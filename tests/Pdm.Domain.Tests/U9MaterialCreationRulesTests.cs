@@ -6,6 +6,15 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class U9MaterialCreationRulesTests
 {
+    [Fact]
+    public void Modify_DoesNotMigrateExistingMaterialEffectiveDate()
+    {
+        var material = Material("0102", MaterialKind.Standard, MaterialSupplyMode.Purchase);
+        using var document = JsonDocument.Parse(U9MaterialPayloadFactory.ModifyPayload(material, "date-scope-test"));
+        Assert.DoesNotContain(document.RootElement[0].GetProperty("Attributes").EnumerateArray(),
+            attribute => attribute.GetProperty("AttributeName").GetString() == "Effective.EffectiveDate");
+    }
+
     [Theory]
     [InlineData("0101", MaterialKind.Electrical, MaterialSupplyMode.Purchase, null, 9, 1, true, true)]
     [InlineData("0102", MaterialKind.Standard, MaterialSupplyMode.Purchase, null, 9, 1, true, true)]

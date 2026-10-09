@@ -124,6 +124,8 @@ public sealed partial class MySqlPdmRepository
                 "SELECT assignment.role_code FROM pdm_user user_account INNER JOIN pdm_user_role assignment ON assignment.user_id=user_account.id WHERE user_account.username=@Actor ORDER BY assignment.is_primary DESC,assignment.created_at,assignment.role_code",
                 new { Actor = actor }, cancellationToken: cancellationToken))).DefaultIfEmpty(role.ToString()).ToArray();
         var byId = rows.ToDictionary(item => item.Id);
+        // Permission checks below open their own connections; release this read connection first.
+        await connection.CloseAsync();
         var result = new List<ProjectFolder>(rows.Length);
         foreach (var row in rows)
         {
@@ -304,6 +306,8 @@ public sealed partial class MySqlPdmRepository
                 matches = templateRules.Where(item => item.FolderKey == current.TemplateKey && Matches(item.PrincipalType, item.PrincipalKey, actor, roleCodes))
                     .Select(item => new FolderPermissionRow { Id = item.Id, FolderId = current.Id, PrincipalType = item.PrincipalType, PrincipalKey = item.PrincipalKey, AccessMask = item.AccessMask }).ToArray();
             if (matches.Length > 0) return matches.Aggregate(FolderAccess.None, (value, item) => value | (FolderAccess)item.AccessMask);
+            if (current.TemplateKey is "presales" or "customer-files" && roleCodes.Any(CommercialProjectAccess.IsCommercialRole))
+                return FolderAccess.View | FolderAccess.Download | FolderAccess.Upload | (role == UserRole.Engineer ? FolderAccess.Edit : FolderAccess.None);
             if (!current.InheritPermissions || current.ParentFolderId is null) break;
             current = byId.GetValueOrDefault(current.ParentFolderId.Value);
         }

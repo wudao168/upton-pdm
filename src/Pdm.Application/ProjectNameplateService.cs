@@ -25,7 +25,8 @@ public sealed class ProjectNameplateService(IPdmRepository repository, IProjectN
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, ct)) throw new UnauthorizedAccessException("无权查看该项目铭牌。");
         return new(await nameplates.FindAsync(projectId, ct) ?? new(projectId), project.Name, project.DeviceModel ?? "", project.SerialNumbers,
             await nameplates.ReadTemplateAsync(ct) ?? NameplateTemplate.Default,
-            await CanEditAsync(project, actor, role, ct), CanManageTemplate(role));
+            await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectNameplateEdit, ct),
+            await repository.HasUserPermissionAsync(actor, role, PermissionCodes.NameplateTemplateManage, ct));
     }
     public async Task<ProjectNameplateView> SaveAsync(Guid projectId, SaveProjectNameplateCommand command, string actor, UserRole role, CancellationToken ct)
     {
@@ -39,7 +40,7 @@ public sealed class ProjectNameplateService(IPdmRepository repository, IProjectN
     }
     public async Task<NameplateTemplate> SaveTemplateAsync(NameplateTemplate command, string actor, UserRole role, CancellationToken ct)
     {
-        if (!CanManageTemplate(role)) throw new UnauthorizedAccessException("仅管理员可维护铭牌模板。");
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.NameplateTemplateManage, ct)) throw new UnauthorizedAccessException("当前账号没有铭牌模板维护权限。");
         if (string.IsNullOrWhiteSpace(command.Title) || command.Title.Length > 100 || command.Labels is null
             || command.Labels.Count != NameplateTemplate.Default.Labels.Count
             || NameplateTemplate.Default.Labels.Keys.Any(key => !command.Labels.TryGetValue(key, out var label) || string.IsNullOrWhiteSpace(label) || label.Length > 30)) throw new PdmRuleException("请填写模板标题及全部字段名称，标题最多100字，字段名称最多30字。");
@@ -47,23 +48,4 @@ public sealed class ProjectNameplateService(IPdmRepository repository, IProjectN
         await repository.AppendAuditAsync(new(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "nameplate.template.update", "NameplateTemplate", "default", $"铭牌模板 · 版本 {saved.RowVersion}"), ct);
         return saved;
     }
-    private async Task<bool> CanEditAsync(Project project, string actor, UserRole role, CancellationToken ct)
-    {
-        if (await ProjectPermissionPolicy.CanAsync(repository, project.Id, actor, role, PermissionCodes.ProjectEdit, ct)) return true;
-        var roles = TenantContext.Current?.EffectiveRoleCodes
-            ?? (await repository.FindUserAsync(actor, ct))?.EffectiveRoleCodes
-            ?? [role.ToString()];
-        if (roles.Any(code => code.Equals("HardwareEngineer", StringComparison.OrdinalIgnoreCase)
-            || code.Equals(nameof(UserRole.ProcessReviewer), StringComparison.OrdinalIgnoreCase)
-            || code.Equals(nameof(UserRole.Approver), StringComparison.OrdinalIgnoreCase))) return true;
-        var root = project.ParentProjectId is null ? project
-            : await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, ct);
-        if (string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase)
-            || project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
-            || string.Equals(root?.DesignLead, actor, StringComparison.OrdinalIgnoreCase)
-            || root?.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase) == true) return true;
-        return roles.Contains(nameof(UserRole.Engineer), StringComparer.OrdinalIgnoreCase)
-            && project.Designers.Contains(actor, StringComparer.OrdinalIgnoreCase);
-    }
-    private static bool CanManageTemplate(UserRole role) => role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true;
 }

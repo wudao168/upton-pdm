@@ -71,14 +71,14 @@ public sealed class ProjectBudgetServiceTests
     }
 
     [Fact]
-    public async Task ReserveIsRemovedFromResponseAndEveryTotalEvenForAdministrator()
+    public async Task ReserveIsRemovedFromResponseAndEveryTotalWithoutReservePermission()
     {
         var (service, store, projectId) = await Setup();
         var lines = ProjectBudgetCategories.All.Select(category => new ProjectBudgetLine(category, 100, 20, 0,
             PlannedHours: 1, HourlyRate: 100, ActualHours: 1, ActualHourlyRate: 20, RemainingHours: 0)).ToArray();
         await store.SaveAsync(new(projectId, lines), 0, default);
         var planning = await service.GetAsync(projectId, "planner", UserRole.PlanningManager, default);
-        var other = await service.GetAsync(projectId, "admin", UserRole.Administrator, default);
+        var other = await service.GetAsync(projectId, "manager", UserRole.BusinessUnitManager, default);
         Assert.True(planning.CanViewReserve);
         Assert.False(other.CanViewReserve);
         Assert.DoesNotContain(other.Rows, row => row.Input.Category == ProjectBudgetCategories.Reserve);
@@ -93,15 +93,19 @@ public sealed class ProjectBudgetServiceTests
     [Fact]
     public async Task HiddenReserveCannotBeSubmittedAndIsPreservedOnOtherEdits()
     {
-        var (service, store, projectId) = await Setup();
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var projectId = Assert.Single(await repository.ListProjectsAsync(default)).Id;
+        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectBudgetView, PermissionCodes.ProjectBudgetEdit], default);
+        var store = new InMemoryProjectBudgetRepository();
+        var service = new ProjectBudgetService(repository, store, new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
         var lines = ProjectBudgetCategories.All.Select(category => new ProjectBudgetLine(category, 100, 0, 0)).ToArray();
         await store.SaveAsync(new(projectId, lines), 0, default);
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(projectId, new(lines, 1), "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(projectId, new(lines, 1), "engineer", UserRole.Engineer, default));
         var visible = lines.Where(line => line.Category != ProjectBudgetCategories.Reserve).Select(line => line with { BudgetAmount = 200 }).ToArray();
-        await service.SaveAsync(projectId, new(visible, 1), "admin", UserRole.Administrator, default);
+        await service.SaveAsync(projectId, new(visible, 1), "engineer", UserRole.Engineer, default);
         var stored = await store.FindAsync(projectId, default);
         Assert.Equal(100, stored!.Lines.Single(line => line.Category == ProjectBudgetCategories.Reserve).BudgetAmount);
-        await Assert.ThrowsAsync<PdmConflictException>(() => service.SaveAsync(projectId, new(visible, 1), "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmConflictException>(() => service.SaveAsync(projectId, new(visible, 1), "engineer", UserRole.Engineer, default));
     }
 
     [Fact]
@@ -195,13 +199,13 @@ public sealed class ProjectBudgetServiceTests
     {
         var (service, _, projectId) = await Setup();
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.AddNoteAsync(projectId, new("Standard", "备注", 0), "engineer", UserRole.Engineer, default));
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.AddNoteAsync(projectId, new("RiskReserve", "备注", 0), "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.AddNoteAsync(projectId, new("RiskReserve", "备注", 0), "manager", UserRole.BusinessUnitManager, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => service.AddNoteAsync(projectId, new("Standard", "  ", 0), "planner", UserRole.PlanningManager, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => service.AddNoteAsync(projectId, new("Invalid", "备注", 0), "planner", UserRole.PlanningManager, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => service.AddNoteAsync(projectId, new("Standard", new string('字', 501), 0), "planner", UserRole.PlanningManager, default));
         await service.AddNoteAsync(projectId, new("RiskReserve", "保密备注", 0), "planner", UserRole.PlanningManager, default);
-        var admin = await service.GetAsync(projectId, "admin", UserRole.Administrator, default);
-        Assert.Empty(admin.Notes!);
+        var manager = await service.GetAsync(projectId, "manager", UserRole.BusinessUnitManager, default);
+        Assert.Empty(manager.Notes!);
     }
 
     [Theory]
@@ -221,9 +225,9 @@ public sealed class ProjectBudgetServiceTests
     [InlineData("SalesAssistant", true)]
     [InlineData("BusinessUnitManager", true)]
     [InlineData("Finance", true)]
-    [InlineData("Administrator", false)]
-    [InlineData("Engineer", false)]
-    public async Task SettlementIsVisibleOnlyToTheFourSpecifiedRoles(string roleCode, bool allowed)
+    [InlineData("Administrator", true)]
+    [InlineData("Engineer", true)]
+    public async Task AdministratorSettlementViewIsNotReducedByTenantRoleContext(string roleCode, bool allowed)
     {
         var (service, _, projectId) = await Setup();
         await service.SaveSettlementAsync(projectId, new([new("结算", "项", 1, 10000)], 0), "planner", UserRole.PlanningManager, default);
@@ -260,11 +264,11 @@ public sealed class ProjectBudgetServiceTests
         Assert.False(manager.CanEditSettlement);
         Assert.False(manager.CanEditBonus);
         var admin = await service.GetAsync(projectId, "admin", UserRole.Administrator, default);
-        Assert.Null(admin.BonusRate);
+        Assert.Equal(.005m, admin.BonusRate);
         Assert.Equal(saved.BonusAmount, admin.BonusAmount);
-        Assert.False(admin.CanViewSettlement);
-        Assert.Null(admin.SettlementAmount);
-        Assert.Empty(admin.SettlementLines!);
+        Assert.True(admin.CanViewSettlement);
+        Assert.Equal(saved.SettlementAmount, admin.SettlementAmount);
+        Assert.Equal(saved.SettlementLines, admin.SettlementLines);
         var bonus = await service.SaveBonusRateAsync(projectId, new(.01m, 1), "planner", UserRole.PlanningManager, default);
         Assert.Equal(16220, bonus.BonusAmount);
         await Assert.ThrowsAsync<PdmConflictException>(() => service.SaveSettlementAsync(projectId, new([], 1), "planner", UserRole.PlanningManager, default));
@@ -281,20 +285,19 @@ public sealed class ProjectBudgetServiceTests
     }
 
     [Fact]
-    public async Task SalesAssistantCanSettleButCannotChangeBonusAndAdministratorsCannotBypassRoles()
+    public async Task SalesAssistantCanSettleButCannotChangeBonusWhileAdministratorHasFullPermissions()
     {
-        var (service, _, projectId) = await Setup();
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveSettlementAsync(projectId, new([], 0), "admin", UserRole.Administrator, default));
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveBonusRateAsync(projectId, new(.01m, 0), "admin", UserRole.Administrator, default));
-        TenantContext.Set(new(Guid.NewGuid(), Guid.Empty, Guid.Empty, "sales", "SalesAssistant", false,
-            new HashSet<string>([PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView])));
-        try {
-            var saved = await service.SaveSettlementAsync(projectId, new([new("销售结算", "套", 2, 1000)], 0), "admin", UserRole.Administrator, default);
-            Assert.True(saved.CanEditSettlement);
-            Assert.False(saved.CanEditBonus);
-            Assert.Equal(2000, saved.SettlementAmount);
-            await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveBonusRateAsync(projectId, new(.01m, 1), "admin", UserRole.Administrator, default));
-        } finally { TenantContext.Clear(); }
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var projectId = Assert.Single(await repository.ListProjectsAsync(default)).Id;
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "sales", "销售助理", "unused", UserRole.ProductionViewer, true, RoleCode: "SalesAssistant"), default);
+        var service = new ProjectBudgetService(repository, new InMemoryProjectBudgetRepository(), new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
+        var saved = await service.SaveSettlementAsync(projectId, new([new("销售结算", "套", 2, 1000)], 0), "sales", UserRole.ProductionViewer, default);
+        Assert.True(saved.CanEditSettlement);
+        Assert.False(saved.CanEditBonus);
+        Assert.Equal(2000, saved.SettlementAmount);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveBonusRateAsync(projectId, new(.01m, 1), "sales", UserRole.ProductionViewer, default));
+        var admin = await service.SaveBonusRateAsync(projectId, new(.01m, 1), "admin", UserRole.Administrator, default);
+        Assert.True(admin.CanEditBonus);
     }
 
     private static async Task<(ProjectBudgetService, InMemoryProjectBudgetRepository, Guid)> Setup()

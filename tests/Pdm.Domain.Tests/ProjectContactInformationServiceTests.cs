@@ -7,6 +7,53 @@ namespace Upton.Pdm.Tests;
 public sealed class ProjectContactInformationServiceTests
 {
     [Fact]
+    public async Task MultipleShippingAddressesAndContactsWithoutAddressesArePersisted()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var root = Assert.Single(await repository.ListProjectsAsync(default));
+        var store = new InMemoryProjectContactInformationRepository();
+        var service = new ProjectContactInformationService(repository, store, TimeProvider.System);
+        var saved = await service.SaveAsync(root.Id, new("", "", "", "", "", 0,
+            [new(" 联系人 ", " 电话 ", "", Position: " 采购经理 ", Remarks: " 工作日联系 "), new("收货甲", "", " 地址甲 ", true), new("收货乙", "", "地址乙", true)], " 销售甲、销售乙 ", " 售前甲 "), "admin", UserRole.Administrator, default);
+        var entries = saved.Information.Entries!;
+        Assert.Equal(3, entries.Count);
+        Assert.Equal("联系人", entries[0].Contact);
+        Assert.Equal("采购经理", entries[0].Position);
+        Assert.Equal("工作日联系", entries[0].Remarks);
+        Assert.Equal("", entries[0].Address);
+        Assert.Equal(2, entries.Count(entry => entry.IsShippingAddress));
+        Assert.Equal("地址甲", entries[1].Address);
+        Assert.Equal("销售甲、销售乙", saved.Information.SalesPeople);
+        Assert.Equal("售前甲", (await service.GetAsync(root.Id, "admin", UserRole.Administrator, default)).Information.PresalesPeople);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, new("", "", "", "", "", 1, [new("联系人", "", "", true)]), "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, new("", "", "", "", "", 1, [new("", "", "")]), "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, new("", "", "", "", "", 1, [], new string('x', 501)), "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, new("", "", "", "", "", 1, [new("联系人", "", "", Position: new string('x', 101))]), "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, new("", "", "", "", "", 1, [new("联系人", "", "", Remarks: new string('x', 501))]), "admin", UserRole.Administrator, default));
+    }
+
+    [Fact]
+    public async Task LegacyCustomerAndShippingFieldsBecomeSeparateRows()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var root = Assert.Single(await repository.ListProjectsAsync(default));
+        var store = new InMemoryProjectContactInformationRepository();
+        await store.SaveAsync(new(root.Id, "客户联系人", "电话", "地址", "收货人", "收货电话"), 0, default);
+        var view = await new ProjectContactInformationService(repository, store, TimeProvider.System).GetAsync(root.Id, "admin", UserRole.Administrator, default);
+        Assert.Equal(2, view.Information.Entries!.Count);
+        Assert.False(view.Information.Entries[0].IsShippingAddress);
+        Assert.True(view.Information.Entries[1].IsShippingAddress);
+    }
+
+    [Fact]
+    public void ExistingStoredEntriesDefaultPositionAndRemarksToEmpty()
+    {
+        var entry = System.Text.Json.JsonSerializer.Deserialize<ProjectContactEntry>("""{"contact":"联系人","phone":"电话","address":"","isShippingAddress":false}""", new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        Assert.Equal("", entry!.Position);
+        Assert.Equal("", entry.Remarks);
+    }
+
+    [Fact]
     public async Task ContactInformationIsSharedByTheFamilyAndRejectsStaleWrites()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -25,12 +72,12 @@ public sealed class ProjectContactInformationServiceTests
     }
 
     [Fact]
-    public async Task OnlyAssignedProjectManagersAndAdministratorsCanWrite()
+    public async Task ContactInformationEditingUsesIndependentRolePermission()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var root = Assert.Single(await repository.ListProjectsAsync(default));
         await repository.SetMainProjectStaffingAsync(root.Id, new("pm", ["co-pm"], ["designer"]), "admin", default);
-        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView], default);
+        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectContactEdit], default);
         var service = new ProjectContactInformationService(repository, new InMemoryProjectContactInformationRepository(), TimeProvider.System);
         foreach (var actor in new[] { "pm", "co-pm" })
         {
@@ -38,10 +85,10 @@ public sealed class ProjectContactInformationServiceTests
             Assert.True(view.CanEdit);
             await service.SaveAsync(root.Id, new(actor, "", "", "", "", view.Information.RowVersion), actor, UserRole.Engineer, default);
         }
-        Assert.False((await service.GetAsync(root.Id, "designer", UserRole.Engineer, default)).CanEdit);
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(root.Id, new("", "", "", "", "", 2), "designer", UserRole.Engineer, default));
-        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView], default);
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.GetAsync(root.Id, "pm", UserRole.Engineer, default));
+        Assert.True((await service.GetAsync(root.Id, "designer", UserRole.Engineer, default)).CanEdit);
+        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView], default);
+        Assert.False((await service.GetAsync(root.Id, "pm", UserRole.Engineer, default)).CanEdit);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(root.Id, new("", "", "", "", "", 2), "pm", UserRole.Engineer, default));
     }
 
     [Fact]

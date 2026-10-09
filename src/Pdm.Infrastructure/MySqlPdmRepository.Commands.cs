@@ -686,7 +686,10 @@ public sealed partial class MySqlPdmRepository
         return EnumerateDocumentIds(root).Distinct().ToArray();
     }
 
-    public async Task MarkPublishedAsync(Guid releasePackageId, string publishedPath, DateTimeOffset publishedAt, CancellationToken cancellationToken)
+    public Task MarkPublishedAsync(Guid releasePackageId, string publishedPath, DateTimeOffset publishedAt, CancellationToken cancellationToken) =>
+        RetryPublishTransactionAsync(() => MarkPublishedOnceAsync(releasePackageId, publishedPath, publishedAt, cancellationToken), cancellationToken);
+
+    private async Task<bool> MarkPublishedOnceAsync(Guid releasePackageId, string publishedPath, DateTimeOffset publishedAt, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -743,6 +746,7 @@ public sealed partial class MySqlPdmRepository
             }, transaction, cancellationToken: cancellationToken));
         await EnqueueU9BomReleaseReadyAsync(connection, transaction, package, publishedAt, null, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        return true;
     }
 
     public async Task MarkPublishFailedAsync(Guid releasePackageId, string error, CancellationToken cancellationToken)

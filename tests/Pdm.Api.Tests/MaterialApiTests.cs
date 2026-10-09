@@ -1,4 +1,4 @@
-using System.IdentityModel.Tokens.Jwt;
+﻿using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -21,6 +21,28 @@ public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
         this.factory = factory;
         client = factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+    }
+
+    [Fact]
+    public async Task BrandSearch_ReturnsDistinctCaseInsensitiveMatchesWithoutArchivedMaterials()
+    {
+        using var scope = factory.Services.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<MaterialService>();
+        var repository = scope.ServiceProvider.GetRequiredService<IMaterialRepository>();
+        var marker = $"BRAND-{Guid.NewGuid():N}";
+        for (var index = 0; index < 4; index++)
+        {
+            var brand = index == 3 ? $"{marker}-停用" : index == 2 ? $"{marker}-施耐德" : $"{marker}-SMC";
+            var material = await service.CreateAsync(new(null, $"{marker}-{index}", Upton.Pdm.Domain.MaterialKind.Electrical,
+                Upton.Pdm.Domain.MaterialSupplyMode.Purchase, "001", $"MODEL-{index}", null, null, brand, null, null, null,
+                CategoryCode: "0101"), "admin", Upton.Pdm.Domain.UserRole.Administrator, default);
+            if (index == 3) await repository.UpdateMaterialAsync(material with { IsArchived = true }, material.RowVersion, default);
+        }
+        var brands = await client.GetFromJsonAsync<string[]>($"/api/materials/brands?query={marker.ToLowerInvariant()}");
+        Assert.Equal(2, brands!.Length);
+        Assert.Contains($"{marker}-SMC", brands);
+        Assert.Contains($"{marker}-施耐德", brands);
+        Assert.Single((await client.GetFromJsonAsync<string[]>($"/api/materials/brands?query={Uri.EscapeDataString(marker + "-施")}"))!);
     }
 
     [Fact]

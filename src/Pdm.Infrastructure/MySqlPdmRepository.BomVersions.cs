@@ -1,4 +1,4 @@
-using System.Data.Common;
+﻿using System.Data.Common;
 using System.Text.Json;
 using Dapper;
 using Upton.Pdm.Application;
@@ -153,14 +153,14 @@ public sealed partial class MySqlPdmRepository
     {
         if (materialCodes.Count == 0) return await FindReleasePackageAsync(releasePackageId, cancellationToken) ?? throw new PdmNotFoundException("发布包不存在。");
         var package = await FindReleasePackageAsync(releasePackageId, cancellationToken) ?? throw new PdmNotFoundException("发布包不存在。");
-        if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval)) throw new PdmConflictException("只有审批中的发布包可以在终审时回填非标件料号。");
+        if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval or ReleasePackageState.Publishing)) throw new PdmConflictException("只有审批中或发布中的发布包可以回填非标件料号。");
         BomItem Apply(BomItem item) => materialCodes.TryGetValue(item.Id, out var code) ? item with { DrawingNumber = code } : item;
         var nonStandard = package.NonStandardBomSnapshot.Select(Apply).ToArray();
         var mechanical = package.MechanicalBomSnapshot.Select(Apply).ToArray();
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var affected = await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE release_package SET non_standard_bom_snapshot_json=@NonStandard,mechanical_bom_snapshot_json=@Mechanical,row_version=row_version+1 WHERE id=@Id AND state IN ('ProcessReview','Approval')",
+            "UPDATE release_package SET non_standard_bom_snapshot_json=@NonStandard,mechanical_bom_snapshot_json=@Mechanical,row_version=row_version+1 WHERE id=@Id AND state IN ('ProcessReview','Approval','Publishing')",
             new { Id = releasePackageId, NonStandard = JsonSerializer.Serialize(nonStandard, jsonOptions), Mechanical = JsonSerializer.Serialize(mechanical, jsonOptions) }, transaction, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("发布包状态已变化，无法回填非标件料号。");
         if (package.NonStandardBomVersionId is Guid versionId)
@@ -171,7 +171,10 @@ public sealed partial class MySqlPdmRepository
         return await FindReleasePackageAsync(releasePackageId, cancellationToken) ?? throw new PdmNotFoundException("发布包不存在。");
     }
 
-    public async Task<ManufacturingBomBaseline> MarkPublishedWithBomBaselineAsync(ReleasePackage package, string publishedPath, DateTimeOffset publishedAt, string actor, CancellationToken cancellationToken)
+    public Task<ManufacturingBomBaseline> MarkPublishedWithBomBaselineAsync(ReleasePackage package, string publishedPath, DateTimeOffset publishedAt, string actor, CancellationToken cancellationToken) =>
+        RetryPublishTransactionAsync(() => MarkPublishedWithBomBaselineOnceAsync(package, publishedPath, publishedAt, actor, cancellationToken), cancellationToken);
+
+    private async Task<ManufacturingBomBaseline> MarkPublishedWithBomBaselineOnceAsync(ReleasePackage package, string publishedPath, DateTimeOffset publishedAt, string actor, CancellationToken cancellationToken)
     {
         var versionIds = RequiredPackageBomVersionIds(package);
         var project = await FindProjectAsync(package.ProjectId, cancellationToken)

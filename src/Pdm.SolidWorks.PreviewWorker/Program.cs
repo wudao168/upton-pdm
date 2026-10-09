@@ -83,7 +83,7 @@ internal static class Program
                     var manifest = serializer.Deserialize<PreviewWorkerManifest>(File.ReadAllText(request.Manifest, Encoding.UTF8));
                     if (manifest?.Jobs == null || manifest.Jobs.Count == 0)
                         throw new InvalidDataException("发布转换清单为空。");
-                    session.Convert(manifest.Jobs);
+                    session.Convert(manifest.Jobs, (stage, completed, total, solidWorksPid) => { Console.Out.WriteLine(serializer.Serialize(new { Progress = true, Stage = stage, Completed = completed, Total = total, SolidWorksPid = solidWorksPid })); Console.Out.Flush(); });
                     result = new PreviewWorkerResult { Success = true };
                 }
                 catch (Exception exception)
@@ -119,14 +119,21 @@ internal static class Program
 
         public ConversionSession(bool lightweightAssemblies) => this.lightweightAssemblies = lightweightAssemblies;
 
-        public void Convert(IReadOnlyList<PreviewWorkerJob> jobs)
+        public void Convert(IReadOnlyList<PreviewWorkerJob> jobs, Action<string, int, int, int> progress = null)
         {
+            var total = jobs.Count(job => job.Convert); var completed = 0;
+            progress?.Invoke("启动或连接SolidWorks", completed, total, 0);
             var current = EnsureApplication();
+            progress?.Invoke("SolidWorks已连接", completed, total, current.GetProcessID());
             foreach (var job in jobs)
             {
                 // Convert=false 的任务只作为引用文件下发（SolidWorks 解析装配体引用时需要），不需要转出。
                 if (!job.Convert) continue;
+                // 工程图/装配体会留下已加载的引用模型；下一任务必须使用本次清单中的源文件，避免同名文档冲突。
+                progress?.Invoke("转换文件：" + Path.GetFileName(job.SourcePath), completed, total, current.GetProcessID());
+                current.CloseAllDocuments(true);
                 ConvertOne(current, job, lightweightAssemblies);
+                progress?.Invoke("文件完成：" + Path.GetFileName(job.SourcePath), ++completed, total, current.GetProcessID());
             }
             try { current.CloseAllDocuments(true); } catch (Exception) { }
         }

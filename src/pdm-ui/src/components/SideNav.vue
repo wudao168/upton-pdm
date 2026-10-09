@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Blocks, Boxes, ClipboardCheck, FileText, FolderKanban, LayoutDashboard, Library, ListTree, Network, Settings } from '@lucide/vue'
+import { CalendarDays, Blocks, Boxes, ClipboardCheck, FileText, FolderKanban, LayoutDashboard, Library, ListTree, Network, Settings } from '@lucide/vue'
 import uptonLogo from '../assets/upton-logo-white.png'
 import { repairMojibake } from '../mojibake'
 import PlmCubeIcon from './PlmCubeIcon.vue'
 
-type NavKey = 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
+type NavKey = 'project-calendar' | 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
 
 type SystemReleaseHistoryEntry = {
   Version?: string
@@ -124,6 +124,7 @@ async function openVersionInfo() {
 }
 
 const items = [
+  { key: 'project-calendar', label: '项目日历', icon: CalendarDays },
   { key: 'project-center', label: '项目中心', icon: FolderKanban },
   { key: 'project-workbench', label: '项目工作台', icon: LayoutDashboard },
   { key: 'projects', label: '项目列表', icon: ListTree },

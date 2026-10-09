@@ -34,6 +34,11 @@ const drawingPageCount = computed(() => Math.ceil(props.drawings.length / drawin
 const visibleDrawings = computed(() => props.drawings.slice(drawingPage.value * drawingPageSize, (drawingPage.value + 1) * drawingPageSize))
 watch([() => props.drawings, query, filter], () => { drawingPage.value = 0 })
 
+function selectFilter(value: DocumentFilter) {
+  if (filter.value === value) return
+  filter.value = value
+  query.value = ''
+}
 function changeDrawingPage(page: number) {
   drawingPage.value = page
   if (drawingList.value) drawingList.value.scrollTop = 0
@@ -109,7 +114,7 @@ onBeforeUnmount(() => {
         type="button"
         role="tab"
         :aria-selected="filter === item.value"
-        @click="filter = item.value"
+        @click="selectFilter(item.value)"
       >
         {{ item.label }}
         <small>{{ item.value === 'all' ? allCount : item.value === 'model' ? modelCount : item.value === 'drawing' ? drawingCount : warningCount }}</small>

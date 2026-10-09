@@ -14,6 +14,7 @@ namespace Upton.Pdm.PreviewAgent;
 public sealed class AgentOptions
 {
     public int Port { get; set; } = 5199;
+    public string Name { get; set; } = Environment.MachineName;
 
     public string BindAddress { get; set; } = "0.0.0.0";
 
@@ -40,6 +41,7 @@ public sealed class AgentOptions
             var json = new JavaScriptSerializer().Deserialize<AgentOptions>(File.ReadAllText(configPath, Encoding.UTF8));
             if (json != null)
             {
+                if (!string.IsNullOrWhiteSpace(json.Name)) options.Name = json.Name.Trim();
                 if (!string.IsNullOrWhiteSpace(json.Token)) options.Token = json.Token.Trim();
                 if (!string.IsNullOrWhiteSpace(json.WorkerPath)) options.WorkerPath = json.WorkerPath.Trim();
                 if (!string.IsNullOrWhiteSpace(json.WorkRoot)) options.WorkRoot = json.WorkRoot.Trim();
@@ -52,6 +54,7 @@ public sealed class AgentOptions
         }
 
         var overrides = ParseArguments(args);
+        if (overrides.TryGetValue("name", out var name) && !string.IsNullOrWhiteSpace(name)) options.Name = name.Trim();
         if (overrides.TryGetValue("port", out var portText) && int.TryParse(portText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var port) && port > 0)
             options.Port = port;
         if (overrides.TryGetValue("token", out var token)) options.Token = token;

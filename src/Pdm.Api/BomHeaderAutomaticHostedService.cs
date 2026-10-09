@@ -8,13 +8,19 @@ public sealed class BomHeaderAutomaticHostedService(
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var nextRecovery = DateTimeOffset.MinValue;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 await using var scope = scopeFactory.CreateAsyncScope();
-                await scope.ServiceProvider.GetRequiredService<BomHeaderService>()
-                    .ProcessAutomaticQueueAsync(stoppingToken);
+                var service = scope.ServiceProvider.GetRequiredService<BomHeaderService>();
+                if (DateTimeOffset.UtcNow >= nextRecovery)
+                {
+                    nextRecovery = DateTimeOffset.UtcNow.AddMinutes(1);
+                    await service.RecoverPublishedApplicationsAsync(stoppingToken);
+                }
+                await service.ProcessAutomaticQueueAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch (Exception exception)

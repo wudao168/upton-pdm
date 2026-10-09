@@ -6,6 +6,14 @@
   /* 全局统一：1 套界面字体 + 1 套等宽字体（料号/图号/代码） */
   --pdm-font-ui: "Microsoft YaHei", "微软雅黑", "Segoe UI", sans-serif;
   --pdm-font-mono: Consolas, monospace;
+  --pdm-font-size-body: 12px;
+  --pdm-font-size-caption: 11px;
+  --pdm-font-size-heading: 12px;
+  --pdm-radius-panel: 8px;
+  --pdm-radius-control: 5px;
+  --pdm-table-header: #f8fafc;
+  --el-border-radius-base: var(--pdm-radius-control);
+  --el-font-family: var(--pdm-font-ui);
   --pdm-bg: #f8fafc;
   --pdm-surface: #ffffff;
   --pdm-surface-muted: #f1f5f9;
@@ -26,10 +34,13 @@
   --pdm-blue-soft: #eff6ff;
   --pdm-green: #15803d;
   --pdm-green-soft: #f0fdf4;
+  --pdm-green-border: #bbf7d0;
   --pdm-orange: #b45309;
   --pdm-orange-soft: #fff7ed;
+  --pdm-orange-border: #fdba74;
   --pdm-danger: #b91c1c;
   --pdm-danger-soft: #fef2f2;
+  --pdm-danger-border: #fecaca;
   --pdm-purple: var(--pdm-blue);
   --pdm-shadow: rgba(29, 52, 83, 0.13);
 }

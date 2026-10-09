@@ -11,7 +11,7 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
     private readonly PdmStorageOptions settings = options.Value;
     private readonly JsonSerializerOptions jsonOptions = new(JsonSerializerDefaults.Web);
 
-    public async Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken)
+    public async Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken, string? owner = null)
     {
         if (totalLength <= 0)
         {
@@ -44,7 +44,7 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
             settings.ChunkSizeBytes,
             expectedSha256.ToUpperInvariant(),
             0,
-            timeProvider.GetUtcNow().AddHours(settings.UploadLifetimeHours));
+            timeProvider.GetUtcNow().AddHours(settings.UploadLifetimeHours), owner);
         var sessionDirectory = GetSessionDirectory(session.Id);
         Directory.CreateDirectory(sessionDirectory);
         await WriteMetadataAsync(session, cancellationToken);
@@ -177,7 +177,7 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
     public Task ValidateStoredFileMetadataAsync(Project project, StoredFile file, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        _ = ValidateStoredFileMetadata(project, file);
+        _ = ValidateStoredFileMetadata(project, file, allowFormalDrawing: true);
         return Task.CompletedTask;
     }
 
@@ -186,6 +186,18 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         cancellationToken.ThrowIfCancellationRequested();
         var path = ValidateStoredFileMetadata(project, file);
 
+        await VerifyFileHashAsync(path, file, cancellationToken);
+    }
+
+    public async Task VerifyVersionReadAsync(Project project, StoredFile file, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var path = ValidateStoredFileMetadata(project, file, allowFormalDrawing: true);
+        await VerifyFileHashAsync(path, file, cancellationToken);
+    }
+
+    private static async Task VerifyFileHashAsync(string path, StoredFile file, CancellationToken cancellationToken)
+    {
         await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         var actual = Convert.ToHexString(await SHA256.HashDataAsync(input, cancellationToken));
         if (!string.Equals(actual, file.Sha256, StringComparison.OrdinalIgnoreCase))
@@ -219,10 +231,17 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
             throw new PdmConflictException("发布预览文件SHA-256校验失败。");
     }
 
-    private static string ValidateStoredFileMetadata(Project project, StoredFile file)
+    private static string ValidateStoredFileMetadata(Project project, StoredFile file, bool allowFormalDrawing = false)
     {
         var relativeSegments = file.RelativePath.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
-        if (relativeSegments.Length == 0 || !string.Equals(relativeSegments[0], ".versions", StringComparison.OrdinalIgnoreCase))
+        // Released drawings are generated under a separate immutable source directory.
+        // Accept that layout for controlled reads only; new check-ins still require .versions.
+        var formalDrawing = allowFormalDrawing && relativeSegments.Length == 3
+            && string.Equals(relativeSegments[0], ".release-formal", StringComparison.OrdinalIgnoreCase)
+            && Guid.TryParseExact(relativeSegments[1], "N", out _)
+            && Guid.TryParseExact(Path.GetFileNameWithoutExtension(relativeSegments[2]), "N", out _)
+            && string.Equals(Path.GetExtension(relativeSegments[2]), ".slddrw", StringComparison.OrdinalIgnoreCase);
+        if (!formalDrawing && (relativeSegments.Length == 0 || !string.Equals(relativeSegments[0], ".versions", StringComparison.OrdinalIgnoreCase)))
         {
             throw new PdmRuleException("历史版本文件必须存放在独立的.versions只读目录中。");
         }

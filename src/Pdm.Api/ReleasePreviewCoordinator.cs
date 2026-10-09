@@ -61,6 +61,7 @@ public sealed class ReleasePublishingCoordinator(
 {
     private readonly object gate = new();
     private Task? activeRun;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, byte> activePackages = new();
 
     public bool TryStart(string triggerKind)
     {
@@ -78,23 +79,9 @@ public sealed class ReleasePublishingCoordinator(
         {
             await using var scope = scopeFactory.CreateAsyncScope();
             var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
-            var workflow = scope.ServiceProvider.GetRequiredService<PdmWorkflowService>();
             foreach (var packageId in await repository.ListPublishingReleasePackageIdsAsync(20, applicationLifetime.ApplicationStopping))
             {
-                try
-                {
-                    var result = await workflow.ResumePublishAsync(packageId, applicationLifetime.ApplicationStopping);
-                    if (result.State != Upton.Pdm.Domain.ReleasePackageState.Published) continue;
-                    logger.LogInformation("后台发布完成 {PackageId}（{Trigger}）。", packageId, triggerKind);
-                }
-                catch (OperationCanceledException) when (applicationLifetime.ApplicationStopping.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception exception)
-                {
-                    logger.LogError(exception, "后台发布 {PackageId} 失败，已记录为发布失败。", packageId);
-                }
+                if (activePackages.TryAdd(packageId, 0)) _ = PublishPackageAsync(packageId, triggerKind);
             }
         }
         catch (OperationCanceledException) when (applicationLifetime.ApplicationStopping.IsCancellationRequested)
@@ -106,6 +93,31 @@ public sealed class ReleasePublishingCoordinator(
             logger.LogError(exception, "后台发布任务执行失败，下一轮会继续重试。");
         }
     }
+
+    private async Task PublishPackageAsync(Guid packageId, string triggerKind)
+    {
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var workflow = scope.ServiceProvider.GetRequiredService<PdmWorkflowService>();
+            var cancellationToken = applicationLifetime.ApplicationStopping;
+            ReleasePublishingProgress.Set(packageId, "读取发布单");
+            var publishing = workflow.ResumePublishAsync(packageId, cancellationToken);
+            while (!publishing.IsCompleted)
+            {
+                if (await Task.WhenAny(publishing, Task.Delay(TimeSpan.FromSeconds(30), cancellationToken)) == publishing) break;
+                cancellationToken.ThrowIfCancellationRequested();
+                logger.LogWarning("后台发布尚未完成 {PackageId}：{Phase}", packageId, ReleasePublishingProgress.Describe(packageId));
+            }
+            var result = await publishing;
+            ReleasePublishingProgress.Set(packageId, result.State == Upton.Pdm.Domain.ReleasePackageState.Published ? "发布完成" : "等待转图重试");
+            if (result.State == Upton.Pdm.Domain.ReleasePackageState.Published)
+                logger.LogInformation("后台发布完成 {PackageId}（{Trigger}）。", packageId, triggerKind);
+        }
+        catch (OperationCanceledException) when (applicationLifetime.ApplicationStopping.IsCancellationRequested) { }
+        catch (Exception exception) { logger.LogError(exception, "后台发布 {PackageId} 执行失败，下一轮检查状态继续处理。", packageId); }
+        finally { activePackages.TryRemove(packageId, out _); }
+    }
 }
 
 /// <summary>
@@ -114,6 +126,7 @@ public sealed class ReleasePublishingCoordinator(
 /// </summary>
 public sealed class PublishRecoveryHostedService(
     IServiceScopeFactory scopeFactory,
+    ReleasePublishingCoordinator publishingCoordinator,
     ILogger<PublishRecoveryHostedService> logger) : IHostedService
 {
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -149,19 +162,7 @@ public sealed class PublishRecoveryHostedService(
                 logger.LogWarning(exception, "补登记发布成品归档失败。");
             }
             // 发布动作可重入（发布目录幂等、正式版本为单个事务），重启后直接续跑，不再要求人工重新提交。
-            var workflow = scope.ServiceProvider.GetRequiredService<Upton.Pdm.Application.PdmWorkflowService>();
-            foreach (var packageId in await repository.ListPublishingReleasePackageIdsAsync(20, cancellationToken))
-            {
-                try
-                {
-                    await workflow.ResumePublishAsync(packageId, cancellationToken);
-                    logger.LogWarning("服务重启后已续跑被中断的发布 {PackageId}。", packageId);
-                }
-                catch (Exception exception)
-                {
-                    logger.LogError(exception, "续跑发布 {PackageId} 失败；该发布包已标记为发布失败，可人工重新提交。", packageId);
-                }
-            }
+            publishingCoordinator.TryStart("StartupRecovery");
         }
         catch (Exception exception)
         {

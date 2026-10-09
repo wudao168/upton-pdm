@@ -72,7 +72,7 @@ public sealed class ProjectPlanningApiTests : IClassFixture<PdmApiFactory>
         using var client = factory.CreateClient();
         var url = $"/api/projects/{child.Id}/plan";
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.DeleteAsync($"{url}?expectedRowVersion={draft.RowVersion}")).StatusCode);
-        Authorize(client, "other-admin", "Administrator");
+        Authorize(client, "other-engineer", "Engineer");
         Assert.Equal(HttpStatusCode.Forbidden, (await client.DeleteAsync($"{url}?expectedRowVersion={draft.RowVersion}")).StatusCode);
         AuthorizeAdmin(client);
         Assert.Equal(HttpStatusCode.Conflict, (await client.DeleteAsync($"{url}?expectedRowVersion=0")).StatusCode);

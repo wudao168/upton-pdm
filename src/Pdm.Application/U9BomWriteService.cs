@@ -18,6 +18,17 @@ public sealed class U9BomWriteService(
         U9BomWriteCommand Command,
         IReadOnlyList<U9BomQuantityReconciliation> Quantities);
 
+    internal async Task<DateOnly?> GetEffectiveDateAsync(string itemCode, CancellationToken cancellationToken)
+    {
+        var context = await LoadContextAsync(cancellationToken);
+        var result = await QueryAsync(context, itemCode, "A1", cancellationToken);
+        var matches = result.Boms.Where(bom => bom.ItemCode == itemCode && bom.BomVersionCode == "A1").ToArray();
+        if (matches.Length > 1) throw new PdmRuleException("主项目存在多张A1 BOM，无法确定统一生效日期，请核对U9C。");
+        if (matches.Length == 0) return null;
+        return matches[0].EffectiveDate is { } date ? DateOnly.FromDateTime(date.DateTime)
+            : throw new PdmRuleException("主项目BOM缺少生效日期，请在U9C确认后重试。");
+    }
+
     public async Task<U9BomWritePreview> PreviewAsync(
         U9BomWriteCommand command,
         string actor,
@@ -192,7 +203,8 @@ public sealed class U9BomWriteService(
             addedCount,
             retainedCount,
             quantityReconciliations,
-            timeProvider.GetUtcNow()) { ComponentChanges = Changes(normalized, current) };
+            timeProvider.GetUtcNow()) { ComponentChanges = Changes(normalized, current),
+                HierarchyEffectiveDate = normalized.InheritEffectiveDateForNewRows ? normalized.EffectiveDate : null };
     }
 
     private async Task DemandPermissionAsync(string actor, UserRole role, CancellationToken cancellationToken)
@@ -405,9 +417,17 @@ public sealed class U9BomWriteService(
         if (matching is null) throw new PdmRuleException("U9C已返回写入成功，但自动回查未找到该BOM版本。");
         if (!IsPdmOwned(matching, command))
             throw new PdmRuleException("U9C自动回查的BOM缺少PLM来源标识。");
+        if (command.InheritEffectiveDateForNewRows && command.Operation == U9BomWriteOperation.Create
+            && matching.EffectiveDate?.Date != command.EffectiveDate?.ToDateTime(TimeOnly.MinValue))
+            throw new PdmRuleException("U9C回查发现BOM生效日期未与主项目一致，不能确认同步成功，请核对后重试。");
 
         var expected = command.Components.OrderBy(component => component.Sequence).ToArray();
         var actual = matching.Components.Where(component => component.IsDelete != true).OrderBy(component => component.Sequence).ToArray();
+        var baseline = FindMatching(beforeWrite, command)?.Components.Where(component => component.IsDelete != true).ToArray() ?? [];
+        if (command.InheritEffectiveDateForNewRows && expected.Where(component => !component.IsDelete
+            && !baseline.Any(row => row.Sequence == component.Sequence)).Any(component =>
+            !actual.Any(row => row.Sequence == component.Sequence && SameEffectiveDate(component, row))))
+            throw new PdmRuleException("U9C回查发现子件生效日期未与主项目一致，不能确认同步成功，请核对后重试。");
         if (command.Operation == U9BomWriteOperation.Create)
         {
             if (expected.Length == actual.Length && expected.All(component =>
@@ -416,7 +436,6 @@ public sealed class U9BomWriteService(
                 $"U9C自动回查的BOM子件与PLM提交内容不一致：期望{DescribeComponents(expected)}；实际{DescribeComponents(actual)}。");
         }
 
-        var baseline = FindMatching(beforeWrite, command)?.Components.Where(component => component.IsDelete != true).ToArray() ?? [];
         var changedSequences = expected.Select(component => component.Sequence).ToHashSet();
         if (baseline.Where(component => !changedSequences.Contains(component.Sequence ?? 0)).Any(component => !actual.Any(reference => SameCore(component, reference) && SameAttributes(component, reference))))
             throw new PdmRuleException("U9C修改后回查发现非本次变更的历史子件被删除或变更，已停止确认本次同步成功。");
@@ -489,6 +508,9 @@ public sealed class U9BomWriteService(
         && expected.ParentQty == actual.ParentQty
         && string.Equals(expected.IssueUomCode, actual.IssueUomCode, StringComparison.OrdinalIgnoreCase);
 
+    private static bool SameEffectiveDate(U9BomComponentCommand expected, U9BomComponentReference actual) =>
+        expected.EffectiveDate?.ToDateTime(TimeOnly.MinValue) == actual.EffectiveDate?.Date;
+
     private static bool SameCore(U9BomComponentReference expected, U9BomComponentReference actual) =>
         expected.Sequence == actual.Sequence
         && string.Equals(expected.ItemCode, actual.ItemCode, StringComparison.OrdinalIgnoreCase)
@@ -498,6 +520,7 @@ public sealed class U9BomWriteService(
 
     private static bool SameAttributes(U9BomComponentReference expected, U9BomComponentReference actual) =>
         expected.IsEffective == actual.IsEffective
+        && (expected.OperationNum ?? "") == (actual.OperationNum ?? "")
         && expected.ComponentType == actual.ComponentType
         && expected.EffectiveDate?.Date == actual.EffectiveDate?.Date
         && expected.DisableDate?.Date == actual.DisableDate?.Date
@@ -556,10 +579,8 @@ public sealed class U9BomWriteService(
             row["Status"] = existing.Status ?? throw new PdmRuleException("U9C BOM缺少审核状态，不能安全修改。");
             row["EffectiveDate"] = existing.EffectiveDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? row["EffectiveDate"];
             row["DisableDate"] = existing.DisableDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? row["DisableDate"];
-            row["BOMMasterChangeDTOList"] = new[]
-            {
-                Change("Explain", AddOwnershipStamp(command.Explain, command.ItemCode, command.BomVersionCode))
-            };
+            var changes = new List<Dictionary<string, string>> { Change("Explain", AddOwnershipStamp(command.Explain, command.ItemCode, command.BomVersionCode)) };
+            row["BOMMasterChangeDTOList"] = changes;
         }
         return JsonSerializer.Serialize(new[] { row });
     }
@@ -584,6 +605,7 @@ public sealed class U9BomWriteService(
                 UsageQty = component.IsDelete ? previous.UsageQty ?? throw new PdmRuleException("待删除子件缺少原数量。") : component.UsageQty,
                 IsEffective = previous.IsEffective ?? throw new PdmRuleException($"子件{component.Sequence}缺少有效状态，不能安全修改。"),
                 ItemVersionCode = previous.ItemVersionCode,
+                // Historical row dates are preserved; only newly created rows inherit the root BOM date.
                 EffectiveDate = previous.EffectiveDate is { } effective ? DateOnly.FromDateTime(effective.DateTime) : component.EffectiveDate,
                 DisableDate = previous.DisableDate is { } disable ? DateOnly.FromDateTime(disable.DateTime) : component.DisableDate,
                 Remark = previous.Remark,
@@ -593,6 +615,7 @@ public sealed class U9BomWriteService(
                 IsPhantomPart = previous.IsPhantomPart ?? component.IsPhantomPart
             }, organizationCode);
             row["ProjectMapNum"] = previous.ProjectMapNum ?? string.Empty;
+            if (previous.OperationNum is not null) row["OperationNum"] = previous.OperationNum;
             // Existing rows are not a historical-data migration; preserve their original usage type.
             row["UsageQtyType"] = previous.UsageQtyType
                 ?? throw new PdmRuleException($"子件{component.Sequence}缺少用量类型，不能安全修改。");
@@ -607,7 +630,11 @@ public sealed class U9BomWriteService(
             else row.Remove("IsCharge");
             if (string.IsNullOrWhiteSpace(previous.CostElementCode)) row.Remove("CostElement");
             else row["CostElement"] = Archive(previous.CostElementCode);
-            if (!component.IsDelete) row["BOMComponentChangeDTOList"] = new[] { Change("UsageQty", FormatQuantity(component.UsageQty)) };
+            if (!component.IsDelete)
+            {
+                var changes = new List<Dictionary<string, string>> { Change("UsageQty", FormatQuantity(component.UsageQty)) };
+                row["BOMComponentChangeDTOList"] = changes;
+            }
             return row;
         }).ToArray();
     }
@@ -675,6 +702,7 @@ public sealed class U9BomWriteService(
                 Components = bom.Components.OrderBy(component => component.Sequence).Select(component => new
                 {
                     component.Sequence,
+                    component.OperationNum,
                     component.ItemCode,
                     component.UsageQty,
                     component.UsageQtyType,

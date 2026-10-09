@@ -139,7 +139,7 @@ public static class U9MaterialPayloadFactory
             }
         }, JsonOptions);
 
-    public static string ModifyPayload(PdmMaterial material, string correlationId, string? u9UnitCode = null)
+    public static string ModifyPayload(PdmMaterial material, string correlationId, string? u9UnitCode = null, PdmMaterial? previous = null)
     {
         var attributes = new List<Dictionary<string, object?>>
         {
@@ -151,11 +151,18 @@ public static class U9MaterialPayloadFactory
             Attribute($"DescFlexField.{U9MaterialContract.PurchaseLinkPublicSegment}", Clean(material.PurchaseLink) ?? string.Empty),
             Attribute($"DescFlexField.{U9MaterialContract.BrandPublicSegment}", Clean(material.Brand) ?? string.Empty),
             Attribute($"DescFlexField.{U9MaterialContract.MaterialPrivateSegment}", Clean(material.Material) ?? string.Empty),
-            Attribute($"DescFlexField.{U9MaterialContract.SurfaceTreatmentPrivateSegment}", Clean(material.SurfaceTreatment) ?? string.Empty),
-            // 已存在的料品同步时一并把生效日期拉平到 2020-01-01，保证 BOM 内所有物料都早于 BOM 生效日期。
-            Attribute("Effective.EffectiveDate", MaterialEffectiveDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
+            Attribute($"DescFlexField.{U9MaterialContract.SurfaceTreatmentPrivateSegment}", Clean(material.SurfaceTreatment) ?? string.Empty)
         };
         if (material.Weight is not null) attributes.Add(Attribute("Weight", material.Weight.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        else if (previous?.Weight is not null) attributes.Add(Attribute("Weight", "0"));
+        if (previous is not null)
+        {
+            using var oldPayload = JsonDocument.Parse(ModifyPayload(previous, correlationId, ResolveUnitCode(previous.UnitCode)));
+            var oldAttributes = oldPayload.RootElement[0].GetProperty("Attributes").EnumerateArray()
+                .ToDictionary(item => item.GetProperty("AttributeName").GetString()!, item => item);
+            attributes.RemoveAll(item => oldAttributes.TryGetValue((string)item["AttributeName"]!, out var oldValue)
+                && JsonElement.DeepEquals(oldValue, JsonSerializer.SerializeToElement(item, JsonOptions)));
+        }
         return JsonSerializer.Serialize(new[]
         {
             new Dictionary<string, object?>

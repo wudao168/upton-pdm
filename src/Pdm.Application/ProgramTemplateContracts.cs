@@ -120,6 +120,8 @@ public interface IProgramTemplateRepository
         CancellationToken cancellationToken);
     Task<ProgramTemplateApprovalTask?> FindTaskAsync(Guid taskId, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProgramTemplateApprovalTask>> ListRevisionTasksAsync(Guid revisionId, CancellationToken cancellationToken);
+    Task<ProgramTemplateRevision> WithdrawAsync(Guid revisionId, long expectedRowVersion, CancellationToken cancellationToken);
+    Task<ProgramTemplateApprovalTask> TransferAsync(Guid taskId, string newAssignee, long expectedRowVersion, CancellationToken cancellationToken);
     /// <summary>待办查询：审图任务按指定审核人；最终批准任务按“批准程序模板”权限（canApprove）或历史角色代码匹配。</summary>
     Task<IReadOnlyList<ProgramTemplateApprovalTask>> ListTasksAsync(string actor, string roleCode, bool canApprove, CancellationToken cancellationToken);
     Task<ProgramTemplateDecisionResult> DecideAsync(

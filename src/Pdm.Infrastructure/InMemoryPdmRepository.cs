@@ -32,6 +32,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     private readonly Dictionary<Guid, int> projectCounters = new();
     private readonly Dictionary<Guid, SortedSet<int>> releasedProjectNumbers = new();
     private readonly TimeProvider timeProvider;
+    private readonly IProjectContactInformationRepository? projectContacts;
     private readonly Dictionary<Guid, int> serialCounters = new();
     private readonly Dictionary<Guid, SortedSet<int>> releasedSerialNumbers = new();
     private readonly Dictionary<(Guid OrganizationId, string CustomerCode), int> customerCounters = new();
@@ -52,9 +53,10 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     public int BomBatchApplyCount { get; private set; }
 
-    public InMemoryPdmRepository(TimeProvider timeProvider)
+    public InMemoryPdmRepository(TimeProvider timeProvider, IProjectContactInformationRepository? projectContacts = null)
     {
         this.timeProvider = timeProvider;
+        this.projectContacts = projectContacts;
         foreach (var definition in RolePermissionCatalog.Roles)
         {
             roleDefinitions[definition.RoleCode] = definition;
@@ -103,12 +105,15 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<IReadOnlyList<Project>> ListProjectsAsync(CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<Project>>(projects.Values.Where(IsInActiveCompany).OrderBy(project => project.Code).ToArray());
 
-    public Task<IReadOnlyList<Project>> ListProjectsForUserAsync(string actor, UserRole role, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<Project>>(!HasUserPermission(actor, role, PermissionCodes.ProjectView) ? [] : projects.Values
-            .Where(IsInActiveCompany)
-            .Select(project => ApplyCapabilities(project, actor, role))
-            .OrderBy(project => project.Code)
-            .ToArray());
+    public async Task<IReadOnlyList<Project>> ListProjectsForUserAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!HasUserPermission(actor, role, PermissionCodes.ProjectView)) return [];
+        var result = new List<Project>();
+        foreach (var project in projects.Values.Where(IsInActiveCompany).OrderBy(project => project.Code))
+            if (await HasCommercialProjectAccessAsync(project, actor, role, cancellationToken))
+                result.Add(ApplyCapabilities(project, actor, role));
+        return result;
+    }
 
     public Task<Project?> FindProjectAsync(Guid projectId, CancellationToken cancellationToken)
     {
@@ -117,12 +122,18 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         return Task.FromResult(project);
     }
 
-    public Task<bool> HasProjectReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
-        Task.FromResult(HasUserPermission(actor, role, PermissionCodes.ProjectView) && projects.TryGetValue(projectId, out var project) && IsInActiveCompany(project));
+    public async Task<bool> HasProjectReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
+        HasUserPermission(actor, role, PermissionCodes.ProjectView) && projects.TryGetValue(projectId, out var project) && IsInActiveCompany(project)
+            && await HasCommercialProjectAccessAsync(project, actor, role, cancellationToken);
 
-    public Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
-        Task.FromResult(projects.TryGetValue(projectId, out var project) && IsInActiveCompany(project)
-            && HasUserPermission(actor, role, PermissionCodes.ProjectContentView));
+    public async Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
+        projects.TryGetValue(projectId, out var project) && IsInActiveCompany(project)
+            && HasUserPermission(actor, role, PermissionCodes.ProjectContentView)
+            && await HasCommercialProjectAccessAsync(project, actor, role, cancellationToken);
+
+    private Task<bool> HasCommercialProjectAccessAsync(Project project, string actor, UserRole role, CancellationToken ct) =>
+        CommercialProjectAccess.CanReadAsync(project, users.Values.FirstOrDefault(user => user.Username.Equals(actor, StringComparison.OrdinalIgnoreCase)),
+            actor, role, projectContacts, ct);
 
     private static bool IsInActiveCompany(Project project) => TenantContext.CompanyId is not Guid companyId || project.OrganizationId is null || project.OrganizationId == companyId;
 
@@ -1194,23 +1205,25 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<bool> HasDocumentReadAccessAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken) =>
         HasDocumentAccessAsync(documentId, actor, role, FolderAccess.View, cancellationToken);
 
-    public Task<bool> HasDocumentAccessAsync(Guid documentId, string actor, UserRole role, FolderAccess requiredAccess, CancellationToken cancellationToken)
+    public async Task<bool> HasDocumentAccessAsync(Guid documentId, string actor, UserRole role, FolderAccess requiredAccess, CancellationToken cancellationToken)
     {
+        if (!documents.TryGetValue(documentId, out var requestedDocument)
+            || !await HasProjectContentReadAccessAsync(requestedDocument.ProjectId, actor, role, cancellationToken)) return false;
         lock (gate)
         {
             if (!documents.TryGetValue(documentId, out var document)
                 || !projects.TryGetValue(document.ProjectId, out var project)
                 || !IsInActiveCompany(project)
                 || !HasUserPermission(actor, role, PermissionCodes.ProjectContentView))
-                return Task.FromResult(false);
+                return false;
             EnsureProjectFolderTree(document.ProjectId);
             var folder = document.FolderId is null
                 ? projectFolders.Values.FirstOrDefault(item => item.TargetProjectId == document.ProjectId && item.TemplateKey == "mechanical.project")
                 : projectFolders.GetValueOrDefault(document.FolderId.Value);
-            if (folder is null) return Task.FromResult(false);
+            if (folder is null) return false;
             var rootFolders = projectFolders.Values.Where(item => item.RootProjectId == folder.RootProjectId).ToArray();
             var access = ResolveFolderAccess(folder, rootFolders, actor, role);
-            return Task.FromResult((access & requiredAccess) == requiredAccess);
+            return (access & requiredAccess) == requiredAccess;
         }
     }
 
@@ -1232,6 +1245,10 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 .ToArray());
         }
     }
+
+    public async Task<IReadOnlyList<ProductionDrawingItem>> ListProductionDrawingIndexAsync(string actor, UserRole role, bool includeHistory, CancellationToken cancellationToken)
+        => (await new ProductionDrawingService(this).ListAsync(actor, role, includeHistory, null, cancellationToken))
+            .Select(item => item with { BomItems = [], ModelFiles = [] }).ToArray();
 
     public Task<IReadOnlyList<ProductionDrawingProject>> ListProductionDrawingProjectsAsync(string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -1284,17 +1301,18 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         }
     }
 
-    public Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken)
+    public Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<BomItem> componentDrawingItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken)
     {
         lock (gate)
         {
             BomBatchApplyCount++;
-            bomItems.RemoveAll(item => item.ProjectId == projectId && item.Kind is BomKind.Standard or BomKind.NonStandard or BomKind.Unclassified or BomKind.Electrical or BomKind.Virtual);
+            bomItems.RemoveAll(item => item.ProjectId == projectId && item.Kind is BomKind.Standard or BomKind.NonStandard or BomKind.Unclassified or BomKind.Electrical or BomKind.Virtual or BomKind.ComponentDrawing);
             bomItems.AddRange(standardItems);
             bomItems.AddRange(nonStandardItems);
             bomItems.AddRange(unclassifiedItems);
             bomItems.AddRange(electricalItems);
             bomItems.AddRange(virtualItems);
+            bomItems.AddRange(componentDrawingItems);
             foreach (var request in writebacks)
             {
                 foreach (var existing in cadPropertyWritebacks.Values
@@ -2049,7 +2067,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         lock (gate)
         {
             if (!packages.TryGetValue(releasePackageId, out var package)) throw new PdmNotFoundException("发布包不存在。");
-            if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval)) throw new PdmConflictException("只有审批中的发布包可以在终审时回填非标件料号。");
+            if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval or ReleasePackageState.Publishing)) throw new PdmConflictException("只有审批中或发布中的发布包可以回填非标件料号。");
             BomItem Apply(BomItem item) => materialCodes.TryGetValue(item.Id, out var code) ? item with { DrawingNumber = code } : item;
             var updated = package with { NonStandardBomSnapshot = package.NonStandardBomSnapshot.Select(Apply).ToArray(), MechanicalBomSnapshot = package.MechanicalBomSnapshot.Select(Apply).ToArray() };
             packages[releasePackageId] = updated;
@@ -2561,6 +2579,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                     item.PrincipalType == FolderPrincipalType.User && string.Equals(item.PrincipalKey, actor, StringComparison.OrdinalIgnoreCase)
                     || item.PrincipalType == FolderPrincipalType.Role && roleCodes.Contains(item.PrincipalKey, StringComparer.OrdinalIgnoreCase)).ToArray();
             if (rules.Length > 0) return rules.Aggregate(FolderAccess.None, (value, item) => value | item.Access);
+            if (current.TemplateKey is "presales" or "customer-files" && roleCodes.Any(CommercialProjectAccess.IsCommercialRole))
+                return FolderAccess.View | FolderAccess.Download | FolderAccess.Upload | (role == UserRole.Engineer ? FolderAccess.Edit : FolderAccess.None);
             if (!current.InheritPermissions || current.ParentFolderId is null) break;
             current = folders.FirstOrDefault(item => item.Id == current.ParentFolderId.Value);
         }
@@ -2612,12 +2632,10 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         var drawingDocumentCount = documents.Values.Count(item => item.ProjectId == project.Id && item.Kind == DocumentKind.Drawing);
         var businessStatus = BuildBusinessStatus(project.Id);
         var rootDocumentCheckedOutBy = RootDocumentCheckedOutBy(project.Id);
-        if (role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true)
-            return project with { CanAssignExecutionUnit = project.ParentProjectId is null, CanManageMainStaffing = project.ParentProjectId is null && project.ExecutionUnitId is not null, CanAssignDesigners = project.ExecutionUnitId is not null, CanReadContent = true, EffectiveProjectPermissions = ProjectPermissionSettings.Operations, CanSubmitArchive = true, DocumentCount = documentCount, ModelDocumentCount = modelDocumentCount, DrawingDocumentCount = drawingDocumentCount, BusinessStatus = businessStatus, RootDocumentCheckedOutBy = rootDocumentCheckedOutBy };
         var managesExecutionUnit = project.ExecutionUnitId is Guid executionUnitId
             && organizationManagers.TryGetValue(executionUnitId, out var managers)
             && (string.Equals(managers.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || managers.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase));
-        var canManage = project.ParentProjectId is null && managesExecutionUnit;
+        var canManage = project.ParentProjectId is null && (managesExecutionUnit || string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase));
         var belongsToProjectStaffing = string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
             || project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
             || string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
@@ -2629,6 +2647,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         var canReadContent = HasUserPermission(actor, role, PermissionCodes.ProjectContentView);
         var canAssignDesigners = HasUserPermission(actor, role, PermissionCodes.ProjectDesignerAssign) && project.ExecutionUnitId is not null
             && (managesExecutionUnit || isMechanicalSupervisor || belongsToProjectStaffing);
+        if (role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true)
+            return project with { CanAssignExecutionUnit = project.ParentProjectId is null, CanManageMainStaffing = project.ExecutionUnitId is not null && canManage, CanAssignDesigners = canAssignDesigners, CanReadContent = true, EffectiveProjectPermissions = ProjectPermissionSettings.Operations, CanSubmitArchive = true, DocumentCount = documentCount, ModelDocumentCount = modelDocumentCount, DrawingDocumentCount = drawingDocumentCount, BusinessStatus = businessStatus, RootDocumentCheckedOutBy = rootDocumentCheckedOutBy };
         return project with
         {
             CanAssignExecutionUnit = HasUserPermission(actor, role, PermissionCodes.ProjectExecutionAssign) && project.ParentProjectId is null && project.OrganizationId == UserPrimaryCompanyId(actor),

@@ -21,6 +21,9 @@ internal static class Program
 {
     private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
     private static readonly PersistentWorker Worker = new PersistentWorker();
+    private static readonly SemaphoreSlim ConversionGate = new SemaphoreSlim(1, 1);
+    private static int waitingRequests;
+    private static string currentTask = string.Empty;
 
     private static int Main(string[] args)
     {
@@ -78,12 +81,18 @@ internal static class Program
                 {
                     status = "ok",
                     machine = Environment.MachineName,
+                    name = options.Name,
+                    busy = ConversionGate.CurrentCount == 0,
+                    queued = Volatile.Read(ref waitingRequests),
+                    currentTask,
                     agentVersion = typeof(Program).Assembly.GetName().Version?.ToString(),
                     workerPath = options.WorkerPath,
                     workerExists = File.Exists(options.WorkerPath),
                     timeoutMinutes = options.TimeoutMinutes,
                     workRoot = options.WorkRoot,
-                    workerSession = Worker.IsRunning ? $"常驻SolidWorks会话运行中（PID {Worker.ProcessId}）" : "常驻SolidWorks会话未启动"
+                    solidWorksPid = Worker.SolidWorksPid, solidWorksRunning = Worker.SolidWorksRunning,
+                    conversionStage = Worker.Stage, completed = Worker.Completed, total = Worker.Total, progressUpdatedAt = Worker.UpdatedAt,
+                    workerSession = Worker.IsRunning ? $"转换工作进程运行中（PID {Worker.ProcessId}）" : "转换工作进程未启动"
                 });
                 return;
             }
@@ -109,6 +118,9 @@ internal static class Program
             var outputRoot = Path.Combine(jobRoot, "outputs");
             Directory.CreateDirectory(sourceRoot);
             Directory.CreateDirectory(outputRoot);
+            Interlocked.Increment(ref waitingRequests);
+            await ConversionGate.WaitAsync();
+            Interlocked.Decrement(ref waitingRequests);
             try
             {
                 var requestPath = Path.Combine(jobRoot, "request.zip");
@@ -120,6 +132,7 @@ internal static class Program
                 var manifest = ReadManifest(requestPath, sourceRoot);
                 if (manifest.Jobs.Count == 0) throw new InvalidOperationException("转换请求中没有任务。");
                 var convertJobs = manifest.Jobs.Where(job => job.Convert).ToList();
+                currentTask = $"{convertJobs.Count} 项：{string.Join("、", convertJobs.Take(3).Select(job => job.FileName))}";
                 Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 收到转换任务 {convertJobs.Count} 项（含只作引用的文件共 {manifest.Jobs.Count} 个），来源 {client.Client?.RemoteEndPoint}");
                 RunWorker(options, jobRoot, sourceRoot, outputRoot, manifest);
 
@@ -154,6 +167,8 @@ internal static class Program
             }
             finally
             {
+                currentTask = string.Empty;
+                ConversionGate.Release();
                 TryDeleteDirectory(jobRoot);
             }
         }
@@ -282,6 +297,12 @@ internal static class Program
         public bool IsRunning => process != null && !process.HasExited;
 
         public int ProcessId => process?.Id ?? 0;
+        public int SolidWorksPid { get; private set; }
+        public bool SolidWorksRunning { get { try { using (var cad = Process.GetProcessById(SolidWorksPid)) return !cad.HasExited; } catch { return false; } } }
+        public string Stage { get; private set; } = "尚未执行";
+        public int Completed { get; private set; }
+        public int Total { get; private set; }
+        public string UpdatedAt { get; private set; }
 
         public PersistentOutcome TryRun(AgentOptions options, string manifestPath, string resultPath)
         {
@@ -292,17 +313,33 @@ internal static class Program
                     if (!EnsureStarted(options)) return PersistentOutcome.Unavailable;
                     input.WriteLine(Serializer.Serialize(new { Manifest = manifestPath, Result = resultPath }));
                     input.Flush();
-                    var responseTask = output.ReadLineAsync();
-                    if (!responseTask.Wait(TimeSpan.FromMinutes(options.TimeoutMinutes)))
+                    Stage = "等待转换程序响应";
+                    Completed = Total = 0;
+                    UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                    var deadline = DateTime.UtcNow.AddMinutes(options.TimeoutMinutes);
+                    while (true)
                     {
-                        Stop();
-                        throw new TimeoutException($"SolidWorks转换超过{options.TimeoutMinutes}分钟，已终止。");
+                        var responseTask = output.ReadLineAsync();
+                        var remaining = deadline - DateTime.UtcNow;
+                        if (remaining <= TimeSpan.Zero || !responseTask.Wait(remaining))
+                        {
+                            Stage = $"SolidWorks转换超过{options.TimeoutMinutes}分钟，已终止。";
+                            Stop();
+                            throw new TimeoutException(Stage);
+                        }
+                        var line = responseTask.Result;
+                        if (string.IsNullOrWhiteSpace(line)) return PersistentOutcome.Unavailable;
+                        var payload = Serializer.Deserialize<WorkerResult>(line);
+                        if (payload == null) return PersistentOutcome.Unavailable;
+                        UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                        if (payload.Progress)
+                        {
+                            SolidWorksPid = payload.SolidWorksPid; Stage = payload.Stage; Completed = payload.Completed; Total = payload.Total;
+                            continue;
+                        }
+                        Stage = payload.Success ? "转换完成" : "转换失败：" + payload.Error;
+                        return payload.Success ? PersistentOutcome.Success : PersistentOutcome.ConversionFailed;
                     }
-                    var line = responseTask.Result;
-                    if (string.IsNullOrWhiteSpace(line)) return PersistentOutcome.Unavailable;
-                    var payload = Serializer.Deserialize<WorkerResult>(line);
-                    if (payload == null) return PersistentOutcome.Unavailable;
-                    return payload.Success ? PersistentOutcome.Success : PersistentOutcome.ConversionFailed;
                 }
                 catch (TimeoutException)
                 {
@@ -419,6 +456,11 @@ internal static class Program
 
     private sealed class WorkerResult
     {
+        public bool Progress { get; set; }
+        public int SolidWorksPid { get; set; }
+        public string Stage { get; set; }
+        public int Completed { get; set; }
+        public int Total { get; set; }
         public bool Success { get; set; }
         public string Error { get; set; }
     }

@@ -143,8 +143,7 @@ const orderedProjects = computed(() => {
 const rootHasChildren = computed(() => hierarchyProjects.value.some(project => project.parentProjectId === rootProjectId.value))
 
 function isProjectExpanded(project: ProjectSummary) {
-  return !project.parentProjectId || (expandedProjects.value[project.id]
-    ?? !!detailCache.value[project.id]?.headers.some(header => header.materialCode))
+  return !project.parentProjectId || (expandedProjects.value[project.id] ?? true)
 }
 
 function toggleProject(project: ProjectSummary) {
@@ -472,7 +471,7 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
           <tr><th>层级 / BOM</th><th>料号分类</th><th>本级BOM料号</th><th>上级BOM料号</th><th>物料数</th><th>PLM版本</th><th>发布状态</th><th>待处理</th><th>最近发布</th><th>自动流程</th><th>U9C料品</th><th>U9C BOM</th></tr>
         </thead>
         <tbody>
-          <tr v-for="row in visibleOverviewRows" :key="row.key" :class="{ 'is-master-row': row.isMaster }">
+          <tr v-for="row in visibleOverviewRows" :key="row.key" :class="{ 'is-master-row': row.isMaster }" :data-bom-type="row.isMaster ? (row.project.parentProjectId ? 'ChildProject' : 'MainProject') : row.kind">
             <td v-if="detailErrors[row.project.id]" colspan="12" class="bom-overview__project-error" :style="{ paddingLeft: `${row.depth * 18 + 8}px` }">{{ row.project.code }} · {{ row.project.name }}：{{ detailErrors[row.project.id] }}</td>
             <template v-else>
             <td :title="`${row.project.code} · ${row.project.name}`">
@@ -507,8 +506,26 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
 </template>
 
 <style scoped>
+.bom-overview__table-wrap tr[data-bom-type] { --bom-row-background: #fff; --bom-name-color: var(--pdm-text); }
+.bom-overview__table-wrap tr[data-bom-type="MainProject"],
+.bom-overview__table-wrap tr[data-bom-type="ChildProject"] { --bom-row-background: var(--pdm-surface-muted); --bom-name-color: var(--pdm-text); }
+.bom-overview__table-wrap tr.is-master-row > td,
+.bom-overview__table-wrap tr.is-master-row > td span,
+.bom-overview__table-wrap tr.is-master-row > td button { color: var(--pdm-text); }
+.bom-overview__table-wrap tr[data-bom-type] > td { background: var(--bom-row-background) !important; }
+.bom-overview__table-wrap tr[data-bom-type] .bom-overview__project,
+.bom-overview__table-wrap tr[data-bom-type] .bom-overview__project span,
+.bom-overview__table-wrap tr[data-bom-type] .bom-overview__link { color: var(--bom-name-color); }
+.bom-overview__table-wrap tr.is-master-row > td:first-child { box-shadow: inset 3px 0 var(--bom-name-color); }
+.bom-overview { flex: 1 1 0; min-height: 0 !important; overflow: hidden; }
+.bom-overview__table-wrap table { table-layout: auto !important; }
+.bom-overview__table-wrap tr,.bom-overview__table-wrap th,.bom-overview__table-wrap td { box-sizing: border-box; height: 40px !important; min-height: 40px !important; max-height: 40px !important; white-space: nowrap; }
+.bom-overview__table-wrap td:first-child { overflow: visible; }
+.bom-overview__project { width: max-content; white-space: nowrap; }
+.bom-overview__project span { flex: 0 0 auto; }
+.bom-overview__link { flex: 0 0 auto; }
 .bom-overview__toggle{display:inline-flex;flex:0 0 16px;width:16px;height:18px;align-items:center;justify-content:center;padding:0;border:0;background:transparent;color:var(--pdm-blue);font:inherit;cursor:pointer}.bom-overview__toggle:focus-visible{outline:2px solid var(--pdm-blue);outline-offset:1px}
 .bom-overview__link{min-width:0;overflow:hidden;padding:0;border:0;background:transparent;color:var(--pdm-blue);font:inherit;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}.bom-overview__link:hover{text-decoration:underline}.bom-overview__link:focus-visible{outline:2px solid var(--pdm-blue);outline-offset:2px}
 .bom-overview__project-error{color:var(--pdm-danger)}
-.bom-overview{display:flex;min-height:560px;min-width:0;flex-direction:column;padding:0;border:1px solid var(--pdm-border);border-radius:7px;background:#fff}.bom-overview__error{margin:10px;padding:8px 10px;border-radius:5px;background:#fef2f2;color:var(--pdm-danger)}.bom-overview__generation{display:flex;min-height:38px;align-items:center;justify-content:flex-end;gap:10px;padding:5px 8px;border-bottom:1px solid var(--pdm-border);color:var(--pdm-muted)}.bom-overview__table-wrap{min-height:0;flex:1;overflow:auto;border-radius:6px}.bom-overview__table-wrap table{width:100%;table-layout:fixed;border-collapse:collapse;white-space:nowrap}.bom-overview__table-wrap th,.bom-overview__table-wrap td{overflow:hidden;padding:8px;border-bottom:1px solid var(--pdm-border);text-align:left;text-overflow:ellipsis}.bom-overview__table-wrap th{position:sticky;top:0;z-index:1;background:#f3f6fa}.bom-overview__table-wrap th:nth-child(1){width:205px}.bom-overview__table-wrap th:nth-child(2){width:85px}.bom-overview__table-wrap th:nth-child(3),.bom-overview__table-wrap th:nth-child(4){width:112px}.bom-overview__table-wrap th:nth-child(5){width:58px}.bom-overview__table-wrap th:nth-child(6){width:80px}.bom-overview__table-wrap th:nth-child(7){width:82px}.bom-overview__table-wrap th:nth-child(8){width:68px}.bom-overview__table-wrap th:nth-child(9){width:118px}.bom-overview__table-wrap th:nth-child(10){width:145px}.bom-overview__table-wrap th:nth-child(11){width:72px}.bom-overview__table-wrap th:nth-child(12){width:92px}.bom-overview__table-wrap tr.is-master-row td{background:#f8fafc;font-weight:600}.bom-overview__project{display:flex;min-width:0;align-items:center;gap:6px}.bom-overview__project i{color:var(--pdm-muted);font-style:normal}.bom-overview__project strong{flex:0 0 auto}.bom-overview__project span{overflow:hidden;color:var(--pdm-muted);text-overflow:ellipsis}.bom-overview__sync{border:0;background:transparent;color:var(--pdm-blue);cursor:pointer;font:inherit}.bom-overview__sync:disabled{cursor:wait;opacity:.6}.is-warning{color:var(--pdm-orange)}.is-success{color:var(--pdm-green)}.is-muted{color:var(--pdm-muted)}.bom-overview__empty{padding:24px;text-align:center;color:var(--pdm-muted)}
+.bom-overview{display:flex;min-height:560px;min-width:0;flex-direction:column;padding:0;border:1px solid var(--pdm-border);border-radius:7px;background:#fff}.bom-overview__error{margin:10px;padding:8px 10px;border-radius:5px;background:var(--pdm-danger-soft);color:var(--pdm-danger)}.bom-overview__generation{display:flex;min-height:38px;align-items:center;justify-content:flex-end;gap:10px;padding:5px 8px;border-bottom:1px solid var(--pdm-border);color:var(--pdm-muted)}.bom-overview__table-wrap{min-height:0;flex:1;overflow:auto;border-radius:6px}.bom-overview__table-wrap table{width:100%;table-layout:fixed;border-collapse:collapse;white-space:nowrap}.bom-overview__table-wrap th,.bom-overview__table-wrap td{overflow:hidden;padding:8px;border-bottom:1px solid var(--pdm-border);text-align:left;text-overflow:ellipsis}.bom-overview__table-wrap th{position:sticky;top:0;z-index:1;background:var(--pdm-table-header)}.bom-overview__table-wrap th:nth-child(1){width:205px}.bom-overview__table-wrap th:nth-child(2){width:85px}.bom-overview__table-wrap th:nth-child(3),.bom-overview__table-wrap th:nth-child(4){width:112px}.bom-overview__table-wrap th:nth-child(5){width:58px}.bom-overview__table-wrap th:nth-child(6){width:80px}.bom-overview__table-wrap th:nth-child(7){width:82px}.bom-overview__table-wrap th:nth-child(8){width:68px}.bom-overview__table-wrap th:nth-child(9){width:118px}.bom-overview__table-wrap th:nth-child(10){width:145px}.bom-overview__table-wrap th:nth-child(11){width:72px}.bom-overview__table-wrap th:nth-child(12){width:92px}.bom-overview__table-wrap tr.is-master-row td{background:var(--pdm-table-header);font-weight:600}.bom-overview__project{display:flex;min-width:0;align-items:center;gap:6px}.bom-overview__project i{color:var(--pdm-muted);font-style:normal}.bom-overview__project strong{flex:0 0 auto}.bom-overview__project span{overflow:hidden;color:var(--pdm-muted);text-overflow:ellipsis}.bom-overview__sync{border:0;background:transparent;color:var(--pdm-blue);cursor:pointer;font:inherit}.bom-overview__sync:disabled{cursor:wait;opacity:.6}.is-warning{color:var(--pdm-orange)}.is-success{color:var(--pdm-green)}.is-muted{color:var(--pdm-muted)}.bom-overview__empty{padding:24px;text-align:center;color:var(--pdm-muted)}
 </style>

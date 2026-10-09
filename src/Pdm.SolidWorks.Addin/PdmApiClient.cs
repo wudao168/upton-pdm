@@ -294,12 +294,16 @@ internal sealed class PdmApiClient : IDisposable
         Guid documentId,
         string originalFilePath,
         CancellationToken cancellationToken,
-        Action<long, long> reportProgress = null)
+        Action<long, long> reportProgress = null,
+        string exactCopySourceSha256 = null)
     {
         var file = new FileInfo(filePath);
         var originalFile = new FileInfo(originalFilePath);
-        var sha256 = ComputeFileSha256(filePath);
-        var sourceFileSha256 = ComputeFileSha256(originalFilePath);
+        var hashes = await Task.Run(
+            () => CheckInUploadHashes.Read(filePath, originalFilePath, exactCopySourceSha256, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+        var sha256 = hashes.Upload;
+        var sourceFileSha256 = hashes.Source;
         var session = await PostJsonAsync<UploadSessionDto>("api/uploads/sessions", new { projectId, fileName = file.Name, totalLength = file.Length, sha256 }, cancellationToken).ConfigureAwait(false);
         using (var input = File.OpenRead(filePath))
         {

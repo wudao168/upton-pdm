@@ -437,6 +437,41 @@ public sealed partial class BomHeaderService(
         return count;
     }
 
+    public async Task RecoverPublishedApplicationsAsync(CancellationToken cancellationToken)
+    {
+        var checkedKinds = new HashSet<(Guid, ProjectBomHeaderKind)>();
+        foreach (var packageId in await repository.ListRecentPublishedReleasePackageIdsAsync(100, cancellationToken))
+        {
+            var package = await repository.FindReleasePackageAsync(packageId, cancellationToken);
+            if (package is null || package.State != ReleasePackageState.Published) continue;
+            ProjectBomHeaderKind[] kinds = package.Scope switch
+            {
+                ReleaseScope.StandardLongLead or ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement => [ProjectBomHeaderKind.Standard],
+                ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardLongLead or ReleaseScope.NonStandardSupplement => [ProjectBomHeaderKind.NonStandard],
+                ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalLongLead or ReleaseScope.ElectricalSupplement => [ProjectBomHeaderKind.Electrical],
+                ReleaseScope.LegacyCombined => [ProjectBomHeaderKind.Standard, ProjectBomHeaderKind.NonStandard, ProjectBomHeaderKind.Electrical],
+                _ => []
+            };
+            var actor = package.ApprovalTasks.OrderBy(task => task.StepOrder)
+                .FirstOrDefault(task => task.Decision == ApprovalDecision.Approved)?.DecisionBy ?? "system";
+            foreach (var kind in kinds)
+            {
+                if (!checkedKinds.Add((package.ProjectId, kind))) continue;
+                try
+                {
+                    await EnsureApplicationsAfterBomApprovalAsync(package.ProjectId, kind, actor, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                catch (Exception exception)
+                {
+                    await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor,
+                        "bom.header.application.recovery-failed", nameof(ReleasePackage), package.Id.ToString(),
+                        $"{KindLabel(kind)}已发布，料号申请补恢复失败，将继续重试：{exception.Message}"), cancellationToken);
+                }
+            }
+        }
+    }
+
     public async Task<bool> ProcessAutomaticQueueAsync(CancellationToken cancellationToken)
     {
         await QueueFailedAutomaticAsync(cancellationToken);

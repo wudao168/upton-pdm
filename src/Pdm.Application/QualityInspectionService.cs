@@ -31,7 +31,7 @@ public sealed class QualityInspectionService(IQualityInspectionRepository record
     {
         await RequireAccessAsync(projectId, actor, role, true, cancellationToken, kind);
         ValidateFileName(fileName);
-        return await storage.StartUploadAsync(projectId, fileName, length, sha256, cancellationToken);
+        return await storage.StartUploadAsync(projectId, fileName, length, sha256, cancellationToken, actor);
     }
 
     public async Task<QualityInspectionRecord> CompleteAsync(Guid projectId, Guid sessionId, string kind, string? station, string title, string? remark, string actor, UserRole role, CancellationToken cancellationToken)
@@ -44,6 +44,7 @@ public sealed class QualityInspectionService(IQualityInspectionRepository record
         if (title.Length is < 1 or > 200 || station.Length > 100 || remark?.Length > 2000)
             throw new PdmRuleException("请填写记录名称（最多200字）、工站（最多100字）和备注（最多2000字）。");
         var session = await storage.GetUploadSessionAsync(sessionId, cancellationToken);
+        session.RequireOwner(actor);
         if (session.ProjectId != projectId) throw new PdmConflictException("上传会话与检验项目不匹配。");
         ValidateFileName(session.FileName);
         var id = Guid.NewGuid();

@@ -245,13 +245,34 @@ public sealed class U9MaterialIntegrationService(
         Guid taskId,
         string actor,
         UserRole role,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyList<string>? selectedAttributes = null)
     {
         if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken))
             throw new UnauthorizedAccessException("当前角色无权执行U9C料品同步。");
 
+        if (selectedAttributes is not null)
+        {
+            var selectedTask = await materials.FindSyncTaskAsync(taskId, cancellationToken)
+                ?? throw new PdmNotFoundException("同步任务不存在。");
+            if (selectedTask.Operation != MaterialSyncOperation.Update || selectedAttributes.Count == 0)
+                throw new PdmRuleException("请至少确认一个需要修改的U9C属性。");
+            using var payload = JsonDocument.Parse(selectedTask.PayloadJson);
+            var attributes = payload.RootElement[0].GetProperty("Attributes").EnumerateArray().ToArray();
+            if (selectedAttributes.Any(name => !attributes.Any(item => item.GetProperty("AttributeName").GetString() == name)))
+                throw new PdmRuleException("选择的属性不在当前修改请求中，请刷新后重试。");
+            var selectedPayload = JsonSerializer.Serialize(new[] { new {
+                Code = payload.RootElement[0].GetProperty("Code").GetString(),
+                OtherID = selectedTask.CorrelationId,
+                Attributes = attributes.Where(item => selectedAttributes.Contains(item.GetProperty("AttributeName").GetString()!)).ToArray()
+            } });
+            await materials.RetrySyncTaskAsync(taskId, selectedPayload,
+                Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(selectedPayload))),
+                timeProvider.GetUtcNow(), cancellationToken);
+        }
+
         var session = await CreateExecutionSessionAsync(cancellationToken);
-        return await ExecuteApprovedTaskCoreAsync(taskId, actor, session, cancellationToken);
+        return await ExecuteApprovedTaskCoreAsync(taskId, actor, session, cancellationToken, allowUpdate: true);
     }
 
     public async Task<MaterialSyncExecutionResult> ExecuteApprovedTaskAsync(
@@ -288,7 +309,8 @@ public sealed class U9MaterialIntegrationService(
         Guid taskId,
         string actor,
         U9MaterialExecutionSession session,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowUpdate = false)
     {
         var configuration = session.Configuration;
 
@@ -296,6 +318,8 @@ public sealed class U9MaterialIntegrationService(
             ?? throw new PdmNotFoundException("U9C同步任务不存在。");
         if (existingTask.Operation is not (MaterialSyncOperation.Create or MaterialSyncOperation.Update))
             throw new PdmRuleException("当前同步任务类型不受支持。");
+        if (existingTask.Operation == MaterialSyncOperation.Update && !allowUpdate)
+            throw new PdmRuleException("U9C属性只能由标准化人员在料品管理中确认修改；BOM及后台流程不能覆盖U9C。");
         var sourceMaterial = await materials.FindMaterialAsync(existingTask.MaterialId, cancellationToken)
             ?? throw new PdmNotFoundException("同步任务对应的物料主档不存在。");
         if (sourceMaterial.IsArchived)
@@ -327,6 +351,7 @@ public sealed class U9MaterialIntegrationService(
         var writeAttempted = false;
         var writeResponseReceived = false;
         var postWriteVerificationStarted = false;
+        var existingCodeFound = false;
         try
         {
             if (!session.ValidatedUnitCodes.Contains(u9UnitCode))
@@ -345,8 +370,10 @@ public sealed class U9MaterialIntegrationService(
             if (query.ResponseCode != 0)
                 throw new PdmRuleException($"U9C料品幂等查询失败（ResCode={query.ResponseCode}）：{query.ResponseMessage ?? "未返回错误说明"}。");
 
-            var existingItem = query.Items.FirstOrDefault(item =>
-                string.Equals(item.U9ItemCode, sourceMaterial.MaterialCode, StringComparison.OrdinalIgnoreCase));
+            var matchingItems = query.Items.Where(item =>
+                string.Equals(item.U9ItemCode, sourceMaterial.MaterialCode, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (matchingItems.Length > 1) throw new PdmRuleException("U9C返回多个同料号，无法确认唯一关联，未执行写入。");
+            var existingItem = matchingItems.SingleOrDefault();
             if (task.Operation == MaterialSyncOperation.Create
                 && existingTask.Status == MaterialSyncStatus.NeedsReview
                 && existingItem is null)
@@ -354,8 +381,7 @@ public sealed class U9MaterialIntegrationService(
 
             if (task.Operation == MaterialSyncOperation.Create && existingItem is not null)
             {
-                if (existingTask.Status != MaterialSyncStatus.NeedsReview)
-                    throw new U9MaterialCodeConflictException(sourceMaterial.MaterialCode);
+                existingCodeFound = true;
 
                 var differences = CompareMappedFields(sourceMaterial, existingItem)
                     .Concat(U9MaterialCreationRules.Compare(task.PayloadJson, existingItem.CreationAttributes,
@@ -378,6 +404,10 @@ public sealed class U9MaterialIntegrationService(
             if (task.Operation == MaterialSyncOperation.Update && existingItem is null)
                 throw new PdmRuleException("U9C不存在同料号，不能执行修改；请先核对创建任务和料号映射。");
 
+            if (task.Operation == MaterialSyncOperation.Update)
+                await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor,
+                    "u9.material.attributes.confirm", nameof(PdmMaterial), sourceMaterial.Id.ToString(),
+                    JsonSerializer.Serialize(new { before = existingItem, confirmedUpdate = task.PayloadJson })), cancellationToken);
             writeAttempted = true;
             var write = await PostBatchWithTokenRefreshAsync(
                 session,
@@ -411,7 +441,7 @@ public sealed class U9MaterialIntegrationService(
         }
         catch (PdmRuleException exception)
         {
-            var status = existingTask.Status == MaterialSyncStatus.NeedsReview
+            var status = existingCodeFound || existingTask.Status == MaterialSyncStatus.NeedsReview
                 || writeAttempted && (!writeResponseReceived || postWriteVerificationStarted)
                 ? MaterialSyncStatus.NeedsReview
                 : MaterialSyncStatus.Failed;
@@ -476,7 +506,8 @@ public sealed class U9MaterialIntegrationService(
                 lastDifferences = [$"U9C写后查询未找到料号 {expected.MaterialCode}。"];
                 continue;
             }
-            var differences = CompareMappedFields(expected, actual).Concat(task.Operation == MaterialSyncOperation.Create
+            var differences = CompareMappedFields(expected, actual).Where(difference => task.Operation != MaterialSyncOperation.Update
+                || IsSelectedUpdateDifference(task.PayloadJson, difference)).Concat(task.Operation == MaterialSyncOperation.Create
                 ? U9MaterialCreationRules.Compare(task.PayloadJson, actual.CreationAttributes) : []).ToArray();
             if (differences.Length == 0) return actual;
             lastDifferences = differences;
@@ -552,14 +583,20 @@ public sealed class U9MaterialIntegrationService(
         CompareCode("U9分类", expected.CategoryCode ?? expected.U9CategoryCode, actual.U9CategoryCode, differences);
         CompareCode("计量单位", U9MaterialPayloadFactory.ResolveUnitCode(expected.UnitCode), actual.U9UnitCode, differences);
         CompareText("型号/规格", expected.Specification, actual.U9Specification, differences);
-        CompareText("备注", expected.Remark, actual.U9Description, differences);
         CompareText("品牌", expected.Brand, actual.U9Brand, differences);
-        CompareText("材质", expected.Material, actual.U9Material, differences);
-        CompareText("表面处理", expected.SurfaceTreatment, actual.U9SurfaceTreatment, differences);
-        CompareText("采购链接", expected.PurchaseLink, actual.U9PurchaseLink, differences);
-        if (NormalizeWeight(expected.Weight) != NormalizeWeight(actual.U9Weight))
-            differences.Add($"重量 PLM={Display(expected.Weight)} U9C={Display(actual.U9Weight)}");
         return differences;
+    }
+
+    private static bool IsSelectedUpdateDifference(string payloadJson, string difference)
+    {
+        if (difference.StartsWith("料号 ", StringComparison.Ordinal)) return true;
+        var names = new Dictionary<string, string> { ["名称"] = "Name", ["型号/规格"] = "SPECS",
+            ["U9分类"] = "MainItemCategory", ["计量单位"] = "InventoryUOM",
+            ["品牌"] = $"DescFlexField.{U9MaterialContract.BrandPublicSegment}" };
+        using var payload = JsonDocument.Parse(payloadJson);
+        return names.Any(pair => difference.StartsWith(pair.Key + " ", StringComparison.Ordinal)
+            && payload.RootElement[0].GetProperty("Attributes").EnumerateArray()
+                .Any(attribute => attribute.GetProperty("AttributeName").GetString() == pair.Value));
     }
 
     private static void CompareText(string field, string? expected, string? actual, ICollection<string> differences)
@@ -578,7 +615,6 @@ public sealed class U9MaterialIntegrationService(
 
     private static string? NormalizeText(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
-    private static decimal? NormalizeWeight(decimal? value) => value is null or 0m ? null : decimal.Round(value.Value, 6, MidpointRounding.AwayFromZero);
 
     private static string Display(object? value) => value?.ToString() ?? "<空>";
 
@@ -597,12 +633,12 @@ public sealed class U9MaterialIntegrationService(
             foreach (var attribute in attributes.EnumerateArray())
             {
                 if (!attribute.TryGetProperty("AttributeName", out var name)
-                    || !string.Equals(name.GetString(), "InventoryUOM", StringComparison.OrdinalIgnoreCase)
-                    || !attribute.TryGetProperty("EntityValue", out var entityValue)
-                    || !entityValue.TryGetProperty("Code", out var code)) continue;
-                return string.Equals(code.GetString()?.Trim(), expectedCode, StringComparison.OrdinalIgnoreCase);
+                    || !string.Equals(name.GetString(), "InventoryUOM", StringComparison.OrdinalIgnoreCase)) continue;
+                return attribute.TryGetProperty("EntityValue", out var entityValue)
+                    && entityValue.TryGetProperty("Code", out var code)
+                    && string.Equals(code.GetString()?.Trim(), expectedCode, StringComparison.OrdinalIgnoreCase);
             }
-            return false;
+            return true; // 本次修改未选择单位，不应要求请求携带单位。
         }
         catch (JsonException)
         {

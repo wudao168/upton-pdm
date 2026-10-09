@@ -149,6 +149,24 @@ public sealed class PreviewConversionTests
     }
 
     [Fact]
+    public async Task PreviewAgentRegistration_PreservesOtherServersAndRemovesOnlyTheRequestedServer()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        await Task.WhenAll(
+            workflow.RegisterPreviewAgentAsync("http://first:5199", "first-token", 30, "admin", UserRole.Administrator, default, "一号转图"),
+            workflow.RegisterPreviewAgentAsync("http://second:5199", "second-token", 40, "admin", UserRole.Administrator, default, "二号转图"));
+        Assert.Equal(2, (await repository.GetSystemSettingsAsync(default)).PreviewConversion.Servers.Count);
+        var renamed = await workflow.RegisterPreviewAgentAsync("http://first:5199/", "updated", 30, "admin", UserRole.Administrator, default, "新的名称");
+        Assert.Equal(2, renamed.PreviewConversion.Servers.Count);
+        Assert.Contains(renamed.PreviewConversion.Servers, server => server.Name == "新的名称" && server.AgentToken == "updated");
+        var removed = await workflow.ClearPreviewAgentAsync("admin", UserRole.Administrator, default, "http://first:5199");
+        Assert.Equal(PreviewConversionMode.Remote, removed.PreviewConversion.Mode);
+        Assert.Equal("二号转图", Assert.Single(removed.PreviewConversion.Servers).Name);
+        Assert.Equal("http://second:5199", removed.PreviewConversion.AgentUrl);
+    }
+
+    [Fact]
     public async Task SystemSettings_RejectsRemoteConversionWithoutValidAddress()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
@@ -221,7 +239,7 @@ public sealed class PreviewConversionTests
         public Task<UploadSession> GetUploadSessionAsync(Guid sessionId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<bool> IsAvailableAsync(string location, CancellationToken cancellationToken) => Task.FromResult(true);
         public Task<Stream> OpenReadAsync(string absolutePath, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken, string? owner = null) => throw new NotSupportedException();
         public Task VerifyStoredFileAsync(Project project, StoredFile file, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<UploadSession> WriteChunkAsync(Guid sessionId, int chunkIndex, Stream content, CancellationToken cancellationToken) => throw new NotSupportedException();
     }

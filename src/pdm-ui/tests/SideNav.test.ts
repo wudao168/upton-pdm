@@ -12,8 +12,8 @@ describe('SideNav', () => {
     const wrapper = mount(SideNav, { props: { active: 'project-center' } })
     const navigationLabels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
 
-    expect(navigationLabels.slice(0, 3)).toEqual(['项目中心', '项目工作台', '项目列表'])
-    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[1]!.trigger('click')
+    expect(navigationLabels.slice(0, 4)).toEqual(['项目日历', '项目中心', '项目工作台', '项目列表'])
+    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[2]!.trigger('click')
     expect(wrapper.emitted('navigate')?.[0]).toEqual(['project-workbench', '项目工作台'])
   })
 
@@ -34,14 +34,14 @@ describe('SideNav', () => {
     const wrapper = mount(SideNav, { props: { active: 'materials', canViewStandardLibrary: true, canViewMaterials: true } })
     const labels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
 
-    expect(labels.slice(3, 6)).toEqual(['标准物料', '标准结构', '料品管理'])
-    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[4]!.trigger('click')
+    expect(labels.slice(4, 7)).toEqual(['标准物料', '标准结构', '料品管理'])
+    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[5]!.trigger('click')
     expect(wrapper.emitted('navigate')?.[0]).toEqual(['standard-structure', '标准结构'])
   })
 
   it('shows the combined material task count on material management', () => {
     const wrapper = mount(SideNav, { props: { active: 'projects', materialCount: 3, canViewMaterials: true } })
-    const materialItem = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[3]!
+    const materialItem = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').find(item => item.text().includes('料品管理'))!
 
     expect(materialItem.text()).toContain('料品管理')
     expect(materialItem.get('em').text()).toBe('3')

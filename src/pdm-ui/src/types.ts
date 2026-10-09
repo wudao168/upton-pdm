@@ -404,7 +404,7 @@ export interface PdmSystemSettings {
 }
 /** 图纸转换（2D转PDF、3D转STEP）的执行位置：Local=API服务器本机，Remote=独立转图电脑上的转图代理。 */
 export type PreviewConversionMode = 'Local' | 'Remote'
-export interface PreviewConversionSettings { mode: PreviewConversionMode; agentUrl: string; agentToken: string; timeoutMinutes: number }
+export interface PreviewConversionSettings { mode: PreviewConversionMode; agentUrl: string; agentToken: string; timeoutMinutes: number; servers?: { name: string; agentUrl: string; agentToken: string; timeoutMinutes: number }[] }
 export interface PreviewAgentProbeResult { ok: boolean; message: string; machine?: string | null; workerExists?: boolean | null; workerPath?: string | null }
 export interface MaterialCodeApprovalSettings { version: number; approverRoleCodes: string[] }
 export interface FormalSupplementPolicy { maximumCount?: number | null; validDays?: number | null }
@@ -682,6 +682,10 @@ export interface EditLockSummary {
 }
 
 export interface BomItem {
+  maintainedItem?: BomItem
+  summaryItemIds?: string[]
+  summaryFingerprint?: string
+  editedFields?: string[]
   id?: string
   releaseTrackingId?: string
   kind?: BomClassification
@@ -733,7 +737,7 @@ export interface BomItem {
 
 export type BomKind = 'Standard' | 'NonStandard' | 'Unclassified' | 'Electrical'
 export type BomExportMode = 'Summary' | 'Structure'
-export type BomClassification = BomKind | 'Virtual'
+export type BomClassification = BomKind | 'Virtual' | 'ComponentDrawing'
 
 export type EngineeringKitRevisionState = 'Draft' | 'Released'
 
@@ -868,6 +872,7 @@ export interface BomGenerationResult {
   electricalItems: BomItem[]
   unclassifiedItems: BomItem[]
   virtualItems: BomItem[]
+  componentDrawingItems: BomItem[]
   virtualCount: number
   unclassifiedCount: number
   pendingRemovalCount: number
@@ -1948,6 +1953,7 @@ export interface U9BomWriteInput {
 export interface U9BomWritePreview {
   componentChanges?: Array<{ sequence: number; itemCode: string; change: string; previousQuantity: number; quantity: number }>
   modifiedComponentCount?: number
+  hierarchyEffectiveDate?: string | null
   deletedComponentCount?: number
   operation: U9BomWriteOperation
   path: string

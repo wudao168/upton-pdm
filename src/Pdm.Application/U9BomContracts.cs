@@ -46,6 +46,7 @@ public sealed record U9BomComponentReference(
     bool? IsPhantomPart,
     bool? IsDelete)
 {
+    public string? OperationNum { get; init; }
     public int? UsageQtyType { get; init; }
     public bool? IsSpecialUseItem { get; init; }
     public bool? IsIssueOrgFixed { get; init; }
@@ -115,6 +116,8 @@ public sealed record U9BomWriteCommand(
     // Only the project release workflow supplies this baseline; never accept it from an API caller.
     [System.Text.Json.Serialization.JsonIgnore]
     public IReadOnlyList<U9BomComponentCommand>? PreviousApprovedComponents { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool InheritEffectiveDateForNewRows { get; init; }
 }
 
 public sealed record U9BomComponentChange(int Sequence, string ItemCode, string Change, decimal PreviousQuantity, decimal Quantity);
@@ -142,6 +145,7 @@ public sealed record U9BomWritePreview(
     public IReadOnlyList<U9BomComponentChange> ComponentChanges { get; init; } = [];
     public int ModifiedComponentCount => ComponentChanges.Count(item => item.Change == "修改");
     public int DeletedComponentCount => ComponentChanges.Count(item => item.Change == "删除");
+    public DateOnly? HierarchyEffectiveDate { get; init; }
 }
 
 public sealed record U9BomWriteExecution(

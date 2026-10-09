@@ -1,3 +1,4 @@
+import { listReleasePackages } from '../api'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, permanentlyDeleteManualBomItems as permanentlyDeleteManualBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest, setBomReleaseExclusion as setBomReleaseExclusionRequest } from '../api'
 import { getBomSourceData } from '../api'
@@ -5,7 +6,7 @@ import { copyProjectContent as copyProjectContentRequest, previewProjectCopy as 
 import { transferApproval } from '../api'
 import { listUserNotifications, markAllUserNotificationsRead as markAllUserNotificationsReadRequest, markUserNotificationRead as markUserNotificationReadRequest } from '../api'
 import { abandonDrawingReviewWritebacks as abandonDrawingReviewWritebacksRequest, addDrawingReviewMarkup as addDrawingReviewMarkupRequest, createDrawingReview as createDrawingReviewRequest, decideDrawingReviewSupervisor as decideDrawingReviewSupervisorRequest, decideDrawingReviewTarget as decideDrawingReviewTargetRequest, listDrawingReviewCandidates, listDrawingReviewers, listDrawingReviews, resolveDrawingReviewMarkup as resolveDrawingReviewMarkupRequest, resubmitDrawingReviewItem as resubmitDrawingReviewItemRequest, withdrawDrawingReview as withdrawDrawingReviewRequest } from '../api'
-import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteReleasePackageDraft as deleteReleasePackageDraftRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, exportWearPartBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMaterialCodeApplications, listMaterialSyncTasks, listMyApprovalTasks, listPasswordResetTasks, listProgramTemplateTasks, listProjectAudit, listProjects, loadProjectDocumentWorkspace, loadProjectWorkspace, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, retryLongLeadU9 as retryLongLeadU9Request, listU9SyncBlockers as listU9SyncBlockersRequest, retryReleasePreview as retryReleasePreviewRequest, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateChildProjectManager as updateChildProjectManagerRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateProjectPhaseOwners as updateProjectPhaseOwnersRequest, updateReleasePackageDraft as updateReleasePackageDraftRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
+import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteReleasePackageDraft as deleteReleasePackageDraftRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, exportWearPartBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMaterialCodeApplications, listMaterialSyncTasks, listMyApprovalTasks, listPasswordResetTasks, listProgramTemplateTasks, listProjectAudit, listProjects, loadProjectDocumentWorkspace, loadProjectWorkspace, loadBomSourceData, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, retryLongLeadU9 as retryLongLeadU9Request, listU9SyncBlockers as listU9SyncBlockersRequest, retryReleasePreview as retryReleasePreviewRequest, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateChildProjectManager as updateChildProjectManagerRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateProjectPhaseOwners as updateProjectPhaseOwnersRequest, updateReleasePackageDraft as updateReleasePackageDraftRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
 import type { AuthSession, ProjectWorkspaceData } from '../api'
 import type { AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomVersion, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCodeApplication, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, PasswordResetTask, PdmCustomer, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplateTask, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectPhaseOwners, ProjectSummary, ProjectVersionItem, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput } from '../types'
 import type { AddDrawingReviewMarkupInput, ApprovalTransferCandidate, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
@@ -294,12 +295,15 @@ export function usePdmWorkspace() {
   let accessToken = ''
   let pendingVersionComparison: { documentId: string; leftVersionId?: string; rightVersionId?: string } | null = null
   let projectSummaryTimer: number | undefined
+  let releaseStatusTimer: number | undefined
+  let releaseStatusLoading = false
   let projectDocumentTimer: number | undefined
   let sessionRenewTimer: number | undefined
   let persistentSession: AuthSession | null = null
   let sessionRenewal: Promise<boolean> | null = null
   let projectDocumentRefreshPending = false
   let reloadRequestSequence = 0
+  let globalLoadErrors: string[] = []
 
   const managedDocumentNodes = computed(() => managedDocuments.value.map(managedDocumentNode))
   const currentProjectManagedDocuments = computed(() => managedDocuments.value.filter(document => document.projectId === project.value.id))
@@ -390,6 +394,8 @@ export function usePdmWorkspace() {
   }
 
   function clearProjectWorkspace() {
+    sourceDataRequestedProjectId.value = ''
+    sourceDataLoadingProjectId = ''
     moduleErrors.value = []
     project.value = emptyProject
     projectFolders.value = []
@@ -514,16 +520,39 @@ export function usePdmWorkspace() {
     if (releasePackage.value) approvalDialogOpen.value = true
   }
 
+  const sourceDataRequestedProjectId = ref('')
+  let sourceDataLoadingProjectId = ''
+  async function ensureBomSourceData() {
+    const requestedId = project.value.id
+    if (!requestedId || sourceDataRequestedProjectId.value === requestedId || sourceDataLoadingProjectId === requestedId) return
+    sourceDataLoadingProjectId = requestedId
+    try {
+      const items = await loadBomSourceData(requestedId, accessToken)
+      if (project.value.id !== requestedId) return
+      bomSourceData.value = items
+      sourceDataRequestedProjectId.value = requestedId
+    } catch (error) {
+      operationError.value = error instanceof Error ? error.message : '源数据结构读取失败，请重试'
+    } finally {
+      if (sourceDataLoadingProjectId === requestedId) sourceDataLoadingProjectId = ''
+    }
+  }
+
   async function saveBomItems(kind: BomKind, items: BomItem[]) {
     operationPending.value = true
     operationError.value = ''
     try {
-      const saved = await saveBom(project.value.id, kind, items, accessToken)
+      const result = await saveBom(project.value.id, kind, items, accessToken)
+      const saved = result.items
       if (kind === 'Standard') standardBom.value = saved
       else if (kind === 'NonStandard') nonStandardBom.value = saved
       else electricalBom.value = saved
       bomEmptyDeclarations.value = bomEmptyDeclarations.value.map(item => item.kind === kind ? { ...item, declaredEmpty: false } : item)
-      await refreshBomVersionData()
+      if (result.draftVersion === undefined) await refreshBomVersionData()
+      else if (result.draftVersion) {
+        const draft = result.draftVersion
+        bomVersions.value = [draft, ...bomVersions.value.filter(version => version.id !== draft.id)]
+      }
     } catch (error) {
       operationError.value = messageFrom(error)
       throw error
@@ -930,6 +959,18 @@ export function usePdmWorkspace() {
   }
 
   /** 转图与发布解耦：手动把该发布包的转图事项重新排队到后台，处理完会有站内消息反馈。 */
+  async function refreshReleaseStatus() {
+    const projectId = project.value?.id
+    if (!projectId || !accessToken || operationPending.value || releaseStatusLoading
+      || !releasePackages.value.some(item => item.state === '发布中' || item.previewState === 'Pending' || item.previewState === 'Running')) return
+    releaseStatusLoading = true
+    try {
+      const packages = await listReleasePackages(projectId, accessToken)
+      if (project.value?.id === projectId) releasePackages.value = packages
+    } catch {
+      // 保留已有状态，下轮继续读取，避免临时网络失败挡住项目页面。
+    } finally { releaseStatusLoading = false }
+  }
   async function retryReleasePreview(releasePackageId: string) {
     operationPending.value = true
     operationError.value = ''
@@ -1162,6 +1203,7 @@ export function usePdmWorkspace() {
 
   function clearSession() {
     reloadRequestSequence += 1
+    globalLoadErrors = []
     loading.value = false
     accessToken = ''
     postDesktopMessage('session-clear')
@@ -1250,14 +1292,14 @@ export function usePdmWorkspace() {
     window.location.reload()
   }
 
-  async function reload(projectId?: string) {
+  async function reload(projectId?: string, refreshGlobal = true) {
     if (!accessToken) return
     const wasReady = ready.value
     const requestSequence = ++reloadRequestSequence
     loading.value = true
     loadError.value = ''
     try {
-      const auxiliaryErrors: string[] = []
+      const auxiliaryErrors: string[] = refreshGlobal ? [] : [...globalLoadErrors]
       async function optional<T>(label: string, request: Promise<T>, fallback: T): Promise<T> {
         try {
           return await request
@@ -1267,67 +1309,70 @@ export function usePdmWorkspace() {
           return fallback
         }
       }
-      const [loadedProjects, loadedOptions, loadedCustomers, loadedTasks, loadedNotifications, loadedMaterialCodeTasks, loadedMaterialSyncTasks, loadedProgramTemplateTasks, loadedEditLocks, loadedDirectory, loadedProfile, loadedPasswordResetTasks, loadedValidationRules] = await Promise.all([
-        withLoadContext('项目列表', listProjects(accessToken)),
-        optional('项目编号选项', getProjectNumberingOptions(accessToken), projectNumberingOptions.value),
-        optional('客户列表', listCustomers(accessToken), customers.value),
-        optional('审批待办', requestMyApprovalTasks(), myApprovalTasks.value),
-        optional('系统消息', requestUserNotifications(), notifications.value),
-        optional('料号审批待办', requestMaterialCodeApprovalTasks(), materialCodeApprovalTasks.value),
-        optional('料品同步任务', requestMaterialSyncTasks(), materialSyncTasks.value),
-        optional('程序模板待办', requestProgramTemplateTasks(), programTemplateTasks.value),
-        optional('编辑锁', requestEditLocks(), editLocks.value),
-        optional('组织目录', getOrganizationDirectory(accessToken), organizationDirectory.value),
-        optional('个人资料', getMyProfile(accessToken), currentProfile.value),
-        optional('密码重置待办', requestPasswordResetTasks(), passwordResetTasks.value),
-        optional('BOM校验规则', getBomValidationRules(accessToken).catch(error => {
-          if (error instanceof PdmApiError && error.status !== 404) throw error
-          return defaultSystemSettings.validationRules
-        }), systemSettings.value.validationRules),
-      ])
-      if (requestSequence !== reloadRequestSequence) return
-      projects.value = loadedProjects
-      projectNumberingOptions.value = loadedOptions
-      customers.value = loadedCustomers
-      myApprovalTasks.value = loadedTasks
-      notifications.value = loadedNotifications
-      materialCodeApprovalTasks.value = loadedMaterialCodeTasks
-      materialSyncTasks.value = loadedMaterialSyncTasks
-      programTemplateTasks.value = loadedProgramTemplateTasks
-      editLocks.value = loadedEditLocks
-      organizationDirectory.value = loadedDirectory
-      users.value = loadedDirectory.users
-      currentProfile.value = loadedProfile
-      passwordResetTasks.value = loadedPasswordResetTasks
-      systemSettings.value = { ...systemSettings.value, validationRules: loadedValidationRules }
-      if (hasPermission('settings.storage.manage')) {
-        const [loadedSettings, loadedEquipmentTypes] = await Promise.all([
-          optional('系统设置', getSystemSettings(accessToken), systemSettings.value),
-          optional('设备类型', listEquipmentTypes(accessToken), equipmentTypes.value),
+      if (refreshGlobal) {
+        const [loadedProjects, loadedOptions, loadedCustomers, loadedTasks, loadedNotifications, loadedMaterialCodeTasks, loadedMaterialSyncTasks, loadedProgramTemplateTasks, loadedEditLocks, loadedDirectory, loadedProfile, loadedPasswordResetTasks, loadedValidationRules] = await Promise.all([
+          withLoadContext('项目列表', listProjects(accessToken)),
+          optional('项目编号选项', getProjectNumberingOptions(accessToken), projectNumberingOptions.value),
+          optional('客户列表', listCustomers(accessToken), customers.value),
+          optional('审批待办', requestMyApprovalTasks(), myApprovalTasks.value),
+          optional('系统消息', requestUserNotifications(), notifications.value),
+          optional('料号审批待办', requestMaterialCodeApprovalTasks(), materialCodeApprovalTasks.value),
+          optional('料品同步任务', requestMaterialSyncTasks(), materialSyncTasks.value),
+          optional('程序模板待办', requestProgramTemplateTasks(), programTemplateTasks.value),
+          optional('编辑锁', requestEditLocks(), editLocks.value),
+          optional('组织目录', getOrganizationDirectory(accessToken), organizationDirectory.value),
+          optional('个人资料', getMyProfile(accessToken), currentProfile.value),
+          optional('密码重置待办', requestPasswordResetTasks(), passwordResetTasks.value),
+          optional('BOM校验规则', getBomValidationRules(accessToken).catch(error => {
+            if (error instanceof PdmApiError && error.status !== 404) throw error
+            return defaultSystemSettings.validationRules
+          }), systemSettings.value.validationRules),
         ])
         if (requestSequence !== reloadRequestSequence) return
-        const mergedSettings = { ...systemSettings.value, ...loadedSettings }
-        systemSettings.value = {
-          ...systemSettings.value,
-          ...loadedSettings,
-          bomPropertyMappings: loadedSettings.bomPropertyMappings?.length ? loadedSettings.bomPropertyMappings : bomPropertyMappingsFromLegacy(mergedSettings),
-          validationRules: loadedSettings.validationRules ?? loadedValidationRules,
-        }
-        equipmentTypes.value = loadedEquipmentTypes
-      } else equipmentTypes.value = []
-      const loadedCrmIntegrationSettings = hasPermission('settings.customer.manage')
-        ? await optional('客户集成设置', getCrmIntegrationSettings(accessToken), crmIntegrationSettings.value)
-        : { ...defaultCrmIntegrationSettings }
-      if (requestSequence !== reloadRequestSequence) return
-      crmIntegrationSettings.value = loadedCrmIntegrationSettings
-      const loadedFolderTemplate = hasPermission('settings.folder.manage')
-        ? await optional('项目文件夹模板', listFolderTemplate(accessToken), folderTemplate.value) : []
-      if (requestSequence !== reloadRequestSequence) return
-      folderTemplate.value = loadedFolderTemplate
-      const loadedRolePermissionDirectory = hasPermission('system.role.view')
-        ? await optional('角色权限', getRolePermissionDirectory(accessToken), rolePermissionDirectory.value) : { permissions: [], roles: [] }
-      if (requestSequence !== reloadRequestSequence) return
-      rolePermissionDirectory.value = loadedRolePermissionDirectory
+        projects.value = loadedProjects
+        projectNumberingOptions.value = loadedOptions
+        customers.value = loadedCustomers
+        myApprovalTasks.value = loadedTasks
+        notifications.value = loadedNotifications
+        materialCodeApprovalTasks.value = loadedMaterialCodeTasks
+        materialSyncTasks.value = loadedMaterialSyncTasks
+        programTemplateTasks.value = loadedProgramTemplateTasks
+        editLocks.value = loadedEditLocks
+        organizationDirectory.value = loadedDirectory
+        users.value = loadedDirectory.users
+        currentProfile.value = loadedProfile
+        passwordResetTasks.value = loadedPasswordResetTasks
+        systemSettings.value = { ...systemSettings.value, validationRules: loadedValidationRules }
+        if (hasPermission('settings.storage.manage')) {
+          const [loadedSettings, loadedEquipmentTypes] = await Promise.all([
+            optional('系统设置', getSystemSettings(accessToken), systemSettings.value),
+            optional('设备类型', listEquipmentTypes(accessToken), equipmentTypes.value),
+          ])
+          if (requestSequence !== reloadRequestSequence) return
+          const mergedSettings = { ...systemSettings.value, ...loadedSettings }
+          systemSettings.value = {
+            ...systemSettings.value,
+            ...loadedSettings,
+            bomPropertyMappings: loadedSettings.bomPropertyMappings?.length ? loadedSettings.bomPropertyMappings : bomPropertyMappingsFromLegacy(mergedSettings),
+            validationRules: loadedSettings.validationRules ?? loadedValidationRules,
+          }
+          equipmentTypes.value = loadedEquipmentTypes
+        } else equipmentTypes.value = []
+        const loadedCrmIntegrationSettings = hasPermission('settings.customer.manage')
+          ? await optional('客户集成设置', getCrmIntegrationSettings(accessToken), crmIntegrationSettings.value)
+          : { ...defaultCrmIntegrationSettings }
+        if (requestSequence !== reloadRequestSequence) return
+        crmIntegrationSettings.value = loadedCrmIntegrationSettings
+        const loadedFolderTemplate = hasPermission('settings.folder.manage')
+          ? await optional('项目文件夹模板', listFolderTemplate(accessToken), folderTemplate.value) : []
+        if (requestSequence !== reloadRequestSequence) return
+        folderTemplate.value = loadedFolderTemplate
+        const loadedRolePermissionDirectory = hasPermission('system.role.view')
+          ? await optional('角色权限', getRolePermissionDirectory(accessToken), rolePermissionDirectory.value) : { permissions: [], roles: [] }
+        if (requestSequence !== reloadRequestSequence) return
+        rolePermissionDirectory.value = loadedRolePermissionDirectory
+        globalLoadErrors = [...auxiliaryErrors]
+      }
       const selectedProject = projects.value.find(candidate => candidate.id === projectId)
         ?? (project.value.id ? projects.value.find(candidate => candidate.id === project.value.id) : undefined)
       if (!selectedProject) {
@@ -1339,11 +1384,12 @@ export function usePdmWorkspace() {
       }
 
       const keepSelection = selectedProject.id === project.value.id
-      const data = await loadProjectWorkspace(selectedProject.id, accessToken)
+      const data = await loadProjectWorkspace(selectedProject.id, accessToken, sourceDataRequestedProjectId.value === selectedProject.id)
       if (requestSequence !== reloadRequestSequence) return
       const previousSelectedId = keepSelection ? selectedId.value : ''
       moduleErrors.value = data.moduleErrors
       project.value = data.project
+      if (!refreshGlobal) projects.value = projects.value.map(candidate => candidate.id === data.project.id ? { ...candidate, ...data.project } : candidate)
       projectFolders.value = data.folders
       managedDocuments.value = data.documents
       documentRelations.value = data.documentRelations
@@ -1727,7 +1773,7 @@ export function usePdmWorkspace() {
   }
 
   async function selectProject(projectId: string) {
-    await reload(projectId)
+    await reload(projectId, !ready.value || !projects.value.some(candidate => candidate.id === projectId))
   }
 
   function closeProject() {
@@ -1774,7 +1820,9 @@ export function usePdmWorkspace() {
     loadError.value = ''
   }
 
-  function handleSessionExpired() {
+  function handleSessionExpired(event?: Event) {
+    const expiredToken = (event as CustomEvent<{ token?: string }> | undefined)?.detail?.token
+    if (expiredToken && expiredToken !== accessToken) return
     if (persistentSession?.resumeToken) {
       void renewPersistentSession()
       return
@@ -1799,6 +1847,7 @@ export function usePdmWorkspace() {
   onMounted(async () => {
     window.addEventListener('pdm-session-expired', handleSessionExpired)
     window.addEventListener('focus', refreshOpenProjectOnFocus)
+    releaseStatusTimer = window.setInterval(() => void refreshReleaseStatus(), 5000)
     projectSummaryTimer = window.setInterval(() => void refreshProjectSummaries(), 300_000)
     projectDocumentTimer = window.setInterval(() => void refreshOpenProjectDocuments(), 300_000)
     window.addEventListener('pdm-open-version-compare', async (event) => {
@@ -1815,8 +1864,7 @@ export function usePdmWorkspace() {
 
     const controller = new AbortController()
     const timer = window.setTimeout(() => controller.abort(), 1600)
-    serviceOnline.value = await checkHealth(controller.signal)
-    window.clearTimeout(timer)
+    void checkHealth(controller.signal).then(online => { serviceOnline.value = online }).finally(() => window.clearTimeout(timer))
 
     window.chrome?.webview?.addEventListener('message', (event) => {
       const message = event.data as { type?: string; payload?: { online?: boolean } }
@@ -1828,15 +1876,13 @@ export function usePdmWorkspace() {
       if (session) {
         persistentSession = session
         const accessTokenIsValid = new Date(session.expiresAt).getTime() > Date.now()
-        if (session.resumeToken) {
-          const renewed = await renewPersistentSession()
-          if (!renewed && persistentSession && accessTokenIsValid) {
-            applySession(session)
-            await reload()
-          }
-        } else if (accessTokenIsValid) {
+        if (accessTokenIsValid) {
           applySession(session)
+          authInitialized.value = true
           await reload()
+          if (persistentSession?.resumeToken) void renewPersistentSession()
+        } else if (session.resumeToken) {
+          await renewPersistentSession()
         }
       }
     } finally {
@@ -1847,6 +1893,7 @@ export function usePdmWorkspace() {
   onBeforeUnmount(() => {
     window.removeEventListener('pdm-session-expired', handleSessionExpired)
     window.removeEventListener('focus', refreshOpenProjectOnFocus)
+    if (releaseStatusTimer !== undefined) window.clearInterval(releaseStatusTimer)
     if (projectSummaryTimer !== undefined) window.clearInterval(projectSummaryTimer)
     if (projectDocumentTimer !== undefined) window.clearInterval(projectDocumentTimer)
     if (sessionRenewTimer !== undefined) window.clearTimeout(sessionRenewTimer)
@@ -1986,6 +2033,8 @@ export function usePdmWorkspace() {
     restoreVersion,
     submitApproval,
     saveBomItems,
+    ensureBomSourceData,
+    bomSourceDataLoaded: computed(() => sourceDataRequestedProjectId.value === project.value.id),
     importBomFile,
     exportBomFile,
     exportWearPartBomFile,

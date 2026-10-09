@@ -215,6 +215,10 @@ Get-NetTCPConnection -LocalPort 5199 -State Listen
 
 ## 相关文件
 
+新版代理管理程序支持自定义服务器名称，填写内容会自动保存；密码和令牌使用当前 Windows 用户的 DPAPI 加密。关闭窗口会进入系统托盘，双击托盘图标恢复窗口，托盘菜单可退出管理窗口，代理仍继续运行。安装后代理和托盘管理程序在当前用户登录时自动启动，SolidWorks 需要该用户的桌面会话。
+
+多台电脑各自运行安装程序并登记，PLM 保留全部服务器，按在线与忙闲状态选择空闲机器，全部忙碌时排队。相同地址重复登记更新名称和配置；卸载只移除本机，其他机器继续工作。管理窗口每 5 秒读取本机当前任务、排队数以及 PLM 调度队列和待完成发布单；这些信息表示执行阶段和任务数量，不代表单张图纸的百分比进度。
+
 - 代理源码：`src/Pdm.PreviewAgent/`；转换程序：`src/Pdm.SolidWorks.PreviewWorker/`
 - 一键安装程序源码：`src/Pdm.PreviewAgent.Setup/`（WinForms + 内嵌载荷）
 - API 侧转换与协议：`src/Pdm.Infrastructure/SolidWorksServerPreviewConverter.cs`

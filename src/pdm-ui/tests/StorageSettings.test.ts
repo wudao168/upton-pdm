@@ -25,6 +25,23 @@ const settings: PdmSystemSettings = {
 }
 
 describe('StorageSettings BOM property mappings', () => {
+  it('shows named servers and preserves the other server when editing conversion settings', async () => {
+    const servers = [{ name: '一号转图机', agentUrl: 'http://one:5199', agentToken: 'one', timeoutMinutes: 30 },
+      { name: '二号转图机', agentUrl: 'http://two:5199', agentToken: 'two', timeoutMinutes: 30 }]
+    const onSaveSettings = vi.fn().mockImplementation(async input => input)
+    const wrapper = mount(StorageSettings, { props: {
+      settings: { ...settings, previewConversion: { mode: 'Remote', agentUrl: servers[0]!.agentUrl, agentToken: 'one', timeoutMinutes: 30, servers } },
+      equipmentTypes: [], numberingOptions: { organizations: [], projectTypes: [], equipmentTypes: [] }, pending: false,
+      onSaveSettings, onSaveEquipmentType: vi.fn(), onUpdateCounters: vi.fn(),
+    }, global: { plugins: [ElementPlus] } })
+    expect(wrapper.text()).toContain('一号转图机')
+    expect(wrapper.text()).toContain('二号转图机')
+    await wrapper.get('input[aria-label="转图服务器地址"]').setValue('http://changed:5199')
+    await wrapper.findAll('button').find(button => button.text() === '保存图纸转换设置')!.trigger('click')
+    await flushPromises()
+    expect(onSaveSettings.mock.calls[0]![0].previewConversion.servers).toEqual([{ ...servers[0], agentUrl: 'http://changed:5199' }, servers[1]])
+    wrapper.unmount()
+  })
   it('explains that project storage is grouped under the main project code', () => {
     const wrapper = mount(StorageSettings, {
       props: {

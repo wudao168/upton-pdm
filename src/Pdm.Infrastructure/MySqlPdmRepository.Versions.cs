@@ -58,6 +58,55 @@ public sealed partial class MySqlPdmRepository
         { Division = project.Division, ProjectManager = project.ProjectManager }).ToArray();
     }
 
+    public async Task<IReadOnlyList<ProductionDrawingItem>> ListProductionDrawingIndexAsync(string actor, UserRole role, bool includeHistory, CancellationToken cancellationToken)
+    {
+        var projects = (await ListProductionDrawingProjectsAsync(actor, role, cancellationToken)).ToDictionary(item => item.Id);
+        if (projects.Count == 0) return [];
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<ProductionDrawingIndexRow>(new CommandDefinition(
+            """
+            SELECT d.project_id,d.id AS DocumentId,v.id AS VersionId,v.release_package_id,
+                   p.package_number AS ReleasePackageNumber,d.drawing_number,d.name,v.revision_label,
+                   v.property_snapshot_json,COALESCE(p.published_at,v.created_at) AS PublishedAt,
+                   v.created_at,v.created_by AS PublishedBy,p.drawing_priority AS Priority,p.drawing_required_on AS RequiredOn
+            FROM document d
+            JOIN document_version v ON v.document_id=d.id
+            JOIN release_package p ON p.id=v.release_package_id
+            WHERE d.project_id IN @ProjectIds AND d.kind='Drawing'
+              AND d.deleted_at IS NULL AND d.purged_at IS NULL
+              AND v.version_status='Released' AND p.state='Published'
+              AND p.release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')
+            """, new { ProjectIds = projects.Keys.ToArray() }, cancellationToken: cancellationToken));
+        var results = new List<ProductionDrawingItem>();
+        foreach (var group in rows.GroupBy(row => row.DocumentId))
+        {
+            var ordered = group.OrderByDescending(row => RevisionLabel.Parse(row.RevisionLabel).BaseRevision)
+                .ThenByDescending(row => row.CreatedAt).ThenByDescending(row => row.VersionId).ToArray();
+            var current = ordered[0];
+            foreach (var row in includeHistory ? ordered : [current])
+            {
+                var project = projects[row.ProjectId];
+                var properties = JsonSerializer.Deserialize<Dictionary<string, string?>>(row.PropertySnapshotJson) ?? [];
+                var model = properties.FirstOrDefault(item => item.Key.Split('/').Last().Equals("型号", StringComparison.OrdinalIgnoreCase)).Value;
+                results.Add(new ProductionDrawingItem(project.Id, project.Code, project.Name, row.DocumentId, row.VersionId,
+                    row.ReleasePackageId, row.ReleasePackageNumber, row.DrawingNumber,
+                    string.IsNullOrWhiteSpace(model) ? row.DrawingNumber : model.Trim(), row.Name, row.RevisionLabel,
+                    AsUtc(row.PublishedAt), row.Priority, row.RequiredOn.HasValue ? DateOnly.FromDateTime(row.RequiredOn.Value) : null,
+                    row.VersionId == current.VersionId, false, false, row.VersionId == current.VersionId ? null : AsUtc(current.CreatedAt))
+                { PublishedBy = row.PublishedBy, Division = project.Division, ProjectManager = project.ProjectManager });
+            }
+        }
+        return results.OrderByDescending(item => item.PublishedAt).ToArray();
+    }
+
+    private sealed class ProductionDrawingIndexRow
+    {
+        public Guid ProjectId { get; init; } public Guid DocumentId { get; init; } public Guid VersionId { get; init; } public Guid ReleasePackageId { get; init; }
+        public string ReleasePackageNumber { get; init; } = ""; public string DrawingNumber { get; init; } = ""; public string Name { get; init; } = "";
+        public string RevisionLabel { get; init; } = ""; public string PropertySnapshotJson { get; init; } = "{}";
+        public DateTime PublishedAt { get; init; } public DateTime CreatedAt { get; init; } public string PublishedBy { get; init; } = "";
+        public string Priority { get; init; } = "Normal"; public DateTime? RequiredOn { get; init; }
+    }
     public async Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -386,7 +435,16 @@ public sealed partial class MySqlPdmRepository
             .Select(item => item.SourceDocumentId!.Value)
             .ToHashSet();
 
-    public async Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(
+    public Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(
+        Guid releasePackageId,
+        Guid approvalTaskId,
+        string actor,
+        IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews,
+        IReadOnlyDictionary<Guid, FormalDrawingSource> formalDrawings,
+        CancellationToken cancellationToken) => RetryPublishTransactionAsync(
+            () => PublishReleasePackageVersionsOnceAsync(releasePackageId, approvalTaskId, actor, previews, formalDrawings, cancellationToken), cancellationToken);
+
+    private async Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsOnceAsync(
         Guid releasePackageId,
         Guid approvalTaskId,
         string actor,
@@ -395,7 +453,7 @@ public sealed partial class MySqlPdmRepository
         CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken);
         var package = await connection.QuerySingleOrDefaultAsync<PackagePublishRow>(new CommandDefinition(
             "SELECT project_id,reference_snapshot_id,state,non_standard_bom_snapshot_json FROM release_package WHERE id=@PackageId FOR UPDATE",
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken))
@@ -423,10 +481,15 @@ public sealed partial class MySqlPdmRepository
         documentIds.AddRange(await ResolveNonStandardDrawingIdsAsync(connection,
             EnumerateDocumentIds(root).Distinct().Where(nonStandardModels.Contains), transaction, cancellationToken));
         var distinctDocumentIds = documentIds.Distinct().ToArray();
+        // Match drawing-review lock order, regardless of assembly-tree traversal order.
+        var lockedDocuments = (await connection.QueryAsync<LockedDocumentRow>(new CommandDefinition(
+            "SELECT id,kind,revision_label,checked_out_by,checkout_session_id,row_version FROM document WHERE id IN @DocumentIds ORDER BY id FOR UPDATE",
+            new { DocumentIds = distinctDocumentIds }, transaction, cancellationToken: cancellationToken))).ToDictionary(item => item.Id);
+        if (lockedDocuments.Count != distinctDocumentIds.Length) throw new PdmNotFoundException("图档不存在。");
         var releasedVersions = new List<DocumentVersion>();
         foreach (var documentId in distinctDocumentIds)
         {
-            var locked = await LockDocumentAsync(connection, transaction, documentId, cancellationToken);
+            var locked = lockedDocuments[documentId];
             var sourceRow = await connection.QuerySingleOrDefaultAsync<DocumentVersionRow>(new CommandDefinition(
                 VersionSelect + " WHERE document_id=@DocumentId ORDER BY created_at DESC LIMIT 1",
                 new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken));

@@ -363,7 +363,7 @@ function onSolidWorksCapability(event: Event) {
 
 function onSolidWorksStatus(event: Event) {
   const detail = (event as CustomEvent<{ state?: string; message?: string }>).detail
-  if (!detail?.state) return
+  if (!detail?.state || !props.active) return
   solidWorksPending.value = detail.state === 'loading'
   solidWorksError.value = detail.state === 'error'
   solidWorksMessage.value = detail.message ?? ''
@@ -419,6 +419,9 @@ watch([() => props.selected.id, () => props.reviewVersionId], () => {
 })
 
 watch(() => props.active, active => {
+  solidWorksPending.value = false
+  solidWorksMessage.value = ''
+  solidWorksError.value = false
   if (!props.desktopAvailable) return
   if (active) {
     if (previewSessionActivated.value && previewState.value === 'idle' && props.selected.documentId) {

@@ -78,7 +78,15 @@ public sealed record UploadSession(
     int ChunkSize,
     string ExpectedSha256,
     long ReceivedLength,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt,
+    string? Owner = null)
+{
+    public void RequireOwner(string actor)
+    {
+        if (Owner is not null && !string.Equals(Owner, actor, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("只能继续本人发起的上传会话。");
+    }
+}
 
 public sealed record StoredFile(
     string RelativePath,
@@ -304,6 +312,7 @@ public sealed record BomGenerationResult(
     IReadOnlyList<BomItem> ElectricalItems,
     IReadOnlyList<BomItem> UnclassifiedItems,
     IReadOnlyList<BomItem> VirtualItems,
+    IReadOnlyList<BomItem> ComponentDrawingItems,
     int VirtualCount,
     int UnclassifiedCount,
     int PendingRemovalCount,
@@ -498,17 +507,23 @@ public interface IPdmRepository
     Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProductionDrawingProject>> ListProductionDrawingProjectsAsync(string actor, UserRole role, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ProductionDrawingItem>> ListProductionDrawingIndexAsync(string actor, UserRole role, bool includeHistory, CancellationToken cancellationToken);
     Task<ReleasePackage> UpdatePublishedDrawingDeliveryAsync(Guid releasePackageId, Guid documentId, DrawingDeliveryOverride delivery, string actor, CancellationToken cancellationToken);
     Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken);
     Task<DocumentReferenceNode?> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken);
     Task<CadReferenceSnapshot?> GetLatestReferenceSnapshotAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken);
-    Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken);
+    Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<BomItem> componentDrawingItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken);
     Task<BomItem?> FindBomItemAsync(Guid projectId, Guid itemId, CancellationToken cancellationToken);
     Task<BomItem> UpdateBomMaterialCodeAsync(Guid projectId, Guid itemId, string materialCode, CancellationToken cancellationToken);
     Task<BomItem> UpdateBomReconciliationAsync(Guid projectId, Guid itemId, string? status, string? note, string? updatedBy, DateTimeOffset? updatedAt, CancellationToken cancellationToken);
     Task<CadPropertyWriteback> EnqueueCadPropertyWritebackAsync(CadPropertyWriteback request, CancellationToken cancellationToken);
+    async Task EnqueueCadPropertyWritebackBatchAsync(IReadOnlyList<CadPropertyWriteback> requests, IReadOnlyList<AuditEntry> audits, CancellationToken cancellationToken)
+    {
+        foreach (var request in requests) await EnqueueCadPropertyWritebackAsync(request, cancellationToken);
+        foreach (var audit in audits) await AppendAuditAsync(audit, cancellationToken);
+    }
     Task<IReadOnlyList<CadPropertyWriteback>> ListCadPropertyWritebacksAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<CadPropertyWritebackVersion>> ListCadPropertyWritebackVersionsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<CadPropertyWriteback?> FindCadPropertyWritebackAsync(Guid id, CancellationToken cancellationToken);
@@ -636,7 +651,7 @@ public interface IPdmRepository
 
 public interface IFileStorage
 {
-    Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken);
+    Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken, string? owner = null);
     Task<UploadSession> GetUploadSessionAsync(Guid sessionId, CancellationToken cancellationToken);
     Task<UploadSession> WriteChunkAsync(Guid sessionId, int chunkIndex, Stream content, CancellationToken cancellationToken);
     Task<StoredFile> CompleteUploadAsync(Guid sessionId, string relativeTargetPath, CancellationToken cancellationToken);
@@ -645,6 +660,8 @@ public interface IFileStorage
     Task ValidateStoredFileMetadataAsync(Project project, StoredFile file, CancellationToken cancellationToken) =>
         VerifyStoredFileAsync(project, file, cancellationToken);
     Task VerifyStoredFileAsync(Project project, StoredFile file, CancellationToken cancellationToken);
+    Task VerifyVersionReadAsync(Project project, StoredFile file, CancellationToken cancellationToken) =>
+        VerifyStoredFileAsync(project, file, cancellationToken);
     Task<StoredFile> CopyVersionAsync(Project project, StoredFile source, string relativeTargetPath, CancellationToken cancellationToken);
     Task<StoredFile> CopyVersionAsync(Project sourceProject, Project targetProject, StoredFile source, string relativeTargetPath, CancellationToken cancellationToken) =>
         throw new NotSupportedException("当前文件存储不支持跨项目复制版本。");

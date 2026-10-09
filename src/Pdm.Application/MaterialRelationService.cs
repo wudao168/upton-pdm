@@ -173,7 +173,7 @@ public sealed class MaterialRelationService(
             reviewsToSave[entry.Key] = entry.Value.Select(review => review with { BomFingerprint = fingerprint }).ToArray();
         }
         var audit = new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "material-relation.apply", nameof(BomItem), projectId.ToString(), $"主物料{commands.Count}项");
-        await repository.ApplyBomBatchAsync(projectId, byKind[BomKind.Standard], byKind[BomKind.NonStandard], byKind[BomKind.Unclassified], byKind[BomKind.Electrical], byKind[BomKind.Virtual], [], [audit], cancellationToken);
+        await repository.ApplyBomBatchAsync(projectId, byKind[BomKind.Standard], byKind[BomKind.NonStandard], byKind[BomKind.Unclassified], byKind[BomKind.Electrical], byKind[BomKind.Virtual], byKind[BomKind.ComponentDrawing], [], [audit], cancellationToken);
         foreach (var entry in selectionsToSave)
             await relations.ReplaceSelectionsAsync(projectId, entry.Key, entry.Value, cancellationToken);
         foreach (var entry in reviewsToSave)
@@ -291,7 +291,7 @@ public sealed class MaterialRelationService(
     private async Task<Dictionary<BomKind, List<BomItem>>> LoadBomByKindAsync(Guid projectId, CancellationToken cancellationToken)
     {
         var result = new Dictionary<BomKind, List<BomItem>>();
-        foreach (var kind in new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Unclassified, BomKind.Electrical, BomKind.Virtual })
+        foreach (var kind in new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Unclassified, BomKind.Electrical, BomKind.Virtual, BomKind.ComponentDrawing })
             result[kind] = (await repository.GetBomAsync(projectId, kind, cancellationToken)).ToList();
         return result;
     }

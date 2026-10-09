@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import { downloadReleasePreviewArchive, listReleasePreviewItems, PdmApiError, retryReleasePreviewItem, retryReleasePreviewItems } from '../api'
 import { releasePreviewStateTag } from '../releasePreviewState'
+import { releaseFailureMessage, releasePublishingMessage } from '../releaseFailureMessage'
 import type { BomVersion, ManufacturingBomBaseline, ReleasePackageSummary, ReleasePreviewItemResult, ReleaseScope } from '../types'
 
 const PREVIEW_PAGE_SIZE = 50
@@ -25,6 +26,12 @@ const previewPackageFilter = ref('')
 const previewLatestBomFilter = ref('')
 const previewPage = ref(1)
 const selectedPreviewKeys = ref<string[]>([])
+const retryRequestedId = ref('')
+
+function requestConversionRetry(releasePackageId: string) {
+  retryRequestedId.value = releasePackageId
+  emit('retryPreview', releasePackageId)
+}
 
 const streams = [
   { kind: 'Standard', label: '标准件BOM', scopes: ['StandardLongLead', 'StandardFormal', 'StandardSupplement'] as ReleaseScope[] },
@@ -90,18 +97,30 @@ const filteredPreviewItems = computed(() => {
 const previewPageCount = computed(() => Math.max(1, Math.ceil(filteredPreviewItems.value.length / PREVIEW_PAGE_SIZE)))
 const pagedPreviewItems = computed(() => filteredPreviewItems.value.slice((previewPage.value - 1) * PREVIEW_PAGE_SIZE, previewPage.value * PREVIEW_PAGE_SIZE))
 const selectedPreviewItems = computed(() => filteredPreviewItems.value.filter(item => selectedPreviewKeys.value.includes(previewItemKey(item))))
-const selectedFailedItems = computed(() => selectedPreviewItems.value.filter(item => !item.succeeded))
+const selectedFailedItems = computed(() => selectedPreviewItems.value.filter(item => previewItemState(item) === '失败'))
 const selectedDownloadableItems = computed(() => selectedPreviewItems.value.filter(item => item.succeeded))
-const failedPreviewItems = computed(() => filteredPreviewItems.value.filter(item => !item.succeeded))
+const failedPreviewItems = computed(() => filteredPreviewItems.value.filter(item => previewItemState(item) === '失败'))
 const allFailedSelected = computed(() => failedPreviewItems.value.length > 0
   && failedPreviewItems.value.every(item => selectedPreviewKeys.value.includes(previewItemKey(item))))
 const downloadablePreviewItems = computed(() => filteredPreviewItems.value.filter(item => item.succeeded))
 const allPageSelected = computed(() => pagedPreviewItems.value.length > 0 && pagedPreviewItems.value.every(item => selectedPreviewKeys.value.includes(previewItemKey(item))))
 const previewSummary = computed(() => {
   const total = filteredPreviewItems.value.length
-  const failed = filteredPreviewItems.value.filter(item => !item.succeeded).length
-  return { total, failed, succeeded: total - failed }
+  const count = (state: string) => filteredPreviewItems.value.filter(item => previewItemState(item) === state).length
+  return { total, failed: count('失败'), succeeded: count('成功'), running: count('转换中'), queued: count('排队中') }
 })
+
+function previewItemState(item: ReleasePreviewItemResult) {
+  if (item.succeeded) return '成功'
+  if (item.error?.includes('没有随本次发布转为正式版本')) return '失败'
+  const state = props.releasePackages.find(release => release.id === item.releasePackageId)?.previewState
+  if (state === 'Running') return '转换中'
+  if (state === 'Pending') return '排队中'
+  if (state === 'Failed') return '失败'
+  if (item.error === '正在转换…') return '转换中'
+  if (!item.error || item.error === '尚未生成预览。') return '排队中'
+  return '失败'
+}
 
 function previewItemKey(item: ReleasePreviewItemResult) {
   return `${item.releasePackageId}:${item.documentId}`
@@ -258,11 +277,18 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
         <header><div><h3>{{ streamRef.value.label }}</h3><small>当前正式版 {{ streamRef.value.version?.label || '—' }}</small></div><span :class="streamRef.value.active.length ? 'is-active' : 'is-clear'">{{ streamRef.value.active.length ? `在途 ${streamRef.value.active.length}` : '无在途' }}</span></header>
         <div v-if="streamRef.value.active.length" class="pdm-release-overview-active">
           <strong>待处理</strong>
-          <button v-for="release in streamRef.value.active" :key="release.id" type="button" @click="emit('open', release.id)"><span>{{ release.number }} · {{ scopeLabel(release.scope) }}</span><em>{{ release.state }}</em></button>
+          <div v-for="release in streamRef.value.active" :key="release.id">
+          <button type="button" @click="emit('open', release.id)">
+            <span class="pdm-release-active-description"><span>{{ release.number }} · {{ scopeLabel(release.scope) }}</span><small v-if="release.state === '发布失败'" class="pdm-release-failure-reason">失败原因：{{ releaseFailureMessage(release.publishError) }}</small><small v-if="release.state === '发布中'" class="pdm-release-publishing-reason">{{ releasePublishingMessage(release) }}<template v-if="release.previewUpdatedAt"> 最近转图状态更新：{{ new Date(release.previewUpdatedAt).toLocaleString('zh-CN', { hour12: false }) }}</template></small></span>
+            <em :class="{ 'is-error': release.state === '发布失败' }">{{ release.state }}</em>
+          </button>
+          <button v-if="canManageRelease && release.state === '发布中' && release.previewState === 'Pending'" type="button" class="pdm-secondary-action pdm-release-retry-conversion" :disabled="pending" @click="requestConversionRetry(release.id)">{{ pending && retryRequestedId === release.id ? '正在提交…' : '重试转图' }}</button>
+          <small v-if="retryRequestedId === release.id" class="pdm-release-retry-feedback" role="status">{{ pending ? '正在提交重试请求…' : '已请求重试。当前状态每5秒自动读取；提交失败时请查看顶部提示。' }}</small>
+          </div>
         </div>
         <div class="pdm-release-overview-history">
           <strong>最近发布</strong>
-          <button v-for="release in streamRef.value.packages.filter(item => item.state === '已发布').slice(0, 5)" :key="release.id" type="button" @click="emit('open', release.id)"><span>{{ release.number }} · {{ scopeLabel(release.scope) }}</span><span class="pdm-release-row-tail"><small v-if="visibleChangeNumber(release)">{{ visibleChangeNumber(release) }}</small><em v-if="releasePreviewStateTag(release)" :class="{ 'is-error': release.previewState === 'Failed' }">{{ releasePreviewStateTag(release) }}</em></span></button>
+          <button v-for="release in streamRef.value.packages.filter(item => item.state === '已发布').slice(0, 5)" :key="release.id" type="button" @click="emit('open', release.id)"><span>{{ release.number }} · {{ scopeLabel(release.scope) }}</span><span class="pdm-release-row-tail"><small v-if="visibleChangeNumber(release)">{{ visibleChangeNumber(release) }}</small><span class="pdm-release-published-state">已发布</span><em v-if="releasePreviewStateTag(release)" :class="{ 'is-error': release.previewState === 'Failed' }">{{ releasePreviewStateTag(release) }}</em></span></button>
           <p v-if="!streamRef.value.latest">尚无已发布记录。</p>
         </div>
       </article>
@@ -272,7 +298,7 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
         <header>
           <div>
             <h3>图纸转出</h3>
-            <small>共 {{ previewSummary.total }} 项：成功 {{ previewSummary.succeeded }}、失败 {{ previewSummary.failed }}；勾选后可重试或打包下载。</small>
+            <small>共 {{ previewSummary.total }} 项：成功 {{ previewSummary.succeeded }}、转换中 {{ previewSummary.running }}、排队中 {{ previewSummary.queued }}、失败 {{ previewSummary.failed }}；勾选后可重试或打包下载。</small>
           </div>
           <div class="pdm-release-preview-actions">
             <label class="pdm-release-preview-filter">发布包
@@ -291,7 +317,7 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
             <button type="button" :disabled="previewBusy || !selectedDownloadableItems.length" :title="selectedPreviewItems.length > selectedDownloadableItems.length ? '只打包下载勾选中已转出的 STEP/PDF' : ''" @click="downloadPreviewItems(selectedDownloadableItems)">下载选中（{{ selectedDownloadableItems.length }}）</button>
             <button type="button" :disabled="previewBusy || pending || !selectedFailedItems.length || canManageRelease === false" :title="retryPermissionHint" @click="retrySelectedPreviewItems">重试选中（{{ selectedFailedItems.length }}）</button>
             <button type="button" :disabled="previewBusy || !downloadablePreviewItems.length" @click="downloadPreviewItems(downloadablePreviewItems)">全部下载</button>
-            <button type="button" :disabled="!previewPackageFilter || pending || previewBusy || canManageRelease === false" :title="retryPackageHint" @click="emit('retryPreview', previewPackageFilter)">重试整包</button>
+            <button type="button" :disabled="!previewPackageFilter || pending || previewBusy || canManageRelease === false || releasePackages.some(release => release.id === previewPackageFilter && release.previewState === 'Running')" :title="retryPackageHint" @click="emit('retryPreview', previewPackageFilter)">重试整包</button>
           </div>
         </header>
         <p v-if="previewLoading" class="pdm-release-preview-empty">正在读取图纸转出明细…</p>
@@ -309,12 +335,12 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
                   <td>{{ item.drawingNumber }}</td>
                   <td><span class="pdm-release-preview-name" :title="item.fileName">{{ item.fileName }}</span></td>
                   <td>{{ previewFormatLabel(item) }}</td>
-                  <td><span :class="item.succeeded ? 'pdm-release-preview-ok' : 'pdm-release-preview-failed'">{{ item.succeeded ? '成功' : '失败' }}</span></td>
+                  <td><span :class="item.succeeded ? 'pdm-release-preview-ok' : previewItemState(item) === '失败' ? 'pdm-release-preview-failed' : 'pdm-release-preview-pending'">{{ previewItemState(item) }}</span></td>
                   <td>{{ item.succeeded ? formatSize(item.fileLength) : '—' }}</td>
-                  <td class="pdm-release-preview-reason" :title="item.error || ''">{{ item.error || '' }}</td>
+                  <td class="pdm-release-preview-reason" :style="{ color: previewItemState(item) === '失败' ? 'var(--pdm-danger)' : 'var(--pdm-text-soft)' }" :title="item.error || ''">{{ item.error || '' }}</td>
                   <td><div class="pdm-row-actions">
-                    <button v-if="!item.succeeded" type="button" :disabled="previewBusy || pending || canManageRelease === false" :title="retryPermissionHint" @click="retryPreviewItem(item)">重试</button>
-                    <button v-else type="button" :disabled="previewBusy" @click="downloadPreviewItems([item])">下载</button>
+                    <button v-if="!item.succeeded" type="button" :disabled="previewBusy || pending || canManageRelease === false || previewItemState(item) === '转换中' || previewItemState(item) === '排队中'" :title="retryPermissionHint" @click="retryPreviewItem(item)">重试</button>
+                    <button v-else type="button" class="pdm-secondary-action pdm-release-preview-download" :disabled="previewBusy" @click="downloadPreviewItems([item])">下载</button>
                   </div></td>
                 </tr>
               </tbody>
@@ -341,28 +367,30 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
 </template>
 
 <style scoped>
-.pdm-release-overview{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;gap:12px}.pdm-release-overview-grid{flex:0 0 auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.pdm-release-stream-card{padding:0;overflow:hidden}.pdm-release-stream-card>header{display:flex;align-items:center;justify-content:space-between;padding:12px;border-bottom:1px solid var(--pdm-border)}.pdm-release-stream-card h3{margin:0}.pdm-release-stream-card header small{color:var(--pdm-muted)}.pdm-release-stream-card header>span{padding:4px 8px;border-radius:999px}.pdm-release-stream-card .is-active{background:#fff7ed;color:var(--pdm-orange)}.pdm-release-stream-card .is-clear{background:#ecfdf5;color:var(--pdm-green)}.pdm-release-overview-active,.pdm-release-overview-history{display:grid;gap:6px;padding:10px 12px}.pdm-release-overview-active{background:#fffbeb;border-bottom:1px solid var(--pdm-border)}.pdm-release-overview-active button,.pdm-release-overview-history button{padding:7px;border:0;border-radius:5px;background:#fff;color:var(--pdm-text);text-align:left}.pdm-release-overview-active button{display:flex;justify-content:space-between;gap:8px}.pdm-release-overview-history button{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px}.pdm-release-overview-history button>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-release-overview-active em{font-style:normal;color:var(--pdm-orange)}.pdm-release-overview-history small,.pdm-release-overview-history p{color:var(--pdm-muted)}.pdm-release-baseline-list{overflow:hidden}.pdm-release-baseline-list>header{padding:12px}.pdm-release-baseline-list h3{margin:0}.pdm-release-baseline-list small{color:var(--pdm-muted)}@media(max-width:1000px){.pdm-release-overview-grid{grid-template-columns:1fr}}
-.pdm-release-overview-history .pdm-release-row-tail{display:inline-flex;align-items:center;justify-content:flex-end;gap:6px;white-space:nowrap}.pdm-release-overview-history .pdm-release-row-tail small{white-space:nowrap}.pdm-release-overview-history .pdm-release-row-tail em{font-style:normal;padding:1px 6px;border-radius:999px;background:var(--pdm-surface-soft);color:var(--pdm-muted);font-size:11px;white-space:nowrap}.pdm-release-overview-history .pdm-release-row-tail em.is-error{background:#fef2f2;color:var(--pdm-danger)}
-.pdm-release-overview-bottom{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;align-items:stretch}.pdm-release-preview-list{grid-column:1 / span 3}.pdm-release-baseline-list{grid-column:4 / span 1;display:flex;flex-direction:column;min-height:0}
+.pdm-release-preview-download { box-sizing: border-box; width: 60px; min-width: 60px; height: 25px; min-height: 25px; padding: 0 2px; font-size: 12px; line-height: 23px; }
+.pdm-release-overview-active>div>button{width:100%}.pdm-release-overview-active button.pdm-release-retry-conversion{width:auto;margin-top:6px;border:1px solid var(--pdm-blue);color:var(--pdm-blue)}.pdm-release-active-description{display:grid;gap:5px;min-width:0;overflow-wrap:anywhere}.pdm-release-publishing-reason{white-space:normal;font-size:12px;color:var(--pdm-text-soft)}.pdm-release-failure-reason{color:var(--pdm-danger);white-space:pre-wrap;font-size:12px}.pdm-release-overview-active em{flex-shrink:0}.pdm-release-overview-active em.is-error{color:var(--pdm-danger)}.pdm-release-published-state{padding:1px 6px;border-radius:999px;background:var(--pdm-green-soft);color:var(--pdm-green);font-size:11px}
+.pdm-release-overview{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;gap:var(--pdm-container-gap)}.pdm-release-overview-grid{flex:0 0 auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--pdm-container-gap)}.pdm-release-stream-card{padding:0;overflow:hidden}.pdm-release-stream-card>header{display:flex;align-items:center;justify-content:space-between;padding:12px;border-bottom:1px solid var(--pdm-border)}.pdm-release-stream-card h3{margin:0}.pdm-release-stream-card header small{color:var(--pdm-muted)}.pdm-release-stream-card header>span{padding:4px 8px;border-radius:999px}.pdm-release-stream-card .is-active{background:var(--pdm-orange-soft);color:var(--pdm-orange)}.pdm-release-stream-card .is-clear{background:var(--pdm-green-soft);color:var(--pdm-green)}.pdm-release-overview-active,.pdm-release-overview-history{display:grid;gap:6px;padding:10px 12px}.pdm-release-overview-active{background:#fffbeb;border-bottom:1px solid var(--pdm-border)}.pdm-release-overview-active button,.pdm-release-overview-history button{padding:7px;border:0;border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);text-align:left}.pdm-release-overview-active button{display:flex;justify-content:space-between;gap:8px}.pdm-release-overview-history button{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px}.pdm-release-overview-history button>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-release-overview-active em{font-style:normal;color:var(--pdm-orange)}.pdm-release-overview-history small,.pdm-release-overview-history p{color:var(--pdm-muted)}.pdm-release-baseline-list{overflow:hidden}.pdm-release-baseline-list>header{padding:12px}.pdm-release-baseline-list h3{margin:0}.pdm-release-baseline-list small{color:var(--pdm-muted)}@media(max-width:1000px){.pdm-release-overview-grid{grid-template-columns:1fr}}
+.pdm-release-overview-history .pdm-release-row-tail{display:inline-flex;align-items:center;justify-content:flex-end;gap:6px;white-space:nowrap}.pdm-release-overview-history .pdm-release-row-tail small{white-space:nowrap}.pdm-release-overview-history .pdm-release-row-tail em{font-style:normal;padding:1px 6px;border-radius:999px;background:var(--pdm-surface-soft);color:var(--pdm-muted);font-size:11px;white-space:nowrap}.pdm-release-overview-history .pdm-release-row-tail em.is-error{background:var(--pdm-danger-soft);color:var(--pdm-danger)}
+.pdm-release-overview-bottom{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--pdm-container-gap);align-items:stretch}.pdm-release-preview-list{grid-column:1 / span 3}.pdm-release-baseline-list{grid-column:4 / span 1;display:flex;flex-direction:column;min-height:0}
 .pdm-release-preview-list{display:flex;flex-direction:column;min-height:0;overflow:hidden}
 .pdm-release-preview-list>header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:10px;padding:12px}
 .pdm-release-preview-list h3{margin:0}
 .pdm-release-preview-list small{color:var(--pdm-muted)}
 .pdm-release-preview-actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px;align-self:flex-end}
-.pdm-release-preview-actions button{box-sizing:border-box;width:95px;min-width:95px;height:26px;padding:2px 3px;overflow:hidden;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text);font-size:11px;white-space:nowrap;text-overflow:ellipsis}
+.pdm-release-preview-actions button{box-sizing:border-box;width:95px;min-width:95px;height:26px;padding:2px 3px;overflow:hidden;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font-size:11px;white-space:nowrap;text-overflow:ellipsis}
 .pdm-release-preview-actions button:disabled{opacity:.55}
 .pdm-release-preview-filter{display:inline-flex;align-items:center;gap:6px;color:var(--pdm-muted);font-size:12px}
-.pdm-release-preview-filter select{box-sizing:border-box;width:200px;height:26px;padding:3px 6px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text);font-size:11px;white-space:nowrap;text-overflow:ellipsis}.pdm-release-preview-filter select:focus{border-color:var(--pdm-blue);outline:2px solid var(--pdm-theme-accent-focus)}
+.pdm-release-preview-filter select{box-sizing:border-box;width:200px;height:26px;padding:3px 6px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font-size:11px;white-space:nowrap;text-overflow:ellipsis}.pdm-release-preview-filter select:focus{border-color:var(--pdm-blue);outline:2px solid var(--pdm-theme-accent-focus)}
 .pdm-release-preview-table-wrap{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid var(--pdm-border)}.pdm-release-baseline-table-wrap{flex:1 1 auto;min-height:0;overflow:auto}.pdm-release-baseline-table-wrap .pdm-edit-table th,.pdm-release-baseline-table-wrap .pdm-edit-table td{white-space:nowrap}
 .pdm-release-preview-table th,.pdm-release-preview-table td{padding:6px 8px;font-size:12px;white-space:nowrap}
 .pdm-release-preview-check{width:34px;text-align:center}
 .pdm-release-preview-name{display:inline-block;max-width:220px;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}
-.pdm-release-preview-ok{padding:1px 6px;border-radius:999px;background:#ecfdf5;color:var(--pdm-green)}
-.pdm-release-preview-failed{padding:1px 6px;border-radius:999px;background:#fef2f2;color:var(--pdm-danger)}
+.pdm-release-preview-ok{padding:1px 6px;border-radius:999px;background:var(--pdm-green-soft);color:var(--pdm-green)}
+.pdm-release-preview-pending{color:var(--pdm-blue)}.pdm-release-preview-failed{padding:1px 6px;border-radius:999px;background:var(--pdm-danger-soft);color:var(--pdm-danger)}
 .pdm-release-preview-reason{max-width:260px;overflow:hidden;color:var(--pdm-danger);text-overflow:ellipsis}
 .pdm-release-preview-empty{margin:0;padding:16px 12px;border-top:1px solid var(--pdm-border);color:var(--pdm-muted);font-size:12px}
 .pdm-release-preview-pager{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;border-top:1px solid var(--pdm-border);background:var(--pdm-surface-soft);color:var(--pdm-muted)}
-.pdm-release-preview-pager button{padding:4px 9px;border:1px solid var(--pdm-border);border-radius:5px;background:#fff;color:var(--pdm-text)}
+.pdm-release-preview-pager button{padding:4px 9px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text)}
 .pdm-release-preview-pager button:disabled{opacity:.55}
 @media(max-width:1200px){.pdm-release-overview-bottom{grid-template-columns:minmax(0,1fr)}.pdm-release-preview-list,.pdm-release-baseline-list{grid-column:auto}}
 </style>

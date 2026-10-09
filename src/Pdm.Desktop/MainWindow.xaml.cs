@@ -863,8 +863,15 @@ public partial class MainWindow : Window
         }
     }
 
+    private int solidWorksOpenPending;
+
     private async Task OpenInSolidWorksAsync(IReadOnlyDictionary<string, object> payload)
     {
+        if (Interlocked.CompareExchange(ref solidWorksOpenPending, 1, 0) != 0)
+        {
+            await PublishSolidWorksStatusAsync("ready", "上一次打开请求仍在处理中，请等待其完成后再打开其他图档。");
+            return;
+        }
         try
         {
             if (!payload.TryGetValue("projectId", out var projectIdValue)
@@ -884,13 +891,26 @@ public partial class MainWindow : Window
             }
 
             await PublishSolidWorksStatusAsync("loading", "正在准备SolidWorks受控打开请求…");
-            var message = await solidWorksBridge.SendAsync(projectId, documentId, versionId, mode ?? "LatestReadOnly", CancellationToken.None);
+            var message = await solidWorksBridge.SendAsync(projectId, documentId, versionId, mode ?? "LatestReadOnly", bootstrapLifetime.Token,
+                waiting => PublishSolidWorksStatusAsync("loading", waiting));
             await PublishSolidWorksStatusAsync("ready", message);
         }
+        catch (OperationCanceledException) when (bootstrapLifetime.IsCancellationRequested) { }
         catch (Exception exception)
         {
+            try
+            {
+                var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPTON PDM");
+                Directory.CreateDirectory(directory);
+                var logPath = Path.Combine(directory, "desktop-solidworks-bridge.log");
+                if (File.Exists(logPath) && new FileInfo(logPath).Length > 1024 * 1024)
+                    File.WriteAllText(logPath, string.Empty);
+                File.AppendAllText(logPath, DateTimeOffset.Now.ToString("O") + " " + exception + Environment.NewLine);
+            }
+            catch { /* Diagnostics must not interrupt the error response. */ }
             await PublishSolidWorksStatusAsync("error", exception.Message);
         }
+        finally { Interlocked.Exchange(ref solidWorksOpenPending, 0); }
     }
 
     private async Task PublishSolidWorksCapabilityAsync()

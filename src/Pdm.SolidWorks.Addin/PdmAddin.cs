@@ -591,6 +591,11 @@ public sealed class PdmAddin : ISwAddin
 
     private int OnActiveDocumentChanged()
     {
+        if (Volatile.Read(ref checkInOperationInProgress) > 0)
+        {
+            ScheduleTreeRefresh(forceScan: false);
+            return 0;
+        }
         CancelMetadataRefresh();
         CacheCurrentTreeContext();
         try
@@ -7328,6 +7333,7 @@ public sealed class PdmAddin : ISwAddin
             case 2: return "标准件";
             case 3: return "非标件";
             case 5: return "虚拟件";
+            case 6: return "部件图";
             default: return string.Empty;
         }
     }
@@ -9645,6 +9651,7 @@ public sealed class PdmAddin : ISwAddin
                 reportProgress,
                 cancellationToken);
 
+            var nativePropertyCards = DiscoverNativePropertyCards();
             for (var index = 0; index < orderedItems.Length; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -9703,7 +9710,8 @@ public sealed class PdmAddin : ISwAddin
                                 total <= 0 ? 0 : Math.Min(100, uploaded * 100 / total),
                                 "%…")),
                         stage => reportProgress?.Invoke(index, orderedItems.Length, node.FileName, stage),
-                        preflight);
+                        preflight,
+                        nativePropertyCards);
                     UpdateBatchDocumentInstances(node, operationNodes);
                     if (fileResult.VersionCreated)
                     {
@@ -9946,12 +9954,12 @@ public sealed class PdmAddin : ISwAddin
         Guid? drawingReviewWritebackId = null,
         Action<long, long> reportUploadProgress = null,
         Action<string> reportFileStage = null,
-        BatchCheckInPreflight preflight = null)
+        BatchCheckInPreflight preflight = null,
+        IReadOnlyDictionary<CadDocumentKind, IReadOnlyList<string>> nativePropertyCards = null)
     {
         var uploadCopyPath = string.Empty;
         IModelDoc2 document = null;
         var openedForBatch = false;
-        var closedBatchDocument = false;
         var operationTimer = Stopwatch.StartNew();
         try
         {
@@ -9994,7 +10002,7 @@ public sealed class PdmAddin : ISwAddin
 
             var documentPath = node.FullPath;
             IReadOnlyDictionary<string, string> modelProperties;
-            if (document == null && latest != null)
+            if (document == null && latest != null && fileMatchesLatest)
             {
                 reportFileStage?.Invoke("阶段4/4：正在读取PLM属性快照…");
                 modelProperties = new Dictionary<string, string>(
@@ -10009,12 +10017,13 @@ public sealed class PdmAddin : ISwAddin
             {
                 if (document == null)
                 {
-                    reportFileStage?.Invoke("阶段4/4：首次存档，正在读取SolidWorks属性…");
+                    reportFileStage?.Invoke("阶段4/4：正在只读加载图档属性…");
                     var openTimer = Stopwatch.StartNew();
-                    document = OpenDocumentSilentlyForBatch(
+                    document = OpenDocumentInvisiblyForBatch(
                         node.FullPath,
                         ToSolidWorksDocumentType(node.Kind),
-                        node.Configuration ?? string.Empty);
+                        node.Kind == CadDocumentKind.Drawing ? string.Empty : node.Configuration ?? string.Empty,
+                        readOnly: true);
                     openedForBatch = true;
                     LogOperation(string.Concat(
                         "Batch check-in SolidWorks open path=", node.FullPath,
@@ -10026,8 +10035,6 @@ public sealed class PdmAddin : ISwAddin
                 {
                     throw new IOException("未能安全加载待提交图档。");
                 }
-                EnsureDocumentEditable(document, documentPath);
-
                 if (!openedForBatch && document.GetSaveFlag())
                 {
                     throw new InvalidOperationException(string.Concat(
@@ -10035,7 +10042,10 @@ public sealed class PdmAddin : ISwAddin
                         "在SolidWorks中处于未保存状态。为避免未变更图档误升版，请先手动保存确认内容，再提交存档；如无需保留修改，请使用“放弃编辑”。"));
                 }
 
-                modelProperties = ReadCheckInProperties(document, node);
+                reportFileStage?.Invoke("阶段4/4：正在读取已保存的属性…");
+                LogCheckInCheckpoint("properties-start", documentPath);
+                modelProperties = ReadCheckInProperties(document, node, useCached: true, nativePropertyCards: nativePropertyCards);
+                LogCheckInCheckpoint("properties-end", documentPath);
                 if (openedForBatch)
                 {
                     CloseBatchOpenedDocument(document);
@@ -10045,21 +10055,7 @@ public sealed class PdmAddin : ISwAddin
                     }
                     document = null;
                     openedForBatch = false;
-                    closedBatchDocument = true;
                 }
-            }
-
-            localSha256 = !closedBatchDocument && preflight != null && preflight.MatchesCurrentFile(documentPath)
-                ? preflight.LocalSha256
-                : await Task.Run(() => ComputeFileHash(documentPath), cancellationToken);
-            if (identity == null
-                && !referenceChanged
-                && ((!string.IsNullOrWhiteSpace(node.LatestStoredSha256)
-                        && VersionMatchesLocalFile(latest, documentPath, localSha256))
-                    || HistoricalEditMatchesLatest(node, latest, documentPath, localSha256)))
-            {
-                await CompleteUnchangedEditAsync(node, documentPath, latest, projectId, cancellationToken);
-                return new BatchNodeCheckInResult(false, null);
             }
 
             reportFileStage?.Invoke("阶段4/4：正在生成上传副本…");
@@ -10079,7 +10075,8 @@ public sealed class PdmAddin : ISwAddin
                 node.DocumentId.Value,
                 documentPath,
                 cancellationToken,
-                reportUploadProgress);
+                reportUploadProgress,
+                exactCopySourceSha256: localSha256);
             LogOperation(string.Concat(
                 "Batch check-in upload end path=", node.FullPath,
                 " elapsedMs=", uploadTimer.ElapsedMilliseconds));
@@ -10827,10 +10824,18 @@ public sealed class PdmAddin : ISwAddin
         Directory.CreateDirectory(directory);
         var copyPath = Path.Combine(directory, Path.GetFileName(sourcePath));
         LogOperation(string.Concat("Batch check-in file copy start source=", sourcePath, " target=", copyPath));
-        using (var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-        using (var output = new FileStream(copyPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        try
         {
-            input.CopyTo(output);
+            using (var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var output = new FileStream(copyPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                input.CopyTo(output);
+            }
+        }
+        catch
+        {
+            DeleteCheckInUploadCopy(copyPath);
+            throw;
         }
         LogOperation(string.Concat("Batch check-in file copy end target=", copyPath));
         return copyPath;
@@ -10916,19 +10921,22 @@ public sealed class PdmAddin : ISwAddin
         return activated;
     }
 
-    private IModelDoc2 OpenDocumentSilentlyForBatch(string fullPath, int documentType, string configuration)
+    private IModelDoc2 OpenDocumentSilentlyForBatch(string fullPath, int documentType, string configuration, bool readOnly = false)
     {
         var openErrors = 0;
         var openWarnings = 0;
         LogOperation(string.Concat("Batch fallback OpenDoc6 start path=", fullPath));
+        if (readOnly) LogCheckInCheckpoint("open-start", fullPath);
         var document = application.OpenDoc6(
             fullPath,
             documentType,
-            (int)swOpenDocOptions_e.swOpenDocOptions_Silent,
+            (int)(swOpenDocOptions_e.swOpenDocOptions_Silent
+                | (readOnly ? swOpenDocOptions_e.swOpenDocOptions_ReadOnly : 0)),
             configuration,
             ref openErrors,
             ref openWarnings);
         LogOperation(string.Concat("Batch fallback OpenDoc6 end path=", fullPath, " errors=", openErrors, " warnings=", openWarnings, " null=", document == null));
+        if (readOnly) LogCheckInCheckpoint("open-end", fullPath);
         if (document == null)
         {
             throw new IOException(string.Concat(
@@ -10943,14 +10951,15 @@ public sealed class PdmAddin : ISwAddin
     private IModelDoc2 OpenDocumentInvisiblyForBatch(
         string fullPath,
         int documentType,
-        string configuration)
+        string configuration,
+        bool readOnly = false)
     {
         var previousVisibility = application.GetDocumentVisible(documentType);
         try
         {
             application.DocumentVisible(false, documentType);
             LogOperation(string.Concat("Batch invisible open start path=", fullPath));
-            return OpenDocumentSilentlyForBatch(fullPath, documentType, configuration);
+            return OpenDocumentSilentlyForBatch(fullPath, documentType, configuration, readOnly);
         }
         finally
         {
@@ -10968,9 +10977,11 @@ public sealed class PdmAddin : ISwAddin
         try
         {
             var title = document.GetTitle();
+            if (Volatile.Read(ref checkInOperationInProgress) > 0) LogCheckInCheckpoint("close-start", title);
             LogOperation(string.Concat("Batch fallback CloseDoc start title=", title));
             application.CloseDoc(title);
             LogOperation(string.Concat("Batch fallback CloseDoc end title=", title));
+            if (Volatile.Read(ref checkInOperationInProgress) > 0) LogCheckInCheckpoint("close-end", title);
         }
         catch (Exception exception)
         {
@@ -11186,11 +11197,13 @@ public sealed class PdmAddin : ISwAddin
         catch (Exception exception) { ShowError(exception.Message); }
     }
 
-    private IReadOnlyDictionary<string, string> ReadCheckInProperties(IModelDoc2 document, CadTreeNode node)
+    private IReadOnlyDictionary<string, string> ReadCheckInProperties(IModelDoc2 document, CadTreeNode node, bool useCached = false,
+        IReadOnlyDictionary<CadDocumentKind, IReadOnlyList<string>> nativePropertyCards = null)
     {
-        var properties = ReadModelProperties(document, node.Configuration)
+        var properties = ReadModelProperties(document, node.Configuration, useCached,
+                includeConfiguration: node.Kind != CadDocumentKind.Drawing)
             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
-        if (node.Kind == CadDocumentKind.Drawing)
+        if (node.Kind == CadDocumentKind.Drawing && !useCached)
         {
             foreach (var propertyName in new[]
             {
@@ -11206,7 +11219,7 @@ public sealed class PdmAddin : ISwAddin
                     properties[string.Concat("全局/", propertyName)] = value;
             }
         }
-        var card = ResolveActiveNativePropertyCard(node, DiscoverNativePropertyCards());
+        var card = ResolveActiveNativePropertyCard(node, nativePropertyCards ?? DiscoverNativePropertyCards());
         if (card?.IsAvailable == true)
         {
             foreach (var field in card.Fields)
@@ -11238,19 +11251,21 @@ public sealed class PdmAddin : ISwAddin
         return match.Value?.Trim() ?? string.Empty;
     }
 
-    private static IReadOnlyDictionary<string, string> ReadModelProperties(IModelDoc2 document, string configurationName = null)
+    private static IReadOnlyDictionary<string, string> ReadModelProperties(IModelDoc2 document, string configurationName = null,
+        bool useCached = false, bool includeConfiguration = true)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (document == null) return result;
-        ReadPropertyManager(document.Extension.CustomPropertyManager[string.Empty], "全局", result);
+        ReadPropertyManager(document.Extension.CustomPropertyManager[string.Empty], "全局", result, useCached);
+        if (!includeConfiguration) return result;
         if (string.IsNullOrWhiteSpace(configurationName))
             configurationName = document.ConfigurationManager?.ActiveConfiguration?.Name;
         if (!string.IsNullOrWhiteSpace(configurationName))
-            ReadPropertyManager(document.Extension.CustomPropertyManager[configurationName], string.Concat("配置:", configurationName), result);
+            ReadPropertyManager(document.Extension.CustomPropertyManager[configurationName], string.Concat("配置:", configurationName), result, useCached);
         return result;
     }
 
-    private static void ReadPropertyManager(CustomPropertyManager manager, string scope, IDictionary<string, string> target)
+    private static void ReadPropertyManager(CustomPropertyManager manager, string scope, IDictionary<string, string> target, bool useCached = false)
     {
         if (manager == null || !(manager.GetNames() is string[] names)) return;
         foreach (var name in names)
@@ -11259,8 +11274,9 @@ public sealed class PdmAddin : ISwAddin
             var resolved = string.Empty;
             var wasResolved = false;
             var linked = false;
-            manager.Get6(name, false, out raw, out resolved, out wasResolved, out linked);
-            target[string.Concat(scope, "/", name)] = wasResolved ? resolved : raw;
+            manager.Get6(name, useCached, out raw, out resolved, out wasResolved, out linked);
+            // A cached evaluated value is usable even when WasResolved is false.
+            target[string.Concat(scope, "/", name)] = wasResolved || (useCached && !string.IsNullOrEmpty(resolved)) ? resolved : raw;
         }
     }
 
@@ -13581,6 +13597,32 @@ public sealed class PdmAddin : ISwAddin
             message,
             System.Environment.NewLine));
         ScheduleOperationLogDrain();
+    }
+
+    private static void LogCheckInCheckpoint(string stage, string fullPath)
+    {
+        // Write before entering native code: an in-process crash can lose queued log entries.
+        try
+        {
+            var directory = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "UPTON PDM");
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, "addin-checkin.log");
+            RotateOperationLogIfNeeded(path);
+            using (var process = Process.GetCurrentProcess())
+            {
+                File.AppendAllText(path, string.Concat(
+                    DateTime.Now.ToString("O"), " stage=", stage, " path=", fullPath,
+                    " thread=", Thread.CurrentThread.ManagedThreadId,
+                    " apartment=", Thread.CurrentThread.GetApartmentState(),
+                    " privateMB=", process.PrivateMemorySize64 / (1024 * 1024),
+                    " version=", typeof(PdmAddin).Assembly.GetName().Version,
+                    System.Environment.NewLine));
+            }
+        }
+        catch
+        {
+            // Diagnostics must never escape into SolidWorks.
+        }
     }
 
     private static void ScheduleOperationLogDrain()

@@ -11,6 +11,34 @@ public sealed class MaterialServiceTests
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     [Fact]
+    public async Task Update_UnsynchronizedNeedsReview_PreservesReadbackAndMaterialCode()
+    {
+        var service = CreateService(out var materials);
+        var draft = await service.CreateAsync(new(
+            null, "待复核显示器", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
+            "DEII-E1715S", null, null, "TEST", null, 4.929m, "kg", CategoryCode: "0102"),
+            "admin", UserRole.Administrator, default);
+        var approved = await service.ApproveAsync(draft.Id, draft.RowVersion, "admin", UserRole.Administrator, default);
+        await materials.BeginSyncTaskAsync(approved.Task.Id, DateTimeOffset.UtcNow, default);
+        await materials.FailSyncTaskAsync(approved.Task.Id, MaterialSyncStatus.NeedsReview, "重量不一致", null,
+            new(Guid.NewGuid(), DateTimeOffset.UtcNow, "system", "u9.material.sync.failed", nameof(PdmMaterial), draft.Id.ToString(), "重量不一致"), default);
+        var existing = (await materials.FindMaterialAsync(draft.Id, default))!;
+        var result = await service.ChangeApprovedAsync(existing.Id, new(
+            existing.MaterialCode, existing.Name, existing.Kind, existing.SupplyMode, existing.UnitCode,
+            existing.Specification, existing.Material, existing.Remark, existing.Brand, existing.SurfaceTreatment,
+            4.93m, existing.WeightUnit, existing.RowVersion, CategoryCode: existing.CategoryCode),
+            "admin", UserRole.Administrator, default);
+        var updated = result.Material;
+        Assert.Equal(existing.MaterialCode, updated.MaterialCode);
+        Assert.Equal(4.93m, updated.Weight);
+        Assert.Equal(MaterialSyncStatus.NeedsReview, updated.SyncStatus);
+        Assert.False(updated.U9SyncConfirmed);
+        var tasks = await materials.ListSyncTasksAsync(default);
+        Assert.Equal(MaterialSyncStatus.Superseded, tasks.Single(task => task.Id == approved.Task.Id).Status);
+        Assert.Contains(tasks, task => task.MaterialId == existing.Id && task.Id != approved.Task.Id
+            && task.Status == MaterialSyncStatus.NeedsReview && task.Operation == MaterialSyncOperation.Create);
+    }
+    [Fact]
     public async Task EngineerCanCreateDraftButCannotMaintainOrApproveMaterialMaster()
     {
         var service = CreateService(out _);
@@ -1215,6 +1243,23 @@ public sealed class MaterialServiceTests
     }
 
     [Fact]
+    public async Task BomMaterialLookup_UsesCurrentAssociationForReusedMaterial()
+    {
+        var service = CreateService(out var materials);
+        var first = await service.CreateAsync(new(null, "复用料品一", MaterialKind.Electrical, MaterialSupplyMode.Purchase,
+            "001", "REUSE-1", null, null, "TEST", null, null, null), "admin", UserRole.Administrator, default);
+        var second = await service.CreateAsync(new(null, "复用料品二", MaterialKind.Electrical, MaterialSupplyMode.Purchase,
+            "001", "REUSE-2", null, null, "TEST", null, null, null), "admin", UserRole.Administrator, default);
+        var bomId = Guid.NewGuid();
+        Assert.Null(first.SourceBomItemId);
+        await materials.LinkBomItemAsync(bomId, first.Id, "admin", DateTimeOffset.UtcNow, default);
+        Assert.Equal(first.Id, (await materials.FindMaterialBySourceBomItemAsync(bomId, default))!.Id);
+        await materials.LinkBomItemAsync(bomId, second.Id, "admin", DateTimeOffset.UtcNow, default);
+        Assert.Equal(second.Id, (await materials.FindMaterialBySourceBomItemAsync(bomId, default))!.Id);
+        Assert.Null(await materials.FindMaterialBySourceBomItemAsync(Guid.NewGuid(), default));
+    }
+
+    [Fact]
     public async Task StandardBomMaterialCode_UsesUniqueMatchAndOnlyCreatesApplicationForNoMatch()
     {
         var service = CreateService(out var materials, out var repository, out _);
@@ -1450,6 +1495,57 @@ public sealed class MaterialServiceTests
 
         Assert.Contains("电气件料号申请前必须补全物料名称、型号、品牌", exception.Message);
         Assert.Contains("缺少：型号、品牌", exception.Message);
+    }
+
+    [Fact]
+    public async Task BackgroundRelease_PreparesCodesForEachBomRowAndResumesSnapshotWriteback()
+    {
+        var service = CreateService(out var materials, out var repository, out _);
+        var publisher = new MaterialPreparationPublisher();
+        var workflow = new PdmWorkflowService(repository, null!, publisher, TimeProvider.System,
+            materialRepository: materials, materialService: service);
+        var bom = await workflow.ReplaceBomAsync(ProjectId, BomKind.NonStandard,
+            [new BomItemInput(1, "DRAW-1", "安装板", 1, "001", "6061", "200x100", "W1", true),
+             new BomItemInput(2, "DRAW-2", "安装板", 2, "001", "6061", "200x100", "W1", true)],
+            "admin", UserRole.Administrator, default);
+        var package = new ReleasePackage(Guid.NewGuid(), ProjectId, "RP-BACKGROUND", ReleasePackageState.Publishing,
+            null, "W1", "W1", [], DateTimeOffset.UtcNow, null, null)
+        {
+            Scope = ReleaseScope.NonStandardLongLead,
+            NonStandardBomSnapshot = bom,
+            MechanicalBomSnapshot = bom,
+            SelectedBomItemIds = bom.Select(item => item.Id).ToArray()
+        };
+        var packages = (ConcurrentDictionary<Guid, ReleasePackage>)typeof(InMemoryPdmRepository)
+            .GetField("packages", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(repository)!;
+        packages[package.Id] = package;
+        Assert.Null(await materials.FindMaterialBySourceBomItemAsync(bom[0].Id, default));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => workflow.ResumePublishAsync(package.Id, default));
+        var material = (await materials.FindMaterialBySourceBomItemAsync(bom[0].Id, default))!;
+        Assert.Equal(MaterialApprovalStatus.Approved, material.ApprovalStatus);
+        Assert.All(publisher.Package!.NonStandardBomSnapshot, item => Assert.Equal(material.MaterialCode, item.DrawingNumber));
+        Assert.All(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default),
+            item => Assert.Equal(material.MaterialCode, item.DrawingNumber));
+        // 模拟回填工作区后服务停止、发布快照尚未保存。
+        packages[package.Id] = package;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => workflow.ResumePublishAsync(package.Id, default));
+        Assert.All(publisher.Package!.NonStandardBomSnapshot, item => Assert.Equal(material.MaterialCode, item.DrawingNumber));
+        Assert.Equal(material.Id, (await materials.FindMaterialBySourceBomItemAsync(bom[0].Id, default))!.Id);
+    }
+
+    private sealed class MaterialPreparationPublisher : IReleasePackagePublisher
+    {
+        public ReleasePackage? Package { get; private set; }
+        public Task PrepareAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task DiscardDraftAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<ReleasePublication> PublishAsync(ReleasePackage package, Project project,
+            IReadOnlyList<ReleasePreviewSource> sources, CancellationToken cancellationToken)
+        {
+            Package = package;
+            throw new InvalidOperationException("Stop after material preparation");
+        }
     }
 
     [Fact]
@@ -1941,6 +2037,24 @@ public sealed class MaterialServiceTests
         Assert.Contains("未遵守料号游标条件", exception.Message);
         Assert.Equal(before, (await materials.ListCategoriesAsync(true, default)).Single(item => item.Code == "0102").CurrentSequence);
         Assert.Empty(await materials.ListSyncTasksAsync(default));
+    }
+
+    [Fact]
+    public async Task ExactBomMatchingReturnsOnlyApprovedExactModelsAndCodes()
+    {
+        var service = CreateService(out _);
+        var created = await service.CreateAsync(new(
+            null, "精确型号测试", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
+            "EXACT-MODEL-001", null, null, "UPTON", null, null, null, CategoryCode: "0102"),
+            "engineer", UserRole.Engineer, default);
+        Assert.Empty(await service.MatchApprovedMaterialsAsync("specification", "EXACT-MODEL-001", "engineer", UserRole.Engineer, default));
+        Assert.Empty(await service.MatchApprovedMaterialsAsync("drawingNumber", created.MaterialCode, "engineer", UserRole.Engineer, default));
+        var approved = await service.ApproveAsync(created.Id, created.RowVersion, "standardizer", UserRole.ProcessReviewer, default);
+        Assert.Equal(created.Id, Assert.Single(await service.MatchApprovedMaterialsAsync("specification", " exact-model-001 ", "engineer", UserRole.Engineer, default)).Id);
+        Assert.Equal(created.Id, Assert.Single(await service.MatchApprovedMaterialsAsync("drawingNumber", approved.Material.MaterialCode, "engineer", UserRole.Engineer, default)).Id);
+        Assert.Empty(await service.MatchApprovedMaterialsAsync("specification", "EXACT-MODEL", "engineer", UserRole.Engineer, default));
+        Assert.Empty(await service.MatchApprovedMaterialsAsync("specification", " ", "engineer", UserRole.Engineer, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.MatchApprovedMaterialsAsync("name", "精确型号测试", "engineer", UserRole.Engineer, default));
     }
 
     private static MaterialService CreateService(out InMemoryMaterialRepository materials, out AvailableCodeClient u9Client)

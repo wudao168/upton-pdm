@@ -6,7 +6,7 @@ import { readQualityUploadAccess } from '../api'
 import { ElMessage } from '../statusMessage'
 import type { ProjectSummary } from '../types'
 
-const props = defineProps<{ projectId: string; projectCode: string; projectName: string; projects: ProjectSummary[]; token: string; currentUsername: string; currentDisplayName: string; canEdit: boolean; canManageCatalog: boolean; canDecideApproval?: boolean; requestedQualityAcceptance?: boolean; requestedProjectId?: string }>()
+const props = defineProps<{ projectId: string; projectCode: string; projectName: string; projects: ProjectSummary[]; token: string; currentUsername: string; currentDisplayName: string; canEdit: boolean; canManageCatalog: boolean; canDecideApproval?: boolean; requestedQualityAcceptance?: boolean; requestedProjectId?: string; requestedSection?: string }>()
 const emit = defineEmits<{ requestHandled: [] }>()
 const inspectionRevision = ref(0)
 const activeDetail = ref('')
@@ -15,7 +15,7 @@ const access = ref<Record<string, string[]>>({})
 let accessGeneration = 0
 function writableIds(kind: string) { return familyProjects.value.filter(x => access.value[x.id]?.includes(kind)).map(x => x.id) }
 const canEditQuality = computed(() => access.value[props.projectId]?.includes('quality') ?? false)
-watch(() => props.requestedProjectId, id => { if (id) activeTab.value = 'quality' }, { immediate: true })
+watch([() => props.requestedProjectId, () => props.requestedSection], ([id]) => { if (id) activeTab.value = props.requestedSection || 'quality' }, { immediate: true })
 function selectTab(tab: string) { activeTab.value = tab }
 
 const familyProjects = computed(() => {
@@ -66,7 +66,7 @@ function changeView(section: string, view: string) { activeDetail.value = view =
 .quality-manager :deep(.quality-inspection){gap:12px}
 .quality-manager :deep(.quality-section__toolbar){height:32px;min-height:32px;flex-shrink:0;display:flex;align-items:center;justify-content:space-between;gap:12px}
 .quality-manager :deep(.quality-section__heading){display:flex;align-items:center;justify-content:flex-start;gap:12px;flex:1;min-width:0}
-.quality-manager :deep(.quality-section__heading h2){display:flex;align-items:center;gap:7px;flex-shrink:0;margin:0;font-size:16px;white-space:nowrap}
+.quality-manager :deep(.quality-section__heading h2){display:flex;align-items:center;gap:7px;flex-shrink:0;margin:0;font-size:var(--pdm-font-size-heading);white-space:nowrap}
 .quality-manager :deep(.quality-section__heading p){margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pdm-muted);font-size:12px}
 .quality-manager :deep(.quality-section__actions){flex-shrink:0}
 .quality-manager :deep(.quality-section__toolbar button){box-sizing:border-box;width:100px;height:32px;min-height:32px;padding:0;white-space:nowrap}

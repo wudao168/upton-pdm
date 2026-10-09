@@ -1,4 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
+import ElementPlus from 'element-plus'
 import { describe, expect, it, vi } from 'vitest'
 import AuditLog from '../src/components/AuditLog.vue'
 
@@ -10,11 +11,13 @@ vi.mock('../src/statusMessage', () => ({ ElMessage: { success: vi.fn(), error: v
 describe('AuditLog', () => {
   it('项目经理在记录页维护备注，其他用户仅查看日志', async () => {
     apiMocks.addProjectManagerNote.mockResolvedValue({})
-    const wrapper = mount(AuditLog, { props: { entries: [], projectId: 'project-1', token: 'token', canAddManagerNote: true, projectRecordsOnly: true } })
+    const wrapper = mount(AuditLog, { props: { entries: [], projectId: 'project-1', token: 'token', canAddManagerNote: true, projectRecordsOnly: true }, global: { plugins: [ElementPlus] } })
 
     await wrapper.findAll('button').find(button => button.text() === '新增记录')!.trigger('click')
-    await wrapper.get('[aria-label="项目备注内容"]').setValue('采购风险已同步')
-    await wrapper.findAll('button').find(button => button.text() === '保存记录')!.trigger('click')
+    const note = document.querySelector<HTMLTextAreaElement>('[aria-label="项目备注内容"]')!
+    note.value = '采购风险已同步'
+    note.dispatchEvent(new Event('input', { bubbles: true }))
+    Array.from(document.querySelectorAll('button')).find(button => button.textContent?.trim() === '保存记录')!.click()
     await flushPromises()
 
     expect(apiMocks.addProjectManagerNote).toHaveBeenCalledWith('project-1', '采购风险已同步', 'token')

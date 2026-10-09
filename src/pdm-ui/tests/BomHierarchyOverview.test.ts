@@ -81,7 +81,7 @@ describe('BomHierarchyOverview', () => {
 
     expect(wrapper.text()).toContain('部分项目BOM读取失败：P700004-2')
     expect(wrapper.text()).toContain('P700004-2 · 子项目二：BOM版本：PLM服务发生内部错误')
-    expect(wrapper.findAll('tbody tr')).toHaveLength(6)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(9)
     expect(wrapper.text()).toContain('P700004-1')
     expect(wrapper.text()).toContain('待BOM发布后自动生成并同步 5 个BOM料号')
 
@@ -93,7 +93,7 @@ describe('BomHierarchyOverview', () => {
     wrapper.unmount()
   })
 
-  it('collapses unnumbered children, preserves all master rows and counts, and remembers toggles on refresh', async () => {
+  it('expands all children by default and remembers manual collapse on refresh', async () => {
     const root = project({ id: 'root', code: 'ROOT', name: '主项目' })
     const child = project({ id: 'child', code: 'CHILD', name: '子项目', parentProjectId: 'root', rootProjectId: 'root' })
     const grandchild = project({ id: 'grandchild', code: 'GRANDCHILD', name: '下级项目', parentProjectId: 'child', rootProjectId: 'root' })
@@ -102,26 +102,26 @@ describe('BomHierarchyOverview', () => {
     api.listProjectBomHeaders.mockResolvedValue([])
     const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root, child, grandchild], token: 'token', editable: true } })
     await flushPromises()
-    expect(wrapper.findAll('tbody tr')).toHaveLength(6)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(12)
     expect(wrapper.findAll('.is-master-row')).toHaveLength(3)
     expect(wrapper.text()).toContain('待BOM发布后自动生成并同步 9 个BOM料号')
-    expect(wrapper.find('[aria-label="进入CHILD的标准件BOM"]').exists()).toBe(false)
-    await wrapper.get('[aria-label="展开CHILD的三类BOM"]').trigger('click')
+    expect(wrapper.find('[aria-label="进入CHILD的标准件BOM"]').exists()).toBe(true)
+    await wrapper.get('[aria-label="折叠CHILD的三类BOM"]').trigger('click')
     expect(wrapper.findAll('tbody tr')).toHaveLength(9)
-    expect(wrapper.get('[aria-label="折叠CHILD的三类BOM"]').attributes('aria-expanded')).toBe('true')
+    expect(wrapper.get('[aria-label="展开CHILD的三类BOM"]').attributes('aria-expanded')).toBe('false')
     await wrapper.get('[aria-label="刷新多级BOM"]').trigger('click')
     await flushPromises()
     expect(wrapper.findAll('tbody tr')).toHaveLength(9)
     expect(wrapper.text()).toContain('待BOM发布后自动生成并同步 9 个BOM料号')
-    await wrapper.get('[aria-label="折叠CHILD的三类BOM"]').trigger('click')
-    expect(wrapper.findAll('tbody tr')).toHaveLength(6)
+    await wrapper.get('[aria-label="展开CHILD的三类BOM"]').trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(12)
     expect(wrapper.findAll('.is-master-row')).toHaveLength(3)
     expect(api.executeProjectBomU9Sync).not.toHaveBeenCalled()
     expect(api.retryProjectBomHeaderAutomatic).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
-  it.each(['Master', 'Standard'])('expands a child when its %s receives a material code, but not for a draft material', async kind => {
+  it.each(['Master', 'Standard'])('keeps a child expanded before and after its %s receives a material code', async kind => {
     const root = project({ id: 'root', code: 'ROOT', name: '主项目' })
     const child = project({ id: 'child', code: 'CHILD', name: '子项目', parentProjectId: 'root', rootProjectId: 'root' })
     let materialCode: string | undefined
@@ -131,7 +131,7 @@ describe('BomHierarchyOverview', () => {
       ? [{ projectId, kind, materialId: 'draft', materialCode, rowVersion: 1 }] : [])
     const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root, child], token: 'token' } })
     await flushPromises()
-    expect(wrapper.findAll('tbody tr')).toHaveLength(5)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(8)
     materialCode = '02011000001'
     await wrapper.get('[aria-label="刷新多级BOM"]').trigger('click')
     await flushPromises()
@@ -216,7 +216,7 @@ describe('BomHierarchyOverview', () => {
     api.listProjectBomHeaders.mockResolvedValue([])
     const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root, child], token: 'token', editable: false } })
     await flushPromises()
-    await wrapper.get('button[aria-label="展开P-CHILD的三类BOM"]').trigger('click')
+    expect(wrapper.get('button[aria-label="折叠P-CHILD的三类BOM"]').attributes('aria-expanded')).toBe('true')
     for (const [label, kind] of [['标准件BOM', 'Standard'], ['非标件BOM', 'NonStandard'], ['电气BOM', 'Electrical']]) {
       await wrapper.get(`button[aria-label="进入P-CHILD的${label}"]`).trigger('click')
       expect(wrapper.emitted('openBom')?.at(-1)).toEqual(['child', kind])

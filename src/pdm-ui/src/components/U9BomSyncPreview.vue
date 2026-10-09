@@ -16,6 +16,7 @@ const delta = (value: number) => `${value > 0 ? '+' : ''}${quantity(value)}`
       <span>母件：<strong>{{ itemCode }}</strong></span>
       <span>版本：<strong>A1</strong></span>
       <span>审核子件：<strong>{{ componentCount }}</strong></span>
+      <span v-if="preview.hierarchyEffectiveDate">新增数据生效日期：<strong>{{ preview.hierarchyEffectiveDate }}</strong>（继承主项目BOM）</span>
     </div>
     <h3>本次变更 <small v-if="changes.length">新增 {{ count('新增') }} 行 · 修改 {{ count('修改') }} 行 · 删除 {{ count('删除') }} 行</small></h3>
     <div v-if="changes.length" class="u9-sync-preview__table-wrap">
@@ -43,6 +44,7 @@ const delta = (value: number) => `${value > 0 ? '+' : ''}${quantity(value)}`
       </div>
     </details>
     <ul class="u9-sync-preview__notes">
+      <li v-if="preview.hierarchyEffectiveDate">新建BOM及新增子件继承主项目生效日期，写入后回查确认；已有BOM及历史子件日期保持不变。</li>
       <li>仅使用审核发布版本。仅调整历史审核记录核对通过的子件，其他U9C行保留，不删除整张BOM。</li>
       <li>减量/删除前记录快照；确认后立即执行并自动回查。U9C审核或引用限制不会自动绕过。</li>
     </ul>

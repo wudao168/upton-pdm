@@ -15,6 +15,7 @@ const positions = [
 const groups = [
   { name: '预算', permissions: [{ code: 'project.budget.view', name: '查看项目预算' }] },
   { name: '项目管理', permissions: [
+    { code: 'project.plan.edit', name: '维护项目计划' },
     { code: 'project.edit', name: '编辑项目信息' },
     { code: 'project.delete', name: '删除空项目' },
     { code: 'project.child.create', name: '创建子项目' },

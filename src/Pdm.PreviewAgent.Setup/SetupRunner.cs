@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -19,12 +20,52 @@ internal sealed class SetupRunner
     private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
     private readonly Action<string> log;
     private readonly SetupOptions options;
+    private string monitorToken;
+    private string monitorIdentity;
+    private bool monitorLoginFailed;
 
     public SetupRunner(SetupOptions options, Action<string> log)
     {
         this.options = options;
         this.log = log ?? (_ => { });
     }
+
+    public async Task<string> ReadStatusAsync()
+    {
+        string local;
+        using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) })
+        {
+            var health = Serializer.Deserialize<AgentStatus>(await client.GetStringAsync($"http://127.0.0.1:{options.Port}/health"));
+            local = $"{health.Name ?? health.Machine}：{(health.Busy ? "执行中" : "空闲")}；本机排队 {health.Queued} 项\r\n当前任务：{(string.IsNullOrWhiteSpace(health.CurrentTask) ? "无" : health.CurrentTask)}";
+            if (!string.IsNullOrWhiteSpace(health.ConversionStage)) local += $"\r\nSolidWorks：{(health.SolidWorksRunning ? "运行中（PID " + health.SolidWorksPid + "）" : "未运行")}\r\n转换阶段：{health.ConversionStage}；已完成 {health.Completed}/{health.Total}；最近进度：{health.ProgressUpdatedAt}";
+        }
+        if (string.IsNullOrWhiteSpace(options.ServerUrl) || string.IsNullOrWhiteSpace(options.Password)) return local + "\r\n填写PLM账号后可读取服务器队列。";
+        try
+        {
+            var identity = options.ServerUrl + "\n" + options.Username + "\n" + options.Password;
+            if (identity != monitorIdentity) { monitorIdentity = identity; monitorToken = null; monitorLoginFailed = false; }
+            if (monitorLoginFailed) return local + "\r\nPLM队列登录失败，请更正服务器地址或账号密码。";
+            if (string.IsNullOrWhiteSpace(monitorToken))
+            {
+                try { monitorToken = await LoginAsync(options.ServerUrl.TrimEnd('/')); }
+                catch { monitorLoginFailed = true; throw; }
+            }
+            using (var client = NewClient(monitorToken))
+            {
+                client.Timeout = TimeSpan.FromSeconds(5);
+                var response = await client.GetAsync($"{options.ServerUrl.TrimEnd('/')}/api/system-settings/preview-agent/queue");
+                if (!response.IsSuccessStatusCode) { if ((int)response.StatusCode == 401) monitorToken = null; return local + "\r\nPLM队列读取失败：" + (int)response.StatusCode; }
+                var queue = Serializer.Deserialize<QueueStatus>(await response.Content.ReadAsStringAsync());
+                return local + $"\r\nPLM调度排队：{string.Join("；", queue.Scheduling.Queued)}\r\nPLM执行：{string.Join("；", queue.Scheduling.Executing.Select(item => item.Server + "：" + item.Task))}\r\n待完成发布单：{string.Join("；", queue.PendingPublishing)}";
+            }
+        }
+        catch (Exception exception) { return local + "\r\nPLM队列暂不可读：" + Describe(exception); }
+    }
+
+    private sealed class AgentStatus { public string Name { get; set; } public string Machine { get; set; } public bool Busy { get; set; } public int Queued { get; set; } public string CurrentTask { get; set; } public bool SolidWorksRunning { get; set; } public int SolidWorksPid { get; set; } public string ConversionStage { get; set; } public int Completed { get; set; } public int Total { get; set; } public string ProgressUpdatedAt { get; set; } }
+    private sealed class QueueStatus { public SchedulingStatus Scheduling { get; set; } public string[] PendingPublishing { get; set; } }
+    private sealed class SchedulingStatus { public string[] Queued { get; set; } public ExecutionStatus[] Executing { get; set; } }
+    private sealed class ExecutionStatus { public string Server { get; set; } public string Task { get; set; } }
 
     public async Task<bool> InstallAsync()
     {
@@ -40,6 +81,17 @@ internal sealed class SetupRunner
         var agentDirectory = options.InstallDirectory;
         log($"安装目录：{agentDirectory}");
 
+        using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) })
+        {
+            AgentStatus installedStatus = null;
+            try { installedStatus = Serializer.Deserialize<AgentStatus>(await client.GetStringAsync($"http://127.0.0.1:{options.Port}/health")); }
+            catch (HttpRequestException) { }
+            catch (TaskCanceledException) { }
+            if (installedStatus?.Busy == true) throw new InvalidOperationException("本机正在转换图纸，请等当前任务完成后再更新代理。");
+        }
+        StopAgentProcesses();
+        StopInstalledManagerAndWorker();
+
         log("1/7 释放转图代理文件…");
         ExtractPayload(agentDirectory);
         log($"1/7 已释放 {EnumeratePayload().Count()} 个文件。");
@@ -54,9 +106,15 @@ internal sealed class SetupRunner
 
         log("4/7 注册开机自启…");
         var agentExe = Path.Combine(agentDirectory, "Upton.Pdm.PreviewAgent.exe");
+        var managerExe = Path.Combine(agentDirectory, "UplmPreviewAgentSetup.exe");
+        var currentExe = Assembly.GetExecutingAssembly().Location;
+        if (!string.Equals(Path.GetFullPath(currentExe), Path.GetFullPath(managerExe), StringComparison.OrdinalIgnoreCase))
+            File.Copy(currentExe, managerExe, true);
         RunTool("schtasks", $"/Delete /TN \"{SetupOptions.DefaultTaskName}\" /F");
         var task = RunTool("schtasks", $"/Create /TN \"{SetupOptions.DefaultTaskName}\" /TR \"\\\"{agentExe}\\\"\" /SC ONLOGON /RL HIGHEST /F");
-        if (task.ExitCode != 0) log($"   计划任务创建返回：{task.Output.Trim()}");
+        if (task.ExitCode != 0) throw new InvalidOperationException($"代理自启任务创建失败：{task.Output.Trim()}");
+        var managerTask = RunTool("schtasks", $"/Create /TN \"{SetupOptions.DefaultTaskName} Manager\" /TR \"\\\"{managerExe}\\\" /tray\" /SC ONLOGON /IT /RL HIGHEST /F");
+        if (managerTask.ExitCode != 0) throw new InvalidOperationException($"托盘管理窗口自启任务创建失败：{managerTask.Output.Trim()}");
 
         log("5/7 启动转图代理…");
         StopAgentProcesses();
@@ -90,12 +148,12 @@ internal sealed class SetupRunner
         log($"7/7 {probe}");
         if (probe.StartsWith("服务器侧连通性测试未通过", StringComparison.Ordinal) || probe.Contains("无法连接转图服务器"))
         {
-            log("   服务器无法访问本机代理，已自动把PLM切回“本机转换”，避免发布被卡住。");
+            log("   服务器无法访问本机代理，将移除本机登记，其他转图服务器继续使用。");
             using (var client = NewClient(token))
             {
                 try
                 {
-                    await client.PostAsync($"{serverUrl}/api/system-settings/preview-agent/unregister", new StringContent("{}", Encoding.UTF8, "application/json"));
+                    await client.PostAsync($"{serverUrl}/api/system-settings/preview-agent/unregister", new StringContent(Serializer.Serialize(new { agentUrl = $"http://{SetupOptions.DetectLocalAddress()}:{options.Port}" }), Encoding.UTF8, "application/json"));
                 }
                 catch (Exception)
                 {
@@ -113,18 +171,19 @@ internal sealed class SetupRunner
         StopAgentProcesses();
         log("2/5 删除开机自启…");
         RunTool("schtasks", $"/Delete /TN \"{SetupOptions.DefaultTaskName}\" /F");
+        RunTool("schtasks", $"/Delete /TN \"{SetupOptions.DefaultTaskName} Manager\" /F");
         log("3/5 删除防火墙规则…");
         RunTool("netsh", $"advfirewall firewall delete rule name=\"{SetupOptions.FirewallRuleName}\"");
         if (!string.IsNullOrWhiteSpace(options.ServerUrl) && !string.IsNullOrWhiteSpace(options.Username) && !string.IsNullOrWhiteSpace(options.Password))
         {
-            log("4/5 通知PLM恢复为本机转换…");
+            log("4/5 通知PLM移除本机登记…");
             try
             {
                 var token = await LoginAsync(options.ServerUrl.TrimEnd('/'));
                 using (var client = NewClient(token))
                 {
-                    var response = await client.PostAsync($"{options.ServerUrl.TrimEnd('/')}/api/system-settings/preview-agent/unregister", new StringContent("{}", Encoding.UTF8, "application/json"));
-                    log(response.IsSuccessStatusCode ? "4/5 已通知PLM恢复为本机转换。" : $"4/5 通知PLM失败：{(int)response.StatusCode}");
+                    var response = await client.PostAsync($"{options.ServerUrl.TrimEnd('/')}/api/system-settings/preview-agent/unregister", new StringContent(Serializer.Serialize(new { agentUrl = $"http://{SetupOptions.DetectLocalAddress()}:{options.Port}" }), Encoding.UTF8, "application/json"));
+                    log(response.IsSuccessStatusCode ? "4/5 已移除本机登记，其他转图服务器保留。" : $"4/5 通知PLM失败：{(int)response.StatusCode}");
                 }
             }
             catch (Exception exception)
@@ -140,7 +199,21 @@ internal sealed class SetupRunner
         log("5/5 删除安装目录…");
         try
         {
-            if (Directory.Exists(options.InstallDirectory)) Directory.Delete(options.InstallDirectory, true);
+            if (Directory.Exists(options.InstallDirectory))
+            {
+                var currentExe = Path.GetFullPath(Assembly.GetExecutingAssembly().Location);
+                var root = Path.GetFullPath(options.InstallDirectory).TrimEnd(Path.DirectorySeparatorChar);
+                if (currentExe.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var file in Directory.GetFiles(root, "*", SearchOption.AllDirectories))
+                        if (!string.Equals(file, currentExe, StringComparison.OrdinalIgnoreCase)) File.Delete(file);
+                    foreach (var directory in Directory.GetDirectories(root, "*", SearchOption.AllDirectories).OrderByDescending(path => path.Length)) Directory.Delete(directory);
+                    if (!MoveFileEx(currentExe, null, 4) || !MoveFileEx(root, null, 4))
+                        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                    log("代理已卸载，当前管理程序文件将在重启电脑后移除。");
+                }
+                else Directory.Delete(root, true);
+            }
         }
         catch (Exception exception)
         {
@@ -150,6 +223,9 @@ internal sealed class SetupRunner
         log("卸载完成。");
         return true;
     }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool MoveFileEx(string existingFileName, string newFileName, int flags);
 
     private static List<ManifestResource> EnumeratePayload()
     {
@@ -188,6 +264,7 @@ internal sealed class SetupRunner
         var configuration = new Dictionary<string, object>
         {
             ["Port"] = options.Port,
+            ["Name"] = options.Name,
             ["BindAddress"] = "0.0.0.0",
             ["Token"] = options.Token,
             ["WorkerPath"] = options.WorkerPath ?? string.Empty,
@@ -213,6 +290,21 @@ internal sealed class SetupRunner
             catch (Exception)
             {
             }
+        }
+    }
+
+    private void StopInstalledManagerAndWorker()
+    {
+        var paths = new[] { Path.Combine(options.InstallDirectory, "UplmPreviewAgentSetup.exe"),
+            Path.Combine(options.InstallDirectory, "preview-worker", "Upton.Pdm.SolidWorks.PreviewWorker.exe") };
+        foreach (var name in new[] { "UplmPreviewAgentSetup", "Upton.Pdm.SolidWorks.PreviewWorker" })
+        foreach (var process in Process.GetProcessesByName(name))
+        {
+            if (process.Id == Process.GetCurrentProcess().Id) continue;
+            if (!paths.Any(path => string.Equals(process.MainModule?.FileName, path, StringComparison.OrdinalIgnoreCase))) continue;
+            if (name == "Upton.Pdm.SolidWorks.PreviewWorker" && process.WaitForExit(3000)) continue;
+            process.Kill();
+            process.WaitForExit(10000);
         }
     }
 
@@ -264,7 +356,7 @@ internal sealed class SetupRunner
     {
         using (var client = NewClient(token))
         {
-            var payload = Serializer.Serialize(new { agentUrl, agentToken = options.Token, timeoutMinutes = options.TimeoutMinutes });
+            var payload = Serializer.Serialize(new { name = options.Name, agentUrl, agentToken = options.Token, timeoutMinutes = options.TimeoutMinutes });
             var response = await client.PostAsync($"{serverUrl}/api/system-settings/preview-agent/register", new StringContent(payload, Encoding.UTF8, "application/json"));
             var body = await response.Content.ReadAsStringAsync();
             if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"登记转图服务器失败（{(int)response.StatusCode}）：{body}");

@@ -4,6 +4,7 @@ import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import 'element-plus/dist/index.css'
 import './styles/tokens.css'
 import './styles/app.css'
+import './styles/ui-consistency.css'
 import './styles/review-overlay.css'
 import DrawingReviewOverlayApp from './components/DrawingReviewOverlayApp.vue'
 

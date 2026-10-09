@@ -77,7 +77,7 @@ async function save() {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="`铭牌 · ${project.code}`" width="900px" append-to-body :close-on-click-modal="false" :close-on-press-escape="!saving" :show-close="!saving">
+  <el-dialog v-model="visible" :title="`铭牌 · ${project.code}`" width="620px" append-to-body :close-on-click-modal="false" :close-on-press-escape="!saving" :show-close="!saving">
     <p v-if="loading" role="status">正在读取铭牌…</p>
     <div v-else-if="error" role="alert">{{ error }} <el-button @click="load">重新读取</el-button></div>
     <template v-else-if="view">
@@ -104,7 +104,7 @@ async function save() {
 .nameplate-preview{user-select:text}
 .nameplate-value{display:block;text-align:center}
 .nameplate-toolbar{display:flex;align-items:center;margin-bottom:12px}
-.nameplate-preview-size{width:calc(100% * 2 / 3);margin-inline:auto}
+.nameplate-preview-size{width:560px;max-width:100%;margin-inline:auto}
 .nameplate-preview{zoom:calc(2 / 3)}
 .nameplate-preview{border:2px solid #333;border-radius:22px;padding:18px;background:#fff;color:#222;overflow-x:auto}
 .nameplate-brand{position:relative;display:flex;align-items:center;min-height:128px;margin-bottom:14px;min-width:620px}

@@ -119,6 +119,20 @@ public static class ValidationPlanEndpointExtensions
             return Results.Ok(await service.SubmitAsync(projectId, expectedRowVersion, actor, role, cancellationToken));
         });
 
+        api.MapPost("/projects/{projectId:guid}/validation-plan/withdraw", async (Guid projectId, long expectedRowVersion, HttpContext context, IServiceProvider services, CancellationToken cancellationToken) =>
+        {
+            var service = qualityAcceptance ? services.GetRequiredKeyedService<ValidationPlanService>("quality") : services.GetRequiredService<ValidationPlanService>();
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.WithdrawAsync(projectId, expectedRowVersion, actor, role, cancellationToken));
+        });
+
+        api.MapPost("/validation-plan-approval-tasks/{taskId:guid}/transfer", async (Guid taskId, ValidationPlanTransferRequest request, HttpContext context, IServiceProvider services, CancellationToken cancellationToken) =>
+        {
+            var service = qualityAcceptance ? services.GetRequiredKeyedService<ValidationPlanService>("quality") : services.GetRequiredService<ValidationPlanService>();
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.TransferAsync(taskId, request.NewAssignee, actor, role, cancellationToken));
+        });
+
         api.MapPost("/validation-plan-approval-tasks/{taskId:guid}/decision", async (Guid taskId, ApprovalRequest request, HttpContext context, IServiceProvider services, CancellationToken cancellationToken) =>
         {
             var service = qualityAcceptance ? services.GetRequiredKeyedService<ValidationPlanService>("quality") : services.GetRequiredService<ValidationPlanService>();
@@ -249,3 +263,4 @@ public sealed record ConfirmValidationPlanExecutionRequest(Guid SourceAttachment
 }
 
 public sealed record ValidationPlanApprovalTaskResponse(Guid Id, Guid PlanId, Guid ProjectId, string ProjectCode, string ProjectName, int RevisionNumber, ApprovalStage Stage, string StepName, DateTimeOffset CreatedAt);
+public sealed record ValidationPlanTransferRequest(string NewAssignee);

@@ -9,7 +9,7 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
     {
         var project = await RequireReadAsync(projectId, actor, role, ct);
         var budget = await budgets.FindAsync(projectId, ct) ?? new(projectId, ProjectBudgetCategories.All.Select(category => new ProjectBudgetLine(category)).ToArray());
-        var reserve = IsPlanning(role);
+        var reserve = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetReserve, ct);
         var canEditActual = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetActualEdit, ct);
         var canEdit = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetEdit, ct);
         var root = project.ParentProjectId is null ? project : await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, ct)
@@ -37,10 +37,12 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
             return Calculate(line, orderAmount, matching.Any(order => order.Amount is null));
         }).ToArray();
         var settlementAmount = SettlementTotal(budget.SettlementLines ?? []);
-        var canViewSettlement = CanViewSettlement(role);
+        var canViewSettlement = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetSettlementView, ct);
+        var canEditSettlement = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetSettlementEdit, ct);
+        var canEditBonusRate = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetBonusRateEdit, ct);
         return new(projectId, rows, Total(rows.Select(row => row.BudgetAmount)), Total(rows.Select(row => row.ActualAmount)),
             Total(rows.Select(row => row.EstimatedAmount)), Overrun(rows), canEdit || canEditActual, reserve,
-            budget.RowVersion, budget.UpdatedBy, budget.UpdatedAt, orders, canEdit, canEditActual, ReadNotes(budget).Where(note => reserve || note.Category != ProjectBudgetCategories.Reserve).ToArray(), canViewSettlement ? budget.SettlementLines ?? [] : [], canViewSettlement ? settlementAmount : null, IsPlanning(role) ? budget.BonusRate : null, settlementAmount.HasValue ? settlementAmount.Value < 200000m ? 0m : decimal.Round(settlementAmount.Value * budget.BonusRate, 2, MidpointRounding.AwayFromZero) : null, CanMaintainSettlement(role), IsPlanning(role), canViewSettlement);
+            budget.RowVersion, budget.UpdatedBy, budget.UpdatedAt, orders, canEdit, canEditActual, ReadNotes(budget).Where(note => reserve || note.Category != ProjectBudgetCategories.Reserve).ToArray(), canViewSettlement ? budget.SettlementLines ?? [] : [], canViewSettlement ? settlementAmount : null, canEditBonusRate ? budget.BonusRate : null, canViewSettlement && settlementAmount.HasValue ? settlementAmount.Value < 200000m ? 0m : decimal.Round(settlementAmount.Value * budget.BonusRate, 2, MidpointRounding.AwayFromZero) : null, canEditSettlement, canEditBonusRate, canViewSettlement);
     }
 
     public async Task<ProjectBudgetView> SaveAsync(Guid projectId, SaveProjectBudgetCommand command, string actor, UserRole role, CancellationToken ct)
@@ -54,7 +56,7 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
             || command.Lines.Any(line => !ProjectBudgetCategories.All.Contains(line.Category)))
             throw new PdmRuleException("预算分类无效或重复。");
         var current = await budgets.FindAsync(projectId, ct);
-        var reserve = IsPlanning(role);
+        var reserve = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetReserve, ct);
         if (!reserve && command.Lines.Any(line => line.Category == ProjectBudgetCategories.Reserve))
             throw new UnauthorizedAccessException("风险预留仅计划管理可维护。");
         var required = ProjectBudgetCategories.All.Where(category => reserve || category != ProjectBudgetCategories.Reserve).ToArray();
@@ -93,7 +95,7 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
     {
         await RequireReadAsync(projectId, actor, role, ct);
         if (command.Category != "Assessment" && !ProjectBudgetCategories.All.Contains(command.Category)) throw new PdmRuleException("预算分类无效。");
-        if (command.Category == ProjectBudgetCategories.Reserve && !IsPlanning(role))
+        if (command.Category == ProjectBudgetCategories.Reserve && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetReserve, ct))
             throw new UnauthorizedAccessException("风险预留仅计划管理可查看。");
         var content = command.Content?.Trim();
         if (string.IsNullOrEmpty(content) || content.Length > 500) throw new PdmRuleException("备注内容应为1至500字。");
@@ -111,7 +113,7 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
     public async Task<ProjectBudgetView> SaveSettlementAsync(Guid projectId, SaveProjectSettlementCommand command, string actor, UserRole role, CancellationToken ct)
     {
         await RequireReadAsync(projectId, actor, role, ct);
-        if (!CanMaintainSettlement(role)) throw new UnauthorizedAccessException("仅销售助理或计划管理可维护结算金额。");
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetSettlementEdit, ct)) throw new UnauthorizedAccessException("当前账号没有结算金额维护权限。");
         if (command.Lines is null || command.Lines.Count > 100) throw new PdmRuleException("结算明细最多100条。");
         var lines = command.Lines.Where(line => !string.IsNullOrWhiteSpace(line.Content) || !string.IsNullOrWhiteSpace(line.Unit) || !string.IsNullOrWhiteSpace(line.Note) || line.Quantity.HasValue || line.UnitPrice.HasValue)
             .Select(line => line with { Content = line.Content?.Trim() ?? "", Unit = line.Unit?.Trim(), Note = line.Note?.Trim() }).ToArray();
@@ -127,7 +129,7 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
     public async Task<ProjectBudgetView> SaveBonusRateAsync(Guid projectId, SaveProjectBonusRateCommand command, string actor, UserRole role, CancellationToken ct)
     {
         await RequireReadAsync(projectId, actor, role, ct);
-        if (!IsPlanning(role)) throw new UnauthorizedAccessException("仅计划管理可维护项目奖金比例。");
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetBonusRateEdit, ct)) throw new UnauthorizedAccessException("当前账号没有项目奖金比例维护权限。");
         if (command.Rate is < 0 or > .01m) throw new PdmRuleException("奖金比例应在0%至1%之间。");
         var current = await budgets.FindAsync(projectId, ct) ?? new(projectId, ProjectBudgetCategories.All.Select(category => new ProjectBudgetLine(category)).ToArray(), ManualActualAmounts: true);
         await budgets.SaveAsync(current with { BonusRate = command.Rate, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() }, command.ExpectedRowVersion, ct);
@@ -136,11 +138,6 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
 
     private static decimal? SettlementTotal(IReadOnlyList<ProjectSettlementLine> lines) => lines.Count == 0 ? null
         : lines.Sum(line => decimal.Round((line.Quantity ?? 0) * (line.UnitPrice ?? 0), 2, MidpointRounding.AwayFromZero));
-    private static bool CanMaintainSettlement(UserRole role) => IsPlanning(role) || TenantContext.Current?.HasRole("SalesAssistant") == true;
-
-    private static bool CanViewSettlement(UserRole role) => TenantContext.Current is { } tenant
-        ? new[] { "PlanningManager", "SalesAssistant", "BusinessUnitManager", "Finance" }.Any(tenant.HasRole)
-        : role is UserRole.PlanningManager or UserRole.BusinessUnitManager;
 
     internal async Task<Project> RequireReadAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
     {
@@ -153,9 +150,6 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
             throw new UnauthorizedAccessException("当前账号没有预算查看权限。");
         return project;
     }
-
-    private static bool IsPlanning(UserRole role) => TenantContext.Current is { } tenant
-        ? tenant.HasRole("PlanningManager") : role == UserRole.PlanningManager;
 
     public static ProjectBudgetRow Calculate(ProjectBudgetLine line, decimal? orderAmount = null, bool missingOrderAmount = false)
     {

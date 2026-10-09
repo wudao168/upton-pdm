@@ -46,6 +46,9 @@ public sealed record ProductionDrawingItem(
 /// <summary>按不可变正式版本列出生产图纸；工作版永远不影响当前正式版的选择。</summary>
 public sealed class ProductionDrawingService(IPdmRepository repository)
 {
+    public Task<IReadOnlyList<ProductionDrawingItem>> ListIndexAsync(string actor, UserRole role, bool includeHistory, CancellationToken cancellationToken)
+        => repository.ListProductionDrawingIndexAsync(actor, role, includeHistory, cancellationToken);
+
     public async Task<IReadOnlyList<ProductionDrawingItem>> ListAsync(
         string actor, UserRole role, bool includeHistory, Guid? projectId, CancellationToken cancellationToken)
     {

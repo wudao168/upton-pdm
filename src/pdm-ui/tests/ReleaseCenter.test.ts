@@ -5,6 +5,43 @@ import * as api from '../src/api'
 import type { BomItem, CreateReleasePackageInput, ReleasePackageSummary } from '../src/types'
 
 describe('ReleaseCenter', () => {
+  it.each([true, false])('restores a compact draft selection only when all instance IDs are selected: %s', async complete => {
+    const item: BomItem = { id: 'first', summaryItemIds: ['first', 'second'], kind: 'Standard', sequence: 1,
+      drawingNumber: '01020003283', name: '接头', quantity: 2, unit: '001', revision: 'W1', complete: true }
+    const wrapper = mount(ReleaseCenter, { props: {
+      releasePackage: { id: 'draft', number: 'RP-DRAFT', state: '草稿', scope: 'StandardFormal', workflowVersion: 1,
+        selectedBomItemIds: complete ? ['first', 'second'] : ['first'], createsManufacturingBaseline: true, locksDocuments: false,
+        standardBomSnapshot: [item], nonStandardBomSnapshot: [], electricalBomSnapshot: [], steps: [] },
+      releaseItems: [item], allowedScopes: ['StandardFormal'], username: 'engineer',
+      pending: false, progress: 0, error: '', canManage: true, canDecide: true,
+    } })
+    await wrapper.findAll('button').find(button => button.text() === '编辑草稿')!.trigger('click')
+    expect((wrapper.get('input[aria-label^="本次发布物料"]').element as HTMLInputElement).checked).toBe(complete)
+    wrapper.unmount()
+  })
+
+  it.each(['StandardFormal', 'NonStandardWithDrawing', 'ElectricalFormal'] as const)('expands compact instances when creating %s and keeps deferred groups excluded', async scope => {
+    const ids = Array.from({ length: 8 }, (_, index) => `instance-${index}`)
+    const kind = scope === 'StandardFormal' ? 'Standard' : scope === 'ElectricalFormal' ? 'Electrical' : 'NonStandard'
+    const item: BomItem = { id: ids[0], summaryItemIds: ids, kind, sequence: 1, drawingNumber: '01020003283',
+      name: '直通卡套接头', quantity: 8, unit: '001', revision: 'W1', complete: true }
+    const wrapper = mount(ReleaseCenter, { props: {
+      releasePackage: null, allowedScopes: [scope], preferredScope: scope, releaseItems: [item,
+        { ...item, id: 'deferred', summaryItemIds: ['deferred', 'deferred-2'], drawingNumber: 'OTHER', quantity: 2 }],
+      username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
+      drawingReviewCandidates: [{ candidateId: 'review', bomItemId: ids[0], drawingNumber: '01020003283', name: item.name,
+        bomKinds: ['NonStandard'], modelRevision: 'W1', drawingRevision: 'W1', state: 'ApprovedCurrent', selectable: false }],
+    } })
+    await wrapper.get('input[aria-label="整包需求日期"]').setValue('2026-10-18')
+    await wrapper.findAll('input[aria-label^="本次发布物料"]')[1]!.setValue(false)
+    expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes('disabled')).toBeUndefined()
+    await wrapper.get('form').trigger('submit')
+    const created = wrapper.emitted<CreateReleasePackageInput[]>('create')![0]![0]!
+    expect(created.selectedBomItemIds).toEqual(ids)
+    expect(created.selectedBomItemQuantities).toBeUndefined()
+    wrapper.unmount()
+  })
+
   const frozenItem = (id: string): BomItem => ({ id, kind: 'Standard', sequence: 1, drawingNumber: id,
     name: `物料${id}`, specification: 'M5', brand: '国优', quantity: 1, unit: '个', revision: 'W1', complete: true })
   const frozenPackage = (items: BomItem[], scope: ReleasePackageSummary['scope'] = 'StandardSupplement'): ReleasePackageSummary => ({
@@ -160,6 +197,7 @@ describe('ReleaseCenter', () => {
 
     expect(wrapper.get('.pdm-release-completion-status').text()).toContain('审批已完成')
     expect(wrapper.get('.pdm-release-summary').text()).toContain('审批完成 · 等待转图')
+    expect(wrapper.get('.pdm-release-completion-status').text()).toContain('当前环节：等待图纸转换。最近一次转图错误：转图连接超时')
     const retry = wrapper.findAll('button').find(button => button.text() === '重试转图')!
     await retry.trigger('click')
     expect(wrapper.emitted('retryPreview')).toEqual([['release-publishing']])

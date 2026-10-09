@@ -261,13 +261,8 @@ describe('WorkbenchHome', () => {
     const configureOwners = wrapper.get('[aria-label="项目团队"]').findAll('button').find(button => button.text() === '配置团队')!
     await configureOwners.trigger('click')
     await flushPromises()
-    expect(document.body.querySelector('[aria-label="执行工程师"]')).not.toBeNull()
-    expect(document.body.querySelector('[aria-label="主项目分工"]')).not.toBeNull()
-    ;[...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === '保存配置')!.click()
-    await flushPromises()
-    expect(wrapper.props('onUpdateMainStaffing')).toHaveBeenCalledOnce()
-    expect(wrapper.props('onUpdateDesigners')).toHaveBeenCalledOnce()
-    expect(wrapper.props('onUpdatePhaseOwners')).toHaveBeenCalledOnce()
+    expect(wrapper.emitted('information')).toHaveLength(1)
+    expect(document.body.querySelector('[aria-label="主项目分工"]')).toBeNull()
     for (const phase of ['标准件采购', '非标件采购', '非标件生产', '机械装配', '电气装配', '电气调试', '验收']) {
       expect(wrapper.get('[aria-label="项目团队"]').text()).toContain(phase)
     }
@@ -286,10 +281,7 @@ describe('WorkbenchHome', () => {
 
     await wrapper.findAll('button').find(button => button.text().includes('配置团队'))!.trigger('click')
     await flushPromises()
-    expect(document.body.textContent).toContain('配置项目团队 · P700001')
-    for (const phase of ['标准件采购', '非标件采购', '非标件生产', '机械装配', '电气装配', '电气调试', '验收']) {
-      expect(document.body.textContent).toContain(phase)
-    }
+    expect(wrapper.emitted('information')).toHaveLength(2)
 
     await wrapper.setProps({ projects: [{ ...project, collaborativeProjectManagers: [] }, childProject] })
     await wrapper.setProps({ project: { ...childProject, canAssignDesigners: false }, projects: [project, { ...childProject, canAssignDesigners: false }] })

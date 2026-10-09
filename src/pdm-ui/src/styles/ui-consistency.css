@@ -1,0 +1,62 @@
+/* 与概览页共用的视觉规范；业务布局和专用预览画布保留各自尺寸。 */
+.pdm-app-shell .el-table,
+.el-dialog .el-table,
+.el-drawer .el-table {
+  --el-table-header-bg-color: var(--pdm-table-header);
+  --el-table-header-text-color: var(--pdm-muted);
+  --el-table-text-color: var(--pdm-text);
+  --el-table-border-color: var(--pdm-border-soft);
+  --el-table-tr-bg-color: var(--pdm-surface);
+  --el-table-row-hover-bg-color: var(--pdm-theme-accent-soft);
+  --el-fill-color-lighter: var(--pdm-detail-row-alt);
+  font-size: var(--pdm-font-size-body);
+}
+
+.pdm-app-shell .el-table th.el-table__cell,
+.el-dialog .el-table th.el-table__cell,
+.el-drawer .el-table th.el-table__cell {
+  font-size: var(--pdm-font-size-heading);
+  font-weight: 500;
+}
+
+.pdm-app-shell :is(.pdm-edit-table, .pdm-project-table, .pdm-bom-table, .pdm-file-detail-table) th {
+  background: var(--pdm-table-header);
+  font-weight: 500;
+}
+
+.pdm-app-shell .el-tree-node__label {
+  font-size: var(--pdm-font-size-body);
+}
+
+.pdm-app-shell :is(.el-tabs__item, .el-form-item__label, .el-input__inner, .el-select__selected-item),
+:is(.el-dialog, .el-drawer) :is(.el-tabs__item, .el-form-item__label, .el-input__inner, .el-select__selected-item) {
+  font-size: var(--pdm-font-size-body);
+}
+
+.el-dialog {
+  --el-dialog-border-radius: var(--pdm-radius-panel);
+  color: var(--pdm-text);
+  font-family: var(--pdm-font-ui);
+  font-size: var(--pdm-font-size-body);
+}
+
+.el-drawer {
+  color: var(--pdm-text);
+  font-family: var(--pdm-font-ui);
+  font-size: var(--pdm-font-size-body);
+}
+
+:is(.el-dialog__title, .el-drawer__title, .el-message-box__title) {
+  color: var(--pdm-text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.el-empty__description p {
+  color: var(--pdm-muted);
+  font-size: var(--pdm-font-size-body);
+}
+
+.el-pagination {
+  --el-pagination-font-size: var(--pdm-font-size-body);
+}

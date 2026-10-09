@@ -30,6 +30,8 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     var baseConnectionString = builder.Configuration.GetConnectionString("Pdm")
         ?? throw new InvalidOperationException("ConnectionStrings:Pdm未配置。 ");
     var connectionBuilder = new MySqlConnectionStringBuilder(baseConnectionString);
+    // Leave connections available for maintenance and other processes on the local MySQL server.
+    if (!connectionBuilder.ContainsKey("Maximum Pool Size")) connectionBuilder.MaximumPoolSize = 64;
     var databaseNameOverride = Environment.GetEnvironmentVariable("PDM_DATABASE_NAME");
     if (!string.IsNullOrWhiteSpace(databaseNameOverride))
     {
@@ -113,6 +115,7 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IProjectNameplateRepository, MySqlProjectNameplateRepository>();
     builder.Services.AddScoped<IProjectContactInformationRepository, MySqlProjectContactInformationRepository>();
     builder.Services.AddScoped<IQualityInspectionRepository, MySqlQualityInspectionRepository>();
+    builder.Services.AddScoped<IProjectWorkbenchRiskRepository, MySqlProjectWorkbenchRiskRepository>();
     builder.Services.AddScoped<IProjectPlanningRepository, MySqlProjectPlanningRepository>();
     builder.Services.AddScoped<IProjectContentResetStore, MySqlProjectContentResetStore>();
 }
@@ -133,6 +136,7 @@ else
     builder.Services.AddSingleton<IProjectNameplateRepository, InMemoryProjectNameplateRepository>();
     builder.Services.AddSingleton<IProjectContactInformationRepository, InMemoryProjectContactInformationRepository>();
     builder.Services.AddSingleton<IQualityInspectionRepository, InMemoryQualityInspectionRepository>();
+    builder.Services.AddSingleton<IProjectWorkbenchRiskRepository, InMemoryProjectWorkbenchRiskRepository>();
     builder.Services.AddSingleton<IProjectPlanningRepository, InMemoryProjectPlanningRepository>();
     builder.Services.AddSingleton<IProjectContentResetStore, InMemoryProjectContentResetStore>();
 }
@@ -187,6 +191,11 @@ builder.Services.AddKeyedScoped<ValidationPlanService>("quality", (provider, _) 
     new ValidationPlanFileArchive(provider.GetRequiredService<IPdmRepository>(), provider.GetRequiredService<IProjectFileRepository>(), true),
     provider.GetRequiredService<TimeProvider>(), true));
 builder.Services.AddScoped<ProjectPlanningService>();
+builder.Services.AddScoped<ProjectWorkbenchService>(provider => new ProjectWorkbenchService(
+    provider.GetRequiredService<IPdmRepository>(), provider.GetRequiredService<IProjectPlanningRepository>(),
+    provider.GetRequiredService<IProjectContactInformationRepository>(), provider.GetRequiredService<ProjectBudgetService>(),
+    provider.GetRequiredService<U9ProcurementService>(), provider.GetRequiredKeyedService<IValidationPlanRepository>("quality"),
+    provider.GetRequiredService<IQualityInspectionRepository>(), provider.GetRequiredService<IProjectWorkbenchRiskRepository>(), provider.GetRequiredService<TimeProvider>()));
 builder.Services.AddScoped<ProjectBudgetService>();
 builder.Services.AddScoped<ProjectNameplateService>();
 builder.Services.AddScoped<ProjectContactInformationService>();
@@ -342,6 +351,7 @@ app.MapU9BomEndpoints();
 app.MapValidationPlanEndpoints();
 app.MapQualityInspectionEndpoints();
 app.MapProjectPlanningEndpoints();
+app.MapProjectWorkbenchEndpoints();
 app.MapProjectBudgetEndpoints();
 app.MapProjectNameplateEndpoints();
 app.MapProjectContactInformationEndpoints();

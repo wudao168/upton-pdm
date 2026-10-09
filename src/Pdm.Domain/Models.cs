@@ -1,4 +1,4 @@
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 
 namespace Upton.Pdm.Domain;
 
@@ -131,8 +131,12 @@ public sealed record PreviewConversionSettings
 
     public int TimeoutMinutes { get; init; } = 30;
 
+    public IReadOnlyList<PreviewAgentServer> Servers { get; init; } = [];
+
     public string NormalizedAgentUrl => AgentUrl.Trim().TrimEnd('/');
 }
+
+public sealed record PreviewAgentServer(string Name, string AgentUrl, string AgentToken, int TimeoutMinutes = 30);
 
 public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
 {
@@ -542,6 +546,11 @@ public sealed record BomItem(
     string Revision,
     bool IsComplete)
 {
+    public BomItem? MaintainedItem { get; init; }
+
+    public IReadOnlyList<Guid>? SummaryItemIds { get; init; }
+    public string? SummaryFingerprint { get; init; }
+
     public Guid ReleaseTrackingId { get; init; } = Id;
 
     public string? Remark { get; init; }

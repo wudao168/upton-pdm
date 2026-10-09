@@ -2,103 +2,83 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { readProjectContactInformation, saveProjectContactInformation } from '../api'
-import type { ProjectContactInformationView } from '../projectContactInformation'
+import type { ProjectContactEntry, ProjectContactInformationView } from '../projectContactInformation'
 
 const props = defineProps<{ projectId: string; token: string }>()
 const view = ref<ProjectContactInformationView | null>(null)
-const draft = ref({ customerContact: '', customerPhone: '', shippingAddress: '', shippingContact: '', shippingPhone: '' })
+const draft = ref<ProjectContactEntry[]>([])
+const staff = ref({ salesPeople: '', presalesPeople: '' })
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
 let generation = 0
 const canEdit = computed(() => Boolean(view.value?.canEdit) && !loading.value && !saving.value)
-type ContactSection = 'customer' | 'shipping'
-function apply(value: ProjectContactInformationView, section?: ContactSection) {
+function apply(value: ProjectContactInformationView) {
   view.value = value
-  const { customerContact, customerPhone, shippingAddress, shippingContact, shippingPhone } = value.information
-  if (section !== 'shipping') Object.assign(draft.value, { customerContact, customerPhone })
-  if (section !== 'customer') Object.assign(draft.value, { shippingAddress, shippingContact, shippingPhone })
+  const info = value.information
+  staff.value = { salesPeople: info.salesPeople ?? '', presalesPeople: info.presalesPeople ?? '' }
+  const legacy: ProjectContactEntry[] = []
+  if (info.customerContact || info.customerPhone) legacy.push({ contact: info.customerContact, phone: info.customerPhone, address: '', isShippingAddress: false })
+  if (info.shippingAddress || info.shippingContact || info.shippingPhone) legacy.push({ contact: info.shippingContact, phone: info.shippingPhone, address: info.shippingAddress, isShippingAddress: Boolean(info.shippingAddress) })
+  draft.value = (info.entries ?? legacy).map(entry => ({ ...entry }))
 }
-async function load(section?: ContactSection) {
+async function load() {
   const current = ++generation
   loading.value = true
-  saving.value = false
   error.value = ''
-  if (!section) {
-    view.value = null
-    draft.value = { customerContact: '', customerPhone: '', shippingAddress: '', shippingContact: '', shippingPhone: '' }
-  }
-  try {
-    const value = await readProjectContactInformation(props.projectId, props.token)
-    if (current === generation) apply(value, section)
-  } catch (cause) {
-    if (current === generation) error.value = cause instanceof Error ? cause.message : '信息加载失败'
-  } finally {
-    if (current === generation) loading.value = false
-  }
+  view.value = null
+  draft.value = []
+  staff.value = { salesPeople: '', presalesPeople: '' }
+  try { const value = await readProjectContactInformation(props.projectId, props.token); if (current === generation) apply(value) }
+  catch (cause) { if (current === generation) error.value = cause instanceof Error ? cause.message : '信息加载失败' }
+  finally { if (current === generation) loading.value = false }
 }
-async function save(section: ContactSection) {
-  if (!canEdit.value || !view.value) return
+async function save() {
+  if (!canEdit.value || !view.value) return false
+  if (draft.value.some(entry => entry.isShippingAddress && !entry.address.trim())) { error.value = '标记为收货地址的记录必须填写地址。'; return }
+  if (draft.value.some(entry => !entry.contact.trim() && !entry.phone.trim() && !entry.address.trim())) { error.value = '请填写联系人信息或地址。'; return }
   const current = generation
   saving.value = true
   error.value = ''
   try {
-    const fields = section === 'customer'
-      ? { customerContact: draft.value.customerContact, customerPhone: draft.value.customerPhone }
-      : { shippingAddress: draft.value.shippingAddress, shippingContact: draft.value.shippingContact, shippingPhone: draft.value.shippingPhone }
-    const value = await saveProjectContactInformation({ ...view.value.information, ...fields }, props.token)
-    if (current === generation) { apply(value, section); ElMessage.success(section === 'customer' ? '客户信息已保存' : '发货信息已保存') }
-  } catch (cause) {
-    if (current === generation) error.value = cause instanceof Error ? cause.message : '保存失败'
-  } finally {
-    if (current === generation) saving.value = false
-  }
+    const value = await saveProjectContactInformation({ ...view.value.information, entries: draft.value, ...staff.value }, props.token)
+    if (current === generation) { apply(value); ElMessage.success('客户信息已保存'); return true }
+  } catch (cause) { if (current === generation) error.value = cause instanceof Error ? cause.message : '保存失败'; return false }
+  finally { if (current === generation) saving.value = false }
 }
-watch(() => [props.projectId, props.token], () => load(), { immediate: true })
+watch(() => [props.projectId, props.token], () => { void load() }, { immediate: true })
 </script>
 
 <template>
-  <form class="project-contacts" aria-label="客户及发货信息" @submit.prevent>
-    <div class="project-contacts__cards">
-      <section class="pdm-panel project-contacts__card" aria-label="客户信息">
-        <header><h2>客户信息</h2><div class="project-contacts__header-actions"><el-button size="small" aria-label="刷新客户信息" :disabled="loading || saving" @click="load('customer')">刷新</el-button><el-button v-if="view?.canEdit" type="primary" size="small" aria-label="保存客户信息" :disabled="!canEdit" @click="save('customer')">保存</el-button></div></header>
-        <div class="project-contacts__fields">
-          <label><span>客户名称</span><input aria-label="客户名称" :value="view?.customerName || ''" readonly placeholder="自动带出" /></label>
-          <label><span>联系人</span><input v-model="draft.customerContact" aria-label="客户联系人" :disabled="!canEdit" maxlength="100" /></label>
-          <label><span>联系方式</span><input v-model="draft.customerPhone" aria-label="客户联系方式" :disabled="!canEdit" maxlength="100" /></label>
-        </div>
-      </section>
-      <section class="pdm-panel project-contacts__card" aria-label="发货信息">
-        <header><h2>发货信息</h2><div class="project-contacts__header-actions"><el-button size="small" aria-label="刷新发货信息" :disabled="loading || saving" @click="load('shipping')">刷新</el-button><el-button v-if="view?.canEdit" type="primary" size="small" aria-label="保存发货信息" :disabled="!canEdit" @click="save('shipping')">保存</el-button></div></header>
-        <div class="project-contacts__fields">
-          <label><span>收货地址</span><input v-model="draft.shippingAddress" aria-label="收货地址" :disabled="!canEdit" maxlength="500" :title="draft.shippingAddress" /></label>
-          <label><span>联系人</span><input v-model="draft.shippingContact" aria-label="发货联系人" :disabled="!canEdit" maxlength="100" /></label>
-          <label><span>联系方式</span><input v-model="draft.shippingPhone" aria-label="发货联系方式" :disabled="!canEdit" maxlength="100" /></label>
-        </div>
-      </section>
-    </div>
-    <div v-if="loading || error" class="project-contacts__feedback">
-      <span v-if="loading" role="status">加载中…</span>
-      <span v-else-if="error" class="project-contacts__error" role="alert">{{ error }}</span>
-      <button v-if="error" type="button" class="pdm-text-action" :disabled="saving" @click="load()">重新读取</button>
-    </div>
+  <form class="project-contacts pdm-panel" aria-label="客户及发货信息" @submit.prevent>
+    <header><h2>客户信息</h2><span>{{ view?.customerName || '—' }}</span><div class="project-contacts__header-actions"><el-button aria-label="刷新客户信息" :disabled="loading || saving" @click="load">刷新</el-button><el-button v-if="view?.canEdit" aria-label="新增" :disabled="!canEdit" @click="draft.push({ contact: '', phone: '', address: '', isShippingAddress: false })">新增</el-button><el-button v-if="view?.canEdit" type="primary" aria-label="保存客户信息" :disabled="!canEdit" @click="save">保存</el-button></div></header>
+    <div class="project-contacts__table-wrap"><table class="project-contacts__table"><thead><tr><th>序号</th><th>用途</th><th>联系人</th><th>联系方式</th><th>职位</th><th>备注</th><th>收货地址</th><th v-if="view?.canEdit">操作</th></tr></thead><tbody>
+      <tr v-for="(entry, index) in draft" :key="index" :class="{ 'is-shipping': entry.isShippingAddress }">
+        <td>{{ index + 1 }}</td><td><label v-if="view?.canEdit"><input v-model="entry.isShippingAddress" type="checkbox" :aria-label="`标记收货地址 ${index + 1}`" :disabled="!canEdit">收货地址</label><span v-if="entry.isShippingAddress" class="project-contacts__shipping-badge">收货</span><span v-else-if="!view?.canEdit">联系人</span></td><td><input v-if="view?.canEdit" v-model="entry.contact" :aria-label="`联系人 ${index + 1}`" :disabled="!canEdit" maxlength="100"><span v-else>{{ entry.contact || '—' }}</span></td>
+        <td><input v-if="view?.canEdit" v-model="entry.phone" :aria-label="`联系方式 ${index + 1}`" :disabled="!canEdit" maxlength="100"><span v-else>{{ entry.phone || '—' }}</span></td>
+        <td><input v-if="view?.canEdit" v-model="entry.position" :aria-label="`职位 ${index + 1}`" :disabled="!canEdit" maxlength="100"><span v-else>{{ entry.position || '—' }}</span></td>
+        <td><input v-if="view?.canEdit" v-model="entry.remarks" :aria-label="`备注 ${index + 1}`" :disabled="!canEdit" maxlength="500"><span v-else>{{ entry.remarks || '—' }}</span></td>
+        <td><input v-if="view?.canEdit" v-model="entry.address" :aria-label="`收货地址 ${index + 1}`" :disabled="!canEdit" maxlength="500" placeholder="可不填写"><span v-else>{{ entry.address || '—' }}</span></td>
+
+        <td v-if="view?.canEdit"><button type="button" class="pdm-text-action" :disabled="!canEdit" :aria-label="`删除联系人 ${index + 1}`" @click="draft.splice(index, 1)">删除</button></td>
+      </tr><tr v-if="!draft.length"><td :colspan="view?.canEdit ? 8 : 7">{{ loading ? '加载中…' : '暂无联系人及收货地址' }}</td></tr>
+    </tbody></table></div>
+    <div v-if="error" class="project-contacts__error" role="alert">{{ error }}<button type="button" class="pdm-text-action" :disabled="saving" @click="load">重新读取</button></div>
   </form>
+  <slot :staff="staff" :can-edit="canEdit" :save="save" />
 </template>
 
 <style scoped>
-.project-contacts{flex:none;font-size:11px}
-.project-contacts__cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
-.project-contacts__card{min-width:0;overflow:hidden}
-.project-contacts header{height:32px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;border-bottom:1px solid var(--pdm-border)}
-.project-contacts h2{margin:0;font-size:12px}
-.project-contacts__header-actions{display:flex;gap:5px}
-.project-contacts__header-actions :deep(.el-button){width:60px;min-width:60px!important;height:24px;margin:0;padding:0 6px}
-.project-contacts__fields{display:grid;gap:6px;padding:8px 12px}
-.project-contacts label{display:grid;grid-template-columns:60px minmax(0,1fr);align-items:center;gap:8px}
-.project-contacts input{box-sizing:border-box;min-width:0;width:100%;height:26px;padding:0 8px;font:inherit;color:var(--pdm-text);border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff)}
-.project-contacts input:focus{outline:1px solid var(--pdm-primary,#2563eb)}
-.project-contacts input:disabled,.project-contacts input:read-only{background:var(--pdm-panel-muted,#f8fafc);color:var(--pdm-text)}
-.project-contacts__feedback{min-height:32px;display:flex;align-items:center;gap:12px;color:var(--pdm-muted)}
-.project-contacts__feedback>span{flex:1}.project-contacts button{font-size:11px}
-.project-contacts__error{color:var(--pdm-danger,#dc2626)}
+.project-contacts{flex:none;font-size:11px;overflow:hidden}
+.project-contacts header{min-height:32px;display:flex;align-items:center;gap:12px;padding:0 12px;border-bottom:1px solid var(--pdm-border)}
+.project-contacts h2{margin:0;font-size:12px}.project-contacts header>span{color:var(--pdm-muted)}
+.project-contacts__header-actions{display:flex;gap:5px;margin-left:auto}
+.project-contacts__header-actions :deep(.el-button){width:60px;min-width:60px;height:24px;margin:0;padding:0 6px;font-size:11px}
+.project-contacts__table-wrap{overflow:auto;max-height:240px}.project-contacts__table{width:100%;min-width:850px;border-collapse:collapse;table-layout:fixed}
+.project-contacts th,.project-contacts td{height:32px;padding:4px 8px;text-align:center;border-right:1px solid var(--pdm-border-soft);border-bottom:1px solid var(--pdm-border-soft);overflow-wrap:anywhere}
+.project-contacts th{background:var(--pdm-panel-muted,#f8fafc);font-weight:500}.project-contacts th:first-child{width:40px}.project-contacts th:nth-child(7){width:28%}
+.project-contacts tbody tr:nth-child(even){background:var(--pdm-row-stripe,#f1f5f9)}.project-contacts .is-shipping{background:var(--pdm-blue-soft,#eff6ff)!important}
+.project-contacts input:not([type=checkbox]){box-sizing:border-box;width:100%;min-width:0;height:26px;padding:0 6px;font:inherit;color:var(--pdm-text);border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff)}
+.project-contacts td label{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}.project-contacts__shipping-badge{display:inline-block;margin-left:4px;padding:1px 4px;background:var(--pdm-blue);color:white;border-radius:3px;white-space:nowrap}
+.project-contacts__error{padding:8px;color:var(--pdm-danger,#dc2626)}.project-contacts button{font-size:11px}
 </style>

@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 using Upton.Pdm.Infrastructure;
@@ -15,6 +15,18 @@ public static class MaterialEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok((await service.ListMaterialsAsync(query, categoryCode, includeArchived ?? false, limit ?? 100, actor, role, cancellationToken)).Select(MapMaterial));
+        });
+
+        api.MapGet("/materials/matches", async (string field, string value, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok((await service.MatchApprovedMaterialsAsync(field, value, actor, role, cancellationToken)).Select(MapMaterial));
+        });
+
+        api.MapGet("/materials/brands", async (string? query, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.ListMaterialBrandsAsync(query, actor, role, cancellationToken));
         });
 
         api.MapGet("/materials/page", async (string? query, string? categoryCode, string? brand, bool? includeArchived, int? page, int? pageSize, string? createdAtOrder, bool? ordinaryOnly, string? sortBy, string? sortOrder, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
@@ -149,6 +161,12 @@ public static class MaterialEndpointExtensions
             return Results.Ok(MapMaterial(await service.ReactivateAsync(materialId, expectedRowVersion, actor, role, cancellationToken)));
         });
 
+        api.MapPost("/materials/link-bom-batch", async (LinkBomMaterialsRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(MapMaterial(await service.LinkBomMaterialsAsync(request.ProjectId, request.BomItemIds, request.MaterialId, actor, role, cancellationToken)));
+        });
+
         api.MapPost("/materials/link-bom", async (LinkBomMaterialRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -159,6 +177,13 @@ public static class MaterialEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(MapMaterial(await service.CreateFromBomAsync(new(request.ProjectId, request.BomItemId), actor, role, cancellationToken)));
+        });
+
+        api.MapPost("/material-code/validate", async (ValidateBomMaterialCodesRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok((await service.ValidateStandardBomMaterialCodesAsync(request.ProjectId, request.Items,
+                actor, role, cancellationToken)).Select(MapResolution));
         });
 
         api.MapPost("/material-code/resolve", async (ResolveMaterialCodesRequest request, HttpContext context, MaterialService service, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -376,10 +401,21 @@ public static class MaterialEndpointExtensions
             return Results.Ok(MapTask(await service.RetrySyncTaskAsync(taskId, actor, role, cancellationToken)));
         });
 
-        api.MapPost("/material-sync-tasks/{taskId:guid}/execute", async (Guid taskId, HttpContext context, MaterialCodeSynchronizationService service, CancellationToken cancellationToken) =>
+        api.MapPost("/material-sync-tasks/{taskId:guid}/execute", async (Guid taskId, HttpContext context, MaterialCodeSynchronizationService service, IMaterialRepository materials, U9MaterialIntegrationService integration, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var result = await service.SynchronizeTaskAsync(taskId, actor, role, cancellationToken);
+            var task = await materials.FindSyncTaskAsync(taskId, cancellationToken)
+                ?? throw new PdmNotFoundException("U9C同步任务不存在。");
+            MaterialCodeSynchronizationResult result;
+            if (task.Operation == MaterialSyncOperation.Update)
+            {
+                var selection = context.Request.ContentLength is > 0
+                    ? await context.Request.ReadFromJsonAsync<ConfirmU9MaterialAttributesRequest>(cancellationToken) : null;
+                if (selection?.Attributes is not { Count: > 0 }) throw new PdmRuleException("请在料品管理中选择属性并确认更新U9C。");
+                var updated = await integration.ExecuteTaskAsync(taskId, actor, role, cancellationToken, selection.Attributes);
+                result = new(updated.Material, updated.Task, updated, null, [], true, "已按人工确认的属性更新U9C。");
+            }
+            else result = await service.SynchronizeTaskAsync(taskId, actor, role, cancellationToken);
             return Results.Ok(new
             {
                 Material = MapMaterial(result.Material),

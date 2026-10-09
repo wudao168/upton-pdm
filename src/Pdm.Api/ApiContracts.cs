@@ -1,4 +1,4 @@
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 
@@ -134,7 +134,8 @@ public sealed record PreviewAgentProbeRequest(
     int? TimeoutMinutes = null);
 
 /// <summary>转图电脑上的安装程序登记自己时提交的信息。</summary>
-public sealed record PreviewAgentRegisterRequest(string AgentUrl, string AgentToken, int TimeoutMinutes);
+public sealed record PreviewAgentRegisterRequest(string AgentUrl, string AgentToken, int TimeoutMinutes, string? Name = null);
+public sealed record PreviewAgentUnregisterRequest(string? AgentUrl = null);
 
 public sealed record PreviewAgentRegisterResult(bool Ok, string AgentUrl, int TimeoutMinutes, string Message);
 
@@ -344,7 +345,7 @@ public sealed record EmergencyApprovalRequest(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] ApprovalDecision Decision,
     string Reason);
 
-public sealed record ReplaceBomRequest(IReadOnlyList<BomItemInput> Items);
+public sealed record ReplaceBomRequest(IReadOnlyList<BomItemInput> Items, IReadOnlyList<BomSummaryEdit>? SummaryRows = null, IReadOnlyList<Guid>? SummaryOrder = null);
 
 public sealed record ResolveBomItemRequest(
     string Action,

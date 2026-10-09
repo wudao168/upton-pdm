@@ -19,7 +19,7 @@ vi.mock('../src/projectPlanExport', () => planExport)
 
 const base = { owner: 'pm', primaryProjectManager: 'pm', collaborativeProjectManagers: [], designLeads: [], designers: [], quantity: 1, serialNumbers: [], responsibleUsers: [] }
 const root = { ...base, id: 'root', name: '主项目', code: 'P1', customerName: '测试客户', projectTypeCode: '自动化设备', deviceModel: 'AK-1', serialNumbers: ['70000032'], executionUnitName: 'T3事业部', designLead: 'designer', designers: ['designer'] } as unknown as ProjectSummary
-const child = { ...base, id: 'child', name: '设备一', code: 'P1-1', parentProjectId: 'root' } as unknown as ProjectSummary
+const child = { ...base, id: 'child', name: '设备一', code: 'P1-1', parentProjectId: 'root', effectiveProjectPermissions: ['project.plan.edit'] } as unknown as ProjectSummary
 const target = { ...child, id: 'target', name: '设备二', code: 'P1-2' }
 const approvedTarget = { ...child, id: 'approved', name: '设备三', code: 'P1-3' }
 const stages = [{ code: 'custom-review', name: '方案确认' }, { code: 'custom-handover', name: '交付' }]
@@ -755,9 +755,9 @@ describe('项目计划审批和配置', () => {
     expect(document.body.textContent).not.toContain('生成初始计划')
   })
 
-  it('总览修改按任务所属子项目授权，非其项目经理不能编辑安排', async () => {
+  it('总览修改按独立计划权限授权，无权限时不能编辑安排', async () => {
     const wrapper = render(root)
-    await wrapper.setProps({ projects: [root, { ...child, primaryProjectManager: 'other' }, target, approvedTarget] })
+    await wrapper.setProps({ canEdit: false, projects: [root, { ...child, primaryProjectManager: 'other', effectiveProjectPermissions: [] }, target, approvedTarget] })
     await flushPromises()
     await clickText('编辑子计划')
     expect(document.querySelectorAll('.pdm-plan-management-list article')[0]!.textContent).toContain('查看计划')
@@ -780,7 +780,7 @@ describe('项目计划审批和配置', () => {
       currentRole: 'Administrator',
       projects: [
         { ...root, primaryProjectManager: 'root-pm', collaborativeProjectManagers: ['other-admin'] },
-        { ...child, primaryProjectManager: 'child-pm', collaborativeProjectManagers: ['other-admin'] },
+        { ...child, primaryProjectManager: 'child-pm', collaborativeProjectManagers: ['other-admin'], effectiveProjectPermissions: [] },
         target,
         approvedTarget,
       ],

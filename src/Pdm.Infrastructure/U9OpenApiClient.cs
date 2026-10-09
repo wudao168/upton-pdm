@@ -837,6 +837,7 @@ public sealed partial class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiC
         ReadBool(row, "IsPhantomPart", "m_isPhantomPart"),
         ReadBool(row, "IsDelete", "m_isDelete"))
         {
+            OperationNum = ReadString(row, "OperationNum", "m_operationNum"),
             UsageQtyType = ReadInt(row, "UsageQtyType", "m_usageQtyType"),
             IsSpecialUseItem = ReadBool(row, "IsSpecialUseItem", "m_isSpecialUseItem"),
             IsIssueOrgFixed = ReadBool(row, "IsIssueOrgFixed", "m_isIssueOrgFixed"),

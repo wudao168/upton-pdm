@@ -1,6 +1,8 @@
-namespace Upton.Pdm.Api;
+﻿namespace Upton.Pdm.Api;
 
 public sealed record SetMaterialCoverRequest(Guid? AttachmentId, long ExpectedRowVersion);
+
+public sealed record ConfirmU9MaterialAttributesRequest(IReadOnlyList<string> Attributes);
 
 public sealed record SaveMaterialRequest(
     string? MaterialCode,
@@ -73,9 +75,11 @@ public sealed record U9MaterialSampleRequest(
 
 public sealed record CreateMaterialSyncBatchRequest(IReadOnlyList<Guid> TaskIds);
 
+public sealed record LinkBomMaterialsRequest(Guid ProjectId, IReadOnlyList<Guid> BomItemIds, Guid MaterialId);
 public sealed record LinkBomMaterialRequest(Guid ProjectId, Guid BomItemId, Guid MaterialId);
 
 public sealed record ResolveMaterialCodesRequest(Guid ProjectId, IReadOnlyList<Guid> BomItemIds);
+public sealed record ValidateBomMaterialCodesRequest(Guid ProjectId, IReadOnlyList<Upton.Pdm.Application.BomItemInput> Items);
 
 public sealed record ApplyMaterialCodesRequest(Guid ProjectId, IReadOnlyList<Guid> BomItemIds);
 

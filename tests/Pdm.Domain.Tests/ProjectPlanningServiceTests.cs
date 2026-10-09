@@ -477,8 +477,8 @@ public sealed class ProjectPlanningServiceTests
         var template = Assert.Single(await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default));
         var draft = await service.GenerateAsync(project.Id, new(template.Id, new DateOnly(2026, 9, 10), 60, false, null), "admin", UserRole.Administrator, default);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.DeleteDraftAsync(project.Id, draft.RowVersion, "outsider", UserRole.Engineer, default));
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.DeleteDraftAsync(project.Id, draft.RowVersion, "collaborator", UserRole.Engineer, default));
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.DeleteDraftAsync(project.Id, draft.RowVersion, "other-admin", UserRole.Administrator, default));
+        Assert.True(await ProjectPermissionPolicy.CanAsync(pdm, project.Id, "collaborator", UserRole.Engineer, PermissionCodes.ProjectPlanEdit, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.DeleteDraftAsync(project.Id, draft.RowVersion, "other-admin", UserRole.Engineer, default));
         try
         {
             TenantContext.Set(new(Guid.NewGuid(), project.OrganizationId ?? Guid.Empty, project.OrganizationId ?? Guid.Empty, "developer", "Administrator", true, new HashSet<string>(), ["developer"]));
@@ -1139,6 +1139,8 @@ public sealed class ProjectPlanningServiceTests
         var service = new ProjectPlanningService(planning, pdm, TimeProvider.System);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
         await pdm.SetMainProjectStaffingAsync(project.Id, new("pm", [], ["designer"]), "admin", default);
+        var permissions = await pdm.GetRolePermissionsAsync(role, default);
+        await pdm.SetRolePermissionsAsync(role.ToString(), permissions.Append(PermissionCodes.ProjectPlanEdit).ToArray(), default);
         var shared = Assert.Single(await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveTemplateAsync(shared.Id, new("修改公共模板", null, true, shared.Tasks, shared.RowVersion, shared.Stages), "pm", role, default));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveTemplateAsync(null, new("新模板", null, true, shared.Tasks, null, shared.Stages), "pm", role, default));
@@ -1172,32 +1174,19 @@ public sealed class ProjectPlanningServiceTests
         Assert.Equal(ProjectPlanTemplateScope.System, replaced.Scope);
     }
 
-    [Theory]
-    [InlineData("developer", true)]
-    [InlineData("Administrator", true)]
-    [InlineData("platform_admin", true)]
-    [InlineData("custom-admin-base", false)]
-    public async Task Template_editing_uses_assigned_role_codes_not_base_role_or_settings_permission(string roleCode, bool allowed)
+    [Fact]
+    public async Task SystemTemplateEditingUsesIndependentPermission()
     {
         var pdm = new InMemoryPdmRepository(TimeProvider.System);
         var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), pdm, TimeProvider.System);
         var shared = Assert.Single(await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default));
-        TenantContext.Set(new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "actor", roleCode, true, new HashSet<string> { "settings.storage.manage" }));
-        try
-        {
-            var command = new SaveProjectPlanTemplateCommand("设置页模板", null, true, shared.Tasks, null, shared.Stages);
-            if (allowed)
-            {
-                var created = await service.SaveTemplateAsync(null, command, "actor", UserRole.Engineer, default);
-                var updated = await service.SaveTemplateAsync(created.Id, command with { Name = "修改初始值", ExpectedRowVersion = created.RowVersion }, "actor", UserRole.Engineer, default);
-                Assert.Equal("修改初始值", updated.Name);
-                Assert.NotEmpty(await service.ListTemplatesAsync(true, "actor", UserRole.Engineer, default));
-            }
-            else
-            {
-                await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveTemplateAsync(null, command, "actor", UserRole.Administrator, default));
-            }
-        }
-        finally { TenantContext.Clear(); }
+        var command = new SaveProjectPlanTemplateCommand("设置页模板", null, true, shared.Tasks, null, shared.Stages);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveTemplateAsync(null, command, "actor", UserRole.Engineer, default));
+        await pdm.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectPlanTemplateManage], default);
+        var created = await service.SaveTemplateAsync(null, command, "actor", UserRole.Engineer, default);
+        Assert.Equal("设置页模板", created.Name);
+        await pdm.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView], default);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveTemplateAsync(created.Id,
+            command with { ExpectedRowVersion = created.RowVersion }, "actor", UserRole.Engineer, default));
     }
 }

@@ -63,8 +63,10 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
             var jobs = new List<PreviewJob>();
             var stamps = new Dictionary<Guid, (ReleasePreviewSource Source, string Revision, string Qr)>();
             var result = new Dictionary<Guid, FormalDrawingSource>();
+            var verifiedDrawings = 0;
             foreach (var source in drawings)
             {
+                ReleasePublishingProgress.Set(package.Id, $"校验工程图 {++verifiedDrawings}/{drawings.Length}：{source.FileName}");
                 var version = await repository.FindDocumentVersionAsync(source.DocumentId, source.SourceVersionId, cancellationToken)
                     ?? throw new PdmConflictException($"工程图{source.DrawingNumber}的审批源版本不存在。");
                 if (version.Status != DocumentVersionStatus.Work || !string.Equals(version.Sha256, source.Sha256, StringComparison.OrdinalIgnoreCase))
@@ -93,6 +95,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                         || !string.Equals(saved.Formal.Sha256, actualSha, StringComparison.OrdinalIgnoreCase)
                         || saved.Formal.FileLength != new FileInfo(existingPath).Length)
                         throw new PdmConflictException($"工程图{source.DrawingNumber}的正式源图与审批来源不一致，已停止发布。");
+                    File.SetAttributes(existingPath, File.GetAttributes(existingPath) | FileAttributes.ReadOnly);
                     result.Add(source.DocumentId, saved.Formal);
                     continue;
                 }
@@ -105,7 +108,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
             var runJobs = jobs.Concat(references).ToArray();
             if (runJobs.GroupBy(job => job.FileName, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
                 throw new PdmRuleException("正式图纸引用树存在重名文件，无法安全生成。");
-            if (remote) await RunRemoteAgentAsync(conversion, runJobs, workRoot, outputRoot, cancellationToken);
+            if (remote) await RunRemoteAgentAsync(conversion, runJobs, workRoot, outputRoot, cancellationToken, package.State == ReleasePackageState.Publishing ? package.Id : null);
             else await RunLocalWorkerAsync(conversion, runJobs, sourceRoot, workRoot, outputRoot, cancellationToken);
             foreach (var job in jobs)
             {
@@ -125,6 +128,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                 else File.Copy(job.OutputPath, vaultPath, false);
                 if (!string.Equals(await ComputeSha256Async(vaultPath, cancellationToken), generatedSha, StringComparison.OrdinalIgnoreCase))
                     throw new PdmConflictException($"工程图{job.FileName}的正式源图保存后指纹不一致。");
+                File.SetAttributes(vaultPath, File.GetAttributes(vaultPath) | FileAttributes.ReadOnly);
                 var formal = new FormalDrawingSource(stamp.Source.SourceVersionId, relative,
                     new FileInfo(vaultPath).Length, generatedSha, stamp.Revision, stamp.Qr);
                 var tempManifest = vaultPath + $".{Guid.NewGuid():N}.json";
@@ -230,7 +234,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
             {
                 var runJobs = pendingJobs.Concat(referenceJobs).ToArray();
                 if (remote)
-                    await RunRemoteAgentAsync(conversionSettings, runJobs, workRoot, outputRoot, cancellationToken);
+                    await RunRemoteAgentAsync(conversionSettings, runJobs, workRoot, outputRoot, cancellationToken, package.State == ReleasePackageState.Publishing ? package.Id : null);
                 else
                     await RunLocalWorkerAsync(conversionSettings, runJobs, sourceRoot, workRoot, outputRoot, cancellationToken);
                 foreach (var job in pendingJobs) await StoreToCacheAsync(cacheRoot, cacheFingerprint, job, cancellationToken);
@@ -312,8 +316,15 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         IReadOnlyList<PreviewJob> jobs,
         string workRoot,
         string outputRoot,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, Guid? publishingPackageId = null)
     {
+        if (publishingPackageId is Guid waitingId) ReleasePublishingProgress.Set(waitingId, "等待空闲转图服务器");
+        using var lease = conversion.Servers.Count == 0 ? null : await PreviewAgentPool.AcquireAsync(conversion,
+            $"{jobs.Count(job => job.Convert)} 项：{string.Join("、", jobs.Where(job => job.Convert).Take(3).Select(job => job.FileName))}",
+            httpClient, cancellationToken);
+        conversion = lease?.Settings ?? conversion;
+        var serverName = conversion.Servers.FirstOrDefault(server => string.Equals(server.AgentUrl.TrimEnd('/'), conversion.NormalizedAgentUrl, StringComparison.OrdinalIgnoreCase))?.Name ?? conversion.NormalizedAgentUrl;
+        if (publishingPackageId is Guid assignedId) ReleasePublishingProgress.Set(assignedId, $"已分配 {serverName}，准备发送转图文件");
         var requestPath = Path.Combine(workRoot, "request.zip");
         var manifest = new PreviewAgentManifest(jobs
             .Select(job => new PreviewAgentJob(job.DocumentId, job.Kind.ToString(), job.FileName, Path.GetFileName(job.OutputPath), job.Convert, job.ReleaseRevision, job.QrContent))
@@ -347,6 +358,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         HttpResponseMessage response;
         try
         {
+            if (publishingPackageId is Guid runningId) ReleasePublishingProgress.Set(runningId, $"向 {serverName} 发送文件并等待转换结果");
             response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -415,6 +427,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         var referenceJobs = new List<PreviewJob>();
         foreach (var source in referenceSources)
         {
+            if (package.State == ReleasePackageState.Publishing) ReleasePublishingProgress.Set(package.Id, $"校验引用文件：{source.FileName}");
             cancellationToken.ThrowIfCancellationRequested();
             if (jobNames.Contains(source.FileName)) continue;
             var path = StorageLocationPolicy.ResolveUnder(vaultRoot, source.StorageRelativePath);

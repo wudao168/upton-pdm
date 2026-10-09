@@ -35,6 +35,24 @@ const bomItem: BomItem = {
 }
 
 describe('PreviewWorkspace', () => {
+  it('清空离开页面前的打开错误，并忽略页面隐藏期间的状态回调', async () => {
+    const wrapper = mount(PreviewWorkspace, { props: { selected, related: [], desktopAvailable: true, active: true } })
+    const status = (state: string, message: string) => window.dispatchEvent(new CustomEvent('pdm-solidworks-status', { detail: { state, message } }))
+    status('error', '上次打开失败')
+    await nextTick()
+    expect(wrapper.get('.pdm-solidworks-feedback.is-error').text()).toBe('上次打开失败')
+    await wrapper.setProps({ active: false })
+    status('error', '后台迟到的错误')
+    await wrapper.setProps({ active: true })
+    expect(wrapper.find('.pdm-solidworks-feedback').exists()).toBe(false)
+    status('loading', '正在等待SolidWorks退出')
+    await nextTick()
+    expect(wrapper.get('.pdm-solidworks-feedback').classes()).not.toContain('is-error')
+    await wrapper.setProps({ selected: { ...selected, id: 'other', documentId: 'other' } })
+    expect(wrapper.find('.pdm-solidworks-feedback').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('图档属性以预览区顶部一行横向常驻显示，且不提供折叠', () => {
     const wrapper = mount(PreviewWorkspace, {
       props: { selected, related: [], bomItem },

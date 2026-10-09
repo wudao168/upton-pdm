@@ -9,8 +9,8 @@ public sealed class ProjectPlanningService(
 {
     public async Task<IReadOnlyList<ProjectPlanTemplate>> ListTemplatesAsync(bool includeInactive, string actor, UserRole role, CancellationToken cancellationToken, Guid? projectId = null)
     {
-        var canManageSystem = CanManageTemplates(role);
-        var canManagePersonal = projectId is Guid id && CanManage(await RequireReadProjectAsync(id, actor, role, cancellationToken), actor, role);
+        var canManageSystem = await CanManageTemplatesAsync(actor, role, cancellationToken);
+        var canManagePersonal = projectId is Guid id && await CanManageAsync(await RequireReadProjectAsync(id, actor, role, cancellationToken), actor, role, cancellationToken);
         var templates = await EnsureDefaultTemplateAsync(includeInactive, actor, cancellationToken);
         var visible = templates.Where(template =>
             template.Scope == ProjectPlanTemplateScope.System
@@ -25,7 +25,7 @@ public sealed class ProjectPlanningService(
 
     public async Task<ProjectPlanTemplate> SaveTemplateAsync(Guid? templateId, SaveProjectPlanTemplateCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        var canManageSystem = CanManageTemplates(role);
+        var canManageSystem = await CanManageTemplatesAsync(actor, role, cancellationToken);
         var current = templateId is Guid id ? await plans.FindTemplateAsync(id, cancellationToken) : null;
         if (templateId is not null && current is null) throw new PdmNotFoundException("计划模板不存在。");
         current = current is null ? null : NormalizeLegacyWorkflowTasks(current);
@@ -84,7 +84,7 @@ public sealed class ProjectPlanningService(
 
     public async Task<ProjectPlanTemplate> ReplaceSystemDefaultTemplateAsync(Guid sourceTemplateId, long expectedSourceRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        if (!CanManageTemplates(role)) throw new UnauthorizedAccessException("仅开发者和管理员可替换系统默认计划模板。");
+        if (!await CanManageTemplatesAsync(actor, role, cancellationToken)) throw new UnauthorizedAccessException("当前账号没有系统计划模板维护权限。");
         var source = await plans.FindTemplateAsync(sourceTemplateId, cancellationToken)
             ?? throw new PdmNotFoundException("计划模板不存在。");
         if (source.RowVersion != expectedSourceRowVersion) throw new PdmConflictException("计划模板已被其他用户修改，请刷新后重试。");
@@ -138,7 +138,7 @@ public sealed class ProjectPlanningService(
             ?? (await EnsureDefaultTemplateAsync(false, actor, cancellationToken)).FirstOrDefault(item => item.Id == command.TemplateId)
             ?? throw new PdmNotFoundException("计划模板不存在。");
         template = await EffectiveTemplateAsync(NormalizeLegacyWorkflowTasks(template), cancellationToken);
-        if (template.Scope == ProjectPlanTemplateScope.Personal && !string.Equals(template.OwnerUsername, actor, StringComparison.OrdinalIgnoreCase) && !CanManageTemplates(role))
+        if (template.Scope == ProjectPlanTemplateScope.Personal && !string.Equals(template.OwnerUsername, actor, StringComparison.OrdinalIgnoreCase) && !await CanManageTemplatesAsync(actor, role, cancellationToken))
             throw new UnauthorizedAccessException("无权使用其他项目经理的个人计划模板。");
         if (!template.IsActive) throw new PdmRuleException("停用模板不能用于生成计划。");
         var current = await plans.FindPlanAsync(projectId, cancellationToken);
@@ -207,7 +207,7 @@ public sealed class ProjectPlanningService(
                 && ((plan.FollowsParentPlan && plan.ParentPlanId == current.Id) || (!deletingApprovedPlan && includeIndependentChildren))))
             {
                 var child = children.Single(item => item.Id == childPlan.ProjectId);
-                if (!CanManage(child, actor, role)) throw new UnauthorizedAccessException($"无权删除子项目“{child.Code}”的计划。");
+                if (!await CanManageAsync(child, actor, role, cancellationToken)) throw new UnauthorizedAccessException($"无权删除子项目“{child.Code}”的计划。");
                 deleted.Add((child, childPlan));
             }
         }
@@ -331,7 +331,7 @@ public sealed class ProjectPlanningService(
         foreach (var child in children)
         {
             var current = await plans.FindPlanAsync(child.Id, cancellationToken, includeDeleted: true);
-            var skip = !CanManage(child, actor, role) ? "无子项目编辑权限"
+            var skip = !await CanManageAsync(child, actor, role, cancellationToken) ? "无子项目编辑权限"
                 : current is null && expectedRowVersion is not null && !createMissingFollowers ? "尚未建立计划，保留当前状态"
                 : current?.IsDeleted == true ? "已删除的计划不自动恢复"
                 : current?.ApprovalStatus == ProjectPlanApprovalStatus.Approved ? "已生效，保留原计划"
@@ -428,7 +428,7 @@ public sealed class ProjectPlanningService(
         RequireEffective(current);
         if (current.RowVersion != command.ExpectedRowVersion) throw new PdmConflictException("计划数据已更新，请重新确认后操作。");
         var task = current.Tasks.FirstOrDefault(item => item.Id == taskId) ?? throw new PdmNotFoundException("计划任务不存在。");
-        if (!CanManage(project, actor, role) && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase))
+        if (!await CanManageAsync(project, actor, role, cancellationToken) && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("仅任务责任人或项目经理可以填报实际进度。");
         if (command.CompletionPercent is < 0 or > 100) throw new PdmRuleException("完成比例必须为0至100。");
         var today = DateOnly.FromDateTime(timeProvider.GetLocalNow().DateTime);
@@ -1215,7 +1215,7 @@ public sealed class ProjectPlanningService(
         return tasks.Max(item => item.Status == ProjectPlanTaskStatus.Completed ? item.ActualFinish ?? item.PlannedFinish : item.PlannedFinish < today ? today.AddDays(item.PlannedFinish.DayNumber - item.PlannedStart.DayNumber) : item.PlannedFinish);
     }
 
-    private static int CompletionPercent(IReadOnlyList<ProjectPlanTask> tasks, IReadOnlyList<ProjectPlanStageDefinition> stages)
+    internal static int CompletionPercent(IReadOnlyList<ProjectPlanTask> tasks, IReadOnlyList<ProjectPlanStageDefinition> stages)
     {
         if (stages.All(stage => stage.ParticipatesInDelivery is not null))
         {
@@ -1297,17 +1297,15 @@ public sealed class ProjectPlanningService(
     private async Task<Project> RequireManageAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         var project = await RequireReadProjectAsync(projectId, actor, role, cancellationToken);
-        if (!CanManage(project, actor, role)) throw new UnauthorizedAccessException("仅该项目的主项目经理或开发者可以维护项目计划。");
+        if (!await CanManageAsync(project, actor, role, cancellationToken)) throw new UnauthorizedAccessException("当前账号没有项目计划维护权限。");
         return project;
     }
 
-    private static bool CanManage(Project project, string actor, UserRole role) =>
-        TenantContext.Current?.HasRole("developer") == true
-        || string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase);
+    private Task<bool> CanManageAsync(Project project, string actor, UserRole role, CancellationToken ct) =>
+        ProjectPermissionPolicy.CanAsync(repository, project.Id, actor, role, PermissionCodes.ProjectPlanEdit, ct);
 
-    private static bool CanManageTemplates(UserRole role) => TenantContext.Current is { } tenant
-        ? tenant.HasRole("developer") || tenant.HasRole("platform_admin") || tenant.HasRole(nameof(UserRole.Administrator))
-        : role is UserRole.Administrator or UserRole.PlatformAdministrator;
+    private Task<bool> CanManageTemplatesAsync(string actor, UserRole role, CancellationToken ct) =>
+        repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectPlanTemplateManage, ct);
 
     private static string Required(string? value, int maxLength, string field)
     {

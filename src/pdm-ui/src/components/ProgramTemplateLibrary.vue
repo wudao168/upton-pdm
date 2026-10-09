@@ -18,8 +18,10 @@ import {
   listProgramTemplates,
   saveProgramTemplateOptions,
   submitProgramTemplateRevision,
+  transferProgramTemplateTask,
   updateProgramTemplateDraft,
   uploadProgramTemplateFile,
+  withdrawProgramTemplateRevision,
 } from '../api'
 import type {
   ProgramTemplate,
@@ -600,6 +602,40 @@ async function decide(decision: 'Approved' | 'Rejected') {
   }
 }
 
+async function withdrawActiveRevision() {
+  const revision = activeRevision.value
+  if (!revision) return
+  try {
+    await ElMessageBox.confirm(`撤回 ${revision.version} 的审批并返回草稿？`, '撤回程序模板', { type: 'warning' })
+    await withdrawProgramTemplateRevision(revision.id, revision.rowVersion, props.token)
+    ElMessage.success('程序模板已撤回')
+    await load()
+    if (selected.value) selected.value = await getProgramTemplate(selected.value.id, props.token)
+    emit('tasksChanged')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error instanceof Error ? error.message : '撤回失败')
+  }
+}
+
+async function transferActiveTask() {
+  const task = activeTask.value
+  if (!task) return
+  try {
+    const { value } = await ElMessageBox.prompt('请输入接收人的登录账号。接收人必须具有该审批节点权限。', '转交程序模板审批', {
+      inputValidator: value => value.trim().length > 0 || '请填写接收人账号',
+    })
+    await transferProgramTemplateTask(task.id, value.trim(), task.rowVersion, props.token)
+    ElMessage.success('审批任务已转交')
+    await load()
+    if (selected.value) selected.value = await getProgramTemplate(selected.value.id, props.token)
+    emit('tasksChanged')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error instanceof Error ? error.message : '转交失败')
+  }
+}
+
 async function downloadCurrent() {
   if (!selected.value) return
   const published = selected.value.revisions.find(item => item.id === selected.value?.currentPublishedRevisionId)
@@ -696,6 +732,8 @@ onMounted(async () => {
           <el-button v-if="activeRevision?.state === 'Draft' && activeRevision.createdBy === username" @click="editActiveDraft">编辑草稿</el-button>
           <el-button v-if="activeRevision?.state === 'Rejected' && activeRevision.createdBy === username && canSubmit && !selected?.revisions.some(item => ['Draft','PendingReview','PendingApproval'].includes(item.state))" @click="createNextVersion">根据退回意见修改</el-button>
           <el-button v-if="selected?.currentPublishedRevisionId && canSubmit && !selected.revisions.some(item => ['Draft','PendingReview','PendingApproval'].includes(item.state))" @click="versionDialogOpen = true">创建新版本</el-button>
+          <el-button v-if="activeRevision && ['PendingReview','PendingApproval'].includes(activeRevision.state) && activeRevision.createdBy.toLowerCase() === username.toLowerCase()" @click="withdrawActiveRevision">撤回申请</el-button>
+          <el-button v-if="activeTask" @click="transferActiveTask">转交</el-button>
           <el-button v-if="activeTask" type="danger" plain @click="decide('Rejected')">退回</el-button>
           <el-button v-if="activeTask" type="primary" @click="decide('Approved')">{{ activeTask.stage === 'Review' ? '审核通过' : '批准发布' }}</el-button>
           <el-button v-if="selected?.currentPublishedRevisionId && !selected.isArchived" type="primary" :icon="Download" @click="downloadCurrent">下载批准版本</el-button>
@@ -779,13 +817,13 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.program-template-library { min-height: 0; height: 100%; display: flex; flex-direction: column; gap: 12px; }
+.program-template-library { min-height: 0; height: 100%; display: flex; flex-direction: column; gap: var(--pdm-container-gap); }
 .program-template-panel { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0; }.program-template-toolbar { min-height: 50px; display: grid; grid-template-columns: 128px 128px 128px 128px minmax(160px,1fr) 150px auto auto auto; align-items: center; gap: 9px; padding: 8px 12px; border-bottom: 1px solid var(--pdm-border); }.program-template-toolbar > span { color: var(--pdm-muted); font-size: 11px; white-space: nowrap; }.program-template-toolbar .program-template-upload { width: 150px; }
 .program-template-panel :deep(.el-table__header .cell),.program-template-panel :deep(.el-table__body .cell) { text-align: center; justify-content: center; }
 .program-template-panel :deep(.el-table__body),.program-template-panel :deep(.el-table__body .cell),.program-template-panel :deep(.el-table__body code),.program-template-panel :deep(.el-table__body .el-tag),.program-template-panel :deep(.el-table__body .el-button) { font-size: 12px; }.program-template-name,.program-template-description,.program-template-cell-note { min-width: 0; display: block; overflow: hidden; font-size: 12px; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }.program-template-description,.program-template-cell-note { color: var(--pdm-muted); }.program-template-vendor { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 5px; overflow: hidden; white-space: nowrap; }.program-template-vendor strong { flex: 0 0 auto; font-size: 12px; }.program-template-vendor .program-template-cell-note { display: inline; }
-.program-template-detail-title { min-width: 0; display: flex; align-items: center; gap: 10px; }.program-template-detail-title div { min-width: 0; flex: 1; }.program-template-detail-title h2 { margin: 0; overflow: hidden; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }.program-template-detail-title p { margin: 3px 0 0; color: var(--pdm-muted); font-size: 11px; }
+.program-template-detail-title { min-width: 0; display: flex; align-items: center; gap: 10px; }.program-template-detail-title div { min-width: 0; flex: 1; }.program-template-detail-title h2 { margin: 0; overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }.program-template-detail-title p { margin: 3px 0 0; color: var(--pdm-muted); font-size: 11px; }
 .program-template-section { padding: 2px 0 18px; }.program-template-section + .program-template-section { border-top: 1px solid var(--pdm-border-soft); padding-top: 16px; }.program-template-section h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; color: var(--pdm-muted); font-size: 11px; font-weight: 600; }.program-template-section h3::after { height: 1px; flex: 1; background: var(--pdm-border-soft); content: ''; }.program-template-section > p { margin: 0; color: var(--pdm-text-soft); line-height: 1.4; }
-.program-parameter-groups { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; }.program-parameter-groups article { overflow: hidden; border: 1px solid var(--pdm-border); border-radius: 8px; }.program-parameter-groups article header { padding: 9px 11px; background: #eef5ff; color: var(--pdm-blue); font-size: 11px; font-weight: 600; }.program-parameter-groups article.is-input header { background: #e8f8f5; color: var(--pdm-green); }.program-parameter-groups article.is-output header { background: #fff4e5; color: var(--pdm-orange); }.program-parameter-groups article.is-inout header { background: #f1edff; color: var(--pdm-purple); }.program-parameter-groups article > div { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; border-top: 1px solid var(--pdm-border-soft); }.program-parameter-groups article strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.program-parameter-groups article code { color: var(--pdm-muted); font-size: 11px; }.program-parameter-groups article > p { margin: 0; padding: 12px; color: var(--pdm-muted); text-align: center; }
+.program-parameter-groups { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; }.program-parameter-groups article { overflow: hidden; border: 1px solid var(--pdm-border); border-radius: 8px; }.program-parameter-groups article header { padding: 9px 11px; background: var(--pdm-theme-accent-soft); color: var(--pdm-blue); font-size: 11px; font-weight: 600; }.program-parameter-groups article.is-input header { background: var(--pdm-green-soft); color: var(--pdm-green); }.program-parameter-groups article.is-output header { background: var(--pdm-orange-soft); color: var(--pdm-orange); }.program-parameter-groups article.is-inout header { background: #f1edff; color: var(--pdm-purple); }.program-parameter-groups article > div { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; border-top: 1px solid var(--pdm-border-soft); }.program-parameter-groups article strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.program-parameter-groups article code { color: var(--pdm-muted); font-size: 11px; }.program-parameter-groups article > p { margin: 0; padding: 12px; color: var(--pdm-muted); text-align: center; }
 .program-template-diagram-scroll { overflow-x: auto; border: 1px solid var(--pdm-border); border-radius: 9px; background: #fbfdff; padding: 8px 12px; }
 .program-template-properties { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 0 20px; margin: 0; }.program-template-properties > div { min-width: 0; display: grid; grid-template-columns: 90px minmax(0,1fr); padding: 7px 0; border-bottom: 1px solid var(--pdm-border-soft); }.program-template-properties .is-wide { grid-column: 1/-1; }.program-template-properties dt { color: var(--pdm-muted); }.program-template-properties dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }.program-template-properties code { font-size: 11px; }
 .program-template-decision :deep(.el-checkbox-group) { display: grid; gap: 8px; margin-bottom: 12px; }.program-template-decision :deep(.el-checkbox) { height: auto; white-space: normal; }

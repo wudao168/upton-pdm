@@ -5,6 +5,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>Upton.Pdm.PreviewAgent.Setup</RootNamespace>
     <AssemblyName>Upton.Pdm.PreviewAgent.Setup</AssemblyName>
+    <Version>1.1.2</Version>
     <PlatformTarget>x64</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
     <Nullable>disable</Nullable>
@@ -18,6 +19,7 @@
     <Reference Include="System.IO.Compression" />
     <Reference Include="System.IO.Compression.FileSystem" />
     <Reference Include="System.Net.Http" />
+    <Reference Include="System.Security" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="payload.generated\agent\*" LogicalName="payload.agent.%(Filename)%(Extension)" />

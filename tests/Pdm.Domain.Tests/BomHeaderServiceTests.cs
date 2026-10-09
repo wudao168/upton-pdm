@@ -162,6 +162,33 @@ public sealed class BomHeaderServiceTests
     }
 
     [Fact]
+    public async Task PublishedBomRecovery_CompletesAnInterruptedPartialHeaderGenerationIdempotently()
+    {
+        var service = CreateService(out var materials, out var repository, out _);
+        var draft = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Draft, "0302", "PDM-PENDING-INTERRUPTED");
+        await repository.SaveProjectBomHeaderBindingAsync(ProjectId, ProjectBomHeaderKind.Master, draft.Id, 0, "admin", default);
+        var before = (await service.ListAsync(ProjectId, "admin", UserRole.Administrator, default)).First();
+        Assert.Equal("WaitingRetry", before.AutomaticStatus);
+        var now = DateTimeOffset.UtcNow;
+        await repository.CreateReleasePackageAsync(new ReleasePackage(Guid.NewGuid(), ProjectId, "RP-INTERRUPTED",
+            ReleasePackageState.Published, Guid.NewGuid(), "BOM", "BOM", [], now, now, "C:\\PDM\\Release")
+            { Scope = ReleaseScope.StandardFormal }, default);
+
+        await service.RecoverPublishedApplicationsAsync(default);
+        Assert.True(await service.ProcessAutomaticQueueAsync(default));
+        var applications = await materials.ListMaterialCodeApplicationsAsync(ProjectId, null, default);
+        Assert.Equal(2, applications.Count);
+        Assert.Contains(applications, application => application.Id == before.ApplicationId);
+        Assert.All(applications, application => {
+            Assert.Equal(MaterialCodeApplicationStatus.Approved, application.Status);
+            Assert.False(string.IsNullOrWhiteSpace(application.MaterialCode));
+        });
+        Assert.DoesNotContain(applications, application => application.BomHeaderKind is ProjectBomHeaderKind.NonStandard or ProjectBomHeaderKind.Electrical);
+        await service.RecoverPublishedApplicationsAsync(default);
+        Assert.Equal(2, (await materials.ListMaterialCodeApplicationsAsync(ProjectId, null, default)).Count);
+    }
+
+    [Fact]
     public async Task BomApproval_AutomaticallyCreatesMasterAndApprovedCategoryApplicationsIdempotently()
     {
         var service = CreateService(out var materials, out _, out var u9Client);
@@ -722,7 +749,7 @@ public sealed class BomHeaderServiceTests
 
         var preview = await service.PreviewAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", UserRole.Administrator, default);
 
-        Assert.Equal(expectedDelta == 0 ? ProjectBomU9SyncState.UpToDate : ProjectBomU9SyncState.ModifyRequired, preview.State);
+        Assert.Equal(expectedDelta > 0 ? ProjectBomU9SyncState.ModifyRequired : ProjectBomU9SyncState.UpToDate, preview.State);
         var quantity = Assert.Single(preview.WritePreview!.QuantityReconciliations);
         Assert.Equal(approvedTotal, quantity.PlmApprovedTotal);
         Assert.Equal(existingTotal, quantity.U9ExistingTotal);
@@ -897,7 +924,7 @@ public sealed class BomHeaderServiceTests
         var service = new ProjectBomU9SyncService(repository, materials, writer, time);
         var automatic = await service.SynchronizeApprovedAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", default);
         Assert.Equal(ProjectBomU9AutomaticState.Modified, automatic.State);
-        Assert.Equal(1, state.WriteCount);
+        Assert.Equal(1, state.WriteCount); // 不修正历史子件的生效日期。
         if (releasedQuantity == 0)
             Assert.DoesNotContain(state.Components, row => row.ItemCode == "01021000007");
         else
@@ -1107,6 +1134,76 @@ public sealed class BomHeaderServiceTests
             new(10, null, "01021000007", "平垫", null, 12, "001", "个", 1, 0, true, null, null, null, null, 0, 0, false, false),
             new(20, null, "MANUAL", "人工添加", null, 9, "001", "个", 1, 0, true, null, null, null, null, 0, 0, false, false)] };
         return (new(materials, repository, new BomWriteClient(state), new BomQueryClient(state), new TestProtector(), time), state, repository);
+    }
+
+    [Fact]
+    public async Task U9BomDates_SameQuantitiesDoNotRepairHistoricalDates()
+    {
+        var (service, state, _) = await ControlledService();
+        state.EffectiveDate = DateTimeOffset.Parse("2026-10-09T00:00:00+08:00");
+        state.Components = state.Components.Select(row => row with { EffectiveDate = state.EffectiveDate, OperationNum = "10" }).ToArray();
+        var command = ControlledCommand(12) with { EffectiveDate = new(2026, 9, 1), InheritEffectiveDateForNewRows = true };
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        Assert.Empty(preview.ComponentChanges);
+        using var payload = JsonDocument.Parse(preview.RequestPreview);
+        Assert.Empty(payload.RootElement[0].GetProperty("BOMComponents").EnumerateArray());
+        Assert.Equal("2026-10-09", payload.RootElement[0].GetProperty("EffectiveDate").GetString());
+        Assert.DoesNotContain(payload.RootElement[0].GetProperty("BOMMasterChangeDTOList").EnumerateArray(),
+            change => change.GetProperty("PropName").GetString() == "EffectiveDate");
+        Assert.Equal(0, state.WriteCount);
+    }
+
+    [Fact]
+    public async Task U9BomDates_AppendedRowsInheritRootDateAndHistoricalRowsRemainUnchanged()
+    {
+        var (service, state, _) = await ControlledService();
+        var oldDate = DateTimeOffset.Parse("2026-10-09T00:00:00+08:00");
+        state.EffectiveDate = oldDate;
+        state.Components = state.Components.Select(row => row with { EffectiveDate = oldDate, OperationNum = "10" }).ToArray();
+        var date = new DateOnly(2026, 9, 1);
+        var command = ControlledCommand(12) with { EffectiveDate = date, InheritEffectiveDateForNewRows = true,
+            Components = [new(10, "01021000007", 12, "001", EffectiveDate: date), new(30, "NEW-PART", 2, "001", EffectiveDate: date)] };
+        var preview = await service.PreviewAsync(command, "admin", UserRole.Administrator, default);
+        Assert.Equal(1, preview.AddedComponentCount);
+        Assert.Equal(0, preview.ModifiedComponentCount);
+        await service.ExecuteAsync(command, preview.RequestSha256, preview.RequiredConfirmation, "admin", UserRole.Administrator, default);
+        Assert.Equal(oldDate, state.EffectiveDate);
+        Assert.All(state.Components.Where(row => row.ItemCode != "NEW-PART"), row => Assert.Equal(oldDate, row.EffectiveDate));
+        Assert.Equal(date, DateOnly.FromDateTime(state.Components.Single(row => row.ItemCode == "NEW-PART").EffectiveDate!.Value.DateTime));
+        Assert.Empty((await service.PreviewAsync(command, "admin", UserRole.Administrator, default)).ComponentChanges);
+    }
+
+    [Theory]
+    [InlineData(ProjectBomHeaderKind.Standard, BomKind.Standard)]
+    [InlineData(ProjectBomHeaderKind.NonStandard, BomKind.NonStandard)]
+    [InlineData(ProjectBomHeaderKind.Electrical, BomKind.Electrical)]
+    public async Task ProjectBomDates_ChildCategoriesInheritConfirmedRootDate(ProjectBomHeaderKind kind, BomKind bomKind)
+    {
+        var time = TimeProvider.System;
+        var repository = new InMemoryPdmRepository(time);
+        var materials = new InMemoryMaterialRepository(time);
+        var project = await repository.CreateNumberedProjectAsync(new(
+            Guid.Parse("70000000-0000-0000-0000-000000000001"), "P", 2,
+            Guid.Parse("c0046500-0000-0000-0000-000000000001"), "日期继承主项目", null,
+            new DateOnly(2026, 9, 1), 1, "admin", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
+        await materials.SaveIntegrationConfigurationAsync(new("http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
+            U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, true, "admin", time.GetUtcNow()), default);
+        var root = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved, "0301", "ROOT", "ROOT", true);
+        await repository.SaveProjectBomHeaderBindingAsync(project.Id, ProjectBomHeaderKind.Master, root.Id, 0, "admin", default);
+        var child = await repository.CreateSubprojectAsync(new(project.Id, "日期继承子项目", null, 1), default);
+        var header = await AddMaterial(materials, MaterialKind.Product, MaterialApprovalStatus.Approved, "0201", "CHILD", "CHILD", true);
+        await repository.SaveProjectBomHeaderBindingAsync(child.Id, kind, header.Id, 0, "admin", default);
+        var material = await AddMaterial(materials, MaterialKind.Standard, MaterialApprovalStatus.Approved, "0102", "ITEM", "ITEM", true);
+        await ReleaseCategoryAsync(repository, child.Id, bomKind, material.MaterialCode, time);
+        var rootDate = new DateTimeOffset(2026, 9, 1, 0, 0, 0, TimeSpan.FromHours(8));
+        var client = new ApprovalAutomationClient { RootBom = new BomWriteState().Bom with { ItemCode = "ROOT", EffectiveDate = rootDate } };
+        var service = new ProjectBomU9SyncService(repository, materials,
+            new U9BomWriteService(materials, repository, client, client, new TestProtector(), time), time);
+        var preview = await service.PreviewAsync(child.Id, kind, "admin", UserRole.Administrator, default);
+        using var payload = JsonDocument.Parse(preview.WritePreview!.RequestPreview);
+        Assert.Equal("2026-09-01", payload.RootElement[0].GetProperty("EffectiveDate").GetString());
+        Assert.All(payload.RootElement[0].GetProperty("BOMComponents").EnumerateArray(),
+            row => Assert.Equal("2026-09-01", row.GetProperty("EffectiveDate").GetString()));
     }
 
     [Fact]
@@ -1349,7 +1446,7 @@ public sealed class BomHeaderServiceTests
         public override DateTimeOffset GetUtcNow() => now;
     }
 
-    private sealed class TestProtector : IU9SecretProtector
+    internal sealed class TestProtector : IU9SecretProtector
     {
         public string Protect(string secret) => $"protected:{secret}";
         public string Unprotect(string ciphertext) => ciphertext[10..];
@@ -1408,6 +1505,7 @@ public sealed class BomHeaderServiceTests
 
     private sealed class BomWriteState
     {
+        public DateTimeOffset? EffectiveDate { get; set; }
         public bool? DefaultIsCharge { get; set; } = true;
         public string? DefaultCostElementCode { get; set; } = "No101";
         public bool ApplyControlledChanges { get; set; }
@@ -1423,7 +1521,7 @@ public sealed class BomHeaderServiceTests
 
         public U9BomReference Bom => new(
             null, "02010000101", "P700001 标准件BOM", "A1", "7", "昆山工厂", 0, 1,
-            "001", "个", null, null, 0, 0, 0, "P700001", Explain,
+            "001", "个", EffectiveDate, null, 0, 0, 0, "P700001", Explain,
             null, false, 0, 0,
             Components.Select(row => row with { UsageQtyType = row.UsageQtyType ?? 1, IsSpecialUseItem = row.IsSpecialUseItem ?? true, IsIssueOrgFixed = row.IsIssueOrgFixed ?? true, IssueOrgCode = row.IssueOrgCode ?? "7", IsCharge = row.IsCharge ?? DefaultIsCharge, CostElementCode = row.CostElementCode ?? DefaultCostElementCode }).ToArray());
 
@@ -1468,6 +1566,9 @@ public sealed class BomHeaderServiceTests
             if (state.ApplyControlledChanges && !state.IgnoreControlledChanges)
             {
                 using var payload = JsonDocument.Parse(payloadJson);
+                var headerChanges = payload.RootElement[0].GetProperty("BOMMasterChangeDTOList").EnumerateArray();
+                var dateChange = headerChanges.FirstOrDefault(item => item.GetProperty("PropName").GetString() == "EffectiveDate");
+                if (dateChange.ValueKind != JsonValueKind.Undefined) state.EffectiveDate = DateTimeOffset.Parse(dateChange.GetProperty("PropValue").GetString()!);
                 // Model the observed server behavior: one row per material per request, direct fields with defaults.
                 foreach (var change in payload.RootElement[0].GetProperty("BOMComponents").EnumerateArray()
                     .GroupBy(row => row.GetProperty("ItemMaster").GetProperty("Code").GetString()).Select(group => group.First()))
@@ -1479,11 +1580,14 @@ public sealed class BomHeaderServiceTests
                         var quantity = change.TryGetProperty("UsageQty", out var usage) ? usage.GetDecimal() : 1;
                         var effective = !state.CorruptEffectiveState && change.TryGetProperty("IsEffective", out var active) && active.GetBoolean();
                         if (state.Components.Any(row => row.Sequence == sequence))
-                            state.Components = state.Components.Select(row => row.Sequence == sequence ? row with { UsageQty = quantity, IsEffective = effective } : row).ToArray();
+                            state.Components = state.Components.Select(row => row.Sequence == sequence ? row with { UsageQty = quantity, IsEffective = effective,
+                                EffectiveDate = change.TryGetProperty("BOMComponentChangeDTOList", out var changes)
+                                    && changes.EnumerateArray().Any(item => item.GetProperty("PropName").GetString() == "EffectiveDate")
+                                    ? DateTimeOffset.Parse(changes.EnumerateArray().Single(item => item.GetProperty("PropName").GetString() == "EffectiveDate").GetProperty("PropValue").GetString()!) : row.EffectiveDate } : row).ToArray();
                         else
                             state.Components = [..state.Components, new(sequence, null, change.GetProperty("ItemMaster").GetProperty("Code").GetString(), null, null,
                                 quantity, change.GetProperty("IssueUOM").GetProperty("Code").GetString(), null, change.GetProperty("ParentQty").GetDecimal(),
-                                0, effective, null, null, null, null, 0, 0, false, false)];
+                                0, effective, DateTimeOffset.Parse(change.GetProperty("EffectiveDate").GetString()!), null, null, null, 0, 0, false, false)];
                     }
                 }
             }
@@ -1495,8 +1599,9 @@ public sealed class BomHeaderServiceTests
         public Task<U9CustomerQueryResult> QueryCustomerReferencesAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
-    private sealed class ApprovalAutomationClient : IU9OpenApiClient, IU9BomQueryClient
+    internal sealed class ApprovalAutomationClient : IU9OpenApiClient, IU9BomQueryClient
     {
+        public U9BomReference? RootBom { get; init; }
         private U9BomReference? bom;
         private U9ItemReference? createdItem;
 
@@ -1556,8 +1661,8 @@ public sealed class BomHeaderServiceTests
                 component.GetProperty("ParentQty").GetDecimal(),
                 0,
                 true,
-                null,
-                null,
+                DateTimeOffset.Parse(component.GetProperty("EffectiveDate").GetString()!),
+                DateTimeOffset.Parse(component.GetProperty("DisableDate").GetString()!),
                 component.GetProperty("Remark").GetString(),
                 null,
                 0,
@@ -1572,17 +1677,22 @@ public sealed class BomHeaderServiceTests
                     IsCharge = component.GetProperty("IsCharge").GetBoolean(),
                     CostElementCode = component.GetProperty("CostElement").GetProperty("Code").GetString()
                 }).ToArray();
-            var components = bom is null ? writtenComponents : bom.Components.Concat(writtenComponents).ToArray();
+            var components = bom is null ? writtenComponents : bom.Components.Where(old => !writtenComponents.Any(row => row.Sequence == old.Sequence)).Concat(writtenComponents).ToArray();
             bom = new U9BomReference(
                 "bom-1", code, null, "A1", "7", null, 0, 1, uom, null,
-                null, null, 0, 0, 0, row.GetProperty("ProjectMapNum").GetString(),
+                DateTimeOffset.Parse(LastBomEffectiveDate!), null, 0, 0, 0, row.GetProperty("ProjectMapNum").GetString(),
                 row.GetProperty("Explain").GetString(), null, false, 0, 0, components,
                 row.GetProperty("OtherID").GetString());
             return Task.FromResult(new U9BusinessBatchResult(0, null, [new(true, null, "bom-1", code)]));
         }
 
-        public Task<U9BomQueryResult> QueryBomsAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken) =>
-            Task.FromResult(new U9BomQueryResult(0, null, bom is null ? [] : [bom]));
+        public Task<U9BomQueryResult> QueryBomsAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
+        {
+            using var payload = JsonDocument.Parse(payloadJson);
+            var code = payload.RootElement[0].GetProperty("ItemMaster").GetProperty("Code").GetString();
+            var found = RootBom?.ItemCode == code ? RootBom : bom?.ItemCode == code ? bom : null;
+            return Task.FromResult(new U9BomQueryResult(0, null, found is null ? [] : [found]));
+        }
 
         public Task<U9BomOperationReference?> QueryBomOperationAsync(string baseUrl, string path, string token, string organizationCode, string itemCode, string bomVersionCode, string otherId, CancellationToken cancellationToken) =>
             Task.FromResult<U9BomOperationReference?>(null);

@@ -9,6 +9,7 @@ internal sealed class SetupForm : Form
 {
     private readonly SetupOptions options;
     private readonly TextBox serverBox = new TextBox();
+    private readonly TextBox nameBox = new TextBox();
     private readonly TextBox userBox = new TextBox();
     private readonly TextBox passwordBox = new TextBox { UseSystemPasswordChar = true };
     private readonly TextBox portBox = new TextBox();
@@ -18,13 +19,21 @@ internal sealed class SetupForm : Form
     private readonly Button installButton = new Button();
     private readonly Button uninstallButton = new Button();
     private readonly Button closeButton = new Button();
+    private readonly NotifyIcon trayIcon = new NotifyIcon();
+    private readonly Timer saveTimer = new Timer { Interval = 500 };
+    private readonly Timer statusTimer = new Timer { Interval = 5000 };
+    private readonly TextBox statusBox = new TextBox { Dock = DockStyle.Top, Height = 110, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
+    private readonly SetupRunner monitor;
+    private bool statusLoading;
+    private bool exitRequested;
 
     public SetupForm(SetupOptions options)
     {
         this.options = options;
+        monitor = new SetupRunner(options, null);
         Text = "UPLM 转图代理安装程序";
         Width = 720;
-        Height = 560;
+        Height = 700;
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(640, 480);
         Font = new Font("Microsoft YaHei UI", 9F);
@@ -38,7 +47,7 @@ internal sealed class SetupForm : Form
                  + "安装程序会自动完成文件释放、防火墙放通、开机自启、启动代理，并把本机登记为PLM的转图服务器。"
         };
 
-        var table = new TableLayoutPanel { Dock = DockStyle.Top, Height = 230, ColumnCount = 3, Padding = new Padding(12, 6, 12, 6) };
+        var table = new TableLayoutPanel { Dock = DockStyle.Top, Height = 264, ColumnCount = 3, Padding = new Padding(12, 6, 12, 6) };
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
@@ -48,8 +57,10 @@ internal sealed class SetupForm : Form
         AddRow(table, "本机代理端口", portBox, options.Port.ToString(), "5199");
         AddRow(table, "访问令牌", tokenBox, options.Token, "留空自动生成");
         AddRow(table, "转换超时（分钟）", timeoutBox, options.TimeoutMinutes.ToString(), "30");
+        AddRow(table, "转图服务器名称", nameBox, options.Name, Environment.MachineName);
         var tokenButton = new Button { Text = "生成令牌", Dock = DockStyle.Fill, Height = 26 };
         tokenButton.Click += (_, _) => tokenBox.Text = SetupOptions.GenerateToken();
+        table.Controls.Remove(table.GetControlFromPosition(2, 4));
         table.Controls.Add(tokenButton, 2, 4);
 
         var actions = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 48, Padding = new Padding(12, 6, 12, 6), FlowDirection = FlowDirection.LeftToRight };
@@ -74,11 +85,56 @@ internal sealed class SetupForm : Form
         logBox.ReadOnly = true;
         logBox.ScrollBars = ScrollBars.Vertical;
         logBox.BackColor = Color.White;
+        statusBox.Text = "运行与排队状态（每5秒更新）\r\n正在连接本机转图代理…";
 
         Controls.Add(logBox);
+        Controls.Add(statusBox);
         Controls.Add(actions);
         Controls.Add(table);
         Controls.Add(info);
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("打开转图代理管理", null, (_, _) => ShowWindow());
+        menu.Items.Add("退出管理窗口（代理继续运行）", null, (_, _) => { exitRequested = true; Close(); });
+        trayIcon.Icon = SystemIcons.Application;
+        trayIcon.Text = "UPLM 转图代理管理";
+        trayIcon.ContextMenuStrip = menu;
+        trayIcon.Visible = true;
+        trayIcon.DoubleClick += (_, _) => ShowWindow();
+        saveTimer.Tick += (_, _) => { saveTimer.Stop(); SaveFields(); };
+        foreach (var box in new[] { serverBox, userBox, passwordBox, portBox, tokenBox, timeoutBox, nameBox })
+            box.TextChanged += (_, _) => { saveTimer.Stop(); saveTimer.Start(); };
+        FormClosing += (_, e) => {
+            SaveFields();
+            if (!exitRequested && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
+        };
+        FormClosed += (_, _) => { saveTimer.Dispose(); statusTimer.Dispose(); trayIcon.Dispose(); menu.Dispose(); };
+        statusTimer.Tick += async (_, _) => await RefreshStatusAsync();
+        Shown += async (_, _) => { if (options.StartInTray) Hide(); statusTimer.Start(); await RefreshStatusAsync(); };
+    }
+
+    private async Task RefreshStatusAsync()
+    {
+        if (statusLoading) return;
+        statusLoading = true;
+        try { var status = await monitor.ReadStatusAsync(); if (!IsDisposed) statusBox.Text = status; }
+        catch (Exception exception) { if (!IsDisposed) statusBox.Text = "本机代理未连接：" + SetupRunner.Describe(exception); }
+        finally { statusLoading = false; }
+    }
+
+    private void ShowWindow() { Show(); WindowState = FormWindowState.Normal; Activate(); }
+
+    private void SaveFields()
+    {
+        options.ServerUrl = serverBox.Text.Trim();
+        options.Name = nameBox.Text.Trim();
+        options.Username = userBox.Text.Trim();
+        options.Password = passwordBox.Text;
+        options.Token = tokenBox.Text.Trim();
+        options.TimeoutMinutes = int.TryParse(timeoutBox.Text.Trim(), out var timeout) && timeout > 0 ? timeout : 30;
+        options.Port = int.TryParse(portBox.Text.Trim(), out var port) && port > 0 ? port : 5199;
+        try { SetupPreferences.Save(options); }
+        catch (Exception exception) when (exception is System.IO.IOException || exception is UnauthorizedAccessException || exception is System.Security.Cryptography.CryptographicException)
+        { logBox.AppendText("配置保存失败：" + exception.Message + Environment.NewLine); }
     }
 
     private static void AddRow(TableLayoutPanel table, string label, TextBox box, string value, string placeholder)
@@ -102,6 +158,7 @@ internal sealed class SetupForm : Form
     private async Task RunAsync(bool uninstall)
     {
         if (!uninstall && !confirmOverwrite()) return;
+        SaveFields();
         options.ServerUrl = serverBox.Text.Trim();
         options.Username = userBox.Text.Trim();
         options.Password = passwordBox.Text;
@@ -116,6 +173,8 @@ internal sealed class SetupForm : Form
         {
             var runner = new SetupRunner(options, message => { logBox.AppendText(message + Environment.NewLine); logBox.Update(); });
             var ok = uninstall ? await runner.UninstallAsync() : await runner.InstallAsync();
+            tokenBox.Text = options.Token;
+            SaveFields();
             MessageBox.Show(this, ok ? (uninstall ? "卸载完成。" : "安装完成，本机已登记为PLM的转图服务器。") : "操作未完成，请查看日志。",
                 Text, MessageBoxButtons.OK, ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         }

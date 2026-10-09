@@ -2,7 +2,7 @@
 import { ArrowLeft, CalendarDays, CheckCircle2, Download, FileUp, LibraryBig, ListChecks, Paperclip, Plus, RotateCcw, Save, Send, Trash2, XCircle } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { appendProjectValidationPlanItems, confirmValidationPlanExecution, createProjectValidationPlanRevision, decideValidationPlanApproval, deleteValidationCheckCategory, deleteValidationCheckItem, downloadValidationPlanAttachment, exportProjectValidationPlan, readProjectValidationPlan, readValidationCheckCatalog, readValidationPlanExecutionRecords, recognizeValidationPlanAttachment, saveProjectValidationPlan, saveValidationCheckCategory, saveValidationCheckItem, submitProjectValidationPlan, updateProjectValidationPlanStandards, uploadValidationPlanAttachment } from '../api'
+import { appendProjectValidationPlanItems, confirmValidationPlanExecution, createProjectValidationPlanRevision, decideValidationPlanApproval, deleteValidationCheckCategory, deleteValidationCheckItem, downloadValidationPlanAttachment, exportProjectValidationPlan, readProjectValidationPlan, readValidationCheckCatalog, readValidationPlanExecutionRecords, recognizeValidationPlanAttachment, saveProjectValidationPlan, saveValidationCheckCategory, saveValidationCheckItem, submitProjectValidationPlan, transferValidationPlanApproval, updateProjectValidationPlanStandards, uploadValidationPlanAttachment, withdrawProjectValidationPlan } from '../api'
 import { createClientId } from '../clientId'
 import { ElMessage } from '../statusMessage'
 import type { ProjectSummary, ProjectValidationPlan, ProjectValidationPlanItem, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanExecutionRecord, ValidationPlanRecognitionCandidate, ValidationPlanRecognitionDraft } from '../types'
@@ -99,9 +99,15 @@ const appendedRows = computed(() => rows.value.filter(item => !persistedItemIds.
 const standardChanges = computed(() => canMaintainStandards.value
   ? rows.value.filter(item => persistedItemIds.value.has(item.id) && (item.validationStandard || null) !== (persistedStandards.value[item.id] || null))
   : [])
-const currentApprovalTask = computed(() => plan.value?.approvalTasks?.slice().sort((a, b) => a.stepOrder - b.stepOrder).find(item => item.decision == null) ?? null)
+const currentApprovalTask = computed(() => normalizedState.value === 'PendingApproval'
+  ? plan.value?.approvalTasks?.slice().sort((a, b) => a.stepOrder - b.stepOrder).find(item => item.decision == null) ?? null
+  : null)
 const canDecideCurrent = computed(() => Boolean(props.canDecideApproval && currentApprovalTask.value
-  && (currentApprovalTask.value.assignee.toLocaleLowerCase() === props.currentUsername.toLocaleLowerCase() || props.currentUsername.toLocaleLowerCase() === 'admin')))
+  && currentApprovalTask.value.assignee.toLocaleLowerCase() === props.currentUsername.toLocaleLowerCase()))
+const canTransferCurrent = computed(() => Boolean(props.canDecideApproval && currentApprovalTask.value
+  && currentApprovalTask.value.assignee.toLowerCase() === props.currentUsername.toLowerCase()))
+const canWithdraw = computed(() => normalizedState.value === 'PendingApproval'
+  && plan.value?.submittedBy?.toLowerCase() === props.currentUsername.toLowerCase())
 const attachmentDialogFiles = computed(() => {
   const projectId = attachmentDialogProject.value?.id
   if (!projectId) return []
@@ -530,6 +536,33 @@ async function decideCurrent(decision: 'Approved' | 'Rejected') {
   }
 }
 
+async function withdrawCurrent() {
+  if (!activeDetailProject.value || !plan.value) return
+  try {
+    await ElMessageBox.confirm('撤回当前验证计划审批并返回草稿？', '撤回验证计划', { type: 'warning' })
+    hydratePlan(await withdrawProjectValidationPlan(activeDetailProject.value.id, plan.value.rowVersion, props.token, ...planScope()))
+    ElMessage.success('验证计划已撤回')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(errorMessage(error))
+  }
+}
+
+async function transferCurrent() {
+  const task = currentApprovalTask.value
+  if (!task) return
+  try {
+    const { value } = await ElMessageBox.prompt('请输入接收人的登录账号。接收人必须具有验证计划审批权限。', '转交验证计划审批', {
+      inputValidator: value => value.trim().length > 0 || '请填写接收人账号',
+    })
+    hydratePlan(await transferValidationPlanApproval(task.id, value.trim(), props.token, ...planScope()))
+    ElMessage.success('审批任务已转交')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(errorMessage(error))
+  }
+}
+
 async function uploadFile(kind: 'PlanDocument' | 'Evidence', event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
@@ -842,6 +875,8 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
         <button v-if="editable || canAppend" type="button" class="pdm-primary-action" :disabled="saving || loading || (canAppend && !appendedRows.length)" @click="savePlan"><Save :size="14" />{{ saving ? '保存中…' : canAppend ? '保存新增' : '保存' }}</button>
         <button v-if="canMaintainStandards" type="button" class="pdm-primary-action" :disabled="saving || loading || !standardChanges.length || Boolean(appendedRows.length)" :title="appendedRows.length ? '请先保存新增验证内容，再保存验证标准' : '保存已生效验证计划的验证标准'" @click="saveValidationStandards"><Save :size="14" />{{ saving ? '保存中…' : '保存标准' }}</button>
         <button v-if="plan && editable" type="button" class="pdm-primary-action" :disabled="dirty || submitting" @click="submitForApproval"><Send :size="14" />提交审批</button>
+        <button v-if="canWithdraw" type="button" class="pdm-secondary-action" :disabled="submitting" @click="withdrawCurrent">撤回申请</button>
+        <button v-if="canTransferCurrent" type="button" class="pdm-secondary-action" :disabled="submitting" @click="transferCurrent">转交</button>
         <button v-if="canDecideCurrent" type="button" class="pdm-secondary-action" :disabled="submitting" @click="decideCurrent('Rejected')"><XCircle :size="14" />退回</button>
         <button v-if="canDecideCurrent" type="button" class="pdm-primary-action" :disabled="submitting" @click="decideCurrent('Approved')"><CheckCircle2 :size="14" />批准</button>
       </div>
@@ -933,7 +968,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 <style scoped>
 .validation-plan { gap: 12px; padding: 12px; }
 .validation-plan__toolbar,.validation-plan__meta,.validation-plan__footer { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-.validation-plan__toolbar h2 { display:flex; align-items:center; gap:7px; margin:0; font-size:16px; }
+.validation-plan__toolbar h2 { display:flex; align-items:center; gap:7px; margin:0; font-size:var(--pdm-font-size-heading); }
 .validation-plan__toolbar p { margin:4px 0 0; color:var(--pdm-muted); font-size:12px; }
 .validation-plan__actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .validation-plan__actions button,.validation-plan__toolbar button { display:inline-flex; align-items:center; gap:5px; }.validation-plan__toolbar .validation-plan__actions>button { box-sizing:border-box; justify-content:center; width:100px; height:32px; min-height:32px; padding:0; white-space:nowrap; }
@@ -946,7 +981,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-plan__table-scroll { min-height:0; flex:1 1 auto; overflow:auto; border:1px solid var(--pdm-border); border-radius:7px; }
 .validation-plan__table { width:100%; min-width:0; border-collapse:collapse; table-layout:fixed; font-size:12px; }
 .validation-plan-summary__table { width:100%; min-width:1240px; border-collapse:collapse; table-layout:fixed; font-size:12px; }
-.validation-plan-summary__table th { position:sticky; top:0; z-index:1; padding:9px 6px; border:0; background:#f3f6f9; color:var(--pdm-muted); font-weight:500; text-align:center; vertical-align:middle; }
+.validation-plan-summary__table th { position:sticky; top:0; z-index:1; padding:9px 6px; border:0; background:var(--pdm-table-header); color:var(--pdm-muted); font-weight:500; text-align:center; vertical-align:middle; }
 .validation-plan-summary__table th:nth-child(7), .validation-plan-summary__table td:nth-child(7) { width:180px; white-space:nowrap; }
 .validation-plan-summary__table tbody tr { background:var(--pdm-surface); cursor:pointer; }
 .validation-plan-summary__table tbody tr:hover,.validation-plan-summary__table tbody tr:focus { background:var(--pdm-theme-accent-soft); outline:none; }
@@ -959,7 +994,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-plan-summary__status.is-审批中 { background:#fff5db; color:var(--pdm-orange); }
 .validation-plan-summary__status.is-已退回 { background:#fff1f1; color:var(--pdm-danger); }
 .validation-plan-summary__status.is-加载失败 { background:#fff1f1; color:var(--pdm-danger); }
-.validation-plan__table th { position:sticky; top:0; z-index:1; padding:9px 3px; border:0; background:#f3f6f9; color:var(--pdm-muted); font-weight:500; text-align:center; vertical-align:middle; }
+.validation-plan__table th { position:sticky; top:0; z-index:1; padding:9px 3px; border:0; background:var(--pdm-table-header); color:var(--pdm-muted); font-weight:500; text-align:center; vertical-align:middle; }
 .validation-plan__table tbody tr { background:var(--pdm-surface); }
 .validation-plan__table td { overflow-wrap:anywhere; padding:0 3px; border:0; border-top:1px solid var(--pdm-border-soft); color:var(--pdm-text); text-align:center; vertical-align:middle; }
 .validation-plan__table th:nth-child(1){width:3%}.validation-plan__table th:nth-child(2){width:8%}.validation-plan__table th:nth-child(3){width:25%}.validation-plan__table th:nth-child(4){width:13%}.validation-plan__table th:nth-child(5){width:8%}.validation-plan__table th:nth-child(6){width:6%}.validation-plan__table th:nth-child(7){width:8%}.validation-plan__table th:nth-child(8){width:7%}.validation-plan__table th:nth-child(9){width:7%}.validation-plan__table th:nth-child(10){width:10%}.validation-plan__table th:nth-child(11){width:5%}
@@ -983,11 +1018,11 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-plan__execution-record { display:grid; gap:4px; padding:7px 0; border-top:1px solid var(--pdm-border-soft); }.validation-plan__execution-record:first-of-type { border-top:0; }.validation-plan__execution-record small { overflow:hidden; color:var(--pdm-muted); text-overflow:ellipsis; white-space:nowrap; }
 .validation-recognition__notice { margin-bottom:10px; padding:9px 11px; border:1px solid #f1cf83; border-radius:6px; background:#fff8e6; color:var(--pdm-orange); font-size:12px; }
 .validation-recognition__table-scroll { max-height:min(62vh,650px); overflow:auto; border:1px solid var(--pdm-border); border-radius:7px; }
-.validation-recognition__table { width:100%; min-width:1120px; border-collapse:collapse; table-layout:fixed; font-size:12px; }.validation-recognition__table th,.validation-recognition__table td { padding:7px 6px; border-bottom:1px solid var(--pdm-border-soft); text-align:center; vertical-align:middle; }.validation-recognition__table th { position:sticky; top:0; z-index:1; background:#f3f6f9; color:var(--pdm-muted); font-weight:500; }.validation-recognition__table th:nth-child(1){width:46px}.validation-recognition__table th:nth-child(2){width:66px}.validation-recognition__table th:nth-child(3){width:62px}.validation-recognition__table th:nth-child(4){width:300px}.validation-recognition__table th:nth-child(5){width:120px}.validation-recognition__table th:nth-child(6){width:125px}.validation-recognition__table th:nth-child(7){width:100px}.validation-recognition__table th:nth-child(8){width:150px}.validation-recognition__table td.is-content { text-align:left; line-height:1.4; }.validation-recognition__table input:not([type="checkbox"]) { box-sizing:border-box; width:100%; height:29px; padding:4px 6px; border:1px solid var(--pdm-border); border-radius:4px; background:var(--pdm-surface); color:var(--pdm-text); }.validation-recognition__table tr.is-review td:nth-child(2),.validation-recognition__table tr.is-unmatched td:nth-child(2) { color:var(--pdm-orange); }.validation-recognition__table tr.is-unmatched { background:#fff8f0; }
+.validation-recognition__table { width:100%; min-width:1120px; border-collapse:collapse; table-layout:fixed; font-size:12px; }.validation-recognition__table th,.validation-recognition__table td { padding:7px 6px; border-bottom:1px solid var(--pdm-border-soft); text-align:center; vertical-align:middle; }.validation-recognition__table th { position:sticky; top:0; z-index:1; background:var(--pdm-table-header); color:var(--pdm-muted); font-weight:500; }.validation-recognition__table th:nth-child(1){width:46px}.validation-recognition__table th:nth-child(2){width:66px}.validation-recognition__table th:nth-child(3){width:62px}.validation-recognition__table th:nth-child(4){width:300px}.validation-recognition__table th:nth-child(5){width:120px}.validation-recognition__table th:nth-child(6){width:125px}.validation-recognition__table th:nth-child(7){width:100px}.validation-recognition__table th:nth-child(8){width:150px}.validation-recognition__table td.is-content { text-align:left; line-height:1.4; }.validation-recognition__table input:not([type="checkbox"]) { box-sizing:border-box; width:100%; height:29px; padding:4px 6px; border:1px solid var(--pdm-border); border-radius:4px; background:var(--pdm-surface); color:var(--pdm-text); }.validation-recognition__table tr.is-review td:nth-child(2),.validation-recognition__table tr.is-unmatched td:nth-child(2) { color:var(--pdm-orange); }.validation-recognition__table tr.is-unmatched { background:#fff8f0; }
 .validation-plan-attachment-list { max-height:min(62vh,620px); overflow:auto; border:1px solid var(--pdm-border); border-radius:7px; }
 .validation-plan-attachment-list table { width:100%; min-width:850px; border-collapse:collapse; table-layout:fixed; font-size:12px; }
 .validation-plan-attachment-list th,.validation-plan-attachment-list td { padding:9px 8px; border-bottom:1px solid var(--pdm-border-soft); text-align:center; vertical-align:middle; }
-.validation-plan-attachment-list th { position:sticky; top:0; z-index:1; background:#f3f6f9; color:var(--pdm-muted); font-weight:500; }
+.validation-plan-attachment-list th { position:sticky; top:0; z-index:1; background:var(--pdm-table-header); color:var(--pdm-muted); font-weight:500; }
 .validation-plan-attachment-list th:first-child,.validation-plan-attachment-list td:first-child { width:190px; text-align:left; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .validation-plan-attachment-list th:nth-child(2) { width:55px; }.validation-plan-attachment-list th:nth-child(3) { width:85px; }.validation-plan-attachment-list th:nth-child(4) { width:145px; }.validation-plan-attachment-list th:nth-child(5) { width:75px; }.validation-plan-attachment-list th:last-child { width:55px; }
 .validation-plan-attachment-list td.is-sha { overflow:hidden; font-family:var(--pdm-font-mono); text-align:left; text-overflow:ellipsis; white-space:nowrap; }

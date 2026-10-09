@@ -181,7 +181,8 @@ public sealed class FullWorkflowAcceptanceTests
         while (validationPlan.State == ProjectValidationPlanState.PendingApproval)
         {
             var task = validationPlan.ApprovalTasks.OrderBy(item => item.StepOrder).First(item => item.Decision is null);
-            validationPlan = await validation.DecideAsync(task.Id, ApprovalDecision.Approved, "QA审批通过", "admin", UserRole.Administrator, default);
+            var assignee = await repository.FindUserAsync(task.Assignee, default) ?? throw new InvalidOperationException("审批人不存在");
+            validationPlan = await validation.DecideAsync(task.Id, ApprovalDecision.Approved, "QA审批通过", assignee.Username, assignee.Role, default);
         }
         Assert.Equal(ProjectValidationPlanState.Effective, validationPlan.State);
 
@@ -266,7 +267,7 @@ public sealed class FullWorkflowAcceptanceTests
     {
         private readonly Dictionary<Guid, UploadSession> sessions = [];
 
-        public Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken)
+        public Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken, string? owner = null)
         {
             var session = new UploadSession(Guid.NewGuid(), projectId, fileName, totalLength, 4 * 1024 * 1024,
                 expectedSha256, totalLength, time.GetUtcNow().AddHours(1));

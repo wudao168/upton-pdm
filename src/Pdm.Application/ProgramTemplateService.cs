@@ -331,6 +331,35 @@ public sealed class ProgramTemplateService(
         return tasks.Values.OrderBy(task => task.CreatedAt).ToArray();
     }
 
+    public async Task<ProgramTemplateRevision> WithdrawAsync(Guid revisionId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.ProgramTemplateSubmit, cancellationToken);
+        var revision = await templates.FindRevisionAsync(revisionId, cancellationToken) ?? throw new PdmNotFoundException("程序模板候选版本不存在。");
+        if (!string.Equals(revision.CreatedBy, actor, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("仅本次提交人可以撤回程序模板。");
+        if (revision.State is not (ProgramTemplateRevisionState.PendingReview or ProgramTemplateRevisionState.PendingApproval))
+            throw new PdmConflictException("程序模板已不在审批中。");
+        var saved = await templates.WithdrawAsync(revisionId, expectedRowVersion, cancellationToken);
+        await AuditAsync(actor, "program-template.withdraw", nameof(ProgramTemplateRevision), revisionId, $"撤回 {saved.VersionLabel}", cancellationToken);
+        return saved;
+    }
+
+    public async Task<ProgramTemplateApprovalTask> TransferAsync(Guid taskId, string newAssignee, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        var task = await templates.FindTaskAsync(taskId, cancellationToken) ?? throw new PdmNotFoundException("程序模板审批任务不存在。");
+        var permission = task.Stage == ProgramTemplateApprovalStage.Review ? PermissionCodes.ProgramTemplateReview : PermissionCodes.ProgramTemplateApprove;
+        await RequirePermissionAsync(actor, role, permission, cancellationToken);
+        if (task.Assignee is not null && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("只能转交当前分配给自己的审批任务。");
+        if (string.Equals(actor, newAssignee, StringComparison.OrdinalIgnoreCase)) throw new PdmRuleException("不能转交给自己。");
+        var target = await pdmRepository.FindUserAsync(newAssignee, cancellationToken);
+        if (target is null || !target.IsActive || !await HasPermissionAsync(target.Username, target.Role, permission, cancellationToken))
+            throw new PdmRuleException("接收人未启用或没有该节点的审批权限。");
+        var saved = await templates.TransferAsync(taskId, target.Username, expectedRowVersion, cancellationToken);
+        await AuditAsync(actor, "program-template.transfer", nameof(ProgramTemplateApprovalTask), taskId, $"{actor} -> {target.Username}；{task.Stage}", cancellationToken);
+        return saved;
+    }
+
     public async Task<ProgramTemplateDecisionResult> DecideAsync(
         Guid taskId,
         ProgramTemplateDecisionCommand command,
@@ -360,6 +389,8 @@ public sealed class ProgramTemplateService(
         else
         {
             await RequirePermissionAsync(actor, role, PermissionCodes.ProgramTemplateApprove, cancellationToken);
+            if (task.Assignee is not null && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase))
+                throw new UnauthorizedAccessException("该批准任务已转交给其他用户。");
             var review = (await templates.ListRevisionTasksAsync(revision.Id, cancellationToken)).FirstOrDefault(item => item.Stage == ProgramTemplateApprovalStage.Review);
             if (review?.Decision != ProgramTemplateApprovalDecision.Approved) throw new PdmConflictException("程序模板尚未通过电气组织审核。");
         }

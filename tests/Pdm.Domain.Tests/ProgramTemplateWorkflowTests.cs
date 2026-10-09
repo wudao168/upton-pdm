@@ -376,6 +376,49 @@ public sealed class ProgramTemplateWorkflowTests
         Assert.Equal(publishedId, Assert.Single(remaining.Revisions).Id);
     }
 
+    [Fact]
+    public async Task PendingTemplate_CanBeTransferredAndWithdrawnThenResubmitted()
+    {
+        var clock = TimeProvider.System;
+        var pdm = new InMemoryPdmRepository(clock);
+        var templates = new InMemoryProgramTemplateRepository(clock);
+        var service = new ProgramTemplateService(templates, pdm, new UnusedProgramTemplateStorage(), clock);
+        await ConfigureElectricalApprovalChainAsync(pdm);
+        await pdm.CreateUserAsync(new(Guid.NewGuid(), "reviewer2", "第二审核人", "unused", UserRole.BusinessUnitManager, true), default);
+        var created = await service.CreateAsync(new CreateProgramTemplateCommand(
+            nameof(ProgramTemplateAssetType.PlcFunctionBlock), "转交模板", "逻辑运算", "转交测试", "Siemens", "TIA Portal", "V19", "S7-1200",
+            [], "首版", [new(ProgramTemplateParameterDirection.Input, 0, "Enable", "BOOL", null, null, null)]),
+            "uploader", UserRole.Engineer, default);
+        var revision = created.Revisions.Single();
+        revision = await templates.AttachFileAsync(revision.Id, new(revision.Id, ProgramTemplateAttachmentKind.Package, "test.zip", "test/package.zip", 128, new string('A', 64), clock.GetUtcNow()), revision.RowVersion, default);
+        revision = await templates.AttachFileAsync(revision.Id, new(revision.Id, ProgramTemplateAttachmentKind.TestEvidence, "test.pdf", "test/evidence.pdf", 64, new string('B', 64), clock.GetUtcNow()), revision.RowVersion, default);
+        revision = await service.SubmitAsync(revision.Id, revision.RowVersion, "uploader", UserRole.Engineer, default);
+        var task = Assert.Single(await service.ListMyTasksAsync("reviewer", UserRole.BusinessUnitManager, default));
+        var assigned = await service.TransferAsync(task.Id, "reviewer2", task.RowVersion, "reviewer", UserRole.BusinessUnitManager, default);
+        Assert.Equal("reviewer2", assigned.Assignee);
+        Assert.Empty(await service.ListMyTasksAsync("reviewer", UserRole.BusinessUnitManager, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.DecideAsync(task.Id,
+            new(ProgramTemplateApprovalDecision.Approved, null, [], assigned.RowVersion), "reviewer", UserRole.BusinessUnitManager, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.WithdrawAsync(revision.Id, revision.RowVersion, "viewer", UserRole.ProductionViewer, default));
+        revision = await service.WithdrawAsync(revision.Id, revision.RowVersion, "uploader", UserRole.Engineer, default);
+        Assert.Equal(ProgramTemplateRevisionState.Draft, revision.State);
+        Assert.Empty(await service.ListMyTasksAsync("reviewer2", UserRole.BusinessUnitManager, default));
+        revision = await service.SubmitAsync(revision.Id, revision.RowVersion, "uploader", UserRole.Engineer, default);
+        Assert.Equal(ProgramTemplateRevisionState.PendingReview, revision.State);
+        var nextReview = Assert.Single(await service.ListMyTasksAsync("reviewer", UserRole.BusinessUnitManager, default));
+        await service.DecideAsync(nextReview.Id, new(ProgramTemplateApprovalDecision.Approved, null,
+            ProgramTemplateChecklist.For(ProgramTemplateAssetType.PlcFunctionBlock), nextReview.RowVersion), "reviewer", UserRole.BusinessUnitManager, default);
+        await pdm.CreateUserAsync(new(Guid.NewGuid(), "approver2", "第二批准人", "unused", UserRole.Approver, true), default);
+        var approval = Assert.Single(await service.ListMyTasksAsync("approver", UserRole.Approver, default));
+        var transferredApproval = await service.TransferAsync(approval.Id, "approver2", approval.RowVersion, "approver", UserRole.Approver, default);
+        Assert.Empty(await service.ListMyTasksAsync("approver", UserRole.Approver, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.DecideAsync(approval.Id,
+            new(ProgramTemplateApprovalDecision.Approved, null, [], transferredApproval.RowVersion), "approver", UserRole.Approver, default));
+        var published = await service.DecideAsync(approval.Id,
+            new(ProgramTemplateApprovalDecision.Approved, null, [], transferredApproval.RowVersion), "approver2", UserRole.Approver, default);
+        Assert.Equal(ProgramTemplateRevisionState.Published, published.Revision.State);
+    }
+
     private static async Task ConfigureElectricalApprovalChainAsync(InMemoryPdmRepository repository)
     {
         await repository.CreateUserAsync(new(Guid.NewGuid(), "uploader", "上传人", "unused", UserRole.Engineer, true, RoleCode: "ElectricalEngineer"), default);

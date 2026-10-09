@@ -85,6 +85,39 @@ function mountProjectManager(directory = emptyDirectory, sourceProjects = [paren
 }
 
 describe('ProjectManager', () => {
+  it('列表仅允许分配事业部，管理员也不能从此修改其他项目字段或人员', async () => {
+    const wrapper = mountProjectManager(emptyDirectory, [{ ...parent, executionUnitId: 'division-1', canAssignExecutionUnit: true, canManageMainStaffing: true }, { ...child, canAssignDesigners: true }], true, true)
+    expect(wrapper.find('[aria-label="分配事业部 P700001"]').exists()).toBe(true)
+    for (const name of ['配置项目经理（含协同） P700001', '配置主设 P700001', '配置子项目负责人 P700001-1', '分配工程师 P700001-1']) expect(wrapper.find('[aria-label="' + name + '"]').exists()).toBe(false)
+    const menuItems = wrapper.findAllComponents({ name: 'ElDropdownItem' }).map(item => item.props('command'))
+    expect(menuItems).not.toContain('edit')
+    expect(menuItems).not.toContain('configure-staffing')
+    expect(menuItems).not.toContain('assign-designers')
+    await wrapper.get('[aria-label="分配事业部 P700001"]').trigger('click')
+    expect(wrapper.text()).toContain('分配执行事业部 · P700001')
+  })
+
+  it('按公司与制造部门筛选，区分同名事业部并排除非制造部门', async () => {
+    const directory: OrganizationDirectory = {
+      ...emptyDirectory,
+      units: [
+        { id: 'division-1', organizationId: 'org-1', code: 'T1', name: 'T1事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 1 },
+        { id: 'division-2', organizationId: 'org-1', code: 'T2', name: 'T1事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 2 },
+        { id: 'office', organizationId: 'org-1', code: 'OFFICE', name: '行政部门', kind: 'Department', canManufacture: false, isActive: true, sortOrder: 3 },
+      ],
+    }
+    const otherProject = { ...parent, id: 'parent-2', code: 'P700002', executionUnitId: 'division-2', executionUnitName: 'T1事业部' }
+    const wrapper = mountProjectManager(directory, [{ ...parent, executionUnitId: 'division-1', executionUnitName: 'T1事业部' }, otherProject])
+    const tree = wrapper.get('[aria-label="项目事业部分类"]')
+    expect(tree.text()).not.toContain('行政部门')
+    await tree.findAll('.pdm-project-classification__division')[0].trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    expect(wrapper.get('tbody').text()).toContain('P700001')
+    await tree.findAll('.pdm-project-classification__division')[1].trigger('click')
+    expect(wrapper.get('tbody').text()).toContain('P700002')
+    await tree.get('[role="treeitem"]').trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(2)
+  })
   it('按业务顺序显示居中项目列表', () => {
     const wrapper = mountProjectManager()
     const headers = wrapper.findAll('.pdm-project-number-table th').map(item => item.text())
@@ -283,112 +316,6 @@ describe('ProjectManager', () => {
     expect(wrapper.findAll('tr.is-child')[1].findAll('td')[3].text()).toBe('AK-2-C001-001-01-01')
   })
 
-  it('可从操作菜单编辑项目名称、别名和订单日期', async () => {
-    const wrapper = mountProjectManager()
-    const menu = wrapper.findAllComponents({ name: 'ElDropdown' }).find(item => item.attributes('aria-label') === '操作项目P700001')
-    expect(menu).toBeDefined()
-    menu!.vm.$emit('command', 'edit')
-    await wrapper.vm.$nextTick()
-
-    expect(wrapper.find('[aria-label="编辑项目基本信息"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('客户、设备类型、所属公司、项目类型和数量都会影响编号')
-    await wrapper.get('input[name="editProjectName"]').setValue('气密设备升级版')
-    await wrapper.get('input[name="editProjectAlias"]').setValue('气密升级')
-    await wrapper.get('input[name="editSignedDate"]').setValue('2026-08-16')
-    await wrapper.get('[aria-label="编辑项目基本信息"]').trigger('submit')
-    await flushPromises()
-
-    expect(wrapper.props('onUpdateProject')).toHaveBeenCalledWith(parent.id, {
-      organizationId: 'org-1',
-      projectTypeCode: 'P',
-      equipmentTypeCode: 2,
-      customerId: 'customer-1',
-      name: '气密设备升级版',
-      projectAlias: '气密升级',
-      signedDate: '2026-08-16',
-      quantity: 1,
-    })
-  })
-
-  it('点击对应列可直接分配事业部、项目经理和主设', async () => {
-    const editableParent = { ...parent, executionUnitId: 'division-1', canAssignExecutionUnit: true, canManageMainStaffing: true }
-    const executionWrapper = mountProjectManager(emptyDirectory, [editableParent])
-    await executionWrapper.get('[aria-label="分配事业部 P700001"]').trigger('click')
-    expect(executionWrapper.text()).toContain('分配执行事业部 · P700001')
-
-    const managerWrapper = mountProjectManager(emptyDirectory, [editableParent])
-    await managerWrapper.get('[aria-label="配置项目经理（含协同） P700001"]').trigger('click')
-    expect(managerWrapper.text()).toContain('项目经理（限1名）')
-    expect(managerWrapper.text()).toContain('协同项目经理（可多选）')
-    expect(managerWrapper.findAll('.pdm-project-person-select')).toHaveLength(3)
-
-    const designWrapper = mountProjectManager(emptyDirectory, [editableParent])
-    await designWrapper.get('[aria-label="配置主设 P700001"]').trigger('click')
-    expect(designWrapper.text()).toContain('主设（可多选）')
-    expect(designWrapper.findAll('.pdm-project-person-select')).toHaveLength(3)
-    expect(designWrapper.find('.is-staffing-target').exists()).toBe(false)
-  })
-
-  it('分工候选按项目角色过滤且只显示姓名，并能写入表单值', async () => {
-    const directory: OrganizationDirectory = {
-      ...emptyDirectory,
-      units: [{ id: 'division-1', organizationId: 'org-1', code: 'DIV-1', name: '自动化事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 1 }],
-      memberships: [
-        { unitId: 'division-1', username: 'liupengbo', isPrimary: true },
-        { unitId: 'division-1', username: 'lvhaozhe', isPrimary: true },
-        { unitId: 'division-1', username: 'mawenhao', isPrimary: true },
-        { unitId: 'division-1', username: 'planning', isPrimary: true },
-      ],
-      users: [
-        { username: 'liupengbo', displayName: '刘鹏搏', role: 'Engineer', roles: ['Engineer', 'ProjectManager'], isActive: true },
-        { username: 'lvhaozhe', displayName: '吕浩哲', role: 'ProjectManager', isActive: true },
-        { username: 'mawenhao', displayName: '马文豪', role: 'Engineer', isActive: true },
-        { username: 'planning', displayName: '计划人员', role: 'PlanningManager', isActive: true },
-      ],
-    }
-    const staffingProject = {
-      ...parent,
-      executionUnitId: 'division-1',
-      primaryProjectManager: undefined,
-      collaborativeProjectManagers: [],
-      designLead: undefined,
-      canManageMainStaffing: true,
-    }
-    const wrapper = mountProjectManager(directory, [staffingProject])
-    await wrapper.get('[aria-label="配置项目经理（含协同） P700001"]').trigger('click')
-
-    const selects = wrapper.findAllComponents({ name: 'ElSelect' })
-    expect(selects).toHaveLength(3)
-    expect(selects.map(select => select.classes())).toEqual([
-      expect.arrayContaining(['pdm-project-person-select']),
-      expect.arrayContaining(['pdm-project-person-select']),
-      expect.arrayContaining(['pdm-project-person-select']),
-    ])
-    expect(selects.map(select => select.props('filterable'))).toEqual([true, true, true])
-    expect(selects.map(select => select.props('placeholder'))).toEqual([
-      '输入姓名筛选',
-      '输入姓名筛选',
-      '输入姓名筛选',
-    ])
-    expect(selects.map(select => select.props('multiple'))).toEqual([false, true, true])
-    expect(selects[0].findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))).toEqual(['刘鹏搏', '吕浩哲'])
-    expect(selects[1].findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))).toEqual(['刘鹏搏', '吕浩哲'])
-    expect(selects[2].findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))).toEqual(['刘鹏搏', '马文豪'])
-
-    selects[0].vm.$emit('update:modelValue', 'liupengbo')
-    selects[1].vm.$emit('update:modelValue', ['lvhaozhe'])
-    selects[2].vm.$emit('update:modelValue', ['liupengbo', 'mawenhao'])
-    await wrapper.vm.$nextTick()
-    await wrapper.get('button.pdm-primary-action').trigger('click')
-    await flushPromises()
-
-    expect(wrapper.props('onUpdateMainStaffing')).toHaveBeenCalledWith(parent.id, {
-      primaryProjectManager: 'liupengbo',
-      collaborativeProjectManagers: ['lvhaozhe'],
-      designLeads: ['liupengbo', 'mawenhao'],
-    })
-  })
-
   it('执行单位候选将事业部置顶并按名称自然排序', async () => {
     const directory: OrganizationDirectory = {
       ...emptyDirectory,
@@ -408,15 +335,6 @@ describe('ProjectManager', () => {
 
     expect(options.map(item => item.props('label'))).toEqual(['T2事业部', 'T10事业部', '标准化', '普通部门'])
     expect(options.map(item => item.props('disabled'))).toEqual([false, false, false, true])
-  })
-
-  it('管理员可分配事业部、项目经理和主设', async () => {
-    const administratorProject = { ...parent, executionUnitId: 'division-1' }
-    const wrapper = mountProjectManager(emptyDirectory, [administratorProject], true)
-
-    expect(wrapper.find('[aria-label="分配事业部 P700001"]').exists()).toBe(true)
-    expect(wrapper.find('[aria-label="配置项目经理（含协同） P700001"]').exists()).toBe(true)
-    expect(wrapper.find('[aria-label="配置主设 P700001"]').exists()).toBe(true)
   })
 
   it('可搜索子项目并按项目层级筛选', async () => {
@@ -466,64 +384,6 @@ describe('ProjectManager', () => {
     expect(wrapper.text()).not.toContain('P700002')
   })
 
-  it('子项目设计人员优先显示本事业部，并将其他事业部单独分组提示', async () => {
-    const directory: OrganizationDirectory = {
-      organizations: [{ id: 'org-1', name: '昆山公司', projectCompanyCode: '7', modelCompanyCode: 'AK', crmCompanyName: '昆山公司', currentProjectSequence: 1, currentSerialSequence: 1 }],
-      units: [
-        { id: 'division-own', organizationId: 'org-1', code: 'A', name: '自动化事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 1 },
-        { id: 'division-other', organizationId: 'org-1', code: 'B', name: '机器人事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 2 },
-        { id: 'procurement', organizationId: 'org-1', code: 'P', name: '采购部', kind: 'Department', canManufacture: false, isActive: true, sortOrder: 3 },
-      ],
-      memberships: [
-        { unitId: 'division-own', username: 'design-lead', isPrimary: true },
-        { unitId: 'division-own', username: 'designer-own', isPrimary: true },
-        { unitId: 'division-other', username: 'designer-other', isPrimary: true },
-        { unitId: 'procurement', username: 'legacy-procurement', isPrimary: true },
-      ],
-      managers: [],
-      users: [
-        { username: 'design-lead', displayName: '设计负责人', role: 'Engineer', isActive: true },
-        { username: 'designer-own', displayName: '本部设计', role: 'Engineer', isActive: true },
-        { username: 'designer-other', displayName: '跨部设计', role: 'Engineer', isActive: true },
-        { username: 'project-manager', displayName: '项目经理甲', role: 'ProjectManager', isActive: true },
-        { username: 'legacy-procurement', displayName: '采购人员甲', role: 'Engineer', isActive: true },
-      ],
-    }
-    const wrapper = mountProjectManager(directory, [parent, { ...child, canAssignDesigners: true }])
-    await wrapper.get('[aria-label="展开P700001的子项目"]').trigger('click')
-    const childMenu = wrapper.findAllComponents({ name: 'ElDropdown' }).find(item => item.attributes('aria-label') === '操作项目P700001-1')
-    expect(childMenu).toBeDefined()
-    childMenu!.vm.$emit('command', 'assign-designers')
-    await wrapper.vm.$nextTick()
-    const text = wrapper.text()
-    expect(text.indexOf('本事业部（优先）')).toBeLessThan(text.indexOf('其他事业部'))
-    expect(text).toContain('默认优先显示当前用户所在事业部人员')
-    expect(wrapper.findAllComponents({ name: 'ElOption' }).map(item => item.props('label'))).not.toContain('项目经理甲')
-    expect(wrapper.findAllComponents({ name: 'ElOption' }).map(item => item.props('label'))).not.toContain('采购人员甲 · 未归属事业部')
-  })
-
-  it('子项目负责人和待分配工程师可从列表直接配置', async () => {
-    const wrapper = mountProjectManager(emptyDirectory, [parent, { ...child, canAssignDesigners: true }])
-    await wrapper.get('[aria-label="展开P700001的子项目"]').trigger('click')
-
-    await wrapper.get('[aria-label="配置子项目负责人 P700001-1"]').trigger('click')
-    expect(wrapper.text()).toContain('配置子项目负责人 · P700001-1')
-    expect(wrapper.findAllComponents({ name: 'ElOption' }).map(item => item.props('value'))).toEqual(expect.arrayContaining(['project-manager', 'project-manager-2']))
-
-    await wrapper.get('[aria-label="分配工程师 P700001-1"]').trigger('click')
-    expect(wrapper.text()).toContain('分配执行工程师 · P700001-1')
-  })
-
-  it('主项目可从操作菜单分配执行工程师', async () => {
-    const wrapper = mountProjectManager(emptyDirectory, [{ ...parent, canAssignDesigners: true }])
-    const menu = wrapper.findComponent({ name: 'ElDropdown' })
-    menu.vm.$emit('command', 'assign-designers')
-    await wrapper.vm.$nextTick()
-
-    expect(wrapper.text()).toContain('分配执行工程师 · P700001')
-    expect(wrapper.findComponent({ name: 'ElSelect' }).props('multiple')).toBe(true)
-  })
-
   it('操作菜单移除进入与事业部分配，并仅向有权限账号开放项目删除', async () => {
     const withoutPermission = mountProjectManager(emptyDirectory, [parent, child], true)
     const hiddenCommands = withoutPermission.findAllComponents({ name: 'ElDropdownItem' }).map(item => item.props('command'))
@@ -533,7 +393,7 @@ describe('ProjectManager', () => {
 
     const wrapper = mountProjectManager(emptyDirectory, [parent, child], true, true, true)
     const commands = wrapper.findAllComponents({ name: 'ElDropdownItem' }).map(item => item.props('command'))
-    expect(commands).toContain('edit')
+    expect(commands).not.toContain('edit')
     expect(commands).toContain('delete')
     expect(commands).not.toContain('open')
     expect(commands).not.toContain('assign-execution')

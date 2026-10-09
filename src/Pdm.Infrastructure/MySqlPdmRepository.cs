@@ -12,9 +12,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
 {
     private readonly string connectionString;
     private readonly TimeProvider timeProvider;
+    private readonly IProjectContactInformationRepository? projectContacts;
     private readonly JsonSerializerOptions jsonOptions = new(JsonSerializerDefaults.Web);
 
-    public MySqlPdmRepository(IOptions<PdmDatabaseOptions> options, TimeProvider timeProvider)
+    public MySqlPdmRepository(IOptions<PdmDatabaseOptions> options, TimeProvider timeProvider, IProjectContactInformationRepository? projectContacts = null)
     {
         connectionString = options.Value.ConnectionString;
         if (string.IsNullOrWhiteSpace(connectionString))
@@ -23,6 +24,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         }
 
         this.timeProvider = timeProvider;
+        this.projectContacts = projectContacts;
         DefaultTypeMap.MatchNamesWithUnderscores = true;
     }
 
@@ -52,15 +54,25 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)) return [];
         var projects = await ListProjectsAsync(cancellationToken);
-        if (role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true)
-        {
-            return projects.Select(ApplyAdministratorCapabilities).ToArray();
-        }
-
-        await using var connection = await OpenAsync(cancellationToken);
+        var user = await FindUserAsync(actor, cancellationToken);
+        var visibleProjects = new List<Project>();
+        foreach (var project in projects)
+            if (await CommercialProjectAccess.CanReadAsync(project, user, actor, role, projectContacts, cancellationToken)) visibleProjects.Add(project);
+        projects = visibleProjects;
         var permissions = await GetUserPermissionsAsync(actor, role, cancellationToken);
         var projectPermissions = await GetProjectPermissionSettingsAsync(cancellationToken);
-        return await ApplyCapabilitiesAsync(connection, projects, actor, permissions, projectPermissions, cancellationToken);
+        await using var connection = await OpenAsync(cancellationToken);
+        var capabilities = await ApplyCapabilitiesAsync(connection, projects, actor, permissions, projectPermissions, cancellationToken);
+        if (role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true)
+        {
+            return projects.Zip(capabilities, (project, capability) => ApplyAdministratorCapabilities(project) with
+            {
+                CanManageMainStaffing = capability.CanManageMainStaffing,
+                CanAssignDesigners = capability.CanAssignDesigners
+            }).ToArray();
+        }
+
+        return capabilities;
     }
 
     public async Task<Project?> FindProjectAsync(Guid projectId, CancellationToken cancellationToken)
@@ -73,13 +85,21 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     public async Task<bool> HasProjectReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         return await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)
-            && await IsProjectInActiveCompanyAsync(projectId, cancellationToken);
+            && await IsProjectInActiveCompanyAsync(projectId, cancellationToken)
+            && await HasCommercialProjectAccessAsync(projectId, actor, role, cancellationToken);
     }
 
     public async Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         return await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectContentView, cancellationToken)
-            && await IsProjectInActiveCompanyAsync(projectId, cancellationToken);
+            && await IsProjectInActiveCompanyAsync(projectId, cancellationToken)
+            && await HasCommercialProjectAccessAsync(projectId, actor, role, cancellationToken);
+    }
+
+    private async Task<bool> HasCommercialProjectAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
+    {
+        var project = await FindProjectAsync(projectId, ct);
+        return project is not null && await CommercialProjectAccess.CanReadAsync(project, await FindUserAsync(actor, ct), actor, role, projectContacts, ct);
     }
 
     private async Task<bool> IsProjectInActiveCompanyAsync(Guid projectId, CancellationToken cancellationToken)
@@ -740,20 +760,94 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             "SELECT COUNT(*) FROM project WHERE id=@ProjectId AND is_active=1 FOR UPDATE",
             new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
         if (exists != 1) throw new PdmNotFoundException("项目不存在或已停用。");
-        await connection.ExecuteAsync(new CommandDefinition("DELETE FROM bom_item WHERE project_id=@ProjectId AND bom_kind=@Kind", new { ProjectId = projectId, Kind = kind.ToString() }, transaction, cancellationToken: cancellationToken));
-        var now = timeProvider.GetUtcNow().UtcDateTime;
-        foreach (var item in items)
-        {
+        var existingRows = await connection.QueryAsync<BomRow>(new CommandDefinition(
+            "SELECT * FROM bom_item WHERE project_id=@ProjectId AND bom_kind=@Kind FOR UPDATE",
+            new { ProjectId = projectId, Kind = kind.ToString() }, transaction, cancellationToken: cancellationToken));
+        var existing = existingRows.Select(MapBomItem).ToDictionary(item => item.Id);
+        var retainedIds = items.Select(item => item.Id).ToHashSet();
+        var removedIds = existing.Keys.Where(id => !retainedIds.Contains(id)).ToArray();
+        var changed = items.Where(item => !existing.TryGetValue(item.Id, out var previous)
+            || previous != item with { ReleaseTrackingId = item.Id }).ToArray();
+        if (removedIds.Length > 0)
             await connection.ExecuteAsync(new CommandDefinition(
-                "INSERT INTO bom_item(id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,heat_treatment,weight,is_wear_part,impact_stage,revision_label,is_complete,source_document_id,source_configuration,source_instance_path,parent_drawing_number,engineering_kit_reference_id,engineering_kit_id,engineering_kit_revision_id,engineering_kit_code,engineering_kit_version_no,engineering_kit_component_id,engineering_kit_component_optional,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,is_release_excluded,release_exclusion_reason,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status,row_version,updated_at) VALUES(@Id,@ProjectId,@Kind,@Sequence,@DrawingNumber,@Name,@Quantity,@Unit,@Material,@Specification,@Remark,@Brand,@SurfaceTreatment,@HeatTreatment,@Weight,@IsWearPart,@ImpactStage,@Revision,@IsComplete,@SourceDocumentId,@SourceConfiguration,@SourceInstancePath,@ParentDrawingNumber,@EngineeringKitReferenceId,@EngineeringKitId,@EngineeringKitRevisionId,@EngineeringKitCode,@EngineeringKitVersionNumber,@EngineeringKitComponentId,@EngineeringKitComponentOptional,@Source,@IsManuallyOverridden,@IsPendingRemoval,@IsPendingClassification,@IsManualUnmatched,@IsManuallyRetained,@IsManuallyExcluded,@IsReleaseExcluded,@ReleaseExclusionReason,@ReconciliationStatus,@ReconciliationNote,@ReconciliationUpdatedBy,@ReconciliationUpdatedAt,@DeletedAt,@DeletedBy,@DeleteReason,@PropertyWritebackStatus,1,@Now) ON DUPLICATE KEY UPDATE project_id=@ProjectId,bom_kind=@Kind,sequence_no=@Sequence,drawing_number=@DrawingNumber,name=@Name,quantity=@Quantity,unit=@Unit,material=@Material,specification=@Specification,remark=@Remark,brand=@Brand,surface_treatment=@SurfaceTreatment,heat_treatment=@HeatTreatment,weight=@Weight,is_wear_part=@IsWearPart,impact_stage=@ImpactStage,revision_label=@Revision,is_complete=@IsComplete,source_document_id=@SourceDocumentId,source_configuration=@SourceConfiguration,source_instance_path=@SourceInstancePath,parent_drawing_number=@ParentDrawingNumber,engineering_kit_reference_id=@EngineeringKitReferenceId,engineering_kit_id=@EngineeringKitId,engineering_kit_revision_id=@EngineeringKitRevisionId,engineering_kit_code=@EngineeringKitCode,engineering_kit_version_no=@EngineeringKitVersionNumber,engineering_kit_component_id=@EngineeringKitComponentId,engineering_kit_component_optional=@EngineeringKitComponentOptional,item_source=@Source,is_manually_overridden=@IsManuallyOverridden,is_pending_removal=@IsPendingRemoval,is_pending_classification=@IsPendingClassification,is_manual_unmatched=@IsManualUnmatched,is_manually_retained=@IsManuallyRetained,is_manually_excluded=@IsManuallyExcluded,is_release_excluded=@IsReleaseExcluded,release_exclusion_reason=@ReleaseExclusionReason,reconciliation_status=@ReconciliationStatus,reconciliation_note=@ReconciliationNote,reconciliation_updated_by=@ReconciliationUpdatedBy,reconciliation_updated_at=@ReconciliationUpdatedAt,deleted_at=@DeletedAt,deleted_by=@DeletedBy,delete_reason=@DeleteReason,property_writeback_status=@PropertyWritebackStatus,row_version=row_version+1,updated_at=@Now",
-                new { item.Id, ProjectId = projectId, Kind = kind.ToString(), item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material, item.Specification, item.Remark, item.Brand, item.SurfaceTreatment, item.HeatTreatment, item.Weight, item.IsWearPart, item.ImpactStage, Revision = item.Revision, item.IsComplete, item.SourceDocumentId, item.SourceConfiguration, item.SourceInstancePath, item.ParentDrawingNumber, item.EngineeringKitReferenceId, item.EngineeringKitId, item.EngineeringKitRevisionId, item.EngineeringKitCode, item.EngineeringKitVersionNumber, item.EngineeringKitComponentId, item.EngineeringKitComponentOptional, item.Source, item.IsManuallyOverridden, item.IsPendingRemoval, item.IsPendingClassification, item.IsManualUnmatched, item.IsManuallyRetained, item.IsManuallyExcluded, item.IsReleaseExcluded, item.ReleaseExclusionReason, item.ReconciliationStatus, item.ReconciliationNote, item.ReconciliationUpdatedBy, ReconciliationUpdatedAt = item.ReconciliationUpdatedAt?.UtcDateTime, DeletedAt = item.DeletedAt?.UtcDateTime, item.DeletedBy, item.DeleteReason, PropertyWritebackStatus = item.PropertyWritebackStatus?.ToString(), Now = now },
-                transaction, cancellationToken: cancellationToken));
+                "DELETE FROM bom_item WHERE project_id=@ProjectId AND bom_kind=@Kind AND id IN @Ids",
+                new { ProjectId = projectId, Kind = kind.ToString(), Ids = removedIds }, transaction, cancellationToken: cancellationToken));
+        // Vacate old sequence slots before upserts so swaps and inserts remain valid.
+        var reorderedIds = changed.Where(item => existing.TryGetValue(item.Id, out var previous)
+            && previous.Sequence != item.Sequence).Select(item => item.Id).ToArray();
+        if (reorderedIds.Length > 0)
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE bom_item SET sequence_no=-sequence_no WHERE project_id=@ProjectId AND bom_kind=@Kind AND id IN @Ids",
+                new { ProjectId = projectId, Kind = kind.ToString(), Ids = reorderedIds }, transaction, cancellationToken: cancellationToken));
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        // Keep one transaction, but avoid one database round trip per instance.
+        foreach (var batch in changed.Chunk(100))
+        {
+            var parameters = new DynamicParameters();
+            var valueRows = new List<string>(batch.Length);
+            for (var index = 0; index < batch.Length; index++)
+            {
+                var item = batch[index];
+                parameters.Add($"Id{index}", item.Id);
+                parameters.Add($"ProjectId{index}", projectId);
+                parameters.Add($"Kind{index}", kind.ToString());
+                parameters.Add($"Sequence{index}", item.Sequence);
+                parameters.Add($"DrawingNumber{index}", item.DrawingNumber);
+                parameters.Add($"Name{index}", item.Name);
+                parameters.Add($"Quantity{index}", item.Quantity);
+                parameters.Add($"Unit{index}", item.Unit);
+                parameters.Add($"Material{index}", item.Material);
+                parameters.Add($"Specification{index}", item.Specification);
+                parameters.Add($"Remark{index}", item.Remark);
+                parameters.Add($"Brand{index}", item.Brand);
+                parameters.Add($"SurfaceTreatment{index}", item.SurfaceTreatment);
+                parameters.Add($"HeatTreatment{index}", item.HeatTreatment);
+                parameters.Add($"Weight{index}", item.Weight);
+                parameters.Add($"IsWearPart{index}", item.IsWearPart);
+                parameters.Add($"ImpactStage{index}", item.ImpactStage);
+                parameters.Add($"Revision{index}", item.Revision);
+                parameters.Add($"IsComplete{index}", item.IsComplete);
+                parameters.Add($"SourceDocumentId{index}", item.SourceDocumentId);
+                parameters.Add($"SourceConfiguration{index}", item.SourceConfiguration);
+                parameters.Add($"SourceInstancePath{index}", item.SourceInstancePath);
+                parameters.Add($"ParentDrawingNumber{index}", item.ParentDrawingNumber);
+                parameters.Add($"EngineeringKitReferenceId{index}", item.EngineeringKitReferenceId);
+                parameters.Add($"EngineeringKitId{index}", item.EngineeringKitId);
+                parameters.Add($"EngineeringKitRevisionId{index}", item.EngineeringKitRevisionId);
+                parameters.Add($"EngineeringKitCode{index}", item.EngineeringKitCode);
+                parameters.Add($"EngineeringKitVersionNumber{index}", item.EngineeringKitVersionNumber);
+                parameters.Add($"EngineeringKitComponentId{index}", item.EngineeringKitComponentId);
+                parameters.Add($"EngineeringKitComponentOptional{index}", item.EngineeringKitComponentOptional);
+                parameters.Add($"Source{index}", item.Source);
+                parameters.Add($"IsManuallyOverridden{index}", item.IsManuallyOverridden);
+                parameters.Add($"IsPendingRemoval{index}", item.IsPendingRemoval);
+                parameters.Add($"IsPendingClassification{index}", item.IsPendingClassification);
+                parameters.Add($"IsManualUnmatched{index}", item.IsManualUnmatched);
+                parameters.Add($"IsManuallyRetained{index}", item.IsManuallyRetained);
+                parameters.Add($"IsManuallyExcluded{index}", item.IsManuallyExcluded);
+                parameters.Add($"IsReleaseExcluded{index}", item.IsReleaseExcluded);
+                parameters.Add($"ReleaseExclusionReason{index}", item.ReleaseExclusionReason);
+                parameters.Add($"ReconciliationStatus{index}", item.ReconciliationStatus);
+                parameters.Add($"ReconciliationNote{index}", item.ReconciliationNote);
+                parameters.Add($"ReconciliationUpdatedBy{index}", item.ReconciliationUpdatedBy);
+                parameters.Add($"ReconciliationUpdatedAt{index}", item.ReconciliationUpdatedAt?.UtcDateTime);
+                parameters.Add($"DeletedAt{index}", item.DeletedAt?.UtcDateTime);
+                parameters.Add($"DeletedBy{index}", item.DeletedBy);
+                parameters.Add($"DeleteReason{index}", item.DeleteReason);
+                parameters.Add($"PropertyWritebackStatus{index}", item.PropertyWritebackStatus?.ToString());
+                parameters.Add($"Now{index}", now);
+                valueRows.Add($"(@Id{index},@ProjectId{index},@Kind{index},@Sequence{index},@DrawingNumber{index},@Name{index},@Quantity{index},@Unit{index},@Material{index},@Specification{index},@Remark{index},@Brand{index},@SurfaceTreatment{index},@HeatTreatment{index},@Weight{index},@IsWearPart{index},@ImpactStage{index},@Revision{index},@IsComplete{index},@SourceDocumentId{index},@SourceConfiguration{index},@SourceInstancePath{index},@ParentDrawingNumber{index},@EngineeringKitReferenceId{index},@EngineeringKitId{index},@EngineeringKitRevisionId{index},@EngineeringKitCode{index},@EngineeringKitVersionNumber{index},@EngineeringKitComponentId{index},@EngineeringKitComponentOptional{index},@Source{index},@IsManuallyOverridden{index},@IsPendingRemoval{index},@IsPendingClassification{index},@IsManualUnmatched{index},@IsManuallyRetained{index},@IsManuallyExcluded{index},@IsReleaseExcluded{index},@ReleaseExclusionReason{index},@ReconciliationStatus{index},@ReconciliationNote{index},@ReconciliationUpdatedBy{index},@ReconciliationUpdatedAt{index},@DeletedAt{index},@DeletedBy{index},@DeleteReason{index},@PropertyWritebackStatus{index},1,@Now{index})");
+            }
+            await connection.ExecuteAsync(new CommandDefinition(
+                "INSERT INTO bom_item(id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,heat_treatment,weight,is_wear_part,impact_stage,revision_label,is_complete,source_document_id,source_configuration,source_instance_path,parent_drawing_number,engineering_kit_reference_id,engineering_kit_id,engineering_kit_revision_id,engineering_kit_code,engineering_kit_version_no,engineering_kit_component_id,engineering_kit_component_optional,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,is_release_excluded,release_exclusion_reason,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status,row_version,updated_at) VALUES" + string.Join(",", valueRows)
+                    + " ON DUPLICATE KEY UPDATE project_id=VALUES(project_id),bom_kind=VALUES(bom_kind),sequence_no=VALUES(sequence_no),drawing_number=VALUES(drawing_number),name=VALUES(name),quantity=VALUES(quantity),unit=VALUES(unit),material=VALUES(material),specification=VALUES(specification),remark=VALUES(remark),brand=VALUES(brand),surface_treatment=VALUES(surface_treatment),heat_treatment=VALUES(heat_treatment),weight=VALUES(weight),is_wear_part=VALUES(is_wear_part),impact_stage=VALUES(impact_stage),revision_label=VALUES(revision_label),is_complete=VALUES(is_complete),source_document_id=VALUES(source_document_id),source_configuration=VALUES(source_configuration),source_instance_path=VALUES(source_instance_path),parent_drawing_number=VALUES(parent_drawing_number),engineering_kit_reference_id=VALUES(engineering_kit_reference_id),engineering_kit_id=VALUES(engineering_kit_id),engineering_kit_revision_id=VALUES(engineering_kit_revision_id),engineering_kit_code=VALUES(engineering_kit_code),engineering_kit_version_no=VALUES(engineering_kit_version_no),engineering_kit_component_id=VALUES(engineering_kit_component_id),engineering_kit_component_optional=VALUES(engineering_kit_component_optional),item_source=VALUES(item_source),is_manually_overridden=VALUES(is_manually_overridden),is_pending_removal=VALUES(is_pending_removal),is_pending_classification=VALUES(is_pending_classification),is_manual_unmatched=VALUES(is_manual_unmatched),is_manually_retained=VALUES(is_manually_retained),is_manually_excluded=VALUES(is_manually_excluded),is_release_excluded=VALUES(is_release_excluded),release_exclusion_reason=VALUES(release_exclusion_reason),reconciliation_status=VALUES(reconciliation_status),reconciliation_note=VALUES(reconciliation_note),reconciliation_updated_by=VALUES(reconciliation_updated_by),reconciliation_updated_at=VALUES(reconciliation_updated_at),deleted_at=VALUES(deleted_at),deleted_by=VALUES(deleted_by),delete_reason=VALUES(delete_reason),property_writeback_status=VALUES(property_writeback_status),row_version=row_version+1,updated_at=VALUES(updated_at)",
+                parameters, transaction, cancellationToken: cancellationToken));
         }
         await transaction.CommitAsync(cancellationToken);
         return items.OrderBy(item => item.Sequence).ToArray();
     }
 
-    public async Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken)
+    public async Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<BomItem> componentDrawingItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -763,11 +857,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         if (exists != 1) throw new PdmNotFoundException("项目不存在或已停用。");
 
         var now = timeProvider.GetUtcNow().UtcDateTime;
-        var allItems = standardItems.Concat(nonStandardItems).Concat(unclassifiedItems).Concat(electricalItems).Concat(virtualItems).ToArray();
+        var allItems = standardItems.Concat(nonStandardItems).Concat(unclassifiedItems).Concat(electricalItems).Concat(virtualItems).Concat(componentDrawingItems).ToArray();
         if (allItems.Select(item => item.Id).Distinct().Count() != allItems.Length)
             throw new PdmConflictException("同一BOM对账批次中存在重复物料标识，已取消更新。");
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE bom_item SET sequence_no=-sequence_no WHERE project_id=@ProjectId AND bom_kind IN ('Standard','NonStandard','Unclassified','Electrical','Virtual')",
+            "UPDATE bom_item SET sequence_no=-sequence_no WHERE project_id=@ProjectId AND bom_kind IN ('Standard','NonStandard','Unclassified','Electrical','Virtual','ComponentDrawing')",
             new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
         foreach (var item in allItems)
         {
@@ -779,8 +873,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
 
         var retainedIds = allItems.Select(item => item.Id).ToArray();
         var deleteSql = retainedIds.Length == 0
-            ? "DELETE FROM bom_item WHERE project_id=@ProjectId AND bom_kind IN ('Standard','NonStandard','Unclassified','Electrical','Virtual')"
-            : "DELETE FROM bom_item WHERE project_id=@ProjectId AND bom_kind IN ('Standard','NonStandard','Unclassified','Electrical','Virtual') AND id NOT IN @RetainedIds";
+            ? "DELETE FROM bom_item WHERE project_id=@ProjectId AND bom_kind IN ('Standard','NonStandard','Unclassified','Electrical','Virtual','ComponentDrawing')"
+            : "DELETE FROM bom_item WHERE project_id=@ProjectId AND bom_kind IN ('Standard','NonStandard','Unclassified','Electrical','Virtual','ComponentDrawing') AND id NOT IN @RetainedIds";
         await connection.ExecuteAsync(new CommandDefinition(
             deleteSql,
             new { ProjectId = projectId, RetainedIds = retainedIds }, transaction, cancellationToken: cancellationToken));
@@ -845,7 +939,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     public async Task<CadPropertyWriteback> EnqueueCadPropertyWritebackAsync(CadPropertyWriteback request, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken);
+        await connection.QueryAsync<Guid>(new CommandDefinition(
+            "SELECT id FROM bom_item WHERE id=@BomItemId FOR UPDATE",
+            new { request.BomItemId }, transaction, cancellationToken: cancellationToken));
         var now = timeProvider.GetUtcNow().UtcDateTime;
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE cad_property_writeback SET status='Superseded',completed_at=@Now WHERE bom_item_id=@BomItemId AND source_document_id=@SourceDocumentId AND status IN ('Pending','InProgress')",
@@ -895,7 +992,14 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     public async Task<CadPropertyWriteback> UpdateCadPropertyWritebackAsync(Guid id, CadPropertyWritebackStatus status, Guid? resultVersionId, string? error, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
+        var bomItemId = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
+            "SELECT bom_item_id FROM cad_property_writeback WHERE id=@Id",
+            new { Id = id }, cancellationToken: cancellationToken));
+        if (bomItemId is null) throw new PdmNotFoundException("属性写回任务不存在。");
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await connection.QueryAsync<Guid>(new CommandDefinition(
+            "SELECT id FROM bom_item WHERE id=@BomItemId FOR UPDATE",
+            new { BomItemId = bomItemId.Value }, transaction, cancellationToken: cancellationToken));
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var affected = await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE cad_property_writeback SET status=@Status,started_at=CASE WHEN @Status='InProgress' THEN COALESCE(started_at,@Now) ELSE started_at END,completed_at=CASE WHEN @Status IN ('Succeeded','Conflict','Failed','Superseded') THEN @Now ELSE NULL END,result_version_id=@ResultVersionId,last_error=@Error WHERE id=@Id AND status IN ('Pending','InProgress')",
@@ -1132,24 +1236,24 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """
             SELECT audit.id,audit.occurred_at,audit.actor,audit.action_name,audit.entity_type,audit.entity_id,audit.detail_json
             FROM audit_entry audit
-            WHERE (audit.entity_type='Project' AND audit.entity_id=@ProjectIdText)
-               OR (audit.entity_type='BomItem' AND audit.entity_id=@ProjectIdText)
-               OR (audit.entity_type='PdmDocument' AND audit.entity_id IN (
-                    SELECT BIN_TO_UUID(document.id) FROM document WHERE document.project_id=@ProjectId))
-               OR (audit.entity_type='DocumentVersion' AND (
-                    audit.entity_id IN (SELECT BIN_TO_UUID(document.id) FROM document WHERE document.project_id=@ProjectId)
-                    OR audit.entity_id IN (
-                        SELECT BIN_TO_UUID(version.id) FROM document_version version
-                        JOIN document ON document.id=version.document_id
-                        WHERE document.project_id=@ProjectId)))
-               OR (audit.entity_type='ReleasePackage' AND audit.entity_id IN (
-                    SELECT BIN_TO_UUID(package.id) FROM release_package package WHERE package.project_id=@ProjectId))
-               OR (audit.entity_type='ApprovalTask' AND audit.entity_id IN (
-                    SELECT BIN_TO_UUID(task.id) FROM approval_task task
-                    JOIN release_package package ON package.id=task.release_package_id
-                    WHERE package.project_id=@ProjectId))
+            INNER JOIN (
+                SELECT candidate.id,candidate.occurred_at
+                FROM (
+                    SELECT 'Project' entity_type,@ProjectIdText entity_id
+                    UNION SELECT 'BomItem',@ProjectIdText
+                    UNION SELECT 'PdmDocument',BIN_TO_UUID(id) FROM document WHERE project_id=@ProjectId
+                    UNION SELECT 'DocumentVersion',BIN_TO_UUID(id) FROM document WHERE project_id=@ProjectId
+                    UNION SELECT 'DocumentVersion',BIN_TO_UUID(version.id) FROM document_version version
+                        JOIN document ON document.id=version.document_id WHERE document.project_id=@ProjectId
+                    UNION SELECT 'ReleasePackage',BIN_TO_UUID(id) FROM release_package WHERE project_id=@ProjectId
+                    UNION SELECT 'ApprovalTask',BIN_TO_UUID(task.id) FROM approval_task task
+                        JOIN release_package package ON package.id=task.release_package_id WHERE package.project_id=@ProjectId
+                ) target STRAIGHT_JOIN audit_entry candidate FORCE INDEX (ix_audit_entity)
+                    ON candidate.entity_type=target.entity_type AND candidate.entity_id=target.entity_id
+                ORDER BY candidate.occurred_at DESC
+                LIMIT @Limit
+            ) recent ON recent.id=audit.id
             ORDER BY audit.occurred_at DESC
-            LIMIT @Limit
             """,
             new { ProjectId = projectId, ProjectIdText = projectIdText, Limit = limit }, cancellationToken: cancellationToken));
         return rows.Select(row => new AuditEntry(row.Id, DateTime.SpecifyKind(row.OccurredAt, DateTimeKind.Utc), row.Actor, row.ActionName, row.EntityType, row.EntityId, ReadAuditDetail(row.DetailJson))).ToArray();
@@ -1343,7 +1447,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
 
     private static IReadOnlyDictionary<string, string> FindPhaseOwners(IReadOnlyList<ProjectAssignmentRow>? assignments, Guid projectId) =>
         assignments?.Where(item => item.ProjectId == projectId && item.AssignmentType.StartsWith("PhaseOwner:", StringComparison.Ordinal))
-            .ToDictionary(item => item.AssignmentType["PhaseOwner:".Length..], item => item.Username, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(item => item.AssignmentType["PhaseOwner:".Length..], StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => string.Join('、', group.Select(item => item.Username).Distinct(StringComparer.OrdinalIgnoreCase)), StringComparer.OrdinalIgnoreCase)
         ?? new Dictionary<string, string>();
 
     private static Project ApplyAdministratorCapabilities(Project project) => project with
@@ -1402,7 +1507,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                         .Distinct(StringComparer.Ordinal).ToArray()
                     : [],
                 CanAssignExecutionUnit = permissions.Contains(PermissionCodes.ProjectExecutionAssign) && project.ParentProjectId is null && project.OrganizationId == primaryCompanyId,
-                CanManageMainStaffing = permissions.Contains(PermissionCodes.ProjectStaffingManage) && project.ParentProjectId is null && project.ExecutionUnitId is not null && managedUnitIds.Contains(project.ExecutionUnitId.Value),
+                CanManageMainStaffing = permissions.Contains(PermissionCodes.ProjectStaffingManage) && project.ParentProjectId is null && project.ExecutionUnitId is not null && (managedUnitIds.Contains(project.ExecutionUnitId.Value) || string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)),
                 CanAssignDesigners = canAssignDesigners,
                 CanReadContent = canReadContent,
                 CanSubmitArchive = canReadContent

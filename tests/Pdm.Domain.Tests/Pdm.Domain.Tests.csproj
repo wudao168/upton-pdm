@@ -21,6 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\..\src\Pdm.SolidWorks.Addin\CheckInUploadHashes.cs" Link="CheckInUploadHashes.cs" />
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchPropertyNameModelAutoFillRule.cs" Link="BatchPropertyNameModelAutoFillRule.cs" />
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchPropertyFilterRule.cs" Link="BatchPropertyFilterRule.cs" />
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchLocalDocumentRule.cs" Link="BatchLocalDocumentRule.cs" />

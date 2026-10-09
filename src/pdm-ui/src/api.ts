@@ -136,6 +136,18 @@ export function submitProgramTemplateRevision(revisionId: string, expectedRowVer
   }, token)
 }
 
+export function withdrawProgramTemplateRevision(revisionId: string, expectedRowVersion: number, token: string): Promise<ProgramTemplateRevision> {
+  return requestJson<ProgramTemplateRevision>(`/api/program-templates/revisions/${revisionId}/withdraw`, {
+    method: 'POST', body: JSON.stringify({ expectedRowVersion }),
+  }, token)
+}
+
+export function transferProgramTemplateTask(taskId: string, newAssignee: string, expectedRowVersion: number, token: string): Promise<unknown> {
+  return requestJson(`/api/program-templates/tasks/${taskId}/transfer`, {
+    method: 'POST', body: JSON.stringify({ newAssignee, expectedRowVersion }),
+  }, token)
+}
+
 export function listProgramTemplateTasks(token: string): Promise<ProgramTemplateTask[]> {
   return requestJson<ProgramTemplateTask[]>('/api/program-templates/tasks/mine', {}, token)
 }
@@ -294,6 +306,9 @@ interface ApiReferenceNode {
 }
 
 interface ApiBomItem {
+  maintainedItem?: ApiBomItem | null
+  summaryItemIds?: string[] | null
+  summaryFingerprint?: string | null
   id?: string
   kind?: string | number
   sequence: number
@@ -414,7 +429,23 @@ interface ApiDrawingReviewCandidate extends Omit<DrawingReviewCandidate, 'state'
   bomKinds: Array<string | number>
 }
 
-async function requestJson<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {
+async function requestJson<T>(path: string, init: RequestInit = {}, token?: string, timeoutMs = 0, timeoutMessage = 'BOM保存等待超时，服务端保存结果尚未确认。当前修改已保留在页面中，请勿刷新或关闭页面，请核对保存结果后再操作。'): Promise<T> {
+  if (timeoutMs > 0) {
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new PdmApiError(timeoutMessage, 0))
+        controller.abort()
+      }, timeoutMs)
+    })
+    try {
+      // Bound the complete response, including a stalled response body, not only headers.
+      return await Promise.race([requestJson<T>(path, { ...init, signal: init.signal ? AbortSignal.any([controller.signal, init.signal]) : controller.signal }, token), timeout])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
   const headers = new Headers(init.headers)
   headers.set('Accept', 'application/json')
   if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json')
@@ -430,7 +461,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}, token?: stri
   }
   if (!response.ok) {
     if (response.status === 401 && path !== '/api/auth/login' && path !== '/api/auth/resume') {
-      window.dispatchEvent(new CustomEvent('pdm-session-expired'))
+      window.dispatchEvent(new CustomEvent('pdm-session-expired', { detail: { token } }))
       throw new PdmApiError('登录已过期，请重新登录。', response.status)
     }
     let message = `PLM API请求失败（${response.status}）`
@@ -506,6 +537,14 @@ export function submitProjectValidationPlan(projectId: string, expectedRowVersio
   return requestJson<ProjectValidationPlan>(`/api${scope}/projects/${projectId}/validation-plan/submit?expectedRowVersion=${expectedRowVersion}`, { method: 'POST' }, token)
 }
 
+export function withdrawProjectValidationPlan(projectId: string, expectedRowVersion: number, token: string, scope = ''): Promise<ProjectValidationPlan> {
+  return requestJson<ProjectValidationPlan>(`/api${scope}/projects/${projectId}/validation-plan/withdraw?expectedRowVersion=${expectedRowVersion}`, { method: 'POST' }, token)
+}
+
+export function transferValidationPlanApproval(taskId: string, newAssignee: string, token: string, scope = ''): Promise<ProjectValidationPlan> {
+  return requestJson<ProjectValidationPlan>(`/api${scope}/validation-plan-approval-tasks/${taskId}/transfer`, { method: 'POST', body: JSON.stringify({ newAssignee }) }, token)
+}
+
 export function decideValidationPlanApproval(taskId: string, decision: 'Approved' | 'Rejected', comment: string, token: string, scope = ''): Promise<ProjectValidationPlan> {
   return requestJson<ProjectValidationPlan>(`/api${scope}/validation-plan-approval-tasks/${taskId}/decision`, { method: 'POST', body: JSON.stringify({ decision: decision === 'Approved' ? 0 : 1, comment }) }, token)
 }
@@ -572,6 +611,10 @@ export async function exportProjectValidationPlan(projectId: string, projectCode
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
+export function listMaterialBrands(token: string, query = ''): Promise<string[]> {
+  return requestJson<string[]>(`/api/materials/brands?query=${encodeURIComponent(query.trim())}`, {}, token)
+}
+
 export function listMaterials(token: string, query = '', includeArchived = false, limit = 100, categoryCode = ''): Promise<PdmMaterial[]> {
   const parameters = new URLSearchParams()
   if (query.trim()) parameters.set('query', query.trim())
@@ -582,6 +625,11 @@ export function listMaterials(token: string, query = '', includeArchived = false
   return requestJson<PdmMaterial[]>(`/api/materials${suffix}`, {}, token)
 }
 
+export function matchApprovedMaterials(token: string, field: 'drawingNumber' | 'specification', value: string): Promise<PdmMaterial[]> {
+  const parameters = new URLSearchParams({ field, value: value.trim() })
+  return requestJson<PdmMaterial[]>(`/api/materials/matches?${parameters}`, { signal: AbortSignal.timeout(5000) }, token)
+}
+
 export function listPendingMasterMaterials(token: string): Promise<PdmMaterial[]> {
   return requestJson<PdmMaterial[]>('/api/materials/pending-approval', {}, token)
 }
@@ -590,7 +638,7 @@ export function listBomHeaderMaterialDirectory(token: string): Promise<import('.
   return requestJson('/api/materials/bom-headers', {}, token)
 }
 
-export function listMaterialPage(token: string, input: { query?: string; categoryCode?: string; brand?: string; includeArchived?: boolean; page?: number; pageSize?: number; createdAtOrder?: 'asc' | 'desc'; sortBy?: 'materialCode' | 'name' | 'specification' | 'brand' | 'createdBy' | 'createdAt'; sortOrder?: 'asc' | 'desc'; ordinaryOnly?: boolean }): Promise<MaterialPage> {
+export function listMaterialPage(token: string, input: { query?: string; categoryCode?: string; brand?: string; includeArchived?: boolean; page?: number; pageSize?: number; createdAtOrder?: 'asc' | 'desc'; sortBy?: 'materialCode' | 'name' | 'specification' | 'brand' | 'createdBy' | 'createdAt'; sortOrder?: 'asc' | 'desc'; ordinaryOnly?: boolean }, signal?: AbortSignal): Promise<MaterialPage> {
   const parameters = new URLSearchParams()
   if (input.query?.trim()) parameters.set('query', input.query.trim())
   if (input.categoryCode?.trim()) parameters.set('categoryCode', input.categoryCode.trim())
@@ -603,7 +651,7 @@ export function listMaterialPage(token: string, input: { query?: string; categor
   if (input.sortOrder) parameters.set('sortOrder', input.sortOrder)
   if (input.ordinaryOnly) parameters.set('ordinaryOnly', 'true')
   const suffix = parameters.size ? `?${parameters}` : ''
-  return requestJson<MaterialPage>(`/api/materials/page${suffix}`, {}, token)
+  return requestJson<MaterialPage>(`/api/materials/page${suffix}`, { signal }, token, 15_000, '料品主档查询超时，请重试或缩小查询范围。')
 }
 
 export function getMaterialDuplicateRules(token: string): Promise<MaterialDuplicateRule[]> {
@@ -846,12 +894,24 @@ export function applyMaterialRelations(projectId: string, mainMaterials: Array<{
   }, token)
 }
 
+export function linkBomMaterials(projectId: string, bomItemIds: string[], materialId: string, token: string): Promise<PdmMaterial> {
+  return requestJson('/api/materials/link-bom-batch', { method: 'POST', body: JSON.stringify({ projectId, bomItemIds, materialId }) }, token)
+}
+
 export function linkBomMaterial(projectId: string, bomItemId: string, materialId: string, token: string): Promise<PdmMaterial> {
   return requestJson<PdmMaterial>('/api/materials/link-bom', { method: 'POST', body: JSON.stringify({ projectId, bomItemId, materialId }) }, token)
 }
 
 export function resolveBomMaterialCodes(projectId: string, bomItemIds: string[], token: string): Promise<MaterialCodeResolution[]> {
   return requestJson('/api/material-code/resolve', { method: 'POST', body: JSON.stringify({ projectId, bomItemIds }) }, token)
+}
+
+export function validateBomMaterialCodes(projectId: string, items: BomItem[], token: string): Promise<MaterialCodeResolution[]> {
+  return requestJson('/api/material-code/validate', { method: 'POST', body: JSON.stringify({ projectId, items: items.map(item => ({
+    id: item.id, sequence: item.sequence, drawingNumber: item.drawingNumber, name: item.name,
+    quantity: item.quantity, unit: item.unit, material: item.material, specification: item.specification,
+    revision: item.revision, isComplete: item.complete, brand: item.brand,
+  })) }) }, token)
 }
 
 export function applyForBomMaterialCodes(projectId: string, bomItemIds: string[], token: string): Promise<MaterialCodeResolution[]> {
@@ -936,8 +996,8 @@ export function retryMaterialSyncTask(taskId: string, token: string): Promise<Ma
   return requestJson<MaterialSyncTask>(`/api/material-sync-tasks/${taskId}/retry`, { method: 'POST' }, token)
 }
 
-export function executeMaterialSyncTask(taskId: string, token: string): Promise<MaterialSyncExecutionResult> {
-  return requestJson<MaterialSyncExecutionResult>(`/api/material-sync-tasks/${taskId}/execute`, { method: 'POST' }, token)
+export function executeMaterialSyncTask(taskId: string, token: string, attributes?: string[]): Promise<MaterialSyncExecutionResult> {
+  return requestJson<MaterialSyncExecutionResult>(`/api/material-sync-tasks/${taskId}/execute`, { method: 'POST', ...(attributes ? { body: JSON.stringify({ attributes }) } : {}) }, token)
 }
 
 export function createMaterialSyncBatch(taskIds: string[], token: string): Promise<MaterialSyncBatch> {
@@ -1085,7 +1145,47 @@ export async function readDocumentPreviewFile(documentId: string, versionId: str
   return response.blob()
 }
 
-export async function downloadDocumentPreviewFile(documentId: string, versionId: string, fileName: string, token: string): Promise<void> {
+
+export type DownloadProgress = (received: number, total: number) => void
+async function receiveDownload(response: Response, progress: DownloadProgress): Promise<Blob> {
+  const total = Number(response.headers.get('Content-Length')) || 0
+  progress(0, total)
+  if (!response.body) { const blob = await response.blob(); progress(blob.size, blob.size); return blob }
+  const reader = response.body.getReader()
+  const chunks: Uint8Array<ArrayBuffer>[] = []
+  let received = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    chunks.push(new Uint8Array(value))
+    received += value.byteLength
+    progress(received, total)
+  }
+  return new Blob(chunks, { type: response.headers.get('Content-Type') || 'application/octet-stream' })
+}
+async function chooseDownloadFile(fileName: string) {
+  const picker = (window as Window & { showSaveFilePicker?: (options: { suggestedName: string }) => Promise<{ createWritable: () => Promise<{ write: (blob: Blob) => Promise<void>; close: () => Promise<void> }> }> }).showSaveFilePicker
+  if (!picker) return null
+  return picker.call(window, { suggestedName: fileName })
+}
+async function saveDownload(blob: Blob, fileName: string, handle: Awaited<ReturnType<typeof chooseDownloadFile>>) {
+  if (handle) { const writer = await handle.createWritable(); await writer.write(blob); await writer.close(); return }
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = fileName
+  anchor.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 60000)
+}
+
+export async function downloadDocumentPreviewFile(documentId: string, versionId: string, fileName: string, token: string, progress?: DownloadProgress): Promise<void> {
+  if (progress) {
+    const handle = await chooseDownloadFile(fileName)
+    const response = await fetch(`${apiBase}/api/documents/${documentId}/versions/${versionId}/preview`, { headers: authenticatedHeaders(token), cache: 'no-store' })
+    if (!response.ok) throw new PdmApiError(`图纸下载失败（${response.status}），请稍后重试。`, response.status)
+    await saveDownload(await receiveDownload(response, progress), fileName, handle)
+    return
+  }
   const blob = await readDocumentPreviewFile(documentId, versionId, token)
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
@@ -1355,23 +1455,48 @@ export function copyProjectContent(targetProjectId: string, input: ProjectCopyOp
   return requestJson(`/api/projects/${targetProjectId}/copy`, { method: 'POST', body: JSON.stringify(input) }, token)
 }
 
-export async function saveBom(projectId: string, kind: BomKind, items: BomItem[], token: string): Promise<BomItem[]> {
-  const saved = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/${kind}`, {
+export async function saveBom(projectId: string, kind: BomKind, items: BomItem[], token: string): Promise<{ items: BomItem[]; draftVersion?: BomVersion | null }> {
+  if (!items.length || items.some(item => item.summaryItemIds)) {
+    const saved = await requestJson<{ items: ApiBomItem[]; draft: ApiBomVersion | null }>(
+      `/api/projects/${projectId}/boms/${kind}?summary=true`, {
+        method: 'PUT', body: JSON.stringify({
+          items: items.filter(item => !item.id).map(item => ({ ...item, isComplete: item.complete })),
+          summaryOrder: items.filter(item => item.id && !item.editedFields?.includes('removeEngineeringKit')).map(item => item.id),
+          summaryRows: items.filter(item => item.summaryItemIds && item.editedFields?.length).map(item => ({
+            itemIds: item.summaryItemIds, fingerprint: item.summaryFingerprint, fields: item.editedFields,
+            values: { ...item, isComplete: item.complete },
+          })),
+        }),
+      }, token, 60_000)
+    return { items: saved.items.map(mapBomItem), draftVersion: saved.draft ? mapBomVersion(saved.draft) : null }
+  }
+  const saved = await requestJson<ApiBomItem[] | {
+    items: ApiBomItem[]; draft: ApiBomVersion | null; draftItemIds: string[]; draftItemOverrides: ApiBomItem[]
+  }>(`/api/projects/${projectId}/boms/${kind}?includeDraft=true`, {
     method: 'PUT',
     body: JSON.stringify({ items: items.map(item => ({ ...item, isComplete: item.complete })) }),
-  }, token)
-  return saved.map(mapBomItem)
+  }, token, 60_000)
+  // Older servers still return the item array; the workspace then refreshes versions normally.
+  if (Array.isArray(saved)) return { items: saved.map(mapBomItem) }
+  const mappedItems = saved.items.map(mapBomItem)
+  if (!saved.draft) return { items: mappedItems, draftVersion: null }
+  const byId = new Map(mappedItems.map(item => [item.id, item]))
+  for (const item of saved.draftItemOverrides) byId.set(item.id, mapBomItem(item))
+  const draftItems = saved.draftItemIds.map(id => byId.get(id))
+  // A missing reference must trigger a full refresh rather than silently truncate a version.
+  if (draftItems.some(item => !item)) return { items: mappedItems }
+  return { items: mappedItems, draftVersion: { ...mapBomVersion(saved.draft), items: (draftItems as BomItem[]).map(item => ({ ...item })) } }
 }
 
 export async function listBom(projectId: string, kind: BomKind, token: string): Promise<BomItem[]> {
-  const items = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/${kind}`, {}, token)
+  const items = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/${kind}?summary=true`, {}, token)
   return items.map(mapBomItem)
 }
 
 export async function importBom(projectId: string, kind: BomKind, file: File, token: string): Promise<BomItem[]> {
   const form = new FormData()
   form.append('file', file, file.name)
-  const imported = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/${kind}/import`, { method: 'POST', body: form }, token)
+  const imported = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/${kind}/import?summary=true`, { method: 'POST', body: form }, token)
   return imported.map(mapBomItem)
 }
 
@@ -1406,8 +1531,8 @@ export async function exportWearPartBom(projectId: string, mode: BomExportMode, 
 }
 
 export async function generateMechanicalBom(projectId: string, token: string): Promise<BomGenerationResult> {
-  const result = await requestJson<{ standardItems: ApiBomItem[]; nonStandardItems: ApiBomItem[]; electricalItems: ApiBomItem[]; unclassifiedItems: ApiBomItem[]; virtualItems: ApiBomItem[]; virtualCount: number; unclassifiedCount: number; pendingRemovalCount: number; manualUnmatchedCount: number; applied: boolean }>(`/api/projects/${projectId}/boms/generate?apply=false`, { method: 'POST' }, token)
-  return { ...result, standardItems: result.standardItems.map(mapBomItem), nonStandardItems: result.nonStandardItems.map(mapBomItem), electricalItems: result.electricalItems.map(mapBomItem), unclassifiedItems: result.unclassifiedItems.map(mapBomItem), virtualItems: result.virtualItems.map(mapBomItem) }
+  const result = await requestJson<{ standardItems: ApiBomItem[]; nonStandardItems: ApiBomItem[]; electricalItems: ApiBomItem[]; unclassifiedItems: ApiBomItem[]; virtualItems: ApiBomItem[]; componentDrawingItems: ApiBomItem[]; virtualCount: number; unclassifiedCount: number; pendingRemovalCount: number; manualUnmatchedCount: number; applied: boolean }>(`/api/projects/${projectId}/boms/generate?apply=false`, { method: 'POST' }, token)
+  return { ...result, standardItems: result.standardItems.map(mapBomItem), nonStandardItems: result.nonStandardItems.map(mapBomItem), electricalItems: result.electricalItems.map(mapBomItem), unclassifiedItems: result.unclassifiedItems.map(mapBomItem), virtualItems: result.virtualItems.map(mapBomItem), componentDrawingItems: (result.componentDrawingItems ?? []).map(mapBomItem) }
 }
 
 export async function getBomSourceData(projectId: string, token: string): Promise<BomItem[]> {
@@ -1558,11 +1683,14 @@ export async function listReleasePackages(projectId: string, token: string): Pro
   return (await requestJson<ApiReleasePackage[]>(`/api/projects/${projectId}/release-packages`, {}, token)).map(mapReleasePackage)
 }
 
-export function listProductionDrawings(token: string, includeHistory = false): Promise<ProductionDrawingItem[]> {
-  return requestJson(`/api/production-drawings?includeHistory=${includeHistory}`, {}, token)
+export function listProductionDrawings(token: string, includeHistory = false, projectId?: string, indexOnly = false): Promise<ProductionDrawingItem[]> {
+  return requestJson(`/api/production-drawings?includeHistory=${includeHistory}&indexOnly=${indexOnly}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`, {}, token)
 }
 
-export async function downloadProductionDrawingArchive(projectId: string, versionIds: string[], format: 'Pdf' | 'Step', token: string, releasePackageNumber = '生产图纸'): Promise<void> {
+export async function downloadProductionDrawingArchive(projectId: string, versionIds: string[], format: 'Pdf' | 'Step', token: string, releasePackageNumber = '生产图纸', progress?: DownloadProgress): Promise<void> {
+  const packageName = releasePackageNumber.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+  const fileName = `${packageName}-${format === 'Pdf' ? 'PDF' : 'STEP'}.zip`
+  const handle = await chooseDownloadFile(fileName)
   const headers = authenticatedHeaders(token)
   headers.set('Content-Type', 'application/json')
   const response = await fetch(`${apiBase}/api/projects/${projectId}/production-drawings/archive`, {
@@ -1574,14 +1702,8 @@ export async function downloadProductionDrawingArchive(projectId: string, versio
     const body = await response.json().catch(() => null)
     throw new PdmApiError(body?.detail || `生产图纸批量下载失败（${response.status}）。`, response.status)
   }
-  const blob = await response.blob()
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  const packageName = releasePackageNumber.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
-  link.download = `${packageName}-${format === 'Pdf' ? 'PDF' : 'STEP'}.zip`
-  link.click()
-  window.setTimeout(() => URL.revokeObjectURL(url), 60000)
+  const blob = progress ? await receiveDownload(response, progress) : await response.blob()
+  await saveDownload(blob, fileName, handle)
 }
 
 export function getProductionDrawing(versionId: string, token: string): Promise<ProductionDrawingItem> {
@@ -1606,7 +1728,7 @@ export function deleteReleasePackageDraft(releasePackageId: string, token: strin
 }
 
 export async function listBomVersions(projectId: string, token: string): Promise<BomVersion[]> {
-  const versions = await requestJson<ApiBomVersion[]>(`/api/projects/${projectId}/bom-versions`, {}, token).catch(error => {
+  const versions = await requestJson<ApiBomVersion[]>(`/api/projects/${projectId}/bom-versions?summary=true`, {}, token).catch(error => {
     if (error instanceof PdmApiError && error.status === 404) return []
     throw error
   })
@@ -1804,6 +1926,20 @@ export function readProjectPlan(projectId: string, token: string): Promise<impor
 
 export function readProjectPlanPortfolio(projectId: string, token: string): Promise<import('./types').ProjectPlanPortfolio> {
   return requestJson(`/api/projects/${projectId}/plan/portfolio`, {}, token)
+}
+
+export async function readProjectWorkbench(view: string, token: string): Promise<import('./projectWorkbench').WorkbenchData> {
+  type Data = import('./projectWorkbench').WorkbenchData
+  const data = await requestJson<Omit<Data, 'projects'> & { projects: Array<Omit<Data['projects'][number], 'project'> & { project: ApiProject }> }>(`/api/workbench${view ? `?view=${encodeURIComponent(view)}` : ''}`, {}, token)
+  return { ...data, projects: data.projects.map(item => ({ ...item, project: mapProject(item.project) })) }
+}
+
+export function registerWorkbenchRisk(projectId: string, input: { title: string; impact: string; owner: string; dueDate: string; severity: string }, token: string): Promise<import('./projectWorkbench').WorkbenchRisk> {
+  return requestJson(`/api/projects/${projectId}/risks`, { method: 'POST', body: JSON.stringify(input) }, token)
+}
+
+export function closeWorkbenchRisk(id: string, token: string): Promise<void> {
+  return requestJson(`/api/workbench/risks/${id}/close`, { method: 'POST' }, token)
 }
 
 export function listProjectPlanVersions(projectId: string, token: string): Promise<import('./types').ProjectPlanVersion[]> {
@@ -2043,7 +2179,11 @@ function mapFolderTemplateNode(node: Omit<ProjectFolderTemplateNode, 'purpose' |
   return { ...node, purpose: mapFolderPurpose(node.purpose), permissions: (node.permissions ?? []).map(mapFolderPermission) }
 }
 
-export async function loadProjectWorkspace(projectId: string, token: string): Promise<ProjectWorkspaceData> {
+export async function loadBomSourceData(projectId: string, token: string): Promise<BomItem[]> {
+  return (await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/bom-source-data`, {}, token)).map(mapBomItem)
+}
+
+export async function loadProjectWorkspace(projectId: string, token: string, includeSourceData = true): Promise<ProjectWorkspaceData> {
   const project = await withApiContext('项目详情', requestJson<ApiProject>(`/api/projects/${projectId}`, {}, token))
   const mappedProject = mapProject(project)
   if (!mappedProject.canReadContent) {
@@ -2063,11 +2203,11 @@ export async function loadProjectWorkspace(projectId: string, token: string): Pr
   const [documentWorkspace, folders, standard, nonStandard, unclassified, electrical, sourceData, bomEmptyDeclarations, bomVersions, bomBaselines, drawingReviews, materialCodeApplications, releasePackages] = await Promise.all([
     recover('图档工作区', 'documents', withApiContext('图档工作区', loadProjectDocumentWorkspace(project.id, token)), { root: emptyProjectRoot(project), hasDocuments: false, documents: [], documentRelations: [] } as ProjectDocumentWorkspaceData),
     recover('项目文件夹', 'files', listProjectFolders(project.id, token), [] as ProjectFolder[]),
-    recover('标准件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Standard`, {}, token), [] as ApiBomItem[]),
-    recover('非标件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/NonStandard`, {}, token), [] as ApiBomItem[]),
+    recover('标准件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Standard?summary=true`, {}, token), [] as ApiBomItem[]),
+    recover('非标件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/NonStandard?summary=true`, {}, token), [] as ApiBomItem[]),
     recover('待分类BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Unclassified`, {}, token), [] as ApiBomItem[]),
-    recover('电气BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Electrical`, {}, token), [] as ApiBomItem[]),
-    recover('BOM源数据', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/bom-source-data`, {}, token), [] as ApiBomItem[]),
+    recover('电气BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Electrical?summary=true`, {}, token), [] as ApiBomItem[]),
+    includeSourceData ? recover('BOM源数据', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/bom-source-data`, {}, token), [] as ApiBomItem[]) : Promise.resolve([] as ApiBomItem[]),
     recover('空BOM声明', 'bom', requestJson<BomEmptyDeclaration[]>(`/api/projects/${project.id}/boms/empty-declarations`, {}, token), [] as BomEmptyDeclaration[]),
     recover('BOM版本', 'bom', listBomVersions(project.id, token), [] as BomVersion[]),
     recover('制造基线', 'release', listBomBaselines(project.id, token), [] as ManufacturingBomBaseline[]),
@@ -2380,9 +2520,12 @@ function reconcileCurrentReferenceTree(
 
 function mapBomItem(item: ApiBomItem): BomItem {
   return {
+    maintainedItem: item.maintainedItem ? mapBomItem(item.maintainedItem) : undefined,
+    summaryItemIds: item.summaryItemIds ?? undefined,
+    summaryFingerprint: item.summaryFingerprint ?? undefined,
     id: item.id,
     kind: typeof item.kind === 'number'
-      ? ([undefined, 'Electrical', 'Standard', 'NonStandard', 'Unclassified', 'Virtual'] as const)[item.kind]
+      ? ([undefined, 'Electrical', 'Standard', 'NonStandard', 'Unclassified', 'Virtual', 'ComponentDrawing'] as const)[item.kind]
       : item.kind as BomClassification | undefined,
     sequence: item.sequence,
     drawingNumber: item.drawingNumber,

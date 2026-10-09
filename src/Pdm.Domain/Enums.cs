@@ -157,7 +157,8 @@ public enum BomKind
     Standard = 2,
     NonStandard = 3,
     Unclassified = 4,
-    Virtual = 5
+    Virtual = 5,
+    ComponentDrawing = 6
 }
 
 public enum BomVersionState

@@ -1,5 +1,6 @@
 import { ElMessage as toastMessage } from 'element-plus'
 import { readonly, shallowRef } from 'vue'
+import { userErrorMessage } from './userErrorMessage'
 
 type StatusType = 'success' | 'warning' | 'error' | 'info'
 const currentStatus = shallowRef<{ id: number; type: StatusType; message: string }>()
@@ -68,6 +69,11 @@ export function registerStatusHost() {
 }
 
 function show(type: StatusType, message: string) {
+  if (type === 'error' || type === 'warning') {
+    const translated = userErrorMessage(message)
+    if (translated !== message) console.error('操作异常原文：', message)
+    message = translated
+  }
   const dialog = activeDialog()
   if (dialog) {
     currentStatus.value = undefined

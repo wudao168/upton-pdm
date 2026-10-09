@@ -1,4 +1,4 @@
-using System.IO.Compression;
+﻿using System.IO.Compression;
 using System.Xml.Linq;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
@@ -10,7 +10,7 @@ public sealed class ValidationPlanServiceTests
 {
     [Theory]
     [InlineData("QualityManager", "质量经理")]
-    [InlineData("QualityInspector", "质量员")]
+    [InlineData("QualityInspector", "质检员")]
     public async Task QualityRoles_ManageAllQualityKindsWithinReadableProjects(string roleCode, string name)
     {
         var definition = Assert.Single(RolePermissionCatalog.Roles, x => x.RoleCode == roleCode);
@@ -90,7 +90,7 @@ public sealed class ValidationPlanServiceTests
     }
 
     [Fact]
-    public async Task QualityDefaultUploaders_RespectDepartmentAndProjectAccess()
+    public async Task QualityUpload_RequiresConfiguredPermissionAndProjectAccess()
     {
         var (_, _, repository, _, project) = await CreateFixtureAsync();
         var company = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First();
@@ -100,6 +100,8 @@ public sealed class ValidationPlanServiceTests
         // Reading project content is still required even for a default uploader.
         var readable = await repository.HasProjectContentReadAccessAsync(project.Id, "quality-user", UserRole.ProductionViewer, default);
         Assert.True(readable);
+        Assert.False(await QualityUploadPolicy.CanAsync(repository, project.Id, "quality", "quality-user", UserRole.ProductionViewer, default));
+        await repository.SetRolePermissionsAsync("ProductionViewer", [PermissionCodes.ProjectContentView, PermissionCodes.QualityInspectionUpload], default);
         Assert.Equal(readable, await QualityUploadPolicy.CanAsync(repository, project.Id, "quality", "quality-user", UserRole.ProductionViewer, default));
         Assert.False(await QualityUploadPolicy.CanAsync(repository, project.Id, "assembly", "quality-user", UserRole.ProductionViewer, default));
         Assert.False(await QualityUploadPolicy.CanAsync(repository, Guid.NewGuid(), "quality", "quality-user", UserRole.ProductionViewer, default));
@@ -422,6 +424,26 @@ public sealed class ValidationPlanServiceTests
         Assert.Single(await service.ListExecutionRecordsAsync(plan.Id, "developer", UserRole.Administrator, default));
     }
 
+    [Fact]
+    public async Task PendingApproval_CanBeTransferredAndWithdrawnOnlyBySubmitter()
+    {
+        var (service, plans, repository, _, project) = await CreateFixtureAsync();
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "approval-target", "接收人", "unused", UserRole.Engineer, true), default);
+        var draft = await service.SavePlanAsync(project.Id,
+            new("编制人", new DateOnly(2026, 9, 14), [new(null, "联锁检查", "内部评审", null, null, null, null, null, 1)]),
+            "admin", UserRole.Administrator, default);
+        var task = new ValidationPlanApprovalTask(Guid.NewGuid(), draft.Id, 1, ApprovalStage.Approval, "技术批准", "admin", null, null, null, DateTimeOffset.UtcNow, null);
+        var submitted = await plans.SubmitAsync(draft.Id, draft.RowVersion, "validation-plan", 1, [task], "admin", DateTimeOffset.UtcNow, default);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.WithdrawAsync(project.Id, submitted.RowVersion, "engineer", UserRole.Engineer, default));
+        var transferred = await service.TransferAsync(task.Id, "approval-target", "admin", UserRole.Administrator, default);
+        Assert.Equal("approval-target", Assert.Single(transferred.ApprovalTasks).Assignee);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.DecideAsync(task.Id, ApprovalDecision.Approved, null, "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.TransferAsync(task.Id, "admin", "admin", UserRole.Administrator, default));
+        var withdrawn = await service.WithdrawAsync(project.Id, transferred.RowVersion, "admin", UserRole.Administrator, default);
+        Assert.Equal(ProjectValidationPlanState.Draft, withdrawn.State);
+        Assert.Empty(await service.ListMyApprovalTasksAsync("approval-target", UserRole.Engineer, default));
+    }
+
     private static async Task<(ValidationPlanService Service, InMemoryValidationPlanRepository Plans, InMemoryPdmRepository Repository, RecordingFileStorage Storage, Project Project)> CreateFixtureAsync(IValidationPlanFileArchive? archive = null)
     {
         var time = TimeProvider.System;
@@ -471,7 +493,7 @@ public sealed class ValidationPlanServiceTests
 
         public string? LastCompletedRelativePath { get; private set; }
 
-        public Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken)
+        public Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken, string? owner = null)
         {
             var session = new UploadSession(Guid.NewGuid(), projectId, fileName, totalLength, 4 * 1024 * 1024, expectedSha256, totalLength, timeProvider.GetUtcNow().AddHours(1));
             sessions.Add(session.Id, session);

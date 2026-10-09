@@ -28,6 +28,20 @@ afterEach(() => {
 })
 
 describe('global operation status', () => {
+  it.each([
+    ['crypto.randomUUID is not a function', '生成校验标识失败'],
+    ['Failed to fetch', '无法连接服务器'],
+    ['Cannot read properties of undefined', '页面处理失败'],
+    ['Unhandled operation exception', '操作未完成'],
+  ])('renders technical errors in Chinese: %s', async (original, expected) => {
+    const diagnostics = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const wrapper = header()
+    ElMessage.error(original)
+    await flushPromises()
+    expect(wrapper.get('.pdm-global-status.is-error').text()).toContain(expected)
+    expect(wrapper.text()).not.toContain(original)
+    expect(diagnostics).toHaveBeenCalledWith('操作异常原文：', original)
+  })
   it('clears old page status and restores the idle animation without suppressing new messages', async () => {
     const wrapper = header()
     const old = ElMessage.success('旧页面的状态')

@@ -102,6 +102,8 @@ public interface IValidationPlanRepository
     Task<ProjectValidationPlan> CreateRevisionAsync(ProjectValidationPlan plan, CancellationToken cancellationToken);
     Task<ProjectValidationPlan> SubmitAsync(Guid planId, long expectedRowVersion, string workflowCode, int workflowVersion, IReadOnlyList<ValidationPlanApprovalTask> tasks, string actor, DateTimeOffset submittedAt, CancellationToken cancellationToken);
     Task<ProjectValidationPlan> DecideAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, DateTimeOffset decidedAt, CancellationToken cancellationToken);
+    Task<ProjectValidationPlan> WithdrawAsync(Guid planId, long expectedRowVersion, string actor, DateTimeOffset at, CancellationToken cancellationToken);
+    Task<ProjectValidationPlan> TransferAsync(Guid taskId, string currentAssignee, string newAssignee, DateTimeOffset at, CancellationToken cancellationToken);
     Task<IReadOnlyList<PendingValidationPlanApprovalTask>> ListPendingApprovalTasksAsync(string actor, bool includeAll, CancellationToken cancellationToken);
     Task<ValidationPlanAttachment> AddAttachmentAsync(ValidationPlanAttachment attachment, CancellationToken cancellationToken);
     Task<IReadOnlyList<ValidationPlanExecutionRecord>> ListExecutionRecordsAsync(Guid planId, CancellationToken cancellationToken);

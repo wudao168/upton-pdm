@@ -1,10 +1,24 @@
-namespace Upton.Pdm.Domain;
+﻿namespace Upton.Pdm.Domain;
 
 public static class PermissionCodes
 {
     public const string ProjectBudgetView = "project.budget.view";
     public const string ProjectBudgetActualEdit = "project.budget.actual.edit";
     public const string ProjectBudgetEdit = "project.budget.edit";
+    public const string ProjectBudgetReserve = "project.budget.reserve";
+    public const string ProjectBudgetSettlementView = "project.budget.settlement.view";
+    public const string ProjectBudgetSettlementEdit = "project.budget.settlement.edit";
+    public const string ProjectBudgetBonusRateEdit = "project.budget.bonus-rate.edit";
+    public const string ProjectPlanEdit = "project.plan.edit";
+    public const string ProjectPlanTemplateManage = "project.plan-template.manage";
+    public const string ProjectContactEdit = "project.contact.edit";
+    public const string ProjectNameplateEdit = "project.nameplate.edit";
+    public const string NameplateTemplateManage = "nameplate.template.manage";
+    public const string QualityIncomingUpload = "quality.incoming.upload";
+    public const string QualityAssemblyUpload = "quality.assembly.upload";
+    public const string QualityInspectionUpload = "quality.inspection.upload";
+    public const string QualityPreAcceptanceUpload = "quality.pre-acceptance.upload";
+    public const string QualityFinalAcceptanceUpload = "quality.final-acceptance.upload";
     public const string ProjectView = "project.view";
     public const string ProjectCreate = "project.create";
     public const string ProjectEdit = "project.edit";
@@ -62,13 +76,27 @@ public static class RolePermissionCatalog
         new(PermissionCodes.ProjectBudgetView, "查看项目预算", "项目预算", "查看未税预算、实际和预计成本；风险预留仅计划管理可见。"),
         new(PermissionCodes.ProjectBudgetActualEdit, "维护实际成本及工时", "项目预算", "由财务人工登记实际金额和实际工时。", Sensitive: true),
         new(PermissionCodes.ProjectBudgetEdit, "维护项目预算", "项目预算", "维护预算及剩余成本预估。", Sensitive: true),
+        new(PermissionCodes.ProjectBudgetReserve, "查看及维护风险预留", "项目预算", Sensitive: true),
+        new(PermissionCodes.ProjectBudgetSettlementView, "查看项目结算", "项目预算"),
+        new(PermissionCodes.ProjectBudgetSettlementEdit, "维护项目结算", "项目预算", Sensitive: true),
+        new(PermissionCodes.ProjectBudgetBonusRateEdit, "维护奖金比例", "项目预算", Sensitive: true),
+        new(PermissionCodes.ProjectPlanEdit, "维护项目计划", "项目计划", Sensitive: true),
+        new(PermissionCodes.ProjectPlanTemplateManage, "维护系统计划模板", "项目计划", Sensitive: true),
+        new(PermissionCodes.ProjectContactEdit, "维护客户及发货信息", "项目内容", Sensitive: true),
+        new(PermissionCodes.ProjectNameplateEdit, "维护项目铭牌", "项目内容", Sensitive: true),
+        new(PermissionCodes.NameplateTemplateManage, "维护铭牌模板", "项目内容", Sensitive: true),
+        new(PermissionCodes.QualityIncomingUpload, "上传来料检验资料", "质量资料", Sensitive: true),
+        new(PermissionCodes.QualityAssemblyUpload, "上传装配检验资料", "质量资料", Sensitive: true),
+        new(PermissionCodes.QualityInspectionUpload, "上传质量检验资料", "质量资料", Sensitive: true),
+        new(PermissionCodes.QualityPreAcceptanceUpload, "上传预验收资料", "质量资料", Sensitive: true),
+        new(PermissionCodes.QualityFinalAcceptanceUpload, "上传终验收资料", "质量资料", Sensitive: true),
         new(PermissionCodes.ProjectView, "查看项目清单", "项目管理", "查看当前公司项目元数据；项目图档与业务内容仍按内容权限和项目分工控制。"),
         new(PermissionCodes.ProjectCreate, "创建主项目", "项目管理"),
         new(PermissionCodes.ProjectEdit, "编辑项目基本信息", "项目管理", "可修改创建项目时填写的业务信息；涉及编号字段时由系统校验并重新生成。"),
         new(PermissionCodes.ProjectChildCreate, "创建子项目", "项目管理"),
         new(PermissionCodes.ProjectDelete, "删除空项目", "项目管理", "仅可删除无子项目、图档、BOM、结构快照及审批发布包的项目；成功删除后释放系统编号。", Sensitive: true),
         new(PermissionCodes.ProjectExecutionAssign, "分配执行事业部", "项目分工", "仅可分配本人所属公司的项目。"),
-        new(PermissionCodes.ProjectStaffingManage, "配置项目经理与设计负责人", "项目分工", "非管理员还必须是执行事业部负责人。"),
+        new(PermissionCodes.ProjectStaffingManage, "配置项目经理与设计负责人", "项目分工", "仅项目经理或执行事业部负责人可维护，项目经理不能修改自己的分配。"),
         new(PermissionCodes.ProjectDesignerAssign, "分配执行工程师", "项目分工", "事业部负责人、机械主管、当前项目经理或主设可在本人负责范围内配置。"),
         new(PermissionCodes.ProjectContentView, "查看项目图档与业务内容", "项目内容", "拥有此权限的角色可查看所属公司内项目的图档、BOM、发布和版本内容。"),
         new(PermissionCodes.ProjectContentReset, "重置项目内容", "项目内容", "仅管理员可在项目从未发布且未同步外部系统时，将项目内容整体重置并保留30天恢复快照。", Sensitive: true),
@@ -116,6 +144,7 @@ public static class RolePermissionCatalog
         new Dictionary<UserRole, IReadOnlySet<string>>
         {
             [UserRole.Engineer] = Set(
+                PermissionCodes.ProjectPlanEdit,
                 PermissionCodes.ProjectView,
                 PermissionCodes.ProjectCreate,
                 PermissionCodes.ProjectEdit,
@@ -144,6 +173,7 @@ public static class RolePermissionCatalog
             [UserRole.BusinessUnitManager] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ValidationPlanEdit, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ApprovalEmergencySubstitute, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateReview),
             [UserRole.Administrator] = Set(Permissions.Select(permission => permission.Code).ToArray()),
             [UserRole.PlatformAdministrator] = Set(
+                PermissionCodes.ProjectPlanTemplateManage,
                 PermissionCodes.CustomerSettingsManage,
                 PermissionCodes.OrganizationSettingsManage,
                 PermissionCodes.FolderSettingsManage,
@@ -168,13 +198,15 @@ public static class RolePermissionCatalog
         new(UserRole.ProcessReviewer.ToString(), "标准化工程师", "负责标准化检查并处理分配的审批任务。", UserRole.ProcessReviewer, true),
         new("ProjectManager", "项目经理", "负责项目建立、人员分工及发布组织。", UserRole.Engineer, true),
         new("SalesAssistant", "销售助理", "查看项目预算并维护项目结算明细。", UserRole.ProductionViewer, true),
+        new("PresalesEngineer", "售前工程师", "负责项目前期资料的提供，参与评审。", UserRole.ProductionViewer, true),
+        new("SalesManager", "销售经理", "查看自己当前项目的状态。", UserRole.ProductionViewer, true),
         new("Finance", "财务", "登记项目实际成本及实际工时。", UserRole.ProductionViewer, true),
         new("SupplyChain", "供应链", "查看负责范围内的项目、BOM和生产资料。", UserRole.ProductionViewer, true),
         new("ProcurementSpecialist", "采购专员", "查看负责范围内的项目、BOM和采购资料。", UserRole.ProductionViewer, true),
         new("ProcurementManager", "采购经理", "查看采购资料并处理分配的审批任务。", UserRole.Approver, true),
         new("ProductionManager", "生产经理", "查看生产资料并处理分配的审批任务。", UserRole.Approver, true),
         new("QualityManager", "质量经理", "管理和查看项目质量检验、过程检验及客户验收资料。", UserRole.ProductionViewer, true),
-        new("QualityInspector", "质量员", "上传、维护和查看项目质量相关检验及验收资料。", UserRole.ProductionViewer, true),
+        new("QualityInspector", "质检员", "上传、维护和查看项目质量相关检验及验收资料。", UserRole.ProductionViewer, true),
         new("ProductionAssistant", "生产助理", "协助查看和组织负责范围内的生产资料。", UserRole.ProductionViewer, true),
         new("MachiningSupervisor", "机加主管", "查看负责范围内的机加图档和生产资料。", UserRole.ProductionViewer, true),
         new("MachiningOperator", "机加人员", "查看分配给本人的机加图档和生产资料。", UserRole.ProductionViewer, true),
@@ -204,6 +236,8 @@ public static class RolePermissionCatalog
             [UserRole.ProcessReviewer.ToString()] = Defaults[UserRole.ProcessReviewer],
             ["ProjectManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectCreate, PermissionCodes.ProjectEdit, PermissionCodes.ProjectChildCreate, PermissionCodes.ProjectStaffingManage, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView),
             ["SalesAssistant"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView),
+            ["PresalesEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView),
+            ["SalesManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView),
             ["Finance"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView, PermissionCodes.ProjectBudgetActualEdit),
             ["SupplyChain"] = Defaults[UserRole.ProductionViewer],
             ["ProcurementSpecialist"] = Defaults[UserRole.ProductionViewer],
@@ -228,8 +262,27 @@ public static class RolePermissionCatalog
 
     private static readonly string[] BudgetViewerRoles = ["BusinessUnitManager", "MechanicalManager", "ProjectManager", "SupplyChain", "ProcurementSpecialist", "ProcurementManager", "ProductionManager", "MachiningSupervisor", "AssemblySupervisor", "ElectricalSupervisor"];
 
-    public static IReadOnlySet<string> InitialPermissions(string roleCode, UserRole baseRole) =>
-        InitialRoleDefaults.GetValueOrDefault(roleCode, Defaults[baseRole]).Concat(BudgetViewerRoles.Contains(roleCode, StringComparer.OrdinalIgnoreCase) ? new[] { PermissionCodes.ProjectBudgetView } : Array.Empty<string>()).ToHashSet(StringComparer.Ordinal);
+    public static IReadOnlySet<string> InitialPermissions(string roleCode, UserRole baseRole)
+    {
+        var permissions = InitialRoleDefaults.GetValueOrDefault(roleCode, Defaults[baseRole])
+            .Concat(BudgetViewerRoles.Contains(roleCode, StringComparer.OrdinalIgnoreCase) ? [PermissionCodes.ProjectBudgetView] : [])
+            .ToHashSet(StringComparer.Ordinal);
+        if (roleCode is "Engineer" or "ElectricalEngineer" or "CommissioningEngineer" or "HardwareEngineer" or "MechanicalManager" or "TechnicalAssistant" or "ProjectManager" or "developer") permissions.Add(PermissionCodes.ProjectPlanEdit);
+        if (roleCode is "ProjectManager" or "developer") permissions.Add(PermissionCodes.ProjectContactEdit);
+        if (roleCode is "Administrator" or "developer" or "platform_admin") permissions.Add(PermissionCodes.ProjectPlanTemplateManage);
+        if (roleCode is "Administrator" or "developer") permissions.Add(PermissionCodes.NameplateTemplateManage);
+        if (roleCode is "Engineer" or "ElectricalEngineer" or "CommissioningEngineer" or "HardwareEngineer" or "MechanicalManager" or "ProcessReviewer" or "Approver" or "ProjectManager" or "developer") permissions.Add(PermissionCodes.ProjectNameplateEdit);
+        if (roleCode is "ProductionManager" or "ProductionAssistant" or "QualityManager" or "QualityInspector" or "TechnicalAssistant" or "ProjectManager")
+        {
+            if (roleCode is "ProductionManager" or "ProductionAssistant" or "QualityManager" or "QualityInspector") { permissions.Add(PermissionCodes.QualityIncomingUpload); permissions.Add(PermissionCodes.QualityAssemblyUpload); }
+            if (roleCode is "QualityManager" or "QualityInspector") permissions.Add(PermissionCodes.QualityInspectionUpload);
+            if (roleCode is "TechnicalAssistant" or "ProjectManager" or "QualityManager" or "QualityInspector") { permissions.Add(PermissionCodes.QualityPreAcceptanceUpload); permissions.Add(PermissionCodes.QualityFinalAcceptanceUpload); }
+        }
+        if (roleCode is "PlanningManager") { permissions.Add(PermissionCodes.ProjectBudgetReserve); permissions.Add(PermissionCodes.ProjectBudgetSettlementEdit); permissions.Add(PermissionCodes.ProjectBudgetBonusRateEdit); }
+        if (roleCode is "SalesAssistant") permissions.Add(PermissionCodes.ProjectBudgetSettlementEdit);
+        if (roleCode is "PlanningManager" or "SalesAssistant" or "BusinessUnitManager" or "Finance") permissions.Add(PermissionCodes.ProjectBudgetSettlementView);
+        return permissions;
+    }
 
     public static bool IsKnown(string code) => Permissions.Any(permission => string.Equals(permission.Code, code, StringComparison.Ordinal));
 
@@ -239,13 +292,16 @@ public static class RolePermissionCatalog
         if (role == UserRole.PlatformAdministrator) return Defaults[UserRole.PlatformAdministrator];
         var normalized = codes.Where(IsKnown).ToHashSet(StringComparer.Ordinal);
         if (normalized.Any(code => code.StartsWith("project.", StringComparison.Ordinal)
+                || code.StartsWith("quality.", StringComparison.Ordinal)
                 || code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease
                     or PermissionCodes.BomEdit or PermissionCodes.BomMechanicalEdit or PermissionCodes.BomElectricalEdit or PermissionCodes.ValidationPlanEdit
                     or PermissionCodes.DrawingReviewSubmit or PermissionCodes.DrawingReviewAnnotate or PermissionCodes.DrawingReviewDecide or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide))
             normalized.Add(PermissionCodes.ProjectView);
         if (normalized.Any(code => code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease
                 or PermissionCodes.BomEdit or PermissionCodes.BomMechanicalEdit or PermissionCodes.BomElectricalEdit or PermissionCodes.ValidationPlanEdit
-                or PermissionCodes.DrawingReviewSubmit or PermissionCodes.DrawingReviewAnnotate or PermissionCodes.DrawingReviewDecide or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide))
+                or PermissionCodes.DrawingReviewSubmit or PermissionCodes.DrawingReviewAnnotate or PermissionCodes.DrawingReviewDecide or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide
+                or PermissionCodes.ProjectContactEdit or PermissionCodes.ProjectNameplateEdit
+                || code.StartsWith("quality.", StringComparison.Ordinal)))
             normalized.Add(PermissionCodes.ProjectContentView);
         if (normalized.Any(code => code is PermissionCodes.ProgramTemplateSubmit or PermissionCodes.ProgramTemplateReview or PermissionCodes.ProgramTemplateApprove or PermissionCodes.ProgramTemplateManage))
             normalized.Add(PermissionCodes.ProgramTemplateView);
@@ -255,6 +311,10 @@ public static class RolePermissionCatalog
         if (normalized.Contains(PermissionCodes.MaterialApply)) normalized.Add(PermissionCodes.MaterialView);
         if (normalized.Contains(PermissionCodes.ProjectBudgetActualEdit)) normalized.Add(PermissionCodes.ProjectBudgetView);
         if (normalized.Contains(PermissionCodes.ProjectBudgetEdit)) normalized.Add(PermissionCodes.ProjectBudgetView);
+        if (normalized.Contains(PermissionCodes.ProjectBudgetReserve) || normalized.Contains(PermissionCodes.ProjectBudgetSettlementView)
+            || normalized.Contains(PermissionCodes.ProjectBudgetSettlementEdit) || normalized.Contains(PermissionCodes.ProjectBudgetBonusRateEdit))
+            normalized.Add(PermissionCodes.ProjectBudgetView);
+        if (normalized.Contains(PermissionCodes.ProjectBudgetSettlementEdit)) normalized.Add(PermissionCodes.ProjectBudgetSettlementView);
         if (normalized.Contains(PermissionCodes.ProjectBudgetView)) normalized.Add(PermissionCodes.ProjectContentView);
         if (normalized.Contains(PermissionCodes.RoleSettingsEdit)) normalized.Add(PermissionCodes.RoleSettingsView);
         if (normalized.Contains(PermissionCodes.ProjectPermissionSettingsEdit)) normalized.Add(PermissionCodes.ProjectPermissionSettingsView);

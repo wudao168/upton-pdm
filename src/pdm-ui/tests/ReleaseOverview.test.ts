@@ -1,6 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ReleaseOverview from '../src/components/ReleaseOverview.vue'
+import { releaseFailureMessage } from '../src/releaseFailureMessage'
 import type { BomVersion, ManufacturingBomBaseline, ReleasePackageSummary, ReleasePreviewItemResult } from '../src/types'
 
 const api = vi.hoisted(() => ({
@@ -21,6 +22,73 @@ function previewItem(overrides: Partial<ReleasePreviewItemResult> = {}): Release
 
 describe('ReleaseOverview', () => {
   beforeEach(() => { vi.clearAllMocks() })
+
+  it('shows a Chinese explanation for an unmapped technical release failure', () => {
+    expect(releaseFailureMessage('MySqlException: connection timed out')).toBe('操作未完成，请重试；如仍失败，请联系管理员。')
+    expect(releaseFailureMessage('发布失败：MySqlException: connection timed out')).toBe('操作未完成，请重试；如仍失败，请联系管理员。')
+  })
+
+  it('does not count running or queued artifacts as failures and prevents duplicate retries', async () => {
+    const release: ReleasePackageSummary = { id: 'release-published', number: 'RP-N-002', state: '已发布', scope: 'NonStandardWithDrawing',
+      workflowVersion: 1, steps: [], selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: false,
+      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], previewState: 'Running' }
+    api.listReleasePreviewItems.mockResolvedValue([previewItem({ succeeded: false, fileLength: 0, error: '正在转换…' })])
+    const wrapper = mount(ReleaseOverview, { props: { releasePackages: [release], versions: [], baselines: [], projectId: 'p', token: 't', canManageRelease: true } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('转换中 1、排队中 0、失败 0')
+    expect(wrapper.get('.pdm-release-preview-pending').text()).toBe('转换中')
+    expect(wrapper.findAll('button').find(button => button.text() === '重试')!.element.disabled).toBe(true)
+    await wrapper.setProps({ releasePackages: [{ ...release, previewState: 'Pending' }] })
+    await flushPromises()
+    expect(wrapper.text()).toContain('转换中 0、排队中 1、失败 0')
+    await wrapper.setProps({ releasePackages: [{ ...release, previewState: 'Failed' }] })
+    await flushPromises()
+    expect(wrapper.text()).toContain('转换中 0、排队中 0、失败 1')
+    wrapper.unmount()
+  })
+
+  it('explains a publishing conversion blocker and clears the old reason when conversion recovers', async () => {
+    const release: ReleasePackageSummary = { id: 'waiting', number: 'RP-WAITING', state: '发布中', scope: 'NonStandardWithDrawing',
+      workflowVersion: 1, steps: [], selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: false,
+      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], previewState: 'Pending',
+      previewError: 'COM error 80080005 (CO_E_SERVER_EXEC_FAILURE)', previewUpdatedAt: '2026-10-09T00:15:41Z' }
+    const wrapper = mount(ReleaseOverview, { props: { releasePackages: [release], versions: [], baselines: [], canManageRelease: true } })
+    await wrapper.get('.pdm-release-retry-conversion').trigger('click')
+    expect(wrapper.emitted('retryPreview')).toEqual([['waiting']])
+    expect(wrapper.emitted('open')).toBeUndefined()
+    expect(wrapper.get('.pdm-release-retry-feedback').text()).toContain('每5秒自动读取')
+    await wrapper.setProps({ pending: true })
+    expect(wrapper.get('.pdm-release-retry-feedback').text()).toBe('正在提交重试请求…')
+    expect(wrapper.get<HTMLButtonElement>('.pdm-release-retry-conversion').element.disabled).toBe(true)
+    await wrapper.setProps({ canManageRelease: false })
+    expect(wrapper.find('.pdm-release-retry-conversion').exists()).toBe(false)
+    expect(wrapper.get('.pdm-release-publishing-reason').text()).toContain('当前环节：等待图纸转换')
+    expect(wrapper.get('.pdm-release-publishing-reason').text()).toContain('转图服务器无法启动 SolidWorks（错误码 80080005）')
+    expect(wrapper.get('.pdm-release-publishing-reason').text()).toContain('最近转图状态更新')
+    await wrapper.setProps({ releasePackages: [{ ...release, previewState: 'Running', previewError: null }] })
+    expect(wrapper.get('.pdm-release-publishing-reason').text()).toContain('图纸转换中')
+    expect(wrapper.text()).not.toContain('80080005')
+    await wrapper.setProps({ releasePackages: [{ ...release, state: '已发布', previewState: 'Succeeded', previewError: null }] })
+    expect(wrapper.find('.pdm-release-publishing-reason').exists()).toBe(false)
+    expect(wrapper.get('.pdm-release-published-state').text()).toBe('已发布')
+    wrapper.unmount()
+  })
+
+  it('shows the publishing failure reason and an explicit published state independently of conversion', async () => {
+    const base: ReleasePackageSummary = { id: 'failed', number: 'RP-FAILED', state: '发布失败', scope: 'NonStandardWithDrawing',
+      workflowVersion: 1, steps: [], selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: false,
+      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], publishError: 'Deadlock found when trying to get lock; try restarting transaction' }
+    const wrapper = mount(ReleaseOverview, { props: { releasePackages: [base, { ...base, id: 'success', number: 'RP-OK',
+      scope: 'StandardFormal', state: '已发布', publishError: undefined }], versions: [], baselines: [] } })
+    expect(wrapper.get('.pdm-release-failure-reason').text()).toContain('数据库事务发生死锁，本次发布被中止')
+    expect(wrapper.get('.pdm-release-failure-reason').text()).not.toContain('Deadlock')
+    expect(wrapper.get('.pdm-release-published-state').text()).toBe('已发布')
+    await wrapper.get('.pdm-release-overview-active button').trigger('click')
+    expect(wrapper.emitted('open')).toEqual([['failed']])
+    await wrapper.setProps({ releasePackages: [{ ...base, publishError: ' ' }] })
+    expect(wrapper.get('.pdm-release-failure-reason').text()).toContain('服务端未返回失败原因')
+    wrapper.unmount()
+  })
 
   it('is read-only and routes a package back to its BOM page', async () => {
     const release: ReleasePackageSummary = {

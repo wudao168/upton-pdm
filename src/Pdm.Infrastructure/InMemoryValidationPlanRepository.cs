@@ -197,6 +197,39 @@ public sealed class InMemoryValidationPlanRepository : IValidationPlanRepository
         }
     }
 
+    public Task<ProjectValidationPlan> WithdrawAsync(Guid planId, long expectedRowVersion, string actor, DateTimeOffset at, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var current = RequirePlan(planId);
+            if (current.State != ProjectValidationPlanState.PendingApproval || current.RowVersion != expectedRowVersion)
+                throw new PdmConflictException("验证计划审批状态已变化。");
+            var saved = current with { State = ProjectValidationPlanState.Draft, UpdatedBy = actor, UpdatedAt = at, RowVersion = current.RowVersion + 1 };
+            plans[planId] = saved;
+            return Task.FromResult(saved);
+        }
+    }
+
+    public Task<ProjectValidationPlan> TransferAsync(Guid taskId, string currentAssignee, string newAssignee, DateTimeOffset at, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var current = plans.Values.FirstOrDefault(plan => plan.ApprovalTasks.Any(task => task.Id == taskId))
+                ?? throw new PdmNotFoundException("验证计划审批任务不存在。");
+            var active = current.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault(task => task.Decision is null);
+            if (current.State != ProjectValidationPlanState.PendingApproval || active?.Id != taskId
+                || !string.Equals(active.Assignee, currentAssignee, StringComparison.OrdinalIgnoreCase))
+                throw new PdmConflictException("验证计划审批任务已变化。");
+            var saved = current with
+            {
+                ApprovalTasks = current.ApprovalTasks.Select(task => task.Id == taskId ? task with { Assignee = newAssignee } : task).ToArray(),
+                UpdatedBy = currentAssignee, UpdatedAt = at, RowVersion = current.RowVersion + 1
+            };
+            plans[current.Id] = saved;
+            return Task.FromResult(saved);
+        }
+    }
+
     public Task<IReadOnlyList<PendingValidationPlanApprovalTask>> ListPendingApprovalTasksAsync(string actor, bool includeAll, CancellationToken cancellationToken)
     {
         lock (gate)

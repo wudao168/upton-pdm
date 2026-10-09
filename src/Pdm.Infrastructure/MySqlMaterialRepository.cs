@@ -30,6 +30,16 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         DefaultTypeMap.MatchNamesWithUnderscores = true;
     }
 
+    public async Task<IReadOnlyList<string>> ListMaterialBrandsAsync(string? query, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var brands = await connection.QueryAsync<string>(new CommandDefinition(
+            "SELECT DISTINCT TRIM(brand) FROM material_master WHERE is_archived=0 AND NULLIF(TRIM(brand),'') IS NOT NULL" +
+            " AND (@Query IS NULL OR LOCATE(UPPER(@Query),UPPER(TRIM(brand)))>0) ORDER BY TRIM(brand) LIMIT 50",
+            new { Query = string.IsNullOrWhiteSpace(query) ? null : query.Trim() }, cancellationToken: cancellationToken));
+        return brands.ToArray();
+    }
+
     public async Task<IReadOnlyList<PdmMaterial>> ListMaterialsAsync(string? query, string? categoryCode, bool includeArchived, int limit, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -76,7 +86,10 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             Offset = (normalizedPage - 1) * normalizedPageSize,
             PageSize = normalizedPageSize
         };
-        if (ordinaryOnly) filters += " AND NOT EXISTS (SELECT 1 FROM (" + BomHeaderMaterialLinksSql + ") header_link WHERE header_link.MaterialId=material_master.id)";
+        if (ordinaryOnly) filters +=
+            " AND NOT EXISTS (SELECT 1 FROM project_bom_header h WHERE h.material_id=material_master.id)" +
+            " AND NOT EXISTS (SELECT 1 FROM bom_version v WHERE v.mother_material_id=material_master.id AND v.bom_kind IN ('Standard','NonStandard','Electrical'))" +
+            " AND NOT EXISTS (SELECT 1 FROM material_code_application a WHERE a.material_id=material_master.id AND a.bom_item_id IS NULL AND a.bom_header_kind IS NOT NULL)";
         var total = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
             "SELECT COUNT(*) FROM material_master" + filters,
             parameters,
@@ -101,11 +114,20 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             " CASE WHEN approval_status='Draft' AND is_archived=0 THEN created_at END DESC," +
             " is_recommended DESC,reference_count DESC,material_code"
         };
+        // Sort only identifiers and ranking values; load attachment counts and wide fields for this page.
+        var candidateSql = effectiveSortBy is not null
+            ? "SELECT id FROM material_master" + filters
+            : "SELECT id FROM (SELECT material_master.id,material_code,name,specification,brand,created_by,created_at,approval_status,is_archived,is_recommended," +
+                " COALESCE(material_links.link_count,0) + CASE WHEN source_bom_item_id IS NULL THEN 0 ELSE 1 END AS reference_count" +
+                " FROM material_master LEFT JOIN (SELECT material_id,COUNT(*) AS link_count FROM bom_material_link GROUP BY material_id) material_links" +
+                " ON material_links.material_id=material_master.id" + filters + ") page_candidates";
+        var ids = (await connection.QueryAsync<Guid>(new CommandDefinition(
+            candidateSql + orderBy + " LIMIT @PageSize OFFSET @Offset", parameters, cancellationToken: cancellationToken))).ToArray();
+        if (ids.Length == 0) return new([], total, normalizedPage, normalizedPageSize);
         var rows = await connection.QueryAsync<MaterialRow>(new CommandDefinition(
-            MaterialSelect + filters + orderBy + " LIMIT @PageSize OFFSET @Offset",
-            parameters,
-            cancellationToken: cancellationToken));
-        return new(rows.Select(MapMaterial).ToArray(), total, normalizedPage, normalizedPageSize);
+            MaterialSelect + " WHERE id IN @Ids", new { Ids = ids }, cancellationToken: cancellationToken));
+        var byId = rows.ToDictionary(row => row.Id);
+        return new(ids.Where(byId.ContainsKey).Select(id => MapMaterial(byId[id])).ToArray(), total, normalizedPage, normalizedPageSize);
     }
 
     public async Task<IReadOnlyList<PdmMaterial>> ListPendingMasterMaterialsAsync(CancellationToken cancellationToken)
@@ -155,8 +177,8 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         {
             clauses.Add(field.ToUpperInvariant() switch
             {
-                "NAME" => "UPPER(TRIM(name))=UPPER(TRIM(@Name))",
-                "SPECIFICATION" => "UPPER(TRIM(specification))=UPPER(TRIM(@Specification))",
+                "NAME" => "name_lookup=UPPER(TRIM(@Name))",
+                "SPECIFICATION" => "specification_lookup=UPPER(TRIM(@Specification))",
                 "BRAND" => "UPPER(TRIM(brand))=UPPER(TRIM(@Brand))",
                 _ => throw new PdmRuleException("查重字段只支持名称、型号和品牌。")
             });
@@ -173,7 +195,11 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var row = await connection.QueryFirstOrDefaultAsync<MaterialRow>(new CommandDefinition(
-            MaterialSelect + " WHERE source_bom_item_id=@BomItemId ORDER BY created_at LIMIT 1",
+            MaterialSelect + """
+             WHERE id=COALESCE(
+                 (SELECT material_id FROM bom_material_link WHERE bom_item_id=@BomItemId),
+                 (SELECT origin.id FROM material_master origin WHERE origin.source_bom_item_id=@BomItemId ORDER BY origin.created_at LIMIT 1))
+            """,
             new { BomItemId = bomItemId }, cancellationToken: cancellationToken));
         return row is null ? null : MapMaterial(row);
     }
@@ -230,7 +256,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<MaterialRow>(new CommandDefinition(
-            MaterialSelect + " WHERE approval_status='Approved' AND is_archived=0 AND UPPER(TRIM(specification))=UPPER(@Specification) ORDER BY material_code",
+            MaterialSelect + " WHERE approval_status='Approved' AND is_archived=0 AND specification_lookup=UPPER(@Specification) ORDER BY material_code",
             new { Specification = specification.Trim() }, cancellationToken: cancellationToken));
         return rows.Select(MapMaterial).ToArray();
     }
@@ -250,7 +276,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         var rows = await connection.QueryAsync<MaterialCodeApplicationRow>(new CommandDefinition(
             MaterialCodeApplicationSelect + " WHERE (@ProjectId IS NULL OR project_id=@ProjectId) AND (@Status IS NULL OR status=@Status) ORDER BY requested_at DESC",
             new { ProjectId = projectId, Status = status?.ToString() }, cancellationToken: cancellationToken));
-        var workflow = await LoadApplicationWorkflowAsync(connection, cancellationToken);
+        var workflow = await LoadApplicationWorkflowAsync(connection, rows.ToArray(), cancellationToken);
         return rows.Select(row => MapMaterialCodeApplication(row, workflow.States, workflow.CompletedBomCodes)).ToArray();
     }
 
@@ -260,7 +286,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         var row = await connection.QuerySingleOrDefaultAsync<MaterialCodeApplicationRow>(new CommandDefinition(
             MaterialCodeApplicationSelect + " WHERE id=@ApplicationId", new { ApplicationId = applicationId }, cancellationToken: cancellationToken));
         if (row is null) return null;
-        var workflow = await LoadApplicationWorkflowAsync(connection, cancellationToken);
+        var workflow = await LoadApplicationWorkflowAsync(connection, [row], cancellationToken);
         return MapMaterialCodeApplication(row, workflow.States, workflow.CompletedBomCodes);
     }
 
@@ -735,7 +761,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                     specification=@Specification,material=@Material,remark=@Remark,brand=@Brand,surface_treatment=@SurfaceTreatment,purchase_link=@PurchaseLink,
                     selection_advice=@SelectionAdvice,reference_price=@ReferencePrice,model_3d_link=@Model3DLink,document_link=@DocumentLink,is_recommended=@IsRecommended,
                     weight=@Weight,weight_unit=@WeightUnit,category_code=@CategoryCode,u9_category_code=@CategoryCode,
-                    sync_status='PreviewReady',updated_by=@UpdatedBy,updated_at=@UpdatedAt,row_version=row_version+1
+                    sync_status=@SyncStatus,updated_by=@UpdatedBy,updated_at=@UpdatedAt,row_version=row_version+1
                 WHERE id=@Id AND row_version=@ExpectedRowVersion AND approval_status='Approved'
                   AND sync_status<>'Pending' AND is_archived=0
                   AND NOT EXISTS(
@@ -745,6 +771,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                 """, new
                 {
                     material.Id,
+                    SyncStatus = task.Status.ToString(),
                     material.Name,
                     MaterialKind = material.Kind.ToString(),
                     SupplyMode = material.SupplyMode.ToString(),
@@ -868,6 +895,20 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             await transaction.RollbackAsync(cancellationToken);
             throw;
         }
+    }
+
+    public async Task LinkBomItemsAsync(IReadOnlyList<Guid> bomItemIds, Guid materialId, string actor, DateTimeOffset linkedAt, CancellationToken cancellationToken)
+    {
+        var ids = bomItemIds.Distinct().ToArray();
+        if (ids.Length == 0) return;
+        var parameters = new DynamicParameters(new { MaterialId = materialId, Actor = actor, LinkedAt = linkedAt.UtcDateTime });
+        for (var index = 0; index < ids.Length; index++) parameters.Add($"Id{index}", ids[index]);
+        var values = string.Join(",", Enumerable.Range(0, ids.Length).Select(index => $"(@Id{index},@MaterialId,@Actor,@LinkedAt)"));
+        await using var connection = await OpenAsync(cancellationToken);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO bom_material_link(bom_item_id,material_id,linked_by,linked_at) VALUES" + values +
+            " ON DUPLICATE KEY UPDATE material_id=VALUES(material_id),linked_by=VALUES(linked_by),linked_at=VALUES(linked_at)",
+            parameters, cancellationToken: cancellationToken));
     }
 
     public async Task LinkBomItemAsync(Guid bomItemId, Guid materialId, string actor, DateTimeOffset linkedAt, CancellationToken cancellationToken)
@@ -1995,8 +2036,12 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
 
     private static async Task<ApplicationWorkflowContext> LoadApplicationWorkflowAsync(
         MySqlConnection connection,
+        IReadOnlyList<MaterialCodeApplicationRow> applications,
         CancellationToken cancellationToken)
     {
+        if (applications.Count == 0) return new(new Dictionary<Guid, ApplicationWorkflowAudit>(), new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        var applicationIds = applications.Select(row => row.Id.ToString()).ToArray();
+        var bomCodes = applications.Select(row => $"{row.MaterialCode ?? row.RequestedMaterialCode}/A1").Distinct().ToArray();
         var auditRows = await connection.QueryAsync<ApplicationWorkflowAuditRow>(new CommandDefinition(
             """
             SELECT entity_id,action_name,
@@ -2004,8 +2049,9 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                    occurred_at
             FROM audit_entry
             WHERE action_name LIKE 'material-code.application.workflow.%'
+              AND entity_id IN @ApplicationIds
             ORDER BY occurred_at DESC
-            """, cancellationToken: cancellationToken));
+            """, new { ApplicationIds = applicationIds }, cancellationToken: cancellationToken));
         var states = new Dictionary<Guid, ApplicationWorkflowAudit>();
         foreach (var row in auditRows)
         {
@@ -2013,8 +2059,8 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             states[applicationId] = new(row.ActionName[(row.ActionName.LastIndexOf('.') + 1)..], row.Detail);
         }
         var completedBomCodes = (await connection.QueryAsync<string>(new CommandDefinition(
-            "SELECT entity_id FROM audit_entry WHERE action_name IN ('u9.bom.create','u9.bom.modify')",
-            cancellationToken: cancellationToken))).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            "SELECT DISTINCT entity_id FROM audit_entry WHERE action_name IN ('u9.bom.create','u9.bom.modify') AND entity_id IN @BomCodes",
+            new { BomCodes = bomCodes }, cancellationToken: cancellationToken))).ToHashSet(StringComparer.OrdinalIgnoreCase);
         return new(states, completedBomCodes);
     }
 

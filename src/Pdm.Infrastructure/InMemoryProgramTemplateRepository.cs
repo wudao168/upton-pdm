@@ -153,6 +153,36 @@ public sealed class InMemoryProgramTemplateRepository(TimeProvider timeProvider)
         lock (gate) return Task.FromResult<IReadOnlyList<ProgramTemplateApprovalTask>>(tasks.Values.Where(item => item.RevisionId == revisionId).OrderBy(item => item.Stage).ToArray());
     }
 
+    public Task<ProgramTemplateRevision> WithdrawAsync(Guid revisionId, long expectedRowVersion, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var current = RequireRevision(revisionId);
+            RequireRowVersion(current.RowVersion, expectedRowVersion);
+            if (current.State is not (ProgramTemplateRevisionState.PendingReview or ProgramTemplateRevisionState.PendingApproval))
+                throw new PdmConflictException("程序模板已不在审批中。");
+            var saved = current with { State = ProgramTemplateRevisionState.Draft, SubmittedAt = null, RowVersion = current.RowVersion + 1 };
+            foreach (var task in tasks.Values.Where(task => task.RevisionId == revisionId).ToArray()) tasks.Remove(task.Id);
+            ReplaceRevision(saved);
+            return Task.FromResult(saved);
+        }
+    }
+
+    public Task<ProgramTemplateApprovalTask> TransferAsync(Guid taskId, string newAssignee, long expectedRowVersion, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var current = tasks.GetValueOrDefault(taskId) ?? throw new PdmNotFoundException("程序模板审批任务不存在。");
+            RequireRowVersion(current.RowVersion, expectedRowVersion);
+            var revision = RequireRevision(current.RevisionId);
+            var expectedState = current.Stage == ProgramTemplateApprovalStage.Review ? ProgramTemplateRevisionState.PendingReview : ProgramTemplateRevisionState.PendingApproval;
+            if (current.Decision is not null || revision.State != expectedState) throw new PdmConflictException("程序模板审批任务已变化。");
+            var saved = current with { Assignee = newAssignee, RowVersion = current.RowVersion + 1 };
+            tasks[taskId] = saved;
+            return Task.FromResult(saved);
+        }
+    }
+
     public Task<IReadOnlyList<ProgramTemplateApprovalTask>> ListTasksAsync(string actor, string roleCode, bool canApprove, CancellationToken cancellationToken)
     {
         lock (gate)
@@ -164,7 +194,8 @@ public sealed class InMemoryProgramTemplateRepository(TimeProvider timeProvider)
                 return task.Stage == ProgramTemplateApprovalStage.Review
                     ? revision.State == ProgramTemplateRevisionState.PendingReview && string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase)
                     : revision.State == ProgramTemplateRevisionState.PendingApproval
-                        && (canApprove || string.Equals(task.AssigneeRoleCode, roleCode, StringComparison.OrdinalIgnoreCase));
+                        && (task.Assignee is not null ? string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase)
+                            : canApprove || string.Equals(task.AssigneeRoleCode, roleCode, StringComparison.OrdinalIgnoreCase));
             }).OrderBy(item => item.CreatedAt).ToArray();
             return Task.FromResult<IReadOnlyList<ProgramTemplateApprovalTask>>(visible);
         }

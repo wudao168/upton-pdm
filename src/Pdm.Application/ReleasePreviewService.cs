@@ -33,14 +33,11 @@ public sealed class ReleasePreviewService(
     public async Task<int> ProcessPendingAsync(CancellationToken cancellationToken)
     {
         var pending = await repository.ListReleasePackagesAwaitingPreviewAsync(MaxAttempts, BatchSize, cancellationToken);
-        var processed = 0;
-        foreach (var package in pending)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            await ProcessAsync(package, cancellationToken);
-            processed++;
-        }
-        return processed;
+        var settings = await repository.GetSystemSettingsAsync(cancellationToken);
+        await Parallel.ForEachAsync(pending, new ParallelOptions {
+            MaxDegreeOfParallelism = Math.Clamp(settings.PreviewConversion.Servers.Count, 1, BatchSize), CancellationToken = cancellationToken
+        }, async (package, token) => { await ProcessAsync(package, token); });
+        return pending.Count;
     }
 
     /// <summary>处理单个发布包的转图；返回是否成功（失败会记录原因并按剩余次数继续排队）。</summary>

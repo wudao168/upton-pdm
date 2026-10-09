@@ -436,7 +436,8 @@ public sealed partial class MySqlPdmRepository
             "DELETE FROM project_assignment WHERE project_id=@ProjectId AND assignment_type LIKE 'PhaseOwner:%'", new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT INTO project_assignment(project_id,username,assignment_type,assigned_by,assigned_at) VALUES(@ProjectId,@Username,@Type,@Actor,@Now)",
-            phaseOwners.Select(item => new { ProjectId = projectId, Username = item.Value, Type = $"PhaseOwner:{item.Key}", Actor = actor, Now = now }), transaction, cancellationToken: cancellationToken));
+            phaseOwners.SelectMany(item => item.Value.Split('、', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Distinct(StringComparer.OrdinalIgnoreCase).Select(username => new { ProjectId = projectId, Username = username, Type = $"PhaseOwner:{item.Key}", Actor = actor, Now = now })), transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
         return await FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
     }

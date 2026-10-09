@@ -8,7 +8,7 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class ProjectBomEffectiveDateTests
 {
     [Fact]
-    public async Task BomEffectiveDate_FollowsMaterialU9EffectiveDate()
+    public async Task BomEffectiveDate_AllLevelsShareRootDateBeforeFirstCreation()
     {
         var time = TimeProvider.System;
         var headerSyncedAt = DateTimeOffset.Parse("2026-09-10T09:00:00+08:00");
@@ -53,14 +53,16 @@ public sealed class ProjectBomEffectiveDateTests
             var version = await repository.SaveBomDraftAsync(child.Id, bomKind, [item], "admin", default);
             await repository.SetBomVersionStateAsync([version.Id], BomVersionState.Released, "admin", time.GetUtcNow(), default);
         }
-        // Inspect the common command builder without configuring any external U9 writer.
-        // 以固定"当天"执行，验证 BOM 生效日期取料品生效日期（晚于当天时不再回落到当天）。
-        var service = new ProjectBomU9SyncService(repository, materials, null!, new FixedTimeProvider(DateTimeOffset.Parse("2026-06-01T09:00:00+08:00")));
+        await materials.SaveIntegrationConfigurationAsync(new("http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",
+            U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, true, "admin", time.GetUtcNow()), default);
+        var client = new BomHeaderServiceTests.ApprovalAutomationClient();
+        var writer = new U9BomWriteService(materials, repository, client, client, new BomHeaderServiceTests.TestProtector(), time);
+        var service = new ProjectBomU9SyncService(repository, materials, writer, new FixedTimeProvider(DateTimeOffset.Parse("2026-06-01T09:00:00+08:00")));
         var method = typeof(ProjectBomU9SyncService).GetMethod("BuildCommandAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
         foreach (var (id, kind, expectedHeaderDate, expectedComponentDate) in new[] {
-            (rootId, ProjectBomHeaderKind.Master, headerSyncedAt, newerComponentSyncedAt),
-            (child.Id, ProjectBomHeaderKind.Master, newerComponentSyncedAt, newerComponentSyncedAt),
-            (child.Id, ProjectBomHeaderKind.Standard, headerSyncedAt, newerComponentSyncedAt),
+            (rootId, ProjectBomHeaderKind.Master, headerSyncedAt, headerSyncedAt),
+            (child.Id, ProjectBomHeaderKind.Master, headerSyncedAt, headerSyncedAt),
+            (child.Id, ProjectBomHeaderKind.Standard, headerSyncedAt, headerSyncedAt),
             (child.Id, ProjectBomHeaderKind.NonStandard, headerSyncedAt, headerSyncedAt),
             (child.Id, ProjectBomHeaderKind.Electrical, headerSyncedAt, headerSyncedAt) })
         {

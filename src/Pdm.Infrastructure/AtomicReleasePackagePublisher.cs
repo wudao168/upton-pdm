@@ -130,11 +130,13 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         }
 
         // Refresh legacy in-review packages as well; the approved full BOM snapshot is unchanged.
+        ReleasePublishingProgress.Set(package.Id, "生成BOM发布文件");
         if (package.Scope is ReleaseScope.StandardFormal or ReleaseScope.NonStandardWithDrawing or ReleaseScope.ElectricalFormal)
             await PrepareAsync(package, project, cancellationToken);
 
         // 正式源图是交付的前提；PDF/STEP 转换仍可在发布后重试。
         Dictionary<Guid, FormalDrawingSource> formalDrawings;
+        ReleasePublishingProgress.Set(package.Id, "准备正式工程图");
         try
         {
             formalDrawings = previewSources.Count == 0

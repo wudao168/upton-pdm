@@ -19,6 +19,7 @@ const props = withDefaults(defineProps<{
   uploadProgress?: number
   coverUrl?: string
   u9FieldsLocked?: boolean
+  u9ReviewRequired?: boolean
   canEdit?: boolean
   mainMaterial?: PdmMaterial | null
   initialTab?: 'material' | 'relations'
@@ -74,6 +75,7 @@ function chooseAttachment(kind: MaterialAttachmentKind) {
       <el-tab-pane v-if="relationTabVisible" label="关联物料" name="relations" />
     </el-tabs>
     <div v-show="activePane === 'material'">
+    <el-alert v-if="u9ReviewRequired" type="warning" :closable="false" title="U9C同步待复核，可修正PLM字段后重新复核。系统保留同一料号，不会重复创建或覆盖U9C已有料品。" />
     <el-alert v-if="u9FieldsLocked" type="warning" :closable="false" title="U9C任务结果尚未确认，名称、分类、单位、规格等U9字段暂不可修改；推荐、选型建议、参考价格、封面和附件仍可维护。" />
     <fieldset class="material-editor-fieldset" :disabled="!canEdit">
     <el-form label-position="top">

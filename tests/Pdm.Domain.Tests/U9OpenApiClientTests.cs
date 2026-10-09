@@ -425,6 +425,7 @@ public sealed class U9OpenApiClientTests
                         new
                         {
                             m_sequence = 10,
+                            m_operationNum = "10",
                             m_itemMaster = new { m_iD = 2001L, m_code = "01020000057", m_name = "阀岛" },
                             m_itemVersionCode = "10",
                             m_usageQty = 2.5m,
@@ -452,6 +453,7 @@ public sealed class U9OpenApiClientTests
         Assert.Equal((2, 1, 0, "ASM-001", "测试BOM"),
             (bom.Status, bom.BomType, bom.BomSort, bom.ProjectMapNum, bom.Explain));
         var component = Assert.Single(bom.Components);
+        Assert.Equal("10", component.OperationNum);
         Assert.Equal((10, "01020000057", "阀岛", "10", 2.5m, "001", 1m, true, "装配备注", false),
             (component.Sequence, component.ItemCode, component.ItemName, component.ItemVersionCode,
                 component.UsageQty, component.IssueUomCode, component.ParentQty, component.IsEffective,

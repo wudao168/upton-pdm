@@ -3,8 +3,8 @@ import { CheckCircle2, ChevronRight, FolderTree, ListTodo, RefreshCw, UsersRound
 import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, listProjectAudit, listProjectPlanVersions, readProjectPlanPortfolio, readProjectValidationPlan } from '../api'
 import OverviewTimeline from './OverviewTimeline.vue'
 import { ElMessage } from '../statusMessage'
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import type { AuditEntry, DocumentNode, DrawingReviewPackage, DrawingReviewTarget, MainProjectStaffingInput, MaterialCodeApplication, MaterialRelationCompleteness, OrganizationDirectory, PdmUser, ProjectPhaseOwnerKey, ProjectPhaseOwners, ProjectPlan, ProjectPlanPortfolio, ProjectSummary, ProjectValidationPlan, ReleasePackageSummary, ReleaseScope } from '../types'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { AuditEntry, DocumentNode, DrawingReviewPackage, DrawingReviewTarget, MaterialCodeApplication, MaterialRelationCompleteness, PdmUser, ProjectPhaseOwnerKey, ProjectPlan, ProjectPlanPortfolio, ProjectSummary, ProjectValidationPlan, ReleasePackageSummary, ReleaseScope } from '../types'
 
 const props = defineProps<{
   project: ProjectSummary
@@ -26,16 +26,12 @@ const props = defineProps<{
   materialApplications: MaterialCodeApplication[]
   releasePackages: ReleasePackageSummary[]
   releasePackage: ReleasePackageSummary | null
-  organizationDirectory: OrganizationDirectory
   pending: boolean
   token: string
   canAddManagerNote: boolean
-  onUpdateMainStaffing: (projectId: string, input: MainProjectStaffingInput) => Promise<ProjectSummary>
-  onUpdateDesigners: (projectId: string, designers: string[]) => Promise<ProjectSummary>
-  onUpdatePhaseOwners: (projectId: string, phaseOwners: ProjectPhaseOwners) => Promise<ProjectSummary>
 }>()
 
-const emit = defineEmits<{ documents: []; bom: []; projectPlan: [taskId?: string]; validationPlan: []; procurement: []; release: [] }>()
+const emit = defineEmits<{ documents: []; information: []; bom: []; projectPlan: [taskId?: string]; validationPlan: []; procurement: []; release: [] }>()
 
 const activeProject = computed(() => props.projects.find(item => item.id === props.project.id) ?? props.project)
 const rootProject = computed(() => {
@@ -43,8 +39,6 @@ const rootProject = computed(() => {
   return props.projects.find(item => item.id === activeProject.value.parentProjectId) ?? activeProject.value
 })
 
-const phaseOwnerDrawerOpen = ref(false)
-const savingTeamConfiguration = ref(false)
 const planPortfolio = ref<ProjectPlanPortfolio | null>(null)
 const initialBaseline = ref<ProjectPlan | null>(null)
 const baselineUnavailable = ref(false)
@@ -59,9 +53,6 @@ const savingManagerNote = ref(false)
 const todoDueDate = ref<string>()
 const todoRecipients = ref<string[]>([])
 let overviewRequestId = 0
-const staffingForm = reactive<MainProjectStaffingInput>({ primaryProjectManager: '', collaborativeProjectManagers: [], designLeads: [] })
-const phaseOwnerDraft = reactive<ProjectPhaseOwners>({})
-const designerDraft = ref<string[]>([])
 
 const phaseOwnerDefinitions: Array<{ key: ProjectPhaseOwnerKey; label: string; detail: string; preferredRoles: string[] }> = [
   { key: 'StandardProcurement', label: '标准件采购', detail: '标准件询价、下单与到货协调', preferredRoles: ['ProcurementSpecialist', 'ProcurementManager', 'SupplyChain'] },
@@ -75,61 +66,6 @@ const phaseOwnerDefinitions: Array<{ key: ProjectPhaseOwnerKey; label: string; d
 
 function projectDesignLeads(project: ProjectSummary) {
   return project.designLeads?.length ? project.designLeads : project.designLead ? [project.designLead] : []
-}
-
-function isUnitWithin(unitId: string, divisionId: string) {
-  let current = props.organizationDirectory.units.find(unit => unit.id === unitId)
-  while (current) {
-    if (current.id === divisionId) return true
-    current = current.parentUnitId ? props.organizationDirectory.units.find(unit => unit.id === current!.parentUnitId) : undefined
-  }
-  return false
-}
-
-function divisionOfUser(username: string) {
-  const memberships = props.organizationDirectory.memberships.filter(item => item.username === username).sort((left, right) => Number(right.isPrimary) - Number(left.isPrimary))
-  for (const membership of memberships) {
-    let current = props.organizationDirectory.units.find(unit => unit.id === membership.unitId)
-    while (current) {
-      if (current.kind === 'BusinessDivision') return current
-      current = current.parentUnitId ? props.organizationDirectory.units.find(unit => unit.id === current!.parentUnitId) : undefined
-    }
-  }
-}
-
-function usersInExecutionUnit(role: string) {
-  const executionUnitId = rootProject.value.executionUnitId
-  if (!executionUnitId) return []
-  const usernames = new Set(props.organizationDirectory.memberships.filter(item => isUnitWithin(item.unitId, executionUnitId)).map(item => item.username))
-  return props.organizationDirectory.users
-    .filter(user => user.isActive && usernames.has(user.username) && [user.role, ...(user.roles ?? [])].includes(role))
-    .sort((left, right) => left.displayName.localeCompare(right.displayName, 'zh-CN'))
-}
-
-const projectManagerCandidates = computed(() => usersInExecutionUnit('ProjectManager'))
-const designLeadCandidates = computed(() => usersInExecutionUnit('Engineer'))
-const phaseOwnerCandidates = computed(() => {
-  const organizationId = props.project.organizationId ?? rootProject.value.organizationId
-  if (!organizationId) return []
-  const companyUnitIds = new Set(props.organizationDirectory.units.filter(unit => unit.organizationId === organizationId && unit.isActive).map(unit => unit.id))
-  const usernames = new Set(props.organizationDirectory.memberships.filter(item => companyUnitIds.has(item.unitId)).map(item => item.username))
-  return props.organizationDirectory.users
-    .filter(user => user.isActive && usernames.has(user.username))
-    .map(user => {
-      const division = divisionOfUser(user.username)
-      return { ...user, divisionName: division?.name ?? '未归属事业部' }
-    })
-    .sort((left, right) => left.divisionName.localeCompare(right.divisionName, 'zh-CN') || left.displayName.localeCompare(right.displayName, 'zh-CN'))
-})
-const executionEngineerCandidates = computed(() => phaseOwnerCandidates.value.filter(user => [user.role, ...(user.roles ?? [])].some(role => ['Engineer', 'ElectricalEngineer', 'CommissioningEngineer', 'HardwareEngineer', 'MechanicalManager', 'TechnicalAssistant', 'ProcessReviewer', 'Approver'].includes(role))))
-
-function preferredPhaseCandidates(preferredRoles: string[]) {
-  return phaseOwnerCandidates.value.filter(user => [user.role, ...(user.roles ?? [])].some(role => preferredRoles.includes(role)))
-}
-
-function otherPhaseCandidates(preferredRoles: string[]) {
-  const preferred = new Set(preferredPhaseCandidates(preferredRoles).map(user => user.username))
-  return phaseOwnerCandidates.value.filter(user => !preferred.has(user.username))
 }
 
 async function fetchOperationalSummary() {
@@ -176,7 +112,7 @@ async function fetchOperationalSummary() {
       baselineUnavailable.value = false
     }
 
-    const noteResults = await Promise.allSettled(planResult.value.projects.map(item => listProjectAudit(item.projectId, token)))
+    const noteResults = await Promise.allSettled((planResult.value.projects ?? []).map(item => listProjectAudit(item.projectId, token)))
     if (requestId !== overviewRequestId) return
     const projectAudits = noteResults.flatMap(result => result.status === 'fulfilled' ? result.value : [])
     managerNotes.value = projectAudits.filter(entry => entry.action === 'project.manager-note')
@@ -207,37 +143,8 @@ watch(() => [props.project.id, props.token], () => {
 onMounted(() => { overviewTimer = window.setInterval(() => { if (!refreshingOverview.value) void loadOperationalSummary() }, 300_000) })
 onBeforeUnmount(() => { window.clearInterval(overviewTimer); ++overviewRequestId })
 
-function openTeamConfiguration() {
-  staffingForm.primaryProjectManager = rootProject.value.primaryProjectManager ?? ''
-  staffingForm.collaborativeProjectManagers = [...rootProject.value.collaborativeProjectManagers]
-  staffingForm.designLeads = [...projectDesignLeads(rootProject.value)]
-  for (const phase of phaseOwnerDefinitions) phaseOwnerDraft[phase.key] = activeProject.value.phaseOwners?.[phase.key] ?? ''
-  designerDraft.value = [...activeProject.value.designers]
-  phaseOwnerDrawerOpen.value = true
-}
-
-async function saveTeamConfiguration() {
-  if (savingTeamConfiguration.value) return
-  if (rootProject.value.canManageMainStaffing && (!staffingForm.primaryProjectManager || !staffingForm.designLeads.length))
-    return ElMessage.warning('请选择一名项目经理和至少一名主设')
-  savingTeamConfiguration.value = true
-  try {
-    if (rootProject.value.canManageMainStaffing) await props.onUpdateMainStaffing(rootProject.value.id, {
-      primaryProjectManager: staffingForm.primaryProjectManager,
-      collaborativeProjectManagers: [...staffingForm.collaborativeProjectManagers],
-      designLeads: [...staffingForm.designLeads],
-    })
-    if (activeProject.value.canAssignDesigners) {
-      await props.onUpdateDesigners(activeProject.value.id, [...designerDraft.value])
-      await props.onUpdatePhaseOwners(activeProject.value.id, { ...phaseOwnerDraft })
-    }
-    phaseOwnerDrawerOpen.value = false
-    ElMessage.success('项目团队配置已保存')
-  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '项目团队配置保存失败') }
-  finally { savingTeamConfiguration.value = false }
-}
 function assignedPeople(usernames: Array<string | undefined>) {
-  const uniqueUsernames = [...new Set(usernames.map(item => item?.trim()).filter((item): item is string => Boolean(item)))]
+  const uniqueUsernames = [...new Set(usernames.flatMap(item => item?.split('、') ?? []).map(item => item.trim()).filter((item): item is string => Boolean(item)))]
   return uniqueUsernames.map(username => ({
     username,
     name: props.users.find(user => user.username.localeCompare(username, undefined, { sensitivity: 'accent' }) === 0)?.displayName || username,
@@ -562,7 +469,7 @@ const overviewAlerts = computed(() => [
 
       <div class="pdm-overview-summary" aria-label="项目核心业务概览">
         <article class="pdm-panel pdm-overview-team" aria-label="项目团队">
-          <header><span><UsersRound :size="18" /></span><h2>项目团队</h2><span class="pdm-overview-team__actions"><button v-if="rootProject.canManageMainStaffing || activeProject.canAssignDesigners" type="button" class="pdm-text-action" @click="openTeamConfiguration">配置团队</button></span></header>
+          <header><span><UsersRound :size="18" /></span><h2>项目团队</h2><span class="pdm-overview-team__actions"><button v-if="rootProject.canManageMainStaffing || activeProject.canAssignDesigners" type="button" class="pdm-text-action" @click="emit('information')">配置团队</button></span></header>
           <div class="pdm-overview-team__table-wrap"><table class="pdm-overview-team__table"><thead><tr><th>职责</th><th>负责人</th><th>职责</th><th>负责人</th></tr></thead><tbody><tr v-for="pair in teamRowPairs" :key="pair[0]?.key"><template v-for="row in pair" :key="row.key"><td class="is-role">{{ row.role }}</td><td :class="{ 'is-pending': !row.people.length }">{{ row.people.map(person => person.name).join('、') || '待分配' }}</td></template></tr></tbody></table></div>
         </article>
         <article class="pdm-panel pdm-overview-reserved" aria-label="预留区域" />
@@ -574,7 +481,7 @@ const overviewAlerts = computed(() => [
           <div class="pdm-project-portfolio__table-wrap">
             <table><thead><tr><th>项目</th><th>执行</th><th>阶段</th><th>计划完成</th><th>剩余工期</th><th>进度</th><th>负责人</th><th>当前</th><th>状态</th><th>备注</th></tr></thead><tbody>
               <tr v-for="row in portfolioRows" :key="row.projectId" :class="{ 'is-root': row.isRoot }" tabindex="0" @click="emit('projectPlan')" @keydown.enter="emit('projectPlan')">
-                <td><strong>{{ row.projectCode }}</strong><small>{{ row.projectName }}</small></td><td :class="{ 'is-pending': row.engineers === '待分配' }">{{ row.engineers }}</td><td>{{ row.stageLabel }}</td><td :title="row.currentStageFinish ? `当前主任务“${row.stageLabel}”计划完成 ${displayDate(row.currentStageFinish)}` : '当前主任务未排期'">{{ displayDate(row.currentStageFinish) }}</td><td><span :class="`is-${row.remainingWorkPeriod.tone}`" :title="row.remainingWorkPeriod.basis">{{ row.remainingWorkPeriod.label }}</span></td><td><span class="pdm-project-portfolio__progress"><em>{{ row.hasPlan ? `${row.completionPercent}%` : '—' }}</em><i><em :style="{ width: `${row.completionPercent}%` }" /></i></span></td><td :class="{ 'is-pending': row.owner === '待分配' }">{{ row.owner }}</td><td class="pdm-project-portfolio__task" :title="row.currentTask?.name"><strong v-if="row.currentTask">{{ row.currentTask.name }}</strong><small v-if="row.currentTask">{{ personName(row.currentTask.assignee) }} · {{ displayDate(row.currentTask.plannedFinish) }}</small><span v-else>暂无待办</span></td><td><span class="pdm-project-portfolio__overdue" :class="`is-${row.overdueTaskSummary.tone}`" :title="row.overdueTaskSummary.basis"><i v-for="line in row.overdueTaskSummary.lines" :key="line">{{ line }}</i></span></td><td class="pdm-project-portfolio__notes" @click.stop><ol><li v-for="note in notesForProject(row.projectId)" :key="note.id"><span :title="`${note.detail} · ${personName(note.actor)} · ${note.occurredAt.replace('T', ' ').slice(0, 16)}`">{{ note.detail }} · {{ personName(note.actor) }} · {{ note.occurredAt.replace('T', ' ').slice(5, 16) }}</span></li><li v-if="!notesForProject(row.projectId).length" class="is-empty">暂无备注</li></ol><button type="button" class="pdm-text-action" :aria-label="`维护 ${row.projectCode} 的记录`" @click="openManagerNote(row.projectId, row.projectCode, row.projectName)">记录</button></td>
+                <td><strong>{{ row.projectCode }}</strong><small>{{ row.projectName }}</small></td><td :class="{ 'is-pending': row.engineers === '待分配' }">{{ row.engineers }}</td><td>{{ row.stageLabel }}</td><td :title="row.currentStageFinish ? `当前主任务“${row.stageLabel}”计划完成 ${displayDate(row.currentStageFinish)}` : '当前主任务未排期'">{{ displayDate(row.currentStageFinish) }}</td><td><span :class="`is-${row.remainingWorkPeriod.tone}`" :title="row.remainingWorkPeriod.basis">{{ row.remainingWorkPeriod.label }}</span></td><td><span class="pdm-project-portfolio__progress"><em>{{ row.hasPlan ? `${row.completionPercent}%` : '—' }}</em><i><em :style="{ width: `${row.completionPercent}%` }" /></i></span></td><td :class="{ 'is-pending': row.owner === '待分配' }">{{ row.owner }}</td><td class="pdm-project-portfolio__task" :title="row.currentTask?.name"><strong v-if="row.currentTask">{{ row.currentTask.name }}</strong><small v-if="row.currentTask">{{ personName(row.currentTask.assignee) }} · {{ displayDate(row.currentTask.plannedFinish) }}</small><span v-else>暂无待办</span></td><td><span class="pdm-project-portfolio__overdue" :class="`is-${row.overdueTaskSummary.tone}`" :title="row.overdueTaskSummary.basis"><i v-for="line in row.overdueTaskSummary.lines" :key="line">{{ line }}</i></span></td><td class="pdm-project-portfolio__notes" @click.stop><ol><li v-for="note in notesForProject(row.projectId)" :key="note.id"><span :title="note.detail">{{ note.detail }}</span></li><li v-if="!notesForProject(row.projectId).length" class="is-empty">暂无备注</li></ol><button type="button" class="pdm-text-action" :aria-label="`维护 ${row.projectCode} 的记录`" @click="openManagerNote(row.projectId, row.projectCode, row.projectName)">记录</button></td>
               </tr>
               <tr v-if="!portfolioRows.length" class="is-empty"><td colspan="10">尚未加载项目计划总览</td></tr>
             </tbody></table>
@@ -607,47 +514,6 @@ const overviewAlerts = computed(() => [
       <template #footer><el-button @click="managerNoteDialogOpen=false">取消</el-button><el-button type="primary" :loading="savingManagerNote" @click="saveManagerNote">保存记录</el-button></template>
     </el-dialog>
 
-    <el-drawer v-model="phaseOwnerDrawerOpen" class="pdm-phase-owner-drawer" :title="`配置项目团队 · ${project.code}`" size="560px" append-to-body>
-      <div v-if="rootProject.canManageMainStaffing" class="pdm-phase-owner-list" aria-label="主项目分工">
-        <label class="pdm-phase-owner-row">
-          <span class="pdm-phase-owner-row__index">1</span>
-          <span class="pdm-phase-owner-row__copy"><strong>项目经理</strong><small>负责主项目统筹，限选1名</small></span>
-          <el-select v-model="staffingForm.primaryProjectManager" filterable placeholder="选择项目经理" aria-label="项目经理"><el-option v-for="user in projectManagerCandidates" :key="user.username" :label="`${user.displayName} · ${divisionOfUser(user.username)?.name ?? '未归属事业部'}`" :value="user.username" /></el-select>
-        </label>
-        <label class="pdm-phase-owner-row">
-          <span class="pdm-phase-owner-row__index">2</span>
-          <span class="pdm-phase-owner-row__copy"><strong>协同项目经理</strong><small>协助主项目统筹，可多选</small></span>
-          <el-select v-model="staffingForm.collaborativeProjectManagers" multiple filterable placeholder="选择协同项目经理" aria-label="协同项目经理"><el-option v-for="user in projectManagerCandidates.filter(item => item.username !== staffingForm.primaryProjectManager)" :key="user.username" :label="`${user.displayName} · ${divisionOfUser(user.username)?.name ?? '未归属事业部'}`" :value="user.username" /></el-select>
-        </label>
-        <label class="pdm-phase-owner-row">
-          <span class="pdm-phase-owner-row__index">3</span>
-          <span class="pdm-phase-owner-row__copy"><strong>主设</strong><small>负责主项目设计统筹，可多选</small></span>
-          <el-select v-model="staffingForm.designLeads" multiple filterable placeholder="选择主设" aria-label="主设"><el-option v-for="user in designLeadCandidates" :key="user.username" :label="`${user.displayName} · ${divisionOfUser(user.username)?.name ?? '未归属事业部'}`" :value="user.username" /></el-select>
-        </label>
-      </div>
-      <div v-if="activeProject.canAssignDesigners" class="pdm-phase-owner-intro"><strong>配置执行工程师与各交付阶段负责人</strong><span>执行工程师可多选；未分配的阶段可暂时留空，后续在此统一补充。</span></div>
-      <div v-if="activeProject.canAssignDesigners" class="pdm-phase-owner-list" aria-label="项目阶段负责人">
-        <label class="pdm-phase-owner-row pdm-phase-owner-row--engineers">
-          <span class="pdm-phase-owner-row__index">{{ rootProject.canManageMainStaffing ? 4 : 1 }}</span>
-          <span class="pdm-phase-owner-row__copy"><strong>执行工程师</strong><small>负责项目设计执行，可多选</small></span>
-          <el-select v-model="designerDraft" multiple filterable clearable placeholder="选择执行工程师" aria-label="执行工程师">
-            <el-option v-for="user in executionEngineerCandidates" :key="user.username" :label="`${user.displayName} · ${user.divisionName}`" :value="user.username" />
-          </el-select>
-        </label>
-        <label v-for="(phase, index) in phaseOwnerDefinitions" :key="phase.key" class="pdm-phase-owner-row">
-          <span class="pdm-phase-owner-row__index">{{ index + (rootProject.canManageMainStaffing ? 5 : 2) }}</span>
-          <span class="pdm-phase-owner-row__copy"><strong>{{ phase.label }}</strong><small>{{ phase.detail }}</small></span>
-          <el-select v-model="phaseOwnerDraft[phase.key]" filterable clearable placeholder="选择负责人" :aria-label="`${phase.label}负责人`">
-            <el-option-group v-if="preferredPhaseCandidates(phase.preferredRoles).length" label="推荐岗位">
-              <el-option v-for="user in preferredPhaseCandidates(phase.preferredRoles)" :key="user.username" :label="`${user.displayName} · ${user.divisionName}`" :value="user.username" />
-            </el-option-group>
-            <el-option-group v-if="otherPhaseCandidates(phase.preferredRoles).length" label="其他人员">
-              <el-option v-for="user in otherPhaseCandidates(phase.preferredRoles)" :key="user.username" :label="`${user.displayName} · ${user.divisionName}`" :value="user.username" />
-            </el-option-group>
-          </el-select>
-        </label>
-      </div>
-      <template #footer><el-button @click="phaseOwnerDrawerOpen=false">取消</el-button><el-button type="primary" :loading="pending || savingTeamConfiguration" @click="saveTeamConfiguration">保存配置</el-button></template>
-    </el-drawer>
+
   </section>
 </template>

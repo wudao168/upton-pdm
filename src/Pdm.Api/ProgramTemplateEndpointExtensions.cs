@@ -97,6 +97,12 @@ public static class ProgramTemplateEndpointExtensions
             return Results.Ok(MapRevision(await service.SubmitAsync(revisionId, request.ExpectedRowVersion, actor, role, cancellationToken)));
         });
 
+        api.MapPost("/revisions/{revisionId:guid}/withdraw", async (Guid revisionId, SubmitProgramTemplateRequest request, HttpContext context, ProgramTemplateService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(MapRevision(await service.WithdrawAsync(revisionId, request.ExpectedRowVersion, actor, role, cancellationToken)));
+        });
+
         api.MapGet("/tasks/mine", async (HttpContext context, ProgramTemplateService service, IProgramTemplateRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -123,6 +129,12 @@ public static class ProgramTemplateEndpointExtensions
             var result = await service.DecideAsync(taskId, new ProgramTemplateDecisionCommand(
                 request.Decision, request.Comment, request.ChecklistItems ?? [], request.ExpectedRowVersion), actor, role, cancellationToken);
             return Results.Ok(new { revision = MapRevision(result.Revision), task = result.Task });
+        });
+
+        api.MapPost("/tasks/{taskId:guid}/transfer", async (Guid taskId, TransferProgramTemplateRequest request, HttpContext context, ProgramTemplateService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.TransferAsync(taskId, request.NewAssignee, request.ExpectedRowVersion, actor, role, cancellationToken));
         });
 
         api.MapGet("/{templateId:guid}/download", async (Guid templateId, HttpContext context, ProgramTemplateService service, CancellationToken cancellationToken) =>

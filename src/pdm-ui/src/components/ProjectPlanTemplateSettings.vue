@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createClientUuid } from '../clientId'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Plus, RefreshCw } from '@lucide/vue'
 import { computed, nextTick, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
@@ -95,7 +96,7 @@ function addTemplateTask() {
   const group = selectedGroup.value
   if (!draft || !group) return
   const task = {
-    id: crypto.randomUUID(), name: '新任务', stage: group.stage.code, durationRatio: .05,
+    id: createClientUuid(), name: '新任务', stage: group.stage.code, durationRatio: .05,
     predecessorSortOrders: [], startOffsetDays: 0, fixedDurationDays: 1, defaultAssigneeRole: 'ProjectManager', weight: 5,
     isMilestone: false, isRequired: true, workflowKey: null, sortOrder: Math.max(0, ...draft.tasks.map(item => item.sortOrder)) + 10,
   }
@@ -170,7 +171,7 @@ function copyTemplate() {
   if (!templateDraft.value) return
   const source = templateDraft.value
   templateDraft.value = JSON.parse(JSON.stringify({
-    ...source, id: crypto.randomUUID(), rowVersion: 0, name: `${source.name}（个人）`, scope: 'Personal',
+    ...source, id: createClientUuid(), rowVersion: 0, name: `${source.name}（个人）`, scope: 'Personal',
     ownerUsername: props.currentUsername, baseSystemTemplateId: (source.scope ?? 'System') === 'System' ? source.id : source.baseSystemTemplateId,
     createdBy: props.currentUsername,
   }))
@@ -202,7 +203,7 @@ async function replaceSystemDefault() {
 }
 
 function addStage(stages: ProjectPlanStageDefinition[]) {
-  const stage = { code: crypto.randomUUID(), name: `新阶段${stages.length + 1}`, participatesInDelivery: true, durationRatio: 0, progressRatio: 0, independentDurationDays: 0 }
+  const stage = { code: createClientUuid(), name: `新阶段${stages.length + 1}`, participatesInDelivery: true, durationRatio: 0, progressRatio: 0, independentDurationDays: 0 }
   stages.push(stage)
   selectTask(stage.code)
 }

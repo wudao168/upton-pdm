@@ -1,4 +1,4 @@
-using Upton.Pdm.Domain;
+﻿using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
 
@@ -300,6 +300,8 @@ public interface IU9OpenApiClient
 public interface IMaterialRepository
 {
     Task<IReadOnlyList<BomHeaderMaterialLink>> ListBomHeaderMaterialLinksAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<string>> ListMaterialBrandsAsync(string? query, CancellationToken cancellationToken);
+
     Task<IReadOnlyList<PdmMaterial>> ListMaterialsAsync(string? query, string? categoryCode, bool includeArchived, int limit, CancellationToken cancellationToken);
     Task<MaterialPage> ListMaterialPageAsync(string? query, string? categoryCode, string? brand, bool includeArchived, int page, int pageSize, CancellationToken cancellationToken, string? createdAtOrder = null, bool ordinaryOnly = false, string? sortBy = null, string? sortOrder = null);
     Task<IReadOnlyList<PdmMaterial>> ListPendingMasterMaterialsAsync(CancellationToken cancellationToken);
@@ -353,6 +355,7 @@ public interface IMaterialRepository
     Task<PdmMaterial> ArchiveMaterialAsync(Guid materialId, long expectedRowVersion, string actor, DateTimeOffset archivedAt, CancellationToken cancellationToken);
     Task<PdmMaterial> ReactivateMaterialAsync(Guid materialId, long expectedRowVersion, string actor, DateTimeOffset reactivatedAt, CancellationToken cancellationToken);
     Task<PdmMaterial> DeleteLocalMaterialAsync(Guid materialId, long expectedRowVersion, bool u9AbsenceConfirmed, CancellationToken cancellationToken);
+    Task LinkBomItemsAsync(IReadOnlyList<Guid> bomItemIds, Guid materialId, string actor, DateTimeOffset linkedAt, CancellationToken cancellationToken);
     Task LinkBomItemAsync(Guid bomItemId, Guid materialId, string actor, DateTimeOffset linkedAt, CancellationToken cancellationToken);
     Task UnlinkBomItemAsync(Guid bomItemId, CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialCategory>> ListCategoriesAsync(bool includeHidden, CancellationToken cancellationToken);

@@ -196,16 +196,17 @@ public sealed class U9MaterialIntegrationServiceTests
     }
 
     [Fact]
-    public async Task ExecuteTask_WhenCodeAlreadyExists_ReturnsRecoverableConflict()
+    public async Task ExecuteTask_WhenCodeAlreadyExists_PreservesCodeAndRequiresReview()
     {
         var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
         fixture.Client.QueryResult = new U9ItemQueryResult(0, null,
             [new U9ItemReference("existing-1001", fixture.Material.MaterialCode)]);
 
-        var exception = await Assert.ThrowsAsync<U9MaterialCodeConflictException>(() => fixture.Service.ExecuteTaskAsync(
+        var exception = await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.ExecuteTaskAsync(
             fixture.Task.Id, "admin", UserRole.Administrator, default));
 
-        Assert.Equal(fixture.Material.MaterialCode, exception.MaterialCode);
+        Assert.Contains("字段仍不一致", exception.Message);
+        Assert.Equal(MaterialSyncStatus.NeedsReview, (await fixture.Materials.FindSyncTaskAsync(fixture.Task.Id, default))!.Status);
         Assert.Equal(0, fixture.Client.PostCallCount);
         var material = await fixture.Materials.FindMaterialAsync(fixture.Material.Id, default);
         Assert.False(material?.U9SyncConfirmed);
@@ -329,6 +330,37 @@ public sealed class U9MaterialIntegrationServiceTests
     }
 
     [Fact]
+    public async Task ExecuteTask_SoftAttributeDifferences_DoNotBlockOrWrite()
+    {
+        var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
+        await fixture.Materials.BeginSyncTaskAsync(fixture.Task.Id, fixture.TimeProvider.GetUtcNow(), default);
+        await fixture.Materials.FailSyncTaskAsync(
+            fixture.Task.Id,
+            MaterialSyncStatus.NeedsReview,
+            "写后回查未确认",
+            null,
+            new AuditEntry(Guid.NewGuid(), fixture.TimeProvider.GetUtcNow(), "admin", "test", nameof(PdmMaterial), fixture.Material.Id.ToString(), "test"),
+            default);
+        var matching = MatchingQuery(fixture.Material, "u9-1001");
+        fixture.Client.QueryResult = matching with
+        {
+            Items = [matching.Items.Single() with { U9Weight = 987m, U9Material = "不同材质", U9Description = "不同备注", U9SurfaceTreatment = "不同表面处理", U9PurchaseLink = "https://different.test" }]
+        };
+
+        var result = await fixture.Service.ExecuteTaskAsync(
+            fixture.Task.Id, "admin", UserRole.Administrator, default);
+
+        Assert.True(result.AlreadyExisted);
+        Assert.False(result.Created);
+        Assert.Equal(MaterialSyncStatus.Succeeded, result.Task.Status);
+        Assert.True(result.Material.U9SyncConfirmed);
+        Assert.Equal("u9-1001", result.Material.U9ItemId);
+        Assert.Equal(fixture.Material.MaterialCode, result.Material.U9ItemCode);
+        Assert.Equal(1, fixture.Client.QueryCallCount);
+        Assert.Equal(0, fixture.Client.PostCallCount);
+    }
+
+    [Fact]
     public async Task ExecuteTask_WhenNeedsReviewCreateDoesNotFindItem_StopsWithoutWriting()
     {
         var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
@@ -378,11 +410,40 @@ public sealed class U9MaterialIntegrationServiceTests
         var attributes = modifyPayload.RootElement[0].GetProperty("Attributes").EnumerateArray()
             .ToDictionary(attribute => attribute.GetProperty("AttributeName").GetString()!);
         Assert.Equal("https://shop.example.test/item/sensor-v2", attributes[$"DescFlexField.{U9MaterialContract.PurchaseLinkPublicSegment}"].GetProperty("AttributeValue").GetString());
-        Assert.Equal("SICK", attributes[$"DescFlexField.{U9MaterialContract.BrandPublicSegment}"].GetProperty("AttributeValue").GetString());
-        Assert.Equal("PBT", attributes[$"DescFlexField.{U9MaterialContract.MaterialPrivateSegment}"].GetProperty("AttributeValue").GetString());
-        Assert.Equal("无", attributes[$"DescFlexField.{U9MaterialContract.SurfaceTreatmentPrivateSegment}"].GetProperty("AttributeValue").GetString());
-        Assert.Equal("进口传感器", attributes["Description"].GetProperty("AttributeValue").GetString());
-        Assert.Equal("2020-01-01", attributes["Effective.EffectiveDate"].GetProperty("AttributeValue").GetString());
+        Assert.Equal(2, attributes.Count);
+        Assert.Contains("Name", attributes.Keys);
+    }
+
+    [Fact]
+    public async Task ExecuteTask_UpdateRequiresManualPathAndOnlyWritesSelectedAttributes()
+    {
+        var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
+        await fixture.Materials.BeginSyncTaskAsync(fixture.Task.Id, fixture.TimeProvider.GetUtcNow(), default);
+        var synced = await fixture.Materials.CompleteSyncTaskAsync(
+            fixture.Task.Id, "u9-1001", fixture.Material.MaterialCode, "{}",
+            new AuditEntry(Guid.NewGuid(), fixture.TimeProvider.GetUtcNow(), "admin", "test", nameof(PdmMaterial), fixture.Material.Id.ToString(), "test"), default);
+        var materialService = new MaterialService(fixture.Materials, fixture.Repository, new TestProtector(), fixture.Client, fixture.TimeProvider);
+        var change = await materialService.ChangeApprovedAsync(fixture.Material.Id, new(
+            fixture.Material.MaterialCode, "改名后的传感器", fixture.Material.Kind, fixture.Material.SupplyMode, fixture.Material.UnitCode,
+            fixture.Material.Specification, fixture.Material.Material, fixture.Material.Remark, fixture.Material.Brand, fixture.Material.SurfaceTreatment,
+            fixture.Material.Weight, fixture.Material.WeightUnit, synced.Material.RowVersion, "0101", "https://shop.example.test/item/sensor-v2"),
+            "admin", UserRole.Administrator, default);
+        fixture.Client.QueryResultSequence.Enqueue(new U9ItemQueryResult(0, null, [new("u9-1001", fixture.Material.MaterialCode)]));
+        fixture.Client.QueryResultSequence.Enqueue(MatchingQuery(synced.Material with { Name = "改名后的传感器", PurchaseLink = "https://shop.example.test/item/sensor-v2" }, "u9-1001"));
+        fixture.Client.BatchResult = new U9BusinessBatchResult(0, null, []);
+
+        await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.ExecuteApprovedTaskAsync(change.Task!.Id, "system", default));
+        Assert.Equal(0, fixture.Client.PostCallCount);
+        var result = await fixture.Service.ExecuteTaskAsync(Assert.IsType<MaterialSyncTask>(change.Task).Id, "admin", UserRole.Administrator, default, ["Name"]);
+
+        Assert.True(result.Updated);
+        Assert.Equal(U9MaterialContract.ModifyPath, fixture.Client.LastPostPath);
+        using var modifyPayload = System.Text.Json.JsonDocument.Parse(fixture.Client.LastCreatePayload);
+        var attributes = modifyPayload.RootElement[0].GetProperty("Attributes").EnumerateArray()
+            .ToDictionary(attribute => attribute.GetProperty("AttributeName").GetString()!);
+        Assert.DoesNotContain($"DescFlexField.{U9MaterialContract.PurchaseLinkPublicSegment}", attributes.Keys);
+        Assert.Single(attributes);
+        Assert.Contains("Name", attributes.Keys);
     }
 
     private static async Task<ExecutionFixture> CreateApprovedTaskAsync(bool writeEnabled)

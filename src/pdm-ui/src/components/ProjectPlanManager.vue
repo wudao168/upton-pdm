@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createClientUuid } from '../clientId'
 import { Calendar, ChevronDown, ChevronRight, Download, History, ListCollapse, ListTree, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Settings, Trash2 } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
@@ -163,11 +164,8 @@ const managedChildPlans = computed(() => (portfolio.value?.projects ?? []).filte
 const ownsDisplayedPlan = computed(() => Boolean(plan.value && !inheritedParentPlan.value && plan.value.projectId === props.project.id))
 const generateTargetProject = computed(() => props.projects.find(item => item.id === generateTargetProjectId.value))
 function canManageProject(projectId: string) {
-  if (props.developer) return true
-  if (projectId === props.project.id) return props.canEdit
-  const project = props.projects.find(item => item.id === projectId)
-  const username = props.currentUsername.trim().toLowerCase()
-  return project?.primaryProjectManager?.trim().toLowerCase() === username
+  return projectId === props.project.id ? props.canEdit
+    : props.projects.find(item => item.id === projectId)?.effectiveProjectPermissions?.includes('project.plan.edit') === true
 }
 function canEditSchedule(owner?: ProjectPlan | null) {
   const approvedDraft = isEffective(owner) && owner?.changeDraftSource && owner.changeRequest?.status === 'Approved'
@@ -1095,7 +1093,7 @@ async function addCustomTask(row: TimelineRow) {
     })
     const nextSortOrder = Math.max(0, ...owner.tasks.map(task => task.sortOrder)) + 10
     const customTask: ProjectPlanTask = {
-      id: crypto.randomUUID(), name: value.trim(), stage: row.stage, assignee: '', durationDays: 1,
+      id: createClientUuid(), name: value.trim(), stage: row.stage, assignee: '', durationDays: 1,
       plannedStart: row.start, plannedFinish: row.start, completionPercent: 0, status: 'NotStarted', predecessorTaskIds: [],
       weight: 1, isMilestone: false, isRequired: false, sortOrder: nextSortOrder, isCustom: true,
     }
@@ -1374,7 +1372,7 @@ async function decideApproval(approve: boolean) {
 
 
 function addStage(stages: ProjectPlanStageDefinition[]) {
-  stages.push({ code: crypto.randomUUID(), name: `新阶段${stages.length + 1}` })
+  stages.push({ code: createClientUuid(), name: `新阶段${stages.length + 1}` })
 }
 function moveStage(stages: ProjectPlanStageDefinition[], index: number, offset: number) {
   const next = index + offset

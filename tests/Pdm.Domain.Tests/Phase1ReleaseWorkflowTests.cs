@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Reflection;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 using Upton.Pdm.Infrastructure;
@@ -5,9 +7,23 @@ using Upton.Pdm.Infrastructure;
 namespace Upton.Pdm.Domain.Tests;
 
 [Collection("BomHeader automatic queue")]
-public sealed class Phase1ReleaseWorkflowTests
+public sealed class Phase1ReleaseWorkflowTests : IDisposable
 {
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+    private readonly string previewTestRoot = Path.Combine(Path.GetTempPath(), "pdm-release-preview-test", Guid.NewGuid().ToString("N"));
+
+    private void UseTemporaryPreviewVault(InMemoryPdmRepository repository)
+    {
+        var projects = (ConcurrentDictionary<Guid, Project>)typeof(InMemoryPdmRepository)
+            .GetField("projects", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(repository)!;
+        projects[ProjectId] = projects[ProjectId] with { VaultLocation = previewTestRoot };
+    }
+
+    public void Dispose()
+    {
+        if (Directory.Exists(previewTestRoot)) Directory.Delete(previewTestRoot, true);
+    }
 
     [Fact]
     public async Task WearPartBom_CollectsMarkedItemsAcrossCategoriesAndKeepsTheirOriginalBomKinds()
@@ -181,6 +197,7 @@ public sealed class Phase1ReleaseWorkflowTests
     public async Task InterruptedPreviewRun_IsRequeuedInsteadOfStuckRunning()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        UseTemporaryPreviewVault(repository);
         var publisher = new RecordingPublisher { PreviewError = "转图服务器未生成图档的预览文件。" };
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -215,6 +232,7 @@ public sealed class Phase1ReleaseWorkflowTests
     public async Task PreviewItemsExposePerItemStatusAndSingleItemRetry()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        UseTemporaryPreviewVault(repository);
         var publisher = new RecordingPublisher { PreviewOnlyDrawings = true, PreviewError = "SolidWorks转换进程失败：SolidWorks打开A01-100.SLDASM失败。" };
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
@@ -1248,27 +1266,81 @@ public sealed class Phase1ReleaseWorkflowTests
         Assert.Equal(generated.UnclassifiedCount - 1, reconciled.UnclassifiedCount);
     }
 
-    [Fact]
-    public async Task MechanicalBom_VirtualClassificationRemainsOnlyInSourceData()
+    [Theory]
+    [InlineData(BomKind.Virtual)]
+    [InlineData(BomKind.ComponentDrawing)]
+    public async Task MechanicalBom_SourceOnlyClassificationRemainsOnlyInSourceData(BomKind kind)
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
         var pending = generated.UnclassifiedItems.First(item => item.IsPendingClassification && item.SourceDocumentId.HasValue);
 
+        var snapshot = (await repository.GetLatestReferenceSnapshotAsync(ProjectId, default))!;
+        await repository.CheckoutAsync(pending.SourceDocumentId!.Value, "admin", default);
+        await repository.CheckInVersionAsync(pending.SourceDocumentId.Value, "admin", new DocumentVersionCommit(
+            new StoredFile("versions/source-only.sldasm", 10, new string('B', 64), DateTimeOffset.UtcNow),
+            "存档源数据", new Dictionary<string, string?>(), snapshot, [], [], ForceVersion: true), default);
+
         var updated = Assert.Single(await workflow.BatchUpdateBomItemsAsync(
             ProjectId,
-            new BatchUpdateBomItemsCommand([pending.Id], ["kind"], BomKind.Virtual),
+            new BatchUpdateBomItemsCommand([pending.Id], ["kind"], kind),
             "admin", UserRole.Administrator, default));
         var sourceData = await workflow.GetBomSourceDataAsync(ProjectId, "admin", UserRole.Administrator, default);
 
-        Assert.Equal(BomKind.Virtual, updated.Kind);
-        Assert.Contains(await repository.GetBomAsync(ProjectId, BomKind.Virtual, default), item => item.Id == pending.Id);
+        Assert.Equal(kind, updated.Kind);
+        if (kind == BomKind.ComponentDrawing)
+        {
+            var writeback = Assert.Single(await repository.ListCadPropertyWritebacksAsync(ProjectId, default));
+            Assert.Equal("部件图", writeback.Properties["物料分类"]);
+            Assert.Equal(CadPropertyWritebackStatus.Pending, updated.PropertyWritebackStatus);
+        }
+        Assert.Contains(await repository.GetBomAsync(ProjectId, kind, default), item => item.Id == pending.Id);
         Assert.DoesNotContain(await repository.GetBomAsync(ProjectId, BomKind.Standard, default), item => item.Id == pending.Id);
         Assert.DoesNotContain(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default), item => item.Id == pending.Id);
         Assert.DoesNotContain(await repository.GetBomAsync(ProjectId, BomKind.Unclassified, default), item => item.Id == pending.Id);
         Assert.DoesNotContain(await repository.GetBomAsync(ProjectId, BomKind.Electrical, default), item => item.Id == pending.Id);
-        Assert.Contains(sourceData, item => item.Id == pending.Id && item.Kind == BomKind.Virtual);
+        Assert.Contains(sourceData, item => item.Id == pending.Id && item.Kind == kind && !item.IsPendingClassification);
+        var reconciled = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        Assert.Contains(kind == BomKind.Virtual ? reconciled.VirtualItems : reconciled.ComponentDrawingItems, item => item.Id == pending.Id);
+        Assert.DoesNotContain(reconciled.UnclassifiedItems, item => item.Id == pending.Id);
+        await workflow.ReclassifyBomItemsFromSourceAsync(ProjectId,
+            new ReclassifyBomItemsFromSourceCommand([pending.Id], BomKind.NonStandard), "admin", UserRole.Administrator, default);
+        Assert.DoesNotContain(await repository.GetBomAsync(ProjectId, kind, default), item => item.Id == pending.Id);
+        Assert.Contains(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default), item => item.Id == pending.Id);
+    }
+
+    [Fact]
+    public async Task MechanicalBom_ComponentDrawingMigratesPendingItemAndPreservesChildHierarchy()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var before = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var assemblyId = Guid.Parse("22222222-2222-2222-2222-222222222223");
+        var pending = Assert.Single(before.UnclassifiedItems, item => item.SourceDocumentId == assemblyId);
+        var snapshot = (await repository.GetLatestReferenceSnapshotAsync(ProjectId, default))!;
+        await repository.CheckoutAsync(assemblyId, "admin", default);
+        await repository.CheckInVersionAsync(assemblyId, "admin", new DocumentVersionCommit(
+            new StoredFile("versions/component.sldasm", 10, new string('C', 64), DateTimeOffset.UtcNow),
+            "部件图分类", new Dictionary<string, string?>
+            {
+                [CadPropertyCardSnapshot.ScopePrefix + "物料分类"] = "Global",
+                [CadPropertyCardSnapshot.ScopePrefix + "物料编码"] = "Global",
+                ["全局/物料分类"] = "部件图",
+                ["全局/物料编码"] = "COMPONENT-001"
+            }, snapshot, [], [], ForceVersion: true), default);
+        var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var component = Assert.Single(generated.ComponentDrawingItems);
+        Assert.Equal(pending.Id, component.Id);
+        Assert.False(component.IsPendingClassification);
+        Assert.Equal(before.UnclassifiedCount - 1, generated.UnclassifiedCount);
+        Assert.DoesNotContain(generated.StandardItems.Concat(generated.NonStandardItems).Concat(generated.ElectricalItems), item => item.Id == component.Id);
+        var source = await workflow.GetBomSourceDataAsync(ProjectId, "admin", UserRole.Administrator, default);
+        Assert.Contains(source, item => item.Id == component.Id && item.Kind == BomKind.ComponentDrawing && !item.IsPendingClassification);
+        var child = Assert.Single(source, item => item.SourceDocumentId == Guid.Parse("22222222-2222-2222-2222-222222222224"));
+        Assert.Equal("COMPONENT-001", child.ParentDrawingNumber);
+        Assert.Equal(2, child.Quantity);
+        Assert.Equal(pending.SourceInstancePath, component.SourceInstancePath);
     }
 
     [Fact]
@@ -1842,6 +1914,7 @@ public sealed class Phase1ReleaseWorkflowTests
             (await repository.GetBomAsync(ProjectId, BomKind.Unclassified, default)).ToArray(),
             (await repository.GetBomAsync(ProjectId, BomKind.Electrical, default)).ToArray(),
             (await repository.GetBomAsync(ProjectId, BomKind.Virtual, default)).ToArray(),
+            (await repository.GetBomAsync(ProjectId, BomKind.ComponentDrawing, default)).ToArray(),
             [], [], default);
         Assert.False((await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).Single(item => item.Id == staleId).IsComplete);
 
@@ -3003,7 +3076,7 @@ public sealed class Phase1ReleaseWorkflowTests
         public Task<UploadSession> GetUploadSessionAsync(Guid sessionId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<bool> IsAvailableAsync(string location, CancellationToken cancellationToken) => Task.FromResult(true);
         public Task<Stream> OpenReadAsync(string absolutePath, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken, string? owner = null) => throw new NotSupportedException();
         public Task VerifyStoredFileAsync(Project project, StoredFile file, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<UploadSession> WriteChunkAsync(Guid sessionId, int chunkIndex, Stream content, CancellationToken cancellationToken) => throw new NotSupportedException();
     }

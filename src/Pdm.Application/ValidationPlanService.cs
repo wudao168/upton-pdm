@@ -18,6 +18,11 @@ public sealed class ValidationPlanService(
     private static readonly HashSet<string> PlanDocumentExtensions = [".pdf", ".png", ".jpg", ".jpeg", ".xlsx", ".xls"];
     private static readonly HashSet<string> EvidenceExtensions = [".pdf", ".png", ".jpg", ".jpeg", ".xlsx", ".xls", ".csv", ".zip"];
 
+    private Task RequirePlanEditAsync(Guid projectId, string actor, UserRole role, CancellationToken ct) =>
+        qualityAcceptance
+            ? QualityUploadPolicy.RequireAsync(repository, projectId, "quality", actor, role, ct)
+            : RequirePermissionAsync(actor, role, PermissionCodes.ValidationPlanEdit, ct);
+
     public async Task<ValidationCheckCatalog> ListCatalogAsync(bool includeInactive, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, includeInactive ? PermissionCodes.ValidationCatalogManage : PermissionCodes.ProjectContentView, cancellationToken);
@@ -139,7 +144,7 @@ public sealed class ValidationPlanService(
     public async Task<ProjectValidationPlan> SavePlanAsync(Guid projectId, SaveProjectValidationPlanCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireProjectReadAsync(projectId, actor, role, cancellationToken);
-        await QualityUploadPolicy.RequireAsync(repository, projectId, "quality", actor, role, cancellationToken);
+        await RequirePlanEditAsync(projectId, actor, role, cancellationToken);
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         var current = await validationPlans.FindPlanAsync(projectId, cancellationToken);
         if (current?.State == ProjectValidationPlanState.PendingApproval) throw new PdmConflictException("验证计划正在审批，不能修改。");
@@ -199,7 +204,7 @@ public sealed class ValidationPlanService(
     public async Task<ProjectValidationPlan> AppendPlanItemsAsync(Guid projectId, AppendProjectValidationPlanItemsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireProjectReadAsync(projectId, actor, role, cancellationToken);
-        await QualityUploadPolicy.RequireAsync(repository, projectId, "quality", actor, role, cancellationToken);
+        await RequirePlanEditAsync(projectId, actor, role, cancellationToken);
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         var current = await validationPlans.FindPlanAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目尚未建立验证计划。");
         if (current.State != ProjectValidationPlanState.Effective) throw new PdmConflictException("只有已生效验证计划可以追加检查项。");
@@ -247,7 +252,7 @@ public sealed class ValidationPlanService(
     public async Task<ProjectValidationPlan> UpdatePlanStandardsAsync(Guid projectId, UpdateProjectValidationPlanStandardsCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireProjectReadAsync(projectId, actor, role, cancellationToken);
-        await QualityUploadPolicy.RequireAsync(repository, projectId, "quality", actor, role, cancellationToken);
+        await RequirePlanEditAsync(projectId, actor, role, cancellationToken);
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         var current = await validationPlans.FindPlanAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目尚未建立验证计划。");
         if (current.State != ProjectValidationPlanState.Effective) throw new PdmConflictException("只有已生效验证计划可以维护验证标准。");
@@ -274,7 +279,7 @@ public sealed class ValidationPlanService(
     public async Task<ProjectValidationPlan> CreateRevisionAsync(Guid projectId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireProjectReadAsync(projectId, actor, role, cancellationToken);
-        await QualityUploadPolicy.RequireAsync(repository, projectId, "quality", actor, role, cancellationToken);
+        await RequirePlanEditAsync(projectId, actor, role, cancellationToken);
         var current = await validationPlans.FindPlanAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目尚未建立验证计划。");
         if (current.RowVersion != expectedRowVersion) throw new PdmConflictException("验证计划已变化，请刷新后重试。");
         if (current.State != ProjectValidationPlanState.Effective) throw new PdmConflictException("只有已生效验证计划可以创建新版本。");
@@ -289,7 +294,7 @@ public sealed class ValidationPlanService(
     public async Task<ProjectValidationPlan> SubmitAsync(Guid projectId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireProjectReadAsync(projectId, actor, role, cancellationToken);
-        await QualityUploadPolicy.RequireAsync(repository, projectId, "quality", actor, role, cancellationToken);
+        await RequirePlanEditAsync(projectId, actor, role, cancellationToken);
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         var current = await validationPlans.FindPlanAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目尚未建立验证计划。");
         if (current.RowVersion != expectedRowVersion || current.State is not (ProjectValidationPlanState.Draft or ProjectValidationPlanState.Rejected)) throw new PdmConflictException("验证计划状态已变化，请刷新后重试。");
@@ -309,8 +314,7 @@ public sealed class ValidationPlanService(
         if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalDecide, cancellationToken)
             && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ValidationPlanEdit, cancellationToken))
             throw new UnauthorizedAccessException("当前角色无权处理验证计划审批。");
-        var includeAll = string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase);
-        var task = (await validationPlans.ListPendingApprovalTasksAsync(actor, includeAll, cancellationToken)).FirstOrDefault(item => item.Id == taskId)
+        var task = (await validationPlans.ListPendingApprovalTasksAsync(actor, false, cancellationToken)).FirstOrDefault(item => item.Id == taskId)
             ?? throw new PdmRuleException("只能处理当前分配给自己的验证计划审批任务。");
         var saved = await validationPlans.DecideAsync(taskId, actor, decision, Optional(comment, 500, "审批意见"), timeProvider.GetUtcNow(), cancellationToken);
         if (saved.State == ProjectValidationPlanState.Effective)
@@ -322,11 +326,41 @@ public sealed class ValidationPlanService(
         return saved;
     }
 
+    public async Task<ProjectValidationPlan> WithdrawAsync(Guid projectId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireProjectReadAsync(projectId, actor, role, cancellationToken);
+        var current = await validationPlans.FindPlanAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("验证计划不存在。");
+        if (current.State != ProjectValidationPlanState.PendingApproval || current.RowVersion != expectedRowVersion)
+            throw new PdmConflictException("验证计划审批状态已变化。");
+        if (!string.Equals(current.SubmittedBy, actor, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("仅本次提交人可以撤回验证计划。");
+        var saved = await validationPlans.WithdrawAsync(current.Id, expectedRowVersion, actor, timeProvider.GetUtcNow(), cancellationToken);
+        await AuditAsync(actor, "project.validation-plan.withdraw", nameof(ProjectValidationPlan), saved.Id, $"撤回验证计划R{saved.RevisionNumber}", cancellationToken);
+        return saved;
+    }
+
+    public async Task<ProjectValidationPlan> TransferAsync(Guid taskId, string newAssignee, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        var task = (await ListMyApprovalTasksAsync(actor, role, cancellationToken)).FirstOrDefault(item => item.Id == taskId)
+            ?? throw new UnauthorizedAccessException("只能转交当前分配给自己的验证计划审批任务。");
+        if (!string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("只能转交当前分配给自己的验证计划审批任务。");
+        if (string.Equals(actor, newAssignee, StringComparison.OrdinalIgnoreCase)) throw new PdmRuleException("不能转交给自己。");
+        var target = await repository.FindUserAsync(newAssignee, cancellationToken);
+        if (target is null || !target.IsActive || !await CanDecideAsync(newAssignee, target.Role, cancellationToken))
+            throw new PdmRuleException("接收人未启用或没有验证计划审批权限。");
+        var saved = await validationPlans.TransferAsync(taskId, actor, target.Username, timeProvider.GetUtcNow(), cancellationToken);
+        await AuditAsync(actor, "project.validation-plan.approval.transfer", nameof(ValidationPlanApprovalTask), taskId, $"{actor} -> {target.Username}；R{saved.RevisionNumber}", cancellationToken);
+        return saved;
+    }
+
+    private async Task<bool> CanDecideAsync(string actor, UserRole role, CancellationToken ct) =>
+        await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalDecide, ct)
+        || await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ValidationPlanEdit, ct);
+
     public async Task<IReadOnlyList<PendingValidationPlanApprovalTask>> ListMyApprovalTasksAsync(string actor, UserRole role, CancellationToken cancellationToken)
     {
-        var includeAll = string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase)
-            && await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalDecide, cancellationToken);
-        return await validationPlans.ListPendingApprovalTasksAsync(actor, includeAll, cancellationToken);
+        return await validationPlans.ListPendingApprovalTasksAsync(actor, false, cancellationToken);
     }
 
     public async Task<UploadSession> StartAttachmentUploadAsync(Guid planId, ValidationPlanAttachmentKind kind, string fileName, long totalLength, string sha256, string actor, UserRole role, CancellationToken cancellationToken)
@@ -336,13 +370,14 @@ public sealed class ValidationPlanService(
         var allowed = kind == ValidationPlanAttachmentKind.PlanDocument ? PlanDocumentExtensions : EvidenceExtensions;
         if (!allowed.Contains(extension)) throw new PdmRuleException(kind == ValidationPlanAttachmentKind.PlanDocument
             ? "上传验证计划仅支持PDF、图片或Excel文件。" : "佐证附件仅支持PDF、图片、Excel、CSV或ZIP文件。");
-        return await storage.StartUploadAsync(plan.ProjectId, fileName, totalLength, sha256, cancellationToken);
+        return await storage.StartUploadAsync(plan.ProjectId, fileName, totalLength, sha256, cancellationToken, actor);
     }
 
     public async Task<ValidationPlanAttachment> CompleteAttachmentUploadAsync(Guid planId, ValidationPlanAttachmentKind kind, Guid sessionId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         var plan = await RequireAttachmentAccessAsync(planId, kind, actor, role, cancellationToken);
         var session = await storage.GetUploadSessionAsync(sessionId, cancellationToken);
+        session.RequireOwner(actor);
         if (session.ProjectId != plan.ProjectId) throw new PdmConflictException("上传会话与验证计划项目不匹配。");
         var fileVersion = plan.Attachments.Where(item => item.Kind == kind && string.Equals(item.OriginalFileName, session.FileName, StringComparison.OrdinalIgnoreCase)).Select(item => item.FileVersion).DefaultIfEmpty(0).Max() + 1;
         var id = Guid.NewGuid();
@@ -377,7 +412,7 @@ public sealed class ValidationPlanService(
     public async Task<ValidationPlanRecognitionDraft> RecognizeAttachmentAsync(Guid attachmentId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         var (plan, project, attachment) = await RequireAttachmentAsync(attachmentId, actor, role, cancellationToken);
-        await QualityUploadPolicy.RequireAsync(repository, plan.ProjectId, "quality", actor, role, cancellationToken);
+        await RequirePlanEditAsync(plan.ProjectId, actor, role, cancellationToken);
         if (plan.State != ProjectValidationPlanState.Effective) throw new PdmConflictException("验证计划审批完成并生效后才能识别上传文件。");
         if (attachment.Kind != ValidationPlanAttachmentKind.PlanDocument) throw new PdmRuleException("仅验证计划文件支持自动识别结果。");
         var extension = Path.GetExtension(attachment.OriginalFileName).ToLowerInvariant();
@@ -400,7 +435,7 @@ public sealed class ValidationPlanService(
     {
         var plan = await validationPlans.FindPlanByIdAsync(planId, cancellationToken) ?? throw new PdmNotFoundException("验证计划不存在。");
         await RequireProjectReadAsync(plan.ProjectId, actor, role, cancellationToken);
-        await QualityUploadPolicy.RequireAsync(repository, plan.ProjectId, "quality", actor, role, cancellationToken);
+        await RequirePlanEditAsync(plan.ProjectId, actor, role, cancellationToken);
         if (plan.State != ProjectValidationPlanState.Effective) throw new PdmConflictException("验证计划审批完成并生效后才能确认识别结果。");
         var attachment = plan.Attachments.FirstOrDefault(item => item.Id == command.SourceAttachmentId)
             ?? throw new PdmNotFoundException("识别来源文件不存在。");
@@ -477,7 +512,7 @@ public sealed class ValidationPlanService(
     {
         var plan = await validationPlans.FindPlanByIdAsync(planId, cancellationToken) ?? throw new PdmNotFoundException("验证计划不存在。");
         await RequireProjectReadAsync(plan.ProjectId, actor, role, cancellationToken);
-        await QualityUploadPolicy.RequireAsync(repository, plan.ProjectId, "quality", actor, role, cancellationToken);
+        await RequirePlanEditAsync(plan.ProjectId, actor, role, cancellationToken);
         if (plan.State != ProjectValidationPlanState.Effective)
             throw new PdmConflictException("验证计划审批完成并生效后才能上传验证计划或附件。");
         return plan;

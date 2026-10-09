@@ -217,6 +217,34 @@ public sealed class MySqlProgramTemplateRepository(IOptions<PdmDatabaseOptions> 
         return rows.Select(MapTask).ToArray();
     }
 
+    public async Task<ProgramTemplateRevision> WithdrawAsync(Guid revisionId, long expectedRowVersion, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE program_template_revision SET state='Draft',submitted_at=NULL,row_version=row_version+1 WHERE id=@RevisionId AND state IN ('PendingReview','PendingApproval') AND row_version=@ExpectedRowVersion",
+            new { RevisionId = revisionId, ExpectedRowVersion = expectedRowVersion }, transaction, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("程序模板已不在审批中。");
+        await connection.ExecuteAsync(new CommandDefinition("DELETE FROM program_template_approval_task WHERE revision_id=@RevisionId", new { RevisionId = revisionId }, transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+        return await FindRevisionAsync(revisionId, cancellationToken) ?? throw new PdmNotFoundException("程序模板候选版本不存在。");
+    }
+
+    public async Task<ProgramTemplateApprovalTask> TransferAsync(Guid taskId, string newAssignee, long expectedRowVersion, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE program_template_approval_task task
+            INNER JOIN program_template_revision revision ON revision.id=task.revision_id
+            SET task.assignee=@NewAssignee,task.row_version=task.row_version+1
+            WHERE task.id=@TaskId AND task.row_version=@ExpectedRowVersion AND task.decision IS NULL
+              AND ((task.stage='Review' AND revision.state='PendingReview') OR (task.stage='Approval' AND revision.state='PendingApproval'))
+            """, new { TaskId = taskId, NewAssignee = newAssignee, ExpectedRowVersion = expectedRowVersion }, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("程序模板审批任务已变化。");
+        return await FindTaskAsync(taskId, cancellationToken) ?? throw new PdmNotFoundException("程序模板审批任务不存在。");
+    }
+
     public async Task<IReadOnlyList<ProgramTemplateApprovalTask>> ListTasksAsync(string actor, string roleCode, bool canApprove, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -226,7 +254,8 @@ public sealed class MySqlProgramTemplateRepository(IOptions<PdmDatabaseOptions> 
              WHERE task.decision IS NULL AND (
                 (task.stage='Review' AND revision.state='PendingReview' AND task.assignee=@Actor)
                 OR (task.stage='Approval' AND revision.state='PendingApproval'
-                    AND (@CanApprove=1 OR task.assignee_role_code=@RoleCode)))
+                    AND ((task.assignee IS NOT NULL AND task.assignee=@Actor)
+                         OR (task.assignee IS NULL AND (@CanApprove=1 OR task.assignee_role_code=@RoleCode)))))
              ORDER BY task.created_at
             """, new { Actor = actor, RoleCode = roleCode, CanApprove = canApprove ? 1 : 0 }, cancellationToken: cancellationToken));
         return rows.Select(MapTask).ToArray();

@@ -184,11 +184,11 @@ public sealed class ProjectBomU9SyncService(
             ? await BuildMasterComponentsAsync(project, bindings, cancellationToken)
             : await BuildCategoryComponentsAsync(projectId, kind, cancellationToken);
         var components = approved.Components;
-        var effectiveDate = ResolveU9EffectiveDate(headerMaterial);
+        var effectiveDate = await ResolveHierarchyEffectiveDateAsync(project, headerMaterial, cancellationToken);
         var disableDate = new DateOnly(9999, 12, 31);
         components = components.Select(component => component with
         {
-            EffectiveDate = component.EffectiveDate is { } componentDate && componentDate > effectiveDate ? componentDate : effectiveDate,
+            EffectiveDate = effectiveDate,
             DisableDate = disableDate
         }).ToArray();
         var command = new U9BomWriteCommand(
@@ -205,6 +205,7 @@ public sealed class ProjectBomU9SyncService(
             AllowEmptyCreate: components.Count == 0,
             ReconcileComponentTotals: true)
         {
+            InheritEffectiveDateForNewRows = true,
             PreviousApprovedComponents = kind == ProjectBomHeaderKind.Master ? null
                 : await PreviousApprovedComponentsAsync(projectId, kind, cancellationToken)
         };
@@ -251,7 +252,7 @@ public sealed class ProjectBomU9SyncService(
                 if (!bindings.TryGetValue(kind, out var binding))
                     throw new PdmRuleException($"{KindLabel(kind)}已有物料，但尚未申请独立BOM料号。");
                 var material = await RequireOfficialMaterialAsync(binding.MaterialId, KindLabel(kind), cancellationToken);
-                result.Add(Component((result.Count + 1) * 10, material, 1, $"{project.Code} · {KindLabel(kind)}", ResolveU9EffectiveDate(material)));
+                result.Add(Component((result.Count + 1) * 10, material, 1, $"{project.Code} · {KindLabel(kind)}"));
             }
         }
         else
@@ -265,7 +266,7 @@ public sealed class ProjectBomU9SyncService(
                     .SingleOrDefault(item => item.Kind == ProjectBomHeaderKind.Master)
                     ?? throw new PdmRuleException($"子项目 {child.Code} 尚未申请项目主BOM料号。");
                 var material = await RequireOfficialMaterialAsync(childMaster.MaterialId, $"子项目 {child.Code} 主BOM", cancellationToken);
-                result.Add(Component((result.Count + 1) * 10, material, Math.Max(child.Quantity, 1), $"子项目 {child.Code} · {child.Name}", ResolveU9EffectiveDate(material)));
+                result.Add(Component((result.Count + 1) * 10, material, Math.Max(child.Quantity, 1), $"子项目 {child.Code} · {child.Name}"));
             }
         }
         return new(approved, result);
@@ -300,8 +301,7 @@ public sealed class ProjectBomU9SyncService(
                 OfficialCode(material),
                 item.Quantity,
                 U9UnitCatalog.NormalizeBomUnit(item.Unit),
-                Remark: item.Remark,
-                EffectiveDate: ResolveU9EffectiveDate(material)));
+                Remark: item.Remark));
         }
         return new(true, result);
     }
@@ -458,20 +458,30 @@ public sealed class ProjectBomU9SyncService(
     private static IEnumerable<BomItem> EffectiveItems(IEnumerable<BomItem> items) =>
         items.Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded && !item.IsPendingRemoval);
 
-    private static U9BomComponentCommand Component(int sequence, PdmMaterial material, decimal quantity, string remark, DateOnly effectiveDate) =>
-        new(sequence, OfficialCode(material), quantity, U9UnitCatalog.NormalizeBomUnit(material.UnitCode), Remark: remark, EffectiveDate: effectiveDate);
+    private static U9BomComponentCommand Component(int sequence, PdmMaterial material, decimal quantity, string remark) =>
+        new(sequence, OfficialCode(material), quantity, U9UnitCatalog.NormalizeBomUnit(material.UnitCode), Remark: remark);
 
-    /// <summary>
-    /// BOM 生效起始日期：U9C 要求 BOM 生效日期不得早于母项/子件料品的生效日期，否则会拒绝写入。
-    /// PLM 建档的料品已统一按 2020-01-01 生效（U9MaterialPayloadFactory.MaterialEffectiveDate），
-    /// 但旧料品的生效日期仍是其 U9C 建档日（料品资料不回传生效日期，只能用同步时间估算），因此这里取
-    /// “料品生效估算日”与“当天”中的较晚者，保证 BOM 日期不早于料品。
-    /// </summary>
-    private DateOnly ResolveU9EffectiveDate(PdmMaterial material)
+    private async Task<DateOnly> ResolveHierarchyEffectiveDateAsync(Project project, PdmMaterial headerMaterial, CancellationToken cancellationToken)
     {
-        var materialDate = DateOnly.FromDateTime((material.LastU9SyncedAt ?? material.CreatedAt).ToLocalTime().DateTime);
-        var today = DateOnly.FromDateTime(timeProvider.GetLocalNow().DateTime);
-        return materialDate > today ? materialDate : today;
+        var root = project;
+        var visited = new HashSet<Guid> { root.Id };
+        while (root.ParentProjectId is { } parentId)
+        {
+            if (!visited.Add(parentId)) throw new PdmRuleException("项目层级存在循环，无法确定主BOM生效日期。");
+            root = await repository.FindProjectAsync(parentId, cancellationToken)
+                ?? throw new PdmRuleException("主项目不存在，无法确定BOM生效日期。");
+        }
+        var binding = (await repository.ListProjectBomHeaderBindingsAsync(root.Id, cancellationToken))
+            .SingleOrDefault(item => item.Kind == ProjectBomHeaderKind.Master);
+        var material = binding is null ? headerMaterial
+            : await RequireOfficialMaterialAsync(binding.MaterialId, "主项目BOM料号", cancellationToken);
+        if (binding is not null)
+        {
+            var confirmed = await u9BomWriteService.GetEffectiveDateAsync(OfficialCode(material), cancellationToken);
+            if (confirmed.HasValue) return confirmed.Value;
+        }
+        // 首次创建前使用根料品建档日，避免分日发布的子BOM使用各自当天日期。
+        return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(material.LastU9SyncedAt ?? material.CreatedAt, timeProvider.LocalTimeZone).DateTime);
     }
 
     private static string OfficialCode(PdmMaterial material) => material.U9ItemCode!.Trim();

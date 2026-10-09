@@ -52,6 +52,8 @@ public sealed class MaterialSyncBatchService(
             .ToDictionary(task => task.Id);
         if (available.Count != selectedIds.Length)
             throw new PdmRuleException("部分U9C同步任务不存在，请刷新后重试。");
+        if (available.Values.Any(task => task.Operation == MaterialSyncOperation.Update))
+            throw new PdmRuleException("U9C属性修改须在料品管理中逐项确认，不能批量或后台自动执行。");
         if (available.Values.Any(task => task.Status is not (MaterialSyncStatus.PreviewReady or MaterialSyncStatus.Failed or MaterialSyncStatus.NeedsReview)))
             throw new PdmRuleException("选中的任务包含不可执行项，请刷新后重新选择。");
 

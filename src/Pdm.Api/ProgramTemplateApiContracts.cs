@@ -132,3 +132,5 @@ public sealed record ProgramTemplateTaskResponse(
     IReadOnlyList<string> RequiredChecklist,
     DateTimeOffset CreatedAt,
     long RowVersion);
+
+public sealed record TransferProgramTemplateRequest(string NewAssignee, long ExpectedRowVersion);

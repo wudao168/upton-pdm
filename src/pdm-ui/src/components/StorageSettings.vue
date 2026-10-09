@@ -65,6 +65,9 @@ watch(() => props.settings.previewConversion, conversion => {
 }, { immediate: true, deep: true })
 
 const previewConversionPayload = () => ({
+  servers: (props.settings.previewConversion?.servers ?? []).map(server => server.agentUrl.replace(/\/+$/, '') === props.settings.previewConversion?.agentUrl.replace(/\/+$/, '')
+    ? { ...server, agentUrl: previewConversionDraft.agentUrl.trim().replace(/\/+$/, ''), agentToken: previewConversionDraft.agentToken.trim(), timeoutMinutes: Number(previewConversionDraft.timeoutMinutes) || 30 }
+    : server),
   mode: previewConversionDraft.mode,
   agentUrl: previewConversionDraft.agentUrl.trim().replace(/\/+$/, ''),
   agentToken: previewConversionDraft.agentToken.trim(),
@@ -273,6 +276,7 @@ async function saveCounters(row: { id: string; project: number; serial: number }
             </label>
           </div>
           <p v-if="previewAgentProbe" class="pdm-inline-info" role="status">{{ previewAgentProbe }}</p>
+          <p v-for="server in settings.previewConversion?.servers ?? []" :key="server.agentUrl">转图服务器：{{ server.name }} · {{ server.agentUrl }}</p>
           <div class="pdm-settings-actions">
             <button type="button" class="pdm-secondary-action" :disabled="pending || previewAgentTesting" @click="testPreviewAgentConnection">{{ previewAgentTesting ? '正在测试…' : '测试连接' }}</button>
             <button type="button" class="pdm-primary-action" :disabled="pending" @click="savePreviewConversion">保存图纸转换设置</button>

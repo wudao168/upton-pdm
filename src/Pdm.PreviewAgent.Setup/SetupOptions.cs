@@ -10,6 +10,7 @@ internal sealed class SetupOptions
     public const string FirewallRuleName = "UPLM Preview Agent";
 
     public string ServerUrl { get; set; } = string.Empty;
+    public string Name { get; set; } = Environment.MachineName;
     public string Username { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
     public int Port { get; set; } = 5199;
@@ -21,10 +22,11 @@ internal sealed class SetupOptions
     public string WorkRoot { get; set; } = string.Empty;
     public bool Silent { get; set; }
     public bool Uninstall { get; set; }
+    public bool StartInTray { get; set; }
 
     public static SetupOptions Parse(string[] args)
     {
-        var options = new SetupOptions();
+        var options = SetupPreferences.Load();
         var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         for (var index = 0; index < (args?.Length ?? 0); index++)
         {
@@ -37,6 +39,7 @@ internal sealed class SetupOptions
             else map[name] = "true";
         }
         if (map.TryGetValue("server", out var server)) options.ServerUrl = server.Trim();
+        if (map.TryGetValue("name", out var serverName)) options.Name = serverName.Trim();
         if (map.TryGetValue("user", out var user)) options.Username = user.Trim();
         if (map.TryGetValue("password", out var password)) options.Password = password;
         if (map.TryGetValue("port", out var portText) && int.TryParse(portText, out var port) && port > 0) options.Port = port;
@@ -47,6 +50,7 @@ internal sealed class SetupOptions
         if (map.TryGetValue("workroot", out var workRoot)) options.WorkRoot = workRoot.Trim();
         options.Silent = map.ContainsKey("silent");
         options.Uninstall = map.ContainsKey("uninstall");
+        options.StartInTray = map.ContainsKey("tray");
         return options;
     }
 

@@ -46,6 +46,12 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         categories["0302"] = Category("0302", "设备", "03", MaterialKind.Product, true, now, 32);
     }
 
+    public Task<IReadOnlyList<string>> ListMaterialBrandsAsync(string? query, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<string>>(materials.Values.Where(item => !item.IsArchived)
+            .Select(item => item.Brand?.Trim()).Where(brand => !string.IsNullOrWhiteSpace(brand))
+            .Select(brand => brand!).Where(brand => string.IsNullOrWhiteSpace(query) || brand.Contains(query.Trim(), StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(brand => brand, StringComparer.OrdinalIgnoreCase).Take(50).ToArray());
+
     public Task<IReadOnlyList<PdmMaterial>> ListMaterialsAsync(string? query, string? categoryCode, bool includeArchived, int limit, CancellationToken cancellationToken)
     {
         var normalized = query?.Trim();
@@ -189,7 +195,8 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
     }
 
     public Task<PdmMaterial?> FindMaterialBySourceBomItemAsync(Guid bomItemId, CancellationToken cancellationToken) =>
-        Task.FromResult(materials.Values.FirstOrDefault(item => item.SourceBomItemId == bomItemId));
+        Task.FromResult(bomLinks.TryGetValue(bomItemId, out var materialId) ? materials.GetValueOrDefault(materialId)
+            : materials.Values.FirstOrDefault(item => item.SourceBomItemId == bomItemId));
 
     public Task<IReadOnlyList<MaterialAttachment>> ListMaterialAttachmentsAsync(Guid materialId, MaterialAttachmentKind? kind, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<MaterialAttachment>>(attachments.Values
@@ -512,6 +519,12 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         }
     }
 
+    public Task LinkBomItemsAsync(IReadOnlyList<Guid> bomItemIds, Guid materialId, string actor, DateTimeOffset linkedAt, CancellationToken cancellationToken)
+    {
+        foreach (var id in bomItemIds) bomLinks[id] = materialId;
+        return Task.CompletedTask;
+    }
+
     public Task LinkBomItemAsync(Guid bomItemId, Guid materialId, string actor, DateTimeOffset linkedAt, CancellationToken cancellationToken)
     {
         bomLinks[bomItemId] = materialId;
@@ -633,7 +646,7 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
                 U9CategoryCode = material.CategoryCode,
                 U9ItemId = existing.U9ItemId,
                 U9ItemCode = existing.U9ItemCode,
-                SyncStatus = MaterialSyncStatus.PreviewReady,
+                SyncStatus = task.Status,
                 RowVersion = existing.RowVersion + 1
             };
             materials[saved.Id] = saved;

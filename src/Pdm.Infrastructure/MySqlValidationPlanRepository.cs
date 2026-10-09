@@ -208,9 +208,10 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
         var nextState = decision == ApprovalDecision.Rejected ? "Rejected" : remaining == 0 ? "Effective" : "PendingApproval";
         if (nextState == "Effective")
             await connection.ExecuteAsync(new CommandDefinition($"UPDATE {tablePrefix}project_validation_plan SET state='Superseded',row_version=row_version+1 WHERE project_id=@ProjectId AND state='Effective' AND id<>@PlanId", new { plan.ProjectId, PlanId = task.PlanId }, transaction, cancellationToken: cancellationToken));
-        await connection.ExecuteAsync(new CommandDefinition(
-            $"UPDATE {tablePrefix}project_validation_plan SET state=@State,updated_by=@Actor,updated_at=@DecidedAt,effective_by=@EffectiveBy,effective_at=@EffectiveAt,row_version=row_version+1 WHERE id=@PlanId",
+        var updated = await connection.ExecuteAsync(new CommandDefinition(
+            $"UPDATE {tablePrefix}project_validation_plan SET state=@State,updated_by=@Actor,updated_at=@DecidedAt,effective_by=@EffectiveBy,effective_at=@EffectiveAt,row_version=row_version+1 WHERE id=@PlanId AND state='PendingApproval'",
             new { PlanId = task.PlanId, State = nextState, Actor = actor, DecidedAt = decidedAt.UtcDateTime, EffectiveBy = nextState == "Effective" ? actor : null, EffectiveAt = nextState == "Effective" ? decidedAt.UtcDateTime : (DateTime?)null }, transaction, cancellationToken: cancellationToken));
+        if (updated != 1) throw new PdmConflictException("验证计划审批状态已变化。");
         await transaction.CommitAsync(cancellationToken);
         return await FindPlanByIdAsync(connection, null, task.PlanId, cancellationToken) ?? throw new PdmNotFoundException("验证计划不存在。");
     }
@@ -229,6 +230,39 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
             ORDER BY task.created_at
             """, new { Actor = actor, IncludeAll = includeAll }, cancellationToken: cancellationToken));
         return rows.Select(row => new PendingValidationPlanApprovalTask(row.Id, row.PlanId, row.ProjectId, row.RevisionNumber, Enum.Parse<ApprovalStage>(row.Stage), row.StepName, row.Assignee, Utc(row.CreatedAt))).ToArray();
+    }
+
+    public async Task<ProjectValidationPlan> WithdrawAsync(Guid planId, long expectedRowVersion, string actor, DateTimeOffset at, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            $"UPDATE {tablePrefix}project_validation_plan SET state='Draft',updated_by=@Actor,updated_at=@At,row_version=row_version+1 WHERE id=@PlanId AND state='PendingApproval' AND row_version=@ExpectedRowVersion",
+            new { PlanId = planId, Actor = actor, At = at.UtcDateTime, ExpectedRowVersion = expectedRowVersion }, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("验证计划审批状态已变化。");
+        return await FindPlanByIdAsync(planId, cancellationToken) ?? throw new PdmNotFoundException("验证计划不存在。");
+    }
+
+    public async Task<ProjectValidationPlan> TransferAsync(Guid taskId, string currentAssignee, string newAssignee, DateTimeOffset at, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var task = await connection.QuerySingleOrDefaultAsync<ApprovalTaskRow>(new CommandDefinition(
+            $"SELECT id,plan_id,step_order,stage,step_name,assignee,decision,decision_by,decision_comment,created_at,decided_at FROM {tablePrefix}validation_plan_approval_task WHERE id=@TaskId FOR UPDATE",
+            new { TaskId = taskId }, transaction, cancellationToken: cancellationToken)) ?? throw new PdmNotFoundException("验证计划审批任务不存在。");
+        var plan = await connection.QuerySingleAsync<PlanRow>(new CommandDefinition(PlanSelect + " WHERE id=@PlanId FOR UPDATE", new { PlanId = task.PlanId }, transaction, cancellationToken: cancellationToken));
+        var earlierPending = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+            $"SELECT COUNT(*) FROM {tablePrefix}validation_plan_approval_task WHERE plan_id=@PlanId AND step_order<@StepOrder AND decision IS NULL",
+            new { task.PlanId, task.StepOrder }, transaction, cancellationToken: cancellationToken));
+        if (plan.State != "PendingApproval" || task.Decision is not null || earlierPending > 0 || !string.Equals(task.Assignee, currentAssignee, StringComparison.OrdinalIgnoreCase))
+            throw new PdmConflictException("验证计划审批任务已变化。");
+        await connection.ExecuteAsync(new CommandDefinition(
+            $"UPDATE {tablePrefix}validation_plan_approval_task SET assignee=@NewAssignee WHERE id=@TaskId",
+            new { TaskId = taskId, NewAssignee = newAssignee }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            $"UPDATE {tablePrefix}project_validation_plan SET updated_by=@Actor,updated_at=@At,row_version=row_version+1 WHERE id=@PlanId",
+            new { PlanId = task.PlanId, Actor = currentAssignee, At = at.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+        return await FindPlanByIdAsync(task.PlanId, cancellationToken) ?? throw new PdmNotFoundException("验证计划不存在。");
     }
 
     public async Task<ValidationPlanAttachment> AddAttachmentAsync(ValidationPlanAttachment attachment, CancellationToken cancellationToken)
