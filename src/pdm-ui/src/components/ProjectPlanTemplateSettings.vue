@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import PanelActions from './PanelActions.vue'
 import { createClientUuid } from '../clientId'
-import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Plus, RefreshCw } from '@lucide/vue'
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Plus, RotateCw as RefreshCw } from '@lucide/vue'
 import { computed, nextTick, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { ElMessage } from '../statusMessage'
@@ -239,8 +240,9 @@ function removeTemplateTask(id: string) {
         <label>选择模板<el-select :model-value="selectedTemplateId" :disabled="saving" @update:model-value="selectTemplate"><el-option v-for="item in templates" :key="item.id" :value="item.id" :label="`${item.name} · ${item.scope === 'Personal' ? '个人' : '系统'} · ${item.isActive ? '启用' : '停用'}`" /></el-select></label>
         <span class="pdm-template-scope" :class="templateDraft.scope === 'Personal' ? 'is-personal' : 'is-system'">{{ templateDraft.scope === 'Personal' ? '个人模板' : '系统模板' }}</span>
         <span v-if="!canEditTemplate">系统模板由管理员维护，可复制后按项目实际情况调整。</span>
-        <button class="pdm-secondary-action" :disabled="saving" @click="copyTemplate">复制为个人模板</button>
+        <PanelActions><button class="pdm-secondary-action" :disabled="saving" @click="copyTemplate">复制为个人模板</button>
         <button v-if="canReplaceSystemDefault" class="pdm-primary-action" :disabled="saving" @click="replaceSystemDefault">替换系统默认模板</button>
+        </PanelActions>
       </div>
       <fieldset class="pdm-template-fields" :disabled="saving || !canEditTemplate">
         <div class="pdm-template-picker">
@@ -305,7 +307,7 @@ function removeTemplateTask(id: string) {
           <p v-else class="pdm-template-empty">请先增加一个阶段，再添加子任务。</p>
         </div>
       </fieldset>
-      <footer><span>{{ allocationError || (canEditTemplate ? '流程节点由管理员维护；个人模板中的流程必需任务不可删除、改名或解除绑定。' : '复制为个人模板后，可调整并删除非流程任务。') }}</span><button class="pdm-secondary-action" :disabled="saving || !canEditTemplate" @click="selectTemplate(selectedTemplateId)">取消修改</button><button class="pdm-primary-action" :disabled="saving || !canEditTemplate || !!allocationError" @click="saveTemplate">{{ saving ? '保存中…' : '保存模板' }}</button></footer>
+    <PanelActions><footer><span>{{ allocationError || (canEditTemplate ? '流程节点由管理员维护；个人模板中的流程必需任务不可删除、改名或解除绑定。' : '复制为个人模板后，可调整并删除非流程任务。') }}</span><button class="pdm-secondary-action" :disabled="saving || !canEditTemplate" @click="selectTemplate(selectedTemplateId)">取消修改</button><button class="pdm-primary-action" :disabled="saving || !canEditTemplate || !!allocationError" @click="saveTemplate">{{ saving ? '保存中…' : '保存模板' }}</button></footer></PanelActions>
     </template>
   </section>
 </template>
@@ -322,7 +324,7 @@ function removeTemplateTask(id: string) {
 .pdm-template-delivery-totals{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:9px 10px;border-bottom:1px solid var(--pdm-border);background:var(--pdm-surface-muted);font-size:11px;flex-shrink:0}.pdm-template-delivery-totals>span{white-space:nowrap;color:var(--pdm-muted)}.pdm-template-delivery-totals strong{color:var(--pdm-text);font-variant-numeric:tabular-nums}
 .pdm-template-tree__body{min-height:0;overflow:auto;padding:6px;flex:1}.pdm-template-stage-parent{display:flex;align-items:center;gap:2px;padding:4px 0;border-radius:5px}.pdm-template-stage-parent.is-active{background:var(--plan-accent-soft)}
 .pdm-template-stage-select{display:flex;align-items:center;gap:6px;flex:1;min-width:0;border:0;background:transparent;color:var(--pdm-text);text-align:left;padding:5px 0}.pdm-template-stage-select strong{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}.pdm-template-stage-select small{color:var(--pdm-muted)}
-.pdm-template-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:26px;height:28px;border:1px solid transparent;border-radius:4px;background:transparent;color:var(--pdm-muted)}.pdm-template-icon:hover:not(:disabled){color:var(--plan-accent);border-color:var(--plan-accent-border);background:var(--plan-accent-soft)}.pdm-template-icon:disabled{opacity:.3;cursor:not-allowed}
+.pdm-template-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:var(--pdm-symbol-compact);height:var(--pdm-symbol-compact);border:1px solid transparent;border-radius:4px;background:transparent;color:var(--pdm-muted)}.pdm-template-icon:hover:not(:disabled){color:var(--plan-accent);border-color:var(--plan-accent-border);background:var(--plan-accent-soft)}.pdm-template-icon:disabled{opacity:.3;cursor:not-allowed}
 .pdm-template-children{display:flex;flex-direction:column;margin-left:13px;border-left:1px solid var(--pdm-border);padding:2px 0 6px 12px}.pdm-template-children>button{display:flex;gap:8px;align-items:center;min-width:0;min-height:30px;padding:4px 7px;border:0;border-radius:4px;background:transparent;color:var(--pdm-text);text-align:left;font-size:11px}.pdm-template-children>button>span:first-child{width:24px;flex-shrink:0;color:var(--pdm-muted)}.pdm-template-children>button>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-template-children>button:hover,.pdm-template-children>button.is-active{background:var(--plan-accent-soft);color:var(--plan-accent)}.pdm-template-children>small{padding:5px 8px;font-size:11px;color:var(--pdm-muted)}
 .pdm-plan-stage-editor{display:flex;align-items:end;gap:10px;padding:12px;flex-shrink:0}.pdm-plan-stage-editor>label{display:flex;flex-direction:column;gap:6px;flex:1;min-width:100px;font-size:11px}.pdm-plan-stage-editor>span{align-self:center;color:var(--pdm-muted);font-size:11px;white-space:nowrap}.pdm-plan-stage-editor>button{padding-inline:8px;font-size:11px;white-space:nowrap}.pdm-template-detail>p{padding:0 12px;margin:0 0 10px}
 .pdm-template-table{min-height:0;overflow-y:auto;overflow-x:hidden;flex:1;border-top:1px solid var(--pdm-border)}.pdm-template-head,.pdm-template-row{display:grid;grid-template-columns:42px 120px minmax(76px,.85fr) minmax(68px,.75fr) minmax(58px,.6fr) minmax(64px,.7fr) minmax(94px,1.15fr) minmax(84px,1fr) minmax(92px,1.05fr) 42px 38px minmax(88px,.95fr);width:100%;min-width:0;box-sizing:border-box;gap:7px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--pdm-border);text-align:center}.pdm-template-head>*,.pdm-template-row>*{min-width:0;text-align:center}.pdm-template-head{position:sticky;top:0;z-index:1;background:var(--pdm-surface-muted);color:var(--pdm-muted);font-size:11px}.pdm-template-row{font-size:11px}.pdm-template-row.is-selected{background:var(--plan-accent-soft)}.pdm-template-row :deep(.el-input),.pdm-template-row :deep(.el-select),.pdm-template-row :deep(.el-input-number){width:100%;min-width:0}.pdm-template-row :deep(.el-input__inner),.pdm-template-row :deep(.el-select__selected-item),.pdm-template-row :deep(.el-select__placeholder){text-align:center}.pdm-template-row :deep(.el-checkbox){justify-self:center}.pdm-template-order{color:var(--pdm-muted);font-variant-numeric:tabular-nums}.pdm-template-row-actions{display:flex;align-items:center;justify-content:center;gap:2px;overflow:hidden}.pdm-template-delete{border:0;background:transparent;color:var(--pdm-muted);padding:5px;font-size:11px;white-space:nowrap}.pdm-template-delete:hover{color:var(--pdm-danger)}.pdm-template-empty{padding:24px;text-align:center}

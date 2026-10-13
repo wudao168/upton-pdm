@@ -114,6 +114,8 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IProjectBudgetRepository, MySqlProjectBudgetRepository>();
     builder.Services.AddScoped<IProjectNameplateRepository, MySqlProjectNameplateRepository>();
     builder.Services.AddScoped<IProjectContactInformationRepository, MySqlProjectContactInformationRepository>();
+    builder.Services.AddScoped<IProjectOplRepository, MySqlProjectOplRepository>();
+    builder.Services.AddScoped<IDingTalkConfigurationRepository, MySqlDingTalkConfigurationRepository>();
     builder.Services.AddScoped<IQualityInspectionRepository, MySqlQualityInspectionRepository>();
     builder.Services.AddScoped<IProjectWorkbenchRiskRepository, MySqlProjectWorkbenchRiskRepository>();
     builder.Services.AddScoped<IProjectPlanningRepository, MySqlProjectPlanningRepository>();
@@ -135,6 +137,8 @@ else
     builder.Services.AddSingleton<IProjectBudgetRepository, InMemoryProjectBudgetRepository>();
     builder.Services.AddSingleton<IProjectNameplateRepository, InMemoryProjectNameplateRepository>();
     builder.Services.AddSingleton<IProjectContactInformationRepository, InMemoryProjectContactInformationRepository>();
+    builder.Services.AddSingleton<IProjectOplRepository, InMemoryProjectOplRepository>();
+    builder.Services.AddSingleton<IDingTalkConfigurationRepository, InMemoryDingTalkConfigurationRepository>();
     builder.Services.AddSingleton<IQualityInspectionRepository, InMemoryQualityInspectionRepository>();
     builder.Services.AddSingleton<IProjectWorkbenchRiskRepository, InMemoryProjectWorkbenchRiskRepository>();
     builder.Services.AddSingleton<IProjectPlanningRepository, InMemoryProjectPlanningRepository>();
@@ -195,13 +199,24 @@ builder.Services.AddScoped<ProjectWorkbenchService>(provider => new ProjectWorkb
     provider.GetRequiredService<IPdmRepository>(), provider.GetRequiredService<IProjectPlanningRepository>(),
     provider.GetRequiredService<IProjectContactInformationRepository>(), provider.GetRequiredService<ProjectBudgetService>(),
     provider.GetRequiredService<U9ProcurementService>(), provider.GetRequiredKeyedService<IValidationPlanRepository>("quality"),
-    provider.GetRequiredService<IQualityInspectionRepository>(), provider.GetRequiredService<IProjectWorkbenchRiskRepository>(), provider.GetRequiredService<TimeProvider>()));
+    provider.GetRequiredService<IQualityInspectionRepository>(), provider.GetRequiredService<IProjectWorkbenchRiskRepository>(), provider.GetRequiredService<TimeProvider>(), provider.GetRequiredService<IProjectOplRepository>()));
 builder.Services.AddScoped<ProjectBudgetService>();
 builder.Services.AddScoped<ProjectNameplateService>();
 builder.Services.AddScoped<ProjectContactInformationService>();
+builder.Services.AddScoped<ProjectOplService>();
+builder.Services.Configure<DingTalkOplOptions>(builder.Configuration.GetSection("DingTalkOpl"));
+builder.Services.AddScoped<DingTalkConfigurationService>();
+builder.Services.AddSingleton<DingTalkStreamStatusCache>();
+builder.Services.AddHttpClient("dingtalk-stream", client => client.Timeout = TimeSpan.FromSeconds(20)).RemoveAllLoggers();
+builder.Services.AddHostedService<DingTalkStreamService>();
+builder.Services.AddScoped<DingTalkVisitorSession>();
+builder.Services.AddHttpClient<DingTalkOplIntegration>(client => client.Timeout = TimeSpan.FromSeconds(15)).RemoveAllLoggers();
+builder.Services.AddScoped<IProjectOplStorage, LocalProjectOplStorage>();
 builder.Services.AddScoped<BudgetAssessmentService>();
 builder.Services.AddScoped<QualityInspectionService>();
 builder.Services.AddScoped<U9MaterialIntegrationService>();
+builder.Services.AddSingleton<SystemConnectionStatusCache>();
+builder.Services.AddScoped<SystemConnectionStatus>();
 builder.Services.AddScoped<U9MaterialFullSyncService>();
 builder.Services.AddSingleton<U9MaterialFullSyncCoordinator>();
 builder.Services.AddScoped<U9InventoryService>();
@@ -280,6 +295,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<CompanySessionService>();
 builder.Services.AddProblemDetails();
+builder.Services.AddClientLogs(builder.Configuration);
 
 var app = builder.Build();
 var deployedWebRoot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
@@ -333,8 +349,23 @@ if (Directory.Exists(deployedWebRoot))
 }
 app.UseCors("PdmClients");
 app.UseAuthentication();
+app.Use(async (context, next) =>
+{
+    if (Guid.TryParse(context.Request.Headers["X-PDM-Request-ID"].FirstOrDefault(), out var requestId))
+        context.TraceIdentifier = requestId.ToString("N");
+    context.Response.Headers["X-PDM-Request-ID"] = context.TraceIdentifier;
+    var watch = System.Diagnostics.Stopwatch.StartNew();
+    try { await next(context); }
+    finally
+    {
+        if (context.Request.Headers.ContainsKey("X-PDM-Request-ID") && !context.Request.Path.StartsWithSegments("/api/client-logs"))
+            requestErrorLogger.LogInformation("客户端请求 {Method} {Path} 状态 {Status} 耗时 {Milliseconds}ms (trace {TraceIdentifier})", context.Request.Method, context.Request.Path, context.Response.StatusCode, watch.ElapsedMilliseconds, context.TraceIdentifier);
+    }
+});
 app.UseMiddleware<CompanyContextMiddleware>();
 app.UseAuthorization();
+app.UseRateLimiter();
+app.MapClientLogs();
 app.MapPdmEndpoints();
 app.MapPdmMaterialEndpoints();
 app.MapPdmInventoryEndpoints();
@@ -355,6 +386,8 @@ app.MapProjectWorkbenchEndpoints();
 app.MapProjectBudgetEndpoints();
 app.MapProjectNameplateEndpoints();
 app.MapProjectContactInformationEndpoints();
+app.MapProjectOplEndpoints();
+app.MapDingTalkOplEndpoints();
 if (Directory.Exists(deployedWebRoot))
 {
     app.MapGet("/{**path}", async context =>

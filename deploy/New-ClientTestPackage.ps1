@@ -68,19 +68,22 @@ $addinBuild = Join-Path $root 'src\Pdm.SolidWorks.Addin\bin\Release\net48'
 Get-ChildItem -LiteralPath $desktopBuild | Where-Object { $_.Name -ne 'Upton.Pdm.Desktop.exe.WebView2' } | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $desktopOutput $_.Name) -Recurse -Force
 }
-if (-not [string]::IsNullOrWhiteSpace($clientUiSourceFull)) {
-    $desktopUiOutput = Join-Path $desktopOutput 'ui'
-    if (Test-Path -LiteralPath $desktopUiOutput) { Remove-Item -LiteralPath $desktopUiOutput -Recurse -Force }
-    New-Item -ItemType Directory -Path $desktopUiOutput -Force | Out-Null
+Get-ChildItem -LiteralPath $addinBuild | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $addinOutput $_.Name) -Recurse -Force
+}
+# Both native components carry the exact same UI snapshot, including the review overlay.
+if ([string]::IsNullOrWhiteSpace($clientUiSourceFull)) { $clientUiSourceFull = [IO.Path]::GetFullPath((Join-Path $root 'src\pdm-ui\dist')) }
+foreach ($componentOutput in @($desktopOutput, $addinOutput)) {
+    $uiOutput = [IO.Path]::GetFullPath((Join-Path $componentOutput 'ui'))
+    if (-not $uiOutput.StartsWith([IO.Path]::GetFullPath($payload) + '\', [StringComparison]::OrdinalIgnoreCase)) { throw '客户端界面输出目录超出安装包范围。' }
+    if (Test-Path -LiteralPath $uiOutput) { Remove-Item -LiteralPath $uiOutput -Recurse -Force }
+    New-Item -ItemType Directory -Path $uiOutput -Force | Out-Null
     Get-ChildItem -LiteralPath $clientUiSourceFull -Recurse -File | Where-Object { $_.Extension -ne '.map' } | ForEach-Object {
         $relativePath = $_.FullName.Substring($clientUiSourceFull.Length + 1)
-        $destination = Join-Path $desktopUiOutput $relativePath
+        $destination = Join-Path $uiOutput $relativePath
         New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
         Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
     }
-}
-Get-ChildItem -LiteralPath $addinBuild | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $addinOutput $_.Name) -Recurse -Force
 }
 
 $serverBase = $ServerBaseUrl.TrimEnd('/')

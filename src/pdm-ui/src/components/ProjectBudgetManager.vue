@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { RefreshCw, Save } from '@lucide/vue'
+import { RotateCw as RefreshCw, Save } from '@lucide/vue'
 import { getProjectBudget, saveProjectBudget, getBudgetAssessments } from '../api'
 import { budgetCategories, calculateBudgetRow, uppercaseMoney } from '../projectBudget'
 import type { BudgetLine, ProjectBudget, AssessmentDirectory } from '../projectBudget'

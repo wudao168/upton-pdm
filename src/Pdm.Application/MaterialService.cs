@@ -248,14 +248,16 @@ public sealed class MaterialService(
         {
             var item = await repository.FindBomItemAsync(command.ProjectId, itemId, cancellationToken)
                 ?? throw new PdmNotFoundException("BOM物料不存在。");
-            if (item.Kind != BomKind.Standard) throw new PdmRuleException("只有标准件BOM需要申请料号。");
+            if (item.Kind is not (BomKind.Standard or BomKind.Electrical)) throw new PdmRuleException("只有标准件和电气件BOM支持料号核对与申请。");
             items.Add(item);
         }
         var materialsByCode = (await materials.FindMaterialsByCodesAsync(
                 items.Where(item => !string.IsNullOrWhiteSpace(item.DrawingNumber)).Select(item => item.DrawingNumber).ToArray(), cancellationToken))
             .ToDictionary(material => material.MaterialCode, StringComparer.OrdinalIgnoreCase);
-        var standardCategoryRule = await RequireEnabledCategoryRuleAsync(MaterialKind.Standard, cancellationToken);
-        var standardCategory = await RequireCreatableCategoryAsync(standardCategoryRule.U9CategoryCode, MaterialKind.Standard, cancellationToken);
+        var materialKind = items.FirstOrDefault()?.Kind == BomKind.Electrical ? MaterialKind.Electrical : MaterialKind.Standard;
+        if (items.Any(item => (item.Kind == BomKind.Electrical) != (materialKind == MaterialKind.Electrical))) throw new PdmRuleException("请分别核对标准件与电气件料号。");
+        var standardCategoryRule = await RequireEnabledCategoryRuleAsync(materialKind, cancellationToken);
+        var standardCategory = await RequireCreatableCategoryAsync(standardCategoryRule.U9CategoryCode, materialKind, cancellationToken);
         var duplicateRule = await GetEffectiveDuplicateRuleAsync(standardCategory, cancellationToken);
         var pendingBySignature = new Dictionary<string, MaterialCodeApplication>(StringComparer.OrdinalIgnoreCase);
         foreach (var application in await materials.ListMaterialCodeApplicationsAsync(null, MaterialCodeApplicationStatus.Pending, cancellationToken))
@@ -348,8 +350,9 @@ public sealed class MaterialService(
         }
         var results = new List<MaterialCodeResolution>(resolutions.Count);
         var createdBySignature = new Dictionary<string, MaterialCodeApplication>(StringComparer.OrdinalIgnoreCase);
-        var standardCategoryRule = await RequireEnabledCategoryRuleAsync(MaterialKind.Standard, cancellationToken);
-        var standardCategory = await RequireCreatableCategoryAsync(standardCategoryRule.U9CategoryCode, MaterialKind.Standard, cancellationToken);
+        var materialKind = applicationItems.Values.FirstOrDefault()?.Kind == BomKind.Electrical ? MaterialKind.Electrical : MaterialKind.Standard;
+        var standardCategoryRule = await RequireEnabledCategoryRuleAsync(materialKind, cancellationToken);
+        var standardCategory = await RequireCreatableCategoryAsync(standardCategoryRule.U9CategoryCode, materialKind, cancellationToken);
         var duplicateRule = await GetEffectiveDuplicateRuleAsync(standardCategory, cancellationToken);
         foreach (var resolution in resolutions)
         {
@@ -383,7 +386,7 @@ public sealed class MaterialService(
             };
             application = await materials.CreateMaterialCodeApplicationAsync(application, cancellationToken);
             if (signature is not null) createdBySignature[signature] = application;
-            await AuditAsync(actor, "material-code.application.create", application.Id, $"申请标准件料号：BOM {application.BomItemId}", cancellationToken);
+            await AuditAsync(actor, "material-code.application.create", application.Id, $"申请BOM物料料号：BOM {application.BomItemId}", cancellationToken);
             results.Add(resolution with { Status = MaterialCodeResolutionStatus.ApplicationPending, Application = application });
         }
         return results;
@@ -571,7 +574,7 @@ public sealed class MaterialService(
         var application = await materials.FindMaterialCodeApplicationAsync(applicationId, cancellationToken)
             ?? throw new PdmNotFoundException("料号申请不存在。");
         if (application.BomHeaderKind is not null || application.BomItemId is null)
-            throw new PdmRuleException("只有标准件BOM料号申请可以撤回。");
+            throw new PdmRuleException("只有BOM物料料号申请可以撤回。");
         if (!string.Equals(application.RequestedBy, actor, StringComparison.OrdinalIgnoreCase) && role != UserRole.Administrator)
             throw new UnauthorizedAccessException("只有申请人或系统管理员可以撤回料号申请。");
         if (!await repository.HasProjectContentReadAccessAsync(application.ProjectId, actor, role, cancellationToken))
@@ -695,10 +698,10 @@ public sealed class MaterialService(
         }
 
         if (application.BomItemId is not Guid bomItemId)
-            throw new PdmRuleException("标准件料号申请未关联BOM物料。");
+            throw new PdmRuleException("料号申请未关联BOM物料。");
         var item = await repository.FindBomItemAsync(application.ProjectId, bomItemId, cancellationToken)
             ?? throw new PdmNotFoundException("申请对应的BOM物料不存在。");
-        if (item.Kind != BomKind.Standard) throw new PdmRuleException("只有标准件使用料号申请审批。");
+        if (item.Kind is not (BomKind.Standard or BomKind.Electrical)) throw new PdmRuleException("只有标准件和电气件使用料号申请审批。");
         var material = await CreateFromBomCoreAsync(new(application.ProjectId, bomItemId), actor, cancellationToken, categoryCode);
         MaterialSyncTask? materialSyncTask = null;
         if (material.ApprovalStatus == MaterialApprovalStatus.Draft)
@@ -708,7 +711,7 @@ public sealed class MaterialService(
                 .FirstOrDefault(task => task.MaterialId == material.Id && task.Status == MaterialSyncStatus.PreviewReady);
         var decided = await materials.DecideMaterialCodeApplicationAsync(application.Id, expectedRowVersion, MaterialCodeApplicationStatus.Approved,
             actor, normalizedComment, material.Id, material.MaterialCode, timeProvider.GetUtcNow(), cancellationToken);
-        await AuditAsync(actor, "material-code.application.approve", decided.Id, $"批准标准件料号：{material.MaterialCode}", cancellationToken);
+        await AuditAsync(actor, "material-code.application.approve", decided.Id, $"批准BOM物料料号：{material.MaterialCode}", cancellationToken);
         return (decided, material, materialSyncTask);
     }
 

@@ -12,7 +12,7 @@ internal sealed class LifecycleActionDialog : Form
     public LifecycleActionDialog(string title, string message, string confirmText)
     {
         Text = title;
-        StartPosition = FormStartPosition.CenterParent;
+        DialogWindowSizing.CenterOnOwnerScreen(this);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;

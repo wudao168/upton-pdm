@@ -100,6 +100,11 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
                 item.MaterialCode, item.Name, item.Specification, item.Material,
                 item.CategoryCode, item.U9CategoryCode, item.SurfaceTreatment, item.PurchaseLink, item.Remark
             }.Any(value => value?.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) == true));
+        if (normalizedQuery is { Length: 11 } && normalizedQuery.All(char.IsAsciiDigit))
+        {
+            var exact = filtered.FirstOrDefault(item => item.MaterialCode == normalizedQuery);
+            if (exact is not null) filtered = [exact];
+        }
         var effectiveSortBy = string.IsNullOrWhiteSpace(sortBy) ? (string.IsNullOrWhiteSpace(createdAtOrder) ? null : "createdAt") : sortBy;
         var effectiveSortOrder = string.IsNullOrWhiteSpace(sortOrder) ? createdAtOrder : sortOrder;
         var ordered = (effectiveSortBy, effectiveSortOrder) switch

@@ -9,6 +9,25 @@ public sealed class DrawingReviewWorkflowTests
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     [Fact]
+    public async Task CandidateDetectsNewDrawingArchiveAgainstReleasedVersion()
+    {
+        var (repository, workflow, _, drawing) = await PrepareReviewAsync();
+        async Task<DrawingReviewCandidate> Candidate() => Assert.Single(
+            await workflow.ListDrawingReviewCandidatesAsync(ProjectId, "submitter", UserRole.Administrator, default));
+        Assert.False((await Candidate()).HasUnreleasedDrawingChanges);
+        var source = (await repository.ListDocumentVersionsAsync(drawing.Id, default)).First();
+        var original = await CreateLegacyReleasePackageAsync(repository);
+        var id = Guid.NewGuid();
+        var task = new ApprovalTask(Guid.NewGuid(), id, ApprovalStage.Approval, "admin", "admin", ApprovalDecision.Approved, "通过", DateTimeOffset.UtcNow);
+        var package = await repository.CreateReleasePackageAsync(original with { Id = id, State = ReleasePackageState.Publishing, ApprovalTasks = [task] }, default);
+        await repository.PublishDocumentVersionAsync(drawing.Id, source.Id, package.Id, task.Id, "admin", default);
+        Assert.False((await Candidate()).HasUnreleasedDrawingChanges);
+        await CheckInAsync(repository, drawing.Id, "designer", new Dictionary<string, string?>(), 'F');
+        var candidate = await Candidate();
+        Assert.True(candidate.HasUnreleasedDrawingChanges);
+        Assert.Equal(DrawingReviewCandidateState.Ready, candidate.State);
+    }
+    [Fact]
     public async Task SubmitterCanListEligibleAssignedReviewersWithoutRoleAdministrationPermission()
     {
         var (repository, workflow, _, _) = await PrepareReviewAsync();

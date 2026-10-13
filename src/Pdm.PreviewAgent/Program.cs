@@ -88,6 +88,7 @@ internal static class Program
                     agentVersion = typeof(Program).Assembly.GetName().Version?.ToString(),
                     workerPath = options.WorkerPath,
                     workerExists = File.Exists(options.WorkerPath),
+                    workerVersion = File.Exists(options.WorkerPath) ? FileVersionInfo.GetVersionInfo(options.WorkerPath).FileVersion : null,
                     timeoutMinutes = options.TimeoutMinutes,
                     workRoot = options.WorkRoot,
                     solidWorksPid = Worker.SolidWorksPid, solidWorksRunning = Worker.SolidWorksRunning,
@@ -135,8 +136,11 @@ internal static class Program
                 currentTask = $"{convertJobs.Count} 项：{string.Join("、", convertJobs.Take(3).Select(job => job.FileName))}";
                 Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 收到转换任务 {convertJobs.Count} 项（含只作引用的文件共 {manifest.Jobs.Count} 个），来源 {client.Client?.RemoteEndPoint}");
                 RunWorker(options, jobRoot, sourceRoot, outputRoot, manifest);
+                var resultPath = Path.Combine(jobRoot, "worker-result.json");
+                var result = Serializer.Deserialize<WorkerResult>(File.ReadAllText(resultPath, Encoding.UTF8));
+                var successfulJobs = convertJobs.Where(job => result.Items == null || result.Items.Any(item => item.DocumentId == job.DocumentId && item.Success)).ToList();
 
-                var missing = convertJobs
+                var missing = successfulJobs
                     .Where(job => !File.Exists(Path.Combine(outputRoot, job.OutputName)))
                     .Select(job => job.OutputName)
                     .ToArray();
@@ -150,11 +154,11 @@ internal static class Program
                     var resultEntry = archive.CreateEntry("result.json", CompressionLevel.Fastest);
                     using (var resultStream = resultEntry.Open())
                     {
-                        var payload = Encoding.UTF8.GetBytes(Serializer.Serialize(new { Success = true, Error = (string)null }));
+                        var payload = Encoding.UTF8.GetBytes(Serializer.Serialize(new { result.Success, result.Error, result.Items }));
                         resultStream.Write(payload, 0, payload.Length);
                     }
                     // 只回传需要转出的结果；引用文件的结果服务端不会使用，回传只是浪费带宽和时间。
-                    foreach (var job in convertJobs)
+                    foreach (var job in successfulJobs)
                     {
                         archive.CreateEntryFromFile(Path.Combine(outputRoot, job.OutputName), "outputs/" + job.OutputName, CompressionLevel.Fastest);
                     }
@@ -163,13 +167,25 @@ internal static class Program
                 {
                     await AgentHttpRequest.WriteResponseAsync(stream, 200, "application/zip", responseFile.Length, responseFile);
                 }
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 转换完成 {convertJobs.Count} 项");
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 转换结束：成功 {successfulJobs.Count} 项，失败 {convertJobs.Count - successfulJobs.Count} 项");
             }
             finally
             {
                 currentTask = string.Empty;
                 ConversionGate.Release();
-                TryDeleteDirectory(jobRoot);
+                var resultFile = Path.Combine(jobRoot, "worker-result.json");
+                var succeeded = false;
+                try { succeeded = File.Exists(resultFile) && Serializer.Deserialize<WorkerResult>(File.ReadAllText(resultFile, Encoding.UTF8))?.Success == true; } catch (Exception) { }
+                if (succeeded) TryDeleteDirectory(jobRoot);
+                else
+                {
+                    // 保留清单和结果用于定位，不长期积累整套模型和重复压缩包。
+                    TryDeleteDirectory(sourceRoot);
+                    TryDeleteDirectory(outputRoot);
+                    foreach (var archiveName in new[] { "request.zip", "response.zip" })
+                        try { File.Delete(Path.Combine(jobRoot, archiveName)); } catch (Exception) { }
+                    Console.Error.WriteLine("失败任务诊断保留在：" + jobRoot);
+                }
             }
         }
         catch (Exception exception)
@@ -273,7 +289,7 @@ internal static class Program
         if (!File.Exists(resultPath)) throw new InvalidOperationException("SolidWorks转换未生成结果文件。");
         var result = Serializer.Deserialize<WorkerResult>(File.ReadAllText(resultPath, Encoding.UTF8));
         if (result == null) throw new InvalidOperationException("SolidWorks转换结果文件无效。");
-        if (!result.Success) throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error) ? "SolidWorks转换失败。" : result.Error);
+        if (!result.Success && result.Items == null) throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error) ? "SolidWorks转换失败。" : result.Error);
     }
 
     private enum PersistentOutcome
@@ -461,6 +477,14 @@ internal static class Program
         public string Stage { get; set; }
         public int Completed { get; set; }
         public int Total { get; set; }
+        public bool Success { get; set; }
+        public string Error { get; set; }
+        public List<WorkerItem> Items { get; set; }
+    }
+
+    private sealed class WorkerItem
+    {
+        public Guid DocumentId { get; set; }
         public bool Success { get; set; }
         public string Error { get; set; }
     }

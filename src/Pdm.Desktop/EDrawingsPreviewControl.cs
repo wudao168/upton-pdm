@@ -5,6 +5,7 @@ using System.Drawing.Drawing2D;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 using Forms = System.Windows.Forms;
 
 namespace Upton.Pdm.Desktop;
@@ -26,6 +27,9 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
     private readonly Forms.Timer repaintTimer = new();
     private readonly Forms.Timer markupDisplayTimer = new();
     private readonly Forms.Timer markupStateTimer = new();
+    private readonly Forms.Timer documentLoadTimer = new();
+    private TaskCompletionSource<bool>? documentLoadCompletion;
+    private string currentDocumentPath = string.Empty;
     private readonly Dictionary<string, Forms.ToolStripButton> modeButtons = new(StringComparer.OrdinalIgnoreCase);
     private TransparentToolStripRenderer? toolbarRenderer;
     private readonly Forms.ToolStripButton measureButton;
@@ -77,6 +81,9 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         Controls.Add(viewer);
         viewer.EndInit();
         viewer.DocumentLoaded += OnDocumentLoaded;
+        viewer.DocumentFailed += OnDocumentFailed;
+        documentLoadTimer.Interval = 30000;
+        documentLoadTimer.Tick += (_, _) => OnDocumentFailed(currentDocumentPath, -1, "加载超时");
 
         ConfigureToolbar();
         toolbar.PaintResourceFailure += OnToolbarPaintResourceFailure;
@@ -132,28 +139,34 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         LayoutOverlays();
     }
 
-    internal void OpenDocument(string path, string? markupPath = null)
+    internal Task OpenDocumentAsync(string path, string? markupPath = null)
     {
         ThrowIfDisposed();
         CloseDocument();
         var documentName = Path.GetFileName(path);
         pendingMarkupPath = markupPath != null && File.Exists(markupPath) ? markupPath : string.Empty;
-        WriteDiagnostic("open-start", documentName);
+        WriteDiagnostic("open-start", Path.GetFullPath(path));
         documentTransitioning = true;
         documentOpen = true;
         documentReady = false;
         currentDocumentName = documentName;
+        currentDocumentPath = Path.GetFullPath(path);
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        documentLoadCompletion = completion;
+        documentLoadTimer.Start();
         try
         {
             viewer.OpenDocument(path);
-            WriteDiagnostic("open-accepted", documentName);
+            WriteDiagnostic("open-accepted", currentDocumentPath);
         }
         catch (Exception exception)
         {
             documentOpen = false;
             currentDocumentName = string.Empty;
+            documentLoadTimer.Stop();
+            documentLoadCompletion = null;
             WriteDiagnostic("open-failed", $"{documentName} | {exception.GetType().Name}: {exception.Message}");
-            throw;
+            completion.TrySetException(new InvalidOperationException("eDrawings预览启动失败，请关闭预览后重试；若仍失败，请检查本机eDrawings组件。"));
         }
         finally
         {
@@ -162,6 +175,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         UpdateToolbarState();
         SetMarkupModified(false, true);
         LayoutOverlays();
+        return completion.Task;
     }
 
     internal void SaveMarkup(string path)
@@ -185,6 +199,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
     private void OnDocumentLoaded(string fileName)
     {
+        if (disposed) return;
         if (InvokeRequired)
         {
             BeginInvoke(new Action<string>(OnDocumentLoaded), fileName);
@@ -198,17 +213,21 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         }
 
         if (!documentOpen
-            || !string.Equals(Path.GetFileName(fileName), currentDocumentName, StringComparison.OrdinalIgnoreCase))
+            || !MatchesCurrentDocument(fileName))
         {
             return;
         }
 
         documentReady = true;
+        documentLoadTimer.Stop();
+        viewer.SetLoadingSilent(false);
+        documentLoadCompletion?.TrySetResult(true);
+        documentLoadCompletion = null;
         UpdateToolbarState();
         markupStateTimer.Start();
         LayoutOverlays();
         ScheduleRefresh(1);
-        WriteDiagnostic("load-complete", Path.GetFileName(fileName));
+        WriteDiagnostic("load-complete", currentDocumentPath);
 
         if (string.IsNullOrWhiteSpace(pendingMarkupPath))
         {
@@ -436,6 +455,32 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         return markupOperator >= 0;
     }
 
+    private bool MatchesCurrentDocument(string fileName) => !string.IsNullOrWhiteSpace(fileName)
+        && string.Equals(Path.GetFullPath(fileName), currentDocumentPath, StringComparison.OrdinalIgnoreCase);
+
+    private void OnDocumentFailed(string fileName, int errorCode, string error)
+    {
+        if (disposed) return;
+        if (InvokeRequired || documentTransitioning)
+        {
+            BeginInvoke(new Action<string, int, string>(OnDocumentFailed), fileName, errorCode, error);
+            return;
+        }
+        if (!documentOpen || !MatchesCurrentDocument(fileName)) return;
+        documentLoadTimer.Stop();
+        documentReady = false;
+        viewer.SetLoadingSilent(false);
+        UpdateToolbarState();
+        WriteDiagnostic("load-failed", $"{currentDocumentPath} | code={errorCode} | {error}");
+        var message = errorCode == -1
+            ? "eDrawings加载超时，请关闭预览后重试。"
+            : Path.GetExtension(currentDocumentPath).Equals(".slddrw", StringComparison.OrdinalIgnoreCase)
+                ? "eDrawings无法读取此版本工程图。请在SolidWorks中打开最新版本，完整还原引用模型并重建、保存后重新存档；重新下载同一版本无法补齐缺失的显示数据。"
+                : "eDrawings无法读取此版本图档，请在SolidWorks中检查文件后重新存档。";
+        documentLoadCompletion?.TrySetException(new InvalidOperationException(message));
+        documentLoadCompletion = null;
+    }
+
     internal void RefreshPreview()
     {
         ScheduleRefresh(1);
@@ -449,6 +494,9 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         }
 
         repaintTimer.Stop();
+        documentLoadTimer.Stop();
+        documentLoadCompletion?.TrySetCanceled();
+        documentLoadCompletion = null;
         markupDisplayTimer.Stop();
         markupStateTimer.Stop();
         pendingRepaintAttempts = 0;
@@ -462,21 +510,23 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         SetMarkupModified(false, true);
         if (!documentOpen)
         {
+            currentDocumentPath = string.Empty;
             UpdateToolbarState();
             return;
         }
 
         documentTransitioning = true;
         documentOpen = false;
-        WriteDiagnostic("close-start", currentDocumentName);
+        WriteDiagnostic("close-start", currentDocumentPath);
         try
         {
             viewer.CloseDocument();
-            WriteDiagnostic("close-complete", currentDocumentName);
+            WriteDiagnostic("close-complete", currentDocumentPath);
         }
         finally
         {
             currentDocumentName = string.Empty;
+            currentDocumentPath = string.Empty;
             documentTransitioning = false;
             UpdateToolbarState();
         }
@@ -488,6 +538,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         {
             CloseDocument();
             repaintTimer.Dispose();
+            documentLoadTimer.Dispose();
             markupDisplayTimer.Dispose();
             markupStateTimer.Dispose();
             viewer.Dispose();
@@ -933,6 +984,8 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
     private static void WriteDiagnostic(string action, string detail)
     {
+        detail = Upton.Pdm.ClientShared.ClientLogRedaction.Clean(detail);
+        Upton.Pdm.ClientShared.ClientDiagnostics.Record(action.EndsWith("failed", StringComparison.Ordinal) ? "error" : "runtime", "预览/" + action, detail);
         try
         {
             lock (DiagnosticLogSync)
@@ -1178,12 +1231,14 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         private static readonly Guid ModelViewEventsId = new("2EA4AE0F-494C-4554-97AE-F02F3076A90D");
         private object? eventSource;
         private Action<string>? documentLoadedHandler;
+        private Action<string, int, string>? documentFailedHandler;
 
         internal EDrawingsAxHost() : base("{C59EEF21-0223-4C39-A708-A3BE9008C67E}")
         {
         }
 
         internal event Action<string>? DocumentLoaded;
+        internal event Action<string, int, string>? DocumentFailed;
 
         internal dynamic ActiveControl
         {
@@ -1199,7 +1254,16 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             dynamic control = ActiveControl;
             ShowCompleteUi(control);
             ApplyDocumentSafety(control);
+            SetLoadingSilent(true);
             control.OpenDoc(path, false, false, true, string.Empty);
+        }
+
+        internal void SetLoadingSilent(bool enabled)
+        {
+            const int silentMode = 16384;
+            dynamic control = ActiveControl;
+            var features = (int)control.EnableFeatures;
+            control.EnableFeatures = enabled ? features | silentMode : features & ~silentMode;
         }
 
         internal void OpenMarkup(string path)
@@ -1232,11 +1296,14 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
                 eventSource = GetOcx();
                 documentLoadedHandler = fileName => DocumentLoaded?.Invoke(fileName);
                 ComEventsHelper.Combine(eventSource, ModelViewEventsId, 3, documentLoadedHandler);
+                documentFailedHandler = (fileName, code, error) => DocumentFailed?.Invoke(fileName, code, error);
+                ComEventsHelper.Combine(eventSource, ModelViewEventsId, 5, documentFailedHandler);
             }
             catch
             {
                 eventSource = null;
                 documentLoadedHandler = null;
+                documentFailedHandler = null;
             }
         }
 
@@ -1247,6 +1314,8 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
                 try
                 {
                     ComEventsHelper.Remove(eventSource, ModelViewEventsId, 3, documentLoadedHandler);
+                    if (documentFailedHandler != null)
+                        ComEventsHelper.Remove(eventSource, ModelViewEventsId, 5, documentFailedHandler);
                 }
                 catch
                 {
@@ -1255,6 +1324,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             }
             eventSource = null;
             documentLoadedHandler = null;
+            documentFailedHandler = null;
             base.DetachSink();
         }
 

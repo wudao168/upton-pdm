@@ -220,7 +220,7 @@ internal sealed class ProjectBrowserDialog : Form
         this.requireSubmissionAccess = requireSubmissionAccess;
 
         Text = "浏览选择项目";
-        StartPosition = FormStartPosition.CenterParent;
+        DialogWindowSizing.CenterOnOwnerScreen(this);
         FormBorderStyle = FormBorderStyle.Sizable;
         MinimumSize = new Size(720, 720);
         ClientSize = new Size(820, 810);

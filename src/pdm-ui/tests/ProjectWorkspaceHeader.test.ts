@@ -115,8 +115,8 @@ describe('ProjectWorkspaceHeader', () => {
     expect(wrapper.findAll('.pdm-project-family__state i')).toHaveLength(0)
     expect(wrapper.find('.pdm-project-selected-summary').exists()).toBe(false)
     const projectTabs = wrapper.findAll('.pdm-project-tabs button')
-    expect(projectTabs).toHaveLength(12)
-    expect(projectTabs.map(button => button.text())).toEqual(['概览', '信息', '文件', '计划', '预算', '质量', '图档', 'BOM', '发布', '备料', '记录', '设置'])
+    expect(projectTabs).toHaveLength(13)
+    expect(projectTabs.map(button => button.text())).toEqual(['概览', '信息', '文件', '计划', 'OPL', '预算', '质量', '图档', 'BOM', '发布', '备料', '记录', '设置'])
     expect(projectTabs.at(-1)?.attributes('aria-label')).toBe('项目设置')
     expect(wrapper.text()).not.toContain('图纸审核')
     expect(sidebar.get('[aria-label="选择项目号 P700002"] .pdm-project-family__state').text()).toBe('可编辑')
@@ -208,7 +208,7 @@ describe('ProjectWorkspaceHeader', () => {
     expect(wrapper.emitted('switch')).toBeUndefined()
   })
 
-  it('浏览项目时支持搜索并在二次确认后切换', async () => {
+  it('浏览项目搜索后直接切换，不再二次确认', async () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const wrapper = mount(ProjectWorkspaceHeader, {
       props: { project: childProject, projects: [rootProject, childProject, drawingChild, otherRootProject], activeTab: 'overview' },
@@ -229,11 +229,7 @@ describe('ProjectWorkspaceHeader', () => {
     await wrapper.get('button[aria-label="选择浏览项目 P700003"]').trigger('click')
     await flushPromises()
 
-    expect(confirm).toHaveBeenCalledWith(
-      '确定切换到项目“P700003 · 检测设备”吗？',
-      '确认切换项目',
-      { confirmButtonText: '确认切换', cancelButtonText: '取消', type: 'warning' },
-    )
+    expect(confirm).not.toHaveBeenCalled()
     expect(wrapper.emitted('switch')).toEqual([[otherRootProject.id]])
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
   })
@@ -277,7 +273,7 @@ describe('ProjectWorkspaceHeader', () => {
     expect(wrapper.get('button[aria-label="选择浏览项目 P700003"]').text()).toContain('检测设备')
   })
 
-  it('取消项目选择或取消二次确认时保持当前项目', async () => {
+  it('取消项目浏览时保持当前项目，选取后直接切换', async () => {
     vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
     const wrapper = mount(ProjectWorkspaceHeader, {
       props: { project: childProject, projects: [rootProject, childProject, drawingChild, otherRootProject], activeTab: 'overview' },
@@ -293,8 +289,8 @@ describe('ProjectWorkspaceHeader', () => {
     await wrapper.get('button[aria-label="选择浏览项目 P700003"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.emitted('switch')).toBeUndefined()
-    expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
+    expect(wrapper.emitted('switch')).toEqual([[otherRootProject.id]])
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
     expect(wrapper.get('button[aria-label="浏览项目"]').text()).toBe('P700002 · XXX设备')
   })
 

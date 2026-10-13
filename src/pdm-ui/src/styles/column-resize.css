@@ -1,0 +1,16 @@
+.pdm-column-resize-edge { cursor: col-resize !important; box-shadow: inset -2px 0 var(--pdm-blue); }
+.pdm-column-resizing, .pdm-column-resizing * { cursor: col-resize !important; user-select: none !important; }
+.pdm-gantt-table.pdm-columns-resized { grid-template-columns: var(--pdm-resized-gantt-width) minmax(0, 1fr) !important; }
+.pdm-gantt-table.pdm-columns-resized .pdm-gantt-info-head,
+.pdm-gantt-table.pdm-columns-resized .pdm-gantt-info-row { grid-template-columns: var(--pdm-resized-gantt-columns) !important; }
+.pdm-fit-columns :is(th, td) { overflow: hidden; text-overflow: ellipsis; }
+
+.pdm-resized-grid-list > :is(.pdm-project-browser-table-head, [role=option]) { grid-template-columns: var(--pdm-resized-list-columns) !important; }
+/* 所有数据表始终适应容器；图表坐标和无表头的铭牌矩阵不受影响。 */
+.el-table { min-width: 0 !important; max-width: 100% !important; }
+table:has(> thead):not(.el-table__header):not(.el-table__body):not(.el-table__footer) { width: 100% !important; min-width: 0 !important; max-width: 100% !important; table-layout: fixed !important; }
+table:has(> thead):not(.pdm-fit-columns):not(.el-table__header) > :is(thead, tbody) > tr > :is(th, td) { width: auto !important; }
+table:has(> thead):not(.pdm-fit-columns):not(.el-table__header):not(.pdm-project-number-table) > colgroup > col { width: auto !important; }
+table:has(> thead):not(.el-table__header) > :is(thead, tbody) > tr > :is(th, td) { min-width: 0 !important; overflow: hidden !important; text-overflow: ellipsis; }
+table:has(> thead):not(.el-table__header) :is(input, select, textarea) { box-sizing: border-box; min-width: 0; max-width: 100%; }
+.pdm-project-browser-list:not(.pdm-resized-grid-list) > :is(.pdm-project-browser-table-head, [role=option]) { grid-template-columns: repeat(6, minmax(0, 1fr)); }

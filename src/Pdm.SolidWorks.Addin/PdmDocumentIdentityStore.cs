@@ -37,8 +37,17 @@ internal static class PdmDocumentIdentityStore
 
     public static bool TryReadControlledMetadata(string filePath, out PdmControlledFileMetadata metadata)
     {
+        if (IsControlledWorkspacePath(filePath)) return TryReadLocalMetadata(filePath, out metadata);
         metadata = null;
-        var binding = IsControlledWorkspacePath(filePath) ? ReadBinding(filePath) : null;
+        return false;
+    }
+
+    // A machine/path binding also records the base of a previous source-directory import.
+    // Copied identity streams never provide a trusted base version.
+    public static bool TryReadLocalMetadata(string filePath, out PdmControlledFileMetadata metadata)
+    {
+        metadata = null;
+        var binding = ReadBinding(filePath);
         if (binding == null || binding.DocumentId == Guid.Empty) return false;
         metadata = new PdmControlledFileMetadata
         {
@@ -191,7 +200,7 @@ internal static class PdmDocumentIdentityStore
                 File.WriteAllText(temporaryPath, new JavaScriptSerializer().Serialize(binding), Encoding.UTF8);
                 if (File.Exists(path)) File.Replace(temporaryPath, path, null);
                 else File.Move(temporaryPath, path);
-                TryWriteIdentityStream(filePath, documentId);
+                if (IsControlledWorkspacePath(filePath)) TryWriteIdentityStream(filePath, documentId);
                 return true;
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException || e is NotSupportedException)

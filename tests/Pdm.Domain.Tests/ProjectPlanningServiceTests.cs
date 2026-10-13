@@ -902,6 +902,27 @@ public sealed class ProjectPlanningServiceTests
     }
 
     [Fact]
+    public async Task Latest_task_reminder_replaces_older_reminder_without_hiding_other_tasks_or_changes()
+    {
+        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var taskId = Guid.NewGuid();
+        var now = TimeProvider.System.GetUtcNow();
+        var older = new UserNotification(Guid.NewGuid(), "engineer", "project-plan", "三天后到期", "旧提醒", null, null,
+            $"project-plan:{taskId:N}:d3:20261009", now.AddDays(-3), now.AddDays(-2));
+        var latest = older with { Id = Guid.NewGuid(), Title = "今天到期", SourceKey = $"project-plan:{taskId:N}:d0:20261012", CreatedAt = now, ReadAt = null };
+        var otherTask = older with { Id = Guid.NewGuid(), SourceKey = $"project-plan:{Guid.NewGuid():N}:d3:20261009" };
+        var change = older with { Id = Guid.NewGuid(), SourceKey = $"project-plan-change-stage:{Guid.NewGuid():N}:Design:engineer" };
+        await pdm.CreateUserNotificationsAsync([older, latest, otherTask, change], default);
+        await pdm.CreateUserNotificationsAsync([latest with { Id = Guid.NewGuid() }], default);
+        var visible = await pdm.ListUserNotificationsAsync("engineer", 200, default);
+        Assert.Equal(3, visible.Count);
+        Assert.DoesNotContain(visible, item => item.Id == older.Id);
+        Assert.Contains(visible, item => item.Id == latest.Id && item.ReadAt is null);
+        await pdm.MarkUserNotificationReadAsync(latest.Id, "engineer", now, default);
+        Assert.All(await pdm.ListUserNotificationsAsync("engineer", 200, default), item => Assert.NotNull(item.ReadAt));
+        Assert.Single(await pdm.ListUserNotificationsAsync("engineer", 1, default));
+    }
+    [Fact]
     public async Task Legacy_plan_overdue_notification_is_hidden_from_message_center()
     {
         var pdm = new InMemoryPdmRepository(TimeProvider.System);

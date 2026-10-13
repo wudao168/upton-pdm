@@ -40,7 +40,9 @@ public static class ProjectPermissionPolicy
             positions.Add(ProjectPermissionPositions.ChildManager);
         if (Equals(root.DesignLead, actor) || root.DesignLeads.Any(user => Equals(user, actor)))
             positions.Add(ProjectPermissionPositions.MainDesigner);
-        if (project.Designers.Any(user => Equals(user, actor)))
+        if (project.Designers.Any(user => Equals(user, actor))
+            || (root.PhaseOwners.TryGetValue("ElectricalHardware", out var hardwareOwners)
+                && hardwareOwners.Split('、', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Any(user => Equals(user, actor))))
             positions.Add(ProjectPermissionPositions.Engineer);
         if (positions.Count == 0) positions.Add(ProjectPermissionPositions.Other);
         return positions.Any(position => settings.Rules.TryGetValue(position, out var permissions) && permissions.Contains(operation, StringComparer.Ordinal));

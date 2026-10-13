@@ -29,11 +29,22 @@ describe('项目日历', () => {
   })
   it('草稿不形成正式事件，传播任务不重复，完成与实际日期保留', () => {
     const root=item(), child=item('child', [{...task('child-task'),sourceTaskId:'t1',isMilestone:true,status:'Completed',actualFinish:'2026-10-03'}])
-    const events=calendarEvents([root,child], [], today)
+    const events=calendarEvents([root,child], [], '2026-10-04')
     expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({projectId:'child',tone:'done',actual:'2026-10-03',date:'2026-10-04'})
     child.plan!.approvalStatus='Draft'
     expect(calendarEvents([child], [], today)).toHaveLength(0)
+  })
+  it('隐藏过去已完成事项，保留今天、未来及历史未完成事项', () => {
+    const past={...task('past'),status:'Completed',actualFinish:'2026-10-04'} as ProjectPlanTask
+    const current={...past,id:'current',plannedFinish:today}
+    const future={...past,id:'future',plannedFinish:'2026-10-06'}
+    const pending={...task('pending'),isMilestone:true}
+    const projects=[item('past',[past]),item('today',[current]),item('future',[future]),item('pending',[pending])]
+    projects[0]!.plan!.stages=[{code:'Design',name:'设计',participatesInDelivery:true}] as NonNullable<WorkbenchProject['plan']>['stages']
+    const events=calendarEvents(projects,[],today)
+    expect(events.some(event=>event.projectId==='past')).toBe(false)
+    expect(events.map(event=>event.projectId)).toEqual(['pending','today','future'])
   })
   it('没有明确交付阶段时不凭项目结束日虚构发货', () => {
     expect(calendarEvents([item()], [], today).some(event=>event.kind==='shipping')).toBe(false)
@@ -42,7 +53,7 @@ describe('项目日历', () => {
     const risks=[{id:'r',projectId:'root',title:'整改',impact:'需处理',owner:'pm',dueDate:'2026-09-01',severity:'warning',createdBy:'pm',createdAt:'',closed:false,canClose:true}]
     expect(calendarEvents([item()],risks,today).find(event=>event.kind==='risk')?.tone).toBe('danger')
     risks[0]!.closed=true
-    expect(calendarEvents([item()],risks,today).find(event=>event.kind==='risk')?.tone).toBe('done')
+    expect(calendarEvents([item()],risks,today).find(event=>event.kind==='risk')).toBeUndefined()
   })
   it('默认双月，翻月及筛选生效，跨月逾期可查看并跳转', async () => {
     vi.mocked(api.readProjectWorkbench).mockResolvedValue(data([item()]))

@@ -107,6 +107,8 @@ public static class PdmEndpointExtensions
         }).AllowAnonymous();
 
         var api = app.MapGroup("/api").RequireAuthorization();
+        api.MapGet("/system-connections", async (SystemConnectionStatus status, CancellationToken cancellationToken) =>
+            Results.Ok(await status.ReadAsync(cancellationToken)));
 
         api.MapGet("/auth/me", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
@@ -737,11 +739,11 @@ public static class PdmEndpointExtensions
             return Results.Ok(await repository.ListDocumentRelationsAsync(projectId, cancellationToken));
         });
 
-        api.MapGet("/documents/{documentId:guid}/versions", async (Guid documentId, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapGet("/documents/{documentId:guid}/versions", async (Guid documentId, int? take, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             await workflow.AuditVersionReadAsync(documentId, Guid.Empty, actor, role, "document.version.list", cancellationToken);
-            var versions = await repository.ListDocumentVersionsAsync(documentId, cancellationToken);
+            var versions = await repository.ListDocumentVersionsAsync(documentId, cancellationToken, take);
             return Results.Ok(versions);
         });
 
@@ -863,6 +865,16 @@ public static class PdmEndpointExtensions
             {
                 using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
                 {
+                    foreach (var packageItems in items.GroupBy(item => item.ReleasePackageId))
+                    {
+                        var bomItems = packageItems.SelectMany(item => item.BomItems).DistinctBy(item => item.Id).ToArray();
+                        if (bomItems.Length == 0)
+                            throw new PdmRuleException("所选图纸缺少发布包冻结的BOM数据，无法下载对应BOM，请刷新后重试。");
+                        var packageNumber = SafeArchiveSegment(packageItems.First().ReleasePackageNumber);
+                        var bomEntry = archive.CreateEntry($"{packageNumber}/{packageNumber}-BOM.xlsx", CompressionLevel.Fastest);
+                        await using var bomTarget = bomEntry.Open();
+                        await bomTarget.WriteAsync(BomWorkbook.Write(bomItems), cancellationToken);
+                    }
                     foreach (var item in items)
                     {
                         if (request.Format == "Pdf")
@@ -1008,7 +1020,8 @@ public static class PdmEndpointExtensions
                 request.ForEdit,
                 actor,
                 role,
-                cancellationToken));
+                cancellationToken,
+                request.ResolveLegacyReferences));
         });
 
         api.MapGet("/documents/{documentId:guid}/versions/compare", async (Guid documentId, Guid left, Guid right, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1050,10 +1063,10 @@ public static class PdmEndpointExtensions
             return Results.Ok(summary == true && bomKind is (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical) ? BomSummaryProjection.Group(items) : items);
         });
 
-        api.MapGet("/projects/{projectId:guid}/bom-source-data", async (Guid projectId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{projectId:guid}/bom-source-data", async (Guid projectId, Guid? rootDocumentId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await workflow.GetBomSourceDataAsync(projectId, actor, role, cancellationToken));
+            return Results.Ok(await workflow.GetBomSourceDataAsync(projectId, actor, role, cancellationToken, rootDocumentId));
         });
 
         api.MapPut("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, bool? includeDraft, bool? summary, ReplaceBomRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1078,7 +1091,8 @@ public static class PdmEndpointExtensions
                 .Where(version => version.State == BomVersionState.Draft).MaxBy(version => version.VersionNumber);
             var savedById = saved.ToDictionary(item => item.Id);
             // Reuse returned rows, but preserve any snapshot values that differ from the working BOM.
-            var overrides = draft?.Items.Where(item => !savedById.TryGetValue(item.Id, out var current) || current != item).ToArray() ?? [];
+            static BomItem SnapshotValues(BomItem item) => item with { ReleaseReviewToken = null, ReleaseReviewTokens = null, ReleaseConfirmation = null };
+            var overrides = draft?.Items.Where(item => !savedById.TryGetValue(item.Id, out var current) || SnapshotValues(current) != SnapshotValues(item)).ToArray() ?? [];
             return Results.Ok(new
             {
                 items = saved,
@@ -1217,6 +1231,13 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await workflow.PermanentlyDeleteManualBomItemsAsync(projectId, new PermanentlyDeleteManualBomItemsCommand(request.ItemIds), actor, role, cancellationToken));
+        });
+
+        api.MapPost("/projects/{projectId:guid}/boms/items/release-confirmation", async (Guid projectId, ConfirmBomReleaseRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            await workflow.ConfirmBomReleaseNotRequiredAsync(projectId, request.Tokens, request.Confirmed, request.Reason, actor, role, cancellationToken);
+            return Results.Ok();
         });
 
         api.MapPost("/projects/{projectId:guid}/boms/items/release-exclusion", async (Guid projectId, SetBomReleaseExclusionRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1420,6 +1441,12 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.DiscardCheckoutAsync(documentId, actor, role, request.CheckoutSessionId, cancellationToken));
         });
 
+        api.MapPost("/documents/{documentId:guid}/close-edit", async (Guid documentId, CloseEditRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.CloseEditAsync(documentId, actor, role, request.SessionId, request.CheckedOutAt, request.Sha256, request.DraftPreserved, cancellationToken));
+        });
+
         api.MapPost("/documents/{documentId:guid}/request-release", async (Guid documentId, EditLockActionRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -1442,6 +1469,25 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await workflow.ObsoleteDocumentAsync(documentId, actor, role, request.Comment, cancellationToken));
+        });
+
+        api.MapPost("/archive-batches", async (ArchiveBatchRequest request, HttpContext context, PdmWorkflowService workflow, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var requestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(request))));
+            var inputs = request.Files.Select(file => new ArchiveBatchInput(file.DocumentId,
+                new StoredFile(file.Request.StorageRelativePath, file.Request.FileLength, file.Request.Sha256, timeProvider.GetUtcNow()),
+                file.Request.Properties ?? new Dictionary<string, string?>(),
+                new CadReferenceSnapshot(Guid.NewGuid(), file.Request.ProjectId, file.DocumentId, timeProvider.GetUtcNow(), actor, file.Request.Root,
+                    Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(file.Request.Root))))),
+                file.Request.Comment, file.Request.IsProjectRoot, file.Request.ExpectedVersionId,
+                file.Request.DrawingNumber, file.Request.Name, file.Request.FileName, file.Request.DrawingReviewWritebackId)).ToArray();
+            return Results.Ok(await workflow.CheckInBatchAsync(request.BatchId, requestHash, actor, role, request.CheckoutSessionId, inputs, cancellationToken));
+        });
+        api.MapGet("/archive-batches/{batchId:guid}", async (Guid batchId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.GetArchiveBatchAsync(batchId, actor, role, cancellationToken));
         });
 
         api.MapPost("/documents/{documentId:guid}/checkin/preflight", async (Guid documentId, CheckInPreflightRequest request, HttpContext context, PdmWorkflowService workflow, TimeProvider timeProvider, CancellationToken cancellationToken) =>
@@ -1468,7 +1514,10 @@ public static class PdmEndpointExtensions
                 request.DrawingNumber,
                 request.Name,
                 request.FileName,
-                request.DrawingReviewWritebackId);
+                request.DrawingReviewWritebackId,
+                request.ExpectedVersionId,
+                true,
+                request.PlannedDocumentIds);
             return Results.Ok(new { valid = true });
         });
 
@@ -1506,14 +1555,19 @@ public static class PdmEndpointExtensions
                 request.DrawingNumber,
                 request.Name,
                 request.FileName,
-                request.DrawingReviewWritebackId);
+                request.DrawingReviewWritebackId,
+                request.ExpectedVersionId,
+                true,
+                request.DeferBomRefresh);
             return Results.Ok(new
             {
                 document = result.Document,
                 version = result.Version,
                 versionCreated = result.VersionCreated,
                 bomUpdate = result.BomUpdate,
-                bomUpdateError = result.BomUpdateError
+                bomUpdateError = result.BomUpdateError,
+                bomRefreshDeferred = result.BomRefreshDeferred,
+                affectedAssemblies = result.AffectedAssemblies
             });
         });
 
@@ -1538,7 +1592,7 @@ public static class PdmEndpointExtensions
                     "未指定", null,
                     request.Scope, request.SelectedBomItemIds,
                     actor, role, cancellationToken, request.SelectedBomItemQuantities, request.WholeSetMultiplier,
-                    request.DrawingPriority, request.DrawingRequiredOn, request.DrawingDeliveryOverrides, request.BomItemDeliveryOverrides));
+                    request.DrawingPriority, request.DrawingRequiredOn, request.DrawingDeliveryOverrides, request.BomItemDeliveryOverrides, request.RootDocumentId));
         });
 
         api.MapPut("/release-packages/{releasePackageId:guid}/draft", async (Guid releasePackageId, UpdateReleasePackageDraftRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1614,7 +1668,8 @@ public static class PdmEndpointExtensions
             if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken)) return Results.Forbid();
             if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken)) return Results.Forbid();
             var item = await previewService.RetryItemAsync(releasePackageId, documentId, actor, cancellationToken);
-            return Results.Ok(new ReleasePreviewItemRetryResult(true, MapReleasePreviewItem(item), "已重新转出该图档。"));
+            return Results.Ok(new ReleasePreviewItemRetryResult(item.Succeeded, MapReleasePreviewItem(item),
+                item.Succeeded ? "已重新转出该图档。" : "该图档转出失败，请查看该项说明；其他已成功图档不受影响。"));
         });
 
         // 批量重试：多个图档合成一次转换请求（引用树只下发一次），比逐条重试快得多。

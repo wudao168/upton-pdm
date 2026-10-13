@@ -32,6 +32,8 @@ public partial class App : System.Windows.Application
         }
 
         // 只有确认当前是唯一实例后才能切换版本：其它实例仍在运行时替换目录会失败，客户端会表现为刚打开就关闭。
+        ClientDiagnostics.Initialize("desktop", ClientPackageUpdater.GetInstalledVersion(AppDomain.CurrentDomain.BaseDirectory));
+        DispatcherUnhandledException += (_, args) => ClientDiagnostics.Record("error", "界面未处理异常", args.Exception.ToString());
         if (ClientPackageUpdater.TryLaunchPendingUpdate("desktop", Process.GetCurrentProcess().Id, executablePath))
         {
             Shutdown();

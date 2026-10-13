@@ -1,8 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { downloadProductionDrawingArchive, downloadReleasePreviewArchive, listProjects, mapApiReleasePackage, readProjectValidationPlan, saveBom } from '../src/api'
+import { downloadProductionDrawingArchive, downloadReleasePreviewArchive, listProjects, loadBomSourceData, mapApiReleasePackage, readProjectValidationPlan, saveBom } from '../src/api'
 import type { BomItem } from '../src/types'
 
 describe('API JSON response handling', () => {
+  it('保留服务端BOM实例所属装配根路径，供独立树统计和发布范围筛选使用', async () => {
+    const path = 'roots/11111111111111111111111111111111/root/part'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([
+      { id: 'source', sourceDocumentId: 'part', sourceConfiguration: 'Default', sourceInstancePath: path, kind: 'NonStandard', quantity: 3, name: '零件', revision: 'W1' },
+    ]), { status: 200 })))
+    const result = await loadBomSourceData('project', 'token')
+    expect(result[0]?.sourceInstancePath).toBe(path)
+    expect(result[0]?.sourceDocumentId).toBe('part')
+  })
   it.each(['headers', 'body'])('bounds a stalled BOM save %s without retrying the write', async phase => {
     vi.useFakeTimers()
     const stalled = new Promise<never>(() => {})

@@ -15,6 +15,27 @@ namespace Upton.Pdm.Api.Tests;
 public sealed class ProjectWorkbenchApiTests(PdmApiFactory factory) : IClassFixture<PdmApiFactory>
 {
     [Fact]
+    public async Task ReviewScopesRespectContentPermissionsAndDepartmentAuthority()
+    {
+        using var client = factory.CreateClient();
+        Authorize(client, "engineer", "Engineer");
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/workbench?scope=division")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/workbench?scope=unknown")).StatusCode);
+        var response = await client.GetAsync("/api/workbench?scope=company");
+        response.EnsureSuccessStatusCode();
+        using var data = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        using var services = factory.Services.CreateScope();
+        var repository = services.ServiceProvider.GetRequiredService<IPdmRepository>();
+        foreach (var item in data.RootElement.GetProperty("projects").EnumerateArray())
+        {
+            var id = item.GetProperty("project").GetProperty("id").GetGuid();
+            Assert.True(await repository.HasProjectContentReadAccessAsync(id, "engineer", UserRole.Engineer, default));
+        }
+        Assert.Contains("company", data.RootElement.GetProperty("scopes").EnumerateArray().Select(value => value.GetString()));
+        (await client.GetAsync("/api/workbench?scope=personal")).EnsureSuccessStatusCode();
+    }
+
+    [Fact]
     public async Task WorkbenchRequiresLoginAndRejectsUnauthorizedViews()
     {
         using var client = factory.CreateClient();

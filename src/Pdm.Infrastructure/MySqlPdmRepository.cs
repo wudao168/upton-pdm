@@ -36,7 +36,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SELECT p.id,p.code,p.name,p.project_alias,p.organization_id,o.name organization_name,p.project_type_code,
                    p.equipment_type_code,p.customer_code,p.customer_name,p.customer_project_sequence,p.device_model,
                    p.signed_date,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
-                   p.owner,p.vault_location,p.release_location,p.is_active,
+                   p.owner,p.vault_location,p.release_location,p.is_active,p.created_at,
                    COALESCE(p.execution_unit_id,root.execution_unit_id) execution_unit_id,execution_unit.name execution_unit_name
              FROM project p
              LEFT JOIN project_organization o ON o.id=p.organization_id
@@ -231,7 +231,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 "INSERT INTO project_responsible(project_id,username,assigned_at) VALUES(@ProjectId,@Username,@Now)",
                 new { ProjectId = project.Id, Username = actor, Now = now }, transaction, cancellationToken: cancellationToken));
             await transaction.CommitAsync(cancellationToken);
-            return project with { ResponsibleUsers = [actor] };
+            return project with { ResponsibleUsers = [actor], CreatedAt = new DateTimeOffset(DateTime.SpecifyKind(now, DateTimeKind.Utc)) };
         }
         catch (MySqlException exception) when (exception.Number == 1062)
         {
@@ -351,7 +351,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 SELECT p.id,p.code,p.name,p.project_alias,p.organization_id,o.name organization_name,p.project_type_code,
                        p.equipment_type_code,p.customer_code,p.customer_name,p.customer_project_sequence,p.device_model,
                        p.signed_date,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
-                       p.owner,p.vault_location,p.release_location,p.is_active
+                       p.owner,p.vault_location,p.release_location,p.is_active,p.created_at
                 FROM project p LEFT JOIN project_organization o ON o.id=p.organization_id
                 WHERE p.id=@ParentProjectId FOR UPDATE
                 """,
@@ -730,6 +730,27 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             cancellationToken: cancellationToken));
     }
 
+    public async Task<CadReferenceSnapshot?> GetProjectReferenceRootAsync(Guid projectId, Guid rootDocumentId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var id = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
+            "SELECT reference_snapshot_id FROM project_reference_roots WHERE project_id=@ProjectId AND root_document_id=@RootDocumentId",
+            new { ProjectId = projectId, RootDocumentId = rootDocumentId }, cancellationToken: cancellationToken));
+        return id.HasValue ? await FindReferenceSnapshotAsync(id.Value, cancellationToken) : null;
+    }
+
+    public async Task<CadReferenceSnapshot?> FindReferenceSnapshotAsync(Guid snapshotId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var row = await connection.QuerySingleOrDefaultAsync<ReferenceSnapshotRow>(new CommandDefinition(
+            "SELECT id,project_id,root_document_id,captured_at,captured_by,sha256,root_json FROM reference_snapshot WHERE id=@SnapshotId",
+            new { SnapshotId = snapshotId }, cancellationToken: cancellationToken));
+        if (row is null) return null;
+        var root = JsonSerializer.Deserialize<DocumentReferenceNode>(row.RootJson, jsonOptions)
+            ?? throw new InvalidDataException("引用树快照损坏。");
+        return new CadReferenceSnapshot(row.Id, row.ProjectId, row.RootDocumentId, AsUtc(row.CapturedAt), row.CapturedBy, root, row.Sha256);
+    }
+
     public async Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -749,7 +770,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """,
             new { ProjectId = projectId, Kind = kind.ToString() },
             cancellationToken: cancellationToken));
-        return rows.Select(MapBomItem).ToArray();
+        var confirmations = await connection.QueryAsync<(Guid BomItemId, string ConfirmationJson)>(new CommandDefinition(
+            "SELECT bom_item_id AS BomItemId, confirmation_json AS ConfirmationJson FROM bom_release_confirmation WHERE project_id=@ProjectId",
+            new { ProjectId = projectId }, cancellationToken: cancellationToken));
+        return await BomReleaseReviewReader.AttachAsync(this, projectId, rows.Select(MapBomItem).ToArray(),
+            confirmations.ToDictionary(row => row.BomItemId, row => JsonSerializer.Deserialize<BomReleaseConfirmation>(row.ConfirmationJson, jsonOptions)!), cancellationToken);
     }
 
     public async Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken)
@@ -1049,7 +1074,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         var rows = await connection.QueryAsync<ReleasePackageRow>(new CommandDefinition(
             """
             SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, selected_bom_item_ids_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier,
-                   reference_snapshot_id, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
+                   reference_snapshot_id, (SELECT scope_snapshot.root_document_id FROM reference_snapshot scope_snapshot WHERE scope_snapshot.id=release_package.reference_snapshot_id AND JSON_TYPE(JSON_EXTRACT(scope_snapshot.root_json, '$.documentId'))='STRING') AS ScopeRootDocumentId, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
                    formal_supplement_policy_snapshotted, formal_supplement_maximum_count, formal_supplement_valid_days, effective_serial_from, effective_serial_to,
@@ -1279,7 +1304,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SELECT p.id,p.code,p.name,p.project_alias,p.organization_id,o.name organization_name,p.project_type_code,
                    p.equipment_type_code,p.customer_code,p.customer_name,p.customer_project_sequence,p.device_model,
                    p.signed_date,p.quantity,p.parent_project_id,p.root_project_id,p.child_sequence,p.bom_item_category_code,
-                   p.owner,p.vault_location,p.release_location,p.is_active,
+                   p.owner,p.vault_location,p.release_location,p.is_active,p.created_at,
                    COALESCE(p.execution_unit_id,root.execution_unit_id) execution_unit_id,execution_unit.name execution_unit_name
             FROM project p LEFT JOIN project_organization o ON o.id=p.organization_id
             LEFT JOIN project root ON root.id=COALESCE(p.root_project_id,p.id)
@@ -1325,7 +1350,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         var row = await connection.QuerySingleOrDefaultAsync<ReleasePackageRow>(new CommandDefinition(
             """
             SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, selected_bom_item_ids_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier,
-                   reference_snapshot_id, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
+                   reference_snapshot_id, (SELECT scope_snapshot.root_document_id FROM reference_snapshot scope_snapshot WHERE scope_snapshot.id=release_package.reference_snapshot_id AND JSON_TYPE(JSON_EXTRACT(scope_snapshot.root_json, '$.documentId'))='STRING') AS ScopeRootDocumentId, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
                    formal_supplement_policy_snapshotted, formal_supplement_maximum_count, formal_supplement_valid_days, effective_serial_from, effective_serial_to,
@@ -1353,6 +1378,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             CustomerProjectSequence = row.CustomerProjectSequence,
             DeviceModel = row.DeviceModel,
             SignedDate = row.SignedDate is null ? null : DateOnly.FromDateTime(row.SignedDate.Value),
+            CreatedAt = row.CreatedAt is DateTime created ? new DateTimeOffset(DateTime.SpecifyKind(created, DateTimeKind.Utc)) : null,
             Quantity = row.Quantity,
             ParentProjectId = row.ParentProjectId,
             RootProjectId = row.RootProjectId ?? row.Id,
@@ -1821,6 +1847,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             row.PublishedAt is null ? null : new DateTimeOffset(DateTime.SpecifyKind(row.PublishedAt.Value, DateTimeKind.Utc)),
             row.PublishedPath)
         {
+            RootDocumentId = row.ScopeRootDocumentId,
             StandardBomVersionId = row.StandardBomVersionId,
             NonStandardBomVersionId = row.NonStandardBomVersionId,
             ElectricalBomVersionId = row.ElectricalBomVersionId,
@@ -1885,6 +1912,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public string VaultLocation { get; init; } = string.Empty;
         public string ReleaseLocation { get; init; } = string.Empty;
         public bool IsActive { get; init; }
+        public DateTime? CreatedAt { get; init; }
         public Guid? ExecutionUnitId { get; init; }
         public string? ExecutionUnitName { get; init; }
     }
@@ -2101,6 +2129,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public bool LocksDocuments { get; init; }
         public int WholeSetMultiplier { get; init; } = 1;
         public Guid? ReferenceSnapshotId { get; init; }
+        public Guid? ScopeRootDocumentId { get; init; }
         public string MechanicalBomRevision { get; init; } = string.Empty;
         public string ElectricalBomRevision { get; init; } = string.Empty;
         public string MechanicalBomSnapshotJson { get; init; } = "[]";

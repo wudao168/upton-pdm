@@ -34,6 +34,8 @@ internal enum CadWorkState
 
 internal sealed class CadTreeNode
 {
+    public string SuppressedLocalStructureSha256 { get; set; }
+
     public Guid NodeId { get; set; } = Guid.NewGuid();
 
     public Guid? DocumentId { get; set; }
@@ -78,6 +80,9 @@ internal sealed class CadTreeNode
 
     public string CurrentRevision { get; set; } = string.Empty;
 
+    public DocumentVersionDto SuppressedArchiveVersion { get; set; }
+    public string SuppressedArchiveSha256 { get; set; }
+
     public string LatestRevision { get; set; } = string.Empty;
 
     public bool StoredVersionStateKnown { get; set; }
@@ -119,6 +124,7 @@ internal sealed class CadTreeNode
     public bool IsReadOnlyPreview => IsHistoricalPreview || IsLatestReadOnlyPreview;
 
     public List<CadTreeNode> Children { get; } = new List<CadTreeNode>();
+    public List<CadTreeNode> ReferencedModels { get; } = new List<CadTreeNode>();
 
     public bool HasBlockingIssue
     {

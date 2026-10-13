@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import PanelActions from './PanelActions.vue'
+import { useId as usePanelFormId } from 'vue'
+const panelFormId = usePanelFormId()
+
 import { ListChecks } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { readQualityInspections, uploadQualityInspection, readQualityInspectionFile, type QualityInspectionRecord } from '../api'
@@ -117,7 +121,7 @@ watch(() => [props.projects.map(x => x.id).join(','), props.token, props.refresh
       <p v-else>此文件暂不支持在线预览，可下载查看。</p>
     </el-dialog>
     <el-dialog v-model="dialogOpen" :title="`上传${title}记录`" width="540px" append-to-body :close-on-click-modal="!saving" :show-close="!saving" :close-on-press-escape="!saving">
-      <form class="quality-inspection__form" @submit.prevent="save">
+      <form :id="panelFormId + '-form-1'" class="quality-inspection__form" @submit.prevent="save">
         <label>项目 / 子项目<select v-model="targetProjectId" :disabled="saving" required><option v-for="project in writableProjects" :key="project.id" :value="project.id">{{ project.code }} · {{ project.name }}</option></select></label>
         <label v-if="customerAcceptance">检验内容<select v-model="selectedKind" :disabled="saving || uploadedCount > 0" required aria-label="检验内容"><option value="preAcceptance">预验收</option><option value="finalAcceptance">终验收</option></select></label>
         <label v-else>检验内容<input v-model="recordTitle" :disabled="saving" maxlength="200" required :placeholder="kind === 'incoming' ? '如：三坐标测量报告' : kind === 'assembly' ? '如：导轨平行度、转台跳动' : '如：客户验收报告、问题确认记录'"></label>
@@ -128,7 +132,7 @@ watch(() => [props.projects.map(x => x.id).join(','), props.token, props.refresh
           <li v-for="(file, index) in uploadedFiles" :key="`saved-${index}`"><span>{{ file.name }}</span><small>已保存</small></li>
           <li v-for="(file, index) in files" :key="`pending-${index}`"><span>{{ file.name }}</span><small>{{ index === 0 && saving ? '上传中' : index === 0 && uploadFailed ? '上传失败' : '待上传' }}</small></li>
         </ul>
-        <footer><button type="button" class="pdm-secondary-action" :disabled="saving" @click="dialogOpen = false">取消</button><button type="submit" class="pdm-primary-action" :disabled="saving || !files.length || !targetProjectId">{{ saving ? '上传中…' : '保存记录' }}</button></footer>
+        <PanelActions><footer><button type="button" class="pdm-secondary-action" :disabled="saving" @click="dialogOpen = false">取消</button><button type="submit" :form="panelFormId + '-form-1'" class="pdm-primary-action" :disabled="saving || !files.length || !targetProjectId">{{ saving ? '上传中…' : '保存记录' }}</button></footer></PanelActions>
       </form>
     </el-dialog>
   </section>

@@ -145,6 +145,21 @@ describe('MyTasks', () => {
     expect(wrapper.emitted('openMaterialApprovals')).toHaveLength(1)
   })
 
+  it('requests editing in one click even when another person has already requested it', async () => {
+    const onRequestRelease = vi.fn().mockResolvedValue(undefined)
+    const wrapper = mount(MyTasks, { props: {
+      tasks: [], materialCodeTasks: [], passwordResetTasks: [], pending: false,
+      locks: [{ documentId: 'document-1', projectId: 'project-1', projectCode: 'P700001', projectName: '测试项目', drawingNumber: 'P-1', documentName: '机架', fileName: 'P-1.SLDPRT',
+        checkedOutBy: 'engineer', checkedOutAt: '2026-10-13T00:00:00Z', lastHeartbeatAt: '2026-10-13T00:00:00Z', leaseExpiresAt: '2026-10-13T00:15:00Z', connectionState: 'Active', attentionLevel: 'Normal',
+        ownedByCurrentUser: false, canRequestRelease: true, canForceRelease: false, releaseRequestedBy: 'someone-else' }],
+      onRequestRelease, onForceRelease: vi.fn(), onResetPassword: vi.fn(),
+    } })
+    await wrapper.findAll('button').find(button => button.text() === '我需要编辑')!.trigger('click')
+    await flushPromises()
+    expect(onRequestRelease).toHaveBeenCalledExactlyOnceWith('document-1', '需要继续编辑该图档，请在完成后关闭图档。')
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  })
+
   it('groups edit permissions by project and releases the project in one action', async () => {
     const onForceRelease = vi.fn().mockResolvedValue(undefined)
     const lock = {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { downloadDocumentPreviewFile, downloadProductionDrawingArchive, listProductionDrawings, updateProductionDrawingDelivery } from '../api'
+import { downloadDocumentPreviewFile, downloadGeneratedFile, downloadProductionDrawingArchive, listProductionDrawings, updateProductionDrawingDelivery } from '../api'
+import { createProductionBomWorkbook } from '../productionBomWorkbook'
 import type { BomItem, DrawingPriority, ProductionDrawingItem } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 import { u9UnitName } from '../u9Units'
@@ -237,6 +238,50 @@ async function downloadBatch(items: ProductionDrawingItem[], format: 'Pdf' | 'St
   if (items.some(item => !item.isCurrent) && !window.confirm('所选图纸包含已被替代的历史正式版，确定下载？')) return
   await runDownload(() => downloadProductionDrawingArchive(project.value!.id, items.map(item => item.versionId), format, props.token, selectedPackage.value!.number, updateDownloadProgress))
 }
+async function downloadBom(items: ProductionDrawingItem[], selectedOnly: boolean) {
+  if (!selectedPackage.value || !items.length || downloading.value) return
+  if (items.some(item => !item.bomItems?.length)) {
+    error.value = '所选图纸缺少发布包冻结的BOM数据，无法导出；请刷新后重试。'
+    return
+  }
+  if (items.some(item => !item.isCurrent) && !window.confirm('所选图纸包含历史正式版，确定下载对应版本BOM？')) return
+  const file = bomDownload(items, selectedOnly)
+  await runDownload(() => downloadGeneratedFile(file.blob, file.fileName))
+}
+function bomDownload(items: ProductionDrawingItem[], selectedOnly: boolean) {
+  const columns = columnDefinitions.filter(column => !['drawing', 'quantityReference', 'issue', 'dataStatus'].includes(column.key))
+  const headers = ['发布包', '图号', ...columns.map(column => column.label)]
+  const values = items.map(item => [item.releasePackageNumber, item.drawingNumber, ...columns.map(column =>
+    column.key === 'quantity' ? Number(quantityValue(item)) : columnValue(item, column.key))])
+  const fileName = `${selectedPackage.value!.number}-${selectedOnly ? '选中' : '本包'}BOM.xlsx`.replace(/[<>:"/\\|?*]/g, '_')
+  return { blob: createProductionBomWorkbook(headers, values), fileName }
+}
+async function downloadPackage() {
+  if (!project.value || !selectedPackage.value || !drawings.value.length || detailLoading.value || downloading.value) return
+  const items = [...drawings.value]
+  if (items.some(item => !item.pdfReady) || !canDownloadStep(items)) {
+    error.value = '本包部分PDF或STEP尚未就绪，暂不能下载全部文件，请稍后重试。'
+    return
+  }
+  if (items.some(item => !item.bomItems?.length)) {
+    error.value = '本包缺少冻结的BOM数据，无法下载全部文件，请刷新后重试。'
+    return
+  }
+  if (items.some(item => !item.isCurrent) && !window.confirm('本包包含历史正式版，确定下载对应版本的STEP、PDF和BOM？')) return
+  const id = project.value.id
+  const number = selectedPackage.value.number
+  const versions = items.map(item => item.versionId)
+  const file = bomDownload(items, false)
+  await runDownload(async () => {
+    const results = await Promise.allSettled([
+      downloadProductionDrawingArchive(id, versions, 'Step', props.token, number, updateDownloadProgress),
+      downloadProductionDrawingArchive(id, versions, 'Pdf', props.token, number, updateDownloadProgress),
+      downloadGeneratedFile(file.blob, file.fileName),
+    ])
+    const failed = results.find(result => result.status === 'rejected')
+    if (failed?.status === 'rejected') throw failed.reason
+  })
+}
 async function downloadPdf(item: ProductionDrawingItem) {
   if (!item.pdfReady || downloading.value) return
   if (!item.isCurrent && !window.confirm(`${item.drawingNumber} ${item.revision} 已被替代，确定下载历史 PDF？`)) return
@@ -273,7 +318,26 @@ onMounted(() => { restoreColumns(); void refresh() })
 </script>
 
 <template>
-  <section class="pdm-panel production-drawings" aria-label="生产图纸中心">
+  <section class="production-drawings" aria-label="生产图纸中心">
+    <div class="production-drawings__layout pdm-project-list-layout">
+      <nav class="production-drawings__projects pdm-panel" aria-label="项目列表">
+        <div v-for="entry in projects" :key="entry.id" class="production-drawings__project-node"><button type="button" class="production-drawings__project"
+          :class="{ 'is-selected': projectId === entry.id }" :aria-expanded="projectId === entry.id" @click="chooseProject(entry.id)">
+          <span class="production-drawings__project-title"><i class="production-drawings__nav-arrow" :class="{ 'is-expanded': projectId === entry.id }" aria-hidden="true" /><strong>{{ entry.code }}</strong> · {{ entry.name }}</span>
+          <small class="production-drawings__project-meta">
+            <span>{{ entry.drawings.length }} 张图纸</span>
+            <span>{{ entry.latestPublishedAt.slice(0, 10) }}</span>
+          </small>
+        </button><div v-if="projectId === entry.id && !detailLoading" class="production-drawings__packages" role="group" aria-label="发布包列表">
+          <button v-for="entry in packages" :key="entry.id" type="button" class="production-drawings__package" :title="entry.number"
+            :class="{ 'is-selected': packageId === entry.id }" @click="choosePackage(entry.id)">
+            <strong>{{ entry.number }}</strong>
+            <small>{{ entry.drawings.length }} 张图纸 · {{ entry.drawings.filter(item => item.pdfReady).length }} 张 PDF 可用 · {{ entry.drawings.reduce((count, item) => count + modelFiles(item).filter(model => model.stepReady).length, 0) }} 个 STEP 可用 · {{ entry.publishedAt.slice(0, 10) }}</small>
+          </button>
+        </div></div>
+        <p v-if="!projects.length">暂无符合条件的正式图纸项目</p>
+      </nav>
+      <section class="production-drawings__main pdm-panel pdm-project-table-panel">
     <div class="production-drawings__filters">
       <input v-model="query" class="production-drawings__query" type="search" placeholder="搜索项目、型号、图号或发布包" aria-label="搜索生产图纸">
       <input v-model="publishedOnFilter" class="production-drawings__published-on" type="date" aria-label="按发布日期筛选">
@@ -285,38 +349,20 @@ onMounted(() => { restoreColumns(); void refresh() })
     </div>
     <p v-if="error" class="pdm-inline-error" role="alert">{{ error }}</p>
     <p v-if="loading" role="status">正在读取图纸…</p>
-    <div v-if="!loading || rows.length" class="production-drawings__layout">
-      <nav class="production-drawings__projects" aria-label="项目列表">
-        <button v-for="entry in projects" :key="entry.id" type="button" class="production-drawings__project"
-          :class="{ 'is-selected': projectId === entry.id }" @click="chooseProject(entry.id)">
-          <span class="production-drawings__project-title"><strong>{{ entry.code }}</strong> · {{ entry.name }}</span>
-          <small class="production-drawings__project-meta">
-            <span>{{ entry.drawings.length }} 张图纸</span>
-            <span>{{ entry.latestPublishedAt.slice(0, 10) }}</span>
-          </small>
-        </button>
-        <p v-if="!projects.length">暂无符合条件的正式图纸项目</p>
-      </nav>
       <div v-if="project" class="production-drawings__content">
         <p v-if="detailLoading" role="status">正在读取项目图纸…</p>
         <template v-if="selectedPackage && !detailLoading">
           <div class="production-drawings__selection">
             <label><input type="checkbox" aria-label="全选本包图纸" :checked="checked.length === drawings.length && drawings.length > 0" @change="checkedIds = ($event.target as HTMLInputElement).checked ? drawings.map(item => item.versionId) : []"> 全选本包</label>
             <span>已选 {{ checked.length }} 张</span>
-            <button type="button" :disabled="!checked.length || downloading" @click="downloadBatch(checked, 'Step')">批量下载 STEP</button>
-            <button type="button" :disabled="!checked.length || downloading" @click="downloadBatch(checked, 'Pdf')">批量下载 PDF</button>
-        <div class="production-drawings__packages" role="group" aria-label="发布包列表">
-          <button v-for="entry in packages" :key="entry.id" type="button" class="production-drawings__package"
-            :class="{ 'is-selected': packageId === entry.id }" @click="choosePackage(entry.id)">
-            <strong>{{ entry.number }}</strong>
-            <small>{{ entry.drawings.length }} 张图纸 · {{ entry.drawings.filter(item => item.pdfReady).length }} 张 PDF 可用 · {{ entry.drawings.reduce((count, item) => count + modelFiles(item).filter(model => model.stepReady).length, 0) }} 个 STEP 可用 · {{ entry.publishedAt.slice(0, 10) }}</small>
-          </button>
-        </div>
+            <button type="button" :disabled="!checked.length || downloading" @click="downloadBatch(checked, 'Step')">下载STEP</button>
+            <button type="button" :disabled="!checked.length || downloading" @click="downloadBatch(checked, 'Pdf')">下载PDF</button>
+            <button type="button" :disabled="!checked.length || downloading || detailLoading" @click="downloadBom(checked, true)">下载BOM</button>
+
             <div class="production-drawings__toolbar-actions">
               <span v-if="downloadStatus" class="production-drawings__download-status" role="status" aria-live="polite">{{ downloadStatus }}</span>
               <button type="button" class="pdm-secondary-action" @click="columnDraft = [...visibleColumnKeys]; columnSettingsOpen = true">列设置</button>
-              <button type="button" class="pdm-secondary-action" :disabled="downloading || !drawings.length" @click="downloadBatch(drawings, 'Step')">下载本包 STEP</button>
-              <button type="button" class="pdm-secondary-action" :disabled="downloading || !drawings.length" @click="downloadBatch(drawings, 'Pdf')">下载本包 PDF</button>
+              <button type="button" class="pdm-secondary-action" :disabled="downloading || detailLoading || !drawings.length" title="同时下载本包STEP、PDF和BOM" @click="downloadPackage">下载本包</button>
             </div>
           </div>
           <div class="pdm-table-scroll"><table class="pdm-edit-table">
@@ -371,6 +417,7 @@ onMounted(() => { restoreColumns(); void refresh() })
         </template>
       </div>
       <div v-else class="production-drawings__empty">选择左侧项目，查看发布包和图纸。</div>
+      </section>
     </div>
     <div v-if="columnSettingsOpen" class="production-drawings__column-backdrop" @click.self="columnSettingsOpen = false">
       <section class="production-drawings__column-dialog" role="dialog" aria-modal="true" aria-label="生产图纸列设置">
@@ -389,11 +436,12 @@ onMounted(() => { restoreColumns(); void refresh() })
 .production-drawings{padding:20px}.production-drawings__header,.production-drawings__filters,.production-drawings__actions,.production-drawings__toolbar,.production-drawings__selection{display:flex;align-items:center;gap:12px;justify-content:space-between}.production-drawings__header h1{margin:0 0 5px;font-size:var(--pdm-font-size-heading)}.production-drawings__header p,.production-drawings__project-header p,.production-drawings__toolbar p{margin:0;color:var(--pdm-muted)}.production-drawings__filters{margin:18px 0;justify-content:flex-start;flex-wrap:wrap}.production-drawings__filters>input{box-sizing:border-box;flex:0 0 227px;width:227px;min-width:227px}.production-drawings__filters form,.production-drawings__toolbar-actions{display:flex;gap:6px}.production-drawings__filters form button{flex:0 0 80px;width:80px;min-height:34px;height:34px;padding:0}.production-drawings input:not([type=checkbox]),.production-drawings select{height:34px;padding:0 9px;border:1px solid var(--pdm-border);border-radius:6px}.production-drawings__layout{display:grid;grid-template-columns:240px minmax(0,1fr);gap:18px}.production-drawings__projects{display:grid;align-content:start;gap:7px;padding-right:12px;border-right:1px solid var(--pdm-border)}.production-drawings__projects h2{margin:0 0 8px;font-size:var(--pdm-font-size-heading)}.production-drawings__projects h2 small{color:var(--pdm-muted)}.production-drawings__project,.production-drawings__package{display:grid;gap:4px;text-align:left;padding:12px;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface);color:inherit;cursor:pointer}.production-drawings__project.is-selected,.production-drawings__package.is-selected{border-color:var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft)}.production-drawings__project span,.production-drawings__project small,.production-drawings__package span,.production-drawings__package small{color:var(--pdm-muted)}.production-drawings__content{min-width:0}.production-drawings__project-header h2{margin:0 0 4px;font-size:14px}.production-drawings__packages{display:flex;gap:8px;overflow-x:auto;padding:15px 0}.production-drawings__package{min-width:240px}.production-drawings__toolbar{margin:4px 0 10px;flex-wrap:wrap}.production-drawings__toolbar h3{margin:0 0 4px;font-size:var(--pdm-font-size-heading)}.production-drawings__selection{justify-content:flex-start;flex-wrap:wrap;margin:10px 0}.production-drawings__selection button{border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);padding:6px 10px;cursor:pointer}.production-drawings__selection button:disabled{opacity:.5;cursor:not-allowed}.production-drawings table{width:100%}.production-drawings tbody tr{cursor:pointer}.production-drawings tbody tr.is-selected{background:var(--pdm-theme-accent-soft)}.production-drawings td small{display:block;color:var(--pdm-muted);font-size:11px}.production-drawings__detail{display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;margin-top:14px;padding:15px;border:1px solid var(--pdm-border);border-radius:7px}.production-drawings__detail h3{margin:0}.production-drawings__detail p{margin:5px 0}.production-drawings__detail .is-warning{color:var(--pdm-danger)}.production-drawings__actions{justify-content:flex-start;flex-wrap:wrap}.production-drawings__edit{display:grid;gap:8px;min-width:230px}.production-drawings__empty{display:grid;place-items:center;min-height:260px;color:var(--pdm-muted);border:1px dashed var(--pdm-border);border-radius:7px}@media(max-width:950px){.production-drawings__layout{grid-template-columns:1fr}.production-drawings__projects{display:flex;overflow-x:auto;border-right:0;border-bottom:1px solid var(--pdm-border);padding:0 0 12px}.production-drawings__projects h2{min-width:80px}.production-drawings__project{min-width:190px}.production-drawings__toolbar,.production-drawings__detail{align-items:flex-start}}
 .production-drawings__project,.production-drawings__package{height:40px;min-height:40px;box-sizing:border-box;gap:0;padding:4px 8px;line-height:15px;overflow:hidden}
 .production-drawings__project-title,.production-drawings__package strong,.production-drawings__project small,.production-drawings__package small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.production-drawings__project .production-drawings__project-title{color:inherit}
+.production-drawings__project .production-drawings__project-title{color:inherit;font-size:14px}
+.production-drawings__package,.production-drawings__package strong,.production-drawings__package small{font-size:11px}
 .production-drawings__project .production-drawings__project-meta{display:flex;justify-content:space-between;gap:8px}.production-drawings__project-meta span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis}.production-drawings__project-meta span:last-child{flex:0 0 auto;text-align:right}
 .production-drawings__packages{padding:0 0 8px}
 .production-drawings__selection{margin:0 0 6px}
-.production-drawings__selection>label,.production-drawings__selection>span,.production-drawings__selection>button,.production-drawings__selection .pdm-secondary-action{box-sizing:border-box;min-height:34px;height:34px;font-size:12px}
+.production-drawings__selection>label,.production-drawings__selection>span,.production-drawings__selection>button,.production-drawings__selection .pdm-secondary-action{box-sizing:border-box;min-height:var(--pdm-button-default);height:var(--pdm-button-default);font-size:12px}
 .production-drawings__selection>label,.production-drawings__selection>span,.production-drawings__selection>button{display:inline-flex;align-items:center}
 .production-drawings__selection>label{gap:4px}.production-drawings__selection>label input{margin:0}
 .production-drawings__selection>button{justify-content:center;padding:0 10px}
@@ -415,7 +463,29 @@ onMounted(() => { restoreColumns(); void refresh() })
 .production-drawings__pagination{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding-top:10px}
 .production-drawings__detail{flex:0 0 auto;max-height:200px;overflow:auto;margin-top:10px}
 .production-drawings__empty{min-height:0}
-.production-drawings__selection>.production-drawings__packages{flex:1 1 240px;min-width:0;margin:0;padding:0;gap:6px}
-.production-drawings__selection .production-drawings__package{flex:0 0 auto;max-width:100%;height:40px;min-height:40px;padding:4px 8px;text-align:left}
 .production-drawings__download-status{max-width:240px;font-size:12px;line-height:17px;overflow-wrap:anywhere}
+.production-drawings__project-node { min-width: 0; }
+.production-drawings__project-node > .production-drawings__project { width: 100%; }
+.production-drawings__projects .production-drawings__packages { display: grid; gap: 4px; padding: 5px 0 0 14px; overflow-x: hidden; }
+.production-drawings__projects .production-drawings__package { width: 100%; min-width: 0; padding: 6px 8px; height: auto; text-align: left; }
+.production-drawings__projects .production-drawings__package strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.production-drawings__projects .production-drawings__package small { font-size: 10px; line-height: 1.4; }
+.production-drawings__selection > button,
+.production-drawings__selection .production-drawings__toolbar-actions > button { box-sizing: border-box; width: 60px; min-width: 60px !important; max-width: 60px; height: 30px !important; min-height: 30px !important; flex: 0 0 60px; padding: 0 2px; font-size: 11px; white-space: nowrap; }
+@media (max-width: 950px) { .production-drawings__project-node { flex: 0 0 220px; } }
+.production-drawings__nav-arrow { display: inline-block; margin-right: 6px; border-top: 4px solid transparent; border-bottom: 4px solid transparent; border-left: 5px solid var(--pdm-muted); transition: transform .15s; }
+.production-drawings__nav-arrow.is-expanded { transform: rotate(90deg); }
+.production-drawings { padding: 0; }
+.production-drawings__layout { grid-template-columns: 200px minmax(0, 1fr); gap: var(--pdm-container-gap); }
+.production-drawings__projects { display: grid; align-content: start; padding: 12px; border-right: 1px solid var(--pdm-border); }
+.production-drawings__main { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 12px; overflow: hidden; }
+.production-drawings__content { flex: 1 1 0; }
+.production-drawings__empty { flex: 1 1 0; display: grid; place-items: center; }
+.production-drawings__project { min-width: 0; }
+.production-drawings__project-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media(max-width:700px) {
+  .production-drawings__layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .production-drawings__projects { max-height: 180px; }
+}
+.production-drawings__filters form button { box-sizing: border-box; width: 80px; min-width: 80px; height: 30px; min-height: 30px; flex: 0 0 80px; }
 </style>

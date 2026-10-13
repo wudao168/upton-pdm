@@ -56,10 +56,14 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
       : json({ accessToken: 'renewed-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'renewed-resume-token', username: 'engineer', displayName: '真实工程师', role: 'Engineer', permissions: engineerPermissions })
     if (url.endsWith('/api/auth/me')) return json({ username: 'admin', displayName: '系统管理员', nickname: null, gender: 'unspecified', landline: null, mobilePhone: null, email: null })
     if (url.endsWith('/api/password-reset-requests')) return passwordResetRequestsForbidden ? json({ title: 'Forbidden' }, 403) : json([])
-    if (url.includes('/api/materials/page')) return materialRequestsUnauthorized
-      ? json({ title: 'Unauthorized' }, 401)
-      : json({ items: [], total: 0, page: 1, pageSize: 50 })
-    if (url.endsWith('/api/materials') || url.includes('/api/materials?')) return materialRequestsUnauthorized ? json({ title: 'Unauthorized' }, 401) : json([])
+    if (url.includes('/api/materials/page')) {
+      if (materialRequestsUnauthorized) { materialRequestsUnauthorized = false; return json({ title: 'Unauthorized' }, 401) }
+      return json({ items: [], total: 0, page: 1, pageSize: 50 })
+    }
+    if (url.endsWith('/api/materials') || url.includes('/api/materials?')) {
+      if (materialRequestsUnauthorized) { materialRequestsUnauthorized = false; return json({ title: 'Unauthorized' }, 401) }
+      return json([])
+    }
     if (url.includes('/api/engineering-kits')) return json([])
     if (url.includes('/api/material-code/applications')) return json([])
     if (url.endsWith('/api/material-category-rules')) return json([])
@@ -593,7 +597,7 @@ describe('PLM client workspace', () => {
     await flushPromises()
 
     expect(wrapper.find('.pdm-project-workspace').exists()).toBe(true)
-    expect(wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').slice(0, 4).map(item => item.text().trim())).toEqual(['项目日历', '项目中心', '项目工作台', '项目列表'])
+    expect(wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').slice(0, 4).map(item => item.text().trim())).toEqual(['项目日历', '项目总览', '项目中心', '项目列表'])
     expect(wrapper.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('项目中心')
     await projectTabByText(wrapper, 'BOM').trigger('click')
     await flushPromises()
@@ -1080,14 +1084,16 @@ describe('PLM client workspace', () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper, false)
 
-    await buttonByText(wrapper, '我的待办').trigger('click')
+    await wrapper.get('.pdm-message-button').trigger('click')
     await flushPromises()
 
-    const taskCenter = wrapper.get('[aria-label="我的待办"]')
-    expect(taskCenter.text()).toContain('LOCK-001')
-    expect(taskCenter.text()).toContain('DESIGN-WS')
-    expect(taskCenter.text()).toContain('请及时存档')
-    expect(taskCenter.text()).toContain('催办／申请释放')
+    await vi.waitFor(() => expect(document.body.querySelector('[aria-label="消息中心"]')).not.toBeNull())
+    const taskCenter = document.body.querySelector('[aria-label="消息中心"]')!
+    expect(taskCenter.textContent).toContain('LOCK-001')
+    expect(taskCenter.textContent).toContain('DESIGN-WS')
+    expect(taskCenter.textContent).toContain('请及时存档')
+    expect(taskCenter.textContent).toContain('我需要编辑')
+    wrapper.unmount()
   })
 
   it('keeps project navigation usable while the new workspace feeds are rolling out', async () => {
@@ -1248,7 +1254,7 @@ describe('PLM client workspace', () => {
     await wrapper.get('.el-tabs__item#tab-checkout-policy').trigger('click')
     await flushPromises()
     expect(wrapper.get('[aria-label="系统设置"]').text()).toContain('建议180秒')
-    expect(wrapper.get('[aria-label="系统设置"]').text()).toContain('建议48小时；旧会话将禁止提交')
+    expect(wrapper.get('[aria-label="系统设置"]').text()).toContain('在线编辑不会因时长被强制释放')
     await wrapper.get('.el-tabs__item#tab-equipment').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('设备类型设置')
@@ -1483,7 +1489,7 @@ describe('PLM client workspace', () => {
     expect(rootRow?.text()).not.toContain('结构待更新')
     const stalePart = tree.findAll('.pdm-tree-row').find(row => row.text().includes('STALE-PRT-001'))
     expect(stalePart?.text()).toContain('W3 / W4')
-    expect(stalePart?.text()).toContain('结构待更新')
+    expect(stalePart?.text()).toContain('引用版本较旧')
     expect(tree.text()).not.toContain('版本：结构实际 / 最新')
 
     await partRows[1].trigger('click')
@@ -1537,9 +1543,7 @@ describe('PLM client workspace', () => {
     expect(markupToolbar.findAll('button').map(button => button.attributes('aria-label'))).toEqual([
       '引线批注', '云线批注', '框选批注', '手绘批注',
     ])
-    expect(previewToolbar.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual([
-      '打开最新', '编辑打开',
-    ])
+    expect(previewToolbar.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual(['打开最新'])
     expect(wrapper.findAll('.pdm-preview-markup-row .pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual([
       '保存批注',
     ])
@@ -1609,9 +1613,11 @@ describe('PLM client workspace', () => {
     }))
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'preview-document')).toHaveLength(previewDocumentCallsBeforeReview)
 
-    const reviewMessageListener = vi.mocked(window.chrome!.webview!.addEventListener).mock.calls.find(([type]) => type === 'message')?.[1]
-    expect(reviewMessageListener).toBeTruthy()
-    reviewMessageListener!(new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'collapse', collapsed: false } } }))
+    const reviewMessageListeners = vi.mocked(window.chrome!.webview!.addEventListener).mock.calls
+      .filter(([type]) => type === 'message').map(([, listener]) => listener)
+    expect(reviewMessageListeners.length).toBeGreaterThan(0)
+    const collapseMessage = new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'collapse', collapsed: false } } })
+    for (const listener of reviewMessageListeners) listener(collapseMessage)
     await flushPromises()
     window.dispatchEvent(new Event('resize'))
     await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
@@ -1635,7 +1641,8 @@ describe('PLM client workspace', () => {
     expect(row.find('.pdm-markup-toolbar').exists()).toBe(true)
     expect(postMessage.mock.calls.filter(([message]) => message.type === 'review-annotation-bounds')).toHaveLength(0)
 
-    reviewMessageListener!(new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'collapse', collapsed: true } } }))
+    const collapseAgainMessage = new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'collapse', collapsed: true } } })
+    for (const listener of reviewMessageListeners) listener(collapseAgainMessage)
     await flushPromises()
     await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
     await flushPromises()

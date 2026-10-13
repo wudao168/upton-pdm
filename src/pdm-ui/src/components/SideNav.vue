@@ -4,6 +4,7 @@ import { CalendarDays, Blocks, Boxes, ClipboardCheck, FileText, FolderKanban, La
 import uptonLogo from '../assets/upton-logo-white.png'
 import { repairMojibake } from '../mojibake'
 import PlmCubeIcon from './PlmCubeIcon.vue'
+import ConnectionLights from './ConnectionLights.vue'
 
 type NavKey = 'project-calendar' | 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
 
@@ -29,6 +30,7 @@ const props = withDefaults(defineProps<{
   releaseHistory?: SystemReleaseHistoryEntry[]
   desktopVersion?: string
   solidWorksAddinVersion?: string
+  token?: string
 }>(), {
   approvalCount: 0,
   materialCount: 0,
@@ -42,6 +44,7 @@ const props = withDefaults(defineProps<{
   releaseHistory: () => [],
   desktopVersion: '',
   solidWorksAddinVersion: '',
+  token: '',
 })
 const emit = defineEmits<{ navigate: [key: NavKey, label: string] }>()
 const versionDialogOpen = ref(false)
@@ -125,8 +128,8 @@ async function openVersionInfo() {
 
 const items = [
   { key: 'project-calendar', label: '项目日历', icon: CalendarDays },
+  { key: 'project-workbench', label: '项目总览', icon: LayoutDashboard },
   { key: 'project-center', label: '项目中心', icon: FolderKanban },
-  { key: 'project-workbench', label: '项目工作台', icon: LayoutDashboard },
   { key: 'projects', label: '项目列表', icon: ListTree },
   { key: 'standard-library', label: '标准物料', icon: Library },
   { key: 'standard-structure', label: '标准结构', icon: Network },
@@ -168,6 +171,7 @@ const items = [
         <span class="pdm-sidebar__version-icon" aria-hidden="true" />
         <span class="pdm-sidebar__version-copy">{{ displayVersion }}</span>
       </button>
+      <ConnectionLights :token="props.token" />
       <button
         v-if="props.canManageSystem"
         type="button"

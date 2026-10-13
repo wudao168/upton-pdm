@@ -306,7 +306,7 @@ onMounted(load)
             <span class="engineering-kit-group__count">共 {{ form.components.length }} 项</span>
             <el-button type="primary" plain @click="addComponent">添加物料</el-button>
           </header>
-          <el-table :data="form.components" border empty-text="请添加至少一个已批准真实物料">
+          <el-table :data="form.components" empty-text="请添加至少一个已批准真实物料">
             <el-table-column label="料号" min-width="260"><template #default="{ row }"><el-select v-model="row.materialId" filterable placeholder="选择已批准真实物料" style="width:100%"><el-option v-for="material in eligibleMaterials" :key="material.id" :label="materialLabel(material)" :value="material.id" /></el-select></template></el-table-column>
             <el-table-column label="名称" min-width="170"><template #default="{ row }">{{ selectedMaterial(row.materialId)?.name || '—' }}</template></el-table-column>
             <el-table-column label="型号" min-width="170"><template #default="{ row }">{{ selectedMaterial(row.materialId)?.specification || '—' }}</template></el-table-column>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CheckCircle2, ChevronRight, FolderTree, ListTodo, RefreshCw, UsersRound } from '@lucide/vue'
+import { CheckCircle2, ChevronRight, FolderTree, ListTodo, RotateCw as RefreshCw, UsersRound } from '@lucide/vue'
 import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, listProjectAudit, listProjectPlanVersions, readProjectPlanPortfolio, readProjectValidationPlan } from '../api'
 import OverviewTimeline from './OverviewTimeline.vue'
 import { ElMessage } from '../statusMessage'

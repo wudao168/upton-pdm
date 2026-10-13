@@ -29,6 +29,7 @@ export function calendarEvents(items: WorkbenchProject[], risks: WorkbenchRisk[]
       if (!dated.length) return
       const date = dated.map(task => task.plannedFinish).sort().at(-1)!
       const completed = group.every(task => task.status === 'Completed')
+      if (completed && date < today) return
       const delayed = group.some(task => task.status !== 'Completed' && task.plannedFinish < today)
       const completeDates = group.map(task => task.actualFinish).filter(validDate) as string[]
       const actual = completed && completeDates.length === group.length ? completeDates.sort().at(-1) : undefined
@@ -60,7 +61,7 @@ export function calendarEvents(items: WorkbenchProject[], risks: WorkbenchRisk[]
   }
   for (const risk of risks) {
     const item = items.find(item => item.project.id === risk.projectId)
-    if (!item || !validDate(risk.dueDate)) continue
+    if (!item || !validDate(risk.dueDate) || (risk.closed && risk.dueDate < today)) continue
     result.push({ id: `risk-${risk.id}`, projectId: risk.projectId, code: item.project.code, projectName: item.project.name,
       title: risk.title, date: risk.dueDate, owner: risk.owner, kind: 'risk', tab: 'overview',
       tone: risk.closed ? 'done' : risk.dueDate < today || risk.severity === 'danger' ? 'danger' : 'warning',

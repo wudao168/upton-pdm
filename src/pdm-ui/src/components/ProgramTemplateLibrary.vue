@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
-import { ArrowDown, ArrowUp, Blocks, Download, Plus, RefreshCw, Trash2, Upload } from '@lucide/vue'
+import { ArrowDown, ArrowUp, Blocks, Download, Plus, RotateCw as RefreshCw, Trash2, Upload } from '@lucide/vue'
 import FunctionBlockDiagram from './FunctionBlockDiagram.vue'
 import { useUserDisplayName } from '../userDisplay'
 import { createClientId } from '../clientId'
@@ -59,6 +59,7 @@ const uploadProgress = ref(0)
 const templates = ref<ProgramTemplate[]>([])
 const tasks = ref<ProgramTemplateTask[]>([])
 const search = ref('')
+const appliedSearch = ref('')
 const typeFilter = ref('')
 const categoryFilter = ref('')
 const platformFilter = ref('')
@@ -139,7 +140,7 @@ function listRevision(template: ProgramTemplate) {
 
 const rows = computed<ProgramTemplateListRow[]>(() => templates.value.map(template => ({ template, revision: listRevision(template) })).filter((row): row is ProgramTemplateListRow => Boolean(row.revision)).filter(row => {
   const text = `${row.template.code} ${row.revision!.name} ${row.revision!.description} ${row.revision!.vendor} ${row.revision!.platform} ${row.revision!.tags.join(' ')}`.toLocaleLowerCase('zh-CN')
-  return (!search.value.trim() || text.includes(search.value.trim().toLocaleLowerCase('zh-CN')))
+  return (!appliedSearch.value.trim() || text.includes(appliedSearch.value.trim().toLocaleLowerCase('zh-CN')))
     && (!typeFilter.value || row.template.assetType === typeFilter.value)
     && (!categoryFilter.value || row.revision!.category === categoryFilter.value)
     && (!platformFilter.value || row.revision!.platform === platformFilter.value)
@@ -676,14 +677,15 @@ onMounted(async () => {
         <el-select v-model="categoryFilter" clearable filterable placeholder="全部分类" aria-label="模板分类"><el-option v-for="item in categories" :key="item" :label="item" :value="item" /></el-select>
         <el-select v-model="platformFilter" clearable filterable placeholder="全部平台" aria-label="模板平台"><el-option v-for="item in platforms" :key="item" :label="item" :value="item" /></el-select>
         <el-select v-model="vendorFilter" clearable filterable placeholder="全部厂商" aria-label="模板厂商"><el-option v-for="vendor in vendors" :key="vendor" :label="vendor" :value="vendor" /></el-select>
-        <el-input v-model="search" clearable placeholder="搜索编号、名称、平台或标签" aria-label="搜索程序模板" />
-        <el-button v-if="canSubmit" class="program-template-upload" type="primary" :icon="Plus" @click="openCreate">上传程序模板</el-button>
+        <el-input v-model="search" clearable placeholder="搜索编号、名称、平台或标签" aria-label="搜索程序模板" class="program-template-search" @keyup.enter="appliedSearch = search" />
+        <el-button class="program-template-search-action" type="primary" @click="appliedSearch = search">搜索</el-button>
+        <el-button class="program-template-refresh" :icon="RefreshCw" :loading="loading" @click="load">刷新</el-button>
+        <el-button v-if="canSubmit" class="program-template-upload" type="primary" :icon="Plus" @click="openCreate">上传模板</el-button>
         <el-button v-if="canManageOptions" @click="openOptionMaintenance">选项维护</el-button>
-        <el-button :icon="RefreshCw" :loading="loading" @click="load">刷新</el-button>
         <span>共 {{ rows.length }} 项</span>
       </div>
 
-      <el-table v-loading="loading" :data="rows" stripe height="100%" row-key="template.id" @row-click="handleRowClick">
+      <el-table class="pdm-auto-fit-table" v-loading="loading" :data="rows" stripe height="100%" row-key="template.id" @row-click="handleRowClick">
         <el-table-column label="编号" width="108"><template #default="{ row }"><code>{{ row.template.code }}</code></template></el-table-column>
         <el-table-column label="程序名称" min-width="140"><template #default="{ row }"><strong class="program-template-name">{{ row.revision.name }}</strong></template></el-table-column>
         <el-table-column label="功能说明" min-width="220"><template #default="{ row }"><span class="program-template-description">{{ row.revision.description || '—' }}</span></template></el-table-column>
@@ -694,7 +696,7 @@ onMounted(async () => {
         <el-table-column label="提交人" width="90"><template #default="{ row }">{{ displayUserName(row.revision.createdBy) }}</template></el-table-column>
         <el-table-column label="状态" width="100" align="center"><template #default="{ row }"><el-tag :type="stateTagType(row.revision.state)">{{ stateLabel(row.revision.state) }}</el-tag></template></el-table-column>
         <el-table-column label="更新时间" width="140"><template #default="{ row }">{{ dateLabel(row.revision.publishedAt || row.revision.submittedAt || row.revision.createdAt) }}</template></el-table-column>
-        <el-table-column label="操作" width="64" fixed="right"><template #default="{ row }"><el-button link type="primary" @click.stop="openDetail(row.template.id, row.revision.id)">查看</el-button></template></el-table-column>
+        <el-table-column label="操作" width="64"><template #default="{ row }"><el-button link type="primary" @click.stop="openDetail(row.template.id, row.revision.id)">查看</el-button></template></el-table-column>
       </el-table>
     </section>
 
@@ -818,7 +820,7 @@ onMounted(async () => {
 
 <style scoped>
 .program-template-library { min-height: 0; height: 100%; display: flex; flex-direction: column; gap: var(--pdm-container-gap); }
-.program-template-panel { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0; }.program-template-toolbar { min-height: 50px; display: grid; grid-template-columns: 128px 128px 128px 128px minmax(160px,1fr) 150px auto auto auto; align-items: center; gap: 9px; padding: 8px 12px; border-bottom: 1px solid var(--pdm-border); }.program-template-toolbar > span { color: var(--pdm-muted); font-size: 11px; white-space: nowrap; }.program-template-toolbar .program-template-upload { width: 150px; }
+.program-template-panel { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0; }.program-template-toolbar { min-height: 50px; display: flex; flex-wrap: wrap; align-items: center; gap: 9px; padding: 8px 12px; border-bottom: 1px solid var(--pdm-border); }.program-template-toolbar > span { color: var(--pdm-muted); font-size: 11px; white-space: nowrap; }.program-template-toolbar .program-template-upload { width: 150px; }
 .program-template-panel :deep(.el-table__header .cell),.program-template-panel :deep(.el-table__body .cell) { text-align: center; justify-content: center; }
 .program-template-panel :deep(.el-table__body),.program-template-panel :deep(.el-table__body .cell),.program-template-panel :deep(.el-table__body code),.program-template-panel :deep(.el-table__body .el-tag),.program-template-panel :deep(.el-table__body .el-button) { font-size: 12px; }.program-template-name,.program-template-description,.program-template-cell-note { min-width: 0; display: block; overflow: hidden; font-size: 12px; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }.program-template-description,.program-template-cell-note { color: var(--pdm-muted); }.program-template-vendor { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 5px; overflow: hidden; white-space: nowrap; }.program-template-vendor strong { flex: 0 0 auto; font-size: 12px; }.program-template-vendor .program-template-cell-note { display: inline; }
 .program-template-detail-title { min-width: 0; display: flex; align-items: center; gap: 10px; }.program-template-detail-title div { min-width: 0; flex: 1; }.program-template-detail-title h2 { margin: 0; overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }.program-template-detail-title p { margin: 3px 0 0; color: var(--pdm-muted); font-size: 11px; }
@@ -880,4 +882,14 @@ onMounted(async () => {
 .program-template-interface-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.program-template-interface-heading h3 { margin-bottom: 2px; }.program-template-interface-heading p { margin: 0; color: var(--pdm-muted); font-size: 12px; }.program-template-interface-layout { display: grid; grid-template-columns: minmax(570px,1.15fr) minmax(360px,.85fr); gap: 10px; margin-top: 7px; }.program-template-parameter-editor { min-width: 0; display: grid; align-content: start; gap: 5px; }.program-template-parameter-row { display: grid; grid-template-columns: 76px minmax(90px,1fr) 90px 76px minmax(110px,1fr) 86px; grid-template-areas: "direction name type default description actions"; gap: 4px; padding: 4px; border: 1px solid var(--pdm-border-soft); border-radius: 7px; background: #fbfdff; }.program-template-parameter-row>*:nth-child(1){grid-area:direction}.program-template-parameter-row>*:nth-child(2){grid-area:name}.program-template-parameter-row>*:nth-child(3){grid-area:type}.program-template-parameter-row>*:nth-child(4){grid-area:default}.program-template-parameter-row>*:nth-child(5){grid-area:description}.program-template-parameter-row>*:nth-child(6){grid-area:actions;align-self:center}.program-template-parameter-row :deep(.el-button-group){display:flex;flex-wrap:nowrap}.program-template-parameter-row :deep(.el-button-group .el-button){width:28px;float:none;margin-left:0;padding:0}.program-template-live-preview { align-self: start; overflow: hidden; border: 1px solid var(--pdm-border); border-radius: 8px; background: #fbfdff; padding: 4px; }.program-template-live-preview :deep(.program-block-diagram){min-width:0}.program-template-version-hint { margin: 0; color: var(--pdm-muted); font-size: 11px; }
 @media(max-width:1000px){.program-template-toolbar{grid-template-columns:repeat(2,minmax(0,1fr))}.program-template-toolbar .el-select{width:100%}.program-template-toolbar .el-input{grid-column:1/-1}.program-template-interface-layout{grid-template-columns:1fr}.program-template-form-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.program-template-form-grid>*{grid-column:span 2}.program-template-form-grid .is-half{grid-column:span 2}.program-template-form-grid .is-wide{grid-column:1/-1}}
 @media(max-width:680px){.program-parameter-groups,.program-template-upload-grid,.program-template-form-grid{grid-template-columns:1fr}.program-template-form-grid>*,.program-template-form-grid .is-half,.program-template-form-grid .is-wide{grid-column:auto}.program-template-properties{grid-template-columns:1fr}.program-template-properties .is-wide{grid-column:auto}.program-template-parameter-row{grid-template-columns:84px minmax(120px,1fr) 90px auto;grid-template-areas:"direction name type actions" "default description description actions"}.program-template-history button{grid-template-columns:65px 75px 80px}.program-template-history small{display:none}}
+.program-template-toolbar { gap: 5px; }
+.program-template-toolbar > .el-button { box-sizing: border-box; width: 80px; min-width: 80px !important; max-width: 80px; height: 30px; min-height: 30px; flex: 0 0 80px; margin-left: 0; padding: 0 4px; }
+</style>
+<style scoped>
+.program-template-toolbar .el-select { width: 128px; }
+.program-template-toolbar .program-template-search { width: 250px; flex: 0 0 250px; }
+.program-template-toolbar .program-template-search-action,
+.program-template-toolbar .program-template-refresh { width: 80px; height: 30px; margin-left: 0; }
+.program-template-toolbar { gap: 5px; }
+.program-template-toolbar > .el-button { box-sizing: border-box; width: 80px; min-width: 80px !important; max-width: 80px; height: 30px; min-height: 30px; flex: 0 0 80px; margin-left: 0; padding: 0 4px; }
 </style>

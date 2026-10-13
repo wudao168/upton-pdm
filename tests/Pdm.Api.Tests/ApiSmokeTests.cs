@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -38,6 +38,115 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Assert.Equal("ok", health.Status);
         Assert.Equal(5080, health.ApiPort);
         Assert.Equal(3308, health.MySqlPort);
+    }
+
+    [Fact]
+    public async Task ArchiveBatchValidatesEveryFileBeforeCommitAndReturnsReplayReceipt()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var directory = Path.Combine(Path.GetTempPath(), "pdm-atomic-api-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(directory, ".versions"));
+        var project = await repository.CreateProjectAsync(new CreateProjectCommand("ATOMIC-" + Guid.NewGuid().ToString("N"), "整批接口", "admin", directory, directory), "admin", default);
+        var root = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "ROOT", "ROOT", "ROOT.SLDASM", DocumentKind.Assembly), "admin", default);
+        var part = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "PART", "PART", "PART.SLDPRT", DocumentKind.Part), "admin", default);
+        var session = Guid.NewGuid();
+        root = await repository.CheckoutAsync(root.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+        part = await repository.CheckoutAsync(part.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+        var child = new DocumentReferenceNode(Guid.NewGuid(), part.Id, "ROOT/PART", part.FileName, part.Name, part.Kind, "Default", 1, ReferenceNodeStatus.Normal, part.Revision, "admin", []);
+        var parent = new DocumentReferenceNode(Guid.NewGuid(), root.Id, "ROOT", root.FileName, root.Name, root.Kind, "Default", 1, ReferenceNodeStatus.Normal, root.Revision, "admin", [child]);
+        object FileRequest(PdmDocument document, DocumentReferenceNode node, bool isRoot, bool bad = false)
+        {
+            var bytes = Encoding.UTF8.GetBytes(document.FileName); var relative = ".versions/" + document.Id.ToString("N") + "-" + Guid.NewGuid().ToString("N");
+            File.WriteAllBytes(Path.Combine(directory, relative), bytes);
+            File.SetAttributes(Path.Combine(directory, relative), FileAttributes.ReadOnly);
+            return new { documentId = document.Id, request = new {
+                projectId = project.Id, root = node, comment = "整批接口测试", storageRelativePath = relative, fileLength = bytes.Length,
+                sha256 = bad ? new string('F', 64) : Convert.ToHexString(SHA256.HashData(bytes)), checkoutSessionId = session, isProjectRoot = isRoot,
+                properties = new Dictionary<string, string?>()
+            } };
+        }
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+        var invalid = await client.PostAsJsonAsync("/api/archive-batches", new { batchId = Guid.NewGuid(), checkoutSessionId = session,
+            files = new[] { FileRequest(part, child, false), FileRequest(root, parent, true, true) } });
+        Assert.False(invalid.IsSuccessStatusCode);
+        Assert.Empty(await repository.ListDocumentVersionsAsync(part.Id, default));
+        Assert.Empty(await repository.ListDocumentVersionsAsync(root.Id, default));
+        var batch = Guid.NewGuid(); var payload = new { batchId = batch, checkoutSessionId = session,
+            files = new[] { FileRequest(root, parent, true), FileRequest(part, child, false) } };
+        var success = await client.PostAsJsonAsync("/api/archive-batches", payload); Assert.True(success.IsSuccessStatusCode, await success.Content.ReadAsStringAsync());
+        var replay = await client.PostAsJsonAsync("/api/archive-batches", payload); replay.EnsureSuccessStatusCode();
+        Assert.Single(await repository.ListDocumentVersionsAsync(part.Id, default));
+        Assert.Single(await repository.ListDocumentVersionsAsync(root.Id, default));
+        var receipt = await client.GetAsync("/api/archive-batches/" + batch); receipt.EnsureSuccessStatusCode();
+    }
+
+    [Fact]
+    public async Task MultiConfigurationPreflightAllowsOnlyOwnedPlannedFilesAndRejectsMissingInstanceIdentity()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var project = await repository.CreateProjectAsync(new CreateProjectCommand("MULTI-" + Guid.NewGuid().ToString("N"), "多配置预检", "admin", "vault", "release"), "admin", default);
+        var root = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "ROOT", "总装", "ROOT.SLDASM", DocumentKind.Assembly), "admin", default);
+        var part = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "PART", "配置件", "PART.SLDPRT", DocumentKind.Part), "admin", default);
+        var session = Guid.NewGuid();
+        root = await repository.CheckoutAsync(root.Id, "admin", session, "QA-PC", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+        part = await repository.CheckoutAsync(part.Id, "admin", session, "QA-PC", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+        var child = new DocumentReferenceNode(Guid.NewGuid(), part.Id, "ROOT/PART-1", part.FileName, part.Name, part.Kind,
+            "CFG-A", 1, ReferenceNodeStatus.Normal, part.Revision, "admin", []);
+        var tree = new DocumentReferenceNode(Guid.NewGuid(), root.Id, "ROOT", root.FileName, root.Name, root.Kind, "Default", 1,
+            ReferenceNodeStatus.Normal, root.Revision, "admin", [child, child with { NodeId = Guid.NewGuid(), InstancePath = "ROOT/PART-2", Configuration = "CFG-B", Quantity = 2 }]);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+        async Task<HttpResponseMessage> Preflight(DocumentReferenceNode input, Guid[] planned) => await client.PostAsJsonAsync(
+            $"/api/documents/{root.Id}/checkin/preflight", new { projectId = project.Id, root = input, properties = new { }, checkoutSessionId = session, plannedDocumentIds = planned });
+        Assert.Equal(HttpStatusCode.BadRequest, (await Preflight(tree, [])).StatusCode);
+        (await Preflight(tree, [part.Id])).EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.BadRequest, (await Preflight(tree with { Children = [child, tree.Children[1] with { DocumentId = null }] }, [part.Id])).StatusCode);
+        Assert.Empty(await repository.ListDocumentVersionsAsync(root.Id, default));
+        Assert.Empty(await repository.ListDocumentVersionsAsync(part.Id, default));
+    }
+
+    [Fact]
+    public async Task RegistrationPreflight_ReportsOwnedUnarchivedRetryWithoutCreatingAnotherDocument()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var project = await repository.CreateProjectAsync(new CreateProjectCommand("PENDING-" + Guid.NewGuid().ToString("N"),
+            "首次存档重试", "admin", "vault", "release"), "admin", default);
+        var document = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "ROOT", "总装", "ROOT.SLDASM",
+            DocumentKind.Assembly, SourceSha256: new string('A', 64)), "admin", default);
+        await repository.CheckoutAsync(document.Id, "admin", Guid.NewGuid(), "QA-PC", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+        var response = await client.PostAsJsonAsync($"/api/projects/{project.Id}/documents/registration-preflight", new
+        {
+            candidates = new[] { new { candidateKey = "root", fileName = document.FileName, kind = 0, sourceSha256 = new string('B', 64) } }
+        });
+        response.EnsureSuccessStatusCode();
+        var matches = (await response.Content.ReadFromJsonAsync<JsonElement>()).EnumerateArray().ToArray();
+        var match = Assert.Single(matches);
+        Assert.Equal((int)DocumentRegistrationMatchKind.PendingFirstArchive, match.GetProperty("matchKind").GetInt32());
+        Assert.Equal(document.Id, match.GetProperty("existingDocumentId").GetGuid());
+        Assert.Empty(await repository.ListDocumentVersionsAsync(document.Id, default));
+        Assert.Equal(document.Id, Assert.Single(await repository.ListDocumentsAsync(project.Id, default)).Id);
+    }
+
+    [Fact]
+    public async Task AutomaticCloseRequiresOwnerGenerationAndPreservedDraftWithoutCreatingVersion()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var key = Guid.NewGuid().ToString("N");
+        var project = await repository.CreateProjectAsync(new CreateProjectCommand($"EDIT-{key}", "自动收尾测试", "admin", "vault", "release"), "admin", default);
+        var document = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "EDIT-" + key, "关闭测试", "edit.SLDPRT", DocumentKind.Part), "admin", default);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+        var sessionId = Guid.NewGuid();
+        var checkoutResponse = await client.PostAsJsonAsync($"/api/documents/{document.Id}/checkout", new { sessionId, machineName = "AUTO-CLOSE-TEST" });
+        checkoutResponse.EnsureSuccessStatusCode();
+        var checkout = (await checkoutResponse.Content.ReadFromJsonAsync<PdmDocument>())!;
+        var denied = await client.PostAsJsonAsync($"/api/documents/{document.Id}/close-edit", new { sessionId = Guid.NewGuid(), checkedOutAt = checkout.CheckedOutAt, sha256 = "draft", draftPreserved = true });
+        Assert.Equal(HttpStatusCode.Conflict, denied.StatusCode);
+        denied = await client.PostAsJsonAsync($"/api/documents/{document.Id}/close-edit", new { sessionId, checkedOutAt = checkout.CheckedOutAt, sha256 = "draft", draftPreserved = false });
+        Assert.Equal(HttpStatusCode.Conflict, denied.StatusCode);
+        var closed = await client.PostAsJsonAsync($"/api/documents/{document.Id}/close-edit", new { sessionId, checkedOutAt = checkout.CheckedOutAt, sha256 = "draft", draftPreserved = true });
+        closed.EnsureSuccessStatusCode();
+        Assert.Null((await repository.FindDocumentAsync(document.Id, default))!.CheckedOutBy);
+        Assert.Empty(await repository.ListDocumentVersionsAsync(document.Id, default));
     }
 
     [Fact]
@@ -1588,7 +1697,7 @@ public sealed class PdmApiFactory : WebApplicationFactory<Program>
         {
             // Endpoint tests drive synchronization explicitly; the polling worker must not consume their queued U9 responses.
             foreach (var registration in services.Where(service =>
-                service.ImplementationType == typeof(Upton.Pdm.Api.MaterialU9SyncBatchHostedService)).ToArray())
+                service.ImplementationType == typeof(Upton.Pdm.Api.MaterialU9SyncBatchHostedService) || service.ImplementationType == typeof(Upton.Pdm.Api.DingTalkStreamService)).ToArray())
                 services.Remove(registration);
             services.AddDataProtection().UseEphemeralDataProtectionProvider();
             services.RemoveAll<ICrmCustomerClient>();

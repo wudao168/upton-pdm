@@ -183,6 +183,26 @@ public sealed class MaterialServiceTests
     }
 
     [Fact]
+    public async Task MaterialPage_CompleteCodeUsesExactMatchAndMissingCodeFallsBackToKeyword()
+    {
+        var service = CreateService(out _);
+        var exact = await service.CreateAsync(new(null, "精确料号", MaterialKind.Electrical, MaterialSupplyMode.Purchase,
+            "001", "EXACT", null, null, "TEST", null, null, null, CategoryCode: "0101"), "admin", UserRole.Administrator, default);
+        var keyword = await service.CreateAsync(new(null, $"引用{exact.MaterialCode}及99999999999", MaterialKind.Electrical, MaterialSupplyMode.Purchase,
+            "001", "KEYWORD", null, null, "OTHER", null, null, null, CategoryCode: "0101"), "admin", UserRole.Administrator, default);
+        var result = await service.ListMaterialPageAsync($" {exact.MaterialCode} ", null, null, false, 1, 50, "admin", UserRole.Administrator, default);
+        Assert.Equal(1, result.Total);
+        Assert.Equal(exact.Id, Assert.Single(result.Items).Id);
+        var laterPage = await service.ListMaterialPageAsync(exact.MaterialCode, null, null, false, 2, 50, "admin", UserRole.Administrator, default);
+        Assert.Equal(1, laterPage.Total);
+        Assert.Empty(laterPage.Items);
+        var fallback = await service.ListMaterialPageAsync("99999999999", null, null, false, 1, 50, "admin", UserRole.Administrator, default);
+        Assert.Equal(keyword.Id, Assert.Single(fallback.Items).Id);
+        var filtered = await service.ListMaterialPageAsync(exact.MaterialCode, null, "OTHER", false, 1, 50, "admin", UserRole.Administrator, default);
+        Assert.Equal(keyword.Id, Assert.Single(filtered.Items).Id);
+    }
+
+    [Fact]
     public async Task MaterialPage_KeywordSearchExcludesBrandButBrandFilterMatches()
     {
         var service = CreateService(out _);
@@ -1259,18 +1279,20 @@ public sealed class MaterialServiceTests
         Assert.Null(await materials.FindMaterialBySourceBomItemAsync(Guid.NewGuid(), default));
     }
 
-    [Fact]
-    public async Task StandardBomMaterialCode_UsesUniqueMatchAndOnlyCreatesApplicationForNoMatch()
+    [Theory]
+    [InlineData(BomKind.Standard, MaterialKind.Standard, "0102")]
+    [InlineData(BomKind.Electrical, MaterialKind.Electrical, "0101")]
+    public async Task StandardBomMaterialCode_UsesUniqueMatchAndOnlyCreatesApplicationForNoMatch(BomKind bomKind, MaterialKind materialKind, string categoryCode)
     {
         var service = CreateService(out var materials, out var repository, out _);
         var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
         var existing = await service.CreateAsync(new(
-            null, "匹配气缸", MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
-            "CP96", null, null, "SMC", null, null, null, CategoryCode: "0102"),
+            null, "匹配气缸", materialKind, MaterialSupplyMode.Purchase, "001",
+            "CP96", null, null, "SMC", null, null, null, CategoryCode: categoryCode),
             "admin", UserRole.Administrator, default);
         existing = (await service.ApproveAsync(existing.Id, existing.RowVersion, "admin", UserRole.Administrator, default)).Material;
 
-        var bom = await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+        var bom = await workflow.ReplaceBomAsync(ProjectId, bomKind,
         [
             new BomItemInput(1, string.Empty, "匹配气缸", 1, "001", null, "CP96", "W1", true, Brand: "SMC"),
             new BomItemInput(2, string.Empty, "全新标准件", 1, "001", null, "NEW-001", "W1", true, Brand: "NEWBRAND")

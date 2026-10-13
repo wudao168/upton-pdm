@@ -43,7 +43,7 @@ onMounted(load)
       <el-button :loading="loading" @click="load">刷新</el-button>
     </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
-    <el-table v-loading="loading" :data="paged" stripe border height="100%" empty-text="暂无BOM表头料号" class="bom-header-directory__table">
+    <el-table v-loading="loading" :data="paged" stripe height="100%" empty-text="暂无BOM表头料号" class="bom-header-directory__table">
       <el-table-column prop="projectCode" label="项目号" width="100" show-overflow-tooltip />
       <el-table-column prop="subprojectCode" label="子项目号" width="100" show-overflow-tooltip />
       <el-table-column prop="projectName" label="项目名称" width="150" show-overflow-tooltip />

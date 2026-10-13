@@ -65,6 +65,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     private TabPage structureTab;
     private TabPage automaticDrawingTab;
     private TabPage versionsTab;
+    private TabPage diagnosticsTab;
     private bool suppressVersionTabRequest;
     private readonly ListView versionList = new ListView();
     private readonly Button openCurrentButton = new Button();
@@ -280,8 +281,13 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     public void SetWorkspaceOperationState(bool active, string message)
     {
+        if (active && !workspaceOperationActive) Upton.Pdm.ClientShared.ClientDiagnostics.BeginOperation();
         RunOnUiThread(() =>
         {
+            if (active || workspaceOperationActive)
+                PluginDiagnosticLog.Record(active ? "开始" : "结束", active
+                    ? message + "\r\n项目：" + currentProject.Text + "\r\n图档：" + rootNode?.FullPath
+                    : "操作已结束，请结合结果记录确认成功或失败。");
             workspaceOperationActive = active;
             workspaceOperationStatus.Text = active
                 ? string.Concat("运行状态：处理中", Environment.NewLine, string.IsNullOrWhiteSpace(message) ? "PLM工作文件操作" : message.Trim())
@@ -292,7 +298,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             actionToolTip.SetToolTip(serviceStatus, active ? "PLM正在处理工作文件" : serviceStatus.AccessibleDescription);
             structureMenu.Enabled = !active;
             versionMenu.Enabled = !active;
-            tabsHost.Enabled = !active;
+            foreach (TabPage tab in tabs.TabPages) tab.Enabled = !active || tab == diagnosticsTab;
             projectPanel.Enabled = !active;
             UseWaitCursor = active;
             UpdateSelected(SelectedNode);
@@ -305,6 +311,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     public void SetWorkspaceOperationProgress(string message, int completed, int total)
     {
+        PluginDiagnosticLog.Record("进度", message);
         RunOnUiThread(() =>
         {
             if (!workspaceOperationActive)
@@ -720,6 +727,10 @@ internal sealed class PdmTaskPaneControl : UserControl
         tabs.TabPages.Add(automaticDrawingTab);
         versionsTab = BuildVersionsTab();
         tabs.TabPages.Add(versionsTab);
+        diagnosticsTab = new TabPage("日志") { BackColor = Color.White, Padding = new Padding(8) };
+        diagnosticsTab.Controls.Add(new DiagnosticLogControl(installedPluginVersion));
+        tabs.TabPages.Add(diagnosticsTab);
+        PluginDiagnosticLog.Record("启动", "插件已加载，版本：" + installedPluginVersion);
         tabs.TabPages.Add(new TabPage("待办") { BackColor = Color.White });
         tabs.SelectedIndexChanged += (_, _) =>
         {
@@ -1165,7 +1176,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         contextVersions.Text = "查看/对比历史版本...";
         contextRefresh.Text = "刷新设计树";
         contextWhereUsed.Text = "使用位置...";
-        contextRequestRelease.Text = "申请释放编辑权限...";
+        contextRequestRelease.Text = "我需要编辑";
         contextOpenReleaseCenter.Text = "进入审批与发布...";
         contextWithdrawApproval.Text = "撤回当前审批...";
         contextObsolete.Text = "作废图档...";

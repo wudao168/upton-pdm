@@ -7,6 +7,12 @@ public sealed partial class InMemoryPdmRepository
 {
     private readonly Dictionary<Guid, UserNotification> userNotifications = [];
 
+    public Task<IReadOnlyList<string>> ListNotificationRecipientsAsync(string sourceKey, CancellationToken cancellationToken)
+    {
+        lock (gate) return Task.FromResult<IReadOnlyList<string>>(userNotifications.Values
+            .Where(item => item.SourceKey == sourceKey).Select(item => item.Recipient).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+    }
+
     public Task<IReadOnlyList<UserNotification>> ListUserNotificationsAsync(string recipient, int take, CancellationToken cancellationToken)
     {
         lock (gate)
@@ -16,6 +22,8 @@ public sealed partial class InMemoryPdmRepository
                 .Where(item => !item.IsPlanOverdueReminder)
                 .OrderByDescending(item => item.CreatedAt)
                 .ThenByDescending(item => item.Id)
+                .GroupBy(item => item.Category == "project-plan" && item.SourceKey.StartsWith("project-plan:", StringComparison.Ordinal) ? $"project-plan:{item.SourceKey.Split(':').ElementAtOrDefault(1)}" : item.Id.ToString())
+                .Select(group => group.First())
                 .Take(Math.Clamp(take, 1, 200))
                 .ToArray());
         }

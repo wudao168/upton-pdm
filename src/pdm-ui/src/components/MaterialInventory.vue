@@ -235,7 +235,7 @@ onMounted(() => {
         <el-alert v-if="errorMessage" :title="errorMessage" type="error" :closable="false" show-icon />
         <el-alert v-if="similarMode" :title="`相似查询中：${appliedSimilarFilters.specification}；品牌：${appliedSimilarFilters.brand || '不限'}${appliedSimilarFilters.brand ? '（一致品牌优先）' : ''}；相似度≥80%，由高到低排序。仅供查找，替代前需人工核对。`" type="info" :closable="false" show-icon />
         <div class="material-inventory__table">
-          <el-table :data="rows" height="100%" border stripe show-summary :summary-method="inventorySummary" empty-text="尚无符合条件的库存记录">
+          <el-table :data="rows" height="100%" stripe show-summary :summary-method="inventorySummary" empty-text="尚无符合条件的库存记录">
             <el-table-column align="center" prop="warehouseName" label="存储地点名称" min-width="150" show-overflow-tooltip />
             <el-table-column align="center" prop="materialCode" label="料号" min-width="130" show-overflow-tooltip />
             <el-table-column align="center" prop="itemName" label="品名" min-width="150" show-overflow-tooltip />

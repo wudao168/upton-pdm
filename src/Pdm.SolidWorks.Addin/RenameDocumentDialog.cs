@@ -11,7 +11,7 @@ internal sealed class RenameDocumentDialog : Form
     public RenameDocumentDialog(string currentName, string extension)
     {
         Text = "重命名图档";
-        StartPosition = FormStartPosition.CenterParent;
+        DialogWindowSizing.CenterOnOwnerScreen(this);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;

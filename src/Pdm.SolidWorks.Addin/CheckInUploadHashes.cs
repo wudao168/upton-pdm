@@ -12,7 +12,7 @@ internal sealed class CheckInUploadHashes
     public string Source { get; private set; }
 
     public static CheckInUploadHashes Read(string uploadPath, string sourcePath,
-        string exactCopySourceSha256, CancellationToken cancellationToken)
+        string exactCopySourceSha256, CancellationToken cancellationToken, string expectedSourceSha256 = null)
     {
         var upload = Compute(uploadPath, cancellationToken);
         if (!string.IsNullOrEmpty(exactCopySourceSha256))
@@ -22,8 +22,18 @@ internal sealed class CheckInUploadHashes
             return new CheckInUploadHashes { Upload = upload, Source = upload };
         }
 
-        // SaveAs copies can differ from the source; retain separate hashes for that path.
-        return new CheckInUploadHashes { Upload = upload, Source = Compute(sourcePath, cancellationToken) };
+        // SaveAs changes the copy's bytes, but its source must still match the pre-copy snapshot.
+        VerifySource(sourcePath, expectedSourceSha256, cancellationToken);
+        return new CheckInUploadHashes { Upload = upload, Source = expectedSourceSha256 };
+    }
+
+    public static void VerifySource(string sourcePath, string expectedSha256, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (string.IsNullOrWhiteSpace(expectedSha256))
+            throw new IOException("缺少存档前的文件校验记录，已停止提交。请重新保存文件后再存档。");
+        if (!string.Equals(Compute(sourcePath, cancellationToken), expectedSha256, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("图档在存档期间发生变化，已停止提交。请保存文件后重新存档。");
     }
 
     private static string Compute(string path, CancellationToken cancellationToken)

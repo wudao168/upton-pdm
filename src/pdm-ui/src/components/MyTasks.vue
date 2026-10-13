@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import PanelActions from './PanelActions.vue'
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
-import { ClipboardCheck, KeyRound, RefreshCw } from '@lucide/vue'
+import { ClipboardCheck, KeyRound, RotateCw as RefreshCw } from '@lucide/vue'
 import type { EditLockSummary, MaterialCodeApplication, MyApprovalTask, PasswordResetTask, ProgramTemplateTask, UserNotification } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
@@ -112,9 +113,10 @@ const forceReleaseDialogOpen = ref(false)
 const forceReleaseDialogTargets = ref<EditLockSummary[]>([])
 const forceReleaseReason = ref('')
 const forceReleaseSubmitting = ref(false)
+const requestReleaseSubmitting = ref(false)
 const forceReleaseDialogSummary = computed(() => {
   const targets = forceReleaseDialogTargets.value
-  return targets.length ? `将统一释放 ${targets[0].projectCode} 项目下 ${targets.length} 个超时编辑权限，相关旧会话将立即失效，只能另存文件，不能提交。` : ''
+  return targets.length ? `将结束 ${targets[0].projectCode} 项目下 ${targets.length} 个离线图档的占用。本地修改仍会保留；旧会话将失效，再次编辑时必须核对服务器版本。` : ''
 })
 
 function stageLabel(stage: string | number) {
@@ -128,6 +130,7 @@ function stageLabel(stage: string | number) {
 }
 
 function notificationActionLabel(notification: UserNotification) {
+  if (notification.category.startsWith('EditLock')) return '查看图档'
   if (notification.category === 'ProjectTodo') return '查看项目'
   return notification.category === 'MaterialMasterRejected' || notification.category === 'MaterialCodeApplicationRejected'
     ? '查看料品'
@@ -259,11 +262,11 @@ watch([pageSize, () => filteredRows.value.length], () => {
 })
 
 function forceReleaseTargets(locks: EditLockSummary[] = []) {
-  return locks.filter(lock => lock.canForceRelease && !lock.ownedByCurrentUser)
+  return locks.filter(lock => lock.canForceRelease)
 }
 
 function requestReleaseTargets(locks: EditLockSummary[] = []) {
-  return locks.filter(lock => lock.canRequestRelease && !lock.ownedByCurrentUser && !lock.releaseRequestedBy)
+  return locks.filter(lock => lock.canRequestRelease && !lock.ownedByCurrentUser)
 }
 
 function forceReleaseLabel(locks: EditLockSummary[] = []) {
@@ -273,7 +276,7 @@ function forceReleaseLabel(locks: EditLockSummary[] = []) {
 
 function requestReleaseLabel(locks: EditLockSummary[] = []) {
   const count = requestReleaseTargets(locks).length
-  return count > 1 ? `统一催办／申请（${count}）` : '催办／申请释放'
+  return count > 1 ? `我需要编辑（${count}）` : '我需要编辑'
 }
 
 function openForceRelease(locks: EditLockSummary[]) {
@@ -286,20 +289,20 @@ function openForceRelease(locks: EditLockSummary[]) {
 
 async function requestRelease(locks: EditLockSummary[]) {
   const targets = requestReleaseTargets(locks)
-  if (!targets.length) return
+  if (!targets.length || requestReleaseSubmitting.value) return
   let completed = 0
+  requestReleaseSubmitting.value = true
   try {
-    const { value } = await ElMessageBox.prompt(`将向 ${targets[0].projectCode} 项目下 ${targets.length} 个图档的当前编辑人统一发送释放申请。`, '批量申请释放编辑权限', { inputValue: '需要继续该项目设计，请及时提交存档或结束编辑。', inputValidator: value => value.trim().length > 0 || '请填写申请原因', confirmButtonText: '提交申请', cancelButtonText: '取消' })
     for (const lock of targets) {
-      await props.onRequestRelease(lock.documentId, value)
+      await props.onRequestRelease(lock.documentId, '需要继续编辑该图档，请在完成后关闭图档。')
       completed++
     }
-    ElMessage.success(`已统一提交 ${completed} 个释放申请`)
+    ElMessage.success(`已通知编辑人员，${completed} 个图档结束编辑后会在消息中心通知您`)
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     const message = error instanceof Error ? error.message : '申请释放失败'
     ElMessage.error(completed ? `已提交 ${completed} 个，其余未完成：${message}` : message)
-  }
+  } finally { requestReleaseSubmitting.value = false }
 }
 
 async function confirmForceRelease() {
@@ -344,7 +347,7 @@ async function resetPassword(task: PasswordResetTask) {
     <section class="pdm-panel pdm-task-message-panel" aria-label="消息中心">
       <div class="pdm-task-toolbar">
         <button type="button" class="pdm-secondary-action" :disabled="pending" @click="$emit('refresh')"><RefreshCw :size="14" />刷新</button>
-        <button v-if="notifications.some(item => !item.readAt)" type="button" class="pdm-secondary-action" :disabled="pending" @click="onMarkAllNotificationsRead">全部已读</button>
+        <PanelActions><button v-if="notifications.some(item => !item.readAt)" type="button" class="pdm-secondary-action" :disabled="pending" @click="onMarkAllNotificationsRead">全部已读</button></PanelActions>
         <div class="pdm-task-filters" role="tablist" aria-label="待办类型">
           <button type="button" role="tab" :aria-selected="taskFilter === 'all'" @click="setTaskFilter('all')">全部待办（{{ filterCounts.all }}）</button>
           <button v-if="filterCounts.todo" type="button" role="tab" :aria-selected="taskFilter === 'todo'" @click="setTaskFilter('todo')">项目待办（{{ filterCounts.todo }}）</button>
@@ -374,9 +377,9 @@ async function resetPassword(task: PasswordResetTask) {
                 <button v-else-if="row.program" type="button" class="pdm-text-action" @click.stop="$emit('openProgramTemplate', row.program.templateId)">查看模板</button>
                 <button v-else-if="row.password" type="button" class="pdm-text-action" :disabled="pending" @click.stop="resetPassword(row.password)"><KeyRound :size="14" />重置密码</button>
                 <button v-else-if="forceReleaseTargets(row.locks).length" type="button" class="pdm-text-action is-danger" :disabled="pending" @click.stop="openForceRelease(row.locks!)">{{ forceReleaseLabel(row.locks) }}</button>
-                <button v-else-if="requestReleaseTargets(row.locks).length" type="button" class="pdm-text-action" :disabled="pending" @click.stop="requestRelease(row.locks!)">{{ requestReleaseLabel(row.locks) }}</button>
+                <button v-else-if="requestReleaseTargets(row.locks).length" type="button" class="pdm-text-action" :disabled="pending || requestReleaseSubmitting" @click.stop="requestRelease(row.locks!)">{{ requestReleaseLabel(row.locks) }}</button>
                 <span v-else-if="row.locks?.some(lock => lock.releaseRequestedBy)">已申请</span>
-                <span v-else-if="row.locks?.some(lock => lock.ownedByCurrentUser)" class="pdm-lock-own">请在SolidWorks处理</span>
+                <span v-else-if="row.locks?.some(lock => lock.ownedByCurrentUser)" class="pdm-lock-own">关闭图档后自动结束编辑</span>
                 <span v-else>—</span>
               </td>
             </tr>

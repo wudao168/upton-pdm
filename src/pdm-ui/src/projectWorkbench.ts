@@ -1,7 +1,7 @@
 import type { ProjectPlan, ProjectPlanTask, ProjectSummary } from './types'
 
 export type WorkbenchView = 'division' | 'manager' | 'engineer' | 'procurement' | 'production' | 'sales' | 'quality'
-export type WorkbenchTab = 'overview' | 'project-plan' | 'budget' | 'procurement' | 'validation-plan' | 'quality-records' | 'information' | 'files' | 'release'
+export type WorkbenchTab = 'opl' | 'overview' | 'project-plan' | 'budget' | 'procurement' | 'validation-plan' | 'quality-records' | 'information' | 'files' | 'release'
 export interface WorkbenchProject {
   project: ProjectSummary
   plan: ProjectPlan | null
@@ -11,6 +11,8 @@ export interface WorkbenchProject {
   quality: { state: string; total: number; pending: number; failed: number; records: number; unconfirmed?: number } | null
   warnings: string[]
   canRegisterRisk: boolean
+  canMaintainRecord?: boolean
+  oplOpenCount?: number | null
   completionPercent: number | null
 }
 export interface WorkbenchRisk {
@@ -19,7 +21,7 @@ export interface WorkbenchRisk {
 }
 export interface WorkbenchData {
   views: { key: WorkbenchView; label: string }[]; view: WorkbenchView | ''; updatedAt: string
-  projects: WorkbenchProject[]; risks: WorkbenchRisk[]
+  projects: WorkbenchProject[]; risks: WorkbenchRisk[]; scopes?: string[]
 }
 export interface WorkbenchAction {
   id: string; projectId: string; title: string; impact: string; owner?: string; due?: string

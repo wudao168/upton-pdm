@@ -63,8 +63,8 @@ watch(nameplateOpen, open => { if (!open) void loadNameplateAccess() })
         <header><h2>人员信息</h2><div class="project-information__staff-actions"><el-button v-if="canMaintainTeam && (rootProject.canManageMainStaffing || rootProject.canAssignDesigners)" aria-label="分配团队人员" @click="assignment?.configure()">分配</el-button><el-button v-if="canEdit" type="primary" aria-label="保存人员信息" @click="save">保存</el-button></div></header>
         <div class="project-information__table-wrap">
           <table class="project-information__table project-information__people">
-            <thead><tr><th>项目经理</th><th>协同项目经理</th><th>主设</th><th>销售</th><th>售前</th><th v-for="phase in phaseRoles" :key="phase.key">{{ phase.label }}</th></tr></thead>
-            <tbody><tr><td>{{ people([rootProject.primaryProjectManager]) }}</td><td>{{ people(rootProject.collaborativeProjectManagers) }}</td><td>{{ people(leads(rootProject)) }}</td><td><button v-if="canEdit" type="button" class="pdm-text-action" aria-label="分配销售人员" @click="staffAssignment = 'salesPeople'">{{ people(selectedPeople(staff.salesPeople)) }}</button><span v-else>{{ people(selectedPeople(staff.salesPeople)) }}</span></td><td><button v-if="canEdit" type="button" class="pdm-text-action" aria-label="分配售前人员" @click="staffAssignment = 'presalesPeople'">{{ people(selectedPeople(staff.presalesPeople)) }}</button><span v-else>{{ people(selectedPeople(staff.presalesPeople)) }}</span></td><td v-for="phase in phaseRoles" :key="phase.key">{{ people((rootProject.phaseOwners?.[phase.key] ?? '').split('、')) }}</td></tr></tbody>
+            <thead><tr><th>项目经理</th><th>协同项目经理</th><th>主设</th><th>电气硬件</th><th>销售</th><th>售前</th><th v-for="phase in phaseRoles" :key="phase.key">{{ phase.label }}</th></tr></thead>
+            <tbody><tr><td>{{ people([rootProject.primaryProjectManager]) }}</td><td>{{ people(rootProject.collaborativeProjectManagers) }}</td><td>{{ people(leads(rootProject)) }}</td><td>{{ people((rootProject.phaseOwners?.ElectricalHardware ?? '').split('、')) }}</td><td><button v-if="canEdit" type="button" class="pdm-text-action" aria-label="分配销售人员" @click="staffAssignment = 'salesPeople'">{{ people(selectedPeople(staff.salesPeople)) }}</button><span v-else>{{ people(selectedPeople(staff.salesPeople)) }}</span></td><td><button v-if="canEdit" type="button" class="pdm-text-action" aria-label="分配售前人员" @click="staffAssignment = 'presalesPeople'">{{ people(selectedPeople(staff.presalesPeople)) }}</button><span v-else>{{ people(selectedPeople(staff.presalesPeople)) }}</span></td><td v-for="phase in phaseRoles" :key="phase.key">{{ people((rootProject.phaseOwners?.[phase.key] ?? '').split('、')) }}</td></tr></tbody>
           </table>
         </div>
       </section>
@@ -104,7 +104,7 @@ watch(nameplateOpen, open => { if (!open) void loadNameplateAccess() })
 .project-information__people{min-width:0;table-layout:fixed}.project-information__people th,.project-information__people td{padding:4px;white-space:normal;overflow-wrap:anywhere}.project-information__table button{font-size:11px}
 .project-information__staff{flex:none;overflow:hidden}.project-information__staff>header{display:flex;align-items:center;gap:12px;min-height:32px;padding:0 12px;border-bottom:1px solid var(--pdm-border)}
 .project-information__staff-actions{display:flex;gap:5px;margin-left:auto}
-.project-information__staff-actions :deep(.el-button){width:60px;min-width:60px;height:24px;margin:0;padding:0 6px;font-size:11px}.project-information__staff .project-information__table-wrap{max-height:240px}
+.project-information__staff-actions :deep(.el-button){width:auto;min-width:60px;height:var(--pdm-button-compact);margin:0;padding:0 6px;font-size:11px}.project-information__staff .project-information__table-wrap{max-height:240px}
 
 .project-information__panel{flex:1 0 180px}
 </style>

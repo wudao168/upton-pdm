@@ -49,12 +49,12 @@ internal static class Program
         Test("copied bindings cannot be replayed at another path or machine", TestBindingValidation);
         Test("same filename does not attach an external file during metadata refresh", TestNoFilenameBinding);
         Test("packed nested assemblies may reference sibling folders", TestNestedPackedAssembly);
-        Test("new assemblies block original external files but allow target project controlled references", TestExternalReferences);
+        Test("new assemblies allow unregistered external files but block foreign controlled references", TestExternalReferences);
         Test("registration persists identity on the source even after UI tree refresh", TestRegistrationBinding);
         Test("structure actions lock during workspace work and recover afterward", TestSelectionIndependentStructureActions);
         Test("binding failure stops before assigning an in-memory identity", TestBindingFailure);
         Test("incremental plan submits ten new files and parent, not ten unchanged originals", TestIncrementalPlan);
-        Test("one project uses one visible working directory", TestProjectWorkspaceDirectory);
+        Test("independent roots use separate visible working directories", TestProjectWorkspaceDirectory);
         Test("project workspace refresh preserves unrelated files", TestWorkspaceMerge);
         Test("writable changed files block refresh while stale read-only files may refresh", TestWorkspaceChangeGuard);
         Test("workspace manifests cannot escape the managed directory", TestWorkspaceTraversalGuard);
@@ -65,6 +65,13 @@ internal static class Program
         Test("batch completion refreshes local controlled version metadata", TestBatchControlledVersionBinding);
         Test("post-check-in refresh cannot restore stale controlled-open metadata", TestCheckedInManifestRefresh);
         Test("batch archive seeds a safe read-only project workspace cache", TestBatchArchiveSeedsProjectCache);
+        Test("downloaded upload copies retain their actual hash after unchanged completion", TestDownloadedCopyBinding);
+        Test("post-commit local edits cannot be acknowledged as archived", TestPostCommitLocalChange);
+        Test("binding write failure is reported without claiming server archive failed", TestArchiveBindingFailure);
+        Test("incomplete local metadata never claims verified cache", TestIncompleteLocalMetadata);
+        Test("valid copy wins over damaged readonly duplicate without deleting either", TestReadOnlyDuplicateSelection);
+        Test("identical changed copies do not conflict but distinct writable edits do", TestChangedDuplicateIdentity);
+        Test("managed archived sources do not create duplicate caches", TestManagedArchiveCache);
         Console.WriteLine($"Passed={passed}; Failed={failed}; no SolidWorks COM or production API calls.");
         return failed == 0 ? 0 : 1;
     }
@@ -273,7 +280,7 @@ internal static class Program
         var child = Node("original/shared.SLDPRT", null);
         FixtureFile("original/shared.SLDPRT");
         Children(root).Add(child);
-        Expect<InvalidOperationException>(() => Static("PdmAddin", "ValidateNewAssemblyReferenceLocations", Items(root, child), project));
+        Static("PdmAddin", "ValidateNewAssemblyReferenceLocations", Items(root, child), project);
         Bind((string)Get(child, "FullPath"), Guid.NewGuid(), Guid.NewGuid());
         Expect<InvalidOperationException>(() => Static("PdmAddin", "ValidateNewAssemblyReferenceLocations", Items(root, child), project));
         var controlledPath = WorkspaceFile("target-project/shared.SLDPRT");
@@ -390,8 +397,8 @@ internal static class Program
         var second = Manifest("P700002", "second.SLDASM");
         var firstDirectory = (string)Call(manager, "WorkingDirectory", first);
         var secondDirectory = (string)Call(manager, "WorkingDirectory", second);
-        Assert(firstDirectory == secondDirectory, "different root documents created separate project views");
-        Assert(firstDirectory == Path.Combine(root, "View", "P700002"), "visible project view path differs");
+        Assert(firstDirectory != secondDirectory, "independent roots share a working directory");
+        Assert(firstDirectory == Path.Combine(root, "View", "P700002", "装配工作区", ((Guid)Get(first, "RootDocumentId")).ToString("N")), "visible root view path differs");
         ((IDisposable)client).Dispose();
     }
 
@@ -424,7 +431,9 @@ internal static class Program
         File.WriteAllText(path, "changed");
         File.SetAttributes(path, FileAttributes.ReadOnly);
         var files = TypedArray("ControlledOpenFileDto", file);
-        Assert(!(bool)Static("ControlledWorkspaceManager", "HasPotentialLocalChanges", target, files, Array.Empty<Guid>()), "stale read-only cache blocked safe refresh");
+        Assert((bool)Static("ControlledWorkspaceManager", "HasPotentialLocalChanges", target, files, Array.Empty<Guid>()), "unknown read-only content was not protected");
+        Assert((bool)Static("PdmDocumentIdentityStore", "TryWriteControlledVersion", path, Get(file, "DocumentId"), Guid.NewGuid(), Guid.NewGuid(), "W1", Hash(File.ReadAllBytes(path)), new FileInfo(path).Length), "baseline binding failed");
+        Assert(!(bool)Static("ControlledWorkspaceManager", "HasPotentialLocalChanges", target, files, Array.Empty<Guid>()), "known unchanged read-only baseline blocked safe refresh");
         File.SetAttributes(path, FileAttributes.Normal);
         Assert((bool)Static("ControlledWorkspaceManager", "HasPotentialLocalChanges", target, files, Array.Empty<Guid>()), "writable changed file was not protected");
     }
@@ -705,7 +714,7 @@ internal static class Program
             documentId,
             projectId,
             version);
-        var expected = Path.Combine(workspaceRoot, "View", projectCode, "drawing.SLDDRW");
+        var expected = Path.Combine(workspaceRoot, "View", projectCode, "图档缓存", documentId.ToString("N"), "drawing.SLDDRW");
         Assert(string.Equals(cached, expected, StringComparison.OrdinalIgnoreCase), "batch archive did not create the project cache path");
         Assert(File.Exists(expected), "batch archive project cache file is missing");
         Assert((File.GetAttributes(expected) & FileAttributes.ReadOnly) != 0, "batch archive project cache is not read-only");
@@ -733,6 +742,107 @@ internal static class Program
             version);
         Assert(string.IsNullOrWhiteSpace(refused), "different existing project file was treated as replaceable cache");
         Assert(File.ReadAllText(expected) == before, "different existing project file was overwritten");
+    }
+
+    private static void TestDownloadedCopyBinding()
+    {
+        var project = Guid.NewGuid(); var id = Guid.NewGuid();
+        var path = WorkspaceFile("HASH-BASE/drawing.SLDDRW");
+        File.WriteAllText(path, "stored upload copy");
+        var version = Version("W1", Hash(File.ReadAllBytes(path)));
+        Set(version, "Id", Guid.NewGuid());
+        Set(version, "PropertySnapshot", new Dictionary<string, string> { ["SourceFileSha256"] = Hash(System.Text.Encoding.UTF8.GetBytes("original source")) });
+        Assert(string.IsNullOrEmpty((string)Call(New("PdmAddin"), "RememberControlledVersionIdentityAndManifest", path, id, project, version)), "valid stored copy rejected");
+        File.SetAttributes(path, FileAttributes.ReadOnly);
+        Assert((string)Get(ArchiveState("HASH-BASE", project, id), "LocalState") == "ReadOnlyCache", "stored copy was falsely marked abnormal");
+    }
+
+    private static void TestPostCommitLocalChange()
+    {
+        var project = Guid.NewGuid(); var id = Guid.NewGuid();
+        var path = WorkspaceFile("POST-COMMIT/drawing.SLDDRW");
+        File.WriteAllText(path, "archived bytes");
+        var version = Version("W1", Hash(File.ReadAllBytes(path))); Set(version, "Id", Guid.NewGuid());
+        Static("PdmAddin", "RememberControlledVersionIdentity", path, id, project, version);
+        File.WriteAllText(path, "unarchived later edit");
+        var warning = (string)Call(New("PdmAddin"), "RememberControlledVersionIdentityAndManifest", path, id, project, version);
+        Assert(warning.Contains("服务器存档已完成") && warning.Contains("未能同步"), "post-commit change silently acknowledged");
+        Assert(File.ReadAllText(path) == "unarchived later edit", "local edit overwritten");
+        Assert((string)Get(ArchiveState("POST-COMMIT", project, id), "LocalState") == "Modified", "local edit hidden as valid cache");
+    }
+
+    private static void TestArchiveBindingFailure()
+    {
+        var path = WorkspaceFile("BINDING-FAIL/drawing.SLDDRW");
+        var version = Version("W1", Hash(File.ReadAllBytes(path))); Set(version, "Id", Guid.NewGuid());
+        var field = Type("PdmDocumentIdentityStore").GetField("bindingDirectory", Members);
+        var previous = field.GetValue(null);
+        var blocker = WriteFixture(Path.Combine(directory, "binding-blocker"), "file, not directory");
+        field.SetValue(null, blocker);
+        try
+        {
+            var warning = (string)Call(New("PdmAddin"), "RememberControlledVersionIdentityAndManifest", path, Guid.NewGuid(), Guid.NewGuid(), version);
+            Assert(warning.Contains("服务器存档已完成") && warning.Contains("磁盘空间"), "binding failure not surfaced in Chinese");
+        }
+        finally { field.SetValue(null, previous); }
+    }
+
+    private static void TestIncompleteLocalMetadata()
+    {
+        var project = Guid.NewGuid(); var id = Guid.NewGuid();
+        var path = WorkspaceFile("INCOMPLETE/drawing.SLDDRW"); Bind(path, id, project); File.SetAttributes(path, FileAttributes.ReadOnly);
+        Assert((string)Get(ArchiveState("INCOMPLETE", project, id), "LocalState") == "NeedsUpdate", "missing baseline considered verified");
+    }
+
+    private static void TestReadOnlyDuplicateSelection()
+    {
+        foreach (var damagedFirst in new[] { true, false })
+        {
+            var code = "COPY-SELECT-" + damagedFirst; var project = Guid.NewGuid(); var id = Guid.NewGuid();
+            var first = WorkspaceFile(code + "/a.SLDDRW"); var second = WorkspaceFile(code + "/b.SLDDRW");
+            File.WriteAllText(first, "valid bytes"); File.WriteAllText(second, "valid bytes");
+            var version = Version("W1", Hash(File.ReadAllBytes(first))); Set(version, "Id", Guid.NewGuid());
+            Static("PdmAddin", "RememberControlledVersionIdentity", first, id, project, version);
+            Static("PdmAddin", "RememberControlledVersionIdentity", second, id, project, version);
+            var bad = damagedFirst ? first : second; var good = damagedFirst ? second : first;
+            File.WriteAllText(bad, "damaged cache"); File.SetAttributes(first, FileAttributes.ReadOnly); File.SetAttributes(second, FileAttributes.ReadOnly);
+            var state = ArchiveState(code, project, id);
+            Assert((string)Get(state, "LocalState") == "ReadOnlyCache" && (string)Get(state, "FullPath") == Path.GetFullPath(good), "damaged readonly cache displaced valid copy");
+            Assert(((string)Get(state, "Message")).Contains(Path.GetFullPath(bad)) && File.Exists(bad), "damaged copy hidden or deleted");
+        }
+    }
+
+    private static void TestChangedDuplicateIdentity()
+    {
+        var project = Guid.NewGuid(); var id = Guid.NewGuid();
+        var first = WorkspaceFile("COPY-EDIT/a.SLDDRW"); var second = WorkspaceFile("COPY-EDIT/b.SLDDRW");
+        File.WriteAllText(first, "base"); File.WriteAllText(second, "base");
+        var version = Version("W1", Hash(File.ReadAllBytes(first))); Set(version, "Id", Guid.NewGuid());
+        Static("PdmAddin", "RememberControlledVersionIdentity", first, id, project, version);
+        Static("PdmAddin", "RememberControlledVersionIdentity", second, id, project, version);
+        File.WriteAllText(first, "same edit"); File.WriteAllText(second, "same edit");
+        Assert((string)Get(ArchiveState("COPY-EDIT", project, id), "LocalState") == "Modified", "identical edits falsely conflict");
+        File.SetAttributes(first, FileAttributes.ReadOnly); File.SetAttributes(second, FileAttributes.ReadOnly);
+        Assert((string)Get(ArchiveState("COPY-EDIT", project, id), "LocalState") == "IntegrityMismatch", "identical readonly copies falsely conflict or hide stale base");
+        File.SetAttributes(first, FileAttributes.Normal); File.SetAttributes(second, FileAttributes.Normal);
+        File.WriteAllText(second, "distinct edit");
+        Assert((string)Get(ArchiveState("COPY-EDIT", project, id), "LocalState") == "IdentityConflict", "distinct real edits were auto-selected");
+        Assert(File.ReadAllText(first) == "same edit" && File.ReadAllText(second) == "distinct edit", "conflicting files altered");
+    }
+
+    private static void TestManagedArchiveCache()
+    {
+        var path = WorkspaceFile("MANAGED/drawing.SLDDRW"); var id = Guid.NewGuid();
+        var version = Version("W1", Hash(File.ReadAllBytes(path))); Set(version, "Id", Guid.NewGuid());
+        var cached = (string)Static("PdmAddin", "CacheCheckedInVersionInProjectView", Path.Combine(directory, "workspace"), "MANAGED", path, id, Guid.NewGuid(), version);
+        Assert(cached == Path.GetFullPath(path) && Directory.GetFiles(Path.GetDirectoryName(path), "*.SLDDRW", SearchOption.AllDirectories).Length == 1, "managed archive created redundant bound copy");
+    }
+
+    private static object ArchiveState(string projectCode, Guid project, Guid id)
+    {
+        var request = New("WorkspaceDocumentStateRequest"); Set(request, "DocumentId", id); Set(request, "LatestRevision", "W1");
+        var snapshot = Static("WorkspaceLocalStateReader", "Read", Path.Combine(directory, "workspace"), project, projectCode, "engineer", TypedArray("WorkspaceDocumentStateRequest", request));
+        return ((IEnumerable)Get(snapshot, "Items")).Cast<object>().Single();
     }
 
     private static string WriteFixture(string path, string content)
@@ -827,7 +937,13 @@ internal static class Program
     private static void Set(object obj, string name, object value) => obj.GetType().GetProperty(name, Members).SetValue(obj, value);
     private static IList Children(object node) => (IList)Get(node, "Children");
     private static object Call(object obj, string name, params object[] args) => obj.GetType().GetMethod(name, Members).Invoke(obj, args);
-    private static object Static(string type, string name, params object[] args) => Type(type).GetMethod(name, Members).Invoke(null, args);
+    private static object Static(string type, string name, params object[] args)
+    {
+        var method = Type(type).GetMethod(name, Members);
+        var parameters = method.GetParameters();
+        if (args.Length < parameters.Length) args = args.Concat(parameters.Skip(args.Length).Select(parameter => parameter.DefaultValue)).ToArray();
+        return method.Invoke(null, args);
+    }
     private static Array TypedArray(string type, params object[] values)
     {
         var array = Array.CreateInstance(Type(type), values.Length);

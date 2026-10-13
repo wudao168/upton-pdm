@@ -151,6 +151,50 @@ describe('MaterialManagement', () => {
     expect(api.listPendingMasterMaterials).toHaveBeenCalledTimes(1)
     wrapper.unmount()
   })
+
+  it('shares an in-flight material query across initialization, sort and repeated searches', async () => {
+    let finish!: (value: { items: PdmMaterial[]; total: number; page: number; pageSize: number }) => void
+    api.listMaterialPage.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const wrapper = mount(MaterialManagement, { props: { token: 'token', canEdit: true, canApprove: false, canManageIntegration: false }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const signal = api.listMaterialPage.mock.calls[0]![2] as AbortSignal
+    wrapper.findComponent({ name: 'ElTable' }).vm.$emit('sort-change', { prop: 'createdAt', order: 'descending' })
+    await wrapper.get('.material-toolbar__search-button').trigger('click')
+    await wrapper.get('.material-toolbar__search-button').trigger('click')
+    await flushPromises()
+    expect(api.listMaterialPage).toHaveBeenCalledTimes(1)
+    expect(signal.aborted).toBe(false)
+    finish({ items: await api.listMaterials(), total: 1, page: 1, pageSize: 50 })
+    await flushPromises()
+    expect(wrapper.text()).toContain('EL-001')
+    await wrapper.get('.material-toolbar__search-button').trigger('click')
+    await flushPromises()
+    expect(api.listMaterialPage).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('cancels an older query and keeps the latest result when old responses arrive late', async () => {
+    const wrapper = mount(MaterialManagement, { props: { token: 'token', canEdit: true, canApprove: false, canManageIntegration: false }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    let finishOld!: (value: { items: PdmMaterial[]; total: number; page: number; pageSize: number }) => void
+    api.listMaterialPage.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve }))
+    const search = wrapper.get('input[placeholder="搜索编码、名称、规格或分类"]')
+    await search.setValue('OLD')
+    await wrapper.get('.material-toolbar__search-button').trigger('click')
+    const signal = api.listMaterialPage.mock.lastCall![2] as AbortSignal
+    const latest = { ...(await api.listMaterials())[0], materialCode: 'LATEST', name: '最新查询结果' }
+    api.listMaterialPage.mockResolvedValueOnce({ items: [latest], total: 1, page: 1, pageSize: 50 })
+    await search.setValue('LATEST')
+    await wrapper.get('.material-toolbar__search-button').trigger('click')
+    await flushPromises()
+    expect(signal.aborted).toBe(true)
+    finishOld({ items: [{ ...latest, materialCode: 'OLD', name: '旧查询结果' }], total: 99, page: 1, pageSize: 50 })
+    await flushPromises()
+    expect(wrapper.text()).toContain('最新查询结果')
+    expect(wrapper.text()).not.toContain('旧查询结果')
+    expect(wrapper.findComponent({ name: 'ElPagination' }).props('total')).toBe(1)
+    wrapper.unmount()
+  })
   it('shows and searches the master list while background approval data is still pending', async () => {
     api.listMaterialCodeApplications.mockReturnValueOnce(new Promise(() => {}))
     const wrapper = mount(MaterialManagement, {

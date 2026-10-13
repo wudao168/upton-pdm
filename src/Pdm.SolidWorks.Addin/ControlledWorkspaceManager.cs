@@ -247,8 +247,14 @@ internal sealed class ControlledWorkspaceManager
             historicalPreview ? "ReadOnly" : "Latest",
             manifest.RootVersionId.ToString("N"));
 
-    private string WorkingDirectory(ControlledOpenManifestDto manifest) =>
-        ProjectViewDirectory(workspaceRoot, manifest.ProjectCode);
+    private string WorkingDirectory(ControlledOpenManifestDto manifest)
+    {
+        var project = ProjectViewDirectory(workspaceRoot, manifest.ProjectCode);
+        var legacyRoot = Path.Combine(project, manifest.RootRelativePath ?? "");
+        if (PdmDocumentIdentityStore.TryReadLocalMetadata(legacyRoot, out var metadata)
+            && metadata.DocumentId == manifest.RootDocumentId) return project;
+        return Path.Combine(project, "装配工作区", manifest.RootDocumentId.ToString("N"));
+    }
 
     private string HistoricalDerivedDirectory(ControlledOpenManifestDto manifest) =>
         Path.Combine(
@@ -305,8 +311,13 @@ internal sealed class ControlledWorkspaceManager
             var info = new FileInfo(path);
             var matches = info.Length == file.FileLength
                 && string.Equals(ComputeSha256(path), file.Sha256, StringComparison.OrdinalIgnoreCase);
+            var hasMetadata = PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var metadata);
+            var matchesBase = hasMetadata && metadata.DocumentId == file.DocumentId
+                && !string.IsNullOrWhiteSpace(metadata.Sha256)
+                && string.Equals(ComputeSha256(path), metadata.Sha256, StringComparison.OrdinalIgnoreCase);
             if (!matches
-                && (editableIds.Contains(file.DocumentId)
+                && (!matchesBase
+                    || editableIds.Contains(file.DocumentId)
                     || (File.GetAttributes(path) & FileAttributes.ReadOnly) == 0))
             {
                 return true;

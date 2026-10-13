@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 
@@ -15,6 +16,10 @@ internal sealed class SolidWorksReferenceTreeScanner
 
     private readonly ISldWorks application;
     private string activeDocumentDirectory = string.Empty;
+    private IModelDoc2 scannedModel;
+    private bool strictStructure;
+    private readonly Dictionary<string, Tuple<long, DateTime, string[]>> drawingReferences =
+        new Dictionary<string, Tuple<long, DateTime, string[]>>(StringComparer.OrdinalIgnoreCase);
 
     public SolidWorksReferenceTreeScanner(ISldWorks application)
     {
@@ -23,7 +28,13 @@ internal sealed class SolidWorksReferenceTreeScanner
 
     public CadTreeNode ScanActiveDocument()
     {
-        var model = application.ActiveDoc as IModelDoc2;
+        return ScanDocument(application.ActiveDoc as IModelDoc2);
+    }
+
+    public CadTreeNode ScanDocument(IModelDoc2 model, bool requireCompleteStructure = false)
+    {
+        scannedModel = model;
+        strictStructure = requireCompleteStructure;
         if (model == null)
         {
             throw new InvalidOperationException("请先打开SolidWorks装配体、零件或工程图。 ");
@@ -34,7 +45,12 @@ internal sealed class SolidWorksReferenceTreeScanner
         Log(string.Concat("ScanActiveDocument type=", model.GetType(), " title=", model.GetTitle(), " path=", path));
         if (model.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
         {
-            return CreateDocumentNode(path, model.GetTitle(), model.ConfigurationManager?.ActiveConfiguration?.Name ?? "默认", model.GetType(), model.GetSaveFlag());
+            var standalone = CreateDocumentNode(path, model.GetTitle(), model.ConfigurationManager?.ActiveConfiguration?.Name ?? "默认", model.GetType(), model.GetSaveFlag());
+            if (standalone.Kind != CadDocumentKind.Drawing)
+                AddRelatedDrawings(standalone, activeDocumentDirectory, false);
+            else
+                UpdateDrawingReferences(model, standalone);
+            return standalone;
         }
 
         var configuration = model.ConfigurationManager.ActiveConfiguration;
@@ -47,7 +63,13 @@ internal sealed class SolidWorksReferenceTreeScanner
 
         Log(string.Concat("RootComponent name=", rootComponent.Name2, " path=", rootComponent.GetPathName()));
         var featureTreeRoot = GetFeatureTreeRoot(model);
-        return BuildComponent(rootComponent, rootComponent.Name2, new HashSet<string>(StringComparer.OrdinalIgnoreCase), true, featureTreeRoot);
+        var root = BuildComponent(rootComponent, rootComponent.Name2, new HashSet<string>(StringComparer.OrdinalIgnoreCase), true, featureTreeRoot);
+        // Root components do not reliably expose ReferencedConfiguration.
+        root.Configuration = configuration.Name ?? string.Empty;
+        foreach (var directory in ModelNodes(root).Select(node => Path.GetDirectoryName(node.FullPath))
+            .Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase))
+            AddRelatedDrawings(root, directory, false);
+        return root;
     }
 
     private CadTreeNode BuildComponent(
@@ -59,7 +81,7 @@ internal sealed class SolidWorksReferenceTreeScanner
     {
         var componentPath = ResolveComponentPath(component);
         var componentName = component.Name2 ?? Path.GetFileNameWithoutExtension(componentPath);
-        var documentName = Path.GetFileNameWithoutExtension(componentPath);
+        var documentName = string.IsNullOrWhiteSpace(componentPath) ? componentName : Path.GetFileNameWithoutExtension(componentPath);
         var currentPath = string.IsNullOrWhiteSpace(instancePath) ? componentName : instancePath;
         var node = new CadTreeNode
         {
@@ -71,9 +93,14 @@ internal sealed class SolidWorksReferenceTreeScanner
             DrawingNumber = Path.GetFileNameWithoutExtension(componentPath),
             Kind = DocumentKindFromPath(componentPath, isRoot ? (int)swDocumentTypes_e.swDocASSEMBLY : 0),
             Configuration = component.ReferencedConfiguration ?? string.Empty,
-            Status = GetStatus(component, componentPath),
+            Status = GetStatus(component, componentPath, strictStructure),
             IsModifiedInSolidWorks = IsModified(component)
         };
+        if (string.IsNullOrWhiteSpace(componentPath) && node.Status != CadReferenceStatus.Virtual)
+        {
+            node.Status = CadReferenceStatus.Missing;
+            node.FileName = componentName;
+        }
 
         if (!visitedInstances.Add(currentPath))
         {
@@ -100,15 +127,10 @@ internal sealed class SolidWorksReferenceTreeScanner
 
     private string ResolveComponentPath(IComponent2 component)
     {
-        var referencedPath = component.GetPathName() ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(referencedPath) && File.Exists(referencedPath))
-        {
-            return referencedPath;
-        }
-
+        var referencedPath = NormalizeComponentFilePath(component.GetPathName());
         try
         {
-            var loadedPath = (component.GetModelDoc2() as IModelDoc2)?.GetPathName() ?? string.Empty;
+            var loadedPath = NormalizeComponentFilePath((component.GetModelDoc2() as IModelDoc2)?.GetPathName());
             if (!string.IsNullOrWhiteSpace(loadedPath))
             {
                 return loadedPath;
@@ -119,6 +141,22 @@ internal sealed class SolidWorksReferenceTreeScanner
             // An unresolved component can throw while SolidWorks is resolving its model document.
         }
 
+        // Suppressed/lightweight components can report their original as-saved path even when
+        // the controlled assembly has been downloaded elsewhere. Only trust a bound local copy.
+        if (!string.IsNullOrWhiteSpace(referencedPath) && !string.IsNullOrWhiteSpace(activeDocumentDirectory)
+            && PdmDocumentIdentityStore.IsControlledWorkspacePath(scannedModel?.GetPathName()))
+        {
+            var localPath = Path.Combine(activeDocumentDirectory, Path.GetFileName(referencedPath));
+            if (File.Exists(localPath)
+                && PdmDocumentIdentityStore.TryReadLocalMetadata(scannedModel?.GetPathName(), out var rootMetadata)
+                && PdmDocumentIdentityStore.TryReadLocalMetadata(localPath, out var localMetadata)
+                && rootMetadata.ProjectId.HasValue && localMetadata.ProjectId == rootMetadata.ProjectId && localMetadata.VersionId.HasValue)
+                return localPath;
+        }
+
+        if (!string.IsNullOrWhiteSpace(referencedPath) && File.Exists(referencedPath)) return referencedPath;
+
+        if (string.IsNullOrWhiteSpace(referencedPath)) return string.Empty;
         var referencedDirectory = Path.GetDirectoryName(referencedPath) ?? string.Empty;
         if (!string.IsNullOrWhiteSpace(activeDocumentDirectory)
             && !string.IsNullOrWhiteSpace(referencedDirectory)
@@ -135,6 +173,20 @@ internal sealed class SolidWorksReferenceTreeScanner
         }
 
         return referencedPath;
+    }
+
+    private static string NormalizeComponentFilePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+        try
+        {
+            return Path.IsPathRooted(path) ? Path.GetFullPath(path) : string.Empty;
+        }
+        catch (Exception exception) when (exception is ArgumentException || exception is NotSupportedException || exception is PathTooLongException)
+        {
+            Log("Invalid component path: " + path);
+            return string.Empty;
+        }
     }
 
     private ITreeControlItem GetFeatureTreeRoot(IModelDoc2 model)
@@ -239,6 +291,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         catch (Exception exception)
         {
             Log(string.Concat("GetChildren(", currentPath, ") threw: ", exception));
+            if (strictStructure) throw new InvalidOperationException("无法完整读取组件结构：" + currentPath, exception);
             children = Array.Empty<object>();
         }
 
@@ -246,14 +299,17 @@ internal sealed class SolidWorksReferenceTreeScanner
         {
             try
             {
-                var assemblyDocument = application.ActiveDoc as IAssemblyDoc;
+                var assemblyDocument = scannedModel as IAssemblyDoc;
                 var raw = assemblyDocument?.GetComponents(true);
+                if (strictStructure && !(raw is Array))
+                    throw new InvalidOperationException("装配体未返回可验证的子组件列表：" + currentPath);
                 Log(string.Concat("GetComponents(true) fallback type=", raw?.GetType().FullName ?? "null"));
                 children = ToObjectArray(raw);
             }
             catch (Exception exception)
             {
                 Log(string.Concat("GetComponents(true) fallback threw: ", exception));
+                if (strictStructure) throw new InvalidOperationException("无法完整读取装配体结构：" + currentPath, exception);
             }
         }
 
@@ -266,6 +322,7 @@ internal sealed class SolidWorksReferenceTreeScanner
             }
             else
             {
+                if (strictStructure) throw new InvalidOperationException("装配体包含无法识别的组件：" + currentPath);
                 Log(string.Concat("Skip child type=", child?.GetType().FullName ?? "null"));
             }
         }
@@ -330,7 +387,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         }
     }
 
-    private static CadTreeNode CreateDocumentNode(string path, string title, string configuration, int documentType, bool isModified)
+    private CadTreeNode CreateDocumentNode(string path, string title, string configuration, int documentType, bool isModified)
     {
         var node = new CadTreeNode
         {
@@ -349,7 +406,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         return node;
     }
 
-    private static void AddSameNameDrawing(CadTreeNode node)
+    private void AddSameNameDrawing(CadTreeNode node)
     {
         if (string.IsNullOrWhiteSpace(node.FullPath) || node.Kind == CadDocumentKind.Drawing)
         {
@@ -357,12 +414,13 @@ internal sealed class SolidWorksReferenceTreeScanner
         }
 
         var drawingPath = Path.ChangeExtension(node.FullPath, ".SLDDRW");
-        if (!File.Exists(drawingPath))
+        if (!File.Exists(drawingPath) || !ReadDrawingReferences(drawingPath)
+            .Contains(Path.GetFullPath(node.FullPath), StringComparer.OrdinalIgnoreCase))
         {
             return;
         }
 
-        node.Children.Add(new CadTreeNode
+        var drawing = new CadTreeNode
         {
             InstancePath = string.Concat(node.InstancePath, "/", Path.GetFileName(drawingPath)),
             FileName = Path.GetFileName(drawingPath),
@@ -372,10 +430,109 @@ internal sealed class SolidWorksReferenceTreeScanner
             Kind = CadDocumentKind.Drawing,
             Configuration = "图纸",
             Status = CadReferenceStatus.Normal
-        });
+        };
+        drawing.ReferencedModels.Add(node);
+        node.Children.Add(drawing);
     }
 
-    private static CadReferenceStatus GetStatus(IComponent2 component, string path)
+    public void AddRelatedDrawings(CadTreeNode root, string directory, bool recursive)
+    {
+        if (root == null || !Directory.Exists(directory)) return;
+        var models = ModelNodes(root).Where(node => !string.IsNullOrWhiteSpace(node.FullPath))
+            .GroupBy(node => Path.GetFullPath(node.FullPath), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.OrdinalIgnoreCase);
+        foreach (var path in Directory.EnumerateFiles(directory, "*.SLDDRW",
+            recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly))
+        {
+            foreach (var reference in ReadDrawingReferences(path))
+            {
+                if (!models.TryGetValue(reference, out var matches)) continue;
+                foreach (var model in matches)
+                {
+                    if (model.Children.Any(child => child.Kind == CadDocumentKind.Drawing
+                        && string.Equals(child.FullPath, path, StringComparison.OrdinalIgnoreCase))) continue;
+                    var drawing = new CadTreeNode
+                    {
+                        InstancePath = model.InstancePath + "/" + Path.GetFileName(path),
+                        FileName = Path.GetFileName(path), FullPath = path,
+                        DisplayName = Path.GetFileNameWithoutExtension(path) + " 工程图",
+                        DrawingNumber = Path.GetFileNameWithoutExtension(path), Kind = CadDocumentKind.Drawing,
+                        Configuration = "图纸", Status = CadReferenceStatus.Normal
+                    };
+                    foreach (var modelPath in ReadDrawingReferences(path))
+                        if (models.TryGetValue(modelPath, out var referenced)) drawing.ReferencedModels.Add(referenced[0]);
+                    model.Children.Add(drawing);
+                }
+            }
+        }
+    }
+
+    private string[] ReadDrawingReferences(string path)
+    {
+        var info = new FileInfo(path);
+        if (drawingReferences.TryGetValue(path, out var cached)
+            && cached.Item1 == info.Length && cached.Item2 == info.LastWriteTimeUtc) return cached.Item3;
+        try
+        {
+            var dependencies = application.GetDocumentDependencies2(path, false, false, false) as string[];
+            var references = (dependencies ?? Array.Empty<string>()).Where((value, index) => index % 2 == 1)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => Path.GetFullPath(Path.IsPathRooted(value) ? value : Path.Combine(info.DirectoryName, value)))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            drawingReferences[path] = Tuple.Create(info.Length, info.LastWriteTimeUtc, references);
+            return references;
+        }
+        catch (Exception exception) { Log("Drawing reference scan failed: " + path + " " + exception.Message); return Array.Empty<string>(); }
+    }
+
+    public void UpdateDrawingReferences(IModelDoc2 document, CadTreeNode drawing)
+    {
+        if (document?.GetType() != (int)swDocumentTypes_e.swDocDRAWING) return;
+        var references = new List<CadTreeNode>();
+        var sheets = (document as IDrawingDoc)?.GetViews() as object[] ?? Array.Empty<object>();
+        foreach (var view in sheets.OfType<object[]>().SelectMany(views => views).OfType<IView>())
+        {
+            var loaded = view.ReferencedDocument as IModelDoc2;
+            var path = loaded?.GetPathName();
+            if (string.IsNullOrWhiteSpace(path)) path = view.GetReferencedModelName();
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                path = Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(Path.GetDirectoryName(drawing.FullPath), path));
+                var configuration = view.ReferencedConfiguration ?? "默认";
+                if (!references.Any(node => string.Equals(node.FullPath, path, StringComparison.OrdinalIgnoreCase)
+                    && node.Configuration == configuration))
+                {
+                    var reference = new CadTreeNode { FullPath = path, FileName = Path.GetFileName(path),
+                        InstancePath = "model/" + Path.GetFileName(path) + "/" + configuration,
+                        DisplayName = Path.GetFileNameWithoutExtension(path), Kind = DocumentKindFromPath(path, 0),
+                        Configuration = configuration, Status = File.Exists(path) ? CadReferenceStatus.Normal : CadReferenceStatus.Missing };
+                    if (PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var metadata))
+                    {
+                        reference.DocumentId = metadata.DocumentId;
+                        reference.OpenedVersionId = metadata.VersionId;
+                        reference.OpenedRevision = reference.CurrentRevision = reference.Revision = metadata.Revision;
+                    }
+                    references.Add(reference);
+                }
+            }
+        }
+        if (references.Count > 0)
+        {
+            drawing.ReferencedModels.Clear();
+            drawing.ReferencedModels.AddRange(references);
+            if (references.Count == 1) drawing.RelatedModelDocumentId = references[0].DocumentId;
+        }
+    }
+
+    private static IEnumerable<CadTreeNode> ModelNodes(CadTreeNode root)
+    {
+        if (root.Kind == CadDocumentKind.Drawing) yield break;
+        yield return root;
+        foreach (var child in root.Children)
+            foreach (var model in ModelNodes(child)) yield return model;
+    }
+
+    private static CadReferenceStatus GetStatus(IComponent2 component, string path, bool requireComplete = false)
     {
         try
         {
@@ -400,8 +557,9 @@ internal sealed class SolidWorksReferenceTreeScanner
                 return CadReferenceStatus.Hidden;
             }
         }
-        catch
+        catch (Exception exception)
         {
+            if (requireComplete) throw new InvalidOperationException("无法确认组件的压缩或加载状态：" + path, exception);
             // A partially resolved component can throw while its state is queried.
         }
 

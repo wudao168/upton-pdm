@@ -29,7 +29,7 @@ $desktopSource = Join-Path $packageRoot 'payload\desktop'
 $addinSource = Join-Path $packageRoot 'payload\solidworks-addin'
 $webViewInstaller = Join-Path $packageRoot 'prerequisites\MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
 $net48Installer = Join-Path $packageRoot 'prerequisites\NDP48-x86-x64-AllOS-ENU.exe'
-foreach ($required in @($manifestPath, $uninstallerSource, $uninstallerExeSource, (Join-Path $desktopSource 'Upton.Pdm.Desktop.exe'), (Join-Path $addinSource 'Upton.Pdm.SolidWorks.Addin.dll'), $webViewInstaller, $net48Installer)) {
+foreach ($required in @($manifestPath, $uninstallerSource, $uninstallerExeSource, (Join-Path $desktopSource 'Upton.Pdm.Desktop.exe'), (Join-Path $addinSource 'Upton.Pdm.SolidWorks.Addin.dll'), (Join-Path $addinSource 'SolidWorks.Interop.swpublished.dll'), (Join-Path $addinSource 'SolidWorks.Interop.sldworks.dll'), (Join-Path $addinSource 'SolidWorks.Interop.swconst.dll'), (Join-Path $addinSource 'QRCoder.dll'), $webViewInstaller, $net48Installer)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "客户端安装包不完整：$required" }
 }
 
@@ -99,6 +99,27 @@ function Remove-UplmRegistrationResidue {
     Remove-Item -LiteralPath 'HKCU:\Software\UPTON\PDM Desktop' -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+function Unregister-PreviousUplmAddin([string]$RegAsm, [string]$OldAddin) {
+    # Native diagnostics belong in the log; only show the recovery status in the installer.
+    $ErrorActionPreference = 'Continue'
+    $logRoot = Join-Path $env:ProgramData 'UPLM\logs'
+    New-Item -ItemType Directory -Path $logRoot -Force -ErrorAction Stop | Out-Null
+    $logPath = Join-Path $logRoot ('addin-unregister-' + [Guid]::NewGuid().ToString('N') + '.log')
+    $diagnostics = & $RegAsm $OldAddin /unregister 2>&1
+    $exitCode = $LASTEXITCODE
+    $diagnostics | Out-File -LiteralPath $logPath -Encoding UTF8 -ErrorAction Stop
+    if ($exitCode -eq 0) { return }
+
+    Write-Output '旧版插件未能正常注销，正在使用安装包内完整插件清理同一插件的注册信息…'
+    $replacement = Join-Path $addinSource 'Upton.Pdm.SolidWorks.Addin.dll'
+    $diagnostics = & $RegAsm $replacement /unregister 2>&1
+    $exitCode = $LASTEXITCODE
+    $diagnostics | Out-File -LiteralPath $logPath -Append -Encoding UTF8 -ErrorAction Stop
+    if ($exitCode -ne 0) {
+        throw "旧版插件注册信息清理失败，尚未删除旧安装文件。请确认使用管理员权限安装。诊断日志：$logPath"
+    }
+}
+
 function Remove-PreviousUplmInstallation {
     Stop-PreviousDesktopClient
     $candidateRoots = New-Object System.Collections.Generic.List[string]
@@ -115,8 +136,7 @@ function Remove-PreviousUplmInstallation {
     foreach ($candidate in @($candidateRoots | Select-Object -Unique)) {
         $oldAddin = Join-Path $candidate 'solidworks-addin\Upton.Pdm.SolidWorks.Addin.dll'
         if ((Test-Path -LiteralPath $oldAddin -PathType Leaf) -and (Test-Path -LiteralPath $regAsm -PathType Leaf)) {
-            & $regAsm $oldAddin /unregister
-            if ($LASTEXITCODE -ne 0) { throw "旧版 SolidWorks 插件注销失败，退出码：$LASTEXITCODE" }
+            Unregister-PreviousUplmAddin -RegAsm $regAsm -OldAddin $oldAddin
         }
         if (Test-Path -LiteralPath $candidate) { Remove-Item -LiteralPath $candidate -Recurse -Force }
     }

@@ -16,7 +16,8 @@ internal sealed class ChangeNoteDialog : Form
     public ChangeNoteDialog(string fileName)
     {
         Text = "提交存档";
-        StartPosition = FormStartPosition.CenterParent;
+        DialogWindowSizing.CenterOnOwnerScreen(this);
+        TopMost = true;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -77,7 +78,7 @@ internal sealed class ChangeNoteDialog : Form
         AcceptButton = submit;
         CancelButton = cancel;
         changeNote.TextChanged += (_, _) => submit.Enabled = !string.IsNullOrWhiteSpace(changeNote.Text);
-        Shown += (_, _) => changeNote.Focus();
+        Shown += (_, _) => { BringToFront(); Activate(); changeNote.Focus(); };
     }
 
     public string ChangeNote => changeNote.Text.Trim();

@@ -5,15 +5,30 @@ namespace Upton.Pdm.Infrastructure;
 
 public sealed partial class MySqlPdmRepository
 {
+    public async Task<IReadOnlyList<string>> ListNotificationRecipientsAsync(string sourceKey, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return (await connection.QueryAsync<string>(new CommandDefinition(
+            "SELECT DISTINCT recipient_username FROM user_notification WHERE source_key=@SourceKey",
+            new { SourceKey = sourceKey }, cancellationToken: cancellationToken))).ToArray();
+    }
+
     public async Task<IReadOnlyList<UserNotification>> ListUserNotificationsAsync(string recipient, int take, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<UserNotificationRow>(new CommandDefinition(
             """
             SELECT id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date
-            FROM user_notification
+            FROM user_notification n
             WHERE recipient_username=@Recipient
               AND NOT (category='project-plan' AND source_key LIKE '%:overdue:%')
+              AND (n.category<>'project-plan' OR n.source_key NOT LIKE 'project-plan:%' OR NOT EXISTS (
+                  SELECT 1 FROM user_notification newer
+                  WHERE newer.recipient_username=n.recipient_username AND newer.category='project-plan'
+                    AND newer.source_key NOT LIKE '%:overdue:%'
+                    AND SUBSTRING_INDEX(newer.source_key,':',2)=SUBSTRING_INDEX(n.source_key,':',2)
+                    AND (newer.created_at>n.created_at OR (newer.created_at=n.created_at AND newer.id>n.id))
+              ))
             ORDER BY created_at DESC,id DESC
             LIMIT @Take
             """,

@@ -31,6 +31,8 @@ public sealed record Project(
 
     public DateOnly? SignedDate { get; init; }
 
+    public DateTimeOffset? CreatedAt { get; init; }
+
     public int Quantity { get; init; } = 1;
 
     public Guid? ParentProjectId { get; init; }
@@ -472,7 +474,10 @@ public sealed record EditSessionHeartbeat(
     DateTimeOffset LeaseExpiresAt,
     IReadOnlyList<Guid> ActiveDocumentIds,
     IReadOnlyList<Guid> LostDocumentIds,
-    PdmSystemSettings Settings);
+    PdmSystemSettings Settings)
+{
+    public IReadOnlyList<Guid> ReleaseRequestedDocumentIds { get; init; } = [];
+}
 
 public sealed record EditLockSummary(
     Guid DocumentId,
@@ -606,6 +611,11 @@ public sealed record BomItem(
     public bool IsReleaseExcluded { get; init; }
 
     public string? ReleaseExclusionReason { get; init; }
+
+    public string? ReleaseReviewToken { get; init; }
+    public IReadOnlyDictionary<Guid, string>? ReleaseReviewTokens { get; init; }
+
+    public BomReleaseConfirmation? ReleaseConfirmation { get; init; }
 
     public string? ReconciliationStatus { get; init; }
 
@@ -754,6 +764,7 @@ public sealed record ReleasePackage(
     DateTimeOffset? PublishedAt,
     string? PublishedPath)
 {
+    public Guid? RootDocumentId { get; init; }
     public Guid? StandardBomVersionId { get; init; }
 
     public Guid? NonStandardBomVersionId { get; init; }

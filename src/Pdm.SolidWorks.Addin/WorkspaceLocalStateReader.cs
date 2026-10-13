@@ -66,8 +66,7 @@ internal static class WorkspaceLocalStateReader
             return result;
         }
 
-        var pathsByDocument = new Dictionary<Guid, Tuple<string, PdmControlledFileMetadata>>();
-        var ambiguousDocuments = new HashSet<Guid>();
+        var pathsByDocument = new Dictionary<Guid, List<Tuple<string, PdmControlledFileMetadata>>>();
         foreach (var path in Directory.EnumerateFiles(projectDirectory, "*", SearchOption.AllDirectories))
         {
             if (!PdmDocumentIdentityStore.TryReadControlledMetadata(path, out var metadata)
@@ -76,29 +75,40 @@ internal static class WorkspaceLocalStateReader
             {
                 continue;
             }
-            if (pathsByDocument.TryGetValue(metadata.DocumentId, out var existing)
-                && !string.Equals(existing.Item1, path, StringComparison.OrdinalIgnoreCase))
-            {
-                ambiguousDocuments.Add(metadata.DocumentId);
-                continue;
-            }
-            pathsByDocument[metadata.DocumentId] = Tuple.Create(path, metadata);
+            if (!pathsByDocument.TryGetValue(metadata.DocumentId, out var paths))
+                pathsByDocument[metadata.DocumentId] = paths = new List<Tuple<string, PdmControlledFileMetadata>>();
+            paths.Add(Tuple.Create(path, metadata));
         }
 
         foreach (var document in uniqueDocuments)
         {
-            if (ambiguousDocuments.Contains(document.DocumentId))
-            {
-                result.Items.Add(State(document, string.Empty, null, "IdentityConflict", "身份冲突", false,
-                    "同一图档在项目工作区中对应多个文件，已停止自动关联。"));
-                continue;
-            }
-            if (!pathsByDocument.TryGetValue(document.DocumentId, out var local))
+            if (!pathsByDocument.TryGetValue(document.DocumentId, out var paths))
             {
                 result.Items.Add(NotDownloaded(document));
                 continue;
             }
-            result.Items.Add(Evaluate(document, local.Item1, local.Item2, currentUsername));
+            var states = paths.Select(local => Evaluate(document, local.Item1, local.Item2, currentUsername)).ToArray();
+            var edits = states.Where(item => item.LocalState == "Modified").ToArray();
+            var valid = states.Where(item => item.LocalState != "IntegrityMismatch"
+                && paths.Any(local => local.Item1 == item.FullPath && !string.IsNullOrWhiteSpace(local.Item2.Sha256))).ToArray();
+            // Preserve real writable edits. Damaged read-only caches must not displace a valid working copy.
+            var candidates = edits.Length > 0 ? edits : valid.Length > 0 ? valid : states;
+            var changed = candidates.Where(item => item.LocalState == "Modified" || item.LocalState == "IntegrityMismatch").ToArray();
+            if (changed.Length > 1 && changed.Select(item => ComputeHash(item.FullPath)).Distinct(StringComparer.OrdinalIgnoreCase).Skip(1).Any())
+            {
+                result.Items.Add(State(document, string.Empty, null, "IdentityConflict", "身份冲突", false,
+                    "同一图档存在内容不同的多个修改副本，请先备份并确认需要保留的文件：\r\n" + string.Join("\r\n", changed.Select(item => item.FullPath))));
+                continue;
+            }
+            var selected = candidates
+                .OrderByDescending(item => string.Equals(item.LocalRevision, document.LatestRevision, StringComparison.OrdinalIgnoreCase))
+                .ThenBy(item => item.IsReadOnly)
+                .ThenBy(item => item.FullPath.IndexOf("图档缓存", StringComparison.OrdinalIgnoreCase) >= 0)
+                .ThenBy(item => item.FullPath, StringComparer.OrdinalIgnoreCase).First();
+            var damaged = states.Where(item => item != selected && item.LocalState == "IntegrityMismatch").ToArray();
+            if (damaged.Length > 0)
+                selected.Message += " 另有只读副本校验不一致，未自动覆盖或删除，请核对：" + string.Join("；", damaged.Select(item => item.FullPath));
+            result.Items.Add(selected);
         }
         return result;
     }
@@ -120,6 +130,9 @@ internal static class WorkspaceLocalStateReader
         var changed = HasChanged(path, metadata);
         var checkedOutByMe = !string.IsNullOrWhiteSpace(currentUsername)
             && string.Equals(document.CheckedOutBy, currentUsername, StringComparison.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(metadata?.Sha256))
+            return State(document, path, metadata, "NeedsUpdate", "需要校验", readOnly,
+                "本地校验记录不完整，无法确认文件是否已存档。请先备份本地文件，再核对服务器版本。");
         if (changed)
         {
             return State(document, path, metadata, readOnly ? "IntegrityMismatch" : "Modified",
@@ -180,13 +193,15 @@ internal static class WorkspaceLocalStateReader
         if (metadata == null || string.IsNullOrWhiteSpace(metadata.Sha256)) return false;
         var info = new FileInfo(path);
         if (metadata.FileLength.HasValue && info.Length != metadata.FileLength.Value) return true;
+        return !string.Equals(ComputeHash(path), metadata.Sha256, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ComputeHash(string path)
+    {
         using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
         using (var hash = SHA256.Create())
         {
-            return !string.Equals(
-                BitConverter.ToString(hash.ComputeHash(input)).Replace("-", string.Empty),
-                metadata.Sha256,
-                StringComparison.OrdinalIgnoreCase);
+            return BitConverter.ToString(hash.ComputeHash(input)).Replace("-", string.Empty);
         }
     }
 

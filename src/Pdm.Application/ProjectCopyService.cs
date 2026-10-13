@@ -189,6 +189,8 @@ public sealed class ProjectCopyService(
         }
 
         var sourceProjectRoot = await repository.GetLatestReferenceSnapshotAsync(source.Id, cancellationToken);
+        var sourceRootIds = sourceProjectRoot is null ? new HashSet<Guid>()
+            : ProjectReferenceForest.Roots(sourceProjectRoot).Where(node => node.DocumentId.HasValue).Select(node => node.DocumentId!.Value).ToHashSet();
         long documentBytes = 0;
         foreach (var sourceDocument in selectedDocuments)
         {
@@ -214,7 +216,7 @@ public sealed class ProjectCopyService(
                 [],
                 SourceVersionId: sourceVersion.Id,
                 SourceDescription: $"复制自{source.Code} · {sourceVersion.Revision.Display}",
-                IsProjectRoot: sourceProjectRoot?.RootDocumentId == sourceDocument.Id,
+                IsProjectRoot: sourceRootIds.Contains(sourceDocument.Id),
                 ForceVersion: true,
                 DrawingNumber: sourceDocument.DrawingNumber,
                 Name: sourceDocument.Name,

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import PanelActions from './PanelActions.vue'
+import ProjectDingTalkBinding from './ProjectDingTalkBinding.vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
@@ -32,8 +34,8 @@ const includeChildren = ref(false)
 const resetReason = ref('')
 const resetConfirmation = ref('')
 const forceReset = ref(false)
-type SettingsTab = 'copy' | 'reset'
-const activeSettingsTab = ref<SettingsTab>(props.canCopyContent ? 'copy' : 'reset')
+type SettingsTab = 'copy' | 'reset' | 'dingtalk'
+const activeSettingsTab = ref<SettingsTab>(props.canCopyContent ? 'copy' : props.canResetContent ? 'reset' : 'dingtalk')
 
 const copySourceProjects = computed(() => props.projects
   .filter(item => item.id !== props.project.id && item.canReadContent)
@@ -60,7 +62,7 @@ function resetDangerForm() {
 }
 
 function resetSettingsTab() {
-  activeSettingsTab.value = props.canCopyContent ? 'copy' : 'reset'
+  activeSettingsTab.value = props.canCopyContent ? 'copy' : props.canResetContent ? 'reset' : 'dingtalk'
 }
 
 function selectSettingsTab(tab: SettingsTab) {
@@ -181,9 +183,10 @@ async function executeSnapshotRestore(snapshot: ProjectContentResetSnapshotSumma
 <template>
   <el-drawer :model-value="modelValue" :title="`项目设置 · ${project.code}`" size="720px" :close-on-click-modal="false" @update:model-value="emit('update:modelValue', $event)">
     <section class="pdm-project-settings" aria-label="项目设置内容">
-      <nav v-if="canCopyContent || canResetContent" class="pdm-project-settings__tabs" role="tablist" aria-label="项目设置选项卡">
+      <nav class="pdm-project-settings__tabs" role="tablist" aria-label="项目设置选项卡">
         <button v-if="canCopyContent" type="button" role="tab" :aria-selected="activeSettingsTab === 'copy'" @click="selectSettingsTab('copy')">项目复制</button>
         <button v-if="canResetContent" type="button" role="tab" :aria-selected="activeSettingsTab === 'reset'" @click="selectSettingsTab('reset')">项目重置</button>
+        <button type="button" role="tab" :aria-selected="activeSettingsTab === 'dingtalk'" @click="selectSettingsTab('dingtalk')">钉钉群绑定</button>
       </nav>
       <section v-if="canCopyContent" v-show="activeSettingsTab === 'copy'" class="pdm-project-settings__section" aria-labelledby="pdm-project-copy-settings-title">
         <header>
@@ -215,12 +218,12 @@ async function executeSnapshotRestore(snapshot: ProjectContentResetSnapshotSumma
           <p v-else class="pdm-counter-note">目标项目必须先创建。选择源项目后，系统会检查目标是否已有同类内容。</p>
         </div>
       </section>
-      <section v-if="canResetContent" v-show="activeSettingsTab === 'reset'" class="pdm-project-settings__section pdm-project-settings__danger" aria-labelledby="pdm-project-reset-settings-title">
+      <section v-if="canResetContent && activeSettingsTab === 'reset'" class="pdm-project-settings__section pdm-project-settings__danger" aria-labelledby="pdm-project-reset-settings-title">
         <header><h3 id="pdm-project-reset-settings-title">项目重置</h3><p>仅系统管理员可执行。保留项目基本信息和人员分配，业务内容进入可恢复30天的整项快照。</p></header>
         <el-alert title="危险操作" type="error" :closable="false" description="普通重置会在存在签出或进行中的任务时被拒绝。管理员可强制中断项目内任务；已发布内容、正在向外部发布和待处理的外部同步仍会阻止重置。项目计划和验证计划会一并进入快照。" />
         <div class="pdm-reset-scope">
           <el-checkbox v-model="includeChildren" :disabled="resetPending" @change="refreshResetReadiness">同时重置下属子项目</el-checkbox>
-          <button type="button" class="pdm-secondary-action" :disabled="resetPending" @click="refreshResetReadiness">{{ resetPending ? '正在检查…' : '重新检查范围' }}</button>
+          <PanelActions><button type="button" class="pdm-secondary-action" :disabled="resetPending" @click="refreshResetReadiness">{{ resetPending ? '正在检查…' : '重新检查范围' }}</button></PanelActions>
         </div>
         <template v-if="resetReadiness">
           <p class="pdm-counter-note">重置范围：{{ resetReadiness.includedProjects.map(item => item.code).join('、') }}</p>
@@ -232,12 +235,12 @@ async function executeSnapshotRestore(snapshot: ProjectContentResetSnapshotSumma
           <template v-if="(resetReadiness.canReset || resetReadiness.canForceReset) && Object.values(resetReadiness.counts).some(count => count > 0)">
             <label class="pdm-dialog-field">重置原因 <b>*</b><el-input v-model="resetReason" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="请填写可审计的重置原因" /></label>
             <label class="pdm-dialog-field">输入项目号确认 <b>*</b><el-input v-model="resetConfirmation" :placeholder="`请输入 ${project.code}`" /></label>
-            <button type="button" class="pdm-danger-action" :disabled="resetPending || (!resetReadiness.canReset && !forceReset) || !resetReason.trim() || resetConfirmation.trim().toLocaleLowerCase() !== project.code.toLocaleLowerCase()" @click="executeProjectReset">{{ resetPending ? '正在重置…' : forceReset ? '强制重置项目内容' : '重置项目内容' }}</button>
+            <PanelActions><button type="button" class="pdm-danger-action" :disabled="resetPending || (!resetReadiness.canReset && !forceReset) || !resetReason.trim() || resetConfirmation.trim().toLocaleLowerCase() !== project.code.toLocaleLowerCase()" @click="executeProjectReset">{{ resetPending ? '正在重置…' : forceReset ? '强制重置项目内容' : '重置项目内容' }}</button></PanelActions>
           </template>
           <p v-else-if="resetReadiness.canReset" class="pdm-counter-note">当前项目没有可重置的业务内容。</p>
         </template>
       </section>
-      <p v-if="!canCopyContent && !canResetContent" class="pdm-project-settings__empty">当前账号没有可操作的项目设置。</p>
+      <ProjectDingTalkBinding v-if="modelValue && activeSettingsTab === 'dingtalk'" :key="project.id" :project-id="project.id" :token="token ?? ''" />
     </section>
     <template #footer>
       <button type="button" class="pdm-secondary-action" :disabled="pending" @click="closeSettings">取消</button>
@@ -247,5 +250,5 @@ async function executeSnapshotRestore(snapshot: ProjectContentResetSnapshotSumma
 </template>
 
 <style scoped>
-.pdm-project-settings{display:flex;flex-direction:column;gap:18px}.pdm-project-settings__tabs{display:flex;gap:4px;padding:3px;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface-muted)}.pdm-project-settings__tabs button{flex:1;min-height:34px;border:0;border-radius:5px;background:transparent;color:var(--pdm-muted);font-weight:600;cursor:pointer}.pdm-project-settings__tabs button[aria-selected="true"]{background:var(--pdm-surface);color:var(--pdm-blue);box-shadow:0 1px 4px rgba(15,23,42,.1)}.pdm-project-settings__section{display:flex;flex-direction:column;gap:14px;padding-bottom:18px;border-bottom:1px solid var(--pdm-border)}.pdm-project-settings__section header h3{margin:0 0 5px}.pdm-project-settings__section header p{margin:0;color:var(--pdm-muted)}.pdm-project-settings__danger{border:1px solid var(--pdm-danger-border);border-radius:8px;padding:16px;background:#fffafa}.pdm-reset-scope{display:flex;align-items:center;justify-content:space-between;gap:12px}.pdm-reset-counts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.pdm-reset-counts span{display:flex;align-items:baseline;gap:7px;padding:9px 11px;border:1px solid var(--pdm-border-soft);border-radius:6px;background:var(--pdm-surface);color:var(--pdm-muted)}.pdm-reset-counts strong{font-size:18px;color:var(--pdm-text)}.pdm-reset-snapshots{display:flex;flex-direction:column;gap:8px}.pdm-reset-snapshots>div{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid var(--pdm-border-soft);border-radius:6px;background:var(--pdm-surface)}.pdm-reset-snapshots span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-project-settings__danger ul{margin:8px 0 0;padding-left:20px}.pdm-dialog-field b{color:var(--pdm-danger)}.pdm-danger-action{align-self:flex-start;min-height:34px;border:1px solid #dc2626;border-radius:5px;padding:0 14px;background:#dc2626;color:var(--pdm-surface);cursor:pointer}.pdm-danger-action:disabled{cursor:not-allowed;opacity:.45}
+.pdm-project-settings{display:flex;flex-direction:column;gap:18px}.pdm-project-settings__tabs{display:flex;gap:4px;padding:3px;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface-muted)}.pdm-project-settings__tabs button{flex:1;min-height:var(--pdm-tab-secondary);border:0;border-radius:5px;background:transparent;color:var(--pdm-muted);font-weight:600;cursor:pointer}.pdm-project-settings__tabs button[aria-selected="true"]{background:var(--pdm-surface);color:var(--pdm-blue);box-shadow:0 1px 4px rgba(15,23,42,.1)}.pdm-project-settings__section{display:flex;flex-direction:column;gap:14px;padding-bottom:18px;border-bottom:1px solid var(--pdm-border)}.pdm-project-settings__section header h3{margin:0 0 5px}.pdm-project-settings__section header p{margin:0;color:var(--pdm-muted)}.pdm-project-settings__danger{border:1px solid var(--pdm-danger-border);border-radius:8px;padding:16px;background:#fffafa}.pdm-reset-scope{display:flex;align-items:center;justify-content:space-between;gap:12px}.pdm-reset-counts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.pdm-reset-counts span{display:flex;align-items:baseline;gap:7px;padding:9px 11px;border:1px solid var(--pdm-border-soft);border-radius:6px;background:var(--pdm-surface);color:var(--pdm-muted)}.pdm-reset-counts strong{font-size:18px;color:var(--pdm-text)}.pdm-reset-snapshots{display:flex;flex-direction:column;gap:8px}.pdm-reset-snapshots>div{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid var(--pdm-border-soft);border-radius:6px;background:var(--pdm-surface)}.pdm-reset-snapshots span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-project-settings__danger ul{margin:8px 0 0;padding-left:20px}.pdm-dialog-field b{color:var(--pdm-danger)}.pdm-danger-action{align-self:flex-start;min-height:var(--pdm-button-default);border:1px solid #dc2626;border-radius:5px;padding:0 14px;background:#dc2626;color:var(--pdm-surface);cursor:pointer}.pdm-danger-action:disabled{cursor:not-allowed;opacity:.45}
 </style>

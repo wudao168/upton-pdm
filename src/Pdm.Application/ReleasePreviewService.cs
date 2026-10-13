@@ -50,8 +50,10 @@ public sealed class ReleasePreviewService(
         await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Running, package.PreviewError, package.PreviewAttempts, now, cancellationToken);
         try
         {
-            var sources = await repository.ListReleasePreviewSourcesAsync(package.Id, cancellationToken);
-            if (sources.Count == 0)
+            var completed = (await ListItemsAsync(package.Id, cancellationToken)).Where(item => item.Succeeded).Select(item => item.DocumentId).ToHashSet();
+            var sources = (await repository.ListReleasePreviewSourcesAsync(package.Id, cancellationToken))
+                .Where(source => !completed.Contains(source.DocumentId)).ToArray();
+            if (sources.Length == 0)
             {
                 await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Succeeded, null, attempts, timeProvider.GetUtcNow(), cancellationToken);
                 return true;
@@ -59,7 +61,7 @@ public sealed class ReleasePreviewService(
             var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
             var stagingDirectory = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-staging", package.Number));
             Directory.CreateDirectory(stagingDirectory);
-            var previews = await previewConverter.GenerateAsync(package, project, sources, stagingDirectory, cancellationToken);
+            var (previews, failures) = await ConvertPreviewsAsync(package, project, sources, stagingDirectory, cancellationToken);
             var releasedVersions = await repository.AttachReleasePreviewArtifactsAsync(package.Id, previews, cancellationToken);
             CopyPreviewsIntoPublishedPath(package, vaultRoot, releasedVersions);
             // 转图补齐后发布目录多了 STEP/PDF，这里顺带把新增成品登记到"机械发布/电气发布"目录。
@@ -73,6 +75,7 @@ public sealed class ReleasePreviewService(
                     ?? "system";
                 await releaseDeliveryArchive.ArchiveAsync(package.Id, archiveActor, cancellationToken);
             }
+            if (failures is not null) throw failures;
             await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Succeeded, null, attempts, timeProvider.GetUtcNow(), cancellationToken);
             await NotifyAsync(package, project, "图纸转换已完成", $"STEP/PDF 已生成并绑定正式版本（第{attempts}次处理）", "result", cancellationToken);
             return true;
@@ -123,7 +126,7 @@ public sealed class ReleasePreviewService(
                     ? null
                     : version is null
                         ? "该图档没有随本次发布转为正式版本（发布时不在发布范围内），需要用新的非标件BOM+图纸发布后才能转出。"
-                        : package.PreviewState == ReleasePreviewState.Running ? "正在转换…" : package.PreviewError ?? "尚未生成预览。";
+                        : package.PreviewState == ReleasePreviewState.Running ? "正在转换…" : ItemError(package.PreviewError, source.FileName);
                 return new ReleasePreviewItem(
                     package.Id,
                     package.Number,
@@ -182,12 +185,15 @@ public sealed class ReleasePreviewService(
         var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
         var stagingDirectory = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-staging", package.Number));
         Directory.CreateDirectory(stagingDirectory);
+        var previousItems = await ListItemsAsync(package.Id, cancellationToken);
+        PartialPreviewConversionException? failures;
         await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Running, package.PreviewError, package.PreviewAttempts, timeProvider.GetUtcNow(), cancellationToken);
         try
         {
-            var previews = await previewConverter.GenerateAsync(package, project, targets, stagingDirectory, cancellationToken, keepExistingPreviews: true);
+            IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews;
+            (previews, failures) = await ConvertPreviewsAsync(package, project, targets, stagingDirectory, cancellationToken);
             var releasedVersions = await repository.AttachReleasePreviewArtifactsAsync(package.Id, previews, cancellationToken);
-            if (releasedVersions.Count == 0)
+            if (releasedVersions.Count == 0 && failures is null)
                 throw new PdmRuleException("该图档还没有正式版本，无法挂接预览；请重新发布后再转图。");
             CopyPreviewsIntoPublishedPath(package, vaultRoot, releasedVersions);
             if (releaseDeliveryArchive is not null) await releaseDeliveryArchive.ArchiveAsync(package.Id, actor, cancellationToken);
@@ -199,13 +205,39 @@ public sealed class ReleasePreviewService(
         }
         var items = await ListItemsAsync(package.Id, cancellationToken);
         var pending = items.Where(item => !item.Succeeded).ToArray();
-        // 还有未完成的图档时保持原来的失败原因（每行显示的是它自己没转出来的原因），全部完成后清空。
+        var errors = pending.Select(item => $"{item.FileName}：{(failures?.Errors.GetValueOrDefault(item.DocumentId)
+            ?? previousItems.FirstOrDefault(previous => previous.DocumentId == item.DocumentId)?.Error
+            ?? "尚未生成预览，请单独重试。").ReplaceLineEndings(" ")}");
         await repository.MarkReleasePreviewStateAsync(package.Id,
             pending.Length == 0 ? ReleasePreviewState.Succeeded : ReleasePreviewState.Failed,
-            pending.Length == 0 ? null : package.PreviewError,
+            pending.Length == 0 ? null : ItemErrorPrefix + string.Join("\n", errors),
             pending.Length == 0 ? 0 : package.PreviewAttempts,
             timeProvider.GetUtcNow(), cancellationToken);
-        return items;
+        return await ListItemsAsync(package.Id, cancellationToken);
+    }
+
+    private const string ItemErrorPrefix = PartialPreviewConversionException.ItemErrorPrefix;
+
+    private static string ItemError(string? error, string fileName)
+    {
+        if (error is null) return "尚未生成预览。";
+        if (!error.StartsWith(ItemErrorPrefix, StringComparison.Ordinal)) return error;
+        var prefix = fileName + "：";
+        return error[ItemErrorPrefix.Length..].Split('\n').FirstOrDefault(line => line.StartsWith(prefix, StringComparison.Ordinal))?[prefix.Length..]
+            ?? "该图档尚未完成转换，请单独重试。";
+    }
+
+    private async Task<(IReadOnlyDictionary<Guid, DocumentPreviewArtifact> Artifacts, PartialPreviewConversionException? Failure)> ConvertPreviewsAsync(
+        ReleasePackage package, Project project, IReadOnlyList<ReleasePreviewSource> sources, string stagingDirectory, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return (await previewConverter.GenerateAsync(package, project, sources, stagingDirectory, cancellationToken, keepExistingPreviews: true), null);
+        }
+        catch (PartialPreviewConversionException exception)
+        {
+            return (exception.Artifacts, exception);
+        }
     }
 
     /// <summary>转出目标格式：三维零件/装配体出STEP，2D工程图出PDF。</summary>

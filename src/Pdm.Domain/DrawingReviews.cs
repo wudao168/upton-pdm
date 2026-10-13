@@ -129,6 +129,8 @@ public sealed record DrawingReviewCandidate
 
     public string? DrawingRevision { get; init; }
 
+    public bool HasUnreleasedDrawingChanges { get; init; }
+
     public required DrawingReviewCandidateState State { get; init; }
 
     public string? Reason { get; init; }

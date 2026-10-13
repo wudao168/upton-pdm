@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -8,6 +9,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
+using Upton.Pdm.ClientShared;
 
 namespace Upton.Pdm.SolidWorks;
 
@@ -19,15 +21,16 @@ internal sealed class PdmApiClient : IDisposable
     private int authenticationExpiredRaised;
 
     public event EventHandler AuthenticationExpired;
+    public Func<Guid, CancellationToken, Task> BeforeCheckout { get; set; }
 
     public PdmApiClient(string baseAddress)
     {
-        httpClient = new HttpClient
+        httpClient = new HttpClient(new ClientDiagnosticHandler())
         {
             BaseAddress = new Uri(baseAddress.TrimEnd('/') + "/", UriKind.Absolute),
             Timeout = TimeSpan.FromSeconds(30)
         };
-        controlledOpenHttpClient = new HttpClient
+        controlledOpenHttpClient = new HttpClient(new ClientDiagnosticHandler())
         {
             BaseAddress = httpClient.BaseAddress,
             Timeout = TimeSpan.FromMinutes(15)
@@ -35,6 +38,7 @@ internal sealed class PdmApiClient : IDisposable
     }
 
     public bool IsAuthenticated => httpClient.DefaultRequestHeaders.Authorization != null;
+    public string EditJournalScope { get; private set; }
 
     public async Task<LoginResponseDto> LoginAsync(string username, string password, CancellationToken cancellationToken)
     {
@@ -48,10 +52,13 @@ internal sealed class PdmApiClient : IDisposable
 
     public void SetActiveCompany(Guid companyId)
     {
+        EditJournalScope = httpClient.BaseAddress.AbsoluteUri.ToLowerInvariant() + "|" + companyId.ToString("N");
         httpClient.DefaultRequestHeaders.Remove("X-Company-Id");
         controlledOpenHttpClient.DefaultRequestHeaders.Remove("X-Company-Id");
         if (companyId != Guid.Empty) httpClient.DefaultRequestHeaders.Add("X-Company-Id", companyId.ToString());
         if (companyId != Guid.Empty) controlledOpenHttpClient.DefaultRequestHeaders.Add("X-Company-Id", companyId.ToString());
+        if (httpClient.DefaultRequestHeaders.Authorization != null)
+            ClientDiagnostics.Bind(httpClient.BaseAddress.AbsoluteUri, httpClient.DefaultRequestHeaders.Authorization.Parameter, companyId.ToString());
     }
 
     public Task<List<ProjectDto>> GetProjectsAsync(CancellationToken cancellationToken) =>
@@ -110,14 +117,15 @@ internal sealed class PdmApiClient : IDisposable
         Guid? versionId,
         bool releasedOnly,
         bool forEdit,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool resolveLegacyReferences = false)
     {
         try
         {
             return await PostJsonAsync<ControlledOpenManifestDto>(
                 controlledOpenHttpClient,
                 string.Concat("api/documents/", documentId, "/open-manifest"),
-                new { versionId, releasedOnly, forEdit },
+                new { versionId, releasedOnly, forEdit, resolveLegacyReferences },
                 cancellationToken).ConfigureAwait(false);
         }
         catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
@@ -157,17 +165,24 @@ internal sealed class PdmApiClient : IDisposable
             },
             cancellationToken);
 
-    public Task<List<DocumentVersionDto>> GetVersionsAsync(Guid documentId, CancellationToken cancellationToken) =>
-        GetJsonAsync<List<DocumentVersionDto>>(string.Concat("api/documents/", documentId, "/versions"), cancellationToken);
+    public Task<List<DocumentVersionDto>> GetVersionsAsync(Guid documentId, CancellationToken cancellationToken, int? take = null) =>
+        GetJsonAsync<List<DocumentVersionDto>>(string.Concat("api/documents/", documentId, "/versions", take.HasValue ? "?take=" + take.Value : string.Empty), cancellationToken);
 
-    public Task<DocumentDto> CheckoutAsync(Guid documentId, Guid sessionId, string machineName, CancellationToken cancellationToken, Guid? drawingReviewWritebackId = null) =>
-        PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/checkout"), new { sessionId, machineName, drawingReviewWritebackId }, cancellationToken);
+    public async Task<DocumentDto> CheckoutAsync(Guid documentId, Guid sessionId, string machineName, CancellationToken cancellationToken, Guid? drawingReviewWritebackId = null)
+    {
+        if (BeforeCheckout != null) await BeforeCheckout(documentId, cancellationToken);
+        return await PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/checkout"), new { sessionId, machineName, drawingReviewWritebackId }, cancellationToken).ConfigureAwait(false);
+    }
 
     public Task<DocumentDto> CompleteEditWithoutChangesAsync(Guid documentId, Guid checkoutSessionId, string sha256, CancellationToken cancellationToken) =>
         PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/complete-edit"), new { sha256, checkoutSessionId }, cancellationToken);
 
     public Task<DocumentDto> DiscardCheckoutAsync(Guid documentId, Guid checkoutSessionId, CancellationToken cancellationToken) =>
         PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/discard-checkout"), new { checkoutSessionId }, cancellationToken);
+
+    public Task<DocumentDto> CloseEditAsync(LocalEditDraft entry, bool draftPreserved, CancellationToken cancellationToken) =>
+        PostJsonAsync<DocumentDto>(string.Concat("api/documents/", entry.DocumentId, "/close-edit"),
+            new { sessionId = entry.SessionId, checkedOutAt = entry.CheckedOutAt.ToUniversalTime().ToString("O"), sha256 = entry.DiskSha256, draftPreserved }, cancellationToken);
 
     public Task<List<DocumentWhereUsedDto>> GetWhereUsedAsync(Guid documentId, CancellationToken cancellationToken) =>
         GetJsonAsync<List<DocumentWhereUsedDto>>(string.Concat("api/documents/", documentId, "/where-used"), cancellationToken);
@@ -212,8 +227,11 @@ internal sealed class PdmApiClient : IDisposable
         string drawingNumber,
         string name,
         CancellationToken cancellationToken,
-        Guid? drawingReviewWritebackId = null)
+        Guid? drawingReviewWritebackId = null,
+        Guid? expectedVersionOverride = null,
+        bool deferBomRefresh = false)
     {
+        var expectedVersionId = expectedVersionOverride ?? await BaseVersionAsync(root, documentId, cancellationToken).ConfigureAwait(false);
         var payload = new
         {
             projectId,
@@ -229,7 +247,9 @@ internal sealed class PdmApiClient : IDisposable
             drawingNumber,
             name,
             fileName = root.FileName,
-            drawingReviewWritebackId
+            drawingReviewWritebackId,
+            expectedVersionId,
+            deferBomRefresh
         };
         for (var attempt = 0; ; attempt++)
         {
@@ -258,8 +278,10 @@ internal sealed class PdmApiClient : IDisposable
         string name,
         CancellationToken cancellationToken,
         Guid? drawingReviewWritebackId = null,
-        ICollection<string> plannedPaths = null)
+        ICollection<string> plannedPaths = null,
+        Guid? expectedVersionOverride = null)
     {
+        var expectedVersionId = expectedVersionOverride ?? await BaseVersionAsync(root, documentId, cancellationToken).ConfigureAwait(false);
         _ = await PostJsonAsync<object>(
             string.Concat("api/documents/", documentId, "/checkin/preflight"),
             new
@@ -273,9 +295,122 @@ internal sealed class PdmApiClient : IDisposable
                 drawingNumber,
                 name,
                 fileName = root.FileName,
-                drawingReviewWritebackId
+                drawingReviewWritebackId,
+                expectedVersionId,
+                plannedDocumentIds = plannedPaths == null ? Array.Empty<Guid>() : PlannedDocumentIds(root, plannedPaths)
             },
             cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<object> PrepareArchiveBatchFileAsync(Guid documentId, Guid projectId, CadTreeNode root, string comment,
+        StoredVersionFile storedFile, IReadOnlyDictionary<string, string> properties, Guid sessionId, bool isRoot,
+        string drawingNumber, string name, Guid? writebackId, Guid? expectedVersionOverride, ICollection<string> plannedPaths, CancellationToken token)
+    {
+        var expectedVersionId = expectedVersionOverride ?? await BaseVersionAsync(root, documentId, token).ConfigureAwait(false);
+        return new { documentId, request = new {
+            projectId, root = ToRequestNode(root, true, plannedPaths), comment,
+            storageRelativePath = storedFile.RelativePath, fileLength = storedFile.Length, sha256 = storedFile.Sha256,
+            properties = MergeProperties(storedFile.Properties, properties), checkoutSessionId = sessionId,
+            isProjectRoot = isRoot, drawingNumber, name, fileName = root.FileName, drawingReviewWritebackId = writebackId, expectedVersionId
+        } };
+    }
+
+    public async Task<ArchiveBatchReceiptDto> CommitArchiveBatchAsync(Guid batchId, Guid sessionId, IReadOnlyList<object> files, CancellationToken token)
+    {
+        var payload = new { batchId, checkoutSessionId = sessionId, files };
+        try
+        {
+            for (var attempt = 0; ; attempt++)
+            {
+                try { return await PostJsonAsync<ArchiveBatchReceiptDto>("api/archive-batches", payload, token).ConfigureAwait(false); }
+                catch (Exception exception) when (attempt < 2 && !token.IsCancellationRequested
+                    && (exception is HttpRequestException || exception is TaskCanceledException))
+                { await Task.Delay(TimeSpan.FromSeconds(attempt + 1), token).ConfigureAwait(false); }
+            }
+        }
+        catch (Exception original) when (original is HttpRequestException || original is TaskCanceledException || original is InvalidOperationException)
+        {
+            using (var verify = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
+            {
+                try { return await GetJsonAsync<ArchiveBatchReceiptDto>("api/archive-batches/" + batchId, verify.Token).ConfigureAwait(false); }
+                catch (Exception verification) { PluginDiagnosticLog.Record("批次", "暂未取得整批存档回执：" + batchId + "，" + verification.GetType().Name); }
+            }
+            if (token.IsCancellationRequested) throw new OperationCanceledException(token);
+            if (original is InvalidOperationException) throw;
+            throw new InvalidOperationException("整批提交结果暂未确认，请恢复连接后刷新项目或重试。服务器按整批提交，不会产生部分存档。", original);
+        }
+    }
+
+    private async Task<Guid?> BaseVersionAsync(CadTreeNode node, Guid documentId, CancellationToken cancellationToken)
+    {
+        Guid? recordedBase = node.OpenedVersionId;
+        if (PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out var metadata)
+            && metadata.DocumentId == documentId && metadata.VersionId.HasValue) recordedBase = metadata.VersionId;
+        var versions = await GetVersionsAsync(documentId, cancellationToken, 1).ConfigureAwait(false);
+        if (recordedBase.HasValue)
+        {
+            var current = versions.FirstOrDefault();
+            if (current != null && current.Id != recordedBase.Value && current.Status == 1)
+            {
+                var history = await GetVersionsAsync(documentId, cancellationToken).ConfigureAwait(false);
+                var source = history.FirstOrDefault(version => version.Id == recordedBase.Value);
+                if (ReleasedArchiveBaseMatches(source, current)) return current.Id;
+            }
+            return recordedBase;
+        }
+        if (versions.Count == 0 || !File.Exists(node.FullPath)) return null;
+        var latest = versions[0];
+        var hash = ComputeFileSha256(node.FullPath);
+        string sourceHash = null;
+        latest.PropertySnapshot?.TryGetValue("SourceFileSha256", out sourceHash);
+        if (!string.Equals(hash, latest.Sha256, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(hash, sourceHash, StringComparison.OrdinalIgnoreCase)) return null;
+        if (!PdmAddin.ReferenceSnapshotMatchesTree(latest.ReferenceSnapshot, node)) return null;
+        PdmDocumentIdentityStore.TryWriteControlledVersion(node.FullPath, documentId, null, latest.Id,
+            latest.Revision?.Display, hash, new FileInfo(node.FullPath).Length);
+        return latest.Id;
+    }
+
+    private static Guid[] PlannedDocumentIds(CadTreeNode root, ICollection<string> paths)
+    {
+        var ids = new HashSet<Guid>();
+        var pending = new Stack<CadTreeNode>(); var visited = new HashSet<CadTreeNode>(); pending.Push(root);
+        while (pending.Count > 0)
+        {
+            var node = pending.Pop(); if (node == null || !visited.Add(node)) continue;
+            if (node.DocumentId.HasValue && paths.Contains(node.FullPath)) ids.Add(node.DocumentId.Value);
+            foreach (var child in node.Children.Concat(node.ReferencedModels)) pending.Push(child);
+        }
+        return ids.ToArray();
+    }
+
+    internal static bool ReleasedArchiveBaseMatches(DocumentVersionDto source, DocumentVersionDto current)
+    {
+        if (source == null || current == null || source.Revision == null
+            || current.Revision == null
+            || source.Status != 0 || current.Status != 1 || current.CreatedAt < source.CreatedAt
+            || string.IsNullOrWhiteSpace(source.Sha256)
+            || !string.Equals(source.Sha256, current.Sha256, StringComparison.OrdinalIgnoreCase)
+            || source.PropertySnapshot == null || current.PropertySnapshot == null
+            || source.PropertySnapshot.Count != current.PropertySnapshot.Count
+            || !source.PropertySnapshot.All(pair => current.PropertySnapshot.TryGetValue(pair.Key, out var value) && value == pair.Value)
+            || source.ReferenceSnapshot == null || current.ReferenceSnapshot == null) return false;
+        // Release-only promotion may change the version id while retaining the exact
+        // source content and reference snapshot. Never compare against the modified local file.
+        return SameReleasedReferences(source.ReferenceSnapshot, current.ReferenceSnapshot);
+    }
+
+    private static bool SameReleasedReferences(DocumentReferenceNodeDto left, DocumentReferenceNodeDto right)
+    {
+        if (left == null || right == null) return left == right;
+        if (left.DocumentId != right.DocumentId || left.InstancePath != right.InstancePath
+            || left.FileName != right.FileName || left.DisplayName != right.DisplayName
+            || left.Kind != right.Kind || left.Configuration != right.Configuration
+            || left.Quantity != right.Quantity || left.Status != right.Status
+            || left.Revision?.Display != right.Revision?.Display) return false;
+        var before = left.Children ?? new List<DocumentReferenceNodeDto>();
+        var after = right.Children ?? new List<DocumentReferenceNodeDto>();
+        return before.Count == after.Count && before.Zip(after, SameReleasedReferences).All(equal => equal);
     }
 
     private static Dictionary<string, string> MergeProperties(IReadOnlyDictionary<string, string> fileProperties, IReadOnlyDictionary<string, string> modelProperties)
@@ -295,23 +430,59 @@ internal sealed class PdmApiClient : IDisposable
         string originalFilePath,
         CancellationToken cancellationToken,
         Action<long, long> reportProgress = null,
-        string exactCopySourceSha256 = null)
+        string exactCopySourceSha256 = null,
+        string expectedSourceSha256 = null)
     {
         var file = new FileInfo(filePath);
         var originalFile = new FileInfo(originalFilePath);
         var hashes = await Task.Run(
-            () => CheckInUploadHashes.Read(filePath, originalFilePath, exactCopySourceSha256, cancellationToken),
+            () => CheckInUploadHashes.Read(filePath, originalFilePath, exactCopySourceSha256, cancellationToken, expectedSourceSha256),
             cancellationToken).ConfigureAwait(false);
         var sha256 = hashes.Upload;
         var sourceFileSha256 = hashes.Source;
-        var session = await PostJsonAsync<UploadSessionDto>("api/uploads/sessions", new { projectId, fileName = file.Name, totalLength = file.Length, sha256 }, cancellationToken).ConfigureAwait(false);
+        var journalPath = ArchiveUploadJournal.PathFor(projectId, documentId, originalFilePath, sha256, file.Length);
+        var transfer = ArchiveUploadJournal.Read(journalPath);
+        UploadSessionDto session = null;
+        if (transfer != null)
+        {
+            using (var response = await httpClient.GetAsync("api/uploads/sessions/" + transfer.SessionId, cancellationToken).ConfigureAwait(false))
+            {
+                if (response.IsSuccessStatusCode)
+                {
+                    session = serializer.Deserialize<UploadSessionDto>(await response.Content.ReadAsStringAsync().ConfigureAwait(false));
+                    if (session.ProjectId != projectId || session.TotalLength != file.Length
+                        || !string.Equals(session.ExpectedSha256, sha256, StringComparison.OrdinalIgnoreCase)
+                        || session.ReceivedLength < transfer.AcknowledgedLength || session.ExpiresAt <= DateTime.UtcNow)
+                        session = null;
+                }
+                else
+                {
+                    ThrowAuthenticationExpiredIfNeeded(response);
+                    if ((int)response.StatusCode >= 500)
+                        throw new InvalidOperationException("暂时无法核对上次上传结果，已保留续传记录，请稍后重试。");
+                }
+            }
+        }
+        if (session == null)
+        {
+            session = await PostJsonAsync<UploadSessionDto>("api/uploads/sessions", new { projectId, fileName = file.Name, totalLength = file.Length, sha256 }, cancellationToken).ConfigureAwait(false);
+            transfer = new ArchiveUploadState { SessionId = session.Id,
+                RelativePath = Path.Combine(".versions", documentId.ToString("N"), Guid.NewGuid().ToString("N"), file.Name) };
+            ArchiveUploadJournal.Save(journalPath, transfer);
+        }
+        if (session.ChunkSize <= 0 || session.ChunkSize > 16 * 1024 * 1024 || transfer.AcknowledgedLength > file.Length
+            || transfer.AcknowledgedLength < 0
+            || (transfer.AcknowledgedLength != file.Length && transfer.AcknowledgedLength % session.ChunkSize != 0))
+            throw new InvalidOperationException("上传分块配置或续传记录无效，已停止上传。");
         using (var input = File.OpenRead(filePath))
         {
             var buffer = new byte[session.ChunkSize];
-            var chunkIndex = 0;
-            long uploaded = 0;
+            input.Position = transfer.AcknowledgedLength;
+            var chunkIndex = (int)(transfer.AcknowledgedLength / session.ChunkSize);
+            long uploaded = transfer.AcknowledgedLength;
+            reportProgress?.Invoke(uploaded, file.Length);
             int read;
-            while ((read = await input.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false)) > 0)
+            while ((read = await ReadUploadChunkAsync(input, buffer, cancellationToken).ConfigureAwait(false)) > 0)
             {
                 using (var content = new ByteArrayContent(buffer, 0, read))
                 using (var response = await httpClient.PutAsync(string.Concat("api/uploads/sessions/", session.Id, "/chunks/", chunkIndex), content, cancellationToken).ConfigureAwait(false))
@@ -323,12 +494,15 @@ internal sealed class PdmApiClient : IDisposable
                     }
                 }
                 uploaded += read;
+                transfer.AcknowledgedLength = uploaded;
+                ArchiveUploadJournal.Save(journalPath, transfer);
                 reportProgress?.Invoke(uploaded, file.Length);
                 chunkIndex++;
             }
         }
-        var relative = Path.Combine(".versions", documentId.ToString("N"), Guid.NewGuid().ToString("N"), file.Name);
+        var relative = transfer.RelativePath;
         var stored = await PostJsonAsync<StoredFileDto>(string.Concat("api/uploads/sessions/", session.Id, "/complete"), new { relativeTargetPath = relative }, cancellationToken).ConfigureAwait(false);
+        CheckInUploadHashes.VerifySource(originalFilePath, sourceFileSha256, cancellationToken);
         return new StoredVersionFile(stored.RelativePath, stored.Length, stored.Sha256, new Dictionary<string, string> { ["FileName"] = originalFile.Name, ["Extension"] = originalFile.Extension, ["LastWriteTimeUtc"] = originalFile.LastWriteTimeUtc.ToString("O"), ["SourceFileSha256"] = sourceFileSha256 });
     }
 
@@ -339,6 +513,18 @@ internal sealed class PdmApiClient : IDisposable
         {
             return BitConverter.ToString(hash.ComputeHash(input)).Replace("-", string.Empty);
         }
+    }
+
+    private static async Task<int> ReadUploadChunkAsync(Stream input, byte[] buffer, CancellationToken cancellationToken)
+    {
+        var length = 0;
+        while (length < buffer.Length)
+        {
+            var read = await input.ReadAsync(buffer, length, buffer.Length - length, cancellationToken).ConfigureAwait(false);
+            if (read == 0) break;
+            length += read;
+        }
+        return length;
     }
 
     public async Task<string> DownloadVersionToTempAsync(Guid documentId, Guid versionId, string fileName, string revision, CancellationToken cancellationToken)
@@ -498,6 +684,7 @@ internal sealed class PdmApiClient : IDisposable
 
     public void Dispose()
     {
+        if (httpClient.DefaultRequestHeaders.Authorization != null) ClientDiagnostics.Pause(httpClient.DefaultRequestHeaders.Authorization.Parameter);
         controlledOpenHttpClient.Dispose();
         httpClient.Dispose();
     }
@@ -547,12 +734,53 @@ internal sealed class PdmApiClient : IDisposable
     /// 提交前校验引用版本。plannedPaths 传入本次一同提交的文件，
     /// 这些引用会在执行阶段先被提交并回填版本，因此校验阶段不做要求。
     /// </summary>
-    internal static void ValidateCheckInReferences(CadTreeNode node, ICollection<string> plannedPaths = null) =>
+    internal static void ValidateCheckInReferences(CadTreeNode node, ICollection<string> plannedPaths = null)
+    {
+        ValidateArchiveReferenceCompleteness(node);
         ToRequestNode(node, true, plannedPaths);
+    }
 
+    internal static void ValidateArchiveReferenceCompleteness(CadTreeNode node)
+    {
+        if (node == null) return;
+        var pending = new Stack<CadTreeNode>();
+        var visited = new HashSet<CadTreeNode>();
+        pending.Push(node);
+        while (pending.Count > 0)
+        {
+            var current = pending.Pop();
+            // A model contains its drawings, whose ReferencedModels point back to that model.
+            if (current == null || !visited.Add(current)) continue;
+            if (current.Status == CadReferenceStatus.Missing)
+                throw new InvalidOperationException("组件“" + current.FileName + "”的引用路径无效或文件缺失，已停止存档。请修复引用并刷新设计树后重试。路径：" + current.FullPath);
+            if (current.Status == CadReferenceStatus.Suppressed)
+            {
+                if (string.IsNullOrWhiteSpace(current.FullPath) || !File.Exists(current.FullPath))
+                    throw new InvalidOperationException("压缩组件“" + current.FileName + "”的引用文件不存在，不能完整存档。请修复文件引用后重试。路径：" + current.FullPath);
+                if (SuppressedAssemblyArchive.IsUnexpanded(current) && !SuppressedAssemblyArchive.CanReuse(current)
+                    && !SuppressedAssemblyLocalStructure.CanUse(current))
+                    throw new InvalidOperationException("压缩子装配体“" + current.FileName + "”的内部结构尚未读取，已停止存档以防遗漏子件。请先解除该子装配体的压缩，刷新设计树后再整体存档。路径：" + current.FullPath);
+            }
+            foreach (var child in current.Children) pending.Push(child);
+            foreach (var model in current.ReferencedModels) pending.Push(model);
+        }
+    }
     private static object ToRequestNode(CadTreeNode node, bool isRoot, ICollection<string> plannedPaths = null)
     {
+        if (isRoot) ValidateArchiveReferenceCompleteness(node);
         var children = new List<object>();
+        if (node.Kind == CadDocumentKind.Drawing)
+        {
+            foreach (var model in node.ReferencedModels)
+            {
+                if (plannedPaths?.Contains(model.FullPath) == true && !HasResolvedReferenceVersion(model)) continue;
+                var reference = new CadTreeNode { DocumentId = model.DocumentId, FullPath = model.FullPath,
+                    FileName = model.FileName, DisplayName = model.DisplayName, Kind = model.Kind,
+                    InstancePath = "model/" + model.FileName + "/" + model.Configuration,
+                    Configuration = model.Configuration, CurrentRevision = model.CurrentRevision, Status = model.Status };
+                children.Add(ToRequestNode(reference, false, plannedPaths));
+            }
+        }
         foreach (var child in node.Children)
         {
             if (child.Kind == CadDocumentKind.Drawing)
@@ -565,18 +793,19 @@ internal sealed class PdmApiClient : IDisposable
                 && plannedPaths.Contains(child.FullPath))
             {
                 // 本次一起提交：执行阶段该子件会先入库并回填版本，这里不要求已解析。
-                try
-                {
-                    children.Add(ToRequestNode(child, false));
-                }
-                catch (InvalidOperationException)
-                {
-                    // 版本尚未解析（本地修改）属于预期状态，交由执行阶段处理。
-                }
+                children.Add(ToRequestNode(child, false, plannedPaths));
                 continue;
             }
 
             children.Add(ToRequestNode(child, false, plannedPaths));
+        }
+
+        if (SuppressedAssemblyArchive.CanReuse(node))
+        {
+            var archived = node.SuppressedArchiveVersion.ReferenceSnapshot;
+            children = (archived.Children ?? new List<DocumentReferenceNodeDto>())
+                .Where(child => child.Kind != (int)CadDocumentKind.Drawing)
+                .Select(child => ToArchivedReferenceRequest(child, archived.InstancePath, node.InstancePath)).ToList();
         }
 
         var displayedRevisionText = isRoot ? node.Revision : node.CurrentRevision;
@@ -584,6 +813,8 @@ internal sealed class PdmApiClient : IDisposable
             ? displayedRevisionText.TrimEnd('*').Trim()
             : displayedRevisionText;
         var revision = ToRevisionRequest(revisionText);
+        if (!isRoot && revision == null && plannedPaths?.Contains(node.FullPath) == true)
+            revision = ToRevisionRequest(node.Revision);
         if (!isRoot && node.DocumentId.HasValue && revision == null)
         {
             throw new InvalidOperationException(string.Concat(
@@ -611,6 +842,24 @@ internal sealed class PdmApiClient : IDisposable
         };
     }
 
+    private static object ToArchivedReferenceRequest(DocumentReferenceNodeDto node, string oldRootPath, string newRootPath)
+    {
+        var prefix = (oldRootPath ?? string.Empty).TrimEnd('/') + "/";
+        var path = node.InstancePath ?? node.FileName ?? string.Empty;
+        var relative = path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? path.Substring(prefix.Length) : path;
+        return new
+        {
+            nodeId = Guid.NewGuid(), documentId = node.DocumentId,
+            instancePath = (newRootPath ?? string.Empty).TrimEnd('/') + "/" + relative,
+            fileName = node.FileName, displayName = node.DisplayName, kind = node.Kind,
+            configuration = node.Configuration, quantity = node.Quantity, status = node.Status,
+            revision = ToRevisionRequest(node.Revision?.Display), checkedOutBy = (string)null,
+            children = (node.Children ?? new List<DocumentReferenceNodeDto>())
+                .Where(child => child.Kind != (int)CadDocumentKind.Drawing)
+                .Select(child => ToArchivedReferenceRequest(child, oldRootPath, newRootPath)).ToArray()
+        };
+    }
+
     private void ThrowAuthenticationExpiredIfNeeded(HttpResponseMessage response)
     {
         if (response == null || response.StatusCode != System.Net.HttpStatusCode.Unauthorized)
@@ -619,6 +868,7 @@ internal sealed class PdmApiClient : IDisposable
         }
 
         httpClient.DefaultRequestHeaders.Authorization = null;
+        ClientDiagnostics.Pause();
         controlledOpenHttpClient.DefaultRequestHeaders.Authorization = null;
         if (Interlocked.Exchange(ref authenticationExpiredRaised, 1) == 0)
         {
@@ -855,6 +1105,7 @@ internal sealed class EditSessionHeartbeatDto
     public DateTime LeaseExpiresAt { get; set; }
     public List<Guid> ActiveDocumentIds { get; set; }
     public List<Guid> LostDocumentIds { get; set; }
+    public List<Guid> ReleaseRequestedDocumentIds { get; set; }
     public CheckoutPolicyDto Settings { get; set; }
 }
 
@@ -867,6 +1118,8 @@ internal sealed class CheckoutPolicyDto
 
 internal sealed class DocumentVersionDto
 {
+    public string StorageRelativePath { get; set; }
+    public long FileLength { get; set; }
     public Guid Id { get; set; }
     public RevisionDto Revision { get; set; }
     public int Status { get; set; }
@@ -926,6 +1179,8 @@ internal sealed class CheckInResultDto
     public bool VersionCreated { get; set; }
     public BomGenerationResultDto BomUpdate { get; set; }
     public string BomUpdateError { get; set; }
+    public bool BomRefreshDeferred { get; set; }
+    public List<string> AffectedAssemblies { get; set; }
 }
 
 internal sealed class BomGenerationResultDto
@@ -950,6 +1205,12 @@ internal sealed class CadPropertyWritebackDto
     public DateTime RequestedAt { get; set; }
     public string LastError { get; set; }
 }
+internal sealed class ArchiveBatchReceiptDto
+{
+    public Guid BatchId { get; set; }
+    public List<CheckInResultDto> Results { get; set; }
+}
+
 internal sealed class ControlledOpenManifestDto
 {
     public Guid Id { get; set; }
@@ -975,7 +1236,16 @@ internal sealed class ControlledOpenFileDto
     public string Configuration { get; set; }
     public bool IsRoot { get; set; }
 }
-internal sealed class UploadSessionDto { public Guid Id { get; set; } public int ChunkSize { get; set; } }
+internal sealed class UploadSessionDto
+{
+    public Guid Id { get; set; }
+    public Guid ProjectId { get; set; }
+    public int ChunkSize { get; set; }
+    public long TotalLength { get; set; }
+    public long ReceivedLength { get; set; }
+    public string ExpectedSha256 { get; set; }
+    public DateTime ExpiresAt { get; set; }
+}
 internal sealed class StoredFileDto { public string RelativePath { get; set; } public long Length { get; set; } public string Sha256 { get; set; } }
 internal sealed class StoredVersionFile
 {

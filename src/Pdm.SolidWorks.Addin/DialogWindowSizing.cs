@@ -9,6 +9,32 @@ internal static class DialogWindowSizing
 {
     private const uint GetAncestorRoot = 2;
 
+    public static void CenterOnOwnerScreen(Form dialog)
+    {
+        dialog.StartPosition = FormStartPosition.Manual;
+        dialog.Load += (_, __) =>
+        {
+            var owner = GetWindow(dialog.Handle, 4); // GW_OWNER, including native SolidWorks owners.
+            var area = owner == IntPtr.Zero
+                ? Screen.FromPoint(Cursor.Position).WorkingArea
+                : Screen.FromHandle(owner).WorkingArea;
+            var bounds = CenteredBounds(area, dialog.Size);
+            dialog.MinimumSize = new Size(Math.Min(dialog.MinimumSize.Width, bounds.Width), Math.Min(dialog.MinimumSize.Height, bounds.Height));
+            dialog.Bounds = bounds;
+        };
+    }
+
+    internal static Rectangle CenteredBounds(Rectangle workingArea, Size size)
+    {
+        var width = Math.Min(size.Width, workingArea.Width);
+        var height = Math.Min(size.Height, workingArea.Height);
+        return new Rectangle(workingArea.Left + (workingArea.Width - width) / 2,
+            workingArea.Top + (workingArea.Height - height) / 2, width, height);
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr window, uint command);
+
     public static void FitToOwner(Form dialog, IntPtr ownerWindowHandle, double fillRatio, int margin)
     {
         if (dialog == null)

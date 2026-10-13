@@ -83,6 +83,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             CategoryCode = normalizedCategory,
             Brand = normalizedBrand,
             IncludeArchived = includeArchived,
+            ExactCode = query?.Trim(),
             Offset = (normalizedPage - 1) * normalizedPageSize,
             PageSize = normalizedPageSize
         };
@@ -90,7 +91,15 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             " AND NOT EXISTS (SELECT 1 FROM project_bom_header h WHERE h.material_id=material_master.id)" +
             " AND NOT EXISTS (SELECT 1 FROM bom_version v WHERE v.mother_material_id=material_master.id AND v.bom_kind IN ('Standard','NonStandard','Electrical'))" +
             " AND NOT EXISTS (SELECT 1 FROM material_code_application a WHERE a.material_id=material_master.id AND a.bom_item_id IS NULL AND a.bom_header_kind IS NOT NULL)";
-        var total = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+        // A complete material code identifies one item; unmatched codes still use the broad search.
+        if (query?.Trim() is { Length: 11 } exactCode && exactCode.All(char.IsAsciiDigit))
+        {
+            var exact = await connection.QuerySingleOrDefaultAsync<MaterialRow>(new CommandDefinition(
+                MaterialSelect + filters + " AND material_code=@ExactCode", parameters, cancellationToken: cancellationToken));
+            if (exact is not null) return new(normalizedPage == 1 ? [MapMaterial(exact)] : [], 1, normalizedPage, normalizedPageSize);
+        }
+        var searching = normalizedQuery is not null;
+        var total = searching ? 0 : await connection.ExecuteScalarAsync<int>(new CommandDefinition(
             "SELECT COUNT(*) FROM material_master" + filters,
             parameters,
             cancellationToken: cancellationToken));
@@ -115,14 +124,27 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
             " is_recommended DESC,reference_count DESC,material_code"
         };
         // Sort only identifiers and ranking values; load attachment counts and wide fields for this page.
+        var projection = searching ? "id,COUNT(*) OVER() AS Total" : "id";
+        // Substring filters must filter rows before sorting, rather than read the entire ordering index with random row lookups.
+        var searchHint = searching ? "/*+ NO_ORDER_INDEX(material_master) */ " : string.Empty;
         var candidateSql = effectiveSortBy is not null
-            ? "SELECT id FROM material_master" + filters
-            : "SELECT id FROM (SELECT material_master.id,material_code,name,specification,brand,created_by,created_at,approval_status,is_archived,is_recommended," +
+            ? "SELECT " + searchHint + projection + " FROM material_master" + filters
+            : "SELECT " + projection + " FROM (SELECT material_master.id,material_code,name,specification,brand,created_by,created_at,approval_status,is_archived,is_recommended," +
                 " COALESCE(material_links.link_count,0) + CASE WHEN source_bom_item_id IS NULL THEN 0 ELSE 1 END AS reference_count" +
                 " FROM material_master LEFT JOIN (SELECT material_id,COUNT(*) AS link_count FROM bom_material_link GROUP BY material_id) material_links" +
                 " ON material_links.material_id=material_master.id" + filters + ") page_candidates";
-        var ids = (await connection.QueryAsync<Guid>(new CommandDefinition(
-            candidateSql + orderBy + " LIMIT @PageSize OFFSET @Offset", parameters, cancellationToken: cancellationToken))).ToArray();
+        Guid[] ids;
+        var pageSql = candidateSql + orderBy + " LIMIT @PageSize OFFSET @Offset";
+        if (searching)
+        {
+            var candidates = (await connection.QueryAsync<MaterialPageCandidate>(new CommandDefinition(
+                pageSql, parameters, cancellationToken: cancellationToken))).ToArray();
+            ids = candidates.Select(candidate => candidate.Id).ToArray();
+            total = candidates.Length > 0 ? candidates[0].Total : normalizedPage == 1 ? 0
+                : await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+                    "SELECT COUNT(*) FROM material_master" + filters, parameters, cancellationToken: cancellationToken));
+        }
+        else ids = (await connection.QueryAsync<Guid>(new CommandDefinition(pageSql, parameters, cancellationToken: cancellationToken))).ToArray();
         if (ids.Length == 0) return new([], total, normalizedPage, normalizedPageSize);
         var rows = await connection.QueryAsync<MaterialRow>(new CommandDefinition(
             MaterialSelect + " WHERE id IN @Ids", new { Ids = ids }, cancellationToken: cancellationToken));
@@ -2102,6 +2124,12 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
     }
 
     private static DateTimeOffset? Utc(DateTime? value) => value is null ? null : new DateTimeOffset(DateTime.SpecifyKind(value.Value, DateTimeKind.Utc));
+
+    private sealed class MaterialPageCandidate
+    {
+        public Guid Id { get; init; }
+        public int Total { get; init; }
+    }
 
     private const string MaterialSelect = """
         SELECT id,material_code,name,material_kind,supply_mode,unit_code,specification,material,remark,brand,surface_treatment,purchase_link,selection_advice,reference_price,model_3d_link,document_link,is_recommended,cover_image_attachment_id,

@@ -1,3 +1,4 @@
+import { confirmBomRelease as confirmBomReleaseRequest } from '../api'
 import { listReleasePackages } from '../api'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, permanentlyDeleteManualBomItems as permanentlyDeleteManualBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest, setBomReleaseExclusion as setBomReleaseExclusionRequest } from '../api'
@@ -105,6 +106,7 @@ function findNodeByDocumentId(root: DocumentNode, documentId: string): DocumentN
 }
 
 function isIssue(node: DocumentNode) {
+  if (node.isVirtualGroup) return false
   return node.status === 'Missing'
     || node.status === 'Unregistered'
     || node.status === 'Unarchived'
@@ -150,7 +152,21 @@ export function buildDocumentDisplayRoot(
   documents: ManagedDocument[],
   projectId: string,
 ): DocumentNode {
-  if (referenceRoot.documentId || referenceRoot.children.length > 0) return referenceRoot
+  const referenced = new Set<string>()
+  const collect = (node: DocumentNode) => {
+    if (node.documentId) referenced.add(node.documentId)
+    node.children.forEach(collect)
+  }
+  collect(referenceRoot)
+  if (referenceRoot.documentId || referenceRoot.children.length > 0) {
+    const standalone = documents.filter(document => document.projectId === projectId && !referenced.has(document.id))
+      .map(managedDocumentNode)
+      .sort((left, right) => left.drawingNumber.localeCompare(right.drawingNumber, 'zh-CN', { numeric: true }))
+    if (standalone.length === 0) return referenceRoot
+    const independent: DocumentNode = { ...emptyRoot, id: `independent-${projectId}`, name: '独立图档 / 待纳入结构', children: standalone }
+    return { ...emptyRoot, id: `project-${projectId}`, name: '项目图档',
+      children: [...(referenceRoot.documentId ? [referenceRoot] : referenceRoot.children), independent] }
+  }
 
   const models = documents
     .filter(document => document.projectId === projectId && document.kind !== 'Drawing')
@@ -682,6 +698,18 @@ export function usePdmWorkspace() {
     } finally {
       operationPending.value = false
     }
+  }
+
+  async function confirmBomRelease(tokens: Record<string, string>, confirmed: boolean, reason: string) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      await confirmBomReleaseRequest(project.value.id, tokens, confirmed, reason, accessToken)
+      await reload()
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally { operationPending.value = false }
   }
 
   async function setBomReleaseExclusion(itemIds: string[], excluded: boolean, reason: string) {
@@ -2046,6 +2074,7 @@ export function usePdmWorkspace() {
     batchRestoreBomItems,
     permanentlyDeleteManualBomItems,
     setBomReleaseExclusion,
+    confirmBomRelease,
     restoreBomItemsFromSource,
     setBomCategoryEmpty,
     refreshDrawingReviews,

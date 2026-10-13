@@ -683,7 +683,6 @@ onBeforeUnmount(() => {
       :row-class-name="rowClassName"
       :cell-class-name="cellClassName"
       height="100%"
-      border
       stripe
       class="procurement-tracking__table"
     >
@@ -702,7 +701,7 @@ onBeforeUnmount(() => {
         :sortable="deliveryColumns.includes(column.key as DeliveryColumn) ? 'custom' : false"
         :width="column.fixedWidth"
         :min-width="column.fixedWidth ? undefined : column.width / 2.5"
-        :resizable="false"
+        :resizable="true"
         :align="column.align ?? 'left'"
         show-overflow-tooltip
       >
@@ -775,8 +774,8 @@ onBeforeUnmount(() => {
 .procurement-tracking__warehouse-list{display:flex;flex-direction:column;max-height:60vh;overflow:auto}
 .procurement-tracking__pagination{display:flex;flex:0 0 auto;align-items:center;justify-content:flex-end;gap:8px;padding:8px 10px;color:var(--pdm-muted);font-size:11px}
 .procurement-tracking__pagination select{height:28px;padding:0 24px 0 8px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text)}
-.procurement-tracking__pagination .pdm-secondary-action{width:60px;min-width:60px;height:28px;min-height:28px;padding:0}
-.procurement-tracking{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;padding:8px 18px 18px}.procurement-tracking__heading{display:flex;overflow-x:auto;overflow-y:hidden;align-items:center;justify-content:flex-start;gap:5px;min-height:30px;flex-shrink:0;margin-bottom:6px;white-space:nowrap}.procurement-tracking__actions{display:flex;align-items:center;gap:5px;flex-shrink:0;white-space:nowrap}.procurement-tracking__actions :deep(.el-button){box-sizing:border-box;width:60px;min-width:60px;height:30px;min-height:30px;flex:0 0 60px;margin:0;padding:0 5px;white-space:nowrap}.procurement-tracking__updated{margin-left:auto;flex-shrink:0;white-space:nowrap;color:var(--pdm-muted);font-size:11px}.procurement-tracking__table{min-height:0;flex:1 1 auto;margin-top:0}.procurement-tracking__settings-note{margin:0 0 12px;color:var(--pdm-muted);line-height:1.4}.procurement-tracking__column-list{display:grid;max-height:calc(100vh - 190px);grid-template-columns:repeat(2,minmax(0,1fr));gap:0;overflow:auto;border:1px solid var(--pdm-border-soft);border-radius:8px}.procurement-tracking__column-list :deep(.el-checkbox){box-sizing:border-box;width:100%;min-height:36px;margin:0;padding:7px 12px;border-bottom:1px solid #eef2f7}.procurement-tracking__column-list :deep(.el-checkbox:nth-child(odd)){border-right:1px solid #eef2f7}.procurement-tracking :deep(.is-procurement-late td.el-table__cell){background:var(--pdm-orange-soft)!important}@media(max-width:1000px){.procurement-tracking__heading{flex-wrap:nowrap}}
+.procurement-tracking__pagination .pdm-secondary-action{width:60px;min-width:60px;height:var(--pdm-symbol-compact);min-height:var(--pdm-symbol-compact);padding:0}
+.procurement-tracking{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;padding:8px 18px 18px}.procurement-tracking__heading{display:flex;overflow-x:auto;overflow-y:hidden;align-items:center;justify-content:flex-start;gap:5px;min-height:30px;flex-shrink:0;margin-bottom:6px;white-space:nowrap}.procurement-tracking__actions{display:flex;align-items:center;gap:5px;flex-shrink:0;white-space:nowrap}.procurement-tracking__actions :deep(.el-button){box-sizing:border-box;width:auto;min-width:60px;height:var(--pdm-button-default);min-height:var(--pdm-button-default);flex:0 0 60px;margin:0;padding:0 5px;white-space:nowrap}.procurement-tracking__updated{margin-left:auto;flex-shrink:0;white-space:nowrap;color:var(--pdm-muted);font-size:11px}.procurement-tracking__table{min-height:0;flex:1 1 auto;margin-top:0}.procurement-tracking__settings-note{margin:0 0 12px;color:var(--pdm-muted);line-height:1.4}.procurement-tracking__column-list{display:grid;max-height:calc(100vh - 190px);grid-template-columns:repeat(2,minmax(0,1fr));gap:0;overflow:auto;border:1px solid var(--pdm-border-soft);border-radius:8px}.procurement-tracking__column-list :deep(.el-checkbox){box-sizing:border-box;width:100%;min-height:36px;margin:0;padding:7px 12px;border-bottom:1px solid #eef2f7}.procurement-tracking__column-list :deep(.el-checkbox:nth-child(odd)){border-right:1px solid #eef2f7}.procurement-tracking :deep(.is-procurement-late td.el-table__cell){background:var(--pdm-orange-soft)!important}@media(max-width:1000px){.procurement-tracking__heading{flex-wrap:nowrap}}
 
 .procurement-tracking :deep(.el-button:not(.is-link):not(.is-circle):not(.el-button--text):not([aria-label])),:global(.procurement-tracking-dialog .el-button:not(.is-link):not(.is-circle):not(.el-button--text):not([aria-label])){box-sizing:border-box;width:60px;min-width:60px!important;flex:0 0 60px;padding-inline:3px!important;font-size:11px}
 .procurement-tracking__multi-options>button{width:60px;min-width:60px}

@@ -35,6 +35,8 @@ public sealed class ProjectTeamPermissionTests
         Assert.True((await repository.ListProjectsForUserAsync("pm", UserRole.Engineer, default)).Single(project => project.Id == root.Id).CanManageMainStaffing);
         var multipleOwners = await workflow.SetProjectPhaseOwnersAsync(root.Id, new(new Dictionary<string, string> { ["Acceptance"] = "lead、collaborator、lead" }), "pm", UserRole.Engineer, default);
         Assert.Equal("lead、collaborator", multipleOwners.PhaseOwners["Acceptance"]);
+        var hardwareOwners = await workflow.SetProjectPhaseOwnersAsync(root.Id, new(new Dictionary<string, string> { ["ElectricalHardware"] = "lead" }), "pm", UserRole.Engineer, default);
+        Assert.Equal("lead", hardwareOwners.PhaseOwners["ElectricalHardware"]);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.SetMainProjectStaffingAsync(root.Id, new("collaborator", [], ["lead"]), "pm", UserRole.Engineer, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => workflow.SetProjectPhaseOwnersAsync(root.Id, new(new Dictionary<string, string> { ["Acceptance"] = "lead、missing-user" }), "pm", UserRole.Engineer, default));
         foreach (var actor in new[] { "pm", "division-manager" })

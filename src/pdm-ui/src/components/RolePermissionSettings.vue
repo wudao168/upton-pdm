@@ -249,7 +249,7 @@ watch(roles, value => {
 .pdm-role-permission-dialog :deep(.el-dialog__body) { max-height: 74vh; overflow: auto; padding-top: 12px; }
 .pdm-role-permission-dialog :deep(.el-dialog__footer) { display: flex; align-items: center; gap: 8px; }
 .pdm-role-dialog-footer-spacer { flex: 1; }
-.pdm-danger-action { display: inline-flex; min-height: 34px; align-items: center; gap: 5px; border: 1px solid var(--pdm-danger-border); border-radius: 5px; padding: 0 11px; background: #fff7f6; color: var(--pdm-danger); cursor: pointer; }.pdm-danger-action:disabled { cursor: not-allowed; opacity: .45; }
+.pdm-danger-action { display: inline-flex; min-height: var(--pdm-button-default); align-items: center; gap: 5px; border: 1px solid var(--pdm-danger-border); border-radius: 5px; padding: 0 11px; background: #fff7f6; color: var(--pdm-danger); cursor: pointer; }.pdm-danger-action:disabled { cursor: not-allowed; opacity: .45; }
 .pdm-role-create-form { display: grid; gap: 14px; }.pdm-role-create-form label { display: grid; gap: 7px; color: var(--pdm-text-soft); font-size: 12px; }.pdm-role-create-form input, .pdm-role-create-form select, .pdm-role-create-form textarea { border: 1px solid var(--pdm-border); border-radius: 6px; padding: 9px 10px; background: var(--pdm-surface); color: var(--pdm-text); }.pdm-role-create-form small { color: var(--pdm-muted); line-height: 1.4; }
 @media (max-width: 900px) { .pdm-role-directory { padding: 12px; }.pdm-role-overview { grid-template-columns: 1fr; }.pdm-role-permission-dialog :deep(.el-dialog) { width: calc(100vw - 24px) !important; }.pdm-permission-layout { grid-template-columns: 132px minmax(0, 1fr); }.pdm-permission-sidebar button { padding-right: 8px; font-size: 12px; }.pdm-permission-matrix { padding-left: 10px; } }
 </style>

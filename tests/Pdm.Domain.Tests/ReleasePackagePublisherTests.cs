@@ -135,8 +135,10 @@ public sealed class ReleasePackagePublisherTests
         }
     }
 
-    [Fact]
-    public async Task Publish_GeneratesStepOnServerAndIncludesItInReleasePackage()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Publish_GeneratesStepOnServerAndIncludesItInReleasePackage(bool partialFailure)
     {
         var root = Path.Combine(Path.GetTempPath(), "pdm-server-preview-test", Guid.NewGuid().ToString("N"));
         var packageId = Guid.NewGuid();
@@ -157,7 +159,7 @@ public sealed class ReleasePackagePublisherTests
             Scope = ReleaseScope.NonStandardWithDrawing
         };
         var project = new Project(package.ProjectId, "P-TEST", "服务器发布测试", "admin", Path.Combine(root, "vault"), Path.Combine(root, "release"), true);
-        var converter = new RecordingServerPreviewConverter();
+        var converter = new RecordingServerPreviewConverter { PartialFailure = partialFailure };
         var publisher = new AtomicReleasePackagePublisher(TimeProvider.System, converter);
         var source = new ReleasePreviewSource(
             documentId,
@@ -181,6 +183,8 @@ public sealed class ReleasePackagePublisherTests
             var publication = await publisher.PublishAsync(package, project, [source], default);
 
             Assert.Equal(1, converter.Calls);
+            if (partialFailure) Assert.StartsWith(PartialPreviewConversionException.ItemErrorPrefix, publication.PreviewError);
+            else Assert.Null(publication.PreviewError);
             Assert.Equal(DocumentPreviewFormat.Step, publication.Previews[documentId].Format);
             Assert.True(File.Exists(Path.Combine(publication.PublishedPath, "previews", $"{documentId:N}_PART-001.step")));
             var manifest = await File.ReadAllTextAsync(Path.Combine(publication.PublishedPath, "manifest.json"), default);
@@ -197,6 +201,7 @@ public sealed class ReleasePackagePublisherTests
     private sealed class RecordingServerPreviewConverter : IServerPreviewConverter
     {
         public Exception? FinalizationError { get; set; }
+        public bool PartialFailure { get; set; }
         public Task<IReadOnlyDictionary<Guid, FormalDrawingSource>> FinalizeDrawingsAsync(ReleasePackage package, Project project, IReadOnlyList<ReleasePreviewSource> sources, string stagingDirectory, CancellationToken cancellationToken)
         {
             if (FinalizationError is not null) throw FinalizationError;
@@ -225,6 +230,8 @@ public sealed class ReleasePackagePublisherTests
                 result[source.DocumentId] = new DocumentPreviewArtifact(format, relativePath, new FileInfo(path).Length, new string('C', 64), source.SourceSha256);
             }
 
+            if (PartialFailure)
+                throw new PartialPreviewConversionException(result, new Dictionary<Guid, string> { [Guid.NewGuid()] = "另一图档转换失败，请单独重试。" }, "OTHER.SLDPRT：另一图档转换失败，请单独重试。");
             return result;
         }
     }

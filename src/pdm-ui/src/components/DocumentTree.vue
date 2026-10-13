@@ -51,6 +51,7 @@ const filters: Array<{ value: DocumentFilter; label: string }> = [
 ]
 
 function showContext(node: DocumentNode, event: MouseEvent) {
+  if (node.isVirtualGroup) return
   contextNode.value = node
   contextLeft.value = Math.max(8, Math.min(event.clientX, window.innerWidth - 310))
   contextTop.value = Math.max(8, Math.min(event.clientY, window.innerHeight - 340))
@@ -131,7 +132,7 @@ onBeforeUnmount(() => {
           @contextmenu.prevent="showContext(drawing, $event)"
         >
           <span class="pdm-tree-row__content"><CadDocumentIcon :kind="drawing.kind" :status="drawing.status" :size="17" /><span class="pdm-tree-row__label"><strong>{{ drawing.drawingNumber }}</strong><small>{{ drawing.name }}</small></span></span>
-          <span class="pdm-tree-row__version"><em>{{ drawing.version }}</em><small v-if="drawing.documentId && localStates[drawing.documentId]" class="pdm-local-state" :class="`is-${localStates[drawing.documentId].localState}`" :title="localStates[drawing.documentId].message">{{ localStates[drawing.documentId].localStateLabel }}</small><small v-if="drawing.documentId && reviewStates[drawing.documentId]" class="pdm-review-badge" :class="`is-${reviewStates[drawing.documentId].tone}`">{{ reviewStates[drawing.documentId].label }}</small></span>
+          <span class="pdm-tree-row__version"><em>{{ drawing.version }}</em><small v-if="drawing.status === 'Unarchived'">未存档</small><small v-if="drawing.documentId && localStates[drawing.documentId]" class="pdm-local-state" :class="`is-${localStates[drawing.documentId].localState}`" :title="localStates[drawing.documentId].message">{{ localStates[drawing.documentId].localStateLabel }}</small><small v-if="drawing.documentId && reviewStates[drawing.documentId]" class="pdm-review-badge" :class="`is-${reviewStates[drawing.documentId].tone}`">{{ reviewStates[drawing.documentId].label }}</small></span>
         </button>
       </li>
       <li v-if="drawingPageCount > 1" class="pdm-drawing-pages">
@@ -141,7 +142,7 @@ onBeforeUnmount(() => {
       </li>
     </ul>
     <ul v-else-if="filter !== 'drawing' && root" class="pdm-tree" role="tree">
-      <DocumentTreeNode :node="root" :selected-id="selectedId" :review-states="reviewStates" :local-states="localStates" @select="emit('select', $event)" @context="showContext" />
+      <DocumentTreeNode :node="root" :search-query="query" :selected-id="selectedId" :review-states="reviewStates" :local-states="localStates" @select="emit('select', $event)" @context="showContext" />
     </ul>
     <div v-else class="pdm-tree-empty" role="status">
       <strong>没有匹配的图档</strong>

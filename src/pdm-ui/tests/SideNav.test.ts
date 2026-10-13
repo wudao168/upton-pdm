@@ -12,9 +12,9 @@ describe('SideNav', () => {
     const wrapper = mount(SideNav, { props: { active: 'project-center' } })
     const navigationLabels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
 
-    expect(navigationLabels.slice(0, 4)).toEqual(['项目日历', '项目中心', '项目工作台', '项目列表'])
-    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[2]!.trigger('click')
-    expect(wrapper.emitted('navigate')?.[0]).toEqual(['project-workbench', '项目工作台'])
+    expect(navigationLabels.slice(0, 4)).toEqual(['项目日历', '项目总览', '项目中心', '项目列表'])
+    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[1]!.trigger('click')
+    expect(wrapper.emitted('navigate')?.[0]).toEqual(['project-workbench', '项目总览'])
   })
 
   it('hides material management without material view permission', () => {

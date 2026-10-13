@@ -1,12 +1,15 @@
 <script setup lang="ts">
+import RawDrawerPanel from './RawDrawerPanel.vue'
+import PanelActions from './PanelActions.vue'
+
 import { Boxes, Calendar, ClipboardCheck, ClipboardList, FolderOpen, FolderTree, Info, LayoutDashboard, Rocket, Search, Settings, ShoppingCart, Wallet } from '@lucide/vue'
-import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
 import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectSummary } from '../types'
 import { useUserDisplayName } from '../userDisplay'
+import { useProjectTabUpdates } from '../projectTabUpdates'
 import ProjectSettingsDrawer from './ProjectSettingsDrawer.vue'
 
-export type ProjectTab = 'overview' | 'information' | 'budget' | 'project-plan' | 'files' | 'validation-plan' | 'documents' | 'bom' | 'release' | 'procurement' | 'records'
+export type ProjectTab = 'overview' | 'information' | 'budget' | 'project-plan' | 'opl' | 'files' | 'validation-plan' | 'documents' | 'bom' | 'release' | 'procurement' | 'records'
 
 const props = defineProps<{
   project: ProjectSummary
@@ -26,6 +29,12 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ back: []; switch: [projectId: string]; tab: [tab: ProjectTab] }>()
 const displayUserName = useUserDisplayName()
+const { pending: tabUpdates } = useProjectTabUpdates(props)
+function updateTitle(key: ProjectTab, label: string) {
+  const update = tabUpdates.value[key]
+  if (!update) return undefined
+  return `${label}${update.needsHandling ? '有待处理内容，完成处理后清除提醒' : '有未查看更新'}${update.updatedAt ? ` · ${new Date(update.updatedAt).toLocaleString('zh-CN')}` : ''}${update.actor ? ` · ${displayUserName(update.actor)}` : ''}`
+}
 
 function projectDesignLeads(project: ProjectSummary) {
   return project.designLeads?.length ? project.designLeads : project.designLead ? [project.designLead] : []
@@ -36,6 +45,7 @@ const tabs = [
   { key: 'information', label: '信息', icon: Info },
   { key: 'files', label: '文件', icon: FolderOpen },
   { key: 'project-plan', label: '计划', icon: Calendar },
+  { key: 'opl', label: 'OPL', icon: ClipboardList },
   { key: 'budget', label: '预算', icon: Wallet },
   { key: 'validation-plan', label: '质量', icon: ClipboardCheck },
   { key: 'documents', label: '图档', icon: FolderTree },
@@ -111,23 +121,15 @@ watch([projectSearchQuery, projectCustomerFilter, projectExecutionUnitFilter, pr
 watch(projectPageCount, pageCount => { if (projectPage.value > pageCount) projectPage.value = pageCount })
 watch(() => props.project.id, () => { projectSettingsOpen.value = false })
 
-async function confirmProjectSwitch(projectId: string) {
+function confirmProjectSwitch(projectId: string) {
   if (switchConfirmationPending.value || projectId === rootProject.value.id) return false
   const target = props.projects.find(item => item.id === projectId)
   if (!target) return false
 
   switchConfirmationPending.value = true
   try {
-    await ElMessageBox.confirm(
-      `确定切换到项目“${target.code} · ${target.name}”吗？`,
-      '确认切换项目',
-      { confirmButtonText: '确认切换', cancelButtonText: '取消', type: 'warning' },
-    )
     emit('switch', projectId)
     return true
-  } catch {
-    // 用户取消时保持当前项目。
-    return false
   } finally {
     switchConfirmationPending.value = false
   }
@@ -144,8 +146,8 @@ function closeProjectBrowser() {
   projectPageSize.value = 20
 }
 
-async function selectBrowsedProject(projectId: string) {
-  if (await confirmProjectSwitch(projectId)) closeProjectBrowser()
+function selectBrowsedProject(projectId: string) {
+  if (confirmProjectSwitch(projectId)) closeProjectBrowser()
 }
 
 function statusTone(status?: string) {
@@ -239,7 +241,7 @@ function drawingDocumentCount(project: ProjectSummary) {
     <section class="pdm-project-detail">
       <header class="pdm-project-detail__header">
         <nav class="pdm-project-tabs" aria-label="项目功能">
-          <button v-for="tab in visibleTabs" :key="tab.key" type="button" :class="{ 'is-active': activeTab === tab.key }" @click="emit('tab', tab.key)"><component :is="tab.icon" :size="15" /><span>{{ tab.label }}</span></button>
+          <button v-for="tab in visibleTabs" :key="tab.key" type="button" :class="{ 'is-active': activeTab === tab.key }" :title="updateTitle(tab.key, tab.label)" @click="emit('tab', tab.key)"><component :is="tab.icon" :size="15" /><span>{{ tab.label }}</span><i v-if="tabUpdates[tab.key]" class="pdm-tab-update-dot" aria-hidden="true" /></button>
           <button type="button" class="pdm-project-tabs__settings" aria-label="项目设置" @click="projectSettingsOpen = true"><Settings :size="15" /><span>设置</span></button>
         </nav>
       </header>
@@ -247,11 +249,11 @@ function drawingDocumentCount(project: ProjectSummary) {
     </section>
 
     <div v-if="projectBrowserOpen" class="pdm-dialog-backdrop" @click.self="closeProjectBrowser" @keydown.esc="closeProjectBrowser">
-      <section class="pdm-project-browser-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-project-browser-title">
-        <header>
+      <RawDrawerPanel class="pdm-project-browser-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-project-browser-title">
+        <template #header="{ setActionTarget }"><header><div class="pdm-panel-topbar"><div class="pdm-panel-topbar-title">
           <div><h3 id="pdm-project-browser-title">浏览项目</h3><p>搜索并选择需要切换的主项目。</p></div>
-          <button type="button" class="pdm-icon-button" aria-label="关闭项目浏览" :disabled="switchConfirmationPending" @click="closeProjectBrowser">×</button>
-        </header>
+
+        </div><div class="pdm-panel-header-actions" :ref="setActionTarget"></div></div><button type="button" class="pdm-icon-button" aria-label="关闭项目浏览" :disabled="switchConfirmationPending" @click="closeProjectBrowser">×</button></header></template>
         <div class="pdm-project-browser-search">
           <input v-model="projectSearchQuery" type="search" aria-label="搜索项目" placeholder="搜索项目号、名称、客户、型号或序列号" autofocus>
           <span>找到 {{ filteredRootProjects.length }} 个项目</span>
@@ -289,8 +291,8 @@ function drawingDocumentCount(project: ProjectSummary) {
           <span>第 {{ projectPage }} / {{ projectPageCount }} 页</span>
           <button type="button" class="pdm-secondary-action" aria-label="下一页" :disabled="projectPage >= projectPageCount" @click="projectPage++">下一页</button>
         </div>
-        <footer><button type="button" class="pdm-secondary-action" :disabled="switchConfirmationPending" @click="closeProjectBrowser">取消</button></footer>
-      </section>
+        <PanelActions><footer><button type="button" class="pdm-secondary-action" :disabled="switchConfirmationPending" @click="closeProjectBrowser">取消</button></footer></PanelActions>
+      </RawDrawerPanel>
     </div>
 
     <ProjectSettingsDrawer

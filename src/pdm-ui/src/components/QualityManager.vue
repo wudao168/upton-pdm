@@ -69,7 +69,7 @@ function changeView(section: string, view: string) { activeDetail.value = view =
 .quality-manager :deep(.quality-section__heading h2){display:flex;align-items:center;gap:7px;flex-shrink:0;margin:0;font-size:var(--pdm-font-size-heading);white-space:nowrap}
 .quality-manager :deep(.quality-section__heading p){margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pdm-muted);font-size:12px}
 .quality-manager :deep(.quality-section__actions){flex-shrink:0}
-.quality-manager :deep(.quality-section__toolbar button){box-sizing:border-box;width:100px;height:32px;min-height:32px;padding:0;white-space:nowrap}
+.quality-manager :deep(.quality-section__toolbar button){box-sizing:border-box;width:auto;height:var(--pdm-button-large);min-height:var(--pdm-button-large);padding:0;white-space:nowrap}
 .quality-manager :deep(.quality-inspection__footer),.quality-manager :deep(.validation-plan__footer){font-size:11px;line-height:16px;min-height:16px;flex-shrink:0}
 
 .quality-manager{display:flex;flex-direction:column;gap:var(--pdm-container-gap);flex:1;min-height:0;overflow:hidden}.quality-manager__sections{display:grid;grid-template-rows:repeat(2,minmax(0,1fr));gap:var(--pdm-container-gap);flex:1;min-height:0}.quality-manager__plan{min-height:0;overflow:hidden}.quality-manager.has-detail .quality-manager__sections{display:flex;flex-direction:column}.quality-manager.has-detail .quality-manager__plan{flex:1}.quality-manager :deep(.validation-plan-summary__table){min-width:980px}.quality-manager :deep(.validation-plan__toolbar),.quality-manager :deep(.validation-plan__footer){flex-shrink:0}.quality-manager :deep(.validation-plan__empty){padding:12px}

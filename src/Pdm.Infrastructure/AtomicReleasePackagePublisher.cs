@@ -159,6 +159,11 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 ? new Dictionary<Guid, DocumentPreviewArtifact>()
                 : new Dictionary<Guid, DocumentPreviewArtifact>(await previewConverter.GenerateAsync(package, project, conversionSources, stagingDirectory, cancellationToken));
         }
+        catch (PartialPreviewConversionException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            previewError = exception.Message;
+            previews = exception.Artifacts;
+        }
         catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
         {
             previewError = exception.Message;

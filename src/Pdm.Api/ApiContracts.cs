@@ -268,6 +268,7 @@ public sealed record CheckoutRequest(Guid SessionId, string MachineName, Guid? D
 public sealed record EditSessionHeartbeatRequest(string MachineName, IReadOnlyList<Guid> DocumentIds);
 
 public sealed record EditLockActionRequest(string Reason);
+public sealed record CloseEditRequest(Guid SessionId, DateTimeOffset CheckedOutAt, string Sha256, bool DraftPreserved);
 
 public sealed record LifecycleActionRequest(string Comment);
 
@@ -285,7 +286,9 @@ public sealed record CheckInRequest(
     string? DrawingNumber = null,
     string? Name = null,
     string? FileName = null,
-    Guid? DrawingReviewWritebackId = null);
+    Guid? DrawingReviewWritebackId = null,
+    Guid? ExpectedVersionId = null,
+    bool DeferBomRefresh = false);
 
 public sealed record CheckInPreflightRequest(
     Guid ProjectId,
@@ -296,9 +299,13 @@ public sealed record CheckInPreflightRequest(
     string? DrawingNumber = null,
     string? Name = null,
     string? FileName = null,
-    Guid? DrawingReviewWritebackId = null);
+    Guid? DrawingReviewWritebackId = null,
+    Guid? ExpectedVersionId = null,
+    IReadOnlyList<Guid>? PlannedDocumentIds = null);
 
 public sealed record CompleteEditRequest(string Sha256, Guid CheckoutSessionId);
+public sealed record ArchiveBatchFileRequest(Guid DocumentId, CheckInRequest Request);
+public sealed record ArchiveBatchRequest(Guid BatchId, Guid CheckoutSessionId, IReadOnlyList<ArchiveBatchFileRequest> Files);
 
 public sealed record DiscardCheckoutRequest(Guid CheckoutSessionId);
 
@@ -306,7 +313,7 @@ public sealed record RestoreVersionRequest(string ChangeNote);
 
 public sealed record PublishDocumentVersionRequest(Guid SourceVersionId, Guid ReleasePackageId, Guid ApprovalTaskId);
 
-public sealed record CreateControlledOpenManifestRequest(Guid? VersionId, bool ReleasedOnly, bool ForEdit);
+public sealed record CreateControlledOpenManifestRequest(Guid? VersionId, bool ReleasedOnly, bool ForEdit, bool ResolveLegacyReferences = false);
 
 public sealed record CreateReleasePackageRequest(
     Guid ProjectId,
@@ -325,7 +332,8 @@ public sealed record CreateReleasePackageRequest(
     string DrawingPriority = "Normal",
     DateOnly? DrawingRequiredOn = null,
     IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? DrawingDeliveryOverrides = null,
-    IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? BomItemDeliveryOverrides = null);
+    IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? BomItemDeliveryOverrides = null,
+    Guid? RootDocumentId = null);
 
 public sealed record UpdateReleasePackageDraftRequest(
     string? ChangeReason = null,
@@ -346,6 +354,7 @@ public sealed record EmergencyApprovalRequest(
     string Reason);
 
 public sealed record ReplaceBomRequest(IReadOnlyList<BomItemInput> Items, IReadOnlyList<BomSummaryEdit>? SummaryRows = null, IReadOnlyList<Guid>? SummaryOrder = null);
+public sealed record ConfirmBomReleaseRequest(IReadOnlyDictionary<Guid, string> Tokens, bool Confirmed, string? Reason);
 
 public sealed record ResolveBomItemRequest(
     string Action,

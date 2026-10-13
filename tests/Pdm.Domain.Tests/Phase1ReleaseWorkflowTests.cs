@@ -233,11 +233,14 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         UseTemporaryPreviewVault(repository);
-        var publisher = new RecordingPublisher { PreviewOnlyDrawings = true, PreviewError = "SolidWorks转换进程失败：SolidWorks打开A01-100.SLDASM失败。" };
+        var publisher = new RecordingPublisher { PreviewOnlyDrawings = true, PreviewError = "SolidWorks转换进程失败：SolidWorks打开A01-100.SLDPRT失败。" };
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
         foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
             await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
         await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var documents = (ConcurrentDictionary<Guid, PdmDocument>)typeof(InMemoryPdmRepository).GetField("documents", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(repository)!;
+        var model = documents.Values.Single(item => item.DrawingNumber == "A01-100" && item.Kind == DocumentKind.Assembly);
+        documents[model.Id] = model with { Kind = DocumentKind.Part, FileName = "A01-100.SLDPRT" };
         await workflow.ReplaceBomAsync(ProjectId, BomKind.Electrical,
             [new BomItemInput(1, "EL-001", "光电传感器", 4, "件", null, "M18 PNP", "A", true)], "admin", UserRole.Administrator, default);
 
@@ -255,12 +258,12 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
 
         // 工程图转成功(PDF)，模型转失败(STEP)，失败原因逐项可见。
         var drawingItem = items.Single(item => item.Kind == DocumentKind.Drawing);
-        var modelItem = items.Single(item => item.Kind == DocumentKind.Assembly);
+        var modelItem = items.Single(item => item.Kind == DocumentKind.Part);
         Assert.True(drawingItem.Succeeded);
         Assert.Equal(DocumentPreviewFormat.Pdf, drawingItem.Format);
         Assert.False(modelItem.Succeeded);
         Assert.Equal(DocumentPreviewFormat.Step, modelItem.Format);
-        Assert.Contains("SolidWorks打开A01-100.SLDASM失败", modelItem.Error);
+        Assert.Contains("SolidWorks打开A01-100.SLDPRT失败", modelItem.Error);
 
         // 转换中不能把上一次的失败原因当成本次结果展示。
         await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Running, package.PreviewError, 1, TimeProvider.System.GetUtcNow(), default);
@@ -287,6 +290,46 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
         Assert.All(batch, item => Assert.True(item.Succeeded));
         var emptyBatch = await Assert.ThrowsAsync<PdmRuleException>(() => service.RetryItemsAsync(package.Id, [Guid.NewGuid()], "admin", default));
         Assert.Contains("不在本次转图范围内", emptyBatch.Message);
+    }
+
+    [Fact]
+    public async Task PreviewPartialFailurePersistsSuccessAndReportsOnlyTheFailedDocument()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        UseTemporaryPreviewVault(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher { PreviewError = "尚未转换" }, TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var documents = (ConcurrentDictionary<Guid, PdmDocument>)typeof(InMemoryPdmRepository).GetField("documents", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(repository)!;
+        var model = documents.Values.Single(item => item.DrawingNumber == "A01-100" && item.Kind == DocumentKind.Assembly);
+        documents[model.Id] = model with { Kind = DocumentKind.Part, FileName = "A01-100.SLDPRT" };
+        var package = await workflow.CreateReleasePackageAsync(ProjectId, null, $"RP-PARTIAL-{Guid.NewGuid():N}", "admin", "admin", "admin", UserRole.Administrator, default);
+        package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+        package = await workflow.DecideAsync(package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.ProcessReview).Id,
+            "admin", UserRole.Administrator, ApprovalDecision.Approved, "工艺可行", default);
+        package = await workflow.DecideAsync(package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.Approval).Id,
+            "admin", UserRole.Administrator, ApprovalDecision.Approved, "批准发布", default);
+        var sources = await repository.ListReleasePreviewSourcesAsync(package.Id, default);
+        Assert.True(sources.Count > 1);
+        var failed = sources[0];
+        var converter = new RecordingPreviewConverter(TimeProvider.System) { FailDocumentId = failed.DocumentId };
+        var service = new ReleasePreviewService(repository, converter, TimeProvider.System);
+        Assert.False(await service.ProcessAsync(package, default));
+        var items = await service.ListItemsAsync(package.Id, default);
+        Assert.Single(items, item => !item.Succeeded);
+        Assert.Equal("自动恢复后仍失败，请检查嵌入对象。", items.Single(item => !item.Succeeded).Error);
+        Assert.All(items.Where(item => item.Succeeded), item => Assert.Null(item.Error));
+
+        var retry = await service.RetryItemAsync(package.Id, failed.DocumentId, "admin", default);
+        Assert.False(retry.Succeeded);
+        Assert.Equal("自动恢复后仍失败，请检查嵌入对象。", retry.Error);
+        Assert.Single(await service.ListItemsAsync(package.Id, default), item => !item.Succeeded);
+
+        converter.FailDocumentId = null;
+        Assert.True(await service.ProcessAsync((await repository.FindReleasePackageAsync(package.Id, default))!, default));
+        Assert.Equal([failed.DocumentId], converter.LastDocumentIds);
+        Assert.All(await service.ListItemsAsync(package.Id, default), item => Assert.True(item.Succeeded));
     }
 
     /// <summary>转出明细可按发布包筛选：只返回指定发布包的明细。</summary>
@@ -323,7 +366,7 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
 
     /// <summary>服务重启后要把停在"转换中"的转图任务重新排队，避免永久卡住。</summary>
     [Fact]
-    public async Task PreviewScope_CoversOnlyNonStandardBomItemsAndTheirAssemblies()
+    public async Task PreviewScope_ExcludesAssembliesAndKeepsDrawingPdf()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var publisher = new RecordingPublisher();
@@ -342,10 +385,10 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
         package = await workflow.DecideAsync(package.ApprovalTasks.Single(task => task.Stage == ApprovalStage.Approval).Id,
             "admin", UserRole.Administrator, ApprovalDecision.Approved, "批准发布", default);
 
-        // 非标件BOM里的机架组件要转（模型出STEP、其2D工程图出PDF），其它零件（夹具/电气柜组件、标准件等）不转。
+        // 装配体不转 STEP；仅转换非标件关联的 2D 工程图，其他零件与图纸不转。
         var sources = await repository.ListReleasePreviewSourcesAsync(package.Id, default);
-        Assert.Equal(2, sources.Count);
-        Assert.Contains(sources, source => source.DrawingNumber == "A01-100" && source.Kind == DocumentKind.Assembly);
+        Assert.Single(sources);
+        Assert.DoesNotContain(sources, source => source.Kind == DocumentKind.Assembly);
         Assert.Contains(sources, source => source.DrawingNumber == "A01-100" && source.Kind == DocumentKind.Drawing);
         Assert.DoesNotContain(sources, source => source.DrawingNumber is "A01-200" or "A01-300" or "A01-101" or "A01-102");
         Assert.Equal(publisher.PreviewSources.Select(source => source.DocumentId).OrderBy(id => id), sources.Select(source => source.DocumentId).OrderBy(id => id));
@@ -1448,6 +1491,112 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
         Assert.DoesNotContain("材质", materialUpdated.ReconciliationNote);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MechanicalBom_BlankCadCodePreservesAssignedNonStandardCode(bool recoverReleasedCode)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var initial = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var pending = initial.UnclassifiedItems.First(item => item.SourceDocumentId.HasValue);
+        var documentId = pending.SourceDocumentId!.Value;
+        if (!string.IsNullOrWhiteSpace((await repository.FindDocumentAsync(documentId, default))!.CheckedOutBy))
+            await repository.ForceReleaseCheckoutAsync(documentId, "admin", "测试准备", default);
+        await repository.CheckoutAsync(documentId, "admin", default);
+        var snapshot = (await repository.GetLatestReferenceSnapshotAsync(ProjectId, default))!;
+        await repository.CheckInVersionAsync(documentId, "admin", new DocumentVersionCommit(
+            new StoredFile("versions/blank-code.sldprt", 10, new string('B', 64), DateTimeOffset.UtcNow),
+            "空编码测试", new Dictionary<string, string?>
+            {
+                [CadPropertyCardSnapshot.ScopePrefix + "物料分类"] = "Global",
+                [CadPropertyCardSnapshot.ScopePrefix + "物料编码"] = "Global",
+                ["全局/物料分类"] = "非标件", ["全局/物料编码"] = ""
+            }, snapshot, [], [], ForceVersion: true), default);
+        var generated = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        var sourceItem = generated.NonStandardItems.First(item => item.SourceDocumentId == documentId);
+        var assigned = sourceItem with { DrawingNumber = "02041000012", IsManuallyOverridden = false };
+        var coded = generated.NonStandardItems.Select(item => item.Id == assigned.Id ? assigned : item).ToArray();
+        var draft = await repository.SaveBomDraftAsync(ProjectId, BomKind.NonStandard, coded, "admin", default);
+        await repository.SetBomVersionStateAsync([draft.Id], BomVersionState.Released, "admin", DateTimeOffset.UtcNow, default);
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard,
+            recoverReleasedCode ? generated.NonStandardItems : coded, default);
+
+        var result = await workflow.GenerateMechanicalBomAsync(ProjectId, true, "admin", UserRole.Administrator, default);
+        Assert.Equal("02041000012", Assert.Single(result.NonStandardItems, item => item.Id == assigned.Id).DrawingNumber);
+        var raw = await workflow.GetBomSourceDataAsync(ProjectId, "admin", UserRole.Administrator, default);
+        Assert.Equal("", Assert.Single(raw, item => item.Id == assigned.Id).DrawingNumber);
+    }
+
+    [Fact]
+    public async Task BomReleaseConfirmation_ExcludesOnlyConfirmedWorkFromRelease()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var selected = (await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default)).First();
+        var ignored = new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 2, "02041999999", "本次无需发布件", 1, "001", "钢", "TEST", "A", true);
+        var baseline = await repository.SaveBomDraftAsync(ProjectId, BomKind.NonStandard, [ignored], "admin", default);
+        await repository.SetBomVersionStateAsync([baseline.Id], BomVersionState.Released, "admin", DateTimeOffset.UtcNow, default);
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, [selected, ignored with { Revision = "A-W1" }], default);
+        var current = (await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default)).Single(item => item.Id == ignored.Id);
+        await workflow.ConfirmBomReleaseNotRequiredAsync(ProjectId, new Dictionary<Guid, string> { [ignored.Id] = current.ReleaseReviewToken! }, true, "人工确认", "admin", UserRole.Administrator, default);
+        var package = await workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", "", "未指定", null,
+            ReleaseScope.NonStandardWithDrawing, [], "admin", UserRole.Administrator, default);
+        Assert.Equal(selected.Id, Assert.Single(package.NonStandardBomSnapshot).Id);
+        Assert.Equal(2, (await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default)).Count);
+        Assert.Equal("A", Assert.Single((await repository.FindBomVersionAsync(ProjectId, baseline.Id, default))!.Items).Revision);
+    }
+
+    [Theory]
+    [InlineData("refresh")]
+    [InlineData("revoke")]
+    [InlineData("bom-change")]
+    [InlineData("impact-change")]
+    [InlineData("model-change")]
+    [InlineData("drawing-change")]
+    public async Task BomReleaseConfirmation_IsLimitedToConfirmedContent(string scenario)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var relation = (await repository.ListDocumentRelationsAsync(ProjectId, default)).First();
+        var item = new BomItem(Guid.NewGuid(), ProjectId, BomKind.NonStandard, 1, "02041009999", "测试零件", 1, "001", "钢", "TEST", "W1", true)
+        { SourceDocumentId = relation.ModelDocumentId, Source = "Auto" };
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, [item], default);
+        var baseline = await repository.SaveBomDraftAsync(ProjectId, BomKind.NonStandard, [item], "admin", default);
+        await repository.SetBomVersionStateAsync([baseline.Id], BomVersionState.Released, "admin", DateTimeOffset.UtcNow, default);
+        await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, [item with { Revision = "A-W1" }], default);
+        var before = Assert.Single(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default));
+        var tokens = new Dictionary<Guid, string> { [item.Id] = before.ReleaseReviewToken! };
+        await workflow.ConfirmBomReleaseNotRequiredAsync(ProjectId, tokens, true, null, "admin", UserRole.Administrator, default);
+        Assert.NotNull(Assert.Single(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default)).ReleaseConfirmation);
+        if (scenario == "revoke")
+            await workflow.ConfirmBomReleaseNotRequiredAsync(ProjectId, tokens, false, null, "admin", UserRole.Administrator, default);
+        if (scenario == "bom-change")
+            await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, [item with { Revision = "A-W1", Material = "铝" }], default);
+        if (scenario == "impact-change")
+            await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, [item with { Revision = "A-W1", ImpactStage = ProjectPlanStage.Assembly }], default);
+        if (scenario is "model-change" or "drawing-change")
+        {
+            var id = scenario == "model-change" ? relation.ModelDocumentId : relation.DrawingDocumentId;
+            if (!string.IsNullOrWhiteSpace((await repository.FindDocumentAsync(id, default))!.CheckedOutBy))
+                await repository.ForceReleaseCheckoutAsync(id, "admin", "测试准备", default);
+            await repository.CheckoutAsync(id, "admin", default);
+            var snapshot = (await repository.GetLatestReferenceSnapshotAsync(ProjectId, default))!;
+            await repository.CheckInVersionAsync(id, "admin", new DocumentVersionCommit(
+                new StoredFile("versions/confirmation-test.sldprt", 123, new string('F', 64), DateTimeOffset.UtcNow),
+                "确认后新修改", new Dictionary<string, string?> { ["测试"] = scenario }, snapshot, [], [], ForceVersion: true), default);
+        }
+        var after = Assert.Single(await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default));
+        Assert.Equal(scenario == "refresh", after.ReleaseConfirmation is not null);
+        if (scenario is "bom-change" or "impact-change" or "model-change" or "drawing-change")
+            await Assert.ThrowsAsync<PdmConflictException>(() => workflow.ConfirmBomReleaseNotRequiredAsync(ProjectId, tokens, true, "旧页面", "admin", UserRole.Administrator, default));
+        Assert.Equal("W1", Assert.Single((await repository.FindBomVersionAsync(ProjectId, baseline.Id, default))!.Items).Revision);
+    }
+
     [Fact]
     public async Task ApplyingMaterialCode_IgnoresSourceCodeAndBlankSourceModelAndBrand()
     {
@@ -2370,6 +2519,12 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
         var itemA = electrical.Single(item => item.DrawingNumber == "EL-SCOPE-A");
         var itemB = electrical.Single(item => item.DrawingNumber == "EL-SCOPE-B");
 
+        var standardItem = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).First();
+        var wrongScope = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
+            ReleaseScope.ElectricalFormal, [standardItem.Id], "admin", UserRole.Administrator, default));
+        Assert.Contains("不属于电气", wrongScope.Message);
+
         var package = await workflow.CreateScopedReleasePackageAsync(
             ProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
             ReleaseScope.ElectricalFormal, [itemA.Id], "admin", UserRole.Administrator, default);
@@ -2847,6 +3002,7 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
     /// <summary>测试用转图器：为传入的图档生成预览，并记录是否要求保留已有预览。</summary>
     private sealed class RecordingPreviewConverter(TimeProvider timeProvider) : IServerPreviewConverter
     {
+        public Guid? FailDocumentId { get; set; }
         public bool LastKeepExistingPreviews { get; private set; }
         public IReadOnlyList<Guid> LastDocumentIds { get; private set; } = [];
 
@@ -2869,7 +3025,7 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
             LastKeepExistingPreviews = keepExistingPreviews;
             LastDocumentIds = sources.Select(source => source.DocumentId).ToArray();
             var convertedAt = timeProvider.GetUtcNow();
-            IReadOnlyDictionary<Guid, DocumentPreviewArtifact> artifacts = sources.ToDictionary(
+            IReadOnlyDictionary<Guid, DocumentPreviewArtifact> artifacts = sources.Where(source => source.DocumentId != FailDocumentId).ToDictionary(
                 source => source.DocumentId,
                 source => new DocumentPreviewArtifact(
                     source.Kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step,
@@ -2879,6 +3035,9 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
                     source.Kind == DocumentKind.Drawing ? new string('F', 64) : source.SourceSha256));
             _ = stagingDirectory;
             _ = convertedAt;
+            if (sources.FirstOrDefault(source => source.DocumentId == FailDocumentId) is { } failed)
+                throw new PartialPreviewConversionException(artifacts, new Dictionary<Guid, string> { [failed.DocumentId] = "自动恢复后仍失败，请检查嵌入对象。" },
+                    failed.FileName + "：自动恢复后仍失败，请检查嵌入对象。");
             return Task.FromResult(artifacts);
         }
     }
@@ -2902,11 +3061,11 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
         Assert.Equal("admin", drawing.PublishedBy);
         Assert.False(drawing.LegacyUnverified);
         var modelFile = Assert.Single(drawing.ModelFiles);
-        Assert.True(modelFile.StepReady);
+        Assert.False(modelFile.StepReady);
         Assert.NotNull(modelFile.VersionId);
         var modelVersion = await repository.FindDocumentVersionAsync(modelFile.DocumentId, modelFile.VersionId!.Value, default);
         Assert.Equal(drawing.ReleasePackageId, modelVersion!.ReleasePackageId);
-        Assert.Equal(DocumentPreviewFormat.Step, modelVersion.Preview!.Format);
+        Assert.Null(modelVersion.Preview);
         var publishedPackage = await repository.FindReleasePackageAsync(drawing.ReleasePackageId, default);
         Assert.NotNull(publishedPackage);
         Assert.NotEmpty(drawing.BomItems);

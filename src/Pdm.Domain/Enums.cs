@@ -65,7 +65,8 @@ public enum DocumentRegistrationMatchKind
     SameNameSameContent,
     SameNameDifferentContent,
     SameContentDifferentName,
-    SameContentOtherProject
+    SameContentOtherProject,
+    PendingFirstArchive
 }
 
 public enum DocumentLifecycleState

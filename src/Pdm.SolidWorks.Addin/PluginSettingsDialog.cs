@@ -52,7 +52,7 @@ internal sealed class PluginSettingsDialog : Form
         this.saveSettings = saveSettings ?? throw new ArgumentNullException(nameof(saveSettings));
 
         Text = "插件设置";
-        StartPosition = FormStartPosition.CenterParent;
+        DialogWindowSizing.CenterOnOwnerScreen(this);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MinimizeBox = false;
         MaximizeBox = false;

@@ -108,8 +108,10 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
             var runJobs = jobs.Concat(references).ToArray();
             if (runJobs.GroupBy(job => job.FileName, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
                 throw new PdmRuleException("正式图纸引用树存在重名文件，无法安全生成。");
-            if (remote) await RunRemoteAgentAsync(conversion, runJobs, workRoot, outputRoot, cancellationToken, package.State == ReleasePackageState.Publishing ? package.Id : null);
-            else await RunLocalWorkerAsync(conversion, runJobs, sourceRoot, workRoot, outputRoot, cancellationToken);
+            var formalErrors = remote
+                ? await RunRemoteAgentAsync(conversion, runJobs, workRoot, outputRoot, cancellationToken, package.State == ReleasePackageState.Publishing ? package.Id : null)
+                : await RunLocalWorkerAsync(conversion, runJobs, sourceRoot, workRoot, outputRoot, cancellationToken);
+            if (formalErrors.Count > 0) throw new PdmRuleException("正式源图生成失败，已停止发布：" + string.Join("；", formalErrors.Values));
             foreach (var job in jobs)
             {
                 if (!File.Exists(job.OutputPath) || new FileInfo(job.OutputPath).Length == 0)
@@ -230,20 +232,21 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                 pendingJobs.Add(job);
             }
 
+            IReadOnlyDictionary<Guid, string> errors = new Dictionary<Guid, string>();
             if (pendingJobs.Count > 0)
             {
                 var runJobs = pendingJobs.Concat(referenceJobs).ToArray();
-                if (remote)
-                    await RunRemoteAgentAsync(conversionSettings, runJobs, workRoot, outputRoot, cancellationToken, package.State == ReleasePackageState.Publishing ? package.Id : null);
-                else
-                    await RunLocalWorkerAsync(conversionSettings, runJobs, sourceRoot, workRoot, outputRoot, cancellationToken);
-                foreach (var job in pendingJobs) await StoreToCacheAsync(cacheRoot, cacheFingerprint, job, cancellationToken);
+                errors = remote
+                    ? await RunRemoteAgentAsync(conversionSettings, runJobs, workRoot, outputRoot, cancellationToken, package.State == ReleasePackageState.Publishing ? package.Id : null)
+                    : await RunLocalWorkerAsync(conversionSettings, runJobs, sourceRoot, workRoot, outputRoot, cancellationToken);
+                foreach (var job in pendingJobs.Where(job => !errors.ContainsKey(job.DocumentId))) await StoreToCacheAsync(cacheRoot, cacheFingerprint, job, cancellationToken);
                 PrunePreviewCache(cacheRoot);
             }
 
             var artifacts = new Dictionary<Guid, DocumentPreviewArtifact>();
             foreach (var source in sources)
             {
+                if (errors.ContainsKey(source.DocumentId)) continue;
                 var job = jobs.Single(item => item.DocumentId == source.DocumentId);
                 if (!File.Exists(job.OutputPath) || new FileInfo(job.OutputPath).Length == 0)
                 {
@@ -264,8 +267,13 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                     sha256,
                     source.SourceSha256);
             }
+            if (errors.Count > 0)
+                throw new PartialPreviewConversionException(artifacts, errors,
+                    string.Join("\n", sources.Where(source => errors.ContainsKey(source.DocumentId))
+                        .Select(source => $"{source.FileName}：{errors[source.DocumentId].ReplaceLineEndings(" ")}")));
             return artifacts;
         }
+        catch (PartialPreviewConversionException) { throw; }
         catch
         {
             if (!keepExistingPreviews)
@@ -282,7 +290,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
     }
 
     /// <summary>本机转换：把源文件复制到临时工作目录后调用SolidWorks转换程序。</summary>
-    private async Task RunLocalWorkerAsync(
+    private async Task<IReadOnlyDictionary<Guid, string>> RunLocalWorkerAsync(
         PreviewConversionSettings conversion,
         IReadOnlyList<PreviewJob> jobs,
         string sourceRoot,
@@ -306,12 +314,11 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         await RunWorkerAsync(workerPath, conversion.TimeoutMinutes, manifestPath, resultPath, cancellationToken);
         var result = JsonSerializer.Deserialize<PreviewWorkerResult>(await File.ReadAllTextAsync(resultPath, cancellationToken), JsonOptions)
             ?? throw new PdmRuleException("服务器转换程序没有返回有效结果。");
-        if (!result.Success)
-            throw new PdmRuleException(string.IsNullOrWhiteSpace(result.Error) ? "服务器生成STEP/PDF失败。" : result.Error);
+        return ValidateWorkerResult(result, jobs);
     }
 
     /// <summary>远程转换：把源文件打包发给转图电脑上的转图代理，取回转换结果。</summary>
-    private async Task RunRemoteAgentAsync(
+    private async Task<IReadOnlyDictionary<Guid, string>> RunRemoteAgentAsync(
         PreviewConversionSettings conversion,
         IReadOnlyList<PreviewJob> jobs,
         string workRoot,
@@ -391,7 +398,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                 await using (var content = await response.Content.ReadAsStreamAsync(timeout.Token))
                 await using (var file = File.Create(responsePath))
                     await content.CopyToAsync(file, timeout.Token);
-                await MaterializeAgentResponseAsync(responsePath, jobs);
+                return await MaterializeAgentResponseAsync(responsePath, jobs);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -406,7 +413,6 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                 throw new PdmRuleException($"读取转图服务器结果在{DescribeElapsed(stopwatch.Elapsed)}后被中断：{DescribeReason(exception)}");
             }
         }
-        _ = outputRoot;
     }
 
     /// <summary>
@@ -444,7 +450,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
     }
 
     /// <summary>解析转图代理返回的压缩包：校验 result.json 并把每个图档的 STEP/PDF 落到输出路径。</summary>
-    private static async Task MaterializeAgentResponseAsync(string responsePath, IReadOnlyList<PreviewJob> jobs)
+    private static async Task<IReadOnlyDictionary<Guid, string>> MaterializeAgentResponseAsync(string responsePath, IReadOnlyList<PreviewJob> jobs)
     {
         using (var archive = ZipFile.OpenRead(responsePath))
         {
@@ -455,17 +461,33 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                 result = await JsonSerializer.DeserializeAsync<PreviewWorkerResult>(stream, JsonOptions)
                     ?? throw new PdmRuleException("转图服务器结果文件无效。");
             }
-            if (!result.Success)
-                throw new PdmRuleException(string.IsNullOrWhiteSpace(result.Error) ? "转图服务器生成STEP/PDF失败。" : result.Error);
+            var errors = ValidateWorkerResult(result, jobs);
             foreach (var job in jobs)
             {
-                if (!job.Convert) continue;
+                if (!job.Convert || errors.ContainsKey(job.DocumentId)) continue;
                 var outputName = Path.GetFileName(job.OutputPath);
                 var outputEntry = archive.GetEntry($"outputs/{outputName}")
                     ?? throw new PdmRuleException($"转图服务器未返回预览文件{outputName}。");
                 outputEntry.ExtractToFile(job.OutputPath, true);
             }
+            return errors;
         }
+    }
+
+    private static IReadOnlyDictionary<Guid, string> ValidateWorkerResult(PreviewWorkerResult result, IReadOnlyList<PreviewJob> jobs)
+    {
+        if (result.Items is null)
+        {
+            if (!result.Success) throw new PdmRuleException(string.IsNullOrWhiteSpace(result.Error) ? "转图服务器生成STEP/PDF失败。" : result.Error);
+            return new Dictionary<Guid, string>();
+        }
+        var expected = jobs.Where(job => job.Convert).Select(job => job.DocumentId).ToHashSet();
+        if (result.Items.Count != expected.Count || !expected.SetEquals(result.Items.Select(item => item.DocumentId)))
+            throw new PdmRuleException("转图服务器返回的逐项结果不完整或重复，请升级转图代理后重试。");
+        if (result.Success != result.Items.All(item => item.Success))
+            throw new PdmRuleException("转图服务器返回的汇总状态与逐项结果不一致，请检查转图代理日志。");
+        return result.Items.Where(item => !item.Success).ToDictionary(item => item.DocumentId,
+            item => string.IsNullOrWhiteSpace(item.Error) ? "该图档转换失败，请在转图电脑打开检查后单独重试。" : item.Error);
     }
 
     /// <summary>转图结果缓存目录（与发布包预览目录同级）。</summary>
@@ -612,7 +634,8 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
     private sealed record PreviewWorkerManifest(IReadOnlyList<PreviewWorkerJob> Jobs);
     private sealed record FormalManifest(string SourceSha256, FormalDrawingSource Formal);
     private sealed record PreviewWorkerJob(Guid DocumentId, string SourcePath, string OutputPath, string Kind, bool Convert = true, string? ReleaseRevision = null, string? QrContent = null);
-    private sealed record PreviewWorkerResult(bool Success, string? Error);
+    private sealed record PreviewWorkerResult(bool Success, string? Error, IReadOnlyList<PreviewWorkerItem>? Items = null);
+    private sealed record PreviewWorkerItem(Guid DocumentId, bool Success, string? Error);
 
     private sealed record PreviewJob(Guid DocumentId, DocumentKind Kind, string FileName, string SourcePath, string OutputPath, string SourceSha256, bool Convert = true, string? ReleaseRevision = null, string? QrContent = null);
     private sealed record PreviewAgentManifest(IReadOnlyList<PreviewAgentJob> Jobs);

@@ -46,6 +46,21 @@
   font-size: var(--pdm-font-size-body);
 }
 
+.pdm-panel-topbar { display: flex; flex: 1; min-width: 0; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.pdm-panel-topbar-title { flex: 1 1 140px; min-width: 0; overflow: hidden; }
+.pdm-panel-topbar-title > .el-dialog__title,
+.pdm-panel-topbar-title > .el-drawer__title { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pdm-panel-header-actions { display: flex; flex: 0 1 auto; min-width: 0; max-width: 100%; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+:is(.el-drawer, .el-dialog, .pdm-custom-drawer) .pdm-panel-header-actions > :is(div, footer) { display: flex; min-width: 0; max-width: 100%; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; border: 0; }
+.pdm-panel-header-actions:empty { display: none; }
+.pdm-panel-header-actions .el-button + .el-button { margin-left: 0; }
+.el-dialog__header:has(.pdm-panel-topbar) .pdm-panel-topbar { padding-right: 32px; }
+.el-drawer__header:has(.pdm-panel-topbar) { align-items: center; gap: 8px; }
+.el-drawer__header:has(.pdm-panel-topbar) .el-drawer__close-btn { align-self: flex-start; margin-left: 0; }
+.pdm-custom-drawer > header:has(.pdm-panel-topbar) { align-items: center; gap: 8px; }
+:is(.el-drawer, .el-dialog, .pdm-custom-drawer) .pdm-panel-topbar-title :is(.el-dialog__title, .el-drawer__title, [role="heading"], h1, h2, h3),
+:is(.el-drawer, .el-dialog, .pdm-custom-drawer) .pdm-panel-topbar-title > strong { font-size: 16px !important; }
+
 :is(.el-dialog__title, .el-drawer__title, .el-message-box__title) {
   color: var(--pdm-text);
   font-size: 14px;
@@ -60,3 +75,73 @@
 .el-pagination {
   --el-pagination-font-size: var(--pdm-font-size-body);
 }
+
+/* 操作、页签和符号分开定尺寸；导航、数据行、卡片和画布不参与。 */
+:is(.project-information__staff-actions, .project-contacts__header-actions) {
+  --pdm-control-height: var(--pdm-button-compact);
+  --pdm-control-min-width: 60px;
+}
+
+button[role="tab"] {
+  height: var(--pdm-tab-secondary);
+  min-height: var(--pdm-tab-secondary);
+  padding-block: 0;
+}
+
+:is(.el-tabs__item, .pdm-project-tabs button, .user-settings-tabs button) {
+  height: var(--pdm-tab-primary);
+  min-height: var(--pdm-tab-primary);
+}
+
+:is(.pdm-admin-tabs, .pdm-segmented, .pdm-plan-view-tabs, .pdm-plan-zoom,
+    .pdm-project-settings__tabs, .org-view-tabs, .wb-tabs, .pdm-view-switch,
+    .pdm-bom-display-control, .pdm-bom-comparison-filters) button,
+.material-code-approval-subtabs .el-tabs__item {
+  height: var(--pdm-tab-secondary);
+  min-height: var(--pdm-tab-secondary);
+  padding-block: 0;
+}
+
+.pc-toolbar button {
+  height: var(--pdm-button-default);
+  min-height: var(--pdm-button-default);
+  padding-block: 0;
+}
+
+.pdm-preview-command {
+  height: var(--pdm-button-default);
+  min-height: var(--pdm-button-default);
+}
+.pc-controls button[aria-pressed]:not(:has(svg)), .pc-filters button {
+  height: var(--pdm-tab-secondary);
+  min-height: var(--pdm-tab-secondary);
+}
+
+.pc-details button {
+  height: var(--pdm-button-compact);
+  min-height: var(--pdm-button-compact);
+  padding-block: 0;
+}
+
+.pc-controls button[aria-label],
+.program-template-parameter-row .el-button,
+.el-button.is-circle,
+.el-button:has(> .el-icon):not(:has(> span)) {
+  width: var(--pdm-symbol-toolbar);
+  min-width: var(--pdm-symbol-toolbar) !important;
+  height: var(--pdm-symbol-toolbar) !important;
+  min-height: var(--pdm-symbol-toolbar) !important;
+  padding: 0 !important;
+}
+
+/* 全局列表沿用BOM的横向分隔风格；不改变日期和时间轴网格。 */
+.el-table .el-table__cell,
+table:has(> thead) :is(th, td) {
+  border-left: 0 !important;
+  border-right: 0 !important;
+}
+button.pdm-button-font-80x30,
+button.pdm-button-font-80x30 :is(span:not(.el-icon), strong, em) { font-size: 12px !important; }
+.drawing-review-decision-bar .drawing-review-decision-buttons button,
+.pdm-solidworks-actions > .pdm-preview-command,
+.pdm-preview-markup-row > .pdm-markup-save { box-sizing: border-box; width: 80px !important; min-width: 80px !important; max-width: 80px !important; height: 30px !important; min-height: 30px !important; flex: 0 0 80px; padding-inline: 4px; }

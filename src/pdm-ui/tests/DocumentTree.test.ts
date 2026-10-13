@@ -20,6 +20,47 @@ function mountTree(refreshing: boolean) {
 }
 
 describe('DocumentTree', () => {
+  it('虚拟汇总节点使用分组图标且不显示未入库，真实子节点仍提示', async () => {
+    const child: DocumentNode = { id: 'part', drawingNumber: 'PART', name: '零件', fileName: 'PART.SLDPRT', kind: 'Part', configuration: '', quantity: 1, version: '—', status: 'Unregistered', children: [] }
+    const wrapper = mountTree(false)
+    await wrapper.setProps({ root: { ...child, id: 'project', drawingNumber: '', name: '项目装配体（汇总）', isVirtualGroup: true, children: [child] } })
+    const group = wrapper.findAll('[role="treeitem"]')[0]!
+    expect(group.text()).not.toContain('未入库')
+    expect(group.classes()).not.toContain('has-warning')
+    expect(group.find('[aria-label="装配体汇总分组"]').exists()).toBe(true)
+    expect(wrapper.findAll('[role="treeitem"]')[1]!.text()).toContain('未入库')
+    await group.trigger('contextmenu')
+    expect(wrapper.text()).not.toContain('该引用尚未入库')
+  })
+  it('搜索时展开已折叠的根节点及所有匹配层级，切换关键词或刷新结果后再次展开', async () => {
+    const leaf: DocumentNode = { id: 'part', drawingNumber: '355.0700A.01', name: '目标零件', fileName: '355.0700A.01.SLDPRT', kind: 'Part', configuration: 'Default', quantity: 1, version: 'W1', status: 'Normal', children: [] }
+    const branch: DocumentNode = { ...leaf, id: 'branch', drawingNumber: 'SUB-001', name: '子装配', kind: 'Assembly', children: [leaf] }
+    const root: DocumentNode = { ...branch, id: 'root', drawingNumber: 'CW0030002.10', name: '总装配', children: [branch] }
+    const wrapper = mountTree(false)
+    await wrapper.setProps({ root })
+    expect(wrapper.text()).not.toContain('目标零件')
+    await wrapper.get('.pdm-tree-row__toggle').trigger('click')
+    expect(wrapper.findAll('[role="treeitem"]')).toHaveLength(1)
+
+    await wrapper.setProps({ query: '355.0700A.01' })
+    expect(wrapper.findAll('[role="treeitem"]')).toHaveLength(3)
+    expect(wrapper.text()).toContain('目标零件')
+    await wrapper.findAll('.pdm-tree-row__toggle')[1]!.trigger('click')
+    expect(wrapper.text()).not.toContain('目标零件')
+    await wrapper.setProps({ query: '目标零件' })
+    expect(wrapper.text()).toContain('目标零件')
+    await wrapper.get('.pdm-tree-row__toggle').trigger('click')
+    await wrapper.setProps({ root: { ...root } })
+    expect(wrapper.text()).toContain('目标零件')
+
+    await wrapper.setProps({ query: '' })
+    await wrapper.get('.pdm-tree-row__toggle').trigger('click')
+    expect(wrapper.findAll('[role="treeitem"]')).toHaveLength(1)
+    await wrapper.setProps({ query: '   ', root: { ...root } })
+    expect(wrapper.findAll('[role="treeitem"]')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
   it('renders large 2D drawing lists in bounded pages', async () => {
     const drawings: DocumentNode[] = Array.from({ length: 161 }, (_, index) => ({
       id: `drawing-${index}`, documentId: `document-${index}`,

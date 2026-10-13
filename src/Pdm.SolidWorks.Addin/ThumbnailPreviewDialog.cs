@@ -28,7 +28,7 @@ internal sealed class ThumbnailPreviewDialog : Form
 
         image = new Bitmap(source);
         Text = string.Concat(string.IsNullOrWhiteSpace(fileName) ? "图档" : fileName, " - 缩略图");
-        StartPosition = FormStartPosition.CenterParent;
+        DialogWindowSizing.CenterOnOwnerScreen(this);
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = false;
         MinimizeBox = false;

@@ -10,7 +10,7 @@ internal sealed class WhereUsedDialog : Form
     public WhereUsedDialog(string documentName, IReadOnlyList<DocumentWhereUsedDto> usages)
     {
         Text = "使用位置";
-        StartPosition = FormStartPosition.CenterParent;
+        DialogWindowSizing.CenterOnOwnerScreen(this);
         MinimumSize = new Size(760, 420);
         ClientSize = new Size(860, 500);
         Font = new Font("Microsoft YaHei UI", 9F);

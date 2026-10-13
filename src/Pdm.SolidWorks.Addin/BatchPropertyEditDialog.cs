@@ -670,7 +670,9 @@ internal sealed class BatchPropertyEditDialog : Form
             ? "属性回写确认"
             : "属性";
         MinimumSize = new Size(1100, 560);
+        TopMost = true;
         DialogWindowSizing.FitToOwner(this, solidWorksWindowHandle, 0.95, 24);
+        DialogWindowSizing.CenterOnOwnerScreen(this);
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
         MinimizeBox = false;
@@ -680,7 +682,7 @@ internal sealed class BatchPropertyEditDialog : Form
         BuildWritebackGrid();
         Controls.Add(BuildLayout());
         StyleButtons(this);
-        Shown += (_, _) => StartThumbnailLoading();
+        Shown += (_, _) => { BringToFront(); Activate(); StartThumbnailLoading(); };
         UpdateOperationState();
         UpdateSummary();
     }
@@ -943,7 +945,8 @@ internal sealed class BatchPropertyEditDialog : Form
         {
             plmSyncStatus.Text = "PLM同步失败";
             plmSyncStatus.ForeColor = Color.FromArgb(190, 55, 55);
-            MessageBox.Show(this, exception.Message, "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            PluginDiagnosticLog.Record("异常", exception.ToString());
+            TopMostMessageBox.Show(this, "PLM同步失败，请检查网络与项目权限后重试；如仍失败，请提供插件诊断日志。", "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         finally
         {
@@ -1051,9 +1054,10 @@ internal sealed class BatchPropertyEditDialog : Form
         }
         catch (Exception exception)
         {
-            executionStatus.Text = string.Concat("读取当前属性卡失败：", exception.Message);
+            PluginDiagnosticLog.Record("异常", exception.ToString());
+            executionStatus.Text = "读取当前属性卡失败，请重试；详情已记录到插件诊断日志。";
             executionStatus.ForeColor = Color.FromArgb(190, 55, 55);
-            MessageBox.Show(this, exception.Message, "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            TopMostMessageBox.Show(this, executionStatus.Text, "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         finally
         {
@@ -2294,7 +2298,7 @@ internal sealed class BatchPropertyEditDialog : Form
 
         if (overwriteCount > 0)
         {
-            var confirmation = MessageBox.Show(
+            var confirmation = TopMostMessageBox.Show(
                 this,
                 string.Concat(
                     "即将把文档名称填充到“", targetProperty, "”。\r\n",
@@ -2590,7 +2594,7 @@ internal sealed class BatchPropertyEditDialog : Form
             CancelValidation("请至少勾选一个需要设置属性卡的图档。");
             return;
         }
-        var cleanupConfirmation = MessageBox.Show(
+        var cleanupConfirmation = TopMostMessageBox.Show(
             this,
             "设置属性卡时，将删除当前属性卡未定义的已知旧卡字段：图号、名称、材料、规格、零件名称、分类、属性、文档名称、物料编码、NT、BOMINFO、TNR、表面处理、重量、标签编号、SUPPLIER、种类、单位、版本。\r\n\r\n当前属性卡仍定义的同名字段会保留。是否继续？",
             "确认清理旧属性卡字段",
@@ -2738,6 +2742,6 @@ internal sealed class BatchPropertyEditDialog : Form
     private void CancelValidation(string message)
     {
         DialogResult = DialogResult.None;
-        MessageBox.Show(this, message, "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        TopMostMessageBox.Show(this, message, "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 }

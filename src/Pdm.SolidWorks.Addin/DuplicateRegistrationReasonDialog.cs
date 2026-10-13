@@ -11,7 +11,7 @@ internal sealed class DuplicateRegistrationReasonDialog : Form
     public DuplicateRegistrationReasonDialog(string localFileName, string existingFileName)
     {
         Text = "确认独立登记重复内容";
-        StartPosition = FormStartPosition.CenterParent;
+        DialogWindowSizing.CenterOnOwnerScreen(this);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;

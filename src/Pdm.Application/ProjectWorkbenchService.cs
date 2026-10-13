@@ -6,10 +6,10 @@ public sealed record WorkbenchBudget(decimal? Budget, decimal? Actual, decimal? 
 public sealed record WorkbenchProcurement(bool Published, int PendingOrder, int Missing, int Delayed, DateTimeOffset? RefreshedAt, string? SyncError);
 public sealed record WorkbenchQuality(string State, int Total, int Pending, int Failed, int Records, int Unconfirmed);
 public sealed record WorkbenchProject(Project Project, ProjectPlan? Plan, string PlanState, WorkbenchBudget? Budget,
-    WorkbenchProcurement? Procurement, WorkbenchQuality? Quality, IReadOnlyList<string> Warnings, bool CanRegisterRisk, int? CompletionPercent);
+    WorkbenchProcurement? Procurement, WorkbenchQuality? Quality, IReadOnlyList<string> Warnings, bool CanRegisterRisk, int? CompletionPercent, bool CanMaintainRecord = false, int? OplOpenCount = null);
 public sealed record WorkbenchView(string Key, string Label);
 public sealed record ProjectWorkbench(IReadOnlyList<WorkbenchView> Views, string View, DateTimeOffset UpdatedAt,
-    IReadOnlyList<WorkbenchProject> Projects, IReadOnlyList<ProjectWorkbenchRisk> Risks);
+    IReadOnlyList<WorkbenchProject> Projects, IReadOnlyList<ProjectWorkbenchRisk> Risks, IReadOnlyList<string>? Scopes = null);
 public sealed record ProjectWorkbenchRisk(Guid Id, Guid ProjectId, string Title, string Impact, string Owner, DateOnly DueDate,
     string Severity, string CreatedBy, DateTimeOffset CreatedAt, bool Closed = false, string? ClosedBy = null, DateTimeOffset? ClosedAt = null, bool CanClose = false);
 public sealed record RegisterWorkbenchRisk(string Title, string Impact, string Owner, DateOnly DueDate, string Severity);
@@ -68,11 +68,16 @@ public static class WorkbenchScope
 
 public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectPlanningRepository planning,
     IProjectContactInformationRepository contacts, ProjectBudgetService budgets, U9ProcurementService procurement,
-    IValidationPlanRepository quality, IQualityInspectionRepository inspections, IProjectWorkbenchRiskRepository risks, TimeProvider clock)
+    IValidationPlanRepository quality, IQualityInspectionRepository inspections, IProjectWorkbenchRiskRepository risks, TimeProvider clock, IProjectOplRepository? opl = null)
 {
-    public async Task<ProjectWorkbench> GetAsync(string? requestedView, string actor, UserRole role, CancellationToken ct)
+    public async Task<ProjectWorkbench> GetAsync(string? requestedView, string actor, UserRole role, CancellationToken ct, string? scope = null, bool summaryOnly = false, Guid? projectId = null)
     {
         var projects = (await repository.ListProjectsForUserAsync(actor, role, ct)).Where(project => project.IsActive && project.CanReadContent).ToArray();
+        if (projectId is Guid requestedId)
+        {
+            if (!projects.Any(project => project.Id == requestedId)) throw new UnauthorizedAccessException("无权读取该项目详情。");
+            projects = projects.Where(project => project.Id == requestedId || project.RootProjectId == requestedId || project.ParentProjectId == requestedId).ToArray();
+        }
         // Repository capabilities are not a replacement for the content access check.
         var readable = new List<Project>();
         foreach (var project in projects) if (await repository.HasProjectContentReadAccessAsync(project.Id, actor, role, ct)) readable.Add(project);
@@ -88,12 +93,27 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
             projects.Any(project => WorkbenchScope.Engineer(project, actor)) || plans.Values.Any(plan => (plan.ChangeDraftSource ?? plan).Tasks.Any(task => WorkbenchScope.Contains(task.Assignee, actor))));
         var selected = string.IsNullOrWhiteSpace(requestedView) ? views.FirstOrDefault()?.Key ?? "" : requestedView;
         if (selected.Length > 0 && !views.Any(view => view.Key == selected)) throw new UnauthorizedAccessException("无权使用该岗位视角。");
+        var scopes = new List<string> { "personal", "company" };
+        if (administrator || managedUnits.Count > 0) scopes.Add("division");
+        if (views.Any(view => view.Key == "sales")) scopes.Add("sales");
+        if (!string.IsNullOrWhiteSpace(scope) && !scopes.Contains(scope)) throw new UnauthorizedAccessException("无权使用该项目范围。");
         var result = new List<WorkbenchProject>();
         foreach (var root in projects.Where(project => project.ParentProjectId is null || !projects.Any(parent => parent.Id == (project.RootProjectId ?? project.ParentProjectId))))
         {
             var family = projects.Where(project => project.Id == root.Id || project.RootProjectId == root.Id || project.ParentProjectId == root.Id).ToArray();
-            var commercial = selected is "sales" or "engineer" ? await contacts.FindAsync(root.Id, ct) : null;
-            if (!WorkbenchScope.Matches(selected, root, family, actor, administrator, managedUnits, plans, commercial)) continue;
+            var commercial = scope is "personal" or "sales" || selected is "sales" or "engineer" ? await contacts.FindAsync(root.Id, ct) : null;
+            var included = scope switch
+            {
+                "company" => true, // projects already passed repository and content-read authorization.
+                "division" => administrator || root.ExecutionUnitId is Guid unitId && managedUnits.Contains(unitId),
+                "personal" => family.Any(project => WorkbenchScope.Manager(project, actor) || WorkbenchScope.Engineer(project, actor)
+                    || project.PhaseOwners.Values.Any(people => WorkbenchScope.Contains(people, actor))
+                    || plans.TryGetValue(project.Id, out var personalPlan) && (personalPlan.ChangeDraftSource ?? personalPlan).Tasks.Any(task => WorkbenchScope.Contains(task.Assignee, actor)))
+                    || WorkbenchScope.Contains(commercial?.SalesPeople, actor) || WorkbenchScope.Contains(commercial?.PresalesPeople, actor),
+                "sales" => WorkbenchScope.Contains(commercial?.SalesPeople, actor),
+                _ => WorkbenchScope.Matches(selected, root, family, actor, administrator, managedUnits, plans, commercial)
+            };
+            if (!included) continue;
             foreach (var project in family)
             {
                 plans.TryGetValue(project.Id, out var plan);
@@ -101,7 +121,7 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
                 WorkbenchBudget? budget = null;
                 WorkbenchProcurement? purchasing = null;
                 WorkbenchQuality? acceptance = null;
-                if (selected is "division" or "manager")
+                if (!summaryOnly && projectId is null && (selected is "division" or "manager"))
                 {
                     try
                     {
@@ -111,7 +131,7 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
                     catch (UnauthorizedAccessException) { warnings.Add("预算无查看权限"); }
                     catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add("预算暂时无法读取"); }
                 }
-                if (selected is "division" or "manager" or "procurement" or "production")
+                if (!summaryOnly && (selected is "division" or "manager" or "procurement" or "production"))
                 {
                     try
                     {
@@ -122,7 +142,7 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add("采购跟踪暂时无法读取"); }
                 }
-                if (selected is "division" or "manager" or "production" or "quality")
+                if (!summaryOnly && (selected is "division" or "manager" or "production" or "quality"))
                 {
                     try
                     {
@@ -142,7 +162,22 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
                     || WorkbenchScope.Contains(commercial?.SalesPeople, actor) || WorkbenchScope.Contains(commercial?.PresalesPeople, actor);
                 var effective = plan?.ChangeDraftSource ?? plan;
                 result.Add(new(project, effective, plan?.ApprovalStatus.ToString() ?? "Missing", budget, purchasing, acceptance, warnings, canRegister,
-                    effective?.ApprovalStatus == ProjectPlanApprovalStatus.Approved && effective.Tasks.Count > 0 ? ProjectPlanningService.CompletionPercent(effective.Tasks, effective.Stages) : null));
+                    effective?.ApprovalStatus == ProjectPlanApprovalStatus.Approved && effective.Tasks.Count > 0 ? ProjectPlanningService.CompletionPercent(effective.Tasks, effective.Stages) : null, administrator || WorkbenchScope.Manager(root, actor) || WorkbenchScope.Manager(project, actor)));
+            }
+        }
+        if (summaryOnly && opl is not null)
+        {
+            var rootIds = result.Where(item => item.Project.ParentProjectId is null).Select(item => item.Project.Id).ToArray();
+            try
+            {
+                var counts = await opl.CountOpenAsync(rootIds, ct);
+                for (var i = 0; i < result.Count; i++)
+                    if (rootIds.Contains(result[i].Project.Id)) result[i] = result[i] with { OplOpenCount = counts.GetValueOrDefault(result[i].Project.Id) };
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Console.Error.WriteLine($"开口问题数量统计失败：{ex}");
+                for (var i = 0; i < result.Count; i++) result[i] = result[i] with { Warnings = [.. result[i].Warnings, "开口问题数量暂时无法读取"] };
             }
         }
         var visibleRisks = await risks.ListAsync(result.Select(item => item.Project.Id).ToArray(), ct);
@@ -152,7 +187,7 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
             var root = projects.FirstOrDefault(item => item.Id == (project.RootProjectId ?? project.ParentProjectId)) ?? project;
             return risk with { CanClose = administrator || WorkbenchScope.Same(risk.Owner, actor) || WorkbenchScope.Same(risk.CreatedBy, actor)
                 || WorkbenchScope.Manager(root, actor) || root.ExecutionUnitId is Guid unit && managedUnits.Contains(unit) };
-        }).ToArray());
+        }).ToArray(), scopes);
     }
 
     private static bool IsFailedResult(string? value) => new[] { "NG", "不合格", "不通过", "未通过", "Fail", "Failed", "失败" }.Contains(value?.Trim(), StringComparer.OrdinalIgnoreCase);

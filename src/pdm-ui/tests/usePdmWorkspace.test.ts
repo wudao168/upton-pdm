@@ -76,6 +76,9 @@ describe('buildDocumentDisplayRoot', () => {
 
   it('keeps the archived assembly hierarchy when a reference root exists', () => {
     const archivedRoot = { ...placeholder, documentId: 'assembly-1', fileName: 'assembly.SLDASM' }
-    expect(buildDocumentDisplayRoot(archivedRoot, [document('part-1', 'Part', 'A-1')], 'project-1')).toBe(archivedRoot)
+    const result = buildDocumentDisplayRoot(archivedRoot, [document('part-1', 'Part', 'A-1')], 'project-1')
+    expect(result.children[0]).toBe(archivedRoot)
+    expect(result.children[1]?.name).toBe('独立图档 / 待纳入结构')
+    expect(result.children[1]?.children[0]?.documentId).toBe('part-1')
   })
 })

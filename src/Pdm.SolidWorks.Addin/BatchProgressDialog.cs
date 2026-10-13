@@ -10,7 +10,6 @@ internal sealed class BatchProgressDialog : Form
     private readonly Label currentFile = new Label();
     private readonly TextBox details = new TextBox();
     private readonly Button close = new Button();
-    private readonly Timer autoCloseTimer = new Timer { Interval = 1000 };
     private bool canClose;
     private bool cancellationRequested;
 
@@ -19,25 +18,27 @@ internal sealed class BatchProgressDialog : Form
     public BatchProgressDialog(int totalFiles)
     {
         Text = "整套提交存档";
-        StartPosition = FormStartPosition.CenterParent;
+        DialogWindowSizing.CenterOnOwnerScreen(this);
+        TopMost = true;
+        Shown += (_, _) => { BringToFront(); Activate(); };
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(560, 218);
+        ClientSize = new Size(720, 460);
         Font = new Font("Microsoft YaHei UI", 9F);
 
         status.AutoSize = false;
         status.Location = new Point(18, 16);
-        status.Size = new Size(524, 25);
+        status.Size = new Size(684, 25);
         status.Text = "正在准备整套提交…";
 
         currentFile.AutoEllipsis = true;
         currentFile.Location = new Point(18, 47);
-        currentFile.Size = new Size(524, 22);
+        currentFile.Size = new Size(684, 22);
 
         details.Location = new Point(18, 75);
-        details.Size = new Size(524, 86);
+        details.Size = new Size(684, 320);
         details.Multiline = true;
         details.ReadOnly = true;
         details.BorderStyle = BorderStyle.None;
@@ -46,17 +47,9 @@ internal sealed class BatchProgressDialog : Form
         details.TabStop = false;
 
         close.Text = "取消";
-        close.Location = new Point(442, 174);
+        close.Location = new Point(602, 412);
         close.Size = new Size(100, 30);
         close.Click += (_, __) => RequestCancelOrClose();
-        autoCloseTimer.Tick += (_, __) =>
-        {
-            autoCloseTimer.Stop();
-            if (canClose && !IsDisposed)
-            {
-                Close();
-            }
-        };
 
         Controls.Add(status);
         Controls.Add(currentFile);
@@ -101,6 +94,7 @@ internal sealed class BatchProgressDialog : Form
 
         status.Text = hasFailures ? "整套提交未完成，部分文件处理失败。"
             : hasBomWarnings ? "整套存档完成，BOM有待处理提醒。" : "整套提交完成。";
+        PluginDiagnosticLog.Record(hasFailures ? "失败" : "结果", status.Text + "\r\n" + message);
         currentFile.Text = string.Empty;
         details.Text = message ?? string.Empty;
         canClose = true;
@@ -108,10 +102,8 @@ internal sealed class BatchProgressDialog : Form
         close.Enabled = true;
         close.Focus();
         Invalidate(true);
-        if (!hasFailures && !hasBomWarnings)
-        {
-            autoCloseTimer.Start();
-        }
+        BringToFront();
+        Activate();
     }
 
     public void Fail(string message)
@@ -123,6 +115,7 @@ internal sealed class BatchProgressDialog : Form
         }
 
         status.Text = "整套提交未完成。";
+        PluginDiagnosticLog.Record("失败", status.Text + "\r\n" + message);
         currentFile.Text = string.Empty;
         details.Text = message ?? string.Empty;
         canClose = true;
@@ -142,13 +135,6 @@ internal sealed class BatchProgressDialog : Form
         }
 
         base.OnFormClosing(eventArgs);
-    }
-
-    protected override void OnFormClosed(FormClosedEventArgs eventArgs)
-    {
-        autoCloseTimer.Stop();
-        autoCloseTimer.Dispose();
-        base.OnFormClosed(eventArgs);
     }
 
     private void RequestCancelOrClose()

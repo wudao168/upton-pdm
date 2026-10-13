@@ -13,6 +13,49 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class PreviewConversionTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task RemotePreviewConversion_PreservesSuccessfulItemsAndRetriesOnlyFailures(int failedIndex)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-preview-partial", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var (repository, project, sources, package, staging) = await PrepareAsync(root,
+                new PreviewConversionSettings { Mode = PreviewConversionMode.Remote, AgentUrl = "http://agent:5199", TimeoutMinutes = 7 });
+            var agent = new StubAgentHandler { FailDocumentId = sources[failedIndex].DocumentId };
+            var converter = new SolidWorksServerPreviewConverter(Options.Create(new PdmPreviewWorkerOptions()), repository, new HttpClient(agent));
+            var failure = await Assert.ThrowsAsync<PartialPreviewConversionException>(() => converter.GenerateAsync(package, project, sources, staging, default));
+            var artifact = Assert.Single(failure.Artifacts);
+            Assert.NotEqual(sources[failedIndex].DocumentId, artifact.Key);
+            Assert.True(File.Exists(Path.Combine(project.VaultLocation, artifact.Value.StorageRelativePath)));
+            Assert.Equal([sources[failedIndex].DocumentId], failure.Errors.Keys);
+            Assert.Contains(sources[failedIndex].FileName, failure.Message);
+
+            agent.FailDocumentId = null;
+            var retried = await converter.GenerateAsync(package, project, sources, staging, default, keepExistingPreviews: true);
+            Assert.Equal(2, retried.Count);
+            Assert.Equal([sources[failedIndex].FileName], agent.UploadedSources);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public async Task RemotePreviewConversion_RejectsIncompleteItemResults()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-preview-incomplete", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var (repository, project, sources, package, staging) = await PrepareAsync(root,
+                new PreviewConversionSettings { Mode = PreviewConversionMode.Remote, AgentUrl = "http://agent:5199", TimeoutMinutes = 7 });
+            var agent = new StubAgentHandler { OmitItem = true };
+            var converter = new SolidWorksServerPreviewConverter(Options.Create(new PdmPreviewWorkerOptions()), repository, new HttpClient(agent));
+            var error = await Assert.ThrowsAsync<PdmRuleException>(() => converter.GenerateAsync(package, project, sources, staging, default));
+            Assert.Contains("逐项结果不完整", error.Message);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
     [Fact]
     public async Task RemotePreviewConversion_UploadsSourcesAndMaterializesAgentOutputs()
     {
@@ -279,10 +322,16 @@ public sealed class PreviewConversionTests
         public List<string> OutputNames { get; } = [];
         public string Payload { get; } = "converted-by-agent";
         public string? Error { get; set; }
+        public Guid? FailDocumentId { get; set; }
+        public bool OmitItem { get; set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             RequestUri = request.RequestUri;
+            UploadedSources.Clear();
+            UploadedKinds.Clear();
+            OutputNames.Clear();
+            var ids = new List<Guid>();
             Token = request.Headers.TryGetValues(PreviewAgentProtocol.TokenHeader, out var values) ? values.FirstOrDefault() : null;
             var requestBytes = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
             using (var archive = new ZipArchive(new MemoryStream(requestBytes), ZipArchiveMode.Read))
@@ -298,6 +347,7 @@ public sealed class PreviewConversionTests
                 {
                     UploadedKinds.Add(job.GetProperty("kind").GetString() ?? string.Empty);
                     OutputNames.Add(job.GetProperty("outputName").GetString()!);
+                    ids.Add(job.GetProperty("documentId").GetGuid());
                 }
             }
 
@@ -315,11 +365,14 @@ public sealed class PreviewConversionTests
                 var resultEntry = archive.CreateEntry("result.json");
                 await using (var stream = resultEntry.Open())
                 {
-                    var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { success = true, error = (string?)null }));
+                    var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { success = FailDocumentId is null, error = (string?)null,
+                        items = FailDocumentId is not null || OmitItem ? ids.Take(OmitItem ? ids.Count - 1 : ids.Count).Select(id => new {
+                            documentId = id, success = id != FailDocumentId, error = id == FailDocumentId ? "自动恢复后仍无法导出，请检查嵌入对象。" : null }).ToArray() : null }));
                     await stream.WriteAsync(payload, cancellationToken);
                 }
                 foreach (var name in OutputNames)
                 {
+                    if (ids[OutputNames.IndexOf(name)] == FailDocumentId) continue;
                     var entry = archive.CreateEntry($"outputs/{name}");
                     await using var stream = entry.Open();
                     var payload = Encoding.UTF8.GetBytes(Payload);

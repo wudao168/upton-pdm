@@ -94,6 +94,24 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
 
     public async Task<StoredFile> CompleteUploadAsync(Guid sessionId, string relativeTargetPath, CancellationToken cancellationToken)
     {
+        var receipt = await ReadCompletionAsync(sessionId, cancellationToken);
+        if (receipt is not null)
+        {
+            if (!string.Equals(receipt.File.RelativePath.Replace('\\', '/'), relativeTargetPath.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase))
+                throw new PdmConflictException("该上传会话已有固定目标，不能改写到其他图档。");
+            var receiptProject = await repository.FindProjectAsync(receipt.Session.ProjectId, cancellationToken)
+                ?? throw new PdmNotFoundException("项目不存在。");
+            var receiptPath = StorageLocationPolicy.ResolveUnder(receiptProject.VaultLocation, receipt.File.RelativePath);
+            if (File.Exists(receiptPath))
+            {
+                await VerifyFileHashAsync(receiptPath, receipt.File, cancellationToken);
+                if (receipt.File.RelativePath.Split('\\', '/').Any(segment => segment.Equals(".versions", StringComparison.OrdinalIgnoreCase)))
+                    File.SetAttributes(receiptPath, File.GetAttributes(receiptPath) | FileAttributes.ReadOnly);
+                var completedDirectory = GetSessionDirectory(sessionId);
+                if (Directory.Exists(completedDirectory)) Directory.Delete(completedDirectory, true);
+                return receipt.File;
+            }
+        }
         var session = await ReadMetadataAsync(sessionId, cancellationToken);
         var project = await repository.FindProjectAsync(session.ProjectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。 ");
@@ -143,11 +161,13 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
             throw new PdmConflictException("目标文件已经存在，不能覆盖受控文件。 ");
         }
 
+        var stored = new StoredFile(Path.GetRelativePath(project.VaultLocation, targetPath), session.TotalLength, actualSha256, timeProvider.GetUtcNow());
+        await WriteCompletionAsync(new UploadCompletion(session, stored), cancellationToken);
         File.Move(assembledPath, targetPath);
         if (relativeTargetPath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(segment => string.Equals(segment, ".versions", StringComparison.OrdinalIgnoreCase)))
             File.SetAttributes(targetPath, File.GetAttributes(targetPath) | FileAttributes.ReadOnly);
         Directory.Delete(GetSessionDirectory(sessionId), true);
-        return new StoredFile(Path.GetRelativePath(project.VaultLocation, targetPath), session.TotalLength, actualSha256, timeProvider.GetUtcNow());
+        return stored;
     }
 
     public Task<Stream> OpenReadAsync(string absolutePath, CancellationToken cancellationToken)
@@ -174,11 +194,10 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         }
     }
 
-    public Task ValidateStoredFileMetadataAsync(Project project, StoredFile file, CancellationToken cancellationToken)
+    public async Task ValidateStoredFileMetadataAsync(Project project, StoredFile file, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        _ = ValidateStoredFileMetadata(project, file, allowFormalDrawing: true);
-        return Task.CompletedTask;
+        _ = await ValidateVersionReadMetadataAsync(project, file, cancellationToken);
     }
 
     public async Task VerifyStoredFileAsync(Project project, StoredFile file, CancellationToken cancellationToken)
@@ -192,8 +211,25 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
     public async Task VerifyVersionReadAsync(Project project, StoredFile file, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var path = ValidateStoredFileMetadata(project, file, allowFormalDrawing: true);
+        var path = await ValidateVersionReadMetadataAsync(project, file, cancellationToken);
         await VerifyFileHashAsync(path, file, cancellationToken);
+    }
+
+    private static async Task<string> ValidateVersionReadMetadataAsync(Project project, StoredFile file, CancellationToken cancellationToken)
+    {
+        var path = ValidateStoredFileMetadata(project, file, allowFormalDrawing: true, allowLegacyWritableFormal: true);
+        if ((File.GetAttributes(path) & FileAttributes.ReadOnly) != 0) return path;
+
+        // Early formal drawing publications did not set ReadOnly. Repair only a validated
+        // formal source, holding a read lock through hash verification and attribute repair.
+        await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 256 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var actual = Convert.ToHexString(await SHA256.HashDataAsync(input, cancellationToken));
+        if (input.Length != file.Length || !string.Equals(actual, file.Sha256, StringComparison.OrdinalIgnoreCase))
+            throw new PdmConflictException("正式图纸内容与版本记录不一致，已停止打开。请联系管理员核查文件完整性。");
+        cancellationToken.ThrowIfCancellationRequested();
+        File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.ReadOnly);
+        return path;
     }
 
     private static async Task VerifyFileHashAsync(string path, StoredFile file, CancellationToken cancellationToken)
@@ -231,7 +267,7 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
             throw new PdmConflictException("发布预览文件SHA-256校验失败。");
     }
 
-    private static string ValidateStoredFileMetadata(Project project, StoredFile file, bool allowFormalDrawing = false)
+    private static string ValidateStoredFileMetadata(Project project, StoredFile file, bool allowFormalDrawing = false, bool allowLegacyWritableFormal = false)
     {
         var relativeSegments = file.RelativePath.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
         // Released drawings are generated under a separate immutable source directory.
@@ -258,7 +294,7 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
             throw new PdmConflictException("待存档文件大小与上传记录不一致。");
         }
 
-        if ((info.Attributes & FileAttributes.ReadOnly) == 0)
+        if ((info.Attributes & FileAttributes.ReadOnly) == 0 && !(formalDrawing && allowLegacyWritableFormal))
         {
             throw new PdmConflictException("历史版本文件不是只读文件，不能写入版本记录。");
         }
@@ -339,6 +375,8 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         var path = Path.Combine(GetSessionDirectory(sessionId), "session.json");
         if (!File.Exists(path))
         {
+            var receipt = await ReadCompletionAsync(sessionId, cancellationToken);
+            if (receipt is not null) return receipt.Session;
             throw new PdmNotFoundException("上传会话不存在。 ");
         }
 
@@ -360,5 +398,31 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         }
 
         File.Move(temporaryPath, finalPath, true);
+    }
+
+    private sealed record UploadCompletion(UploadSession Session, StoredFile File);
+
+    private string CompletionPath(Guid sessionId) => Path.Combine(StorageLocationPolicy.Normalize(settings.UploadTempRoot),
+        "completed", sessionId.ToString("N") + ".json");
+
+    private async Task<UploadCompletion?> ReadCompletionAsync(Guid sessionId, CancellationToken cancellationToken)
+    {
+        var path = CompletionPath(sessionId);
+        if (!File.Exists(path)) return null;
+        await using var input = File.OpenRead(path);
+        return await JsonSerializer.DeserializeAsync<UploadCompletion>(input, jsonOptions, cancellationToken);
+    }
+
+    private async Task WriteCompletionAsync(UploadCompletion receipt, CancellationToken cancellationToken)
+    {
+        var path = CompletionPath(receipt.Session.Id);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temporary = path + ".tmp";
+        await using (var output = File.Create(temporary))
+        {
+            await JsonSerializer.SerializeAsync(output, receipt, jsonOptions, cancellationToken);
+            await output.FlushAsync(cancellationToken);
+        }
+        File.Move(temporary, path, true);
     }
 }

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ArrowLeft, ChevronLeft, ChevronRight, History, MessageSquareText, RefreshCw, Search, Send, X } from '@lucide/vue'
+import { ArrowLeft, ChevronLeft, ChevronRight, History, MessageSquareText, RotateCw as RefreshCw, Search, Send, X } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
-import { drawingReviewAssignedReviewerLabel, drawingReviewAssignedReviewerPool, drawingReviewCandidateStateTone, drawingReviewPackageStateLabel, drawingReviewPackageStateTone, drawingReviewTargetStateLabel, drawingReviewTargetStateTone } from '../drawingReviewLabels'
+import { drawingReviewAssignedReviewerLabel, drawingReviewAssignedReviewerPool, drawingReviewCandidateBadge, drawingReviewCandidateStateTone, drawingReviewPackageStateLabel, drawingReviewPackageStateTone, drawingReviewTargetStateLabel, drawingReviewTargetStateTone } from '../drawingReviewLabels'
 import type { AddDrawingReviewMarkupInput, DrawingReviewBatchEntry, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
@@ -99,12 +99,12 @@ const overviewStateOptions = computed(() => [
 const overviewCandidates = computed(() => props.candidates.filter(candidate => overviewState.value === 'All' || overviewStateLabel(candidate) === overviewState.value))
 const overviewEmptyMessage = '没有符合筛选条件的图纸。'
 
-// 批量操作：所有审核阶段都能勾选（待发起审核/已批准可批量发起新一轮审核，审核中可批量通过或退回）。
+// 仅允许勾选当前用户能够发起、重新提交或审批的图纸。
 const selectedOverviewIds = ref<string[]>([])
 const overviewTargets = computed(() => overviewCandidates.value.map(candidate => ({ candidate, action: overviewRowAction(candidate) })))
 const overviewSelectableIds = computed(() => overviewCandidates.value
   .filter(candidate => overviewRowAction(candidate) || resubmitEntryFor(candidate)
-    || (props.canSubmit && candidate.selectable && candidate.modelDocumentId))
+    || (canInitiate(candidate)))
   .map(candidate => candidate.candidateId))
 const overviewAllSelected = computed(() => overviewSelectableIds.value.length > 0
   && overviewSelectableIds.value.every(id => selectedOverviewIds.value.includes(id)))
@@ -124,8 +124,15 @@ const selectedResubmitEntries = computed(() => selectedOverviewCandidates.value.
 }))
 const selectedOverviewEntries = computed(() => overviewTargets.value.filter(entry => entry.action && selectedOverviewIds.value.includes(entry.candidate.candidateId)))
 watch(overviewSelectableIds, ids => { selectedOverviewIds.value = selectedOverviewIds.value.filter(id => ids.includes(id)) })
+// 审核任务变化时默认选中待当前人员处理的图纸；普通刷新不覆盖人工取消勾选。
+watch(() => `${selectedPackageId.value}:${props.currentUsername}:` + props.candidates.flatMap(candidate => {
+  const action = overviewRowAction(candidate)
+  return action ? [`${candidate.candidateId}:${action.packageId}:${action.itemId}:${action.kind}`] : []
+}).join('|'), () => {
+  selectedOverviewIds.value = props.candidates.filter(candidate => overviewRowAction(candidate)).map(candidate => candidate.candidateId)
+}, { immediate: true })
 const selectedSubmittableIds = computed(() => selectedOverviewCandidates.value
-  .filter(candidate => candidate.selectable && candidate.modelDocumentId)
+  .filter(canInitiate)
   .map(candidate => candidate.modelDocumentId!))
 const batchApproveLabel = computed(() => selectedOverviewEntries.value.length > 0
   && selectedOverviewEntries.value.every(entry => entry.action!.kind === 'supervisor') ? '批量批准' : '批量通过')
@@ -215,7 +222,10 @@ const candidateEmptyMessage = computed(() => props.candidates.length === 0
   : '没有符合搜索条件的图档。')
 
 watch(() => props.candidates, () => {
-  if (scopeOpen.value) selectAllReadyCandidates()
+  if (scopeOpen.value) {
+    const available = new Set(props.candidates.filter(canInitiate).map(candidate => candidate.modelDocumentId))
+    selectedCandidateIds.value = selectedCandidateIds.value.filter(id => available.has(id))
+  }
 }, { deep: true })
 
 function toggleCollapsed() {
@@ -223,9 +233,13 @@ function toggleCollapsed() {
   emit('update:collapsed', collapsed.value)
 }
 
+function canInitiate(candidate: DrawingReviewCandidate) {
+  return props.canSubmit && candidate.state === 'Ready' && candidate.selectable && !!candidate.modelDocumentId
+}
+
 function selectAllReadyCandidates() {
   selectedCandidateIds.value = props.candidates
-    .filter(candidate => candidate.state === 'Ready' && candidate.modelDocumentId)
+    .filter(canInitiate)
     .map(candidate => candidate.modelDocumentId!)
 }
 
@@ -239,34 +253,16 @@ function openScopeSelection() {
   selectAllReadyCandidates()
 }
 
-/** 批量发起沿用已有审核人；无可用选择时打开人员选择界面。 */
-const batchReviewers = computed(() => {
-  const current = props.packages.find(item => item.id === props.packageId) ?? props.packages[0]
-  if (current?.assignedReviewers?.length) return [...current.assignedReviewers]
-  if (current?.assignedReviewer) return [current.assignedReviewer]
-  return eligibleDefaultReviewers.value.length
-    ? [...eligibleDefaultReviewers.value]
-    : props.reviewerOptions.length === 1 ? [props.reviewerOptions[0]!.username] : []
-})
-const batchReviewerHint = computed(() => batchReviewers.value.length
-  ? `审核人：${batchReviewers.value.map(username => props.reviewerOptions.find(option => option.username === username)?.label ?? username).join('、')}`
-  : '请先选择审核人')
-
-/** 点击即批量发起：直接提交所选图纸发起审核，不再进入二次选择页。 */
+/** 发起前明确确认审核人员，并保留本次勾选的范围。 */
 function batchSubmit() {
-  const ids = selectedSubmittableIds.value
+  const ids = [...selectedSubmittableIds.value]
   if (!ids.length) return
-  if (!batchReviewers.value.length) {
-    openScopeSelection()
-    selectedCandidateIds.value = [...ids]
-    return
-  }
-  emit('create', ids, batchReviewers.value)
-  selectedOverviewIds.value = []
+  openScopeSelection()
+  selectedCandidateIds.value = ids
 }
 
 function toggleCandidate(candidate: DrawingReviewCandidate) {
-  if (!candidate.selectable || !candidate.modelDocumentId) return
+  if (!canInitiate(candidate) || !candidate.modelDocumentId) return
   selectedCandidateIds.value = selectedCandidateIds.value.includes(candidate.modelDocumentId)
     ? selectedCandidateIds.value.filter(id => id !== candidate.modelDocumentId)
     : [...selectedCandidateIds.value, candidate.modelDocumentId]
@@ -298,26 +294,11 @@ function candidateStateLabel(candidate: DrawingReviewCandidate) {
 }
 
 function overviewStateLabel(candidate: DrawingReviewCandidate) {
-  if (reviewItemStateFor(candidate) === 'ChangesRequested') return '已退回（待修改）'
-  // 状态表按“下一步等谁”显示：待审核 → 待批准 → 已批准。
-  if (candidate.state !== 'InReview') return candidateStateLabel(candidate)
-  const state = reviewItemStateFor(candidate)
-  return state ? drawingReviewTargetStateLabel(state) : candidateStateLabel(candidate)
+  return drawingReviewCandidateBadge(candidate, props.packages).label
 }
 
 function overviewStateTone(candidate: DrawingReviewCandidate) {
-  if (candidate.state !== 'InReview') return drawingReviewCandidateStateTone(candidate.state)
-  const state = reviewItemStateFor(candidate)
-  return state ? drawingReviewTargetStateTone(state) : drawingReviewCandidateStateTone(candidate.state)
-}
-
-// 主管批准后审核单进入“已批准/WritingProperties”，此时逐张图纸都应视为已批准。
-function reviewItemStateFor(candidate: DrawingReviewCandidate) {
-  const item = reviewItemFor(candidate)
-  if (!item) return null
-  const packageValue = activeReviewPackageFor(candidate)
-  if (packageValue?.state === 'WritingProperties' || packageValue?.state === 'Approved') return 'Marked' as const
-  return item.drawingState
+  return drawingReviewCandidateBadge(candidate, props.packages).tone
 }
 
 function reviewItemFor(candidate: DrawingReviewCandidate) {
@@ -441,7 +422,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
           type="button"
           class="drawing-review-candidate"
           :class="[`is-${candidate.state.toLowerCase()}`, { 'is-selected': !!candidate.modelDocumentId && selectedCandidateIds.includes(candidate.modelDocumentId) }]"
-          :disabled="!candidate.selectable"
+          :disabled="pending || !canInitiate(candidate)"
           :title="candidate.reason || candidate.name"
           @click="toggleCandidate(candidate)"
         >
@@ -494,7 +475,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
         <button
           type="button"
           :class="batchPrimaryMode === 'approve' ? 'is-approve' : 'is-submit'"
-          :title="batchPrimaryMode === 'submit' ? batchReviewerHint : undefined"
+          :title="batchPrimaryMode === 'submit' ? '选择审核人后发起审核' : undefined"
           :disabled="batchPrimaryDisabled"
           @click="runBatchPrimary()"
         >{{ batchPrimaryLabel }}</button>
@@ -544,7 +525,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
 .drawing-review-panel.is-overlay-hosted{position:relative;inset:auto;width:100%;height:100%;border-radius:0;backdrop-filter:none;-webkit-backdrop-filter:none}
 .drawing-review-panel__header{display:flex;align-items:center;gap:8px;padding:12px 13px 9px;border-bottom:1px solid var(--pdm-border-soft)}
 .drawing-review-panel__title{flex:0 1 auto;min-width:0}.drawing-review-panel__title span{color:var(--pdm-blue);font-size:12px;font-weight:600;letter-spacing:.12em}.drawing-review-panel__header h2{margin:2px 0 0;overflow:hidden;font-size:14px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
-.drawing-review-back{width:28px;flex:0 0 28px;padding:0!important;border:0!important;background:transparent!important}.drawing-review-panel.is-collapsed{width:34px;min-width:34px}.drawing-review-panel.is-collapsed>.drawing-review-panel__header{padding:8px 4px;justify-content:center;border-bottom:0}.drawing-review-panel__header .drawing-review-submit{margin-left:auto;width:80px;min-width:80px;padding:5px 4px}.drawing-review-panel__header .drawing-review-submit:disabled{border-color:var(--pdm-border);background:var(--pdm-surface-muted);color:var(--pdm-muted);opacity:1}.drawing-review-panel__header .drawing-review-collapse{width:24px;min-width:24px;height:24px;min-height:24px;flex:0 0 24px;padding:0;border:0;background:transparent;color:var(--pdm-muted)}.drawing-review-panel__header .drawing-review-collapse:hover{background:var(--pdm-surface-muted);color:var(--pdm-text)}.drawing-review-scope{display:flex;flex-direction:column;gap:7px;padding:10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-scope>select{width:100%}.drawing-review-scope__search{display:flex;align-items:center;gap:5px;padding:0 7px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface)}.drawing-review-scope__search input{min-width:0;width:100%;height:30px;border:0;outline:0;background:transparent;color:var(--pdm-text);font-size:12px}.drawing-review-candidate-list{min-height:0;flex:1;overflow:auto;padding:6px}.drawing-review-candidate{position:relative;width:100%;min-height:62px!important;display:grid!important;grid-template-columns:20px minmax(0,1fr) 66px;align-items:center!important;justify-content:stretch!important;gap:6px;margin-bottom:5px;padding:7px!important;text-align:left;border-color:var(--pdm-border-soft)!important}.drawing-review-candidate.is-selected{border-color:var(--pdm-blue)!important;background:var(--pdm-blue-soft)!important}.drawing-review-candidate:disabled{opacity:.68}.drawing-review-candidate__check{width:17px;height:17px;display:flex;align-items:center;justify-content:center;border:1px solid var(--pdm-border);border-radius:3px;background:var(--pdm-surface);color:var(--pdm-blue);font-weight:600}.drawing-review-candidate.is-selected .drawing-review-candidate__check{border-color:var(--pdm-blue)}.drawing-review-candidate__copy,.drawing-review-candidate__versions{min-width:0;display:flex;flex-direction:column;gap:2px}.drawing-review-candidate__copy strong,.drawing-review-candidate__copy small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.drawing-review-candidate__copy strong{font-size:12px}.drawing-review-candidate__copy small,.drawing-review-candidate__copy em,.drawing-review-candidate__versions small,.drawing-review-candidate__versions em{color:var(--pdm-muted);font-size:12px;font-style:normal}.drawing-review-candidate__versions{align-items:flex-end}.drawing-review-candidate__versions strong{font-size:12px}.drawing-review-candidate.is-approvedcurrent .drawing-review-candidate__versions em{color:var(--pdm-green)}.drawing-review-candidate.is-inreview .drawing-review-candidate__versions em,.drawing-review-candidate.is-unavailable .drawing-review-candidate__versions em{color:var(--pdm-orange)}.drawing-review-candidate__reason{grid-column:2/4;color:var(--pdm-muted);font-size:12px}.drawing-review-no-candidate{padding:28px 8px;color:var(--pdm-muted);text-align:center;font-size:12px}.drawing-review-scope__footer{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;border-top:1px solid var(--pdm-border-soft);font-size:12px}.drawing-review-package-actions{display:grid!important;grid-template-columns:1fr;gap:5px}.drawing-review-package-actions button{width:100%}.drawing-review-package-actions .is-danger{border-color:var(--pdm-danger-border);background:var(--pdm-danger-soft);color:var(--pdm-danger)}.drawing-review-withdrawn{padding:5px 6px;border-radius:4px;background:var(--pdm-danger-soft);color:var(--pdm-danger)!important}
+.drawing-review-back{width:28px;flex:0 0 28px;padding:0!important;border:0!important;background:transparent!important}.drawing-review-panel.is-collapsed{width:34px;min-width:34px}.drawing-review-panel.is-collapsed>.drawing-review-panel__header{padding:8px 4px;justify-content:center;border-bottom:0}.drawing-review-panel__header .drawing-review-submit{margin-left:auto;width:80px;min-width:80px;padding:5px 4px}.drawing-review-panel__header .drawing-review-submit:disabled{border-color:var(--pdm-border);background:var(--pdm-surface-muted);color:var(--pdm-muted);opacity:1}.drawing-review-panel__header .drawing-review-collapse{width:var(--pdm-symbol-compact);min-width:var(--pdm-symbol-compact);height:var(--pdm-symbol-compact);min-height:var(--pdm-symbol-compact);flex:0 0 24px;padding:0;border:0;background:transparent;color:var(--pdm-muted)}.drawing-review-panel__header .drawing-review-collapse:hover{background:var(--pdm-surface-muted);color:var(--pdm-text)}.drawing-review-scope{display:flex;flex-direction:column;gap:7px;padding:10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-scope>select{width:100%}.drawing-review-scope__search{display:flex;align-items:center;gap:5px;padding:0 7px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface)}.drawing-review-scope__search input{min-width:0;width:100%;height:30px;border:0;outline:0;background:transparent;color:var(--pdm-text);font-size:12px}.drawing-review-candidate-list{min-height:0;flex:1;overflow:auto;padding:6px}.drawing-review-candidate{position:relative;width:100%;min-height:62px!important;display:grid!important;grid-template-columns:20px minmax(0,1fr) 66px;align-items:center!important;justify-content:stretch!important;gap:6px;margin-bottom:5px;padding:7px!important;text-align:left;border-color:var(--pdm-border-soft)!important}.drawing-review-candidate.is-selected{border-color:var(--pdm-blue)!important;background:var(--pdm-blue-soft)!important}.drawing-review-candidate:disabled{opacity:.68}.drawing-review-candidate__check{width:17px;height:17px;display:flex;align-items:center;justify-content:center;border:1px solid var(--pdm-border);border-radius:3px;background:var(--pdm-surface);color:var(--pdm-blue);font-weight:600}.drawing-review-candidate.is-selected .drawing-review-candidate__check{border-color:var(--pdm-blue)}.drawing-review-candidate__copy,.drawing-review-candidate__versions{min-width:0;display:flex;flex-direction:column;gap:2px}.drawing-review-candidate__copy strong,.drawing-review-candidate__copy small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.drawing-review-candidate__copy strong{font-size:12px}.drawing-review-candidate__copy small,.drawing-review-candidate__copy em,.drawing-review-candidate__versions small,.drawing-review-candidate__versions em{color:var(--pdm-muted);font-size:12px;font-style:normal}.drawing-review-candidate__versions{align-items:flex-end}.drawing-review-candidate__versions strong{font-size:12px}.drawing-review-candidate.is-approvedcurrent .drawing-review-candidate__versions em{color:var(--pdm-green)}.drawing-review-candidate.is-inreview .drawing-review-candidate__versions em,.drawing-review-candidate.is-unavailable .drawing-review-candidate__versions em{color:var(--pdm-orange)}.drawing-review-candidate__reason{grid-column:2/4;color:var(--pdm-muted);font-size:12px}.drawing-review-no-candidate{padding:28px 8px;color:var(--pdm-muted);text-align:center;font-size:12px}.drawing-review-scope__footer{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;border-top:1px solid var(--pdm-border-soft);font-size:12px}.drawing-review-package-actions{display:grid!important;grid-template-columns:1fr;gap:5px}.drawing-review-package-actions button{width:100%}.drawing-review-package-actions .is-danger{border-color:var(--pdm-danger-border);background:var(--pdm-danger-soft);color:var(--pdm-danger)}.drawing-review-withdrawn{padding:5px 6px;border-radius:4px;background:var(--pdm-danger-soft);color:var(--pdm-danger)!important}
 .drawing-review-scope__reviewer{display:grid;grid-template-columns:70px minmax(0,1fr);align-items:center;gap:6px;font-size:12px}.drawing-review-scope__reviewer select{width:100%}.drawing-review-reviewer-select{width:100%;min-width:0}.drawing-review-scope__reviewer :deep(.el-select__wrapper){min-height:30px;padding:2px 8px;border-radius:5px;font-size:12px}.drawing-review-scope__reviewer :deep(.el-select__selection){gap:2px;flex-wrap:wrap}.drawing-review-scope__reviewer :deep(.el-tag){height:18px;padding:0 5px;font-size:12px}.drawing-review-scope__empty-hint{margin:0;color:var(--pdm-muted);font-size:12px;line-height:1.4}.drawing-review-route{color:var(--pdm-blue)!important}.drawing-review-current-handler{color:var(--pdm-text)!important;font-weight:600}
 .drawing-review-candidate{height:30px!important;min-height:30px!important;grid-template-columns:20px minmax(0,1fr) 52px;gap:6px;margin-bottom:3px;padding:0 7px!important;overflow:hidden}.drawing-review-candidate__number{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.drawing-review-candidate__state{color:var(--pdm-muted);font-size:12px;font-style:normal;text-align:right;white-space:nowrap}.drawing-review-candidate.is-approvedcurrent .drawing-review-candidate__state{color:var(--pdm-green)}.drawing-review-candidate.is-inreview .drawing-review-candidate__state,.drawing-review-candidate.is-unavailable .drawing-review-candidate__state{color:var(--pdm-orange)}
 .drawing-review-panel__toolbar{display:flex;gap:5px;padding:8px 10px;border-bottom:1px solid var(--pdm-border-soft)}.drawing-review-panel__toolbar label{min-width:0;display:flex;flex:1;align-items:center;gap:5px}.drawing-review-panel__toolbar select{min-width:0;width:100%}.drawing-review-panel__toolbar .drawing-review-toolbar__refresh,.drawing-review-panel__toolbar .drawing-review-toolbar__create{width:80px;min-width:80px;height:30px;min-height:30px;padding:5px 4px}.drawing-review-panel button,.drawing-review-panel select,.drawing-review-panel input,.drawing-review-panel textarea{font:inherit;font-size:12px}.drawing-review-panel button,.drawing-review-panel select{min-height:30px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text)}.drawing-review-panel button{display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:5px 8px}.drawing-review-panel button:disabled{opacity:.45;cursor:not-allowed}.drawing-review-panel .is-primary{border-color:var(--pdm-blue);background:var(--pdm-blue);color:var(--pdm-surface)}

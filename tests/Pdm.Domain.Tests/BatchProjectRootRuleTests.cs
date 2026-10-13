@@ -26,7 +26,7 @@ public sealed class BatchProjectRootRuleTests
     }
 
     [Fact]
-    public void DifferentDocument_BlocksBeforeUpload()
+    public void DifferentDocument_AllowsIndependentRoot()
     {
         var reason = Upton.Pdm.SolidWorks.BatchProjectRootRule.IncompatibilityReason(
             Guid.NewGuid(),
@@ -34,8 +34,6 @@ public sealed class BatchProjectRootRuleTests
             Guid.NewGuid(),
             "80龟缸.SLDASM");
 
-        Assert.Contains("尚未上传任何文件", reason, StringComparison.Ordinal);
-        Assert.Contains("CW004-3.SLDASM", reason, StringComparison.Ordinal);
-        Assert.Contains("80龟缸.SLDASM", reason, StringComparison.Ordinal);
+        Assert.Equal(string.Empty, reason);
     }
 }

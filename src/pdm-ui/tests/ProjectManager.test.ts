@@ -85,6 +85,16 @@ function mountProjectManager(directory = emptyDirectory, sourceProjects = [paren
 }
 
 describe('ProjectManager', () => {
+  it('制造部门顺序与组织架构一致，按编码而非排序号排列', () => {
+    const directory: OrganizationDirectory = { ...emptyDirectory, units: [
+      { id: 't3', organizationId: 'org-1', code: 'T3', name: 'T3事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 0 },
+      { id: 't1', organizationId: 'org-1', code: 'T1', name: 'T1事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 2 },
+      { id: 't2', organizationId: 'org-1', code: 'T2', name: 'T2事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 1 },
+    ] }
+    const wrapper = mountProjectManager(directory)
+    expect(wrapper.findAll('.pdm-project-classification__division').map(item => item.text())).toEqual(['T1事业部', 'T2事业部', 'T3事业部'])
+    wrapper.unmount()
+  })
   it('列表仅允许分配事业部，管理员也不能从此修改其他项目字段或人员', async () => {
     const wrapper = mountProjectManager(emptyDirectory, [{ ...parent, executionUnitId: 'division-1', canAssignExecutionUnit: true, canManageMainStaffing: true }, { ...child, canAssignDesigners: true }], true, true)
     expect(wrapper.find('[aria-label="分配事业部 P700001"]').exists()).toBe(true)
@@ -128,7 +138,7 @@ describe('ProjectManager', () => {
     expect(wrapper.get('[aria-label="项目筛选"]').element.parentElement).toBe(wrapper.get('[aria-label="项目列表"]').element)
     expect(wrapper.find('.pdm-project-table-panel .pdm-panel-heading').exists()).toBe(false)
     expect(wrapper.findAllComponents({ name: 'ElDropdownItem' }).some(item => item.props('command') === 'copy-content')).toBe(false)
-    expect(headers).toEqual(['项目号', '项目名称', '别名', '型号', '序列号', '客户', '事业部', '项目经理', '主设／工程师', '状态', '订单日期', '铭牌', '操作'])
+    expect(headers).toEqual(['项目号', '项目名称', '别名', '型号', '序列号', '客户', '事业部', '项目经理', '主设', '状态', '订单日期', '铭牌', '操作'])
     expect(cells[1].text()).toBe('气密设备')
     expect(cells[2].text()).toBe('—')
     expect(cells[3].text()).toBe('AK-2-C001-001-00')
@@ -185,7 +195,7 @@ describe('ProjectManager', () => {
     expect(toolbar.element.children[2].classList.contains('pdm-project-filters')).toBe(true)
     expect(createButton.text()).toContain('创建主项目')
     expect(toolbar.find('[aria-label="搜索项目"]').exists()).toBe(true)
-    expect(toolbar.findAll('.pdm-project-filters > *')).toHaveLength(7)
+    expect(toolbar.findAll('.pdm-project-filters > *')).toHaveLength(6)
     expect(list.find('.pdm-project-number-scroll').exists()).toBe(true)
   })
 
@@ -337,24 +347,39 @@ describe('ProjectManager', () => {
     expect(options.map(item => item.props('disabled'))).toEqual([false, false, false, true])
   })
 
-  it('可搜索子项目并按项目层级筛选', async () => {
+  it('搜索后默认折叠，支持展开、折叠以及清空搜索', async () => {
     const wrapper = mountProjectManager()
-    const search = wrapper.get('[aria-label="搜索项目"]')
-    const filter = wrapper.get('[aria-label="项目层级筛选"]')
-
-    await search.setValue('子项目')
-    expect(wrapper.findAll('tr.is-child')).toHaveLength(1)
-
-    await filter.setValue('parent')
+    await wrapper.get('[aria-label="搜索项目"]').setValue('子项目')
+    await wrapper.findAll('.pdm-project-filters button').find(button => button.text() === '搜索')!.trigger('click')
     expect(wrapper.findAll('tr.is-child')).toHaveLength(0)
-
-    await search.setValue('')
-    await filter.setValue('child')
+    await wrapper.get('[aria-label="展开全部项目明细"]').trigger('click')
     expect(wrapper.findAll('tr.is-child')).toHaveLength(1)
-    expect(wrapper.findAll('.pdm-project-number-table tbody tr')).toHaveLength(1)
+    await wrapper.get('[aria-label="折叠全部项目明细"]').trigger('click')
+    expect(wrapper.findAll('tr.is-child')).toHaveLength(0)
+    await wrapper.get('[aria-label="搜索项目"]').setValue('')
+    await wrapper.get('[aria-label="搜索项目"]').trigger('keyup', { key: 'Enter' })
+    expect(wrapper.findAll('tr.is-child')).toHaveLength(0)
+    await wrapper.get('[aria-label="展开全部项目明细"]').trigger('click')
+    expect(wrapper.findAll('tr.is-child')).toHaveLength(1)
+    wrapper.unmount()
   })
-
-  it('可分别按事业部、项目经理和主设工程师筛选，并自动展开匹配子项目', async () => {
+  it('选择制造部门后默认折叠且仍可展开、折叠全部明细', async () => {
+    const directory: OrganizationDirectory = { ...emptyDirectory, units: [
+      { id: 'division', organizationId: 'org-1', code: 'T2', name: '自动化事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 0 },
+    ] }
+    const wrapper = mountProjectManager(directory, [{...parent, executionUnitId:'division'}, {...child, executionUnitId:'division'}])
+    await wrapper.get('[aria-label="展开全部项目明细"]').trigger('click')
+    expect(wrapper.findAll('tr.is-child')).toHaveLength(1)
+    await wrapper.get('.pdm-project-classification__division').trigger('click')
+    expect(wrapper.findAll('tr.is-child')).toHaveLength(0)
+    expect(wrapper.get('[aria-label="展开全部项目明细"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('[aria-label="展开全部项目明细"]').trigger('click')
+    expect(wrapper.findAll('tr.is-child')).toHaveLength(1)
+    await wrapper.get('[aria-label="折叠全部项目明细"]').trigger('click')
+    expect(wrapper.findAll('tr.is-child')).toHaveLength(0)
+    wrapper.unmount()
+  })
+  it('可分别按事业部、项目经理和主设工程师筛选，且筛选后默认折叠，可手动展开匹配子项目', async () => {
     const otherParent: ProjectSummary = {
       ...parent,
       id: 'parent-2',
@@ -379,6 +404,9 @@ describe('ProjectManager', () => {
 
     await wrapper.get('[aria-label="项目经理筛选"]').setValue('')
     await wrapper.get('[aria-label="主设工程师筛选"]').setValue('child-designer')
+    expect(wrapper.findAll('tr.is-child')).toHaveLength(0)
+    expect(wrapper.get('[aria-label="展开全部项目明细"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('[aria-label="展开全部项目明细"]').trigger('click')
     expect(wrapper.findAll('tr.is-child')).toHaveLength(1)
     expect(wrapper.get('tr.is-child').text()).toContain('P700001-1')
     expect(wrapper.text()).not.toContain('P700002')

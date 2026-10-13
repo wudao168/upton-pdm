@@ -39,6 +39,8 @@ public static class BomSummaryProjection
                 Sequence = index + 1, Quantity = members.Sum(item => item.Quantity),
                 IsComplete = members.All(item => item.IsComplete),
                 SummaryItemIds = members.Select(item => item.Id).ToArray(),
+                ReleaseReviewTokens = members.SelectMany(item => item.ReleaseReviewTokens ?? new Dictionary<Guid, string>()).ToDictionary(pair => pair.Key, pair => pair.Value),
+                ReleaseConfirmation = members.All(item => item.ReleaseConfirmation is not null) ? members[0].ReleaseConfirmation : null,
                 SummaryFingerprint = Fingerprint(members)
             };
         }).ToArray();

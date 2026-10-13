@@ -111,6 +111,8 @@ public sealed record DocumentVersionCommit(
 {
     /// <summary>该次提交的性质；受控属性回写会强制记为 PropertyWriteback。</summary>
     public DocumentVersionChangeKind ChangeKind { get; init; } = DocumentVersionChangeKind.Content;
+    public Guid? ExpectedVersionId { get; init; }
+    public bool RequireBaseVersion { get; init; }
 }
 
 public sealed record ReleasePreviewSource(
@@ -138,7 +140,11 @@ public sealed record DocumentCheckInResult(
     DocumentVersion? Version,
     bool VersionCreated,
     BomGenerationResult? BomUpdate = null,
-    string? BomUpdateError = null);
+    string? BomUpdateError = null)
+{
+    public IReadOnlyList<string> AffectedAssemblies { get; init; } = [];
+    public bool BomRefreshDeferred { get; init; }
+}
 
 public sealed record ControlledOpenFile(
     Guid DocumentId,
@@ -178,6 +184,12 @@ public sealed record RegisterDocumentCommand(
 public sealed record DocumentContentFingerprint(
     PdmDocument Document,
     string SourceSha256);
+
+public sealed record ArchiveBatchFile(Guid DocumentId, DocumentVersionCommit Commit, Guid? DrawingReviewWritebackId = null);
+public sealed record ArchiveBatchReceipt(Guid BatchId, Guid ProjectId, string Actor, string RequestHash, IReadOnlyList<DocumentCheckInResult> Results);
+public sealed record ArchiveBatchInput(Guid DocumentId, StoredFile File, IReadOnlyDictionary<string, string?> Properties,
+    CadReferenceSnapshot Snapshot, string Comment, bool IsProjectRoot, Guid? ExpectedVersionId,
+    string? DrawingNumber = null, string? Name = null, string? FileName = null, Guid? DrawingReviewWritebackId = null);
 
 public sealed record DocumentRegistrationCandidate(
     string CandidateKey,
@@ -504,15 +516,22 @@ public interface IPdmRepository
     Task<PdmDocument> RegisterDocumentAsync(RegisterDocumentCommand command, string actor, CancellationToken cancellationToken);
     Task<bool> HasDocumentReadAccessAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken);
     Task<bool> HasDocumentAccessAsync(Guid documentId, string actor, UserRole role, FolderAccess requiredAccess, CancellationToken cancellationToken);
-    Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken, int? limit = null);
     Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken);
+    async Task<IReadOnlyDictionary<Guid, Guid>> LatestDocumentVersionIdsAsync(Guid projectId, CancellationToken cancellationToken) =>
+        (await ListProjectDocumentVersionsAsync(projectId, cancellationToken)).GroupBy(version => version.DocumentId)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(version => version.CreatedAt).First().Id);
     Task<IReadOnlyList<ProductionDrawingProject>> ListProductionDrawingProjectsAsync(string actor, UserRole role, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProductionDrawingItem>> ListProductionDrawingIndexAsync(string actor, UserRole role, bool includeHistory, CancellationToken cancellationToken);
     Task<ReleasePackage> UpdatePublishedDrawingDeliveryAsync(Guid releasePackageId, Guid documentId, DrawingDeliveryOverride delivery, string actor, CancellationToken cancellationToken);
     Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken);
     Task<DocumentReferenceNode?> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken);
     Task<CadReferenceSnapshot?> GetLatestReferenceSnapshotAsync(Guid projectId, CancellationToken cancellationToken);
+    Task<CadReferenceSnapshot?> GetProjectReferenceRootAsync(Guid projectId, Guid rootDocumentId, CancellationToken cancellationToken);
+    Task<CadReferenceSnapshot?> FindReferenceSnapshotAsync(Guid snapshotId, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken);
+    Task SaveBomReleaseConfirmationsAsync(Guid projectId, IReadOnlyDictionary<Guid, BomReleaseConfirmation?> confirmations, CancellationToken cancellationToken)
+        => throw new NotSupportedException();
     Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken);
     Task ApplyBomBatchAsync(Guid projectId, IReadOnlyList<BomItem> standardItems, IReadOnlyList<BomItem> nonStandardItems, IReadOnlyList<BomItem> unclassifiedItems, IReadOnlyList<BomItem> electricalItems, IReadOnlyList<BomItem> virtualItems, IReadOnlyList<BomItem> componentDrawingItems, IReadOnlyList<CadPropertyWriteback> writebacks, IReadOnlyList<AuditEntry> auditEntries, CancellationToken cancellationToken);
     Task<BomItem?> FindBomItemAsync(Guid projectId, Guid itemId, CancellationToken cancellationToken);
@@ -589,9 +608,15 @@ public interface IPdmRepository
     Task<PdmDocument> DiscardCheckoutAsync(Guid documentId, string actor, Guid sessionId, CancellationToken cancellationToken);
     Task<PdmDocument> RequestCheckoutReleaseAsync(Guid documentId, string requestedBy, string reason, CancellationToken cancellationToken);
     Task<PdmDocument> ForceReleaseCheckoutAsync(Guid documentId, string releasedBy, string reason, CancellationToken cancellationToken);
+    Task<PdmDocument> ForceReleaseOfflineCheckoutAsync(Guid documentId, Guid? expectedSessionId, DateTimeOffset heartbeatBefore, DateTimeOffset now, CancellationToken cancellationToken);
+    Task<PdmDocument> CloseCheckoutAsync(Guid documentId, string actor, Guid sessionId, DateTimeOffset checkedOutAt, string sha256, bool draftPreserved, CancellationToken cancellationToken);
+    Task<IReadOnlyList<string>> ListNotificationRecipientsAsync(string sourceKey, CancellationToken cancellationToken);
     Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, DocumentVersionCommit commit, CancellationToken cancellationToken);
     Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, CancellationToken cancellationToken);
     Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, Guid? drawingReviewWritebackId, CancellationToken cancellationToken);
+    Task<ArchiveBatchReceipt?> FindArchiveBatchAsync(Guid batchId, CancellationToken cancellationToken);
+    Task<ArchiveBatchReceipt> CheckInBatchVersionsAsync(Guid batchId, string requestHash, string actor, Guid sessionId,
+        IReadOnlyList<ArchiveBatchFile> files, CancellationToken cancellationToken);
     Task<(PdmDocument Document, DocumentVersion Version)> RestoreVersionAsync(Guid documentId, Guid sourceVersionId, string actor, StoredFile restoredFile, string changeNote, CancellationToken cancellationToken);
     Task<DocumentVersion> PublishDocumentVersionAsync(Guid documentId, Guid sourceVersionId, Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(

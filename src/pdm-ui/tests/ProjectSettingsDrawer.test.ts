@@ -93,10 +93,10 @@ describe('ProjectSettingsDrawer', () => {
     })
     expect(api.getProjectContentResetReadiness).not.toHaveBeenCalled()
     const tabs = wrapper.findAll('[role="tab"]')
-    expect(tabs.map(tab => tab.text())).toEqual(['项目复制', '项目重置'])
+    expect(tabs.map(tab => tab.text())).toEqual(['项目复制', '项目重置', '钉钉群绑定'])
     expect(tabs[0].attributes('aria-selected')).toBe('true')
     expect(wrapper.find('[aria-labelledby="pdm-project-copy-settings-title"]').attributes('style') ?? '').not.toContain('display: none')
-    expect(wrapper.find('[aria-labelledby="pdm-project-reset-settings-title"]').attributes('style')).toContain('display: none')
+    expect(wrapper.find('[aria-labelledby="pdm-project-reset-settings-title"]').exists()).toBe(false)
 
     await tabs[1].trigger('click')
     await flushPromises()

@@ -52,6 +52,28 @@ const candidate: DrawingReviewCandidate = {
 }
 
 describe('DrawingReviewPanel', () => {
+  it('自动勾选待本人审核的图纸，排除已批准项，刷新保留人工取消', async () => {
+    const current: DrawingReviewPackage = { ...review, assignedReviewers: ['reviewer'], items: [
+      review.items[0]!,
+      { ...review.items[0]!, id: 'item-approved', modelDocumentId: 'model-approved', drawingDocumentId: 'drawing-approved', drawingState: 'Approved' },
+    ] }
+    const candidates = [
+      { ...candidate, state: 'InReview' as const, selectable: false },
+      { ...candidate, candidateId: 'approved', drawingNumber: 'APPROVED', modelDocumentId: 'model-approved', drawingDocumentId: 'drawing-approved', state: 'InReview' as const },
+    ]
+    const wrapper = mount(DrawingReviewPanel, { global: { plugins: [ElementPlus] }, props: {
+      ...permissions, packageId: current.id, packages: [current], candidates, currentUsername: 'reviewer',
+    } })
+    const pending = wrapper.get('input[aria-label="选择图纸 A01-100"]')
+    expect((pending.element as HTMLInputElement).checked).toBe(true)
+    expect((wrapper.get('input[aria-label="选择图纸 APPROVED"]').element as HTMLInputElement).checked).toBe(false)
+    await pending.setValue(false)
+    await wrapper.setProps({ packages: [{ ...current }], candidates: [...candidates] })
+    expect((pending.element as HTMLInputElement).checked).toBe(false)
+    await wrapper.setProps({ packageId: 'next', packages: [{ ...current, id: 'next' }] })
+    expect((pending.element as HTMLInputElement).checked).toBe(true)
+    wrapper.unmount()
+  })
   it('无操作权限的图纸不可勾选，全选排除它们，权限变化清除选择', async () => {
     const current: DrawingReviewPackage = { ...review, assignedReviewers: ['reviewer'], items: [
       { ...review.items[0]!, drawingState: 'ChangesRequested' },
@@ -68,7 +90,7 @@ describe('DrawingReviewPanel', () => {
     await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
     expect(wrapper.text()).toContain('已选 1 张')
     await wrapper.setProps({ currentUsername: 'reviewer' })
-    expect(wrapper.text()).toContain('已选 0 张')
+    expect(wrapper.text()).toContain('已选 1 张')
     expect(wrapper.get('input[aria-label="选择图纸 A01-100"]').attributes('disabled')).toBeDefined()
     expect(wrapper.get('input[aria-label="选择图纸 A02"]').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
@@ -450,10 +472,12 @@ describe('DrawingReviewPanel', () => {
 
     await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
     await wrapper.get('.drawing-review-overview__batch .is-submit').trigger('click')
+    expect(wrapper.emitted('create')).toHaveLength(1)
+    await wrapper.get('.drawing-review-panel__header .drawing-review-submit').trigger('click')
     expect(wrapper.emitted('create')).toEqual([[['model-1'], ['lead']], [['model-1'], ['lead']]])
   })
 
-  it('默认全选待审图纸，并可手工增选或取消已审核版本', async () => {
+  it('仅选择允许发起的图纸，已批准版本不能单选或全选', async () => {
     const candidates: DrawingReviewCandidate[] = [
       candidate,
       { ...candidate, candidateId: 'second-candidate', modelDocumentId: 'second-model', drawingDocumentId: 'second-drawing', drawingNumber: 'NS-200' },
@@ -463,13 +487,19 @@ describe('DrawingReviewPanel', () => {
       global: { plugins: [ElementPlus] },
       props: { packageId: '', packages: [], candidates, selectedDocumentId: 'model-1', currentUsername: 'designer', ...permissions },
     })
+    const overviewChecks = wrapper.findAll('.drawing-review-overview__row input[type="checkbox"]')
+    expect(overviewChecks[2]!.attributes('disabled')).toBeDefined()
+    await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
+    expect(overviewChecks.map(input => (input.element as HTMLInputElement).checked)).toEqual([true, true, false])
+    await wrapper.setProps({ candidates: candidates.map((item, index) => index === 1 ? { ...item, selectable: false } : item) })
+    expect((overviewChecks[1]!.element as HTMLInputElement).checked).toBe(false)
+    await wrapper.setProps({ candidates })
     await wrapper.get('.drawing-review-panel__empty button').trigger('click')
     expect(wrapper.findAll('.drawing-review-scope__modes')).toHaveLength(0)
     expect(wrapper.findAll('.drawing-review-candidate.is-selected')).toHaveLength(2)
     const approved = wrapper.findAll('.drawing-review-candidate').find(button => button.text().includes('OLD-100'))!
     await approved.trigger('click')
-    expect(approved.classes()).toContain('is-selected')
-    await approved.trigger('click')
+    expect(approved.attributes('disabled')).toBeDefined()
     expect(approved.classes()).not.toContain('is-selected')
   })
 
@@ -613,6 +643,7 @@ describe('DrawingReviewPanel', () => {
     const boxes = wrapper.findAll('.drawing-review-overview__row input[type="checkbox"]')
     expect(boxes).toHaveLength(2)
     expect(boxes.every(box => box.attributes('disabled') === undefined)).toBe(true)
+    expect(boxes.every(box => (box.element as HTMLInputElement).checked)).toBe(true)
 
     await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
     expect(wrapper.text()).toContain('已选 2 张')
@@ -629,7 +660,7 @@ describe('DrawingReviewPanel', () => {
     confirm.mockRestore()
   })
 
-  it('待发起审核阶段同样有勾选框，点击批量发起即直接提交审核', async () => {
+  it('批量发起先选择审核人，候选刷新保留勾选范围', async () => {
     const candidates: DrawingReviewCandidate[] = [
       { ...candidate, candidateId: 'r1', modelDocumentId: 'model-2', drawingDocumentId: 'drawing-2', drawingNumber: 'A01-200', state: 'Ready' },
       { ...candidate, candidateId: 'r2', modelDocumentId: 'model-3', drawingDocumentId: 'drawing-3', drawingNumber: 'A01-300', state: 'Ready' },
@@ -647,9 +678,15 @@ describe('DrawingReviewPanel', () => {
     await wrapper.get('input[aria-label="全选可操作图纸"]').setValue(true)
     await wrapper.get('.drawing-review-overview__batch .is-submit').trigger('click')
 
-    // 不再进入二次选择页，直接发出 create（沿用上一单审核人，本用例只有一个可选审核人）。
-    expect(wrapper.text()).not.toContain('选择审核范围')
-    expect(wrapper.emitted('create')).toEqual([[['model-2', 'model-3'], ['reviewer']]])
+    expect(wrapper.text()).toContain('指定审核人')
+    expect(wrapper.emitted('create')).toBeUndefined()
+    await wrapper.findAll('.drawing-review-candidate')[1]!.trigger('click')
+    await wrapper.setProps({ candidates: candidates.map(item => ({ ...item })) })
+    expect(wrapper.findAll('.drawing-review-candidate.is-selected')).toHaveLength(1)
+    wrapper.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', ['other-reviewer'])
+    await wrapper.vm.$nextTick()
+    await wrapper.get('.drawing-review-panel__header .drawing-review-submit').trigger('click')
+    expect(wrapper.emitted('create')).toEqual([[['model-2'], ['other-reviewer']]])
   })
 
   it('审核明细栏内不再渲染审核结论条（结论条在预览工具条里）', () => {

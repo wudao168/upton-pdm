@@ -13,7 +13,7 @@ internal sealed class LoginDialog : Form
     public LoginDialog()
     {
         Text = "登录 UPLM";
-        StartPosition = FormStartPosition.CenterParent;
+        DialogWindowSizing.CenterOnOwnerScreen(this);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;

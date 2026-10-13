@@ -17,6 +17,30 @@ internal sealed class SolidWorksOpenBridge
 
     public bool IsAvailable => FindSolidWorksExecutable() != null && IsAddinRegistered();
 
+    public async Task<bool> IsConnectedAsync()
+    {
+        try
+        {
+            using (var pipe = new System.IO.Pipes.NamedPipeClientStream(".", PipeName(), System.IO.Pipes.PipeDirection.InOut,
+                System.IO.Pipes.PipeOptions.Asynchronous))
+            {
+                await pipe.ConnectAsync(500).ConfigureAwait(false);
+                using (var writer = new StreamWriter(pipe, new UTF8Encoding(false), 4096, true) { AutoFlush = true })
+                using (var reader = new StreamReader(pipe, Encoding.UTF8, false, 4096, true))
+                {
+                    // 空请求只检查现有监听器响应，不入队、不启动SolidWorks、不打开图档。
+                    await writer.WriteLineAsync(string.Empty).ConfigureAwait(false);
+                    var response = reader.ReadLineAsync();
+                    if (await Task.WhenAny(response, Task.Delay(500)).ConfigureAwait(false) != response) return false;
+                    return await response.ConfigureAwait(false) == "rejected";
+                }
+            }
+        }
+        catch (IOException) { return false; }
+        catch (TimeoutException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
     public async Task<string> SendAsync(Guid projectId, Guid documentId, Guid? versionId, string mode, CancellationToken cancellationToken,
         Func<string, Task> reportWaiting)
     {

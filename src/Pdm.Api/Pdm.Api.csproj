@@ -4,6 +4,7 @@
     <RootNamespace>Upton.Pdm.Api</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="..\Pdm.Client.Shared\ClientLogRedaction.cs" Link="ClientLogRedaction.cs" />
     <ProjectReference Include="..\Pdm.Application\Pdm.Application.csproj" />
     <ProjectReference Include="..\Pdm.Infrastructure\Pdm.Infrastructure.csproj" />
     <ProjectReference Include="..\Pdm.Domain\Pdm.Domain.csproj" />

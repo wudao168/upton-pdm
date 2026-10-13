@@ -51,9 +51,11 @@ public sealed class FormalDrawingStorageTests : IDisposable
     }
 
     [Fact]
-    public async Task VersionDownloadRejectsWritableFormalDrawing()
+    public async Task VersionDownloadRepairsMatchingLegacyFormalDrawing()
     {
-        await Assert.ThrowsAsync<PdmConflictException>(() => storage.VerifyVersionReadAsync(project, CreateFile(false), default));
+        var file = CreateFile(false);
+        await storage.VerifyVersionReadAsync(project, file, default);
+        Assert.True(File.GetAttributes(Path.Combine(root, file.RelativePath)).HasFlag(FileAttributes.ReadOnly));
     }
 
     [Fact]
@@ -63,9 +65,11 @@ public sealed class FormalDrawingStorageTests : IDisposable
     }
 
     [Fact]
-    public async Task ControlledOpenRejectsWritableFormalDrawing()
+    public async Task ControlledOpenRepairsMatchingLegacyFormalDrawing()
     {
-        await Assert.ThrowsAsync<PdmConflictException>(() => storage.ValidateStoredFileMetadataAsync(project, CreateFile(false), default));
+        var file = CreateFile(false);
+        await storage.ValidateStoredFileMetadataAsync(project, file, default);
+        Assert.True(File.GetAttributes(Path.Combine(root, file.RelativePath)).HasFlag(FileAttributes.ReadOnly));
     }
 
     [Fact]

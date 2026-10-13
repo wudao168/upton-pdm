@@ -73,9 +73,9 @@ describe('ProgramTemplateLibrary', () => {
     await flushPromises()
 
     expect(wrapper.find('.program-template-heading').exists()).toBe(false)
-    expect(wrapper.get('.program-template-toolbar').text()).toContain('上传程序模板')
+    expect(wrapper.get('.program-template-toolbar').text()).toContain('上传模板')
     expect(wrapper.findAll('.table-column-label').map(column => column.text())).toEqual(expect.arrayContaining(['程序名称', '功能说明']))
-    await wrapper.findAll('button').find(button => button.text().includes('上传程序模板'))!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text().includes('上传模板'))!.trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('保存草稿')
     await wrapper.findAll('button').find(button => button.text().includes('提交审核'))!.trigger('click')
@@ -108,7 +108,7 @@ describe('ProgramTemplateLibrary', () => {
       },
     })
     await flushPromises()
-    await wrapper.findAll('button').find(button => button.text().includes('上传程序模板'))!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text().includes('上传模板'))!.trigger('click')
     await flushPromises()
 
     expect(wrapper.find('input[accept=".zip,.rar"]').exists()).toBe(true)

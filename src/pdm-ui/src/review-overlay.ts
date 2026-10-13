@@ -1,3 +1,7 @@
+import { installButtonTypography } from './buttonTypography'
+import { installPanelHeaderActions } from './panelHeaderActions'
+import { installColumnResize } from './columnResize'
+import './styles/column-resize.css'
 import { createApp } from 'vue'
 import ElementPlus from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
@@ -7,5 +11,11 @@ import './styles/app.css'
 import './styles/ui-consistency.css'
 import './styles/review-overlay.css'
 import DrawingReviewOverlayApp from './components/DrawingReviewOverlayApp.vue'
+import { installClientDiagnostics } from './clientDiagnostics'
 
-createApp(DrawingReviewOverlayApp).use(ElementPlus, { locale: zhCn }).mount('#review-overlay-root')
+const app = createApp(DrawingReviewOverlayApp).use(ElementPlus, { locale: zhCn })
+installClientDiagnostics(app)
+installPanelHeaderActions(app)
+installColumnResize(app)
+installButtonTypography(app)
+app.mount('#review-overlay-root')

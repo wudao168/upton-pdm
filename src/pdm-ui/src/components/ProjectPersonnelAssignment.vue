@@ -20,7 +20,7 @@ const commercial = reactive({ salesPeople: [] as string[], presalesPeople: [] as
 function commercialUsers(value: string) { return value.split('、').filter(Boolean).map(name => props.directory.users.find(user => user.username === name || user.displayName === name)?.username ?? name) }
 const engineers = ref<string[]>([])
 const phases = reactive<Partial<Record<keyof ProjectPhaseOwners, string[]>>>({})
-const definitions = [{ key: 'StandardProcurement', label: '标准件采购' }, { key: 'NonStandardProcurement', label: '非标件采购' }, { key: 'NonStandardProduction', label: '非标件生产' }, { key: 'MechanicalAssembly', label: '机械装配' }, { key: 'ElectricalAssembly', label: '电气装配' }, { key: 'ElectricalCommissioning', label: '电气调试' }, { key: 'Acceptance', label: '验收' }] as const
+const definitions = [{ key: 'ElectricalHardware', label: '电气硬件' }, { key: 'StandardProcurement', label: '标准件采购' }, { key: 'NonStandardProcurement', label: '非标件采购' }, { key: 'NonStandardProduction', label: '非标件生产' }, { key: 'MechanicalAssembly', label: '机械装配' }, { key: 'ElectricalAssembly', label: '电气装配' }, { key: 'ElectricalCommissioning', label: '电气调试' }, { key: 'Acceptance', label: '验收' }] as const
 function inDivision(unitId: string): boolean {
   const unit = props.directory.units.find(item => item.id === unitId)
   return unitId === props.root.executionUnitId || Boolean(unit?.parentUnitId && inDivision(unit.parentUnitId))
@@ -34,6 +34,7 @@ const companyUsers = computed(() => {
   const members = new Set(props.directory.memberships.filter(item => units.has(item.unitId)).map(item => item.username))
   return props.directory.users.filter(user => user.isActive && members.has(user.username))
 })
+const hardwareUsers = computed(() => companyUsers.value.filter(user => [user.role, ...(user.roles ?? [])].includes('HardwareEngineer')))
 const engineerUsers = computed(() => companyUsers.value.filter(user => [user.role, ...(user.roles ?? [])].some(role => ['Engineer', 'ElectricalEngineer', 'CommissioningEngineer', 'HardwareEngineer', 'MechanicalManager', 'TechnicalAssistant', 'ProcessReviewer', 'Approver'].includes(role))))
 function configure(project?: ProjectSummary) {
   if (!project && !props.canMaintainTeam) return
@@ -80,9 +81,10 @@ defineExpose({ configure })
           <label>协同项目经理<el-select v-model="staffing.collaborativeProjectManagers" aria-label="协同项目经理" multiple filterable :disabled="saving || !root.canManageMainStaffing"><el-option v-for="user in divisionUsers.filter(item => item.username !== staffing.primaryProjectManager)" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
           <label>主设<el-select v-model="staffing.designLeads" aria-label="主设" multiple filterable :disabled="saving || !root.canManageMainStaffing"><el-option v-for="user in divisionUsers" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
 
+        <label>电气硬件<el-select v-model="phases.ElectricalHardware" aria-label="电气硬件" multiple filterable clearable :disabled="saving || !root.canAssignDesigners"><el-option v-for="user in hardwareUsers" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
         <label>销售<el-select v-model="commercial.salesPeople" aria-label="团队销售人员" multiple filterable :disabled="saving || !canEditCommercial"><el-option v-for="user in companyUsers" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
         <label>售前<el-select v-model="commercial.presalesPeople" aria-label="团队售前人员" multiple filterable :disabled="saving || !canEditCommercial"><el-option v-for="user in companyUsers" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
-        <label v-for="phase in definitions" :key="phase.key">{{ phase.label }}<el-select v-model="phases[phase.key]" :aria-label="phase.label" multiple filterable clearable :disabled="saving || !root.canAssignDesigners"><el-option v-for="user in companyUsers" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
+        <label v-for="phase in definitions.filter(item => item.key !== 'ElectricalHardware')" :key="phase.key">{{ phase.label }}<el-select v-model="phases[phase.key]" :aria-label="phase.label" multiple filterable clearable :disabled="saving || !root.canAssignDesigners"><el-option v-for="user in companyUsers" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
       </template>
       <label v-else>执行工程师<el-select v-model="engineers" aria-label="执行工程师" multiple filterable :disabled="saving"><el-option v-for="user in engineerUsers" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
       <p v-if="error" role="alert">{{ error }}</p>

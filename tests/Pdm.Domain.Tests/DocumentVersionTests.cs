@@ -5,6 +5,181 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class DocumentVersionTests
 {
     [Fact]
+    public async Task MultiConfigurationReferencesShareFileVersionAndPreflightRejectsUnresolvedInstances()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(default));
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        var root = await repository.RegisterDocumentAsync(new(project.Id, "CONFIG-ROOT", "总装", "CONFIG-ROOT.SLDASM", DocumentKind.Assembly), "engineer", default);
+        var part = await repository.RegisterDocumentAsync(new(project.Id, "CONFIG-PART", "多配置件", "CONFIG-PART.SLDPRT", DocumentKind.Part), "engineer", default);
+        var session = Guid.NewGuid();
+        root = await workflow.CheckoutAsync(root.Id, "engineer", UserRole.Administrator, session, "test", default);
+        part = await workflow.CheckoutAsync(part.Id, "engineer", UserRole.Administrator, session, "test", default);
+        var instances = new[] {
+            ReferenceRoot(part, "engineer") with { InstancePath = "ROOT/PART-1", Configuration = "D13-V4-T4", Quantity = 1 },
+            ReferenceRoot(part, "engineer") with { InstancePath = "ROOT/PART-2", Configuration = "D14-V6-T8", Quantity = 2 }
+        };
+        var snapshot = new CadReferenceSnapshot(Guid.NewGuid(), project.Id, root.Id, DateTimeOffset.UtcNow, "engineer",
+            ReferenceRoot(root, "engineer") with { Children = instances }, new string('F', 64));
+        Task Preflight(CadReferenceSnapshot tree, IReadOnlyCollection<Guid>? planned = null) => workflow.PreflightCheckInAsync(
+            root.Id, "engineer", UserRole.Administrator, session, new Dictionary<string, string?>(), tree, true, default,
+            requireBaseVersion: true, plannedDocumentIds: planned);
+        await Assert.ThrowsAsync<Application.PdmRuleException>(() => Preflight(snapshot));
+        await Preflight(snapshot, [part.Id]);
+        await Assert.ThrowsAsync<Application.PdmRuleException>(() => Preflight(snapshot with {
+            Root = snapshot.Root with { Children = [instances[0], instances[1] with { DocumentId = null }] }
+        }, [part.Id]));
+        await workflow.CheckoutAsync(part.Id, "engineer", UserRole.Administrator, Guid.NewGuid(), "test", default);
+        await Assert.ThrowsAsync<Application.PdmRuleException>(() => Preflight(snapshot, [part.Id]));
+        part = await workflow.CheckoutAsync(part.Id, "engineer", UserRole.Administrator, session, "test", default);
+        var rootFile = new Application.StoredFile(".versions/config-root", 128, new string('B', 64), DateTimeOffset.UtcNow);
+        await Assert.ThrowsAsync<Application.PdmRuleException>(() => workflow.CheckInAsync(root.Id, "engineer", UserRole.Administrator,
+            session, rootFile, "未提交子件", new Dictionary<string, string?>(), snapshot, true, false, default, requireBaseVersion: true));
+        Assert.Empty(await repository.ListDocumentVersionsAsync(root.Id, default));
+
+        var partTree = new CadReferenceSnapshot(Guid.NewGuid(), project.Id, part.Id, DateTimeOffset.UtcNow, "engineer", instances[0], new string('F', 64));
+        await workflow.CheckInAsync(part.Id, "engineer", UserRole.Administrator, session,
+            new Application.StoredFile(".versions/config-part", 128, new string('A', 64), DateTimeOffset.UtcNow), "多配置件首次", new Dictionary<string, string?>(),
+            partTree, false, false, default, requireBaseVersion: true);
+        await Preflight(snapshot);
+        var saved = await workflow.CheckInAsync(root.Id, "engineer", UserRole.Administrator, session, rootFile, "总装采用两种配置",
+            new Dictionary<string, string?>(), snapshot, true, false, default, requireBaseVersion: true);
+        Assert.True(saved.VersionCreated);
+        Assert.Single(await repository.ListDocumentVersionsAsync(part.Id, default));
+        Assert.Equal(instances.Select(node => node.Configuration), saved.Version!.ReferenceSnapshot.Children.Select(node => node.Configuration));
+        Assert.Equal(new[] { 1, 2 }, saved.Version.ReferenceSnapshot.Children.Select(node => node.Quantity));
+    }
+
+    [Fact]
+    public async Task SubassemblyCheckInKeepsItsIdentityAndParentPinUntilParentAdoptsStructure()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new Application.CreateProjectCommand("QA-SUB-PIN", "子装配体版本引用", "admin", "vault", "release"), "admin", default);
+        var part = await RegisterAndCheckInAsync(repository, project, "OLD-PART", new string('1', 64));
+        var sub = await repository.RegisterDocumentAsync(new Application.RegisterDocumentCommand(project.Id, "SUB", "子装配", "SUB.SLDASM", DocumentKind.Assembly), "engineer", default);
+        sub = await repository.CheckoutAsync(sub.Id, "engineer", default);
+        var firstSubTree = ReferenceRoot(sub, "engineer") with { Children = [ReferenceRoot(part, "engineer")] };
+        var firstSub = await repository.CheckInVersionAsync(sub.Id, "engineer", Commit(project, sub, firstSubTree, new string('2', 64), "子件首次"), default);
+        var root = await repository.RegisterDocumentAsync(new Application.RegisterDocumentCommand(project.Id, "ROOT", "总装", "ROOT.SLDASM", DocumentKind.Assembly), "engineer", default);
+        root = await repository.CheckoutAsync(root.Id, "engineer", default);
+        var firstRootTree = ReferenceRoot(root, "engineer") with { Children = [firstSubTree with { Revision = firstSub.Document.Revision }] };
+        await repository.CheckInVersionAsync(root.Id, "engineer", Commit(project, root, firstRootTree, new string('3', 64), "总装首次", true), default);
+        var addedPart = await RegisterAndCheckInAsync(repository, project, "NEW-PART", new string('4', 64));
+        sub = await repository.CheckoutAsync(sub.Id, "engineer", default);
+        var secondSubTree = ReferenceRoot(sub, "engineer") with { Children = [ReferenceRoot(part, "engineer"), ReferenceRoot(addedPart, "engineer")] };
+        var updatedSub = await repository.CheckInVersionAsync(sub.Id, "engineer", Commit(project, sub, secondSubTree, new string('5', 64), "补充子件"), default);
+        var unchangedRoot = Assert.Single(ProjectReferenceForest.Roots((await repository.GetLatestReferenceSnapshotAsync(project.Id, default))!));
+        Assert.Equal(root.Id, unchangedRoot.DocumentId);
+        Assert.Equal(firstSub.Document.Revision, unchangedRoot.Children.Single().Revision);
+        Assert.Single(unchangedRoot.Children.Single().Children);
+        Assert.Equal(2, updatedSub.Version!.ReferenceSnapshot.Children.Count);
+        root = await repository.CheckoutAsync(root.Id, "engineer", default);
+        await repository.CheckInVersionAsync(root.Id, "engineer", Commit(project, root,
+            ReferenceRoot(root, "engineer") with { Children = [secondSubTree with { Revision = updatedSub.Document.Revision }] },
+            new string('6', 64), "总装采用新版", true), default);
+        var adopted = Assert.Single(ProjectReferenceForest.Roots((await repository.GetLatestReferenceSnapshotAsync(project.Id, default))!));
+        Assert.Equal(sub.Id, adopted.Children.Single().DocumentId);
+        Assert.Equal(2, adopted.Children.Single().Children.Count);
+        Assert.Equal(2, (await repository.ListDocumentVersionsAsync(sub.Id, default)).Count);
+    }
+    [Fact]
+    public async Task OfflineReleaseUsesHeartbeatGraceAndRechecksReconnectionAtomically()
+    {
+        var clock = new MutableTimeProvider(DateTimeOffset.Parse("2026-10-13T00:00:00Z"));
+        var repository = new Infrastructure.InMemoryPdmRepository(clock);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var document = await repository.RegisterDocumentAsync(new Application.RegisterDocumentCommand(project.Id, "AUTO-LOCK", "自动释放", "AUTO.SLDPRT", DocumentKind.Part), "admin", CancellationToken.None);
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), clock);
+        var session = Guid.NewGuid();
+        await workflow.CheckoutAsync(document.Id, "admin", UserRole.Administrator, session, "WS-A", CancellationToken.None);
+        clock.Advance(TimeSpan.FromHours(49));
+        await workflow.HeartbeatEditSessionAsync(session, "admin", UserRole.Administrator, "WS-A", [document.Id], CancellationToken.None);
+        Assert.False(Assert.Single(await workflow.ListEditLocksAsync("admin", UserRole.Administrator, CancellationToken.None), item => item.DocumentId == document.Id).CanForceRelease);
+        await Assert.ThrowsAsync<Application.PdmRuleException>(() => workflow.ForceReleaseEditLockAsync(document.Id, "admin", UserRole.Administrator, "仍在线", CancellationToken.None));
+        clock.Advance(TimeSpan.FromMinutes(61));
+        Assert.True(Assert.Single(await workflow.ListEditLocksAsync("admin", UserRole.Administrator, CancellationToken.None), item => item.DocumentId == document.Id).CanForceRelease);
+        var cutoff = clock.GetUtcNow().AddMinutes(-60);
+        await workflow.HeartbeatEditSessionAsync(session, "admin", UserRole.Administrator, "WS-A", [document.Id], CancellationToken.None);
+        await Assert.ThrowsAsync<Application.PdmConflictException>(() => repository.ForceReleaseOfflineCheckoutAsync(document.Id, session, cutoff, clock.GetUtcNow(), CancellationToken.None));
+        clock.Advance(TimeSpan.FromMinutes(61));
+        Assert.Null((await workflow.ForceReleaseEditLockAsync(document.Id, "admin", UserRole.Administrator, "离线接管", CancellationToken.None)).CheckedOutBy);
+    }
+
+    [Fact]
+    public async Task DelayedAutomaticCloseCannotReleaseReopenedEditEvenWithSameProcessSession()
+    {
+        var clock = new MutableTimeProvider(DateTimeOffset.Parse("2026-10-13T00:00:00Z"));
+        var repository = new Infrastructure.InMemoryPdmRepository(clock);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var document = await repository.RegisterDocumentAsync(new Application.RegisterDocumentCommand(project.Id, "AUTO-CLOSE", "自动收尾", "AUTO.SLDPRT", DocumentKind.Part), "admin", CancellationToken.None);
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), clock);
+        var session = Guid.NewGuid();
+        var first = await workflow.CheckoutAsync(document.Id, "admin", UserRole.Administrator, session, "WS-A", CancellationToken.None);
+        await Assert.ThrowsAsync<Application.PdmConflictException>(() => workflow.CloseEditAsync(document.Id, "admin", UserRole.Administrator, session, first.CheckedOutAt!.Value, "changed", false, CancellationToken.None));
+        var closed = await workflow.CloseEditAsync(document.Id, "admin", UserRole.Administrator, session, first.CheckedOutAt!.Value, "changed", true, CancellationToken.None);
+        Assert.Null(closed.CheckedOutBy);
+        Assert.Empty(await repository.ListDocumentVersionsAsync(document.Id, CancellationToken.None));
+        Assert.Null((await workflow.CloseEditAsync(document.Id, "admin", UserRole.Administrator, session, first.CheckedOutAt.Value, "changed", true, CancellationToken.None)).CheckedOutBy);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        await workflow.CheckoutAsync(document.Id, "admin", UserRole.Administrator, session, "WS-A", CancellationToken.None);
+        await Assert.ThrowsAsync<Application.PdmConflictException>(() => workflow.CloseEditAsync(document.Id, "admin", UserRole.Administrator, session, first.CheckedOutAt.Value, "changed", true, CancellationToken.None));
+        Assert.Equal(session, (await repository.FindDocumentAsync(document.Id, CancellationToken.None))!.CheckoutSessionId);
+    }
+
+    [Fact]
+    public async Task EditReleaseNotifiesAllWaitingUsersWithoutDuplicateRequests()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var document = await repository.RegisterDocumentAsync(new Application.RegisterDocumentCommand(project.Id, "AUTO-NOTIFY", "编辑通知", "AUTO.SLDPRT", DocumentKind.Part), "admin", CancellationToken.None);
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        var session = Guid.NewGuid();
+        var checkout = await workflow.CheckoutAsync(document.Id, "admin", UserRole.Administrator, session, "WS-A", CancellationToken.None);
+        foreach (var actor in new[] { "waiter1", "waiter2", "waiter1" })
+            await workflow.RequestEditLockReleaseAsync(document.Id, actor, UserRole.Administrator, "我需要编辑", CancellationToken.None);
+        var heartbeat = await workflow.HeartbeatEditSessionAsync(session, "admin", UserRole.Administrator, "WS-A", [document.Id], CancellationToken.None);
+        Assert.Contains(document.Id, heartbeat.ReleaseRequestedDocumentIds);
+        await workflow.CloseEditAsync(document.Id, "admin", UserRole.Administrator, session, checkout.CheckedOutAt!.Value, "draft", true, CancellationToken.None);
+        foreach (var actor in new[] { "waiter1", "waiter2" })
+        {
+            var notifications = await repository.ListUserNotificationsAsync(actor, 100, CancellationToken.None);
+            Assert.Single(notifications, item => item.Category == "EditLockWaiting");
+            Assert.Single(notifications, item => item.Category == "EditLockAvailable");
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ArchiveSuppressedReferenceMustHaveArchivedVersion(bool archived)
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(default));
+        var part = await repository.RegisterDocumentAsync(new Application.RegisterDocumentCommand(project.Id, "SUP-P", "压缩件", "SUP-P.SLDPRT", DocumentKind.Part), "engineer", default);
+        if (archived)
+        {
+            part = await repository.CheckoutAsync(part.Id, "engineer", default);
+            part = (await repository.CheckInVersionAsync(part.Id, "engineer", Commit(project, part, ReferenceRoot(part, "engineer"), new string('A', 64), "part"), default)).Document;
+        }
+        var root = await repository.RegisterDocumentAsync(new Application.RegisterDocumentCommand(project.Id, "SUP-A", "装配", "SUP-A.SLDASM", DocumentKind.Assembly), "engineer", default);
+        root = await repository.CheckoutAsync(root.Id, "engineer", default);
+        var tree = ReferenceRoot(root, "engineer") with { Children = [ReferenceRoot(part, "engineer") with { Status = ReferenceNodeStatus.Suppressed }] };
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        var snapshot = new CadReferenceSnapshot(Guid.NewGuid(), project.Id, root.Id, DateTimeOffset.UtcNow, "engineer", tree, new string('B', 64));
+        async Task Save() => await workflow.CheckInAsync(root.Id, "engineer", UserRole.Administrator,
+            new Application.StoredFile("unused", 1, new string('C', 64), DateTimeOffset.UtcNow), "root", new Dictionary<string, string?>(), snapshot, true, true, default);
+        if (archived)
+        {
+            await Save();
+            Assert.Equal(ReferenceNodeStatus.Suppressed, Assert.Single((await repository.ListDocumentVersionsAsync(root.Id, default)).Single().ReferenceSnapshot.Children).Status);
+        }
+        else
+        {
+            await Assert.ThrowsAsync<Application.PdmRuleException>(Save);
+            Assert.Empty(await repository.ListDocumentVersionsAsync(root.Id, default));
+        }
+    }
+    [Fact]
     public async Task IncrementalAdmission_AndIndependentProjectCopies_PreserveIdentityOnRetry()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
@@ -91,6 +266,43 @@ public sealed class DocumentVersionTests
         Assert.Equal(DocumentRegistrationMatchKind.SameNameDifferentContent, Assert.Single(matches, item => item.CandidateKey == "conflict").MatchKind);
         Assert.Equal(DocumentRegistrationMatchKind.New, Assert.Single(matches, item => item.CandidateKey == "same-content-new-name").MatchKind);
         Assert.Equal(DocumentRegistrationMatchKind.New, Assert.Single(matches, item => item.CandidateKey == "new").MatchKind);
+    }
+
+    [Fact]
+    public async Task RegistrationPreflight_ResumesOnlyOwnedPendingFirstArchiveAndKeepsArchivedConflicts()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        var pending = await workflow.RegisterDocumentAsync(new Application.RegisterDocumentCommand(
+            project.Id, "PENDING", "未完成的首次存档", "PENDING.SLDASM", DocumentKind.Assembly, SourceSha256: new string('A', 64)),
+            "admin", UserRole.Administrator, default);
+        var changedFile = new Application.DocumentRegistrationCandidate("retry", pending.FileName, DocumentKind.Assembly, new string('B', 64));
+        async Task<Application.DocumentRegistrationMatch> Match() => Assert.Single(await workflow.PreflightDocumentRegistrationAsync(
+            project.Id, [changedFile], "admin", UserRole.Administrator, default));
+
+        Assert.Equal(DocumentRegistrationMatchKind.SameNameDifferentContent, (await Match()).MatchKind);
+        await repository.CheckoutAsync(pending.Id, "another-user", default);
+        Assert.Equal(DocumentRegistrationMatchKind.SameNameDifferentContent, (await Match()).MatchKind);
+        await repository.DiscardCheckoutAsync(pending.Id, "another-user", default);
+        pending = await repository.CheckoutAsync(pending.Id, "admin", default);
+        var retry = await Match();
+        Assert.Equal(DocumentRegistrationMatchKind.PendingFirstArchive, retry.MatchKind);
+        Assert.Equal(pending.Id, retry.ExistingDocumentId);
+        Assert.Equal(project.Id, retry.ExistingProjectId);
+        var wrongKind = Assert.Single(await workflow.PreflightDocumentRegistrationAsync(project.Id,
+            [changedFile with { Kind = DocumentKind.Part }], "admin", UserRole.Administrator, default));
+        Assert.Equal(DocumentRegistrationMatchKind.SameNameDifferentContent, wrongKind.MatchKind);
+        Assert.Empty(await repository.ListDocumentVersionsAsync(pending.Id, default));
+
+        await repository.CheckInVersionAsync(pending.Id, "admin", Commit(project, pending, ReferenceRoot(pending, "admin"),
+            new string('B', 64), "重试首次存档", sourceFileSha256: new string('B', 64)), default);
+        Assert.Single(await repository.ListDocumentVersionsAsync(pending.Id, default));
+        Assert.Single(await repository.ListDocumentsAsync(project.Id, default), d => d.FileName == pending.FileName);
+        await repository.CheckoutAsync(pending.Id, "admin", default);
+        Assert.Equal(DocumentRegistrationMatchKind.SameNameSameContent, (await Match()).MatchKind);
+        changedFile = changedFile with { SourceSha256 = new string('C', 64) };
+        Assert.Equal(DocumentRegistrationMatchKind.SameNameDifferentContent, (await Match()).MatchKind);
     }
 
     [Fact]
@@ -580,7 +792,7 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
-    public async Task CheckInWithSameFileHash_ForceVersionCreatesNextWorkVersion()
+    public async Task CheckInWithSameFileHash_ReferenceChangeCreatesNextWorkVersion()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
@@ -590,7 +802,7 @@ public sealed class DocumentVersionTests
         var result = await repository.CheckInVersionAsync(
             document.Id,
             "engineer",
-            Commit(project, document, ReferenceRoot(document, "engineer"), new string('6', 64), "reference changed", forceVersion: true),
+            Commit(project, document, ReferenceRoot(document, "engineer") with { Configuration = "Changed" }, new string('6', 64), "reference changed", forceVersion: true),
             CancellationToken.None);
 
         Assert.True(result.VersionCreated);
@@ -958,7 +1170,7 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
-    public async Task WorkflowCheckIn_RejectsSubassemblyMarkedAsProjectRoot()
+    public async Task WorkflowCheckIn_CanAdmitSubassemblyAsIndependentRootWithoutReplacingExistingRoot()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
@@ -984,7 +1196,7 @@ public sealed class DocumentVersionTests
         subassembly = await repository.CheckoutAsync(subassembly.Id, "engineer", CancellationToken.None);
         var storage = new RecordingFileStorage();
         var workflow = new Application.PdmWorkflowService(repository, storage, new NoOpPublisher(), TimeProvider.System);
-        var exception = await Assert.ThrowsAsync<Application.PdmRuleException>(() => workflow.CheckInAsync(
+        var result = await workflow.CheckInAsync(
             subassembly.Id,
             "engineer",
             UserRole.Administrator,
@@ -1001,12 +1213,13 @@ public sealed class DocumentVersionTests
                 new string('8', 64)),
             true,
             true,
-            CancellationToken.None));
+            CancellationToken.None);
 
-        Assert.Contains("不能替换项目完整结构", exception.Message, StringComparison.Ordinal);
-        Assert.Empty(storage.VerifiedFiles);
+        Assert.True(result.VersionCreated);
+        Assert.Single(storage.VerifiedFiles);
         var currentSnapshot = await repository.GetLatestReferenceSnapshotAsync(project.Id, CancellationToken.None);
-        Assert.Equal(rootAssembly.Id, currentSnapshot?.RootDocumentId);
+        Assert.Contains(ProjectReferenceForest.Roots(currentSnapshot!), node => node.DocumentId == rootAssembly.Id);
+        Assert.Contains(ProjectReferenceForest.Roots(currentSnapshot!), node => node.DocumentId == subassembly.Id);
     }
 
     [Fact]
@@ -1057,7 +1270,7 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
-    public async Task ControlledOpenManifest_CurrentLatestNormalizesConflictingInstanceVersionsButHistoricalStaysStrict()
+    public async Task ControlledOpenManifest_RequiresConfirmationForLegacyConflictsAndHistoricalStaysStrict()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
@@ -1096,8 +1309,10 @@ public sealed class DocumentVersionTests
             CancellationToken.None)).Document;
 
         var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        await Assert.ThrowsAsync<Application.PdmRuleException>(() => workflow.CreateControlledOpenManifestAsync(
+            assembly.Id, null, false, false, "engineer", UserRole.Administrator, CancellationToken.None));
         var currentManifest = await workflow.CreateControlledOpenManifestAsync(
-            assembly.Id, null, false, false, "engineer", UserRole.Administrator, CancellationToken.None);
+            assembly.Id, null, false, false, "engineer", UserRole.Administrator, CancellationToken.None, true);
 
         Assert.Equal(2, currentManifest.Files.Count);
         Assert.Contains(currentManifest.Files, file => file.DocumentId == part.Id && file.Revision == "W2" && file.Sha256 == new string('2', 64));
@@ -1572,6 +1787,165 @@ public sealed class DocumentVersionTests
             document.Id, "engineer", UserRole.Administrator, sessionId,
             file with { RelativePath = ".versions/RETRY-001/W2/RETRY-001.SLDPRT" },
             "different upload", new Dictionary<string, string?>(), snapshot, false, false, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ArchiveSafety_StaleSourceAndMissingBaseCannotOverwriteLatest()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new Application.CreateProjectCommand("QA-BASE", "存档基准验收", "admin", "vault", "release"), "admin", default);
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        var document = await repository.RegisterDocumentAsync(new(project.Id, "QA-P", "零件", "QA-P.SLDPRT", DocumentKind.Part), "admin", default);
+        var session = Guid.NewGuid();
+        await workflow.CheckoutAsync(document.Id, "admin", UserRole.Administrator, session, "QA-PC", default);
+        var snapshot = new CadReferenceSnapshot(Guid.NewGuid(), project.Id, document.Id, DateTimeOffset.UtcNow, "admin", ReferenceRoot(document, "admin"), "snapshot");
+        var first = await workflow.CheckInAsync(document.Id, "admin", UserRole.Administrator, session,
+            new("first", 1, new string('A', 64), DateTimeOffset.UtcNow), "首次", new Dictionary<string, string?>(), snapshot, false, false, default,
+            expectedVersionId: null, requireBaseVersion: true);
+        await workflow.CheckoutAsync(document.Id, "admin", UserRole.Administrator, session, "QA-PC", default);
+        var second = await workflow.CheckInAsync(document.Id, "admin", UserRole.Administrator, session,
+            new("second", 1, new string('B', 64), DateTimeOffset.UtcNow), "修改", new Dictionary<string, string?>(), snapshot with { SnapshotId = Guid.NewGuid() }, false, false, default,
+            expectedVersionId: first.Version!.Id, requireBaseVersion: true);
+        await workflow.CheckoutAsync(document.Id, "admin", UserRole.Administrator, session, "QA-PC", default);
+        foreach (var invalidBase in new Guid?[] { null, first.Version.Id, Guid.NewGuid() })
+        {
+            var error = await Assert.ThrowsAsync<Application.PdmConflictException>(() => workflow.CheckInAsync(document.Id,
+                "admin", UserRole.Administrator, session, new("old-source", 1, new string('C', 64), DateTimeOffset.UtcNow),
+                "旧原目录修改", new Dictionary<string, string?>(), snapshot, false, false, default,
+                expectedVersionId: invalidBase, requireBaseVersion: true));
+            Assert.Contains("保留本地修改", error.Message);
+            Assert.Equal(second.Version!.Id, (await repository.ListDocumentVersionsAsync(document.Id, default))[0].Id);
+        }
+        // Also validate at the atomic repository boundary, after workflow preflight could have raced.
+        await Assert.ThrowsAsync<Application.PdmConflictException>(() => repository.CheckInVersionAsync(document.Id, "admin", session,
+            Commit(project, document, snapshot.Root, new string('C', 64), "事务基准校验") with
+            { ExpectedVersionId = first.Version.Id, RequireBaseVersion = true }, default));
+        Assert.Equal(2, (await repository.ListDocumentVersionsAsync(document.Id, default)).Count);
+        Assert.Equal(session, (await repository.FindDocumentAsync(document.Id, default))!.CheckoutSessionId);
+    }
+
+    [Fact]
+    public async Task ArchiveSafety_OpeningAssemblyDrawingExpandsPinnedModelDependencies()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new Application.CreateProjectCommand("QA-DRAW-ASSEMBLY", "装配工程图依赖验收", "admin", "vault", "release"), "admin", default);
+        var part = await repository.RegisterDocumentAsync(new(project.Id, "DRAW-PART", "零件", "DRAW-PART.SLDPRT", DocumentKind.Part), "admin", default);
+        part = await repository.CheckoutAsync(part.Id, "admin", default);
+        var partFirst = await repository.CheckInVersionAsync(part.Id, "admin", Commit(project, part, ReferenceRoot(part, "admin"), new string('A', 64), "零件首次"), default);
+        var assembly = await repository.RegisterDocumentAsync(new(project.Id, "DRAW-ASM", "装配体", "DRAW-ASM.SLDASM", DocumentKind.Assembly), "admin", default);
+        assembly = await repository.CheckoutAsync(assembly.Id, "admin", default);
+        var modelRoot = ReferenceRoot(assembly, "admin") with { Children = [ReferenceRoot(partFirst.Document, "admin")] };
+        var assemblyFirst = await repository.CheckInVersionAsync(assembly.Id, "admin", Commit(project, assembly, modelRoot, new string('B', 64), "装配首次"), default);
+        var drawing = await repository.RegisterDocumentAsync(new(project.Id, "DRAW-2D", "工程图", "DRAW-2D.SLDDRW", DocumentKind.Drawing), "admin", default);
+        drawing = await repository.CheckoutAsync(drawing.Id, "admin", default);
+        var drawingRoot = ReferenceRoot(drawing, "admin") with { Children = [ReferenceRoot(assemblyFirst.Document, "admin")] };
+        var drawingFirst = await repository.CheckInVersionAsync(drawing.Id, "admin", Commit(project, drawing, drawingRoot, new string('C', 64), "工程图首次"), default);
+        // Current files move forward while the drawing still confirms its original model version.
+        part = await repository.CheckoutAsync(part.Id, "admin", default);
+        var partNext = await repository.CheckInVersionAsync(part.Id, "admin", Commit(project, part, ReferenceRoot(part, "admin"), new string('D', 64), "零件新版"), default);
+        assembly = await repository.CheckoutAsync(assembly.Id, "admin", default);
+        await repository.CheckInVersionAsync(assembly.Id, "admin", Commit(project, assembly, modelRoot with { Children = [ReferenceRoot(partNext.Document, "admin")] }, new string('E', 64), "装配新版"), default);
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        var manifest = await workflow.CreateControlledOpenManifestAsync(drawing.Id, null, false, false, "admin", UserRole.Administrator, default);
+        Assert.Equal(3, manifest.Files.Count);
+        Assert.Equal(drawingFirst.Version!.Id, manifest.RootVersionId);
+        Assert.Equal(assemblyFirst.Version!.Id, manifest.Files.Single(file => file.DocumentId == assembly.Id).VersionId);
+        Assert.Equal(partFirst.Version!.Id, manifest.Files.Single(file => file.DocumentId == part.Id).VersionId);
+    }
+
+    [Fact]
+    public async Task ArchiveSafety_MultiRootReferencesRemainIndependentAndRemovalRetainsDocument()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new Application.CreateProjectCommand("QA-ROOTS", "独立根验收", "admin", "vault", "release"), "admin", default);
+        var part = await repository.RegisterDocumentAsync(new(project.Id, "SHARED", "共用件", "SHARED.SLDPRT", DocumentKind.Part), "engineer", default);
+        part = await repository.CheckoutAsync(part.Id, "engineer", default);
+        var partFirst = await repository.CheckInVersionAsync(part.Id, "engineer", Commit(project, part, ReferenceRoot(part, "engineer"), new string('A', 64), "首次"), default);
+        var originalChild = ReferenceRoot(partFirst.Document, "engineer") with { InstancePath = "child", Quantity = 3 };
+        var roots = new List<PdmDocument>();
+        foreach (var name in new[] { "ROOT-A", "ROOT-B" })
+        {
+            var root = await repository.RegisterDocumentAsync(new(project.Id, name, name, name + ".SLDASM", DocumentKind.Assembly), "engineer", default);
+            root = await repository.CheckoutAsync(root.Id, "engineer", default);
+            var stored = await repository.CheckInVersionAsync(root.Id, "engineer", Commit(project, root,
+                ReferenceRoot(root, "engineer") with { Children = [originalChild] }, new string('B', 64), "首次总装", true), default);
+            roots.Add(stored.Document);
+        }
+        var initialForest = (await repository.GetLatestReferenceSnapshotAsync(project.Id, default))!;
+        Assert.Equal(2, ProjectReferenceForest.Roots(initialForest).Count);
+        Assert.Equal(2, initialForest.Root.Children.Select(node => node.Children[0].InstancePath).Distinct().Count());
+        await repository.CheckoutAsync(part.Id, "engineer", default);
+        var partSecond = await repository.CheckInVersionAsync(part.Id, "engineer", Commit(project, partFirst.Document,
+            ReferenceRoot(partFirst.Document, "engineer"), new string('C', 64), "更新共用件"), default);
+        Assert.All(ProjectReferenceForest.Roots((await repository.GetLatestReferenceSnapshotAsync(project.Id, default))!),
+            node => Assert.Equal(partFirst.Document.Revision, node.Children[0].Revision));
+        await repository.CheckoutAsync(roots[0].Id, "engineer", default);
+        var adopt = Commit(project, roots[0], ReferenceRoot(roots[0], "engineer") with
+            { Children = [originalChild with { Revision = partSecond.Document.Revision }] }, new string('B', 64), "确认采用新版", true);
+        var adopted = await repository.CheckInVersionAsync(roots[0].Id, "engineer", adopt, default);
+        Assert.True(adopted.VersionCreated); // References changed even though native bytes did not.
+        var forest = ProjectReferenceForest.Roots((await repository.GetLatestReferenceSnapshotAsync(project.Id, default))!);
+        Assert.Equal(partSecond.Document.Revision, forest.Single(node => node.DocumentId == roots[0].Id).Children[0].Revision);
+        Assert.Equal(partFirst.Document.Revision, forest.Single(node => node.DocumentId == roots[1].Id).Children[0].Revision);
+        await repository.CheckoutAsync(roots[0].Id, "engineer", default);
+        await repository.CheckInVersionAsync(roots[0].Id, "engineer", adopt with
+            { ReferenceSnapshot = adopt.ReferenceSnapshot with { SnapshotId = Guid.NewGuid(), Root = adopt.ReferenceSnapshot.Root with { Children = [] } } }, default);
+        Assert.NotNull(await repository.FindDocumentAsync(part.Id, default));
+        Assert.Equal(2, (await repository.ListDocumentVersionsAsync(part.Id, default)).Count);
+        Assert.Single(ProjectReferenceForest.Roots((await repository.GetLatestReferenceSnapshotAsync(project.Id, default))!)
+            .Single(node => node.DocumentId == roots[1].Id).Children);
+    }
+
+    [Fact]
+    public async Task ArchiveSafety_ForceFlagDoesNotVersionUnchangedFileOrDrawingSupplement()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new Application.CreateProjectCommand("QA-NOCHANGE", "无变化验收", "admin", "vault", "release"), "admin", default);
+        var document = await repository.RegisterDocumentAsync(new(project.Id, "ASM", "装配体", "ASM.SLDASM", DocumentKind.Assembly), "engineer", default);
+        document = await repository.CheckoutAsync(document.Id, "engineer", default);
+        var commit = Commit(project, document, ReferenceRoot(document, "engineer"), new string('A', 64), "首次", true);
+        var first = await repository.CheckInVersionAsync(document.Id, "engineer", commit, default);
+        for (var iteration = 0; iteration < 3; iteration++)
+        {
+            await repository.CheckoutAsync(document.Id, "engineer", default);
+            var drawing = new DocumentReferenceNode(Guid.NewGuid(), Guid.NewGuid(), "drawing", "DIFFERENT-NAME.SLDDRW", "补充工程图",
+                DocumentKind.Drawing, "图纸", 1, ReferenceNodeStatus.Normal, RevisionLabel.InitialWork(), null, []);
+            var noChange = await repository.CheckInVersionAsync(document.Id, "engineer", commit with
+            {
+                ForceVersion = true, ExpectedVersionId = first.Version!.Id, RequireBaseVersion = true,
+                ReferenceSnapshot = commit.ReferenceSnapshot with { SnapshotId = Guid.NewGuid(), Root = commit.ReferenceSnapshot.Root with { Children = [drawing] } }
+            }, default);
+            Assert.False(noChange.VersionCreated);
+            Assert.Null(noChange.Document.CheckedOutBy);
+        }
+        Assert.Single(await repository.ListDocumentVersionsAsync(document.Id, default));
+    }
+
+    [Theory]
+    [InlineData("configuration")]
+    [InlineData("quantity")]
+    [InlineData("suppressed")]
+    [InlineData("replacement")]
+    [InlineData("revision")]
+    [InlineData("addition")]
+    [InlineData("removal")]
+    public void ArchiveSafety_DetectsStructureChanges(string operation)
+    {
+        var child = new DocumentReferenceNode(Guid.NewGuid(), Guid.NewGuid(), "child", "PART.SLDPRT", "零件", DocumentKind.Part,
+            "Default", 1, ReferenceNodeStatus.Normal, RevisionLabel.InitialWork(), null, []);
+        var root = child with { DocumentId = Guid.NewGuid(), Kind = DocumentKind.Assembly, FileName = "ASM.SLDASM", Children = [child] };
+        var changed = operation switch
+        {
+            "configuration" => child with { Configuration = "Other" },
+            "quantity" => child with { Quantity = 2 },
+            "suppressed" => child with { Status = ReferenceNodeStatus.Suppressed },
+            "replacement" => child with { DocumentId = Guid.NewGuid() },
+            "revision" => child with { Revision = RevisionLabel.InitialWork().NextWork() },
+            _ => child
+        };
+        var current = root with { Children = operation == "removal" ? [] : operation == "addition" ? [child, child with { InstancePath = "another" }] : [changed] };
+        Assert.False(ArchiveSafety.SameReferences(root, current));
+        Assert.True(ArchiveSafety.SameReferences(root, root with { NodeId = Guid.NewGuid(), Revision = RevisionLabel.InitialWork().NextWork(), CheckedOutBy = "another" }));
     }
 
     private static async Task<PdmDocument> RegisterAndCheckInAsync(Infrastructure.InMemoryPdmRepository repository, Project project, string drawingNumber, string sha256)

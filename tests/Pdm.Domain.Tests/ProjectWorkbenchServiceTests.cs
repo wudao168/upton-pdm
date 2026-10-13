@@ -6,6 +6,31 @@ namespace Upton.Pdm.Tests;
 
 public sealed class ProjectWorkbenchServiceTests
 {
+    private sealed class CountingOplRepository : IProjectOplRepository
+    {
+        public int Batches { get; private set; }
+        public IReadOnlyCollection<Guid> Requested { get; private set; } = [];
+        public Task<IReadOnlyDictionary<Guid, int>> CountOpenAsync(IReadOnlyCollection<Guid> ids, CancellationToken ct)
+        { Batches++; Requested = ids; return Task.FromResult<IReadOnlyDictionary<Guid, int>>(ids.ToDictionary(id => id, _ => 2)); }
+        public Task<IReadOnlyList<OplIssue>> ListAsync(Guid id, CancellationToken ct) => throw new InvalidOperationException("Overview must not load full OPL lists");
+        public Task<OplIssue> SaveAsync(OplIssue issue, long version, CancellationToken ct) => throw new NotSupportedException();
+    }
+    [Fact]
+    public async Task FirstScreenUsesOneOplCountBatchAndSkipsBusinessDetails()
+    {
+        var opl = new CountingOplRepository();
+        var (service, repository, _, _) = Setup(opl);
+        var project = Assert.Single(await repository.ListProjectsAsync(default));
+        var summary = await service.GetAsync(null, "admin", UserRole.Administrator, default, "company", true);
+        var row = Assert.Single(summary.Projects);
+        Assert.Null(row.Budget); Assert.Null(row.Procurement); Assert.Null(row.Quality);
+        Assert.Equal(2, row.OplOpenCount);
+        Assert.Equal(1, opl.Batches);
+        Assert.Equal([project.Id], opl.Requested);
+        Assert.Empty(row.Warnings);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.GetAsync(null, "admin", UserRole.Administrator, default, "company", false, Guid.NewGuid()));
+    }
+
     [Theory]
     [InlineData("BusinessUnitManager", "division")]
     [InlineData("ProjectManager", "manager")]
@@ -100,14 +125,14 @@ public sealed class ProjectWorkbenchServiceTests
     }
 
     private static Project Project() => new(Guid.NewGuid(), "P1", "项目", "pm", "vault", "release", true);
-    private static (ProjectWorkbenchService, InMemoryPdmRepository, InMemoryProjectPlanningRepository, InMemoryProjectWorkbenchRiskRepository) Setup()
+    private static (ProjectWorkbenchService, InMemoryPdmRepository, InMemoryProjectPlanningRepository, InMemoryProjectWorkbenchRiskRepository) Setup(IProjectOplRepository? opl = null)
     {
         var time = TimeProvider.System; var repository = new InMemoryPdmRepository(time); var planning = new InMemoryProjectPlanningRepository();
         var procurement = new InMemoryU9ProcurementRepository(); var materials = new InMemoryMaterialRepository(time); var risks = new InMemoryProjectWorkbenchRiskRepository();
         var service = new ProjectWorkbenchService(repository, planning, new InMemoryProjectContactInformationRepository(),
             new ProjectBudgetService(repository, new InMemoryProjectBudgetRepository(), procurement, time, materials),
             new U9ProcurementService(procurement, materials, repository, planning, null!, null!, null!, time),
-            new InMemoryValidationPlanRepository(), new InMemoryQualityInspectionRepository(), risks, time);
+            new InMemoryValidationPlanRepository(), new InMemoryQualityInspectionRepository(), risks, time, opl);
         return (service, repository, planning, risks);
     }
 }

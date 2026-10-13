@@ -35,6 +35,16 @@ const bomItem: BomItem = {
 }
 
 describe('PreviewWorkspace', () => {
+  it('总装只有打开最新入口且始终发送只读请求', async () => {
+    const assembly = { ...selected, kind: 'Assembly' as const, fileName: 'ROOT.SLDASM' }
+    const wrapper = mount(PreviewWorkspace, { props: { selected: assembly, related: [], desktopAvailable: true, canEditDocuments: true } })
+    window.dispatchEvent(new CustomEvent('pdm-solidworks-capability', { detail: { available: true } }))
+    await nextTick()
+    expect(wrapper.find('.pdm-solidworks-actions').findAll('button')).toHaveLength(1)
+    await wrapper.get('button[aria-label="打开最新"]').trigger('click')
+    expect(wrapper.emitted('open')?.[0]).toEqual([assembly, 'LatestReadOnly', undefined])
+    wrapper.unmount()
+  })
   it('清空离开页面前的打开错误，并忽略页面隐藏期间的状态回调', async () => {
     const wrapper = mount(PreviewWorkspace, { props: { selected, related: [], desktopAvailable: true, active: true } })
     const status = (state: string, message: string) => window.dispatchEvent(new CustomEvent('pdm-solidworks-status', { detail: { state, message } }))
@@ -127,7 +137,7 @@ describe('PreviewWorkspace', () => {
       '引线批注', '云线批注', '框选批注', '手绘批注',
     ])
     expect(wrapper.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual([
-      '打开最新', '编辑打开', '保存批注',
+      '打开最新', '保存批注',
     ])
     expect(wrapper.find('button[aria-label="使用位置"]').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="作废图档"]').exists()).toBe(false)
@@ -142,7 +152,7 @@ describe('PreviewWorkspace', () => {
     expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-save-markup', payload: undefined })
   })
 
-  it('审核冻结版本默认只读，已退回待修改的图档可以编辑打开', async () => {
+  it('审核冻结版本和退回状态都只提供只读打开入口', async () => {
     const wrapper = mount(PreviewWorkspace, {
       props: { selected, related: [], bomItem, desktopAvailable: true, canEditDocuments: true, reviewVersionId: 'review-version-1', reviewRevision: 'W1' },
     })
@@ -153,8 +163,8 @@ describe('PreviewWorkspace', () => {
 
     await wrapper.setProps({ reviewEditable: true })
 
-    expect(wrapper.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual(['打开审核版', '编辑打开', '保存批注'])
-    expect(wrapper.get('button[aria-label="编辑打开"]').attributes('title')).toContain('该图已退回待修改')
+    expect(wrapper.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual(['打开审核版', '保存批注'])
+    expect(wrapper.find('button[aria-label="编辑打开"]').exists()).toBe(false)
   })
 
   it('shows a local lightweight image and keeps eDrawings behind an explicit action', async () => {

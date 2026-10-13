@@ -73,7 +73,7 @@ watch(() => [props.projectId, props.token], () => { void load() }, { immediate: 
 .project-contacts header{min-height:32px;display:flex;align-items:center;gap:12px;padding:0 12px;border-bottom:1px solid var(--pdm-border)}
 .project-contacts h2{margin:0;font-size:12px}.project-contacts header>span{color:var(--pdm-muted)}
 .project-contacts__header-actions{display:flex;gap:5px;margin-left:auto}
-.project-contacts__header-actions :deep(.el-button){width:60px;min-width:60px;height:24px;margin:0;padding:0 6px;font-size:11px}
+.project-contacts__header-actions :deep(.el-button){width:auto;min-width:60px;height:var(--pdm-button-compact);margin:0;padding:0 6px;font-size:11px}
 .project-contacts__table-wrap{overflow:auto;max-height:240px}.project-contacts__table{width:100%;min-width:850px;border-collapse:collapse;table-layout:fixed}
 .project-contacts th,.project-contacts td{height:32px;padding:4px 8px;text-align:center;border-right:1px solid var(--pdm-border-soft);border-bottom:1px solid var(--pdm-border-soft);overflow-wrap:anywhere}
 .project-contacts th{background:var(--pdm-panel-muted,#f8fafc);font-weight:500}.project-contacts th:first-child{width:40px}.project-contacts th:nth-child(7){width:28%}

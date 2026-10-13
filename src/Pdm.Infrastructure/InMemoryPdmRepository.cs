@@ -44,6 +44,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     private readonly ConcurrentDictionary<Guid, ManufacturingBomBaseline> manufacturingBomBaselines = new();
     private readonly Dictionary<Guid, CadPropertyWriteback> cadPropertyWritebacks = new();
     private readonly ConcurrentDictionary<Guid, CadReferenceSnapshot> referenceSnapshots = new();
+    private readonly ConcurrentDictionary<(Guid, Guid), CadReferenceSnapshot> referenceRoots = new();
+    private readonly ConcurrentDictionary<Guid, CadReferenceSnapshot> referenceSnapshotHistory = new();
     private PdmSystemSettings systemSettings = new(@"D:\PDM\Vault", @"D:\PDM\Release")
     {
         MaterialAttachmentRoot = @"D:\PDM\MaterialAttachments",
@@ -96,6 +98,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             "seed",
             referenceTree,
             string.Empty);
+        referenceRoots[(project.Id, SeedData.RootDocumentId)] = referenceSnapshots[project.Id];
+        referenceSnapshotHistory[SeedData.SnapshotId] = referenceSnapshots[project.Id];
         bomItems = SeedData.Bom().ToList();
         var package = SeedData.ReleasePackage(timeProvider.GetUtcNow());
         packages[package.Id] = package;
@@ -214,7 +218,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 command.Owner,
                 command.VaultLocation,
                 command.ReleaseLocation,
-                true) { ResponsibleUsers = [actor] };
+                true) { ResponsibleUsers = [actor], CreatedAt = timeProvider.GetUtcNow() };
             projects[project.Id] = project;
             projectResponsibles[project.Id] = [actor];
             EnsureProjectFolderTree(project.Id);
@@ -654,6 +658,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 StorageLocationPolicy.ProjectStorageLocation(command.ReleaseLocation, code, $"{code}-0"), serials);
             project = project with
             {
+                CreatedAt = timeProvider.GetUtcNow(),
                 RootProjectId = projectId,
                 BomItemCategoryCode = command.BomItemCategoryCode,
                 ResponsibleUsers = [command.Owner]
@@ -692,6 +697,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 StorageLocationPolicy.ProjectStorageLocation(command.ReleaseRoot ?? systemSettings.ReleaseRoot, root.Code, code), serials);
             project = project with
             {
+                CreatedAt = timeProvider.GetUtcNow(),
                 RootProjectId = parent.RootProjectId ?? parent.Id,
                 BomItemCategoryCode = "0302",
                 ResponsibleUsers = parent.ResponsibleUsers,
@@ -1227,8 +1233,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         }
     }
 
-    public Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<DocumentVersion>>(versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).ToArray());
+    public Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken, int? limit = null) =>
+        Task.FromResult<IReadOnlyList<DocumentVersion>>(versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).Take(limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : int.MaxValue).ToArray());
 
     public Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken)
     {
@@ -1288,8 +1294,25 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<CadReferenceSnapshot?> GetLatestReferenceSnapshotAsync(Guid projectId, CancellationToken cancellationToken) =>
         Task.FromResult<CadReferenceSnapshot?>(referenceSnapshots.GetValueOrDefault(projectId));
 
+    public Task<CadReferenceSnapshot?> GetProjectReferenceRootAsync(Guid projectId, Guid rootDocumentId, CancellationToken cancellationToken) =>
+        Task.FromResult<CadReferenceSnapshot?>(referenceRoots.GetValueOrDefault((projectId, rootDocumentId)));
+
+    public Task<CadReferenceSnapshot?> FindReferenceSnapshotAsync(Guid snapshotId, CancellationToken cancellationToken) =>
+        Task.FromResult<CadReferenceSnapshot?>(referenceSnapshotHistory.GetValueOrDefault(snapshotId));
+
+    private readonly ConcurrentDictionary<Guid, BomReleaseConfirmation> bomReleaseConfirmations = new();
+
     public Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<BomItem>>(bomItems.Where(item => item.ProjectId == projectId && item.Kind == kind).OrderBy(item => item.Sequence).ToArray());
+        BomReleaseReviewReader.AttachAsync(this, projectId,
+            bomItems.Where(item => item.ProjectId == projectId && item.Kind == kind).OrderBy(item => item.Sequence).ToArray(), bomReleaseConfirmations, cancellationToken);
+
+    public Task SaveBomReleaseConfirmationsAsync(Guid projectId, IReadOnlyDictionary<Guid, BomReleaseConfirmation?> confirmations, CancellationToken cancellationToken)
+    {
+        foreach (var pair in confirmations)
+            if (pair.Value is null) bomReleaseConfirmations.TryRemove(pair.Key, out _);
+            else bomReleaseConfirmations[pair.Key] = pair.Value;
+        return Task.CompletedTask;
+    }
 
     public Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken)
     {
@@ -1723,6 +1746,33 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         }
     }
 
+    public Task<PdmDocument> CloseCheckoutAsync(Guid documentId, string actor, Guid sessionId, DateTimeOffset checkedOutAt, string sha256, bool draftPreserved, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!documents.TryGetValue(documentId, out var document)) throw new PdmNotFoundException("图档不存在。");
+            EnsureSessionOwner(document, actor, sessionId, "自动结束编辑");
+            if (document.CheckedOutAt != checkedOutAt) throw new PdmConflictException("图档已重新开始编辑，已忽略旧的关闭请求。");
+            if (!draftPreserved) return CompleteEditWithoutChangesAsync(documentId, actor, sessionId, sha256, cancellationToken);
+            return DiscardCheckoutAsync(documentId, actor, sessionId, cancellationToken);
+        }
+    }
+
+    public Task<PdmDocument> ForceReleaseOfflineCheckoutAsync(Guid documentId, Guid? expectedSessionId, DateTimeOffset heartbeatBefore, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!documents.TryGetValue(documentId, out var document)) throw new PdmNotFoundException("图档不存在。");
+            if (document.CheckedOutBy is null || document.CheckoutSessionId != expectedSessionId
+                || (document.CheckoutLastHeartbeatAt ?? document.CheckedOutAt ?? document.UpdatedAt) >= heartbeatBefore
+                || document.CheckoutLeaseExpiresAt >= now)
+                throw new PdmConflictException("编辑人员已恢复连接或编辑会话已变化，请刷新后重试。");
+            var updated = ClearEditLock(document, now);
+            documents[documentId] = updated;
+            return Task.FromResult(updated);
+        }
+    }
+
     public Task<PdmDocument> CheckInAsync(Guid documentId, string actor, RevisionLabel nextRevision, CadReferenceSnapshot snapshot, CancellationToken cancellationToken)
     {
         lock (gate)
@@ -1771,6 +1821,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 FileName = commit.FileName ?? document.FileName
             };
             var latest = versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).FirstOrDefault();
+            ArchiveVersionGuard.ValidateBaseVersion(latest?.Id, commit.ExpectedVersionId, commit.RequireBaseVersion);
             string? latestSourceSha256 = null;
             latest?.PropertySnapshot.TryGetValue("SourceFileSha256", out latestSourceSha256);
             commit.Properties.TryGetValue("SourceFileSha256", out var sourceFileSha256);
@@ -1779,12 +1830,16 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                     || (!string.IsNullOrWhiteSpace(latestSourceSha256)
                         && !string.IsNullOrWhiteSpace(sourceFileSha256)
                         && string.Equals(latestSourceSha256, sourceFileSha256, StringComparison.OrdinalIgnoreCase)));
-            if (!commit.ForceVersion
-                && sameFile)
+            if (sameFile && latest is not null && ArchiveSafety.SameProperties(latest.PropertySnapshot, commit.Properties)
+                && ArchiveSafety.SameReferences(latest.ReferenceSnapshot, commit.ReferenceSnapshot.Root))
             {
-                if (commit.IsProjectRoot)
+                if (commit.IsProjectRoot && !referenceRoots.ContainsKey((document.ProjectId, documentId)))
                 {
-                    referenceSnapshots[document.ProjectId] = commit.ReferenceSnapshot with { RootDocumentId = documentId };
+                    var previousRoot = referenceSnapshots.GetValueOrDefault(document.ProjectId);
+                    referenceSnapshots[document.ProjectId] = ProjectReferenceForest.Merge(previousRoot?.CapturedBy == "seed" ? null : previousRoot, commit.ReferenceSnapshot);
+                    referenceRoots[(document.ProjectId, documentId)] = commit.ReferenceSnapshot;
+                    referenceSnapshotHistory[commit.ReferenceSnapshot.SnapshotId] = commit.ReferenceSnapshot;
+                    referenceSnapshotHistory[referenceSnapshots[document.ProjectId].SnapshotId] = referenceSnapshots[document.ProjectId];
                 }
 
                 var unchanged = ClearEditLock(renamedDocument, timeProvider.GetUtcNow());
@@ -1793,6 +1848,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 return Task.FromResult(new DocumentCheckInResult(unchanged, null, false));
             }
             var revision = versions.Values.Any(version => version.DocumentId == documentId) || document.Revision.IsReleased ? document.Revision.NextWork() : RevisionLabel.InitialWork();
+            commit = commit with { ReferenceSnapshot = commit.ReferenceSnapshot with
+                { Root = commit.ReferenceSnapshot.Root with { Revision = revision, CheckedOutBy = null } } };
             var version = new DocumentVersion(Guid.NewGuid(), documentId, revision, DocumentVersionStatus.Work, commit.File.RelativePath, commit.File.Length, commit.File.Sha256, actor, DateTimeOffset.UtcNow, commit.ChangeNote, commit.Properties, commit.ReferenceSnapshot.Root, commit.MechanicalBomSnapshot, commit.ElectricalBomSnapshot, commit.SourceVersionId, commit.SourceDescription, null, null)
             {
                 // 受控属性回写只写入属性、不修改几何。
@@ -1804,7 +1861,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             if (!string.IsNullOrWhiteSpace(sourceFileSha256)) documentSourceFingerprints[documentId] = sourceFileSha256;
             if (commit.IsProjectRoot)
             {
-                referenceSnapshots[document.ProjectId] = commit.ReferenceSnapshot with { RootDocumentId = documentId };
+                var previousRoot = referenceSnapshots.GetValueOrDefault(document.ProjectId);
+                referenceSnapshots[document.ProjectId] = ProjectReferenceForest.Merge(previousRoot?.CapturedBy == "seed" ? null : previousRoot, commit.ReferenceSnapshot);
+                referenceRoots[(document.ProjectId, documentId)] = commit.ReferenceSnapshot;
+                referenceSnapshotHistory[commit.ReferenceSnapshot.SnapshotId] = commit.ReferenceSnapshot;
+                referenceSnapshotHistory[referenceSnapshots[document.ProjectId].SnapshotId] = referenceSnapshots[document.ProjectId];
             }
 
             return Task.FromResult(new DocumentCheckInResult(updated, version, true));
@@ -1869,7 +1930,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             if (!packages.TryGetValue(releasePackageId, out var package)
                 || package.State is not (ReleasePackageState.Publishing or ReleasePackageState.Published))
                 throw new PdmConflictException("发布包尚未进入服务器转换状态。");
-            // 转图范围：只转非标件BOM中的物料（模型出STEP、其关联2D工程图出PDF）以及这些物料的上级装配体。
+            // 转图范围：只转非标件BOM中的物料（零件出STEP、其关联2D工程图出PDF），装配体不作为转换目标。
             var nonStandardModels = NonStandardModels(package);
             var root = ReferenceTree(package.ProjectId);
             var scope = PreviewScope(root, nonStandardModels);
@@ -1879,7 +1940,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             foreach (var documentId in scope)
             {
                 if (!documents.TryGetValue(documentId, out var document)
-                    || document.Kind is not (DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing)) continue;
+                    || document.Kind is not (DocumentKind.Part or DocumentKind.Drawing)) continue;
                 var source = versions.Values
                     .Where(version => version.DocumentId == documentId
                         && (package.State == ReleasePackageState.Published
@@ -2721,7 +2782,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         }
     }
 
-    /// <summary>转图范围：非标件BOM物料 + 它们的上级装配体 + 物料关联的2D工程图（转PDF）。</summary>
+    /// <summary>收集非标件BOM物料及关联图纸；实际转图仅选零件和2D工程图。</summary>
     private static HashSet<Guid> NonStandardModels(ReleasePackage package) =>
         package.NonStandardBomSnapshot
             .Where(item => item.SourceDocumentId.HasValue)

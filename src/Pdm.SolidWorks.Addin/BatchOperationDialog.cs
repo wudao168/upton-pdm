@@ -92,6 +92,7 @@ internal sealed class BatchOperationDialog : Form
     private readonly Button execute = new Button { Text = "开始执行", DialogResult = DialogResult.OK };
     private readonly Button selectChanged = new Button { Text = "勾选变更项" };
     private readonly Button showCheckedOnly = new Button { Text = "仅显示勾选" };
+    public string AdditionalDrawingFolder { get; private set; }
     private bool showCheckedOnlyActive;
     private readonly Label selectionSummary = new Label
     {
@@ -131,7 +132,9 @@ internal sealed class BatchOperationDialog : Form
         changeNote.Enabled = startWithCheckIn;
 
         Text = startWithCheckIn ? "登记新增引用并提交最新整套存档" : "整套装配操作";
-        StartPosition = FormStartPosition.CenterParent;
+        DialogWindowSizing.CenterOnOwnerScreen(this);
+        TopMost = true;
+        Shown += (_, _) => { BringToFront(); Activate(); };
         FormBorderStyle = FormBorderStyle.Sizable;
         MinimumSize = new Size(1050, 720);
         ClientSize = new Size(1230, 840);
@@ -262,6 +265,17 @@ internal sealed class BatchOperationDialog : Form
         var selectionButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Margin = Padding.Empty };
         var selectAll = new Button { Text = "全选", AutoSize = false, Size = standardButtonSize };
         var clear = new Button { Text = "清除", AutoSize = false, Size = standardButtonSize };
+        var supplement = new Button { Text = "补充工程图", AutoSize = false, Size = standardButtonSize };
+        supplement.Click += (_, _) =>
+        {
+            using (var picker = new FolderBrowserDialog { Description = "选择工程图目录，系统将按实际模型引用补充关联工程图。" })
+            {
+                if (picker.ShowDialog(this) != DialogResult.OK) return;
+                AdditionalDrawingFolder = picker.SelectedPath;
+                DialogResult = DialogResult.Retry;
+                Close();
+            }
+        };
         var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = false, Size = standardButtonSize };
         selectChanged.AutoSize = false;
         selectChanged.Size = standardButtonSize;
@@ -285,6 +299,7 @@ internal sealed class BatchOperationDialog : Form
         selectionButtons.Controls.Add(selectAll);
         selectionButtons.Controls.Add(clear);
         selectionButtons.Controls.Add(selectChanged);
+        selectionButtons.Controls.Add(supplement);
         selectionButtons.Controls.Add(cancel);
         selectionButtons.Controls.Add(execute);
 
@@ -385,7 +400,7 @@ internal sealed class BatchOperationDialog : Form
 
         if (SelectedItems.Count == 0)
         {
-            MessageBox.Show(
+            TopMostMessageBox.Show(
                 this,
                 checkIn.Checked
                     ? "当前没有选择可提交图档。若已经修改，请先在SolidWorks中保存文件，再点击“勾选变更项”；若尚未获取编辑权限，请先选择“获取最新并获取权限”，完成编辑并保存后再提交。"
@@ -399,7 +414,7 @@ internal sealed class BatchOperationDialog : Form
 
         if (!SelectedProjectId.HasValue)
         {
-            MessageBox.Show(
+            TopMostMessageBox.Show(
                 this,
                 "请选择本次整套操作的归属项目号。插件不会为未入库图档自动选择项目。",
                 "整套装配操作",
@@ -511,7 +526,8 @@ internal sealed class BatchOperationDialog : Form
         catch (Exception exception)
         {
             selectionSummary.Text = "变更分析失败，请保存图档后重试";
-            MessageBox.Show(this, exception.Message, "勾选变更项", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            PluginDiagnosticLog.Record("异常", exception.ToString());
+            TopMostMessageBox.Show(this, "变更分析失败，请保存图档后重试；如仍失败，请提供插件诊断日志。", "勾选变更项", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         finally
         {

@@ -1,14 +1,22 @@
 <script setup lang="ts">
+import RawDrawerPanel from './RawDrawerPanel.vue'
+import { useId as usePanelFormId } from 'vue'
+const panelFormId = usePanelFormId()
+
+import PanelActions from './PanelActions.vue'
 import { releaseFailureMessage, releasePublishingMessage } from '../releaseFailureMessage'
-import { computed, ref, watch } from 'vue'
+import { computed, ref, useId, watch } from 'vue'
 import { addReleaseItemComment, listApprovalTransferCandidates, listReleaseItemComments, readProjectPlan } from '../api'
 import { releasePreviewStateLabel } from '../releasePreviewState'
 import type { ApprovalTransferCandidate, BomItem, CreateReleasePackageInput, DrawingDeliveryOverride, DrawingPriority, DrawingReviewCandidate, DrawingReviewPackage, FormalSupplementPolicies, ProjectPlan, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
 import { useUserDisplayName } from '../userDisplay'
+import type { DocumentNode } from '../types'
 
 const displayUserName = useUserDisplayName()
+const createFormId = `pdm-release-create-${useId()}`
 
 const props = withDefaults(defineProps<{
+  referenceRoot?: DocumentNode
   releasePackage: ReleasePackageSummary | null
   projectId?: string
   token?: string
@@ -28,6 +36,7 @@ const props = withDefaults(defineProps<{
   releasePackages?: ReleasePackageSummary[]
   longLeadPublishedItems?: BomItem[]
   previousVersionItems?: BomItem[]
+  previousSummaryItems?: BomItem[]
   drawingReviewCandidates?: DrawingReviewCandidate[]
   drawingReviews?: DrawingReviewPackage[]
 }>(), { projectId: '', standardItems: () => [], releaseItems: () => [], canEmergencyDecide: false, allowedScopes: () => [], changeReasonTypes: () => [], formalSupplementPolicies: () => ({ standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } }), releasePackages: () => [], longLeadPublishedItems: () => [], previousVersionItems: () => [], drawingReviewCandidates: () => [] })
@@ -147,6 +156,7 @@ const selectedDrawingDeliveryOverrides = computed(() => Object.fromEntries(selec
   .filter((item): item is [string, DrawingDeliveryOverride] => item !== null)))
 const deliveryItemLabel = (item: BomItem) => item.drawingNumber || item.name || '当前物料'
 const wholeSetMultiplier = ref(1)
+const effectiveRootDocumentId = computed(() => editingDraft.value ? props.releasePackage?.rootDocumentId ?? '' : '')
 const selectedLongLeadKeys = ref<string[]>([])
 const selectedFormalKeys = ref<string[]>([])
 const selectedSupplementKeys = ref<string[]>([])
@@ -188,6 +198,11 @@ const releaseBomRevisionLabel = computed(() => {
 })
 const canPrepare = computed(() => !props.releasePackage || ['草稿', '已退回', '发布失败'].includes(props.releasePackage.state))
 const isSupplement = computed(() => isSupplementScope(scope.value))
+const releaseColumnWidths = computed(() => {
+  const weights = [1, 1, 2, 2, 2, 1, 1, 1, 1, 1, ...(isSupplement.value ? [2] : []), ...(deliveryScope.value ? [1, 2] : [])]
+  const total = weights.reduce((sum, weight) => sum + weight, 0)
+  return weights.map(weight => `width: ${weight / total * 100}% !important`)
+})
 const isFormalSupplementReason = (releasePackage: ReleasePackageSummary) =>
   Boolean(releasePackage.changeReasonSelections?.some(item => item.categoryCode === 'FormalSupplement'))
   || (releasePackage.changeReason || '').split('；').some(reason => reason.trim() === '正式补充')
@@ -218,8 +233,11 @@ const changeReasonText = computed(() => selectedChangeReasons.value.map(reason =
   reason === '其他' ? `其他 / ${otherChangeReason.value.trim()}` : reason).join('；'))
 const changeReasonSummary = computed(() => selectedChangeReasons.value.map(reason =>
   reason === '其他' ? `其他 / ${otherChangeReason.value.trim() || '请填写具体原因'}` : reason).join('；'))
-const availableReleaseItems = computed(() => (props.releaseItems.length ? props.releaseItems : props.standardItems)
-  .filter(row => !row.manuallyExcluded && !row.releaseExcluded))
+const availableReleaseItems = computed(() => (props.releaseItems.length ? props.releaseItems
+  : scope.value.startsWith('Standard') ? props.standardItems : [])
+  .filter(row => !row.manuallyExcluded && !row.releaseExcluded && !row.releaseConfirmation
+    && (!effectiveRootDocumentId.value || row.sourceInstancePath?.startsWith(`roots/${effectiveRootDocumentId.value.replaceAll('-', '').toLowerCase()}/`))
+    && (!row.kind || row.kind === (scope.value.startsWith('Electrical') ? 'Electrical' : isNonStandardScope(scope.value) ? 'NonStandard' : 'Standard'))))
 const releasePageSize = 50
 const longLeadPage = ref(1)
 const formalPage = ref(1)
@@ -245,26 +263,14 @@ const releaseItemGroupKey = (item: BomItem, index: number) => {
         item.weight, item.remark, item.revision, item.id || index,
       ].map(value => String(value ?? '').trim().toLocaleLowerCase()).join('|')
 }
-const drawingReviewCandidateFor = (item: BomItem) => props.drawingReviewCandidates.find(candidate => candidate.bomItemId === item.id)
+const drawingReviewCandidateFor = (item: BomItem) => props.drawingReviewCandidates.find(candidate => Boolean(candidate.bomItemId) && releaseInstanceIds(item).includes(candidate.bomItemId!))
   ?? props.drawingReviewCandidates.find(candidate => Boolean(item.sourceDocumentId) && candidate.modelDocumentId === item.sourceDocumentId)
-// 主管批准后审核单进入“已批准/回写属性”，逐张图纸记录可能仍是“已通过（待批准）”，这里同样按已批准处理。
-const drawingReviewApprovedByPackage = (item: BomItem) => {
-  const candidate = drawingReviewCandidateFor(item)
-  if (!candidate) return false
-  return (props.drawingReviews ?? []).some(packageValue =>
-    (packageValue.state === 'Approved' || packageValue.state === 'WritingProperties')
-    && packageValue.items.some(value =>
-      (Boolean(candidate.drawingDocumentId) && value.drawingDocumentId === candidate.drawingDocumentId)
-      || (Boolean(candidate.modelDocumentId) && value.modelDocumentId === candidate.modelDocumentId)))
-}
 const itemDrawingReviewReady = (item: BomItem) => item.kind !== 'NonStandard'
   || drawingReviewCandidateFor(item)?.state === 'ApprovedCurrent'
-  || drawingReviewApprovedByPackage(item)
 const releaseRowDrawingReviewReady = (row: { sourceItems: BomItem[] }) => row.sourceItems.length > 0 && row.sourceItems.every(itemDrawingReviewReady)
 const drawingReviewStatusForItem = (item: BomItem) => {
   const candidate = drawingReviewCandidateFor(item)
   if (candidate?.state === 'ApprovedCurrent') return '图纸已批准'
-  if (drawingReviewApprovedByPackage(item)) return '图纸已批准'
   if (candidate?.state === 'InReview') return '图纸待审核'
   if (candidate?.state === 'Unavailable') return candidate.reason || '图纸不可审核'
   return candidate?.reason || '图纸待发起审核'
@@ -382,7 +388,17 @@ function changedRows(current: BomItem[], previous: BomItem[]) {
   // Reserve stable identities first, so repeated material codes cannot consume another instance's baseline.
   for (const item of current) {
     const match = [...remaining].find(old => Boolean(item.id) && old.id === item.id)
+      ?? [...remaining].find(old => Boolean(item.releaseTrackingId) && old.releaseTrackingId === item.releaseTrackingId)
     if (match) { matches.set(item, match); remaining.delete(match) }
+  }
+  // 汇总代表实例或料号可能在重新提取后改变，来源模型和配置仍能识别同一零件。
+  for (const item of current.filter(row => !matches.has(row) && row.summaryItemIds?.length)) {
+    const candidates = [...remaining].filter(old => Boolean(item.sourceDocumentId) && old.sourceDocumentId === item.sourceDocumentId
+      && old.sourceConfiguration === item.sourceConfiguration && old.unit === item.unit)
+    if (candidates.length === 1 && current.filter(row => !matches.has(row) && row.sourceDocumentId === item.sourceDocumentId
+      && row.sourceConfiguration === item.sourceConfiguration && row.unit === item.unit).length === 1) {
+      matches.set(item, candidates[0]!); remaining.delete(candidates[0]!)
+    }
   }
   for (const item of current.filter(row => !matches.has(row))) {
     const match = [...remaining].find(old => Boolean(item.sourceDocumentId && item.sourceInstancePath)
@@ -408,16 +424,37 @@ function changedRows(current: BomItem[], previous: BomItem[]) {
   rows.push(...[...remaining].map(item => ({ item, change: '删除', details: ['当前发布范围已移除此项'] })))
   return rows
 }
-const supplementRows = computed(() => changedRows(availableReleaseItems.value, props.previousVersionItems))
+function supplementChanges(items: BomItem[], previous: BomItem[], confirmed: BomItem[] = []) {
+  const rows = changedRows([...items, ...confirmed], previous).filter(row => !row.item.releaseConfirmation)
+  if (scope.value !== 'NonStandardSupplement') return rows
+  for (const item of items) {
+    if (rows.some(row => row.item === item)) continue
+    if (drawingReviewCandidateFor(item)?.hasUnreleasedDrawingChanges) {
+      rows.push({ item, change: '修改', details: ['2D图纸较正式版有新存档，纳入本次变更发布'] })
+    }
+  }
+  return rows
+}
+const supplementRows = computed(() => supplementChanges(availableReleaseItems.value,
+  (props.releaseItems.length ? props.releaseItems : props.standardItems).some(item => item.summaryItemIds?.length) ? props.previousSummaryItems ?? props.previousVersionItems : props.previousVersionItems,
+  (props.releaseItems.length ? props.releaseItems : props.standardItems).filter(item => !!item.releaseConfirmation)))
 const supplementPageCount = computed(() => Math.max(1, Math.ceil(supplementRows.value.length / releasePageSize)))
 const pagedSupplementRows = computed(() => {
   const start = (supplementPage.value - 1) * releasePageSize
   return supplementRows.value.slice(start, start + releasePageSize)
 })
 const supplementRowKey = (row: { change: string; item: BomItem }) => `${row.change}|${row.item.id ?? itemKey(row.item)}`
-// 只有新增项可以单独顺延；修改/删除的是已发布物料，必须随本次变更单一起发布。
-const supplementRowSelectable = (row: { change: string }) => row.change === '新增'
-// 本次不纳入的新增项（顺延到下一次变更）不参与发布范围校验。
+// 新增与修改项可单独顺延；实际删除项随变更单生效。
+const supplementRowSelectable = (row: { change: string }) => row.change !== '删除'
+const supplementRowReady = (row: { change: string; item: BomItem }) => supplementRowSelectable(row)
+  && (scope.value !== 'NonStandardSupplement' || Boolean(drawingReviewCandidateFor(row.item)?.drawingDocumentId) && itemDrawingReviewReady(row.item))
+const readySupplementKeys = computed(() => supplementRows.value.filter(supplementRowReady).map(supplementRowKey))
+const allSupplementSelected = computed(() => readySupplementKeys.value.length > 0
+  && readySupplementKeys.value.every(key => selectedSupplementKeys.value.includes(key)))
+function toggleAllSupplement(checked: boolean) {
+  selectedSupplementKeys.value = checked ? [...readySupplementKeys.value] : []
+}
+// 本次不纳入的新增/修改项（顺延到下一次变更）不参与发布范围校验。
 const isDeferredSupplementRow = (row: { change: string; item: BomItem }) =>
   supplementRowSelectable(row) && !selectedSupplementKeys.value.includes(supplementRowKey(row))
 const deferredSupplementItemIds = computed(() => supplementRows.value
@@ -431,7 +468,7 @@ const selectedSupplementBomItemIds = computed<string[] | undefined>(() => {
 const isLongLeadRelease = computed(() => isLongLeadScope(scope.value))
 const isFormalRelease = computed(() => scope.value === 'StandardFormal' || scope.value === 'ElectricalFormal' || scope.value === 'NonStandardWithDrawing')
 // 三类BOM的每个发布阶段都支持选择本次发布的部分物料，规则与标准件正式发布一致。
-// 增补/变更阶段未勾选的新增项顺延到下一次变更；已发布物料的修改与删除随本次变更单一起生效，不能单独顺延。
+// 增补/变更阶段未勾选的新增/修改项顺延到下一次变更；实际删除项随本次变更单一起生效。
 const selectedScopedBomItemIds = computed<string[] | undefined>(() => isLongLeadRelease.value
   ? selectedBomItemIds.value
   : isFormalRelease.value ? selectedFormalBomItemIds.value : selectedSupplementBomItemIds.value)
@@ -455,7 +492,7 @@ const releaseDetailLegend = computed(() => {
   if (isFormalRelease.value) return `正式发布内容（已选 ${selectedFormalKeys.value.length} / 共 ${formalReleaseRows.value.length} 项 · 默认全选 · 整套倍率 ×${wholeSetMultiplier.value}${fullyPublishedFormalRowCount.value ? ` · ${fullyPublishedFormalRowCount.value} 项已发布不再重复下发` : ''}）`
   const deferrableCount = supplementRows.value.filter(supplementRowSelectable).length
   return deferrableCount
-    ? `增补/变更内容（共 ${supplementRows.value.length} 项变更 · 新增项已选 ${selectedSupplementKeys.value.length} / ${deferrableCount} 项 · 未勾选的新增项顺延到下一次变更 · 整套倍率 ×${wholeSetMultiplier.value}）`
+    ? `增补/变更内容（共 ${supplementRows.value.length} 项变更 · 新增/修改项已选 ${selectedSupplementKeys.value.length} / ${deferrableCount} 项 · 未勾选的新增/修改项顺延到下一次变更 · 整套倍率 ×${wholeSetMultiplier.value}）`
     : `增补/变更内容（共 ${supplementRows.value.length} 项变更 · 整套倍率 ×${wholeSetMultiplier.value}）`
 })
 const releaseDetailEmptyText = computed(() => {
@@ -495,6 +532,7 @@ const createDisabled = computed(() => props.pending
   || isLongLeadRelease.value && hasInvalidLongLeadQuantity.value
   || isFormalRelease.value && selectedFormalBomItemIds.value.length === 0
   || isSupplement.value && selectedScopedBomItemIds.value !== undefined && selectedScopedBomItemIds.value.length === 0
+  || isSupplement.value && supplementRows.value.length > 0 && !supplementRows.value.some(row => !isDeferredSupplementRow(row))
   || hasInvalidWholeSetMultiplier.value
   || isSupplement.value && selectedChangeReasons.value.length === 0
   || isSupplement.value && selectedChangeReasons.value.includes('其他') && !otherChangeReason.value.trim()
@@ -520,13 +558,21 @@ const frozenMaterialKey = (item: BomItem) => {
   const materialCode = item.drawingNumber?.trim().toLocaleLowerCase()
   return materialCode ? `material:${materialCode}|${item.unit?.trim().toLocaleLowerCase() ?? ''}` : `item:${item.id?.toLocaleLowerCase() ?? ''}`
 }
+const frozenSummaryKey = (item: BomItem) => {
+  if (item.drawingNumber?.trim() || !item.sourceDocumentId) return frozenMaterialKey(item)
+  return ['document', item.sourceDocumentId, item.sourceConfiguration, item.kind, item.unit,
+    item.name, item.specification, item.brand, item.material, item.surfaceTreatment,
+    item.weight, item.remark, item.revision]
+    .map(value => String(value ?? '').trim().toLocaleLowerCase()).join('|')
+}
 const frozenSummaryRows = computed<FrozenDisplayRow[]>(() => {
   const grouped = new Map<string, FrozenDisplayRow>()
   frozenItems.value.forEach((item, index) => {
     const materialKey = frozenMaterialKey(item)
-    const existing = grouped.get(materialKey)
+    const summaryKey = frozenSummaryKey(item)
+    const existing = grouped.get(summaryKey)
     if (!existing) {
-      grouped.set(materialKey, { key: materialKey || `summary-${index}`, materialKey, item: { ...item }, sourceItems: [item] })
+      grouped.set(summaryKey, { key: summaryKey || `summary-${index}`, materialKey, item: { ...item }, sourceItems: [item] })
       return
     }
     existing.item.quantity = Number(existing.item.quantity) + Number(item.quantity)
@@ -545,13 +591,27 @@ const frozenStructureRows = computed<FrozenDisplayRow[]>(() => frozenItems.value
 })))
 const isFrozenSupplement = computed(() => Boolean(props.releasePackage && isSupplementScope(props.releasePackage.scope)))
 const showFrozenChanges = computed(() => isFrozenSupplement.value && !frozenShowFullBom.value)
-const frozenChanges = computed(() => changedRows(frozenItems.value, props.previousVersionItems))
+function summarizeFrozenItems(items: BomItem[]) {
+  const groups = new Map<string, BomItem>()
+  for (const item of items) {
+    const key = frozenSummaryKey(item)
+    const existing = groups.get(key)
+    if (existing) {
+      existing.quantity = Number(existing.quantity) + Number(item.quantity)
+      existing.summaryItemIds!.push(...releaseInstanceIds(item))
+    } else groups.set(key, { ...item, summaryItemIds: [...releaseInstanceIds(item)] })
+  }
+  return [...groups.values()]
+}
+const frozenChanges = computed(() => supplementChanges(
+  summarizeFrozenItems(frozenItems.value), summarizeFrozenItems(props.previousVersionItems)))
 const frozenChangeRows = computed<FrozenDisplayRow[]>(() => frozenChanges.value.map((row, index) => ({
   ...row,
   key: `change:${row.item.id || index}:${row.change}`,
   materialKey: frozenMaterialKey(row.item),
   item: { ...row.item, quantity: row.change === '删除' ? 0 : Number(row.item.quantity) * (props.releasePackage?.wholeSetMultiplier ?? 1) },
-  sourceItems: [row.item],
+  sourceItems: (row.change === '删除' ? props.previousVersionItems : frozenItems.value)
+    .filter(item => row.item.summaryItemIds?.some(id => releaseInstanceIds(item).includes(id))),
 })))
 const frozenDisplayRows = computed(() => showFrozenChanges.value ? frozenChangeRows.value
   : frozenViewMode.value === 'Summary' ? frozenSummaryRows.value : frozenStructureRows.value)
@@ -575,7 +635,7 @@ const formalPriorQuantities = computed(() => {
     && previous.publishedAt && (!props.releasePackage?.publishedAt || previous.publishedAt <= props.releasePackage.publishedAt))
     .forEach(previous => (longLeadScope === 'NonStandardLongLead' ? previous.nonStandardBomSnapshot
       : longLeadScope === 'ElectricalLongLead' ? previous.electricalBomSnapshot : previous.standardBomSnapshot)
-      .filter(item => !item.manuallyExcluded && !item.releaseExcluded && !item.pendingRemoval)
+      .filter(item => !item.manuallyExcluded && !item.releaseExcluded && !item.releaseConfirmation && !item.pendingRemoval)
       .forEach(item => {
         const key = item.releaseTrackingId ? currentKeysByTrackingId.get(item.releaseTrackingId) ?? issueMaterialKey(item) : issueMaterialKey(item)
         quantities.set(key, (quantities.get(key) ?? 0) + Number(item.quantity) * (previous.wholeSetMultiplier ?? 1))
@@ -662,9 +722,9 @@ watch([() => longLeadReleaseRows.value.map(row => row.key).join('\n'), () => pro
 watch([scope, () => formalReleaseRows.value.map(row => row.key).join('\n')], () => {
   selectedFormalKeys.value = isFormalRelease.value ? formalReleaseRows.value.map(row => row.key) : []
 }, { immediate: true, flush: 'sync' })
-watch([scope, () => supplementRows.value.map(row => supplementRowKey(row)).join('\n')], () => {
+watch([scope, () => readySupplementKeys.value.join('\n')], () => {
   selectedSupplementKeys.value = isSupplement.value
-    ? supplementRows.value.filter(supplementRowSelectable).map(row => supplementRowKey(row))
+    ? [...readySupplementKeys.value]
     : []
 }, { immediate: true, flush: 'sync' })
 
@@ -723,11 +783,11 @@ function toggleFormalSelection(key: string, checked: boolean) {
 }
 
 function toggleSupplementSelection(row: { change: string; item: BomItem }, checked: boolean) {
+  if (!supplementRowReady(row)) return
   // 服务端要求同一料号+单位整组选择，这里同步切换同组的新增项。
-  const groupKey = `${row.item.drawingNumber?.trim() ?? ''}|${row.item.unit?.trim() ?? ''}`
+  const groupKey = frozenMaterialKey(row.item)
   const keys = supplementRows.value
-    .filter(candidate => supplementRowSelectable(candidate)
-      && `${candidate.item.drawingNumber?.trim() ?? ''}|${candidate.item.unit?.trim() ?? ''}` === groupKey)
+    .filter(candidate => supplementRowReady(candidate) && frozenMaterialKey(candidate.item) === groupKey)
     .map(candidate => supplementRowKey(candidate))
   selectedSupplementKeys.value = checked
     ? [...new Set([...selectedSupplementKeys.value, ...keys])]
@@ -792,7 +852,7 @@ function startDraftEdit() {
   if (!isLongLeadScope(releasePackage.scope) && releasePackage.selectedBomItemIds.length > 0) {
     const selectedIds = new Set(releasePackage.selectedBomItemIds)
     if (isSupplementScope(releasePackage.scope)) {
-      // 已发布物料的修改/删除不参与勾选，此处只回填可顺延的新增项。
+      // 回填本次选中的新增和修改项。
       selectedSupplementKeys.value = supplementRows.value
         .filter(row => supplementRowSelectable(row) && releaseInstanceIds(row.item).length > 0
           && releaseInstanceIds(row.item).every(id => selectedIds.has(id)))
@@ -930,7 +990,7 @@ async function saveItemComment() {
 <template>
   <section class="pdm-panel pdm-manager-panel release-center" aria-label="审批与生产发包">
     <p v-if="error" class="pdm-inline-error" role="alert">{{ error }}</p>
-    <form v-if="canManage && (!releasePackage || editingDraft)" class="pdm-form-grid pdm-release-create-form" @submit.prevent="create">
+    <form v-if="canManage && (!releasePackage || editingDraft)" :id="createFormId" class="pdm-form-grid pdm-release-create-form" @submit.prevent="create">
       <section class="pdm-release-create-header" :class="{ 'has-drawing-delivery': deliveryScope }" aria-label="发布参数">
         <div class="pdm-release-type-row">
           <label>发布类型
@@ -947,10 +1007,10 @@ async function saveItemComment() {
           <label v-if="deliveryScope"><span>整包需求日期 <small v-if="usesAssemblyStartRequirementDate" class="pdm-release-assembly-note">计划装配节点</small></span>
             <input v-model="drawingRequiredOn" type="date" required aria-label="整包需求日期">
           </label>
-          <div class="pdm-release-draft-actions">
+          <PanelActions><div class="pdm-release-draft-actions">
             <button v-if="editingDraft" type="button" class="pdm-secondary-action" :disabled="pending" @click="editingDraft = false">取消编辑</button>
-            <button type="submit" class="pdm-primary-action" :disabled="createDisabled">{{ editingDraft ? '保存草稿' : '创建草稿' }}</button>
-          </div>
+            <button type="submit" :form="createFormId" class="pdm-primary-action" :disabled="createDisabled">{{ editingDraft ? '保存草稿' : '创建草稿' }}</button>
+          </div></PanelActions>
           <label v-if="isSupplement">变更单号<input value="创建草稿后自动生成" readonly aria-label="变更单号由系统自动生成"></label>
         </div>
         <div class="pdm-release-parameter-slot">
@@ -980,8 +1040,8 @@ async function saveItemComment() {
         <legend>{{ releaseDetailLegend }}</legend>
         <div class="pdm-table-scroll">
           <table class="pdm-edit-table" :class="{ 'is-supplement': isSupplement, 'has-delivery': deliveryScope }">
-            <colgroup><col><col><col><col><col><col><col><col><col><col><col v-if="isSupplement"><col v-if="deliveryScope"><col v-if="deliveryScope"></colgroup>
-            <thead><tr><th>标记</th><th>序号</th><th>物料编码</th><th>名称</th><th>型号</th><th>品牌</th><th>可发布数量</th><th>发布总数量</th><th>备注</th><th>发布状态</th><th v-if="isSupplement">变更明细（原值 → 新值）</th><th v-if="deliveryScope">紧急程度</th><th v-if="deliveryScope">需求时间</th></tr></thead>
+            <colgroup><col v-for="(width, index) in releaseColumnWidths" :key="index" :style="width"></colgroup>
+            <thead><tr><th><input v-if="isSupplement" type="checkbox" aria-label="全选可发布变更" :checked="allSupplementSelected" :indeterminate="!allSupplementSelected && readySupplementKeys.some(key => selectedSupplementKeys.includes(key))" :disabled="pending || !readySupplementKeys.length" @change="toggleAllSupplement(($event.target as HTMLInputElement).checked)">标记</th><th>序号</th><th>物料编码</th><th>名称</th><th>型号</th><th>品牌</th><th title="可发布数量">可发布</th><th title="发布总数量">总发布</th><th>备注</th><th>状态</th><th v-if="isSupplement" title="原值 → 新值">变更明细</th><th v-if="deliveryScope">紧急</th><th v-if="deliveryScope">需求时间</th></tr></thead>
             <tbody>
               <template v-if="isLongLeadRelease">
                 <tr v-for="(row, index) in pagedLongLeadItems" :key="row.key">
@@ -1001,7 +1061,7 @@ async function saveItemComment() {
               </template>
               <template v-else>
                 <tr v-for="(row, index) in pagedSupplementRows" :key="`${row.change}-${row.item.id}-${index}`" :class="{ 'is-release-unselected': supplementRowSelectable(row) && !selectedSupplementKeys.includes(supplementRowKey(row)) }">
-                  <td class="is-release-centered"><input v-if="supplementRowSelectable(row)" :checked="selectedSupplementKeys.includes(supplementRowKey(row))" type="checkbox" :aria-label="`本次纳入 ${row.item.drawingNumber || row.item.name}`" :title="`取消勾选后该项顺延到下一次增补/变更`" @change="toggleSupplementSelection(row, ($event.target as HTMLInputElement).checked)"><input v-else type="checkbox" checked disabled :title="row.change === '修改' ? '已发布物料的修改随本次变更单一起发布，不能单独顺延' : '删除项随本次变更单一起生效'"><span :class="`release-change-tag is-${row.change}`">{{ row.change }}</span></td><td class="is-release-centered">{{ (supplementPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': row.change !== '删除' && Number(wholeSetMultiplier) !== 1 }">{{ row.change === '删除' ? '—' : Number(row.item.quantity) * Number(wholeSetMultiplier) }}</td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span v-if="supplementRowSelectable(row) && !selectedSupplementKeys.includes(supplementRowKey(row))" class="release-status-tag">本次不发布</span><span v-else class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardSupplement' && row.change !== '删除' && !itemDrawingReviewReady(row.item) }">{{ scope === 'NonStandardSupplement' && row.change !== '删除' ? drawingReviewStatusForItem(row.item) : '待纳入变更' }}</span></td>
+                  <td class="is-release-centered"><input v-if="supplementRowSelectable(row)" :disabled="pending || !supplementRowReady(row)" :checked="selectedSupplementKeys.includes(supplementRowKey(row))" type="checkbox" :aria-label="`本次纳入 ${row.item.drawingNumber || row.item.name}`" :title="`取消勾选后该项顺延到下一次增补/变更`" @change="toggleSupplementSelection(row, ($event.target as HTMLInputElement).checked)"><input v-else type="checkbox" checked disabled :title="row.change === '修改' ? '已发布物料的修改随本次变更单一起发布，不能单独顺延' : '删除项随本次变更单一起生效'"><span :class="`release-change-tag is-${row.change}`">{{ row.change }}</span></td><td class="is-release-centered">{{ (supplementPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': row.change !== '删除' && Number(wholeSetMultiplier) !== 1 }">{{ row.change === '删除' || isDeferredSupplementRow(row) ? '—' : Number(row.item.quantity) * Number(wholeSetMultiplier) }}</td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span v-if="supplementRowReady(row) && !selectedSupplementKeys.includes(supplementRowKey(row))" class="release-status-tag">本次不发布</span><span v-else class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardSupplement' && row.change !== '删除' && !itemDrawingReviewReady(row.item) }">{{ scope === 'NonStandardSupplement' && row.change !== '删除' ? drawingReviewStatusForItem(row.item) : '待纳入变更' }}</span></td>
                   <td class="release-change-details" :title="row.details.join('；')"><div v-for="detail in row.details" :key="detail">{{ detail }}</div></td>
                   <td><select :value="itemDeliveryOverride(row.item.id!).priority" :aria-label="`${deliveryItemLabel(row.item)}紧急程度`" @change="setBomItemDeliveryOverride(row.item.id!, ($event.target as HTMLSelectElement).value as DrawingPriority, itemDeliveryOverride(row.item.id!).requiredOn)"><option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option></select></td>
                   <td><input type="date" :value="itemDeliveryOverride(row.item.id!).requiredOn" :aria-label="`${deliveryItemLabel(row.item)}需求时间`" @change="setBomItemDeliveryOverride(row.item.id!, itemDeliveryOverride(row.item.id!).priority, ($event.target as HTMLInputElement).value)"></td>
@@ -1037,47 +1097,47 @@ async function saveItemComment() {
           </article>
         </div>
 
-        <div v-if="canManage && releasePackage.state === '草稿'" class="pdm-manager-actions pdm-release-draft-management">
+        <PanelActions><div v-if="canManage && releasePackage.state === '草稿'" class="pdm-manager-actions pdm-release-draft-management">
           <button type="button" class="pdm-secondary-action" :disabled="pending" @click="startDraftEdit">编辑草稿</button>
           <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="deleteDraft">删除草稿</button>
-        </div>
+        </div></PanelActions>
 
         <div v-if="canManage && canPrepare" class="pdm-release-preparation">
           <h3>发布资料</h3>
           <p v-if="requiresDrawingFiles">非标件BOM已固化为XLSX；图纸发布预览由系统生成，审批通过后与BOM原子发布。</p>
           <p v-else>系统已按本次发布范围生成受控BOM XLSX，无需上传机械图纸。</p>
-          <div class="pdm-manager-actions">
+          <PanelActions><div class="pdm-manager-actions">
             <button type="button" class="pdm-primary-action" :disabled="pending" @click="emit('submit', releasePackage.id)">{{ releasePackage.state === '已退回' ? '重新提交审批' : '提交审批' }}</button>
-          </div>
+          </div></PanelActions>
           <progress v-if="pending && progress > 0" :value="progress" max="100">{{ progress }}%</progress>
         </div>
 
         <div v-if="canHandleCurrentTask && currentTask" class="pdm-decision-box">
           <label>审批意见<textarea v-model="comment" rows="3" maxlength="1000" placeholder="通过可不填；退回必须填写原因" @input="approvalCommentError = ''" /><small v-if="approvalCommentError" class="pdm-inline-error">{{ approvalCommentError }}</small></label>
-          <div class="pdm-manager-actions">
+          <PanelActions><div class="pdm-manager-actions">
             <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="submitDecision('Rejected')">退回</button>
             <button type="button" class="pdm-secondary-action" :disabled="pending" @click="openTransfer">转交</button>
             <button type="button" class="pdm-primary-action" :disabled="pending" @click="submitDecision('Approved')">通过</button>
-          </div>
+          </div></PanelActions>
         </div>
         <div v-else-if="canManage && ['审批中', '工艺审核', '待批准', '已退回'].includes(releasePackage.state)" class="pdm-decision-box pdm-withdraw-decision">
           <small>{{ releasePackage.state === '已退回' ? '退回后撤回：发布包恢复为草稿，可编辑草稿重新绑定当前BOM，或删除后重新创建。' : releasePackage.locksDocuments ? '撤回后图档与非标件BOM恢复为工作中。' : '撤回后当前BOM版本恢复为草稿。' }}</small>
-          <div class="pdm-manager-actions">
+          <PanelActions><div class="pdm-manager-actions">
             <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="emit('withdraw', releasePackage.id)">{{ releasePackage.state === '已退回' ? '撤回为草稿' : '撤回审批' }}</button>
-          </div>
+          </div></PanelActions>
         </div>
         <div v-if="canEmergencyDecide && currentTask && !canHandleCurrentTask" class="pdm-decision-box emergency-decision">
           <label>紧急代批原因<textarea v-model.trim="emergencyReason" rows="3" maxlength="1000" required placeholder="说明必须立即处理的业务原因；该内容会进入审计记录" /></label>
-          <div class="pdm-manager-actions">
+          <PanelActions><div class="pdm-manager-actions">
             <button type="button" class="pdm-secondary-action is-danger" :disabled="pending || !emergencyReason" @click="emit('emergencyDecide', currentTask.id, 'Rejected', emergencyReason)">紧急代退回</button>
             <button type="button" class="pdm-primary-action" :disabled="pending || !emergencyReason" @click="emit('emergencyDecide', currentTask.id, 'Approved', emergencyReason)">紧急代批当前节点</button>
-          </div>
+          </div></PanelActions>
         </div>
         <div v-if="canManage && isLongLeadScope(releasePackage.scope) && releasePackage.state === '已发布'" class="pdm-decision-box pdm-long-lead-u9-retry">
           <small>自动补建当前及上级BOM料号申请；正式料号齐全后按BOM层级续传U9C。</small>
-          <div class="pdm-manager-actions">
+          <PanelActions><div class="pdm-manager-actions">
             <button type="button" class="pdm-secondary-action" :disabled="pending" @click="emit('retryU9', releasePackage.id)">{{ pending ? '处理中…' : '重试U9C' }}</button>
-          </div>
+          </div></PanelActions>
         </div>
       </section>
 
@@ -1096,7 +1156,7 @@ async function saveItemComment() {
 
       <section class="pdm-release-frozen-snapshot" aria-label="审批固化快照">
         <header>
-          <div><strong>{{ showFrozenChanges ? '本次变更明细' : '审批固化快照' }}</strong><small>显示发布后的最终数量（工作区数量 × 整套倍率 {{ releasePackage.wholeSetMultiplier ?? 1 }}）；批注独立保存，不修改BOM。</small><small v-if="showFrozenChanges">仅列出新增、修改、删除的实例；变更字段按工作区原值对比，删除项发布后数量为0。完整BOM仍保留。</small></div>
+          <div><strong>{{ showFrozenChanges ? '本次变更明细' : '审批固化快照' }}</strong><small>显示发布后的最终数量（工作区数量 × 整套倍率 {{ releasePackage.wholeSetMultiplier ?? 1 }}）；批注独立保存，不修改BOM。</small><small v-if="showFrozenChanges">按物料编码和单位汇总新增、修改、删除项；使用发布包冻结数据与上一正式版同口径对比，删除项数量为0。</small></div>
           <div class="pdm-frozen-view-actions">
             <span>{{ frozenDisplayRows.length }} 项<span v-if="!showFrozenChanges && frozenViewMode === 'Summary' && frozenItems.length !== frozenDisplayRows.length"> · {{ frozenItems.length }} 个实例</span></span>
             <button v-if="isFrozenSupplement" type="button" class="pdm-secondary-action" @click="frozenShowFullBom = !frozenShowFullBom">{{ showFrozenChanges ? '查看完整BOM' : '仅看本次变更' }}</button>
@@ -1111,7 +1171,7 @@ async function saveItemComment() {
         <div class="pdm-table-scroll">
           <table class="pdm-edit-table pdm-release-frozen-table" :class="{ 'is-formal-issue-view': showFormalIssueQuantities, 'is-change-view': showFrozenChanges }">
             <colgroup><col><col><col><col><col><col><col><template v-if="showFormalIssueQuantities"><col><col></template><col><col><template v-if="showFrozenChanges"><col><col></template></colgroup>
-            <thead><tr><th>序号</th><th>物料编码</th><th>{{ frozenViewMode === 'Structure' ? '物料名称 / 结构位置' : '物料名称' }}</th><th>型号</th><th>版本</th><th>品牌</th><th>备注</th><th>{{ showFormalIssueQuantities ? 'BOM总量' : '数量' }}</th><template v-if="showFormalIssueQuantities"><th>前期已发布</th><th>本次新增下发</th></template><th>批注</th><template v-if="showFrozenChanges"><th>变更</th><th>变更字段（原值 → 新值）</th></template></tr></thead>
+            <thead><tr><th>序号</th><th>物料编码</th><th>{{ frozenViewMode === 'Structure' ? '物料名称 / 结构位置' : '物料名称' }}</th><th>型号</th><th>版本</th><th>品牌</th><th>备注</th><th>{{ showFormalIssueQuantities ? 'BOM总量' : '数量' }}</th><template v-if="showFormalIssueQuantities"><th>前期已发布</th><th>本次新增下发</th></template><th>批注</th><template v-if="showFrozenChanges"><th>变更</th><th title="原值 → 新值">变更明细</th></template></tr></thead>
             <tbody>
               <tr v-for="(row, index) in pagedFrozenRows" :key="row.key">
                 <td class="is-release-centered">{{ (frozenPage - 1) * releasePageSize + index + 1 }}</td>
@@ -1144,25 +1204,25 @@ async function saveItemComment() {
       </section>
 
       <div v-if="itemCommentOpen && itemCommentTarget" class="pdm-dialog-backdrop pdm-item-comment-backdrop" role="presentation" @click.self="itemCommentOpen = false">
-        <section class="pdm-item-comment-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-item-comment-title">
-          <header><div><strong id="pdm-item-comment-title">物料审批批注</strong><small>{{ itemCommentTarget.item.drawingNumber || '无料号' }} · {{ itemCommentTarget.item.name }}</small></div><button type="button" class="pdm-icon-button" aria-label="关闭物料批注" @click="itemCommentOpen = false">×</button></header>
+        <RawDrawerPanel class="pdm-item-comment-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-item-comment-title">
+          <template #header="{ setActionTarget }"><header><div class="pdm-panel-topbar"><div class="pdm-panel-topbar-title"><div><strong id="pdm-item-comment-title">物料审批批注</strong><small>{{ itemCommentTarget.item.drawingNumber || '无料号' }} · {{ itemCommentTarget.item.name }}</small></div></div><div class="pdm-panel-header-actions" :ref="setActionTarget"></div></div><button type="button" class="pdm-icon-button" aria-label="关闭物料批注" @click="itemCommentOpen = false">×</button></header></template>
           <div class="pdm-item-comment-history" aria-label="物料批注历史">
             <article v-for="entry in selectedItemComments" :key="entry.id"><p>{{ entry.comment }}</p><small>{{ displayUserName(entry.createdBy) }} · {{ formatCommentTime(entry.createdAt) }}</small></article>
             <p v-if="itemCommentsLoading">正在加载批注…</p>
             <p v-else-if="!selectedItemComments.length">暂无批注。</p>
           </div>
-          <form v-if="canAddItemComment" @submit.prevent="saveItemComment">
+          <form :id="panelFormId + '-form-1'" v-if="canAddItemComment" @submit.prevent="saveItemComment">
             <label>新增批注<textarea v-model.trim="itemCommentText" rows="3" maxlength="1000" aria-label="物料审批批注" placeholder="批注只追加保存，不修改BOM内容" /></label>
             <p v-if="itemCommentsError" class="pdm-inline-error">{{ itemCommentsError }}</p>
-            <footer><button type="button" class="pdm-secondary-action" @click="itemCommentOpen = false">关闭</button><button type="submit" class="pdm-primary-action" :disabled="itemCommentSaving || !itemCommentText.trim()">{{ itemCommentSaving ? '保存中…' : '保存批注' }}</button></footer>
+            <PanelActions><footer><button type="button" class="pdm-secondary-action" @click="itemCommentOpen = false">关闭</button><button type="submit" :form="panelFormId + '-form-1'" class="pdm-primary-action" :disabled="itemCommentSaving || !itemCommentText.trim()">{{ itemCommentSaving ? '保存中…' : '保存批注' }}</button></footer></PanelActions>
           </form>
-          <footer v-else><small>审批已结束或当前账号不是本节点处理人，批注历史仅供查看。</small><button type="button" class="pdm-secondary-action" @click="itemCommentOpen = false">关闭</button></footer>
-        </section>
+          <PanelActions v-else><footer><small>审批已结束或当前账号不是本节点处理人，批注历史仅供查看。</small><button type="button" class="pdm-secondary-action" @click="itemCommentOpen = false">关闭</button></footer></PanelActions>
+        </RawDrawerPanel>
       </div>
 
       <div v-if="transferOpen" class="pdm-dialog-backdrop pdm-approval-transfer-backdrop" role="presentation" @click.self="transferOpen = false">
-        <section class="pdm-approval-transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-approval-transfer-title">
-          <header><strong id="pdm-approval-transfer-title">转交审批</strong><button type="button" class="pdm-icon-button" aria-label="关闭转交审批" @click="transferOpen = false">×</button></header>
+        <RawDrawerPanel class="pdm-approval-transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-approval-transfer-title">
+          <template #header="{ setActionTarget }"><header><div class="pdm-panel-topbar"><div class="pdm-panel-topbar-title"><strong id="pdm-approval-transfer-title">转交审批</strong></div><div class="pdm-panel-header-actions" :ref="setActionTarget"></div></div><button type="button" class="pdm-icon-button" aria-label="关闭转交审批" @click="transferOpen = false">×</button></header></template>
           <label>选择人员<input v-model.trim="transferQuery" type="search" placeholder="输入姓名或账号筛选" aria-label="筛选审批转交人员"></label>
           <div class="pdm-approval-transfer-list" role="listbox" aria-label="审批转交人员">
             <button v-for="candidate in filteredTransferCandidates" :key="candidate.username" type="button" :class="{ 'is-selected': transferTarget === candidate.username }" role="option" :aria-selected="transferTarget === candidate.username" @click="transferTarget = candidate.username"><strong>{{ candidate.displayName }}</strong></button>
@@ -1171,8 +1231,8 @@ async function saveItemComment() {
             <p v-else-if="!filteredTransferCandidates.length">没有符合条件的可转交人员。</p>
           </div>
           <label>转交说明<textarea v-model.trim="transferComment" rows="2" maxlength="500" placeholder="选填"></textarea></label>
-          <footer><button type="button" class="pdm-secondary-action" @click="transferOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending || !transferTarget" @click="confirmTransfer">确认转交</button></footer>
-        </section>
+          <PanelActions><footer><button type="button" class="pdm-secondary-action" @click="transferOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending || !transferTarget" @click="confirmTransfer">确认转交</button></footer></PanelActions>
+        </RawDrawerPanel>
       </div>
       <p v-if="releasePackage.publishError" class="pdm-inline-error">发布失败：{{ releaseFailureMessage(releasePackage.publishError) }}</p>
       <!-- 转图与发布解耦：发布已完成时转图单独显示状态，失败由后台自动重试，也可手动重试。 -->
@@ -1203,9 +1263,9 @@ async function saveItemComment() {
 .release-detail-picker table.is-supplement th{white-space:normal;overflow-wrap:anywhere}
 .release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(1){width:5%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(2){width:4%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(3){width:9%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(4){width:10%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(5){width:10%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(6){width:6%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(7){width:7%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(8){width:8%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(9){width:9%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(10){width:9%}.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(11),.release-detail-picker table.has-delivery:not(.is-supplement) col:nth-child(12){width:11.5%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(1){width:4%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(2){width:3%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(3){width:8%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(4),.release-detail-picker table.has-delivery.is-supplement col:nth-child(5){width:8%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(6),.release-detail-picker table.has-delivery.is-supplement col:nth-child(7){width:5%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(8),.release-detail-picker table.has-delivery.is-supplement col:nth-child(10){width:6%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(9){width:7%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(11){width:17%}.release-detail-picker table.has-delivery.is-supplement col:nth-child(12),.release-detail-picker table.has-delivery.is-supplement col:nth-child(13){width:11.5%}.release-detail-picker table.has-delivery td>select,.release-detail-picker table.has-delivery td>input[type="date"]{width:100%;height:26px;box-sizing:border-box;padding:0 5px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface);color:var(--pdm-text)}
 .pdm-release-top-workflow{display:grid;gap:6px;margin-bottom:8px}.pdm-release-top-workflow .pdm-approval-chain,.pdm-release-summary{grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pdm-release-top-workflow .pdm-approval-chain{margin:0}.pdm-release-top-workflow .pdm-approval-chain article,.pdm-release-summary>div{min-width:0;min-height:46px;box-sizing:border-box;align-content:center;gap:2px;padding:6px 8px;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface)}.pdm-release-top-workflow .pdm-approval-chain article{align-items:flex-start;gap:6px}.pdm-release-top-workflow .pdm-approval-chain article div{overflow:hidden}.pdm-release-top-workflow .pdm-approval-chain strong,.pdm-release-top-workflow .pdm-approval-chain small,.pdm-release-top-workflow .pdm-approval-chain em{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-release-top-workflow .pdm-release-draft-management{margin:0}.pdm-release-top-workflow .pdm-release-preparation{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;margin:0;padding:6px 8px}.pdm-release-top-workflow .pdm-release-preparation h3,.pdm-release-top-workflow .pdm-release-preparation p{margin:0}.pdm-release-top-workflow .pdm-release-preparation .pdm-manager-actions{flex-wrap:nowrap}.pdm-release-top-workflow .pdm-release-preparation progress{grid-column:1/-1;margin-top:0}.pdm-release-top-workflow .pdm-decision-box{grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:8px;margin:0;padding:6px 8px}.pdm-release-top-workflow .pdm-decision-box textarea{min-height:30px;height:30px;box-sizing:border-box;resize:vertical}.pdm-release-top-workflow .pdm-withdraw-decision{align-items:center}.pdm-release-summary{grid-auto-rows:minmax(46px,auto);margin-bottom:8px}.pdm-release-summary small{font-size:11px}.pdm-release-summary strong{font-size:11px}@media(max-width:900px){.pdm-release-top-workflow .pdm-approval-chain,.pdm-release-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.pdm-release-top-workflow .pdm-release-preparation,.pdm-release-top-workflow .pdm-decision-box{grid-template-columns:1fr}.pdm-release-top-workflow .pdm-release-preparation .pdm-manager-actions,.pdm-release-top-workflow .pdm-decision-box .pdm-manager-actions{justify-content:flex-end}}@media(max-width:560px){.pdm-release-top-workflow .pdm-approval-chain,.pdm-release-summary{grid-template-columns:1fr}}
-.release-center select{height:34px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface);padding:0 9px;color:var(--pdm-text)}.pdm-release-create-header{grid-column:1/-1;display:grid;grid-template-rows:52px 82px;gap:8px;min-height:162px;padding:10px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface)}.pdm-release-type-row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(120px,180px) auto minmax(180px,1fr);gap:5px;align-items:end}.pdm-release-type-row label{min-width:0}.pdm-release-type-row select,.pdm-release-type-row input{width:100%;height:34px;box-sizing:border-box}.pdm-release-draft-actions{display:flex;gap:5px}.pdm-release-draft-actions button{height:34px;padding:0 10px;white-space:nowrap}.pdm-release-parameter-slot{min-height:82px;overflow:auto}.pdm-release-parameter-slot>.pdm-release-reason{height:100%;box-sizing:border-box}.pdm-release-parameter-slot>.pdm-release-reason textarea{height:60px;box-sizing:border-box;resize:none}.release-detail-picker,.release-change-reason-picker{grid-column:1/-1;margin:0;padding:10px;border:1px solid var(--pdm-border);border-radius:7px}.release-detail-picker legend,.release-change-reason-picker legend{padding:0 5px;font-weight:600}.release-detail-picker .pdm-table-scroll{border:1px solid var(--pdm-border);border-radius:5px}.release-detail-picker table{width:100%;min-width:0;table-layout:fixed}.release-detail-picker col:nth-child(1){width:6%}.release-detail-picker col:nth-child(2){width:5%}.release-detail-picker col:nth-child(3){width:12%}.release-detail-picker col:nth-child(4){width:13%}.release-detail-picker col:nth-child(5){width:15%}.release-detail-picker col:nth-child(6){width:8%}.release-detail-picker col:nth-child(7){width:9%}.release-detail-picker col:nth-child(8){width:10%}.release-detail-picker col:nth-child(9){width:12%}.release-detail-picker col:nth-child(10){width:10%}.release-detail-picker th,.release-detail-picker td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}.release-detail-picker td{height:32px}.release-detail-picker th,.release-detail-picker td.is-release-centered{text-align:center}.release-detail-picker th:nth-child(8),.release-detail-picker td:nth-child(8){background:#fffbeb}.release-detail-picker td.is-release-multiplied{font-weight:600}.long-lead-quantity-input{width:100%;min-width:0;height:26px;box-sizing:border-box;text-align:center}.pdm-release-draft-management{justify-content:flex-end;margin-bottom:8px}.release-change-reason-picker{display:flex;height:100%;box-sizing:border-box;flex-wrap:wrap;align-content:flex-start;gap:8px 18px}.release-change-reason-picker label{display:flex;align-items:center;gap:5px}.long-lead-tag,.release-change-tag,.release-inclusion-tag,.release-status-tag{display:inline-flex;align-items:center;min-height:20px;padding:0 6px;border-radius:10px}.long-lead-tag,.release-change-tag{background:var(--pdm-orange-soft);color:var(--pdm-orange)}.release-inclusion-tag{background:var(--pdm-theme-accent-soft);color:var(--pdm-blue)}.release-status-tag{background:var(--pdm-surface-soft);color:var(--pdm-muted)}.release-change-tag.is-新增{background:var(--pdm-green-soft);color:var(--pdm-green)}.release-change-tag.is-修改{background:var(--pdm-orange-soft);color:var(--pdm-orange)}.release-change-tag.is-删除{background:var(--pdm-danger-soft);color:var(--pdm-danger)}.pdm-release-create-form .pdm-release-reason{grid-column:1/-1}.emergency-decision{border-color:#f59e0b;background:#fffbeb}.pdm-release-frozen-snapshot{margin:12px 0;border:1px solid var(--pdm-border);border-radius:7px;overflow:hidden}.pdm-release-frozen-snapshot>header{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:9px 11px;background:var(--pdm-surface-soft)}.pdm-release-frozen-snapshot>header>div:first-child{display:grid;gap:2px;min-width:0}.pdm-release-frozen-snapshot>header small{color:var(--pdm-muted)}.pdm-frozen-view-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;white-space:nowrap}.pdm-view-switch{display:inline-flex;padding:2px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface)}.pdm-view-switch button{height:24px;padding:0 9px;border:0;border-radius:4px;background:transparent;color:var(--pdm-muted)}.pdm-view-switch button.is-active{background:#0f9d90;color:var(--pdm-surface)}.pdm-release-diff-summary{display:flex;align-items:center;gap:10px;padding:7px 11px;border-top:1px solid var(--pdm-border);border-bottom:1px solid var(--pdm-border)}.pdm-release-diff-summary small{margin-left:auto;color:var(--pdm-muted)}.pdm-release-diff-summary .is-added{color:var(--pdm-green)}.pdm-release-diff-summary .is-modified{color:var(--pdm-orange)}.pdm-release-diff-summary .is-removed{color:var(--pdm-danger)}.pdm-release-frozen-snapshot .pdm-table-scroll{max-height:230px}.pdm-item-comments-load-error{margin:0;padding:7px 11px}.pdm-item-comment-action{border:0;background:transparent;color:var(--pdm-green);white-space:nowrap}.pdm-frozen-item-name{padding-left:7px}.pdm-frozen-item-name small{display:block;margin-top:2px;color:var(--pdm-muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-structure-marker{margin-right:4px;color:var(--pdm-green)}.pdm-release-integration-note{margin:0;padding:8px 11px;color:var(--pdm-green);background:var(--pdm-green-soft);border-top:1px solid var(--pdm-green-border)}.pdm-release-completion-status{margin:0 0 8px;padding:8px 11px;border:1px solid var(--pdm-green-border);border-radius:7px;background:var(--pdm-green-soft);color:var(--pdm-green);font-weight:600}@media(max-width:900px){.pdm-release-type-row{grid-template-columns:repeat(2,minmax(0,1fr))}.pdm-release-frozen-snapshot>header{align-items:flex-start;flex-direction:column}.pdm-frozen-view-actions{width:100%;justify-content:space-between}}
+.release-center select{height:34px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface);padding:0 9px;color:var(--pdm-text)}.pdm-release-create-header{grid-column:1/-1;display:grid;grid-template-rows:52px 82px;gap:8px;min-height:162px;padding:10px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface)}.pdm-release-type-row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(120px,180px) auto minmax(180px,1fr);gap:5px;align-items:end}.pdm-release-type-row label{min-width:0}.pdm-release-type-row select,.pdm-release-type-row input{width:100%;height:34px;box-sizing:border-box}.pdm-release-draft-actions{display:flex;gap:5px}.pdm-release-draft-actions button{height:var(--pdm-button-default);padding:0 10px;white-space:nowrap}.pdm-release-parameter-slot{min-height:82px;overflow:auto}.pdm-release-parameter-slot>.pdm-release-reason{height:100%;box-sizing:border-box}.pdm-release-parameter-slot>.pdm-release-reason textarea{height:60px;box-sizing:border-box;resize:none}.release-detail-picker,.release-change-reason-picker{grid-column:1/-1;margin:0;padding:10px;border:1px solid var(--pdm-border);border-radius:7px}.release-detail-picker legend,.release-change-reason-picker legend{padding:0 5px;font-weight:600}.release-detail-picker .pdm-table-scroll{border:1px solid var(--pdm-border);border-radius:5px}.release-detail-picker table{width:100%;min-width:0;table-layout:fixed}.release-detail-picker col:nth-child(1){width:6%}.release-detail-picker col:nth-child(2){width:5%}.release-detail-picker col:nth-child(3){width:12%}.release-detail-picker col:nth-child(4){width:13%}.release-detail-picker col:nth-child(5){width:15%}.release-detail-picker col:nth-child(6){width:8%}.release-detail-picker col:nth-child(7){width:9%}.release-detail-picker col:nth-child(8){width:10%}.release-detail-picker col:nth-child(9){width:12%}.release-detail-picker col:nth-child(10){width:10%}.release-detail-picker th,.release-detail-picker td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}.release-detail-picker td{height:32px}.release-detail-picker th,.release-detail-picker td.is-release-centered{text-align:center}.release-detail-picker th:nth-child(8),.release-detail-picker td:nth-child(8){background:#fffbeb}.release-detail-picker td.is-release-multiplied{font-weight:600}.long-lead-quantity-input{width:100%;min-width:0;height:26px;box-sizing:border-box;text-align:center}.pdm-release-draft-management{justify-content:flex-end;margin-bottom:8px}.release-change-reason-picker{display:flex;height:100%;box-sizing:border-box;flex-wrap:wrap;align-content:flex-start;gap:8px 18px}.release-change-reason-picker label{display:flex;align-items:center;gap:5px}.long-lead-tag,.release-change-tag,.release-inclusion-tag,.release-status-tag{display:inline-flex;align-items:center;min-height:20px;padding:0 6px;border-radius:10px}.long-lead-tag,.release-change-tag{background:var(--pdm-orange-soft);color:var(--pdm-orange)}.release-inclusion-tag{background:var(--pdm-theme-accent-soft);color:var(--pdm-blue)}.release-status-tag{background:var(--pdm-surface-soft);color:var(--pdm-muted)}.release-change-tag.is-新增{background:var(--pdm-green-soft);color:var(--pdm-green)}.release-change-tag.is-修改{background:var(--pdm-orange-soft);color:var(--pdm-orange)}.release-change-tag.is-删除{background:var(--pdm-danger-soft);color:var(--pdm-danger)}.pdm-release-create-form .pdm-release-reason{grid-column:1/-1}.emergency-decision{border-color:#f59e0b;background:#fffbeb}.pdm-release-frozen-snapshot{margin:12px 0;border:1px solid var(--pdm-border);border-radius:7px;overflow:hidden}.pdm-release-frozen-snapshot>header{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:9px 11px;background:var(--pdm-surface-soft)}.pdm-release-frozen-snapshot>header>div:first-child{display:grid;gap:2px;min-width:0}.pdm-release-frozen-snapshot>header small{color:var(--pdm-muted)}.pdm-frozen-view-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;white-space:nowrap}.pdm-view-switch{display:inline-flex;padding:2px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface)}.pdm-view-switch button{height:var(--pdm-tab-secondary);padding:0 9px;border:0;border-radius:4px;background:transparent;color:var(--pdm-muted)}.pdm-view-switch button.is-active{background:#0f9d90;color:var(--pdm-surface)}.pdm-release-diff-summary{display:flex;align-items:center;gap:10px;padding:7px 11px;border-top:1px solid var(--pdm-border);border-bottom:1px solid var(--pdm-border)}.pdm-release-diff-summary small{margin-left:auto;color:var(--pdm-muted)}.pdm-release-diff-summary .is-added{color:var(--pdm-green)}.pdm-release-diff-summary .is-modified{color:var(--pdm-orange)}.pdm-release-diff-summary .is-removed{color:var(--pdm-danger)}.pdm-release-frozen-snapshot .pdm-table-scroll{max-height:230px}.pdm-item-comments-load-error{margin:0;padding:7px 11px}.pdm-item-comment-action{border:0;background:transparent;color:var(--pdm-green);white-space:nowrap}.pdm-frozen-item-name{padding-left:7px}.pdm-frozen-item-name small{display:block;margin-top:2px;color:var(--pdm-muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-structure-marker{margin-right:4px;color:var(--pdm-green)}.pdm-release-integration-note{margin:0;padding:8px 11px;color:var(--pdm-green);background:var(--pdm-green-soft);border-top:1px solid var(--pdm-green-border)}.pdm-release-completion-status{margin:0 0 8px;padding:8px 11px;border:1px solid var(--pdm-green-border);border-radius:7px;background:var(--pdm-green-soft);color:var(--pdm-green);font-weight:600}@media(max-width:900px){.pdm-release-type-row{grid-template-columns:repeat(2,minmax(0,1fr))}.pdm-release-frozen-snapshot>header{align-items:flex-start;flex-direction:column}.pdm-frozen-view-actions{width:100%;justify-content:space-between}}
 .release-detail-picker col:nth-child(8){width:11%}.release-detail-picker col:nth-child(9){width:11%}.release-detail-picker th:nth-child(8){white-space:normal;text-overflow:clip}
-.release-detail-picker{display:flex;width:100%;min-width:0;min-height:0;box-sizing:border-box;flex-direction:column}.release-detail-picker .pdm-table-scroll{width:100%;height:clamp(220px,calc(100dvh - 440px),630px);max-width:100%;max-height:none;box-sizing:border-box;overflow-x:hidden;overflow-y:auto}.release-detail-pagination,.release-list-pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding-top:8px;color:var(--pdm-muted)}.release-detail-pagination span,.release-list-pagination span{margin-right:auto}.release-detail-pagination button,.release-list-pagination button{width:28px;height:28px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface);color:var(--pdm-text);cursor:pointer}.release-detail-pagination button:disabled,.release-list-pagination button:disabled{cursor:not-allowed;opacity:.45}.release-detail-pagination strong,.release-list-pagination strong{min-width:54px;text-align:center;color:var(--pdm-text)}
+.release-detail-picker{display:flex;width:100%;min-width:0;min-height:0;box-sizing:border-box;flex-direction:column}.release-detail-picker .pdm-table-scroll{width:100%;height:clamp(220px,calc(100dvh - 440px),630px);max-width:100%;max-height:none;box-sizing:border-box;overflow-x:hidden;overflow-y:auto}.release-detail-pagination,.release-list-pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding-top:8px;color:var(--pdm-muted)}.release-detail-pagination span,.release-list-pagination span{margin-right:auto}.release-detail-pagination button,.release-list-pagination button{width:var(--pdm-symbol-compact);height:var(--pdm-symbol-compact);border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface);color:var(--pdm-text);cursor:pointer}.release-detail-pagination button:disabled,.release-list-pagination button:disabled{cursor:not-allowed;opacity:.45}.release-detail-pagination strong,.release-list-pagination strong{min-width:54px;text-align:center;color:var(--pdm-text)}
 .pdm-release-frozen-snapshot{display:flex;min-width:0;min-height:0;flex-direction:column}.pdm-release-frozen-snapshot .pdm-table-scroll{width:100%;height:clamp(220px,calc(100dvh - 470px),620px);max-width:100%;max-height:none;box-sizing:border-box;overflow-x:hidden;overflow-y:auto}.pdm-release-frozen-snapshot .release-list-pagination{padding:8px 11px}
 .pdm-release-frozen-table{width:100%;min-width:0;table-layout:fixed}.pdm-release-frozen-table col:nth-child(1){width:5%}.pdm-release-frozen-table col:nth-child(2){width:12%}.pdm-release-frozen-table col:nth-child(3){width:21%}.pdm-release-frozen-table col:nth-child(4){width:15%}.pdm-release-frozen-table col:nth-child(5){width:10%}.pdm-release-frozen-table col:nth-child(6){width:13%}.pdm-release-frozen-table col:nth-child(7),.pdm-release-frozen-table col:nth-child(8){width:7%}.pdm-release-frozen-table col:nth-child(9){width:10%}.pdm-release-frozen-table th,.pdm-release-frozen-table td{white-space:normal;overflow-wrap:anywhere;vertical-align:middle}.pdm-release-frozen-table th,.pdm-release-frozen-table td.is-release-centered{text-align:center}
 .pdm-item-comment-backdrop{z-index:3200}.pdm-item-comment-dialog{width:min(560px,calc(100vw - 32px));max-height:min(680px,calc(100vh - 32px));display:grid;grid-template-rows:auto minmax(120px,1fr) auto;gap:12px;padding:16px;border-radius:10px;background:var(--pdm-surface);box-shadow:0 18px 60px rgb(15 23 42 / 24%)}.pdm-item-comment-dialog>header,.pdm-item-comment-dialog>footer,.pdm-item-comment-dialog form>footer{display:flex;align-items:center;justify-content:space-between;gap:8px}.pdm-item-comment-dialog>header>div{display:grid;gap:3px}.pdm-item-comment-dialog>header small{color:var(--pdm-muted)}.pdm-item-comment-history{min-height:120px;overflow:auto;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface-soft)}.pdm-item-comment-history article{padding:10px 12px;border-bottom:1px solid var(--pdm-border);background:var(--pdm-surface)}.pdm-item-comment-history article:last-child{border-bottom:0}.pdm-item-comment-history p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.pdm-item-comment-history small{display:block;margin-top:5px;color:var(--pdm-muted)}.pdm-item-comment-history>p{margin:0;padding:14px;color:var(--pdm-muted)}.pdm-item-comment-dialog form{display:grid;gap:8px}.pdm-item-comment-dialog form label{display:grid;gap:5px}.pdm-item-comment-dialog textarea{width:100%;box-sizing:border-box;resize:vertical}.pdm-item-comment-dialog form>footer{justify-content:flex-end}.pdm-item-comment-dialog>footer{justify-content:flex-end}.pdm-item-comment-dialog>footer small{margin-right:auto;color:var(--pdm-muted)}
@@ -1246,4 +1306,13 @@ async function saveItemComment() {
 .pdm-release-parameter-slot>.pdm-inline-warning{margin:0 0 6px;padding:6px 8px;border-radius:5px;background:var(--pdm-orange-soft);color:var(--pdm-orange)}
 .pdm-release-create-header.has-drawing-delivery{grid-template-rows:auto minmax(82px,auto);min-height:210px}.pdm-release-create-header.has-drawing-delivery .pdm-release-type-row{grid-template-columns:repeat(4,minmax(0,1fr));row-gap:8px}.pdm-release-create-header.has-drawing-delivery .pdm-release-draft-actions{grid-column:1/-1}.pdm-release-assembly-note{margin-left:5px;color:var(--pdm-green);font-size:11px;font-weight:600;line-height:1.2}
 @media(max-width:900px){.pdm-release-create-header.has-drawing-delivery .pdm-release-type-row{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.release-detail-picker table.has-delivery td>select{appearance:none;-webkit-appearance:none;background-image:none;padding:0 2px;text-align:center;cursor:pointer}
+.release-center .release-detail-picker :is(th,td),
+.release-center .pdm-release-frozen-table :is(th,td){text-align:center;vertical-align:middle}
+.release-center .release-detail-picker td :is(input,select){text-align:center}
+.release-center .pdm-frozen-item-name{padding-left:0}
+.release-center .release-detail-picker :is(th,td),
+.release-center .pdm-release-frozen-table :is(th,td){text-align:center;vertical-align:middle}
+.release-center .release-detail-picker td :is(input,select){text-align:center}
+.release-center .pdm-frozen-item-name{padding-left:0}
 </style>

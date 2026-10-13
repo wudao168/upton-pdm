@@ -1,4 +1,54 @@
 import type { ProjectBudget, BudgetLine, SettlementLine } from './projectBudget'
+import { diagnosticRequestId, recordClientDiagnostic } from './clientDiagnostics'
+
+export interface ClientLogRow {
+  id: string; deviceId: string; machine: string; username: string; component: string; kind: string
+  version: string; uiVersion: string; startedAt: string; endedAt: string; receivedAt: string; entryCount: number; bytes: number
+}
+export interface ClientLogPage { items: ClientLogRow[]; total: number; pageSize: number; runtimeDays: number; errorDays: number }
+export const readClientLogs = (query: URLSearchParams, token: string) => requestJson<ClientLogPage>(`/api/client-logs?${query}`, {}, token)
+export async function downloadClientLogs(query: URLSearchParams, token: string) {
+  let response: Response
+  try { response = await fetch(`${apiBase}/api/client-logs/download?${query}`, { headers: authenticatedHeaders(token), cache: 'no-store' }) }
+  catch { throw new Error('无法连接日志服务器，请检查网络后重试。') }
+  if (!response.ok) {
+    if (response.status === 403) throw new Error('只有管理员可以下载客户端日志。')
+    if (response.status === 401) throw new Error('登录已过期，请重新登录。')
+    if (response.status === 404) throw new Error('没有符合条件的日志，请调整筛选条件。')
+    if (response.status === 400) throw new Error('日志包过大或筛选条件无效，请选择一台计算机并缩小时间范围。')
+    throw new Error('日志下载失败，请稍后重试或联系管理员检查日志存储。')
+  }
+  try { await saveDownload(await response.blob(), `UPLM-客户端诊断-${new Date().toISOString().slice(0, 10)}.zip`, null) }
+  catch { throw new Error('诊断包保存失败，请检查浏览器下载设置后重试。') }
+}
+import type { OplInput, OplIssue, OplView } from './projectOpl'
+import type { DingTalkSettings, DingTalkBinding } from './dingtalk'
+
+export const readDingTalkSettings = (token: string) => requestJson<DingTalkSettings>('/api/settings/dingtalk', {}, token)
+export const saveDingTalkSettings = (input: { robotCode?: string; enabled: boolean; corpId: string; appKey: string; appSecret: string; publicUrl: string; expectedRowVersion: number }, token: string) => requestJson<DingTalkSettings>('/api/settings/dingtalk', { method: 'PUT', body: JSON.stringify(input) }, token)
+export const readDingTalkBinding = (id: string, token: string) => requestJson<DingTalkBinding>(`/api/projects/${id}/dingtalk`, {}, token)
+export const saveDingTalkBinding = (id: string, input: { groupId: string | null; expectedRowVersion: number }, token: string) => requestJson<DingTalkBinding>(`/api/projects/${id}/dingtalk`, { method: 'PUT', body: JSON.stringify(input) }, token)
+export const publishDingTalkEntry = (id: string, token: string) => requestJson<{ sent: boolean; message: string }>(`/api/projects/${id}/dingtalk/entry`, { method: 'POST' }, token)
+
+export function readProjectOpl(projectId: string, token: string, includePeople = true) {
+  return requestJson<OplView>(`/api/projects/${projectId}/opl${includePeople ? '' : '?includePeople=false'}`, {}, token)
+}
+export function completeProjectOpl(projectId: string, id: string, expectedRowVersion: number, token: string) {
+  return requestJson<OplIssue>(`/api/projects/${projectId}/opl/${id}/complete`, { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token)
+}
+export function saveProjectOpl(projectId: string, id: string | null, input: OplInput, files: File[], token: string) {
+  const body = new FormData()
+  body.append('data', JSON.stringify(input))
+  files.forEach(file => body.append('files', file))
+  return requestJson<OplIssue>(`/api/projects/${projectId}/opl${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body }, token)
+}
+export async function readOplAttachment(projectId: string, issueId: string, attachmentId: string, token: string) {
+  let response: Response
+  try { response = await fetch(`${apiBase}/api/projects/${projectId}/opl/${issueId}/attachments/${attachmentId}`, { headers: authenticatedHeaders(token) }) }
+  catch { throw new Error('无法读取附件，请检查网络后重试。') }
+  if (!response.ok) throw new Error(response.status === 401 ? '登录已过期，请重新登录后查看附件。' : '附件读取失败，请刷新清单或联系管理员检查文件。')
+  return response.blob()
+}
 import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EngineeringKit, EngineeringKitExpansion, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialApprovalRule, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialImportPreview, MaterialImportResult, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectProcurementTrackingResult, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, U9ProcurementSyncSettings, U9ProcurementSyncStatusResponse, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
 import type { CadPropertyWritebackVersion } from './types'
 import type { DrawingDeliveryOverride, ProductionDrawingItem } from './types'
@@ -228,6 +278,7 @@ interface ApiProject {
   customerName?: string | null
   customerProjectSequence?: number | null
   deviceModel?: string | null
+  createdAt?: string | null
   signedDate?: string | null
   quantity?: number
   parentProjectId?: string | null
@@ -329,6 +380,7 @@ interface ApiBomItem {
   isComplete: boolean
   sourceDocumentId?: string | null
   sourceConfiguration?: string | null
+  sourceInstancePath?: string | null
   source?: string | null
   isManuallyOverridden?: boolean
   isPendingRemoval?: boolean
@@ -337,6 +389,8 @@ interface ApiBomItem {
   isManuallyRetained?: boolean
   isManuallyExcluded?: boolean
   isReleaseExcluded?: boolean
+  releaseReviewTokens?: Record<string, string>
+  releaseConfirmation?: BomItem['releaseConfirmation']
   releaseExclusionReason?: string | null
   reconciliationStatus?: string | null
   reconciliationNote?: string | null
@@ -370,6 +424,7 @@ interface ApiApprovalTask {
 }
 
 interface ApiReleasePackage {
+  rootDocumentId?: string | null
   id: string
   number: string
   state: number | string
@@ -447,6 +502,9 @@ async function requestJson<T>(path: string, init: RequestInit = {}, token?: stri
     }
   }
   const headers = new Headers(init.headers)
+  const diagnosticId = diagnosticRequestId()
+  headers.set('X-PDM-Request-ID', diagnosticId)
+  const requestStarted = performance.now()
   headers.set('Accept', 'application/json')
   if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json')
   if (token) headers.set('Authorization', `Bearer ${token}`)
@@ -457,8 +515,10 @@ async function requestJson<T>(path: string, init: RequestInit = {}, token?: stri
   try {
     response = await fetch(`${apiBase}${path}`, { ...init, headers, cache: 'no-store' })
   } catch {
+    recordClientDiagnostic('error', '接口连接失败', `${init.method ?? 'GET'} ${path.split('?')[0]}`, diagnosticId)
     throw new PdmApiError('无法连接 PLM 服务。请检查网络连接或联系管理员确认服务是否运行。', 0)
   }
+  recordClientDiagnostic(response.status >= 500 ? 'error' : 'runtime', '接口结果', `${init.method ?? 'GET'} ${path.split('?')[0]}；状态=${response.status}；耗时=${Math.round(performance.now() - requestStarted)}毫秒`, diagnosticId)
   if (!response.ok) {
     if (response.status === 401 && path !== '/api/auth/login' && path !== '/api/auth/resume') {
       window.dispatchEvent(new CustomEvent('pdm-session-expired', { detail: { token } }))
@@ -1178,6 +1238,10 @@ async function saveDownload(blob: Blob, fileName: string, handle: Awaited<Return
   window.setTimeout(() => URL.revokeObjectURL(url), 60000)
 }
 
+export async function downloadGeneratedFile(blob: Blob, fileName: string): Promise<void> {
+  await saveDownload(blob, fileName, await chooseDownloadFile(fileName))
+}
+
 export async function downloadDocumentPreviewFile(documentId: string, versionId: string, fileName: string, token: string, progress?: DownloadProgress): Promise<void> {
   if (progress) {
     const handle = await chooseDownloadFile(fileName)
@@ -1581,6 +1645,12 @@ export async function setBomReleaseExclusion(projectId: string, itemIds: string[
   return saved.map(mapBomItem)
 }
 
+export function confirmBomRelease(projectId: string, tokens: Record<string, string>, confirmed: boolean, reason: string, token: string) {
+  return requestJson(`/api/projects/${projectId}/boms/items/release-confirmation`, {
+    method: 'POST', body: JSON.stringify({ tokens, confirmed, reason }),
+  }, token)
+}
+
 export async function restoreBomItemsFromSource(projectId: string, itemIds: string[], token: string): Promise<BomItem[]> {
   const saved = await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/items/restore-source`, {
     method: 'POST', body: JSON.stringify({ itemIds }),
@@ -1928,9 +1998,9 @@ export function readProjectPlanPortfolio(projectId: string, token: string): Prom
   return requestJson(`/api/projects/${projectId}/plan/portfolio`, {}, token)
 }
 
-export async function readProjectWorkbench(view: string, token: string): Promise<import('./projectWorkbench').WorkbenchData> {
+export async function readProjectWorkbench(view: string, token: string, scope = '', options: { summaryOnly?: boolean; projectId?: string } = {}): Promise<import('./projectWorkbench').WorkbenchData> {
   type Data = import('./projectWorkbench').WorkbenchData
-  const data = await requestJson<Omit<Data, 'projects'> & { projects: Array<Omit<Data['projects'][number], 'project'> & { project: ApiProject }> }>(`/api/workbench${view ? `?view=${encodeURIComponent(view)}` : ''}`, {}, token)
+  const data = await requestJson<Omit<Data, 'projects'> & { projects: Array<Omit<Data['projects'][number], 'project'> & { project: ApiProject }> }>(`/api/workbench?view=${encodeURIComponent(view)}${scope ? `&scope=${encodeURIComponent(scope)}` : ''}${options.summaryOnly ? '&summaryOnly=true' : ''}${options.projectId ? `&projectId=${encodeURIComponent(options.projectId)}` : ''}`, {}, token)
   return { ...data, projects: data.projects.map(item => ({ ...item, project: mapProject(item.project) })) }
 }
 
@@ -2324,6 +2394,7 @@ function mapProject(project: ApiProject): ProjectSummary {
     customerProjectSequence: project.customerProjectSequence ?? undefined,
     deviceModel: project.deviceModel ?? undefined,
     signedDate: project.signedDate ?? undefined,
+    createdAt: project.createdAt ?? undefined,
     quantity: project.quantity ?? 1,
     parentProjectId: project.parentProjectId ?? undefined,
     rootProjectId: project.rootProjectId ?? undefined,
@@ -2384,9 +2455,10 @@ function mapReferenceNode(
   return {
     id: node.nodeId || node.instancePath,
     instancePath: node.instancePath,
+    isVirtualGroup: isRoot && !node.documentId && node.instancePath === 'project' && !node.fileName,
     documentId: documentId ?? undefined,
     drawingNumber: document?.drawingNumber ?? node.fileName.replace(/\.[^.]+$/, ''),
-    name: document?.name || meaningfulReferenceName(node.displayName, node.fileName),
+    name: isRoot && !node.documentId && node.instancePath === 'project' && !node.fileName ? '项目装配体（汇总）' : document?.name || meaningfulReferenceName(node.displayName, node.fileName),
     fileName: node.fileName,
     kind: mapDocumentKind(node.kind),
     configuration: node.configuration || '默认',
@@ -2545,6 +2617,7 @@ function mapBomItem(item: ApiBomItem): BomItem {
     complete: item.isComplete,
     sourceDocumentId: item.sourceDocumentId ?? undefined,
     sourceConfiguration: item.sourceConfiguration ?? undefined,
+    sourceInstancePath: item.sourceInstancePath ?? undefined,
     source: ['Auto', 'MaterialRelation', 'EngineeringKit'].includes(item.source ?? '') ? item.source as BomItem['source'] : 'Manual',
     engineeringKitReferenceId: item.engineeringKitReferenceId ?? undefined,
     engineeringKitId: item.engineeringKitId ?? undefined,
@@ -2560,6 +2633,8 @@ function mapBomItem(item: ApiBomItem): BomItem {
     manuallyRetained: item.isManuallyRetained ?? false,
     manuallyExcluded: item.isManuallyExcluded ?? false,
     releaseExcluded: item.isReleaseExcluded ?? false,
+    releaseReviewTokens: item.releaseReviewTokens,
+    releaseConfirmation: item.releaseConfirmation,
     releaseExclusionReason: item.releaseExclusionReason ?? undefined,
     reconciliationStatus: item.reconciliationStatus ?? undefined,
     reconciliationNote: item.reconciliationNote ?? undefined,
@@ -2644,6 +2719,7 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
 
   return {
     id: releasePackage.id, number: releasePackage.number, state, steps,
+    rootDocumentId: releasePackage.rootDocumentId,
     publishedPath: releasePackage.publishedPath ?? undefined, publishError: releasePackage.publishError ?? undefined,
     previewState: releasePackage.previewState ?? undefined, previewError: releasePackage.previewError ?? undefined,
     previewAttempts: releasePackage.previewAttempts ?? 0, previewUpdatedAt: releasePackage.previewUpdatedAt ?? undefined,

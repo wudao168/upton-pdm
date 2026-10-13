@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <Version>1.1.2</Version>
+    <Version>1.1.3</Version>
     <TargetFramework>net48</TargetFramework>
     <RootNamespace>Upton.Pdm.PreviewAgent</RootNamespace>
     <AssemblyName>Upton.Pdm.PreviewAgent</AssemblyName>

@@ -201,6 +201,49 @@ public sealed partial class MySqlPdmRepository
         if (affected != 1) throw new PdmConflictException("图档编辑状态已经变化，请刷新后重试。");
     }
 
+    public async Task<PdmDocument> ForceReleaseOfflineCheckoutAsync(Guid documentId, Guid? expectedSessionId, DateTimeOffset heartbeatBefore, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE document SET checked_out_by=NULL,checked_out_at=NULL,checkout_session_id=NULL,checkout_machine=NULL,
+                checkout_last_heartbeat_at=NULL,checkout_lease_expires_at=NULL,checkout_release_requested_by=NULL,
+                checkout_release_requested_at=NULL,checkout_release_request_reason=NULL,updated_at=@Now,row_version=row_version+1
+            WHERE id=@DocumentId AND checked_out_by IS NOT NULL AND checkout_session_id <=> @ExpectedSessionId
+              AND COALESCE(checkout_last_heartbeat_at,checked_out_at,updated_at)<@HeartbeatBefore
+              AND (checkout_lease_expires_at IS NULL OR checkout_lease_expires_at<@Now)
+            """, new { DocumentId = documentId, ExpectedSessionId = expectedSessionId, HeartbeatBefore = heartbeatBefore.UtcDateTime, Now = now.UtcDateTime },
+            transaction, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("编辑人员已恢复连接或编辑会话已变化，请刷新后重试。");
+        var updated = await FindDocumentAsync(connection, transaction, documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
+        await transaction.CommitAsync(cancellationToken);
+        return updated;
+    }
+
+    public async Task<PdmDocument> CloseCheckoutAsync(Guid documentId, string actor, Guid sessionId, DateTimeOffset checkedOutAt, string sha256, bool draftPreserved, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var current = await connection.QuerySingleOrDefaultAsync<EditLockRow>(new CommandDefinition(
+            "SELECT checked_out_by,checkout_session_id,checked_out_at,row_version FROM document WHERE id=@DocumentId FOR UPDATE",
+            new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken)) ?? throw new PdmNotFoundException("图档不存在。");
+        EnsureSessionOwner(current, actor, sessionId, "自动结束编辑");
+        if (current.CheckedOutAt != checkedOutAt.UtcDateTime) throw new PdmConflictException("图档已重新开始编辑，已忽略旧的关闭请求。");
+        if (!draftPreserved)
+        {
+            var latestHash = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
+                "SELECT sha256 FROM document_version WHERE document_id=@DocumentId ORDER BY created_at DESC LIMIT 1",
+                new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken));
+            if (string.IsNullOrWhiteSpace(latestHash) || !string.Equals(latestHash, sha256, StringComparison.OrdinalIgnoreCase))
+                throw new PdmConflictException("本地图档有未提交修改，请先保存可恢复草稿再结束编辑。");
+        }
+        await ReleaseEditLockAsync(connection, transaction, documentId, actor, sessionId, current.RowVersion, cancellationToken);
+        var updated = await FindDocumentAsync(connection, transaction, documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
+        await transaction.CommitAsync(cancellationToken);
+        return updated;
+    }
+
     private static void EnsureSessionOwner(EditLockRow current, string actor, Guid sessionId, string action)
     {
         if (!string.Equals(current.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase) || current.CheckoutSessionId != sessionId)
@@ -211,6 +254,7 @@ public sealed partial class MySqlPdmRepository
     {
         public string? CheckedOutBy { get; init; }
         public Guid? CheckoutSessionId { get; init; }
+        public DateTime? CheckedOutAt { get; init; }
         public long RowVersion { get; init; }
     }
 

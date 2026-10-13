@@ -39,7 +39,8 @@ public sealed class CheckInUploadHashesTests : IDisposable
     {
         var upload = Write("upload.sldprt", new byte[] { 1, 2 });
         var source = Write("source.sldprt", new byte[] { 3, 4 });
-        var hashes = CheckInUploadHashes.Read(upload, source, null, CancellationToken.None);
+        var hashes = CheckInUploadHashes.Read(upload, source, null, CancellationToken.None,
+            Convert.ToHexString(SHA256.HashData(new byte[] { 3, 4 })));
         Assert.Equal(Convert.ToHexString(SHA256.HashData(new byte[] { 1, 2 })), hashes.Upload);
         Assert.Equal(Convert.ToHexString(SHA256.HashData(new byte[] { 3, 4 })), hashes.Source);
     }
@@ -48,6 +49,39 @@ public sealed class CheckInUploadHashesTests : IDisposable
     public void CancelledHashDoesNotOpenFiles()
     {
         Assert.Throws<OperationCanceledException>(() => CheckInUploadHashes.Read("missing", "missing", null, new CancellationToken(true)));
+    }
+
+    [Fact]
+    public void SourceChangedAfterSaveAsIsRejected()
+    {
+        var source = Write("source.slddrw", new byte[] { 1, 2 });
+        var upload = Write("upload.slddrw", new byte[] { 3, 4 });
+        var beforeCopy = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(source)));
+        File.WriteAllBytes(source, new byte[] { 5, 6 });
+        var error = Assert.Throws<IOException>(() => CheckInUploadHashes.Read(upload, source, null, CancellationToken.None, beforeCopy));
+        Assert.Contains("存档期间发生变化", error.Message);
+    }
+
+    [Fact]
+    public void SaveAsWithoutPreCopyBaselineIsRejected()
+    {
+        var source = Write("source.slddrw", new byte[] { 1, 2 });
+        var error = Assert.Throws<IOException>(() => CheckInUploadHashes.Read(source, source, null, CancellationToken.None));
+        Assert.Contains("缺少存档前", error.Message);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SourceChangedDuringUploadIsRejectedBeforeRegistration(bool exactCopy)
+    {
+        var source = Write("source.slddrw", new byte[] { 1, 2 });
+        var upload = Write("upload.slddrw", exactCopy ? new byte[] { 1, 2 } : new byte[] { 3, 4 });
+        var expected = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(source)));
+        var hashes = CheckInUploadHashes.Read(upload, source, exactCopy ? expected : null, CancellationToken.None, expected);
+        CheckInUploadHashes.VerifySource(source, hashes.Source, CancellationToken.None);
+        File.WriteAllBytes(source, new byte[] { 5, 6 });
+        Assert.Throws<IOException>(() => CheckInUploadHashes.VerifySource(source, hashes.Source, CancellationToken.None));
     }
 
     private string Write(string name, byte[] bytes)

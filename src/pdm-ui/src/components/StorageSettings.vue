@@ -158,9 +158,9 @@ function mappingSource(mapping: BomPropertyMapping) {
 }
 
 async function saveCheckoutPolicy() {
-  const ordered = [storageDraft.checkoutReminderHours, storageDraft.checkoutStrongReminderHours, storageDraft.checkoutOverdueHours, storageDraft.checkoutForceReleaseHours]
+  const ordered = [storageDraft.checkoutReminderHours, storageDraft.checkoutStrongReminderHours, storageDraft.checkoutOverdueHours]
   if (ordered.some(value => !Number.isInteger(value) || value < 1) || ordered.some((value, index) => index > 0 && value <= ordered[index - 1])) {
-    ElMessage.warning('提醒、强提醒、超时和强制释放时间必须为依次增大的整数')
+    ElMessage.warning('提醒、强提醒和超时时间必须为依次增大的整数')
     return
   }
   try {
@@ -285,7 +285,7 @@ async function saveCounters(row: { id: string; project: number; serial: number }
       </el-tab-pane>
       <el-tab-pane label="编辑权限" name="checkout-policy">
         <section class="pdm-panel pdm-manager-panel">
-          <header class="pdm-manager-heading"><div><h2>防止长时间占用</h2><p>租约过期只标记离线，不自动释放；达到强制释放时限后仍需授权人员填写原因。</p></div></header>
+          <header class="pdm-manager-heading"><div><h2>自动结束编辑与离线保护</h2><p>关闭图档后，插件校验文件并保留必要草稿，自动结束编辑。断网期间保留占用；超过租约及离线宽限后，本人或授权人员可处理异常占用。在线编辑不会因时长被强制释放。</p></div></header>
           <div class="pdm-settings-form pdm-lock-policy-grid">
             <label>插件心跳（秒）<input v-model.number="storageDraft.checkoutHeartbeatSeconds" type="number" min="30" max="600"><small>建议180秒</small></label>
             <label>编辑租约（分钟）<input v-model.number="storageDraft.checkoutLeaseMinutes" type="number" min="2" max="60"><small>建议15分钟，至少为心跳的两倍</small></label>
@@ -293,7 +293,6 @@ async function saveCounters(row: { id: string; project: number; serial: number }
             <label>首次提醒（小时）<input v-model.number="storageDraft.checkoutReminderHours" type="number" min="1" max="720"><small>建议4小时</small></label>
             <label>强提醒（小时）<input v-model.number="storageDraft.checkoutStrongReminderHours" type="number" min="2" max="720"><small>建议8小时</small></label>
             <label>超时标记（小时）<input v-model.number="storageDraft.checkoutOverdueHours" type="number" min="3" max="720"><small>建议24小时</small></label>
-            <label>允许强制释放（小时）<input v-model.number="storageDraft.checkoutForceReleaseHours" type="number" min="4" max="720"><small>建议48小时；旧会话将禁止提交</small></label>
           </div>
           <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveCheckoutPolicy">保存编辑权限策略</button></div>
         </section>

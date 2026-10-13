@@ -46,7 +46,7 @@ public partial class MainWindow : Window
     private const uint MenuSeparator = 0x0800;
     private readonly string[] startupArgs = Environment.GetCommandLineArgs().Skip(1).ToArray();
     private readonly bool startedWithWindows = Environment.GetCommandLineArgs().Any(argument => string.Equals(argument, "--startup", StringComparison.OrdinalIgnoreCase));
-    private readonly HttpClient apiClient = new() { Timeout = TimeSpan.FromMinutes(5) };
+    private readonly HttpClient apiClient = new(new ClientDiagnosticHandler()) { Timeout = TimeSpan.FromMinutes(5) };
     private readonly CancellationTokenSource bootstrapLifetime = new();
     private readonly SolidWorksOpenBridge solidWorksBridge = new();
     private readonly LightweightPreviewProvider lightweightPreviewProvider = new(20);
@@ -54,6 +54,7 @@ public partial class MainWindow : Window
     // 设计树缩略图：同一份本地只读缓存缩略图，按小尺寸生成并缓存，限制并发避免一次刷 50 行卡顿。
     private readonly LightweightPreviewProvider treeThumbnailProvider = new(512);
     private readonly SemaphoreSlim treeThumbnailGate = new(2, 2);
+    private readonly SemaphoreSlim previewOpenGate = new(1, 1);
     private string accessToken = string.Empty;
     private string activeCompanyId = string.Empty;
     private string currentTheme = "a";
@@ -384,6 +385,8 @@ public partial class MainWindow : Window
 
     private static void AppendClientDiagnostic(string message)
     {
+        message = ClientLogRedaction.Clean(message);
+        ClientDiagnostics.Record(message.Contains("失败") ? "error" : "runtime", "客户端", message);
         try
         {
             var directory = Path.Combine(
@@ -481,7 +484,7 @@ public partial class MainWindow : Window
             var targetUri = new Uri(new Uri(bootstrapConfiguration.ApiBaseUrl), requestUri.PathAndQuery.TrimStart('/'));
             using (var request = new HttpRequestMessage(new HttpMethod(args.Request.Method), targetUri))
             {
-                foreach (var name in new[] { "Accept", "Authorization", "X-Company-Id" })
+                foreach (var name in new[] { "Accept", "Authorization", "X-Company-Id", "X-PDM-Request-ID" })
                 {
                     try
                     {
@@ -619,6 +622,7 @@ public partial class MainWindow : Window
         }
 
         var type = typeValue as string;
+        if (TryRecordUiDiagnostic(type, message)) return;
         if (type == "credentials-request")
         {
             _ = PublishRememberedCredentialsAsync();
@@ -721,11 +725,13 @@ public partial class MainWindow : Window
         {
             accessToken = token;
             activeCompanyId = TryReadPayloadString(message, "activeCompanyId", out var companyId) ? companyId : string.Empty;
+            ClientDiagnostics.Bind(bootstrapConfiguration.ApiBaseUrl, accessToken, activeCompanyId);
             return;
         }
 
         if (type == "session-clear")
         {
+            ClientDiagnostics.Pause();
             accessToken = string.Empty;
             activeCompanyId = string.Empty;
             HideEmbeddedPreview(true);
@@ -916,7 +922,7 @@ public partial class MainWindow : Window
     private async Task PublishSolidWorksCapabilityAsync()
     {
         if (WorkspaceView.CoreWebView2 == null) return;
-        var detail = new { available = solidWorksBridge.IsAvailable };
+        var detail = new { available = solidWorksBridge.IsAvailable, connected = await solidWorksBridge.IsConnectedAsync() };
         var script = $"window.dispatchEvent(new CustomEvent('pdm-solidworks-capability', {{ detail: {Serialize(detail)} }}));";
         try { await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script); }
         catch (InvalidOperationException) { }
@@ -1120,6 +1126,7 @@ public partial class MainWindow : Window
                 response.EnsureSuccessStatusCode();
             }
             ClientServerSettingsStore.Save(normalizedAddress);
+            ClientDiagnostics.Pause();
             HideEmbeddedPreview(true);
             HideReviewOverlay();
             accessToken = string.Empty;
@@ -1530,6 +1537,17 @@ public partial class MainWindow : Window
     private async Task PreviewDocumentAsync(IReadOnlyDictionary<string, object> payload)
     {
         var requestGeneration = Interlocked.Increment(ref previewRequestGeneration);
+        await previewOpenGate.WaitAsync();
+        try
+        {
+            if (requestGeneration == previewRequestGeneration)
+                await PreviewDocumentCoreAsync(payload, requestGeneration);
+        }
+        finally { previewOpenGate.Release(); }
+    }
+
+    private async Task PreviewDocumentCoreAsync(IReadOnlyDictionary<string, object> payload, int requestGeneration)
+    {
         var previewStep = "读取预览版本";
         var nativeOpenStarted = false;
         previewDocumentReady = false;
@@ -1641,7 +1659,8 @@ public partial class MainWindow : Window
             try
             {
                 EnsureEmbeddedPreview();
-                embeddedPreview!.OpenDocument(cachedFile, markupPath);
+                ApplyPreviewBounds();
+                await embeddedPreview!.OpenDocumentAsync(cachedFile, markupPath);
             }
             finally
             {
@@ -1873,6 +1892,7 @@ public partial class MainWindow : Window
         var message = serializer.Deserialize<Dictionary<string, object>>(messageJson);
         if (message == null || !message.TryGetValue("type", out var typeValue)) return;
         var type = typeValue as string;
+        if (TryRecordUiDiagnostic(type, message)) return;
         if (type == "preview-host-command" && TryReadPayloadString(message, "command", out var previewCommand))
         {
             embeddedPreview?.ExecuteCommand(previewCommand);
@@ -1885,6 +1905,20 @@ public partial class MainWindow : Window
         }
     }
 
+    private static bool TryRecordUiDiagnostic(string? type, Dictionary<string, object> message)
+    {
+        if (type != "client-diagnostic") return false;
+        if (TryReadPayloadString(message, "uiVersion", out var build)) ClientDiagnostics.SetUiVersion(build);
+        if (TryReadPayloadString(message, "message", out var detail))
+        {
+            var kind = TryReadPayloadString(message, "kind", out var level) && level == "error" ? "error" : "runtime";
+            var action = TryReadPayloadString(message, "operation", out var operation) ? operation : "嵌入网页";
+            var request = TryReadPayloadString(message, "requestId", out var id) ? id : string.Empty;
+            ClientDiagnostics.Record(kind, action, detail, request);
+        }
+        return true;
+    }
+
     private void ApplyPreviewSurfaces()
     {
         ApplyPreviewBounds();
@@ -1894,7 +1928,7 @@ public partial class MainWindow : Window
     private void ApplyPreviewBounds()
     {
         if (!IsVisible || WindowState == WindowState.Minimized
-            || previewHostSuspended || !previewDocumentReady || previewBounds is not { Visible: true } bounds
+            || previewHostSuspended || (!previewDocumentReady && !previewNativeOpening) || previewBounds is not { Visible: true } bounds
             || bounds.Width < 80 || bounds.Height < 80
             || WorkspaceView.ActualWidth <= 0 || WorkspaceView.ActualHeight <= 0)
         {

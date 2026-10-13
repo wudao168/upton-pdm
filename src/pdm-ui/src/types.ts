@@ -4,7 +4,7 @@ export type DocumentFilter = 'all' | 'model' | 'drawing' | 'issue'
 export type VersionAlignmentStatus = 'Synced' | 'StructureStale' | 'VersionConflict' | 'NotSnapshotted'
 export type PreviewMode = 'model' | 'drawing'
 export type SolidWorksOpenMode = 'LatestReadOnly' | 'LatestReleased' | 'LatestEdit' | 'SpecificReadOnly' | 'PropertyWriteback'
-export type ProjectPhaseOwnerKey = 'StandardProcurement' | 'NonStandardProcurement' | 'NonStandardProduction' | 'MechanicalAssembly' | 'ElectricalAssembly' | 'ElectricalCommissioning' | 'Acceptance'
+export type ProjectPhaseOwnerKey = 'ElectricalHardware' | 'StandardProcurement' | 'NonStandardProcurement' | 'NonStandardProduction' | 'MechanicalAssembly' | 'ElectricalAssembly' | 'ElectricalCommissioning' | 'Acceptance'
 export type ProjectPhaseOwners = Partial<Record<ProjectPhaseOwnerKey, string>>
 
 export interface ProjectSummary {
@@ -25,6 +25,7 @@ export interface ProjectSummary {
   customerName?: string
   customerProjectSequence?: number
   deviceModel?: string
+  createdAt?: string
   signedDate?: string
   quantity: number
   parentProjectId?: string
@@ -470,6 +471,7 @@ export interface SaveProjectOrganizationInput { id?: string; name: string; proje
 export interface SaveOrganizationUnitInput { id?: string; organizationId: string; parentUnitId?: string; code: string; name: string; kind: OrganizationUnitKind; canManufacture: boolean; isActive: boolean; sortOrder: number }
 export interface MainProjectStaffingInput { primaryProjectManager: string; collaborativeProjectManagers: string[]; designLeads: string[] }
 export interface DocumentNode {
+  isVirtualGroup?: boolean
   /** Unique assembly occurrence. Tree selection and rendering must use this value. */
   id: string
   /** Stable occurrence path from the reference snapshot. */
@@ -724,6 +726,8 @@ export interface BomItem {
   manuallyRetained?: boolean
   manuallyExcluded?: boolean
   releaseExcluded?: boolean
+  releaseReviewTokens?: Record<string, string>
+  releaseConfirmation?: { token: string; actor: string; confirmedAt: string; reason: string }
   releaseExclusionReason?: string
   reconciliationStatus?: string
   reconciliationNote?: string
@@ -1005,6 +1009,7 @@ export interface ProductionDrawingItem {
 }
 
 export interface CreateReleasePackageInput {
+  rootDocumentId?: string
   changeReason: string
   scope: Exclude<ReleaseScope, 'LegacyCombined'>
   selectedBomItemIds: string[]
@@ -1028,6 +1033,7 @@ export interface UpdateReleasePackageDraftInput {
 }
 
 export interface ReleasePackageSummary {
+  rootDocumentId?: string | null
   id: string
   number: string
   state: string
@@ -1191,6 +1197,7 @@ export interface DrawingReviewCandidate {
   bomKinds: BomKind[]
   modelRevision: string
   drawingRevision?: string | null
+  hasUnreleasedDrawingChanges?: boolean
   state: DrawingReviewCandidateState
   reason?: string | null
   selectable: boolean

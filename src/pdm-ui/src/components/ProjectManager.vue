@@ -42,8 +42,7 @@ const executionProject = ref<ProjectSummary | null>(null)
 const executionUnitId = ref('')
 const expanded = ref(new Set<string>())
 const projectQuery = ref('')
-const hierarchyFilter = ref<'all' | 'parent' | 'child'>('all')
-const stageFilter = ref('')
+const projectSearchDraft = ref('')
 const responsibleFilter = ref('')
 const executionUnitFilter = ref('')
 const organizationFilter = ref('')
@@ -52,7 +51,7 @@ const collapsedOrganizations = ref(new Set<string>())
 const projectOrganizationGroups = computed(() => props.numberingOptions.organizations.map(organization => ({
   ...organization,
   divisions: props.organizationDirectory.units.filter(unit => unit.organizationId === organization.id && unit.isActive && unit.canManufacture)
-    .sort((left, right) => left.sortOrder - right.sortOrder || left.name.localeCompare(right.name, 'zh-CN', { numeric: true })),
+    .sort((left, right) => left.code.localeCompare(right.code, 'zh-CN')),
 })))
 function selectProjectOrganization(organizationId = '', divisionId = '') {
   organizationFilter.value = organizationId
@@ -96,7 +95,6 @@ const executionUnitCandidates = computed(() => props.organizationDirectory.units
   .filter(unit => unit.kind === 'BusinessDivision' && unit.isActive)
   .sort((left, right) => Number(!left.name.includes('事业部')) - Number(!right.name.includes('事业部'))
     || left.name.localeCompare(right.name, 'zh-CN', { numeric: true, sensitivity: 'base' })))
-const stageOptions = computed(() => [...new Set(props.projects.map(item => item.stage).filter(Boolean))].sort())
 const selectedCustomer = computed(() => props.customers.find(item => item.id === form.customerId))
 const childrenByParent = computed(() => {
   const result = new Map<string, ProjectSummary[]>()
@@ -115,7 +113,6 @@ function matchesProject(project: ProjectSummary) {
     const division = props.organizationDirectory.units.find(unit => unit.id === selectedDivisionId.value)
     if (project.executionUnitId ? project.executionUnitId !== selectedDivisionId.value : project.executionUnitName !== division?.name) return false
   }
-  if (stageFilter.value && project.stage !== stageFilter.value) return false
   if (responsibleFilter.value && ![project.primaryProjectManager, ...projectDesignLeads(project), ...project.collaborativeProjectManagers, ...project.designers].includes(responsibleFilter.value)) return false
   if (executionUnitFilter.value && project.executionUnitName !== executionUnitFilter.value) return false
   if (projectManagerFilter.value && ![project.primaryProjectManager, ...project.collaborativeProjectManagers].includes(projectManagerFilter.value)) return false
@@ -140,7 +137,6 @@ function matchesProject(project: ProjectSummary) {
 }
 const filteredChildrenByParent = computed(() => {
   const result = new Map<string, ProjectSummary[]>()
-  if (hierarchyFilter.value === 'parent') return result
   const hasMatchingDescendant = (projectId: string): boolean => (childrenByParent.value.get(projectId) ?? [])
     .some(child => matchesProject(child) || hasMatchingDescendant(child.id))
   for (const parent of props.projects) {
@@ -151,9 +147,7 @@ const filteredChildrenByParent = computed(() => {
   return result
 })
 const visibleRootProjects = computed(() => rootProjects.value.filter(parent => {
-  if (hierarchyFilter.value === 'parent') return matchesProject(parent)
   const hasMatchingChild = filteredChildrenByParent.value.has(parent.id)
-  if (hierarchyFilter.value === 'child') return hasMatchingChild
   return matchesProject(parent) || hasMatchingChild
 }))
 const expandableProjectIds = computed(() => {
@@ -167,25 +161,21 @@ const expandableProjectIds = computed(() => {
   visibleRootProjects.value.forEach(append)
   return result
 })
-const hasActiveProjectFilter = computed(() => Boolean(
-  organizationFilter.value || selectedDivisionId.value || normalizedProjectQuery.value || stageFilter.value || responsibleFilter.value || executionUnitFilter.value || projectManagerFilter.value || designOwnerFilter.value,
-))
+watch([organizationFilter, selectedDivisionId, projectQuery, responsibleFilter, executionUnitFilter, projectManagerFilter, designOwnerFilter], () => { expanded.value = new Set() })
 function visibleChildren(parentId: string) {
   const children = filteredChildrenByParent.value.get(parentId) ?? []
-  if (hasActiveProjectFilter.value || hierarchyFilter.value === 'child') return children
   return expanded.value.has(parentId) ? children : []
 }
 function isEffectivelyExpanded(parentId: string) {
   return filteredChildrenByParent.value.has(parentId)
-    && (hasActiveProjectFilter.value || hierarchyFilter.value === 'child' || expanded.value.has(parentId))
+    && expanded.value.has(parentId)
 }
 const visibleProjectRows = computed(() => {
   const result: Array<{ project: ProjectSummary; depth: number }> = []
   const append = (project: ProjectSummary, depth: number) => {
-    if (!(hierarchyFilter.value === 'child' && depth === 0)) result.push({ project, depth })
-    if (hierarchyFilter.value === 'parent') return
+    result.push({ project, depth })
     const children = filteredChildrenByParent.value.get(project.id) ?? []
-    if (!hasActiveProjectFilter.value && hierarchyFilter.value !== 'child' && !expanded.value.has(project.id)) return
+    if (!expanded.value.has(project.id)) return
     children.forEach(child => append(child, depth + 1))
   }
   visibleRootProjects.value.forEach(project => append(project, 0))
@@ -326,12 +316,10 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
   <section class="pdm-project-manager" aria-label="项目中心">
     <section class="pdm-project-list pdm-project-list-layout">
       <aside class="pdm-panel pdm-project-classification" aria-label="项目事业部分类">
-        <h2>事业部（制造部门）</h2>
         <div role="tree" aria-label="公司与事业部">
-          <button type="button" role="treeitem" :aria-selected="!organizationFilter" :class="{ 'is-active': !organizationFilter }" @click="selectProjectOrganization()">全部公司</button>
           <div v-for="organization in projectOrganizationGroups" :key="organization.id" role="none">
             <div class="pdm-project-classification__company">
-              <button type="button" class="pdm-tree-toggle" :aria-label="`${collapsedOrganizations.has(organization.id) ? '展开' : '折叠'}${organization.name}的事业部`" @click="toggleOrganization(organization.id)"><ChevronRight v-if="collapsedOrganizations.has(organization.id)" :size="15" /><ChevronDown v-else :size="15" /></button>
+              <button type="button" class="pdm-tree-toggle" :aria-label="`${collapsedOrganizations.has(organization.id) ? '展开' : '折叠'}${organization.name}的事业部`" @click="toggleOrganization(organization.id)"><span class="pdm-classification-caret" :class="{ 'is-expanded': !collapsedOrganizations.has(organization.id) }" aria-hidden="true" /></button>
               <button type="button" role="treeitem" :aria-expanded="!collapsedOrganizations.has(organization.id)" :aria-selected="organizationFilter === organization.id && !selectedDivisionId" :class="{ 'is-active': organizationFilter === organization.id && !selectedDivisionId }" :title="organization.name" @click="selectProjectOrganization(organization.id)">{{ organization.name }}</button>
             </div>
             <div v-show="!collapsedOrganizations.has(organization.id)" role="group">
@@ -343,23 +331,23 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
       <section class="pdm-panel pdm-project-table-panel" aria-label="项目列表">
         <div class="pdm-project-list-toolbar" aria-label="项目筛选">
           <button v-if="canCreate" type="button" class="pdm-primary-action pdm-project-create-action" @click="openCreateDialog"><FolderPlus :size="16" />创建主项目</button>
-          <button type="button" class="pdm-secondary-action pdm-project-collapse-action" :aria-label="`${allProjectDetailsExpanded ? '折叠' : '展开'}全部项目明细`" :disabled="expandableProjectIds.length === 0 || hasActiveProjectFilter || hierarchyFilter !== 'all'" :title="hasActiveProjectFilter || hierarchyFilter !== 'all' ? '清除筛选后可统一展开或折叠项目明细' : ''" @click="toggleAllProjectDetails"><ChevronDown v-if="allProjectDetailsExpanded" :size="15" /><ChevronRight v-else :size="15" />{{ allProjectDetailsExpanded ? '折叠明细' : '展开明细' }}</button>
+          <button type="button" class="pdm-secondary-action pdm-project-collapse-action" :aria-label="`${allProjectDetailsExpanded ? '折叠' : '展开'}全部项目明细`" :disabled="expandableProjectIds.length === 0" @click="toggleAllProjectDetails"><ChevronDown v-if="allProjectDetailsExpanded" :size="15" /><ChevronRight v-else :size="15" />{{ allProjectDetailsExpanded ? '折叠明细' : '展开明细' }}</button>
           <div class="pdm-project-filters">
-            <label class="pdm-inline-search"><Search :size="15" /><input v-model="projectQuery" type="search" aria-label="搜索项目" placeholder="搜索项目号、名称、客户或项目人员"></label>
-            <select v-model="stageFilter" aria-label="项目状态筛选"><option value="">全部状态</option><option v-for="stage in stageOptions" :key="stage" :value="stage">{{ stage }}</option></select>
+            <label class="pdm-inline-search"><Search :size="15" /><input v-model="projectSearchDraft" @keyup.enter="projectQuery = projectSearchDraft" type="search" aria-label="搜索项目" placeholder="搜索项目号、名称、客户或项目人员"></label>
+            <button type="button" class="pdm-secondary-action" @click="projectQuery = projectSearchDraft">搜索</button>
             <select v-model="responsibleFilter" aria-label="项目人员筛选"><option value="">全部项目人员</option><option v-for="username in responsibleOptions" :key="username" :value="username">{{ userDisplayName(username) }}</option></select>
             <select v-model="executionUnitFilter" aria-label="事业部筛选"><option value="">全部事业部</option><option v-for="unit in executionUnitOptions" :key="unit" :value="unit">{{ unit }}</option></select>
             <select v-model="projectManagerFilter" aria-label="项目经理筛选"><option value="">全部项目经理</option><option v-for="username in projectManagerOptions" :key="username" :value="username">{{ userDisplayName(username) }}</option></select>
             <select v-model="designOwnerFilter" aria-label="主设工程师筛选"><option value="">全部主设／工程师</option><option v-for="username in designOwnerOptions" :key="username" :value="username">{{ userDisplayName(username) }}</option></select>
-            <select v-model="hierarchyFilter" aria-label="项目层级筛选"><option value="all">全部项目</option><option value="parent">仅主项目</option><option value="child">仅子项目</option></select>
           </div>
         </div>
         <div v-if="visibleRootProjects.length" class="pdm-table-scroll pdm-project-number-scroll">
         <table class="pdm-project-table pdm-project-number-table">
-          <thead><tr><th>项目号</th><th>项目名称</th><th>别名</th><th>型号</th><th>序列号</th><th>客户</th><th>事业部</th><th>项目经理</th><th>主设／工程师</th><th>状态</th><th>订单日期</th><th>铭牌</th><th>操作</th></tr></thead>
+          <colgroup><col v-for="(weight, index) in [2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1]" :key="index" :style="{ width: `${weight / 19 * 100}%` }"></colgroup>
+          <thead><tr><th>项目号</th><th>项目名称</th><th>别名</th><th>型号</th><th>序列号</th><th>客户</th><th>事业部</th><th>项目经理</th><th>主设</th><th>状态</th><th>订单日期</th><th>铭牌</th><th>操作</th></tr></thead>
           <tbody>
             <tr v-for="row in visibleProjectRows" :key="row.project.id" :class="{ 'is-child': row.depth > 0 }">
-              <td><div class="pdm-project-code-cell" :class="{ 'is-child-code': row.depth > 0 }" :style="{ transform: `translateX(${row.depth * 2}ch)` }"><button v-if="filteredChildrenByParent.has(row.project.id) && hierarchyFilter !== 'parent'" type="button" class="pdm-tree-toggle" :aria-label="`${isEffectivelyExpanded(row.project.id) ? '折叠' : '展开'}${row.project.code}的子项目`" @click="toggle(row.project.id)"><ChevronDown v-if="isEffectivelyExpanded(row.project.id)" :size="15" /><ChevronRight v-else :size="15" /></button><span v-else class="pdm-project-code-spacer"></span><button type="button" class="pdm-project-code-link" :aria-label="`进入项目 ${row.project.code}`" @click="emit('open', row.project.id)">{{ row.project.code }}</button><button v-if="row.depth === 0 && canCreateSubproject && row.project.effectiveProjectPermissions?.includes('project.child.create') && row.project.deviceModel" type="button" class="pdm-project-add-child" :aria-label="`为${row.project.code}创建子项目`" title="创建子项目" @click.stop="openChildDialog(row.project)"><FolderPlus :size="14" /></button><span v-else class="pdm-project-code-spacer"></span></div></td>
+              <td><div class="pdm-project-code-cell" :class="{ 'is-child-code': row.depth > 0 }" :style="{ transform: `translateX(${row.depth * 2}ch)` }"><button v-if="filteredChildrenByParent.has(row.project.id)" type="button" class="pdm-tree-toggle" :aria-label="`${isEffectivelyExpanded(row.project.id) ? '折叠' : '展开'}${row.project.code}的子项目`" @click="toggle(row.project.id)"><ChevronDown v-if="isEffectivelyExpanded(row.project.id)" :size="15" /><ChevronRight v-else :size="15" /></button><span v-else class="pdm-project-code-spacer"></span><button type="button" class="pdm-project-code-link" :aria-label="`进入项目 ${row.project.code}`" @click="emit('open', row.project.id)">{{ row.project.code }}</button><button v-if="row.depth === 0 && canCreateSubproject && row.project.effectiveProjectPermissions?.includes('project.child.create') && row.project.deviceModel" type="button" class="pdm-project-add-child" :aria-label="`为${row.project.code}创建子项目`" title="创建子项目" @click.stop="openChildDialog(row.project)"><FolderPlus :size="14" /></button><span v-else class="pdm-project-code-spacer"></span></div></td>
               <td>{{ row.project.name }}</td>
               <td>{{ row.project.projectAlias || '—' }}</td>
               <td>{{ row.project.deviceModel || '旧项目未编号' }}</td>
@@ -371,12 +359,12 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
               <td><span class="pdm-status" :class="row.project.stage === '进行中' ? 'is-ok' : 'is-warn'">{{ row.project.stage }}</span></td>
               <td class="pdm-project-order-date">{{ row.project.signedDate || '—' }}</td>
               <td><button type="button" class="pdm-text-action" :disabled="!row.project.canReadContent || !token" :aria-label="`查看铭牌 ${row.project.code}`" @click="nameplateProject = row.project; nameplateOpen = true">查看铭牌</button></td>
-              <td><el-dropdown :aria-label="`操作项目${row.project.code}`" trigger="click" placement="bottom-end" popper-class="pdm-project-action-menu" @command="handleProjectAction(row.project, $event)"><button type="button" class="pdm-project-action-trigger" :aria-label="`操作项目${row.project.code}`">操作<ChevronDown :size="13" /></button><template #dropdown><el-dropdown-menu><el-dropdown-item v-if="row.depth === 0 && canCreateSubproject && row.project.effectiveProjectPermissions?.includes('project.child.create') && row.project.deviceModel" command="create-child">创建设备子项目</el-dropdown-item><el-dropdown-item v-if="canDelete && row.project.effectiveProjectPermissions?.includes('project.delete')" command="delete" divided>删除项目</el-dropdown-item></el-dropdown-menu></template></el-dropdown></td>
+              <td><el-dropdown :aria-label="`操作项目${row.project.code}`" trigger="click" placement="bottom-end" popper-class="pdm-project-action-menu" @command="handleProjectAction(row.project, $event)"><button type="button" class="pdm-project-action-trigger" :aria-label="`操作项目${row.project.code}`">操作<ChevronDown :size="13" /></button><template #dropdown><el-dropdown-menu><el-dropdown-item v-if="row.depth === 0 && canCreateSubproject && row.project.effectiveProjectPermissions?.includes('project.child.create') && row.project.deviceModel" command="create-child">创建子项目</el-dropdown-item><el-dropdown-item v-if="canDelete && row.project.effectiveProjectPermissions?.includes('project.delete')" command="delete" divided>删除项目</el-dropdown-item></el-dropdown-menu></template></el-dropdown></td>
             </tr>
           </tbody>
         </table>
       </div>
-        <div v-else-if="projects.length" class="pdm-project-empty"><Search :size="42" /><h2>未找到匹配项目</h2><p>请调整搜索内容或筛选条件。</p><button type="button" class="pdm-secondary-action" @click="projectQuery=''; stageFilter=''; responsibleFilter=''; hierarchyFilter='all'; selectProjectOrganization()">清除筛选</button></div>
+        <div v-else-if="projects.length" class="pdm-project-empty"><Search :size="42" /><h2>未找到匹配项目</h2><p>请调整搜索内容或筛选条件。</p><button type="button" class="pdm-secondary-action" @click="projectQuery=''; projectSearchDraft=''; responsibleFilter=''; selectProjectOrganization()">清除筛选</button></div>
         <div v-else class="pdm-project-empty"><FolderKanban :size="42" /><h2>当前公司还没有项目</h2><p v-if="canCreate">创建主项目后，可继续分配事业部和配置项目岗位。</p><p v-else>请联系有创建权限的人员新建项目。</p></div>
       </section>
     </section>

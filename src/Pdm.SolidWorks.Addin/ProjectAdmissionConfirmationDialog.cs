@@ -20,7 +20,7 @@ internal sealed class ProjectAdmissionConfirmationDialog : Form
         }
 
         Text = "新增图档归属确认";
-        StartPosition = FormStartPosition.CenterParent;
+        DialogWindowSizing.CenterOnOwnerScreen(this);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
