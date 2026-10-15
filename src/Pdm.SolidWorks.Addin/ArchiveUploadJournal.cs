@@ -32,6 +32,13 @@ internal static class ArchiveUploadJournal
         { return null; }
     }
 
+    public static void CompleteBatch(Guid batchId)
+    {
+        if (!Directory.Exists(directory)) return;
+        foreach (var path in Directory.GetFiles(directory, "*." + batchId.ToString("N") + ".json"))
+            File.Delete(path);
+    }
+
     public static void Save(string path, ArchiveUploadState state)
     {
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";

@@ -115,14 +115,15 @@ public sealed class ProjectFolderTreeTests
     }
 
     [Fact]
-    public async Task ProjectListReportsDocumentAndBusinessStatusForAuthorizedUsers()
+    public async Task ProjectListReportsReferenceAndStandaloneDocumentCountsForAuthorizedUsers()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
 
         var project = Assert.Single(await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, CancellationToken.None));
 
-        Assert.Equal(7, project.DocumentCount);
-        Assert.Equal(6, project.ModelDocumentCount);
+        // Include the unregistered model reference as the workspace tree does.
+        Assert.Equal(8, project.DocumentCount);
+        Assert.Equal(7, project.ModelDocumentCount);
         Assert.Equal(1, project.DrawingDocumentCount);
         Assert.Contains("编辑中", project.BusinessStatus);
         Assert.Contains("待审批", project.BusinessStatus);

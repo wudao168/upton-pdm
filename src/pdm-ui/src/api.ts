@@ -1,3 +1,5 @@
+import type { ProjectExportMetadata } from './exportFormat'
+export function getProjectExportMetadata(projectId: string, token: string, releasePackageId?: string): Promise<ProjectExportMetadata> { return requestJson(`/api/projects/${projectId}/export-metadata${releasePackageId ? `?releasePackageId=${encodeURIComponent(releasePackageId)}` : ''}`, {}, token) }
 import type { ProjectBudget, BudgetLine, SettlementLine } from './projectBudget'
 import { diagnosticRequestId, recordClientDiagnostic } from './clientDiagnostics'
 
@@ -326,6 +328,7 @@ interface ApiDocument {
   rowVersion?: number
   checkedOutBy?: string | null
   checkedOutAt?: string | null
+  checkoutSessionId?: string | null
   checkoutMachine?: string | null
   checkoutLastHeartbeatAt?: string | null
   checkoutLeaseExpiresAt?: string | null
@@ -1263,8 +1266,15 @@ export function compareDocumentVersions(documentId: string, left: string, right:
   return requestJson<DocumentVersionComparison>(`/api/documents/${documentId}/versions/compare?left=${encodeURIComponent(left)}&right=${encodeURIComponent(right)}`, {}, token)
 }
 
-export function restoreDocumentVersion(documentId: string, versionId: string, changeNote: string, token: string): Promise<unknown> {
-  return requestJson(`/api/documents/${documentId}/versions/${versionId}/restore`, { method: 'POST', body: JSON.stringify({ changeNote }) }, token)
+export interface RestoreDocumentVersionInput {
+  changeNote: string
+  operationId: string
+  expectedVersionId: string
+  checkoutSessionId?: string | null
+}
+
+export function restoreDocumentVersion(documentId: string, versionId: string, input: RestoreDocumentVersionInput, token: string): Promise<unknown> {
+  return requestJson(`/api/documents/${documentId}/versions/${versionId}/restore`, { method: 'POST', body: JSON.stringify(input) }, token)
 }
 
 export async function readDocumentVersionFile(documentId: string, versionId: string, token: string, download: boolean): Promise<Blob> {
@@ -2344,6 +2354,7 @@ function mapManagedDocument(document: ApiDocument): ManagedDocument {
     rowVersion: document.rowVersion ?? 1,
     storedVersionCount: document.storedVersionCount ?? undefined,
     checkedOutBy: document.checkedOutBy ?? undefined,
+    checkoutSessionId: document.checkoutSessionId ?? undefined,
     checkedOutAt: document.checkedOutAt ?? undefined,
     checkoutMachine: document.checkoutMachine ?? undefined,
     checkoutLastHeartbeatAt: document.checkoutLastHeartbeatAt ?? undefined,
@@ -2545,7 +2556,8 @@ function reconcileCurrentReferenceTree(
           : undefined
         if (!drawing) return child
 
-        const drawingVersion = revisionDisplay(drawing.revision)
+        const hasStoredVersion = drawing.storedVersionCount !== 0
+        const drawingVersion = hasStoredVersion ? revisionDisplay(drawing.revision) : '—'
         return {
           ...child,
           drawingNumber: drawing.drawingNumber,
@@ -2553,10 +2565,10 @@ function reconcileCurrentReferenceTree(
           fileName: drawing.fileName,
           version: drawingVersion,
           snapshotVersion: drawingVersion,
-          versionAlignment: 'Synced',
+          versionAlignment: hasStoredVersion ? 'Synced' : undefined,
           checkedOutBy: drawing.checkedOutBy ?? undefined,
           lifecycleState: drawing.state ?? drawing.lifecycleState ?? 'Work',
-          status: 'Normal',
+          status: hasStoredVersion ? 'Normal' : 'Unarchived',
         }
       })
       const existingDrawingIds = new Set(children
@@ -2564,7 +2576,8 @@ function reconcileCurrentReferenceTree(
         .map(child => child.documentId))
       for (const drawing of relatedDrawings) {
         if (existingDrawingIds.has(drawing.id)) continue
-        const drawingVersion = revisionDisplay(drawing.revision)
+        const hasStoredVersion = drawing.storedVersionCount !== 0
+        const drawingVersion = hasStoredVersion ? revisionDisplay(drawing.revision) : '—'
         children.push({
           id: `drawing:${node.id}:${drawing.id}`,
           documentId: drawing.id,
@@ -2576,10 +2589,10 @@ function reconcileCurrentReferenceTree(
           quantity: 1,
           version: drawingVersion,
           snapshotVersion: drawingVersion,
-          versionAlignment: 'Synced',
+          versionAlignment: hasStoredVersion ? 'Synced' : undefined,
           checkedOutBy: drawing.checkedOutBy ?? undefined,
           lifecycleState: drawing.state ?? drawing.lifecycleState ?? 'Work',
-          status: 'Normal',
+          status: hasStoredVersion ? 'Normal' : 'Unarchived',
           children: [],
         })
       }

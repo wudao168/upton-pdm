@@ -2538,7 +2538,14 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
             ProjectId, null, string.Empty, string.Empty, "物料问题 / 交期不满足", "未指定", null,
             ReleaseScope.ElectricalSupplement, [itemB.Id], "admin", UserRole.Administrator, default);
         Assert.Equal([itemB.Id], supplement.SelectedBomItemIds);
-        Assert.Equal(itemB.Id, Assert.Single(supplement.ElectricalBomSnapshot).Id);
+        Assert.Equal(2, supplement.ElectricalBomSnapshot.Count);
+        Assert.Contains(supplement.ElectricalBomSnapshot, item => item.Id == itemA.Id);
+        Assert.Contains(supplement.ElectricalBomSnapshot, item => item.Id == itemB.Id);
+        supplement = await PublishThroughAllStepsAsync(workflow, supplement);
+        Assert.Equal(ReleasePackageState.Published, supplement.State);
+        var released = (await repository.ListBomVersionsAsync(ProjectId, BomKind.Electrical, default))
+            .First(version => version.Id == supplement.ElectricalBomVersionId);
+        Assert.Equal(2, released.Items.Count);
     }
 
     [Fact]

@@ -135,9 +135,10 @@ public sealed partial class MySqlPdmRepository
     }
 
     private async Task<DocumentCheckInResult> CheckInVersionCoreAsync(MySqlConnection connection, DbTransaction transaction,
-        Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, Guid? drawingReviewWritebackId, CancellationToken cancellationToken)
+        Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, Guid? drawingReviewWritebackId, CancellationToken cancellationToken, Guid? archiveBatchId = null)
     {
         var locked = await LockDocumentAsync(connection, transaction, documentId, cancellationToken);
+        await ValidateArchiveUploadAsync(connection, transaction, documentId, actor, sessionId, archiveBatchId, commit.File, cancellationToken);
         if (!string.Equals(locked.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase) || locked.CheckoutSessionId != sessionId)
             throw new PdmConflictException("编辑会话已经失效，不能提交存档。请另存本地修改或重新获取权限。");
         var drawingReviewLocked = await IsDocumentUnderActiveDrawingReviewAsync(connection, transaction, documentId, cancellationToken);
@@ -166,7 +167,7 @@ public sealed partial class MySqlPdmRepository
                     && string.Equals(latestFile.SourceFileSha256, sourceFileSha256, StringComparison.OrdinalIgnoreCase)));
         var sameProperties = latestFile is not null && ArchiveSafety.SameProperties(
             JsonSerializer.Deserialize<Dictionary<string, string?>>(latestFile.PropertySnapshotJson, jsonOptions) ?? [], commit.Properties);
-        if (sameFile && sameProperties && ArchiveSafety.SameReferences(previousReferences, commit.ReferenceSnapshot.Root))
+        if (!commit.IsHistoricalRestore && sameFile && sameProperties && ArchiveSafety.SameReferences(previousReferences, commit.ReferenceSnapshot.Root))
         {
             if (commit.IsProjectRoot && !await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
                 "SELECT EXISTS(SELECT 1 FROM project_reference_roots WHERE project_id=@ProjectId AND root_document_id=@DocumentId)",
@@ -218,34 +219,6 @@ public sealed partial class MySqlPdmRepository
         if (affected != 1) throw new PdmConflictException("图档已被其他存档操作更新，本次存档未生效。");
         var document = await FindDocumentAsync(connection, transaction, documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
         return new DocumentCheckInResult(document, version, true);
-    }
-
-    public async Task<(PdmDocument Document, DocumentVersion Version)> RestoreVersionAsync(Guid documentId, Guid sourceVersionId, string actor, StoredFile restoredFile, string changeNote, CancellationToken cancellationToken)
-    {
-        await using var connection = await OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        var locked = await LockDocumentAsync(connection, transaction, documentId, cancellationToken);
-        if (locked.CheckedOutBy is not null && !string.Equals(locked.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase))
-            throw new PdmConflictException($"图档正在由{locked.CheckedOutBy}编辑。");
-        var source = await FindDocumentVersionAsync(connection, transaction, documentId, sourceVersionId, cancellationToken) ?? throw new PdmNotFoundException("历史版本不存在。");
-        var nextRevision = await NextWorkRevisionAsync(connection, transaction, locked, cancellationToken);
-        var version = source with
-        {
-            Id = Guid.NewGuid(), Revision = nextRevision, Status = DocumentVersionStatus.Work,
-            StorageRelativePath = restoredFile.RelativePath, FileLength = restoredFile.Length, Sha256 = restoredFile.Sha256,
-            CreatedBy = actor, CreatedAt = timeProvider.GetUtcNow(), ChangeNote = changeNote,
-            SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}恢复生成{nextRevision.Display}",
-            ApprovalTaskId = null, ReleasePackageId = null, Preview = null
-        };
-        await InsertVersionAsync(connection, transaction, version, cancellationToken);
-        source.PropertySnapshot.TryGetValue("SourceFileSha256", out var restoredSourceSha256);
-        var affected = await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE document SET revision_label=@Revision,lifecycle_state='Work',source_fingerprint_sha256=COALESCE(@SourceFileSha256,source_fingerprint_sha256),checked_out_by=NULL,checked_out_at=NULL,checkout_session_id=NULL,checkout_machine=NULL,checkout_last_heartbeat_at=NULL,checkout_lease_expires_at=NULL,checkout_release_requested_by=NULL,checkout_release_requested_at=NULL,checkout_release_request_reason=NULL,updated_at=@Now,row_version=row_version+1 WHERE id=@DocumentId AND row_version=@RowVersion",
-            new { DocumentId = documentId, Revision = nextRevision.Display, RowVersion = locked.RowVersion, Now = version.CreatedAt.UtcDateTime, SourceFileSha256 = restoredSourceSha256 }, transaction, cancellationToken: cancellationToken));
-        if (affected != 1) throw new PdmConflictException("图档已被其他恢复或存档操作更新，本次恢复未生效。");
-        var document = await FindDocumentAsync(connection, transaction, documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
-        await transaction.CommitAsync(cancellationToken);
-        return (document, version);
     }
 
     public async Task<DocumentVersion> PublishDocumentVersionAsync(Guid documentId, Guid sourceVersionId, Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken)

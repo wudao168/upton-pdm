@@ -23,12 +23,130 @@ internal static class Program
         assembly = Assembly.LoadFrom(Path.GetFullPath(args[0]));
         try
         {
+            if (args.Length > 1) { SourceWriteLock(args[1] == "--expect-file-lock"); return 0; }
             Scenario(false, false).GetAwaiter().GetResult();
             Scenario(true, false).GetAwaiter().GetResult();
             Scenario(true, true).GetAwaiter().GetResult();
+            MissingSourceRecovery();
+            BatchCloseRecovery().GetAwaiter().GetResult();
             return 0;
         }
         catch (Exception exception) { Console.WriteLine(exception); return 1; }
+    }
+
+    static void MissingSourceRecovery()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-edit-session-acceptance", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var source = Path.Combine(root, "missing.SLDPRT");
+        File.WriteAllText(source, "base");
+        var plugin = New("PdmAddin");
+        var entry = New("LocalEditDraft");
+        Set(entry, "DocumentId", Guid.NewGuid()); Set(entry, "ProjectId", Guid.NewGuid());
+        Set(entry, "SessionId", Field(plugin, "checkoutSessionId")); Set(entry, "SourcePath", source);
+        Set(entry, "BaseSha256", Type("EditDraftJournal").GetMethod("Hash", Flags).Invoke(null, new object[] { source }));
+        Set(entry, "ObservedOpen", true); Set(entry, "ProcessId", int.MaxValue);
+        var journal = New("EditDraftJournal", root, "missing-source");
+        Invoke(journal, "Save", entry);
+        SetField(plugin, "editJournal", journal);
+        ((IDictionary)Field(plugin, "localEdits")).Add(Get(entry, "DocumentId"), entry);
+        EmptyApplication(plugin);
+        File.Delete(source);
+        for (var index = 0; index < 100; index++)
+            Require(((ICollection)Invoke(plugin, "PrepareClosedEdits")).Count == 0, "Missing source was queued for release");
+        Require((bool)Get(entry, "RecoveryRequired") && (int)Get(entry, "MaintenanceFailureCount") == 1,
+            "Missing-source ticks repeatedly attempted maintenance");
+        Require(!(bool)Get(entry, "PendingClose") && !(bool)Get(entry, "Closed"), "Missing source was treated as unchanged");
+        var restarted = New("PdmAddin");
+        SetField(restarted, "editJournal", New("EditDraftJournal", root, "missing-source"));
+        EmptyApplication(restarted);
+        for (var index = 0; index < 100; index++)
+            Require(((ICollection)Invoke(restarted, "PrepareClosedEdits")).Count == 0, "Restart lost missing-source backoff");
+        var recovered = ((IEnumerable)Invoke(journal, "ReadAll")).Cast<object>().Single();
+        Require((int)Get(recovered, "MaintenanceFailureCount") == 1, "Restart repeated the same failure");
+        File.WriteAllText(source, "base");
+        Set(recovered, "NextMaintenanceAttemptUtc", DateTime.MinValue); Invoke(journal, "Save", recovered);
+        var pending = (ICollection)Invoke(restarted, "PrepareClosedEdits");
+        Require(pending.Count == 1 && (bool)Get(pending.Cast<object>().Single(), "PendingClose"), "Restored original path did not resume safely");
+        File.SetAttributes(source, FileAttributes.Normal);
+        Directory.Delete(root, true);
+        Console.WriteLine("PASS: missing source held safely for 100 ticks and restart; original-path recovery resumed");
+    }
+
+    static void EmptyApplication(object plugin)
+    {
+        var appType = plugin.GetType().GetField("application", Flags).FieldType;
+        SetField(plugin, "application", new Proxy(appType, call =>
+        {
+            if (call.MethodName == "GetRunningCommandInfo")
+                return new ReturnMessage(null, new object[] { 0, "", false }, 3, call.LogicalCallContext, call);
+            if (call.MethodName == "GetDocuments") return Array.Empty<object>();
+            throw new Exception("Unexpected application call: " + call.MethodName);
+        }).GetTransparentProxy());
+    }
+
+    static async Task BatchCloseRecovery()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-edit-session-acceptance", Guid.NewGuid().ToString("N"));
+        var plugin = New("PdmAddin");
+        var journal = New("EditDraftJournal", root, "batch-close");
+        SetField(plugin, "editJournal", journal); SetField(plugin, "authenticatedUsername", "tester");
+        var entries = Array.CreateInstance(Type("LocalEditDraft"), 100);
+        var projectId = Guid.NewGuid();
+        for (var index = 0; index < entries.Length; index++)
+        {
+            var entry = New("LocalEditDraft");
+            Set(entry, "DocumentId", Guid.NewGuid()); Set(entry, "ProjectId", projectId);
+            Set(entry, "SessionId", Field(plugin, "checkoutSessionId"));
+            Set(entry, "CheckedOutAt", new DateTime(2026, 10, 14, 0, 0, 0, DateTimeKind.Utc));
+            Set(entry, "PendingClose", true); Set(entry, "BaseSha256", "verified-base"); Set(entry, "DiskSha256", "verified-base");
+            Invoke(journal, "Save", entry); entries.SetValue(entry, index);
+        }
+        using (var handler = new Handler(entries.Cast<object>().ToArray()))
+        using (var client = (IDisposable)New("PdmApiClient", "http://fixture.invalid/"))
+        {
+            ((HttpClient)Field(client, "httpClient")).Dispose();
+            SetField(client, "httpClient", new HttpClient(handler) { BaseAddress = new Uri("http://fixture.invalid/") });
+            SetField(plugin, "apiClient", client);
+            handler.Fail = true;
+            for (var index = 0; index < 100; index++)
+                await (Task)Invoke(plugin, "ClosePreservedEditsAsync", entries, CancellationToken.None);
+            Require(handler.QueryCalls == 1 && handler.CloseCalls == 0, "Offline batch made more than one project query or released edits");
+            entries = (Array)Invoke(New("EditDraftJournal", root, "batch-close"), "ReadAll");
+            await (Task)Invoke(plugin, "ClosePreservedEditsAsync", entries, CancellationToken.None);
+            Require(handler.QueryCalls == 1, "Reloaded journals lost network backoff");
+            handler.Fail = false; handler.HideDocuments = true;
+            foreach (var entry in entries) { Set(entry, "NextMaintenanceAttemptUtc", DateTime.MinValue); Invoke(journal, "Save", entry); }
+            for (var index = 0; index < 100; index++)
+                await (Task)Invoke(plugin, "ClosePreservedEditsAsync", entries, CancellationToken.None);
+            Require(handler.QueryCalls == 2 && handler.CloseCalls == 0, "Unavailable documents repeatedly queried or released");
+            handler.HideDocuments = false;
+            foreach (var entry in entries) { Set(entry, "NextMaintenanceAttemptUtc", DateTime.MinValue); Invoke(journal, "Save", entry); }
+            await (Task)Invoke(plugin, "ClosePreservedEditsAsync", entries, CancellationToken.None);
+            Require(handler.QueryCalls == 3 && handler.CloseCalls == 100, "100 same-project closes did not share one query");
+            Require(entries.Cast<object>().All(entry => (bool)Get(entry, "Closed") && !(bool)Get(entry, "PendingClose")
+                && Get(entry, "MaintenanceErrorKey") == null), "Successful close did not clear durable pending state");
+        }
+        Directory.Delete(root, true);
+        Console.WriteLine("PASS: 100 same-project closes use one query; offline/unavailable state backs off across journal reload; recovery closes once");
+    }
+
+    static void SourceWriteLock(bool expectFailure)
+    {
+        var root=Path.Combine(Path.GetTempPath(),"pdm-edit-session-acceptance",Guid.NewGuid().ToString("N"));Directory.CreateDirectory(root);
+        var path=Path.Combine(root,"assembly.SLDASM");var copy=Path.Combine(root,"snapshot.SLDASM");
+        File.WriteAllText(path,"saved assembly");File.WriteAllText(copy,"unsaved inserted assembly");
+        var entry=New("LocalEditDraft");Set(entry,"DocumentId",Guid.NewGuid());Set(entry,"SessionId",Guid.NewGuid());Set(entry,"SourcePath",path);
+        var journal=New("EditDraftJournal",root,"share-proof");
+        var failed=false;
+        using(var writer=new FileStream(path,FileMode.Open,FileAccess.ReadWrite,FileShare.Read))
+        {
+            try{Invoke(journal,"Preserve",entry,copy,true);}
+            catch(TargetInvocationException error) when(error.InnerException is IOException){failed=true;}
+        }
+        Require(failed==expectFailure,"Source-lock regression result unexpected");
+        if(!failed)Require((bool)Invoke(journal,"HasVerifiedDraft",entry),"Shared-writer draft was not verified");
+        Console.WriteLine(expectFailure ? "PASS reproduced released-plugin draft sharing violation with a writable open source" : "PASS fixed-plugin preserves verified draft with the same writable source lock");
     }
 
     static async Task Scenario(bool changed, bool dirty)
@@ -58,9 +176,15 @@ internal static class Program
         var extensionType = modelType.GetProperty("Extension").PropertyType;
         var dirtyFlag = dirty;
         var saves = 0;
+        var allowDraft = false;
+        SetField(plugin, "draftIdleCheck", new Func<bool>(() => allowDraft));
         var extension = new Proxy(extensionType, call =>
         {
             if (call.MethodName != "SaveAs") throw new Exception("Unexpected extension call: " + call.MethodName);
+            Invoke(plugin, "OnAssemblyFileSaved", 0, path);
+            Invoke(plugin, "OnAssemblyTreeChanged");
+            Invoke(plugin, "OnDocumentStateChanged");
+            Invoke(plugin, "OnActiveDocumentChanged");
             File.WriteAllText((string)call.Args[0], "unsaved memory");
             call.Args[4] = 0; call.Args[5] = 0; dirtyFlag = false; saves++; return true;
         }).GetTransparentProxy();
@@ -105,11 +229,38 @@ internal static class Program
         commandQueryFails = false;
         var pending = (ICollection)Invoke(plugin, "PrepareClosedEdits");
         Require(pending.Count == 0 && (bool)Get(entry, "ObservedOpen"), "An open/referenced document was released");
+        Require(saves == 0, "Mouse/keyboard activity allowed an expensive draft snapshot");
+        allowDraft = true;
+        SetField(plugin,"pendingTreeRefresh",0);SetField(plugin,"pendingTreeRefreshForceScan",0);
+        SetField(plugin,"currentTreeCacheKey","unchanged-edit-tree");
+        using(var solidWorksFile = new FileStream(path,FileMode.Open,FileAccess.ReadWrite,FileShare.Read))
+            pending = (ICollection)Invoke(plugin,"PrepareClosedEdits");
         if (dirty)
         {
             Require(saves == 1 && dirtyFlag, "Draft snapshot cleared the original unsaved flag");
             Require(File.ReadAllText((string)Get(entry, "DraftPath")) == "unsaved memory", "Unsaved memory was not backed up");
             Require(File.ReadAllText(path) == "saved change", "Snapshot modified original file");
+            Require((int)Field(plugin,"pendingTreeRefresh")==0 && (int)Field(plugin,"pendingTreeRefreshForceScan")==0
+                && (string)Field(plugin,"currentTreeCacheKey")=="unchanged-edit-tree", "Draft-only save events scheduled a full tree scan");
+            for(var i=0;i<100;i++) Invoke(plugin,"PrepareClosedEdits");
+            Require(saves==1,"Unchanged dirty flag caused repeated snapshot work");
+            var preserved = (string)Get(entry,"DraftPath");
+            Set(entry,"SavedAtUtc",DateTime.UtcNow.AddMinutes(-5));Set(entry,"NextSnapshotAttemptUtc",DateTime.MinValue);
+            using(var exclusive = new FileStream(path,FileMode.Open,FileAccess.ReadWrite,FileShare.None))
+            {
+                Invoke(plugin,"PrepareClosedEdits");
+                var attempts=saves;
+                for(var i=0;i<100;i++) Invoke(plugin,"PrepareClosedEdits");
+                Require(attempts==2 && saves==attempts,"A failed snapshot repeatedly retried while the source remained locked");
+                Require((string)Get(entry,"DraftPath")==preserved && (bool)Invoke(journal,"HasVerifiedDraft",entry),"Failed snapshot destroyed a verified draft");
+            }
+            Require(dirtyFlag && !(bool)Get(entry,"PendingClose"),"Failed draft cleared unsaved changes or released editing");
+            Set(entry,"NextSnapshotAttemptUtc",DateTime.MinValue);
+            Invoke(plugin,"PrepareClosedEdits");
+            Require(saves==3 && (bool)Invoke(journal,"HasVerifiedDraft",entry),"Draft did not recover after the lock was released");
+            Invoke(plugin,"OnAssemblyTreeChanged");
+            Require((int)Field(plugin,"pendingTreeRefreshForceScan")==1,"Actual insertion/structural event was lost after snapshot");
+            Console.WriteLine("PASS: writable SW lock compatible; input deferral; no snapshot-induced scan; 100 failed retry ticks coalesced; verified draft retained");
         }
         loaded = false;
         pending = (ICollection)Invoke(plugin, "PrepareClosedEdits");
@@ -137,18 +288,21 @@ internal static class Program
 
     sealed class Handler : HttpMessageHandler
     {
-        readonly object entry;
-        public bool Fail, DraftPreserved;
-        public int CloseCalls;
+        readonly object[] entries;
+        public bool Fail, DraftPreserved, HideDocuments;
+        public int CloseCalls, QueryCalls;
         public DateTime CheckedOutAt;
-        public Handler(object entry) { this.entry = entry; }
+        public Handler(object entry) : this(new[] { entry }) { }
+        public Handler(object[] entries) { this.entries = entries; }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
+            if (request.Method == HttpMethod.Get) QueryCalls++;
             if (Fail) throw new HttpRequestException("模拟断网");
             var serializer = new JavaScriptSerializer();
             if (request.Method == HttpMethod.Get)
-                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(serializer.Serialize(new[] { new
-                { id = Get(entry, "DocumentId"), checkedOutBy = "tester", checkoutSessionId = Get(entry, "SessionId"), checkedOutAt = ((DateTime)Get(entry, "CheckedOutAt")).ToString("O") } })) };
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(serializer.Serialize(
+                    (HideDocuments ? Array.Empty<object>() : entries).Select(entry => new
+                    { id = Get(entry, "DocumentId"), checkedOutBy = "tester", checkoutSessionId = Get(entry, "SessionId"), checkedOutAt = ((DateTime)Get(entry, "CheckedOutAt")).ToString("O") }).ToArray())) };
             Require(request.RequestUri.AbsolutePath.EndsWith("/close-edit"), "Unexpected write endpoint");
             var body = serializer.Deserialize<System.Collections.Generic.Dictionary<string, object>>(await request.Content.ReadAsStringAsync());
             DraftPreserved = (bool)body["draftPreserved"];

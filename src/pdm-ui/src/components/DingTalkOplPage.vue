@@ -46,7 +46,8 @@ async function login() {
     if (!bootstrap.enabled) throw new Error('钉钉提交尚未启用，请联系项目人员完成应用配置。')
     await withTimeout(new Promise<void>((resolve, reject) => {
       const script = document.createElement('script')
-      script.src = 'https://g.alicdn.com/dingding/open-develop/1.9.0/dingtalk.js'
+      // 多端SDK通过电脑钉钉容器识别PC，不依赖User-Agent中的DingTalk标记。
+      script.src = 'https://g.alicdn.com/dingding/dingtalk-jsapi/3.0.25/dingtalk.open.js'
       script.onload = () => resolve(); script.onerror = () => reject(new Error('钉钉组件加载失败，请检查网络后重新打开。'))
       document.head.appendChild(script)
     }))

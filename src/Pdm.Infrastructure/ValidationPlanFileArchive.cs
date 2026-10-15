@@ -19,7 +19,12 @@ public sealed class ValidationPlanFileArchive(
         var fileName = $"{SafeFileName(export.Project.Code)}_{Title}_R{export.Plan.RevisionNumber:D3}_{effectiveAt:yyyyMMdd_HHmmss}.xlsx";
         if (await ContainsAsync(folder, fileName, null, cancellationToken)) return;
 
-        var content = ValidationPlanWorkbook.Write(export, Title);
+        var main = await repository.FindProjectAsync(export.Project.RootProjectId ?? export.Project.ParentProjectId ?? export.Project.Id, cancellationToken) ?? export.Project;
+        var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
+        var metadata = ProjectWorkbookMetadata.ForProject(export.Project, main, directory, qualityAcceptance ? "项目质量验收计划" : "项目验证计划",
+            "计划版本", $"R{export.Plan.RevisionNumber:D3}", export.ExportedAt, actor, "审批完成归档");
+        metadata = metadata with { Notes = $"编制：{export.Plan.PreparedBy ?? export.Plan.UpdatedBy}　审核：{export.ReviewPerson}　批准：{export.ApprovalPerson}　验证日期：{export.Plan.ValidationDate?.ToString("yyyy-MM-dd") ?? "待明确"}" };
+        var content = ProjectWorkbookHeader.Apply(ValidationPlanWorkbook.Write(export, Title), metadata, 4, 5);
         var versionId = Guid.NewGuid();
         var relativePath = Path.Combine("验收资料", Title, ".versions", $"R{export.Plan.RevisionNumber:D3}", "Generated", versionId.ToString("N"), fileName);
         var absolutePath = StorageLocationPolicy.ResolveUnder(export.Project.VaultLocation, relativePath);

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { downloadDocumentPreviewFile, downloadGeneratedFile, downloadProductionDrawingArchive, listProductionDrawings, updateProductionDrawingDelivery } from '../api'
+import { getProjectExportMetadata, downloadDocumentPreviewFile, downloadGeneratedFile, downloadProductionDrawingArchive, listProductionDrawings, updateProductionDrawingDelivery } from '../api'
 import { createProductionBomWorkbook } from '../productionBomWorkbook'
 import type { BomItem, DrawingPriority, ProductionDrawingItem } from '../types'
 import { useUserDisplayName } from '../userDisplay'
@@ -245,16 +245,17 @@ async function downloadBom(items: ProductionDrawingItem[], selectedOnly: boolean
     return
   }
   if (items.some(item => !item.isCurrent) && !window.confirm('所选图纸包含历史正式版，确定下载对应版本BOM？')) return
-  const file = bomDownload(items, selectedOnly)
-  await runDownload(() => downloadGeneratedFile(file.blob, file.fileName))
+  await runDownload(async () => { const file = await bomDownload(items, selectedOnly); await downloadGeneratedFile(file.blob, file.fileName) })
 }
-function bomDownload(items: ProductionDrawingItem[], selectedOnly: boolean) {
+async function bomDownload(items: ProductionDrawingItem[], selectedOnly: boolean) {
+  const exportProjectId = project.value!.id, frozenPackage = selectedPackage.value!
+  const metadata = await getProjectExportMetadata(exportProjectId, props.token, frozenPackage.id)
   const columns = columnDefinitions.filter(column => !['drawing', 'quantityReference', 'issue', 'dataStatus'].includes(column.key))
   const headers = ['发布包', '图号', ...columns.map(column => column.label)]
   const values = items.map(item => [item.releasePackageNumber, item.drawingNumber, ...columns.map(column =>
     column.key === 'quantity' ? Number(quantityValue(item)) : columnValue(item, column.key))])
-  const fileName = `${selectedPackage.value!.number}-${selectedOnly ? '选中' : '本包'}BOM.xlsx`.replace(/[<>:"/\\|?*]/g, '_')
-  return { blob: createProductionBomWorkbook(headers, values), fileName }
+  const fileName = `${frozenPackage.number}-${selectedOnly ? '选中' : '本包'}BOM.xlsx`.replace(/[<>:"/\\|?*]/g, '_')
+  return { blob: createProductionBomWorkbook(headers, values, { ...metadata, title: '发布包BOM清单', scope: selectedOnly ? `选中条目 · ${items.length}条` : '完整发布包', versionLabel: '发布包版本', version: frozenPackage.number }), fileName }
 }
 async function downloadPackage() {
   if (!project.value || !selectedPackage.value || !drawings.value.length || detailLoading.value || downloading.value) return
@@ -271,8 +272,8 @@ async function downloadPackage() {
   const id = project.value.id
   const number = selectedPackage.value.number
   const versions = items.map(item => item.versionId)
-  const file = bomDownload(items, false)
   await runDownload(async () => {
+    const file = await bomDownload(items, false)
     const results = await Promise.allSettled([
       downloadProductionDrawingArchive(id, versions, 'Step', props.token, number, updateDownloadProgress),
       downloadProductionDrawingArchive(id, versions, 'Pdf', props.token, number, updateDownloadProgress),

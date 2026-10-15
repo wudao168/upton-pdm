@@ -10,18 +10,18 @@ public sealed partial class MySqlPdmRepository
     private static async Task<IReadOnlyDictionary<Guid, (int All, int Model, int Drawing)>> LoadReferenceDocumentCountsAsync(
         DbConnection connection, DbTransaction? transaction, ProjectRow[] projects, CancellationToken cancellationToken)
     {
-        var familyIds = projects.Select(project => project.ParentProjectId ?? project.Id).Distinct().ToArray();
+        var familyIds = projects.Select(project => project.RootProjectId ?? project.ParentProjectId ?? project.Id).Distinct().ToArray();
         var documentRows = (await connection.QueryAsync<CountDocumentRow>(new CommandDefinition(
             """
-            SELECT COALESCE(p.parent_project_id,p.id) family_id, d.id, d.project_id, d.file_name, d.kind
+            SELECT COALESCE(p.root_project_id,p.parent_project_id,p.id) family_id, d.id, d.project_id, d.file_name, d.kind
             FROM document d INNER JOIN project p ON p.id=d.project_id
-            WHERE COALESCE(p.parent_project_id,p.id) IN @FamilyIds
+            WHERE COALESCE(p.root_project_id,p.parent_project_id,p.id) IN @FamilyIds AND d.deleted_at IS NULL AND d.purged_at IS NULL
             """, new { FamilyIds = familyIds }, transaction, cancellationToken: cancellationToken))).ToArray();
         var relationRows = (await connection.QueryAsync<CountRelationRow>(new CommandDefinition(
             """
-            SELECT COALESCE(p.parent_project_id,p.id) family_id, r.model_document_id, r.drawing_document_id
+            SELECT COALESCE(p.root_project_id,p.parent_project_id,p.id) family_id, r.model_document_id, r.drawing_document_id
             FROM document_model_drawing_relation r INNER JOIN project p ON p.id=r.project_id
-            WHERE COALESCE(p.parent_project_id,p.id) IN @FamilyIds
+            WHERE COALESCE(p.root_project_id,p.parent_project_id,p.id) IN @FamilyIds
             """, new { FamilyIds = familyIds }, transaction, cancellationToken: cancellationToken))).ToArray();
         var snapshots = (await connection.QueryAsync<WhereUsedSnapshotRow>(new CommandDefinition(
             """
@@ -39,7 +39,7 @@ public sealed partial class MySqlPdmRepository
         var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         return projects.ToDictionary(project => project.Id, project =>
         {
-            var familyId = project.ParentProjectId ?? project.Id;
+            var familyId = project.RootProjectId ?? project.ParentProjectId ?? project.Id;
             var root = snapshots.TryGetValue(project.Id, out var snapshot)
                 ? JsonSerializer.Deserialize<DocumentReferenceNode>(snapshot.RootJson, json) : null;
             return ProjectReferenceDocumentCounts.Count(root, project.Id,

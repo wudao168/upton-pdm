@@ -9,7 +9,7 @@ const api = vi.hoisted(() => ({
   generateProjectPlan: vi.fn(), deleteProjectPlan: vi.fn(), supplementProjectPlanStageSchedule: vi.fn(), submitProjectPlan: vi.fn(), submitProjectPlanChange: vi.fn(), completeProjectPlanChange: vi.fn(), abandonProjectPlanChange: vi.fn(), decideProjectPlan: vi.fn(),
   listProjectPlanTemplates: vi.fn(), listProjectPlanVersions: vi.fn(), readProjectPlan: vi.fn(), readProjectPlanPortfolio: vi.fn(),
   reuseProjectPlan: vi.fn(), saveProjectPlan: vi.fn(), saveProjectPlanTemplate: vi.fn(), setProjectPlanBaseline: vi.fn(),
-  setProjectPlanStage: vi.fn(), updateProjectPlanTaskProgress: vi.fn(),
+  setProjectPlanStage: vi.fn(), updateProjectPlanTaskProgress: vi.fn(), getProjectExportMetadata: vi.fn(),
 }))
 vi.mock('../src/api', () => api)
 const statusContent = vi.hoisted(() => ({ loadGlobalStatusContent: vi.fn() }))
@@ -60,6 +60,7 @@ beforeEach(() => {
     { projectId: 'approved', projectCode: 'P1-3', projectName: '设备三', hasPlan: true, plan: { ...structuredClone(draft), projectId: 'approved', approvalStatus: 'Approved' } },
   ] })
   api.saveProjectPlan.mockResolvedValue(structuredClone(draft))
+  api.getProjectExportMetadata.mockResolvedValue({ title: '项目计划', company: '昆山阿普顿自动化系统有限公司', scope: '项目', versionLabel: '版本', version: 'W1', exportedAt: '2026-10-15T00:00:00Z', exportedBy: 'pm', fields: [] })
 })
 afterEach(() => { wrappers.splice(0).forEach(item => item.unmount()); document.body.innerHTML = ''; vi.restoreAllMocks() })
 
@@ -99,11 +100,13 @@ describe('项目计划审批和配置', () => {
     expect(childChecks).toHaveLength(2)
     await childChecks[0]!.setValue(true)
     await childChecks[1]!.setValue(true)
+    const popup = { close: vi.fn() } as unknown as Window
+    vi.spyOn(window, 'open').mockReturnValue(popup)
     await clickText('导出 PDF')
     expect(planExport.exportProjectPlansPdf).toHaveBeenCalledWith('P1', [
       expect.objectContaining({ projectCode: 'P1-1', inherited: false }),
       expect.objectContaining({ projectCode: 'P1-2', inherited: true }),
-    ])
+    ], popup)
   })
 
   it('编辑工期保留开始日期，跨月调整结束日期，阶段及里程碑只读', async () => {

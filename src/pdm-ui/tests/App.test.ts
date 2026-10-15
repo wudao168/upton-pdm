@@ -1478,7 +1478,7 @@ describe('PLM client workspace', () => {
     expect(currentDrawing?.classes()).not.toContain('has-version-conflict')
 
     const relatedDrawing = tree.findAll('.pdm-tree-row').find(row => row.text().includes('遗漏工程图'))
-    expect(relatedDrawing?.text()).toContain('W1 / W1')
+    expect(relatedDrawing?.text()).toContain('未存档')
     expect(relatedDrawing?.text()).not.toContain('未进入快照')
     expect(relatedDrawing?.classes()).not.toContain('has-version-warning')
     expect(tree.text()).not.toContain('正常图档')

@@ -249,6 +249,7 @@ builder.Services.AddHostedService<ReleasePreviewRetryHostedService>();
 builder.Services.AddHostedService<ReleasePublishingRetryHostedService>();
 builder.Services.AddHostedService<PublishRecoveryHostedService>();
 builder.Services.AddHostedService<ProjectContentResetCleanupService>();
+builder.Services.AddHostedService<ArchiveBatchRecoveryService>();
 builder.Services.AddHostedService<ProjectPlanningReminderHostedService>();
 builder.Services.AddHostedService<DrawingReviewWritebackTimeoutHostedService>();
 

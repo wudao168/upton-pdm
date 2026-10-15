@@ -15,17 +15,18 @@ describe('料品批量导入 Excel 模板', () => {
     const bytes = createMaterialImportTemplate([category])
     expect([...bytes.slice(0, 2)]).toEqual([0x50, 0x4b])
     const files = unzipSync(bytes)
-    for (const content of Object.values(files)) {
+    for (const [path, content] of Object.entries(files)) {
+      if (!path.endsWith('.xml') && !path.endsWith('.rels')) continue
       const doc = new DOMParser().parseFromString(strFromU8(content), 'text/xml')
       expect(doc.querySelector('parsererror')).toBeNull()
     }
 
     const sheet = new DOMParser().parseFromString(strFromU8(files['xl/worksheets/sheet1.xml']), 'text/xml')
-    expect([...sheet.querySelectorAll('row[r="1"] c')].map(cell => cell.textContent)).toEqual(materialImportHeaders)
-    expect(sheet.querySelector('c[r="C2"]')?.textContent).toBe('个')
+    expect([...sheet.querySelectorAll('row[r="7"] c')].map(cell => cell.textContent)).toEqual(materialImportHeaders)
+    expect(sheet.querySelector('c[r="C8"]')?.textContent).toBe('个')
     expect(sheet.querySelector('pane')?.getAttribute('state')).toBe('frozen')
-    expect(sheet.querySelector('dataValidation[sqref="A2:A1001"] formula1')?.textContent).toBe("'字典'!$A$2:$A$2")
-    expect(sheet.querySelector('dataValidation[sqref="C2:C1001"] formula1')?.textContent).toBe("'字典'!$C$2:$C$13")
+    expect(sheet.querySelector('dataValidation[sqref="A8:A1007"] formula1')?.textContent).toBe("'字典'!$A$2:$A$2")
+    expect(sheet.querySelector('dataValidation[sqref="C8:C1007"] formula1')?.textContent).toBe("'字典'!$C$2:$C$13")
 
     const dictionary = new DOMParser().parseFromString(strFromU8(files['xl/worksheets/sheet2.xml']), 'text/xml')
     expect(dictionary.querySelector('c[r="A2"]')?.textContent).toBe('0102 机械外购件')

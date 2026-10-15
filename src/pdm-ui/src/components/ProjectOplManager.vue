@@ -1,19 +1,20 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, RotateCw as RefreshCw } from '@lucide/vue'
-import { completeProjectOpl, PdmApiError, readOplAttachment, readProjectOpl, saveProjectOpl } from '../api'
+import { Download, Plus, RotateCw as RefreshCw } from '@lucide/vue'
+import { completeProjectOpl, getProjectExportMetadata, PdmApiError, readOplAttachment, readProjectOpl, saveProjectOpl } from '../api'
 import type { ProjectSummary } from '../types'
 import type { OplAttachment, OplInput, OplRow, OplView } from '../projectOpl'
 import { useUserDisplayName } from '../userDisplay'
+import { downloadOplWorkbook } from '../oplWorkbook'
 
 const PdfDrawingViewer = defineAsyncComponent(() => import('./PdfDrawingViewer.vue'))
 const props = defineProps<{ project: ProjectSummary; token: string }>()
 const displayUserName = useUserDisplayName()
 const view = ref<OplView>({ rows: [], people: [] })
 const loading = ref(false), saving = ref(false), error = ref(''), drawer = ref(false), readonly = ref(false)
-const completing = ref<string | null>(null)
-const query = ref(''), status = ref('未完成'), owner = ref(''), priority = ref(''), page = ref(1)
+const completing = ref<string | null>(null), exporting = ref(false)
+const query = ref(''), status = ref('未完成'), owner = ref(''), priority = ref<string[]>([]), page = ref(1)
 const states = ['待处理', '处理中', '待确认', '已完成', '已作废']
 const priorities = ['紧急', '高', '普通', '低']
 const editing = ref<OplRow | null>(null), retained = ref<OplAttachment[]>([]), files = ref<File[]>([])
@@ -25,7 +26,7 @@ function closePreview() { if (previewKind.value === 'pdf' && previewUrl.value) U
 const rootProject = computed(() => view.value.rootProject ?? props.project)
 const subprojects = computed(() => view.value.subprojects ?? [])
 const scopedRows = computed(() => props.project.parentProjectId ? view.value.rows.filter(row => row.issue.relatedProjectId === props.project.id) : view.value.rows)
-const relatedProject = (id: string | null | undefined) => { const project = subprojects.value.find(item => item.id === id); return project ? `${project.code} · ${project.name}` : id ? '关联子项目' : '项目整体' }
+const relatedProject = (id: string | null | undefined) => { const project = subprojects.value.find(item => item.id === id); return project ? project.code : id ? '关联子项目' : '项目整体' }
 let generation = 0
 const snapshot = () => JSON.stringify({ draft: draft.value, attachments: retained.value.map(x => x.id) })
 const dirty = computed(() => drawer.value && !readonly.value && (snapshot() !== baseline.value || files.value.length > 0))
@@ -37,7 +38,7 @@ const overdueCount = computed(() => scopedRows.value.filter(overdue).length)
 const filtered = computed(() => scopedRows.value.filter(({ issue }) =>
   (!query.value.trim() || `${issue.number} ${issue.description} ${issue.solution}`.toLowerCase().includes(query.value.trim().toLowerCase()))
   && (!status.value || (status.value === '未完成' ? !closed(issue.status) : issue.status === status.value))
-  && (!owner.value || issue.owner === owner.value) && (!priority.value || issue.priority === priority.value)))
+  && (!owner.value || issue.owner === owner.value) && (!priority.value.length || priority.value.includes(issue.priority))))
 const visible = computed(() => filtered.value.slice((page.value - 1) * 20, page.value * 20))
 const name = (username: string) => view.value.people.find(x => x.username === username)?.displayName || displayUserName(username, username || '待分派')
 const date = (value: string | null) => value ? new Date(value).toLocaleDateString('sv-SE') : '—'
@@ -50,6 +51,24 @@ async function load() {
   try { const data = await readProjectOpl(props.project.id, props.token); if (current === generation) { releaseUrls(); view.value = data } }
   catch (cause) { if (current === generation) error.value = message(cause, '开口问题加载失败，请检查网络后重试。') }
   finally { if (current === generation) loading.value = false }
+}
+async function exportExcel() {
+  if (loading.value || exporting.value || error.value || !scopedRows.value.length) return
+  const current = generation, projectId = props.project.id, projectCode = props.project.code, token = props.token
+  const rows = scopedRows.value.map(({ issue }) => [issue.number, relatedProject(issue.relatedProjectId), issue.priority, issue.status,
+    issue.description, issue.attachments.map(file => file.name).join('\n'), issue.solution, issue.dueDate || '—', name(issue.owner),
+    date(issue.completedAt), date(issue.createdAt), issue.createdByDisplayName || name(issue.createdBy)])
+  const projectScope = props.project.parentProjectId ? '当前子项目' : '当前主项目及子项目'
+  exporting.value = true
+  try {
+    const metadata = await getProjectExportMetadata(projectId, token)
+    if (current !== generation || projectId !== props.project.id) return
+    downloadOplWorkbook(`${projectCode}_OPL_${metadata.exportedAt.slice(0, 16).replace(/[-:T ]/g, '')}.xlsx`, rows,
+      { ...metadata, title: 'OPL开口问题清单', scope: `${projectScope} · 全部${rows.length}条`,
+        versionLabel: '数据时间', version: metadata.exportedAt.replace('T', ' ').slice(0, 16), notes: '完整导出，包含全部状态，不受列表筛选与分页影响' })
+    ElMessage.success(`已导出${rows.length}条开口问题`)
+  } catch (cause) { ElMessage.error(message(cause, '开口问题导出失败，请检查网络后重试。')) }
+  finally { exporting.value = false }
 }
 async function thumbnail(row: OplRow, file: OplAttachment) {
   if (!imageType(file) || thumbnails.value[file.id]) return
@@ -125,23 +144,23 @@ void load()
 
 <template>
   <section class="pdm-panel pdm-manager-panel opl-manager" aria-label="开口问题清单">
-    <header class="pdm-panel-header"><div><h2>OPL 开口问题清单</h2><span v-if="project.parentProjectId" class="opl-scope">当前子项目：{{ project.code }} · {{ project.name }}</span><span class="opl-counts">全部 {{ scopedRows.length }} · 未完成 {{ activeCount }} · <span :class="{ 'opl-overdue': overdueCount > 0 }">已逾期 {{ overdueCount }}</span> · 已完成 {{ scopedRows.filter(row => row.issue.status === '已完成').length }}</span></div><div class="opl-actions"><el-button :disabled="loading" @click="load"><RefreshCw :size="14" />刷新</el-button><el-button type="primary" :disabled="loading || !!error" @click="open()"><Plus :size="14" />新增问题</el-button></div></header>
-    <div class="opl-filters"><el-input v-model="query" aria-label="搜索开口问题" placeholder="搜索问题描述 / 编号" clearable /><el-select v-model="status" aria-label="筛选实施状态"><el-option label="全部状态" value="" /><el-option label="未完成" value="未完成" /><el-option v-for="item in states" :key="item" :label="item" :value="item" /></el-select><el-select v-model="owner" aria-label="筛选负责人" placeholder="全部负责人" clearable filterable><el-option v-for="person in view.people" :key="person.username" :label="person.displayName" :value="person.username" /></el-select><el-select v-model="priority" aria-label="筛选优先级" placeholder="全部优先级" clearable><el-option v-for="item in priorities" :key="item" :label="item" :value="item" /></el-select></div>
+    <header class="pdm-panel-header"><div><h2>OPL 开口问题清单</h2><span v-if="project.parentProjectId" class="opl-scope">当前子项目：{{ project.code }} · {{ project.name }}</span><span class="opl-counts">全部 {{ scopedRows.length }} · 未完成 {{ activeCount }} · <span :class="{ 'opl-overdue': overdueCount > 0 }">已逾期 {{ overdueCount }}</span> · 已完成 {{ scopedRows.filter(row => row.issue.status === '已完成').length }}</span></div><div class="opl-actions"><el-button :disabled="loading || !!error || !scopedRows.length" :loading="exporting" title="导出当前项目范围的全部开口问题（不受筛选影响）" @click="exportExcel"><Download v-if="!exporting" :size="14" />导出Excel</el-button><el-button :disabled="loading" @click="load"><RefreshCw :size="14" />刷新</el-button><el-button type="primary" :disabled="loading || !!error" @click="open()"><Plus :size="14" />新增问题</el-button></div></header>
+    <div class="opl-filters"><el-input v-model="query" aria-label="搜索开口问题" placeholder="搜索问题描述 / 编号" clearable /><el-select v-model="status" aria-label="筛选实施状态"><el-option label="全部状态" value="" /><el-option label="未完成" value="未完成" /><el-option v-for="item in states" :key="item" :label="item" :value="item" /></el-select><el-select v-model="owner" aria-label="筛选负责人" placeholder="全部负责人" clearable filterable><el-option v-for="person in view.people" :key="person.username" :label="person.displayName" :value="person.username" /></el-select><el-select v-model="priority" aria-label="筛选优先级" placeholder="全部优先级" multiple collapse-tags collapse-tags-tooltip clearable><el-option v-for="item in priorities" :key="item" :label="item" :value="item" /></el-select></div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
     <div class="opl-table-wrap" v-loading="loading"><el-table :data="visible" height="100%" stripe border row-key="issue.id" empty-text="暂无符合条件的开口问题" class="opl-table" @row-click="(row: OplRow) => open(row, !row.canEdit)">
       <el-table-column label="序号" width="100" fixed><template #default="{ row }">{{ row.issue.number }}</template></el-table-column>
-      <el-table-column label="子项目" width="100" show-overflow-tooltip><template #default="{ row }">{{ relatedProject(row.issue.relatedProjectId) }}</template></el-table-column>
+      <el-table-column label="子项目" width="200" show-overflow-tooltip><template #default="{ row }">{{ relatedProject(row.issue.relatedProjectId) }}</template></el-table-column>
       <el-table-column label="优先级" width="100"><template #default="{ row }"><el-tag :type="['紧急', '高'].includes(row.issue.priority) ? 'danger' : 'info'" size="small">{{ row.issue.priority }}</el-tag></template></el-table-column>
       <el-table-column label="实施状态" width="100"><template #default="{ row }"><el-tag :type="row.issue.status === '已完成' ? 'success' : row.issue.status === '处理中' ? 'warning' : 'info'" size="small">{{ row.issue.status }}</el-tag></template></el-table-column>
       <el-table-column prop="issue.description" label="问题描述" width="300"><template #default="{ row }"><span class="opl-description" :title="row.issue.description">{{ row.issue.description }}</span></template></el-table-column>
-      <el-table-column label="附件" width="100"><template #default="{ row }"><div class="opl-attachments"><button v-for="file in row.issue.attachments.slice(0, 2)" :key="file.id" :title="file.name" :aria-label="`查看附件 ${file.name}`" @click.stop="attachment(row, file)"><img v-if="thumbnails[file.id]" :src="thumbnails[file.id]" :alt="file.name"><span v-else>{{ file.name }}</span></button><button v-if="row.issue.attachments.length > 2" @click.stop="open(row, true)">+{{ row.issue.attachments.length - 2 }}</button></div><span v-if="!row.issue.attachments.length">—</span></template></el-table-column>
+      <el-table-column label="附件" width="200"><template #default="{ row }"><div class="opl-attachments"><button v-for="file in row.issue.attachments.slice(0, 2)" :key="file.id" :title="file.name" :aria-label="`查看附件 ${file.name}`" @click.stop="attachment(row, file)"><img v-if="thumbnails[file.id]" :src="thumbnails[file.id]" :alt="file.name"><span v-else>{{ file.name }}</span></button><button v-if="row.issue.attachments.length > 2" @click.stop="open(row, true)">+{{ row.issue.attachments.length - 2 }}</button></div><span v-if="!row.issue.attachments.length">—</span></template></el-table-column>
       <el-table-column prop="issue.solution" label="解决措施" width="300" show-overflow-tooltip />
       <el-table-column label="需求日期" width="200"><template #default="{ row }"><span :class="{ 'opl-overdue': overdue(row) }">{{ row.issue.dueDate || '—' }}<small v-if="overdue(row)"> 逾期</small></span></template></el-table-column>
       <el-table-column label="负责人" width="100"><template #default="{ row }">{{ name(row.issue.owner) }}</template></el-table-column>
       <el-table-column label="完成日期" width="200"><template #default="{ row }"><button v-if="!closed(row.issue.status) && row.canComplete" class="pdm-text-action" :disabled="loading || saving || !!completing" @click.stop="complete(row)">{{ completing === row.issue.id ? '完成中…' : '完成' }}</button><span v-else>{{ date(row.issue.completedAt) }}</span></template></el-table-column>
       <el-table-column label="提交日期" width="200"><template #default="{ row }">{{ date(row.issue.createdAt) }}</template></el-table-column>
       <el-table-column label="提交人" width="100"><template #default="{ row }">{{ row.issue.createdByDisplayName || name(row.issue.createdBy) }}</template></el-table-column>
-      <el-table-column label="操作" width="100" fixed="right"><template #default="{ row }"><button class="pdm-text-action" @click.stop="open(row, true)">查看</button><button v-if="row.canEdit" class="pdm-text-action" @click.stop="open(row)">编辑</button></template></el-table-column>
+      <el-table-column label="操作" width="200" fixed="right"><template #default="{ row }"><button class="pdm-text-action" @click.stop="open(row, true)">查看</button><button v-if="row.canEdit" class="pdm-text-action" @click.stop="open(row)">编辑</button></template></el-table-column>
     </el-table></div>
     <footer class="opl-footer"><span>共 {{ filtered.length }} 条</span><el-pagination v-model:current-page="page" :page-size="20" :total="filtered.length" layout="prev, pager, next" /></footer>
     <el-drawer class="opl-drawer" v-model="drawer" direction="rtl" :title="readonly ? '查看开口问题' : editing ? '编辑开口问题' : '新增开口问题'" size="min(680px, 100vw)" append-to-body destroy-on-close :before-close="close" :close-on-click-modal="false">
@@ -165,7 +184,7 @@ void load()
 .opl-manager{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;overflow:hidden;gap:var(--pdm-container-gap,10px)}
 .opl-manager .pdm-panel-header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0}.opl-manager h2{margin:0 0 5px;font-size:var(--pdm-font-size-heading)}
 .opl-scope{display:block;margin-bottom:5px;color:var(--pdm-blue);font-size:var(--pdm-font-size-body)}
-.opl-counts,.opl-meta,.opl-footer,.opl-upload small{color:var(--pdm-muted);font-size:var(--pdm-font-size-body)}.opl-actions{display:flex;align-items:center;gap:8px}.opl-actions .el-button{margin:0}.opl-actions svg{margin-right:4px}
+.opl-counts,.opl-meta,.opl-footer,.opl-upload small{color:var(--pdm-muted);font-size:var(--pdm-font-size-body)}.opl-actions{display:flex;align-items:center;gap:5px}.opl-actions .el-button{box-sizing:border-box;width:80px;min-width:80px;max-width:80px;height:30px;min-height:30px;flex:0 0 80px;padding:0;margin:0;font-size:12px}.opl-actions svg{margin-right:4px}
 .opl-filters{display:flex;flex-wrap:wrap;gap:8px}.opl-filters>.el-input{flex:1 1 210px;max-width:360px}.opl-filters>.el-select{width:145px}
 .opl-table-wrap{flex:1;min-height:160px;min-width:0;overflow:hidden}.opl-description{text-align:left;white-space:pre-wrap;overflow-wrap:anywhere}.opl-overdue{color:var(--pdm-danger,#dc2626)}
 .opl-attachments{display:flex;gap:4px;align-items:center}.opl-attachments button{padding:0;border:0;background:transparent;color:var(--pdm-blue);max-width:54px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}.opl-attachments img{width:44px;height:36px;object-fit:cover;border-radius:3px}.opl-footer{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap}.opl-table .pdm-text-action+.pdm-text-action{margin-left:8px}

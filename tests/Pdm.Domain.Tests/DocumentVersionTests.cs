@@ -5,6 +5,106 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class DocumentVersionTests
 {
     [Fact]
+    public async Task PendingDrawingRegistrationAcceptsOnlyItsOwnBatchModel()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new("QA-PENDING-SAFE", "同批模型登记", "admin", "vault", "release"), "admin", default);
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        var context = new Application.ArchiveRegistrationContext(Guid.NewGuid(), Guid.NewGuid(), "QA");
+        var model = await workflow.RegisterDocumentAsync(new(project.Id, "PART", "模型", "PART.SLDPRT", DocumentKind.Part, SourceSha256: new string('A',64)), "admin", UserRole.Administrator, default, context);
+        var command = new Application.RegisterDocumentCommand(project.Id, "DRAWING", "图纸", "DRAWING.SLDDRW", DocumentKind.Drawing, RelatedModelDocumentId: model.Id, SourceSha256: new string('B',64));
+        await Assert.ThrowsAsync<Application.PdmConflictException>(() => workflow.RegisterDocumentAsync(command, "admin", UserRole.Administrator, default, context with { BatchId = Guid.NewGuid() }));
+        var drawing = await workflow.RegisterDocumentAsync(command, "admin", UserRole.Administrator, default, context);
+        Assert.NotNull(await repository.FindPendingArchiveDocumentAsync(drawing.Id, default));
+        Assert.Empty(await repository.ListDocumentsAsync(project.Id, default));
+    }
+
+    [Theory]
+    [InlineData(DocumentKind.Drawing)]
+    [InlineData(DocumentKind.Assembly)]
+    public async Task HistoricalRestoreUsesAtomicReferencesReceiptAndDurableFollowup(DocumentKind kind)
+    {
+        var clock = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var repository = new Infrastructure.InMemoryPdmRepository(clock);
+        var project = await repository.CreateProjectAsync(new("QA-RESTORE-" + kind, "历史恢复", "admin", "vault", "release"), "admin", default);
+        var a = await RegisterAndCheckInAsync(repository, project, "MODEL-A", new string('A',64));
+        var b = await RegisterAndCheckInAsync(repository, project, "MODEL-B", new string('B',64));
+        var document = await repository.RegisterDocumentAsync(new(project.Id, "ROOT", "根图档", kind == DocumentKind.Drawing ? "ROOT.SLDDRW" : "ROOT.SLDASM", kind), "engineer", default);
+        var session = Guid.NewGuid();
+        document = await repository.CheckoutAsync(document.Id, "engineer", session, "QA", clock.GetUtcNow().AddHours(1), default);
+        var firstCommit = Commit(project, document, ReferenceRoot(document, "engineer") with { Children = [ReferenceRoot(a,"engineer")] }, new string('C',64), "首次", kind == DocumentKind.Assembly);
+        var first = (await repository.CheckInBatchVersionsAsync(Guid.NewGuid(), "first", "engineer", session, [new(document.Id,firstCommit)], default)).Results.Single();
+        document = await repository.CheckoutAsync(document.Id, "engineer", session, "QA", clock.GetUtcNow().AddHours(1), default);
+        var secondCommit = Commit(project, document, ReferenceRoot(document, "engineer") with { Children = [ReferenceRoot(b,"engineer")] }, new string('D',64), "替换模型", kind == DocumentKind.Assembly) with { ExpectedVersionId = first.Version!.Id, RequireBaseVersion = true };
+        var second = (await repository.CheckInBatchVersionsAsync(Guid.NewGuid(), "second", "engineer", session, [new(document.Id,secondCommit)], default)).Results.Single();
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), clock);
+        await Assert.ThrowsAsync<Application.PdmRuleException>(() => workflow.RestoreVersionAsync(document.Id, first.Version.Id, "engineer", UserRole.Administrator, "恢复", default));
+        await Assert.ThrowsAsync<Application.PdmConflictException>(() => workflow.RestoreVersionAsync(document.Id, first.Version.Id, "engineer", UserRole.Administrator, "恢复", default, Guid.NewGuid(), first.Version.Id));
+        await Assert.ThrowsAsync<Application.PdmConflictException>(() => workflow.RestoreVersionAsync(document.Id, first.Version.Id, "engineer", UserRole.Administrator, "恢复", default, Guid.NewGuid(), second.Version!.Id, Guid.NewGuid()));
+        var operation = Guid.NewGuid();
+        var restored = await workflow.RestoreVersionAsync(document.Id, first.Version.Id, "engineer", UserRole.Administrator, "恢复", default, operation, second.Version!.Id);
+        var replay = await workflow.RestoreVersionAsync(document.Id, first.Version.Id, "engineer", UserRole.Administrator, "恢复", default, operation, second.Version.Id);
+        Assert.Equal(restored.Version.Id, replay.Version.Id);
+        Assert.Equal(first.Version.StorageRelativePath, restored.Version.StorageRelativePath);
+        Assert.Equal(a.Id, Assert.Single(restored.Version.ReferenceSnapshot.Children).DocumentId);
+        Assert.Equal(3, (await repository.ListDocumentVersionsAsync(document.Id, default)).Count);
+        Assert.Null(restored.Document.CheckoutSessionId);
+        if (kind == DocumentKind.Drawing)
+            Assert.Equal(a.Id, Assert.Single(await repository.ListDocumentRelationsAsync(project.Id, default)).ModelDocumentId);
+        else
+            Assert.Equal(a.Id, Assert.Single((await repository.GetLatestReferenceSnapshotAsync(project.Id, default))!.Root.Children).DocumentId);
+        var work = (await repository.ListArchiveBatchFollowupsAsync(20, default)).Single(item => item.Receipt.BatchId == operation);
+        await Assert.ThrowsAsync<OperationCanceledException>(() => workflow.CompleteArchiveBatchFollowupAsync(work, new CancellationToken(true)));
+        Assert.True((await repository.FindArchiveBatchAsync(operation, default))!.FollowupPending);
+        clock.Advance(TimeSpan.FromMinutes(6));
+        Assert.Contains(await repository.ListArchiveBatchFollowupsAsync(20, default), item => item.Receipt.BatchId == operation);
+        await repository.CompleteArchiveBatchFollowupAsync(operation, default);
+        Assert.False((await repository.FindArchiveBatchAsync(operation, default))!.FollowupPending);
+        if (kind == DocumentKind.Drawing)
+        {
+            var reviewId = Guid.NewGuid();
+            var modelVersion = (await repository.ListDocumentVersionsAsync(a.Id, default)).First();
+            await repository.CreateDrawingReviewPackageAsync(new DrawingReviewPackage
+            {
+                Id=reviewId,ProjectId=project.Id,Number="QA-REVIEW",State=DrawingReviewPackageState.InReview,CreatedBy="engineer",CreatedAt=clock.GetUtcNow(),
+                Items=[new DrawingReviewItem { Id=Guid.NewGuid(),PackageId=reviewId,BomItemId=Guid.NewGuid(),DrawingNumber=document.DrawingNumber,Name=document.Name,
+                    ModelDocumentId=a.Id,ModelVersionId=modelVersion.Id,ModelRevision=modelVersion.Revision.Display,ModelSha256=modelVersion.Sha256,ModelCreatedBy="engineer",
+                    DrawingDocumentId=document.Id,DrawingVersionId=restored.Version.Id,DrawingRevision=restored.Version.Revision.Display,DrawingSha256=restored.Version.Sha256,DrawingCreatedBy="engineer" }]
+            },default);
+            await Assert.ThrowsAsync<Application.PdmConflictException>(() => workflow.RestoreVersionAsync(document.Id,first.Version.Id,"engineer",UserRole.Administrator,"审核中恢复",default,Guid.NewGuid(),restored.Version.Id));
+        }
+    }
+
+    [Theory]
+    [InlineData("document.version.read")]
+    [InlineData("document.version.download")]
+    public async Task OriginalVersionBytesRequireDownloadEvenWithoutAttachmentDisposition(string action)
+    {
+        var repository=new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project=await repository.CreateProjectAsync(new("QA-BYTES-"+action,"下载权限","engineer","vault","release"),"engineer",default);
+        await repository.EnsureProjectFolderTreeAsync(project.Id,default);
+        var folder=(await repository.ListProjectFoldersAsync(project.Id,"admin",UserRole.Administrator,default)).First(item=>item.TemplateKey=="mechanical.project");
+        var document=await repository.RegisterDocumentAsync(new(project.Id,"VIEW","只读","VIEW.SLDPRT",DocumentKind.Part,folder.Id),"engineer",default);
+        await repository.SetProjectFolderPermissionsAsync(project.Id,folder.Id,[new(FolderPrincipalType.Role,nameof(UserRole.Engineer),FolderAccess.View)],"admin",UserRole.Administrator,default);
+        var workflow=new Application.PdmWorkflowService(repository,new RecordingFileStorage(),new NoOpPublisher(),TimeProvider.System);
+        await workflow.AuditVersionReadAsync(document.Id,Guid.Empty,"engineer",UserRole.Engineer,"document.version.list",default);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(()=>workflow.AuditVersionReadAsync(document.Id,Guid.Empty,"engineer",UserRole.Engineer,action,default));
+        await repository.SetProjectFolderPermissionsAsync(project.Id,folder.Id,[new(FolderPrincipalType.Role,nameof(UserRole.Engineer),FolderAccess.View|FolderAccess.Download)],"admin",UserRole.Administrator,default);
+        await workflow.AuditVersionReadAsync(document.Id,Guid.Empty,"engineer",UserRole.Engineer,action,default);
+    }
+
+    [Theory]
+    [InlineData(DocumentLifecycleState.InReview)]
+    [InlineData(DocumentLifecycleState.Obsolete)]
+    public void RestoreCannotBypassLifecycleOrForeignSession(DocumentLifecycleState state)
+    {
+        var document = new PdmDocument(Guid.NewGuid(), Guid.NewGuid(), "P", "P", "P.SLDPRT", DocumentKind.Part, state, RevisionLabel.InitialWork(), null, DateTimeOffset.UtcNow);
+        Assert.Throws<Application.PdmConflictException>(() => Application.ArchiveBatchRules.ValidateRestoreSession(document, "admin", null));
+        var session = Guid.NewGuid();
+        Assert.Throws<Application.PdmConflictException>(() => Application.ArchiveBatchRules.ValidateRestoreSession(document with { State = DocumentLifecycleState.Work, CheckedOutBy = "other", CheckoutSessionId = session }, "admin", session));
+    }
+
+    [Fact]
     public async Task MultiConfigurationReferencesShareFileVersionAndPreflightRejectsUnresolvedInstances()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);

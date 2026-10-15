@@ -48,13 +48,29 @@ public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepositor
     }
     public string Entry(DingTalkOplOptions value, Guid? groupId = null) => string.IsNullOrWhiteSpace(value.PublicUrl) ? "" :
         value.PublicUrl.TrimEnd('/') + "/?dingtalkOpl=1&companyId=" + value.CompanyId + (groupId is null ? "" : "&groupId=" + groupId);
-    private object Groups(DingTalkOplOptions value) => value.Groups.OrderBy(x => x.Value.Name).Select(x => new {
-        id = x.Key, name = x.Value.Name, openConversationId = x.Value.OpenConversationId, registered = !string.IsNullOrWhiteSpace(x.Value.OpenConversationId),
-        projectCount = value.Bindings.Count(binding => binding.Value == x.Key), entryUrl = Entry(value, x.Key) }).ToArray();
-    private object ApplicationView(DingTalkOplOptions value) => new { value.Enabled, value.CorpId, value.AppKey, value.RobotCode, value.PublicUrl, value.CompanyId, value.RowVersion,
-        hasAppSecret = !string.IsNullOrWhiteSpace(value.AppSecret), entryUrl = Entry(value), stream = streamStatus.Read(value.CompanyId), groups = Groups(value) };
+    private static Guid[] BoundProjectIds(DingTalkOplOptions value, Guid groupId)
+    {
+        var conversation = value.Groups[groupId].OpenConversationId;
+        return value.Bindings.Where(binding => binding.Value == groupId || (!string.IsNullOrWhiteSpace(conversation)
+                && value.Groups.GetValueOrDefault(binding.Value)?.OpenConversationId == conversation)).Select(binding => binding.Key)
+            .Concat(value.Projects.Where(project => !value.Bindings.ContainsKey(project.Key) && !string.IsNullOrWhiteSpace(conversation)
+                && project.Value.OpenConversationId == conversation).Select(project => project.Key)).Distinct().ToArray();
+    }
+    private async Task<object[]> GroupsAsync(DingTalkOplOptions value, string actor, UserRole role, CancellationToken ct)
+    {
+        var known = (await projects.ListProjectsForUserAsync(actor, role, ct)).ToDictionary(project => project.Id);
+        return value.Groups.OrderBy(group => group.Value.Name).Select(group => {
+            var bound = BoundProjectIds(value, group.Key);
+            return (object)new { id = group.Key, name = group.Value.Name, openConversationId = group.Value.OpenConversationId,
+                registered = !string.IsNullOrWhiteSpace(group.Value.OpenConversationId), projectCount = bound.Length,
+                boundProjects = bound.Select(id => new { id, code = known.GetValueOrDefault(id)?.Code ?? id.ToString(),
+                    name = known.GetValueOrDefault(id)?.Name ?? "项目不可见" }).OrderBy(project => project.code).ToArray(), entryUrl = Entry(value, group.Key) };
+        }).ToArray();
+    }
+    private async Task<object> ApplicationViewAsync(DingTalkOplOptions value, string actor, UserRole role, CancellationToken ct) => new { value.Enabled, value.CorpId, value.AppKey, value.RobotCode, value.PublicUrl, value.CompanyId, value.RowVersion,
+        hasAppSecret = !string.IsNullOrWhiteSpace(value.AppSecret), entryUrl = Entry(value), stream = streamStatus.Read(value.CompanyId), groups = await GroupsAsync(value, actor, role, ct) };
     public async Task<object> GetApplicationAsync(string actor, UserRole role, CancellationToken ct)
-    { await RequireSystemAsync(actor, role, ct); return ApplicationView(await LoadAsync(TenantContext.CompanyId, ct)); }
+    { await RequireSystemAsync(actor, role, ct); return await ApplicationViewAsync(await LoadAsync(TenantContext.CompanyId, ct), actor, role, ct); }
     private async Task<DingTalkOplOptions> PersistAsync(DingTalkOplOptions value, long expectedVersion, string actor, string action, CancellationToken ct)
     {
         var record = await configs.SaveAsync(new(value.CompanyId, protector.Protect(JsonSerializer.Serialize(value, Json)), value.RowVersion), expectedVersion, ct);
@@ -72,7 +88,7 @@ public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepositor
         if (input.RobotCode is not null) { if (input.RobotCode.Length > 200) throw new PdmRuleException("RobotCode最多200个字符。"); value.RobotCode = input.RobotCode.Trim(); }
         if (!string.IsNullOrWhiteSpace(input.AppSecret)) value.AppSecret = input.AppSecret.Trim();
         if (value.Enabled && (value.CorpId.Length == 0 || value.AppKey.Length == 0 || value.AppSecret.Length == 0)) throw new PdmRuleException("启用前请填写CorpId、AppKey和AppSecret。");
-        return ApplicationView(await PersistAsync(value, input.ExpectedRowVersion, actor, "settings.dingtalk.save", ct));
+        return await ApplicationViewAsync(await PersistAsync(value, input.ExpectedRowVersion, actor, "settings.dingtalk.save", ct), actor, role, ct);
     }
     private async Task<(Guid RootId, bool CanManage)> ProjectAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
     {
@@ -85,10 +101,10 @@ public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepositor
         if (TenantContext.CompanyId is null) throw new PdmRuleException("请先选择所属公司。");
         return (root.Id, manage);
     }
-    private object BindingView(DingTalkOplOptions value, Guid rootId, bool canManage) => new { rootProjectId = rootId, canManage, value.RowVersion,
-        groupId = value.Bindings.TryGetValue(rootId, out var groupId) ? (Guid?)groupId : null, groups = Groups(value), entryUrl = Entry(value), enabled = value.Enabled };
+    private async Task<object> BindingViewAsync(DingTalkOplOptions value, Guid rootId, bool canManage, string actor, UserRole role, CancellationToken ct) => new { rootProjectId = rootId, canManage, value.RowVersion,
+        groupId = value.Bindings.TryGetValue(rootId, out var groupId) ? (Guid?)groupId : null, groups = await GroupsAsync(value, actor, role, ct), entryUrl = Entry(value), enabled = value.Enabled };
     public async Task<object> GetBindingAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
-    { var access = await ProjectAccessAsync(projectId, actor, role, ct); return BindingView(await LoadAsync(TenantContext.CompanyId, ct), access.RootId, access.CanManage); }
+    { var access = await ProjectAccessAsync(projectId, actor, role, ct); return await BindingViewAsync(await LoadAsync(TenantContext.CompanyId, ct), access.RootId, access.CanManage, actor, role, ct); }
     public async Task<Guid> EntryGroupAsync(Guid projectId,string actor,UserRole role,CancellationToken ct)
     {
         var access=await ProjectAccessAsync(projectId,actor,role,ct);
@@ -103,9 +119,19 @@ public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepositor
         var value = await LoadAsync(TenantContext.CompanyId, ct);
         if (input.GroupId is Guid id && (!value.Groups.TryGetValue(id, out var group) || string.IsNullOrWhiteSpace(group.OpenConversationId)))
             throw new PdmRuleException("请选择已发现的群；请先在钉钉群内@企业机器人发送“登记项目群”，再刷新列表。");
+        if (input.GroupId is Guid selected && value.Bindings.GetValueOrDefault(access.RootId) != selected)
+        {
+            var occupied = BoundProjectIds(value, selected).Where(id => id != access.RootId).ToArray();
+            if (occupied.Length > 0)
+            {
+                var known = (await projects.ListProjectsForUserAsync(actor, role, ct)).ToDictionary(project => project.Id);
+                var labels = occupied.Select(id => known.TryGetValue(id, out var project) ? $"{project.Code} · {project.Name}" : "其他项目");
+                throw new PdmRuleException($"该钉钉群已关联项目：{string.Join("、", labels)}，不能再次关联其他主项目。请先解除原项目的绑定。");
+            }
+        }
         if (input.GroupId is Guid bound) value.Bindings[access.RootId] = bound; else value.Bindings.Remove(access.RootId);
         value.Projects.Remove(access.RootId);
-        return BindingView(await PersistAsync(value, input.ExpectedRowVersion, actor, "project.dingtalk.bind", ct), access.RootId, true);
+        return await BindingViewAsync(await PersistAsync(value, input.ExpectedRowVersion, actor, "project.dingtalk.bind", ct), access.RootId, true, actor, role, ct);
     }
     public async Task<IReadOnlyList<DingTalkOplOptions>> ListStreamConfigurationsAsync(CancellationToken ct)
     {

@@ -24,7 +24,20 @@ internal static class Program
         var dll = Path.GetFullPath(args[0]);
         AppDomain.CurrentDomain.AssemblyResolve += (_, e) => { var path = Path.Combine(Path.GetDirectoryName(dll), new AssemblyName(e.Name).Name + ".dll"); return File.Exists(path) ? Assembly.LoadFrom(path) : null; };
         assembly = Assembly.LoadFrom(dll);
+        if(args.Length>2 && args[2]=="assembly-facts")
+        {
+            foreach(var name in new[]{"CheckInBatchAsync","PrepareBatchCheckInPermissionAsync","ResolveBatchReferenceVersionsAsync"})
+            {
+                var method=T("PdmAddin").GetMethod(name,Flags);
+                var state=((System.Runtime.CompilerServices.AsyncStateMachineAttribute)method.GetCustomAttributes(typeof(System.Runtime.CompilerServices.AsyncStateMachineAttribute),false).Single()).StateMachineType;
+                Console.WriteLine(name+" parameters="+method.GetParameters().Length+" state="+state.Name);
+                var body=state.GetMethod("MoveNext",Flags).GetMethodBody().GetILAsByteArray();
+                for(var i=0;i<body.Length-4;i++)if(body[i]==0x72){try{var text=state.Module.ResolveString(BitConverter.ToInt32(body,i+1));if(text.Contains("未成功")||text.Contains("批次")||text.Contains("尚未产生"))Console.WriteLine(text);}catch(ArgumentException){}}
+            }
+            return 0;
+        }
         T("ArchiveUploadJournal").GetField("directory", Flags).SetValue(null, Path.Combine(directory, "journals"));
+        T("ArchiveBatchJournal").GetField("directory", Flags).SetValue(null, Path.Combine(directory, "batches"));
         T("PdmDocumentIdentityStore").GetField("bindingDirectory", Flags).SetValue(null, Path.Combine(directory, "bindings"));
         T("PdmDocumentIdentityStore").GetField("workspaceRootResolver", Flags).SetValue(null, new Func<string>(() => Path.Combine(directory, "workspace")));
         try
@@ -34,6 +47,8 @@ internal static class Program
             Run("日志限量、并发记录、诊断汇总与凭据脱敏", Diagnostics);
             Run("上传分块中断后只续传剩余块", () => Upload(false));
             Run("完成响应丢失后复用同一上传目标", () => Upload(true));
+            Run("整批上传绑定服务器分配路径，批次记录只在结果确认后清理", BatchUploadOwnership);
+            Run("重复刷新复用已确认历史，版本号或数量变化立即失效", VersionHistoryCache);
             Run("来源文件修改不伪装成原样副本", CopyHashes);
             Run("首次存档重试沿用登记编号，版本、用户、电脑和项目变化仍拦截", PendingFirstArchive);
             Run("首次存档读取多层压缩结构，保留实例与压缩状态并拒绝错误配置和循环", LocalSuppressedStructure);
@@ -52,6 +67,15 @@ internal static class Program
             Run("压缩零件保留引用，缺失文件及未展开子装配体阻止漏传", SuppressedReferences);
             Run("已存档压缩子装配体沿用准确版本及内部结构，修改和配置冲突仍拦截", ArchivedSuppressedAssembly);
             Run("跨子项目已存档同名零件按当前项目文件内容复用并锁定引用版本", SubprojectReference);
+            Run("多层压缩结构的重复实例在权限准备后重新匹配存档身份", NestedReferenceIdentity);
+            Run("身份不完整的历史压缩结构不能复用，未登记引用在本地预检拦截", IncompleteArchivedReferences);
+            Run("选中模型自动纳入其异名、异目录及多模型工程图，排除无关图纸", SelectedModelDrawings);
+            Run("工程图内的独立模型引用同步身份和准确版本，双向关系不会递归溢出", NestedDrawingReferenceIdentity);
+            Run("失败登记不写永久身份，旧空登记可重新准备，历史和跨项目身份保持", PendingRegistrationIdentity);
+            Run("预检与提交复用固定快照，多配置及工程图引用不能被异步刷新改写", FrozenArchiveSnapshot);
+            Run("计划内缺失身份或版本也必须在上传前拦截", IncompletePlannedSnapshot);
+            Run("中断批次记录隔离服务器与账号，存活进程不被误清理", InterruptedBatchJournal);
+            Run("重启后核对已提交、未提交、并发完成和服务器不可达的批次", InterruptedBatchRecovery);
             if (args.Length > 2) Run("实际P700012发布版本与工作区编辑基准兼容", () => RealReleasedBaseline(args[2]));
             Console.WriteLine("PASS " + passed + " archive scenarios (protocol and COM-independent simulation)");
             return 0;
@@ -67,7 +91,7 @@ internal static class Program
         using (var client = (IDisposable)Client(handler))
         {
             Action attempt = () => Await(Call(client, "UploadVersionFileAsync", project, path, document, path, CancellationToken.None, null, null,
-                Hash(path)));
+                Hash(path), null, null));
             Expect<InvalidOperationException>(attempt); attempt();
             Assert(handler.Starts == 1, "created another upload session");
             Assert(handler.Chunks[0] == 1, "reuploaded acknowledged chunk zero");
@@ -87,9 +111,54 @@ internal static class Program
             {
                 handler.OnComplete = () => File.WriteAllText(path, "later edit");
                 T("PdmApiClient").GetField("httpClient", Flags).SetValue(client, new HttpClient(handler) { BaseAddress = new Uri("http://fixture.invalid/") });
-                Expect<IOException>(() => Await(Call(client, "UploadVersionFileAsync", project, copy, Guid.NewGuid(), path, CancellationToken.None, null, exact ? baseline : null, baseline)));
+                Expect<IOException>(() => Await(Call(client, "UploadVersionFileAsync", project, copy, Guid.NewGuid(), path, CancellationToken.None, null, exact ? baseline : null, baseline, null, null)));
                 Assert(handler.Received == 10 && handler.StoredTargets.Count == 1 && File.ReadAllText(path) == "later edit", "upload race did not preserve and detect late edit");
             }
+        }
+    }
+    static void BatchUploadOwnership()
+    {
+        var project = Guid.NewGuid(); var document = Guid.NewGuid(); var batch = Guid.NewGuid(); var checkout = Guid.NewGuid();
+        var source = Path.Combine(directory, "owned.SLDPRT"); File.WriteAllText(source, "abcdefghij");
+        var serverTarget = ".versions/" + document.ToString("N") + "/server-assigned/owned.SLDPRT";
+        using (var handler = new UploadHandler(project, Hash(source), true) { TargetRelativePath = serverTarget })
+        using (var client = (IDisposable)Client(handler))
+        {
+            Action attempt = () => Await(Call(client, "UploadVersionFileAsync", project, source, document, source,
+                CancellationToken.None, null, null, Hash(source), batch, checkout));
+            Expect<InvalidOperationException>(attempt); attempt();
+            Assert(handler.Starts == 1 && handler.StoredTargets.All(target => target == serverTarget), "owned upload restarted or ignored server target");
+            Assert((string)handler.StartBody["batchId"] == batch.ToString() && (string)handler.StartBody["documentId"] == document.ToString()
+                && (string)handler.StartBody["checkoutSessionId"] == checkout.ToString(), "upload owner missing");
+            var records = Directory.GetFiles(Path.Combine(directory, "journals"), "*." + batch.ToString("N") + ".json");
+            Assert(records.Length == 1, "receipt recovery record missing before commit");
+            Static("ArchiveBatchJournal", "Complete", batch);
+            Assert(!File.Exists(records[0]) && File.ReadAllText(source) == "abcdefghij", "batch cleanup did not preserve source");
+        }
+    }
+    static void VersionHistoryCache()
+    {
+        var document = Guid.NewGuid(); var requests = 0; var revision = "W1";
+        using (var client = (IDisposable)Client(new JsonHandler(request =>
+        {
+            Assert(request.RequestUri.AbsolutePath.EndsWith("/versions"), "unexpected cache request"); requests++;
+            return new[] { new { id = Guid.NewGuid(), documentId = document, revision = new { display = revision } } };
+        })))
+        {
+            var plugin = New("PdmAddin"); T("PdmAddin").GetField("apiClient", Flags).SetValue(plugin, client);
+            var metadata = New("DocumentDto"); Set(metadata, "Id", document); Set(metadata, "StoredVersionCount", 1);
+            var label = New("RevisionDto"); Set(label, "Display", "W1"); Set(metadata, "Revision", label);
+            var documents = Array.CreateInstance(T("DocumentDto"), 1); documents.SetValue(metadata, 0);
+            Await(Call(plugin, "GetTreeVersionsAsync", document, CancellationToken.None)); Thread.Sleep(2200);
+            for (var i = 0; i < 100; i++)
+            { Call(plugin, "InvalidateChangedVersionHistories", documents); Await(Call(plugin, "GetTreeVersionsAsync", document, CancellationToken.None)); }
+            Assert(requests == 1, "unchanged tree repeatedly fetched history");
+            revision = "W2"; Set(label, "Display", revision); Call(plugin, "InvalidateChangedVersionHistories", documents);
+            Await(Call(plugin, "GetTreeVersionsAsync", document, CancellationToken.None));
+            Assert(requests == 2, "changed revision reused stale history");
+            Set(metadata, "StoredVersionCount", 2); Call(plugin, "InvalidateChangedVersionHistories", documents);
+            Await(Call(plugin, "GetTreeVersionsAsync", document, CancellationToken.None));
+            Assert(requests == 3, "changed version count reused stale history");
         }
     }
     static void CopyHashes()
@@ -133,14 +202,23 @@ internal static class Program
     static Func<object, object> localStructureReader;
     static void AtomicArchiveRetry()
     {
-        foreach (var mode in new[] { "retry", "receipt" })
+        foreach (var mode in new[] { "retry", "receipt", "partial" })
         {
             var batch = Guid.NewGuid(); var posts = 0;
             using (var handler = new AtomicReceiptHandler(batch, mode))
             using (var client = (IDisposable)Client(handler))
             {
-                var result = Await(Call(client, "CommitArchiveBatchAsync", batch, Guid.NewGuid(), new object[] { new { documentId = Guid.NewGuid() } }, CancellationToken.None));
+                var files = Enumerable.Range(0, 6).Select(_ => (object)new { documentId = Guid.NewGuid() }).ToArray();
+                if (mode == "partial")
+                {
+                    try { Await(Call(client, "CommitArchiveBatchAsync", batch, Guid.NewGuid(), files, CancellationToken.None)); throw new Exception("six-file submission accepted a four-file receipt"); }
+                    catch (Exception error) when (Unwrap(error) is InvalidOperationException)
+                    { Assert(!(Unwrap(error).Data["ArchiveBatchNotCommitted"] is bool known && known), "incomplete receipt incorrectly treated as definitely uncommitted"); }
+                    continue;
+                }
+                var result = Await(Call(client, "CommitArchiveBatchAsync", batch, Guid.NewGuid(), files, CancellationToken.None));
                 Assert((Guid)Get(result, "BatchId") == batch, "batch identity changed");
+                Assert(((IList)Get(result, "Results")).Count == 6, "six-file receipt incomplete");
                 posts = handler.Posts;
                 Assert(posts == (mode == "retry" ? 2 : 1), "unexpected retry count");
             }
@@ -148,19 +226,20 @@ internal static class Program
     }
     sealed class AtomicReceiptHandler : HttpMessageHandler
     {
-        readonly Guid batch; readonly string mode; public int Posts;
+        readonly Guid batch; readonly string mode; public int Posts; Guid[] documents;
         public AtomicReceiptHandler(Guid batch, string mode) { this.batch = batch; this.mode = mode; }
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             if (request.Method == HttpMethod.Post)
             {
                 Posts++; var body = Json.Deserialize<Dictionary<string, object>>(request.Content.ReadAsStringAsync().GetAwaiter().GetResult());
+                documents = ((IList)body["files"]).Cast<Dictionary<string, object>>().Select(file => Guid.Parse((string)file["documentId"])).ToArray();
                 Assert(Guid.Parse((string)body["batchId"]) == batch, "retry used another batch");
                 if (Posts == 1 && mode == "retry") throw new HttpRequestException("simulated response loss");
                 if (mode == "receipt") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("{\"message\":\"响应发送失败\"}") });
             }
             else Assert(request.RequestUri.AbsolutePath.EndsWith(batch.ToString()), "wrong receipt query");
-            return Task.FromResult(Reply(new { batchId = batch, results = new object[0] }));
+            return Task.FromResult(Reply(new { batchId = batch, results = documents.Take(mode == "partial" ? 4 : documents.Length).Select(id => new { document = new { id } }).ToArray() }));
         }
     }
     static void MultiConfigurationIdentity()
@@ -182,6 +261,7 @@ internal static class Program
     static void PreflightProperties()
     {
         var node = Node("inspected.SLDPRT", Guid.NewGuid(), 1); var path = (string)Get(node, "FullPath"); File.WriteAllText(path, "native file");
+        Set(node, "Revision", "W1");
         var items = Array.CreateInstance(T("BatchOperationItem"), 1); items.SetValue(New("BatchOperationItem", node, 0), 0);
         var properties = new Dictionary<string, IReadOnlyDictionary<string, string>> { [path] = new Dictionary<string, string> { ["全局/名称"] = "样件" } };
         var posted = false;
@@ -197,8 +277,83 @@ internal static class Program
         {
             var addin = New("PdmAddin"); T("PdmAddin").GetField("apiClient", Flags).SetValue(addin, client);
             Await(Call(addin, "PreflightBatchCheckInItemsAsync", items, Guid.NewGuid(), null, null, null,
-                new HashSet<string> { path }, null, CancellationToken.None, null, null, properties));
+                new HashSet<string> { path }, null, CancellationToken.None, null, null, properties, null));
             Assert(posted, "server preflight not called");
+        }
+    }
+    static void FrozenArchiveSnapshot()
+    {
+        var root=Node("FROZEN.SLDASM",Guid.NewGuid(),0);Set(root,"Revision","W1");
+        var child=Node("REPEATED.SLDPRT",Guid.NewGuid(),1);Set(child,"Revision","W1");Set(child,"CurrentRevision","W1");Set(child,"Configuration","D13");
+        var alias=Node("REPEATED.SLDPRT",(Guid)Get(child,"DocumentId"),1);Set(alias,"Revision","W1");Set(alias,"CurrentRevision","W1");Set(alias,"Configuration","D14");
+        ((IList)Get(root,"Children")).Add(child);((IList)Get(root,"Children")).Add(alias);
+        var paths=new HashSet<string>{(string)Get(root,"FullPath"),(string)Get(child,"FullPath")};
+        var posts=new List<Dictionary<string,object>>();var reads=0;
+        using(var handler=new JsonHandler(request=>{if(request.Method==HttpMethod.Get){reads++;return new object[0];}posts.Add(Json.Deserialize<Dictionary<string,object>>(request.Content.ReadAsStringAsync().GetAwaiter().GetResult()));return new{};}))
+        using(var client=(IDisposable)Client(handler))
+        {
+            var snapshot=Await(Call(client,"PrepareArchiveSnapshotAsync",root,paths,null,CancellationToken.None));
+            var original=Json.Serialize(Call(snapshot,"CreateRoot"));
+            Set(child,"DocumentId",null);Set(child,"Configuration","changed");((IList)Get(root,"Children")).Clear();Set(root,"FileName","changed.SLDASM");
+            Await(Call(client,"PreflightCheckInAsync",Get(root,"DocumentId"),Guid.NewGuid(),root,new Dictionary<string,string>(),Guid.NewGuid(),true,null,null,CancellationToken.None,null,paths,null,snapshot));
+            var stored=New("StoredVersionFile","vault/source",4L,"hash",new Dictionary<string,string>());
+            var prepared=Await(Call(client,"PrepareArchiveBatchFileAsync",Get(root,"DocumentId"),Guid.NewGuid(),root,"test",stored,new Dictionary<string,string>(),Guid.NewGuid(),true,null,null,null,null,paths,CancellationToken.None,snapshot));
+            var request=(Dictionary<string,object>)Json.Deserialize<Dictionary<string,object>>(Json.Serialize(prepared))["request"];
+            Assert(Json.Serialize(posts.Single()["root"])==original&&Json.Serialize(request["root"])==original,"frozen references changed between preflight and commit");
+            Assert((string)request["fileName"]=="FROZEN.SLDASM"&&reads==1,"filename changed or base versions queried repeatedly");
+        }
+        var drawing=Node("MULTI.SLDDRW",Guid.NewGuid(),2);Set(drawing,"Revision","W1");
+        Set(child,"DocumentId",Guid.NewGuid());Set(child,"CurrentRevision","");Set(child,"Revision","W1");((IList)Get(drawing,"ReferencedModels")).Add(child);
+        var captured=Static("PdmApiClient","CaptureArchiveSnapshot",drawing,new HashSet<string>{(string)Get(child,"FullPath")});
+        var body=Json.Deserialize<Dictionary<string,object>>(Json.Serialize(Call(captured,"CreateRoot")));
+        Assert(((IList)body["children"]).Count==1,"planned drawing model was dropped");
+    }
+    static void IncompletePlannedSnapshot()
+    {
+        var root=Node("INCOMPLETE.SLDASM",Guid.NewGuid(),0);Set(root,"Revision","W1");
+        var child=Node("355.0700A.01.SLDPRT",Guid.NewGuid(),1);Set(child,"DocumentId",null);Set(child,"InstancePath","ROOT/SUB/355-4");Set(child,"Configuration","默认");((IList)Get(root,"Children")).Add(child);
+        var paths=new HashSet<string>{(string)Get(child,"FullPath")};
+        Expect<InvalidOperationException>(()=>Static("PdmApiClient","CaptureArchiveSnapshot",root,paths));
+        Set(child,"DocumentId",Guid.NewGuid());Expect<InvalidOperationException>(()=>Static("PdmApiClient","CaptureArchiveSnapshot",root,paths));
+        Set(child,"Revision","W1");Static("PdmApiClient","CaptureArchiveSnapshot",root,paths);
+    }
+    static void InterruptedBatchJournal()
+    {
+        var batch=Guid.NewGuid();var session=Guid.NewGuid();Static("ArchiveBatchJournal","Begin",batch,session,"server|company","engineer");
+        Assert(!((IEnumerable)Static("ArchiveBatchJournal","Interrupted","server|company","engineer")).Cast<object>().Any(),"live process recovered");
+        var path=Path.Combine(directory,"batches",batch.ToString("N")+".json");var state=Json.Deserialize<Dictionary<string,object>>(File.ReadAllText(path));state["ProcessStartUtcTicks"]=0;File.WriteAllText(path,Json.Serialize(state));
+        Assert(((IEnumerable)Static("ArchiveBatchJournal","Interrupted","server|company","engineer")).Cast<object>().Count()==1,"crash record lost");
+        Assert(!((IEnumerable)Static("ArchiveBatchJournal","Interrupted","other","engineer")).Cast<object>().Any(),"server scope leaked");
+        Assert(!((IEnumerable)Static("ArchiveBatchJournal","Interrupted","server|company","other")).Cast<object>().Any(),"actor scope leaked");
+        Static("ArchiveBatchJournal","Complete",batch);Assert(!File.Exists(path),"receipt journal not cleaned");
+    }
+    static void InterruptedBatchRecovery()
+    {
+        foreach(var mode in new[]{"committed","pending","concurrent-commit","unreachable"})
+        {
+            var batch=Guid.NewGuid();var session=Guid.NewGuid();var reads=0;var cancellations=0;
+            using(var handler=new JsonHandler(request=>
+            {
+                if(mode=="unreachable")throw new HttpRequestException("fixture unavailable");
+                if(request.Method==HttpMethod.Post){Assert(request.RequestUri.AbsolutePath.EndsWith("/cancel-registration"),"recovery reposted archive versions");cancellations++;return new{};}
+                reads++;
+                return mode=="committed"||mode=="concurrent-commit"&&reads>1?(object)new{batchId=batch,results=new object[0]}:new HttpResponseMessage(HttpStatusCode.NotFound){Content=new StringContent("{}")};
+            }))
+            using(var client=(IDisposable)Client(handler))
+            using(var pane=(IDisposable)New("PdmTaskPaneControl","中断恢复"))
+            using(var lifetime=new CancellationTokenSource())
+            {
+                Call(client,"SetActiveCompany",Guid.Empty);var scope=(string)Get(client,"EditJournalScope");
+                Static("ArchiveBatchJournal","Begin",batch,session,scope,"engineer");
+                var path=Path.Combine(directory,"batches",batch.ToString("N")+".json");var state=Json.Deserialize<Dictionary<string,object>>(File.ReadAllText(path));state["ProcessStartUtcTicks"]=0;File.WriteAllText(path,Json.Serialize(state));
+                var plugin=New("PdmAddin");T("PdmAddin").GetField("apiClient",Flags).SetValue(plugin,client);T("PdmAddin").GetField("taskPaneControl",Flags).SetValue(plugin,pane);T("PdmAddin").GetField("lifetime",Flags).SetValue(plugin,lifetime);T("PdmAddin").GetField("authenticatedUsername",Flags).SetValue(plugin,"engineer");
+                var previousContext=SynchronizationContext.Current;
+                try{SynchronizationContext.SetSynchronizationContext(null);Await(Call(plugin,"RecoverInterruptedArchiveBatchesAsync"));}
+                finally{SynchronizationContext.SetSynchronizationContext(previousContext);}
+                Assert(File.Exists(path)==(mode=="unreachable"),"unconfirmed outcome journal lost or confirmed journal retained");
+                Assert(cancellations==((mode=="pending"||mode=="concurrent-commit")?1:0),"unexpected recovery cancellation");
+                Static("ArchiveBatchJournal","Complete",batch);
+            }
         }
     }
     static Task<T> ReadLocalStructure<T>(T node) => Task.FromResult((T)localStructureReader(node));
@@ -434,6 +589,125 @@ internal static class Program
             }
         }
     }
+    static void NestedReferenceIdentity()
+    {
+        var project = Guid.NewGuid(); var document = Guid.NewGuid(); var version = Guid.NewGuid();
+        var root = Node("nested-held-root.SLDASM", Guid.NewGuid(), 0);
+        var sub = Node("nested-panel.SLDASM", Guid.NewGuid(), 0);
+        Set(sub, "Revision", "W1"); Set(sub, "CurrentRevision", "W1");
+        var first = Node("复位按钮标牌(正装).SLDPRT", document, 1);
+        var second = Node("复位按钮标牌(正装).SLDPRT", document, 1);
+        Set(first, "Configuration", "默认"); Set(second, "Configuration", "反装");
+        Set(first, "CurrentRevision", "W1"); Set(second, "CurrentRevision", "W1");
+        ((IList)Get(root, "Children")).Add(sub); ((IList)Get(sub, "Children")).Add(first); ((IList)Get(sub, "Children")).Add(second);
+        File.WriteAllText((string)Get(first, "FullPath"), "verified archived nameplate");
+        var hash = Hash((string)Get(first, "FullPath"));
+        var items = Array.CreateInstance(T("BatchOperationItem"), 2);
+        items.SetValue(New("BatchOperationItem", root, 0), 0); items.SetValue(New("BatchOperationItem", sub, 1), 1);
+        using (var handler = new JsonHandler(request => {
+            if (request.RequestUri.AbsolutePath.EndsWith("/documents")) return new[] { new { id=document, projectId=project, fileName=Get(first,"FileName"),kind=1 } };
+            return new[] { new { id=version, revision=new { display="W1" },sha256=hash,propertySnapshot=new Dictionary<string,string>() } };
+        }))
+        using (var client = (IDisposable)Client(handler))
+        {
+            var addin = New("PdmAddin"); T("PdmAddin").GetField("apiClient", Flags).SetValue(addin, client);
+            T("PdmAddin").GetField("currentTree", Flags).SetValue(addin, Node("unrelated-active.SLDASM",Guid.NewGuid(),0));
+            foreach (var part in new[] { first, second }) { Set(part,"DocumentId",null); Set(part,"CurrentRevision", ""); }
+            Await(Call(addin,"ResolveBatchReferenceVersionsAsync",items,project,null,CancellationToken.None));
+            Assert((Guid)Get(first,"DocumentId")==document && (Guid)Get(second,"DocumentId")==document,"held nested instances not resolved");
+            Assert((string)Get(second,"Configuration")=="反装","configuration overwritten during identity resolution");
+            var body=Json.Serialize(Static("PdmApiClient","ToRequestNode",root,true,new HashSet<string>{(string)Get(sub,"FullPath")}));
+            Assert(body.Split(new[]{document.ToString()},StringSplitOptions.None).Length==3,"nested serialized references missing shared identity");
+        }
+    }
+    static void IncompleteArchivedReferences()
+    {
+        var root=Node("incomplete-history.SLDASM",Guid.NewGuid(),0);
+        var sub=Node("incomplete-sub.SLDASM",Guid.NewGuid(),0);
+        File.WriteAllText((string)Get(sub,"FullPath"),"archived incomplete assembly");
+        Set(sub,"Status",Enum.Parse(T("CadReferenceStatus"),"Suppressed")); Set(sub,"Configuration","TP900"); Set(sub,"CurrentRevision","W1");
+        ((IList)Get(root,"Children")).Add(sub);
+        foreach(var missing in new[]{"document","revision"})
+        {
+            var snapshot=new {documentId=Get(sub,"DocumentId"),fileName=Get(sub,"FileName"),kind=0,configuration="TP900",children=new[]{new{documentId=missing=="document"?(Guid?)null:Guid.NewGuid(),fileName="复位按钮标牌(正装).SLDPRT",kind=1,status=0,revision=missing=="revision"?null:new{display="W1"},children=new object[0]}}};
+            var saved=Json.Deserialize(Json.Serialize(new{id=Guid.NewGuid(),revision=new{display="W1"},referenceSnapshot=snapshot}),T("DocumentVersionDto"));
+            Set(sub,"SuppressedArchiveVersion",saved);Set(sub,"SuppressedArchiveSha256",Hash((string)Get(sub,"FullPath")));
+            Assert(!(bool)Static("SuppressedAssemblyArchive","CanReuse",sub),"incomplete historical references reused");
+        }
+        var missingPart=Node("unbound-reference.SLDPRT",Guid.NewGuid(),1); File.WriteAllText((string)Get(missingPart,"FullPath"),"part"); Set(missingPart,"DocumentId",null);
+        var liveRoot=Node("unbound-root.SLDASM",Guid.NewGuid(),0); ((IList)Get(liveRoot,"Children")).Add(missingPart);
+        Expect<InvalidOperationException>(()=>Static("PdmApiClient","ValidateCheckInReferences",liveRoot,null));
+        Static("PdmApiClient","ValidateCheckInReferences",liveRoot,new HashSet<string>{(string)Get(missingPart,"FullPath")});
+    }
+    static void NestedDrawingReferenceIdentity()
+    {
+        var project = Guid.NewGuid(); var document = Guid.NewGuid();
+        var root = Node("drawing-reference-root.SLDASM",Guid.NewGuid(),0);
+        var model = Node("drawing-model.SLDPRT",document,1);
+        File.WriteAllText((string)Get(model,"FullPath"),"archived model file");
+        var drawing = Node("drawing-model.SLDDRW",Guid.NewGuid(),2);
+        var alias = Node("drawing-model.SLDPRT",Guid.NewGuid(),1); Set(alias,"DocumentId",null); Set(alias,"FullPath",Get(model,"FullPath")); Set(alias,"CurrentRevision","");
+        ((IList)Get(root,"Children")).Add(model); ((IList)Get(model,"Children")).Add(drawing);
+        ((IList)Get(drawing,"ReferencedModels")).Add(alias); ((IList)Get(drawing,"ReferencedModels")).Add(model);
+        var items=Array.CreateInstance(T("BatchOperationItem"),1); items.SetValue(New("BatchOperationItem",root,0),0);
+        Static("PdmAddin","SynchronizeBatchFileIdentities",items);
+        Assert((Guid)Get(alias,"DocumentId")==document,"drawing alias lost model identity");
+        using(var handler=new JsonHandler(request => new[]{new{id=Guid.NewGuid(),revision=new{display="W1"},sha256=Hash((string)Get(model,"FullPath")),propertySnapshot=new Dictionary<string,string>()}}))
+        using(var client=(IDisposable)Client(handler))
+        {
+            var plugin=New("PdmAddin"); T("PdmAddin").GetField("apiClient",Flags).SetValue(plugin,client);
+            Await(Call(plugin,"ResolveBatchReferenceVersionsAsync",items,project,null,CancellationToken.None));
+            Assert((string)Get(alias,"CurrentRevision")=="W1","nested drawing reference version unresolved");
+            Static("PdmApiClient","ValidateCheckInReferences",root,null);
+            Static("PdmApiClient","ValidateCheckInReferences",drawing,null);
+        }
+    }
+    static void PendingRegistrationIdentity()
+    {
+        var project=Guid.NewGuid(); var node=Node("pending-registration.SLDDRW",Guid.NewGuid(),2);
+        File.WriteAllText((string)Get(node,"FullPath"),"drawing source");
+        var doc=New("DocumentDto"); Set(doc,"Id",Get(node,"DocumentId"));Set(doc,"ProjectId",project);
+        var plugin=New("PdmAddin");
+        using(var pane=(IDisposable)New("PdmTaskPaneControl","事务测试"))
+        {
+            T("PdmAddin").GetField("taskPaneControl",Flags).SetValue(plugin,pane);
+            Call(plugin,"ApplyPreparedDocumentToMatchingInstances",node,doc,false);
+        }
+        var bindingArguments = new object[]{Get(node,"FullPath"),null};
+        Assert(!(bool)Static("PdmDocumentIdentityStore","TryReadLocalMetadata",bindingArguments),"pending registration wrote a persistent binding");
+        Assert((bool)Static("PdmDocumentIdentityStore","TryWrite",Get(node,"FullPath"),Get(node,"DocumentId"),project),"registration-only binding fixture failed");
+        var docs=Array.CreateInstance(T("DocumentDto"),0);
+        Static("PdmAddin","ResetRemovedRegistrationBindings",node,project,docs);
+        Assert(Get(node,"DocumentId")==null,"removed empty registration retained invalid ID");
+        var stored=Guid.NewGuid();Set(node,"DocumentId",stored);
+        Static("PdmDocumentIdentityStore","TryWriteControlledVersion",Get(node,"FullPath"),stored,project,Guid.NewGuid(),"W1",Hash((string)Get(node,"FullPath")),new FileInfo((string)Get(node,"FullPath")).Length);
+        Static("PdmAddin","ResetRemovedRegistrationBindings",node,project,docs);
+        Assert((Guid)Get(node,"DocumentId")==stored,"archived identity cleared");
+        var foreign=Guid.NewGuid(); Set(node,"DocumentId",foreign);
+        Static("PdmDocumentIdentityStore","TryWrite",Get(node,"FullPath"),foreign,Guid.NewGuid());
+        Static("PdmAddin","ResetRemovedRegistrationBindings",node,project,docs);
+        Assert((Guid)Get(node,"DocumentId")==foreign,"foreign identity cleared");
+    }
+    static void SelectedModelDrawings()
+    {
+        var part=Node("selected-part.SLDPRT",Guid.NewGuid(),1);
+        var alias=Node("selected-part.SLDPRT",(Guid)Get(part,"DocumentId"),1); Set(alias,"FullPath",Path.Combine(directory,"old-folder","selected-part.SLDPRT"));
+        var other=Node("unrelated-part.SLDPRT",Guid.NewGuid(),1);
+        var first=Node("different-name.SLDDRW",Guid.NewGuid(),2); ((IList)Get(first,"ReferencedModels")).Add(alias);
+        var second=Node("multi-model.SLDDRW",Guid.NewGuid(),2); ((IList)Get(second,"ReferencedModels")).Add(part); ((IList)Get(second,"ReferencedModels")).Add(other);
+        var unrelated=Node("unrelated.SLDDRW",Guid.NewGuid(),2); ((IList)Get(unrelated,"ReferencedModels")).Add(other);
+        var selected=Array.CreateInstance(T("BatchOperationItem"),1);selected.SetValue(New("BatchOperationItem",part,1),0);
+        var all=Array.CreateInstance(T("BatchOperationItem"),4); all.SetValue(selected.GetValue(0),0);
+        all.SetValue(New("BatchOperationItem",first,2),1);all.SetValue(New("BatchOperationItem",second,2),2);all.SetValue(New("BatchOperationItem",unrelated,2),3);
+        var items=((IEnumerable)Static("PdmAddin","IncludeSelectedModelDrawings",selected,all)).Cast<object>().ToArray();
+        Assert(items.Length==3 && items.Any(item=>Get(item,"Node")==first) && items.Any(item=>Get(item,"Node")==second),"required drawing scope lost or unrelated drawing added");
+        var parent=Node("selected-root.SLDASM",Guid.NewGuid(),0);
+        ((IList)Get(parent,"Children")).Add(part);((IList)Get(parent,"Children")).Add(other);
+        var withParent=Array.CreateInstance(T("BatchOperationItem"),2);
+        withParent.SetValue(New("BatchOperationItem",parent,0),0);withParent.SetValue(selected.GetValue(0),1);
+        var scoped=((IEnumerable)Static("PdmAddin","IncludeSelectedModelDrawings",withParent,all)).Cast<object>().ToArray();
+        Assert(!scoped.Any(item=>Get(item,"Node")==other||Get(item,"Node")==unrelated),"selected ancestor silently added deselected model or drawing");
+    }
     static void ReferenceCycle()
     {
         var model = Node("cycle.SLDPRT", Guid.NewGuid(), 1);
@@ -507,20 +781,23 @@ internal static class Program
     {
         readonly Func<HttpRequestMessage, object> response;
         public JsonHandler(Func<HttpRequestMessage, object> response) { this.response = response; }
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) => Task.FromResult(Reply(response(request)));
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        { var value=response(request);return Task.FromResult(value as HttpResponseMessage??Reply(value)); }
     }
     sealed class UploadHandler : HttpMessageHandler
     {
         readonly Guid project, session = Guid.NewGuid(); readonly string hash; readonly bool lostCompletion; bool failed;
         public int Starts; public long Received; public Dictionary<int, int> Chunks = new Dictionary<int, int>(); public List<string> StoredTargets = new List<string>();
         public Action OnComplete;
+        public string TargetRelativePath;
+        public Dictionary<string, object> StartBody;
         public UploadHandler(Guid project, string hash, bool lostCompletion) { this.project = project; this.hash = hash; this.lostCompletion = lostCompletion; }
-        object Session() => new { id = session, projectId = project, totalLength = 10, chunkSize = 4, expectedSha256 = hash, receivedLength = Received, expiresAt = DateTime.UtcNow.AddHours(1).ToString("O") };
+        object Session() => new { id = session, projectId = project, totalLength = 10, chunkSize = 4, expectedSha256 = hash, receivedLength = Received, expiresAt = DateTime.UtcNow.AddHours(1).ToString("O"), targetRelativePath = TargetRelativePath };
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             var path = request.RequestUri.AbsolutePath;
             if (request.Method == HttpMethod.Get) return Reply(Session());
-            if (path.EndsWith("/sessions")) { Starts++; return Reply(Session()); }
+            if (path.EndsWith("/sessions")) { Starts++; StartBody = Json.Deserialize<Dictionary<string, object>>(await request.Content.ReadAsStringAsync()); return Reply(Session()); }
             if (path.Contains("/chunks/"))
             {
                 var index = int.Parse(path.Substring(path.LastIndexOf('/') + 1));

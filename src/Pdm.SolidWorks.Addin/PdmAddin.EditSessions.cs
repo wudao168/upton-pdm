@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using SolidWorks.Interop.sldworks;
@@ -19,6 +20,20 @@ public sealed partial class PdmAddin
     private DateTime nextEditMaintenanceUtc = DateTime.MinValue;
     private int editMaintenanceInProgress;
     private string lastEditMaintenanceError;
+    private int draftSnapshotInProgress;
+    private Func<bool> draftIdleCheck = UserIdleForDraft;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LastDraftInputInfo { public uint Size; public uint Time; }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetLastInputInfo(ref LastDraftInputInfo input);
+
+    private static bool UserIdleForDraft()
+    {
+        var input = new LastDraftInputInfo { Size = (uint)Marshal.SizeOf(typeof(LastDraftInputInfo)) };
+        return GetLastInputInfo(ref input) && unchecked((uint)System.Environment.TickCount - input.Time) >= 5000;
+    }
 
     private bool EnsureEditJournal()
     {
@@ -82,11 +97,7 @@ public sealed partial class PdmAddin
         {
             if (!EnsureEditJournal()) return;
             var pending = PrepareClosedEdits();
-            foreach (var entry in pending)
-            {
-                try { await ClosePreservedEditAsync(entry, lifetime.Token); }
-                catch (Exception exception) { ReportEditMaintenanceError(exception); }
-            }
+            await ClosePreservedEditsAsync(pending, lifetime.Token);
         }
         catch (Exception exception) { ReportEditMaintenanceError(exception); }
         finally { Interlocked.Exchange(ref editMaintenanceInProgress, 0); }
@@ -110,12 +121,18 @@ public sealed partial class PdmAddin
         var pending = new List<LocalEditDraft>();
         foreach (var entry in localEdits.Values.ToArray())
         {
+            var closing = false;
             try
             {
                 if (entry.Closed) continue;
                 if (loaded.TryGetValue(entry.SourcePath, out var model))
                 {
                     if (entry.PendingClose) continue;
+                    if (entry.RecoveryRequired)
+                    {
+                        EditDraftJournal.ClearMaintenanceFailure(entry);
+                        editJournal.Save(entry);
+                    }
                     var dirty = model.GetSaveFlag();
                     if (!entry.ObservedOpen || entry.UnsavedChanges != dirty)
                     {
@@ -123,14 +140,24 @@ public sealed partial class PdmAddin
                         entry.UnsavedChanges = dirty;
                         editJournal.Save(entry);
                     }
-                    if (dirty && DateTime.UtcNow - entry.SavedAtUtc >= TimeSpan.FromMinutes(1))
+                    if (dirty && DateTime.UtcNow >= entry.NextSnapshotAttemptUtc
+                        && DateTime.UtcNow - entry.SavedAtUtc >= TimeSpan.FromMinutes(1)
+                        && Volatile.Read(ref pendingTreeRefresh) == 0 && Volatile.Read(ref treeRefreshInProgress) == 0 && draftIdleCheck())
                     {
                         string copy = null;
+                        // Record the attempt before COM work: a locked source must not trigger
+                        // SaveAs on every ten-second maintenance tick or immediately after a crash.
+                        entry.NextSnapshotAttemptUtc = DateTime.UtcNow.AddMinutes(1);
+                        editJournal.Save(entry);
                         try
                         {
                             Interlocked.Increment(ref refreshSuppressionDepth);
+                            Interlocked.Increment(ref draftSnapshotInProgress);
                             copy = CreateCheckInUploadCopy(model, entry.SourcePath, entry.DocumentId);
                             editJournal.Preserve(entry, copy, true);
+                            EditDraftJournal.ClearMaintenanceFailure(entry);
+                            editJournal.Save(entry);
+                            PluginDiagnosticLog.Record("草稿", "已保留本机自动草稿，尚未提交存档：" + Path.GetFileName(entry.SourcePath));
                         }
                         finally
                         {
@@ -140,18 +167,25 @@ public sealed partial class PdmAddin
                                 model.SetSaveFlag();
                                 DeleteCheckInUploadCopy(copy);
                             }
-                            finally { Interlocked.Decrement(ref refreshSuppressionDepth); }
+                            finally
+                            {
+                                Interlocked.Decrement(ref draftSnapshotInProgress);
+                                Interlocked.Decrement(ref refreshSuppressionDepth);
+                            }
                         }
                     }
                     continue;
                 }
                 if (!entry.ObservedOpen && !entry.PendingClose) continue;
+                if (DateTime.UtcNow < entry.NextMaintenanceAttemptUtc) continue;
+                closing = true;
                 PrepareClosedEdit(entry, false);
                 pending.Add(entry);
             }
-            catch (Exception exception) { ReportEditMaintenanceError(exception); }
+            catch (Exception exception) { ReportEditMaintenanceError(exception, entry, closing); }
         }
-        foreach (var entry in editJournal.ReadAll().Where(entry => entry.SessionId != checkoutSessionId && !entry.Closed))
+        foreach (var entry in editJournal.ReadAll().Where(entry => entry.SessionId != checkoutSessionId && !entry.Closed
+            && DateTime.UtcNow >= entry.NextMaintenanceAttemptUtc))
         {
             try
             {
@@ -161,7 +195,7 @@ public sealed partial class PdmAddin
                 PrepareClosedEdit(entry, true);
                 pending.Add(entry);
             }
-            catch (Exception exception) { ReportEditMaintenanceError(exception); }
+            catch (Exception exception) { ReportEditMaintenanceError(exception, entry, true); }
         }
         return pending;
     }
@@ -192,17 +226,50 @@ public sealed partial class PdmAddin
 
     private async Task ClosePreservedEditAsync(LocalEditDraft entry, CancellationToken token)
     {
+        var current = (await apiClient.GetDocumentsAsync(entry.ProjectId, token).ConfigureAwait(false))
+            .FirstOrDefault(document => document.Id == entry.DocumentId);
+        await ClosePreservedEditWithDocumentAsync(entry, current, token).ConfigureAwait(false);
+    }
+
+    private async Task ClosePreservedEditsAsync(IReadOnlyList<LocalEditDraft> entries, CancellationToken token)
+    {
+        foreach (var project in entries.Where(entry => !entry.Closed && DateTime.UtcNow >= entry.NextMaintenanceAttemptUtc).GroupBy(entry => entry.ProjectId))
+        {
+            List<DocumentDto> documents;
+            try { documents = await apiClient.GetDocumentsAsync(project.Key, token).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception exception)
+            {
+                foreach (var entry in project) ReportEditMaintenanceError(exception, entry, true);
+                continue;
+            }
+            var byId = documents.ToDictionary(document => document.Id);
+            foreach (var entry in project)
+            {
+                try
+                {
+                    byId.TryGetValue(entry.DocumentId, out var current);
+                    await ClosePreservedEditWithDocumentAsync(entry, current, token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch (Exception exception) { ReportEditMaintenanceError(exception, entry, true); }
+            }
+        }
+    }
+
+    private async Task ClosePreservedEditWithDocumentAsync(LocalEditDraft entry, DocumentDto current, CancellationToken token)
+    {
         var journal = editJournal;
         var client = apiClient;
         var username = authenticatedUsername;
+        if (current == null) throw new InvalidOperationException("暂时无法读取该图档的服务器状态，已保留草稿和待办记录，稍后重试；请确认项目访问权限。");
         var needsDraft = !string.Equals(entry.DiskSha256, entry.BaseSha256, StringComparison.OrdinalIgnoreCase);
         if (needsDraft && !journal.HasVerifiedDraft(entry)) throw new IOException("图档草稿未通过校验，已保留编辑状态。请保存图档后重试。");
-        var current = (await client.GetDocumentsAsync(entry.ProjectId, token).ConfigureAwait(false)).FirstOrDefault(document => document.Id == entry.DocumentId);
-        if (current == null) return; // Do not infer release when access was removed.
         if (current.CheckedOutBy == null || current.CheckoutSessionId == entry.SessionId && current.CheckedOutAt?.ToUniversalTime() == entry.CheckedOutAt.ToUniversalTime() && string.Equals(current.CheckedOutBy, username, StringComparison.OrdinalIgnoreCase))
             await client.CloseEditAsync(entry, needsDraft, token).ConfigureAwait(false);
         entry.PendingClose = false;
         entry.Closed = true;
+        EditDraftJournal.ClearMaintenanceFailure(entry);
         journal.Save(entry);
     }
 
@@ -213,17 +280,38 @@ public sealed partial class PdmAddin
         {
             var pending = PrepareClosedEdits();
             using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
-                foreach (var entry in pending) ClosePreservedEditAsync(entry, timeout.Token).GetAwaiter().GetResult();
+                ClosePreservedEditsAsync(pending, timeout.Token).GetAwaiter().GetResult();
         }
         catch (Exception exception) { LogDiagnostic("Close edits on disconnect (will retry after login)", exception); }
     }
 
-    private void ReportEditMaintenanceError(Exception exception)
+    private void ReportEditMaintenanceError(Exception exception, LocalEditDraft entry = null, bool delayRetry = false)
     {
+        var errorKey = exception.GetType().FullName + ":" + exception.HResult + ":" + exception.Message;
+        var missingSource = exception is FileNotFoundException || exception is DirectoryNotFoundException;
+        if (entry != null)
+        {
+            var changed = !string.Equals(entry.MaintenanceErrorKey, errorKey, StringComparison.Ordinal);
+            if (delayRetry) changed = editJournal.DelayMaintenance(entry, errorKey, missingSource, DateTime.UtcNow);
+            else
+            {
+                entry.MaintenanceErrorKey = errorKey;
+                editJournal.Save(entry);
+            }
+            if (!changed) return;
+        }
+        else
+        {
+            if (lastEditMaintenanceError == errorKey) return;
+            lastEditMaintenanceError = errorKey;
+        }
         LogDiagnostic("Edit draft/close", exception);
-        if (lastEditMaintenanceError == exception.Message) return;
-        lastEditMaintenanceError = exception.Message;
-        taskPaneControl?.SetCheckoutReminder("自动保存草稿或结束编辑尚未完成，系统会重试。请保留本机文件，检查服务器连接和磁盘空间；仍需编辑可重新打开图档。", true);
+        var sharedFileBusy = exception is IOException && ((exception.HResult & 0xffff) == 32 || (exception.HResult & 0xffff) == 33);
+        taskPaneControl?.SetCheckoutReminder(missingSource
+            ? "原图档路径暂不可访问，已暂停频繁重试并保留编辑记录，未自动结束编辑。请找回原路径文件或检查本机草稿；系统稍后会重新检查。"
+            : sharedFileBusy
+            ? "图档暂时被占用，自动草稿已延后重试。原有草稿、未保存修改和编辑权限均保留，可继续编辑或手动保存。"
+            : "自动保存草稿或结束编辑尚未完成，系统会重试。请保留本机文件，检查服务器连接和磁盘空间；仍需编辑可重新打开图档。", true);
     }
 
     private void FinishLocalEdit(Guid documentId)
@@ -236,6 +324,7 @@ public sealed partial class PdmAddin
                 entry.Closed = true;
                 entry.PendingClose = false;
                 entry.RestoreOnOpen = false;
+                EditDraftJournal.ClearMaintenanceFailure(entry);
                 editJournal.Save(entry);
             }
             localEdits.Remove(documentId);

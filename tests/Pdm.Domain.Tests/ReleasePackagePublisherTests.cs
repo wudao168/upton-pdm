@@ -60,10 +60,10 @@ public sealed class ReleasePackagePublisherTests
             var xml = System.Xml.Linq.XDocument.Load(stream);
             System.Xml.Linq.XNamespace ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
             var rows = xml.Descendants(ns + "row").ToArray();
-            var headers = rows[0].Descendants(ns + "t").Select(value => value.Value).ToArray();
+            var headers = rows[6].Descendants(ns + "t").Select(value => value.Value).ToArray();
             Assert.Contains("BOM总量", headers);
             Assert.Equal(new[] { "已提前发布", "本次新增下发" }, headers[^2..]);
-            var cells = rows[1].Elements(ns + "c").ToArray();
+            var cells = rows[7].Elements(ns + "c").ToArray();
             Assert.Equal("4", cells[12].Element(ns + "v")!.Value);
             Assert.Equal("4", cells[^2].Element(ns + "v")!.Value);
             Assert.Equal("0", cells[^1].Element(ns + "v")!.Value);

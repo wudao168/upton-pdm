@@ -6,7 +6,7 @@ test('DingTalk mobile submission with optional subproject and group notification
   await page.setViewportSize({ width: 390, height: 844 })
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
   const view = { rootProject: { id: projectId, code: 'P700014', name: '测试项目' }, subprojects: [{ id: 'child-1', code: 'P700014-1', name: '子项目A' }], people: [{ username: 'user-1', displayName: '张三' }], rows: [] }
-  await page.route('https://g.alicdn.com/**/dingtalk.js', route => route.fulfill({ contentType: 'application/javascript', body: 'window.dd={ready:function(cb){cb()},runtime:{permission:{requestAuthCode:function(o){o.onSuccess({code:"mock-code"})}}}}' }))
+  await page.route('https://g.alicdn.com/dingding/dingtalk-jsapi/3.0.25/dingtalk.open.js', route => route.fulfill({ contentType: 'application/javascript', body: 'window.dd={env:{platform:"ios"},ready:function(cb){cb()},runtime:{permission:{requestAuthCode:function(o){o.onSuccess({code:"mock-code"})}}}}' }))
   await page.route('**/api/integrations/dingtalk/opl/**', route => route.fulfill({ json: route.request().method() === 'POST' ? { guestToken: 'mock-token', displayName: '张三' } : { enabled: true, corpId: 'mock-corp' } }))
   await page.route('**/api/integrations/dingtalk/opl/guest/projects', route => route.fulfill({ json: [{ ...view.rootProject, subprojects: view.subprojects }, { id: '22222222-2222-2222-2222-222222222222', code: 'P700015', name: '同群第二项目' }] }))
   await page.route(`**/api/projects/${projectId}/opl`, route => route.fulfill({ json: view }))
@@ -52,4 +52,43 @@ test('DingTalk desktop displays unconfigured status without anonymous submission
   await expect(page.getByRole('button', { name: '提交问题', exact: true })).toHaveCount(0)
   expect(errors).toEqual([])
   await page.screenshot({ path: join(process.env.TEMP!, 'dingtalk-opl-desktop.png'), fullPage: true })
+})
+
+test.describe('DingTalk PC container without a DingTalk user-agent marker', () => {
+  test.use({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36' })
+  test('identifies the desktop user and submits the problem', async ({ page }) => {
+    const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
+    await page.setViewportSize({ width: 1518, height: 855 })
+    await page.route('https://g.alicdn.com/dingding/dingtalk-jsapi/3.0.25/dingtalk.open.js', route => route.fulfill({ contentType: 'application/javascript', body: 'window.dd={env:{platform:"pc"},ready:function(cb){cb()},runtime:{permission:{requestAuthCode:function(o){o.onSuccess({code:"desktop-code"})}}}}' }))
+    await page.route('**/api/integrations/dingtalk/opl/bootstrap*', route => route.fulfill({ json: { enabled: true, corpId: 'corp' } }))
+    await page.route('**/api/integrations/dingtalk/opl/login', route => {
+      expect(route.request().postDataJSON().code).toBe('desktop-code')
+      return route.fulfill({ json: { guestToken: 'desktop-ticket', displayName: '电脑端张工' } })
+    })
+    await page.route('**/api/integrations/dingtalk/opl/guest/projects', route => route.fulfill({ json: [{ id: projectId, code: 'P700014', name: '测试项目', subprojects: [] }] }))
+    await page.route('**/api/integrations/dingtalk/opl/guest/projects/*/people', route => route.fulfill({ json: [] }))
+    await page.route('**/api/integrations/dingtalk/opl/guest/projects/*/submit', route => {
+      expect(route.request().headers()['x-dingtalk-session']).toBe('desktop-ticket')
+      expect(route.request().postDataBuffer()!.toString()).toContain('电脑钉钉提交验证')
+      return route.fulfill({ json: { number: 11, submittedBy: '电脑端张工', notificationSent: true } })
+    })
+    await page.goto('/?dingtalkOpl=1')
+    await expect(page.getByText('提交人：电脑端张工')).toBeVisible()
+    await page.getByLabel('问题描述').fill('电脑钉钉提交验证')
+    await page.getByRole('button', { name: '提交问题', exact: true }).click()
+    await expect(page.getByRole('status')).toContainText('问题 #11 已提交')
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    expect(errors).toEqual([])
+    await page.screenshot({ path: join(process.env.TEMP!, 'dingtalk-opl-pc-fixed.png'), fullPage: true })
+  })
+  test('ordinary browser remains unable to submit without DingTalk identity', async ({ page }) => {
+    await page.route('https://g.alicdn.com/dingding/dingtalk-jsapi/3.0.25/dingtalk.open.js', route => route.fulfill({ contentType: 'application/javascript', body: 'window.dd={env:{platform:"notInDingTalk"}}' }))
+    await page.route('**/api/integrations/dingtalk/opl/bootstrap*', route => route.fulfill({ json: { enabled: true, corpId: 'corp' } }))
+    let logins = 0
+    await page.route('**/api/integrations/dingtalk/opl/login', route => { logins++; return route.abort() })
+    await page.goto('/?dingtalkOpl=1')
+    await expect(page.getByRole('alert')).toContainText('请在钉钉内打开')
+    await expect(page.getByRole('button', { name: '提交问题' })).toHaveCount(0)
+    expect(logins).toBe(0)
+  })
 })

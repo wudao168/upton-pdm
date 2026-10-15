@@ -779,7 +779,8 @@
 .pdm-budget__header, .pdm-budget__actions, .pdm-budget__section > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .pdm-budget__header h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; font-size: 12px; }
 .pdm-budget__header span, .pdm-budget__section > header span { color: var(--pdm-muted, #64748b); font-size: 12px; }
-.pdm-budget__actions .el-button { display: inline-flex; gap: 5px; }
+.pdm-budget__actions { gap: 5px; }
+.pdm-budget__actions > button { box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; width: 80px; min-width: 80px; max-width: 80px; height: 30px; min-height: 30px; flex: 0 0 80px; gap: 4px; margin: 0; padding: 0; font-size: 12px; }
 .pdm-budget__cards { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--pdm-container-gap); }
 @media (min-width: 1301px) { .pdm-budget__cards.is-settlement-hidden { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
 .pdm-budget__cards article { border: 1px solid var(--pdm-border, #dbe4ef); background: var(--pdm-surface, #fff); border-radius: 6px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }

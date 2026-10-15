@@ -1,3 +1,4 @@
+import { formatProjectWorkbook } from './exportFormat'
 import { strToU8, zipSync } from 'three/examples/jsm/libs/fflate.module.js'
 import type { MaterialCategory } from './types'
 
@@ -36,7 +37,7 @@ export function createMaterialImportTemplate(categories: MaterialCategory[]): Ui
     'xl/worksheets/sheet1.xml': `<worksheet xmlns="${ns}"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${materialImportHeaders.map((_, index) => `<col min="${index + 1}" max="${index + 1}" width="${index === 1 || index === 3 || index === 9 || index === 11 ? 24 : 16}" customWidth="1"/>`).join('')}</cols><sheetData>${headerRow}${dataRows}</sheetData><autoFilter ref="A1:P1001"/><dataValidations count="3"><dataValidation type="list" allowBlank="0" showErrorMessage="1" errorTitle="分类无效" error="请选择模板提供的U9C分类" sqref="A2:A1001"><formula1>'字典'!$A$2:$A$${categoryLast}</formula1></dataValidation><dataValidation type="list" allowBlank="0" showErrorMessage="1" errorTitle="单位无效" error="请选择模板提供的计量单位" sqref="C2:C1001"><formula1>'字典'!$C$2:$C$${unitLast}</formula1></dataValidation><dataValidation type="list" allowBlank="1" sqref="P2:P1001"><formula1>"是,否"</formula1></dataValidation></dataValidations></worksheet>`,
     'xl/worksheets/sheet2.xml': `<worksheet xmlns="${ns}"><sheetData><row r="1">${cell('A1', 'U9C分类编码')}${cell('C1', '计量单位')}</row>${Array.from({ length: Math.max(allowedCategories.length, unitOptions.length) }, (_, index) => `<row r="${index + 2}">${allowedCategories[index] ? cell(`A${index + 2}`, `${allowedCategories[index].code} ${allowedCategories[index].name}`) : ''}${unitOptions[index] ? cell(`C${index + 2}`, unitOptions[index]) : ''}</row>`).join('')}</sheetData></worksheet>`,
   }
-  return zipSync(Object.fromEntries(Object.entries(files).map(([name, content]) => [name, new Uint8Array(strToU8(content))])))
+  return formatProjectWorkbook(zipSync(Object.fromEntries(Object.entries(files).map(([name, content]) => [name, new Uint8Array(strToU8(content))]))), [{title:'料品批量导入模板',company:'UPTON 阿普顿',scope:'全局料品',versionLabel:'模板版本',version:'V1',exportedAt:new Date().toLocaleString('sv-SE', {timeZone:'Asia/Shanghai'}),exportedBy:'—',fields:[{key:'数据范围',value:'全局料品'},{key:'适用格式',value:'XLSX'},{key:'必填字段',value:'U9C分类编码、物料名称、计量单位、规格型号'},{key:'填写规则',value:'不修改列名；项目资料不适用'}]}])
 }
 
 export function downloadMaterialImportTemplate(categories: MaterialCategory[]) {

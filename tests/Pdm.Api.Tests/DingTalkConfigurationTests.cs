@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.DataProtection;
 using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Json;
@@ -23,7 +24,7 @@ public sealed class DingTalkConfigurationTests
         [new(ClaimTypes.Name, username), new(ClaimTypes.Role, role)], expires: DateTime.UtcNow.AddMinutes(10),
         signingCredentials: new(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")), SecurityAlgorithms.HmacSha256)));
     [Fact]
-    public async Task SelfServiceConfigurationEncryptsSecretsAndSupportsSharedGroupsWithOptimisticConcurrency()
+    public async Task SelfServiceConfigurationEncryptsSecretsAndPreventsSharedGroupsWithOptimisticConcurrency()
     {
         using var baseFactory = new PdmApiFactory();
         using var factory = baseFactory.WithWebHostBuilder(builder => builder.ConfigureServices(services =>
@@ -63,20 +64,37 @@ public sealed class DingTalkConfigurationTests
         Assert.Contains("提交入口卡片已发到群内",(await boundResponse.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("entryMessage").GetString());
         Assert.Equal(HttpStatusCode.OK,(await client.PostAsync($"/api/projects/{RootId}/dingtalk/entry",null)).StatusCode);
         var second = await repository.CreateProjectAsync(new CreateProjectCommand("DING-SECOND", "第二项目", "admin", "unused", "unused"), "admin", default);
-        Assert.Equal(HttpStatusCode.OK, (await client.PutAsJsonAsync($"/api/projects/{second.Id}/dingtalk", new { groupId, expectedRowVersion = 3 })).StatusCode);
+        var duplicate = await client.PutAsJsonAsync($"/api/projects/{second.Id}/dingtalk", new { groupId, expectedRowVersion = 3 });
+        Assert.Equal(HttpStatusCode.BadRequest, duplicate.StatusCode);
+        var root = (await repository.FindProjectAsync(RootId, default))!;
+        Assert.Contains(root.Code, await duplicate.Content.ReadAsStringAsync());
+        Assert.Equal(JsonValueKind.Null, (await client.GetFromJsonAsync<JsonElement>($"/api/projects/{second.Id}/dingtalk")).GetProperty("groupId").ValueKind);
         var selected = await client.GetFromJsonAsync<JsonElement>($"/api/integrations/dingtalk/opl/projects?groupId={groupId}");
-        Assert.Equal(2, selected.GetArrayLength());
+        Assert.Equal(1, selected.GetArrayLength());
         var shared = await client.GetFromJsonAsync<JsonElement>("/api/settings/dingtalk");
-        Assert.Equal(2, shared.GetProperty("groups")[0].GetProperty("projectCount").GetInt32());
+        Assert.Equal(1, shared.GetProperty("groups")[0].GetProperty("projectCount").GetInt32());
+        var boundProject = Assert.Single(shared.GetProperty("groups")[0].GetProperty("boundProjects").EnumerateArray());
+        Assert.Equal(RootId, boundProject.GetProperty("id").GetGuid());
+        Assert.Equal(root.Code, boundProject.GetProperty("code").GetString());
+        Assert.Equal(root.Name, boundProject.GetProperty("name").GetString());
         Assert.True(shared.GetProperty("hasAppSecret").GetBoolean());
         Assert.Equal("robot-test",shared.GetProperty("robotCode").GetString()); Assert.Equal("cid-shared",shared.GetProperty("groups")[0].GetProperty("openConversationId").GetString());
-        var preserved = await client.PutAsJsonAsync("/api/settings/dingtalk", new { input.enabled, input.corpId, input.appKey, appSecret = "", input.publicUrl, input.users, expectedRowVersion = 4 });
+        var preserved = await client.PutAsJsonAsync("/api/settings/dingtalk", new { input.enabled, input.corpId, input.appKey, appSecret = "", input.publicUrl, input.users, expectedRowVersion = 3 });
         Assert.Equal(HttpStatusCode.OK, preserved.StatusCode);
         Assert.True((await preserved.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("hasAppSecret").GetBoolean());
-        Assert.Equal(HttpStatusCode.BadRequest, (await client.PutAsJsonAsync($"/api/projects/{RootId}/dingtalk", new { groupId = Guid.NewGuid(), expectedRowVersion = 5 })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PutAsJsonAsync($"/api/projects/{RootId}/dingtalk", new { groupId = Guid.NewGuid(), expectedRowVersion = 4 })).StatusCode);
         Assert.Equal(groupId, (await client.GetFromJsonAsync<JsonElement>($"/api/projects/{RootId}/dingtalk")).GetProperty("groupId").GetGuid());
+        Assert.Equal(HttpStatusCode.OK, (await client.PutAsJsonAsync($"/api/projects/{RootId}/dingtalk", new { groupId, expectedRowVersion = 4 })).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await client.PutAsJsonAsync($"/api/projects/{RootId}/dingtalk", new { expectedRowVersion = 5 })).StatusCode);
-        Assert.Single((await client.GetFromJsonAsync<JsonElement>($"/api/integrations/dingtalk/opl/projects?groupId={groupId}")).EnumerateArray());
+        Assert.Empty((await client.GetFromJsonAsync<JsonElement>($"/api/integrations/dingtalk/opl/projects?groupId={groupId}")).EnumerateArray());
+        Assert.Equal(HttpStatusCode.OK, (await client.PutAsJsonAsync($"/api/projects/{second.Id}/dingtalk", new { groupId, expectedRowVersion = 6 })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync($"/api/projects/{second.Id}/dingtalk", new { groupId, expectedRowVersion = 6 })).StatusCode);
+        var bindingOptions = await discovery.LoadAsync(company, default);
+        var alias = Guid.NewGuid();
+        bindingOptions.Groups[alias] = new() { Name = "同群的旧登记", OpenConversationId = "cid-shared" };
+        var protector = factory.Services.GetRequiredService<Microsoft.AspNetCore.DataProtection.IDataProtectionProvider>().CreateProtector("Upton.Pdm.DingTalk.Configuration.v1");
+        await configs.SaveAsync(new(company, protector.Protect(JsonSerializer.Serialize(bindingOptions, new JsonSerializerOptions(JsonSerializerDefaults.Web))), bindingOptions.RowVersion), 7, default);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PutAsJsonAsync($"/api/projects/{RootId}/dingtalk", new { groupId = alias, expectedRowVersion = 8 })).StatusCode);
         await repository.CreateUserAsync(new(Guid.NewGuid(), "other", "普通用户", "unused", UserRole.Engineer, true), default);
         await repository.SetUserCompanyScopeAsync("other", company, false, [], "admin", default);
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("other", "Engineer"));

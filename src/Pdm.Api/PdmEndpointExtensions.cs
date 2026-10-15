@@ -873,7 +873,16 @@ public static class PdmEndpointExtensions
                         var packageNumber = SafeArchiveSegment(packageItems.First().ReleasePackageNumber);
                         var bomEntry = archive.CreateEntry($"{packageNumber}/{packageNumber}-BOM.xlsx", CompressionLevel.Fastest);
                         await using var bomTarget = bomEntry.Open();
-                        await bomTarget.WriteAsync(BomWorkbook.Write(bomItems), cancellationToken);
+                        var packageProject = await repository.FindProjectAsync(packageItems.First().ProjectId, cancellationToken) ?? project;
+                        var main = await repository.FindProjectAsync(packageProject.RootProjectId ?? packageProject.ParentProjectId ?? packageProject.Id, cancellationToken) ?? packageProject;
+                        var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
+                        var metadata = ProjectWorkbookMetadata.ForProject(packageProject, main, directory, "发布包BOM清单", "发布包版本", packageNumber,
+                            timeProvider.GetUtcNow().ToOffset(TimeSpan.FromHours(8)), actor, "选中图纸 · 发布冻结BOM");
+                        var package = (await repository.ListReleasePackagesAsync(packageProject.Id, cancellationToken)).FirstOrDefault(item => item.Id == packageItems.Key);
+                        if (package is not null) metadata = metadata with {
+                            Fields = metadata.Fields.Select(field => field.Key == "整套数量" ? new KeyValuePair<string, string>(field.Key, $"{Math.Max(1, package.WholeSetMultiplier)}套") : field).ToArray(),
+                            Notes = $"发布日期：{package.PublishedAt?.ToOffset(TimeSpan.FromHours(8)).ToString("yyyy-MM-dd") ?? "未发布"}" };
+                        await bomTarget.WriteAsync(ProjectWorkbookHeader.Apply(BomWorkbook.Write(bomItems), metadata), cancellationToken);
                     }
                     foreach (var item in items)
                     {
@@ -1033,7 +1042,8 @@ public static class PdmEndpointExtensions
         api.MapPost("/documents/{documentId:guid}/versions/{versionId:guid}/restore", async (Guid documentId, Guid versionId, RestoreVersionRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var result = await workflow.RestoreVersionAsync(documentId, versionId, actor, role, request.ChangeNote, cancellationToken);
+            var result = await workflow.RestoreVersionAsync(documentId, versionId, actor, role, request.ChangeNote, cancellationToken,
+                request.OperationId, request.ExpectedVersionId, request.CheckoutSessionId);
             return Results.Ok(new { document = result.Document, version = result.Version });
         });
 
@@ -1114,6 +1124,25 @@ public static class PdmEndpointExtensions
             return Results.Ok(summary == true ? BomSummaryProjection.Group(saved) : saved);
         }).DisableAntiforgery();
 
+        api.MapGet("/projects/{projectId:guid}/export-metadata", async (Guid projectId, Guid? releasePackageId, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
+            var project = await repository.FindProjectAsync(projectId, cancellationToken);
+            if (project is null) return Results.NotFound();
+            var main = await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId ?? project.Id, cancellationToken) ?? project;
+            var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
+            var metadata = ProjectWorkbookMetadata.ForProject(project, main, directory, "项目资料", "资料版本", "—", DateTimeOffset.Now, actor);
+            if (releasePackageId.HasValue)
+            {
+                var package = (await repository.ListReleasePackagesAsync(projectId, cancellationToken)).FirstOrDefault(item => item.Id == releasePackageId);
+                if (package is null) return Results.NotFound();
+                metadata = metadata with {
+                    Fields = metadata.Fields.Select(field => field.Key == "整套数量" ? new KeyValuePair<string, string>(field.Key, $"{Math.Max(1, package.WholeSetMultiplier)}套") : field).ToArray(),
+                    Notes = $"发布日期：{package.PublishedAt?.ToOffset(TimeSpan.FromHours(8)).ToString("yyyy-MM-dd") ?? "未发布"}" };
+            }
+            return Results.Ok(metadata);
+        });
         api.MapGet("/projects/{projectId:guid}/boms/wear-parts/export", async (Guid projectId, string? mode, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -1141,6 +1170,7 @@ public static class PdmEndpointExtensions
                 [],
                 null,
                 exportedAt);
+            contextData = contextData with { Header = ProjectWorkbookMetadata.ForProject(project, mainProject, directory, "易损件BOM", "BOM版本", contextData.BomVersion, exportedAt, actor, (project.Id == mainProject.Id ? "当前主项目 · " : "当前子项目 · ") + (exportMode == BomWorkbookExportMode.Summary ? "汇总导出" : "结构导出")) };
             var fileName = BomWorkbook.ExportFileName(project.Code, "易损件BOM", "统计", exportedAt);
             return Results.File(BomWorkbook.WriteExport(items, contextData, exportMode), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
         });
@@ -1183,6 +1213,7 @@ public static class PdmEndpointExtensions
                 ApprovalPeople(latestPackage, directory),
                 latestVersion?.ReleasedAt,
                 exportedAt);
+            contextData = contextData with { Header = ProjectWorkbookMetadata.ForProject(project, mainProject, directory, bomName, "BOM版本", versionLabel, exportedAt, actor, (project.Id == mainProject.Id ? "当前主项目 · " : "当前子项目 · ") + (exportMode == BomWorkbookExportMode.Summary ? "汇总导出" : "结构导出")) };
             var fileName = BomWorkbook.ExportFileName(project.Code, bomName, versionLabel, exportedAt);
             return Results.File(BomWorkbook.WriteExport(items, contextData, exportMode), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
         });
@@ -1488,6 +1519,22 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await workflow.GetArchiveBatchAsync(batchId, actor, role, cancellationToken));
+        });
+        api.MapPost("/archive-batches/{batchId:guid}/projects/{projectId:guid}/registrations", async (Guid batchId, Guid projectId,
+            ReserveArchiveDocumentRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var r = request.Document;
+            return Results.Ok(await workflow.RegisterDocumentAsync(new RegisterDocumentCommand(projectId, r.DrawingNumber, r.Name, r.FileName,
+                r.Kind, r.FolderId, r.RelatedModelDocumentId, r.SourceSha256, r.AllowDuplicateContent, r.DuplicateReason), actor, role, cancellationToken,
+                new ArchiveRegistrationContext(batchId, request.SessionId, request.MachineName)));
+        });
+        api.MapPost("/archive-batches/{batchId:guid}/cancel-registration", async (Guid batchId, CancelArchiveRegistrationRequest request,
+            HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (actor, _) = CurrentUser(context.User);
+            await repository.CancelArchiveRegistrationAsync(batchId, actor, request.SessionId, cancellationToken);
+            return Results.Ok(new { cancelled = true });
         });
 
         api.MapPost("/documents/{documentId:guid}/checkin/preflight", async (Guid documentId, CheckInPreflightRequest request, HttpContext context, PdmWorkflowService workflow, TimeProvider timeProvider, CancellationToken cancellationToken) =>
@@ -1905,6 +1952,14 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             await workflow.RequireProjectSubmissionAccessAsync(request.ProjectId, actor, role, "上传存档文件", cancellationToken);
+            if (request.BatchId.HasValue || request.DocumentId.HasValue || request.CheckoutSessionId.HasValue)
+            {
+                if (request.BatchId is not Guid batchId || batchId == Guid.Empty || request.DocumentId is not Guid documentId || documentId == Guid.Empty
+                    || request.CheckoutSessionId is not Guid sessionId || sessionId == Guid.Empty)
+                    throw new PdmRuleException("整批上传需要完整的批次、图档和编辑会话编号，请刷新后重试。");
+                return Results.Ok(await storage.StartArchiveUploadAsync(request.ProjectId, request.FileName, request.TotalLength, request.Sha256,
+                    actor, new ArchiveUploadContext(batchId, documentId, sessionId), cancellationToken));
+            }
             return Results.Ok(await storage.StartUploadAsync(request.ProjectId, request.FileName, request.TotalLength, request.Sha256, cancellationToken, actor));
         });
 

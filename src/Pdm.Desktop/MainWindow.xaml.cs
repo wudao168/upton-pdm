@@ -93,6 +93,8 @@ public partial class MainWindow : Window
     private FileSystemWatcher? workspaceWatcher;
     private System.Threading.Timer? workspaceRefreshTimer;
     private int workspaceStateGeneration;
+    private readonly Dictionary<string, DateTime> workspaceVerificationAttempts = new();
+    private string workspaceVerificationToken = string.Empty;
     private int lightweightPreviewGeneration;
     private Guid? selectedDocumentId;
 
@@ -941,6 +943,11 @@ public partial class MainWindow : Window
     {
         if (WorkspaceView.CoreWebView2 == null) return;
         var generation = Interlocked.Increment(ref workspaceStateGeneration);
+        if (workspaceVerificationToken != accessToken)
+        {
+            workspaceVerificationAttempts.Clear();
+            workspaceVerificationToken = accessToken;
+        }
         try
         {
             var snapshot = await Task.Run(() => WorkspaceLocalStateReader.Read(
@@ -949,6 +956,64 @@ public partial class MainWindow : Window
                 request.ProjectCode,
                 request.CurrentUsername,
                 request.Documents));
+            if (generation != workspaceStateGeneration) return;
+            var recovered = false;
+            foreach (var item in snapshot.Items.Where(item => item.LocalState == "IntegrityMismatch"))
+            {
+                var verificationKey = bootstrapConfiguration.ApiBaseUrl + "|" + activeCompanyId + "|" + request.ProjectId + "|" + request.CurrentUsername + "|" + item.DocumentId + "|" + item.VerificationKey;
+                if (workspaceVerificationAttempts.TryGetValue(verificationKey, out var nextAttempt) && nextAttempt > DateTime.UtcNow) continue;
+                if (workspaceVerificationAttempts.Count >= 1024) workspaceVerificationAttempts.Clear();
+                // Coalesce watcher/UI refreshes. Transient failures retry later; an unchanged
+                // verified mismatch is checked again only after its file, binding or server revision changes.
+                workspaceVerificationAttempts[verificationKey] = DateTime.UtcNow.AddMinutes(1);
+                try
+                {
+                    using var versionRequest = CreateApiRequest(HttpMethod.Get, $"/api/documents/{item.DocumentId}/versions?take=1");
+                    using var response = await apiClient.SendAsync(versionRequest, bootstrapLifetime.Token);
+                    if (generation != workspaceStateGeneration) return;
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        if (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden)
+                            workspaceVerificationAttempts[verificationKey] = DateTime.MaxValue;
+                        continue;
+                    }
+                    var json = await response.Content.ReadAsStringAsync();
+                    var version = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }
+                        .Deserialize<WorkspaceArchivedVersionResponse[]>(json)?.FirstOrDefault();
+                    if (generation != workspaceStateGeneration) return;
+                    if (version != null && version.DocumentId != item.DocumentId) continue;
+                    var repaired = RecoverWorkspaceBinding(item, request.ProjectId, version);
+                    if (!repaired && item.BoundVersionId.HasValue && item.BoundVersionId != version?.Id)
+                    {
+                        using var boundRequest = CreateApiRequest(HttpMethod.Get, $"/api/documents/{item.DocumentId}/versions/{item.BoundVersionId.Value}");
+                        using var boundResponse = await apiClient.SendAsync(boundRequest, bootstrapLifetime.Token);
+                        if (generation != workspaceStateGeneration) return;
+                        if (!boundResponse.IsSuccessStatusCode && boundResponse.StatusCode != HttpStatusCode.NotFound)
+                        {
+                            if (boundResponse.StatusCode == HttpStatusCode.Unauthorized || boundResponse.StatusCode == HttpStatusCode.Forbidden)
+                                workspaceVerificationAttempts[verificationKey] = DateTime.MaxValue;
+                            continue;
+                        }
+                        if (boundResponse.IsSuccessStatusCode)
+                            repaired = RecoverWorkspaceBinding(item, request.ProjectId,
+                                new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<WorkspaceArchivedVersionResponse>(await boundResponse.Content.ReadAsStringAsync()));
+                    }
+                    workspaceVerificationAttempts[verificationKey] = DateTime.MaxValue;
+                    if (repaired)
+                    {
+                        recovered = true;
+                        ClientDiagnostics.Record("runtime", "工作区校验恢复", item.FileName + "：文件内容已匹配服务器存档版本，已更新本地校验记录。");
+                    }
+                    else ClientDiagnostics.Record("error", "工作区校验不一致", item.FileName + "：本地文件未匹配服务器最新版本或原绑定版本，已保留文件和原校验记录；内容变化前不重复核对。路径=" + item.FullPath);
+                }
+                catch (Exception exception)
+                {
+                    ClientDiagnostics.Record("error", "工作区校验核对失败", item.FileName + "；" + exception);
+                }
+            }
+            if (recovered)
+                snapshot = await Task.Run(() => WorkspaceLocalStateReader.Read(WorkspaceSettingsStore.GetWorkspaceRoot(),
+                    request.ProjectId, request.ProjectCode, request.CurrentUsername, request.Documents));
             if (generation != workspaceStateGeneration) return;
             workspaceStateSnapshot = snapshot;
             if (selectedDocumentId.HasValue) _ = PublishLightweightPreviewAsync(selectedDocumentId.Value);
@@ -981,11 +1046,32 @@ public partial class MainWindow : Window
             || exception is NotSupportedException)
         {
             if (generation != workspaceStateGeneration) return;
-            var detail = new { projectId = request.ProjectId, projectCode = request.ProjectCode, error = exception.Message, items = Array.Empty<object>() };
+            ClientDiagnostics.Record("error", "工作区校验失败", exception.ToString());
+            var detail = new { projectId = request.ProjectId, projectCode = request.ProjectCode,
+                error = "本地工作区校验失败，请检查文件是否被占用、路径及读取权限后刷新；技术详情已写入客户端日志。", items = Array.Empty<object>() };
             var script = $"window.dispatchEvent(new CustomEvent('pdm-workspace-local-state', {{ detail: {Serialize(detail)} }}));";
             try { await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script); }
             catch (InvalidOperationException) { }
         }
+    }
+
+    private static bool RecoverWorkspaceBinding(WorkspaceLocalFileState item, Guid projectId, WorkspaceArchivedVersionResponse? version)
+    {
+        if (version?.DocumentId != item.DocumentId || version.Revision == null
+            || !version.Revision.TryGetValue("display", out var revision)) return false;
+        string? sourceHash = null;
+        version.PropertySnapshot?.TryGetValue("SourceFileSha256", out sourceHash);
+        return WorkspaceLocalStateReader.RecoverArchivedBinding(item, projectId, version.Id,
+            Convert.ToString(revision), version.Sha256, sourceHash);
+    }
+
+    private sealed class WorkspaceArchivedVersionResponse
+    {
+        public Guid Id { get; set; }
+        public Guid DocumentId { get; set; }
+        public string Sha256 { get; set; } = string.Empty;
+        public Dictionary<string, object>? Revision { get; set; }
+        public Dictionary<string, string>? PropertySnapshot { get; set; }
     }
 
     private void ConfigureWorkspaceWatcher(WorkspaceStateRequestContext request)

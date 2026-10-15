@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import ProductionDrawingCenter from '../src/components/ProductionDrawingCenter.vue'
 import * as api from '../src/api'
 import type { ProductionDrawingItem } from '../src/types'
@@ -12,6 +12,8 @@ const current: ProductionDrawingItem = {
   priority: 'Urgent', requiredOn: '2026-10-01', isCurrent: true, pdfReady: false, legacyUnverified: false,
 }
 const old: ProductionDrawingItem = { ...current, versionId: 'old', releasePackageId: 'package-old', releasePackageNumber: 'RP-1', revision: 'A', isCurrent: false, pdfReady: true, legacyUnverified: true }
+
+beforeEach(() => { vi.spyOn(api, 'getProjectExportMetadata').mockResolvedValue({title:'项目资料',company:'测试公司',scope:'当前项目',versionLabel:'资料版本',version:'—',exportedAt:'2026-10-14T09:00:00+08:00',exportedBy:'管理员',fields:Array.from({length:12},(_,i)=>({key:'字段'+i,value:'项目资料'}))}) })
 
 describe('ProductionDrawingCenter', () => {  it('shows progress and blocks repeated package downloads until the request finishes', async () => {
     vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([{ ...current, pdfReady: true }])
@@ -89,7 +91,7 @@ describe('ProductionDrawingCenter', () => {  it('shows progress and blocks repea
     const { unzipSync, strFromU8 } = await import('three/examples/jsm/libs/fflate.module.js')
     const files = unzipSync(new Uint8Array(await read(saved.mock.calls[1]![0])))
     const sheet = strFromU8(files['xl/worksheets/sheet1.xml']!)
-    expect(sheet.match(/<row /g)).toHaveLength(52)
+    expect(sheet.match(/<row /g)).toHaveLength(58)
     expect(sheet).toContain('MAT-50')
     wrapper.unmount()
   })

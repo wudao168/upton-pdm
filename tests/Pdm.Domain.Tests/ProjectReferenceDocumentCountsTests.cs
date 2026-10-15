@@ -58,12 +58,40 @@ public sealed class ProjectReferenceDocumentCountsTests
     }
 
     [Fact]
-    public void NoReferenceTreeMatchesEmptyWorkspaceAndIndependentDrawingList()
+    public void NoReferenceTreeIncludesStandaloneModelsAndIndependentDrawings()
     {
         var project = Guid.NewGuid();
         var model = new ProjectReferenceDocumentCounts.Document(Guid.NewGuid(), project, "orphan.SLDPRT", DocumentKind.Part);
         var drawing = new ProjectReferenceDocumentCounts.Document(Guid.NewGuid(), project, "drawing.SLDDRW", DocumentKind.Drawing);
-        Assert.Equal((0, 0, 0), ProjectReferenceDocumentCounts.Count(null, project, [model], []));
-        Assert.Equal((1, 0, 1), ProjectReferenceDocumentCounts.Count(null, project, [model, drawing], []));
+        Assert.Equal((1, 1, 0), ProjectReferenceDocumentCounts.Count(null, project, [model], []));
+        Assert.Equal((2, 1, 1), ProjectReferenceDocumentCounts.Count(null, project, [model, drawing], []));
+    }
+
+    [Fact]
+    public void IncludesStandaloneModelsBesideReferenceTreeWithoutCountingOtherProjectModels()
+    {
+        var project = Guid.NewGuid();
+        var rootModel = new ProjectReferenceDocumentCounts.Document(Guid.NewGuid(), project, "root.SLDASM", DocumentKind.Assembly);
+        var standalone = new ProjectReferenceDocumentCounts.Document(Guid.NewGuid(), project, "standalone.SLDPRT", DocumentKind.Part);
+        var other = standalone with { Id = Guid.NewGuid(), ProjectId = Guid.NewGuid(), FileName = "other.SLDPRT" };
+        Assert.Equal((2, 2, 0), ProjectReferenceDocumentCounts.Count(Node(rootModel.FileName, rootModel.Id, rootModel.Kind), project, [rootModel, standalone, other], []));
+    }
+
+    [Fact]
+    public async Task ProjectSummaryExcludesRecycledAndPurgedDrawingsAndRestoresLiveCounts()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new Upton.Pdm.Application.CreateProjectCommand("COUNT-TEST", "计数测试", "admin", "unused", "unused"), "admin", default);
+        var drawing = await repository.RegisterDocumentAsync(new Upton.Pdm.Application.RegisterDocumentCommand(project.Id, "COUNT-001", "独立工程图", "COUNT-001.SLDDRW", DocumentKind.Drawing), "admin", default);
+        async Task<int?> DrawingCount() => (await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, default)).Single(item => item.Id == project.Id).DrawingDocumentCount;
+        Assert.Equal(1, await DrawingCount());
+        var now = DateTimeOffset.UtcNow;
+        var deleted = await repository.SetDocumentDeletedAsync(drawing.Id, true, drawing.RowVersion, "admin", "清理重复图纸", now, default);
+        Assert.Equal(0, await DrawingCount());
+        var restored = await repository.SetDocumentDeletedAsync(drawing.Id, false, deleted.RowVersion, "admin", "恢复", now, default);
+        Assert.Equal(1, await DrawingCount());
+        await repository.SetDocumentDeletedAsync(drawing.Id, true, restored.RowVersion, "admin", "清理", now, default);
+        await repository.PurgeExpiredDeletedDocumentsAsync(now.AddDays(1), now.AddDays(2), default);
+        Assert.Equal(0, await DrawingCount());
     }
 }

@@ -33,8 +33,8 @@ public static class ProjectReferenceDocumentCounts
                 foreach (var drawingId in drawingsByModel[modelId]) kinds.TryAdd(drawingId.ToString(), DocumentKind.Drawing);
         }
         if (root is not null) Visit(root);
-        foreach (var drawing in documents.Where(document => document.ProjectId == projectId && document.Kind == DocumentKind.Drawing))
-            kinds.TryAdd(drawing.Id.ToString(), DocumentKind.Drawing);
+        foreach (var document in documents.Where(document => document.ProjectId == projectId))
+            kinds.TryAdd(document.Id.ToString(), document.Kind);
         var drawingCount = kinds.Values.Count(kind => kind == DocumentKind.Drawing);
         return (kinds.Count, kinds.Count - drawingCount, drawingCount);
     }

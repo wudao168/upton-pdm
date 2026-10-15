@@ -581,6 +581,7 @@ export interface ManagedDocument {
   storedVersionCount?: number
   checkedOutBy?: string
   checkedOutAt?: string
+  checkoutSessionId?: string
   checkoutMachine?: string
   checkoutLastHeartbeatAt?: string
   checkoutLeaseExpiresAt?: string

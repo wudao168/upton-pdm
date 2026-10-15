@@ -23,6 +23,11 @@ public sealed class LocalEditDraft
     public string DraftSha256 { get; set; }
     public string DiskSha256 { get; set; }
     public DateTime SavedAtUtc { get; set; }
+    public DateTime NextSnapshotAttemptUtc { get; set; }
+    public DateTime NextMaintenanceAttemptUtc { get; set; }
+    public int MaintenanceFailureCount { get; set; }
+    public string MaintenanceErrorKey { get; set; }
+    public bool RecoveryRequired { get; set; }
     public bool ObservedOpen { get; set; }
     public bool UnsavedChanges { get; set; }
     public bool PendingClose { get; set; }
@@ -75,13 +80,33 @@ internal sealed class EditDraftJournal
 
     public static string Hash(string path)
     {
-        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
         using (var hash = SHA256.Create())
             return BitConverter.ToString(hash.ComputeHash(stream)).Replace("-", "");
     }
 
+    public bool DelayMaintenance(LocalEditDraft entry, string errorKey, bool recoveryRequired, DateTime now)
+    {
+        var changed = !string.Equals(entry.MaintenanceErrorKey, errorKey, StringComparison.Ordinal);
+        entry.MaintenanceFailureCount = changed ? 1 : Math.Min(entry.MaintenanceFailureCount + 1, 5);
+        entry.MaintenanceErrorKey = errorKey;
+        entry.RecoveryRequired = recoveryRequired;
+        entry.NextMaintenanceAttemptUtc = now.AddSeconds(recoveryRequired ? 300 : Math.Min(300, 30 * Math.Pow(2, entry.MaintenanceFailureCount - 1)));
+        Save(entry);
+        return changed;
+    }
+
+    public static void ClearMaintenanceFailure(LocalEditDraft entry)
+    {
+        entry.NextMaintenanceAttemptUtc = DateTime.MinValue;
+        entry.MaintenanceFailureCount = 0;
+        entry.MaintenanceErrorKey = null;
+        entry.RecoveryRequired = false;
+    }
+
     public void Preserve(LocalEditDraft entry, string snapshotPath, bool restoreOnOpen)
     {
+        var previousDraft = entry.DraftPath;
         var sourceHash = Hash(snapshotPath);
         var diskHash = Hash(entry.SourcePath);
         if (string.Equals(entry.DraftSha256, sourceHash, StringComparison.OrdinalIgnoreCase) && HasVerifiedDraft(entry))
@@ -110,6 +135,33 @@ internal sealed class EditDraftJournal
         entry.SavedAtUtc = DateTime.UtcNow;
         entry.RestoreOnOpen = restoreOnOpen;
         Save(entry);
+        // Only the live owning process can retire its own superseded snapshot. Historical
+        // sessions and the last referenced recovery copy remain available for recovery.
+        using (var process = Process.GetCurrentProcess())
+            if (entry.ProcessId == process.Id && OwnerProcessRunning(entry))
+                TryDeleteUnreferencedSnapshot(entry.DocumentId, previousDraft);
+    }
+
+    private void TryDeleteUnreferencedSnapshot(Guid documentId, string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return;
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            var snapshotDirectory = Path.GetDirectoryName(fullPath);
+            var documentDirectory = Path.Combine(directory, documentId.ToString("N"));
+            if (!string.Equals(Path.GetDirectoryName(snapshotDirectory), documentDirectory, StringComparison.OrdinalIgnoreCase)
+                || !Guid.TryParseExact(Path.GetFileName(snapshotDirectory), "N", out _)
+                || !string.Equals(Path.GetFileNameWithoutExtension(fullPath), "draft", StringComparison.OrdinalIgnoreCase)
+                || ReadAll().Any(record => !string.IsNullOrWhiteSpace(record.DraftPath)
+                    && string.Equals(Path.GetFullPath(record.DraftPath), fullPath, StringComparison.OrdinalIgnoreCase))) return;
+            File.Delete(fullPath);
+            if (!Directory.EnumerateFileSystemEntries(snapshotDirectory).Any()) Directory.Delete(snapshotDirectory);
+        }
+        catch (IOException) { } // A reader or unavailable journal is not evidence that a draft can be removed.
+        catch (UnauthorizedAccessException) { }
+        catch (InvalidOperationException) { } // Corrupt journal: preserve all snapshots.
+        catch (ArgumentException) { }
     }
 
     public bool HasVerifiedDraft(LocalEditDraft entry) => !string.IsNullOrWhiteSpace(entry.DraftPath)

@@ -81,12 +81,17 @@ public sealed record UploadSession(
     DateTimeOffset ExpiresAt,
     string? Owner = null)
 {
+    public ArchiveUploadContext? ArchiveContext { get; init; }
+    public string? TargetRelativePath { get; init; }
     public void RequireOwner(string actor)
     {
         if (Owner is not null && !string.Equals(Owner, actor, StringComparison.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("只能继续本人发起的上传会话。");
     }
 }
+
+public sealed record ArchiveUploadContext(Guid BatchId, Guid DocumentId, Guid CheckoutSessionId);
+public sealed record ArchiveUploadCleanup(Guid SessionId, Guid ProjectId, StoredFile File);
 
 public sealed record StoredFile(
     string RelativePath,
@@ -113,6 +118,7 @@ public sealed record DocumentVersionCommit(
     public DocumentVersionChangeKind ChangeKind { get; init; } = DocumentVersionChangeKind.Content;
     public Guid? ExpectedVersionId { get; init; }
     public bool RequireBaseVersion { get; init; }
+    public bool IsHistoricalRestore { get; init; }
 }
 
 public sealed record ReleasePreviewSource(
@@ -185,8 +191,15 @@ public sealed record DocumentContentFingerprint(
     PdmDocument Document,
     string SourceSha256);
 
-public sealed record ArchiveBatchFile(Guid DocumentId, DocumentVersionCommit Commit, Guid? DrawingReviewWritebackId = null);
-public sealed record ArchiveBatchReceipt(Guid BatchId, Guid ProjectId, string Actor, string RequestHash, IReadOnlyList<DocumentCheckInResult> Results);
+public sealed record ArchiveBatchFile(Guid DocumentId, DocumentVersionCommit Commit, Guid? DrawingReviewWritebackId = null,
+    bool RestoreHistoricalVersion = false, Guid? ExpectedCheckoutSessionId = null);
+public sealed record ArchiveRegistrationContext(Guid BatchId, Guid SessionId, string MachineName);
+public sealed record PendingArchiveDocument(Guid BatchId, PdmDocument Document, RegisterDocumentCommand Command);
+public sealed record ArchiveBatchReceipt(Guid BatchId, Guid ProjectId, string Actor, string RequestHash, IReadOnlyList<DocumentCheckInResult> Results)
+{
+    public bool FollowupPending { get; init; }
+}
+public sealed record ArchiveBatchFollowup(ArchiveBatchReceipt Receipt, IReadOnlyList<PdmDocument> PreviousDocuments);
 public sealed record ArchiveBatchInput(Guid DocumentId, StoredFile File, IReadOnlyDictionary<string, string?> Properties,
     CadReferenceSnapshot Snapshot, string Comment, bool IsProjectRoot, Guid? ExpectedVersionId,
     string? DrawingNumber = null, string? Name = null, string? FileName = null, Guid? DrawingReviewWritebackId = null);
@@ -514,6 +527,8 @@ public interface IPdmRepository
     Task<int> PurgeExpiredDeletedDocumentsAsync(DateTimeOffset cutoff, DateTimeOffset purgedAt, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentContentFingerprint>> ListDocumentContentFingerprintsAsync(IReadOnlyCollection<Guid> projectIds, CancellationToken cancellationToken);
     Task<PdmDocument> RegisterDocumentAsync(RegisterDocumentCommand command, string actor, CancellationToken cancellationToken);
+    Task<PdmDocument> ReserveArchiveDocumentAsync(RegisterDocumentCommand command, string actor, ArchiveRegistrationContext context, CancellationToken cancellationToken);
+    Task CancelArchiveRegistrationAsync(Guid batchId, string actor, Guid sessionId, CancellationToken cancellationToken);
     Task<bool> HasDocumentReadAccessAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken);
     Task<bool> HasDocumentAccessAsync(Guid documentId, string actor, UserRole role, FolderAccess requiredAccess, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken, int? limit = null);
@@ -615,9 +630,14 @@ public interface IPdmRepository
     Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, CancellationToken cancellationToken);
     Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, Guid? drawingReviewWritebackId, CancellationToken cancellationToken);
     Task<ArchiveBatchReceipt?> FindArchiveBatchAsync(Guid batchId, CancellationToken cancellationToken);
+    Task<PendingArchiveDocument?> FindPendingArchiveDocumentAsync(Guid documentId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ArchiveBatchFollowup>> ListArchiveBatchFollowupsAsync(int limit, CancellationToken cancellationToken);
+    Task CompleteArchiveBatchFollowupAsync(Guid batchId, CancellationToken cancellationToken);
+    Task RegisterArchiveUploadAsync(UploadSession session, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ArchiveUploadCleanup>> ClaimExpiredArchiveUploadsAsync(int limit, CancellationToken cancellationToken);
+    Task CompleteArchiveUploadCleanupAsync(Guid sessionId, CancellationToken cancellationToken);
     Task<ArchiveBatchReceipt> CheckInBatchVersionsAsync(Guid batchId, string requestHash, string actor, Guid sessionId,
         IReadOnlyList<ArchiveBatchFile> files, CancellationToken cancellationToken);
-    Task<(PdmDocument Document, DocumentVersion Version)> RestoreVersionAsync(Guid documentId, Guid sourceVersionId, string actor, StoredFile restoredFile, string changeNote, CancellationToken cancellationToken);
     Task<DocumentVersion> PublishDocumentVersionAsync(Guid documentId, Guid sourceVersionId, Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(
         Guid releasePackageId,
@@ -676,6 +696,9 @@ public interface IPdmRepository
 
 public interface IFileStorage
 {
+    Task<UploadSession> StartArchiveUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256,
+        string owner, ArchiveUploadContext context, CancellationToken cancellationToken) => throw new NotSupportedException("当前存储不支持整批暂存，请升级服务器。");
+    Task CleanupExpiredArchiveUploadsAsync(CancellationToken cancellationToken) => Task.CompletedTask;
     Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken, string? owner = null);
     Task<UploadSession> GetUploadSessionAsync(Guid sessionId, CancellationToken cancellationToken);
     Task<UploadSession> WriteChunkAsync(Guid sessionId, int chunkIndex, Stream content, CancellationToken cancellationToken);

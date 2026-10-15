@@ -48,6 +48,7 @@ const expandedProjects = ref<Record<string, boolean>>({})
 const loading = ref(false)
 const error = ref('')
 const syncingRowKey = ref('')
+const deniedU9Rows = new Set<string>()
 const retryingApplicationId = ref('')
 
 function automaticText(header?: ProjectBomHeader) {
@@ -262,6 +263,7 @@ function u9BomStateText(row: (typeof overviewRows.value)[number]) {
   if (state === 'waiting-components') return '待首个正式子件'
   if (state === 'create-pending') return '待自动创建'
   if (state === 'modify-pending') return '待同步子件'
+  if (deniedU9Rows.has(row.key)) return '无检查权限'
   if (state === 'failed') return '检查失败'
   return canEditRow(row.project) ? (row.releaseStatus === '正式发布' ? '检查同步' : '检查BOM状态') : '未检查'
 }
@@ -287,14 +289,18 @@ function viewStateFromPreview(preview: Awaited<ReturnType<typeof previewProjectB
 }
 
 async function refreshU9BomStates() {
-  const rows = eligibleHeaderRows.value.filter(row => row.header?.materialCode)
+  const rows = eligibleHeaderRows.value.filter(row => row.header?.materialCode && canEditRow(row.project) && !deniedU9Rows.has(row.key))
   if (!rows.length) return
   const updates = await Promise.all(rows.map(async row => {
     try {
       const preview = await previewProjectBomU9Sync(row.project.id, row.headerKind, props.token)
       u9Blockers.value = { ...u9Blockers.value, [row.key]: [] }
       return [row.key, viewStateFromPreview(preview)] as const
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && 'status' in error && (error.status === 401 || error.status === 403)) {
+        deniedU9Rows.add(row.key)
+        return [row.key, 'failed'] as const
+      }
       const blockers = await findU9Blockers(row.project.id, row.headerKind)
       if (blockers.length) {
         u9Blockers.value = { ...u9Blockers.value, [row.key]: blockers }
@@ -307,7 +313,7 @@ async function refreshU9BomStates() {
 }
 
 async function syncU9Bom(row: (typeof overviewRows.value)[number]) {
-  if (!canEditRow(row.project) || !isHeaderEligible(row) || !row.header?.materialCode || syncingRowKey.value) return
+  if (!canEditRow(row.project) || !isHeaderEligible(row) || !row.header?.materialCode || syncingRowKey.value || deniedU9Rows.has(row.key)) return
   const known = u9Blockers.value[row.key] ?? []
   if (known.length) { showU9Blockers(known); return }
   syncingRowKey.value = row.key
@@ -357,6 +363,12 @@ async function syncU9Bom(row: (typeof overviewRows.value)[number]) {
     u9BomStates.value = { ...u9BomStates.value, [row.key]: 'synced' }
     ElMessage.success(`U9C BOM${operation}成功，自动回查通过`)
   } catch (reason) {
+    if (reason instanceof Error && 'status' in reason && (reason.status === 401 || reason.status === 403)) {
+      deniedU9Rows.add(row.key)
+      u9BomStates.value = { ...u9BomStates.value, [row.key]: 'failed' }
+      ElMessage.error('当前账号没有检查此项目U9C同步状态的权限，请联系项目管理员。')
+      return
+    }
     const blockers = await findU9Blockers(row.project.id, row.headerKind)
     if (blockers.length) {
       u9Blockers.value = { ...u9Blockers.value, [row.key]: blockers }
@@ -447,7 +459,10 @@ function formatDate(value?: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false })
 }
 
-watch([rootProjectId, () => props.token], () => { expandedProjects.value = {} })
+watch([rootProjectId, () => props.token, () => props.projects.map(project => `${project.id}:${project.effectiveProjectPermissions?.join(',')}`).join('|')], () => {
+  expandedProjects.value = {}
+  deniedU9Rows.clear()
+})
 
 watch([rootProjectId, hierarchySignature, () => props.token], () => {
   detailCache.value = {}

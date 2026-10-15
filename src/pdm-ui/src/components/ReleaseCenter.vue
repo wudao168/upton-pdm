@@ -382,6 +382,10 @@ const comparedFields: Array<{ key: keyof BomItem; label: string }> = [
 ]
 const fieldValue = (item: BomItem, key: keyof BomItem) => String(item[key] ?? '').trim()
 const itemSignature = (item: BomItem) => JSON.stringify(comparedFields.map(field => fieldValue(item, field.key)))
+function isFormalRevisionPromotion(previous: string, current: string) {
+  const work = /^(?:([A-Z]+)-)?W1$/i.exec(previous)
+  return Boolean(work && current.toUpperCase() === (work[1]?.toUpperCase() ?? 'A'))
+}
 function changedRows(current: BomItem[], previous: BomItem[]) {
   const remaining = new Set(previous)
   const matches = new Map<BomItem, BomItem>()
@@ -417,7 +421,8 @@ function changedRows(current: BomItem[], previous: BomItem[]) {
   for (const item of current) {
     const old = matches.get(item)
     if (!old) { rows.push({ item, change: '新增', details: ['上一发布版不存在此项'] }); continue }
-    const details = comparedFields.filter(field => fieldValue(old, field.key) !== fieldValue(item, field.key))
+    const details = comparedFields.filter(field => fieldValue(old, field.key) !== fieldValue(item, field.key)
+      && !(field.key === 'revision' && isFormalRevisionPromotion(fieldValue(old, field.key), fieldValue(item, field.key))))
       .map(field => `${field.label}：${fieldValue(old, field.key) || '—'} → ${fieldValue(item, field.key) || '—'}`)
     if (details.length) rows.push({ item, change: '修改', details })
   }
@@ -457,13 +462,11 @@ function toggleAllSupplement(checked: boolean) {
 // 本次不纳入的新增/修改项（顺延到下一次变更）不参与发布范围校验。
 const isDeferredSupplementRow = (row: { change: string; item: BomItem }) =>
   supplementRowSelectable(row) && !selectedSupplementKeys.value.includes(supplementRowKey(row))
-const deferredSupplementItemIds = computed(() => supplementRows.value
-  .filter(row => supplementRowSelectable(row) && !selectedSupplementKeys.value.includes(supplementRowKey(row)))
-  .flatMap(row => releaseInstanceIds(row.item)))
 const selectedSupplementBomItemIds = computed<string[] | undefined>(() => {
-  const deferredIds = new Set(deferredSupplementItemIds.value)
-  if (deferredIds.size === 0) return undefined
-  return [...new Set(availableReleaseItems.value.flatMap(releaseInstanceIds).filter(id => !deferredIds.has(id)))]
+  if (supplementRows.value.length === 0) return undefined
+  const ids = [...new Set(supplementRows.value.filter(row => supplementRowSelectable(row)
+    && selectedSupplementKeys.value.includes(supplementRowKey(row))).flatMap(row => releaseInstanceIds(row.item)))]
+  return ids.length === 0 && supplementRows.value.some(row => row.change === '删除') ? undefined : ids
 })
 const isLongLeadRelease = computed(() => isLongLeadScope(scope.value))
 const isFormalRelease = computed(() => scope.value === 'StandardFormal' || scope.value === 'ElectricalFormal' || scope.value === 'NonStandardWithDrawing')

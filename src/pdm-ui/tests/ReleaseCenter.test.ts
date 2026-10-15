@@ -5,6 +5,27 @@ import * as api from '../src/api'
 import type { BomItem, CreateReleasePackageInput, ReleasePackageSummary } from '../src/types'
 
 describe('ReleaseCenter', () => {
+  it('does not reselect twenty formally promoted items when only one item is new', async () => {
+    const previous: BomItem[] = Array.from({ length: 20 }, (_, i) => ({ id: `old-${i}`, kind: 'NonStandard', sequence: i + 1,
+      drawingNumber: `CODE-${i}`, name: `已发布${i}`, specification: `MODEL-${i}`, quantity: 1, unit: '个', revision: 'W1', complete: true }))
+    const added: BomItem = { ...previous[0]!, id: 'new', drawingNumber: '', name: '圆柱', specification: 'TSST.01-02' }
+    const current = [...previous.map(item => ({ ...item, revision: 'A' })), added]
+    const wrapper = mount(ReleaseCenter, { props: { ...frozenProps, releasePackage: null, releaseItems: current, previousVersionItems: previous,
+      allowedScopes: ['NonStandardSupplement'], preferredScope: 'NonStandardSupplement', releasePackages: [publishedFormal('NonStandardWithDrawing')],
+      drawingReviewCandidates: current.map(item => ({ candidateId: item.id!, bomItemId: item.id, drawingDocumentId: `drawing-${item.id}`,
+        drawingNumber: item.specification!, name: item.name, modelRevision: item.revision, bomKinds: ['NonStandard' as const], state: 'ApprovedCurrent' as const, selectable: false, hasUnreleasedDrawingChanges: false })) } })
+    expect(wrapper.findAll('.release-change-tag').map(tag => tag.text())).toEqual(['新增'])
+    expect(wrapper.findAll('.release-detail-picker tbody input[type="checkbox"]')).toHaveLength(1)
+    await wrapper.get('input[aria-label="变更原因 物料问题 / 交期不满足"]').setValue(true)
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('create')?.[0]?.[0]).toMatchObject({ selectedBomItemIds: ['new'] })
+    await wrapper.setProps({ releasePackage: { ...publishedFormal('NonStandardWithDrawing'), scope: 'NonStandardSupplement', nonStandardBomSnapshot: current } })
+    const rows = wrapper.findAll('.pdm-release-frozen-table tbody tr')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.text()).toContain('圆柱')
+    expect(wrapper.text()).not.toContain('版本：W1 → A')
+    wrapper.unmount()
+  })
   it('草稿汇总同一来源的空料号垫块，保留不同零件', () => {
     const spacer: BomItem = { id: 'spacer-1', sourceDocumentId: 'spacer-model', sourceConfiguration: '默认', kind: 'NonStandard',
       sequence: 1, drawingNumber: '', name: '垫块', specification: 'P700022.10.00-05', quantity: 1, unit: '个', revision: 'W1', complete: true }
@@ -1126,21 +1147,21 @@ describe('ReleaseCenter', () => {
     await wrapper.setProps({ standardItems: wrapper.props('standardItems')!.map(item => ({ ...item, releaseConfirmation: undefined })) })
     await wrapper.get('input[aria-label="变更原因 物料问题 / 交期不满足"]').setValue(true)
     await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
-    expect(wrapper.emitted('create')?.at(0)?.at(0)).toMatchObject({ scope: 'StandardSupplement', selectedBomItemIds: [] })
+    expect(wrapper.emitted('create')?.at(0)?.at(0)).toMatchObject({ scope: 'StandardSupplement', selectedBomItemIds: ['new-1', 'mod-1'] })
 
     await wrapper.get('input[aria-label="本次纳入 NEW-001"]').setValue(false)
     expect(rows.at(0)!.text()).toContain('本次不发布')
     await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
     expect(wrapper.emitted('create')?.at(1)?.at(0)).toMatchObject({
       scope: 'StandardSupplement',
-      selectedBomItemIds: ['keep-1', 'mod-1'],
+      selectedBomItemIds: ['mod-1'],
     })
     await wrapper.get('input[aria-label="本次纳入 MOD-001"]').setValue(false)
     expect(wrapper.get('input[aria-label="本次纳入 MOD-001"]').element).toHaveProperty('checked', false)
     expect(wrapper.get('.pdm-release-draft-actions .pdm-primary-action').attributes('disabled')).toBeDefined()
     await wrapper.get('input[aria-label="本次纳入 NEW-001"]').setValue(true)
     await wrapper.get('.pdm-release-draft-actions .pdm-primary-action').trigger('submit')
-    expect(wrapper.emitted('create')?.at(-1)?.at(0)).toMatchObject({ selectedBomItemIds: ['new-1', 'keep-1'] })
+    expect(wrapper.emitted('create')?.at(-1)?.at(0)).toMatchObject({ selectedBomItemIds: ['new-1'] })
     wrapper.unmount()
   })
 

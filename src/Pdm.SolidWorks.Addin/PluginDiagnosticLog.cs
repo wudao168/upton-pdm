@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
-using System.Text.RegularExpressions;
 
 namespace Upton.Pdm.SolidWorks;
 
@@ -36,13 +35,7 @@ internal static class PluginDiagnosticLog
         lock (Sync) return string.Join(Environment.NewLine + Environment.NewLine, Entries);
     }
 
-    internal static string Redact(string text)
-    {
-        var safe = Regex.Replace(text ?? string.Empty, @"(?i)\bBearer\s+[^\s""',;]+", "Bearer [已隐藏]");
-        const string keys = @"(?:access[_-]?token|refresh[_-]?token|token|api[_-]?key|client[_-]?secret|password|passwd|authorization|secret|密码|口令)";
-        safe = Regex.Replace(safe, @"(?i)(\b" + keys + @"\b[""']?\s*[:=]\s*)(?:""(?:\\.|[^""\\])*""|'(?:\\.|[^'\\])*')", "$1\"[已隐藏]\"");
-        return Regex.Replace(safe, @"(?i)(\b" + keys + @"\b[""']?\s*[:=]\s*)([^\s""',;&}]+)", "$1[已隐藏]");
-    }
+    internal static string Redact(string text) => Upton.Pdm.ClientShared.ClientLogRedaction.Clean(text, false);
 
     public static string BuildReport(string version, string directory)
     {

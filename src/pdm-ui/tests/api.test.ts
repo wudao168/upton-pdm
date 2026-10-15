@@ -1,8 +1,29 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { downloadProductionDrawingArchive, downloadReleasePreviewArchive, listProjects, loadBomSourceData, mapApiReleasePackage, readProjectValidationPlan, saveBom } from '../src/api'
+import { downloadProductionDrawingArchive, downloadReleasePreviewArchive, listProjects, loadBomSourceData, loadProjectDocumentWorkspace, mapApiReleasePackage, readProjectValidationPlan, restoreDocumentVersion, saveBom } from '../src/api'
 import type { BomItem } from '../src/types'
 
 describe('API JSON response handling', () => {
+  it('关联树工程图与2D列表统一使用正式版本数，登记不等于存档', async () => {
+    const documents = [
+      { id: 'model', projectId: 'project', kind: 0, fileName: 'A.SLDASM', storedVersionCount: 1, revision: { display: 'W1' } },
+      { id: 'drawing', projectId: 'project', kind: 2, fileName: 'A.SLDDRW', storedVersionCount: 0, revision: { display: 'W1' } },
+    ]
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => new Response(JSON.stringify(path.endsWith('/documents') || path.endsWith('/folder-documents') ? documents
+      : path.endsWith('/document-relations') ? [{ modelDocumentId: 'model', drawingDocumentId: 'drawing' }]
+        : path.endsWith('/reference-tree') ? { documentId: 'model', nodeId: 'root', instancePath: 'root', fileName: 'A.SLDASM', kind: 0, children: [] } : []), { status: 200 })))
+    const result = await loadProjectDocumentWorkspace('project', 'token')
+    expect(result.root.children[0]).toMatchObject({ documentId: 'drawing', status: 'Unarchived', version: '—' })
+    expect(result.documents.find(document => document.id === 'drawing')?.storedVersionCount).toBe(0)
+  })
+
+  it('恢复版本携带固定操作号、原基准与编辑会话', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const input = { changeNote: '恢复检查', operationId: 'operation', expectedVersionId: 'latest', checkoutSessionId: 'session' }
+    await restoreDocumentVersion('doc', 'old', input, 'token')
+    await restoreDocumentVersion('doc', 'old', input, 'token')
+    expect(fetchMock.mock.calls.map(call => JSON.parse(call[1].body))).toEqual([input, input])
+  })
   it('保留服务端BOM实例所属装配根路径，供独立树统计和发布范围筛选使用', async () => {
     const path = 'roots/11111111111111111111111111111111/root/part'
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([

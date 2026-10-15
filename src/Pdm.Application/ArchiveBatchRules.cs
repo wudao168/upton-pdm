@@ -4,6 +4,16 @@ namespace Upton.Pdm.Application;
 
 public static class ArchiveBatchRules
 {
+    public static void ValidateRestoreSession(PdmDocument document, string actor, Guid? expectedSessionId)
+    {
+        if (document.DeletedAt.HasValue || document.PurgedAt.HasValue || document.State is DocumentLifecycleState.InReview or DocumentLifecycleState.Obsolete)
+            throw new PdmConflictException("图档已删除、作废或正在审批，不能恢复历史版本。");
+        if (document.CheckoutSessionId != expectedSessionId
+            || (document.CheckedOutBy is not null && !string.Equals(document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase))
+            || (document.CheckedOutBy is not null && expectedSessionId is null))
+            throw new PdmConflictException("图档的编辑会话已变化，不能恢复历史版本。请刷新后通过当前编辑会话重试。");
+    }
+
     public static IReadOnlyList<ArchiveBatchFile> Order(IReadOnlyList<ArchiveBatchFile> files)
     {
         var byId = files.ToDictionary(file => file.DocumentId);

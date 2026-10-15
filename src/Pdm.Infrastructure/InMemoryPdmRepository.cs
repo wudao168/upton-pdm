@@ -9,7 +9,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     private readonly object gate = new();
     private readonly ConcurrentDictionary<Guid, Project> projects = new();
     private readonly ConcurrentDictionary<Guid, PdmDocument> documents = new();
-    private readonly ConcurrentDictionary<Guid, DocumentModelDrawingRelation> documentRelations = new();
+    private readonly ConcurrentDictionary<(Guid DrawingId, Guid ModelId), DocumentModelDrawingRelation> documentRelations = new();
     private readonly ConcurrentDictionary<Guid, ProjectFolder> projectFolders = new();
     private readonly Dictionary<string, ProjectFolderTemplateNode> folderTemplate = CreateDefaultFolderTemplate();
     private readonly ConcurrentDictionary<Guid, UserAccount> users = new();
@@ -86,7 +86,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var model = documents.Values.FirstOrDefault(item => item.ProjectId == drawing.ProjectId
                 && item.DrawingNumber.Equals(drawing.DrawingNumber, StringComparison.OrdinalIgnoreCase)
                 && item.Kind is DocumentKind.Assembly or DocumentKind.Part);
-            if (model is not null) documentRelations[drawing.Id] = new(model.Id, drawing.Id);
+            if (model is not null) documentRelations[(drawing.Id, model.Id)] = new(model.Id, drawing.Id);
         }
 
         var referenceTree = SeedData.Tree(documents);
@@ -1085,6 +1085,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<PdmDocument?> FindDocumentAsync(Guid documentId, CancellationToken cancellationToken)
     {
         documents.TryGetValue(documentId, out var document);
+        document ??= pendingArchiveDocuments.GetValueOrDefault(documentId)?.Document;
         return Task.FromResult(document is { DeletedAt: null, PurgedAt: null } ? document : null);
     }
 
@@ -1205,7 +1206,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             || model.Kind is not (DocumentKind.Assembly or DocumentKind.Part)
             || drawing.Kind != DocumentKind.Drawing)
             throw new PdmRuleException("工程图只能关联同一项目中的装配体或零件。");
-        documentRelations[drawing.Id] = new(model.Id, drawing.Id);
+        documentRelations[(drawing.Id, model.Id)] = new(model.Id, drawing.Id);
     }
 
     public Task<bool> HasDocumentReadAccessAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken) =>
@@ -1213,12 +1214,12 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     public async Task<bool> HasDocumentAccessAsync(Guid documentId, string actor, UserRole role, FolderAccess requiredAccess, CancellationToken cancellationToken)
     {
-        if (!documents.TryGetValue(documentId, out var requestedDocument)
-            || !await HasProjectContentReadAccessAsync(requestedDocument.ProjectId, actor, role, cancellationToken)) return false;
+        var requestedDocument = await FindDocumentAsync(documentId, cancellationToken);
+        if (requestedDocument is null || !await HasProjectContentReadAccessAsync(requestedDocument.ProjectId, actor, role, cancellationToken)) return false;
         lock (gate)
         {
-            if (!documents.TryGetValue(documentId, out var document)
-                || !projects.TryGetValue(document.ProjectId, out var project)
+            var document = requestedDocument;
+            if (!projects.TryGetValue(document.ProjectId, out var project)
                 || !IsInActiveCompany(project)
                 || !HasUserPermission(actor, role, PermissionCodes.ProjectContentView))
                 return false;
@@ -1803,10 +1804,14 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         => CheckInVersionAsync(documentId, actor, sessionId, commit, null, cancellationToken);
 
     public Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, Guid? drawingReviewWritebackId, CancellationToken cancellationToken)
+        => CheckInVersionCore(documentId, actor, sessionId, commit, drawingReviewWritebackId, cancellationToken);
+
+    private Task<DocumentCheckInResult> CheckInVersionCore(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, Guid? drawingReviewWritebackId, CancellationToken cancellationToken, Guid? archiveBatchId = null)
     {
         lock (gate)
         {
             if (!documents.TryGetValue(documentId, out var document)) throw new PdmNotFoundException("图档不存在。");
+            ValidateArchiveUpload(documentId, actor, sessionId, archiveBatchId, commit.File);
             EnsureSessionOwner(document, actor, sessionId, "提交存档");
             var controlledWriteback = drawingReviewWritebackId.HasValue
                 && IsActiveDrawingReviewWriteback(documentId, drawingReviewWritebackId.Value);
@@ -1830,7 +1835,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                     || (!string.IsNullOrWhiteSpace(latestSourceSha256)
                         && !string.IsNullOrWhiteSpace(sourceFileSha256)
                         && string.Equals(latestSourceSha256, sourceFileSha256, StringComparison.OrdinalIgnoreCase)));
-            if (sameFile && latest is not null && ArchiveSafety.SameProperties(latest.PropertySnapshot, commit.Properties)
+            if (!commit.IsHistoricalRestore && sameFile && latest is not null && ArchiveSafety.SameProperties(latest.PropertySnapshot, commit.Properties)
                 && ArchiveSafety.SameReferences(latest.ReferenceSnapshot, commit.ReferenceSnapshot.Root))
             {
                 if (commit.IsProjectRoot && !referenceRoots.ContainsKey((document.ProjectId, documentId)))
@@ -1884,24 +1889,6 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             && !string.IsNullOrWhiteSpace(sourceSha256)
                 ? sourceSha256
                 : latest.Sha256;
-    }
-
-    public Task<(PdmDocument Document, DocumentVersion Version)> RestoreVersionAsync(Guid documentId, Guid sourceVersionId, string actor, StoredFile restoredFile, string changeNote, CancellationToken cancellationToken)
-    {
-        lock (gate)
-        {
-            if (!documents.TryGetValue(documentId, out var document)) throw new PdmNotFoundException("图档不存在。");
-            if (!versions.TryGetValue(sourceVersionId, out var source) || source.DocumentId != documentId) throw new PdmNotFoundException("历史版本不存在。");
-            var revision = document.Revision.NextWork();
-            var restored = source with { Id = Guid.NewGuid(), Revision = revision, Status = DocumentVersionStatus.Work, StorageRelativePath = restoredFile.RelativePath, FileLength = restoredFile.Length, Sha256 = restoredFile.Sha256, CreatedBy = actor, CreatedAt = DateTimeOffset.UtcNow, ChangeNote = changeNote, SourceVersionId = source.Id, SourceDescription = $"由{source.Revision.Display}恢复生成{revision.Display}", ApprovalTaskId = null, ReleasePackageId = null, Preview = null };
-            versions[restored.Id] = restored;
-            var updated = ClearEditLock(document with { Revision = revision, State = DocumentLifecycleState.Work }, restored.CreatedAt);
-            documents[documentId] = updated;
-            if (source.PropertySnapshot.TryGetValue("SourceFileSha256", out var restoredSourceSha256)
-                && !string.IsNullOrWhiteSpace(restoredSourceSha256))
-                documentSourceFingerprints[documentId] = restoredSourceSha256;
-            return Task.FromResult((updated, restored));
-        }
     }
 
     public Task<DocumentVersion> PublishDocumentVersionAsync(Guid documentId, Guid sourceVersionId, Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken)
@@ -2688,9 +2675,12 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     private Project ApplyCapabilities(Project project, string actor, UserRole role)
     {
-        var documentCount = documents.Values.Count(item => item.ProjectId == project.Id);
-        var modelDocumentCount = documents.Values.Count(item => item.ProjectId == project.Id && item.Kind is DocumentKind.Assembly or DocumentKind.Part);
-        var drawingDocumentCount = documents.Values.Count(item => item.ProjectId == project.Id && item.Kind == DocumentKind.Drawing);
+        var familyId = project.RootProjectId ?? project.ParentProjectId ?? project.Id;
+        var familyIds = projects.Values.Where(item => item.Id == familyId || (item.RootProjectId ?? item.ParentProjectId) == familyId).Select(item => item.Id).ToHashSet();
+        var liveDocuments = documents.Values.Where(item => familyIds.Contains(item.ProjectId) && item.DeletedAt is null && item.PurgedAt is null)
+            .Select(item => new ProjectReferenceDocumentCounts.Document(item.Id, item.ProjectId, item.FileName, item.Kind)).ToArray();
+        var (documentCount, modelDocumentCount, drawingDocumentCount) = ProjectReferenceDocumentCounts.Count(
+            referenceSnapshots.GetValueOrDefault(project.Id)?.Root, project.Id, liveDocuments, documentRelations.Values.ToArray());
         var businessStatus = BuildBusinessStatus(project.Id);
         var rootDocumentCheckedOutBy = RootDocumentCheckedOutBy(project.Id);
         var managesExecutionUnit = project.ExecutionUnitId is Guid executionUnitId

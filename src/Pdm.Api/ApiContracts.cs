@@ -264,6 +264,8 @@ public sealed record SaveFolderTemplateRequest(IReadOnlyList<SaveFolderTemplateN
 public sealed record SaveProjectFolderPermissionsRequest(IReadOnlyList<SaveFolderPermissionRequest> Permissions);
 
 public sealed record CheckoutRequest(Guid SessionId, string MachineName, Guid? DrawingReviewWritebackId = null);
+public sealed record ReserveArchiveDocumentRequest(RegisterDocumentRequest Document, Guid SessionId, string MachineName);
+public sealed record CancelArchiveRegistrationRequest(Guid SessionId);
 
 public sealed record EditSessionHeartbeatRequest(string MachineName, IReadOnlyList<Guid> DocumentIds);
 
@@ -309,7 +311,7 @@ public sealed record ArchiveBatchRequest(Guid BatchId, Guid CheckoutSessionId, I
 
 public sealed record DiscardCheckoutRequest(Guid CheckoutSessionId);
 
-public sealed record RestoreVersionRequest(string ChangeNote);
+public sealed record RestoreVersionRequest(string ChangeNote, Guid? OperationId = null, Guid? ExpectedVersionId = null, Guid? CheckoutSessionId = null);
 
 public sealed record PublishDocumentVersionRequest(Guid SourceVersionId, Guid ReleasePackageId, Guid ApprovalTaskId);
 
@@ -437,6 +439,7 @@ public sealed record DocumentPreviewSourceVersionResponse(
     string Sha256,
     DateTimeOffset CreatedAt);
 
-public sealed record StartUploadRequest(Guid ProjectId, string FileName, long TotalLength, string Sha256);
+public sealed record StartUploadRequest(Guid ProjectId, string FileName, long TotalLength, string Sha256,
+    Guid? BatchId = null, Guid? DocumentId = null, Guid? CheckoutSessionId = null);
 
 public sealed record CompleteUploadRequest(string RelativeTargetPath);

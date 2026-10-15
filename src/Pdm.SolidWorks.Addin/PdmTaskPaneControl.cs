@@ -12,6 +12,7 @@ namespace Upton.Pdm.SolidWorks;
 
 internal sealed class PdmTaskPaneControl : UserControl
 {
+    private readonly TaskPaneSynchronizationContext uiContext;
     private const int StructureSelectionColumnWidth = 28;
     private const int StructureVersionColumnWidth = 105;
     private const int StructureTreeLeftPadding = 4;
@@ -33,6 +34,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     private Label plannedTaskLabel = new Label();
     private Label nextPlannedTaskLabel = new Label();
     private readonly System.Windows.Forms.Timer plannedTaskTimer = new System.Windows.Forms.Timer { Interval = 30000 };
+    private readonly System.Windows.Forms.Timer plannedTaskRefreshTimer = new System.Windows.Forms.Timer { Interval = 300000 };
     private readonly System.Windows.Forms.Timer plannedTaskAnimation = new System.Windows.Forms.Timer { Interval = 20 };
     private string[] plannedTasks = Array.Empty<string>();
     private int plannedTaskIndex;
@@ -133,6 +135,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     public PdmTaskPaneControl(string installedVersion = "")
     {
+        uiContext = new TaskPaneSynchronizationContext(this);
         installedPluginVersion = installedVersion?.Trim() ?? string.Empty;
         Dock = DockStyle.Fill;
         MinimumSize = new Size(250, 420);
@@ -170,6 +173,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             Interlocked.Increment(ref treeBuildGeneration);
             CancelActiveTreeBuild();
             plannedTaskTimer.Dispose();
+            plannedTaskRefreshTimer.Dispose();
             plannedTaskAnimation.Dispose();
             emphasizedNodeFont?.Dispose();
             structureImages?.Dispose();
@@ -398,10 +402,12 @@ internal sealed class PdmTaskPaneControl : UserControl
         {
             loginButton.Text = string.IsNullOrWhiteSpace(displayName) ? "登录" : displayName;
             plannedTaskTimer.Stop();
+            plannedTaskRefreshTimer.Stop();
             SetPlannedTasks(Array.Empty<string>());
             plannedTaskLabel.Text = string.IsNullOrWhiteSpace(authenticatedUsername)
                 ? "登录后显示本人负责的计划任务" : "暂无本人负责的计划任务";
             if (!string.IsNullOrWhiteSpace(authenticatedUsername)) plannedTaskTimer.Start();
+            if (!string.IsNullOrWhiteSpace(authenticatedUsername)) plannedTaskRefreshTimer.Start();
             loginButton.AccessibleDescription = string.IsNullOrWhiteSpace(username)
                 ? loginButton.Text
                 : string.Concat(loginButton.Text, "（", username, "）");
@@ -661,9 +667,9 @@ internal sealed class PdmTaskPaneControl : UserControl
             plannedTaskLabel.Top = 0;
             nextPlannedTaskLabel.Top = plannedTaskBar.ClientSize.Height;
         };
+        plannedTaskRefreshTimer.Tick += (_, _) => PlannedTasksRefreshRequested?.Invoke(this, EventArgs.Empty);
         plannedTaskTimer.Tick += (_, _) =>
         {
-            PlannedTasksRefreshRequested?.Invoke(this, EventArgs.Empty);
             if (plannedTasks.Length < 2) return;
             plannedTaskIndex = (plannedTaskIndex + 1) % plannedTasks.Length;
             nextPlannedTaskLabel.Text = plannedTasks[plannedTaskIndex];
@@ -3315,9 +3321,9 @@ internal sealed class PdmTaskPaneControl : UserControl
 
         try
         {
-            if (InvokeRequired)
+            if (!uiContext.IsCurrentThread)
             {
-                BeginInvoke(action);
+                uiContext.Post(_ => { if (!IsDisposed) action(); }, null);
             }
             else
             {

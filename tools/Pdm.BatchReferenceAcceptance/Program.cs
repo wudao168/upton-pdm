@@ -24,7 +24,7 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        if (args.Length != 2) return 2;
+        if (args.Length != 2 && !(args.Length == 3 && args[2] == "--archive-state-only")) return 2;
         directory = Path.GetFullPath(args[1]);
         Directory.CreateDirectory(directory);
         AppDomain.CurrentDomain.AssemblyResolve += (_, e) =>
@@ -38,6 +38,23 @@ internal static class Program
             .SetValue(null, Path.Combine(directory, "bindings-" + Guid.NewGuid().ToString("N")));
         Type("PdmDocumentIdentityStore").GetField("workspaceRootResolver", Members)
             .SetValue(null, new Func<string>(() => Path.Combine(directory, "workspace")));
+        if (args.Length == 3)
+        {
+            Test("desktop workspace identity and local changes", TestWorkspaceLocalStates);
+            Test("committed version binding", TestBatchControlledVersionBinding);
+            Test("manifest refresh retains committed metadata", TestCheckedInManifestRefresh);
+            Test("external file archive cache", TestBatchArchiveSeedsProjectCache);
+            Test("downloaded normalized copy binding", TestDownloadedCopyBinding);
+            Test("post-commit edits remain unarchived", TestPostCommitLocalChange);
+            Test("binding write failure remains visible", TestArchiveBindingFailure);
+            Test("incomplete metadata remains unverified", TestIncompleteLocalMetadata);
+            Test("damaged duplicate does not hide valid cache", TestReadOnlyDuplicateSelection);
+            Test("different real edits retain conflict", TestChangedDuplicateIdentity);
+            Test("managed archive cache", TestManagedArchiveCache);
+            Test("server-confirmed metadata recovery", TestConfirmedArchiveRecovery);
+            Console.WriteLine($"Passed={passed}; Failed={failed}; no SolidWorks COM or production API calls.");
+            return failed == 0 ? 0 : 1;
+        }
         Test("stale source is updated alongside the refreshed UI tree", TestStaleSource);
         Test("300 repeated references resolve once to the matching historical version", TestResolveDuplicates);
         Test("changed reference is blocked, never assigned the latest version", TestChangedReference);
@@ -72,6 +89,7 @@ internal static class Program
         Test("valid copy wins over damaged readonly duplicate without deleting either", TestReadOnlyDuplicateSelection);
         Test("identical changed copies do not conflict but distinct writable edits do", TestChangedDuplicateIdentity);
         Test("managed archived sources do not create duplicate caches", TestManagedArchiveCache);
+        Test("server-confirmed archive repairs stale metadata without hiding corrupt files or edits", TestConfirmedArchiveRecovery);
         Console.WriteLine($"Passed={passed}; Failed={failed}; no SolidWorks COM or production API calls.");
         return failed == 0 ? 0 : 1;
     }
@@ -326,8 +344,9 @@ internal static class Program
         Assert(property.Enabled, "property action still requires a selected design-tree node");
 
         Call(pane, "SetWorkspaceOperationState", true, "正在批量编辑本地属性");
-        Assert(!((Control)Field(pane, "tabsHost")).Enabled && !((Control)Field(pane, "projectPanel")).Enabled,
-            "plugin actions remain available during a workspace operation");
+        Assert(((Control)Field(pane, "tabsHost")).Enabled && !((Control)Field(pane, "projectPanel")).Enabled
+            && !overall.Enabled && !property.Enabled,
+            "archive actions must lock while diagnostics tabs remain accessible");
         var healthFilterType = Type("PdmTaskPaneControl+StructureHealthFilter");
         Call(pane, "ToggleHealthFilter", Enum.Parse(healthFilterType, "Outdated"));
         Assert(Field(pane, "activeHealthFilter").Equals(Enum.Parse(healthFilterType, "None")),
@@ -838,11 +857,38 @@ internal static class Program
         Assert(cached == Path.GetFullPath(path) && Directory.GetFiles(Path.GetDirectoryName(path), "*.SLDDRW", SearchOption.AllDirectories).Length == 1, "managed archive created redundant bound copy");
     }
 
-    private static object ArchiveState(string projectCode, Guid project, Guid id)
+    private static object ArchiveState(string projectCode, Guid project, Guid id, string latestRevision = "W1")
     {
-        var request = New("WorkspaceDocumentStateRequest"); Set(request, "DocumentId", id); Set(request, "LatestRevision", "W1");
+        var request = New("WorkspaceDocumentStateRequest"); Set(request, "DocumentId", id); Set(request, "LatestRevision", latestRevision);
         var snapshot = Static("WorkspaceLocalStateReader", "Read", Path.Combine(directory, "workspace"), project, projectCode, "engineer", TypedArray("WorkspaceDocumentStateRequest", request));
         return ((IEnumerable)Get(snapshot, "Items")).Cast<object>().Single();
+    }
+
+    private static void TestConfirmedArchiveRecovery()
+    {
+        foreach (var difference in new[] { "stored", "source", "changed", "project", "revision", "writable" })
+        {
+            var project = Guid.NewGuid(); var id = Guid.NewGuid(); var versionId = Guid.NewGuid();
+            var code = "ARCHIVE-RECOVERY-" + difference; var path = WorkspaceFile(code + "/root.SLDASM");
+            File.WriteAllText(path, "old archive"); var oldHash = Hash(File.ReadAllBytes(path));
+            var oldVersion = Guid.NewGuid();
+            Assert((bool)Static("PdmDocumentIdentityStore", "TryWriteControlledVersion", path, id, project, oldVersion,"W1",oldHash,new FileInfo(path).Length),"fixture binding failed");
+            File.WriteAllText(path,"committed new archive"); var committed = Hash(File.ReadAllBytes(path));
+            if (difference == "changed") File.WriteAllText(path,"unarchived change");
+            File.SetAttributes(path,FileAttributes.ReadOnly);
+            var state = ArchiveState(code,project,id); Set(state,"LatestRevision","W2");
+            Assert((string)Get(state,"LocalState")=="IntegrityMismatch","fixture did not reproduce stale readonly checksum");
+            if (difference == "writable") File.SetAttributes(path,FileAttributes.Normal);
+            var before=File.ReadAllBytes(path); var attributes=File.GetAttributes(path);
+            var repaired=(bool)Static("WorkspaceLocalStateReader","RecoverArchivedBinding",state,
+                difference=="project"?Guid.NewGuid():project,versionId,difference=="revision"?"W3":"W2",
+                difference=="source"?"different normalized upload hash":committed,difference=="source"?committed:null);
+            Assert(repaired == (difference=="stored" || difference=="source"),"incorrect archive recovery: "+difference);
+            Assert(File.ReadAllBytes(path).SequenceEqual(before) && File.GetAttributes(path)==attributes,"recovery changed file content or permissions");
+            var metadata=Static("PdmDocumentIdentityStore","ReadBinding",path);
+            Assert((Guid?)Get(metadata,"VersionId")== (repaired?versionId:oldVersion),"recovery overwrote an unverified base");
+            if(repaired) Assert((string)Get(ArchiveState(code,project,id,"W2"),"LocalState")=="ReadOnlyCache","recovery did not clear stale integrity state");
+        }
     }
 
     private static string WriteFixture(string path, string content)
@@ -905,7 +951,7 @@ internal static class Program
     }
 
     private static void Resolve(object plugin, Array items, CancellationToken token) =>
-        ((Task)Call(plugin, "ResolveBatchReferenceVersionsAsync", items, null, token)).GetAwaiter().GetResult();
+        ((Task)Call(plugin, "ResolveBatchReferenceVersionsAsync", items, Guid.NewGuid(), null, token)).GetAwaiter().GetResult();
 
     private static Array Items(params object[] nodes) =>
         TypedArray("BatchOperationItem", nodes.Select(node => New("BatchOperationItem", node, 0)).ToArray());

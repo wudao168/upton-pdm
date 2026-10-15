@@ -114,6 +114,7 @@ internal sealed class CadTreeNode
     public string LatestStoredSha256 { get; set; } = string.Empty;
 
     public bool IsModifiedInSolidWorks { get; set; }
+    public string ArchiveReadError { get; set; }
 
     public bool IsRenamePendingSave { get; set; }
 
@@ -130,7 +131,7 @@ internal sealed class CadTreeNode
     {
         get
         {
-            if (Status == CadReferenceStatus.Missing)
+            if (Status == CadReferenceStatus.Missing || !string.IsNullOrWhiteSpace(ArchiveReadError))
             {
                 return true;
             }

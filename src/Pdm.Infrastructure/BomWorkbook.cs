@@ -21,7 +21,7 @@ public sealed record BomWorkbookExportContext(
     IReadOnlyList<BomWorkbookApprovalEntry> ApprovalSteps,
     DateTimeOffset? PublishedAt,
     DateTimeOffset ExportedAt,
-    byte[]? CompanyLogo = null);
+    byte[]? CompanyLogo = null, ProjectWorkbookMetadata? Header = null);
 
 public sealed record BomWorkbookApprovalEntry(string StepName, string People);
 
@@ -240,7 +240,7 @@ public static class BomWorkbook
             writer.WriteEndDocument();
         }
 
-        return output.ToArray();
+        return context.Header is null ? output.ToArray() : ProjectWorkbookHeader.Apply(output.ToArray(), context.Header with { Notes = string.Join("　", context.ApprovalSteps.Select(step => $"{step.StepName}：{step.People}").Append($"发布日期：{context.PublishedAt?.ToOffset(TimeSpan.FromHours(8)).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "未发布"}")) }, 6, 7);
     }
 
     private static IReadOnlyList<BomItem> PrepareExportItems(IReadOnlyList<BomItem> items, BomWorkbookExportMode mode)
@@ -537,6 +537,11 @@ public static class BomWorkbook
             if (!string.IsNullOrWhiteSpace(labelCell.Value)
                 && cells.TryGetValue(labelCell.Key + 1, out var value)
                 && !string.IsNullOrWhiteSpace(value)) return value.Trim();
+        }
+        foreach (var value in rows.SelectMany(cells => cells.Values))
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(value, System.Text.RegularExpressions.Regex.Escape(label) + @"[：:]\s*([^　\r\n]+)");
+            if (match.Success) return match.Groups[1].Value.Trim();
         }
         return string.Empty;
     }

@@ -7,6 +7,78 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class ArchiveBatchTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task EveryDrawingModelRelationIsAtomicWithTheBatch(bool failLastDrawing)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new("MULTI-" + Guid.NewGuid().ToString("N"), "多模型工程图", "admin", "vault", "release"), "admin", default);
+        var session = Guid.NewGuid(); var batch = Guid.NewGuid(); var context = new ArchiveRegistrationContext(batch, session, "QA");
+        async Task<PdmDocument> Reserve(string name, DocumentKind kind) => await repository.ReserveArchiveDocumentAsync(
+            new(project.Id, name, name, name + (kind == DocumentKind.Part ? ".SLDPRT" : ".SLDDRW"), kind, SourceSha256: new string('A',64)), "admin", context, default);
+        var first = await Reserve("FIRST", DocumentKind.Part); var second = await Reserve("SECOND", DocumentKind.Part);
+        var drawing = await Reserve("MULTI", DocumentKind.Drawing); var last = await Reserve("LAST", DocumentKind.Drawing);
+        var drawingRoot = Node(drawing) with { Children = [Node(first), Node(second) with { Configuration = "D14" }, Node(second) with { Configuration = "D15" }] };
+        var lastCommit = Commit(project, last, Node(last) with { Children = [Node(first)] }, 'E');
+        if (failLastDrawing) lastCommit = lastCommit with { ExpectedVersionId = Guid.NewGuid() };
+        ArchiveBatchFile[] files = [new(first.Id, Commit(project, first, Node(first), 'B')), new(second.Id, Commit(project, second, Node(second), 'C')),
+            new(drawing.Id, Commit(project, drawing, drawingRoot, 'D')), new(last.Id, lastCommit)];
+        if (failLastDrawing)
+        {
+            await Assert.ThrowsAsync<PdmConflictException>(() => repository.CheckInBatchVersionsAsync(batch, "multi", "admin", session, files, default));
+            Assert.Empty(await repository.ListDocumentRelationsAsync(project.Id, default));
+            Assert.Empty(await repository.ListDocumentsAsync(project.Id, default));
+            Assert.Null(await repository.FindArchiveBatchAsync(batch, default));
+        }
+        else
+        {
+            await repository.CheckInBatchVersionsAsync(batch, "multi", "admin", session, files, default);
+            var relations = (await repository.ListDocumentRelationsAsync(project.Id, default)).Where(relation => relation.DrawingDocumentId == drawing.Id).ToArray();
+            Assert.Equal(2, relations.Length);
+            Assert.Contains(relations, relation => relation.ModelDocumentId == first.Id);
+            Assert.Contains(relations, relation => relation.ModelDocumentId == second.Id);
+            Assert.Equal(3, (await repository.ListDocumentVersionsAsync(drawing.Id, default)).Single().ReferenceSnapshot.Children.Count);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NewRegistrationsAndDrawingRelationsBecomeVisibleOnlyWhenEveryFileCommits(bool failLastDrawing)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new("RESERVE-" + Guid.NewGuid().ToString("N"), "新登记整体回滚", "admin", "vault", "release"), "admin", default);
+        var session = Guid.NewGuid(); var batch = Guid.NewGuid(); var context = new ArchiveRegistrationContext(batch,session,"QA");
+        var root = await repository.ReserveArchiveDocumentAsync(new(project.Id,"ROOT","总装","ROOT.SLDASM",DocumentKind.Assembly,SourceSha256:new string('A',64)),"admin",context,default);
+        var drawing = await repository.ReserveArchiveDocumentAsync(new(project.Id,"DRW","工程图","DRW.SLDDRW",DocumentKind.Drawing,RelatedModelDocumentId:root.Id,SourceSha256:new string('B',64)),"admin",context,default);
+        Assert.Empty(await repository.ListDocumentsAsync(project.Id,default));
+        Assert.Empty(await repository.ListDocumentRelationsAsync(project.Id,default));
+        var drawingCommit = Commit(project,drawing,Node(drawing) with { Children = [Node(root)] },'D');
+        if(failLastDrawing) drawingCommit = drawingCommit with { ExpectedVersionId = Guid.NewGuid() };
+        ArchiveBatchFile[] files = [new(root.Id,Commit(project,root,Node(root),'C',true)), new(drawing.Id,drawingCommit)];
+        if(failLastDrawing)
+        {
+            await Assert.ThrowsAsync<PdmConflictException>(() => repository.CheckInBatchVersionsAsync(batch,"request","admin",session,files,default));
+            Assert.Empty(await repository.ListDocumentsAsync(project.Id,default));
+            Assert.Empty(await repository.ListDocumentRelationsAsync(project.Id,default));
+            Assert.Empty(await repository.ListDocumentVersionsAsync(root.Id,default));
+            Assert.Null(await repository.GetLatestReferenceSnapshotAsync(project.Id,default));
+            await repository.CancelArchiveRegistrationAsync(batch,"admin",session,default);
+            Assert.Null(await repository.FindDocumentAsync(drawing.Id,default));
+        }
+        else
+        {
+            var receipt = await repository.CheckInBatchVersionsAsync(batch,"request","admin",session,files,default);
+            Assert.Equal(2,(await repository.ListDocumentsAsync(project.Id,default)).Count);
+            Assert.Single(await repository.ListDocumentRelationsAsync(project.Id,default));
+            Assert.Single(await repository.ListDocumentVersionsAsync(drawing.Id,default));
+            Assert.Equal(receipt,await repository.CheckInBatchVersionsAsync(batch,"request","admin",session,files,default));
+            await repository.CancelArchiveRegistrationAsync(batch,"admin",session,default);
+            Assert.Equal(2,(await repository.ListDocumentsAsync(project.Id,default)).Count);
+        }
+    }
+
+    [Theory]
     [InlineData("permission", false)]
     [InlineData("missing-reference", false)]
     [InlineData("base-version", false)]

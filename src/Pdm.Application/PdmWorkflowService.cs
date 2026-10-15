@@ -1000,7 +1000,8 @@ public sealed class PdmWorkflowService(
         return results;
     }
 
-    public async Task<PdmDocument> RegisterDocumentAsync(RegisterDocumentCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<PdmDocument> RegisterDocumentAsync(RegisterDocumentCommand command, string actor, UserRole role, CancellationToken cancellationToken,
+        ArchiveRegistrationContext? archiveContext = null)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken);
         await RequireProjectSubmissionAccessAsync(command.ProjectId, actor, role, "登记并提交图档", cancellationToken);
@@ -1034,6 +1035,11 @@ public sealed class PdmWorkflowService(
             if (relatedModel.ProjectId != command.ProjectId
                 || relatedModel.Kind is not (DocumentKind.Assembly or DocumentKind.Part))
                 throw new PdmRuleException("工程图只能关联同一项目中的装配体或零件。");
+            var pendingModel = await repository.FindPendingArchiveDocumentAsync(relatedModel.Id, cancellationToken);
+            if (pendingModel is not null && (archiveContext is null || pendingModel.BatchId != archiveContext.BatchId
+                || pendingModel.Document.CheckoutSessionId != archiveContext.SessionId
+                || !string.Equals(pendingModel.Document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase)))
+                throw new PdmConflictException("工程图只能关联本次整批存档中由当前用户准备的模型，请重新整体存档。");
         }
 
         var project = await repository.FindProjectAsync(command.ProjectId, cancellationToken)
@@ -1060,6 +1066,12 @@ public sealed class PdmWorkflowService(
             SourceSha256 = sourceSha256,
             DuplicateReason = duplicateReason
         };
+        if (archiveContext is not null)
+        {
+            if (archiveContext.BatchId == Guid.Empty || archiveContext.SessionId == Guid.Empty || string.IsNullOrWhiteSpace(archiveContext.MachineName))
+                throw new PdmRuleException("整批存档的批次、编辑会话和电脑名称不能为空。");
+            return await repository.ReserveArchiveDocumentAsync(normalized, actor, archiveContext, cancellationToken);
+        }
         var document = await repository.RegisterDocumentAsync(normalized, actor, cancellationToken);
         await AuditAsync(actor, "document.register", nameof(PdmDocument), document.Id.ToString(), document.FileName, cancellationToken);
         if (normalized.AllowDuplicateContent)
@@ -1365,14 +1377,12 @@ public sealed class PdmWorkflowService(
         }
         var planned = inputs.Select(input => input.DocumentId).ToArray();
         var commits = new List<ArchiveBatchFile>();
-        var originalDocuments = new List<PdmDocument>();
         foreach (var input in inputs)
         {
             await PreflightCheckInAsync(input.DocumentId, actor, role, sessionId, input.Properties, input.Snapshot,
                 input.IsProjectRoot, cancellationToken, input.DrawingNumber, input.Name, input.FileName,
                 input.DrawingReviewWritebackId, input.ExpectedVersionId, true, planned);
             var document = await repository.FindDocumentAsync(input.DocumentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
-            originalDocuments.Add(document);
             var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
             await fileStorage.VerifyStoredFileAsync(project, input.File, cancellationToken);
             var latest = (await repository.ListDocumentVersionsAsync(input.DocumentId, cancellationToken)).FirstOrDefault();
@@ -1402,17 +1412,22 @@ public sealed class PdmWorkflowService(
             commits.Add(new ArchiveBatchFile(input.DocumentId, commit, input.DrawingReviewWritebackId));
         }
         var receipt = await repository.CheckInBatchVersionsAsync(batchId, requestHash, actor, sessionId, commits, cancellationToken);
-        foreach (var result in receipt.Results)
-            await AuditAsync(actor, "document.checkin.batch", nameof(PdmDocument), result.Document.Id.ToString(), "整批存档：" + batchId, cancellationToken);
-        foreach (var document in originalDocuments) await NotifyEditReleasedAsync(document, cancellationToken);
-        var rootSnapshot = await repository.GetLatestReferenceSnapshotAsync(receipt.ProjectId, cancellationToken);
-        if (rootSnapshot is not null)
-        {
-            try { await GenerateMechanicalBomFromSnapshotAsync(receipt.ProjectId, rootSnapshot, actor, cancellationToken, true); }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            { await AuditAsync(actor, "bom.generate.failed", nameof(Project), receipt.ProjectId.ToString(), exception.Message, cancellationToken); }
-        }
+        // The receipt and follow-up work are committed together. HTTP cancellation,
+        // notification or BOM failures must never turn a successful archive into an error.
         return receipt;
+    }
+
+    public async Task CompleteArchiveBatchFollowupAsync(ArchiveBatchFollowup followup, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        foreach (var document in followup.PreviousDocuments) await NotifyEditReleasedAsync(document, cancellationToken);
+        var snapshot = await repository.GetLatestReferenceSnapshotAsync(followup.Receipt.ProjectId, cancellationToken);
+        if (snapshot is not null)
+        {
+            await EnsureBomChangeAllowedAsync(followup.Receipt.ProjectId, cancellationToken, BomKind.Standard, BomKind.NonStandard);
+            await GenerateMechanicalBomFromSnapshotAsync(followup.Receipt.ProjectId, snapshot, followup.Receipt.Actor, cancellationToken, true);
+        }
+        await repository.CompleteArchiveBatchFollowupAsync(followup.Receipt.BatchId, cancellationToken);
     }
 
     public async Task<ArchiveBatchReceipt> GetArchiveBatchAsync(Guid batchId, string actor, UserRole role, CancellationToken cancellationToken)
@@ -1436,7 +1451,7 @@ public sealed class PdmWorkflowService(
             if (!isRoot && node.Status != ReferenceNodeStatus.Virtual)
             {
                 if (!node.DocumentId.HasValue || node.Revision is null)
-                    throw new PdmRuleException($"引用图档“{node.FileName}”尚未完整存档，请先提交该图档；本次父装配体未更新。");
+                    throw new PdmRuleException($"引用图档“{node.FileName}”缺少{(!node.DocumentId.HasValue ? "存档身份" : "引用版本")}，可能为实例身份未同步或引用结构未完整读取。请刷新设计树并重新整体存档；本次父装配体未更新。实例：{node.InstancePath}；配置：{node.Configuration}。");
                 if (node.DocumentId == rootDocumentId)
                     throw new PdmRuleException($"图档“{node.FileName}”存在循环引用，未提交父装配体。");
                 var key = (node.DocumentId.Value, node.Revision.Value.Display);
@@ -1724,24 +1739,47 @@ public sealed class PdmWorkflowService(
         string actor,
         UserRole role,
         string changeNote,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? operationId = null,
+        Guid? expectedVersionId = null,
+        Guid? checkoutSessionId = null)
     {
+        if (operationId is null || operationId == Guid.Empty || expectedVersionId is null || expectedVersionId == Guid.Empty)
+            throw new PdmRuleException("恢复历史版本需要操作编号和当前基准版本，请刷新页面或升级客户端后重试。");
+        var note = RequiredComment(changeNote, "恢复说明");
         await RequirePermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken);
         var document = await RequireDocumentAsync(documentId, cancellationToken);
         await RequireDocumentAccessAsync(documentId, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
+        var requestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(
+            new { operation = "restore", documentId, sourceVersionId, expectedVersionId, checkoutSessionId, note }))));
+        var existing = await repository.FindArchiveBatchAsync(operationId.Value, cancellationToken);
+        if (existing is not null)
+        {
+            var result = ArchiveBatchRules.RequireMatchingReceipt(existing, actor, requestHash).Results.Single();
+            return (result.Document, result.Version!);
+        }
+        var project = await RequireProjectSubmissionAccessAsync(document.ProjectId, actor, role, "恢复历史版本", cancellationToken);
+        if (!project.IsActive) throw new PdmConflictException("项目已停用，不能恢复历史版本。");
+        ArchiveBatchRules.ValidateRestoreSession(document, actor, checkoutSessionId);
+        await EnsureDrawingReviewEditAllowedAsync(documentId, null, "恢复历史版本", cancellationToken);
+        var latest = (await repository.ListDocumentVersionsAsync(documentId, cancellationToken, 1)).FirstOrDefault();
+        ArchiveVersionGuard.ValidateBaseVersion(latest?.Id, expectedVersionId, true);
         var source = await repository.FindDocumentVersionAsync(documentId, sourceVersionId, cancellationToken)
             ?? throw new PdmNotFoundException("历史版本不存在。");
-        var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken)
-            ?? throw new PdmNotFoundException("项目不存在。");
-        var restoredPath = Path.Combine(".versions", document.Id.ToString("N"), Guid.NewGuid().ToString("N"), document.FileName);
-        var restoredFile = await fileStorage.CopyVersionAsync(
-            project,
-            new StoredFile(source.StorageRelativePath, source.FileLength, source.Sha256, source.CreatedAt),
-            restoredPath,
-            cancellationToken);
-        var result = await repository.RestoreVersionAsync(documentId, sourceVersionId, actor, restoredFile, changeNote, cancellationToken);
-        await AuditAsync(actor, "document.version.restore", nameof(DocumentVersion), sourceVersionId.ToString(), $"生成{result.Version.Revision.Display}", cancellationToken);
-        return result;
+        var stored = new StoredFile(source.StorageRelativePath, source.FileLength, source.Sha256, source.CreatedAt);
+        await fileStorage.VerifyVersionReadAsync(project, stored, cancellationToken);
+        await ValidateArchivedReferencesAsync(source.ReferenceSnapshot, documentId, cancellationToken);
+        var currentTree = await repository.GetLatestReferenceSnapshotAsync(project.Id, cancellationToken);
+        var isRoot = currentTree is not null && ProjectReferenceForest.Roots(currentTree).Any(root => root.DocumentId == documentId);
+        var snapshot = new CadReferenceSnapshot(Guid.NewGuid(), project.Id, documentId, timeProvider.GetUtcNow(), actor,
+            source.ReferenceSnapshot, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(source.ReferenceSnapshot)))));
+        var commit = new DocumentVersionCommit(stored, note, source.PropertySnapshot, snapshot, source.MechanicalBomSnapshot,
+            source.ElectricalBomSnapshot, source.Id, $"由{source.Revision.Display}恢复生成新的工作版本", IsProjectRoot: isRoot)
+        { ExpectedVersionId = expectedVersionId, RequireBaseVersion = true, IsHistoricalRestore = true };
+        var receipt = await repository.CheckInBatchVersionsAsync(operationId.Value, requestHash, actor,
+            checkoutSessionId ?? operationId.Value, [new(documentId, commit, RestoreHistoricalVersion: true, ExpectedCheckoutSessionId: checkoutSessionId)], cancellationToken);
+        var saved = receipt.Results.Single();
+        return (saved.Document, saved.Version!);
     }
 
     public async Task<DocumentVersionComparison> CompareVersionsAsync(Guid documentId, Guid leftVersionId, Guid rightVersionId, string actor, UserRole role, CancellationToken cancellationToken)
@@ -1765,7 +1803,7 @@ public sealed class PdmWorkflowService(
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectContentView, cancellationToken);
         await RequireDocumentAccessAsync(documentId, actor, role,
-            action == "document.version.download" ? FolderAccess.View | FolderAccess.Download : FolderAccess.View, cancellationToken);
+            action is "document.version.download" or "document.version.read" ? FolderAccess.View | FolderAccess.Download : FolderAccess.View, cancellationToken);
         _ = await RequireDocumentAsync(documentId, cancellationToken);
         if (versionId != Guid.Empty)
         {
@@ -2371,18 +2409,19 @@ public sealed class PdmWorkflowService(
         BomVersion? standardVersion = null;
         BomVersion? nonStandardVersion = null;
         BomVersion? electricalVersion = null;
+        var snapshotItems = await SupplementSnapshotItemsAsync(projectId, scope, targetKind, targetItems, cancellationToken);
         if (!IsLongLeadScope(scope))
         {
             var allVersions = await repository.ListBomVersionsAsync(projectId, null, cancellationToken);
             BomVersion? LatestReleased(BomKind kind) => allVersions.FirstOrDefault(version => version.Kind == kind && version.State == BomVersionState.Released);
             standardVersion = targetKind == BomKind.Standard
-                ? await ResolveBomVersionForReleaseAsync(projectId, BomKind.Standard, targetItems, actor, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, settings.ValidationRules, cancellationToken)
+                ? await ResolveBomVersionForReleaseAsync(projectId, BomKind.Standard, snapshotItems, actor, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, settings.ValidationRules, cancellationToken)
                 : LatestReleased(BomKind.Standard);
             nonStandardVersion = targetKind == BomKind.NonStandard
-                ? await ResolveBomVersionForReleaseAsync(projectId, BomKind.NonStandard, targetItems, actor, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, settings.ValidationRules, cancellationToken)
+                ? await ResolveBomVersionForReleaseAsync(projectId, BomKind.NonStandard, snapshotItems, actor, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, settings.ValidationRules, cancellationToken)
                 : LatestReleased(BomKind.NonStandard);
             electricalVersion = targetKind == BomKind.Electrical
-                ? await ResolveBomVersionForReleaseAsync(projectId, BomKind.Electrical, targetItems, actor, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, settings.ValidationRules, cancellationToken)
+                ? await ResolveBomVersionForReleaseAsync(projectId, BomKind.Electrical, snapshotItems, actor, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, settings.ValidationRules, cancellationToken)
                 : LatestReleased(BomKind.Electrical);
         }
 
@@ -2548,7 +2587,7 @@ public sealed class PdmWorkflowService(
             if (!BomReady(targetKind, selectedItems, settings.ValidationRules))
                 throw new PdmRuleException($"{BomKindLabel(targetKind)}BOM仍有资料不完整的物料，不能保存发布草稿。{MissingBomSummary(targetKind, selectedItems, settings.ValidationRules)}");
             var targetVersion = await ResolveBomVersionForReleaseAsync(
-                package.ProjectId, targetKind, selectedItems, actor,
+                package.ProjectId, targetKind, await SupplementSnapshotItemsAsync(package.ProjectId, package.Scope, targetKind, selectedItems, cancellationToken), actor,
                 package.ChangeNumber ?? package.Number, normalizedReason,
                 package.EffectiveSerialFrom ?? project.SerialNumbers.FirstOrDefault() ?? "未指定",
                 package.EffectiveSerialTo, settings.ValidationRules, cancellationToken);
@@ -4626,7 +4665,8 @@ public sealed class PdmWorkflowService(
                 ? await repository.FindBomVersionAsync(package.ProjectId, targetVersionId.Value, cancellationToken)
                 : null;
             if (targetVersion is null) throw new PdmConflictException($"发布包绑定的{BomKindLabel(targetKind)}BOM版本不存在。");
-            if (!BomSnapshotsEqual(targetVersion.Items, targetItems))
+            if (!BomSnapshotsEqual(targetVersion.Items, WithCurrentCompleteness(
+                await SupplementSnapshotItemsAsync(package.ProjectId, package.Scope, targetKind, targetItems, cancellationToken), targetKind, validationRules)))
                 throw new PdmConflictException($"{BomKindLabel(targetKind)}BOM在发布包创建后已变化，请撤销该草稿并重新创建。");
             versionsForReview.Add(targetVersion);
         }
@@ -4636,7 +4676,8 @@ public sealed class PdmWorkflowService(
                 package.NonStandardBomSnapshot,
                 cancellationToken,
                 package.Scope != ReleaseScope.NonStandardLongLead,
-                await CurrentNonStandardReleaseItemsAsync(package, cancellationToken));
+                await CurrentNonStandardReleaseItemsAsync(package, cancellationToken),
+                package.Scope == ReleaseScope.NonStandardSupplement ? package.SelectedBomItemIds : null);
         if (materialRelationReleaseGuard is not null)
             await materialRelationReleaseGuard.EnsureCompleteAsync(package.ProjectId, cancellationToken);
         await publisher.PrepareAsync(package, project, cancellationToken);
@@ -4776,7 +4817,8 @@ public sealed class PdmWorkflowService(
                 pendingPackage.NonStandardBomSnapshot,
                 cancellationToken,
                 pendingPackage.Scope != ReleaseScope.NonStandardLongLead,
-                await CurrentNonStandardReleaseItemsAsync(pendingPackage, cancellationToken));
+                await CurrentNonStandardReleaseItemsAsync(pendingPackage, cancellationToken),
+                pendingPackage.Scope == ReleaseScope.NonStandardSupplement ? pendingPackage.SelectedBomItemIds : null);
         var package = await repository.DecideApprovalAsync(taskId, actor, decision, comment, emergencySubstitute, emergencyReason, cancellationToken);
         await AuditAsync(actor, emergencySubstitute ? "approval.emergency-substitute" : "approval.decide", nameof(ApprovalTask), taskId.ToString(), emergencySubstitute ? $"{decision}；原因：{emergencyReason}" : decision.ToString(), cancellationToken);
 
@@ -6242,7 +6284,8 @@ public sealed class PdmWorkflowService(
             .ToArray();
         var validationRules = (await repository.GetSystemSettingsAsync(cancellationToken)).ValidationRules;
         return WithCurrentCompleteness(
-            SelectScopedReleaseItems(BomKind.NonStandard, items, package.SelectedBomItemIds),
+            await SupplementSnapshotItemsAsync(package.ProjectId, package.Scope, BomKind.NonStandard,
+                SelectScopedReleaseItems(BomKind.NonStandard, items, package.SelectedBomItemIds), cancellationToken),
             BomKind.NonStandard,
             validationRules);
     }
@@ -6259,13 +6302,15 @@ public sealed class PdmWorkflowService(
         IReadOnlyList<BomItem> snapshot,
         CancellationToken cancellationToken,
         bool requireExactQuantities = true,
-        IReadOnlyList<BomItem>? currentItems = null)
+        IReadOnlyList<BomItem>? currentItems = null,
+        IReadOnlyList<Guid>? selectedBomItemIds = null)
     {
         // 草稿固化的快照与当前BOM不一致时，先提示刷新草稿：否则会误报成“BOM数量与设计树不一致”。
         if (currentItems is not null && !BomSnapshotsEqual(snapshot, currentItems))
             throw new PdmConflictException("非标件BOM在发布草稿创建后已变化，请删除该草稿并重新发起发布。");
         var effectiveItems = snapshot
             .Where(item => !item.IsManuallyExcluded && !item.IsPendingRemoval && !item.DeletedAt.HasValue)
+            .Where(item => selectedBomItemIds is null || selectedBomItemIds.Contains(item.Id))
             .ToArray();
         var withoutDrawingSource = effectiveItems.Where(item => !item.SourceDocumentId.HasValue).Select(item => item.DrawingNumber).ToArray();
         if (withoutDrawingSource.Length > 0)
@@ -6711,6 +6756,16 @@ public sealed class PdmWorkflowService(
     {
         var items = (await repository.GetBomAsync(projectId, kind, cancellationToken)).Where(IsPublishableBomItem).ToArray();
         await repository.SaveBomDraftAsync(projectId, kind, items, actor, cancellationToken);
+    }
+
+    private async Task<BomItem[]> SupplementSnapshotItemsAsync(Guid projectId, ReleaseScope scope, BomKind kind,
+        IReadOnlyList<BomItem> selected, CancellationToken cancellationToken)
+    {
+        if (!IsSupplementScope(scope)) return selected.ToArray();
+        var current = await repository.GetBomAsync(projectId, kind, cancellationToken);
+        var previous = (await repository.ListBomVersionsAsync(projectId, kind, cancellationToken))
+            .FirstOrDefault(version => version.State == BomVersionState.Released);
+        return BomSupplementSnapshot.Merge(current.Where(item => !item.IsManuallyExcluded && !item.IsPendingRemoval).ToArray(), selected, previous?.Items ?? []);
     }
 
     private async Task<BomVersion> ResolveBomVersionForReleaseAsync(

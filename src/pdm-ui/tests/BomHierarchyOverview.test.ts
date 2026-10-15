@@ -27,6 +27,23 @@ function item(drawingNumber: string, name: string): BomItem {
 }
 
 describe('BomHierarchyOverview', () => {
+  it.each([false, true])('停止无权限项目自动预览，403不继续请求阻塞项（editable=%s）', async editable => {
+    vi.useFakeTimers()
+    const root = project({ id: 'denied', code: 'P-DENIED', name: '只读项目' })
+    api.listBom.mockResolvedValue([])
+    api.listBomVersions.mockResolvedValue([])
+    api.listProjectBomHeaders.mockResolvedValue([{ projectId: root.id, kind: 'Master', materialId: 'm', materialCode: 'CODE', rowVersion: 1 }])
+    api.previewProjectBomU9Sync.mockRejectedValue(Object.assign(new Error('无权限'), { status: 403 }))
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token', editable } })
+    try {
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(90_000)
+      await flushPromises()
+      expect(api.previewProjectBomU9Sync).toHaveBeenCalledTimes(editable ? 1 : 0)
+      expect(api.listU9SyncBlockers).not.toHaveBeenCalled()
+      if (editable) expect(wrapper.text()).toContain('无检查权限')
+    } finally { wrapper.unmount(); vi.useRealTimers() }
+  })
   beforeEach(() => {
     Object.values(api).forEach(mock => mock.mockReset())
     api.listReleasePackages.mockResolvedValue([])
@@ -300,7 +317,8 @@ describe('BomHierarchyOverview', () => {
     expect(button.attributes('disabled')).toBeUndefined()
     expect(api.listBomVersions).toHaveBeenCalledTimes(2)
     expect(api.listProjectBomHeaders).toHaveBeenCalledTimes(2)
-    expect(api.previewProjectBomU9Sync.mock.calls.length).toBeGreaterThan(previews)
+    expect(api.previewProjectBomU9Sync.mock.calls.length).toBe(previews)
+    expect(previews).toBe(0)
     expect(api.executeProjectBomU9Sync).not.toHaveBeenCalled()
     expect(wrapper.findAll('tbody tr')[1].findAll('td')[4].text()).toBe('1')
     api.listBom.mockRejectedValueOnce(new Error('刷新失败测试'))

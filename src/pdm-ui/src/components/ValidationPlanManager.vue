@@ -970,8 +970,8 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-plan__toolbar,.validation-plan__meta,.validation-plan__footer { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .validation-plan__toolbar h2 { display:flex; align-items:center; gap:7px; margin:0; font-size:var(--pdm-font-size-heading); }
 .validation-plan__toolbar p { margin:4px 0 0; color:var(--pdm-muted); font-size:12px; }
-.validation-plan__actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.validation-plan__actions button,.validation-plan__toolbar button { display:inline-flex; align-items:center; gap:5px; }.validation-plan__toolbar .validation-plan__actions>button { box-sizing:border-box; justify-content:center; width:auto; height:var(--pdm-button-large); min-height:var(--pdm-button-large); padding:0; white-space:nowrap; }
+.validation-plan__actions { display:flex; align-items:center; gap:5px; flex-wrap:wrap; }
+.validation-plan__actions button,.validation-plan__toolbar button { display:inline-flex; align-items:center; gap:5px; }.validation-plan__toolbar .validation-plan__actions>button { box-sizing:border-box; justify-content:center; width:80px; min-width:80px; max-width:80px; height:30px; min-height:30px; flex:0 0 80px; padding:0; margin:0; gap:4px; font-size:12px; white-space:nowrap; }
 .validation-plan__upload-action:disabled { border-color:#cbd2dc; background:#eef1f4; color:var(--pdm-muted); cursor:not-allowed; opacity:1; }
 .validation-plan__back { display:grid!important; place-items:center; width:var(--pdm-symbol-compact); height:var(--pdm-symbol-compact); padding:0; border:1px solid var(--pdm-border); border-radius:5px; background:var(--pdm-surface); color:var(--pdm-text); }
 .validation-plan__meta { justify-content:flex-start; padding:10px 12px; border:1px solid var(--pdm-border); border-radius:8px; background:var(--pdm-soft); }

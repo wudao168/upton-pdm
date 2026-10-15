@@ -7,6 +7,7 @@ import { downloadProcurementWorkbook } from '../src/procurementWorkbook'
 vi.mock('../src/procurementWorkbook', () => ({ downloadProcurementWorkbook: vi.fn() }))
 
 const api = vi.hoisted(() => ({
+  getProjectExportMetadata: vi.fn(),
   getProjectProcurementTracking: vi.fn(),
   listBom: vi.fn(),
   refreshProjectProcurementTracking: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock('../src/api', () => api)
 describe('ProcurementTracking', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    api.getProjectExportMetadata.mockResolvedValue({title:'清单',company:'公司',scope:'当前项目',versionLabel:'版本',version:'V1',exportedAt:'2026-10-14T09:00:00+08:00',exportedBy:'工程师',fields:[]})
     window.localStorage.clear()
     api.listMaterialInventory.mockReset().mockResolvedValue({ items: [], total: 0, lastSuccessfulRefreshAt: '2026-09-08T01:00:00Z' })
     api.listBom.mockReset().mockResolvedValue([])

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { getProjectExportMetadata } from '../api'
 import { createClientUuid } from '../clientId'
 import { Calendar, ChevronDown, ChevronRight, Download, History, ListCollapse, ListTree, PanelLeftClose, PanelLeftOpen, Plus, RotateCw as RefreshCw, Settings, Trash2 } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
@@ -468,14 +469,19 @@ function openExportDialog() {
   exportDialogOpen.value = true
 }
 
-function exportPlans(format: 'excel' | 'pdf') {
+async function exportPlans(format: 'excel' | 'pdf') {
   if (!selectedExportItems.value.length) return ElMessage.warning(exportScope.value === 'root' ? '主项目尚未建立可导出的计划' : '请至少选择一个子项目')
+  const items = [...selectedExportItems.value], rootCode = rootProject.value.code
+  const popup = format === 'pdf' ? window.open('', '_blank') : null
   try {
-    if (format === 'excel') exportProjectPlansExcel(rootProject.value.code, selectedExportItems.value)
-    else exportProjectPlansPdf(rootProject.value.code, selectedExportItems.value)
+    if (format === 'pdf' && !popup) throw new Error('浏览器已拦截打印窗口，请允许弹出窗口后重试。')
+    const exported = await Promise.all(items.map(async item => ({...item,metadata:{...item.metadata,exportHeader:await getProjectExportMetadata(props.projects.find(project=>project.code===item.projectCode)!.id,props.token)}})))
+    if (format === 'excel') exportProjectPlansExcel(rootCode, exported)
+    else exportProjectPlansPdf(rootCode, exported, popup!)
     exportDialogOpen.value = false
     ElMessage.success(format === 'excel' ? '项目计划 Excel 已导出' : '已打开 PDF 打印页，请选择“另存为 PDF”')
   } catch (reason) {
+    popup?.close()
     ElMessage.error(reason instanceof Error ? reason.message : '项目计划导出失败')
   }
 }

@@ -18,9 +18,9 @@ it('shows a Chinese disabled message without requesting identity or project cont
   expect(wrapper.find('form').exists()).toBe(false)
   expect(fetchMock).toHaveBeenCalledTimes(1)
 })
-it('uses a submit-only guest session, records DingTalk name, and does not read the OPL list', async () => {
+it.each(['ios', 'pc'])('uses a submit-only guest session on %s without requiring a DingTalk user agent', async (platform) => {
   vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone WebView')
-  vi.stubGlobal('dd', { env: { platform: 'ios' }, ready: (callback: () => void) => callback(), runtime: { permission: { requestAuthCode: ({ onSuccess }: { onSuccess: (result: { code: string }) => void }) => onSuccess({ code: 'verified-code' }) } } })
+  vi.stubGlobal('dd', { env: { platform }, ready: (callback: () => void) => callback(), runtime: { permission: { requestAuthCode: ({ onSuccess }: { onSuccess: (result: { code: string }) => void }) => onSuccess({ code: 'verified-code' }) } } })
   const append = document.head.appendChild.bind(document.head)
   vi.spyOn(document.head, 'appendChild').mockImplementation((node) => { const result = append(node); if (node instanceof HTMLScriptElement) queueMicrotask(() => node.dispatchEvent(new Event('load'))); return result })
   const view = { rootProject: { id: projectId, code: 'P700014', name: '测试项目' }, people: [], subprojects: [], rows: [] }
@@ -28,6 +28,7 @@ it('uses a submit-only guest session, records DingTalk name, and does not read t
     .mockResolvedValueOnce(json({ guestToken: 'verified-token', displayName: '张三' }))
     .mockResolvedValueOnce(json([{ ...view.rootProject, subprojects: [] }])).mockResolvedValueOnce(json([])).mockResolvedValueOnce(json({ number: 9, submittedBy: '张三', notificationSent: false }))
   wrapper = mount(DingTalkOplPage); await flushPromises()
+  expect(document.head.querySelector('script')?.src).toBe('https://g.alicdn.com/dingding/dingtalk-jsapi/3.0.25/dingtalk.open.js')
   expect(wrapper.text()).toContain('提交人：张三')
   const loginBody = JSON.parse(fetchMock.mock.calls[1]![1].body)
   expect(loginBody).toEqual({ projectId, companyId: null, groupId: null, code: 'verified-code' })

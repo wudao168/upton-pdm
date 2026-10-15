@@ -499,11 +499,29 @@ export function usePdmWorkspace() {
     window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
   }
 
+  let pendingVersionRestore: { documentId: string; versionId: string; changeNote: string; operationId: string; expectedVersionId: string; checkoutSessionId?: string; token: string } | undefined
   async function restoreVersion(versionId: string, changeNote: string) {
     const documentId = selectedDocumentId.value
     if (!documentId) throw new Error('该引用尚未登记到PLM。')
-    await restoreDocumentVersion(documentId, versionId, changeNote, accessToken)
+    if (!pendingVersionRestore || pendingVersionRestore.documentId !== documentId
+      || pendingVersionRestore.versionId !== versionId || pendingVersionRestore.changeNote !== changeNote || pendingVersionRestore.token !== accessToken) {
+      const expectedVersionId = versions.value[0]?.id
+      if (!expectedVersionId) throw new Error('无法确认当前最新版本，请刷新版本记录后重试。')
+      const bytes = new Uint8Array(16)
+      globalThis.crypto.getRandomValues(bytes)
+      const operationId = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+      pendingVersionRestore = { documentId, versionId, changeNote, operationId, expectedVersionId, token: accessToken,
+        checkoutSessionId: managedDocuments.value.find(document => document.id === documentId)?.checkoutSessionId }
+    }
+    try {
+      const { operationId, expectedVersionId, checkoutSessionId } = pendingVersionRestore
+      await restoreDocumentVersion(documentId, versionId, { changeNote, operationId, expectedVersionId, checkoutSessionId }, accessToken)
+    } catch (error) {
+      if (error instanceof PdmApiError && error.status >= 400 && error.status < 500) pendingVersionRestore = undefined
+      throw error
+    }
     await Promise.all([reload(), openVersionDrawer(undefined, undefined)])
+    pendingVersionRestore = undefined
   }
 
   function openDocument(node = selectedNode.value, mode: SolidWorksOpenMode = 'LatestReadOnly', versionId?: string) {

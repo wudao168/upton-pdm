@@ -38,6 +38,18 @@ public sealed class ValidationPlanFileArchiveTests
             var version = Assert.Single(await files.ListVersionsAsync(workbook.Id, default));
             Assert.Contains("_R002_", workbook.FileName);
             Assert.True(File.Exists(Path.Combine(version.StorageRoot, version.StorageRelativePath)));
+            using (var zip = System.IO.Compression.ZipFile.OpenRead(Path.Combine(version.StorageRoot, version.StorageRelativePath)))
+            using (var source = zip.GetEntry("xl/worksheets/sheet1.xml")!.Open())
+            {
+                var xml = System.Xml.Linq.XDocument.Load(source).ToString();
+                Assert.Contains("主项目号", xml);
+                Assert.Contains("编制：编制人", xml);
+                Assert.Contains("审核：审核人", xml);
+                Assert.Contains("批准：批准人", xml);
+                Assert.Contains("验证安全门", xml);
+                Assert.Contains("会签", xml);
+                Assert.NotNull(zip.GetEntry("xl/media/uplm-company-logo.png"));
+            }
             Assert.True((File.GetAttributes(Path.Combine(version.StorageRoot, version.StorageRelativePath)) & FileAttributes.ReadOnly) != 0);
         }
         finally

@@ -23,7 +23,9 @@ public static class MaterialImportWorkbook
         var rows = document.Descendants(ns + "row").ToArray();
         if (rows.Length < 2) throw new PdmRuleException("Excel没有可导入的数据行。");
 
-        var headers = ReadCells(rows[0], ns, sharedStrings);
+        var headerIndex = Array.FindIndex(rows, row => RequiredHeaders.All(header => FindHeaderColumn(ReadCells(row, ns, sharedStrings), header) >= 0));
+        if (headerIndex < 0) throw new PdmRuleException($"Excel必须包含列：{string.Join("、", RequiredHeaders)}。");
+        var headers = ReadCells(rows[headerIndex], ns, sharedStrings);
         var columns = RequiredHeaders.Concat(OptionalHeaders).ToDictionary(
             header => header,
             header => FindHeaderColumn(headers, header),
@@ -32,7 +34,7 @@ public static class MaterialImportWorkbook
         if (missing.Length > 0) throw new PdmRuleException($"Excel必须包含列：{string.Join("、", missing)}。");
 
         var result = new List<MaterialImportRowCommand>();
-        foreach (var row in rows.Skip(1))
+        foreach (var row in rows.Skip(headerIndex + 1))
         {
             var cells = ReadCells(row, ns, sharedStrings);
             if (cells.Values.All(string.IsNullOrWhiteSpace)) continue;

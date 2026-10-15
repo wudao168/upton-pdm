@@ -11,6 +11,24 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
     private readonly PdmStorageOptions settings = options.Value;
     private readonly JsonSerializerOptions jsonOptions = new(JsonSerializerDefaults.Web);
 
+    public async Task<UploadSession> StartArchiveUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256,
+        string owner, ArchiveUploadContext context, CancellationToken cancellationToken)
+    {
+        var document = await repository.FindDocumentAsync(context.DocumentId, cancellationToken) ?? throw new PdmNotFoundException("待上传图档不存在。");
+        if (document.ProjectId != projectId || document.CheckoutSessionId != context.CheckoutSessionId
+            || !string.Equals(document.CheckedOutBy, owner, StringComparison.OrdinalIgnoreCase))
+            throw new PdmConflictException("待上传图档不属于当前项目或编辑会话。");
+        var pending = await repository.FindPendingArchiveDocumentAsync(document.Id, cancellationToken);
+        if (pending is not null && pending.BatchId != context.BatchId) throw new PdmConflictException("新图档不属于本次存档批次。");
+        if (await repository.FindArchiveBatchAsync(context.BatchId, cancellationToken) is not null)
+            throw new PdmConflictException("该批次已经完成，请刷新存档结果。");
+        var session = await StartUploadAsync(projectId, fileName, totalLength, expectedSha256, cancellationToken, owner);
+        session = session with { ArchiveContext = context, TargetRelativePath = Path.Combine(".versions", document.Id.ToString("N"), session.Id.ToString("N"), session.FileName) };
+        await repository.RegisterArchiveUploadAsync(session, cancellationToken);
+        await WriteMetadataAsync(session, cancellationToken);
+        return session;
+    }
+
     public async Task<UploadSession> StartUploadAsync(Guid projectId, string fileName, long totalLength, string expectedSha256, CancellationToken cancellationToken, string? owner = null)
     {
         if (totalLength <= 0)
@@ -24,7 +42,8 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         }
 
         var safeName = Path.GetFileName(fileName);
-        if (!string.Equals(fileName, safeName, StringComparison.Ordinal) || string.IsNullOrWhiteSpace(safeName))
+        if (!string.Equals(fileName, safeName, StringComparison.Ordinal) || string.IsNullOrWhiteSpace(safeName)
+            || safeName.Length > 260 || safeName is "." or ".." || safeName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
         {
             throw new PdmRuleException("文件名不能包含路径。 ");
         }
@@ -55,6 +74,12 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         ReadMetadataAsync(sessionId, cancellationToken);
 
     public async Task<UploadSession> WriteChunkAsync(Guid sessionId, int chunkIndex, Stream content, CancellationToken cancellationToken)
+    {
+        using var lease = LockUpload(sessionId);
+        return await WriteChunkCoreAsync(sessionId, chunkIndex, content, cancellationToken);
+    }
+
+    private async Task<UploadSession> WriteChunkCoreAsync(Guid sessionId, int chunkIndex, Stream content, CancellationToken cancellationToken)
     {
         if (chunkIndex < 0)
         {
@@ -94,6 +119,12 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
 
     public async Task<StoredFile> CompleteUploadAsync(Guid sessionId, string relativeTargetPath, CancellationToken cancellationToken)
     {
+        using var lease = LockUpload(sessionId);
+        return await CompleteUploadCoreAsync(sessionId, relativeTargetPath, cancellationToken);
+    }
+
+    private async Task<StoredFile> CompleteUploadCoreAsync(Guid sessionId, string relativeTargetPath, CancellationToken cancellationToken)
+    {
         var receipt = await ReadCompletionAsync(sessionId, cancellationToken);
         if (receipt is not null)
         {
@@ -115,6 +146,9 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         var session = await ReadMetadataAsync(sessionId, cancellationToken);
         var project = await repository.FindProjectAsync(session.ProjectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。 ");
+        if (session.ExpiresAt <= timeProvider.GetUtcNow()) throw new PdmConflictException("上传会话已过期，请重新存档。");
+        if (session.TargetRelativePath is not null && !string.Equals(session.TargetRelativePath.Replace('\\', '/'), relativeTargetPath.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase))
+            throw new PdmConflictException("整批上传目标与服务器分配的位置不一致，已停止写入。");
         if (session.ReceivedLength != session.TotalLength)
         {
             throw new PdmConflictException($"上传尚未完成：{session.ReceivedLength}/{session.TotalLength}字节。 ");
@@ -369,6 +403,70 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
     }
 
     private string GetSessionDirectory(Guid sessionId) => Path.Combine(StorageLocationPolicy.Normalize(settings.UploadTempRoot), sessionId.ToString("N"));
+
+    private FileStream LockUpload(Guid sessionId)
+    {
+        var directory = Path.Combine(StorageLocationPolicy.Normalize(settings.UploadTempRoot), "locks");
+        Directory.CreateDirectory(directory);
+        return new FileStream(Path.Combine(directory, sessionId.ToString("N") + ".lock"), FileMode.OpenOrCreate,
+            FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
+    }
+
+    public async Task CleanupExpiredArchiveUploadsAsync(CancellationToken cancellationToken)
+    {
+        foreach (var item in await repository.ClaimExpiredArchiveUploadsAsync(50, cancellationToken))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            FileStream lease;
+            try { lease = LockUpload(item.SessionId); }
+            catch (IOException) { continue; } // An in-flight upload owns this file. Retry next cycle.
+            using (lease)
+            {
+                var project = await repository.FindProjectAsync(item.ProjectId, cancellationToken);
+                if (project is null) continue; // No trusted vault root; leave the data for an administrator.
+                var segments = item.File.RelativePath.Replace('\\', '/').Split('/');
+                if (segments.Length != 4 || segments[0] != ".versions" || !Guid.TryParseExact(segments[1], "N", out _)
+                    || segments[2] != item.SessionId.ToString("N") || Path.GetFileName(segments[3]) != segments[3])
+                    throw new PdmRuleException("暂存回收记录的路径无效，已保留文件。");
+                var path = StorageLocationPolicy.ResolveUnder(project.VaultLocation, item.File.RelativePath);
+                RequireOrdinaryPath(project.VaultLocation, path);
+                if (File.Exists(path))
+                {
+                    if (new FileInfo(path).Length != item.File.Length) throw new PdmConflictException("暂存文件大小已变化，已停止自动回收。");
+                    await VerifyFileHashAsync(path, item.File, cancellationToken);
+                    File.SetAttributes(path, File.GetAttributes(path) & ~FileAttributes.ReadOnly);
+                    File.Delete(path);
+                }
+                var sessionDirectory = GetSessionDirectory(item.SessionId);
+                RequireOrdinaryPath(settings.UploadTempRoot, Path.Combine(sessionDirectory, "session.json"));
+                if (Directory.Exists(sessionDirectory))
+                {
+                    // A session contains only its own metadata/chunks. Never recursively traverse links or unknown subdirectories.
+                    if (Directory.EnumerateDirectories(sessionDirectory).Any()) throw new PdmRuleException("暂存目录含有未知子目录，已停止自动回收。");
+                    foreach (var file in Directory.EnumerateFiles(sessionDirectory))
+                    {
+                        RequireOrdinaryPath(settings.UploadTempRoot, file);
+                        File.Delete(file);
+                    }
+                    Directory.Delete(sessionDirectory);
+                }
+                File.Delete(CompletionPath(item.SessionId));
+                var versionDirectory = Path.GetDirectoryName(path)!;
+                if (Directory.Exists(versionDirectory) && !Directory.EnumerateFileSystemEntries(versionDirectory).Any()) Directory.Delete(versionDirectory);
+                await repository.CompleteArchiveUploadCleanupAsync(item.SessionId, cancellationToken);
+            }
+        }
+    }
+
+    private static void RequireOrdinaryPath(string root, string path)
+    {
+        var normalizedRoot = StorageLocationPolicy.Normalize(root);
+        if (!path.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            throw new PdmRuleException("暂存回收路径超出了指定目录。");
+        for (var current = path; current.Length >= normalizedRoot.Length; current = Path.GetDirectoryName(current) ?? "")
+            if ((File.Exists(current) || Directory.Exists(current)) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                throw new PdmRuleException("暂存路径包含目录链接，已停止自动回收。");
+    }
 
     private async Task<UploadSession> ReadMetadataAsync(Guid sessionId, CancellationToken cancellationToken)
     {

@@ -34,6 +34,7 @@ public static class ClientDiagnostics
     private static string lastRecord = "";
     private static DateTime lastRecordAt;
     private static string owner;
+    private static readonly Dictionary<string, DateTime> RecentErrors = new Dictionary<string, DateTime>();
 
     public static void Initialize(string source, string build)
     {
@@ -128,7 +129,14 @@ public static class ClientDiagnostics
                 if (timer == null) return;
                 kind = kind == "error" ? "error" : "runtime";
                 var safe = ClientLogRedaction.Clean(message);
-                var signature = kind + "|" + action + "|" + safe;
+                var signature = scope + "|" + operationId + "|" + kind + "|" + action + "|" + safe;
+                if (kind == "error")
+                {
+                    if (RecentErrors.TryGetValue(signature, out var recordedAt) && DateTime.UtcNow - recordedAt < TimeSpan.FromMinutes(1)) return;
+                    foreach (var expired in RecentErrors.Where(pair => DateTime.UtcNow - pair.Value >= TimeSpan.FromMinutes(1)).Select(pair => pair.Key).ToArray()) RecentErrors.Remove(expired);
+                    if (RecentErrors.Count >= 1024) RecentErrors.Clear();
+                    RecentErrors[signature] = DateTime.UtcNow;
+                }
                 if (signature == lastRecord && DateTime.UtcNow - lastRecordAt < TimeSpan.FromSeconds(5)) return;
                 lastRecord = signature; lastRecordAt = DateTime.UtcNow;
                 var entry = new Dictionary<string, object>
@@ -175,16 +183,31 @@ public static class ClientDiagnostics
                 object[] entries;
                 lock (Sync)
                 {
+                    var invalidLines = false;
                     entries = File.ReadAllLines(path).Where(line => !string.IsNullOrWhiteSpace(line)).Select(line =>
                     {
-                        try { return Json.DeserializeObject(line); }
-                        catch (ArgumentException) { return null; } // A crash can leave a partial final line.
+                        try
+                        {
+                            var entry = Json.DeserializeObject(line) as Dictionary<string, object>;
+                            if (entry == null || !entry.TryGetValue("time", out var time)
+                                || !DateTimeOffset.TryParse(Convert.ToString(time), out var timestamp)
+                                || timestamp < DateTimeOffset.UtcNow.AddDays(-8) || timestamp > DateTimeOffset.UtcNow.AddDays(1)
+                                || !entry.TryGetValue("kind", out var kind)
+                                || !Path.GetFileName(path).StartsWith(Convert.ToString(kind) + "-", StringComparison.Ordinal))
+                            { invalidLines = true; return null; }
+                            foreach (var key in entry.Keys.ToArray())
+                                if (entry[key] is string value) entry[key] = ClientLogRedaction.Clean(value);
+                            return entry;
+                        }
+                        catch (Exception error) when (error is ArgumentException || error is InvalidOperationException)
+                        { invalidLines = true; return null; } // A crash can leave a partial final line.
                     }).Where(entry => entry != null).ToArray();
+                    if (invalidLines && !File.Exists(path + ".invalid")) File.Copy(path, path + ".invalid");
                 }
                 var id = Path.GetFileNameWithoutExtension(path).Split('-').Last();
                 if (entries.Length == 0)
                 {
-                    lock (Sync) File.Move(path, path + ".invalid");
+                    lock (Sync) { if (!File.Exists(path + ".invalid")) File.Move(path, path + ".invalid"); else File.Delete(path); }
                     Record("error", "日志恢复", "发现崩溃留下的不完整日志分片，已保留本机副本，其余日志继续上传。");
                     continue;
                 }
@@ -201,8 +224,27 @@ public static class ClientDiagnostics
                         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/gzip");
                         using (var response = await Http.SendAsync(request).ConfigureAwait(false))
                         {
+                            var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized || response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                            {
+                                lock (Sync) if (token == credential) token = "";
+                                return; // Wait for a fresh login, retaining every pending file.
+                            }
+                            if ((int)response.StatusCode == 429)
+                            {
+                                var delay = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(60);
+                                lock (Sync) retryAfter = DateTime.UtcNow.AddSeconds(Math.Max(10, Math.Min(3600, delay.TotalSeconds)));
+                                return;
+                            }
+                            if ((int)response.StatusCode == 413 || response.StatusCode == System.Net.HttpStatusCode.BadRequest
+                                && (body.Contains("格式") || body.Contains("分类或发生时间") || body.Contains("内容不能为空")))
+                            {
+                                lock (Sync) { if (!File.Exists(path + ".invalid")) File.Move(path, path + ".invalid"); else File.Delete(path); }
+                                Record("error", "日志分片隔离", "服务器拒绝了无效日志分片，已保留本机副本，其余日志继续上传。");
+                                continue;
+                            }
                             response.EnsureSuccessStatusCode();
-                            var receipt = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(await response.Content.ReadAsStringAsync().ConfigureAwait(false));
+                            var receipt = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(body);
                             if (!receipt.ContainsKey("batchId") || !string.Equals(Convert.ToString(receipt["batchId"]).Replace("-", ""), id, StringComparison.OrdinalIgnoreCase))
                                 throw new IOException("服务器未返回有效日志回执");
                         }

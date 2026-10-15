@@ -4,6 +4,64 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { budgetCategories, calculateBudgetRow, assessmentItemTotal, assessmentSum } from '../../src/projectBudget'
 
+test('archive states agree in structure and 2D list over HTTP', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  const documents = [
+    { id: 'doc-root', projectId, drawingNumber: 'REAL-ASM-001', name: '真实总装配', fileName: 'REAL-ASM-001.SLDASM', kind: 0, revision: { display: 'W2' }, storedVersionCount: 2 },
+    { id: 'doc-drawing', projectId, drawingNumber: 'REAL-ASM-001', name: '真实总装工程图', fileName: 'REAL-ASM-001.SLDDRW', kind: 2, revision: { display: 'W1' }, storedVersionCount: 0 },
+  ]
+  await page.route('**/api/projects/*/documents', route => route.fulfill({ json: documents }))
+  await page.route('**/api/projects/*/folder-documents', route => route.fulfill({ json: documents }))
+  await page.route('**/api/projects/*/reference-tree', route => route.fulfill({ json: {
+    documentId: 'doc-root', nodeId: 'root', instancePath: 'root', fileName: 'REAL-ASM-001.SLDASM', displayName: '真实总装配', kind: 0, quantity: 1, children: [],
+  } }))
+  await page.goto('/')
+  expect(new URL(page.url()).protocol).toBe('http:')
+  await expect(page).toHaveTitle(/PLM|UPLM|PDM/)
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '图档', exact: true }).click()
+  const tree = page.getByLabel('项目设计树')
+  await expect(tree).toContainText('真实总装工程图')
+  await expect(tree).toContainText('未存档')
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  await page.screenshot({ path: join(tmpdir(), 'pdm-archive-state-structure.png'), fullPage: false })
+  await page.getByRole('tab', { name: /^2D/ }).click()
+  await expect(tree.locator('.pdm-drawing-list')).toContainText('未存档')
+  await expect(tree.locator('.pdm-drawing-list')).not.toContainText('W1')
+  await page.screenshot({ path: join(tmpdir(), 'pdm-archive-state-2d.png'), fullPage: false })
+  expect(errors).toEqual([])
+})
+
+test('version restore retries reuse operation and baseline over HTTP', async ({ page }) => {
+  const requests: Record<string, unknown>[] = []
+  await page.route('**/api/documents/doc-root/versions', route => route.fulfill({ json: [...versions].reverse() }))
+  await page.route('**/api/documents/doc-root/versions/*/restore', async route => {
+    requests.push(route.request().postDataJSON())
+    await route.fulfill({ status: requests.length === 1 ? 503 : 200, json: requests.length === 1 ? { message: '存档结果尚未确认，请重试核对。' } : {} })
+  })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '图档', exact: true }).click()
+  await page.locator('.pdm-tree-row').first().click({ button: 'right' })
+  await page.getByRole('menuitem', { name: /查看\/对比历史版本/ }).click()
+  const restore = page.getByRole('button', { name: '以左版为基线创建新工作版' })
+  await restore.click()
+  await expect(page.getByText('存档结果尚未确认，请重试核对。', { exact: true })).toBeVisible()
+  await restore.click()
+  await expect.poll(() => requests.length).toBe(2)
+  expect(requests[0]).toEqual(requests[1])
+  expect(requests[0]?.operationId).toMatch(/^[a-f0-9]{32}$/)
+  expect(requests[0]?.expectedVersionId).toBe('version-w2')
+  await expect(page.getByText('已从历史版本创建新的工作版本，当前文件未被覆盖', { exact: true })).toBeVisible()
+})
+
 test('client diagnostic logs filter and download with Chinese status', async ({ page }) => {
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
   let filtered = false
@@ -643,7 +701,7 @@ const referenceChildren = Array.from({ length: 40 }, (_, index) => ({
 test.beforeEach(async ({ page }) => {
   materialCodeApplications = []
   let currentUsername = 'engineer'
-  await page.route(/^http:\/\/(?:127\.0\.0\.1:\d+|192\.168\.2\.8:5173)\/(?:api(?:\/.*)?|health)(?:\?.*)?$/, async (route) => {
+  await page.route(/^http:\/\/(?:127\.0\.0\.1:\d+|192\.168\.2\.8:\d+)\/(?:api(?:\/.*)?|health)(?:\?.*)?$/, async (route) => {
     const path = new URL(route.request().url()).pathname
     const fulfill = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
     if (path === '/health') return fulfill({ status: 'ok' })
@@ -3973,8 +4031,8 @@ test('empty electrical release never displays standard BOM items', async ({ page
 })
 
 test('nonstandard supplement selects only two approved drawing updates against instance baseline', async ({ page }, testInfo) => {
-  const items = Array.from({ length: 35 }, (_, i) => ({ id: `current-${i}`, summaryItemIds: [`current-${i}`, `second-${i}`], kind: 'NonStandard', sequence: i + 1, drawingNumber: `NS-${i}`, name: `零件${i}`, specification: `NS-${i}`, sourceDocumentId: `model-${i}`, sourceConfiguration: '默认', quantity: 2, unit: '个', revision: 'W1', isComplete: true }))
-  const baseline = items.flatMap((item, i) => [0, 1].map(n => ({ ...item, id: `old-${i}-${n}`, summaryItemIds: undefined, quantity: 1 })))
+  const items = Array.from({ length: 35 }, (_, i) => ({ id: `current-${i}`, summaryItemIds: [`current-${i}`, `second-${i}`], kind: 'NonStandard', sequence: i + 1, drawingNumber: `NS-${i}`, name: `零件${i}`, specification: `NS-${i}`, sourceDocumentId: `model-${i}`, sourceConfiguration: '默认', quantity: 2, unit: '个', revision: 'A', isComplete: true }))
+  const baseline = items.flatMap((item, i) => [0, 1].map(n => ({ ...item, id: `old-${i}-${n}`, summaryItemIds: undefined, quantity: 1, revision: 'W1' })))
   const project = { id: projectId, code: 'PRJ-REAL-001', name: '非标变更项目', owner: 'admin', vaultLocation: 'D:/PDM', releaseLocation: 'D:/Release', isActive: true, quantity: 1, serialNumbers: [], designers: [], canReadContent: true, effectiveProjectPermissions: ['project.edit', 'bom.nonstandard.edit', 'release.manage'] }
   await page.route('**/api/projects', route => route.fulfill({ json: [project] }))
   await page.route(`**/api/projects/${projectId}`, route => route.fulfill({ json: project }))

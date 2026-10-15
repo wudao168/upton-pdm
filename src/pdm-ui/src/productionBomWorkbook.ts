@@ -1,3 +1,4 @@
+import { formatProjectWorkbook, type ProjectExportMetadata } from './exportFormat'
 import { strToU8, zipSync } from 'three/examples/jsm/libs/fflate.module.js'
 
 const ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
@@ -9,7 +10,7 @@ function column(index: number) {
   return result
 }
 
-export function createProductionBomWorkbook(headers: string[], rows: (string | number)[][]): Blob {
+export function createProductionBomWorkbook(headers: string[], rows: (string | number)[][], metadata?: ProjectExportMetadata): Blob {
   const data = [headers, ...rows].map((values, index) => `<row r="${index + 1}">${values.map((value, i) =>
     typeof value === 'number' ? `<c r="${column(i)}${index + 1}"><v>${value}</v></c>`
       : `<c r="${column(i)}${index + 1}" t="inlineStr"><is><t xml:space="preserve">${xml(value)}</t></is></c>`).join('')}</row>`).join('')
@@ -21,5 +22,5 @@ export function createProductionBomWorkbook(headers: string[], rows: (string | n
     'xl/worksheets/sheet1.xml': `<worksheet xmlns="${ns}"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${headers.map((_, i) => `<col min="${i + 1}" max="${i + 1}" width="20" customWidth="1"/>`).join('')}</cols><sheetData>${data}</sheetData><autoFilter ref="A1:${column(headers.length - 1)}${rows.length + 1}"/></worksheet>`,
   }
   const bytes = zipSync(Object.fromEntries(Object.entries(files).map(([name, value]) => [name, new Uint8Array(strToU8(value))])))
-  return new Blob([new Uint8Array(bytes)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+  return new Blob([new Uint8Array(metadata ? formatProjectWorkbook(bytes, [metadata]) : bytes)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
 }

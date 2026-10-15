@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { projectHeaderHtml, projectHeaderCss } from '../exportFormat'
 import { clearGlobalStatus, ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { h, computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
@@ -1940,6 +1941,7 @@ onMounted(() => {
 
     <el-dialog v-model="importDialogOpen" title="Excel批量新增料品" width="900px" class="material-import-dialog">
       <input ref="importFileInput" class="pdm-visually-hidden" type="file" accept=".xlsx" @change="selectImportFile">
+      <div class="material-import-header" v-html="`<style>${projectHeaderCss}</style>${projectHeaderHtml({title:'料品导入预检',company:'UPTON 阿普顿',scope:'全局料品',versionLabel:'模板版本',version:'V1',exportedAt:new Date().toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}),exportedBy:'—',fields:[{key:'文件',value:importFile?.name || '未选择'},{key:'适用格式',value:'XLSX'},{key:'数据范围',value:'全局料品'},{key:'状态',value:importPreview ? '预检完成，待确认' : '等待预检'}]})}`"></div>
       <div class="material-import-actions">
         <el-button @click="downloadImportTemplate">下载Excel模板</el-button>
         <el-button type="primary" :loading="importPreviewing" @click="importFileInput?.click()">{{ importFile ? '重新选择Excel' : '上传Excel' }}</el-button>

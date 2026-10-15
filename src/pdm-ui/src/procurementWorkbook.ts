@@ -1,3 +1,4 @@
+import { formatProjectWorkbook, type ProjectExportMetadata } from './exportFormat'
 import { strToU8, zipSync } from 'three/examples/jsm/libs/fflate.module.js'
 
 type Cell = string | number
@@ -8,7 +9,7 @@ function xml(value: string) {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
-export function createProcurementWorkbook(headers: string[], rows: Cell[][], sheetName = '采购跟踪'): Uint8Array {
+export function createProcurementWorkbook(headers: string[], rows: Cell[][], sheetName = '采购跟踪', metadata?: ProjectExportMetadata): Uint8Array {
   const sheetRows = [headers, ...rows].map((row, index) => `<row r="${index + 1}">${row.map(value =>
     typeof value === 'number' && Number.isFinite(value)
       ? `<c><v>${value}</v></c>`
@@ -21,11 +22,12 @@ export function createProcurementWorkbook(headers: string[], rows: Cell[][], she
     'xl/_rels/workbook.xml.rels': '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
     'xl/worksheets/sheet1.xml': `<worksheet xmlns="${spreadsheetNamespace}"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${headers.map((_, i) => `<col min="${i + 1}" max="${i + 1}" width="20" customWidth="1"/>`).join('')}</cols><sheetData>${sheetRows}</sheetData></worksheet>`,
   }
-  return zipSync(Object.fromEntries(Object.entries(files).map(([name, content]) => [name, new Uint8Array(strToU8(content))])))
+  const bytes = zipSync(Object.fromEntries(Object.entries(files).map(([name, content]) => [name, new Uint8Array(strToU8(content))])))
+  return metadata ? formatProjectWorkbook(bytes, [metadata]) : bytes
 }
 
-export function downloadProcurementWorkbook(filename: string, headers: string[], rows: Cell[][], sheetName?: string) {
-  const bytes = createProcurementWorkbook(headers, rows, sheetName)
+export function downloadProcurementWorkbook(filename: string, headers: string[], rows: Cell[][], sheetName?: string, metadata?: ProjectExportMetadata) {
+  const bytes = createProcurementWorkbook(headers, rows, sheetName, metadata)
   const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }))
   const link = document.createElement('a')
   link.href = url

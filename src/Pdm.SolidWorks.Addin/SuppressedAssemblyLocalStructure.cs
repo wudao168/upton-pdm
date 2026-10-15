@@ -22,7 +22,9 @@ internal static class SuppressedAssemblyLocalStructure
         var key = node.Kind == CadDocumentKind.Assembly && !string.IsNullOrWhiteSpace(node.FullPath)
             ? Path.GetFullPath(node.FullPath) + "|" + node.Configuration : null;
         if (key != null && !ancestors.Add(key))
-            throw new InvalidOperationException("发现循环装配体引用，已停止存档：" + node.FileName);
+            throw new InvalidOperationException("发现循环装配体引用，已停止存档：" + node.FileName
+                + "；实例：" + node.InstancePath + "；配置：" + node.Configuration + "；路径：" + node.FullPath
+                + "。请核对该实例与上层装配的引用关系后重试。");
         try
         {
             if (!string.IsNullOrWhiteSpace(node.SuppressedLocalStructureSha256) && !CanUse(node))

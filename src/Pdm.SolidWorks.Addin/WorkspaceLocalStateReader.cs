@@ -27,6 +27,8 @@ internal sealed class WorkspaceLocalFileState
     public string Message { get; set; } = string.Empty;
     public bool IsReadOnly { get; set; }
     public DateTime? LastWriteTimeUtc { get; set; }
+    public Guid? BoundVersionId { get; set; }
+    public string VerificationKey { get; set; } = string.Empty;
 }
 
 internal sealed class WorkspaceLocalStateSnapshot
@@ -119,6 +121,23 @@ internal static class WorkspaceLocalStateReader
         return Path.Combine(root, "View", SafeSegment(projectCode));
     }
 
+    internal static bool RecoverArchivedBinding(WorkspaceLocalFileState state, Guid projectId, Guid versionId,
+        string revision, string storedSha256, string sourceSha256)
+    {
+        if (state == null || state.LocalState != "IntegrityMismatch" || versionId == Guid.Empty
+            || (!string.Equals(revision, state.LatestRevision, StringComparison.OrdinalIgnoreCase)
+                && versionId != state.BoundVersionId)
+            || !PdmDocumentIdentityStore.TryReadControlledMetadata(state.FullPath, out var metadata)
+            || metadata.DocumentId != state.DocumentId || metadata.ProjectId != projectId
+            || metadata.VersionId != state.BoundVersionId
+            || (File.GetAttributes(state.FullPath) & FileAttributes.ReadOnly) == 0) return false;
+        var hash = ComputeHash(state.FullPath);
+        if (!string.Equals(hash, storedSha256, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(hash, sourceSha256, StringComparison.OrdinalIgnoreCase)) return false;
+        return PdmDocumentIdentityStore.TryWriteControlledVersion(state.FullPath, state.DocumentId, projectId,
+            versionId, revision, hash, new FileInfo(state.FullPath).Length);
+    }
+
     private static WorkspaceLocalFileState Evaluate(
         WorkspaceDocumentStateRequest document,
         string path,
@@ -127,6 +146,9 @@ internal static class WorkspaceLocalStateReader
     {
         var attributes = File.GetAttributes(path);
         var readOnly = (attributes & FileAttributes.ReadOnly) != 0;
+        var info = new FileInfo(path);
+        var verificationKey = string.Join("|", path, metadata?.VersionId, metadata?.Revision, metadata?.Sha256,
+            metadata?.FileLength, info.Length, info.LastWriteTimeUtc.Ticks, (int)attributes, document.LatestRevision);
         var changed = HasChanged(path, metadata);
         var checkedOutByMe = !string.IsNullOrWhiteSpace(currentUsername)
             && string.Equals(document.CheckedOutBy, currentUsername, StringComparison.OrdinalIgnoreCase);
@@ -135,9 +157,11 @@ internal static class WorkspaceLocalStateReader
                 "本地校验记录不完整，无法确认文件是否已存档。请先备份本地文件，再核对服务器版本。");
         if (changed)
         {
-            return State(document, path, metadata, readOnly ? "IntegrityMismatch" : "Modified",
+            var state = State(document, path, metadata, readOnly ? "IntegrityMismatch" : "Modified",
                 readOnly ? "文件异常" : "待签入", readOnly,
                 readOnly ? "只读缓存内容与获取时不一致，请重新获取最新版。" : "本地内容已修改，确认保存后请提交存档。" );
+            state.VerificationKey = verificationKey;
+            return state;
         }
         if (checkedOutByMe)
         {
@@ -180,6 +204,7 @@ internal static class WorkspaceLocalStateReader
             LocalStateLabel = label,
             LocalRevision = metadata?.Revision ?? string.Empty,
             LatestRevision = document.LatestRevision ?? string.Empty,
+            BoundVersionId = metadata?.VersionId,
             Message = message ?? string.Empty,
             IsReadOnly = readOnly,
             LastWriteTimeUtc = !string.IsNullOrWhiteSpace(path) && File.Exists(path)

@@ -102,7 +102,13 @@ public static class ValidationPlanEndpointExtensions
             var service = qualityAcceptance ? services.GetRequiredKeyedService<ValidationPlanService>("quality") : services.GetRequiredService<ValidationPlanService>();
             var (actor, role) = CurrentUser(context.User);
             var export = await service.PrepareExportAsync(projectId, actor, role, cancellationToken);
-            return Results.File(ValidationPlanWorkbook.Write(export, qualityAcceptance ? "质量验收" : "验证计划"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ValidationPlanWorkbook.FileName(export, qualityAcceptance ? "质量验收" : "验证计划"));
+            var repository = services.GetRequiredService<IPdmRepository>();
+            var mainId = export.Project.RootProjectId ?? export.Project.ParentProjectId ?? export.Project.Id;
+            var main = await repository.FindProjectAsync(mainId, cancellationToken) ?? export.Project;
+            var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
+            var header = ProjectWorkbookMetadata.ForProject(export.Project, main, directory, qualityAcceptance ? "项目质量验收计划" : "项目验证计划", "计划版本", $"R{export.Plan.RevisionNumber:D3}", export.ExportedAt, actor);
+            header = header with { Notes = $"编制：{export.Plan.PreparedBy ?? export.Plan.UpdatedBy}　审核：{export.ReviewPerson}　批准：{export.ApprovalPerson}　验证日期：{export.Plan.ValidationDate?.ToString("yyyy-MM-dd") ?? "待明确"}" };
+            return Results.File(ProjectWorkbookHeader.Apply(ValidationPlanWorkbook.Write(export, qualityAcceptance ? "质量验收" : "验证计划"), header, 4, 5), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ValidationPlanWorkbook.FileName(export, qualityAcceptance ? "质量验收" : "验证计划"));
         });
 
         api.MapPost("/projects/{projectId:guid}/validation-plan/revisions", async (Guid projectId, long expectedRowVersion, HttpContext context, IServiceProvider services, CancellationToken cancellationToken) =>

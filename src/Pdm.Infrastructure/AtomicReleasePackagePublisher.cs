@@ -93,6 +93,20 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "electrical-bom.xlsx"), BomWorkbook.Write(electrical), cancellationToken);
                 break;
         }
+        var main = repository is null ? project : await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId ?? project.Id, cancellationToken) ?? project;
+        var directory = repository is null ? null : await repository.GetOrganizationDirectoryAsync(cancellationToken);
+        foreach (var path in Directory.GetFiles(stagingDirectory, "*.xlsx", SearchOption.TopDirectoryOnly))
+        {
+            var fileName = Path.GetFileName(path);
+            var title = fileName.Contains("nonstandard", StringComparison.Ordinal) ? "非标件BOM"
+                : fileName.Contains("electrical", StringComparison.Ordinal) ? "电气件BOM" : "标准件BOM";
+            var metadata = ProjectWorkbookMetadata.ForProject(project, main, directory, title, "发布包版本", package.Number,
+                timeProvider.GetUtcNow().ToOffset(TimeSpan.FromHours(8)), "—", "发布冻结BOM");
+            metadata = metadata with { Fields = metadata.Fields.Select(field => field.Key == "整套数量"
+                ? new KeyValuePair<string, string>(field.Key, $"{Math.Max(1, package.WholeSetMultiplier)}套") : field).ToArray() };
+            var content = await File.ReadAllBytesAsync(path, cancellationToken);
+            await File.WriteAllBytesAsync(path, ProjectWorkbookHeader.Apply(content, metadata), cancellationToken);
+        }
     }
 
     public Task DiscardDraftAsync(ReleasePackage package, Project project, CancellationToken cancellationToken)

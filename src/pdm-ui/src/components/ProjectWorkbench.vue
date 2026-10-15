@@ -251,7 +251,7 @@ onBeforeUnmount(() => { generation++; noteGeneration++; clearInterval(timer); wi
         <div class="wr-panel-tools"><nav class="wr-tabs"><button v-for="tab in issueTabs" :key="tab.key" :aria-pressed="oplFilter === tab.key" @click="oplFilter = tab.key">{{ tab.label }} {{ selectedOpl ? tab.count : '—' }}</button></nav><small>编号由新到旧，与OPL列表一致</small></div>
         <p v-if="oplErrors[selectedId]" role="alert" class="wr-error">{{ oplErrors[selectedId] }} <button @click="ensureOpl(selectedId)">重试</button></p>
         <div v-else class="wr-scroll"><table class="pdm-opl-ratio-table">
-          <colgroup><col v-for="(weight, index) in [1,1,1,1,3,1,3,2,1,2,2,1,1]" :key="index" :style="{ '--opl-column-width': `${weight / 20 * 100}%` }" /></colgroup>
+          <colgroup><col v-for="(weight, index) in [1,2,1,1,3,2,3,2,1,2,2,1,2]" :key="index" :style="{ '--opl-column-width': `${weight / 23 * 100}%` }" /></colgroup>
           <thead><tr><th>序号</th><th>子项目</th><th>优先级</th><th>实施状态</th><th>问题描述</th><th>附件</th><th>解决措施</th><th>需求日期</th><th>负责人</th><th>完成日期</th><th>提交日期</th><th>提交人</th><th>操作</th></tr></thead>
           <tbody><tr v-for="row in visibleIssues" :key="row.issue.id">
             <td>{{ row.issue.number }}</td><td :title="projectCode(row.issue.relatedProjectId)">{{ row.issue.relatedProjectId ? projectCode(row.issue.relatedProjectId) : '项目整体' }}</td>

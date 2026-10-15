@@ -25,7 +25,7 @@ public sealed class ClientLogTests : IDisposable
     private static ClientLogQuery All => new(null, null, null, null, null, null, null);
     private ClientLogStore Store(long capacity = 10 * 1024 * 1024) => new(Options.Create(new PdmDatabaseOptions()), Options.Create(new ClientLogOptions { Root = root, MaxBytes = capacity }), clock, NullLogger<ClientLogStore>.Instance);
     private ClientLogBatch Batch(string kind = "runtime") => new(Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"), "设计电脑", "solidworks",
-        [new(clock.GetUtcNow(), kind, "存档", "图档=组件.SLDASM；password=private-pass Bearer private-token", "operation-1", "request-1", "session-1", "2026-test", "main-test.js")]);
+        [new(clock.GetUtcNow(), kind, "存档", "图档=组件.SLDASM；password=private-pass Bearer private-token; resumeToken=fake-resume-camel; resume_token='fake-resume-underscore'; resume-token=\"fake-resume-hyphen\"", "operation-1", "request-1", "session-1", "2026-test", "main-test.js")]);
 
     [Fact]
     public async Task DuplicateUploadIsIdempotentAndTenantScopeIsEnforced()
@@ -41,6 +41,7 @@ public sealed class ClientLogTests : IDisposable
         var log = zip.Entries.Single(e => e.FullName.EndsWith(".jsonl"));
         using var reader = new StreamReader(log.Open()); var text = await reader.ReadToEndAsync();
         Assert.DoesNotContain("private-pass", text); Assert.DoesNotContain("private-token", text);
+        Assert.DoesNotContain("fake-resume", text);
         Assert.Contains("request-1", text); Assert.Contains("operation-1", text);
         Assert.Contains(zip.Entries, e => e.FullName == "诊断说明.txt");
     }

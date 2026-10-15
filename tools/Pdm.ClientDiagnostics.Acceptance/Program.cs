@@ -44,6 +44,7 @@ internal static class Program
         using (var child = Process.Start(start)) { child.WaitForExit(); Check(child.ExitCode == 0, "独立进程产生待传日志并退出"); }
         var handler = new Receiver(); Set("Http", new HttpClient(handler));
         ClientDiagnostics.Initialize("desktop", "acceptance");
+        ((Timer)typeof(ClientDiagnostics).GetField("timer", BindingFlags.Static | BindingFlags.NonPublic).GetValue(null)).Change(Timeout.Infinite, Timeout.Infinite);
         ClientDiagnostics.Bind("http://client-log-test/", Token("user-a"), "company-a");
         handler.Offline = true;
         await ClientDiagnostics.UploadAsync();
@@ -54,6 +55,42 @@ internal static class Program
         Check(handler.Messages.Any(t => t.Contains("restarted-record")), "重启后补传上一进程记录");
         Check(handler.Messages.All(t => !t.Contains("hidden-value")), "敏感字段在落盘与上传前脱敏");
         Check(Directory.GetFiles(root, "*.sent", SearchOption.AllDirectories).Any(), "有效回执后才标记已上传");
+        Check(!ClientLogRedaction.Clean("Cookie: session=private-cookie; other=private-other\nAuthorization: Basic c2VjcmV0\npwd=private-pwd")
+            .Contains("private-") && !ClientLogRedaction.Clean("Authorization: Basic c2VjcmV0").Contains("c2VjcmV0"), "整行Cookie、Basic及连接串密码统一脱敏");
+        var resumeFixture = "resumeToken=fake-resume-camel; resume_token='fake-resume-underscore'; resume-token=\"fake-resume-hyphen\"";
+        Check(!ClientLogRedaction.Clean(resumeFixture).Contains("fake-resume")
+            && !ClientLogRedaction.Clean(resumeFixture, false).Contains("fake-resume"), "恢复令牌三种命名在落盘上传与完整导出规则中均脱敏");
+        handler.Messages.Clear();
+        ClientDiagnostics.BeginOperation();
+        ClientDiagnostics.Record("error", "重复校验", "deduplicated-error");
+        ClientDiagnostics.Record("runtime", "其它操作", "interleaving");
+        ClientDiagnostics.Record("error", "重复校验", "deduplicated-error");
+        Retry(); await ClientDiagnostics.UploadAsync();
+        Check(handler.Messages.Sum(message => message.Split(new[] { "deduplicated-error" }, StringSplitOptions.None).Length - 1) == 1,
+            "同次操作交错重复错误只上传一次");
+        var scope = (string)typeof(ClientDiagnostics).GetField("scope", BindingFlags.Static | BindingFlags.NonPublic).GetValue(null);
+        var damaged = Path.Combine(scope, "error-999999-0-" + Guid.NewGuid().ToString("N") + ".jsonl");
+        File.WriteAllText(damaged, "{broken-json");
+        ClientDiagnostics.Record("runtime", "正常分片", "after-invalid-file");
+        handler.Messages.Clear(); Retry(); await ClientDiagnostics.UploadAsync();
+        Check(File.Exists(damaged + ".invalid") && handler.Messages.Any(message => message.Contains("after-invalid-file")), "坏分片隔离不阻止其它日志上传");
+        ClientDiagnostics.Record("error", "服务器格式校验", "reject-this-batch");
+        ClientDiagnostics.Record("runtime", "正常分片", "after-rejected-file");
+        handler.Messages.Clear(); Retry(); await ClientDiagnostics.UploadAsync();
+        Check(handler.Messages.Any(message => message.Contains("after-rejected-file"))
+            && Directory.GetFiles(scope, "*.invalid").Length >= 2, "格式拒绝分片保留本地并继续上传其它分片");
+        ClientDiagnostics.Record("error", "权限拒绝", "waiting-for-login");
+        handler.Status = HttpStatusCode.Forbidden; Retry(); await ClientDiagnostics.UploadAsync();
+        var attempts = handler.Messages.Count;
+        Retry(); await ClientDiagnostics.UploadAsync();
+        Check(handler.Messages.Count == attempts && Directory.GetFiles(scope, "*.jsonl").Length > 0, "权限拒绝停止重试并保留日志");
+        handler.Status = HttpStatusCode.OK;
+        ClientDiagnostics.Bind("http://client-log-test/", Token("user-a"), "company-a"); Retry(); await ClientDiagnostics.UploadAsync();
+        Check(handler.Messages.Any(message => message.Contains("waiting-for-login")), "重新登录后补传权限拒绝时保留的日志");
+        ClientDiagnostics.Record("error", "限流", "rate-limited-record");
+        handler.Status = (HttpStatusCode)429; Retry(); await ClientDiagnostics.UploadAsync();
+        Check((DateTime)typeof(ClientDiagnostics).GetField("retryAfter", BindingFlags.Static | BindingFlags.NonPublic).GetValue(null) > DateTime.UtcNow.AddSeconds(30), "服务端限流采用延迟重试");
+        handler.Status = HttpStatusCode.OK; Retry(); await ClientDiagnostics.UploadAsync();
         handler.Messages.Clear(); ClientDiagnostics.Pause(); ClientDiagnostics.Record("error", "退出后", "user-a-private");
         ClientDiagnostics.Bind("http://client-log-test/", Token("user-b"), "company-b"); Retry(); await ClientDiagnostics.UploadAsync();
         Check(handler.Messages.All(t => !t.Contains("user-a-private")), "切换账号与公司不能上传上一账号记录");
@@ -87,6 +124,7 @@ internal static class Program
     private sealed class Receiver : HttpMessageHandler
     {
         public bool Offline, WrongReceipt;
+        public HttpStatusCode Status = HttpStatusCode.OK;
         public readonly List<string> Messages = new List<string>();
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -96,6 +134,8 @@ internal static class Program
             using (var reader = new StreamReader(gzip))
             {
                 var body = await reader.ReadToEndAsync(); Messages.Add(body);
+                if (body.Contains("reject-this-batch")) return new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("日志格式不正确") };
+                if (Status != HttpStatusCode.OK) return new HttpResponseMessage(Status) { Content = new StringContent("模拟服务状态") };
                 var batch = Json.Deserialize<Dictionary<string, object>>(body);
                 return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(Json.Serialize(new { batchId = WrongReceipt ? "wrong" : batch["batchId"] })) };
             }

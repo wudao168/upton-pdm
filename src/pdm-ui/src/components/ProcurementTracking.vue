@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ElMessage } from '../statusMessage'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { getProjectProcurementTracking, listBom, listMaterialInventory, refreshProjectProcurementTracking } from '../api'
+import { getProjectExportMetadata, getProjectProcurementTracking, listBom, listMaterialInventory, refreshProjectProcurementTracking } from '../api'
 import type { BomItem, ProjectProcurementTrackingItem, ProjectProcurementTrackingResult, U9InventoryRow } from '../types'
 import { inventoryScopes, isDefaultInventoryWarehouse, sumProcurementInventory } from '../procurementInventory'
 import SquareLoader from './SquareLoader.vue'
@@ -569,6 +569,8 @@ async function exportExcel() {
   try {
     if (exportColumns.some(column => column.key === 'inventoryQuantity')) await loadVisibleInventory(items)
     if (version !== loadVersion) return
+    const metadata = await getProjectExportMetadata(props.projectId, props.token)
+    if (version !== loadVersion) return
     const rows = items.map(row => exportColumns.map(({ key }) => {
       if (isMovementColumn(key)) {
         if (key.endsWith('Quantity')) return movementFor(row, key)?.quantity ?? '—'
@@ -588,7 +590,7 @@ async function exportExcel() {
     if (!Number.isInteger(previousSequence) || previousSequence < 0 || previousSequence >= 99) throw new Error('当日导出流水号不可用或已达99次，请次日再导出')
     const sequence = previousSequence + 1
     window.localStorage.setItem(sequenceKey, String(sequence))
-    downloadProcurementWorkbook(`${projectCode}_物料状态清单_${date}_${String(sequence).padStart(2, '0')}.xlsx`, exportColumns.map(column => column.label), rows)
+    downloadProcurementWorkbook(`${projectCode}_物料状态清单_${date}_${String(sequence).padStart(2, '0')}.xlsx`, exportColumns.map(column => column.label), rows, undefined, { ...metadata, title: '物料采购跟踪清单', scope: `当前筛选结果 · ${items.length}条`, versionLabel: '数据时间', version: result.value?.lastSuccessfulRefreshAt || '未同步' })
     ElMessage.success(`已导出 ${items.length} 条采购跟踪记录`)
   } catch (error) {
     if (version === loadVersion) ElMessage.error(error instanceof Error ? error.message : '采购跟踪导出失败')

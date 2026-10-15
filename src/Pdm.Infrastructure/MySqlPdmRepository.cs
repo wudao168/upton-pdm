@@ -570,7 +570,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     public async Task<PdmDocument?> FindDocumentAsync(Guid documentId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
-        return await FindDocumentAsync(connection, null, documentId, cancellationToken);
+        return await FindDocumentAsync(connection, null, documentId, cancellationToken)
+            ?? (await FindPendingArchiveDocumentAsync(connection, null, documentId, cancellationToken))?.Document;
     }
 
     public async Task<PdmDocument> RegisterDocumentAsync(RegisterDocumentCommand command, string actor, CancellationToken cancellationToken)
@@ -1273,12 +1274,15 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                     UNION SELECT 'ReleasePackage',BIN_TO_UUID(id) FROM release_package WHERE project_id=@ProjectId
                     UNION SELECT 'ApprovalTask',BIN_TO_UUID(task.id) FROM approval_task task
                         JOIN release_package package ON package.id=task.release_package_id WHERE package.project_id=@ProjectId
-                ) target STRAIGHT_JOIN audit_entry candidate FORCE INDEX (ix_audit_entity)
-                    ON candidate.entity_type=target.entity_type AND candidate.entity_id=target.entity_id
-                ORDER BY candidate.occurred_at DESC
+                ) target JOIN LATERAL (
+                    SELECT entry.id,entry.occurred_at FROM audit_entry entry FORCE INDEX (ix_audit_entity_recent)
+                    WHERE entry.entity_type=target.entity_type AND entry.entity_id=target.entity_id
+                    ORDER BY entry.occurred_at DESC,entry.id DESC LIMIT @Limit
+                ) candidate ON TRUE
+                ORDER BY candidate.occurred_at DESC,candidate.id DESC
                 LIMIT @Limit
             ) recent ON recent.id=audit.id
-            ORDER BY audit.occurred_at DESC
+            ORDER BY audit.occurred_at DESC,audit.id DESC
             """,
             new { ProjectId = projectId, ProjectIdText = projectIdText, Limit = limit }, cancellationToken: cancellationToken));
         return rows.Select(row => new AuditEntry(row.Id, DateTime.SpecifyKind(row.OccurredAt, DateTimeKind.Utc), row.Actor, row.ActionName, row.EntityType, row.EntityId, ReadAuditDetail(row.DetailJson))).ToArray();
