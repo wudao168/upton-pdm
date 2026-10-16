@@ -259,14 +259,27 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         }
     }
 
-    public Task<MaterialCodeApplication> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApplicationStatus status, string actor, string? comment, Guid? materialId, string? materialCode, DateTimeOffset decidedAt, CancellationToken cancellationToken)
+    public Task<MaterialCodeApplication> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApplicationStatus status, string actor, string? comment, Guid? materialId, string? materialCode, DateTimeOffset decidedAt, CancellationToken cancellationToken, MaterialCodeApprovalSnapshot? approvalWorkflow = null)
     {
         lock (gate)
         {
             if (!applications.TryGetValue(applicationId, out var current)) throw new PdmNotFoundException("料号申请不存在。");
             if (current.Status != MaterialCodeApplicationStatus.Pending || current.RowVersion != expectedRowVersion)
                 throw new PdmConflictException("料号申请已由其他标准化人员处理，请刷新后重试。");
-            var saved = current with { Status = status, DecidedBy = actor, DecidedAt = decidedAt, DecisionComment = comment, MaterialId = materialId, MaterialCode = materialCode, RowVersion = current.RowVersion + 1 };
+            var saved = current with { ApprovalWorkflow = approvalWorkflow ?? current.ApprovalWorkflow, Status = status, DecidedBy = actor, DecidedAt = decidedAt, DecisionComment = comment, MaterialId = materialId, MaterialCode = materialCode, RowVersion = current.RowVersion + 1 };
+            applications[applicationId] = saved;
+            return Task.FromResult(saved);
+        }
+    }
+
+    public Task<MaterialCodeApplication> AdvanceMaterialCodeApprovalAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApprovalSnapshot approvalWorkflow, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!applications.TryGetValue(applicationId, out var current)) throw new PdmNotFoundException("料号申请不存在。");
+            if (current.Status != MaterialCodeApplicationStatus.Pending || current.RowVersion != expectedRowVersion)
+                throw new PdmConflictException("审批节点已由其他人处理，请刷新后重试。");
+            var saved = current with { ApprovalWorkflow = approvalWorkflow, RowVersion = current.RowVersion + 1 };
             applications[applicationId] = saved;
             return Task.FromResult(saved);
         }

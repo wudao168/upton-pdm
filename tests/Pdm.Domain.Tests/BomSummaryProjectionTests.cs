@@ -1,10 +1,30 @@
-﻿using Upton.Pdm.Application;
+using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Domain.Tests;
 
 public sealed class BomSummaryProjectionTests
 {
+    [Fact]
+    public void InventoryReplacement_MarkerIsSavedPerInstanceAndExposedOnTheSummary()
+    {
+        var projectId = Guid.NewGuid();
+        var first = new BomItem(Guid.NewGuid(), projectId, BomKind.Standard, 1, "OLD", "原物料", 2, "001", null, "OLD-MODEL", "W1", true);
+        var second = first with { Id = Guid.NewGuid(), Sequence = 2, Quantity = 3 };
+        var group = Assert.Single(BomSummaryProjection.Group([first, second]));
+        var edit = new BomItemInput(1, "STOCK", "库存物料", 5, "001", null, "STOCK-MODEL", "W1", true,
+            InventoryReplacementMaterialCode: "STOCK");
+        var expanded = BomSummaryProjection.Expand([first, second], [new(group.SummaryItemIds!, group.SummaryFingerprint!,
+            ["drawingNumber", "name", "specification", "inventoryReplacementMaterialCode"], edit)], []);
+        Assert.All(expanded, item => Assert.Equal("STOCK", item.InventoryReplacementMaterialCode));
+        Assert.Equal(5, expanded.Sum(item => item.Quantity));
+        var stockItem = first with { Sequence = 2, DrawingNumber = "STOCK", InventoryReplacementMaterialCode = "STOCK" };
+        var unmarked = second with { Sequence = 1, DrawingNumber = "STOCK" };
+        Assert.Equal("STOCK", Assert.Single(BomSummaryProjection.Group([unmarked, stockItem])).InventoryReplacementMaterialCode);
+        var kept = BomSummaryProjection.Expand([stockItem], [], []);
+        Assert.Equal("STOCK", Assert.Single(kept).InventoryReplacementMaterialCode);
+    }
+
     [Fact]
     public void GroupAndPatch_PreserveInstanceIdentityAndUneditedAttributes()
     {

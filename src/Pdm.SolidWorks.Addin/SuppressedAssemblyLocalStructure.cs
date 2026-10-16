@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -69,7 +68,6 @@ internal static class SuppressedAssemblyLocalStructure
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
             throw new InvalidOperationException("压缩子装配体文件不存在，无法读取内部结构：" + path);
-        using (var file = File.OpenRead(path))
-        using (var hash = SHA256.Create()) return BitConverter.ToString(hash.ComputeHash(file)).Replace("-", "");
+        return ArchiveFileFingerprint.Read(path);
     }
 }

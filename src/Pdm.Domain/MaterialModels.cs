@@ -70,6 +70,9 @@ public sealed record MaterialCodeApplication(
     public MaterialSyncStatus? SyncStatus { get; init; }
     public string? SyncError { get; init; }
     public string? WorkflowMessage { get; init; }
+    public MaterialCodeApprovalSnapshot? ApprovalWorkflow { get; init; }
+    public bool? CanDecide { get; init; }
+    public bool CanEmergencyDecide { get; init; }
 }
 
 public enum MaterialCodeResolutionStatus
@@ -418,3 +421,10 @@ public sealed record U9MaterialIntegrationSettings(
     string BomDeletePath = "/webapi/BOM/Delete",
     string BomBatchUnapprovePath = "/webapi/BOM/BatchUnApprove",
     string BomBipQueryPagePath = "/webapi/BOM/BIPQueryPage");
+
+public sealed record MaterialCodeApprovalNode(Guid Id, int Order, ApprovalStage Stage, string Name,
+    IReadOnlyList<string> Assignees, ApprovalDecision? Decision = null, string? DecisionBy = null,
+    string? Comment = null, DateTimeOffset? DecidedAt = null, bool IsEmergencySubstitute = false);
+
+public sealed record MaterialCodeApprovalSnapshot(string Code, int Version,
+    IReadOnlyList<MaterialCodeApprovalNode> Nodes, IReadOnlyList<string> EmergencyRoleCodes);

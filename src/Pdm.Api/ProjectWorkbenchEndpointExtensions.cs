@@ -9,6 +9,8 @@ public static class ProjectWorkbenchEndpointExtensions
     public static void MapProjectWorkbenchEndpoints(this WebApplication app)
     {
         var api = app.MapGroup("/api").RequireAuthorization();
+        api.MapGet("/project-calendar", async (HttpContext context, ProjectWorkbenchService service, CancellationToken ct) =>
+            Results.Ok(await service.GetAsync(null, Actor(context), Role(context), ct, calendarOnly: true)));
         api.MapGet("/workbench", async (string? view, string? scope, bool? summaryOnly, Guid? projectId, HttpContext context, ProjectWorkbenchService service, CancellationToken ct) =>
             Results.Ok(await service.GetAsync(view, Actor(context), Role(context), ct, scope, summaryOnly ?? false, projectId)));
         api.MapPost("/projects/{projectId:guid}/risks", async (Guid projectId, RegisterWorkbenchRisk command, HttpContext context, ProjectWorkbenchService service, CancellationToken ct) =>

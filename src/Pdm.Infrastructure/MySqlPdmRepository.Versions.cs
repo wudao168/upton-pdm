@@ -52,6 +52,7 @@ public sealed partial class MySqlPdmRepository
                 JOIN document_version v ON v.document_id=d.id
                 JOIN release_package p ON p.id=v.release_package_id
                 WHERE d.project_id=project.id AND d.kind='Drawing' AND d.deleted_at IS NULL AND d.purged_at IS NULL
+                  AND d.lifecycle_state<>'Obsolete'
                   AND v.version_status='Released' AND p.state='Published'
                   AND p.release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined'))
             """,
@@ -75,7 +76,7 @@ public sealed partial class MySqlPdmRepository
             JOIN document_version v ON v.document_id=d.id
             JOIN release_package p ON p.id=v.release_package_id
             WHERE d.project_id IN @ProjectIds AND d.kind='Drawing'
-              AND d.deleted_at IS NULL AND d.purged_at IS NULL
+              AND d.deleted_at IS NULL AND d.purged_at IS NULL AND d.lifecycle_state<>'Obsolete'
               AND v.version_status='Released' AND p.state='Published'
               AND p.release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')
             """, new { ProjectIds = projects.Keys.ToArray() }, cancellationToken: cancellationToken));
@@ -391,6 +392,7 @@ public sealed partial class MySqlPdmRepository
 
         bool Visit(DocumentReferenceNode node)
         {
+            if (node.Role == ReferenceRole.ExternalFileDependency) return false;
             var isTarget = node.DocumentId is Guid own && nonStandardModels.Contains(own);
             foreach (var child in node.Children) isTarget |= Visit(child);
             if (isTarget && node.DocumentId is Guid id) scope.Add(id);

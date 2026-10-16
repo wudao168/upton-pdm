@@ -69,23 +69,25 @@ internal sealed class PluginSettingsDialog : Form
             RowCount = 5
         };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 145F));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 166F));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 180F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 44F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
         Controls.Add(root);
 
-        var connectionGroup = new GroupBox { Text = "服务器连接", Dock = DockStyle.Fill };
+        var connectionGroup = new GroupBox { Text = "服务器连接", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 6) };
         var connectionLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(10, 8, 10, 8),
-            ColumnCount = 3,
-            RowCount = 3
+            ColumnCount = 4,
+            RowCount = 3,
+            Margin = Padding.Empty
         };
-        connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76F));
+        connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84F));
         connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-        connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88F));
+        connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6F));
+        connectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96F));
         connectionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
         connectionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
         connectionLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
@@ -95,22 +97,26 @@ internal sealed class PluginSettingsDialog : Form
         {
             Text = "服务器地址",
             TextAlign = ContentAlignment.MiddleLeft,
-            Dock = DockStyle.Fill
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 0, 6, 0)
         }, 0, 0);
         serverAddress.Text = initialSettings.ServerAddress ?? string.Empty;
         serverAddress.Dock = DockStyle.Fill;
+        serverAddress.AutoSize = false;
+        serverAddress.Margin = Padding.Empty;
         serverAddress.AccessibleName = "服务器地址";
         connectionLayout.Controls.Add(serverAddress, 1, 0);
         testConnectionButton.Text = "测试连接";
         testConnectionButton.Dock = DockStyle.Fill;
         ConfigureDialogButton(testConnectionButton);
+        testConnectionButton.Margin = Padding.Empty;
         testConnectionButton.Click += async (_, _) => await RunConnectionTestAsync();
-        connectionLayout.Controls.Add(testConnectionButton, 2, 0);
+        connectionLayout.Controls.Add(testConnectionButton, 3, 0);
         connectionStatus.Text = "修改地址前可先测试；测试失败不会覆盖原配置。";
         connectionStatus.ForeColor = Color.FromArgb(95, 108, 124);
         connectionStatus.TextAlign = ContentAlignment.MiddleLeft;
         connectionStatus.Dock = DockStyle.Fill;
-        connectionLayout.SetColumnSpan(connectionStatus, 3);
+        connectionLayout.SetColumnSpan(connectionStatus, 4);
         connectionLayout.Controls.Add(connectionStatus, 0, 1);
         var addressHint = new Label
         {
@@ -119,11 +125,11 @@ internal sealed class PluginSettingsDialog : Form
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.TopLeft
         };
-        connectionLayout.SetColumnSpan(addressHint, 3);
+        connectionLayout.SetColumnSpan(addressHint, 4);
         connectionLayout.Controls.Add(addressHint, 0, 2);
         root.Controls.Add(connectionGroup, 0, 0);
 
-        var qrPositionGroup = new GroupBox { Text = "工程图二维码位置与尺寸", Dock = DockStyle.Fill };
+        var qrPositionGroup = new GroupBox { Text = "工程图二维码位置与尺寸", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 6) };
         var qrPositionLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -132,13 +138,13 @@ internal sealed class PluginSettingsDialog : Form
             RowCount = 5
         };
         qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90F));
-        qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100F));
+        qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
         qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90F));
-        qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100F));
+        qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
         qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
-        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 27F));
-        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 27F));
-        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 3F));
+        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
+        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
+        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 6F));
         qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
         qrPositionGroup.Controls.Add(qrPositionLayout);
 
@@ -174,22 +180,24 @@ internal sealed class PluginSettingsDialog : Form
         qrPositionLayout.Controls.Add(qrPositionHint, 0, 4);
         root.Controls.Add(qrPositionGroup, 0, 1);
 
-        var taskGroup = new GroupBox { Text = "任务计划显示", Dock = DockStyle.Fill };
-        var taskLayout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(10, 5, 10, 5), ColumnCount = 2, RowCount = 1 };
+        var taskGroup = new GroupBox { Text = "任务计划显示", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 6) };
+        var taskLayout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(10, 5, 10, 5), ColumnCount = 3, RowCount = 1 };
         taskLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130F));
+        taskLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100F));
         taskLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
         taskLayout.Controls.Add(new Label { Text = "任务滚动间隔", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
         plannedTaskScrollInterval.DropDownStyle = ComboBoxStyle.DropDownList;
         plannedTaskScrollInterval.Items.AddRange(new object[] { "15 秒", "30 秒", "60 秒" });
         plannedTaskScrollInterval.SelectedIndex = initialSettings.PlannedTaskScrollIntervalSeconds == 15 ? 0
             : initialSettings.PlannedTaskScrollIntervalSeconds == 60 ? 2 : 1;
-        plannedTaskScrollInterval.Dock = DockStyle.Fill;
+        plannedTaskScrollInterval.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        plannedTaskScrollInterval.Margin = Padding.Empty;
         plannedTaskScrollInterval.AccessibleName = "任务滚动间隔";
         taskLayout.Controls.Add(plannedTaskScrollInterval, 1, 0);
         taskGroup.Controls.Add(taskLayout);
         root.Controls.Add(taskGroup, 0, 2);
 
-        var updateGroup = new GroupBox { Text = "版本与更新", Dock = DockStyle.Fill };
+        var updateGroup = new GroupBox { Text = "版本与更新", Dock = DockStyle.Fill, Margin = Padding.Empty };
         var updateLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -200,7 +208,7 @@ internal sealed class PluginSettingsDialog : Form
         updateLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88F));
         updateLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
         updateLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96F));
-        for (var row = 0; row < 6; row++) updateLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 29F));
+        for (var row = 0; row < 6; row++) updateLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
         updateLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
         updateGroup.Controls.Add(updateLayout);
 
@@ -224,13 +232,15 @@ internal sealed class PluginSettingsDialog : Form
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.RightToLeft,
-            WrapContents = false
+            WrapContents = false,
+            Margin = new Padding(0, 6, 0, 0)
         };
         checkUpdateButton.Text = "检查更新";
         ConfigureDialogButton(checkUpdateButton);
         checkUpdateButton.Click += async (_, _) => await RunUpdateActionAsync(false);
         installUpdateButton.Text = "安装更新";
         ConfigureDialogButton(installUpdateButton);
+        installUpdateButton.Margin = Padding.Empty;
         installUpdateButton.Click += async (_, _) => await RunUpdateActionAsync(true);
         updateActions.Controls.Add(installUpdateButton);
         updateActions.Controls.Add(checkUpdateButton);
@@ -243,10 +253,11 @@ internal sealed class PluginSettingsDialog : Form
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.RightToLeft,
             WrapContents = false,
-            Padding = new Padding(0, 8, 0, 0)
+            Margin = new Padding(0, 6, 0, 0)
         };
         saveButton.Text = "保存";
         ConfigureDialogButton(saveButton);
+        saveButton.Margin = Padding.Empty;
         saveButton.UseVisualStyleBackColor = false;
         saveButton.BackColor = Color.FromArgb(21, 126, 77);
         saveButton.ForeColor = Color.White;
@@ -429,7 +440,11 @@ internal sealed class PluginSettingsDialog : Form
         input.Increment = 1M;
         input.Minimum = 0M;
         input.Maximum = 2000M;
-        input.Dock = DockStyle.Fill;
+        input.Dock = DockStyle.None;
+        input.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        input.AutoSize = false;
+        input.MinimumSize = new Size(0, 30);
+        input.Margin = new Padding(0, 3, 6, 3);
         input.AccessibleName = accessibleName;
         var safeValue = double.IsNaN(value) || double.IsInfinity(value) ? 0M : (decimal)value;
         input.Value = Math.Max(input.Minimum, Math.Min(input.Maximum, safeValue));
@@ -441,7 +456,11 @@ internal sealed class PluginSettingsDialog : Form
         input.Increment = 1M;
         input.Minimum = 8M;
         input.Maximum = 2000M;
-        input.Dock = DockStyle.Fill;
+        input.Dock = DockStyle.None;
+        input.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        input.AutoSize = false;
+        input.MinimumSize = new Size(0, 30);
+        input.Margin = new Padding(0, 3, 6, 3);
         input.AccessibleName = accessibleName;
         var safeValue = double.IsNaN(value) || double.IsInfinity(value) || value <= 0d ? 20M : (decimal)value;
         input.Value = Math.Max(input.Minimum, Math.Min(input.Maximum, safeValue));
@@ -450,7 +469,8 @@ internal sealed class PluginSettingsDialog : Form
     private static void ConfigureDialogButton(Button button)
     {
         button.AutoSize = false;
-        button.Size = new Size(88, 30);
+        button.Size = new Size(96, 30);
+        button.Margin = new Padding(0, 0, 6, 0);
         button.TextAlign = ContentAlignment.MiddleCenter;
         button.UseCompatibleTextRendering = false;
         button.FlatStyle = FlatStyle.Flat;

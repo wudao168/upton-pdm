@@ -325,7 +325,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         await connection.ExecuteAsync(new CommandDefinition(
-            "INSERT INTO material_code_application(id,project_id,bom_item_id,bom_header_kind,status,requested_by,requested_at,material_id,material_code,row_version) VALUES(@Id,@ProjectId,@BomItemId,@BomHeaderKind,@Status,@RequestedBy,@RequestedAt,@MaterialId,@MaterialCode,@RowVersion)",
+            "INSERT INTO material_code_application(id,project_id,bom_item_id,bom_header_kind,status,requested_by,requested_at,material_id,material_code,row_version,approval_workflow_json) VALUES(@Id,@ProjectId,@BomItemId,@BomHeaderKind,@Status,@RequestedBy,@RequestedAt,@MaterialId,@MaterialCode,@RowVersion,@ApprovalWorkflowJson)",
             new
             {
                 application.Id,
@@ -337,18 +337,29 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
                 RequestedAt = application.RequestedAt.UtcDateTime,
                 application.MaterialId,
                 application.MaterialCode,
-                application.RowVersion
+                application.RowVersion,
+                ApprovalWorkflowJson = application.ApprovalWorkflow is null ? null : JsonSerializer.Serialize(application.ApprovalWorkflow, jsonOptions)
             }, cancellationToken: cancellationToken));
         return application;
     }
 
-    public async Task<MaterialCodeApplication> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApplicationStatus status, string actor, string? comment, Guid? materialId, string? materialCode, DateTimeOffset decidedAt, CancellationToken cancellationToken)
+    public async Task<MaterialCodeApplication> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApplicationStatus status, string actor, string? comment, Guid? materialId, string? materialCode, DateTimeOffset decidedAt, CancellationToken cancellationToken, MaterialCodeApprovalSnapshot? approvalWorkflow = null)
     {
         await using var connection = await OpenAsync(cancellationToken);
         var affected = await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE material_code_application SET status=@Status,decided_by=@Actor,decided_at=@DecidedAt,decision_comment=@Comment,material_id=@MaterialId,material_code=@MaterialCode,row_version=row_version+1 WHERE id=@ApplicationId AND status='Pending' AND row_version=@ExpectedRowVersion",
-            new { ApplicationId = applicationId, ExpectedRowVersion = expectedRowVersion, Status = status.ToString(), Actor = actor, DecidedAt = decidedAt.UtcDateTime, Comment = comment, MaterialId = materialId, MaterialCode = materialCode }, cancellationToken: cancellationToken));
+            "UPDATE material_code_application SET status=@Status,decided_by=@Actor,decided_at=@DecidedAt,decision_comment=@Comment,material_id=@MaterialId,material_code=@MaterialCode,approval_workflow_json=COALESCE(@ApprovalWorkflowJson,approval_workflow_json),row_version=row_version+1 WHERE id=@ApplicationId AND status='Pending' AND row_version=@ExpectedRowVersion",
+            new { ApplicationId = applicationId, ExpectedRowVersion = expectedRowVersion, Status = status.ToString(), Actor = actor, DecidedAt = decidedAt.UtcDateTime, Comment = comment, MaterialId = materialId, MaterialCode = materialCode, ApprovalWorkflowJson = approvalWorkflow is null ? null : JsonSerializer.Serialize(approvalWorkflow, jsonOptions) }, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("料号申请已由其他标准化人员处理，请刷新后重试。");
+        return await FindMaterialCodeApplicationAsync(applicationId, cancellationToken) ?? throw new PdmNotFoundException("料号申请不存在。");
+    }
+
+    public async Task<MaterialCodeApplication> AdvanceMaterialCodeApprovalAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApprovalSnapshot approvalWorkflow, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE material_code_application SET approval_workflow_json=@Json,row_version=row_version+1 WHERE id=@Id AND status='Pending' AND row_version=@Version",
+            new { Id = applicationId, Version = expectedRowVersion, Json = JsonSerializer.Serialize(approvalWorkflow, jsonOptions) }, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("审批节点已由其他人处理，请刷新后重试。");
         return await FindMaterialCodeApplicationAsync(applicationId, cancellationToken) ?? throw new PdmNotFoundException("料号申请不存在。");
     }
 
@@ -2039,6 +2050,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         Utc(row.RequestedAt)!.Value, row.DecidedBy, Utc(row.DecidedAt), row.DecisionComment, row.MaterialId, row.MaterialCode, row.RowVersion,
         string.IsNullOrWhiteSpace(row.BomHeaderKind) ? null : Enum.Parse<ProjectBomHeaderKind>(row.BomHeaderKind))
         {
+            ApprovalWorkflow = string.IsNullOrWhiteSpace(row.ApprovalWorkflowJson) ? null : JsonSerializer.Deserialize<MaterialCodeApprovalSnapshot>(row.ApprovalWorkflowJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
             BomItemName = row.BomItemName,
             ApplicationName = row.ApplicationName,
             ProjectCode = row.ProjectCode,
@@ -2178,7 +2190,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         """;
 
     private const string MaterialCodeApplicationSelect = """
-        SELECT id,project_id,bom_item_id,bom_header_kind,status,requested_by,requested_at,decided_by,decided_at,decision_comment,material_id,material_code,row_version,
+        SELECT id,project_id,bom_item_id,bom_header_kind,status,requested_by,requested_at,decided_by,decided_at,decision_comment,material_id,material_code,row_version,approval_workflow_json,
                (SELECT code FROM project WHERE project.id=material_code_application.project_id) project_code,
                (SELECT name FROM project WHERE project.id=material_code_application.project_id) project_name,
                (SELECT name FROM bom_item WHERE bom_item.id=material_code_application.bom_item_id) bom_item_name,
@@ -2408,6 +2420,7 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
 
     private sealed class MaterialCodeApplicationRow
     {
+        public string? ApprovalWorkflowJson { get; init; }
         public Guid Id { get; init; }
         public Guid ProjectId { get; init; }
         public Guid? BomItemId { get; init; }

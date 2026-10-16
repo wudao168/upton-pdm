@@ -22,7 +22,6 @@ internal sealed class PdmTaskPaneControl : UserControl
     private static readonly Color CheckoutAvailableColor = Color.FromArgb(36, 170, 168);
     private static readonly Color DiscardCheckoutAvailableColor = Color.FromArgb(230, 126, 34);
     private static readonly Color SubmitAvailableColor = Color.FromArgb(21, 126, 77);
-    private static readonly Color BatchOperationAvailableColor = Color.FromArgb(47, 109, 224);
     private static readonly Color SecondaryActionAvailableColor = Color.FromArgb(72, 84, 99);
     private static readonly Color DisabledActionBackgroundColor = Color.FromArgb(224, 228, 233);
     private static readonly Color DisabledActionTextColor = Color.FromArgb(145, 151, 159);
@@ -49,9 +48,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly Button openClientButton = new Button();
     private readonly Button checkoutButton = new Button();
     private readonly Button checkinButton = new Button();
-    private readonly Button batchOperationButton = new Button();
     private readonly Button propertyEditButton = new Button();
-    private readonly Button propertyCardButton = new Button();
     private readonly Button settingsButton = new Button();
     private readonly Panel workspaceOperationPanel = new Panel();
     private readonly Label workspaceOperationStatus = new Label();
@@ -608,7 +605,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private Control BuildProjectPanel()
     {
-        var panel = new Panel { Dock = DockStyle.Top, Height = 87, BackColor = Color.White, Padding = new Padding(12, 7, 12, 8) };
+        var panel = new Panel { Dock = DockStyle.Top, Height = 84, BackColor = Color.White, Padding = new Padding(12, 6, 12, 6) };
         var actions = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -625,9 +622,9 @@ internal sealed class PdmTaskPaneControl : UserControl
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
         var userButtonColumn = new ColumnStyle(SizeType.Absolute, 60);
         actions.ColumnStyles.Add(userButtonColumn);
-        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 6));
-        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         actions.SizeChanged += (_, _) =>
         {
             MatchProjectButtonWidths(actions, clientButtonColumn, userButtonColumn);
@@ -643,6 +640,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         currentProject.AccessibleName = "当前项目号（只读）";
         openClientButton.Text = "客户端";
         ConfigureStructureToolbarButton(openClientButton);
+        actionToolTip.SetToolTip(openClientButton, "打开PLM客户端");
         openClientButton.Click += (_, _) => OpenClientRequested?.Invoke(this, EventArgs.Empty);
         loginButton.Text = "登录";
         ConfigureStructureToolbarButton(loginButton);
@@ -737,7 +735,6 @@ internal sealed class PdmTaskPaneControl : UserControl
         diagnosticsTab.Controls.Add(new DiagnosticLogControl(installedPluginVersion));
         tabs.TabPages.Add(diagnosticsTab);
         PluginDiagnosticLog.Record("启动", "插件已加载，版本：" + installedPluginVersion);
-        tabs.TabPages.Add(new TabPage("待办") { BackColor = Color.White });
         tabs.SelectedIndexChanged += (_, _) =>
         {
             if (!suppressVersionTabRequest && tabs.SelectedTab == versionsTab)
@@ -788,37 +785,31 @@ internal sealed class PdmTaskPaneControl : UserControl
     private TabPage BuildStructureTab()
     {
         var tab = new TabPage("设计树") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(8) };
-        var actions = new TableLayoutPanel { Dock = DockStyle.Top, Height = 38, ColumnCount = 5, RowCount = 1, Margin = Padding.Empty, Padding = new Padding(3) };
+        var actions = new TableLayoutPanel { Dock = DockStyle.Top, Height = 36, ColumnCount = 7, RowCount = 1, Margin = Padding.Empty, Padding = new Padding(3) };
         ConfigureStructureActionColumns(actions);
-        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
 
         ConfigureCompactActionButton(checkoutButton, "获取", CheckoutAvailableColor);
         ConfigureCompactActionButton(checkinButton, "存档", SubmitAvailableColor);
-        ConfigureCompactActionButton(batchOperationButton, "整体", BatchOperationAvailableColor);
         ConfigureCompactActionButton(propertyEditButton, "属性", SecondaryActionAvailableColor);
         ConfigureCompactActionButton(settingsButton, "设置", SecondaryActionAvailableColor);
         actionToolTip.SetToolTip(checkoutButton, "获取编辑权限");
-        actionToolTip.SetToolTip(checkinButton, "提交存档");
-        actionToolTip.SetToolTip(batchOperationButton, "整体获取最新文件及权限，或按子件优先顺序提交存档");
+        actionToolTip.SetToolTip(checkinButton, "选择存档范围，统一检查后整批提交；未勾选时自动选择整套变更项");
         actionToolTip.SetToolTip(propertyEditButton, "批量编辑图档属性，或在属性窗口内设置SolidWorks原生属性卡");
         actionToolTip.SetToolTip(settingsButton, "设置服务器连接，查看插件版本与更新状态");
         checkoutButton.Click += (_, _) => RaiseCheckoutToggle();
         checkinButton.Click += (_, _) => RaiseCheckInRequested();
-        batchOperationButton.Click += (_, _) => BatchOperationRequested?.Invoke(this, EventArgs.Empty);
         propertyEditButton.Click += (_, _) => RaiseBatchPropertyRequested();
         settingsButton.Click += (_, _) => SettingsRequested?.Invoke(this, EventArgs.Empty);
         checkoutButton.Enabled = false;
         checkinButton.Enabled = false;
-        batchOperationButton.Enabled = false;
         propertyEditButton.Enabled = false;
-        propertyCardButton.Enabled = false;
         settingsButton.Enabled = true;
         ApplyStructureActionButtonAppearances();
         actions.Controls.Add(checkoutButton, 0, 0);
-        actions.Controls.Add(checkinButton, 1, 0);
-        actions.Controls.Add(batchOperationButton, 2, 0);
-        actions.Controls.Add(propertyEditButton, 3, 0);
-        actions.Controls.Add(settingsButton, 4, 0);
+        actions.Controls.Add(checkinButton, 2, 0);
+        actions.Controls.Add(propertyEditButton, 4, 0);
+        actions.Controls.Add(settingsButton, 6, 0);
 
         workspaceOperationPanel.Dock = DockStyle.Bottom;
         workspaceOperationPanel.Height = 72;
@@ -849,11 +840,11 @@ internal sealed class PdmTaskPaneControl : UserControl
         workspaceOperationLayout.Controls.Add(workspaceOperationProgress, 0, 1);
         workspaceOperationPanel.Controls.Add(workspaceOperationLayout);
 
-        var searchToolbar = new TableLayoutPanel { Dock = DockStyle.Top, Height = 40, ColumnCount = 1, RowCount = 1, Margin = Padding.Empty };
+        var searchToolbar = new TableLayoutPanel { Dock = DockStyle.Top, Height = 36, ColumnCount = 1, RowCount = 1, Margin = Padding.Empty };
         searchToolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         searchBox.AutoSize = false;
         searchBox.Dock = DockStyle.Fill;
-        searchBox.Margin = new Padding(3, 4, 3, 4);
+        searchBox.Margin = new Padding(3);
         searchBox.AccessibleName = "搜索图号、名称或文件名";
         searchBox.TextChanged += (_, _) => RebuildTree(searchBox.Text);
         searchToolbar.Controls.Add(searchBox, 0, 0);
@@ -1149,6 +1140,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private static string VersionText(CadTreeNode node)
     {
+        if (node.Status == CadReferenceStatus.Virtual || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath)) return "随父装配";
         if (node.StoredVersionStateKnown && !node.HasStoredVersion)
         {
             return "— / —";
@@ -1669,33 +1661,50 @@ internal sealed class PdmTaskPaneControl : UserControl
         var actions = new TableLayoutPanel
         {
             Dock = DockStyle.Bottom,
-            Height = 72,
-            ColumnCount = 2,
-            RowCount = 2,
-            Padding = new Padding(0, 6, 0, 0)
+            Height = 36,
+            ColumnCount = 7,
+            RowCount = 1,
+            Padding = new Padding(3)
         };
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        openCurrentButton.Text = "只读打开最新受控版";
-        openCurrentButton.Dock = DockStyle.Fill;
-        openCurrentButton.AutoEllipsis = true;
+        ConfigureStructureActionColumns(actions);
+        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        foreach (var button in new[] { openCurrentButton, openHistoryButton, editHistoryButton, compareVersionsButton })
+            ConfigureStructureToolbarButton(button);
+        openCurrentButton.Text = "打开最新";
         openCurrentButton.Click += (_, _) => RaiseSelected(OpenRequested);
-        openHistoryButton.Text = "切换为所选版本";
-        openHistoryButton.Dock = DockStyle.Fill;
+        openHistoryButton.Text = "切换版本";
         openHistoryButton.Click += (_, _) => RaiseOpenHistory();
-        editHistoryButton.Text = "基于所选版本获取权限";
-        editHistoryButton.Dock = DockStyle.Fill;
-        editHistoryButton.AutoEllipsis = true;
+        editHistoryButton.Text = "获取权限";
         editHistoryButton.Click += (_, _) => RaiseEditHistoricalVersion();
-        compareVersionsButton.Text = "发起版本对比";
-        compareVersionsButton.Dock = DockStyle.Fill;
+        compareVersionsButton.Text = "版本对比";
         compareVersionsButton.Click += (_, _) => RaiseVersionComparison();
         actions.Controls.Add(openCurrentButton, 0, 0);
-        actions.Controls.Add(openHistoryButton, 1, 0);
-        actions.Controls.Add(editHistoryButton, 0, 1);
-        actions.Controls.Add(compareVersionsButton, 1, 1);
+        actions.Controls.Add(openHistoryButton, 2, 0);
+        actions.Controls.Add(editHistoryButton, 4, 0);
+        actions.Controls.Add(compareVersionsButton, 6, 0);
+        var arrangedColumns = 0;
+        Action arrangeButtons = () =>
+        {
+            var buttons = new[] { openCurrentButton, openHistoryButton, editHistoryButton, compareVersionsButton };
+            var gap = (int)Math.Round(actions.ColumnStyles[1].Width);
+            var buttonHeight = (int)Math.Round(actions.RowStyles[0].SizeType == SizeType.Absolute ? actions.RowStyles[0].Height : openCurrentButton.Height);
+            var minimumWidth = buttons.Max(button => TextRenderer.MeasureText(button.Text, button.Font).Width) + 8;
+            var columns = actions.ClientSize.Width - actions.Padding.Horizontal >= minimumWidth * 4 + gap * 3 ? 4 : 2;
+            if (columns == arrangedColumns) return;
+            arrangedColumns = columns;
+            actions.SuspendLayout();
+            actions.ColumnCount = columns * 2 - 1;
+            ConfigureStructureActionColumns(actions, columns, gap);
+            actions.RowCount = columns == 4 ? 1 : 3;
+            actions.RowStyles.Clear();
+            for (var row = 0; row < actions.RowCount; row++) actions.RowStyles.Add(new RowStyle(SizeType.Absolute, row % 2 == 0 ? buttonHeight : gap));
+            actions.Height = actions.Padding.Vertical + (columns == 4 ? buttonHeight : buttonHeight * 2 + gap);
+            for (var index = 0; index < buttons.Length; index++)
+                actions.SetCellPosition(buttons[index], new TableLayoutPanelCellPosition(index % columns * 2, index / columns * 2));
+            actions.ResumeLayout();
+        };
+        actions.Layout += (_, _) => arrangeButtons();
+        arrangeButtons();
         tab.Controls.Add(versionList);
         tab.Controls.Add(actions);
         return tab;
@@ -2540,6 +2549,8 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private string WorkStateText(CadTreeNode node)
     {
+        if (node.Status == CadReferenceStatus.Virtual || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath))
+            return "嵌入式·随父装配保存";
         if (node.IsLatestReadOnlyPreview)
         {
             return "最新只读";
@@ -2643,15 +2654,10 @@ internal sealed class PdmTaskPaneControl : UserControl
             selectedMeta.Text = "配置、版本和编辑状态";
             checkoutButton.Text = "获取";
             checkoutButton.Enabled = false;
-            checkinButton.Enabled = false;
-            batchOperationButton.Enabled = string.IsNullOrWhiteSpace(authenticatedUsername) == false
-                && rootNode is object
-                && rootNode.IsReadOnlyPreview == false
-                && workspaceOperationActive == false;
+            checkinButton.Enabled = CanOpenArchiveDialog;
             propertyEditButton.Enabled = rootNode is object
                 && rootNode.IsReadOnlyPreview == false
                 && workspaceOperationActive == false;
-            propertyCardButton.Enabled = propertyEditButton.Enabled;
             settingsButton.Enabled = true;
             ApplyStructureActionButtonAppearances();
             UpdateTreeHealth();
@@ -2663,16 +2669,17 @@ internal sealed class PdmTaskPaneControl : UserControl
             " · ",
             string.IsNullOrWhiteSpace(node.DisplayName) ? node.FileName : node.DisplayName);
         var workStateText = WorkStateText(node);
+        var embedded = node.Status == CadReferenceStatus.Virtual || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath);
         var editState = string.IsNullOrWhiteSpace(workStateText) ? string.Empty : string.Concat("　状态：", workStateText);
-        var selectedVersionText = string.IsNullOrWhiteSpace(node.CurrentRevision)
+        var selectedVersionText = embedded ? "随父装配" : string.IsNullOrWhiteSpace(node.CurrentRevision)
             ? string.IsNullOrWhiteSpace(node.Revision) ? "未归档" : node.Revision
             : VersionText(node);
-        var editor = string.IsNullOrWhiteSpace(node.CheckedOutBy)
+        var editor = embedded ? "随父装配编辑" : string.IsNullOrWhiteSpace(node.CheckedOutBy)
             ? "未检出"
             : string.Concat(DisplayUserName(node.CheckedOutBy),
                 string.IsNullOrWhiteSpace(node.CheckoutMachine) ? string.Empty : string.Concat(" @ ", node.CheckoutMachine),
                 node.CheckedOutAt.HasValue ? string.Concat(" · ", node.CheckedOutAt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm")) : string.Empty);
-        var provenance = node.IsExternalProvenance
+        var provenance = embedded ? "\r\n来源：嵌入式组件（保存在所属装配体内）" : node.IsExternalProvenance
             ? string.Concat("\r\n来源：工作区外的PLM来源副本", ProvenanceProjectText(node))
             : PdmDocumentIdentityStore.IsControlledWorkspacePath(node.FullPath)
                 ? string.Concat("\r\n来源：工作区", node.DocumentId.HasValue ? "受控文件" : "本地文件（未入库）")
@@ -2685,7 +2692,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             "\r\n描述：", string.IsNullOrWhiteSpace(node.Description) ? "-" : node.Description,
             "　材料：", string.IsNullOrWhiteSpace(node.Material) ? "-" : node.Material,
             provenance,
-            "\r\n路径：", string.IsNullOrWhiteSpace(node.FullPath) ? "-" : node.FullPath);
+            embedded ? "\r\n存储：所属父装配体内" : "\r\n路径：" + (string.IsNullOrWhiteSpace(node.FullPath) ? "-" : node.FullPath));
         var localFileExists = !string.IsNullOrWhiteSpace(node.FullPath) && File.Exists(node.FullPath);
         var canRegister = !node.DocumentId.HasValue
             && localFileExists
@@ -2715,16 +2722,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             && (latestReadOnlyPreview
                 ? node.DocumentId.HasValue && (string.IsNullOrWhiteSpace(node.CheckedOutBy) || canReclaimLatestPreview)
                 : (string.IsNullOrWhiteSpace(node.CheckedOutBy) || canRecoverCheckout) && (node.DocumentId.HasValue || canRegister));
-        var canFirstCheckIn = !readOnlyPreview && authenticated && canRegister;
-        var canCheckIn = CanCheckInNode(node);
-        var canExplainCheckIn = !readOnlyPreview
-            && !lifecycleLocked
-            && authenticated
-            && node.DocumentId.HasValue
-            && localFileExists
-            && (node.Kind == CadDocumentKind.Assembly || node.Kind == CadDocumentKind.Part || node.Kind == CadDocumentKind.Drawing);
         var checkedActionNodes = GetCheckedActionNodes();
-        var checkedNodes = checkedActionNodes.Where(CanCheckInNode).ToArray();
         var discardCheckedNodes = checkedActionNodes.Count > 0 && checkedActionNodes.All(IsEditingByCurrentUser);
         checkoutButton.Text = checkedActionNodes.Count > 0
             ? discardCheckedNodes ? "放弃" : "获取"
@@ -2733,18 +2731,14 @@ internal sealed class PdmTaskPaneControl : UserControl
         checkoutButton.Enabled = checkedActionNodes.Count > 0
             || canCheckout
             || (!readOnlyPreview && node.DocumentId.HasValue && editingByCurrentUser);
-        checkinButton.Enabled = !readOnlyPreview && (canCheckIn || checkedNodes.Length > 0 || canExplainCheckIn);
-        batchOperationButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
+        checkinButton.Enabled = CanOpenArchiveDialog;
         propertyEditButton.Enabled = rootNode != null && !rootNode.IsReadOnlyPreview;
-        propertyCardButton.Enabled = authenticated && rootNode != null && !rootNode.IsReadOnlyPreview;
         settingsButton.Enabled = true;
         if (workspaceOperationActive)
         {
             checkoutButton.Enabled = false;
             checkinButton.Enabled = false;
-            batchOperationButton.Enabled = false;
             propertyEditButton.Enabled = false;
-            propertyCardButton.Enabled = false;
         }
         ApplyStructureActionButtonAppearances();
         actionToolTip.SetToolTip(
@@ -2758,32 +2752,30 @@ internal sealed class PdmTaskPaneControl : UserControl
                 : historicalPreview ? "历史版本为只读预览，不能获取编辑权限" : latestReadOnlyPreview ? "切换到Working工作区并获取编辑权限" : canRecoverCheckout ? "恢复本机已过期的旧编辑会话" : canRegister ? "首次获取权限时将自动登记该图档" : node.DocumentId.HasValue ? "获取该图档的独占编辑权限" : "本地文件不存在或文件类型不支持登记");
         actionToolTip.SetToolTip(
             checkinButton,
-            checkedNodes.Length > 0
-                ? string.Concat("提交已勾选的", checkedNodes.Length, "个图档")
-                : node.DrawingReviewLocked ? "图纸审核中，不能提交存档" : readOnlyPreview ? "只读预览不能提交存档；请先切换到编辑工作区" : canFirstCheckIn ? "首次提交存档时选择归属项目，系统将自动登记并准备权限" : !node.DocumentId.HasValue ? "本地文件不存在或文件类型不支持登记" : !editingByCurrentUser ? string.IsNullOrWhiteSpace(node.CheckedOutBy) ? "尚未获取编辑权限；点击后查看正确操作" : string.Concat("当前编辑人员：", DisplayUserName(node.CheckedOutBy)) : !localFileExists ? "本地文件不存在，不能提交存档" : "提交当前文件并生成新工作版本");
+            checkedActionNodes.Count > 0
+                ? string.Concat("检查并整批提交已勾选的", checkedActionNodes.Count, "个图档，自动纳入必要的关联文件")
+                : rootNode?.IsReadOnlyPreview == true ? "只读预览不能提交存档；请先获取编辑权限"
+                    : "选择存档范围，统一检查后整批提交；未勾选时自动选择整套变更项");
         if (workspaceOperationActive)
         {
             var operationText = string.Concat(workspaceOperationStatus.Text, "，完成后按钮会自动恢复");
             actionToolTip.SetToolTip(checkoutButton, operationText);
             actionToolTip.SetToolTip(checkinButton, operationText);
-            actionToolTip.SetToolTip(batchOperationButton, operationText);
             actionToolTip.SetToolTip(propertyEditButton, operationText);
-            actionToolTip.SetToolTip(propertyCardButton, operationText);
         }
         UpdateTreeHealth();
     }
 
+    private bool CanOpenArchiveDialog => !string.IsNullOrWhiteSpace(authenticatedUsername)
+        && rootNode != null && !rootNode.IsReadOnlyPreview && !workspaceOperationActive;
+
     private void RefreshSelectionIndependentStructureActions()
     {
-        var enabled = !string.IsNullOrWhiteSpace(authenticatedUsername)
-            && rootNode != null
-            && !rootNode.IsReadOnlyPreview
-            && !workspaceOperationActive;
-        batchOperationButton.Enabled = enabled;
+        checkinButton.Enabled = CanOpenArchiveDialog;
         propertyEditButton.Enabled = rootNode != null
             && !rootNode.IsReadOnlyPreview
             && !workspaceOperationActive;
-        ApplyActionButtonAppearance(batchOperationButton, BatchOperationAvailableColor);
+        ApplyActionButtonAppearance(checkinButton, SubmitAvailableColor);
         ApplyActionButtonAppearance(propertyEditButton, SecondaryActionAvailableColor);
     }
 
@@ -2881,9 +2873,6 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
     }
 
-    private IReadOnlyList<CadTreeNode> GetCheckedCheckInNodes()
-        => GetCheckedActionNodes().Where(CanCheckInNode).ToArray();
-
     private IReadOnlyList<CadTreeNode> GetCheckedActionNodes()
     {
         if (rootNode == null || checkedCheckInPaths.Count == 0)
@@ -2961,6 +2950,8 @@ internal sealed class PdmTaskPaneControl : UserControl
     {
         MaterializeChildren(root, plan);
         root.Expand();
+        foreach (TreeNode child in root.Nodes)
+            if (child.Tag is CadTreeNode model && model.Status == CadReferenceStatus.Virtual) MaterializeAndExpand(child, plan);
     }
 
     private void MaterializeAndExpand(TreeNode node, TreeBuildPlan plan)
@@ -3159,14 +3150,15 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private void RaiseCheckInRequested()
     {
-        var checkedNodes = GetCheckedCheckInNodes();
+        if (!CanOpenArchiveDialog) return;
+        var checkedNodes = GetCheckedActionNodes();
         if (checkedNodes.Count > 0)
         {
             CheckInRequested?.Invoke(this, new CadTreeNodeEventArgs(checkedNodes[0], checkedNodes, true));
             return;
         }
 
-        RaiseSelected(CheckInRequested);
+        BatchOperationRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private void RaiseBatchPropertyRequested()
@@ -3244,7 +3236,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         button.Dock = DockStyle.Fill;
         button.Margin = Padding.Empty;
         button.AutoSize = false;
-        button.AutoEllipsis = false;
+        button.AutoEllipsis = true;
         button.TextAlign = ContentAlignment.MiddleCenter;
         button.UseCompatibleTextRendering = false;
         button.FlatStyle = FlatStyle.Flat;
@@ -3257,7 +3249,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         button.Text = text;
         button.AccessibleName = text;
         button.Dock = DockStyle.Fill;
-        button.Margin = new Padding(2, 0, 2, 0);
+        button.Margin = Padding.Empty;
         button.AutoSize = false;
         button.AutoEllipsis = true;
         button.TabStop = true;
@@ -3277,9 +3269,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             checkoutButton,
             string.Equals(checkoutButton.Text, "放弃", StringComparison.Ordinal) ? DiscardCheckoutAvailableColor : CheckoutAvailableColor);
         ApplyActionButtonAppearance(checkinButton, SubmitAvailableColor);
-        ApplyActionButtonAppearance(batchOperationButton, BatchOperationAvailableColor);
         ApplyActionButtonAppearance(propertyEditButton, SecondaryActionAvailableColor);
-        ApplyActionButtonAppearance(propertyCardButton, SecondaryActionAvailableColor);
         ApplyActionButtonAppearance(settingsButton, SecondaryActionAvailableColor);
     }
 
@@ -3294,12 +3284,14 @@ internal sealed class PdmTaskPaneControl : UserControl
         button.Invalidate();
     }
 
-    private static void ConfigureStructureActionColumns(TableLayoutPanel actions)
+    private static void ConfigureStructureActionColumns(TableLayoutPanel actions, int buttons = 4, float gap = 6)
     {
         actions.ColumnStyles.Clear();
-        for (var column = 0; column < 5; column++)
+        for (var column = 0; column < buttons * 2 - 1; column++)
         {
-            actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F));
+            actions.ColumnStyles.Add(column % 2 == 0
+                ? new ColumnStyle(SizeType.Percent, 100F / buttons)
+                : new ColumnStyle(SizeType.Absolute, gap));
         }
     }
 
@@ -3307,7 +3299,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     {
         const int structureToolbarGaps = 18;
         var availableWidth = Math.Max(0, actions.ClientSize.Width - actions.Padding.Horizontal);
-        var buttonWidth = Math.Max(60, (availableWidth - structureToolbarGaps) / 4);
+        var buttonWidth = Math.Max(48, (availableWidth - structureToolbarGaps) / 4);
         clientButtonColumn.Width = buttonWidth;
         userButtonColumn.Width = buttonWidth;
     }

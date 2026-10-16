@@ -59,6 +59,7 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         var definition = await FindRoleDefinitionAsync(connection, roleCode, cancellationToken) ?? throw new PdmNotFoundException("角色不存在。");
         if (definition.BaseRole == UserRole.Administrator) return await GetRolePermissionDirectoryAsync(cancellationToken);
+        if (definition.BaseRole == UserRole.PlatformAdministrator) throw new PdmRuleException("平台管理员权限由系统固定，不支持修改。");
         var normalized = RolePermissionCatalog.Normalize(definition.BaseRole, permissionCodes);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         try
@@ -81,6 +82,7 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         var source = await FindRoleDefinitionAsync(connection, sourceRoleCode, cancellationToken) ?? throw new PdmNotFoundException("复制来源角色不存在。");
         if (source.BaseRole == UserRole.Administrator) throw new PdmRuleException("系统管理员不能作为复制来源。");
+        if (source.BaseRole == UserRole.PlatformAdministrator) throw new PdmRuleException("平台管理员不能作为复制来源，请选择业务角色。");
         if (await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT EXISTS(SELECT 1 FROM role_definition WHERE role_name=@Name)", new { Name = normalizedName }, cancellationToken: cancellationToken)) == 1)
             throw new PdmConflictException("角色名称已经存在。");
         var roleCode = $"custom-{Guid.NewGuid():N}";
@@ -137,7 +139,7 @@ public sealed partial class MySqlPdmRepository
         {
             var baseRole = Enum.Parse<UserRole>(definition.BaseRole, true);
             return new RolePermissionSettings(definition.RoleCode, definition.Name, definition.Description, baseRole, definition.IsSystem,
-                baseRole == UserRole.Administrator,
+                baseRole is UserRole.Administrator or UserRole.PlatformAdministrator,
                 baseRole == UserRole.Administrator ? RolePermissionCatalog.Defaults[UserRole.Administrator].Order().ToArray() : byRole.GetValueOrDefault(definition.RoleCode, []),
                 userCounts.GetValueOrDefault(definition.RoleCode));
         }).ToArray());

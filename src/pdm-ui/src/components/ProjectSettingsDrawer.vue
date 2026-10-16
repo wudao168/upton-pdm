@@ -35,7 +35,7 @@ const resetReason = ref('')
 const resetConfirmation = ref('')
 const forceReset = ref(false)
 type SettingsTab = 'copy' | 'reset' | 'dingtalk'
-const activeSettingsTab = ref<SettingsTab>(props.canCopyContent ? 'copy' : props.canResetContent ? 'reset' : 'dingtalk')
+const activeSettingsTab = ref<SettingsTab>('dingtalk')
 
 const copySourceProjects = computed(() => props.projects
   .filter(item => item.id !== props.project.id && item.canReadContent)
@@ -62,7 +62,7 @@ function resetDangerForm() {
 }
 
 function resetSettingsTab() {
-  activeSettingsTab.value = props.canCopyContent ? 'copy' : props.canResetContent ? 'reset' : 'dingtalk'
+  activeSettingsTab.value = 'dingtalk'
 }
 
 function selectSettingsTab(tab: SettingsTab) {
@@ -70,8 +70,8 @@ function selectSettingsTab(tab: SettingsTab) {
   if (tab === 'reset' && props.canResetContent && !resetReadiness.value) void refreshResetReadiness()
 }
 
-watch(() => props.modelValue, open => { if (open) { resetCopy(); resetDangerForm(); resetSettingsTab(); if (activeSettingsTab.value === 'reset' && props.canResetContent) void refreshResetReadiness() } }, { immediate: true })
-watch(() => props.project.id, () => { resetCopy(); resetDangerForm(); resetSettingsTab(); if (props.modelValue && activeSettingsTab.value === 'reset' && props.canResetContent) void refreshResetReadiness() })
+watch(() => props.modelValue, open => { if (open) { resetCopy(); resetDangerForm(); resetSettingsTab() } }, { immediate: true })
+watch(() => props.project.id, () => { resetCopy(); resetDangerForm(); resetSettingsTab() })
 
 function closeSettings() {
   emit('update:modelValue', false)
@@ -184,9 +184,9 @@ async function executeSnapshotRestore(snapshot: ProjectContentResetSnapshotSumma
   <el-drawer :model-value="modelValue" :title="`项目设置 · ${project.code}`" size="720px" :close-on-click-modal="false" @update:model-value="emit('update:modelValue', $event)">
     <section class="pdm-project-settings" aria-label="项目设置内容">
       <nav class="pdm-project-settings__tabs" role="tablist" aria-label="项目设置选项卡">
+        <button type="button" role="tab" :aria-selected="activeSettingsTab === 'dingtalk'" @click="selectSettingsTab('dingtalk')">钉钉群绑定</button>
         <button v-if="canCopyContent" type="button" role="tab" :aria-selected="activeSettingsTab === 'copy'" @click="selectSettingsTab('copy')">项目复制</button>
         <button v-if="canResetContent" type="button" role="tab" :aria-selected="activeSettingsTab === 'reset'" @click="selectSettingsTab('reset')">项目重置</button>
-        <button type="button" role="tab" :aria-selected="activeSettingsTab === 'dingtalk'" @click="selectSettingsTab('dingtalk')">钉钉群绑定</button>
       </nav>
       <section v-if="canCopyContent" v-show="activeSettingsTab === 'copy'" class="pdm-project-settings__section" aria-labelledby="pdm-project-copy-settings-title">
         <header>

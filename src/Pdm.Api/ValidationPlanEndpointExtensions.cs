@@ -146,6 +146,19 @@ public static class ValidationPlanEndpointExtensions
             return Results.Ok(await service.DecideAsync(taskId, request.Decision, request.Comment, actor, role, cancellationToken));
         });
 
+        api.MapGet("/validation-plan-approval-tasks/{taskId:guid}/emergency-capability", async (Guid taskId, HttpContext context, IServiceProvider services, CancellationToken cancellationToken) =>
+        {
+            var service = qualityAcceptance ? services.GetRequiredKeyedService<ValidationPlanService>("quality") : services.GetRequiredService<ValidationPlanService>();
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(new { CanDecide = await service.CanEmergencyDecideAsync(taskId, actor, role, cancellationToken) });
+        });
+        api.MapPost("/validation-plan-approval-tasks/{taskId:guid}/emergency-decision", async (Guid taskId, EmergencyApprovalRequest request, HttpContext context, IServiceProvider services, CancellationToken cancellationToken) =>
+        {
+            var service = qualityAcceptance ? services.GetRequiredKeyedService<ValidationPlanService>("quality") : services.GetRequiredService<ValidationPlanService>();
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.EmergencyDecideAsync(taskId, request.Decision, request.Reason, actor, role, cancellationToken));
+        });
+
         api.MapGet("/validation-plan-approval-tasks/mine", async (HttpContext context, IPdmRepository repository, IServiceProvider services, CancellationToken cancellationToken) =>
         {
             var service = qualityAcceptance ? services.GetRequiredKeyedService<ValidationPlanService>("quality") : services.GetRequiredService<ValidationPlanService>();

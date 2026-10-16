@@ -1,4 +1,4 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 
 namespace Upton.Pdm.Domain;
 
@@ -244,19 +244,27 @@ public sealed record ApprovalWorkflowStepTemplate(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] ApprovalStage Stage,
     string Name,
     [property: JsonConverter(typeof(JsonStringEnumConverter))] ApprovalAssigneeSource AssigneeSource,
-    string? FixedAssignee = null);
+    string? FixedAssignee = null,
+    Guid? FixedUnitId = null,
+    IReadOnlyList<string>? RoleCodes = null);
 
 public sealed record ApprovalWorkflowTemplate(
     string Code,
     string Name,
     int Version,
-    IReadOnlyList<ApprovalWorkflowStepTemplate> Steps);
+    IReadOnlyList<ApprovalWorkflowStepTemplate> Steps)
+{
+    public IReadOnlyList<string>? EmergencyRoleCodes { get; init; }
+}
 
 public sealed record ReleaseApprovalSettings(
     ApprovalWorkflowTemplate Mechanical,
     ApprovalWorkflowTemplate Electrical,
     string EmergencySubstituteRoleCode,
-    ApprovalWorkflowTemplate? ValidationPlan = null)
+    ApprovalWorkflowTemplate? ValidationPlan = null,
+    ApprovalWorkflowTemplate? Standard = null,
+    ApprovalWorkflowTemplate? NonStandard = null,
+    ApprovalWorkflowTemplate? MaterialCodeApplication = null)
 {
     public static ReleaseApprovalSettings Default { get; } = new(
         new ApprovalWorkflowTemplate(
@@ -294,12 +302,14 @@ public sealed record ReleaseApprovalSettings(
 
         static ApprovalWorkflowTemplate Upgrade(
             ApprovalWorkflowTemplate template,
-            IReadOnlyDictionary<ApprovalStage, ApprovalAssigneeSource> sources)
+            IReadOnlyDictionary<ApprovalStage, ApprovalAssigneeSource> sources,
+            bool fixedUsersOnly = false)
         {
             var changed = false;
             var steps = template.Steps.Select(step =>
             {
-                if (!sources.TryGetValue(step.Stage, out var source) || step.AssigneeSource == source)
+                if (!sources.TryGetValue(step.Stage, out var source) || step.AssigneeSource == source
+                    || fixedUsersOnly && step.AssigneeSource != ApprovalAssigneeSource.FixedUser)
                     return step;
                 changed = true;
                 return step with { AssigneeSource = source, FixedAssignee = null };
@@ -307,18 +317,23 @@ public sealed record ReleaseApprovalSettings(
             return changed ? template with { Version = template.Version + 1, Steps = steps } : template;
         }
 
+        var mechanical = Upgrade(settings.Mechanical, new Dictionary<ApprovalStage, ApprovalAssigneeSource>
+        {
+            [ApprovalStage.MechanicalSupervisor] = ApprovalAssigneeSource.PrimaryUnitManager
+        });
         return settings with
         {
-            Mechanical = Upgrade(settings.Mechanical, new Dictionary<ApprovalStage, ApprovalAssigneeSource>
-            {
-                [ApprovalStage.MechanicalSupervisor] = ApprovalAssigneeSource.PrimaryUnitManager
-            }),
-            Electrical = Upgrade(settings.Electrical, new Dictionary<ApprovalStage, ApprovalAssigneeSource>
+            Mechanical = mechanical,
+            Standard = settings.Standard ?? mechanical with { Code = "standard-release", Name = "标准件BOM审批" },
+            NonStandard = settings.NonStandard ?? mechanical with { Code = "nonstandard-release", Name = "非标件BOM与图纸审批" },
+            Electrical = settings.Standard is not null || settings.NonStandard is not null ? settings.Electrical : Upgrade(settings.Electrical, new Dictionary<ApprovalStage, ApprovalAssigneeSource>
             {
                 [ApprovalStage.HardwareSupervisor] = ApprovalAssigneeSource.PrimaryUnitManager,
                 [ApprovalStage.StandardizationSupervisor] = ApprovalAssigneeSource.ParentUnitManager
-            }),
-            ValidationPlan = Upgrade(settings.ValidationPlan ?? Default.ValidationPlan!, new Dictionary<ApprovalStage, ApprovalAssigneeSource>
+            }, fixedUsersOnly: true),
+            ValidationPlan = settings.Standard is not null || settings.NonStandard is not null
+                ? settings.ValidationPlan ?? Default.ValidationPlan!
+                : Upgrade(settings.ValidationPlan ?? Default.ValidationPlan!, new Dictionary<ApprovalStage, ApprovalAssigneeSource>
             {
                 [ApprovalStage.MechanicalEngineer] = ApprovalAssigneeSource.Submitter,
                 [ApprovalStage.MainDesigner] = ApprovalAssigneeSource.ProjectDesignLead,
@@ -326,6 +341,14 @@ public sealed record ReleaseApprovalSettings(
             })
         };
     }
+
+    public ApprovalWorkflowTemplate ForBomKind(BomKind kind) => kind switch
+    {
+        BomKind.Standard => Standard ?? UseOrganizationHierarchy(this).Standard!,
+        BomKind.NonStandard => NonStandard ?? UseOrganizationHierarchy(this).NonStandard!,
+        BomKind.Electrical => Electrical,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "该BOM类型不支持发布审批。")
+    };
 }
 
 public sealed record ProjectNumberingOptions(
@@ -572,6 +595,8 @@ public sealed record BomItem(
 
     public string? ImpactStage { get; init; }
 
+    public string? InventoryReplacementMaterialCode { get; init; }
+
     public Guid? SourceDocumentId { get; init; }
 
     public string? SourceConfiguration { get; init; }
@@ -809,6 +834,8 @@ public sealed record ReleasePackage(
     public string? WorkflowCode { get; init; }
 
     public int WorkflowVersion { get; init; }
+
+    public IReadOnlyList<string>? EmergencyRoleCodes { get; init; }
 
     public IReadOnlyList<Guid> SelectedBomItemIds { get; init; } = [];
 

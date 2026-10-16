@@ -1,4 +1,4 @@
-﻿using System.Security.Claims;
+using System.Security.Claims;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 using Upton.Pdm.Infrastructure;
@@ -186,12 +186,21 @@ public static class MaterialEndpointExtensions
                 actor, role, cancellationToken)).Select(MapResolution));
         });
 
-        api.MapPost("/material-code/resolve", async (ResolveMaterialCodesRequest request, HttpContext context, MaterialService service, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPost("/material-code/resolve", async (ResolveMaterialCodesRequest request, HttpContext context, MaterialService service, PdmWorkflowService workflow, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var results = await service.ResolveStandardBomMaterialsAsync(new(request.ProjectId, request.BomItemIds), actor, role, cancellationToken);
+            if (!await ProjectPermissionPolicy.CanAsync(repository, request.ProjectId, actor, role, PermissionCodes.BomEdit, cancellationToken))
+                return Results.Ok(results.Select(MapResolution));
+            var editableKinds = new Dictionary<BomKind, bool>();
             foreach (var result in results.Where(item => item.Status == MaterialCodeResolutionStatus.Matched && item.Material?.U9SyncConfirmed == true))
             {
+                var bomItem = await repository.FindBomItemAsync(request.ProjectId, result.BomItemId, cancellationToken);
+                if (bomItem is null) continue;
+                if (!editableKinds.TryGetValue(bomItem.Kind, out var canEdit))
+                    editableKinds[bomItem.Kind] = canEdit = await ProjectPermissionPolicy.CanAsync(repository, request.ProjectId, actor, role,
+                        bomItem.Kind == BomKind.Electrical ? PermissionCodes.BomElectricalEdit : PermissionCodes.BomMechanicalEdit, cancellationToken);
+                if (!canEdit) continue;
                 await service.LinkAutomaticallyMatchedBomMaterialAsync(new(request.ProjectId, result.BomItemId, result.Material!.Id), actor, role, cancellationToken);
                 await workflow.ApplyAutomaticallyMatchedMaterialCodeToBomAsync(request.ProjectId, result.BomItemId, result.Material.MaterialCode, actor, cancellationToken);
             }
@@ -226,10 +235,11 @@ public static class MaterialEndpointExtensions
         api.MapPost("/material-code/applications/{applicationId:guid}/decision", async (Guid applicationId, DecideMaterialCodeApplicationRequest request, HttpContext context, MaterialService service, MaterialSyncBatchService syncBatches, ApprovalU9AutomationService automation, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var result = await service.DecideMaterialCodeApplicationAsync(applicationId, request.ExpectedRowVersion, request.Approved, request.Comment, actor, role, cancellationToken, request.CategoryCode);
+            var result = await service.DecideMaterialCodeApplicationAsync(applicationId, request.ExpectedRowVersion, request.Approved, request.Comment, actor, role, cancellationToken, request.CategoryCode, request.EmergencySubstitute, request.EmergencyReason);
+            var finalApproved = request.Approved && result.Application.Status == MaterialCodeApplicationStatus.Approved;
             MaterialSyncBatch? automaticBatch = null;
             ApprovalU9AutomationResult? automationResult = null;
-            if (request.Approved && result.Application.BomHeaderKind is not null && result.Task is not null)
+            if (finalApproved && result.Application.BomHeaderKind is not null && result.Task is not null)
             {
                 automaticBatch = await syncBatches.CreateAsync([result.Task.Id], actor, role, cancellationToken);
                 automationResult = new ApprovalU9AutomationResult(
@@ -238,11 +248,11 @@ public static class MaterialEndpointExtensions
                     null,
                     []);
             }
-            else if (request.Approved && result.Application.BomHeaderKind is not null && result.Material?.U9SyncConfirmed == true)
+            else if (finalApproved && result.Application.BomHeaderKind is not null && result.Material?.U9SyncConfirmed == true)
             {
                 automationResult = await automation.ContinueAfterMaterialSyncAsync(result.Application.ProjectId, actor, cancellationToken);
             }
-            else if (request.Approved)
+            else if (finalApproved)
             {
                 // 普通料品：批准后同样自动排队同步U9C，失败项仍留在第二步列表可人工重试。
                 if (result.Task is not null)
@@ -263,6 +273,8 @@ public static class MaterialEndpointExtensions
                         []);
                 }
             }
+            if (request.Approved && !finalApproved)
+                automationResult = new ApprovalU9AutomationResult(ApprovalU9AutomationStage.NotRequested, "当前节点已通过，等待后续审批；尚未生成料号或同步任务。", null, []);
             return Results.Ok(new
             {
                 Application = MapApplication(result.Application),
@@ -820,7 +832,10 @@ public static class MaterialEndpointExtensions
         application.SyncTaskId,
         SyncStatus = application.SyncStatus?.ToString(),
         application.SyncError,
-        application.WorkflowMessage
+        application.WorkflowMessage,
+        application.ApprovalWorkflow,
+        application.CanDecide,
+        application.CanEmergencyDecide
     };
 
     private static object MapResolution(MaterialCodeResolution resolution) => new

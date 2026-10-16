@@ -27,8 +27,33 @@ public sealed class ReleasePreviewService(
     TimeProvider timeProvider,
     ReleaseDeliveryArchiveService? releaseDeliveryArchive = null)
 {
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, SemaphoreSlim> PackageLocks = new();
     public const int MaxAttempts = 5;
     private const int BatchSize = 5;
+
+    /// <summary>启动巡检历史成功状态，发现实际文件缺失或归档未完成时重新排队。</summary>
+    public async Task<int> ReconcileDeliveryAsync(Guid packageId, CancellationToken cancellationToken)
+    {
+        var package = await repository.FindReleasePackageAsync(packageId, cancellationToken);
+        if (package is null || package.State != ReleasePackageState.Published) return 0;
+        string? error = null;
+        var archived = 0;
+        try
+        {
+            if ((await ListItemsAsync(packageId, cancellationToken)).Any(item => !item.Succeeded))
+                error = "生产资料巡检发现预览缺失或尚未投放，已重新排队补齐。";
+            if (releaseDeliveryArchive is not null) archived = await releaseDeliveryArchive.ArchiveAsync(packageId, "system", cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            error = await RecordFailureAsync(packageId, exception);
+        }
+        if (error is not null)
+            await repository.MarkReleasePreviewStateAsync(packageId, ReleasePreviewState.Pending, error,
+                package.PreviewState is ReleasePreviewState.Succeeded or ReleasePreviewState.None ? 0 : package.PreviewAttempts,
+                timeProvider.GetUtcNow(), cancellationToken);
+        return archived;
+    }
 
     public async Task<int> ProcessPendingAsync(CancellationToken cancellationToken)
     {
@@ -43,6 +68,19 @@ public sealed class ReleasePreviewService(
     /// <summary>处理单个发布包的转图；返回是否成功（失败会记录原因并按剩余次数继续排队）。</summary>
     public async Task<bool> ProcessAsync(ReleasePackage package, CancellationToken cancellationToken)
     {
+        var gate = PackageLocks.GetOrAdd(package.Id, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            package = await repository.FindReleasePackageAsync(package.Id, cancellationToken) ?? package;
+            if (package.State != ReleasePackageState.Published) return false;
+            return await ProcessCoreAsync(package, cancellationToken);
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task<bool> ProcessCoreAsync(ReleasePackage package, CancellationToken cancellationToken)
+    {
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken);
         if (project is null) return false;
         var attempts = package.PreviewAttempts + 1;
@@ -50,20 +88,19 @@ public sealed class ReleasePreviewService(
         await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Running, package.PreviewError, package.PreviewAttempts, now, cancellationToken);
         try
         {
-            var completed = (await ListItemsAsync(package.Id, cancellationToken)).Where(item => item.Succeeded).Select(item => item.DocumentId).ToHashSet();
+            var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
+            var completed = new HashSet<Guid>();
+            foreach (var version in await ReleasedVersionsAsync(package.Id, cancellationToken))
+                if (await PreviewReadableAsync(vaultRoot, version, cancellationToken)) completed.Add(version.DocumentId);
             var sources = (await repository.ListReleasePreviewSourcesAsync(package.Id, cancellationToken))
                 .Where(source => !completed.Contains(source.DocumentId)).ToArray();
-            if (sources.Length == 0)
-            {
-                await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Succeeded, null, attempts, timeProvider.GetUtcNow(), cancellationToken);
-                return true;
-            }
-            var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
             var stagingDirectory = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-staging", package.Number));
             Directory.CreateDirectory(stagingDirectory);
-            var (previews, failures) = await ConvertPreviewsAsync(package, project, sources, stagingDirectory, cancellationToken);
-            var releasedVersions = await repository.AttachReleasePreviewArtifactsAsync(package.Id, previews, cancellationToken);
-            CopyPreviewsIntoPublishedPath(package, vaultRoot, releasedVersions);
+            var (previews, failures) = sources.Length == 0
+                ? (new Dictionary<Guid, DocumentPreviewArtifact>(), (PartialPreviewConversionException?)null)
+                : await ConvertPreviewsAsync(package, project, sources, stagingDirectory, cancellationToken);
+            if (previews.Count > 0) await repository.AttachReleasePreviewArtifactsAsync(package.Id, previews, cancellationToken);
+            await CopyPreviewsIntoPublishedPathAsync(package, vaultRoot, await ReleasedVersionsAsync(package.Id, cancellationToken), cancellationToken);
             // 转图补齐后发布目录多了 STEP/PDF，这里顺带把新增成品登记到"机械发布/电气发布"目录。
             if (releaseDeliveryArchive is not null)
             {
@@ -76,6 +113,8 @@ public sealed class ReleasePreviewService(
                 await releaseDeliveryArchive.ArchiveAsync(package.Id, archiveActor, cancellationToken);
             }
             if (failures is not null) throw failures;
+            if ((await ListItemsAsync(package.Id, cancellationToken)).Any(item => !item.Succeeded))
+                throw new PdmRuleException("发布资料尚未齐套，请检查失败图档并重试转图。");
             await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Succeeded, null, attempts, timeProvider.GetUtcNow(), cancellationToken);
             await NotifyAsync(package, project, "图纸转换已完成", $"STEP/PDF 已生成并绑定正式版本（第{attempts}次处理）", "result", cancellationToken);
             return true;
@@ -83,19 +122,20 @@ public sealed class ReleasePreviewService(
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             var exhausted = attempts >= MaxAttempts;
+            var error = await RecordFailureAsync(package.Id, exception);
             await repository.MarkReleasePreviewStateAsync(package.Id,
-                exhausted ? ReleasePreviewState.Failed : ReleasePreviewState.Pending, exception.Message, attempts, timeProvider.GetUtcNow(), cancellationToken);
+                exhausted ? ReleasePreviewState.Failed : ReleasePreviewState.Pending, error, attempts, timeProvider.GetUtcNow(), CancellationToken.None);
             if (exhausted)
                 await NotifyAsync(package, project, "图纸转换多次失败",
-                    $"已重试{attempts}次仍未生成 STEP/PDF：{exception.Message}；发布已完成，可在发布面板手动重试转图", "result", cancellationToken);
+                    $"已重试{attempts}次，生产资料仍未全部投放：{error}；可在发布面板手动重试转图", "result", cancellationToken);
             return false;
         }
-        catch (OperationCanceledException exception)
+        catch (OperationCanceledException)
         {
             // 服务重启或整批运行超时会打断转图；必须落回可重排队的状态，否则发布面板会一直停在"转换中"并显示上一次的旧错误。
             // 打断不是转换本身失败，因此不消耗重试次数。
             await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Pending,
-                $"转图处理被中断（服务停止或整批运行超时），已重新排队：{(string.IsNullOrWhiteSpace(exception.Message) ? "未返回原因" : exception.Message)}",
+                "转图处理被中断（服务停止或整批运行超时），已重新排队。",
                 package.PreviewAttempts, timeProvider.GetUtcNow(), CancellationToken.None);
             throw;
         }
@@ -108,41 +148,58 @@ public sealed class ReleasePreviewService(
             ?? throw new PdmNotFoundException("发布包不存在。");
         var sources = await repository.ListReleasePreviewSourcesAsync(releasePackageId, cancellationToken);
         if (sources.Count == 0) return [];
-        var released = new Dictionary<Guid, DocumentVersion>();
+        var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
+            ?? throw new PdmNotFoundException("发布包对应的项目不存在。");
+        var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
+        var released = (await ReleasedVersionsAsync(releasePackageId, cancellationToken)).ToDictionary(version => version.DocumentId);
+        var items = new List<ReleasePreviewItem>();
         foreach (var source in sources)
         {
-            var version = (await repository.ListDocumentVersionsAsync(source.DocumentId, cancellationToken))
-                .Where(item => item.ReleasePackageId == releasePackageId)
-                .OrderByDescending(item => item.CreatedAt)
-                .FirstOrDefault();
-            if (version is not null) released[source.DocumentId] = version;
+            released.TryGetValue(source.DocumentId, out var version);
+            var preview = version?.Preview;
+            var readable = await PreviewReadableAsync(vaultRoot, version, cancellationToken);
+            var delivered = readable && !string.IsNullOrWhiteSpace(package.PublishedPath)
+                && await ReleaseDeliveryFiles.IsDeliveredAsync(package.PublishedPath, preview!, cancellationToken);
+            var error = delivered ? null
+                : package.PreviewState == ReleasePreviewState.Running ? "正在转换…"
+                : version is null ? "该图档没有随本次发布转为正式版本，需要重新发布后才能转出。"
+                : readable ? "预览已生成，但生产目录尚未投放或文件校验未通过，请重试转图。"
+                : preview is not null ? "预览文件缺失或内容校验未通过，请重试转图。"
+                : ItemError(package.PreviewError, source.FileName);
+            items.Add(new ReleasePreviewItem(package.Id, package.Number, source.DocumentId, source.DrawingNumber,
+                source.FileName, source.Kind, ExpectedFormat(source.Kind), delivered, preview?.FileLength ?? 0,
+                preview?.StorageRelativePath ?? string.Empty, preview?.Sha256 ?? string.Empty, error));
         }
-        return sources
-            .Select(source =>
-            {
-                released.TryGetValue(source.DocumentId, out var version);
-                var preview = version?.Preview;
-                var error = preview is not null
-                    ? null
-                    : version is null
-                        ? "该图档没有随本次发布转为正式版本（发布时不在发布范围内），需要用新的非标件BOM+图纸发布后才能转出。"
-                        : package.PreviewState == ReleasePreviewState.Running ? "正在转换…" : ItemError(package.PreviewError, source.FileName);
-                return new ReleasePreviewItem(
-                    package.Id,
-                    package.Number,
-                    source.DocumentId,
-                    source.DrawingNumber,
-                    source.FileName,
-                    source.Kind,
-                    ExpectedFormat(source.Kind),
-                    preview is not null,
-                    preview?.FileLength ?? 0,
-                    preview?.StorageRelativePath ?? string.Empty,
-                    preview?.Sha256 ?? string.Empty,
-                    error);
-            })
-            .OrderBy(item => item.DrawingNumber, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        return items.OrderBy(item => item.DrawingNumber, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private async Task<IReadOnlyList<DocumentVersion>> ReleasedVersionsAsync(Guid packageId, CancellationToken cancellationToken)
+    {
+        var result = new List<DocumentVersion>();
+        foreach (var source in await repository.ListReleasePreviewSourcesAsync(packageId, cancellationToken))
+        {
+            var version = (await repository.ListDocumentVersionsAsync(source.DocumentId, cancellationToken))
+                .Where(item => item.ReleasePackageId == packageId).OrderByDescending(item => item.CreatedAt).FirstOrDefault();
+            if (version is not null) result.Add(version);
+        }
+        return result;
+    }
+
+    private async Task<bool> PreviewReadableAsync(string vaultRoot, DocumentVersion? version, CancellationToken cancellationToken)
+    {
+        if (version?.Preview is not { } preview || version.Status != DocumentVersionStatus.Released) return false;
+        var document = await repository.FindDocumentAsync(version.DocumentId, cancellationToken);
+        if (document is null || preview.Format != ExpectedFormat(document.Kind)) return false;
+        var legacy = false;
+        if (document.Kind == DocumentKind.Drawing)
+        {
+            var original = version.SourceVersionId.HasValue
+                ? await repository.FindDocumentVersionAsync(version.DocumentId, version.SourceVersionId.Value, cancellationToken) : null;
+            legacy = original is null || string.Equals(original.StorageRelativePath, version.StorageRelativePath, StringComparison.OrdinalIgnoreCase);
+        }
+        if (!legacy && !string.Equals(preview.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase)) return false;
+        return await ReleaseDeliveryFiles.MatchesAsync(StorageLocationPolicy.ResolveUnder(vaultRoot, preview.StorageRelativePath),
+            preview.FileLength, preview.Sha256, cancellationToken);
     }
 
     /// <summary>按项目列出转图明细，可按发布包筛选（不传则列出该项目所有有转图记录的发布包）。</summary>
@@ -173,6 +230,22 @@ public sealed class ReleasePreviewService(
     /// </summary>
     public async Task<IReadOnlyList<ReleasePreviewItem>> RetryItemsAsync(Guid releasePackageId, IReadOnlyList<Guid> documentIds, string actor, CancellationToken cancellationToken)
     {
+        var gate = PackageLocks.GetOrAdd(releasePackageId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
+        try { return await RetryItemsCoreAsync(releasePackageId, documentIds, actor, cancellationToken); }
+        catch (OperationCanceledException)
+        {
+            var package = await repository.FindReleasePackageAsync(releasePackageId, CancellationToken.None);
+            if (package?.PreviewState == ReleasePreviewState.Running)
+                await repository.MarkReleasePreviewStateAsync(releasePackageId, ReleasePreviewState.Pending,
+                    "转图处理被中断（服务停止或整批运行超时），已重新排队。", package.PreviewAttempts, timeProvider.GetUtcNow(), CancellationToken.None);
+            throw;
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task<IReadOnlyList<ReleasePreviewItem>> RetryItemsCoreAsync(Guid releasePackageId, IReadOnlyList<Guid> documentIds, string actor, CancellationToken cancellationToken)
+    {
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
         if (package.State != ReleasePackageState.Published) throw new PdmRuleException("只有已发布的发布包可以重试转图。");
@@ -191,32 +264,66 @@ public sealed class ReleasePreviewService(
         try
         {
             IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews;
-            (previews, failures) = await ConvertPreviewsAsync(package, project, targets, stagingDirectory, cancellationToken);
+            var versions = (await ReleasedVersionsAsync(package.Id, cancellationToken)).ToDictionary(version => version.DocumentId);
+            var missingTargets = new List<ReleasePreviewSource>();
+            foreach (var target in targets)
+                if (!versions.TryGetValue(target.DocumentId, out var version) || !await PreviewReadableAsync(vaultRoot, version, cancellationToken))
+                    missingTargets.Add(target);
+            (previews, failures) = missingTargets.Count == 0
+                ? (new Dictionary<Guid, DocumentPreviewArtifact>(), (PartialPreviewConversionException?)null)
+                : await ConvertPreviewsAsync(package, project, missingTargets, stagingDirectory, cancellationToken);
             var releasedVersions = await repository.AttachReleasePreviewArtifactsAsync(package.Id, previews, cancellationToken);
-            if (releasedVersions.Count == 0 && failures is null)
+            if (missingTargets.Count > 0 && releasedVersions.Count == 0 && failures is null)
                 throw new PdmRuleException("该图档还没有正式版本，无法挂接预览；请重新发布后再转图。");
-            CopyPreviewsIntoPublishedPath(package, vaultRoot, releasedVersions);
+            await CopyPreviewsIntoPublishedPathAsync(package, vaultRoot, await ReleasedVersionsAsync(package.Id, cancellationToken), cancellationToken);
             if (releaseDeliveryArchive is not null) await releaseDeliveryArchive.ArchiveAsync(package.Id, actor, cancellationToken);
+            var items = await ListItemsAsync(package.Id, cancellationToken);
+            var pending = items.Where(item => !item.Succeeded).ToArray();
+            var errors = pending.Select(item => $"{item.FileName}：{(failures?.Errors.GetValueOrDefault(item.DocumentId)
+                ?? previousItems.FirstOrDefault(previous => previous.DocumentId == item.DocumentId)?.Error
+                ?? "尚未生成预览，请单独重试。").ReplaceLineEndings(" ")}");
+            await repository.MarkReleasePreviewStateAsync(package.Id,
+                pending.Length == 0 ? ReleasePreviewState.Succeeded : ReleasePreviewState.Failed,
+                pending.Length == 0 ? null : ItemErrorPrefix + string.Join("\n", errors),
+                pending.Length == 0 ? 0 : package.PreviewAttempts,
+                timeProvider.GetUtcNow(), cancellationToken);
+            return await ListItemsAsync(package.Id, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Failed, exception.Message, package.PreviewAttempts, timeProvider.GetUtcNow(), cancellationToken);
+            var error = await RecordFailureAsync(package.Id, exception);
+            await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Failed, error, package.PreviewAttempts, timeProvider.GetUtcNow(), CancellationToken.None);
+            throw new PdmRuleException(error);
+        }
+        catch (OperationCanceledException)
+        {
+            await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Pending,
+                "转图处理被中断（服务停止或整批运行超时），已重新排队。", package.PreviewAttempts, timeProvider.GetUtcNow(), CancellationToken.None);
             throw;
         }
-        var items = await ListItemsAsync(package.Id, cancellationToken);
-        var pending = items.Where(item => !item.Succeeded).ToArray();
-        var errors = pending.Select(item => $"{item.FileName}：{(failures?.Errors.GetValueOrDefault(item.DocumentId)
-            ?? previousItems.FirstOrDefault(previous => previous.DocumentId == item.DocumentId)?.Error
-            ?? "尚未生成预览，请单独重试。").ReplaceLineEndings(" ")}");
-        await repository.MarkReleasePreviewStateAsync(package.Id,
-            pending.Length == 0 ? ReleasePreviewState.Succeeded : ReleasePreviewState.Failed,
-            pending.Length == 0 ? null : ItemErrorPrefix + string.Join("\n", errors),
-            pending.Length == 0 ? 0 : package.PreviewAttempts,
-            timeProvider.GetUtcNow(), cancellationToken);
-        return await ListItemsAsync(package.Id, cancellationToken);
     }
 
     private const string ItemErrorPrefix = PartialPreviewConversionException.ItemErrorPrefix;
+
+    private async Task<string> RecordFailureAsync(Guid packageId, Exception exception)
+    {
+        try
+        {
+            await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), "system",
+                "release-package.preview-diagnostic", nameof(ReleasePackage), packageId.ToString(), exception.ToString()), CancellationToken.None);
+        }
+        catch (Exception diagnosticFailure)
+        {
+            // 诊断写入失败也必须继续尝试恢复任务状态，避免一次瞬时数据库故障把任务留在 Running。
+            System.Diagnostics.Trace.TraceError("发布包 {0} 转图异常：{1}；诊断写入失败：{2}", packageId, exception, diagnosticFailure);
+        }
+        return exception switch
+        {
+            PdmRuleException or PdmConflictException or PartialPreviewConversionException => exception.Message,
+            IOException or UnauthorizedAccessException => "生产资料写入或读取失败，请检查磁盘空间、共享目录连接和读写权限后重试。",
+            _ => "生产资料处理失败，请重试；如仍失败，请联系管理员检查转图诊断日志。"
+        };
+    }
 
     private static string ItemError(string? error, string fileName)
     {
@@ -244,22 +351,33 @@ public sealed class ReleasePreviewService(
     private static DocumentPreviewFormat ExpectedFormat(DocumentKind kind) =>
         kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step;
 
-    private static void CopyPreviewsIntoPublishedPath(ReleasePackage package, string vaultRoot, IReadOnlyList<DocumentVersion> releasedVersions)
+    private async Task CopyPreviewsIntoPublishedPathAsync(ReleasePackage package, string vaultRoot, IReadOnlyList<DocumentVersion> releasedVersions, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(package.PublishedPath) || !Directory.Exists(package.PublishedPath)) return;
+        if (string.IsNullOrWhiteSpace(package.PublishedPath) || !Directory.Exists(package.PublishedPath))
+            throw new PdmRuleException("生产发布目录不可访问，请检查共享目录连接和权限后重试转图。");
+        var delivered = new Dictionary<Guid, DocumentPreviewArtifact>();
         foreach (var version in releasedVersions)
         {
-            if (version.Preview is null) continue;
-            try
+            var preview = version.Preview;
+            if (preview is null || !await PreviewReadableAsync(vaultRoot, version, cancellationToken)) continue;
+            var source = StorageLocationPolicy.ResolveUnder(vaultRoot, preview.StorageRelativePath);
+            var target = ReleaseDeliveryFiles.PreviewPath(package.PublishedPath, preview);
+            if (!await ReleaseDeliveryFiles.MatchesAsync(target, preview.FileLength, preview.Sha256, cancellationToken))
             {
-                var source = StorageLocationPolicy.ResolveUnder(vaultRoot, version.Preview.StorageRelativePath);
-                if (!File.Exists(source)) continue;
-                var target = Path.Combine(package.PublishedPath, Path.GetFileName(source));
-                File.Copy(source, target, true);
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                var temporary = target + $".{Guid.NewGuid():N}.tmp";
+                try
+                {
+                    File.Copy(source, temporary, false);
+                    if (!await ReleaseDeliveryFiles.MatchesAsync(temporary, preview.FileLength, preview.Sha256, cancellationToken))
+                        throw new PdmRuleException("预览文件投放后校验不一致，请检查生产目录并重试转图。");
+                    File.Move(temporary, target, true);
+                }
+                finally { if (File.Exists(temporary)) File.Delete(temporary); }
             }
-            catch (IOException) { /* 发布目录不可写时忽略：预览已绑定到正式版本，可后续重试。 */ }
-            catch (UnauthorizedAccessException) { }
+            delivered[version.DocumentId] = preview;
         }
+        await ReleaseDeliveryFiles.RefreshManifestAsync(package, delivered, cancellationToken);
     }
 
     private async Task NotifyAsync(

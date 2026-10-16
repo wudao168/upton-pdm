@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, RotateCw as RefreshCw, Maximize2, Minimize2 } from '@lucide/vue'
-import { readProjectWorkbench } from '../api'
+import { readProjectCalendar } from '../api'
 import type { PdmUser } from '../types'
 import type { WorkbenchData, WorkbenchTab } from '../projectWorkbench'
 import { addDays, isMine } from '../projectWorkbench'
 import { calendarEvents, chinaToday, monthDays, shiftMonth } from '../projectCalendar'
 import type { CalendarEvent } from '../projectCalendar'
+import { festivalForDate, loadGlobalStatusContent } from '../globalStatusContent'
 
 const props = defineProps<{ token: string; currentUsername: string; companyId: string; users: PdmUser[] }>()
 const emit = defineEmits<{ open: [projectId: string, tab?: WorkbenchTab, taskId?: string] }>()
@@ -20,14 +21,18 @@ const error = ref('')
 const query = ref(''), unit = ref(''), manager = ref(''), mine = ref(false), kind = ref('')
 const display = ref<'double' | 'month' | 'week' | 'list'>('double')
 let generation = 0
+let request: AbortController | undefined
 async function load() {
   const current = ++generation
+  request?.abort()
+  const controller = new AbortController()
+  request = controller
   loading.value = true; error.value = ''
   try {
-    const response = await readProjectWorkbench('', props.token)
+    const response = await readProjectCalendar(props.token, controller.signal)
     if (current === generation) { data.value = response; today.value = chinaToday() }
   } catch (reason) {
-    if (current !== generation) return
+    if (current !== generation || controller.signal.aborted) return
     console.error('项目日历读取失败', reason)
     data.value = undefined
     error.value = '项目日历读取失败，请检查网络后重试；如仍失败，请联系管理员。'
@@ -37,10 +42,11 @@ watch([() => props.token, () => props.companyId, () => props.currentUsername], (
   data.value = undefined; query.value = ''; unit.value = ''; manager.value = ''; mine.value = false
   void load()
 }, { immediate: true })
+watch(today, (value, previous) => { if (value !== previous) void load() })
 const timer = setInterval(() => { today.value = chinaToday() }, 60000)
 const exitBoard = (event: KeyboardEvent) => { if (event.key === 'Escape') maximized.value = false }
 window.addEventListener('keydown', exitBoard)
-onBeforeUnmount(() => { generation++; clearInterval(timer); window.removeEventListener('keydown', exitBoard) })
+onBeforeUnmount(() => { generation++; request?.abort(); clearInterval(timer); window.removeEventListener('keydown', exitBoard) })
 const allItems = computed(() => data.value?.projects ?? [])
 const units = computed(() => [...new Set(allItems.value.map(item => item.project.executionUnitName).filter(Boolean))] as string[])
 const managers = computed(() => [...new Set(allItems.value.map(item => item.project.primaryProjectManager).filter(Boolean))] as string[])
@@ -68,6 +74,19 @@ const label = (value: string) => `${value.slice(0, 4)}年${Number(value.slice(5,
 const name = (username?: string) => props.users.find(user => user.username === username)?.displayName || username || '待安排'
 const toneLabel = { normal: '待完成', warning: '需关注', danger: '逾期／风险', done: '已完成' }
 const kindLabel = { milestone: '里程碑', stage: '阶段节点', shipping: '计划发货', risk: '风险期限' }
+const holidayDays = ref(new Map<string, { name: string; isOffDay: boolean }>())
+void loadGlobalStatusContent().then(library => {
+  holidayDays.value = new Map(library.holidayCalendars.flatMap(calendar => calendar.days.map(day => [day.date, day] as const)))
+}).catch(reason => { console.error('项目日历节假日数据读取失败', reason) })
+const holidayLabels = computed(() => new Map([...new Set([...months.value.flatMap(monthDays), ...weekDays.value])].map(day => {
+  const schedule = holidayDays.value.get(day)
+  const name = schedule?.name || festivalForDate(new Date(day + 'T12:00:00'))
+  return [day, name ? {
+    label: schedule?.isOffDay === false ? '补班' : name,
+    title: schedule ? `${name}（${schedule.isOffDay ? '放假' : '调休上班'}）` : name,
+    tone: schedule?.isOffDay === false ? 'workday' : 'holiday',
+  } : undefined] as const
+})))
 function move(offset: number) {
   if (display.value === 'week') { selected.value = addDays(selected.value, offset * 7); month.value = selected.value.slice(0, 7) + '-01' }
   else { month.value = shiftMonth(month.value, offset); selected.value = month.value }
@@ -91,13 +110,13 @@ function open(event: CalendarEvent) { emit('open', event.projectId, event.tab, e
       <article v-for="entry in months" :key="entry" class="pc-month pdm-panel">
         <h2>{{ label(entry) }}<small v-if="entry.startsWith(today.slice(0, 7))">本月</small><small v-else-if="entry === shiftMonth(today, 1)">下月</small></h2>
         <div class="pc-weekdays"><span v-for="day in ['一','二','三','四','五','六','日']" :key="day">{{ day }}</span></div>
-        <div class="pc-grid"><button v-for="day in monthDays(entry)" :key="day" class="pc-day" :class="{ outside: !day.startsWith(entry.slice(0, 7)), selected: day === selected }" :aria-label="`${day}，${day.startsWith(entry.slice(0, 7)) ? dayEvents(day).length : 0}项事项`" :aria-pressed="day === selected" @click="select(day)">
-          <span class="pc-date" :class="{ today: day === today }">{{ Number(day.slice(8)) }}</span>
+        <div class="pc-grid"><button v-for="day in monthDays(entry)" :key="day" class="pc-day" :class="{ outside: !day.startsWith(entry.slice(0, 7)), selected: day === selected }" :aria-label="`${day}，${holidayLabels.get(day) ? holidayLabels.get(day)!.title + '，' : ''}${day.startsWith(entry.slice(0, 7)) ? dayEvents(day).length : 0}项事项`" :aria-pressed="day === selected" @click="select(day)">
+          <span class="pc-day-heading"><span class="pc-date" :class="{ today: day === today }">{{ Number(day.slice(8)) }}</span><span v-if="holidayLabels.get(day)" class="pc-holiday" :class="`is-${holidayLabels.get(day)!.tone}`" :title="holidayLabels.get(day)!.title">{{ holidayLabels.get(day)!.label }}</span></span>
           <template v-if="day.startsWith(entry.slice(0, 7))"><span v-for="event in dayEvents(day).slice(0, 2)" :key="event.id" class="pc-event" :class="event.tone" :title="`${event.title} · ${event.code} · ${event.detail}`"><b>{{ event.code }} · {{ event.title }}</b></span><small v-if="dayEvents(day).length > 2" class="pc-more">另有{{ dayEvents(day).length - 2 }}项</small></template>
         </button></div>
       </article>
     </div>
-    <div v-else-if="display === 'week'" class="pc-week-view"><article v-for="day in weekDays" :key="day" class="pdm-panel"><button @click="select(day)">{{ day }}</button><button v-for="event in dayEvents(day)" :key="event.id" class="pc-event" :class="event.tone" :title="`${event.code} · ${event.title} · ${event.detail}`" @click="open(event)"><b>{{ event.code }} · {{ event.title }}</b></button><p v-if="!dayEvents(day).length">暂无事项</p></article></div>
+    <div v-else-if="display === 'week'" class="pc-week-view"><article v-for="day in weekDays" :key="day" class="pdm-panel"><button @click="select(day)">{{ day }}</button><span v-if="holidayLabels.get(day)" class="pc-holiday" :class="`is-${holidayLabels.get(day)!.tone}`" :title="holidayLabels.get(day)!.title">{{ holidayLabels.get(day)!.label }}</span><button v-for="event in dayEvents(day)" :key="event.id" class="pc-event" :class="event.tone" :title="`${event.code} · ${event.title} · ${event.detail}`" @click="open(event)"><b>{{ event.code }} · {{ event.title }}</b></button><p v-if="!dayEvents(day).length">暂无事项</p></article></div>
     <div v-else class="pc-list pdm-panel"><button v-for="event in inRange" :key="event.id" @click="open(event)"><span>{{ event.date }}</span><strong>{{ event.code }} · {{ event.title }}</strong><span>{{ name(event.owner) }}</span><span :class="event.tone">{{ toneLabel[event.tone] }}</span></button><p v-if="!inRange.length" class="pc-empty">所选月份暂无符合条件的重要事项</p></div>
     <div class="pc-legend"><span v-for="(text, tone) in toneLabel" :key="tone" :class="tone">● {{ text }}</span></div>
     <div class="pc-bottom">
@@ -130,4 +149,6 @@ function open(event: CalendarEvent) { emit('open', event.projectId, event.tab, e
 
 .pc-toolbar{justify-content:space-between;align-items:center;flex-wrap:wrap}.pc-controls{flex-shrink:0;display:flex;align-items:center;gap:5px;flex-wrap:nowrap}.pc-toolbar .pc-filters{display:flex;flex:1;min-width:0;justify-content:flex-end;flex-wrap:nowrap;margin-left:10px}.pc-toolbar .pc-filters input{min-width:90px;width:140px;flex:0 1 180px}.pc-toolbar .pc-filters select{max-width:115px}.pc-toolbar .pc-filters button{white-space:nowrap}.pc-grid{position:relative;isolation:isolate}.pc-grid .pc-day{background:transparent;z-index:1}.pc-grid .pc-day.outside{background:var(--pdm-surface-muted,var(--pdm-table-header))}.pc-grid .pc-day.selected{background:var(--pdm-theme-accent-soft,#e4f7f5)}
 @container (max-width:1250px){.pc-toolbar .pc-filters{flex-basis:100%;margin-left:0}.pc-controls{flex-wrap:wrap}.pc-toolbar .pc-filters input{flex:1}.pc-toolbar .pc-filters{overflow:auto}}
+.pc-day-heading{display:flex;align-items:center;gap:3px;min-width:0;width:100%;flex-shrink:0}.pc-day-heading .pc-date{flex:0 0 20px}.pc-holiday{display:block;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--pdm-orange);font-size:10px;font-weight:600;line-height:18px}.pc-holiday.is-workday{color:var(--pdm-blue)}.pc-grid .pc-more{position:static;align-self:flex-end;margin-top:auto}
+@container (max-width:850px){.pc-day-heading{flex-wrap:wrap;gap:0}.pc-day-heading .pc-date{height:16px;min-height:16px}.pc-day-heading .pc-holiday{flex-basis:100%;font-size:9px;line-height:12px}}
 </style>

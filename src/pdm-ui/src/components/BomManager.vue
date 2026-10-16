@@ -6,6 +6,9 @@ import { createClientUuid } from '../clientId'
 import { matchApprovedMaterials, readDocumentPreviewFile, queryU9Material } from '../api'
 import PdfDrawingViewer from './PdfDrawingViewer.vue'
 import BomBrandEditor from './BomBrandEditor.vue'
+import BomInventoryRecommendations from './BomInventoryRecommendations.vue'
+import { inventoryBomSignature } from '../bomInventoryRecommendations'
+import type { InventoryBomRow } from '../bomInventoryRecommendations'
 import { clearGlobalStatus, ElMessage } from '../statusMessage'
 import { recordClientDiagnostic } from '../clientDiagnostics'
 import { userErrorMessage } from '../userErrorMessage'
@@ -242,6 +245,70 @@ const materialFilter = ref('')
 const showPendingOnly = ref(false)
 const bomPage = ref(1)
 const bomPageSize = ref(50)
+const pendingInventoryReferences = new Map<string, { itemIds: string[]; sequence: number; material: PdmMaterial }>()
+let inventoryReferenceLinking = false
+async function completePendingInventoryReferences() {
+  if (inventoryReferenceLinking || !props.projectId || !props.token || !pendingInventoryReferences.size) return
+  const projectId = props.projectId, token = props.token
+  inventoryReferenceLinking = true
+  try {
+    for (const [key, pending] of pendingInventoryReferences) {
+      if (projectId !== props.projectId) break
+      const target = rows.value.find(row => pending.itemIds.length
+        ? operationItemIds(row).some(id => pending.itemIds.includes(id))
+        : row.sequence === pending.sequence)
+      if (!target || target.drawingNumber !== pending.material.materialCode
+        || target.specification !== (pending.material.specification ?? '')) continue
+      const ids = operationItemIds(target)
+      if (!ids.length) continue
+      await linkBomMaterials(projectId, ids, pending.material.id, token)
+      if (pendingInventoryReferences.get(key) === pending) pendingInventoryReferences.delete(key)
+    }
+  } catch (error) {
+    ElMessage.error(userErrorMessage(error instanceof Error ? error.message : 'BOM已保存，但料品引用更新失败，请重新保存BOM后重试。'))
+  } finally { inventoryReferenceLinking = false }
+}
+const inventoryRecommendationsOpen = ref(false)
+const inventoryRecommendationInitialKey = ref('')
+const inventoryRecommendationCounts = ref<Record<string, { signature: string; count: number }>>({})
+const inventoryRecommendationRows = ref<InventoryBomRow[]>([])
+function openInventoryRecommendations(initialRow?: EditableBomRow) {
+  if (!canEditCurrentView.value || !supportsMaterialCodes.value || props.pending || !props.token || !props.projectId) return
+  inventoryRecommendationRows.value = rows.value.filter(row => !row._quickEntry && !row.manuallyExcluded && !row.pendingRemoval)
+    .map(row => ({ key: rowSelectionKey(row) ?? `row:${row.sequence}`, signature: inventoryBomSignature(row),
+      sequence: row.sequence, drawingNumber: row.drawingNumber, name: row.name, specification: row.specification,
+      brand: row.brand, quantity: row.quantity, unit: row.unit,
+      disabledReason: row.engineeringKitReferenceId ? '套件子料请通过套件维护' : undefined }))
+  inventoryRecommendationInitialKey.value = initialRow ? rowSelectionKey(initialRow) ?? '' : ''
+  inventoryRecommendationsOpen.value = true
+}
+function inventoryRecommendationCount(row: EditableBomRow) {
+  const count = inventoryRecommendationCounts.value[rowSelectionKey(row) ?? `row:${row.sequence}`]
+  return count?.signature === inventoryBomSignature(row) ? count.count : 0
+}
+function storeInventoryRecommendationCounts(counts: Array<{ key: string; signature: string; count: number }>) {
+  inventoryRecommendationCounts.value = Object.fromEntries(counts.map(item => [item.key, item]))
+}
+function applyInventoryRecommendation(original: InventoryBomRow, material: PdmMaterial) {
+  if (!canEditCurrentView.value || !supportsMaterialCodes.value || props.pending || material.kind !== kind.value
+    || material.isArchived || material.approvalStatus !== 'Approved') return
+  const row = rows.value.find(item => (rowSelectionKey(item) ?? `row:${item.sequence}`) === original.key)
+  if (!row || row.engineeringKitReferenceId || inventoryBomSignature(row) !== original.signature) {
+    ElMessage.warning('该BOM行已变化，请关闭库存推荐后重新扫描。')
+    return
+  }
+  const values = { drawingNumber: material.materialCode, name: material.name, unit: material.unitCode,
+    specification: material.specification ?? '', brand: material.brand ?? '', material: material.material ?? '',
+    surfaceTreatment: material.surfaceTreatment ?? '', weight: material.weight == null ? '' : String(material.weight),
+    inventoryReplacementMaterialCode: material.materialCode }
+  const itemIds = operationItemIds(row)
+  pendingInventoryReferences.set(original.key, { itemIds, sequence: row.sequence, material })
+  markStagedEdits(row, Object.keys(values))
+  Object.assign(row, values)
+  const key = rowSelectionKey(row)
+  if (key) unconfirmedDuplicateDraftRows.delete(key)
+  ElMessage.success(`已暂存 ${original.drawingNumber || original.name} → ${material.materialCode}，请点击“保存BOM”提交。`)
+}
 const materialReferenceOpen = ref(false)
 const materialReferenceQuery = ref('')
 const materialReferenceBrandInput = ref('')
@@ -1583,7 +1650,11 @@ function validationFieldLabel(field: BomValidationField) {
   return ({ drawingNumber: '物料编码', name: '物料名称', unit: '单位', specification: '型号', brand: '品牌', material: '材质', surfaceTreatment: '表面处理', weight: '重量', quantity: '数量', revision: '版本', remark: '备注' } as Record<BomValidationField, string>)[field]
 }
 
+function isInventoryReplacement(row: BomItem) {
+  return !!row.inventoryReplacementMaterialCode?.trim() && row.inventoryReplacementMaterialCode.trim().toUpperCase() === row.drawingNumber.trim().toUpperCase()
+}
 function dataStatusLabel(row: BomItem) {
+  if (isInventoryReplacement(row)) return '库存'
   if (row.releaseConfirmation) return '本次无需发布'
   if (isSourceView.value && rowNeedsClassification(row)) return '待归类'
   const masterIssues = materialMasterIssues(row)
@@ -2239,7 +2310,7 @@ function saveCurrentBom() {
       }
       // A summary row represents multiple instances; only edited fields may overwrite them.
       for (const field of ['kind', 'drawingNumber', 'name', 'unit', 'material', 'specification', 'remark', 'brand',
-        'surfaceTreatment', 'heatTreatment', 'weight', 'isWearPart', 'impactStage', 'revision', 'parentDrawingNumber'] as const) {
+        'surfaceTreatment', 'heatTreatment', 'weight', 'isWearPart', 'impactStage', 'inventoryReplacementMaterialCode', 'revision', 'parentDrawingNumber'] as const) {
         if (stagedEditKeys.value.has(`${id}:${field}`)) Object.assign(item, { [field]: displayItem[field] })
       }
       return [{ ...item, complete: dataStatusIssues(item).length === 0 }]
@@ -2250,6 +2321,7 @@ function saveCurrentBom() {
 }
 
 function discardStagedEdits() {
+  pendingInventoryReferences.clear()
   stagedEditKeys.value = new Set()
   summaryQuantityTargets.clear()
   saveRequested = false
@@ -2938,6 +3010,8 @@ async function completePendingMaterialLink() {
 }
 
 function refreshRows(preserveDrafts: boolean) {
+  inventoryRecommendationsOpen.value = false
+  inventoryRecommendationCounts.value = {}
   inlineMaterialMatches.clear()
   editingCell.value = null
   const drafts = preserveDrafts
@@ -2967,6 +3041,7 @@ watch(quickEntryRow, row => {
 }, { deep: true })
 
 watch(kind, () => {
+  pendingInventoryReferences.clear()
   if (kind.value !== 'Source') displayMode.value = 'Summary'
   if (pendingMaterialLink.value && pendingMaterialLink.value.kind !== kind.value) pendingMaterialLink.value = null
   relationDialogOpen.value = false
@@ -2984,7 +3059,9 @@ watch(kind, () => {
   if (!isOverviewView.value) void resolveMissingStandardMaterialCodes()
 }, { immediate: true })
 watch(() => props.username, restoreBomColumns)
+watch([canEditCurrentView, () => props.pending, () => props.token], () => { inventoryRecommendationsOpen.value = false })
 watch(() => props.projectId, projectId => {
+  pendingInventoryReferences.clear()
   restoreDisplayMode(projectId)
   expandedStructurePaths.value = new Set()
   refreshRows(false)
@@ -3015,6 +3092,7 @@ watch(() => props.baselines, baselines => {
   if (!selectedBaselineId.value && baselines.length) selectedBaselineId.value = baselines[0].id
 }, { immediate: true })
 watch([() => props.sourceData, () => props.standard, () => props.nonStandard, () => props.unclassified, () => props.electrical], () => {
+  inventoryRecommendationsOpen.value = false
   const restoringSource = restoreSourceRefreshIds.size > 0
   const discardingDrafts = discardDraftsOnNextSourceRefresh
   if ((hasStagedEdits.value || editingCell.value) && !saveRequested && !restoringSource && !discardingDrafts) {
@@ -3064,6 +3142,7 @@ watch([() => props.sourceData, () => props.standard, () => props.nonStandard, ()
   discardDraftsOnNextSourceRefresh = false
   if (restoringSource) restoreSourceRefreshIds = new Set()
   void completePendingMaterialLink()
+  void completePendingInventoryReferences()
   void resolveMissingStandardMaterialCodes()
 }, { deep: true })
 watch(() => props.pending, (pending, previous) => {
@@ -3983,6 +4062,7 @@ async function submitBatchUpdate() {
         <button v-if="canEditCurrentView" type="button" class="pdm-secondary-action" @click="selectImport" title="导入XLSX">导入</button>
         <button type="button" class="pdm-secondary-action" @click="openExportDialog(kind as BomKind)" title="导出XLSX">导出</button>
         <button v-if="editable" type="button" class="pdm-secondary-action" :class="{ 'is-reconcile-needed': reconciliationReminderCount > 0 }" aria-label="对比源数据" :title="reconcileActionTitle" :disabled="pending || reconciliationPreviewLoading" @click="requestGenerate">{{ reconciliationPreviewLoading ? '生成中…' : '源数据' }}</button>
+        <button v-if="canEditCurrentView && supportsMaterialCodes" type="button" class="pdm-secondary-action pdm-bom-inventory-action" :disabled="pending || !token || !projectId || !rows.length" title="扫描当前子项目完整BOM的库存相似型号，不受筛选和分页影响" @click="openInventoryRecommendations()">库存推荐</button>
         <button v-if="canEditCurrentView" type="button" class="pdm-secondary-action" :disabled="pending || u9BomReading || !selectedRows.length" @click="previewU9BomDifferences">{{ u9BomReading ? '读取U9…' : '按U9校正' }}</button>
         <button type="button" class="pdm-secondary-action" @click="openReleaseDrawer(activeReleasePackages[0]?.id || latestPublishedPackage?.id)">{{ activeReleasePackages.length ? `处理审批 ${activeReleasePackages.length}` : '发布记录' }}</button>
         <span v-if="hasStagedEdits" class="pdm-bom-unsaved-count" role="status" aria-live="polite">未保存 {{ stagedEditCount }} 项</span>
@@ -4136,6 +4216,7 @@ async function submitBatchUpdate() {
                 <button v-else-if="row.id && canEditCurrentView" type="button" class="pdm-bom-cell-edit" :title="row.specification || '点击编辑型号'" aria-label="编辑型号" @click="beginInlineEdit(row, 'specification')">{{ displayValue(row.specification) }}</button>
                 <input v-else-if="canEditCurrentView && !isSourceView" v-model.trim="row.specification" aria-label="型号" @blur="autofillDraftFromMaterialMaster(row, 'specification')">
                 <span v-else class="pdm-bom-cell-value" :title="row.specification">{{ displayValue(row.specification) }}</span>
+                <button v-if="canEditCurrentView && supportsMaterialCodes && inventoryRecommendationCount(row)" type="button" class="pdm-bom-inventory-count" :aria-label="`查看${row.drawingNumber || row.name}的库存候选`" @click="openInventoryRecommendations(row)">库存 {{ inventoryRecommendationCount(row) }}</button>
                 <span v-if="hasDrawingNameModelMismatch(row)" class="pdm-bom-drawing-name-warning" aria-label="图纸名称与BOM型号不一致" :title="drawingNameMismatchTitle(row)">⚠</span>
               </div>
             </td>
@@ -4222,7 +4303,7 @@ async function submitBatchUpdate() {
               <span v-else-if="!row._quickEntry" class="pdm-bom-cell-value">—</span>
             </td>
             <td v-if="isBomColumnVisible('dataStatus') && row._quickEntry" class="pdm-bom-data-status-cell"><span class="pdm-bom-data-status">待录入</span></td>
-            <td v-else-if="isBomColumnVisible('dataStatus')" class="pdm-bom-data-status-cell" :class="dataStatusIssues(row).length ? 'is-incomplete' : row.releaseExcluded ? 'is-release-excluded' : 'is-complete'"><span class="pdm-bom-data-status" :class="dataStatusIssues(row).length ? 'is-incomplete' : row.releaseExcluded ? 'is-release-excluded' : 'is-complete'" :title="row.releaseConfirmation ? `本次无需发布：${row.releaseConfirmation.reason}；后续新修改会重新提示` : row.releaseExcluded ? `不发布：${row.releaseExclusionReason || '未记录原因'}` : dataStatusIssues(row).length ? `待完善：${dataStatusIssues(row).join('、')}` : '必填资料及料品主档校验均已通过'">{{ dataStatusLabel(row) }}</span></td>
+            <td v-else-if="isBomColumnVisible('dataStatus')" class="pdm-bom-data-status-cell" :class="dataStatusIssues(row).length ? 'is-incomplete' : row.releaseExcluded ? 'is-release-excluded' : 'is-complete'"><span class="pdm-bom-data-status" :class="dataStatusIssues(row).length ? 'is-incomplete' : row.releaseExcluded ? 'is-release-excluded' : 'is-complete'" :title="(isInventoryReplacement(row) ? '已确认库存替换；' : '') + (row.releaseConfirmation ? `本次无需发布：${row.releaseConfirmation.reason}；后续新修改会重新提示` : row.releaseExcluded ? `不发布：${row.releaseExclusionReason || '未记录原因'}` : dataStatusIssues(row).length ? `待完善：${dataStatusIssues(row).join('、')}` : '必填资料及料品主档校验均已通过')">{{ dataStatusLabel(row) }}</span></td>
           </tr>
           <tr v-if="filteredRows.length === 0 && !canShowQuickEntry"><td :colspan="3 + visibleBomColumnCount()" class="pdm-empty-info">{{ rows.length ? '没有符合当前筛选条件的物料。' : isWearPartView ? '当前没有标记为易损件的物料。' : isSourceView ? '当前没有图档源数据。' : '当前BOM为空，系统自动按无此类物料处理；可新增物料或导入标准XLSX。' }}</td></tr>
         </tbody>
@@ -4309,6 +4390,10 @@ async function submitBatchUpdate() {
       </div>
       <template #footer><div class="pdm-material-relation-footer"><span>当前 BOM 共 {{ relationMainRows.length }} 条已配置主物料；未核对项只提醒，不影响BOM保存和发布</span><button type="button" class="pdm-secondary-action" @click="relationDialogOpen = false">关闭</button><button type="button" class="pdm-primary-action" :disabled="relationApplying || relationLoading || !currentRelationChecks.length" @click="applySelectedRelations">{{ relationApplying ? '正在保存…' : '保存核对结果' }}</button></div></template>
     </el-drawer>
+
+    <BomInventoryRecommendations v-if="inventoryRecommendationsOpen && (kind === 'Standard' || kind === 'Electrical')"
+      :token="token" :username="username" :kind="kind" :items="inventoryRecommendationRows" :initial-key="inventoryRecommendationInitialKey"
+      @close="inventoryRecommendationsOpen = false" @replace="applyInventoryRecommendation" @scanned="storeInventoryRecommendationCounts" />
 
     <div v-if="materialReferenceOpen" class="pdm-dialog-backdrop" @click.self="materialReferenceOpen = false">
       <RawDrawerPanel class="pdm-bom-batch-dialog pdm-material-reference-dialog pdm-kit-reference-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-material-reference-title">

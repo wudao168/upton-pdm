@@ -92,9 +92,37 @@ describe('ProjectManager', () => {
       { id: 't2', organizationId: 'org-1', code: 'T2', name: 'T2事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 1 },
     ] }
     const wrapper = mountProjectManager(directory)
-    expect(wrapper.findAll('.pdm-project-classification__division').map(item => item.text())).toEqual(['T1事业部', 'T2事业部', 'T3事业部'])
+    expect(wrapper.findAll('.pdm-project-classification__division').map(item => item.text())).toEqual(['T1事业部', 'T2事业部', 'T3事业部', '待分配'])
     wrapper.unmount()
   })
+  it('待分配筛选仅保留当前公司未分配事业部的项目，且可展开子项目并切回公司或事业部', async () => {
+    const directory: OrganizationDirectory = {...emptyDirectory, units:[
+      {id:'division-1',organizationId:'org-1',code:'T1',name:'T1事业部',kind:'BusinessDivision',canManufacture:true,isActive:true,sortOrder:1},
+    ]}
+    const unassigned = {...parent,id:'unassigned',code:'P700002',executionUnitId:undefined,executionUnitName:undefined}
+    const unassignedChild = {...child,id:'unassigned-child',code:'P700002-1',parentProjectId:unassigned.id,rootProjectId:unassigned.id,executionUnitId:undefined,executionUnitName:undefined}
+    const assigned = {...parent,executionUnitId:'division-1',executionUnitName:'T1事业部'}
+    const legacyAssigned = {...parent,id:'legacy',code:'P700003',executionUnitId:undefined,executionUnitName:'T1事业部'}
+    const idOnlyAssigned = {...parent,id:'id-only',code:'P700004',executionUnitId:'division-1',executionUnitName:undefined}
+    const otherCompany = {...unassigned,id:'other-company',code:'P700005',organizationId:'org-2'}
+    const wrapper = mountProjectManager(directory,[assigned,unassigned,unassignedChild,legacyAssigned,idOnlyAssigned,otherCompany])
+    const pending = wrapper.get('.pdm-project-classification__unassigned')
+    await pending.trigger('click')
+    expect(pending.attributes('aria-selected')).toBe('true')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    expect(wrapper.get('tbody').text()).toContain('P700002')
+    expect(wrapper.get('tbody').text()).not.toMatch(/P700001|P700003|P700004|P700005/)
+    await wrapper.get('[aria-label="展开全部项目明细"]').trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(2)
+    expect(wrapper.get('tbody').text()).toContain('P700002-1')
+    await wrapper.get('.pdm-project-classification__division:not(.pdm-project-classification__unassigned)').trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(3)
+    expect(pending.attributes('aria-selected')).toBe('false')
+    await wrapper.get('.pdm-project-classification__company [role="treeitem"]').trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(4)
+    wrapper.unmount()
+  })
+
   it('列表仅允许分配事业部，管理员也不能从此修改其他项目字段或人员', async () => {
     const wrapper = mountProjectManager(emptyDirectory, [{ ...parent, executionUnitId: 'division-1', canAssignExecutionUnit: true, canManageMainStaffing: true }, { ...child, canAssignDesigners: true }], true, true)
     expect(wrapper.find('[aria-label="分配事业部 P700001"]').exists()).toBe(true)

@@ -32,7 +32,7 @@ internal static class Program
   using(var timer=new System.Windows.Forms.Timer{Interval=50})
   {
    timer.Tick+=(_,__)=>{var dialog=FindWindow("#32770","整体存档前保存文件");if(dialog!=IntPtr.Zero)SendMessage(dialog,0x111,new IntPtr(6),IntPtr.Zero);if(args.Length>1){dialog=FindWindow("#32770","UPLM");if(dialog!=IntPtr.Zero){GetWindowThreadProcessId(dialog,out var process);if(process==(uint)System.Diagnostics.Process.GetCurrentProcess().Id)SendMessage(dialog,0x111,new IntPtr(1),IntPtr.Zero);}}};
-   host.Shown+=async (_,__)=>{try{if(args.Length>1&&args[1]=="--cycle-scan-regression"){VisualReferenceCycleScenario();return;}if(args.Length>1&&args[1]=="--strict-scan-matrix"){VisualReferenceCycleScenario();StrictScanMatrix();SixDrawingDiscoveryScenario();PlannedTaskTimerScenario(host);SuppressedReadScenario();return;}if(args.Length>1){await OpenDispatcherScenario(args[1]=="--expect-handle-failure");return;}await OpenDispatcherScenario(false);VisualReferenceCycleScenario();StrictScanMatrix();SixDrawingDiscoveryScenario();PlannedTaskTimerScenario(host);DrawingDiscoveryScenario();ControlledReferenceScenario();ControlledScannerScenario();SearchScopeScenario();PropertyCompletenessScenario();await PreflightGateScenario(host);await LatePreparationGate(host);DrawingSaveGate();SuppressedReadScenario();ReadOnlyOpenScenario();DiagnosticTabScenario(host);CenteringScenario();CloseReferencedScenario();EntryScenario(host);await Scenario(false,false);await Scenario(true,false);await Scenario(true,true);}catch(Exception e){failure=e;}finally{host.Close();}};
+   host.Shown+=async (_,__)=>{try{if(args.Length>1&&args[1]=="--document-rename-regression"){RootRenameScenario();return;}if(args.Length>1&&args[1]=="--archive-network-regression"){await ArchiveNetworkScenario();return;}if(args.Length>1&&args[1]=="--cycle-scan-regression"){VisualReferenceCycleScenario();return;}if(args.Length>1&&args[1]=="--strict-scan-matrix"){VisualReferenceCycleScenario();StrictScanMatrix();SixDrawingDiscoveryScenario();NativeManifestScenario();RootRenameScenario();PlannedTaskTimerScenario(host);SuppressedReadScenario();return;}if(args.Length>1){await OpenDispatcherScenario(args[1]=="--expect-handle-failure");return;}await OpenDispatcherScenario(false);VisualReferenceCycleScenario();StrictScanMatrix();SixDrawingDiscoveryScenario();NativeManifestScenario();RootRenameScenario();PlannedTaskTimerScenario(host);DrawingDiscoveryScenario();ControlledReferenceScenario();ControlledScannerScenario();SearchScopeScenario();PropertyCompletenessScenario();await PreflightGateScenario(host);await ArchiveNetworkScenario();await LatePreparationGate(host);DrawingSaveGate();SuppressedReadScenario();ReadOnlyOpenScenario();DiagnosticTabScenario(host);CenteringScenario();CloseReferencedScenario();EntryScenario(host);await Scenario(false,false);await Scenario(true,false);await Scenario(true,true);}catch(Exception e){failure=e;}finally{host.Close();}};
    timer.Start();Application.Run(host);
   }
   if(failure!=null){Console.WriteLine("FAIL: "+failure.GetType().FullName+" "+failure.Message);if(failure.InnerException!=null)Console.WriteLine("INNER: "+failure.InnerException.GetType().FullName+" "+failure.InnerException.Message);Environment.ExitCode=1;}
@@ -115,6 +115,68 @@ internal static class Program
    }
   }
  }
+ static void RootRenameScenario()
+ {
+  var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var interop=appType.Assembly;
+  var recoveryField=Type("PdmAddin").GetField("documentRenameRecoveryDirectory",Flags);var previousRecovery=recoveryField.GetValue(null);
+  foreach(var mode in new[]{"context-and-drawing","read-only-local-dependent","embedded-virtual","owned-dependent","open-dependent","replace-failure","reopen-failure","native-omits-drawing","concurrent-edit","concurrent-before-write"})
+  {
+   var folder=Path.Combine(Path.GetTempPath(),"pdm-root-rename-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+   var oldPath=Path.Combine(folder,"旧总装.SLDASM");var newPath=Path.Combine(folder,"P700017-3.00.00.SLDASM");
+   var part=Path.Combine(folder,"PART.SLDPRT");var drawing=Path.Combine(folder,"不同名工程图.SLDDRW");
+   var virtualPath=Path.Combine(folder,"EMBEDDED.SLDPRT");if(mode=="embedded-virtual")File.WriteAllText(virtualPath,"embedded original bytes");
+   var recovery=Path.Combine(folder,"recovery");recoveryField.SetValue(null,recovery);
+   File.WriteAllText(oldPath,"original assembly bytes");File.WriteAllText(part,"original part bytes");File.WriteAllText(drawing,"original drawing bytes");
+   if(mode=="read-only-local-dependent")File.SetAttributes(part,FileAttributes.ReadOnly);
+   var loaded=true;var openPath=oldPath;var closes=0;var replaces=0;var cwd="original-working-directory";
+   object model=null,extension=null;
+   var pack=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.PackAndGo",true),call=>{
+    if(call.MethodName=="set_IncludeDrawings"||call.MethodName=="set_IncludeSuppressed")return null;
+    if(call.MethodName=="GetDocumentNames"){var output=(object[])call.Args.Clone();output[0]=mode=="native-omits-drawing"&&openPath==newPath?new[]{openPath,part}:new[]{openPath,part,drawing};return new ReturnMessage(true,output,output.Length,call.LogicalCallContext,call);}throw new Exception(call.MethodName);
+   }).GetTransparentProxy();
+   extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="GetPackAndGo"?pack:call.MethodName=="HasRenamedDocuments"?false:throw new Exception(call.MethodName)).GetTransparentProxy();
+   var configuration=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Configuration",true),call=>call.MethodName=="get_Name"?"CONFIG-A":throw new Exception(call.MethodName)).GetTransparentProxy();
+   var manager=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ConfigurationManager",true),call=>call.MethodName=="get_ActiveConfiguration"?configuration:throw new Exception(call.MethodName)).GetTransparentProxy();
+   model=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>{
+    switch(call.MethodName){case "GetPathName":return openPath;case "GetTitle":return Path.GetFileName(openPath);case "GetSaveFlag":return false;case "Save3":return true;case "get_ConfigurationManager":return manager;case "get_Extension":return extension;default:throw new Exception(call.MethodName);}
+   }).GetTransparentProxy();
+   var dependent=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetPathName"?part:call.MethodName=="get_Visible"?true:call.MethodName=="IsOpenedReadOnly"?false:throw new Exception(call.MethodName)).GetTransparentProxy();
+   var app=new Proxy(appType,call=>{
+    switch(call.MethodName)
+    {
+     case "GetCurrentWorkingDirectory":return cwd;case "SetCurrentWorkingDirectory":cwd=(string)call.Args[0];return true;
+     case "GetDocuments":return loaded?(mode=="open-dependent"?new[]{model,dependent}:new[]{model}):new object[0];
+     case "GetDocumentDependencies2":var path=(string)call.Args[0];if(path==virtualPath)throw new Exception("Embedded component read independently");return path==part||path==drawing?new[]{"CONTEXT",File.ReadAllText(path).Contains("new-context")?newPath:oldPath}:new string[0];
+     case "CloseDoc":loaded=false;closes++;return null;
+     case "ReplaceReferencedDocument":replaces++;var target=(string)call.Args[0];if(mode=="replace-failure"&&target==drawing)return false;
+      if(mode=="concurrent-edit"&&target==drawing)File.WriteAllText(part,"external user change");if(mode=="concurrent-before-write"&&target==part)File.WriteAllText(drawing,"external drawing change");File.AppendAllText(target,"|new-context");return true;
+     case "OpenDoc6":var requested=(string)call.Args[0];if(mode=="reopen-failure"&&requested==newPath){call.Args[4]=1;call.Args[5]=0;return null;}openPath=requested;loaded=true;call.Args[4]=0;call.Args[5]=0;return model;
+     case "ActivateDoc3":return model;
+     default:throw new Exception("Unexpected rename application call "+call.MethodName);
+    }
+   }).GetTransparentProxy();
+   var plugin=New("PdmAddin");SetField(plugin,"application",app);SetField(plugin,"authenticatedUsername","tester");
+   var root=New("CadTreeNode");Set(root,"FullPath",oldPath);Set(root,"FileName",Path.GetFileName(oldPath));Set(root,"Kind",Enum.Parse(Type("CadDocumentKind"),"Assembly"));
+   foreach(var path in new[]{part,drawing}){var node=New("CadTreeNode");Set(node,"FullPath",path);Set(node,"FileName",Path.GetFileName(path));Set(node,"Kind",Enum.Parse(Type("CadDocumentKind"),path==part?"Part":"Drawing"));if(mode=="owned-dependent"&&path==part){Set(node,"DocumentId",Guid.NewGuid());Set(node,"CheckedOutBy","other-user");}((IList)Get(root,"Children")).Add(node);}
+   if(mode=="embedded-virtual"){var node=New("CadTreeNode");Set(node,"FullPath",virtualPath);Set(node,"Status",Enum.Parse(Type("CadReferenceStatus"),"Virtual"));((IList)Get(root,"Children")).Add(node);}
+   SetField(plugin,"currentTree",root);var rejected=false;Exception renameError=null;
+   try{Type("PdmAddin").GetMethod("RenameRootDocumentAndReferences",Flags).Invoke(plugin,new object[]{root,model,newPath});}
+   catch(TargetInvocationException error)when(error.InnerException is IOException||error.InnerException is InvalidOperationException){rejected=true;renameError=error.InnerException;}
+   var success=mode=="context-and-drawing"||mode=="read-only-local-dependent"||mode=="embedded-virtual";
+   if(rejected==success||cwd!="original-working-directory"||(int)Field(plugin,"draftSnapshotInProgress")!=0)throw new Exception("Incorrect rename result "+mode+" "+renameError);
+   if(success){if(File.Exists(oldPath)||!File.Exists(newPath)||File.ReadAllText(newPath)!="original assembly bytes"||!File.ReadAllText(part).Contains("new-context")||!File.ReadAllText(drawing).Contains("new-context")||openPath!=newPath)throw new Exception("Rename lost bytes, references or active model");}
+   else if(mode=="concurrent-edit"){if(File.ReadAllText(part)!="external user change"||!Directory.EnumerateFiles(recovery,"rename.json",SearchOption.AllDirectories).Any())throw new Exception("Concurrent edit overwritten or recovery omitted");}
+   else if(mode=="concurrent-before-write"){if(!File.Exists(oldPath)||File.Exists(newPath)||File.ReadAllText(part)!="original part bytes"||File.ReadAllText(drawing)!="external drawing change")throw new Exception("Unmodified external edit overwritten during rollback");}
+   else if(!File.Exists(oldPath)||File.Exists(newPath)||File.ReadAllText(part)!="original part bytes"||File.ReadAllText(drawing)!="original drawing bytes")throw new Exception("Failed rename left a partial file/reference change "+mode);
+   if(mode=="owned-dependent"||mode=="open-dependent")if(closes!=0||replaces!=0)throw new Exception("Rename permission/window preflight changed source files");
+   if(mode=="read-only-local-dependent"&&(File.GetAttributes(part)&FileAttributes.ReadOnly)==0)throw new Exception("Dependent read-only attribute not restored");
+   if(mode=="embedded-virtual"&&File.ReadAllText(virtualPath)!="embedded original bytes")throw new Exception("Embedded content changed during root rename");
+   if(mode!="concurrent-edit"&&Directory.Exists(recovery)&&Directory.GetFiles(recovery,"*",SearchOption.AllDirectories).Length!=0)throw new Exception("Completed rename left recovery garbage");
+   foreach(var file in Directory.GetFiles(folder,"*",SearchOption.AllDirectories))File.SetAttributes(file,FileAttributes.Normal);
+   Directory.Delete(folder,true);recoveryField.SetValue(null,previousRecovery);
+   Console.WriteLine("PASS: root rename preserves bytes/configuration and updates exact context/drawing references "+mode);
+  }
+ }
  sealed class LifecycleControl:Control{public void RemoveHandle()=>DestroyHandle();}
  static void ReadOnlyOpenScenario()
  {
@@ -176,6 +238,7 @@ internal static class Program
   }
  } static void PropertyCompletenessScenario()
  {
+  ReferenceConfigurationPropertiesScenario();
   var interop=Type("PdmAddin").GetField("application",Flags).FieldType.Assembly;
   foreach(var mode in new[]{"valid","empty","missing-manager","partial-names","disappeared"})
   {
@@ -217,6 +280,44 @@ internal static class Program
    if(!rejected||handler.Writes!=0)throw new Exception("Preflight failed to collect all issues or wrote before validation");
   }
   Console.WriteLine("PASS: Multiple invalid files are reported together before registration, checkout or upload");
+ }
+ static async Task ArchiveNetworkScenario()
+ {
+  var message=(string)Type("PdmAddin").GetMethod("ArchivePreflightError",Flags).Invoke(null,new object[]{new HttpRequestException("connection refused")});
+  if(!message.Contains("服务器")||message.Contains("保存文件"))throw new Exception("Server connection failure was misreported as a CAD read/save failure");
+  foreach(var mode in new[]{"connection","timeout","502","503","504","get-502","get-503","get-504","cancelled"})
+  using(var cancellation=new CancellationTokenSource())
+  using(var handler=new ArchiveNetworkHandler(mode,cancellation))
+  using(var client=(IDisposable)New("PdmApiClient","http://fixture.invalid/"))
+  {
+   ((HttpClient)Field(client,"httpClient")).Dispose();SetField(client,"httpClient",new HttpClient(handler){BaseAddress=new Uri("http://fixture.invalid/")});
+   var plugin=New("PdmAddin");SetField(plugin,"apiClient",client);
+   var items=Array.CreateInstance(Type("BatchOperationItem"),2);
+   for(var i=0;i<2;i++){var node=New("CadTreeNode");Set(node,"DocumentId",Guid.NewGuid());Set(node,"FileName","PART"+i+".SLDPRT");Set(node,"FullPath",Path.Combine(Path.GetTempPath(),"NETWORK-PART"+i+".SLDPRT"));Set(node,"Revision","W1");Set(node,"CurrentRevision","W1");Set(node,"Kind",Enum.ToObject(Type("CadDocumentKind"),1));items.SetValue(New("BatchOperationItem",node,0),i);}
+   var rejected=false;
+   try{await (Task)Type("PdmAddin").GetMethod("PreflightBatchCheckInItemsAsync",Flags).Invoke(plugin,new object[]{items,Guid.NewGuid(),null,null,null,new HashSet<string>(),null,cancellation.Token,Activator.CreateInstance(typeof(List<>).MakeGenericType(Type("BatchOperationItem"))),new List<string>(),null,null});}
+   catch(OperationCanceledException)when(mode=="cancelled"&&cancellation.IsCancellationRequested){rejected=true;}
+   catch(InvalidOperationException error)when(mode!="cancelled"){rejected=error.Message.Contains("服务器")&&error.Message.Contains("尚未上传")&&!error.Message.Contains("保存文件");}
+   if(!rejected||handler.Preflights!=(mode.StartsWith("get-")?0:1)||handler.Reads!=1||handler.Uploads!=0)throw new Exception("Server outage did not stop the batch before later requests/uploads: "+mode);
+   Console.WriteLine("PASS: archive preflight stops on first "+mode+" and preserves cancellation semantics");
+  }
+  var local=(string)Type("PdmAddin").GetMethod("ArchivePreflightError",Flags).Invoke(null,new object[]{new IOException("file locked")});
+  if(!local.Contains("本地文件")||local.Contains("服务器"))throw new Exception("Local file failure was mislabeled as server failure");
+ }
+ sealed class ArchiveNetworkHandler:HttpMessageHandler
+ {
+  readonly string mode;readonly CancellationTokenSource cancellation;public int Preflights,Reads,Uploads;
+  public ArchiveNetworkHandler(string mode,CancellationTokenSource cancellation){this.mode=mode;this.cancellation=cancellation;}
+  protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
+  {
+   if(request.Method==HttpMethod.Get){Reads++;return Task.FromResult(new HttpResponseMessage(mode.StartsWith("get-")?(HttpStatusCode)int.Parse(mode.Substring(4)):HttpStatusCode.OK){Content=new StringContent(mode.StartsWith("get-")?"<html>proxy unavailable</html>":"[]")});}
+   if(!request.RequestUri.AbsolutePath.EndsWith("/checkin/preflight")){Uploads++;throw new Exception("Unexpected archive write");}
+   Preflights++;
+   if(mode=="connection")throw new HttpRequestException("connection refused",new WebException("unavailable"));
+   if(mode=="timeout")throw new TaskCanceledException("HTTP timeout");
+   if(mode=="cancelled"){cancellation.Cancel();throw new OperationCanceledException(cancellation.Token);}
+   return Task.FromResult(new HttpResponseMessage((HttpStatusCode)int.Parse(mode)){Content=new StringContent("<html>proxy unavailable</html>")});
+  }
  }
  sealed class PreflightReadHandler:HttpMessageHandler
  {
@@ -490,6 +591,148 @@ internal static class Program
    }
   }
   foreach(var model in models){File.SetAttributes(model.Path,FileAttributes.Normal);File.Delete(model.Path);}Directory.Delete(directory);
+  if(!dirty&&!denied)await SavePropagationScenario();
+  if(!dirty&&!denied)await SharedAssemblySaveScenario();
+  if(!dirty&&!denied)await PreloadCancellationScenario();
+  if(!dirty&&!denied)await PreloadOwnershipScenario();
+ }
+ static async Task PreloadCancellationScenario()
+ {
+  var plugin=New("PdmAddin");var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
+  var path=Path.Combine(Path.GetTempPath(),"PRELOAD-CANCEL.SLDASM");var reads=0;
+  var document=new Proxy(appType.Assembly.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),call=>call.MethodName=="GetPathName"?path:call.MethodName=="GetSaveFlag"?false:throw new Exception(call.MethodName)).GetTransparentProxy();
+  SetField(plugin,"application",new Proxy(appType,call=>{if(call.MethodName=="get_ActiveDoc")return document;if(call.MethodName=="GetDocuments"){reads++;return new[]{document};}throw new Exception("Cancelled preload reached native mutation: "+call.MethodName);}).GetTransparentProxy());
+  var node=New("CadTreeNode");Set(node,"FullPath",path);Set(node,"FileName","PRELOAD-CANCEL.SLDASM");var items=Array.CreateInstance(Type("BatchOperationItem"),1);items.SetValue(New("BatchOperationItem",node,0),0);
+  using(var cancellation=new CancellationTokenSource())
+  {
+   var cancelled=false;try{await (Task)Type("PdmAddin").GetMethod("PreloadBatchCheckInDocumentsAsync",Flags).Invoke(plugin,new object[]{items,(Action<string>)(_=>cancellation.Cancel()),cancellation.Token});}
+   catch(OperationCanceledException){cancelled=true;}
+   if(!cancelled||reads!=1)throw new Exception("Cancelled preload continued reading/opening a document");
+  }
+  Console.WriteLine("PASS: cancellation during preload progress stops before another native read or any save");
+ }
+ static async Task PreloadOwnershipScenario()
+ {
+  var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var interop=appType.Assembly;
+  foreach(var mode in new[]{"wrong-path","clean-model","dirty-model","unknown-save-state","generated-drawing","editable-drawing"})
+  {
+   var plugin=New("PdmAddin");var path=Path.Combine(Path.GetTempPath(),"OWNED.SLDPRT");var other=Path.Combine(Path.GetTempPath(),"other","OWNED.SLDPRT");var closes=0;
+   var document=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>{
+    if(call.MethodName=="GetPathName")return mode=="wrong-path"?other:path;if(call.MethodName=="GetTitle")return "OWNED.SLDPRT";
+    if(call.MethodName=="GetSaveFlag"){if(mode=="unknown-save-state")throw new COMException("fixture");return mode!="clean-model";}
+    if(call.MethodName=="IsOpenedReadOnly")return mode!="editable-drawing";throw new Exception(call.MethodName);
+   }).GetTransparentProxy();
+   SetField(plugin,"application",new Proxy(appType,call=>{
+    switch(call.MethodName){case "get_ActiveDoc":return null;case "GetDocuments":return new object[0];case "GetDocumentVisible":return true;case "DocumentVisible":return null;
+     case "OpenDoc6":return document;case "CloseDoc":closes++;return null;default:throw new Exception(call.MethodName);}
+   }).GetTransparentProxy());
+   if(mode=="wrong-path")
+   {
+    var node=New("CadTreeNode");Set(node,"FullPath",path);Set(node,"FileName","OWNED.SLDPRT");Set(node,"Kind",Enum.ToObject(Type("CadDocumentKind"),1));
+    var items=Array.CreateInstance(Type("BatchOperationItem"),1);items.SetValue(New("BatchOperationItem",node,0),0);var rejected=false;
+    try{await (Task)Type("PdmAddin").GetMethod("PreloadBatchCheckInDocumentsAsync",Flags).Invoke(plugin,new object[]{items,null,CancellationToken.None});}
+    catch(InvalidOperationException e)when(e.Message.Contains("其他路径")){rejected=true;}
+    if(!rejected)throw new Exception("Foreign document accepted by preload");
+   }
+   else
+   {
+    if(mode.Contains("drawing"))((ISet<string>)Field(plugin,"preloadedOwnedDrawings")).Add(path);
+    var documents=Array.CreateInstance(interop.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),1);documents.SetValue(document,0);
+    Type("PdmAddin").GetMethod("ClosePreloadedArchiveDocuments",Flags).Invoke(plugin,new object[]{documents});
+   }
+   if(closes!=(mode=="clean-model"||mode=="generated-drawing"?1:0))throw new Exception("Preload cleanup closed a foreign or unsaved document: "+mode);
+   Console.WriteLine("PASS: archive cleanup preserves user content and ownership "+mode);
+  }
+ }
+ static void ReferenceConfigurationPropertiesScenario()
+ {
+  var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var interop=appType.Assembly;
+  foreach(var missing in new[]{false,true})
+  {
+   var lookups=new List<string>();var path=Path.Combine(Path.GetTempPath(),"MULTI.SLDPRT");
+   Func<string,object> manager=scope=>new Proxy(interop.GetType("SolidWorks.Interop.sldworks.CustomPropertyManager",true),call=>{
+    if(call.MethodName=="get_Count")return 1;if(call.MethodName=="GetNames")return new object[]{"编号"};
+    if(call.MethodName=="Get6")return new ReturnMessage(2,new object[]{"编号",true,scope+"-raw",scope+"-resolved",true,false},6,call.LogicalCallContext,call);
+    throw new Exception("Unexpected property mutation "+call.MethodName);
+   }).GetTransparentProxy();
+   var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="get_CustomPropertyManager"?manager((string)call.Args[0]):throw new Exception(call.MethodName)).GetTransparentProxy();
+   var configuration=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Configuration",true),call=>throw new Exception("Unexpected configuration mutation "+call.MethodName)).GetTransparentProxy();
+   var document=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),call=>{
+    if(call.MethodName=="GetPathName")return path;if(call.MethodName=="GetSaveFlag")return false;if(call.MethodName=="get_Extension")return extension;
+    if(call.MethodName=="GetConfigurationByName"){lookups.Add((string)call.Args[0]);return missing&&(string)call.Args[0]=="Alternate"?null:configuration;}
+    throw new Exception("Read-only multi-configuration validation mutated or switched the model: "+call.MethodName);
+   }).GetTransparentProxy();
+   var plugin=New("PdmAddin");SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?new[]{document}:throw new Exception(call.MethodName)).GetTransparentProxy());
+   var node=New("CadTreeNode");Set(node,"FullPath",path);Set(node,"FileName","MULTI.SLDPRT");Set(node,"Kind",Enum.ToObject(Type("CadDocumentKind"),1));Set(node,"Configuration","Default");
+   var cards=Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(Type("CadDocumentKind"),typeof(IReadOnlyList<string>)));
+   var rejected=false;
+   try{
+    var values=(IReadOnlyDictionary<string,string>)Type("PdmAddin").GetMethod("ReadArchivePreflightProperties",Flags).Invoke(plugin,
+      new object[]{node,cards,new Dictionary<string,IReadOnlyList<string>>{{path,new[]{"Default","Alternate"}}}});
+    if(!missing){
+     if(values["配置:Default/编号"]!="Default-resolved"||values["配置:Alternate/编号"]!="Alternate-resolved")throw new Exception("Referenced configuration properties were not retained");
+     var prepared=new Dictionary<string,string>{{"配置:Default/编号","saved-primary"}};
+     var merged=(IReadOnlyDictionary<string,string>)Type("PdmAddin").GetMethod("PreserveInspectedConfigurationProperties",Flags).Invoke(null,new object[]{node,prepared,values});
+     if(merged["配置:Default/编号"]!="saved-primary"||merged["配置:Alternate/编号"]!="Alternate-resolved")throw new Exception("Prepared archive lost an alternate configuration or replaced freshly read primary properties");
+    }
+   }
+   catch(TargetInvocationException e)when(missing&&e.InnerException is InvalidOperationException&&e.InnerException.Message.Contains("Alternate")){rejected=true;}
+   if(rejected!=missing||!lookups.SequenceEqual(new[]{"Default","Alternate"}))throw new Exception("Not every referenced configuration was validated");
+   Console.WriteLine("PASS: every referenced configuration checked without switching, rebuilding or saving; missing="+missing);
+  }
+ }
+ static async Task SharedAssemblySaveScenario()
+ {
+  var folder=Path.Combine(Path.GetTempPath(),"pdm-shared-save-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+  try
+  {
+   var plugin=New("PdmAddin");var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
+   var modelType=appType.Assembly.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true);var events=new List<string>();
+   var names=new[]{"ROOT.SLDASM","SHARED.SLDASM","OUTER.SLDASM","INNER.SLDASM"};var models=new List<Model>();var nodes=new List<object>();
+   foreach(var name in names){var path=Path.Combine(folder,name);File.WriteAllText(path,"saved source");var node=New("CadTreeNode");Set(node,"FullPath",path);Set(node,"FileName",name);Set(node,"Kind",Enum.ToObject(Type("CadDocumentKind"),0));nodes.Add(node);models.Add(new Model(modelType,path,true,events));}
+   ((IList)Get(nodes[0],"Children")).Add(nodes[1]);((IList)Get(nodes[0],"Children")).Add(nodes[2]);
+   ((IList)Get(nodes[2],"Children")).Add(nodes[3]);
+   var repeated=New("CadTreeNode");Set(repeated,"FullPath",Get(nodes[1],"FullPath"));Set(repeated,"FileName",names[1]);Set(repeated,"Kind",Enum.ToObject(Type("CadDocumentKind"),0));((IList)Get(nodes[3],"Children")).Add(repeated);
+   models[1].OnSave=()=>{models[3].Dirty=true;models[2].Dirty=true;models[0].Dirty=true;};models[3].OnSave=()=>{models[2].Dirty=true;models[0].Dirty=true;};models[2].OnSave=()=>models[0].Dirty=true;
+   SetField(plugin,"currentTree",nodes[0]);SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?models.Select(model=>model.GetTransparentProxy()).ToArray():throw new Exception(call.MethodName)).GetTransparentProxy());
+   var items=Type("PdmAddin").GetMethod("BuildBatchOperationItems",Flags).Invoke(null,new[]{nodes[0]});
+   using(var pane=(Control)New("PdmTaskPaneControl","重复子装配保存测试"))
+   {
+    pane.CreateControl();SetField(plugin,"taskPaneControl",pane);
+    await (Task)Type("PdmAddin").GetMethod("EnsureBatchCheckInSavedStateAsync",Flags).Invoke(plugin,new object[]{items,Guid.NewGuid(),CancellationToken.None});
+    if(models.Any(model=>model.Dirty)||!events.SequenceEqual(new[]{"save:SHARED.SLDASM","save:INNER.SLDASM","save:OUTER.SLDASM","save:ROOT.SLDASM"}))throw new Exception("Shared assemblies were saved by display depth instead of file dependencies");
+   }
+   Console.WriteLine("PASS: a shared assembly at shallow and deep occurrences saves once before every parent");
+  }
+  finally{Directory.Delete(folder,true);}
+ }
+ static async Task SavePropagationScenario()
+ {
+  foreach(var remainsDirty in new[]{false,true})
+  {
+   var folder=Path.Combine(Path.GetTempPath(),"pdm-save-propagation-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+   try
+   {
+    var plugin=New("PdmAddin");var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
+    var modelType=appType.Assembly.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true);var events=new List<string>();
+    var names=new[]{"ROOT.SLDASM","PART.SLDPRT","PART.SLDDRW"};var models=new List<Model>();var nodes=new List<object>();
+    for(var i=0;i<3;i++){var path=Path.Combine(folder,names[i]);File.WriteAllText(path,"saved source");var node=New("CadTreeNode");Set(node,"FullPath",path);Set(node,"FileName",names[i]);Set(node,"Kind",Enum.ToObject(Type("CadDocumentKind"),i));nodes.Add(node);models.Add(new Model(modelType,path,i==1,events));}
+    models[1].OnSave=()=>{models[0].Dirty=true;models[2].Dirty=true;};models[0].OnSave=()=>{models[0].Dirty=remainsDirty;models[2].Dirty=true;};
+    ((IList)Get(nodes[0],"Children")).Add(nodes[1]);((IList)Get(nodes[1],"Children")).Add(nodes[2]);SetField(plugin,"currentTree",nodes[0]);
+    SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?models.Select(model=>model.GetTransparentProxy()).ToArray():throw new Exception(call.MethodName)).GetTransparentProxy());
+    var items=Array.CreateInstance(Type("BatchOperationItem"),3);for(var i=0;i<3;i++)items.SetValue(New("BatchOperationItem",nodes[i],i),i);
+    using(var pane=(Control)New("PdmTaskPaneControl","保存传播测试"))
+    {
+     pane.CreateControl();SetField(plugin,"taskPaneControl",pane);var rejected=false;
+     try{await (Task)Type("PdmAddin").GetMethod("EnsureBatchCheckInSavedStateAsync",Flags).Invoke(plugin,new object[]{items,Guid.NewGuid(),CancellationToken.None});}
+     catch(IOException)when(remainsDirty){rejected=true;}
+     if(rejected!=remainsDirty||models[0].Dirty!=remainsDirty||models[1].Dirty||models[2].Dirty||!events.SequenceEqual(new[]{"save:PART.SLDPRT","save:ROOT.SLDASM","save:PART.SLDDRW"}))throw new Exception("Save ordering lost propagated changes or ignored a persistent dirty flag");
+     if(names.Any(name=>File.ReadAllText(Path.Combine(folder,name))!="saved source"))throw new Exception("Save-order fixture modified source bytes");
+    }
+    Console.WriteLine("PASS: child-save dirties a clean parent; models save child-first, drawings last; persistent-dirty="+remainsDirty);
+   }
+   finally{Directory.Delete(folder,true);}
+  }
  }
  static void VisualReferenceCycleScenario()
  {
@@ -707,6 +950,96 @@ internal static class Program
   }
   finally{Directory.Delete(folder,true);}
  }
+ static void NativeManifestScenario()
+ {
+  var directory=Path.Combine(Path.GetTempPath(),"pdm-native-manifest-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(directory);
+  var virtualTop=Path.Combine(Path.GetTempPath(),"swx"+Guid.NewGuid().ToString("N"));
+  try
+  {
+   var rootPath=Path.Combine(directory,"ROOT.SLDASM");var partPath=Path.Combine(directory,"PART.SLDPRT");var drawingPath=Path.Combine(directory,"DRAWING.SLDDRW");
+   foreach(var path in new[]{rootPath,partPath,drawingPath})File.WriteAllText(path,System.IO.Path.GetFileName(path));
+   var root=New("CadTreeNode");Set(root,"FullPath",rootPath);Set(root,"Kind",Enum.Parse(Type("CadDocumentKind"),"Assembly"));
+   var part=New("CadTreeNode");Set(part,"FullPath",partPath);Set(part,"Kind",Enum.Parse(Type("CadDocumentKind"),"Part"));
+   var drawing=New("CadTreeNode");Set(drawing,"FullPath",drawingPath);Set(drawing,"Kind",Enum.Parse(Type("CadDocumentKind"),"Drawing"));
+   ((IList)Get(root,"Children")).Add(part);((IList)Get(root,"Children")).Add(drawing);
+   var oldPath=Path.Combine(directory,"old","PART.SLDPRT");Set(part,"SourceReferencePath",oldPath);
+   var sameNamePath=Path.Combine(directory,"other","PART.SLDPRT");Directory.CreateDirectory(Path.GetDirectoryName(sameNamePath));File.WriteAllText(sameNamePath,"different content");
+   var extraPath=Path.Combine(directory,"UNSEEN.SLDPRT");File.WriteAllText(extraPath,"extra model");
+   var secondExtraPath=Path.Combine(directory,"六角螺母C级-M6.SLDPRT");File.WriteAllText(secondExtraPath,"second native dependency");
+   var externalPath=Path.Combine(directory,"TABLE.xlsx");File.WriteAllText(externalPath,"external dependency");
+   var validate=Type("NativeArchiveManifest").GetMethod("Validate",Flags);
+   foreach(var mode in new[]{"all-in-tree","verified-old-path","unseen-model","same-name-other-path","changed-old-path","missing-file","external-file"})
+   {
+    if(mode=="changed-old-path"){Directory.CreateDirectory(Path.GetDirectoryName(oldPath));File.WriteAllText(oldPath,"different from verified part");}
+    var input=mode=="all-in-tree"?new[]{rootPath,partPath,drawingPath}:mode=="verified-old-path"?new[]{rootPath,oldPath,drawingPath}:
+     mode=="unseen-model"?new[]{rootPath,partPath,drawingPath,extraPath,secondExtraPath}:mode=="same-name-other-path"?new[]{rootPath,sameNamePath,drawingPath}:
+     mode=="changed-old-path"?new[]{rootPath,oldPath,drawingPath}:mode=="missing-file"?new[]{rootPath,partPath,drawingPath,Path.Combine(directory,"MISSING.SLDPRT")}:
+     new[]{rootPath,partPath,drawingPath,externalPath};
+    var rejected=false;IReadOnlyList<string> external=null;try{external=(IReadOnlyList<string>)validate.Invoke(null,new object[]{root,input});}catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){rejected=true;}
+    if(rejected==(mode=="all-in-tree"||mode=="verified-old-path"||mode=="unseen-model"||mode=="external-file")
+      ||mode=="external-file"&&(external?.Count!=1||external[0]!=externalPath))throw new Exception("Native manifest silently lost a dependency or rejected a verified path: "+mode);
+    if(mode=="unseen-model"){
+     foreach(var path in new[]{extraPath,secondExtraPath}){
+      var attached=((IEnumerable)Get(root,"Children")).Cast<object>().SingleOrDefault(node=>(string)Get(node,"FullPath")==path);
+      if(attached==null||Get(attached,"Role").ToString()!="ExternalFileDependency")throw new Exception("Additional CAD was not explicitly marked as an external file dependency: "+path);
+     }
+    }
+    Console.WriteLine("PASS: native manifest "+mode);
+   }
+   var embeddedFolder=Path.Combine(virtualTop,"VC~~","STEP-assembly");Directory.CreateDirectory(embeddedFolder);
+   var embeddedAssemblyPath=Path.Combine(embeddedFolder,"STEP-virtual^ROOT.SLDASM");
+   var embeddedPartPath=Path.Combine(embeddedFolder,"STEP-part^ROOT.SLDPRT");
+   var embeddedChildPath=Path.Combine(embeddedFolder,"STEP-rod^ROOT.SLDPRT");
+   File.WriteAllText(embeddedAssemblyPath,"temporary embedded assembly");File.WriteAllText(embeddedPartPath,"temporary embedded part");
+   var embeddedAssembly=New("CadTreeNode");Set(embeddedAssembly,"FullPath",embeddedAssemblyPath);Set(embeddedAssembly,"FileName",Path.GetFileName(embeddedAssemblyPath));
+   Set(embeddedAssembly,"Kind",Enum.Parse(Type("CadDocumentKind"),"Assembly"));Set(embeddedAssembly,"Status",Enum.Parse(Type("CadReferenceStatus"),"Virtual"));
+   var obsoleteIdentity=Guid.NewGuid();Set(embeddedAssembly,"DocumentId",obsoleteIdentity);Set(embeddedAssembly,"Revision","W1");
+   var embeddedPart=New("CadTreeNode");Set(embeddedPart,"FullPath",embeddedPartPath);Set(embeddedPart,"Kind",Enum.Parse(Type("CadDocumentKind"),"Part"));
+   Set(embeddedPart,"Status",Enum.Parse(Type("CadReferenceStatus"),"Virtual"));
+   var embeddedChild=New("CadTreeNode");Set(embeddedChild,"FullPath",embeddedChildPath);Set(embeddedChild,"Kind",Enum.Parse(Type("CadDocumentKind"),"Part"));
+   Set(embeddedChild,"Status",Enum.Parse(Type("CadReferenceStatus"),"Normal"));
+   ((IList)Get(embeddedAssembly,"Children")).Add(embeddedPart);((IList)Get(embeddedAssembly,"Children")).Add(embeddedChild);
+   ((IList)Get(root,"Children")).Add(embeddedAssembly);
+   var modelItems=(IEnumerable)Type("PdmAddin").GetMethod("BuildBatchOperationItems",Flags).Invoke(null,new[]{root});
+   if(modelItems.Cast<object>().Any(item=>new[]{embeddedAssemblyPath,embeddedPartPath,embeddedChildPath}.Contains((string)Get(Get(item,"Node"),"FullPath"))))
+    throw new Exception("SolidWorks temporary virtual components became standalone archive files");
+   var embeddedFiles=new[]{rootPath,partPath,drawingPath,embeddedAssemblyPath,embeddedPartPath,embeddedChildPath};
+   var virtualExternal=(IReadOnlyList<string>)validate.Invoke(null,new object[]{root,embeddedFiles});
+   if(virtualExternal.Count!=0)throw new Exception("Verified virtual components were treated as external data");
+   Set(embeddedChild,"Status",Enum.Parse(Type("CadReferenceStatus"),"Virtual"));
+   var snapshotRoot=New("CadTreeNode");Set(snapshotRoot,"FullPath",rootPath);Set(snapshotRoot,"FileName",Path.GetFileName(rootPath));
+   Set(snapshotRoot,"Kind",Enum.Parse(Type("CadDocumentKind"),"Assembly"));Set(snapshotRoot,"DocumentId",Guid.NewGuid());
+   ((IList)Get(snapshotRoot,"Children")).Add(embeddedAssembly);
+   var request=Type("PdmApiClient").GetMethod("ToRequestNode",Flags).Invoke(null,new object[]{snapshotRoot,true,null});
+   if(new JavaScriptSerializer().Serialize(request).Contains(obsoleteIdentity.ToString()))throw new Exception("Virtual component's stale PDM identity was persisted");
+   Console.WriteLine("PASS: STEP-imported embedded virtual assembly and parts stay inside parent; no temporary file or stale identity archived");
+   var priorSessionPart=Path.Combine(Path.GetTempPath(),"swx"+Guid.NewGuid().ToString("N"),"VC~~","STEP-assembly",Path.GetFileName(embeddedPartPath));
+   var priorSessionFiles=new[]{rootPath,partPath,drawingPath,embeddedAssemblyPath,priorSessionPart,embeddedChildPath};
+   if(((IReadOnlyList<string>)validate.Invoke(null,new object[]{root,priorSessionFiles})).Count!=0)
+    throw new Exception("Prior SolidWorks session's virtual path was treated as an external file");
+   Console.WriteLine("PASS: stale swx directory reconciles only by complete verified embedded hierarchy");
+   var foreignSessionPart=Path.Combine(Path.GetPathRoot(Path.GetTempPath()),"Users","archived-other-user","AppData","Local","Temp","swx12345","VC~~","STEP-assembly",Path.GetFileName(embeddedPartPath));
+   var foreignSessionFiles=new[]{rootPath,partPath,drawingPath,embeddedAssemblyPath,foreignSessionPart,embeddedChildPath};
+   if(((IReadOnlyList<string>)validate.Invoke(null,new object[]{root,foreignSessionFiles})).Count!=0)
+    throw new Exception("Another Windows user's saved virtual path was treated as an external file");
+   Console.WriteLine("PASS: foreign-user Temp/swx virtual paths require the same complete verified embedded hierarchy");
+   var unknownPath=Path.Combine(embeddedFolder,"UNVERIFIED^ROOT.SLDPRT");File.WriteAllText(unknownPath,"unknown temporary file");
+   var rejectedUnknown=false;try{validate.Invoke(null,new object[]{root,embeddedFiles.Concat(new[]{unknownPath}).ToArray()});}
+   catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){rejectedUnknown=true;}
+   if(!rejectedUnknown)throw new Exception("Unverified temporary SolidWorks CAD was silently omitted");
+   Console.WriteLine("PASS: unknown VC~~ temporary CAD remains blocked");
+   var otherVirtualTop=Path.Combine(Path.GetTempPath(),"swx"+Guid.NewGuid().ToString("N"));
+   var ambiguousPath=Path.Combine(otherVirtualTop,"VC~~","STEP-assembly",Path.GetFileName(embeddedPartPath));
+   var ambiguous=New("CadTreeNode");Set(ambiguous,"FullPath",ambiguousPath);Set(ambiguous,"Kind",Enum.Parse(Type("CadDocumentKind"),"Part"));
+   Set(ambiguous,"Status",Enum.Parse(Type("CadReferenceStatus"),"Virtual"));((IList)Get(root,"Children")).Add(ambiguous);
+   var rejectedAmbiguous=false;try{validate.Invoke(null,new object[]{root,priorSessionFiles});}
+   catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){rejectedAmbiguous=true;}
+   if(!rejectedAmbiguous)throw new Exception("Ambiguous stale virtual hierarchy was automatically rebound");
+   Console.WriteLine("PASS: ambiguous historical virtual path remains blocked");
+   if(File.ReadAllText(partPath)!="PART.SLDPRT")throw new Exception("Native manifest modified a source CAD file");
+  }
+  finally{Directory.Delete(directory,true);if(Directory.Exists(virtualTop))Directory.Delete(virtualTop,true);}
+ }
  static void PlannedTaskTimerScenario(Form host)
  {
   using(var pane=(Control)New("PdmTaskPaneControl",string.Empty))
@@ -787,7 +1120,7 @@ internal static class Program
  }
  sealed class Model:RealProxy
  {
-  public string Path;public bool Dirty;bool readOnly=true;readonly List<string> events;
+  public string Path;public bool Dirty;public Action OnSave;bool readOnly=true;readonly List<string> events;
   public Model(System.Type type,string path,bool dirty,List<string> events):base(type){Path=path;Dirty=dirty;this.events=events;}
   public override IMessage Invoke(IMessage message)
   {
@@ -800,7 +1133,7 @@ internal static class Program
     case "SetReadOnlyState":readOnly=(bool)call.Args[0];value=true;break;
     case "Save3":
      if(readOnly||(File.GetAttributes(Path)&FileAttributes.ReadOnly)!=0)return new ReturnMessage(new IOException("Regression: Save3 called while read-only"),call);
-     events.Add("save:"+System.IO.Path.GetFileName(Path));Dirty=false;call.Args[1]=0;call.Args[2]=0;value=true;break;
+     events.Add("save:"+System.IO.Path.GetFileName(Path));Dirty=false;OnSave?.Invoke();call.Args[1]=0;call.Args[2]=0;value=true;break;
     default:return new ReturnMessage(new Exception("Unexpected model call "+call.MethodName),call);
    }
    return new ReturnMessage(value,call.Args,call.ArgCount,call.LogicalCallContext,call);

@@ -62,6 +62,52 @@ public sealed class ReleaseDeliveryArchiveTests
     }
 
     [Fact]
+    public async Task NestedPreviewsAndSameNamedNewPackagesAreArchivedAndBackfillKeepsNewestCurrent()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-release-archive-test", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var repository = new InMemoryPdmRepository(TimeProvider.System);
+            var files = new InMemoryProjectFileRepository(TimeProvider.System);
+            var service = new ReleaseDeliveryArchiveService(repository, files, TimeProvider.System);
+            var oldPath = Path.Combine(root, "RP-OLD");
+            var newPath = Path.Combine(root, "RP-NEW");
+            Directory.CreateDirectory(Path.Combine(oldPath, "previews"));
+            Directory.CreateDirectory(Path.Combine(newPath, "previews"));
+            await File.WriteAllTextAsync(Path.Combine(oldPath, "nonstandard-parts-bom.xlsx"), "old-bom");
+            await File.WriteAllTextAsync(Path.Combine(newPath, "nonstandard-parts-bom.xlsx"), "new-bom");
+            await File.WriteAllTextAsync(Path.Combine(oldPath, "previews", "drawing.pdf"), "same-pdf");
+            await File.WriteAllTextAsync(Path.Combine(newPath, "previews", "drawing.pdf"), "same-pdf");
+            var oldPackage = await CreatePublishedPackageAsync(repository, ProjectId, oldPath, "RP-OLD", ReleaseScope.NonStandardWithDrawing);
+            var newPackage = await CreatePublishedPackageAsync(repository, ProjectId, newPath, "RP-NEW", ReleaseScope.NonStandardWithDrawing);
+            await repository.MarkPublishedAsync(oldPackage.Id, oldPath, DateTimeOffset.UtcNow.AddDays(-1), default);
+            Assert.Equal(2, await service.ArchiveAsync(newPackage.Id, "admin", default));
+            Assert.Equal(2, await service.ArchiveAsync(oldPackage.Id, "admin", default));
+            Assert.Equal(0, await service.ArchiveAsync(newPackage.Id, "admin", default));
+            var folder = (await repository.FindProjectFolderByKeyAsync(ProjectId, "mechanical.release", default))!;
+            var archived = await files.ListAsync(folder.RootProjectId, folder.Id, false, default);
+            Assert.Equal(2, archived.Count);
+            foreach (var file in archived)
+            {
+                Assert.StartsWith("RP-NEW", file.CurrentVersion!.StorageRelativePath);
+                Assert.Equal(2, (await files.ListVersionsAsync(file.Id, default)).Count);
+            }
+            Assert.Contains(archived, item => item.CurrentVersion!.StorageRelativePath == Path.Combine("RP-NEW", "previews", "drawing.pdf"));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public async Task MissingPublishedDirectoryCannotBeReportedAsArchived()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var package = await CreatePublishedPackageAsync(repository, ProjectId,
+            Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")), "RP-MISSING", ReleaseScope.NonStandardWithDrawing);
+        var service = new ReleaseDeliveryArchiveService(repository, new InMemoryProjectFileRepository(TimeProvider.System), TimeProvider.System);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.ArchiveAsync(package.Id, "admin", default));
+    }
+
+    [Fact]
     public async Task UnpublishedOrMissingDirectoryArchivesNothing()
     {
         var clock = TimeProvider.System;

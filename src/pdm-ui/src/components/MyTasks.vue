@@ -97,7 +97,7 @@ const materialTaskRows = computed<TaskCenterRow[]>(() => {
     status: '待审批',
     statusClass: 'is-remind',
     title: `${task.projectCode || '项目'} 标准件料号审批`,
-    content: `${task.projectName || task.projectId} · ${task.applicationName || task.bomItemName || 'BOM物料'} · 申请人 ${displayUserName(task.requestedBy)}`,
+    content: `${task.projectName || task.projectId} · ${task.applicationName || task.bomItemName || 'BOM物料'}${task.approvalWorkflow ? ` · ${task.approvalWorkflow.nodes.find(node => node.decision == null)?.name || '审批完成'}` : ''} · 申请人 ${displayUserName(task.requestedBy)}`,
     createdAt: task.requestedAt,
     material: task,
   }))

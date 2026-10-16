@@ -24,7 +24,7 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        if (args.Length != 2 && !(args.Length == 3 && args[2] == "--archive-state-only")) return 2;
+        if (args.Length != 2 && !(args.Length == 3 && (args[2] == "--archive-state-only" || args[2] == "--reference-cache-only"))) return 2;
         directory = Path.GetFullPath(args[1]);
         Directory.CreateDirectory(directory);
         AppDomain.CurrentDomain.AssemblyResolve += (_, e) =>
@@ -38,6 +38,12 @@ internal static class Program
             .SetValue(null, Path.Combine(directory, "bindings-" + Guid.NewGuid().ToString("N")));
         Type("PdmDocumentIdentityStore").GetField("workspaceRootResolver", Members)
             .SetValue(null, new Func<string>(() => Path.Combine(directory, "workspace")));
+        if (args.Length == 3 && args[2] == "--reference-cache-only")
+        {
+            RunReferenceCacheTests();
+            Console.WriteLine($"Passed={passed}; Failed={failed}; no SolidWorks COM or production API calls.");
+            return failed == 0 ? 0 : 1;
+        }
         if (args.Length == 3)
         {
             Test("desktop workspace identity and local changes", TestWorkspaceLocalStates);
@@ -59,6 +65,9 @@ internal static class Program
         Test("300 repeated references resolve once to the matching historical version", TestResolveDuplicates);
         Test("changed reference is blocked, never assigned the latest version", TestChangedReference);
         Test("cancelled preflight makes no requests", TestCancellation);
+        Test("embedded components skip independent registration and history checks but retain external dependencies", TestVirtualReferences);
+        Test("archive dialog displays embedded hierarchy without separate upload selections", TestVirtualDialog);
+        RunReferenceCacheTests();
         Test("successful child updates all operation instances but not a different local file", TestOperationInstances);
         Test("reference validation rejects unknown versions before upload", TestValidation);
         Test("copied legacy IDs are hints only, never automatic associations", TestLegacyIdentity);
@@ -69,6 +78,7 @@ internal static class Program
         Test("new assemblies allow unregistered external files but block foreign controlled references", TestExternalReferences);
         Test("registration persists identity on the source even after UI tree refresh", TestRegistrationBinding);
         Test("structure actions lock during workspace work and recover afterward", TestSelectionIndependentStructureActions);
+        Test("merged archive entry preserves whole-tree, checked, and context-menu scopes", TestMergedArchiveEntry);
         Test("binding failure stops before assigning an in-memory identity", TestBindingFailure);
         Test("incremental plan submits ten new files and parent, not ten unchanged originals", TestIncrementalPlan);
         Test("independent roots use separate visible working directories", TestProjectWorkspaceDirectory);
@@ -181,6 +191,202 @@ internal static class Program
         Assert(Get(duplicate, "DocumentId").Equals(Get(source, "DocumentId")), "new document identity not propagated");
         Assert(string.IsNullOrEmpty((string)Get(differentPath, "CurrentRevision")), "different local content path was overwritten");
     }
+
+    private static void RunReferenceCacheTests()
+    {
+        Test("three checkpoints share committed history while preserving 300 configured references", TestBatchReferenceHistoryReuse);
+        Test("same-length same-mtime edits invalidate reference content at the next checkpoint", TestBatchReferenceContentChanges);
+        Test("changed file identity queries its own history instead of reusing the old document", TestBatchReferenceIdentityChange);
+        Test("history cache rejects other projects, servers, users and edit sessions", TestBatchReferenceCacheScope);
+        Test("failed history lookup is retried but cached lookup still respects cancellation", TestBatchReferenceCacheFailure);
+    }
+
+    private static void TestBatchReferenceHistoryReuse()
+    {
+        var id = Guid.NewGuid();
+        var project = Guid.NewGuid();
+        var root = Node("cache-root.SLDASM", null, 0);
+        var bytes = new byte[] { 5, 4, 3, 2 };
+        File.WriteAllBytes(Path.Combine(directory, "cache-part.SLDPRT"), bytes);
+        for (var i = 0; i < 300; i++)
+        {
+            var child = Node("cache-part.SLDPRT", id);
+            Set(child, "Configuration", "configuration-" + i);
+            Children(root).Add(child);
+        }
+        using (var handler = new VersionsHandler(id, Hash(bytes)))
+        {
+            var plugin = Plugin(handler);
+            var cache = ReferenceCache(plugin, project);
+            for (var i = 0; i < 3; i++) ResolveCached(plugin, Items(root), project, cache);
+            Assert(handler.Requests == 1, "three checkpoints repeated immutable history requests");
+            Assert(Children(root).Cast<object>().All(node => (string)Get(node, "CurrentRevision") == "W1"), "content-matched historical version changed");
+            var first = Children(root)[0];
+            Set(first, "IsModifiedInSolidWorks", true);
+            ResolveCached(plugin, Items(root), project, cache);
+            Assert((string)Get(first, "CurrentRevision") == "W1*", "cached lookup masked an unsaved state change");
+            Set(first, "IsModifiedInSolidWorks", false);
+            ResolveCached(plugin, Items(root), project, cache);
+            Assert((string)Get(first, "CurrentRevision") == "W1", "saved state did not refresh");
+            ResolveCached(plugin, Items(root), project, ReferenceCache(plugin, project));
+            Assert(handler.Requests == 2 && handler.Writes == 0, "a new batch reused the previous batch history or wrote data");
+        }
+    }
+
+    private static void TestBatchReferenceContentChanges()
+    {
+        var id = Guid.NewGuid();
+        var project = Guid.NewGuid();
+        var root = Node("cache-change-root.SLDASM", null, 0);
+        var child = Node("cache-change.SLDPRT", id);
+        var path = (string)Get(child, "FullPath");
+        var bytes = new byte[] { 1, 2, 3, 4 };
+        File.WriteAllBytes(path, bytes);
+        Children(root).Add(child);
+        using (var handler = new VersionsHandler(id, Hash(bytes)))
+        {
+            var plugin = Plugin(handler);
+            var cache = ReferenceCache(plugin, project);
+            ResolveCached(plugin, Items(root), project, cache);
+            var timestamp = File.GetLastWriteTimeUtc(path);
+            File.WriteAllBytes(path, new byte[] { 4, 3, 2, 1 });
+            File.SetLastWriteTimeUtc(path, timestamp);
+            Expect<InvalidOperationException>(() => ResolveCached(plugin, Items(root), project, cache));
+            Assert(handler.Requests == 1 && handler.Writes == 0, "content recheck required stale history refresh or wrote data");
+        }
+    }
+
+    private static void TestBatchReferenceIdentityChange()
+    {
+        var firstId = Guid.NewGuid();
+        var secondId = Guid.NewGuid();
+        var project = Guid.NewGuid();
+        var root = Node("cache-identity-root.SLDASM", null, 0);
+        var child = Node("cache-identity.SLDPRT", firstId);
+        var bytes = new byte[] { 1, 9, 8, 4 };
+        File.WriteAllBytes((string)Get(child, "FullPath"), bytes);
+        Children(root).Add(child);
+        using (var handler = new VersionsHandler(firstId, Hash(bytes)))
+        {
+            var plugin = Plugin(handler);
+            var cache = ReferenceCache(plugin, project);
+            ResolveCached(plugin, Items(root), project, cache);
+            handler.DocumentId = secondId;
+            Set(child, "DocumentId", secondId);
+            ResolveCached(plugin, Items(root), project, cache);
+            Assert(handler.Requests == 2 && (string)Get(child, "CurrentRevision") == "W1", "new document identity reused the old identity's history");
+        }
+    }
+
+    private static void TestBatchReferenceCacheScope()
+    {
+        var id = Guid.NewGuid();
+        var project = Guid.NewGuid();
+        var root = Node("cache-scope-root.SLDASM", null, 0);
+        using (var handler = new VersionsHandler(id, "hash"))
+        {
+            var plugin = Plugin(handler);
+            var cache = ReferenceCache(plugin, project);
+            Expect<InvalidOperationException>(() => ResolveCached(plugin, Items(root), Guid.NewGuid(), cache));
+            plugin.GetType().GetField("authenticatedUsername", Members).SetValue(plugin, "other-user");
+            Expect<InvalidOperationException>(() => ResolveCached(plugin, Items(root), project, cache));
+            plugin.GetType().GetField("authenticatedUsername", Members).SetValue(plugin, string.Empty);
+            var client = Field(plugin, "apiClient");
+            var originalScope = Get(client, "EditJournalScope");
+            Set(client, "EditJournalScope", "http://other-server/|other-company");
+            Expect<InvalidOperationException>(() => ResolveCached(plugin, Items(root), project, cache));
+            Set(client, "EditJournalScope", originalScope);
+            using (var otherHandler = new VersionsHandler(id, "hash"))
+                Expect<InvalidOperationException>(() => ResolveCached(Plugin(otherHandler), Items(root), project, cache));
+            Assert(handler.Requests == 0 && handler.Writes == 0, "scope rejection performed network requests");
+        }
+    }
+
+    private static void TestBatchReferenceCacheFailure()
+    {
+        var id = Guid.NewGuid();
+        var project = Guid.NewGuid();
+        var root = Node("cache-failure-root.SLDASM", null, 0);
+        var child = Node("cache-failure.SLDPRT", id);
+        var bytes = new byte[] { 7, 5, 3, 1 };
+        File.WriteAllBytes((string)Get(child, "FullPath"), bytes);
+        Children(root).Add(child);
+        using (var handler = new VersionsHandler(id, Hash(bytes)) { FailNext = true })
+        {
+            var plugin = Plugin(handler);
+            var cache = ReferenceCache(plugin, project);
+            Expect<InvalidOperationException>(() => ResolveCached(plugin, Items(root), project, cache));
+            ResolveCached(plugin, Items(root), project, cache);
+            Assert(handler.Requests == 2, "failed lookup was cached as a success");
+            Expect<OperationCanceledException>(() => ((Task)Call(plugin, "ResolveBatchReferenceVersionsCachedAsync", Items(root), project,
+                null, new CancellationToken(true), cache)).GetAwaiter().GetResult());
+            Assert(handler.Requests == 2 && handler.Writes == 0, "cancellation made another request or write");
+        }
+    }
+
+    private static object ReferenceCache(object plugin, Guid project) => New("PdmAddin+BatchReferenceVersionCache", project,
+        Field(plugin, "checkoutSessionId"), Get(Field(plugin, "apiClient"), "EditJournalScope"), Field(plugin, "authenticatedUsername"));
+
+    private static void TestVirtualReferences()
+    {
+        var root = Node("virtual-reference-root.SLDASM", null, 0);
+        var nested = Node("STEP-child^ROOT.SLDASM", null, 0);
+        var part = Node("STEP-part^STEP-child.SLDPRT", null);
+        foreach (var node in new[] { nested, part })
+        { Set(node, "Status", Enum.Parse(Type("CadReferenceStatus"), "Virtual")); File.WriteAllText((string)Get(node, "FullPath"), "embedded data"); }
+        Children(root).Add(nested); Children(nested).Add(part);
+        using var handler = new VersionsHandler(Guid.NewGuid(), "unused");
+        var plugin = Plugin(handler);
+        Resolve(plugin, Items(root), CancellationToken.None);
+        Set(nested, "DocumentId", Guid.NewGuid()); Set(part, "DocumentId", Guid.NewGuid());
+        Resolve(plugin, Items(root), CancellationToken.None);
+        Assert(handler.Requests == 0 && handler.Writes == 0, "embedded components triggered independent registration/history lookup");
+        var external = Node("real-external-under-virtual.SLDPRT", handler.DocumentId);
+        var bytes = new byte[] { 1, 3, 5 }; File.WriteAllBytes((string)Get(external, "FullPath"), bytes);
+        Children(nested).Add(external);
+        // A real external file remains a normal reference even inside an embedded assembly.
+        Expect<InvalidOperationException>(() => Resolve(plugin, Items(root), CancellationToken.None));
+        Assert(handler.Requests == 1, "real external dependency beneath a virtual assembly was silently skipped");
+    }
+
+    private static void TestVirtualDialog()
+    {
+        var previousContext = SynchronizationContext.Current;
+        try
+        {
+        var root = Node("embedded-ui-root.SLDASM", null, 0); File.WriteAllText((string)Get(root, "FullPath"), "parent file");
+        var nested = Node("嵌入式子装配^ROOT.SLDASM", null, 0);
+        var first = Node("嵌入式缸体^ROOT.SLDPRT", null); var second = Node("嵌入式活塞杆^ROOT.SLDPRT", null);
+        foreach (var node in new[] { nested, first, second })
+        { Set(node, "Status", Enum.Parse(Type("CadReferenceStatus"), "Virtual")); Set(node, "DisplayName", "嵌入式组件"); }
+        Children(root).Add(nested); Children(nested).Add(first); Children(nested).Add(second);
+        using var dialog = (Form)New("BatchOperationDialog", root, Items(root), Array.CreateInstance(Type("ProjectDto"), 0),
+            null, "tester", Enum.Parse(Type("BatchOperationKind"), "CheckIn"), null, null, null);
+        dialog.ShowInTaskbar = false; dialog.Opacity = 0; dialog.Show(); Application.DoEvents();
+        var tree = (TreeView)Field(dialog, "files");
+        Assert(tree.Nodes.Count == 1 && tree.Nodes[0].Nodes.Count == 1 && tree.Nodes[0].Nodes[0].Nodes.Count == 2
+            && tree.Nodes[0].Nodes[0].IsExpanded, "embedded component rows were hidden or collapsed");
+        Assert(((IEnumerable)Get(dialog, "SelectedItems")).Cast<object>().Count() == 1, "embedded components became separate upload items");
+        Assert(((string)Call(dialog, "StateText", nested, "tester")).Contains("随父装配"), "embedded status still says unregistered");
+        Assert(((Label)Field(dialog, "selectionSummary")).Text.Contains("3个嵌入式组件"), "selection summary omits embedded contents");
+        Call(dialog, "ToggleShowCheckedOnly");
+        Assert(tree.Nodes[0].Nodes[0].Nodes.Count == 2, "selected-parent filtering hides its embedded contents");
+        using var bitmap = new Bitmap(dialog.Width, dialog.Height); dialog.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+        bitmap.Save(Path.Combine(directory, "embedded-components-ui.png"));
+        dialog.Close();
+        using var pane = (Control)New("PdmTaskPaneControl", "");
+        Call(pane, "SetTree", root);
+        Set(nested, "CurrentRevision", "W99"); Set(nested, "CheckedOutBy", "stale-user");
+        Call(pane, "UpdateSelected", nested);
+        var detail = ((Label)Field(pane, "selectedMeta")).Text;
+        Assert(detail.Contains("随父装配") && !detail.Contains("W99") && !detail.Contains("未归档") && !detail.Contains("未检出"),
+            "embedded details show an independent version or checkout requirement");
+        }
+        finally { SynchronizationContext.SetSynchronizationContext(previousContext); }
+    }
+
+    private static void ResolveCached(object plugin, Array items, Guid project, object cache) =>
+        ((Task)Call(plugin, "ResolveBatchReferenceVersionsCachedAsync", items, project, null, CancellationToken.None, cache)).GetAwaiter().GetResult();
 
     private static void TestValidation()
     {
@@ -337,7 +543,7 @@ internal static class Program
         Call(pane, "SetTree", root);
 
         var tree = (TreeView)Field(pane, "structureTree");
-        var overall = (Button)Field(pane, "batchOperationButton");
+        var overall = (Button)Field(pane, "checkinButton");
         var property = (Button)Field(pane, "propertyEditButton");
         Assert(tree.SelectedNode == null, "fixture unexpectedly selected a design-tree node");
         Assert(overall.Enabled, "overall action still requires a selected design-tree node");
@@ -354,6 +560,83 @@ internal static class Program
         Call(pane, "SetWorkspaceOperationState", false, "");
         Assert(((Control)Field(pane, "tabsHost")).Enabled && ((Control)Field(pane, "projectPanel")).Enabled,
             "plugin actions did not recover after the workspace operation");
+        Assert(overall.Enabled && property.Enabled, "selection-independent actions did not recover after the workspace operation");
+    }
+
+    private static void TestMergedArchiveEntry()
+    {
+        using var pane = (Control)New("PdmTaskPaneControl", "");
+        using var host = new Form
+        {
+            ClientSize = new Size(460, 850), ShowInTaskbar = false,
+            StartPosition = FormStartPosition.Manual, Location = new Point(-10000, -10000)
+        };
+        host.Controls.Add(pane);
+        host.Show();
+        Call(pane, "SetAuthenticatedUser", "设计员", "designer");
+        var root = Node("merged-entry/main.SLDASM", Guid.NewGuid(), 0);
+        var unowned = Node("merged-entry/unowned.SLDPRT", Guid.NewGuid());
+        FixtureFile("merged-entry/main.SLDASM");
+        FixtureFile("merged-entry/unowned.SLDPRT");
+        Set(root, "CheckedOutBy", "designer");
+        Children(root).Add(unowned);
+        Call(pane, "SetTree", root);
+        Application.DoEvents();
+
+        var wholeRequests = 0;
+        var checkInRequests = new List<EventArgs>();
+        EventHandler wholeHandler = (_, _) => wholeRequests++;
+        EventHandler checkInHandler = (_, args) => checkInRequests.Add(args);
+        pane.GetType().GetEvent("BatchOperationRequested").AddEventHandler(pane, wholeHandler);
+        var checkInEvent = pane.GetType().GetEvent("CheckInRequested");
+        checkInEvent.AddEventHandler(pane, Delegate.CreateDelegate(checkInEvent.EventHandlerType, checkInHandler.Target, checkInHandler.Method));
+        var archive = (Button)Field(pane, "checkinButton");
+        var tree = (TreeView)Field(pane, "structureTree");
+        tree.SelectedNode = null;
+        Call(pane, "UpdateSelected", (object)null);
+        Assert(archive.Enabled, "merged archive entry requires a selected tree row");
+        archive.PerformClick();
+        Assert(wholeRequests == 1 && checkInRequests.Count == 0, "unselected archive entry did not use whole-tree defaults");
+
+        tree.SelectedNode = tree.Nodes[0];
+        archive.PerformClick();
+        Assert(wholeRequests == 2 && checkInRequests.Count == 0, "an unmarked selected row unexpectedly narrowed the archive scope");
+        Call(pane, "SynchronizeCheckedDocument", root, true);
+        Call(pane, "SynchronizeCheckedDocument", unowned, true);
+        Call(pane, "UpdateSelected", root);
+        archive.PerformClick();
+        Assert(wholeRequests == 2 && checkInRequests.Count == 1, "checked archive scope was not dispatched once");
+        var checkedArgs = checkInRequests[0];
+        var checkedNodes = ((IEnumerable)Get(checkedArgs, "Nodes")).Cast<object>().ToArray();
+        Assert((bool)Get(checkedArgs, "UsesCheckedSelection") && checkedNodes.Length == 2
+            && checkedNodes.Contains(root) && checkedNodes.Contains(unowned),
+            "merged archive silently discarded a checked document without an owned checkout");
+
+        Call(pane, "UpdateStructureContextMenu", root);
+        var contextArchive = (ToolStripMenuItem)Field(pane, "contextCheckIn");
+        Assert(contextArchive.Enabled, "owned selected document lost context-menu archive access");
+        contextArchive.PerformClick();
+        var contextArgs = checkInRequests.Last();
+        Assert(checkInRequests.Count == 2 && !(bool)Get(contextArgs, "UsesCheckedSelection")
+            && ReferenceEquals(Get(contextArgs, "Node"), root)
+            && ((IEnumerable)Get(contextArgs, "Nodes")).Cast<object>().Count() == 1,
+            "context-menu archive inherited the checked batch instead of its selected document");
+
+        Call(pane, "SetWorkspaceOperationState", true, "正在存档");
+        Assert(!archive.Enabled, "merged archive remained enabled during an active operation");
+        archive.PerformClick();
+        Assert(wholeRequests == 2 && checkInRequests.Count == 2, "busy archive entry dispatched another operation");
+        Call(pane, "SetWorkspaceOperationState", false, "");
+        foreach (var previewFlag in new[] { "IsLatestReadOnlyPreview", "IsHistoricalPreview" })
+        {
+            Set(root, previewFlag, true);
+            Call(pane, "UpdateSelected", root);
+            Assert(!archive.Enabled, "merged archive remained enabled in " + previewFlag);
+            archive.PerformClick();
+            Assert(wholeRequests == 2 && checkInRequests.Count == 2, "read-only archive entry dispatched an operation");
+            Set(root, previewFlag, false);
+        }
+        host.Hide();
     }
 
     private static void TestBindingFailure()
@@ -520,10 +803,11 @@ internal static class Program
         var selectedState = (Label)Field(control, "selectedState");
         var selectedHint = (Label)Field(control, "selectedHint");
         var workspaceLocation = (Label)Field(control, "workspaceLocation");
-        Assert(viewButton.Text == "查看最新版（只读）", "read-only action is ambiguous");
-        Assert(editButton.Text == "检出并编辑" && editButton.Enabled, "edit action does not explain checkout");
+        var buttonHints = (ToolTip)Field(control, "toolTip");
+        Assert(viewButton.Text == "打开最新" && buttonHints.GetToolTip(viewButton).Contains("只读"), "read-only action is ambiguous");
+        Assert(editButton.Text == "获取编辑" && editButton.Enabled && buttonHints.GetToolTip(editButton).Contains("编辑权限"), "edit action does not explain checkout");
         Assert(selectedState.Text.Contains("本地 W1 = PLM最新 W1"), "selected state does not compare local and PLM versions");
-        Assert(selectedHint.Text.Contains("检出并编辑"), "selected hint does not explain the next action");
+        Assert(selectedHint.Text.Contains("获取编辑"), "selected hint does not explain the next action");
         Assert(workspaceLocation.Text.Contains("View") && workspaceLocation.Text.Contains("P700005-4-4"), "workspace location is not visible");
         Assert((string)Call(control, "LocalStateText", root) == "只读缓存", "local read-only cache state differs");
         Assert((string)Call(control, "PlmStateText", child) == "需更新 W1→W2", "PLM update state differs");
@@ -558,7 +842,7 @@ internal static class Program
             var selectorControl = (Control)selector;
             var selectorBottom = selectorControl.PointToScreen(Point.Empty).Y + selectorControl.Height;
             var buttonTop = viewButton.PointToScreen(Point.Empty).Y;
-            Assert(buttonTop - selectorBottom == 3, "workspace action row gap is not 3 pixels");
+            Assert(buttonTop - selectorBottom == 6, "workspace action row gap is not 6 pixels");
             control.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
             bitmap.Save(Path.Combine(directory, "workspace-guidance.png"));
             host.Hide();
@@ -1016,14 +1300,15 @@ internal static class Program
 
     private sealed class VersionsHandler : HttpMessageHandler
     {
-        private readonly Guid documentId;
+        public Guid DocumentId;
         private readonly string hash;
         private readonly bool includeNewerVersion;
         public int Requests;
         public int Writes;
+        public bool FailNext;
         public VersionsHandler(Guid documentId, string hash, bool includeNewerVersion = true)
         {
-            this.documentId = documentId;
+            DocumentId = documentId;
             this.hash = hash;
             this.includeNewerVersion = includeNewerVersion;
         }
@@ -1031,7 +1316,12 @@ internal static class Program
         {
             Requests++;
             if (request.Method != HttpMethod.Get) { Writes++; throw new Exception("Writes are forbidden"); }
-            Assert(request.RequestUri.AbsolutePath == "/api/documents/" + documentId + "/versions", "unexpected document lookup");
+            Assert(request.RequestUri.AbsolutePath == "/api/documents/" + DocumentId + "/versions", "unexpected document lookup");
+            if (FailNext)
+            {
+                FailNext = false;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("{\"message\":\"测试历史查询失败\"}") });
+            }
             var versions = new[]
             {
                 new { revision = new { display = "W2" }, sha256 = "newer-different-content", propertySnapshot = new { SourceFileSha256 = "newer-different-source" } },

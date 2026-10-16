@@ -7,6 +7,34 @@ namespace Pdm.Domain.Tests;
 public sealed class MaterialRelationServiceTests
 {
     [Fact]
+    public async Task MechanicalGrantCannotAddElectricalAccessoriesWithoutElectricalProjectPermission()
+    {
+        var clock = TimeProvider.System;
+        var pdm = new InMemoryPdmRepository(clock);
+        var materials = new InMemoryMaterialRepository(clock);
+        var relations = new InMemoryMaterialRelationRepository();
+        var service = new MaterialRelationService(relations, materials, pdm, clock);
+        var project = await pdm.CreateProjectAsync(new(
+            $"PERM-REL-{Guid.NewGuid():N}", "配件权限验证", "admin", @"D:\PDM\PermissionRelation", @"D:\PDM\PermissionRelease"), "admin", default);
+        await pdm.SetMainProjectStaffingAsync(project.Id, new("admin", [], ["engineer"]), "admin", default);
+        await pdm.SetRolePermissionsAsync("Engineer", [PermissionCodes.BomEdit, PermissionCodes.BomMechanicalEdit, PermissionCodes.ProjectContentView], default);
+        var motor = await AddApprovedMaterialAsync(materials, MaterialKind.Standard, "0102", "MOTOR", "电机");
+        var controller = await AddApprovedMaterialAsync(materials, MaterialKind.Electrical, "0101", "CTRL", "控制器");
+        var template = await SaveAndPublishAsync(service, motor, controller);
+        var main = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 1, motor.MaterialCode, motor.Name, 1, "001", null, null, "W1", true);
+        await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [main], default);
+        var originalElectrical = await pdm.GetBomAsync(project.Id, BomKind.Electrical, default);
+        var group = template.PublishedRevision!.Groups.Single();
+        var commands = new[] { new ApplyMaterialRelationsCommand(main.Id, [new(group.Id, [group.Options.Single().Id])]) };
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.ApplyAsync(project.Id, commands, "engineer", UserRole.Engineer, default));
+        Assert.Equal(originalElectrical, await pdm.GetBomAsync(project.Id, BomKind.Electrical, default));
+        Assert.Empty(await relations.ListSelectionsAsync(project.Id, default));
+        await pdm.SetRolePermissionsAsync("Engineer", [PermissionCodes.BomEdit, PermissionCodes.BomMechanicalEdit, PermissionCodes.BomElectricalEdit, PermissionCodes.ProjectContentView], default);
+        await service.ApplyAsync(project.Id, commands, "engineer", UserRole.Engineer, default);
+        Assert.Contains(await pdm.GetBomAsync(project.Id, BomKind.Electrical, default), item => item.Source == "MaterialRelation");
+    }
+
+    [Fact]
     public async Task UniqueAccessory_RequiresExplicitSelectionAndKeepsEachMainRowIndependent()
     {
         var clock = TimeProvider.System;

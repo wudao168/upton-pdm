@@ -37,6 +37,7 @@ public sealed record ProductionDrawingItem(
     DateTimeOffset? SupersededAt)
 {
     public IReadOnlyList<BomItem> BomItems { get; init; } = [];
+    public IReadOnlyList<ProductionDrawingBomQuantity> BomQuantities { get; init; } = [];
     public IReadOnlyList<ProductionDrawingModelFile> ModelFiles { get; init; } = [];
     public string PublishedBy { get; init; } = string.Empty;
     public string? Division { get; init; }
@@ -58,17 +59,21 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
         {
             var allDocuments = (await repository.ListDocumentsAsync(project.Id, cancellationToken))
                 .ToDictionary(document => document.Id);
-            var documents = allDocuments.Values.Where(document => document.Kind == DocumentKind.Drawing)
+            var documents = allDocuments.Values.Where(document => document.Kind == DocumentKind.Drawing
+                    && document.State != DocumentLifecycleState.Obsolete)
                 .ToDictionary(document => document.Id);
             if (documents.Count == 0) continue;
-            var packages = (await repository.ListReleasePackagesAsync(project.Id, cancellationToken))
+            var packageHistory = await repository.ListReleasePackagesAsync(project.Id, cancellationToken);
+            var packages = packageHistory
                 .Where(package => package.State == ReleasePackageState.Published
                     && package.Scope is (ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement or ReleaseScope.LegacyCombined))
                 .ToDictionary(package => package.Id);
             var relatedModels = (await repository.ListDocumentRelationsAsync(project.Id, cancellationToken))
                 .GroupBy(relation => relation.DrawingDocumentId)
                 .ToDictionary(group => group.Key, group => group.Select(relation => relation.ModelDocumentId).ToHashSet());
-            var packageBomItems = packages.ToDictionary(entry => entry.Key, entry => entry.Value.NonStandardBomSnapshot
+            var frozenBomItems = packages.ToDictionary(entry => entry.Key, entry => ProductionDrawingQuantities.FrozenItems(entry.Value));
+            var packageQuantities = packages.ToDictionary(entry => entry.Key, entry => ProductionDrawingQuantities.Build(entry.Value, packageHistory));
+            var packageBomItems = packages.ToDictionary(entry => entry.Key, entry => frozenBomItems[entry.Key]
                 .Where(item => item.SourceDocumentId.HasValue)
                 .GroupBy(item => item.SourceDocumentId!.Value)
                 .ToDictionary(group => group.Key, group => group.OrderBy(item => item.Sequence).ToArray()));
@@ -107,7 +112,7 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                         ? modelIds.SelectMany(modelId => packageBomItems[package.Id].GetValueOrDefault(modelId, [])).ToArray()
                         : [];
                     if (bomItems.Length == 0)
-                        bomItems = package.NonStandardBomSnapshot
+                        bomItems = frozenBomItems[package.Id]
                             .Where(item => string.Equals(item.DrawingNumber, document.DrawingNumber, StringComparison.OrdinalIgnoreCase))
                             .OrderBy(item => item.Sequence).ToArray();
                     var modelFiles = relatedModels.TryGetValue(document.Id, out modelIds)
@@ -120,7 +125,8 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                             {
                                 var modelDocument = allDocuments[modelId];
                                 modelVersionsByPackage.TryGetValue((package.Id, modelId), out var modelVersion);
-                                var stepReady = modelVersion?.Preview is { Format: DocumentPreviewFormat.Step } preview
+                                var stepReady = modelDocument.State != DocumentLifecycleState.Obsolete
+                                    && modelVersion?.Preview is { Format: DocumentPreviewFormat.Step } preview
                                     && string.Equals(preview.SourceSha256, modelVersion.Sha256, StringComparison.OrdinalIgnoreCase);
                                 return new ProductionDrawingModelFile(modelId, modelVersion?.Id,
                                     modelDocument.DrawingNumber, modelDocument.Name, modelVersion?.Revision.Display ?? "—", stepReady);
@@ -137,7 +143,12 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                             && (legacy || string.Equals(version.Preview.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase)),
                         legacy,
                         version.Id == current.Id ? null : current.CreatedAt)
-                    { BomItems = bomItems, ModelFiles = modelFiles, PublishedBy = version.CreatedBy, Division = project.Division, ProjectManager = project.ProjectManager });
+                    {
+                        BomItems = bomItems,
+                        BomQuantities = packageQuantities[package.Id].Where(quantity =>
+                            bomItems.Any(item => quantity.SourceBomItemIds.Contains(item.Id))).ToArray(),
+                        ModelFiles = modelFiles, PublishedBy = version.CreatedBy, Division = project.Division, ProjectManager = project.ProjectManager
+                    });
                 }
             }
         }
@@ -147,6 +158,26 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
             .ThenBy(item => item.RequiredOn ?? DateOnly.MaxValue)
             .ThenByDescending(item => item.PublishedAt)
             .ToArray();
+    }
+
+    /// <summary>生产取用时重新检查当前作废状态，不影响工程历史版本的查阅。</summary>
+    public async Task<DocumentVersion> EnsureProductionUseAllowedAsync(
+        Guid documentId, Guid versionId, CancellationToken cancellationToken)
+    {
+        var document = await repository.FindDocumentAsync(documentId, cancellationToken)
+            ?? throw new PdmNotFoundException("图档不存在或已删除，不能用于生产，请刷新图纸列表。");
+        if (document.State == DocumentLifecycleState.Obsolete)
+            throw new PdmConflictException($"图档 {document.DrawingNumber} 已作废，不能用于生产，请联系项目负责人确认替代图纸。");
+        var version = await repository.FindDocumentVersionAsync(documentId, versionId, cancellationToken)
+            ?? throw new PdmNotFoundException("正式版本不存在，请刷新图纸列表。");
+        if (document.Kind is not (DocumentKind.Drawing or DocumentKind.Part or DocumentKind.Assembly)
+            || version.Status != DocumentVersionStatus.Released || !version.ReleasePackageId.HasValue)
+            throw new PdmConflictException("所选文件不是已发布的正式生产版本，请刷新图纸列表。");
+        var package = await repository.FindReleasePackageAsync(version.ReleasePackageId.Value, cancellationToken);
+        if (package is null || package.ProjectId != document.ProjectId || package.State != ReleasePackageState.Published
+            || package.Scope is not (ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement or ReleaseScope.LegacyCombined))
+            throw new PdmConflictException("所选文件的发布包尚未生效或已失效，不能用于生产，请刷新图纸列表。");
+        return version;
     }
 
     public async Task<ReleasePackage> UpdateDeliveryAsync(Guid releasePackageId, Guid documentId,

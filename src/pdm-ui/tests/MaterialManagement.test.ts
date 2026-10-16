@@ -1339,7 +1339,7 @@ describe('MaterialManagement', () => {
     await table.findAll('.el-table__body-wrapper tbody tr')[0].findAll('button').find(button => button.text() === '批准')!.trigger('click')
     await flushPromises()
 
-    expect(wrapper.get('.material-approval-feedback .material-step-feedback__status').text()).toContain('按PLM基线分配料号，并自动排队同步到U9C')
+    expect(wrapper.get('.material-approval-feedback .material-step-feedback__status').text()).toContain('处理当前审批节点，末节点通过后分配料号并排队同步U9C')
     finishDecision({ application: { ...application, status: 'Approved' } })
     await flushPromises()
     expect(wrapper.get('.material-approval-feedback .material-step-feedback__status').text()).toContain('空闲')

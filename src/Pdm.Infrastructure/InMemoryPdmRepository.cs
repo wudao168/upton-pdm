@@ -364,6 +364,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<RolePermissionDirectory> SetRolePermissionsAsync(string roleCode, IReadOnlyList<string> permissionCodes, CancellationToken cancellationToken)
     {
         var definition = roleDefinitions.GetValueOrDefault(roleCode) ?? throw new PdmNotFoundException("角色不存在。");
+        if (definition.BaseRole == UserRole.PlatformAdministrator) throw new PdmRuleException("平台管理员权限由系统固定，不支持修改。");
         if (!definition.IsSystemAdministrator) rolePermissions[roleCode] = RolePermissionCatalog.Normalize(definition.BaseRole, permissionCodes);
         return Task.FromResult(BuildRolePermissionDirectory());
     }
@@ -374,6 +375,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         if (string.IsNullOrWhiteSpace(normalizedName)) throw new PdmRuleException("角色名称不能为空。");
         if (roleDefinitions.Values.Any(item => string.Equals(item.Name, normalizedName, StringComparison.OrdinalIgnoreCase))) throw new PdmConflictException("角色名称已经存在。");
         var source = roleDefinitions.GetValueOrDefault(sourceRoleCode) ?? throw new PdmNotFoundException("复制来源角色不存在。");
+        if (source.BaseRole == UserRole.PlatformAdministrator) throw new PdmRuleException("平台管理员不能作为复制来源，请选择业务角色。");
         if (source.IsSystemAdministrator) throw new PdmRuleException("系统管理员不能作为复制来源。");
         var roleCode = $"custom-{Guid.NewGuid():N}";
         roleDefinitions[roleCode] = new(roleCode, normalizedName, description.Trim(), source.BaseRole);
@@ -2785,6 +2787,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         var matchedModels = new HashSet<Guid>();
         bool Visit(DocumentReferenceNode node)
         {
+            if (node.Role == ReferenceRole.ExternalFileDependency) return false;
             var isTarget = node.DocumentId is Guid own && nonStandardModels.Contains(own);
             if (isTarget && node.DocumentId is Guid target) matchedModels.Add(target);
             foreach (var child in node.Children) isTarget |= Visit(child);

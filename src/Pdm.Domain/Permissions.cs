@@ -293,13 +293,15 @@ public static class RolePermissionCatalog
         var normalized = codes.Where(IsKnown).ToHashSet(StringComparer.Ordinal);
         if (normalized.Any(code => code.StartsWith("project.", StringComparison.Ordinal)
                 || code.StartsWith("quality.", StringComparison.Ordinal)
-                || code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease
+                || code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentRecycle or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease
                     or PermissionCodes.BomEdit or PermissionCodes.BomMechanicalEdit or PermissionCodes.BomElectricalEdit or PermissionCodes.ValidationPlanEdit
-                    or PermissionCodes.DrawingReviewSubmit or PermissionCodes.DrawingReviewAnnotate or PermissionCodes.DrawingReviewDecide or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide))
+                    or PermissionCodes.DrawingReviewSubmit or PermissionCodes.DrawingReviewAnnotate or PermissionCodes.DrawingReviewDecide or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide
+                    or PermissionCodes.ProductionDrawingManage or PermissionCodes.ApprovalEmergencySubstitute))
             normalized.Add(PermissionCodes.ProjectView);
-        if (normalized.Any(code => code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease
+        if (normalized.Any(code => code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentRecycle or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease
                 or PermissionCodes.BomEdit or PermissionCodes.BomMechanicalEdit or PermissionCodes.BomElectricalEdit or PermissionCodes.ValidationPlanEdit
                 or PermissionCodes.DrawingReviewSubmit or PermissionCodes.DrawingReviewAnnotate or PermissionCodes.DrawingReviewDecide or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide
+                or PermissionCodes.ProductionDrawingManage or PermissionCodes.ApprovalEmergencySubstitute
                 or PermissionCodes.ProjectContactEdit or PermissionCodes.ProjectNameplateEdit
                 || code.StartsWith("quality.", StringComparison.Ordinal)))
             normalized.Add(PermissionCodes.ProjectContentView);

@@ -49,13 +49,17 @@ public sealed class InMemoryProjectFileRepository(TimeProvider timeProvider) : I
             foreach (var entry in archiveFiles)
             {
                 var file = files.Values.FirstOrDefault(item => item.FolderId == folderId && item.DeletedAt is null && item.FileName.Equals(entry.FileName, StringComparison.OrdinalIgnoreCase));
-                if (file is not null && versions.Values.Any(item => item.ProjectFileId == file.Id && item.Sha256.Equals(entry.Sha256, StringComparison.OrdinalIgnoreCase))) continue;
+                if (file is not null && versions.Values.Any(item => item.ProjectFileId == file.Id
+                    && item.StorageRoot.Equals(storageRoot, StringComparison.OrdinalIgnoreCase)
+                    && item.StorageRelativePath.Equals(entry.StorageRelativePath, StringComparison.OrdinalIgnoreCase)
+                    && item.Sha256.Equals(entry.Sha256, StringComparison.OrdinalIgnoreCase))) continue;
                 var now = timeProvider.GetUtcNow();
                 file ??= new ProjectFile(Guid.NewGuid(), rootProjectId, folderId, entry.FileName, actor, now, actor, now, null, null);
                 var number = versions.Values.Where(item => item.ProjectFileId == file.Id).Select(item => item.VersionNumber).DefaultIfEmpty().Max() + 1;
                 var version = new ProjectFileVersion(Guid.NewGuid(), file.Id, number, entry.FileName, storageRoot, entry.StorageRelativePath, entry.FileLength, entry.Sha256, actor, releasedAt, $"发布成品 · {releaseNumber}");
                 versions[version.Id] = version;
-                files[file.Id] = file with { UpdatedBy = actor, UpdatedAt = now, CurrentVersion = version };
+                files[file.Id] = file with { UpdatedBy = actor, UpdatedAt = now,
+                    CurrentVersion = file.CurrentVersion is { } current && current.UploadedAt > releasedAt ? current : version };
                 archived++;
             }
             return Task.FromResult(archived);

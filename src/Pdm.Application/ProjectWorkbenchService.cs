@@ -70,7 +70,7 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
     IProjectContactInformationRepository contacts, ProjectBudgetService budgets, U9ProcurementService procurement,
     IValidationPlanRepository quality, IQualityInspectionRepository inspections, IProjectWorkbenchRiskRepository risks, TimeProvider clock, IProjectOplRepository? opl = null)
 {
-    public async Task<ProjectWorkbench> GetAsync(string? requestedView, string actor, UserRole role, CancellationToken ct, string? scope = null, bool summaryOnly = false, Guid? projectId = null)
+    public async Task<ProjectWorkbench> GetAsync(string? requestedView, string actor, UserRole role, CancellationToken ct, string? scope = null, bool summaryOnly = false, Guid? projectId = null, bool calendarOnly = false)
     {
         var projects = (await repository.ListProjectsForUserAsync(actor, role, ct)).Where(project => project.IsActive && project.CanReadContent).ToArray();
         if (projectId is Guid requestedId)
@@ -89,6 +89,9 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
         var managedUnits = WorkbenchScope.ManagedUnits(directory, actor);
         var plans = (projects.Length == 0 ? [] : await planning.ListPlansAsync(projects.Select(project => project.Id).ToArray(), ct))
             .Where(plan => !plan.IsDeleted).ToDictionary(plan => plan.ProjectId);
+        var propagatedTasks = calendarOnly ? plans.Values.Select(plan => plan.ChangeDraftSource ?? plan)
+            .Where(plan => plan.ApprovalStatus == ProjectPlanApprovalStatus.Approved).SelectMany(plan => plan.Tasks)
+            .Where(task => task.SourceTaskId.HasValue).Select(task => task.SourceTaskId!.Value).ToHashSet() : [];
         var views = WorkbenchScope.Available(roles, administrator, managedUnits.Count > 0, projects.Any(project => WorkbenchScope.Manager(project, actor)),
             projects.Any(project => WorkbenchScope.Engineer(project, actor)) || plans.Values.Any(plan => (plan.ChangeDraftSource ?? plan).Tasks.Any(task => WorkbenchScope.Contains(task.Assignee, actor))));
         var selected = string.IsNullOrWhiteSpace(requestedView) ? views.FirstOrDefault()?.Key ?? "" : requestedView;
@@ -117,11 +120,13 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
             foreach (var project in family)
             {
                 plans.TryGetValue(project.Id, out var plan);
+                var effective = plan?.ChangeDraftSource ?? plan;
+                var needsDeliveryDetails = !calendarOnly || NeedsCalendarDeliveryDetails(effective, propagatedTasks);
                 var warnings = new List<string>();
                 WorkbenchBudget? budget = null;
                 WorkbenchProcurement? purchasing = null;
                 WorkbenchQuality? acceptance = null;
-                if (!summaryOnly && projectId is null && (selected is "division" or "manager"))
+                if (!summaryOnly && !calendarOnly && projectId is null && (selected is "division" or "manager"))
                 {
                     try
                     {
@@ -131,7 +136,7 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
                     catch (UnauthorizedAccessException) { warnings.Add("预算无查看权限"); }
                     catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add("预算暂时无法读取"); }
                 }
-                if (!summaryOnly && (selected is "division" or "manager" or "procurement" or "production"))
+                if (!summaryOnly && needsDeliveryDetails && (selected is "division" or "manager" or "procurement" or "production"))
                 {
                     try
                     {
@@ -142,7 +147,7 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add("采购跟踪暂时无法读取"); }
                 }
-                if (!summaryOnly && (selected is "division" or "manager" or "production" or "quality"))
+                if (!summaryOnly && needsDeliveryDetails && (selected is "division" or "manager" or "production" or "quality"))
                 {
                     try
                     {
@@ -160,7 +165,6 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
                     || WorkbenchScope.Engineer(root, actor) || WorkbenchScope.Engineer(project, actor) || root.PhaseOwners.Values.Concat(project.PhaseOwners.Values).Any(value => WorkbenchScope.Contains(value, actor))
                     || ((plan?.ChangeDraftSource ?? plan)?.Tasks.Any(task => WorkbenchScope.Contains(task.Assignee, actor)) ?? false)
                     || WorkbenchScope.Contains(commercial?.SalesPeople, actor) || WorkbenchScope.Contains(commercial?.PresalesPeople, actor);
-                var effective = plan?.ChangeDraftSource ?? plan;
                 result.Add(new(project, effective, plan?.ApprovalStatus.ToString() ?? "Missing", budget, purchasing, acceptance, warnings, canRegister,
                     effective?.ApprovalStatus == ProjectPlanApprovalStatus.Approved && effective.Tasks.Count > 0 ? ProjectPlanningService.CompletionPercent(effective.Tasks, effective.Stages) : null, administrator || WorkbenchScope.Manager(root, actor) || WorkbenchScope.Manager(project, actor)));
             }
@@ -188,6 +192,20 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
             return risk with { CanClose = administrator || WorkbenchScope.Same(risk.Owner, actor) || WorkbenchScope.Same(risk.CreatedBy, actor)
                 || WorkbenchScope.Manager(root, actor) || root.ExecutionUnitId is Guid unit && managedUnits.Contains(unit) };
         }).ToArray(), scopes);
+    }
+
+    private bool NeedsCalendarDeliveryDetails(ProjectPlan? plan, IReadOnlySet<Guid> propagatedTasks)
+    {
+        if (plan?.ApprovalStatus != ProjectPlanApprovalStatus.Approved) return false;
+        var stages = plan.Stages.Where(stage => stage.ParticipatesInDelivery == true).Select(stage => stage.Code).ToHashSet();
+        var tasks = plan.Tasks.Where(task => stages.Contains(task.Stage)).ToArray();
+        // Filtering child projects can show propagated source tasks again; retain their delivery checks.
+        if (tasks.Any(task => propagatedTasks.Contains(task.Id))) return true;
+        var dates = tasks.Where(task => task.PlannedFinish > new DateOnly(1900, 1, 1)).Select(task => task.PlannedFinish).ToArray();
+        if (dates.Length == 0) return false;
+        var today = DateOnly.FromDateTime(clock.GetUtcNow().ToOffset(TimeSpan.FromHours(8)).DateTime);
+        var finish = dates.Max();
+        return finish <= today.AddDays(7) && (finish >= today || tasks.Any(task => task.Status != ProjectPlanTaskStatus.Completed));
     }
 
     private static bool IsFailedResult(string? value) => new[] { "NG", "不合格", "不通过", "未通过", "Fail", "Failed", "失败" }.Contains(value?.Trim(), StringComparer.OrdinalIgnoreCase);

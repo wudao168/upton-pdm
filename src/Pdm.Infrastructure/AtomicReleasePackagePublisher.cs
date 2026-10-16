@@ -137,6 +137,9 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
     {
         var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
         var releaseRoot = StorageLocationPolicy.Normalize(project.ReleaseLocation);
+        var finalDirectory = StorageLocationPolicy.ResolveUnder(releaseRoot, package.Number);
+        if (Directory.Exists(finalDirectory))
+            return await RestorePublicationAsync(package, vaultRoot, finalDirectory, previewSources, cancellationToken);
         var stagingDirectory = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-staging", package.Number));
         if (!Directory.Exists(stagingDirectory))
         {
@@ -183,22 +186,17 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
             previewError = exception.Message;
             previews = new Dictionary<Guid, DocumentPreviewArtifact>();
         }
-        var sourceFiles = Directory.GetFiles(stagingDirectory, "*", SearchOption.AllDirectories);
+        var activePreviewFiles = previews.Values.Select(preview =>
+        {
+            var path = ReleaseDeliveryFiles.PreviewPath(stagingDirectory, preview);
+            return File.Exists(path) ? path : Path.Combine(stagingDirectory, "previews", Path.GetFileName(preview.StorageRelativePath));
+        }).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var sourceFiles = Directory.GetFiles(stagingDirectory, "*", SearchOption.AllDirectories)
+            .Where(path => !ReleaseDeliveryFiles.IsPreview(path) || activePreviewFiles.Contains(path))
+            .Where(path => !path.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)).ToArray();
         ValidateFiles(package.Scope, sourceFiles, previewSources, previews, requirePreviews: previewError is null);
 
         Directory.CreateDirectory(releaseRoot);
-        var finalDirectory = StorageLocationPolicy.ResolveUnder(releaseRoot, package.Number);
-        if (Directory.Exists(finalDirectory))
-        {
-            var existingManifest = Path.Combine(finalDirectory, "manifest.json");
-            if (File.Exists(existingManifest) && (await File.ReadAllTextAsync(existingManifest, cancellationToken)).Contains(package.Id.ToString(), StringComparison.OrdinalIgnoreCase))
-            {
-                return new ReleasePublication(finalDirectory, previews, previewError, formalDrawings);
-            }
-
-            throw new PdmConflictException("生产目录已存在同名但内容不同的发布包。 ");
-        }
-
         var temporaryDirectory = StorageLocationPolicy.ResolveUnder(releaseRoot, $".{package.Number}.publishing-{Guid.NewGuid():N}");
         Directory.CreateDirectory(temporaryDirectory);
         try
@@ -235,6 +233,9 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 package.NonStandardBomRevision,
                 package.MechanicalBomRevision,
                 package.ElectricalBomRevision,
+                Previews = previews,
+                FormalDrawings = formalDrawings,
+                PreviewError = previewError,
                 PublishedAt = timeProvider.GetUtcNow(),
                 Files = sourceFiles.Select(path => Path.GetRelativePath(stagingDirectory, path).Replace('\\', '/')).OrderBy(path => path).ToArray()
             };
@@ -262,6 +263,54 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
 
             throw;
         }
+    }
+
+    private async Task<ReleasePublication> RestorePublicationAsync(ReleasePackage package, string vaultRoot, string directory,
+        IReadOnlyList<ReleasePreviewSource> sources, CancellationToken cancellationToken)
+    {
+        var manifestPath = Path.Combine(directory, "manifest.json");
+        if (!File.Exists(manifestPath)) throw new PdmConflictException("生产目录已存在，但缺少发布包清单，不能安全恢复发布。");
+        using var document = JsonDocument.Parse(await File.ReadAllTextAsync(manifestPath, cancellationToken));
+        var manifest = document.RootElement;
+        if (!manifest.TryGetProperty("id", out var id) || !id.TryGetGuid(out var savedId) || savedId != package.Id
+            || !manifest.TryGetProperty("projectId", out var projectId) || projectId.GetGuid() != package.ProjectId)
+            throw new PdmConflictException("生产目录已存在同名但身份不同的发布包。");
+        await ReleaseDeliveryFiles.VerifyChecksumsAsync(directory, cancellationToken);
+        var previews = manifest.TryGetProperty("previews", out var previewNode)
+            ? previewNode.Deserialize<Dictionary<Guid, DocumentPreviewArtifact>>(ReleaseDeliveryFiles.JsonOptions) ?? [] : [];
+        var formal = manifest.TryGetProperty("formalDrawings", out var formalNode)
+            ? formalNode.Deserialize<Dictionary<Guid, FormalDrawingSource>>(ReleaseDeliveryFiles.JsonOptions) ?? [] : [];
+        foreach (var source in sources)
+        {
+            // 兼容升级前生成的清单：只复用经过指纹核对的正式版本和正式源图旁清单。
+            if (repository is not null && !previews.ContainsKey(source.DocumentId))
+            {
+                var released = (await repository.ListDocumentVersionsAsync(source.DocumentId, cancellationToken))
+                    .FirstOrDefault(version => version.ReleasePackageId == package.Id && version.Preview is not null);
+                if (released?.Preview is not null) previews[source.DocumentId] = released.Preview;
+            }
+            if (source.Kind == DocumentKind.Drawing && !formal.ContainsKey(source.DocumentId))
+            {
+                var formalManifest = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-formal", package.Id.ToString("N"), $"{source.DocumentId:N}.slddrw.json"));
+                if (!File.Exists(formalManifest)) throw new PdmConflictException($"工程图{source.DrawingNumber}缺少正式源图清单，不能安全恢复发布。");
+                using var saved = JsonDocument.Parse(await File.ReadAllTextAsync(formalManifest, cancellationToken));
+                formal[source.DocumentId] = saved.RootElement.GetProperty("formal").Deserialize<FormalDrawingSource>(ReleaseDeliveryFiles.JsonOptions)
+                    ?? throw new PdmConflictException("正式源图清单无效，不能安全恢复发布。");
+            }
+            if (formal.TryGetValue(source.DocumentId, out var drawing)
+                && !await ReleaseDeliveryFiles.MatchesAsync(StorageLocationPolicy.ResolveUnder(vaultRoot, drawing.StorageRelativePath), drawing.FileLength, drawing.Sha256, cancellationToken))
+                throw new PdmConflictException($"工程图{source.DrawingNumber}的正式源文件缺失或校验失败，已停止恢复发布。");
+            if (previews.TryGetValue(source.DocumentId, out var preview))
+            {
+                var target = ReleaseDeliveryFiles.PreviewPath(directory, preview);
+                if (!File.Exists(target)) target = Path.Combine(directory, "previews", Path.GetFileName(preview.StorageRelativePath));
+                if (!await ReleaseDeliveryFiles.MatchesAsync(StorageLocationPolicy.ResolveUnder(vaultRoot, preview.StorageRelativePath), preview.FileLength, preview.Sha256, cancellationToken)
+                    || !await ReleaseDeliveryFiles.MatchesAsync(target, preview.FileLength, preview.Sha256, cancellationToken))
+                    throw new PdmConflictException($"图档{source.DrawingNumber}的预览与生产目录不一致，已停止恢复发布。");
+            }
+        }
+        var error = sources.Any(source => !previews.ContainsKey(source.DocumentId)) ? "发布资料尚未齐套，等待后台补齐预览。" : null;
+        return new ReleasePublication(directory, previews, error, formal);
     }
 
     private static void RequireFile(IEnumerable<string> files, Func<string, bool> predicate, string description)

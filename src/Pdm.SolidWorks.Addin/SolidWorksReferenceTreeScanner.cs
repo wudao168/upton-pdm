@@ -74,7 +74,7 @@ internal sealed class SolidWorksReferenceTreeScanner
 
         Log(string.Concat("RootComponent name=", rootComponent.Name2, " path=", rootComponent.GetPathName()));
         var featureTreeRoot = GetFeatureTreeRoot(model);
-        var root = BuildComponent(rootComponent, rootComponent.Name2, new HashSet<string>(StringComparer.OrdinalIgnoreCase), true, featureTreeRoot);
+        var root = BuildComponent(rootComponent, rootComponent.Name2, new HashSet<string>(StringComparer.OrdinalIgnoreCase), true, featureTreeRoot, false);
         // Root components do not reliably expose ReferencedConfiguration.
         root.Configuration = configuration.Name ?? string.Empty;
         foreach (var directory in ModelNodes(root).Select(node => Path.GetDirectoryName(node.FullPath))
@@ -88,7 +88,8 @@ internal sealed class SolidWorksReferenceTreeScanner
         string instancePath,
         ISet<string> visitedInstances,
         bool isRoot,
-        ITreeControlItem featureTreeItem)
+        ITreeControlItem featureTreeItem,
+        bool parentVirtual)
     {
         var componentPath = ResolveComponentPath(component);
         var componentName = component.Name2 ?? Path.GetFileNameWithoutExtension(componentPath);
@@ -100,6 +101,7 @@ internal sealed class SolidWorksReferenceTreeScanner
             ComponentSelectionName = component.Name2 ?? string.Empty,
             FileName = Path.GetFileName(componentPath),
             FullPath = componentPath,
+            SourceReferencePath = NormalizeComponentFilePath(component.GetPathName()),
             DisplayName = documentName,
             DrawingNumber = Path.GetFileNameWithoutExtension(componentPath),
             Kind = DocumentKindFromPath(componentPath, isRoot ? (int)swDocumentTypes_e.swDocASSEMBLY : 0),
@@ -107,7 +109,8 @@ internal sealed class SolidWorksReferenceTreeScanner
         };
         try
         {
-            node.Status = GetStatus(component, componentPath, true);
+            node.Status = parentVirtual && PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(componentPath)
+                ? CadReferenceStatus.Virtual : GetStatus(component, componentPath, true);
             node.IsModifiedInSolidWorks = IsModified(component, true);
         }
         catch (Exception exception)
@@ -148,7 +151,8 @@ internal sealed class SolidWorksReferenceTreeScanner
             {
                 var child = childEntry.Component;
                 var childPath = string.Concat(currentPath, "/", child.Name2);
-                var childNode = BuildComponent(child, childPath, visitedInstances, false, childEntry.TreeItem);
+                var childNode = BuildComponent(child, childPath, visitedInstances, false, childEntry.TreeItem,
+                    parentVirtual || node.Status == CadReferenceStatus.Virtual);
                 if (childNode != null) node.Children.Add(childNode);
             }
             Log(string.Concat("Node(", currentPath, ") children=", node.Children.Count));
@@ -485,7 +489,7 @@ internal sealed class SolidWorksReferenceTreeScanner
             recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly));
     }
 
-    public void AddNativeAssociatedDrawings(IModelDoc2 model, CadTreeNode root)
+    public IReadOnlyList<string> AddNativeAssociatedDrawings(IModelDoc2 model, CadTreeNode root)
     {
         var previousStrict = strictStructure;
         strictStructure = true;
@@ -499,7 +503,12 @@ internal sealed class SolidWorksReferenceTreeScanner
                 throw new InvalidOperationException("SolidWorks未返回完整的关联工程图清单，已停止整体存档。");
             if (!(names is Array documents) || documents.Length == 0)
                 throw new InvalidOperationException("SolidWorks关联文件清单为空，无法确认工程图完整性，已停止整体存档。");
-            var paths = Strings(names).Where(path => string.Equals(Path.GetExtension(path), ".SLDDRW", StringComparison.OrdinalIgnoreCase)).ToArray();
+            var files = Strings(names).Select(path => string.IsNullOrWhiteSpace(path) ? string.Empty
+                : Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(Path.GetDirectoryName(root.FullPath), path)))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if (files.Any(string.IsNullOrWhiteSpace))
+                throw new InvalidOperationException("SolidWorks关联文件清单包含空路径，无法确认完整存档范围。");
+            var paths = files.Where(path => string.Equals(Path.GetExtension(path), ".SLDDRW", StringComparison.OrdinalIgnoreCase)).ToArray();
             foreach (var path in paths)
                 if (!File.Exists(path)) throw new InvalidOperationException("关联工程图文件不存在，已停止整体存档：" + path);
             AddRelatedDrawingPaths(root, paths, true);
@@ -509,6 +518,7 @@ internal sealed class SolidWorksReferenceTreeScanner
             if (omitted.Length > 0)
                 throw new InvalidOperationException("关联工程图未完整纳入存档，已停止提交：" + string.Join("、", omitted.Select(Path.GetFileName)));
             PluginDiagnosticLog.Record("工程图", "已核对SolidWorks原生关联工程图清单：" + paths.Length + "份；未执行打包或保存。");
+            return files;
         }
         finally { strictStructure = previousStrict; }
     }
@@ -669,10 +679,7 @@ internal sealed class SolidWorksReferenceTreeScanner
 
     private static bool FilesHaveSameContent(string first, string second)
     {
-        using (var hash = System.Security.Cryptography.SHA256.Create())
-        using (var a = File.OpenRead(first))
-        using (var b = File.OpenRead(second))
-            return hash.ComputeHash(a).SequenceEqual(hash.ComputeHash(b));
+        return string.Equals(ArchiveFileFingerprint.Read(first), ArchiveFileFingerprint.Read(second), StringComparison.Ordinal);
     }
 
     private static IEnumerable<CadTreeNode> ModelNodes(CadTreeNode root)

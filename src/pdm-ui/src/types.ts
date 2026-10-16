@@ -411,10 +411,10 @@ export interface MaterialCodeApprovalSettings { version: number; approverRoleCod
 export interface FormalSupplementPolicy { maximumCount?: number | null; validDays?: number | null }
 export interface FormalSupplementPolicies { standard: FormalSupplementPolicy; electrical: FormalSupplementPolicy }
 export type ApprovalStage = 'ProcessReview' | 'Approval' | 'MechanicalEngineer' | 'MainDesigner' | 'MechanicalSupervisor' | 'HardwareEngineer' | 'HardwareSupervisor' | 'StandardizationSupervisor'
-export type ApprovalAssigneeSource = 'Submitter' | 'ProjectDesignLead' | 'FixedUser' | 'PrimaryUnitManager' | 'ParentUnitManager'
-export interface ApprovalWorkflowStepTemplate { stage: ApprovalStage; name: string; assigneeSource: ApprovalAssigneeSource; fixedAssignee?: string | null }
-export interface ApprovalWorkflowTemplate { code: string; name: string; version: number; steps: ApprovalWorkflowStepTemplate[] }
-export interface ReleaseApprovalSettings { mechanical: ApprovalWorkflowTemplate; electrical: ApprovalWorkflowTemplate; validationPlan?: ApprovalWorkflowTemplate; emergencySubstituteRoleCode: string }
+export type ApprovalAssigneeSource = 'Submitter' | 'ProjectDesignLead' | 'FixedUser' | 'PrimaryUnitManager' | 'ParentUnitManager' | 'FixedUnitManager' | 'Role'
+export interface ApprovalWorkflowStepTemplate { stage: ApprovalStage; name: string; assigneeSource: ApprovalAssigneeSource; fixedAssignee?: string | null; fixedUnitId?: string | null; roleCodes?: string[] | null }
+export interface ApprovalWorkflowTemplate { code: string; name: string; version: number; steps: ApprovalWorkflowStepTemplate[]; emergencyRoleCodes?: string[] | null }
+export interface ReleaseApprovalSettings { mechanical: ApprovalWorkflowTemplate; standard?: ApprovalWorkflowTemplate; nonStandard?: ApprovalWorkflowTemplate; electrical: ApprovalWorkflowTemplate; validationPlan?: ApprovalWorkflowTemplate; materialCodeApplication?: ApprovalWorkflowTemplate; emergencySubstituteRoleCode: string }
 export type BomValidationField = 'drawingNumber' | 'name' | 'unit' | 'specification' | 'brand' | 'material' | 'surfaceTreatment' | 'weight' | 'quantity' | 'revision' | 'remark'
 export interface BomValidationRules {
   standard: BomValidationField[]
@@ -704,6 +704,7 @@ export interface BomItem {
   surfaceTreatment?: string
   heatTreatment?: string
   weight?: string
+  inventoryReplacementMaterialCode?: string
   isWearPart?: boolean
   impactStage?: 'Assembly' | 'Commissioning'
   revision: string
@@ -998,6 +999,10 @@ export interface DrawingDeliveryOverride { priority: DrawingPriority; requiredOn
 export interface ProductionDrawingModelFile {
   documentId: string; versionId?: string | null; drawingNumber: string; name: string; revision: string; stepReady: boolean
 }
+export interface ProductionDrawingBomQuantity {
+  materialKey: string; sourceBomItemIds: string[]; singleSetQuantity: number; wholeSetMultiplier: number
+  totalQuantity: number; priorReleasedQuantity: number; netIssueQuantity: number
+}
 export interface ProductionDrawingItem {
   projectId: string; projectCode: string; projectName: string
   publishedBy?: string | null; division?: string | null; projectManager?: string | null
@@ -1007,6 +1012,7 @@ export interface ProductionDrawingItem {
   legacyUnverified: boolean; supersededAt?: string | null
   modelFiles?: ProductionDrawingModelFile[]
   bomItems?: BomItem[]
+  bomQuantities?: ProductionDrawingBomQuantity[]
 }
 
 export interface CreateReleasePackageInput {
@@ -1584,6 +1590,9 @@ export interface ProjectBomHeader {
 export type MaterialCodeApplicationStatus = 'Pending' | 'Approved' | 'Rejected' | 'Withdrawn'
 export type MaterialCodeWorkflowState = 'PendingApproval' | 'PendingMaterialSync' | 'MaterialSyncFailed' | 'PendingBomSync' | 'BomSyncFailed' | 'Completed' | 'Rejected' | 'Withdrawn'
 export interface MaterialCodeApplication {
+  approvalWorkflow?: MaterialCodeApprovalSnapshot | null
+  canDecide?: boolean | null
+  canEmergencyDecide?: boolean
   id: string
   projectId: string
   bomItemId?: string | null
@@ -2631,4 +2640,12 @@ export interface AppendProjectValidationPlanItemsInput {
 export interface UpdateProjectValidationPlanStandardsInput {
   items: Array<{ itemId: string; validationStandard?: string | null }>
   expectedRowVersion: number
+}
+
+export interface MaterialCodeApprovalSnapshot {
+  code: string
+  version: number
+  emergencyRoleCodes: string[]
+  nodes: Array<{ id: string; order: number; name: string; stage: string | number; assignees: string[];
+    decision?: 'Approved' | 'Rejected' | number | null; decisionBy?: string | null; comment?: string | null; decidedAt?: string | null; isEmergencySubstitute: boolean }>
 }

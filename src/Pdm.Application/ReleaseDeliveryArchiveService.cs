@@ -19,29 +19,29 @@ public sealed class ReleaseDeliveryArchiveService(
     {
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken);
         if (package is null || package.State != ReleasePackageState.Published) return 0;
-        if (string.IsNullOrWhiteSpace(package.PublishedPath) || !Directory.Exists(package.PublishedPath)) return 0;
+        if (string.IsNullOrWhiteSpace(package.PublishedPath) || !Directory.Exists(package.PublishedPath))
+            throw new PdmRuleException("生产发布目录不可访问，请检查共享目录连接和权限后重试归档。");
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken);
         if (project is null) return 0;
         var folder = await repository.FindProjectFolderByKeyAsync(project.Id, ReleaseFolderKey(package.Scope), cancellationToken);
         if (folder is null) return 0;
+        if (File.Exists(Path.Combine(package.PublishedPath, "checksums.sha256")))
+            await ReleaseDeliveryFiles.VerifyChecksumsAsync(package.PublishedPath, cancellationToken);
 
-        var registered = (await files.ListAsync(folder.RootProjectId, folder.Id, false, cancellationToken))
-            .Select(item => item.FileName)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         // 存储根取发布包上一级目录、相对路径带上发布包号：同一图档在后续增补/变更发布里重名也不会撞唯一索引。
         var packageDirectory = Path.GetDirectoryName(package.PublishedPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)) ?? package.PublishedPath;
         var relativePrefix = Path.GetFileName(package.PublishedPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         var missing = new List<ReleaseArchiveFile>();
-        foreach (var path in Directory.EnumerateFiles(package.PublishedPath, "*", SearchOption.TopDirectoryOnly))
+        foreach (var path in await ReleaseDeliveryFiles.ManifestFilesAsync(package.PublishedPath, cancellationToken))
         {
             var fileName = Path.GetFileName(path);
             if (MetadataFileNames.Contains(fileName, StringComparer.OrdinalIgnoreCase)) continue;
-            if (registered.Contains(fileName)) continue;
+            if (!new[] { ".xlsx", ".pdf", ".step", ".stp", ".zip" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase)) continue;
             var info = new FileInfo(path);
-            if (info.Length == 0) continue;
+            if (info.Length == 0) throw new PdmRuleException($"发布成品{fileName}为空，请重新生成后重试归档。");
             await using var input = File.OpenRead(path);
             var sha256 = Convert.ToHexString(await SHA256.HashDataAsync(input, cancellationToken));
-            missing.Add(new ReleaseArchiveFile(fileName, Path.Combine(relativePrefix, fileName), info.Length, sha256));
+            missing.Add(new ReleaseArchiveFile(fileName, Path.Combine(relativePrefix, Path.GetRelativePath(package.PublishedPath, path)), info.Length, sha256));
         }
         if (missing.Count == 0) return 0;
 
@@ -52,7 +52,7 @@ public sealed class ReleaseDeliveryArchiveService(
             package.Number,
             missing,
             actor,
-            timeProvider.GetUtcNow(),
+            package.PublishedAt ?? timeProvider.GetUtcNow(),
             cancellationToken);
     }
 

@@ -377,8 +377,12 @@
 .pdm-bom-detail-toolbar { flex: 0 0 auto; display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .pdm-bom-detail-toolbar .pdm-segmented { margin-bottom: 0; }
 .pdm-bom-manager-panel { padding: 8px 12px 12px; }
-.pdm-bom-manager-panel .pdm-bom-detail-toolbar { align-items: center; gap: var(--pdm-container-gap); margin-bottom: var(--pdm-container-gap); }
-.pdm-bom-manager-panel .pdm-bom-detail-toolbar .pdm-segmented { gap: 2px; padding: 2px; }
+.pdm-bom-manager-panel .pdm-bom-detail-toolbar { align-items: center; flex-wrap: wrap; gap: var(--pdm-container-gap); margin-bottom: var(--pdm-container-gap); }
+.pdm-bom-manager-panel .pdm-bom-detail-toolbar .pdm-segmented { max-width: 100%; overflow-x: auto; gap: 2px; padding: 2px; }
+.pdm-bom-manager-panel .pdm-bom-detail-toolbar .pdm-bom-display-control { flex-shrink: 0; }
+.pdm-bom-manager-panel .pdm-bom-detail-toolbar .pdm-bom-detail-actions { max-width: 100%; margin-left: auto; padding-right: 0; }
+.pdm-bom-manager-panel .pdm-bom-detail-toolbar .pdm-manager-actions { min-width: 0; max-width: 100%; flex-wrap: nowrap; }
+.pdm-bom-manager-panel .pdm-bom-detail-toolbar .pdm-bom-reconcile-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pdm-bom-manager-panel .pdm-bom-detail-toolbar .pdm-segmented button,
 .pdm-bom-manager-panel .pdm-bom-detail-toolbar .pdm-manager-actions button { min-height: var(--pdm-tab-secondary); padding: 4px 10px; font-size: 12px; line-height: 18px; white-space: nowrap; }
 .pdm-bom-manager-panel .pdm-bom-detail-toolbar .pdm-segmented button { box-sizing: border-box; width: 120px; min-width: 120px; height: var(--pdm-tab-secondary); }
@@ -1019,3 +1023,7 @@
 .pdm-plan-template-settings .pdm-template-workspace { min-height: 0; flex: 1 1 0; }
 .pdm-project-template { height: 100%; min-height: 0; display: flex; flex-direction: column; }
 .pdm-project-template > .pdm-panel { flex: 1 1 0; min-height: 0; overflow: auto; }
+
+/* BOM 库存相似型号推荐入口及行内候选数量。 */
+.pdm-bom-inventory-action { width: 80px; min-width: 80px; height: 30px; padding: 0 4px; }
+.pdm-bom-inventory-count { flex-shrink: 0; border: 0; background: transparent; color: var(--pdm-primary); padding: 0 3px; cursor: pointer; font-size: 11px; white-space: nowrap; }

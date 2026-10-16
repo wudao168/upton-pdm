@@ -101,16 +101,19 @@ public sealed class MaterialRelationService(
         var existingSelections = (await relations.ListSelectionsAsync(projectId, cancellationToken)).ToArray();
         var selectionsToSave = new Dictionary<Guid, IReadOnlyList<MaterialRelationSelection>>();
         var reviewsToSave = new Dictionary<Guid, IReadOnlyList<MaterialRelationReview>>();
+        var affectedKinds = new HashSet<BomKind>();
 
         foreach (var command in commands)
         {
             if (!allItems.TryGetValue(command.MainBomItemId, out var main)) throw new PdmNotFoundException("主物料BOM行不存在或已被排除。");
+            affectedKinds.Add(main.Kind);
             if (!templates.TryGetValue(main.DrawingNumber.Trim(), out var template) || template.PublishedRevision is not { } revision)
                 throw new PdmRuleException($"主物料“{main.DrawingNumber}”尚未发布生效的关联配置。");
             var choiceByGroup = command.Choices.GroupBy(item => item.GroupId).ToDictionary(group => group.Key, group => group.Last());
             var oldForMain = existingSelections.Where(item => item.MainBomItemId == main.Id).ToArray();
             foreach (var old in oldForMain)
-                foreach (var list in byKind.Values) list.RemoveAll(item => item.Id == old.AccessoryBomItemId);
+                foreach (var entry in byKind)
+                    if (entry.Value.RemoveAll(item => item.Id == old.AccessoryBomItemId) > 0) affectedKinds.Add(entry.Key);
 
             var savedSelections = new List<MaterialRelationSelection>();
             var savedReviews = new List<MaterialRelationReview>();
@@ -136,6 +139,7 @@ public sealed class MaterialRelationService(
                     var old = oldForMain.FirstOrDefault(item => item.GroupId == group.Id && item.OptionId == option.Id);
                     var accessoryId = old?.AccessoryBomItemId ?? Guid.NewGuid();
                     var kind = ToBomKind(material.Kind);
+                    affectedKinds.Add(kind);
                     var target = byKind[kind];
                     target.Add(new BomItem(accessoryId, projectId, kind, target.Count + 1, material.MaterialCode, material.Name, expected,
                         U9UnitCatalog.NormalizeBomUnit(material.UnitCode), material.Material, material.Specification, "W1", true)
@@ -160,7 +164,12 @@ public sealed class MaterialRelationService(
 
         static List<BomItem> Resequence(List<BomItem> items) => items.OrderBy(item => item.IsManuallyExcluded).ThenBy(item => item.Sequence)
             .Select((item, index) => item with { Sequence = index + 1 }).ToList();
-        foreach (var kind in byKind.Keys.ToArray()) byKind[kind] = Resequence(byKind[kind]);
+        foreach (var kind in affectedKinds)
+        {
+            await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role,
+                kind == BomKind.Electrical ? PermissionCodes.BomElectricalEdit : PermissionCodes.BomMechanicalEdit, cancellationToken);
+            byKind[kind] = Resequence(byKind[kind]);
+        }
         var finalItems = byKind.Values.SelectMany(items => items).Where(IsActive).ToDictionary(item => item.Id);
         foreach (var entry in reviewsToSave.Where(entry => entry.Value.Count > 0).ToArray())
         {
@@ -178,7 +187,7 @@ public sealed class MaterialRelationService(
             await relations.ReplaceSelectionsAsync(projectId, entry.Key, entry.Value, cancellationToken);
         foreach (var entry in reviewsToSave)
             await relations.ReplaceReviewsAsync(projectId, entry.Key, entry.Value, cancellationToken);
-        foreach (var kind in new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Electrical })
+        foreach (var kind in affectedKinds.Where(kind => kind is BomKind.Standard or BomKind.NonStandard or BomKind.Electrical))
         {
             var publishable = byKind[kind].Where(item => !item.IsManuallyExcluded && !item.IsReleaseExcluded).ToArray();
             await repository.SaveBomDraftAsync(projectId, kind, publishable, actor, cancellationToken);

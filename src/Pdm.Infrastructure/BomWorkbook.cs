@@ -52,7 +52,19 @@ public static class BomWorkbook
             .Select(group => group.First() with { Quantity = group.Sum(item => item.Quantity), ParentDrawingNumber = null })
             .ToArray(), priorQuantities);
 
-    private static byte[] WriteCore(IReadOnlyList<BomItem> items, IReadOnlyDictionary<string, decimal>? priorQuantities)
+    public static byte[] WriteProductionRelease(IReadOnlyList<BomItem> items, IReadOnlyList<ProductionDrawingBomQuantity> quantities)
+    {
+        var totals = quantities.DistinctBy(item => item.MaterialKey).ToDictionary(item => item.MaterialKey);
+        var released = items.DistinctBy(item => item.Id).GroupBy(BomReleaseAggregation.MaterialKey)
+            .Select(group => totals.TryGetValue(group.Key, out var quantity)
+                ? group.First() with { Quantity = quantity.TotalQuantity, ParentDrawingNumber = null }
+                : throw new PdmRuleException("发布包数量数据不完整，无法导出生产BOM，请刷新后重试。"))
+            .ToArray();
+        return WriteCore(released, totals.ToDictionary(entry => entry.Key, entry => entry.Value.PriorReleasedQuantity), totals);
+    }
+
+    private static byte[] WriteCore(IReadOnlyList<BomItem> items, IReadOnlyDictionary<string, decimal>? priorQuantities,
+        IReadOnlyDictionary<string, ProductionDrawingBomQuantity>? productionQuantities = null)
     {
         using var output = new MemoryStream();
         using (var archive = new ZipArchive(output, ZipArchiveMode.Create, true))
@@ -93,6 +105,7 @@ public static class BomWorkbook
             writer.WriteStartElement("sheetData");
             var headers = priorQuantities is null ? Headers
                 : Headers.Select(header => header == "数量" ? "BOM总量" : header).Concat(["已提前发布", "本次新增下发"]).ToArray();
+            if (productionQuantities is not null) headers = [.. headers, "单套数量", "整套数量"];
             WriteRow(writer, 1, headers.Cast<object?>().ToArray());
             var rowNumber = 2;
             foreach (var item in items.OrderBy(item => item.Sequence))
@@ -102,6 +115,11 @@ public static class BomWorkbook
                 {
                     var prior = priorQuantities.GetValueOrDefault(BomReleaseAggregation.MaterialKey(item));
                     values = [.. values, prior, Math.Max(0, item.Quantity - prior)];
+                }
+                if (productionQuantities is not null)
+                {
+                    var quantity = productionQuantities[BomReleaseAggregation.MaterialKey(item)];
+                    values = [.. values, quantity.SingleSetQuantity, quantity.WholeSetMultiplier];
                 }
                 WriteRow(writer, rowNumber++, values);
             }

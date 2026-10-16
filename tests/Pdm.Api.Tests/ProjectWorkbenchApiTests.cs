@@ -81,6 +81,22 @@ public sealed class ProjectWorkbenchApiTests(PdmApiFactory factory) : IClassFixt
         Assert.Equal("admin", risk.ClosedBy);
     }
 
+    [Fact]
+    public async Task CalendarEndpointRequiresLoginAndOnlyReturnsAuthorizedProjects()
+    {
+        using var client = factory.CreateClient();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/project-calendar")).StatusCode);
+        Authorize(client, "engineer", "Engineer");
+        var response = await client.GetAsync("/api/project-calendar"); response.EnsureSuccessStatusCode();
+        var data = await response.Content.ReadFromJsonAsync<ProjectWorkbench>();
+        using var scope = factory.Services.CreateScope(); var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
+        foreach (var item in data!.Projects)
+        {
+            Assert.True(await repository.HasProjectContentReadAccessAsync(item.Project.Id, "engineer", UserRole.Engineer, default));
+            Assert.Null(item.Budget);
+        }
+    }
+
     private static void Authorize(HttpClient client, string username, string role)
     {
         var jwt = new JwtSecurityToken("upton-pdm", "upton-pdm-clients",

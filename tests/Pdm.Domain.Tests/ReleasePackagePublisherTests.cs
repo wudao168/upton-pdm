@@ -189,8 +189,10 @@ public sealed class ReleasePackagePublisherTests
             Assert.True(File.Exists(Path.Combine(publication.PublishedPath, "previews", $"{documentId:N}_PART-001.step")));
             var manifest = await File.ReadAllTextAsync(Path.Combine(publication.PublishedPath, "manifest.json"), default);
             Assert.Contains($"{documentId:N}_PART-001.step", manifest, StringComparison.OrdinalIgnoreCase);
-            Assert.DoesNotContain(".SLDPRT", manifest, StringComparison.OrdinalIgnoreCase);
-            Assert.DoesNotContain(".DWG", manifest, StringComparison.OrdinalIgnoreCase);
+            using var parsedManifest = System.Text.Json.JsonDocument.Parse(manifest);
+            var publishedFiles = parsedManifest.RootElement.GetProperty("files").EnumerateArray().Select(file => file.GetString()!).ToArray();
+            Assert.DoesNotContain(publishedFiles, file => file.EndsWith(".SLDPRT", StringComparison.OrdinalIgnoreCase));
+            Assert.DoesNotContain(publishedFiles, file => file.EndsWith(".DWG", StringComparison.OrdinalIgnoreCase));
         }
         finally
         {

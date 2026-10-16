@@ -158,7 +158,7 @@ internal sealed class AutomaticDrawingControl : UserControl
             Dock = DockStyle.Top,
             AutoSize = true,
             ColumnCount = 1,
-            RowCount = 6,
+            RowCount = 4,
             Padding = new Padding(8)
         };
         content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -178,7 +178,7 @@ internal sealed class AutomaticDrawingControl : UserControl
         ConfigureButton(generateButton, PrimaryColor);
         ConfigureButton(importAnnotationsButton, Color.White);
         ConfigureButton(submitButton, SubmitColor);
-        acquireEditButton.Text = "获取工程图权限";
+        acquireEditButton.Text = "获取权限";
         generateButton.Text = "生成视图";
         importAnnotationsButton.Text = "自动标注";
         submitButton.Text = "提交存档";
@@ -189,13 +189,40 @@ internal sealed class AutomaticDrawingControl : UserControl
                 AcquireEditRequested?.Invoke(this, new CadTreeNodeEventArgs(drawing));
             }
         };
-        generateButton.Click += (_, _) => RaiseBusyRequest(GenerateRequested, true, generateButton, "正在生成...");
-        importAnnotationsButton.Click += (_, _) => RaiseBusyRequest(ImportAnnotationsRequested, true, importAnnotationsButton, "正在整理尺寸...");
+        generateButton.Click += (_, _) => RaiseBusyRequest(GenerateRequested, true, generateButton, "生成中…");
+        importAnnotationsButton.Click += (_, _) => RaiseBusyRequest(ImportAnnotationsRequested, true, importAnnotationsButton, "标注中…");
         submitButton.Click += (_, _) => RaiseRequest(SubmitRequested, false);
         mainActions.Controls.Add(acquireEditButton, 0, 0);
         mainActions.Controls.Add(generateButton, 2, 0);
         mainActions.Controls.Add(importAnnotationsButton, 4, 0);
         mainActions.Controls.Add(submitButton, 6, 0);
+        mainActions.Layout += (_, _) =>
+        {
+            var buttons = new[] { acquireEditButton, generateButton, importAnnotationsButton, submitButton };
+            var minimumWidth = buttons.Max(button => TextRenderer.MeasureText(button.Text, button.Font).Width) + 4;
+            var gap = (int)Math.Round(mainActions.ColumnStyles[1].Width);
+            var buttonHeight = (int)Math.Round(mainActions.RowStyles[0].Height);
+            var narrow = (mainActions.ClientSize.Width - 3 * gap) / 4 < minimumWidth;
+            var rowCount = narrow ? 3 : 1;
+            if (mainActions.RowCount == rowCount) return;
+            mainActions.SuspendLayout();
+            mainActions.RowCount = rowCount;
+            mainActions.RowStyles.Clear();
+            mainActions.RowStyles.Add(new RowStyle(SizeType.Absolute, buttonHeight));
+            if (narrow)
+            {
+                mainActions.RowStyles.Add(new RowStyle(SizeType.Absolute, gap));
+                mainActions.RowStyles.Add(new RowStyle(SizeType.Absolute, buttonHeight));
+            }
+            for (var index = 0; index < buttons.Length; index++)
+            {
+                mainActions.SetColumn(buttons[index], narrow ? index % 2 * 4 : index * 2);
+                mainActions.SetRow(buttons[index], narrow ? index / 2 * 2 : 0);
+                mainActions.SetColumnSpan(buttons[index], narrow ? 3 : 1);
+            }
+            mainActions.Height = narrow ? 2 * buttonHeight + gap : buttonHeight;
+            mainActions.ResumeLayout();
+        };
 
         var settingsGroup = new GroupBox
         {
@@ -205,67 +232,79 @@ internal sealed class AutomaticDrawingControl : UserControl
             Padding = new Padding(8),
             Margin = new Padding(0, 0, 0, 7)
         };
-        var settings = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3, RowCount = 7 };
-        settings.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 78));
+        var settings = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3, RowCount = 10, Margin = Padding.Empty };
         settings.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        settings.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
-        settings.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        settings.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        settings.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        settings.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-        settings.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-        settings.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-        settings.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        settings.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
+        settings.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 64));
+        for (var row = 0; row < 6; row++)
+        {
+            settings.RowStyles.Add(new RowStyle(SizeType.Absolute, row % 2 == 0 ? 26 : 30));
+        }
+        for (var row = 0; row < 4; row++)
+        {
+            settings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        }
 
         var templateLabel = BuildFieldLabel("模板");
         templatePath.Dock = DockStyle.Fill;
-        templatePath.Margin = new Padding(0, 3, 4, 3);
+        templatePath.AutoSize = false;
+        templatePath.Margin = Padding.Empty;
         templatePath.TextChanged += (_, _) => toolTip.SetToolTip(templatePath, templatePath.Text);
-        var browseButton = new Button { Text = "浏览..." };
+        var browseButton = new Button { Text = "浏览" };
         ConfigureButton(browseButton, Color.White);
-        browseButton.Margin = new Padding(0, 3, 0, 3);
+        toolTip.SetToolTip(browseButton, "选择 SolidWorks 工程图模板");
         browseButton.Click += (_, _) => BrowseTemplate();
         settings.Controls.Add(templateLabel, 0, 0);
-        settings.Controls.Add(templatePath, 1, 0);
-        settings.Controls.Add(browseButton, 2, 0);
+        settings.SetColumnSpan(templateLabel, 3);
+        settings.Controls.Add(templatePath, 0, 1);
+        settings.Controls.Add(browseButton, 2, 1);
 
-        settings.Controls.Add(BuildFieldLabel("主视方向"), 0, 1);
+        var viewLabel = BuildFieldLabel("主视方向");
+        settings.Controls.Add(viewLabel, 0, 2);
+        settings.SetColumnSpan(viewLabel, 3);
         primaryView.Dock = DockStyle.Fill;
         primaryView.DropDownStyle = ComboBoxStyle.DropDownList;
-        primaryView.Margin = new Padding(0, 3, 0, 3);
+        primaryView.Margin = Padding.Empty;
         primaryView.Items.Add("标准正视图（固定）");
         primaryView.Enabled = false;
-        settings.Controls.Add(primaryView, 1, 1);
-        settings.SetColumnSpan(primaryView, 2);
+        settings.Controls.Add(primaryView, 0, 3);
+        settings.SetColumnSpan(primaryView, 3);
 
-        settings.Controls.Add(BuildFieldLabel("主视图上限"), 0, 2);
+        var maximumLabel = BuildFieldLabel("主视图上限");
+        settings.Controls.Add(maximumLabel, 0, 4);
+        settings.SetColumnSpan(maximumLabel, 3);
         primaryViewMaximumPercent.Dock = DockStyle.Fill;
-        primaryViewMaximumPercent.Margin = new Padding(0, 3, 4, 3);
+        primaryViewMaximumPercent.AutoSize = false;
+        primaryViewMaximumPercent.Margin = Padding.Empty;
         primaryViewMaximumPercent.Minimum = 10m;
         primaryViewMaximumPercent.Maximum = 50m;
         primaryViewMaximumPercent.DecimalPlaces = 1;
         primaryViewMaximumPercent.Increment = 1m;
         primaryViewMaximumPercent.AccessibleName = "主视图最大图纸占比";
-        settings.Controls.Add(primaryViewMaximumPercent, 1, 2);
-        settings.Controls.Add(BuildFieldLabel("% 宽/高"), 2, 2);
+        settings.Controls.Add(primaryViewMaximumPercent, 0, 5);
+        settings.Controls.Add(BuildFieldLabel("% 宽/高"), 2, 5);
         toolTip.SetToolTip(primaryViewMaximumPercent, "主视图宽度和高度占图纸尺寸的最大百分比，保持纵横比且不会超过该值");
 
-        includeAssemblyBom.Text = "装配体生成层级BOM";
-        importMarkedDimensions.Text = "导入标记用于工程图的尺寸和公差";
-        importHoleDimensions.Text = "导入孔向导尺寸和孔定位尺寸";
-        generateIsometric.Text = "生成轴测图（比例为主视图的1/2）";
+        includeAssemblyBom.Text = "装配体层级BOM";
+        importMarkedDimensions.Text = "导入标记尺寸和公差";
+        importHoleDimensions.Text = "导入孔尺寸和定位尺寸";
+        generateIsometric.Text = "生成轴测图（1/2 比例）";
+        toolTip.SetToolTip(importMarkedDimensions, "导入标记用于工程图的尺寸和公差");
+        toolTip.SetToolTip(importHoleDimensions, "导入孔向导尺寸和孔定位尺寸");
+        toolTip.SetToolTip(generateIsometric, "生成轴测图，比例为主视图的 1/2");
         foreach (var option in new[] { includeAssemblyBom, importMarkedDimensions, importHoleDimensions, generateIsometric })
         {
             option.Dock = DockStyle.Fill;
-            option.Margin = new Padding(0, 2, 0, 1);
+            option.AutoSize = true;
+            option.Margin = new Padding(0, 6, 0, 0);
         }
-        settings.Controls.Add(includeAssemblyBom, 0, 3);
+        settings.Controls.Add(includeAssemblyBom, 0, 6);
         settings.SetColumnSpan(includeAssemblyBom, 3);
-        settings.Controls.Add(importMarkedDimensions, 0, 4);
+        settings.Controls.Add(importMarkedDimensions, 0, 7);
         settings.SetColumnSpan(importMarkedDimensions, 3);
-        settings.Controls.Add(importHoleDimensions, 0, 5);
+        settings.Controls.Add(importHoleDimensions, 0, 8);
         settings.SetColumnSpan(importHoleDimensions, 3);
-        settings.Controls.Add(generateIsometric, 0, 6);
+        settings.Controls.Add(generateIsometric, 0, 9);
         settings.SetColumnSpan(generateIsometric, 3);
         settingsGroup.Controls.Add(settings);
 
@@ -285,13 +324,14 @@ internal sealed class AutomaticDrawingControl : UserControl
 
     private static TableLayoutPanel BuildActionRow()
     {
-        var row = new TableLayoutPanel { Dock = DockStyle.Top, Height = 38, ColumnCount = 7, RowCount = 1, Margin = new Padding(0, 0, 0, 7) };
+        var row = new TableLayoutPanel { Dock = DockStyle.Top, Height = 30, ColumnCount = 7, RowCount = 1, Margin = new Padding(0, 0, 0, 6), Padding = Padding.Empty };
         for (var index = 0; index < 7; index++)
         {
             row.ColumnStyles.Add(index % 2 == 0
                 ? new ColumnStyle(SizeType.Percent, 25)
                 : new ColumnStyle(SizeType.Absolute, 6));
         }
+        row.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         return row;
     }
 
@@ -306,6 +346,9 @@ internal sealed class AutomaticDrawingControl : UserControl
     private static void ConfigureButton(Button button, Color enabledColor)
     {
         button.Dock = DockStyle.Fill;
+        button.AutoSize = false;
+        button.AutoEllipsis = false;
+        button.Padding = Padding.Empty;
         button.Margin = Padding.Empty;
         button.FlatStyle = FlatStyle.Flat;
         button.FlatAppearance.BorderColor = BorderColor;
@@ -360,7 +403,7 @@ internal sealed class AutomaticDrawingControl : UserControl
         ApplyEnabledAppearance(importAnnotationsButton, Color.White);
         ApplyEnabledAppearance(submitButton, SubmitColor);
         toolTip.SetToolTip(acquireEditButton, drawingReviewLocked ? "图纸审核中，不能获取工程图编辑权限" : acquireEditButton.Enabled ? "获取或恢复当前工程图的编辑会话" : drawingControlled && drawingEditable ? "当前工程图已可编辑" : "工程图首次入库后可获取编辑权限");
-        toolTip.SetToolTip(generateButton, source?.IsReadOnlyPreview == true ? "只读预览不能生成或更新工程图" : sourceExists ? string.Empty : "请选择本地存在的零件或装配体");
+        toolTip.SetToolTip(generateButton, source?.IsReadOnlyPreview == true ? "只读预览不能生成或更新工程图" : sourceExists ? "生成或更新关联工程图的视图" : "请选择本地存在的零件或装配体");
         toolTip.SetToolTip(importAnnotationsButton, drawingExists ? "仅导入标记尺寸、公差和孔标注，消除重复后按固化规则排列" : "请先完成第1步：生成工程图");
         toolTip.SetToolTip(submitButton, source?.DocumentId.HasValue == true ? "提交关联工程图草稿" : "源模型入库后才能绑定并提交工程图");
     }

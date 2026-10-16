@@ -1,4 +1,4 @@
-﻿using System.IdentityModel.Tokens.Jwt;
+using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -25,6 +25,43 @@ public sealed class BomSummaryApiTests : IClassFixture<PdmApiFactory>
             expires: DateTime.UtcNow.AddMinutes(10), signingCredentials: new SigningCredentials(
                 new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")), SecurityAlgorithms.HmacSha256));
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", new JwtSecurityTokenHandler().WriteToken(token));
+    }
+
+    [Theory]
+    [InlineData(BomKind.Standard)]
+    [InlineData(BomKind.Electrical)]
+    public async Task InventoryReplacementMarker_SurvivesSaveReloadAndOlderClientSaves(BomKind kind)
+    {
+        using var scope = factory.Services.CreateScope();
+        var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
+        var materials = scope.ServiceProvider.GetRequiredService<IMaterialRepository>();
+        var service = scope.ServiceProvider.GetRequiredService<MaterialService>();
+        var project = await repository.CreateProjectAsync(new CreateProjectCommand($"INV-{Guid.NewGuid():N}", "库存替换验收", "admin", "vault", "release"), "admin", default);
+        var materialKind = kind == BomKind.Standard ? MaterialKind.Standard : MaterialKind.Electrical;
+        var model = $"INV-{Guid.NewGuid():N}";
+        var material = await service.CreateAsync(new(null, "库存物料", materialKind, MaterialSupplyMode.Purchase,
+            "001", model, null, null, "TEST", null, null, null, CategoryCode: kind == BomKind.Standard ? "0102" : "0101"), "admin", UserRole.Administrator, default);
+        material = (await service.ApproveAsync(material.Id, material.RowVersion, "admin", UserRole.Administrator, default)).Material;
+        material = await materials.UpdateMaterialAsync(material with { U9SyncConfirmed = true, SyncStatus = MaterialSyncStatus.Succeeded }, material.RowVersion, default);
+        var original = new BomItem(Guid.NewGuid(), project.Id, kind, 1, "", "原物料", 2, "001", null, "OLD", "W1", true);
+        await repository.ReplaceBomAsync(project.Id, kind, [original], default);
+        var initial = await client.GetFromJsonAsync<JsonElement>($"/api/projects/{project.Id}/boms/{kind}?summary=true");
+        var group = new { SummaryItemIds = initial[0].GetProperty("summaryItemIds").EnumerateArray().Select(value => value.GetGuid()).ToArray(),
+            SummaryFingerprint = initial[0].GetProperty("summaryFingerprint").GetString()! };
+        var values = new BomItemInput(1, material.MaterialCode, material.Name, 2, material.UnitCode, null, model, "W1", true,
+            Brand: "TEST", InventoryReplacementMaterialCode: material.MaterialCode);
+        var edit = new BomSummaryEdit(group.SummaryItemIds!, group.SummaryFingerprint!,
+            ["drawingNumber", "name", "specification", "brand", "inventoryReplacementMaterialCode"], values);
+        var saved = await client.PutAsJsonAsync($"/api/projects/{project.Id}/boms/{kind}?summary=true", new { items = Array.Empty<BomItemInput>(), summaryRows = new[] { edit } });
+        saved.EnsureSuccessStatusCode();
+        var reloaded = await client.GetFromJsonAsync<JsonElement>($"/api/projects/{project.Id}/boms/{kind}?summary=true");
+        Assert.Equal(material.MaterialCode, reloaded[0].GetProperty("inventoryReplacementMaterialCode").GetString());
+        var olderClient = await client.PutAsJsonAsync($"/api/projects/{project.Id}/boms/{kind}", new { items = new[] { values with { Id = original.Id, InventoryReplacementMaterialCode = null } } });
+        olderClient.EnsureSuccessStatusCode();
+        Assert.Equal(material.MaterialCode, Assert.Single(await repository.GetBomAsync(project.Id, kind, default)).InventoryReplacementMaterialCode);
+        var cleared = await client.PutAsJsonAsync($"/api/projects/{project.Id}/boms/{kind}", new { items = new[] { values with { Id = original.Id, DrawingNumber = "", InventoryReplacementMaterialCode = null } } });
+        cleared.EnsureSuccessStatusCode();
+        Assert.Null(Assert.Single(await repository.GetBomAsync(project.Id, kind, default)).InventoryReplacementMaterialCode);
     }
 
     [Fact]
@@ -61,7 +98,7 @@ public sealed class BomSummaryApiTests : IClassFixture<PdmApiFactory>
         if (await repository.FindUserAsync("admin", default) is null)
             await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "admin", "测试管理员", "unused", UserRole.Administrator, true), default);
         await repository.UpdateSystemSettingsAsync(settings with { ApprovalWorkflows = settings.ApprovalWorkflows with {
-            Mechanical = settings.ApprovalWorkflows.Mechanical with { Steps = [new(ApprovalStage.MechanicalEngineer, "测试自检", ApprovalAssigneeSource.Submitter)] }
+            Standard = settings.ApprovalWorkflows.Standard! with { Steps = [new(ApprovalStage.MechanicalEngineer, "测试自检", ApprovalAssigneeSource.Submitter)] }
         } }, default);
         try
         {

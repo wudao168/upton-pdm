@@ -141,11 +141,11 @@ public sealed class PublishRecoveryHostedService(
             // 发布成品归档补登记：老发布包（归档功能上线前发布的）在这里自动补进"机械发布/电气发布"目录，已登记过的会被跳过。
             try
             {
-                var deliveryArchive = scope.ServiceProvider.GetRequiredService<ReleaseDeliveryArchiveService>();
+                var previewService = scope.ServiceProvider.GetRequiredService<ReleasePreviewService>();
                 var archivedPackages = 0;
                 foreach (var packageId in await repository.ListRecentPublishedReleasePackageIdsAsync(20, cancellationToken))
                 {
-                    if (await deliveryArchive.ArchiveAsync(packageId, "system", cancellationToken) > 0) archivedPackages++;
+                    if (await previewService.ReconcileDeliveryAsync(packageId, cancellationToken) > 0) archivedPackages++;
                 }
                 if (archivedPackages > 0) logger.LogInformation("服务启动时补登记发布成品归档 {Count} 个发布包。", archivedPackages);
             }

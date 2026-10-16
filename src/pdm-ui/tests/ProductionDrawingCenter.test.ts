@@ -12,6 +12,10 @@ const current: ProductionDrawingItem = {
   priority: 'Urgent', requiredOn: '2026-10-01', isCurrent: true, pdfReady: false, legacyUnverified: false,
 }
 const old: ProductionDrawingItem = { ...current, versionId: 'old', releasePackageId: 'package-old', releasePackageNumber: 'RP-1', revision: 'A', isCurrent: false, pdfReady: true, legacyUnverified: true }
+function withQuantities(item: ProductionDrawingItem): ProductionDrawingItem {
+  return { ...item, bomQuantities: item.bomItems?.map(bom => ({ materialKey: `${bom.drawingNumber}|001`, sourceBomItemIds: [bom.id!],
+    singleSetQuantity: bom.quantity, wholeSetMultiplier: 1, totalQuantity: bom.quantity, priorReleasedQuantity: 0, netIssueQuantity: bom.quantity })) }
+}
 
 beforeEach(() => { vi.spyOn(api, 'getProjectExportMetadata').mockResolvedValue({title:'项目资料',company:'测试公司',scope:'当前项目',versionLabel:'资料版本',version:'—',exportedAt:'2026-10-14T09:00:00+08:00',exportedBy:'管理员',fields:Array.from({length:12},(_,i)=>({key:'字段'+i,value:'项目资料'}))}) })
 
@@ -69,7 +73,7 @@ describe('ProductionDrawingCenter', () => {  it('shows progress and blocks repea
     wrapper.unmount()
   })
   it('exports the full package and cross-page selection as frozen BOM without requiring PDF conversion', async () => {
-    const items = Array.from({ length: 51 }, (_, i) => ({ ...current, versionId: `v-${i}`, bomItems: [{ id: `bom-${i}`, sequence: i + 1, drawingNumber: `MAT-${i}`, name: `零件${i}`, quantity: i + 1, unit: '个', revision: 'B', complete: true }] }))
+    const items = Array.from({ length: 51 }, (_, i) => withQuantities({ ...current, versionId: `v-${i}`, bomItems: [{ id: `bom-${i}`, sequence: i + 1, drawingNumber: `MAT-${i}`, name: `零件${i}`, quantity: i + 1, unit: '个', revision: 'B', complete: true }] }))
     vi.spyOn(api, 'listProductionDrawings').mockResolvedValue(items)
     const saved = vi.spyOn(api, 'downloadGeneratedFile').mockResolvedValue(undefined)
     const wrapper = mount(ProductionDrawingCenter, { props: { token: 'token', canManage: false } })
@@ -98,17 +102,17 @@ describe('ProductionDrawingCenter', () => {  it('shows progress and blocks repea
   afterEach(() => { vi.restoreAllMocks(); window.localStorage.removeItem('upton-pdm:production-drawing-columns:tester') })
 
   it('shows frozen BOM fields by default and saves optional columns per user', async () => {
-    vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([{
+    vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([withQuantities({
       ...current,
-      bomItems: [{ sequence: 1, drawingNumber: 'MAT-100', name: '机架', specification: 'MODEL-X', revision: 'B', remark: '先加工', material: '铝', surfaceTreatment: '阳极', heatTreatment: '无', quantity: 2, unit: '001', complete: true, brand: '自制' }],
-    }])
+      bomItems: [{ id: 'bom', sequence: 1, drawingNumber: 'MAT-100', name: '机架', specification: 'MODEL-X', revision: 'B', remark: '先加工', material: '铝', surfaceTreatment: '阳极', heatTreatment: '无', quantity: 2, unit: '001', complete: true, brand: '自制' }],
+    })])
     const wrapper = mount(ProductionDrawingCenter, { props: { token: 'token', canManage: false, username: 'tester' } })
     await flushPromises()
     expect(wrapper.find('.production-drawings__header').exists()).toBe(false)
     expect(wrapper.get('.production-drawings__project-meta').text()).toBe('1 张图纸2026-09-23')
     expect(wrapper.get('.production-drawings__project').text()).not.toContain('发布')
     await wrapper.get('.production-drawings__project').trigger('click')
-    expect(wrapper.findAll('thead th').map(cell => cell.text())).toEqual(['选择', '物料编码', '名称', '型号', '版本', '备注', '材质', '表面处理', '热处理', '数量', '图纸', '紧急程度', '需求货期'])
+    expect(wrapper.findAll('thead th').map(cell => cell.text())).toEqual(['选择', '物料编码', '名称', '型号', '版本', '备注', '材质', '表面处理', '热处理', '单套数量 × 套数', '发布总量', '已提前发布', '本次新增下发', '图纸', '紧急程度', '需求货期'])
     expect(wrapper.get('tbody tr').text()).toContain('MAT-100')
     expect(wrapper.get('tbody tr').text()).toContain('先加工')
     expect(wrapper.get('tbody tr').text()).toContain('2')
@@ -237,17 +241,17 @@ describe('ProductionDrawingCenter', () => {  it('shows progress and blocks repea
     vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([{ ...current, modelFiles: [{
       documentId: 'model-document', versionId: 'model-version', drawingNumber: 'M-100', name: '三维件', revision: 'A', stepReady: true,
     }] }])
-    const download = vi.spyOn(api, 'downloadDocumentPreviewFile').mockResolvedValue()
+    const download = vi.spyOn(api, 'downloadProductionDrawingFile').mockResolvedValue()
     const wrapper = mount(ProductionDrawingCenter, { props: { token: 'token', canManage: false } })
     await flushPromises()
     await wrapper.get('.production-drawings__project').trigger('click')
     await wrapper.get('tbody tr').trigger('click')
     await wrapper.findAll('.production-drawings__actions button')[1].trigger('click')
-    expect(download).toHaveBeenCalledWith('model-document', 'model-version', 'M-100.step', 'token', expect.any(Function))
+    expect(download).toHaveBeenCalledWith(expect.objectContaining({ versionId: 'current' }), 'Step', 'token', expect.any(Function), expect.objectContaining({ documentId: 'model-document', versionId: 'model-version' }))
     wrapper.unmount()
   })
   it('places packages under the selected project and downloads STEP, PDF and full frozen BOM together', async () => {
-    const ready = { ...current, pdfReady: true, modelFiles: [{ documentId: 'model', versionId: 'model-version', drawingNumber: 'M-100', name: '三维件', revision: 'B', stepReady: true }], bomItems: [{ id: 'bom', sequence: 1, drawingNumber: 'MAT-100', name: '零件', quantity: 2, unit: '个', revision: 'B', complete: true }] }
+    const ready = withQuantities({ ...current, pdfReady: true, modelFiles: [{ documentId: 'model', versionId: 'model-version', drawingNumber: 'M-100', name: '三维件', revision: 'B', stepReady: true }], bomItems: [{ id: 'bom', sequence: 1, drawingNumber: 'MAT-100', name: '零件', quantity: 2, unit: '个', revision: 'B', complete: true }] })
     vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([ready])
     const archive = vi.spyOn(api, 'downloadProductionDrawingArchive').mockResolvedValue(undefined)
     const generated = vi.spyOn(api, 'downloadGeneratedFile').mockResolvedValue(undefined)
@@ -271,4 +275,79 @@ describe('ProductionDrawingCenter', () => {  it('shows progress and blocks repea
     expect(wrapper.text()).toContain('本包部分PDF或STEP尚未就绪')
     expect(archive).not.toHaveBeenCalled(); expect(generated).not.toHaveBeenCalled()
     wrapper.unmount()
-  })})
+  })
+
+  it('shows material-specific frozen totals and exports shared materials once without mixing units', async () => {
+    const item: ProductionDrawingItem = { ...current, bomItems: [
+      { id: 'part', sequence: 1, drawingNumber: 'MAT-100', name: '零件', quantity: 2, unit: '001', revision: 'B', complete: true },
+      { id: 'box', sequence: 2, drawingNumber: 'MAT-100', name: '整盒', quantity: 1, unit: '004', revision: 'B', complete: true },
+    ], bomQuantities: [
+      { materialKey: 'MAT-100|001', sourceBomItemIds: ['part'], singleSetQuantity: 2, wholeSetMultiplier: 3, totalQuantity: 6, priorReleasedQuantity: 2, netIssueQuantity: 4 },
+      { materialKey: 'MAT-100|004', sourceBomItemIds: ['box'], singleSetQuantity: 1, wholeSetMultiplier: 3, totalQuantity: 3, priorReleasedQuantity: 5, netIssueQuantity: 0 },
+    ] }
+    vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([item, { ...item, versionId: 'second', drawingNumber: 'D-101' }])
+    const saved = vi.spyOn(api, 'downloadGeneratedFile').mockResolvedValue()
+    const wrapper = mount(ProductionDrawingCenter, { props: { token: 'token', canManage: false } })
+    await flushPromises(); await wrapper.get('.production-drawings__project').trigger('click'); await flushPromises()
+    expect(wrapper.get('tbody .production-drawings__column--quantity').text()).toBe('MAT-100：6 个；MAT-100：3 盒')
+    expect(wrapper.get('tbody .production-drawings__column--quantityReference').text()).toBe('MAT-100：2 × 3 个；MAT-100：1 × 3 盒')
+    expect(wrapper.get('tbody .production-drawings__column--netIssueQuantity').text()).toBe('MAT-100：4 个；MAT-100：0 盒')
+    await wrapper.get('[aria-label="全选本包图纸"]').setValue(true)
+    await wrapper.findAll('button').find(button => button.text() === '下载BOM')!.trigger('click'); await flushPromises()
+    const content = await new Promise<ArrayBuffer>(resolve => { const reader = new FileReader(); reader.onload = () => resolve(reader.result as ArrayBuffer); reader.readAsArrayBuffer(saved.mock.calls[0]![0]) })
+    const { unzipSync, strFromU8 } = await import('three/examples/jsm/libs/fflate.module.js')
+    const xml = strFromU8(unzipSync(new Uint8Array(content))['xl/worksheets/sheet1.xml']!)
+    const rows = [...new DOMParser().parseFromString(xml, 'application/xml').querySelectorAll('row')].map(row => [...row.querySelectorAll('c')].map(cell => cell.textContent))
+    const header = rows.find(row => row.includes('发布总量'))!
+    const materials = rows.filter(row => row.includes('MAT-100'))
+    expect(materials).toHaveLength(2)
+    expect(materials.map(row => row[header.indexOf('发布总量')])).toEqual(['6', '3'])
+    expect(materials.map(row => row[header.indexOf('已提前发布')])).toEqual(['2', '5'])
+    expect(materials.map(row => row[header.indexOf('本次新增下发')])).toEqual(['4', '0'])
+    expect(materials.every(row => row.includes('D-100、D-101'))).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('refuses to export raw single-set quantities when frozen quantity information is missing', async () => {
+    vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([{ ...current, bomItems: [{ id: 'bom', sequence: 1, drawingNumber: 'MAT-100', name: '零件', quantity: 2, unit: '个', revision: 'B', complete: true }] }])
+    const saved = vi.spyOn(api, 'downloadGeneratedFile').mockResolvedValue()
+    const wrapper = mount(ProductionDrawingCenter, { props: { token: 'token', canManage: false } })
+    await flushPromises(); await wrapper.get('.production-drawings__project').trigger('click'); await flushPromises()
+    await wrapper.get('[aria-label="全选本包图纸"]').setValue(true)
+    await wrapper.findAll('button').find(button => button.text() === '下载BOM')!.trigger('click'); await flushPromises()
+    expect(saved).not.toHaveBeenCalled()
+    expect(wrapper.get('[role="alert"]').text()).toContain('缺少发布包冻结的BOM数据')
+    expect(wrapper.get('tbody .production-drawings__column--quantity').text()).toBe('—')
+    wrapper.unmount()
+  })
+
+  it('shows the server obsolescence reason when cached drawings are no longer allowed for production', async () => {
+    vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([{ ...current, pdfReady: true }])
+    vi.spyOn(api, 'downloadProductionDrawingFile').mockRejectedValue(new api.PdmApiError('所选图纸已作废，禁止用于生产，请联系项目负责人。', 409))
+    const wrapper = mount(ProductionDrawingCenter, { props: { token: 'token', canManage: false } })
+    await flushPromises(); await wrapper.get('.production-drawings__project').trigger('click'); await flushPromises()
+    await wrapper.get('[aria-label="下载 D-100 PDF"]').trigger('click'); await flushPromises()
+    expect(wrapper.get('[role="alert"]').text()).toBe('所选图纸已作废，禁止用于生产，请联系项目负责人。')
+    wrapper.unmount()
+  })
+
+  it.each(['下载BOM', '下载本包'])('rechecks cached drawings and blocks %s after obsolescence', async action => {
+    const ready = withQuantities({ ...current, pdfReady: true,
+      modelFiles: [{ documentId: 'model', versionId: 'model-version', drawingNumber: 'M-100', name: '三维件', revision: 'B', stepReady: true }],
+      bomItems: [{ id: 'bom', sequence: 1, drawingNumber: 'MAT-100', name: '零件', quantity: 2, unit: '个', revision: 'B', complete: true }],
+    })
+    const list = vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([ready])
+    const generated = vi.spyOn(api, 'downloadGeneratedFile').mockResolvedValue()
+    const archive = vi.spyOn(api, 'downloadProductionDrawingArchive').mockResolvedValue()
+    const wrapper = mount(ProductionDrawingCenter, { props: { token: 'token', canManage: false } })
+    await flushPromises(); await wrapper.get('.production-drawings__project').trigger('click'); await flushPromises()
+    await wrapper.get('[aria-label="全选本包图纸"]').setValue(true)
+    list.mockResolvedValue([])
+    await wrapper.findAll('button').find(button => button.text() === action)!.trigger('click'); await flushPromises()
+    expect(list).toHaveBeenLastCalledWith('token', true, 'project')
+    expect(wrapper.get('[role="alert"]').text()).toBe('所选图纸已作废、已删除或无法访问，不能导出生产BOM，请刷新列表。')
+    expect(generated).not.toHaveBeenCalled()
+    expect(archive).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+})

@@ -209,7 +209,17 @@ public sealed class MaterialService(
     public async Task<IReadOnlyList<MaterialCodeApplication>> ListCodeApplicationsAsync(Guid? projectId, MaterialCodeApplicationStatus? status, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken);
-        return await materials.ListMaterialCodeApplicationsAsync(projectId, status, cancellationToken);
+        var result = new List<MaterialCodeApplication>();
+        var projectAccess = new Dictionary<Guid, bool>();
+        var legacyRoles = (await repository.GetSystemSettingsAsync(cancellationToken)).MaterialCodeApproval.ApproverRoleCodes;
+        foreach (var application in await materials.ListMaterialCodeApplicationsAsync(projectId, status, cancellationToken))
+        {
+            if (!projectAccess.TryGetValue(application.ProjectId, out var canRead))
+                projectAccess[application.ProjectId] = canRead = await repository.HasProjectContentReadAccessAsync(application.ProjectId, actor, role, cancellationToken);
+            if (!canRead) continue;
+            result.Add(await WithApprovalCapabilitiesAsync(application, actor, role, cancellationToken, legacyRoles));
+        }
+        return result;
     }
 
     public Task<IReadOnlyList<MaterialCodeApplication>> ListCodeApplicationsAsync(
@@ -345,6 +355,7 @@ public sealed class MaterialService(
         {
             var item = await repository.FindBomItemAsync(command.ProjectId, resolution.BomItemId, cancellationToken)
                 ?? throw new PdmNotFoundException("BOM物料不存在。");
+            await RequireBomKindEditAsync(command.ProjectId, item.Kind, actor, role, cancellationToken);
             EnsureMaterialCodeRequiredFields(item);
             applicationItems[item.Id] = item;
         }
@@ -384,6 +395,9 @@ public sealed class MaterialService(
                 Brand = item.Brand,
                 Remark = item.Remark
             };
+            var approvalTemplate = (await repository.GetSystemSettingsAsync(cancellationToken)).ApprovalWorkflows.MaterialCodeApplication;
+            if (approvalTemplate is not null)
+                application = application with { ApprovalWorkflow = await new MaterialCodeApprovalWorkflow(repository, timeProvider).CreateAsync(command.ProjectId, actor, approvalTemplate, cancellationToken) };
             application = await materials.CreateMaterialCodeApplicationAsync(application, cancellationToken);
             if (signature is not null) createdBySignature[signature] = application;
             await AuditAsync(actor, "material-code.application.create", application.Id, $"申请BOM物料料号：BOM {application.BomItemId}", cancellationToken);
@@ -553,19 +567,53 @@ public sealed class MaterialService(
         _ => null
     };
 
-    public async Task<(MaterialCodeApplication Application, PdmMaterial? Material, MaterialSyncTask? Task)> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, bool approved, string? comment, string actor, UserRole role, CancellationToken cancellationToken, string? categoryCode = null)
+    private async Task<MaterialCodeApplication> WithApprovalCapabilitiesAsync(MaterialCodeApplication application, string actor, UserRole role, CancellationToken ct, IReadOnlyList<string>? legacyRoles = null)
     {
-        var approvalSettings = (await repository.GetSystemSettingsAsync(cancellationToken)).MaterialCodeApproval;
-        if (role != UserRole.Administrator && !approvalSettings.ApproverRoleCodes.Contains(role.ToString(), StringComparer.OrdinalIgnoreCase))
-            throw new UnauthorizedAccessException("只有标准化角色可以处理料号申请。");
-        var application = await materials.FindMaterialCodeApplicationAsync(applicationId, cancellationToken)
-            ?? throw new PdmNotFoundException("料号申请不存在。");
-        if (!await repository.HasProjectContentReadAccessAsync(application.ProjectId, actor, role, cancellationToken))
-            throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
-        if (application.BomHeaderKind is not null && application.BomItemId is null)
-            throw new PdmRuleException("BOM表头料号由系统自动审批，请在BOM多级总览查看进度或重试，不能人工批准或退回。");
-        return await DecideMaterialCodeApplicationCoreAsync(
-            application, expectedRowVersion, approved, comment, actor, false, cancellationToken, categoryCode);
+        var node = application.ApprovalWorkflow?.Nodes.OrderBy(item => item.Order).FirstOrDefault(item => item.Decision is null);
+        legacyRoles ??= application.ApprovalWorkflow is null ? (await repository.GetSystemSettingsAsync(ct)).MaterialCodeApproval.ApproverRoleCodes : [];
+        return application with {
+            CanDecide = application.Status == MaterialCodeApplicationStatus.Pending && (application.ApprovalWorkflow is null
+                ? role == UserRole.Administrator || legacyRoles.Contains(role.ToString(), StringComparer.OrdinalIgnoreCase)
+                : node?.Assignees.Contains(actor, StringComparer.OrdinalIgnoreCase) == true),
+            CanEmergencyDecide = application.Status == MaterialCodeApplicationStatus.Pending && node is not null
+                && await ApprovalEmergencyPolicy.CanAsync(repository, application.ProjectId, application.ApprovalWorkflow!.EmergencyRoleCodes, actor, role, ct)
+        };
+    }
+
+    public async Task<(MaterialCodeApplication Application, PdmMaterial? Material, MaterialSyncTask? Task)> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, bool approved, string? comment, string actor, UserRole role, CancellationToken cancellationToken, string? categoryCode = null, bool emergencySubstitute = false, string? emergencyReason = null)
+    {
+        var application = await materials.FindMaterialCodeApplicationAsync(applicationId, cancellationToken) ?? throw new PdmNotFoundException("料号申请不存在。");
+        if (!await repository.HasProjectContentReadAccessAsync(application.ProjectId, actor, role, cancellationToken)) throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
+        if (application.BomHeaderKind is not null && application.BomItemId is null) throw new PdmRuleException("BOM表头料号由系统自动审批，不能人工批准或退回。");
+        if (application.Status != MaterialCodeApplicationStatus.Pending || application.RowVersion != expectedRowVersion) throw new PdmConflictException("料号申请或审批节点已变化，请刷新后重试。");
+        var capability = await WithApprovalCapabilitiesAsync(application, actor, role, cancellationToken);
+        MaterialCodeApprovalSnapshot? next = null;
+        if (application.ApprovalWorkflow is not null)
+        {
+            var node = application.ApprovalWorkflow.Nodes.OrderBy(item => item.Order).FirstOrDefault(item => item.Decision is null)
+                ?? throw new PdmConflictException("审批节点已经处理，请刷新后重试。");
+            if (emergencySubstitute)
+            {
+                if (!capability.CanEmergencyDecide) throw new UnauthorizedAccessException("当前用户不属于该审批流配置的紧急代批角色。");
+                if (string.IsNullOrWhiteSpace(emergencyReason) || emergencyReason.Trim().Length > 500) throw new PdmRuleException("请填写紧急代批原因，最多500个字符。");
+                comment = $"紧急代批：{emergencyReason.Trim()}";
+            }
+            else if (capability.CanDecide != true) throw new UnauthorizedAccessException("只能处理当前节点分配给自己的料号审批任务。");
+            if (!approved && string.IsNullOrWhiteSpace(comment)) throw new PdmRuleException("退回料号申请时必须填写原因。");
+            if (comment?.Trim().Length > 1000) throw new PdmRuleException("审批备注不能超过1000个字符。");
+            next = application.ApprovalWorkflow with { Nodes = application.ApprovalWorkflow.Nodes.Select(item => item.Id == node.Id
+                ? item with { Decision = approved ? ApprovalDecision.Approved : ApprovalDecision.Rejected, DecisionBy = actor,
+                    Comment = comment?.Trim(), DecidedAt = timeProvider.GetUtcNow(), IsEmergencySubstitute = emergencySubstitute } : item).ToArray() };
+            if (approved && next.Nodes.Any(item => item.Decision is null))
+            {
+                var advanced = await materials.AdvanceMaterialCodeApprovalAsync(applicationId, expectedRowVersion, next, cancellationToken);
+                await AuditAsync(actor, emergencySubstitute ? "material-code.application.emergency" : "material-code.application.node.approve", applicationId, $"当前节点“{node.Name}”已通过，等待后续审批。{comment}", cancellationToken);
+                return (await WithApprovalCapabilitiesAsync(advanced, actor, role, cancellationToken), null, null);
+            }
+        }
+        else if (emergencySubstitute || capability.CanDecide != true) throw new UnauthorizedAccessException("当前用户无权处理该料号申请。");
+        var result = await DecideMaterialCodeApplicationCoreAsync(application, expectedRowVersion, approved, comment, actor, false, cancellationToken, categoryCode, next);
+        return (await WithApprovalCapabilitiesAsync(result.Application, actor, role, cancellationToken), result.Material, result.Task);
     }
 
     public async Task<MaterialCodeApplication> WithdrawMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
@@ -579,6 +627,7 @@ public sealed class MaterialService(
             throw new UnauthorizedAccessException("只有申请人或系统管理员可以撤回料号申请。");
         if (!await repository.HasProjectContentReadAccessAsync(application.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
+        await ProjectPermissionPolicy.RequireAsync(repository, application.ProjectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
         if (application.Status != MaterialCodeApplicationStatus.Pending)
             throw new PdmRuleException("只有待审批的料号申请可以撤回。");
         var withdrawn = await materials.DecideMaterialCodeApplicationAsync(applicationId, expectedRowVersion,
@@ -650,7 +699,7 @@ public sealed class MaterialService(
         string actor,
         bool automaticBomHeaderApproval,
         CancellationToken cancellationToken,
-        string? categoryCode = null)
+        string? categoryCode = null, MaterialCodeApprovalSnapshot? approvalWorkflow = null)
     {
         var normalizedComment = comment?.Trim();
         if (!approved && string.IsNullOrWhiteSpace(normalizedComment))
@@ -661,7 +710,7 @@ public sealed class MaterialService(
         {
             var decidedAt = timeProvider.GetUtcNow();
             var rejected = await materials.DecideMaterialCodeApplicationAsync(application.Id, expectedRowVersion, MaterialCodeApplicationStatus.Rejected,
-                actor, normalizedComment, null, null, decidedAt, cancellationToken);
+                actor, normalizedComment, null, null, decidedAt, cancellationToken, approvalWorkflow);
             await repository.CreateUserNotificationsAsync([new UserNotification(
                 Guid.NewGuid(), application.RequestedBy, "MaterialCodeApplicationRejected", "料号申请已退回",
                 $"{application.ApplicationName ?? application.BomItemName ?? "料号申请"} 被 {actor} 退回：{normalizedComment}",
@@ -686,7 +735,7 @@ public sealed class MaterialService(
                     .FirstOrDefault(task => task.MaterialId == headerMaterial.Id && task.Status == MaterialSyncStatus.PreviewReady);
             var approvedHeader = await materials.DecideMaterialCodeApplicationAsync(
                 application.Id, expectedRowVersion, MaterialCodeApplicationStatus.Approved,
-                actor, normalizedComment, headerMaterial.Id, headerMaterial.MaterialCode, timeProvider.GetUtcNow(), cancellationToken);
+                actor, normalizedComment, headerMaterial.Id, headerMaterial.MaterialCode, timeProvider.GetUtcNow(), cancellationToken, approvalWorkflow);
             await AuditAsync(actor,
                 automaticBomHeaderApproval ? "bom.header.application.auto-approve" : "bom.header.application.approve",
                 approvedHeader.Id,
@@ -710,7 +759,7 @@ public sealed class MaterialService(
             materialSyncTask = (await materials.ListSyncTasksAsync(cancellationToken))
                 .FirstOrDefault(task => task.MaterialId == material.Id && task.Status == MaterialSyncStatus.PreviewReady);
         var decided = await materials.DecideMaterialCodeApplicationAsync(application.Id, expectedRowVersion, MaterialCodeApplicationStatus.Approved,
-            actor, normalizedComment, material.Id, material.MaterialCode, timeProvider.GetUtcNow(), cancellationToken);
+            actor, normalizedComment, material.Id, material.MaterialCode, timeProvider.GetUtcNow(), cancellationToken, approvalWorkflow);
         await AuditAsync(actor, "material-code.application.approve", decided.Id, $"批准BOM物料料号：{material.MaterialCode}", cancellationToken);
         return (decided, material, materialSyncTask);
     }
@@ -827,6 +876,9 @@ public sealed class MaterialService(
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
         await ProjectPermissionPolicy.RequireAsync(repository, command.ProjectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
+        var item = await repository.FindBomItemAsync(command.ProjectId, command.BomItemId, cancellationToken)
+            ?? throw new PdmNotFoundException("BOM物料不存在。");
+        await RequireBomKindEditAsync(command.ProjectId, item.Kind, actor, role, cancellationToken);
         return await CreateFromBomCoreAsync(command, actor, cancellationToken);
     }
 
@@ -1538,6 +1590,8 @@ public sealed class MaterialService(
         foreach (var kind in new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Electrical })
             items.AddRange((await repository.GetBomAsync(projectId, kind, cancellationToken)).Where(item => ids.Contains(item.Id) && !item.IsManuallyExcluded));
         if (items.Count != ids.Count) throw new PdmNotFoundException("所选BOM物料不存在或已删除。");
+        foreach (var kind in items.Select(item => item.Kind).Distinct())
+            await RequireBomKindEditAsync(projectId, kind, actor, role, cancellationToken);
         foreach (var item in items.DistinctBy(item => (item.Kind, item.DrawingNumber, item.Specification, item.Brand)))
             EnsureStandardMaterialIdentity(item, material);
         await materials.LinkBomItemsAsync(ids.ToArray(), material.Id, actor, timeProvider.GetUtcNow(), cancellationToken);
@@ -1551,6 +1605,7 @@ public sealed class MaterialService(
         await ProjectPermissionPolicy.RequireAsync(repository, command.ProjectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
         var bomItem = await repository.FindBomItemAsync(command.ProjectId, command.BomItemId, cancellationToken)
             ?? throw new PdmNotFoundException("BOM物料不存在。");
+        await RequireBomKindEditAsync(command.ProjectId, bomItem.Kind, actor, role, cancellationToken);
         var material = await materials.FindMaterialAsync(command.MaterialId, cancellationToken)
             ?? throw new PdmNotFoundException("料品主档不存在。");
         if (material.IsArchived) throw new PdmRuleException("已归档料品不能建立新的BOM引用。");
@@ -1590,6 +1645,7 @@ public sealed class MaterialService(
         await ProjectPermissionPolicy.RequireAsync(repository, command.ProjectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
         var bomItem = await repository.FindBomItemAsync(command.ProjectId, command.BomItemId, cancellationToken)
             ?? throw new PdmNotFoundException("BOM物料不存在。");
+        await RequireBomKindEditAsync(command.ProjectId, bomItem.Kind, actor, role, cancellationToken);
         var material = await materials.FindMaterialAsync(command.MaterialId, cancellationToken)
             ?? throw new PdmNotFoundException("料品主档不存在。");
         if (material.IsArchived) throw new PdmRuleException("已归档料品不能建立新的BOM引用。");
@@ -1600,6 +1656,10 @@ public sealed class MaterialService(
         await AuditAsync(actor, "material.auto-link-bom", material.Id, $"唯一型号自动关联：{command.BomItemId} → {material.MaterialCode}", cancellationToken);
         return material;
     }
+
+    private Task RequireBomKindEditAsync(Guid projectId, BomKind kind, string actor, UserRole role, CancellationToken cancellationToken) =>
+        ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role,
+            kind == BomKind.Electrical ? PermissionCodes.BomElectricalEdit : PermissionCodes.BomMechanicalEdit, cancellationToken);
 
     private static void EnsureStandardMaterialIdentity(BomItem item, PdmMaterial material, bool allowMissingDrawingIdentity = false)
     {

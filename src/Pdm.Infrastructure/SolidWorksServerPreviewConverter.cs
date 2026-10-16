@@ -179,17 +179,9 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         var outputRoot = Path.Combine(workRoot, "outputs");
         Directory.CreateDirectory(sourceRoot);
         Directory.CreateDirectory(outputRoot);
-        // 单项重试（keepExistingPreviews）时不能清空整个发布包的预览目录，否则会删掉其它已转好的文件。
-        if (keepExistingPreviews)
-        {
-            Directory.CreateDirectory(previewRoot);
-            Directory.CreateDirectory(stagingPreviewRoot);
-        }
-        else
-        {
-            ResetDirectory(previewRoot);
-            ResetDirectory(stagingPreviewRoot);
-        }
+        // 正式版本可能已提交而发布状态尚未更新，重入时也不得清空已挂接的不可变预览。
+        Directory.CreateDirectory(previewRoot);
+        Directory.CreateDirectory(stagingPreviewRoot);
 
         try
         {
@@ -255,11 +247,24 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                         : $"服务器未生成图档{source.DrawingNumber}的预览文件。");
                 }
                 var outputName = Path.GetFileName(job.OutputPath);
-                var vaultPreviewPath = Path.Combine(previewRoot, outputName);
-                var stagingPreviewPath = Path.Combine(stagingPreviewRoot, outputName);
-                File.Copy(job.OutputPath, vaultPreviewPath, true);
-                File.Copy(job.OutputPath, stagingPreviewPath, true);
-                var sha256 = await ComputeSha256Async(vaultPreviewPath, cancellationToken);
+                var sha256 = await ComputeSha256Async(job.OutputPath, cancellationToken);
+                var vaultPreviewPath = Path.Combine(previewRoot, sha256, outputName);
+                var stagingPreviewPath = Path.Combine(stagingPreviewRoot, sha256, outputName);
+                Directory.CreateDirectory(Path.GetDirectoryName(vaultPreviewPath)!);
+                Directory.CreateDirectory(Path.GetDirectoryName(stagingPreviewPath)!);
+                foreach (var destination in new[] { vaultPreviewPath, stagingPreviewPath })
+                {
+                    if (await ReleaseDeliveryFiles.MatchesAsync(destination, new FileInfo(job.OutputPath).Length, sha256, cancellationToken)) continue;
+                    var temporary = destination + $".{Guid.NewGuid():N}.tmp";
+                    try
+                    {
+                        File.Copy(job.OutputPath, temporary, false);
+                        if (!await ReleaseDeliveryFiles.MatchesAsync(temporary, new FileInfo(job.OutputPath).Length, sha256, cancellationToken))
+                            throw new PdmConflictException($"图档{source.DrawingNumber}的预览写入后校验失败，请检查存储目录。");
+                        File.Move(temporary, destination, true);
+                    }
+                    finally { if (File.Exists(temporary)) File.Delete(temporary); }
+                }
                 artifacts[source.DocumentId] = new DocumentPreviewArtifact(
                     source.Kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step,
                     Path.GetRelativePath(vaultRoot, vaultPreviewPath),
@@ -274,15 +279,6 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
             return artifacts;
         }
         catch (PartialPreviewConversionException) { throw; }
-        catch
-        {
-            if (!keepExistingPreviews)
-            {
-                DeleteDirectory(previewRoot);
-                DeleteDirectory(stagingPreviewRoot);
-            }
-            throw;
-        }
         finally
         {
             DeleteDirectory(workRoot);
@@ -618,12 +614,6 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
     {
         await using var input = File.OpenRead(path);
         return Convert.ToHexString(await SHA256.HashDataAsync(input, cancellationToken));
-    }
-
-    private static void ResetDirectory(string path)
-    {
-        DeleteDirectory(path);
-        Directory.CreateDirectory(path);
     }
 
     private static void DeleteDirectory(string path)

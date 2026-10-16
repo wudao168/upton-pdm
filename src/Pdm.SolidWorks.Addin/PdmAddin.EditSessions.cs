@@ -96,6 +96,12 @@ public sealed partial class PdmAddin
         try
         {
             if (!EnsureEditJournal()) return;
+            if (ArchiveBatchJournal.Recoverable(apiClient.EditJournalScope, authenticatedUsername).Any())
+            {
+                if (DateTime.UtcNow < nextArchiveBatchRecoveryUtc) return;
+                nextArchiveBatchRecoveryUtc = DateTime.UtcNow.AddSeconds(30);
+                if (!await ReconcileArchiveBatchesAsync()) return;
+            }
             var pending = PrepareClosedEdits();
             await ClosePreservedEditsAsync(pending, lifetime.Token);
         }
@@ -215,7 +221,6 @@ public sealed partial class PdmAddin
             entry.UnsavedChanges = false;
             entry.PendingClose = true;
             editJournal.Save(entry); // The retry record is durable before removing the heartbeat.
-            SetFileReadOnly(entry.SourcePath, true);
         }
         lock (checkoutDocumentSync)
         {
@@ -240,7 +245,16 @@ public sealed partial class PdmAddin
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
             catch (Exception exception)
             {
-                foreach (var entry in project) ReportEditMaintenanceError(exception, entry, true);
+                var groupEntries = project.ToArray();
+                if (groupEntries.Length > 0)
+                {
+                    ReportEditMaintenanceError(exception, groupEntries[0], true);
+                    var key = exception.GetType().FullName + ":" + exception.HResult + ":" + exception.Message;
+                    var missing = exception is FileNotFoundException || exception is DirectoryNotFoundException;
+                    foreach (var entry in groupEntries.Skip(1)) editJournal.DelayMaintenance(entry, key, missing, DateTime.UtcNow);
+                }
+                if (exception is System.Net.Http.HttpRequestException or TaskCanceledException or PdmApiClient.ServiceUnavailableException)
+                    return;
                 continue;
             }
             var byId = documents.ToDictionary(document => document.Id);
@@ -262,15 +276,33 @@ public sealed partial class PdmAddin
         var journal = editJournal;
         var client = apiClient;
         var username = authenticatedUsername;
-        if (current == null) throw new InvalidOperationException("暂时无法读取该图档的服务器状态，已保留草稿和待办记录，稍后重试；请确认项目访问权限。");
         var needsDraft = !string.Equals(entry.DiskSha256, entry.BaseSha256, StringComparison.OrdinalIgnoreCase);
         if (needsDraft && !journal.HasVerifiedDraft(entry)) throw new IOException("图档草稿未通过校验，已保留编辑状态。请保存图档后重试。");
+        if (entry.UnsavedChanges && !journal.HasVerifiedDraft(entry))
+            throw new IOException("图档仍有未保存修改且本机草稿未通过校验，已保留编辑状态。请打开原图档保存后重试。");
+        if (current == null)
+        {
+            if (entry.BaseVersionId.HasValue)
+                throw new InvalidOperationException("暂时无法读取该图档的服务器状态，已保留草稿和待办记录，稍后重试；请确认项目访问权限。");
+            // A canceled first-archive reservation has no formal server document.
+            // Its source and verified draft remain untouched and editable.
+            entry.PendingClose = false;
+            entry.Closed = true;
+            EditDraftJournal.ClearMaintenanceFailure(entry);
+            journal.Save(entry);
+            return;
+        }
         if (current.CheckedOutBy == null || current.CheckoutSessionId == entry.SessionId && current.CheckedOutAt?.ToUniversalTime() == entry.CheckedOutAt.ToUniversalTime() && string.Equals(current.CheckedOutBy, username, StringComparison.OrdinalIgnoreCase))
             await client.CloseEditAsync(entry, needsDraft, token).ConfigureAwait(false);
         entry.PendingClose = false;
         entry.Closed = true;
         EditDraftJournal.ClearMaintenanceFailure(entry);
         journal.Save(entry);
+        if (entry.BaseVersionId.HasValue)
+        {
+            try { SetFileReadOnly(entry.SourcePath, true); }
+            catch (Exception error) { LogDiagnostic("结束编辑后设置本地只读状态：" + entry.SourcePath, error); }
+        }
     }
 
     private void FinishClosedEditsBeforeDisconnect()

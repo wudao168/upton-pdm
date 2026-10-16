@@ -50,6 +50,8 @@ internal static class Program
             Run("整批上传绑定服务器分配路径，批次记录只在结果确认后清理", BatchUploadOwnership);
             Run("重复刷新复用已确认历史，版本号或数量变化立即失效", VersionHistoryCache);
             Run("来源文件修改不伪装成原样副本", CopyHashes);
+            Run("共享可写句柄允许读取；旧式共享回退仅接受可禁止写入和替换的文件", SharedFileFingerprint);
+            Run("读取时同长度修改与同时间戳替换不能冒充稳定图档，取消及时退出", ChangingFileFingerprint);
             Run("首次存档重试沿用登记编号，版本、用户、电脑和项目变化仍拦截", PendingFirstArchive);
             Run("首次存档读取多层压缩结构，保留实例与压缩状态并拒绝错误配置和循环", LocalSuppressedStructure);
             Run("服务端预检使用实际属性，不再发送空属性表", PreflightProperties);
@@ -73,7 +75,7 @@ internal static class Program
             Run("工程图内的独立模型引用同步身份和准确版本，双向关系不会递归溢出", NestedDrawingReferenceIdentity);
             Run("失败登记不写永久身份，旧空登记可重新准备，历史和跨项目身份保持", PendingRegistrationIdentity);
             Run("预检与提交复用固定快照，多配置及工程图引用不能被异步刷新改写", FrozenArchiveSnapshot);
-            Run("计划内缺失身份或版本也必须在上传前拦截", IncompletePlannedSnapshot);
+            Run("计划内引用保留待绑定版本，缺失身份及计划外缺失版本仍在上传前拦截", IncompletePlannedSnapshot);
             Run("中断批次记录隔离服务器与账号，存活进程不被误清理", InterruptedBatchJournal);
             Run("重启后核对已提交、未提交、并发完成和服务器不可达的批次", InterruptedBatchRecovery);
             if (args.Length > 2) Run("实际P700012发布版本与工作区编辑基准兼容", () => RealReleasedBaseline(args[2]));
@@ -168,6 +170,70 @@ internal static class Program
         Expect<IOException>(() => Static("CheckInUploadHashes", "Read", copy, source, Hash(source), CancellationToken.None, null));
         var result = Static("CheckInUploadHashes", "Read", copy, source, null, CancellationToken.None, Hash(source));
         Assert((string)Get(result, "Source") == Hash(source) && (string)Get(result, "Upload") == Hash(copy), "source/upload hashes lost");
+    }
+    static void SharedFileFingerprint()
+    {
+        var path = Path.Combine(directory, "shared-fingerprint.SLDASM");
+        var copy = path + ".copy";
+        File.WriteAllText(path, "assembly remains open for editing"); File.Copy(path, copy);
+        var expected = Hash(path);
+        Assert((string)Static("ArchiveFileFingerprint", "ReadProtected", path, CancellationToken.None) == expected,
+            "protected fallback rejected a closed file");
+        using (var reader = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            Assert((string)Static("ArchiveFileFingerprint", "ReadProtected", path, CancellationToken.None) == expected,
+                "protected fallback rejected another read-only handle");
+        using (var writable = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete))
+        {
+            Expect<IOException>(() => Static("ArchiveFileFingerprint", "ReadProtected", path, CancellationToken.None));
+            Assert((string)Static("ArchiveFileFingerprint", "Read", path, CancellationToken.None) == expected, "writable shared file fingerprint changed");
+            Assert((string)Static("SuppressedAssemblyLocalStructure", "Hash", path) == expected, "suppressed assembly rejected writable shared handle");
+            Assert((bool)Static("SolidWorksReferenceTreeScanner", "FilesHaveSameContent", path, copy), "drawing comparison rejected writable shared handle");
+        }
+        using (var exclusive = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            Expect<IOException>(() => Static("ArchiveFileFingerprint", "Read", path, CancellationToken.None));
+        Assert(Hash(path) == expected, "fingerprint modified the source");
+    }
+    static void ChangingFileFingerprint()
+    {
+        foreach (var mode in new[] { "overwrite", "replace", "cancel" })
+        {
+            var path = Path.Combine(directory, "changing-fingerprint-" + mode + ".SLDPRT");
+            var original = Enumerable.Repeat((byte)31, 8192).ToArray(); File.WriteAllBytes(path, original);
+            var timestamp = File.GetLastWriteTimeUtc(path);
+            using (var cancellation = new CancellationTokenSource())
+            using (var source = new MutatingFileStream(path, () =>
+            {
+                if (mode == "cancel") { cancellation.Cancel(); return; }
+                if (mode == "overwrite") File.WriteAllBytes(path, Enumerable.Repeat((byte)97, original.Length).ToArray());
+                else
+                {
+                    File.WriteAllBytes(path + ".replacement", original);
+                    File.Move(path, path + ".previous"); File.Move(path + ".replacement", path);
+                }
+                File.SetLastWriteTimeUtc(path, timestamp);
+            }))
+            {
+                Action read = () => Static("ArchiveFileFingerprint", "ReadOpenedFile", path, source, cancellation.Token);
+                if (mode == "cancel") Expect<OperationCanceledException>(read); else Expect<IOException>(read);
+            }
+            Assert(File.Exists(path), "unstable read removed the current source");
+            Assert(new FileInfo(path).Length == original.Length && File.GetLastWriteTimeUtc(path) == timestamp,
+                "race fixture must preserve size and timestamp so metadata-only checks cannot pass");
+            if (mode == "overwrite") Assert(!File.ReadAllBytes(path).SequenceEqual(original), "overwrite fixture did not change the bytes");
+            if (mode == "replace") Assert(File.ReadAllBytes(path + ".previous").SequenceEqual(original), "replacement test lost the original bytes");
+        }
+    }
+    sealed class MutatingFileStream : FileStream
+    {
+        Action afterRead;
+        public MutatingFileStream(string path, Action action) : base(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete) { afterRead = action; }
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var read = base.Read(buffer, offset, count);
+            var action = afterRead; afterRead = null; action?.Invoke();
+            return read;
+        }
     }
     static void PendingFirstArchive()
     {
@@ -314,13 +380,22 @@ internal static class Program
         var child=Node("355.0700A.01.SLDPRT",Guid.NewGuid(),1);Set(child,"DocumentId",null);Set(child,"InstancePath","ROOT/SUB/355-4");Set(child,"Configuration","默认");((IList)Get(root,"Children")).Add(child);
         var paths=new HashSet<string>{(string)Get(child,"FullPath")};
         Expect<InvalidOperationException>(()=>Static("PdmApiClient","CaptureArchiveSnapshot",root,paths));
-        Set(child,"DocumentId",Guid.NewGuid());Expect<InvalidOperationException>(()=>Static("PdmApiClient","CaptureArchiveSnapshot",root,paths));
+        Set(child,"DocumentId",Guid.NewGuid());
+        var planned=Static("PdmApiClient","CaptureArchiveSnapshot",root,paths);
+        var body=Json.Deserialize<Dictionary<string,object>>(Json.Serialize(Call(planned,"CreateRoot")));
+        Assert(((Dictionary<string,object>)((IList)body["children"])[0])["revision"]==null,"invented a revision before the child committed");
+        Expect<InvalidOperationException>(()=>Static("PdmApiClient","CaptureArchiveSnapshot",root,new HashSet<string>()));
         Set(child,"Revision","W1");Static("PdmApiClient","CaptureArchiveSnapshot",root,paths);
     }
     static void InterruptedBatchJournal()
     {
         var batch=Guid.NewGuid();var session=Guid.NewGuid();Static("ArchiveBatchJournal","Begin",batch,session,"server|company","engineer");
+        var reserved=Guid.NewGuid();Static("ArchiveBatchJournal","AddReservedDocument",batch,reserved);
+        var saved=Json.Deserialize<Dictionary<string,object>>(File.ReadAllText(Path.Combine(directory,"batches",batch.ToString("N")+".json")));
+        Assert(Json.Serialize(saved["ReservedDocumentIds"]).Contains(reserved.ToString()),"reserved identities were not durably recorded");
         Assert(!((IEnumerable)Static("ArchiveBatchJournal","Interrupted","server|company","engineer")).Cast<object>().Any(),"live process recovered");
+        Assert(((IEnumerable)Static("ArchiveBatchJournal","Recoverable","server|company","engineer")).Cast<object>().Count()==1,
+            "current process could not reconcile its completed uncertain submission");
         var path=Path.Combine(directory,"batches",batch.ToString("N")+".json");var state=Json.Deserialize<Dictionary<string,object>>(File.ReadAllText(path));state["ProcessStartUtcTicks"]=0;File.WriteAllText(path,Json.Serialize(state));
         Assert(((IEnumerable)Static("ArchiveBatchJournal","Interrupted","server|company","engineer")).Cast<object>().Count()==1,"crash record lost");
         Assert(!((IEnumerable)Static("ArchiveBatchJournal","Interrupted","other","engineer")).Cast<object>().Any(),"server scope leaked");
@@ -329,15 +404,15 @@ internal static class Program
     }
     static void InterruptedBatchRecovery()
     {
-        foreach(var mode in new[]{"committed","pending","concurrent-commit","unreachable"})
+        foreach(var mode in new[]{"committed","pending","concurrent-commit","unreachable","current-pending","current-committed"})
         {
-            var batch=Guid.NewGuid();var session=Guid.NewGuid();var reads=0;var cancellations=0;
+            var batch=Guid.NewGuid();var session=Guid.NewGuid();var provisionalId=Guid.NewGuid();var reads=0;var cancellations=0;
             using(var handler=new JsonHandler(request=>
             {
                 if(mode=="unreachable")throw new HttpRequestException("fixture unavailable");
                 if(request.Method==HttpMethod.Post){Assert(request.RequestUri.AbsolutePath.EndsWith("/cancel-registration"),"recovery reposted archive versions");cancellations++;return new{};}
                 reads++;
-                return mode=="committed"||mode=="concurrent-commit"&&reads>1?(object)new{batchId=batch,results=new object[0]}:new HttpResponseMessage(HttpStatusCode.NotFound){Content=new StringContent("{}")};
+                return mode=="committed"||mode=="current-committed"||mode=="concurrent-commit"&&reads>1?(object)new{batchId=batch,results=new object[0]}:new HttpResponseMessage(HttpStatusCode.NotFound){Content=new StringContent("{}")};
             }))
             using(var client=(IDisposable)Client(handler))
             using(var pane=(IDisposable)New("PdmTaskPaneControl","中断恢复"))
@@ -345,13 +420,20 @@ internal static class Program
             {
                 Call(client,"SetActiveCompany",Guid.Empty);var scope=(string)Get(client,"EditJournalScope");
                 Static("ArchiveBatchJournal","Begin",batch,session,scope,"engineer");
-                var path=Path.Combine(directory,"batches",batch.ToString("N")+".json");var state=Json.Deserialize<Dictionary<string,object>>(File.ReadAllText(path));state["ProcessStartUtcTicks"]=0;File.WriteAllText(path,Json.Serialize(state));
+                Static("ArchiveBatchJournal","AddReservedDocument",batch,provisionalId);
+                var path=Path.Combine(directory,"batches",batch.ToString("N")+".json");
+                if(!mode.StartsWith("current-")){var state=Json.Deserialize<Dictionary<string,object>>(File.ReadAllText(path));state["ProcessStartUtcTicks"]=0;File.WriteAllText(path,Json.Serialize(state));}
                 var plugin=New("PdmAddin");T("PdmAddin").GetField("apiClient",Flags).SetValue(plugin,client);T("PdmAddin").GetField("taskPaneControl",Flags).SetValue(plugin,pane);T("PdmAddin").GetField("lifetime",Flags).SetValue(plugin,lifetime);T("PdmAddin").GetField("authenticatedUsername",Flags).SetValue(plugin,"engineer");
+                var provisional=Node("batch-provisional.SLDASM",provisionalId,0);T("PdmAddin").GetField("currentTree",Flags).SetValue(plugin,provisional);
                 var previousContext=SynchronizationContext.Current;
                 try{SynchronizationContext.SetSynchronizationContext(null);Await(Call(plugin,"RecoverInterruptedArchiveBatchesAsync"));}
                 finally{SynchronizationContext.SetSynchronizationContext(previousContext);}
                 Assert(File.Exists(path)==(mode=="unreachable"),"unconfirmed outcome journal lost or confirmed journal retained");
-                Assert(cancellations==((mode=="pending"||mode=="concurrent-commit")?1:0),"unexpected recovery cancellation");
+                Assert(cancellations==((mode=="pending"||mode=="current-pending"||mode=="concurrent-commit")?1:0),"unexpected recovery cancellation");
+                Assert((bool)T("PdmAddin").GetField("archiveRecoveryNeedsReview",Flags).GetValue(plugin)==(mode=="committed"||mode=="current-committed"||mode=="concurrent-commit"),
+                    "uncertain committed batch did not require a version review");
+                Assert((Guid?)Get(provisional,"DocumentId")==((mode=="pending"||mode=="current-pending")?(Guid?)null:provisionalId),
+                    "recovery cleared a committed identity or retained a canceled provisional identity");
                 Static("ArchiveBatchJournal","Complete",batch);
             }
         }
@@ -500,6 +582,16 @@ internal static class Program
         var compare = T("PdmAddin").GetMethods(Flags).Single(m => m.Name == "ReferenceSnapshotMatchesTree" && m.GetParameters().Length == 2);
         Assert((bool)compare.Invoke(null, new[] { dto, drawing }), "same drawing pins mismatch");
         Set(model, "CurrentRevision", "W2"); Assert(!(bool)compare.Invoke(null, new[] { dto, drawing }), "changed model pins ignored");
+        var dependency = Node("NATIVE-EXTRA.SLDPRT", Guid.NewGuid(), 1);
+        Set(dependency, "Role", Enum.Parse(T("CadReferenceRole"), "ExternalFileDependency"));
+        var archivedDependency = New("DocumentReferenceNodeDto");
+        Set(archivedDependency, "DocumentId", Get(dependency, "DocumentId"));
+        Set(archivedDependency, "FileName", Get(dependency, "FileName"));
+        Set(archivedDependency, "Kind", 1); Set(archivedDependency, "Role", 1);
+        Set(archivedDependency, "Quantity", Get(dependency, "Quantity"));
+        Assert((bool)compare.Invoke(null, new[] { archivedDependency, dependency }), "native dependency role mismatch");
+        Set(archivedDependency, "Role", 0);
+        Assert(!(bool)compare.Invoke(null, new[] { archivedDependency, dependency }), "native dependency role change was ignored");
     }
     static void RootAdmission()
     {
@@ -523,6 +615,7 @@ internal static class Program
         File.WriteAllText(Path.Combine(logs, "addin-scan.log"), new string('x', 1200000) + "\n末尾扫描记录");
         var report = (string)Static("PluginDiagnosticLog", "BuildReport", "test-version", logs);
         Assert(report.Contains("test-version") && report.Contains("上一轮崩溃记录") && report.Contains("末尾扫描记录"), "report missing context");
+        Assert(report.Contains(assembly.ManifestModule.ModuleVersionId.ToString("D")) && report.Contains(assembly.Location), "report does not identify the actual loaded plugin binary");
         Assert(!report.Contains("secret-") && !report.Contains("must-not-export") && report.Length < 1100000, "unsafe or unbounded report");
     }
     static void SubprojectReference()

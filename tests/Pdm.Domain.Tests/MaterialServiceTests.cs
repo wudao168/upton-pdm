@@ -10,6 +10,41 @@ public sealed class MaterialServiceTests
 {
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
+    [Theory]
+    [InlineData(BomKind.Standard, false)]
+    [InlineData(BomKind.Electrical, false)]
+    [InlineData(BomKind.Standard, true)]
+    [InlineData(BomKind.Electrical, true)]
+    public async Task BomMaterialWritesRequireBothRoleAndProjectKindPermissions(BomKind kind, bool revokeProjectGrant)
+    {
+        var service = CreateService(out var materials, out var repository, out _);
+        await repository.SetMainProjectStaffingAsync(ProjectId, new("admin", [], ["engineer"]), "admin", default);
+        var permission = kind == BomKind.Electrical ? PermissionCodes.BomElectricalEdit : PermissionCodes.BomMechanicalEdit;
+        var otherPermission = kind == BomKind.Electrical ? PermissionCodes.BomMechanicalEdit : PermissionCodes.BomElectricalEdit;
+        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.BomEdit,
+            revokeProjectGrant ? permission : otherPermission], default);
+        if (revokeProjectGrant)
+        {
+            var settings = await repository.GetProjectPermissionSettingsAsync(default);
+            await repository.UpdateProjectPermissionSettingsAsync(new(settings.Rules.ToDictionary(pair => pair.Key,
+                pair => (IReadOnlyList<string>)pair.Value.Where(code => code != permission).ToArray())), default);
+        }
+        var item = new BomItem(Guid.NewGuid(), ProjectId, kind, 1, "", "权限测试物料", 1, "001", null, "PERMISSION-MODEL", "W1", true) { Brand = "TEST" };
+        await repository.ReplaceBomAsync(ProjectId, kind, [item], default);
+        var material = await service.CreateAsync(new(null, item.Name, MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
+            item.Specification, null, null, item.Brand, null, null, null, CategoryCode: "0102"), "admin", UserRole.Administrator, default);
+        material = (await service.ApproveAsync(material.Id, material.RowVersion, "admin", UserRole.Administrator, default)).Material;
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.ApplyForMaterialCodesAsync(new(ProjectId, [item.Id]), "engineer", UserRole.Engineer, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.CreateFromBomAsync(new(ProjectId, item.Id), "engineer", UserRole.Engineer, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.LinkBomMaterialAsync(new(ProjectId, item.Id, material.Id), "engineer", UserRole.Engineer, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.LinkAutomaticallyMatchedBomMaterialAsync(new(ProjectId, item.Id, material.Id), "engineer", UserRole.Engineer, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.LinkBomMaterialsAsync(ProjectId, [item.Id], material.Id, "engineer", UserRole.Engineer, default));
+        Assert.Empty(await materials.ListMaterialCodeApplicationsAsync(ProjectId, MaterialCodeApplicationStatus.Pending, default));
+        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.BomEdit, permission], default);
+        await repository.UpdateProjectPermissionSettingsAsync(ProjectPermissionSettings.Default, default);
+        Assert.Equal(material.Id, (await service.LinkBomMaterialAsync(new(ProjectId, item.Id, material.Id), "engineer", UserRole.Engineer, default)).Id);
+    }
+
     [Fact]
     public async Task Update_UnsynchronizedNeedsReview_PreservesReadbackAndMaterialCode()
     {
@@ -1923,6 +1958,69 @@ public sealed class MaterialServiceTests
                 Id = staleBatchId,
                 Items = [item with { Id = Guid.NewGuid(), BatchId = staleBatchId }]
             }, default));
+    }
+
+    [Fact]
+    public async Task ConfiguredMaterialWorkflow_AdvancesOneNodeAndFreezesAssignmentsUntilFinalApproval()
+    {
+        var service = CreateService(out var materials, out var repository, out _);
+        foreach (var name in new[] { "admin", "reviewer", "finisher" })
+            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), name, name, "unused", UserRole.Administrator, true), default);
+        var settings = await repository.GetSystemSettingsAsync(default);
+        var flow = MaterialCodeWorkflowDefaults.Template() with { Version = 5, EmergencyRoleCodes = [], Steps = [
+            new(ApprovalStage.MechanicalEngineer, "自检", ApprovalAssigneeSource.Submitter),
+            new(ApprovalStage.MainDesigner, "共享审核", ApprovalAssigneeSource.Role, RoleCodes: ["Administrator"]),
+            new(ApprovalStage.StandardizationSupervisor, "末级批准", ApprovalAssigneeSource.FixedUser, "finisher")] };
+        await repository.UpdateSystemSettingsAsync(settings with { ApprovalWorkflows = settings.ApprovalWorkflows with { MaterialCodeApplication = flow } }, default);
+        var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
+        var item = Assert.Single(await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+            [new BomItemInput(1, "", "独立流程测试件", 1, "001", null, "FLOW-001", "W1", true, Brand: "TEST")], "admin", UserRole.Administrator, default));
+        var pending = Assert.Single(await service.ApplyForMaterialCodesAsync(new(ProjectId, [item.Id]), "admin", UserRole.Administrator, default)).Application!;
+        Assert.Equal(5, pending.ApprovalWorkflow!.Version);
+        Assert.Equal(ApprovalDecision.Approved, pending.ApprovalWorkflow.Nodes[0].Decision);
+        Assert.Contains("reviewer", pending.ApprovalWorkflow.Nodes[1].Assignees);
+        await repository.UpdateSystemSettingsAsync(settings, default);
+        var intermediate = await service.DecideMaterialCodeApplicationAsync(pending.Id, pending.RowVersion, true, "通过", "reviewer", UserRole.Administrator, default);
+        Assert.Equal(MaterialCodeApplicationStatus.Pending, intermediate.Application.Status);
+        Assert.Null(intermediate.Material);
+        Assert.Null(intermediate.Task);
+        Assert.Empty(await materials.ListSyncTasksAsync(default));
+        Assert.False(Assert.Single(await service.ListCodeApplicationsAsync(ProjectId, MaterialCodeApplicationStatus.Pending, "reviewer", UserRole.Administrator, default)).CanDecide);
+        await Assert.ThrowsAsync<PdmConflictException>(() => service.DecideMaterialCodeApplicationAsync(pending.Id, pending.RowVersion, true, "重复", "finisher", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.DecideMaterialCodeApplicationAsync(pending.Id, intermediate.Application.RowVersion, true, "越级", "reviewer", UserRole.Administrator, default));
+        var final = await service.DecideMaterialCodeApplicationAsync(pending.Id, intermediate.Application.RowVersion, true, "终审", "finisher", UserRole.Administrator, default);
+        Assert.Equal(MaterialCodeApplicationStatus.Approved, final.Application.Status);
+        Assert.NotNull(final.Material);
+        Assert.NotNull(final.Task);
+        Assert.All(final.Application.ApprovalWorkflow!.Nodes, node => Assert.Equal(ApprovalDecision.Approved, node.Decision));
+    }
+
+    [Fact]
+    public async Task MaterialEmergencyPolicy_RequiresConfiguredRoleAndReasonAndOnlyAdvancesCurrentNode()
+    {
+        var service = CreateService(out var materials, out var repository, out _);
+        foreach (var name in new[] { "admin", "reviewer" })
+            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), name, name, "unused", UserRole.Administrator, true), default);
+        var settings = await repository.GetSystemSettingsAsync(default);
+        var flow = MaterialCodeWorkflowDefaults.Template() with { EmergencyRoleCodes = ["Administrator"], Steps = [
+            new(ApprovalStage.MechanicalEngineer, "自检", ApprovalAssigneeSource.Submitter),
+            new(ApprovalStage.MainDesigner, "审核", ApprovalAssigneeSource.FixedUser, "reviewer"),
+            new(ApprovalStage.StandardizationSupervisor, "批准", ApprovalAssigneeSource.FixedUser, "reviewer")] };
+        await repository.UpdateSystemSettingsAsync(settings with { ApprovalWorkflows = settings.ApprovalWorkflows with { MaterialCodeApplication = flow } }, default);
+        var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
+        var item = Assert.Single(await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+            [new BomItemInput(1, "", "代批测试件", 1, "001", null, "EMERGENCY-001", "W1", true, Brand: "TEST")], "admin", UserRole.Administrator, default));
+        var app = Assert.Single(await service.ApplyForMaterialCodesAsync(new(ProjectId, [item.Id]), "admin", UserRole.Administrator, default)).Application!;
+        Assert.False(await ApprovalEmergencyPolicy.CanAsync(repository, ProjectId, [], "admin", UserRole.Administrator, default));
+        Assert.False(await ApprovalEmergencyPolicy.CanAsync(repository, ProjectId, ["Engineer"], "admin", UserRole.Administrator, default));
+        Assert.False(await ApprovalEmergencyPolicy.CanAsync(repository, ProjectId, ["Administrator"], "unknown", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.DecideMaterialCodeApplicationAsync(app.Id, app.RowVersion, true, null, "admin", UserRole.Administrator, default, emergencySubstitute: true));
+        var result = await service.DecideMaterialCodeApplicationAsync(app.Id, app.RowVersion, true, null, "admin", UserRole.Administrator, default, emergencySubstitute: true, emergencyReason: "审核人临时请假");
+        Assert.Equal(MaterialCodeApplicationStatus.Pending, result.Application.Status);
+        Assert.True(result.Application.ApprovalWorkflow!.Nodes[1].IsEmergencySubstitute);
+        Assert.Contains("审核人临时请假", result.Application.ApprovalWorkflow.Nodes[1].Comment);
+        Assert.Null(result.Application.ApprovalWorkflow.Nodes[2].Decision);
+        Assert.Empty(await materials.ListSyncTasksAsync(default));
     }
 
     private static MaterialService CreateService(out InMemoryMaterialRepository materials)

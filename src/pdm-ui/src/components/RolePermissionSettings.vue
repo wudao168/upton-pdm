@@ -35,14 +35,15 @@ const groups = computed(() => {
 })
 const moduleCount = computed(() => groups.value.length)
 const permissionCount = computed(() => props.directory.permissions.length)
-const editable = computed(() => props.canEdit && !selected.value?.isSystemAdministrator)
+const fixedPlatformRole = computed(() => selected.value?.baseRole === 'PlatformAdministrator')
+const editable = computed(() => props.canEdit && !selected.value?.isSystemAdministrator && !fixedPlatformRole.value)
 const selectedGroup = computed(() => groups.value.find(group => group.name === activeModule.value) ?? groups.value[0] ?? null)
 const draftChanged = computed(() => {
   if (!selected.value || draft.value.length !== selected.value.permissions.length) return Boolean(selected.value)
   const original = new Set(selected.value.permissions)
   return draft.value.some(code => !original.has(code))
 })
-const copySources = computed(() => roles.value.filter(role => !role.isSystemAdministrator))
+const copySources = computed(() => roles.value.filter(role => !role.isSystemAdministrator && role.baseRole !== 'PlatformAdministrator'))
 const deletable = computed(() => props.canEdit && selected.value && !selected.value.isSystem && selected.value.userCount === 0)
 const permissionCategories = [
   { key: 'view', label: '查看' },
@@ -84,17 +85,52 @@ function hasPermission(code: string) {
 }
 
 function setPermission(code: string, checked: boolean) {
+  if (!editable.value || props.pending) return
   const next = new Set(draft.value)
-  checked ? next.add(code) : next.delete(code)
-  if (checked && (code.startsWith('project.') || ['document.edit', 'bom.edit', 'bom.mechanical.edit', 'bom.electrical.edit', 'release.manage', 'approval.decide'].includes(code))) next.add('project.view')
-  if (checked && ['document.edit', 'bom.edit', 'bom.mechanical.edit', 'bom.electrical.edit', 'release.manage', 'approval.decide'].includes(code)) next.add('project.content.view')
-  if (checked && code === 'system.role.edit') next.add('system.role.view')
-  if (checked && code === 'material.manage') next.add('material.view')
-  if (!checked && code === 'project.view') [...next].filter(item => item.startsWith('project.') || ['document.edit', 'bom.edit', 'bom.mechanical.edit', 'bom.electrical.edit', 'release.manage', 'approval.decide'].includes(item)).forEach(item => next.delete(item))
-  if (!checked && code === 'project.content.view') ['document.edit', 'bom.edit', 'bom.mechanical.edit', 'bom.electrical.edit', 'release.manage', 'approval.decide'].forEach(item => next.delete(item))
-  if (!checked && code === 'system.role.view') next.delete('system.role.edit')
-  if (!checked && code === 'material.view') next.delete('material.manage')
+  if (checked) {
+    const add = (permission: string) => {
+      if (next.has(permission)) return
+      next.add(permission)
+      permissionDependencies(permission).forEach(add)
+    }
+    add(code)
+  } else {
+    const removed = new Set([code])
+    let expanded = true
+    while (expanded) {
+      expanded = false
+      for (const permission of next) {
+        if (!removed.has(permission) && permissionDependencies(permission).some(dependency => removed.has(dependency))) {
+          removed.add(permission)
+          expanded = true
+        }
+      }
+    }
+    removed.forEach(permission => next.delete(permission))
+  }
   draft.value = [...next]
+}
+
+// Keep these prerequisites aligned with RolePermissionCatalog.Normalize.
+function permissionDependencies(code: string): string[] {
+  const contentOperations = ['document.edit', 'document.recycle', 'document.lock.request-release', 'document.lock.force-release',
+    'bom.edit', 'bom.mechanical.edit', 'bom.electrical.edit', 'validation-plan.edit',
+    'drawing-review.submit', 'drawing-review.annotate', 'drawing-review.decide', 'release.manage', 'production.drawing.manage',
+    'approval.decide', 'approval.emergency-substitute', 'project.contact.edit', 'project.nameplate.edit', 'project.budget.view']
+  const result: string[] = []
+  if (code !== 'project.view' && code.startsWith('project.')) result.push('project.view')
+  if (contentOperations.includes(code) || code.startsWith('quality.')) result.push('project.content.view')
+  if (['project.budget.actual.edit', 'project.budget.edit', 'project.budget.reserve', 'project.budget.settlement.view',
+    'project.budget.settlement.edit', 'project.budget.bonus-rate.edit'].includes(code)) result.push('project.budget.view')
+  if (code === 'project.budget.settlement.edit') result.push('project.budget.settlement.view')
+  if (['program-template.submit', 'program-template.review', 'program-template.approve', 'program-template.manage'].includes(code)) result.push('program-template.view')
+  if (code === 'standard-library.manage') result.push('standard-library.view')
+  if (['material-relation.manage', 'material-relation.publish'].includes(code)) result.push('material-relation.view')
+  if (code === 'material.manage') result.push('material.apply')
+  if (code === 'material.apply') result.push('material.view')
+  if (code === 'system.role.edit') result.push('system.role.view')
+  if (code === 'system.project-permission.edit') result.push('system.project-permission.view')
+  return result
 }
 
 function setGroup(permissions: PermissionDefinition[], checked: boolean) {
@@ -116,7 +152,7 @@ function categoryPermissions(category: PermissionCategory) {
 }
 
 async function save() {
-  if (!selected.value || !editable.value) return
+  if (!selected.value || !editable.value || props.pending) return
   try {
     const directory = await props.onSave(selected.value.role, draft.value)
     const saved = directory.roles.find(role => role.role === selected.value?.role)
@@ -128,12 +164,14 @@ async function save() {
 }
 
 function openCreate() {
-  const source = selected.value && !selected.value.isSystemAdministrator ? selected.value : copySources.value[0]
+  if (!props.canEdit || props.pending) return
+  const source = copySources.value.find(role => role.role === selectedRole.value) ?? copySources.value[0]
   Object.assign(createForm, { name: '', description: '', sourceRoleCode: source?.role ?? '' })
   createDialog.value = true
 }
 
 async function createRole() {
+  if (!props.canEdit || props.pending) return
   if (!createForm.name.trim() || !createForm.sourceRoleCode) return ElMessage.warning('请填写角色名称并选择复制来源')
   try {
     const directory = await props.onCreate({ ...createForm, name: createForm.name.trim(), description: createForm.description.trim() })
@@ -145,7 +183,7 @@ async function createRole() {
 }
 
 async function deleteRole() {
-  if (!selected.value || selected.value.isSystem) return
+  if (!selected.value || !deletable.value || props.pending) return
   try {
     await ElMessageBox.confirm(`确认删除自定义角色“${selected.value.name}”？删除后无法恢复。`, '删除角色', { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' })
     const deletedRole = selected.value.role
@@ -172,7 +210,7 @@ watch(roles, value => {
       <div><div class="pdm-breadcrumb">系统管理 <span>/</span> 角色权限</div><h1>角色权限设置</h1><p>功能权限决定账号可以执行的操作，项目岗位与组织分配决定可操作的数据范围。</p></div>
     </header>
     <section class="pdm-panel pdm-role-directory" aria-label="角色列表">
-      <div v-if="canEdit" class="pdm-role-toolbar"><button type="button" class="pdm-primary-action" aria-label="复制角色新建" @click="openCreate"><CopyPlus :size="15" />复制角色新建</button></div>
+      <div v-if="canEdit" class="pdm-role-toolbar"><button type="button" class="pdm-primary-action" :disabled="pending" aria-label="复制角色新建" @click="openCreate"><CopyPlus :size="15" />复制角色新建</button></div>
       <el-table :data="roles" stripe height="100%" class="pdm-role-table" empty-text="暂无角色">
         <el-table-column prop="name" label="角色" min-width="150" />
         <el-table-column prop="role" label="编码" min-width="190" />
@@ -186,12 +224,13 @@ watch(roles, value => {
     <el-dialog v-model="permissionDialog" title="角色权限" width="min(1360px, 96vw)" class="pdm-role-permission-dialog" top="2vh">
       <template v-if="selected">
         <div class="pdm-role-overview">
-          <label><span>切换角色</span><select :value="selectedRole" @change="switchRole"><option v-for="role in roles" :key="role.role" :value="role.role">{{ role.name }}</option></select></label>
+          <label><span>切换角色</span><select :value="selectedRole" :disabled="pending" @change="switchRole"><option v-for="role in roles" :key="role.role" :value="role.role">{{ role.name }}</option></select></label>
           <label><span>角色名称</span><input :value="selected.name" readonly></label>
           <label><span>说明</span><input :value="selected.description || '—'" readonly></label>
           <label><span>角色信息</span><input :value="`${selected.isSystem ? '系统角色' : '自定义角色'} · ${selected.userCount} 个用户 · ${selected.role}`" readonly></label>
         </div>
         <p class="pdm-role-directory-note">权限模块由系统功能目录自动生成；当前共 {{ moduleCount }} 个模块、{{ permissionCount }} 项权限，后续新增模块会自动加入。</p>
+        <p class="pdm-role-directory-note">勾选操作权限会同步勾选必要的查看权限；取消查看权限会同时取消依赖它的操作。项目操作通常还需满足项目岗位授权；预算查看可由角色独立授权，审批仍按实际任务分配。</p>
         <div class="pdm-permission-layout">
           <nav class="pdm-permission-sidebar" aria-label="权限模块">
             <strong>权限分类</strong>
@@ -200,7 +239,7 @@ watch(roles, value => {
             </button>
           </nav>
           <section v-if="selectedGroup" class="pdm-permission-matrix" :aria-label="`${selectedGroup.name}权限`">
-            <header><h3>{{ selectedGroup.name }}权限</h3><div v-if="editable"><button type="button" @click="setGroup(selectedGroup.permissions, true)">全选本组</button><button type="button" @click="setGroup(selectedGroup.permissions, false)">清空</button></div></header>
+            <header><h3>{{ selectedGroup.name }}权限</h3><div v-if="editable"><button type="button" :disabled="pending" @click="setGroup(selectedGroup.permissions, true)">全选本组</button><button type="button" :disabled="pending" @click="setGroup(selectedGroup.permissions, false)">清空</button></div></header>
             <div class="pdm-permission-table-wrap">
               <table>
                 <thead><tr><th class="pdm-permission-category-heading">分类</th><th v-for="category in permissionCategories" :key="category.key">{{ category.label }}</th></tr></thead>
@@ -208,7 +247,7 @@ watch(roles, value => {
                   <th class="pdm-permission-category-cell" scope="row">{{ selectedGroup.name }}</th>
                   <td v-for="category in permissionCategories" :key="category.key">
                     <label v-for="permission in categoryPermissions(category.key)" :key="permission.code" class="pdm-permission-cell" :class="{ 'is-checked': hasPermission(permission.code) }">
-                      <input type="checkbox" :checked="hasPermission(permission.code)" :disabled="!editable" @change="setPermission(permission.code, ($event.target as HTMLInputElement).checked)">
+                      <input type="checkbox" :checked="hasPermission(permission.code)" :disabled="!editable || pending" @change="setPermission(permission.code, ($event.target as HTMLInputElement).checked)">
                       <span><strong>{{ permission.name }}<em v-if="permission.sensitive">敏感</em></strong><small>{{ permission.description || permission.code }}</small><code>{{ permission.code }}</code></span>
                     </label>
                     <span v-if="!categoryPermissions(category.key).length" class="pdm-permission-empty">—</span>
@@ -220,11 +259,11 @@ watch(roles, value => {
           <p v-else class="pdm-empty-info">当前没有可配置权限。</p>
         </div>
       </template>
-      <template #footer><button v-if="selected && !selected.isSystem && canEdit" type="button" class="pdm-danger-action" :disabled="pending || !deletable" :title="selected.userCount ? '请先调整引用该角色的用户' : '删除自定义角色'" @click="deleteRole"><Trash2 :size="15" />删除角色</button><span class="pdm-role-dialog-footer-spacer"></span><span v-if="selected && !editable" class="pdm-role-lock"><LockKeyhole :size="15" />{{ selected.isSystemAdministrator ? '系统管理员固定拥有全部权限' : '当前账号只有查看权限' }}</span><button type="button" class="pdm-secondary-action" @click="permissionDialog=false">取消</button><button v-if="editable" type="button" class="pdm-primary-action" :disabled="pending" @click="save">{{ pending ? '保存中…' : '保存并立即生效' }}</button></template>
+      <template #footer><button v-if="selected && !selected.isSystem && canEdit" type="button" class="pdm-danger-action" :disabled="pending || !deletable" :title="selected.userCount ? '请先调整引用该角色的用户' : '删除自定义角色'" @click="deleteRole"><Trash2 :size="15" />删除角色</button><span class="pdm-role-dialog-footer-spacer"></span><span v-if="selected && !editable" class="pdm-role-lock"><LockKeyhole :size="15" />{{ fixedPlatformRole ? '平台管理员使用固定管理权限，不可修改或复制' : selected.isSystemAdministrator ? '系统管理员固定拥有全部权限' : '当前账号只有查看权限' }}</span><button type="button" class="pdm-secondary-action" @click="permissionDialog=false">取消</button><button v-if="editable" type="button" class="pdm-primary-action" :disabled="pending" @click="save">{{ pending ? '保存中…' : '保存并立即生效' }}</button></template>
     </el-dialog>
 
     <el-dialog v-model="createDialog" title="复制角色新建" width="520px">
-      <div class="pdm-role-create-form"><label>角色名称<input v-model="createForm.name" maxlength="80" placeholder="请输入角色名称"></label><label>复制来源<select v-model="createForm.sourceRoleCode"><option v-for="role in copySources" :key="role.role" :value="role.role">{{ role.name }}</option></select></label><label>角色说明<textarea v-model="createForm.description" maxlength="300" rows="3" placeholder="说明该角色的职责范围"></textarea></label><small>新角色会复制来源角色的基础业务身份和权限，创建后可单独调整；系统管理员不能作为复制来源。</small></div>
+      <div class="pdm-role-create-form"><label>角色名称<input v-model="createForm.name" maxlength="80" placeholder="请输入角色名称"></label><label>复制来源<select v-model="createForm.sourceRoleCode"><option v-for="role in copySources" :key="role.role" :value="role.role">{{ role.name }}</option></select></label><label>角色说明<textarea v-model="createForm.description" maxlength="300" rows="3" placeholder="说明该角色的职责范围"></textarea></label><small>新角色会复制来源角色的基础业务身份和权限，创建后可单独调整；系统管理员和平台管理员不能作为复制来源。</small></div>
       <template #footer><button type="button" class="pdm-secondary-action" @click="createDialog=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="createRole">{{ pending ? '创建中…' : '创建角色' }}</button></template>
     </el-dialog>
   </section>

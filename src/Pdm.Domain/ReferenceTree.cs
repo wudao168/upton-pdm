@@ -14,6 +14,8 @@ public sealed record DocumentReferenceNode(
     string? CheckedOutBy,
     IReadOnlyList<DocumentReferenceNode> Children)
 {
+    public ReferenceRole Role { get; init; } = ReferenceRole.Component;
+
     public bool HasBlockingIssue => Status == ReferenceNodeStatus.Missing || Children.Any(child => child.HasBlockingIssue);
 }
 

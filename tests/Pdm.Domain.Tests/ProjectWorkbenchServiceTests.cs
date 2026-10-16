@@ -31,6 +31,61 @@ public sealed class ProjectWorkbenchServiceTests
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.GetAsync(null, "admin", UserRole.Administrator, default, "company", false, Guid.NewGuid()));
     }
 
+    private sealed class CalendarClock : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => new(2026, 10, 15, 0, 0, 0, TimeSpan.Zero);
+    }
+
+    [Theory]
+    [InlineData(7, false, true, true)]
+    [InlineData(8, false, true, false)]
+    [InlineData(-1, false, true, true)]
+    [InlineData(-1, true, true, false)]
+    [InlineData(0, true, true, true)]
+    [InlineData(7, false, false, false)]
+    public async Task CalendarSkipsUnneededDetailsButRetainsUpcomingAndOverdueDeliveryWarnings(int days, bool completed, bool deliveryStage, bool needsDetails)
+    {
+        var opl = new CountingOplRepository();
+        var time = new CalendarClock();
+        var (service, repository, planning, risks) = Setup(opl, time);
+        var project = Assert.Single(await repository.ListProjectsAsync(default));
+        var finish = new DateOnly(2026, 10, 15).AddDays(days);
+        var task = new ProjectPlanTask(Guid.NewGuid(), "交付", "Delivery", "engineer", 1, finish, finish, null, null, null, null,
+            completed ? 100 : 20, completed ? ProjectPlanTaskStatus.Completed : ProjectPlanTaskStatus.InProgress, [], 1, true, true, 0);
+        var plan = new ProjectPlan(Guid.NewGuid(), project.Id, Guid.NewGuid(), "日历计划", "Delivery", null, null,
+            finish, finish, finish, 1, [task], "admin", time.GetUtcNow(), "admin", time.GetUtcNow(), 0)
+            { ApprovalStatus = ProjectPlanApprovalStatus.Approved, Stages = [new("Delivery", "交付") { ParticipatesInDelivery = deliveryStage }] };
+        await planning.SavePlanAsync(plan, null, null, default);
+        var risk = new ProjectWorkbenchRisk(Guid.NewGuid(), project.Id, "日历风险", "交期", "admin", finish, "warning", "admin", time.GetUtcNow());
+        await risks.SaveAsync(risk, default);
+        var calendar = await service.GetAsync(null, "admin", UserRole.Administrator, default, calendarOnly: true);
+        var entry = Assert.Single(calendar.Projects);
+        Assert.Equal(plan.Tasks, entry.Plan!.Tasks);
+        Assert.Contains(calendar.Risks, item => item.Id == risk.Id);
+        Assert.Null(entry.Budget);
+        Assert.Equal(needsDetails, entry.Procurement is not null);
+        Assert.Equal(needsDetails, entry.Quality is not null);
+        Assert.Equal(0, opl.Batches);
+        if (needsDetails) Assert.DoesNotContain(entry.Warnings, warning => warning.Contains("采购跟踪") || warning.Contains("验收情况"));
+    }
+
+    [Fact]
+    public async Task CalendarRetainsDeliveryChecksForPropagatedSourcesWhenClientFiltersCanShowThemAgain()
+    {
+        var time = new CalendarClock();
+        var (service, repository, planning, _) = Setup(testClock: time);
+        var project = Assert.Single(await repository.ListProjectsAsync(default));
+        var other = await repository.CreateProjectAsync(new("CAL-OTHER", "传播任务", "admin", "vault", "release"), "admin", default);
+        var finish = new DateOnly(2026, 12, 1);
+        var task = new ProjectPlanTask(Guid.NewGuid(), "交付", "Delivery", "engineer", 1, finish, finish, null, null, null, null, 20, ProjectPlanTaskStatus.InProgress, [], 1, true, true, 0);
+        var plan = new ProjectPlan(Guid.NewGuid(), project.Id, Guid.NewGuid(), "计划", "Delivery", null, null, finish, finish, finish, 1, [task], "admin", time.GetUtcNow(), "admin", time.GetUtcNow(), 0)
+            { ApprovalStatus = ProjectPlanApprovalStatus.Approved, Stages = [new("Delivery", "交付") { ParticipatesInDelivery = true }] };
+        await planning.SavePlanAsync(plan, null, null, default);
+        await planning.SavePlanAsync(plan with { Id = Guid.NewGuid(), ProjectId = other.Id, Tasks = [task with { Id = Guid.NewGuid(), SourceTaskId = task.Id }] }, null, null, default);
+        var calendar = await service.GetAsync(null, "admin", UserRole.Administrator, default, calendarOnly: true);
+        Assert.NotNull(calendar.Projects.Single(item => item.Project.Id == project.Id).Quality);
+    }
+
     [Theory]
     [InlineData("BusinessUnitManager", "division")]
     [InlineData("ProjectManager", "manager")]
@@ -125,9 +180,9 @@ public sealed class ProjectWorkbenchServiceTests
     }
 
     private static Project Project() => new(Guid.NewGuid(), "P1", "项目", "pm", "vault", "release", true);
-    private static (ProjectWorkbenchService, InMemoryPdmRepository, InMemoryProjectPlanningRepository, InMemoryProjectWorkbenchRiskRepository) Setup(IProjectOplRepository? opl = null)
+    private static (ProjectWorkbenchService, InMemoryPdmRepository, InMemoryProjectPlanningRepository, InMemoryProjectWorkbenchRiskRepository) Setup(IProjectOplRepository? opl = null, TimeProvider? testClock = null)
     {
-        var time = TimeProvider.System; var repository = new InMemoryPdmRepository(time); var planning = new InMemoryProjectPlanningRepository();
+        var time = testClock ?? TimeProvider.System; var repository = new InMemoryPdmRepository(time); var planning = new InMemoryProjectPlanningRepository();
         var procurement = new InMemoryU9ProcurementRepository(); var materials = new InMemoryMaterialRepository(time); var risks = new InMemoryProjectWorkbenchRiskRepository();
         var service = new ProjectWorkbenchService(repository, planning, new InMemoryProjectContactInformationRepository(),
             new ProjectBudgetService(repository, new InMemoryProjectBudgetRepository(), procurement, time, materials),

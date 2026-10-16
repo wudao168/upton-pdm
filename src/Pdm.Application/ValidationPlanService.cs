@@ -309,6 +309,29 @@ public sealed class ValidationPlanService(
         return saved;
     }
 
+    public async Task<bool> CanEmergencyDecideAsync(Guid taskId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        var pending = (await validationPlans.ListPendingApprovalTasksAsync(actor, true, cancellationToken)).FirstOrDefault(task => task.Id == taskId);
+        if (pending is null) return false;
+        var plan = await validationPlans.FindPlanByIdAsync(pending.PlanId, cancellationToken);
+        var node = plan?.ApprovalTasks.FirstOrDefault(task => task.Id == taskId);
+        return node?.EmergencyRoleCodes is not null && await ApprovalEmergencyPolicy.CanAsync(repository, pending.ProjectId, node.EmergencyRoleCodes, actor, role, cancellationToken);
+    }
+
+    public async Task<ProjectValidationPlan> EmergencyDecideAsync(Guid taskId, ApprovalDecision decision, string reason, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(reason) || reason.Trim().Length > 500) throw new PdmRuleException("请填写紧急代批原因，最多500个字符。");
+        if (!await CanEmergencyDecideAsync(taskId, actor, role, cancellationToken)) throw new UnauthorizedAccessException("当前用户不属于该审批流的紧急代批角色，或无项目访问权限。");
+        var saved = await validationPlans.DecideAsync(taskId, actor, decision, $"紧急代批：{reason.Trim()}", timeProvider.GetUtcNow(), cancellationToken);
+        if (saved.State == ProjectValidationPlanState.Effective)
+        {
+            var project = await repository.FindProjectAsync(saved.ProjectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
+            await EnsureArchivedAsync(project, saved, cancellationToken);
+        }
+        await AuditAsync(actor, "project.validation-plan.emergency-decision", nameof(ValidationPlanApprovalTask), taskId, reason.Trim(), cancellationToken);
+        return saved;
+    }
+
     public async Task<ProjectValidationPlan> DecideAsync(Guid taskId, ApprovalDecision decision, string? comment, string actor, UserRole role, CancellationToken cancellationToken)
     {
         if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalDecide, cancellationToken)
@@ -360,7 +383,10 @@ public sealed class ValidationPlanService(
 
     public async Task<IReadOnlyList<PendingValidationPlanApprovalTask>> ListMyApprovalTasksAsync(string actor, UserRole role, CancellationToken cancellationToken)
     {
-        return await validationPlans.ListPendingApprovalTasksAsync(actor, false, cancellationToken);
+        var result = new List<PendingValidationPlanApprovalTask>();
+        foreach (var task in await validationPlans.ListPendingApprovalTasksAsync(actor, true, cancellationToken))
+            if (string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase) || await CanEmergencyDecideAsync(task.Id, actor, role, cancellationToken)) result.Add(task);
+        return result;
     }
 
     public async Task<UploadSession> StartAttachmentUploadAsync(Guid planId, ValidationPlanAttachmentKind kind, string fileName, long totalLength, string sha256, string actor, UserRole role, CancellationToken cancellationToken)
@@ -489,7 +515,7 @@ public sealed class ValidationPlanService(
         string? DisplayName(string? username) => string.IsNullOrWhiteSpace(username)
             ? null
             : users.FirstOrDefault(user => string.Equals(user.Username, username, StringComparison.OrdinalIgnoreCase))?.DisplayName ?? username;
-        var reviewTask = plan.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault(task => task.Stage == ApprovalStage.MainDesigner);
+        var reviewTask = plan.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault(task => task.StepOrder != 1 || task.Stage != ApprovalStage.MechanicalEngineer);
         var approvalTask = plan.ApprovalTasks.OrderByDescending(task => task.StepOrder).FirstOrDefault();
         return new(project, plan, timeProvider.GetUtcNow(),
             DisplayName(reviewTask?.DecisionBy ?? reviewTask?.Assignee ?? project.DesignLead),
@@ -643,6 +669,8 @@ public sealed class ValidationPlanService(
                 ApprovalAssigneeSource.Submitter => actor,
                 ApprovalAssigneeSource.ProjectDesignLead => project.DesignLead,
                 ApprovalAssigneeSource.FixedUser => step.FixedAssignee,
+                ApprovalAssigneeSource.FixedUnitManager => directory.Units.Any(unit => unit.Id == step.FixedUnitId && unit.IsActive)
+                    ? directory.Managers.FirstOrDefault(item => item.UnitId == step.FixedUnitId)?.PrimaryManager : null,
                 ApprovalAssigneeSource.PrimaryUnitManager or ApprovalAssigneeSource.ParentUnitManager => UnitManager(step.AssigneeSource),
                 _ => null
             };
@@ -655,7 +683,7 @@ public sealed class ValidationPlanService(
                 ? "提交验证计划即完成编制人自检"
                 : autoApproved ? "提交人为当前主设，系统自动通过" : null;
             result.Add(new ValidationPlanApprovalTask(Guid.NewGuid(), planId, index + 1, step.Stage, step.Name, assignee,
-                autoApproved ? ApprovalDecision.Approved : null, autoApproved ? actor : null, autoComment, createdAt, autoApproved ? createdAt : null));
+                autoApproved ? ApprovalDecision.Approved : null, autoApproved ? actor : null, autoComment, createdAt, autoApproved ? createdAt : null) { EmergencyRoleCodes = workflow.EmergencyRoleCodes });
         }
         return result;
     }

@@ -1,4 +1,4 @@
-﻿namespace Upton.Pdm.Api;
+namespace Upton.Pdm.Api;
 
 public sealed record SetMaterialCoverRequest(Guid? AttachmentId, long ExpectedRowVersion);
 
@@ -83,7 +83,7 @@ public sealed record ValidateBomMaterialCodesRequest(Guid ProjectId, IReadOnlyLi
 
 public sealed record ApplyMaterialCodesRequest(Guid ProjectId, IReadOnlyList<Guid> BomItemIds);
 
-public sealed record DecideMaterialCodeApplicationRequest(long ExpectedRowVersion, bool Approved, string? Comment, string? CategoryCode = null);
+public sealed record DecideMaterialCodeApplicationRequest(long ExpectedRowVersion, bool Approved, string? Comment, string? CategoryCode = null, bool EmergencySubstitute = false, string? EmergencyReason = null);
 public sealed record WithdrawMaterialCodeApplicationRequest(long ExpectedRowVersion);
 
 public sealed record RejectMaterialRequest(long ExpectedRowVersion, string? Comment);

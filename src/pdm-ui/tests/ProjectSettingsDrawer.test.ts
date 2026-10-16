@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   getProjectContentResetReadiness: vi.fn(), resetProjectContent: vi.fn(), restoreProjectContent: vi.fn(),
 }))
 vi.mock('../src/api', () => api)
+vi.mock('../src/components/ProjectDingTalkBinding.vue', () => ({ default: { template: '<section data-test="dingtalk-binding">钉钉群绑定内容</section>' } }))
 
 const target: ProjectSummary = {
   id: 'target-project', code: 'P700002', name: '新建目标项目', owner: 'admin', stage: '进行中', vaultName: 'P700002',
@@ -50,6 +51,7 @@ describe('ProjectSettingsDrawer', () => {
       } },
     })
 
+    await wrapper.findAll('[role="tab"]').find(tab => tab.text() === '项目复制')!.trigger('click')
     expect(wrapper.text()).toContain('项目复制')
     expect(wrapper.text()).toContain('验证计划检查项目')
     const sourceSelect = wrapper.findAllComponents({ name: 'ElSelect' }).find(item => item.props('placeholder') === '选择已有项目')
@@ -93,16 +95,17 @@ describe('ProjectSettingsDrawer', () => {
     })
     expect(api.getProjectContentResetReadiness).not.toHaveBeenCalled()
     const tabs = wrapper.findAll('[role="tab"]')
-    expect(tabs.map(tab => tab.text())).toEqual(['项目复制', '项目重置', '钉钉群绑定'])
+    expect(tabs.map(tab => tab.text())).toEqual(['钉钉群绑定', '项目复制', '项目重置'])
     expect(tabs[0].attributes('aria-selected')).toBe('true')
-    expect(wrapper.find('[aria-labelledby="pdm-project-copy-settings-title"]').attributes('style') ?? '').not.toContain('display: none')
+    expect(wrapper.find('[data-test="dingtalk-binding"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-labelledby="pdm-project-copy-settings-title"]').attributes('style')).toContain('display: none')
     expect(wrapper.find('[aria-labelledby="pdm-project-reset-settings-title"]').exists()).toBe(false)
 
-    await tabs[1].trigger('click')
+    await tabs[2].trigger('click')
     await flushPromises()
 
     expect(api.getProjectContentResetReadiness).toHaveBeenCalledWith(target.id, false, 'token')
-    expect(tabs[1].attributes('aria-selected')).toBe('true')
+    expect(tabs[2].attributes('aria-selected')).toBe('true')
     expect(wrapper.find('[aria-labelledby="pdm-project-copy-settings-title"]').attributes('style')).toContain('display: none')
     expect(wrapper.find('[aria-labelledby="pdm-project-reset-settings-title"]').attributes('style') ?? '').not.toContain('display: none')
     expect(wrapper.text()).toContain('存在已发布的BOM，项目内容不能重置')
@@ -110,6 +113,15 @@ describe('ProjectSettingsDrawer', () => {
     expect(wrapper.text()).toContain('误导入')
     expect(wrapper.text()).toContain('系统管理员')
     expect(wrapper.text()).not.toContain('admin')
+    await wrapper.setProps({ modelValue: false })
+    await wrapper.setProps({ modelValue: true })
+    expect(tabs[0].attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('[data-test="dingtalk-binding"]').exists()).toBe(true)
+    expect(api.getProjectContentResetReadiness).toHaveBeenCalledTimes(1)
+    await tabs[1].trigger('click')
+    await wrapper.setProps({ project: source })
+    expect(tabs[0].attributes('aria-selected')).toBe('true')
+    wrapper.unmount()
   })
 
   it('仅在阻断任务可中断时显示管理员强制重置并提交强制标记', async () => {
@@ -127,6 +139,7 @@ describe('ProjectSettingsDrawer', () => {
         ElCheckbox: { props: ['modelValue'], emits: ['update:modelValue', 'change'], template: '<label><input type="checkbox" :checked="modelValue" @change="$emit(\'update:modelValue\', $event.target.checked)" /><slot /></label>' },
       } },
     })
+    await wrapper.findAll('[role="tab"]').find(tab => tab.text() === '项目重置')!.trigger('click')
     await flushPromises()
 
     const button = wrapper.findAll('button').find(item => item.text() === '重置项目内容')!

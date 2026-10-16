@@ -25,7 +25,7 @@ internal sealed class ProjectBrowserControl : UserControl
         ForeColor = Color.White
     };
     private readonly ColumnStyle browseButtonColumn;
-    private float requestedBrowseButtonWidth = 98;
+    private float requestedBrowseButtonWidth = 96;
     private IReadOnlyList<ProjectDto> projects = Array.Empty<ProjectDto>();
     private ProjectDto selection;
     private readonly bool requireSubmissionAccess;
@@ -33,7 +33,7 @@ internal sealed class ProjectBrowserControl : UserControl
     public ProjectBrowserControl(bool matchTaskPaneProjectLayout = false, bool requireSubmissionAccess = false)
     {
         this.requireSubmissionAccess = requireSubmissionAccess;
-        AutoScaleMode = AutoScaleMode.Font;
+        AutoScaleMode = AutoScaleMode.Inherit;
         MinimumSize = new Size(120, 30);
         Height = 30;
 
@@ -61,7 +61,7 @@ internal sealed class ProjectBrowserControl : UserControl
             ColumnCount = 3,
             RowCount = 1,
             Margin = Padding.Empty,
-            Padding = matchTaskPaneProjectLayout ? new Padding(3) : Padding.Empty
+            Padding = Padding.Empty
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
@@ -73,7 +73,6 @@ internal sealed class ProjectBrowserControl : UserControl
         Controls.Add(layout);
         Layout += (_, _) =>
         {
-            layout.Padding = matchTaskPaneProjectLayout ? new Padding(3) : Padding.Empty;
             browseButtonColumn.Width = requestedBrowseButtonWidth;
         };
     }
@@ -180,7 +179,7 @@ internal sealed class ProjectBrowserControl : UserControl
 internal sealed class ProjectBrowserDialog : Form
 {
     private readonly IReadOnlyList<ProjectDto> projects;
-    private readonly TextBox search = new TextBox { Dock = DockStyle.Fill };
+    private readonly TextBox search = new TextBox { Dock = DockStyle.Fill, AutoSize = false, Margin = Padding.Empty };
     private readonly ListBox mainProjects = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false };
     private readonly ListView childProjects = new ListView
     {
@@ -209,7 +208,7 @@ internal sealed class ProjectBrowserDialog : Form
         TextAlign = ContentAlignment.MiddleLeft,
         ForeColor = Color.FromArgb(54, 76, 102)
     };
-    private readonly Button confirm = new Button { Text = "确认选择", AutoSize = true };
+    private readonly Button confirm = new Button { Text = "确认选择", AutoSize = false, Size = new Size(96, 30), Margin = Padding.Empty };
     private readonly Guid? initialProjectId;
     private readonly bool requireSubmissionAccess;
 
@@ -240,13 +239,14 @@ internal sealed class ProjectBrowserDialog : Form
         childProjects.Columns.Add("业务状态");
         childProjects.Columns.Add("存档权限");
 
-        var searchPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
-        searchPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
+        var searchPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0, 0, 0, 6) };
+        searchPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 126));
         searchPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         searchPanel.Controls.Add(new Label
         {
             Text = "搜索项目号/名称",
             Dock = DockStyle.Fill,
+            Margin = new Padding(0, 0, 6, 0),
             AutoEllipsis = true,
             TextAlign = ContentAlignment.MiddleLeft
         }, 0, 0);
@@ -258,21 +258,22 @@ internal sealed class ProjectBrowserDialog : Form
         columns.Controls.Add(BuildProjectGroup("1. 主项目", mainProjects, null), 0, 0);
         columns.Controls.Add(BuildProjectGroup("2. 图档归属（必选）", childProjects, childHint), 1, 0);
 
-        var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = true };
+        var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = false, Size = new Size(96, 30), Margin = new Padding(0, 0, 6, 0) };
         ApplyDialogButtonAppearance(confirm, Color.FromArgb(21, 126, 77), true);
         ApplyDialogButtonAppearance(cancel, Color.FromArgb(230, 126, 34), true);
         var buttons = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.RightToLeft,
-            WrapContents = false
+            WrapContents = false,
+            Margin = Padding.Empty
         };
         buttons.Controls.Add(cancel);
         buttons.Controls.Add(confirm);
 
-        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0, 6, 0, 0) };
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 198));
+        selection.Margin = new Padding(0, 0, 6, 0);
         footer.Controls.Add(selection, 0, 0);
         footer.Controls.Add(buttons, 1, 0);
 
@@ -283,10 +284,10 @@ internal sealed class ProjectBrowserDialog : Form
             ColumnCount = 1,
             RowCount = 4
         };
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         layout.Controls.Add(searchPanel, 0, 0);
         layout.Controls.Add(new Label
         {

@@ -18,7 +18,7 @@ public static class ArchiveSafety
     public static bool SameReferences(DocumentReferenceNode? previous, DocumentReferenceNode current, bool root = true)
     {
         if (previous is null) return false;
-        if (previous.DocumentId != current.DocumentId || previous.Kind != current.Kind
+        if (previous.DocumentId != current.DocumentId || previous.Kind != current.Kind || previous.Role != current.Role
             || !string.Equals(previous.FileName, current.FileName, StringComparison.OrdinalIgnoreCase)
             || !string.Equals(previous.Configuration, current.Configuration, StringComparison.Ordinal)
             || previous.Quantity != current.Quantity

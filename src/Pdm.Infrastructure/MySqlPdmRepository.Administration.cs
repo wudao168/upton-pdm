@@ -366,7 +366,7 @@ public sealed partial class MySqlPdmRepository
     private ReleaseApprovalSettings ReadApprovalWorkflows(IReadOnlyDictionary<string, string> values)
     {
         if (!values.TryGetValue("release_approval_workflows", out var value) || string.IsNullOrWhiteSpace(value))
-            return ReleaseApprovalSettings.Default;
+            return ReleaseApprovalSettings.UseOrganizationHierarchy(null);
         try
         {
             return ReleaseApprovalSettings.UseOrganizationHierarchy(
@@ -374,7 +374,7 @@ public sealed partial class MySqlPdmRepository
         }
         catch (JsonException)
         {
-            return ReleaseApprovalSettings.Default;
+            return ReleaseApprovalSettings.UseOrganizationHierarchy(null);
         }
     }
 

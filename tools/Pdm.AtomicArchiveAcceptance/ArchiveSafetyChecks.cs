@@ -42,9 +42,14 @@ internal static class ArchiveSafetyChecks
             var b=await Reserve("MODEL-B",DocumentKind.Part);
             var drawing=await Reserve("DRAWING",DocumentKind.Drawing,a.Id);
             var aFile=await Upload(a,batch,"model-a");var bFile=await Upload(b,batch,"model-b");var drawingFile=await Upload(drawing,batch,"drawing-a");
-            var receipt=await workflow.CheckInBatchAsync(batch,"first","qa",UserRole.Administrator,session,[Input(a,aFile,[]),Input(b,bFile,[]),Input(drawing,drawingFile,[Node(a)])],default);
+            var firstInputs=new[]{Input(a,aFile,[]),Input(b,bFile,[]),Input(drawing,drawingFile,[Node(a) with {Revision=null}])};
+            var receipt=await workflow.CheckInBatchAsync(batch,"first","qa",UserRole.Administrator,session,firstInputs,default);
             Require(receipt.FollowupPending,"follow-up was not committed with receipt");
             var first=receipt.Results.Single(result=>result.Document.Id==drawing.Id).Version!;
+            Require(first.ReferenceSnapshot.Children.Single().Revision?.Display=="W1","same-batch missing revision was not bound to the real child commit");
+            var firstReplay=await workflow.CheckInBatchAsync(batch,"first","qa",UserRole.Administrator,session,firstInputs,default);
+            Require(firstReplay.Results.Single(result=>result.Document.Id==drawing.Id).Version!.Id==first.Id
+                &&(await repository.ListDocumentVersionsAsync(a.Id,default)).Count==1,"same-batch replay created another child version");
             Require((await repository.ListDocumentRelationsAsync(project.Id,default)).Single().ModelDocumentId==a.Id,"pending model relation missing");
             Console.WriteLine("PASS MySQL same-batch pending model registration and atomic upload adoption");
 

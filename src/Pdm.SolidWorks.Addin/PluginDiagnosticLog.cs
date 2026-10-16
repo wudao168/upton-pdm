@@ -43,6 +43,8 @@ internal static class PluginDiagnosticLog
         report.AppendLine("UPLM SolidWorks 插件诊断日志");
         report.AppendLine("导出时间：" + DateTimeOffset.Now.ToString("O"));
         report.AppendLine("插件版本：" + version);
+        report.AppendLine("实际加载的插件文件：" + typeof(PdmAddin).Assembly.Location);
+        report.AppendLine("运行程序集标识：" + typeof(PdmAddin).Assembly.ManifestModule.ModuleVersionId.ToString("D"));
         report.AppendLine("系统：" + Environment.OSVersion + "；进程位数：" + (Environment.Is64BitProcess ? "64" : "32"));
         report.AppendLine("请补充：发生时间、项目号、图档名、操作步骤和实际现象。");
         report.AppendLine("\r\n===== 本次运行的操作记录 =====\r\n" + Snapshot());

@@ -1,4 +1,4 @@
-﻿using System.IO.Compression;
+using System.IO.Compression;
 using System.Xml.Linq;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
@@ -28,6 +28,99 @@ public sealed class ValidationPlanServiceTests
             Assert.False(await QualityUploadPolicy.CanAsync(repository, Guid.NewGuid(), kind, "quality-role", definition.BaseRole, default));
         }
     }
+    [Fact]
+    public async Task EmergencyApproval_UsesTaskPolicyAndKeepsFollowingNodePending()
+    {
+        var (service, plans, repository, _, project) = await CreateFixtureAsync();
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "admin", "管理员", "unused", UserRole.Administrator, true), default);
+        var draft = await service.SavePlanAsync(project.Id,
+            new("管理员", new DateOnly(2026, 10, 15), [new(null, "测试紧急审核", "内部评审", null, null, null, null, null, 1)]),
+            "admin", UserRole.Administrator, default);
+        var first = new ValidationPlanApprovalTask(Guid.NewGuid(), draft.Id, 1, ApprovalStage.MainDesigner, "审核", "engineer", null, null, null, DateTimeOffset.UtcNow, null) { EmergencyRoleCodes = ["Administrator"] };
+        var last = first with { Id = Guid.NewGuid(), StepOrder = 2, StepName = "批准", EmergencyRoleCodes = [] };
+        await plans.SubmitAsync(draft.Id, draft.RowVersion, "validation-plan", 1, [first, last], "admin", DateTimeOffset.UtcNow, default);
+        Assert.True(await service.CanEmergencyDecideAsync(first.Id, "admin", UserRole.Administrator, default));
+        Assert.False(await service.CanEmergencyDecideAsync(last.Id, "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.EmergencyDecideAsync(first.Id, ApprovalDecision.Approved, "", "admin", UserRole.Administrator, default));
+        var result = await service.EmergencyDecideAsync(first.Id, ApprovalDecision.Approved, "审批人出差", "admin", UserRole.Administrator, default);
+        Assert.Equal(ProjectValidationPlanState.PendingApproval, result.State);
+        Assert.Equal("admin", result.ApprovalTasks[0].DecisionBy);
+        Assert.Contains("审批人出差", result.ApprovalTasks[0].DecisionComment);
+        Assert.Null(result.ApprovalTasks[1].Decision);
+        Assert.False(await service.CanEmergencyDecideAsync(last.Id, "admin", UserRole.Administrator, default));
+    }
+
+    [Fact]
+    public async Task ConfigurableWorkflow_PreservesSourcesAndCreatesAFrozenOrderedApprovalChain()
+    {
+        var (service, plans, repository, storage, project) = await CreateFixtureAsync();
+        foreach (var name in new[] { "admin", "reviewer", "manager", "final" })
+            if (await repository.FindUserAsync(name, default) is null)
+                await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), name, name, "unused", UserRole.Engineer, true), default);
+        var directory = await repository.GetOrganizationDirectoryAsync(default);
+        var company = directory.Organizations.First();
+        var unit = await repository.SaveOrganizationUnitAsync(new(null, company.Id, null, "VALID", "验证部门", OrganizationUnitKind.Department, true, 1, true), default);
+        await repository.SetOrganizationMembershipsAsync("manager", [unit.Id], unit.Id, default);
+        await repository.SetOrganizationUnitManagersAsync(unit.Id, "manager", [], default);
+        var workflow = new PdmWorkflowService(repository, storage, new UnusedWorkflowPublisher(), TimeProvider.System);
+        var settings = await repository.GetSystemSettingsAsync(default);
+        var configured = settings.ApprovalWorkflows.ValidationPlan! with { Steps = [
+            new(ApprovalStage.MechanicalEngineer, "编制人自检", ApprovalAssigneeSource.Submitter),
+            new(ApprovalStage.HardwareSupervisor, "指定审核员", ApprovalAssigneeSource.FixedUser, "reviewer"),
+            new(ApprovalStage.MechanicalSupervisor, "验证部门批准", ApprovalAssigneeSource.FixedUnitManager, FixedUnitId: unit.Id),
+            new(ApprovalStage.MainDesigner, "最终复核", ApprovalAssigneeSource.FixedUser, "final")] };
+        var savedSettings = await workflow.UpdateSystemSettingsAsync(settings with { ApprovalWorkflows = settings.ApprovalWorkflows with { ValidationPlan = configured } }, "admin", UserRole.Administrator, default);
+        var restored = await repository.GetSystemSettingsAsync(default);
+        Assert.Equal(configured.Steps, restored.ApprovalWorkflows.ValidationPlan!.Steps);
+        Assert.Equal(settings.ApprovalWorkflows.Standard!.Version, restored.ApprovalWorkflows.Standard!.Version);
+        Assert.Equal(settings.ApprovalWorkflows.Standard.Steps, restored.ApprovalWorkflows.Standard.Steps);
+        Assert.Equal(settings.ApprovalWorkflows.Electrical.Steps, restored.ApprovalWorkflows.Electrical.Steps);
+        var plan = await service.SavePlanAsync(project.Id, new("编制人", new DateOnly(2026, 10, 15),
+            [new(null, "检查配置审批", "内部评审", null, null, null, null, null, 1)]), "admin", UserRole.Administrator, default);
+        var submitted = await service.SubmitAsync(project.Id, plan.RowVersion, "admin", UserRole.Administrator, default);
+        Assert.Equal(new[] { "admin", "reviewer", "manager", "final" }, submitted.ApprovalTasks.Select(task => task.Assignee));
+        Assert.Equal(new[] { 1, 2, 3, 4 }, submitted.ApprovalTasks.Select(task => task.StepOrder));
+        Assert.Equal(ApprovalDecision.Approved, submitted.ApprovalTasks[0].Decision);
+        Assert.Equal(savedSettings.ApprovalWorkflows.ValidationPlan!.Version, submitted.WorkflowVersion);
+        var exported = await service.PrepareExportAsync(project.Id, "admin", UserRole.Administrator, default);
+        Assert.Equal("reviewer", exported.ReviewPerson);
+        Assert.Equal("final", exported.ApprovalPerson);
+        await workflow.UpdateSystemSettingsAsync(restored with { ApprovalWorkflows = restored.ApprovalWorkflows with {
+            ValidationPlan = configured with { Steps = [configured.Steps[0], configured.Steps[3]] } } }, "admin", UserRole.Administrator, default);
+        var pending = (await plans.FindPlanAsync(project.Id, default))!;
+        Assert.Equal(4, pending.ApprovalTasks.Count);
+        Assert.Equal(submitted.WorkflowVersion, pending.WorkflowVersion);
+        foreach (var task in submitted.ApprovalTasks.Skip(1))
+            pending = await service.DecideAsync(task.Id, ApprovalDecision.Approved, "同意", task.Assignee, UserRole.Engineer, default);
+        Assert.Equal(ProjectValidationPlanState.Effective, pending.State);
+    }
+
+    [Fact]
+    public async Task ConfigurableWorkflow_RejectsInvalidNodeCountsSelfCheckAndMissingTargets()
+    {
+        var (_, _, repository, storage, _) = await CreateFixtureAsync();
+        var workflow = new PdmWorkflowService(repository, storage, new UnusedWorkflowPublisher(), TimeProvider.System);
+        var settings = await repository.GetSystemSettingsAsync(default);
+        var template = settings.ApprovalWorkflows.ValidationPlan!;
+        var invalid = new[] {
+            template with { Steps = [template.Steps[0]] },
+            template with { Steps = [template.Steps[0] with { AssigneeSource = ApprovalAssigneeSource.ProjectDesignLead }, template.Steps[1]] },
+            template with { Steps = [template.Steps[0], template.Steps[1] with { AssigneeSource = ApprovalAssigneeSource.FixedUser, FixedAssignee = "missing-reviewer" }] },
+            template with { Steps = [template.Steps[0], template.Steps[1] with { AssigneeSource = ApprovalAssigneeSource.FixedUnitManager, FixedUnitId = Guid.NewGuid() }] }
+        };
+        foreach (var value in invalid)
+            await Assert.ThrowsAsync<PdmRuleException>(() => workflow.UpdateSystemSettingsAsync(settings with {
+                ApprovalWorkflows = settings.ApprovalWorkflows with { ValidationPlan = value } }, "admin", UserRole.Administrator, default));
+    }
+
+    private sealed class UnusedWorkflowPublisher : IReleasePackagePublisher
+    {
+        public Task PrepareAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task DiscardDraftAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task ValidateAsync(ReleasePackage package, Project project, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<ReleasePublication> PublishAsync(ReleasePackage package, Project project, IReadOnlyList<ReleasePreviewSource> sources, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
     [Fact]
     public async Task QualityAcceptance_IsIndependentFromValidationPlan()
     {

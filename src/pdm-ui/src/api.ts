@@ -377,6 +377,7 @@ interface ApiBomItem {
   surfaceTreatment?: string | null
   heatTreatment?: string | null
   weight?: string | null
+  inventoryReplacementMaterialCode?: string | null
   isWearPart?: boolean
   impactStage?: string | null
   revision: string
@@ -991,8 +992,8 @@ export async function listMaterialCodeApplications(token: string, projectId?: st
   })
 }
 
-export function decideMaterialCodeApplication(applicationId: string, expectedRowVersion: number, approved: boolean, comment: string, token: string, categoryCode?: string): Promise<MaterialCodeDecisionResult> {
-  return requestJson(`/api/material-code/applications/${applicationId}/decision`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, approved, comment, categoryCode }) }, token)
+export function decideMaterialCodeApplication(applicationId: string, expectedRowVersion: number, approved: boolean, comment: string, token: string, categoryCode?: string, emergencySubstitute = false, emergencyReason?: string): Promise<MaterialCodeDecisionResult> {
+  return requestJson(`/api/material-code/applications/${applicationId}/decision`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, approved, comment, categoryCode, emergencySubstitute, emergencyReason }) }, token)
 }
 
 export function withdrawMaterialCodeApplication(applicationId: string, expectedRowVersion: number, token: string): Promise<MaterialCodeApplication> {
@@ -1083,7 +1084,7 @@ export function getU9MaterialFullSyncStatus(token: string): Promise<U9MaterialFu
   return requestJson<U9MaterialFullSyncStatusResponse>('/api/u9-material-full-sync/status', {}, token)
 }
 
-export function listMaterialInventory(filters: U9InventoryFilters, token: string): Promise<U9InventoryPage> {
+export function listMaterialInventory(filters: U9InventoryFilters, token: string, signal?: AbortSignal): Promise<U9InventoryPage> {
   const params = new URLSearchParams()
   if (filters.similarSpecification !== undefined) params.set('similarSpecification', filters.similarSpecification.trim())
   if (filters.materialCode?.trim()) params.set('materialCode', filters.materialCode.trim())
@@ -1096,7 +1097,7 @@ export function listMaterialInventory(filters: U9InventoryFilters, token: string
   params.set('positiveStockOnly', String(filters.positiveStockOnly ?? true))
   params.set('page', String(filters.page ?? 1))
   params.set('pageSize', String(filters.pageSize ?? 50))
-  return requestJson<U9InventoryPage>(`/api/material-inventory?${params.toString()}`, {}, token)
+  return requestJson<U9InventoryPage>(`/api/material-inventory?${params.toString()}`, { signal }, token)
 }
 
 export function refreshMaterialInventory(materialCode: string, token: string): Promise<U9InventoryPage> {
@@ -1260,6 +1261,25 @@ export async function downloadDocumentPreviewFile(documentId: string, versionId:
   anchor.download = fileName
   anchor.click()
   URL.revokeObjectURL(url)
+}
+
+export async function downloadProductionDrawingFile(item: ProductionDrawingItem, format: 'Pdf' | 'Step', token: string,
+  progress?: DownloadProgress, model?: { documentId: string; versionId?: string | null; drawingNumber: string }): Promise<void> {
+  const query = new URLSearchParams()
+  if (format === 'Step') {
+    if (!model?.versionId) throw new Error('该图纸没有可用的同包正式 STEP。')
+    query.set('modelDocumentId', model.documentId)
+    query.set('modelVersionId', model.versionId)
+  }
+  const fileName = `${format === 'Step' ? model!.drawingNumber : item.drawingNumber}.${format === 'Step' ? 'step' : 'pdf'}`
+  const handle = await chooseDownloadFile(fileName)
+  const response = await fetch(`${apiBase}/api/production-drawings/${item.documentId}/versions/${item.versionId}/preview?${query}`,
+    { headers: authenticatedHeaders(token), cache: 'no-store' })
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { detail?: string; message?: string } | null
+    throw new PdmApiError(body?.detail || body?.message || `生产图纸下载失败（${response.status}），请刷新后重试。`, response.status)
+  }
+  await saveDownload(await receiveDownload(response, progress ?? (() => {})), fileName, handle)
 }
 
 export function compareDocumentVersions(documentId: string, left: string, right: string, token: string): Promise<DocumentVersionComparison> {
@@ -2014,6 +2034,12 @@ export async function readProjectWorkbench(view: string, token: string, scope = 
   return { ...data, projects: data.projects.map(item => ({ ...item, project: mapProject(item.project) })) }
 }
 
+export async function readProjectCalendar(token: string, signal?: AbortSignal): Promise<import('./projectWorkbench').WorkbenchData> {
+  type Data = import('./projectWorkbench').WorkbenchData
+  const data = await requestJson<Omit<Data, 'projects'> & { projects: Array<Omit<Data['projects'][number], 'project'> & { project: ApiProject }> }>('/api/project-calendar', { signal }, token)
+  return { ...data, projects: data.projects.map(item => ({ ...item, project: mapProject(item.project) })) }
+}
+
 export function registerWorkbenchRisk(projectId: string, input: { title: string; impact: string; owner: string; dueDate: string; severity: string }, token: string): Promise<import('./projectWorkbench').WorkbenchRisk> {
   return requestJson(`/api/projects/${projectId}/risks`, { method: 'POST', body: JSON.stringify(input) }, token)
 }
@@ -2625,6 +2651,7 @@ function mapBomItem(item: ApiBomItem): BomItem {
     heatTreatment: item.heatTreatment ?? undefined,
     weight: item.weight ?? undefined,
     isWearPart: item.isWearPart ?? false,
+    inventoryReplacementMaterialCode: item.inventoryReplacementMaterialCode ?? undefined,
     impactStage: item.impactStage === 'Assembly' || item.impactStage === 'Commissioning' ? item.impactStage : undefined,
     revision: item.revision,
     complete: item.isComplete,
@@ -2905,4 +2932,14 @@ export function readQualityUploadAccess(projectId: string, token: string): Promi
 
 export function saveAssessmentLaborRates(projectId: string, input: { rates: Record<string, number | null>; expectedRowVersion: number }, token: string): Promise<import('./projectBudget').AssessmentDirectory> {
   return requestJson(`/api/projects/${projectId}/budget/assessments/labor-rates`, { method: 'PUT', body: JSON.stringify(input) }, token)
+}
+
+export function getApprovalEmergencyCapability(taskId: string, token: string): Promise<{ canDecide: boolean }> {
+  return requestJson(`/api/approval-tasks/${taskId}/emergency-capability`, {}, token)
+}
+export function getValidationEmergencyCapability(taskId: string, token: string, scope = ''): Promise<{ canDecide: boolean }> {
+  return requestJson(`/api${scope}/validation-plan-approval-tasks/${taskId}/emergency-capability`, {}, token)
+}
+export function emergencyDecideValidationPlan(taskId: string, decision: 'Approved' | 'Rejected', reason: string, token: string, scope = ''): Promise<ProjectValidationPlan> {
+  return requestJson(`/api${scope}/validation-plan-approval-tasks/${taskId}/emergency-decision`, { method: 'POST', body: JSON.stringify({ decision: decision === 'Approved' ? 0 : 1, reason }) }, token)
 }

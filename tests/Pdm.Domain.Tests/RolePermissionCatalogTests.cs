@@ -97,4 +97,19 @@ public sealed class RolePermissionCatalogTests
         Assert.Contains(PermissionCodes.MaterialApply, normalized);
         Assert.Contains(PermissionCodes.MaterialView, normalized);
     }
+
+    [Theory]
+    [InlineData(PermissionCodes.DocumentRecycle)]
+    [InlineData(PermissionCodes.ProductionDrawingManage)]
+    [InlineData(PermissionCodes.ApprovalEmergencySubstitute)]
+    public void Normalize_ProjectOperationIncludesRequiredReadPermissions(string permission)
+    {
+        var normalized = RolePermissionCatalog.Normalize(UserRole.ProductionViewer, [permission]);
+
+        Assert.Equal(3, normalized.Count);
+        Assert.Contains(permission, normalized);
+        Assert.Contains(PermissionCodes.ProjectView, normalized);
+        Assert.Contains(PermissionCodes.ProjectContentView, normalized);
+        Assert.True(normalized.SetEquals(RolePermissionCatalog.Normalize(UserRole.ProductionViewer, normalized)));
+    }
 }

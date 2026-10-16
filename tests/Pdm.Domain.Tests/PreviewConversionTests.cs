@@ -13,6 +13,29 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class PreviewConversionTests
 {
+    [Fact]
+    public async Task FailedReentryPreservesExistingPreviewAndCorruptArtifactCanBeRestored()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-preview-reentry", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var (repository, project, sources, package, staging) = await PrepareAsync(root,
+                new PreviewConversionSettings { Mode = PreviewConversionMode.Remote, AgentUrl = "http://agent:5199", TimeoutMinutes = 7 });
+            var converter = new SolidWorksServerPreviewConverter(Options.Create(new PdmPreviewWorkerOptions()), repository, new HttpClient(new StubAgentHandler()));
+            var artifacts = await converter.GenerateAsync(package, project, sources, staging, default);
+            var first = artifacts[sources[0].DocumentId];
+            var existing = Path.Combine(project.VaultLocation, first.StorageRelativePath);
+            var original = await File.ReadAllBytesAsync(existing);
+            await Assert.ThrowsAsync<PdmConflictException>(() => converter.GenerateAsync(package, project,
+                sources.Select(source => source with { Sha256 = new string('0', 64) }).ToArray(), staging, default));
+            Assert.Equal(original, await File.ReadAllBytesAsync(existing));
+            await File.WriteAllTextAsync(existing, "corrupt");
+            await converter.GenerateAsync(package, project, sources, staging, default, keepExistingPreviews: true);
+            Assert.Equal(original, await File.ReadAllBytesAsync(existing));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
@@ -88,7 +111,7 @@ public sealed class PreviewConversionTests
             var vaultPreview = Path.Combine(project.VaultLocation, artifacts[sources[0].DocumentId].StorageRelativePath);
             Assert.True(File.Exists(vaultPreview));
             Assert.Equal(agent.Payload, Encoding.UTF8.GetString(await File.ReadAllBytesAsync(vaultPreview)));
-            Assert.True(File.Exists(Path.Combine(staging, "previews", Path.GetFileName(vaultPreview))));
+            Assert.True(File.Exists(Path.Combine(staging, "previews", artifacts[sources[0].DocumentId].Sha256, Path.GetFileName(vaultPreview))));
         }
         finally
         {

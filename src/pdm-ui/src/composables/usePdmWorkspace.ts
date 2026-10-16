@@ -1148,9 +1148,10 @@ export function usePdmWorkspace() {
   }
 
   async function requestMaterialCodeApprovalTasks() {
-    return hasPermission('approval.decide')
-      ? listMaterialCodeApplications(accessToken, undefined, 'Pending')
-      : []
+    if (!hasPermission('project.view')) return []
+    const applications = await listMaterialCodeApplications(accessToken, undefined, 'Pending')
+    return applications.filter(application => application.canDecide === true || application.canEmergencyDecide
+      || application.canDecide == null && hasPermission('approval.decide'))
   }
 
   async function requestMaterialSyncTasks() {

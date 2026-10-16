@@ -1,4 +1,4 @@
-﻿using Upton.Pdm.Domain;
+using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
 
@@ -319,7 +319,8 @@ public interface IMaterialRepository
     Task<MaterialCodeApplication?> FindMaterialCodeApplicationAsync(Guid applicationId, CancellationToken cancellationToken);
     Task<MaterialCodeApplication?> FindPendingMaterialCodeApplicationByBomItemAsync(Guid bomItemId, CancellationToken cancellationToken);
     Task<MaterialCodeApplication> CreateMaterialCodeApplicationAsync(MaterialCodeApplication application, CancellationToken cancellationToken);
-    Task<MaterialCodeApplication> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApplicationStatus status, string actor, string? comment, Guid? materialId, string? materialCode, DateTimeOffset decidedAt, CancellationToken cancellationToken);
+    Task<MaterialCodeApplication> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApplicationStatus status, string actor, string? comment, Guid? materialId, string? materialCode, DateTimeOffset decidedAt, CancellationToken cancellationToken, MaterialCodeApprovalSnapshot? approvalWorkflow = null);
+    Task<MaterialCodeApplication> AdvanceMaterialCodeApprovalAsync(Guid applicationId, long expectedRowVersion, MaterialCodeApprovalSnapshot approvalWorkflow, CancellationToken cancellationToken);
     Task RecordMaterialCodeApplicationWorkflowAsync(Guid applicationId, MaterialCodeWorkflowState state, string actor, DateTimeOffset occurredAt, string detail, CancellationToken cancellationToken);
     Task<bool> HasMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken);
     Task<int> CountMaterialReferencesAsync(Guid materialId, CancellationToken cancellationToken);

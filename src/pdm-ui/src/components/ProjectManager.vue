@@ -47,6 +47,7 @@ const responsibleFilter = ref('')
 const executionUnitFilter = ref('')
 const organizationFilter = ref('')
 const selectedDivisionId = ref('')
+const unassignedDivisionId = '__unassigned__'
 const collapsedOrganizations = ref(new Set<string>())
 const projectOrganizationGroups = computed(() => props.numberingOptions.organizations.map(organization => ({
   ...organization,
@@ -109,7 +110,9 @@ const childrenByParent = computed(() => {
 const normalizedProjectQuery = computed(() => projectQuery.value.trim().toLocaleLowerCase())
 function matchesProject(project: ProjectSummary) {
   if (organizationFilter.value && project.organizationId !== organizationFilter.value) return false
-  if (selectedDivisionId.value) {
+  if (selectedDivisionId.value === unassignedDivisionId) {
+    if (project.executionUnitId || project.executionUnitName?.trim()) return false
+  } else if (selectedDivisionId.value) {
     const division = props.organizationDirectory.units.find(unit => unit.id === selectedDivisionId.value)
     if (project.executionUnitId ? project.executionUnitId !== selectedDivisionId.value : project.executionUnitName !== division?.name) return false
   }
@@ -324,6 +327,7 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
             </div>
             <div v-show="!collapsedOrganizations.has(organization.id)" role="group">
               <button v-for="division in organization.divisions" :key="division.id" type="button" role="treeitem" class="pdm-project-classification__division" :aria-selected="selectedDivisionId === division.id" :class="{ 'is-active': selectedDivisionId === division.id }" @click="selectProjectOrganization(organization.id, division.id)">{{ division.name }}</button>
+              <button type="button" role="treeitem" class="pdm-project-classification__division pdm-project-classification__unassigned" :aria-selected="organizationFilter === organization.id && selectedDivisionId === unassignedDivisionId" :class="{ 'is-active': organizationFilter === organization.id && selectedDivisionId === unassignedDivisionId }" @click="selectProjectOrganization(organization.id, unassignedDivisionId)">待分配</button>
             </div>
           </div>
         </div>

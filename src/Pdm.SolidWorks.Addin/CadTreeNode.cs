@@ -23,6 +23,12 @@ internal enum CadReferenceStatus
     Missing
 }
 
+internal enum CadReferenceRole
+{
+    Component,
+    ExternalFileDependency
+}
+
 internal enum CadWorkState
 {
     None,
@@ -55,6 +61,11 @@ internal sealed class CadTreeNode
     public string FileName { get; set; } = string.Empty;
 
     public string FullPath { get; set; } = string.Empty;
+
+    // The native reference spelling can differ from the verified local working-copy path.
+    public string SourceReferencePath { get; set; } = string.Empty;
+
+    public CadReferenceRole Role { get; set; }
 
     public string DisplayName { get; set; } = string.Empty;
 

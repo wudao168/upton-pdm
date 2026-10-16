@@ -46,8 +46,8 @@ internal sealed class ProjectDocumentsControl : UserControl
     private const int ExpanderSize = 9;
     private static readonly Color InputBorderColor = Color.FromArgb(122, 122, 122);
     private readonly ProjectBrowserControl projectSelector = new ProjectBrowserControl();
-    private readonly Button openLatest = CreateButton("查看最新版（只读）");
-    private readonly Button openEdit = CreateButton("检出并编辑");
+    private readonly Button openLatest = CreateButton("打开最新");
+    private readonly Button openEdit = CreateButton("获取编辑");
     private readonly TreeView tree = new TreeView();
     private readonly Panel treeSurface = new Panel();
     private readonly ImageList structureImages = PdmTaskPaneControl.BuildStructureImages();
@@ -68,7 +68,7 @@ internal sealed class ProjectDocumentsControl : UserControl
         Dock = DockStyle.Fill;
         BackColor = Color.FromArgb(244, 247, 251);
 
-        var projectPanel = new Panel { Dock = DockStyle.Top, Height = 126, BackColor = BackColor, Padding = new Padding(3, 5, 3, 5) };
+        var projectPanel = new Panel { Dock = DockStyle.Top, Height = 126, BackColor = BackColor, Padding = new Padding(3, 6, 3, 6) };
         var projectLabel = new Label
         {
             Text = "项目工作区",
@@ -80,7 +80,7 @@ internal sealed class ProjectDocumentsControl : UserControl
         };
         var workflow = new Label
         {
-            Text = "选择项目 → 选择图档 → 查看或检出编辑 → 保存后到“设计树”签入",
+            Text = "选择项目和图档；编辑保存后到“设计树”存档。",
             Dock = DockStyle.Fill,
             ForeColor = Color.FromArgb(90, 107, 128),
             AutoEllipsis = true,
@@ -103,20 +103,26 @@ internal sealed class ProjectDocumentsControl : UserControl
         openLatest.Dock = DockStyle.Fill;
         openLatest.Margin = Padding.Empty;
         openLatest.Click += (_, _) => Raise(ControlledOpenMode.LatestReadOnly);
+        toolTip.SetToolTip(openLatest, "打开所选图档的最新版本，保持只读状态");
+        openLatest.AccessibleName = "打开最新版本（只读）";
         openEdit.Dock = DockStyle.Fill;
         openEdit.Margin = Padding.Empty;
         openEdit.Click += (_, _) => Raise(ControlledOpenMode.LatestEdit);
+        toolTip.SetToolTip(openEdit, "获取所选图档的编辑权限并打开最新版本");
         var projectActions = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 3,
+            ColumnCount = 7,
             RowCount = 1,
-            Margin = new Padding(0, 3, 0, 0),
+            Margin = new Padding(0, 6, 0, 0),
             Padding = Padding.Empty
         };
-        projectActions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        projectActions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
-        projectActions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        for (var column = 0; column < 7; column++)
+        {
+            projectActions.ColumnStyles.Add(column % 2 == 0
+                ? new ColumnStyle(SizeType.Percent, 25)
+                : new ColumnStyle(SizeType.Absolute, 6));
+        }
         projectActions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         projectActions.Controls.Add(openLatest, 0, 0);
         projectActions.Controls.Add(openEdit, 2, 0);
@@ -132,12 +138,27 @@ internal sealed class ProjectDocumentsControl : UserControl
         projectLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         projectLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
         projectLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-        projectLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        projectLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        projectLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        projectLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         projectLayout.Controls.Add(projectLabel, 0, 0);
         projectLayout.Controls.Add(workflow, 0, 1);
         projectLayout.Controls.Add(projectSelector, 0, 2);
         projectLayout.Controls.Add(projectActions, 0, 3);
+        projectActions.Layout += (_, _) =>
+        {
+            var minimumWidth = Math.Max(TextRenderer.MeasureText(openLatest.Text, openLatest.Font).Width, TextRenderer.MeasureText(openEdit.Text, openEdit.Font).Width) + 4;
+            var gap = (int)Math.Round(projectActions.ColumnStyles[1].Width);
+            var span = (projectActions.ClientSize.Width - 3 * gap) / 4 < minimumWidth ? 3 : 1;
+            if (projectActions.GetColumnSpan(openLatest) != span)
+            {
+                projectActions.SuspendLayout();
+                projectActions.SetColumnSpan(openLatest, span);
+                projectActions.SetColumn(openEdit, span == 3 ? 4 : 2);
+                projectActions.SetColumnSpan(openEdit, span);
+                projectActions.ResumeLayout();
+            }
+            projectSelector.BrowseButtonWidth = Math.Max(minimumWidth, (projectActions.ClientSize.Width - 3 * gap) / 4);
+        };
         projectPanel.Controls.Add(projectLayout);
 
         tree.Dock = DockStyle.Fill;
@@ -339,13 +360,15 @@ internal sealed class ProjectDocumentsControl : UserControl
             && !node.DrawingReviewLocked;
 
         openLatest.Enabled = canOpen;
-        openLatest.Text = "查看最新版（只读）";
+        openLatest.Text = "打开最新";
         openLatest.UseVisualStyleBackColor = false;
         openLatest.BackColor = canOpen ? Color.FromArgb(21, 126, 77) : Color.FromArgb(224, 228, 233);
         openLatest.ForeColor = canOpen ? Color.White : Color.FromArgb(145, 151, 159);
         openLatest.FlatAppearance.BorderColor = Color.FromArgb(31, 49, 72);
         openLatest.FlatAppearance.BorderSize = 1;
-        openEdit.Text = checkedOutByMe ? "继续编辑" : node?.CheckoutSessionLost == true ? "重新获取编辑权限" : "检出并编辑";
+        openEdit.Text = checkedOutByMe ? "继续编辑" : node?.CheckoutSessionLost == true ? "恢复编辑" : "获取编辑";
+        openEdit.AccessibleName = openEdit.Text;
+        toolTip.SetToolTip(openEdit, checkedOutByMe ? "继续编辑当前已获取权限的图档" : node?.CheckoutSessionLost == true ? "重新获取所选图档的编辑权限" : "获取所选图档的编辑权限并打开最新版本");
         openEdit.Enabled = canEdit;
         openEdit.UseVisualStyleBackColor = false;
         openEdit.BackColor = canEdit ? Color.FromArgb(31, 49, 72) : Color.FromArgb(224, 228, 233);
@@ -398,7 +421,7 @@ internal sealed class ProjectDocumentsControl : UserControl
         }
         else if (!string.Equals(current, latest, StringComparison.OrdinalIgnoreCase))
         {
-            SetSelectionMessage(string.Concat("本地 ", current, "，PLM最新 ", latest), "打开时将获取最新版；要修改请选择“检出并编辑”", Color.FromArgb(174, 94, 0));
+            SetSelectionMessage(string.Concat("本地 ", current, "，PLM最新 ", latest), "打开时将获取最新版；要修改请选择“获取编辑”", Color.FromArgb(174, 94, 0));
         }
         else if (string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
         {
@@ -406,7 +429,7 @@ internal sealed class ProjectDocumentsControl : UserControl
         }
         else
         {
-            SetSelectionMessage(string.Concat("本地 ", current, " = PLM最新 ", latest), "可以安全查看；修改时请选择“检出并编辑”", Color.FromArgb(21, 126, 77));
+            SetSelectionMessage(string.Concat("本地 ", current, " = PLM最新 ", latest), "可以安全查看；修改时请选择“获取编辑”", Color.FromArgb(21, 126, 77));
         }
     }
 
@@ -545,6 +568,7 @@ internal sealed class ProjectDocumentsControl : UserControl
             Text = text,
             Dock = DockStyle.Fill,
             Margin = Padding.Empty,
+            Padding = Padding.Empty,
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.White,
             ForeColor = Color.FromArgb(31, 49, 72)

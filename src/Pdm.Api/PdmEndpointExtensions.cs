@@ -834,6 +834,47 @@ public static class PdmEndpointExtensions
             return item is null ? Results.NotFound() : Results.Ok(item);
         });
 
+        api.MapGet("/production-drawings/{documentId:guid}/versions/{versionId:guid}/preview", async (
+            Guid documentId, Guid versionId, Guid? modelDocumentId, Guid? modelVersionId, HttpContext context,
+            ProductionDrawingService drawings, IPdmRepository repository, IFileStorage storage,
+            PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            await workflow.AuditVersionReadAsync(documentId, versionId, actor, role, "document.production.download", cancellationToken);
+            var version = await drawings.EnsureProductionUseAllowedAsync(documentId, versionId, cancellationToken);
+            var document = await repository.FindDocumentAsync(documentId, cancellationToken);
+            if (document?.Kind != DocumentKind.Drawing) return Results.BadRequest(new { detail = "请选择正式生产图纸。" });
+            var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken);
+            if (project is null) return Results.NotFound();
+            var item = (await drawings.ListAsync(actor, role, true, project.Id, cancellationToken))
+                .FirstOrDefault(value => value.VersionId == versionId);
+            if (item is null) return Results.NotFound();
+            var expectedFormat = DocumentPreviewFormat.Pdf;
+            if (modelDocumentId.HasValue || modelVersionId.HasValue)
+            {
+                var model = item.ModelFiles.FirstOrDefault(value => value.DocumentId == modelDocumentId && value.VersionId == modelVersionId);
+                if (!modelDocumentId.HasValue || !modelVersionId.HasValue || model is null)
+                    return Results.BadRequest(new { detail = "所选三维模型不属于该图纸的同一发布包。" });
+                await workflow.AuditVersionReadAsync(modelDocumentId.Value, modelVersionId.Value, actor, role, "document.production.download", cancellationToken);
+                version = await drawings.EnsureProductionUseAllowedAsync(modelDocumentId.Value, modelVersionId.Value, cancellationToken);
+                if (version.ReleasePackageId != item.ReleasePackageId || !model.StepReady)
+                    throw new PdmConflictException("同包正式 STEP 尚未就绪或已经作废，下载已停止。");
+                expectedFormat = DocumentPreviewFormat.Step;
+            }
+            else if (!item.PdfReady)
+                throw new PdmConflictException("正式 PDF 尚未就绪，不能用旧版替代。");
+            if (version.Preview?.Format != expectedFormat)
+                throw new PdmConflictException("生产文件格式与正式版本不匹配，请刷新后重试。");
+            await storage.VerifyPreviewFileAsync(project, version.Preview, cancellationToken);
+            await drawings.EnsureProductionUseAllowedAsync(documentId, versionId, cancellationToken);
+            if (modelDocumentId.HasValue)
+                await drawings.EnsureProductionUseAllowedAsync(modelDocumentId.Value, modelVersionId!.Value, cancellationToken);
+            var path = StorageLocationPolicy.ResolveUnder(project.VaultLocation, version.Preview.StorageRelativePath);
+            var stream = await storage.OpenReadAsync(path, cancellationToken);
+            context.Response.Headers.CacheControl = "no-store";
+            return Results.File(stream, expectedFormat == DocumentPreviewFormat.Pdf ? "application/pdf" : "model/step", enableRangeProcessing: true);
+        });
+
         api.MapPost("/projects/{projectId:guid}/production-drawings/archive", async (
             Guid projectId, ProductionDrawingArchiveRequest request, HttpContext context, ProductionDrawingService drawings,
             IPdmRepository repository, IFileStorage storage, PdmWorkflowService workflow,
@@ -848,8 +889,10 @@ public static class PdmEndpointExtensions
             if (request.Format is not ("Pdf" or "Step")) return Results.BadRequest(new { detail = "下载格式只能是 PDF 或正式 STEP。" });
             var available = (await drawings.ListAsync(actor, role, true, projectId, cancellationToken))
                 .ToDictionary(item => item.VersionId);
-            if (ids.Any(id => !available.ContainsKey(id))) return Results.BadRequest(new { detail = "所选图纸包含不存在或无权访问的正式版本。" });
+            if (ids.Any(id => !available.ContainsKey(id))) return Results.BadRequest(new { detail = "所选图纸已作废、已删除或无法访问，不能用于生产。" });
             var items = ids.Select(id => available[id]).ToArray();
+            foreach (var item in items)
+                await drawings.EnsureProductionUseAllowedAsync(item.DocumentId, item.VersionId, cancellationToken);
             var archiveEntries = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
             if (request.Format == "Pdf" && items.Any(item => !item.PdfReady))
                 return Results.BadRequest(new { detail = "所选图纸中有 PDF 待转换，不能用旧版替代。" });
@@ -868,6 +911,7 @@ public static class PdmEndpointExtensions
                     foreach (var packageItems in items.GroupBy(item => item.ReleasePackageId))
                     {
                         var bomItems = packageItems.SelectMany(item => item.BomItems).DistinctBy(item => item.Id).ToArray();
+                        var quantities = packageItems.SelectMany(item => item.BomQuantities).DistinctBy(item => item.MaterialKey).ToArray();
                         if (bomItems.Length == 0)
                             throw new PdmRuleException("所选图纸缺少发布包冻结的BOM数据，无法下载对应BOM，请刷新后重试。");
                         var packageNumber = SafeArchiveSegment(packageItems.First().ReleasePackageNumber);
@@ -882,18 +926,17 @@ public static class PdmEndpointExtensions
                         if (package is not null) metadata = metadata with {
                             Fields = metadata.Fields.Select(field => field.Key == "整套数量" ? new KeyValuePair<string, string>(field.Key, $"{Math.Max(1, package.WholeSetMultiplier)}套") : field).ToArray(),
                             Notes = $"发布日期：{package.PublishedAt?.ToOffset(TimeSpan.FromHours(8)).ToString("yyyy-MM-dd") ?? "未发布"}" };
-                        await bomTarget.WriteAsync(ProjectWorkbookHeader.Apply(BomWorkbook.Write(bomItems), metadata), cancellationToken);
+                        await bomTarget.WriteAsync(ProjectWorkbookHeader.Apply(BomWorkbook.WriteProductionRelease(bomItems, quantities), metadata), cancellationToken);
                     }
                     foreach (var item in items)
                     {
                         if (request.Format == "Pdf")
                         {
-                            var version = await repository.FindDocumentVersionAsync(item.DocumentId, item.VersionId, cancellationToken)
-                                ?? throw new PdmNotFoundException("正式图纸版本不存在。");
+                            var version = await drawings.EnsureProductionUseAllowedAsync(item.DocumentId, item.VersionId, cancellationToken);
                             var preview = version.Preview;
                             if (preview?.Format != DocumentPreviewFormat.Pdf)
                                 throw new PdmRuleException("所选图纸中有 PDF 待转换，不能用旧版替代。");
-                            await workflow.AuditVersionReadAsync(item.DocumentId, item.VersionId, actor, role, "document.preview.read", cancellationToken);
+                            await workflow.AuditVersionReadAsync(item.DocumentId, item.VersionId, actor, role, "document.production.download", cancellationToken);
                             await storage.VerifyPreviewFileAsync(project, preview, cancellationToken);
                             var entryName = $"{SafeArchiveSegment(item.ReleasePackageNumber)}/{SafeArchiveSegment(item.DrawingNumber)}.pdf";
                             if (archiveEntries.TryGetValue(entryName, out var existingVersion))
@@ -913,7 +956,7 @@ public static class PdmEndpointExtensions
                         {
                             var modelDocument = await repository.FindDocumentAsync(model.DocumentId, cancellationToken);
                             var modelVersion = model.VersionId.HasValue
-                                ? await repository.FindDocumentVersionAsync(model.DocumentId, model.VersionId.Value, cancellationToken)
+                                ? await drawings.EnsureProductionUseAllowedAsync(model.DocumentId, model.VersionId.Value, cancellationToken)
                                 : null;
                             if (modelDocument is null || modelVersion is null)
                                 throw new PdmConflictException($"三维模型 {model.DrawingNumber} 的正式 STEP 不存在，下载已停止。");
@@ -925,7 +968,7 @@ public static class PdmEndpointExtensions
                                 || !string.Equals(preview.SourceSha256, modelVersion.Sha256, StringComparison.OrdinalIgnoreCase))
                                 throw new PdmConflictException($"三维模型 {model.DrawingNumber} 的正式 STEP 与发布包不匹配，下载已停止。");
 
-                            await workflow.AuditVersionReadAsync(model.DocumentId, model.VersionId!.Value, actor, role, "document.preview.read", cancellationToken);
+                            await workflow.AuditVersionReadAsync(model.DocumentId, model.VersionId!.Value, actor, role, "document.production.download", cancellationToken);
                             await storage.VerifyPreviewFileAsync(project, preview, cancellationToken);
                             var entryName = $"{SafeArchiveSegment(item.ReleasePackageNumber)}/{SafeArchiveSegment(model.DrawingNumber)}.step";
                             if (archiveEntries.TryGetValue(entryName, out var existingModelVersion))
@@ -941,6 +984,14 @@ public static class PdmEndpointExtensions
                         }
                     }
                 }
+                // 打包期间可能有人作废图纸；交付前重新核对，避免发送已失效的整包。
+                foreach (var item in items)
+                {
+                    await drawings.EnsureProductionUseAllowedAsync(item.DocumentId, item.VersionId, cancellationToken);
+                    if (request.Format == "Step")
+                        foreach (var model in item.ModelFiles)
+                            await drawings.EnsureProductionUseAllowedAsync(model.DocumentId, model.VersionId!.Value, cancellationToken);
+                }
             }
             catch
             {
@@ -948,6 +999,7 @@ public static class PdmEndpointExtensions
                 throw;
             }
             stream.Position = 0;
+            context.Response.Headers.CacheControl = "no-store";
             return Results.Stream(stream, "application/zip", $"生产图纸-{(request.Format == "Pdf" ? "PDF" : "STEP")}-{SafeArchiveSegment(project.Code)}-{timeProvider.GetLocalNow():yyyyMMdd-HHmmss}.zip");
         });
 
@@ -1831,18 +1883,24 @@ public static class PdmEndpointExtensions
             return Results.Ok(decided);
         });
 
-        api.MapGet("/approval-tasks/mine", async (HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        api.MapGet("/approval-tasks/{taskId:guid}/emergency-capability", async (Guid taskId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(new { CanDecide = await workflow.CanEmergencyDecideAsync(taskId, actor, role, cancellationToken) });
+        });
+
+        api.MapGet("/approval-tasks/mine", async (HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var projects = await repository.ListProjectsForUserAsync(actor, role, cancellationToken);
-            var canEmergencySubstitute = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalEmergencySubstitute, cancellationToken);
             var results = new List<MyApprovalTaskResponse>();
             foreach (var project in projects)
             {
                 var tasks = await repository.ListPendingApprovalTasksAsync(project.Id, cancellationToken);
                 foreach (var task in tasks)
                 {
-                    if (!canEmergencySubstitute && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase)
+                        && !await workflow.CanEmergencyDecideAsync(task.Id, actor, role, cancellationToken)) continue;
                     results.Add(new MyApprovalTaskResponse(
                         task.Id, project.Id, project.Code, project.Name, task.ReleasePackageId, task.ReleasePackageNumber,
                         task.Stage, task.PackageState, task.CreatedAt));

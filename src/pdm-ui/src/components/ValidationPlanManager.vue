@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { getValidationEmergencyCapability, emergencyDecideValidationPlan } from '../api'
 import { ArrowLeft, CalendarDays, CheckCircle2, Download, FileUp, LibraryBig, ListChecks, Paperclip, Plus, RotateCcw, Save, Send, Trash2, XCircle } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
@@ -104,6 +105,32 @@ const currentApprovalTask = computed(() => normalizedState.value === 'PendingApp
   : null)
 const canDecideCurrent = computed(() => Boolean(props.canDecideApproval && currentApprovalTask.value
   && currentApprovalTask.value.assignee.toLocaleLowerCase() === props.currentUsername.toLocaleLowerCase()))
+const canEmergencyCurrent = ref(false)
+let emergencyCheck = 0
+watch(() => currentApprovalTask.value?.id, async taskId => {
+  const check = ++emergencyCheck
+  canEmergencyCurrent.value = false
+  if (!taskId || !props.token) return
+  try {
+    const result = await getValidationEmergencyCapability(taskId, props.token, ...planScope())
+    if (check === emergencyCheck) canEmergencyCurrent.value = result.canDecide
+  } catch { /* Older servers keep the emergency action hidden. */ }
+}, { immediate: true })
+async function emergencyDecideCurrent(decision: 'Approved' | 'Rejected') {
+  const task = currentApprovalTask.value
+  if (!task || !canEmergencyCurrent.value || submitting.value) return
+  try {
+    const result = await ElMessageBox.prompt('请填写紧急代批原因，只处理当前节点。', '紧急代批', {
+      inputType: 'textarea', inputValidator: value => value.trim().length > 0 && value.trim().length <= 500 || '请填写原因，最多500个字符',
+      confirmButtonText: decision === 'Approved' ? '代批当前节点' : '代退回', cancelButtonText: '取消',
+    })
+    submitting.value = true
+    hydratePlan(await emergencyDecideValidationPlan(task.id, decision, result.value.trim(), props.token, ...planScope()))
+    ElMessage.success('当前审批节点已处理')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '紧急代批失败，请刷新后重试')
+  } finally { submitting.value = false }
+}
 const canTransferCurrent = computed(() => Boolean(props.canDecideApproval && currentApprovalTask.value
   && currentApprovalTask.value.assignee.toLowerCase() === props.currentUsername.toLowerCase()))
 const canWithdraw = computed(() => normalizedState.value === 'PendingApproval'
@@ -877,6 +904,8 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
         <button v-if="plan && editable" type="button" class="pdm-primary-action" :disabled="dirty || submitting" @click="submitForApproval"><Send :size="14" />提交审批</button>
         <button v-if="canWithdraw" type="button" class="pdm-secondary-action" :disabled="submitting" @click="withdrawCurrent">撤回申请</button>
         <button v-if="canTransferCurrent" type="button" class="pdm-secondary-action" :disabled="submitting" @click="transferCurrent">转交</button>
+        <button v-if="canEmergencyCurrent && !canDecideCurrent" type="button" class="pdm-secondary-action" :disabled="submitting" @click="emergencyDecideCurrent('Rejected')">紧急代退回</button>
+        <button v-if="canEmergencyCurrent && !canDecideCurrent" type="button" class="pdm-primary-action" :disabled="submitting" @click="emergencyDecideCurrent('Approved')">紧急代批</button>
         <button v-if="canDecideCurrent" type="button" class="pdm-secondary-action" :disabled="submitting" @click="decideCurrent('Rejected')"><XCircle :size="14" />退回</button>
         <button v-if="canDecideCurrent" type="button" class="pdm-primary-action" :disabled="submitting" @click="decideCurrent('Approved')"><CheckCircle2 :size="14" />批准</button>
       </div>

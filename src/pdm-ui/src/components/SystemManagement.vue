@@ -96,7 +96,7 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
     <StorageSettings v-else-if="activeTab === 'settings'" :settings="settings" :token="token" :equipment-types="equipmentTypes" :numbering-options="numberingOptions" :pending="pending" :on-save-settings="onSaveSettings" :on-save-equipment-type="onSaveEquipmentType" :on-update-counters="onUpdateCounters" />
     <DingTalkSettings v-else-if="activeTab === 'dingtalk'" :key="activeOrganizationId" :token="token" />
     <ClientLogManagement v-else-if="activeTab === 'client-logs'" :key="activeOrganizationId" :token="token" />
-    <ApprovalWorkflowSettings v-else-if="activeTab === 'approval'" :settings="settings" :pending="pending" :on-save="onSaveSettings" />
+    <ApprovalWorkflowSettings v-else-if="activeTab === 'approval'" :settings="settings" :directory="organizationDirectory" :roles="rolePermissionDirectory.roles" :pending="pending" :on-save="onSaveSettings" />
     <section v-else-if="activeTab === 'audit'" class="pdm-project-manager"><AuditLog :entries="auditEntries" title="全局操作记录" description="查看所有项目的存档、审批、发布和系统管理操作。" @refresh="$emit('refreshAudit')" /></section>
   </section>
 </template>

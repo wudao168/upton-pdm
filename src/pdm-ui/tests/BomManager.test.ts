@@ -17,6 +17,8 @@ function showDetailedColumns() {
 const materialApi = vi.hoisted(() => ({
   listMaterialBrands: vi.fn().mockResolvedValue([]),
   listMaterials: vi.fn(),
+  listMaterialInventory: vi.fn().mockResolvedValue({ items: [], total: 0 }),
+  refreshMaterialInventory: vi.fn(),
   queryU9Material: vi.fn(),
   matchApprovedMaterials: vi.fn(),
   linkBomMaterial: vi.fn(),
@@ -50,6 +52,60 @@ config.global.stubs = {
 }
 
 describe('BomManager', () => {
+  it.each(['Standard', 'Electrical'] as const)('stages reviewed %s inventory replacements and links only after BOM save', async kind => {
+    showDetailedColumns()
+    const original: BomItem = { id: 'inventory-old', summaryItemIds: ['inventory-old'], summaryFingerprint: 'before', kind,
+      sequence: 1, drawingNumber: 'OLD', name: '旧物料', specification: 'ABC-100', brand: 'SMC', quantity: 4,
+      unit: '个', revision: 'W1', complete: true, remark: '保留项目备注', sourceDocumentId: 'source-document' }
+    const material = { id: 'inventory-new', materialCode: 'NEW', kind, name: '新物料', specification: 'ABC-110',
+      brand: 'SMC', unitCode: '个', approvalStatus: 'Approved', isArchived: false, material: '铝', surfaceTreatment: '阳极氧化', weight: 2 } as PdmMaterial
+    materialApi.listMaterialInventory.mockResolvedValue({ items: [{ organizationCode: '7', warehouseCode: '01', warehouseName: '常备仓',
+      materialCode: 'NEW', itemName: '新物料', specification: 'ABC-110', brand: 'SMC', stockQuantity: 8, similarityPercent: 90,
+      refreshedAt: '2026-10-15T00:00:00Z' }], total: 1 })
+    materialApi.matchApprovedMaterials.mockResolvedValue([material])
+    const wrapper = mount(BomManager, { props: { standard: kind === 'Standard' ? [original] : [], nonStandard: [],
+      electrical: kind === 'Electrical' ? [original] : [], declarations: [], pending: false, editable: true, token: 'token', projectId: 'project' } })
+    await wrapper.findAll('button[role="tab"]')[kind === 'Standard' ? 1 : 3]!.trigger('click'); await flushPromises()
+    await wrapper.get('.pdm-bom-inventory-action').trigger('click'); await flushPromises()
+    await wrapper.findAll('button').find(value => value.text() === '查看对比')!.trigger('click'); await flushPromises()
+    await wrapper.get('.bom-inventory input[type="checkbox"]').setValue(true)
+    await wrapper.findAll('button').find(value => value.text() === '确认替换')!.trigger('click'); await flushPromises()
+    expect(materialApi.linkBomMaterials).not.toHaveBeenCalled()
+    expect(wrapper.emitted('save')).toBeUndefined()
+    expect(original.drawingNumber).toBe('OLD')
+    await wrapper.get('[aria-label="关闭库存推荐"]').trigger('click')
+    await wrapper.get('.pdm-bom-save-action').trigger('click')
+    const saved = (wrapper.emitted('save')![0]![1] as BomItem[])[0]!
+    expect(saved).toMatchObject({ drawingNumber: 'NEW', specification: 'ABC-110', name: '新物料', quantity: 4,
+      unit: '个', revision: 'W1', remark: '保留项目备注', sourceDocumentId: 'source-document', summaryItemIds: ['inventory-old'], inventoryReplacementMaterialCode: 'NEW' })
+    expect(saved.editedFields).toContain('drawingNumber')
+    expect(saved.editedFields).toContain('specification')
+    expect(saved.editedFields).toContain('inventoryReplacementMaterialCode')
+    expect(wrapper.get('.pdm-bom-data-status-cell').text()).toBe('库存')
+    await wrapper.setProps(kind === 'Standard' ? { standard: [{ ...saved, summaryFingerprint: 'after' }] } : { electrical: [{ ...saved, summaryFingerprint: 'after' }] })
+    await flushPromises()
+    expect(materialApi.linkBomMaterials).toHaveBeenCalledWith('project', ['inventory-old'], 'inventory-new', 'token')
+    expect(wrapper.get('.pdm-bom-data-status-cell').text()).toBe('库存')
+    wrapper.unmount()
+  })
+  it('scans the full BOM despite search filters, and hides recommendations for read-only views', async () => {
+    const rows = [1, 2].map(sequence => ({ id: `stock-${sequence}`, sequence, drawingNumber: `OLD-${sequence}`,
+      name: '气缸', specification: `ABC-10${sequence}`, quantity: 1, unit: '个', revision: 'W1', complete: true }))
+    materialApi.listMaterialInventory.mockResolvedValue({ items: [], total: 0, warehouseNames: ['常备仓'] })
+    const wrapper = mount(BomManager, { props: { standard: rows, nonStandard: [], electrical: [], declarations: [],
+      pending: false, editable: true, token: 'token', projectId: 'project' } })
+    await wrapper.findAll('button[role="tab"]')[1]!.trigger('click'); await flushPromises()
+    await wrapper.get('[aria-label="搜索BOM物料"]').setValue('无匹配结果')
+    await wrapper.get('.pdm-bom-inventory-action').trigger('click'); await flushPromises()
+    expect(materialApi.listMaterialInventory.mock.calls.filter(([filters]) => filters.similarSpecification)).toHaveLength(2)
+    expect(wrapper.findAll('.bom-inventory__existing-table tbody tr')).toHaveLength(0)
+    expect(wrapper.text()).toContain('暂无有库存推荐的物料')
+    await wrapper.setProps({ editable: false })
+    expect(wrapper.find('.bom-inventory').exists()).toBe(false)
+    expect(wrapper.find('.pdm-bom-inventory-action').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it.each(['Standard', 'Electrical'] as const)('clears nonexistent %s codes and permits applications before saving', async kind => {
     materialApi.resolveBomMaterialCodes.mockResolvedValue([
       { bomItemId: 'missing', status: 'CodeNotFound', material: null, candidates: [], issues: ['料号不存在'] },
@@ -331,6 +387,8 @@ describe('BomManager', () => {
     materialApi.matchApprovedMaterials.mockReset().mockResolvedValue([])
     materialApi.listMaterialBrands.mockReset().mockResolvedValue([])
     materialApi.listMaterials.mockReset()
+    materialApi.listMaterialInventory.mockReset().mockResolvedValue({ items: [], total: 0 })
+    materialApi.refreshMaterialInventory.mockReset()
     materialApi.linkBomMaterials.mockReset().mockResolvedValue({})
     materialApi.linkBomMaterial.mockReset()
     materialApi.resolveBomMaterialCodes.mockReset().mockResolvedValue([])
@@ -1067,7 +1125,7 @@ describe('BomManager', () => {
     expect(wrapper.get('.pdm-bom-save-action').text()).toBe('保存BOM')
     expect(releaseStrip.findAll('.pdm-bom-release-strip-actions')).toHaveLength(1)
     expect(releaseStrip.find('.pdm-bom-release-maintenance-actions').exists()).toBe(false)
-    expect(releaseStrip.findAll('.pdm-bom-release-strip-actions button').map(button => button.text())).toEqual(['刷新BOM', '导入', '导出', '源数据', '按U9校正', '处理审批 1', '保存BOM', '发起发布'])
+    expect(releaseStrip.findAll('.pdm-bom-release-strip-actions button').map(button => button.text())).toEqual(['刷新BOM', '导入', '导出', '源数据', '库存推荐', '按U9校正', '处理审批 1', '保存BOM', '发起发布'])
     expect(releaseStrip.findAll('button').some(button => button.text() === '新增物料')).toBe(false)
 
     await releaseStrip.findAll('button').find(button => button.text() === '处理审批 1')!.trigger('click')
@@ -1081,7 +1139,7 @@ describe('BomManager', () => {
     expect(wrapper.find('.pdm-release-create-form').exists()).toBe(false)
 
     await wrapper.setProps({ releasePackages: [] })
-    expect(wrapper.findAll('.pdm-bom-release-strip-actions button').map(button => button.text())).toEqual(['刷新BOM', '导入', '导出', '源数据', '按U9校正', '发布记录', '保存BOM', '发起发布'])
+    expect(wrapper.findAll('.pdm-bom-release-strip-actions button').map(button => button.text())).toEqual(['刷新BOM', '导入', '导出', '源数据', '库存推荐', '按U9校正', '发布记录', '保存BOM', '发起发布'])
   })
 
   it('limits standard and non-standard BOM publishing without restricting electrical publishing', async () => {

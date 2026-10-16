@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { getApprovalEmergencyCapability } from '../api'
 import RawDrawerPanel from './RawDrawerPanel.vue'
 import { useId as usePanelFormId } from 'vue'
 const panelFormId = usePanelFormId()
@@ -77,6 +78,8 @@ const hasPublishedFormalFor = (value: ReleaseScope) => props.releasePackages
 const scopeLabels = Object.fromEntries(releaseTypes.map(item => [item.value, item.label])) as Record<string, string>
 const workflowNames: Record<string, string> = {
   'mechanical-release': '机械发布审批',
+  'standard-release': '标准件BOM审批',
+  'nonstandard-release': '非标件BOM与图纸审批',
   'electrical-release': '电气发布审批',
 }
 const visibleReleaseTypes = computed(() => releaseTypes.filter(item =>
@@ -651,6 +654,17 @@ const pagedFrozenRows = computed(() => {
   const start = (frozenPage.value - 1) * releasePageSize
   return frozenDisplayRows.value.slice(start, start + releasePageSize)
 })
+const canEmergencyCurrent = ref(false)
+let emergencyCheck = 0
+watch([() => currentTask.value?.id, () => props.token, () => props.canEmergencyDecide], async ([taskId]) => {
+  const check = ++emergencyCheck
+  canEmergencyCurrent.value = false
+  if (!taskId || !props.token) { canEmergencyCurrent.value = props.canEmergencyDecide; return }
+  try {
+    const result = await getApprovalEmergencyCapability(taskId as string, props.token)
+    if (check === emergencyCheck) canEmergencyCurrent.value = result.canDecide
+  } catch { if (check === emergencyCheck) canEmergencyCurrent.value = props.canEmergencyDecide }
+}, { immediate: true })
 const canAddItemComment = computed(() => Boolean(currentTask.value && (canHandleCurrentTask.value || props.canEmergencyDecide)))
 const selectedItemComments = computed(() => itemCommentTarget.value
   ? releaseItemComments.value.filter(item => item.materialKey.toLocaleLowerCase() === itemCommentTarget.value!.materialKey)
@@ -1129,7 +1143,7 @@ async function saveItemComment() {
             <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="emit('withdraw', releasePackage.id)">{{ releasePackage.state === '已退回' ? '撤回为草稿' : '撤回审批' }}</button>
           </div></PanelActions>
         </div>
-        <div v-if="canEmergencyDecide && currentTask && !canHandleCurrentTask" class="pdm-decision-box emergency-decision">
+        <div v-if="canEmergencyCurrent && currentTask && !canHandleCurrentTask" class="pdm-decision-box emergency-decision">
           <label>紧急代批原因<textarea v-model.trim="emergencyReason" rows="3" maxlength="1000" required placeholder="说明必须立即处理的业务原因；该内容会进入审计记录" /></label>
           <PanelActions><div class="pdm-manager-actions">
             <button type="button" class="pdm-secondary-action is-danger" :disabled="pending || !emergencyReason" @click="emit('emergencyDecide', currentTask.id, 'Rejected', emergencyReason)">紧急代退回</button>

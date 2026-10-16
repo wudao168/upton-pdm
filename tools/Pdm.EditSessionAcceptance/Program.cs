@@ -29,6 +29,7 @@ internal static class Program
             Scenario(true, true).GetAwaiter().GetResult();
             MissingSourceRecovery();
             BatchCloseRecovery().GetAwaiter().GetResult();
+            FirstArchiveFailureRemainsEditable().GetAwaiter().GetResult();
             return 0;
         }
         catch (Exception exception) { Console.WriteLine(exception); return 1; }
@@ -99,7 +100,8 @@ internal static class Program
             Set(entry, "DocumentId", Guid.NewGuid()); Set(entry, "ProjectId", projectId);
             Set(entry, "SessionId", Field(plugin, "checkoutSessionId"));
             Set(entry, "CheckedOutAt", new DateTime(2026, 10, 14, 0, 0, 0, DateTimeKind.Utc));
-            Set(entry, "PendingClose", true); Set(entry, "BaseSha256", "verified-base"); Set(entry, "DiskSha256", "verified-base");
+            Set(entry, "PendingClose", true); Set(entry, "BaseVersionId", Guid.NewGuid());
+            Set(entry, "BaseSha256", "verified-base"); Set(entry, "DiskSha256", "verified-base");
             Invoke(journal, "Save", entry); entries.SetValue(entry, index);
         }
         using (var handler = new Handler(entries.Cast<object>().ToArray()))
@@ -129,6 +131,58 @@ internal static class Program
         }
         Directory.Delete(root, true);
         Console.WriteLine("PASS: 100 same-project closes use one query; offline/unavailable state backs off across journal reload; recovery closes once");
+    }
+
+    static async Task FirstArchiveFailureRemainsEditable()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-edit-session-acceptance", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var source = Path.Combine(root, "new-assembly.SLDASM");
+        File.WriteAllText(source, "unsaved first archive source");
+        var plugin = New("PdmAddin");
+        var journal = New("EditDraftJournal", root, "first-archive");
+        var entry = New("LocalEditDraft");
+        Set(entry, "DocumentId", Guid.NewGuid()); Set(entry, "ProjectId", Guid.NewGuid());
+        Set(entry, "SessionId", Field(plugin, "checkoutSessionId")); Set(entry, "SourcePath", source);
+        Set(entry, "ObservedOpen", true);
+        Invoke(journal, "Save", entry); SetField(plugin, "editJournal", journal);
+        ((IDictionary)Field(plugin, "localEdits")).Add(Get(entry, "DocumentId"), entry);
+        EmptyApplication(plugin);
+        var pending = (ICollection)Invoke(plugin, "PrepareClosedEdits");
+        Require(pending.Count == 1 && (bool)Get(entry, "PendingClose"), "Failed first archive was not queued safely");
+        Require((File.GetAttributes(source) & FileAttributes.ReadOnly) == 0, "Failed first archive became read-only before server confirmation");
+        Require((bool)Invoke(journal, "HasVerifiedDraft", entry), "Failed first archive lost its local draft");
+        using (var handler = new Handler(new[] { entry }) { HideDocuments = true })
+        using (var client = (IDisposable)New("PdmApiClient", "http://fixture.invalid/"))
+        {
+            ((HttpClient)Field(client, "httpClient")).Dispose();
+            SetField(client, "httpClient", new HttpClient(handler) { BaseAddress = new Uri("http://fixture.invalid/") });
+            SetField(plugin, "apiClient", client);
+            await (Task)Invoke(plugin, "ClosePreservedEditsAsync", pending, CancellationToken.None);
+            Require(handler.QueryCalls == 1 && handler.CloseCalls == 0, "Absent provisional document was treated as archived");
+        }
+        Require((bool)Get(entry, "Closed") && !(bool)Get(entry, "PendingClose"), "Failed first archive kept a stale edit record");
+        Require((File.GetAttributes(source) & FileAttributes.ReadOnly) == 0, "Failed first archive was locked after cleanup");
+        Require(File.ReadAllText(source) == "unsaved first archive source" && (bool)Invoke(journal, "HasVerifiedDraft", entry),
+            "Failed first archive changed source or discarded verified draft");
+        var unsafeEntry = New("LocalEditDraft");
+        Set(unsafeEntry, "DocumentId", Guid.NewGuid()); Set(unsafeEntry, "ProjectId", Get(entry, "ProjectId"));
+        Set(unsafeEntry, "SessionId", Get(entry, "SessionId")); Set(unsafeEntry, "SourcePath", source);
+        Set(unsafeEntry, "BaseSha256", "older content"); Set(unsafeEntry, "DiskSha256", "newer content");
+        Set(unsafeEntry, "PendingClose", true); Invoke(journal, "Save", unsafeEntry);
+        var unsafeEntries = Array.CreateInstance(Type("LocalEditDraft"), 1); unsafeEntries.SetValue(unsafeEntry, 0);
+        using (var handler = new Handler(new[] { unsafeEntry }) { HideDocuments = true })
+        using (var client = (IDisposable)New("PdmApiClient", "http://fixture.invalid/"))
+        {
+            ((HttpClient)Field(client, "httpClient")).Dispose();
+            SetField(client, "httpClient", new HttpClient(handler) { BaseAddress = new Uri("http://fixture.invalid/") });
+            SetField(plugin, "apiClient", client);
+            await (Task)Invoke(plugin, "ClosePreservedEditsAsync", unsafeEntries, CancellationToken.None);
+        }
+        Require(!(bool)Get(unsafeEntry, "Closed") && (bool)Get(unsafeEntry, "PendingClose"), "Unverified draft was discarded");
+        Require((File.GetAttributes(source) & FileAttributes.ReadOnly) == 0, "Unverified draft locked the source");
+        Directory.Delete(root, true);
+        Console.WriteLine("PASS: uncommitted first archive keeps source editable and verified draft; stale reservation closes once");
     }
 
     static void SourceWriteLock(bool expectFailure)
@@ -265,6 +319,7 @@ internal static class Program
         loaded = false;
         pending = (ICollection)Invoke(plugin, "PrepareClosedEdits");
         Require(pending.Count == 1 && (bool)Get(entry, "PendingClose"), "Closed document not queued durably");
+        Require((File.GetAttributes(path) & FileAttributes.ReadOnly) == 0, "Closed edit was locked before server confirmation");
         if (changed) Require((bool)Invoke(journal, "HasVerifiedDraft", entry), "Changed file lacks verified draft");
         using (var handler = new Handler(entry))
         using (var client = (IDisposable)New("PdmApiClient", "http://fixture.invalid/"))
@@ -274,10 +329,12 @@ internal static class Program
             SetField(plugin, "apiClient", client);
             handler.Fail = true;
             try { await (Task)Invoke(plugin, "ClosePreservedEditAsync", entry, CancellationToken.None); throw new Exception("Network failure ignored"); }
-            catch (HttpRequestException) { Require((bool)Get(entry, "PendingClose"), "Failed close lost retry record"); }
+            catch (HttpRequestException) { Require((bool)Get(entry, "PendingClose"), "Failed close lost retry record");
+                Require((File.GetAttributes(path) & FileAttributes.ReadOnly) == 0, "Disconnected close locked uncommitted changes"); }
             handler.Fail = false;
             await (Task)Invoke(plugin, "ClosePreservedEditAsync", entry, CancellationToken.None);
             Require((bool)Get(entry, "Closed") && !(bool)Get(entry, "PendingClose"), "Successful close not recorded");
+            Require((File.GetAttributes(path) & FileAttributes.ReadOnly) != 0, "Confirmed archived close did not protect the source");
             Require(handler.CloseCalls == 1 && handler.DraftPreserved == changed, "Wrong close semantics");
             Require(handler.CheckedOutAt == (DateTime)Get(entry, "CheckedOutAt"), "Checkout generation lost in HTTP serialization");
         }

@@ -105,6 +105,7 @@ internal sealed class PdmApiClient : IDisposable
             if (!response.IsSuccessStatusCode)
             {
                 ThrowAuthenticationExpiredIfNeeded(response);
+                ThrowServiceUnavailableIfNeeded(response);
                 throw new InvalidOperationException(GetErrorMessage(response.StatusCode.ToString(), body));
             }
 
@@ -359,7 +360,7 @@ internal sealed class PdmApiClient : IDisposable
             }
             if (token.IsCancellationRequested) throw new OperationCanceledException(token);
             if (original is InvalidOperationException) throw;
-            throw new InvalidOperationException("整批提交结果暂未确认，请恢复连接后刷新项目或重试。服务器按整批提交，不会产生部分存档。", original);
+            throw new InvalidOperationException("整批提交结果暂未确认。本地文件已保留；连接恢复后插件会核对原批次，在结果明确前请勿重新提交。服务器按整批提交，不会产生部分存档。", original);
         }
     }
 
@@ -434,6 +435,7 @@ internal sealed class PdmApiClient : IDisposable
     internal static ArchiveReferenceSnapshot CaptureArchiveSnapshot(CadTreeNode root, ICollection<string> plannedPaths)
     {
         // Capture on the SolidWorks thread, before an await can refresh the held tree.
+        var plannedIds = new HashSet<Guid>(plannedPaths == null ? Array.Empty<Guid>() : PlannedDocumentIds(root, plannedPaths));
         var json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
         var serialized = json.Serialize(ToRequestNode(root, true, plannedPaths));
         var requiredIds = new HashSet<Guid>();
@@ -441,8 +443,9 @@ internal sealed class PdmApiClient : IDisposable
         validate = (node, isRoot) =>
         {
             var hasId = node["documentId"] != null && Guid.TryParse(node["documentId"].ToString(), out var id) && id != Guid.Empty;
+            var plannedReference = !isRoot && hasId && plannedIds.Contains(Guid.Parse(node["documentId"].ToString()));
             if ((isRoot || Convert.ToInt32(node["status"]) != (int)CadReferenceStatus.Virtual)
-                && (!hasId || node["revision"] == null))
+                && (!hasId || node["revision"] == null && !plannedReference))
             {
                 var detail = "文件=" + node["fileName"] + "；实例=" + node["instancePath"]
                     + "；配置=" + node["configuration"] + "；图档编号=" + node["documentId"]
@@ -456,9 +459,7 @@ internal sealed class PdmApiClient : IDisposable
             foreach (var child in (object[])node["children"]) validate((Dictionary<string, object>)child, false);
         };
         validate((Dictionary<string, object>)json.DeserializeObject(serialized), true);
-        var plannedIds = plannedPaths == null ? Array.Empty<Guid>()
-            : PlannedDocumentIds(root, plannedPaths).Where(requiredIds.Contains).ToArray();
-        return new ArchiveReferenceSnapshot(serialized, root.FileName, plannedIds);
+        return new ArchiveReferenceSnapshot(serialized, root.FileName, plannedIds.Where(requiredIds.Contains).ToArray());
     }
 
     internal async Task<ArchiveReferenceSnapshot> PrepareArchiveSnapshotAsync(CadTreeNode root, ICollection<string> plannedPaths,
@@ -802,6 +803,7 @@ internal sealed class PdmApiClient : IDisposable
             if (!response.IsSuccessStatusCode)
             {
                 ThrowAuthenticationExpiredIfNeeded(response);
+                ThrowServiceUnavailableIfNeeded(response);
                 throw new InvalidOperationException(GetErrorMessage(response.StatusCode.ToString(), body));
             }
 
@@ -825,6 +827,7 @@ internal sealed class PdmApiClient : IDisposable
                 {
                     ThrowAuthenticationExpiredIfNeeded(response);
                 }
+                ThrowServiceUnavailableIfNeeded(response);
                 throw new InvalidOperationException(GetErrorMessage(response.StatusCode.ToString(), body));
             }
 
@@ -834,6 +837,19 @@ internal sealed class PdmApiClient : IDisposable
 
     internal static bool HasResolvedReferenceVersion(CadTreeNode node) =>
         HasResolvedRevision(node.CurrentRevision?.TrimEnd('*').Trim());
+
+    private static void ThrowServiceUnavailableIfNeeded(HttpResponseMessage response)
+    {
+        if (response.StatusCode == System.Net.HttpStatusCode.BadGateway
+            || response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable
+            || response.StatusCode == System.Net.HttpStatusCode.GatewayTimeout)
+            throw new ServiceUnavailableException();
+    }
+
+    internal sealed class ServiceUnavailableException : InvalidOperationException
+    {
+        public ServiceUnavailableException() : base("PLM服务器暂时不可用，请确认服务恢复后重试。") { }
+    }
 
     internal static bool HasResolvedRevision(string revision) => ToRevisionRequest(revision) != null;
 
@@ -925,13 +941,16 @@ internal sealed class PdmApiClient : IDisposable
             revision = ToRevisionRequest(node.Revision);
         if (!isRoot && node.Status != CadReferenceStatus.Virtual && !node.DocumentId.HasValue)
         {
-            PluginDiagnosticLog.Record("引用", "引用身份缺失：文件=" + node.FileName + "；路径=" + node.FullPath
-                + "；实例=" + node.InstancePath + "；配置=" + node.Configuration);
             if (plannedPaths?.Contains(node.FullPath) != true)
+            {
+                PluginDiagnosticLog.Record("引用", "引用身份缺失：文件=" + node.FileName + "；路径=" + node.FullPath
+                    + "；实例=" + node.InstancePath + "；配置=" + node.Configuration);
                 throw new InvalidOperationException("引用文件“" + node.FileName + "”未匹配到当前项目的存档身份，请刷新设计树并重新整体存档。实例："
                     + node.InstancePath + "；路径：" + node.FullPath);
+            }
         }
-        if (!isRoot && node.DocumentId.HasValue && revision == null)
+        if (!isRoot && node.Status != CadReferenceStatus.Virtual && node.DocumentId.HasValue
+            && revision == null && plannedPaths?.Contains(node.FullPath) != true)
         {
             throw new InvalidOperationException(string.Concat(
                 "引用文件",
@@ -944,16 +963,17 @@ internal sealed class PdmApiClient : IDisposable
         return new
         {
             nodeId = node.NodeId,
-            documentId = node.DocumentId,
+            documentId = node.Status == CadReferenceStatus.Virtual ? (Guid?)null : node.DocumentId,
             instancePath = node.InstancePath,
             fileName = node.FileName,
             displayName = node.DisplayName,
             kind = (int)node.Kind,
+            role = (int)node.Role,
             configuration = node.Configuration,
             quantity = node.Quantity,
             status = (int)node.Status,
-            revision,
-            checkedOutBy = node.CheckedOutBy,
+            revision = node.Status == CadReferenceStatus.Virtual ? null : revision,
+            checkedOutBy = node.Status == CadReferenceStatus.Virtual ? null : node.CheckedOutBy,
             children
         };
     }
@@ -970,6 +990,7 @@ internal sealed class PdmApiClient : IDisposable
             nodeId = Guid.NewGuid(), documentId = node.DocumentId,
             instancePath = (newRootPath ?? string.Empty).TrimEnd('/') + "/" + relative,
             fileName = node.FileName, displayName = node.DisplayName, kind = node.Kind,
+            role = node.Role,
             configuration = node.Configuration, quantity = node.Quantity, status = node.Status,
             revision = ToRevisionRequest(node.Revision?.Display), checkedOutBy = (string)null,
             children = (node.Children ?? new List<DocumentReferenceNodeDto>())
@@ -1135,6 +1156,7 @@ internal sealed class DocumentReferenceNodeDto
     public string FileName { get; set; }
     public string DisplayName { get; set; }
     public int Kind { get; set; }
+    public int Role { get; set; }
     public string Configuration { get; set; }
     public int Quantity { get; set; }
     public int Status { get; set; }

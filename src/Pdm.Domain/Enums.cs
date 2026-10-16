@@ -123,6 +123,12 @@ public enum ReferenceNodeStatus
     Missing
 }
 
+public enum ReferenceRole
+{
+    Component,
+    ExternalFileDependency
+}
+
 public enum ReferenceChangeKind
 {
     Added,
@@ -214,7 +220,9 @@ public enum ApprovalAssigneeSource
     ProjectDesignLead,
     FixedUser,
     PrimaryUnitManager,
-    ParentUnitManager
+    ParentUnitManager,
+    FixedUnitManager,
+    Role
 }
 
 public enum ReleaseScope

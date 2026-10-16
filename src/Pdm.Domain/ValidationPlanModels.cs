@@ -98,7 +98,11 @@ public sealed record ValidationPlanApprovalTask(
     string? DecisionBy,
     string? DecisionComment,
     DateTimeOffset CreatedAt,
-    DateTimeOffset? DecidedAt);
+    DateTimeOffset? DecidedAt)
+{
+    public IReadOnlyList<string>? EmergencyRoleCodes { get; init; }
+}
+
 
 public sealed record ValidationPlanAttachment(
     Guid Id,

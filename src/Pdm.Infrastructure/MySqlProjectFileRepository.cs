@@ -135,8 +135,8 @@ public sealed class MySqlProjectFileRepository : IProjectFileRepository
             {
                 // 同一内容（指纹相同）已经在发布目录里登记过，重复发布或重启补登记都不再生成新版本。
                 var duplicate = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
-                    "SELECT COUNT(*) FROM project_file_version WHERE project_file_id=@FileId AND LOWER(sha256)=LOWER(@Sha256)",
-                    new { FileId = fileId, entry.Sha256 }, transaction, cancellationToken: cancellationToken));
+                    "SELECT COUNT(*) FROM project_file_version WHERE project_file_id=@FileId AND LOWER(sha256)=LOWER(@Sha256) AND LOWER(storage_root)=LOWER(@StorageRoot) AND LOWER(storage_relative_path)=LOWER(@StorageRelativePath)",
+                    new { FileId = fileId, entry.Sha256, StorageRoot = storageRoot, entry.StorageRelativePath }, transaction, cancellationToken: cancellationToken));
                 if (duplicate > 0) continue;
             }
             else
@@ -217,7 +217,7 @@ public sealed class MySqlProjectFileRepository : IProjectFileRepository
         SELECT f.id,f.root_project_id,f.folder_id,f.file_name,f.description,f.created_by,f.created_at,f.updated_by,f.updated_at,f.deleted_at,f.deleted_by,
                v.id version_id,v.version_number,v.file_name version_file_name,v.storage_root,v.storage_relative_path,v.file_length,v.sha256,v.uploaded_by,v.uploaded_at,v.comment
           FROM project_file f
-          LEFT JOIN project_file_version v ON v.project_file_id=f.id AND v.version_number=(SELECT MAX(v2.version_number) FROM project_file_version v2 WHERE v2.project_file_id=f.id)
+          LEFT JOIN project_file_version v ON v.id=(SELECT v2.id FROM project_file_version v2 WHERE v2.project_file_id=f.id ORDER BY v2.uploaded_at DESC,v2.version_number DESC LIMIT 1)
         """;
     private const string VersionSelect = "SELECT id,project_file_id,version_number,file_name,storage_root,storage_relative_path,file_length,sha256,uploaded_by,uploaded_at,comment FROM project_file_version";
     private sealed class ProjectFileRow { public Guid Id { get; init; } public Guid RootProjectId { get; init; } public Guid FolderId { get; init; } public string FileName { get; init; } = string.Empty; public string? Description { get; init; } public string CreatedBy { get; init; } = string.Empty; public DateTime CreatedAt { get; init; } public string UpdatedBy { get; init; } = string.Empty; public DateTime UpdatedAt { get; init; } public DateTime? DeletedAt { get; init; } public string? DeletedBy { get; init; } public Guid? VersionId { get; init; } public int? VersionNumber { get; init; } public string? VersionFileName { get; init; } public string? StorageRoot { get; init; } public string? StorageRelativePath { get; init; } public long? FileLength { get; init; } public string? Sha256 { get; init; } public string? UploadedBy { get; init; } public DateTime? UploadedAt { get; init; } public string? Comment { get; init; } }

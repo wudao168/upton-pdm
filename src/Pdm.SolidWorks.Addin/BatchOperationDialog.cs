@@ -197,7 +197,7 @@ internal sealed class BatchOperationDialog : Form
 
         projectSelector.SetProjects(projects);
         projectSelector.SelectProject(initialProjectId);
-        const int projectActionWidth = 75;
+        const int projectActionWidth = 96;
         const int projectInputHeight = 30;
         projectSelector.BrowseButtonWidth = projectActionWidth;
         projectSelector.MinimumSize = new Size(120, projectInputHeight);
@@ -222,21 +222,20 @@ internal sealed class BatchOperationDialog : Form
         {
             Dock = DockStyle.Fill,
             AutoSize = false,
-            Height = 30,
-            ColumnCount = 9,
-            RowCount = 1,
+            Height = 66,
+            ColumnCount = 6,
+            RowCount = 3,
             Margin = new Padding(0, 0, 0, 6)
         };
         operationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 430));
-        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 12));
-        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 12));
-        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 12));
+        operationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 6));
+        operationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 12));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         acquire.Anchor = AnchorStyles.Left;
         acquire.Margin = Padding.Empty;
         checkIn.Anchor = AnchorStyles.Left;
@@ -247,7 +246,7 @@ internal sealed class BatchOperationDialog : Form
             Text = "归属项目",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
-            Margin = new Padding(0, 0, 8, 0)
+            Margin = new Padding(0, 0, 6, 0)
         }, 0, 0);
         operationPanel.Controls.Add(projectSelector, 1, 0);
         operationPanel.Controls.Add(acquire, 3, 0);
@@ -257,12 +256,13 @@ internal sealed class BatchOperationDialog : Form
             Text = "变更说明",
             AutoSize = true,
             Anchor = AnchorStyles.Left,
-            Margin = new Padding(0, 0, 8, 0)
-        }, 7, 0);
-        operationPanel.Controls.Add(changeNote, 8, 0);
+            Margin = new Padding(0, 0, 6, 0)
+        }, 0, 2);
+        operationPanel.Controls.Add(changeNote, 1, 2);
+        operationPanel.SetColumnSpan(changeNote, 5);
 
-        var standardButtonSize = new Size(75, 30);
-        var selectionButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, Margin = Padding.Empty };
+        var standardButtonSize = new Size(96, 30);
+        var selectionButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = false, WrapContents = false, Margin = Padding.Empty };
         var selectAll = new Button { Text = "全选", AutoSize = false, Size = standardButtonSize };
         var clear = new Button { Text = "清除", AutoSize = false, Size = standardButtonSize };
         var supplement = new Button { Text = "补充工程图", AutoSize = false, Size = standardButtonSize };
@@ -283,11 +283,13 @@ internal sealed class BatchOperationDialog : Form
         execute.AutoSize = false;
         execute.Size = standardButtonSize;
         showCheckedOnly.AutoSize = false;
-        showCheckedOnly.Size = new Size(105, standardButtonSize.Height);
+        showCheckedOnly.Size = standardButtonSize;
         showCheckedOnly.Anchor = AnchorStyles.Right;
         selectAll.Margin = new Padding(0, 0, 6, 0);
         clear.Margin = new Padding(0, 0, 6, 0);
         selectChanged.Margin = new Padding(0, 0, 6, 0);
+        supplement.Margin = Padding.Empty;
+        showCheckedOnly.Margin = Padding.Empty;
         cancel.Margin = new Padding(0, 0, 6, 0);
         execute.Margin = Padding.Empty;
         selectAll.Click += (_, _) => SetAllChecked(true);
@@ -300,41 +302,71 @@ internal sealed class BatchOperationDialog : Form
         selectionButtons.Controls.Add(clear);
         selectionButtons.Controls.Add(selectChanged);
         selectionButtons.Controls.Add(supplement);
-        selectionButtons.Controls.Add(cancel);
-        selectionButtons.Controls.Add(execute);
 
         var selectionBar = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            AutoSize = true,
+            AutoSize = false,
             ColumnCount = 3,
             RowCount = 1,
-            Margin = Padding.Empty
+            Margin = new Padding(0, 0, 0, 6)
         };
-        selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 402));
         selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+        selectionBar.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        selectionSummary.AutoSize = false;
+        selectionSummary.AutoEllipsis = true;
         selectionSummary.Dock = DockStyle.Fill;
         selectionSummary.TextAlign = ContentAlignment.MiddleLeft;
-        selectionSummary.Margin = new Padding(8, 0, 8, 0);
+        selectionSummary.Margin = Padding.Empty;
         selectionBar.Controls.Add(selectionButtons, 0, 0);
-        selectionBar.Controls.Add(selectionSummary, 1, 0);
         selectionBar.Controls.Add(showCheckedOnly, 2, 0);
+
+        var actionButtons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            WrapContents = false,
+            Margin = Padding.Empty
+        };
+        actionButtons.Controls.Add(cancel);
+        actionButtons.Controls.Add(execute);
+        var footer = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = new Padding(0, 6, 0, 0)
+        };
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 198));
+        footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        footer.Controls.Add(new Label
+        {
+            Text = "勾选图档归入上方项目；重复实例只处理一次；新增图档自动登记，子件优先、总装最后。",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            ForeColor = Color.FromArgb(99, 115, 134),
+            Margin = new Padding(0, 0, 6, 0)
+        }, 0, 0);
+        footer.Controls.Add(actionButtons, 1, 0);
 
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
             ColumnCount = 1,
-            RowCount = 4
+            RowCount = 5
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         layout.Controls.Add(operationPanel, 0, 0);
         layout.Controls.Add(selectionBar, 0, 1);
+        layout.Controls.Add(selectionSummary, 0, 2);
         filesHeader.Dock = DockStyle.Top;
         filesHeader.Height = 25;
         filesHeader.BackColor = Color.FromArgb(242, 244, 247);
@@ -342,15 +374,10 @@ internal sealed class BatchOperationDialog : Form
         var fileDetails = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
         fileDetails.Controls.Add(files);
         fileDetails.Controls.Add(filesHeader);
-        layout.Controls.Add(fileDetails, 0, 2);
-        layout.Controls.Add(new Label
-        {
-            Text = "注意：勾选图档只会归入上方确认的项目；重复实例按同一个文件处理一次。提交时自动登记新增图档并准备权限，顺序为子件优先、总装最后。",
-            AutoSize = true,
-            ForeColor = Color.FromArgb(99, 115, 134),
-            Margin = new Padding(0, 6, 0, 0)
-        }, 0, 3);
+        layout.Controls.Add(fileDetails, 0, 3);
+        layout.Controls.Add(footer, 0, 4);
         Controls.Add(layout);
+        selectionSummary.Text = SelectionCountText();
 
         acquire.CheckedChanged += (_, _) => RefreshOperationState(username);
         checkIn.CheckedChanged += (_, _) => RefreshOperationState(username);
@@ -372,6 +399,16 @@ internal sealed class BatchOperationDialog : Form
     public string SelectedProjectDisplay => projectSelector.SelectedProjectDisplay;
 
     public string ChangeNote => changeNote.Text.Trim();
+
+    private string SelectionCountText()
+    {
+        var embedded = CountEmbedded(root);
+        return string.Concat("已选择 ", SelectedItems.Count, " 个图档",
+            embedded == 0 ? string.Empty : "；另有" + embedded + "个嵌入式组件实例随父装配保存");
+    }
+
+    private static int CountEmbedded(CadTreeNode node) => node == null ? 0
+        : (IsEmbedded(node) ? 1 : 0) + node.Children.Sum(CountEmbedded);
 
     private void RefreshOperationState(string username)
     {
@@ -445,7 +482,7 @@ internal sealed class BatchOperationDialog : Form
             }
         }
         RefreshFileTreePresentation();
-        selectionSummary.Text = string.Empty;
+        selectionSummary.Text = SelectionCountText();
     }
 
     private async Task SelectChangedItemsAsync(string username)
@@ -540,6 +577,13 @@ internal sealed class BatchOperationDialog : Form
     {
         if (disposing)
         {
+            files.DrawNode -= DrawFileDetailNode;
+            filesHeader.Paint -= DrawFileDetailHeader;
+            if (!files.IsDisposed)
+            {
+                files.ImageList = null;
+                files.StateImageList = null;
+            }
             selectionImages?.Dispose();
             structureImages?.Dispose();
         }
@@ -547,7 +591,9 @@ internal sealed class BatchOperationDialog : Form
         base.Dispose(disposing);
     }
 
-    private TreeNode CreateOccurrenceNode(CadTreeNode model)
+    private TreeNode CreateOccurrenceNode(CadTreeNode model) => CreateOccurrenceNode(model, false);
+
+    private TreeNode CreateOccurrenceNode(CadTreeNode model, bool owningFileSelected)
     {
         if (model == null)
         {
@@ -555,13 +601,15 @@ internal sealed class BatchOperationDialog : Form
         }
 
         itemsByPath.TryGetValue(model.FullPath ?? string.Empty, out var item);
+        var embedded = IsEmbedded(model);
+        var ownerSelected = embedded ? owningFileSelected : item != null && checkedPaths.Contains(model.FullPath);
         var children = model.Children
-            .Select(CreateOccurrenceNode)
+            .Select(child => CreateOccurrenceNode(child, ownerSelected))
             .Where(child => child != null)
             .ToArray();
         var includeItem = item != null
             && (!showCheckedOnlyActive || checkedPaths.Contains(item.Node.FullPath));
-        if (!includeItem && children.Length == 0)
+        if (!includeItem && children.Length == 0 && !(embedded && (!showCheckedOnlyActive || owningFileSelected)))
         {
             return null;
         }
@@ -644,6 +692,7 @@ internal sealed class BatchOperationDialog : Form
 
     private void ToggleNode(TreeNode node)
     {
+        if (node?.Tag is BatchTreeOccurrence embedded && IsEmbedded(embedded.Model)) return;
         var paths = SelectablePaths(node).ToArray();
         if (paths.Length == 0)
         {
@@ -664,7 +713,7 @@ internal sealed class BatchOperationDialog : Form
         }
 
         RefreshFileTreePresentation();
-        selectionSummary.Text = string.Concat("已选择 ", SelectedItems.Count, " 个图档");
+        selectionSummary.Text = SelectionCountText();
     }
 
     private IEnumerable<string> SelectablePaths(TreeNode root)
@@ -830,7 +879,7 @@ internal sealed class BatchOperationDialog : Form
             16,
             16);
         var stateImageIndex = Math.Max(0, Math.Min(selectionImages.Images.Count - 1, eventArgs.Node.StateImageIndex));
-        eventArgs.Graphics.DrawImage(selectionImages.Images[stateImageIndex], checkBoxBounds);
+        if (!IsEmbedded(model)) eventArgs.Graphics.DrawImage(selectionImages.Images[stateImageIndex], checkBoxBounds);
 
         var expanderBounds = GetFileExpanderBounds(eventArgs.Node);
         if (eventArgs.Node.Nodes.Count > 0)
@@ -860,7 +909,7 @@ internal sealed class BatchOperationDialog : Form
         TextRenderer.DrawText(eventArgs.Graphics, eventArgs.Node.Text, eventArgs.Node.NodeFont ?? files.Font, nameBounds, foreground, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         TextRenderer.DrawText(
             eventArgs.Graphics,
-            string.Concat(string.IsNullOrWhiteSpace(model.CurrentRevision) ? "—" : model.CurrentRevision, " / ", string.IsNullOrWhiteSpace(model.LatestRevision) ? "—" : model.LatestRevision),
+            IsEmbedded(model) ? "随所属装配体" : string.Concat(string.IsNullOrWhiteSpace(model.CurrentRevision) ? "—" : model.CurrentRevision, " / ", string.IsNullOrWhiteSpace(model.LatestRevision) ? "—" : model.LatestRevision),
             files.Font,
             versionBounds,
             foreground,
@@ -906,6 +955,7 @@ internal sealed class BatchOperationDialog : Form
         foreach (TreeNode root in files.Nodes)
         {
             root.Expand();
+            foreach (var node in EnumerateNodes(root).Where(node => node.Tag is BatchTreeOccurrence occurrence && IsEmbedded(occurrence.Model))) node.Expand();
         }
     }
 
@@ -1007,6 +1057,8 @@ internal sealed class BatchOperationDialog : Form
 
     private static bool CanAcquire(CadTreeNode node) =>
         !node.IsReadOnlyPreview
+        && node.Status != CadReferenceStatus.Virtual
+        && !PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath)
         && !string.IsNullOrWhiteSpace(node.FullPath)
         && IsSupported(node.Kind);
 
@@ -1024,6 +1076,9 @@ internal sealed class BatchOperationDialog : Form
             || node.WorkState == CadWorkState.ModifiedUnsaved
             || node.WorkState == CadWorkState.PendingCheckIn);
 
+    private static bool IsEmbedded(CadTreeNode node) => node.Status == CadReferenceStatus.Virtual
+        || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath);
+
     private static bool IsSupported(CadDocumentKind kind) =>
         kind == CadDocumentKind.Assembly || kind == CadDocumentKind.Part || kind == CadDocumentKind.Drawing;
 
@@ -1039,6 +1094,7 @@ internal sealed class BatchOperationDialog : Form
 
     private string StateText(CadTreeNode node, string username)
     {
+        if (IsEmbedded(node)) return "嵌入式·随父装配保存";
         if (node.IsLatestReadOnlyPreview) return "最新只读";
         if (node.IsHistoricalPreview) return "历史预览（只读）";
         if (!node.DocumentId.HasValue) return "未入库（提交时登记）";

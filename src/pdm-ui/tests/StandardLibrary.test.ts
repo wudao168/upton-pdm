@@ -54,6 +54,7 @@ describe('StandardLibrary', () => {
     expect(wrapper.text()).toContain('引用')
     expect(wrapper.text()).not.toContain('引用次数')
     expect(wrapper.text()).toContain('已一致')
+    expect(wrapper.get('.material-sync-consistent').classes()).not.toContain('el-tag')
     const mainTable = wrapper.findAllComponents({ name: 'ElTable' }).find(table => (table.props('data') as unknown[])?.length === 1)!
     const mainLabels = mainTable.findAllComponents({ name: 'ElTableColumn' }).map(column => column.props('label')).filter(Boolean)
     expect(mainLabels).not.toContain('标准分类')

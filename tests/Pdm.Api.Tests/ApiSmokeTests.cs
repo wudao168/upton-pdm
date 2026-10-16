@@ -81,6 +81,261 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task NativeFileDependencyIsArchivedWithTheAssemblyWithoutBecomingABomComponent()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var directory = Path.Combine(Path.GetTempPath(), "pdm-native-dependency-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(directory, ".versions"));
+        try
+        {
+            var project = await repository.CreateProjectAsync(new CreateProjectCommand("NATIVE-DEP-" + Guid.NewGuid().ToString("N"),
+                "原生文件依赖整批验收", "admin", directory, directory), "admin", default);
+            var root = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "ROOT", "总装", "ROOT.SLDASM", DocumentKind.Assembly), "admin", default);
+            var used = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "USED", "装配零件", "USED.SLDPRT", DocumentKind.Part), "admin", default);
+            var extra = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "EXTRA", "原生文件依赖", "EXTRA.SLDPRT", DocumentKind.Part), "admin", default);
+            var session = Guid.NewGuid();
+            foreach (var document in new[] { root, used, extra })
+                await repository.CheckoutAsync(document.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+            var usedNode = new DocumentReferenceNode(Guid.NewGuid(), used.Id, "ROOT/USED-1", used.FileName, used.Name,
+                DocumentKind.Part, "Default", 1, ReferenceNodeStatus.Normal, null, null, []);
+            var extraNode = new DocumentReferenceNode(Guid.NewGuid(), extra.Id, "ROOT/native-file/EXTRA.SLDPRT", extra.FileName, extra.Name,
+                DocumentKind.Part, "Default", 1, ReferenceNodeStatus.Normal, null, null, [])
+                { Role = ReferenceRole.ExternalFileDependency };
+            var tree = new DocumentReferenceNode(Guid.NewGuid(), root.Id, "ROOT", root.FileName, root.Name,
+                DocumentKind.Assembly, "Default", 1, ReferenceNodeStatus.Normal, root.Revision, null, [usedNode, extraNode]);
+            object Input(PdmDocument document, DocumentReferenceNode node, bool bad = false)
+            {
+                var bytes = Encoding.UTF8.GetBytes(document.FileName);
+                var relative = ".versions/" + Guid.NewGuid().ToString("N");
+                File.WriteAllBytes(Path.Combine(directory, relative), bytes);
+                File.SetAttributes(Path.Combine(directory, relative), FileAttributes.ReadOnly);
+                return new { documentId = document.Id, request = new {
+                    projectId = project.Id, root = node, comment = "原生文件依赖", storageRelativePath = relative,
+                    fileLength = bytes.Length, sha256 = bad ? new string('F', 64) : Convert.ToHexString(SHA256.HashData(bytes)),
+                    checkoutSessionId = session, isProjectRoot = document.Id == root.Id,
+                    properties = new Dictionary<string, string?> { ["配置:Default/物料分类"] = "标准件" }
+                } };
+            }
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+            var invalid = await client.PostAsJsonAsync("/api/archive-batches", new { batchId = Guid.NewGuid(), checkoutSessionId = session,
+                files = new[] { Input(root, tree), Input(used, usedNode), Input(extra, extraNode, true) } });
+            Assert.False(invalid.IsSuccessStatusCode);
+            foreach (var document in new[] { root, used, extra }) Assert.Empty(await repository.ListDocumentVersionsAsync(document.Id, default));
+            var payload = new { batchId = Guid.NewGuid(), checkoutSessionId = session,
+                files = new[] { Input(root, tree), Input(used, usedNode), Input(extra, extraNode) } };
+            var success = await client.PostAsJsonAsync("/api/archive-batches", payload);
+            Assert.True(success.IsSuccessStatusCode, await success.Content.ReadAsStringAsync());
+            (await client.PostAsJsonAsync("/api/archive-batches", payload)).EnsureSuccessStatusCode();
+            foreach (var document in new[] { root, used, extra }) Assert.Single(await repository.ListDocumentVersionsAsync(document.Id, default));
+            var rootVersion = Assert.Single(await repository.ListDocumentVersionsAsync(root.Id, default));
+            var dependency = Assert.Single(rootVersion.ReferenceSnapshot.Children, node => node.DocumentId == extra.Id);
+            Assert.Equal(ReferenceRole.ExternalFileDependency, dependency.Role);
+            Assert.Equal("W1", dependency.Revision?.Display);
+            Assert.False(ArchiveSafety.SameReferences(rootVersion.ReferenceSnapshot,
+                rootVersion.ReferenceSnapshot with { Children = [usedNode, extraNode with { Role = ReferenceRole.Component }] }));
+            var snapshot = await repository.GetLatestReferenceSnapshotAsync(project.Id, default);
+            Assert.NotNull(snapshot);
+            using var scope = factory.Services.CreateScope();
+            var workflow = scope.ServiceProvider.GetRequiredService<PdmWorkflowService>();
+            var generate = typeof(PdmWorkflowService).GetMethod("GenerateMechanicalBomFromSnapshotAsync",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.NotNull(generate);
+            var bom = await (Task<BomGenerationResult>)generate.Invoke(workflow,
+                [project.Id, snapshot, "admin", CancellationToken.None, false, false])!;
+            Assert.Contains(bom.StandardItems.Concat(bom.NonStandardItems).Concat(bom.UnclassifiedItems), item => item.SourceDocumentId == used.Id);
+            Assert.DoesNotContain(bom.StandardItems.Concat(bom.NonStandardItems).Concat(bom.UnclassifiedItems), item => item.SourceDocumentId == extra.Id);
+        }
+        finally
+        {
+            foreach (var file in Directory.GetFiles(directory, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
+            Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public async Task SixDrawingsCommitTogetherAndRetriesDoNotCreateAdditionalVersions()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var directory = Path.Combine(Path.GetTempPath(), "pdm-six-drawings-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(directory, ".versions"));
+        try
+        {
+            var project = await repository.CreateProjectAsync(new CreateProjectCommand("SIX-" + Guid.NewGuid().ToString("N"),
+                "六张工程图整批存档", "admin", directory, directory), "admin", default);
+            var documents = new List<PdmDocument>();
+            foreach (var index in Enumerable.Range(0, 8))
+                documents.Add(await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "FILE-" + index, "图档" + index,
+                    index == 0 ? "ROOT.SLDASM" : index == 1 ? "PART.SLDPRT" : "DRAWING-" + index + ".SLDDRW",
+                    index == 0 ? DocumentKind.Assembly : index == 1 ? DocumentKind.Part : DocumentKind.Drawing), "admin", default));
+            var session = Guid.NewGuid();
+            foreach (var document in documents)
+                await repository.CheckoutAsync(document.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+            var part = new DocumentReferenceNode(Guid.NewGuid(), documents[1].Id, "ROOT/PART-1", documents[1].FileName, documents[1].Name,
+                DocumentKind.Part, "CFG-A", 1, ReferenceNodeStatus.Lightweight, null, null, []);
+            var root = new DocumentReferenceNode(Guid.NewGuid(), documents[0].Id, "ROOT", documents[0].FileName, documents[0].Name,
+                DocumentKind.Assembly, "Default", 1, ReferenceNodeStatus.Normal, documents[0].Revision, null,
+                [part, part with { NodeId = Guid.NewGuid(), InstancePath = "ROOT/PART-2", Configuration = "CFG-B", Status = ReferenceNodeStatus.Suppressed }]);
+            var baselines = new Dictionary<Guid, Guid>();
+            object FileRequest(int index, bool invalid = false)
+            {
+                var document = documents[index];
+                var node = index == 0 ? root : index == 1 ? part : new DocumentReferenceNode(Guid.NewGuid(), document.Id,
+                    "DRAWING-" + index, document.FileName, document.Name, DocumentKind.Drawing, "", 1, ReferenceNodeStatus.Normal, document.Revision, null,
+                    [part with { NodeId = Guid.NewGuid(), InstancePath = "DRAWING-" + index + "/MODEL", Configuration = index % 2 == 0 ? "CFG-A" : "CFG-B" }]);
+                var bytes = Encoding.UTF8.GetBytes(document.FileName);
+                var relative = ".versions/" + Guid.NewGuid().ToString("N");
+                File.WriteAllBytes(Path.Combine(directory, relative), bytes);
+                File.SetAttributes(Path.Combine(directory, relative), FileAttributes.ReadOnly);
+                return new { documentId = document.Id, request = new {
+                    projectId = project.Id, root = node, comment = "六张图整批测试", storageRelativePath = relative, fileLength = bytes.Length,
+                    sha256 = invalid ? new string('F', 64) : Convert.ToHexString(SHA256.HashData(bytes)), checkoutSessionId = session,
+                    isProjectRoot = index == 0, properties = new Dictionary<string, string?>(),
+                    expectedVersionId = baselines.TryGetValue(document.Id, out var baseline) ? (Guid?)baseline : null
+                } };
+            }
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+            var invalid = await client.PostAsJsonAsync("/api/archive-batches", new { batchId = Guid.NewGuid(), checkoutSessionId = session,
+                files = Enumerable.Range(0, 8).Select(index => FileRequest(index, index == 6)).ToArray() });
+            Assert.False(invalid.IsSuccessStatusCode);
+            foreach (var document in documents) Assert.Empty(await repository.ListDocumentVersionsAsync(document.Id, default));
+            var payload = new { batchId = Guid.NewGuid(), checkoutSessionId = session, files = Enumerable.Range(0, 8).Select(index => FileRequest(index)).ToArray() };
+            var success = await client.PostAsJsonAsync("/api/archive-batches", payload);
+            Assert.True(success.IsSuccessStatusCode, await success.Content.ReadAsStringAsync());
+            (await client.PostAsJsonAsync("/api/archive-batches", payload)).EnsureSuccessStatusCode();
+            foreach (var document in documents)
+                baselines[document.Id] = Assert.Single(await repository.ListDocumentVersionsAsync(document.Id, default)).Id;
+            session = Guid.NewGuid();
+            foreach (var document in documents)
+                await repository.CheckoutAsync(document.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+            var unchanged = await client.PostAsJsonAsync("/api/archive-batches", new { batchId = Guid.NewGuid(), checkoutSessionId = session,
+                files = Enumerable.Range(0, 8).Select(index => FileRequest(index)).ToArray() });
+            Assert.True(unchanged.IsSuccessStatusCode, await unchanged.Content.ReadAsStringAsync());
+            foreach (var document in documents) Assert.Single(await repository.ListDocumentVersionsAsync(document.Id, default));
+        }
+        finally
+        {
+            foreach (var file in Directory.GetFiles(directory, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
+            Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public async Task FirstArchiveBindsPlannedReferencesToCommittedChildrenAndReplaysWithoutNewVersions()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var directory = Path.Combine(Path.GetTempPath(), "pdm-planned-revision-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(directory, ".versions"));
+        try
+        {
+            var project = await repository.CreateProjectAsync(new CreateProjectCommand("PLANNED-" + Guid.NewGuid().ToString("N"),
+                "首次整批引用", "admin", directory, directory), "admin", default);
+            var names = new[] { "F700XX.00.SLDASM", "F700XX.01.SLDASM", "旋转按钮组件.SLDASM", "PSU-08OG-20250301014805833.SLDPRT", "HR-100-20220321105016532.SLDPRT" };
+            var documents = new List<PdmDocument>(); var session = Guid.NewGuid(); var batch = Guid.NewGuid();
+            foreach (var name in names)
+            {
+                documents.Add(await repository.ReserveArchiveDocumentAsync(new RegisterDocumentCommand(project.Id, name, name, name,
+                    name.EndsWith("SLDASM", StringComparison.Ordinal) ? DocumentKind.Assembly : DocumentKind.Part), "admin",
+                    new ArchiveRegistrationContext(batch, session, "QA"), default));
+            }
+            DocumentReferenceNode Node(int index, params DocumentReferenceNode[] children) => new(Guid.NewGuid(), documents[index].Id,
+                names[index], names[index], names[index], documents[index].Kind, "默认", 1, ReferenceNodeStatus.Normal, documents[index].Revision, "admin", children);
+            var psu = Node(3) with { Revision = null, InstancePath = "F700XX.00/F700XX.01/PSU-4", Status = ReferenceNodeStatus.Lightweight };
+            var hr = Node(4) with { Revision = null, InstancePath = "F700XX.00/旋转按钮组件/HR-1", Status = ReferenceNodeStatus.Suppressed };
+            var first = Node(1, psu, psu with { NodeId = Guid.NewGuid(), InstancePath = "F700XX.00/F700XX.01/PSU-5", Configuration = "另一配置", Quantity = 2 });
+            var second = Node(2, hr, hr with { NodeId = Guid.NewGuid(), InstancePath = "F700XX.00/旋转按钮组件/HR-2", Status = ReferenceNodeStatus.Hidden });
+            var root = Node(0, first with { Revision = null }, second with { Revision = null });
+            var nodes = new[] { root, first, second, Node(3), Node(4) };
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+            async Task<HttpResponseMessage> Preflight(int index, Guid[] planned) => await client.PostAsJsonAsync(
+                $"/api/documents/{documents[index].Id}/checkin/preflight", new { projectId = project.Id, root = nodes[index], properties = new { }, checkoutSessionId = session, plannedDocumentIds = planned });
+            (await Preflight(3, [])).EnsureSuccessStatusCode();
+            (await Preflight(4, [])).EnsureSuccessStatusCode();
+            var allIds = documents.Select(document => document.Id).ToArray();
+            var parentPreflight = await Preflight(1, allIds);
+            Assert.True(parentPreflight.IsSuccessStatusCode, await parentPreflight.Content.ReadAsStringAsync());
+            (await Preflight(2, allIds)).EnsureSuccessStatusCode();
+            Assert.Equal(HttpStatusCode.BadRequest, (await Preflight(1, [])).StatusCode);
+            var baselines = new Dictionary<Guid, Guid>();
+            object FileRequest(int index)
+            {
+                var bytes = Encoding.UTF8.GetBytes(names[index]);
+                var relative = ".versions/" + Guid.NewGuid().ToString("N");
+                File.WriteAllBytes(Path.Combine(directory, relative), bytes);
+                File.SetAttributes(Path.Combine(directory, relative), FileAttributes.ReadOnly);
+                return new { documentId = documents[index].Id, request = new {
+                    projectId = project.Id, root = nodes[index], comment = "首次整批引用", storageRelativePath = relative, fileLength = bytes.Length,
+                    sha256 = Convert.ToHexString(SHA256.HashData(bytes)), checkoutSessionId = session, isProjectRoot = index == 0,
+                    properties = new Dictionary<string, string?>(), expectedVersionId = baselines.TryGetValue(documents[index].Id, out var baseline) ? (Guid?)baseline : null
+                } };
+            }
+            var incomplete = await client.PostAsJsonAsync("/api/archive-batches", new { batchId = Guid.NewGuid(), checkoutSessionId = session,
+                files = new[] { FileRequest(0), FileRequest(1), FileRequest(2), FileRequest(3) } });
+            Assert.Equal(HttpStatusCode.BadRequest, incomplete.StatusCode);
+            foreach (var document in documents) Assert.Empty(await repository.ListDocumentVersionsAsync(document.Id, default));
+            var payload = new { batchId = batch, checkoutSessionId = session, files = Enumerable.Range(0, 5).Select(FileRequest).ToArray() };
+            var wrongBatch = await client.PostAsJsonAsync("/api/archive-batches", new { batchId = Guid.NewGuid(), checkoutSessionId = session,
+                files = payload.files });
+            Assert.False(wrongBatch.IsSuccessStatusCode);
+            foreach (var document in documents) Assert.Empty(await repository.ListDocumentVersionsAsync(document.Id, default));
+            var success = await client.PostAsJsonAsync("/api/archive-batches", payload);
+            Assert.True(success.IsSuccessStatusCode, await success.Content.ReadAsStringAsync());
+            (await client.PostAsJsonAsync("/api/archive-batches", payload)).EnsureSuccessStatusCode();
+            foreach (var document in documents)
+            {
+                var version = Assert.Single(await repository.ListDocumentVersionsAsync(document.Id, default));
+                baselines[document.Id] = version.Id;
+                Assert.All(ArchiveBatchRules.References(version.ReferenceSnapshot), node => Assert.Equal("W1", node.Revision?.Display));
+            }
+            session = Guid.NewGuid();
+            foreach (var document in documents)
+                await repository.CheckoutAsync(document.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+            var unchanged = await client.PostAsJsonAsync("/api/archive-batches", new { batchId = Guid.NewGuid(), checkoutSessionId = session,
+                files = Enumerable.Range(0, 5).Select(FileRequest).ToArray() });
+            Assert.True(unchanged.IsSuccessStatusCode, await unchanged.Content.ReadAsStringAsync());
+            foreach (var document in documents) Assert.Single(await repository.ListDocumentVersionsAsync(document.Id, default));
+        }
+        finally
+        {
+            if (!Path.GetFullPath(directory).StartsWith(Path.Combine(Path.GetTempPath(), "pdm-planned-revision-"), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("验收目录越界。");
+            foreach (var file in Directory.GetFiles(directory, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
+            Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public async Task DeferredReferenceRequiresProjectIdentityAndTheSameEditingSession()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+        foreach (var mode in new[] { "missing-id", "unknown-id", "other-project", "other-session", "other-user", "outside-plan" })
+        {
+            var project = await repository.CreateProjectAsync(new CreateProjectCommand("DEFERRED-" + Guid.NewGuid().ToString("N"), "延后绑定校验", "admin", "vault", "release"), "admin", default);
+            var root = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "ROOT", "ROOT", "ROOT.SLDASM", DocumentKind.Assembly), "admin", default);
+            var childProject = mode == "other-project"
+                ? await repository.CreateProjectAsync(new CreateProjectCommand("DEFERRED-OTHER-" + Guid.NewGuid().ToString("N"), "其他项目", "admin", "vault", "release"), "admin", default)
+                : project;
+            var part = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(childProject.Id,
+                "PART", "PART", "PART.SLDPRT", DocumentKind.Part), "admin", default);
+            var session = Guid.NewGuid();
+            root = await repository.CheckoutAsync(root.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+            part = await repository.CheckoutAsync(part.Id, mode == "other-user" ? "other" : "admin", mode == "other-session" ? Guid.NewGuid() : session,
+                "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+            var child = new DocumentReferenceNode(Guid.NewGuid(), mode == "missing-id" ? null : mode == "unknown-id" ? Guid.NewGuid() : part.Id,
+                "ROOT/PART", part.FileName, part.Name, part.Kind, "默认", 1, ReferenceNodeStatus.Normal, null, null, []);
+            var tree = new DocumentReferenceNode(Guid.NewGuid(), root.Id, "ROOT", root.FileName, root.Name, root.Kind, "默认", 1, ReferenceNodeStatus.Normal,
+                root.Revision, "admin", [child]);
+            var response = await client.PostAsJsonAsync($"/api/documents/{root.Id}/checkin/preflight", new {
+                projectId = project.Id, root = tree, checkoutSessionId = session, properties = new { },
+                plannedDocumentIds = mode == "outside-plan" ? Array.Empty<Guid>() : new[] { child.DocumentId ?? part.Id }
+            });
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Empty(await repository.ListDocumentVersionsAsync(root.Id, default));
+            Assert.Empty(await repository.ListDocumentVersionsAsync(part.Id, default));
+        }
+    }
+
+    [Fact]
     public async Task MultiConfigurationPreflightAllowsOnlyOwnedPlannedFilesAndRejectsMissingInstanceIdentity()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
@@ -99,7 +354,13 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
             $"/api/documents/{root.Id}/checkin/preflight", new { projectId = project.Id, root = input, properties = new { }, checkoutSessionId = session, plannedDocumentIds = planned });
         Assert.Equal(HttpStatusCode.BadRequest, (await Preflight(tree, [])).StatusCode);
         (await Preflight(tree, [part.Id])).EnsureSuccessStatusCode();
+        foreach (var status in new[] { ReferenceNodeStatus.Suppressed, ReferenceNodeStatus.Hidden, ReferenceNodeStatus.Lightweight })
+            (await Preflight(tree with { Children = tree.Children.Select(node => node with { Status = status }).ToArray() }, [part.Id])).EnsureSuccessStatusCode();
         Assert.Equal(HttpStatusCode.BadRequest, (await Preflight(tree with { Children = [child, tree.Children[1] with { DocumentId = null }] }, [part.Id])).StatusCode);
+        (await Preflight(tree with { Children = [child, tree.Children[1] with { Revision = null }] }, [part.Id])).EnsureSuccessStatusCode();
+        var missingRevision = await Preflight(tree with { Children = tree.Children.Select(node => node with { Revision = null }).ToArray() }, []);
+        Assert.Equal(HttpStatusCode.BadRequest, missingRevision.StatusCode);
+        Assert.Contains("引用版本", await missingRevision.Content.ReadAsStringAsync());
         Assert.Empty(await repository.ListDocumentVersionsAsync(root.Id, default));
         Assert.Empty(await repository.ListDocumentVersionsAsync(part.Id, default));
     }

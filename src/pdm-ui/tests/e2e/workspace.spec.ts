@@ -709,7 +709,7 @@ test.beforeEach(async ({ page }) => {
       const credentials = route.request().postDataJSON() as { username?: string }
       const administrator = credentials.username === 'admin'
       currentUsername = administrator ? 'admin' : 'engineer'
-      return fulfill({ accessToken: 'e2e-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'e2e-resume-token', username: currentUsername, displayName: administrator ? '系统管理员' : '真实工程师', role: administrator ? 'Administrator' : 'Engineer', permissions: administrator ? ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'project.content.reset', 'document.edit', 'document.recycle', 'bom.edit', 'release.manage', 'material.view', 'material.manage', 'settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.role.edit', 'audit.view'] : ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'bom.mechanical.edit', 'bom.electrical.edit', 'material.view', 'release.manage'], primaryCompanyId: 'org-ks', activeCompanyId: 'org-ks', activeCompanyName: '昆山阿普顿自动化系统有限公司', crossCompanyView: administrator, accessibleCompanies: administrator ? [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }, { id: 'org-gz', name: '广州阿普顿自动化系统有限公司', code: '3' }] : [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }] })
+      return fulfill({ accessToken: 'e2e-token', expiresAt: '2099-01-01T00:00:00Z', resumeToken: 'e2e-resume-token', username: currentUsername, displayName: administrator ? '系统管理员' : '真实工程师', role: administrator ? 'Administrator' : 'Engineer', permissions: administrator ? ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'project.content.reset', 'document.edit', 'document.recycle', 'bom.edit', 'release.manage', 'material.view', 'material.manage', 'settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.role.edit', 'system.project-permission.view', 'system.project-permission.edit', 'audit.view'] : ['project.view', 'project.create', 'project.child.create', 'project.content.view', 'document.edit', 'bom.edit', 'bom.mechanical.edit', 'bom.electrical.edit', 'material.view', 'release.manage'], primaryCompanyId: 'org-ks', activeCompanyId: 'org-ks', activeCompanyName: '昆山阿普顿自动化系统有限公司', crossCompanyView: administrator, accessibleCompanies: administrator ? [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }, { id: 'org-gz', name: '广州阿普顿自动化系统有限公司', code: '3' }] : [{ id: 'org-ks', name: '昆山阿普顿自动化系统有限公司', code: '7' }] })
     }
     if (path === '/api/auth/me') return fulfill({ username: currentUsername, displayName: currentUsername === 'admin' ? '系统管理员' : '真实工程师', nickname: null, gender: 'unspecified', landline: null, mobilePhone: null, email: null })
     if (path === '/api/system-connections') return fulfill({ pdf: { state: 'unconfigured', message: 'PDF：测试环境未配置。' }, u9c: { state: 'unconfigured', message: 'U9C：测试环境未配置。' } })
@@ -2869,10 +2869,12 @@ test('administrator switches independent company organization trees', async ({ p
 
 test('role permissions follow the system module directory and include future modules', async ({ page }, testInfo) => {
   const errors: string[] = []
+  let savedPermissions: string[] = []
   const permissionDirectory = {
     permissions: [
       { code: 'project.view', name: '查看项目清单', module: '项目管理', description: '查看当前公司范围内的项目。', sensitive: false },
       { code: 'document.edit', name: '编辑项目图档', module: '项目内容', description: '编辑图档并创建新版本。', sensitive: false },
+      { code: 'project.content.view', name: '查看项目内容', module: '项目内容', description: '查看图档与业务内容。', sensitive: false },
       { code: 'future-module.view', name: '查看新增模块', module: '新增模块', description: '模拟后续发布的系统模块权限。', sensitive: false },
     ],
     roles: [
@@ -2883,11 +2885,14 @@ test('role permissions follow the system module directory and include future mod
   page.on('console', message => {
     if (message.type() === 'error' || message.type() === 'warning') errors.push(`${message.text()} ${message.location().url}`.trim())
   })
-  await page.route('**/api/role-permissions/PlanningManager', route => route.fulfill({
+  await page.route('**/api/role-permissions/PlanningManager', route => {
+    savedPermissions = route.request().postDataJSON().permissions
+    return route.fulfill({
     status: 200,
     contentType: 'application/json',
     body: JSON.stringify(permissionDirectory),
-  }))
+    })
+  })
   await page.route('**/api/role-permissions', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -2917,20 +2922,71 @@ test('role permissions follow the system module directory and include future mod
   const dialog = page.getByRole('dialog', { name: '角色权限' })
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('权限模块由系统功能目录自动生成')
-  await expect(dialog).toContainText('3 个模块、3 项权限')
+  await expect(dialog).toContainText('3 个模块、4 项权限')
   const modules = dialog.getByRole('navigation', { name: '权限模块' })
   await expect(modules).toContainText('项目管理')
   await expect(dialog).toContainText('查看项目清单')
   await modules.getByRole('button', { name: /项目内容/ }).click()
   await expect(dialog).toContainText('编辑项目图档')
+  const edit = dialog.getByRole('checkbox', { name: /编辑项目图档/ })
+  const view = dialog.getByRole('checkbox', { name: /查看项目内容/ })
+  await edit.check()
+  await expect(view).toBeChecked()
+  await view.uncheck()
+  await expect(edit).not.toBeChecked()
+  await edit.check()
   await modules.getByRole('button', { name: /新增模块/ }).click()
   await expect(dialog).toContainText('查看新增模块')
   await dialog.getByRole('button', { name: '保存并立即生效', exact: true }).click()
+  await expect.poll(() => [...savedPermissions].sort()).toEqual(['document.edit', 'project.content.view', 'project.view'])
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('角色权限已保存并立即生效')
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  // Existing app boot warnings from registering the shared dialog wrappers are unrelated to permissions.
+  expect(errors.filter(message => !/Component "El(?:Drawer|Dialog)" has already been registered/.test(message))).toEqual([])
+  await page.screenshot({ path: join(tmpdir(), 'pdm-role-permission-dependencies-desktop.png'), fullPage: false })
+  await page.setViewportSize({ width: 834, height: 900 })
+  await modules.getByRole('button', { name: /项目内容/ }).click()
+  await expect(edit).toBeVisible()
+  await page.screenshot({ path: join(tmpdir(), 'pdm-role-permission-dependencies-narrow.png'), fullPage: false })
+})
+
+test('project permission settings show position grants and preserve other positions when saving', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  const initialRules = { MainManager: [], ChildManager: [], MainDesigner: [], Engineer: ['bom.electrical.edit'], Other: [] }
+  let savedRules: Record<string, string[]> | undefined
+  await page.route('**/api/project-permissions', route => {
+    if (route.request().method() === 'PUT') savedRules = route.request().postDataJSON().rules
+    return route.fulfill({ json: { rules: savedRules ?? initialRules } })
+  })
+  await page.setViewportSize({ width: 1518, height: 855 })
+  await page.goto('/')
+  await expect(page).toHaveTitle(/PLM|UPLM|PDM/)
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '系统设置', exact: true }).click()
+  await page.getByRole('button', { name: '项目权限', exact: true }).click()
+  const positions = page.getByLabel('项目岗位列表')
+  await expect(positions).toContainText('电气硬件')
+  await positions.getByRole('button', { name: '权限设置' }).first().click()
+  const dialog = page.getByRole('dialog', { name: '主项目经理／协同项目经理 · 项目权限' })
+  await expect(dialog).toContainText('预算查看可由角色独立授权')
+  await expect(dialog.locator('tbody')).toContainText('未授权')
+  await dialog.getByRole('checkbox', { name: '查看项目预算' }).check()
+  await dialog.getByRole('button', { name: '保存并立即生效' }).click()
+  await expect.poll(() => savedRules).toEqual({ ...initialRules, MainManager: ['project.budget.view'] })
+  await positions.getByRole('button', { name: '权限设置' }).first().click()
+  await expect(dialog.getByRole('checkbox', { name: '查看项目预算' })).toBeChecked()
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  await page.screenshot({ path: join(tmpdir(), 'pdm-project-permission-grants-desktop.png'), fullPage: false })
+  await page.setViewportSize({ width: 834, height: 900 })
+  await expect(dialog.getByRole('checkbox', { name: '查看项目预算' })).toBeVisible()
+  await page.screenshot({ path: join(tmpdir(), 'pdm-project-permission-grants-narrow.png'), fullPage: false })
   expect(errors).toEqual([])
-  await page.screenshot({ path: testInfo.outputPath('role-permission-system-modules.png'), fullPage: false })
 })
 
 for (const scale of [

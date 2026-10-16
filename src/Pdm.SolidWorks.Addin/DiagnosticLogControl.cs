@@ -1,4 +1,5 @@
 using System;
+using System.Drawing;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
@@ -11,6 +12,7 @@ internal sealed class DiagnosticLogControl : UserControl
     private readonly TextBox content = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false };
     private readonly Label status = new Label { Dock = DockStyle.Bottom, Height = 44, Text = "显示本次运行最近200条记录。导出包含历史技术日志，可直接提交分析。" };
     private readonly Timer timer = new Timer { Interval = 1000 };
+    private readonly ToolTip toolTip = new ToolTip();
     private readonly string version;
     private int displayedRevision = -1;
 
@@ -18,11 +20,17 @@ internal sealed class DiagnosticLogControl : UserControl
     {
         this.version = version;
         Dock = DockStyle.Fill;
-        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 66, AutoSize = true, WrapContents = true };
-        var refresh = new Button { Text = "刷新", AutoSize = true };
-        var copy = new Button { Text = "复制记录", AutoSize = true };
-        var export = new Button { Text = "导出诊断", AutoSize = true };
-        refresh.Click += (_, __) => RefreshLog(true);
+        var toolbar = new TableLayoutPanel { Dock = DockStyle.Top, Height = 36, ColumnCount = 7, RowCount = 1, Padding = new Padding(0, 0, 0, 6), Margin = Padding.Empty };
+        for (var column = 0; column < 7; column++)
+        {
+            toolbar.ColumnStyles.Add(column % 2 == 0
+                ? new ColumnStyle(SizeType.Percent, 25)
+                : new ColumnStyle(SizeType.Absolute, 6));
+        }
+        var copy = CreateButton("复制记录");
+        var export = CreateButton("导出诊断");
+        toolTip.SetToolTip(copy, "复制本次运行的最近 200 条操作记录");
+        toolTip.SetToolTip(export, "导出操作记录和历史技术日志，供问题排查使用");
         copy.Click += (_, __) =>
         {
             try { Clipboard.SetText("插件版本：" + version + Environment.NewLine + PluginDiagnosticLog.Snapshot()); status.Text = "操作记录已复制；完整排查请使用“导出诊断”。"; }
@@ -48,13 +56,43 @@ internal sealed class DiagnosticLogControl : UserControl
                 finally { if (!IsDisposed) export.Enabled = true; }
             }
         };
-        toolbar.Controls.AddRange(new Control[] { refresh, copy, export });
+        toolbar.Controls.Add(copy, 0, 0);
+        toolbar.Controls.Add(export, 2, 0);
+        toolbar.Layout += (_, __) =>
+        {
+            var minimumWidth = Math.Max(TextRenderer.MeasureText(copy.Text, copy.Font).Width, TextRenderer.MeasureText(export.Text, export.Font).Width) + 4;
+            var gap = (int)Math.Round(toolbar.ColumnStyles[1].Width);
+            var span = (toolbar.ClientSize.Width - 3 * gap) / 4 < minimumWidth ? 3 : 1;
+            if (toolbar.GetColumnSpan(copy) == span) return;
+            toolbar.SuspendLayout();
+            toolbar.SetColumnSpan(copy, span);
+            toolbar.SetColumn(export, span == 3 ? 4 : 2);
+            toolbar.SetColumnSpan(export, span);
+            toolbar.ResumeLayout();
+        };
         Controls.Add(content);
         Controls.Add(status);
         Controls.Add(toolbar);
         timer.Tick += (_, __) => { if (Visible) RefreshLog(false); };
         VisibleChanged += (_, __) => { if (Visible) RefreshLog(true); };
         timer.Start();
+    }
+
+    private static Button CreateButton(string text)
+    {
+        var button = new Button
+        {
+            Text = text,
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.White,
+            ForeColor = Color.FromArgb(31, 49, 72),
+            UseVisualStyleBackColor = false
+        };
+        button.FlatAppearance.BorderColor = Color.FromArgb(122, 122, 122);
+        return button;
     }
 
     private void RefreshLog(bool force)
@@ -69,7 +107,11 @@ internal sealed class DiagnosticLogControl : UserControl
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) timer.Dispose();
+        if (disposing)
+        {
+            timer.Dispose();
+            toolTip.Dispose();
+        }
         base.Dispose(disposing);
     }
 }

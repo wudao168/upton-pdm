@@ -1,4 +1,4 @@
-﻿using System.Security.Cryptography;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Upton.Pdm.Domain;
@@ -38,6 +38,8 @@ public static class BomSummaryProjection
             return members[0] with {
                 Sequence = index + 1, Quantity = members.Sum(item => item.Quantity),
                 IsComplete = members.All(item => item.IsComplete),
+                InventoryReplacementMaterialCode = members.Any(item => !string.IsNullOrWhiteSpace(item.InventoryReplacementMaterialCode)
+                    && Normalize(item.InventoryReplacementMaterialCode) == Normalize(item.DrawingNumber)) ? members[0].DrawingNumber : null,
                 SummaryItemIds = members.Select(item => item.Id).ToArray(),
                 ReleaseReviewTokens = members.SelectMany(item => item.ReleaseReviewTokens ?? new Dictionary<Guid, string>()).ToDictionary(pair => pair.Key, pair => pair.Value),
                 ReleaseConfirmation = members.All(item => item.ReleaseConfirmation is not null) ? members[0].ReleaseConfirmation : null,
@@ -73,7 +75,7 @@ public static class BomSummaryProjection
                 }
                 continue;
             }
-            if (edit.Fields.Any(field => field is not ("drawingNumber" or "name" or "unit" or "material" or "specification" or "remark" or "brand" or "surfaceTreatment" or "heatTreatment" or "weight" or "isWearPart" or "impactStage" or "revision" or "quantity" or "kind")))
+            if (edit.Fields.Any(field => field is not ("drawingNumber" or "name" or "unit" or "material" or "specification" or "remark" or "brand" or "surfaceTreatment" or "heatTreatment" or "weight" or "isWearPart" or "impactStage" or "inventoryReplacementMaterialCode" or "revision" or "quantity" or "kind")))
                 throw new PdmRuleException("汇总BOM包含不支持的修改字段。");
             var positiveCount = edit.ItemIds.Count(id => updated[id].Quantity > 0);
             var minimum = edit.Values.Quantity > 0 ? positiveCount * 0.0001m : 0;
@@ -99,6 +101,7 @@ public static class BomSummaryProjection
                         "weight" => value with { Weight = edit.Values.Weight },
                         "isWearPart" => value with { IsWearPart = edit.Values.IsWearPart },
                         "impactStage" => value with { ImpactStage = edit.Values.ImpactStage },
+                        "inventoryReplacementMaterialCode" => value with { InventoryReplacementMaterialCode = edit.Values.InventoryReplacementMaterialCode },
                         "revision" => value with { Revision = edit.Values.Revision },
                         _ => value
                     };
@@ -135,5 +138,5 @@ public static class BomSummaryProjection
         item.IsManualUnmatched, item.IsManuallyRetained, item.Id, item.SourceInstancePath, item.ParentDrawingNumber,
         item.HeatTreatment, item.EngineeringKitReferenceId, item.EngineeringKitId, item.EngineeringKitRevisionId,
         item.EngineeringKitCode, item.EngineeringKitVersionNumber, item.EngineeringKitComponentId,
-        item.EngineeringKitComponentOptional, item.IsWearPart, item.ImpactStage);
+        item.EngineeringKitComponentOptional, item.IsWearPart, item.ImpactStage, item.InventoryReplacementMaterialCode);
 }

@@ -104,6 +104,7 @@ try
         var assembly = await Register(repo, project, "ROOT", DocumentKind.Assembly, failure == "permission" ? Guid.NewGuid() : session);
         var partCommit = Commit(project, part, Node(part), 'A');
         var child = Node(part) with { InstancePath = "ROOT/PART-1", Configuration = "CFG-A" };
+        if (failure == "success") child = child with { Role = ReferenceRole.ExternalFileDependency };
         if (failure == "missing-reference") child = child with { DocumentId = null };
         var rootCommit = Commit(project, assembly, Node(assembly) with { Children = [child] }, 'B', true);
         if (failure == "base-version") rootCommit = rootCommit with { ExpectedVersionId = Guid.NewGuid() };
@@ -115,6 +116,8 @@ try
             if (failure != "success") throw new Exception("Expected rollback " + failure);
             Require((await repo.ListDocumentVersionsAsync(part.Id, default)).Count == 1, "part not committed");
             Require((await repo.ListDocumentVersionsAsync(assembly.Id, default)).Count == 1, "root not committed");
+            Require((await repo.ListDocumentVersionsAsync(assembly.Id, default)).Single().ReferenceSnapshot.Children.Single().Role
+                == ReferenceRole.ExternalFileDependency, "native dependency role was not preserved in MySQL");
             var replay = await repo.CheckInBatchVersionsAsync(batch, "request", "qa", session, files, default);
             Require(replay.Results[0].Version!.Id == receipt.Results[0].Version!.Id, "replay created another version");
             Require(await repo.FindArchiveBatchAsync(batch, default) != null, "committed receipt missing");

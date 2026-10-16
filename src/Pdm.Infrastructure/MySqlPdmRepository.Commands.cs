@@ -313,7 +313,7 @@ public sealed partial class MySqlPdmRepository
         await connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO release_package(
-                id, project_id, package_number, state, release_scope, workflow_code, workflow_version,
+                id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json,
                 selected_bom_item_ids_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier,
                 reference_snapshot_id, mechanical_bom_revision,
                 electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
@@ -324,7 +324,7 @@ public sealed partial class MySqlPdmRepository
                 effective_serial_from, effective_serial_to, drawing_priority, drawing_required_on, drawing_delivery_overrides_json, bom_item_delivery_overrides_json,
                 published_at, published_path, publish_error, row_version, created_at)
             VALUES (
-                @Id, @ProjectId, @PackageNumber, @State, @Scope, @WorkflowCode, @WorkflowVersion,
+                @Id, @ProjectId, @PackageNumber, @State, @Scope, @WorkflowCode, @WorkflowVersion, @EmergencyRolesJson,
                 @SelectedBomItemIds, @CreatesManufacturingBaseline, @LocksDocuments, @WholeSetMultiplier,
                 @ReferenceSnapshotId, @MechanicalBomRevision,
                 @ElectricalBomRevision, @MechanicalBomSnapshot, @ElectricalBomSnapshot,
@@ -344,6 +344,7 @@ public sealed partial class MySqlPdmRepository
                 Scope = package.Scope.ToString(),
                 package.WorkflowCode,
                 package.WorkflowVersion,
+                EmergencyRolesJson = package.EmergencyRoleCodes is null ? null : JsonSerializer.Serialize(package.EmergencyRoleCodes, jsonOptions),
                 SelectedBomItemIds = JsonSerializer.Serialize(package.SelectedBomItemIds, jsonOptions),
                 package.CreatesManufacturingBaseline,
                 package.LocksDocuments,
