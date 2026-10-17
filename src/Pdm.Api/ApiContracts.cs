@@ -118,6 +118,7 @@ public sealed record UpdateSystemSettingsRequest(
     ReleaseApprovalSettings? ApprovalWorkflows = null,
     MaterialCodeApprovalSettings? MaterialCodeApproval = null,
     IReadOnlyList<string>? ReleaseChangeReasonTypes = null,
+    IReadOnlyDictionary<string, string>? ReleaseChangeReasonLabels = null,
     FormalSupplementPolicies? FormalSupplementPolicies = null,
     DrawingQrPolicy? DrawingQrPolicy = null,
     PreviewConversionSettings? PreviewConversion = null);
@@ -190,9 +191,10 @@ public sealed record DecideDrawingReviewSupervisorRequest(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] DrawingReviewDecision Decision,
     string? Comment);
 
-public sealed record UpdateRolePermissionsRequest(IReadOnlyList<string> Permissions);
+public sealed record UpdateRolePermissionsRequest(IReadOnlyList<string> Permissions, int SchemaVersion = 1);
 
-public sealed record UpdateProjectPermissionSettingsRequest(IReadOnlyDictionary<string, IReadOnlyList<string>> Rules);
+public sealed record UpdateProjectPermissionSettingsRequest(IReadOnlyDictionary<string, IReadOnlyList<string>> Rules, IReadOnlyList<ProjectPositionDefinition>? CustomPositions = null, int SchemaVersion = 1);
+public sealed record SetProjectPositionMembersRequest(IReadOnlyDictionary<string, IReadOnlyList<string>> Members);
 
 public sealed record CreateRoleRequest(string Name, string Description, string SourceRoleCode);
 
@@ -443,3 +445,5 @@ public sealed record StartUploadRequest(Guid ProjectId, string FileName, long To
     Guid? BatchId = null, Guid? DocumentId = null, Guid? CheckoutSessionId = null);
 
 public sealed record CompleteUploadRequest(string RelativeTargetPath);
+
+public sealed record DocumentVersionVerificationBatchRequest(IReadOnlyList<DocumentVersionVerificationRequest>? Documents);

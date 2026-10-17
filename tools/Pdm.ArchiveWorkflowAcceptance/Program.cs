@@ -818,9 +818,11 @@ internal static class Program
         Expect<InvalidOperationException>(() => Static("PdmApiClient", "ValidateArchiveReferenceCompleteness", model));
         ((IList)Get(drawing, "ReferencedModels")).Remove(duplicate);
         foreach (var invalid in new[] { "", " ", "invalid|file.SLDPRT", "C:\\invalid|file.SLDPRT" })
-            Assert((string)Static("SolidWorksReferenceTreeScanner", "NormalizeComponentFilePath", invalid) == "", "invalid path accepted");
+            Expect<InvalidOperationException>(() => Static("ArchiveReferencePath", "Resolve", invalid, directory,
+                "存档校验回归", "cycle.SLDPRT", null, null));
         var valid = Path.Combine(directory, "valid.SLDPRT");
-        Assert((string)Static("SolidWorksReferenceTreeScanner", "NormalizeComponentFilePath", valid) == valid, "valid full path changed");
+        Assert((string)Static("ArchiveReferencePath", "Resolve", valid, directory,
+            "存档校验回归", "cycle.SLDPRT", null, null) == valid, "valid full path changed");
     }
     static void SuppressedReferences()
     {
@@ -868,7 +870,11 @@ internal static class Program
     static object Client(HttpMessageHandler handler)
     {
         var client = New("PdmApiClient", "http://fixture.invalid/"); var field = T("PdmApiClient").GetField("httpClient", Flags);
-        ((HttpClient)field.GetValue(client)).Dispose(); field.SetValue(client, new HttpClient(handler) { BaseAddress = new Uri("http://fixture.invalid/") }); return client;
+        ((HttpClient)field.GetValue(client)).Dispose(); field.SetValue(client, new HttpClient(handler, false) { BaseAddress = new Uri("http://fixture.invalid/") });
+        field = T("PdmApiClient").GetField("controlledOpenHttpClient", Flags);
+        ((HttpClient)field.GetValue(client)).Dispose(); field.SetValue(client,
+            new HttpClient(handler, false) { BaseAddress = new Uri("http://fixture.invalid/"), Timeout = TimeSpan.FromMinutes(15) });
+        return client;
     }
     sealed class JsonHandler : HttpMessageHandler
     {

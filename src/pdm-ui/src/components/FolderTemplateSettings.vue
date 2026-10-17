@@ -58,3 +58,9 @@ function moveNode(node: ProjectFolderTemplateNode, offset: -1 | 1) {
     <template #footer><button type="button" class="pdm-secondary-action" @click="permissionOpen=false">取消</button><button type="button" class="pdm-primary-action" @click="applyPermissions">应用到模板草稿</button></template>
   </el-dialog>
 </template>
+
+<style scoped>
+.pdm-data-table th, .pdm-data-table td { text-align: center; vertical-align: middle; }
+.pdm-order-actions { justify-content: center; }
+.pdm-data-table :deep(.el-input__inner) { text-align: center; }
+</style>

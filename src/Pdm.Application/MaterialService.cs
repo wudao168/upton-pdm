@@ -1659,7 +1659,7 @@ public sealed class MaterialService(
 
     private Task RequireBomKindEditAsync(Guid projectId, BomKind kind, string actor, UserRole role, CancellationToken cancellationToken) =>
         ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role,
-            kind == BomKind.Electrical ? PermissionCodes.BomElectricalEdit : PermissionCodes.BomMechanicalEdit, cancellationToken);
+            kind == BomKind.Electrical ? "bom.electrical.row.update" : "bom.mechanical.row.update", cancellationToken);
 
     private static void EnsureStandardMaterialIdentity(BomItem item, PdmMaterial material, bool allowMissingDrawingIdentity = false)
     {

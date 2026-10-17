@@ -164,22 +164,24 @@ const targetProjectOptions = computed(() => (portfolio.value?.projects ?? []).fi
 const managedChildPlans = computed(() => (portfolio.value?.projects ?? []).filter(item => !item.isRoot))
 const ownsDisplayedPlan = computed(() => Boolean(plan.value && !inheritedParentPlan.value && plan.value.projectId === props.project.id))
 const generateTargetProject = computed(() => props.projects.find(item => item.id === generateTargetProjectId.value))
-function canManageProject(projectId: string) {
+function canManageProject(projectId: string, action?: string) {
+  const project = projectId === props.project.id ? props.project : props.projects.find(item => item.id === projectId)
+  if (action && project?.permissionSchemaVersion === 2 && !project.effectiveProjectPermissions?.includes(`project.plan.${action}`)) return false
   return projectId === props.project.id ? props.canEdit
     : props.projects.find(item => item.id === projectId)?.effectiveProjectPermissions?.includes('project.plan.edit') === true
 }
-function canEditSchedule(owner?: ProjectPlan | null) {
+function canEditSchedule(owner?: ProjectPlan | null, action = 'update') {
   const approvedDraft = isEffective(owner) && owner?.changeDraftSource && owner.changeRequest?.status === 'Approved'
     && owner.changeRequest.submittedBy.toLowerCase() === props.currentUsername.toLowerCase()
   return Boolean(owner && !(inheritedParentPlan.value && owner.id === plan.value?.id)
-    && (!isEffective(owner) || approvedDraft) && canManageProject(owner.projectId))
+    && (!isEffective(owner) || approvedDraft) && canManageProject(owner.projectId, action))
 }
 const showGanttTaskActions = computed(() => Boolean(!portfolioMode.value && plan.value && canEditSchedule(plan.value)))
 watch(showGanttTaskActions, updateTimelineWidth, { flush: 'post' })
 const unapprovedPortfolioPlans = computed(() => portfolioMode.value
   ? (portfolio.value?.projects ?? []).filter(item => !item.isRoot && item.plan && !isEffective(item.plan))
   : [])
-const deletablePortfolioPlans = computed(() => unapprovedPortfolioPlans.value.filter(item => canManageProject(item.projectId)))
+const deletablePortfolioPlans = computed(() => unapprovedPortfolioPlans.value.filter(item => canManageProject(item.projectId, 'delete')))
 const toolbarDeleteTarget = computed(() => {
   if (ownsDisplayedPlan.value && canEditSchedule(plan.value)) return plan.value
   return deletablePortfolioPlans.value.length === 1 ? deletablePortfolioPlans.value[0]?.plan ?? null : null
@@ -188,7 +190,7 @@ const canDeleteDisplayedPlan = computed(() => Boolean(toolbarDeleteTarget.value 
 const deleteDisabledReason = computed(() => {
   if (inheritedParentPlan.value || (props.project.parentProjectId && plan.value && plan.value.projectId !== props.project.id)) return '当前子项目没有独立计划，请在主项目处理'
   if (unapprovedPortfolioPlans.value.length && !deletablePortfolioPlans.value.length) return '当前账号没有删除这些未审批计划的权限'
-  if (plan.value && ownsDisplayedPlan.value && !canManageProject(plan.value.projectId)) return '当前账号没有删除该计划的权限'
+  if (plan.value && ownsDisplayedPlan.value && !canManageProject(plan.value.projectId, 'delete')) return '当前账号没有删除该计划的权限'
   if (plan.value && ownsDisplayedPlan.value && isEffective(plan.value) && !canEditSchedule(plan.value)) return '已审批生效的计划不可直接删除，请先申请并取得变更权限'
   if (!canDeleteDisplayedPlan.value) return '当前项目及其子项目没有可删除的未审批计划'
   return ''
@@ -218,7 +220,7 @@ const followerChildPlans = computed(() => deletableChildPlans.value.filter(item 
 const independentChildPlans = computed(() => deletableChildPlans.value.filter(item => !followerChildPlans.value.includes(item)))
 
 async function openDelete(target: ProjectPlan) {
-  if (!canManageProject(target.projectId) || (isEffective(target) && !canEditSchedule(target))) return
+  if (!canManageProject(target.projectId, 'delete') || (isEffective(target) && !canEditSchedule(target, 'delete'))) return
   try {
     saving.value = true
     const latest = await readProjectPlan(target.projectId, props.token)
@@ -253,7 +255,7 @@ function openToolbarDelete() {
 
 async function confirmDelete() {
   const target = deleteTarget.value
-  if (!target || !canManageProject(target.projectId) || (isEffective(target) && !canEditSchedule(target))) return
+  if (!target || !canManageProject(target.projectId, 'delete') || (isEffective(target) && !canEditSchedule(target, 'delete'))) return
   try {
     saving.value = true
     await deleteProjectPlan(target.projectId, target.rowVersion, deleteIndependentChildren.value, props.token)
@@ -979,6 +981,7 @@ function openGenerate(targetPlan: ProjectPlan | null = plan.value, targetProject
 }
 
 async function generate() {
+  if (!canManageProject(generateTargetProjectId.value || props.project.id, 'create')) return
   if (!generateForm.templateId) return ElMessage.warning('请选择计划模板')
   if (postDeliveryDateError.value) return ElMessage.warning(postDeliveryDateError.value)
   saving.value = true
@@ -1526,13 +1529,13 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
         <header class="pdm-plan-toolbar">
           <div class="pdm-plan-view-tabs"><strong class="pdm-plan-view-label">{{ portfolioMode ? `全部子项目（${timelineRows.length}）` : '任务甘特图' }}</strong><span v-if="!portfolioMode">{{ timelineRows.length }} 行</span></div>
           <div class="pdm-plan-toolbar__actions">
-            <button type="button" class="pdm-plan-delete-action" :disabled="saving || !canDeleteDisplayedPlan" :title="deleteDisabledReason || (isEffective(plan) ? '删除现行计划和变更草稿' : '删除未审批计划')" @click="openToolbarDelete">删除计划</button>
+            <button type="button" class="pdm-plan-delete-action" :disabled="saving || !canDeleteDisplayedPlan || !canManageProject(project.id, 'delete')" :title="deleteDisabledReason || (isEffective(plan) ? '删除现行计划和变更草稿' : '删除未审批计划')" @click="openToolbarDelete">删除计划</button>
             <template v-if="canApprove"><button type="button" class="pdm-primary-action" :disabled="saving" @click="decideApproval(true)">批准生效</button><button type="button" class="pdm-secondary-action" :disabled="saving" @click="decideApproval(false)">退回</button></template>
             <button v-if="!portfolioMode && ownsDisplayedPlan && isEffective(plan) && canEdit && !pendingChange && !editingChangeDraft" type="button" class="pdm-secondary-action" :disabled="saving" @click="openChangeRequest">申请变更权限</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && plan?.changeRequest" type="button" class="pdm-secondary-action" @click="changeReviewOpen = true">{{ pendingChange ? '权限待审批' : '变更申请记录' }}</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && editingChangeDraft && canEditSchedule(plan)" type="button" class="pdm-primary-action" :disabled="saving" @click="completeChangeDraft">完成变更并生效</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && editingChangeDraft && canEditSchedule(plan)" type="button" class="pdm-secondary-action" :disabled="saving" @click="abandonChangeDraft">放弃变更</button>
-            <button v-if="!portfolioMode && ownsDisplayedPlan && plan && canEdit && !isEffective(plan) && plan.approvalStatus !== 'Pending'" type="button" class="pdm-primary-action" :disabled="saving" @click="submitApproval">提交审批</button>
+            <button v-if="!portfolioMode && ownsDisplayedPlan && plan && canManageProject(project.id, 'submit') && !isEffective(plan) && plan.approvalStatus !== 'Pending'" type="button" class="pdm-primary-action" :disabled="saving" @click="submitApproval">提交审批</button>
             <button v-if="portfolioMode && canEdit" type="button" class="pdm-secondary-action" :disabled="sourceProjectOptions.length === 0" @click="openReuse">复制计划</button>
             <button v-if="portfolioMode && isMasterWithChildren" type="button" class="pdm-primary-action" @click="masterPlanMode = true">编辑主计划</button>
             <button v-if="portfolioMode && (managedChildPlans.length || plan?.childSyncResults?.length || canEditSchedule(plan))" type="button" class="pdm-secondary-action" @click="manageDialogOpen = true">编辑子计划</button>

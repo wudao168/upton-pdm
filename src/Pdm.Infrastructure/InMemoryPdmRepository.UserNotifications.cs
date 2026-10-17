@@ -13,12 +13,21 @@ public sealed partial class InMemoryPdmRepository
             .Where(item => item.SourceKey == sourceKey).Select(item => item.Recipient).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
     }
 
+    public Task<IReadOnlyList<UserNotification>> ListDatedUserTodosAsync(string recipient, Guid companyId, DateOnly from, DateOnly to, CancellationToken ct)
+    {
+        lock (gate) return Task.FromResult<IReadOnlyList<UserNotification>>(userNotifications.Values.Where(item =>
+            item.Recipient.Equals(recipient, StringComparison.OrdinalIgnoreCase) && item.Category == "ProjectTodo" && item.DueDate >= from && item.DueDate <= to
+            && (item.SourceKey.StartsWith($"calendar-todo:{companyId:N}:", StringComparison.Ordinal)
+                || item.ProjectId is Guid id && projects.TryGetValue(id, out var project) && project.OrganizationId == companyId)).OrderBy(item => item.DueDate).ThenBy(item => item.CreatedAt).ToArray());
+    }
+
     public Task<IReadOnlyList<UserNotification>> ListUserNotificationsAsync(string recipient, int take, CancellationToken cancellationToken)
     {
         lock (gate)
         {
             return Task.FromResult<IReadOnlyList<UserNotification>>(userNotifications.Values
                 .Where(item => string.Equals(item.Recipient, recipient, StringComparison.OrdinalIgnoreCase))
+                .Where(item => !item.SourceKey.StartsWith("calendar-todo:", StringComparison.Ordinal) || TenantContext.CompanyId is Guid company && item.SourceKey.StartsWith($"calendar-todo:{company:N}:", StringComparison.Ordinal))
                 .Where(item => !item.IsPlanOverdueReminder)
                 .OrderByDescending(item => item.CreatedAt)
                 .ThenByDescending(item => item.Id)

@@ -27,6 +27,7 @@ const familyProjects = computed(() => {
 })
 const rootProject = computed(() => familyProjects.value[0]!)
 const canMaintainTeam = computed(() => {
+  if (rootProject.value.canAssignDesigners) return true
   const actor = props.currentUsername.toLowerCase()
   return rootProject.value.primaryProjectManager?.toLowerCase() === actor || props.directory.managers.some(item => item.unitId === rootProject.value.executionUnitId && [item.primaryManager, ...item.collaborativeManagers].some(user => user.toLowerCase() === actor))
 })
@@ -72,7 +73,7 @@ watch(nameplateOpen, open => { if (!open) void loadNameplateAccess() })
         <el-select v-if="staffAssignment" :model-value="selectedPeople(staff[staffAssignment])" @update:model-value="staff[staffAssignment!] = $event.join('、')" aria-label="选择销售售前人员" multiple filterable placeholder="选择人员" style="width:100%"><el-option v-for="user in staffCandidates" :key="user.username" :label="user.displayName" :value="user.username" /></el-select>
         <template #footer><el-button aria-label="完成人员选择" @click="staffAssignment = null">完成选择</el-button></template>
       </el-dialog>
-    <ProjectPersonnelAssignment ref="assignment" :current-username="currentUsername" :commercial-staff="staff" :can-edit-commercial="canEdit" :on-save-commercial="async value => { Object.assign(staff, value); return await save() }" :root="rootProject" :directory="directory" :can-maintain-team="canMaintainTeam" :on-update-main-staffing="onUpdateMainStaffing" :on-update-designers="onUpdateDesigners" :on-update-phase-owners="onUpdatePhaseOwners" />
+    <ProjectPersonnelAssignment ref="assignment" :token="token" @positions-updated="saved => Object.assign(projects.find(item => item.id === saved.id) ?? project, saved)" :current-username="currentUsername" :commercial-staff="staff" :can-edit-commercial="canEdit" :on-save-commercial="async value => { Object.assign(staff, value); return await save() }" :root="rootProject" :directory="directory" :can-maintain-team="canMaintainTeam" :on-update-main-staffing="onUpdateMainStaffing" :on-update-designers="onUpdateDesigners" :on-update-phase-owners="onUpdatePhaseOwners" />
     </ProjectContactInformation>
     <section class="pdm-panel project-information__panel" aria-label="项目基本信息列表">
       <header><h2>基本信息</h2><span>共 {{ familyProjects.length }} 个主、子项目</span></header>

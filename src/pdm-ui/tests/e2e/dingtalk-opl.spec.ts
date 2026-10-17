@@ -2,6 +2,37 @@ import { test, expect } from '@playwright/test'
 import { join } from 'node:path'
 const projectId = '11111111-1111-1111-1111-111111111111'
 test.use({ userAgent: 'Mozilla/5.0 DingTalk' })
+
+test('single robot entries select the bound project on LAN HTTP without member setup', async ({page})=>{
+  const errors:string[]=[];page.on('pageerror',error=>errors.push(error.message))
+  const groupId='33333333-3333-3333-3333-333333333333'
+  await page.route('https://g.alicdn.com/dingding/dingtalk-jsapi/3.0.25/dingtalk.open.js',route=>route.fulfill({contentType:'application/javascript',body:'window.dd={chooseChat:function(){throw new Error("unexpected picker")},env:{platform:"pc"},ready:function(cb){cb()},runtime:{permission:{requestAuthCode:function(o){o.onSuccess({code:"group-code"})}}}}'}))
+  await page.route('**/api/integrations/dingtalk/opl/bootstrap*',route=>route.fulfill({json:{enabled:true,corpId:'corp',companyId:'company'}}))
+  await page.route('**/api/integrations/dingtalk/opl/login',route=>{
+    expect(route.request().postDataJSON().groupId).toBe(groupId)
+    return route.fulfill({json:{guestToken:'group-ticket',displayName:'项目提交人'}})
+  })
+  await page.route('**/api/integrations/dingtalk/opl/guest/projects',route=>route.fulfill({json:[{id:projectId,code:'P700014',name:'TEST 5',subprojects:[]}]}))
+  await page.route('**/api/integrations/dingtalk/opl/guest/projects/*/people',route=>route.fulfill({json:[]}))
+  for(const viewport of [{width:390,height:844},{width:1518,height:855}]){
+    await page.setViewportSize(viewport)
+    await page.goto(`http://192.168.2.8:5173/?dingtalkOpl=1&companyId=company&groupId=${groupId}`)
+    await expect(page).toHaveTitle(/UPLM|PDM|PLM/)
+    await expect(page.getByLabel('所属项目')).toHaveValue(projectId)
+    await expect(page.getByLabel('所属项目')).toBeDisabled()
+    await expect(page.getByText('已自动关联当前群绑定的项目。')).toBeVisible()
+    await expect(page.getByLabel('问题描述')).toBeVisible()
+    await expect(page.getByText('负责人 @ 设置',{exact:false})).toHaveCount(0)
+    await expect(page.getByRole('button',{name:/确认当前群|启用负责人@/})).toHaveCount(0)
+    await page.getByLabel('问题描述').fill('绑定群后直接提交的问题')
+    await expect(page.getByRole('button',{name:'提交问题',exact:true})).toBeEnabled()
+    await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true)
+    await page.screenshot({path:join(process.env.TEMP!,`dingtalk-single-robot-${viewport.width}.png`),fullPage:true})
+  }
+  expect(errors).toEqual([])
+})
+
 test('DingTalk mobile submission with optional subproject and group notification', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))

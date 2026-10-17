@@ -173,6 +173,7 @@ try {
     foreach ($assemblyName in @('Pdm.Api.dll', 'Pdm.Domain.dll', 'Pdm.Application.dll', 'Pdm.Infrastructure.dll')) {
         $result.apiAssemblies[$assemblyName] = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $apiTarget $assemblyName)).Hash
     }
+    & (Join-Path $PSScriptRoot 'Sync-LocalUiManifest.ps1') -ProjectRoot $projectRoot | Out-Null
     $resultJson = $result | ConvertTo-Json -Depth 5
     $resultJson | Set-Content -LiteralPath $resultPath -Encoding UTF8
     if ($deferredHelperArguments) {

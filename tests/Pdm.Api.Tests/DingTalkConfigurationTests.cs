@@ -38,11 +38,17 @@ public sealed class DingTalkConfigurationTests
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("admin", "Administrator")); client.DefaultRequestHeaders.Add("X-Company-Id", company.ToString());
         var initial = await client.GetFromJsonAsync<JsonElement>("/api/settings/dingtalk");
         Assert.Equal(0, initial.GetProperty("rowVersion").GetInt64());
-        var input = new { enabled = true, corpId = "test-corp", appKey = "test-key", robotCode = "robot-test", appSecret = "private-app-secret", publicUrl = "http://192.168.2.8:5173", users = new[] { new { dingTalkUserId = "ding-admin", username = "admin" } }, expectedRowVersion = 0 };
+        var input = new { enabled = true, corpId = "test-corp", appKey = "test-key", robotCode = "robot-test", coolAppCode = "COOLAPP-test", appSecret = "private-app-secret", publicUrl = "http://192.168.2.8:5173", notificationTemplate = "问题描述：{问题描述}\n处理状态：{实施状态}", users = new[] { new { dingTalkUserId = "ding-admin", username = "admin" } }, expectedRowVersion = 0 };
         var savedResponse = await client.PutAsJsonAsync("/api/settings/dingtalk", input);
         Assert.Equal(HttpStatusCode.OK, savedResponse.StatusCode);
         var text = await savedResponse.Content.ReadAsStringAsync(); Assert.DoesNotContain("private-app-secret", text);
         var saved = JsonSerializer.Deserialize<JsonElement>(text); Assert.True(saved.GetProperty("hasAppSecret").GetBoolean());
+        Assert.Equal(input.notificationTemplate, saved.GetProperty("notificationTemplate").GetString());
+        Assert.False(saved.TryGetProperty("coolAppCode", out _));
+        Assert.False(saved.TryGetProperty("groupEntryUrl", out _));
+        Assert.Contains("问题描述", saved.GetProperty("notificationFields").EnumerateArray().Select(field => field.GetString()));
+        foreach (var invalid in new[] { "未知：{未知字段}", "问题：{问题描述", new string('长', 6001) })
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PutAsJsonAsync("/api/settings/dingtalk", new { input.enabled, input.corpId, input.appKey, input.publicUrl, expectedRowVersion = 1, notificationTemplate = invalid })).StatusCode);
         Assert.Equal($"http://192.168.2.8:5173/?dingtalkOpl=1&companyId={company}", saved.GetProperty("entryUrl").GetString());
         Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync("/api/settings/dingtalk", input)).StatusCode);
         var configs = factory.Services.GetRequiredService<IDingTalkConfigurationRepository>();
@@ -61,7 +67,9 @@ public sealed class DingTalkConfigurationTests
         Assert.True(discovered.GetProperty("groups")[0].GetProperty("registered").GetBoolean());
         var boundResponse=await client.PutAsJsonAsync($"/api/projects/{RootId}/dingtalk",new {groupId,expectedRowVersion=2});
         Assert.Equal(HttpStatusCode.OK,boundResponse.StatusCode);
-        Assert.Contains("提交入口卡片已发到群内",(await boundResponse.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("entryMessage").GetString());
+        var bound = await boundResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Contains("groupId="+groupId,bound.GetProperty("entryUrl").GetString());
+        Assert.Contains("提交入口卡片已发到群内",bound.GetProperty("entryMessage").GetString());
         Assert.Equal(HttpStatusCode.OK,(await client.PostAsync($"/api/projects/{RootId}/dingtalk/entry",null)).StatusCode);
         var second = await repository.CreateProjectAsync(new CreateProjectCommand("DING-SECOND", "第二项目", "admin", "unused", "unused"), "admin", default);
         var duplicate = await client.PutAsJsonAsync($"/api/projects/{second.Id}/dingtalk", new { groupId, expectedRowVersion = 3 });
@@ -82,6 +90,7 @@ public sealed class DingTalkConfigurationTests
         var preserved = await client.PutAsJsonAsync("/api/settings/dingtalk", new { input.enabled, input.corpId, input.appKey, appSecret = "", input.publicUrl, input.users, expectedRowVersion = 3 });
         Assert.Equal(HttpStatusCode.OK, preserved.StatusCode);
         Assert.True((await preserved.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("hasAppSecret").GetBoolean());
+        Assert.Equal(input.notificationTemplate, (await client.GetFromJsonAsync<JsonElement>("/api/settings/dingtalk")).GetProperty("notificationTemplate").GetString());
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PutAsJsonAsync($"/api/projects/{RootId}/dingtalk", new { groupId = Guid.NewGuid(), expectedRowVersion = 4 })).StatusCode);
         Assert.Equal(groupId, (await client.GetFromJsonAsync<JsonElement>($"/api/projects/{RootId}/dingtalk")).GetProperty("groupId").GetGuid());
         Assert.Equal(HttpStatusCode.OK, (await client.PutAsJsonAsync($"/api/projects/{RootId}/dingtalk", new { groupId, expectedRowVersion = 4 })).StatusCode);
@@ -95,6 +104,11 @@ public sealed class DingTalkConfigurationTests
         var protector = factory.Services.GetRequiredService<Microsoft.AspNetCore.DataProtection.IDataProtectionProvider>().CreateProtector("Upton.Pdm.DingTalk.Configuration.v1");
         await configs.SaveAsync(new(company, protector.Protect(JsonSerializer.Serialize(bindingOptions, new JsonSerializerOptions(JsonSerializerDefaults.Web))), bindingOptions.RowVersion), 7, default);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PutAsJsonAsync($"/api/projects/{RootId}/dingtalk", new { groupId = alias, expectedRowVersion = 8 })).StatusCode);
+        var renamedEvent=JsonSerializer.SerializeToElement(new {conversationType="2",chatbotCorpId="test-corp",robotCode="robot-test",conversationId="cid-shared",conversationTitle="改名后的项目群",text=new {content="登记项目群"}});
+        Assert.True(await discovery.RegisterGroupAsync(company,"test-corp","test-key","robot-test",renamedEvent,default));
+        var renamed=await discovery.LoadAsync(company,default);
+        Assert.Equal("改名后的项目群",renamed.Groups[groupId].Name);
+        Assert.Equal(groupId,renamed.Bindings[second.Id]);
         await repository.CreateUserAsync(new(Guid.NewGuid(), "other", "普通用户", "unused", UserRole.Engineer, true), default);
         await repository.SetUserCompanyScopeAsync("other", company, false, [], "admin", default);
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("other", "Engineer"));

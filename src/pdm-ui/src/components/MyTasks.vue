@@ -131,7 +131,7 @@ function stageLabel(stage: string | number) {
 
 function notificationActionLabel(notification: UserNotification) {
   if (notification.category.startsWith('EditLock')) return '查看图档'
-  if (notification.category === 'ProjectTodo') return '查看项目'
+  if (notification.category === 'ProjectTodo') return notification.projectId ? '查看项目' : '查看待办'
   return notification.category === 'MaterialMasterRejected' || notification.category === 'MaterialCodeApplicationRejected'
     ? '查看料品'
     : '查看发布包'

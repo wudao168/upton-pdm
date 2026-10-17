@@ -4,7 +4,7 @@ import { addDays, effectiveTasks, stageName, validDate } from './projectWorkbenc
 export interface CalendarEvent {
   id: string; projectId: string; code: string; projectName: string; title: string; date: string
   owner?: string; actual?: string; baseline?: string; taskId?: string; tab: WorkbenchTab
-  kind: 'milestone' | 'stage' | 'shipping' | 'risk'; tone: 'normal' | 'warning' | 'danger' | 'done'; detail: string
+  todoId?: string; kind: 'milestone' | 'stage' | 'shipping' | 'risk' | 'todo'; tone: 'normal' | 'warning' | 'danger' | 'done'; detail: string
 }
 export const chinaToday = () => new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10)
 export function shiftMonth(month: string, offset: number) {

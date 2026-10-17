@@ -1254,7 +1254,10 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             var updated = await response.Content.ReadFromJsonAsync<RolePermissionDirectoryResponse>();
             var updatedEngineer = Assert.Single(updated!.Roles, role => role.Role == nameof(UserRole.Engineer));
-            Assert.Contains(PermissionCodes.DocumentEdit, updatedEngineer.Permissions);
+            Assert.Contains("document.register", updatedEngineer.Permissions);
+            Assert.Contains("document.checkout", updatedEngineer.Permissions);
+            Assert.Contains("document.archive", updatedEngineer.Permissions);
+            Assert.Contains("document.restore", updatedEngineer.Permissions);
             Assert.Contains(PermissionCodes.ProjectContentView, updatedEngineer.Permissions);
             Assert.Contains(PermissionCodes.ProjectView, updatedEngineer.Permissions);
         }

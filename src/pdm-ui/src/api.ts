@@ -27,7 +27,7 @@ import type { OplInput, OplIssue, OplView } from './projectOpl'
 import type { DingTalkSettings, DingTalkBinding } from './dingtalk'
 
 export const readDingTalkSettings = (token: string) => requestJson<DingTalkSettings>('/api/settings/dingtalk', {}, token)
-export const saveDingTalkSettings = (input: { robotCode?: string; enabled: boolean; corpId: string; appKey: string; appSecret: string; publicUrl: string; expectedRowVersion: number }, token: string) => requestJson<DingTalkSettings>('/api/settings/dingtalk', { method: 'PUT', body: JSON.stringify(input) }, token)
+export const saveDingTalkSettings = (input: { robotCode?: string; notificationTemplate?: string; enabled: boolean; corpId: string; appKey: string; appSecret: string; publicUrl: string; expectedRowVersion: number }, token: string) => requestJson<DingTalkSettings>('/api/settings/dingtalk', { method: 'PUT', body: JSON.stringify(input) }, token)
 export const readDingTalkBinding = (id: string, token: string) => requestJson<DingTalkBinding>(`/api/projects/${id}/dingtalk`, {}, token)
 export const saveDingTalkBinding = (id: string, input: { groupId: string | null; expectedRowVersion: number }, token: string) => requestJson<DingTalkBinding>(`/api/projects/${id}/dingtalk`, { method: 'PUT', body: JSON.stringify(input) }, token)
 export const publishDingTalkEntry = (id: string, token: string) => requestJson<{ sent: boolean; message: string }>(`/api/projects/${id}/dingtalk/entry`, { method: 'POST' }, token)
@@ -35,8 +35,8 @@ export const publishDingTalkEntry = (id: string, token: string) => requestJson<{
 export function readProjectOpl(projectId: string, token: string, includePeople = true) {
   return requestJson<OplView>(`/api/projects/${projectId}/opl${includePeople ? '' : '?includePeople=false'}`, {}, token)
 }
-export function completeProjectOpl(projectId: string, id: string, expectedRowVersion: number, token: string) {
-  return requestJson<OplIssue>(`/api/projects/${projectId}/opl/${id}/complete`, { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token)
+export function completeProjectOpl(projectId: string, id: string, expectedRowVersion: number, token: string, notifyGroup = false) {
+  return requestJson<OplIssue>(`/api/projects/${projectId}/opl/${id}/complete`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, notifyGroup }) }, token)
 }
 export function saveProjectOpl(projectId: string, id: string | null, input: OplInput, files: File[], token: string) {
   const body = new FormData()
@@ -264,6 +264,7 @@ export interface ProjectDocumentWorkspaceData {
 }
 
 interface ApiProject {
+  permissionSchemaVersion?: number
   id: string
   code: string
   name: string
@@ -1412,13 +1413,21 @@ export function getProjectPermissionSettings(token: string): Promise<import('./t
   return requestJson('/api/project-permissions', {}, token)
 }
 
+export function getProjectPositionMembers(projectId: string, token: string): Promise<{ positions: import('./types').ProjectPositionDefinition[]; members: Record<string, string[]> }> {
+  return requestJson(`/api/projects/${projectId}/position-members`, {}, token)
+}
+
+export function updateProjectPositionMembers(projectId: string, members: Record<string, string[]>, token: string): Promise<ProjectSummary> {
+  return requestJson(`/api/projects/${projectId}/position-members`, { method: 'PUT', body: JSON.stringify({ members }) }, token)
+}
+
 export function updateProjectPermissionSettings(settings: import('./types').ProjectPermissionSettings, token: string): Promise<import('./types').ProjectPermissionSettings> {
   return requestJson('/api/project-permissions', { method: 'PUT', body: JSON.stringify(settings) }, token)
 }
 
 export function updateRolePermissions(role: string, permissions: string[], token: string): Promise<RolePermissionDirectory> {
   return requestJson(`/api/role-permissions/${encodeURIComponent(role)}`, {
-    method: 'PUT', body: JSON.stringify({ permissions }),
+    method: 'PUT', body: JSON.stringify({ permissions, schemaVersion: 2 }),
   }, token)
 }
 
@@ -2413,6 +2422,7 @@ function emptyProjectRoot(project: Pick<ApiProject, 'id'>): DocumentNode {
 function mapProject(project: ApiProject): ProjectSummary {
   const locationParts = project.vaultLocation.split(/[\\/]/).filter(Boolean)
   return {
+    permissionSchemaVersion: project.permissionSchemaVersion,
     id: project.id,
     code: project.code,
     name: project.name,
@@ -2942,4 +2952,11 @@ export function getValidationEmergencyCapability(taskId: string, token: string, 
 }
 export function emergencyDecideValidationPlan(taskId: string, decision: 'Approved' | 'Rejected', reason: string, token: string, scope = ''): Promise<ProjectValidationPlan> {
   return requestJson(`/api${scope}/validation-plan-approval-tasks/${taskId}/emergency-decision`, { method: 'POST', body: JSON.stringify({ decision: decision === 'Approved' ? 0 : 1, reason }) }, token)
+}
+
+export async function readCalendarTodos(from: string, to: string, token: string): Promise<UserNotification[]> {
+  return requestJson(`/api/calendar-todos?${new URLSearchParams({ from, to })}`, {}, token)
+}
+export async function createUserTodo(input: { content: string; dueDate?: string; recipientUsernames: string[] }, token: string): Promise<UserNotification> {
+  return requestJson('/api/todos', { method: 'POST', body: JSON.stringify(input) }, token)
 }

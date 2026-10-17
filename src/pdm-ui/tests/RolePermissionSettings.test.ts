@@ -6,10 +6,10 @@ import type { RolePermissionDirectory } from '../src/types'
 
 const directory: RolePermissionDirectory = {
   permissions: [
-    { code: 'project.view', name: '查看项目', module: '项目管理', sensitive: false },
-    { code: 'document.edit', name: '编辑图档', module: '项目内容', sensitive: true },
-    { code: 'future-module.view', name: '查看新增模块', module: '新增模块', sensitive: false },
-    { code: 'future-module.publish', name: '发布新增模块', module: '新增模块', sensitive: true },
+    { code: 'project.view', name: '查看项目', module: '项目管理', sensitive: false, action: 'view' },
+    { code: 'document.edit', name: '编辑图档', module: '项目内容', sensitive: true, action: 'edit', dependencies: ['project.view'] },
+    { code: 'future-module.view', name: '查看新增模块', module: '新增模块', sensitive: false, action: 'view' },
+    { code: 'future-module.publish', name: '发布新增模块', module: '新增模块', sensitive: true, action: 'other', dependencies: ['project.view'] },
   ],
   roles: [
     { role: 'Engineer', name: '工程师', description: '设计岗位', baseRole: 'Engineer', isSystem: true, isSystemAdministrator: false, permissions: ['project.view'], userCount: 1 },
@@ -36,7 +36,7 @@ describe('RolePermissionSettings', () => {
   ])('授权 %s 补齐读取前提，撤销读取时清除依赖操作', async (operation, prerequisites) => {
     const codes = [operation, ...prerequisites]
     const roleDirectory: RolePermissionDirectory = {
-      permissions: codes.map(code => ({ code, name: code, module: '测试权限', sensitive: false })),
+      permissions: codes.map(code => ({ code, name: code, module: '测试权限', sensitive: false, action: 'other', dependencies: codes.slice(codes.indexOf(code) + 1) })),
       roles: [{ ...directory.roles[0]!, permissions: [] }],
     }
     const onSave = vi.fn().mockImplementation((_role, permissions) => Promise.resolve({ ...roleDirectory, roles: [{ ...roleDirectory.roles[0], permissions }] }))

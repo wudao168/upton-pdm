@@ -23,7 +23,12 @@ public static class ProjectOplEndpointExtensions
         });
         api.MapPut("/{id:guid}", (Guid projectId, Guid id, HttpContext context, ProjectOplService service, CancellationToken ct) => Save(projectId, id, context, service, ct));
         api.MapPost("/{id:guid}/complete", async (Guid projectId, Guid id, CompleteOplInput input, HttpContext context, ProjectOplService service, CancellationToken ct) =>
-            Results.Ok(await service.CompleteAsync(projectId, id, input.ExpectedRowVersion, Actor(context), Role(context), ct)));
+        {
+            var previous = input.NotifyGroup ? (await service.GetAsync(projectId, Actor(context), Role(context), ct, false)).Rows.SingleOrDefault(row => row.Issue.Id == id)?.Issue : null;
+            var issue = await service.CompleteAsync(projectId, id, input.ExpectedRowVersion, Actor(context), Role(context), ct);
+            var notification = input.NotifyGroup ? await context.RequestServices.GetRequiredService<DingTalkOplIntegration>().NotifyAsync(issue, false, ct, previous) : null;
+            return MutationResult(issue, notification);
+        });
         api.MapGet("/{id:guid}/attachments/{attachmentId:guid}", async (Guid projectId, Guid id, Guid attachmentId, HttpContext context, ProjectOplService service, CancellationToken ct) =>
         {
             var (file, content) = await service.OpenAsync(projectId, id, attachmentId, Actor(context), Role(context), ct);
@@ -61,14 +66,23 @@ public static class ProjectOplEndpointExtensions
     private static async Task<IResult> Save(Guid projectId, Guid? id, HttpContext context, ProjectOplService service, CancellationToken ct, string source = "Manual")
     {
         var (input, uploads) = await ReadFormAsync<OplInput>(context, ct);
+        var previous = id is not null && input.NotifyGroup ? (await service.GetAsync(projectId, Actor(context), Role(context), ct, false)).Rows.SingleOrDefault(row => row.Issue.Id == id)?.Issue : null;
         var issue = await service.SaveAsync(projectId, id, input, uploads, Actor(context), Role(context), ct, source);
-        if (id is null)
+        DingTalkNotificationResult? notification = null;
+        if (id is null || input.NotifyGroup)
         {
             var integration = context.RequestServices.GetRequiredService<DingTalkOplIntegration>();
-            var notification = await integration.NotifyAsync(issue, false, ct);
+            notification = await integration.NotifyAsync(issue, false, ct, previous);
             context.Response.Headers["X-OPL-Notification"] = notification.Sent ? "sent" : "not-sent";
         }
-        return Results.Ok(issue);
+        return MutationResult(issue, notification);
+    }
+    private static IResult MutationResult(OplIssue issue, DingTalkNotificationResult? notification)
+    {
+        var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var value = JsonSerializer.SerializeToNode(issue, json)!;
+        if (notification is not null) value["notification"] = JsonSerializer.SerializeToNode(notification, json);
+        return Results.Ok(value);
     }
     private static string Actor(HttpContext context) => context.User.Identity?.Name ?? throw new UnauthorizedAccessException("登录信息无效。");
     private static UserRole Role(HttpContext context) => Enum.Parse<UserRole>(context.User.FindFirstValue(ClaimTypes.Role) ?? throw new UnauthorizedAccessException("角色信息无效。"));

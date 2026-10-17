@@ -42,5 +42,6 @@
     <Compile Include="..\Pdm.Client.Shared\DesktopAuthHandoffStore.cs" Link="DesktopAuthHandoffStore.cs" />
     <Compile Include="..\Pdm.SolidWorks.Addin\PdmDocumentIdentityStore.cs" Link="Workspace\PdmDocumentIdentityStore.cs" />
     <Compile Include="..\Pdm.SolidWorks.Addin\WorkspaceLocalStateReader.cs" Link="Workspace\WorkspaceLocalStateReader.cs" />
+    <Compile Include="..\Pdm.SolidWorks.Addin\ArchiveFileFingerprint.cs" Link="Workspace\ArchiveFileFingerprint.cs" />
   </ItemGroup>
 </Project>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ProjectTodoFields from './ProjectTodoFields.vue'
 import { CheckCircle2, ChevronRight, FolderTree, ListTodo, RotateCw as RefreshCw, UsersRound } from '@lucide/vue'
 import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, listProjectAudit, listProjectPlanVersions, readProjectPlanPortfolio, readProjectValidationPlan } from '../api'
 import OverviewTimeline from './OverviewTimeline.vue'
@@ -493,13 +494,7 @@ const overviewAlerts = computed(() => [
 
     <el-dialog v-model="managerNoteDialogOpen" class="pdm-manager-note-dialog" :title="managerNoteTarget ? `维护项目记录 · ${managerNoteTarget.code}` : '维护项目记录'" width="520px" append-to-body>
       <label class="pdm-dialog-field">备注内容<textarea v-model="managerNoteContent" class="pdm-manager-note-dialog__input" maxlength="1000" rows="5" placeholder="记录进度、风险或需要跟进的事项" aria-label="项目备注内容" /></label>
-      <section class="pdm-project-todo-settings" aria-label="待办设置">
-        <header><strong>待办设置</strong><span>保存记录时将上述内容推送给指定人员</span></header>
-        <div>
-          <label class="pdm-dialog-field">截止日期（可选）<el-date-picker v-model="todoDueDate" type="date" value-format="YYYY-MM-DD" placeholder="不设截止日期" aria-label="待办截止日期" /></label>
-          <label class="pdm-dialog-field">接收人<el-select v-model="todoRecipients" multiple filterable collapse-tags collapse-tags-tooltip placeholder="选择接收人" aria-label="待办接收人"><el-option v-for="user in todoRecipientCandidates" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
-        </div>
-      </section>
+      <ProjectTodoFields v-model:due-date="todoDueDate" v-model:recipients="todoRecipients" :users="todoRecipientCandidates" :pending="savingManagerNote" />
       <section class="pdm-project-record-history" aria-label="当前项目及子项目历史记录">
         <header><strong>历史记录</strong><span>当前项目及子项目</span></header>
         <div v-if="projectRecordHistory.length" class="pdm-project-record-history__list">

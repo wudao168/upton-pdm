@@ -56,4 +56,22 @@ describe('PreviewWorkspace 网页端预览版本回退', () => {
     expect(wrapper.find('.pdm-preview-notice').exists()).toBe(false)
     wrapper.unmount()
   })
+
+  it('审核版本更新后等待主动加载，不自动下载或回退到其他预览版本', async () => {
+    api.listDocumentVersions.mockResolvedValue([
+      version('frozen', 'W2', 'Work', { format: 'Pdf', storageRelativePath: 'frozen.pdf', fileLength: 10, sha256: 'B'.repeat(64), sourceSha256: 'C'.repeat(64) }),
+      version('previous', 'A', 'Released', { format: 'Pdf', storageRelativePath: 'previous.pdf', fileLength: 10, sha256: 'B'.repeat(64), sourceSha256: 'C'.repeat(64) }),
+    ])
+    api.readDocumentPreviewFile.mockResolvedValue(new Blob(['pdf'], { type: 'application/pdf' }))
+    const wrapper = mount(PreviewWorkspace, { props: { selected, related: [], accessToken: 'token' } })
+    await wrapper.get('.pdm-preview-state-content button').trigger('click')
+    await vi.waitFor(() => expect(api.readDocumentPreviewFile).toHaveBeenCalledTimes(1))
+    await wrapper.setProps({ reviewVersionId: 'frozen', reviewRevision: 'W2' })
+    expect(api.readDocumentPreviewFile).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('.pdm-embedded-preview-slot').attributes('data-preview-state')).toBe('idle')
+    await wrapper.get('.pdm-preview-state-content button').trigger('click')
+    await vi.waitFor(() => expect(api.readDocumentPreviewFile).toHaveBeenCalledTimes(2))
+    expect(api.readDocumentPreviewFile).toHaveBeenLastCalledWith('document-1', 'frozen', 'token')
+    wrapper.unmount()
+  })
 })

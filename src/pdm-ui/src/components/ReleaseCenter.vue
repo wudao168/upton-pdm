@@ -33,6 +33,7 @@ const props = withDefaults(defineProps<{
   allowedScopes?: Array<Exclude<ReleaseScope, 'LegacyCombined'>>
   preferredScope?: Exclude<ReleaseScope, 'LegacyCombined'>
   changeReasonTypes?: string[]
+  changeReasonLabels?: Record<string, string>
   formalSupplementPolicies?: FormalSupplementPolicies
   releasePackages?: ReleasePackageSummary[]
   longLeadPublishedItems?: BomItem[]
@@ -40,7 +41,7 @@ const props = withDefaults(defineProps<{
   previousSummaryItems?: BomItem[]
   drawingReviewCandidates?: DrawingReviewCandidate[]
   drawingReviews?: DrawingReviewPackage[]
-}>(), { projectId: '', standardItems: () => [], releaseItems: () => [], canEmergencyDecide: false, allowedScopes: () => [], changeReasonTypes: () => [], formalSupplementPolicies: () => ({ standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } }), releasePackages: () => [], longLeadPublishedItems: () => [], previousVersionItems: () => [], drawingReviewCandidates: () => [] })
+}>(), { projectId: '', standardItems: () => [], releaseItems: () => [], canEmergencyDecide: false, allowedScopes: () => [], formalSupplementPolicies: () => ({ standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } }), releasePackages: () => [], longLeadPublishedItems: () => [], previousVersionItems: () => [], drawingReviewCandidates: () => [] })
 const emit = defineEmits<{
   create: [input: CreateReleasePackageInput]
   updateDraft: [releasePackageId: string, input: UpdateReleasePackageDraftInput]
@@ -95,7 +96,7 @@ const visibleReleaseTypes = computed(() => releaseTypes.filter(item =>
 const releaseNote = ref('')
 const selectedChangeReasons = ref<string[]>([])
 const otherChangeReason = ref('')
-const changeReasonGroups = [
+const defaultChangeReasonGroups = [
   { category: '正式补充', reasons: [{ label: '正式补充', value: '正式补充' }] },
   { category: '物料问题', reasons: ['交期不满足', '物料下单晚', '买错物料', '物料漏买'].map(reason => ({ label: reason, value: `物料问题 / ${reason}` })) },
   { category: '图纸问题', reasons: ['图纸漏下', '图纸错误'].map(reason => ({ label: reason, value: `图纸问题 / ${reason}` })) },
@@ -103,6 +104,9 @@ const changeReasonGroups = [
   { category: '客户原因', reasons: ['客户需求变更', '客户信息输入错误', '客户未及时确认', '客户未及时提供产品'].map(reason => ({ label: reason, value: `客户原因 / ${reason}` })) },
   { category: '其他', reasons: [{ label: '其他', value: '其他' }] },
 ]
+const changeReasonGroups = computed(() => defaultChangeReasonGroups.map(group => ({ ...group,
+  reasons: props.changeReasonTypes == null ? group.reasons : props.changeReasonTypes.filter(key => key === group.category || key.startsWith(group.category + ' / ')).map(value => ({ value, label: props.changeReasonLabels?.[value] || group.reasons.find(item => item.value === value)?.label || value.split(' / ').slice(1).join(' / ') })),
+})))
 const scope = ref<Exclude<ReleaseScope, 'LegacyCombined'>>('StandardLongLead')
 const drawingPriority = ref<DrawingPriority>('Normal')
 const drawingRequiredOn = ref('')
@@ -235,7 +239,7 @@ const formalSupplementAvailability = computed(() => {
 const changeReasonText = computed(() => selectedChangeReasons.value.map(reason =>
   reason === '其他' ? `其他 / ${otherChangeReason.value.trim()}` : reason).join('；'))
 const changeReasonSummary = computed(() => selectedChangeReasons.value.map(reason =>
-  reason === '其他' ? `其他 / ${otherChangeReason.value.trim() || '请填写具体原因'}` : reason).join('；'))
+  reason === '其他' ? `其他 / ${otherChangeReason.value.trim() || '请填写具体原因'}` : props.changeReasonLabels?.[reason] ? (reason.includes(' / ') ? reason.split(' / ')[0] + ' / ' : '') + props.changeReasonLabels[reason] : reason).join('；'))
 const availableReleaseItems = computed(() => (props.releaseItems.length ? props.releaseItems
   : scope.value.startsWith('Standard') ? props.standardItems : [])
   .filter(row => !row.manuallyExcluded && !row.releaseExcluded && !row.releaseConfirmation
@@ -836,7 +840,7 @@ function startDraftEdit() {
           otherChangeReason.value = item.detail || ''
           return '其他'
         }
-        return `${item.category} / ${item.reason}`
+        return `${item.category} / ${item.reasonCode.startsWith('custom-') ? item.reasonCode : item.reason}`
       })
     } else {
       selectedChangeReasons.value = (releasePackage.changeReason || '').split('；').filter(Boolean).map(reason => {
@@ -1042,7 +1046,7 @@ async function saveItemComment() {
                 <div>
                   <label v-for="reason in group.reasons" :key="reason.value" :class="{ 'is-disabled': reason.value === '正式补充' && !formalSupplementAvailability.allowed }">
                     <input v-model="selectedChangeReasons" type="checkbox" :value="reason.value" :disabled="reason.value === '正式补充' && !formalSupplementAvailability.allowed" :aria-label="`变更原因 ${reason.value}`">
-                    <span>{{ reason.label }}</span>
+                    <span>{{ changeReasonLabels?.[reason.value] || reason.label }}</span>
                   </label>
                   <input v-if="group.category === '其他' && selectedChangeReasons.includes('其他')" v-model.trim="otherChangeReason" class="release-other-reason-input" maxlength="200" placeholder="请填写具体原因（必填）" aria-label="其他具体原因">
                 </div>

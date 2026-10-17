@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ProjectTodoFields from './ProjectTodoFields.vue'
 import { computed, ref, watch } from 'vue'
 import { addProjectManagerNote, createProjectTodo } from '../api'
 import { ElMessage } from '../statusMessage'
@@ -106,13 +107,7 @@ async function saveProjectRecord() {
     <el-drawer v-model="projectRecordDrawerOpen" class="pdm-project-record-drawer" title="新增项目记录" size="520px" append-to-body>
       <label v-if="noteProjects.length > 1" class="pdm-dialog-field">项目<el-select v-model="noteProjectId" aria-label="备注项目" placeholder="选择项目"><el-option v-for="project in noteProjects" :key="project.id" :label="`${project.code} · ${project.name}`" :value="project.id" /></el-select></label>
       <label class="pdm-dialog-field">备注内容<textarea v-model="managerNote" class="pdm-manager-note-dialog__input" maxlength="1000" rows="5" placeholder="记录进度、风险或需要跟进的事项" aria-label="项目备注内容" /></label>
-      <section class="pdm-project-todo-settings" aria-label="待办设置">
-        <header><strong>待办设置</strong><span>保存记录时将上述内容推送给指定人员</span></header>
-        <div>
-          <label class="pdm-dialog-field">截止日期（可选）<el-date-picker v-model="todoDueDate" type="date" value-format="YYYY-MM-DD" placeholder="不设截止日期" aria-label="待办截止日期" /></label>
-          <label class="pdm-dialog-field">接收人<el-select v-model="todoRecipients" multiple filterable collapse-tags collapse-tags-tooltip placeholder="选择接收人" aria-label="待办接收人"><el-option v-for="user in todoRecipientCandidates" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
-        </div>
-      </section>
+      <ProjectTodoFields v-model:due-date="todoDueDate" v-model:recipients="todoRecipients" :users="todoRecipientCandidates" :pending="savingManagerNote" />
       <template #footer><el-button @click="projectRecordDrawerOpen=false">取消</el-button><el-button type="primary" :loading="savingManagerNote" @click="saveProjectRecord">保存记录</el-button></template>
     </el-drawer>
   </section>

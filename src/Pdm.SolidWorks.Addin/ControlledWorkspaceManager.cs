@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using Upton.Pdm.LocalSettings;
@@ -611,10 +610,6 @@ internal sealed class ControlledWorkspaceManager
 
     private static string ComputeSha256(string path)
     {
-        using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-        using (var hash = SHA256.Create())
-        {
-            return BitConverter.ToString(hash.ComputeHash(input)).Replace("-", string.Empty);
-        }
+        return ArchiveFileFingerprint.Read(path);
     }
 }

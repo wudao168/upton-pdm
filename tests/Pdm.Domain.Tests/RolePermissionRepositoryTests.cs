@@ -34,8 +34,10 @@ public sealed class RolePermissionRepositoryTests
             RoleCodes: ["ProductionViewer", customRole.Role]), default);
 
         var permissions = await repository.GetUserPermissionsAsync("delivery-role-test", UserRole.ProductionViewer, default);
-        Assert.True(permissions.SetEquals([
+        Assert.True(permissions.IsSupersetOf([
             PermissionCodes.MaterialView, PermissionCodes.ProductionDrawingManage, PermissionCodes.ProjectView, PermissionCodes.ProjectContentView]));
+        Assert.DoesNotContain(PermissionCodes.BomMechanicalEdit, permissions);
+        Assert.DoesNotContain(PermissionCodes.ProjectBudgetView, permissions);
 
         await repository.SetRolePermissionsAsync(customRole.Role, [], default);
         var afterRevocation = await repository.GetUserPermissionsAsync("delivery-role-test", UserRole.ProductionViewer, default);

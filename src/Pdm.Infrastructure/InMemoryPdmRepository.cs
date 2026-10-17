@@ -323,7 +323,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     private ProjectPermissionSettings projectPermissionSettings = ProjectPermissionSettings.Default;
 
     public Task<ProjectPermissionSettings> GetProjectPermissionSettingsAsync(CancellationToken cancellationToken) =>
-        Task.FromResult(projectPermissionSettings);
+        Task.FromResult(projectPermissionSettings.Normalize());
 
     public Task<ProjectPermissionSettings> UpdateProjectPermissionSettingsAsync(ProjectPermissionSettings settings, CancellationToken cancellationToken)
     {
@@ -347,7 +347,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         Task.FromResult(BuildRolePermissionDirectory());
 
     public Task<IReadOnlySet<string>> GetRolePermissionsAsync(UserRole role, CancellationToken cancellationToken) =>
-        Task.FromResult(rolePermissions.GetValueOrDefault(role.ToString(), RolePermissionCatalog.Defaults[role]));
+        Task.FromResult(FunctionPermissionCatalog.Effective(rolePermissions.GetValueOrDefault(role.ToString(), RolePermissionCatalog.Defaults[role])));
 
     public Task<IReadOnlySet<string>> GetUserPermissionsAsync(string username, UserRole fallbackRole, CancellationToken cancellationToken)
     {
@@ -379,7 +379,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         if (source.IsSystemAdministrator) throw new PdmRuleException("系统管理员不能作为复制来源。");
         var roleCode = $"custom-{Guid.NewGuid():N}";
         roleDefinitions[roleCode] = new(roleCode, normalizedName, description.Trim(), source.BaseRole);
-        rolePermissions[roleCode] = PermissionsFor(source.RoleCode, source.BaseRole).ToHashSet(StringComparer.Ordinal);
+        rolePermissions[roleCode] = rolePermissions.GetValueOrDefault(source.RoleCode, RolePermissionCatalog.Defaults[source.BaseRole]).ToHashSet(StringComparer.Ordinal);
         return Task.FromResult(BuildRolePermissionDirectory());
     }
 
@@ -1672,6 +1672,13 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var active = new List<Guid>();
             foreach (var documentId in documentIds.Distinct())
             {
+                if (pendingArchiveDocuments.TryGetValue(documentId, out var pending)
+                    && string.Equals(pending.Document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase)
+                    && pending.Document.CheckoutSessionId == sessionId && pending.Document.CheckoutLeaseExpiresAt > now)
+                {
+                    active.Add(documentId);
+                    continue;
+                }
                 if (!documents.TryGetValue(documentId, out var document)
                     || !string.Equals(document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase)
                     || document.CheckoutSessionId != sessionId) continue;
@@ -2299,7 +2306,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     /// <summary>列出需要继续转图的已发布包（待处理，或失败但未超过重试上限）。</summary>
     public Task<IReadOnlyList<Guid>> ListPublishingReleasePackageIdsAsync(int limit, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<Guid>>(packages.Values
-            .Where(package => package.State == ReleasePackageState.Publishing)
+            .Where(package => package.State == ReleasePackageState.Publishing && package.PreviewState != ReleasePreviewState.Failed)
             .OrderBy(package => package.CreatedAt)
             .Take(limit)
             .Select(package => package.Id)
@@ -2699,7 +2706,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             && supervisorMembership.UnitIds.Any(unitId => IsUnitWithin(unitId, supervisorUnitId));
         var canReadContent = HasUserPermission(actor, role, PermissionCodes.ProjectContentView);
         var canAssignDesigners = HasUserPermission(actor, role, PermissionCodes.ProjectDesignerAssign) && project.ExecutionUnitId is not null
-            && (managesExecutionUnit || isMechanicalSupervisor || belongsToProjectStaffing);
+            && (managesExecutionUnit || isMechanicalSupervisor || belongsToProjectStaffing
+                || ProjectPermissionPolicy.CustomAllows(project, projects.GetValueOrDefault(project.RootProjectId ?? project.Id) ?? project, actor, projectPermissionSettings, PermissionCodes.ProjectDesignerAssign));
         if (role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true)
             return project with { CanAssignExecutionUnit = project.ParentProjectId is null, CanManageMainStaffing = project.ExecutionUnitId is not null && canManage, CanAssignDesigners = canAssignDesigners, CanReadContent = true, EffectiveProjectPermissions = ProjectPermissionSettings.Operations, CanSubmitArchive = true, DocumentCount = documentCount, ModelDocumentCount = modelDocumentCount, DrawingDocumentCount = drawingDocumentCount, BusinessStatus = businessStatus, RootDocumentCheckedOutBy = rootDocumentCheckedOutBy };
         return project with
@@ -2716,7 +2724,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 : [],
             CanSubmitArchive = canReadContent
                 && HasUserPermission(actor, role, PermissionCodes.DocumentEdit)
-                && ProjectSubmissionPolicy.CanSubmitArchive(project, actor, false),
+                && (ProjectSubmissionPolicy.CanSubmitArchive(project, actor, false) || ProjectPermissionPolicy.CustomAllows(project, projects.GetValueOrDefault(project.RootProjectId ?? project.Id) ?? project, actor, projectPermissionSettings, PermissionCodes.DocumentEdit)),
             DocumentCount = canReadContent ? documentCount : null,
             ModelDocumentCount = canReadContent ? modelDocumentCount : null,
             DrawingDocumentCount = canReadContent ? drawingDocumentCount : null,
@@ -2848,11 +2856,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     private IReadOnlySet<string> PermissionsFor(string roleCode, UserRole fallbackRole) => fallbackRole == UserRole.Administrator
         ? RolePermissionCatalog.Defaults[UserRole.Administrator]
-        : rolePermissions.GetValueOrDefault(roleCode, RolePermissionCatalog.Defaults[fallbackRole]);
+        : FunctionPermissionCatalog.Effective(rolePermissions.GetValueOrDefault(roleCode, RolePermissionCatalog.Defaults[fallbackRole]));
 
     private IReadOnlySet<string> PermissionsFor(IEnumerable<string> roleCodes, UserRole fallbackRole) => fallbackRole == UserRole.Administrator
         ? RolePermissionCatalog.Defaults[UserRole.Administrator]
-        : roleCodes.SelectMany(roleCode => rolePermissions.GetValueOrDefault(roleCode, new HashSet<string>(StringComparer.Ordinal))).ToHashSet(StringComparer.Ordinal);
+        : roleCodes.SelectMany(roleCode => FunctionPermissionCatalog.Effective(rolePermissions.GetValueOrDefault(roleCode, new HashSet<string>(StringComparer.Ordinal)))).ToHashSet(StringComparer.Ordinal);
 
     private HashSet<Guid> UserOrganizationIds(string username)
     {

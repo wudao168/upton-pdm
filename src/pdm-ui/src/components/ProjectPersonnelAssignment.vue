@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import type { MainProjectStaffingInput, OrganizationDirectory, ProjectPhaseOwners, ProjectSummary } from '../types'
+import { ElMessage } from '../statusMessage'
+import { getProjectPositionMembers, updateProjectPositionMembers } from '../api'
+import type { MainProjectStaffingInput, OrganizationDirectory, ProjectPhaseOwners, ProjectPositionDefinition, ProjectSummary } from '../types'
 
 const props = defineProps<{
+  token?: string
   currentUsername: string; root: ProjectSummary; directory: OrganizationDirectory; canMaintainTeam: boolean
   commercialStaff: { salesPeople: string; presalesPeople: string }; canEditCommercial: boolean
   onSaveCommercial: (value: { salesPeople: string; presalesPeople: string }) => Promise<boolean | undefined>
@@ -11,10 +13,16 @@ const props = defineProps<{
   onUpdateDesigners: (id: string, users: string[]) => Promise<ProjectSummary>
   onUpdatePhaseOwners: (id: string, owners: ProjectPhaseOwners) => Promise<ProjectSummary>
 }>()
+const emit = defineEmits<{ positionsUpdated: [project: ProjectSummary] }>()
 const open = ref(false)
 const target = ref<ProjectSummary | null>(null)
 const saving = ref(false)
 const error = ref('')
+const customPositions = ref<ProjectPositionDefinition[]>([])
+const customMembers = ref<Record<string, string[]>>({})
+const originalMembers = ref('')
+const positionsLoading = ref(false)
+let positionGeneration = 0
 const staffing = reactive<MainProjectStaffingInput>({ primaryProjectManager: '', collaborativeProjectManagers: [], designLeads: [] })
 const commercial = reactive({ salesPeople: [] as string[], presalesPeople: [] as string[] })
 function commercialUsers(value: string) { return value.split('、').filter(Boolean).map(name => props.directory.users.find(user => user.username === name || user.displayName === name)?.username ?? name) }
@@ -36,7 +44,7 @@ const companyUsers = computed(() => {
 })
 const hardwareUsers = computed(() => companyUsers.value.filter(user => [user.role, ...(user.roles ?? [])].includes('HardwareEngineer')))
 const engineerUsers = computed(() => companyUsers.value.filter(user => [user.role, ...(user.roles ?? [])].some(role => ['Engineer', 'ElectricalEngineer', 'CommissioningEngineer', 'HardwareEngineer', 'MechanicalManager', 'TechnicalAssistant', 'ProcessReviewer', 'Approver'].includes(role))))
-function configure(project?: ProjectSummary) {
+async function configure(project?: ProjectSummary) {
   if (!project && !props.canMaintainTeam) return
   target.value = project ?? null
   error.value = ''
@@ -48,9 +56,23 @@ function configure(project?: ProjectSummary) {
   commercial.presalesPeople = commercialUsers(props.commercialStaff.presalesPeople)
   engineers.value = [...(project?.designers ?? [])]
   open.value = true
+  const generation = ++positionGeneration
+  customPositions.value = []
+  customMembers.value = {}
+  originalMembers.value = ''
+  if (!props.token) return
+  positionsLoading.value = true
+  try {
+    const value = await getProjectPositionMembers(project?.id ?? props.root.id, props.token)
+    if (generation !== positionGeneration) return
+    customPositions.value = value.positions
+    customMembers.value = Object.fromEntries(value.positions.map(position => [position.key, [...(value.members[position.key] ?? [])]]))
+    originalMembers.value = JSON.stringify(customMembers.value)
+  } catch (cause) { if (generation === positionGeneration) error.value = cause instanceof Error ? cause.message : '读取项目岗位失败，请关闭后重试' }
+  finally { if (generation === positionGeneration) positionsLoading.value = false }
 }
 async function save() {
-  if (saving.value || (!target.value && !props.canMaintainTeam)) return
+  if (saving.value || positionsLoading.value || (!target.value && !props.canMaintainTeam)) return
   if (!target.value && props.root.canManageMainStaffing && (!staffing.primaryProjectManager || !staffing.designLeads.length)) { error.value = '请选择项目经理和至少一名主设。'; return }
   saving.value = true
   error.value = ''
@@ -64,6 +86,8 @@ async function save() {
       if (props.root.canManageMainStaffing) await props.onUpdateMainStaffing(props.root.id, { ...staffing, collaborativeProjectManagers: [...staffing.collaborativeProjectManagers], designLeads: [...staffing.designLeads] })
       if (props.root.canAssignDesigners) await props.onUpdatePhaseOwners(props.root.id, Object.fromEntries(definitions.map(phase => [phase.key, (phases[phase.key] ?? []).join('、')])))
     }
+    if (props.token && originalMembers.value && JSON.stringify(customMembers.value) !== originalMembers.value)
+      emit('positionsUpdated', await updateProjectPositionMembers(target.value?.id ?? props.root.id, customMembers.value, props.token))
     open.value = false
     ElMessage.success('人员分配已保存')
   } catch (cause) { error.value = cause instanceof Error ? cause.message : '人员分配失败' }
@@ -87,6 +111,11 @@ defineExpose({ configure })
         <label v-for="phase in definitions.filter(item => item.key !== 'ElectricalHardware')" :key="phase.key">{{ phase.label }}<el-select v-model="phases[phase.key]" :aria-label="phase.label" multiple filterable clearable :disabled="saving || !root.canAssignDesigners"><el-option v-for="user in companyUsers" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
       </template>
       <label v-else>执行工程师<el-select v-model="engineers" aria-label="执行工程师" multiple filterable :disabled="saving"><el-option v-for="user in engineerUsers" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
+      <p v-if="positionsLoading" role="status">正在读取自定义岗位…</p>
+      <template v-for="position in customPositions" :key="position.key">
+        <label>{{ position.name }}{{ position.isActive ? '' : '（已停用）' }}<el-select v-model="customMembers[position.key]" :aria-label="`自定义岗位${position.name}`" multiple filterable clearable :disabled="saving"><el-option v-for="user in companyUsers" :disabled="!position.isActive && !customMembers[position.key]?.includes(user.username)" :key="user.username" :label="user.displayName" :value="user.username" /></el-select></label>
+        <small>{{ position.scope === 'subtree' ? '适用于所分配项目及其子项目' : '仅适用于所分配项目' }}</small>
+      </template>
       <p v-if="error" role="alert">{{ error }}</p>
     </div>
     <template #footer><el-button aria-label="取消人员分配" :disabled="saving" @click="open = false">取消</el-button><el-button aria-label="保存人员分配" type="primary" :loading="saving" @click="save">保存</el-button></template>

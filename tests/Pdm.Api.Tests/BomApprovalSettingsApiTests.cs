@@ -23,6 +23,25 @@ public sealed class BomApprovalSettingsApiTests
         var settings = (await client.GetFromJsonAsync<PdmSystemSettings>("/api/system-settings"))!;
         Assert.NotNull(settings.ApprovalWorkflows.Standard);
         Assert.NotNull(settings.ApprovalWorkflows.NonStandard);
+        var labelsResponse = await client.PutAsJsonAsync("/api/system-settings", settings with {
+            ReleaseChangeReasonLabels = new Dictionary<string, string> { ["物料问题 / 交期不满足"] = "  库存交期不足  ", ["正式补充"] = "计划内正式补充" }
+        });
+        labelsResponse.EnsureSuccessStatusCode();
+        settings = (await client.GetFromJsonAsync<PdmSystemSettings>("/api/system-settings"))!;
+        Assert.Equal("库存交期不足", settings.ReleaseChangeReasonLabels["物料问题 / 交期不满足"]);
+        Assert.Equal("计划内正式补充", settings.ReleaseChangeReasonLabels["正式补充"]);
+        Assert.Equal(PdmSystemSettings.DefaultReleaseChangeReasonTypes, settings.ReleaseChangeReasonTypes);
+        var customKey = "物料问题 / custom-inventory";
+        var customTypes = settings.ReleaseChangeReasonTypes.Where(key => key != "物料问题 / 交期不满足").Append(customKey).ToArray();
+        var customResponse = await client.PutAsJsonAsync("/api/system-settings", settings with {
+            ReleaseChangeReasonTypes = customTypes,
+            ReleaseChangeReasonLabels = new Dictionary<string, string> { [customKey] = "临时库存替代" }
+        });
+        customResponse.EnsureSuccessStatusCode();
+        var customized = (await client.GetFromJsonAsync<PdmSystemSettings>("/api/system-settings"))!;
+        Assert.DoesNotContain("物料问题 / 交期不满足", customized.ReleaseChangeReasonTypes);
+        Assert.Contains(customKey, customized.ReleaseChangeReasonTypes);
+        Assert.Equal("临时库存替代", customized.ReleaseChangeReasonLabels[customKey]);
         var original = settings.ApprovalWorkflows;
         var response = await client.PutAsJsonAsync("/api/system-settings", settings with { ApprovalWorkflows = original with
         {

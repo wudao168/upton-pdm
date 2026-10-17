@@ -27,6 +27,7 @@ const selected = computed(() => roles.value.find(role => role.role === selectedR
 const groups = computed(() => {
   const result = new Map<string, PermissionDefinition[]>()
   for (const permission of props.directory.permissions) {
+    if (permission.hidden) continue
     const items = result.get(permission.module) ?? []
     items.push(permission)
     result.set(permission.module, items)
@@ -113,24 +114,7 @@ function setPermission(code: string, checked: boolean) {
 
 // Keep these prerequisites aligned with RolePermissionCatalog.Normalize.
 function permissionDependencies(code: string): string[] {
-  const contentOperations = ['document.edit', 'document.recycle', 'document.lock.request-release', 'document.lock.force-release',
-    'bom.edit', 'bom.mechanical.edit', 'bom.electrical.edit', 'validation-plan.edit',
-    'drawing-review.submit', 'drawing-review.annotate', 'drawing-review.decide', 'release.manage', 'production.drawing.manage',
-    'approval.decide', 'approval.emergency-substitute', 'project.contact.edit', 'project.nameplate.edit', 'project.budget.view']
-  const result: string[] = []
-  if (code !== 'project.view' && code.startsWith('project.')) result.push('project.view')
-  if (contentOperations.includes(code) || code.startsWith('quality.')) result.push('project.content.view')
-  if (['project.budget.actual.edit', 'project.budget.edit', 'project.budget.reserve', 'project.budget.settlement.view',
-    'project.budget.settlement.edit', 'project.budget.bonus-rate.edit'].includes(code)) result.push('project.budget.view')
-  if (code === 'project.budget.settlement.edit') result.push('project.budget.settlement.view')
-  if (['program-template.submit', 'program-template.review', 'program-template.approve', 'program-template.manage'].includes(code)) result.push('program-template.view')
-  if (code === 'standard-library.manage') result.push('standard-library.view')
-  if (['material-relation.manage', 'material-relation.publish'].includes(code)) result.push('material-relation.view')
-  if (code === 'material.manage') result.push('material.apply')
-  if (code === 'material.apply') result.push('material.view')
-  if (code === 'system.role.edit') result.push('system.role.view')
-  if (code === 'system.project-permission.edit') result.push('system.project-permission.view')
-  return result
+  return props.directory.permissions.find(permission => permission.code === code)?.dependencies ?? []
 }
 
 function setGroup(permissions: PermissionDefinition[], checked: boolean) {
@@ -138,13 +122,7 @@ function setGroup(permissions: PermissionDefinition[], checked: boolean) {
 }
 
 function permissionCategory(permission: PermissionDefinition): PermissionCategory {
-  const label = permission.name
-  if (/查看|浏览|下载|查询/.test(label) || permission.code.endsWith('.view')) return 'view'
-  if (/发布|批准|审批|审核|分配|同步|释放|导入|导出|恢复|催办|决定/.test(label) || /\.(publish|approve|decide|assign|sync|release|import|export)$/.test(permission.code)) return 'other'
-  if (/新增|创建|发起|上传|提交/.test(label) || permission.code.endsWith('.create')) return 'create'
-  if (/删除|停用|作废|回收/.test(label) || /\.(delete|recycle|archive|disable)$/.test(permission.code)) return 'delete'
-  if (/编辑|维护|配置|登记|签出|存档/.test(label) || /\.(edit|manage|configure)$/.test(permission.code)) return 'edit'
-  return 'other'
+  return permission.action ?? 'other'
 }
 
 function categoryPermissions(category: PermissionCategory) {
@@ -207,7 +185,7 @@ watch(roles, value => {
 <template>
   <section class="pdm-project-manager" aria-label="角色权限设置">
     <header v-if="!embedded" class="pdm-pagebar">
-      <div><div class="pdm-breadcrumb">系统管理 <span>/</span> 角色权限</div><h1>角色权限设置</h1><p>功能权限决定账号可以执行的操作，项目岗位与组织分配决定可操作的数据范围。</p></div>
+      <div><div class="pdm-breadcrumb">系统管理 <span>/</span> 角色权限</div><h1>角色权限设置</h1><p>角色权限配置业务功能，项目岗位授权规则限定岗位职责及适用项目；具体人员在项目分工中指定。</p></div>
     </header>
     <section class="pdm-panel pdm-role-directory" aria-label="角色列表">
       <div v-if="canEdit" class="pdm-role-toolbar"><button type="button" class="pdm-primary-action" :disabled="pending" aria-label="复制角色新建" @click="openCreate"><CopyPlus :size="15" />复制角色新建</button></div>
@@ -230,7 +208,7 @@ watch(roles, value => {
           <label><span>角色信息</span><input :value="`${selected.isSystem ? '系统角色' : '自定义角色'} · ${selected.userCount} 个用户 · ${selected.role}`" readonly></label>
         </div>
         <p class="pdm-role-directory-note">权限模块由系统功能目录自动生成；当前共 {{ moduleCount }} 个模块、{{ permissionCount }} 项权限，后续新增模块会自动加入。</p>
-        <p class="pdm-role-directory-note">勾选操作权限会同步勾选必要的查看权限；取消查看权限会同时取消依赖它的操作。项目操作通常还需满足项目岗位授权；预算查看可由角色独立授权，审批仍按实际任务分配。</p>
+        <p class="pdm-role-directory-note">勾选操作权限会同步勾选必要的查看权限；取消查看权限会同时取消依赖它的操作。多数项目操作还需满足“项目岗位授权规则”；预算查看可由角色或项目岗位任一授权，仍需项目内容访问权，审批仍按实际任务分配。</p>
         <div class="pdm-permission-layout">
           <nav class="pdm-permission-sidebar" aria-label="权限模块">
             <strong>权限分类</strong>

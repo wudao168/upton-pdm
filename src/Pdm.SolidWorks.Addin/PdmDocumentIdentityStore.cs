@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Security.Cryptography;
+using System.Threading;
 using System.Web.Script.Serialization;
 using Microsoft.Win32.SafeHandles;
 using Upton.Pdm.LocalSettings;
@@ -154,6 +155,13 @@ internal static class PdmDocumentIdentityStore
         return TryWriteBinding(filePath, documentId, projectId, versionId, revision, sha256, fileLength);
     }
 
+    internal static bool TryRecoverControlledVersion(string filePath, PdmControlledFileMetadata expected,
+        Guid projectId, Guid versionId, string revision, string sha256, long fileLength)
+    {
+        return expected != null && TryWriteBinding(filePath, expected.DocumentId, projectId, versionId,
+            revision, sha256, fileLength, expected);
+    }
+
     private static bool TryWriteBinding(
         string filePath,
         Guid documentId,
@@ -161,15 +169,27 @@ internal static class PdmDocumentIdentityStore
         Guid? versionId,
         string revision,
         string sha256,
-        long? fileLength)
+        long? fileLength,
+        PdmControlledFileMetadata expected = null)
     {
         if (documentId == Guid.Empty || string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return false;
         lock (bindingSync)
         {
             string temporaryPath = null;
+            Mutex bindingMutex = null;
+            var ownsMutex = false;
             try
             {
+                // Desktop verification and the add-in write the same per-user binding files.
+                bindingMutex = new Mutex(false, @"Local\UPTON-PDM-Binding-" + Path.GetFileNameWithoutExtension(BindingPath(filePath)));
+                try { ownsMutex = bindingMutex.WaitOne(TimeSpan.FromSeconds(5)); }
+                catch (AbandonedMutexException) { ownsMutex = true; }
+                if (!ownsMutex) return false;
                 var previous = ReadBinding(filePath);
+                if (expected != null && (previous == null || previous.DocumentId != expected.DocumentId
+                    || previous.ProjectId != expected.ProjectId || previous.VersionId != expected.VersionId
+                    || previous.Revision != expected.Revision || previous.FileLength != expected.FileLength
+                    || !string.Equals(previous.Sha256, expected.Sha256, StringComparison.OrdinalIgnoreCase))) return false;
                 var retainedProjectId = projectId ?? (previous?.DocumentId == documentId ? previous.ProjectId : null);
                 var retainedVersionId = versionId ?? (previous?.DocumentId == documentId ? previous.VersionId : null);
                 var retainedRevision = revision ?? (previous?.DocumentId == documentId ? previous.Revision : null);
@@ -209,6 +229,8 @@ internal static class PdmDocumentIdentityStore
             }
             finally
             {
+                if (ownsMutex) bindingMutex.ReleaseMutex();
+                bindingMutex?.Dispose();
                 if (temporaryPath != null && File.Exists(temporaryPath))
                 {
                     try { File.Delete(temporaryPath); } catch (IOException) { } catch (UnauthorizedAccessException) { }

@@ -334,16 +334,19 @@ internal sealed class PdmApiClient : IDisposable
 
     public async Task<ArchiveBatchReceiptDto> CommitArchiveBatchAsync(Guid batchId, Guid sessionId, IReadOnlyList<object> files, CancellationToken token)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromMinutes(15));
+        var commitToken = deadline.Token;
         var payload = new { batchId, checkoutSessionId = sessionId, files };
         var expectedIds = files.Select(file => Guid.Parse(Convert.ToString(file.GetType().GetProperty("documentId").GetValue(file)))).ToArray();
         try
         {
             for (var attempt = 0; ; attempt++)
             {
-                try { return RequireCompleteArchiveReceipt(await PostJsonAsync<ArchiveBatchReceiptDto>("api/archive-batches", payload, token).ConfigureAwait(false), batchId, expectedIds); }
-                catch (Exception exception) when (attempt < 2 && !token.IsCancellationRequested
+                try { return RequireCompleteArchiveReceipt(await PostJsonAsync<ArchiveBatchReceiptDto>(controlledOpenHttpClient, "api/archive-batches", payload, commitToken).ConfigureAwait(false), batchId, expectedIds); }
+                catch (Exception exception) when (attempt < 2 && !commitToken.IsCancellationRequested
                     && (exception is HttpRequestException || exception is TaskCanceledException))
-                { await Task.Delay(TimeSpan.FromSeconds(attempt + 1), token).ConfigureAwait(false); }
+                { await Task.Delay(TimeSpan.FromSeconds(attempt + 1), commitToken).ConfigureAwait(false); }
             }
         }
         catch (Exception original) when (original is HttpRequestException || original is TaskCanceledException || original is InvalidOperationException)

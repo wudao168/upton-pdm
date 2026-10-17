@@ -1,4 +1,4 @@
-import { mount } from '@vue/test-utils'
+import { mount, flushPromises } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import ApprovalWorkflowSettings from '../src/components/ApprovalWorkflowSettings.vue'
 import type { OrganizationDirectory, PdmSystemSettings } from '../src/types'
@@ -33,22 +33,25 @@ describe('ApprovalWorkflowSettings', () => {
     const sourceValues = wrapper.findAll('input:disabled, select').map(input => (input.element as HTMLInputElement | HTMLSelectElement).value)
     expect(sourceValues).toContain('PrimaryUnitManager')
     expect(sourceValues).toContain('ParentUnitManager')
-    expect(wrapper.text()).toContain('组织调整不影响在途审批')
+    expect(wrapper.find('.workflow-heading h1').exists()).toBe(false)
+    expect(wrapper.find('.workflow-heading p').exists()).toBe(false)
+    expect(wrapper.find('.workflow-heading').exists()).toBe(false)
     expect(wrapper.findAll('.workflow-card')).toHaveLength(5)
     expect(wrapper.findAll('.workflow-card').map(card => card.attributes('aria-label'))).toEqual([
       '标准件BOM审批', '非标件BOM与图纸审批', '电气发布审批', '验证计划审批', '料号申请审批',
     ])
     expect(wrapper.find('select').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('指定账号')
-    expect(wrapper.text()).toContain('物料下单晚')
-    expect(wrapper.text()).toContain('客户未及时提供产品')
-    expect(wrapper.find('.change-reason-list input').exists()).toBe(false)
+    expect(wrapper.get('input[aria-label="物料问题具体原因 物料下单晚"]').element).toHaveProperty('value', '物料下单晚')
+    expect(wrapper.get('input[aria-label="客户原因具体原因 客户未及时提供产品"]').element).toHaveProperty('value', '客户未及时提供产品')
+    expect(wrapper.find('.change-reason-list input').exists()).toBe(true)
     const standardCount = wrapper.find('.formal-supplement-policy-card input[type="number"]')
     expect((standardCount.element as HTMLInputElement).value).toBe('3')
     await standardCount.setValue(4)
-    await wrapper.findAll('button').find(button => button.text() === '保存审批设置')!.trigger('click')
+    await wrapper.get('input[aria-label="物料问题具体原因 交期不满足"]').setValue('库存交期不足')
+    await wrapper.get('.change-reason-settings button').trigger('click')
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
-      releaseChangeReasonTypes: expect.arrayContaining(['正式补充', '物料问题 / 交期不满足', '设计问题 / 设计错误', '其他']),
+      releaseChangeReasonLabels: expect.objectContaining({ '正式补充': '正式补充', '物料问题 / 交期不满足': '库存交期不足' }),
       formalSupplementPolicies: expect.objectContaining({ standard: { maximumCount: 4, validDays: 10 } }),
     }))
   })
@@ -84,7 +87,7 @@ describe('ApprovalWorkflowSettings', () => {
     const saved = onSave.mock.calls[0]![0] as PdmSystemSettings
     expect(saved.approvalWorkflows!.standard!.steps).toHaveLength(2)
     expect(saved.approvalWorkflows!.standard!.steps[1]).toMatchObject({ name: '标准采购审核', assigneeSource: 'ParentUnitManager' })
-    expect(saved.approvalWorkflows!.nonStandard!.steps[1]!.stage).toBe('MechanicalSupervisor')
+    expect(saved.approvalWorkflows!.nonStandard).toBe(settings.approvalWorkflows!.nonStandard)
     expect(saved.approvalWorkflows!.mechanical).toEqual(settings.approvalWorkflows!.mechanical)
     expect(saved.approvalWorkflows!.electrical).toEqual(settings.approvalWorkflows!.electrical)
     await wrapper.setProps({ settings: saved })
@@ -123,13 +126,13 @@ describe('ApprovalWorkflowSettings', () => {
     expect(electrical.find('.workflow-target').text()).toContain('研发部（负责人：张审核） · 测试公司')
     expect(electrical.find('.workflow-target option[value="empty"]').attributes('disabled')).toBeDefined()
     expect(electrical.find('.workflow-target option[value="inactive"]').exists()).toBe(false)
-    await wrapper.find('button').trigger('click')
+    await electrical.find('button').trigger('click')
     expect(onSave).not.toHaveBeenCalled()
     expect(wrapper.find('[role="alert"]').text()).toContain('请选择已配置有效负责人的部门')
     await electrical.find('.workflow-target select').setValue('department')
-    await wrapper.find('button').trigger('click')
+    await electrical.find('button').trigger('click')
     const saved = onSave.mock.calls[0]![0] as PdmSystemSettings
-    expect(saved.approvalWorkflows!.standard!.steps[1]).toMatchObject({ assigneeSource: 'FixedUser', fixedAssignee: 'approver' })
+    expect(saved.approvalWorkflows!.standard).toBeUndefined()
     expect(saved.approvalWorkflows!.electrical.steps[1]).toMatchObject({ assigneeSource: 'FixedUnitManager', fixedUnitId: 'department' })
     await wrapper.setProps({ settings: saved })
     expect((electrical.find('.workflow-target select').element as HTMLSelectElement).value).toBe('department')
@@ -140,7 +143,7 @@ describe('ApprovalWorkflowSettings', () => {
     await wrapper.find('button').trigger('click')
     const changed = onSave.mock.calls[1]![0] as PdmSystemSettings
     expect(changed.approvalWorkflows!.standard!.steps[1]).not.toHaveProperty('fixedAssignee')
-    expect(changed.approvalWorkflows!.electrical.steps[1]).not.toHaveProperty('fixedUnitId')
+    expect(changed.approvalWorkflows!.electrical.steps[1]!.fixedUnitId).toBe('department')
   })
   it('configures validation-plan nodes like BOM approvals and preserves its independent settings', async () => {
     const directory = { users: [{ username: 'reviewer', displayName: '审核员', isActive: true }],
@@ -152,7 +155,7 @@ describe('ApprovalWorkflowSettings', () => {
     expect(plan.findAll('.workflow-node-actions')).toHaveLength(2)
     expect(plan.find('li .workflow-node-assignee input:disabled').exists()).toBe(true)
     await plan.find('select[aria-label="审批人来源"]').setValue('FixedUser')
-    await wrapper.find('button').trigger('click')
+    await plan.find('button').trigger('click')
     expect(onSave).not.toHaveBeenCalled()
     expect(wrapper.get('[role="alert"]').text()).toContain('验证计划审批')
     await plan.get('select[aria-label="指定人员"]').setValue('reviewer')
@@ -165,10 +168,10 @@ describe('ApprovalWorkflowSettings', () => {
     expect(plan.get('[aria-label="删除节点"]').attributes('disabled')).toBeDefined()
     await plan.get('.workflow-card-footer button').trigger('click')
     expect(plan.findAll('li')).toHaveLength(3)
-    await wrapper.find('button').trigger('click')
+    await plan.find('button').trigger('click')
     const saved = onSave.mock.calls[0]![0] as PdmSystemSettings
     expect(saved.approvalWorkflows!.validationPlan!.steps[1]).toMatchObject({ stage: 'MechanicalSupervisor', assigneeSource: 'FixedUnitManager', fixedUnitId: 'unit' })
-    expect(saved.approvalWorkflows!.standard!.steps[1]!.assigneeSource).toBe('ProjectDesignLead')
+    expect(saved.approvalWorkflows!.standard).toBeUndefined()
     await wrapper.setProps({ settings: saved })
     expect(plan.get('select[aria-label="指定部门"]').element).toHaveProperty('value', 'unit')
   })
@@ -186,15 +189,84 @@ describe('ApprovalWorkflowSettings', () => {
     await material.get('.workflow-card-footer button').trigger('click')
     expect(material.findAll('li')).toHaveLength(3)
     await material.findAll('[aria-label="上移节点"]')[1]!.trigger('click')
-    await wrapper.find('button').trigger('click')
+    await material.find('button').trigger('click')
     const saved = onSave.mock.calls[0]![0] as PdmSystemSettings
-    expect(saved.approvalWorkflows!.standard!.emergencyRoleCodes).toEqual(['Administrator'])
-    expect(saved.approvalWorkflows!.electrical.emergencyRoleCodes).toEqual([])
+    expect(saved.approvalWorkflows!.standard).toBeUndefined()
+    expect(saved.approvalWorkflows!.electrical.emergencyRoleCodes).toBeUndefined()
     expect(saved.approvalWorkflows!.materialCodeApplication!.emergencyRoleCodes).toEqual(['BusinessUnitManager'])
     expect(saved.approvalWorkflows!.materialCodeApplication!.steps).toHaveLength(3)
     expect(saved.approvalWorkflows!.materialCodeApplication!.steps[2]).toMatchObject({ assigneeSource: 'Role', roleCodes: ['ProcessReviewer', 'Approver'] })
     await wrapper.setProps({ settings: saved })
     expect(material.get('.workflow-emergency select').element).toHaveProperty('value', 'BusinessUnitManager')
+  })
+
+  it('switches sections through tabs without losing unsaved workflow edits', async () => {
+    const onSave = vi.fn().mockImplementation(async value => value)
+    const wrapper = mount(ApprovalWorkflowSettings, { props: { settings: {} as PdmSystemSettings, pending: false, onSave } })
+    const standard = wrapper.get('[aria-label="标准件BOM审批"]')
+    await standard.findAll('li')[1]!.find('input').setValue('保留未保存审核名称')
+    await wrapper.get('[role="tab"][id="tab-electrical-release"]').trigger('click')
+    expect(wrapper.get('#pane-electrical-release').isVisible()).toBe(true)
+    expect(wrapper.get('#pane-standard-release').isVisible()).toBe(false)
+    await wrapper.get('[role="tab"][id="tab-change-rules"]').trigger('click')
+    expect(wrapper.get('#pane-change-rules').isVisible()).toBe(true)
+    await wrapper.get('[role="tab"][id="tab-standard-release"]').trigger('click')
+    expect(standard.findAll('li')[1]!.find('input').element).toHaveProperty('value', '保留未保存审核名称')
+    wrapper.unmount()
+  })
+
+  it('saves only one workflow while retaining other unsaved drafts after the parent updates', async () => {
+    let wrapper: ReturnType<typeof mount>
+    const onSave = vi.fn().mockImplementation(async settings => {
+      await wrapper.setProps({ settings })
+      return settings
+    })
+    wrapper = mount(ApprovalWorkflowSettings, { props: { settings: {} as PdmSystemSettings, pending: false, onSave } })
+    const standard = wrapper.get('[aria-label="标准件BOM审批"]')
+    const electrical = wrapper.get('[aria-label="电气发布审批"]')
+    await standard.findAll('li')[1]!.find('input').setValue('标准已保存')
+    await electrical.find('select').setValue('FixedUser')
+    await standard.find('button').trigger('click'); await flushPromises()
+    expect(onSave).toHaveBeenCalledTimes(1)
+    expect(onSave.mock.calls[0]![0].approvalWorkflows.electrical.steps[1].assigneeSource).toBe('PrimaryUnitManager')
+    expect(electrical.find('select').element).toHaveProperty('value', 'FixedUser')
+    expect(standard.findAll('li')[1]!.find('input').element).toHaveProperty('value', '标准已保存')
+    wrapper.unmount()
+  })
+
+  it('adds and removes reasons and saves their stable keys and display labels', async () => {
+    const onSave = vi.fn().mockImplementation(async value => value)
+    const wrapper = mount(ApprovalWorkflowSettings, { props: { settings: {} as PdmSystemSettings, pending: false, onSave } })
+    const group = wrapper.findAll('.change-reason-list section')[1]!
+    await group.get('button[aria-label="删除物料问题原因 交期不满足"]').trigger('click')
+    await group.findAll('button').find(b => b.text() === '新增原因')!.trigger('click')
+    const added = group.findAll('input').at(-1)!
+    await added.setValue('临时库存替代')
+    await wrapper.get('.change-reason-settings header button').trigger('click'); await flushPromises()
+    const saved = onSave.mock.lastCall![0] as PdmSystemSettings
+    expect(saved.releaseChangeReasonTypes).not.toContain('物料问题 / 交期不满足')
+    const key = saved.releaseChangeReasonTypes!.find(key => key.startsWith('物料问题 / custom-'))!
+    expect(saved.releaseChangeReasonLabels![key]).toBe('临时库存替代')
+    await wrapper.setProps({ settings: saved })
+    expect(group.findAll('input').some(input => (input.element as HTMLInputElement).value === '临时库存替代')).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('persists reason order and keeps move controls within group bounds', async () => {
+    const onSave = vi.fn().mockImplementation(async value => value)
+    const wrapper = mount(ApprovalWorkflowSettings, { props: { settings: {} as PdmSystemSettings, pending: false, onSave } })
+    const group = wrapper.findAll('.change-reason-list section')[1]!
+    expect(group.get('[aria-label="上移物料问题原因 交期不满足"]').attributes('disabled')).toBeDefined()
+    expect(group.get('[aria-label="下移物料问题原因 物料漏买"]').attributes('disabled')).toBeDefined()
+    await group.get('[aria-label="下移物料问题原因 交期不满足"]').trigger('click')
+    expect(group.findAll('input').map(input => (input.element as HTMLInputElement).value)).toEqual(['物料下单晚', '交期不满足', '买错物料', '物料漏买'])
+    await group.get('[aria-label="上移物料问题原因 买错物料"]').trigger('click')
+    await wrapper.get('.change-reason-settings header button').trigger('click'); await flushPromises()
+    const saved = onSave.mock.lastCall![0] as PdmSystemSettings
+    expect(saved.releaseChangeReasonTypes!.filter(key => key.startsWith('物料问题 / '))).toEqual(['物料问题 / 物料下单晚', '物料问题 / 买错物料', '物料问题 / 交期不满足', '物料问题 / 物料漏买'])
+    await wrapper.setProps({ settings: saved })
+    expect(group.findAll('input')[1]!.element).toHaveProperty('value', '买错物料')
+    wrapper.unmount()
   })
 
 })

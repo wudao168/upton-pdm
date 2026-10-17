@@ -297,6 +297,7 @@ builder.Services.AddAuthorization();
 builder.Services.AddScoped<CompanySessionService>();
 builder.Services.AddProblemDetails();
 builder.Services.AddClientLogs(builder.Configuration);
+builder.Services.AddScoped<UserTodoService>();
 
 var app = builder.Build();
 var deployedWebRoot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
@@ -365,6 +366,7 @@ app.Use(async (context, next) =>
 });
 app.UseMiddleware<CompanyContextMiddleware>();
 app.UseAuthorization();
+app.UseMiddleware<FunctionPermissionMiddleware>();
 app.UseRateLimiter();
 app.MapClientLogs();
 app.MapPdmEndpoints();
@@ -384,6 +386,7 @@ app.MapValidationPlanEndpoints();
 app.MapQualityInspectionEndpoints();
 app.MapProjectPlanningEndpoints();
 app.MapProjectWorkbenchEndpoints();
+app.MapCalendarTodos();
 app.MapProjectBudgetEndpoints();
 app.MapProjectNameplateEndpoints();
 app.MapProjectContactInformationEndpoints();

@@ -58,6 +58,8 @@ internal static class Program
             Test("different real edits retain conflict", TestChangedDuplicateIdentity);
             Test("managed archive cache", TestManagedArchiveCache);
             Test("server-confirmed metadata recovery", TestConfirmedArchiveRecovery);
+            Test("matching timestamps never verify different file contents", TestLegacyTimestampDoesNotVerify);
+            Test("archive completion refreshes metadata captured by an earlier scan", TestArchiveScanMetadataRefresh);
             Console.WriteLine($"Passed={passed}; Failed={failed}; no SolidWorks COM or production API calls.");
             return failed == 0 ? 0 : 1;
         }
@@ -100,6 +102,8 @@ internal static class Program
         Test("identical changed copies do not conflict but distinct writable edits do", TestChangedDuplicateIdentity);
         Test("managed archived sources do not create duplicate caches", TestManagedArchiveCache);
         Test("server-confirmed archive repairs stale metadata without hiding corrupt files or edits", TestConfirmedArchiveRecovery);
+        Test("matching timestamps never verify different file contents", TestLegacyTimestampDoesNotVerify);
+        Test("archive completion refreshes metadata captured by an earlier scan", TestArchiveScanMetadataRefresh);
         Console.WriteLine($"Passed={passed}; Failed={failed}; no SolidWorks COM or production API calls.");
         return failed == 0 ? 0 : 1;
     }
@@ -909,6 +913,42 @@ internal static class Program
         snapshot = Static("WorkspaceLocalStateReader", "Read", Path.Combine(directory, "workspace"), projectId, "P700005-STATE", "engineer", requests);
         item = ((IEnumerable)Get(snapshot, "Items")).Cast<object>().Single();
         Assert((string)Get(item, "LocalState") == "Modified", "writable changed file was not protected as a local modification");
+    }
+
+    private static void TestLegacyTimestampDoesNotVerify()
+    {
+        var path = WriteFixture(Path.Combine(directory, "legacy-timestamp", "drawing.SLDDRW"), "locally changed content");
+        var version = Version("W1", "different-server-content");
+        Set(version, "PropertySnapshot", new Dictionary<string, string>
+        {
+            ["FileName"] = Path.GetFileName(path),
+            ["LastWriteTimeUtc"] = File.GetLastWriteTimeUtc(path).ToString("O")
+        });
+        var hash = Hash(File.ReadAllBytes(path));
+        Assert(!(bool)Static("PdmAddin", "VersionMatchesLocalFile", version, path, hash), "timestamp-only fallback hid a real local modification");
+        ((Dictionary<string, string>)Get(version, "PropertySnapshot"))["SourceFileSha256"] = hash;
+        Assert((bool)Static("PdmAddin", "VersionMatchesLocalFile", version, path, hash), "verified SaveAs source no longer matches its archived version");
+    }
+
+    private static void TestArchiveScanMetadataRefresh()
+    {
+        var project = Guid.NewGuid(); var id = Guid.NewGuid();
+        var path = WorkspaceFile("ARCHIVE-SCAN/part.SLDPRT");
+        File.WriteAllText(path, "previous local record");
+        Static("PdmDocumentIdentityStore", "TryWriteControlledVersion", path, id, project,
+            Guid.NewGuid(), "W1", Hash(File.ReadAllBytes(path)), new FileInfo(path).Length);
+        var metadataArgs = new object[] { path, null };
+        Assert((bool)Static("PdmDocumentIdentityStore", "TryReadControlledMetadata", metadataArgs), "cannot capture scan metadata");
+        File.WriteAllText(path, "first archive final content");
+        var committedVersion = Guid.NewGuid();
+        Static("PdmDocumentIdentityStore", "TryWriteControlledVersion", path, id, project,
+            committedVersion, "W1", Hash(File.ReadAllBytes(path)), new FileInfo(path).Length);
+        File.SetAttributes(path, FileAttributes.ReadOnly);
+        var request = New("WorkspaceDocumentStateRequest");
+        Set(request, "DocumentId", id); Set(request, "LatestRevision", "W1");
+        var state = Static("WorkspaceLocalStateReader", "Evaluate", request, path, metadataArgs[1], "engineer");
+        Assert((string)Get(state, "LocalState") == "ReadOnlyCache" && (Guid?)Get(state, "BoundVersionId") == committedVersion,
+            "archive completion still uses the scan's old binding and reports an integrity mismatch");
     }
 
     private static void TestBatchControlledVersionBinding()

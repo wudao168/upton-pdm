@@ -96,8 +96,13 @@ public sealed partial class MySqlPdmRepository
             new { DocumentIds = ids, Actor = actor, SessionId = sessionId, MachineName = machineName.Trim(), Now = now, LeaseExpiresAt = leaseExpiresAt.UtcDateTime },
             cancellationToken: cancellationToken));
         var active = await connection.QueryAsync<Guid>(new CommandDefinition(
-            "SELECT id FROM document WHERE id IN @DocumentIds AND checked_out_by=@Actor AND checkout_session_id=@SessionId",
-            new { DocumentIds = ids, Actor = actor, SessionId = sessionId }, cancellationToken: cancellationToken));
+            """
+            SELECT id FROM document WHERE id IN @DocumentIds AND checked_out_by=@Actor AND checkout_session_id=@SessionId
+            UNION
+            SELECT document_id FROM pending_archive_document
+            WHERE document_id IN @DocumentIds AND actor=@Actor AND session_id=@SessionId AND expires_at>@Now
+            """,
+            new { DocumentIds = ids, Actor = actor, SessionId = sessionId, Now = now }, cancellationToken: cancellationToken));
         return active.ToArray();
     }
 

@@ -8,6 +8,7 @@ export type ProjectPhaseOwnerKey = 'ElectricalHardware' | 'StandardProcurement' 
 export type ProjectPhaseOwners = Partial<Record<ProjectPhaseOwnerKey, string>>
 
 export interface ProjectSummary {
+  permissionSchemaVersion?: number
   id: string
   code: string
   name: string
@@ -56,7 +57,12 @@ export interface ProjectSummary {
 
 export interface ProjectPermissionSettings {
   rules: Record<string, string[]>
+  customPositions?: ProjectPositionDefinition[]
+  positions?: ProjectPositionDefinition[]
+  permissions?: PermissionDefinition[]
+  schemaVersion?: number
 }
+export interface ProjectPositionDefinition { key: string; name: string; description: string; scope: 'self' | 'subtree'; isSystem: boolean; isActive: boolean; sortOrder: number; projectCount?: number }
 
 export interface ProjectCopyOptionsInput {
   sourceProjectId: string
@@ -399,6 +405,7 @@ export interface PdmSystemSettings {
   approvalWorkflows?: ReleaseApprovalSettings
   materialCodeApproval?: MaterialCodeApprovalSettings
   releaseChangeReasonTypes?: string[]
+  releaseChangeReasonLabels?: Record<string, string>
   formalSupplementPolicies?: FormalSupplementPolicies
   drawingQrPolicy?: DrawingQrPolicy
   previewConversion?: PreviewConversionSettings
@@ -449,6 +456,11 @@ export interface PermissionDefinition {
   module: string
   description?: string | null
   sensitive: boolean
+  action?: 'view' | 'create' | 'edit' | 'delete' | 'other'
+  scope?: 'system' | 'project'
+  projectAuthorization?: 'role' | 'position' | 'budget'
+  dependencies?: string[]
+  hidden?: boolean
 }
 
 export interface RolePermissionSettings {

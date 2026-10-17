@@ -1060,7 +1060,7 @@ internal sealed class BatchOperationDialog : Form
         && node.Status != CadReferenceStatus.Virtual
         && !PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath)
         && !string.IsNullOrWhiteSpace(node.FullPath)
-        && IsSupported(node.Kind);
+        && (IsSupported(node.Kind) || node.IsImportedSourceFile);
 
     private static bool CanSelectForCheckIn(CadTreeNode node, string username) =>
         CanAcquire(node)

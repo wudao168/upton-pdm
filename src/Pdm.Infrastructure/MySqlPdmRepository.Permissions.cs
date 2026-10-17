@@ -42,17 +42,17 @@ public sealed partial class MySqlPdmRepository
             WHERE user_account.username=@Username
             """, new { Username = username }, cancellationToken: cancellationToken)))
             .Where(RolePermissionCatalog.IsKnown).ToHashSet(StringComparer.Ordinal);
-        if (assignmentCount > 0) return permissions;
+        if (assignmentCount > 0) return FunctionPermissionCatalog.Effective(permissions);
         var roleCode = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
             "SELECT COALESCE(NULLIF(assigned_role_code,''),role) FROM pdm_user WHERE username=@Username LIMIT 1", new { Username = username }, cancellationToken: cancellationToken));
         return await ReadPermissionsAsync(connection, string.IsNullOrWhiteSpace(roleCode) ? fallbackRole.ToString() : roleCode, cancellationToken);
     }
 
     public async Task<bool> HasRolePermissionAsync(UserRole role, string permissionCode, CancellationToken cancellationToken) =>
-        role == UserRole.Administrator || (await GetRolePermissionsAsync(role, cancellationToken)).Contains(permissionCode);
+        role == UserRole.Administrator || FunctionPermissionCatalog.Contains(await GetRolePermissionsAsync(role, cancellationToken), permissionCode);
 
     public async Task<bool> HasUserPermissionAsync(string username, UserRole fallbackRole, string permissionCode, CancellationToken cancellationToken) =>
-        fallbackRole == UserRole.Administrator || (await GetUserPermissionsAsync(username, fallbackRole, cancellationToken)).Contains(permissionCode);
+        fallbackRole == UserRole.Administrator || FunctionPermissionCatalog.Contains(await GetUserPermissionsAsync(username, fallbackRole, cancellationToken), permissionCode);
 
     public async Task<RolePermissionDirectory> SetRolePermissionsAsync(string roleCode, IReadOnlyList<string> permissionCodes, CancellationToken cancellationToken)
     {
@@ -120,8 +120,8 @@ public sealed partial class MySqlPdmRepository
     }
 
     private static async Task<IReadOnlySet<string>> ReadPermissionsAsync(System.Data.Common.DbConnection connection, string roleCode, CancellationToken cancellationToken) =>
-        (await connection.QueryAsync<string>(new CommandDefinition("SELECT permission_code FROM role_permission WHERE role_code=@RoleCode", new { RoleCode = roleCode }, cancellationToken: cancellationToken)))
-        .Where(RolePermissionCatalog.IsKnown).ToHashSet(StringComparer.Ordinal);
+        FunctionPermissionCatalog.Effective((await connection.QueryAsync<string>(new CommandDefinition("SELECT permission_code FROM role_permission WHERE role_code=@RoleCode", new { RoleCode = roleCode }, cancellationToken: cancellationToken)))
+        .Where(RolePermissionCatalog.IsKnown));
 
     private static async Task<RoleDefinitionData?> FindRoleDefinitionAsync(System.Data.Common.DbConnection connection, string roleCode, CancellationToken cancellationToken)
     {
@@ -140,7 +140,7 @@ public sealed partial class MySqlPdmRepository
             var baseRole = Enum.Parse<UserRole>(definition.BaseRole, true);
             return new RolePermissionSettings(definition.RoleCode, definition.Name, definition.Description, baseRole, definition.IsSystem,
                 baseRole is UserRole.Administrator or UserRole.PlatformAdministrator,
-                baseRole == UserRole.Administrator ? RolePermissionCatalog.Defaults[UserRole.Administrator].Order().ToArray() : byRole.GetValueOrDefault(definition.RoleCode, []),
+                baseRole == UserRole.Administrator ? RolePermissionCatalog.Defaults[UserRole.Administrator].Order().ToArray() : FunctionPermissionCatalog.Expand(byRole.GetValueOrDefault(definition.RoleCode, [])).Where(code => !RolePermissionCatalog.Permissions.Single(item => item.Code == code).Hidden).Order().ToArray(),
                 userCounts.GetValueOrDefault(definition.RoleCode));
         }).ToArray());
     }

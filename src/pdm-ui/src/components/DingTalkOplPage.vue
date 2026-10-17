@@ -89,7 +89,8 @@ onMounted(login)
     <header><h1>OPL 开口问题反馈</h1><p v-if="user">提交人：{{ user }}</p><p>描述现场问题并上传附件，即可提交给项目人员处理。</p></header>
     <p v-if="error" role="alert" class="ding-error">{{ error }}</p><p v-if="notice" role="status" class="ding-success">{{ notice }}</p>
     <p v-if="pending && !token">正在识别钉钉姓名…</p>
-    <label v-if="token">所属项目<select v-model="projectId" :disabled="pending" @change="changeProject"><option value="">请选择项目</option><option v-for="project in projects" :key="project.id" :value="project.id">{{ project.code }} · {{ project.name }}</option></select></label>
+    <label v-if="token">所属项目<select v-model="projectId" :disabled="pending || projects.length === 1" @change="changeProject"><option v-if="projects.length !== 1" value="">请选择项目</option><option v-for="project in projects" :key="project.id" :value="project.id">{{ project.code }} · {{ project.name }}</option></select></label>
+    <p v-if="token && selected && query.get('groupId') && projects.length === 1">已自动关联当前群绑定的项目。</p>
     <p v-if="token && !pending && !projects.length">当前入口尚未关联项目，请联系项目人员设置群绑定。</p>
     <form v-if="token && selected" @submit.prevent="submit">
       <fieldset :disabled="pending">

@@ -36,20 +36,24 @@ public sealed partial class MySqlPdmRepository
             ordered.Select(file => file.DocumentId).ToArray(), cancellationToken);
         var ids = ordered.Select(file => file.DocumentId).Concat(ordered.SelectMany(file => ArchiveBatchRules.References(file.Commit.ReferenceSnapshot.Root))
             .Where(node => node.DocumentId.HasValue).Select(node => node.DocumentId!.Value)).Distinct().Order().ToArray();
+        var lockedDocuments = new Dictionary<Guid, PdmDocument>();
         foreach (var id in ids)
         {
             await LockDocumentAsync(connection, transaction, id, cancellationToken);
             var locked = await FindDocumentAsync(connection, transaction, id, cancellationToken);
-            if (locked?.ProjectId != projectId) throw new PdmRuleException("整批存档包含其他项目的图档，已取消提交。");
+            if (locked is null || locked.ProjectId != projectId) throw new PdmRuleException("整批存档包含其他项目的图档，已取消提交。");
+            lockedDocuments.Add(id, locked);
         }
+        // These documents remain locked until commit. Repeated instances/configurations
+        // can share immutable version-existence checks within this transaction.
+        var verifiedReferences = new HashSet<(Guid DocumentId, string Revision)>();
         var previousDocuments = new List<PdmDocument>();
         var results = new Dictionary<Guid, DocumentCheckInResult>();
         foreach (var file in ordered)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var commit = ArchiveBatchRules.BindCommittedReferences(file.Commit, results);
-            var previous = await FindDocumentAsync(connection, transaction, file.DocumentId, cancellationToken)
-                ?? throw new PdmNotFoundException("图档不存在。");
+            var previous = lockedDocuments[file.DocumentId];
             previousDocuments.Add(previous);
             if (file.RestoreHistoricalVersion)
             {
@@ -66,16 +70,23 @@ public sealed partial class MySqlPdmRepository
             foreach (var node in ArchiveBatchRules.References(commit.ReferenceSnapshot.Root).Where(node => node.Status != ReferenceNodeStatus.Virtual))
             {
                 if (node.DocumentId is not Guid id || node.Revision is null) throw new PdmRuleException("引用图档未完整存档，整批提交已取消：" + node.FileName);
-                var document = await FindDocumentAsync(connection, transaction, id, cancellationToken);
-                var exists = await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
-                    "SELECT EXISTS(SELECT 1 FROM document_version WHERE document_id=@Id AND revision_label=@Revision)",
-                    new { Id = id, Revision = node.Revision.Value.Display }, transaction, cancellationToken: cancellationToken));
-                if (document is null || document.ProjectId != projectId || document.DeletedAt.HasValue || document.PurgedAt.HasValue
-                    || document.Kind != node.Kind || !string.Equals(document.FileName, node.FileName, StringComparison.OrdinalIgnoreCase) || !exists)
+                var document = lockedDocuments[id];
+                if (document.DeletedAt.HasValue || document.PurgedAt.HasValue
+                    || document.Kind != node.Kind || !string.Equals(document.FileName, node.FileName, StringComparison.OrdinalIgnoreCase))
                     throw new PdmRuleException("引用图档的项目或存档版本无效，整批提交已取消：" + node.FileName);
+                var reference = (DocumentId: id, Revision: node.Revision.Value.Display);
+                if (!verifiedReferences.Contains(reference))
+                {
+                    var exists = await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
+                        "SELECT EXISTS(SELECT 1 FROM document_version WHERE document_id=@Id AND revision_label=@Revision)",
+                        new { Id = id, reference.Revision }, transaction, cancellationToken: cancellationToken));
+                    if (!exists) throw new PdmRuleException("引用图档的项目或存档版本无效，整批提交已取消：" + node.FileName);
+                    verifiedReferences.Add(reference);
+                }
             }
             results[file.DocumentId] = await CheckInVersionCoreAsync(connection, transaction, file.DocumentId, actor, sessionId,
                 commit, file.DrawingReviewWritebackId, cancellationToken, batchId);
+            lockedDocuments[file.DocumentId] = results[file.DocumentId].Document;
             if (commit.ReferenceSnapshot.Root.Kind == DocumentKind.Drawing)
             {
                 var models = commit.ReferenceSnapshot.Root.Children.Where(node => node.Kind is DocumentKind.Assembly or DocumentKind.Part)

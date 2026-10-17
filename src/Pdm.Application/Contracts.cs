@@ -484,6 +484,8 @@ public interface IPdmRepository
     Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken);
     Task<ProjectPermissionSettings> GetProjectPermissionSettingsAsync(CancellationToken cancellationToken);
     Task<ProjectPermissionSettings> UpdateProjectPermissionSettingsAsync(ProjectPermissionSettings settings, CancellationToken cancellationToken);
+    Task<IReadOnlyDictionary<string, int>> GetProjectPositionUsageAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+    Task<Project> SetCustomProjectPositionsAsync(Guid projectId, IReadOnlyDictionary<string, IReadOnlyList<string>> members, string actor, CancellationToken cancellationToken) => throw new NotSupportedException();
     Task<IReadOnlyList<UserAccount>> ListUsersAsync(CancellationToken cancellationToken);
     Task<UserCompanyScope?> GetUserCompanyScopeAsync(string username, CancellationToken cancellationToken);
     Task<UserCompanyScope> SetUserCompanyScopeAsync(string username, Guid companyId, bool crossCompanyView, IReadOnlyList<Guid> accessibleCompanyIds, string actor, CancellationToken cancellationToken);
@@ -533,6 +535,7 @@ public interface IPdmRepository
     Task<bool> HasDocumentReadAccessAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken);
     Task<bool> HasDocumentAccessAsync(Guid documentId, string actor, UserRole role, FolderAccess requiredAccess, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken, int? limit = null);
+    Task<IReadOnlyList<DocumentVersionVerificationResult>> ListDocumentVersionVerificationsAsync(IReadOnlyList<DocumentVersionVerificationRequest> requests, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken);
     async Task<IReadOnlyDictionary<Guid, Guid>> LatestDocumentVersionIdsAsync(Guid projectId, CancellationToken cancellationToken) =>
         (await ListProjectDocumentVersionsAsync(projectId, cancellationToken)).GroupBy(version => version.DocumentId)
@@ -672,6 +675,7 @@ public interface IPdmRepository
     Task<ReleasePackage> WithdrawReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, bool emergencySubstitute, string? emergencyReason, CancellationToken cancellationToken);
     Task<ReleasePackage> TransferApprovalAsync(Guid taskId, string expectedAssignee, string targetUsername, CancellationToken cancellationToken);
+    Task<IReadOnlyList<UserNotification>> ListDatedUserTodosAsync(string recipient, Guid companyId, DateOnly from, DateOnly to, CancellationToken ct);
     Task<IReadOnlyList<UserNotification>> ListUserNotificationsAsync(string recipient, int take, CancellationToken cancellationToken);
     Task CreateUserNotificationsAsync(IReadOnlyList<UserNotification> notifications, CancellationToken cancellationToken);
     Task MarkUserNotificationReadAsync(Guid notificationId, string recipient, DateTimeOffset readAt, CancellationToken cancellationToken);

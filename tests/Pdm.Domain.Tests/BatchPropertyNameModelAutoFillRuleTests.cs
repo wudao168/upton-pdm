@@ -5,6 +5,20 @@ namespace Pdm.Domain.Tests;
 
 public sealed class BatchPropertyNameModelAutoFillRuleTests
 {
+    [Theory]
+    [InlineData("文档中的型号", "另一个文件.SLDPRT", "文档中的型号")]
+    [InlineData("", "LM30UU.SLDPRT", "LM30UU")]
+    [InlineData(" ", "按钮（黄色）.SLDPRT", "按钮（黄色）")]
+    [InlineData(null, "340.0700A.01.SLDPRT", "340.0700A.01")]
+    [InlineData("", "340.0700A.01", "340.0700A.01")]
+    [InlineData("", "装配体.SLDASM", "装配体")]
+    [InlineData("", "工程图.SLDDRW", "工程图")]
+    [InlineData("", "", "")]
+    public void MissingDocumentName_UsesFileStemWithoutChangingAProvidedName(string? documentName, string fileName, string expected)
+    {
+        Assert.Equal(expected, BatchPropertyNameModelAutoFillRule.DocumentNameOrFileName(documentName!, fileName));
+    }
+
     [Fact]
     public void EmptyTarget_UsesTrimmedDocumentName()
     {

@@ -1402,6 +1402,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             DesignLeads = FindAssignments(assignments, row.RootProjectId ?? row.Id, ProjectAssignmentType.DesignLead),
             Designers = FindAssignments(assignments, row.Id, ProjectAssignmentType.Designer),
             PhaseOwners = FindPhaseOwners(assignments, row.Id),
+            CustomPositionMembers = assignments?.Where(item => item.ProjectId == row.Id && item.AssignmentType.StartsWith("Post:", StringComparison.Ordinal))
+                .GroupBy(item => item.AssignmentType[5..]).ToDictionary(group => group.Key, group => (IReadOnlyList<string>)group.Select(item => item.Username).ToArray()) ?? new Dictionary<string, IReadOnlyList<string>>(),
             DocumentCount = activity?.DocumentCount,
             ModelDocumentCount = activity?.ModelDocumentCount,
             DrawingDocumentCount = activity?.DrawingDocumentCount,
@@ -1529,7 +1531,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 && actorRoleCodes.Contains("MechanicalManager", StringComparer.OrdinalIgnoreCase)
                 && IsActorWithin(supervisorUnitId);
             var canAssignDesigners = permissions.Contains(PermissionCodes.ProjectDesignerAssign) && project.ExecutionUnitId is not null
-                && (managesExecutionUnit || isMechanicalSupervisor || belongsToProjectStaffing);
+                && (managesExecutionUnit || isMechanicalSupervisor || belongsToProjectStaffing
+                    || ProjectPermissionPolicy.CustomAllows(project, projects.FirstOrDefault(item => item.Id == (project.RootProjectId ?? project.Id)) ?? project, actor, projectPermissions, PermissionCodes.ProjectDesignerAssign));
             return project with
             {
                 EffectiveProjectPermissions = canReadContent
@@ -1543,7 +1546,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 CanReadContent = canReadContent,
                 CanSubmitArchive = canReadContent
                     && permissions.Contains(PermissionCodes.DocumentEdit)
-                    && ProjectSubmissionPolicy.CanSubmitArchive(project, actor, false),
+                    && (ProjectSubmissionPolicy.CanSubmitArchive(project, actor, false) || ProjectPermissionPolicy.CustomAllows(project, projects.FirstOrDefault(item => item.Id == (project.RootProjectId ?? project.Id)) ?? project, actor, projectPermissions, PermissionCodes.DocumentEdit)),
                 DocumentCount = canReadContent ? project.DocumentCount : null,
                 ModelDocumentCount = canReadContent ? project.ModelDocumentCount : null,
                 DrawingDocumentCount = canReadContent ? project.DrawingDocumentCount : null,

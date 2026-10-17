@@ -19,7 +19,9 @@ public sealed class RolePermissionCatalogTests
             .OrderBy(code => code, StringComparer.Ordinal)
             .ToArray();
 
-        Assert.Equal(declaredCodes, publishedCodes);
+        Assert.All(declaredCodes, code => Assert.Contains(code, publishedCodes));
+        Assert.Equal(publishedCodes.Length, publishedCodes.Distinct().Count());
+        Assert.All(RolePermissionCatalog.Permissions.SelectMany(item => item.Dependencies), code => Assert.Contains(code, publishedCodes));
         Assert.All(RolePermissionCatalog.Permissions, permission => Assert.False(string.IsNullOrWhiteSpace(permission.Module)));
     }
 
@@ -106,7 +108,7 @@ public sealed class RolePermissionCatalogTests
     {
         var normalized = RolePermissionCatalog.Normalize(UserRole.ProductionViewer, [permission]);
 
-        Assert.Equal(3, normalized.Count);
+        Assert.Contains(FunctionPermissionCatalog.SchemaMarker, normalized);
         Assert.Contains(permission, normalized);
         Assert.Contains(PermissionCodes.ProjectView, normalized);
         Assert.Contains(PermissionCodes.ProjectContentView, normalized);

@@ -172,6 +172,7 @@ public sealed partial class PdmAddin
                 token.ThrowIfCancellationRequested();
                 var node = item.Node;
                 report?.Invoke("存档准备：正在预加载并核对图档… " + node.FileName);
+                if (node.IsImportedSourceFile) continue; // Preserve source bytes without importing/rebuilding them.
                 token.ThrowIfCancellationRequested();
                 var document = FindLoadedDocument(node.FullPath);
                 if (document == null)
@@ -228,12 +229,17 @@ public sealed partial class PdmAddin
         if (IsSolidWorksCommandActive())
             throw new InvalidOperationException("请先完成SolidWorks当前编辑或保存操作，再提交存档。");
         var previous = currentTree;
+        Action<string> stage = text => PluginDiagnosticLog.Record("存档预检查", text + "；根图档：" + ArchiveReferencePath.Visible(previous.FullPath));
+        stage("开始核对路径");
+        ArchiveReferencePath.Resolve(previous.FullPath, null, "核对当前根图档路径", previous.FullPath, previous.InstancePath, previous.Configuration);
         var document = FindLoadedDocument(previous.FullPath);
         if (document == null)
             throw new InvalidOperationException("当前存档根图档已关闭或切换，请重新打开并确认存档范围。");
         var paths = new HashSet<string>(selected.Select(item => item.Node.FullPath), StringComparer.OrdinalIgnoreCase);
         var verifiedScanner = new SolidWorksReferenceTreeScanner(application);
+        stage("重新读取完整组件结构");
         var verified = verifiedScanner.ScanDocument(document, true);
+        stage("核对本地图档身份");
         RestorePersistedDocumentIdentities(verified);
         var previousNodes = EnumerateCadNodes(previous).Where(node => !string.IsNullOrWhiteSpace(node.FullPath))
             .GroupBy(node => node.FullPath, StringComparer.OrdinalIgnoreCase)
@@ -245,18 +251,21 @@ public sealed partial class PdmAddin
                 node.OpenedVersionId = old.OpenedVersionId;
                 node.OpenedRevision = old.OpenedRevision;
             }
+        stage("核对压缩组件及引用完整性");
         await ResolveSuppressedAssemblyReferencesAsync(verified, token);
         await ReadMissingSuppressedStructuresAsync(verified, token);
         PdmApiClient.ValidateArchiveReferenceCompleteness(verified);
         if (verified.Kind != CadDocumentKind.Drawing)
         {
             // Include both the native dependency list and explicitly selected drawing folders.
+            stage("读取原生文件和工程图清单");
             var nativeFiles = verifiedScanner.AddNativeAssociatedDrawings(document, verified);
             verifiedScanner.AddRelatedDrawingPaths(verified, previousNodes.Values
                 .Where(node => node.Kind == CadDocumentKind.Drawing && File.Exists(node.FullPath))
                 .Select(node => node.FullPath), true);
             if (paths.Contains(verified.FullPath))
             {
+                stage("比对原生文件清单与实例引用");
                 var external = NativeArchiveManifest.Validate(verified, nativeFiles);
                 foreach (var dependency in verified.Children.Where(child => child.Role == CadReferenceRole.ExternalFileDependency))
                     RestorePersistedDocumentIdentities(dependency);
@@ -276,6 +285,7 @@ public sealed partial class PdmAddin
             }
         }
         currentTree = verified;
+        stage("补齐关联工程图并核对提交范围");
         await CompleteRelatedDrawingFilesAsync(verified, projectId, token);
         var all = BuildBatchOperationItems(verified);
         var refreshed = all.Where(item => paths.Contains(item.Node.FullPath)).ToArray();

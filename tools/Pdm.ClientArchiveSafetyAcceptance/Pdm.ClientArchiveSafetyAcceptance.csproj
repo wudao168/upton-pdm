@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net48</TargetFramework><Nullable>disable</Nullable><UseWindowsForms>true</UseWindowsForms></PropertyGroup>
+  <ItemGroup><Reference Include="System.Web.Extensions" /></ItemGroup>
+</Project>

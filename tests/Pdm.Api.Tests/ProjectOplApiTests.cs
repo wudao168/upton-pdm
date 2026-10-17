@@ -5,12 +5,65 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.Extensions.DependencyInjection;
+using Upton.Pdm.Api;
 using Upton.Pdm.Application;
 
 namespace Upton.Pdm.Api.Tests;
 
 public sealed class ProjectOplApiTests
 {
+    private sealed class NotificationHandler : HttpMessageHandler
+    {
+        public List<string> Cards { get; } = [];
+        public bool Fail { get; set; }
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.RequestUri!.AbsolutePath == "/v1.0/oauth2/accessToken") return new(HttpStatusCode.OK) { Content = new StringContent("{\"accessToken\":\"test\"}") };
+            Cards.Add(await request.Content!.ReadAsStringAsync(ct));
+            return new(Fail ? HttpStatusCode.BadRequest : HttpStatusCode.OK) { Content = new StringContent("{\"processQueryKey\":\"accepted\"}") };
+        }
+    }
+    [Fact]
+    public async Task UpdatesAndCompletionNotifyOnlyWhenRequestedAfterSuccessfulSave()
+    {
+        var projectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var handler = new NotificationHandler();
+        using var baseFactory = new PdmApiFactory();
+        using var factory = baseFactory.WithWebHostBuilder(builder => builder.ConfigureServices(services => {
+            services.Configure<DingTalkOplOptions>(settings => {
+                settings.Enabled = true; settings.CorpId = "corp"; settings.AppKey = "app"; settings.AppSecret = "secret"; settings.RobotCode = "robot";
+                settings.CompanyId = Guid.NewGuid(); settings.PublicUrl = "http://192.168.2.8:5173";
+                settings.Projects[projectId] = new() { OpenConversationId = "cid" };
+            });
+            services.AddHttpClient<DingTalkOplIntegration>().ConfigurePrimaryHttpMessageHandler(() => handler);
+        }));
+        using var client = factory.CreateClient();
+        var jwt = new JwtSecurityToken("upton-pdm", "upton-pdm-clients", [new(ClaimTypes.Name,"admin"),new(ClaimTypes.Role,"Administrator")], expires:DateTime.UtcNow.AddMinutes(10),
+            signingCredentials:new(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")),SecurityAlgorithms.HmacSha256));
+        client.DefaultRequestHeaders.Authorization = new("Bearer",new JwtSecurityTokenHandler().WriteToken(jwt));
+        var path = $"/api/projects/{projectId}/opl";
+        static MultipartFormDataContent Body(OplInput input) { var form = new MultipartFormDataContent(); form.Add(JsonContent.Create(input),"data"); return form; }
+        var input = new OplInput("更新通知测试", "普通", "待处理", "", null, "", 0, []);
+        var issue = (await (await client.PostAsync(path,Body(input))).Content.ReadFromJsonAsync<OplIssue>())!;
+        Assert.Single(handler.Cards);
+        await client.PutAsync($"{path}/{issue.Id}",Body(input with {ExpectedRowVersion=1,Priority="高"}));
+        Assert.Single(handler.Cards);
+        Assert.Equal(HttpStatusCode.Conflict,(await client.PutAsync($"{path}/{issue.Id}",Body(input with {ExpectedRowVersion=1,NotifyGroup=true}))).StatusCode);
+        Assert.Single(handler.Cards);
+        var updated = await client.PutAsync($"{path}/{issue.Id}",Body(input with {ExpectedRowVersion=2,Priority="高",Status="处理中",NotifyGroup=true}));
+        Assert.True((await updated.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("notification").GetProperty("sent").GetBoolean());
+        Assert.Equal(2,handler.Cards.Count);
+        using var updatedCard = JsonDocument.Parse(JsonDocument.Parse(handler.Cards[1]).RootElement.GetProperty("cardData").GetString()!);
+        Assert.Equal("OPL 问题已更新",updatedCard.RootElement.GetProperty("header").GetProperty("title").GetProperty("text").GetString());
+        handler.Fail = true;
+        var completed = await client.PostAsJsonAsync($"{path}/{issue.Id}/complete",new {expectedRowVersion=3,notifyGroup=true});
+        Assert.Equal(HttpStatusCode.OK,completed.StatusCode);
+        var result = await completed.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("已完成",result.GetProperty("status").GetString());
+        Assert.False(result.GetProperty("notification").GetProperty("sent").GetBoolean());
+        Assert.Equal("已完成",(await client.GetFromJsonAsync<OplView>(path))!.Rows.Single().Issue.Status);
+    }
     [Fact]
     public async Task MultipartCreateUpdateValidationAndDisabledIntegration()
     {

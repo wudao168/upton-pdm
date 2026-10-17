@@ -1,3 +1,4 @@
+import { permissionDirectory as projectPermissionDirectory } from '../projectPermissionFixture'
 import { expect, test, type Page } from '@playwright/test'
 import type { AssessmentGroup } from '../../src/projectBudget'
 import { tmpdir } from 'node:os'
@@ -96,9 +97,9 @@ test('DingTalk self-service application settings and shared project group bindin
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
   const group = { id: 'shared-group', name: '设备项目共享群', projectCount: 2, registered: true, entryUrl: 'http://192.168.2.8:5173/?dingtalkOpl=1&companyId=org-ks&groupId=shared-group' }
   let saved = false, bound = false, entrySent = false
-  const settings = { enabled: false, corpId: 'ding-test-corp', appKey: 'test-app-key', hasAppSecret: true, publicUrl: 'http://192.168.2.8:5173', companyId: 'org-ks', rowVersion: 2, users: [{ dingTalkUserId: 'ding-user', username: 'engineer' }], groups: [group], entryUrl: 'http://192.168.2.8:5173/?dingtalkOpl=1&companyId=org-ks' }
+  const settings = { notificationTemplate: '问题描述：{问题描述}\n负责人：{负责人}', defaultNotificationTemplate: '问题描述：{问题描述}\n负责人：{负责人}', notificationFields: ['问题描述','负责人','实施状态'], enabled: false, corpId: 'ding-test-corp', appKey: 'test-app-key', hasAppSecret: true, publicUrl: 'http://192.168.2.8:5173', companyId: 'org-ks', rowVersion: 2, users: [{ dingTalkUserId: 'ding-user', username: 'engineer' }], groups: [group], entryUrl: 'http://192.168.2.8:5173/?dingtalkOpl=1&companyId=org-ks' }
   await page.route('**/api/settings/dingtalk', async route => {
-    if (route.request().method() === 'PUT') { expect(route.request().postDataJSON().appSecret).toBe(''); expect(route.request().postDataJSON().robotCode).toBe('ding-robot-test'); saved = true }
+    if (route.request().method() === 'PUT') { expect(route.request().postDataJSON().appSecret).toBe(''); expect(route.request().postDataJSON().robotCode).toBe('ding-robot-test'); expect(route.request().postDataJSON().notificationTemplate).toBe('内容：{问题描述}'); saved = true }
     await route.fulfill({ json: settings })
   })
   await page.route('**/api/projects/*/dingtalk/entry', async route => {
@@ -107,7 +108,7 @@ test('DingTalk self-service application settings and shared project group bindin
   })
   await page.route('**/api/projects/*/dingtalk', async route => {
     if (route.request().method() === 'PUT') { expect(route.request().postDataJSON().groupId).toBe(group.id); expect(route.request().postDataJSON().webhook).toBeUndefined(); bound = true }
-    await route.fulfill({ json: { rootProjectId: projectId, canManage: true, rowVersion: 2, groupId: group.id, groups: [group], enabled: false, entryUrl: settings.entryUrl } })
+    await route.fulfill({ json: { rootProjectId: projectId, canManage: true, rowVersion: 2, groupId: group.id, groups: [group], enabled: false, entryUrl: group.entryUrl } })
   })
   await page.goto('/')
   const login = page.getByLabel('登录PLM')
@@ -130,8 +131,21 @@ test('DingTalk self-service application settings and shared project group bindin
   await page.getByRole('button', { name: '钉钉应用', exact: true }).click()
   const panel = page.getByLabel('钉钉应用设置')
   await expect(panel.getByLabel('统一应用首页地址')).toHaveValue(settings.entryUrl)
+  await expect(panel.getByLabel('群聊酷应用编码', { exact: true })).toHaveCount(0)
+  await expect(panel).toContainText('通知中显示负责人名称')
+  await expect(panel).not.toContainText('qyapi_chat_read')
   await expect(panel.getByLabel('AppSecret', { exact: true })).toHaveValue('')
   await panel.getByLabel('企业机器人RobotCode', { exact: true }).fill('ding-robot-test')
+  await expect(panel.locator('.ding-message-preview')).toContainText('问题描述：测试')
+  await panel.getByLabel('群通知消息内容', { exact: true }).fill('内容：{问题描述}')
+  await expect(panel.locator('.ding-message-preview')).toHaveText('内容：测试')
+  await panel.getByRole('region', { name: '群通知消息模板' }).scrollIntoViewIfNeeded()
+  await page.screenshot({ path: join(tmpdir(), 'dingtalk-template-desktop.png') })
+  await page.setViewportSize({ width: 780, height: 900 })
+  await panel.getByLabel('群通知消息内容', { exact: true }).scrollIntoViewIfNeeded()
+  expect(await page.locator('body').evaluate(element => element.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: join(tmpdir(), 'dingtalk-template-narrow.png') })
+  await page.setViewportSize({ width: 1280, height: 720 })
   await expect(panel.getByRole('button', { name: '新增账号绑定' })).toHaveCount(0)
   await expect(panel).toContainText('无需PLM账号')
   await panel.getByRole('button', { name: '保存配置', exact: true }).click(); await expect.poll(() => saved).toBe(true)
@@ -2873,8 +2887,8 @@ test('role permissions follow the system module directory and include future mod
   const permissionDirectory = {
     permissions: [
       { code: 'project.view', name: '查看项目清单', module: '项目管理', description: '查看当前公司范围内的项目。', sensitive: false },
-      { code: 'document.edit', name: '编辑项目图档', module: '项目内容', description: '编辑图档并创建新版本。', sensitive: false },
-      { code: 'project.content.view', name: '查看项目内容', module: '项目内容', description: '查看图档与业务内容。', sensitive: false },
+      { code: 'document.edit', dependencies: ['project.content.view', 'project.view'], action: 'edit', name: '编辑项目图档', module: '项目内容', description: '编辑图档并创建新版本。', sensitive: false },
+      { code: 'project.content.view', dependencies: ['project.view'], action: 'view', name: '查看项目内容', module: '项目内容', description: '查看图档与业务内容。', sensitive: false },
       { code: 'future-module.view', name: '查看新增模块', module: '新增模块', description: '模拟后续发布的系统模块权限。', sensitive: false },
     ],
     roles: [
@@ -2951,7 +2965,49 @@ test('role permissions follow the system module directory and include future mod
   await page.screenshot({ path: join(tmpdir(), 'pdm-role-permission-dependencies-narrow.png'), fullPage: false })
 })
 
-test('project permission settings show position grants and preserve other positions when saving', async ({ page }) => {
+test('custom project positions consume future directory operations without UI changes', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  const initialRules = { MainManager: [], ChildManager: [], MainDesigner: [], Engineer: ['bom.electrical.edit'], Other: [] }
+  const future = { code: 'project.change.create', name: '创建项目变更', module: '项目变更', scope: 'project', projectAuthorization: 'position', action: 'create', sensitive: false, dependencies: [] }
+  let saved: { rules: Record<string, string[]>; customPositions: Array<{ key: string; name: string; scope: string; isActive: boolean }> } | undefined
+  await page.route('**/api/project-permissions', route => {
+    if (route.request().method() === 'PUT') saved = route.request().postDataJSON()
+    return route.fulfill({ json: { ...projectPermissionDirectory, rules: saved?.rules ?? initialRules, permissions: [...projectPermissionDirectory.permissions!, future], customPositions: saved?.customPositions ?? [], positions: [...projectPermissionDirectory.positions!, ...(saved?.customPositions ?? [])] } })
+  })
+  await page.setViewportSize({ width: 1518, height: 855 })
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '系统设置', exact: true }).click()
+  await page.getByRole('button', { name: '项目权限', exact: true }).click()
+  const panel = page.getByRole('region', { name: '项目岗位授权规则', exact: true })
+  await panel.getByText('岗位管理及适用范围（5类）', { exact: true }).click()
+  await panel.getByRole('button', { name: '新增岗位', exact: true }).click()
+  await panel.locator('input[aria-label$="岗位名称"]').fill('变更复核')
+  await panel.getByLabel('变更复核岗位范围', { exact: true }).selectOption('subtree')
+  await panel.getByLabel('功能模块', { exact: true }).selectOption('项目变更')
+  const permission = panel.getByRole('checkbox', { name: '变更复核：创建项目变更（项目变更）', exact: true })
+  await permission.check()
+  await panel.getByRole('button', { name: '保存并立即生效' }).click()
+  await expect.poll(() => saved?.customPositions[0]?.scope).toBe('subtree')
+  const position = saved!.customPositions[0]!
+  expect(position.key).toMatch(/^custom-[a-f0-9]{32}$/)
+  expect(saved!.rules[position.key]).toEqual([future.code])
+  expect(saved!.rules.Engineer).toEqual(initialRules.Engineer)
+  await panel.getByText('岗位管理及适用范围（6类）', { exact: true }).click()
+  await expect(permission).toBeChecked()
+  await page.screenshot({ path: join(tmpdir(), 'pdm-custom-position-future-operation.png'), fullPage: false })
+  await page.setViewportSize({ width: 792, height: 855 })
+  await permission.scrollIntoViewIfNeeded()
+  await expect(permission).toBeVisible()
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
+})
+
+test('project permission matrix preserves budget and other positions when saving over HTTP', async ({ page }) => {
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
@@ -2959,7 +3015,7 @@ test('project permission settings show position grants and preserve other positi
   let savedRules: Record<string, string[]> | undefined
   await page.route('**/api/project-permissions', route => {
     if (route.request().method() === 'PUT') savedRules = route.request().postDataJSON().rules
-    return route.fulfill({ json: { rules: savedRules ?? initialRules } })
+    return route.fulfill({ json: { ...projectPermissionDirectory, rules: savedRules ?? initialRules } })
   })
   await page.setViewportSize({ width: 1518, height: 855 })
   await page.goto('/')
@@ -2970,21 +3026,35 @@ test('project permission settings show position grants and preserve other positi
   await login.getByRole('button', { name: '登录', exact: true }).click()
   await page.getByRole('button', { name: '系统设置', exact: true }).click()
   await page.getByRole('button', { name: '项目权限', exact: true }).click()
-  const positions = page.getByLabel('项目岗位列表')
-  await expect(positions).toContainText('电气硬件')
-  await positions.getByRole('button', { name: '权限设置' }).first().click()
-  const dialog = page.getByRole('dialog', { name: '主项目经理／协同项目经理 · 项目权限' })
-  await expect(dialog).toContainText('预算查看可由角色独立授权')
-  await expect(dialog.locator('tbody')).toContainText('未授权')
-  await dialog.getByRole('checkbox', { name: '查看项目预算' }).check()
-  await dialog.getByRole('button', { name: '保存并立即生效' }).click()
-  await expect.poll(() => savedRules).toEqual({ ...initialRules, MainManager: ['project.budget.view'] })
-  await positions.getByRole('button', { name: '权限设置' }).first().click()
-  await expect(dialog.getByRole('checkbox', { name: '查看项目预算' })).toBeChecked()
+  const panel = page.getByRole('region', { name: '项目岗位授权规则', exact: true })
+  const matrix = panel.getByRole('region', { name: '功能与岗位授权矩阵' })
+  await expect(matrix.getByRole('checkbox')).toHaveCount(55)
+  await expect(matrix.locator('input:checked')).toHaveCount(1)
+  await expect(panel).toContainText('预算查看可由角色独立授权')
+  await panel.getByText('岗位管理及适用范围（5类）', { exact: true }).click()
+  await expect(panel.getByLabel('项目岗位适用范围')).toContainText('仅负责的子项目')
+  await panel.getByText('岗位管理及适用范围（5类）', { exact: true }).click()
+  await matrix.getByRole('checkbox', { name: '主项目经理／协同项目经理：编辑项目信息（项目管理）', exact: true }).check()
+  await matrix.getByRole('checkbox', { name: '主设：维护质量计划（质量）', exact: true }).check()
+  await panel.getByRole('button', { name: '保存并立即生效' }).click()
+  await expect.poll(() => savedRules).toEqual({ ...initialRules, MainManager: ['project.edit'], MainDesigner: ['validation-plan.edit'] })
+  await expect(matrix.getByRole('checkbox', { name: '执行工程师／电气硬件：电气BOM（BOM）', exact: true })).toBeChecked()
+  await expect(matrix.getByRole('checkbox', { name: '主项目经理／协同项目经理：查看项目预算（预算）', exact: true })).not.toBeChecked()
+  await expect(panel.getByRole('button', { name: '保存并立即生效' })).toBeDisabled()
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  await matrix.getByRole('checkbox', { name: '主项目经理／协同项目经理：查看项目预算（预算）', exact: true }).scrollIntoViewIfNeeded()
   await page.screenshot({ path: join(tmpdir(), 'pdm-project-permission-grants-desktop.png'), fullPage: false })
-  await page.setViewportSize({ width: 834, height: 900 })
-  await expect(dialog.getByRole('checkbox', { name: '查看项目预算' })).toBeVisible()
+  await page.setViewportSize({ width: 792, height: 855 })
+  const other = matrix.getByRole('checkbox', { name: '其他人员：编辑项目信息（项目管理）', exact: true })
+  await other.check()
+  await expect(other).toBeChecked()
+  await panel.getByRole('button', { name: '撤销未保存修改' }).click()
+  await expect(other).not.toBeChecked()
+  await expect(panel.getByRole('button', { name: '保存并立即生效' })).toBeDisabled()
+  const scroll = panel.getByLabel('岗位授权表，可横向滚动')
+  expect(await scroll.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true)
+  await matrix.getByRole('checkbox', { name: '主项目经理／协同项目经理：查看项目预算（预算）', exact: true }).scrollIntoViewIfNeeded()
+  expect(new URL(page.url()).protocol).toBe('http:')
   await page.screenshot({ path: join(tmpdir(), 'pdm-project-permission-grants-narrow.png'), fullPage: false })
   expect(errors).toEqual([])
 })
@@ -3169,10 +3239,11 @@ test('summary material check includes hidden instances and exposes their failure
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
   await page.getByRole('tab', { name: /标准件BOM/ }).click()
   await expect(page.getByRole('button', { name: '查看问题详情：料号不存在', exact: true })).toBeVisible()
+  await page.locator('.pdm-bom-table').getByRole('checkbox', { name: '选择物料', exact: true }).check()
   await page.getByRole('button', { name: '核对料号', exact: true }).click()
   await expect(page.getByText(/已核对 4 行.*需人工维护 3 项/).first()).toBeVisible()
   expect(requests.at(-1)).toEqual(ids)
-  await expect(page.locator('.pdm-edit-table tbody tr').first().locator('input[type="checkbox"]').first()).toBeChecked()
+  await expect(page.locator('.pdm-edit-table tbody tr').first().locator('input[type="checkbox"]').first()).not.toBeChecked()
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
   expect(await page.title()).toContain('UPTON-PLM')
   await page.screenshot({ path: join(tmpdir(), 'standard-summary-material-check.png') })
@@ -3208,6 +3279,7 @@ test('unsaved new standard rows report unknown codes in check results and issue 
   await page.getByRole('button', { name: '核对料号', exact: true }).click()
   await expect(page.getByText(/已核对 2 行.*需人工维护 2 项/).first()).toBeVisible()
   for (const input of await page.locator('tbody tr:not(.is-quick-entry)').getByLabel('物料编码', { exact: true }).all()) await expect(input).toHaveValue('')
+  for (const input of await page.locator('.pdm-bom-table').getByRole('checkbox', { name: '选择物料', exact: true }).all()) await expect(input).not.toBeChecked()
   await page.screenshot({ path: testInfo.outputPath('unsaved-codes-checked.png') })
   expect(errors).toEqual([])
 })
@@ -3226,9 +3298,12 @@ test('electrical BOM exposes code verification and application actions', async (
   await enterProject(page)
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
   await page.getByRole('tab', { name: /电气BOM/ }).click()
+  await page.locator('.pdm-bom-table').getByRole('checkbox', { name: '选择物料', exact: true }).check()
   await page.getByRole('button', { name: '核对料号', exact: true }).click()
   await expect(page.locator('.pdm-bom-table')).not.toContainText('INVALID-ELECTRICAL')
   await expect(page.locator('.pdm-bom-table').getByRole('button', { name: '申请料号', exact: true })).toBeVisible()
+  await expect(page.locator('.pdm-bom-selection-actions').getByRole('button', { name: '申请料号', exact: true })).toBeDisabled()
+  await page.locator('.pdm-bom-table').getByRole('checkbox', { name: '选择物料', exact: true }).check()
   await expect(page.locator('.pdm-bom-selection-actions').getByRole('button', { name: '申请料号', exact: true })).toBeEnabled()
   await page.screenshot({ path: testInfo.outputPath('electrical-material-code-actions.png') })
   expect(errors).toEqual([])
@@ -4149,7 +4224,7 @@ test('OPL uses the existing sidebar and a responsive right drawer on LAN HTTP', 
   const completedAt = new Date().toISOString()
   let completionRequested = false
   await page.route('**/api/projects/*/opl/*/complete', async route => {
-    expect(route.request().postDataJSON()).toEqual({ expectedRowVersion: 1 })
+    expect(route.request().postDataJSON()).toEqual({ expectedRowVersion: 1, notifyGroup: true })
     completionRequested = true
     return route.fulfill({ json: { ...issue, status: '已完成', completedAt, rowVersion: 2 } })
   })
@@ -4231,6 +4306,7 @@ test('OPL uses the existing sidebar and a responsive right drawer on LAN HTTP', 
   await drawer.getByRole('button', { name: '取消', exact: true }).click()
   await page.setViewportSize({ width: 1600, height: 1000 })
   await expect(page.locator('.opl-table').getByRole('columnheader', { name: '子项目', exact: true })).toBeVisible()
+  await page.getByText('更新或完成后通知钉钉群', { exact: true }).click()
   await page.locator('.opl-table').getByRole('button', { name: '完成', exact: true }).first().click()
   await expect(page.locator('.opl-table')).not.toContainText('相机支架松动')
   expect(completionRequested).toBe(true)

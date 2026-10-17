@@ -1,19 +1,24 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
+import { ElDatePicker } from 'element-plus'
 import { readClientLogs, downloadClientLogs, type ClientLogPage } from '../api'
 
 const props = defineProps<{ token: string }>()
 const data = ref<ClientLogPage>({ items: [], total: 0, pageSize: 50, runtimeDays: 30, errorDays: 90 })
 const device = ref(''), user = ref(''), component = ref(''), kind = ref(''), version = ref('')
-const from = ref(''), to = ref(''), page = ref(1), pending = ref(false), downloading = ref(false), error = ref(''), notice = ref('')
+const dateRange = ref<[Date, Date] | null>(null)
+const page = ref(1), pending = ref(false), downloading = ref(false), error = ref(''), notice = ref('')
 let generation = 0
 function query(downloadKind = kind.value) {
   const values = new URLSearchParams({ page: String(page.value) })
   for (const [key, value] of Object.entries({ device: device.value, user: user.value, component: component.value, kind: downloadKind, version: version.value }))
     if (value.trim()) values.set(key, value.trim())
-  if (from.value) values.set('from', new Date(from.value).toISOString())
-  if (to.value) values.set('to', new Date(to.value).toISOString())
-  if (from.value && to.value && from.value > to.value) throw new Error('开始时间不能晚于结束时间。')
+  if (dateRange.value) {
+    const [from, to] = dateRange.value
+    if (from > to) throw new Error('开始时间不能晚于结束时间。')
+    values.set('from', from.toISOString())
+    values.set('to', to.toISOString())
+  }
   return values
 }
 async function load(reset = false) {
@@ -48,8 +53,7 @@ watch(() => props.token, () => load(true))
       <label>组件<select v-model="component" aria-label="组件"><option value="">全部组件</option><option value="desktop">桌面客户端</option><option value="solidworks">SolidWorks 插件</option></select></label>
       <label>日志类型<select v-model="kind" aria-label="日志类型"><option value="">全部日志</option><option value="runtime">运行日志</option><option value="error">错误日志</option></select></label>
       <label>组件或界面版本<input v-model="version" placeholder="版本号或界面构建标识" /></label>
-      <label>开始时间<input v-model="from" type="datetime-local" /></label>
-      <label>结束时间<input v-model="to" type="datetime-local" /></label>
+      <label class="log-date-range">日期时间区间<el-date-picker v-model="dateRange" type="datetimerange" aria-label="日志日期时间区间" format="YYYY-MM-DD HH:mm" range-separator="至" start-placeholder="开始时间" end-placeholder="结束时间" /></label>
       <button type="submit" :disabled="pending">{{ pending ? '查询中…' : '查询日志' }}</button>
     </form>
     <div class="log-actions">
@@ -85,5 +89,7 @@ input, select { min-height: 34px; border: 1px solid #cbd5e1; border-radius: 4px;
 button { border: 1px solid #cbd5e1; border-radius: 4px; background: white; padding: 8px 12px; cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
 .log-actions, footer { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; } footer { justify-content: flex-end; margin-top: 16px; }
 .log-table-wrap { overflow: auto; } table { width: 100%; border-collapse: collapse; font-size: 13px; } th { text-align: left; background: #f1f5f9; } td, th { padding: 12px; border-bottom: 1px solid #e2e8f0; vertical-align: top; } small { display: block; max-width: 240px; overflow-wrap: anywhere; color: #64748b; margin-top: 5px; }
+.log-date-range { min-width: 0; max-width: 100%; }
+.log-date-range :deep(.el-date-editor) { width: 380px; max-width: 100%; min-height: 34px; box-sizing: border-box; }
 .log-error { color: #b91c1c; }
 </style>

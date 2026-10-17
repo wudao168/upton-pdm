@@ -98,6 +98,7 @@ try {
     }
     if ($null -eq $health -or $health.status -ne 'ok') { throw 'API health check failed after deployment.' }
 
+    & (Join-Path $PSScriptRoot 'Sync-LocalUiManifest.ps1') -ProjectRoot $projectRoot | Out-Null
     $result = [ordered]@{
         status = 'passed'
         deployedAt = [DateTimeOffset]::Now.ToString('O')

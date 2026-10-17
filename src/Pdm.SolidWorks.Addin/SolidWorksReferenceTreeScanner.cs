@@ -17,6 +17,7 @@ internal sealed class SolidWorksReferenceTreeScanner
     private readonly ISldWorks application;
     private string activeDocumentDirectory = string.Empty;
     private IModelDoc2 scannedModel;
+    private string scannedDocumentPath;
     private bool strictStructure;
     private string rootConfiguration = string.Empty;
     private readonly List<string> assemblyAncestry = new List<string>();
@@ -45,12 +46,13 @@ internal sealed class SolidWorksReferenceTreeScanner
             throw new InvalidOperationException("请先打开SolidWorks装配体、零件或工程图。 ");
         }
 
-        var path = NormalizeComponentFilePath(model.GetPathName());
+        scannedDocumentPath = model.GetPathName();
+        var path = ReadComponentFilePath(scannedDocumentPath, "读取根图档路径", null, null);
         if (requireCompleteStructure && string.IsNullOrWhiteSpace(path))
             throw new InvalidOperationException("当前图档尚未保存为有效文件，无法确认完整存档范围。请先保存后重试。");
         if (requireCompleteStructure && model.IsOpenedViewOnly())
             throw new InvalidOperationException("当前图档处于大型设计审阅或仅查看模式，无法确认完整结构。请以完整加载方式打开后存档。");
-        activeDocumentDirectory = Path.GetDirectoryName(path) ?? string.Empty;
+        activeDocumentDirectory = string.IsNullOrWhiteSpace(path) ? string.Empty : Path.GetDirectoryName(path) ?? string.Empty;
         Log(string.Concat("ScanActiveDocument type=", model.GetType(), " title=", model.GetTitle(), " path=", path));
         if (model.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
         {
@@ -77,7 +79,8 @@ internal sealed class SolidWorksReferenceTreeScanner
         var root = BuildComponent(rootComponent, rootComponent.Name2, new HashSet<string>(StringComparer.OrdinalIgnoreCase), true, featureTreeRoot, false);
         // Root components do not reliably expose ReferencedConfiguration.
         root.Configuration = configuration.Name ?? string.Empty;
-        foreach (var directory in ModelNodes(root).Select(node => Path.GetDirectoryName(node.FullPath))
+        foreach (var directory in ModelNodes(root).Where(node => !string.IsNullOrWhiteSpace(node.FullPath))
+            .Select(node => Path.GetDirectoryName(node.FullPath))
             .Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase))
             AddRelatedDrawings(root, directory, false);
         return root;
@@ -101,17 +104,30 @@ internal sealed class SolidWorksReferenceTreeScanner
             ComponentSelectionName = component.Name2 ?? string.Empty,
             FileName = Path.GetFileName(componentPath),
             FullPath = componentPath,
-            SourceReferencePath = NormalizeComponentFilePath(component.GetPathName()),
+            SourceReferencePath = ReadComponentFilePath(component.GetPathName(), "读取组件原始引用", currentPath, isRoot ? rootConfiguration : component.ReferencedConfiguration),
             DisplayName = documentName,
             DrawingNumber = Path.GetFileNameWithoutExtension(componentPath),
             Kind = DocumentKindFromPath(componentPath, isRoot ? (int)swDocumentTypes_e.swDocASSEMBLY : 0),
             Configuration = isRoot ? rootConfiguration : component.ReferencedConfiguration ?? string.Empty
         };
+        if (!isRoot && NativeArchiveManifest.IsInterconnectCachePath(componentPath))
+        {
+            var imported = component.GetImportedPath();
+            if (!string.IsNullOrWhiteSpace(imported))
+                node.ImportedSourcePath = ReadComponentFilePath(imported, "读取3D Interconnect导入源", currentPath, node.Configuration);
+        }
         try
         {
             node.Status = parentVirtual && PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(componentPath)
                 ? CadReferenceStatus.Virtual : GetStatus(component, componentPath, true);
             node.IsModifiedInSolidWorks = IsModified(component, true);
+            if (strictStructure && !string.IsNullOrWhiteSpace(node.ImportedSourcePath))
+                PluginDiagnosticLog.Record("导入组件状态", "实例=" + currentPath + "；配置=" + node.Configuration
+                    + "；原生状态=" + node.Status + "；未保存=" + node.IsModifiedInSolidWorks
+                    + "；缓存路径=" + componentPath + "；GetImportedPath记录=" + node.ImportedSourcePath
+                    + "。该路径记录本身不能证明链接仍活动或源文件仍在原位置。");
+            if (!string.IsNullOrWhiteSpace(node.ImportedSourcePath) && node.Status != CadReferenceStatus.Missing)
+                node.Status = CadReferenceStatus.Virtual;
         }
         catch (Exception exception)
         {
@@ -164,19 +180,27 @@ internal sealed class SolidWorksReferenceTreeScanner
 
     private string ResolveComponentPath(IComponent2 component)
     {
-        var referencedPath = NormalizeComponentFilePath(component.GetPathName());
+        var original = component.GetPathName();
+        var instance = strictStructure ? component.Name2 : null;
+        string configuration = null;
+        if (strictStructure)
+        {
+            if (string.Equals(original, scannedDocumentPath, StringComparison.OrdinalIgnoreCase)) configuration = rootConfiguration;
+            else try { configuration = component.ReferencedConfiguration; }
+                catch { configuration = "（SolidWorks尚未返回，未推断配置）"; }
+        }
+        var referencedPath = ReadComponentFilePath(original, "读取组件原始引用", instance, configuration);
+        string loadedPath = null;
         try
         {
-            var loadedPath = NormalizeComponentFilePath((component.GetModelDoc2() as IModelDoc2)?.GetPathName());
-            if (!string.IsNullOrWhiteSpace(loadedPath))
-            {
-                return loadedPath;
-            }
+            loadedPath = (component.GetModelDoc2() as IModelDoc2)?.GetPathName();
         }
         catch
         {
             // An unresolved component can throw while SolidWorks is resolving its model document.
         }
+        if (!string.IsNullOrWhiteSpace(loadedPath))
+            return ReadComponentFilePath(loadedPath, "读取组件实际加载路径", instance, configuration);
 
         // Suppressed/lightweight components can report their original as-saved path even when
         // the controlled assembly has been downloaded elsewhere. Only trust a bound local copy.
@@ -212,18 +236,12 @@ internal sealed class SolidWorksReferenceTreeScanner
         return referencedPath;
     }
 
-    private static string NormalizeComponentFilePath(string path)
+    private string ReadComponentFilePath(string path, string step, string instance, string configuration)
     {
+        // Unsaved/virtual components may have no disk path; non-empty malformed paths must
+        // retain their owner/instance context rather than becoming empty and failing later.
         if (string.IsNullOrWhiteSpace(path)) return string.Empty;
-        try
-        {
-            return Path.IsPathRooted(path) ? Path.GetFullPath(path) : string.Empty;
-        }
-        catch (Exception exception) when (exception is ArgumentException || exception is NotSupportedException || exception is PathTooLongException)
-        {
-            Log("Invalid component path: " + path);
-            return string.Empty;
-        }
+        return ArchiveReferencePath.Resolve(path, activeDocumentDirectory, step, scannedDocumentPath, instance, configuration);
     }
 
     private ITreeControlItem GetFeatureTreeRoot(IModelDoc2 model)
@@ -337,7 +355,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         try
         {
             var raw = component.GetChildren();
-            var assembly = string.Equals(Path.GetExtension(component.GetPathName()), ".SLDASM", StringComparison.OrdinalIgnoreCase);
+            var assembly = string.Equals(Path.GetExtension(ReadComponentFilePath(component.GetPathName(), "读取组件子结构", currentPath, isRoot ? rootConfiguration : null)), ".SLDASM", StringComparison.OrdinalIgnoreCase);
             if (raw == null && !isRoot && assembly)
             {
                 var state = component.GetSuppression2();
@@ -355,6 +373,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         {
             Log(string.Concat("GetChildren(", currentPath, ") threw: ", exception));
             incompleteStructures.Add(currentPath);
+            if (strictStructure && exception is ArchiveReferencePathException) throw;
             if (strictStructure) throw new InvalidOperationException("无法完整读取组件结构：" + currentPath, exception);
             children = Array.Empty<object>();
         }
@@ -503,9 +522,7 @@ internal sealed class SolidWorksReferenceTreeScanner
                 throw new InvalidOperationException("SolidWorks未返回完整的关联工程图清单，已停止整体存档。");
             if (!(names is Array documents) || documents.Length == 0)
                 throw new InvalidOperationException("SolidWorks关联文件清单为空，无法确认工程图完整性，已停止整体存档。");
-            var files = Strings(names).Select(path => string.IsNullOrWhiteSpace(path) ? string.Empty
-                : Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(Path.GetDirectoryName(root.FullPath), path)))
-                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var files = NativeArchiveManifest.ReadFiles(root, Strings(names));
             if (files.Any(string.IsNullOrWhiteSpace))
                 throw new InvalidOperationException("SolidWorks关联文件清单包含空路径，无法确认完整存档范围。");
             var paths = files.Where(path => string.Equals(Path.GetExtension(path), ".SLDDRW", StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -589,9 +606,12 @@ internal sealed class SolidWorksReferenceTreeScanner
             {
                 var saved = Strings(application.GetDocumentDependencies2(path, false, false, false)).ToArray();
                 var resolved = Strings(application.GetDocumentDependencies2(path, false, true, false)).ToArray();
-                references = saved.Where((value, index) => index % 2 == 1).Concat(resolved.Where((value, index) => index % 2 == 1))
-                    .Where(value => !string.IsNullOrWhiteSpace(value))
-                    .Select(value => Path.GetFullPath(Path.IsPathRooted(value) ? value : Path.Combine(info.DirectoryName, value)))
+                if (strictStructure && (saved.Length % 2 != 0 || resolved.Length % 2 != 0))
+                    throw new InvalidOperationException("工程图依赖清单中的名称与路径未完整配对，已停止整批存档，本次尚未上传文件：" + path);
+                references = saved.Where((value, index) => index % 2 == 1).Where(value => strictStructure || !string.IsNullOrWhiteSpace(value))
+                    .Select(value => ArchiveReferencePath.Resolve(value, info.DirectoryName, "读取工程图已保存引用", path))
+                    .Concat(resolved.Where((value, index) => index % 2 == 1).Where(value => strictStructure || !string.IsNullOrWhiteSpace(value))
+                        .Select(value => ArchiveReferencePath.Resolve(value, info.DirectoryName, "读取工程图搜索解析引用", path)))
                     .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             }
             finally { application.SetCurrentWorkingDirectory(previousDirectory ?? string.Empty); }
@@ -604,6 +624,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         {
             Log("Drawing reference scan failed: " + path + " " + exception.Message);
             PluginDiagnosticLog.Record("工程图", "工程图引用读取失败：" + path + "；" + exception.GetType().Name);
+            if (strictStructure && exception is ArchiveReferencePathException) throw;
             if (strictStructure) throw new InvalidOperationException("工程图引用读取失败，已停止整体存档，请核对引用并重试：" + path, exception);
             return Array.Empty<string>();
         }
@@ -624,8 +645,8 @@ internal sealed class SolidWorksReferenceTreeScanner
             if (string.IsNullOrWhiteSpace(path)) path = view.GetReferencedModelName();
             if (!string.IsNullOrWhiteSpace(path))
             {
-                path = Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(Path.GetDirectoryName(drawing.FullPath), path));
                 var configuration = view.ReferencedConfiguration ?? "默认";
+                path = ArchiveReferencePath.Resolve(path, Path.GetDirectoryName(drawing.FullPath), "读取工程图视图模型引用", drawing.FullPath, null, configuration);
                 if (!references.Any(node => string.Equals(node.FullPath, path, StringComparison.OrdinalIgnoreCase)
                     && node.Configuration == configuration))
                 {

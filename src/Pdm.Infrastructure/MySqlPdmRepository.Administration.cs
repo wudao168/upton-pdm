@@ -191,6 +191,7 @@ public sealed partial class MySqlPdmRepository
             ApprovalWorkflows = ReadApprovalWorkflows(values),
             MaterialCodeApproval = ReadMaterialCodeApproval(values),
             ReleaseChangeReasonTypes = ReadStringList(values, "release_change_reason_types", PdmSystemSettings.DefaultReleaseChangeReasonTypes),
+            ReleaseChangeReasonLabels = ReadReleaseChangeReasonLabels(values),
             FormalSupplementPolicies = ReadFormalSupplementPolicies(values),
             DrawingQrPolicy = ReadDrawingQrPolicy(values),
             PreviewConversion = ReadPreviewConversion(values),
@@ -207,7 +208,7 @@ public sealed partial class MySqlPdmRepository
             "SELECT setting_value FROM pdm_system_setting WHERE setting_key='project_permission_settings'",
             cancellationToken: cancellationToken));
         return string.IsNullOrWhiteSpace(json)
-            ? ProjectPermissionSettings.Default
+            ? ProjectPermissionSettings.Default.Normalize()
             : (JsonSerializer.Deserialize<ProjectPermissionSettings>(json, jsonOptions) ?? ProjectPermissionSettings.Default).Normalize();
     }
 
@@ -255,6 +256,7 @@ public sealed partial class MySqlPdmRepository
             new { Key = "release_approval_workflows", Value = JsonSerializer.Serialize(settings.ApprovalWorkflows, jsonOptions) },
             new { Key = "material_code_approval", Value = JsonSerializer.Serialize(settings.MaterialCodeApproval, jsonOptions) },
             new { Key = "release_change_reason_types", Value = JsonSerializer.Serialize(settings.ReleaseChangeReasonTypes, jsonOptions) },
+            new { Key = "release_change_reason_labels", Value = JsonSerializer.Serialize(settings.ReleaseChangeReasonLabels, jsonOptions) },
             new { Key = "formal_supplement_policies", Value = JsonSerializer.Serialize(settings.FormalSupplementPolicies, jsonOptions) },
             new { Key = "drawing_qr_policy", Value = JsonSerializer.Serialize(settings.DrawingQrPolicy, jsonOptions) },
             new { Key = "preview_conversion", Value = JsonSerializer.Serialize(settings.PreviewConversion, jsonOptions) },
@@ -383,6 +385,13 @@ public sealed partial class MySqlPdmRepository
         if (!values.TryGetValue("material_code_approval", out var value) || string.IsNullOrWhiteSpace(value)) return MaterialCodeApprovalSettings.Default;
         try { return JsonSerializer.Deserialize<MaterialCodeApprovalSettings>(value, jsonOptions) ?? MaterialCodeApprovalSettings.Default; }
         catch (JsonException) { return MaterialCodeApprovalSettings.Default; }
+    }
+
+    private IReadOnlyDictionary<string, string> ReadReleaseChangeReasonLabels(IReadOnlyDictionary<string, string> values)
+    {
+        if (!values.TryGetValue("release_change_reason_labels", out var value) || string.IsNullOrWhiteSpace(value)) return new Dictionary<string, string>();
+        try { return JsonSerializer.Deserialize<Dictionary<string, string>>(value, jsonOptions) ?? new Dictionary<string, string>(); }
+        catch (JsonException) { return new Dictionary<string, string>(); }
     }
 
     private FormalSupplementPolicies ReadFormalSupplementPolicies(IReadOnlyDictionary<string, string> values)

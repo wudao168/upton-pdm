@@ -14,6 +14,7 @@ const displayUserName = useUserDisplayName()
 const view = ref<OplView>({ rows: [], people: [] })
 const loading = ref(false), saving = ref(false), error = ref(''), drawer = ref(false), readonly = ref(false)
 const completing = ref<string | null>(null), exporting = ref(false)
+const notifyUpdates = ref(false)
 const query = ref(''), status = ref('未完成'), owner = ref(''), priority = ref<string[]>([]), page = ref(1)
 const states = ['待处理', '处理中', '待确认', '已完成', '已作废']
 const priorities = ['紧急', '高', '普通', '低']
@@ -111,8 +112,8 @@ async function save() {
   if (draft.value.status === '待确认' && !draft.value.solution.trim()) { formError.value = '请填写解决措施后再提交确认。'; return }
   saving.value = true
   try {
-    await saveProjectOpl(props.project.id, editing.value?.issue.id || null, { ...draft.value, dueDate: draft.value.dueDate || null, relatedProjectId: draft.value.relatedProjectId || null, attachmentIds: retained.value.map(x => x.id) }, files.value, props.token)
-    drawer.value = false; files.value = []; ElMessage.success('开口问题已保存'); await load()
+    const issue = await saveProjectOpl(props.project.id, editing.value?.issue.id || null, { ...draft.value, dueDate: draft.value.dueDate || null, relatedProjectId: draft.value.relatedProjectId || null, attachmentIds: retained.value.map(x => x.id), notifyGroup: !!editing.value && notifyUpdates.value }, files.value, props.token)
+    drawer.value = false; files.value = []; ElMessage.success('开口问题已保存'); showNotification(issue); await load()
   } catch (cause) { formError.value = message(cause, '问题保存失败，请检查网络后重试，填写内容已保留。') }
   finally { saving.value = false }
 }
@@ -120,11 +121,15 @@ async function complete(row: OplRow) {
   if (loading.value || saving.value || completing.value || !row.canComplete || closed(row.issue.status)) return
   completing.value = row.issue.id
   try {
-    const issue = await completeProjectOpl(props.project.id, row.issue.id, row.issue.rowVersion, props.token)
+    const issue = await completeProjectOpl(props.project.id, row.issue.id, row.issue.rowVersion, props.token, notifyUpdates.value)
     view.value.rows = view.value.rows.map(item => item.issue.id === issue.id ? { ...item, issue } : item)
     ElMessage.success('问题已完成，已自动记录完成日期。')
+    showNotification(issue)
   } catch (cause) { ElMessage.error(message(cause, '确认完成失败，请检查网络后重试。')) }
   finally { completing.value = null }
+}
+function showNotification(issue: OplRow['issue']) {
+  if (issue.notification) ElMessage({ type: issue.notification.sent && issue.notification.message === '群通知已发送。' ? 'success' : 'warning', message: issue.notification.message, duration: 7000 })
 }
 async function attachment(row: OplRow, file: OplAttachment) {
   try {
@@ -162,7 +167,7 @@ void load()
       <el-table-column label="提交人" width="100"><template #default="{ row }">{{ row.issue.createdByDisplayName || name(row.issue.createdBy) }}</template></el-table-column>
       <el-table-column label="操作" width="200" fixed="right"><template #default="{ row }"><button class="pdm-text-action" @click.stop="open(row, true)">查看</button><button v-if="row.canEdit" class="pdm-text-action" @click.stop="open(row)">编辑</button></template></el-table-column>
     </el-table></div>
-    <footer class="opl-footer"><span>共 {{ filtered.length }} 条</span><el-pagination v-model:current-page="page" :page-size="20" :total="filtered.length" layout="prev, pager, next" /></footer>
+    <footer class="opl-footer"><span>共 {{ filtered.length }} 条</span><el-checkbox v-model="notifyUpdates" :disabled="saving || !!completing">更新或完成后通知钉钉群</el-checkbox><el-pagination v-model:current-page="page" :page-size="20" :total="filtered.length" layout="prev, pager, next" /></footer>
     <el-drawer class="opl-drawer" v-model="drawer" direction="rtl" :title="readonly ? '查看开口问题' : editing ? '编辑开口问题' : '新增开口问题'" size="min(680px, 100vw)" append-to-body destroy-on-close :before-close="close" :close-on-click-modal="false">
       <el-form label-position="top" :disabled="saving || readonly" class="opl-form" @submit.prevent="save">
         <div class="opl-project-fields"><el-form-item label="所属项目"><el-input :model-value="`${rootProject.code} · ${rootProject.name}`" disabled /></el-form-item>
@@ -174,7 +179,7 @@ void load()
       <section class="opl-upload"><strong>图片和附件</strong><label v-if="!readonly" class="opl-file-picker">上传图片 / 附件<input type="file" multiple :disabled="saving" aria-label="上传图片和附件" @change="selectFiles"></label><small v-if="!readonly">最多10个附件，单个不超过10MB，单次总大小不超过30MB。</small><div v-for="file in retained" :key="file.id" class="opl-file"><button class="pdm-text-action" @click="editing && attachment(editing, file)">{{ file.name }}</button><button v-if="!readonly" class="pdm-text-action" :disabled="saving" @click="retained = retained.filter(item => item.id !== file.id)">移除</button></div><div v-for="(file, index) in files" :key="index" class="opl-file"><span>{{ file.name }}</span><button class="pdm-text-action" :disabled="saving" @click="files.splice(index, 1)">移除</button></div><span v-if="readonly && !retained.length">暂无附件</span></section>
       <p v-if="editing" class="opl-meta">提交人：{{ editing.issue.createdByDisplayName || name(editing.issue.createdBy) }} · 提交日期：{{ date(editing.issue.createdAt) }} · 最近更新：{{ editing.issue.updatedBy === editing.issue.createdBy ? (editing.issue.createdByDisplayName || name(editing.issue.updatedBy)) : name(editing.issue.updatedBy) }}</p>
       <el-alert v-if="formError" :title="formError" type="error" :closable="false" />
-      <template #footer><el-button :disabled="saving" @click="close()">{{ readonly ? '关闭' : '取消' }}</el-button><el-button v-if="!readonly" type="primary" :loading="saving" @click="save">保存问题</el-button></template>
+      <template #footer><el-checkbox v-if="editing && !readonly" v-model="notifyUpdates" :disabled="saving">保存后通知钉钉群</el-checkbox><el-button :disabled="saving" @click="close()">{{ readonly ? '关闭' : '取消' }}</el-button><el-button v-if="!readonly" type="primary" :loading="saving" @click="save">保存问题</el-button></template>
     </el-drawer>
     <el-dialog :model-value="!!previewUrl" :title="previewName" width="min(1000px, 95vw)" append-to-body @close="closePreview"><PdfDrawingViewer v-if="previewUrl && previewKind === 'pdf'" :url="previewUrl" /><img v-else-if="previewUrl" :src="previewUrl" alt="问题附件预览" style="display:block;max-width:100%;max-height:75vh;margin:auto"><template #footer><a :href="previewUrl" :download="previewName">下载附件</a></template></el-dialog>
   </section>

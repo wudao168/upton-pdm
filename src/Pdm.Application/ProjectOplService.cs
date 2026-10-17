@@ -9,8 +9,8 @@ public sealed record OplIssue(Guid Id, Guid ProjectId, int Number, string Descri
     IReadOnlyList<OplAttachment> Attachments, string Source = "Manual", string? ExternalId = null,
     Guid? RelatedProjectId = null, Guid? AttachmentProjectId = null, string? CreatedByDisplayName = null);
 public sealed record OplInput(string Description, string Priority, string Status, string Owner, DateOnly? DueDate,
-    string Solution, long ExpectedRowVersion, IReadOnlyList<Guid> AttachmentIds, Guid? RelatedProjectId = null);
-public sealed record CompleteOplInput(long ExpectedRowVersion);
+    string Solution, long ExpectedRowVersion, IReadOnlyList<Guid> AttachmentIds, Guid? RelatedProjectId = null, bool NotifyGroup = false);
+public sealed record CompleteOplInput(long ExpectedRowVersion, bool NotifyGroup = false);
 public sealed record OplUpload(string Name, byte[] Content);
 public sealed record OplVisitorInput(string Description, Guid? RelatedProjectId = null, string Priority = "普通", string Status = "待处理", string Owner = "", DateOnly? DueDate = null, string Solution = "");
 public sealed record OplPerson(string Username, string DisplayName);

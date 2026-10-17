@@ -71,6 +71,7 @@ const props = withDefaults(defineProps<{
   drawingReviews?: DrawingReviewPackage[]
   validationRules?: BomValidationRules
   releaseChangeReasonTypes?: string[]
+  changeReasonLabels?: Record<string, string>
   formalSupplementPolicies?: FormalSupplementPolicies
   declarations: BomEmptyDeclaration[]
   versions?: BomVersion[]
@@ -485,8 +486,14 @@ const isOverviewView = computed(() => kind.value === 'Overview')
 const isWearPartView = computed(() => kind.value === 'WearPart')
 const isReleaseView = computed(() => kind.value === 'Release')
 const canClassifySourceView = computed(() => props.editable && isSourceView.value)
-const canEditCurrentView = computed(() => props.editable && !isSourceView.value && !isOverviewView.value && !isWearPartView.value && selectedVersionId.value === 'current')
-const canShowQuickEntry = computed(() => canEditCurrentView.value && !!props.projectId && comparisonFilter.value === 'All')
+function hasBomOperation(action: string) {
+  if (!props.editable) return false
+  if (props.project?.permissionSchemaVersion !== 2) return true
+  return props.project.effectiveProjectPermissions?.includes(`bom.${kind.value === 'Electrical' ? 'electrical' : 'mechanical'}.row.${action}`) === true
+}
+const canOperateCurrentView = computed(() => props.editable && !isSourceView.value && !isOverviewView.value && !isWearPartView.value && selectedVersionId.value === 'current')
+const canEditCurrentView = computed(() => canOperateCurrentView.value && hasBomOperation('update'))
+const canShowQuickEntry = computed(() => canOperateCurrentView.value && hasBomOperation('create') && !!props.projectId && comparisonFilter.value === 'All')
 const canSelectCurrentView = computed(() => canClassifySourceView.value || canEditCurrentView.value)
 const latestReleasedVersion = computed(() => categoryVersions.value.find(version => version.state === 'Released'))
 const publishedStandardLongLeadPackages = computed(() => {
@@ -984,7 +991,10 @@ async function resolveMissingStandardMaterialCodes(force = false) {
     return force || resolvedMaterialSignatures.get(rowSelectionKey(row as EditableBomRow)!) !== materialCodeSignature(row)
   })
   if (targets.length === 0) {
-    if (force) ElMessage.info('BOM料号已核对：没有需要重新核对的行')
+    if (force) {
+      selectedIds.value = []
+      ElMessage.info('BOM料号已核对：没有需要重新核对的行')
+    }
     return
   }
   materialCodeResolving.value = true
@@ -1041,8 +1051,9 @@ async function resolveMissingStandardMaterialCodes(force = false) {
   }
 }
 
-/** 核对料号后给出可见结论：通过多少、哪几类需要人工维护，并自动勾选需要处理的行。 */
+/** 核对料号后给出可见结论并清空勾选，后续操作由用户手工选择物料。 */
 function reportMaterialCodeResolution(resolutions: MaterialCodeResolution[]) {
+  selectedIds.value = []
   if (resolutions.length === 0) {
     ElMessage.info('BOM料号已核对：没有需要处理的行')
     return
@@ -1063,11 +1074,7 @@ function reportMaterialCodeResolution(resolutions: MaterialCodeResolution[]) {
   }
   const summary = [...reasons.entries()].map(([label, count]) => `${label} ${count} 项`).join('；')
   ElMessage.warning(`已核对 ${resolutions.length} 行：通过 ${resolutions.length - problems.length} 项，需人工维护 ${problems.length} 项（${summary}）。`
-    + '已自动勾选这些行：料号不存在或主档已归档/未批准可点“申请料号”，存在多个候选可点“引用物料”，型号/品牌不一致请修改BOM属性或引用正确料号。')
-  const problemIds = new Set(problems.map(item => item.bomItemId))
-  if (problemIds.size) selectedIds.value = rows.value
-    .filter(row => problemIds.has(rowSelectionKey(row)!) || operationItemIds(row).some(id => problemIds.has(id)))
-    .map(row => rowSelectionKey(row)!)
+    + '请按需手工勾选物料：料号不存在或主档已归档/未批准可点“申请料号”，存在多个候选可点“引用物料”，型号/品牌不一致请修改BOM属性或引用正确料号。')
 }
 
 async function applyForMaterialCodes(itemIds: string[]) {
@@ -3221,6 +3228,7 @@ onBeforeUnmount(() => inlineMaterialMatches.clear())
 onBeforeUnmount(() => summaryQuantityChoiceResolver?.(null))
 
 function addRow(afterIndex = rows.value.length - 1) {
+  if (!hasBomOperation('create')) return
   rows.value.splice(afterIndex + 1, 0, withClientKey({ sequence: afterIndex + 2, drawingNumber: '', name: '', quantity: 1, unit: '001', revision: 'W1', complete: false, source: 'Manual' }))
   resequence()
 }
@@ -3329,6 +3337,7 @@ function removeDraftRow(index: number) {
 }
 
 async function deleteItems(itemIds: string[]) {
+  if (!hasBomOperation('delete')) return
   if (itemIds.length === 0 || (isSourceView.value && !canConfirmDeleteSelected.value)) return
   try {
     const deletingRows = rows.value.filter(row => row.id && itemIds.includes(row.id))
@@ -3371,12 +3380,14 @@ function formatDeletedAt(value?: string) {
 }
 
 function restoreRecycleBin() {
+  if (!hasBomOperation('restore')) return
   if (recycleBinSelectedIds.value.length === 0) return
   emit('batchRestore', recycleOperationIds(recycleBinSelectedIds.value), 'Original')
   recycleBinSelectedIds.value = []
 }
 
 async function permanentlyDeleteManualRecycleBin() {
+  if (!hasBomOperation('delete')) return
   const itemIds = [...recycleBinManualSelectedIds.value]
   if (itemIds.length === 0 || props.pending) return
   try {
@@ -3524,6 +3535,7 @@ function selectImport() {
 }
 
 function importSelected(event: Event) {
+  if (!hasBomOperation('import')) return
   const target = event.target as HTMLInputElement
   const file = target.files?.[0]
   if (file && (kind.value === 'Standard' || kind.value === 'NonStandard' || kind.value === 'Electrical')) emit('import', kind.value, file)
@@ -4059,7 +4071,7 @@ async function submitBatchUpdate() {
       <div class="pdm-bom-release-strip-actions">
         <span v-if="editable && reconciliationReminderCount" class="pdm-bom-reconcile-hint" role="status" aria-live="polite">机械BOM待对账 {{ reconciliationReminderCount }} 类（{{ reconciliationReminderInstanceCount }} 个实例）</span>
         <button type="button" class="pdm-secondary-action" :disabled="pending" @click="refreshCurrentBom">刷新BOM</button>
-        <button v-if="canEditCurrentView" type="button" class="pdm-secondary-action" @click="selectImport" title="导入XLSX">导入</button>
+        <button v-if="canOperateCurrentView && hasBomOperation('import')" type="button" class="pdm-secondary-action" @click="selectImport" title="导入XLSX">导入</button>
         <button type="button" class="pdm-secondary-action" @click="openExportDialog(kind as BomKind)" title="导出XLSX">导出</button>
         <button v-if="editable" type="button" class="pdm-secondary-action" :class="{ 'is-reconcile-needed': reconciliationReminderCount > 0 }" aria-label="对比源数据" :title="reconcileActionTitle" :disabled="pending || reconciliationPreviewLoading" @click="requestGenerate">{{ reconciliationPreviewLoading ? '生成中…' : '源数据' }}</button>
         <button v-if="canEditCurrentView && supportsMaterialCodes" type="button" class="pdm-secondary-action pdm-bom-inventory-action" :disabled="pending || !token || !projectId || !rows.length" title="扫描当前子项目完整BOM的库存相似型号，不受筛选和分页影响" @click="openInventoryRecommendations()">库存推荐</button>
@@ -4112,7 +4124,7 @@ async function submitBatchUpdate() {
           <button type="button" class="pdm-secondary-action pdm-bom-no-publish-action" :disabled="pending || !(canSetNoPublish || canRestorePublish)" :title="mixedPublishConfirmation ? '所选条目确认状态不同，请分别选择后操作' : selectedPublishConfirmed ? '恢复参与后续发布' : '仅确认本次工作修改无需发布；新修改后重新提示'" @click="setSelectedReleaseExclusion(!selectedPublishConfirmed)">{{ selectedPublishConfirmed ? '恢复发布' : '暂不发布' }}</button>
           <button v-if="canRestoreLegacyExclusion" type="button" class="pdm-secondary-action" :disabled="pending" @click="restoreLegacyExclusion">恢复旧的不发布设置</button>
           <button v-if="hasSelectedKitRows" type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="removeSelectedKitReferences">移除套件</button>
-          <button v-if="(!isSourceView || canConfirmDeleteSelected) && !hasSelectedKitRows" type="button" class="pdm-secondary-action is-danger" :disabled="pending || selectedIds.length === 0 || hasSelectedDraftRows" @click="deleteItems(selectedPersistedIds)">{{ canConfirmDeleteSelected ? (selectedIds.length > 1 ? '批量确认删除' : '确认删除') : (selectedIds.length > 1 ? '批量删除' : '删除') }}</button>
+          <button v-if="(!isSourceView || canConfirmDeleteSelected) && !hasSelectedKitRows && hasBomOperation('delete')" type="button" class="pdm-secondary-action is-danger" :disabled="pending || selectedIds.length === 0 || hasSelectedDraftRows" @click="deleteItems(selectedPersistedIds)">{{ canConfirmDeleteSelected ? (selectedIds.length > 1 ? '批量确认删除' : '确认删除') : (selectedIds.length > 1 ? '批量删除' : '删除') }}</button>
           <button v-if="kind === 'Standard' || kind === 'NonStandard'" type="button" class="pdm-secondary-action" :disabled="pending || !canRestoreSourceSelected" :title="selectedIds.length > 0 && !canRestoreSourceSelected ? '仅支持恢复有图档来源的标准件或非标件' : '恢复最新图档源属性，保留分类与排序'" @click="restoreSelectedFromSource" aria-label="恢复源数据">源数据</button>
         </template>
         <button v-if="editable" type="button" class="pdm-secondary-action" :disabled="pending" @click="recycleBinOpen = true">回收站（{{ recycleBinRows.length }}）</button>
@@ -4200,7 +4212,7 @@ async function submitBatchUpdate() {
               <span v-else class="pdm-bom-cell-value pdm-bom-name-value" :title="row.name">{{ displayValue(row.name) }}</span>
             </td>
             <td v-if="isBomColumnVisible('parentDrawingNumber')">
-              <input v-if="!row.id && canEditCurrentView && !isSourceView" v-model.trim="row.parentDrawingNumber" aria-label="上级物料编码" placeholder="">
+              <input v-if="!row.id && hasBomOperation('create') && !isSourceView" v-model.trim="row.parentDrawingNumber" aria-label="上级物料编码" placeholder="">
               <span v-else class="pdm-bom-cell-value" :title="parentDrawingNumberDisplay(row)">{{ parentDrawingNumberDisplay(row) }}</span>
             </td>
             <td v-if="isBomColumnVisible('specification')" class="pdm-bom-model-cell">
@@ -4222,7 +4234,7 @@ async function submitBatchUpdate() {
             </td>
             <td v-if="isBomColumnVisible('revision')">
               <span v-if="row._quickEntry" class="pdm-bom-cell-value">{{ displayValue(row.revision) }}</span>
-              <input v-else-if="!row.id && canEditCurrentView && !isSourceView" v-model.trim="row.revision" required aria-label="版本">
+              <input v-else-if="!row.id && hasBomOperation('create') && !isSourceView" v-model.trim="row.revision" required aria-label="版本">
               <span v-else class="pdm-bom-cell-value">{{ displayValue(row.revision) }}</span>
             </td>
             <td v-if="isBomColumnVisible('remark')">
@@ -4256,7 +4268,7 @@ async function submitBatchUpdate() {
               <span v-else class="pdm-bom-cell-value" :title="row.heatTreatment">{{ displayValue(row.heatTreatment) }}</span>
             </td>
             <td v-if="isBomColumnVisible('weight')">
-              <input v-if="!row.id && canEditCurrentView && !isSourceView" v-model.trim="row.weight" aria-label="重量">
+              <input v-if="!row.id && hasBomOperation('create') && !isSourceView" v-model.trim="row.weight" aria-label="重量">
               <span v-else class="pdm-bom-cell-value">{{ displayValue(row.weight) }}</span>
             </td>
             <td v-if="isBomColumnVisible('quantity')" class="pdm-bom-quantity-audit">
@@ -4609,6 +4621,7 @@ async function submitBatchUpdate() {
           :allowed-scopes="createReleaseScopes"
           :preferred-scope="preferredReleaseScope"
           :change-reason-types="releaseChangeReasonTypes"
+          :change-reason-labels="changeReasonLabels"
           :formal-supplement-policies="formalSupplementPolicies"
           :release-packages="releasePackages"
           :long-lead-published-items="publishedLongLeadItems"

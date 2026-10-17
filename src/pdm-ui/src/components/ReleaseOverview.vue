@@ -280,9 +280,9 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
           <div v-for="release in streamRef.value.active" :key="release.id">
           <button type="button" @click="emit('open', release.id)">
             <span class="pdm-release-active-description"><span>{{ release.number }} · {{ scopeLabel(release.scope) }}</span><small v-if="release.state === '发布失败'" class="pdm-release-failure-reason">失败原因：{{ releaseFailureMessage(release.publishError) }}</small><small v-if="release.state === '发布中'" class="pdm-release-publishing-reason">{{ releasePublishingMessage(release) }}<template v-if="release.previewUpdatedAt"> 最近转图状态更新：{{ new Date(release.previewUpdatedAt).toLocaleString('zh-CN', { hour12: false }) }}</template></small></span>
-            <em :class="{ 'is-error': release.state === '发布失败' }">{{ release.state }}</em>
+            <em :class="{ 'is-error': release.state === '发布失败' || release.previewState === 'Failed' }">{{ release.state === '发布中' && release.previewState === 'Failed' ? '转图失败' : release.state }}</em>
           </button>
-          <button v-if="canManageRelease && release.state === '发布中' && release.previewState === 'Pending'" type="button" class="pdm-secondary-action pdm-release-retry-conversion" :disabled="pending" @click="requestConversionRetry(release.id)">{{ pending && retryRequestedId === release.id ? '正在提交…' : '重试转图' }}</button>
+          <button v-if="canManageRelease && release.state === '发布中' && (release.previewState === 'Pending' || release.previewState === 'Failed')" type="button" class="pdm-secondary-action pdm-release-retry-conversion" :disabled="pending" @click="requestConversionRetry(release.id)">{{ pending && retryRequestedId === release.id ? '正在提交…' : '重试转图' }}</button>
           <small v-if="retryRequestedId === release.id" class="pdm-release-retry-feedback" role="status">{{ pending ? '正在提交重试请求…' : '已请求重试。当前状态每5秒自动读取；提交失败时请查看顶部提示。' }}</small>
           </div>
         </div>

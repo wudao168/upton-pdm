@@ -612,7 +612,7 @@ public sealed partial class MySqlPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         return (await connection.QueryAsync<Guid>(new CommandDefinition(
-            "SELECT id FROM release_package WHERE state='Publishing' ORDER BY created_at LIMIT @Limit",
+            "SELECT id FROM release_package WHERE state='Publishing' AND preview_state<>'Failed' ORDER BY created_at LIMIT @Limit",
             new { Limit = limit }, cancellationToken: cancellationToken))).ToArray();
     }
 
@@ -693,18 +693,25 @@ public sealed partial class MySqlPdmRepository
             ON DUPLICATE KEY UPDATE reference_snapshot_id=VALUES(reference_snapshot_id),updated_at=VALUES(updated_at)
             """, new { snapshot.ProjectId, snapshot.RootDocumentId, snapshot.SnapshotId,
                 UpdatedAt = snapshot.CapturedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
-        var members = await connection.QueryAsync<ReferenceSnapshotRow>(new CommandDefinition(
+        // Sort only identifiers: including root_json in a MySQL filesort can exhaust
+        // sort_buffer_size even for a single large assembly snapshot.
+        var memberIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
             """
-            SELECT rs.id,rs.project_id,rs.root_document_id,rs.captured_at,rs.captured_by,rs.sha256,rs.root_json
+            SELECT roots.reference_snapshot_id
             FROM project_reference_roots roots
-            JOIN reference_snapshot rs ON rs.id=roots.reference_snapshot_id
             JOIN document d ON d.id=roots.root_document_id
             WHERE roots.project_id=@ProjectId AND d.deleted_at IS NULL AND d.purged_at IS NULL
             ORDER BY d.file_name, d.id
-            """, new { snapshot.ProjectId }, transaction, cancellationToken: cancellationToken));
+            """, new { snapshot.ProjectId }, transaction, cancellationToken: cancellationToken))).ToArray();
+        var members = (await connection.QueryAsync<ReferenceSnapshotRow>(new CommandDefinition(
+            """
+            SELECT id,project_id,root_document_id,captured_at,captured_by,sha256,root_json
+            FROM reference_snapshot WHERE id IN @Ids
+            """, new { Ids = memberIds }, transaction, cancellationToken: cancellationToken))).ToDictionary(member => member.Id);
         CadReferenceSnapshot? aggregate = null;
-        foreach (var member in members)
+        foreach (var id in memberIds)
         {
+            var member = members[id];
             var root = JsonSerializer.Deserialize<DocumentReferenceNode>(member.RootJson, jsonOptions)
                 ?? throw new InvalidDataException("装配体引用快照损坏，未更新项目结构。");
             aggregate = ProjectReferenceForest.Merge(aggregate, new CadReferenceSnapshot(member.Id, member.ProjectId,

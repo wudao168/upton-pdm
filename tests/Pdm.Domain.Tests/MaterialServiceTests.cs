@@ -27,7 +27,7 @@ public sealed class MaterialServiceTests
         {
             var settings = await repository.GetProjectPermissionSettingsAsync(default);
             await repository.UpdateProjectPermissionSettingsAsync(new(settings.Rules.ToDictionary(pair => pair.Key,
-                pair => (IReadOnlyList<string>)pair.Value.Where(code => code != permission).ToArray())), default);
+                pair => (IReadOnlyList<string>)pair.Value.Where(code => code != permission && !RolePermissionCatalog.Permissions.Any(item => item.Code == code && item.LegacyPermission == permission)).ToArray())), default);
         }
         var item = new BomItem(Guid.NewGuid(), ProjectId, kind, 1, "", "权限测试物料", 1, "001", null, "PERMISSION-MODEL", "W1", true) { Brand = "TEST" };
         await repository.ReplaceBomAsync(ProjectId, kind, [item], default);

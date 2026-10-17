@@ -1,3 +1,4 @@
+using System.Data;
 using System.Data.Common;
 using Dapper;
 using Upton.Pdm.Application;
@@ -35,29 +36,72 @@ public sealed partial class MySqlPdmRepository
     public async Task<IReadOnlyList<ArchiveUploadCleanup>> ClaimExpiredArchiveUploadsAsync(int limit, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var now = timeProvider.GetUtcNow().UtcDateTime;
-        await connection.ExecuteAsync(new CommandDefinition("""
-            DELETE pending FROM pending_archive_document pending
-            WHERE pending.expires_at<=@Now AND NOT EXISTS(SELECT 1 FROM archive_batch_receipt receipt WHERE receipt.batch_id=pending.batch_id AND receipt.result_json IS NOT NULL)
-            """, new { Now = now }, transaction, cancellationToken: cancellationToken));
-        var rows = (await connection.QueryAsync<ArchiveUploadRow>(new CommandDefinition("""
-            SELECT session_id Id,project_id ProjectId,relative_path Path,file_length Length,sha256 Sha256
-            FROM archive_upload WHERE state IN ('Staged','Collecting') AND expires_at<=@Now
-            ORDER BY expires_at LIMIT @Limit FOR UPDATE SKIP LOCKED
-            """, new { Now = now, Limit = Math.Clamp(limit, 1, 100) }, transaction, cancellationToken: cancellationToken))).ToArray();
-        var collected = new List<ArchiveUploadCleanup>();
-        foreach (var row in rows)
+        var count = Math.Clamp(limit, 1, 100);
+        var pendingRows = (await connection.QueryAsync<ArchiveUploadRow>(new CommandDefinition("""
+            SELECT document_id Id,batch_id BatchId FROM pending_archive_document
+            WHERE expires_at<=@Now ORDER BY expires_at,document_id LIMIT @Limit
+            """, new { Now = now, Limit = count }, cancellationToken: cancellationToken))).ToArray();
+        foreach (var pending in pendingRows)
         {
+            await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+            // Match the foreground commit order: receipt, then reservation/upload. Do not
+            // wait on a live batch or lock an entire expired range before checking receipts.
+            if (!await TryLockArchiveCleanupBatchAsync(connection, transaction, pending.BatchId, true, cancellationToken)) continue;
+            var id = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition("""
+                SELECT document_id FROM pending_archive_document WHERE document_id=@Id AND expires_at<=@Now
+                FOR UPDATE SKIP LOCKED
+                """, new { pending.Id, Now = now }, transaction, cancellationToken: cancellationToken));
+            if (id.HasValue)
+                await connection.ExecuteAsync(new CommandDefinition("DELETE FROM pending_archive_document WHERE document_id=@Id",
+                    new { Id = id.Value }, transaction, cancellationToken: cancellationToken));
+            await transaction.CommitAsync(cancellationToken);
+        }
+        var candidates = (await connection.QueryAsync<ArchiveUploadRow>(new CommandDefinition("""
+            SELECT session_id Id,batch_id BatchId
+            FROM archive_upload WHERE state IN ('Staged','Collecting') AND expires_at<=@Now
+            ORDER BY expires_at,session_id LIMIT @Limit
+            """, new { Now = now, Limit = count }, cancellationToken: cancellationToken))).ToArray();
+        var collected = new List<ArchiveUploadCleanup>();
+        foreach (var candidate in candidates)
+        {
+            await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+            if (!await TryLockArchiveCleanupBatchAsync(connection, transaction, candidate.BatchId, false, cancellationToken)) continue;
+            var row = await connection.QuerySingleOrDefaultAsync<ArchiveUploadRow>(new CommandDefinition("""
+                SELECT session_id Id,project_id ProjectId,relative_path Path,file_length Length,sha256 Sha256
+                FROM archive_upload WHERE session_id=@Id AND batch_id=@BatchId AND state IN ('Staged','Collecting') AND expires_at<=@Now
+                FOR UPDATE SKIP LOCKED
+                """, new { candidate.Id, candidate.BatchId, Now = now }, transaction, cancellationToken: cancellationToken));
+            if (row is null) continue;
             var referenced = await connection.ExecuteScalarAsync<bool>(new CommandDefinition("""
-                SELECT EXISTS(SELECT 1 FROM document_version WHERE REPLACE(storage_relative_path,CHAR(92),'/')=@Path OR REPLACE(preview_storage_relative_path,CHAR(92),'/')=@Path)
+                SELECT EXISTS(SELECT 1 FROM document_version WHERE cleanup_storage_path=@Path)
+                    OR EXISTS(SELECT 1 FROM document_version WHERE cleanup_preview_path=@Path)
                 """, new { row.Path }, transaction, cancellationToken: cancellationToken));
             await connection.ExecuteAsync(new CommandDefinition("UPDATE archive_upload SET state=@State WHERE session_id=@Id",
                 new { row.Id, State = referenced ? "Adopted" : "Collecting" }, transaction, cancellationToken: cancellationToken));
             if (!referenced) collected.Add(new(row.Id, row.ProjectId, new(row.Path, row.Length, row.Sha256, timeProvider.GetUtcNow())));
+            await transaction.CommitAsync(cancellationToken);
         }
-        await transaction.CommitAsync(cancellationToken);
         return collected;
+    }
+
+    private static async Task<bool> TryLockArchiveCleanupBatchAsync(DbConnection connection, DbTransaction transaction,
+        Guid batchId, bool preserveCommitted, CancellationToken cancellationToken)
+    {
+        var receipt = await connection.QuerySingleOrDefaultAsync<ArchiveCleanupReceipt>(new CommandDefinition(
+            "SELECT result_json IS NOT NULL Committed FROM archive_batch_receipt WHERE batch_id=@Id FOR UPDATE SKIP LOCKED",
+            new { Id = batchId }, transaction, cancellationToken: cancellationToken));
+        if (receipt is not null) return !preserveCommitted || !receipt.Committed;
+        // An existing row skipped above belongs to another transaction. A genuinely absent
+        // receipt is safe for an expired upload: foreground validation rejects expiry too.
+        return !await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
+            "SELECT EXISTS(SELECT 1 FROM archive_batch_receipt WHERE batch_id=@Id)", new { Id = batchId },
+            transaction, cancellationToken: cancellationToken));
+    }
+
+    private sealed class ArchiveCleanupReceipt
+    {
+        public bool Committed { get; init; }
     }
 
     public async Task CompleteArchiveUploadCleanupAsync(Guid sessionId, CancellationToken cancellationToken)

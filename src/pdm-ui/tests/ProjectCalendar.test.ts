@@ -7,7 +7,7 @@ import type { GlobalStatusContentLibrary } from '../src/globalStatusContent'
 import { calendarEvents, monthDays, shiftMonth } from '../src/projectCalendar'
 import type { WorkbenchProject, WorkbenchData, WorkbenchView } from '../src/projectWorkbench'
 import type { ProjectPlanTask } from '../src/types'
-vi.mock('../src/api', () => ({ readProjectCalendar: vi.fn() }))
+vi.mock('../src/api', () => ({ readProjectCalendar: vi.fn(), readCalendarTodos: vi.fn(), createUserTodo: vi.fn() }))
 vi.mock('../src/globalStatusContent', async importOriginal => ({
   ...await importOriginal<typeof import('../src/globalStatusContent')>(), loadGlobalStatusContent: vi.fn(),
 }))
@@ -26,6 +26,7 @@ function data(projects: WorkbenchProject[], view: WorkbenchView = 'manager'): Wo
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(api.readCalendarTodos).mockResolvedValue([])
   vi.mocked(loadGlobalStatusContent).mockResolvedValue({ holidayCalendars: [{ year: 2026, papers: [], days: [
     { date: '2026-10-01', name: '国庆节', isOffDay: true },
     { date: '2026-10-07', name: '国庆节', isOffDay: true },
@@ -33,6 +34,36 @@ beforeEach(() => {
   ] }] } as unknown as GlobalStatusContentLibrary)
 })
 describe('项目日历', () => {
+  it('uses the shared todo fields, defaults the clicked date and creates a normal task-center todo', async () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-15T04:00:00Z'))
+    vi.mocked(api.readProjectCalendar).mockResolvedValue(data([]))
+    vi.mocked(api.createUserTodo).mockResolvedValue({ id: 'private', recipient: 'pm', category: 'ProjectTodo', title: '日历待办', content: '跟进资料', sourceKey: 'calendar-todo:c:g', dueDate: '2026-10-16', createdAt: '' })
+    const wrapper = mount(ProjectCalendar, { props: { token: 't', companyId: 'c', currentUsername: 'pm', users: [] }, global: { stubs: { teleport: true, ElSelect: true } } })
+    await flushPromises()
+    await wrapper.findAll('.pc-day').find(day => day.attributes('aria-label')?.startsWith('2026-10-16'))!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text() === '新增待办')!.trigger('click'); await flushPromises()
+    const fields = wrapper.findComponent({ name: 'ProjectTodoFields' })
+    expect(fields.props('dueDate')).toBe('2026-10-16')
+    expect(fields.props('recipients')).toEqual(['pm'])
+    await wrapper.get('textarea[aria-label="待办内容"]').setValue('跟进资料')
+    await wrapper.findAll('button').find(button => button.text() === '保存待办')!.trigger('click'); await flushPromises()
+    expect(api.createUserTodo).toHaveBeenCalledWith({ content: '跟进资料', dueDate: '2026-10-16', recipientUsernames: ['pm'] }, 't')
+    expect(wrapper.emitted('todosChanged')).toHaveLength(1)
+    wrapper.unmount(); clock.mockRestore()
+  })
+  it('shows existing project todos from the same inbox and clears them when the company changes', async () => {
+    vi.mocked(api.readProjectCalendar).mockResolvedValue(data([]))
+    vi.mocked(api.readCalendarTodos).mockResolvedValue([{ id: 'private', recipient: 'pm', category: 'ProjectTodo', title: '日历待办', content: '跟进资料', sourceKey: 'calendar-todo:c:g', dueDate: '2026-10-16', createdAt: '' }])
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-15T04:00:00Z'))
+    const wrapper = mount(ProjectCalendar, { props: { token: 't', companyId: 'c', currentUsername: 'pm', users: [] } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('跟进资料')
+    vi.mocked(api.readCalendarTodos).mockResolvedValue([])
+    await wrapper.setProps({ companyId: 'other' }); await flushPromises()
+    expect(wrapper.text()).not.toContain('跟进资料')
+    wrapper.unmount(); clock.mockRestore()
+  })
+
   it('月历和周历显示节日名称及补班，普通日期不提前显示节假日', async () => {
     const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-15T04:00:00Z'))
     vi.mocked(api.readProjectCalendar).mockResolvedValue(data([item()]))
@@ -97,10 +128,10 @@ describe('项目日历', () => {
     expect(wrapper.find('.pc-note').exists()).toBe(false)
     const board=wrapper.findAll('button').find(button=>button.text()==='最大化看板')!
     await board.trigger('click')
-    expect(wrapper.classes()).toContain('is-maximized')
+    expect(wrapper.get('.project-calendar').classes()).toContain('is-maximized')
     window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))
     await flushPromises()
-    expect(wrapper.classes()).not.toContain('is-maximized')
+    expect(wrapper.get('.project-calendar').classes()).not.toContain('is-maximized')
     const first=wrapper.find('.pc-month h2').text()
     await wrapper.get('[aria-label="下一期"]').trigger('click')
     expect(wrapper.find('.pc-month h2').text()).not.toBe(first)

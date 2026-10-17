@@ -20,9 +20,11 @@ public static class DingTalkOplEndpoints
             DingTalkVisitorSession sessions, CancellationToken ct) =>
         {
             await integration.LoadAsync(input.CompanyId, ct);
-            if (input.GroupId is Guid group && !integration.Settings.Groups.ContainsKey(group)) throw new PdmRuleException("群入口无效，请在项目设置中重新获取入口。");
+            var groupId = input.GroupId;
+            if (groupId is Guid registered && !integration.Settings.Groups.ContainsKey(registered)) throw new PdmRuleException("群入口无效，请在项目设置中重新获取入口。");
+            if (groupId is Guid group && input.ProjectId is Guid project && !integration.IsBoundToGroup(project, group)) throw new PdmRuleException("项目不属于当前钉钉群，请从当前群的提交入口重新打开。");
             var visitor = await integration.ResolveVisitorAsync(input.ProjectId, input.Code, ct);
-            return Results.Ok(new { guestToken = sessions.Issue(integration.Settings, input.GroupId, visitor), displayName = visitor.Name });
+            return Results.Ok(new { guestToken = sessions.Issue(integration.Settings, groupId, visitor), displayName = visitor.Name });
         }).AllowAnonymous();
         app.MapDingTalkVisitorEndpoints();
         app.MapGet("/api/integrations/dingtalk/opl/projects", async (Guid? groupId, HttpContext context, IPdmRepository repository, DingTalkOplIntegration integration, CancellationToken ct) => {

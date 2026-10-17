@@ -76,6 +76,7 @@ public sealed class ProjectFileService(
         try
         {
             var folders = await VisibleFoldersAsync(upload.ProjectId, actor, role, cancellationToken);
+            await ProjectPermissionPolicy.RequireAsync(repository, upload.ProjectId, actor, role, "project.file.upload", cancellationToken);
             RequireBusinessFolder(folders, upload.FolderId, FolderAccess.Upload);
             var file = await files.AddVersionAsync(upload, actor, comment?.Trim(), cancellationToken);
             await AuditAsync(actor, "project.file.upload", nameof(ProjectFile), file.Id, $"上传项目文件：{file.FileName} · {upload.Sha256}", cancellationToken);

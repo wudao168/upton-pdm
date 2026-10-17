@@ -50,6 +50,14 @@ try
     if (!directory.Users.Any(user => user.Username == "qa"))
         await repo.CreateUserAsync(new UserAccount(Guid.NewGuid(), "qa", "事务隔离测试", "unused", UserRole.Administrator, true,
             CompanyId: directory.Organizations.First().Id), default);
+    if (args.Contains("--prepare-only"))
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "tmp/archive-performance-db.txt"), database);
+        Console.WriteLine("Prepared isolated archive performance fixture " + database);
+        return;
+    }
+    await LargeReferenceSnapshotChecks.RunAsync(repo, builder.ConnectionString);
+    if (args.Contains("--reference-sort-only")) { passed = true; return; }
     foreach (var failure in new[] { "missing-reference", "base-version", "drawing-failure", "omitted-file", "foreign-session", "cancel", "success" })
     {
         var project = await repo.CreateProjectAsync(new("QA-PENDING-" + Guid.NewGuid().ToString("N"), "登记回滚测试", "qa", "vault", "release"), "qa", default);

@@ -11,12 +11,16 @@ describe('ReleaseCenter', () => {
     const added: BomItem = { ...previous[0]!, id: 'new', drawingNumber: '', name: '圆柱', specification: 'TSST.01-02' }
     const current = [...previous.map(item => ({ ...item, revision: 'A' })), added]
     const wrapper = mount(ReleaseCenter, { props: { ...frozenProps, releasePackage: null, releaseItems: current, previousVersionItems: previous,
-      allowedScopes: ['NonStandardSupplement'], preferredScope: 'NonStandardSupplement', releasePackages: [publishedFormal('NonStandardWithDrawing')],
+      changeReasonTypes: ['物料问题 / 交期不满足', '物料问题 / custom-stock'], changeReasonLabels: { '物料问题 / 交期不满足': '库存交期不足', '物料问题 / custom-stock': '临时库存替代' }, allowedScopes: ['NonStandardSupplement'], preferredScope: 'NonStandardSupplement', releasePackages: [publishedFormal('NonStandardWithDrawing')],
       drawingReviewCandidates: current.map(item => ({ candidateId: item.id!, bomItemId: item.id, drawingDocumentId: `drawing-${item.id}`,
         drawingNumber: item.specification!, name: item.name, modelRevision: item.revision, bomKinds: ['NonStandard' as const], state: 'ApprovedCurrent' as const, selectable: false, hasUnreleasedDrawingChanges: false })) } })
     expect(wrapper.findAll('.release-change-tag').map(tag => tag.text())).toEqual(['新增'])
     expect(wrapper.findAll('.release-detail-picker tbody input[type="checkbox"]')).toHaveLength(1)
+    expect(wrapper.get('input[aria-label="变更原因 物料问题 / 交期不满足"]').element.closest('label')?.textContent).toContain('库存交期不足')
     await wrapper.get('input[aria-label="变更原因 物料问题 / 交期不满足"]').setValue(true)
+    await wrapper.get('input[aria-label="变更原因 物料问题 / custom-stock"]').setValue(true)
+    expect(wrapper.get('.release-change-reason-summary').text()).toContain('临时库存替代')
+    expect(wrapper.get('.release-change-reason-summary').text()).not.toContain('custom-stock')
     await wrapper.get('form').trigger('submit')
     expect(wrapper.emitted('create')?.[0]?.[0]).toMatchObject({ selectedBomItemIds: ['new'] })
     await wrapper.setProps({ releasePackage: { ...publishedFormal('NonStandardWithDrawing'), scope: 'NonStandardSupplement', nonStandardBomSnapshot: current } })

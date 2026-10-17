@@ -60,13 +60,13 @@ public sealed class ProjectPermissionPolicyTests
                 Assert.Contains(PermissionCodes.ReleaseManage, allowed);
                 Assert.DoesNotContain(PermissionCodes.BomMechanicalEdit, allowed);
             }
-            Assert.Empty(ProjectPermissionPolicy.AllowedOperations(project, root, "unassigned", permissions, ProjectPermissionSettings.Default));
+            Assert.DoesNotContain(PermissionCodes.BomElectricalEdit, ProjectPermissionPolicy.AllowedOperations(project, root, "unassigned", permissions, ProjectPermissionSettings.Default));
         }
         var otherRoot = NewProject();
-        Assert.Empty(ProjectPermissionPolicy.AllowedOperations(otherRoot, otherRoot, "hardware", permissions, ProjectPermissionSettings.Default));
+        Assert.DoesNotContain(PermissionCodes.BomElectricalEdit, ProjectPermissionPolicy.AllowedOperations(otherRoot, otherRoot, "hardware", permissions, ProjectPermissionSettings.Default));
         var configured = new ProjectPermissionSettings(ProjectPermissionSettings.Default.Rules.ToDictionary(item => item.Key,
             item => item.Key == ProjectPermissionPositions.Engineer ? (IReadOnlyList<string>)[] : item.Value));
-        Assert.Empty(ProjectPermissionPolicy.AllowedOperations(child, root, "hardware", permissions, configured));
+        Assert.DoesNotContain(PermissionCodes.BomElectricalEdit, ProjectPermissionPolicy.AllowedOperations(child, root, "hardware", permissions, configured));
     }
 
     [Fact]
@@ -121,7 +121,7 @@ public sealed class ProjectPermissionPolicyTests
 
         await repository.SetRolePermissionsAsync("HardwareEngineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView], default);
         Assert.False(await ProjectPermissionPolicy.CanAsync(repository, child.Id, "child-hardware", UserRole.Engineer, PermissionCodes.BomElectricalEdit, default));
-        Assert.Empty((await repository.ListProjectsForUserAsync("child-hardware", UserRole.Engineer, default))
+        Assert.DoesNotContain(PermissionCodes.BomElectricalEdit, (await repository.ListProjectsForUserAsync("child-hardware", UserRole.Engineer, default))
             .Single(item => item.Id == child.Id).EffectiveProjectPermissions);
     }
 

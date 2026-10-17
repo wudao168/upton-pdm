@@ -169,7 +169,7 @@ describe('BomManager', () => {
     wrapper.unmount()
   })
 
-  it('checks every summary instance and selects the visible row when a hidden instance fails', async () => {
+  it('checks every summary instance without selecting the row when a hidden instance fails', async () => {
     materialApi.resolveBomMaterialCodes.mockImplementation(async (_project, ids: string[]) => ids.map(id => ({
       bomItemId: id, status: id === 'coded' ? 'Verified' : 'CodeNotFound', material: null,
       candidates: [], application: null, issues: id === 'coded' ? [] : ['料号不存在于料品主档'],
@@ -185,7 +185,7 @@ describe('BomManager', () => {
     expect(wrapper.find('button[aria-label="查看问题详情：料号不存在"]').exists()).toBe(true)
     await wrapper.get('.pdm-bom-code-check-action').trigger('click')
     await flushPromises()
-    expect((wrapper.get('tbody tr:not(.is-quick-entry) input[type="checkbox"]').element as HTMLInputElement).checked).toBe(true)
+    expect((wrapper.get('tbody tr:not(.is-quick-entry) input[type="checkbox"]').element as HTMLInputElement).checked).toBe(false)
     materialApi.resolveBomMaterialCodes.mockClear()
     await wrapper.setProps({ standard: [{ ...item, quantity: 4, summaryItemIds: [...item.summaryItemIds!, 'uncoded-3'], summaryFingerprint: 'summary-v2' }] })
     await flushPromises()
@@ -3492,7 +3492,7 @@ describe('BomManager', () => {
     expect(error).toHaveBeenCalledWith('非标件BOM保存前必须补全材质；第 1 行缺少材质')
   })
 
-  it('reports material code verification results and selects the rows needing manual work', async () => {
+  it('reports material code verification results without automatically selecting rows', async () => {
     const warning = vi.spyOn(ElMessage, 'warning').mockImplementation(() => undefined as never)
     materialApi.resolveBomMaterialCodes.mockResolvedValue([
       { bomItemId: 'code-missing', status: 'CodeNotFound', material: null, candidates: [], application: null, issues: ['料号不存在于料品主档'] },
@@ -3515,12 +3515,43 @@ describe('BomManager', () => {
     await flushPromises()
 
     expect(warning).toHaveBeenCalledWith(expect.stringContaining('料号不存在于料品主档 1 项'))
+    expect(warning).not.toHaveBeenCalledWith(expect.stringContaining('已自动勾选'))
+    expect(wrapper.findAll('input[aria-label="选择物料"]').every(input => !(input.element as HTMLInputElement).checked)).toBe(true)
     const applyButton = wrapper.findAll('button').find(button => button.text() === '申请料号')!
+    expect(applyButton.attributes('disabled')).toBeDefined()
+    await wrapper.findAll('input[aria-label="选择物料"]')[0]!.setValue(true)
     expect(applyButton.attributes('disabled')).toBeUndefined()
     await applyButton.trigger('click')
     await flushPromises()
     expect(materialApi.applyForBomMaterialCodes).toHaveBeenCalledWith('project-1', ['code-missing'], 'token')
     warning.mockRestore()
+  })
+
+  it.each(['Standard', 'Electrical'] as const)('clears checked %s BOM rows after verification and leaves failure selections intact', async kind => {
+    const items: BomItem[] = ['one', 'two'].map((id, index) => ({ id, kind, sequence: index + 1, drawingNumber: `CODE-${id}`,
+      name: `物料${index + 1}`, specification: `MODEL-${id}`, brand: 'SMC', quantity: 1, unit: '001', revision: 'W1', complete: true, source: 'Manual' }))
+    materialApi.resolveBomMaterialCodes.mockResolvedValue(items.map(item => ({ bomItemId: item.id, status: 'NoMatch', material: null, candidates: [], application: null, issues: [] })))
+    const wrapper = mount(BomManager, { props: { standard: kind === 'Standard' ? items : [], nonStandard: [],
+      electrical: kind === 'Electrical' ? items : [], declarations: [], pending: false, editable: true, token: 'token', projectId: 'project-1' } })
+    await wrapper.findAll('button[role="tab"]')[kind === 'Standard' ? 1 : 3]!.trigger('click')
+    await flushPromises()
+    const check = wrapper.findAll('button').find(button => button.text() === '核对料号')!
+    const selections = () => wrapper.findAll('input[aria-label="选择物料"]')
+    for (const input of selections()) await input.setValue(true)
+    expect(wrapper.text()).toContain('已选择 2 项')
+    await check.trigger('click'); await flushPromises()
+    expect(selections().every(input => !(input.element as HTMLInputElement).checked)).toBe(true)
+    expect(wrapper.text()).not.toContain('已选择 2 项')
+    await selections()[0]!.setValue(true)
+    materialApi.resolveBomMaterialCodes.mockResolvedValue(items.map(item => ({ bomItemId: item.id, status: 'Verified', material: null, candidates: [], application: null, issues: [] })))
+    await check.trigger('click'); await flushPromises()
+    expect(selections().every(input => !(input.element as HTMLInputElement).checked)).toBe(true)
+    await selections()[0]!.setValue(true)
+    materialApi.resolveBomMaterialCodes.mockRejectedValueOnce(new Error('料号核对暂时失败，请稍后重试。'))
+    await check.trigger('click'); await flushPromises()
+    expect((selections()[0]!.element as HTMLInputElement).checked).toBe(true)
+    expect((selections()[1]!.element as HTMLInputElement).checked).toBe(false)
+    wrapper.unmount()
   })
 
   it('validates drawing material codes against model and brand without rewriting the code', async () => {

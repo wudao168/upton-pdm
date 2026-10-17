@@ -226,6 +226,30 @@ describe('PreviewWorkspace', () => {
     wrapper.unmount()
   })
 
+  it('审核版本变化不自动重开eDrawings，主动加载后仍可预览冻结版本', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(window, 'chrome', { configurable: true, value: { webview: { postMessage } } })
+    const drawing = { ...selected, kind: 'Drawing' as const, fileName: 'FIRST.SLDDRW' }
+    const wrapper = mount(PreviewWorkspace, { props: { selected: drawing, related: [], desktopAvailable: true } })
+    await wrapper.findAll('button').find(button => button.text() === '加载交互预览')!.trigger('click')
+    expect(wrapper.emitted('preview')).toHaveLength(1)
+    postMessage.mockClear()
+    await wrapper.setProps({ reviewVersionId: 'frozen-drawing', reviewRevision: 'W2' })
+    expect(wrapper.emitted('preview')).toHaveLength(1)
+    expect(postMessage).toHaveBeenCalledWith({ type: 'preview-host-hide', payload: undefined })
+    expect(wrapper.get('.pdm-embedded-preview-slot').attributes('data-preview-state')).toBe('idle')
+    await wrapper.setProps({ active: false })
+    await wrapper.setProps({ active: true })
+    expect(wrapper.emitted('preview')).toHaveLength(1)
+    await wrapper.findAll('button').find(button => button.text() === '加载交互预览')!.trigger('click')
+    expect(wrapper.emitted('preview')?.[1]).toEqual([drawing, 'frozen-drawing', 'W2'])
+    await wrapper.setProps({ reviewVersionId: 'approved-result' })
+    expect(wrapper.emitted('preview')).toHaveLength(2)
+    await wrapper.setProps({ reviewVersionId: '' })
+    expect(wrapper.emitted('preview')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
   it('suspends the client preview instead of releasing it when the tab is left', async () => {
     const postMessage = vi.fn()
     Object.defineProperty(window, 'chrome', {

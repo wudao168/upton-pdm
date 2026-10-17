@@ -65,6 +65,11 @@ internal sealed class CadTreeNode
     // The native reference spelling can differ from the verified local working-copy path.
     public string SourceReferencePath { get; set; } = string.Empty;
 
+    // 3D Interconnect's generated native cache is backed by this imported model.
+    public string ImportedSourcePath { get; set; } = string.Empty;
+
+    public bool IsImportedSourceFile => Kind == CadDocumentKind.Other && Role == CadReferenceRole.ExternalFileDependency;
+
     public CadReferenceRole Role { get; set; }
 
     public string DisplayName { get; set; } = string.Empty;

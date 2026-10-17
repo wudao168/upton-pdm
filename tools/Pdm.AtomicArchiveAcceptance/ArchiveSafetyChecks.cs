@@ -25,7 +25,7 @@ internal static class ArchiveSafetyChecks
         var batch = Guid.NewGuid();
         var context = new ArchiveRegistrationContext(batch,session,"QA");
         async Task<PdmDocument> Reserve(string name,DocumentKind kind,Guid? model=null) => await workflow.RegisterDocumentAsync(
-            new(project.Id,name,name,name+(kind==DocumentKind.Drawing?".SLDDRW":".SLDPRT"),kind,RelatedModelDocumentId:model,SourceSha256:new string('A',64)),"qa",UserRole.Administrator,default,context);
+            new(project.Id,name,name,name+(kind==DocumentKind.Drawing?".SLDDRW":kind==DocumentKind.Assembly?".SLDASM":kind==DocumentKind.Other?".stp":".SLDPRT"),kind,RelatedModelDocumentId:model,SourceSha256:new string('A',64)),"qa",UserRole.Administrator,default,context);
         async Task<StoredFile> Upload(PdmDocument document,Guid archiveBatch,string content)
         {
             var bytes=System.Text.Encoding.UTF8.GetBytes(content);
@@ -41,6 +41,12 @@ internal static class ArchiveSafetyChecks
             var a=await Reserve("MODEL-A",DocumentKind.Part);
             var b=await Reserve("MODEL-B",DocumentKind.Part);
             var drawing=await Reserve("DRAWING",DocumentKind.Drawing,a.Id);
+            var heartbeat=await workflow.HeartbeatEditSessionAsync(session,"qa",UserRole.Administrator,"QA",[a.Id,b.Id,drawing.Id],default);
+            Require(heartbeat.ActiveDocumentIds.Count==3 && heartbeat.LostDocumentIds.Count==0,"pending registrations were reported as lost sessions");
+            Require((await repository.HeartbeatCheckoutSessionAsync(Guid.NewGuid(),"qa","QA",[a.Id],DateTimeOffset.UtcNow.AddHours(1),default)).Count==0,"foreign pending session accepted");
+            Require((await repository.HeartbeatCheckoutSessionAsync(session,"other","QA",[a.Id],DateTimeOffset.UtcNow.AddHours(1),default)).Count==0,"foreign pending actor accepted");
+            Require((await repository.ListDocumentsAsync(project.Id,default)).Count==0,"pending heartbeat created official documents");
+            Console.WriteLine("PASS MySQL pending heartbeat ownership without official documents or versions");
             var aFile=await Upload(a,batch,"model-a");var bFile=await Upload(b,batch,"model-b");var drawingFile=await Upload(drawing,batch,"drawing-a");
             var firstInputs=new[]{Input(a,aFile,[]),Input(b,bFile,[]),Input(drawing,drawingFile,[Node(a) with {Revision=null}])};
             var receipt=await workflow.CheckInBatchAsync(batch,"first","qa",UserRole.Administrator,session,firstInputs,default);
@@ -83,12 +89,55 @@ internal static class ArchiveSafetyChecks
             await storage.WriteChunkAsync(legacy.Id,0,new MemoryStream("old!"u8.ToArray()),default);
             var legacyFile=await storage.CompleteUploadAsync(legacy.Id,".versions/legacy/keep.SLDPRT",default);
             await connection.ExecuteAsync("UPDATE archive_upload SET expires_at=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND WHERE project_id=@Id; UPDATE pending_archive_document SET expires_at=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND WHERE project_id=@Id",new{Id=project.Id});
+            Require((await repository.HeartbeatCheckoutSessionAsync(session,"qa","QA",[orphan.Id],DateTimeOffset.UtcNow.AddHours(1),default)).Count==0,"expired pending lease revived");
+            await connection.ExecuteAsync("INSERT INTO archive_batch_receipt(batch_id,project_id,actor,request_hash) VALUES(@Batch,@Project,'qa','locked-cleanup-fixture')",new{Batch=context.BatchId,Project=project.Id});
+            await using(var blocker=new MySqlConnection(connectionString))
+            {
+                await blocker.OpenAsync();await using var transaction=await blocker.BeginTransactionAsync();
+                await blocker.ExecuteAsync("SELECT batch_id FROM archive_batch_receipt WHERE batch_id=@Id FOR UPDATE",new{Id=context.BatchId},transaction);
+                using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var claimed=await repository.ClaimExpiredArchiveUploadsAsync(50,deadline.Token);
+                Require(claimed.All(item=>item.File.RelativePath.Replace('\\','/')!=orphanFile.RelativePath.Replace('\\','/')),"cleanup claimed a live locked batch");
+                Require(await repository.FindPendingArchiveDocumentAsync(orphan.Id,default)!=null && File.Exists(Path.Combine(project.VaultLocation,orphanFile.RelativePath)),"locked batch lost its registration or bytes");
+                await transaction.RollbackAsync();
+            }
+            Console.WriteLine("PASS MySQL cleanup skips active receipt locks without waiting or deleting files");
             await storage.CleanupExpiredArchiveUploadsAsync(default);
             Require(!File.Exists(Path.Combine(project.VaultLocation,orphanFile.RelativePath)),"owned orphan file was retained");
             Require(File.Exists(Path.Combine(project.VaultLocation,drawingFile.RelativePath)) && File.Exists(Path.Combine(project.VaultLocation,legacyFile.RelativePath)),"cleanup removed adopted or unowned data");
             Require(await repository.FindPendingArchiveDocumentAsync(orphan.Id,default)==null,"expired new registration was not collected");
             Require(await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM archive_upload WHERE batch_id=@Id AND state='Collected'",new{Id=context.BatchId})==1,"cleanup ownership tombstone missing");
             Console.WriteLine("PASS MySQL expired owned uploads collected; adopted/legacy files preserved; expired reservations removed");
+            for(var i=0;i<3;i++){context=new(Guid.NewGuid(),session,"QA");await Reserve("BOUNDED-"+i,DocumentKind.Part);}
+            await connection.ExecuteAsync("UPDATE pending_archive_document SET expires_at=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND WHERE project_id=@Id",new{Id=project.Id});
+            await repository.ClaimExpiredArchiveUploadsAsync(1,default);
+            Require(await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM pending_archive_document WHERE project_id=@Id",new{Id=project.Id})==2,"pending cleanup was not bounded");
+            var plan=await connection.QuerySingleAsync("EXPLAIN SELECT id FROM document_version WHERE cleanup_storage_path=@Path",new{Path=orphanFile.RelativePath.Replace('\\','/')});
+            Require(((string?)plan.possible_keys)?.Contains("ix_version_cleanup_storage")==true,"normalized cleanup lookup has no usable index");
+            Console.WriteLine("PASS MySQL bounded reservation cleanup and indexed normalized path lookup");
+
+            context=new(Guid.NewGuid(),session,"QA");
+            var importedRoot=await Reserve("IMPORTED-ROOT",DocumentKind.Assembly);
+            var step=await Reserve("IMPORTED-SOURCE",DocumentKind.Other);
+            var nativeFile=await Upload(importedRoot,context.BatchId,"saved assembly with linked import");
+            var stepFile=await Upload(step,context.BatchId,"ISO-10303-21; exact original STEP bytes; END-ISO-10303-21;");
+            var virtualNode=Node(importedRoot) with {DocumentId=null,FileName="generated.stp.SLDPRT",Kind=DocumentKind.Part,Status=ReferenceNodeStatus.Virtual,Revision=null};
+            var stepNode=Node(step) with {Role=ReferenceRole.ExternalFileDependency,Revision=null};
+            var importedInputs=new[]{Input(importedRoot,nativeFile,[virtualNode,stepNode]),Input(step,stepFile,[])};
+            await ExpectConflict(()=>workflow.CheckInBatchAsync(context.BatchId,"imported-step","qa",UserRole.Administrator,session,
+                [importedInputs[0],importedInputs[1] with {File=stepFile with {Sha256=new string('0',64)}}],default));
+            Require((await repository.ListDocumentVersionsAsync(importedRoot.Id,default)).Count==0
+                &&(await repository.ListDocumentVersionsAsync(step.Id,default)).Count==0,"failed STEP verification partially archived parent or source");
+            Console.WriteLine("PASS MySQL STEP source verification failure leaves parent and source without versions");
+            var importedReceipt=await workflow.CheckInBatchAsync(context.BatchId,"imported-step","qa",UserRole.Administrator,session,importedInputs,default);
+            var importedReplay=await workflow.CheckInBatchAsync(context.BatchId,"imported-step","qa",UserRole.Administrator,session,importedInputs,default);
+            Require(importedReceipt.Results.Count==2&&importedReceipt.Results.Select(result=>result.Version!.Id).SequenceEqual(importedReplay.Results.Select(result=>result.Version!.Id)),"STEP replay created duplicate versions");
+            var importedVersion=(await repository.ListDocumentVersionsAsync(importedRoot.Id,default)).Single();
+            Require(importedVersion.ReferenceSnapshot.Children.Any(node=>node.DocumentId==null&&node.Status==ReferenceNodeStatus.Virtual)
+                &&importedVersion.ReferenceSnapshot.Children.Any(node=>node.DocumentId==step.Id&&node.Role==ReferenceRole.ExternalFileDependency&&node.Revision?.Display=="W1"),"STEP reference or embedded component omitted");
+            await storage.VerifyStoredFileAsync(project,stepFile,default);
+            Require((await repository.ListDocumentVersionsAsync(step.Id,default)).Count==1,"STEP source duplicated");
+            Console.WriteLine("PASS MySQL STEP source and parent stored atomically, generated cache not registered, replay keeps W1");
         }
         finally
         {

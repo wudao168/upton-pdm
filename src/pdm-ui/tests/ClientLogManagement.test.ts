@@ -29,3 +29,22 @@ it('does not show a raw query exception', async () => {
   expect(wrapper.text()).not.toContain('secret')
   wrapper.unmount()
 })
+
+it('uses the complete selected interval for queries and downloads and clears both bounds together', async () => {
+  const wrapper = mount(ClientLogManagement, { props: { token: 'login' } })
+  await flushPromises()
+  const picker = wrapper.findComponent({ name: 'ElDatePicker' })
+  const range = [new Date(2026, 9, 15, 8, 30), new Date(2026, 9, 16, 18, 0)]
+  picker.vm.$emit('update:modelValue', range)
+  await wrapper.find('form').trigger('submit'); await flushPromises()
+  expect(api.readClientLogs.mock.lastCall![0].get('from')).toBe(range[0]!.toISOString())
+  expect(api.readClientLogs.mock.lastCall![0].get('to')).toBe(range[1]!.toISOString())
+  await wrapper.findAll('button').find(b => b.text() === '下载运行日志')!.trigger('click'); await flushPromises()
+  expect(api.downloadClientLogs.mock.lastCall![0].get('from')).toBe(range[0]!.toISOString())
+  expect(api.downloadClientLogs.mock.lastCall![0].get('to')).toBe(range[1]!.toISOString())
+  picker.vm.$emit('update:modelValue', null)
+  await wrapper.find('form').trigger('submit'); await flushPromises()
+  expect(api.readClientLogs.mock.lastCall![0].has('from')).toBe(false)
+  expect(api.readClientLogs.mock.lastCall![0].has('to')).toBe(false)
+  wrapper.unmount()
+})

@@ -27,7 +27,8 @@ public sealed partial class InMemoryPdmRepository
         lock (gate)
         {
             var collected = new List<ArchiveUploadCleanup>();
-            foreach (var item in archiveUploads.Values.Where(item => item.State is "Staged" or "Collecting" && item.Session.ExpiresAt <= timeProvider.GetUtcNow()).Take(limit).ToArray())
+            var count = Math.Clamp(limit, 1, 100);
+            foreach (var item in archiveUploads.Values.Where(item => item.State is "Staged" or "Collecting" && item.Session.ExpiresAt <= timeProvider.GetUtcNow()).Take(count).ToArray())
             {
                 var session = item.Session;
                 var path = session.TargetRelativePath!;
@@ -36,7 +37,7 @@ public sealed partial class InMemoryPdmRepository
                 archiveUploads[session.Id] = (session, referenced ? "Adopted" : "Collecting");
                 if (!referenced) collected.Add(new(session.Id, session.ProjectId, new(path, session.TotalLength, session.ExpectedSha256, timeProvider.GetUtcNow())));
             }
-            foreach (var pending in pendingArchiveDocuments.Values.Where(p => p.Document.CheckoutLeaseExpiresAt <= timeProvider.GetUtcNow() && !archiveBatchReceipts.ContainsKey(p.BatchId)).ToArray())
+            foreach (var pending in pendingArchiveDocuments.Values.Where(p => p.Document.CheckoutLeaseExpiresAt <= timeProvider.GetUtcNow() && !archiveBatchReceipts.ContainsKey(p.BatchId)).Take(count).ToArray())
                 pendingArchiveDocuments.Remove(pending.Document.Id);
             return Task.FromResult<IReadOnlyList<ArchiveUploadCleanup>>(collected);
         }

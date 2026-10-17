@@ -16,7 +16,7 @@ using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-internal static class Program
+internal static partial class Program
 {
  const BindingFlags Flags=BindingFlags.Instance|BindingFlags.Static|BindingFlags.Public|BindingFlags.NonPublic;
  static Assembly assembly;
@@ -32,7 +32,7 @@ internal static class Program
   using(var timer=new System.Windows.Forms.Timer{Interval=50})
   {
    timer.Tick+=(_,__)=>{var dialog=FindWindow("#32770","整体存档前保存文件");if(dialog!=IntPtr.Zero)SendMessage(dialog,0x111,new IntPtr(6),IntPtr.Zero);if(args.Length>1){dialog=FindWindow("#32770","UPLM");if(dialog!=IntPtr.Zero){GetWindowThreadProcessId(dialog,out var process);if(process==(uint)System.Diagnostics.Process.GetCurrentProcess().Id)SendMessage(dialog,0x111,new IntPtr(1),IntPtr.Zero);}}};
-   host.Shown+=async (_,__)=>{try{if(args.Length>1&&args[1]=="--document-rename-regression"){RootRenameScenario();return;}if(args.Length>1&&args[1]=="--archive-network-regression"){await ArchiveNetworkScenario();return;}if(args.Length>1&&args[1]=="--cycle-scan-regression"){VisualReferenceCycleScenario();return;}if(args.Length>1&&args[1]=="--strict-scan-matrix"){VisualReferenceCycleScenario();StrictScanMatrix();SixDrawingDiscoveryScenario();NativeManifestScenario();RootRenameScenario();PlannedTaskTimerScenario(host);SuppressedReadScenario();return;}if(args.Length>1){await OpenDispatcherScenario(args[1]=="--expect-handle-failure");return;}await OpenDispatcherScenario(false);VisualReferenceCycleScenario();StrictScanMatrix();SixDrawingDiscoveryScenario();NativeManifestScenario();RootRenameScenario();PlannedTaskTimerScenario(host);DrawingDiscoveryScenario();ControlledReferenceScenario();ControlledScannerScenario();SearchScopeScenario();PropertyCompletenessScenario();await PreflightGateScenario(host);await ArchiveNetworkScenario();await LatePreparationGate(host);DrawingSaveGate();SuppressedReadScenario();ReadOnlyOpenScenario();DiagnosticTabScenario(host);CenteringScenario();CloseReferencedScenario();EntryScenario(host);await Scenario(false,false);await Scenario(true,false);await Scenario(true,true);}catch(Exception e){failure=e;}finally{host.Close();}};
+   host.Shown+=async (_,__)=>{try{if(args.Length>1&&args[1]=="--rename-fill-regression"){ComponentRenameAndFillScenario(host);return;}if(args.Length>1&&args[1]=="--document-rename-regression"){RootRenameScenario();return;}if(args.Length>1&&args[1]=="--archive-network-regression"){await ArchiveNetworkScenario();return;}if(args.Length>1&&args[1]=="--cycle-scan-regression"){VisualReferenceCycleScenario();return;}if(args.Length>1&&args[1]=="--strict-scan-matrix"){VisualReferenceCycleScenario();StrictScanMatrix();SixDrawingDiscoveryScenario();NativeManifestScenario();RootRenameScenario();PlannedTaskTimerScenario(host);SuppressedReadScenario();return;}if(args.Length>1){await OpenDispatcherScenario(args[1]=="--expect-handle-failure");return;}await OpenDispatcherScenario(false);VisualReferenceCycleScenario();StrictScanMatrix();SixDrawingDiscoveryScenario();NativeManifestScenario();RootRenameScenario();ComponentRenameAndFillScenario(host);PlannedTaskTimerScenario(host);DrawingDiscoveryScenario();ControlledReferenceScenario();ControlledScannerScenario();SearchScopeScenario();PropertyCompletenessScenario();await PreflightGateScenario(host);await ArchiveNetworkScenario();await LatePreparationGate(host);DrawingSaveGate();SuppressedReadScenario();ReadOnlyOpenScenario();DiagnosticTabScenario(host);CenteringScenario();CloseReferencedScenario();EntryScenario(host);await Scenario(false,false);await Scenario(true,false);await Scenario(true,true);}catch(Exception e){failure=e;}finally{host.Close();}};
    timer.Start();Application.Run(host);
   }
   if(failure!=null){Console.WriteLine("FAIL: "+failure.GetType().FullName+" "+failure.Message);if(failure.InnerException!=null)Console.WriteLine("INNER: "+failure.InnerException.GetType().FullName+" "+failure.InnerException.Message);Environment.ExitCode=1;}
@@ -377,6 +377,7 @@ internal static class Program
  }
  static void ControlledReferenceScenario()
  {
+  ImportedControlledReferences();
   var interop=Type("PdmAddin").GetField("application",Flags).FieldType.Assembly;
   var folder=Path.Combine(Path.GetTempPath(),"pdm-controlled-ref-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
   var path=Path.Combine(folder,"PART.SLDPRT");var old=Path.Combine(folder,"legacy","PART.SLDPRT");Directory.CreateDirectory(Path.GetDirectoryName(old));File.WriteAllText(old,"uncontrolled");
@@ -404,6 +405,29 @@ internal static class Program
    }
    Console.WriteLine("PASS: Controlled reference validation "+mode);
   }
+ }
+ static void ImportedControlledReferences()
+ {
+  var interop=Type("PdmAddin").GetField("application",Flags).FieldType.Assembly;
+  var folder=Path.Combine(Path.GetTempPath(),"pdm-import-open-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+  var cacheDirectory=Path.Combine(Path.GetTempPath(),"swx-open-"+Guid.NewGuid().ToString("N"),"IC~~");Directory.CreateDirectory(cacheDirectory);
+  var native=Path.Combine(cacheDirectory,"source.stp.SLDPRT");var source=Path.Combine(folder,"source.stp");
+  foreach(var mode in new[]{"correct","outside-workspace","corrupt","missing","unknown-source"})
+  {
+   File.WriteAllText(source,"original STEP bytes");var hash=(string)Type("PdmAddin").GetMethod("ComputeFileHash",Flags).Invoke(null,new object[]{source});var length=new FileInfo(source).Length;
+   var model=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetPathName"?native:throw new Exception(call.MethodName)).GetTransparentProxy();
+   var component=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),call=>{
+    switch(call.MethodName){case "GetPathName":return native;case "GetModelDoc2":return model;case "GetImportedPath":return mode=="outside-workspace"?Path.Combine(folder,"outside","source.stp"):mode=="unknown-source"?Path.Combine(folder,"unknown.stp"):source;default:throw new Exception(call.MethodName);}
+   }).GetTransparentProxy();
+   var root=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetType"?2:call.MethodName=="GetComponents"?new[]{component}:throw new Exception(call.MethodName)).GetTransparentProxy();
+   var manifest=New("ControlledOpenManifestDto");var files=(IList)Activator.CreateInstance(Property(manifest,"Files").PropertyType);var file=New("ControlledOpenFileDto");
+   Set(file,"FileName","source.stp");Set(file,"RelativePath","source.stp");Set(file,"Sha256",hash);Set(file,"FileLength",length);files.Add(file);Set(manifest,"Files",files);
+   if(mode=="corrupt")File.WriteAllText(source,"changed original");if(mode=="missing")File.Delete(source);
+   var rejected=false;try{Type("PdmAddin").GetMethod("ValidateHistoricalControlledOpenReferences",Flags).Invoke(null,new object[]{root,Path.Combine(folder,"ROOT.SLDASM"),manifest});}catch(TargetInvocationException e)when(e.InnerException is InvalidOperationException){rejected=true;}
+   if(rejected!=(mode!="correct"))throw new Exception("Imported STEP controlled-open mismatch "+mode);
+   Console.WriteLine("PASS: imported STEP controlled-open "+mode);
+  }
+  Directory.Delete(folder,true);Directory.Delete(cacheDirectory);Directory.Delete(Path.GetDirectoryName(cacheDirectory));
  }
  static void SearchScopeScenario()
  {

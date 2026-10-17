@@ -1680,14 +1680,16 @@ internal sealed class BatchRenameControl : UserControl
             {
                 summary.Text = string.Concat("已完成 ", completed, " 项；其余项目请查看状态列。");
                 var failedRequest = requests.FirstOrDefault(request => statuses.TryGetValue(request.NodeId, out var status)
-                    && status.StartsWith("失败：", StringComparison.Ordinal));
+                    && (status.StartsWith("失败：", StringComparison.Ordinal) || status.StartsWith("不可执行：", StringComparison.Ordinal)));
                 var blockedRequest = failedRequest ?? requests.FirstOrDefault(request => !statuses.TryGetValue(request.NodeId, out var status)
                     || !string.Equals(status, "已完成", StringComparison.Ordinal));
                 var failureDetail = blockedRequest == null ? string.Empty : string.Concat(
                     "\r\n图档：", blockedRequest.Item.FileName, "\r\n",
                     statuses.TryGetValue(blockedRequest.NodeId, out var blockedStatus) ? blockedStatus : "未返回执行结果");
                 MessageBox.Show(this, string.Concat("批量重命名未全部完成：已完成 ", completed, "/", requests.Length,
-                    " 项。", failureDetail, "\r\n已完成项目予以保留，其余项目未执行，请查看状态列。"), "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    " 项。", failureDetail, completed == 0
+                        ? "\r\n本批次尚未重命名。请先处理以上问题，再重新生成预览。"
+                        : "\r\n已完成项目予以保留，其余项目未执行，请查看状态列。"), "UPLM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
         catch (Exception exception)

@@ -39,7 +39,7 @@ public static class DingTalkVisitorEndpoints
             }, ct));
     }
     private static bool IsBound(Guid projectId, DingTalkVisitorTicket ticket, DingTalkOplIntegration integration) => integration.SubmissionEnabled(projectId)
-        && (ticket.GroupId is null || integration.Settings.Bindings.GetValueOrDefault(projectId) == ticket.GroupId);
+        && (ticket.GroupId is null || integration.IsBoundToGroup(projectId, ticket.GroupId.Value));
     private static async Task<IResult> InSession(HttpContext context, DingTalkVisitorSession sessions, DingTalkOplIntegration integration,
         Func<DingTalkVisitorTicket, string, Task<IResult>> action, CancellationToken ct)
     {

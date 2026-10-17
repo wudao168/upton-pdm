@@ -63,6 +63,9 @@ public sealed record Project(
 
     public IReadOnlyDictionary<string, string> PhaseOwners { get; init; } = new Dictionary<string, string>();
 
+    public IReadOnlyDictionary<string, IReadOnlyList<string>> CustomPositionMembers { get; init; } = new Dictionary<string, IReadOnlyList<string>>();
+    public int PermissionSchemaVersion => 2;
+
     public bool CanAssignExecutionUnit { get; init; }
 
     public bool CanManageMainStaffing { get; init; }
@@ -195,6 +198,8 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
     public MaterialCodeApprovalSettings MaterialCodeApproval { get; init; } = MaterialCodeApprovalSettings.Default;
 
     public IReadOnlyList<string> ReleaseChangeReasonTypes { get; init; } = DefaultReleaseChangeReasonTypes;
+
+    public IReadOnlyDictionary<string, string> ReleaseChangeReasonLabels { get; init; } = new Dictionary<string, string>();
 
     public ProgramTemplateOptionCatalog ProgramTemplateOptions { get; init; } = ProgramTemplateOptionCatalog.Empty;
 
@@ -402,7 +407,17 @@ public sealed record PermissionDefinition(
     string Name,
     string Module,
     string? Description = null,
-    bool Sensitive = false);
+    bool Sensitive = false)
+{
+    public string Action { get; init; } = "other";
+    public string Scope { get; init; } = "system";
+    public string ProjectAuthorization { get; init; } = "role";
+    public IReadOnlyList<string> Dependencies { get; init; } = [];
+    public string? LegacyPermission { get; init; }
+    public bool Hidden { get; init; }
+    public bool LegacyAllPositions { get; init; }
+    public IReadOnlyList<FunctionRoute> Routes { get; init; } = [];
+}
 
 public sealed record RoleDefinition(
     string RoleCode,

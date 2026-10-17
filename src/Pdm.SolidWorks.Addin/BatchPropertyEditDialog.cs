@@ -611,7 +611,8 @@ internal sealed class BatchPropertyEditDialog : Form
     private readonly Label propertyCardSummary = new Label { AutoSize = false, ForeColor = Color.FromArgb(90, 107, 128) };
     private readonly Label writebackSummary = new Label { AutoSize = true, ForeColor = Color.FromArgb(90, 107, 128) };
     private readonly Label propertyCardStatus = new Label { Text = string.Empty, AutoSize = false, AutoEllipsis = true, ForeColor = Color.FromArgb(210, 110, 0), TextAlign = ContentAlignment.MiddleLeft };
-    private readonly Label plmSyncStatus = new Label { Text = "PLM属性尚未同步", AutoSize = true, AutoEllipsis = false, ForeColor = Color.FromArgb(210, 110, 0), TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Label plmSyncStatus = new Label { Text = "PLM属性尚未同步", AutoSize = false, AutoEllipsis = true, ForeColor = Color.FromArgb(210, 110, 0), TextAlign = ContentAlignment.MiddleLeft };
+    private readonly ToolTip fillResultToolTip = new ToolTip();
     private readonly Button execute = new Button { Text = "执行批量编辑", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight) };
     private readonly Button setPropertyCard = new Button { Text = "设置属性卡", AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight) };
     private readonly Button close = new Button { Text = "关闭", DialogResult = DialogResult.Cancel, AutoSize = false, Size = new Size(StandardControlWidth, StandardControlHeight) };
@@ -1393,18 +1394,10 @@ internal sealed class BatchPropertyEditDialog : Form
         }
 
         var drawing = drawingItem.OperationItem.Node;
-        var drawingStem = Path.GetFileNameWithoutExtension(drawing.FileName ?? string.Empty);
         return items.Where(candidate =>
             candidate.OperationItem.Node.Kind == CadDocumentKind.Assembly
             || candidate.OperationItem.Node.Kind == CadDocumentKind.Part)
-            .Where(candidate =>
-                drawing.RelatedModelDocumentId.HasValue
-                    && candidate.OperationItem.Node.DocumentId == drawing.RelatedModelDocumentId
-                || !string.IsNullOrWhiteSpace(drawingStem)
-                    && string.Equals(
-                        Path.GetFileNameWithoutExtension(candidate.FileName),
-                        drawingStem,
-                        StringComparison.OrdinalIgnoreCase));
+            .Where(candidate => DrawingReferencesModel(drawing, candidate.OperationItem.Node));
     }
 
     private IEnumerable<BatchPropertyEditItem> RelatedDrawingItems(BatchPropertyEditItem modelItem)
@@ -1415,16 +1408,20 @@ internal sealed class BatchPropertyEditDialog : Form
         }
 
         var model = modelItem.OperationItem.Node;
-        var modelStem = Path.GetFileNameWithoutExtension(model.FileName ?? string.Empty);
         return items.Where(candidate => candidate.OperationItem.Node.Kind == CadDocumentKind.Drawing)
-            .Where(candidate =>
-                model.DocumentId.HasValue
-                    && candidate.OperationItem.Node.RelatedModelDocumentId == model.DocumentId
-                || !string.IsNullOrWhiteSpace(modelStem)
-                    && string.Equals(
-                        Path.GetFileNameWithoutExtension(candidate.FileName),
-                        modelStem,
-                        StringComparison.OrdinalIgnoreCase));
+            .Where(candidate => DrawingReferencesModel(candidate.OperationItem.Node, model));
+    }
+
+    private static bool DrawingReferencesModel(CadTreeNode drawing, CadTreeNode model)
+    {
+        if (drawing.RelatedModelDocumentId.HasValue) return drawing.RelatedModelDocumentId == model.DocumentId;
+        if (drawing.ReferencedModels.Count > 0)
+            return drawing.ReferencedModels.Any(reference => reference.DocumentId.HasValue && model.DocumentId.HasValue
+                ? reference.DocumentId == model.DocumentId
+                : !string.IsNullOrWhiteSpace(reference.FullPath) && string.Equals(reference.FullPath, model.FullPath, StringComparison.OrdinalIgnoreCase));
+        var stem = Path.GetFileNameWithoutExtension(drawing.FileName ?? string.Empty);
+        return !string.IsNullOrWhiteSpace(stem) && string.Equals(stem, Path.GetFileNameWithoutExtension(model.FileName ?? string.Empty), StringComparison.OrdinalIgnoreCase)
+            && string.Equals(Path.GetDirectoryName(drawing.FullPath), Path.GetDirectoryName(model.FullPath), StringComparison.OrdinalIgnoreCase);
     }
 
     private void SynchronizeRelatedDrawings(BatchPropertyEditItem modelItem, string propertyName)
@@ -2130,6 +2127,7 @@ internal sealed class BatchPropertyEditDialog : Form
     {
         if (disposing)
         {
+            fillResultToolTip.Dispose();
             thumbnailCancellation.Cancel();
             foreach (var image in thumbnails.Values.Concat(fallbackThumbnails.Values))
             {
@@ -2260,29 +2258,53 @@ internal sealed class BatchPropertyEditDialog : Form
             return;
         }
 
-        var pendingValues = new List<KeyValuePair<BatchPropertyEditItem, string>>();
+        var pendingValues = new Dictionary<BatchPropertyEditItem, string>();
         var overwriteCount = 0;
+        var unchangedCount = 0;
+        var filenameSources = 0;
+        var skipped = new List<string>();
         foreach (var item in selectedItems.OrderBy(item =>
                      item.OperationItem.Node.Kind == CadDocumentKind.Drawing ? 1 : 0))
         {
             var isDrawing = item.OperationItem.Node.Kind == CadDocumentKind.Drawing;
-            var sourceValue = isDrawing
-                ? RelatedModelItems(item)
-                    .Select(model => model.PropertyValue(targetProperty))
-                    .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
-                : item.PropertyValue("文档名称");
+            string sourceValue;
+            if (isDrawing)
+            {
+                var sources = RelatedModelItems(item).Select(model => pendingValues.TryGetValue(model, out var next) ? next
+                        : !string.IsNullOrWhiteSpace(model.PropertyValue(targetProperty)) ? model.PropertyValue(targetProperty)
+                        : BatchPropertyNameModelAutoFillRule.DocumentNameOrFileName(model.PropertyValue("文档名称"), model.FileName))
+                    .Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.Ordinal).ToArray();
+                if (sources.Length != 1)
+                {
+                    skipped.Add(item.FileName + (sources.Length == 0
+                        ? "：没有可确认的关联模型，请补充工程图关联后重试。"
+                        : "：关联模型的值不一致，请核对工程图引用并手动填写。"));
+                    continue;
+                }
+                sourceValue = sources[0];
+            }
+            else
+            {
+                sourceValue = BatchPropertyNameModelAutoFillRule.DocumentNameOrFileName(item.PropertyValue("文档名称"), item.FileName);
+                if (string.IsNullOrWhiteSpace(item.PropertyValue("文档名称")) && !string.IsNullOrWhiteSpace(sourceValue)) filenameSources++;
+            }
             var currentValue = item.PropertyValue(targetProperty);
-            if (!item.IsPropertyApplicable(targetProperty)
-                || !BatchPropertyNameModelAutoFillRule.TryResolveValue(
+            if (!item.IsPropertyApplicable(targetProperty) || string.IsNullOrWhiteSpace(sourceValue))
+            {
+                skipped.Add(item.FileName + "：字段不可写或缺少文档名称及文件名，请读取属性卡并核对文件后重试。");
+                continue;
+            }
+            if (!BatchPropertyNameModelAutoFillRule.TryResolveValue(
                     sourceValue,
                     currentValue,
                     overwriteMismatch: true,
                     out var value))
             {
+                unchangedCount++;
                 continue;
             }
 
-            pendingValues.Add(new KeyValuePair<BatchPropertyEditItem, string>(item, value));
+            pendingValues.Add(item, value);
             if (!string.IsNullOrWhiteSpace(currentValue))
             {
                 overwriteCount++;
@@ -2291,8 +2313,11 @@ internal sealed class BatchPropertyEditDialog : Form
 
         if (pendingValues.Count == 0)
         {
-            CancelValidation(string.Concat(
-                "所选图档没有可用的文档/关联模型值，或“", targetProperty, "”已经正确。"));
+            plmSyncStatus.Text = skipped.Count == 0 ? targetProperty + "已全部正确，无需重复填充"
+                : "未填充 " + skipped.Count + " 项，请查看问题提示";
+            fillResultToolTip.SetToolTip(plmSyncStatus, string.Join(Environment.NewLine, skipped));
+            PluginDiagnosticLog.Record("属性填充", plmSyncStatus.Text + Environment.NewLine + string.Join(Environment.NewLine, skipped));
+            ShowFillProblems(targetProperty, skipped, 0);
             return;
         }
 
@@ -2321,8 +2346,27 @@ internal sealed class BatchPropertyEditDialog : Form
             SynchronizeRelatedDrawings(pending.Key, targetProperty);
         }
 
+        rows.ResetBindings();
         grid.Refresh();
         UpdateSummary();
+        plmSyncStatus.Text = targetProperty + (skipped.Count > 0
+            ? "：未填充 " + skipped.Count + "，已填充 " + pendingValues.Count + "，已正确 " + unchangedCount
+            : "：已填充 " + pendingValues.Count + "，已正确 " + unchangedCount + "，未填充 0");
+        plmSyncStatus.ForeColor = skipped.Count > 0 ? Color.FromArgb(210, 110, 0) : Color.FromArgb(31, 132, 92);
+        var detail = "文档名称为空时已使用不含扩展名的文件名：" + filenameSources + " 项。请确认后点击“批量写入”保存。"
+            + (skipped.Count > 0 ? Environment.NewLine + string.Join(Environment.NewLine, skipped) : string.Empty);
+        fillResultToolTip.SetToolTip(plmSyncStatus, detail);
+        PluginDiagnosticLog.Record("属性填充", plmSyncStatus.Text + "；" + detail);
+        ShowFillProblems(targetProperty, skipped, pendingValues.Count);
+    }
+
+    private void ShowFillProblems(string propertyName, IReadOnlyList<string> skipped, int filled)
+    {
+        if (skipped.Count == 0) return;
+        TopMostMessageBox.Show(this, "已填充 " + filled + " 项，以下 " + skipped.Count + " 项未自动填充：\r\n"
+            + string.Join("\r\n", skipped.Take(15)) + (skipped.Count > 15 ? "\r\n其余问题已写入插件诊断日志。" : string.Empty)
+            + "\r\n请核对后再批量写入；当前填充仅修改表格预览，尚未保存到图档。",
+            propertyName + "填充问题", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     private void RefreshAfterBatchRename()

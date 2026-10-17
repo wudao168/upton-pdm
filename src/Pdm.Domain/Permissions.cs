@@ -1,4 +1,4 @@
-﻿namespace Upton.Pdm.Domain;
+namespace Upton.Pdm.Domain;
 
 public static class PermissionCodes
 {
@@ -71,7 +71,7 @@ public static class PermissionCodes
 
 public static class RolePermissionCatalog
 {
-    public static IReadOnlyList<PermissionDefinition> Permissions { get; } =
+    public static IReadOnlyList<PermissionDefinition> Permissions { get; } = FunctionPermissionCatalog.Build(
     [
         new(PermissionCodes.ProjectBudgetView, "查看项目预算", "项目预算", "查看未税预算、实际和预计成本；风险预留仅计划管理可见。"),
         new(PermissionCodes.ProjectBudgetActualEdit, "维护实际成本及工时", "项目预算", "由财务人工登记实际金额和实际工时。", Sensitive: true),
@@ -138,7 +138,7 @@ public static class RolePermissionCatalog
         new(PermissionCodes.ProjectPermissionSettingsView, "查看项目权限设置", "项目权限"),
         new(PermissionCodes.ProjectPermissionSettingsEdit, "修改项目权限设置", "项目权限", Sensitive: true),
         new(PermissionCodes.AuditView, "查看全局审计", "系统审计", Sensitive: true)
-    ];
+    ]);
 
     public static IReadOnlyDictionary<UserRole, IReadOnlySet<string>> Defaults { get; } =
         new Dictionary<UserRole, IReadOnlySet<string>>
@@ -290,36 +290,14 @@ public static class RolePermissionCatalog
     {
         if (role == UserRole.Administrator) return Defaults[UserRole.Administrator];
         if (role == UserRole.PlatformAdministrator) return Defaults[UserRole.PlatformAdministrator];
-        var normalized = codes.Where(IsKnown).ToHashSet(StringComparer.Ordinal);
-        if (normalized.Any(code => code.StartsWith("project.", StringComparison.Ordinal)
-                || code.StartsWith("quality.", StringComparison.Ordinal)
-                || code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentRecycle or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease
-                    or PermissionCodes.BomEdit or PermissionCodes.BomMechanicalEdit or PermissionCodes.BomElectricalEdit or PermissionCodes.ValidationPlanEdit
-                    or PermissionCodes.DrawingReviewSubmit or PermissionCodes.DrawingReviewAnnotate or PermissionCodes.DrawingReviewDecide or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide
-                    or PermissionCodes.ProductionDrawingManage or PermissionCodes.ApprovalEmergencySubstitute))
-            normalized.Add(PermissionCodes.ProjectView);
-        if (normalized.Any(code => code is PermissionCodes.DocumentEdit or PermissionCodes.DocumentRecycle or PermissionCodes.DocumentLockRequestRelease or PermissionCodes.DocumentLockForceRelease
-                or PermissionCodes.BomEdit or PermissionCodes.BomMechanicalEdit or PermissionCodes.BomElectricalEdit or PermissionCodes.ValidationPlanEdit
-                or PermissionCodes.DrawingReviewSubmit or PermissionCodes.DrawingReviewAnnotate or PermissionCodes.DrawingReviewDecide or PermissionCodes.ReleaseManage or PermissionCodes.ApprovalDecide
-                or PermissionCodes.ProductionDrawingManage or PermissionCodes.ApprovalEmergencySubstitute
-                or PermissionCodes.ProjectContactEdit or PermissionCodes.ProjectNameplateEdit
-                || code.StartsWith("quality.", StringComparison.Ordinal)))
-            normalized.Add(PermissionCodes.ProjectContentView);
-        if (normalized.Any(code => code is PermissionCodes.ProgramTemplateSubmit or PermissionCodes.ProgramTemplateReview or PermissionCodes.ProgramTemplateApprove or PermissionCodes.ProgramTemplateManage))
-            normalized.Add(PermissionCodes.ProgramTemplateView);
-        if (normalized.Contains(PermissionCodes.StandardLibraryManage)) normalized.Add(PermissionCodes.StandardLibraryView);
-        if (normalized.Contains(PermissionCodes.MaterialRelationManage) || normalized.Contains(PermissionCodes.MaterialRelationPublish)) normalized.Add(PermissionCodes.MaterialRelationView);
-        if (normalized.Contains(PermissionCodes.MaterialManage)) normalized.Add(PermissionCodes.MaterialApply);
-        if (normalized.Contains(PermissionCodes.MaterialApply)) normalized.Add(PermissionCodes.MaterialView);
-        if (normalized.Contains(PermissionCodes.ProjectBudgetActualEdit)) normalized.Add(PermissionCodes.ProjectBudgetView);
-        if (normalized.Contains(PermissionCodes.ProjectBudgetEdit)) normalized.Add(PermissionCodes.ProjectBudgetView);
-        if (normalized.Contains(PermissionCodes.ProjectBudgetReserve) || normalized.Contains(PermissionCodes.ProjectBudgetSettlementView)
-            || normalized.Contains(PermissionCodes.ProjectBudgetSettlementEdit) || normalized.Contains(PermissionCodes.ProjectBudgetBonusRateEdit))
-            normalized.Add(PermissionCodes.ProjectBudgetView);
-        if (normalized.Contains(PermissionCodes.ProjectBudgetSettlementEdit)) normalized.Add(PermissionCodes.ProjectBudgetSettlementView);
-        if (normalized.Contains(PermissionCodes.ProjectBudgetView)) normalized.Add(PermissionCodes.ProjectContentView);
-        if (normalized.Contains(PermissionCodes.RoleSettingsEdit)) normalized.Add(PermissionCodes.RoleSettingsView);
-        if (normalized.Contains(PermissionCodes.ProjectPermissionSettingsEdit)) normalized.Add(PermissionCodes.ProjectPermissionSettingsView);
+        var source = codes.ToHashSet(StringComparer.Ordinal);
+        var normalized = FunctionPermissionCatalog.Expand(source).Where(IsKnown).Where(code => !Permissions.Single(item => item.Code == code).Hidden).ToHashSet(StringComparer.Ordinal);
+        var pending = new Queue<string>(normalized);
+        while (pending.TryDequeue(out var code))
+            foreach (var dependency in Permissions.Single(item => item.Code == code).Dependencies)
+                if (normalized.Add(dependency)) pending.Enqueue(dependency);
+        if (!source.Contains(FunctionPermissionCatalog.SchemaMarker)) normalized.UnionWith(FunctionPermissionCatalog.Expand(normalized).Where(code => !Permissions.Single(item => item.Code == code).Hidden));
+        normalized.Add(FunctionPermissionCatalog.SchemaMarker);
         return normalized;
     }
 

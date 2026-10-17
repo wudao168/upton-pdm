@@ -68,6 +68,7 @@ public sealed class DingTalkVisitorTests
         var login = await client.PostAsJsonAsync("/api/integrations/dingtalk/opl/login", new { code="auth-code",companyId=company,groupId=group });
         Assert.Equal(HttpStatusCode.OK,login.StatusCode);
         var session = await login.Content.ReadFromJsonAsync<JsonElement>(); Assert.False(session.TryGetProperty("accessToken",out _));
+        Assert.False(session.TryGetProperty("groupConfirmationRequired",out _));
         var ticket = session.GetProperty("guestToken").GetString()!;
         client.DefaultRequestHeaders.Add("X-DingTalk-Session",ticket);
         var projects = await client.GetFromJsonAsync<JsonElement>("/api/integrations/dingtalk/opl/guest/projects"); Assert.Equal(2,projects.GetArrayLength());
@@ -93,6 +94,22 @@ public sealed class DingTalkVisitorTests
         client.DefaultRequestHeaders.Authorization = null; client.DefaultRequestHeaders.Remove("X-DingTalk-Session"); client.DefaultRequestHeaders.Add("X-DingTalk-Session",ticket+"tampered");
         Assert.Equal(HttpStatusCode.Forbidden,(await client.GetAsync("/api/integrations/dingtalk/opl/guest/projects")).StatusCode);
         Assert.Equal(4,handler.Calls);
+        client.DefaultRequestHeaders.Remove("X-DingTalk-Session");
+        Assert.Equal(HttpStatusCode.BadRequest,(await client.PostAsJsonAsync("/api/integrations/dingtalk/opl/login",new {code="code",companyId=company,groupId=group,projectId=unrelated.Id})).StatusCode);
+        Assert.Equal(4,handler.Calls);
+        var alias=Guid.NewGuid();options.Groups[alias]=new(){Name="同一群的旧登记",OpenConversationId="cid-group"};
+        foreach(var entryGroup in new[]{group,alias})
+        {
+            var scopedLogin=await client.PostAsJsonAsync("/api/integrations/dingtalk/opl/login",new {code="group-code",companyId=company,groupId=entryGroup});
+            Assert.Equal(HttpStatusCode.OK,scopedLogin.StatusCode);
+            var scopedSession=await scopedLogin.Content.ReadFromJsonAsync<JsonElement>();
+            client.DefaultRequestHeaders.Add("X-DingTalk-Session",scopedSession.GetProperty("guestToken").GetString());
+            var scopedProjects=await client.GetFromJsonAsync<JsonElement>("/api/integrations/dingtalk/opl/guest/projects");
+            Assert.Equal(2,scopedProjects.GetArrayLength());
+            Assert.DoesNotContain(scopedProjects.EnumerateArray(),project=>project.GetProperty("id").GetGuid()==unrelated.Id);
+            Assert.Equal(HttpStatusCode.BadRequest,(await client.GetAsync($"/api/integrations/dingtalk/opl/guest/projects/{unrelated.Id}/people")).StatusCode);
+            client.DefaultRequestHeaders.Remove("X-DingTalk-Session");
+        }
     }
     private sealed class Clock : TimeProvider { public DateTimeOffset Now = DateTimeOffset.UtcNow; public override DateTimeOffset GetUtcNow()=>Now; }
     [Fact]

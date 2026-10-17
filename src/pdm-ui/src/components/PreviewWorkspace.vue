@@ -385,7 +385,9 @@ watch([() => props.selected.documentId, () => props.accessToken], () => {
   void loadLastArchivedAt()
 }, { immediate: true })
 
-watch([() => props.selected.id, () => props.reviewVersionId], () => {
+watch([() => props.selected.id, () => props.reviewVersionId], ([selectedId, reviewVersionId], [previousSelectedId, previousReviewVersionId]) => {
+  // 审批只更新审核版本；只有用户主动加载后才打开该版本，不能续用旧预览会话自动打开。
+  if (selectedId === previousSelectedId && reviewVersionId !== previousReviewVersionId) previewSessionActivated.value = false
   markupSaving.value = false
   markupDirty.value = false
   solidWorksPending.value = false

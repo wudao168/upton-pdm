@@ -16,6 +16,7 @@ public sealed class DingTalkOplOptions
     public string RobotCode { get; set; } = "";
     public Guid CompanyId { get; set; }
     public string PublicUrl { get; set; } = "";
+    public string NotificationTemplate { get; set; } = DingTalkOplMessageTemplate.Default;
     public Dictionary<string, string> Users { get; set; } = [];
     public Dictionary<Guid, DingTalkOplGroup> Projects { get; set; } = [];
     public Dictionary<Guid, DingTalkOplGroup> Groups { get; set; } = [];
@@ -45,6 +46,8 @@ public sealed partial class DingTalkOplIntegration(HttpClient http, IOptions<Din
         && !string.IsNullOrWhiteSpace(Settings.AppSecret);
     private DingTalkOplGroup? Group(Guid projectId) => Settings.Bindings.TryGetValue(projectId, out var id)
         ? Settings.Groups.GetValueOrDefault(id) : Settings.Projects.GetValueOrDefault(projectId);
+    public bool IsBoundToGroup(Guid projectId, Guid groupId) => Settings.Groups.TryGetValue(groupId, out var group)
+        && !string.IsNullOrWhiteSpace(group.OpenConversationId) && Group(projectId)?.OpenConversationId == group.OpenConversationId;
     public bool SubmissionEnabled(Guid projectId) => ApplicationEnabled && Group(projectId) is not null;
     private bool ApplicationRobotEnabled(DingTalkOplGroup group) => ApplicationEnabled && !string.IsNullOrWhiteSpace(Settings.RobotCode) && !string.IsNullOrWhiteSpace(group.OpenConversationId);
     public bool NotificationEnabled(Guid projectId) => Settings.Enabled && Group(projectId) is { } group

@@ -747,9 +747,9 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
                 [BomValidationFieldCatalog.DrawingNumber, BomValidationFieldCatalog.Name, BomValidationFieldCatalog.Unit, BomValidationFieldCatalog.Brand, BomValidationFieldCatalog.Quantity, BomValidationFieldCatalog.Revision],
                 BomValidationFieldCatalog.NonStandardDefaults,
                 BomValidationFieldCatalog.ElectricalDefaults),
-            ReleaseChangeReasonTypes = [" 设计变更 ", "客户需求", "设计变更"]
+            ReleaseChangeReasonTypes = ["物料问题 / 交期不满足"]
         }, "admin", UserRole.Administrator, default);
-        Assert.Equal(PdmSystemSettings.DefaultReleaseChangeReasonTypes, savedSettings.ReleaseChangeReasonTypes);
+        Assert.Equal(["物料问题 / 交期不满足"], savedSettings.ReleaseChangeReasonTypes);
 
         var item = Assert.Single(await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
             [new BomItemInput(1, "STD-RULE", "标准件", 1, "件", null, "M10", "W1", true)],
@@ -2403,6 +2403,37 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
     }
 
     [Fact]
+    public async Task CustomReasons_AreSelectableAndRemainFrozenAfterRemoval()
+    {
+        var time = new FixedTimeProvider(DateTimeOffset.Parse("2026-09-02T18:30:00Z"));
+        var repository = new InMemoryPdmRepository(time);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), time);
+
+        var formal = await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
+            ReleaseScope.StandardFormal, [], "admin", UserRole.Administrator, default);
+        formal = await workflow.SubmitReleasePackageAsync(formal.Id, "admin", UserRole.Administrator, default);
+        foreach (var task in formal.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
+            formal = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "同意", default);
+
+        var settings = await repository.GetSystemSettingsAsync(default);
+        const string key = "物料问题 / custom-inventory";
+        await repository.UpdateSystemSettingsAsync(settings with {
+            ReleaseChangeReasonTypes = [key], ReleaseChangeReasonLabels = new Dictionary<string, string> { [key] = "临时库存替代" }
+        }, default);
+        await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, "", "", "设计问题 / 设计变更", "未指定", null, ReleaseScope.StandardSupplement, [], "admin", UserRole.Administrator, default));
+        var package = await workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", key, "未指定", null,
+            ReleaseScope.StandardSupplement, [], "admin", UserRole.Administrator, default);
+        Assert.Equal("物料问题 / 临时库存替代", package.ChangeReason);
+        Assert.Equal("custom-inventory", Assert.Single(package.ChangeReasonSelections).ReasonCode);
+        await repository.UpdateSystemSettingsAsync(settings with { ReleaseChangeReasonTypes = [], ReleaseChangeReasonLabels = new Dictionary<string, string>() }, default);
+        package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+        Assert.Equal("临时库存替代", Assert.Single(package.ChangeReasonSelections).Reason);
+    }
+
+    [Fact]
     public async Task FormalSupplement_RequiresSpecificReasonsAndEnforcesSnapshottedCount()
     {
         var time = new MutableTimeProvider(DateTimeOffset.Parse("2026-09-02T18:30:00Z"));
@@ -3343,6 +3374,44 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
         Assert.DoesNotContain(await repository.ListProjectDocumentVersionsAsync(ProjectId, default), version => version.ReleasePackageId == package.Id);
         await workflow.DemandReleasePreviewRetryAsync(package.Id, "admin", UserRole.Administrator, default);
         publisher.ConversionUnavailable = false;
+        var published = await workflow.ResumePublishAsync(package.Id, default);
+        Assert.Equal(ReleasePackageState.Published, published.State);
+        Assert.All(published.ApprovalTasks, task => Assert.Equal(ApprovalDecision.Approved, task.Decision));
+    }
+
+    [Fact]
+    public async Task DrawingPublication_StopsAutomaticRetriesAndPreservesApprovalUntilExplicitRetry()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var publisher = new RecordingPublisher { ConversionUnavailable = true };
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), publisher, TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var package = await workflow.CreateReleasePackageAsync(ProjectId, null, $"RP-CONVERSION-STOP-{Guid.NewGuid():N}",
+            "admin", "admin", "admin", UserRole.Administrator, default);
+        await PublishAsync(workflow, package);
+        for (var attempt = 1; attempt < ReleasePreviewService.MaxAttempts; attempt++)
+            await workflow.ResumePublishAsync(package.Id, default);
+        var paused = (await repository.FindReleasePackageAsync(package.Id, default))!;
+        Assert.Equal(ReleasePackageState.Publishing, paused.State);
+        Assert.Equal(ReleasePreviewState.Failed, paused.PreviewState);
+        Assert.Equal(ReleasePreviewService.MaxAttempts, paused.PreviewAttempts);
+        Assert.Contains("超时", paused.PreviewError);
+        Assert.All(paused.ApprovalTasks, task => Assert.Equal(ApprovalDecision.Approved, task.Decision));
+        Assert.DoesNotContain(package.Id, await repository.ListPublishingReleasePackageIdsAsync(20, default));
+        await workflow.ResumePublishAsync(package.Id, default);
+        Assert.Equal(ReleasePreviewService.MaxAttempts, publisher.PublishCalls);
+        // 旧数据即使已重试41次，也不能再启动一次转换。
+        await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Running, "旧转图错误", 41, DateTimeOffset.UtcNow, default);
+        var legacy = await workflow.ResumePublishAsync(package.Id, default);
+        Assert.Equal(ReleasePreviewState.Failed, legacy.PreviewState);
+        Assert.Equal(41, legacy.PreviewAttempts);
+        Assert.Equal(ReleasePreviewService.MaxAttempts, publisher.PublishCalls);
+        publisher.ConversionUnavailable = false;
+        var requeued = await workflow.DemandReleasePreviewRetryAsync(package.Id, "admin", UserRole.Administrator, default);
+        Assert.Equal(0, requeued.PreviewAttempts);
+        Assert.Contains(package.Id, await repository.ListPublishingReleasePackageIdsAsync(20, default));
         var published = await workflow.ResumePublishAsync(package.Id, default);
         Assert.Equal(ReleasePackageState.Published, published.State);
         Assert.All(published.ApprovalTasks, task => Assert.Equal(ApprovalDecision.Approved, task.Decision));

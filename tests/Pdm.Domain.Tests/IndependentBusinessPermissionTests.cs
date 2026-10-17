@@ -17,7 +17,7 @@ public sealed class IndependentBusinessPermissionTests
         var settings = await repository.GetProjectPermissionSettingsAsync(default);
         await repository.UpdateProjectPermissionSettingsAsync(new(settings.Rules.ToDictionary(pair => pair.Key,
             pair => (IReadOnlyList<string>)(pair.Key == ProjectPermissionPositions.MainManager
-                ? pair.Value.Where(code => code != PermissionCodes.ProjectPlanEdit).ToArray() : pair.Value))), default);
+                ? pair.Value.Where(code => code != PermissionCodes.ProjectPlanEdit && !RolePermissionCatalog.Permissions.Any(item => item.Code == code && item.LegacyPermission == PermissionCodes.ProjectPlanEdit)).ToArray() : pair.Value))), default);
         Assert.False(await ProjectPermissionPolicy.CanAsync(repository, project.Id, "engineer", UserRole.Engineer, PermissionCodes.ProjectPlanEdit, default));
     }
 

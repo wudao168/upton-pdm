@@ -287,7 +287,7 @@ public static class PdmEndpointExtensions
         api.MapPut("/role-permissions/{targetRole}", async (string targetRole, UpdateRolePermissionsRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(MapRolePermissionDirectory(await workflow.UpdateRolePermissionsAsync(targetRole, request.Permissions, actor, role, cancellationToken)));
+            return Results.Ok(MapRolePermissionDirectory(await workflow.UpdateRolePermissionsAsync(targetRole, request.SchemaVersion >= 2 ? request.Permissions.Concat([FunctionPermissionCatalog.SchemaMarker]).ToArray() : request.Permissions, actor, role, cancellationToken)));
         });
 
         api.MapPost("/role-permissions", async (CreateRoleRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -307,13 +307,32 @@ public static class PdmEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             return !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectPermissionSettingsView, cancellationToken)
                 ? Results.Forbid()
-                : Results.Ok(await repository.GetProjectPermissionSettingsAsync(cancellationToken));
+                : Results.Ok(MapProjectPermissionDirectory(await repository.GetProjectPermissionSettingsAsync(cancellationToken), await repository.GetProjectPositionUsageAsync(cancellationToken)));
         });
 
-        api.MapPut("/project-permissions", async (UpdateProjectPermissionSettingsRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPut("/project-permissions", async (UpdateProjectPermissionSettingsRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await workflow.UpdateProjectPermissionSettingsAsync(new(request.Rules), actor, role, cancellationToken));
+            var previous = await repository.GetProjectPermissionSettingsAsync(cancellationToken);
+            var custom = request.CustomPositions ?? previous.CustomPositions;
+            var rules = request.CustomPositions is null ? previous.Rules.Concat(request.Rules).GroupBy(item => item.Key).ToDictionary(group => group.Key, group => group.Last().Value) : request.Rules;
+            var saved = await workflow.UpdateProjectPermissionSettingsAsync(new(rules, custom, request.SchemaVersion), actor, role, cancellationToken);
+            return Results.Ok(MapProjectPermissionDirectory(saved, await repository.GetProjectPositionUsageAsync(cancellationToken)));
+        });
+
+        api.MapGet("/function-permissions", () => Results.Ok(RolePermissionCatalog.Permissions));
+        api.MapGet("/projects/{projectId:guid}/position-members", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, ct)) return Results.Forbid();
+            var project = await repository.FindProjectAsync(projectId, ct) ?? throw new PdmNotFoundException("项目不存在。");
+            var settings = await repository.GetProjectPermissionSettingsAsync(ct);
+            return Results.Ok(new { Positions = settings.CustomPositions ?? [], Members = project.CustomPositionMembers });
+        });
+        api.MapPut("/projects/{projectId:guid}/position-members", async (Guid projectId, SetProjectPositionMembersRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.SetCustomProjectPositionsAsync(projectId, request.Members, actor, role, ct));
         });
 
         api.MapGet("/organization-directory", async (IPdmRepository repository, CancellationToken cancellationToken) =>
@@ -413,6 +432,7 @@ public static class PdmEndpointExtensions
                 ApprovalWorkflows = request.ApprovalWorkflows ?? currentSettings.ApprovalWorkflows,
                 MaterialCodeApproval = request.MaterialCodeApproval ?? currentSettings.MaterialCodeApproval,
                 ReleaseChangeReasonTypes = request.ReleaseChangeReasonTypes ?? currentSettings.ReleaseChangeReasonTypes,
+                ReleaseChangeReasonLabels = request.ReleaseChangeReasonLabels ?? currentSettings.ReleaseChangeReasonLabels,
                 FormalSupplementPolicies = request.FormalSupplementPolicies ?? currentSettings.FormalSupplementPolicies,
                 DrawingQrPolicy = request.DrawingQrPolicy ?? currentSettings.DrawingQrPolicy,
                 PreviewConversion = request.PreviewConversion ?? currentSettings.PreviewConversion
@@ -737,6 +757,14 @@ public static class PdmEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             return Results.Ok(await repository.ListDocumentRelationsAsync(projectId, cancellationToken));
+        });
+
+        api.MapPost("/documents/version-verifications", async (DocumentVersionVerificationBatchRequest request,
+            HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            context.Response.Headers.CacheControl = "no-store";
+            return Results.Ok(await workflow.VerifyDocumentVersionsAsync(request.Documents, actor, role, cancellationToken));
         });
 
         api.MapGet("/documents/{documentId:guid}/versions", async (Guid documentId, int? take, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -2164,9 +2192,16 @@ public static class PdmEndpointExtensions
             BaseRole = role.BaseRole.ToString(),
             role.IsSystem,
             role.IsSystemAdministrator,
-            role.Permissions,
+            Permissions = role.Permissions.Where(code => RolePermissionCatalog.Permissions.Any(item => item.Code == code && !item.Hidden)),
             role.UserCount
         })
+    };
+
+    private static object MapProjectPermissionDirectory(ProjectPermissionSettings settings, IReadOnlyDictionary<string, int> usage) => new
+    {
+        settings.Rules, settings.CustomPositions, settings.SchemaVersion,
+        Positions = settings.Positions.Select(item => new { item.Key, item.Name, item.Description, item.Scope, item.IsSystem, item.IsActive, item.SortOrder, ProjectCount = usage.GetValueOrDefault(item.Key) }),
+        Permissions = RolePermissionCatalog.Permissions.Where(item => item.Scope == "project" && !item.Hidden)
     };
 
     private static string? TrimToNull(string? value, int maxLength, string fieldName)

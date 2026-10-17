@@ -29,6 +29,9 @@ internal sealed class WorkspaceLocalFileState
     public DateTime? LastWriteTimeUtc { get; set; }
     public Guid? BoundVersionId { get; set; }
     public string VerificationKey { get; set; } = string.Empty;
+    public string VerificationDetails { get; set; } = string.Empty;
+    public string CheckedOutBy { get; set; } = string.Empty;
+    public string ContentSha256 { get; set; } = string.Empty;
 }
 
 internal sealed class WorkspaceLocalStateSnapshot
@@ -96,7 +99,7 @@ internal static class WorkspaceLocalStateReader
             // Preserve real writable edits. Damaged read-only caches must not displace a valid working copy.
             var candidates = edits.Length > 0 ? edits : valid.Length > 0 ? valid : states;
             var changed = candidates.Where(item => item.LocalState == "Modified" || item.LocalState == "IntegrityMismatch").ToArray();
-            if (changed.Length > 1 && changed.Select(item => ComputeHash(item.FullPath)).Distinct(StringComparer.OrdinalIgnoreCase).Skip(1).Any())
+            if (changed.Length > 1 && changed.Select(item => item.ContentSha256).Distinct(StringComparer.OrdinalIgnoreCase).Skip(1).Any())
             {
                 result.Items.Add(State(document, string.Empty, null, "IdentityConflict", "身份冲突", false,
                     "同一图档存在内容不同的多个修改副本，请先备份并确认需要保留的文件：\r\n" + string.Join("\r\n", changed.Select(item => item.FullPath))));
@@ -129,13 +132,34 @@ internal static class WorkspaceLocalStateReader
                 && versionId != state.BoundVersionId)
             || !PdmDocumentIdentityStore.TryReadControlledMetadata(state.FullPath, out var metadata)
             || metadata.DocumentId != state.DocumentId || metadata.ProjectId != projectId
-            || metadata.VersionId != state.BoundVersionId
             || (File.GetAttributes(state.FullPath) & FileAttributes.ReadOnly) == 0) return false;
-        var hash = ComputeHash(state.FullPath);
-        if (!string.Equals(hash, storedSha256, StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(hash, sourceSha256, StringComparison.OrdinalIgnoreCase)) return false;
-        return PdmDocumentIdentityStore.TryWriteControlledVersion(state.FullPath, state.DocumentId, projectId,
-            versionId, revision, hash, new FileInfo(state.FullPath).Length);
+        // Keep the verified bytes fixed until the conditional binding write completes.
+        using (var source = new FileStream(state.FullPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (var sha256 = SHA256.Create())
+        {
+            var hash = BitConverter.ToString(sha256.ComputeHash(source)).Replace("-", string.Empty);
+            state.VerificationDetails = "本地SHA256=" + hash + "；绑定SHA256=" + metadata.Sha256
+                + "；绑定版本=" + metadata.VersionId + "；服务器版本=" + versionId
+                + "；服务器SHA256=" + storedSha256 + "；源文件SHA256=" + sourceSha256;
+            if (!string.Equals(hash, storedSha256, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(hash, sourceSha256, StringComparison.OrdinalIgnoreCase)) return false;
+            // The add-in can finish writing this exact binding while the desktop awaits HTTP.
+            // Accept an already verified binding, but never overwrite a different concurrent edit.
+            if (metadata.VersionId != state.BoundVersionId)
+                return metadata.VersionId == versionId && metadata.Revision == revision
+                    && metadata.FileLength == source.Length
+                    && string.Equals(hash, metadata.Sha256, StringComparison.OrdinalIgnoreCase);
+            return PdmDocumentIdentityStore.TryRecoverControlledVersion(state.FullPath, metadata, projectId,
+                versionId, revision, hash, source.Length);
+        }
+    }
+
+    internal static WorkspaceLocalFileState Recheck(WorkspaceLocalFileState state, Guid projectId, string currentUsername)
+    {
+        if (!PdmDocumentIdentityStore.TryReadControlledMetadata(state.FullPath, out var metadata)
+            || metadata.DocumentId != state.DocumentId || metadata.ProjectId != projectId) return state;
+        return Evaluate(new WorkspaceDocumentStateRequest { DocumentId = state.DocumentId, FileName = state.FileName,
+            LatestRevision = state.LatestRevision, CheckedOutBy = state.CheckedOutBy }, state.FullPath, metadata, currentUsername);
     }
 
     private static WorkspaceLocalFileState Evaluate(
@@ -144,15 +168,36 @@ internal static class WorkspaceLocalStateReader
         PdmControlledFileMetadata metadata,
         string currentUsername)
     {
+        string hash;
+        try { hash = ComputeHash(path); }
+        catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
+        {
+            return State(document, path, metadata, "NeedsUpdate", "等待校验", true,
+                "文件正在保存、替换或暂时无法读取，请等待操作完成后刷新；本地文件已保留。");
+        }
+        // Enumeration may have captured metadata before the archive finished writing it.
+        if (PdmDocumentIdentityStore.TryReadControlledMetadata(path, out var current))
+        {
+            if (current.DocumentId != metadata.DocumentId || current.ProjectId != metadata.ProjectId)
+                return State(document, path, metadata, "NeedsUpdate", "等待校验", true,
+                    "文件关联记录正在更新，请等待存档完成后刷新。");
+            metadata = current;
+        }
+        else return State(document, path, metadata, "NeedsUpdate", "等待校验", true,
+            "当前无法确认文件关联记录，请等待存档完成后刷新。");
         var attributes = File.GetAttributes(path);
         var readOnly = (attributes & FileAttributes.ReadOnly) != 0;
         var info = new FileInfo(path);
+        // ADS/attribute writes can change timestamps without changing CAD content.
         var verificationKey = string.Join("|", path, metadata?.VersionId, metadata?.Revision, metadata?.Sha256,
-            metadata?.FileLength, info.Length, info.LastWriteTimeUtc.Ticks, (int)attributes, document.LatestRevision);
-        var changed = HasChanged(path, metadata);
+            metadata?.FileLength, info.Length, hash, document.LatestRevision);
+        var changed = !string.IsNullOrWhiteSpace(metadata?.Sha256)
+            && (metadata.FileLength.HasValue && info.Length != metadata.FileLength.Value
+                || !string.Equals(hash, metadata.Sha256, StringComparison.OrdinalIgnoreCase));
         var checkedOutByMe = !string.IsNullOrWhiteSpace(currentUsername)
             && string.Equals(document.CheckedOutBy, currentUsername, StringComparison.OrdinalIgnoreCase);
-        if (string.IsNullOrWhiteSpace(metadata?.Sha256))
+        if (string.IsNullOrWhiteSpace(metadata?.Sha256) || !metadata.VersionId.HasValue
+            || metadata.VersionId == Guid.Empty || string.IsNullOrWhiteSpace(metadata.Revision) || !metadata.FileLength.HasValue)
             return State(document, path, metadata, "NeedsUpdate", "需要校验", readOnly,
                 "本地校验记录不完整，无法确认文件是否已存档。请先备份本地文件，再核对服务器版本。");
         if (changed)
@@ -161,6 +206,9 @@ internal static class WorkspaceLocalStateReader
                 readOnly ? "文件异常" : "待签入", readOnly,
                 readOnly ? "只读缓存内容与获取时不一致，请重新获取最新版。" : "本地内容已修改，确认保存后请提交存档。" );
             state.VerificationKey = verificationKey;
+            state.ContentSha256 = hash;
+            state.VerificationDetails = "本地SHA256=" + hash + "；绑定SHA256=" + metadata.Sha256
+                + "；本地长度=" + info.Length + "；绑定长度=" + metadata.FileLength + "；绑定版本=" + metadata.VersionId;
             return state;
         }
         if (checkedOutByMe)
@@ -205,6 +253,7 @@ internal static class WorkspaceLocalStateReader
             LocalRevision = metadata?.Revision ?? string.Empty,
             LatestRevision = document.LatestRevision ?? string.Empty,
             BoundVersionId = metadata?.VersionId,
+            CheckedOutBy = document.CheckedOutBy,
             Message = message ?? string.Empty,
             IsReadOnly = readOnly,
             LastWriteTimeUtc = !string.IsNullOrWhiteSpace(path) && File.Exists(path)
@@ -213,20 +262,19 @@ internal static class WorkspaceLocalStateReader
         };
     }
 
-    private static bool HasChanged(string path, PdmControlledFileMetadata metadata)
-    {
-        if (metadata == null || string.IsNullOrWhiteSpace(metadata.Sha256)) return false;
-        var info = new FileInfo(path);
-        if (metadata.FileLength.HasValue && info.Length != metadata.FileLength.Value) return true;
-        return !string.Equals(ComputeHash(path), metadata.Sha256, StringComparison.OrdinalIgnoreCase);
-    }
-
     private static string ComputeHash(string path)
     {
-        using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-        using (var hash = SHA256.Create())
+        try
         {
-            return BitConverter.ToString(hash.ComputeHash(input)).Replace("-", string.Empty);
+            // Most cache files have no writer: one protected read is enough.
+            using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var hash = SHA256.Create())
+                return BitConverter.ToString(hash.ComputeHash(input)).Replace("-", string.Empty);
+        }
+        catch (IOException error) when ((error.HResult & 0xffff) == 32 || (error.HResult & 0xffff) == 33)
+        {
+            // Loaded CAD documents may retain writable handles; verify two independent reads.
+            return ArchiveFileFingerprint.Read(path);
         }
     }
 

@@ -18,6 +18,18 @@ const click = async (label: string, root: ParentNode = document.body) => { (Arra
 beforeEach(() => { vi.clearAllMocks(); api.readProjectOpl.mockResolvedValue({ rows: [{ issue, canEdit: true, canComplete: true }], people: [] }); api.saveProjectOpl.mockResolvedValue(issue); api.getProjectExportMetadata.mockResolvedValue({title:'项目资料',company:'公司',scope:'当前项目',versionLabel:'版本',version:'—',exportedAt:'2026-10-14T12:00:00+08:00',exportedBy:'管理员',fields:[]}) })
 afterEach(() => { wrapper?.unmount(); document.body.innerHTML = ''; vi.unstubAllGlobals() })
 describe('OPL drawer', () => {
+  it('lets the user send an update or completion to the group and displays delivery failures without losing the save', async () => {
+    api.saveProjectOpl.mockResolvedValue({ ...issue, notification: { sent: false, message: '群通知未发送。问题已保存，无需重复提交。' } })
+    api.completeProjectOpl.mockResolvedValue({ ...issue, status: '已完成', notification: { sent: true, message: '群通知已发送。' } })
+    await setup(); await click('编辑')
+    const checkbox = Array.from(document.body.querySelectorAll('label.el-checkbox')).find(label => label.textContent?.includes('保存后通知钉钉群'))!.querySelector('input')!
+    checkbox.click(); await flushPromises()
+    await click('保存问题')
+    expect(api.saveProjectOpl).toHaveBeenCalledWith('p1','i1',expect.objectContaining({ notifyGroup: true }),[],'token')
+    expect(document.body.textContent).toContain('问题已保存，无需重复提交')
+    await click('完成',wrapper.element)
+    expect(api.completeProjectOpl).toHaveBeenCalledWith('p1','i1',3,'token',true)
+  })
   it('exports every scoped issue regardless of filters or pagination, retaining complete content', async () => {
     const rows = Array.from({length:27}, (_, index) => ({issue:{...issue,id:`export-${index}`,number:index+1,description:`完整描述${index}\n第二行`,solution:'完整解决措施',priority:'高',relatedProjectId:'child-1',owner:'engineer',attachments:[{id:'a',name:'证据.txt',length:8}]},canEdit:true,canComplete:true}))
     api.readProjectOpl.mockResolvedValue({rows:[...rows,{issue:{...issue,id:'closed',status:'已完成'},canEdit:true,canComplete:false},{issue:{...issue,id:'low',priority:'低'},canEdit:true,canComplete:true},{issue:{...issue,id:'void',status:'已作废'},canEdit:true,canComplete:false}],people:[{username:'engineer',displayName:'王工'}],subprojects:[{id:'child-1',code:'P700012-1',name:'子设备'}]})
@@ -72,7 +84,7 @@ describe('OPL drawer', () => {
   it('completes a row without opening its drawer and displays the server completion date', async () => {
     api.completeProjectOpl.mockResolvedValue({ ...issue, status: '已完成', completedAt: '2026-10-13T00:01:00Z', rowVersion: 4 })
     await setup(); await click('完成', wrapper.element)
-    expect(api.completeProjectOpl).toHaveBeenCalledWith('p1', 'i1', 3, 'token')
+    expect(api.completeProjectOpl).toHaveBeenCalledWith('p1', 'i1', 3, 'token', false)
     expect(wrapper.findComponent({ name: 'ElDrawer' }).props('modelValue')).toBe(false)
     expect(wrapper.text()).not.toContain('相机支架松动')
     expect(wrapper.text()).toContain('已完成 1')

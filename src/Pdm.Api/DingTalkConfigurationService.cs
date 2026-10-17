@@ -8,7 +8,7 @@ using Upton.Pdm.Domain;
 namespace Upton.Pdm.Api;
 
 
-public sealed record SaveDingTalkApplication(bool Enabled, string CorpId, string AppKey, string? AppSecret, string PublicUrl, long ExpectedRowVersion, string? RobotCode = null);
+public sealed record SaveDingTalkApplication(bool Enabled, string CorpId, string AppKey, string? AppSecret, string PublicUrl, long ExpectedRowVersion, string? RobotCode = null, string? NotificationTemplate = null);
 public sealed record SaveDingTalkBinding(Guid? GroupId, long ExpectedRowVersion);
 
 public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepository configs, IPdmRepository projects,
@@ -68,6 +68,7 @@ public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepositor
         }).ToArray();
     }
     private async Task<object> ApplicationViewAsync(DingTalkOplOptions value, string actor, UserRole role, CancellationToken ct) => new { value.Enabled, value.CorpId, value.AppKey, value.RobotCode, value.PublicUrl, value.CompanyId, value.RowVersion,
+        notificationTemplate = DingTalkOplMessageTemplate.Normalize(value.NotificationTemplate), defaultNotificationTemplate = DingTalkOplMessageTemplate.Default, notificationFields = DingTalkOplMessageTemplate.Fields,
         hasAppSecret = !string.IsNullOrWhiteSpace(value.AppSecret), entryUrl = Entry(value), stream = streamStatus.Read(value.CompanyId), groups = await GroupsAsync(value, actor, role, ct) };
     public async Task<object> GetApplicationAsync(string actor, UserRole role, CancellationToken ct)
     { await RequireSystemAsync(actor, role, ct); return await ApplicationViewAsync(await LoadAsync(TenantContext.CompanyId, ct), actor, role, ct); }
@@ -84,6 +85,7 @@ public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepositor
         var url = input.PublicUrl?.Trim().TrimEnd('/') ?? "";
         if (!Uri.TryCreate(url, UriKind.Absolute, out var address) || address.Scheme is not ("http" or "https") || !string.IsNullOrEmpty(address.Query) || !string.IsNullOrEmpty(address.Fragment) || !string.IsNullOrEmpty(address.UserInfo)) throw new PdmRuleException("请填写有效的PLM访问地址，不含查询参数，例如 http://192.168.2.8:5173。");
         if (input.CorpId?.Length > 200 || input.AppKey?.Length > 200 || input.AppSecret?.Length > 1000) throw new PdmRuleException("应用配置内容超出允许范围。");
+        if (input.NotificationTemplate is not null) value.NotificationTemplate = DingTalkOplMessageTemplate.Normalize(input.NotificationTemplate);
         value.Enabled = input.Enabled; value.CorpId = input.CorpId?.Trim() ?? ""; value.AppKey = input.AppKey?.Trim() ?? ""; value.PublicUrl = url;
         if (input.RobotCode is not null) { if (input.RobotCode.Length > 200) throw new PdmRuleException("RobotCode最多200个字符。"); value.RobotCode = input.RobotCode.Trim(); }
         if (!string.IsNullOrWhiteSpace(input.AppSecret)) value.AppSecret = input.AppSecret.Trim();
@@ -102,7 +104,7 @@ public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepositor
         return (root.Id, manage);
     }
     private async Task<object> BindingViewAsync(DingTalkOplOptions value, Guid rootId, bool canManage, string actor, UserRole role, CancellationToken ct) => new { rootProjectId = rootId, canManage, value.RowVersion,
-        groupId = value.Bindings.TryGetValue(rootId, out var groupId) ? (Guid?)groupId : null, groups = await GroupsAsync(value, actor, role, ct), entryUrl = Entry(value), enabled = value.Enabled };
+        groupId = value.Bindings.TryGetValue(rootId, out var groupId) ? (Guid?)groupId : null, groups = await GroupsAsync(value, actor, role, ct), entryUrl = value.Bindings.TryGetValue(rootId, out var boundGroup) ? Entry(value, boundGroup) : "", enabled = value.Enabled };
     public async Task<object> GetBindingAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
     { var access = await ProjectAccessAsync(projectId, actor, role, ct); return await BindingViewAsync(await LoadAsync(TenantContext.CompanyId, ct), access.RootId, access.CanManage, actor, role, ct); }
     public async Task<Guid> EntryGroupAsync(Guid projectId,string actor,UserRole role,CancellationToken ct)
