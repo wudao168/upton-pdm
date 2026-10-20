@@ -28,6 +28,37 @@ public sealed class DrawingReviewWorkflowTests
         Assert.Equal(DrawingReviewCandidateState.Ready, candidate.State);
     }
     [Fact]
+    public async Task ReleasedReviewRetiresOldWritebackWithoutChangingVersions()
+    {
+        var (repository, workflow, model, drawing) = await PrepareReviewAsync();
+        var review = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
+        var item = Assert.Single(review.Items);
+        review = await workflow.DecideDrawingReviewTargetAsync(review.Id, item.Id,
+            new DecideDrawingReviewTargetCommand(DrawingReviewTarget.Drawing2D, DrawingReviewDecision.Approve, "通过"),
+            "drawing-reviewer", UserRole.Administrator, default);
+        review = await ApproveAsMechanicalSupervisorAsync(workflow, review);
+        var source = (await repository.ListDocumentVersionsAsync(drawing.Id, default)).First();
+        var release = await CreateLegacyReleasePackageAsync(repository);
+        var id = Guid.NewGuid();
+        var task = new ApprovalTask(Guid.NewGuid(), id, ApprovalStage.Approval, "admin", "admin", ApprovalDecision.Approved, "通过", DateTimeOffset.UtcNow);
+        var published = await repository.CreateReleasePackageAsync(release with { Id = id, State = ReleasePackageState.Publishing, ApprovalTasks = [task] }, default);
+        await repository.PublishDocumentVersionAsync(drawing.Id, source.Id, published.Id, task.Id, "admin", default);
+        Assert.Equal(0, await workflow.CompleteReleasedDrawingReviewWritebacksAsync(default));
+        await repository.MarkPublishedAsync(published.Id, "test-release", DateTimeOffset.UtcNow, default);
+        var versions = (await repository.ListDocumentVersionsAsync(drawing.Id, default)).Select(version => version.Id).ToArray();
+        Assert.Equal(1, await workflow.CompleteReleasedDrawingReviewWritebacksAsync(default));
+        Assert.Equal(0, await workflow.CompleteReleasedDrawingReviewWritebacksAsync(default));
+        Assert.Equal(versions, (await repository.ListDocumentVersionsAsync(drawing.Id, default)).Select(version => version.Id));
+        Assert.Single(await repository.ListDocumentVersionsAsync(model.Id, default));
+        Assert.Equal(DrawingReviewPackageState.Approved, (await repository.FindDrawingReviewPackageAsync(review.Id, default))!.State);
+        var oldTask = Assert.Single(await repository.ListCadPropertyWritebacksAsync(ProjectId, default));
+        Assert.Equal(CadPropertyWritebackStatus.Superseded, oldTask.Status);
+        await Assert.ThrowsAsync<PdmConflictException>(() => workflow.StartCadPropertyWritebackAsync(oldTask.Id, "cad-client", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmConflictException>(() => repository.CheckoutAsync(drawing.Id, "cad-client",
+            Guid.NewGuid(), "TEST-WS", DateTimeOffset.UtcNow.AddMinutes(15), oldTask.Id, default));
+    }
+
+    [Fact]
     public async Task SubmitterCanListEligibleAssignedReviewersWithoutRoleAdministrationPermission()
     {
         var (repository, workflow, _, _) = await PrepareReviewAsync();
@@ -562,7 +593,7 @@ public sealed class DrawingReviewWorkflowTests
         Assert.Equal(DrawingReviewPackageState.WritingProperties, review.State);
         var writeback = Assert.Single(await repository.ListCadPropertyWritebacksAsync(ProjectId, default));
         Assert.Equal(CadPropertyWritebackStatus.Pending, writeback.Status);
-        Assert.True(await repository.IsDocumentUnderActiveDrawingReviewAsync(drawing.Id, default));
+        Assert.False(await repository.IsDocumentUnderActiveDrawingReviewAsync(drawing.Id, default));
 
         // 只有审核发起人、项目经理或系统管理员可以放弃写入。
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
@@ -602,7 +633,7 @@ public sealed class DrawingReviewWorkflowTests
     }
 
     [Fact]
-    public async Task PropertyWritingRejectsOrdinaryCheckInWithoutControlledWriteback()
+    public async Task ApprovedDrawingCanBeEditedWhileOldWritebackCannotOverwriteIt()
     {
         var (repository, workflow, model, drawing) = await PrepareReviewAsync();
         var review = await workflow.CreateDrawingReviewPackageAsync(ProjectId, "submitter", UserRole.Administrator, default);
@@ -616,27 +647,34 @@ public sealed class DrawingReviewWorkflowTests
 
         var lockedIds = await repository.ListActiveDrawingReviewDocumentIdsAsync(ProjectId, default);
         Assert.DoesNotContain(model.Id, lockedIds);
-        Assert.Contains(drawing.Id, lockedIds);
+        Assert.DoesNotContain(drawing.Id, lockedIds);
 
         var writeback = (await repository.ListCadPropertyWritebacksAsync(ProjectId, default))
             .Single(request => request.SourceDocumentId == drawing.Id);
-        await workflow.StartCadPropertyWritebackAsync(writeback.Id, "cad-client", UserRole.Administrator, default);
         var sessionId = Guid.NewGuid();
-        var checkedOut = await repository.CheckoutAsync(drawing.Id, "cad-client", sessionId, "TEST-WS",
-            DateTimeOffset.UtcNow.AddMinutes(15), writeback.Id, default);
+        var checkedOut = await workflow.CheckoutAsync(drawing.Id, "cad-client", UserRole.Administrator,
+            sessionId, "TEST-WS", default);
+        await Assert.ThrowsAsync<PdmConflictException>(() => workflow.StartCadPropertyWritebackAsync(
+            writeback.Id, "cad-client", UserRole.Administrator, default));
+        var modelVersionsBefore = (await repository.ListDocumentVersionsAsync(model.Id, default)).Select(version => version.Id).ToArray();
         var root = new DocumentReferenceNode(Guid.NewGuid(), checkedOut.Id, checkedOut.DrawingNumber, checkedOut.FileName,
             checkedOut.Name, checkedOut.Kind, "默认", 1, ReferenceNodeStatus.Normal, checkedOut.Revision, "cad-client", []);
         var commit = new DocumentVersionCommit(
             new StoredFile($"versions/{checkedOut.FileName}", 128, new string('E', 64), DateTimeOffset.UtcNow),
-            "非法普通存档",
+            "批准后修改工程图",
             writeback.Properties,
             new CadReferenceSnapshot(Guid.NewGuid(), ProjectId, checkedOut.Id, DateTimeOffset.UtcNow, "cad-client", root, new string('F', 64)),
             [],
             []);
 
-        var blocked = await Assert.ThrowsAsync<PdmConflictException>(() =>
-            repository.CheckInVersionAsync(drawing.Id, "cad-client", sessionId, commit, default));
-        Assert.Contains("不能提交存档", blocked.Message);
+        var changed = await repository.CheckInVersionAsync(drawing.Id, "cad-client", sessionId, commit, default);
+        await Assert.ThrowsAsync<PdmConflictException>(() => workflow.StartCadPropertyWritebackAsync(
+            writeback.Id, "cad-client", UserRole.Administrator, default));
+        Assert.Equal(changed.Version!.Id, (await repository.ListDocumentVersionsAsync(drawing.Id, default)).First().Id);
+        Assert.Equal(modelVersionsBefore, (await repository.ListDocumentVersionsAsync(model.Id, default)).Select(version => version.Id));
+        Assert.Equal(DrawingReviewTargetState.Approved, (await repository.FindDrawingReviewPackageAsync(review.Id, default))!.Items.Single().DrawingState);
+        Assert.False(await repository.IsDocumentUnderActiveDrawingReviewAsync(drawing.Id, default));
+        Assert.Equal(0, await workflow.CompleteReleasedDrawingReviewWritebacksAsync(default));
     }
 
     [Fact]

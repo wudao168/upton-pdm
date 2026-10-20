@@ -145,8 +145,8 @@ onBeforeUnmount(() => {
       <DocumentTreeNode :node="root" :search-query="query" :selected-id="selectedId" :review-states="reviewStates" :local-states="localStates" @select="emit('select', $event)" @context="showContext" />
     </ul>
     <div v-else class="pdm-tree-empty" role="status">
-      <strong>没有匹配的图档</strong>
-      <span>请调整类型筛选或搜索关键字。</span>
+      <strong>{{ allCount === 0 ? '当前项目暂无图档' : '没有匹配的图档' }}</strong>
+      <span>{{ allCount === 0 ? '存档后将在这里显示设计树和工程图。' : '请调整类型筛选或搜索关键字。' }}</span>
     </div>
     <div
       v-if="contextNode"
@@ -168,6 +168,7 @@ onBeforeUnmount(() => {
       <span><i class="is-green" />只读缓存</span>
       <span><i class="is-blue" />可编辑</span>
       <span><i class="is-orange" />需处理</span>
+      <slot name="actions" />
     </footer>
   </section>
 </template>

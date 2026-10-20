@@ -83,6 +83,21 @@ function loadStep() {
   worker.postMessage({ id, buffer }, [buffer])
 }
 
+function setView(view: 'fit' | 'front' | 'top' | 'isometric') {
+  if (!model || !camera || !controls) return
+  const bounds = new THREE.Box3().setFromObject(model)
+  const center = bounds.getCenter(new THREE.Vector3())
+  const radius = Math.max(bounds.getSize(new THREE.Vector3()).length() / 2, 1)
+  const direction = view === 'front' ? new THREE.Vector3(0, 0, 1)
+    : view === 'top' ? new THREE.Vector3(0, 1, 0)
+      : view === 'fit' ? camera.position.clone().sub(controls.target) : new THREE.Vector3(1.55, 1.15, 1.55)
+  camera.up.set(0, view === 'top' ? 0 : 1, view === 'top' ? -1 : 0)
+  camera.position.copy(center).add(direction.normalize().multiplyScalar(radius * 2.5))
+  controls.target.copy(center)
+  controls.update()
+}
+defineExpose({ setView })
+
 onMounted(() => {
   if (!canvas.value) return
   scene = new THREE.Scene()

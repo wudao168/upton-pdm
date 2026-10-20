@@ -1,20 +1,36 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import type { TableInstance } from 'element-plus'
 import { Download, Plus, RotateCw as RefreshCw } from '@lucide/vue'
-import { completeProjectOpl, getProjectExportMetadata, PdmApiError, readOplAttachment, readProjectOpl, saveProjectOpl } from '../api'
+import { completeProjectOpl, getProjectExportMetadata, markProjectOplViewed, PdmApiError, readOplAttachment, readProjectOpl, saveProjectOpl } from '../api'
 import type { ProjectSummary } from '../types'
-import type { OplAttachment, OplInput, OplRow, OplView } from '../projectOpl'
+import type { OplAttachment, OplInput, OplReleaseRecord, OplRow, OplView } from '../projectOpl'
 import { useUserDisplayName } from '../userDisplay'
 import { downloadOplWorkbook } from '../oplWorkbook'
 
 const PdfDrawingViewer = defineAsyncComponent(() => import('./PdfDrawingViewer.vue'))
 const props = defineProps<{ project: ProjectSummary; token: string }>()
+const emit = defineEmits<{ openRelease: [projectId: string, releasePackageId: string] }>()
 const displayUserName = useUserDisplayName()
 const view = ref<OplView>({ rows: [], people: [] })
 const loading = ref(false), saving = ref(false), error = ref(''), drawer = ref(false), readonly = ref(false)
 const completing = ref<string | null>(null), exporting = ref(false)
 const notifyUpdates = ref(false)
+const oplTable = ref<TableInstance>()
+// 全局列宽适配会按比例压缩；为状态胶囊保留可完整显示的空间。
+watch(() => oplTable.value?.store.states.columns.value.map(column => column.realWidth), () => {
+  const table = oplTable.value, columns = table?.store.states.columns.value
+  if (!table || !columns?.length) return
+  const widths = columns.map(column => column.realWidth ?? Number(column.width ?? column.minWidth ?? 80))
+  const statusIndex = columns.findIndex(column => column.className === 'opl-status-column')
+  if (statusIndex < 0 || Math.abs(widths[statusIndex]! - 56) < .1) return
+  const available = widths.reduce((sum, width) => sum + width, 0)
+  const rest = available - widths[statusIndex]!, scale = (available - 56) / rest
+  if (rest <= 0 || scale <= 0) return
+  columns.forEach((column, index) => { column.width = column.realWidth = index === statusIndex ? 56 : widths[index]! * scale })
+  table.doLayout()
+}, { flush: 'post' })
 const query = ref(''), status = ref('未完成'), owner = ref(''), priority = ref<string[]>([]), page = ref(1)
 const states = ['待处理', '处理中', '待确认', '已完成', '已作废']
 const priorities = ['紧急', '高', '普通', '低']
@@ -43,6 +59,7 @@ const filtered = computed(() => scopedRows.value.filter(({ issue }) =>
 const visible = computed(() => filtered.value.slice((page.value - 1) * 20, page.value * 20))
 const name = (username: string) => view.value.people.find(x => x.username === username)?.displayName || displayUserName(username, username || '待分派')
 const date = (value: string | null) => value ? new Date(value).toLocaleDateString('sv-SE') : '—'
+const releases = (row: OplRow) => [...(row.releases ?? [])].sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))
 const imageType = (file: OplAttachment) => ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' }[file.name.split('.').pop()?.toLowerCase() || ''])
 function message(cause: unknown, fallback: string) { console.error(cause); return cause instanceof PdmApiError && cause.status < 500 && /[\u3400-\u9fff]/.test(cause.message) ? cause.message : fallback }
 function releaseUrls() { closePreview(); Object.values(thumbnails.value).forEach(URL.revokeObjectURL); thumbnails.value = {}; previewUrl.value = '' }
@@ -86,7 +103,18 @@ function open(row: OplRow | null = null, read = false) {
   retained.value = row ? [...row.issue.attachments] : []
   draft.value = row ? { description: row.issue.description, priority: row.issue.priority, status: row.issue.status, owner: row.issue.owner, dueDate: row.issue.dueDate, solution: row.issue.solution, expectedRowVersion: row.issue.rowVersion, attachmentIds: row.issue.attachments.map(x => x.id), relatedProjectId: row.issue.relatedProjectId ?? null } : empty()
   baseline.value = snapshot(); drawer.value = true
-  if (row) window.dispatchEvent(new CustomEvent('pdm-tab-content-viewed', { detail: { projectId: props.project.id, tab: 'opl' } }))
+  if (row) {
+    void markViewed(row)
+    window.dispatchEvent(new CustomEvent('pdm-tab-content-viewed', { detail: { projectId: props.project.id, tab: 'opl' } }))
+  }
+}
+async function markViewed(row: OplRow) {
+  if (!row.isNew) return
+  const current = generation
+  try {
+    await markProjectOplViewed(props.project.id, row.issue.id, props.token)
+    if (current === generation) view.value.rows = view.value.rows.map(item => item.issue.id === row.issue.id ? { ...item, isNew: false } : item)
+  } catch { if (current === generation) ElMessage.warning('问题已打开，查看状态同步失败，NEW 标记暂时保留，请稍后刷新重试。') }
 }
 async function close(done?: () => void) {
   if (saving.value) return
@@ -95,6 +123,10 @@ async function close(done?: () => void) {
     catch { return }
   }
   drawer.value = false; done?.()
+}
+async function openRelease(record: OplReleaseRecord) {
+  await close()
+  if (!drawer.value) emit('openRelease', record.projectId, record.releasePackageId)
 }
 function selectFiles(event: Event) {
   const input = event.target as HTMLInputElement
@@ -142,17 +174,20 @@ async function attachment(row: OplRow, file: OplAttachment) {
   } catch (cause) { ElMessage.error(message(cause, '附件读取失败，请检查网络或联系管理员。')) }
 }
 function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value || saving.value) { event.preventDefault(); event.returnValue = '' } }
+function refreshOnFocus() { if (!loading.value && !drawer.value && !saving.value && !completing.value && !exporting.value && !previewUrl.value) void load() }
 window.addEventListener('beforeunload', beforeUnload)
-onBeforeUnmount(() => { generation++; releaseUrls(); window.removeEventListener('beforeunload', beforeUnload) })
+window.addEventListener('focus', refreshOnFocus)
+onBeforeUnmount(() => { generation++; releaseUrls(); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('focus', refreshOnFocus) })
 void load()
 </script>
 
 <template>
   <section class="pdm-panel pdm-manager-panel opl-manager" aria-label="开口问题清单">
-    <header class="pdm-panel-header"><div><h2>OPL 开口问题清单</h2><span v-if="project.parentProjectId" class="opl-scope">当前子项目：{{ project.code }} · {{ project.name }}</span><span class="opl-counts">全部 {{ scopedRows.length }} · 未完成 {{ activeCount }} · <span :class="{ 'opl-overdue': overdueCount > 0 }">已逾期 {{ overdueCount }}</span> · 已完成 {{ scopedRows.filter(row => row.issue.status === '已完成').length }}</span></div><div class="opl-actions"><el-button :disabled="loading || !!error || !scopedRows.length" :loading="exporting" title="导出当前项目范围的全部开口问题（不受筛选影响）" @click="exportExcel"><Download v-if="!exporting" :size="14" />导出Excel</el-button><el-button :disabled="loading" @click="load"><RefreshCw :size="14" />刷新</el-button><el-button type="primary" :disabled="loading || !!error" @click="open()"><Plus :size="14" />新增问题</el-button></div></header>
-    <div class="opl-filters"><el-input v-model="query" aria-label="搜索开口问题" placeholder="搜索问题描述 / 编号" clearable /><el-select v-model="status" aria-label="筛选实施状态"><el-option label="全部状态" value="" /><el-option label="未完成" value="未完成" /><el-option v-for="item in states" :key="item" :label="item" :value="item" /></el-select><el-select v-model="owner" aria-label="筛选负责人" placeholder="全部负责人" clearable filterable><el-option v-for="person in view.people" :key="person.username" :label="person.displayName" :value="person.username" /></el-select><el-select v-model="priority" aria-label="筛选优先级" placeholder="全部优先级" multiple collapse-tags collapse-tags-tooltip clearable><el-option v-for="item in priorities" :key="item" :label="item" :value="item" /></el-select></div>
+    <header class="pdm-panel-header"><div><span v-if="project.parentProjectId" class="opl-scope">当前子项目：{{ project.code }} · {{ project.name }}</span><span class="opl-counts">全部 {{ scopedRows.length }} · 未完成 {{ activeCount }} · <span :class="{ 'opl-overdue': overdueCount > 0 }">已逾期 {{ overdueCount }}</span> · 已完成 {{ scopedRows.filter(row => row.issue.status === '已完成').length }}</span></div><div class="opl-actions"><el-button :disabled="loading || !!error || !scopedRows.length" :loading="exporting" title="导出当前项目范围的全部开口问题（不受筛选影响）" @click="exportExcel"><Download v-if="!exporting" :size="14" />导出Excel</el-button><el-button :disabled="loading" @click="load"><RefreshCw :size="14" />刷新</el-button><el-button type="primary" :disabled="loading || !!error" @click="open()"><Plus :size="14" />新增问题</el-button></div></header>
+    <div class="opl-filters"><el-input v-model="query" aria-label="搜索开口问题" placeholder="搜索问题描述 / 编号" clearable /><el-select v-model="status" aria-label="筛选实施状态"><el-option label="全部状态" value="" /><el-option label="未完成" value="未完成" /><el-option v-for="item in states" :key="item" :label="item" :value="item" /></el-select><el-select v-model="owner" aria-label="筛选负责人" placeholder="全部负责人" clearable filterable><el-option v-for="person in view.people" :key="person.username" :label="person.displayName" :value="person.username" /></el-select><el-select v-model="priority" aria-label="筛选优先级" placeholder="全部优先级" multiple collapse-tags collapse-tags-tooltip clearable><el-option v-for="item in priorities" :key="item" :label="item" :value="item" /></el-select><el-checkbox v-model="notifyUpdates" class="opl-notify-toggle" :disabled="saving || !!completing">更新或完成后通知钉钉群</el-checkbox></div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
-    <div class="opl-table-wrap" v-loading="loading"><el-table :data="visible" height="100%" stripe border row-key="issue.id" empty-text="暂无符合条件的开口问题" class="opl-table" @row-click="(row: OplRow) => open(row, !row.canEdit)">
+    <div class="opl-table-wrap" v-loading="loading"><el-table ref="oplTable" :data="visible" height="100%" stripe border row-key="issue.id" empty-text="暂无符合条件的开口问题" class="opl-table" @row-click="(row: OplRow) => open(row, !row.canEdit)">
+      <el-table-column label="状态" width="56" fixed class-name="opl-status-column"><template #default="{ row }"><div class="opl-status-markers"><span v-if="row.isNew" class="opl-capsule" aria-label="新增未查看">NEW</span><span v-if="overdue(row)" class="opl-capsule opl-capsule--overdue" aria-label="已逾期">逾期</span></div></template></el-table-column>
       <el-table-column label="序号" width="100" fixed><template #default="{ row }">{{ row.issue.number }}</template></el-table-column>
       <el-table-column label="子项目" width="200" show-overflow-tooltip><template #default="{ row }">{{ relatedProject(row.issue.relatedProjectId) }}</template></el-table-column>
       <el-table-column label="优先级" width="100"><template #default="{ row }"><el-tag :type="['紧急', '高'].includes(row.issue.priority) ? 'danger' : 'info'" size="small">{{ row.issue.priority }}</el-tag></template></el-table-column>
@@ -160,14 +195,16 @@ void load()
       <el-table-column prop="issue.description" label="问题描述" width="300"><template #default="{ row }"><span class="opl-description" :title="row.issue.description">{{ row.issue.description }}</span></template></el-table-column>
       <el-table-column label="附件" width="200"><template #default="{ row }"><div class="opl-attachments"><button v-for="file in row.issue.attachments.slice(0, 2)" :key="file.id" :title="file.name" :aria-label="`查看附件 ${file.name}`" @click.stop="attachment(row, file)"><img v-if="thumbnails[file.id]" :src="thumbnails[file.id]" :alt="file.name"><span v-else>{{ file.name }}</span></button><button v-if="row.issue.attachments.length > 2" @click.stop="open(row, true)">+{{ row.issue.attachments.length - 2 }}</button></div><span v-if="!row.issue.attachments.length">—</span></template></el-table-column>
       <el-table-column prop="issue.solution" label="解决措施" width="300" show-overflow-tooltip />
-      <el-table-column label="需求日期" width="200"><template #default="{ row }"><span :class="{ 'opl-overdue': overdue(row) }">{{ row.issue.dueDate || '—' }}<small v-if="overdue(row)"> 逾期</small></span></template></el-table-column>
+      <el-table-column label="需求日期" width="200"><template #default="{ row }">{{ row.issue.dueDate || '—' }}</template></el-table-column>
       <el-table-column label="负责人" width="100"><template #default="{ row }">{{ name(row.issue.owner) }}</template></el-table-column>
       <el-table-column label="完成日期" width="200"><template #default="{ row }"><button v-if="!closed(row.issue.status) && row.canComplete" class="pdm-text-action" :disabled="loading || saving || !!completing" @click.stop="complete(row)">{{ completing === row.issue.id ? '完成中…' : '完成' }}</button><span v-else>{{ date(row.issue.completedAt) }}</span></template></el-table-column>
+      <el-table-column label="图纸数量" width="100"><template #default="{ row }"><span :title="'最近一次成功关联发布包的图纸总数'">{{ releases(row)[0]?.drawingCount ?? '—' }}</span></template></el-table-column>
+      <el-table-column label="最近发布日期" width="150"><template #default="{ row }">{{ date(releases(row)[0]?.publishedAt ?? null) }}</template></el-table-column>
       <el-table-column label="提交日期" width="200"><template #default="{ row }">{{ date(row.issue.createdAt) }}</template></el-table-column>
       <el-table-column label="提交人" width="100"><template #default="{ row }">{{ row.issue.createdByDisplayName || name(row.issue.createdBy) }}</template></el-table-column>
       <el-table-column label="操作" width="200" fixed="right"><template #default="{ row }"><button class="pdm-text-action" @click.stop="open(row, true)">查看</button><button v-if="row.canEdit" class="pdm-text-action" @click.stop="open(row)">编辑</button></template></el-table-column>
     </el-table></div>
-    <footer class="opl-footer"><span>共 {{ filtered.length }} 条</span><el-checkbox v-model="notifyUpdates" :disabled="saving || !!completing">更新或完成后通知钉钉群</el-checkbox><el-pagination v-model:current-page="page" :page-size="20" :total="filtered.length" layout="prev, pager, next" /></footer>
+    <footer class="opl-footer"><span>共 {{ filtered.length }} 条</span><el-pagination v-model:current-page="page" :page-size="20" :total="filtered.length" layout="prev, pager, next" /></footer>
     <el-drawer class="opl-drawer" v-model="drawer" direction="rtl" :title="readonly ? '查看开口问题' : editing ? '编辑开口问题' : '新增开口问题'" size="min(680px, 100vw)" append-to-body destroy-on-close :before-close="close" :close-on-click-modal="false">
       <el-form label-position="top" :disabled="saving || readonly" class="opl-form" @submit.prevent="save">
         <div class="opl-project-fields"><el-form-item label="所属项目"><el-input :model-value="`${rootProject.code} · ${rootProject.name}`" disabled /></el-form-item>
@@ -176,6 +213,11 @@ void load()
         <div class="opl-form-grid"><el-form-item label="优先级"><el-select v-model="draft.priority" aria-label="优先级"><el-option v-for="item in priorities" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="实施状态"><el-select v-model="draft.status" aria-label="实施状态"><el-option v-for="item in states" :key="item" :label="item" :value="item" :disabled="item === '已完成' && editing !== null && !editing.canComplete && editing.issue.status !== '已完成'" /></el-select></el-form-item><el-form-item label="负责人"><el-select v-model="draft.owner" aria-label="负责人" clearable filterable placeholder="待分派"><el-option v-for="person in view.people" :key="person.username" :label="person.displayName" :value="person.username" /></el-select></el-form-item><el-form-item label="需求完成日期"><el-date-picker v-model="draft.dueDate" aria-label="需求完成日期" type="date" value-format="YYYY-MM-DD" placeholder="请选择日期" style="width:100%" /></el-form-item></div>
         <el-form-item label="解决措施"><el-input v-model="draft.solution" aria-label="解决措施" type="textarea" :rows="4" maxlength="4000" show-word-limit placeholder="请填写处理过程和解决结果" /></el-form-item>
       </el-form>
+      <section v-if="editing" class="opl-release-history" aria-label="关联发布记录">
+        <strong>关联发布记录（{{ releases(editing).length }} 次）</strong>
+        <p>每条记录的图纸数量为该发布包的图纸总数。</p>
+        <div class="opl-release-scroll"><table v-if="releases(editing).length"><thead><tr><th>发布单号</th><th>BOM类型</th><th>图纸数量</th><th>发布日期</th></tr></thead><tbody><tr v-for="record in releases(editing)" :key="record.releasePackageId"><td><button type="button" class="pdm-text-action" @click="openRelease(record)">{{ record.packageNumber }}</button></td><td>{{ record.bomType }}</td><td>{{ record.drawingCount }}</td><td>{{ date(record.publishedAt) }}</td></tr></tbody></table><p v-else>暂无成功关联的发布记录。</p></div>
+      </section>
       <section class="opl-upload"><strong>图片和附件</strong><label v-if="!readonly" class="opl-file-picker">上传图片 / 附件<input type="file" multiple :disabled="saving" aria-label="上传图片和附件" @change="selectFiles"></label><small v-if="!readonly">最多10个附件，单个不超过10MB，单次总大小不超过30MB。</small><div v-for="file in retained" :key="file.id" class="opl-file"><button class="pdm-text-action" @click="editing && attachment(editing, file)">{{ file.name }}</button><button v-if="!readonly" class="pdm-text-action" :disabled="saving" @click="retained = retained.filter(item => item.id !== file.id)">移除</button></div><div v-for="(file, index) in files" :key="index" class="opl-file"><span>{{ file.name }}</span><button class="pdm-text-action" :disabled="saving" @click="files.splice(index, 1)">移除</button></div><span v-if="readonly && !retained.length">暂无附件</span></section>
       <p v-if="editing" class="opl-meta">提交人：{{ editing.issue.createdByDisplayName || name(editing.issue.createdBy) }} · 提交日期：{{ date(editing.issue.createdAt) }} · 最近更新：{{ editing.issue.updatedBy === editing.issue.createdBy ? (editing.issue.createdByDisplayName || name(editing.issue.updatedBy)) : name(editing.issue.updatedBy) }}</p>
       <el-alert v-if="formError" :title="formError" type="error" :closable="false" />
@@ -187,17 +229,23 @@ void load()
 
 <style scoped>
 .opl-manager{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;overflow:hidden;gap:var(--pdm-container-gap,10px)}
-.opl-manager .pdm-panel-header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0}.opl-manager h2{margin:0 0 5px;font-size:var(--pdm-font-size-heading)}
+.opl-manager .pdm-panel-header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0}
 .opl-scope{display:block;margin-bottom:5px;color:var(--pdm-blue);font-size:var(--pdm-font-size-body)}
 .opl-counts,.opl-meta,.opl-footer,.opl-upload small{color:var(--pdm-muted);font-size:var(--pdm-font-size-body)}.opl-actions{display:flex;align-items:center;gap:5px}.opl-actions .el-button{box-sizing:border-box;width:80px;min-width:80px;max-width:80px;height:30px;min-height:30px;flex:0 0 80px;padding:0;margin:0;font-size:12px}.opl-actions svg{margin-right:4px}
-.opl-filters{display:flex;flex-wrap:wrap;gap:8px}.opl-filters>.el-input{flex:1 1 210px;max-width:360px}.opl-filters>.el-select{width:145px}
-.opl-table-wrap{flex:1;min-height:160px;min-width:0;overflow:hidden}.opl-description{text-align:left;white-space:pre-wrap;overflow-wrap:anywhere}.opl-overdue{color:var(--pdm-danger,#dc2626)}
+.opl-counts { font-size: 14px; }
+.opl-filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.opl-filters>.el-input{flex:1 1 210px;max-width:360px}.opl-filters>.el-select{width:145px}
+.opl-notify-toggle { flex: 0 0 auto; margin-left: auto; margin-right: 0; }
+.opl-table-wrap{flex:1;min-height:160px;min-width:0;overflow:hidden}.opl-description{text-align:left;white-space:pre-wrap;overflow-wrap:anywhere}.opl-overdue{color:var(--pdm-danger,var(--pdm-danger))}
 .opl-attachments{display:flex;gap:4px;align-items:center}.opl-attachments button{padding:0;border:0;background:transparent;color:var(--pdm-blue);max-width:54px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}.opl-attachments img{width:44px;height:36px;object-fit:cover;border-radius:3px}.opl-footer{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap}.opl-table .pdm-text-action+.pdm-text-action{margin-left:8px}
 .opl-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}.opl-upload{display:flex;flex-direction:column;gap:10px}.opl-file-picker{border:1px dashed var(--pdm-border);padding:16px;display:flex;flex-direction:column;gap:10px;border-radius:var(--pdm-radius-panel)}.opl-file{display:flex;align-items:center;justify-content:space-between;gap:12px;overflow-wrap:anywhere}.opl-file>.pdm-text-action:first-child{text-align:left}.opl-meta{margin-top:20px}
 @media(max-width:600px){.opl-form-grid{grid-template-columns:1fr}.opl-filters>.el-select{flex:1 1 120px}.opl-filters>.el-input{max-width:none}.opl-counts{line-height:1.8}}
 .opl-table :deep(.el-table__row) { height: 30px; cursor: pointer; }
 .opl-table :deep(.el-table__body .el-table__cell) { height: 30px; padding: 0; }
 .opl-table :deep(.el-table__cell) { text-align: center; }
+.opl-capsule { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; box-sizing: border-box; width: 39px; height: 18px; padding: 0 5px; border-radius: 20px; background: var(--pdm-theme-accent-soft-strong); color: var(--pdm-theme-accent); font-size: 11px; font-weight: 700; line-height: 18px; letter-spacing: .3px; white-space: nowrap; vertical-align: middle; }
+.opl-capsule--overdue { background: color-mix(in srgb, var(--pdm-danger-soft) 60%, var(--pdm-danger-border)); color: var(--pdm-danger); }
+.opl-status-markers { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 2px 0; }
+.opl-table :deep(.opl-status-column .cell) { padding: 0 4px; }
 .opl-table :deep(.cell) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 20px; }
 .opl-description { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .opl-attachments { justify-content: center; max-height: 28px; overflow: hidden; }
@@ -217,4 +265,5 @@ void load()
 .opl-upload { flex: 0 1 auto; min-height: 0; max-height: min(180px, 25vh); overflow: auto; gap: 6px; }
 .opl-file-picker { padding: 8px; gap: 6px; }
 .opl-meta { flex: 0 0 auto; margin: 0; font-size: 11px; }
+.opl-release-history{flex:0 1 auto;min-height:90px;display:flex;flex-direction:column;gap:4px}.opl-release-history>p{margin:0;color:var(--pdm-muted);font-size:11px}.opl-release-scroll{min-height:0;max-height:180px;overflow:auto}.opl-release-history table{width:100%;border-collapse:collapse;table-layout:fixed}.opl-release-history th,.opl-release-history td{padding:6px;border:1px solid var(--pdm-border);text-align:center;overflow-wrap:anywhere}.opl-release-history th:first-child{width:40%}.opl-release-history th{position:sticky;top:0;background:var(--pdm-surface-soft)}
 </style>

@@ -129,7 +129,7 @@ public sealed partial class MySqlPdmRepository
     public async Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, Guid? drawingReviewWritebackId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken);
         var result = await CheckInVersionCoreAsync(connection, transaction, documentId, actor, sessionId, commit, drawingReviewWritebackId, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return result;
@@ -138,6 +138,11 @@ public sealed partial class MySqlPdmRepository
     private async Task<DocumentCheckInResult> CheckInVersionCoreAsync(MySqlConnection connection, DbTransaction transaction,
         Guid documentId, string actor, Guid sessionId, DocumentVersionCommit commit, Guid? drawingReviewWritebackId, CancellationToken cancellationToken, Guid? archiveBatchId = null)
     {
+        // Match archive batches: serialize the project's current reference projection
+        // before locking individual files. Parent CAD versions are never updated here.
+        if (!archiveBatchId.HasValue)
+            await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition("SELECT id FROM project WHERE id=@ProjectId FOR UPDATE",
+                new { commit.ReferenceSnapshot.ProjectId }, transaction, cancellationToken: cancellationToken));
         var locked = await LockDocumentAsync(connection, transaction, documentId, cancellationToken);
         await ValidateArchiveUploadAsync(connection, transaction, documentId, actor, sessionId, archiveBatchId, commit.File, cancellationToken);
         if (!string.Equals(locked.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase) || locked.CheckoutSessionId != sessionId)
@@ -145,6 +150,9 @@ public sealed partial class MySqlPdmRepository
         var drawingReviewLocked = await IsDocumentUnderActiveDrawingReviewAsync(connection, transaction, documentId, cancellationToken);
         var controlledWriteback = drawingReviewWritebackId.HasValue
             && await IsActiveDrawingReviewWritebackAsync(connection, transaction, documentId, drawingReviewWritebackId.Value, cancellationToken);
+        if (drawingReviewWritebackId.HasValue
+            && !await IsActivePropertyWritebackAsync(connection, transaction, documentId, drawingReviewWritebackId.Value, cancellationToken))
+            throw new PdmConflictException("审核标记回写任务已结束或已失效，未提交任何新版本。");
         if (drawingReviewLocked && !controlledWriteback)
             throw new PdmConflictException("图档正在进行图纸审核，不能提交存档。");
 
@@ -168,7 +176,7 @@ public sealed partial class MySqlPdmRepository
                     && string.Equals(latestFile.SourceFileSha256, sourceFileSha256, StringComparison.OrdinalIgnoreCase)));
         var sameProperties = latestFile is not null && ArchiveSafety.SameProperties(
             JsonSerializer.Deserialize<Dictionary<string, string?>>(latestFile.PropertySnapshotJson, jsonOptions) ?? [], commit.Properties);
-        if (!commit.IsHistoricalRestore && sameFile && sameProperties && ArchiveSafety.SameReferences(previousReferences, commit.ReferenceSnapshot.Root))
+        if (!commit.IsHistoricalRestore && sameFile && sameProperties && ArchiveSafety.SameOwnDesignReferences(previousReferences, commit.ReferenceSnapshot.Root))
         {
             if (commit.IsProjectRoot && !await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
                 "SELECT EXISTS(SELECT 1 FROM project_reference_roots WHERE project_id=@ProjectId AND root_document_id=@DocumentId)",
@@ -190,6 +198,8 @@ public sealed partial class MySqlPdmRepository
                 new { DocumentId = documentId, Actor = actor, SessionId = sessionId, RowVersion = locked.RowVersion, Now = timeProvider.GetUtcNow().UtcDateTime, commit.DrawingNumber, commit.Name, commit.FileName, SourceFileSha256 = sourceFileSha256 }, transaction, cancellationToken: cancellationToken));
             if (unchanged != 1) throw new PdmConflictException("图档编辑状态已经变化，请刷新后重试。");
             var unchangedDocument = await FindDocumentAsync(connection, transaction, documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
+            if (!archiveBatchId.HasValue)
+                await RefreshWorkingReferenceRootsAsync(connection, transaction, unchangedDocument.ProjectId, actor, timeProvider.GetUtcNow(), cancellationToken);
             return new DocumentCheckInResult(unchangedDocument, null, false);
         }
 
@@ -219,6 +229,8 @@ public sealed partial class MySqlPdmRepository
             new { DocumentId = documentId, Revision = nextRevision.Display, Actor = actor, SessionId = sessionId, RowVersion = locked.RowVersion, Now = version.CreatedAt.UtcDateTime, commit.DrawingNumber, commit.Name, commit.FileName, SourceFileSha256 = sourceFileSha256 }, transaction, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("图档已被其他存档操作更新，本次存档未生效。");
         var document = await FindDocumentAsync(connection, transaction, documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
+        if (!archiveBatchId.HasValue)
+            await RefreshWorkingReferenceRootsAsync(connection, transaction, document.ProjectId, actor, version.CreatedAt, cancellationToken);
         return new DocumentCheckInResult(document, version, true);
     }
 
@@ -255,6 +267,8 @@ public sealed partial class MySqlPdmRepository
 
     public async Task<IReadOnlyList<ReleasePreviewSource>> ListReleasePreviewSourcesAsync(Guid releasePackageId, CancellationToken cancellationToken)
     {
+        var bound = await FindReleasePackageAsync(releasePackageId, cancellationToken);
+        if (bound?.VersionBindings is not null) return await ReleaseBoundSourceReader.ReadAsync(this, bound, true, cancellationToken);
         await using var connection = await OpenAsync(cancellationToken);
         var package = await connection.QuerySingleOrDefaultAsync<PackagePublishRow>(new CommandDefinition(
             "SELECT project_id,reference_snapshot_id,state,non_standard_bom_snapshot_json FROM release_package WHERE id=@PackageId",
@@ -329,6 +343,8 @@ public sealed partial class MySqlPdmRepository
     /// </summary>
     public async Task<IReadOnlyList<ReleasePreviewSource>> ListReleaseReferenceSourcesAsync(Guid releasePackageId, CancellationToken cancellationToken)
     {
+        var bound = await FindReleasePackageAsync(releasePackageId, cancellationToken);
+        if (bound?.VersionBindings is not null) return await ReleaseBoundSourceReader.ReadAsync(this, bound, false, cancellationToken);
         await using var connection = await OpenAsync(cancellationToken);
         var package = await connection.QuerySingleOrDefaultAsync<PackagePublishRow>(new CommandDefinition(
             "SELECT project_id,reference_snapshot_id,state,non_standard_bom_snapshot_json FROM release_package WHERE id=@PackageId",
@@ -446,7 +462,7 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken);
         var package = await connection.QuerySingleOrDefaultAsync<PackagePublishRow>(new CommandDefinition(
-            "SELECT project_id,reference_snapshot_id,state,non_standard_bom_snapshot_json FROM release_package WHERE id=@PackageId FOR UPDATE",
+            "SELECT project_id,reference_snapshot_id,state,non_standard_bom_snapshot_json,version_bindings_json FROM release_package WHERE id=@PackageId FOR UPDATE",
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken))
             ?? throw new PdmNotFoundException("发布包不存在。");
         if (package.State != ReleasePackageState.Publishing.ToString()) throw new PdmConflictException("发布包尚未进入发布状态。");
@@ -471,7 +487,10 @@ public sealed partial class MySqlPdmRepository
         var nonStandardModels = ParseNonStandardModels(package.NonStandardBomSnapshotJson);
         documentIds.AddRange(await ResolveNonStandardDrawingIdsAsync(connection,
             EnumerateDocumentIds(root).Distinct().Where(nonStandardModels.Contains), transaction, cancellationToken));
-        var distinctDocumentIds = documentIds.Distinct().ToArray();
+        var bindings = package.VersionBindingsJson is null ? null : JsonSerializer.Deserialize<ReleaseVersionBinding[]>(package.VersionBindingsJson, jsonOptions);
+        var distinctDocumentIds = bindings is null ? documentIds.Distinct().ToArray() : bindings.Where(item => item.Publish && item.RequiresPromotion).Select(item => item.DocumentId).ToArray();
+        if (distinctDocumentIds.Length == 0) { await transaction.CommitAsync(cancellationToken); return []; }
+        documentIds = distinctDocumentIds.ToList();
         // Match drawing-review lock order, regardless of assembly-tree traversal order.
         var lockedDocuments = (await connection.QueryAsync<LockedDocumentRow>(new CommandDefinition(
             "SELECT id,kind,revision_label,checked_out_by,checkout_session_id,row_version FROM document WHERE id IN @DocumentIds ORDER BY id FOR UPDATE",
@@ -486,6 +505,10 @@ public sealed partial class MySqlPdmRepository
                 new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken));
             if (sourceRow is null) continue;
             var source = MapDocumentVersion(sourceRow);
+            var binding = bindings?.Single(item => item.Publish && item.DocumentId == documentId);
+            if (binding is not null && (source.Id != binding.VersionId || source.Sha256 != binding.Sha256)
+                && !(source.Status == DocumentVersionStatus.Released && source.ReleasePackageId == releasePackageId && source.SourceVersionId == binding.VersionId))
+                throw new PdmConflictException("发布绑定的源版本已变化，已停止整批发布，未自动切换图纸版本。");
             if (source.Status == DocumentVersionStatus.Released) continue;
             if (!string.Equals(source.Revision.Display, locked.RevisionLabel, StringComparison.OrdinalIgnoreCase))
                 throw new PdmConflictException($"图档{documentId}最新工作版本已变化，发布包不能继续发布。");
@@ -620,17 +643,24 @@ public sealed partial class MySqlPdmRepository
     public async Task<IReadOnlyList<DocumentVersion>> AttachReleasePreviewArtifactsAsync(Guid releasePackageId, IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews, CancellationToken cancellationToken)
     {
         if (previews.Count == 0) return [];
+        var package = await FindReleasePackageAsync(releasePackageId, cancellationToken) ?? throw new PdmNotFoundException("发布包不存在。");
+        var reusedIds = package.VersionBindings?.Where(item => item.Publish && !item.RequiresPromotion).Select(item => item.VersionId).ToArray() ?? [];
+        // Dapper expands an empty IN list into a subquery; keeping it in OR makes MySQL
+        // scan every version (including large snapshots) instead of the package index.
+        var versionScope = reusedIds.Length == 0 ? "release_package_id=@PackageId" : "(release_package_id=@PackageId OR id IN @ReusedIds)";
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<DocumentVersionRow>(new CommandDefinition(
             // 不按 created_at 排序：document_version 行含多个大 JSON 快照，排序会超出 MySQL 排序内存（Out of sort memory），
             // 而这里的调用方按图档匹配预览，顺序无关。
-            VersionSelect + " WHERE release_package_id=@PackageId",
-            new { PackageId = releasePackageId }, cancellationToken: cancellationToken));
+            VersionSelect + " WHERE version_status='Released' AND " + versionScope,
+            new { PackageId = releasePackageId, ReusedIds = reusedIds }, cancellationToken: cancellationToken));
         var updated = new List<DocumentVersion>();
         foreach (var row in rows)
         {
             var version = MapDocumentVersion(row);
             if (!previews.TryGetValue(version.DocumentId, out var preview)) continue;
+            if (reusedIds.Contains(version.Id) && !string.Equals(preview.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new PdmConflictException("复用图纸的转图来源与固定正式版本不一致。");
             if (preview.Format == DocumentPreviewFormat.Pdf && version.SourceVersionId.HasValue)
             {
                 var originalPath = await connection.ExecuteScalarAsync<string?>(new CommandDefinition(
@@ -641,16 +671,17 @@ public sealed partial class MySqlPdmRepository
                     throw new PdmConflictException($"工程图{version.DocumentId}的PDF来源不是该正式源图。");
             }
             await connection.ExecuteAsync(new CommandDefinition(
-                """
+                $"""
                 UPDATE document_version
                 SET preview_format=@Format,preview_storage_relative_path=@Path,preview_file_length=@Length,
                     preview_sha256=@Sha256,preview_source_sha256=@SourceSha256
-                WHERE id=@VersionId AND release_package_id=@PackageId
+                WHERE id=@VersionId AND {versionScope}
                 """,
                 new
                 {
                     VersionId = version.Id,
                     PackageId = releasePackageId,
+                    ReusedIds = reusedIds,
                     Format = preview.Format.ToString(),
                     Path = preview.StorageRelativePath,
                     Length = preview.FileLength,
@@ -660,6 +691,16 @@ public sealed partial class MySqlPdmRepository
             updated.Add(version with { Preview = preview });
         }
         return updated;
+    }
+
+    public async Task AttachWorkVersionPreviewAsync(Guid documentId, Guid versionId, DocumentPreviewArtifact preview, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        var rows = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE document_version SET preview_format=@Format,preview_storage_relative_path=@Path,preview_file_length=@Length,preview_sha256=@Sha256,preview_source_sha256=@SourceSha256 WHERE id=@VersionId AND document_id=@DocumentId AND version_status='Work' AND sha256=@SourceSha256",
+            new { VersionId = versionId, DocumentId = documentId, Format = preview.Format.ToString(), Path = preview.StorageRelativePath,
+                Length = preview.FileLength, preview.Sha256, preview.SourceSha256 }, cancellationToken: ct));
+        if (rows != 1) throw new PdmConflictException("工作预览与存档源版本不一致，未修改图档或正式预览。");
     }
 
     private static async Task<RevisionLabel> NextWorkRevisionAsync(DbConnection connection, DbTransaction transaction, LockedDocumentRow document, CancellationToken cancellationToken)
@@ -679,6 +720,41 @@ public sealed partial class MySqlPdmRepository
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT INTO reference_snapshot(id,project_id,root_document_id,captured_at,captured_by,sha256,root_json) VALUES(@Id,@ProjectId,@RootDocumentId,@CapturedAt,@CapturedBy,@Sha256,@RootJson)",
             new { Id = snapshot.SnapshotId, snapshot.ProjectId, snapshot.RootDocumentId, CapturedAt = snapshot.CapturedAt.UtcDateTime, snapshot.CapturedBy, snapshot.Sha256, RootJson = JsonSerializer.Serialize(snapshot.Root, jsonOptions) }, transaction, cancellationToken: cancellationToken));
+
+    private sealed class WorkingReferenceVersionRow
+    {
+        public Guid DocumentId { get; set; }
+        public string Revision { get; set; } = "";
+        public string RootJson { get; set; } = "";
+    }
+
+    private async Task RefreshWorkingReferenceRootsAsync(MySqlConnection connection, DbTransaction transaction,
+        Guid projectId, string actor, DateTimeOffset at, CancellationToken cancellationToken)
+    {
+        var rows = (await connection.QueryAsync<ReferenceSnapshotRow>(new CommandDefinition(
+            "SELECT rs.id,rs.project_id,rs.root_document_id,rs.captured_at,rs.captured_by,rs.sha256,rs.root_json "
+            + "FROM project_reference_roots roots JOIN reference_snapshot rs ON rs.id=roots.reference_snapshot_id WHERE roots.project_id=@ProjectId",
+            new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken))).ToArray();
+        if (rows.Length == 0) return;
+        var latest = await connection.QueryAsync<WorkingReferenceVersionRow>(new CommandDefinition(
+            "SELECT v.document_id DocumentId,v.revision_label Revision,v.reference_snapshot_json RootJson "
+            + "FROM document d JOIN document_version v ON v.id=(SELECT id FROM document_version WHERE document_id=d.id ORDER BY created_at DESC LIMIT 1) "
+            + "WHERE d.project_id=@ProjectId AND d.deleted_at IS NULL AND d.purged_at IS NULL",
+            new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
+        var current = latest.ToDictionary(row => row.DocumentId, row =>
+            (JsonSerializer.Deserialize<DocumentReferenceNode>(row.RootJson, jsonOptions)
+                ?? throw new InvalidDataException("当前图档结构记录无法读取。")) with { Revision = RevisionLabel.Parse(row.Revision) });
+        foreach (var row in rows)
+        {
+            var root = JsonSerializer.Deserialize<DocumentReferenceNode>(row.RootJson, jsonOptions)
+                ?? throw new InvalidDataException("当前项目结构无法读取。");
+            var original = new CadReferenceSnapshot(row.Id, row.ProjectId, row.RootDocumentId, AsUtc(row.CapturedAt), row.CapturedBy, root, row.Sha256);
+            var refreshed = WorkingReferenceTree.Refresh(original, current, at, actor);
+            if (refreshed.SnapshotId == original.SnapshotId) continue;
+            await InsertReferenceSnapshotAsync(connection, transaction, refreshed, cancellationToken);
+            await SetProjectReferenceRootAsync(connection, transaction, refreshed, cancellationToken);
+        }
+    }
 
     private async Task SetProjectReferenceRootAsync(DbConnection connection, DbTransaction transaction, CadReferenceSnapshot snapshot, CancellationToken cancellationToken)
     {
@@ -801,6 +877,7 @@ public sealed partial class MySqlPdmRepository
         public Guid? ReferenceSnapshotId { get; init; }
         public string State { get; init; } = string.Empty;
         public string NonStandardBomSnapshotJson { get; init; } = "[]";
+        public string? VersionBindingsJson { get; init; }
     }
     private sealed class ReleasePreviewSourceRow
     {

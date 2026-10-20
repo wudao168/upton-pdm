@@ -14,7 +14,12 @@ public sealed record CompleteOplInput(long ExpectedRowVersion, bool NotifyGroup 
 public sealed record OplUpload(string Name, byte[] Content);
 public sealed record OplVisitorInput(string Description, Guid? RelatedProjectId = null, string Priority = "普通", string Status = "待处理", string Owner = "", DateOnly? DueDate = null, string Solution = "");
 public sealed record OplPerson(string Username, string DisplayName);
-public sealed record OplRow(OplIssue Issue, bool CanEdit, bool CanComplete);
+public sealed record OplReleaseRecord(Guid ReleasePackageId, Guid ProjectId, string PackageNumber, string BomType,
+    int DrawingCount, DateTimeOffset PublishedAt);
+public sealed record OplRow(OplIssue Issue, bool CanEdit, bool CanComplete)
+{
+    public IReadOnlyList<OplReleaseRecord> Releases { get; init; } = [];
+}
 public sealed record OplProject(Guid Id, string Code, string Name);
 public sealed record OplView(IReadOnlyList<OplRow> Rows, IReadOnlyList<OplPerson> People, OplProject RootProject, IReadOnlyList<OplProject> Subprojects);
 public interface IProjectOplRepository
@@ -59,7 +64,51 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
         var subprojects = includePeople ? (await projects.ListProjectsForUserAsync(actor, role, ct))
             .Where(x => x.ParentProjectId is not null && (x.RootProjectId ?? x.ParentProjectId) == root.Id && x.CanReadContent)
             .OrderBy(x => x.Code).Select(x => new OplProject(x.Id, x.Code, x.Name)).ToArray() : [];
+        if (includePeople && rows.Length > 0)
+        {
+            var histories = new Dictionary<Guid, List<OplReleaseRecord>>();
+            var issueIds = rows.Select(row => row.Issue.Id).ToHashSet();
+            foreach (var id in subprojects.Select(item => item.Id).Prepend(root.Id))
+            {
+                foreach (var package in (await projects.ListReleasePackagesAsync(id, ct))
+                    .Where(item => item.State == ReleasePackageState.Published && item.PublishedAt.HasValue
+                        && item.RelatedOplIssueIds.Any(issueIds.Contains)))
+                {
+                    var bomType = package.Scope switch
+                    {
+                        ReleaseScope.StandardSupplement => "标准件",
+                        ReleaseScope.ElectricalSupplement => "电气件",
+                        ReleaseScope.NonStandardSupplement => "非标件",
+                        _ => "历史发布"
+                    };
+                    var record = new OplReleaseRecord(package.Id, id, package.Number, bomType, package.DrawingDocumentCount, package.PublishedAt!.Value);
+                    foreach (var issueId in package.RelatedOplIssueIds.Distinct().Where(issueIds.Contains))
+                    {
+                        if (!histories.TryGetValue(issueId, out var history)) histories[issueId] = history = [];
+                        history.Add(record);
+                    }
+                }
+            }
+            rows = rows.Select(row => row with { Releases = histories.GetValueOrDefault(row.Issue.Id, [])
+                .OrderByDescending(item => item.PublishedAt).ThenBy(item => item.ReleasePackageId).ToArray() }).ToArray();
+        }
         return new(rows, people, new(root.Id, root.Code, root.Name), subprojects);
+    }
+    public async Task<IReadOnlyList<Guid>> ValidateReleaseLinksAsync(Guid projectId, IReadOnlyList<Guid> ids,
+        string actor, UserRole role, CancellationToken ct)
+    {
+        var (root, _) = await AccessAsync(projectId, actor, role, ct);
+        var available = (await issues.ListAsync(root.Id, ct)).ToDictionary(item => item.Id);
+        var selected = ids.Distinct().ToArray();
+        foreach (var id in selected)
+        {
+            if (!available.TryGetValue(id, out var issue) || issue.Status == "已作废")
+                throw new PdmRuleException("所选OPL问题不存在、已作废或不属于当前主项目，请刷新后重新选择。");
+            if (issue.RelatedProjectId is Guid childId && (projectId != root.Id && childId != projectId
+                || !await projects.HasProjectContentReadAccessAsync(childId, actor, role, ct)))
+                throw new PdmRuleException("所选OPL问题不在当前发布项目的可访问范围内。");
+        }
+        return selected;
     }
     public async Task<OplIssue> SaveAsync(Guid projectId, Guid? id, OplInput input, IReadOnlyList<OplUpload> uploads, string actor, UserRole role, CancellationToken ct, string source = "Manual")
     {

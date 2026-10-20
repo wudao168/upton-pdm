@@ -102,6 +102,7 @@ public sealed partial class MySqlPdmRepository
                         transaction, cancellationToken: cancellationToken));
             }
         }
+        await RefreshWorkingReferenceRootsAsync(connection, transaction, projectId, actor, timeProvider.GetUtcNow(), cancellationToken);
         var receipt = new ArchiveBatchReceipt(batchId, projectId, actor, requestHash, ordered.Select(file => results[file.DocumentId]).ToArray()) { FollowupPending = true };
         foreach (var result in receipt.Results.Where(result => result.VersionCreated && result.Version is not null))
             await connection.ExecuteAsync(new CommandDefinition("UPDATE archive_upload SET state='Adopted' WHERE document_id=@Id AND relative_path=@Path",

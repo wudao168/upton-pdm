@@ -30,9 +30,51 @@ internal static class Program
             MissingSourceRecovery();
             BatchCloseRecovery().GetAwaiter().GetResult();
             FirstArchiveFailureRemainsEditable().GetAwaiter().GetResult();
+            EquivalentDraftBase();
             return 0;
         }
         catch (Exception exception) { Console.WriteLine(exception); return 1; }
+    }
+
+    static void EquivalentDraftBase()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-draft-base-test", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var source = Path.Combine(root, "part.SLDPRT");
+            File.WriteAllText(source, "unchanged released model");
+            var hash = (string)Type("EditDraftJournal").GetMethod("Hash", Flags).Invoke(null, new object[] { source });
+            var journal = New("EditDraftJournal", root, "promotion");
+            var entry = New("LocalEditDraft");
+            Set(entry, "DocumentId", Guid.NewGuid()); Set(entry, "SessionId", Guid.NewGuid());
+            Set(entry, "SourcePath", source); Set(entry, "BaseVersionId", Guid.NewGuid()); Set(entry, "BaseSha256", hash);
+            var snapshot = Path.Combine(root, "snapshot.SLDPRT");
+            File.WriteAllText(snapshot, "local unsaved feature change");
+            Invoke(journal, "Preserve", entry, snapshot, true);
+            var formalVersion = Guid.NewGuid();
+            Require((bool)Invoke(journal, "Restore", entry, source, formalVersion, hash), "Content-equivalent formal version blocked draft restore");
+            Require(File.ReadAllText(source) == "local unsaved feature change", "Draft content lost");
+            Require((bool)Invoke(journal, "HasVerifiedDraft", entry), "Recovery copy removed");
+            var separateWorkspace = Path.Combine(root, "standalone-part.SLDPRT");
+            File.WriteAllText(separateWorkspace, "unchanged released model");
+            Set(entry, "DiskSha256", Type("EditDraftJournal").GetMethod("Hash", Flags).Invoke(null, new object[] { source }));
+            Require((bool)Invoke(journal, "Restore", entry, separateWorkspace, formalVersion, hash), "Same document could not recover from assembly workspace into standalone workspace");
+            Require(File.ReadAllText(separateWorkspace) == "local unsaved feature change" && File.ReadAllText(source) == "local unsaved feature change", "Workspace switch lost either copy");
+            File.WriteAllText(separateWorkspace, "different local edits");
+            var localConflict = false;
+            try { Invoke(journal, "Restore", entry, separateWorkspace, formalVersion, hash); }
+            catch (TargetInvocationException e) when (e.InnerException is InvalidOperationException) { localConflict = true; }
+            Require(localConflict && File.ReadAllText(separateWorkspace) == "different local edits", "Workspace switch overwrote unrelated local modifications");
+            var blocked = false;
+            try { Invoke(journal, "Restore", entry, source, Guid.NewGuid(), new string('F', 64)); }
+            catch (TargetInvocationException e) when (e.InnerException is InvalidOperationException) { blocked = true; }
+            Require(blocked && File.ReadAllText(source) == "local unsaved feature change", "Different server contents overwrote draft");
+            Require(!(bool)Type("EditDraftJournal").GetMethod("MatchesBase", Flags).Invoke(null,
+                new object[] { entry, Guid.NewGuid(), null }), "Unknown server hash allowed rebase");
+            Console.WriteLine("PASS: equal-content W-to-formal baseline restores draft; content change and unknown baseline preserve both files");
+        }
+        finally { Directory.Delete(root, true); }
     }
 
     static void MissingSourceRecovery()

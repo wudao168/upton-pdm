@@ -45,7 +45,9 @@
     <Compile Include="..\Pdm.Client.Shared\ClientLogRedaction.cs" Link="ClientLogRedaction.cs" />
     <Compile Include="..\Pdm.Client.Shared\DesktopAuthHandoffStore.cs" Link="DesktopAuthHandoffStore.cs" />
     <Compile Include="..\Pdm.Domain\CadPropertyCardSnapshot.cs" Link="CadPropertyCardSnapshot.cs" />
+    <Compile Include="..\Pdm.Domain\StandardStructureRules.cs" Link="StandardStructureRules.cs" />
     <EmbeddedResource Include="..\pdm-ui\src\assets\pdm-client-icon.png" LogicalName="Upton.Pdm.SolidWorks.Assets.PdmClient.png" />
+    <EmbeddedResource Include="..\pdm-ui\src\styles\themes.css" LogicalName="Upton.Pdm.SolidWorks.Assets.Themes.css" />
   </ItemGroup>
   <Target Name="ValidateSolidWorksInterop" BeforeTargets="ResolveReferences">
     <Error Condition="!Exists('$(SolidWorksInstallDir)\SolidWorks.Interop.sldworks.dll')" Text="SolidWorks interop assemblies were not found. Set SolidWorksInstallDir." />

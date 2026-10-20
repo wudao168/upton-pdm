@@ -31,7 +31,8 @@ public sealed class ApprovalU9AutomationService(
     IPdmRepository repository,
     U9MaterialIntegrationService materialIntegration,
     ProjectBomU9SyncService bomSync,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    IReleaseDeliveryObserver? releaseDeliveryObserver = null)
 {
     private static readonly ProjectBomHeaderKind[] SyncOrder =
     [
@@ -144,6 +145,8 @@ public sealed class ApprovalU9AutomationService(
                 {
                     var synchronized = await bomSync.SynchronizeApprovedAsync(project.Id, kind, actor, cancellationToken);
                     outcomes.Add(new(project.Id, project.Code, kind, synchronized.State, synchronized.Message));
+                    if (synchronized.SourceScope is not null)
+                        await RecordDeliveryOutcomeAsync(project.Id, kind, synchronized.SourceScope, synchronized.State.ToString(), synchronized.Message, cancellationToken);
                     if (synchronized.State is ProjectBomU9AutomaticState.WaitingForDependencies or ProjectBomU9AutomaticState.AwaitingApproval)
                         BomU9AutomationRetryQueue.Schedule(project.Id, kind, synchronized.Message, timeProvider.GetUtcNow());
                     else
@@ -202,5 +205,16 @@ public sealed class ApprovalU9AutomationService(
             application.Id.ToString(),
             $"审批后U9C自动串联：{result.Stage}；{result.Message}"), cancellationToken);
         return result;
+    }
+
+    private async Task RecordDeliveryOutcomeAsync(Guid projectId, ProjectBomHeaderKind kind, U9ReleaseScope sourceScope, string state, string message, CancellationToken ct)
+    {
+        if (releaseDeliveryObserver is null) return;
+        try { await releaseDeliveryObserver.U9ResultAsync(projectId, kind, sourceScope, state, message, ct); }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            await repository.AppendAuditAsync(new(Guid.NewGuid(), timeProvider.GetUtcNow(), "system", "release.u9-receipt.pending", "Project", projectId.ToString(), "U9处理结果已返回，发布执行回执尚未写入；保留自动回查任务。"), ct);
+            throw new PdmRuleException("U9已处理，发布执行回执尚未写入；后台将重新回查，不会直接重复写入ERP。");
+        }
     }
 }

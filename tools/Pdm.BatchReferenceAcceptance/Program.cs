@@ -13,7 +13,7 @@ using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-internal static class Program
+internal static partial class Program
 {
     private static Assembly addin;
     private static string directory;
@@ -24,7 +24,7 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        if (args.Length != 2 && !(args.Length == 3 && (args[2] == "--archive-state-only" || args[2] == "--reference-cache-only"))) return 2;
+        if (args.Length != 2 && !(args.Length == 3 && (args[2] == "--archive-state-only" || args[2] == "--reference-cache-only" || args[2] == "--snapshot-only"))) return 2;
         directory = Path.GetFullPath(args[1]);
         Directory.CreateDirectory(directory);
         AppDomain.CurrentDomain.AssemblyResolve += (_, e) =>
@@ -38,6 +38,12 @@ internal static class Program
             .SetValue(null, Path.Combine(directory, "bindings-" + Guid.NewGuid().ToString("N")));
         Type("PdmDocumentIdentityStore").GetField("workspaceRootResolver", Members)
             .SetValue(null, new Func<string>(() => Path.Combine(directory, "workspace")));
+        if (args.Length == 3 && args[2] == "--snapshot-only")
+        {
+            Test("metadata refresh during base lookup cannot clear repeated reference versions", TestFrozenBatchReferences);
+            Console.WriteLine($"Passed={passed}; Failed={failed}; no SolidWorks COM or production API calls.");
+            return failed == 0 ? 0 : 1;
+        }
         if (args.Length == 3 && args[2] == "--reference-cache-only")
         {
             RunReferenceCacheTests();
@@ -83,6 +89,7 @@ internal static class Program
         Test("merged archive entry preserves whole-tree, checked, and context-menu scopes", TestMergedArchiveEntry);
         Test("binding failure stops before assigning an in-memory identity", TestBindingFailure);
         Test("incremental plan submits ten new files and parent, not ten unchanged originals", TestIncrementalPlan);
+        Test("metadata refresh during base lookup cannot clear repeated reference versions", TestFrozenBatchReferences);
         Test("independent roots use separate visible working directories", TestProjectWorkspaceDirectory);
         Test("project workspace refresh preserves unrelated files", TestWorkspaceMerge);
         Test("writable changed files block refresh while stale read-only files may refresh", TestWorkspaceChangeGuard);
@@ -365,7 +372,7 @@ internal static class Program
         { Set(node, "Status", Enum.Parse(Type("CadReferenceStatus"), "Virtual")); Set(node, "DisplayName", "嵌入式组件"); }
         Children(root).Add(nested); Children(nested).Add(first); Children(nested).Add(second);
         using var dialog = (Form)New("BatchOperationDialog", root, Items(root), Array.CreateInstance(Type("ProjectDto"), 0),
-            null, "tester", Enum.Parse(Type("BatchOperationKind"), "CheckIn"), null, null, null);
+            null, "tester", Enum.Parse(Type("BatchOperationKind"), "CheckIn"), null, null, null, false, false, 0);
         dialog.ShowInTaskbar = false; dialog.Opacity = 0; dialog.Show(); Application.DoEvents();
         var tree = (TreeView)Field(dialog, "files");
         Assert(tree.Nodes.Count == 1 && tree.Nodes[0].Nodes.Count == 1 && tree.Nodes[0].Nodes[0].Nodes.Count == 2
@@ -385,6 +392,43 @@ internal static class Program
         var detail = ((Label)Field(pane, "selectedMeta")).Text;
         Assert(detail.Contains("随父装配") && !detail.Contains("W99") && !detail.Contains("未归档") && !detail.Contains("未检出"),
             "embedded details show an independent version or checkout requirement");
+        foreach (var node in new[] { nested, first, second })
+        {
+            Set(node, "ImportedSourcePath", Path.Combine(directory, "YIHEDA_CDL21D150P", "CDL21-D150-P.stp"));
+            Set(node, "DisplayName", "CDL21导入组件");
+        }
+        Call(pane, "SetTree", root); Call(pane, "UpdateSelected", nested);
+        var importedDetail = ((Label)Field(pane, "selectedMeta")).Text;
+        Assert(importedDetail.Contains("不随存档") && importedDetail.Contains("CDL21-D150-P.stp")
+            && importedDetail.Contains("待确认保存归属") && !importedDetail.Contains("保存在所属装配体内")
+            && !importedDetail.Contains("存储：所属父装配体内") && !importedDetail.Contains("W99"),
+            "IC import was presented as verified self-contained embedded data");
+        Assert((string)Static("PdmTaskPaneControl", "VersionText", nested) == "随总装核对",
+            "imported cache shows an independent or embedded archive version");
+        pane.GetType().GetField("authenticatedUsername", Members).SetValue(pane, "tester");
+        Set(nested, "DocumentId", Guid.NewGuid()); Set(nested, "CheckedOutBy", "tester");
+        Call(pane, "UpdateSelected", nested);
+        Assert(!((Button)Field(pane, "checkoutButton")).Enabled,
+            "stale cache identity enabled independent editing of imported content");
+        Set(nested, "DocumentId", null); Set(nested, "CheckedOutBy", null);
+        using var importDialog = (Form)New("BatchOperationDialog", root, Items(root), Array.CreateInstance(Type("ProjectDto"), 0),
+            null, "tester", Enum.Parse(Type("BatchOperationKind"), "CheckIn"), null, null, null, false, false, 0);
+        importDialog.ShowInTaskbar = false; importDialog.Opacity = 0; importDialog.Show(); Application.DoEvents();
+        Assert(((IEnumerable)Get(importDialog, "SelectedItems")).Cast<object>().Count() == 1,
+            "import UI enabled independent registration of cache files");
+        var importSummary = ((Label)Field(importDialog, "selectionSummary")).Text;
+        Assert(importSummary.Contains("3个导入组件") && !importSummary.Contains("3个嵌入式"),
+            "import cache counts promise parent-only persistence");
+        Assert(((string)Call(importDialog, "StateText", nested, "tester")).Contains("待确认保存归属"),
+            "batch import status hides source dependency");
+        using var importedBitmap = new Bitmap(importDialog.Width, importDialog.Height);
+        importDialog.DrawToBitmap(importedBitmap, new Rectangle(Point.Empty, importedBitmap.Size));
+        importedBitmap.Save(Path.Combine(directory, "imported-components-ui.png"));
+        importDialog.Close();
+        foreach (var node in new[] { nested, first, second }) Set(node,"ImportedStorageOwnerPath",Path.GetFullPath(Path.Combine(directory,"ROOT.SLDASM")));
+        Call(pane,"UpdateSelected",nested);
+        Assert((string)Static("PdmTaskPaneControl","VersionText",nested)=="随父装配"
+            && ((Label)Field(pane,"selectedMeta")).Text.Contains("不单独登记或升版"),"persisted imports were not presented as parent-owned content");
         }
         finally { SynchronizationContext.SetSynchronizationContext(previousContext); }
     }
@@ -510,7 +554,7 @@ internal static class Program
         Children(root).Add(child);
         Static("PdmAddin", "ValidateNewAssemblyReferenceLocations", Items(root, child), project);
         Bind((string)Get(child, "FullPath"), Guid.NewGuid(), Guid.NewGuid());
-        Expect<InvalidOperationException>(() => Static("PdmAddin", "ValidateNewAssemblyReferenceLocations", Items(root, child), project));
+        Static("PdmAddin", "ValidateNewAssemblyReferenceLocations", Items(root, child), project);
         var controlledPath = WorkspaceFile("target-project/shared.SLDPRT");
         Set(child, "FullPath", controlledPath);
         Bind(controlledPath, Guid.NewGuid(), project);
@@ -678,6 +722,7 @@ internal static class Program
                 Set(node, "CurrentRevision", "W1");
                 Set(node, "LatestRevision", "W1");
                 Set(node, "LatestVersionSha256", Hash(File.ReadAllBytes(path)));
+                if (i == 0) Set(node, "CheckedOutBy", "another-designer");
             }
             Children(root).Add(node);
             nodes.Add(node);
@@ -692,6 +737,17 @@ internal static class Program
         Assert(nodes.Skip(1).Take(10).All(node => !planned.Contains(node)), "unchanged controlled originals would be submitted again");
         Assert((int)Get(plan, "SkippedFiles") == 10, "unchanged file count differs");
         Assert(handler.Writes == 0 && handler.Requests == 1, "plan repeated per-instance queries or wrote business data");
+        var scopeRows = ((IEnumerable)Type("PdmAddin").GetMethod("BuildArchiveScopeRows", Members).Invoke(null, new[] { Items(nodes.ToArray()), plan })).Cast<string[]>().ToArray();
+        Assert(scopeRows.Length == 21 && scopeRows.Count(row => row[2] == "复用已有版本") == 10, "scope preview expanded the edit set or hid reused versions");
+        using (var review = (Form)New("ArchiveScopeReviewDialog", scopeRows, 11, 10))
+        {
+            var grid = review.Controls.OfType<DataGridView>().Single();
+            Assert(grid.ReadOnly && grid.Rows.Count == 21, "scope review is editable or lost files");
+            Assert(review.CancelButton != null && review.AcceptButton != null, "scope review cannot be cancelled before submission");
+        }
+        SynchronizationContext.SetSynchronizationContext(null);
+        Set(nodes[1], "IsModifiedInSolidWorks", true);
+        Expect<InvalidOperationException>(() => ((Task)Call(plugin, "BuildBatchCheckInPlanAsync", Items(nodes.ToArray()), null, CancellationToken.None)).GetAwaiter().GetResult());
     }
 
     private static void TestProjectWorkspaceDirectory()

@@ -19,6 +19,14 @@ internal static class Program
     }
     static int Run(string[] args)
     {
+        var configurationVersion = args[0];
+        var configurationIndex = Array.IndexOf(args, "--ui-configuration");
+        if (configurationIndex >= 0)
+        {
+            configurationVersion = args[configurationIndex + 1];
+            var values = new System.Collections.Generic.List<string>(args);
+            values.RemoveRange(configurationIndex, 2); args = values.ToArray();
+        }
         var directory = AppDomain.CurrentDomain.BaseDirectory;
         AppDomain.CurrentDomain.AssemblyResolve += (_, e) => { var path = Path.Combine(directory, new AssemblyName(e.Name).Name + ".dll"); return File.Exists(path) ? Assembly.LoadFrom(path) : null; };
         var assembly = Assembly.LoadFrom(Path.Combine(directory, "Upton.Pdm.Desktop.exe"));
@@ -50,7 +58,7 @@ internal static class Program
             {
                 var location = await Execute(core, "location.href");
                 if (location != lastLocation) { Console.WriteLine("Native UI location: " + location); lastLocation = location; }
-                if (!location.Contains(args[0])) { busy = false; return; }
+                if (!location.Contains(configurationVersion)) { busy = false; return; }
                 using (var client = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(15) })
                 {
                     var secrets = Json.DeserializeObject(File.ReadAllText(args[1])) as System.Collections.Generic.Dictionary<string, object>;
@@ -75,7 +83,7 @@ internal static class Program
                     string page;
                     try
                     {
-                        page = await Execute(core, "JSON.stringify({url:location.href,visibleVersion:document.body.innerText.includes('V" + args[0] + "'),observedVersion:(document.body.innerText.match(/V\\d{4}\\.\\d{2}\\.\\d{2}\\.\\d{4,6}/)||[])[0],scripts:[...document.querySelectorAll('script[src]')].map(node=>node.src)})");
+                        page = await Execute(core, "JSON.stringify({url:location.href,visibleVersion:document.body.innerText.includes('V" + configurationVersion + "'),observedVersion:(document.body.innerText.match(/V\\d{4}\\.\\d{2}\\.\\d{2}\\.\\d{4,6}/)||[])[0],scripts:[...document.querySelectorAll('script[src]')].map(node=>node.src)})");
                     }
                     catch (TimeoutException)
                     {
@@ -108,7 +116,31 @@ internal static class Program
                 var reviewCore = reviewView.GetType().GetProperty("CoreWebView2").GetValue(reviewView);
                 var reviewPage = await Execute(reviewCore, "JSON.stringify({url:location.href,scripts:[...document.querySelectorAll('script[src]')].map(node=>node.src)})");
                 var reviewResult = Json.DeserializeObject(Json.Deserialize<string>(reviewPage)) as System.Collections.Generic.Dictionary<string, object>;
-                if (!((string)reviewResult["url"]).Contains(args[0]) || !((string)reviewResult["url"]).StartsWith("http://192.168.2.8:5173/")) throw new Exception("审核浮层未使用服务器同版界面。");
+                if (!((string)reviewResult["url"]).Contains(configurationVersion) || !((string)reviewResult["url"]).StartsWith("http://192.168.2.8:5173/")) throw new Exception("审核浮层未使用服务器同版界面。");
+                var nativeTheme = window.GetType().GetField("currentTheme", Flags);
+                var originalTheme = (string)nativeTheme.GetValue(window);
+                var themeChecks = new System.Collections.Generic.List<string>();
+                var paletteType = assembly.GetType("Upton.Pdm.Desktop.EDrawingsPreviewControl+PreviewButtonTheme", true);
+                foreach (var palette in new[] { new[] { "a", "1d4ed8" }, new[] { "c", "0f766e" }, new[] { "p", "6d28d9" }, new[] { "o", "a84b08" }, new[] { "g", "52525b" } })
+                {
+                    var themeId = palette[0];
+                    await Execute(core, "window.chrome.webview.postMessage({type:'theme-change',payload:{theme:'" + themeId + "'}})");
+                    await Task.Delay(150);
+                    if ((string)nativeTheme.GetValue(window) != themeId) throw new Exception("原生客户端未保留主题：" + themeId);
+                    var resolved = paletteType.GetMethod("Resolve", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { themeId });
+                    var iconColor = paletteType.GetProperty("IconColor", Flags).GetValue(resolved);
+                    if (!((string)iconColor.GetType().GetProperty("Name").GetValue(iconColor)).EndsWith(palette[1], StringComparison.OrdinalIgnoreCase))
+                        throw new Exception("原生预览按钮与网页主色不一致：" + themeId);
+                    var payload = Json.Serialize(new { type = "review-overlay-state", payload = new { theme = themeId, visible = false } });
+                    await (Task)overlay.GetType().GetMethod("PublishStateAsync", Flags).Invoke(overlay, new object[] { payload });
+                    await Task.Delay(150);
+                    var colors = Json.DeserializeObject(Json.Deserialize<string>(await Execute(reviewCore, "JSON.stringify({theme:document.documentElement.dataset.pdmTheme,accent:getComputedStyle(document.documentElement).getPropertyValue('--pdm-theme-accent').trim()})"))) as System.Collections.Generic.Dictionary<string, object>;
+                    if ((string)colors["theme"] != themeId || !string.Equals((string)colors["accent"], "#" + palette[1], StringComparison.OrdinalIgnoreCase))
+                        throw new Exception("审核浮层主题未与主界面同步：" + themeId);
+                    themeChecks.Add(themeId);
+                }
+                await Execute(core, "window.chrome.webview.postMessage({type:'theme-change',payload:{theme:'" + originalTheme + "'}})");
+                result["nativeThemesVerified"] = themeChecks;
                 if (args.Length > 3)
                 {
                     var extra = Json.DeserializeObject(File.ReadAllText(args[3])) as System.Collections.Generic.Dictionary<string, object>;
@@ -137,6 +169,7 @@ internal static class Program
                     }
                 }
                 result["review"] = reviewResult; result["succeeded"] = true; result["version"] = args[0];
+                result["configurationVersion"] = configurationVersion;
                 File.WriteAllText(args[2], Json.Serialize(result));
                 Console.WriteLine("PASS actual native MainWindow + review WebView2 use server UI " + args[0]);
                 done = true; Exit(window);

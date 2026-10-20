@@ -183,6 +183,7 @@ public sealed class ReleasePackagePublisherTests
             var publication = await publisher.PublishAsync(package, project, [source], default);
 
             Assert.Equal(1, converter.Calls);
+            Assert.Equal(converter.ObservedPublishedAt, publication.PublishedAt);
             if (partialFailure) Assert.StartsWith(PartialPreviewConversionException.ItemErrorPrefix, publication.PreviewError);
             else Assert.Null(publication.PreviewError);
             Assert.Equal(DocumentPreviewFormat.Step, publication.Previews[documentId].Format);
@@ -190,6 +191,7 @@ public sealed class ReleasePackagePublisherTests
             var manifest = await File.ReadAllTextAsync(Path.Combine(publication.PublishedPath, "manifest.json"), default);
             Assert.Contains($"{documentId:N}_PART-001.step", manifest, StringComparison.OrdinalIgnoreCase);
             using var parsedManifest = System.Text.Json.JsonDocument.Parse(manifest);
+            Assert.Equal(publication.PublishedAt, parsedManifest.RootElement.GetProperty("publishedAt").GetDateTimeOffset());
             var publishedFiles = parsedManifest.RootElement.GetProperty("files").EnumerateArray().Select(file => file.GetString()!).ToArray();
             Assert.DoesNotContain(publishedFiles, file => file.EndsWith(".SLDPRT", StringComparison.OrdinalIgnoreCase));
             Assert.DoesNotContain(publishedFiles, file => file.EndsWith(".DWG", StringComparison.OrdinalIgnoreCase));
@@ -211,6 +213,7 @@ public sealed class ReleasePackagePublisherTests
         }
 
         public int Calls { get; private set; }
+        public DateTimeOffset? ObservedPublishedAt { get; private set; }
 
         public async Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateAsync(
             ReleasePackage package,
@@ -220,6 +223,7 @@ public sealed class ReleasePackagePublisherTests
             CancellationToken cancellationToken)
         {
             Calls++;
+            ObservedPublishedAt = package.PublishedAt;
             var result = new Dictionary<Guid, DocumentPreviewArtifact>();
             foreach (var source in sources)
             {

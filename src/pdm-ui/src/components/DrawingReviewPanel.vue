@@ -502,7 +502,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
         <p class="drawing-review-route">审核：{{ assignedReviewerLabel(activePackage) }} → 批准：{{ activePackage.supervisorName || displayUserName(activePackage.supervisor) }}</p>
         <p v-if="currentHandlerLabel(activePackage)" class="drawing-review-current-handler">{{ currentHandlerLabel(activePackage) }}</p>
         <p v-if="activePackage.state === 'Withdrawn'" class="drawing-review-withdrawn">{{ activePackage.withdrawnBy }} 撤销：{{ activePackage.withdrawalReason }}</p>
-        <p v-if="activePackage.state === 'WritingProperties'" class="drawing-review-writeback">审核标记属性回写：还有 {{ pendingWritebackCount }} 张待写入（到图档页选中该图纸后点“回写审核标记”）。未写完前这些图纸保持编辑锁定。</p>
+        <p v-if="activePackage.state === 'WritingProperties'" class="drawing-review-writeback">审核已批准，还有 {{ pendingWritebackCount }} 张审核标记待写入；不影响获取编辑权限。发布时核验正式工程图标记，旧回写任务不会覆盖新修改。</p>
         <div class="drawing-review-package-actions">
           <button v-if="canAbandonWritebacks" type="button" :disabled="pending" @click="abandonReviewWritebacks">放弃写入并完成审核</button>
           <button v-if="canWithdrawActive" type="button" class="is-danger" :disabled="pending" @click="withdrawActiveReview"><X :size="14" />撤销审核</button>
@@ -521,7 +521,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
 </template>
 
 <style scoped>
-.drawing-review-panel{font-size:12px;position:absolute;z-index:20;inset:0 0 0 auto;box-sizing:border-box;width:300px;min-width:0;min-height:0;height:100%;display:flex;flex-direction:column;overflow-x:hidden;overflow-y:auto;background:var(--pdm-surface);border-color:var(--pdm-border);box-shadow:-10px 0 28px rgba(15,23,42,.16)}
+.drawing-review-panel{font-size:12px;position:absolute;z-index:20;inset:0 0 0 auto;box-sizing:border-box;width:300px;min-width:0;min-height:0;height:100%;display:flex;flex-direction:column;overflow-x:hidden;overflow-y:auto;background:var(--pdm-surface);border-color:var(--pdm-border);box-shadow:-10px 0 28px var(--pdm-shadow)}
 .drawing-review-panel.is-overlay-hosted{position:relative;inset:auto;width:100%;height:100%;border-radius:0;backdrop-filter:none;-webkit-backdrop-filter:none}
 .drawing-review-panel__header{display:flex;align-items:center;gap:8px;padding:12px 13px 9px;border-bottom:1px solid var(--pdm-border-soft)}
 .drawing-review-panel__title{flex:0 1 auto;min-width:0}.drawing-review-panel__title span{color:var(--pdm-blue);font-size:12px;font-weight:600;letter-spacing:.12em}.drawing-review-panel__header h2{margin:2px 0 0;overflow:hidden;font-size:14px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
@@ -548,8 +548,8 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
 .drawing-review-candidate__state.is-pending{color:var(--pdm-theme-accent)}
 .drawing-review-candidate__state.is-success{color:var(--pdm-green)}
 .drawing-review-candidate__state.is-danger{color:var(--pdm-danger)}
-.drawing-review-package-summary>div>span.is-warning{background:#fff4dc;color:var(--pdm-orange)}
-.drawing-review-package-summary>div>span.is-pending{background:#e8f0fe;color:var(--pdm-theme-accent)}
+.drawing-review-package-summary>div>span.is-warning{background:var(--pdm-orange-soft);color:var(--pdm-orange)}
+.drawing-review-package-summary>div>span.is-pending{background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent)}
 .drawing-review-package-summary>div>span.is-success{background:var(--pdm-green-soft);color:var(--pdm-green)}
 .drawing-review-package-summary>div>span.is-danger{background:var(--pdm-danger-soft);color:var(--pdm-danger)}
 .drawing-review-package-summary>div>span.is-neutral{background:var(--pdm-surface-muted);color:var(--pdm-muted)}

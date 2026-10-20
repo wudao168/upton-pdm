@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { CalendarDays, Blocks, Boxes, ClipboardCheck, FileText, FolderKanban, LayoutDashboard, Library, ListTree, Network, Settings } from '@lucide/vue'
+import { Boxes, ClipboardCheck, Clock, FileText, FolderKanban, LayoutDashboard, Library, Settings } from '@lucide/vue'
 import uptonLogo from '../assets/upton-logo-white.png'
 import { repairMojibake } from '../mojibake'
 import PlmCubeIcon from './PlmCubeIcon.vue'
 import ConnectionLights from './ConnectionLights.vue'
 
-type NavKey = 'project-calendar' | 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
+type NavKey = 'work-hours' | 'project-applications' | 'project-calendar' | 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
 
 type SystemReleaseHistoryEntry = {
   Version?: string
@@ -21,7 +21,6 @@ const props = withDefaults(defineProps<{
   approvalCount?: number
   materialCount?: number
   canManageSystem?: boolean
-  canViewStandardLibrary?: boolean
   canViewMaterials?: boolean
   collapsed?: boolean
   version?: string
@@ -35,7 +34,6 @@ const props = withDefaults(defineProps<{
   approvalCount: 0,
   materialCount: 0,
   canManageSystem: false,
-  canViewStandardLibrary: false,
   canViewMaterials: false,
   collapsed: false,
   version: '',
@@ -127,16 +125,13 @@ async function openVersionInfo() {
 }
 
 const items = [
-  { key: 'project-calendar', label: '项目日历', icon: CalendarDays },
   { key: 'project-workbench', label: '项目总览', icon: LayoutDashboard },
   { key: 'project-center', label: '项目中心', icon: FolderKanban },
-  { key: 'projects', label: '项目列表', icon: ListTree },
+  { key: 'production-drawings', label: '制造中心', icon: FileText },
   { key: 'standard-library', label: '标准物料', icon: Library },
-  { key: 'standard-structure', label: '标准结构', icon: Network },
   { key: 'materials', label: '料品管理', icon: Boxes },
-  { key: 'program-templates', label: '程序模板', icon: Blocks },
+  { key: 'work-hours', label: '工时管理', icon: Clock },
   { key: 'tasks', label: '我的待办', icon: ClipboardCheck },
-  { key: 'production-drawings', label: '生产图纸', icon: FileText },
 ] satisfies Array<{ key: NavKey; label: string; icon: typeof FolderKanban }>
 </script>
 
@@ -150,7 +145,7 @@ const items = [
     </div>
     <nav class="pdm-sidebar__nav">
       <button
-        v-for="item in items.filter(entry => (!['standard-library', 'standard-structure'].includes(entry.key) || props.canViewStandardLibrary) && (entry.key !== 'materials' || props.canViewMaterials))"
+        v-for="item in items.filter(entry => entry.key !== 'materials' || props.canViewMaterials)"
         :key="item.label"
         type="button"
         class="pdm-nav-item"

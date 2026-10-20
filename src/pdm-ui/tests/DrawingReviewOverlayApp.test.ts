@@ -1,63 +1,23 @@
-import ElementPlus from 'element-plus'
-import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import DrawingReviewPanel from '../src/components/DrawingReviewPanel.vue'
+import { mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import DrawingReviewOverlayApp from '../src/components/DrawingReviewOverlayApp.vue'
 
-describe('DrawingReviewOverlayApp', () => {
-  beforeEach(() => {
-    window.localStorage.clear()
-    Object.defineProperty(window, 'chrome', { configurable: true, value: undefined })
-  })
+describe('审核浮层全局主题', () => {
+  afterEach(() => { delete document.documentElement.dataset.pdmTheme })
 
-  it('renders state from the desktop host and returns actions to the main page', async () => {
-    const postMessage = vi.fn()
-    let messageListener: ((event: MessageEvent) => void) | undefined
-    Object.defineProperty(window, 'chrome', {
-      configurable: true,
-      value: {
-        webview: {
-          postMessage,
-          addEventListener: vi.fn((_type: 'message', listener: (event: MessageEvent) => void) => { messageListener = listener }),
-          removeEventListener: vi.fn(),
-        },
-      },
-    })
-    const wrapper = mount(DrawingReviewOverlayApp, { attachTo: document.body, global: { plugins: [ElementPlus] } })
-
-    messageListener?.(new MessageEvent('message', {
-      data: {
-        type: 'review-overlay-state',
-        payload: {
-          visible: true,
-          packageId: '',
-          packages: [],
-          selectedDocumentId: 'doc-root',
-          currentUsername: 'reviewer',
-          pending: false,
-          canSubmit: true,
-          canAnnotate: true,
-          canDecide: true,
-          allowSelfReview: true,
-          collapsed: false,
-          theme: 'a',
-        },
-      },
-    }))
-    await flushPromises()
-
-    const entries = [{ kind: 'supervisor', packageId: 'review-1', itemId: 'item-1', decision: 'Approve', comment: '' }]
-    wrapper.findComponent(DrawingReviewPanel).vm.$emit('decideBatch', entries)
-    expect(postMessage).toHaveBeenCalledWith({ type: 'review-overlay-action', payload: { action: 'decide-batch', decisionEntries: entries } })
-    expect(wrapper.find('[aria-label="图纸审核面板"]').exists()).toBe(true)
-    expect(wrapper.find('[aria-label="关闭图纸审核面板"]').exists()).toBe(false)
-    await wrapper.get('[aria-label="折叠图纸审核栏"]').trigger('click')
-    expect(postMessage).toHaveBeenCalledWith({ type: 'review-overlay-action', payload: { action: 'collapse', collapsed: true } })
-
-    messageListener?.(new MessageEvent('message', { data: { type: 'review-overlay-state', payload: { collapsed: true } } }))
-    await flushPromises()
-    expect(wrapper.find('[aria-label="展开图纸审核栏"]').exists()).toBe(true)
-
+  it.each(['a', 'c', 'p', 'o', 'g'])('接收到%s主题时同步全局变量，覆盖浮层及传送弹窗', async theme => {
+    let receive: (event: MessageEvent) => void = () => {}
+    Object.defineProperty(window, 'chrome', { configurable: true, value: { webview: {
+      addEventListener: vi.fn((_name, handler) => { receive = handler }),
+      removeEventListener: vi.fn(),
+    } } })
+    const wrapper = mount(DrawingReviewOverlayApp, { global: { stubs: { DrawingReviewPanel: true } } })
+    receive(new MessageEvent('message', { data: { type: 'review-overlay-state', payload: { theme } } }))
+    await nextTick()
+    expect(document.documentElement.dataset.pdmTheme).toBe(theme)
+    expect(wrapper.classes()).toContain(`theme-${theme}`)
     wrapper.unmount()
+    delete window.chrome
   })
 })

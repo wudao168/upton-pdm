@@ -7,6 +7,17 @@ namespace Upton.Pdm.Tests;
 public sealed class ProjectPermissionPolicyTests
 {
     [Fact]
+    public void AssignedElectricalEngineer_HasEngineerPositionOnlyOnItsProject()
+    {
+        var root = NewProject();
+        var child = NewProject() with { ParentProjectId = root.Id, RootProjectId = root.Id, PhaseOwners = new Dictionary<string, string> { ["ElectricalEngineer"] = "electrical" } };
+        var sibling = NewProject() with { ParentProjectId = root.Id, RootProjectId = root.Id };
+        Assert.True(ProjectPermissionPolicy.Allows(child, root, "electrical", ProjectPermissionSettings.Default, PermissionCodes.BomElectricalEdit));
+        Assert.False(ProjectPermissionPolicy.Allows(sibling, root, "electrical", ProjectPermissionSettings.Default, PermissionCodes.BomElectricalEdit));
+        Assert.False(ProjectPermissionPolicy.Allows(root, root, "electrical", ProjectPermissionSettings.Default, PermissionCodes.BomElectricalEdit));
+    }
+
+    [Fact]
     public void MainDesigner_CanEditEveryChild_EngineerOnlyAssignedChild()
     {
         var root = NewProject() with { DesignLeads = ["lead"], Designers = ["root-engineer"] };

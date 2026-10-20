@@ -371,7 +371,7 @@ onBeforeUnmount(() => { ++generation; ++selectionGeneration; controller?.abort()
 .bom-inventory__comparison > header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 12px; }
 .bom-inventory__locations { min-width: 470px; }
 .bom-inventory__hint { font-size: 11px; color: var(--pdm-muted); line-height: 1.7; }
-.bom-inventory mark { background: #fff0d1; color: #a64b00; font-weight: 600; padding: 1px 2px; border-radius: 2px; }
+.bom-inventory mark { background: var(--pdm-orange-soft); color: var(--pdm-orange); font-weight: 600; padding: 1px 2px; border-radius: 2px; }
 .bom-inventory__error { color: var(--pdm-danger); font-size: 12px; padding: 0 12px; }
 .bom-inventory__decision { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 0; font-size: 12px; }
 .bom-inventory__decision label { display: flex; gap: 6px; align-items: center; }

@@ -232,11 +232,71 @@ internal static class NativeArchiveRunner
             Root = Map(files[index].Root, true, true), CheckoutSessionId = session, ExpectedVersionId = baselines[file.DocumentId] } }).ToArray();
         await Post<ArchiveBatchReceipt>(api, "/api/archive-batches", new ArchiveBatchRequest(Guid.NewGuid(), session, unchanged));
         foreach (var document in documents.Values) Require((await repository.ListDocumentVersionsAsync(document.Id, default)).Count == 1, "无修改新批次造成重复升版。");
+        var rootDocument = documents[files.Single(file => file.IsProjectRoot).Key];
+        // Normal workspace acquisition includes related drawings. Historical root-only
+        // opening intentionally does not infer drawing versions from today's relations.
+        var manifest = await Post<ControlledOpenManifest>(api, $"/api/documents/{rootDocument.Id}/open-manifest",
+            new CreateControlledOpenManifestRequest(null, false, false));
+        Require(manifest.Files.Count == files.Length, "受控获取清单没有完整包含原生存档文件：预期=" + files.Length + "；实际=" + manifest.Files.Count
+            + "；缺少=" + string.Join("、", files.Where(file => !manifest.Files.Any(restored => restored.DocumentId == documents[file.Key].Id)).Select(file => file.Root.FileName))
+            + "；提醒=" + string.Join("；", manifest.Warnings));
+        var recovered = Path.Combine(Path.GetDirectoryName(ownedFiles)!, "recovered");
+        Directory.CreateDirectory(recovered);
+        foreach (var file in manifest.Files)
+        {
+            Require(baselines[file.DocumentId] == file.VersionId, "重新获取没有使用本次冻结版本。");
+            using var response = await api.GetAsync($"/api/documents/{file.DocumentId}/versions/{file.VersionId}/file?download=true");
+            await Success(response);
+            var bytes = await response.Content.ReadAsByteArrayAsync();
+            Require(Convert.ToHexString(SHA256.HashData(bytes)) == file.Sha256, "下载后的图档字节校验失败。");
+            var target = Within(recovered, Path.GetFullPath(Path.Combine(recovered, file.RelativePath)));
+            Require(!File.Exists(target), "受控恢复目标路径重复。");
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            await File.WriteAllBytesAsync(target, bytes);
+        }
         Require(before.All(pair => Hash(pair.Key) == pair.Value), "验收改写了原生源文件或准备副本。");
+        var drawingSource = files.FirstOrDefault(file => file.Root.Kind == DocumentKind.Drawing);
+        if (drawingSource != null)
+        {
+            // Add one drawing after the model is already archived. No model checkout,
+            // upload or version change is needed for this independent drawing batch.
+            var drawingBatch = Guid.NewGuid(); var drawingSession = Guid.NewGuid();
+            var modelKey = drawingSource.Root.Children.First(child => child.DocumentId.HasValue).DocumentId!.Value;
+            var drawingName = "新增工程图-" + drawingSource.Root.FileName;
+            var added = await Post<PdmDocument>(api, $"/api/archive-batches/{drawingBatch}/projects/{project.Id}/registrations",
+                new ReserveArchiveDocumentRequest(new RegisterDocumentRequest("NEW-DRAWING", "独立新增工程图", drawingName,
+                    DocumentKind.Drawing, folder.Id, documents[modelKey].Id, drawingSource.SourceSha256, true, "验证单独新增工程图"), drawingSession, "NATIVE-QA"));
+            var drawingRoot = Map(drawingSource.Root, true, true) with { DocumentId = added.Id, FileName = drawingName, Revision = added.Revision };
+            var drawingProperties = new Dictionary<string, string?> { ["SourceFileSha256"] = drawingSource.SourceSha256 };
+            await Post<JsonElement>(api, $"/api/documents/{added.Id}/checkin/preflight", new CheckInPreflightRequest(project.Id,
+                drawingRoot, drawingProperties, drawingSession, false, PlannedDocumentIds: new[] { added.Id }));
+            var drawingBytes = await File.ReadAllBytesAsync(drawingSource.Path);
+            var upload = await Post<UploadSession>(api, "/api/uploads/sessions", new StartUploadRequest(project.Id, drawingName,
+                drawingBytes.Length, Hash(drawingSource.Path), drawingBatch, added.Id, drawingSession));
+            for (var offset = 0; offset < drawingBytes.Length; offset += upload.ChunkSize)
+            {
+                using var content = new ByteArrayContent(drawingBytes, offset, Math.Min(upload.ChunkSize, drawingBytes.Length - offset));
+                using var response = await api.PutAsync($"/api/uploads/sessions/{upload.Id}/chunks/{offset / upload.ChunkSize}", content);
+                await Success(response);
+            }
+            var stored = await Post<StoredFile>(api, $"/api/uploads/sessions/{upload.Id}/complete", new CompleteUploadRequest(upload.TargetRelativePath!));
+            await Post<ArchiveBatchReceipt>(api, "/api/archive-batches", new ArchiveBatchRequest(drawingBatch, drawingSession,
+                new[] { new ArchiveBatchFileRequest(added.Id, new CheckInRequest(project.Id, drawingRoot, "单独新增工程图", stored.RelativePath,
+                    stored.Length, stored.Sha256, drawingProperties, drawingSession, false)) }));
+            Require((await repository.ListDocumentVersionsAsync(added.Id, default)).Count == 1, "新工程图未单独保存。");
+            foreach (var document in documents.Values)
+                Require((await repository.ListDocumentVersionsAsync(document.Id, default)).Count == 1, "单独新增工程图导致已有模型或图档升版。");
+            var addedManifest = await Post<ControlledOpenManifest>(api, $"/api/documents/{added.Id}/open-manifest",
+                new CreateControlledOpenManifestRequest(null, false, false));
+            Require(addedManifest.Files.Any(file => file.DocumentId == added.Id)
+                && addedManifest.Files.Any(file => file.DocumentId == documents[modelKey].Id && file.VersionId == baselines[documents[modelKey].Id]),
+                "新工程图取回未包含原有模型的正确版本。");
+        }
         return new { passed = true, files = files.Length, drawings = files.Count(file => file.Root.Kind == DocumentKind.Drawing), uploadedBytes,
             failedFileZeroVersions = true, failedDrawingZeroVersions = files.Any(file => file.Root.Kind == DocumentKind.Drawing),
-            lostResponseReplaySingleVersion = true, unchangedBatchSingleVersion = true,
+            lostResponseReplaySingleVersion = true, unchangedBatchSingleVersion = true, drawingOnlyKeepsExistingModelVersion = drawingSource != null,
             archivedBytesMatch = true, referenceConfigurationsPreserved = true, sourceFilesUnchanged = true,
+            restoredFiles = manifest.Files.Count, recoveredDirectory = recovered, recoveredRoot = Path.Combine(recovered, manifest.RootRelativePath),
             storage = "isolated-in-memory", productionDatabaseTouched = false };
     }
 
@@ -244,7 +304,7 @@ internal static class NativeArchiveRunner
     {
         IEnumerable<DocumentReferenceNode> Flatten(DocumentReferenceNode node) => new[] { node }.Concat(node.Children.SelectMany(Flatten));
         return JsonSerializer.Serialize(Flatten(root).Select(node => new { node.DocumentId, node.InstancePath, node.Kind,
-            node.Configuration, node.Quantity, node.Status }));
+            node.Configuration, node.Quantity, node.Status, node.Role }));
     }
 
     private static async Task<T> Post<T>(HttpClient client, string url, object body)

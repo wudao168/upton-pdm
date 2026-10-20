@@ -65,6 +65,7 @@ public sealed partial class InMemoryPdmRepository
                         foreach (var modelId in models) documentRelations[(file.DocumentId, modelId)] = new(modelId, file.DocumentId);
                     }
                 }
+                RefreshWorkingReferenceRoots(projectId, actor, timeProvider.GetUtcNow());
                 var receipt = new ArchiveBatchReceipt(batchId, projectId, actor, requestHash, ordered.Select(file => results[file.DocumentId]).ToArray()) { FollowupPending = true };
                 archiveBatchReceipts[batchId] = receipt;
                 foreach (var result in receipt.Results.Where(result => result.VersionCreated && result.Version is not null))

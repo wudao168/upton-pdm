@@ -166,6 +166,7 @@ public sealed partial class MySqlPdmRepository
             throw new PdmRuleException("系统存储根目录尚未配置。");
         var settings = new PdmSystemSettings(vaultRoot, releaseRoot)
         {
+            BrowserCadArchiveEnabled = !values.TryGetValue("browser_cad_archive_enabled", out var browserArchive) || browserArchive != "false",
             MaterialAttachmentRoot = ReadString(values, "material_attachment_root", Path.Combine(Path.GetDirectoryName(vaultRoot) ?? vaultRoot, "MaterialAttachments")),
             CheckoutHeartbeatSeconds = ReadInt(values, "checkout_heartbeat_seconds", 180),
             CheckoutLeaseMinutes = ReadInt(values, "checkout_lease_minutes", 15),
@@ -223,6 +224,14 @@ public sealed partial class MySqlPdmRepository
         return normalized;
     }
 
+    public async Task SetBrowserCadArchiveEnabledAsync(bool enabled, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "INSERT INTO pdm_system_setting(setting_key,setting_value,updated_at) VALUES('browser_cad_archive_enabled',@Value,@Now) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value),updated_at=VALUES(updated_at)",
+            new { Value = enabled ? "true" : "false", Now = timeProvider.GetUtcNow().UtcDateTime }, cancellationToken: ct));
+    }
+
     public async Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow().UtcDateTime;
@@ -231,6 +240,7 @@ public sealed partial class MySqlPdmRepository
         foreach (var item in new[]
         {
             new { Key = "vault_root", Value = settings.VaultRoot },
+            new { Key = "browser_cad_archive_enabled", Value = settings.BrowserCadArchiveEnabled ? "true" : "false" },
             new { Key = "release_root", Value = settings.ReleaseRoot },
             new { Key = "material_attachment_root", Value = settings.MaterialAttachmentRoot },
             new { Key = "checkout_heartbeat_seconds", Value = settings.CheckoutHeartbeatSeconds.ToString() },

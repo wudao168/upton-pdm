@@ -6,6 +6,64 @@ namespace Upton.Pdm.Tests;
 
 public sealed class ProjectOplTests
 {
+    [Fact]
+    public async Task LinkedReleasesKeepEverySuccessfulPublicationAndShareDistinctDrawingCounts()
+    {
+        var projects = new InMemoryPdmRepository(TimeProvider.System);
+        var issues = new InMemoryProjectOplRepository();
+        var service = new ProjectOplService(projects, issues, new Storage(), TimeProvider.System);
+        var first = await service.SaveAsync(ProjectId, null, Input(), [], "admin", UserRole.Administrator, default);
+        var second = await service.SaveAsync(ProjectId, null, Input() with { Description = "第二项问题" }, [], "admin", UserRole.Administrator, default);
+        var drawing = await projects.RegisterDocumentAsync(new(ProjectId, "OPL-DRAW", "图纸", "OPL.SLDDRW", DocumentKind.Drawing), "admin", default);
+        var model = await projects.RegisterDocumentAsync(new(ProjectId, "OPL-PART", "零件", "OPL.SLDPRT", DocumentKind.Part), "admin", default);
+        var now = DateTimeOffset.UtcNow;
+        var binding = new ReleaseVersionBinding(drawing.Id, Guid.NewGuid(), "A", "hash", true);
+        var package = new ReleasePackage(Guid.NewGuid(), ProjectId, "OPL-RP-1", ReleasePackageState.Published,
+            null, "M1", "E1", [], now, now, "release")
+        {
+            Scope = ReleaseScope.NonStandardSupplement, RelatedOplIssueIds = [first.Id, second.Id, first.Id],
+            WholeSetMultiplier = 20, DrawingDocumentCount = 1,
+            VersionBindings = [binding, binding, new(model.Id, Guid.NewGuid(), "A", "hash", true),
+                new(Guid.NewGuid(), Guid.NewGuid(), "A", "hash", false)]
+        };
+        await projects.CreateReleasePackageAsync(package, default);
+        await projects.CreateReleasePackageAsync(package with { Id = Guid.NewGuid(), Number = "OPL-RP-2", Scope = ReleaseScope.StandardSupplement,
+            PublishedAt = now.AddMinutes(1), RelatedOplIssueIds = [first.Id], DrawingDocumentCount = 0, VersionBindings = [] }, default);
+        foreach (var state in new[] { ReleasePackageState.Draft, ReleasePackageState.PublishFailed })
+            await projects.CreateReleasePackageAsync(package with { Id = Guid.NewGuid(), State = state, PublishedAt = null }, default);
+        var view = await service.GetAsync(ProjectId, "admin", UserRole.Administrator, default);
+        var history = view.Rows.Single(row => row.Issue.Id == first.Id);
+        Assert.Equal(new[] { "OPL-RP-2", "OPL-RP-1" }, history.Releases.Select(item => item.PackageNumber));
+        Assert.Equal(new[] { 0, 1 }, history.Releases.Select(item => item.DrawingCount));
+        Assert.Equal(1, Assert.Single(view.Rows.Single(row => row.Issue.Id == second.Id).Releases).DrawingCount);
+        Assert.Equal("待处理", history.Issue.Status);
+        Assert.Equal(1, history.Issue.RowVersion);
+        await service.SaveAsync(ProjectId, first.Id, Input(1) with { Description = "修改问题描述" }, [], "admin", UserRole.Administrator, default);
+        Assert.Equal(2, (await service.GetAsync(ProjectId, "admin", UserRole.Administrator, default)).Rows.Single(row => row.Issue.Id == first.Id).Releases.Count);
+    }
+
+    [Fact]
+    public async Task ReleaseLinksRejectMissingVoidAndSiblingIssuesButAllowCompletedIssues()
+    {
+        var projects = new InMemoryPdmRepository(TimeProvider.System);
+        var service = new ProjectOplService(projects, new InMemoryProjectOplRepository(), new Storage(), TimeProvider.System);
+        var issue = await service.SaveAsync(ProjectId, null, Input(), [], "admin", UserRole.Administrator, default);
+        await service.CompleteAsync(ProjectId, issue.Id, 1, "admin", UserRole.Administrator, default);
+        Assert.Equal(new[] { issue.Id }, await service.ValidateReleaseLinksAsync(ProjectId, [issue.Id, issue.Id], "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.ValidateReleaseLinksAsync(ProjectId, [Guid.NewGuid()], "admin", UserRole.Administrator, default));
+        var discarded = await service.SaveAsync(ProjectId, null, Input() with { Status = "已作废" }, [], "admin", UserRole.Administrator, default);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.ValidateReleaseLinksAsync(ProjectId, [discarded.Id], "admin", UserRole.Administrator, default));
+        var numbering = await projects.GetProjectNumberingOptionsAsync(default);
+        var customer = (await projects.ListCustomersAsync(true, default))[0];
+        var root = await projects.CreateNumberedProjectAsync(new(numbering.Organizations[0].Id, "P", 0, customer.Id, "OPL范围测试", null, null, 1, "admin", "D:/test", "D:/release"), default);
+        var child = await projects.CreateSubprojectAsync(new(root.Id, "关联子设备", null, 1), default);
+        var sibling = await projects.CreateSubprojectAsync(new(root.Id, "同级子设备", null, 1), default);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.ValidateReleaseLinksAsync(root.Id, [issue.Id], "admin", UserRole.Administrator, default));
+        var childIssue = await service.SaveAsync(root.Id, null, Input() with { RelatedProjectId = child.Id }, [], "admin", UserRole.Administrator, default);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.ValidateReleaseLinksAsync(sibling.Id, [childIssue.Id], "admin", UserRole.Administrator, default));
+        Assert.Equal(new[] { childIssue.Id }, await service.ValidateReleaseLinksAsync(child.Id, [childIssue.Id], "admin", UserRole.Administrator, default));
+    }
+
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static OplInput Input(long version = 0) => new("相机支架松动", "高", "待处理", "", new(2026, 10, 15), "", version, []);
     private sealed class Storage : IProjectOplStorage

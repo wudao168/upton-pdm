@@ -87,6 +87,21 @@ function projectDesignLeads(project: ProjectSummary) {
 }
 
 const rootProjects = computed(() => props.projects.filter(item => !item.parentProjectId).sort(compareProjectCodeDescending))
+const projectTypeFilter = ref('')
+const unclassifiedProjectType = '__unclassified__'
+const projectTypeOf = (project: ProjectSummary) => project.projectTypeCode?.trim().toUpperCase() || unclassifiedProjectType
+const projectTypeTabs = computed(() => {
+  const usedTypes = new Set(rootProjects.value.map(projectTypeOf))
+  const tabs = props.numberingOptions.projectTypes
+    .filter(item => item.isActive !== false || usedTypes.has(item.code.trim().toUpperCase()))
+    .map(item => ({ code: item.code.trim().toUpperCase(), name: item.name }))
+  for (const code of usedTypes) {
+    if (code !== unclassifiedProjectType && !tabs.some(item => item.code === code)) tabs.push({ code, name: `${code} 类项目` })
+  }
+  if (usedTypes.has(unclassifiedProjectType)) tabs.push({ code: unclassifiedProjectType, name: '未分类' })
+  return [{ code: '', name: '全部项目' }, ...tabs]
+})
+watch(projectTypeTabs, tabs => { if (!tabs.some(item => item.code === projectTypeFilter.value)) projectTypeFilter.value = '' })
 const activeCustomers = computed(() => props.customers.filter(item => item.isActive))
 const responsibleOptions = computed(() => [...new Set(props.projects.flatMap(item => [item.primaryProjectManager, ...projectDesignLeads(item), ...item.collaborativeProjectManagers, ...item.designers]).filter((item): item is string => Boolean(item)))].sort((left, right) => userDisplayName(left).localeCompare(userDisplayName(right), 'zh-CN')))
 const executionUnitOptions = computed(() => [...new Set(props.projects.map(item => item.executionUnitName).filter((item): item is string => Boolean(item)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
@@ -150,6 +165,7 @@ const filteredChildrenByParent = computed(() => {
   return result
 })
 const visibleRootProjects = computed(() => rootProjects.value.filter(parent => {
+  if (projectTypeFilter.value && projectTypeOf(parent) !== projectTypeFilter.value) return false
   const hasMatchingChild = filteredChildrenByParent.value.has(parent.id)
   return matchesProject(parent) || hasMatchingChild
 }))
@@ -164,7 +180,7 @@ const expandableProjectIds = computed(() => {
   visibleRootProjects.value.forEach(append)
   return result
 })
-watch([organizationFilter, selectedDivisionId, projectQuery, responsibleFilter, executionUnitFilter, projectManagerFilter, designOwnerFilter], () => { expanded.value = new Set() })
+watch([projectTypeFilter, organizationFilter, selectedDivisionId, projectQuery, responsibleFilter, executionUnitFilter, projectManagerFilter, designOwnerFilter], () => { expanded.value = new Set() })
 function visibleChildren(parentId: string) {
   const children = filteredChildrenByParent.value.get(parentId) ?? []
   return expanded.value.has(parentId) ? children : []
@@ -189,20 +205,15 @@ watch(() => props.projects.map(item => item.id).join(','), () => {
   expanded.value = new Set([...expanded.value].filter(id => validIds.has(id)))
 }, { immediate: true })
 
-function localDate() {
-  const date = new Date()
-  const offset = date.getTimezoneOffset() * 60_000
-  return new Date(date.getTime() - offset).toISOString().slice(0, 10)
-}
-
 function openCreateDialog() {
   form.organizationId = props.numberingOptions.organizations[0]?.id ?? ''
-  form.projectTypeCode = props.numberingOptions.projectTypes[0]?.code ?? ''
+  form.projectTypeCode = props.numberingOptions.projectTypes.find(item => item.isActive !== false && item.code.trim().toUpperCase() === projectTypeFilter.value)?.code
+    ?? props.numberingOptions.projectTypes.find(item => item.isActive !== false)?.code ?? ''
   form.equipmentTypeCode = props.numberingOptions.equipmentTypes[0]?.code ?? 0
   form.customerId = activeCustomers.value[0]?.id ?? ''
   form.name = ''
   form.projectAlias = ''
-  form.signedDate = localDate()
+  form.signedDate = ''
   form.quantity = 1
   form.bomItemCategoryCode = '0301'
   dialogOpen.value = true
@@ -250,12 +261,12 @@ function toggleAllProjectDetails() {
 }
 
 async function submitProject() {
-  if (!form.organizationId || !form.projectTypeCode || !form.customerId || !form.name.trim() || !form.signedDate || form.quantity < 1) {
+  if (!form.organizationId || !form.projectTypeCode || !form.customerId || !form.name.trim() || form.quantity < 1) {
     ElMessage.warning('请完整填写项目资料并选择客户')
     return
   }
   try {
-    await props.onCreate({ ...form, name: form.name.trim(), projectAlias: form.projectAlias?.trim() })
+    await props.onCreate({ ...form, signedDate: form.signedDate || null, name: form.name.trim(), projectAlias: form.projectAlias?.trim() })
     dialogOpen.value = false
     ElMessage.success('项目号、设备型号和序列号已自动生成')
   } catch (error) {
@@ -333,6 +344,9 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
         </div>
       </aside>
       <section class="pdm-panel pdm-project-table-panel" aria-label="项目列表">
+        <el-tabs v-model="projectTypeFilter" class="pdm-settings-tabs pdm-project-type-tabs" aria-label="项目类型">
+          <el-tab-pane v-for="item in projectTypeTabs" :key="item.code" :name="item.code" :label="item.name" />
+        </el-tabs>
         <div class="pdm-project-list-toolbar" aria-label="项目筛选">
           <button v-if="canCreate" type="button" class="pdm-primary-action pdm-project-create-action" @click="openCreateDialog"><FolderPlus :size="16" />创建主项目</button>
           <button type="button" class="pdm-secondary-action pdm-project-collapse-action" :aria-label="`${allProjectDetailsExpanded ? '折叠' : '展开'}全部项目明细`" :disabled="expandableProjectIds.length === 0" @click="toggleAllProjectDetails"><ChevronDown v-if="allProjectDetailsExpanded" :size="15" /><ChevronRight v-else :size="15" />{{ allProjectDetailsExpanded ? '折叠明细' : '展开明细' }}</button>
@@ -352,7 +366,7 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
           <tbody>
             <tr v-for="row in visibleProjectRows" :key="row.project.id" :class="{ 'is-child': row.depth > 0 }">
               <td><div class="pdm-project-code-cell" :class="{ 'is-child-code': row.depth > 0 }" :style="{ transform: `translateX(${row.depth * 2}ch)` }"><button v-if="filteredChildrenByParent.has(row.project.id)" type="button" class="pdm-tree-toggle" :aria-label="`${isEffectivelyExpanded(row.project.id) ? '折叠' : '展开'}${row.project.code}的子项目`" @click="toggle(row.project.id)"><ChevronDown v-if="isEffectivelyExpanded(row.project.id)" :size="15" /><ChevronRight v-else :size="15" /></button><span v-else class="pdm-project-code-spacer"></span><button type="button" class="pdm-project-code-link" :aria-label="`进入项目 ${row.project.code}`" @click="emit('open', row.project.id)">{{ row.project.code }}</button><button v-if="row.depth === 0 && canCreateSubproject && row.project.effectiveProjectPermissions?.includes('project.child.create') && row.project.deviceModel" type="button" class="pdm-project-add-child" :aria-label="`为${row.project.code}创建子项目`" title="创建子项目" @click.stop="openChildDialog(row.project)"><FolderPlus :size="14" /></button><span v-else class="pdm-project-code-spacer"></span></div></td>
-              <td>{{ row.project.name }}</td>
+              <td><span v-if="row.project.isSpecialInitiation" class="pdm-status is-warn" style="margin-right:4px">特殊立项</span>{{ row.project.name }}</td>
               <td>{{ row.project.projectAlias || '—' }}</td>
               <td>{{ row.project.deviceModel || '旧项目未编号' }}</td>
               <td class="pdm-project-serials"><span v-for="serial in row.project.serialNumbers" :key="serial" class="pdm-serial-line">{{ serial }}</span><span v-if="row.project.serialNumbers.length === 0">—</span></td>
@@ -368,7 +382,7 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
           </tbody>
         </table>
       </div>
-        <div v-else-if="projects.length" class="pdm-project-empty"><Search :size="42" /><h2>未找到匹配项目</h2><p>请调整搜索内容或筛选条件。</p><button type="button" class="pdm-secondary-action" @click="projectQuery=''; projectSearchDraft=''; responsibleFilter=''; selectProjectOrganization()">清除筛选</button></div>
+        <div v-else-if="projects.length" class="pdm-project-empty"><Search :size="42" /><h2>未找到匹配项目</h2><p>请切换项目类型或调整搜索、筛选条件。</p><button type="button" class="pdm-secondary-action" @click="projectTypeFilter=''; projectQuery=''; projectSearchDraft=''; responsibleFilter=''; selectProjectOrganization()">清除筛选</button></div>
         <div v-else class="pdm-project-empty"><FolderKanban :size="42" /><h2>当前公司还没有项目</h2><p v-if="canCreate">创建主项目后，可继续分配事业部和配置项目岗位。</p><p v-else>请联系有创建权限的人员新建项目。</p></div>
       </section>
     </section>
@@ -383,7 +397,7 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
         <label class="is-wide">客户<el-select v-model="form.customerId" class="pdm-project-customer-select" name="customerId" filterable placeholder="输入客户名称或编码筛选" no-match-text="未找到匹配客户" style="width:100%"><el-option v-for="item in activeCustomers" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select><small v-if="selectedCustomer">客户编码由U9C客户数据自动带出：{{ selectedCustomer.code }}</small><small v-else-if="activeCustomers.length === 0">尚未同步U9C客户，请先到“系统管理 → U9C接口 → 客户查询”执行同步。</small></label>
         <label>项目名称<input v-model="form.name" name="projectName" maxlength="200" placeholder="人工录入"></label>
         <label>项目别名<input v-model="form.projectAlias" name="projectAlias" maxlength="200" placeholder="人工录入，可选"></label>
-        <label>签订日期<input v-model="form.signedDate" name="signedDate" type="date"></label>
+        <label>订单日期（选填）<input v-model="form.signedDate" name="signedDate" type="date"></label>
         <label>数量<input v-model.number="form.quantity" name="quantity" type="number" min="1" max="10000"></label>
         <p class="is-wide">0301产线通常包含多台0302设备；0302也可独立作为根节点并继续嵌套0302设备。项目号、客户流水和序列号由服务器生成。</p>
       </form>
@@ -412,3 +426,7 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
     <ProjectNameplateDialog v-if="nameplateProject && token" v-model="nameplateOpen" :project="nameplateProject" :token="token" />
   </section>
 </template>
+
+<style scoped>
+.pdm-project-type-tabs{flex:none;min-width:0;margin-bottom:8px}
+</style>

@@ -2,6 +2,8 @@
 import { ElMessage } from '../statusMessage'
 import { reactive, ref, watch } from 'vue'
 import { testPreviewAgent } from '../api'
+import StandardStructureStorageSettings from './StandardStructureStorageSettings.vue'
+import BrowserCadArchiveSettings from './BrowserCadArchiveSettings.vue'
 import type { BomPropertyMapping, BomValidationField, EquipmentTypeDefinition, PdmSystemSettings, ProjectNumberingOptions } from '../types'
 
 const props = defineProps<{
@@ -250,6 +252,8 @@ async function saveCounters(row: { id: string; project: number; serial: number }
           <div class="pdm-settings-form"><label>图档存档根目录<input v-model="storageDraft.vaultRoot" placeholder="例如 D:\PLM\Vault"><small>示例：{{ storageDraft.vaultRoot || '未设置' }}\P700001\P700001-0、{{ storageDraft.vaultRoot || '未设置' }}\P700001\P700001-1</small></label><label>生产发包根目录<input v-model="storageDraft.releaseRoot" placeholder="例如 D:\PLM\Release"><small>示例：{{ storageDraft.releaseRoot || '未设置' }}\P700001\P700001-0、{{ storageDraft.releaseRoot || '未设置' }}\P700001\P700001-1</small></label><label>料品资料存档根目录<input v-model="storageDraft.materialAttachmentRoot" placeholder="例如 D:\PLM\MaterialAttachments"><small>目录变更只影响新上传附件，历史附件仍从原位置下载。</small></label></div>
           <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveStorage">保存存储设置</button></div>
         </section>
+        <StandardStructureStorageSettings v-if="token" :token="token" />
+        <BrowserCadArchiveSettings v-if="token" :token="token" />
       </el-tab-pane>
       <el-tab-pane label="图纸转换" name="preview-conversion">
         <section class="pdm-panel pdm-manager-panel">

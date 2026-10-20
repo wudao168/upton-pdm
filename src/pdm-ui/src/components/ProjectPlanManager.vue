@@ -103,6 +103,10 @@ const showBaseline = ref(true)
 const showNonWorkingDays = ref(false)
 const expanded = ref(new Set<string>())
 const collapsedStages = ref(new Set<string>())
+const timelineStageFilter = ref<string[]>([])
+const timelineTaskFilter = ref('')
+const timelineAssigneeFilter = ref<string[]>([])
+const unassignedFilter = '__unassigned__'
 const holidayCalendarDays = ref(new Map<string, { name: string; isOffDay: boolean }>())
 void loadGlobalStatusContent().then(library => {
   holidayCalendarDays.value = new Map(library.holidayCalendars.flatMap(calendar => calendar.days.map(day => [day.date, { name: day.name, isOffDay: day.isOffDay }] as const)))
@@ -637,6 +641,36 @@ const timelineRows = computed<TimelineRow[]>(() => {
     if (expanded.value.has(item.projectId) && item.plan) rows.push(...stageRows(item.plan, 1))
   }
   return rows
+})
+
+const planTaskEntries = computed(() => displayedPlans.value.flatMap(owner => owner.tasks.map(task => ({ owner, task }))))
+const timelineStageOptions = computed(() => [...new Set(displayedPlans.value.flatMap(owner => planStageGroups(owner).map(stage => stage.name)))])
+const timelineAssigneeOptions = computed(() => [...new Set(planTaskEntries.value.map(({ task }) => task.assignee?.trim() || ''))]
+  .map(username => ({ value: username || unassignedFilter, label: displayUserName(username, '待分配') }))
+  .sort((left, right) => left.label.localeCompare(right.label, 'zh-CN')))
+const hasTimelineFilters = computed(() => Boolean(timelineStageFilter.value.length || timelineTaskFilter.value.trim() || timelineAssigneeFilter.value.length))
+const matchingPlanTasks = computed(() => planTaskEntries.value.filter(({ owner, task }) =>
+  (!timelineStageFilter.value.length || timelineStageFilter.value.includes(stageLabel(task.stage, owner)))
+  && (!timelineTaskFilter.value.trim() || task.name.toLowerCase().includes(timelineTaskFilter.value.trim().toLowerCase()))
+  && (!timelineAssigneeFilter.value.length || timelineAssigneeFilter.value.some(username =>
+    username.toLowerCase() === (task.assignee?.trim().toLowerCase() || unassignedFilter)))))
+const visibleTimelineRows = computed(() => {
+  if (!hasTimelineFilters.value) return timelineRows.value
+  const tasks = new Set(matchingPlanTasks.value.map(({ owner, task }) => `${owner.projectId}:${task.id}`))
+  const stages = new Set(matchingPlanTasks.value.map(({ owner, task }) => `stage-${owner.projectId}-${task.stage}`))
+  const projects = new Set(matchingPlanTasks.value.map(({ owner }) => owner.projectId))
+  return timelineRows.value.filter(row => row.task ? tasks.has(`${row.projectId}:${row.task.id}`)
+    : row.isStage ? stages.has(row.key) : projects.has(row.projectId))
+})
+function clearTimelineFilters() {
+  timelineStageFilter.value = []
+  timelineTaskFilter.value = ''
+  timelineAssigneeFilter.value = []
+}
+watch([timelineStageFilter, timelineTaskFilter, timelineAssigneeFilter], () => {
+  if (!hasTimelineFilters.value) return
+  expanded.value = new Set(displayedPlans.value.map(owner => owner.projectId))
+  collapsedStages.value = new Set()
 })
 
 const timelineBounds = computed(() => {
@@ -1488,7 +1522,7 @@ function formatIsoWeek(value: string) {
   return `W${String(week).padStart(2, '0')}`
 }
 
-watch(() => props.project.id, () => { masterPlanMode.value = false; return load() }, { immediate: true })
+watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.value = false; return load() }, { immediate: true })
 </script>
 
 <template>
@@ -1527,7 +1561,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
 
       <section class="pdm-plan-panel">
         <header class="pdm-plan-toolbar">
-          <div class="pdm-plan-view-tabs"><strong class="pdm-plan-view-label">{{ portfolioMode ? `全部子项目（${timelineRows.length}）` : '任务甘特图' }}</strong><span v-if="!portfolioMode">{{ timelineRows.length }} 行</span></div>
+          <div class="pdm-plan-view-tabs"><strong class="pdm-plan-view-label">{{ portfolioMode ? `全部子项目（${visibleTimelineRows.length}）` : '任务甘特图' }}</strong><span v-if="!portfolioMode">{{ visibleTimelineRows.length }} 行</span></div>
           <div class="pdm-plan-toolbar__actions">
             <button type="button" class="pdm-plan-delete-action" :disabled="saving || !canDeleteDisplayedPlan || !canManageProject(project.id, 'delete')" :title="deleteDisabledReason || (isEffective(plan) ? '删除现行计划和变更草稿' : '删除未审批计划')" @click="openToolbarDelete">删除计划</button>
             <template v-if="canApprove"><button type="button" class="pdm-primary-action" :disabled="saving" @click="decideApproval(true)">批准生效</button><button type="button" class="pdm-secondary-action" :disabled="saving" @click="decideApproval(false)">退回</button></template>
@@ -1546,7 +1580,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
             <button v-if="!portfolioMode && canEdit && ((!plan && !project.parentProjectId) || (ownsDisplayedPlan && canEditSchedule(plan)))" type="button" class="pdm-primary-action" @click="openGenerate()"><Calendar :size="14" />{{ plan ? '重新生成' : '生成初始计划' }}</button>
             <label v-if="hasVisibleBaseline" class="pdm-plan-switch"><input v-model="showBaseline" type="checkbox">显示基线</label>
             <label class="pdm-plan-switch"><input v-model="showNonWorkingDays" aria-label="显示节假日和周日背景色" type="checkbox">休息日</label>
-            <div class="pdm-plan-zoom" aria-label="甘特图缩放"><button v-for="item in ([['month','月'],['week','周'],['day','日']] as const)" :key="item[0]" :class="{ 'is-active': zoom === item[0] }" @click="zoom = item[0]">{{ item[1] }}</button></div>
+            <div class="pdm-plan-zoom pdm-tabs" aria-label="甘特图缩放"><button v-for="item in ([['month','月'],['week','周'],['day','日']] as const)" :key="item[0]" :class="{ 'is-active': zoom === item[0] }" @click="zoom = item[0]">{{ item[1] }}</button></div>
             <button v-if="!portfolioMode && canEditSchedule(plan)" type="button" class="pdm-secondary-action" @click="shiftPlan">批量调整</button>
             <button v-if="!portfolioMode && plan && canEditSchedule(plan) && !hasStageAllocation(plan.stages)" type="button" class="pdm-secondary-action" @click="openStageConfiguration">阶段配置</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan" type="button" class="pdm-secondary-action" @click="openVersions"><History :size="14" />版本对比</button>
@@ -1558,7 +1592,14 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
         <div v-if="!portfolioMode && editingChangeDraft" class="pdm-plan-edit-hint is-change-draft"><strong>正在编辑变更草稿</strong>：原计划继续用于生产、提醒和进度统计；可多次保存，完成变更并生效后才会替换。已完成任务不可改排期。</div>
         <div v-if="project.parentProjectId && plan && !inheritedParentPlan" class="pdm-plan-edit-hint">{{ plan.followsParentPlan ? '跟随主项目计划：单独修改计划日期后转为独立计划；修改责任人不解除跟随。' : '独立计划：主项目调整不会覆盖此计划。' }}</div>
 
-        <div v-if="timelineRows.length" ref="ganttShell" class="pdm-gantt-shell">
+        <div v-if="displayedPlans.length" class="pdm-plan-filters" aria-label="甘特图任务筛选">
+          <label>阶段<el-select v-model="timelineStageFilter" aria-label="筛选阶段" placeholder="全部阶段" multiple filterable clearable collapse-tags collapse-tags-tooltip><el-option v-for="name in timelineStageOptions" :key="name" :label="name" :value="name" /></el-select></label>
+          <label>任务<el-input v-model="timelineTaskFilter" aria-label="筛选任务" placeholder="搜索任务名称" clearable /></label>
+          <label>责任人<el-select v-model="timelineAssigneeFilter" aria-label="筛选责任人" placeholder="全部责任人" multiple filterable clearable collapse-tags collapse-tags-tooltip><el-option v-for="person in timelineAssigneeOptions" :key="person.value" :label="person.label" :value="person.value" /></el-select></label>
+          <button type="button" class="pdm-secondary-action" :disabled="!hasTimelineFilters" @click="clearTimelineFilters">清空筛选</button>
+          <small role="status">匹配 {{ matchingPlanTasks.length }} / {{ planTaskEntries.length }} 项任务</small>
+        </div>
+        <div v-if="visibleTimelineRows.length" ref="ganttShell" class="pdm-gantt-shell">
           <div class="pdm-gantt-table" :class="{ 'is-info-collapsed': infoColumnsCollapsed, 'has-task-actions': showGanttTaskActions }">
             <div class="pdm-gantt-head pdm-gantt-info-head">
               <span v-if="showGanttTaskActions" class="pdm-gantt-action-head" aria-label="任务操作"><Settings :size="14" /></span>
@@ -1577,7 +1618,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
               <span v-if="todayLeft >= 0 && todayLeft <= timelineWidth" class="pdm-gantt-today is-header" :title="todayDate" :style="{ left: `${todayLeft}px` }"><b class="pdm-gantt-today__label">{{ todayLabel }}</b></span>
               <span v-if="shippingDateLeft >= 0 && shippingDateLeft <= timelineWidth" class="pdm-gantt-shipping is-header" :title="`项目发货日期：${shippingDate}`" :style="{ left: `${shippingDateLeft}px` }"><b class="pdm-gantt-shipping__label">发货</b></span>
             </div>
-            <template v-for="row in timelineRows" :key="row.key">
+            <template v-for="row in visibleTimelineRows" :key="row.key">
               <div role="button" tabindex="0" class="pdm-gantt-info-row" :class="{ 'is-project': !row.task && !row.isStage, 'is-stage': row.isStage, 'is-task': Boolean(row.task), 'is-sortable': canDragTaskRow(row), 'is-drop-before': taskDropTarget?.key === row.key && taskDropTarget.position === 'before', 'is-drop-after': taskDropTarget?.key === row.key && taskDropTarget.position === 'after', 'is-child': row.level > 0, 'is-inherited-plan': row.isInherited }" :style="{ '--gantt-indent': `${10 + row.level * 16}px` }" :title="row.isInherited ? '默认跟随主计划' : undefined" :aria-expanded="row.isStage ? !collapsedStages.has(row.key) : !row.task && row.plan ? expanded.has(row.projectId) : undefined" :draggable="canDragTaskRow(row)" @dragstart="startTaskSortDrag($event, row)" @dragend="clearTaskSortDrag" @dragover="dragOverTaskRow($event, row)" @drop="dropTaskRow($event, row)" @keydown.enter.self.prevent="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)" @keydown.space.self.prevent="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)" @click="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)">
                 <span v-if="showGanttTaskActions" class="pdm-gantt-action-cell">
                   <button v-if="row.isStage && canEditSchedule(row.plan)" type="button" :aria-label="`在${row.name}新增自定义任务`" :title="`在${row.name}新增自定义任务`" @click.stop="addCustomTask(row)"><Plus :size="14" /></button>
@@ -1645,6 +1686,7 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
             </template>
           </div>
         </div>
+        <div v-else-if="hasTimelineFilters" class="pdm-plan-empty" role="status"><h2>暂无符合筛选条件的任务</h2><p>请调整阶段、任务名称或责任人，或清空筛选后查看全部任务。</p><button type="button" class="pdm-secondary-action" @click="clearTimelineFilters">清空筛选</button></div>
         <div v-else class="pdm-plan-empty">
           <Calendar :size="42" />
           <h2>{{ project.parentProjectId ? '主项目尚未建立计划' : portfolioMode ? '各子项目尚未建立计划' : '尚未建立项目计划' }}</h2>
@@ -1914,7 +1956,9 @@ watch(() => props.project.id, () => { masterPlanMode.value = false; return load(
 .pdm-gantt-info-row{cursor:pointer}.pdm-gantt-info-row:has(.pdm-gantt-inline-editor){z-index:9}
 .pdm-gantt-cell-edit{display:block;width:100%;padding:4px 0;overflow:hidden;text-overflow:ellipsis;border:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}.pdm-gantt-cell-edit:hover{text-decoration:underline}
 .pdm-gantt-cell-edit.is-complete{margin:0 auto;width:auto;padding:2px 10px;border:1px solid var(--pdm-blue);border-radius:10px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:11px;font-weight:600;text-align:center}.pdm-gantt-cell-edit.is-complete:hover{background:var(--pdm-blue);color:#fff;text-decoration:none}
-.pdm-gantt-inline-editor{position:absolute;top:100%;left:236px;width:260px;padding:10px;background:var(--pdm-surface);border:1px solid var(--pdm-border);border-radius:6px;box-shadow:0 4px 14px #0002;cursor:default}.pdm-gantt-inline-editor.is-dates{left:216px;width:350px}.pdm-gantt-inline-editor>div:last-child{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}.pdm-gantt-inline-editor button{border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface);color:var(--pdm-text);padding:5px 9px;cursor:pointer}
+.pdm-gantt-inline-editor{position:absolute;top:100%;left:236px;width:260px;padding:10px;background:var(--pdm-surface);border:1px solid var(--pdm-border);border-radius:6px;box-shadow:0 4px 14px var(--pdm-shadow);cursor:default}.pdm-gantt-inline-editor.is-dates{left:216px;width:350px}.pdm-gantt-inline-editor>div:last-child{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}.pdm-gantt-inline-editor button{border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface);color:var(--pdm-text);padding:5px 9px;cursor:pointer}
 .pdm-plan-date-range.el-date-editor,.pdm-gantt-inline-editor .el-date-editor{width:100%;min-width:0;box-sizing:border-box}
 .pdm-plan-stage-dot.is-neutral{background:var(--pdm-muted);box-shadow:none}.pdm-gantt-bar.is-neutral{border-color:var(--pdm-muted);background:color-mix(in srgb,var(--pdm-muted) 24%,var(--pdm-surface));box-shadow:none}.pdm-gantt-bar.is-neutral i{background:var(--pdm-muted)}.pdm-gantt-bar.is-neutral.is-milestone{background:var(--pdm-muted)}
+.pdm-plan-filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:0 10px;box-sizing:border-box;margin-bottom:8px;flex:none}.pdm-plan-filters>label{display:flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap}.pdm-plan-filters .el-select{width:180px}.pdm-plan-filters .el-input{width:220px}.pdm-plan-filters>small{color:var(--pdm-muted);font-size:12px}.pdm-plan-filters>button{height:30px;padding:0 10px}
+@media(max-width:700px){.pdm-plan-filters>label{flex:1 1 220px;min-width:0}.pdm-plan-filters .el-select,.pdm-plan-filters .el-input{flex:1;width:auto;min-width:0}}
 </style>

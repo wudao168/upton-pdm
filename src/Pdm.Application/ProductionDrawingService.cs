@@ -79,35 +79,43 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                 .ToDictionary(group => group.Key, group => group.OrderBy(item => item.Sequence).ToArray()));
             var allVersions = await repository.ListProjectDocumentVersionsAsync(project.Id, cancellationToken);
             var versionsById = allVersions.ToDictionary(version => version.Id);
-            var modelVersionsByPackage = allVersions
+            var uses = allVersions
                 .Where(version => version.Status == DocumentVersionStatus.Released
                     && version.ReleasePackageId.HasValue
-                    && packages.ContainsKey(version.ReleasePackageId.Value)
-                    && allDocuments.TryGetValue(version.DocumentId, out var modelDocument)
-                    && modelDocument.Kind is DocumentKind.Assembly or DocumentKind.Part)
+                    && packages.ContainsKey(version.ReleasePackageId.Value))
                 .GroupBy(version => (PackageId: version.ReleasePackageId!.Value, version.DocumentId))
                 .ToDictionary(group => group.Key, group => group
                     .OrderByDescending(version => version.CreatedAt).ThenByDescending(version => version.Id).First());
-            var versions = allVersions
-                .Where(version => version.Status == DocumentVersionStatus.Released
-                    && version.ReleasePackageId.HasValue
-                    && packages.ContainsKey(version.ReleasePackageId.Value)
-                    && documents.ContainsKey(version.DocumentId))
-                .GroupBy(version => version.DocumentId);
+            foreach (var package in packages.Values.Where(value => value.VersionBindings is not null))
+            foreach (var binding in package.VersionBindings!)
+            {
+                if (!binding.Publish && documents.ContainsKey(binding.DocumentId)) continue;
+                if (!uses.ContainsKey((package.Id, binding.DocumentId)) && versionsById.TryGetValue(binding.VersionId, out var reusable)
+                    && reusable.Status == DocumentVersionStatus.Released && reusable.Sha256 == binding.Sha256)
+                    uses[(package.Id, binding.DocumentId)] = reusable;
+            }
+            var modelVersionsByPackage = uses.Where(entry => allDocuments.TryGetValue(entry.Value.DocumentId, out var model)
+                && model.Kind is DocumentKind.Assembly or DocumentKind.Part).ToDictionary(entry => entry.Key, entry => entry.Value);
+            var versions = uses.Where(entry => documents.ContainsKey(entry.Value.DocumentId))
+                .Select(entry => (Package: packages[entry.Key.PackageId], Version: entry.Value)).GroupBy(entry => entry.Version.DocumentId);
             foreach (var group in versions)
             {
-                var ordered = group.OrderByDescending(version => version.Revision.BaseRevision)
-                    .ThenByDescending(version => version.CreatedAt).ThenByDescending(version => version.Id).ToArray();
+                var ordered = group.GroupBy(entry => entry.Version.Id).Select(values => values.OrderByDescending(entry => entry.Package.PublishedAt).First())
+                    .OrderByDescending(entry => entry.Version.Revision.BaseRevision)
+                    .ThenByDescending(entry => entry.Version.CreatedAt).ThenByDescending(entry => entry.Version.Id).ToArray();
                 var current = ordered[0];
-                foreach (var version in includeHistory ? ordered : [current])
+                foreach (var use in includeHistory ? ordered : [current])
                 {
+                    var version = use.Version;
                     var document = documents[version.DocumentId];
-                    var package = packages[version.ReleasePackageId!.Value];
+                    var package = use.Package;
                     package.DrawingDeliveryOverrides.TryGetValue(document.Id, out var delivery);
                     var source = version.SourceVersionId.HasValue
                         && versionsById.TryGetValue(version.SourceVersionId.Value, out var foundSource)
                         && foundSource.DocumentId == document.Id ? foundSource : null;
-                    var legacy = source is null || string.Equals(source.StorageRelativePath, version.StorageRelativePath, StringComparison.OrdinalIgnoreCase);
+                    // Direct conversion keeps the approved source path; provenance is
+                    // established by the source-version link, not by rewriting CAD files.
+                    var legacy = source is null;
                     var bomItems = relatedModels.TryGetValue(document.Id, out var modelIds)
                         ? modelIds.SelectMany(modelId => packageBomItems[package.Id].GetValueOrDefault(modelId, [])).ToArray()
                         : [];
@@ -138,16 +146,18 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                         package.PublishedAt ?? version.CreatedAt,
                         delivery?.Priority ?? package.DrawingPriority,
                         delivery?.RequiredOn ?? package.DrawingRequiredOn,
-                        version.Id == current.Id,
+                        version.Id == current.Version.Id,
                         version.Preview?.Format == DocumentPreviewFormat.Pdf
                             && (legacy || string.Equals(version.Preview.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase)),
                         legacy,
-                        version.Id == current.Id ? null : current.CreatedAt)
+                        version.Id == current.Version.Id ? null : current.Version.CreatedAt)
                     {
                         BomItems = bomItems,
                         BomQuantities = packageQuantities[package.Id].Where(quantity =>
                             bomItems.Any(item => quantity.SourceBomItemIds.Contains(item.Id))).ToArray(),
-                        ModelFiles = modelFiles, PublishedBy = version.CreatedBy, Division = project.Division, ProjectManager = project.ProjectManager
+                        ModelFiles = modelFiles, PublishedBy = package.ApprovalTasks.OrderByDescending(task => task.StepOrder)
+                            .FirstOrDefault(task => task.Decision == ApprovalDecision.Approved)?.DecisionBy ?? version.CreatedBy,
+                        Division = project.Division, ProjectManager = project.ProjectManager
                     });
                 }
             }

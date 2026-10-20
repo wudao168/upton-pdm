@@ -103,7 +103,7 @@ describe('MyTasks', () => {
     })
 
     expect(wrapper.find('.pdm-pagebar').exists()).toBe(false)
-    expect(wrapper.get('[aria-label="消息中心"]').text()).toContain('全部待办（4）')
+    expect(wrapper.get('[aria-label="待办类型"]').text()).toContain('全部待办（4）')
     expect(wrapper.text()).toContain('P700001 BOM发布审批')
     expect(wrapper.text()).toContain('P700001 BOM料号审批')
     expect(wrapper.text()).toContain('申请人 engineer')

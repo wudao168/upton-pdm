@@ -8,12 +8,12 @@ describe('SideNav', () => {
     vi.unstubAllGlobals()
     document.body.innerHTML = ''
   })
-  it('places the project workbench and project list directly below the project center', async () => {
+  it('combines the project pages into one sidebar entry', async () => {
     const wrapper = mount(SideNav, { props: { active: 'project-center' } })
     const navigationLabels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
 
-    expect(navigationLabels.slice(0, 4)).toEqual(['项目日历', '项目总览', '项目中心', '项目列表'])
-    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[1]!.trigger('click')
+    expect(navigationLabels).toEqual(['项目总览', '项目中心', '制造中心', '标准物料', '工时管理', '我的待办'])
+    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[0]!.trigger('click')
     expect(wrapper.emitted('navigate')?.[0]).toEqual(['project-workbench', '项目总览'])
   })
 
@@ -30,13 +30,13 @@ describe('SideNav', () => {
     expect(wrapper.text()).not.toContain('料品与U9C')
   })
 
-  it('places the permission-gated standard structure directly below standard materials', async () => {
-    const wrapper = mount(SideNav, { props: { active: 'materials', canViewStandardLibrary: true, canViewMaterials: true } })
+  it('combines standard resources into one sidebar entry', async () => {
+    const wrapper = mount(SideNav, { props: { active: 'materials', canViewMaterials: true } })
     const labels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
 
-    expect(labels.slice(4, 7)).toEqual(['标准物料', '标准结构', '料品管理'])
-    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[5]!.trigger('click')
-    expect(wrapper.emitted('navigate')?.[0]).toEqual(['standard-structure', '标准结构'])
+    expect(labels).toEqual(['项目总览', '项目中心', '制造中心', '标准物料', '料品管理', '工时管理', '我的待办'])
+    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[3]!.trigger('click')
+    expect(wrapper.emitted('navigate')?.[0]).toEqual(['standard-library', '标准物料'])
   })
 
   it('shows the combined material task count on material management', () => {

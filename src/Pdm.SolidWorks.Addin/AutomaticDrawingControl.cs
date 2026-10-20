@@ -383,7 +383,7 @@ internal sealed class AutomaticDrawingControl : UserControl
             && drawing?.IsHistoricalPreview != true && !drawingReviewLocked;
         generateButton.Text = "生成视图";
         importAnnotationsButton.Text = "自动标注";
-        generateButton.Enabled = sourceExists && !source.IsReadOnlyPreview && !sourceReviewLocked
+        generateButton.Enabled = sourceExists && !source.IsHistoricalPreview && !sourceReviewLocked
             && !drawingReviewLocked && (!drawingExists || drawingEditable);
         includeAssemblyBom.Enabled = source?.Kind == CadDocumentKind.Assembly;
         importAnnotationsButton.Enabled = drawingExists && drawingEditable && !drawingReviewLocked;
@@ -403,7 +403,7 @@ internal sealed class AutomaticDrawingControl : UserControl
         ApplyEnabledAppearance(importAnnotationsButton, Color.White);
         ApplyEnabledAppearance(submitButton, SubmitColor);
         toolTip.SetToolTip(acquireEditButton, drawingReviewLocked ? "图纸审核中，不能获取工程图编辑权限" : acquireEditButton.Enabled ? "获取或恢复当前工程图的编辑会话" : drawingControlled && drawingEditable ? "当前工程图已可编辑" : "工程图首次入库后可获取编辑权限");
-        toolTip.SetToolTip(generateButton, source?.IsReadOnlyPreview == true ? "只读预览不能生成或更新工程图" : sourceExists ? "生成或更新关联工程图的视图" : "请选择本地存在的零件或装配体");
+        toolTip.SetToolTip(generateButton, source?.IsHistoricalPreview == true ? "请打开当前模型版本后生成工程图" : sourceExists ? "生成或更新工程图；仅引用模型时无需获取模型编辑权限" : "请选择本地存在的零件或装配体");
         toolTip.SetToolTip(importAnnotationsButton, drawingExists ? "仅导入标记尺寸、公差和孔标注，消除重复后按固化规则排列" : "请先完成第1步：生成工程图");
         toolTip.SetToolTip(submitButton, source?.DocumentId.HasValue == true ? "提交关联工程图草稿" : "源模型入库后才能绑定并提交工程图");
     }
@@ -560,7 +560,12 @@ internal sealed class AutomaticDrawingControl : UserControl
             return string.Empty;
         }
 
-        return Path.ChangeExtension(node.FullPath, ".SLDDRW");
+        var related = node.Children.FirstOrDefault(child => child.Kind == CadDocumentKind.Drawing
+            && !string.IsNullOrWhiteSpace(child.FullPath) && File.Exists(child.FullPath));
+        if (related != null) return related.FullPath;
+        var adjacent = Path.ChangeExtension(node.FullPath, ".SLDDRW");
+        if (File.Exists(adjacent) || !node.IsLatestReadOnlyPreview) return adjacent;
+        return DrawingDraftPath.ForSource(node.FullPath, node.ProvenanceProjectId, node.DocumentId);
     }
 }
 

@@ -39,7 +39,8 @@ public sealed partial class BomHeaderService(
     IMaterialRepository materials,
     MaterialService materialService,
     MaterialSyncBatchService syncBatches,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    WorkflowNotificationService? workflowNotifications = null)
 {
     private const string ChildBomCategoryCode = "0201";
     private static readonly ProjectBomHeaderKind[] AllKinds =
@@ -600,6 +601,7 @@ public sealed partial class BomHeaderService(
             RequestedMaterialCode = null
         };
         var saved = await materials.CreateMaterialCodeApplicationAsync(application, cancellationToken);
+        if (workflowNotifications is not null) await workflowNotifications.CaptureMaterialAsync(saved, cancellationToken);
         await repository.AppendAuditAsync(new AuditEntry(
             Guid.NewGuid(), now, actor, "bom.header.application.create", nameof(MaterialCodeApplication),
             saved.Id.ToString(), $"生成{KindLabel(kind)}料号自动处理记录：{project.Code} · {material.Name}"), cancellationToken);

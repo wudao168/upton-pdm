@@ -27,13 +27,13 @@ const props = defineProps<{
   onCopyProjectContent?: (projectId: string, input: ProjectCopyOptionsInput) => Promise<ProjectCopyResult>
   onContentResetComplete?: () => Promise<unknown>
 }>()
-const emit = defineEmits<{ back: []; switch: [projectId: string]; tab: [tab: ProjectTab] }>()
+const emit = defineEmits<{ back: []; switch: [projectId: string]; tab: [tab: ProjectTab, hasUpdates?: boolean] }>()
 const displayUserName = useUserDisplayName()
 const { pending: tabUpdates } = useProjectTabUpdates(props)
 function updateTitle(key: ProjectTab, label: string) {
   const update = tabUpdates.value[key]
   if (!update) return undefined
-  return `${label}${update.needsHandling ? '有待处理内容，完成处理后清除提醒' : '有未查看更新'}${update.updatedAt ? ` · ${new Date(update.updatedAt).toLocaleString('zh-CN')}` : ''}${update.actor ? ` · ${displayUserName(update.actor)}` : ''}`
+  return `${label}有未查看更新，查看后清除提醒${update.updatedAt ? ` · ${new Date(update.updatedAt).toLocaleString('zh-CN')}` : ''}${update.actor ? ` · ${displayUserName(update.actor)}` : ''}`
 }
 
 function projectDesignLeads(project: ProjectSummary) {
@@ -240,8 +240,8 @@ function drawingDocumentCount(project: ProjectSummary) {
 
     <section class="pdm-project-detail">
       <header class="pdm-project-detail__header">
-        <nav class="pdm-project-tabs" aria-label="项目功能">
-          <button v-for="tab in visibleTabs" :key="tab.key" type="button" :class="{ 'is-active': activeTab === tab.key }" :title="updateTitle(tab.key, tab.label)" @click="emit('tab', tab.key)"><component :is="tab.icon" :size="15" /><span>{{ tab.label }}</span><i v-if="tabUpdates[tab.key]" class="pdm-tab-update-dot" aria-hidden="true" /></button>
+        <nav class="pdm-project-tabs pdm-tabs" aria-label="项目功能">
+          <button v-for="tab in visibleTabs" :key="tab.key" type="button" :class="{ 'is-active': activeTab === tab.key }" :title="updateTitle(tab.key, tab.label)" @click="emit('tab', tab.key, Boolean(tabUpdates[tab.key]))"><component :is="tab.icon" :size="15" /><span>{{ tab.label }}</span><i v-if="tabUpdates[tab.key]" class="pdm-tab-update-dot" aria-hidden="true" /></button>
           <button type="button" class="pdm-project-tabs__settings" aria-label="项目设置" @click="projectSettingsOpen = true"><Settings :size="15" /><span>设置</span></button>
         </nav>
       </header>

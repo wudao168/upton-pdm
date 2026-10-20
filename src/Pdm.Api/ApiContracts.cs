@@ -58,7 +58,7 @@ public sealed record CreateProjectRequest(
     Guid CustomerId,
     string Name,
     string? ProjectAlias,
-    DateOnly SignedDate,
+    DateOnly? SignedDate,
     int Quantity,
     string BomItemCategoryCode = "0302");
 
@@ -79,7 +79,7 @@ public sealed record UpdateProjectDetailsRequest(
     Guid? CustomerId,
     string Name,
     string? ProjectAlias,
-    DateOnly SignedDate,
+    DateOnly? SignedDate,
     int Quantity);
 
 public sealed record UpdateOrganizationCountersRequest(int CurrentProjectSequence, int CurrentSerialSequence);
@@ -208,7 +208,8 @@ public sealed record SaveOrganizationUnitRequest(
     OrganizationUnitKind Kind,
     bool IsActive = true,
     int SortOrder = 0,
-    bool CanManufacture = false);
+    bool CanManufacture = false,
+    bool CanArchiveStandardLibrary = false);
 
 public sealed record UpdateOrganizationMembershipsRequest(IReadOnlyList<Guid> UnitIds, Guid PrimaryUnitId);
 
@@ -317,7 +318,7 @@ public sealed record RestoreVersionRequest(string ChangeNote, Guid? OperationId 
 
 public sealed record PublishDocumentVersionRequest(Guid SourceVersionId, Guid ReleasePackageId, Guid ApprovalTaskId);
 
-public sealed record CreateControlledOpenManifestRequest(Guid? VersionId, bool ReleasedOnly, bool ForEdit, bool ResolveLegacyReferences = false);
+public sealed record CreateControlledOpenManifestRequest(Guid? VersionId, bool ReleasedOnly, bool ForEdit, bool ResolveLegacyReferences = false, bool TreeScopeOnly = false);
 
 public sealed record CreateReleasePackageRequest(
     Guid ProjectId,
@@ -337,7 +338,9 @@ public sealed record CreateReleasePackageRequest(
     DateOnly? DrawingRequiredOn = null,
     IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? DrawingDeliveryOverrides = null,
     IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? BomItemDeliveryOverrides = null,
-    Guid? RootDocumentId = null);
+    Guid? RootDocumentId = null,
+    IReadOnlyList<Guid>? ConfirmedRemovedBomItemIds = null,
+    IReadOnlyList<Guid>? RelatedOplIssueIds = null);
 
 public sealed record UpdateReleasePackageDraftRequest(
     string? ChangeReason = null,
@@ -347,7 +350,9 @@ public sealed record UpdateReleasePackageDraftRequest(
     string? DrawingPriority = null,
     DateOnly? DrawingRequiredOn = null,
     IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? DrawingDeliveryOverrides = null,
-    IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? BomItemDeliveryOverrides = null);
+    IReadOnlyDictionary<Guid, DrawingDeliveryOverride>? BomItemDeliveryOverrides = null,
+    IReadOnlyList<Guid>? ConfirmedRemovedBomItemIds = null,
+    IReadOnlyList<Guid>? RelatedOplIssueIds = null);
 
 public sealed record UpdateDrawingDeliveryRequest(string Priority, DateOnly RequiredOn);
 

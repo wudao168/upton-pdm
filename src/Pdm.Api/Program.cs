@@ -57,6 +57,8 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
 
 var storageOptions = new PdmStorageOptions();
 builder.Configuration.GetSection(PdmStorageOptions.SectionName).Bind(storageOptions);
+if (!Path.IsPathFullyQualified(storageOptions.StandardStructureRoot))
+    storageOptions.StandardStructureRoot = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, storageOptions.StandardStructureRoot));
 if (!Path.IsPathFullyQualified(storageOptions.UploadTempRoot))
 {
     storageOptions.UploadTempRoot = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, storageOptions.UploadTempRoot));
@@ -106,6 +108,9 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IU9InventoryRepository, MySqlU9InventoryRepository>();
     builder.Services.AddScoped<IU9ProcurementRepository, MySqlU9ProcurementRepository>();
     builder.Services.AddScoped<IStandardLibraryRepository, MySqlStandardLibraryRepository>();
+    builder.Services.AddScoped<IStandardStructureStore, MySqlStandardStructureStore>();
+    builder.Services.AddScoped<IWorkflowNotificationStore, MySqlWorkflowNotificationStore>();
+    builder.Services.AddScoped<IWorkHoursStore, MySqlWorkHoursStore>();
     builder.Services.AddScoped<IEngineeringKitRepository, MySqlEngineeringKitRepository>();
     builder.Services.AddScoped<IMaterialRelationRepository, MySqlMaterialRelationRepository>();
     builder.Services.AddScoped<IProgramTemplateRepository, MySqlProgramTemplateRepository>();
@@ -116,6 +121,9 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IProjectContactInformationRepository, MySqlProjectContactInformationRepository>();
     builder.Services.AddScoped<IProjectOplRepository, MySqlProjectOplRepository>();
     builder.Services.AddScoped<IDingTalkConfigurationRepository, MySqlDingTalkConfigurationRepository>();
+    builder.Services.AddScoped<IReleaseDeliveryStore, MySqlReleaseDeliveryStore>();
+    builder.Services.AddScoped<IProductionTrackingStore, MySqlProductionTrackingStore>();
+    builder.Services.AddScoped<IProductionSupplierStore, MySqlProductionSupplierStore>();
     builder.Services.AddScoped<IQualityInspectionRepository, MySqlQualityInspectionRepository>();
     builder.Services.AddScoped<IProjectWorkbenchRiskRepository, MySqlProjectWorkbenchRiskRepository>();
     builder.Services.AddScoped<IProjectPlanningRepository, MySqlProjectPlanningRepository>();
@@ -129,6 +137,9 @@ else
     builder.Services.AddSingleton<IU9InventoryRepository, InMemoryU9InventoryRepository>();
     builder.Services.AddSingleton<IU9ProcurementRepository, InMemoryU9ProcurementRepository>();
     builder.Services.AddSingleton<IStandardLibraryRepository, InMemoryStandardLibraryRepository>();
+    builder.Services.AddSingleton<IStandardStructureStore, InMemoryStandardStructureStore>();
+    builder.Services.AddSingleton<IWorkflowNotificationStore, InMemoryWorkflowNotificationStore>();
+    builder.Services.AddSingleton<IWorkHoursStore, InMemoryWorkHoursStore>();
     builder.Services.AddSingleton<IEngineeringKitRepository, InMemoryEngineeringKitRepository>();
     builder.Services.AddSingleton<IMaterialRelationRepository, InMemoryMaterialRelationRepository>();
     builder.Services.AddSingleton<IProgramTemplateRepository, InMemoryProgramTemplateRepository>();
@@ -139,6 +150,9 @@ else
     builder.Services.AddSingleton<IProjectContactInformationRepository, InMemoryProjectContactInformationRepository>();
     builder.Services.AddSingleton<IProjectOplRepository, InMemoryProjectOplRepository>();
     builder.Services.AddSingleton<IDingTalkConfigurationRepository, InMemoryDingTalkConfigurationRepository>();
+    builder.Services.AddSingleton<IReleaseDeliveryStore, InMemoryReleaseDeliveryStore>();
+    builder.Services.AddSingleton<IProductionTrackingStore, InMemoryProductionTrackingStore>();
+    builder.Services.AddSingleton<IProductionSupplierStore, InMemoryProductionSupplierStore>();
     builder.Services.AddSingleton<IQualityInspectionRepository, InMemoryQualityInspectionRepository>();
     builder.Services.AddSingleton<IProjectWorkbenchRiskRepository, InMemoryProjectWorkbenchRiskRepository>();
     builder.Services.AddSingleton<IProjectPlanningRepository, InMemoryProjectPlanningRepository>();
@@ -157,9 +171,10 @@ builder.Services.AddSingleton<IValidationPlanTextRecognitionService, WindowsVali
 // 图纸转换位置（本机/远程转图服务器）来自系统设置，转换器和发布器都按请求作用域解析。
 // 显式构造转图转换器：只使用它自带的 HttpClient（超时由"转图超时"设置控制），避免容器注入默认 100 秒超时的
 // HttpClient 把一次 100 秒的失败误报成"超过60分钟"。
+builder.Services.AddScoped<IPdfReleaseStampProcessor, PdfReleaseStampProcessor>();
 builder.Services.AddScoped<IServerPreviewConverter>(provider => new SolidWorksServerPreviewConverter(
     provider.GetRequiredService<IOptions<PdmPreviewWorkerOptions>>(),
-    provider.GetRequiredService<IPdmRepository>()));
+    provider.GetRequiredService<IPdmRepository>(), pdfReleaseStamp: provider.GetRequiredService<IPdfReleaseStampProcessor>()));
 builder.Services.AddScoped<IReleasePackagePublisher, AtomicReleasePackagePublisher>();
 builder.Services.AddSingleton<ICrmCredentialProtector, DataProtectionCrmCredentialProtector>();
 builder.Services.AddSingleton<IU9SecretProtector, DataProtectionU9SecretProtector>();
@@ -179,6 +194,12 @@ builder.Services.AddScoped<CrmCustomerIntegrationService>();
 builder.Services.AddScoped<MaterialService>();
 builder.Services.AddScoped<MaterialAttachmentService>();
 builder.Services.AddScoped<StandardLibraryService>();
+builder.Services.AddScoped<StandardStructureService>();
+builder.Services.AddSingleton<BrowserCadArchiveQueue>();
+builder.Services.AddSingleton<IBrowserCadReader, FileBrowserCadReader>();
+builder.Services.AddScoped<BrowserCadArchiveService>();
+builder.Services.AddHostedService<BrowserCadArchiveHostedService>();
+builder.Services.AddScoped<IStandardStructureFiles, LocalStandardStructureFiles>();
 builder.Services.AddScoped<EngineeringKitService>();
 builder.Services.AddScoped<MaterialRelationService>();
 builder.Services.AddScoped<IMaterialRelationReleaseGuard>(provider => provider.GetRequiredService<MaterialRelationService>());
@@ -203,7 +224,11 @@ builder.Services.AddScoped<ProjectWorkbenchService>(provider => new ProjectWorkb
 builder.Services.AddScoped<ProjectBudgetService>();
 builder.Services.AddScoped<ProjectNameplateService>();
 builder.Services.AddScoped<ProjectContactInformationService>();
+builder.Services.AddScoped<IProjectApplicationRepository>(provider => (IProjectApplicationRepository)provider.GetRequiredService<IPdmRepository>());
+builder.Services.AddScoped<ProjectApplicationService>();
+builder.Services.AddScoped<WorkHoursService>();
 builder.Services.AddScoped<ProjectOplService>();
+builder.Services.AddSingleton<ProjectOplViewState>();
 builder.Services.Configure<DingTalkOplOptions>(builder.Configuration.GetSection("DingTalkOpl"));
 builder.Services.AddScoped<DingTalkConfigurationService>();
 builder.Services.AddSingleton<DingTalkStreamStatusCache>();
@@ -224,7 +249,19 @@ builder.Services.AddSingleton<U9InventorySyncCoordinator>();
 builder.Services.AddScoped<U9ProcurementService>();
 builder.Services.AddScoped<ReleasePreviewService>();
 builder.Services.AddScoped<ProductionDrawingService>();
+builder.Services.AddScoped<ProductionTrackingService>();
+builder.Services.AddScoped<ProductionScanService>();
+builder.Services.AddScoped<ProductionSupplierService>();
+builder.Services.AddScoped<IProductionTrackingObserver>(provider => provider.GetRequiredService<ProductionTrackingService>());
 builder.Services.AddScoped<ReleaseDeliveryArchiveService>();
+builder.Services.AddScoped<ReleaseNotificationSettingsService>();
+builder.Services.AddScoped<WorkflowNotificationService>();
+builder.Services.AddHostedService<WorkflowNotificationHostedService>();
+builder.Services.AddScoped<IReleaseNotificationConfigurationProvider>(provider => provider.GetRequiredService<ReleaseNotificationSettingsService>());
+builder.Services.AddScoped<IReleaseNotificationSender, ReleaseNotificationSender>();
+builder.Services.AddScoped<ReleaseDeliveryService>();
+builder.Services.AddScoped<IReleaseDeliveryObserver>(provider => provider.GetRequiredService<ReleaseDeliveryService>());
+builder.Services.AddHostedService<ReleaseDeliveryHostedService>();
 builder.Services.AddSingleton<ReleasePreviewCoordinator>();
 builder.Services.AddSingleton<ReleasePublishingCoordinator>();
 builder.Services.AddSingleton<U9ProcurementSyncCoordinator>();
@@ -300,6 +337,9 @@ builder.Services.AddClientLogs(builder.Configuration);
 builder.Services.AddScoped<UserTodoService>();
 
 var app = builder.Build();
+// 固定内存模式的启用时点；不能等首次打开生产工作台才开始计算新发布范围。
+if (!string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgnoreCase))
+    _ = app.Services.GetRequiredService<IProductionTrackingStore>();
 var deployedWebRoot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
 var requestErrorLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("UnhandledRequest");
 app.UseExceptionHandler(exceptionHandler => exceptionHandler.Run(async context =>
@@ -374,6 +414,8 @@ app.MapPdmMaterialEndpoints();
 app.MapPdmInventoryEndpoints();
 app.MapPdmProcurementEndpoints();
 app.MapStandardLibraryEndpoints();
+app.MapStandardStructureEndpoints();
+app.MapBrowserCadArchives();
 app.MapEngineeringKitEndpoints();
 app.MapMaterialRelationEndpoints();
 app.MapPdmBomHeaderEndpoints();
@@ -382,7 +424,11 @@ app.MapProjectFileEndpoints();
 app.MapControlledDocumentRecycleEndpoints();
 app.MapProjectContentResetEndpoints();
 app.MapU9BomEndpoints();
+app.MapReleaseDeliveryEndpoints();
+app.MapProductionTrackingEndpoints();
+app.MapProductionSupplierEndpoints();
 app.MapValidationPlanEndpoints();
+app.MapWorkflowNotificationEndpoints();
 app.MapQualityInspectionEndpoints();
 app.MapProjectPlanningEndpoints();
 app.MapProjectWorkbenchEndpoints();
@@ -390,6 +436,8 @@ app.MapCalendarTodos();
 app.MapProjectBudgetEndpoints();
 app.MapProjectNameplateEndpoints();
 app.MapProjectContactInformationEndpoints();
+app.MapProjectApplicationEndpoints();
+app.MapWorkHoursEndpoints();
 app.MapProjectOplEndpoints();
 app.MapDingTalkOplEndpoints();
 if (Directory.Exists(deployedWebRoot))

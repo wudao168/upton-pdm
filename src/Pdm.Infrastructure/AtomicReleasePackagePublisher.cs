@@ -146,20 +146,23 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
             throw new PdmRuleException($"发布暂存目录不存在：{stagingDirectory}");
         }
 
+        var publishedAt = package.PublishedAt ?? timeProvider.GetUtcNow();
+        var conversionPackage = package with { PublishedAt = publishedAt };
         // Refresh legacy in-review packages as well; the approved full BOM snapshot is unchanged.
         ReleasePublishingProgress.Set(package.Id, "生成BOM发布文件");
         if (package.Scope is ReleaseScope.StandardFormal or ReleaseScope.NonStandardWithDrawing or ReleaseScope.ElectricalFormal)
             await PrepareAsync(package, project, cancellationToken);
 
-        // 正式源图是交付的前提；PDF/STEP 转换仍可在发布后重试。
+        // 核对审批冻结的工程图，原文件直接作为正式版本和PDF转换来源。
         Dictionary<Guid, FormalDrawingSource> formalDrawings;
-        ReleasePublishingProgress.Set(package.Id, "准备正式工程图");
+        ReleasePublishingProgress.Set(package.Id, "核对审批冻结工程图");
         try
         {
-            formalDrawings = previewSources.Count == 0
+            var workSources = previewSources.Where(source => !source.AlreadyReleased).ToArray();
+            formalDrawings = workSources.Length == 0
                 ? new Dictionary<Guid, FormalDrawingSource>()
                 : new Dictionary<Guid, FormalDrawingSource>(await previewConverter.FinalizeDrawingsAsync(
-                    package, project, previewSources, stagingDirectory, cancellationToken));
+                    package, project, workSources, stagingDirectory, cancellationToken));
         }
         catch (Exception exception) when (exception is not PdmConflictException && !cancellationToken.IsCancellationRequested)
         {
@@ -169,22 +172,35 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
             ? source with { StorageRelativePath = formal.StorageRelativePath, FileLength = formal.FileLength, Sha256 = formal.Sha256, SourceSha256 = formal.Sha256 }
             : source).ToArray();
         string? previewError = null;
-        IReadOnlyDictionary<Guid, DocumentPreviewArtifact> previews;
+        var previews = new Dictionary<Guid, DocumentPreviewArtifact>();
+        if (repository is not null)
+        foreach (var source in conversionSources.Where(source => source.AlreadyReleased))
+        {
+            var version = await repository.FindDocumentVersionAsync(source.DocumentId, source.SourceVersionId, cancellationToken);
+            if (version?.Preview is not { } existing || existing.Format != (source.Kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step)
+                || !string.Equals(existing.SourceSha256, source.Sha256, StringComparison.OrdinalIgnoreCase)) continue;
+            var sourcePath = StorageLocationPolicy.ResolveUnder(vaultRoot, existing.StorageRelativePath);
+            if (!await ReleaseDeliveryFiles.MatchesAsync(sourcePath, existing.FileLength, existing.Sha256, cancellationToken)) continue;
+            var targetPath = ReleaseDeliveryFiles.PreviewPath(stagingDirectory, existing);
+            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+            File.Copy(sourcePath, targetPath, true);
+            if (!await ReleaseDeliveryFiles.MatchesAsync(targetPath, existing.FileLength, existing.Sha256, cancellationToken)) throw new PdmConflictException("已发布图纸的复制校验失败，未生成新版本。");
+            previews[source.DocumentId] = existing;
+        }
         try
         {
-            previews = conversionSources.Length == 0
-                ? new Dictionary<Guid, DocumentPreviewArtifact>()
-                : new Dictionary<Guid, DocumentPreviewArtifact>(await previewConverter.GenerateAsync(package, project, conversionSources, stagingDirectory, cancellationToken));
+            var pendingSources = conversionSources.Where(source => !previews.ContainsKey(source.DocumentId)).ToArray();
+            if (pendingSources.Length > 0)
+                foreach (var preview in await previewConverter.GenerateAsync(conversionPackage, project, pendingSources, stagingDirectory, cancellationToken)) previews[preview.Key] = preview.Value;
         }
         catch (PartialPreviewConversionException exception) when (!cancellationToken.IsCancellationRequested)
         {
             previewError = exception.Message;
-            previews = exception.Artifacts;
+            foreach (var preview in exception.Artifacts) previews[preview.Key] = preview.Value;
         }
         catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
         {
             previewError = exception.Message;
-            previews = new Dictionary<Guid, DocumentPreviewArtifact>();
         }
         var activePreviewFiles = previews.Values.Select(preview =>
         {
@@ -222,6 +238,8 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 package.CreatesManufacturingBaseline,
                 package.LocksDocuments,
                 package.SelectedBomItemIds,
+                package.ConfirmedRemovedBomItemIds,
+                package.VersionBindings,
                 package.ChangeNumber,
                 package.ChangeReason,
                 package.EffectiveSerialFrom,
@@ -236,7 +254,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 Previews = previews,
                 FormalDrawings = formalDrawings,
                 PreviewError = previewError,
-                PublishedAt = timeProvider.GetUtcNow(),
+                PublishedAt = publishedAt,
                 Files = sourceFiles.Select(path => Path.GetRelativePath(stagingDirectory, path).Replace('\\', '/')).OrderBy(path => path).ToArray()
             };
             await File.WriteAllTextAsync(Path.Combine(temporaryDirectory, "manifest.json"), JsonSerializer.Serialize(manifest, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true }), cancellationToken);
@@ -252,7 +270,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
 
             await File.WriteAllLinesAsync(Path.Combine(temporaryDirectory, "checksums.sha256"), checksums, cancellationToken);
             Directory.Move(temporaryDirectory, finalDirectory);
-            return new ReleasePublication(finalDirectory, previews, previewError, formalDrawings);
+            return new ReleasePublication(finalDirectory, previews, previewError, formalDrawings) { PublishedAt = publishedAt };
         }
         catch
         {
@@ -286,10 +304,10 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
             if (repository is not null && !previews.ContainsKey(source.DocumentId))
             {
                 var released = (await repository.ListDocumentVersionsAsync(source.DocumentId, cancellationToken))
-                    .FirstOrDefault(version => version.ReleasePackageId == package.Id && version.Preview is not null);
+                    .FirstOrDefault(version => (version.ReleasePackageId == package.Id || source.AlreadyReleased && version.Id == source.SourceVersionId) && version.Preview is not null);
                 if (released?.Preview is not null) previews[source.DocumentId] = released.Preview;
             }
-            if (source.Kind == DocumentKind.Drawing && !formal.ContainsKey(source.DocumentId))
+            if (source.Kind == DocumentKind.Drawing && !source.AlreadyReleased && !formal.ContainsKey(source.DocumentId))
             {
                 var formalManifest = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-formal", package.Id.ToString("N"), $"{source.DocumentId:N}.slddrw.json"));
                 if (!File.Exists(formalManifest)) throw new PdmConflictException($"工程图{source.DrawingNumber}缺少正式源图清单，不能安全恢复发布。");
@@ -310,7 +328,10 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
             }
         }
         var error = sources.Any(source => !previews.ContainsKey(source.DocumentId)) ? "发布资料尚未齐套，等待后台补齐预览。" : null;
-        return new ReleasePublication(directory, previews, error, formal);
+        return new ReleasePublication(directory, previews, error, formal)
+        {
+            PublishedAt = manifest.TryGetProperty("publishedAt", out var publishedAt) && publishedAt.TryGetDateTimeOffset(out var value) ? value : null
+        };
     }
 
     private static void RequireFile(IEnumerable<string> files, Func<string, bool> predicate, string description)

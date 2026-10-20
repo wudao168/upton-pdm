@@ -46,6 +46,12 @@ try
     await new MySqlMigrationRunner(options, NullLogger<MySqlMigrationRunner>.Instance, TimeProvider.System).RunAsync(default);
     Console.WriteLine("Fixture migrations completed");
     var repo = new MySqlPdmRepository(options, TimeProvider.System);
+    if (args.Contains("--working-only"))
+    {
+        await WorkingReferenceChecks.RunAsync(repo, root);
+        passed = true;
+        return;
+    }
     var directory = await repo.GetOrganizationDirectoryAsync(default);
     if (!directory.Users.Any(user => user.Username == "qa"))
         await repo.CreateUserAsync(new UserAccount(Guid.NewGuid(), "qa", "事务隔离测试", "unused", UserRole.Administrator, true,
@@ -175,6 +181,7 @@ try
         Console.WriteLine("PASS MySQL multi-model drawing "+failure);
     }
     await ArchiveSafetyChecks.RunAsync(repo, builder.ConnectionString, root);
+    await WorkingReferenceChecks.RunAsync(repo, root);
     passed = true;
 }
 catch (Exception failure) { Console.WriteLine("Fixture failure: " + failure.GetType().Name + ": " + failure.Message); throw; }

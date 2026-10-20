@@ -13,7 +13,7 @@ using Upton.Pdm.ClientShared;
 
 namespace Upton.Pdm.SolidWorks;
 
-internal sealed class PdmApiClient : IDisposable
+internal sealed partial class PdmApiClient : IDisposable
 {
     private readonly HttpClient httpClient;
     private readonly HttpClient controlledOpenHttpClient;
@@ -63,6 +63,9 @@ internal sealed class PdmApiClient : IDisposable
 
     public Task<List<ProjectDto>> GetProjectsAsync(CancellationToken cancellationToken) =>
         GetJsonAsync<List<ProjectDto>>("api/projects", cancellationToken);
+
+    public Task<UserThemeDto> GetUserThemeAsync(CancellationToken cancellationToken) =>
+        GetJsonAsync<UserThemeDto>("api/auth/me", cancellationToken);
 
     public Task<ProjectPlanDto> GetProjectPlanAsync(Guid projectId, CancellationToken cancellationToken) =>
         GetJsonAsync<ProjectPlanDto>(string.Concat("api/projects/", projectId, "/plan"), cancellationToken);
@@ -126,7 +129,7 @@ internal sealed class PdmApiClient : IDisposable
             return await PostJsonAsync<ControlledOpenManifestDto>(
                 controlledOpenHttpClient,
                 string.Concat("api/documents/", documentId, "/open-manifest"),
-                new { versionId, releasedOnly, forEdit, resolveLegacyReferences },
+                new { versionId, releasedOnly, forEdit, resolveLegacyReferences, treeScopeOnly = !versionId.HasValue && !releasedOnly },
                 cancellationToken).ConfigureAwait(false);
         }
         catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
@@ -192,9 +195,17 @@ internal sealed class PdmApiClient : IDisposable
     public Task<DocumentDto> DiscardCheckoutAsync(Guid documentId, Guid checkoutSessionId, CancellationToken cancellationToken) =>
         PostJsonAsync<DocumentDto>(string.Concat("api/documents/", documentId, "/discard-checkout"), new { checkoutSessionId }, cancellationToken);
 
-    public Task<DocumentDto> CloseEditAsync(LocalEditDraft entry, bool draftPreserved, CancellationToken cancellationToken) =>
-        PostJsonAsync<DocumentDto>(string.Concat("api/documents/", entry.DocumentId, "/close-edit"),
-            new { sessionId = entry.SessionId, checkedOutAt = entry.CheckedOutAt.ToUniversalTime().ToString("O"), sha256 = entry.DiskSha256, draftPreserved }, cancellationToken);
+    public Task<DocumentDto> CloseEditAsync(LocalEditDraft entry, bool draftPreserved, CancellationToken cancellationToken)
+    {
+        var sha256 = entry.DiskSha256;
+        if (!draftPreserved && PdmDocumentIdentityStore.TryReadLocalMetadata(entry.SourcePath, out var baseline)
+            && baseline.DocumentId == entry.DocumentId && baseline.VersionId == entry.BaseVersionId
+            && !string.IsNullOrWhiteSpace(baseline.ResolvedReferenceSha256)
+            && string.Equals(sha256, baseline.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase))
+            sha256 = baseline.Sha256;
+        return PostJsonAsync<DocumentDto>(string.Concat("api/documents/", entry.DocumentId, "/close-edit"),
+            new { sessionId = entry.SessionId, checkedOutAt = entry.CheckedOutAt.ToUniversalTime().ToString("O"), sha256, draftPreserved }, cancellationToken);
+    }
 
     public Task<List<DocumentWhereUsedDto>> GetWhereUsedAsync(Guid documentId, CancellationToken cancellationToken) =>
         GetJsonAsync<List<DocumentWhereUsedDto>>(string.Concat("api/documents/", documentId, "/where-used"), cancellationToken);
@@ -466,9 +477,9 @@ internal sealed class PdmApiClient : IDisposable
     }
 
     internal async Task<ArchiveReferenceSnapshot> PrepareArchiveSnapshotAsync(CadTreeNode root, ICollection<string> plannedPaths,
-        Guid? expectedVersionOverride, CancellationToken token)
+        Guid? expectedVersionOverride, CancellationToken token, ArchiveReferenceSnapshot captured = null)
     {
-        var snapshot = CaptureArchiveSnapshot(root, plannedPaths);
+        var snapshot = captured ?? CaptureArchiveSnapshot(root, plannedPaths);
         var expectedVersionId = expectedVersionOverride ?? await BaseVersionAsync(root, root.DocumentId.Value, token).ConfigureAwait(false);
         return snapshot.WithBaseVersion(expectedVersionId);
     }
@@ -871,27 +882,38 @@ internal sealed class PdmApiClient : IDisposable
         if (node == null) return;
         var pending = new Stack<CadTreeNode>();
         var visited = new HashSet<CadTreeNode>();
+        var missingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         pending.Push(node);
         while (pending.Count > 0)
         {
             var current = pending.Pop();
             // A model contains its drawings, whose ReferencedModels point back to that model.
-            if (current == null || !visited.Add(current)) continue;
+            if (current == null || current.Role == CadReferenceRole.ExternalFileDependency || !visited.Add(current)) continue;
+            if (NativeArchiveManifest.IsInterconnectCachePath(current.FullPath)
+                && (!current.IsStoredImport || !ImportedComponentStorage.IsStableOwner(current.ImportedStorageOwnerPath)))
+                throw new InvalidOperationException("树内导入组件仅有临时缓存，尚未形成可确认的原生存档内容。请保存为稳定原生文件或真正嵌入父装配后重试：" + current.FileName);
+            if (current.IsStoredImport && current.IsModifiedInSolidWorks)
+                throw new InvalidOperationException("导入组件仍有未保存内容，请先在SolidWorks中保存所属装配并重新检查。组件：" + current.FileName
+                    + "；所属装配：" + current.ImportedStorageOwnerPath + "。本次尚未上传文件，未保存内容仍保留。");
             if (!string.IsNullOrWhiteSpace(current.ArchiveReadError))
                 throw new InvalidOperationException(current.ArchiveReadError);
             if (current.Status == CadReferenceStatus.Missing)
-                throw new InvalidOperationException("组件“" + current.FileName + "”的引用路径无效或文件缺失，已停止存档。请修复引用并刷新设计树后重试。路径：" + current.FullPath);
+                missingFiles.Add(current.FileName + "；实例：" + current.InstancePath + "；配置：" + current.Configuration + "；路径：" + current.FullPath);
             if (current.Status == CadReferenceStatus.Suppressed || current.Status == CadReferenceStatus.Lightweight)
             {
                 if (string.IsNullOrWhiteSpace(current.FullPath) || !File.Exists(current.FullPath))
-                    throw new InvalidOperationException("压缩组件“" + current.FileName + "”的引用文件不存在，不能完整存档。请修复文件引用后重试。路径：" + current.FullPath);
-                if (SuppressedAssemblyArchive.IsUnexpanded(current) && !SuppressedAssemblyArchive.CanReuse(current)
+                    missingFiles.Add(current.FileName + "；实例：" + current.InstancePath + "；配置：" + current.Configuration + "；路径：" + current.FullPath);
+                else if (SuppressedAssemblyArchive.IsUnexpanded(current) && !SuppressedAssemblyArchive.CanReuse(current)
                     && !SuppressedAssemblyLocalStructure.CanUse(current))
                     throw new InvalidOperationException("压缩或轻化子装配体“" + current.FileName + "”的内部结构尚未完整读取，已停止存档以防遗漏子件。请核对引用配置并重新执行整体存档。路径：" + current.FullPath);
             }
             foreach (var child in current.Children) pending.Push(child);
             foreach (var model in current.ReferencedModels) pending.Push(model);
         }
+        if (missingFiles.Count > 0)
+            throw new InvalidOperationException("以下存档所需文件尚未定位，无法保证其他客户端独立打开；本地文件和修改均已保留：\r\n"
+                + string.Join("\r\n", missingFiles.OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
+                + "\r\n请补齐以上实际文件后重试；压缩状态本身不限制存档。");
     }
     private static object ToRequestNode(CadTreeNode node, bool isRoot, ICollection<string> plannedPaths = null)
     {
@@ -903,6 +925,7 @@ internal sealed class PdmApiClient : IDisposable
             {
                 var reference = new CadTreeNode { DocumentId = model.DocumentId, FullPath = model.FullPath,
                     FileName = model.FileName, DisplayName = model.DisplayName, Kind = model.Kind,
+                    ImportedSourcePath = model.ImportedSourcePath, ImportedStorageOwnerPath = model.ImportedStorageOwnerPath,
                     InstancePath = "model/" + model.FileName + "/" + model.Configuration,
                     Configuration = model.Configuration, Revision = model.Revision, CurrentRevision = model.CurrentRevision, Status = model.Status };
                 children.Add(ToRequestNode(reference, false, plannedPaths));
@@ -910,7 +933,7 @@ internal sealed class PdmApiClient : IDisposable
         }
         foreach (var child in node.Children)
         {
-            if (child.Kind == CadDocumentKind.Drawing)
+            if (child.Kind == CadDocumentKind.Drawing || child.Role == CadReferenceRole.ExternalFileDependency)
             {
                 continue;
             }
@@ -931,7 +954,7 @@ internal sealed class PdmApiClient : IDisposable
         {
             var archived = node.SuppressedArchiveVersion.ReferenceSnapshot;
             children = (archived.Children ?? new List<DocumentReferenceNodeDto>())
-                .Where(child => child.Kind != (int)CadDocumentKind.Drawing)
+                .Where(child => child.Kind != (int)CadDocumentKind.Drawing && child.Role != (int)CadReferenceRole.ExternalFileDependency)
                 .Select(child => ToArchivedReferenceRequest(child, archived.InstancePath, node.InstancePath)).ToList();
         }
 
@@ -965,7 +988,7 @@ internal sealed class PdmApiClient : IDisposable
 
         return new
         {
-            nodeId = node.NodeId,
+            treeScopeOnly = isRoot, nodeId = node.NodeId,
             documentId = node.Status == CadReferenceStatus.Virtual ? (Guid?)null : node.DocumentId,
             instancePath = node.InstancePath,
             fileName = node.FileName,
@@ -997,7 +1020,7 @@ internal sealed class PdmApiClient : IDisposable
             configuration = node.Configuration, quantity = node.Quantity, status = node.Status,
             revision = ToRevisionRequest(node.Revision?.Display), checkedOutBy = (string)null,
             children = (node.Children ?? new List<DocumentReferenceNodeDto>())
-                .Where(child => child.Kind != (int)CadDocumentKind.Drawing)
+                .Where(child => child.Kind != (int)CadDocumentKind.Drawing && child.Role != (int)CadReferenceRole.ExternalFileDependency)
                 .Select(child => ToArchivedReferenceRequest(child, oldRootPath, newRootPath)).ToArray()
         };
     }
@@ -1078,6 +1101,11 @@ internal sealed class PdmApiClient : IDisposable
 
         return body.Length <= 500 ? body : body.Substring(0, 500);
     }
+}
+
+internal sealed class UserThemeDto
+{
+    public string Theme { get; set; }
 }
 
 internal sealed class LoginResponseDto

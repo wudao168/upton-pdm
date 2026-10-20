@@ -1195,26 +1195,44 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             if (string.Equals(theme, "c", StringComparison.OrdinalIgnoreCase))
             {
                 return new PreviewButtonTheme(
-                    Color.FromArgb(233, 248, 246),
-                    Color.FromArgb(208, 239, 236),
-                    Color.FromArgb(157, 219, 213),
-                    Color.FromArgb(19, 157, 147));
+                    ColorTranslator.FromHtml("#EFFAF7"),
+                    ColorTranslator.FromHtml("#CCF1EA"),
+                    ColorTranslator.FromHtml("#C2D6D1"),
+                    ColorTranslator.FromHtml("#0F766E"));
+            }
+
+            if (string.Equals(theme, "p", StringComparison.OrdinalIgnoreCase))
+            {
+                return new PreviewButtonTheme(
+                    ColorTranslator.FromHtml("#F5F0FE"),
+                    ColorTranslator.FromHtml("#EDE4FC"),
+                    ColorTranslator.FromHtml("#D5CCE4"),
+                    ColorTranslator.FromHtml("#6D28D9"));
             }
 
             if (string.Equals(theme, "o", StringComparison.OrdinalIgnoreCase))
             {
                 return new PreviewButtonTheme(
-                    Color.FromArgb(255, 243, 231),
-                    Color.FromArgb(255, 227, 196),
-                    Color.FromArgb(246, 199, 143),
-                    Color.FromArgb(230, 120, 23));
+                    ColorTranslator.FromHtml("#FFF6EC"),
+                    ColorTranslator.FromHtml("#FCE6CF"),
+                    ColorTranslator.FromHtml("#DFCDBA"),
+                    ColorTranslator.FromHtml("#A84B08"));
+            }
+
+            if (string.Equals(theme, "g", StringComparison.OrdinalIgnoreCase))
+            {
+                return new PreviewButtonTheme(
+                    ColorTranslator.FromHtml("#F4F4F5"),
+                    ColorTranslator.FromHtml("#E4E4E7"),
+                    ColorTranslator.FromHtml("#D1D1D7"),
+                    ColorTranslator.FromHtml("#52525B"));
             }
 
             return new PreviewButtonTheme(
-                Color.FromArgb(237, 245, 255),
-                Color.FromArgb(217, 236, 255),
-                Color.FromArgb(156, 199, 255),
-                Color.FromArgb(64, 158, 255));
+                ColorTranslator.FromHtml("#EFF6FF"),
+                ColorTranslator.FromHtml("#DBEAFE"),
+                ColorTranslator.FromHtml("#C7D3E3"),
+                ColorTranslator.FromHtml("#1D4ED8"));
         }
     }
 

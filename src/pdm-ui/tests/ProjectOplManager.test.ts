@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProjectOplManager from '../src/components/ProjectOplManager.vue'
 import type { ProjectSummary } from '../src/types'
 
-const api = vi.hoisted(() => ({ readProjectOpl: vi.fn(), saveProjectOpl: vi.fn(), readOplAttachment: vi.fn(), completeProjectOpl: vi.fn(), getProjectExportMetadata: vi.fn() }))
+const api = vi.hoisted(() => ({ readProjectOpl: vi.fn(), markProjectOplViewed: vi.fn(), saveProjectOpl: vi.fn(), readOplAttachment: vi.fn(), completeProjectOpl: vi.fn(), getProjectExportMetadata: vi.fn() }))
 vi.mock('../src/api', () => ({ ...api, PdmApiError: class extends Error { status = 409 } }))
 const exporter = vi.hoisted(() => ({ downloadOplWorkbook: vi.fn() }))
 vi.mock('../src/oplWorkbook', () => exporter)
@@ -15,9 +15,76 @@ async function setup(project = { id: 'p1', code: 'P700012', name: 'TEST 4' } as 
   await flushPromises()
 }
 const click = async (label: string, root: ParentNode = document.body) => { (Array.from(root.querySelectorAll('button')).find(b => b.textContent?.trim() === label) as HTMLButtonElement).click(); await flushPromises() }
-beforeEach(() => { vi.clearAllMocks(); api.readProjectOpl.mockResolvedValue({ rows: [{ issue, canEdit: true, canComplete: true }], people: [] }); api.saveProjectOpl.mockResolvedValue(issue); api.getProjectExportMetadata.mockResolvedValue({title:'项目资料',company:'公司',scope:'当前项目',versionLabel:'版本',version:'—',exportedAt:'2026-10-14T12:00:00+08:00',exportedBy:'管理员',fields:[]}) })
+beforeEach(() => { vi.clearAllMocks(); api.markProjectOplViewed.mockResolvedValue(undefined); api.readProjectOpl.mockResolvedValue({ rows: [{ issue, canEdit: true, canComplete: true }], people: [] }); api.saveProjectOpl.mockResolvedValue(issue); api.getProjectExportMetadata.mockResolvedValue({title:'项目资料',company:'公司',scope:'当前项目',versionLabel:'版本',version:'—',exportedAt:'2026-10-14T12:00:00+08:00',exportedBy:'管理员',fields:[]}) })
 afterEach(() => { wrapper?.unmount(); document.body.innerHTML = ''; vi.unstubAllGlobals() })
 describe('OPL drawer', () => {
+  it('keeps NEW until the individual detail is viewed, then clears only that marker and retains overdue', async () => {
+    api.readProjectOpl.mockResolvedValue({ rows: [{ issue, canEdit: false, canComplete: false, isNew: true }, { issue: { ...issue, id: 'i2', number: 2 }, canEdit: true, canComplete: true, isNew: true }], people: [] })
+    await setup()
+    expect(wrapper.findAll('[aria-label="新增未查看"]')).toHaveLength(2)
+    expect(wrapper.findAll('[aria-label="已逾期"]')).toHaveLength(2)
+    expect(wrapper.findAll('thead th')[0]!.text()).toBe('状态')
+    expect(wrapper.get('tbody tr td:first-child').findAll('.opl-capsule').map(marker => marker.text())).toEqual(['NEW', '逾期'])
+    expect(wrapper.get('tbody tr td:nth-child(9)').text()).toBe(issue.dueDate)
+    expect(wrapper.get('tbody tr td:nth-child(9)').findAll('.opl-capsule')).toHaveLength(0)
+    expect(api.markProjectOplViewed).not.toHaveBeenCalled()
+    await click('查看', wrapper.element)
+    expect(api.markProjectOplViewed).toHaveBeenCalledWith('p1', 'i1', 'token')
+    expect(wrapper.findAll('[aria-label="新增未查看"]')).toHaveLength(1)
+    expect(wrapper.findAll('[aria-label="已逾期"]')).toHaveLength(2)
+    expect(wrapper.get('tbody tr td:first-child').findAll('.opl-capsule').map(marker => marker.text())).toEqual(['逾期'])
+    expect(document.body.textContent).toContain('查看开口问题')
+  })
+  it('retains NEW when the read receipt fails and displays a Chinese retry message', async () => {
+    api.readProjectOpl.mockResolvedValue({ rows: [{ issue, canEdit: true, canComplete: true, isNew: true }], people: [] })
+    api.markProjectOplViewed.mockRejectedValue(new Error('network failure'))
+    await setup(); await click('编辑', wrapper.element)
+    expect(wrapper.findAll('[aria-label="新增未查看"]')).toHaveLength(1)
+    expect(document.body.textContent).toContain('查看状态同步失败')
+    expect(document.body.textContent).not.toContain('network failure')
+  })
+  it('refreshes account read state on focus and skips refresh while editing', async () => {
+    api.readProjectOpl.mockResolvedValue({ rows: [{ issue, canEdit: true, canComplete: true, isNew: true }], people: [] })
+    await setup()
+    api.readProjectOpl.mockResolvedValue({ rows: [{ issue, canEdit: true, canComplete: true, isNew: false }], people: [] })
+    window.dispatchEvent(new Event('focus')); await flushPromises()
+    expect(wrapper.findAll('[aria-label="新增未查看"]')).toHaveLength(0)
+    await click('编辑', wrapper.element)
+    const count = api.readProjectOpl.mock.calls.length
+    window.dispatchEvent(new Event('focus')); await flushPromises()
+    expect(api.readProjectOpl).toHaveBeenCalledTimes(count)
+  })
+  it('marks only past-due unfinished issues overdue, excluding today, future, missing and closed dates', async () => {
+    const now = new Date(), value = new Date(now.getFullYear(), now.getMonth(), now.getDate()), today = value.toLocaleDateString('sv-SE')
+    value.setDate(value.getDate() - 1); const yesterday = value.toLocaleDateString('sv-SE')
+    value.setDate(value.getDate() + 2); const tomorrow = value.toLocaleDateString('sv-SE')
+    api.readProjectOpl.mockResolvedValue({ rows: [
+      { ...issue, id: 'late', dueDate: yesterday }, { ...issue, id: 'today', dueDate: today }, { ...issue, id: 'future', dueDate: tomorrow },
+      { ...issue, id: 'none', dueDate: null }, { ...issue, id: 'closed', dueDate: yesterday, status: '已完成' }, { ...issue, id: 'void', dueDate: yesterday, status: '已作废' },
+    ].map(issue => ({ issue, canEdit: true, canComplete: true })), people: [] })
+    await setup()
+    wrapper.findAllComponents({ name: 'ElSelect' })[0]!.vm.$emit('update:modelValue', '')
+    await flushPromises()
+    expect(wrapper.findAll('[aria-label="已逾期"]')).toHaveLength(1)
+  })
+  it('shows the latest release in the list and every historical release in the drawer with working package links', async () => {
+    api.readProjectOpl.mockResolvedValue({ rows: [{ issue, canEdit: false, canComplete: false, releases: [
+      { releasePackageId: 'old', projectId: 'p1', packageNumber: 'RP-OLD', bomType: '标准件', drawingCount: 0, publishedAt: '2026-10-18T00:00:00Z' },
+      { releasePackageId: 'new', projectId: 'p1', packageNumber: 'RP-NEW', bomType: '非标件', drawingCount: 8, publishedAt: '2026-10-19T00:00:00Z' },
+    ] }], people: [] })
+    await setup()
+    expect(wrapper.text()).toContain('最近发布日期')
+    expect(wrapper.find('tbody').text()).toContain('2026-10-19')
+    await click('查看')
+    const history = document.body.querySelector('[aria-label="关联发布记录"]')!
+    expect(history.textContent).toContain('2 次')
+    expect([...history.querySelectorAll('tbody tr')].map(row => row.textContent)).toEqual([
+      'RP-NEW非标件82026-10-19', 'RP-OLD标准件02026-10-18',
+    ])
+    await click('RP-OLD', history)
+    expect(wrapper.emitted('openRelease')).toEqual([['p1', 'old']])
+    expect(api.completeProjectOpl).not.toHaveBeenCalled()
+  })
   it('lets the user send an update or completion to the group and displays delivery failures without losing the save', async () => {
     api.saveProjectOpl.mockResolvedValue({ ...issue, notification: { sent: false, message: '群通知未发送。问题已保存，无需重复提交。' } })
     api.completeProjectOpl.mockResolvedValue({ ...issue, status: '已完成', notification: { sent: true, message: '群通知已发送。' } })
@@ -77,7 +144,7 @@ describe('OPL drawer', () => {
     expect(select.props('multiple')).toBe(true)
     select.vm.$emit('update:modelValue',['紧急','低']);await flushPromises()
     expect(wrapper.findAll('tbody tr')).toHaveLength(2)
-    expect(wrapper.findAll('tbody tr td:nth-child(3)').map(cell=>cell.text())).toEqual(['紧急','低'])
+    expect(wrapper.findAll('tbody tr td:nth-child(4)').map(cell=>cell.text())).toEqual(['紧急','低'])
     select.vm.$emit('update:modelValue',[]);await flushPromises()
     expect(wrapper.findAll('tbody tr')).toHaveLength(3)
   })
@@ -117,7 +184,7 @@ describe('OPL drawer', () => {
   })
   it('opens an editable row on click and respects read-only permissions', async () => {
     await setup()
-    expect(wrapper.get('tbody tr td').text()).toBe('1')
+    expect(wrapper.get('tbody tr td:nth-child(2)').text()).toBe('1')
     await wrapper.get('tbody tr').trigger('click')
     expect(document.body.textContent).toContain('编辑开口问题')
     wrapper.unmount()

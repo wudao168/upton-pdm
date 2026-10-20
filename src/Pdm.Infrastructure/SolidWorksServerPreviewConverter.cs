@@ -29,11 +29,14 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
     private readonly PdmPreviewWorkerOptions settings;
     private readonly IPdmRepository? repository;
     private readonly HttpClient httpClient;
+    private readonly IPdfReleaseStampProcessor? pdfReleaseStamp;
 
-    public SolidWorksServerPreviewConverter(IOptions<PdmPreviewWorkerOptions> options, IPdmRepository? repository = null, HttpClient? httpClient = null)
+    public SolidWorksServerPreviewConverter(IOptions<PdmPreviewWorkerOptions> options, IPdmRepository? repository = null, HttpClient? httpClient = null,
+        IPdfReleaseStampProcessor? pdfReleaseStamp = null)
     {
         settings = options.Value;
         this.repository = repository;
+        this.pdfReleaseStamp = pdfReleaseStamp;
         this.httpClient = httpClient ?? new HttpClient(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(15) })
         {
             Timeout = Timeout.InfiniteTimeSpan
@@ -47,101 +50,26 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         var drawings = sources.Where(source => source.Kind == DocumentKind.Drawing).ToArray();
         if (drawings.Length == 0) return new Dictionary<Guid, FormalDrawingSource>();
         if (repository is null) throw new PdmRuleException("无法核对正式图纸来源版本。");
-        var conversion = (await repository.GetSystemSettingsAsync(cancellationToken)).PreviewConversion ?? PreviewConversionSettings.Default;
-        var remote = conversion.Mode == PreviewConversionMode.Remote;
-        if (remote && !Uri.TryCreate(conversion.NormalizedAgentUrl, UriKind.Absolute, out _))
-            throw new PdmRuleException("远程转图服务器地址未配置，不能生成正式源图。");
-        if (!remote && !OperatingSystem.IsWindows()) throw new PdmRuleException("正式源图生成需要 Windows SolidWorks 转图服务器。");
         var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
-        var workRoot = Path.Combine(Path.GetTempPath(), "UPTON-PLM", "release-formal", package.Id.ToString("N"), Guid.NewGuid().ToString("N"));
-        var sourceRoot = Path.Combine(workRoot, "sources");
-        var outputRoot = Path.Combine(workRoot, "outputs");
-        Directory.CreateDirectory(sourceRoot);
-        Directory.CreateDirectory(outputRoot);
-        try
+        var result = new Dictionary<Guid, FormalDrawingSource>();
+        foreach (var source in drawings)
         {
-            var jobs = new List<PreviewJob>();
-            var stamps = new Dictionary<Guid, (ReleasePreviewSource Source, string Revision, string Qr)>();
-            var result = new Dictionary<Guid, FormalDrawingSource>();
-            var verifiedDrawings = 0;
-            foreach (var source in drawings)
-            {
-                ReleasePublishingProgress.Set(package.Id, $"校验工程图 {++verifiedDrawings}/{drawings.Length}：{source.FileName}");
-                var version = await repository.FindDocumentVersionAsync(source.DocumentId, source.SourceVersionId, cancellationToken)
-                    ?? throw new PdmConflictException($"工程图{source.DrawingNumber}的审批源版本不存在。");
-                if (version.Status != DocumentVersionStatus.Work || !string.Equals(version.Sha256, source.Sha256, StringComparison.OrdinalIgnoreCase))
-                    throw new PdmConflictException($"工程图{source.DrawingNumber}的审批源版本不匹配。");
-                var revision = version.Revision.Release().Display;
-                if (!string.IsNullOrWhiteSpace(source.ExpectedFormalRevision)
-                    && !string.Equals(source.ExpectedFormalRevision, revision, StringComparison.OrdinalIgnoreCase))
-                    throw new PdmConflictException($"工程图{source.DrawingNumber}的冻结版次已变化。");
-                var model = version.PropertySnapshot.FirstOrDefault(item => item.Key.Split('/').Last().Equals("型号", StringComparison.OrdinalIgnoreCase)).Value;
-                if (string.IsNullOrWhiteSpace(model)) model = source.DrawingNumber;
-                var qr = $"UPLM-DRAWING|{Uri.EscapeDataString(model.Trim())}|{revision}|{source.DocumentId:N}";
-                var sourcePath = StorageLocationPolicy.ResolveUnder(vaultRoot, source.StorageRelativePath);
-                await VerifySourceAsync(source, sourcePath, cancellationToken);
-                var relative = Path.Combine(".release-formal", package.Id.ToString("N"), $"{source.DocumentId:N}.slddrw");
-                var existingPath = StorageLocationPolicy.ResolveUnder(vaultRoot, relative);
-                var manifestPath = existingPath + ".json";
-                if (File.Exists(existingPath) || File.Exists(manifestPath))
-                {
-                    if (!File.Exists(existingPath) || !File.Exists(manifestPath))
-                        throw new PdmConflictException($"工程图{source.DrawingNumber}的正式源图清单不完整，已停止发布。");
-                    var saved = JsonSerializer.Deserialize<FormalManifest>(await File.ReadAllTextAsync(manifestPath, cancellationToken), JsonOptions)
-                        ?? throw new PdmConflictException($"工程图{source.DrawingNumber}的正式源图清单无效。");
-                    var actualSha = await ComputeSha256Async(existingPath, cancellationToken);
-                    if (saved.SourceSha256 != source.Sha256 || saved.Formal.SourceVersionId != source.SourceVersionId
-                        || saved.Formal.Revision != revision || saved.Formal.QrContent != qr
-                        || !string.Equals(saved.Formal.Sha256, actualSha, StringComparison.OrdinalIgnoreCase)
-                        || saved.Formal.FileLength != new FileInfo(existingPath).Length)
-                        throw new PdmConflictException($"工程图{source.DrawingNumber}的正式源图与审批来源不一致，已停止发布。");
-                    File.SetAttributes(existingPath, File.GetAttributes(existingPath) | FileAttributes.ReadOnly);
-                    result.Add(source.DocumentId, saved.Formal);
-                    continue;
-                }
-                jobs.Add(new PreviewJob(source.DocumentId, source.Kind, source.FileName, sourcePath,
-                    Path.Combine(outputRoot, $"{source.DocumentId:N}.slddrw"), source.Sha256, true, revision, qr));
-                stamps.Add(source.DocumentId, (source, revision, qr));
-            }
-            if (jobs.Count == 0) return result;
-            var references = await ResolveReferenceJobsAsync(package, vaultRoot, jobs, outputRoot, cancellationToken);
-            var runJobs = jobs.Concat(references).ToArray();
-            if (runJobs.GroupBy(job => job.FileName, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
-                throw new PdmRuleException("正式图纸引用树存在重名文件，无法安全生成。");
-            var formalErrors = remote
-                ? await RunRemoteAgentAsync(conversion, runJobs, workRoot, outputRoot, cancellationToken, package.State == ReleasePackageState.Publishing ? package.Id : null)
-                : await RunLocalWorkerAsync(conversion, runJobs, sourceRoot, workRoot, outputRoot, cancellationToken);
-            if (formalErrors.Count > 0) throw new PdmRuleException("正式源图生成失败，已停止发布：" + string.Join("；", formalErrors.Values));
-            foreach (var job in jobs)
-            {
-                if (!File.Exists(job.OutputPath) || new FileInfo(job.OutputPath).Length == 0)
-                    throw new PdmRuleException($"工程图{job.FileName}未生成正式源图。");
-                var stamp = stamps[job.DocumentId];
-                var relative = Path.Combine(".release-formal", package.Id.ToString("N"), $"{job.DocumentId:N}.slddrw");
-                var vaultPath = StorageLocationPolicy.ResolveUnder(vaultRoot, relative);
-                Directory.CreateDirectory(Path.GetDirectoryName(vaultPath)!);
-                var generatedSha = await ComputeSha256Async(job.OutputPath, cancellationToken);
-                if (File.Exists(vaultPath))
-                {
-                    var existingSha = await ComputeSha256Async(vaultPath, cancellationToken);
-                    if (!string.Equals(existingSha, generatedSha, StringComparison.OrdinalIgnoreCase))
-                        throw new PdmConflictException($"工程图{job.FileName}的正式源图已存在且内容不同，已停止发布。");
-                }
-                else File.Copy(job.OutputPath, vaultPath, false);
-                if (!string.Equals(await ComputeSha256Async(vaultPath, cancellationToken), generatedSha, StringComparison.OrdinalIgnoreCase))
-                    throw new PdmConflictException($"工程图{job.FileName}的正式源图保存后指纹不一致。");
-                File.SetAttributes(vaultPath, File.GetAttributes(vaultPath) | FileAttributes.ReadOnly);
-                var formal = new FormalDrawingSource(stamp.Source.SourceVersionId, relative,
-                    new FileInfo(vaultPath).Length, generatedSha, stamp.Revision, stamp.Qr);
-                var tempManifest = vaultPath + $".{Guid.NewGuid():N}.json";
-                await File.WriteAllTextAsync(tempManifest,
-                    JsonSerializer.Serialize(new FormalManifest(stamp.Source.Sha256, formal), JsonOptions), cancellationToken);
-                File.Move(tempManifest, vaultPath + ".json", false);
-                result.Add(job.DocumentId, formal);
-            }
-            return result;
+            cancellationToken.ThrowIfCancellationRequested();
+            ReleasePublishingProgress.Set(package.Id, $"核对审批冻结工程图：{source.FileName}");
+            var version = await repository.FindDocumentVersionAsync(source.DocumentId, source.SourceVersionId, cancellationToken)
+                ?? throw new PdmConflictException($"工程图{source.DrawingNumber}的审批源版本不存在。");
+            if (version.Status != DocumentVersionStatus.Work || !string.Equals(version.Sha256, source.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new PdmConflictException($"工程图{source.DrawingNumber}的审批源版本不匹配。");
+            var revision = version.Revision.Release().Display;
+            if (!string.IsNullOrWhiteSpace(source.ExpectedFormalRevision)
+                && !string.Equals(source.ExpectedFormalRevision, revision, StringComparison.OrdinalIgnoreCase))
+                throw new PdmConflictException($"工程图{source.DrawingNumber}的冻结版次已变化。");
+            await VerifySourceAsync(source, StorageLocationPolicy.ResolveUnder(vaultRoot, source.StorageRelativePath), cancellationToken);
+            // 正式版本直接引用批准的不可变源文件；版次保留在PLM记录中，不向工程图写入批注或二维码。
+            result.Add(source.DocumentId, new FormalDrawingSource(source.SourceVersionId,
+                source.StorageRelativePath, source.FileLength, source.Sha256, revision, string.Empty));
         }
-        finally { DeleteDirectory(workRoot); }
+        return result;
     }
 
     public async Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateAsync(
@@ -235,6 +163,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                 PrunePreviewCache(cacheRoot);
             }
 
+            var itemErrors = errors.ToDictionary(item => item.Key, item => item.Value);
             var artifacts = new Dictionary<Guid, DocumentPreviewArtifact>();
             foreach (var source in sources)
             {
@@ -247,6 +176,16 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                         : $"服务器未生成图档{source.DrawingNumber}的预览文件。");
                 }
                 var outputName = Path.GetFileName(job.OutputPath);
+                if (source.Kind == DocumentKind.Drawing && pdfReleaseStamp is not null)
+                {
+                    try { await pdfReleaseStamp.ApplyAsync(package, project, source, job.OutputPath, cancellationToken); }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                    catch (Exception error) when (error is PdmRuleException or PdmConflictException)
+                    {
+                        // Keep the successfully converted PDF available. Only its supplemental stamp needs retrying.
+                        itemErrors[source.DocumentId] = "PDF已生成，发布标识待补：" + error.Message;
+                    }
+                }
                 var sha256 = await ComputeSha256Async(job.OutputPath, cancellationToken);
                 var vaultPreviewPath = Path.Combine(previewRoot, sha256, outputName);
                 var stagingPreviewPath = Path.Combine(stagingPreviewRoot, sha256, outputName);
@@ -272,10 +211,10 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
                     sha256,
                     source.SourceSha256);
             }
-            if (errors.Count > 0)
-                throw new PartialPreviewConversionException(artifacts, errors,
-                    string.Join("\n", sources.Where(source => errors.ContainsKey(source.DocumentId))
-                        .Select(source => $"{source.FileName}：{errors[source.DocumentId].ReplaceLineEndings(" ")}")));
+            if (itemErrors.Count > 0)
+                throw new PartialPreviewConversionException(artifacts, itemErrors,
+                    string.Join("\n", sources.Where(source => itemErrors.ContainsKey(source.DocumentId))
+                        .Select(source => $"{source.FileName}：{itemErrors[source.DocumentId].ReplaceLineEndings(" ")}")));
             return artifacts;
         }
         catch (PartialPreviewConversionException) { throw; }
@@ -622,7 +561,6 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
     }
 
     private sealed record PreviewWorkerManifest(IReadOnlyList<PreviewWorkerJob> Jobs);
-    private sealed record FormalManifest(string SourceSha256, FormalDrawingSource Formal);
     private sealed record PreviewWorkerJob(Guid DocumentId, string SourcePath, string OutputPath, string Kind, bool Convert = true, string? ReleaseRevision = null, string? QrContent = null);
     private sealed record PreviewWorkerResult(bool Success, string? Error, IReadOnlyList<PreviewWorkerItem>? Items = null);
     private sealed record PreviewWorkerItem(Guid DocumentId, bool Success, string? Error);

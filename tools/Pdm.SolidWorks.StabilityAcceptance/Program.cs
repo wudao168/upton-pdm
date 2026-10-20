@@ -7,6 +7,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,7 +17,7 @@ using Microsoft.Win32;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 
-internal static class Program
+internal static partial class Program
 {
     private const BindingFlags Members = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
     private const string StartupKey = @"Software\SolidWorks\AddInsStartup\{BCFD8A8A-472B-42E2-AC62-58BC17773650}";
@@ -25,17 +26,39 @@ internal static class Program
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string name, string title);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
     [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("ole32.dll")] private static extern int GetRunningObjectTable(int reserved, out IRunningObjectTable table);
+    [DllImport("ole32.dll")] private static extern int CreateBindCtx(int reserved, out IBindCtx context);
+
+    private static SldWorks FindProcess(int processId)
+    {
+        GetRunningObjectTable(0, out var table); CreateBindCtx(0, out var context);
+        table.EnumRunning(out var iterator); var monikers = new IMoniker[1];
+        try
+        {
+            while (iterator.Next(1, monikers, IntPtr.Zero) == 0)
+                try
+                {
+                    monikers[0].GetDisplayName(context, null, out var name);
+                    if (!string.Equals(name, "SolidWorks_PID_" + processId, StringComparison.OrdinalIgnoreCase)) continue;
+                    table.GetObject(monikers[0], out var value);
+                    return (SldWorks)value;
+                }
+                finally { Marshal.ReleaseComObject(monikers[0]); }
+            return null;
+        }
+        finally { Marshal.ReleaseComObject(iterator); Marshal.ReleaseComObject(context); Marshal.ReleaseComObject(table); }
+    }
 
     [STAThread]
     private static int Main(string[] args)
     {
         var options = args.Skip(3).Where(value => value.StartsWith("--", StringComparison.Ordinal)).ToArray();
         var roots = args.Skip(3).Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray();
-        if (args.Length < 3 || args.Length > 7 || roots.Length > 1 || options.Any(value =>
+        if (args.Length < 3 || args.Length > 8 || roots.Length > 1 || options.Any(value =>
             value != "--structure-only" && value != "--archive-preload" && value != "--mixed-states-only"
                 && value != "--api-payload" && value != "--virtual-fixture"
                 && value != "--virtual-nested-fixture" && value != "--reopen-native" && value != "--rename-fixture" && value != "--rename-existing"
-                && value != "--audit-native" && value != "--repair-native-ref" && value != "--pack-repaired" && value != "--reopen-archive")
+                && value != "--audit-native" && value != "--repair-native-ref" && value != "--pack-repaired" && value != "--reopen-archive" && value != "--pending-child-rename" && value != "--isolated-virtual-fixture" && value != "--separate-instance" && value != "--checkout-context" && value != "--open-only" && value != "--controlled-isolation")
             || options.Contains("--structure-only") && options.Contains("--archive-preload")
             || options.Contains("--api-payload") && !options.Contains("--archive-preload")
             || options.Contains("--reopen-native") && options.Length != 1)
@@ -45,12 +68,14 @@ internal static class Program
         Report["archivePreload"] = options.Contains("--archive-preload");
         Report["apiPayload"] = options.Contains("--api-payload");
         Report["virtualFixture"] = options.Contains("--virtual-fixture");
-        Report["virtualNestedFixture"] = options.Contains("--virtual-nested-fixture");
+        Report["virtualNestedFixture"] = options.Contains("--virtual-nested-fixture") || options.Contains("--isolated-virtual-fixture");
+        Report["isolatedVirtualFixture"] = options.Contains("--isolated-virtual-fixture");
         Report["reopenNative"] = options.Contains("--reopen-native");
         Report["packRepaired"] = options.Contains("--pack-repaired");
         Report["reopenArchive"] = options.Contains("--reopen-archive");
         Report["renameFixture"] = options.Contains("--rename-fixture") || options.Contains("--rename-existing");
         Report["addRenameDrawing"] = options.Contains("--rename-fixture");
+        Report["pendingChildRenameFixture"] = options.Contains("--pending-child-rename");
         Report["auditNative"] = options.Contains("--audit-native");
         Report["repairNativeReference"] = options.Contains("--repair-native-ref");
         var addinPath = Path.GetFullPath(args[0]);
@@ -59,7 +84,8 @@ internal static class Program
             Path.Combine(System.Environment.CurrentDirectory, "tmp") + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("原生打包可能保存总装，只允许从仓库tmp中的隔离样本导出，不能直接打包原图目录。");
         var qa = Path.GetFullPath(args[2]);
-        if (Process.GetProcessesByName("SLDWORKS").Length > 0) { Console.Error.WriteLine("已有SolidWorks进程，拒绝接管用户会话。"); return 2; }
+        var separateInstance = options.Contains("--separate-instance");
+        if (!separateInstance && Process.GetProcessesByName("SLDWORKS").Length > 0) { Console.Error.WriteLine("已有SolidWorks进程，拒绝接管用户会话。"); return 2; }
         if (Directory.Exists(qa) || qa.StartsWith(source + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("验收目录必须是独立的新目录。");
         var before = HashFiles(source);
@@ -93,6 +119,7 @@ internal static class Program
             Report["qaControlledBindings"] = true;
         }
         SldWorks app = null;
+        Process launchedProcess = null;
         int ownedPid = 0;
         DateTime ownedStarted = DateTime.MinValue;
         bool startupChanged = false, keyExisted = false, valueExisted = false;
@@ -112,11 +139,38 @@ internal static class Program
             Report["startupOriginal"] = new { keyExisted, valueExisted, value = startupValue };
             using (var key = Registry.CurrentUser.CreateSubKey(StartupKey)) key.SetValue("", 0, RegistryValueKind.DWord);
             startupChanged = true;
-            if (Process.GetProcessesByName("SLDWORKS").Length != 0) throw new InvalidOperationException("启动前检测到新的用户会话，已停止验收。");
+            var existingProcesses = Process.GetProcessesByName("SLDWORKS").Select(process => process.Id).ToArray();
+            if (!separateInstance && existingProcesses.Length != 0) throw new InvalidOperationException("启动前检测到新的用户会话，已停止验收。");
             Console.WriteLine("NATIVE: starting isolated hidden SolidWorks; UPLM autoload disabled");
-            app = (SldWorks)Activator.CreateInstance(System.Type.GetTypeFromProgID("SldWorks.Application", true));
-            app.Visible = false; app.UserControl = false;
+            if (separateInstance)
+            {
+                launchedProcess = Process.Start(new ProcessStartInfo(Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ProgramFiles), "SOLIDWORKS Corp", "SOLIDWORKS", "SLDWORKS.exe"))
+                    { UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden,
+                        WorkingDirectory = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ProgramFiles), "SOLIDWORKS Corp", "SOLIDWORKS") });
+                Console.WriteLine("NATIVE: launched separate process pid=" + launchedProcess.Id);
+                for (var attempt = 0; attempt < 90 && app == null && !launchedProcess.HasExited; attempt++)
+                {
+                    try
+                    {
+                        var candidate = FindProcess(launchedProcess.Id);
+                        if (candidate != null && candidate.GetProcessID() == launchedProcess.Id) app = candidate;
+                        else if (candidate != null) Marshal.ReleaseComObject(candidate);
+                    }
+                    catch (COMException) { }
+                    if (app == null) Thread.Sleep(1000);
+                }
+                if (app == null) throw new InvalidOperationException("独立CAD进程未就绪，未接管已有会话。");
+            }
+            else app = (SldWorks)Activator.CreateInstance(System.Type.GetTypeFromProgID("SldWorks.Application", true));
             ownedPid = app.GetProcessID();
+            if (existingProcesses.Contains(ownedPid))
+            {
+                Marshal.ReleaseComObject(app); app = null; ownedPid = 0;
+                throw new InvalidOperationException("未创建独立的SolidWorks进程，未修改或接管已有会话。");
+            }
+            Report["separateProcessVerified"] = true;
+            Report["preexistingProcessIds"] = existingProcesses;
+            app.Visible = false; app.UserControl = false;
             ownedStarted = Process.GetProcessById(ownedPid).StartTime.ToUniversalTime();
             Report["processId"] = ownedPid; Report["solidWorksVersion"] = app.RevisionNumber();
             Console.WriteLine("NATIVE: version=" + Report["solidWorksVersion"] + " pid=" + ownedPid);
@@ -130,7 +184,22 @@ internal static class Program
             var assemblies = explicitRoot ? new[] { Path.Combine(copies, roots[0]) } : Directory.GetFiles(copies, "*.SLDASM", SearchOption.TopDirectoryOnly);
             if (assemblies.Length != 1) throw new InvalidOperationException("验收样本必须有唯一根装配体。");
             var expectedDrawings = Directory.GetFiles(copies, "*.SLDDRW", SearchOption.AllDirectories).Length;
+            var expectedDrawingList = Path.Combine(copies, "qa-expected-drawings.json");
+            if (File.Exists(expectedDrawingList))
+            {
+                var names = new JavaScriptSerializer().Deserialize<string[]>(File.ReadAllText(expectedDrawingList));
+                if (names == null || names.Distinct(StringComparer.OrdinalIgnoreCase).Count() != names.Length
+                    || names.Any(name => Path.GetFileName(name) != name || !File.Exists(Path.Combine(copies, name))))
+                    throw new InvalidOperationException("显式工程图验收清单无效。");
+                Report["expectedDrawingNames"] = names;
+                expectedDrawings = names.Length;
+            }
             Report["expectedDrawingCount"] = expectedDrawings;
+            if (options.Contains("--controlled-isolation"))
+            {
+                ControlledIsolation(app, plugin, copies, assemblies[0], qa);
+                goto NativeVerificationComplete;
+            }
             int errors = 0, warnings = 0;
             if (Equals(Report["repairNativeReference"], true))
             {
@@ -151,10 +220,46 @@ internal static class Program
             if (model == null || errors != 0) throw new InvalidOperationException("只读打开失败，错误=" + errors + "，警告=" + warnings);
             Console.WriteLine("NATIVE: read-only root opened " + DateTimeOffset.Now.ToString("O"));
             if (!Equals(Report["renameFixture"], true) && !model.IsOpenedReadOnly()) throw new InvalidOperationException("样本未以只读方式打开。");
+            var activationErrors = 0;
+            var activatedRoot = app.ActivateDoc3(model.GetTitle(), false, (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref activationErrors) as IModelDoc2;
+            if (activatedRoot == null || activationErrors != 0 || !string.Equals(activatedRoot.GetPathName(), assemblies[0], StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("隔离根装配未进入有效的活动文档上下文。");
             var assembly = (IAssemblyDoc)model;
+            var resolveResult = assembly.ResolveAllLightWeightComponents(false);
+            Report["resolveResult"] = resolveResult;
+            Console.WriteLine("NATIVE: lightweight resolve finished " + DateTimeOffset.Now.ToString("O"));
+            if (options.Contains("--checkout-context"))
+            {
+                app.UserControl = true;
+                CheckoutContext(plugin, app, model, copies, qa);
+                passed = true;
+                goto NativeFinished;
+            }
             var virtualPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var importedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var importStorageType = plugin.GetType("Upton.Pdm.SolidWorks.ImportedComponentStorage", true);
+            var importStorage = Activator.CreateInstance(importStorageType, Members, null, new object[] { app }, null);
+            var importInputs = new List<object>(); Report["importOwnershipInputs"] = importInputs;
             foreach (var component in (assembly.GetComponents(false) as Array)?.Cast<object>().OfType<IComponent2>() ?? Enumerable.Empty<IComponent2>())
             {
+                var owner = (string)importStorageType.GetMethod("FindOwner", Members).Invoke(importStorage, new object[] { component, model });
+                if (component.GetPathName().IndexOf("IC~~", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var parent = component.GetParent(); var parentModel = parent?.GetModelDoc2() as IModelDoc2;
+                    var importModel = component.GetModelDoc2() as IModelDoc2;
+                    var importFeature = ((parentModel ?? model) as IAssemblyDoc)?.FeatureByName(component.Name2.Split('/').Last()) as IFeature;
+                    var featureComponent = importFeature?.GetSpecificFeature2() as IComponent2;
+                    object storagePaths = null, storageTitles = null;
+                    var nativeVirtual = importModel?.Extension.IsVirtualComponent3(out storagePaths, out storageTitles);
+                    importInputs.Add(new { name = component.Name2, path = component.GetPathName(), imported = component.GetImportedPath(),
+                        loaded = (component.GetModelDoc2() as IModelDoc2)?.GetPathName(), suppression = component.GetSuppression2(),
+                        parent = parent?.GetPathName(), parentModel = parentModel?.GetPathName(), owner, nativeVirtual, storagePaths, storageTitles,
+                        featureType = importFeature?.GetTypeName2(), isInterconnectFeature = importFeature?.Is3DInterconnectFeature,
+                        componentId = component.GetID(), featureComponentId = featureComponent?.GetID(), featureComponentPath = featureComponent?.GetPathName(),
+                        featureComponentModel = (featureComponent?.GetModelDoc2() as IModelDoc2)?.GetPathName(), featureImported = featureComponent?.GetImportedPath() });
+                }
+                if (!string.IsNullOrWhiteSpace(owner) && Path.GetFullPath(owner).StartsWith(copies + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    importedPaths.Add(Path.GetFullPath(component.GetPathName()));
                 if (!component.IsVirtual) continue;
                 var path = component.GetPathName();
                 if (!string.IsNullOrWhiteSpace(path) && path.IndexOf("VC~~", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -163,13 +268,12 @@ internal static class Program
             var outside = (app.GetDocuments() as Array)?.Cast<object>().OfType<IModelDoc2>()
                 .Select(document => document.GetPathName()).Where(path => !string.IsNullOrWhiteSpace(path)
                     && !Path.GetFullPath(path).StartsWith(copies + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                    && !virtualPaths.Contains(Path.GetFullPath(path))).ToArray() ?? new string[0];
+                    && !virtualPaths.Contains(Path.GetFullPath(path)) && !importedPaths.Contains(Path.GetFullPath(path))).ToArray() ?? new string[0];
             Report["loadedOutsideQa"] = outside;
             Report["embeddedVirtualOutsideQa"] = virtualPaths.Count;
+            Report["verifiedImportedRuntimePaths"] = importedPaths.ToArray();
+            Report["storageInventories"] = importStorageType.GetField("inventories", Members).GetValue(importStorage);
             if (outside.Length > 0) throw new InvalidOperationException("样本引用加载到了验收目录之外，已停止内存状态验证。");
-            var resolveResult = assembly.ResolveAllLightWeightComponents(false);
-            Report["resolveResult"] = resolveResult;
-            Console.WriteLine("NATIVE: lightweight resolve finished " + DateTimeOffset.Now.ToString("O"));
             if (Equals(Report["packRepaired"], true))
             {
                 var pack = (IPackAndGo)model.Extension.GetPackAndGo();
@@ -194,7 +298,25 @@ internal static class Program
             }
             else if (Equals(Report["reopenArchive"], true))
             {
-                Scan(plugin, app, model, "reopened-archive", expectedDrawings);
+                var manifestType = plugin.GetType("Upton.Pdm.SolidWorks.ControlledOpenManifestDto", true);
+                var fileType = plugin.GetType("Upton.Pdm.SolidWorks.ControlledOpenFileDto", true);
+                var manifest = Activator.CreateInstance(manifestType);
+                var files = (IList)Activator.CreateInstance(manifestType.GetProperty("Files").PropertyType);
+                foreach (var path in Directory.GetFiles(copies).Where(path => new[] { ".SLDASM", ".SLDPRT", ".SLDDRW" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase)))
+                {
+                    var file = Activator.CreateInstance(fileType);
+                    fileType.GetProperty("FileName").SetValue(file, Path.GetFileName(path));
+                    fileType.GetProperty("RelativePath").SetValue(file, Path.GetFileName(path));
+                    fileType.GetProperty("IsRoot").SetValue(file, string.Equals(path, assemblies[0], StringComparison.OrdinalIgnoreCase));
+                    fileType.GetProperty("FileLength").SetValue(file, new FileInfo(path).Length);
+                    fileType.GetProperty("Sha256").SetValue(file, Hash(path));
+                    files.Add(file);
+                }
+                manifestType.GetProperty("Files").SetValue(manifest, files);
+                plugin.GetType("Upton.Pdm.SolidWorks.PdmAddin", true).GetMethod("ValidateHistoricalControlledOpenReferences", Members)
+                    .Invoke(null, new object[] { model, assemblies[0], manifest, app });
+                Report["controlledOpenValidationPassed"] = true;
+                if (!options.Contains("--open-only")) Scan(plugin, app, model, "reopened-archive", expectedDrawings);
             }
             else if (Equals(Report["auditNative"], true))
             {
@@ -204,6 +326,7 @@ internal static class Program
                         saved = app.GetDocumentDependencies2(file, false, false, false),
                         resolved = app.GetDocumentDependencies2(file, false, true, false) };
                 Report["fileDependencies"] = dependencies;
+                Report["featureDependencies"] = AuditFeatureDependencies(app, model, copies);
                 var pack = (IPackAndGo)model.Extension.GetPackAndGo();
                 pack.IncludeDrawings = true; pack.IncludeSuppressed = true; pack.GetDocumentNames(out var names);
                 Report["auditNativeFiles"] = names;
@@ -221,7 +344,7 @@ internal static class Program
                 var topLevel = (assembly.GetComponents(true) as Array)?.Cast<object>().OfType<IComponent2>().ToArray()
                     ?? new IComponent2[0];
                 var nested = Equals(Report["virtualNestedFixture"], true);
-                var candidate = nested
+                var candidate = Equals(Report["isolatedVirtualFixture"], true) ? CreateIndependentVirtualCandidate(app, model, copies) : nested
                     ? topLevel.Where(component => !component.IsVirtual
                         && component.GetSuppression2() != (int)swComponentSuppressionState_e.swComponentSuppressed
                         && component.GetPathName().EndsWith(".SLDASM", StringComparison.OrdinalIgnoreCase)
@@ -273,10 +396,20 @@ internal static class Program
             else
             {
                 Scan(plugin, app, model, "resolved", expectedDrawings);
+                // Native drawing preload can unload/reload reference-only models in an
+                // invisible automation session. Never reuse the pre-preload COM pointer.
+                model = app.GetOpenDocumentByName(assemblies[0]) as ModelDoc2
+                    ?? app.OpenDoc6(assemblies[0], (int)swDocumentTypes_e.swDocASSEMBLY,
+                        (int)(swOpenDocOptions_e.swOpenDocOptions_Silent | swOpenDocOptions_e.swOpenDocOptions_ReadOnly), "", ref errors, ref warnings);
+                if (model == null) throw new InvalidOperationException("无法重新获取隔离根装配进行状态验证。");
+                assembly = (IAssemblyDoc)model;
                 var components = (assembly.GetComponents(false) as Array)?.Cast<object>().OfType<IComponent2>().ToArray() ?? new IComponent2[0];
                 var part = components.FirstOrDefault(component => !component.IsVirtual && component.GetSuppression2() != (int)swComponentSuppressionState_e.swComponentSuppressed
-                    && component.GetPathName().EndsWith(".SLDPRT", StringComparison.OrdinalIgnoreCase));
-                if (part == null) throw new InvalidOperationException("样本没有可验证状态切换的零件。");
+                    && component.GetPathName().EndsWith(".SLDPRT", StringComparison.OrdinalIgnoreCase)
+                    && component.GetPathName().IndexOf("IC~~", StringComparison.OrdinalIgnoreCase) < 0);
+                if (part == null) { Report["stateChangesNotApplicable"] = "组件由原生导入特征管理，不支持作为独立零件切换轻化状态"; passed = true; }
+                else
+                {
                 var originalState = part.GetSuppression2();
                 Report["stateComponent"] = part.Name2;
                 try
@@ -293,6 +426,7 @@ internal static class Program
                     }
                 }
                 finally { part.SetSuppression2(originalState); }
+                }
                 if (Equals(Report["archivePreload"], true) && !Report.ContainsKey("qaControlledBindings"))
                 {
                     var drawingPath = Directory.GetFiles(copies, "*.SLDDRW").OrderBy(path => path).First();
@@ -319,7 +453,9 @@ internal static class Program
                     Report["existingDrawingEditSavedAndWindowRetained"] = true;
                 }
             }
+        NativeVerificationComplete:
             passed = true;
+        NativeFinished:;
         }
         catch (Exception exception)
         {
@@ -362,6 +498,11 @@ internal static class Program
                 }
                 catch (ArgumentException) { }
             }
+            if (app == null && launchedProcess != null && !launchedProcess.HasExited)
+            {
+                launchedProcess.Kill(); launchedProcess.WaitForExit(10000);
+            }
+            launchedProcess?.Dispose();
             if (startupChanged)
             {
                 try
@@ -391,12 +532,83 @@ internal static class Program
             var copiesUnchanged = SameHashes(before, HashFiles(copies));
             Report["sourceUnchanged"] = unchanged; Report["copiesUnchanged"] = copiesUnchanged;
             Report["sourceFileCount"] = before.Count; Report["finishedAt"] = DateTimeOffset.Now.ToString("O");
-            Report["qaCopiesSavedWithConsent"] = Equals(Report["archivePreload"], true);
-            Report["passed"] = passed && unchanged && (copiesUnchanged || Equals(Report["archivePreload"], true) || Equals(Report["renameFixture"], true) || Equals(Report["renameFixture"], true) || Equals(Report["repairNativeReference"], true));
+            Report["qaCopiesSavedWithConsent"] = Equals(Report["archivePreload"], true) || options.Contains("--controlled-isolation");
+            Report["passed"] = passed && unchanged && (copiesUnchanged || Equals(Report["archivePreload"], true) || Equals(Report["renameFixture"], true) || Equals(Report["repairNativeReference"], true) || options.Contains("--controlled-isolation"));
             File.WriteAllText(reportPath, new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(Report));
             Console.WriteLine("NATIVE REPORT: " + reportPath);
         }
         return Equals(Report["passed"], true) ? 0 : 1;
+    }
+
+    private static IComponent2 CreateIndependentVirtualCandidate(SldWorks app, IModelDoc2 root, string copies)
+    {
+        int errors = 0, warnings = 0;
+        var part = Directory.GetFiles(copies, "LMF40LUU.SLDPRT").Single();
+        var assembly = (IModelDoc2)app.NewDocument(@"C:\ProgramData\SOLIDWORKS\SOLIDWORKS 2022\templates\gb_assembly.asmdot", 0, 0, 0);
+        var target = Path.Combine(copies, "QA-独立嵌入子装配.SLDASM");
+        if (assembly == null || !assembly.Extension.SaveAs3(target, 0, 1, null, null, ref errors, ref warnings) || errors != 0)
+            throw new InvalidOperationException("未建立独立虚拟子装配样本。");
+        for (var index = 0; index < 2; index++)
+        {
+            var path = Path.Combine(copies, "QA-内部轴承" + index + ".SLDPRT");
+            File.Copy(part, path); File.SetAttributes(path, FileAttributes.Normal);
+            var child = app.OpenDoc6(path, 1, 1, "", ref errors, ref warnings);
+            if (child == null || errors != 0 || !string.Equals(child.GetPathName(), path, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("独立子件样本未按指定路径打开。");
+            app.ActivateDoc3(assembly.GetTitle(), false, 0, ref errors);
+            if (((IAssemblyDoc)assembly).AddComponent5(path, 0, "", false, "", index * 0.2, 0, 0) == null)
+                throw new InvalidOperationException("未插入独立内部子件。");
+        }
+        if (!assembly.Save3(1, ref errors, ref warnings) || errors != 0) throw new InvalidOperationException("独立子装配未保存。");
+        File.SetAttributes(root.GetPathName(), File.GetAttributes(root.GetPathName()) & ~FileAttributes.ReadOnly);
+        if (root.IsOpenedReadOnly()) root.SetReadOnlyState(false);
+        app.ActivateDoc3(root.GetTitle(), false, 0, ref errors);
+        return ((IAssemblyDoc)root).AddComponent5(target, 0, "", false, "", 0.5, 0, 0);
+    }
+
+    private static object AuditFeatureDependencies(SldWorks app, IModelDoc2 root, string copies)
+    {
+        var result = new List<object>();
+        foreach (var path in Directory.GetFiles(copies, "*.SLDPRT"))
+        {
+            var refs = (app.GetDocumentDependencies2(path, false, false, false) as Array)?.Cast<object>()
+                .Where((value, index) => index % 2 == 1).Select(Convert.ToString).ToArray() ?? new string[0];
+            if (!refs.Any(value => value.EndsWith(".SLDASM", StringComparison.OrdinalIgnoreCase))) continue;
+            var doc = app.GetOpenDocumentByName(path) as IModelDoc2;
+            var owned = doc == null;
+            int errors = 0, warnings = 0;
+            if (owned) doc = app.OpenDoc6(path, (int)swDocumentTypes_e.swDocPART,
+                (int)(swOpenDocOptions_e.swOpenDocOptions_Silent | swOpenDocOptions_e.swOpenDocOptions_ReadOnly), "", ref errors, ref warnings);
+            if (doc == null || errors != 0 || !string.Equals(doc.GetPathName(), path, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("引用特征审计未能打开指定副本：" + path);
+            var original = doc.ConfigurationManager.ActiveConfiguration.Name;
+            try
+            {
+                foreach (var configuration in ((Array)doc.GetConfigurationNames()).Cast<string>())
+                {
+                    if (doc.ConfigurationManager.ActiveConfiguration.Name != configuration && !doc.ShowConfiguration2(configuration))
+                        throw new InvalidOperationException("引用特征审计无法读取配置：" + path + " / " + configuration);
+                    var count = doc.Extension.ListExternalFileReferencesCount();
+                    doc.Extension.ListExternalFileReferences(out var models, out var components, out var features,
+                        out var types, out var states, out var entities, out var owners, out var option, out var referencedConfiguration);
+                    object[] Values(object value) => (value as Array)?.Cast<object>().ToArray() ?? new object[0];
+                    var stateValues = Values(states);
+                    result.Add(new { file = Path.GetFileName(path), configuration, count, models = Values(models),
+                        components = Values(components), features = Values(features), dataTypes = Values(types),
+                        statuses = stateValues.Select(value => new { value, name = Enum.GetName(typeof(swExternalReferenceStatus_e), Convert.ToInt32(value)) }).ToArray(),
+                        entities = Values(entities), featureOwners = Values(owners), configurationOption = option,
+                        referencedConfiguration, dirty = doc.GetSaveFlag() });
+                    Console.WriteLine("FEATURE AUDIT: " + Path.GetFileName(path) + " / " + configuration + " references=" + count);
+                }
+            }
+            finally
+            {
+                if (doc.ConfigurationManager.ActiveConfiguration.Name != original && !doc.ShowConfiguration2(original))
+                    throw new InvalidOperationException("引用特征审计无法恢复原配置：" + path);
+                if (owned) app.CloseDoc(doc.GetTitle());
+            }
+        }
+        return result;
     }
 
     private static void RenameFixture(Assembly plugin, SldWorks app, IModelDoc2 model, int expectedDrawings)
@@ -438,6 +650,22 @@ internal static class Program
         using (var pane = (Control)Activator.CreateInstance(plugin.GetType("Upton.Pdm.SolidWorks.PdmTaskPaneControl", true), Members & ~BindingFlags.Static, null, new object[] { "改名存档验收" }, null))
         {
             type.GetField("taskPaneControl", Members).SetValue(addin, pane);
+            if (Equals(Report["pendingChildRenameFixture"], true))
+            {
+                var candidate = Flatten(root).Where(item => Get(item, "Kind").ToString() == "Part")
+                    .GroupBy(item => (string)Get(item, "FullPath"), StringComparer.OrdinalIgnoreCase).Select(group => group.First())
+                    .First(item => ((string[])type.GetMethod("ReadRenameReferences", Members).Invoke(addin, new object[] { Get(item, "FullPath"), true }))
+                        .Any(path => string.Equals(path, oldPath, StringComparison.OrdinalIgnoreCase)));
+                var beforePath = (string)Get(candidate, "FullPath");
+                type.GetMethod("ApplyDocumentRenameWithLinkedDrawing", Members).Invoke(addin,
+                    new object[] { candidate, "QA-待落盘子件", model, false });
+                var pendingPath = (string)Get(candidate, "FullPath");
+                Report["pendingChildBeforeRootRename"] = new { beforePath, pendingPath,
+                    pending = Get(candidate, "IsRenamePendingSave"), targetExists = File.Exists(pendingPath) };
+                if (File.Exists(pendingPath) || !(bool)Get(candidate, "IsRenamePendingSave"))
+                    throw new InvalidOperationException("真实样本未形成待落盘改名状态，不能算作该回归通过。");
+                Console.WriteLine("RENAME: child renamed in memory; target absent on disk; now renaming root");
+            }
             Console.WriteLine("RENAME: applying production rename");
             type.GetMethod("ApplyDocumentRenameWithLinkedDrawing", Members).Invoke(addin, new object[] { root, "QA-改名后总装", model, true });
             model = (IModelDoc2)app.GetOpenDocumentByName((string)Get(root, "FullPath"));
@@ -480,6 +708,9 @@ internal static class Program
                     Console.WriteLine("NATIVE PACK VIRTUAL path=" + path);
             var external = (IReadOnlyList<string>)plugin.GetType("Upton.Pdm.SolidWorks.NativeArchiveManifest", true)
                 .GetMethod("Validate", Members).Invoke(null, new object[] { root, nativeFiles });
+            Report["validatedArchiveFiles"] = nativeFiles;
+            Report["fileDependencyNodes"] = Flatten(root).Where(node => Get(node, "Role").ToString() == "ExternalFileDependency")
+                .Select(node => new { path = Get(node, "FullPath"), kind = Get(node, "Kind").ToString(), configuration = Get(node, "Configuration") }).ToArray();
             Report["nativeExternalFiles"] = external;
             Console.WriteLine("NATIVE: external documents listed separately=" + external.Count);
         }
@@ -507,6 +738,10 @@ internal static class Program
             .Where(group => group.configurations.Length > 1).ToArray();
         Scans.Add(new { mode, nodeCount = nodes.Length, drawings, statuses, multipleConfigurations = configurations });
         if (!Equals(Report["structureOnly"], true) && drawings.Length != expectedDrawings) throw new InvalidOperationException("真实关联工程图未全部发现：" + drawings.Length + "/" + expectedDrawings);
+        if (Report.TryGetValue("expectedDrawingNames", out var expectedNames)
+            && !((string[])expectedNames).OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .SequenceEqual(drawings.Select(Path.GetFileName).OrderBy(name => name, StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException("工程图实际名称与已核对的验收清单不一致。");
         Console.WriteLine("NATIVE PASS: " + mode + " nodes=" + nodes.Length + " drawings=" + drawings.Length);
         Console.WriteLine("NATIVE: files referenced in multiple configurations=" + configurations.Length);
         if (Equals(Report["archivePreload"], true))
@@ -549,6 +784,8 @@ internal static class Program
             type.GetField("apiClient", Members).SetValue(addin, null);
         }
         var previous = SynchronizationContext.Current;
+        var plannedPaths = ((IEnumerable)items).Cast<object>().Select(item => (string)Get(Get(item, "Node"), "FullPath")).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var outsideHashes = HashFiles((string)Report["copies"]).Where(pair => !plannedPaths.Contains(Path.Combine((string)Report["copies"], pair.Key))).ToDictionary(pair => pair.Key, pair => pair.Value);
         var drawingHashes = HashFiles((string)Report["copies"]).Where(pair => pair.Key.EndsWith(".SLDDRW", StringComparison.OrdinalIgnoreCase)).ToDictionary(pair => pair.Key, pair => pair.Value);
         using (var host = new Form { ShowInTaskbar = false, Opacity = 0 })
         using (var pane = (Control)Activator.CreateInstance(plugin.GetType("Upton.Pdm.SolidWorks.PdmTaskPaneControl", true), Members & ~BindingFlags.Static, null, new object[] { "隔离存档准备验收" }, null))
@@ -576,6 +813,11 @@ internal static class Program
                     .GroupBy(node => (string)Get(node, "FullPath"), StringComparer.OrdinalIgnoreCase)
                     .ToDictionary(group => group.Key, group => (IReadOnlyList<string>)group.Select(node => (string)Get(node, "Configuration")).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), StringComparer.OrdinalIgnoreCase);
                 var propertiesByPath = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+                var initialFlags = ((IEnumerable)items).Cast<object>().Select(item => (string)Get(Get(item, "Node"), "FullPath"))
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToDictionary(path => path,
+                        path => (app.GetOpenDocumentByName(path) as IModelDoc2)?.GetSaveFlag() == true, StringComparer.OrdinalIgnoreCase);
+                long peakBytes = Process.GetProcessById(app.GetProcessID()).PrivateMemorySize64;
+                var drawingsRead = 0;
                 foreach (var item in (IEnumerable)items)
                 {
                     var node = Get(item, "Node");
@@ -585,11 +827,14 @@ internal static class Program
                     {
                         type.GetMethod("ValidateDrawingModelsSaved", Members).Invoke(addin, new object[] { node, null });
                         var document = app.GetOpenDocumentByName((string)Get(node, "FullPath")) as IModelDoc2;
+                        var owned = document == null;
+                        if (owned) document = (IModelDoc2)type.GetMethod("OpenDrawingForArchive", Members).Invoke(addin, new object[] { Get(node, "FullPath") });
                         var create = type.GetMethods(Members).Single(method => method.Name == "CreateCheckInUploadCopy"
                             && method.GetParameters().Length == 3 && method.GetParameters()[0].ParameterType.Name == "IModelDoc2");
-                        var copy = (string)create.Invoke(addin, new object[] { document, Get(node, "FullPath"), Guid.NewGuid() });
+                        string copy = null;
                         try
                         {
+                            copy = (string)create.Invoke(addin, new object[] { document, Get(node, "FullPath"), Guid.NewGuid() });
                             if (!File.Exists(copy) || new FileInfo(copy).Length == 0) throw new InvalidOperationException("工程图上传副本为空。");
                             type.GetMethod("ValidateDrawingModelsSaved", Members).Invoke(addin, new object[] { node, null });
                             if (Equals(Report["apiPayload"], true) && (mode == "resolved" || mode == "mixed-states" || mode == "virtual-fixture" || mode == "virtual-nested" || mode == "audit-native"))
@@ -598,20 +843,28 @@ internal static class Program
                                 Directory.CreateDirectory(staging);
                                 File.Copy(copy, Path.Combine(staging, Path.GetFileName((string)Get(node, "FullPath"))));
                             }
+                            drawingsRead++;
+                            peakBytes = Math.Max(peakBytes, Process.GetProcessById(app.GetProcessID()).PrivateMemorySize64);
+                            Console.WriteLine("DRAWING " + drawingsRead + ": " + Get(node, "FileName") + " privateBytes=" + peakBytes);
                         }
-                        finally { type.GetMethod("DeleteCheckInUploadCopy", Members).Invoke(null, new object[] { copy }); }
+                        finally
+                        {
+                            if (copy != null) type.GetMethod("DeleteCheckInUploadCopy", Members).Invoke(null, new object[] { copy });
+                            if (owned && document != null) type.GetMethod("CloseArchiveReadDocument", Members).Invoke(addin, new object[] { document });
+                        }
                     }
                 }
-                var ownedDrawings = (ISet<string>)type.GetField("preloadedOwnedDrawings", Members).GetValue(addin);
-                var dirty = (app.GetDocuments() as Array)?.Cast<object>().OfType<IModelDoc2>().Where(document => document.GetSaveFlag()
-                    && !ownedDrawings.Contains(document.GetPathName())).Select(document => document.GetPathName()).ToArray() ?? new string[0];
-                if (dirty.Length != 0) throw new InvalidOperationException("统一保存后只读预检再次触发未保存状态：" + string.Join("、", dirty));
+                type.GetMethod("ValidateBatchSavedState", Members).Invoke(addin, new object[] { items, initialFlags, false });
+                Report["streamedDrawings"] = drawingsRead; Report["archivePeakPrivateBytes"] = peakBytes;
                 if (!drawingHashes.Where(pair => mode != "existing-drawing" || !string.Equals(Path.Combine((string)Report["copies"], pair.Key),
                     (string)Report["existingDrawingPath"], StringComparison.OrdinalIgnoreCase))
                     .All(pair => Hash(Path.Combine((string)Report["copies"], pair.Key)) == pair.Value)) throw new InvalidOperationException("临时工程图预加载改写了源工程图。");
                 if (Equals(Report["apiPayload"], true) && (mode == "resolved" || mode == "mixed-states" || mode == "virtual-fixture" || mode == "virtual-nested" || mode == "audit-native"))
                     WriteNativeApiPayload(plugin, app, addin, root, items, propertiesByPath);
                 Report["sourceDrawingsUnchanged"] = true;
+                if (outsideHashes.Any(pair => Hash(Path.Combine((string)Report["copies"], pair.Key)) != pair.Value))
+                    throw new InvalidOperationException("存档准备改写了结构外文件，验证失败。");
+                Report["outsideFilesUnchanged"] = true;
                 Console.WriteLine("NATIVE PRELOAD PASS: " + mode + " models saved before drawings; final read-only preflight clean");
             }
             finally
@@ -709,6 +962,7 @@ internal static class Program
             return BitConverter.ToString(hash.ComputeHash(stream)).Replace("-", "");
     }
     private static Dictionary<string, string> HashFiles(string root) => Directory.GetFiles(root, "*", SearchOption.AllDirectories)
+        .Where(path => !Path.GetFileName(path).StartsWith("~$", StringComparison.Ordinal) || new FileInfo(path).Length >= 1024)
         .ToDictionary(path => path.Substring(root.TrimEnd(Path.DirectorySeparatorChar).Length + 1), Hash, StringComparer.OrdinalIgnoreCase);
     private static bool SameHashes(Dictionary<string, string> before, Dictionary<string, string> after) => before.Count == after.Count
         && before.All(pair => after.TryGetValue(pair.Key, out var hash) && pair.Value == hash);

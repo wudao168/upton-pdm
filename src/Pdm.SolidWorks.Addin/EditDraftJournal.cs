@@ -167,17 +167,25 @@ internal sealed class EditDraftJournal
     public bool HasVerifiedDraft(LocalEditDraft entry) => !string.IsNullOrWhiteSpace(entry.DraftPath)
         && File.Exists(entry.DraftPath) && string.Equals(Hash(entry.DraftPath), entry.DraftSha256, StringComparison.OrdinalIgnoreCase);
 
-    public bool Restore(LocalEditDraft entry, string target, Guid? latestVersionId)
+    public static bool MatchesBase(LocalEditDraft entry, Guid? latestVersionId, string latestSha256) =>
+        latestVersionId.HasValue && (entry.BaseVersionId == latestVersionId
+            || !string.IsNullOrWhiteSpace(entry.BaseSha256) && !string.IsNullOrWhiteSpace(latestSha256)
+                && string.Equals(entry.BaseSha256, latestSha256, StringComparison.OrdinalIgnoreCase));
+
+    public bool Restore(LocalEditDraft entry, string target, Guid? latestVersionId, string latestSha256 = null)
     {
         if (!entry.RestoreOnOpen) return false;
-        if (entry.BaseVersionId != latestVersionId)
+        if (!MatchesBase(entry, latestVersionId, latestSha256))
             throw new InvalidOperationException("服务器已有新版本，本机草稿已保留，不能直接覆盖。请核对并合并修改。草稿位置：" + Path.GetDirectoryName(entry.DraftPath));
         if (!HasVerifiedDraft(entry)) throw new IOException("本机草稿校验失败，已停止恢复。请检查草稿文件及磁盘状态。");
-        if (!string.Equals(Path.GetFullPath(entry.SourcePath), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("工作区路径已变化，草稿已保留，请在原工作区恢复：" + entry.SourcePath);
+        var samePath = string.Equals(Path.GetFullPath(entry.SourcePath), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase);
+        if (!samePath && File.Exists(entry.SourcePath)
+            && !string.Equals(Hash(entry.SourcePath), entry.DiskSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("原工作文件还有更新的本地修改，两份文件及草稿均已保留，请核对后恢复：" + entry.SourcePath);
         var current = Hash(target);
         if (string.Equals(current, entry.DraftSha256, StringComparison.OrdinalIgnoreCase)) return false;
-        if (!string.Equals(current, entry.DiskSha256, StringComparison.OrdinalIgnoreCase))
+        var expectedDisk = samePath ? entry.DiskSha256 : latestSha256;
+        if (string.IsNullOrWhiteSpace(expectedDisk) || !string.Equals(current, expectedDisk, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("本地图档已有其他修改，已保留图档和草稿，请核对后恢复。草稿位置：" + Path.GetDirectoryName(entry.DraftPath));
         // Retain both files. Never replace an unrecognized local revision.
         var temporary = target + "." + Guid.NewGuid().ToString("N") + ".draft";

@@ -16,6 +16,8 @@ public sealed record DocumentReferenceNode(
 {
     public ReferenceRole Role { get; init; } = ReferenceRole.Component;
 
+    public bool TreeScopeOnly { get; init; }
+
     public bool HasBlockingIssue => Status == ReferenceNodeStatus.Missing || Children.Any(child => child.HasBlockingIssue);
 }
 
@@ -38,6 +40,11 @@ public static class ReferenceTreeDiff
 {
     public static IReadOnlyList<ReferenceTreeChange> Compare(DocumentReferenceNode previous, DocumentReferenceNode current)
     {
+        if (current.TreeScopeOnly)
+        {
+            previous = ArchiveSafety.StructureOnly(previous);
+            current = ArchiveSafety.StructureOnly(current);
+        }
         var before = Flatten(previous);
         var after = Flatten(current);
         var changes = new List<ReferenceTreeChange>();

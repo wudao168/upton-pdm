@@ -10,6 +10,13 @@ namespace Upton.Pdm.Domain.Tests;
 [Collection("BomHeader automatic queue")]
 public sealed class BomHeaderServiceTests
 {
+    private sealed class ReceiptObserver : IReleaseDeliveryObserver
+    {
+        public List<U9ReleaseScope> Scopes { get; } = [];
+        public Task PublishedAsync(Guid id, CancellationToken ct) => Task.CompletedTask;
+        public Task U9ResultAsync(Guid projectId, ProjectBomHeaderKind kind, U9ReleaseScope sourceScope, string state, string message, CancellationToken ct)
+        { Scopes.Add(sourceScope); return Task.CompletedTask; }
+    }
     [Fact]
     public async Task HeaderDirectory_IsReadOnly_AndOrdinaryPagingUsesActualLinks()
     {
@@ -594,7 +601,8 @@ public sealed class BomHeaderServiceTests
 
         var client = new ApprovalAutomationClient();
         var u9 = new U9BomWriteService(materials, repository, client, client, new TestProtector(), time);
-        var service = new ProjectBomU9SyncService(repository, materials, u9, time);
+        var receiptObserver = new ReceiptObserver();
+        var service = new ProjectBomU9SyncService(repository, materials, u9, time, receiptObserver);
 
         var preview = await service.PreviewAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", UserRole.Administrator, default);
         Assert.Equal(ProjectBomU9SyncState.CreateRequired, preview.State);
@@ -629,6 +637,7 @@ public sealed class BomHeaderServiceTests
         var verified = await service.PreviewAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", UserRole.Administrator, default);
         Assert.Equal(ProjectBomU9SyncState.UpToDate, verified.State);
         Assert.Equal(0, verified.WritePreview!.AddedComponentCount);
+        Assert.Equal(released.Id, Assert.Single(receiptObserver.Scopes).BomVersionId);
     }
 
     [Fact]
@@ -924,6 +933,8 @@ public sealed class BomHeaderServiceTests
         var service = new ProjectBomU9SyncService(repository, materials, writer, time);
         var automatic = await service.SynchronizeApprovedAsync(ProjectId, ProjectBomHeaderKind.Standard, "admin", default);
         Assert.Equal(ProjectBomU9AutomaticState.Modified, automatic.State);
+        var sourcePackage = (await repository.ListReleasePackagesAsync(ProjectId, default)).Single(package => package.Number == $"RP-{releasedQuantity}");
+        Assert.Equal(new[] { sourcePackage.Id }, automatic.SourceScope!.ReleasePackageIds);
         Assert.Equal(1, state.WriteCount); // 不修正历史子件的生效日期。
         if (releasedQuantity == 0)
             Assert.DoesNotContain(state.Components, row => row.ItemCode == "01021000007");

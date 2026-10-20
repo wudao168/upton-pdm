@@ -10,6 +10,7 @@ internal static class SuppressedAssemblyArchive
     internal static bool HasCompleteReferences(DocumentReferenceNodeDto node, bool isRoot = true)
     {
         if (node == null) return false;
+        if (node.Role == (int)CadReferenceRole.ExternalFileDependency) return true;
         if (node.Kind == (int)CadDocumentKind.Drawing) return true;
         if (node.Status != (int)CadReferenceStatus.Virtual
             && (!node.DocumentId.HasValue || !isRoot && !PdmApiClient.HasResolvedRevision(node.Revision?.Display))) return false;
@@ -19,7 +20,7 @@ internal static class SuppressedAssemblyArchive
     public static bool IsUnexpanded(CadTreeNode node) => node != null
         && node.Kind == CadDocumentKind.Assembly
         && (node.Status == CadReferenceStatus.Suppressed || node.Status == CadReferenceStatus.Lightweight)
-        && !node.Children.Any(child => child.Kind != CadDocumentKind.Drawing);
+        && !node.Children.Any(child => child.Kind != CadDocumentKind.Drawing && child.Role != CadReferenceRole.ExternalFileDependency);
 
     public static bool MatchesConfiguration(CadTreeNode node, DocumentVersionDto version)
     {
@@ -45,7 +46,7 @@ internal static class SuppressedAssemblyArchive
             || !string.Equals(version.ReferenceSnapshot.FileName, node.FileName, StringComparison.OrdinalIgnoreCase)
             || !MatchesConfiguration(node, version)
             || version.ReferenceSnapshot.Children == null
-            || !version.ReferenceSnapshot.Children.Any(child => child.Kind != (int)CadDocumentKind.Drawing)
+            || !version.ReferenceSnapshot.Children.Any(child => child.Kind != (int)CadDocumentKind.Drawing && child.Role != (int)CadReferenceRole.ExternalFileDependency)
             || !HasCompleteReferences(version.ReferenceSnapshot)
             || !string.Equals(node.CurrentRevision, version.Revision?.Display, StringComparison.OrdinalIgnoreCase)
             || string.IsNullOrWhiteSpace(node.SuppressedArchiveSha256) || !File.Exists(node.FullPath)) return false;

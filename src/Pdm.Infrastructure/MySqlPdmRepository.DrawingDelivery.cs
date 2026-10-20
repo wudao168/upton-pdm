@@ -14,13 +14,15 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<DrawingDeliveryRow>(new CommandDefinition(
-            "SELECT state, drawing_delivery_overrides_json FROM release_package WHERE id=@ReleasePackageId FOR UPDATE",
+            "SELECT state, drawing_delivery_overrides_json,version_bindings_json FROM release_package WHERE id=@ReleasePackageId FOR UPDATE",
             new { ReleasePackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
         if (row is null) throw new PdmNotFoundException("发布包不存在。");
         if (row.State != nameof(ReleasePackageState.Published)) throw new PdmConflictException("只有已发布图纸可以调整发图信息。");
+        var boundIds = row.VersionBindingsJson is null ? [] : (JsonSerializer.Deserialize<ReleaseVersionBinding[]>(row.VersionBindingsJson, jsonOptions) ?? [])
+            .Where(item => item.Publish && item.DocumentId == documentId).Select(item => item.VersionId).ToArray();
         var belongs = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
-            "SELECT COUNT(*) FROM document_version v INNER JOIN document d ON d.id=v.document_id WHERE v.release_package_id=@ReleasePackageId AND v.document_id=@DocumentId AND d.kind='Drawing' AND v.version_status='Released'",
-            new { ReleasePackageId = releasePackageId, DocumentId = documentId }, transaction, cancellationToken: cancellationToken));
+            "SELECT COUNT(*) FROM document_version v INNER JOIN document d ON d.id=v.document_id WHERE (v.release_package_id=@ReleasePackageId OR v.id IN @BoundIds) AND v.document_id=@DocumentId AND d.kind='Drawing' AND v.version_status='Released'",
+            new { ReleasePackageId = releasePackageId, DocumentId = documentId, BoundIds = boundIds }, transaction, cancellationToken: cancellationToken));
         if (belongs == 0) throw new PdmNotFoundException("该图纸不在发布包中。");
         var overrides = JsonSerializer.Deserialize<Dictionary<Guid, DrawingDeliveryOverride>>(row.DrawingDeliveryOverridesJson ?? "{}", jsonOptions)
             ?? new Dictionary<Guid, DrawingDeliveryOverride>();
@@ -46,5 +48,6 @@ public sealed partial class MySqlPdmRepository
     {
         public string State { get; init; } = string.Empty;
         public string? DrawingDeliveryOverridesJson { get; init; }
+        public string? VersionBindingsJson { get; init; }
     }
 }

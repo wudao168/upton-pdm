@@ -41,7 +41,10 @@ public sealed record ProjectBomU9AutomaticResult(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] ProjectBomU9AutomaticState State,
     string? ItemCode,
     string Message,
-    U9BomWriteExecution? Execution = null);
+    U9BomWriteExecution? Execution = null,
+    U9ReleaseScope? SourceScope = null);
+
+public sealed record U9ReleaseScope(Guid? BomVersionId, IReadOnlyList<Guid> ReleasePackageIds);
 
 /// <summary>发布前提醒项：某个BOM子件发布后无法自动同步到U9C的原因。</summary>
 public sealed record U9SyncBlocker(int Sequence, string Category, string MaterialCode, string Name, string Reason);
@@ -50,11 +53,12 @@ public sealed class ProjectBomU9SyncService(
     IPdmRepository repository,
     IMaterialRepository materials,
     U9BomWriteService u9BomWriteService,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    IReleaseDeliveryObserver? releaseDeliveryObserver = null)
 {
     private static readonly ConcurrentDictionary<(Guid ProjectId, ProjectBomHeaderKind Kind), SemaphoreSlim> AutomationLocks = new();
-    private sealed record CommandBuild(U9BomWriteCommand Command, bool ComponentsApproved);
-    private sealed record ApprovedComponents(bool Approved, IReadOnlyList<U9BomComponentCommand> Components);
+    private sealed record CommandBuild(U9BomWriteCommand Command, bool ComponentsApproved, U9ReleaseScope? SourceScope);
+    private sealed record ApprovedComponents(bool Approved, IReadOnlyList<U9BomComponentCommand> Components, U9ReleaseScope? SourceScope = null);
 
     public async Task<ProjectBomU9SyncPreview> PreviewAsync(
         Guid projectId,
@@ -102,6 +106,20 @@ public sealed class ProjectBomU9SyncService(
         command = command with { Operation = preview.Operation };
         var execution = await u9BomWriteService.ExecuteAuthorizedAsync(
             command, preview.RequestSha256, confirmation, actor, cancellationToken);
+        if (releaseDeliveryObserver is not null && build.SourceScope is not null)
+        {
+            try
+            {
+                await releaseDeliveryObserver.U9ResultAsync(projectId, kind, build.SourceScope,
+                    preview.Operation == U9BomWriteOperation.Create ? "Created" : "Modified", "手动同步已完成并回查确认。", cancellationToken);
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                BomU9AutomationRetryQueue.Schedule(projectId, kind, "U9已处理，发布回执等待重新回查", timeProvider.GetUtcNow());
+                await repository.AppendAuditAsync(new(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "release.u9-receipt.pending", "Project",
+                    projectId.ToString(), "手动U9同步已完成，发布回执将在后台回查后补齐。"), cancellationToken);
+            }
+        }
         var state = preview.Operation == U9BomWriteOperation.Create
             ? ProjectBomU9SyncState.CreateRequired
             : ProjectBomU9SyncState.ModifyRequired;
@@ -144,7 +162,7 @@ public sealed class ProjectBomU9SyncService(
                 && preview.AddedComponentCount == 0
                 && preview.ModifiedComponentCount == 0
                 && preview.DeletedComponentCount == 0)
-                return new(projectId, kind, ProjectBomU9AutomaticState.UpToDate, command.ItemCode, "U9C A1 BOM已与PLM一致。");
+                return new(projectId, kind, ProjectBomU9AutomaticState.UpToDate, command.ItemCode, "U9C A1 BOM已与PLM一致。", SourceScope: build.SourceScope);
 
             command = command with { Operation = preview.Operation };
             var execution = await u9BomWriteService.ExecuteApprovalAutomationAsync(command, preview, actor, cancellationToken);
@@ -157,7 +175,7 @@ public sealed class ProjectBomU9SyncService(
                         ? "U9C A1 BOM已按审核发布版本创建并回查确认。"
                         : "U9C A1 BOM档案已创建并回查确认；未写入工作区子件，等待BOM审核发布。"
                     : $"U9C A1 BOM已自动同步新增{preview.AddedComponentCount}项、修改{preview.ModifiedComponentCount}项、删除{preview.DeletedComponentCount}项并回查确认。",
-                execution);
+                execution, build.SourceScope);
         }
         finally
         {
@@ -209,7 +227,7 @@ public sealed class ProjectBomU9SyncService(
             PreviousApprovedComponents = kind == ProjectBomHeaderKind.Master ? null
                 : await PreviousApprovedComponentsAsync(projectId, kind, cancellationToken)
         };
-        return new(command, approved.Approved);
+        return new(command, approved.Approved, approved.SourceScope);
     }
 
     private async Task<IReadOnlyList<U9BomComponentCommand>?> PreviousApprovedComponentsAsync(
@@ -303,7 +321,7 @@ public sealed class ProjectBomU9SyncService(
                 U9UnitCatalog.NormalizeBomUnit(item.Unit),
                 Remark: item.Remark));
         }
-        return new(true, result);
+        return new(true, result, category.SourceScope);
     }
 
     /// <summary>
@@ -342,7 +360,7 @@ public sealed class ProjectBomU9SyncService(
         _ => "电气件"
     };
 
-    private async Task<(bool Approved, IReadOnlyList<BomItem> Items)> ApprovedCategoryItemsAsync(
+    private async Task<(bool Approved, IReadOnlyList<BomItem> Items, U9ReleaseScope? SourceScope)> ApprovedCategoryItemsAsync(
         Guid projectId,
         ProjectBomHeaderKind kind,
         CancellationToken cancellationToken)
@@ -372,7 +390,8 @@ public sealed class ProjectBomU9SyncService(
             _ => (ReleaseScope?)null
         };
         if (!longLeadScope.HasValue)
-            return released is null && categoryPackage is null ? (false, []) : (true, baseItems);
+            return released is null && categoryPackage is null ? (false, [], null)
+                : (true, baseItems, new(released?.Id, usePackage ? [categoryPackage!.Id] : []));
         var longLeadPackages = packages
             .Where(package => package.Scope == longLeadScope.Value
                 && package.State == ReleasePackageState.Published
@@ -380,7 +399,7 @@ public sealed class ProjectBomU9SyncService(
                 && (!basePublishedAt.HasValue || package.PublishedAt.Value > basePublishedAt.Value))
             .OrderBy(package => package.PublishedAt ?? package.CreatedAt)
             .ToArray();
-        if (released is null && categoryPackage is null && longLeadPackages.Length == 0) return (false, []);
+        if (released is null && categoryPackage is null && longLeadPackages.Length == 0) return (false, [], null);
 
         static string MaterialKey(BomItem item) => $"{item.DrawingNumber.Trim()}|{item.Unit.Trim()}";
         var merged = new Dictionary<string, BomItem>(StringComparer.OrdinalIgnoreCase);
@@ -402,7 +421,9 @@ public sealed class ProjectBomU9SyncService(
                     : releasedItem;
             }
         }
-        return (true, merged.Values.OrderBy(item => item.Sequence).ThenBy(item => item.Id).ToArray());
+        return (true, merged.Values.OrderBy(item => item.Sequence).ThenBy(item => item.Id).ToArray(),
+            new(usePackage ? null : released?.Id, (usePackage ? new[] { categoryPackage!.Id } : [])
+                .Concat(longLeadPackages.Select(package => package.Id)).ToArray()));
     }
 
     private static bool PackageMatchesKind(ReleaseScope scope, ProjectBomHeaderKind kind) => kind switch

@@ -6,7 +6,8 @@ export interface OplIssue {
   completedAt: string | null; updatedBy: string; updatedAt: string; rowVersion: number; attachments: OplAttachment[]; relatedProjectId?: string | null
   notification?: { sent: boolean; message: string }
 }
-export interface OplRow { issue: OplIssue; canEdit: boolean; canComplete: boolean }
+export interface OplReleaseRecord { releasePackageId: string; projectId: string; packageNumber: string; bomType: string; drawingCount: number; publishedAt: string }
+export interface OplRow { issue: OplIssue; canEdit: boolean; canComplete: boolean; isNew?: boolean; releases?: OplReleaseRecord[] }
 export interface OplProject { id: string; code: string; name: string }
 export interface OplView { rows: OplRow[]; people: Array<{ username: string; displayName: string }>; rootProject?: OplProject; subprojects?: OplProject[] }
 export interface OplInput {

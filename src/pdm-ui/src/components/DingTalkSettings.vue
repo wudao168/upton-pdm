@@ -50,5 +50,5 @@ onMounted(load)
 </template>
 <style scoped>
 .ding-settings { flex:1;display:flex;flex-direction:column;gap:14px;overflow:auto;min-height:0;height:auto; }.ding-settings > * { flex-shrink:0; }.ding-fields { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px; }.ding-toolbar { display:flex;justify-content:space-between;align-items:center; } .ding-settings h3 { margin:8px 0; } @media(max-width:700px){.ding-fields{grid-template-columns:1fr}}
-.ding-template{display:flex;flex-direction:column;gap:10px}.ding-message-preview{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:var(--pdm-surface-muted,#f5f7fa);border:1px solid var(--pdm-border);border-radius:6px;padding:14px;margin:0}
+.ding-template{display:flex;flex-direction:column;gap:10px}.ding-message-preview{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:var(--pdm-surface-muted,var(--pdm-bg));border:1px solid var(--pdm-border);border-radius:6px;padding:14px;margin:0}
 </style>

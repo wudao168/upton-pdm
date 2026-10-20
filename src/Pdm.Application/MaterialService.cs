@@ -11,7 +11,8 @@ public sealed class MaterialService(
     IPdmRepository repository,
     IU9SecretProtector secretProtector,
     IU9OpenApiClient u9Client,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    WorkflowNotificationService? workflowNotifications = null)
 {
     private const string PendingApplicationCodePrefix = "PDM-PENDING-";
     private const long DefaultMaterialCodeStartSequence = 1_000_000;
@@ -399,6 +400,7 @@ public sealed class MaterialService(
             if (approvalTemplate is not null)
                 application = application with { ApprovalWorkflow = await new MaterialCodeApprovalWorkflow(repository, timeProvider).CreateAsync(command.ProjectId, actor, approvalTemplate, cancellationToken) };
             application = await materials.CreateMaterialCodeApplicationAsync(application, cancellationToken);
+            if (workflowNotifications is not null) await workflowNotifications.CaptureMaterialAsync(application, cancellationToken);
             if (signature is not null) createdBySignature[signature] = application;
             await AuditAsync(actor, "material-code.application.create", application.Id, $"申请BOM物料料号：BOM {application.BomItemId}", cancellationToken);
             results.Add(resolution with { Status = MaterialCodeResolutionStatus.ApplicationPending, Application = application });

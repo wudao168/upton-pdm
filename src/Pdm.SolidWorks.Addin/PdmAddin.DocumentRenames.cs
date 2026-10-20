@@ -51,7 +51,8 @@ public sealed partial class PdmAddin
         {
             if (embeddedReferences.Contains(path)) continue;
             if (IsSolidWorksTemporaryVirtualComponentPath(path)) throw new InvalidOperationException("嵌入式组件的原生路径尚未完整核对，已停止主图档改名。");
-            if (candidates.Any(candidate => PathsEqual(candidate.FullPath, path))) continue;
+            if (candidates.Any(candidate => PathsEqual(candidate.FullPath, path)
+                || candidate.IsRenamePendingSave && PathsEqual(candidate.SourceReferencePath, path))) continue;
             var kind = DocumentKindFromPath(path);
             if (kind != CadDocumentKind.Part && kind != CadDocumentKind.Assembly && kind != CadDocumentKind.Drawing) continue;
             var candidate = new CadTreeNode { FullPath = path, SourceReferencePath = path, FileName = Path.GetFileName(path), Kind = kind };
@@ -70,18 +71,29 @@ public sealed partial class PdmAddin
                 throw new InvalidOperationException("引用当前总装的图档不是可编辑工作副本，请先从所属项目获取：" + candidate.FileName);
             if (candidate.DocumentId.HasValue && !IsCheckedOutByCurrentUser(candidate))
                 throw new InvalidOperationException("请先获取引用当前总装的图档的编辑权限：" + candidate.FileName);
-            EnsureLocalRenameFileWritable(candidate);
-            if (FindLoadedDocument(candidate.FullPath)?.Visible == true)
+            // RenameDocument can change the in-memory path before SaveReferenced creates
+            // that path on disk. Validate the known original, then recheck the saved target.
+            var pendingPath = candidate.IsRenamePendingSave && !PathsEqual(readablePath, candidate.FullPath);
+            EnsureLocalRenameFileWritable(pendingPath
+                ? new CadTreeNode { FullPath = readablePath, DocumentId = candidate.DocumentId } : candidate);
+            var loadedDependent = FindLoadedDocument(candidate.FullPath)
+                ?? (pendingPath ? FindLoadedDocument(readablePath) : null);
+            if (loadedDependent?.Visible == true)
                 throw new InvalidOperationException("请先保存并关闭引用当前总装的图档，再执行改名：" + candidate.FileName);
+            if (loadedDependent?.IsOpenedReadOnly() == true)
+                throw new InvalidOperationException("引用当前总装的图档以只读方式打开，已停止改名：" + candidate.FileName);
             dependents.Add(candidate);
         }
         if (document.GetSaveFlag() || document.Extension.HasRenamedDocuments())
         {
             var errors = 0; var warnings = 0;
             if (!document.Save3((int)(swSaveAsOptions_e.swSaveAsOptions_Silent | swSaveAsOptions_e.swSaveAsOptions_SaveReferenced), ref errors, ref warnings)
-                || document.GetSaveFlag())
+                || errors != 0 || document.GetSaveFlag())
                 throw new IOException("总装及待改名子件尚未保存，已停止主图档改名。请先保存后重试。错误码：" + errors + "，警告码：" + warnings);
         }
+        foreach (var pending in candidates.Where(candidate => candidate.IsRenamePendingSave))
+            if (!File.Exists(pending.FullPath) || new FileInfo(pending.FullPath).Length == 0)
+                throw new IOException("待改名子件的新文件尚未完整保存，已停止主图档改名：" + pending.FileName);
         var references = dependents.ToDictionary(candidate => candidate.FullPath,
             candidate =>
             {

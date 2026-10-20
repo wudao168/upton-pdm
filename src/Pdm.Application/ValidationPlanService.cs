@@ -11,7 +11,8 @@ public sealed class ValidationPlanService(
     IValidationPlanTextRecognitionService recognition,
     IValidationPlanFileArchive fileArchive,
     TimeProvider timeProvider,
-    bool qualityAcceptance = false)
+    bool qualityAcceptance = false,
+    WorkflowNotificationService? workflowNotifications = null)
 {
     private static readonly HashSet<string> InformationSources =
         ["技术协议", "技术方案", "内部评审", "客户评审"];
@@ -305,6 +306,7 @@ public sealed class ValidationPlanService(
         var now = timeProvider.GetUtcNow();
         var tasks = await BuildApprovalTasksAsync(current.Id, workflow, project, actor, now, cancellationToken);
         var saved = await validationPlans.SubmitAsync(current.Id, expectedRowVersion, workflow.Code, workflow.Version, tasks, actor, now, cancellationToken);
+        if (!qualityAcceptance && workflowNotifications is not null) await workflowNotifications.CaptureValidationAsync(saved, cancellationToken);
         await AuditAsync(actor, "project.validation-plan.submit", nameof(ProjectValidationPlan), saved.Id, $"提交验证计划R{saved.RevisionNumber}审批；模板v{workflow.Version}", cancellationToken);
         return saved;
     }

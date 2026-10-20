@@ -131,13 +131,17 @@ public sealed record ReleasePreviewSource(
     long FileLength,
     string Sha256,
     string SourceSha256,
-    string ExpectedFormalRevision = "");
+    string ExpectedFormalRevision = "",
+    bool AlreadyReleased = false);
 
 public sealed record ReleasePublication(
     string PublishedPath,
     IReadOnlyDictionary<Guid, DocumentPreviewArtifact> Previews,
     string? PreviewError = null,
-    IReadOnlyDictionary<Guid, FormalDrawingSource>? FormalDrawings = null);
+    IReadOnlyDictionary<Guid, FormalDrawingSource>? FormalDrawings = null)
+{
+    public DateTimeOffset? PublishedAt { get; init; }
+}
 
 public sealed record FormalDrawingSource(Guid SourceVersionId, string StorageRelativePath, long FileLength, string Sha256, string Revision, string QrContent);
 
@@ -247,12 +251,15 @@ public sealed record CreateNumberedProjectCommand(
     Guid CustomerId,
     string Name,
     string? ProjectAlias,
-    DateOnly SignedDate,
+    DateOnly? SignedDate,
     int Quantity,
     string Owner,
     string VaultLocation,
     string ReleaseLocation,
-    string BomItemCategoryCode = "0302");
+    string BomItemCategoryCode = "0302")
+{
+    public ProjectApplicationApproval? ApplicationApproval { get; init; }
+}
 
 public sealed record CreateSubprojectCommand(
     Guid ParentProjectId,
@@ -270,7 +277,7 @@ public sealed record UpdateProjectDetailsCommand(
     Guid? CustomerId,
     string Name,
     string? ProjectAlias,
-    DateOnly SignedDate,
+    DateOnly? SignedDate,
     int Quantity);
 
 public sealed record SaveProjectOrganizationCommand(
@@ -289,7 +296,8 @@ public sealed record SaveOrganizationUnitCommand(
     OrganizationUnitKind Kind,
     bool IsActive,
     int SortOrder,
-    bool CanManufacture = false);
+    bool CanManufacture = false,
+    bool CanArchiveStandardLibrary = false);
 
 public sealed record SetMainProjectStaffingCommand(
     string PrimaryProjectManager,
@@ -482,6 +490,8 @@ public interface IPdmRepository
     Task<EquipmentTypeDefinition> SaveEquipmentTypeAsync(int code, string name, bool isActive, CancellationToken cancellationToken);
     Task<PdmSystemSettings> GetSystemSettingsAsync(CancellationToken cancellationToken);
     Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken);
+    async Task SetBrowserCadArchiveEnabledAsync(bool enabled, CancellationToken ct) =>
+        await UpdateSystemSettingsAsync((await GetSystemSettingsAsync(ct)) with { BrowserCadArchiveEnabled = enabled }, ct);
     Task<ProjectPermissionSettings> GetProjectPermissionSettingsAsync(CancellationToken cancellationToken);
     Task<ProjectPermissionSettings> UpdateProjectPermissionSettingsAsync(ProjectPermissionSettings settings, CancellationToken cancellationToken);
     Task<IReadOnlyDictionary<string, int>> GetProjectPositionUsageAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
@@ -509,6 +519,7 @@ public interface IPdmRepository
     Task<Project> SetChildProjectDesignersAsync(Guid projectId, IReadOnlyList<string> designers, string actor, CancellationToken cancellationToken);
     Task<Project> SetProjectPhaseOwnersAsync(Guid projectId, IReadOnlyDictionary<string, string> phaseOwners, string actor, CancellationToken cancellationToken);
     Task<Project> CreateNumberedProjectAsync(CreateNumberedProjectCommand command, CancellationToken cancellationToken);
+    Task<string> ReserveBusinessNumberAsync(string prefix, CancellationToken cancellationToken);
     Task<Project> CreateSubprojectAsync(CreateSubprojectCommand command, CancellationToken cancellationToken);
     Task EnsureProjectFolderTreeAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<ProjectFolder>> ListProjectFoldersAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken);
@@ -643,6 +654,7 @@ public interface IPdmRepository
     Task<ArchiveBatchReceipt> CheckInBatchVersionsAsync(Guid batchId, string requestHash, string actor, Guid sessionId,
         IReadOnlyList<ArchiveBatchFile> files, CancellationToken cancellationToken);
     Task<DocumentVersion> PublishDocumentVersionAsync(Guid documentId, Guid sourceVersionId, Guid releasePackageId, Guid approvalTaskId, string actor, CancellationToken cancellationToken);
+    Task AttachWorkVersionPreviewAsync(Guid documentId, Guid versionId, DocumentPreviewArtifact preview, CancellationToken ct);
     Task<IReadOnlyList<DocumentVersion>> PublishReleasePackageVersionsAsync(
         Guid releasePackageId,
         Guid approvalTaskId,
@@ -743,7 +755,7 @@ public interface IServerPreviewConverter
         ReleasePackage package, Project project, IReadOnlyList<ReleasePreviewSource> sources,
         string stagingDirectory, CancellationToken cancellationToken) =>
         sources.Any(source => source.Kind == DocumentKind.Drawing)
-            ? throw new PdmRuleException("正式图纸生成器不可用，已停止图纸发布。")
+            ? throw new PdmRuleException("无法核对审批冻结工程图的来源，已停止图纸发布。")
             : Task.FromResult<IReadOnlyDictionary<Guid, FormalDrawingSource>>(new Dictionary<Guid, FormalDrawingSource>());
     Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateAsync(
         ReleasePackage package,

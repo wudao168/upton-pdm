@@ -1,0 +1,185 @@
+/* 五套全局主题：页面、浮层及客户端共用，状态色独立于主题。 */
+:root {
+  --pdm-theme-accent: #1d4ed8;
+  --pdm-theme-accent-hover: #1e40af;
+  --pdm-theme-accent-soft: #eff6ff;
+  --pdm-theme-accent-soft-strong: #dbeafe;
+  --pdm-bg: #f5f8fd;
+  --pdm-surface: #fff;
+  --pdm-surface-muted: #edf2f9;
+  --pdm-border: #c7d3e3;
+  --pdm-text: #1e293b;
+  --pdm-text-soft: #50627a;
+  --pdm-sidebar: #1d2b42;
+  --pdm-sidebar-active: #2e466c;
+}
+
+:root[data-pdm-theme="c"] {
+  --pdm-theme-accent: #0f766e;
+  --pdm-theme-accent-hover: #115e59;
+  --pdm-theme-accent-soft: #effaf7;
+  --pdm-theme-accent-soft-strong: #ccf1ea;
+  --pdm-bg: #f4f9f8;
+  --pdm-surface-muted: #ebf3f1;
+  --pdm-border: #c2d6d1;
+  --pdm-text: #203530;
+  --pdm-text-soft: #4b6961;
+  --pdm-sidebar: #203a35;
+  --pdm-sidebar-active: #2c534b;
+}
+
+:root[data-pdm-theme="p"] {
+  --pdm-theme-accent: #6d28d9;
+  --pdm-theme-accent-hover: #5b21b6;
+  --pdm-theme-accent-soft: #f5f0fe;
+  --pdm-theme-accent-soft-strong: #ede4fc;
+  --pdm-bg: #f8f6fc;
+  --pdm-surface-muted: #f0ecf6;
+  --pdm-border: #d5cce4;
+  --pdm-text: #2e263c;
+  --pdm-text-soft: #685b7a;
+  --pdm-sidebar: #30263f;
+  --pdm-sidebar-active: #4d3a68;
+}
+
+:root[data-pdm-theme="o"] {
+  --pdm-theme-accent: #a84b08;
+  --pdm-theme-accent-hover: #863c07;
+  --pdm-theme-accent-soft: #fff6ec;
+  --pdm-theme-accent-soft-strong: #fce6cf;
+  --pdm-bg: #fcf8f3;
+  --pdm-surface-muted: #f5eee5;
+  --pdm-border: #dfcdba;
+  --pdm-text: #392d22;
+  --pdm-text-soft: #77624f;
+  --pdm-sidebar: #3e3025;
+  --pdm-sidebar-active: #604731;
+}
+
+:root[data-pdm-theme="g"] {
+  --pdm-theme-accent: #52525b;
+  --pdm-theme-accent-hover: #3f3f46;
+  --pdm-theme-accent-soft: #f4f4f5;
+  --pdm-theme-accent-soft-strong: #e4e4e7;
+  --pdm-bg: #f7f7f8;
+  --pdm-surface-muted: #eeeef0;
+  --pdm-border: #d1d1d7;
+  --pdm-text: #27272a;
+  --pdm-text-soft: #62626c;
+  --pdm-sidebar: #303036;
+  --pdm-sidebar-active: #494950;
+}
+
+:root {
+  --pdm-on-accent: #fff;
+  --pdm-theme-accent-border: color-mix(in srgb, var(--pdm-theme-accent) 40%, var(--pdm-surface));
+  --pdm-theme-accent-focus: color-mix(in srgb, var(--pdm-theme-accent) 18%, transparent);
+  --pdm-border-soft: var(--pdm-border);
+  --pdm-muted: var(--pdm-text-soft);
+  --pdm-text-muted: var(--pdm-text-soft);
+  --pdm-text-disabled: color-mix(in srgb, var(--pdm-text-soft) 65%, var(--pdm-surface));
+  --pdm-detail-row: var(--pdm-surface);
+  --pdm-detail-row-alt: var(--pdm-surface-muted);
+  --pdm-surface-soft: var(--pdm-surface-muted);
+  --pdm-panel: var(--pdm-surface);
+  --pdm-panel-bg: var(--pdm-surface);
+  --pdm-table-header: var(--pdm-surface-muted);
+  --pdm-sidebar-text: #fff;
+  --pdm-sidebar-text-soft: color-mix(in srgb, var(--pdm-sidebar-text) 78%, var(--pdm-sidebar));
+  --pdm-sidebar-hover: color-mix(in srgb, var(--pdm-sidebar-active) 65%, var(--pdm-sidebar));
+  --pdm-shadow: color-mix(in srgb, var(--pdm-sidebar) 13%, transparent);
+  --pdm-shadow-strong: color-mix(in srgb, var(--pdm-sidebar) 24%, transparent);
+  --pdm-overlay: color-mix(in srgb, var(--pdm-sidebar) 42%, transparent);
+  --pdm-primary: var(--pdm-theme-accent);
+  --pdm-blue: var(--pdm-theme-accent);
+  --pdm-blue-soft: var(--pdm-theme-accent-soft);
+  --pdm-purple: var(--pdm-theme-accent);
+  --pdm-green: #15803d;
+  --pdm-green-soft: #ecfdf3;
+  --pdm-green-border: #bbe7c9;
+  --pdm-orange: #92400e;
+  --pdm-orange-soft: #fff6df;
+  --pdm-orange-border: #f2db9e;
+  --pdm-warning-highlight: #f59e0b;
+  --pdm-danger: #b91c1c;
+  --pdm-danger-soft: #fef2f2;
+  --pdm-danger-border: #fecaca;
+  --pdm-change-highlight: #fff0a8;
+  --pdm-change-highlight-hover: #ffe477;
+  /* 轨道和未选中页签透出所在容器底色，只有选中态加深。 */
+  --pdm-tabs-track: transparent;
+  --shell-accent: var(--pdm-theme-accent);
+  --shell-accent-hover: var(--pdm-theme-accent-hover);
+  --shell-accent-soft: var(--pdm-theme-accent-soft);
+  --shell-accent-border: var(--pdm-theme-accent-border);
+  --shell-brand: var(--pdm-theme-accent);
+  --shell-nav-icon: var(--pdm-sidebar-text);
+  --shell-sidebar-active: var(--pdm-sidebar-active);
+  --shell-content-bg: var(--pdm-bg);
+  --el-color-primary: var(--pdm-theme-accent);
+  --el-color-primary-dark-2: var(--pdm-theme-accent-hover);
+  --el-color-primary-light-3: color-mix(in srgb, var(--pdm-theme-accent) 70%, var(--pdm-surface));
+  --el-color-primary-light-5: var(--pdm-theme-accent-border);
+  --el-color-primary-light-7: var(--pdm-theme-accent-soft-strong);
+  --el-color-primary-light-8: var(--pdm-theme-accent-soft);
+  --el-color-primary-light-9: var(--pdm-theme-accent-soft);
+  --el-color-white: var(--pdm-surface);
+  --el-color-black: var(--pdm-text);
+  --el-text-color-primary: var(--pdm-text);
+  --el-text-color-regular: var(--pdm-text-soft);
+  --el-text-color-secondary: var(--pdm-muted);
+  --el-text-color-placeholder: var(--pdm-text-disabled);
+  --el-text-color-disabled: var(--pdm-text-disabled);
+  --el-border-color: var(--pdm-border);
+  --el-border-color-light: var(--pdm-border-soft);
+  --el-border-color-lighter: var(--pdm-border-soft);
+  --el-border-color-extra-light: var(--pdm-border-soft);
+  --el-border-color-dark: var(--pdm-border);
+  --el-border-color-darker: var(--pdm-theme-accent-border);
+  --el-fill-color: var(--pdm-surface-muted);
+  --el-fill-color-light: var(--pdm-bg);
+  --el-fill-color-lighter: var(--pdm-surface-muted);
+  --el-fill-color-extra-light: var(--pdm-bg);
+  --el-fill-color-dark: var(--pdm-border);
+  --el-fill-color-darker: var(--pdm-theme-accent-border);
+  --el-fill-color-blank: var(--pdm-surface);
+  --el-bg-color: var(--pdm-surface);
+  --el-bg-color-page: var(--pdm-bg);
+  --el-bg-color-overlay: var(--pdm-surface);
+  --el-mask-color: var(--pdm-overlay);
+  --el-box-shadow: 0 12px 32px var(--pdm-shadow-strong);
+  --el-box-shadow-light: 0 3px 12px var(--pdm-shadow);
+  --el-box-shadow-lighter: 0 1px 4px var(--pdm-shadow);
+  --el-color-success: var(--pdm-green);
+  --el-color-success-dark-2: var(--pdm-green);
+  --el-color-success-light-3: var(--pdm-green-border);
+  --el-color-success-light-5: var(--pdm-green-border);
+  --el-color-success-light-7: var(--pdm-green-soft);
+  --el-color-success-light-8: var(--pdm-green-soft);
+  --el-color-success-light-9: var(--pdm-green-soft);
+  --el-color-warning: var(--pdm-orange);
+  --el-color-warning-dark-2: var(--pdm-orange);
+  --el-color-warning-light-3: var(--pdm-orange-border);
+  --el-color-warning-light-5: var(--pdm-orange-border);
+  --el-color-warning-light-7: var(--pdm-orange-soft);
+  --el-color-warning-light-8: var(--pdm-orange-soft);
+  --el-color-warning-light-9: var(--pdm-orange-soft);
+  --el-color-danger: var(--pdm-danger);
+  --el-color-danger-dark-2: var(--pdm-danger);
+  --el-color-danger-light-3: var(--pdm-danger-border);
+  --el-color-danger-light-5: var(--pdm-danger-border);
+  --el-color-danger-light-7: var(--pdm-danger-soft);
+  --el-color-danger-light-8: var(--pdm-danger-soft);
+  --el-color-danger-light-9: var(--pdm-danger-soft);
+  --el-color-error: var(--pdm-danger);
+  --el-color-info: var(--pdm-muted);
+  --el-color-info-dark-2: var(--pdm-text-soft);
+  --el-color-info-light-3: var(--pdm-border);
+  --el-color-info-light-5: var(--pdm-border);
+  --el-color-info-light-7: var(--pdm-surface-muted);
+  --el-color-info-light-8: var(--pdm-surface-muted);
+  --el-color-info-light-9: var(--pdm-surface-muted);
+}
+
+input, select, textarea { accent-color: var(--pdm-theme-accent); }
+::selection { background: var(--pdm-theme-accent-soft-strong); color: var(--pdm-text); }

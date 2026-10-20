@@ -19,9 +19,15 @@ importers:
       element-plus:
         specifier: 2.14.4
         version: 2.14.4(vue@3.5.41(typescript@5.9.3))
+      jsqr:
+        specifier: 1.4.0
+        version: 1.4.0
       occt-import-js:
         specifier: ^0.0.23
         version: 0.0.23
+      overlayscrollbars:
+        specifier: ^2.16.0
+        version: 2.16.0
       pdfjs-dist:
         specifier: ^6.3.289
         version: 6.3.289
@@ -685,6 +691,9 @@ packages:
       canvas:
         optional: true
 
+  jsqr@1.4.0:
+    resolution: {integrity: sha512-dxLob7q65Xg2DvstYkRpkYtmKm2sPJ9oFhrhmudT1dZvNFFTlroai3AWSpLey/w5vMcLBXRgOJsbXpdN9HzU/A==}
+
   lightningcss-android-arm64@1.33.0:
     resolution: {integrity: sha512-gEpRTalKdosp4Bb8qWtc2iOgE5SeIHlpS1up9bFq2wAyYhl1UdTObYiHe98zEM9SQvSoqQZ1IQD0JNpg3Ml5pg==}
     engines: {node: '>= 12.0.0'}
@@ -820,6 +829,9 @@ packages:
 
   occt-import-js@0.0.23:
     resolution: {integrity: sha512-RFfYQXYFX5C1mB1Aywm0ShcUKzXOr/VzTnlzhBSDJOR6YCAPt1HYCzeXWg1vwwjn/cUxwqRNhhtf1dlewoZYCQ==}
+
+  overlayscrollbars@2.16.0:
+    resolution: {integrity: sha512-N03oje/q7j93D0aLZtoCdsDSYLmhheSsv8H7oSLE7HhdV9P/bmCURtLV/KbPye7P/bpfyt/obSfDpGUYoJ0OWg==}
 
   package-json-from-dist@1.0.1:
     resolution: {integrity: sha512-UEZIS3/by4OC8vL3P2dTXRETpebLI2NiI5vIrjaD/5UtrkFX/tNbwjTSRAGC/+7CAo2pIcBaRgWmcBBHcsaCIw==}
@@ -1729,6 +1741,8 @@ snapshots:
       - supports-color
       - utf-8-validate
 
+  jsqr@1.4.0: {}
+
   lightningcss-android-arm64@1.33.0:
     optional: true
 
@@ -1821,6 +1835,8 @@ snapshots:
   obug@2.1.4: {}
 
   occt-import-js@0.0.23: {}
+
+  overlayscrollbars@2.16.0: {}
 
   package-json-from-dist@1.0.1: {}
 

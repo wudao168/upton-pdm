@@ -66,8 +66,9 @@ public sealed partial class PdmAddin
         private readonly string sha256;
         private readonly string sourceSha256;
 
-        public bool MatchesFile(string hash) => !string.IsNullOrWhiteSpace(hash)
+        public bool MatchesFile(string hash, string path = null) => !string.IsNullOrWhiteSpace(hash)
             && ((!string.IsNullOrWhiteSpace(sha256) && string.Equals(sha256, hash, StringComparison.OrdinalIgnoreCase))
-                || (!string.IsNullOrWhiteSpace(sourceSha256) && string.Equals(sourceSha256, hash, StringComparison.OrdinalIgnoreCase)));
+                || (!string.IsNullOrWhiteSpace(sourceSha256) && string.Equals(sourceSha256, hash, StringComparison.OrdinalIgnoreCase))
+                || !string.IsNullOrWhiteSpace(path) && PdmDocumentIdentityStore.MatchesResolvedVersion(path, Id, sha256, hash));
     }
 }

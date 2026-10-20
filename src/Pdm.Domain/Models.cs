@@ -31,6 +31,11 @@ public sealed record Project(
 
     public DateOnly? SignedDate { get; init; }
 
+    public bool IsSpecialInitiation { get; init; }
+    public Guid? SourceApplicationId { get; init; }
+    public string? SourceApplicationNumber { get; init; }
+    public DateOnly? DeliveryDate { get; init; }
+
     public DateTimeOffset? CreatedAt { get; init; }
 
     public int Quantity { get; init; } = 1;
@@ -145,6 +150,8 @@ public sealed record PreviewAgentServer(string Name, string AgentUrl, string Age
 
 public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
 {
+    public bool BrowserCadArchiveEnabled { get; init; } = true;
+
     public static IReadOnlyList<string> DefaultReleaseChangeReasonTypes { get; } =
         [
             "正式补充",
@@ -370,7 +377,8 @@ public sealed record OrganizationUnit(
     OrganizationUnitKind Kind,
     bool IsActive,
     int SortOrder,
-    bool CanManufacture = false);
+    bool CanManufacture = false,
+    bool CanArchiveStandardLibrary = false);
 
 public sealed record OrganizationMembership(Guid UnitId, string Username, bool IsPrimary);
 
@@ -854,6 +862,14 @@ public sealed record ReleasePackage(
 
     public IReadOnlyList<Guid> SelectedBomItemIds { get; init; } = [];
 
+    public IReadOnlyList<Guid> ConfirmedRemovedBomItemIds { get; init; } = [];
+
+    public IReadOnlyList<Guid> RelatedOplIssueIds { get; init; } = [];
+    public int DrawingDocumentCount { get; init; }
+
+    /// <summary>本次发布固定使用的源版本；引用文件仅用于恢复打开，只有Publish项转正式版。</summary>
+    public IReadOnlyList<ReleaseVersionBinding>? VersionBindings { get; init; }
+
     public bool CreatesManufacturingBaseline { get; init; } = true;
 
     public bool LocksDocuments { get; init; } = true;
@@ -882,6 +898,9 @@ public sealed record ReleasePackage(
 }
 
 public sealed record DrawingDeliveryOverride(string Priority, DateOnly RequiredOn);
+
+public sealed record ReleaseVersionBinding(Guid DocumentId, Guid VersionId, string Revision, string Sha256, bool Publish,
+    string FileName = "", bool RequiresPromotion = true, string PreviousReleasedRevision = "", string TargetRevision = "");
 
 public sealed record AuditEntry(
     Guid Id,

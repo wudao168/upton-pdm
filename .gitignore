@@ -15,6 +15,8 @@
 **/test-results/
 **/playwright-report/
 artifacts/
+/tmp/self-contained-archive-20261020/
+/backups/self-contained-archive-2026.10.20.182650/
 .env
 .env.*
 !.env.example

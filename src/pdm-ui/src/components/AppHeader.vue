@@ -5,8 +5,8 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import ClientSettings from './ClientSettings.vue'
 import type { PdmUserProfile } from '../types'
 import GlobalStatusBar from './GlobalStatusBar.vue'
+import { isPdmTheme, pdmThemes, type PdmTheme } from '../themes'
 
-type PdmTheme = 'a' | 'c' | 'o'
 
 const props = withDefaults(defineProps<{
   online: boolean
@@ -99,7 +99,7 @@ const headerDateTime = computed(() => {
 })
 
 function selectTheme(command: string) {
-  if (command === 'a' || command === 'c' || command === 'o') emit('theme', command)
+  if (isPdmTheme(command)) emit('theme', command)
 }
 
 function openPersonalSettings() {
@@ -200,9 +200,7 @@ onUnmounted(() => {
           </button>
           <template #dropdown>
             <el-dropdown-menu class="pdm-theme-menu">
-              <el-dropdown-item command="a"><i class="pdm-theme-swatch is-a" /><span>青蓝平衡</span><small v-if="props.theme === 'a'">当前</small></el-dropdown-item>
-              <el-dropdown-item command="c"><i class="pdm-theme-swatch is-c" /><span>石墨青绿</span><small v-if="props.theme === 'c'">当前</small></el-dropdown-item>
-              <el-dropdown-item command="o"><i class="pdm-theme-swatch is-o" /><span>暖橙活力</span><small v-if="props.theme === 'o'">当前</small></el-dropdown-item>
+              <el-dropdown-item v-for="item in pdmThemes" :key="item.value" :command="item.value"><i class="pdm-theme-swatch" :style="{ backgroundColor: item.color }" /><span>{{ item.label }}</span><small v-if="props.theme === item.value">当前</small></el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -245,9 +243,7 @@ onUnmounted(() => {
         </el-tab-pane>
         <el-tab-pane label="界面主题" name="theme">
           <el-radio-group :model-value="props.theme" class="personal-theme-group" @change="(value: string | number | boolean | undefined) => emit('theme', value as PdmTheme)">
-            <el-radio value="a">青蓝平衡</el-radio>
-            <el-radio value="c">石墨青绿</el-radio>
-            <el-radio value="o">暖橙活力</el-radio>
+            <el-radio v-for="item in pdmThemes" :key="item.value" :value="item.value">{{ item.label }}</el-radio>
           </el-radio-group>
           <p class="personal-settings-hint">主题与账号同步，换电脑登录后同样是这个主题；顶栏「主题」按钮仍可快速切换。</p>
         </el-tab-pane>

@@ -13,6 +13,12 @@ namespace Upton.Pdm.SolidWorks;
 
 internal static class PdmDocumentIdentityStore
 {
+    internal static void ConfigureBrowserReadScope(string root)
+    {
+        bindingDirectory = Path.Combine(root, "_bindings");
+        workspaceRootResolver = () => root;
+    }
+
     private const string StreamName = ":UptonPdm.DocumentId";
     private const uint GenericRead = 0x80000000;
     private const uint GenericWrite = 0x40000000;
@@ -57,6 +63,7 @@ internal static class PdmDocumentIdentityStore
             VersionId = binding.VersionId,
             Revision = binding.Revision ?? string.Empty,
             Sha256 = binding.Sha256 ?? string.Empty,
+            ResolvedReferenceSha256 = binding.ResolvedReferenceSha256 ?? string.Empty,
             FileLength = binding.FileLength
         };
         return true;
@@ -162,6 +169,35 @@ internal static class PdmDocumentIdentityStore
             revision, sha256, fileLength, expected);
     }
 
+    internal static bool MatchesResolvedVersion(string path, Guid versionId, string archivedHash, string actualHash)
+    {
+        return !string.IsNullOrWhiteSpace(actualHash) && !string.IsNullOrWhiteSpace(archivedHash)
+            && TryReadLocalMetadata(path, out var metadata) && metadata.VersionId == versionId
+            && string.Equals(metadata.Sha256, archivedHash, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(metadata.ResolvedReferenceSha256, actualHash, StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool TryRecordResolvedReferences(string path, PdmControlledFileMetadata expected, string actualHash) =>
+        expected?.VersionId != null && !string.IsNullOrWhiteSpace(actualHash)
+        && TryWriteBinding(path, expected.DocumentId, expected.ProjectId, expected.VersionId, expected.Revision,
+            expected.Sha256, expected.FileLength, expected, actualHash);
+
+    internal static void RestoreLocalMetadata(string path, PdmControlledFileMetadata previous)
+    {
+        if (previous != null)
+        {
+            if (!TryWriteBinding(path, previous.DocumentId, previous.ProjectId, previous.VersionId, previous.Revision,
+                previous.Sha256, previous.FileLength, null, previous.ResolvedReferenceSha256))
+                throw new IOException("工作区文件已回滚，但原始版本记录未能恢复：" + Path.GetFileName(path));
+            return;
+        }
+        lock (bindingSync)
+        {
+            var record = BindingPath(path);
+            if (File.Exists(record)) File.Delete(record);
+        }
+    }
+
     private static bool TryWriteBinding(
         string filePath,
         Guid documentId,
@@ -170,7 +206,7 @@ internal static class PdmDocumentIdentityStore
         string revision,
         string sha256,
         long? fileLength,
-        PdmControlledFileMetadata expected = null)
+        PdmControlledFileMetadata expected = null, string resolvedReferenceSha256 = null)
     {
         if (documentId == Guid.Empty || string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return false;
         lock (bindingSync)
@@ -189,18 +225,24 @@ internal static class PdmDocumentIdentityStore
                 if (expected != null && (previous == null || previous.DocumentId != expected.DocumentId
                     || previous.ProjectId != expected.ProjectId || previous.VersionId != expected.VersionId
                     || previous.Revision != expected.Revision || previous.FileLength != expected.FileLength
-                    || !string.Equals(previous.Sha256, expected.Sha256, StringComparison.OrdinalIgnoreCase))) return false;
+                    || !string.Equals(previous.Sha256, expected.Sha256, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(previous.ResolvedReferenceSha256 ?? string.Empty, expected.ResolvedReferenceSha256 ?? string.Empty, StringComparison.OrdinalIgnoreCase))) return false;
                 var retainedProjectId = projectId ?? (previous?.DocumentId == documentId ? previous.ProjectId : null);
                 var retainedVersionId = versionId ?? (previous?.DocumentId == documentId ? previous.VersionId : null);
                 var retainedRevision = revision ?? (previous?.DocumentId == documentId ? previous.Revision : null);
                 var retainedSha256 = sha256 ?? (previous?.DocumentId == documentId ? previous.Sha256 : null);
                 var retainedFileLength = fileLength ?? (previous?.DocumentId == documentId ? previous.FileLength : null);
+                var retainedResolvedHash = resolvedReferenceSha256
+                    ?? (previous?.DocumentId == documentId && previous.VersionId == retainedVersionId
+                        && string.Equals(previous.Sha256, retainedSha256, StringComparison.OrdinalIgnoreCase)
+                        ? previous.ResolvedReferenceSha256 : null);
                 if (previous?.DocumentId == documentId
                     && previous.ProjectId == retainedProjectId
                     && previous.VersionId == retainedVersionId
                     && string.Equals(previous.Revision ?? string.Empty, retainedRevision ?? string.Empty, StringComparison.Ordinal)
                     && string.Equals(previous.Sha256 ?? string.Empty, retainedSha256 ?? string.Empty, StringComparison.OrdinalIgnoreCase)
-                    && previous.FileLength == retainedFileLength)
+                    && previous.FileLength == retainedFileLength
+                    && string.Equals(previous.ResolvedReferenceSha256, retainedResolvedHash, StringComparison.OrdinalIgnoreCase))
                     return true;
                 var binding = new DocumentBinding
                 {
@@ -212,6 +254,7 @@ internal static class PdmDocumentIdentityStore
                     VersionId = retainedVersionId,
                     Revision = retainedRevision,
                     Sha256 = retainedSha256,
+                    ResolvedReferenceSha256 = retainedResolvedHash,
                     FileLength = retainedFileLength
                 };
                 Directory.CreateDirectory(bindingDirectory);
@@ -277,6 +320,7 @@ internal static class PdmDocumentIdentityStore
         public Guid? VersionId { get; set; }
         public string Revision { get; set; }
         public string Sha256 { get; set; }
+        public string ResolvedReferenceSha256 { get; set; }
         public long? FileLength { get; set; }
     }
 
@@ -363,5 +407,6 @@ internal sealed class PdmControlledFileMetadata
     public Guid? VersionId { get; set; }
     public string Revision { get; set; } = string.Empty;
     public string Sha256 { get; set; } = string.Empty;
+    public string ResolvedReferenceSha256 { get; set; } = string.Empty;
     public long? FileLength { get; set; }
 }

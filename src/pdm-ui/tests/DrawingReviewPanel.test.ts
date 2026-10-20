@@ -528,7 +528,9 @@ describe('DrawingReviewPanel', () => {
       props: { packageId: writingProperties.id, packages: [writingProperties], candidates: [candidate], selectedDocumentId: 'model-1', currentUsername: 'submitter', ...permissions },
     })
 
-    expect(wrapper.get('.drawing-review-writeback').text()).toContain('还有 1 张待写入')
+    expect(wrapper.get('.drawing-review-writeback').text()).toContain('还有 1 张审核标记待写入')
+    expect(wrapper.get('.drawing-review-writeback').text()).toContain('不影响获取编辑权限')
+    expect(wrapper.get('.drawing-review-writeback').text()).not.toContain('保持编辑锁定')
     expect(wrapper.findAll('.drawing-review-package-actions button').map(button => button.text())).toEqual(['放弃写入并完成审核'])
 
     await wrapper.get('.drawing-review-package-actions button').trigger('click')

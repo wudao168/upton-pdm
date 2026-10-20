@@ -68,9 +68,20 @@ internal sealed class CadTreeNode
     // 3D Interconnect's generated native cache is backed by this imported model.
     public string ImportedSourcePath { get; set; } = string.Empty;
 
+    public bool IsInterconnectImport => !string.IsNullOrWhiteSpace(ImportedSourcePath);
+
+    // Managed storage ownership, not IComponent2.IsVirtual. Interconnect can persist
+    // components inside a native container while exposing IsVirtual=false at runtime.
+    public string ImportedStorageOwnerPath { get; set; } = string.Empty;
+    public bool IsStoredImport => !string.IsNullOrWhiteSpace(ImportedStorageOwnerPath);
+
     public bool IsImportedSourceFile => Kind == CadDocumentKind.Other && Role == CadReferenceRole.ExternalFileDependency;
 
     public CadReferenceRole Role { get; set; }
+
+    public List<string> UnmanagedReferences { get; } = new List<string>();
+
+    public HashSet<string> DrawingScopePaths { get; set; }
 
     public string DisplayName { get; set; } = string.Empty;
 

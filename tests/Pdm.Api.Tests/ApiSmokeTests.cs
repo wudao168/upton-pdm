@@ -30,6 +30,21 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task NewReleaseCannotUseLegacyImplicitScopeOrEmptySelection()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var project = (await repository.ListProjectsAsync(default)).First();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+        var before = (await repository.ListReleasePackagesAsync(project.Id, default)).Count;
+        var implicitScope = await client.PostAsJsonAsync("/api/release-packages", new CreateReleasePackageRequest(project.Id));
+        Assert.Equal(HttpStatusCode.BadRequest, implicitScope.StatusCode);
+        Assert.Contains("明确勾选", await implicitScope.Content.ReadAsStringAsync());
+        var empty = await client.PostAsJsonAsync("/api/release-packages", new CreateReleasePackageRequest(project.Id, Scope: ReleaseScope.StandardFormal, SelectedBomItemIds: []));
+        Assert.Equal(HttpStatusCode.BadRequest, empty.StatusCode);
+        Assert.Equal(before, (await repository.ListReleasePackagesAsync(project.Id, default)).Count);
+    }
+
+    [Fact]
     public async Task Health_ReportsIsolatedPdmPorts()
     {
         var health = await client.GetFromJsonAsync<HealthResponse>("/health");
@@ -80,8 +95,10 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var receipt = await client.GetAsync("/api/archive-batches/" + batch); receipt.EnsureSuccessStatusCode();
     }
 
-    [Fact]
-    public async Task NativeFileDependencyIsArchivedWithTheAssemblyWithoutBecomingABomComponent()
+    [Theory]
+    [InlineData(DocumentKind.Part, "EXTRA.SLDPRT")]
+    [InlineData(DocumentKind.Assembly, "CONTEXT.SLDASM")]
+    public async Task NativeFileDependencyIsArchivedWithTheAssemblyWithoutBecomingABomComponent(DocumentKind dependencyKind, string dependencyName)
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         var directory = Path.Combine(Path.GetTempPath(), "pdm-native-dependency-" + Guid.NewGuid().ToString("N"));
@@ -92,14 +109,14 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
                 "原生文件依赖整批验收", "admin", directory, directory), "admin", default);
             var root = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "ROOT", "总装", "ROOT.SLDASM", DocumentKind.Assembly), "admin", default);
             var used = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "USED", "装配零件", "USED.SLDPRT", DocumentKind.Part), "admin", default);
-            var extra = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "EXTRA", "原生文件依赖", "EXTRA.SLDPRT", DocumentKind.Part), "admin", default);
+            var extra = await repository.RegisterDocumentAsync(new RegisterDocumentCommand(project.Id, "EXTRA", "原生文件依赖", dependencyName, dependencyKind), "admin", default);
             var session = Guid.NewGuid();
             foreach (var document in new[] { root, used, extra })
                 await repository.CheckoutAsync(document.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
             var usedNode = new DocumentReferenceNode(Guid.NewGuid(), used.Id, "ROOT/USED-1", used.FileName, used.Name,
                 DocumentKind.Part, "Default", 1, ReferenceNodeStatus.Normal, null, null, []);
             var extraNode = new DocumentReferenceNode(Guid.NewGuid(), extra.Id, "ROOT/native-file/EXTRA.SLDPRT", extra.FileName, extra.Name,
-                DocumentKind.Part, "Default", 1, ReferenceNodeStatus.Normal, null, null, [])
+                dependencyKind, "Default", 1, ReferenceNodeStatus.Normal, null, null, [])
                 { Role = ReferenceRole.ExternalFileDependency };
             var tree = new DocumentReferenceNode(Guid.NewGuid(), root.Id, "ROOT", root.FileName, root.Name,
                 DocumentKind.Assembly, "Default", 1, ReferenceNodeStatus.Normal, root.Revision, null, [usedNode, extraNode]);
@@ -137,6 +154,19 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
             Assert.NotNull(snapshot);
             using var scope = factory.Services.CreateScope();
             var workflow = scope.ServiceProvider.GetRequiredService<PdmWorkflowService>();
+            var restored = await workflow.CreateControlledOpenManifestAsync(root.Id, rootVersion.Id, false, false,
+                "admin", UserRole.Administrator, default);
+            Assert.Equal(3, restored.Files.Count);
+            var companion = Assert.Single(restored.Files, file => file.DocumentId == extra.Id);
+            Assert.Equal("W1", companion.Revision);
+            Assert.Equal(dependencyName, companion.FileName);
+            Assert.Equal(Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(dependencyName))), companion.Sha256);
+            var treeOnly = await workflow.CreateControlledOpenManifestAsync(root.Id, null, false, false,
+                "admin", UserRole.Administrator, default, treeScopeOnly: true);
+            Assert.Equal(2, treeOnly.Files.Count);
+            Assert.DoesNotContain(treeOnly.Files, file => file.DocumentId == extra.Id);
+            Assert.Single(await repository.ListDocumentVersionsAsync(extra.Id, default));
+            Assert.Equal(ReferenceRole.ExternalFileDependency, Assert.Single(rootVersion.ReferenceSnapshot.Children, node => node.DocumentId == extra.Id).Role);
             var generate = typeof(PdmWorkflowService).GetMethod("GenerateMechanicalBomFromSnapshotAsync",
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
             Assert.NotNull(generate);
@@ -765,6 +795,32 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/auth/me")).StatusCode);
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", changedLogin.AccessToken);
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Theory]
+    [InlineData("a")]
+    [InlineData("c")]
+    [InlineData("p")]
+    [InlineData("o")]
+    [InlineData("g")]
+    public async Task PersonalSettings_PersistsAllFiveThemesAndRejectsUnknownTheme(string theme)
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var passwords = factory.Services.GetRequiredService<IPasswordService>();
+        var username = $"theme-{Guid.NewGuid():N}";
+        await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), username, "主题测试", passwords.Hash("ThemeTest1"), UserRole.Engineer, true), CancellationToken.None);
+        var loginResponse = await client.PostAsJsonAsync("/api/auth/login", new { username, password = "ThemeTest1" });
+        var login = await loginResponse.Content.ReadFromJsonAsync<LoginSessionResponse>();
+        Assert.NotNull(login);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login.AccessToken);
+        var response = await client.PutAsJsonAsync("/api/auth/profile", new { theme });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var saved = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(theme, saved.RootElement.GetProperty("theme").GetString());
+        using var restored = JsonDocument.Parse(await client.GetStringAsync("/api/auth/me"));
+        Assert.Equal(theme, restored.RootElement.GetProperty("theme").GetString());
+        var rejected = await client.PutAsJsonAsync("/api/auth/profile", new { theme = "unknown" });
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
     }
 
     [Fact]
@@ -1961,7 +2017,8 @@ public sealed class PdmApiFactory : WebApplicationFactory<Program>
         {
             // Endpoint tests drive synchronization explicitly; the polling worker must not consume their queued U9 responses.
             foreach (var registration in services.Where(service =>
-                service.ImplementationType == typeof(Upton.Pdm.Api.MaterialU9SyncBatchHostedService) || service.ImplementationType == typeof(Upton.Pdm.Api.DingTalkStreamService)).ToArray())
+                service.ImplementationType == typeof(Upton.Pdm.Api.MaterialU9SyncBatchHostedService) || service.ImplementationType == typeof(Upton.Pdm.Api.DingTalkStreamService)
+                || service.ImplementationType == typeof(Upton.Pdm.Api.ReleaseDeliveryHostedService)).ToArray())
                 services.Remove(registration);
             services.AddDataProtection().UseEphemeralDataProtectionProvider();
             services.RemoveAll<ICrmCustomerClient>();

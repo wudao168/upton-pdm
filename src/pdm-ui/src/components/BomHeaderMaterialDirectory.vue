@@ -61,7 +61,7 @@ onMounted(load)
 <style scoped>
 .bom-header-directory{height:100%;min-width:0;min-height:0;display:flex;flex-direction:column;gap:10px;overflow:hidden}
 .bom-header-directory__toolbar{display:flex;align-items:center;gap:10px;min-width:0}
-.bom-header-directory__toolbar p{flex:1;min-width:0;margin:0;color:var(--pdm-text-muted,#64748b);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bom-header-directory__toolbar p{flex:1;min-width:0;margin:0;color:var(--pdm-text-muted,var(--pdm-text-soft));font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bom-header-directory__toolbar .el-input{flex:0 1 260px;min-width:0}
 .bom-header-directory__table{flex:1;min-height:180px;width:100%;font-size:12px}
 .bom-header-directory__table :deep(.cell){white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

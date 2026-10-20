@@ -61,14 +61,14 @@ const short = (value: string, length = 20) => value.length > length ? `${value.s
 
 <style scoped>
 .program-block-diagram { width: 100%; min-width: 520px; height: auto; display: block; font-family: var(--pdm-font-ui); font-size: 12px; }
-.program-block-diagram__body { fill: #f4f8ff; stroke: #1f64c8; stroke-width: 2.5; }
-.program-block-diagram__title { fill: #17365f; font-size: 12px; font-weight: 600; }
-.program-block-diagram__meta { fill: #7085a3; font-size: 12px; font-family: var(--pdm-font-mono); }
-.program-block-diagram__divider { stroke: #cbd8ea; stroke-width: 1; }
+.program-block-diagram__body { fill: var(--pdm-theme-accent-soft); stroke: var(--pdm-theme-accent); stroke-width: 2.5; }
+.program-block-diagram__title { fill: var(--pdm-text); font-size: 12px; font-weight: 600; }
+.program-block-diagram__meta { fill: var(--pdm-muted); font-size: 12px; font-family: var(--pdm-font-mono); }
+.program-block-diagram__divider { stroke: var(--pdm-border); stroke-width: 1; }
 .program-block-diagram__wire { fill: none; stroke-width: 2; }
 .program-block-diagram__pin { stroke-width: 1.5; }
 .program-block-diagram__name { font-size: 12px; font-weight: 600; }
-.program-block-diagram__type { fill: #778aa5; font-size: 12px; font-family: var(--pdm-font-mono); }
+.program-block-diagram__type { fill: var(--pdm-muted); font-size: 12px; font-family: var(--pdm-font-mono); }
 .program-block-diagram__direction { font-size: 12px; font-weight: 600; }
 .program-block-diagram__caption { fill: #94a3b8; font-size: 12px; font-weight: 600; letter-spacing: .06em; }
 .is-input .program-block-diagram__wire,.is-input .program-block-diagram__pin { stroke: #0aa79b; }.is-input .program-block-diagram__pin { fill: #dff8f4; }.is-input .program-block-diagram__name,.is-input .program-block-diagram__direction { fill: #08857c; }

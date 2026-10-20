@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, reactive } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, watch } from 'vue'
 import type { AddDrawingReviewMarkupInput, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 import DrawingReviewPanel from './DrawingReviewPanel.vue'
+import { isPdmTheme, type PdmTheme } from '../themes'
 
-type OverlayTheme = 'a' | 'c' | 'o'
 
 interface ReviewOverlayState {
   visible: boolean
@@ -21,7 +21,7 @@ interface ReviewOverlayState {
   canDecide: boolean
   allowSelfReview: boolean
   collapsed: boolean
-  theme: OverlayTheme
+  theme: PdmTheme
 }
 
 const state = reactive<ReviewOverlayState>({
@@ -51,7 +51,10 @@ function updateState(event: MessageEvent) {
   const message = event.data as { type?: string; payload?: Partial<ReviewOverlayState> } | undefined
   if (message?.type !== 'review-overlay-state' || !message.payload) return
   Object.assign(state, message.payload)
+  if (!isPdmTheme(state.theme)) state.theme = 'a'
 }
+
+watch(() => state.theme, theme => { document.documentElement.dataset.pdmTheme = theme }, { immediate: true })
 
 function addMarkup(packageId: string, input: AddDrawingReviewMarkupInput) {
   send('add-markup', { packageId, input })

@@ -102,7 +102,7 @@ describe('OrganizationSettings', () => {
     const dialog = document.body.querySelector('.el-dialog')!
     expect(dialog.textContent).not.toContain('排序')
     expect(dialog.textContent).toContain('保存组织')
-    expect(Array.from(dialog.querySelectorAll('.org-form-check span')).map(item => item.textContent)).toEqual(['制造部门（可承接项目）', '启用'])
+    expect(Array.from(dialog.querySelectorAll('.org-form-check span')).map(item => item.textContent)).toEqual(['制造部门（可承接项目）', '标准库存档授权（本部门及下级成员）', '启用'])
     Array.from(dialog.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '保存组织')!.click()
     await flushPromises()
     expect(dialog.querySelector('.pdm-dialog-status')?.textContent).toContain('提醒请完整填写组织资料')

@@ -4,32 +4,32 @@ using Upton.Pdm.Domain;
 namespace Upton.Pdm.Api;
 
 /// <summary>
-/// 启动自检：把“料品已批准、但同步请求只生成过预览、从未执行”的任务自动排队到U9C同步批次，
-/// 使普通料品不再依赖人工点击同步（历史遗留的待同步记录也会被自动处理）。
+/// 持续补排队：料品批准与批次创建之间中断，或非标发布仅生成预览时，自动恢复首次同步。
+/// 已有批次、执行失败及属性修改任务仍走各自的重试或人工确认流程。
 /// </summary>
 public sealed class MaterialU9PendingSyncSeederHostedService(
     IServiceScopeFactory scopeFactory,
-    ILogger<MaterialU9PendingSyncSeederHostedService> logger) : BackgroundService
+    ILogger<MaterialU9PendingSyncSeederHostedService> logger,
+    TimeProvider timeProvider) : BackgroundService
 {
     private const string SystemActor = "system:u9-material-sync";
     private const int BatchSize = 200;
+    private static readonly TimeSpan ScanInterval = TimeSpan.FromSeconds(30);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        try { await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken); }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
-
-        try
+        while (!stoppingToken.IsCancellationRequested)
         {
-            await SeedAsync(stoppingToken);
-        }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-        {
-            return;
-        }
-        catch (Exception exception)
-        {
-            logger.LogWarning(exception, "U9C material sync start-up seeding failed; manual sync stays available.");
+            try
+            {
+                await Task.Delay(ScanInterval, timeProvider, stoppingToken);
+                await SeedAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "U9C material sync recovery failed; the next scan will continue.");
+            }
         }
     }
 
@@ -42,10 +42,12 @@ public sealed class MaterialU9PendingSyncSeederHostedService(
         var candidates = new List<Guid>();
         foreach (var task in await materials.ListSyncTasksAsync(cancellationToken))
         {
-            if (task.Status != MaterialSyncStatus.PreviewReady) continue;
+            if (task.Operation != MaterialSyncOperation.Create
+                || task.Status != MaterialSyncStatus.PreviewReady || task.AttemptCount != 0) continue;
             var material = await materials.FindMaterialAsync(task.MaterialId, cancellationToken);
             if (material is null || material.IsArchived || material.U9SyncConfirmed) continue;
             if (material.ApprovalStatus != MaterialApprovalStatus.Approved) continue;
+            if ((await materials.ListSyncBatchItemsForTaskAsync(task.Id, cancellationToken)).Count > 0) continue;
             candidates.Add(task.Id);
         }
 
@@ -59,12 +61,13 @@ public sealed class MaterialU9PendingSyncSeederHostedService(
                 await batches.CreateAutomaticAsync(chunk, SystemActor, cancellationToken);
                 queued += chunk.Length;
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception exception)
             {
-                logger.LogWarning(exception, "Queueing one U9C material sync batch at start-up failed.");
+                logger.LogWarning(exception, "Queueing one recovered U9C material sync batch failed; the next scan will retry unscheduled tasks.");
             }
         }
         if (queued > 0)
-            logger.LogInformation("Queued {Count} pending U9C material sync task(s) at start-up.", queued);
+            logger.LogInformation("Queued {Count} previously unscheduled U9C material sync task(s).", queued);
     }
 }

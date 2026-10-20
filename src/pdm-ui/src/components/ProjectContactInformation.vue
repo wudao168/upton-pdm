@@ -71,14 +71,14 @@ watch(() => [props.projectId, props.token], () => { void load() }, { immediate: 
 <style scoped>
 .project-contacts{flex:none;font-size:11px;overflow:hidden}
 .project-contacts header{min-height:32px;display:flex;align-items:center;gap:12px;padding:0 12px;border-bottom:1px solid var(--pdm-border)}
-.project-contacts h2{margin:0;font-size:12px}.project-contacts header>span{color:var(--pdm-muted)}
+.project-contacts h2{margin:0;font-size:14px}.project-contacts header>span{color:var(--pdm-muted)}
 .project-contacts__header-actions{display:flex;gap:5px;margin-left:auto}
 .project-contacts__header-actions :deep(.el-button){width:auto;min-width:60px;height:var(--pdm-button-compact);margin:0;padding:0 6px;font-size:11px}
 .project-contacts__table-wrap{overflow:auto;max-height:240px}.project-contacts__table{width:100%;min-width:850px;border-collapse:collapse;table-layout:fixed}
 .project-contacts th,.project-contacts td{height:32px;padding:4px 8px;text-align:center;border-right:1px solid var(--pdm-border-soft);border-bottom:1px solid var(--pdm-border-soft);overflow-wrap:anywhere}
-.project-contacts th{background:var(--pdm-panel-muted,#f8fafc);font-weight:500}.project-contacts th:first-child{width:40px}.project-contacts th:nth-child(7){width:28%}
-.project-contacts tbody tr:nth-child(even){background:var(--pdm-row-stripe,#f1f5f9)}.project-contacts .is-shipping{background:var(--pdm-blue-soft,#eff6ff)!important}
+.project-contacts th{background:var(--pdm-panel-muted,var(--pdm-bg));font-weight:500}.project-contacts th:first-child{width:40px}.project-contacts th:nth-child(7){width:28%}
+.project-contacts tbody tr:nth-child(even){background:var(--pdm-row-stripe,var(--pdm-surface-muted))}.project-contacts .is-shipping{background:var(--pdm-blue-soft,var(--pdm-theme-accent-soft))!important}
 .project-contacts input:not([type=checkbox]){box-sizing:border-box;width:100%;min-width:0;height:26px;padding:0 6px;font:inherit;color:var(--pdm-text);border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,#fff)}
 .project-contacts td label{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}.project-contacts__shipping-badge{display:inline-block;margin-left:4px;padding:1px 4px;background:var(--pdm-blue);color:white;border-radius:3px;white-space:nowrap}
-.project-contacts__error{padding:8px;color:var(--pdm-danger,#dc2626)}.project-contacts button{font-size:11px}
+.project-contacts__error{padding:8px;color:var(--pdm-danger,var(--pdm-danger))}.project-contacts button{font-size:11px}
 </style>

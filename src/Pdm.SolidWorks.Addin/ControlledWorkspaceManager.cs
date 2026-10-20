@@ -42,6 +42,7 @@ internal sealed class ControlledWorkspaceManager
         }
 
         var parent = Path.GetDirectoryName(target) ?? throw new InvalidDataException("受控工作区路径无效。");
+        EnsureNoUnarchivedDrawingIsRemoved(target, manifest.Files);
         Directory.CreateDirectory(parent);
         var staging = Path.Combine(workspaceRoot, ".uplm", "Staging", manifest.Id.ToString("N"));
         if (Directory.Exists(staging)) Directory.Delete(staging, true);
@@ -74,6 +75,18 @@ internal sealed class ControlledWorkspaceManager
     {
         var readOnlyRootPath = await PrepareReadOnlyAsync(manifest, false, cancellationToken).ConfigureAwait(false);
         var source = Path.GetDirectoryName(readOnlyRootPath) ?? throw new InvalidDataException("只读工作区路径无效。");
+        return CopyWorkingContext(manifest, source, editableDocumentIds);
+    }
+
+    internal string TryPrepareWorkingContext(ControlledOpenManifestDto manifest, string source,
+        IReadOnlyCollection<Guid> editableDocumentIds)
+    {
+        return !string.IsNullOrWhiteSpace(source) && ValidateWorkspace(source, manifest.Files)
+            ? CopyWorkingContext(manifest, source, editableDocumentIds) : null;
+    }
+
+    private string CopyWorkingContext(ControlledOpenManifestDto manifest, string source, IReadOnlyCollection<Guid> editableDocumentIds)
+    {
         var target = WorkingDirectory(manifest);
         var editableIds = new HashSet<Guid>(editableDocumentIds ?? Array.Empty<Guid>());
         if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
@@ -240,11 +253,17 @@ internal sealed class ControlledWorkspaceManager
             manifest.RootDocumentId.ToString("N"));
     }
 
-    private string ReadOnlyDirectory(ControlledOpenManifestDto manifest, bool historicalPreview) =>
-        Path.Combine(
-            SnapshotRoot(manifest),
-            historicalPreview ? "ReadOnly" : "Latest",
-            manifest.RootVersionId.ToString("N"));
+    private string ReadOnlyDirectory(ControlledOpenManifestDto manifest, bool historicalPreview)
+    {
+        var root = Path.Combine(SnapshotRoot(manifest), historicalPreview ? "ReadOnly" : "Latest", manifest.RootVersionId.ToString("N"));
+        if (historicalPreview) return root;
+        // A parent can retain its version while a child advances. Each complete file
+        // combination gets an immutable cache directory instead of replacing open files.
+        var shape = manifest.RootVersionId + "|" + manifest.RootDocumentId + "|" + string.Join("|", manifest.Files.OrderBy(file => file.DocumentId)
+            .Select(file => file.DocumentId + ":" + file.VersionId + ":" + file.Sha256));
+        using (var hash = System.Security.Cryptography.SHA256.Create())
+            return Path.Combine(SnapshotRoot(manifest), "Latest", BitConverter.ToString(hash.ComputeHash(System.Text.Encoding.UTF8.GetBytes(shape))).Replace("-", "").Substring(0, 32));
+    }
 
     private string WorkingDirectory(ControlledOpenManifestDto manifest)
     {
@@ -285,13 +304,22 @@ internal sealed class ControlledWorkspaceManager
         {
             var path = ManifestPath(directory, file);
             if (!File.Exists(path)) return false;
-            var info = new FileInfo(path);
-            if (info.Length != file.FileLength || !string.Equals(ComputeSha256(path), file.Sha256, StringComparison.OrdinalIgnoreCase))
+            if (!ControlledReferenceMaterializer.Matches(path, file))
             {
                 return false;
             }
         }
         return true;
+    }
+
+    internal static void EnsureNoUnarchivedDrawingIsRemoved(string directory, IEnumerable<ControlledOpenFileDto> files)
+    {
+        if (!Directory.Exists(directory)) return;
+        var controlled = new HashSet<string>(files.Select(file => ManifestPath(directory, file)), StringComparer.OrdinalIgnoreCase);
+        var draft = Directory.EnumerateFiles(directory, "*.SLDDRW", SearchOption.AllDirectories)
+            .FirstOrDefault(path => !controlled.Contains(Path.GetFullPath(path)));
+        if (draft != null)
+            throw new InvalidDataException("预览目录中有新建工程图，已保留原文件并停止替换目录。请先将该工程图存档或另存到工作目录：" + draft);
     }
 
     private static bool HasAllManifestFiles(string directory, IEnumerable<ControlledOpenFileDto> files) =>
@@ -307,13 +335,12 @@ internal sealed class ControlledWorkspaceManager
         {
             var path = ManifestPath(directory, file);
             if (!File.Exists(path)) continue;
-            var info = new FileInfo(path);
-            var matches = info.Length == file.FileLength
-                && string.Equals(ComputeSha256(path), file.Sha256, StringComparison.OrdinalIgnoreCase);
+            var matches = ControlledReferenceMaterializer.Matches(path, file);
             var hasMetadata = PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var metadata);
             var matchesBase = hasMetadata && metadata.DocumentId == file.DocumentId
                 && !string.IsNullOrWhiteSpace(metadata.Sha256)
-                && string.Equals(ComputeSha256(path), metadata.Sha256, StringComparison.OrdinalIgnoreCase);
+                && (string.Equals(ComputeSha256(path), metadata.Sha256, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(ComputeSha256(path), metadata.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase));
             if (!matches
                 && (!matchesBase
                     || editableIds.Contains(file.DocumentId)
@@ -433,6 +460,7 @@ internal sealed class ControlledWorkspaceManager
     {
         var backup = RecoveryDirectory("working");
         var changed = new List<Tuple<string, string, FileAttributes?>>();
+        var previousBindings = new Dictionary<string, PdmControlledFileMetadata>(StringComparer.OrdinalIgnoreCase);
         var keepRecovery = false;
         try
         {
@@ -459,8 +487,11 @@ internal sealed class ControlledWorkspaceManager
                     File.Copy(targetPath, backupPath, true);
                 }
                 changed.Add(Tuple.Create(targetPath, backupPath, attributes));
+                PdmDocumentIdentityStore.TryReadLocalMetadata(targetPath, out var previousBinding);
+                previousBindings[targetPath] = previousBinding;
                 Directory.CreateDirectory(Path.GetDirectoryName(targetPath));
                 CopyFileAtomically(sourcePath, targetPath);
+                ControlledReferenceMaterializer.CopyResolvedBinding(sourcePath, targetPath);
             }
         }
         catch (Exception updateException)
@@ -479,6 +510,7 @@ internal sealed class ControlledWorkspaceManager
                         File.SetAttributes(item.Item1, FileAttributes.Normal);
                         File.Delete(item.Item1);
                     }
+                    PdmDocumentIdentityStore.RestoreLocalMetadata(item.Item1, previousBindings[item.Item1]);
                 }
             }
             catch (Exception rollbackException)

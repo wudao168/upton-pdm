@@ -185,7 +185,7 @@ describe('ProjectWorkspaceHeader', () => {
     const fileTab = wrapper.findAll('.pdm-project-tabs button').find(button => button.text() === '文件')
     expect(fileTab).toBeDefined()
     await fileTab!.trigger('click')
-    expect(wrapper.emitted('tab')).toEqual([['files']])
+    expect(wrapper.emitted('tab')).toEqual([['files', false]])
   })
 
   it('切换项目时显示进度并阻止重复点击', async () => {

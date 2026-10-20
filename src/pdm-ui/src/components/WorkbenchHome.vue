@@ -470,7 +470,7 @@ const overviewAlerts = computed(() => [
 
       <div class="pdm-overview-summary" aria-label="项目核心业务概览">
         <article class="pdm-panel pdm-overview-team" aria-label="项目团队">
-          <header><span><UsersRound :size="18" /></span><h2>项目团队</h2><span class="pdm-overview-team__actions"><button v-if="rootProject.canManageMainStaffing || activeProject.canAssignDesigners" type="button" class="pdm-text-action" @click="emit('information')">配置团队</button></span></header>
+          <header><span><UsersRound :size="18" /></span><h2>项目团队</h2><span class="pdm-overview-team__actions"><button v-if="rootProject.canManageMainStaffing || activeProject.canAssignDesigners" type="button" class="pdm-text-action" title="前往信息页分配项目人员" @click="emit('information')">分配人员</button></span></header>
           <div class="pdm-overview-team__table-wrap"><table class="pdm-overview-team__table"><thead><tr><th>职责</th><th>负责人</th><th>职责</th><th>负责人</th></tr></thead><tbody><tr v-for="pair in teamRowPairs" :key="pair[0]?.key"><template v-for="row in pair" :key="row.key"><td class="is-role">{{ row.role }}</td><td :class="{ 'is-pending': !row.people.length }">{{ row.people.map(person => person.name).join('、') || '待分配' }}</td></template></tr></tbody></table></div>
         </article>
         <article class="pdm-panel pdm-overview-reserved" aria-label="预留区域" />

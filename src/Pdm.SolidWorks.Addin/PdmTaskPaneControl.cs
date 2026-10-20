@@ -53,7 +53,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly Panel workspaceOperationPanel = new Panel();
     private readonly Label workspaceOperationStatus = new Label();
     private readonly PdmQuantityProgressBar workspaceOperationProgress = new PdmQuantityProgressBar();
-    private readonly TabControl tabs = new TabControl();
+    private readonly PdmSegmentedTabControl tabs = new PdmSegmentedTabControl();
     private readonly Panel tabsHost = new Panel();
     private readonly Control projectPanel;
     private readonly Label pluginVersion = new Label();
@@ -85,6 +85,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly ToolStripMenuItem contextVersionInfo = new ToolStripMenuItem();
     private readonly ToolStripMenuItem contextCheckout = new ToolStripMenuItem();
     private readonly ToolStripMenuItem contextCheckIn = new ToolStripMenuItem();
+
     private readonly ToolStripMenuItem contextDiscardCheckout = new ToolStripMenuItem();
     private readonly ToolStripMenuItem contextGenerateDrawing = new ToolStripMenuItem();
     private readonly ToolStripMenuItem contextOpenDrawing = new ToolStripMenuItem();
@@ -148,10 +149,10 @@ internal sealed class PdmTaskPaneControl : UserControl
         BuildTabs();
         ConfigurePluginVersion();
         tabsHost.Dock = DockStyle.Fill;
+        tabsHost.Padding = new Padding(0, 5, 0, 0);
         tabsHost.BackColor = Color.FromArgb(244, 247, 251);
         tabsHost.Controls.Add(tabs);
-        tabsHost.Controls.Add(pluginVersion);
-        tabsHost.Layout += (_, _) => PositionPluginVersion();
+        tabsHost.Layout += (_, _) => ResizeTabHeaders();
         Controls.Add(tabsHost);
         Controls.Add(workspaceOperationPanel);
         Controls.Add(checkoutReminder);
@@ -216,6 +217,9 @@ internal sealed class PdmTaskPaneControl : UserControl
     public event EventHandler<CadTreeNodeEventArgs> UpdateLatestRequested;
     public event EventHandler<CadTreeNodeEventArgs> CheckoutRequested;
     public event EventHandler<CadTreeNodeEventArgs> CheckInRequested;
+
+
+
     public event EventHandler<CadTreeNodeEventArgs> DiscardCheckoutRequested;
     public event EventHandler BatchOperationRequested;
     public event EventHandler<CadTreeNodeEventArgs> BatchPropertyEditRequested;
@@ -395,6 +399,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     public void SetAuthenticatedUser(string displayName, string username)
     {
         authenticatedUsername = username ?? string.Empty;
+
         RunOnUiThread(() =>
         {
             loginButton.Text = string.IsNullOrWhiteSpace(displayName) ? "登录" : displayName;
@@ -557,7 +562,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             Size = new Size(38, 38)
         };
         var title = new Label { Text = "UPLM", ForeColor = Color.White, Font = new Font("Microsoft YaHei UI", 10F), Location = new Point(58, 9), AutoSize = true };
-        var subtitle = new Label { Text = "SolidWorks 插件", ForeColor = Color.FromArgb(184, 201, 220), Location = new Point(58, 32), AutoSize = true };
+        var subtitle = new Label { Text = "阿普顿产品管理系统", ForeColor = Color.FromArgb(184, 201, 220), Location = new Point(58, 32), AutoSize = true };
         serviceStatus.AccessibleName = "PLM连接状态";
         serviceStatus.AccessibleDescription = "未连接";
         serviceStatus.Online = false;
@@ -571,6 +576,8 @@ internal sealed class PdmTaskPaneControl : UserControl
         header.Controls.Add(title);
         header.Controls.Add(subtitle);
         header.Controls.Add(serviceStatus);
+        header.Controls.Add(pluginVersion);
+        header.Layout += (_, _) => PositionPluginVersion();
         return header;
     }
 
@@ -709,7 +716,10 @@ internal sealed class PdmTaskPaneControl : UserControl
     private void BuildTabs()
     {
         tabs.Dock = DockStyle.Fill;
-        tabs.Padding = new Point(10, 6);
+        tabs.Padding = new Point(0, 6);
+        tabs.SizeMode = TabSizeMode.Fixed;
+        tabs.ShowToolTips = true;
+        tabs.FontChanged += (_, _) => ResizeTabHeaders();
         structureTab = BuildStructureTab();
         tabs.TabPages.Add(structureTab);
         var projectTab = new TabPage("工作区") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(8) };
@@ -734,6 +744,9 @@ internal sealed class PdmTaskPaneControl : UserControl
         diagnosticsTab = new TabPage("日志") { BackColor = Color.White, Padding = new Padding(8) };
         diagnosticsTab.Controls.Add(new DiagnosticLogControl(installedPluginVersion));
         tabs.TabPages.Add(diagnosticsTab);
+        tabs.TabPages.Add(new TabPage { AccessibleName = "预留页签", ToolTipText = "预留页签", BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(8) });
+        foreach (TabPage tab in tabs.TabPages)
+            if (!string.IsNullOrWhiteSpace(tab.Text)) tab.ToolTipText = tab.Text;
         PluginDiagnosticLog.Record("启动", "插件已加载，版本：" + installedPluginVersion);
         tabs.SelectedIndexChanged += (_, _) =>
         {
@@ -747,8 +760,8 @@ internal sealed class PdmTaskPaneControl : UserControl
     private void ConfigurePluginVersion()
     {
         pluginVersion.AutoSize = true;
-        pluginVersion.BackColor = Color.FromArgb(244, 247, 251);
-        pluginVersion.ForeColor = Color.FromArgb(95, 108, 124);
+        pluginVersion.BackColor = Color.FromArgb(31, 49, 72);
+        pluginVersion.ForeColor = Color.FromArgb(184, 201, 220);
         pluginVersion.Font = new Font("Microsoft YaHei UI", 8F);
         pluginVersion.Text = FormatDisplayVersion(installedPluginVersion);
         pluginVersion.AccessibleName = string.IsNullOrWhiteSpace(installedPluginVersion)
@@ -757,21 +770,30 @@ internal sealed class PdmTaskPaneControl : UserControl
         actionToolTip.SetToolTip(pluginVersion, pluginVersion.AccessibleName);
     }
 
+    private void ResizeTabHeaders()
+    {
+        if (tabs.TabCount == 0 || tabsHost.ClientSize.Width <= 4) return;
+        var itemSize = new Size(Math.Max(1, (tabsHost.ClientSize.Width - 4) / tabs.TabCount), Math.Max(27, tabs.Font.Height + 12));
+        if (tabs.ItemSize != itemSize) tabs.ItemSize = itemSize;
+    }
+
+    public void ApplyTheme(string theme)
+    {
+        RunOnUiThread(() => tabs.ApplyTheme(theme));
+    }
+
     private void PositionPluginVersion()
     {
-        if (tabs.TabPages.Count == 0 || tabsHost.ClientSize.Width <= 0)
-        {
-            return;
-        }
-
-        var lastTab = tabs.GetTabRect(tabs.TabPages.Count - 1);
+        var header = pluginVersion.Parent;
+        if (header == null || header.ClientSize.Width <= 0) return;
+        var title = header.Controls.OfType<Label>().FirstOrDefault(label => label.Text == "UPLM");
+        var left = (title?.Right ?? 96) + 8;
+        var right = header.ClientSize.Width - header.Padding.Right - serviceStatus.Width - 8;
         var fullText = FormatDisplayVersion(installedPluginVersion);
         var fullWidth = TextRenderer.MeasureText(fullText, pluginVersion.Font).Width;
-        var availableWidth = tabsHost.ClientSize.Width - lastTab.Right - 14;
-        pluginVersion.Text = availableWidth >= fullWidth ? fullText : "V";
-        pluginVersion.Location = new Point(
-            Math.Max(lastTab.Right + 8, tabsHost.ClientSize.Width - pluginVersion.PreferredWidth - 8),
-            7);
+        var text = right - left >= fullWidth ? fullText : "V";
+        if (pluginVersion.Text != text) pluginVersion.Text = text;
+        pluginVersion.Location = new Point(Math.Max(left, right - pluginVersion.PreferredWidth), 12);
         pluginVersion.BringToFront();
     }
 
@@ -1140,6 +1162,8 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private static string VersionText(CadTreeNode node)
     {
+        if (node.IsStoredImport) return "随父装配";
+        if (node.IsInterconnectImport) return "随总装核对";
         if (node.Status == CadReferenceStatus.Virtual || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath)) return "随父装配";
         if (node.StoredVersionStateKnown && !node.HasStoredVersion)
         {
@@ -1202,6 +1226,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         contextUpdateLatest.Click += (_, _) => RaiseSelected(UpdateLatestRequested);
         contextCheckout.Click += (_, _) => RaiseSelected(CheckoutRequested);
         contextCheckIn.Click += (_, _) => RaiseSelected(CheckInRequested);
+
         contextDiscardCheckout.Click += (_, _) => RaiseSelected(DiscardCheckoutRequested);
         contextGenerateDrawing.Click += (_, _) => ShowAutomaticDrawing(SelectedNode);
         contextOpenDrawing.Click += (_, _) =>
@@ -1272,6 +1297,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             contextRequestRelease,
             contextDiscardCheckout,
             contextCheckIn,
+
             new ToolStripSeparator(),
             contextGenerateDrawing,
             contextOpenDrawing,
@@ -1396,9 +1422,9 @@ internal sealed class PdmTaskPaneControl : UserControl
         contextGenerateDrawing.Text = drawingExists ? "更新工程图..." : "生成工程图...";
         SetContextState(
             contextGenerateDrawing,
-            drawingSource && localFileExists && !readOnlyPreview,
-            readOnlyPreview
-                ? "只读预览不能生成或更新工程图"
+            drawingSource && localFileExists && !historicalPreview,
+            historicalPreview
+                ? "请打开当前模型版本后生成工程图"
                 : drawingSource ? "本地模型不存在，不能生成工程图" : "请选择零件或装配体");
         SetContextState(
             contextOpenDrawing,
@@ -2335,7 +2361,8 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
 
         var isMissing = model.Status == CadReferenceStatus.Missing && !model.IsRenamePendingSave;
-        var status = model.Status == CadReferenceStatus.Normal || isMissing ? string.Empty : string.Concat(" · ", StatusText(model.Status));
+        var status = model.IsInterconnectImport ? " · 导入组件"
+            : model.Status == CadReferenceStatus.Normal || isMissing ? string.Empty : string.Concat(" · ", StatusText(model.Status));
         var editTip = isMissing
             ? "\r\n状态：文件缺失"
             : string.Concat("\r\n状态：", WorkStateText(model), string.IsNullOrWhiteSpace(model.CheckedOutBy) ? string.Empty : string.Concat("\r\n编辑人员：", DisplayUserName(model.CheckedOutBy)));
@@ -2549,6 +2576,8 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private string WorkStateText(CadTreeNode node)
     {
+        if (node.IsStoredImport) return "导入组件·随父装配保存";
+        if (node.IsInterconnectImport) return "导入组件·待确认保存归属";
         if (node.Status == CadReferenceStatus.Virtual || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath))
             return "嵌入式·随父装配保存";
         if (node.IsLatestReadOnlyPreview)
@@ -2671,15 +2700,16 @@ internal sealed class PdmTaskPaneControl : UserControl
         var workStateText = WorkStateText(node);
         var embedded = node.Status == CadReferenceStatus.Virtual || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath);
         var editState = string.IsNullOrWhiteSpace(workStateText) ? string.Empty : string.Concat("　状态：", workStateText);
-        var selectedVersionText = embedded ? "随父装配" : string.IsNullOrWhiteSpace(node.CurrentRevision)
+        var selectedVersionText = node.IsInterconnectImport ? "随总装核对" : embedded ? "随父装配" : string.IsNullOrWhiteSpace(node.CurrentRevision)
             ? string.IsNullOrWhiteSpace(node.Revision) ? "未归档" : node.Revision
             : VersionText(node);
-        var editor = embedded ? "随父装配编辑" : string.IsNullOrWhiteSpace(node.CheckedOutBy)
+        var editor = node.IsInterconnectImport ? "随总装处理" : embedded ? "随父装配编辑" : string.IsNullOrWhiteSpace(node.CheckedOutBy)
             ? "未检出"
             : string.Concat(DisplayUserName(node.CheckedOutBy),
                 string.IsNullOrWhiteSpace(node.CheckoutMachine) ? string.Empty : string.Concat(" @ ", node.CheckoutMachine),
                 node.CheckedOutAt.HasValue ? string.Concat(" · ", node.CheckedOutAt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm")) : string.Empty);
-        var provenance = embedded ? "\r\n来源：嵌入式组件（保存在所属装配体内）" : node.IsExternalProvenance
+        var provenance = node.IsInterconnectImport ? "\r\n来源：3D Interconnect导入组件\r\n树外源文件记录（不随存档）：" + node.ImportedSourcePath
+            : embedded ? "\r\n来源：嵌入式组件（保存在所属装配体内）" : node.IsExternalProvenance
             ? string.Concat("\r\n来源：工作区外的PLM来源副本", ProvenanceProjectText(node))
             : PdmDocumentIdentityStore.IsControlledWorkspacePath(node.FullPath)
                 ? string.Concat("\r\n来源：工作区", node.DocumentId.HasValue ? "受控文件" : "本地文件（未入库）")
@@ -2692,9 +2722,11 @@ internal sealed class PdmTaskPaneControl : UserControl
             "\r\n描述：", string.IsNullOrWhiteSpace(node.Description) ? "-" : node.Description,
             "　材料：", string.IsNullOrWhiteSpace(node.Material) ? "-" : node.Material,
             provenance,
-            embedded ? "\r\n存储：所属父装配体内" : "\r\n路径：" + (string.IsNullOrWhiteSpace(node.FullPath) ? "-" : node.FullPath));
+            node.IsStoredImport ? "\r\n存储：" + node.ImportedStorageOwnerPath + "（内部组件随此图档存档，不单独登记或升版）"
+                : node.IsInterconnectImport ? "\r\n存档：尚未确认原生保存归属，请保存所属装配后重试。"
+                : embedded ? "\r\n存储：所属父装配体内" : "\r\n路径：" + (string.IsNullOrWhiteSpace(node.FullPath) ? "-" : node.FullPath));
         var localFileExists = !string.IsNullOrWhiteSpace(node.FullPath) && File.Exists(node.FullPath);
-        var canRegister = !node.DocumentId.HasValue
+        var canRegister = !embedded && !node.DocumentId.HasValue
             && localFileExists
             && (node.Kind == CadDocumentKind.Assembly || node.Kind == CadDocumentKind.Part || node.Kind == CadDocumentKind.Drawing);
         var authenticated = !string.IsNullOrWhiteSpace(authenticatedUsername);
@@ -2716,7 +2748,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         var lifecycleLocked = node.DrawingReviewLocked
             || string.Equals(node.LifecycleState, "InReview", StringComparison.OrdinalIgnoreCase)
             || string.Equals(node.LifecycleState, "Obsolete", StringComparison.OrdinalIgnoreCase);
-        var canCheckout = !historicalPreview
+        var canCheckout = !embedded && !historicalPreview
             && !lifecycleLocked
             && authenticated
             && (latestReadOnlyPreview
@@ -2730,7 +2762,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         checkoutButton.AccessibleName = checkoutButton.Text;
         checkoutButton.Enabled = checkedActionNodes.Count > 0
             || canCheckout
-            || (!readOnlyPreview && node.DocumentId.HasValue && editingByCurrentUser);
+            || (!embedded && !readOnlyPreview && node.DocumentId.HasValue && editingByCurrentUser);
         checkinButton.Enabled = CanOpenArchiveDialog;
         propertyEditButton.Enabled = rootNode != null && !rootNode.IsReadOnlyPreview;
         settingsButton.Enabled = true;
@@ -2745,6 +2777,8 @@ internal sealed class PdmTaskPaneControl : UserControl
             checkoutButton,
             checkedActionNodes.Count > 0
                 ? string.Concat(checkoutButton.Text, "已勾选的", checkedActionNodes.Count, "个图档")
+                : node.IsInterconnectImport ? "导入组件需保存为稳定原生内容，树外源文件不随存档"
+                : embedded ? "嵌入式组件随所属装配处理"
                 : node.DrawingReviewLocked
                 ? "图纸审核中，只允许只读打开，不能获取编辑权限"
                 : editingByCurrentUser
@@ -2767,7 +2801,8 @@ internal sealed class PdmTaskPaneControl : UserControl
     }
 
     private bool CanOpenArchiveDialog => !string.IsNullOrWhiteSpace(authenticatedUsername)
-        && rootNode != null && !rootNode.IsReadOnlyPreview && !workspaceOperationActive;
+        && rootNode != null && (!rootNode.IsReadOnlyPreview || SelectedNode?.Kind == CadDocumentKind.Drawing
+            && !SelectedNode.IsReadOnlyPreview) && !workspaceOperationActive;
 
     private void RefreshSelectionIndependentStructureActions()
     {
@@ -3155,6 +3190,12 @@ internal sealed class PdmTaskPaneControl : UserControl
         if (checkedNodes.Count > 0)
         {
             CheckInRequested?.Invoke(this, new CadTreeNodeEventArgs(checkedNodes[0], checkedNodes, true));
+            return;
+        }
+
+        if (SelectedNode?.Kind == CadDocumentKind.Drawing)
+        {
+            CheckInRequested?.Invoke(this, new CadTreeNodeEventArgs(SelectedNode, new[] { SelectedNode }, true));
             return;
         }
 

@@ -82,14 +82,14 @@ watch(() => props.token, () => load(true))
 
 <style scoped>
 .pdm-client-logs { padding: 20px; min-width: 0; }
-header h2 { margin: 0 0 8px; } header p, .log-hint { color: #64748b; font-size: 13px; line-height: 1.6; }
+header h2 { margin: 0 0 8px; } header p, .log-hint { color: var(--pdm-text-soft); font-size: 13px; line-height: 1.6; }
 .log-filters { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; margin: 18px 0; }
 .log-filters label { display: grid; gap: 6px; font-size: 13px; }
-input, select { min-height: 34px; border: 1px solid #cbd5e1; border-radius: 4px; padding: 5px 8px; max-width: 230px; }
-button { border: 1px solid #cbd5e1; border-radius: 4px; background: white; padding: 8px 12px; cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
+input, select { min-height: 34px; border: 1px solid var(--pdm-border); border-radius: 4px; padding: 5px 8px; max-width: 230px; }
+button { border: 1px solid var(--pdm-border); border-radius: 4px; background: white; padding: 8px 12px; cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
 .log-actions, footer { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; } footer { justify-content: flex-end; margin-top: 16px; }
-.log-table-wrap { overflow: auto; } table { width: 100%; border-collapse: collapse; font-size: 13px; } th { text-align: left; background: #f1f5f9; } td, th { padding: 12px; border-bottom: 1px solid #e2e8f0; vertical-align: top; } small { display: block; max-width: 240px; overflow-wrap: anywhere; color: #64748b; margin-top: 5px; }
+.log-table-wrap { overflow: auto; } table { width: 100%; border-collapse: collapse; font-size: 13px; } th { text-align: left; background: var(--pdm-surface-muted); } td, th { padding: 12px; border-bottom: 1px solid var(--pdm-surface-muted); vertical-align: top; } small { display: block; max-width: 240px; overflow-wrap: anywhere; color: var(--pdm-text-soft); margin-top: 5px; }
 .log-date-range { min-width: 0; max-width: 100%; }
 .log-date-range :deep(.el-date-editor) { width: 380px; max-width: 100%; min-height: 34px; box-sizing: border-box; }
-.log-error { color: #b91c1c; }
+.log-error { color: var(--pdm-danger); }
 </style>

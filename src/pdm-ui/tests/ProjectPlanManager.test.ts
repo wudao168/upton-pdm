@@ -65,6 +65,67 @@ beforeEach(() => {
 afterEach(() => { wrappers.splice(0).forEach(item => item.unmount()); document.body.innerHTML = ''; vi.restoreAllMocks() })
 
 describe('项目计划审批和配置', () => {
+  it('阶段、任务和责任人组合筛选保留阶段行，支持待分配且不改变原计划', async () => {
+    const task = structuredClone(draft.tasks[0]!)
+    const source = { ...structuredClone(draft), tasks: [
+      { ...task, id: 'mechanical', name: '机械方案评审', assignee: 'pm' },
+      { ...task, id: 'electrical', name: '电气方案评审', assignee: 'designer' },
+      { ...task, id: 'handover', name: '交付资料整理', stage: 'custom-handover', assignee: 'designer' },
+      { ...task, id: 'training', name: '交付培训', stage: 'custom-handover' },
+    ] }
+    const snapshot = JSON.stringify(source)
+    api.readProjectPlan.mockResolvedValue(source)
+    const wrapper = render()
+    await flushPromises()
+    const names = () => wrapper.findAll('.pdm-gantt-info-row.is-task .pdm-gantt-name strong').map(item => item.text())
+    const selects = wrapper.find('.pdm-plan-filters').findAllComponents(ElSelect)
+    const query = wrapper.get('input[aria-label="筛选任务"]')
+    const ticks = wrapper.get('.pdm-gantt-timeline-head').text()
+    selects[0]!.vm.$emit('update:modelValue', ['方案确认']); await flushPromises()
+    expect(names()).toEqual(['机械方案评审', '电气方案评审'])
+    expect(wrapper.findAll('.pdm-gantt-info-row.is-stage')).toHaveLength(1)
+    expect(wrapper.get('.pdm-gantt-timeline-head').text()).toBe(ticks)
+    await query.setValue('机械')
+    expect(names()).toEqual(['机械方案评审'])
+    selects[1]!.vm.$emit('update:modelValue', ['designer']); await flushPromises()
+    expect(wrapper.text()).toContain('暂无符合筛选条件的任务')
+    expect(wrapper.find('.pdm-gantt-shell').exists()).toBe(false)
+    await query.setValue('方案')
+    expect(names()).toEqual(['电气方案评审'])
+    selects[0]!.vm.$emit('update:modelValue', ['方案确认', '交付'])
+    selects[1]!.vm.$emit('update:modelValue', ['pm', 'designer']); await flushPromises()
+    expect(names()).toEqual(['机械方案评审', '电气方案评审'])
+    await query.setValue('')
+    expect(names()).toEqual(['机械方案评审', '电气方案评审', '交付资料整理'])
+    selects[1]!.vm.$emit('update:modelValue', ['__unassigned__']); await flushPromises()
+    expect(names()).toEqual(['交付培训'])
+    expect(wrapper.find('.pdm-plan-filters [role=status]').text()).toBe('匹配 1 / 4 项任务')
+    await wrapper.find('.pdm-plan-filters').findAll('button').find(button => button.text() === '清空筛选')!.trigger('click')
+    expect(names()).toHaveLength(4)
+    expect(wrapper.findAll('.pdm-gantt-info-row')).toHaveLength(wrapper.findAll('.pdm-gantt-timeline-row').length)
+    expect(JSON.stringify(source)).toBe(snapshot)
+    expect(api.saveProjectPlan).not.toHaveBeenCalled()
+  })
+
+  it('汇总筛选自动展开命中的项目，按项目隔离重复任务ID并在切换项目时清空筛选', async () => {
+    api.readProjectPlanPortfolio.mockResolvedValue({ rootProjectId: 'root', currentStage: 'custom-review', completionPercent: 0, projects: [
+      { projectId: 'root', projectCode: 'P1', projectName: '主项目', isRoot: true, hasPlan: false },
+      { projectId: 'child', projectCode: 'P1-1', projectName: '设备一', hasPlan: true, plan: { ...structuredClone(draft), tasks: [{ ...draft.tasks[0]!, assignee: 'designer' }] } },
+      { projectId: 'target', projectCode: 'P1-2', projectName: '设备二', hasPlan: true, plan: { ...structuredClone(draft), projectId: 'target', tasks: [{ ...draft.tasks[0]!, assignee: 'pm' }] } },
+    ] })
+    const wrapper = render(root)
+    await flushPromises()
+    expect(wrapper.findAll('.pdm-gantt-info-row.is-task')).toHaveLength(0)
+    wrapper.find('.pdm-plan-filters').findAllComponents(ElSelect)[1]!.vm.$emit('update:modelValue', ['designer'])
+    await flushPromises()
+    expect(wrapper.findAll('.pdm-gantt-info-row.is-project')).toHaveLength(1)
+    expect(wrapper.find('.pdm-gantt-info-row.is-project').text()).toContain('P1-1')
+    expect(wrapper.findAll('.pdm-gantt-info-row.is-task')).toHaveLength(1)
+    expect(wrapper.findAll('.pdm-gantt-info-row')).toHaveLength(wrapper.findAll('.pdm-gantt-timeline-row').length)
+    await wrapper.setProps({ project: child }); await flushPromises()
+    expect(wrapper.find('.pdm-plan-filters').findAllComponents(ElSelect)[1]!.props('modelValue')).toEqual([])
+    expect(wrapper.find('.pdm-plan-filters [role=status]').text()).toBe('匹配 1 / 1 项任务')
+  })
   it('从概览节点进入主项目时打开对应任务而非子项目汇总', async () => {
     const rootPlan = { ...structuredClone(draft), projectId: 'root' }
     api.readProjectPlan.mockResolvedValue(rootPlan)
@@ -860,8 +921,8 @@ describe('项目计划审批和配置', () => {
     let width = 980
     const clientWidth = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => width)
     vi.stubGlobal('ResizeObserver', class {
-      constructor(callback: () => void) { resized = callback }
-      observe() {}
+      constructor(private callback: () => void) {}
+      observe(element: Element) { if (element.classList.contains('pdm-gantt-shell')) resized = this.callback }
       disconnect() {}
       unobserve() {}
     })
@@ -1105,7 +1166,7 @@ describe('项目计划审批和配置', () => {
     await flushPromises()
     await wrapper.find('[aria-label="编辑方案检查责任人"]').trigger('click')
     expect(document.body.textContent).not.toContain('任务详情与实际进度')
-    wrapper.findComponent(ElSelect).vm.$emit('update:modelValue', 'pm')
+    wrapper.find('.pdm-gantt-inline-editor').findComponent(ElSelect).vm.$emit('update:modelValue', 'pm')
     await clickText('保存责任人')
     expect(api.saveProjectPlan).toHaveBeenLastCalledWith('child', expect.objectContaining({ expectedRowVersion: 1, tasks: [expect.objectContaining({ ...draft.tasks[0], assignee: 'pm' })] }), 'test')
     await wrapper.find('[aria-label="编辑方案检查计划日期"]').trigger('click')

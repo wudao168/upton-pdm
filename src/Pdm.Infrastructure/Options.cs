@@ -19,6 +19,8 @@ public sealed class PdmStorageOptions
 
     public string ProgramTemplateRoot { get; set; } = Path.Combine(AppContext.BaseDirectory, "data", "program-templates");
 
+    public string StandardStructureRoot { get; set; } = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "standard-structures"));
+
     public int ChunkSizeBytes { get; set; } = 16 * 1024 * 1024;
 
     public int UploadLifetimeHours { get; set; } = 24;

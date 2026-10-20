@@ -85,6 +85,66 @@ function mountProjectManager(directory = emptyDirectory, sourceProjects = [paren
 }
 
 describe('ProjectManager', () => {
+  it('按项目类型切换主项目，子项目随主项目显示并保留搜索筛选', async () => {
+    const research = { ...parent, id: 'research', code: 'R700001', projectTypeCode: 'R', name: '研发主项目' }
+    const researchChild = { ...child, id: 'research-child', code: 'R700001-1', parentProjectId: research.id, rootProjectId: research.id, projectTypeCode: undefined, name: '研发下级设备' }
+    const wrapper = mountProjectManager(emptyDirectory, [parent, child, research, researchChild])
+    await wrapper.setProps({ numberingOptions: { ...wrapper.props('numberingOptions'), projectTypes: [
+      { code: 'P', name: '标准项目', isActive: true }, { code: 'R', name: '研发项目', isActive: true }, { code: 'W', name: '外发项目', isActive: true },
+    ] } })
+    const tabs = () => wrapper.findAll('.pdm-project-type-tabs [role="tab"]')
+    expect(tabs().map(item => item.text())).toEqual(['全部项目', '标准项目', '研发项目', '外发项目'])
+    expect(tabs().find(item => item.text() === '全部项目')!.attributes('aria-selected')).toBe('true')
+    await tabs().find(item => item.text() === '研发项目')!.trigger('click')
+    expect(wrapper.get('tbody').text()).toContain('R700001')
+    expect(wrapper.get('tbody').text()).not.toContain('P700001')
+    await wrapper.get('[aria-label="展开全部项目明细"]').trigger('click')
+    expect(wrapper.get('tbody').text()).toContain('研发下级设备')
+    await wrapper.get('[aria-label="搜索项目"]').setValue('研发下级设备')
+    await wrapper.get('[aria-label="搜索项目"]').trigger('keyup.enter')
+    expect(wrapper.get('tbody').text()).toContain('R700001')
+    await tabs().find(item => item.text() === '标准项目')!.trigger('click')
+    expect(wrapper.find('tbody').exists()).toBe(false)
+    await wrapper.get('[aria-label="搜索项目"]').setValue('')
+    await wrapper.get('[aria-label="搜索项目"]').trigger('keyup.enter')
+    expect(wrapper.get('tbody').text()).toContain('P700001')
+    expect(wrapper.get('tbody').text()).not.toContain('R700001')
+    await tabs().find(item => item.text() === '外发项目')!.trigger('click')
+    expect(wrapper.text()).toContain('未找到匹配项目')
+    wrapper.unmount()
+  })
+
+  it('旧项目、未配置类型和停用但已有项目的类型仍有独立入口', async () => {
+    const legacy = { ...parent, id: 'legacy', code: 'OLD-001', projectTypeCode: undefined }
+    const retired = { ...parent, id: 'retired', code: 'W700001', projectTypeCode: 'W' }
+    const custom = { ...parent, id: 'custom', code: 'X700001', projectTypeCode: 'X' }
+    const wrapper = mountProjectManager(emptyDirectory, [parent, legacy, retired, custom])
+    await wrapper.setProps({ numberingOptions: { ...wrapper.props('numberingOptions'), projectTypes: [
+      { code: 'P', name: '标准项目', isActive: true }, { code: 'W', name: '外发项目', isActive: false }, { code: 'S', name: '售后项目', isActive: false },
+    ] } })
+    const tabs = () => wrapper.findAll('.pdm-project-type-tabs [role="tab"]')
+    expect(tabs().map(item => item.text())).toEqual(['全部项目', '标准项目', '外发项目', 'X 类项目', '未分类'])
+    await tabs().find(item => item.text() === '未分类')!.trigger('click')
+    expect(wrapper.get('tbody').text()).toContain('OLD-001')
+    expect(wrapper.get('tbody').text()).not.toContain('P700001')
+    await tabs().find(item => item.text() === '外发项目')!.trigger('click')
+    expect(wrapper.get('tbody').text()).toContain('W700001')
+    await wrapper.setProps({ projects: [parent, legacy, custom] })
+    expect(tabs().find(item => item.text() === '全部项目')!.attributes('aria-selected')).toBe('true')
+    wrapper.unmount()
+  })
+
+  it('从类型页签创建主项目时默认选中当前类型', async () => {
+    const wrapper = mountProjectManager(emptyDirectory, [parent], false, true, false, true)
+    await wrapper.setProps({ numberingOptions: { ...wrapper.props('numberingOptions'), projectTypes: [
+      { code: 'P', name: '标准项目', isActive: true }, { code: 'R', name: '研发项目', isActive: true },
+    ] } })
+    await wrapper.findAll('.pdm-project-type-tabs [role="tab"]').find(item => item.text() === '研发项目')!.trigger('click')
+    await wrapper.get('.pdm-project-create-action').trigger('click')
+    expect((wrapper.get('[name="projectTypeCode"]').element as HTMLSelectElement).value).toBe('R')
+    wrapper.unmount()
+  })
+
   it('制造部门顺序与组织架构一致，按编码而非排序号排列', () => {
     const directory: OrganizationDirectory = { ...emptyDirectory, units: [
       { id: 't3', organizationId: 'org-1', code: 'T3', name: 'T3事业部', kind: 'BusinessDivision', canManufacture: true, isActive: true, sortOrder: 0 },
@@ -256,6 +316,17 @@ describe('ProjectManager', () => {
     customerSelect.vm.$emit('update:modelValue', 'customer-2')
     await wrapper.vm.$nextTick()
     expect(wrapper.text()).toContain('客户编码由U9C客户数据自动带出：0-000003')
+  })
+
+  it('直接建项的订单日期也可留空，且不自动填入当天日期', async () => {
+    const wrapper = mountProjectManager(emptyDirectory, [], false, true, false, true)
+    await wrapper.get('.pdm-project-create-action').trigger('click')
+    const form = wrapper.get('[aria-label="创建PLM项目"]')
+    expect((form.get('[name="signedDate"]').element as HTMLInputElement).value).toBe('')
+    await form.get('[name="projectName"]').setValue('未签合同项目')
+    await wrapper.findAll('button').find(item => item.text() === '创建并取号')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.props('onCreate')).toHaveBeenCalledWith(expect.objectContaining({ name: '未签合同项目', signedDate: null }))
   })
 
   it('创建子项目时不显示设备类型并由后端继承上级项目', async () => {

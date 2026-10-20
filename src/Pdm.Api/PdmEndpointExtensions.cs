@@ -128,7 +128,7 @@ public static class PdmEndpointExtensions
             if (gender is not ("male" or "female" or "unspecified")) throw new PdmRuleException("性别选项无效。");
             if (email is not null && !MailAddress.TryCreate(email, out _)) throw new PdmRuleException("邮箱格式不正确。");
             var theme = string.IsNullOrWhiteSpace(request.Theme) ? null : request.Theme.Trim();
-            if (theme is not null && theme is not ("a" or "c" or "o")) throw new PdmRuleException("主题选项无效。");
+            if (theme is not null && theme is not ("a" or "c" or "p" or "o" or "g")) throw new PdmRuleException("主题选项无效。");
             var profile = await repository.UpdateUserProfileAsync(actor, nickname, gender, landline, mobilePhone, email, theme, cancellationToken);
             await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "user.profile.update", nameof(UserProfile), actor, "更新个人资料"), cancellationToken);
             return Results.Ok(profile);
@@ -341,7 +341,7 @@ public static class PdmEndpointExtensions
             return Results.Ok(new
             {
                 directory.Organizations,
-                Units = directory.Units.Select(unit => new { unit.Id, unit.OrganizationId, unit.ParentUnitId, unit.Code, unit.Name, Kind = unit.Kind.ToString(), unit.CanManufacture, unit.IsActive, unit.SortOrder }),
+                Units = directory.Units.Select(unit => new { unit.Id, unit.OrganizationId, unit.ParentUnitId, unit.Code, unit.Name, Kind = unit.Kind.ToString(), unit.CanManufacture, unit.CanArchiveStandardLibrary, unit.IsActive, unit.SortOrder }),
                 directory.Memberships,
                 directory.Managers,
                 Users = directory.Users.Select(user => new
@@ -374,14 +374,14 @@ public static class PdmEndpointExtensions
         api.MapPost("/organization-units", async (SaveOrganizationUnitRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var saved = await workflow.SaveOrganizationUnitAsync(new(null, request.OrganizationId, request.ParentUnitId, request.Code, request.Name, request.Kind, request.IsActive, request.SortOrder, request.CanManufacture), actor, role, cancellationToken);
+            var saved = await workflow.SaveOrganizationUnitAsync(new(null, request.OrganizationId, request.ParentUnitId, request.Code, request.Name, request.Kind, request.IsActive, request.SortOrder, request.CanManufacture, request.CanArchiveStandardLibrary), actor, role, cancellationToken);
             return Results.Created($"/api/organization-units/{saved.Id}", saved);
         });
 
         api.MapPut("/organization-units/{unitId:guid}", async (Guid unitId, SaveOrganizationUnitRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await workflow.SaveOrganizationUnitAsync(new(unitId, request.OrganizationId, request.ParentUnitId, request.Code, request.Name, request.Kind, request.IsActive, request.SortOrder, request.CanManufacture), actor, role, cancellationToken));
+            return Results.Ok(await workflow.SaveOrganizationUnitAsync(new(unitId, request.OrganizationId, request.ParentUnitId, request.Code, request.Name, request.Kind, request.IsActive, request.SortOrder, request.CanManufacture, request.CanArchiveStandardLibrary), actor, role, cancellationToken));
         });
 
         api.MapPut("/organization-users/{username}/memberships", async (string username, UpdateOrganizationMembershipsRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1110,7 +1110,8 @@ public static class PdmEndpointExtensions
                 actor,
                 role,
                 cancellationToken,
-                request.ResolveLegacyReferences));
+                request.ResolveLegacyReferences,
+                request.TreeScopeOnly));
         });
 
         api.MapGet("/documents/{documentId:guid}/versions/compare", async (Guid documentId, Guid left, Guid right, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1702,24 +1703,18 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasProjectContentReadAccessAsync(request.ProjectId, actor, role, cancellationToken)) return Results.Forbid();
+            if (request.Scope == ReleaseScope.LegacyCombined)
+                return Results.BadRequest(new { detail = "新发布必须选择标准件、非标件或电气件，并明确勾选本次范围；历史发布包仍可继续查看和处理。" });
             if (request.Scope is (ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement) && request.DrawingRequiredOn is null)
                 return Results.BadRequest(new { detail = "图纸发布必须填写生产需求日期。" });
-            return Results.Ok(request.Scope == ReleaseScope.LegacyCombined
-                ? await workflow.CreateReleasePackageAsync(
-                    request.ProjectId, request.ReferenceSnapshotId, request.Number ?? string.Empty,
-                    request.ChangeNumber ?? request.Number ?? string.Empty,
-                    request.ChangeReason ?? "兼容既有发布流程创建的设变",
-                    request.EffectiveSerialFrom ?? "未指定", request.EffectiveSerialTo,
-                    request.ProcessReviewer ?? string.Empty, request.Approver ?? string.Empty,
-                    actor, role, cancellationToken)
-                : await workflow.CreateScopedReleasePackageAsync(
+            return Results.Ok(await workflow.CreateScopedReleasePackageAsync(
                     request.ProjectId, request.ReferenceSnapshotId, string.Empty,
                     string.Empty,
                     request.ChangeReason ?? string.Empty,
                     "未指定", null,
                     request.Scope, request.SelectedBomItemIds,
                     actor, role, cancellationToken, request.SelectedBomItemQuantities, request.WholeSetMultiplier,
-                    request.DrawingPriority, request.DrawingRequiredOn, request.DrawingDeliveryOverrides, request.BomItemDeliveryOverrides, request.RootDocumentId));
+                    request.DrawingPriority, request.DrawingRequiredOn, request.DrawingDeliveryOverrides, request.BomItemDeliveryOverrides, request.RootDocumentId, request.ConfirmedRemovedBomItemIds, request.RelatedOplIssueIds));
         });
 
         api.MapPut("/release-packages/{releasePackageId:guid}/draft", async (Guid releasePackageId, UpdateReleasePackageDraftRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1742,7 +1737,9 @@ public static class PdmEndpointExtensions
                 request.DrawingPriority,
                 request.DrawingRequiredOn ?? package.DrawingRequiredOn,
                 request.DrawingDeliveryOverrides,
-                request.BomItemDeliveryOverrides));
+                request.BomItemDeliveryOverrides,
+                request.ConfirmedRemovedBomItemIds,
+                request.RelatedOplIssueIds));
         });
 
         api.MapDelete("/release-packages/{releasePackageId:guid}/draft", async (Guid releasePackageId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>

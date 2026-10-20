@@ -28,7 +28,7 @@ public sealed partial class MySqlPdmRepository
             SELECT item.drawing_document_id
             FROM drawing_review_item item
             JOIN drawing_review_package package ON package.id=item.package_id
-            WHERE package.project_id=@ProjectId AND package.state IN ('InReview','PendingSupervisorApproval','WritingProperties') AND item.drawing_document_id IS NOT NULL
+            WHERE package.project_id=@ProjectId AND package.state IN ('InReview','PendingSupervisorApproval') AND item.drawing_document_id IS NOT NULL
               -- 已退回的图档立即释放编辑锁，设计者可直接改图；该审核单其余图档仍保持锁定。
               AND item.drawing_state <> 'ChangesRequested'
             """,
@@ -75,7 +75,7 @@ public sealed partial class MySqlPdmRepository
             SELECT COUNT(*)
             FROM drawing_review_item item
             JOIN drawing_review_package package ON package.id=item.package_id
-            WHERE package.state IN ('InReview','PendingSupervisorApproval','WritingProperties')
+            WHERE package.state IN ('InReview','PendingSupervisorApproval')
               AND item.drawing_document_id IN @DocumentIds
             """,
             new { DocumentIds = documentIds }, transaction, cancellationToken: cancellationToken));
@@ -159,7 +159,7 @@ public sealed partial class MySqlPdmRepository
             SELECT COUNT(*)
             FROM drawing_review_item item
             JOIN drawing_review_package package ON package.id=item.package_id
-            WHERE package.state IN ('InReview','PendingSupervisorApproval','WritingProperties')
+            WHERE package.state IN ('InReview','PendingSupervisorApproval')
               AND item.drawing_document_id=@DocumentId
               -- 已退回的图档不再锁定，允许设计者获取编辑权限。
               AND item.drawing_state <> 'ChangesRequested'
@@ -189,6 +189,15 @@ public sealed partial class MySqlPdmRepository
             """,
             new { DocumentId = documentId, WritebackId = writebackId }, transaction, cancellationToken: cancellationToken));
         return count > 0;
+    }
+
+    private static async Task<bool> IsActivePropertyWritebackAsync(DbConnection connection, DbTransaction? transaction,
+        Guid documentId, Guid writebackId, CancellationToken cancellationToken)
+    {
+        var id = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
+            "SELECT source_document_id FROM cad_property_writeback WHERE id=@WritebackId AND source_document_id=@DocumentId AND status='InProgress' FOR UPDATE",
+            new { WritebackId = writebackId, DocumentId = documentId }, transaction, cancellationToken: cancellationToken));
+        return id == documentId;
     }
 
     public async Task<DrawingReviewPackage> AddDrawingReviewMarkupAsync(DrawingReviewMarkup markup, CancellationToken cancellationToken)
@@ -444,15 +453,15 @@ public sealed partial class MySqlPdmRepository
         if (!succeeded)
         {
             await connection.ExecuteAsync(new CommandDefinition(
-                "UPDATE drawing_review_package SET state='Stale',approved_at=NULL WHERE id=@PackageId",
+                "UPDATE drawing_review_package SET state='WritingProperties' WHERE id=@PackageId AND state='WritingProperties'",
                 new { link.PackageId }, transaction, cancellationToken: cancellationToken));
         }
         else
         {
             if (!resultVersionId.HasValue) throw new PdmRuleException("图纸审核属性写回缺少结果版本。");
             var sql = link.Target == DrawingReviewTarget.Model3D.ToString()
-                ? "UPDATE drawing_review_item SET model_state='Marked',model_result_version_id=@ResultVersionId WHERE id=@ItemId"
-                : "UPDATE drawing_review_item SET drawing_state='Marked',drawing_result_version_id=@ResultVersionId WHERE id=@ItemId";
+                ? "UPDATE drawing_review_item item JOIN drawing_review_package package ON package.id=item.package_id SET item.model_state='Marked',item.model_result_version_id=@ResultVersionId WHERE item.id=@ItemId AND package.state='WritingProperties'"
+                : "UPDATE drawing_review_item item JOIN drawing_review_package package ON package.id=item.package_id SET item.drawing_state='Marked',item.drawing_result_version_id=@ResultVersionId WHERE item.id=@ItemId AND package.state='WritingProperties'";
             await connection.ExecuteAsync(new CommandDefinition(sql,
                 new { link.ItemId, ResultVersionId = resultVersionId.Value }, transaction, cancellationToken: cancellationToken));
             var remaining = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
@@ -460,8 +469,8 @@ public sealed partial class MySqlPdmRepository
                 new { link.PackageId }, transaction, cancellationToken: cancellationToken));
             await connection.ExecuteAsync(new CommandDefinition(
                 remaining == 0
-                    ? "UPDATE drawing_review_package SET state='Approved',approved_at=@Now WHERE id=@PackageId"
-                    : "UPDATE drawing_review_package SET state='WritingProperties',approved_at=NULL WHERE id=@PackageId",
+                    ? "UPDATE drawing_review_package SET state='Approved',approved_at=@Now WHERE id=@PackageId AND state='WritingProperties'"
+                    : "UPDATE drawing_review_package SET state='WritingProperties' WHERE id=@PackageId AND state='WritingProperties'",
                 new { link.PackageId, Now = timeProvider.GetUtcNow().UtcDateTime }, transaction, cancellationToken: cancellationToken));
         }
         await transaction.CommitAsync(cancellationToken);

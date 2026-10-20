@@ -16,7 +16,9 @@ public class BomSupplementSnapshotTests
         var unselectedNew = Item("NEXT");
         var baseline = new[] { unchanged, deferred, removed };
         var current = new[] { unchanged with { Revision = "A" }, deferred with { Quantity = 2 }, added, unselectedNew };
-        var snapshot = BomSupplementSnapshot.Merge(current, [added], baseline);
+        var preserved = BomSupplementSnapshot.Merge(current, [added], baseline);
+        Assert.Contains(removed, preserved);
+        var snapshot = BomSupplementSnapshot.Merge(current, [added], baseline, [removed.Id]);
         Assert.Equal(3, snapshot.Length);
         Assert.Contains(unchanged, snapshot);
         Assert.Contains(deferred, snapshot);

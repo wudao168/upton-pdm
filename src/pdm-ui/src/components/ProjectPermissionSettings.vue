@@ -181,7 +181,7 @@ watch(() => props.token, token => { void load(token) }, { immediate: true })
 .pdm-project-permission-matrix small { display: block; margin-top: 4px; color: var(--pdm-muted); font-size: 11px; font-weight: 400; }
 .pdm-project-permission-group th { background: var(--pdm-table-header); color: var(--pdm-muted); text-align: left; }
 .pdm-project-permission-matrix td label { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 26px; color: var(--pdm-muted); cursor: pointer; }
-.pdm-project-permission-matrix td label.is-checked { color: var(--pdm-green); }.pdm-project-permission-matrix input { accent-color: var(--pdm-green); }
+.pdm-project-permission-matrix td label.is-checked { color: var(--pdm-theme-accent); }.pdm-project-permission-matrix input { accent-color: var(--pdm-theme-accent); }
 .pdm-project-permission-notes { margin-top: 12px; padding: 4px 12px; border-left: 3px solid var(--pdm-border); color: var(--pdm-muted); font-size: 12px; line-height: 1.7; }
 .pdm-project-permission-notes p { margin: 6px 0; }
 .pdm-project-permission-actions { display: flex; flex-wrap: wrap; flex: 0 0 auto; align-items: center; gap: 8px; padding: 12px 0 0; border-top: 1px solid var(--pdm-border); }

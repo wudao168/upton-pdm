@@ -2,133 +2,163 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { ProjectSummary } from './types'
 
 type Context = { project: ProjectSummary; currentUsername?: string; token?: string; activeTab: string }
-type Update = { sourceVersion?: string; needsHandling?: boolean; fingerprint: string; updatedAt?: string; actor?: string }
-export function procurementContent(value: { items?: unknown[] }) { return value.items ?? [] }
+type Row = Record<string, any>
+type Snapshot = { fingerprint: string; tokens?: string[]; revisions?: Record<string, string>; updatedAt?: string; actor?: string }
+type Update = Snapshot & { unread: boolean }
+export const projectUpdateTabs = ['information', 'files', 'project-plan', 'opl', 'budget', 'validation-plan', 'documents', 'bom', 'release']
+const pick = (row: Row | null | undefined, fields: string[]) => Object.fromEntries(fields.map(key => [key, row?.[key] ?? null]))
+function canonical(value: any): any {
+  if (Array.isArray(value)) return value.map(canonical)
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]))
+  return value
+}
 export function fingerprint(value: unknown) {
-  const text = JSON.stringify(value)
+  const text = JSON.stringify(canonical(value))
   let hash = 2166136261
   for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619)
   return `${text.length}:${hash >>> 0}`
 }
-function metadata(value: unknown): Omit<Update, 'fingerprint'> {
-  let result: Omit<Update, 'fingerprint'> = {}
+const sorted = (rows: any[] = []) => rows.map(canonical).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+// 只比较业务字段，权限、刷新时间及并发版本号不代表内容更新。
+function business(value: any): any {
+  if (Array.isArray(value)) return sorted(value.map(business))
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !/^(can[A-Z]|rowVersion$|createdAt$|createdBy$|updatedAt$|updatedBy$|lastRefresh|lastSuccessfulRefresh|notification$)/.test(key)).map(([key, item]) => [key, business(item)]))
+}
+function metadata(value: unknown): Pick<Snapshot, 'updatedAt' | 'actor'> {
+  let result: Pick<Snapshot, 'updatedAt' | 'actor'> = {}
   function visit(item: unknown) {
     if (!item || typeof item !== 'object') return
-    const row = item as Record<string, unknown>
-    const time = [row.updatedAt, row.occurredAt, row.createdAt, row.publishedAt].filter((v): v is string => typeof v === 'string' && !Number.isNaN(Date.parse(v))).sort().at(-1)
-    if (time && (!result.updatedAt || time > result.updatedAt)) result = { updatedAt: time, actor: typeof row.updatedBy === 'string' ? row.updatedBy : typeof row.actor === 'string' ? row.actor : typeof row.createdBy === 'string' ? row.createdBy : undefined }
+    const row = item as Row
+    const time = [row.updatedAt, row.createdAt, row.publishedAt, row.uploadedAt].filter((v): v is string => typeof v === 'string' && !Number.isNaN(Date.parse(v))).sort().at(-1)
+    if (time && (!result.updatedAt || time > result.updatedAt)) result = { updatedAt: time, actor: row.updatedBy ?? row.uploadedBy ?? row.createdBy }
     Object.values(row).forEach(visit)
   }
   visit(value)
   return result
 }
-type Row = Record<string, any>
-export function bomNeedsHandling(current: Row[][], versions: Row[], packages: Row[]) {
-  const fields = ['drawingNumber', 'name', 'quantity', 'unit', 'material', 'specification', 'remark', 'brand', 'surfaceTreatment', 'heatTreatment', 'weight', 'revision', 'materialCode', 'materialId', 'isWearPart', 'impactStage']
-  const normalize = (items: Row[]) => items.filter(item => !item.isManuallyExcluded && !item.isReleaseExcluded).map(item => JSON.stringify(fields.map(key => item[key] ?? null))).sort()
-  return current.some((items, index) => {
-    if (index === 3) return items.some(item => !item.isManuallyExcluded && !item.isReleaseExcluded)
-    if (items.some(item => item.isPendingRemoval || item.isPendingClassification)) return true
-    const versionKey = ['standardBomVersionId', 'nonStandardBomVersionId', 'electricalBomVersionId'][index]!
-    const published = packages.filter(pkg => pkg.publishedAt && pkg[versionKey]).sort((a,b) => String(b.publishedAt).localeCompare(String(a.publishedAt)))[0]
-    const baseline = published && versions.find(version => version.id === published[versionKey] && (version.state === 'Released' || version.state === 2))
-    return JSON.stringify(normalize(items)) !== JSON.stringify(normalize(baseline?.items ?? []))
-  })
+export function projectTabSnapshot(tab: string, data: any[], project: ProjectSummary): Snapshot {
+  const first = data[0]
+  let content: unknown = null, tokens: string[] | undefined, revisions: Record<string, string> | undefined
+  if (tab === 'information') content = [
+    business(pick(first, ['name', 'owner', 'projectAlias', 'organizationId', 'organizationName', 'projectTypeCode', 'equipmentTypeCode', 'customerCode', 'customerName', 'customerProjectSequence', 'deviceModel', 'signedDate', 'isSpecialInitiation', 'deliveryDate', 'quantity', 'bomItemCategoryCode', 'serialNumbers', 'responsibleUsers', 'executionUnitId', 'executionUnitName', 'primaryProjectManager', 'collaborativeProjectManagers', 'designLead', 'designLeads', 'designers', 'phaseOwners'])),
+    business(data[1]?.information), business(data[2]?.nameplate),
+  ]
+  if (tab === 'files') tokens = (first ?? []).filter((file: Row) => !file.deletedAt).map((file: Row) => `${file.id}:${file.currentVersion?.id ?? file.currentVersion?.versionNumber ?? file.createdAt}`)
+  if (tab === 'project-plan') content = business(pick(first, ['id', 'templateId', 'plannedStart', 'plannedFinish', 'manualStage', 'manualStageReason', 'baselineVersion', 'tasks', 'stageSchedules', 'approvalStatus', 'approvalAssignee', 'submittedBy', 'submittedAt', 'approvedBy', 'approvedAt', 'approvalComment', 'changeRequest']))
+  if (tab === 'opl') {
+    const issues: Row[] = (first?.rows ?? []).map((row: Row) => row.issue).filter((issue: Row) => !project.parentProjectId || issue.relatedProjectId === project.id)
+    tokens = issues.flatMap(issue => [
+      `issue:${issue.id}`,
+      ...['description', 'solution'].filter(key => issue[key]?.trim()).map(key => `${issue.id}:${key}:${fingerprint(issue[key])}`),
+      ...(issue.attachments ?? []).map((file: Row) => `${issue.id}:attachment:${file.id}`),
+    ])
+  }
+  if (tab === 'budget') content = business(data)
+  if (tab === 'validation-plan') content = business(data)
+  if (tab === 'documents') revisions = Object.fromEntries((first ?? []).filter((row: Row) => !row.deletedAt).map((row: Row) => [row.id, row.storedVersionCount === 0 ? '' : String(row.revision ?? '')]))
+  if (tab === 'bom') content = data.map(rows => sorted((rows ?? []).map((row: Row) => pick(row, ['kind', 'sequence', 'drawingNumber', 'name', 'quantity', 'unit', 'material', 'specification', 'remark', 'brand', 'surfaceTreatment', 'heatTreatment', 'weight', 'revision', 'materialCode', 'materialId', 'isWearPart', 'impactStage', 'sourceDocumentId', 'sourceConfiguration', 'isManuallyExcluded', 'isReleaseExcluded', 'isPendingRemoval', 'isPendingClassification']))))
+  if (tab === 'release') tokens = (first ?? []).flatMap((row: Row) => [`package:${row.id}`, ...(row.publishedAt ? [`published:${row.id}:${row.publishedAt}`] : [])])
+  if (tokens) tokens = [...new Set(tokens)].sort()
+  return { fingerprint: fingerprint(tokens ?? revisions ?? content), tokens, revisions, ...metadata(data) }
 }
-export function needsHandling(tab: string, data: any[], username?: string) {
-  if (tab === 'opl') return (data[0]?.rows ?? []).some((row: Row) => !['已完成', '已作废'].includes(row.issue.status))
-  if (tab === 'project-plan') return (data[0]?.tasks ?? []).some((task: Row) => task.assignee === username && task.status !== 'Completed')
-  if (tab === 'release') return (data[0] ?? []).some((pkg: Row) => !pkg.publishedAt && ['Draft', 'ProcessReview', 'Approval', 'Publishing', 'PublishFailed', 0, 1, 2, 4, 6].includes(pkg.state))
-  if (tab === 'validation-plan') return (data[0]?.approvalTasks ?? []).some((task: Row) => task.assignee === username && !task.decidedAt)
-  return false
+export function hasProjectTabUpdate(previous: Snapshot, next: Snapshot) {
+  if (next.tokens) return next.tokens.some(token => !previous.tokens?.includes(token))
+  if (next.revisions) return Object.entries(next.revisions).some(([id, revision]) => Boolean(revision && previous.revisions?.[id] && previous.revisions[id] !== revision))
+  return previous.fingerprint !== next.fingerprint
 }
 export function useProjectTabUpdates(context: Context) {
-  const latest = ref<Record<string, Update>>({}), seen = ref<Record<string, string>>({})
-  let controller: AbortController | undefined, generation = 0, running = false
-
+  const latest = ref<Record<string, Update>>({})
+  let generation = 0, running = false, serial = 0
+  const controllers = new Set<AbortController>(), readOrder: Record<string, number> = {}
+  const acknowledgements = new Map<string, Promise<void>>()
   const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? '').replace(/\/$/, '')
   const storageKey = () => `upton-pdm-tab-seen:${JSON.stringify([context.currentUsername, context.project.id])}`
-  function persist() { try { localStorage.setItem(storageKey(), JSON.stringify({ seen: seen.value, latest: latest.value })) } catch { /* 存储不可用时保留本次会话的已查看状态。 */ } }
-  function markSeen(tab: string) { const value = latest.value[tab]; if (value) { seen.value[tab] = value.fingerprint; persist() } }
-  const pending = computed(() => Object.fromEntries(Object.entries(latest.value).filter(([tab, update]) => update.needsHandling || seen.value[tab] !== update.fingerprint)))
-  async function refresh() {
-    if (running || !context.token || !context.currentUsername || document.visibilityState === 'hidden') return
-    const current = generation, project = context.project, token = context.token
-    running = true
-    controller = new AbortController()
-    const currentController = controller, signal = controller.signal, timeout = setTimeout(() => currentController.abort(), 20000)
+  function persist() { try { localStorage.setItem(storageKey(), JSON.stringify({ schemaVersion: 2, latest: latest.value })) } catch { /* 存储不可用时保留本次会话状态。 */ } }
+  const pending = computed(() => Object.fromEntries(Object.entries(latest.value).filter(([tab, value]) => projectUpdateTabs.includes(tab) && value.unread)))
+  function routes(project: ProjectSummary): Record<string, string[]> {
+    if (!project.canReadContent) return {}
     const base = `/api/projects/${project.id}`
-    const routes: Record<string, string[]> = {
-      information: [base], records: [`${base}/audit?take=200`],
-      ...(project.canReadContent ? {
-        files: [`${base}/folders`, `${base}/files?includeDeleted=true`],
-        'project-plan': [`${base}/plan`], opl: [`${base}/opl`], budget: [`${base}/budget`],
-        'validation-plan': [`${base}/validation-plan`],
-        documents: [`${base}/documents`, `${base}/folder-documents`, `${base}/document-relations`],
-        bom: ['Standard', 'NonStandard', 'Electrical', 'Unclassified'].map(kind => `${base}/boms/${kind}`),
-        release: [`${base}/release-packages`], procurement: [`${base}/procurement-tracking`],
-      } : {}),
+    return {
+      information: [base, `${base}/contact-information`, `${base}/nameplate`],
+      files: [`${base}/files?includeDeleted=true`], 'project-plan': [`${base}/plan`], opl: [`${base}/opl`],
+      budget: [`${base}/budget`, `${base}/budget/assessments`], 'validation-plan': [`${base}/validation-plan`],
+      documents: [`${base}/documents`], bom: ['Standard', 'NonStandard', 'Electrical', 'Unclassified'].map(kind => `${base}/boms/${kind}`),
+      release: [`${base}/release-packages`],
     }
+  }
+  async function refreshTab(tab: string, acknowledge = false) {
+    const urls = routes(context.project)[tab]
+    if (!urls || !context.token || !context.currentUsername) return
+    const current = generation, project = context.project, order = ++serial
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 20000)
+    controllers.add(controller)
+    const headers = new Headers({ Authorization: `Bearer ${context.token}` })
+    const companyId = localStorage.getItem('pdm_active_organization')
+    if (companyId) headers.set('X-Company-Id', companyId)
     async function read(url: string) {
-      const headers = new Headers({ Authorization: `Bearer ${token}` })
-      const companyId = localStorage.getItem('pdm_active_organization')
-      if (companyId) headers.set('X-Company-Id', companyId)
-      const response = await fetch(`${apiBase}${url}`, { headers, signal })
+      const response = await fetch(`${apiBase}${url}`, { headers, signal: controller.signal })
       if (!response.ok) throw new Error('更新状态暂不可用')
-      return response.json()
+      if (response.status === 204) return null
+      const text = await response.text()
+      return text.trim() ? JSON.parse(text) : null
     }
     try {
-      const entries = Object.entries(routes)
-      // 限制并发，避免打开项目时集中占用服务端连接。
-      for (let start = 0; start < entries.length; start += 3) {
-        await Promise.all(entries.slice(start, start + 3).map(async ([tab, urls]) => {
-          try {
-            const data = await Promise.all(urls.map(read))
-            if (tab === 'validation-plan' && data[0]?.id) data.push(await read(`/api/validation-plans/${data[0].id}/execution-records`))
-            if (tab === 'opl' && project.parentProjectId && data[0]?.rows) data[0] = { ...data[0], rows: data[0].rows.filter((row: { issue: { relatedProjectId?: string } }) => row.issue.relatedProjectId === project.id) }
-            let work = needsHandling(tab, data, context.currentUsername)
-            if (tab === 'bom') {
-              const [versions, packages] = await Promise.all([read(`${base}/bom-versions`), read(`${base}/release-packages`)])
-              work = bomNeedsHandling(data, versions ?? [], packages ?? [])
-            }
-            if (current !== generation) return
-            const businessData = tab === 'procurement' ? procurementContent(data[0] ?? {}) : data
-            const migration = tab === 'procurement' && latest.value[tab]?.sourceVersion !== 'items-v1'
-            const update = { fingerprint: fingerprint(businessData), sourceVersion: tab === 'procurement' ? 'items-v1' : undefined, needsHandling: work, ...metadata(businessData) }
-            const wasHandling = latest.value[tab]?.needsHandling
-            latest.value[tab] = update
-
-            if (migration || (tab === 'procurement' && (data[0]?.items?.length ?? 0) === 0) || !seen.value[tab] || (wasHandling && !work) || (tab === 'bom' && !work)) seen.value[tab] = update.fingerprint
-            persist()
-          } catch { /* 检测失败不覆盖上次结果，也不制造更新提醒。 */ }
-        }))
+      const data = await Promise.all(urls.map(read))
+      if (tab === 'validation-plan' && data[0]?.id) data.push(await read(`/api/validation-plans/${data[0].id}/execution-records`))
+      if (current !== generation) return
+      const next = projectTabSnapshot(tab, data, project), previous = latest.value[tab]
+      if (order < (readOrder[tab] ?? 0)) {
+        if (acknowledge && context.activeTab === tab && previous?.fingerprint === next.fingerprint) { previous.unread = false; persist() }
+        return
       }
-      if (current === generation) {
-        const overview = ['information', 'project-plan', 'opl', 'bom', 'release', 'procurement', 'validation-plan'].map(tab => latest.value[tab]).filter(Boolean)
-        if (overview.length) {
-          const wasHandling = latest.value.overview?.needsHandling
-          const work = overview.some(update => update?.needsHandling)
-          latest.value.overview = { fingerprint: fingerprint(overview), needsHandling: work, ...metadata(overview) }
-
-          if (!seen.value.overview || (wasHandling && !work)) seen.value.overview = latest.value.overview.fingerprint
-          persist()
-        }
+      readOrder[tab] = order
+      const changed = Boolean(previous && hasProjectTabUpdate(previous, next))
+      const viewed = acknowledge && context.activeTab === tab
+      latest.value[tab] = {
+        ...next,
+        // 保留已知上传和图档编号，删除后恢复不会被误判成新上传或升版。
+        tokens: next.tokens ? [...new Set([...(previous?.tokens ?? []), ...next.tokens])] : undefined,
+        revisions: next.revisions ? { ...previous?.revisions, ...next.revisions } : undefined,
+        unread: !viewed && Boolean(previous?.unread || changed),
+        ...(!changed && previous?.unread ? { updatedAt: previous.updatedAt, actor: previous.actor } : {}),
       }
-    } finally { clearTimeout(timeout); if (current === generation) running = false }
+      persist()
+    } catch { /* 读取失败不制造红点，也不清除尚未查看的更新。 */ }
+    finally { clearTimeout(timeout); controllers.delete(controller) }
+  }
+  function markSeen(tab: string) {
+    if (acknowledgements.has(tab)) return acknowledgements.get(tab)!
+    const promise = refreshTab(tab, true).finally(() => { if (acknowledgements.get(tab) === promise) acknowledgements.delete(tab) })
+    acknowledgements.set(tab, promise)
+    return promise
+  }
+  async function refresh() {
+    if (running || document.visibilityState === 'hidden') return
+    const current = generation
+    running = true
+    try {
+      const tabs = Object.keys(routes(context.project))
+      for (let start = 0; start < tabs.length && current === generation; start += 3) await Promise.all(tabs.slice(start, start + 3).map(tab => refreshTab(tab)))
+    } finally { if (current === generation) running = false }
   }
   watch(() => [context.project.id, context.token, context.currentUsername], () => {
-    generation++; controller?.abort(); running = false; latest.value = {}
-    try { const stored = JSON.parse(localStorage.getItem(storageKey()) || '{}'); seen.value = stored.seen ?? stored; latest.value = stored.latest ?? {} } catch { seen.value = {} }
+    generation++; controllers.forEach(controller => controller.abort()); running = false; latest.value = {}; acknowledgements.clear()
+    for (const tab of Object.keys(readOrder)) delete readOrder[tab]
+    try {
+      const stored = JSON.parse(localStorage.getItem(storageKey()) || '{}')
+      if (stored.schemaVersion === 2) latest.value = stored.latest ?? {}
+    } catch { /* 首次使用建立基线，旧版待办红点不沿用。 */ }
     void refresh()
   }, { immediate: true })
   function viewed(event: Event) {
     const detail = (event as CustomEvent<{ projectId: string; tab: string }>).detail
-    if (detail?.projectId === context.project.id) markSeen(detail.tab)
+    if (detail?.projectId === context.project.id && detail.tab === context.activeTab) void markSeen(detail.tab)
   }
-  window.addEventListener('pdm-tab-content-viewed', viewed)
-  const timer = setInterval(() => { void refresh() }, 60000)
   function focus() { void refresh() }
+  window.addEventListener('pdm-tab-content-viewed', viewed)
   window.addEventListener('focus', focus)
-  onBeforeUnmount(() => { generation++; controller?.abort(); clearInterval(timer); window.removeEventListener('pdm-tab-content-viewed', viewed); window.removeEventListener('focus', focus) })
+  const timer = setInterval(focus, 60000)
+  onBeforeUnmount(() => { generation++; controllers.forEach(controller => controller.abort()); clearInterval(timer); window.removeEventListener('pdm-tab-content-viewed', viewed); window.removeEventListener('focus', focus) })
   return { pending, markSeen }
 }

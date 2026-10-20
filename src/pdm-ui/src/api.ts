@@ -1,4 +1,64 @@
+﻿import type { ProductionSupplierCatalog, SaveProductionSupplier } from './productionSuppliers'
+import type { WorkHoursView, SaveWorkHours, WorkHourRevision } from './workHours'
+import type { BrowserCadCapability, BrowserCadTarget, BrowserCadTicket } from './browserCadArchive'
+export const readBrowserCadCapability = (projectId: string | undefined, token: string) => requestJson<BrowserCadCapability>(`/api/browser-archives/capabilities${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`, {}, token)
+export const setBrowserCadEnabled = (enabled: boolean, token: string) => requestJson<{ enabled: boolean }>('/api/browser-archives/settings', { method: 'PUT', body: JSON.stringify({ enabled }) }, token)
+export const readBrowserCadTicket = (id: string, token: string) => requestJson<BrowserCadTicket>(`/api/browser-archives/${id}`, {}, token)
+export const startBrowserCadArchive = (id: string, rootPath: string, token: string) => requestJson<BrowserCadTicket>(`/api/browser-archives/${id}/start`, { method: 'POST', body: JSON.stringify({ rootPath }) }, token)
+export async function stageBrowserCadArchive(id: string, target: BrowserCadTarget, files: File[], token: string, signal?: AbortSignal) {
+  const body = new FormData(); body.append('target', JSON.stringify(target))
+  files.forEach(file => body.append('files', file, file.webkitRelativePath || file.name))
+  let response: Response
+  try { response = await fetch(`${apiBase}/api/browser-archives/${id}/files${target.projectId ? `?projectId=${encodeURIComponent(target.projectId)}` : ''}`, { method: 'POST', headers: authenticatedHeaders(token), body, signal }) }
+  catch { throw new Error('文件接收结果尚未确认，请保留原文件，重新打开存档窗口核对任务。') }
+  if (!response.ok) { const detail = await response.json().catch(() => ({})); throw new Error(detail.message || '文件接收失败，请检查权限及文件大小后重试。') }
+  return await response.json() as BrowserCadTicket
+}
+export const readWorkHours = (from: string, to: string, report: boolean, token: string) => requestJson<WorkHoursView>(`/api/work-hours?${new URLSearchParams({ from, to, report: String(report) })}`, {}, token)
+export const saveWorkHours = (input: SaveWorkHours, token: string) => requestJson<WorkHoursView>('/api/work-hours', { method: 'PUT', body: JSON.stringify(input) }, token)
+export const readWorkHoursHistory = (month: string, token: string) => requestJson<WorkHourRevision[]>(`/api/work-hours/history?month=${encodeURIComponent(month)}`, {}, token)
+import type { WorkflowNotificationCatalog, WorkflowNotificationRecipient, WorkflowNoticeRecord } from './workflowNotifications'
+export const readWorkflowNotifications = (token: string) => requestJson<WorkflowNotificationCatalog>('/api/workflow-notifications', {}, token)
+export const saveWorkflowNotification = (flowCode: string, input: { enabled: boolean; recipients: WorkflowNotificationRecipient[]; expectedRowVersion: number; companyId: string }, token: string) => requestJson<WorkflowNotificationCatalog>(`/api/workflow-notifications/flows/${flowCode}`, { method: 'PUT', body: JSON.stringify(input) }, token)
+export const readWorkflowNotificationRecords = (flowCode: string, token: string) => requestJson<WorkflowNoticeRecord[]>(`/api/workflow-notifications/flows/${flowCode}/records`, {}, token)
+export const readProductionSuppliers = (token: string) => requestJson<ProductionSupplierCatalog>('/api/production-suppliers', {}, token)
+export const saveProductionSupplierCategory = (id: string, input: { name: string; isActive: boolean; expectedRowVersion: number }, token: string) => requestJson<ProductionSupplierCatalog>(`/api/production-suppliers/categories/${id}`, { method: 'PUT', body: JSON.stringify(input) }, token)
+export const saveProductionSupplier = (id: string, input: SaveProductionSupplier, token: string) => requestJson<ProductionSupplierCatalog>(`/api/production-suppliers/${id}`, { method: 'PUT', body: JSON.stringify(input) }, token)
 import type { ProjectExportMetadata } from './exportFormat'
+import type { ReleaseNotificationSettings, ReleaseExecutionView } from './releaseDelivery'
+import type { ProductionProject, ProductionReleaseRecord, ProductionReleaseState, ProductionCapacityView, ProductionScanResult, ProductionScheduleSlot, ProductionMovementKind, ProductionRoute, ProductionOpeningLot } from './productionTracking'
+import { productionRequestId } from './productionTracking'
+export const listProductionTrackingProjects = (token: string, selfOnly = false) => requestJson<ProductionProject[]>(`/api/production-tracking/projects${selfOnly ? '?selfOnly=true' : ''}`, {}, token)
+export const readProductionTrackingRelease = (id: string, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}`, {}, token)
+export const readProductionScanSettings = (token: string) => requestJson<import('./productionTracking').ProductionScanCatalog>('/api/production-tracking/scan-settings', {}, token)
+export const readProductionScanOptions = (token: string) => requestJson<{ users: Array<{ username: string; displayName: string }>; roles: Array<{ role: string; name: string }> }>('/api/production-tracking/scan-settings/options', {}, token)
+export const saveProductionScanSettings = (input: { workstations: import('./productionTracking').ProductionWorkstation[]; bindings: import('./productionTracking').ProductionPostBinding[]; expectedRowVersion: number }, token: string) => requestJson<import('./productionTracking').ProductionScanCatalog>('/api/production-tracking/scan-settings', { method: 'PUT', body: JSON.stringify(input) }, token)
+export const readProductionActions = (id: string, token: string) => requestJson<import('./productionTracking').ProductionScanContext>(`/api/production-tracking/releases/${id}/actions`, {}, token)
+export const previewExistingProductionRelease = (id: string, token: string) => requestJson<ProductionReleaseState>(`/api/production-tracking/releases/${id}/opening-preview`, {}, token)
+export const includeExistingProductionRelease = (id: string, input: { verifiedAt: string; received: boolean; verifiedMaterialKeys: string[]; lots: ProductionOpeningLot[]; verificationNote: string }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/include-existing`, { method: 'POST', body: JSON.stringify(input) }, token)
+export const receiveProductionTrackingRelease = (id: string, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/receive`, { method: 'POST', body: JSON.stringify({ requestId: productionRequestId() }) }, token)
+export const assignProductionLot = (id: string, input: { lineId: string; route: ProductionRoute; quantity: number; supplier?: string; supplierId?: string | null; assignee?: string; promisedOn?: string | null; requestId: string }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/lots`, { method: 'POST', body: JSON.stringify(input) }, token)
+export const updateProductionLotAllocation = (id: string, input: import('./productionTracking').UpdateProductionAllocation, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/lot-allocation`, { method: 'PUT', body: JSON.stringify(input) }, token)
+export const batchAllocateProduction = (id: string, input: import('./productionTracking').BatchProductionAllocation, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/lot-allocations`, { method: 'PUT', body: JSON.stringify(input) }, token)
+export const updateProductionLineDelivery = (id: string, input: { lineId: string; priority: string; requiredOn: string | null; reason: string; requestId: string }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/delivery`, { method: 'PUT', body: JSON.stringify(input) }, token)
+export const updateProductionLotPromise = (id: string, input: { lotId: string; promisedOn: string; reason: string; requestId: string }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/lot-promise`, { method: 'PUT', body: JSON.stringify(input) }, token)
+export const recordProductionMovement = (id: string, input: { lotId: string; kind: ProductionMovementKind; quantity: number; requestId: string; workstationId?: string; note?: string; recipient?: string }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/movements`, { method: 'POST', body: JSON.stringify(input) }, token)
+export const resolveProductionRevision = (id: string, input: { lotId: string; changedReleasePackageId: string; action: 'ContinueOld' | 'CancelRemaining' | 'TransferNew'; reason: string; requestId: string; quantity?: number }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/revision-decisions`, { method: 'POST', body: JSON.stringify(input) }, token)
+export const scheduleProductionLot = (id: string, input: { lotId: string; slots: ProductionScheduleSlot[]; promisedOn: string; requestId: string; changeReason?: string }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/schedule`, { method: 'POST', body: JSON.stringify(input) }, token)
+export const readProductionCapacity = (token: string) => requestJson<ProductionCapacityView>('/api/production-tracking/capacity', {}, token)
+export const saveProductionCapacity = (input: { resourceGroupId: string; date: string; availableHours: number; expectedRowVersion: number }, token: string) => requestJson<ProductionCapacityView['calendar']>('/api/production-tracking/capacity', { method: 'PUT', body: JSON.stringify(input) }, token)
+export const resolveProductionScan = (code: string, token: string) => requestJson<ProductionScanResult[]>(`/api/production-tracking/scan?code=${encodeURIComponent(code)}`, {}, token)
+export async function readProductionLotQr(releasePackageId: string, lotId: string, token: string): Promise<Blob> {
+  const response = await fetch(`${apiBase}/api/production-tracking/releases/${releasePackageId}/lots/${lotId}/card-qr`,
+    { headers: authenticatedHeaders(token), cache: 'no-store' })
+  if (!response.ok) throw new PdmApiError('批次流转卡二维码读取失败，请刷新批次后重试。', response.status)
+  return response.blob()
+}
+export const readReleaseNotificationSettings = (token: string) => requestJson<ReleaseNotificationSettings>('/api/settings/release-notifications', {}, token)
+export const saveReleaseNotificationSettings = (input: ReleaseNotificationSettings, token: string) => requestJson<ReleaseNotificationSettings>('/api/settings/release-notifications', { method: 'PUT', body: JSON.stringify({ ...input, expectedRowVersion: input.rowVersion }) }, token)
+export const readReleaseExecution = (id: string, token: string) => requestJson<ReleaseExecutionView>(`/api/release-packages/${id}/execution`, {}, token)
+export const acknowledgeReleaseDepartment = (id: string, receiptId: string, executed: boolean, note: string, token: string) => requestJson(`/api/release-packages/${id}/department-acknowledgements`, { method: 'POST', body: JSON.stringify({ receiptId, executed, note }) }, token)
+export const retryReleaseNotification = (id: string, deliveryId: string, confirmUnknownOutcome: boolean, token: string) => requestJson(`/api/release-packages/${id}/notification-retries`, { method: 'POST', body: JSON.stringify({ deliveryId, confirmUnknownOutcome }) }, token)
 export function getProjectExportMetadata(projectId: string, token: string, releasePackageId?: string): Promise<ProjectExportMetadata> { return requestJson(`/api/projects/${projectId}/export-metadata${releasePackageId ? `?releasePackageId=${encodeURIComponent(releasePackageId)}` : ''}`, {}, token) }
 import type { ProjectBudget, BudgetLine, SettlementLine } from './projectBudget'
 import { diagnosticRequestId, recordClientDiagnostic } from './clientDiagnostics'
@@ -35,6 +95,9 @@ export const publishDingTalkEntry = (id: string, token: string) => requestJson<{
 export function readProjectOpl(projectId: string, token: string, includePeople = true) {
   return requestJson<OplView>(`/api/projects/${projectId}/opl${includePeople ? '' : '?includePeople=false'}`, {}, token)
 }
+export function markProjectOplViewed(projectId: string, id: string, token: string) {
+  return requestJson<void>(`/api/projects/${projectId}/opl/${id}/view`, { method: 'POST' }, token)
+}
 export function completeProjectOpl(projectId: string, id: string, expectedRowVersion: number, token: string, notifyGroup = false) {
   return requestJson<OplIssue>(`/api/projects/${projectId}/opl/${id}/complete`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, notifyGroup }) }, token)
 }
@@ -69,6 +132,14 @@ import type { AppendProjectValidationPlanItemsInput, ConfirmValidationPlanExecut
 import { sha256Hex } from './fileHash'
 import type { NameplateTemplate, ProjectNameplate, ProjectNameplateView } from './projectNameplate'
 import type { ProjectContactInformation, ProjectContactInformationView } from './projectContactInformation'
+import type { ProjectApplication, ProjectApplicationInput, ProjectApplicationDetail, ProjectApplicationView, ProjectApplicationApprovalInput } from './projectApplications'
+
+export const readProjectApplications = (token: string) => requestJson<ProjectApplicationView>('/api/project-applications', {}, token)
+export const saveApplicationProjectOrderDate = (id: string, input: { orderDate: string | null; expectedOrderDate: string | null }, token: string) => requestJson<{ id: string; signedDate: string | null }>(`/api/project-applications/projects/${id}/order-date`, { method: 'PUT', body: JSON.stringify(input) }, token)
+export const readProjectApplication = (id: string, token: string) => requestJson<ProjectApplicationDetail>(`/api/project-applications/${id}`, {}, token)
+export const saveProjectApplication = (id: string | undefined, input: { data: ProjectApplicationInput; expectedRowVersion: number; submit: boolean }, token: string) => requestJson<ProjectApplication>(`/api/project-applications${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(input) }, token)
+export const actProjectApplication = (id: string, action: 'withdraw' | 'return', input: { expectedRowVersion: number; comment?: string }, token: string) => requestJson<ProjectApplication>(`/api/project-applications/${id}/${action}`, { method: 'POST', body: JSON.stringify(input) }, token)
+export const approveProjectApplication = (id: string, input: ProjectApplicationApprovalInput, token: string) => requestJson<ProjectApplication>(`/api/project-applications/${id}/approve`, { method: 'POST', body: JSON.stringify(input) }, token)
 
 export function readProjectContactInformation(projectId: string, token: string) {
   return requestJson<ProjectContactInformationView>(`/api/projects/${projectId}/contact-information`, {}, token)
@@ -88,6 +159,22 @@ export function saveNameplateTemplate(value: NameplateTemplate, token: string) {
 }
 
 const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? (import.meta.env.MODE === 'test' ? 'http://127.0.0.1:5080' : '')).replace(/\/$/, '')
+
+export const readStandardStructures = (token: string) => requestJson<import('./standardStructure').StructureView>('/api/standard-structures', {}, token)
+export const saveStructureCategory = (id: string, input: Omit<import('./standardStructure').StructureCategory, 'id'> & { expectedRowVersion: number }, token: string) => requestJson<import('./standardStructure').StructureCatalog>(`/api/standard-structures/categories/${id}`, { method: 'PUT', body: JSON.stringify(input) }, token)
+export const deleteStructureCategory = (id: string, expectedRowVersion: number, token: string) => requestJson<import('./standardStructure').StructureCatalog>(`/api/standard-structures/categories/${id}?expectedRowVersion=${expectedRowVersion}`, { method: 'DELETE' }, token)
+export const moveStructureCategory = (id: string, direction: number, expectedRowVersion: number, token: string) => requestJson<import('./standardStructure').StructureCatalog>(`/api/standard-structures/categories/${id}/move`, { method: 'POST', body: JSON.stringify({ direction, expectedRowVersion }) }, token)
+export const classifyStandardStructures = (structureIds: string[], categoryId: string, expectedRowVersion: number, token: string) => requestJson<import('./standardStructure').StructureCatalog>('/api/standard-structures/classifications', { method: 'POST', body: JSON.stringify({ structureIds, categoryId, expectedRowVersion }) }, token)
+export const readStructureStorage = (token: string) => requestJson<{ storageRoot: string; rowVersion: number }>('/api/standard-structures/storage', {}, token)
+export const saveStructureStorage = (storageRoot: string, expectedRowVersion: number, token: string) => requestJson<{ storageRoot: string; rowVersion: number }>('/api/standard-structures/storage', { method: 'PUT', body: JSON.stringify({ storageRoot, expectedRowVersion }) }, token)
+export const referenceStandardStructure = (input: { revisionId: string; projectId: string; kind: 'Standard' | 'NonStandard'; quantity: number; requestId: string }, token: string) => requestJson<{ addedCount: number; revisionId: string; version: number }>('/api/standard-structures/references', { method: 'POST', body: JSON.stringify(input) }, token)
+export async function readStructurePreview(revisionId: string, fileKey: string, token: string): Promise<Blob> {
+  let response: Response
+  try { response = await fetch(`${apiBase}/api/standard-structures/revisions/${revisionId}/preview/${encodeURIComponent(fileKey)}`, { headers: authenticatedHeaders(token), cache: 'no-store' }) }
+  catch { throw new Error('无法连接预览服务器，请检查网络后重试。') }
+  if (!response.ok) throw new PdmApiError(response.status === 401 ? '登录已过期，请重新登录后查看预览。' : response.status === 404 ? '预览文件缺失，请由标准化人员重新存档补全。' : '预览读取失败，请刷新分类后重试。', response.status)
+  return response.blob()
+}
 
 export class PdmApiError extends Error {
   constructor(message: string, public readonly status: number) {
@@ -283,6 +370,10 @@ interface ApiProject {
   deviceModel?: string | null
   createdAt?: string | null
   signedDate?: string | null
+  isSpecialInitiation?: boolean
+  sourceApplicationId?: string | null
+  sourceApplicationNumber?: string | null
+  deliveryDate?: string | null
   quantity?: number
   parentProjectId?: string | null
   rootProjectId?: string | null
@@ -429,6 +520,7 @@ interface ApiApprovalTask {
 }
 
 interface ApiReleasePackage {
+  relatedOplIssueIds?: string[]
   rootDocumentId?: string | null
   id: string
   number: string
@@ -452,6 +544,7 @@ interface ApiReleasePackage {
   workflowCode?: string | null
   workflowVersion?: number
   selectedBomItemIds?: string[]
+  confirmedRemovedBomItemIds?: string[]
   createsManufacturingBaseline?: boolean
   locksDocuments?: boolean
   wholeSetMultiplier?: number
@@ -1262,6 +1355,17 @@ export async function downloadDocumentPreviewFile(documentId: string, versionId:
   anchor.download = fileName
   anchor.click()
   URL.revokeObjectURL(url)
+}
+
+export async function readProductionDrawingPreview(item: ProductionDrawingItem, token: string): Promise<Blob> {
+  const response = await fetch(`${apiBase}/api/production-drawings/${item.documentId}/versions/${item.versionId}/preview`, {
+    headers: authenticatedHeaders(token), cache: 'no-store',
+  })
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { detail?: string; message?: string } | null
+    throw new PdmApiError(body?.detail || body?.message || '正式图纸预览读取失败，请刷新后重试。', response.status)
+  }
+  return response.blob()
 }
 
 export async function downloadProductionDrawingFile(item: ProductionDrawingItem, format: 'Pdf' | 'Step', token: string,
@@ -2441,6 +2545,10 @@ function mapProject(project: ApiProject): ProjectSummary {
     customerProjectSequence: project.customerProjectSequence ?? undefined,
     deviceModel: project.deviceModel ?? undefined,
     signedDate: project.signedDate ?? undefined,
+    isSpecialInitiation: project.isSpecialInitiation ?? false,
+    sourceApplicationId: project.sourceApplicationId ?? undefined,
+    sourceApplicationNumber: project.sourceApplicationNumber ?? undefined,
+    deliveryDate: project.deliveryDate ?? undefined,
     createdAt: project.createdAt ?? undefined,
     quantity: project.quantity ?? 1,
     parentProjectId: project.parentProjectId ?? undefined,
@@ -2781,6 +2889,8 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
     workflowCode: releasePackage.workflowCode ?? undefined,
     workflowVersion: releasePackage.workflowVersion ?? 0,
     selectedBomItemIds: releasePackage.selectedBomItemIds ?? [],
+    confirmedRemovedBomItemIds: releasePackage.confirmedRemovedBomItemIds ?? [],
+    relatedOplIssueIds: releasePackage.relatedOplIssueIds ?? [],
     createsManufacturingBaseline: releasePackage.createsManufacturingBaseline ?? true,
     locksDocuments: releasePackage.locksDocuments ?? true,
     wholeSetMultiplier: releasePackage.wholeSetMultiplier ?? 1,

@@ -8,11 +8,39 @@ using Microsoft.IdentityModel.Tokens;
 using Microsoft.Extensions.DependencyInjection;
 using Upton.Pdm.Api;
 using Upton.Pdm.Application;
+using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Api.Tests;
 
 public sealed class ProjectOplApiTests
 {
+    [Fact]
+    public async Task HttpOplHistoryUsesPublishedPackagesAndNewReleaseContractValidatesAssociations()
+    {
+        using var factory = new PdmApiFactory();
+        using var client = factory.CreateClient();
+        var jwt = new JwtSecurityToken("upton-pdm", "upton-pdm-clients", [new(ClaimTypes.Name, "admin"), new(ClaimTypes.Role, "Administrator")],
+            expires: DateTime.UtcNow.AddMinutes(10), signingCredentials: new(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")), SecurityAlgorithms.HmacSha256));
+        client.DefaultRequestHeaders.Authorization = new("Bearer", new JwtSecurityTokenHandler().WriteToken(jwt));
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var project = (await repository.ListProjectsAsync(default)).First();
+        using var scope = factory.Services.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<ProjectOplService>();
+        var issue = await service.SaveAsync(project.Id, null, new("发布关联接口测试", "普通", "待处理", "", null, "", 0, []), [], "admin", UserRole.Administrator, default);
+        var package = new ReleasePackage(Guid.NewGuid(), project.Id, "RP-HTTP-OPL", ReleasePackageState.Published,
+            null, "M", "E", [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, "test")
+            { Scope = ReleaseScope.NonStandardSupplement, RelatedOplIssueIds = [issue.Id], DrawingDocumentCount = 5 };
+        await repository.CreateReleasePackageAsync(package, default);
+        var view = (await client.GetFromJsonAsync<OplView>($"/api/projects/{project.Id}/opl"))!;
+        var history = Assert.Single(view.Rows.Single(row => row.Issue.Id == issue.Id).Releases);
+        Assert.Equal(package.Id, history.ReleasePackageId);
+        Assert.Equal(5, history.DrawingCount);
+        var invalid = await client.PostAsJsonAsync("/api/release-packages", new CreateReleasePackageRequest(project.Id,
+            Scope: ReleaseScope.StandardFormal, SelectedBomItemIds: [], RelatedOplIssueIds: [issue.Id]));
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        Assert.Contains("只有增补/变更", await invalid.Content.ReadAsStringAsync());
+    }
+
     private sealed class NotificationHandler : HttpMessageHandler
     {
         public List<string> Cards { get; } = [];

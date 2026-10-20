@@ -1811,7 +1811,7 @@ public sealed class MaterialServiceTests
         Assert.DoesNotContain("品牌与料品主档不一致", resolution.Issues);
         var exception = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
             ProjectId, null, string.Empty, string.Empty, "首次正式发布", "未指定", null,
-            ReleaseScope.StandardFormal, [], "admin", UserRole.Administrator, default));
+            ReleaseScope.StandardFormal, [bom[0].Id], "admin", UserRole.Administrator, default));
         Assert.Contains("需人工维护", exception.Message);
         Assert.Contains("型号与料品主档不一致", exception.Message);
     }

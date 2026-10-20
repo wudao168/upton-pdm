@@ -78,7 +78,7 @@ onBeforeUnmount(() => { generation++; renderTask?.cancel(); void loadingTask?.de
 
 <style scoped>
 .pdf-drawing-viewer__toolbar{display:flex;align-items:center;gap:12px;margin-bottom:8px}
-.pdf-drawing-viewer__pages{height:min(72vh,calc(100dvh - 180px));min-height:80px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#e5e7eb;padding:8px;box-sizing:border-box}
+.pdf-drawing-viewer__pages{height:min(72vh,calc(100dvh - 180px));min-height:80px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:var(--pdm-border);padding:8px;box-sizing:border-box}
 canvas{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;background:white}
 [role=alert]{color:var(--pdm-danger)}
 </style>

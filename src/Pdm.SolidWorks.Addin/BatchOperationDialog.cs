@@ -6,6 +6,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.SolidWorks;
 
@@ -69,6 +70,18 @@ internal sealed class BatchOperationDialog : Form
     private readonly ProjectBrowserControl projectSelector = new ProjectBrowserControl(requireSubmissionAccess: true) { Dock = DockStyle.Fill };
     private readonly RadioButton acquire = new RadioButton { Text = "获取最新权限", AutoSize = true, Checked = true };
     private readonly RadioButton checkIn = new RadioButton { Text = "提交最新存档", AutoSize = true };
+    private readonly CheckBox standardLibrary = new CheckBox { Text = "存档到标准库", AutoSize = true };
+    private readonly ComboBox drawingType = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
+    private readonly ToolTip standardLibraryTip = new ToolTip();
+    private readonly bool canArchiveStandardLibrary;
+    private sealed class DrawingTypeChoice
+    {
+        public int Value;
+        public string Placeholder;
+        public override string ToString() => Value == 0 ? Placeholder : Value + " · " + StandardStructureRules.TypeName(Value);
+    }
+    public bool ArchiveToStandardLibrary => checkIn.Checked && standardLibrary.Checked;
+    public int StandardLibraryDrawingType => (drawingType.SelectedItem as DrawingTypeChoice)?.Value ?? 0;
     private readonly TreeView files = new TreeView();
     private readonly Panel filesHeader = new Panel();
     private readonly ImageList selectionImages = BuildSelectionImages();
@@ -109,10 +122,14 @@ internal sealed class BatchOperationDialog : Form
         BatchOperationKind initialOperation = BatchOperationKind.AcquireLatestAndCheckout,
         IReadOnlyCollection<string> initiallySelectedPaths = null,
         IReadOnlyDictionary<string, Guid> inheritedDrawingProjects = null,
-        IReadOnlyDictionary<string, string> userDisplayNames = null)
+        IReadOnlyDictionary<string, string> userDisplayNames = null,
+        bool canArchiveStandardLibrary = false,
+        bool initialStandardLibrary = false,
+        int initialDrawingType = 0)
     {
         this.root = root;
         this.username = username ?? string.Empty;
+        this.canArchiveStandardLibrary = canArchiveStandardLibrary;
         operationItems = items ?? Array.Empty<BatchOperationItem>();
         this.projects = projects ?? Array.Empty<ProjectDto>();
         this.inheritedDrawingProjects = inheritedDrawingProjects
@@ -223,7 +240,7 @@ internal sealed class BatchOperationDialog : Form
             Dock = DockStyle.Fill,
             AutoSize = false,
             Height = 66,
-            ColumnCount = 6,
+            ColumnCount = 10,
             RowCount = 3,
             Margin = new Padding(0, 0, 0, 6)
         };
@@ -236,6 +253,10 @@ internal sealed class BatchOperationDialog : Form
         operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
         operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 8));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 8));
+        operationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
         acquire.Anchor = AnchorStyles.Left;
         acquire.Margin = Padding.Empty;
         checkIn.Anchor = AnchorStyles.Left;
@@ -251,6 +272,16 @@ internal sealed class BatchOperationDialog : Form
         operationPanel.Controls.Add(projectSelector, 1, 0);
         operationPanel.Controls.Add(acquire, 3, 0);
         operationPanel.Controls.Add(checkIn, 5, 0);
+        standardLibrary.Anchor = AnchorStyles.Left;
+        standardLibrary.Margin = Padding.Empty;
+        drawingType.Margin = Padding.Empty;
+        foreach (var type in new[] { 0, 1, 2, 3, 4, 9 }) drawingType.Items.Add(new DrawingTypeChoice { Value = type, Placeholder = canArchiveStandardLibrary ? "图纸类型" : "仅标准化部门可用" });
+        drawingType.SelectedIndex = 0;
+        standardLibrary.Enabled = canArchiveStandardLibrary && checkIn.Checked;
+        drawingType.Enabled = false;
+        standardLibraryTip.SetToolTip(standardLibrary, canArchiveStandardLibrary ? "存入集团共享标准库，首次自动归入未分类；升版保留原分类。" : "仅获授权的标准化部门成员可存档到标准库。");
+        operationPanel.Controls.Add(standardLibrary, 7, 0);
+        operationPanel.Controls.Add(drawingType, 9, 0);
         operationPanel.Controls.Add(new Label
         {
             Text = "变更说明",
@@ -259,7 +290,7 @@ internal sealed class BatchOperationDialog : Form
             Margin = new Padding(0, 0, 6, 0)
         }, 0, 2);
         operationPanel.Controls.Add(changeNote, 1, 2);
-        operationPanel.SetColumnSpan(changeNote, 5);
+        operationPanel.SetColumnSpan(changeNote, 9);
 
         var standardButtonSize = new Size(96, 30);
         var selectionButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = false, WrapContents = false, Margin = Padding.Empty };
@@ -302,6 +333,28 @@ internal sealed class BatchOperationDialog : Form
         selectionButtons.Controls.Add(clear);
         selectionButtons.Controls.Add(selectChanged);
         selectionButtons.Controls.Add(supplement);
+        standardLibrary.CheckedChanged += (_, _) =>
+        {
+            if (standardLibrary.Checked && (!canArchiveStandardLibrary || !checkIn.Checked)) { standardLibrary.Checked = false; return; }
+            drawingType.Enabled = ArchiveToStandardLibrary;
+            projectSelector.Enabled = !ArchiveToStandardLibrary;
+            selectAll.Enabled = clear.Enabled = selectChanged.Enabled = !ArchiveToStandardLibrary;
+            if (ArchiveToStandardLibrary)
+            {
+                if (drawingType.SelectedIndex == 0) drawingType.SelectedIndex = Array.IndexOf(new[] { 0, 1, 2, 3, 4, 9 },
+                    StandardStructureRules.IsDrawingType(initialDrawingType) ? initialDrawingType : root.Kind == CadDocumentKind.Assembly ? 1 : root.Kind == CadDocumentKind.Part ? 2 : 9);
+                checkedPaths.Clear();
+                foreach (var item in operationItems) if (!string.IsNullOrWhiteSpace(item.Node.FullPath)) checkedPaths.Add(item.Node.FullPath);
+                RebuildFileTree();
+                selectionSummary.Text = "标准库保存完整当前结构及关联工程图；嵌入组件随父装配保存。";
+            }
+            else { drawingType.SelectedIndex = 0; RefreshOperationState(username); }
+        };
+        checkIn.CheckedChanged += (_, _) =>
+        {
+            standardLibrary.Enabled = canArchiveStandardLibrary && checkIn.Checked;
+            if (!checkIn.Checked) standardLibrary.Checked = false;
+        };
 
         var selectionBar = new TableLayoutPanel
         {
@@ -343,7 +396,7 @@ internal sealed class BatchOperationDialog : Form
         footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         footer.Controls.Add(new Label
         {
-            Text = "勾选图档归入上方项目；重复实例只处理一次；新增图档自动登记，子件优先、总装最后。",
+            Text = "仅保存当前结构及关联工程图；树外引用不随存档。重复实例处理一次，子件优先、总装最后。",
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
             ForeColor = Color.FromArgb(99, 115, 134),
@@ -384,6 +437,8 @@ internal sealed class BatchOperationDialog : Form
         FormClosing += ValidateBeforeClose;
         AcceptButton = execute;
         CancelButton = cancel;
+        standardLibrary.Checked = initialStandardLibrary && canArchiveStandardLibrary && checkIn.Checked;
+        FormClosed += (_, _) => standardLibraryTip.Dispose();
     }
 
     public BatchOperationKind Operation => checkIn.Checked
@@ -403,15 +458,21 @@ internal sealed class BatchOperationDialog : Form
     private string SelectionCountText()
     {
         var embedded = CountEmbedded(root);
+        var imported = CountImported(root);
         return string.Concat("已选择 ", SelectedItems.Count, " 个图档",
-            embedded == 0 ? string.Empty : "；另有" + embedded + "个嵌入式组件实例随父装配保存");
+            embedded == 0 ? string.Empty : "；另有" + embedded + "个嵌入式组件实例随父装配保存",
+            imported == 0 ? string.Empty : "；" + imported + "个导入组件实例待确认保存归属");
     }
 
     private static int CountEmbedded(CadTreeNode node) => node == null ? 0
-        : (IsEmbedded(node) ? 1 : 0) + node.Children.Sum(CountEmbedded);
+        : (IsEmbedded(node) && (!node.IsInterconnectImport || node.IsStoredImport) ? 1 : 0) + node.Children.Sum(CountEmbedded);
+
+    private static int CountImported(CadTreeNode node) => node == null ? 0
+        : (node.IsInterconnectImport && !node.IsStoredImport ? 1 : 0) + node.Children.Sum(CountImported);
 
     private void RefreshOperationState(string username)
     {
+        if (ArchiveToStandardLibrary) return;
         changeNote.Enabled = checkIn.Checked;
         selectChanged.Enabled = checkIn.Checked;
         selectionSummary.Text = checkIn.Checked
@@ -435,6 +496,17 @@ internal sealed class BatchOperationDialog : Form
             return;
         }
 
+        if (ArchiveToStandardLibrary)
+        {
+            if (!canArchiveStandardLibrary || !StandardStructureRules.IsDrawingType(StandardLibraryDrawingType)
+                || !StandardStructureRules.MatchesKind(StandardLibraryDrawingType, root.Kind.ToString()))
+            {
+                TopMostMessageBox.Show(this, !canArchiveStandardLibrary ? "仅获授权的标准化部门成员可存档到标准库。"
+                    : "请选择与当前图档对应的类型：组件使用装配体，零件使用零件，独立工程图选择其他图档。", "标准库存档", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                eventArgs.Cancel = true;
+            }
+            return;
+        }
         if (SelectedItems.Count == 0)
         {
             TopMostMessageBox.Show(
@@ -473,6 +545,7 @@ internal sealed class BatchOperationDialog : Form
 
     private void SetAllChecked(bool value)
     {
+        if (ArchiveToStandardLibrary) return;
         checkedPaths.Clear();
         if (value)
         {
@@ -692,6 +765,7 @@ internal sealed class BatchOperationDialog : Form
 
     private void ToggleNode(TreeNode node)
     {
+        if (ArchiveToStandardLibrary) return;
         if (node?.Tag is BatchTreeOccurrence embedded && IsEmbedded(embedded.Model)) return;
         var paths = SelectablePaths(node).ToArray();
         if (paths.Length == 0)
@@ -909,7 +983,7 @@ internal sealed class BatchOperationDialog : Form
         TextRenderer.DrawText(eventArgs.Graphics, eventArgs.Node.Text, eventArgs.Node.NodeFont ?? files.Font, nameBounds, foreground, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         TextRenderer.DrawText(
             eventArgs.Graphics,
-            IsEmbedded(model) ? "随所属装配体" : string.Concat(string.IsNullOrWhiteSpace(model.CurrentRevision) ? "—" : model.CurrentRevision, " / ", string.IsNullOrWhiteSpace(model.LatestRevision) ? "—" : model.LatestRevision),
+            model.IsStoredImport ? "随所属装配体" : model.IsInterconnectImport ? "随总装核对" : IsEmbedded(model) ? "随所属装配体" : string.Concat(string.IsNullOrWhiteSpace(model.CurrentRevision) ? "—" : model.CurrentRevision, " / ", string.IsNullOrWhiteSpace(model.LatestRevision) ? "—" : model.LatestRevision),
             files.Font,
             versionBounds,
             foreground,
@@ -1094,6 +1168,8 @@ internal sealed class BatchOperationDialog : Form
 
     private string StateText(CadTreeNode node, string username)
     {
+        if (node.IsStoredImport) return "导入组件·随父装配保存";
+        if (node.IsInterconnectImport) return "导入组件·待确认保存归属";
         if (IsEmbedded(node)) return "嵌入式·随父装配保存";
         if (node.IsLatestReadOnlyPreview) return "最新只读";
         if (node.IsHistoricalPreview) return "历史预览（只读）";

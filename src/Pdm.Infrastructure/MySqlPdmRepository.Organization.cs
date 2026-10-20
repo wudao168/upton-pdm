@@ -22,7 +22,7 @@ public sealed partial class MySqlPdmRepository
             ORDER BY organization.is_active DESC,organization.project_company_code
             """, cancellationToken: cancellationToken));
         var unitRows = await connection.QueryAsync<OrganizationUnitRow>(new CommandDefinition(
-            "SELECT id,organization_id,parent_unit_id,code,name,kind,is_active,sort_order,can_manufacture CanManufacture FROM organization_unit ORDER BY organization_id,sort_order,name",
+            "SELECT id,organization_id,parent_unit_id,code,name,kind,is_active,sort_order,can_manufacture CanManufacture,can_archive_standard_library CanArchiveStandardLibrary FROM organization_unit ORDER BY organization_id,sort_order,name",
             cancellationToken: cancellationToken));
         var membershipRows = await connection.QueryAsync<OrganizationMembershipRow>(new CommandDefinition(
             "SELECT unit_id,username,is_primary FROM organization_membership ORDER BY username,is_primary DESC",
@@ -94,19 +94,19 @@ public sealed partial class MySqlPdmRepository
             {
                 await connection.ExecuteAsync(new CommandDefinition(
                     """
-                    INSERT INTO organization_unit(id,organization_id,parent_unit_id,code,name,kind,is_active,sort_order,can_manufacture,created_at,updated_at)
-                    VALUES(@Id,@OrganizationId,@ParentUnitId,@Code,@Name,@Kind,@IsActive,@SortOrder,@CanManufacture,@Now,@Now)
+                    INSERT INTO organization_unit(id,organization_id,parent_unit_id,code,name,kind,is_active,sort_order,can_manufacture,can_archive_standard_library,created_at,updated_at)
+                    VALUES(@Id,@OrganizationId,@ParentUnitId,@Code,@Name,@Kind,@IsActive,@SortOrder,@CanManufacture,@CanArchiveStandardLibrary,@Now,@Now)
                     """,
-                    new { Id = id, command.OrganizationId, command.ParentUnitId, command.Code, command.Name, Kind = command.Kind.ToString(), command.IsActive, command.SortOrder, command.CanManufacture, Now = now }, cancellationToken: cancellationToken));
+                    new { Id = id, command.OrganizationId, command.ParentUnitId, command.Code, command.Name, Kind = command.Kind.ToString(), command.IsActive, command.SortOrder, command.CanManufacture, command.CanArchiveStandardLibrary, Now = now }, cancellationToken: cancellationToken));
             }
             else
             {
                 var affected = await connection.ExecuteAsync(new CommandDefinition(
                     """
                     UPDATE organization_unit SET organization_id=@OrganizationId,parent_unit_id=@ParentUnitId,code=@Code,name=@Name,
-                        kind=@Kind,is_active=@IsActive,sort_order=@SortOrder,can_manufacture=@CanManufacture,updated_at=@Now WHERE id=@Id
+                        kind=@Kind,is_active=@IsActive,sort_order=@SortOrder,can_manufacture=@CanManufacture,can_archive_standard_library=@CanArchiveStandardLibrary,updated_at=@Now WHERE id=@Id
                     """,
-                    new { Id = id, command.OrganizationId, command.ParentUnitId, command.Code, command.Name, Kind = command.Kind.ToString(), command.IsActive, command.SortOrder, command.CanManufacture, Now = now }, cancellationToken: cancellationToken));
+                    new { Id = id, command.OrganizationId, command.ParentUnitId, command.Code, command.Name, Kind = command.Kind.ToString(), command.IsActive, command.SortOrder, command.CanManufacture, command.CanArchiveStandardLibrary, Now = now }, cancellationToken: cancellationToken));
                 if (affected == 0) throw new PdmNotFoundException("组织单元不存在。");
             }
         }
@@ -114,7 +114,7 @@ public sealed partial class MySqlPdmRepository
         {
             throw new PdmConflictException("同一公司内的完整组织编码已经存在。");
         }
-        return new OrganizationUnit(id, command.OrganizationId, command.ParentUnitId, command.Code, command.Name, command.Kind, command.IsActive, command.SortOrder, command.CanManufacture);
+        return new OrganizationUnit(id, command.OrganizationId, command.ParentUnitId, command.Code, command.Name, command.Kind, command.IsActive, command.SortOrder, command.CanManufacture, command.CanArchiveStandardLibrary);
     }
 
     public async Task<OrganizationDirectory> SetOrganizationMembershipsAsync(string username, IReadOnlyList<Guid> unitIds, Guid primaryUnitId, CancellationToken cancellationToken)
@@ -298,7 +298,7 @@ public sealed partial class MySqlPdmRepository
                         CustomerName = customer.Name,
                         CustomerSequence = customerSequence,
                         DeviceModel = $"{organization.ModelCompanyCode}-{itemEquipmentTypeCode}-{customer.Code}-{customerSequence:D3}-{BuildModelSuffixFromCode(code)}",
-                        SignedDate = command.SignedDate.ToDateTime(TimeOnly.MinValue),
+                        SignedDate = command.SignedDate?.ToDateTime(TimeOnly.MinValue),
                         Quantity = quantity,
                         VaultLocation = StorageLocationPolicy.RebaseProjectStorageLocation(item.VaultLocation, project.Code, rootCode, storageProjectCode),
                         ReleaseLocation = StorageLocationPolicy.RebaseProjectStorageLocation(item.ReleaseLocation, project.Code, rootCode, storageProjectCode),
@@ -464,7 +464,7 @@ public sealed partial class MySqlPdmRepository
         checked((int)row.CurrentProjectSequence), checked((int)row.CurrentSerialSequence));
 
     private static OrganizationUnit MapOrganizationUnit(OrganizationUnitRow row) => new(
-        row.Id, row.OrganizationId, row.ParentUnitId, row.Code, row.Name, Enum.Parse<OrganizationUnitKind>(row.Kind), row.IsActive, row.SortOrder, row.CanManufacture);
+        row.Id, row.OrganizationId, row.ParentUnitId, row.Code, row.Name, Enum.Parse<OrganizationUnitKind>(row.Kind), row.IsActive, row.SortOrder, row.CanManufacture, row.CanArchiveStandardLibrary);
 
     private sealed class OrganizationUnitRow
     {
@@ -477,6 +477,7 @@ public sealed partial class MySqlPdmRepository
         public bool IsActive { get; init; }
         public int SortOrder { get; init; }
         public bool CanManufacture { get; init; }
+        public bool CanArchiveStandardLibrary { get; init; }
     }
 
     private sealed class OrganizationMembershipRow

@@ -81,12 +81,12 @@ onUnmounted(() => {
   max-width: 42%;
   flex: 0 1 auto;
   overflow: hidden;
-  color: var(--pdm-green);
+  color: var(--pdm-theme-accent);
   font-size: 12px;
   font-weight: 400;
   line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.pdm-global-status-detail a { color: var(--pdm-green); }
+.pdm-global-status-detail a { color: var(--pdm-theme-accent); }
 </style>

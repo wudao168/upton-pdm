@@ -22,6 +22,8 @@ public sealed class DrawingReviewWritebackTimeoutHostedService(
             {
                 using var scope = scopeFactory.CreateScope();
                 var workflow = scope.ServiceProvider.GetRequiredService<PdmWorkflowService>();
+                var released = await workflow.CompleteReleasedDrawingReviewWritebacksAsync(stoppingToken);
+                if (released > 0) logger.LogInformation("已发布审核单的旧版本回写任务已结束 {Count} 单。", released);
                 var completed = await workflow.CompleteTimedOutDrawingReviewWritebacksAsync(Timeout, stoppingToken);
                 if (completed > 0) logger.LogInformation("超时未写入审核标记的图纸审核单已自动完成 {Count} 单。", completed);
             }

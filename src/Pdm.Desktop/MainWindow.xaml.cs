@@ -680,7 +680,7 @@ public partial class MainWindow : Window
 
         if (type == "theme-change" && TryReadPayloadString(message, "theme", out var requestedTheme))
         {
-            currentTheme = requestedTheme == "c" || requestedTheme == "o" ? requestedTheme : "a";
+            currentTheme = requestedTheme is "c" or "p" or "o" or "g" ? requestedTheme : "a";
             embeddedPreview?.ApplyTheme(currentTheme);
             return;
         }

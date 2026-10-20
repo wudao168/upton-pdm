@@ -62,7 +62,8 @@ public sealed partial class PdmAddin
                 {
                     DocumentId = document.Id, ProjectId = document.ProjectId, SessionId = checkoutSessionId, CheckedOutAt = document.CheckedOutAt ?? DateTime.MinValue,
                     SourcePath = Path.GetFullPath(node.FullPath), BaseVersionId = metadata?.VersionId,
-                    BaseSha256 = metadata?.Sha256, ProcessId = process.Id, ProcessStartedUtcTicks = process.StartTime.ToUniversalTime().Ticks
+                    BaseSha256 = !string.IsNullOrWhiteSpace(metadata?.ResolvedReferenceSha256) ? metadata.ResolvedReferenceSha256 : metadata?.Sha256,
+                    ProcessId = process.Id, ProcessStartedUtcTicks = process.StartTime.ToUniversalTime().Ticks
                 };
                 editJournal.Save(entry);
                 localEdits[document.Id] = entry;
@@ -375,19 +376,36 @@ public sealed partial class PdmAddin
         lock (checkoutDocumentSync) pendingCloseDocumentIds.Remove(documentId);
     }
 
-    private void RestoreEditDraftBeforeOpen(Guid documentId, string path, Guid? latestVersionId)
+    private void RestoreEditDraftBeforeOpen(Guid documentId, string path, ControlledOpenFileDto latest)
     {
         if (!EnsureEditJournal()) return;
         var entry = editJournal.ReadAll().Where(item => item.DocumentId == documentId && item.RestoreOnOpen)
             .OrderByDescending(item => item.SavedAtUtc).FirstOrDefault();
         if (entry == null) return;
-        var loaded = (application.GetDocuments() as Array)?.OfType<IModelDoc2>().Any(model => PathsEqual(model.GetPathName(), path)) == true;
+        if (latest.DocumentId != documentId) throw new InvalidOperationException("草稿与受控图档标识不一致，已停止恢复并保留文件。");
+        var openDocuments = (application.GetDocuments() as Array)?.OfType<IModelDoc2>().ToArray() ?? Array.Empty<IModelDoc2>();
+        var changedPath = !PathsEqual(entry.SourcePath, path);
+        if (changedPath && openDocuments.Any(model => PathsEqual(model.GetPathName(), entry.SourcePath) && model.GetSaveFlag()))
+            throw new InvalidOperationException("原工作文件仍有未保存修改，请先保存并关闭该工作文件再获取；文件及草稿均已保留。");
+        var loaded = openDocuments.Any(model => PathsEqual(model.GetPathName(), path));
         if (loaded)
         {
-            if (entry.BaseVersionId != latestVersionId) throw new InvalidOperationException("服务器已有新版本，本地图档和草稿已保留，请关闭图档后核对并合并修改。");
-            return;
+            if (changedPath) throw new InvalidOperationException("目标工作文件已经打开，两处工作文件及草稿均已保留，请先核对并关闭目标文件后重试。");
+            if (!EditDraftJournal.MatchesBase(entry, latest.VersionId, latest.Sha256)) throw new InvalidOperationException("服务器已有内容不同的新版本，本地图档和草稿已保留，请核对并合并修改。");
         }
-        if (editJournal.Restore(entry, path, latestVersionId))
+        else if (editJournal.Restore(entry, path, latest.VersionId, latest.Sha256))
             LogOperation("Recovered local edit draft document=" + documentId);
+        if (entry.BaseVersionId != latest.VersionId || changedPath)
+        {
+            if (!PdmDocumentIdentityStore.TryWriteControlledVersion(path, documentId, entry.ProjectId,
+                latest.VersionId, latest.Revision, latest.Sha256, latest.FileLength))
+                throw new IOException("草稿已保留，但未能更新等内容版本的基准记录，请稍后重试。");
+            entry.BaseVersionId = latest.VersionId;
+            entry.BaseSha256 = latest.Sha256;
+            entry.SourcePath = Path.GetFullPath(path);
+            entry.DiskSha256 = EditDraftJournal.Hash(path);
+            editJournal.Save(entry);
+            LogOperation("Draft base advanced without content changes document=" + documentId + " version=" + latest.VersionId);
+        }
     }
 }

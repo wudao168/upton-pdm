@@ -1,0 +1,19 @@
+/* Native content containers and Element Plus tables share the same visible pill dimensions. */
+.os-theme-pdm {
+  z-index: 20;
+  --os-size: 12px;
+  --os-padding-perpendicular: 2px;
+  --os-padding-axis: 2px;
+  --os-track-border-radius: 6px;
+  --os-track-bg: transparent;
+  --os-track-bg-hover: var(--pdm-scrollbar-track-hover);
+  --os-track-bg-active: var(--pdm-scrollbar-track-hover);
+  --os-handle-border-radius: 999px;
+  --os-handle-bg: var(--pdm-scrollbar-thumb);
+  --os-handle-bg-hover: var(--pdm-scrollbar-thumb-hover);
+  --os-handle-bg-active: var(--pdm-scrollbar-thumb-active);
+  --os-handle-min-size: 32px;
+}
+.os-theme-pdm:hover { --os-padding-perpendicular: 1px; }
+.os-theme-pdm .os-scrollbar-handle { border-radius: 999px; }
+[data-overlayscrollbars-viewport] { scrollbar-gutter: auto; }

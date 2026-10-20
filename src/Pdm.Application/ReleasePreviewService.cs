@@ -18,14 +18,15 @@ public sealed record ReleasePreviewItem(
     string? Error);
 
 /// <summary>
-/// 发布预览（PDF/STEP 转换）的独立处理：正式源图生成是发布前置条件，PDF/STEP 失败不阻断发布，
+/// 发布预览（PDF/STEP 转换）的独立处理：使用审批冻结源图直接转换，PDF/STEP 失败不阻断发布，
 /// 生成成功后补挂到正式版本并写入发布目录，结果通过站内消息反馈给相关人。
 /// </summary>
 public sealed class ReleasePreviewService(
     IPdmRepository repository,
     IServerPreviewConverter previewConverter,
     TimeProvider timeProvider,
-    ReleaseDeliveryArchiveService? releaseDeliveryArchive = null)
+    ReleaseDeliveryArchiveService? releaseDeliveryArchive = null,
+    IPdfReleaseStampProcessor? pdfReleaseStamp = null)
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, SemaphoreSlim> PackageLocks = new();
     public const int MaxAttempts = 5;
@@ -91,7 +92,14 @@ public sealed class ReleasePreviewService(
             var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
             var completed = new HashSet<Guid>();
             foreach (var version in await ReleasedVersionsAsync(package.Id, cancellationToken))
-                if (await PreviewReadableAsync(vaultRoot, version, cancellationToken)) completed.Add(version.DocumentId);
+            {
+                if (!await PreviewReadableAsync(vaultRoot, version, cancellationToken)) continue;
+                var bindingId = package.VersionBindings?.FirstOrDefault(binding => binding.DocumentId == version.DocumentId)?.VersionId
+                    ?? version.SourceVersionId ?? version.Id;
+                if (version.Preview?.Format == DocumentPreviewFormat.Pdf && pdfReleaseStamp is not null
+                    && !pdfReleaseStamp.IsStamped(StorageLocationPolicy.ResolveUnder(vaultRoot, version.Preview.StorageRelativePath), package.Id, bindingId)) continue;
+                completed.Add(version.DocumentId);
+            }
             var sources = (await repository.ListReleasePreviewSourcesAsync(package.Id, cancellationToken))
                 .Where(source => !completed.Contains(source.DocumentId)).ToArray();
             var stagingDirectory = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-staging", package.Number));
@@ -179,7 +187,8 @@ public sealed class ReleasePreviewService(
         foreach (var source in await repository.ListReleasePreviewSourcesAsync(packageId, cancellationToken))
         {
             var version = (await repository.ListDocumentVersionsAsync(source.DocumentId, cancellationToken))
-                .Where(item => item.ReleasePackageId == packageId).OrderByDescending(item => item.CreatedAt).FirstOrDefault();
+                .Where(item => item.ReleasePackageId == packageId || source.AlreadyReleased && item.Id == source.SourceVersionId)
+                .OrderByDescending(item => item.ReleasePackageId == packageId).ThenByDescending(item => item.CreatedAt).FirstOrDefault();
             if (version is not null) result.Add(version);
         }
         return result;

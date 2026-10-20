@@ -130,6 +130,7 @@ function stageLabel(stage: string | number) {
 }
 
 function notificationActionLabel(notification: UserNotification) {
+  if (notification.category === 'project-application') return '查看立项申请'
   if (notification.category.startsWith('EditLock')) return '查看图档'
   if (notification.category === 'ProjectTodo') return notification.projectId ? '查看项目' : '查看待办'
   return notification.category === 'MaterialMasterRejected' || notification.category === 'MaterialCodeApplicationRejected'
@@ -344,20 +345,20 @@ async function resetPassword(task: PasswordResetTask) {
 
 <template>
   <section class="pdm-project-manager pdm-task-center" aria-label="我的待办">
+    <nav class="pdm-task-filters pdm-tabs" role="tablist" aria-label="待办类型">
+      <button type="button" role="tab" :aria-selected="taskFilter === 'all'" @click="setTaskFilter('all')">全部待办（{{ filterCounts.all }}）</button>
+      <button v-if="filterCounts.todo" type="button" role="tab" :aria-selected="taskFilter === 'todo'" @click="setTaskFilter('todo')">项目待办（{{ filterCounts.todo }}）</button>
+      <button type="button" role="tab" :aria-selected="taskFilter === 'approval'" @click="setTaskFilter('approval')">审批任务（{{ filterCounts.approval }}）</button>
+      <button type="button" role="tab" :aria-selected="taskFilter === 'material'" @click="setTaskFilter('material')">料号审批（{{ filterCounts.material }}）</button>
+      <button v-if="programTemplateTasks.length" type="button" role="tab" :aria-selected="taskFilter === 'program'" @click="setTaskFilter('program')">程序模板（{{ filterCounts.program }}）</button>
+      <button type="button" role="tab" :aria-selected="taskFilter === 'lock'" @click="setTaskFilter('lock')">编辑权限（{{ filterCounts.lock }}）</button>
+      <button type="button" role="tab" :aria-selected="taskFilter === 'password'" @click="setTaskFilter('password')">密码重置（{{ filterCounts.password }}）</button>
+      <button type="button" role="tab" :aria-selected="taskFilter === 'notification'" @click="setTaskFilter('notification')">系统消息（{{ filterCounts.notification }}）</button>
+    </nav>
     <section class="pdm-panel pdm-task-message-panel" aria-label="消息中心">
       <div class="pdm-task-toolbar">
         <button type="button" class="pdm-secondary-action" :disabled="pending" @click="$emit('refresh')"><RefreshCw :size="14" />刷新</button>
         <PanelActions><button v-if="notifications.some(item => !item.readAt)" type="button" class="pdm-secondary-action" :disabled="pending" @click="onMarkAllNotificationsRead">全部已读</button></PanelActions>
-        <div class="pdm-task-filters" role="tablist" aria-label="待办类型">
-          <button type="button" role="tab" :aria-selected="taskFilter === 'all'" @click="setTaskFilter('all')">全部待办（{{ filterCounts.all }}）</button>
-          <button v-if="filterCounts.todo" type="button" role="tab" :aria-selected="taskFilter === 'todo'" @click="setTaskFilter('todo')">项目待办（{{ filterCounts.todo }}）</button>
-          <button type="button" role="tab" :aria-selected="taskFilter === 'approval'" @click="setTaskFilter('approval')">审批任务（{{ filterCounts.approval }}）</button>
-          <button type="button" role="tab" :aria-selected="taskFilter === 'material'" @click="setTaskFilter('material')">料号审批（{{ filterCounts.material }}）</button>
-          <button v-if="programTemplateTasks.length" type="button" role="tab" :aria-selected="taskFilter === 'program'" @click="setTaskFilter('program')">程序模板（{{ filterCounts.program }}）</button>
-          <button type="button" role="tab" :aria-selected="taskFilter === 'lock'" @click="setTaskFilter('lock')">编辑权限（{{ filterCounts.lock }}）</button>
-          <button type="button" role="tab" :aria-selected="taskFilter === 'password'" @click="setTaskFilter('password')">密码重置（{{ filterCounts.password }}）</button>
-          <button type="button" role="tab" :aria-selected="taskFilter === 'notification'" @click="setTaskFilter('notification')">系统消息（{{ filterCounts.notification }}）</button>
-        </div>
       </div>
 
       <div v-if="pagedRows.length" class="pdm-table-scroll pdm-task-table-scroll">
@@ -417,3 +418,12 @@ async function resetPassword(task: PasswordResetTask) {
     </el-dialog>
   </section>
 </template>
+
+<style scoped>
+.pdm-task-center > .pdm-task-filters.pdm-tabs {
+  --pdm-tabs-height: var(--pdm-tab-primary);
+  align-self: stretch;
+  flex-shrink: 0;
+  width: 100%;
+}
+</style>

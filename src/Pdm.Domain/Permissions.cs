@@ -2,6 +2,7 @@ namespace Upton.Pdm.Domain;
 
 public static class PermissionCodes
 {
+    public const string WorkHoursReportView = "work-hours.report.view";
     public const string ProjectBudgetView = "project.budget.view";
     public const string ProjectBudgetActualEdit = "project.budget.actual.edit";
     public const string ProjectBudgetEdit = "project.budget.edit";
@@ -21,6 +22,8 @@ public static class PermissionCodes
     public const string QualityFinalAcceptanceUpload = "quality.final-acceptance.upload";
     public const string ProjectView = "project.view";
     public const string ProjectCreate = "project.create";
+    public const string ProjectApplicationSubmit = "project.application.submit";
+    public const string ProjectApplicationApprove = "project.application.approve";
     public const string ProjectEdit = "project.edit";
     public const string ProjectChildCreate = "project.child.create";
     public const string ProjectDelete = "project.delete";
@@ -46,6 +49,13 @@ public static class PermissionCodes
     public const string DrawingReviewDecide = "drawing-review.decide";
     public const string ReleaseManage = "release.manage";
     public const string ProductionDrawingManage = "production.drawing.manage";
+    public const string ProductionAssign = "production.assign";
+    public const string ProductionExecute = "production.execute";
+    public const string ProductionInspect = "production.inspect";
+    public const string ProductionIssue = "production.issue";
+    public const string ProductionSchedule = "production.schedule";
+    public const string ProductionCapacityManage = "production.capacity.manage";
+    public const string ProductionScanManage = "production.scan.manage";
     public const string ApprovalDecide = "approval.decide";
     public const string ApprovalEmergencySubstitute = "approval.emergency-substitute";
     public const string ProgramTemplateView = "program-template.view";
@@ -73,6 +83,7 @@ public static class RolePermissionCatalog
 {
     public static IReadOnlyList<PermissionDefinition> Permissions { get; } = FunctionPermissionCatalog.Build(
     [
+        new(PermissionCodes.WorkHoursReportView, "查看公司工时汇总", "工时管理", "查看当前公司员工的工时明细与汇总；不包含代填或修改他人工时。", Sensitive: true),
         new(PermissionCodes.ProjectBudgetView, "查看项目预算", "项目预算", "查看未税预算、实际和预计成本；风险预留仅计划管理可见。"),
         new(PermissionCodes.ProjectBudgetActualEdit, "维护实际成本及工时", "项目预算", "由财务人工登记实际金额和实际工时。", Sensitive: true),
         new(PermissionCodes.ProjectBudgetEdit, "维护项目预算", "项目预算", "维护预算及剩余成本预估。", Sensitive: true),
@@ -92,6 +103,8 @@ public static class RolePermissionCatalog
         new(PermissionCodes.QualityFinalAcceptanceUpload, "上传终验收资料", "质量资料", Sensitive: true),
         new(PermissionCodes.ProjectView, "查看项目清单", "项目管理", "查看当前公司项目元数据；项目图档与业务内容仍按内容权限和项目分工控制。"),
         new(PermissionCodes.ProjectCreate, "创建主项目", "项目管理"),
+        new(PermissionCodes.ProjectApplicationSubmit, "发起立项申请", "立项申请", "填写、提交及撤回本人立项申请。"),
+        new(PermissionCodes.ProjectApplicationApprove, "审批立项申请", "立项申请", "查看本公司申请，批准建项或退回修改。", Sensitive: true),
         new(PermissionCodes.ProjectEdit, "编辑项目基本信息", "项目管理", "可修改创建项目时填写的业务信息；涉及编号字段时由系统校验并重新生成。"),
         new(PermissionCodes.ProjectChildCreate, "创建子项目", "项目管理"),
         new(PermissionCodes.ProjectDelete, "删除空项目", "项目管理", "仅可删除无子项目、图档、BOM、结构快照及审批发布包的项目；成功删除后释放系统编号。", Sensitive: true),
@@ -117,6 +130,13 @@ public static class RolePermissionCatalog
         new(PermissionCodes.DrawingReviewDecide, "审核2D图纸", "图纸审核", "设计者不能审核自己生成的2D图纸版本。", Sensitive: true),
         new(PermissionCodes.ReleaseManage, "创建并提交发布包", "审批发布", Sensitive: true),
         new(PermissionCodes.ProductionDrawingManage, "调整生产图纸发图信息", "审批发布", "仅调整紧急程度和需求日期，不改变图纸版本。", Sensitive: true),
+        new(PermissionCodes.ProductionAssign, "分配非标件自制与外协", "生产跟踪", "供应链接收发布包并分配自制或外协批次。", Sensitive: true),
+        new(PermissionCodes.ProductionExecute, "登记自制加工进度", "生产跟踪", "按授权批次记录内部加工与交检数量。", Sensitive: true),
+        new(PermissionCodes.ProductionInspect, "登记生产质量检验", "生产跟踪", "记录质量收料、合格、返工和报废数量。", Sensitive: true),
+        new(PermissionCodes.ProductionIssue, "登记项目领料", "生产跟踪", "记录质量放行后的实际领料人和数量。", Sensitive: true),
+        new(PermissionCodes.ProductionSchedule, "安排自制生产", "生产跟踪", "安排内部资源组、日期和预计工时。", Sensitive: true),
+        new(PermissionCodes.ProductionScanManage, "配置生产扫码岗位", "生产跟踪", "维护账号、角色与生产岗位、工位的绑定。", Sensitive: true),
+        new(PermissionCodes.ProductionCapacityManage, "维护生产资源可用工时", "生产跟踪", "维护资源组每日可用工时。", Sensitive: true),
         new(PermissionCodes.ApprovalDecide, "处理发布审批", "审批发布", Sensitive: true),
         new(PermissionCodes.ApprovalEmergencySubstitute, "紧急代批当前节点", "审批发布", "仅在紧急情况下替代当前审批人，必须填写原因，后续节点仍正常流转。", Sensitive: true),
         new(PermissionCodes.ProgramTemplateView, "查看和下载程序模板", "程序模板", "查看集团已发布的PLC、HMI程序模板。"),
@@ -279,7 +299,14 @@ public static class RolePermissionCatalog
             if (roleCode is "TechnicalAssistant" or "ProjectManager" or "QualityManager" or "QualityInspector") { permissions.Add(PermissionCodes.QualityPreAcceptanceUpload); permissions.Add(PermissionCodes.QualityFinalAcceptanceUpload); }
         }
         if (roleCode is "PlanningManager") { permissions.Add(PermissionCodes.ProjectBudgetReserve); permissions.Add(PermissionCodes.ProjectBudgetSettlementEdit); permissions.Add(PermissionCodes.ProjectBudgetBonusRateEdit); }
-        if (roleCode is "SalesAssistant") permissions.Add(PermissionCodes.ProjectBudgetSettlementEdit);
+        if (roleCode is "SalesAssistant") { permissions.Add(PermissionCodes.ProjectBudgetSettlementEdit); permissions.Add(PermissionCodes.ProjectApplicationSubmit); }
+        if (roleCode is "PlanningManager") permissions.Add(PermissionCodes.ProjectApplicationApprove);
+        if (roleCode is "SupplyChain" or "ProcurementManager") permissions.Add(PermissionCodes.ProductionAssign);
+        if (roleCode is "ProductionManager" or "ProductionAssistant" or "MachiningSupervisor" or "MachiningOperator") permissions.Add(PermissionCodes.ProductionExecute);
+        if (roleCode is "ProductionManager" or "ProductionAssistant" or "MachiningSupervisor") permissions.Add(PermissionCodes.ProductionSchedule);
+        if (roleCode is "ProductionManager") { permissions.Add(PermissionCodes.ProductionCapacityManage); permissions.Add(PermissionCodes.ProductionScanManage); }
+        if (roleCode is "QualityManager" or "QualityInspector") permissions.Add(PermissionCodes.ProductionInspect);
+        if (roleCode is "QualityManager" or "QualityInspector" or "ProductionViewer" or "AssemblyFitter") permissions.Add(PermissionCodes.ProductionIssue);
         if (roleCode is "PlanningManager" or "SalesAssistant" or "BusinessUnitManager" or "Finance") permissions.Add(PermissionCodes.ProjectBudgetSettlementView);
         return permissions;
     }

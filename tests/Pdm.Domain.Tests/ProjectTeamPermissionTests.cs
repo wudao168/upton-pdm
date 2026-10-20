@@ -37,6 +37,19 @@ public sealed class ProjectTeamPermissionTests
         Assert.Equal("lead、collaborator", multipleOwners.PhaseOwners["Acceptance"]);
         var hardwareOwners = await workflow.SetProjectPhaseOwnersAsync(root.Id, new(new Dictionary<string, string> { ["ElectricalHardware"] = "lead" }), "pm", UserRole.Engineer, default);
         Assert.Equal("lead", hardwareOwners.PhaseOwners["ElectricalHardware"]);
+        var child = await repository.CreateSubprojectAsync(new(root.Id, "独立人员子项目", null, 1), default);
+        var rootOwners = await workflow.SetProjectPhaseOwnersAsync(root.Id, new(new Dictionary<string, string> {
+            ["ElectricalEngineer"] = "lead", ["ElectricalHardware"] = "collaborator", ["MechanicalAssembly"] = "pm", ["ElectricalAssembly"] = "division-manager", ["Acceptance"] = "lead"
+        }), "pm", UserRole.Engineer, default);
+        var childOwners = await workflow.SetProjectPhaseOwnersAsync(child.Id, new(new Dictionary<string, string> {
+            ["ElectricalEngineer"] = "collaborator", ["ElectricalHardware"] = "lead", ["MechanicalAssembly"] = "division-manager", ["ElectricalAssembly"] = "pm"
+        }), "pm", UserRole.Engineer, default);
+        Assert.Equal("lead", rootOwners.PhaseOwners["ElectricalEngineer"]);
+        Assert.Equal("collaborator", childOwners.PhaseOwners["ElectricalEngineer"]);
+        var cleared = await workflow.SetProjectPhaseOwnersAsync(child.Id, new(new Dictionary<string, string>(childOwners.PhaseOwners) { ["ElectricalEngineer"] = "" }), "pm", UserRole.Engineer, default);
+        Assert.False(cleared.PhaseOwners.ContainsKey("ElectricalEngineer"));
+        Assert.Equal("lead", (await repository.FindProjectAsync(root.Id, default))!.PhaseOwners["ElectricalEngineer"]);
+        Assert.Equal("pm", cleared.PhaseOwners["ElectricalAssembly"]);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.SetMainProjectStaffingAsync(root.Id, new("collaborator", [], ["lead"]), "pm", UserRole.Engineer, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => workflow.SetProjectPhaseOwnersAsync(root.Id, new(new Dictionary<string, string> { ["Acceptance"] = "lead、missing-user" }), "pm", UserRole.Engineer, default));
         foreach (var actor in new[] { "pm", "division-manager" })

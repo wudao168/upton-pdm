@@ -21,26 +21,22 @@ internal static class NativeArchiveManifest
                 .Any(extension => parts[0].EndsWith(extension, StringComparison.OrdinalIgnoreCase))
                 && !string.IsNullOrWhiteSpace(parts[1]))
             {
-                foreach (var part in parts)
-                    files.Add(ArchiveReferencePath.Resolve(part, Path.GetDirectoryName(root.FullPath), step,
-                        root.FullPath, root.InstancePath, root.Configuration));
-                var native = files[files.Count - 2];
-                var imported = files[files.Count - 1];
-                if (!Path.IsPathRooted(parts[0]) || !Path.IsPathRooted(parts[1]))
-                    throw new InvalidOperationException(step + "的导入复合引用不是完整路径，已停止存档。原始引用：" + ArchiveReferencePath.Visible(entry));
-                if (IsInterconnectCachePath(native))
-                {
-                    var matches = Walk(root).Where(node => string.Equals(node.FullPath, native, StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(node.SourceReferencePath, native, StringComparison.OrdinalIgnoreCase)).ToArray();
-                    if (matches.Length == 0 || matches.Any(node => !string.Equals(node.ImportedSourcePath, imported, StringComparison.OrdinalIgnoreCase)))
-                        throw new InvalidOperationException(step + "的导入源与当前组件未能对应，已停止存档。原始引用："
-                            + ArchiveReferencePath.Visible(entry) + "；请核对导入源和配置后重试。");
-                }
                 PluginDiagnosticLog.Record("导入引用", step + "：原始值=" + ArchiveReferencePath.Visible(entry)
-                    + "；原生路径=" + parts[0] + "；导入源路径=" + parts[1] + "；两项均纳入核对。");
+                    + "；原生路径=" + parts[0] + "；导入源路径=" + parts[1] + "；历史导入记录不作为存档门槛。");
             }
-            else files.Add(ArchiveReferencePath.Resolve(entry, Path.GetDirectoryName(root.FullPath), step,
-                root.FullPath, root.InstancePath, root.Configuration));
+            else parts = new[] { entry };
+            foreach (var part in parts)
+            {
+                try { files.Add(ArchiveReferencePath.Resolve(part, Path.GetDirectoryName(root.FullPath), step,
+                    root.FullPath, root.InstancePath, root.Configuration)); }
+                catch (ArchiveReferencePathException error)
+                {
+                    // Actual tree paths are checked independently. A malformed historical
+                    // entry must not prevent archiving the current native component.
+                    files.Add(part ?? string.Empty);
+                    PluginDiagnosticLog.Record("树外引用", "原生历史记录路径未解析，不影响当前结构文件收集：" + error.Message);
+                }
+            }
         }
         return files.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
@@ -58,135 +54,58 @@ internal static class NativeArchiveManifest
 
     public static IReadOnlyList<string> Validate(CadTreeNode root, IReadOnlyList<string> nativeFiles)
     {
-        var rootPath = ArchiveReferencePath.Resolve(root.FullPath, null, "核对原生存档根路径", root.FullPath, root.InstancePath, root.Configuration);
-        var rootDirectory = Path.GetDirectoryName(rootPath) + Path.DirectorySeparatorChar;
+        var directory = Path.GetDirectoryName(ArchiveReferencePath.Resolve(root.FullPath, null, "核对存档根路径", root.FullPath));
+        var nodes = Walk(root).ToArray();
+        var failures = new List<string>();
+        var external = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var embeddedNodes = new HashSet<CadTreeNode>(EmbeddedVirtualNodes(root, false));
         var embeddedPaths = EmbeddedPaths(embeddedNodes);
-        var importedSources = Walk(root).Where(node => node.Status == CadReferenceStatus.Virtual
-            && IsInterconnectCachePath(node.FullPath) && !string.IsNullOrWhiteSpace(node.ImportedSourcePath))
-            .Select(node => ArchiveReferencePath.Resolve(node.ImportedSourcePath, rootDirectory,
-                "核对3D Interconnect导入源", root.FullPath, node.InstancePath, node.Configuration))
-            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var embeddedKeys = embeddedPaths.Where(path => VirtualComponentKey(path) != null).GroupBy(VirtualComponentKey, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), StringComparer.OrdinalIgnoreCase);
-        var nodes = Walk(root).Where(node => !string.IsNullOrWhiteSpace(node.FullPath)
-            && node.Status != CadReferenceStatus.Virtual && !embeddedNodes.Contains(node)
-            && !PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath)).ToArray();
-        var paths = new HashSet<string>(nodes.Select(node => ArchiveReferencePath.Resolve(node.FullPath, rootDirectory,
-            "核对当前实例文件路径", root.FullPath, node.InstancePath, node.Configuration)), StringComparer.OrdinalIgnoreCase);
-        var names = nodes.GroupBy(node => Path.GetFileName(node.FullPath), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.Select(node => Path.GetFullPath(node.FullPath))
-                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), StringComparer.OrdinalIgnoreCase);
-        var aliases = nodes.Where(node => !string.IsNullOrWhiteSpace(node.SourceReferencePath))
-            .GroupBy(node => ArchiveReferencePath.Resolve(node.SourceReferencePath, rootDirectory,
-                "核对实例原始引用映射", root.FullPath, node.InstancePath, node.Configuration), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.Select(node => Path.GetFullPath(node.FullPath))
-                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), StringComparer.OrdinalIgnoreCase);
-        var failures = new List<string>();
-        var external = new List<string>();
-        var additionalParts = new List<string>();
-        var additionalSources = new List<string>();
-        var sourceReadFailures = 0;
-        foreach (var source in importedSources)
+            .ToDictionary(group => group.Key, group => group.Distinct(StringComparer.OrdinalIgnoreCase).Count(), StringComparer.OrdinalIgnoreCase);
+        foreach (var node in nodes)
         {
-            var failure = ProbeImportedSource(source);
-            if (failure != null)
+            if (IsInterconnectCachePath(node.FullPath) && (!node.IsStoredImport || !ImportedComponentStorage.IsStableOwner(node.ImportedStorageOwnerPath)))
+                failures.Add("树内导入组件尚未形成可确认的原生存档内容，请将其保存为稳定原生文件或确认随父装配嵌入保存：" + node.FileName + "；实例：" + node.InstancePath);
+            else if (node.Status != CadReferenceStatus.Virtual && !embeddedNodes.Contains(node)
+                && PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath))
+                failures.Add("树内临时组件的嵌入归属尚未确认：" + node.FileName);
+            else if (node.Status == CadReferenceStatus.Virtual || embeddedNodes.Contains(node))
             {
-                sourceReadFailures++;
-                failures.Add("STEP导入源在记录路径处无法读取（" + failure + "）：" + source);
-                var instances = embeddedNodes.Where(node => string.Equals(node.ImportedSourcePath, source, StringComparison.OrdinalIgnoreCase))
-                    .GroupBy(node => node.FullPath, StringComparer.OrdinalIgnoreCase).ToArray();
-                PluginDiagnosticLog.Record("导入源诊断", "原路径=" + source + "；原因=" + failure
-                    + "；报错电脑=" + Environment.MachineName + "；装配=" + rootPath
-                    + "；对应原生缓存文件=" + instances.Length + "份。缓存存在不代表原STEP文件已保存。");
-                foreach (var instance in instances)
-                    PluginDiagnosticLog.Record("导入缓存诊断", "路径=" + instance.Key + "；读取结果="
-                        + (ProbeImportedSource(instance.Key) ?? "可读取") + "；实例=" + instance.First().InstancePath
-                        + "；配置=" + instance.First().Configuration + "；源路径=" + source);
+                if (!embeddedNodes.Contains(node)) failures.Add("树内虚拟组件的保存归属尚未确认：" + node.FileName);
             }
-            else if (!paths.Contains(source)) additionalSources.Add(source);
+            else if (string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
+                failures.Add("树内图档缺失，不能完整存档：" + node.FileName + "；路径：" + node.FullPath);
+            else if (new FileInfo(node.FullPath).Length == 0)
+                failures.Add("树内图档为空，不能完整存档：" + node.FileName);
         }
-        var embeddedCount = 0;
+        var ordinary = nodes.Where(node => node.Status != CadReferenceStatus.Virtual && !embeddedNodes.Contains(node)
+            && !string.IsNullOrWhiteSpace(node.FullPath)).ToArray();
+        var paths = new HashSet<string>(ordinary.Select(node => Path.GetFullPath(node.FullPath)), StringComparer.OrdinalIgnoreCase);
         foreach (var original in nativeFiles.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            var path = ArchiveReferencePath.Resolve(original, rootDirectory, "核对原生文件依赖", root.FullPath, root.InstancePath, root.Configuration);
-            if (embeddedPaths.Contains(path)) { embeddedCount++; continue; }
-            var virtualKey = VirtualComponentKey(path);
-            if (virtualKey != null && embeddedKeys.TryGetValue(virtualKey, out var matches))
+            string path;
+            try { path = ArchiveReferencePath.Resolve(original, directory, "识别结构内原生引用", root.FullPath); }
+            catch (ArchiveReferencePathException) { external.Add(ArchiveReferencePath.Visible(original)); continue; }
+            if (embeddedPaths.Contains(path)) continue;
+            var key = VirtualComponentKey(path);
+            if (key != null && embeddedKeys.TryGetValue(key, out var count))
             {
-                if (matches.Length != 1)
-                    failures.Add("嵌入式虚拟组件对应到多个当前实例，不能自动关联：" + original);
-                else embeddedCount++;
+                if (count != 1) failures.Add("树内嵌入组件的原生路径对应不唯一：" + original);
                 continue;
             }
-            if (!paths.Contains(path) && aliases.TryGetValue(path, out var resolved) && resolved.Length == 1)
-            {
-                // A saved reference can still exist at its old path. It must not silently
-                // override a different working copy simply because the component names match.
-                if (File.Exists(path) && !string.Equals(path, resolved[0], StringComparison.OrdinalIgnoreCase)
-                    && ArchiveFileFingerprint.Read(path) != ArchiveFileFingerprint.Read(resolved[0]))
-                    failures.Add("原始引用与当前工作副本内容不同：" + original + "；当前副本：" + resolved[0]);
-                path = resolved[0]; // Only an actual scanned instance can establish this mapping.
-            }
-            if (paths.Contains(path) && File.Exists(path)) continue;
-            var extension = Path.GetExtension(original);
-            var cad = new[] { ".SLDPRT", ".SLDASM", ".SLDDRW" }.Contains(extension, StringComparer.OrdinalIgnoreCase);
-            if (!cad)
-            {
-                if (!importedSources.Contains(path, StringComparer.OrdinalIgnoreCase)) external.Add(original);
-                continue;
-            }
-            if (extension.Equals(".SLDPRT", StringComparison.OrdinalIgnoreCase) && File.Exists(path)
-                && path.StartsWith(rootDirectory, StringComparison.OrdinalIgnoreCase))
-            {
-                var name = Path.GetFileName(path);
-                if (names.TryGetValue(name, out var collisions) && collisions.Any(existing =>
-                    !string.Equals(existing, path, StringComparison.OrdinalIgnoreCase)))
-                {
-                    failures.Add("原生依赖与已核对图档同名但路径不同，不能自动关联：" + path);
-                    continue;
-                }
-                names[name] = new[] { path };
-                additionalParts.Add(path);
-                continue;
-            }
-            failures.Add((!File.Exists(path) ? "原生图档引用文件缺失或路径未确认："
-                : "原生图档依赖尚未对应到已核对的实例/配置：") + original);
+            if (paths.Contains(path)) continue;
+            // The loaded tree owns the archive scope. A saved source path outside it
+            // is not another version of the current component and must not be read.
+            external.Add(original);
         }
         if (failures.Count > 0)
-        {
-            PluginDiagnosticLog.Record("存档范围", "原生文件清单与存档结构不一致：" + string.Join("；", failures));
-            throw new InvalidOperationException((sourceReadFailures > 0
-                ? "STEP导入源读取检查未通过，本次尚未上传文件，也未产生存档版本：\r\n"
-                : "原生文件清单与存档结构不一致，本次尚未上传文件。请核对以下引用及其配置；系统不会按同名文件替代或忽略：\r\n")
-                + string.Join("\r\n", failures.Take(12)) + (failures.Count > 12 ? "\r\n另有" + (failures.Count - 12) + "项，请查看诊断日志。" : string.Empty)
-                + (sourceReadFailures > 0 ? "\r\n请在当前业务电脑确认源文件位置及访问权限；若仅剩现有装配，请先保留图档及缓存，再核对保存方案。系统不会忽略源文件、修改引用或自动断开链接。" : string.Empty));
-        }
-        foreach (var path in additionalParts.Concat(additionalSources))
-        {
-            var name = Path.GetFileName(path);
-            root.Children.Add(new CadTreeNode
-            {
-                FullPath = path,
-                SourceReferencePath = path,
-                FileName = name,
-                DisplayName = (additionalSources.Contains(path) ? "导入源资料 · " : "原生文件依赖 · ") + Path.GetFileNameWithoutExtension(path),
-                DrawingNumber = Path.GetFileNameWithoutExtension(path),
-                Kind = additionalSources.Contains(path) ? CadDocumentKind.Other : CadDocumentKind.Part,
-                Role = CadReferenceRole.ExternalFileDependency,
-                InstancePath = root.InstancePath + "/native-file/" + name,
-                Status = CadReferenceStatus.Normal
-            });
-        }
-        PluginDiagnosticLog.Record("存档范围", "原生清单中图档核对通过；随父装配保存的嵌入式虚拟组件" + embeddedCount
-            + "份；独立归档但不计入装配BOM的零件依赖" + additionalParts.Count
-            + "份；非SolidWorks外部资料" + external.Count
-            + "项；同批存档的导入源资料" + additionalSources.Count + "份。"
-            + (additionalParts.Count == 0 ? string.Empty : " 依赖零件：" + string.Join("；", additionalParts))
-            + (external.Count == 0 ? string.Empty : " 外部资料：" + string.Join("；", external)));
-        return external;
+            throw new InvalidOperationException("当前结构内容检查未通过，本次尚未上传文件：\r\n" + string.Join("\r\n", failures.Distinct().Take(12)));
+        foreach (var reference in external)
+            PluginDiagnosticLog.Record("树外引用", "不纳入当前结构存档，未读取、登记或改写：" + ArchiveReferencePath.Visible(reference));
+        PluginDiagnosticLog.Record("存档范围", "已核对当前结构图档" + ordinary.Length + "项；嵌入组件" + embeddedNodes.Count
+            + "项；树外引用" + external.Count + "项，仅提示，不纳入存档。完整性结论仅针对当前结构。");
+        return external.ToArray();
     }
-
     internal static string ProbeImportedSource(string path)
     {
         try
@@ -216,7 +135,7 @@ internal static class NativeArchiveManifest
     private static IEnumerable<CadTreeNode> Walk(CadTreeNode node)
     {
         yield return node;
-        foreach (var child in node.Children)
+        foreach (var child in node.Children.Where(child => child.Role != CadReferenceRole.ExternalFileDependency))
             foreach (var descendant in Walk(child)) yield return descendant;
     }
 
@@ -231,16 +150,15 @@ internal static class NativeArchiveManifest
 
     private static HashSet<string> EmbeddedPaths(IEnumerable<CadTreeNode> nodes) => new HashSet<string>(
         nodes.SelectMany(node => new[] { node.FullPath, node.SourceReferencePath })
-            .Where(path => PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(path) || IsInterconnectCachePath(path))
+            .Where(path => !string.IsNullOrWhiteSpace(path))
             .Select(Path.GetFullPath), StringComparer.OrdinalIgnoreCase);
 
-    private static IEnumerable<CadTreeNode> EmbeddedVirtualNodes(CadTreeNode node, bool parentVirtual)
+    internal static IEnumerable<CadTreeNode> EmbeddedVirtualNodes(CadTreeNode node, bool parentVirtual)
     {
         var virtualComponent = parentVirtual || node.Status == CadReferenceStatus.Virtual;
-        if (virtualComponent && (PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath)
-            || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.SourceReferencePath)
-            || IsInterconnectCachePath(node.FullPath) && !string.IsNullOrWhiteSpace(node.ImportedSourcePath))) yield return node;
-        foreach (var child in node.Children)
+        if (node.Status == CadReferenceStatus.Virtual || virtualComponent && (PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath)
+            || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.SourceReferencePath))) yield return node;
+        foreach (var child in node.Children.Where(child => child.Role != CadReferenceRole.ExternalFileDependency))
             foreach (var embedded in EmbeddedVirtualNodes(child, virtualComponent)) yield return embedded;
     }
 

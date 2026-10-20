@@ -58,7 +58,7 @@ public static class ProjectPermissionPolicy
         if (Equals(root.DesignLead, actor) || root.DesignLeads.Any(user => Equals(user, actor)))
             positions.Add(ProjectPermissionPositions.MainDesigner);
         if (project.Designers.Any(user => Equals(user, actor))
-            || IsHardwareOwner(project, actor) || IsHardwareOwner(root, actor))
+            || IsAssignedEngineer(project, actor) || IsAssignedEngineer(root, actor))
             positions.Add(ProjectPermissionPositions.Engineer);
         foreach (var position in settings.CustomPositions ?? [])
             if (position.IsActive && (project.CustomPositionMembers.GetValueOrDefault(position.Key, []).Any(user => Equals(user, actor))
@@ -91,7 +91,7 @@ public static class ProjectPermissionPolicy
         && root.Id == (project.ParentProjectId is null ? project.Id : project.RootProjectId ?? project.ParentProjectId.Value)
         && project.OrganizationId == root.OrganizationId;
 
-    private static bool IsHardwareOwner(Project project, string actor) =>
-        project.PhaseOwners.TryGetValue("ElectricalHardware", out var hardwareOwners)
-        && hardwareOwners.Split('、', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Any(user => Equals(user, actor));
+    private static bool IsAssignedEngineer(Project project, string actor) =>
+        new[] { "ElectricalEngineer", "ElectricalHardware" }.Any(key => project.PhaseOwners.TryGetValue(key, out var owners)
+            && owners.Split('、', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Any(user => Equals(user, actor)));
 }

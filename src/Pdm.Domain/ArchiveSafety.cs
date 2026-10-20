@@ -18,6 +18,16 @@ public static class ArchiveSafety
     public static bool SameReferences(DocumentReferenceNode? previous, DocumentReferenceNode current, bool root = true)
     {
         if (previous is null) return false;
+        if (root && current.TreeScopeOnly)
+        {
+            previous = StructureOnly(previous);
+            current = StructureOnly(current);
+            if (current.Kind == DocumentKind.Drawing && current.Children.Count > 0)
+            {
+                var models = current.Children.Select(node => node.DocumentId).ToHashSet();
+                previous = previous with { Children = previous.Children.Where(node => models.Contains(node.DocumentId)).ToArray() };
+            }
+        }
         if (previous.DocumentId != current.DocumentId || previous.Kind != current.Kind || previous.Role != current.Role
             || !string.Equals(previous.FileName, current.FileName, StringComparison.OrdinalIgnoreCase)
             || !string.Equals(previous.Configuration, current.Configuration, StringComparison.Ordinal)
@@ -30,6 +40,28 @@ public static class ArchiveSafety
         var after = current.Children.Where(node => current.Kind == DocumentKind.Drawing || node.Kind != DocumentKind.Drawing)
             .OrderBy(node => node.InstancePath, StringComparer.OrdinalIgnoreCase).ToArray();
         return before.Length == after.Length && before.Zip(after).All(pair => SameReferences(pair.First, pair.Second, false));
+    }
+
+    public static DocumentReferenceNode StructureOnly(DocumentReferenceNode node) => node with
+    {
+        Children = node.Children.Where(child => child.Role != ReferenceRole.ExternalFileDependency)
+            .Select(StructureOnly).ToArray()
+    };
+
+    public static bool SameOwnDesignReferences(DocumentReferenceNode? previous, DocumentReferenceNode current)
+    {
+        if (previous is null) return false;
+        if (current.Kind != DocumentKind.Assembly) return SameReferences(previous, current);
+        var sameConfiguration = string.Equals(previous.Configuration, current.Configuration, StringComparison.OrdinalIgnoreCase);
+        DocumentReferenceNode Own(DocumentReferenceNode node) => StructureOnly(node) with
+        {
+            Configuration = "", // The active configuration is an opening choice, not a file edit.
+            Quantity = 1, Status = ReferenceNodeStatus.Normal,
+            Children = node.Children.Where(child => sameConfiguration && child.Kind != DocumentKind.Drawing && child.Role != ReferenceRole.ExternalFileDependency)
+                .Select(child => child with { Revision = null, Children = child.Status == ReferenceNodeStatus.Virtual
+                    ? child.Children : [] }).ToArray()
+        };
+        return SameReferences(Own(previous), Own(current));
     }
 
     private static ReferenceNodeStatus NormalizeStatus(ReferenceNodeStatus status) =>

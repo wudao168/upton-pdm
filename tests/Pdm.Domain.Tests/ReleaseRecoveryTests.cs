@@ -11,6 +11,52 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class ReleaseRecoveryTests
 {
     [Fact]
+    public async Task QuantityOnlyPublicationReusesFormalDrawingsAndUpdatesDeliveryWithoutNewVersions()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        Assert.True(await fixture.Service.ProcessAsync(fixture.Package, default));
+        var originals = fixture.Versions.Values.Where(version => version.ReleasePackageId == fixture.Package.Id).ToArray();
+        var count = fixture.Versions.Count;
+        var path = Path.Combine(fixture.Project.ReleaseLocation, "RP-QUANTITY"); Directory.CreateDirectory(path);
+        var package = fixture.Package with { Id = Guid.NewGuid(), Number = "RP-QUANTITY", Scope = ReleaseScope.NonStandardSupplement,
+            PublishedAt = DateTimeOffset.UtcNow.AddSeconds(1), PublishedPath = path,
+            VersionBindings = originals.Select(version => new ReleaseVersionBinding(version.DocumentId, version.Id, version.Revision.Display,
+                version.Sha256, true, "已有正式图纸.SLDDRW", false, "A", "A")).ToArray() };
+        await fixture.Repository.CreateReleasePackageAsync(package, default);
+        Assert.True(await fixture.Service.ProcessAsync(package, default));
+        Assert.Equal(1, fixture.Converter.Calls);
+        Assert.Equal(count, fixture.Versions.Count);
+        Assert.All(await fixture.Service.ListItemsAsync(package.Id, default), item => Assert.True(item.Succeeded));
+        Assert.True(await fixture.Service.ProcessAsync(package, default));
+        Assert.Equal(1, fixture.Converter.Calls); Assert.Equal(count, fixture.Versions.Count);
+        var drawings = await new ProductionDrawingService(fixture.Repository).ListAsync("admin", UserRole.Administrator, false, null, default);
+        Assert.All(drawings.Where(item => originals.Any(version => version.DocumentId == item.DocumentId)), item => Assert.Equal(package.Id, item.ReleasePackageId));
+        var changed = await fixture.Repository.UpdatePublishedDrawingDeliveryAsync(package.Id, originals[0].DocumentId,
+            new("Priority", new DateOnly(2026, 10, 20)), "admin", default);
+        Assert.Equal("Priority", changed.DrawingDeliveryOverrides[originals[0].DocumentId].Priority);
+        Assert.Equal(count, fixture.Versions.Count);
+        await ReleaseDeliveryFiles.VerifyChecksumsAsync(path, default);
+    }
+
+    [Fact]
+    public async Task MissingReusedPreviewCanBeRebuiltAgainstItsPinnedFormalSourceWithoutCreatingACadVersion()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        Assert.True(await fixture.Service.ProcessAsync(fixture.Package, default));
+        var original = fixture.Versions.Values.First(version => version.ReleasePackageId == fixture.Package.Id);
+        File.Delete(StorageLocationPolicy.ResolveUnder(fixture.Project.VaultLocation, original.Preview!.StorageRelativePath));
+        var path = Path.Combine(fixture.Project.ReleaseLocation, "RP-REUSE-RECOVERY"); Directory.CreateDirectory(path);
+        var package = fixture.Package with { Id = Guid.NewGuid(), Number = "RP-REUSE-RECOVERY", Scope = ReleaseScope.NonStandardSupplement, PublishedPath = path,
+            VersionBindings = [new(original.DocumentId, original.Id, original.Revision.Display, original.Sha256, true, "复用图.SLDDRW", false)] };
+        await fixture.Repository.CreateReleasePackageAsync(package, default);
+        var count = fixture.Versions.Count;
+        Assert.True(await fixture.Service.ProcessAsync(package, default));
+        Assert.Equal(count, fixture.Versions.Count);
+        Assert.Equal(original.Sha256, fixture.Versions[original.Id].Sha256);
+        Assert.True(Assert.Single(await fixture.Service.ListItemsAsync(package.Id, default)).Succeeded);
+    }
+
+    [Fact]
     public async Task DeliveryFailureStaysPendingAndRetryCopiesExistingArtifactWithoutReconversion()
     {
         using var fixture = await Fixture.CreateAsync();

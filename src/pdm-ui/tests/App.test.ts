@@ -43,6 +43,7 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
     if (url.endsWith('/client-bootstrap.json')) return json({ ConfigurationVersion: '2026.09.12.1234-version-display' })
     if (url.endsWith('/health')) return json({ status: 'ok' })
     if (url.endsWith('/api/approval-tasks/mine')) return json([])
+    if (url.endsWith('/api/standard-structures')) return json({ catalog: { companyId: 'company', categories: [], structures: [], storageRoot: '', rowVersion: 0 }, canManage: false, canArchive: false, canConfigureStorage: false })
     if (url.endsWith('/api/edit-locks')) return json(editLocks)
     if (url.endsWith('/api/audit?take=200')) return json([])
     if (url.endsWith('/api/auth/login')) {
@@ -235,7 +236,7 @@ async function login(wrapper: ReturnType<typeof mount>, openProject = true, user
     await projectTabByText(wrapper, '图档').trigger('click')
     await flushPromises()
   } else {
-    await buttonByText(wrapper, '项目列表').trigger('click')
+    await navigateTo(wrapper, '项目列表')
     await flushPromises()
   }
 }
@@ -251,6 +252,20 @@ function buttonByText(wrapper: ReturnType<typeof mount>, label: string) {
   const button = wrapper.findAll('button').find((candidate) => candidate.text().includes(label))
   if (!button) throw new Error(`Button not found: ${label}`)
   return button
+}
+
+async function navigateTo(wrapper: ReturnType<typeof mount>, label: string) {
+  const projectPages = ['项目总览', '项目日历', '项目列表']
+  const standardPages = ['标准物料', '标准结构', '程序模板']
+  const group = projectPages.includes(label) ? '项目总览' : standardPages.includes(label) ? '标准物料' : label
+  const button = wrapper.get('.pdm-sidebar').findAll('button').find(button => button.text().trim() === group)!
+  await button.trigger('click')
+  await flushPromises()
+  if (projectPages.includes(label) || standardPages.includes(label)) {
+    const tab = wrapper.get('.pdm-navigation-tabs').findAll('[role="tab"]').find(tab => tab.text() === label)!
+    await tab.trigger('click')
+    await flushPromises()
+  }
 }
 
 async function runProjectAction(wrapper: ReturnType<typeof mount>, command: string, projectCode = 'PRJ-REAL-001') {
@@ -307,6 +322,44 @@ describe('PLM client workspace', () => {
     } finally { wrapper.unmount() }
   })
 
+  it('空项目保留设计树、预览区和受权限控制的存档入口，存档后可刷新显示图档', async () => {
+    const originalFetch = fetch
+    let empty = true
+    let enabled = true
+    let canArchive = true
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/api/browser-archives/capabilities')) return Promise.resolve(json({ enabled, canArchive, canConfigure: false }))
+      if (empty && /\/(documents|folder-documents|document-relations)$/.test(url)) return Promise.resolve(json([]))
+      if (empty && url.endsWith('/reference-tree')) return Promise.resolve(json(null))
+      return originalFetch(input, init)
+    }))
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    try {
+      await login(wrapper)
+      expect(wrapper.get('.pdm-tree-empty').text()).toContain('当前项目暂无图档')
+      expect(wrapper.find('[aria-label="工作区命令栏"]').exists()).toBe(true)
+      expect(wrapper.get('[aria-label="图档预览"]').text()).toContain('项目尚未关联CAD图纸')
+      expect(wrapper.get('.pdm-tree-legend .browser-cad-entry').text()).toBe('存档')
+      await wrapper.get('.browser-cad-entry').trigger('click')
+      await flushPromises()
+      expect(document.querySelector('[aria-label="图档存档"]')?.textContent).toContain('选择文件')
+      canArchive = false
+      window.dispatchEvent(new Event('pdm-browser-archive-settings'))
+      await flushPromises()
+      expect(wrapper.get('.browser-cad-entry').attributes('disabled')).toBeDefined()
+      enabled = false
+      window.dispatchEvent(new Event('pdm-browser-archive-settings'))
+      await flushPromises()
+      expect(wrapper.find('.browser-cad-entry').exists()).toBe(false)
+      empty = false
+      await wrapper.get('[aria-label="刷新设计树"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[aria-label="项目设计树"]').text()).toContain('REAL-ASM-001')
+      expect(wrapper.get('[aria-label="图档预览"]').text()).not.toContain('项目尚未关联CAD图纸')
+    } finally { wrapper.unmount() }
+  })
+
   it.each(['Administrator', 'platform_admin', 'developer', 'PlanningManager', 'Engineer'])('项目计划模板已从系统管理移除（角色 %s）', async roleCode => {
     installApiMock([], [String(roleCode)])
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
@@ -352,18 +405,18 @@ describe('PLM client workspace', () => {
     await verify('developer', 'true', ['developer'])
   })
 
-  it('applies the saved theme to web buttons and synchronizes it to the Windows client', async () => {
+  it.each(['a', 'c', 'p', 'o', 'g'])('applies saved theme %s and synchronizes it to the Windows client', async savedTheme => {
     const postMessage = vi.fn()
-    window.localStorage.setItem('pdm_theme', 'c')
+    window.localStorage.setItem('pdm_theme', savedTheme)
     Object.defineProperty(window, 'chrome', {
       configurable: true,
       value: { webview: { postMessage, addEventListener: vi.fn() } },
     })
 
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
-    expect(wrapper.get('.pdm-app-shell').classes()).toContain('theme-c')
-    expect(document.documentElement.dataset.pdmTheme).toBe('c')
-    expect(postMessage).toHaveBeenCalledWith({ type: 'theme-change', payload: { theme: 'c' } })
+    expect(wrapper.get('.pdm-app-shell').classes()).toContain(`theme-${savedTheme}`)
+    expect(document.documentElement.dataset.pdmTheme).toBe(savedTheme)
+    expect(postMessage).toHaveBeenCalledWith({ type: 'theme-change', payload: { theme: savedTheme } })
 
     wrapper.unmount()
     expect(document.documentElement.dataset.pdmTheme).toBeUndefined()
@@ -377,7 +430,7 @@ describe('PLM client workspace', () => {
     await flushPromises()
     expect(globalStatus.value).toBeUndefined()
     ElMessage.warning('概览旧状态')
-    await buttonByText(wrapper, '项目列表').trigger('click')
+    await navigateTo(wrapper, '项目列表')
     await flushPromises()
     expect(globalStatus.value).toBeUndefined()
     expect(wrapper.find('.pdm-global-status.is-idle').exists()).toBe(true)
@@ -460,20 +513,23 @@ describe('PLM client workspace', () => {
     wrapper.unmount()
   })
 
-  it('keeps the standard structure entry but shows its reserved empty state', async () => {
+  it('opens the independent standard structure workspace with drawing and BOM tabs', async () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper, false)
 
     const navigationLabels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
-    expect(navigationLabels.slice(4, 6)).toEqual(['标准物料', '标准结构'])
+    expect(navigationLabels).toContain('标准物料')
+    expect(navigationLabels).not.toContain('标准结构')
     expect(navigationLabels).toContain('料品管理')
 
-    await buttonByText(wrapper, '标准结构').trigger('click')
+    await navigateTo(wrapper, '标准结构')
     await flushPromises()
 
-    expect(wrapper.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('标准结构')
-    const standardStructurePage = wrapper.get('[aria-label="标准结构空状态"]')
-    expect(standardStructurePage.text()).toContain('标准结构当前不用于存放套件，暂时留空')
+    expect(wrapper.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('标准物料')
+    const standardStructurePage = wrapper.get('[aria-label="标准结构"]')
+    expect(standardStructurePage.text()).toContain('分类筛选')
+    expect(standardStructurePage.get('[aria-label="标准结构功能"]').findAll('button').map(button => button.text()).filter(Boolean)).toEqual(['图档', 'BOM'])
+    expect(standardStructurePage.text()).not.toContain('审核')
     expect(window.localStorage.getItem('upton-pdm-active-navigation')).toBe('standard-structure')
     wrapper.unmount()
   })
@@ -597,7 +653,7 @@ describe('PLM client workspace', () => {
     await flushPromises()
 
     expect(wrapper.find('.pdm-project-workspace').exists()).toBe(true)
-    expect(wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').slice(0, 4).map(item => item.text().trim())).toEqual(['项目日历', '项目总览', '项目中心', '项目列表'])
+    expect(wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())).toEqual(['项目总览', '项目中心', '制造中心', '标准物料', '料品管理', '工时管理', '我的待办'])
     expect(wrapper.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('项目中心')
     await projectTabByText(wrapper, 'BOM').trigger('click')
     await flushPromises()
@@ -609,9 +665,9 @@ describe('PLM client workspace', () => {
     expect(restoredProjectPage.find('.pdm-project-workspace').exists()).toBe(true)
     expect(restoredProjectPage.get('.pdm-project-tabs button.is-active').text()).toBe('BOM')
 
-    await buttonByText(restoredProjectPage, '项目列表').trigger('click')
+    await navigateTo(restoredProjectPage, '项目列表')
     expect(restoredProjectPage.get('[aria-label="项目中心"]').text()).toContain('PRJ-REAL-001')
-    expect(restoredProjectPage.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('项目列表')
+    expect(restoredProjectPage.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('项目总览')
     expect(window.localStorage.getItem('upton-pdm-active-navigation')).toBe('projects')
 
     restoredProjectPage.unmount()
@@ -1010,7 +1066,7 @@ describe('PLM client workspace', () => {
     expect(postMessage).toHaveBeenCalledWith({ type: 'desktop-settings-save', payload: { workspaceRoot: 'D:\\PDM-Cache' } })
   })
 
-  it('个人设置里切换主题会写入个人资料，实现跨设备同步', async () => {
+  it.each([['琥珀橙', 'o'], ['鸢尾紫', 'p'], ['石墨灰', 'g']])('个人设置切换%s会写入账号并立即应用', async (label, value) => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper, false)
 
@@ -1021,15 +1077,15 @@ describe('PLM client workspace', () => {
     themeTab.click()
     await flushPromises()
     const orange = [...document.querySelectorAll<HTMLElement>('.personal-theme-group .el-radio')]
-      .find(item => item.textContent?.includes('暖橙活力'))!
+      .find(item => item.textContent?.includes(label))!
     orange.querySelector<HTMLInputElement>('input')!.click()
     await flushPromises()
 
     const profileCall = vi.mocked(fetch).mock.calls
       .find(([input, init]) => String(input).endsWith('/api/auth/profile') && (init?.method ?? 'GET') === 'PUT')
     expect(profileCall).toBeTruthy()
-    expect(String(profileCall![1]?.body)).toContain('"theme":"o"')
-    expect(document.documentElement.dataset.pdmTheme).toBe('o')
+    expect(String(profileCall![1]?.body)).toContain(`"theme":"${value}"`)
+    expect(document.documentElement.dataset.pdmTheme).toBe(value)
     wrapper.unmount()
   })
 
@@ -1187,7 +1243,7 @@ describe('PLM client workspace', () => {
     await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
     await flushPromises()
 
-    await buttonByText(wrapper, '项目列表').trigger('click')
+    await navigateTo(wrapper, '项目列表')
 
     await buttonByText(wrapper, '创建主项目').trigger('click')
     expect(wrapper.getComponent({ name: 'ElSelect' }).props('filterable')).toBe(true)
@@ -1226,7 +1282,7 @@ describe('PLM client workspace', () => {
     expect(wrapper.get('[aria-label="U9C客户同步"]').text()).toContain('C00888')
     expect(wrapper.get('[aria-label="U9C客户同步"]').text()).toContain('当前可见')
 
-    await buttonByText(wrapper, '项目列表').trigger('click')
+    await navigateTo(wrapper, '项目列表')
     const maintainButton = wrapper.findAll('button').find(button => button.text().trim() === '维护')
     expect(maintainButton).toBeUndefined()
 
@@ -1404,6 +1460,127 @@ describe('PLM client workspace', () => {
     wrapper.unmount()
   })
 
+  it('orders grouped tabs and restores the last page when returning to each group', async () => {
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+    await navigateTo(wrapper, '项目日历')
+    const tabs = () => wrapper.get('.pdm-navigation-tabs').findAll('[role="tab"]').map(tab => tab.text())
+    expect(tabs()).toEqual(['项目总览', '项目日历', '项目列表'])
+    const calendar = wrapper.get('[data-navigation-page="project-calendar"]')
+    await calendar.findAll('button').find(button => button.text() === '周')!.trigger('click')
+    await navigateTo(wrapper, '程序模板')
+    expect(tabs()).toEqual(['标准物料', '标准结构', '程序模板'])
+    const templates = wrapper.get('[data-navigation-page="program-templates"]').element
+    await buttonByText(wrapper, '项目总览').trigger('click'); await flushPromises()
+    expect(calendar.isVisible()).toBe(true)
+    expect(calendar.get('.pc-week-view').isVisible()).toBe(true)
+    expect(wrapper.get('.pdm-navigation-tabs [aria-selected="true"]').text()).toBe('项目日历')
+    await buttonByText(wrapper, '标准物料').trigger('click'); await flushPromises()
+    expect(wrapper.get('[data-navigation-page="program-templates"]').element).toBe(templates)
+    expect(wrapper.get('.pdm-navigation-tabs [aria-selected="true"]').text()).toBe('程序模板')
+    wrapper.unmount()
+  })
+
+  it('keeps program templates accessible without granting access to standard library pages', async () => {
+    const originalFetch = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const response = await originalFetch(input, init)
+      if (!String(input).endsWith('/api/auth/login')) return response
+      const session = await response.json()
+      return json({ ...session, permissions: session.permissions.filter((permission: string) => permission !== 'standard-library.view') })
+    })
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+    await buttonByText(wrapper, '标准物料').trigger('click'); await flushPromises()
+    expect(wrapper.get('.pdm-navigation-tabs').findAll('[role="tab"]').map(tab => tab.text())).toEqual(['程序模板'])
+    expect(wrapper.get('[data-navigation-page="program-templates"]').isVisible()).toBe(true)
+    expect(wrapper.find('[data-navigation-page="standard-library"]').exists()).toBe(false)
+    expect(wrapper.find('[data-navigation-page="standard-structure"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps every visited navigation page mounted with its filters and active tab', async () => {
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper, true, 'admin')
+    const navigate = (label: string) => navigateTo(wrapper, label)
+    const pages = [
+      ['项目日历', 'project-calendar'], ['项目总览', 'project-workbench'], ['项目列表', 'projects'],
+      ['标准物料', 'standard-library'], ['标准结构', 'standard-structure'], ['料品管理', 'materials'],
+      ['程序模板', 'program-templates'], ['我的待办', 'tasks'], ['制造中心', 'production-drawings'], ['系统设置', 'admin'],
+    ] as const
+    for (const [label, key] of pages) {
+      await navigate(label)
+      const page = wrapper.get(`[data-navigation-page="${key}"]`)
+      const original = page.element
+      const search = page.find('input[type="search"], input[aria-label^="搜索"]')
+      if (search.exists()) await search.setValue(`remember-${key}`)
+      if (key === 'project-calendar') await page.findAll('button').find(button => button.text() === '周')!.trigger('click')
+      if (key === 'materials') await page.get('#tab-code-approvals').trigger('click')
+      if (key === 'admin') await page.findAll('.pdm-admin-tabs button').find(button => button.text() === '审批流程')!.trigger('click')
+      await flushPromises()
+      await navigate(key === 'standard-structure' ? '项目列表' : '标准结构')
+      expect(page.isVisible()).toBe(false)
+      await navigate(label)
+      expect(wrapper.get(`[data-navigation-page="${key}"]`).element).toBe(original)
+      expect(page.isVisible()).toBe(true)
+      if (search.exists()) expect(search.element).toHaveProperty('value', `remember-${key}`)
+      if (key === 'project-calendar') expect(page.get('.pc-week-view').isVisible()).toBe(true)
+      if (key === 'materials') expect(page.get('#tab-code-approvals').attributes('aria-selected')).toBe('true')
+      if (key === 'admin') expect(page.get('.approval-workflow-settings').isVisible()).toBe(true)
+      expect(wrapper.findAll('[data-navigation-page]').filter(page => page.isVisible())).toHaveLength(1)
+    }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await wrapper.get('[data-navigation-page="materials"] #tab-materials').trigger('click')
+      await navigate('我的待办')
+      wrapper.get('[data-navigation-page="tasks"]').getComponent({ name: 'MyTasks' }).vm.$emit('openMaterialApprovals')
+      await flushPromises()
+      expect(wrapper.get('[data-navigation-page="materials"] #tab-code-approvals').attributes('aria-selected')).toBe('true')
+    }
+    await buttonByText(wrapper, '退出').trigger('click'); await flushPromises()
+    expect(wrapper.findAll('[data-navigation-page]')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('retains the BOM draft when leaving through the sidebar', async () => {
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+    await projectTabByText(wrapper, 'BOM').trigger('click'); await flushPromises()
+    const bom = wrapper.getComponent({ name: 'BomManager' })
+    bom.vm.$emit('dirtyChange', true)
+    await navigateTo(wrapper, '项目列表'); await flushPromises()
+    expect(wrapper.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('项目总览')
+    await buttonByText(wrapper, '项目中心').trigger('click'); await flushPromises()
+    expect(wrapper.getComponent({ name: 'BomManager' }).element).toBe(bom.element)
+    expect(wrapper.get('.pdm-project-tabs button.is-active').text()).toBe('BOM')
+    wrapper.unmount()
+  })
+
+  it('preserves the current project tab when returning from sidebar navigation', async () => {
+    drawingReviewsResponse = [{ id: 'review-1', projectId, number: 'DR-TEST', state: 'WritingProperties', createdBy: 'designer', createdAt: '2026-09-30T00:00:00Z', markups: [], items: [{ id: 'item-1', drawingDocumentId: 'doc-drawing', drawingNumber: 'REAL-ASM-001', drawingState: 'Approved', modelState: 'NotRequired' }] }]
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper)
+    for (const tab of ['图档', '信息', 'BOM']) {
+      await projectTabByText(wrapper, tab).trigger('click')
+      await flushPromises()
+      if (tab === '图档') { wrapper.getComponent({ name: 'DrawingReviewPanel' }).vm.$emit('update:collapsed', true); await flushPromises() }
+      await navigateTo(wrapper, '项目列表')
+      await flushPromises()
+      expect(wrapper.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('项目总览')
+      await buttonByText(wrapper, '项目中心').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.pdm-project-tabs button.is-active').text()).toBe(tab)
+      expect(wrapper.get('.pdm-project-workspace').text()).toContain('PRJ-REAL-001')
+      if (tab === '图档') {
+        expect(wrapper.get('[aria-label="项目设计树"]').isVisible()).toBe(true)
+        expect(wrapper.getComponent({ name: 'DrawingReviewPanel' }).props('collapsed')).toBe(true)
+      }
+      await buttonByText(wrapper, '项目中心').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.pdm-project-tabs button.is-active').text()).toBe(tab)
+    }
+    wrapper.unmount()
+  })
+
   it('switches the workbench and document pages and makes navigation buttons respond', async () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper)
@@ -1445,7 +1622,7 @@ describe('PLM client workspace', () => {
     await flushPromises()
     expect(document.body.querySelector('.pdm-message-drawer')).not.toBeNull()
     expect(document.body.textContent).toContain('全部待办')
-    await buttonByText(wrapper, '项目列表').trigger('click')
+    await navigateTo(wrapper, '项目列表')
     await runProjectAction(wrapper, 'open')
     await flushPromises()
     await projectTabByText(wrapper, '发布').trigger('click')

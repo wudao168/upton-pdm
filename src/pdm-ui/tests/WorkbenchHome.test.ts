@@ -256,9 +256,9 @@ describe('WorkbenchHome', () => {
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('项目经理甲')
     expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('主设丙')
     expect(wrapper.get('[aria-label="项目团队"]').text()).not.toContain('工程师丁')
-    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('配置团队')
+    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('分配人员')
     expect(wrapper.get('[aria-label="项目团队"]').findAll('button')).toHaveLength(1)
-    const configureOwners = wrapper.get('[aria-label="项目团队"]').findAll('button').find(button => button.text() === '配置团队')!
+    const configureOwners = wrapper.get('[aria-label="项目团队"]').findAll('button').find(button => button.text() === '分配人员')!
     await configureOwners.trigger('click')
     await flushPromises()
     expect(wrapper.emitted('information')).toHaveLength(1)
@@ -279,14 +279,14 @@ describe('WorkbenchHome', () => {
     expect(wrapper.find('[aria-label="当前阶段任务"]').exists()).toBe(false)
     expect(wrapper.find('[aria-label="项目位置"]').exists()).toBe(false)
 
-    await wrapper.findAll('button').find(button => button.text().includes('配置团队'))!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text().includes('分配人员'))!.trigger('click')
     await flushPromises()
     expect(wrapper.emitted('information')).toHaveLength(2)
 
     await wrapper.setProps({ projects: [{ ...project, collaborativeProjectManagers: [] }, childProject] })
     await wrapper.setProps({ project: { ...childProject, canAssignDesigners: false }, projects: [project, { ...childProject, canAssignDesigners: false }] })
     expect(wrapper.get('[aria-label="项目团队"]').text()).not.toContain('执行工程师')
-    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('配置团队')
+    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('分配人员')
 
     await wrapper.findAll('button').find(button => button.text().includes('进入项目计划'))!.trigger('click')
 

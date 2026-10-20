@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { ElTabs, ElTabPane } from 'element-plus'
+import WorkflowNotificationSettings from './WorkflowNotificationSettings.vue'
 import type { ApprovalAssigneeSource, ApprovalStage, ApprovalWorkflowStepTemplate, ApprovalWorkflowTemplate, FormalSupplementPolicies, OrganizationDirectory, OrganizationUnit, PdmSystemSettings, ReleaseApprovalSettings, RolePermissionSettings } from '../types'
 
 const props = defineProps<{
+  token?: string
+  companyId?: string
   settings: PdmSystemSettings
   roles?: RolePermissionSettings[]
   directory?: OrganizationDirectory
@@ -235,6 +238,7 @@ function toggleUnlimited(kind: keyof FormalSupplementPolicies, field: 'maximumCo
 
     <el-tabs v-model="activeTab" class="pdm-settings-tabs workflow-tabs">
       <el-tab-pane v-for="flow in flows" :key="flow.code" :name="flow.code" :label="({ 'standard-release': '标准件审批', 'nonstandard-release': '非标件审批', 'electrical-release': '电气件审批' } as Record<string, string>)[flow.code] || flow.name">
+      <div class="workflow-layout">
       <section class="pdm-panel workflow-card" :aria-label="flow.name">
         <div class="workflow-card-title">
           <div><h2>{{ flow.name }}</h2><p>当前模板 v{{ flow.version }}</p></div>
@@ -294,6 +298,8 @@ function toggleUnlimited(kind: keyof FormalSupplementPolicies, field: 'maximumCo
           <button type="button" class="pdm-secondary-action" :disabled="pending || saving || flow.steps.length >= 6" @click="addStep(flow)">添加审批节点</button>
         </footer>
       </section>
+      <WorkflowNotificationSettings v-if="token && companyId" class="pdm-panel workflow-notification-card" :token="token" :company-id="companyId" :flow-code="flow.code" :directory="directory" :roles="roles" :active="activeTab === flow.code" />
+      </div>
       </el-tab-pane>
       <el-tab-pane name="change-rules" label="增补/变更规则">
     <section class="pdm-panel change-reason-settings">
@@ -322,6 +328,12 @@ function toggleUnlimited(kind: keyof FormalSupplementPolicies, field: 'maximumCo
 </style>
 
 <style scoped>
+.workflow-layout{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:stretch;gap:5px;min-width:0}
+.workflow-layout>.workflow-card{container-type:inline-size}
+.workflow-layout>.workflow-notification-card{min-width:0;margin:0;padding:14px;border:1px solid var(--pdm-border);border-radius:7px;background:var(--pdm-surface)}
+.workflow-layout .workflow-card-title{flex-wrap:wrap;gap:8px}
+.workflow-layout .workflow-card-title>div{min-width:0}
+@container(max-width:650px){.workflow-steps li{grid-template-columns:24px minmax(0,1fr)}.workflow-steps li>label,.workflow-node-assignee{grid-column:2}.workflow-node-assignee>label{flex-basis:100%}.workflow-node-actions{margin-left:auto}.workflow-emergency{flex-wrap:wrap}}
 .workflow-card{min-width:0}.workflow-card-title>button{margin-left:auto}.workflow-card-title>span{flex-shrink:0}.workflow-steps select{width:100%}.workflow-node-assignee{display:flex;flex-wrap:wrap;min-width:0;align-items:flex-end;gap:6px}.workflow-node-assignee>label{min-width:0;flex:1}.workflow-node-assignee>.workflow-target{flex-basis:100%;order:1}.workflow-node-actions{display:flex;flex:0 0 auto;justify-content:flex-end;gap:6px}.workflow-node-actions button{min-height:26px;padding:0 8px}.workflow-card-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px}.workflow-card-footer small{color:var(--pdm-muted)}
 @media(max-width:1000px){.workflow-node-assignee{grid-column:2}}
 .workflow-steps li:has(.workflow-target)>label{align-self:start}

@@ -139,7 +139,7 @@ async function resetPassword(user: PdmUser) {
 
 <template>
   <section class="pdm-project-manager pdm-user-settings" aria-label="用户设置">
-    <nav class="user-settings-tabs" aria-label="用户设置功能">
+    <nav class="user-settings-tabs pdm-tabs" aria-label="用户设置功能">
       <button type="button" :class="{ 'is-active': activeSection === 'users' }" @click="activeSection='users'">用户</button>
       <button v-if="availableSections.includes('roles')" type="button" :class="{ 'is-active': activeSection === 'roles' }" @click="activeSection='roles'">角色权限</button>
       <button v-if="availableSections.includes('organization')" type="button" :class="{ 'is-active': activeSection === 'organization' }" @click="activeSection='organization'">组织关系</button>

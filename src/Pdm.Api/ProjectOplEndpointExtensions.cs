@@ -11,8 +11,12 @@ public static class ProjectOplEndpointExtensions
     public static void MapProjectOplEndpoints(this WebApplication app)
     {
         var api = app.MapGroup("/api/projects/{projectId:guid}/opl").RequireAuthorization();
-        api.MapGet("", async (Guid projectId, bool? includePeople, HttpContext context, ProjectOplService service, CancellationToken ct) =>
-            Results.Ok(await service.GetAsync(projectId, Actor(context), Role(context), ct, includePeople ?? true)));
+        api.MapGet("", async (Guid projectId, bool? includePeople, HttpContext context, ProjectOplService service, ProjectOplViewState viewed, CancellationToken ct) =>
+        {
+            var view = await service.GetAsync(projectId, Actor(context), Role(context), ct, includePeople ?? true);
+            var unread = await viewed.UnreadAsync(view, Actor(context), ct);
+            return Results.Ok(new { Rows = view.Rows.Select(row => new { row.Issue, row.CanEdit, row.CanComplete, row.Releases, IsNew = unread.Contains(row.Issue.Id) }), view.People, view.RootProject, view.Subprojects });
+        });
         api.MapPost("", (Guid projectId, HttpContext context, ProjectOplService service, CancellationToken ct) => Save(projectId, null, context, service, ct));
         api.MapPost("/integrations/dingtalk/submit", async (Guid projectId, HttpContext context, ProjectOplService service, DingTalkOplIntegration integration, CancellationToken ct) =>
         {
@@ -22,6 +26,14 @@ public static class ProjectOplEndpointExtensions
             return await Save(projectId, null, context, service, ct, "DingTalk");
         });
         api.MapPut("/{id:guid}", (Guid projectId, Guid id, HttpContext context, ProjectOplService service, CancellationToken ct) => Save(projectId, id, context, service, ct));
+        api.MapPost("/{id:guid}/view", async (Guid projectId, Guid id, HttpContext context, ProjectOplService service, ProjectOplViewState viewed, CancellationToken ct) =>
+        {
+            var view = await service.GetAsync(projectId, Actor(context), Role(context), ct, false);
+            var issue = view.Rows.SingleOrDefault(row => row.Issue.Id == id)?.Issue;
+            if (issue is null || (projectId != view.RootProject.Id && issue.RelatedProjectId != projectId)) throw new PdmNotFoundException("当前项目中没有该开口问题。");
+            await viewed.MarkAsync(id, Actor(context), ct);
+            return Results.NoContent();
+        });
         api.MapPost("/{id:guid}/complete", async (Guid projectId, Guid id, CompleteOplInput input, HttpContext context, ProjectOplService service, CancellationToken ct) =>
         {
             var previous = input.NotifyGroup ? (await service.GetAsync(projectId, Actor(context), Role(context), ct, false)).Rows.SingleOrDefault(row => row.Issue.Id == id)?.Issue : null;

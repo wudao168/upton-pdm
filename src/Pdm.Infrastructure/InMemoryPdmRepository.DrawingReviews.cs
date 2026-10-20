@@ -91,7 +91,7 @@ public sealed partial class InMemoryPdmRepository
     }
 
     private static bool IsActiveDrawingReview(DrawingReviewPackage package) =>
-        package.State is DrawingReviewPackageState.InReview or DrawingReviewPackageState.PendingSupervisorApproval or DrawingReviewPackageState.WritingProperties;
+        package.State is DrawingReviewPackageState.InReview or DrawingReviewPackageState.PendingSupervisorApproval;
 
     private bool IsDocumentUnderActiveDrawingReview(Guid documentId) => drawingReviewPackages.Values.Any(package =>
         IsActiveDrawingReview(package)
@@ -99,6 +99,10 @@ public sealed partial class InMemoryPdmRepository
 
     private static bool IsChangesRequested(DrawingReviewItem item) =>
         item.DrawingState == DrawingReviewTargetState.ChangesRequested;
+
+    private bool IsActivePropertyWriteback(Guid documentId, Guid writebackId) =>
+        cadPropertyWritebacks.TryGetValue(writebackId, out var writeback)
+        && writeback.SourceDocumentId == documentId && writeback.Status == CadPropertyWritebackStatus.InProgress;
 
     private bool IsActiveDrawingReviewWriteback(Guid documentId, Guid writebackId) =>
         cadPropertyWritebacks.TryGetValue(writebackId, out var writeback)
@@ -328,6 +332,7 @@ public sealed partial class InMemoryPdmRepository
         {
             var package = drawingReviewPackages.Values.FirstOrDefault(candidate => candidate.Items.Any(item => item.ModelWritebackId == writebackId || item.DrawingWritebackId == writebackId));
             if (package is null) return Task.FromResult<DrawingReviewPackage?>(null);
+            if (package.State != DrawingReviewPackageState.WritingProperties) return Task.FromResult<DrawingReviewPackage?>(package);
             var items = package.Items.Select(item =>
             {
                 if (item.ModelWritebackId == writebackId)
@@ -340,7 +345,7 @@ public sealed partial class InMemoryPdmRepository
             package = package with
             {
                 Items = items,
-                State = succeeded ? approved ? DrawingReviewPackageState.Approved : DrawingReviewPackageState.WritingProperties : DrawingReviewPackageState.Stale,
+                State = approved ? DrawingReviewPackageState.Approved : DrawingReviewPackageState.WritingProperties,
                 ApprovedAt = approved ? timeProvider.GetUtcNow() : null
             };
             drawingReviewPackages[package.Id] = package;

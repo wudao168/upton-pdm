@@ -151,7 +151,7 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
-    public async Task SubassemblyCheckInKeepsItsIdentityAndParentPinUntilParentAdoptsStructure()
+    public async Task SubassemblyCheckInUpdatesWorkingStructureWithoutAdvancingParentVersion()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var project = await repository.CreateProjectAsync(new Application.CreateProjectCommand("QA-SUB-PIN", "子装配体版本引用", "admin", "vault", "release"), "admin", default);
@@ -170,8 +170,11 @@ public sealed class DocumentVersionTests
         var updatedSub = await repository.CheckInVersionAsync(sub.Id, "engineer", Commit(project, sub, secondSubTree, new string('5', 64), "补充子件"), default);
         var unchangedRoot = Assert.Single(ProjectReferenceForest.Roots((await repository.GetLatestReferenceSnapshotAsync(project.Id, default))!));
         Assert.Equal(root.Id, unchangedRoot.DocumentId);
-        Assert.Equal(firstSub.Document.Revision, unchangedRoot.Children.Single().Revision);
-        Assert.Single(unchangedRoot.Children.Single().Children);
+        Assert.Equal(updatedSub.Document.Revision, unchangedRoot.Children.Single().Revision);
+        Assert.Equal(2, unchangedRoot.Children.Single().Children.Count);
+        var parentVersion = Assert.Single(await repository.ListDocumentVersionsAsync(root.Id, default));
+        Assert.Equal(firstSub.Document.Revision, parentVersion.ReferenceSnapshot.Children.Single().Revision);
+        Assert.Single(parentVersion.ReferenceSnapshot.Children.Single().Children);
         Assert.Equal(2, updatedSub.Version!.ReferenceSnapshot.Children.Count);
         root = await repository.CheckoutAsync(root.Id, "engineer", default);
         await repository.CheckInVersionAsync(root.Id, "engineer", Commit(project, root,
@@ -1323,7 +1326,7 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
-    public async Task ControlledOpenManifest_UsesExactReferencedVersionsAndValidatesEveryFileMetadata()
+    public async Task ControlledOpenManifest_CurrentChildrenAdvanceWhileHistoricalPinsRemainExact()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
@@ -1364,13 +1367,17 @@ public sealed class DocumentVersionTests
         Assert.Equal("A-MANIFEST.SLDASM", manifest.RootRelativePath);
         Assert.Equal(2, manifest.Files.Count);
         Assert.Contains(manifest.Files, file => file.IsRoot && file.Revision == "W1" && file.Sha256 == new string('3', 64));
-        Assert.Contains(manifest.Files, file => file.DocumentId == part.Id && file.Revision == "W1" && file.Sha256 == new string('1', 64));
+        Assert.Contains(manifest.Files, file => file.DocumentId == part.Id && file.Revision == "W2" && file.Sha256 == new string('2', 64));
         Assert.Equal(2, storage.MetadataValidatedFiles.Count);
         Assert.Empty(storage.VerifiedFiles);
+        var assemblyVersion = Assert.Single(await repository.ListDocumentVersionsAsync(assembly.Id, default));
+        var historical = await workflow.CreateControlledOpenManifestAsync(assembly.Id, assemblyVersion.Id, false, false,
+            "engineer", UserRole.Administrator, default);
+        Assert.Contains(historical.Files, file => file.DocumentId == part.Id && file.Revision == "W1" && file.Sha256 == new string('1', 64));
     }
 
     [Fact]
-    public async Task ControlledOpenManifest_RequiresConfirmationForLegacyConflictsAndHistoricalStaysStrict()
+    public async Task ControlledOpenManifest_CurrentReferencesFollowOneLatestVersionAndHistoricalStaysStrict()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
@@ -1409,16 +1416,12 @@ public sealed class DocumentVersionTests
             CancellationToken.None)).Document;
 
         var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
-        await Assert.ThrowsAsync<Application.PdmRuleException>(() => workflow.CreateControlledOpenManifestAsync(
-            assembly.Id, null, false, false, "engineer", UserRole.Administrator, CancellationToken.None));
         var currentManifest = await workflow.CreateControlledOpenManifestAsync(
-            assembly.Id, null, false, false, "engineer", UserRole.Administrator, CancellationToken.None, true);
+            assembly.Id, null, false, false, "engineer", UserRole.Administrator, CancellationToken.None);
 
         Assert.Equal(2, currentManifest.Files.Count);
         Assert.Contains(currentManifest.Files, file => file.DocumentId == part.Id && file.Revision == "W2" && file.Sha256 == new string('2', 64));
-        Assert.Contains(currentManifest.Warnings, warning =>
-            warning.Contains("P-CONFLICT.SLDPRT", StringComparison.Ordinal)
-            && warning.Contains("最新受控版本W2", StringComparison.Ordinal));
+        Assert.Empty(currentManifest.Warnings);
 
         var assemblyVersion = Assert.Single(await repository.ListDocumentVersionsAsync(assembly.Id, CancellationToken.None));
         var exception = await Assert.ThrowsAsync<Application.PdmRuleException>(() => workflow.CreateControlledOpenManifestAsync(
@@ -1949,8 +1952,11 @@ public sealed class DocumentVersionTests
         var manifest = await workflow.CreateControlledOpenManifestAsync(drawing.Id, null, false, false, "admin", UserRole.Administrator, default);
         Assert.Equal(3, manifest.Files.Count);
         Assert.Equal(drawingFirst.Version!.Id, manifest.RootVersionId);
-        Assert.Equal(assemblyFirst.Version!.Id, manifest.Files.Single(file => file.DocumentId == assembly.Id).VersionId);
-        Assert.Equal(partFirst.Version!.Id, manifest.Files.Single(file => file.DocumentId == part.Id).VersionId);
+        Assert.Equal((await repository.ListDocumentVersionsAsync(assembly.Id, default)).First().Id, manifest.Files.Single(file => file.DocumentId == assembly.Id).VersionId);
+        Assert.Equal(partNext.Version!.Id, manifest.Files.Single(file => file.DocumentId == part.Id).VersionId);
+        var historical = await workflow.CreateControlledOpenManifestAsync(drawing.Id, drawingFirst.Version!.Id, false, false, "admin", UserRole.Administrator, default);
+        Assert.Equal(assemblyFirst.Version!.Id, historical.Files.Single(file => file.DocumentId == assembly.Id).VersionId);
+        Assert.Equal(partFirst.Version!.Id, historical.Files.Single(file => file.DocumentId == part.Id).VersionId);
     }
 
     [Fact]
@@ -1978,15 +1984,18 @@ public sealed class DocumentVersionTests
         var partSecond = await repository.CheckInVersionAsync(part.Id, "engineer", Commit(project, partFirst.Document,
             ReferenceRoot(partFirst.Document, "engineer"), new string('C', 64), "更新共用件"), default);
         Assert.All(ProjectReferenceForest.Roots((await repository.GetLatestReferenceSnapshotAsync(project.Id, default))!),
-            node => Assert.Equal(partFirst.Document.Revision, node.Children[0].Revision));
+            node => Assert.Equal(partSecond.Document.Revision, node.Children[0].Revision));
         await repository.CheckoutAsync(roots[0].Id, "engineer", default);
         var adopt = Commit(project, roots[0], ReferenceRoot(roots[0], "engineer") with
             { Children = [originalChild with { Revision = partSecond.Document.Revision }] }, new string('B', 64), "确认采用新版", true);
         var adopted = await repository.CheckInVersionAsync(roots[0].Id, "engineer", adopt, default);
-        Assert.True(adopted.VersionCreated); // References changed even though native bytes did not.
+        Assert.False(adopted.VersionCreated); // Only a child version advanced; the parent's native file did not change.
+        Assert.Single(await repository.ListDocumentVersionsAsync(roots[0].Id, default));
         var forest = ProjectReferenceForest.Roots((await repository.GetLatestReferenceSnapshotAsync(project.Id, default))!);
         Assert.Equal(partSecond.Document.Revision, forest.Single(node => node.DocumentId == roots[0].Id).Children[0].Revision);
-        Assert.Equal(partFirst.Document.Revision, forest.Single(node => node.DocumentId == roots[1].Id).Children[0].Revision);
+        Assert.Equal(partSecond.Document.Revision, forest.Single(node => node.DocumentId == roots[1].Id).Children[0].Revision);
+        Assert.All(ProjectReferenceForest.Roots((await repository.FindReferenceSnapshotAsync(initialForest.SnapshotId, default))!),
+            node => Assert.Equal(partFirst.Document.Revision, node.Children[0].Revision));
         await repository.CheckoutAsync(roots[0].Id, "engineer", default);
         await repository.CheckInVersionAsync(roots[0].Id, "engineer", adopt with
             { ReferenceSnapshot = adopt.ReferenceSnapshot with { SnapshotId = Guid.NewGuid(), Root = adopt.ReferenceSnapshot.Root with { Children = [] } } }, default);

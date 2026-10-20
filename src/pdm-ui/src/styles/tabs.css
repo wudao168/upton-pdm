@@ -1,0 +1,209 @@
+/* 主界面、详情、弹窗及审核浮层共用的 iOS 分段页签。
+   外观统一覆盖页面内的旧样式；保留业务布局、切换事件及 Element Plus 滚动机制。 */
+:root body :where(.el-tabs, .pdm-tabs, [role="tablist"]:not(.el-tabs__nav)) {
+  --pdm-tabs-height: var(--pdm-tab-secondary);
+}
+
+:root body :is(.el-tabs, .pdm-project-tabs, .user-settings-tabs, .production-workbench__tabs) {
+  --pdm-tabs-height: var(--pdm-tab-primary);
+}
+
+:root body :is(.el-dialog, .el-drawer, .pdm-custom-drawer) .el-tabs,
+:root body .material-code-approval-subtabs {
+  --pdm-tabs-height: var(--pdm-tab-secondary);
+}
+
+:root body .el-tabs > .el-tabs__header {
+  flex-shrink: 0;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0 0 var(--pdm-tabs-spacing) !important;
+  padding: 0 !important;
+  border: 1px solid var(--pdm-border) !important;
+  border-radius: 7px !important;
+  background: var(--pdm-surface) !important;
+  box-shadow: none;
+}
+
+:root body .el-tabs > .el-tabs__header .el-tabs__nav-wrap::after,
+:root body .el-tabs > .el-tabs__header .el-tabs__active-bar {
+  display: none;
+}
+
+:root body :is(.el-tabs__nav, .pdm-tabs, [role="tablist"]) {
+  display: flex;
+  align-items: center;
+  gap: 2px !important;
+  padding: var(--pdm-tabs-spacing) !important;
+  border: 0 !important;
+  border-radius: calc(var(--pdm-tabs-radius) + 2px) !important;
+  background: var(--pdm-tabs-track) !important;
+  box-shadow: none !important;
+}
+
+:root body :is(.pdm-tabs, [role="tablist"]:not(.el-tabs__nav)) {
+  flex-wrap: nowrap;
+  flex-shrink: 1;
+  align-self: flex-start;
+  width: fit-content;
+  min-width: 0;
+  max-width: 100%;
+  min-height: calc(var(--pdm-tabs-height) + 2 * var(--pdm-tabs-spacing));
+  margin-block: 0 var(--pdm-tabs-spacing) !important;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+:root body .el-tabs > .el-tabs__header .el-tabs__nav {
+  float: left;
+  flex-wrap: nowrap;
+}
+
+/* 项目范围与侧栏筛选、列表同宽，避免内容宽度与等分按钮互相收缩。 */
+:root body .wr-projects > .pdm-tabs {
+  align-self: stretch;
+  flex-shrink: 0;
+  width: 100%;
+  margin-bottom: 0 !important;
+}
+
+:root body .wr-projects > .pdm-tabs > button {
+  flex: 1 1 0;
+  width: auto;
+  padding-inline: var(--pdm-tabs-spacing) !important;
+}
+
+:root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item),
+:root body .pdm-tabs .el-radio-button__inner {
+  box-sizing: border-box;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: var(--pdm-tabs-height) !important;
+  min-height: var(--pdm-tabs-height) !important;
+  margin: 0 !important;
+  padding: 0 12px !important;
+  border: 0 !important;
+  border-radius: var(--pdm-tabs-radius) !important;
+  background: var(--pdm-tabs-track) !important;
+  box-shadow: none !important;
+  color: var(--pdm-muted) !important;
+  font-family: var(--pdm-font-ui);
+  font-size: var(--pdm-font-size-body) !important;
+  font-weight: 700 !important;
+  line-height: 1.4;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 140ms ease, box-shadow 140ms ease, color 140ms ease;
+}
+
+:root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):hover:not(:disabled):not(.is-disabled):not(:is(.is-active, [aria-selected="true"], [aria-pressed="true"], [aria-current="page"])),
+:root body .pdm-tabs .el-radio-button:not(.is-disabled):not(.is-active):hover .el-radio-button__inner {
+  background: var(--pdm-tabs-track) !important;
+  color: var(--pdm-theme-accent) !important;
+}
+
+:root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):is(.is-active, [aria-selected="true"], [aria-pressed="true"], [aria-current="page"]),
+:root body .pdm-tabs .el-radio-button.is-active .el-radio-button__inner {
+  background: var(--pdm-tabs-selected) !important;
+  box-shadow: var(--pdm-tabs-shadow) !important;
+  color: var(--pdm-theme-accent-hover) !important;
+  font-weight: 700 !important;
+}
+
+:root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):focus-visible,
+:root body .pdm-tabs .el-radio-button:focus-within .el-radio-button__inner {
+  outline: 2px solid var(--pdm-theme-accent) !important;
+  outline-offset: -2px;
+}
+
+:root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):is(:disabled, .is-disabled, [aria-disabled="true"]),
+:root body .pdm-tabs .el-radio-button.is-disabled .el-radio-button__inner {
+  cursor: not-allowed;
+  opacity: .5;
+}
+
+/* 项目设置属于操作入口，保留它与功能页签的间距。 */
+:root body .pdm-project-tabs > .pdm-project-tabs__settings {
+  margin-left: 8px !important;
+}
+
+/* 页签与相邻内容统一留 5px；父容器已有纵向 gap 时不再叠加外边距。 */
+:root body :is(.pdm-project-settings, .pdm-budget, .production-workbench) {
+  row-gap: var(--pdm-tabs-spacing) !important;
+}
+
+:root body :is(.pdm-project-settings, .pdm-budget, .production-workbench,
+    .pdm-project-detail__header, .pdm-bom-detail-toolbar, .pc-controls, .pc-filters,
+    .wr-panel-tools, .pdm-frozen-view-actions) > :is(.pdm-tabs, [role="tablist"]),
+:root body .wr-panel > header > .pdm-tabs {
+  margin-block: 0 !important;
+}
+
+:root body :is(.el-dialog__body, .el-drawer__body):has(> :is(.el-tabs, .pdm-tabs, .pdm-project-settings)) {
+  padding-top: var(--pdm-tabs-spacing) !important;
+}
+
+:root body .pdm-project-detail__header {
+  margin-bottom: var(--pdm-tabs-spacing);
+}
+
+/* 选项维护提示与其后页签的距离也使用同一规范。 */
+:root body :is(.engineering-kit-option-hint, .program-template-option-hint) {
+  margin-bottom: var(--pdm-tabs-spacing) !important;
+}
+
+:root body .pdm-tree-search-row {
+  margin-bottom: var(--pdm-tabs-spacing) !important;
+}
+
+:root body .pdm-document-filters + .pdm-tree-columns {
+  margin-top: 0;
+}
+
+/* 页签使用独立容器；项目功能已有外框，保留单层边框。 */
+:root body .el-tabs > .el-tabs__header .el-tabs__nav-wrap {
+  margin-bottom: 0;
+}
+
+:root body :is(.pdm-tabs:not(.pdm-project-tabs), [role="tablist"]:not(.el-tabs__nav, .pdm-project-tabs)),
+:root body .material-tabs > .el-tabs__content {
+  border: 1px solid var(--pdm-border) !important;
+  border-radius: 7px !important;
+  background: var(--pdm-surface) !important;
+}
+
+:root body :is(.pdm-tabs:not(.pdm-project-tabs), [role="tablist"]:not(.el-tabs__nav, .pdm-project-tabs)) {
+  min-height: calc(var(--pdm-tabs-height) + 2 * var(--pdm-tabs-spacing) + 2px);
+}
+
+:root body :is(.production-workbench__tabs, .pdm-admin-tabs, .user-settings-tabs,
+    .org-view-tabs, .pdm-project-settings__tabs, .pdm-project-subtabs,
+    .engineering-kit-option-tabs, .program-template-option-tabs):is(.pdm-tabs, [role="tablist"]) {
+  align-self: stretch;
+  flex-shrink: 0;
+  width: 100%;
+}
+
+/* 料品页分别容纳导航和业务内容，不再由共同的外框包住两者。 */
+:root body .material-page {
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none;
+}
+
+:root body .material-tabs > .el-tabs__content {
+  padding: var(--pdm-tabs-spacing);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item),
+  :root body .pdm-tabs .el-radio-button__inner {
+    transition: none;
+  }
+}

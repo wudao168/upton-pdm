@@ -10,6 +10,7 @@ const StepPreviewViewer = defineAsyncComponent(() => import('./StepPreviewViewer
 
 const props = withDefaults(defineProps<{
   selected: DocumentNode
+  emptyProject?: boolean
   related: DocumentNode[]
   bomItem?: BomItem
   currentUsername?: string
@@ -27,6 +28,7 @@ const props = withDefaults(defineProps<{
   active?: boolean
 }>(), {
   currentUsername: '',
+  emptyProject: false,
   canManageLifecycle: false,
   canEditDocuments: false,
   desktopAvailable: false,
@@ -76,6 +78,7 @@ let archiveDateRequest = 0
 const mode = computed<PreviewMode>(() => props.selected.kind === 'Drawing' ? 'drawing' : 'model')
 const displayedRevision = computed(() => props.reviewVersionId && props.reviewRevision ? props.reviewRevision : props.selected.version)
 const meaningfulSelectedName = computed(() => {
+  if (props.emptyProject) return ''
   const name = props.selected.name?.trim()
   return name && name !== props.selected.drawingNumber?.trim() ? name : ''
 })
@@ -563,7 +566,12 @@ onBeforeUnmount(() => {
           @ready="onWebStepReady"
           @error="onWebStepError"
         />
-        <template v-if="previewState === 'unavailable'">
+        <div v-if="emptyProject" class="pdm-preview-state-content">
+          <FileSearch :size="52" />
+          <h3>项目尚未关联CAD图纸</h3>
+          <small>存档后可在左侧选择图档，查看模型和工程图预览。</small>
+        </div>
+        <template v-else-if="previewState === 'unavailable'">
           <div class="pdm-preview-state-content">
             <FileSearch :size="52" />
             <h3>{{ previewError || '该版本尚无网页预览文件' }}</h3>
@@ -612,5 +620,5 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.pdm-preview-work-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:4px;background:#fff7ed;color:#9a3412;font-size:12px;font-weight:600;white-space:nowrap}
+.pdm-preview-work-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:4px;background:var(--pdm-orange-soft);color:var(--pdm-orange);font-size:12px;font-weight:600;white-space:nowrap}
 </style>

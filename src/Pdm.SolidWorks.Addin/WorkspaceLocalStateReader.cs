@@ -190,8 +190,9 @@ internal static class WorkspaceLocalStateReader
         var info = new FileInfo(path);
         // ADS/attribute writes can change timestamps without changing CAD content.
         var verificationKey = string.Join("|", path, metadata?.VersionId, metadata?.Revision, metadata?.Sha256,
-            metadata?.FileLength, info.Length, hash, document.LatestRevision);
+            metadata?.FileLength, metadata?.ResolvedReferenceSha256, info.Length, hash, document.LatestRevision);
         var changed = !string.IsNullOrWhiteSpace(metadata?.Sha256)
+            && !string.Equals(hash, metadata.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase)
             && (metadata.FileLength.HasValue && info.Length != metadata.FileLength.Value
                 || !string.Equals(hash, metadata.Sha256, StringComparison.OrdinalIgnoreCase));
         var checkedOutByMe = !string.IsNullOrWhiteSpace(currentUsername)

@@ -1728,8 +1728,9 @@ export function usePdmWorkspace() {
     operationPending.value = true
     try {
       const saved = await updateProjectPhaseOwnersRequest(projectId, phaseOwners, accessToken)
-      await reload(project.value.id)
-      return saved
+      projects.value = projects.value.map(item => item.id === saved.id ? { ...item, phaseOwners: saved.phaseOwners } : item)
+      if (project.value.id === saved.id) project.value = { ...project.value, phaseOwners: saved.phaseOwners }
+      return projects.value.find(item => item.id === saved.id) ?? saved
     } finally { operationPending.value = false }
   }
 
@@ -2038,6 +2039,7 @@ export function usePdmWorkspace() {
     projectAuditEntries,
     projectAuditProjects,
     storageStatus,
+    refreshProjectSummaries,
     createProject,
     createSubproject,
     deleteProject,

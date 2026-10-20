@@ -14,6 +14,35 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class PreviewConversionTests
 {
     [Fact]
+    public async Task PdfStampRetryReusesRawCacheAndKeepsSuccessfulPdfAvailable()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-pdf-stamp-cache", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var (repository, project, sources, package, staging) = await PrepareAsync(root,
+                new PreviewConversionSettings { Mode = PreviewConversionMode.Remote, AgentUrl = "http://agent:5199", TimeoutMinutes = 7 });
+            var agent = new StubAgentHandler();
+            var stamp = new RecordingPdfStamp { Fail = true };
+            var converter = new SolidWorksServerPreviewConverter(Options.Create(new PdmPreviewWorkerOptions()), repository,
+                new HttpClient(agent), stamp);
+            var failure = await Assert.ThrowsAsync<PartialPreviewConversionException>(() => converter.GenerateAsync(package, project, sources, staging, default));
+            Assert.Equal(2, failure.Artifacts.Count);
+            var drawing = Assert.Single(sources, item => item.Kind == DocumentKind.Drawing);
+            Assert.Contains("PDF已生成", failure.Errors[drawing.DocumentId]);
+            var raw = failure.Artifacts[drawing.DocumentId];
+            Assert.Equal("converted-by-agent", await File.ReadAllTextAsync(Path.Combine(project.VaultLocation, raw.StorageRelativePath)));
+            stamp.Fail = false;
+            var completed = await converter.GenerateAsync(package, project, sources, staging, default);
+            var repeated = await converter.GenerateAsync(package, project, sources, staging, default);
+            Assert.Equal(1, agent.RequestCount);
+            Assert.Equal(3, stamp.Calls);
+            Assert.Equal(completed[drawing.DocumentId].Sha256, repeated[drawing.DocumentId].Sha256);
+            Assert.Equal("converted-by-agent|stamp", await File.ReadAllTextAsync(Path.Combine(project.VaultLocation, completed[drawing.DocumentId].StorageRelativePath)));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public async Task FailedReentryPreservesExistingPreviewAndCorruptArtifactCanBeRestored()
     {
         var root = Path.Combine(Path.GetTempPath(), "pdm-preview-reentry", Guid.NewGuid().ToString("N"));
@@ -338,6 +367,7 @@ public sealed class PreviewConversionTests
 
     private sealed class StubAgentHandler : HttpMessageHandler
     {
+        public int RequestCount { get; private set; }
         public Uri? RequestUri { get; private set; }
         public string? Token { get; private set; }
         public List<string> UploadedSources { get; } = [];
@@ -350,6 +380,7 @@ public sealed class PreviewConversionTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            RequestCount++;
             RequestUri = request.RequestUri;
             UploadedSources.Clear();
             UploadedKinds.Clear();
@@ -368,6 +399,8 @@ public sealed class PreviewConversionTests
                 using var document = JsonDocument.Parse(manifestStream);
                 foreach (var job in document.RootElement.GetProperty("jobs").EnumerateArray())
                 {
+                    Assert.True(!job.TryGetProperty("releaseRevision", out var revision) || revision.ValueKind == JsonValueKind.Null);
+                    Assert.True(!job.TryGetProperty("qrContent", out var qr) || qr.ValueKind == JsonValueKind.Null);
                     UploadedKinds.Add(job.GetProperty("kind").GetString() ?? string.Empty);
                     OutputNames.Add(job.GetProperty("outputName").GetString()!);
                     ids.Add(job.GetProperty("documentId").GetGuid());
@@ -406,6 +439,19 @@ public sealed class PreviewConversionTests
             {
                 Content = new ByteArrayContent(responseStream.ToArray())
             };
+        }
+    }
+
+    private sealed class RecordingPdfStamp : IPdfReleaseStampProcessor
+    {
+        public bool Fail { get; set; }
+        public int Calls { get; private set; }
+        public bool IsStamped(string path, Guid packageId, Guid sourceVersionId) => false;
+        public async Task ApplyAsync(ReleasePackage package, Project project, ReleasePreviewSource source, string path, CancellationToken cancellationToken)
+        {
+            Calls++;
+            if (Fail) throw new PdmRuleException("标识测试失败");
+            await File.AppendAllTextAsync(path, "|stamp", cancellationToken);
         }
     }
 }

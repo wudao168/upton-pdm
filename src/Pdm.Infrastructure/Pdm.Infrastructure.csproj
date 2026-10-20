@@ -9,6 +9,10 @@
   <ItemGroup>
     <PackageReference Include="Dapper" Version="2.1.79" />
     <PackageReference Include="MySqlConnector" Version="2.6.1" />
+    <PackageReference Include="PDFsharp" Version="6.2.4" />
+    <PackageReference Include="bblanchon.PDFium.Win32" Version="157.0.8100" />
+    <PackageReference Include="QRCoder" Version="1.6.0" />
+    <PackageReference Include="ZXing.Net" Version="0.16.11" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="Migrations\*.sql" />
@@ -16,5 +20,6 @@
   </ItemGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <InternalsVisibleTo Include="Pdm.Domain.Tests" />
   </ItemGroup>
 </Project>

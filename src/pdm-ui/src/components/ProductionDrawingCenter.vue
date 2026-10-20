@@ -372,6 +372,7 @@ onMounted(() => { restoreColumns(); void refresh() })
       <select v-model="managerFilter" aria-label="按项目经理筛选"><option value="">全部项目经理</option><option v-for="name in managers" :key="name" :value="name">{{ displayUserName(name) }}</option></select>
       <label><input v-model="history" type="checkbox"> 查看历史正式版</label>
       <form @submit.prevent="locateScan"><input v-model="scan" placeholder="扫描图纸二维码" aria-label="扫描图纸二维码"><button type="submit" class="pdm-primary-action">定位</button></form>
+      <button type="button" class="pdm-secondary-action" :disabled="loading || detailLoading" @click="refresh">刷新</button>
     </div>
     <p v-if="error" class="pdm-inline-error" role="alert">{{ error }}</p>
     <p v-if="loading" role="status">正在读取图纸…</p>
@@ -476,7 +477,7 @@ onMounted(() => { restoreColumns(); void refresh() })
 @media(max-width:950px){.production-drawings__filters>input{flex-basis:190px;width:190px;min-width:190px}.production-drawings__project{min-width:190px}.production-drawings__selection .production-drawings__toolbar-actions{margin-left:0}}
 .production-drawings__filters>.production-drawings__project-code{flex:0 0 104px;width:104px;min-width:104px}.production-drawings__filters>.production-drawings__published-on{flex:0 0 132px;width:132px;min-width:132px}
 .production-drawings table{min-width:0;table-layout:fixed}.production-drawings th,.production-drawings td{white-space:nowrap}.production-drawings .pdm-edit-table th,.production-drawings .pdm-edit-table td{text-align:center}.production-drawings td{max-width:220px;overflow:hidden;text-overflow:ellipsis}.production-drawings .production-drawings__column--priority{width:64px;max-width:64px}.production-drawings .production-drawings__column--requiredOn{width:92px;max-width:92px}.production-drawings__file-link{border:0;background:none;color:var(--pdm-primary);cursor:pointer;padding:0 3px}.production-drawings__file-link:disabled{color:var(--pdm-muted);cursor:not-allowed}
-.production-drawings__column-backdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;background:#0006;padding:20px}.production-drawings__column-dialog{width:min(520px,100%);max-height:90vh;overflow:auto;background:var(--pdm-surface);border-radius:8px;padding:20px;box-shadow:0 18px 55px #0003}.production-drawings__column-dialog header,.production-drawings__column-dialog footer{display:flex;align-items:center;justify-content:space-between;gap:12px}.production-drawings__column-dialog h2{margin:0;font-size:14px}.production-drawings__column-dialog header button{border:0;background:none;font-size:24px;cursor:pointer}.production-drawings__column-dialog p{color:var(--pdm-muted)}.production-drawings__column-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:18px 0}.production-drawings__column-options label{display:flex;align-items:center;gap:6px;white-space:nowrap}.production-drawings__column-dialog footer{justify-content:flex-end}
+.production-drawings__column-backdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;background:var(--pdm-overlay);padding:20px}.production-drawings__column-dialog{width:min(520px,100%);max-height:90vh;overflow:auto;background:var(--pdm-surface);border-radius:8px;padding:20px;box-shadow:0 18px 55px var(--pdm-shadow-strong)}.production-drawings__column-dialog header,.production-drawings__column-dialog footer{display:flex;align-items:center;justify-content:space-between;gap:12px}.production-drawings__column-dialog h2{margin:0;font-size:14px}.production-drawings__column-dialog header button{border:0;background:none;font-size:24px;cursor:pointer}.production-drawings__column-dialog p{color:var(--pdm-muted)}.production-drawings__column-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:18px 0}.production-drawings__column-options label{display:flex;align-items:center;gap:6px;white-space:nowrap}.production-drawings__column-dialog footer{justify-content:flex-end}
 @media(max-width:600px){.production-drawings__column-options{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .production-drawings__step-status{color:var(--pdm-muted);font-size:11px}
 .production-drawings{height:100%;min-height:0;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;padding:10px 20px}
@@ -514,4 +515,13 @@ onMounted(() => { restoreColumns(); void refresh() })
   .production-drawings__projects { max-height: 180px; }
 }
 .production-drawings__filters form button { box-sizing: border-box; width: 80px; min-width: 80px; height: 30px; min-height: 30px; flex: 0 0 80px; }
+
+/* 制造中心容器间距统一为 5px。 */
+.production-drawings__projects,
+.production-drawings__main { padding: var(--pdm-container-gap); }
+.production-drawings__filters { gap: var(--pdm-container-gap); margin-bottom: var(--pdm-container-gap); }
+.production-drawings__toolbar,
+.production-drawings__selection { margin-block: var(--pdm-container-gap); }
+.production-drawings__detail { gap: var(--pdm-container-gap); padding: var(--pdm-container-gap); margin-top: var(--pdm-container-gap); }
+.production-drawings__pagination { gap: var(--pdm-container-gap); padding-top: var(--pdm-container-gap); }
 </style>

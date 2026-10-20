@@ -93,7 +93,7 @@ internal sealed class BatchProgressDialog : Form
         }
 
         status.Text = hasFailures ? "整套提交未完成，部分文件处理失败。"
-            : hasBomWarnings ? "整套存档完成，BOM有待处理提醒。" : "整套提交完成。";
+            : hasBomWarnings ? "存档已完成，请查看处理提醒。" : "整套提交完成。";
         PluginDiagnosticLog.Record(hasFailures ? "失败" : "结果", status.Text + "\r\n" + message);
         currentFile.Text = string.Empty;
         details.Text = message ?? string.Empty;

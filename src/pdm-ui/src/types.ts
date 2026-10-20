@@ -4,7 +4,7 @@ export type DocumentFilter = 'all' | 'model' | 'drawing' | 'issue'
 export type VersionAlignmentStatus = 'Synced' | 'StructureStale' | 'VersionConflict' | 'NotSnapshotted'
 export type PreviewMode = 'model' | 'drawing'
 export type SolidWorksOpenMode = 'LatestReadOnly' | 'LatestReleased' | 'LatestEdit' | 'SpecificReadOnly' | 'PropertyWriteback'
-export type ProjectPhaseOwnerKey = 'ElectricalHardware' | 'StandardProcurement' | 'NonStandardProcurement' | 'NonStandardProduction' | 'MechanicalAssembly' | 'ElectricalAssembly' | 'ElectricalCommissioning' | 'Acceptance'
+export type ProjectPhaseOwnerKey = 'ElectricalEngineer' | 'ElectricalHardware' | 'StandardProcurement' | 'NonStandardProcurement' | 'NonStandardProduction' | 'MechanicalAssembly' | 'ElectricalAssembly' | 'ElectricalCommissioning' | 'Acceptance'
 export type ProjectPhaseOwners = Partial<Record<ProjectPhaseOwnerKey, string>>
 
 export interface ProjectSummary {
@@ -28,6 +28,10 @@ export interface ProjectSummary {
   deviceModel?: string
   createdAt?: string
   signedDate?: string
+  isSpecialInitiation?: boolean
+  sourceApplicationId?: string
+  sourceApplicationNumber?: string
+  deliveryDate?: string
   quantity: number
   parentProjectId?: string
   rootProjectId?: string
@@ -271,7 +275,7 @@ export interface CreateProjectInput {
   customerId: string
   name: string
   projectAlias?: string
-  signedDate: string
+  signedDate: string | null
   quantity: number
   bomItemCategoryCode: '0301' | '0302'
 }
@@ -290,7 +294,7 @@ export interface UpdateProjectInput {
   customerId?: string
   name: string
   projectAlias?: string
-  signedDate: string
+  signedDate: string | null
   quantity: number
 }
 
@@ -436,6 +440,7 @@ export interface OrganizationUnit {
   code: string
   name: string
   kind: OrganizationUnitKind
+  canArchiveStandardLibrary?: boolean
   canManufacture: boolean
   isActive: boolean
   sortOrder: number
@@ -480,7 +485,7 @@ export interface RolePermissionDirectory {
 }
 export interface CreateRoleInput { name: string; description: string; sourceRoleCode: string }
 export interface SaveProjectOrganizationInput { id?: string; name: string; projectCompanyCode: string; modelCompanyCode: string; isActive: boolean }
-export interface SaveOrganizationUnitInput { id?: string; organizationId: string; parentUnitId?: string; code: string; name: string; kind: OrganizationUnitKind; canManufacture: boolean; isActive: boolean; sortOrder: number }
+export interface SaveOrganizationUnitInput { id?: string; organizationId: string; parentUnitId?: string; code: string; name: string; kind: OrganizationUnitKind; canArchiveStandardLibrary?: boolean; canManufacture: boolean; isActive: boolean; sortOrder: number }
 export interface MainProjectStaffingInput { primaryProjectManager: string; collaborativeProjectManagers: string[]; designLeads: string[] }
 export interface DocumentNode {
   isVirtualGroup?: boolean
@@ -1028,6 +1033,8 @@ export interface ProductionDrawingItem {
 }
 
 export interface CreateReleasePackageInput {
+  relatedOplIssueIds?: string[]
+  confirmedRemovedBomItemIds?: string[]
   rootDocumentId?: string
   changeReason: string
   scope: Exclude<ReleaseScope, 'LegacyCombined'>
@@ -1041,6 +1048,8 @@ export interface CreateReleasePackageInput {
 }
 
 export interface UpdateReleasePackageDraftInput {
+  relatedOplIssueIds?: string[]
+  confirmedRemovedBomItemIds?: string[]
   changeReason: string
   selectedBomItemIds: string[]
   selectedBomItemQuantities?: Record<string, number>
@@ -1052,6 +1061,8 @@ export interface UpdateReleasePackageDraftInput {
 }
 
 export interface ReleasePackageSummary {
+  relatedOplIssueIds?: string[]
+  confirmedRemovedBomItemIds?: string[]
   rootDocumentId?: string | null
   id: string
   number: string

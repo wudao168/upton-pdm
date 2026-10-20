@@ -104,6 +104,24 @@ $encoding = New-Object Text.UTF8Encoding($false)
 [IO.File]::WriteAllText((Join-Path $addinOutput 'uplm-bootstrap.json'), $locatorJson, $encoding)
 [IO.File]::WriteAllText((Join-Path $addinOutput '.uplm-version'), $SolidWorksAddinVersion, $encoding)
 
+# Offline UI carries the current configuration version. Update hashes are obtained
+# from the server; embedding a ZIP's own hash inside that ZIP would be circular.
+$offlineBootstrap = [ordered]@{
+    SchemaVersion = 2
+    ConfigurationVersion = $Version
+    ReleasedAt = $releasedAt
+    ReleaseNote = $ReleaseNote
+    ReleaseHistory = $releaseHistory
+    ApiBaseUrl = "$serverBase/"
+    UiBaseUrl = "$serverBase/"
+    PollSeconds = 30
+    Desktop = [ordered]@{ Version = $DesktopVersion; PackageUrl = ''; Sha256 = '' }
+    SolidWorksAddin = [ordered]@{ Version = $SolidWorksAddinVersion; PackageUrl = ''; Sha256 = '' }
+} | ConvertTo-Json -Depth 8
+foreach ($componentOutput in @($desktopOutput, $addinOutput)) {
+    [IO.File]::WriteAllText((Join-Path $componentOutput 'ui/client-bootstrap.json'), $offlineBootstrap, $encoding)
+}
+
 $desktopArchive = Join-Path $updates "uplm-desktop-$DesktopVersion.zip"
 $addinArchive = Join-Path $updates "uplm-solidworks-addin-$SolidWorksAddinVersion.zip"
 Compress-Archive -Path (Join-Path $desktopOutput '*') -DestinationPath $desktopArchive -CompressionLevel Optimal -Force

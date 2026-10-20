@@ -42,6 +42,9 @@ public sealed partial class MySqlPdmRepository
         var drawingReviewLocked = await IsDocumentUnderActiveDrawingReviewAsync(connection, transaction, documentId, cancellationToken);
         var controlledWriteback = drawingReviewWritebackId.HasValue
             && await IsActiveDrawingReviewWritebackAsync(connection, transaction, documentId, drawingReviewWritebackId.Value, cancellationToken);
+        if (drawingReviewWritebackId.HasValue
+            && !await IsActivePropertyWritebackAsync(connection, transaction, documentId, drawingReviewWritebackId.Value, cancellationToken))
+            throw new PdmConflictException("审核标记回写任务已结束或已失效，不能重新获取编辑权限。");
         if (drawingReviewLocked && !controlledWriteback)
             throw new PdmConflictException("图档正在进行图纸审核，不能获取编辑权限。");
         var now = timeProvider.GetUtcNow().UtcDateTime;
@@ -319,7 +322,7 @@ public sealed partial class MySqlPdmRepository
             """
             INSERT INTO release_package(
                 id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json,
-                selected_bom_item_ids_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier,
+                selected_bom_item_ids_json, confirmed_removed_bom_item_ids_json, related_opl_issue_ids_json, drawing_document_count, version_bindings_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier,
                 reference_snapshot_id, mechanical_bom_revision,
                 electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                 standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id,
@@ -330,7 +333,7 @@ public sealed partial class MySqlPdmRepository
                 published_at, published_path, publish_error, row_version, created_at)
             VALUES (
                 @Id, @ProjectId, @PackageNumber, @State, @Scope, @WorkflowCode, @WorkflowVersion, @EmergencyRolesJson,
-                @SelectedBomItemIds, @CreatesManufacturingBaseline, @LocksDocuments, @WholeSetMultiplier,
+                @SelectedBomItemIds, @ConfirmedRemovedBomItemIds, @RelatedOplIssueIds, @DrawingDocumentCount, @VersionBindings, @CreatesManufacturingBaseline, @LocksDocuments, @WholeSetMultiplier,
                 @ReferenceSnapshotId, @MechanicalBomRevision,
                 @ElectricalBomRevision, @MechanicalBomSnapshot, @ElectricalBomSnapshot,
                 @StandardBomVersionId, @NonStandardBomVersionId, @ElectricalBomVersionId,
@@ -351,6 +354,10 @@ public sealed partial class MySqlPdmRepository
                 package.WorkflowVersion,
                 EmergencyRolesJson = package.EmergencyRoleCodes is null ? null : JsonSerializer.Serialize(package.EmergencyRoleCodes, jsonOptions),
                 SelectedBomItemIds = JsonSerializer.Serialize(package.SelectedBomItemIds, jsonOptions),
+                ConfirmedRemovedBomItemIds = JsonSerializer.Serialize(package.ConfirmedRemovedBomItemIds, jsonOptions),
+                RelatedOplIssueIds = JsonSerializer.Serialize(package.RelatedOplIssueIds, jsonOptions),
+                package.DrawingDocumentCount,
+                VersionBindings = package.VersionBindings is null ? null : JsonSerializer.Serialize(package.VersionBindings, jsonOptions),
                 package.CreatesManufacturingBaseline,
                 package.LocksDocuments,
                 package.WholeSetMultiplier,
@@ -407,6 +414,11 @@ public sealed partial class MySqlPdmRepository
             UPDATE release_package
             SET reference_snapshot_id=@ReferenceSnapshotId,
                 selected_bom_item_ids_json=@SelectedBomItemIds,
+                confirmed_removed_bom_item_ids_json=@ConfirmedRemovedBomItemIds,
+                related_opl_issue_ids_json=@RelatedOplIssueIds,
+                drawing_document_count=@DrawingDocumentCount,
+                version_bindings_json=@VersionBindings,
+                locks_documents=@LocksDocuments,
                 mechanical_bom_revision=@MechanicalBomRevision,
                 electrical_bom_revision=@ElectricalBomRevision,
                 mechanical_bom_snapshot_json=@MechanicalBomSnapshot,
@@ -433,6 +445,11 @@ public sealed partial class MySqlPdmRepository
                 package.Id,
                 package.ReferenceSnapshotId,
                 SelectedBomItemIds = JsonSerializer.Serialize(package.SelectedBomItemIds, jsonOptions),
+                ConfirmedRemovedBomItemIds = JsonSerializer.Serialize(package.ConfirmedRemovedBomItemIds, jsonOptions),
+                RelatedOplIssueIds = JsonSerializer.Serialize(package.RelatedOplIssueIds, jsonOptions),
+                package.DrawingDocumentCount,
+                VersionBindings = package.VersionBindings is null ? null : JsonSerializer.Serialize(package.VersionBindings, jsonOptions),
+                package.LocksDocuments,
                 package.MechanicalBomRevision,
                 package.ElectricalBomRevision,
                 MechanicalBomSnapshot = JsonSerializer.Serialize(package.MechanicalBomSnapshot, jsonOptions),
@@ -484,7 +501,7 @@ public sealed partial class MySqlPdmRepository
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var packageState = await connection.QuerySingleOrDefaultAsync<ReleaseSnapshotStateRow>(new CommandDefinition(
             """
-            SELECT package.state,package.release_scope,package.locks_documents,snapshot.root_json
+            SELECT package.state,package.release_scope,package.locks_documents,package.version_bindings_json,snapshot.root_json
             FROM release_package package
             LEFT JOIN reference_snapshot snapshot ON snapshot.id=package.reference_snapshot_id
             WHERE package.id=@PackageId
@@ -495,9 +512,11 @@ public sealed partial class MySqlPdmRepository
         if (packageState.State is not ("Draft" or "Rejected" or "PublishFailed"))
             throw new PdmConflictException("只有草稿、已退回或发布失败的发布包可以提交。");
         var documentIds = string.IsNullOrWhiteSpace(packageState.RootJson) ? [] : DeserializeDocumentIds(packageState.RootJson);
+        var bindings = packageState.VersionBindingsJson is null ? null : JsonSerializer.Deserialize<ReleaseVersionBinding[]>(packageState.VersionBindingsJson, jsonOptions);
+        if (bindings is not null) documentIds = bindings.Where(item => item.Publish && item.RequiresPromotion).Select(item => item.DocumentId).ToArray();
         if (packageState.LocksDocuments && string.IsNullOrWhiteSpace(packageState.RootJson))
             throw new PdmConflictException("正式发布包缺少引用树快照，不能提交审批。");
-        if (packageState.LocksDocuments && documentIds.Length == 0) throw new PdmConflictException("发布包引用快照中没有可审批图档。");
+        if (packageState.LocksDocuments && documentIds.Length == 0 && bindings is null) throw new PdmConflictException("发布包引用快照中没有可审批图档。");
         var blocked = packageState.LocksDocuments ? await connection.QuerySingleOrDefaultAsync<DocumentApprovalBlockRow>(new CommandDefinition(
             """
             SELECT drawing_number,checked_out_by,lifecycle_state
@@ -512,6 +531,12 @@ public sealed partial class MySqlPdmRepository
             if (blocked.LifecycleState == DocumentLifecycleState.Obsolete.ToString())
                 throw new PdmConflictException($"图档{blocked.DrawingNumber}已作废，不能提交审批。");
             throw new PdmConflictException($"图档{blocked.DrawingNumber}正在由{blocked.CheckedOutBy}编辑，不能提交审批。");
+        }
+        foreach (var binding in bindings?.Where(item => item.Publish && item.RequiresPromotion) ?? [])
+        {
+            var latest = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
+                "SELECT id FROM document_version WHERE document_id=@DocumentId ORDER BY created_at DESC LIMIT 1", binding, transaction, cancellationToken: cancellationToken));
+            if (latest != binding.VersionId) throw new PdmConflictException("发布绑定的源版本已变化，请刷新草稿后重新核对。");
         }
 
         await connection.ExecuteAsync(new CommandDefinition(
@@ -549,7 +574,7 @@ public sealed partial class MySqlPdmRepository
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var packageState = await connection.QuerySingleOrDefaultAsync<ReleaseSnapshotStateRow>(new CommandDefinition(
             """
-            SELECT package.state,package.release_scope,package.locks_documents,snapshot.root_json
+            SELECT package.state,package.release_scope,package.locks_documents,package.version_bindings_json,snapshot.root_json
             FROM release_package package
             LEFT JOIN reference_snapshot snapshot ON snapshot.id=package.reference_snapshot_id
             WHERE package.id=@PackageId
@@ -560,6 +585,7 @@ public sealed partial class MySqlPdmRepository
         if (packageState.State is not ("ProcessReview" or "Approval" or "Rejected"))
             throw new PdmConflictException("只有审批中或已退回的发布包可以撤回。");
         var documentIds = string.IsNullOrWhiteSpace(packageState.RootJson) ? [] : DeserializeDocumentIds(packageState.RootJson);
+        if (packageState.VersionBindingsJson is not null) documentIds = (JsonSerializer.Deserialize<ReleaseVersionBinding[]>(packageState.VersionBindingsJson, jsonOptions) ?? []).Where(item => item.Publish && item.RequiresPromotion).Select(item => item.DocumentId).ToArray();
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL,is_emergency_substitute=0,emergency_reason=NULL WHERE release_package_id=@PackageId",
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
@@ -645,6 +671,10 @@ public sealed partial class MySqlPdmRepository
                 "SELECT snapshot.root_json FROM release_package package INNER JOIN reference_snapshot snapshot ON snapshot.id=package.reference_snapshot_id WHERE package.id=@PackageId",
                 new { PackageId = row.ReleasePackageId }, transaction, cancellationToken: cancellationToken)) : null;
             var documentIds = rootJson is null ? [] : DeserializeDocumentIds(rootJson);
+            var bindingsJson = await connection.QuerySingleAsync<string?>(new CommandDefinition(
+                "SELECT version_bindings_json FROM release_package WHERE id=@PackageId", new { PackageId = row.ReleasePackageId }, transaction, cancellationToken: cancellationToken));
+            if (bindingsJson is not null) documentIds = (JsonSerializer.Deserialize<ReleaseVersionBinding[]>(bindingsJson, jsonOptions) ?? [])
+                .Where(item => item.Publish && item.RequiresPromotion).Select(item => item.DocumentId).ToArray();
             if (documentIds.Length > 0)
             {
                 await connection.ExecuteAsync(new CommandDefinition(
@@ -928,6 +958,7 @@ public sealed partial class MySqlPdmRepository
         public string State { get; init; } = string.Empty;
         public string ReleaseScope { get; init; } = Upton.Pdm.Domain.ReleaseScope.LegacyCombined.ToString();
         public bool LocksDocuments { get; init; }
+        public string? VersionBindingsJson { get; init; }
         public string? RootJson { get; init; }
     }
 

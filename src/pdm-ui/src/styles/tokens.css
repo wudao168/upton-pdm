@@ -15,42 +15,17 @@
   --pdm-button-default: 30px;
   --pdm-button-large: 32px;
   --pdm-tab-secondary: 28px;
-  --pdm-tab-primary: 40px;
+  --pdm-tab-primary: 34px;
+  --pdm-tabs-selected: var(--pdm-theme-accent-soft-strong);
+  --pdm-tabs-spacing: 5px;
+  --pdm-tabs-radius: 10px;
+  --pdm-tabs-shadow: 0 1px 4px var(--pdm-shadow);
   --pdm-symbol-small: 20px;
   --pdm-symbol-compact: 24px;
   --pdm-symbol-toolbar: 28px;
-  --pdm-table-header: #f8fafc;
   --el-border-radius-base: var(--pdm-radius-control);
   --el-font-family: var(--pdm-font-ui);
-  --pdm-bg: #f8fafc;
-  --pdm-surface: #ffffff;
-  --pdm-surface-muted: #f1f5f9;
-  --pdm-detail-row: #ffffff;
-  --pdm-detail-row-alt: #f1f5f9;
   --pdm-detail-row-height: 30px;
-  --pdm-sidebar: #3a475c;
-  --pdm-sidebar-active: #203347;
-  --pdm-sidebar-text: rgba(255, 255, 255, .95);
-  /* 文字色收敛为主文字与高对比度辅助文字两档。 */
-  --pdm-text: #0f172a;
-  --pdm-text-soft: #334155;
-  --pdm-muted: #334155;
-  --pdm-text-muted: var(--pdm-muted);
-  --pdm-border: #cbd5e1;
-  --pdm-border-soft: #cbd5e1;
-  --pdm-blue: #1d4ed8;
-  --pdm-blue-soft: #eff6ff;
-  --pdm-green: #15803d;
-  --pdm-green-soft: #f0fdf4;
-  --pdm-green-border: #bbf7d0;
-  --pdm-orange: #b45309;
-  --pdm-orange-soft: #fff7ed;
-  --pdm-orange-border: #fdba74;
-  --pdm-danger: #b91c1c;
-  --pdm-danger-soft: #fef2f2;
-  --pdm-danger-border: #fecaca;
-  --pdm-purple: var(--pdm-blue);
-  --pdm-shadow: rgba(29, 52, 83, 0.13);
 }
 
 * { box-sizing: border-box; }
