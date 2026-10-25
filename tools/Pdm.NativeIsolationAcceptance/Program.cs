@@ -290,6 +290,11 @@ internal static class NativeChecks
  }
  static void ImportProbe(string source)
  {
+  var interconnect=(int)Enum.Parse(Assembly.LoadFrom(Path.Combine(Path.GetDirectoryName(Plugin.Location),"SolidWorks.Interop.swconst.dll")).GetType("SolidWorks.Interop.swconst.swUserPreferenceToggle_e"),"swMultiCAD_Enable3DInterconnect");
+  var enabled=App.GetUserPreferenceToggle(interconnect);Console.WriteLine("3D Interconnect enabled before probe="+enabled);
+  App.SetUserPreferenceToggle(interconnect,true);
+  try
+  {
   var name="LHH30CA2R1000Z0C-E20E20(1).SLDASM";var rows=new List<object>();
   File.Copy(Path.Combine(source,"LHH30CA2R1000Z0C-E20E20(1).STEP"),Path.Combine(Stage,"LHH30CA2R1000Z0C-E20E20(1).STEP"));
   foreach(var prefix in new[]{"uplm_probe_"})
@@ -302,6 +307,8 @@ internal static class NativeChecks
    rows.Add(new{prefix,error,warning,features,components});
   }
   File.WriteAllText(Path.Combine(Stage,"import-probe.json"),Json.Serialize(rows));Console.WriteLine(Json.Serialize(rows));
+  }
+  finally{App.SetUserPreferenceToggle(interconnect,enabled);}
  }
  static void FirstArchive(string source)
  {
