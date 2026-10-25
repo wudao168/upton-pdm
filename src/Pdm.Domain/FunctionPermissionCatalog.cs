@@ -32,7 +32,7 @@ public static class FunctionPermissionCatalog
         foreach (var item in new[] { ("create", "创建发布包", "POST", "/release-packages"), ("edit", "编辑发布包草稿", "PUT", "/release-packages/{releasePackageId}/draft"), ("delete", "删除发布包草稿", "DELETE", "/release-packages/{releasePackageId}/draft"), ("submit", "提交发布包", "POST", "/release-packages/{releasePackageId}/submit"), ("withdraw", "撤回发布包", "POST", "/release-packages/{releasePackageId}/withdraw") })
             Add("release." + item.Item1, item.Item2, "审批发布", PermissionCodes.ReleaseManage, false, Route(item.Item3, item.Item4));
         Add("release.view", "查看发布记录", "审批发布", PermissionCodes.ProjectContentView, true, Route("GET", "/projects/{projectId}/release-packages"));
-        foreach (var category in new[] { ("mechanical", "标准件／非标件BOM", PermissionCodes.BomMechanicalEdit), ("electrical", "电气BOM", PermissionCodes.BomElectricalEdit) })
+        foreach (var category in new[] { ("mechanical", "标准件／非标件BOM", PermissionCodes.BomMechanicalEdit), ("electrical", "电气件BOM", PermissionCodes.BomElectricalEdit) })
         {
             foreach (var action in new[] { ("create", "新增明细"), ("update", "编辑明细"), ("delete", "删除明细"), ("restore", "恢复明细"), ("import", "导入明细") })
                 Add($"bom.{category.Item1}.row.{action.Item1}", action.Item2, category.Item2, category.Item3, false);
@@ -64,6 +64,7 @@ public static class FunctionPermissionCatalog
         if (item.Code == PermissionCodes.ProjectBudgetSettlementEdit) dependencies.Add(PermissionCodes.ProjectBudgetSettlementView);
         if (item.Code.StartsWith("program-template.") && item.Code != PermissionCodes.ProgramTemplateView) dependencies.Add(PermissionCodes.ProgramTemplateView);
         if (item.Code == PermissionCodes.StandardLibraryManage) dependencies.Add(PermissionCodes.StandardLibraryView);
+        if (item.Code == PermissionCodes.ProductionSupplierManage) dependencies.Add(PermissionCodes.ProductionSupplierView);
         if (item.Code is PermissionCodes.MaterialRelationManage or PermissionCodes.MaterialRelationPublish) dependencies.Add(PermissionCodes.MaterialRelationView);
         if (item.Code == PermissionCodes.MaterialManage) dependencies.Add(PermissionCodes.MaterialApply);
         if (item.Code == PermissionCodes.MaterialApply) dependencies.Add(PermissionCodes.MaterialView);

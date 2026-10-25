@@ -1,9 +1,10 @@
 <script setup lang="ts">
+import { documentVersionSummary, documentDrawingVersion, documentPublishedVersion } from '../drawingRevision'
 import { Cloud, FileSearch, PencilLine, Rotate3D, RotateCcw, Square } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listDocumentVersions, postDesktopMessage, readDocumentPreviewFile } from '../api'
-import type { BomItem, DocumentNode, PreviewMode, SolidWorksOpenMode } from '../types'
+import type { BomItem, DocumentNode, DocumentVersionSummary, PreviewMode, SolidWorksOpenMode } from '../types'
 import SquareLoader from './SquareLoader.vue'
 
 const StepPreviewViewer = defineAsyncComponent(() => import('./StepPreviewViewer.vue'))
@@ -68,6 +69,10 @@ const solidWorksError = ref(false)
 const markupSaving = ref(false)
 const markupDirty = ref(false)
 const lastArchivedAt = ref('')
+const versionMetadata = ref<DocumentVersionSummary[]>([])
+const activeVersionMetadata = computed(() => props.reviewVersionId
+  ? versionMetadata.value.find(version => version.id === props.reviewVersionId) ?? {}
+  : props.selected)
 let resizeObserver: ResizeObserver | undefined
 let overlayObserver: MutationObserver | undefined
 let previewSyncFrame = 0
@@ -96,6 +101,8 @@ const previewProperties = computed(() => [
   { label: '材质', value: previewPropertyValue(props.bomItem?.material) },
   { label: '表面处理', value: previewPropertyValue(props.bomItem?.surfaceTreatment) },
   { label: '热处理', value: previewPropertyValue(props.bomItem?.heatTreatment) },
+  { label: '图纸版本', value: documentDrawingVersion(activeVersionMetadata.value) },
+  { label: '发布版本', value: documentPublishedVersion(activeVersionMetadata.value) },
   { label: '最近存档', value: formatArchiveDate(lastArchivedAt.value) },
 ])
 
@@ -276,7 +283,7 @@ async function startPreview() {
         return
       }
       if (requested && version !== requested)
-        webPreviewNotice.value = `当前 ${expectedRevision} 版本还没有预览，以下是 ${version.revision.display} 版本的预览。`
+        webPreviewNotice.value = `当前存档版本 ${requested.revision.display} 还没有预览，以下是存档版本 ${version.revision.display} 的预览。`
       const format = normalizedPreviewFormat(version.preview.format)
       const blob = await readDocumentPreviewFile(props.selected.documentId, version.id, props.accessToken)
       if (request !== webPreviewRequest) return
@@ -384,7 +391,7 @@ watch(() => props.reviewPanelCollapsed, () => {
   void nextTick(schedulePreviewBounds)
 }, { flush: 'post' })
 
-watch([() => props.selected.documentId, () => props.accessToken], () => {
+watch([() => props.selected.documentId, () => props.selected.version, () => props.accessToken], () => {
   void loadLastArchivedAt()
 }, { immediate: true })
 
@@ -575,7 +582,7 @@ onBeforeUnmount(() => {
           <div class="pdm-preview-state-content">
             <FileSearch :size="52" />
             <h3>{{ previewError || '该版本尚无网页预览文件' }}</h3>
-            <p>{{ selected.fileName }} · {{ displayedRevision }}</p>
+            <p :title="`存档版本：${displayedRevision}`">{{ selected.fileName }} · {{ documentVersionSummary(activeVersionMetadata) }}</p>
             <small>工作版本签入时不生成预览；最终审批通过后由服务器生成并绑定正式版本：三维使用STP/STEP，工程图使用PDF。历史DWG不会自动删除，但不再作为预览或发布必需文件。</small>
             <button type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="emit('more')">查看并下载版本</button>
           </div>
@@ -594,7 +601,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="pdm-lightweight-preview-controls">
               <h3>{{ !selected.documentId ? '请选择图纸' : lightweightPreviewState === 'loading' ? '正在读取轻量预览…' : lightweightPreviewState === 'ready' ? '本地轻量预览' : '暂无轻量预览' }}</h3>
-              <p v-if="selected.documentId">{{ selected.fileName }} · {{ displayedRevision }}</p>
+              <p v-if="selected.documentId" :title="`存档版本：${displayedRevision}`">{{ selected.fileName }} · {{ documentVersionSummary(activeVersionMetadata) }}</p>
               <small>{{ !selected.documentId ? '在左侧列表选择图纸后显示预览。' : lightweightPreviewState === 'unavailable' ? lightweightPreviewMessage : '当前仅显示本地只读缓存中的静态缩略图，不会启动 SolidWorks 或 eDrawings。' }}</small>
               <button type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="startPreview">加载交互预览</button>
             </div>
@@ -605,7 +612,7 @@ onBeforeUnmount(() => {
             <SquareLoader v-if="previewState === 'loading'" :label="desktopAvailable ? '正在加载 eDrawings' : '正在加载网页预览'" />
             <FileSearch v-else :size="52" />
             <h3>{{ previewState === 'loading' ? desktopAvailable ? '正在加载 eDrawings…' : '正在加载网页预览…' : previewState === 'idle' ? '预览尚未加载' : desktopAvailable ? mode === 'model' ? 'eDrawings 内嵌三维预览' : 'eDrawings 内嵌图纸预览' : mode === 'model' ? 'STP/STEP三维预览' : 'PDF工程图预览' }}</h3>
-            <p>{{ selected.fileName }} · {{ displayedRevision }}</p>
+            <p :title="`存档版本：${displayedRevision}`">{{ selected.fileName }} · {{ documentVersionSummary(activeVersionMetadata) }}</p>
             <small>{{ previewState === 'idle' ? '首次进入图档或切换项目时需手动加载一次；加载后只要不切换项目就保持预览，切换到其他页签再返回不会重新加载。' : '文件通过PLM权限校验和SHA-256校验后下载到独立只读缓存，不会覆盖工作文件。' }}</small>
             <p v-if="previewState === 'error'" class="pdm-preview-error" role="alert">{{ previewError || 'eDrawings加载失败，请重试。' }}</p>
             <button v-if="previewState === 'idle' || previewState === 'error'" type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="startPreview">

@@ -28,6 +28,12 @@ public sealed record DocumentVersion(
     Guid? ReleasePackageId,
     DocumentPreviewArtifact? Preview = null)
 {
+    public int? DrawingVersionNumber { get; init; }
+    public string LatestPublishedVersion { get; init; } = "未发布";
+    public string DrawingVersion => DrawingVersionNumber is > 0 ? $"V{DrawingVersionNumber}" : "待核对";
+    public string PublishedVersion => Status == DocumentVersionStatus.Released && string.CompareOrdinal(LatestPublishedVersion, Revision.Display) >= 0
+        && LatestPublishedVersion.Length == 1 ? Revision.Display : "未发布";
+
     /// <summary>该版本是"仅属性写入"产生还是内容变更产生；仅属性版本不改变零件几何。</summary>
     public DocumentVersionChangeKind ChangeKind { get; init; } = DocumentVersionChangeKind.Content;
 }

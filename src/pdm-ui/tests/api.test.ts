@@ -1,8 +1,77 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { downloadProductionDrawingArchive, downloadReleasePreviewArchive, listProjects, loadBomSourceData, loadProjectDocumentWorkspace, mapApiReleasePackage, readProjectValidationPlan, restoreDocumentVersion, saveBom } from '../src/api'
+import { downloadProductionDrawingArchive, downloadReleasePreviewArchive, listProjects, loadBomSourceData, loadProjectDocumentWorkspace, logoutSession, mapApiReleasePackage, readProjectValidationPlan, restoreDocumentVersion, saveBom } from '../src/api'
 import type { BomItem } from '../src/types'
 
 describe('API JSON response handling', () => {
+  it('合并同时读取且每个页面得到独立数据，完成后重新读取', async () => {
+    let resolve!: (response: Response) => void
+    const fetchMock = vi.fn().mockImplementationOnce(() => new Promise<Response>(done => { resolve = done }))
+      .mockImplementation(async () => new Response('{"items":[]}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const first = readProjectValidationPlan('same-project', 'token')
+    const second = readProjectValidationPlan('same-project', 'token')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    resolve(new Response('{"items":[{"validationContent":"原始任务"}]}', { status: 200 }))
+    const [left, right] = await Promise.all([first, second])
+    expect(left).toEqual(right)
+    expect(left).not.toBe(right)
+    expect(left!.items).not.toBe(right!.items)
+    await readProjectValidationPlan('same-project', 'token')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('不同账号和公司不共用进行中的读取', async () => {
+    const resolvers: Array<(response: Response) => void> = []
+    const fetchMock = vi.fn().mockImplementation(() => new Promise<Response>(resolve => resolvers.push(resolve)))
+    vi.stubGlobal('fetch', fetchMock)
+    window.localStorage.setItem('pdm_active_organization', 'company-a')
+    const first = readProjectValidationPlan('project', 'first-token')
+    const second = readProjectValidationPlan('project', 'second-token')
+    window.localStorage.setItem('pdm_active_organization', 'company-b')
+    const third = readProjectValidationPlan('project', 'first-token')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    resolvers.forEach(resolve => resolve(new Response('null', { status: 200 })))
+    await Promise.all([first, second, third])
+  })
+
+  it('写入后重新读取，旧请求完成不会删除新的进行中请求', async () => {
+    const resolvers: Array<(response: Response) => void> = []
+    const fetchMock = vi.fn().mockImplementation(() => new Promise<Response>(resolve => resolvers.push(resolve)))
+    vi.stubGlobal('fetch', fetchMock)
+    const first = readProjectValidationPlan('project', 'token')
+    const write = logoutSession('token')
+    const second = readProjectValidationPlan('project', 'token')
+    resolvers[0]!(new Response('null', { status: 200 }))
+    await first
+    const third = readProjectValidationPlan('project', 'token')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    resolvers[1]!(new Response('true', { status: 200 }))
+    resolvers[2]!(new Response('null', { status: 200 }))
+    await Promise.all([write, second, third])
+  })
+
+  it('失败的共同读取可重试', async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error('offline'))
+      .mockImplementation(async () => new Response('null', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const results = await Promise.allSettled([readProjectValidationPlan('project', 'token'), readProjectValidationPlan('project', 'token')])
+    expect(results.map(result => result.status)).toEqual(['rejected', 'rejected'])
+    await expect(readProjectValidationPlan('project', 'token')).resolves.toBeNull()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+  it.each([4, 'Virtual'])('嵌入组件保留虚拟状态，不因没有独立图档编号误报未入库（%s）', async status => {
+    const documents = [{ id: 'model', projectId: 'project', kind: 0, fileName: 'A.SLDASM', storedVersionCount: 1, revision: { display: 'W1' } }]
+    const root = { documentId: 'model', nodeId: 'root', instancePath: 'root', fileName: 'A.SLDASM', kind: 0, status: 0, children: [
+      { nodeId: 'embedded', instancePath: 'root/embedded', fileName: 'PART^A.SLDPRT', kind: 1, status, children: [] },
+      { nodeId: 'unregistered', instancePath: 'root/external', fileName: 'EXTERNAL.SLDPRT', kind: 1, status: 0, children: [] },
+    ] }
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => new Response(JSON.stringify(path.endsWith('/documents') || path.endsWith('/folder-documents') ? documents
+      : path.endsWith('/reference-tree') ? root : []), { status: 200 })))
+    const result = await loadProjectDocumentWorkspace('project', 'token')
+    expect(result.root.children.find(node => node.id === 'embedded')).toMatchObject({ status: 'Virtual', documentId: undefined, versionAlignment: undefined })
+    expect(result.root.children.find(node => node.id === 'unregistered')).toMatchObject({ status: 'Unregistered' })
+  })
+
   it('关联树工程图与2D列表统一使用正式版本数，登记不等于存档', async () => {
     const documents = [
       { id: 'model', projectId: 'project', kind: 0, fileName: 'A.SLDASM', storedVersionCount: 1, revision: { display: 'W1' } },
@@ -146,12 +215,14 @@ describe('API JSON response handling', () => {
       id: 'release-1', number: 'RP-1', state: 'Published', scope: 'NonStandardWithDrawing',
       previewState: 'Failed', previewError: '发布包尚未进入服务器转换状态。', previewAttempts: 5,
       previewUpdatedAt: '2026-09-20T15:00:00Z',
+      versionBindings: [{ documentId: 'model', versionId: 'frozen-work', revision: 'A-W1', sha256: 'hash', publish: true, requiresPromotion: true, targetRevision: 'B' }],
     } as never)
 
     expect(mapped.previewState).toBe('Failed')
     expect(mapped.previewError).toBe('发布包尚未进入服务器转换状态。')
     expect(mapped.previewAttempts).toBe(5)
     expect(mapped.previewUpdatedAt).toBe('2026-09-20T15:00:00Z')
+    expect(mapped.versionBindings?.[0]).toMatchObject({ documentId: 'model', versionId: 'frozen-work', targetRevision: 'B' })
   })
 
   it.each(['Pdf', 'Step'] as const)('names %s archive with release package number', async format => {

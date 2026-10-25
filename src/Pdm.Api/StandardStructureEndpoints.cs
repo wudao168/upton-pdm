@@ -49,6 +49,16 @@ public static class StandardStructureEndpoints
             var (actor, role) = User(context);
             return Results.Ok(await service.MoveStructuresAsync(input, actor, role, ct));
         });
+        api.MapPost("/{id:guid}/state", async (Guid id, ChangeStandardStructureState input, HttpContext context, StandardStructureService service, CancellationToken ct) =>
+        {
+            var (actor, role) = User(context);
+            return Results.Ok(await service.ChangeStateAsync(id, input, actor, role, ct));
+        });
+        api.MapGet("/{id:guid}/references", async (Guid id, HttpContext context, StandardStructureService service, CancellationToken ct) =>
+        {
+            var (actor, role) = User(context);
+            return Results.Ok(await service.ListReferencesAsync(id, actor, role, ct));
+        });
         api.MapGet("/storage", async (HttpContext context, StandardStructureService service, CancellationToken ct) =>
         {
             var (actor, role) = User(context);

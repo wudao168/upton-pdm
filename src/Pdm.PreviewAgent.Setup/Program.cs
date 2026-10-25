@@ -12,6 +12,12 @@ internal static class Program
     private static int Main(string[] args)
     {
         var options = SetupOptions.Parse(args);
+        if (options.StartInTray)
+        {
+            var agent = Path.Combine(options.InstallDirectory, "Upton.Pdm.PreviewAgent.exe");
+            if (File.Exists(agent)) System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(agent) { UseShellExecute = true, WindowStyle = System.Diagnostics.ProcessWindowStyle.Normal });
+            return 0;
+        }
         if (options.Silent)
         {
             return RunSilentAsync(options).GetAwaiter().GetResult();

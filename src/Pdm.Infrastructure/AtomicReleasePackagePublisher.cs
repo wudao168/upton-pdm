@@ -43,6 +43,9 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         standard = ReleaseQuantities(standard, package.WholeSetMultiplier);
         nonStandard = ReleaseQuantities(nonStandard, package.WholeSetMultiplier);
         var electrical = ReleaseQuantities(package.ElectricalBomSnapshot, package.WholeSetMultiplier);
+        standard = BomDrawingRevision.ForPackage(standard, package, preparingPublication: true).ToArray();
+        nonStandard = BomDrawingRevision.ForPackage(nonStandard, package, preparingPublication: true).ToArray();
+        electrical = BomDrawingRevision.ForPackage(electrical, package, preparingPublication: true).ToArray();
         switch (package.Scope)
         {
             case ReleaseScope.StandardLongLead:
@@ -150,8 +153,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         var conversionPackage = package with { PublishedAt = publishedAt };
         // Refresh legacy in-review packages as well; the approved full BOM snapshot is unchanged.
         ReleasePublishingProgress.Set(package.Id, "生成BOM发布文件");
-        if (package.Scope is ReleaseScope.StandardFormal or ReleaseScope.NonStandardWithDrawing or ReleaseScope.ElectricalFormal)
-            await PrepareAsync(package, project, cancellationToken);
+        await PrepareAsync(package with { State = ReleasePackageState.Publishing }, project, cancellationToken);
 
         // 核对审批冻结的工程图，原文件直接作为正式版本和PDF转换来源。
         Dictionary<Guid, FormalDrawingSource> formalDrawings;
@@ -374,13 +376,13 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         if (scope == ReleaseScope.NonStandardLongLead)
             RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "long-lead-nonstandard-parts-bom.xlsx", StringComparison.OrdinalIgnoreCase), "长交期非标件BOM XLSX");
         if (scope == ReleaseScope.ElectricalLongLead)
-            RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "long-lead-electrical-bom.xlsx", StringComparison.OrdinalIgnoreCase), "长交期电气BOM XLSX");
+            RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "long-lead-electrical-bom.xlsx", StringComparison.OrdinalIgnoreCase), "长交期电气件BOM XLSX");
         if (scope is ReleaseScope.LegacyCombined or ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement)
             RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "standard-parts-bom.xlsx", StringComparison.OrdinalIgnoreCase), "标准件BOM XLSX");
         if (scope is ReleaseScope.LegacyCombined or ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement)
             RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "nonstandard-parts-bom.xlsx", StringComparison.OrdinalIgnoreCase), "非标件BOM XLSX");
         if (scope is ReleaseScope.LegacyCombined or ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement)
-            RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "electrical-bom.xlsx", StringComparison.OrdinalIgnoreCase), "电气BOM XLSX");
+            RequireFile(sourceFiles, path => string.Equals(Path.GetFileName(path), "electrical-bom.xlsx", StringComparison.OrdinalIgnoreCase), "电气件BOM XLSX");
     }
 
     private sealed class MissingServerPreviewConverter : IServerPreviewConverter

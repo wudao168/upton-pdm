@@ -33,6 +33,8 @@ public sealed class LocalEditDraft
     public bool PendingClose { get; set; }
     public bool Closed { get; set; }
     public bool RestoreOnOpen { get; set; }
+    public bool DiscardPending { get; set; }
+    public string DiscardBackupPath { get; set; }
     public int ProcessId { get; set; }
     public long ProcessStartedUtcTicks { get; set; }
 }
@@ -173,8 +175,12 @@ internal sealed class EditDraftJournal
                 && string.Equals(entry.BaseSha256, latestSha256, StringComparison.OrdinalIgnoreCase));
 
     public bool Restore(LocalEditDraft entry, string target, Guid? latestVersionId, string latestSha256 = null)
+        => RestoreWithVerifiedBase(entry, target, latestVersionId, latestSha256, null);
+
+    public bool RestoreWithVerifiedBase(LocalEditDraft entry, string target, Guid? latestVersionId, string latestSha256,
+        string verifiedCurrentSha256)
     {
-        if (!entry.RestoreOnOpen) return false;
+        if (!entry.RestoreOnOpen || entry.DiscardPending) return false;
         if (!MatchesBase(entry, latestVersionId, latestSha256))
             throw new InvalidOperationException("服务器已有新版本，本机草稿已保留，不能直接覆盖。请核对并合并修改。草稿位置：" + Path.GetDirectoryName(entry.DraftPath));
         if (!HasVerifiedDraft(entry)) throw new IOException("本机草稿校验失败，已停止恢复。请检查草稿文件及磁盘状态。");
@@ -185,7 +191,9 @@ internal sealed class EditDraftJournal
         var current = Hash(target);
         if (string.Equals(current, entry.DraftSha256, StringComparison.OrdinalIgnoreCase)) return false;
         var expectedDisk = samePath ? entry.DiskSha256 : latestSha256;
-        if (string.IsNullOrWhiteSpace(expectedDisk) || !string.Equals(current, expectedDisk, StringComparison.OrdinalIgnoreCase))
+        if ((string.IsNullOrWhiteSpace(expectedDisk) || !string.Equals(current, expectedDisk, StringComparison.OrdinalIgnoreCase))
+            && (string.IsNullOrWhiteSpace(latestSha256) || !string.Equals(current, latestSha256, StringComparison.OrdinalIgnoreCase))
+            && (string.IsNullOrWhiteSpace(verifiedCurrentSha256) || !string.Equals(current, verifiedCurrentSha256, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("本地图档已有其他修改，已保留图档和草稿，请核对后恢复。草稿位置：" + Path.GetDirectoryName(entry.DraftPath));
         // Retain both files. Never replace an unrecognized local revision.
         var temporary = target + "." + Guid.NewGuid().ToString("N") + ".draft";
@@ -196,10 +204,116 @@ internal sealed class EditDraftJournal
             if (!string.Equals(Hash(temporary), entry.DraftSha256, StringComparison.OrdinalIgnoreCase)) throw new IOException("恢复副本校验失败。");
             if (!string.Equals(Hash(target), current, StringComparison.OrdinalIgnoreCase)) throw new IOException("恢复期间本地图档发生变化，已停止恢复。");
             File.SetAttributes(target, File.GetAttributes(target) & ~FileAttributes.ReadOnly);
-            File.Replace(temporary, target, null);
+            ReplaceVerifiedWorkingFile(temporary, target, current, entry.DraftSha256);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
         return true;
+    }
+
+    // Explicit discard is durable until both the controlled bytes and their binding
+    // have been restored. A failed download or locked CAD file must not revive a draft.
+    public void MarkDiscarded(LocalEditDraft entry)
+    {
+        entry.DiskSha256 = File.Exists(entry.SourcePath) ? Hash(entry.SourcePath) : null;
+        entry.Closed = true;
+        entry.PendingClose = false;
+        entry.RestoreOnOpen = false;
+        entry.DiscardPending = true;
+        ClearMaintenanceFailure(entry);
+        Save(entry);
+    }
+
+    public string ValidateDiscardedFile(LocalEditDraft entry, string controlledPath, string controlledHash)
+    {
+        if (!entry.DiscardPending) throw new InvalidOperationException("该图档没有待完成的放弃编辑记录。");
+        if (!string.Equals(Hash(controlledPath), controlledHash, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("服务器版本副本校验失败，未恢复工作文件。");
+        var target = Path.GetFullPath(entry.SourcePath);
+        var current = File.Exists(target) ? Hash(target) : null;
+        if (current != null && !string.Equals(current, controlledHash, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(current, entry.DiskSha256, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("放弃编辑后工作文件又发生变化，已保留两份文件，请核对后重试。文件：" + target);
+        return current;
+    }
+
+    public void RestoreDiscardedFile(LocalEditDraft entry, string controlledPath, string controlledHash)
+    {
+        var current = ValidateDiscardedFile(entry, controlledPath, controlledHash);
+        var target = Path.GetFullPath(entry.SourcePath);
+        if (string.Equals(current, controlledHash, StringComparison.OrdinalIgnoreCase))
+        {
+            File.SetAttributes(target, File.GetAttributes(target) | FileAttributes.ReadOnly);
+            return;
+        }
+        if (current != null)
+        {
+            var backup = Path.Combine(directory, entry.DocumentId.ToString("N"), Guid.NewGuid().ToString("N"), Path.GetFileName(target));
+            Directory.CreateDirectory(Path.GetDirectoryName(backup));
+            File.Copy(target, backup);
+            if (!string.Equals(Hash(backup), current, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("放弃编辑的恢复备份校验失败，原工作文件未替换。");
+            entry.DiscardBackupPath = backup;
+            Save(entry);
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(target));
+        var temporary = target + "." + Guid.NewGuid().ToString("N") + ".restore";
+        try
+        {
+            File.Copy(controlledPath, temporary);
+            File.SetAttributes(temporary, FileAttributes.Normal);
+            if (!string.Equals(Hash(temporary), controlledHash, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(File.Exists(target) ? Hash(target) : null, current, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("恢复期间文件发生变化，已停止替换并保留备份。");
+            if (File.Exists(target))
+            {
+                File.SetAttributes(target, File.GetAttributes(target) & ~FileAttributes.ReadOnly);
+                ReplaceVerifiedWorkingFile(temporary, target, current, controlledHash);
+            }
+            else File.Move(temporary, target);
+            File.SetAttributes(target, File.GetAttributes(target) | FileAttributes.ReadOnly);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+    }
+
+    private static void ReplaceVerifiedWorkingFile(string temporary, string target, string previousHash, string replacementHash)
+    {
+        try
+        {
+            // Working copies have their PLM binding recorded separately. An inability
+            // to merge old Windows metadata must not reject otherwise permitted writes.
+            File.Replace(temporary, target, null, true);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // A rename still requires Windows to permit replacing this file. This
+            // changes no ACL and keeps the original until the verified copy is installed.
+            ReplaceByRenaming(temporary, target, previousHash, replacementHash);
+        }
+    }
+
+    internal static void ReplaceByRenaming(string temporary, string target, string previousHash, string replacementHash)
+    {
+        var retained = target + ".discard-backup-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            if (!string.Equals(Hash(target), previousHash, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(Hash(temporary), replacementHash, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("恢复期间文件发生变化，已停止替换并保留备份。");
+            File.Move(target, retained);
+            try { File.Move(temporary, target); }
+            catch
+            {
+                if (!File.Exists(target)) File.Move(retained, target);
+                throw;
+            }
+            // Keep the renamed original as an additional recovery copy. Do not turn
+            // a successful restoration into a failure because cleanup was denied.
+        }
+        catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
+        {
+            throw new IOException("本地恢复文件替换失败：" + Path.GetFileName(target) + "；路径：" + target
+                + "。原文件及恢复副本已保留，请检查文件占用和目录写入权限后重试。", error);
+        }
     }
 
     public static bool OwnerProcessRunning(LocalEditDraft entry)

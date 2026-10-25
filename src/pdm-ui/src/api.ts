@@ -1,10 +1,11 @@
-﻿import type { ProductionSupplierCatalog, SaveProductionSupplier } from './productionSuppliers'
-import type { WorkHoursView, SaveWorkHours, WorkHourRevision } from './workHours'
+import type { ProductionSupplierCatalog, ProductionSupplierChoices, SaveProductionSupplier } from './productionSuppliers'
+import type { WorkHoursView, SaveWorkHours, WorkHourRevision, WorkHoursManagement, WorkHoursSheet, WorkHoursProject, SaveWorkHoursGroupSettings } from './workHours'
 import type { BrowserCadCapability, BrowserCadTarget, BrowserCadTicket } from './browserCadArchive'
 export const readBrowserCadCapability = (projectId: string | undefined, token: string) => requestJson<BrowserCadCapability>(`/api/browser-archives/capabilities${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`, {}, token)
 export const setBrowserCadEnabled = (enabled: boolean, token: string) => requestJson<{ enabled: boolean }>('/api/browser-archives/settings', { method: 'PUT', body: JSON.stringify({ enabled }) }, token)
 export const readBrowserCadTicket = (id: string, token: string) => requestJson<BrowserCadTicket>(`/api/browser-archives/${id}`, {}, token)
 export const startBrowserCadArchive = (id: string, rootPath: string, token: string) => requestJson<BrowserCadTicket>(`/api/browser-archives/${id}/start`, { method: 'POST', body: JSON.stringify({ rootPath }) }, token)
+export const retryBrowserCadPreviews = (id: string, token: string) => requestJson<BrowserCadTicket>(`/api/browser-archives/${id}/previews/retry`, { method: 'POST' }, token)
 export async function stageBrowserCadArchive(id: string, target: BrowserCadTarget, files: File[], token: string, signal?: AbortSignal) {
   const body = new FormData(); body.append('target', JSON.stringify(target))
   files.forEach(file => body.append('files', file, file.webkitRelativePath || file.name))
@@ -17,22 +18,33 @@ export async function stageBrowserCadArchive(id: string, target: BrowserCadTarge
 export const readWorkHours = (from: string, to: string, report: boolean, token: string) => requestJson<WorkHoursView>(`/api/work-hours?${new URLSearchParams({ from, to, report: String(report) })}`, {}, token)
 export const saveWorkHours = (input: SaveWorkHours, token: string) => requestJson<WorkHoursView>('/api/work-hours', { method: 'PUT', body: JSON.stringify(input) }, token)
 export const readWorkHoursHistory = (month: string, token: string) => requestJson<WorkHourRevision[]>(`/api/work-hours/history?month=${encodeURIComponent(month)}`, {}, token)
+export const readWorkHoursSettings = (token: string) => requestJson<WorkHoursManagement>('/api/work-hours/settings', {}, token)
+export const saveWorkHoursSettings = (input: SaveWorkHoursGroupSettings, token: string) => requestJson<WorkHoursManagement>('/api/work-hours/settings', { method: 'PUT', body: JSON.stringify(input) }, token)
+export const setWorkHoursRequirement = (input: { usernames: string[]; from: string; to: string | null; hours: number; required: boolean; reason: string; rowVersion: number }, token: string) => requestJson<WorkHoursManagement>('/api/work-hours/settings/requirements', { method: 'PUT', body: JSON.stringify(input) }, token)
+export const setWorkHoursException = (input: { username: string; from: string; to: string; kind: string; hours: number | null; reason: string; rowVersion: number }, token: string) => requestJson<WorkHoursManagement>('/api/work-hours/settings/exceptions', { method: 'POST', body: JSON.stringify(input) }, token)
+export const removeWorkHoursException = (input: { id: string; reason: string; rowVersion: number }, token: string) => requestJson<WorkHoursManagement>('/api/work-hours/settings/exceptions/remove', { method: 'POST', body: JSON.stringify(input) }, token)
+export const setWorkHoursGrant = (input: { username: string; unitIds: string[]; reason: string; rowVersion: number }, token: string) => requestJson<WorkHoursManagement>('/api/work-hours/settings/grants', { method: 'PUT', body: JSON.stringify(input) }, token)
+export const readWorkHoursCorrection = (username: string, month: string, token: string) => requestJson<{ sheet: WorkHoursSheet; projects: WorkHoursProject[] }>(`/api/work-hours/correction?${new URLSearchParams({ username, month })}`, {}, token)
+export const correctWorkHours = (input: { username: string; sheet: SaveWorkHours; reason: string }, token: string) => requestJson<void>('/api/work-hours/correction', { method: 'PUT', body: JSON.stringify(input) }, token)
+export const remindWorkHours = (usernames: string[], token: string) => requestJson<{ sent: number; skipped: number; results?: Array<{username: string; displayName: string; sent: boolean; reason: string}> }>('/api/work-hours/remind', { method: 'POST', body: JSON.stringify({ usernames }) }, token)
 import type { WorkflowNotificationCatalog, WorkflowNotificationRecipient, WorkflowNoticeRecord } from './workflowNotifications'
 export const readWorkflowNotifications = (token: string) => requestJson<WorkflowNotificationCatalog>('/api/workflow-notifications', {}, token)
 export const saveWorkflowNotification = (flowCode: string, input: { enabled: boolean; recipients: WorkflowNotificationRecipient[]; expectedRowVersion: number; companyId: string }, token: string) => requestJson<WorkflowNotificationCatalog>(`/api/workflow-notifications/flows/${flowCode}`, { method: 'PUT', body: JSON.stringify(input) }, token)
 export const readWorkflowNotificationRecords = (flowCode: string, token: string) => requestJson<WorkflowNoticeRecord[]>(`/api/workflow-notifications/flows/${flowCode}/records`, {}, token)
 export const readProductionSuppliers = (token: string) => requestJson<ProductionSupplierCatalog>('/api/production-suppliers', {}, token)
+export const readProductionSupplierChoices = (token: string) => requestJson<ProductionSupplierChoices>('/api/production-suppliers/choices', {}, token)
+export const readProductionTrackingSupplierChoices = (id: string, token: string) => requestJson<ProductionSupplierChoices>(`/api/production-tracking/releases/${id}/external-suppliers`, {}, token)
 export const saveProductionSupplierCategory = (id: string, input: { name: string; isActive: boolean; expectedRowVersion: number }, token: string) => requestJson<ProductionSupplierCatalog>(`/api/production-suppliers/categories/${id}`, { method: 'PUT', body: JSON.stringify(input) }, token)
 export const saveProductionSupplier = (id: string, input: SaveProductionSupplier, token: string) => requestJson<ProductionSupplierCatalog>(`/api/production-suppliers/${id}`, { method: 'PUT', body: JSON.stringify(input) }, token)
 import type { ProjectExportMetadata } from './exportFormat'
 import type { ReleaseNotificationSettings, ReleaseExecutionView } from './releaseDelivery'
 import type { ProductionProject, ProductionReleaseRecord, ProductionReleaseState, ProductionCapacityView, ProductionScanResult, ProductionScheduleSlot, ProductionMovementKind, ProductionRoute, ProductionOpeningLot } from './productionTracking'
 import { productionRequestId } from './productionTracking'
-export const listProductionTrackingProjects = (token: string, selfOnly = false) => requestJson<ProductionProject[]>(`/api/production-tracking/projects${selfOnly ? '?selfOnly=true' : ''}`, {}, token)
+export const listProductionTrackingProjects = (token: string, selfOnly = false, externalOnly = false) => requestJson<ProductionProject[]>(`/api/production-tracking/projects${externalOnly ? '?externalOnly=true' : selfOnly ? '?selfOnly=true' : ''}`, {}, token)
 export const readProductionTrackingRelease = (id: string, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}`, {}, token)
 export const readProductionScanSettings = (token: string) => requestJson<import('./productionTracking').ProductionScanCatalog>('/api/production-tracking/scan-settings', {}, token)
 export const readProductionScanOptions = (token: string) => requestJson<{ users: Array<{ username: string; displayName: string }>; roles: Array<{ role: string; name: string }> }>('/api/production-tracking/scan-settings/options', {}, token)
-export const saveProductionScanSettings = (input: { workstations: import('./productionTracking').ProductionWorkstation[]; bindings: import('./productionTracking').ProductionPostBinding[]; expectedRowVersion: number }, token: string) => requestJson<import('./productionTracking').ProductionScanCatalog>('/api/production-tracking/scan-settings', { method: 'PUT', body: JSON.stringify(input) }, token)
+export const saveProductionScanSettings = (input: { workstations: import('./productionTracking').ProductionWorkstation[]; bindings: import('./productionTracking').ProductionPostBinding[]; expectedRowVersion: number; flowMode?: string; flowNodes?: import('./productionTracking').ProductionFlowNode[] | null; controlRoleCodes?: string[]; labelWidthMm?: number; labelHeightMm?: number }, token: string) => requestJson<import('./productionTracking').ProductionScanCatalog>('/api/production-tracking/scan-settings', { method: 'PUT', body: JSON.stringify(input) }, token)
 export const readProductionActions = (id: string, token: string) => requestJson<import('./productionTracking').ProductionScanContext>(`/api/production-tracking/releases/${id}/actions`, {}, token)
 export const previewExistingProductionRelease = (id: string, token: string) => requestJson<ProductionReleaseState>(`/api/production-tracking/releases/${id}/opening-preview`, {}, token)
 export const includeExistingProductionRelease = (id: string, input: { verifiedAt: string; received: boolean; verifiedMaterialKeys: string[]; lots: ProductionOpeningLot[]; verificationNote: string }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/include-existing`, { method: 'POST', body: JSON.stringify(input) }, token)
@@ -42,7 +54,8 @@ export const updateProductionLotAllocation = (id: string, input: import('./produ
 export const batchAllocateProduction = (id: string, input: import('./productionTracking').BatchProductionAllocation, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/lot-allocations`, { method: 'PUT', body: JSON.stringify(input) }, token)
 export const updateProductionLineDelivery = (id: string, input: { lineId: string; priority: string; requiredOn: string | null; reason: string; requestId: string }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/delivery`, { method: 'PUT', body: JSON.stringify(input) }, token)
 export const updateProductionLotPromise = (id: string, input: { lotId: string; promisedOn: string; reason: string; requestId: string }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/lot-promise`, { method: 'PUT', body: JSON.stringify(input) }, token)
-export const recordProductionMovement = (id: string, input: { lotId: string; kind: ProductionMovementKind; quantity: number; requestId: string; workstationId?: string; note?: string; recipient?: string }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/movements`, { method: 'POST', body: JSON.stringify(input) }, token)
+export const recordProductionMovement = (id: string, input: { lotId: string; kind: ProductionMovementKind; quantity: number; requestId: string; workstationId?: string; note?: string; recipient?: string; sourceKind?: string }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/movements`, { method: 'POST', body: JSON.stringify(input) }, token)
+export const cancelUnassignedProductionDemand = (id: string, input: { lineId: string; quantity: number; reason: string; requestId: string }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/cancel-unassigned-demand`, { method: 'POST', body: JSON.stringify(input) }, token)
 export const resolveProductionRevision = (id: string, input: { lotId: string; changedReleasePackageId: string; action: 'ContinueOld' | 'CancelRemaining' | 'TransferNew'; reason: string; requestId: string; quantity?: number }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/revision-decisions`, { method: 'POST', body: JSON.stringify(input) }, token)
 export const scheduleProductionLot = (id: string, input: { lotId: string; slots: ProductionScheduleSlot[]; promisedOn: string; requestId: string; changeReason?: string }, token: string) => requestJson<ProductionReleaseRecord>(`/api/production-tracking/releases/${id}/schedule`, { method: 'POST', body: JSON.stringify(input) }, token)
 export const readProductionCapacity = (token: string) => requestJson<ProductionCapacityView>('/api/production-tracking/capacity', {}, token)
@@ -62,6 +75,11 @@ export const retryReleaseNotification = (id: string, deliveryId: string, confirm
 export function getProjectExportMetadata(projectId: string, token: string, releasePackageId?: string): Promise<ProjectExportMetadata> { return requestJson(`/api/projects/${projectId}/export-metadata${releasePackageId ? `?releasePackageId=${encodeURIComponent(releasePackageId)}` : ''}`, {}, token) }
 import type { ProjectBudget, BudgetLine, SettlementLine } from './projectBudget'
 import { diagnosticRequestId, recordClientDiagnostic } from './clientDiagnostics'
+
+export interface DocumentOperationRuleSettings { revision: number; disabledRuleIds: string[] }
+export const getDocumentOperationRuleSettings = (token: string) => requestJson<DocumentOperationRuleSettings>('/api/document-operation-rules', {}, token)
+export const setDocumentOperationRule = (ruleId: string, enabled: boolean, expectedRevision: number, token: string) =>
+  requestJson<DocumentOperationRuleSettings>(`/api/document-operation-rules/${encodeURIComponent(ruleId)}`, { method: 'PUT', body: JSON.stringify({ enabled, expectedRevision }) }, token)
 
 export interface ClientLogRow {
   id: string; deviceId: string; machine: string; username: string; component: string; kind: string
@@ -161,6 +179,8 @@ export function saveNameplateTemplate(value: NameplateTemplate, token: string) {
 const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? (import.meta.env.MODE === 'test' ? 'http://127.0.0.1:5080' : '')).replace(/\/$/, '')
 
 export const readStandardStructures = (token: string) => requestJson<import('./standardStructure').StructureView>('/api/standard-structures', {}, token)
+export const changeStandardStructureState = (id: string, action: 'Disable' | 'Enable' | 'Delete' | 'Restore', expectedRowVersion: number, token: string) => requestJson<import('./standardStructure').StructureCatalog>(`/api/standard-structures/${id}/state`, { method: 'POST', body: JSON.stringify({ action, expectedRowVersion }) }, token)
+export const listStandardStructureReferences = (id: string, token: string) => requestJson<import('./standardStructure').StructureReference[]>(`/api/standard-structures/${id}/references`, {}, token)
 export const saveStructureCategory = (id: string, input: Omit<import('./standardStructure').StructureCategory, 'id'> & { expectedRowVersion: number }, token: string) => requestJson<import('./standardStructure').StructureCatalog>(`/api/standard-structures/categories/${id}`, { method: 'PUT', body: JSON.stringify(input) }, token)
 export const deleteStructureCategory = (id: string, expectedRowVersion: number, token: string) => requestJson<import('./standardStructure').StructureCatalog>(`/api/standard-structures/categories/${id}?expectedRowVersion=${expectedRowVersion}`, { method: 'DELETE' }, token)
 export const moveStructureCategory = (id: string, direction: number, expectedRowVersion: number, token: string) => requestJson<import('./standardStructure').StructureCatalog>(`/api/standard-structures/categories/${id}/move`, { method: 'POST', body: JSON.stringify({ direction, expectedRowVersion }) }, token)
@@ -190,6 +210,7 @@ function withApiContext<T>(label: string, request: Promise<T>): Promise<T> {
 }
 
 export interface AuthSession {
+  desktopHandoff?: boolean
   accessToken: string
   expiresAt: string
   resumeToken: string
@@ -409,6 +430,9 @@ interface ApiRevision {
 }
 
 interface ApiDocument {
+  drawingVersion?: string
+  drawingVersionNumber?: number | null
+  publishedVersion?: string
   id: string
   projectId: string
   folderId?: string | null
@@ -437,6 +461,7 @@ interface ApiDocument {
 }
 
 interface ApiReferenceNode {
+  structureIndexPending?: boolean
   nodeId: string
   documentId?: string | null
   instancePath: string
@@ -452,6 +477,7 @@ interface ApiReferenceNode {
 }
 
 interface ApiBomItem {
+  displayRevision?: string | null
   maintainedItem?: ApiBomItem | null
   summaryItemIds?: string[] | null
   summaryFingerprint?: string | null
@@ -520,6 +546,7 @@ interface ApiApprovalTask {
 }
 
 interface ApiReleasePackage {
+  versionBindings?: ReleasePackageSummary['versionBindings']
   relatedOplIssueIds?: string[]
   rootDocumentId?: string | null
   id: string
@@ -582,6 +609,18 @@ interface ApiDrawingReviewCandidate extends Omit<DrawingReviewCandidate, 'state'
   bomKinds: Array<string | number>
 }
 
+const pendingJsonReads = new Map<string, Promise<unknown>>()
+
+export function readUserTablePreferences(token: string, company: string): Promise<{ preferences: Record<string, string> }> {
+  return requestJson('/api/me/table-preferences', { headers: company ? { 'X-Company-Id': company } : {} }, token, 10000, '个人列设置读取超时，暂时使用本机缓存。')
+}
+
+export function saveUserTablePreference(key: string, value: string, token: string, company: string): Promise<void> {
+  return requestJson('/api/me/table-preferences', { method: 'PUT', headers: company ? { 'X-Company-Id': company } : {}, body: JSON.stringify({ key, value }) }, token, 10000, '列设置同步超时，请保留当前选择并重试。')
+}
+
+export const listMaterialStockPlans = (token: string) => requestJson<import('./materialStockPlans').MaterialStockPlanSnapshot>('/api/material-stock-plans', {}, token)
+
 async function requestJson<T>(path: string, init: RequestInit = {}, token?: string, timeoutMs = 0, timeoutMessage = 'BOM保存等待超时，服务端保存结果尚未确认。当前修改已保留在页面中，请勿刷新或关闭页面，请核对保存结果后再操作。'): Promise<T> {
   if (timeoutMs > 0) {
     const controller = new AbortController()
@@ -599,6 +638,18 @@ async function requestJson<T>(path: string, init: RequestInit = {}, token?: stri
       clearTimeout(timer)
     }
   }
+  if (init.method && init.method.toUpperCase() !== 'GET') pendingJsonReads.clear()
+  if (Object.keys(init).length === 0) {
+    const key = JSON.stringify([path, token, window.localStorage.getItem('pdm_active_organization')])
+    const pending = pendingJsonReads.get(key) ?? performJsonRequest<T>(path, init, token)
+    pendingJsonReads.set(key, pending)
+    try { return structuredClone(await pending) as T }
+    finally { if (pendingJsonReads.get(key) === pending) pendingJsonReads.delete(key) }
+  }
+  return performJsonRequest<T>(path, init, token)
+}
+
+async function performJsonRequest<T>(path: string, init: RequestInit, token?: string): Promise<T> {
   const headers = new Headers(init.headers)
   const diagnosticId = diagnosticRequestId()
   headers.set('X-PDM-Request-ID', diagnosticId)
@@ -607,7 +658,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}, token?: stri
   if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json')
   if (token) headers.set('Authorization', `Bearer ${token}`)
   const activeCompanyId = window.localStorage.getItem('pdm_active_organization')
-  if (activeCompanyId && (token || path === '/api/auth/resume')) headers.set('X-Company-Id', activeCompanyId)
+  if (activeCompanyId && (token || path === '/api/auth/resume') && !headers.has('X-Company-Id')) headers.set('X-Company-Id', activeCompanyId)
 
   let response: Response
   try {
@@ -619,8 +670,11 @@ async function requestJson<T>(path: string, init: RequestInit = {}, token?: stri
   recordClientDiagnostic(response.status >= 500 ? 'error' : 'runtime', '接口结果', `${init.method ?? 'GET'} ${path.split('?')[0]}；状态=${response.status}；耗时=${Math.round(performance.now() - requestStarted)}毫秒`, diagnosticId)
   if (!response.ok) {
     if (response.status === 401 && path !== '/api/auth/login' && path !== '/api/auth/resume') {
-      window.dispatchEvent(new CustomEvent('pdm-session-expired', { detail: { token } }))
-      throw new PdmApiError('登录已过期，请重新登录。', response.status)
+      const final = response.headers.get('X-UPLM-Session-Final') === 'true'
+      const problem = await response.json().catch(() => ({})) as { message?: string }
+      const message = problem.message && /[\u3400-\u9fff]/.test(problem.message) ? problem.message : '登录已过期，请重新登录。'
+      window.dispatchEvent(new CustomEvent('pdm-session-expired', { detail: { token, final, message } }))
+      throw new PdmApiError(message, response.status)
     }
     let message = `PLM API请求失败（${response.status}）`
     try {
@@ -773,14 +827,14 @@ export function listMaterialBrands(token: string, query = ''): Promise<string[]>
   return requestJson<string[]>(`/api/materials/brands?query=${encodeURIComponent(query.trim())}`, {}, token)
 }
 
-export function listMaterials(token: string, query = '', includeArchived = false, limit = 100, categoryCode = ''): Promise<PdmMaterial[]> {
+export function listMaterials(token: string, query = '', includeArchived = false, limit = 100, categoryCode = '', signal?: AbortSignal): Promise<PdmMaterial[]> {
   const parameters = new URLSearchParams()
   if (query.trim()) parameters.set('query', query.trim())
   if (includeArchived) parameters.set('includeArchived', 'true')
   if (limit !== 100) parameters.set('limit', String(limit))
   if (categoryCode.trim()) parameters.set('categoryCode', categoryCode.trim())
   const suffix = parameters.size ? `?${parameters}` : ''
-  return requestJson<PdmMaterial[]>(`/api/materials${suffix}`, {}, token)
+  return requestJson<PdmMaterial[]>(`/api/materials${suffix}`, { signal }, token)
 }
 
 export function matchApprovedMaterials(token: string, field: 'drawingNumber' | 'specification', value: string): Promise<PdmMaterial[]> {
@@ -881,12 +935,20 @@ export function reactivateMaterial(materialId: string, expectedRowVersion: numbe
   return requestJson<PdmMaterial>(`/api/materials/${materialId}/reactivate?expectedRowVersion=${expectedRowVersion}`, { method: 'POST' }, token)
 }
 
+export function saveEngineeringKitLibraryMetadata(kitId: string, input: { remark?: string | null; selectionAdvice?: string | null; referencePrice?: number | null; isRecommended: boolean; coverImageAttachmentId?: string | null; expectedRowVersion: number }, token: string): Promise<EngineeringKit> {
+  return requestJson<ApiEngineeringKit>(`/api/engineering-kits/${kitId}/library-metadata`, { method: 'PUT', body: JSON.stringify(input) }, token).then(mapApiEngineeringKit)
+}
+
 export function listMaterialAttachments(materialId: string, token: string, kind?: MaterialAttachmentKind): Promise<MaterialAttachment[]> {
   const query = kind ? `?kind=${encodeURIComponent(kind)}` : ''
   return requestJson<MaterialAttachment[]>(`/api/materials/${materialId}/attachments${query}`, {}, token).catch(error => {
     if (error instanceof PdmApiError && error.status === 404) return []
     throw error
   })
+}
+
+export function deleteMaterialAttachment(materialId: string, attachmentId: string, token: string): Promise<void> {
+  return requestJson<void>(`/api/materials/${materialId}/attachments/${attachmentId}`, { method: 'DELETE' }, token)
 }
 
 export async function uploadMaterialAttachment(materialId: string, kind: MaterialAttachmentKind, file: File, token: string, onProgress?: (percent: number) => void): Promise<MaterialAttachment> {
@@ -918,7 +980,7 @@ export async function downloadMaterialAttachment(materialId: string, attachment:
 
 export async function materialAttachmentObjectUrl(materialId: string, attachmentId: string, token: string, thumbnailMaxSize?: number): Promise<string> {
   const response = await fetch(`${apiBase}/api/materials/${materialId}/attachments/${attachmentId}/file`, { headers: authenticatedHeaders(token) })
-  if (!response.ok) throw new PdmApiError(`图片加载失败（${response.status}）`, response.status)
+  if (!response.ok) throw new PdmApiError(`附件加载失败（${response.status}）`, response.status)
   let imageBlob = await response.blob()
   if (thumbnailMaxSize && typeof createImageBitmap === 'function') {
     try {
@@ -948,7 +1010,7 @@ export function listStandardLibraryCategories(token: string, includeInactive = f
   return requestJson<StandardLibraryCategory[]>(`/api/standard-library/categories${includeInactive ? '?includeInactive=true' : ''}`, {}, token)
 }
 
-export function saveStandardLibraryCategory(input: { name: string; parentId?: string | null; sortOrder: number; isActive: boolean; expectedRowVersion?: number | null }, token: string, categoryId?: string): Promise<StandardLibraryCategory> {
+export function saveStandardLibraryCategory(input: { name: string; code?: string | null; parentId?: string | null; sortOrder: number; isActive: boolean; expectedRowVersion?: number | null }, token: string, categoryId?: string): Promise<StandardLibraryCategory> {
   return requestJson<StandardLibraryCategory>(categoryId ? `/api/standard-library/categories/${categoryId}` : '/api/standard-library/categories', {
     method: categoryId ? 'PUT' : 'POST', body: JSON.stringify(input),
   }, token)
@@ -958,19 +1020,29 @@ export function deleteStandardLibraryCategory(categoryId: string, expectedRowVer
   return requestJson<void>(`/api/standard-library/categories/${categoryId}?expectedRowVersion=${expectedRowVersion}`, { method: 'DELETE' }, token)
 }
 
-export function listStandardLibraryMaterials(token: string, input: { categoryId?: string; query?: string; brand?: string; recommendedOnly?: boolean; page?: number; pageSize?: number }): Promise<StandardLibraryMaterialPage> {
+export function listStandardLibraryMaterials(token: string, input: { categoryId?: string; query?: string; brand?: string; recommendedOnly?: boolean; page?: number; pageSize?: number; includeInactive?: boolean }): Promise<StandardLibraryMaterialPage> {
   const parameters = new URLSearchParams()
   if (input.categoryId) parameters.set('categoryId', input.categoryId)
   if (input.query?.trim()) parameters.set('query', input.query.trim())
   if (input.brand?.trim()) parameters.set('brand', input.brand.trim())
   if (input.recommendedOnly) parameters.set('recommendedOnly', 'true')
+  if (input.includeInactive) parameters.set('includeInactive', 'true')
   if (input.page) parameters.set('page', String(input.page))
   if (input.pageSize) parameters.set('pageSize', String(input.pageSize))
-  return requestJson<StandardLibraryMaterialPage>(`/api/standard-library/materials?${parameters}`, {}, token)
+  return requestJson<StandardLibraryMaterialPage>(`/api/standard-library/materials?${parameters}`, {}, token).then(result => ({ ...result, items: result.items.map(row => ({ ...row, kit: row.kit ? mapApiEngineeringKit(row.kit as ApiEngineeringKit) : null })) }))
 }
 
 export function addStandardLibraryMaterials(categoryIds: string[], materialIds: string[], token: string): Promise<void> {
   return requestJson<void>('/api/standard-library/memberships', { method: 'POST', body: JSON.stringify({ categoryIds, materialIds }) }, token)
+}
+
+export function importStandardLibraryMaterials(materialCodes: string[], token: string) {
+  return requestJson<import('./types').StandardLibraryImportResult>('/api/standard-library/imports', { method: 'POST', body: JSON.stringify({ materialCodes }) }, token)
+}
+
+export function readStandardLibraryImportFile(file: File, token: string) {
+  const form = new FormData(); form.append('file', file)
+  return requestJson<{ materialCodes: string[] }>('/api/standard-library/imports/parse', { method: 'POST', body: form }, token)
 }
 
 export function removeStandardLibraryMaterial(categoryId: string, materialId: string, token: string): Promise<void> {
@@ -983,16 +1055,58 @@ export function setStandardLibraryRecommendation(materialId: string, isRecommend
   }, token)
 }
 
-export function listEngineeringKits(token: string, releasedOnly = true): Promise<EngineeringKit[]> {
-  return requestJson<EngineeringKit[]>(`/api/engineering-kits?releasedOnly=${releasedOnly}`, {}, token)
+type ApiEngineeringKit = Omit<EngineeringKit, 'modelMode' | 'revisions'> & {
+  modelMode?: EngineeringKit['modelMode'] | 0 | 1
+  revisions: Array<Omit<EngineeringKit['revisions'][number], 'state'> & { state: 'Draft' | 'Released' | 0 | 1 }>
 }
 
-export function saveEngineeringKit(input: {
+function mapApiEngineeringKit(kit: ApiEngineeringKit): EngineeringKit {
+  return {
+    ...kit,
+    isActive: kit.isActive ?? true,
+    modelMode: kit.modelMode === 1 || kit.modelMode === 'Manual' ? 'Manual' : 'Auto',
+    revisions: kit.revisions.map(revision => ({
+      ...revision,
+      state: revision.state === 1 || revision.state === 'Released' ? 'Released' : 'Draft',
+    })),
+  }
+}
+
+export async function listEngineeringKits(token: string, releasedOnly = true): Promise<EngineeringKit[]> {
+  const kits = await requestJson<ApiEngineeringKit[]>(`/api/engineering-kits?releasedOnly=${releasedOnly}`, {}, token)
+  return kits.map(mapApiEngineeringKit)
+}
+
+export async function listStandardLibraryKits(token: string, input: { categoryId?: string; query?: string; brand?: string }): Promise<EngineeringKit[]> {
+  const parameters = new URLSearchParams()
+  if (input.categoryId) parameters.set('categoryId', input.categoryId)
+  if (input.query) parameters.set('query', input.query)
+  if (input.brand) parameters.set('brand', input.brand)
+  const kits = await requestJson<ApiEngineeringKit[]>(`/api/engineering-kits/library?${parameters}`, {}, token)
+  return kits.map(mapApiEngineeringKit)
+}
+
+export async function setEngineeringKitActive(kitId: string, isActive: boolean, expectedRowVersion: number, token: string): Promise<EngineeringKit> {
+  const kit = await requestJson<ApiEngineeringKit>(`/api/engineering-kits/${kitId}/active`, {
+    method: 'PUT', body: JSON.stringify({ isActive, expectedRowVersion }),
+  }, token)
+  return mapApiEngineeringKit(kit)
+}
+
+export async function moveEngineeringKitCategory(kitId: string, categoryId: string, expectedRowVersion: number, token: string): Promise<EngineeringKit> {
+  const kit = await requestJson<ApiEngineeringKit>(`/api/engineering-kits/${kitId}/category`, {
+    method: 'PUT', body: JSON.stringify({ categoryId, expectedRowVersion }),
+  }, token)
+  return mapApiEngineeringKit(kit)
+}
+
+export async function saveEngineeringKit(input: {
   name: string
   brand: string
   description?: string
   changeNote?: string
   modelMode?: 'Auto' | 'Manual'
+  standardLibraryCategoryId?: string
   model?: string
   standardName?: string
   standardCode?: string
@@ -1001,9 +1115,10 @@ export function saveEngineeringKit(input: {
   components: Array<{ materialId: string; quantity: number; isOptional: boolean; sortOrder: number }>
   expectedRowVersion?: number
 }, token: string, kitId?: string): Promise<EngineeringKit> {
-  return requestJson<EngineeringKit>(kitId ? `/api/engineering-kits/${kitId}` : '/api/engineering-kits', {
+  const kit = await requestJson<ApiEngineeringKit>(kitId ? `/api/engineering-kits/${kitId}` : '/api/engineering-kits', {
     method: kitId ? 'PUT' : 'POST', body: JSON.stringify(input),
   }, token)
+  return mapApiEngineeringKit(kit)
 }
 
 export function getEngineeringKitOptions(token: string): Promise<EngineeringKitOptionCatalog> {
@@ -1014,10 +1129,11 @@ export function saveEngineeringKitOptions(catalog: EngineeringKitOptionCatalog, 
   return requestJson<EngineeringKitOptionCatalog>('/api/engineering-kits/options', { method: 'PUT', body: JSON.stringify(catalog) }, token)
 }
 
-export function publishEngineeringKit(kitId: string, expectedRowVersion: number, token: string): Promise<EngineeringKit> {
-  return requestJson<EngineeringKit>(`/api/engineering-kits/${kitId}/publish`, {
+export async function publishEngineeringKit(kitId: string, expectedRowVersion: number, token: string): Promise<EngineeringKit> {
+  const kit = await requestJson<ApiEngineeringKit>(`/api/engineering-kits/${kitId}/publish`, {
     method: 'POST', body: JSON.stringify({ expectedRowVersion }),
   }, token)
+  return mapApiEngineeringKit(kit)
 }
 
 export function expandEngineeringKit(kitId: string, input: { revisionId?: string; quantity: number; selectedOptionalComponentIds: string[] }, token: string): Promise<EngineeringKitExpansion> {
@@ -1420,15 +1536,68 @@ export async function checkHealth(signal?: AbortSignal): Promise<boolean> {
 export function login(username: string, password: string): Promise<AuthSession> {
   return requestJson<AuthSession>('/api/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ username: username.trim(), password }),
+    body: JSON.stringify({ username: username.trim(), password, clientInstanceId: browserLoginInstance(), clientType: window.chrome?.webview ? 'desktop' : 'web' }),
   })
 }
 
-export function resumeSession(resumeToken: string): Promise<AuthSession> {
+export function resumeSession(resumeToken: string, desktopHandoff = false): Promise<AuthSession> {
   return requestJson<AuthSession>('/api/auth/resume', {
     method: 'POST',
-    body: JSON.stringify({ resumeToken }),
+    body: JSON.stringify({ resumeToken, clientInstanceId: browserLoginInstance(), desktopHandoff, clientType: window.chrome?.webview ? 'desktop' : 'web' }),
   })
+}
+
+function browserLoginInstance(): string {
+  const key = 'upton-pdm-browser-instance'
+  let id = window.localStorage.getItem(key)
+  if (!id) {
+    // 内网 HTTP 不能依赖仅安全上下文提供的 crypto.randomUUID。
+    id = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const n = Math.floor(Math.random() * 16)
+      return (c === 'x' ? n : (n & 3) | 8).toString(16)
+    })
+    window.localStorage.setItem(key, id)
+  }
+  return id
+}
+
+export function heartbeatSession(token: string): Promise<boolean> {
+  return requestJson('/api/auth/heartbeat', { method: 'POST' }, token)
+}
+
+export function logoutSession(token: string): Promise<boolean> {
+  return requestJson('/api/auth/logout', { method: 'POST' }, token)
+}
+
+export interface LoginSecurityPolicy {
+  singleSessionEnabled: boolean
+  deviceBindingEnabled: boolean
+  version: string
+}
+export interface LoginSecurityDevice {
+  id: string; machine: string; mac: string; approved: boolean
+  requestedAt: string; approvedAt?: string; lastSeenAt: string
+}
+export interface LoginSecuritySession {
+  id: string; type: string; machine: string; version: string; revoked: boolean
+  createdAt: string; lastSeenAt: string
+}
+export interface LoginSecurityDirectory {
+  policy: LoginSecurityPolicy
+  canEditPolicy: boolean
+  users: Array<{ username: string; devices: LoginSecurityDevice[]; sessions: LoginSecuritySession[] }>
+}
+export function getLoginSecurity(token: string): Promise<LoginSecurityDirectory> {
+  return requestJson('/api/login-security', {}, token)
+}
+export function saveLoginSecurityPolicy(input: Pick<LoginSecurityPolicy, 'singleSessionEnabled' | 'deviceBindingEnabled'>, token: string): Promise<LoginSecurityPolicy> {
+  return requestJson('/api/login-security/policy', { method: 'PUT', body: JSON.stringify(input) }, token)
+}
+export function approveLoginDevice(username: string, id: string, approved: boolean, token: string): Promise<boolean> {
+  return requestJson(`/api/login-security/users/${encodeURIComponent(username)}/devices/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ approved }) }, token)
+}
+export function revokeLoginSession(username: string, id: string, token: string): Promise<boolean> {
+  return requestJson(`/api/login-security/users/${encodeURIComponent(username)}/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }, token)
 }
 
 export function requestPasswordReset(username: string, displayName: string): Promise<boolean> {
@@ -2229,6 +2398,10 @@ export function forceReleaseEditLock(documentId: string, reason: string, token: 
   return requestJson(`/api/documents/${documentId}/force-release`, { method: 'POST', body: JSON.stringify({ reason }) }, token)
 }
 
+export function emergencyReleaseEditLock(documentId: string, sessionId: string, checkedOutAt: string, reason: string, token: string): Promise<void> {
+  return requestJson(`/api/documents/${documentId}/emergency-release`, { method: 'POST', body: JSON.stringify({ sessionId, checkedOutAt, reason }) }, token)
+}
+
 export function listProjectVersions(projectId: string, token: string): Promise<ProjectVersionItem[]> {
   return requestJson(`/api/projects/${projectId}/versions`, {}, token)
 }
@@ -2425,7 +2598,7 @@ export async function loadProjectWorkspace(projectId: string, token: string, inc
     recover('标准件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Standard?summary=true`, {}, token), [] as ApiBomItem[]),
     recover('非标件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/NonStandard?summary=true`, {}, token), [] as ApiBomItem[]),
     recover('待分类BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Unclassified`, {}, token), [] as ApiBomItem[]),
-    recover('电气BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Electrical?summary=true`, {}, token), [] as ApiBomItem[]),
+    recover('电气件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Electrical?summary=true`, {}, token), [] as ApiBomItem[]),
     includeSourceData ? recover('BOM源数据', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/bom-source-data`, {}, token), [] as ApiBomItem[]) : Promise.resolve([] as ApiBomItem[]),
     recover('空BOM声明', 'bom', requestJson<BomEmptyDeclaration[]>(`/api/projects/${project.id}/boms/empty-declarations`, {}, token), [] as BomEmptyDeclaration[]),
     recover('BOM版本', 'bom', listBomVersions(project.id, token), [] as BomVersion[]),
@@ -2481,6 +2654,9 @@ export async function loadProjectDocumentWorkspace(projectId: string, token: str
 
 function mapManagedDocument(document: ApiDocument): ManagedDocument {
   return {
+    drawingVersion: document.drawingVersion,
+    drawingVersionNumber: document.drawingVersionNumber,
+    publishedVersion: document.publishedVersion,
     id: document.id,
     projectId: document.projectId,
     folderId: document.folderId ?? undefined,
@@ -2585,10 +2761,12 @@ function mapReferenceNode(
   snapshotVersionsByFileName: Map<string, string>,
   isRoot = false,
 ): DocumentNode {
-  const document = node.documentId
+  const referenceStatus = mapReferenceStatus(node.status)
+  const embedded = !isRoot && referenceStatus === 'Virtual'
+  const document = embedded ? undefined : node.documentId
     ? documentsById.get(node.documentId)
     : documentsByFileName.get(normalizedFileName(node.fileName))
-  const documentId = node.documentId ?? document?.id
+  const documentId = embedded ? undefined : node.documentId ?? document?.id
   const hasStoredVersion = document?.storedVersionCount !== 0
   const latestVersion = document && hasStoredVersion ? revisionDisplay(document.revision) : '—'
   const capturedVersion = revisionDisplay(node.revision)
@@ -2609,6 +2787,7 @@ function mapReferenceNode(
     .map((child) => mapReferenceNode(child, documentsById, documentsByFileName, snapshotVersionsByFileName, false))
   return {
     id: node.nodeId || node.instancePath,
+    structureIndexPending: node.structureIndexPending,
     instancePath: node.instancePath,
     isVirtualGroup: isRoot && !node.documentId && node.instancePath === 'project' && !node.fileName,
     documentId: documentId ?? undefined,
@@ -2619,13 +2798,16 @@ function mapReferenceNode(
     configuration: node.configuration || '默认',
     quantity: node.quantity,
     version: document ? latestVersion : structureVersion,
+    drawingVersion: document?.drawingVersion,
+    drawingVersionNumber: document?.drawingVersionNumber,
+    publishedVersion: document?.publishedVersion,
     snapshotVersion: structureVersion,
     versionAlignment: document && hasStoredVersion ? classifyVersionAlignment(latestVersion, structureVersion) : undefined,
     // A reference snapshot records the checkout owner at capture time. It is
     // historical metadata and must not be presented as the current edit state.
     checkedOutBy: document?.checkedOutBy ?? undefined,
     lifecycleState: document?.state ?? document?.lifecycleState ?? 'Work',
-    status: documentId ? hasStoredVersion ? mapReferenceStatus(node.status) : 'Unarchived' : 'Unregistered',
+    status: embedded ? 'Virtual' : documentId ? hasStoredVersion ? referenceStatus : 'Unarchived' : 'Unregistered',
     children,
   }
 }
@@ -2708,6 +2890,9 @@ function reconcileCurrentReferenceTree(
           name: drawing.name,
           fileName: drawing.fileName,
           version: drawingVersion,
+          drawingVersion: drawing.drawingVersion,
+          drawingVersionNumber: drawing.drawingVersionNumber,
+          publishedVersion: drawing.publishedVersion,
           snapshotVersion: drawingVersion,
           versionAlignment: hasStoredVersion ? 'Synced' : undefined,
           checkedOutBy: drawing.checkedOutBy ?? undefined,
@@ -2732,6 +2917,9 @@ function reconcileCurrentReferenceTree(
           configuration: '工程图',
           quantity: 1,
           version: drawingVersion,
+          drawingVersion: drawing.drawingVersion,
+          drawingVersionNumber: drawing.drawingVersionNumber,
+          publishedVersion: drawing.publishedVersion,
           snapshotVersion: drawingVersion,
           versionAlignment: hasStoredVersion ? 'Synced' : undefined,
           checkedOutBy: drawing.checkedOutBy ?? undefined,
@@ -2749,6 +2937,7 @@ function reconcileCurrentReferenceTree(
 
 function mapBomItem(item: ApiBomItem): BomItem {
   return {
+    displayRevision: item.displayRevision ?? undefined,
     maintainedItem: item.maintainedItem ? mapBomItem(item.maintainedItem) : undefined,
     summaryItemIds: item.summaryItemIds ?? undefined,
     summaryFingerprint: item.summaryFingerprint ?? undefined,
@@ -2889,6 +3078,7 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
     workflowCode: releasePackage.workflowCode ?? undefined,
     workflowVersion: releasePackage.workflowVersion ?? 0,
     selectedBomItemIds: releasePackage.selectedBomItemIds ?? [],
+    versionBindings: releasePackage.versionBindings,
     confirmedRemovedBomItemIds: releasePackage.confirmedRemovedBomItemIds ?? [],
     relatedOplIssueIds: releasePackage.relatedOplIssueIds ?? [],
     createsManufacturingBaseline: releasePackage.createsManufacturingBaseline ?? true,

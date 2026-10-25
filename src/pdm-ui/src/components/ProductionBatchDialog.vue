@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { batchAllocateProduction, updateProductionLineDelivery } from '../api'
-import { allocationChangeBlockReason, productionPriority, productionRequestId,
+import { allocationChangeBlockReason, effectiveDemand, productionPriority, productionRequestId,
   type BatchProductionAllocation, type ProductionLine, type ProductionReleaseRecord, type ProductionRoute } from '../productionTracking'
 import { ElMessage } from '../statusMessage'
 import ProductionSupplierPicker from './ProductionSupplierPicker.vue'
@@ -13,9 +13,10 @@ type BatchRow = { line: ProductionLine; assigned: number; quantity: number; bloc
 const rows = ref<BatchRow[]>(props.lines.map(line => {
   const lots = props.record.state.lots.filter(lot => lot.lineId === line.id)
   const assigned = lots.reduce((total, lot) => total + lot.quantity, 0)
+  const demand = effectiveDemand(props.record.state, line)
   const blocked = lots.map(lot => allocationChangeBlockReason(props.record.state, lot)).find(Boolean)
-    || (assigned > line.requiredQuantity ? '现有分配超过BOM数量，请先核对。' : '')
-  return { line, assigned, quantity: line.requiredQuantity, blocked, status: 'ready', error: '' }
+    || (assigned > demand ? '现有分配超过有效需求，请先核对。' : '')
+  return { line, assigned, quantity: demand, blocked, status: 'ready', error: '' }
 }))
 const eligibleRows = computed(() => rows.value.filter(row => row.quantity > 0))
 const blockedRows = computed(() => eligibleRows.value.some(row => row.blocked))
@@ -41,7 +42,7 @@ async function submit() {
         ElMessage.warning('批量外协分配必须填写供应商和承诺日期。'); return
       }
       if (blockedRows.value) { ElMessage.warning('所选物料包含不能修改的批次，请取消勾选对应物料后重试。'); return }
-      if (!eligibleRows.value.length) { ElMessage.warning('所选物料没有需要分配的BOM数量。'); return }
+      if (!eligibleRows.value.length) { ElMessage.warning('所选物料没有需要分配的有效需求。'); return }
       allocationInput = { lineIds: eligibleRows.value.map(row => row.line.id), route: route.value,
         supplier: supplier.value.trim(), supplierId: route.value === 'External' ? supplierId.value : null,
         assignee: assignee.value.trim(), promisedOn: promisedOn.value || null, reason: reason.value.trim(),
@@ -115,8 +116,8 @@ async function submit() {
         <p v-if="mode === 'assign'">数量固定随发布包BOM，不可编辑。已有未开工批次统一修改方式并保留编号及拆分数量，未分配数量自动补齐。负责人和自制承诺日期留空时保留原值。</p>
         <p v-if="mode === 'assign' && blockedRows" class="production-batch__error">存在不可修改项，请关闭并取消勾选对应物料后重试；整批不会保存。</p>
         <div class="production-batch__table"><table class="pdm-fit-columns">
-          <thead><tr><th>图号／名称</th><template v-if="mode === 'delivery'"><th>当前紧急程度</th><th>当前需求日期</th></template><template v-else><th>BOM数量</th><th>当前已分配</th></template><th>处理结果</th></tr></thead>
-          <tbody><tr v-for="row in rows" :key="row.line.id"><td :title="`${row.line.drawingNumber} · ${row.line.name}`"><strong>{{ row.line.drawingNumber }}</strong><small>{{ row.line.name }}</small></td><template v-if="mode === 'delivery'"><td>{{ productionPriority(row.line.priority) }}</td><td>{{ row.line.requiredOn || '待确认' }}</td></template><template v-else><td>{{ row.quantity }}</td><td>{{ row.assigned }}</td></template><td :class="{ 'production-batch__error': row.status === 'failed' || mode === 'assign' && row.blocked }">{{ row.status === 'done' ? '已完成' : row.status === 'running' ? '正在处理' : row.error || (mode === 'assign' ? row.quantity === 0 ? '跳过：BOM数量为零' : row.blocked || '待处理' : '待处理') }}</td></tr></tbody>
+          <thead><tr><th>图号／名称</th><template v-if="mode === 'delivery'"><th>当前紧急程度</th><th>当前需求日期</th></template><template v-else><th>有效需求</th><th>当前已分配</th></template><th>处理结果</th></tr></thead>
+          <tbody><tr v-for="row in rows" :key="row.line.id"><td :title="`${row.line.drawingNumber} · ${row.line.name}`"><strong v-stocked-material="row.line.materialCode">{{ row.line.drawingNumber }}</strong><small v-stocked-material="row.line.materialCode">{{ row.line.name }}</small></td><template v-if="mode === 'delivery'"><td>{{ productionPriority(row.line.priority) }}</td><td>{{ row.line.requiredOn || '待确认' }}</td></template><template v-else><td>{{ row.quantity }}</td><td>{{ row.assigned }}</td></template><td :class="{ 'production-batch__error': row.status === 'failed' || mode === 'assign' && row.blocked }">{{ row.status === 'done' ? '已完成' : row.status === 'running' ? '正在处理' : row.error || (mode === 'assign' ? row.quantity === 0 ? '跳过：有效需求为零' : row.blocked || '待处理' : '待处理') }}</td></tr></tbody>
         </table></div>
         <footer><span v-if="started">已完成 {{ completedCount }}／{{ taskCount }} 项</span><button type="button" class="pdm-secondary-action" :disabled="pending" @click="close">关闭</button><button type="submit" class="pdm-primary-action" :disabled="pending || mode === 'assign' && blockedRows">{{ actionLabel }}</button></footer>
       </form>

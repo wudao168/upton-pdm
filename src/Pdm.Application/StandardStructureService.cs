@@ -5,7 +5,7 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
 
-public sealed class StandardStructureService(IPdmRepository repository, IStandardStructureStore store,
+public sealed partial class StandardStructureService(IPdmRepository repository, IStandardStructureStore store,
     IStandardStructureFiles files, TimeProvider clock)
 {
     private static readonly SemaphoreSlim ReferenceGate = new(1, 1);
@@ -46,7 +46,7 @@ public sealed class StandardStructureService(IPdmRepository repository, IStandar
         await RequireView(actor, role, ct);
         var catalog = await store.ReadAsync(GroupScope(), ct);
         var canArchive = await CanArchive(actor, ct);
-        return new(catalog with { StorageRoot = Root(catalog) }, canArchive || await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StandardLibraryManage, ct), canArchive,
+        return new(catalog with { StorageRoot = Root(catalog), Structures = catalog.Structures.Select(s => s with { References = [] }).ToArray() }, canArchive || await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StandardLibraryManage, ct), canArchive,
             await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StorageSettingsManage, ct));
     }
     public async Task<object> CapabilitiesAsync(string actor, UserRole role, CancellationToken ct)
@@ -60,10 +60,13 @@ public sealed class StandardStructureService(IPdmRepository repository, IStandar
     {
         await RequireView(actor, role, ct);
         if (!await CanManage(actor, role, ct)) throw new UnauthorizedAccessException("只有标准化人员或标准库管理员可以维护标准结构分类。");
+        await ReferenceGate.WaitAsync(ct);
+        try
+        {
         var catalog = await store.ReadAsync(GroupScope(), ct);
         CheckVersion(catalog, input.ExpectedRowVersion);
-        if (id == StandardStructureRules.UnclassifiedId || input.ParentId == StandardStructureRules.UnclassifiedId)
-            throw new PdmRuleException("未分类是固定的系统分类，不能修改或增加子分类。");
+        if (id == StandardStructureRules.UnclassifiedId)
+            throw new PdmRuleException("未分类是固定的系统分类，不能修改。");
         var name = Text(input.Name, 150, "分类名称");
         if (input.ParentId is { } parent && !catalog.Categories.Any(c => c.Id == parent)) throw new PdmRuleException("上级分类不存在。");
         if (catalog.Categories.Any(c => c.Id != id && c.ParentId == input.ParentId && string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)))
@@ -83,6 +86,8 @@ public sealed class StandardStructureService(IPdmRepository repository, IStandar
             }
         }
         return await Save(catalog with { Categories = categories }, actor, "category.save", id, name, ct);
+        }
+        finally { ReferenceGate.Release(); }
     }
 
     public async Task<StandardStructureCatalog> DeleteCategoryAsync(Guid id, long expectedVersion, string actor, UserRole role, CancellationToken ct)
@@ -180,6 +185,7 @@ public sealed class StandardStructureService(IPdmRepository repository, IStandar
                         return replay;
                     }
                     var existing = catalog.Structures.FirstOrDefault(s => s.Id == input.StructureId);
+                    if (existing?.DeletedAt is not null) throw new PdmRuleException("该标准结构已在回收站，请先恢复后再存档。");
                     var latest = existing?.Revisions.OrderByDescending(r => r.Version).FirstOrDefault();
                     if (latest?.Id != input.ExpectedRevisionId)
                         throw new PdmConflictException("该图档已产生新版本或原版本不存在，请刷新标准库后重新存档。");
@@ -206,9 +212,19 @@ public sealed class StandardStructureService(IPdmRepository repository, IStandar
                         StorageCompanyId = StandardStructureRules.GroupId, StorageRoot = root,
                         RequestId = input.RequestId, Fingerprint = fingerprint, ChangeNote = input.ChangeNote?.Trim() ?? "", BrowserSourceFingerprint = browserSourceFingerprint
                     };
-                    var saved = new StandardStructure(input.StructureId, existing?.CategoryId ?? StandardStructureRules.UnclassifiedId,
-                        code, name, (existing?.Revisions ?? []).Append(revision).ToArray(), input.DrawingType);
-                    if (!await store.SaveAsync(catalog with { StorageRoot = root, Sequences = sequences,
+                    var categories = catalog.Categories;
+                    var categoryId = existing?.CategoryId;
+                    if (categoryId is null)
+                    {
+                        categoryId = Guid.NewGuid();
+                        var order = categories.Where(c => c.ParentId == StandardStructureRules.UnclassifiedId).Select(c => c.SortOrder).DefaultIfEmpty(0).Max() + 1;
+                        categories = categories.Append(new StandardStructureCategory(categoryId.Value,
+                            $"{code}-{StandardStructureRules.Version(revision.Version)}", StandardStructureRules.UnclassifiedId, order, true)).ToArray();
+                    }
+                    var saved = new StandardStructure(input.StructureId, categoryId.Value,
+                        code, name, (existing?.Revisions ?? []).Append(revision).ToArray(), input.DrawingType)
+                    { IsActive = existing?.IsActive ?? true, References = existing?.References ?? [] };
+                    if (!await store.SaveAsync(catalog with { StorageRoot = root, Sequences = sequences, Categories = categories,
                         Structures = catalog.Structures.Where(s => s.Id != saved.Id).Append(saved).ToArray() }, catalog.RowVersion, ct)) continue;
                     committed = true;
                     await Audit(actor, "archive", saved.Id, $"{code}-{StandardStructureRules.Version(revision.Version)}；文件 {savedFiles.Count} 个", ct);
@@ -233,6 +249,7 @@ public sealed class StandardStructureService(IPdmRepository repository, IStandar
             if (!current.IsActive) throw new PdmRuleException("目标分类或其上级分类已停用。");
         var ids = input.StructureIds.Distinct().ToHashSet();
         if (ids.Count == 0 || ids.Any(id => !catalog.Structures.Any(s => s.Id == id))) throw new PdmRuleException("请选择有效的标准库根图档。");
+        if (catalog.Structures.Any(s => ids.Contains(s.Id) && s.DeletedAt is not null)) throw new PdmRuleException("请先恢复回收站中的标准结构，再调整分类。");
         return await Save(catalog with { Structures = catalog.Structures.Select(s => ids.Contains(s.Id) ? s with { CategoryId = category.Id } : s).ToArray() },
             actor, "category.assign", category.Id, $"调整 {ids.Count} 份完整图档的分类，不修改编号、版本和存档路径", ct);
     }
@@ -254,15 +271,17 @@ public sealed class StandardStructureService(IPdmRepository repository, IStandar
         if (input.Kind is not (BomKind.Standard or BomKind.NonStandard) || input.Quantity <= 0 || input.Quantity > 100000 || input.RequestId == Guid.Empty)
             throw new PdmRuleException("请选择标准件或非标件BOM，并填写有效的引用套数。");
         await ProjectPermissionPolicy.RequireAsync(repository, input.ProjectId, actor, role, PermissionCodes.BomMechanicalEdit, ct);
+        await ReferenceGate.WaitAsync(ct);
+        try
+        {
         var catalog = await store.ReadAsync(GroupScope(), ct);
         var (structure, revision) = FindRevision(catalog, input.RevisionId);
+        if (structure.DeletedAt is not null || !structure.IsActive || !CategoryActive(catalog, structure.CategoryId))
+            throw new PdmRuleException("该标准结构或所属分类已停用或删除，不能新增项目引用；已有项目BOM保持原样。");
         if (revision.Bom.Any(b => b.Kind == BomKind.Unclassified))
             throw new PdmRuleException("该标准结构仍有待分类明细，请补齐物料分类并存档后引用，避免遗漏BOM。");
         var source = revision.Bom.Where(b => b.Kind == input.Kind).ToArray();
         if (source.Length == 0) throw new PdmRuleException("当前版本没有可引用的此类BOM明细。");
-        await ReferenceGate.WaitAsync(ct);
-        try
-        {
             var existing = await repository.GetBomAsync(input.ProjectId, input.Kind, ct);
             var existingIds = existing.Select(b => b.Id).ToHashSet();
             var next = existing.Where(b => !b.IsManuallyExcluded).Select(ToInput).ToList();
@@ -285,9 +304,12 @@ public sealed class StandardStructureService(IPdmRepository repository, IStandar
             }
             if (added > 0)
             {
+                await SaveReference(structure.Id, input, revision.Version, actor, true, ct);
                 await workflow.ReplaceBomAsync(input.ProjectId, input.Kind, next, actor, role, ct, preserveNewIds: true);
                 await Audit(actor, "reference", input.ProjectId, JsonSerializer.Serialize(new { input, structure.Code, revision.Version, AddedCount = added }), ct);
             }
+            if (added > 0 || structure.References.Any(r => r.RequestId == input.RequestId && r.Kind == input.Kind && r.Pending))
+                await SaveReference(structure.Id, input, revision.Version, actor, false, ct);
             return new(added, revision.Id, revision.Version);
         }
         finally { ReferenceGate.Release(); }

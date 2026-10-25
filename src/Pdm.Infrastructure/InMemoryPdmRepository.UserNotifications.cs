@@ -6,6 +6,13 @@ namespace Upton.Pdm.Infrastructure;
 public sealed partial class InMemoryPdmRepository
 {
     private readonly Dictionary<Guid, UserNotification> userNotifications = [];
+    public Task ResolveWorkHoursNotificationsAsync(string recipient, Guid companyId, DateTimeOffset readAt, CancellationToken ct)
+    {
+        lock (gate)
+            foreach (var notice in userNotifications.Values.Where(x => x.ReadAt is null && x.Category == "work-hours" && x.Recipient.Equals(recipient, StringComparison.OrdinalIgnoreCase) && x.SourceKey.StartsWith($"work-hours:{companyId:N}:", StringComparison.Ordinal)).ToArray())
+                userNotifications[notice.Id] = notice with { ReadAt = readAt };
+        return Task.CompletedTask;
+    }
 
     public Task<IReadOnlyList<string>> ListNotificationRecipientsAsync(string sourceKey, CancellationToken cancellationToken)
     {
@@ -28,6 +35,7 @@ public sealed partial class InMemoryPdmRepository
             return Task.FromResult<IReadOnlyList<UserNotification>>(userNotifications.Values
                 .Where(item => string.Equals(item.Recipient, recipient, StringComparison.OrdinalIgnoreCase))
                 .Where(item => !item.SourceKey.StartsWith("calendar-todo:", StringComparison.Ordinal) || TenantContext.CompanyId is Guid company && item.SourceKey.StartsWith($"calendar-todo:{company:N}:", StringComparison.Ordinal))
+                .Where(item => item.Category is not ("work-hours" or "work-hours-correction") || TenantContext.CompanyId is not Guid hoursCompany || item.SourceKey.StartsWith($"{item.Category}:{hoursCompany:N}:", StringComparison.Ordinal))
                 .Where(item => !item.IsPlanOverdueReminder)
                 .OrderByDescending(item => item.CreatedAt)
                 .ThenByDescending(item => item.Id)

@@ -80,8 +80,14 @@ internal sealed class CadTreeNode
     public CadReferenceRole Role { get; set; }
 
     public List<string> UnmanagedReferences { get; } = new List<string>();
+    public List<string> EmbeddedDesignDependencies { get; } = new List<string>();
+    public IReadOnlyDictionary<string, string> EmbeddedProperties { get; set; }
 
     public HashSet<string> DrawingScopePaths { get; set; }
+
+    public bool RequiresModelUpdate { get; set; }
+    public bool DrawingReferenceIndexPending { get; set; }
+    public string DrawingUpdatePendingReason { get; set; }
 
     public string DisplayName { get; set; } = string.Empty;
 
@@ -102,6 +108,7 @@ internal sealed class CadTreeNode
     public int Quantity { get; set; } = 1;
 
     public CadReferenceStatus Status { get; set; }
+    public bool IsSuppressed { get; set; }
 
     public string Revision { get; set; } = string.Empty;
 
@@ -111,6 +118,9 @@ internal sealed class CadTreeNode
     public string SuppressedArchiveSha256 { get; set; }
 
     public string LatestRevision { get; set; } = string.Empty;
+    public string DrawingVersion { get; set; } = "待核对";
+    public string PublishedVersion { get; set; } = "未发布";
+    public string BusinessVersionText => string.Concat(DrawingVersion, " / ", PublishedVersion);
 
     public bool StoredVersionStateKnown { get; set; }
 
@@ -142,6 +152,16 @@ internal sealed class CadTreeNode
 
     public bool IsModifiedInSolidWorks { get; set; }
     public string ArchiveReadError { get; set; }
+    public bool NativeFileScopeVerified { get; set; }
+    internal ISet<string> NativeFileScopePaths { get; set; }
+    public bool IsOutsideNativeFileScope { get; set; }
+    public bool StructureIndexPending { get; set; }
+    // Candidate discovery is not proof that every native drawing view was read.
+    public bool DrawingViewsRead { get; set; }
+    // Server state is separate from the completeness of the latest local scan.
+    public bool? LatestStructureIndexPending { get; set; }
+    public bool HasUnverifiedDrawingIndex => Kind == CadDocumentKind.Drawing
+        && !DrawingViewsRead && LatestStructureIndexPending == true;
 
     public bool IsRenamePendingSave { get; set; }
 
@@ -158,7 +178,8 @@ internal sealed class CadTreeNode
     {
         get
         {
-            if (Status == CadReferenceStatus.Missing || !string.IsNullOrWhiteSpace(ArchiveReadError))
+            if (IsOutsideNativeFileScope) return false;
+            if (Status == CadReferenceStatus.Missing || !NativeFileScopeVerified && !string.IsNullOrWhiteSpace(ArchiveReadError))
             {
                 return true;
             }

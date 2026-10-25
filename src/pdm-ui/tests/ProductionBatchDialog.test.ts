@@ -7,9 +7,9 @@ import type { ProductionReleaseRecord } from '../src/productionTracking'
 
 vi.mock('../src/statusMessage', () => ({ ElMessage: { success: vi.fn(), warning: vi.fn(), error: vi.fn() } }))
 
-beforeEach(() => vi.spyOn(api, 'readProductionSuppliers').mockResolvedValue({ companyId: 'company', rowVersion: 1,
+beforeEach(() => vi.spyOn(api, 'readProductionSupplierChoices').mockResolvedValue({ companyId: 'company',
   categories: [{ id: 'category', name: '外协', isActive: true }], suppliers: [{ id: 'supplier', code: 'S001', name: '外协供应商',
-    fullName: '外协供应商有限公司', categoryIds: ['category'], isActive: true, address: '', phone: '', contact: '', contactPhone: '', remarks: '', updatedAt: '' }] }))
+    categoryIds: ['category'], isActive: true }] }))
 
 function record(): ProductionReleaseRecord {
   return { rowVersion: 1, state: { releasePackageId: 'release', projectId: 'project', companyId: 'company',

@@ -136,9 +136,10 @@ public sealed class BomWorkbookTests
         var widths = sheet.Descendants(ns + "col").Select(column => (int)double.Parse((string)column.Attribute("width")!, CultureInfo.InvariantCulture)).ToArray();
         var mergedRanges = sheet.Descendants(ns + "mergeCell").Select(cell => (string)cell.Attribute("ref")!).ToArray();
 
-        Assert.Equal(new[] { "序号", "物料分类", "易损件", "关键", "单位", "物料编码", "物料名称", "上级物料编码", "型号", "备注信息", "品牌", "材质", "表面处理", "热处理", "重量", "数量", "版本", "完整" }, headers);
+        Assert.Equal(new[] { "序号", "物料分类", "易损件", "关键", "单位", "物料编码", "物料名称", "上级物料编码", "型号", "备注信息", "品牌", "材质", "表面处理", "热处理", "重量", "数量", "发布版本", "完整", "存档版本" }, headers);
         Assert.Equal("个", data[4]);
-        Assert.Equal(new[] { 10, 10, 10, 10, 10, 15, 15, 15, 25, 30, 10, 10, 15, 15, 10, 10, 10, 10 }, widths);
+        Assert.Equal(new[] { 10, 10, 10, 10, 10, 15, 15, 15, 25, 30, 10, 10, 15, 15, 10, 10, 10, 10, 12 }, widths);
+        Assert.Equal("1", (string?)sheet.Descendants(ns + "col").Last().Attribute("hidden"));
         Assert.Contains("A1:R2", mergedRanges);
         Assert.Contains("B3:C3", mergedRanges);
         Assert.Contains("K4:L4", mergedRanges);

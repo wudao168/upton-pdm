@@ -11,6 +11,23 @@ public sealed class ProductionDrawingValidityTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task DrawingQrUsesPdfRuleAndFrozenModelWithoutRequiringPdf(bool pdfReady)
+    {
+        var fixture = await CreateFixtureAsync();
+        Store<ReleasePackage>(fixture.Repository, "packages")[fixture.Package.Id] = fixture.Package with
+        { NonStandardBomSnapshot = fixture.Package.NonStandardBomSnapshot!.Select(item => item with { Specification = "PLM-FROZEN-MODEL" }).ToArray() };
+        Store<DocumentVersion>(fixture.Repository, "versions")[fixture.DrawingVersion.Id] = fixture.DrawingVersion with
+        { Preview = pdfReady ? fixture.DrawingVersion.Preview : null, PropertySnapshot = new Dictionary<string, string?> { ["型号"] = "OLD-CAD-MODEL" } };
+
+        var drawing = Assert.Single(await fixture.Service.ListAsync("admin", UserRole.Administrator, true, fixture.Drawing.ProjectId, default));
+
+        Assert.Equal(PdfReleaseIdentity.Display("PLM-FROZEN-MODEL", "B"), drawing.QrContent);
+        Assert.Equal(pdfReady, drawing.PdfReady);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task ObsoleteDrawingDisappearsFromProductionWithoutFallingBackToOlderRevision(bool includeHistory)
     {
         var fixture = await CreateFixtureAsync();

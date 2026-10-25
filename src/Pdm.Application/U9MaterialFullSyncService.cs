@@ -36,12 +36,6 @@ public sealed class U9MaterialFullSyncService(
             0, 0, 0, 0, 0, 0, null, startedAt, null);
         await materials.SaveU9MaterialFullSyncRunAsync(run, cancellationToken);
 
-        if (categories.Length == 0)
-        {
-            run = run with { Status = U9MaterialFullSyncStatus.Succeeded, CompletedAt = timeProvider.GetUtcNow() };
-            return await materials.SaveU9MaterialFullSyncRunAsync(run, cancellationToken);
-        }
-
         try
         {
             var configuration = await RequireConfigurationAsync(cancellationToken);
@@ -76,6 +70,22 @@ public sealed class U9MaterialFullSyncService(
                 await materials.SaveU9MaterialFullSyncRunAsync(run, cancellationToken);
             }
 
+            var stockPlanToken = await AuthenticateAsync(configuration, clientSecret, cancellationToken);
+            var priorStockPlans = await materials.ListStockedMaterialPlansAsync(configuration.EnterpriseCode, configuration.OrganizationCode, cancellationToken);
+            var stockPlans = await client.QueryStockPlansAsync(configuration.BaseUrl, stockPlanToken,
+                configuration.EnterpriseCode, configuration.OrganizationCode, timeProvider.GetUtcNow(), cancellationToken);
+            if (stockPlans is not null)
+            {
+                await materials.SaveStockPlansAsync(stockPlans, cancellationToken);
+                var observed = stockPlans.Select(plan => plan.MaterialCode).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var missingCodes in priorStockPlans.Select(plan => plan.MaterialCode).Where(code => !observed.Contains(code)).Chunk(200))
+                {
+                    // 从非零列表消失不等于清零；回查到完整资料才取消标识，缺失/失败保留原值。
+                    var clearedPlans = await client.QueryStockPlansAsync(configuration.BaseUrl, stockPlanToken,
+                        configuration.EnterpriseCode, configuration.OrganizationCode, timeProvider.GetUtcNow(), cancellationToken, missingCodes);
+                    if (clearedPlans is not null) await materials.SaveStockPlansAsync(clearedPlans, cancellationToken);
+                }
+            }
             run = Aggregate(run, results, completed: true);
             await materials.SaveU9MaterialFullSyncRunAsync(run, cancellationToken);
             await repository.AppendAuditAsync(new AuditEntry(
@@ -176,6 +186,14 @@ public sealed class U9MaterialFullSyncService(
                     configuration, token, clientSecret, category.Code, codeBatch, cancellationToken);
                 token = detailResult.Token;
                 var details = detailResult.Items;
+                // 库存规划是U9C只读属性，独立于料品主控权；缺失字段不覆盖上次成功结果。
+                var stockPlans = details.Where(item => item.StockPlan is { SafetyStockQuantity: not null, IsEffective: not null } plan
+                        && string.Equals(plan.OrganizationCode, configuration.OrganizationCode, StringComparison.OrdinalIgnoreCase)
+                        && !string.IsNullOrWhiteSpace(item.U9ItemCode))
+                    .Select(item => new MaterialStockPlan(configuration.EnterpriseCode, configuration.OrganizationCode, item.U9ItemCode!.Trim(),
+                        item.StockPlan!.SafetyStockQuantity!.Value, item.StockPlan.ReorderQuantity, item.StockPlan.IsEffective!.Value,
+                        item.StockPlan.UnitCode, item.StockPlan.UnitName, timeProvider.GetUtcNow())).ToArray();
+                await materials.SaveStockPlansAsync(stockPlans, cancellationToken);
                 var detailsByCode = details
                     .Where(item => !string.IsNullOrWhiteSpace(item.U9ItemCode))
                     .GroupBy(item => item.U9ItemCode!.Trim(), StringComparer.OrdinalIgnoreCase)

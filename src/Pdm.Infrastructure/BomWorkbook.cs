@@ -34,7 +34,7 @@ public enum BomWorkbookExportMode
 public static class BomWorkbook
 {
     private static readonly string[] Headers = ["序号", "物料分类", "单位", "物料编码", "物料名称", "上级物料编码", "型号", "备注信息", "品牌", "材质", "表面处理", "重量", "数量", "版本", "完整"];
-    private static readonly string[] ImportHeaders = [.. Headers, "易损件", "关键", "热处理"];
+    private static readonly string[] ImportHeaders = [.. Headers, "易损件", "关键", "热处理", "存档版本"];
     private static readonly string[] RequiredHeaders = ["序号", "单位", "物料编码", "物料名称", "数量", "版本"];
     private static readonly string[] ExportHeaders = ["序号", "物料分类", "易损件", "关键", "单位", "物料编码", "物料名称", "上级物料编码", "型号", "备注信息", "品牌", "材质", "表面处理", "热处理", "重量", "数量", "版本", "完整"];
     private static readonly int[] ExportColumnWidths = [10, 10, 10, 10, 10, 15, 15, 15, 25, 30, 10, 10, 15, 15, 10, 10, 10, 10];
@@ -106,11 +106,11 @@ public static class BomWorkbook
             var headers = priorQuantities is null ? Headers
                 : Headers.Select(header => header == "数量" ? "BOM总量" : header).Concat(["已提前发布", "本次新增下发"]).ToArray();
             if (productionQuantities is not null) headers = [.. headers, "单套数量", "整套数量"];
-            WriteRow(writer, 1, headers.Cast<object?>().ToArray());
+            WriteRow(writer, 1, headers.Select(header => header == "版本" ? "发布版本" : header).Cast<object?>().ToArray());
             var rowNumber = 2;
             foreach (var item in items.OrderBy(item => item.Sequence))
             {
-                object?[] values = [item.Sequence, KindLabel(item.Kind), item.Unit, item.DrawingNumber, item.Name, item.ParentDrawingNumber, item.Specification, item.Remark, item.Brand, item.Material, item.SurfaceTreatment, item.Weight, item.Quantity, item.Revision, item.IsComplete ? "是" : "否"];
+                object?[] values = [item.Sequence, KindLabel(item.Kind), item.Unit, item.DrawingNumber, item.Name, item.ParentDrawingNumber, item.Specification, item.Remark, item.Brand, item.Material, item.SurfaceTreatment, item.Weight, item.Quantity, item.DisplayRevision ?? item.Revision, item.IsComplete ? "是" : "否"];
                 if (priorQuantities is not null)
                 {
                     var prior = priorQuantities.GetValueOrDefault(BomReleaseAggregation.MaterialKey(item));
@@ -203,6 +203,12 @@ public static class BomWorkbook
                 writer.WriteAttributeString("customWidth", "1");
                 writer.WriteEndElement();
             }
+            writer.WriteStartElement("col");
+            writer.WriteAttributeString("min", "19");
+            writer.WriteAttributeString("max", "19");
+            writer.WriteAttributeString("width", "12");
+            writer.WriteAttributeString("hidden", "1");
+            writer.WriteEndElement();
             writer.WriteEndElement();
             writer.WriteStartElement("sheetData");
             WriteStyledRow(writer, 1, 30, 1, [context.BomName]);
@@ -216,14 +222,14 @@ public static class BomWorkbook
             ], 0, 3, 6, 9);
             WriteStyledRow(writer, 4, 24, 2,
             [
-                "BOM版本", DisplayValue(context.BomVersion), null,
+                "BOM发布版本", DisplayValue(context.BomVersion), null,
                 "部门", DisplayValue(context.Department), null,
                 "项目经理", DisplayValue(context.ProjectManagers), null,
                 "设计", DisplayValue(context.Designers), null
             ], 0, 3, 6, 9);
             WriteStyledRow(writer, 5, 24, 2, ApprovalCells(context.ApprovalSteps, context.PublishedAt), 0, 3, 6, 9);
             WriteStyledRow(writer, 6, 8, 2, []);
-            WriteStyledRow(writer, 7, 24, 3, ExportHeaders.Cast<object?>().ToArray());
+            WriteStyledRow(writer, 7, 24, 3, [.. ExportHeaders.Select(header => header == "版本" ? "发布版本" : header).Cast<object?>(), "存档版本"]);
             var rowNumber = 8;
             foreach (var item in exportItems)
             {
@@ -232,7 +238,7 @@ public static class BomWorkbook
                     item.Sequence, KindLabel(item.Kind), item.IsWearPart ? "是" : "否", ImpactStageLabel(item.ImpactStage),
                     DisplayUnit(item.Unit), item.DrawingNumber, item.Name, item.ParentDrawingNumber, item.Specification,
                     item.Remark, item.Brand, item.Material, item.SurfaceTreatment, item.HeatTreatment, item.Weight,
-                    item.Quantity, item.Revision, item.IsComplete ? "是" : "否"
+                    item.Quantity, item.DisplayRevision ?? (DrawingRevision.IsWork(item.Revision) ? "未发布" : item.Revision), item.IsComplete ? "是" : "否", item.Revision
                 ]);
             }
             writer.WriteEndElement();
@@ -269,7 +275,7 @@ public static class BomWorkbook
         return ordered
             .GroupBy(item => string.IsNullOrWhiteSpace(item.DrawingNumber)
                 ? $"row:{item.Id:N}"
-                : $"material:{item.DrawingNumber.Trim()}|{U9UnitCatalog.NormalizeBomUnit(item.Unit)}", StringComparer.OrdinalIgnoreCase)
+                : $"material:{item.DrawingNumber.Trim()}|{U9UnitCatalog.NormalizeBomUnit(item.Unit)}|{item.Revision.Trim()}", StringComparer.OrdinalIgnoreCase)
             .Select((group, index) => group.First() with
             {
                 Sequence = index + 1,
@@ -321,7 +327,9 @@ public static class BomWorkbook
             if (cells.Values.All(string.IsNullOrWhiteSpace)) continue;
             var sequence = ParseInt(Value(cells, columns["序号"]), "序号");
             var quantity = ParseDecimal(Value(cells, columns["数量"]), "数量");
-            var revision = columns["版本"] >= 0 ? Value(cells, columns["版本"]) : defaultRevision;
+            var archiveRevision = Value(cells, columns["存档版本"]);
+            var revision = !string.IsNullOrWhiteSpace(archiveRevision) ? archiveRevision
+                : columns["版本"] >= 0 ? Value(cells, columns["版本"]) : defaultRevision;
             result.Add(new BomItemInput(
                 sequence,
                 Value(cells, columns["物料编码"]),
@@ -535,6 +543,7 @@ public static class BomWorkbook
         "描述" => "备注信息",
         "材料" => "材质",
         "是否完整" => "完整",
+        "发布版本" or "图纸版次" => "版本",
         var normalized => normalized
     };
 

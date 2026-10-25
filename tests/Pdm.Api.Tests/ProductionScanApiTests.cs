@@ -111,5 +111,49 @@ public sealed class ProductionScanApiTests(PdmApiFactory factory) : IClassFixtur
         var events = record.State.Movements.Where(movement => ProductionFlowRules.Labels.ContainsKey(movement.Kind)).ToArray();
         Assert.Equal(8, events.Length);
         Assert.All(events, movement => { Assert.StartsWith("scan-", movement.Actor); Assert.Equal("人员-" + movement.Actor, movement.ActorName); Assert.NotNull(movement.BindingId); Assert.NotNull(movement.WorkstationName); Assert.True(movement.OccurredAt.Year > 2000); Assert.NotNull(movement.FromStage); Assert.NotNull(movement.ToStage); });
+
+        var nextRelease = release with { Id = Guid.NewGuid(), Number = "RP-DEPARTMENT", PublishedAt = DateTimeOffset.UtcNow };
+        await repository.CreateReleasePackageAsync(nextRelease, default);
+        var received = (await (await admin.PostAsJsonAsync($"/api/production-tracking/releases/{nextRelease.Id}/receive", new { requestId = Guid.NewGuid() })).Content.ReadFromJsonAsync<ProductionTrackingRecord>())!;
+        var next = (await (await admin.PostAsJsonAsync($"/api/production-tracking/releases/{nextRelease.Id}/lots", new { lineId = received.State.Lines[0].Id, route = "Self", quantity = 2, requestId = Guid.NewGuid() })).Content.ReadFromJsonAsync<ProductionTrackingRecord>())!;
+        var nextLot = next.State.Lots[0].Id;
+        var department = new SaveProductionScanCatalog(stations,
+            bindings.Select(binding => binding.Post == "Machining" ? binding with { Post = "MachiningReception" } : binding)
+                .Append(new(Guid.NewGuid(), "User", "scan-machine", "Trace", [stations[1].Id], true)).ToArray(), 1)
+        { FlowMode = "DepartmentHandover", FlowNodes = ProductionDepartmentFlow.DefaultNodes, ControlRoleCodes = [roleCodes["scan-receive"]], LabelWidthMm = 70, LabelHeightMm = 45 };
+        Assert.Equal(HttpStatusCode.OK, (await admin.PutAsJsonAsync("/api/production-tracking/scan-settings", department)).StatusCode);
+        var readBack = (await admin.GetFromJsonAsync<ProductionScanCatalog>("/api/production-tracking/scan-settings"))!;
+        Assert.Equal(ProductionDepartmentFlow.DefaultNodes, readBack.FlowNodes);
+        async Task<ProductionTrackingRecord> DepartmentMove(HttpClient client, string kind, Guid? station = null, decimal quantity = 2)
+        {
+            var response = await client.PostAsJsonAsync($"/api/production-tracking/releases/{nextRelease.Id}/movements", new { lotId = nextLot, kind, quantity, requestId = Guid.NewGuid(), workstationId = station, note = "部门流转验证", recipient = "装配领料人", actor = "伪造用户" });
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            return (await response.Content.ReadFromJsonAsync<ProductionTrackingRecord>())!;
+        }
+        var forged = await machine.PostAsJsonAsync($"/api/production-tracking/releases/{nextRelease.Id}/movements", new { lotId = nextLot, kind = "Pause", quantity = 2, requestId = Guid.NewGuid(), note = "越权暂停" });
+        Assert.Equal(HttpStatusCode.BadRequest, forged.StatusCode);
+        next = await DepartmentMove(receive, "ProductionReceived", stations[0].Id);
+        next = await DepartmentMove(receive, "Pause"); Assert.True(next.State.Lots[0].Paused);
+        Assert.Empty((await machine.GetFromJsonAsync<ProductionScanContext>($"/api/production-tracking/releases/{nextRelease.Id}/actions"))!.Actions);
+        next = await DepartmentMove(receive, "Resume");
+        next = await DepartmentMove(machine, "MachiningReceived", stations[1].Id);
+        Assert.Equal("机加", ProductionFlowRules.Stage(next.State, next.State.Lots[0]));
+        next = await DepartmentMove(machine, "Trace", stations[1].Id);
+        Assert.Equal(next.State.Movements.Last().FromStage, next.State.Movements.Last().ToStage);
+        next = await DepartmentMove(pack, "PackingStarted", stations[2].Id);
+        var printable = (await pack.GetFromJsonAsync<ProductionScanContext>($"/api/production-tracking/releases/{nextRelease.Id}/actions"))!;
+        Assert.True(printable.CanPrintLabels); Assert.Equal(70, printable.LabelWidthMm);
+        next = await DepartmentMove(quality, "QualityReceived", stations[3].Id);
+        next = await DepartmentMove(quality, "Pass", stations[3].Id);
+        next = await DepartmentMove(issue, "Issue", stations[4].Id, 1);
+        var unauthorizedCancellation = await receive.PostAsJsonAsync($"/api/production-tracking/releases/{nextRelease.Id}/movements",
+            new { lotId = nextLot, kind = "Cancelled", quantity = 1, requestId = Guid.NewGuid(), note = "未授权减少需求" });
+        Assert.Equal(HttpStatusCode.Forbidden, unauthorizedCancellation.StatusCode);
+        await repository.SetRolePermissionsAsync(roleCodes["scan-receive"],
+            [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProductionExecute, PermissionCodes.ProductionAssign], default);
+        next = await DepartmentMove(receive, "Cancelled", quantity: 1);
+        Assert.Equal("已取消剩余流程", ProductionFlowRules.Stage(next.State, next.State.Lots[0]));
+        Assert.Equal("scan-receive", next.State.Movements.Last().Actor);
+        Assert.Null(next.State.Movements.Last().WorkstationId);
     }
 }

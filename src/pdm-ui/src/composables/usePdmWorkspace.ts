@@ -1,5 +1,8 @@
+import { initializeTablePreferences, clearTablePreferencesSession } from '../tablePreferences'
 import { confirmBomRelease as confirmBomReleaseRequest } from '../api'
-import { listReleasePackages } from '../api'
+import { listProjectFolders, listReleasePackages } from '../api'
+import { emergencyReleaseEditLock as emergencyReleaseEditLockRequest } from '../api'
+import { heartbeatSession, logoutSession } from '../api'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, permanentlyDeleteManualBomItems as permanentlyDeleteManualBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest, setBomReleaseExclusion as setBomReleaseExclusionRequest } from '../api'
 import { getBomSourceData } from '../api'
@@ -51,7 +54,7 @@ function bomPropertyMappingsFromLegacy(settings: PdmSystemSettings) {
     solidWorksProperty: mapping.mappingEditable ? values[mapping.pdmPropertyKey] ?? mapping.solidWorksProperty : mapping.solidWorksProperty,
   }))
 }
-const defaultSystemSettings: PdmSystemSettings = { vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: fallbackBomPropertyMappings.map(mapping => ({ ...mapping })), validationRules: { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], }, approvalWorkflows: { mechanical: { code: 'mechanical-release', name: '机械发布审批', version: 1, steps: [{ stage: 'MechanicalEngineer', name: '机械工程师自检', assigneeSource: 'Submitter' }, { stage: 'MainDesigner', name: '主设审核', assigneeSource: 'ProjectDesignLead' }, { stage: 'MechanicalSupervisor', name: '机械主管批准', assigneeSource: 'PrimaryUnitManager' }] }, electrical: { code: 'electrical-release', name: '电气发布审批', version: 1, steps: [{ stage: 'HardwareEngineer', name: '硬件工程师自检', assigneeSource: 'Submitter' }, { stage: 'HardwareSupervisor', name: '硬件主管审核', assigneeSource: 'PrimaryUnitManager' }, { stage: 'StandardizationSupervisor', name: '标准化主管批准', assigneeSource: 'ParentUnitManager' }] }, emergencySubstituteRoleCode: 'BusinessUnitManager' }, releaseChangeReasonTypes: ['正式补充', '物料问题 / 交期不满足', '物料问题 / 物料下单晚', '物料问题 / 买错物料', '物料问题 / 物料漏买', '图纸问题 / 图纸漏下', '图纸问题 / 图纸错误', '设计问题 / 设计变更', '设计问题 / 设计错误', '客户原因 / 客户需求变更', '客户原因 / 客户信息输入错误', '客户原因 / 客户未及时确认', '客户原因 / 客户未及时提供产品', '其他'], formalSupplementPolicies: { standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } } }
+const defaultSystemSettings: PdmSystemSettings = { vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 60, checkoutLeaseMinutes: 5, checkoutOfflineGraceMinutes: 30, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, checkoutAutoReleaseEnabled: true, checkoutIdleReleaseMinutes: 30, checkoutReleaseCountdownSeconds: 60, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: fallbackBomPropertyMappings.map(mapping => ({ ...mapping })), validationRules: { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], }, approvalWorkflows: { mechanical: { code: 'mechanical-release', name: '机械发布审批', version: 1, steps: [{ stage: 'MechanicalEngineer', name: '机械工程师自检', assigneeSource: 'Submitter' }, { stage: 'MainDesigner', name: '主设审核', assigneeSource: 'ProjectDesignLead' }, { stage: 'MechanicalSupervisor', name: '机械主管批准', assigneeSource: 'PrimaryUnitManager' }] }, electrical: { code: 'electrical-release', name: '电气发布审批', version: 1, steps: [{ stage: 'HardwareEngineer', name: '硬件工程师自检', assigneeSource: 'Submitter' }, { stage: 'HardwareSupervisor', name: '硬件主管审核', assigneeSource: 'PrimaryUnitManager' }, { stage: 'StandardizationSupervisor', name: '标准化主管批准', assigneeSource: 'ParentUnitManager' }] }, emergencySubstituteRoleCode: 'BusinessUnitManager' }, releaseChangeReasonTypes: ['正式补充', '物料问题 / 交期不满足', '物料问题 / 物料下单晚', '物料问题 / 买错物料', '物料问题 / 物料漏买', '图纸问题 / 图纸漏下', '图纸问题 / 图纸错误', '设计问题 / 设计变更', '设计问题 / 设计错误', '客户原因 / 客户需求变更', '客户原因 / 客户信息输入错误', '客户原因 / 客户未及时确认', '客户原因 / 客户未及时提供产品', '其他'], formalSupplementPolicies: { standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } } }
 const defaultCrmIntegrationSettings: CrmIntegrationSettings = { baseUrl: '', username: '', passwordConfigured: false, autoSyncEnabled: false, autoSyncIntervalMinutes: 60, lastSyncAt: null, lastSyncCount: 0, lastAutoSyncAttemptAt: null, lastAutoSyncError: null }
 
 const emptyProject: ProjectSummary = {
@@ -140,6 +143,9 @@ function managedDocumentNode(document: ManagedDocument): DocumentNode {
     configuration: document.kind === 'Drawing' ? '工程图' : '默认',
     quantity: 1,
     version: document.storedVersionCount === 0 ? '—' : document.revision,
+    drawingVersion: document.drawingVersion,
+    drawingVersionNumber: document.drawingVersionNumber,
+    publishedVersion: document.publishedVersion,
     checkedOutBy: document.checkedOutBy,
     lifecycleState: document.state,
     status: document.storedVersionCount === 0 ? 'Unarchived' : 'Normal',
@@ -315,6 +321,7 @@ export function usePdmWorkspace() {
   let releaseStatusLoading = false
   let projectDocumentTimer: number | undefined
   let sessionRenewTimer: number | undefined
+  let sessionHeartbeatTimer: number | undefined
   let persistentSession: AuthSession | null = null
   let sessionRenewal: Promise<boolean> | null = null
   let projectDocumentRefreshPending = false
@@ -1155,7 +1162,7 @@ export function usePdmWorkspace() {
   }
 
   async function requestMaterialSyncTasks() {
-    return hasPermission('material.view') ? listMaterialSyncTasks(accessToken) : []
+    return hasPermission('material.view') ? listMaterialSyncTasks(accessToken, true) : []
   }
 
   async function requestPasswordResetTasks() {
@@ -1184,6 +1191,12 @@ export function usePdmWorkspace() {
   async function forceReleaseEditLock(documentId: string, reason: string) {
     operationPending.value = true
     try { await forceReleaseEditLockRequest(documentId, reason, accessToken); editLocks.value = await requestEditLocks() }
+    finally { operationPending.value = false }
+  }
+
+  async function emergencyReleaseEditLock(documentId: string, sessionId: string, checkedOutAt: string, reason: string) {
+    operationPending.value = true
+    try { await emergencyReleaseEditLockRequest(documentId, sessionId, checkedOutAt, reason, accessToken); editLocks.value = await requestEditLocks() }
     finally { operationPending.value = false }
   }
 
@@ -1224,11 +1237,11 @@ export function usePdmWorkspace() {
     storageStatus.value = await getStorageStatus(project.value.id, accessToken)
   }
 
-  function applySession(session: AuthSession) {
+  async function applySession(session: AuthSession) {
+    if (currentUsername.value !== session.username || activeCompanyId.value !== (session.activeCompanyId ?? session.primaryCompanyId ?? '')) authenticated.value = false
     persistentSession = session
     accessToken = session.accessToken
     postDesktopMessage('session-ready', { accessToken: session.accessToken, activeCompanyId: session.activeCompanyId })
-    authenticated.value = true
     currentUser.value = session.displayName || session.username
     currentUsername.value = session.username
     currentRole.value = session.role
@@ -1246,9 +1259,13 @@ export function usePdmWorkspace() {
     window.localStorage.setItem(sessionKey, JSON.stringify(session))
     window.sessionStorage.removeItem(sessionKey)
     scheduleSessionRenewal(session)
+    await initializeTablePreferences(session.username, activeCompanyId.value, session.accessToken)
+    if (accessToken !== session.accessToken || persistentSession?.username !== session.username) return
+    authenticated.value = true
   }
 
   function clearSession() {
+    clearTablePreferencesSession()
     reloadRequestSequence += 1
     globalLoadErrors = []
     loading.value = false
@@ -1305,14 +1322,14 @@ export function usePdmWorkspace() {
     const wasAuthenticated = authenticated.value
     sessionRenewal = (async () => {
       try {
-        const session = await apiResumeSession(persistentSession!.resumeToken)
-        applySession(session)
+        const session = await apiResumeSession(persistentSession!.resumeToken, persistentSession!.desktopHandoff)
+        await applySession(session)
         if (!wasAuthenticated) await reload()
         return true
       } catch (error) {
-        if (error instanceof PdmApiError && error.status === 401) {
+        if (error instanceof PdmApiError && (error.status === 401 || error.status === 400)) {
           clearSession()
-          loginError.value = '登录已失效，请重新登录。'
+          loginError.value = /[\u3400-\u9fff]/.test(error.message) ? error.message : '登录已失效，请重新登录。'
         } else if (persistentSession) {
           sessionRenewTimer = window.setTimeout(() => void renewPersistentSession(), 60_000)
         }
@@ -1357,7 +1374,7 @@ export function usePdmWorkspace() {
         }
       }
       if (refreshGlobal) {
-        const [loadedProjects, loadedOptions, loadedCustomers, loadedTasks, loadedNotifications, loadedMaterialCodeTasks, loadedMaterialSyncTasks, loadedProgramTemplateTasks, loadedEditLocks, loadedDirectory, loadedProfile, loadedPasswordResetTasks, loadedValidationRules] = await Promise.all([
+        const [loadedProjects, loadedOptions, loadedCustomers, loadedTasks, loadedNotifications, loadedMaterialCodeTasks, loadedMaterialSyncTasks, loadedProgramTemplateTasks, loadedEditLocks, loadedDirectory, loadedProfile, loadedPasswordResetTasks, loadedValidationRules, loadedSettingsResult, loadedEquipmentTypes, loadedCrmIntegrationSettings, loadedFolderTemplate, loadedRolePermissionDirectory] = await Promise.all([
           withLoadContext('项目列表', listProjects(accessToken)),
           optional('项目编号选项', getProjectNumberingOptions(accessToken), projectNumberingOptions.value),
           optional('客户列表', listCustomers(accessToken), customers.value),
@@ -1374,6 +1391,11 @@ export function usePdmWorkspace() {
             if (error instanceof PdmApiError && error.status !== 404) throw error
             return defaultSystemSettings.validationRules
           }), systemSettings.value.validationRules),
+          hasPermission('settings.storage.manage') ? optional('系统设置', getSystemSettings(accessToken), null) : Promise.resolve(null),
+          hasPermission('settings.storage.manage') ? optional('设备类型', listEquipmentTypes(accessToken), equipmentTypes.value) : Promise.resolve([]),
+          hasPermission('settings.customer.manage') ? optional('客户集成设置', getCrmIntegrationSettings(accessToken), crmIntegrationSettings.value) : Promise.resolve({ ...defaultCrmIntegrationSettings }),
+          hasPermission('settings.folder.manage') ? optional('项目文件夹模板', listFolderTemplate(accessToken), folderTemplate.value) : Promise.resolve([]),
+          hasPermission('system.role.view') ? optional('角色权限', getRolePermissionDirectory(accessToken), rolePermissionDirectory.value) : Promise.resolve({ permissions: [], roles: [] }),
         ])
         if (requestSequence !== reloadRequestSequence) return
         projects.value = loadedProjects
@@ -1391,11 +1413,7 @@ export function usePdmWorkspace() {
         passwordResetTasks.value = loadedPasswordResetTasks
         systemSettings.value = { ...systemSettings.value, validationRules: loadedValidationRules }
         if (hasPermission('settings.storage.manage')) {
-          const [loadedSettings, loadedEquipmentTypes] = await Promise.all([
-            optional('系统设置', getSystemSettings(accessToken), systemSettings.value),
-            optional('设备类型', listEquipmentTypes(accessToken), equipmentTypes.value),
-          ])
-          if (requestSequence !== reloadRequestSequence) return
+          const loadedSettings = loadedSettingsResult ?? systemSettings.value
           const mergedSettings = { ...systemSettings.value, ...loadedSettings }
           systemSettings.value = {
             ...systemSettings.value,
@@ -1405,18 +1423,8 @@ export function usePdmWorkspace() {
           }
           equipmentTypes.value = loadedEquipmentTypes
         } else equipmentTypes.value = []
-        const loadedCrmIntegrationSettings = hasPermission('settings.customer.manage')
-          ? await optional('客户集成设置', getCrmIntegrationSettings(accessToken), crmIntegrationSettings.value)
-          : { ...defaultCrmIntegrationSettings }
-        if (requestSequence !== reloadRequestSequence) return
         crmIntegrationSettings.value = loadedCrmIntegrationSettings
-        const loadedFolderTemplate = hasPermission('settings.folder.manage')
-          ? await optional('项目文件夹模板', listFolderTemplate(accessToken), folderTemplate.value) : []
-        if (requestSequence !== reloadRequestSequence) return
         folderTemplate.value = loadedFolderTemplate
-        const loadedRolePermissionDirectory = hasPermission('system.role.view')
-          ? await optional('角色权限', getRolePermissionDirectory(accessToken), rolePermissionDirectory.value) : { permissions: [], roles: [] }
-        if (requestSequence !== reloadRequestSequence) return
         rolePermissionDirectory.value = loadedRolePermissionDirectory
         globalLoadErrors = [...auxiliaryErrors]
       }
@@ -1782,9 +1790,15 @@ export function usePdmWorkspace() {
   }
 
   async function saveFolderTemplate(nodes: ProjectFolderTemplateNode[]) {
+    const projectId = project.value.id
+    const token = accessToken
     operationPending.value = true
     try {
       folderTemplate.value = await saveFolderTemplateRequest(nodes, accessToken)
+      if (projectId && hasPermission('project.content.view')) {
+        const folders = await listProjectFolders(projectId, token)
+        if (project.value.id === projectId && accessToken === token) projectFolders.value = folders
+      }
       return folderTemplate.value
     } finally { operationPending.value = false }
   }
@@ -1798,7 +1812,7 @@ export function usePdmWorkspace() {
           .filter(item => hasRole(item.role))
           .flatMap(item => item.permissions))]
         const stored = restoreSession()
-        if (stored) applySession({ ...stored, permissions: currentPermissions.value })
+        if (stored) await applySession({ ...stored, permissions: currentPermissions.value })
       }
       return rolePermissionDirectory.value
     } finally { operationPending.value = false }
@@ -1838,7 +1852,7 @@ export function usePdmWorkspace() {
       } else {
         postDesktopMessage('credentials-clear')
       }
-      applySession(session)
+      await applySession(session)
       await reload()
     } catch (error) {
       clearSession()
@@ -1858,19 +1872,26 @@ export function usePdmWorkspace() {
   async function changeMyPassword(currentPassword: string, password: string) {
     const session = await changeMyPasswordRequest(currentPassword, password, accessToken)
     const profile = currentProfile.value
-    applySession(session)
+    await applySession(session)
     currentProfile.value = profile
   }
 
   function logout() {
+    if (accessToken) void logoutSession(accessToken).catch(() => { loginError.value = '已退出本页面；服务器暂未连接，原登录名额将在约5分钟后释放。' })
     clearSession()
     loginError.value = ''
     loadError.value = ''
   }
 
   function handleSessionExpired(event?: Event) {
-    const expiredToken = (event as CustomEvent<{ token?: string }> | undefined)?.detail?.token
+    const detail = (event as CustomEvent<{ token?: string; final?: boolean; message?: string }> | undefined)?.detail
+    const expiredToken = detail?.token
     if (expiredToken && expiredToken !== accessToken) return
+    if (detail?.final) {
+      clearSession()
+      loginError.value = detail.message || '登录已失效，请重新登录。'
+      return
+    }
     if (persistentSession?.resumeToken) {
       void renewPersistentSession()
       return
@@ -1892,7 +1913,16 @@ export function usePdmWorkspace() {
     }
   }
 
+  async function syncBrowserSession(event: StorageEvent) {
+    if (event.key !== sessionKey) return
+    if (!event.newValue) { if (authenticated.value) clearSession(); return }
+    const session = restoreSession()
+    if (session && session.accessToken !== accessToken) await applySession(session)
+  }
+
   onMounted(async () => {
+    window.addEventListener('storage', syncBrowserSession)
+    sessionHeartbeatTimer = window.setInterval(() => { if (authenticated.value && accessToken) void heartbeatSession(accessToken).catch(() => {}) }, 60_000)
     window.addEventListener('pdm-session-expired', handleSessionExpired)
     window.addEventListener('focus', refreshOpenProjectOnFocus)
     releaseStatusTimer = window.setInterval(() => void refreshReleaseStatus(), 5000)
@@ -1923,9 +1953,9 @@ export function usePdmWorkspace() {
       const session = restoreSession()
       if (session) {
         persistentSession = session
-        const accessTokenIsValid = new Date(session.expiresAt).getTime() > Date.now()
+        const accessTokenIsValid = !session.desktopHandoff && new Date(session.expiresAt).getTime() > Date.now()
         if (accessTokenIsValid) {
-          applySession(session)
+          await applySession(session)
           authInitialized.value = true
           await reload()
           if (persistentSession?.resumeToken) void renewPersistentSession()
@@ -1939,6 +1969,8 @@ export function usePdmWorkspace() {
   })
 
   onBeforeUnmount(() => {
+    window.removeEventListener('storage', syncBrowserSession)
+    if (sessionHeartbeatTimer !== undefined) window.clearInterval(sessionHeartbeatTimer)
     window.removeEventListener('pdm-session-expired', handleSessionExpired)
     window.removeEventListener('focus', refreshOpenProjectOnFocus)
     if (releaseStatusTimer !== undefined) window.clearInterval(releaseStatusTimer)
@@ -2127,6 +2159,7 @@ export function usePdmWorkspace() {
     markAllNotificationsRead,
     requestEditLockRelease,
     forceReleaseEditLock,
+    emergencyReleaseEditLock,
     resetRequestedPassword,
     loadProjectAuditEntries,
     loadStorageStatus,

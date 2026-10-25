@@ -5,7 +5,9 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>Upton.Pdm.PreviewAgent.Setup</RootNamespace>
     <AssemblyName>Upton.Pdm.PreviewAgent.Setup</AssemblyName>
-    <Version>1.1.2</Version>
+    <Version>1.2.0</Version>
+    <ApplicationIcon>..\Pdm.Desktop\Assets\PdmClient.ico</ApplicationIcon>
+    <PreviewAgentPayloadRoot Condition="'$(PreviewAgentPayloadRoot)' == ''">payload.generated</PreviewAgentPayloadRoot>
     <PlatformTarget>x64</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
     <Nullable>disable</Nullable>
@@ -22,11 +24,14 @@
     <Reference Include="System.Security" />
   </ItemGroup>
   <ItemGroup>
-    <EmbeddedResource Include="payload.generated\agent\*" LogicalName="payload.agent.%(Filename)%(Extension)" />
-    <EmbeddedResource Include="payload.generated\preview-worker\*" LogicalName="payload.worker.%(Filename)%(Extension)" />
+    <Compile Include="..\Pdm.Client.Shared\ClientLogRedaction.cs" Link="ClientLogRedaction.cs" />
+    <EmbeddedResource Include="$(PreviewAgentPayloadRoot)\agent\*" LogicalName="payload.agent.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="$(PreviewAgentPayloadRoot)\preview-worker\*" LogicalName="payload.worker.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="$(PreviewAgentPayloadRoot)\upgrade\*" LogicalName="upgrade.%(Filename)%(Extension)" />
   </ItemGroup>
   <Target Name="EnsurePreviewAgentPayload" BeforeTargets="PrepareForBuild">
-    <Error Condition="!Exists('payload.generated\agent\Upton.Pdm.PreviewAgent.exe')"
-           Text="缺少 payload.generated 载荷：请先运行 .local\Build-PreviewAgentSetup-20260920.ps1（它会调用 Build-PreviewAgentPackage）。" />
+    <Error Condition="!Exists('$(PreviewAgentPayloadRoot)\agent\Upton.Pdm.PreviewAgent.exe')"
+           Text="缺少安装载荷，请先运行 deploy\New-PreviewAgentSetup.ps1。" />
   </Target>
+  <Import Project="..\Pdm.Client.Shared\PlmBrandAssets.targets" />
 </Project>

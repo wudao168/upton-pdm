@@ -22,6 +22,30 @@ public static class EngineeringKitEndpointExtensions
             return Results.Ok(await service.GetAsync(kitId, actor, role, cancellationToken));
         });
 
+        api.MapGet("/library", async (Guid? categoryId, string? query, string? brand, HttpContext context, EngineeringKitService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.ListLibraryAsync(categoryId, query, brand, actor, role, cancellationToken));
+        });
+
+        api.MapPut("/{kitId:guid}/active", async (Guid kitId, SetEngineeringKitActiveRequest request, HttpContext context, EngineeringKitService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.SetActiveAsync(kitId, request.IsActive, request.ExpectedRowVersion, actor, role, cancellationToken));
+        });
+
+        api.MapPut("/{kitId:guid}/library-metadata", async (Guid kitId, SaveEngineeringKitLibraryMetadataCommand request, HttpContext context, EngineeringKitService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.SaveLibraryMetadataAsync(kitId, request, actor, role, cancellationToken));
+        });
+
+        api.MapPut("/{kitId:guid}/category", async (Guid kitId, MoveEngineeringKitCategoryRequest request, HttpContext context, EngineeringKitService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.MoveCategoryAsync(kitId, request.CategoryId, request.ExpectedRowVersion, actor, role, cancellationToken));
+        });
+
         api.MapGet("/options", async (HttpContext context, EngineeringKitService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -84,7 +108,8 @@ public sealed record SaveEngineeringKitRequest(
     string? StandardCode = null,
     string? CategoryName = null,
     string? CategoryCode = null,
-    long? ExpectedRowVersion = null)
+    long? ExpectedRowVersion = null,
+    Guid? StandardLibraryCategoryId = null)
 {
     public SaveEngineeringKitDraftCommand ToCommand() => new(Name, Brand, Description, ChangeNote,
         Components.Select(item => item.ToCommand()).ToArray(),
@@ -92,8 +117,11 @@ public sealed record SaveEngineeringKitRequest(
         string.Equals(ModelMode, nameof(EngineeringKitModelMode.Manual), StringComparison.OrdinalIgnoreCase)
             ? EngineeringKitModelMode.Manual
             : EngineeringKitModelMode.Auto,
-        Model, StandardName, StandardCode, CategoryName, CategoryCode);
+        Model, StandardName, StandardCode, CategoryName, CategoryCode, StandardLibraryCategoryId);
 }
+
+public sealed record MoveEngineeringKitCategoryRequest(Guid CategoryId, long ExpectedRowVersion);
+public sealed record SetEngineeringKitActiveRequest(bool IsActive, long ExpectedRowVersion);
 
 public sealed record PublishEngineeringKitRequest(long ExpectedRowVersion);
 

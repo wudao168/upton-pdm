@@ -32,6 +32,7 @@ describe('RolePermissionSettings', () => {
     ['system.project-permission.edit', ['system.project-permission.view']],
     ['program-template.approve', ['program-template.view']],
     ['standard-library.manage', ['standard-library.view']],
+    ['production.supplier.manage', ['production.supplier.view']],
     ['material-relation.publish', ['material-relation.view']],
   ])('授权 %s 补齐读取前提，撤销读取时清除依赖操作', async (operation, prerequisites) => {
     const codes = [operation, ...prerequisites]

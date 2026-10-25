@@ -8,7 +8,7 @@ public sealed class ProductionSupplierTests
 {
     private static void Company(Guid company, bool allowed = true) => TenantContext.Set(new(
         Guid.NewGuid(), company, company, allowed ? "admin" : "engineer", allowed ? "Administrator" : "Engineer",
-        false, allowed ? new HashSet<string> { PermissionCodes.ProductionAssign } : new HashSet<string>()));
+        false, allowed ? new HashSet<string> { PermissionCodes.ProductionAssign, PermissionCodes.ProductionSupplierView, PermissionCodes.ProductionSupplierManage } : new HashSet<string>()));
 
     [Fact]
     public async Task CatalogKeepsCompaniesSeparateAndEnforcesCategoriesVersionsAndActivation()

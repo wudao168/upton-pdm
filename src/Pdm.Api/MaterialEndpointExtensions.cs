@@ -87,6 +87,13 @@ public static class MaterialEndpointExtensions
             return Results.File(download.Content, "application/octet-stream", download.Attachment.OriginalFileName, enableRangeProcessing: true);
         });
 
+        api.MapDelete("/materials/{materialId:guid}/attachments/{attachmentId:guid}", async (Guid materialId, Guid attachmentId, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            await service.DeleteAsync(materialId, attachmentId, actor, role, cancellationToken);
+            return Results.NoContent();
+        });
+
         api.MapPut("/materials/{materialId:guid}/cover", async (Guid materialId, SetMaterialCoverRequest request, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -458,6 +465,18 @@ public static class MaterialEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(MapSyncBatch(await service.GetAsync(batchId, actor, role, cancellationToken)));
+        });
+
+        api.MapGet("/material-stock-plans", async (HttpContext context, IMaterialRepository materials, IPdmRepository repository, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var allowed = false;
+            foreach (var permission in new[] { PermissionCodes.MaterialView, PermissionCodes.StandardLibraryView, PermissionCodes.BomEdit, PermissionCodes.ProjectContentView })
+                if (await repository.HasUserPermissionAsync(actor, role, permission, cancellationToken)) { allowed = true; break; }
+            if (!allowed) throw new UnauthorizedAccessException("当前角色无权查看料品常备属性。");
+            var configuration = await materials.GetIntegrationConfigurationAsync(cancellationToken);
+            var items = await materials.ListStockedMaterialPlansAsync(configuration.EnterpriseCode, configuration.OrganizationCode, cancellationToken);
+            return Results.Ok(new { configuration.EnterpriseCode, configuration.OrganizationCode, Items = items });
         });
 
         api.MapGet("/u9-material-integration", async (HttpContext context, MaterialService service, CancellationToken cancellationToken) =>

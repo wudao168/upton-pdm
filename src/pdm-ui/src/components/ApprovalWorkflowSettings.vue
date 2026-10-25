@@ -243,9 +243,9 @@ function toggleUnlimited(kind: keyof FormalSupplementPolicies, field: 'maximumCo
         <div class="workflow-card-title">
           <div><h2>{{ flow.name }}</h2><p>当前模板 v{{ flow.version }}</p></div>
           <button type="button" class="pdm-primary-action" :disabled="pending || saving" @click="save(flow.code)">保存审批设置</button>
-          <span>{{ flow.code === 'standard-release' ? '标准件BOM' : flow.code === 'nonstandard-release' ? '非标件BOM与图纸' : flow.code === 'electrical-release' ? '电气BOM' : flow.code === 'material-code-application' ? '物料料号申请' : '项目验证计划' }}</span>
+          <span>{{ flow.code === 'standard-release' ? '标准件BOM' : flow.code === 'nonstandard-release' ? '非标件BOM与图纸' : flow.code === 'electrical-release' ? '电气件BOM' : flow.code === 'material-code-application' ? '物料料号申请' : '项目验证计划' }}</span>
         </div>
-        <p v-if="flow.code === 'material-code-application'" class="workflow-material-note">用于标准件和电气BOM物料申请，末节点通过后才生成料号并进入同步；角色节点由该节点任一指定角色的人员处理。</p>
+        <p v-if="flow.code === 'material-code-application'" class="workflow-material-note">用于标准件和电气件BOM物料申请，末节点通过后才生成料号并进入同步；角色节点由该节点任一指定角色的人员处理。</p>
         <ol class="workflow-steps">
           <li v-for="(step, index) in flow.steps" :key="step.stage">
             <b>{{ index + 1 }}</b>
@@ -305,7 +305,7 @@ function toggleUnlimited(kind: keyof FormalSupplementPolicies, field: 'maximumCo
     <section class="pdm-panel change-reason-settings">
       <header><div><h2>增补/变更原因与正式补充规则</h2><p>工程师必须选择到具体原因；“其他”必须填写说明。具体原因文字可编辑，保存后用于新操作的原因选择；业务编码和历史记录保持原值。</p></div><button type="button" class="pdm-primary-action" :disabled="pending || saving" @click="save('change-rules')">保存规则</button></header>
       <div class="formal-supplement-policy-grid">
-        <section v-for="item in [{ key: 'standard', label: '标准件BOM' }, { key: 'electrical', label: '电气BOM' }]" :key="item.key" class="formal-supplement-policy-card">
+        <section v-for="item in [{ key: 'standard', label: '标准件BOM' }, { key: 'electrical', label: '电气件BOM' }]" :key="item.key" class="formal-supplement-policy-card">
           <strong>{{ item.label }}</strong>
           <label class="policy-value"><span>正式补充次数</span><input v-model.number="formalSupplementPolicies[item.key as keyof FormalSupplementPolicies].maximumCount" type="number" min="0" max="99" :disabled="formalSupplementPolicies[item.key as keyof FormalSupplementPolicies].maximumCount == null"><span>次</span></label>
           <label class="policy-unlimited"><input type="checkbox" :checked="formalSupplementPolicies[item.key as keyof FormalSupplementPolicies].maximumCount == null" @change="toggleUnlimited(item.key as keyof FormalSupplementPolicies, 'maximumCount', ($event.target as HTMLInputElement).checked)">不限次数</label>

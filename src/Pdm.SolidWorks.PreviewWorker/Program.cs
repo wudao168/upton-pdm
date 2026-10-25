@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -19,6 +20,8 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        Console.InputEncoding = new UTF8Encoding(false);
+        Console.OutputEncoding = new UTF8Encoding(false);
         var flags = args.Where(argument => argument.StartsWith("--", StringComparison.Ordinal))
             .Select(argument => argument.ToLowerInvariant())
             .ToArray();
@@ -83,7 +86,7 @@ internal static class Program
                     var manifest = serializer.Deserialize<PreviewWorkerManifest>(File.ReadAllText(request.Manifest, Encoding.UTF8));
                     if (manifest?.Jobs == null || manifest.Jobs.Count == 0)
                         throw new InvalidDataException("发布转换清单为空。");
-                    result = session.Convert(manifest.Jobs, (stage, completed, total, solidWorksPid) => { Console.Out.WriteLine(serializer.Serialize(new { Progress = true, Stage = stage, Completed = completed, Total = total, SolidWorksPid = solidWorksPid })); Console.Out.Flush(); });
+                    result = session.Convert(manifest.Jobs, (stage, completed, total, solidWorksPid, item) => { Console.Out.WriteLine(serializer.Serialize(new { Progress = true, Stage = stage, Completed = completed, Total = total, SolidWorksPid = solidWorksPid, Item = item })); Console.Out.Flush(); });
                 }
                 catch (Exception exception)
                 {
@@ -115,13 +118,15 @@ internal static class Program
     {
         private readonly bool lightweightAssemblies;
         private SldWorks application;
+        private Process ownedProcess;
+        private long ownedStartTicksUtc;
 
         public ConversionSession(bool lightweightAssemblies) => this.lightweightAssemblies = lightweightAssemblies;
 
-        public PreviewWorkerResult Convert(IReadOnlyList<PreviewWorkerJob> jobs, Action<string, int, int, int> progress = null)
+        public PreviewWorkerResult Convert(IReadOnlyList<PreviewWorkerJob> jobs, Action<string, int, int, int, PreviewWorkerItem> progress = null)
         {
             var total = jobs.Count(job => job.Convert); var completed = 0;
-            progress?.Invoke("启动或连接SolidWorks", completed, total, 0);
+            progress?.Invoke("启动或连接SolidWorks", completed, total, 0, null);
             var items = new List<PreviewWorkerItem>();
             foreach (var job in jobs)
             {
@@ -133,9 +138,9 @@ internal static class Program
                 {
                     var current = EnsureApplication();
                     solidWorksPid = current.GetProcessID();
-                    progress?.Invoke("转换文件：" + Path.GetFileName(job.SourcePath), completed, total, solidWorksPid);
-                    current.CloseAllDocuments(true);
-                    ConvertOne(current, job, lightweightAssemblies);
+                    progress?.Invoke("转换文件：" + Path.GetFileName(job.SourcePath), completed, total, solidWorksPid, null);
+                    CloseSessionDocuments();
+                    ConvertOne(current, job, lightweightAssemblies, AssertPrivateApplication);
                     items.Add(new PreviewWorkerItem { DocumentId = job.DocumentId, Success = true });
                 }
                 catch (Exception exception)
@@ -148,11 +153,11 @@ internal static class Program
                     Reset();
                     solidWorksPid = 0;
                 }
-                progress?.Invoke("已处理文件：" + Path.GetFileName(job.SourcePath), ++completed, total, solidWorksPid);
+                progress?.Invoke("已处理文件：" + Path.GetFileName(job.SourcePath), ++completed, total, solidWorksPid, items[items.Count - 1]);
             }
-            try { application?.CloseAllDocuments(true); } catch (Exception) { }
+            try { if (application != null) CloseSessionDocuments(); } catch (Exception error) { Console.Error.WriteLine(error); }
             var failed = items.Count(item => !item.Success);
-            return new PreviewWorkerResult { Success = failed == 0, Items = items,
+            return new PreviewWorkerResult { Success = failed == 0, Items = items, AssemblyPreviewVersion = 1,
                 Error = failed == 0 ? null : $"{failed}项图档转换失败，其余{items.Count - failed}项已完成，可单独重试失败项。" };
         }
 
@@ -160,23 +165,67 @@ internal static class Program
         {
             if (application == null)
             {
-                application = new SldWorks
+                // COM activation may attach to a user's existing session. Refuse
+                // before activation, and verify the returned process before any mutation.
+                var existing = Process.GetProcessesByName("SLDWORKS");
+                try
                 {
-                    Visible = false,
-                    UserControl = false,
-                    CommandInProgress = true
-                };
+                    if (existing.Length > 0)
+                        throw new InvalidOperationException("本机已有SolidWorks会话，后台转图未接管或关闭任何窗口。请在独立转图电脑处理，或待该会话正常结束后重试。");
+                }
+                finally { foreach (var process in existing) process.Dispose(); }
+                var createdAfter = DateTime.UtcNow;
+                application = new SldWorks();
+                var candidate = Process.GetProcessById(application.GetProcessID());
+                try
+                {
+                    if (!string.Equals(candidate.ProcessName, "SLDWORKS", StringComparison.OrdinalIgnoreCase)
+                        || candidate.StartTime.ToUniversalTime() < createdAfter || application.UserControl || application.Visible)
+                        throw new InvalidOperationException("未能确认独立的后台SolidWorks进程，已停止转图；现有窗口及文件保持不变。");
+                    ownedStartTicksUtc = candidate.StartTime.ToUniversalTime().Ticks;
+                    ownedProcess = candidate;
+                    candidate = null;
+                }
+                finally { candidate?.Dispose(); }
+                AssertPrivateApplication();
+                application.CommandInProgress = true;
             }
+            AssertPrivateApplication();
             return application;
+        }
+
+        private void AssertPrivateApplication()
+        {
+            if (application == null || ownedProcess == null || ownedProcess.HasExited
+                || ownedProcess.StartTime.ToUniversalTime().Ticks != ownedStartTicksUtc
+                || application.GetProcessID() != ownedProcess.Id || application.UserControl || application.Visible)
+                throw new InvalidOperationException("后台转图的进程归属已变化，已停止操作并保留当前SolidWorks窗口及文件。");
+        }
+
+        private void CloseSessionDocuments()
+        {
+            AssertPrivateApplication();
+            application.CloseAllDocuments(true);
         }
 
         public void Reset()
         {
-            if (application == null) return;
-            try { application.CommandInProgress = false; } catch { }
-            try { application.ExitApp(); } catch { }
-            try { Marshal.FinalReleaseComObject(application); } catch { }
+            if (application != null)
+            {
+                try
+                {
+                    AssertPrivateApplication();
+                    application.CommandInProgress = false;
+                    AssertPrivateApplication();
+                    application.ExitApp();
+                }
+                catch (Exception error) { Console.Error.WriteLine("未关闭未经核对的SolidWorks会话：" + error); }
+                try { if (Marshal.IsComObject(application)) Marshal.FinalReleaseComObject(application); } catch { }
+            }
             application = null;
+            ownedProcess?.Dispose();
+            ownedProcess = null;
+            ownedStartTicksUtc = 0;
             GC.Collect();
             GC.WaitForPendingFinalizers();
         }
@@ -184,11 +233,12 @@ internal static class Program
         public void Dispose() => Reset();
     }
 
-    private static void ConvertOne(ISldWorks application, PreviewWorkerJob job, bool lightweightAssemblies)
+    private static void ConvertOne(ISldWorks application, PreviewWorkerJob job, bool lightweightAssemblies, Action verifyApplication)
     {
         if (job == null || string.IsNullOrWhiteSpace(job.SourcePath) || string.IsNullOrWhiteSpace(job.OutputPath))
             throw new InvalidDataException("发布转换任务字段不完整。");
         if (!File.Exists(job.SourcePath)) throw new FileNotFoundException("发布源文件不存在。", job.SourcePath);
+        verifyApplication();
         var documentType = DocumentType(job.Kind);
         Directory.CreateDirectory(Path.GetDirectoryName(job.OutputPath));
         if (File.Exists(job.OutputPath)) File.Delete(job.OutputPath);
@@ -199,23 +249,51 @@ internal static class Program
         try
         {
             var formalDrawing = !string.IsNullOrWhiteSpace(job.ReleaseRevision);
+            if (job.AssemblyPreview)
+            {
+                if (documentType != (int)swDocumentTypes_e.swDocASSEMBLY
+                    || !string.Equals(Path.GetExtension(job.OutputPath), ".easm", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("最新装配预览任务的来源或输出格式不正确。");
+                PrepareAssemblyPreviewReferences(application, Path.GetDirectoryName(job.SourcePath));
+            }
             if (formalDrawing && (documentType != (int)swDocumentTypes_e.swDocDRAWING
                 || string.IsNullOrWhiteSpace(job.QrContent)
                 || !string.Equals(Path.GetExtension(job.OutputPath), ".slddrw", StringComparison.OrdinalIgnoreCase)))
                 throw new InvalidDataException("正式图纸任务缺少版次、二维码内容或输出格式不正确。");
             var openOptions = (formalDrawing ? (int)swOpenDocOptions_e.swOpenDocOptions_Silent : OpenOptionsCommon)
-                | (lightweightAssemblies && documentType == (int)swDocumentTypes_e.swDocASSEMBLY ? OpenOptionsLightweight : 0);
+                | (lightweightAssemblies && !job.AssemblyPreview && documentType == (int)swDocumentTypes_e.swDocASSEMBLY ? OpenOptionsLightweight : 0);
             document = application.OpenDoc6(
                 job.SourcePath,
                 documentType,
                 openOptions,
-                string.Empty,
+                job.AssemblyPreview ? job.Configuration ?? string.Empty : string.Empty,
                 ref openErrors,
                 ref openWarnings) as IModelDoc2;
             if (document == null || openErrors != 0)
                 throw new InvalidOperationException($"SolidWorks打开{Path.GetFileName(job.SourcePath)}失败，错误码{openErrors}，警告码{openWarnings}。");
 
             if (formalDrawing) FormalDrawingStamp.Apply(application, document, job.ReleaseRevision, job.QrContent);
+            if (job.AssemblyPreview)
+            {
+                if (!string.IsNullOrWhiteSpace(job.Configuration)
+                    && !string.Equals(document.ConfigurationManager.ActiveConfiguration.Name, job.Configuration, StringComparison.OrdinalIgnoreCase)
+                    && (!document.ShowConfiguration2(job.Configuration)
+                        || !string.Equals(document.ConfigurationManager.ActiveConfiguration.Name, job.Configuration, StringComparison.OrdinalIgnoreCase)))
+                {
+                    Console.Error.WriteLine("装配预览配置：要求=" + job.Configuration + "；实际=" + document.ConfigurationManager.ActiveConfiguration.Name
+                        + "；可用=" + string.Join("、", (document.GetConfigurationNames() as Array)?.Cast<object>() ?? Enumerable.Empty<object>()));
+                    throw new InvalidOperationException("装配预览指定的配置不存在，请核对存档配置后重试。");
+                }
+                ((IAssemblyDoc)document).ResolveAllLightWeightComponents(false);
+                VerifyAssemblyPreviewReferences((IAssemblyDoc)document, Path.GetDirectoryName(job.SourcePath));
+                if (!document.ForceRebuild3(false))
+                    throw new InvalidOperationException("最新装配预览重建失败，请检查装配特征和引用后重试。");
+                var activationErrors = 0;
+                if (application.ActivateDoc3(document.GetTitle(), false, (int)swRebuildOnActivation_e.swDontRebuildActiveDoc,
+                    ref activationErrors) == null || activationErrors != 0)
+                    throw new InvalidOperationException("无法激活最新装配预览，请检查转图日志后重试。");
+                document.ClearSelection2(true);
+            }
 
             var saveErrors = 0;
             var saveWarnings = 0;
@@ -255,7 +333,7 @@ internal static class Program
         {
             if (document != null)
             {
-                try { application.CloseDoc(document.GetTitle()); } catch { }
+                try { verifyApplication(); application.CloseDoc(document.GetTitle()); } catch { }
                 try { Marshal.FinalReleaseComObject(document); } catch { }
             }
         }
@@ -267,6 +345,40 @@ internal static class Program
         if (string.Equals(kind, "Part", StringComparison.OrdinalIgnoreCase)) return (int)swDocumentTypes_e.swDocPART;
         if (string.Equals(kind, "Drawing", StringComparison.OrdinalIgnoreCase)) return (int)swDocumentTypes_e.swDocDRAWING;
         throw new InvalidDataException($"不支持的SolidWorks图档类型：{kind}");
+    }
+
+    private static void PrepareAssemblyPreviewReferences(ISldWorks application, string directory)
+    {
+        var files = Directory.GetFiles(directory).ToDictionary(Path.GetFileName, StringComparer.OrdinalIgnoreCase);
+        application.SetSearchFolders((int)swSearchFolderTypes_e.swDocumentType, directory);
+        foreach (var owner in files.Values.Where(path => new[] { ".sldasm", ".sldprt" }.Contains(Path.GetExtension(path).ToLowerInvariant())))
+        {
+            var dependencies = application.GetDocumentDependencies2(owner, false, false, false) as Array;
+            if (dependencies == null) continue;
+            if (dependencies.Length % 2 != 0)
+                throw new InvalidOperationException("无法读取装配预览引用清单，请检查转图日志后重试。");
+            for (var index = 1; index < dependencies.Length; index += 2)
+            {
+                var reference = (Convert.ToString(dependencies.GetValue(index)) ?? "").Split('|')[0];
+                if (!files.TryGetValue(Path.GetFileName(reference), out var target)
+                    || string.Equals(reference, target, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!application.ReplaceReferencedDocument(owner, reference, target))
+                    throw new InvalidOperationException("无法将装配预览引用定位到受控副本，请检查转图日志后重试。");
+            }
+        }
+    }
+
+    private static void VerifyAssemblyPreviewReferences(IAssemblyDoc assembly, string directory)
+    {
+        var prefix = Path.GetFullPath(directory).TrimEnd('\\') + Path.DirectorySeparatorChar;
+        foreach (var component in ((assembly.GetComponents(false) as Array)?.Cast<object>() ?? Enumerable.Empty<object>()).OfType<IComponent2>())
+        {
+            if (component.IsSuppressed() || component.IsVirtual) continue;
+            var path = component.GetPathName();
+            if (string.IsNullOrWhiteSpace(path) || !Path.GetFullPath(path).StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                || !File.Exists(path) || component.GetModelDoc2() == null)
+                throw new InvalidOperationException("装配预览存在未还原或未使用受控副本的组件，请检查引用后重试。");
+        }
     }
 
     private sealed class PreviewWorkerManifest
@@ -290,10 +402,13 @@ internal static class Program
         public bool Convert { get; set; } = true;
         public string ReleaseRevision { get; set; }
         public string QrContent { get; set; }
+        public bool AssemblyPreview { get; set; }
+        public string Configuration { get; set; }
     }
 
     private sealed class PreviewWorkerResult
     {
+        public int AssemblyPreviewVersion { get; set; }
         public bool Success { get; set; }
         public string Error { get; set; }
         public List<PreviewWorkerItem> Items { get; set; }

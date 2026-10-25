@@ -145,7 +145,7 @@ internal sealed class PdmSegmentedTabControl : TabControl
         return path;
     }
 
-    private static Dictionary<string, Color> ReadTheme(string theme)
+    internal static Dictionary<string, Color> ReadTheme(string theme)
     {
         // 与网页使用同一份主题变量，避免原生页签另存一套近似颜色。
         using (var stream = typeof(PdmSegmentedTabControl).Assembly.GetManifestResourceStream("Upton.Pdm.SolidWorks.Assets.Themes.css"))

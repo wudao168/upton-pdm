@@ -21,6 +21,7 @@ export interface ReleaseChannelDelivery {
 }
 export interface ReleaseExecutionView {
   id: string; state: string; ready: boolean; acknowledgementIds: string[]
+  workflowNotifications?: Array<{ state: string; message: string; enabled: boolean }>
   selectedBomItemIds: string[]; confirmedRemovedBomItemIds: string[]; versionBindings?: ReleaseVersionBinding[] | null
   progress: null | {
     u9: Record<string, { state: string; message: string; confirmedAt?: string | null }>

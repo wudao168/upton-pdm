@@ -14,6 +14,22 @@ namespace Upton.Pdm.Api;
 
 public static class PdmEndpointExtensions
 {
+    public static string ComputeArchiveRequestHash(ArchiveBatchRequest request)
+    {
+        var serialized = JsonSerializer.SerializeToNode(request)!;
+        // 旧批次回执使用原请求结构的指纹；默认释放模式不能因新增可选字段改变指纹。
+        foreach (var file in serialized["Files"]!.AsArray())
+        {
+            var input = file!["Request"]!.AsObject();
+            if (input["KeepEditing"]?.GetValue<bool>() != true && string.IsNullOrWhiteSpace(input["HandoffTo"]?.GetValue<string>()))
+            {
+                input.Remove("KeepEditing");
+                input.Remove("HandoffTo");
+            }
+        }
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(serialized.ToJsonString())));
+    }
+
     public static void MapPdmEndpoints(this WebApplication app)
     {
         app.MapGet("/health", HealthAsync).AllowAnonymous();
@@ -24,6 +40,7 @@ public static class PdmEndpointExtensions
             IPasswordService passwords,
             ITokenIssuer tokenIssuer,
             IPersistentSessionTokenService persistentSessions,
+            LoginSecurityService loginSecurity,
             CompanySessionService companySessions,
             IOptions<AuthenticationOptions> authenticationOptions,
             HttpContext context,
@@ -39,10 +56,13 @@ public static class PdmEndpointExtensions
             var lifetime = TimeSpan.FromHours(authenticationOptions.Value.TokenLifetimeHours);
             var expiresAt = timeProvider.GetUtcNow().Add(lifetime);
             var company = await companySessions.ResolveAsync(account, context.Request.Headers["X-Company-Id"].FirstOrDefault(), cancellationToken);
+            var peer = await loginSecurity.ResolvePeerAsync(context.Request, request.ClientInstanceId, request.ClientType, cancellationToken);
+            var login = await loginSecurity.OpenAsync(account with { CompanyId = company.PrimaryCompanyId }, peer, null, false, cancellationToken);
+            if (login.Error is not null) return Results.Problem(login.Error, statusCode: StatusCodes.Status409Conflict, title: "登录受限");
             return Results.Ok(new LoginResponse(
-                tokenIssuer.Issue(account, lifetime),
+                tokenIssuer.Issue(account, lifetime, login.SessionId),
                 expiresAt,
-                persistentSessions.Issue(account),
+                persistentSessions.Issue(account, login.SessionId),
                 account.Username,
                 account.DisplayName,
                 account.EffectiveRoleCode,
@@ -60,6 +80,7 @@ public static class PdmEndpointExtensions
             IPdmRepository repository,
             ITokenIssuer tokenIssuer,
             IPersistentSessionTokenService persistentSessions,
+            LoginSecurityService loginSecurity,
             CompanySessionService companySessions,
             IOptions<AuthenticationOptions> authenticationOptions,
             HttpContext context,
@@ -73,10 +94,25 @@ public static class PdmEndpointExtensions
             var lifetime = TimeSpan.FromHours(authenticationOptions.Value.TokenLifetimeHours);
             var expiresAt = timeProvider.GetUtcNow().Add(lifetime);
             var company = await companySessions.ResolveAsync(account, context.Request.Headers["X-Company-Id"].FirstOrDefault(), cancellationToken);
+            var peer = await loginSecurity.ResolvePeerAsync(context.Request, request.ClientInstanceId, request.ClientType, cancellationToken);
+            LoginSecurityResult login;
+            if (request.DesktopHandoff)
+            {
+                login = await loginSecurity.OpenAsync(account with { CompanyId = company.PrimaryCompanyId }, peer, null, false, cancellationToken, handoff: true, handoffFrom: ticket.SessionId);
+            }
+            else if (ticket.SessionId is null)
+            {
+                var policy = await loginSecurity.PolicyAsync(cancellationToken);
+                if (policy.SingleSessionEnabled || policy.DeviceBindingEnabled)
+                    return Results.Problem("登录安全规则已启用，请重新输入账号密码登录。", statusCode: 401, title: "请重新登录");
+                login = await loginSecurity.OpenAsync(account with { CompanyId = company.PrimaryCompanyId }, peer, null, false, cancellationToken);
+            }
+            else login = await loginSecurity.OpenAsync(account with { CompanyId = company.PrimaryCompanyId }, peer, ticket.SessionId, true, cancellationToken);
+            if (login.Error is not null) return Results.Problem(login.Error, statusCode: StatusCodes.Status401Unauthorized, title: "请重新登录");
             return Results.Ok(new LoginResponse(
-                tokenIssuer.Issue(account, lifetime),
+                tokenIssuer.Issue(account, lifetime, login.SessionId),
                 expiresAt,
-                persistentSessions.Issue(account),
+                persistentSessions.Issue(account, login.SessionId),
                 account.Username,
                 account.DisplayName,
                 account.EffectiveRoleCode,
@@ -157,9 +193,9 @@ public static class PdmEndpointExtensions
             var lifetime = TimeSpan.FromHours(authenticationOptions.Value.TokenLifetimeHours);
             var company = await companySessions.ResolveAsync(updatedAccount, TenantContext.CompanyId?.ToString(), cancellationToken);
             return Results.Ok(new LoginResponse(
-                tokenIssuer.Issue(updatedAccount, lifetime),
+                tokenIssuer.Issue(updatedAccount, lifetime, context.User.FindFirst("sid")?.Value),
                 timeProvider.GetUtcNow().Add(lifetime),
-                persistentSessions.Issue(updatedAccount),
+                persistentSessions.Issue(updatedAccount, context.User.FindFirst("sid")?.Value),
                 account.Username,
                 account.DisplayName,
                 updatedAccount.EffectiveRoleCode,
@@ -418,6 +454,9 @@ public static class PdmEndpointExtensions
                 CheckoutStrongReminderHours = request.CheckoutStrongReminderHours,
                 CheckoutOverdueHours = request.CheckoutOverdueHours,
                 CheckoutForceReleaseHours = request.CheckoutForceReleaseHours,
+                CheckoutAutoReleaseEnabled = request.CheckoutAutoReleaseEnabled ?? currentSettings.CheckoutAutoReleaseEnabled,
+                CheckoutIdleReleaseMinutes = request.CheckoutIdleReleaseMinutes ?? currentSettings.CheckoutIdleReleaseMinutes,
+                CheckoutReleaseCountdownSeconds = request.CheckoutReleaseCountdownSeconds ?? currentSettings.CheckoutReleaseCountdownSeconds,
                 BomDrawingNumberProperty = request.BomDrawingNumberProperty,
                 BomNameProperty = request.BomNameProperty,
                 BomDescriptionProperty = request.BomDescriptionProperty,
@@ -775,6 +814,20 @@ public static class PdmEndpointExtensions
             return Results.Ok(versions);
         });
 
+        api.MapPost("/documents/{documentId:guid}/assembly-preview", async (Guid documentId, HttpContext context,
+            IPdmRepository repository, PdmWorkflowService workflow, IAssemblyPreviewConverter converter, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var manifest = await workflow.CreateControlledOpenManifestAsync(documentId, null, false, false, actor, role, cancellationToken);
+            var project = await repository.FindProjectAsync(manifest.ProjectId, cancellationToken)
+                ?? throw new PdmNotFoundException("装配项目不存在。");
+            var preview = await converter.GenerateAssemblyAsync(manifest, project, cancellationToken, actor);
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.Headers["X-Pdm-Preview-Version"] = preview.VersionId.ToString("D");
+            context.Response.Headers["X-Pdm-Preview-Sha256"] = preview.Sha256;
+            return Results.File(preview.Path, "application/octet-stream", "preview.easm");
+        });
+
         api.MapGet("/documents/{documentId:guid}/preview-source-version", async (Guid documentId, Guid? versionId, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -906,7 +959,7 @@ public static class PdmEndpointExtensions
         api.MapPost("/projects/{projectId:guid}/production-drawings/archive", async (
             Guid projectId, ProductionDrawingArchiveRequest request, HttpContext context, ProductionDrawingService drawings,
             IPdmRepository repository, IFileStorage storage, PdmWorkflowService workflow,
-            IOptions<PdmStorageOptions> storageOptions, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+            IOptions<PdmStorageOptions> storageOptions, TimeProvider timeProvider, IMaterialRepository materials, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var project = await repository.FindProjectAsync(projectId, cancellationToken);
@@ -954,7 +1007,10 @@ public static class PdmEndpointExtensions
                         if (package is not null) metadata = metadata with {
                             Fields = metadata.Fields.Select(field => field.Key == "整套数量" ? new KeyValuePair<string, string>(field.Key, $"{Math.Max(1, package.WholeSetMultiplier)}套") : field).ToArray(),
                             Notes = $"发布日期：{package.PublishedAt?.ToOffset(TimeSpan.FromHours(8)).ToString("yyyy-MM-dd") ?? "未发布"}" };
-                        await bomTarget.WriteAsync(ProjectWorkbookHeader.Apply(BomWorkbook.WriteProductionRelease(bomItems, quantities), metadata), cancellationToken);
+                        var displayedItems = package is null ? bomItems : BomDrawingRevision.ForPackage(bomItems, package);
+                        var stockConfig = await materials.GetIntegrationConfigurationAsync(cancellationToken);
+                        var stockPlans = await materials.ListStockedMaterialPlansAsync(stockConfig.EnterpriseCode, stockConfig.OrganizationCode, cancellationToken);
+                        await bomTarget.WriteAsync(MaterialStockWorkbook.Apply(ProjectWorkbookHeader.Apply(BomWorkbook.WriteProductionRelease(displayedItems, quantities), metadata), stockPlans), cancellationToken);
                     }
                     foreach (var item in items)
                     {
@@ -1154,10 +1210,11 @@ public static class PdmEndpointExtensions
             return Results.Ok(summary == true && bomKind is (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical) ? BomSummaryProjection.Group(items) : items);
         });
 
-        api.MapGet("/projects/{projectId:guid}/bom-source-data", async (Guid projectId, Guid? rootDocumentId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{projectId:guid}/bom-source-data", async (Guid projectId, Guid? rootDocumentId, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await workflow.GetBomSourceDataAsync(projectId, actor, role, cancellationToken, rootDocumentId));
+            var items = await workflow.GetBomSourceDataAsync(projectId, actor, role, cancellationToken, rootDocumentId);
+            return Results.Ok(await BomDrawingRevision.CurrentAsync(repository, items, cancellationToken));
         });
 
         api.MapPut("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, bool? includeDraft, bool? summary, ReplaceBomRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1224,13 +1281,14 @@ public static class PdmEndpointExtensions
             }
             return Results.Ok(metadata);
         });
-        api.MapGet("/projects/{projectId:guid}/boms/wear-parts/export", async (Guid projectId, string? mode, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{projectId:guid}/boms/wear-parts/export", async (Guid projectId, string? mode, HttpContext context, IPdmRepository repository, IMaterialRepository materials, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             if (!Enum.TryParse<BomWorkbookExportMode>(mode ?? nameof(BomWorkbookExportMode.Summary), true, out var exportMode)) return Results.BadRequest(new { message = "导出方式必须是Summary或Structure。" });
             var project = await repository.FindProjectAsync(projectId, cancellationToken);
             if (project is null) return Results.NotFound();
-            var items = await workflow.GetWearPartBomAsync(projectId, actor, role, cancellationToken);
+            var items = await BomDrawingRevision.CurrentAsync(repository,
+                await workflow.GetWearPartBomAsync(projectId, actor, role, cancellationToken), cancellationToken);
             var mainProjectId = project.RootProjectId ?? project.ParentProjectId ?? project.Id;
             var mainProject = mainProjectId == project.Id ? project : await repository.FindProjectAsync(mainProjectId, cancellationToken) ?? project;
             var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
@@ -1253,10 +1311,12 @@ public static class PdmEndpointExtensions
                 exportedAt);
             contextData = contextData with { Header = ProjectWorkbookMetadata.ForProject(project, mainProject, directory, "易损件BOM", "BOM版本", contextData.BomVersion, exportedAt, actor, (project.Id == mainProject.Id ? "当前主项目 · " : "当前子项目 · ") + (exportMode == BomWorkbookExportMode.Summary ? "汇总导出" : "结构导出")) };
             var fileName = BomWorkbook.ExportFileName(project.Code, "易损件BOM", "统计", exportedAt);
-            return Results.File(BomWorkbook.WriteExport(items, contextData, exportMode), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
+            var stockConfig = await materials.GetIntegrationConfigurationAsync(cancellationToken);
+            var stockPlans = await materials.ListStockedMaterialPlansAsync(stockConfig.EnterpriseCode, stockConfig.OrganizationCode, cancellationToken);
+            return Results.File(MaterialStockWorkbook.Apply(BomWorkbook.WriteExport(items, contextData, exportMode), stockPlans), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
         });
 
-        api.MapGet("/projects/{projectId:guid}/boms/{kind}/export", async (Guid projectId, string kind, string? mode, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{projectId:guid}/boms/{kind}/export", async (Guid projectId, string kind, string? mode, HttpContext context, IPdmRepository repository, IMaterialRepository materials, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
@@ -1264,7 +1324,8 @@ public static class PdmEndpointExtensions
             if (!Enum.TryParse<BomWorkbookExportMode>(mode ?? nameof(BomWorkbookExportMode.Summary), true, out var exportMode)) return Results.BadRequest(new { message = "导出方式必须是Summary或Structure。" });
             var project = await repository.FindProjectAsync(projectId, cancellationToken);
             if (project is null) return Results.NotFound();
-            var items = (await repository.GetBomAsync(projectId, bomKind, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
+            var items = (await BomDrawingRevision.CurrentAsync(repository,
+                await repository.GetBomAsync(projectId, bomKind, cancellationToken), cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
             var mainProjectId = project.RootProjectId ?? project.ParentProjectId ?? project.Id;
             var mainProject = mainProjectId == project.Id ? project : await repository.FindProjectAsync(mainProjectId, cancellationToken) ?? project;
             var versions = await repository.ListBomVersionsAsync(projectId, bomKind, cancellationToken);
@@ -1296,7 +1357,9 @@ public static class PdmEndpointExtensions
                 exportedAt);
             contextData = contextData with { Header = ProjectWorkbookMetadata.ForProject(project, mainProject, directory, bomName, "BOM版本", versionLabel, exportedAt, actor, (project.Id == mainProject.Id ? "当前主项目 · " : "当前子项目 · ") + (exportMode == BomWorkbookExportMode.Summary ? "汇总导出" : "结构导出")) };
             var fileName = BomWorkbook.ExportFileName(project.Code, bomName, versionLabel, exportedAt);
-            return Results.File(BomWorkbook.WriteExport(items, contextData, exportMode), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
+            var stockConfig = await materials.GetIntegrationConfigurationAsync(cancellationToken);
+            var stockPlans = await materials.ListStockedMaterialPlansAsync(stockConfig.EnterpriseCode, stockConfig.OrganizationCode, cancellationToken);
+            return Results.File(MaterialStockWorkbook.Apply(BomWorkbook.WriteExport(items, contextData, exportMode), stockPlans), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
         });
 
         api.MapPost("/projects/{projectId:guid}/boms/generate", async (Guid projectId, bool? apply, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1570,6 +1633,16 @@ public static class PdmEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await workflow.ForceReleaseEditLockAsync(documentId, actor, role, request.Reason, cancellationToken));
         });
+        api.MapPost("/documents/{documentId:guid}/emergency-release", async (Guid documentId, EmergencyEditReleaseRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.EmergencyReleaseEditLockAsync(documentId, request.SessionId, request.CheckedOutAt, actor, role, request.Reason, ct));
+        });
+        api.MapPost("/documents/{documentId:guid}/auto-release", async (Guid documentId, AutoEditReleaseRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.AutoReleaseUnchangedEditAsync(documentId, request.SessionId, request.CheckedOutAt, request.BaseVersionId, request.Sha256, actor, role, ct));
+        });
 
         api.MapGet("/documents/{documentId:guid}/where-used", async (Guid documentId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
@@ -1586,14 +1659,14 @@ public static class PdmEndpointExtensions
         api.MapPost("/archive-batches", async (ArchiveBatchRequest request, HttpContext context, PdmWorkflowService workflow, TimeProvider timeProvider, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var requestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(request))));
+            var requestHash = ComputeArchiveRequestHash(request);
             var inputs = request.Files.Select(file => new ArchiveBatchInput(file.DocumentId,
                 new StoredFile(file.Request.StorageRelativePath, file.Request.FileLength, file.Request.Sha256, timeProvider.GetUtcNow()),
                 file.Request.Properties ?? new Dictionary<string, string?>(),
                 new CadReferenceSnapshot(Guid.NewGuid(), file.Request.ProjectId, file.DocumentId, timeProvider.GetUtcNow(), actor, file.Request.Root,
                     Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(file.Request.Root))))),
                 file.Request.Comment, file.Request.IsProjectRoot, file.Request.ExpectedVersionId,
-                file.Request.DrawingNumber, file.Request.Name, file.Request.FileName, file.Request.DrawingReviewWritebackId)).ToArray();
+                file.Request.DrawingNumber, file.Request.Name, file.Request.FileName, file.Request.DrawingReviewWritebackId, file.Request.KeepEditing, file.Request.HandoffTo)).ToArray();
             return Results.Ok(await workflow.CheckInBatchAsync(request.BatchId, requestHash, actor, role, request.CheckoutSessionId, inputs, cancellationToken));
         });
         api.MapGet("/archive-batches/{batchId:guid}", async (Guid batchId, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1646,6 +1719,7 @@ public static class PdmEndpointExtensions
                 request.ExpectedVersionId,
                 true,
                 request.PlannedDocumentIds);
+            await workflow.ValidateEditDispositionAsync(documentId, actor, request.KeepEditing, request.HandoffTo, request.DrawingReviewWritebackId, cancellationToken);
             return Results.Ok(new { valid = true });
         });
 
@@ -1686,7 +1760,7 @@ public static class PdmEndpointExtensions
                 request.DrawingReviewWritebackId,
                 request.ExpectedVersionId,
                 true,
-                request.DeferBomRefresh);
+                request.DeferBomRefresh, request.KeepEditing, request.HandoffTo);
             return Results.Ok(new
             {
                 document = result.Document,
@@ -2220,7 +2294,7 @@ public static class PdmEndpointExtensions
     {
         BomKind.Standard => "标准件BOM",
         BomKind.NonStandard => "非标件BOM",
-        BomKind.Electrical => "电气BOM",
+        BomKind.Electrical => "电气件BOM",
         _ => "BOM"
     };
 

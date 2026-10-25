@@ -10,6 +10,8 @@ internal static class TopMostMessageBox
         MessageBoxButtons buttons, MessageBoxIcon icon,
         MessageBoxDefaultButton defaultButton = MessageBoxDefaultButton.Button1)
     {
+        var session = ArchiveSession.Current;
+        if (session != null && !session.IsClosed) return session.Confirm(message, caption, buttons, defaultButton);
         var handle = owner?.Handle ?? IntPtr.Zero;
         var root = handle == IntPtr.Zero ? IntPtr.Zero : GetAncestor(handle, 2);
         // Preserve the owner and default choice while keeping confirmations above progress windows.

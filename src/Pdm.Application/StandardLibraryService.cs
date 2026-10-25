@@ -6,7 +6,8 @@ public sealed class StandardLibraryService(
     IStandardLibraryRepository standardLibrary,
     IMaterialRepository materials,
     IPdmRepository repository,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    IEngineeringKitRepository? kits = null)
 {
     public async Task<IReadOnlyList<StandardLibraryCategory>> ListCategoriesAsync(
         bool includeInactive, string actor, UserRole role, CancellationToken cancellationToken)
@@ -26,6 +27,10 @@ public sealed class StandardLibraryService(
         var name = command.Name?.Trim() ?? string.Empty;
         if (name.Length is < 1 or > 150) throw new PdmRuleException("标准分类名称必须为1至150个字符。");
         var all = await standardLibrary.ListCategoriesAsync(true, cancellationToken);
+        var code = all.FirstOrDefault(item => item.Id == categoryId)?.Code;
+        if (all.Any(item => item.Id == categoryId && StandardLibraryDefaults.IsUncategorized(item))
+            || all.Any(item => item.Id == command.ParentId && StandardLibraryDefaults.IsUncategorized(item)))
+            throw new PdmRuleException("未分类是系统保留分类，不能修改、停用或添加子分类。");
         if (command.ParentId is not null && all.All(item => item.Id != command.ParentId)) throw new PdmNotFoundException("上级标准分类不存在。");
         if (categoryId is not null && command.ParentId == categoryId) throw new PdmRuleException("标准分类不能将自己设为上级。");
         if (all.Any(item => item.Id != categoryId && item.ParentId == command.ParentId && string.Equals(item.Name.Trim(), name, StringComparison.OrdinalIgnoreCase)))
@@ -38,7 +43,7 @@ public sealed class StandardLibraryService(
         {
             saved = await standardLibrary.CreateCategoryAsync(new(
                 Guid.NewGuid(), name, command.ParentId, command.SortOrder, command.IsActive,
-                actor, now, actor, now, 1), cancellationToken);
+                actor, now, actor, now, 1, code), cancellationToken);
         }
         else
         {
@@ -47,6 +52,7 @@ public sealed class StandardLibraryService(
             saved = await standardLibrary.UpdateCategoryAsync(existing with
             {
                 Name = name,
+                Code = code,
                 ParentId = command.ParentId,
                 SortOrder = command.SortOrder,
                 IsActive = command.IsActive,
@@ -62,6 +68,8 @@ public sealed class StandardLibraryService(
     public async Task DeleteCategoryAsync(Guid categoryId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken);
+        var category = await standardLibrary.FindCategoryAsync(categoryId, cancellationToken);
+        if (category is not null && StandardLibraryDefaults.IsUncategorized(category)) throw new PdmRuleException("未分类是系统保留分类，不能删除。");
         await standardLibrary.DeleteCategoryAsync(categoryId, expectedRowVersion, cancellationToken);
         await AuditAsync(actor, "standard-library.category.delete", categoryId, "删除空标准分类", cancellationToken);
     }
@@ -83,7 +91,7 @@ public sealed class StandardLibraryService(
         foreach (var group in scoped.GroupBy(item => item.MaterialId))
         {
             var material = await materials.FindMaterialAsync(group.Key, cancellationToken);
-            if (material is null || material.IsArchived || material.ApprovalStatus != MaterialApprovalStatus.Approved || !material.U9SyncConfirmed) continue;
+            if (material is null || (!query.IncludeInactive && material.IsArchived) || material.ApprovalStatus != MaterialApprovalStatus.Approved || !material.U9SyncConfirmed) continue;
             if (query.RecommendedOnly && !material.IsRecommended) continue;
             if (!string.IsNullOrWhiteSpace(query.Brand) && !string.Equals(material.Brand?.Trim(), query.Brand.Trim(), StringComparison.OrdinalIgnoreCase)) continue;
             if (!string.IsNullOrWhiteSpace(normalized) && !new[] { material.Name, material.MaterialCode, material.Specification, material.Brand }
@@ -94,6 +102,30 @@ public sealed class StandardLibraryService(
                 ? null
                 : await materials.FindMaterialAttachmentAsync(material.CoverImageAttachmentId.Value, cancellationToken);
             rows.Add(new(material, rowCategories, cover));
+        }
+
+        if (kits is not null)
+        {
+            foreach (var kit in await kits.ListAsync(true, cancellationToken))
+            {
+                if (!query.IncludeInactive && !kit.IsActive) continue;
+                if (query.RecommendedOnly && !kit.IsRecommended) continue;
+                if (scope is not null && (kit.StandardLibraryCategoryId is not Guid categoryId || !scope.Contains(categoryId))) continue;
+                if (!string.IsNullOrWhiteSpace(query.Brand) && !string.Equals(kit.Brand.Trim(), query.Brand.Trim(), StringComparison.OrdinalIgnoreCase)) continue;
+                if (!string.IsNullOrWhiteSpace(normalized) && !new[] { kit.Name, kit.Code, kit.Model, kit.Brand }
+                    .Any(value => value?.Contains(normalized, StringComparison.OrdinalIgnoreCase) == true)) continue;
+                // 仅用于统一列表的字段投影；套件及其组成仍由套件仓储管理。
+                var material = new PdmMaterial(kit.Id, kit.Code!, kit.Name, MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
+                    kit.Model, null, kit.Description, kit.Brand, null, null, null, null, MaterialApprovalStatus.Approved,
+                    null, null, null, null, null, MaterialSyncStatus.NotQueued, kit.CreatedBy, kit.CreatedAt, kit.UpdatedBy, kit.UpdatedAt,
+                    kit.RowVersion, ReferenceCount: kit.ReferenceCount, IsRecommended: kit.IsRecommended, SelectionAdvice: kit.SelectionAdvice,
+                    ReferencePrice: kit.ReferencePrice, CoverImageAttachmentId: kit.CoverImageAttachmentId)
+                { Model3DAttachmentCount = kit.Model3DAttachmentCount, DocumentAttachmentCount = kit.DocumentAttachmentCount };
+                var kitCategories = kit.StandardLibraryCategoryId is Guid id && categoryById.TryGetValue(id, out var category)
+                    ? new[] { category } : Array.Empty<StandardLibraryCategory>();
+                var cover = kit.CoverImageAttachmentId is Guid coverId ? await kits.FindLibraryAttachmentAsync(coverId, cancellationToken) : null;
+                rows.Add(new(material, kitCategories, cover, kit with { Revisions = kit.Revisions.Where(item => item.State == EngineeringKitRevisionState.Released).ToArray() }));
+            }
         }
 
         var ordered = rows.OrderByDescending(item => item.Material.IsRecommended)

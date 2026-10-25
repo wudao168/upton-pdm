@@ -5,6 +5,7 @@
     <Reference Include="System.Net.Http" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="all" />
     <Compile Include="../../src/Pdm.SolidWorks.Addin/WorkspaceLocalStateReader.cs" Link="WorkspaceLocalStateReader.cs" />
+    <Compile Include="../../src/Pdm.SolidWorks.Addin/EditDraftJournal.cs" Link="EditDraftJournal.cs" />
     <Compile Include="../../src/Pdm.SolidWorks.Addin/ArchiveFileFingerprint.cs" Link="ArchiveFileFingerprint.cs" />
     <Compile Include="../../src/Pdm.SolidWorks.Addin/PdmDocumentIdentityStore.cs" Link="PdmDocumentIdentityStore.cs" />
     <Compile Include="../../src/Pdm.LocalSettings/WorkspaceSettingsStore.cs" Link="WorkspaceSettingsStore.cs" />

@@ -14,7 +14,7 @@ describe('生产供应商选择', () => {
       suppliers: [{ ...supplier, id: 'one', code: 'S001', name: '机加厂', categoryIds: ['machining'] },
         { ...supplier, id: 'two', code: 'S002', name: '表处厂', categoryIds: ['surface'] },
         { ...supplier, id: 'stopped', code: 'S003', name: '停用厂', categoryIds: ['machining'], isActive: false }] }
-    vi.spyOn(api, 'readProductionSuppliers').mockResolvedValue(catalog)
+    vi.spyOn(api, 'readProductionSupplierChoices').mockResolvedValue(catalog)
     const wrapper = mount(ProductionSupplierPicker, { props: { token: 'token', modelValue: 'one' } })
     await flushPromises()
     expect(wrapper.findAll('.production-supplier-picker__supplier option').map(item => item.text())).toEqual(['请选择供应商', 'S001 · 机加厂', 'S002 · 表处厂'])

@@ -2,4 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="DocumentOperationRules.json" LogicalName="Upton.Pdm.DocumentOperationRules.json" />
+  </ItemGroup>
 </Project>

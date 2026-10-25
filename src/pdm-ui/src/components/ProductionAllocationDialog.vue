@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { vQuantity } from '../quantityInput'
 import { computed, ref } from 'vue'
 import ProductionSupplierPicker from './ProductionSupplierPicker.vue'
 import { updateProductionLotAllocation } from '../api'
@@ -45,7 +46,7 @@ async function save() {
   <el-dialog :model-value="true" title="修改批次分配" width="min(680px, calc(100vw - 32px))" :show-close="!pending" :close-on-click-modal="!pending" :close-on-press-escape="!pending" @update:model-value="!$event && !pending && emit('close')">
     <form class="production-allocation" novalidate @submit.prevent="save">
       <p>{{ state.packageNumber }} · {{ line.drawingNumber }} · {{ line.name }}</p><p>修改当前批次，保留批次编号和历史记录。加工、交付或后续流转开始后不能修改。</p>
-      <fieldset :disabled="pending || submitted"><label>分配方式<select v-model="route" aria-label="修改分配方式"><option value="Self">自制</option><option value="External">外协</option></select></label><label>分配数量<input v-model.number="quantity" type="number" min="0.001" step="any" :max="maximum" aria-label="修改分配数量"></label>
+      <fieldset :disabled="pending || submitted"><label>分配方式<select v-model="route" aria-label="修改分配方式"><option value="Self">自制</option><option value="External">外协</option></select></label><label>分配数量<input v-quantity v-model.number="quantity" type="number" min="0.001" step="any" :max="maximum" aria-label="修改分配数量"></label>
         <ProductionSupplierPicker v-if="route === 'External'" v-model="supplierId" :token="token" :disabled="pending || submitted" @selected="supplier = $event?.name ?? ''" />
         <label>负责人（选填）<input v-model="assignee" aria-label="修改分配负责人"></label><label>{{ route === 'External' ? '承诺日期' : '预计完成日期' }}<input v-model="promisedOn" type="date" aria-label="修改分配承诺日期"></label><label class="production-allocation__reason">调整原因（选填）<input v-model="reason" placeholder="填写分配调整原因"></label>
       </fieldset>

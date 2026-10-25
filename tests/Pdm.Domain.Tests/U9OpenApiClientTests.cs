@@ -9,6 +9,35 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class U9OpenApiClientTests
 {
     [Fact]
+    public async Task StockPlans_ReadsAllPagesIncludingZeroAndInactive_ButRejectsOtherOrganizationsAndMissingFields()
+    {
+        var rows = new[] {
+            new { ID = "1", Code = "positive", Org = new { Code = "7" }, Effective = new { IsEffective = "True" }, InventoryInfo = new { SafetyStockQty = "15.000", ReorderQty = "50" } },
+            new { ID = "2", Code = "zero", Org = new { Code = "7" }, Effective = new { IsEffective = "True" }, InventoryInfo = new { SafetyStockQty = "0", ReorderQty = "50" } },
+            new { ID = "3", Code = "inactive", Org = new { Code = "7" }, Effective = new { IsEffective = "False" }, InventoryInfo = new { SafetyStockQty = "15", ReorderQty = "50" } },
+            new { ID = "4", Code = "positive", Org = new { Code = "8" }, Effective = new { IsEffective = "True" }, InventoryInfo = new { SafetyStockQty = "99", ReorderQty = "50" } },
+            new { ID = "5", Code = "missing", Org = new { Code = "7" }, Effective = new { IsEffective = "True" }, InventoryInfo = new { SafetyStockQty = "", ReorderQty = "50" } }
+        };
+        var handler = new SequenceHandler(JsonSerializer.Serialize(new { ResCode = 0, Data = rows }), "{\"ResCode\":0,\"Data\":[]}");
+        var result = (await new U9OpenApiClient(new HttpClient(handler)).QueryStockPlansAsync("http://u9.test", "token", "01", "7", DateTimeOffset.UtcNow, default))!;
+        Assert.Equal(3, result.Count);
+        Assert.Single(result, plan => plan.IsStocked);
+        Assert.Equal(15, result.Single(plan => plan.MaterialCode == "positive").SafetyStockQuantity);
+        Assert.All(handler.Requests, request => { Assert.Contains("Org.Code", request.Body); Assert.DoesNotContain("\"gt\"", request.Body); });
+    }
+
+    [Fact]
+    public async Task StockPlans_FailedOrRepeatedPagesDoNotReturnPartialSnapshot()
+    {
+        const string page = "{\"ResCode\":0,\"Data\":[{\"ID\":\"1\",\"Code\":\"A\",\"Org\":{\"Code\":\"7\"},\"Effective\":{\"IsEffective\":true},\"InventoryInfo\":{\"SafetyStockQty\":10}}]}";
+        foreach (var last in new[] { page, "{\"ResCode\":500,\"Data\":\"secret must not escape\"}" })
+        {
+            var client = new U9OpenApiClient(new HttpClient(new SequenceHandler(page, last)));
+            var error = await Assert.ThrowsAsync<PdmRuleException>(() => client.QueryStockPlansAsync("http://u9.test", "token", "01", "7", DateTimeOffset.UtcNow, default));
+            Assert.DoesNotContain("secret", error.Message);
+        }
+    }
+    [Fact]
     public async Task Authenticate_UsesOneStepOAuthAndReturnsDataToken()
     {
         var handler = new RecordingHandler("""{"ResCode":0,"Data":"token-123"}""");
@@ -260,6 +289,9 @@ public sealed class U9OpenApiClientTests
                 m_iD = 1002L, m_code = "01010000002", m_name = "按钮",
                 m_mainItemCategory = new { m_code = "0101", m_name = "电气外购件" },
                 m_inventoryUOM = new { m_code = "001", m_name = "个" },
+                m_org = new { m_code = "7" },
+                m_effective = new { m_isEffective = true },
+                m_inventoryInfo = new { m_safetyStockQty = 15m, m_reorderQty = 50m },
                 m_weight = 1.25m,
                 m_weightUom = new { m_code = "KG" },
                 m_descFlexField = new
@@ -288,6 +320,7 @@ public sealed class U9OpenApiClientTests
         Assert.Equal(("铝合金", "阳极氧化", 1.25m, "KG"),
             (item.U9Material, item.U9SurfaceTreatment, item.U9Weight, item.U9WeightUnitCode));
         Assert.Equal("https://shop.example.test/item/01010000002", item.U9PurchaseLink);
+        Assert.Equal(new U9ItemStockPlan("7", true, 15m, 50m, "001", "个"), item.StockPlan);
     }
 
     [Fact]

@@ -67,6 +67,7 @@ public sealed partial class PdmAddin
                 };
                 editJournal.Save(entry);
                 localEdits[document.Id] = entry;
+                editIdleDeferredUntil[document.Id] = DateTime.UtcNow.AddMinutes(idleReleaseMinutes);
                 lock (checkoutDocumentSync) pendingCloseDocumentIds.Remove(document.Id);
             }
         }
@@ -104,6 +105,7 @@ public sealed partial class PdmAddin
                 if (!await ReconcileArchiveBatchesAsync()) return;
             }
             var pending = PrepareClosedEdits();
+            TryOfferIdleRelease();
             await ClosePreservedEditsAsync(pending, lifetime.Token);
         }
         catch (Exception exception) { ReportEditMaintenanceError(exception); }
@@ -113,7 +115,7 @@ public sealed partial class PdmAddin
     private bool CanMaintainEdits() => Volatile.Read(ref checkInOperationInProgress) == 0
         && Volatile.Read(ref workspaceOperationInProgress) == 0 && Volatile.Read(ref openOperationInProgress) == 0
         && Volatile.Read(ref controlledOpenInProgress) == 0 && Volatile.Read(ref refreshSuppressionDepth) == 0
-        && Volatile.Read(ref drawingQrSyncInProgress) == 0 && Volatile.Read(ref automaticDrawingOperationInProgress) == 0
+        && Volatile.Read(ref automaticDrawingOperationInProgress) == 0
         && Volatile.Read(ref batchDialogInProgress) == 0;
 
     private IReadOnlyList<LocalEditDraft> PrepareClosedEdits()
@@ -349,6 +351,7 @@ public sealed partial class PdmAddin
 
     private void FinishLocalEdit(Guid documentId)
     {
+        shownEditRequests.Remove(documentId);
         try
         {
             if (!EnsureEditJournal()) return;
@@ -357,6 +360,7 @@ public sealed partial class PdmAddin
                 entry.Closed = true;
                 entry.PendingClose = false;
                 entry.RestoreOnOpen = false;
+                entry.DiscardPending = false;
                 EditDraftJournal.ClearMaintenanceFailure(entry);
                 editJournal.Save(entry);
             }
@@ -368,7 +372,10 @@ public sealed partial class PdmAddin
 
     private async Task FinishPendingCloseBeforeCheckoutAsync(Guid documentId, CancellationToken token)
     {
+        if (plmAuthoritativeCheckouts.Contains(documentId)) return;
         if (!EnsureEditJournal()) return;
+        if (editJournal.ReadAll().Any(item => item.DocumentId == documentId && item.DiscardPending))
+            throw new InvalidOperationException("该图档已放弃编辑但工作文件尚未恢复，请从PLM重新打开后再获取权限；已放弃的修改不会重新提交。");
         if (!localEdits.TryGetValue(documentId, out var entry) || !entry.PendingClose) return;
         await ClosePreservedEditAsync(entry, token);
         if (!entry.Closed) throw new InvalidOperationException("上次结束编辑尚未确认，请检查服务器连接后重试；本机草稿已保留。");
@@ -379,7 +386,7 @@ public sealed partial class PdmAddin
     private void RestoreEditDraftBeforeOpen(Guid documentId, string path, ControlledOpenFileDto latest)
     {
         if (!EnsureEditJournal()) return;
-        var entry = editJournal.ReadAll().Where(item => item.DocumentId == documentId && item.RestoreOnOpen)
+        var entry = editJournal.ReadAll().Where(item => item.DocumentId == documentId && item.RestoreOnOpen && !item.DiscardPending)
             .OrderByDescending(item => item.SavedAtUtc).FirstOrDefault();
         if (entry == null) return;
         if (latest.DocumentId != documentId) throw new InvalidOperationException("草稿与受控图档标识不一致，已停止恢复并保留文件。");
@@ -393,8 +400,16 @@ public sealed partial class PdmAddin
             if (changedPath) throw new InvalidOperationException("目标工作文件已经打开，两处工作文件及草稿均已保留，请先核对并关闭目标文件后重试。");
             if (!EditDraftJournal.MatchesBase(entry, latest.VersionId, latest.Sha256)) throw new InvalidOperationException("服务器已有内容不同的新版本，本地图档和草稿已保留，请核对并合并修改。");
         }
-        else if (editJournal.Restore(entry, path, latest.VersionId, latest.Sha256))
-            LogOperation("Recovered local edit draft document=" + documentId);
+        else
+        {
+            var verifiedBase = ControlledReferenceMaterializer.TryReadVerifiedCopyHash(path, latest, out var verifiedHash)
+                ? verifiedHash : null;
+            LogOperation("草稿恢复核对 document=" + documentId + " path=" + path + " currentHash=" + verifiedHash
+                + " recordedDiskHash=" + entry.DiskSha256 + " draftHash=" + entry.DraftSha256
+                + " archivedHash=" + latest.Sha256 + " verifiedControlledBase=" + (verifiedBase != null));
+            if (editJournal.RestoreWithVerifiedBase(entry, path, latest.VersionId, latest.Sha256, verifiedBase))
+                LogOperation("Recovered local edit draft document=" + documentId);
+        }
         if (entry.BaseVersionId != latest.VersionId || changedPath)
         {
             if (!PdmDocumentIdentityStore.TryWriteControlledVersion(path, documentId, entry.ProjectId,

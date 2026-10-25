@@ -10,7 +10,7 @@ beforeEach(() => {
   api.listBomHeaderMaterialDirectory.mockResolvedValue([
     { materialId: 'legacy', projectId: 'p1', projectCode: 'P700004', subprojectCode: 'P700004-1', projectName: '项目1', kind: 'Standard', materialCode: 'PDM-PENDING-legacy', materialName: '标准件BOM', automaticStatus: 'NotRequested', automaticMessage: '历史表头尚未进入自动流程', isArchived: false },
     { materialId: 'done', projectId: 'p2', projectCode: 'P700005', subprojectCode: '—', projectName: '项目2', kind: 'Master', materialCode: '03020000009', materialName: '项目主BOM', automaticStatus: 'Completed', automaticMessage: 'U9C正式料号已回查确认', isArchived: false },
-    { materialId: 'failed', projectId: 'p3', projectCode: 'P700006', subprojectCode: '—', projectName: '项目3', kind: 'Electrical', materialCode: '01000003', materialName: '电气BOM', automaticStatus: 'Failed', automaticMessage: '自动处理失败：缺少分类映射', isArchived: false },
+    { materialId: 'failed', projectId: 'p3', projectCode: 'P700006', subprojectCode: '—', projectName: '项目3', kind: 'Electrical', materialCode: '01000003', materialName: '电气件BOM', automaticStatus: 'Failed', automaticMessage: '自动处理失败：缺少分类映射', isArchived: false },
   ])
 })
 it('separates header states, keeps refresh read-only, filters and navigates to the linked project', async () => {

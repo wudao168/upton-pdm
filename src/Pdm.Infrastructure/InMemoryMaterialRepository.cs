@@ -4,7 +4,7 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Infrastructure;
 
-public sealed class InMemoryMaterialRepository : IMaterialRepository
+public sealed partial class InMemoryMaterialRepository : IMaterialRepository
 {
     private readonly object gate = new();
     private readonly IPdmRepository? projectRepository;
@@ -217,6 +217,15 @@ public sealed class InMemoryMaterialRepository : IMaterialRepository
         if (!materials.ContainsKey(attachment.MaterialId)) throw new PdmNotFoundException("料品主档不存在。");
         if (!attachments.TryAdd(attachment.Id, attachment)) throw new PdmConflictException("料品附件已经存在。");
         return Task.FromResult(attachment);
+    }
+
+    public Task<bool> DeleteMaterialAttachmentAsync(Guid materialId, Guid attachmentId, CancellationToken cancellationToken)
+    {
+        if (!materials.TryGetValue(materialId, out var material) || material.IsArchived
+            || !attachments.TryGetValue(attachmentId, out var attachment) || attachment.MaterialId != materialId
+            || attachment.Kind is not (MaterialAttachmentKind.Model3D or MaterialAttachmentKind.Document))
+            return Task.FromResult(false);
+        return Task.FromResult(attachments.TryRemove(attachmentId, out _));
     }
 
     public Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsBySpecificationAsync(string specification, CancellationToken cancellationToken) =>

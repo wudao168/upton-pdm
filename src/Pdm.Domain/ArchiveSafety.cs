@@ -33,6 +33,10 @@ public static class ArchiveSafety
             || !string.Equals(previous.Configuration, current.Configuration, StringComparison.Ordinal)
             || previous.Quantity != current.Quantity
             || NormalizeStatus(previous.Status) != NormalizeStatus(current.Status)
+            || previous.StructureIndexPending != current.StructureIndexPending
+            || root && previous.UsesNativeFileInventory != current.UsesNativeFileInventory
+            || (previous.IsSuppressed || previous.Status == ReferenceNodeStatus.Suppressed)
+                != (current.IsSuppressed || current.Status == ReferenceNodeStatus.Suppressed)
             || (!root && previous.Revision?.Display != current.Revision?.Display)) return false;
         // Attaching a drawing does not change the model's assembly structure.
         var before = previous.Children.Where(node => current.Kind == DocumentKind.Drawing || node.Kind != DocumentKind.Drawing)
@@ -51,12 +55,37 @@ public static class ArchiveSafety
     public static bool SameOwnDesignReferences(DocumentReferenceNode? previous, DocumentReferenceNode current)
     {
         if (previous is null) return false;
+        if (current.UsesNativeFileInventory)
+        {
+            static HashSet<string> FileClosure(DocumentReferenceNode node) => (node.UsesNativeFileInventory ? node.Children : [])
+                .Where(child => child.Role == ReferenceRole.ExternalFileDependency)
+                .Select(child => $"{child.DocumentId:N}|{child.FileName}|{child.Kind}|{child.Revision?.Display}|{child.StructureIndexPending}")
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (!FileClosure(previous).SetEquals(FileClosure(current))) return false;
+        }
+        // Verification metadata alone is not a new native file version. Verified file-closure
+        // changes are compared above; real incomplete indexes still participate below.
+        previous = previous with { UsesNativeFileInventory = false };
+        current = current with { UsesNativeFileInventory = false };
+        if (current.Kind is DocumentKind.Part or DocumentKind.Assembly)
+        {
+            // A file's selected occurrence is not its own quantity or suppression state.
+            // Keep every child occurrence intact and preserve real missing/virtual states.
+            DocumentReferenceNode FileRoot(DocumentReferenceNode node) => node with
+            {
+                Quantity = 1, IsSuppressed = false,
+                Status = node.Status is ReferenceNodeStatus.Suppressed or ReferenceNodeStatus.Hidden or ReferenceNodeStatus.Lightweight
+                    ? ReferenceNodeStatus.Normal : node.Status,
+                Configuration = node.Kind == DocumentKind.Part ? "" : node.Configuration
+            };
+            previous = FileRoot(previous);
+            current = FileRoot(current);
+        }
         if (current.Kind != DocumentKind.Assembly) return SameReferences(previous, current);
         var sameConfiguration = string.Equals(previous.Configuration, current.Configuration, StringComparison.OrdinalIgnoreCase);
         DocumentReferenceNode Own(DocumentReferenceNode node) => StructureOnly(node) with
         {
             Configuration = "", // The active configuration is an opening choice, not a file edit.
-            Quantity = 1, Status = ReferenceNodeStatus.Normal,
             Children = node.Children.Where(child => sameConfiguration && child.Kind != DocumentKind.Drawing && child.Role != ReferenceRole.ExternalFileDependency)
                 .Select(child => child with { Revision = null, Children = child.Status == ReferenceNodeStatus.Virtual
                     ? child.Children : [] }).ToArray()

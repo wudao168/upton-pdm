@@ -187,7 +187,19 @@ public sealed record ProjectProcurementTrackingItem(
     public string? ImpactStage { get; init; }
     public DateOnly? AssemblyStartDate { get; init; }
     public DateOnly? CommissioningStartDate { get; init; }
+    public ManufacturingTracking? Manufacturing { get; init; }
 }
+
+public sealed record ManufacturingBatch(Guid Id, string Route, decimal Quantity, string Status,
+    string? Supplier, string? Assignee, DateOnly? PromisedOn, decimal DeliveredQuantity,
+    decimal SubmittedQuantity, decimal QualifiedQuantity, decimal IssuedQuantity,
+    IReadOnlyList<ProductionMovement> History);
+
+public sealed record ManufacturingTracking(Guid ReleasePackageId, Guid LineId, string Revision,
+    DateTimeOffset PublishedAt, DateTimeOffset? ReceivedAt, string Status,
+    decimal AssignedQuantity, decimal SubmittedQuantity, decimal QualifiedQuantity, decimal IssuedQuantity,
+    DateOnly? RequiredOn, DateOnly? ForecastOn, string? Responsible, string? Suppliers, string? LatestNote,
+    DateTimeOffset? QualifiedAt, DateTimeOffset? IssuedAt, IReadOnlyList<ManufacturingBatch> Batches);
 
 public sealed record ProjectProcurementTrackingResult(
     Guid ProjectId,
@@ -196,4 +208,7 @@ public sealed record ProjectProcurementTrackingResult(
     IReadOnlyList<ProjectProcurementTrackingItem> Items,
     DateTimeOffset? LastSuccessfulRefreshAt,
     string? LastRefreshError,
-    bool HasPublishedBom);
+    bool HasPublishedBom)
+{
+    public DateTimeOffset? ManufacturingReadAt { get; init; }
+}

@@ -250,6 +250,7 @@ Write-Utf8File $myIniPath @(
     'local-infile=0',
     'skip-log-bin',
     'max-connections=100',
+    'innodb_buffer_pool_size=1G',
     "log-error=$mysqlLogOption",
     'pid-file=upton-pdm-mysql.pid',
     '',

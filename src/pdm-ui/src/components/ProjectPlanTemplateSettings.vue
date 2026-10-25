@@ -36,7 +36,7 @@ const workflowOptions = [
   { value: 'drawing.review', label: '图纸审核' },
   { value: 'bom.standard', label: '标准件BOM' },
   { value: 'bom.non-standard', label: '非标件BOM' },
-  { value: 'bom.electrical', label: '电气BOM' },
+  { value: 'bom.electrical', label: '电气件BOM' },
   { value: 'validation-plan', label: '验证计划' },
 ]
 const workflowLabel = (key?: string | null) => workflowOptions.find(item => item.value === key)?.label ?? '非流程任务'

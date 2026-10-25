@@ -9,7 +9,7 @@ const loading = ref(false)
 const error = ref('')
 const query = ref('')
 const page = ref(1)
-const kindLabels: Record<string, string> = { Master: '项目主BOM', Standard: '标准件BOM', NonStandard: '非标件BOM', Electrical: '电气BOM' }
+const kindLabels: Record<string, string> = { Master: '项目主BOM', Standard: '标准件BOM', NonStandard: '非标件BOM', Electrical: '电气件BOM' }
 const stateLabels: Record<string, string> = {
   NotRequested: '待发布／核对', Running: '自动处理中', ApprovalQueued: '自动审批排队中',
   WaitingRetry: '待核对／重试', Failed: '自动处理失败', Rejected: '历史申请已退回',
@@ -48,8 +48,8 @@ onMounted(load)
       <el-table-column prop="subprojectCode" label="子项目号" width="100" show-overflow-tooltip />
       <el-table-column prop="projectName" label="项目名称" width="150" show-overflow-tooltip />
       <el-table-column label="BOM类型" width="100" show-overflow-tooltip><template #default="{ row }">{{ kindLabels[row.kind] || row.kind }}</template></el-table-column>
-      <el-table-column prop="materialCode" label="临时／正式料号" min-width="1" show-overflow-tooltip />
-      <el-table-column prop="materialName" label="料品名称" min-width="1" show-overflow-tooltip />
+      <el-table-column prop="materialCode" label="临时／正式料号" min-width="1" show-overflow-tooltip ><template #default="{ row }"><span v-stocked-material="row.materialCode">{{ row.materialCode }}</span></template></el-table-column>
+      <el-table-column prop="materialName" label="料品名称" min-width="1" show-overflow-tooltip ><template #default="{ row }"><span v-stocked-material="row.materialCode">{{ row.materialName }}</span></template></el-table-column>
       <el-table-column label="自动处理状态" width="100" show-overflow-tooltip><template #default="{ row }"><el-tag :type="row.automaticStatus === 'Completed' ? 'success' : ['Failed', 'Rejected'].includes(row.automaticStatus) ? 'danger' : 'info'">{{ stateLabels[row.automaticStatus] || row.automaticStatus }}</el-tag><span v-if="row.isArchived">（已停用）</span></template></el-table-column>
       <el-table-column prop="automaticMessage" label="处理说明／失败原因" min-width="1" show-overflow-tooltip />
       <el-table-column label="操作" width="150" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="openBom(row)">查看对应BOM</el-button></template></el-table-column>

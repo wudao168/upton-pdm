@@ -19,6 +19,7 @@ internal sealed class SolidWorksReferenceTreeScanner
     private IModelDoc2 scannedModel;
     private string scannedDocumentPath;
     private bool strictStructure;
+    internal bool ExpandEmbeddedStructure { get; set; } = true;
     private ImportedComponentStorage importedStorage;
     private readonly List<Tuple<CadTreeNode, IComponent2>> importedComponents = new List<Tuple<CadTreeNode, IComponent2>>();
     private string rootConfiguration = string.Empty;
@@ -58,8 +59,6 @@ internal sealed class SolidWorksReferenceTreeScanner
         var path = ReadComponentFilePath(scannedDocumentPath, "读取根图档路径", null, null);
         if (requireCompleteStructure && string.IsNullOrWhiteSpace(path))
             throw new InvalidOperationException("当前图档尚未保存为有效文件，无法确认完整存档范围。请先保存后重试。");
-        if (requireCompleteStructure && model.IsOpenedViewOnly())
-            throw new InvalidOperationException("当前图档处于大型设计审阅或仅查看模式，无法确认完整结构。请以完整加载方式打开后存档。");
         activeDocumentDirectory = string.IsNullOrWhiteSpace(path) ? string.Empty : Path.GetDirectoryName(path) ?? string.Empty;
         Log(string.Concat("ScanActiveDocument type=", model.GetType(), " title=", model.GetTitle(), " path=", path));
         if (model.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
@@ -82,12 +81,15 @@ internal sealed class SolidWorksReferenceTreeScanner
         }
 
         var configuration = model.ConfigurationManager.ActiveConfiguration;
+        if (configuration == null && !requireCompleteStructure)
+            return PendingAssembly(model, path, "装配配置尚未就绪，结构待补全。");
         if (configuration == null) throw new InvalidOperationException("当前装配体配置尚未就绪，请待加载完成后重新存档。");
         rootConfiguration = configuration.Name ?? string.Empty;
         Log(string.Concat("ActiveConfiguration=", configuration?.Name ?? "(null)"));
         var rootComponent = configuration.GetRootComponent3(true);
         if (rootComponent == null)
         {
+            if (!requireCompleteStructure) return PendingAssembly(model, path, "装配根组件尚未读取，结构待补全。");
             throw new InvalidOperationException("无法读取当前装配体配置。 ");
         }
 
@@ -97,12 +99,29 @@ internal sealed class SolidWorksReferenceTreeScanner
         CompleteImportedStorage();
         // Root components do not reliably expose ReferencedConfiguration.
         root.Configuration = configuration.Name ?? string.Empty;
+        if (ExpandEmbeddedStructure)
+        {
+            try { EmbeddedAssemblyStructure.Complete(application, model, root); }
+            catch (Exception error) when (!strictStructure)
+            {
+                root.ArchiveReadError = "嵌入结构尚未读取完成，已保留当前设计树；存档时将重新核对。";
+                PluginDiagnosticLog.Record("嵌入结构显示", root.FileName + "；" + error);
+            }
+        }
         foreach (var directory in ModelNodes(root).Where(node => node.Status != CadReferenceStatus.Virtual && !string.IsNullOrWhiteSpace(node.FullPath))
             .Select(node => Path.GetDirectoryName(node.FullPath))
             .Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToArray())
             AddRelatedDrawings(root, directory, false);
         return root;
     }
+
+    private static CadTreeNode PendingAssembly(IModelDoc2 model, string path, string reason) => new CadTreeNode
+    {
+        FullPath = path, SourceReferencePath = path, FileName = Path.GetFileName(path),
+        DisplayName = model.GetTitle(), DrawingNumber = Path.GetFileNameWithoutExtension(path),
+        InstancePath = Path.GetFileNameWithoutExtension(path), Kind = CadDocumentKind.Assembly,
+        StructureIndexPending = true, ArchiveReadError = reason
+    };
 
     private CadTreeNode BuildComponent(
         IComponent2 component,
@@ -136,6 +155,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         }
         try
         {
+            node.IsSuppressed = component.GetSuppression2() == (int)swComponentSuppressionState_e.swComponentSuppressed;
             node.Status = parentVirtual && PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(componentPath)
                 ? CadReferenceStatus.Virtual : GetStatus(component, componentPath, true);
             node.IsModifiedInSolidWorks = IsModified(component, true);
@@ -597,6 +617,21 @@ internal sealed class SolidWorksReferenceTreeScanner
         AddRelatedDrawingPaths(root, paths);
     }
 
+    public void RefreshRelatedDrawings(CadTreeNode root)
+    {
+        if (root == null || root.Kind == CadDocumentKind.Drawing) return;
+        var directories = ModelNodes(root).Where(node => node.Status != CadReferenceStatus.Virtual && !string.IsNullOrWhiteSpace(node.FullPath))
+            .Select(node => Path.GetDirectoryName(node.FullPath)).Where(Directory.Exists)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        foreach (var directory in directories) AddRelatedDrawings(root, directory, false);
+        // Only inspect drawings already loaded; never rescan assembly components or open files.
+        var drawings = ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
+            .Where(model => model.GetType() == (int)swDocumentTypes_e.swDocDRAWING).Select(model => model.GetPathName())
+            .Where(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path)
+                && !directories.Contains(Path.GetDirectoryName(path), StringComparer.OrdinalIgnoreCase)).ToArray();
+        AddRelatedDrawingPaths(root, drawings);
+    }
+
     public IReadOnlyList<string> AddNativeAssociatedDrawings(IModelDoc2 model, CadTreeNode root)
     {
         var previousStrict = strictStructure;
@@ -605,7 +640,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         {
             if (model == null) throw new InvalidOperationException("无法读取SolidWorks关联工程图清单，已停止整体存档。");
             var names = importedStorage.ReadNativeInventory(model, true);
-            var files = names.SelectMany(value => (value ?? string.Empty).Split('|')).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var files = NativeArchiveManifest.ReadFiles(root, names);
             var known = ModelNodes(root).SelectMany(node => node.Children).Where(node => node.Kind == CadDocumentKind.Drawing)
                 .Select(node => node.FullPath).ToArray();
             foreach (var raw in files.Where(path => path.EndsWith(".SLDDRW", StringComparison.OrdinalIgnoreCase)))
@@ -624,7 +659,9 @@ internal sealed class SolidWorksReferenceTreeScanner
                 if (!ModelNodes(root).SelectMany(node => node.Children).Any(node => node.Kind == CadDocumentKind.Drawing
                     && string.Equals(node.FullPath, path, StringComparison.OrdinalIgnoreCase))) root.UnmanagedReferences.Add(path);
             }
-            PluginDiagnosticLog.Record("工程图", "按当前结构模型核对关联工程图；树外图纸不纳入提交，未执行打包或保存。");            return files;
+            NativeDesignDependencies.Collect(application, root, files);
+            PluginDiagnosticLog.Record("工程图", "已读取原生文件清单并收集可用文件，未执行打包或保存。");
+            return files;
         }
         finally { strictStructure = previousStrict; }
     }
@@ -808,14 +845,14 @@ internal sealed class SolidWorksReferenceTreeScanner
             var references = ReadDrawingReferences(path, out var readError);
             var referencedModels = references.SelectMany(reference => ResolveDrawingModels(reference, models))
                 .Distinct().ToArray();
-            // Candidate discovery is not proof of membership. Keep failures blocking
-            // only for drawings already in scope or proven to reference a tree model.
-            if (strictStructure && (known || referencedModels.Length > 0))
+            // C02/C03: a readable drawing can be pure 2D or have pending view indexing.
+            // Preserve known files; never require a guessed model relation.
+            if (known && (readError != null || referencedModels.Length == 0))
             {
-                if (readError != null)
-                    throw new InvalidOperationException("当前结构关联工程图的引用未完整读取，已停止存档，请核对该工程图后重试：" + path, readError);
-                if (referencedModels.Length == 0)
-                    throw new InvalidOperationException("当前结构关联工程图未能对应到树内模型，已停止存档，请核对视图引用后重试：" + path);
+                var existing = models.SelectMany(model => model.Children).Where(child => child.Kind == CadDocumentKind.Drawing
+                    && string.Equals(child.FullPath, path, StringComparison.OrdinalIgnoreCase)).ToArray();
+                foreach (var drawing in existing) drawing.StructureIndexPending = true;
+                PluginDiagnosticLog.Record("工程图结构待补全", path + "：保留原生文件，稍后按实际视图补全关联。" + readError);
             }
             if (referencedModels.Length == 0)
             {
@@ -842,7 +879,8 @@ internal sealed class SolidWorksReferenceTreeScanner
                     FileName = Path.GetFileName(path), FullPath = path,
                     DisplayName = Path.GetFileNameWithoutExtension(path) + " 工程图",
                     DrawingNumber = Path.GetFileNameWithoutExtension(path), Kind = CadDocumentKind.Drawing,
-                    Configuration = "图纸", Status = CadReferenceStatus.Normal, DrawingScopePaths = new HashSet<string>(models.Select(node => node.FullPath), StringComparer.OrdinalIgnoreCase)
+                    Configuration = "图纸", Status = CadReferenceStatus.Normal, StructureIndexPending = readError != null,
+                    DrawingScopePaths = new HashSet<string>(models.Select(node => node.FullPath), StringComparer.OrdinalIgnoreCase)
                 };
                 // Repeated instances/configurations remain in the model tree; a drawing needs
                 // each distinct referenced file once, not an arbitrary filename match.
@@ -874,6 +912,20 @@ internal sealed class SolidWorksReferenceTreeScanner
         var references = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
+            IModelDoc2 loaded = null;
+            try { loaded = application.GetOpenDocumentByName(path) as IModelDoc2; }
+            catch (Exception error) { Log("Drawing loaded lookup pending: " + error.Message); }
+            if (loaded is IDrawingDoc && string.Equals(loaded.GetPathName(), path, StringComparison.OrdinalIgnoreCase))
+            {
+                var drawing = new CadTreeNode { Kind = CadDocumentKind.Drawing, FullPath = path, FileName = Path.GetFileName(path) };
+                try
+                {
+                    UpdateDrawingReferences(loaded, drawing);
+                    if (drawing.DrawingViewsRead)
+                        return drawing.ReferencedModels.Select(model => model.FullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                }
+                catch (Exception error) { readError = error; Log("Drawing views pending: " + error.Message); }
+            }
             var info = new FileInfo(path);
             if (drawingReferences.TryGetValue(path, out var cached)
                 && cached.Item1 == info.Length && cached.Item2 == info.LastWriteTimeUtc) return cached.Item3;
@@ -905,7 +957,11 @@ internal sealed class SolidWorksReferenceTreeScanner
                     catch (Exception error) { readError = error; }
                 }
             }
-            finally { application.SetCurrentWorkingDirectory(previousDirectory ?? string.Empty); }
+            finally
+            {
+                try { application.SetCurrentWorkingDirectory(previousDirectory ?? string.Empty); }
+                catch (Exception error) { PluginDiagnosticLog.Record("工作目录恢复", "工程图检查后恢复目录失败：" + error); }
+            }
             if (readError == null && references.Count > 0)
                 drawingReferences[path] = Tuple.Create(info.Length, info.LastWriteTimeUtc, references.ToArray());
         }
@@ -921,12 +977,19 @@ internal sealed class SolidWorksReferenceTreeScanner
     public void UpdateDrawingReferences(IModelDoc2 document, CadTreeNode drawing)
     {
         if (document?.GetType() != (int)swDocumentTypes_e.swDocDRAWING) return;
+        drawing.DrawingViewsRead = false;
         var expectedModels = drawing.ReferencedModels.ToArray();
         var references = new List<CadTreeNode>();
         var sheets = (document as IDrawingDoc)?.GetViews() as object[];
-        if (sheets == null || sheets.Any(sheet => !(sheet is object[])))
-            throw new InvalidOperationException("工程图“" + drawing.FileName + "”的图纸或视图尚未完整加载，请完整打开工程图后重新存档。");
-        foreach (var view in sheets.OfType<object[]>().SelectMany(views => views).OfType<IView>())
+        if (sheets == null || sheets.Any(sheet => !(sheet is object[])
+            || ((object[])sheet).Skip(1).Any(view => !(view is IView))))
+        {
+            drawing.StructureIndexPending = true;
+            PluginDiagnosticLog.Record("工程图结构待补全", drawing.FileName + "：视图尚未完整读取，保留文件及原有关联。");
+            return;
+        }
+        drawing.StructureIndexPending = false;
+        foreach (var view in sheets.OfType<object[]>().SelectMany(views => views.Skip(1)).OfType<IView>())
         {
             var loaded = view.ReferencedDocument as IModelDoc2;
             var path = loaded?.GetPathName();
@@ -943,6 +1006,7 @@ internal sealed class SolidWorksReferenceTreeScanner
                         InstancePath = "model/" + Path.GetFileName(path) + "/" + configuration,
                         DisplayName = Path.GetFileNameWithoutExtension(path), Kind = DocumentKindFromPath(path, 0),
                         Configuration = configuration, Status = File.Exists(path) ? CadReferenceStatus.Normal : CadReferenceStatus.Missing };
+                    if (reference.Status == CadReferenceStatus.Missing) drawing.StructureIndexPending = true;
                     if (PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var metadata))
                     {
                         var expected = expectedModels.FirstOrDefault(model => model.DocumentId == metadata.DocumentId);
@@ -970,24 +1034,21 @@ internal sealed class SolidWorksReferenceTreeScanner
                 }
             }
         }
-        if (references.Count == 0)
-            throw new InvalidOperationException("工程图“" + drawing.FileName + "”的实际模型视图引用未读取，已停止存档。请完整打开工程图，核对视图与模型后保存并重试。");
         foreach (var expected in expectedModels)
         {
             if (references.Any(actual => string.Equals(actual.FullPath, expected.FullPath, StringComparison.OrdinalIgnoreCase)
                 || expected.DocumentId.HasValue && actual.DocumentId == expected.DocumentId)) continue;
-            throw new InvalidOperationException("工程图“" + drawing.FileName + "”的关联模型“" + expected.FileName
-                + "”未出现在实际视图引用中，已停止存档。可能为旧引用或视图读取不完整，请核对工程图引用并保存，刷新设计树后重试。");
+            PluginDiagnosticLog.Record("工程图关联", drawing.FileName + "：旧关联未出现在当前视图中，按实际视图更新：" + expected.FileName);
         }
-        if (references.Count > 0)
-        {
             // Actual views supersede the candidate-discovery scope. Keep every
             // model in subsequent version comparison and archive serialization.
             drawing.DrawingScopePaths = null;
             drawing.ReferencedModels.Clear();
             drawing.ReferencedModels.AddRange(references);
             drawing.RelatedModelDocumentId = references.Count == 1 ? references[0].DocumentId : null;
-        }
+        if (drawing.NativeFileScopePaths != null)
+            NativeArchiveManifest.ConfirmFileScope(drawing, drawing.NativeFileScopePaths.ToArray());
+        drawing.DrawingViewsRead = true;
     }
 
     private static bool FilesHaveSameContent(string first, string second)
@@ -1012,7 +1073,7 @@ internal sealed class SolidWorksReferenceTreeScanner
                 return CadReferenceStatus.Virtual;
             }
 
-            if (requireComplete && component.IsSpeedPak)
+            if (requireComplete && component.IsSpeedPak && DocumentRuleGate.ShouldBlock("B03", "组件使用SpeedPak简化配置：" + path))
                 throw new InvalidOperationException("组件使用SpeedPak简化配置，无法确认完整内部结构。请核对完整配置后存档：" + path);
             var suppression = component.GetSuppression2();
             if (suppression == (int)swComponentSuppressionState_e.swComponentSuppressed)

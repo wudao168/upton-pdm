@@ -11,6 +11,16 @@ internal sealed class CheckInUploadHashes
     public string Upload { get; private set; }
     public string Source { get; private set; }
 
+    public static CheckInUploadHashes ReadFrozen(string uploadPath, string expectedUploadSha256,
+        string sourceSha256, CancellationToken cancellationToken)
+    {
+        var upload = Compute(uploadPath, cancellationToken);
+        if (string.IsNullOrWhiteSpace(sourceSha256) || string.IsNullOrWhiteSpace(expectedUploadSha256)
+            || !string.Equals(upload, expectedUploadSha256, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("固定上传副本的内容校验失败，请重新准备存档副本。本地文件已保留。");
+        return new CheckInUploadHashes { Upload = upload, Source = sourceSha256 };
+    }
+
     public static CheckInUploadHashes Read(string uploadPath, string sourcePath,
         string exactCopySourceSha256, CancellationToken cancellationToken, string expectedSourceSha256 = null)
     {

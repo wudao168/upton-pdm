@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <PlatformTarget>x64</PlatformTarget>
+    <DesktopDownloadsSourceRoot Condition="'$(DesktopDownloadsSourceRoot)' == ''">../../src/Pdm.Desktop</DesktopDownloadsSourceRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Web" />
+    <Reference Include="System.Drawing" />
+    <Compile Include="$(DesktopDownloadsSourceRoot)/MainWindow.Downloads.cs" Link="Product/MainWindow.Downloads.cs" />
+    <Compile Include="$(DesktopDownloadsSourceRoot)/ReviewOverlayWindow.xaml.cs" Link="Product/ReviewOverlayWindow.xaml.cs" />
+    <Compile Include="$(DesktopDownloadsSourceRoot)/ReviewOverlaySource.cs" Link="Product/ReviewOverlaySource.cs" />
+    <Page Include="$(DesktopDownloadsSourceRoot)/ReviewOverlayWindow.xaml" Link="ReviewOverlayWindow.xaml" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" />
+  </ItemGroup>
+</Project>

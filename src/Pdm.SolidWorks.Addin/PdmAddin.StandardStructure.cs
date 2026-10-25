@@ -24,7 +24,7 @@ public sealed partial class PdmAddin
         string originalDocumentPath = null;
         try
         {
-            var view = await apiClient.GetStandardStructuresAsync(lifetime.Token);
+            var view = await apiClient.GetStandardStructuresAsync(ArchiveOperationToken);
             if (!view.CanArchive) throw new InvalidOperationException("只有标准化账号可以存档标准结构。");
             var model = application.ActiveDoc as IModelDoc2;
             if (model == null || string.IsNullOrWhiteSpace(model.GetPathName()))
@@ -34,6 +34,8 @@ public sealed partial class PdmAddin
             originalDocumentPath = model.GetPathName();
             var structureScanner = new SolidWorksReferenceTreeScanner(application);
             var root = structureScanner.ScanDocument(model, true);
+            await ReadMissingSuppressedStructuresAsync(root, ArchiveOperationToken);
+            ArchiveOperationToken.ThrowIfCancellationRequested();
             if (root.Status == CadReferenceStatus.Virtual || IsSolidWorksTemporaryVirtualComponentPath(root.FullPath))
                 throw new InvalidOperationException("嵌入组件须随父装配保存，请打开父装配后存档标准结构；无需独立登记该组件。");
             {
@@ -67,7 +69,7 @@ public sealed partial class PdmAddin
                     if (ReadResolvedCustomProperty(model, null, StandardStructureRules.IdentityProperty) != libraryId.ToString("D"))
                         throw new InvalidOperationException("标准库独立标识写入失败，本次尚未上传。请检查图档是否可编辑后重试。");
                 }
-                var mappings = await apiClient.GetBomPropertyMappingsAsync(lifetime.Token);
+                var mappings = await apiClient.GetBomPropertyMappingsAsync(ArchiveOperationToken);
                 if (!PathsEqual((application.ActiveDoc as IModelDoc2)?.GetPathName(), root.FullPath))
                     throw new InvalidOperationException("当前活动图档已切换，请重新选择标准结构存档。");
                 var nativeFiles = structureScanner.AddNativeAssociatedDrawings(model, root);
@@ -76,14 +78,15 @@ public sealed partial class PdmAddin
                 var nodes = StandardStructureNodes(root).ToArray();
                 progress = new BatchProgressDialog(nodes.Length) { Text = "标准结构存档" };
                 progress.Show(taskPaneControl);
-                using (var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token))
+                using (var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ArchiveOperationToken))
                 {
-                    progress.CancelRequested += (_, _) => cancellation.Cancel();
+                    if (!progress.IsSessionProxy) progress.CancelRequested += (_, _) => cancellation.Cancel();
                     var ct = cancellation.Token;
                     var models = new Dictionary<CadTreeNode, IModelDoc2>();
                     foreach (var node in nodes.Reverse())
                     {
                         ct.ThrowIfCancellationRequested();
+                        if (node.Role == CadReferenceRole.ExternalFileDependency) continue;
                         var loaded = FindLoadedBatchDocument(node);
                         if (loaded == null && !embedded.Contains(node))
                         {
@@ -91,7 +94,8 @@ public sealed partial class PdmAddin
                                 : OpenDocumentInvisiblyForBatch(node.FullPath, ToSolidWorksDocumentType(node.Kind), node.Configuration, true);
                             opened.Add(loaded);
                         }
-                        if (loaded == null) throw new InvalidOperationException("嵌入组件尚未完整加载，请在父装配体中还原后再存档；无需独立登记：" + node.FileName);
+                        if (loaded == null && embedded.Contains(node) && node.EmbeddedProperties != null) continue;
+                        if (loaded == null) throw new InvalidOperationException("嵌入组件结构尚未读取完成，请保存父装配后重试；无需独立登记：" + node.FileName);
                         models[node] = loaded;
                         if (!embedded.Contains(node) && (loaded.GetSaveFlag()
                             || ReferenceEquals(node, root) && embedded.Any(e => FindLoadedBatchDocument(e)?.GetSaveFlag() == true)))
@@ -111,13 +115,16 @@ public sealed partial class PdmAddin
                     var uploads = new Dictionary<string, string>();
                     var nativeKeys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     var previewKeys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    var previewFailures = new List<string>();
                     var properties = new Dictionary<CadTreeNode, IReadOnlyDictionary<string, string>>();
                     foreach (var node in nodes)
                     {
                         ct.ThrowIfCancellationRequested();
                         progress.ReportFile(properties.Count, nodes.Length, node.FileName, "保存原生副本、完整嵌入结构及只读预览");
-                        var document = models[node];
-                        properties[node] = ReadModelProperties(document, node.Configuration, false, node.Kind != CadDocumentKind.Drawing, true);
+                        models.TryGetValue(node, out var document);
+                        properties[node] = node.Role == CadReferenceRole.ExternalFileDependency ? new Dictionary<string, string>()
+                            : document == null ? node.EmbeddedProperties
+                            : ReadModelProperties(document, node.Configuration, false, node.Kind != CadDocumentKind.Drawing, true);
                         if (!embedded.Contains(node) && !nativeKeys.ContainsKey(node.FullPath))
                         {
                             var key = Guid.NewGuid().ToString("N");
@@ -128,14 +135,22 @@ public sealed partial class PdmAddin
                             nativeKeys[node.FullPath] = key;
                             uploads[key] = copy;
                         }
+                        if (node.Role == CadReferenceRole.ExternalFileDependency) continue;
                         var configurationKey = node.FullPath + "|" + node.Configuration;
                         if (!previewKeys.ContainsKey(configurationKey))
                         {
                             var key = Guid.NewGuid().ToString("N");
                             var previewPath = Path.Combine(temporaryRoot, key + (node.Kind == CadDocumentKind.Drawing ? ".pdf" : ".step"));
-                            ExportStandardStructurePreview(document, node, previewPath);
-                            previewKeys[configurationKey] = key;
-                            uploads[key] = previewPath;
+                            if (document != null && TryExportStandardStructurePreview(document, node, previewPath))
+                            {
+                                previewKeys[configurationKey] = key;
+                                uploads[key] = previewPath;
+                            }
+                            else
+                            {
+                                previewKeys[configurationKey] = null;
+                                previewFailures.Add(node.FileName);
+                            }
                         }
                     }
                     string Value(CadTreeNode node, string field, string fallback)
@@ -162,7 +177,8 @@ public sealed partial class PdmAddin
                     var bom = new List<StandardStructureBomDto>();
                     void Bom(CadTreeNode node, decimal parentQuantity, bool isRoot)
                     {
-                        if (node.Kind == CadDocumentKind.Drawing || node.Kind == CadDocumentKind.Pdf || node.Status == CadReferenceStatus.Suppressed) return;
+                        if (node.Kind == CadDocumentKind.Drawing || node.Kind == CadDocumentKind.Pdf
+                            || node.Status == CadReferenceStatus.Suppressed || node.IsSuppressed) return;
                         var quantity = parentQuantity * (isRoot ? 1 : Math.Max(1, node.Quantity));
                         var kind = Value(node, "kind", "物料分类");
                         var standard = kind == "标准件" || kind.Equals("Standard", StringComparison.OrdinalIgnoreCase) || kind == "外购件";
@@ -185,11 +201,25 @@ public sealed partial class PdmAddin
                     }
                     if (root.Kind != CadDocumentKind.Drawing) Bom(root, 1, true);
                     ct.ThrowIfCancellationRequested();
+                    if (ArchiveSession.Current != null)
+                    {
+                        ArchiveSession.Current.ReportPreparedFiles(nodes.Select(node => new BatchOperationItem(node, 0)).ToArray());
+                        ct.ThrowIfCancellationRequested();
+                        foreach (var node in nodes.Where(node => !embedded.Contains(node) && nativeKeys.ContainsKey(node.FullPath)))
+                            if (!string.Equals(ComputeFileHash(node.FullPath), ComputeFileHash(uploads[nativeKeys[node.FullPath]]), StringComparison.OrdinalIgnoreCase))
+                                throw new InvalidOperationException("标准图档在准备完成后发生变化，已停止上传，请保存后重新准备：" + node.FileName);
+                    }
                     progress.SetStage("正在上传标准结构完整版本，请等待服务器确认");
                     var saved = await apiClient.ArchiveStandardStructureAsync(new { StructureId = libraryId, DrawingType = drawingType, Name = Name(root), Root = Map(root), Bom = bom,
                         RequestId = Guid.NewGuid(), ExpectedRevisionId = latest == null ? (Guid?)null : latest.Id, ChangeNote = changeNote }, uploads, ct);
-                    progress.Complete("标准结构存档完成：" + saved.Code + "-" + StandardStructureRules.Version(saved.Revisions.Max(r => r.Version))
-                        + "\r\n原生文件、嵌入层级和BOM已保存到独立标准化目录，可在标准结构页面查看。", false);
+                    var standardVersion = StandardStructureRules.Version(saved.Revisions.Max(r => r.Version));
+                    foreach (var node in nodes)
+                        ArchiveSession.Current?.TrackFile(node, embedded.Contains(node) ? "已存档至标准库（随父装配）" : "已存档至标准库（服务器已确认）",
+                            (embedded.Contains(node) ? "随父装配 " : "随标准结构 ") + standardVersion);
+                    progress.Complete("标准结构存档完成：" + saved.Code + "-" + standardVersion
+                        + "\r\n原生文件、嵌入层级和BOM已保存到独立标准化目录，可在标准结构页面查看。"
+                        + (previewFailures.Count == 0 ? "" : "\r\n以下图档的预览未生成，原生文件已存档，无需重复上传："
+                            + string.Join("、", previewFailures.Distinct().Take(8)) + "。可下载原生文件查看。"), false);
                 }
             }
         }
@@ -216,6 +246,17 @@ public sealed partial class PdmAddin
                 catch (Exception error) { LogDiagnostic("清理标准结构临时副本", error); }
             }
             EndWorkspaceOperation();
+        }
+    }
+
+    private bool TryExportStandardStructurePreview(IModelDoc2 document, CadTreeNode node, string previewPath)
+    {
+        try { ExportStandardStructurePreview(document, node, previewPath); return true; }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception error)
+        {
+            LogDiagnostic("标准结构预览生成失败，继续保存原生图档：" + node.FileName, error);
+            return false;
         }
     }
 
@@ -267,7 +308,7 @@ public sealed partial class PdmAddin
     private static IEnumerable<CadTreeNode> StandardStructureNodes(CadTreeNode root)
     {
         yield return root;
-        foreach (var child in root.Children.Where(c => c.Role != CadReferenceRole.ExternalFileDependency))
+        foreach (var child in root.Children)
             foreach (var node in StandardStructureNodes(child)) yield return node;
     }
 }

@@ -14,6 +14,18 @@ internal static class SuppressedAssemblyLocalStructure
         return Visit(root, read, new HashSet<string>(StringComparer.OrdinalIgnoreCase), token);
     }
 
+    public static bool TryReuse(CadTreeNode source, CadTreeNode target)
+    {
+        if (source == null || !SuppressedAssemblyArchive.IsUnexpanded(target)
+            || !string.Equals(source.FullPath, target.FullPath, StringComparison.OrdinalIgnoreCase)
+            || source.Configuration != target.Configuration || source.InstancePath != target.InstancePath
+            || source.IsRenamePendingSave || target.IsModifiedInSolidWorks || target.IsRenamePendingSave || !CanUse(source)) return false;
+        target.Children.AddRange(source.Children.Where(child => child.Kind != CadDocumentKind.Drawing));
+        target.SuppressedLocalStructureSha256 = source.SuppressedLocalStructureSha256;
+        target.StructureIndexPending |= source.StructureIndexPending;
+        return true;
+    }
+
     private static async Task Visit(CadTreeNode node, Func<CadTreeNode, Task<CadTreeNode>> read, HashSet<string> ancestors, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();

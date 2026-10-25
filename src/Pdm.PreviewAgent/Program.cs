@@ -17,7 +17,7 @@ namespace Upton.Pdm.PreviewAgent;
 /// 转图电脑上的转图代理：接收API服务器打包的源文件，调用本机SolidWorks转换程序生成PDF/STEP，再把结果打包返回。
 /// 部署要求：本目录（或其 preview-worker 子目录）放置 Upton.Pdm.SolidWorks.PreviewWorker.exe 与 SolidWorks 互操作程序集，并安装 SolidWorks。
 /// </summary>
-internal static class Program
+internal static partial class Program
 {
     private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
     private static readonly PersistentWorker Worker = new PersistentWorker();
@@ -25,49 +25,12 @@ internal static class Program
     private static int waitingRequests;
     private static string currentTask = string.Empty;
 
-    private static int Main(string[] args)
-    {
-        var options = AgentOptions.Load(args);
-        if (!File.Exists(options.WorkerPath))
-        {
-            Console.Error.WriteLine($"SolidWorks转换程序不存在：{options.WorkerPath}");
-            return 1;
-        }
-
-        var listener = new TcpListener(IPAddress.Parse(options.BindAddress), options.Port);
-        try
-        {
-            listener.Start();
-        }
-        catch (Exception exception)
-        {
-            Console.Error.WriteLine($"转图代理启动失败（{options.BindAddress}:{options.Port}）：{exception.Message}。请确认端口未被占用并已在防火墙中放通。");
-            return 1;
-        }
-
-        Console.WriteLine($"转图代理已启动：http://{options.BindAddress}:{options.Port}/");
-        Console.WriteLine($"工作目录：{options.WorkRoot}；转换程序：{options.WorkerPath}；超时：{options.TimeoutMinutes} 分钟；访问令牌：{(string.IsNullOrEmpty(options.Token) ? "未设置" : "已设置")}");
-        var stopping = new ManualResetEventSlim(false);
-        Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; stopping.Set(); };
-        while (!stopping.IsSet)
-        {
-            TcpClient client;
-            try
-            {
-                client = listener.AcceptTcpClient();
-            }
-            catch (Exception)
-            {
-                break;
-            }
-            _ = Task.Run(() => HandleClientAsync(client, options));
-        }
-        listener.Stop();
-        return 0;
-    }
+    [STAThread]
+    private static int Main(string[] args) => RunApplication(args);
 
     private static async Task HandleClientAsync(TcpClient client, AgentOptions options)
     {
+        AgentBatch batch = null;
         using (client)
         using (var stream = client.GetStream())
         try
@@ -82,7 +45,11 @@ internal static class Program
                     status = "ok",
                     machine = Environment.MachineName,
                     name = options.Name,
-                    busy = ConversionGate.CurrentCount == 0,
+                    busy = Paused || ConversionGate.CurrentCount == 0,
+                    processing = ConversionGate.CurrentCount == 0,
+                    accepting = !Paused,
+                    windowCreated = WindowCreated,
+                    windowVisible = WindowVisible,
                     queued = Volatile.Read(ref waitingRequests),
                     currentTask,
                     agentVersion = typeof(Program).Assembly.GetName().Version?.ToString(),
@@ -114,16 +81,31 @@ internal static class Program
                 return;
             }
 
+            lock (RuntimeGate)
+            {
+                if (!Paused)
+                {
+                    batch = Journal.Begin(Convert.ToString(client.Client?.RemoteEndPoint));
+                    Interlocked.Increment(ref waitingRequests);
+                }
+            }
+            if (batch == null)
+            {
+                await WriteJsonAsync(stream, 503, new { error = "代理已暂停接收新任务，请稍后重试或在代理首页恢复接收。" });
+                return;
+            }
+
             var jobRoot = Path.Combine(options.WorkRoot, Guid.NewGuid().ToString("N"));
             var sourceRoot = Path.Combine(jobRoot, "sources");
             var outputRoot = Path.Combine(jobRoot, "outputs");
-            Directory.CreateDirectory(sourceRoot);
-            Directory.CreateDirectory(outputRoot);
-            Interlocked.Increment(ref waitingRequests);
             await ConversionGate.WaitAsync();
             Interlocked.Decrement(ref waitingRequests);
+            CurrentBatchId = batch.Id;
+            Journal.Update(batch.Id, item => { item.Status = "处理中"; item.StartedUtc = DateTime.UtcNow; item.Stage = "正在接收和校验源文件"; });
             try
             {
+                Directory.CreateDirectory(sourceRoot);
+                Directory.CreateDirectory(outputRoot);
                 var requestPath = Path.Combine(jobRoot, "request.zip");
                 using (var requestFile = File.Create(requestPath))
                 {
@@ -133,11 +115,30 @@ internal static class Program
                 var manifest = ReadManifest(requestPath, sourceRoot);
                 if (manifest.Jobs.Count == 0) throw new InvalidOperationException("转换请求中没有任务。");
                 var convertJobs = manifest.Jobs.Where(job => job.Convert).ToList();
+                if (convertJobs.Count == 0) throw new InvalidDataException("转换请求没有需要处理的图档。");
+                Journal.Update(batch.Id, item =>
+                {
+                    item.Context = manifest.Context ?? new AgentBatchContext();
+                    item.ReferenceFiles = manifest.Jobs.Count - convertJobs.Count;
+                    item.Files = convertJobs.Select(job => new AgentFileRecord { DocumentId = job.DocumentId, FileName = job.FileName }).ToList();
+                });
+                Journal.Log("信息", "源文件校验完成：处理 " + convertJobs.Count + " 个图档，引用文件 " + (manifest.Jobs.Count - convertJobs.Count) + " 个。", batch.Id);
                 currentTask = $"{convertJobs.Count} 项：{string.Join("、", convertJobs.Take(3).Select(job => job.FileName))}";
                 Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 收到转换任务 {convertJobs.Count} 项（含只作引用的文件共 {manifest.Jobs.Count} 个），来源 {client.Client?.RemoteEndPoint}");
                 RunWorker(options, jobRoot, sourceRoot, outputRoot, manifest);
                 var resultPath = Path.Combine(jobRoot, "worker-result.json");
                 var result = Serializer.Deserialize<WorkerResult>(File.ReadAllText(resultPath, Encoding.UTF8));
+                Journal.Update(batch.Id, item =>
+                {
+                    foreach (var file in item.Files)
+                    {
+                        var outcome = result.Items?.SingleOrDefault(value => value.DocumentId == file.DocumentId);
+                        var success = outcome?.Success ?? (result.Items == null && result.Success);
+                        file.Status = success ? "成功" : "失败";
+                        file.Message = success ? "转换完成" : AgentText.Safe(outcome?.Error, "图档转换失败，请核对源文件及引用后重试，技术详情已记录日志。");
+                        if (!file.FinishedUtc.HasValue) file.FinishedUtc = DateTime.UtcNow;
+                    }
+                });
                 var successfulJobs = convertJobs.Where(job => result.Items == null || result.Items.Any(item => item.DocumentId == job.DocumentId && item.Success)).ToList();
 
                 var missing = successfulJobs
@@ -154,7 +155,7 @@ internal static class Program
                     var resultEntry = archive.CreateEntry("result.json", CompressionLevel.Fastest);
                     using (var resultStream = resultEntry.Open())
                     {
-                        var payload = Encoding.UTF8.GetBytes(Serializer.Serialize(new { result.Success, result.Error, result.Items }));
+                        var payload = Encoding.UTF8.GetBytes(Serializer.Serialize(new { result.Success, result.Error, result.Items, result.AssemblyPreviewVersion }));
                         resultStream.Write(payload, 0, payload.Length);
                     }
                     // 只回传需要转出的结果；引用文件的结果服务端不会使用，回传只是浪费带宽和时间。
@@ -168,10 +169,12 @@ internal static class Program
                     await AgentHttpRequest.WriteResponseAsync(stream, 200, "application/zip", responseFile.Length, responseFile);
                 }
                 Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 转换结束：成功 {successfulJobs.Count} 项，失败 {convertJobs.Count - successfulJobs.Count} 项");
+                Journal.Complete(batch.Id, true);
             }
             finally
             {
                 currentTask = string.Empty;
+                CurrentBatchId = null;
                 ConversionGate.Release();
                 var resultFile = Path.Combine(jobRoot, "worker-result.json");
                 var succeeded = false;
@@ -191,9 +194,16 @@ internal static class Program
         catch (Exception exception)
         {
             Console.Error.WriteLine($"[{DateTime.Now:HH:mm:ss}] 转换失败：{exception.Message}");
+            Journal.Diagnostic(exception.ToString());
+            var message = "转图任务未完成，请检查源文件、引用及转换程序状态后重试；技术详情已保存在代理诊断日志。";
+            if (exception is InvalidDataException || exception is FileNotFoundException)
+                message = "转图源文件不完整或无法读取，请核对本批文件后重新发起。";
+            if (exception is TimeoutException) message = "图档转换等待超时，请检查SolidWorks状态和图档引用后重新发起。";
+            if (batch != null) Journal.Complete(batch.Id, false, message);
+            else Journal.Log("提醒", message);
             try
             {
-                await WriteJsonAsync(stream, 500, new { error = exception.Message });
+                await WriteJsonAsync(stream, 500, new { error = message });
             }
             catch (Exception)
             {
@@ -240,7 +250,9 @@ internal static class Program
                 OutputPath = Path.Combine(outputRoot, job.OutputName),
                 Kind = job.Kind,
                 ReleaseRevision = job.ReleaseRevision,
-                QrContent = job.QrContent
+                QrContent = job.QrContent,
+                AssemblyPreview = job.AssemblyPreview,
+                Configuration = job.Configuration
             }).ToList()
         };
         var manifestPath = Path.Combine(jobRoot, "worker-manifest.json");
@@ -351,6 +363,19 @@ internal static class Program
                         if (payload.Progress)
                         {
                             SolidWorksPid = payload.SolidWorksPid; Stage = payload.Stage; Completed = payload.Completed; Total = payload.Total;
+                            if (CurrentBatchId.HasValue) Journal.Progress(CurrentBatchId.Value, payload.Stage, payload.Completed);
+                            if (CurrentBatchId.HasValue && payload.Item != null)
+                            {
+                                Journal.Update(CurrentBatchId.Value, batch =>
+                                {
+                                    var file = batch.Files.Single(item => item.DocumentId == payload.Item.DocumentId);
+                                    file.Status = payload.Item.Success ? "成功" : "失败";
+                                    file.Message = payload.Item.Success ? "转换完成" : AgentText.Safe(payload.Item.Error, "图档转换失败，请核对源文件及引用后重试，技术详情已记录日志。");
+                                    file.FinishedUtc = DateTime.UtcNow;
+                                    Journal.Log(payload.Item.Success ? "成功" : "失败", file.FileName + "：" + file.Message, batch.Id);
+                                });
+                                if (!string.IsNullOrWhiteSpace(payload.Item.Error)) Journal.Diagnostic(payload.Item.Error);
+                            }
                             continue;
                         }
                         Stage = payload.Success ? "转换完成" : "转换失败：" + payload.Error;
@@ -379,6 +404,8 @@ internal static class Program
                 WorkingDirectory = Path.GetDirectoryName(options.WorkerPath),
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -407,7 +434,7 @@ internal static class Program
             return true;
         }
 
-        private void Stop()
+        internal void Stop()
         {
             try { input?.Dispose(); } catch (Exception) { }
             try { if (process != null && !process.HasExited) process.Kill(); } catch (Exception) { }
@@ -415,6 +442,17 @@ internal static class Program
             input = null;
             output = null;
             process = null;
+        }
+
+        internal void Close()
+        {
+            lock (gate)
+            {
+                // Closing stdin lets the worker dispose its own SolidWorks session; never close a user's separate CAD process.
+                try { input?.Dispose(); input = null; if (process != null && !process.HasExited) process.WaitForExit(15000); }
+                catch (Exception error) when (error is IOException || error is InvalidOperationException) { Journal.Diagnostic(error.ToString()); }
+                finally { Stop(); }
+            }
         }
     }
 
@@ -441,6 +479,7 @@ internal static class Program
     private sealed class AgentManifest
     {
         public List<AgentJob> Jobs { get; set; } = new List<AgentJob>();
+        public AgentBatchContext Context { get; set; }
     }
 
     private sealed class AgentJob
@@ -453,6 +492,8 @@ internal static class Program
         public bool Convert { get; set; } = true;
         public string ReleaseRevision { get; set; }
         public string QrContent { get; set; }
+        public bool AssemblyPreview { get; set; }
+        public string Configuration { get; set; }
     }
 
     private sealed class WorkerManifest
@@ -468,10 +509,14 @@ internal static class Program
         public string Kind { get; set; }
         public string ReleaseRevision { get; set; }
         public string QrContent { get; set; }
+        public bool AssemblyPreview { get; set; }
+        public string Configuration { get; set; }
     }
 
     private sealed class WorkerResult
     {
+        public WorkerItem Item { get; set; }
+        public int AssemblyPreviewVersion { get; set; }
         public bool Progress { get; set; }
         public int SolidWorksPid { get; set; }
         public string Stage { get; set; }

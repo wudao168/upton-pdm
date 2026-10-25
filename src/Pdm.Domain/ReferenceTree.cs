@@ -17,6 +17,11 @@ public sealed record DocumentReferenceNode(
     public ReferenceRole Role { get; init; } = ReferenceRole.Component;
 
     public bool TreeScopeOnly { get; init; }
+    public bool IsSuppressed { get; init; }
+    public bool IncludesDesignDependencies { get; init; }
+    public bool UsesNativeFileInventory { get; init; }
+    public bool StructureIndexPending { get; init; }
+    public bool HasPendingStructureIndex => StructureIndexPending || Children.Any(child => child.HasPendingStructureIndex);
 
     public bool HasBlockingIssue => Status == ReferenceNodeStatus.Missing || Children.Any(child => child.HasBlockingIssue);
 }
@@ -75,6 +80,12 @@ public static class ReferenceTreeDiff
             if (node.Status != currentNode.Status)
             {
                 changes.Add(new ReferenceTreeChange(ReferenceChangeKind.StatusChanged, path, node.Status.ToString(), currentNode.Status.ToString()));
+            }
+            else if (node.Status == ReferenceNodeStatus.Virtual && node.IsSuppressed != currentNode.IsSuppressed)
+            {
+                changes.Add(new ReferenceTreeChange(ReferenceChangeKind.StatusChanged, path,
+                    node.IsSuppressed ? "嵌入，压缩" : "嵌入，未压缩",
+                    currentNode.IsSuppressed ? "嵌入，压缩" : "嵌入，未压缩"));
             }
         }
 

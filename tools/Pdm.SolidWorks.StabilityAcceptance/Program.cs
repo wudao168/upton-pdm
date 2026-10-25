@@ -56,15 +56,15 @@ internal static partial class Program
         var roots = args.Skip(3).Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray();
         if (args.Length < 3 || args.Length > 8 || roots.Length > 1 || options.Any(value =>
             value != "--structure-only" && value != "--archive-preload" && value != "--mixed-states-only"
-                && value != "--api-payload" && value != "--virtual-fixture"
+                && value != "--api-payload" && value != "--virtual-fixture" && value != "--suppressed-only" && value != "--archive-only"
                 && value != "--virtual-nested-fixture" && value != "--reopen-native" && value != "--rename-fixture" && value != "--rename-existing"
-                && value != "--audit-native" && value != "--repair-native-ref" && value != "--pack-repaired" && value != "--reopen-archive" && value != "--pending-child-rename" && value != "--isolated-virtual-fixture" && value != "--separate-instance" && value != "--checkout-context" && value != "--open-only" && value != "--controlled-isolation")
+                && value != "--audit-native" && value != "--repair-native-ref" && value != "--pack-repaired" && value != "--reopen-archive" && value != "--pending-child-rename" && value != "--isolated-virtual-fixture" && value != "--separate-instance" && value != "--checkout-context" && value != "--checkout-discard-chain" && value != "--open-only" && value != "--controlled-isolation" && value != "--discard-edit-regression" && value != "--linked-archive" && value != "--inventory-probe" && value != "--live-workflow")
             || options.Contains("--structure-only") && options.Contains("--archive-preload")
             || options.Contains("--api-payload") && !options.Contains("--archive-preload")
             || options.Contains("--reopen-native") && options.Length != 1)
         { Console.Error.WriteLine("Usage: <latest-addin-dll> <source-fixture-directory> <new-qa-directory> [root-assembly-file-name] [--structure-only|--archive-preload] [--mixed-states-only] [--api-payload]"); return 2; }
         Report["structureOnly"] = options.Contains("--structure-only");
-        Report["mixedStatesOnly"] = options.Contains("--mixed-states-only");
+        Report["mixedStatesOnly"] = options.Contains("--mixed-states-only") || options.Contains("--suppressed-only");
         Report["archivePreload"] = options.Contains("--archive-preload");
         Report["apiPayload"] = options.Contains("--api-payload");
         Report["virtualFixture"] = options.Contains("--virtual-fixture");
@@ -119,12 +119,13 @@ internal static partial class Program
             Report["qaControlledBindings"] = true;
         }
         SldWorks app = null;
-        Process launchedProcess = null;
         int ownedPid = 0;
         DateTime ownedStarted = DateTime.MinValue;
-        bool startupChanged = false, keyExisted = false, valueExisted = false;
+        bool keyExisted = false, valueExisted = false;
         object startupValue = null;
-        RegistryValueKind startupKind = RegistryValueKind.DWord;
+        System.Threading.Timer startupMonitor = null;
+        int startupChanged = 0, startupSamples = 0;
+        string startupMonitorError = null;
         string searchFolders = null, workingDirectory = null;
         bool? searchRules = null;
         var passed = false;
@@ -134,45 +135,51 @@ internal static partial class Program
             {
                 keyExisted = existing != null;
                 valueExisted = existing?.GetValueNames().Contains("") == true;
-                if (valueExisted) { startupValue = existing.GetValue(""); startupKind = existing.GetValueKind(""); }
+                if (valueExisted) startupValue = existing.GetValue("");
             }
             Report["startupOriginal"] = new { keyExisted, valueExisted, value = startupValue };
-            using (var key = Registry.CurrentUser.CreateSubKey(StartupKey)) key.SetValue("", 0, RegistryValueKind.DWord);
-            startupChanged = true;
+            // 仅监测启动项；COM 后台实例不得加载交互插件，也不得卸载插件或改写用户偏好。
+            Report["startupRegistryNotWritten"] = true;
+            startupMonitor = new System.Threading.Timer(_ =>
+            {
+                try
+                {
+                    using (var key = Registry.CurrentUser.OpenSubKey(StartupKey))
+                        if ((key != null) != keyExisted || (key?.GetValueNames().Contains("") == true) != valueExisted
+                            || valueExisted && !Equals(key?.GetValue(""), startupValue))
+                            Interlocked.Exchange(ref startupChanged, 1);
+                    Interlocked.Increment(ref startupSamples);
+                }
+                catch (Exception exception) { Interlocked.CompareExchange(ref startupMonitorError, exception.ToString(), null); }
+            }, null, 0, 200);
             var existingProcesses = Process.GetProcessesByName("SLDWORKS").Select(process => process.Id).ToArray();
             if (!separateInstance && existingProcesses.Length != 0) throw new InvalidOperationException("启动前检测到新的用户会话，已停止验收。");
-            Console.WriteLine("NATIVE: starting isolated hidden SolidWorks; UPLM autoload disabled");
-            if (separateInstance)
+            Console.WriteLine("NATIVE: starting isolated hidden SolidWorks; user autoload preference unchanged");
+            app = (SldWorks)Activator.CreateInstance(System.Type.GetTypeFromProgID("SldWorks.Application", true));
+            var processId = app.GetProcessID();
+            if (existingProcesses.Contains(processId))
             {
-                launchedProcess = Process.Start(new ProcessStartInfo(Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ProgramFiles), "SOLIDWORKS Corp", "SOLIDWORKS", "SLDWORKS.exe"))
-                    { UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden,
-                        WorkingDirectory = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ProgramFiles), "SOLIDWORKS Corp", "SOLIDWORKS") });
-                Console.WriteLine("NATIVE: launched separate process pid=" + launchedProcess.Id);
-                for (var attempt = 0; attempt < 90 && app == null && !launchedProcess.HasExited; attempt++)
-                {
-                    try
-                    {
-                        var candidate = FindProcess(launchedProcess.Id);
-                        if (candidate != null && candidate.GetProcessID() == launchedProcess.Id) app = candidate;
-                        else if (candidate != null) Marshal.ReleaseComObject(candidate);
-                    }
-                    catch (COMException) { }
-                    if (app == null) Thread.Sleep(1000);
-                }
-                if (app == null) throw new InvalidOperationException("独立CAD进程未就绪，未接管已有会话。");
-            }
-            else app = (SldWorks)Activator.CreateInstance(System.Type.GetTypeFromProgID("SldWorks.Application", true));
-            ownedPid = app.GetProcessID();
-            if (existingProcesses.Contains(ownedPid))
-            {
-                Marshal.ReleaseComObject(app); app = null; ownedPid = 0;
+                Marshal.ReleaseComObject(app); app = null;
                 throw new InvalidOperationException("未创建独立的SolidWorks进程，未修改或接管已有会话。");
+            }
+            using (var owned = Process.GetProcessById(processId))
+            {
+                if (!string.Equals(owned.ProcessName, "SLDWORKS", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("无法确认独立CAD进程身份，未接管该会话。");
+                ownedStarted = owned.StartTime.ToUniversalTime();
+                ownedPid = processId;
             }
             Report["separateProcessVerified"] = true;
             Report["preexistingProcessIds"] = existingProcesses;
             app.Visible = false; app.UserControl = false;
-            ownedStarted = Process.GetProcessById(ownedPid).StartTime.ToUniversalTime();
             Report["processId"] = ownedPid; Report["solidWorksVersion"] = app.RevisionNumber();
+            var loadedAddin = app.GetAddInObject("{BCFD8A8A-472B-42E2-AC62-58BC17773650}");
+            if (loadedAddin != null)
+            {
+                if (Marshal.IsComObject(loadedAddin)) Marshal.ReleaseComObject(loadedAddin);
+                throw new InvalidOperationException("独立后台验收会话已加载交互插件，已停止测试；未卸载插件或修改启动加载设置。");
+            }
+            Report["interactiveAddinNotLoaded"] = true;
             Console.WriteLine("NATIVE: version=" + Report["solidWorksVersion"] + " pid=" + ownedPid);
             searchFolders = app.GetSearchFolders((int)swSearchFolderTypes_e.swDocumentType); workingDirectory = app.GetCurrentWorkingDirectory();
             searchRules = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules);
@@ -195,6 +202,12 @@ internal static partial class Program
                 expectedDrawings = names.Length;
             }
             Report["expectedDrawingCount"] = expectedDrawings;
+            if (options.Contains("--linked-archive")) { LinkedNativeArchive(plugin, app, copies, qa); goto NativeVerificationComplete; }
+            if (options.Contains("--discard-edit-regression"))
+            {
+                DiscardNativeEdit(app, plugin, copies, assemblies[0], qa);
+                goto NativeVerificationComplete;
+            }
             if (options.Contains("--controlled-isolation"))
             {
                 ControlledIsolation(app, plugin, copies, assemblies[0], qa);
@@ -224,14 +237,45 @@ internal static partial class Program
             var activatedRoot = app.ActivateDoc3(model.GetTitle(), false, (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref activationErrors) as IModelDoc2;
             if (activatedRoot == null || activationErrors != 0 || !string.Equals(activatedRoot.GetPathName(), assemblies[0], StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("隔离根装配未进入有效的活动文档上下文。");
+            var activatedAddin = app.GetAddInObject("{BCFD8A8A-472B-42E2-AC62-58BC17773650}");
+            if (activatedAddin != null)
+            {
+                if (Marshal.IsComObject(activatedAddin)) Marshal.ReleaseComObject(activatedAddin);
+                throw new InvalidOperationException("激活隔离根装配后检测到交互插件，已停止测试；未卸载插件或修改启动加载设置。");
+            }
+            Report["interactiveAddinNotLoadedAfterActivation"] = true;
             var assembly = (IAssemblyDoc)model;
             var resolveResult = assembly.ResolveAllLightWeightComponents(false);
             Report["resolveResult"] = resolveResult;
             Console.WriteLine("NATIVE: lightweight resolve finished " + DateTimeOffset.Now.ToString("O"));
-            if (options.Contains("--checkout-context"))
+            if (options.Contains("--live-workflow"))
+            {
+                LiveWorkflow(plugin, app, model, copies, qa);
+                goto NativeVerificationComplete;
+            }
+            if (options.Contains("--inventory-probe"))
+            {
+                var inventories = new List<object>();
+                foreach (var userControl in new[] { false, true })
+                    foreach (var includeDrawings in new[] { false, true })
+                    {
+                        app.UserControl = userControl;
+                        app.ActivateDoc3(model.GetTitle(), false, 0, ref activationErrors);
+                        var pack = (IPackAndGo)model.Extension.GetPackAndGo();
+                        pack.IncludeSuppressed = true; pack.IncludeDrawings = includeDrawings;
+                        var ok = pack.GetDocumentNames(out var names);
+                        var count = (names as Array)?.Length ?? 0;
+                        inventories.Add(new { userControl, includeDrawings, ok, count });
+                        Console.WriteLine("INVENTORY PROBE userControl=" + userControl + " drawings=" + includeDrawings + " success=" + ok + " count=" + count);
+                        if (Marshal.IsComObject(pack)) Marshal.ReleaseComObject(pack);
+                    }
+                Report["inventoryProbe"] = inventories;
+                goto NativeVerificationComplete;
+            }
+            if (options.Contains("--checkout-context") || options.Contains("--checkout-discard-chain"))
             {
                 app.UserControl = true;
-                CheckoutContext(plugin, app, model, copies, qa);
+                CheckoutContext(plugin, app, model, copies, qa, options.Contains("--checkout-discard-chain"));
                 passed = true;
                 goto NativeFinished;
             }
@@ -302,17 +346,27 @@ internal static partial class Program
                 var fileType = plugin.GetType("Upton.Pdm.SolidWorks.ControlledOpenFileDto", true);
                 var manifest = Activator.CreateInstance(manifestType);
                 var files = (IList)Activator.CreateInstance(manifestType.GetProperty("Files").PropertyType);
-                foreach (var path in Directory.GetFiles(copies).Where(path => new[] { ".SLDASM", ".SLDPRT", ".SLDDRW" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase)))
+                var downloadedFiles = before.Keys.Select(relative => Path.Combine(copies, relative)).Where(path => new[] { ".SLDASM", ".SLDPRT", ".SLDDRW", ".STEP", ".STP", ".TXT", ".XLS", ".XLSX" }
+                    .Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase)).ToArray();
+                var manifestEvidence = new List<object>();
+                foreach (var path in downloadedFiles)
                 {
                     var file = Activator.CreateInstance(fileType);
+                    var length = new FileInfo(path).Length; var sha256 = Hash(path);
+                    var extension = Path.GetExtension(path).ToUpperInvariant();
+                    var kind = extension == ".SLDASM" ? "Assembly" : extension == ".SLDPRT" ? "Part" : extension == ".SLDDRW" ? "Drawing" : "Other";
                     fileType.GetProperty("FileName").SetValue(file, Path.GetFileName(path));
                     fileType.GetProperty("RelativePath").SetValue(file, Path.GetFileName(path));
                     fileType.GetProperty("IsRoot").SetValue(file, string.Equals(path, assemblies[0], StringComparison.OrdinalIgnoreCase));
-                    fileType.GetProperty("FileLength").SetValue(file, new FileInfo(path).Length);
-                    fileType.GetProperty("Sha256").SetValue(file, Hash(path));
+                    fileType.GetProperty("FileLength").SetValue(file, length);
+                    fileType.GetProperty("Sha256").SetValue(file, sha256);
                     files.Add(file);
+                    manifestEvidence.Add(new { fileName = Path.GetFileName(path), relativePath = Path.GetFileName(path), kind,
+                        kindCode = kind == "Other" ? 5 : kind == "Assembly" ? 0 : kind == "Part" ? 1 : 2, length, sha256 });
                 }
+                Report["controlledOpenManifestFiles"] = manifestEvidence;
                 manifestType.GetProperty("Files").SetValue(manifest, files);
+                CaptureColdReferenceMetadata(app, model, assemblies[0], downloadedFiles);
                 plugin.GetType("Upton.Pdm.SolidWorks.PdmAddin", true).GetMethod("ValidateHistoricalControlledOpenReferences", Members)
                     .Invoke(null, new object[] { model, assemblies[0], manifest, app });
                 Report["controlledOpenValidationPassed"] = true;
@@ -377,21 +431,32 @@ internal static partial class Program
             {
                 Scan(plugin, app, model, "reopened-virtual", expectedDrawings);
             }
+            else if (options.Contains("--archive-only"))
+            {
+                Scan(plugin, app, model, "resolved", expectedDrawings);
+            }
             else if (Equals(Report["mixedStatesOnly"], true))
             {
                 var mixed = (assembly.GetComponents(false) as Array)?.Cast<object>().OfType<IComponent2>().First(component => !component.IsVirtual
                     && component.GetSuppression2() != (int)swComponentSuppressionState_e.swComponentSuppressed
-                    && component.GetPathName().EndsWith(".SLDPRT", StringComparison.OrdinalIgnoreCase));
+                    && component.GetPathName().EndsWith(".SLDPRT", StringComparison.OrdinalIgnoreCase)
+                    && component.GetPathName().IndexOf("IC~~", StringComparison.OrdinalIgnoreCase) < 0);
                 var mixedOriginal = mixed.GetSuppression2();
+                var mixedName = mixed.Name2;
                 try
                 {
-                    mixed.SetSuppression2((int)swComponentSuppressionState_e.swComponentLightweight);
-                    if (mixed.GetSuppression2() != (int)swComponentSuppressionState_e.swComponentLightweight
-                        && mixed.GetSuppression2() != (int)swComponentSuppressionState_e.swComponentFullyLightweight)
-                        throw new InvalidOperationException("混合状态样本未进入轻化状态。");
-                    Scan(plugin, app, model, "mixed-states", expectedDrawings);
+                    var state = options.Contains("--suppressed-only") ? swComponentSuppressionState_e.swComponentSuppressed : swComponentSuppressionState_e.swComponentLightweight;
+                    mixed.SetSuppression2((int)state);
+                    if (mixed.GetSuppression2() != (int)state
+                        && !(state == swComponentSuppressionState_e.swComponentLightweight && mixed.GetSuppression2() == (int)swComponentSuppressionState_e.swComponentFullyLightweight))
+                        throw new InvalidOperationException("混合状态样本未进入请求状态：" + state);
+                    Scan(plugin, app, model, options.Contains("--suppressed-only") ? "suppressed-state" : "mixed-states", expectedDrawings);
                 }
-                finally { mixed.SetSuppression2(mixedOriginal); }
+                finally
+                {
+                    var current = app.GetOpenDocumentByName(assemblies[0]) as IAssemblyDoc;
+                    (current?.GetComponents(false) as Array)?.OfType<IComponent2>().FirstOrDefault(component => component.Name2 == mixedName)?.SetSuppression2(mixedOriginal);
+                }
             }
             else
             {
@@ -411,21 +476,31 @@ internal static partial class Program
                 else
                 {
                 var originalState = part.GetSuppression2();
-                Report["stateComponent"] = part.Name2;
+                var partName = part.Name2;
+                Report["stateComponent"] = partName;
+                IComponent2 FreshStateComponent()
+                {
+                    model = app.GetOpenDocumentByName(assemblies[0]) as ModelDoc2
+                        ?? app.OpenDoc6(assemblies[0], 2, 3, "", ref errors, ref warnings);
+                    if (model == null) throw new IOException("状态验证前无法重新打开根装配。");
+                    return (((IAssemblyDoc)model).GetComponents(false) as Array)?.OfType<IComponent2>().FirstOrDefault(component => component.Name2 == partName)
+                        ?? throw new IOException("状态验证前无法重新取得组件：" + partName);
+                }
                 try
                 {
                     foreach (var state in new[] { swComponentSuppressionState_e.swComponentLightweight, swComponentSuppressionState_e.swComponentSuppressed })
                     {
+                        part = FreshStateComponent();
                         var result = part.SetSuppression2((int)state);
                         var actual = part.GetSuppression2();
                         Report[state.ToString()] = new { result, actual };
                         if (actual != (int)state && !(state == swComponentSuppressionState_e.swComponentLightweight && actual == (int)swComponentSuppressionState_e.swComponentFullyLightweight))
                             throw new InvalidOperationException("SolidWorks未进入请求的内存状态：" + state + "，实际=" + actual);
                         Scan(plugin, app, model, state.ToString(), expectedDrawings);
-                        part.SetSuppression2(originalState);
+                        FreshStateComponent().SetSuppression2(originalState);
                     }
                 }
-                finally { part.SetSuppression2(originalState); }
+                finally { FreshStateComponent().SetSuppression2(originalState); }
                 }
                 if (Equals(Report["archivePreload"], true) && !Report.ContainsKey("qaControlledBindings"))
                 {
@@ -468,15 +543,22 @@ internal static partial class Program
             {
                 try
                 {
-                    if (searchFolders != null) app.SetSearchFolders((int)swSearchFolderTypes_e.swDocumentType, searchFolders);
-                    if (searchRules.HasValue) app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules, searchRules.Value);
-                    if (workingDirectory != null) app.SetCurrentWorkingDirectory(workingDirectory);
-                    // A background session can exit as soon as its last document closes:
-                    // https://help.solidworks.com/2022/english/api/sldworksapi/SolidWorks.Interop.sldworks~SolidWorks.Interop.sldworks.ISldWorks~CloseDoc.html
-                    Console.WriteLine("NATIVE: closing only the owned QA session");
-                    if (!app.CloseAllDocuments(true)) throw new InvalidOperationException("验收文档未能全部关闭。");
-                    app.ExitApp();
+                    if (ownedPid != 0)
+                        using (var owned = Process.GetProcessById(ownedPid))
+                        {
+                            if (!string.Equals(owned.ProcessName, "SLDWORKS", StringComparison.OrdinalIgnoreCase)
+                                || owned.StartTime.ToUniversalTime() != ownedStarted)
+                                throw new InvalidOperationException("验收进程身份已变化，未关闭或修改该会话。");
+                            if (searchFolders != null) app.SetSearchFolders((int)swSearchFolderTypes_e.swDocumentType, searchFolders);
+                            if (searchRules.HasValue) app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules, searchRules.Value);
+                            if (workingDirectory != null) app.SetCurrentWorkingDirectory(workingDirectory);
+                            // A background session can exit as soon as its last document closes.
+                            Console.WriteLine("NATIVE: closing only the owned QA session");
+                            if (!app.CloseAllDocuments(true)) throw new InvalidOperationException("验收文档未能全部关闭。");
+                            app.ExitApp();
+                        }
                 }
+                catch (ArgumentException) { Report["ownedProcessAlreadyExited"] = true; }
                 catch (COMException exception) when (exception.ErrorCode == unchecked((int)0x80010108))
                 { Report["backgroundSessionDisconnected"] = true; }
                 catch (Exception exception) { Report["shutdownError"] = exception.Message; passed = false; }
@@ -488,7 +570,8 @@ internal static partial class Program
                 {
                     using (var process = Process.GetProcessById(ownedPid))
                     {
-                        if (process.StartTime.ToUniversalTime() == ownedStarted && !process.WaitForExit(20000))
+                        if (string.Equals(process.ProcessName, "SLDWORKS", StringComparison.OrdinalIgnoreCase)
+                            && process.StartTime.ToUniversalTime() == ownedStarted && !process.WaitForExit(20000))
                         {
                             Report["ownedProcessNeededTermination"] = true;
                             passed = false;
@@ -498,42 +581,37 @@ internal static partial class Program
                 }
                 catch (ArgumentException) { }
             }
-            if (app == null && launchedProcess != null && !launchedProcess.HasExited)
+            if (startupMonitor != null)
             {
-                launchedProcess.Kill(); launchedProcess.WaitForExit(10000);
-            }
-            launchedProcess?.Dispose();
-            if (startupChanged)
-            {
-                try
+                using (var stopped = new ManualResetEvent(false))
                 {
-                    using (var key = Registry.CurrentUser.OpenSubKey(StartupKey, true))
-                    {
-                        if (valueExisted) key.SetValue("", startupValue, startupKind);
-                        else key?.DeleteValue("", false);
-                    }
-                    if (!keyExisted)
-                    {
-                        using (var key = Registry.CurrentUser.OpenSubKey(StartupKey))
-                            if (key != null && (key.GetValueNames().Length != 0 || key.GetSubKeyNames().Length != 0))
-                                throw new InvalidOperationException("验收期间启动项出现其他值，已保留并停止删除。");
-                        Registry.CurrentUser.DeleteSubKey(StartupKey, false);
-                    }
-                    using (var key = Registry.CurrentUser.OpenSubKey(StartupKey))
-                    {
-                        var restored = (key != null) == keyExisted && (key?.GetValueNames().Contains("") == true) == valueExisted
-                            && (!valueExisted || Equals(key.GetValue(""), startupValue));
-                        Report["startupRestored"] = restored; passed &= restored;
-                    }
+                    if (startupMonitor.Dispose(stopped) && !stopped.WaitOne(5000))
+                    { Report["startupMonitorStopFailed"] = true; passed = false; }
                 }
-                catch (Exception exception) { Report["startupRestoreError"] = exception.ToString(); passed = false; }
             }
+            // 仅核对，不恢复旧快照，避免覆盖用户或其他会话刚刚选择的新设置。
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(StartupKey))
+                {
+                    var startupUnchanged = startupChanged == 0 && startupMonitorError == null
+                        && (key != null) == keyExisted && (key?.GetValueNames().Contains("") == true) == valueExisted
+                        && (!valueExisted || Equals(key.GetValue(""), startupValue));
+                    Report["startupPreferenceUnchanged"] = startupUnchanged;
+                    Report["startupMonitorSamples"] = startupSamples;
+                    Report["startupMonitorChanged"] = startupChanged != 0;
+                    if (startupMonitorError != null) Report["startupMonitorError"] = startupMonitorError;
+                    Report["startupObservedAtEnd"] = key?.GetValue("");
+                }
+            }
+            catch (Exception exception) { Report["startupReadError"] = exception.ToString(); passed = false; }
             var unchanged = SameHashes(before, HashFiles(source));
             var copiesUnchanged = SameHashes(before, HashFiles(copies));
             Report["sourceUnchanged"] = unchanged; Report["copiesUnchanged"] = copiesUnchanged;
             Report["sourceFileCount"] = before.Count; Report["finishedAt"] = DateTimeOffset.Now.ToString("O");
-            Report["qaCopiesSavedWithConsent"] = Equals(Report["archivePreload"], true) || options.Contains("--controlled-isolation");
-            Report["passed"] = passed && unchanged && (copiesUnchanged || Equals(Report["archivePreload"], true) || Equals(Report["renameFixture"], true) || Equals(Report["repairNativeReference"], true) || options.Contains("--controlled-isolation"));
+            Report["qaCopiesSavedWithConsent"] = Equals(Report["archivePreload"], true) || options.Contains("--controlled-isolation") || options.Contains("--discard-edit-regression") || options.Contains("--linked-archive");
+            Report["passed"] = passed && unchanged && Equals(Report["startupPreferenceUnchanged"], true)
+                && (copiesUnchanged || Equals(Report["archivePreload"], true) || Equals(Report["renameFixture"], true) || Equals(Report["repairNativeReference"], true) || options.Contains("--controlled-isolation") || options.Contains("--discard-edit-regression") || options.Contains("--linked-archive"));
             File.WriteAllText(reportPath, new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(Report));
             Console.WriteLine("NATIVE REPORT: " + reportPath);
         }
@@ -694,6 +772,14 @@ internal static partial class Program
         var scanner = Activator.CreateInstance(type, Members & ~BindingFlags.Static, null, new object[] { app }, null);
         var root = type.GetMethod("ScanDocument", Members).Invoke(scanner, new object[] { model, true });
         Console.WriteLine("NATIVE: component scan finished " + mode + " " + DateTimeOffset.Now.ToString("O"));
+        if (mode == "reopened-archive")
+        {
+            Report["coldScanBeforeIdentityRestore"] = ColdScanNodeEvidence(root);
+            plugin.GetType("Upton.Pdm.SolidWorks.PdmAddin", true)
+                .GetMethod("RestorePersistedDocumentIdentities", Members).Invoke(null, new[] { root });
+            Report["coldScanAfterIdentityRestore"] = ColdScanNodeEvidence(root);
+            Report["coldScanIdentityRestored"] = true;
+        }
         if (mode == "reopened-virtual")
             foreach (var node in Flatten(root).Where(node => Get(node, "Status").ToString() == "Virtual"))
                 Console.WriteLine("NATIVE VERIFIED VIRTUAL path=" + Get(node, "FullPath") + " source=" + Get(node, "SourceReferencePath"));
@@ -703,6 +789,8 @@ internal static partial class Program
         if (!Equals(Report["structureOnly"], true))
         {
             nativeFiles = (IReadOnlyList<string>)type.GetMethod("AddNativeAssociatedDrawings", Members).Invoke(scanner, new object[] { model, root });
+            plugin.GetType("Upton.Pdm.SolidWorks.NativeArchiveManifest", true)
+                .GetMethod("ConfirmFileScope", Members).Invoke(null, new object[] { root, nativeFiles });
             if (mode == "reopened-virtual")
                 foreach (var path in nativeFiles.Where(path => path.IndexOf("VC~~", StringComparison.OrdinalIgnoreCase) >= 0))
                     Console.WriteLine("NATIVE PACK VIRTUAL path=" + path);
@@ -714,6 +802,7 @@ internal static partial class Program
             Report["nativeExternalFiles"] = external;
             Console.WriteLine("NATIVE: external documents listed separately=" + external.Count);
         }
+        if (mode == "reopened-archive") NormalizeColdArchiveScan(plugin, root);
         var nodes = Flatten(root).ToArray();
         var drawings = nodes.Where(node => Get(node, "Kind").ToString() == "Drawing")
             .Select(node => (string)Get(node, "FullPath")).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(path => path).ToArray();
@@ -946,7 +1035,15 @@ internal static partial class Program
         Func<T, Task<T>> reader = node => Task.FromResult((T)read.Invoke(addin, new object[] { node }));
         var task = (Task)plugin.GetType("Upton.Pdm.SolidWorks.SuppressedAssemblyLocalStructure", true)
             .GetMethod("ExpandAsync", Members).Invoke(null, new object[] { root, reader, CancellationToken.None });
-        task.GetAwaiter().GetResult();
+        try { task.GetAwaiter().GetResult(); }
+        catch (Exception error) when (error is InvalidOperationException || error is IOException)
+        {
+            // Match the plugin's pre-dialog handling: native file inventory and the
+            // strict archive preparation below still decide whether files are complete.
+            root.GetType().GetProperty("StructureIndexPending").SetValue(root, true);
+            Report["suppressedIndexWarning"] = error.Message;
+            Console.WriteLine("NATIVE: structure index pending; continuing to native-file validation: " + error.Message);
+        }
     }
 
     private static object Get(object value, string name) => value.GetType().GetProperty(name, Members).GetValue(value);

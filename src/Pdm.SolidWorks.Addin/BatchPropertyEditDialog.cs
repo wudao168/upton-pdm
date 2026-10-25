@@ -37,6 +37,15 @@ internal sealed class BatchPropertyEditItem
     private readonly Dictionary<string, string> originalValues;
     private readonly Dictionary<string, string> propertyScopes;
     private readonly Dictionary<string, string> additionalValues;
+    private readonly HashSet<string> filledIdentityProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> unreadProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    internal void SetUnreadProperties(IEnumerable<string> names)
+    {
+        unreadProperties.Clear();
+        foreach (var name in names) unreadProperties.Add(NormalizePropertyName(name));
+    }
+    internal bool IsPropertyUnread(string name) => unreadProperties.Contains(NormalizePropertyName(name));
+    internal bool HasUnreadProperties => unreadProperties.Count > 0;
     private readonly List<string> sourcePropertyNames;
     private IReadOnlyList<NativePropertyCardField> propertyCardFields = Array.Empty<NativePropertyCardField>();
     private IReadOnlyList<NativePropertyCardField> activePropertyCardFields = Array.Empty<NativePropertyCardField>();
@@ -235,7 +244,9 @@ internal sealed class BatchPropertyEditItem
     internal bool IsPropertyApplicable(string propertyName)
     {
         var normalized = NormalizePropertyName(propertyName);
+        if (unreadProperties.Contains(normalized)) return false;
         return IsAlwaysManuallyEditableProperty(normalized)
+            || filledIdentityProperties.Contains(normalized)
             || OperationItem.Node.Kind == CadDocumentKind.Drawing
                 && EditablePropertyNames.Contains(normalized, StringComparer.OrdinalIgnoreCase)
             || EffectivePropertyCardFields.Any(field => string.Equals(
@@ -264,6 +275,7 @@ internal sealed class BatchPropertyEditItem
             activePropertyCardFields = propertyCardFields;
             propertyCardFields = Array.Empty<NativePropertyCardField>();
         }
+        filledIdentityProperties.Clear();
     }
 
     internal NativePropertyCardField PropertyCardField(string editorPropertyName) =>
@@ -272,6 +284,11 @@ internal sealed class BatchPropertyEditItem
 
     internal void ApplyPropertyCard(NativePropertyCardTemplate template)
     {
+        if (HasUnreadProperties)
+        {
+            PluginDiagnosticLog.Record("属性卡", "部分属性尚未读取，保留原属性卡；已读字段仍可编辑：" + FileName);
+            return;
+        }
         if (template == null || !template.IsAvailable)
         {
             throw new InvalidOperationException("未选择有效的SolidWorks原生属性卡。");
@@ -286,7 +303,7 @@ internal sealed class BatchPropertyEditItem
             propertyScopes[propertyName] = field.ConfigurationSpecific
                 ? string.Concat("配置:", ConfigurationDisplay)
                 : "全局";
-            if (!EditablePropertyNames.Contains(propertyName, StringComparer.OrdinalIgnoreCase)
+            if (!IsIdentityProperty(propertyName) && !EditablePropertyNames.Contains(propertyName, StringComparer.OrdinalIgnoreCase)
                 && !additionalValues.ContainsKey(propertyName))
             {
                 additionalValues[propertyName] = string.Empty;
@@ -311,7 +328,7 @@ internal sealed class BatchPropertyEditItem
             propertyScopes[propertyName] = field.ConfigurationSpecific
                 ? string.Concat("配置:", ConfigurationDisplay)
                 : "全局";
-            if (!EditablePropertyNames.Contains(propertyName, StringComparer.OrdinalIgnoreCase)
+            if (!IsIdentityProperty(propertyName) && !EditablePropertyNames.Contains(propertyName, StringComparer.OrdinalIgnoreCase)
                 && !additionalValues.ContainsKey(propertyName))
             {
                 additionalValues[propertyName] = string.Empty;
@@ -323,9 +340,12 @@ internal sealed class BatchPropertyEditItem
     internal void SetPropertyValue(string propertyName, string value)
     {
         propertyName = NormalizePropertyName(propertyName);
+        if (unreadProperties.Contains(propertyName)) return;
         var normalized = value ?? string.Empty;
         switch (propertyName)
         {
+            case "项目号": ProjectNumber = normalized; filledIdentityProperties.Add(propertyName); break;
+            case "项目名称": ProjectName = normalized; filledIdentityProperties.Add(propertyName); break;
             case "图号": DrawingNumber = normalized; break;
             case "名称": Name = normalized; break;
             case "材料": Material = normalized; break;
@@ -407,7 +427,7 @@ internal sealed class BatchPropertyEditItem
 
         foreach (var propertyName in EffectivePropertyCardFields
             .Select(field => NormalizePropertyName(field.EditorPropertyName))
-            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Where(name => !string.IsNullOrWhiteSpace(name) && !unreadProperties.Contains(name))
             .Distinct(StringComparer.OrdinalIgnoreCase))
         {
             var value = Value(values, propertyName);
@@ -470,7 +490,7 @@ internal sealed class BatchPropertyEditItem
         || string.Equals(propertyName, "零件名称", StringComparison.OrdinalIgnoreCase)
         || string.Equals(propertyName, "型号", StringComparison.OrdinalIgnoreCase);
 
-    private static bool IsIdentityProperty(string propertyName) =>
+    internal static bool IsIdentityProperty(string propertyName) =>
         string.Equals(propertyName, "项目号", StringComparison.OrdinalIgnoreCase)
         || string.Equals(propertyName, "项目名称", StringComparison.OrdinalIgnoreCase);
 
@@ -1226,8 +1246,11 @@ internal sealed class BatchPropertyEditDialog : Form
         }
         propertyCardsConfirmed = true;
         RefreshDynamicPropertyColumns();
-        propertyCardStatus.Text = "属性卡已确认，可设置属性卡或继续编辑";
-        propertyCardStatus.ForeColor = Color.FromArgb(31, 132, 92);
+        var unreadCount = rows.Count(item => item.Selected && item.HasUnreadProperties);
+        propertyCardStatus.Text = unreadCount > 0
+            ? "属性卡已确认；" + unreadCount + "个图档有未读字段，设置时将跳过并保留原值"
+            : "属性卡已确认，可设置属性卡或继续编辑";
+        propertyCardStatus.ForeColor = unreadCount > 0 ? Color.FromArgb(210, 110, 0) : Color.FromArgb(31, 132, 92);
         RefreshFillPropertyOptions();
         UpdateOperationState();
     }
@@ -1819,6 +1842,7 @@ internal sealed class BatchPropertyEditDialog : Form
         var applicable = item.IsPropertyApplicable(propertyName);
         var cell = grid.Rows[eventArgs.RowIndex].Cells[eventArgs.ColumnIndex];
         cell.ReadOnly = !applicable;
+        cell.ToolTipText = item.IsPropertyUnread(propertyName) ? "字段未读取成功，已保留原值并跳过写入。" : string.Empty;
         cell.Style.BackColor = applicable ? Color.White : Color.FromArgb(242, 245, 248);
         cell.Style.ForeColor = applicable ? grid.DefaultCellStyle.ForeColor : Color.FromArgb(145, 154, 166);
         var value = applicable ? item.PropertyValue(propertyName) : string.Empty;
@@ -2231,7 +2255,7 @@ internal sealed class BatchPropertyEditDialog : Form
             ? fillOptionValue.SelectedItem?.ToString() ?? string.Empty
             : fillValue.Text ?? string.Empty;
         var selectedRows = rows.Where(candidate => candidate.Selected).ToArray();
-        var applicableRows = selectedRows.Where(item => item.IsPropertyApplicable(property)).ToArray();
+        var applicableRows = selectedRows.Where(item => BatchPropertyEditItem.IsIdentityProperty(property) || item.IsPropertyApplicable(property)).ToArray();
         foreach (var item in applicableRows)
         {
             item.SetPropertyValue(property, value);
@@ -2405,6 +2429,7 @@ internal sealed class BatchPropertyEditDialog : Form
         var available = selectedRows.Length > 0
             ? selectedRows
                 .SelectMany(item => item.VisiblePropertyNames)
+                .Concat(new[] { "项目号", "项目名称" })
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(name => name, StringComparer.CurrentCulture)
                 .ToArray()

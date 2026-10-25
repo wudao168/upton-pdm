@@ -20,6 +20,15 @@ function mountTree(refreshing: boolean) {
 }
 
 describe('DocumentTree', () => {
+  it('嵌入组件的菜单提示打开父装配，不要求独立登记', async () => {
+    const embedded: DocumentNode = { id: 'embedded', drawingNumber: 'PART', name: '嵌入零件', fileName: 'PART^ASM.SLDPRT', kind: 'Part', configuration: '', quantity: 1, version: '—', status: 'Virtual', children: [] }
+    const wrapper = mountTree(false)
+    await wrapper.setProps({ root: embedded })
+    await wrapper.get('[role="treeitem"]').trigger('contextmenu')
+    expect(wrapper.text()).toContain('内容随父装配存档')
+    expect(wrapper.text()).not.toContain('该引用尚未入库')
+  })
+
   it('虚拟汇总节点使用分组图标且不显示未入库，真实子节点仍提示', async () => {
     const child: DocumentNode = { id: 'part', drawingNumber: 'PART', name: '零件', fileName: 'PART.SLDPRT', kind: 'Part', configuration: '', quantity: 1, version: '—', status: 'Unregistered', children: [] }
     const wrapper = mountTree(false)
@@ -111,7 +120,7 @@ describe('DocumentTree', () => {
     const wrapper = mount(DocumentTree, { props: { query: '', filter: 'all', root, drawings: [], selectedId: root.id, allCount: 1, modelCount: 1, drawingCount: 0, warningCount: 0, localStates: { [state.documentId]: state } } })
 
     expect(wrapper.get('.pdm-local-state').text()).toBe('需要更新')
-    expect(wrapper.text()).toContain('本地状态 / PLM版本')
+    expect(wrapper.text()).toContain('图纸版本 / 发布版本')
     await wrapper.get('[role="treeitem"]').trigger('contextmenu')
     const folder = wrapper.findAll('[role="menuitem"]').find(item => item.text().includes('打开所在文件夹'))
     expect(folder).toBeTruthy()

@@ -90,6 +90,7 @@ internal sealed class AgentHttpRequest
         401 => "Unauthorized",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        503 => "Service Unavailable",
         _ => "Internal Server Error"
     };
 

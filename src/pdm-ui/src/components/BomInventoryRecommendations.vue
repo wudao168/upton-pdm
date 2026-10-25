@@ -270,7 +270,7 @@ onBeforeUnmount(() => { ++generation; ++selectionGeneration; controller?.abort()
     <div class="pdm-dialog-backdrop" @click.self="emit('close')" @keydown.esc="emit('close')">
       <RawDrawerPanel class="pdm-bom-batch-dialog bom-inventory" role="dialog" aria-modal="true" aria-labelledby="bom-inventory-title">
         <template #header>
-          <header><div><h3 id="bom-inventory-title">库存相似型号推荐 · {{ kind === 'Standard' ? '标准件BOM' : '电气BOM' }}</h3>
+          <header><div><h3 id="bom-inventory-title">库存相似型号推荐 · {{ kind === 'Standard' ? '标准件BOM' : '电气件BOM' }}</h3>
             <p>当前项目完整BOM，共 {{ items.length }} 行；型号匹配度≥80%，同品牌优先。型号相似，待工程师核对。</p></div>
             <button type="button" class="pdm-icon-button" aria-label="关闭库存推荐" @click="emit('close')">×</button>
           </header>
@@ -293,7 +293,7 @@ onBeforeUnmount(() => { ++generation; ++selectionGeneration; controller?.abort()
                 <tbody><tr v-for="item in recommendedItems" :key="item.key" :class="{ 'is-selected': selectedKey === item.key }"
                   :aria-selected="selectedKey === item.key" :aria-label="`选择现有物料 ${item.drawingNumber || item.name}`" tabindex="0"
                   @click="selectRow(item)" @keydown.enter="selectRow(item)" @keydown.space.prevent="selectRow(item)">
-                  <td :title="item.drawingNumber"><div class="bom-inventory__cell">{{ item.drawingNumber || '—' }}</div></td><td :title="`${item.name} · ${item.brand || '—'}`"><div class="bom-inventory__cell"><span>{{ item.name }}</span><small>{{ item.brand || '—' }}</small></div></td>
+                  <td v-stocked-material="item.drawingNumber" :title="item.drawingNumber"><div class="bom-inventory__cell">{{ item.drawingNumber || '—' }}</div></td><td :title="`${item.name} · ${item.brand || '—'}`"><div class="bom-inventory__cell"><span v-stocked-material="item.drawingNumber">{{ item.name }}</span><small>{{ item.brand || '—' }}</small></div></td>
                   <td :title="item.specification"><div class="bom-inventory__cell bom-inventory__model-cell"><template v-for="(part, index) in inventoryModelDifference(selectedKey === item.key && candidate ? candidate.specification : item.specification || '', item.specification || '')" :key="index"><mark v-if="part.changed">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></div></td>
                   <td><div class="bom-inventory__cell">{{ quantity(item.quantity) }} {{ u9UnitName(item.unit) }}</div></td><td :title="rowStatus(item)"><div class="bom-inventory__cell">{{ rowStatus(item) }}</div></td>
                 </tr></tbody>
@@ -308,7 +308,7 @@ onBeforeUnmount(() => { ++generation; ++selectionGeneration; controller?.abort()
                 <p class="bom-inventory__selection">对应左侧：{{ selected.drawingNumber || selected.name }}</p>
                 <div class="bom-inventory__table-wrap"><table class="bom-inventory__candidates"><thead><tr><th>料号／名称</th><th>库存型号／品牌</th><th>匹配依据</th><th>现存量</th><th>操作</th></tr></thead>
                   <tbody><tr v-for="stock in currentResult?.candidates ?? []" :key="stock.materialCode" :class="{ 'is-selected': candidate?.materialCode === stock.materialCode }">
-                    <td :title="`${stock.materialCode} · ${stock.name}`"><div class="bom-inventory__cell"><span>{{ stock.materialCode }}</span><small>{{ stock.name }}</small></div></td>
+                    <td :title="`${stock.materialCode} · ${stock.name}`"><div class="bom-inventory__cell"><span v-stocked-material="stock.materialCode">{{ stock.materialCode }}</span><small>{{ stock.name }}</small></div></td>
                     <td :title="`${stock.specification} · ${stock.brand || '—'}`"><div class="bom-inventory__cell"><span class="bom-inventory__model"><template v-for="(part, index) in inventoryModelDifference(selected.specification || '', stock.specification)" :key="index"><mark v-if="part.changed">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></span><small>{{ stock.brand || '—' }}</small></div></td>
                     <td :title="`${quantity(stock.similarity)}% · ${stock.reason}`"><div class="bom-inventory__cell"><span>{{ quantity(stock.similarity) }}%</span><small>{{ stock.reason }}</small></div></td><td><div class="bom-inventory__cell"><span>{{ quantity(stock.stockQuantity) }}</span><small>{{ stock.locations.length }} 条库位明细</small></div></td>
                     <td><button type="button" class="pdm-secondary-action" :disabled="refreshing" @click="inspect(stock)">{{ stock.materialCode.trim().toUpperCase() === selected.drawingNumber.trim().toUpperCase() ? '原料号库存' : '查看对比' }}</button></td>

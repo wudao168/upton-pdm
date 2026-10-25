@@ -21,7 +21,18 @@ public sealed record StandardStructureRevision(Guid Id, int Version, DateTimeOff
     public string? BrowserSourceFingerprint { get; init; }
 }
 public sealed record StandardStructure(Guid Id, Guid CategoryId, string Code, string Name,
-    IReadOnlyList<StandardStructureRevision> Revisions, int DrawingType = 9);
+    IReadOnlyList<StandardStructureRevision> Revisions, int DrawingType = 9)
+{
+    public bool IsActive { get; init; } = true;
+    public DateTimeOffset? DeletedAt { get; init; }
+    public IReadOnlyList<StandardStructureReference> References { get; init; } = [];
+}
+public sealed record StandardStructureReference(Guid ProjectId, Guid RevisionId, int Version, BomKind Kind,
+    decimal Quantity, Guid RequestId, DateTimeOffset ReferencedAt, string Actor, bool Pending = false)
+{
+    public string? ProjectCode { get; init; }
+}
+public sealed record ChangeStandardStructureState(string Action, long ExpectedRowVersion);
 public sealed record StandardStructureCatalog(Guid CompanyId, IReadOnlyList<StandardStructureCategory> Categories,
     IReadOnlyList<StandardStructure> Structures, string StorageRoot = "", long RowVersion = 0)
 {

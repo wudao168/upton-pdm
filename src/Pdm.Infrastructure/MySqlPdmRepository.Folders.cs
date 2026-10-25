@@ -170,6 +170,15 @@ public sealed partial class MySqlPdmRepository
                 new { node.FolderKey, Name = name, node.SortOrder, Inherit = node.InheritPermissions }, transaction, cancellationToken: cancellationToken));
             await connection.ExecuteAsync(new CommandDefinition("DELETE FROM folder_template_permission WHERE folder_key=@FolderKey", new { node.FolderKey }, transaction, cancellationToken: cancellationToken));
             await InsertTemplatePermissionsAsync(connection, transaction, node.FolderKey, node.Permissions, cancellationToken);
+            await connection.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE project_folder f
+                SET f.inherit_permissions=@Inherit, f.updated_at=@Now
+                WHERE f.template_key=@FolderKey
+                  AND f.inherit_permissions<>@Inherit
+                  AND NOT EXISTS(SELECT 1 FROM project_folder_permission p WHERE p.folder_id=f.id)
+                """,
+                new { node.FolderKey, Inherit = node.InheritPermissions, Now = timeProvider.GetUtcNow().UtcDateTime }, transaction, cancellationToken: cancellationToken));
         }
         await transaction.CommitAsync(cancellationToken);
         return await ListFolderTemplateAsync(cancellationToken);

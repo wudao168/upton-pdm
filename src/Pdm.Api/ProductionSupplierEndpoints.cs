@@ -17,6 +17,11 @@ public static class ProductionSupplierEndpoints
             var (actor, role) = User(context);
             return Results.Ok(await service.ReadAsync(actor, role, ct));
         });
+        api.MapGet("/choices", async (HttpContext context, ProductionSupplierService service, CancellationToken ct) =>
+        {
+            var (actor, role) = User(context);
+            return Results.Ok(await service.ChoicesAsync(actor, role, ct));
+        });
         api.MapPut("/categories/{id:guid}", async (Guid id, SaveProductionSupplierCategory input,
             HttpContext context, ProductionSupplierService service, CancellationToken ct) =>
         {

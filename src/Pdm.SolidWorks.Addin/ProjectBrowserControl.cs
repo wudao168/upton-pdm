@@ -140,13 +140,13 @@ internal sealed class ProjectBrowserControl : UserControl
     {
         if (projects.Count == 0)
         {
-            MessageBox.Show(this, "当前账号没有可选择的项目。", "选择项目", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            TopMostMessageBox.Show(this, "当前账号没有可选择的项目。", "选择项目", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
         using (var dialog = new ProjectBrowserDialog(projects, SelectedProjectId, requireSubmissionAccess))
         {
-            if (dialog.ShowDialog(FindForm()) != DialogResult.OK || dialog.SelectedProject == null)
+            if ((ArchiveSession.Current?.ShowInline(dialog) ?? dialog.ShowDialog(FindForm())) != DialogResult.OK || dialog.SelectedProject == null)
             {
                 return;
             }

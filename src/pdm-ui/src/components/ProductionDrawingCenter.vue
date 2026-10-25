@@ -1,19 +1,12 @@
 <script setup lang="ts">
+import { readTablePreference, tablePreferenceVersion, writeTablePreference } from '../tablePreferences'
+import { ElMessage } from '../statusMessage'
 import { computed, onMounted, ref, watch } from 'vue'
-import { getProjectExportMetadata, downloadProductionDrawingFile, downloadGeneratedFile, downloadProductionDrawingArchive, listProductionDrawings, updateProductionDrawingDelivery, PdmApiError } from '../api'
-import { createProductionBomWorkbook } from '../productionBomWorkbook'
-import type { BomItem, DrawingPriority, ProductionDrawingBomQuantity, ProductionDrawingItem } from '../types'
+import { downloadProductionDrawingFile, downloadGeneratedFile, downloadProductionDrawingArchive, listProductionDrawings, updateProductionDrawingDelivery, PdmApiError } from '../api'
+import { columnDefinitions, columnValue, priorityLabel, createProductionDrawingBomDownload, type ColumnKey } from '../productionDrawingBomDownload'
+import type { DrawingPriority, ProductionDrawingItem } from '../types'
 import { useUserDisplayName } from '../userDisplay'
-import { u9UnitName } from '../u9Units'
 
-type ColumnKey = 'kind' | 'wearPart' | 'impact' | 'unit' | 'drawingNumber' | 'name' | 'parentDrawingNumber' | 'specification' | 'revision' | 'remark' | 'brand' | 'material' | 'surfaceTreatment' | 'heatTreatment' | 'weight' | 'quantity' | 'quantityReference' | 'priorReleasedQuantity' | 'netIssueQuantity' | 'drawing' | 'issue' | 'dataStatus' | 'priority' | 'requiredOn' | 'deliveryStatus'
-const columnDefinitions: { key: ColumnKey; label: string }[] = [
-  { key: 'kind', label: '物料分类' }, { key: 'wearPart', label: '易损件' }, { key: 'impact', label: '关键' }, { key: 'unit', label: '单位' },
-  { key: 'drawingNumber', label: '物料编码' }, { key: 'name', label: '名称' }, { key: 'parentDrawingNumber', label: '上级物料编码' }, { key: 'specification', label: '型号' }, { key: 'revision', label: '版本' },
-  { key: 'remark', label: '备注' }, { key: 'brand', label: '品牌' }, { key: 'material', label: '材质' }, { key: 'surfaceTreatment', label: '表面处理' }, { key: 'heatTreatment', label: '热处理' },
-  { key: 'weight', label: '重量' }, { key: 'quantityReference', label: '单套数量 × 套数' }, { key: 'quantity', label: '发布总量' }, { key: 'priorReleasedQuantity', label: '已提前发布' }, { key: 'netIssueQuantity', label: '本次新增下发' }, { key: 'drawing', label: '图纸' },
-  { key: 'issue', label: '问题' }, { key: 'dataStatus', label: '资料状态' }, { key: 'priority', label: '紧急程度' }, { key: 'requiredOn', label: '需求货期' }, { key: 'deliveryStatus', label: '交付状态' },
-]
 const defaultColumns: ColumnKey[] = ['drawingNumber', 'name', 'specification', 'revision', 'remark', 'material', 'surfaceTreatment', 'heatTreatment', 'quantityReference', 'quantity', 'priorReleasedQuantity', 'netIssueQuantity', 'drawing', 'priority', 'requiredOn']
 const props = defineProps<{ token: string; canManage: boolean; username?: string }>()
 const displayUserName = useUserDisplayName()
@@ -64,59 +57,25 @@ const columnStorageKey = () => `upton-pdm:production-drawing-columns:${props.use
 function restoreColumns() {
   visibleColumnKeys.value = [...defaultColumns]
   try {
-    const saved = JSON.parse(window.localStorage.getItem(columnStorageKey()) ?? 'null') as { visible?: ColumnKey[] } | null
+    const saved = JSON.parse(readTablePreference(columnStorageKey()) ?? 'null') as { visible?: ColumnKey[] } | null
     const allowed = new Set(columnDefinitions.map(column => column.key))
     const visible = (saved?.visible ?? []).filter((key, index, values) => allowed.has(key) && values.indexOf(key) === index)
     if (visible.length) visibleColumnKeys.value = visible
   } catch { /* 浏览器禁用本地存储时使用默认列。 */ }
 }
-function saveColumns() {
+async function saveColumns() {
   if (!columnDraft.value.length) return
   visibleColumnKeys.value = [...columnDraft.value]
-  try { window.localStorage.setItem(columnStorageKey(), JSON.stringify({ visible: visibleColumnKeys.value })) }
-  catch { /* 当前会话仍可使用列设置。 */ }
+  let synced: boolean
+  try { synced = await writeTablePreference(columnStorageKey(), JSON.stringify({ visible: visibleColumnKeys.value })) }
+  catch { ElMessage.error('列设置同步失败，当前选择已保留在本机，请重试保存。'); return }
   columnSettingsOpen.value = false
+  if (synced) ElMessage.success('列设置已保存到当前账号')
+  else ElMessage.warning('列设置已保存在本机；服务器尚不支持账号同步，请升级后重新保存。')
 }
-const bomItems = (item: ProductionDrawingItem) => item.bomItems ?? []
 const modelFiles = (item: ProductionDrawingItem) => item.modelFiles ?? []
 const canDownloadStep = (items: ProductionDrawingItem[]) => items.length > 0
   && items.every(item => modelFiles(item).length > 0 && modelFiles(item).every(file => file.stepReady && !!file.versionId))
-function joinedBomValue(item: ProductionDrawingItem, key: keyof BomItem) {
-  const values = bomItems(item).map(bom => bom[key]).filter(value => value !== null && value !== undefined && String(value).trim() !== '')
-  return [...new Set(values.map(String))].join('、')
-}
-function quantityValue(item: ProductionDrawingItem, key: keyof Pick<ProductionDrawingBomQuantity, 'totalQuantity' | 'priorReleasedQuantity' | 'netIssueQuantity'> | 'reference' = 'totalQuantity') {
-  const quantities = item.bomQuantities ?? []
-  return quantities.map(quantity => {
-    const bom = bomItems(item).find(value => value.id && quantity.sourceBomItemIds.includes(value.id))
-    const value = key === 'reference' ? `${quantity.singleSetQuantity} × ${quantity.wholeSetMultiplier}` : String(quantity[key])
-    return `${quantities.length > 1 ? `${bom?.drawingNumber ?? quantity.materialKey}：` : ''}${value} ${u9UnitName(bom?.unit ?? quantity.materialKey.split('|').at(-1) ?? '')}`
-  }).join('；') || '—'
-}
-function columnValue(item: ProductionDrawingItem, key: ColumnKey): string {
-  switch (key) {
-    case 'kind': return bomItems(item).length ? '非标件' : '—'
-    case 'wearPart': return bomItems(item).length ? [...new Set(bomItems(item).map(bom => bom.isWearPart ? '是' : '否'))].join('、') : '—'
-    case 'impact': return joinedBomValue(item, 'impactStage').replaceAll('Assembly', '装配').replaceAll('Commissioning', '调试') || '—'
-    case 'unit': return bomItems(item).length ? [...new Set(bomItems(item).map(bom => u9UnitName(bom.unit)))].join('、') : '—'
-    case 'drawingNumber': return joinedBomValue(item, 'drawingNumber') || item.drawingNumber
-    case 'name': return joinedBomValue(item, 'name') || item.name
-    case 'specification': return joinedBomValue(item, 'specification') || item.model
-    case 'revision': return joinedBomValue(item, 'revision') || item.revision
-    case 'quantity': return quantityValue(item)
-    case 'quantityReference': return quantityValue(item, 'reference')
-    case 'priorReleasedQuantity': return quantityValue(item, 'priorReleasedQuantity')
-    case 'netIssueQuantity': return quantityValue(item, 'netIssueQuantity')
-    case 'issue': return bomItems(item).some(bom => bom.manualUnmatched || bom.pendingRemoval || bom.releaseExcluded) ? '需核对' : '—'
-    case 'dataStatus': return bomItems(item).length ? bomItems(item).every(bom => bom.complete) ? '齐全' : '待完善' : '—'
-    case 'priority': return priorityLabel(item.priority)
-    case 'requiredOn': return item.requiredOn || '—'
-    case 'deliveryStatus': return item.pdfReady ? '可拿图' : '待转换'
-    case 'drawing': return ''
-    default: return joinedBomValue(item, key) || '—'
-  }
-}
-const priorityLabel = (value: DrawingPriority) => value === 'Urgent' ? '紧急' : value === 'Priority' ? '优先' : '普通'
 const priorityRank = (value: DrawingPriority) => value === 'Urgent' ? 0 : value === 'Priority' ? 1 : 2
 const filterOptions = (key: 'publishedBy' | 'division' | 'projectManager') => computed(() =>
   [...new Set(rows.value.map(item => item[key]?.trim()).filter((value): value is string => !!value))]
@@ -254,33 +213,7 @@ async function downloadBom(items: ProductionDrawingItem[], selectedOnly: boolean
   await runDownload(async () => { const file = await bomDownload(items, selectedOnly); await downloadGeneratedFile(file.blob, file.fileName) })
 }
 async function bomDownload(items: ProductionDrawingItem[], selectedOnly: boolean) {
-  const exportProjectId = project.value!.id, frozenPackage = selectedPackage.value!
-  const metadata = await getProjectExportMetadata(exportProjectId, props.token, frozenPackage.id)
-  // BOM 也属于生产发放资料；不能从长期停留页面导出已经作废的图纸配套数据。
-  const available = await listProductionDrawings(props.token, true, exportProjectId)
-  items = items.map(item => {
-    const latest = available.find(value => value.versionId === item.versionId && value.releasePackageId === frozenPackage.id)
-    if (!latest) throw new PdmApiError('所选图纸已作废、已删除或无法访问，不能导出生产BOM，请刷新列表。', 409)
-    if (!latest.bomQuantities?.length) throw new PdmApiError('发布包缺少冻结数量，不能导出生产BOM，请刷新列表。', 409)
-    return latest
-  })
-  const columns = columnDefinitions.filter(column => !['drawing', 'quantityReference', 'issue', 'dataStatus'].includes(column.key))
-  const headers = ['发布包', '关联图号', ...columns.map(column => column.label), '单套数量', '整套数量']
-  const materials = new Map<string, { item: ProductionDrawingItem; quantity: ProductionDrawingBomQuantity; drawingNumbers: Set<string> }>()
-  for (const item of items) for (const quantity of item.bomQuantities ?? []) {
-    const key = `${item.releasePackageId}|${quantity.materialKey}`
-    const existing = materials.get(key)
-    if (existing) { existing.drawingNumbers.add(item.drawingNumber); continue }
-    const bom = bomItems(item).find(value => value.id && quantity.sourceBomItemIds.includes(value.id))
-    if (!bom) throw new Error('发布包数量与物料数据不完整，请刷新后重试。')
-    materials.set(key, { item: { ...item, bomItems: [{ ...bom, parentDrawingNumber: undefined }], bomQuantities: [quantity] }, quantity, drawingNumbers: new Set([item.drawingNumber]) })
-  }
-  const values = [...materials.values()].map(({ item, quantity, drawingNumbers }) => [item.releasePackageNumber, [...drawingNumbers].join('、'), ...columns.map(column =>
-    column.key === 'quantity' ? quantity.totalQuantity
-      : column.key === 'priorReleasedQuantity' ? quantity.priorReleasedQuantity
-        : column.key === 'netIssueQuantity' ? quantity.netIssueQuantity : columnValue(item, column.key)), quantity.singleSetQuantity, quantity.wholeSetMultiplier])
-  const fileName = `${frozenPackage.number}-${selectedOnly ? '选中' : '本包'}BOM.xlsx`.replace(/[<>:"/\\|?*]/g, '_')
-  return { blob: createProductionBomWorkbook(headers, values, { ...metadata, title: '发布包BOM清单', scope: selectedOnly ? `选中条目 · ${items.length}条` : '完整发布包', versionLabel: '发布包版本', version: frozenPackage.number }), fileName }
+  return createProductionDrawingBomDownload(items, props.token, project.value!.id, selectedPackage.value!, selectedOnly)
 }
 async function downloadPackage() {
   if (!project.value || !selectedPackage.value || !drawings.value.length || detailLoading.value || downloading.value) return
@@ -340,6 +273,7 @@ watch([publishedOnFilter, publisherFilter, divisionFilter, managerFilter], () =>
   checkedIds.value = checkedIds.value.filter(id => drawings.value.some(item => item.versionId === id))
 })
 watch(() => props.username, restoreColumns)
+watch(tablePreferenceVersion, () => { if (!columnSettingsOpen.value) restoreColumns() })
 onMounted(() => { restoreColumns(); void refresh() })
 </script>
 
@@ -449,7 +383,7 @@ onMounted(() => { restoreColumns(); void refresh() })
     <div v-if="columnSettingsOpen" class="production-drawings__column-backdrop" @click.self="columnSettingsOpen = false">
       <section class="production-drawings__column-dialog" role="dialog" aria-modal="true" aria-label="生产图纸列设置">
         <header><h2>列设置</h2><button type="button" aria-label="关闭列设置" @click="columnSettingsOpen = false">×</button></header>
-        <p>字段来自发布包冻结的非标件 BOM；缺失的数据以“—”显示。</p>
+        <p>字段来自发布包冻结的非标件 BOM；缺失的数据以“—”显示。列设置随当前账号保存，下次打开自动恢复。</p>
         <div class="production-drawings__column-options">
           <label v-for="column in columnDefinitions" :key="column.key"><input v-model="columnDraft" type="checkbox" :value="column.key">{{ column.label }}</label>
         </div>

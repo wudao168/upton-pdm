@@ -12,6 +12,87 @@ namespace Upton.Pdm.Api.Tests;
 
 public sealed class WorkHoursApiTests
 {
+    [Fact]
+    public async Task ManualReminderHttpRepeatsAfterAutomaticReminderAndReturnsRecipientResults()
+    {
+        using var factory=new PdmApiFactory();using var client=factory.CreateClient();
+        var repo=factory.Services.GetRequiredService<IPdmRepository>();var store=factory.Services.GetRequiredService<IWorkHoursStore>();
+        var company=(await repo.GetProjectNumberingOptionsAsync(default)).Organizations.First().Id;
+        var day=DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(8)).DateTime);
+        var calendar=factory.Services.GetRequiredService<IWorkHoursCalendar>();var from=day.AddDays(-1);
+        while(!calendar.IsWorkingDay(from))from=from.AddDays(-1);
+        foreach(var name in new[]{"remind-assistant","remind-worker"})
+            await repo.CreateUserAsync(new(Guid.NewGuid(),name,name,"unused",UserRole.Engineer,true,RoleCode:name.EndsWith("assistant")?"TechnicalAssistant":null,CompanyId:company),default);
+        var unit=await repo.SaveOrganizationUnitAsync(new(null,company,null,"WH-REMIND","提醒测试部",OrganizationUnitKind.Department,true,1),default);
+        await repo.SetOrganizationMembershipsAsync("remind-worker",[unit.Id],unit.Id,default);
+        await repo.SetOrganizationMembershipsAsync("remind-assistant",[unit.Id],unit.Id,default);
+        await store.StartDateAsync(company,from,default);
+        Assert.True(await store.SaveCatalogAsync(new(company,0,[new(Guid.NewGuid(),"remind-worker",from,null,8)],[],[],[]),default));
+        client.DefaultRequestHeaders.Add("X-Company-Id",company.ToString());Authenticate(client,"remind-assistant",UserRole.Engineer);
+        using var scope=factory.Services.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<WorkHoursService>().SendDailyRemindersAsync(default);
+        for(var i=0;i<2;i++)
+        {
+            var response=await client.PostAsJsonAsync("/api/work-hours/remind",new RemindWorkHours(["remind-worker"]));
+            Assert.Equal(HttpStatusCode.OK,response.StatusCode);
+            var result=(await response.Content.ReadFromJsonAsync<WorkHoursReminderResult>())!;
+            Assert.Equal(1,result.Sent);Assert.True(Assert.Single(result.Results).Sent);
+        }
+        var notices=await repo.ListUserNotificationsAsync("remind-worker",200,default);
+        Assert.Equal(2,notices.Count(n=>n.SourceKey.Contains(":manual:")));
+        Assert.All(notices.Where(n=>n.SourceKey.Contains(":manual:")),n=>Assert.Null(n.ReadAt));
+    }
+
+    [Fact]
+    public async Task SettingsAndCorrectionHttpEnforceScopeAndRetainVersionsAndReasons()
+    {
+        using var factory = new PdmApiFactory(); using var client = factory.CreateClient();
+        var repo = factory.Services.GetRequiredService<IPdmRepository>();
+        var company = (await repo.GetProjectNumberingOptionsAsync(default)).Organizations.First().Id;
+        var day = DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(8)).DateTime);
+        foreach (var name in new[] { "wh-admin", "wh-assistant", "wh-worker", "wh-outsider" })
+            await repo.CreateUserAsync(new(Guid.NewGuid(), name, name, "unused", name == "wh-admin" ? UserRole.Administrator : UserRole.Engineer, true,
+                RoleCode: name == "wh-assistant" ? "TechnicalAssistant" : null, CompanyId: company), default);
+        var unit = await repo.SaveOrganizationUnitAsync(new(null, company, null, "WH-API", "工时接口测试部", OrganizationUnitKind.Department, true, 1), default);
+        await repo.SetOrganizationMembershipsAsync("wh-worker", [unit.Id], unit.Id, default);
+        await repo.SetOrganizationMembershipsAsync("wh-assistant", [unit.Id], unit.Id, default);
+        var project = await repo.CreateNumberedProjectAsync(new(company, "P", 2, Guid.Parse("c0046500-0000-0000-0000-000000000001"), "更正测试", null, day, 1, "wh-worker", "D:/test", "D:/release"), default);
+        await repo.SetMainProjectStaffingAsync(project.Id, new("wh-worker", [], ["wh-worker"]), "wh-admin", default);
+        client.DefaultRequestHeaders.Add("X-Company-Id", company.ToString());
+        Authenticate(client, "wh-admin", UserRole.Administrator);
+        var initialSettings = (await client.GetFromJsonAsync<WorkHoursManagementView>("/api/work-hours/settings"))!;
+        Assert.Equal(HttpStatusCode.OK, (await client.PutAsJsonAsync("/api/work-hours/settings", new SaveWorkHoursGroupSettings(company, initialSettings.RowVersion, [new(unit.Id, true)], []))).StatusCode);
+        Authenticate(client, "wh-worker", UserRole.Engineer);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/work-hours/settings")).StatusCode);
+        var ownReport = (await client.GetFromJsonAsync<WorkHoursView>($"/api/work-hours?from={day:yyyy-MM-dd}&to={day:yyyy-MM-dd}&report=true"))!;
+        Assert.Equal(unit.Id, ownReport.DefaultDepartmentId);
+        Assert.Equal(unit.Id, Assert.Single(ownReport.People).DepartmentId);
+        Assert.Contains(ownReport.OrganizationUnits, x => x.Id == unit.Id && x.ParentUnitId == unit.ParentUnitId);
+        Authenticate(client, "wh-assistant", UserRole.Engineer);
+        var settings = (await client.GetFromJsonAsync<WorkHoursManagementView>("/api/work-hours/settings"))!;
+        Assert.DoesNotContain(settings.People, x => x.Username == "wh-outsider");
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync("/api/work-hours/settings", new SaveWorkHoursGroupSettings(company, settings.RowVersion, [new(unit.Id,false)], []))).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync("/api/work-hours/settings", new SaveWorkHoursGroupSettings(Guid.NewGuid(), settings.RowVersion, [], [new("wh-worker",true)]))).StatusCode);
+        var requirement = new SetWorkHoursRequirement(["wh-worker"], day, null, 8, true, "开始工时填报", settings.RowVersion);
+        var response = await client.PutAsJsonAsync("/api/work-hours/settings/requirements", requirement);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        settings = (await response.Content.ReadFromJsonAsync<WorkHoursManagementView>())!;
+        Assert.Single(settings.Requirements); Assert.Equal("wh-assistant", settings.History.Last().Actor);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync("/api/work-hours/settings/requirements", requirement)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync("/api/work-hours/settings/requirements", requirement with { Usernames = ["wh-outsider"], RowVersion = settings.RowVersion })).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync("/api/work-hours/settings/grants", new SetWorkHoursGrant("wh-assistant", [], "越权", settings.RowVersion))).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"/api/work-hours/correction?username=wh-outsider&month={day:yyyy-MM}")).StatusCode);
+        var correction = (await client.GetFromJsonAsync<WorkHoursCorrectionView>($"/api/work-hours/correction?username=wh-worker&month={day:yyyy-MM}"))!;
+        var command = new CorrectWorkHours("wh-worker", new(day, day, [new(day, "厂外", 7.5m, project.Id)], [new(day.ToString("yyyy-MM"), correction.Sheet.RowVersion)]), "核对后代更正");
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PutAsJsonAsync("/api/work-hours/correction", command with { Reason = "" })).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await client.PutAsJsonAsync("/api/work-hours/correction", command)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync("/api/work-hours/correction", command)).StatusCode);
+        Authenticate(client, "wh-worker", UserRole.Engineer);
+        var history = (await client.GetFromJsonAsync<WorkHourRevision[]>($"/api/work-hours/history?month={day:yyyy-MM}"))!;
+        Assert.Equal("核对后代更正", Assert.Single(history).Reason);
+        Assert.Equal("wh-assistant", history.Single().Actor);
+        Assert.Equal(7.5m, Assert.Single(history.Single().After).Hours);
+    }
     private static void Authenticate(HttpClient client, string username, UserRole role)
     {
         var jwt = new JwtSecurityToken("upton-pdm", "upton-pdm-clients", [new(ClaimTypes.Name, username), new(ClaimTypes.Role, role.ToString())],

@@ -285,8 +285,14 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         if (preview.Format is not (DocumentPreviewFormat.Step or DocumentPreviewFormat.Pdf))
             throw new PdmRuleException("发布预览文件格式无效。");
         var relativeSegments = preview.StorageRelativePath.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+        var workPreview = relativeSegments.Length > 0 && string.Equals(relativeSegments[0], ".work-previews", StringComparison.OrdinalIgnoreCase);
+        if (workPreview && (relativeSegments.Length != 3 || !Guid.TryParseExact(relativeSegments[1], "N", out _)
+            || preview.FileLength <= 0 || preview.Sha256.Length != 64 || !preview.Sha256.All(Uri.IsHexDigit)
+            || !string.Equals(Path.GetFileNameWithoutExtension(relativeSegments[2]), preview.Sha256, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(Path.GetExtension(relativeSegments[2]), preview.Format == DocumentPreviewFormat.Pdf ? ".pdf" : ".step", StringComparison.OrdinalIgnoreCase)))
+            throw new PdmRuleException("工作预览目录或文件标识无效，未读取预览。");
         if (relativeSegments.Length == 0
-            || (!string.Equals(relativeSegments[0], ".release-previews", StringComparison.OrdinalIgnoreCase)
+            || (!workPreview && !string.Equals(relativeSegments[0], ".release-previews", StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(relativeSegments[0], ".versions", StringComparison.OrdinalIgnoreCase)))
         {
             throw new PdmRuleException("发布预览文件必须存放在独立的.release-previews只读目录中。");

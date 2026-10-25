@@ -1,11 +1,11 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessageBox } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import StandardStructureLibrary from '../src/components/StandardStructureLibrary.vue'
-import type { StructureNode, StructureView } from '../src/standardStructure'
+import { unclassifiedStructureCategoryId, type StructureNode, type StructureView } from '../src/standardStructure'
 
 const api = vi.hoisted(() => ({ readStandardStructures: vi.fn(), readStructurePreview: vi.fn(),
-  referenceStandardStructure: vi.fn(), classifyStandardStructures: vi.fn(), saveStructureCategory: vi.fn(), deleteStructureCategory: vi.fn(), moveStructureCategory: vi.fn() }))
+  referenceStandardStructure: vi.fn(), changeStandardStructureState: vi.fn(), listStandardStructureReferences: vi.fn(), classifyStandardStructures: vi.fn(), saveStructureCategory: vi.fn(), deleteStructureCategory: vi.fn(), moveStructureCategory: vi.fn() }))
 vi.mock('../src/api', () => api)
 const part = (id: string, kind = 'Part'): StructureNode => ({ id, kind, drawingNumber: id, name: `名称-${id}`,
   fileName: `${id}.${kind === 'Drawing' ? 'SLDDRW' : 'SLDPRT'}`, fileKey: id, previewFileKey: `preview-${id}`, embedded: false, quantity: 1, children: [] })
@@ -37,6 +37,7 @@ describe('StandardStructureLibrary', () => {
     api.readStandardStructures.mockResolvedValue(data())
     api.referenceStandardStructure.mockResolvedValue({ addedCount: 1, version: 1, revisionId: 'revision-1' })
     api.readStructurePreview.mockResolvedValue({ arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)) })
+    api.listStandardStructureReferences.mockResolvedValue([])
   })
   afterEach(() => { wrapper?.unmount(); document.body.innerHTML = '' })
 
@@ -57,6 +58,74 @@ describe('StandardStructureLibrary', () => {
     expect(w.get('.standard-structure__breadcrumb').text()).toContain('定位夹紧')
   })
 
+  it('shows automatic model folders below unclassified and permits editing their existing parent', async () => {
+    const view = data()
+    view.catalog.categories.push({ id: unclassifiedStructureCategoryId, name: '未分类', parentId: null, sortOrder: 0, isActive: true },
+      { id: 'model-folder', name: 'UPST-1-0001-V01', parentId: unclassifiedStructureCategoryId, sortOrder: 1, isActive: true })
+    view.catalog.structures[0]!.categoryId = 'model-folder'
+    view.catalog.structures[0]!.code = 'UPST-1-0001'
+    api.readStandardStructures.mockResolvedValue(view)
+    const w = await open()
+    const tree = w.findAllComponents({ name: 'ElTree' })[0]!
+    tree.vm.$emit('node-click', { id: unclassifiedStructureCategoryId })
+    await flushPromises()
+    expect(w.get('.standard-structure__drawing-tree').text()).toContain('UPST-1-0001-V01')
+    expect(w.get('.standard-structure__drawing-tree').text()).not.toContain('BZ-002-V01')
+    tree.vm.$emit('node-click', { id: 'model-folder' })
+    await flushPromises()
+    expect(w.get('.standard-structure__breadcrumb').text()).toContain('未分类 › UPST-1-0001-V01')
+    await button('分类维护').trigger('click'); await flushPromises()
+    const manager = w.findAllComponents({ name: 'ElDialog' }).find(c => c.props('title') === '标准结构分类维护')!
+    const folderRow = manager.findAll('.standard-structure__category-row').find(row => row.text().includes('UPST-1-0001-V01'))!
+    await folderRow.findAll('button').find(b => b.text() === '编辑')!.trigger('click'); await flushPromises()
+    expect(manager.findComponent({ name: 'ElSelect' }).props('modelValue')).toBe(unclassifiedStructureCategoryId)
+    expect(manager.findAllComponents({ name: 'ElOption' }).some(option => option.props('label') === '未分类' && option.props('value') === unclassifiedStructureCategoryId)).toBe(true)
+  })
+
+  it('disables, recycles, restores and enables the whole structure without changing snapshots', async () => {
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    let current = data()
+    const snapshots = JSON.stringify(current.catalog.structures[0]!.revisions)
+    api.readStandardStructures.mockResolvedValue(current)
+    api.changeStandardStructureState.mockImplementation(async (id: string, action: string, expected: number) => {
+      expect(expected).toBe(current.catalog.rowVersion)
+      const next = JSON.parse(JSON.stringify(current.catalog))
+      const item = next.structures.find((s: { id: string }) => s.id === id)!
+      if (action === 'Disable') item.isActive = false
+      if (action === 'Enable') item.isActive = true
+      if (action === 'Delete') item.deletedAt = '2026-10-23T10:00:00Z'
+      if (action === 'Restore') item.deletedAt = null
+      next.rowVersion++; current = { ...current, catalog: next }
+      return next
+    })
+    const w = await open()
+    for (const [label, status] of [['停用', 'inactive'], ['删除', 'deleted'], ['恢复', 'inactive'], ['启用', 'active']]) {
+      await button(label!).trigger('click'); await flushPromises()
+      expect((w.get('select[aria-label="标准结构状态"]').element as HTMLSelectElement).value).toBe(status)
+      expect(w.get('.standard-structure__properties').text()).toContain('BZ-001-V01')
+      expect(JSON.stringify(current.catalog.structures[0]!.revisions)).toBe(snapshots)
+    }
+    expect(api.changeStandardStructureState.mock.calls.map(call => call[1])).toEqual(['Disable', 'Delete', 'Restore', 'Enable'])
+    expect(ElMessageBox.confirm).toHaveBeenCalledWith(expect.stringContaining('完整图档、工程图及对应BOM'), expect.any(String), expect.any(Object))
+  })
+
+  it('blocks deletion with references and disables the reference button for an inactive parent', async () => {
+    const current = data()
+    current.catalog.categories[0]!.isActive = false
+    api.readStandardStructures.mockResolvedValue(current)
+    api.listStandardStructureReferences.mockResolvedValue([{ projectId: 'p', projectCode: 'P700016', revisionId: 'revision-1', version: 1, kind: 'NonStandard', quantity: 2, actor: 'engineer', referencedAt: '2026-10-23T10:00:00Z', pending: false }])
+    const w = await open()
+    await w.get('select[aria-label="标准结构状态"]').setValue('inactive'); await flushPromises()
+    expect(w.get('[role="status"]').text()).toContain('所属分类已停用')
+    await button('BOM').trigger('click'); await flushPromises()
+    expect(button('引用到项目').attributes('disabled')).toBeDefined()
+    await button('删除').trigger('click'); await flushPromises()
+    expect(api.changeStandardStructureState).not.toHaveBeenCalled()
+    const dialog = w.findAllComponents({ name: 'ElDialog' }).find(c => c.props('title') === 'BZ-001 · 项目引用')!
+    expect(dialog.text()).toContain('P700016')
+    expect(dialog.text()).toContain('V01')
+  })
+
   it('filters drawing rows and keeps embedded hierarchy without demanding independent registration', async () => {
     const w = await open()
     await w.get('input[placeholder="搜索图号或名称"]').setValue('drawing')
@@ -75,7 +144,7 @@ describe('StandardStructureLibrary', () => {
     await button('BOM').trigger('click')
     expect(w.get('[aria-label="标准结构BOM类型"]').text()).toContain('标准件BOM')
     expect(w.get('[aria-label="标准结构BOM类型"]').text()).toContain('非标件BOM')
-    expect(w.text()).not.toContain('电气BOM')
+    expect(w.text()).not.toContain('电气件BOM')
     expect(w.get('[aria-label="标准结构BOM"]').text()).toContain('气缸')
     await button('非标件BOM').trigger('click')
     expect(w.get('[aria-label="标准结构BOM"]').text()).toContain('底板')

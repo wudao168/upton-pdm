@@ -68,7 +68,7 @@ public sealed class ProductionTrackingApiTests(PdmApiFactory factory) : IClassFi
         supplierCatalog = (await categorySaved.Content.ReadFromJsonAsync<ProductionSupplierCatalog>())!;
         var supplierId = Guid.NewGuid();
         var supplierSaved = await client.PutAsJsonAsync($"/api/production-suppliers/{supplierId}",
-            new SaveProductionSupplier("API-SUP", "供应商A", "接口供应商有限公司", [categoryId], true, supplierCatalog.RowVersion));
+            new SaveProductionSupplier("API-SUP", "供应商A", "接口供应商有限公司", [categoryId], true, supplierCatalog.RowVersion, Contact: "私有联系人"));
         Assert.Equal(HttpStatusCode.OK, supplierSaved.StatusCode);
         var allocated = await client.PostAsJsonAsync($"/api/production-tracking/releases/{release.Id}/lots",
             new { lineId = line.Id, route = "External", quantity = 2, supplier = "供应商A",
@@ -78,6 +78,35 @@ public sealed class ProductionTrackingApiTests(PdmApiFactory factory) : IClassFi
         Assert.Equal(HttpStatusCode.OK, allocated.StatusCode);
         var allocationRecord = (await allocated.Content.ReadFromJsonAsync<ProductionTrackingRecord>())!;
         var lot = Assert.Single(allocationRecord.State.Lots);
+        var procurement = (await client.GetFromJsonAsync<ProjectProcurementTrackingResult>($"/api/projects/{project.Id}/procurement-tracking"))!;
+        var tracked = Assert.Single(procurement.Items);
+        Assert.Empty(tracked.PurchaseOrderNumbers);
+        Assert.Equal("B", tracked.Manufacturing!.Revision);
+        Assert.Equal(2, tracked.Manufacturing.AssignedQuantity);
+        Assert.Equal(0, tracked.Manufacturing.QualifiedQuantity);
+        Assert.Equal("供应商A", Assert.Single(tracked.Manufacturing.Batches).Supplier);
+        Assert.NotNull(procurement.ManufacturingReadAt);
+        supplierCatalog = (await supplierSaved.Content.ReadFromJsonAsync<ProductionSupplierCatalog>())!;
+        Assert.Equal(HttpStatusCode.OK, (await client.PutAsJsonAsync($"/api/production-suppliers/{Guid.NewGuid()}",
+            new SaveProductionSupplier("API-UNUSED", "未使用供应商", "未使用供应商有限公司", [categoryId], true, supplierCatalog.RowVersion))).StatusCode);
+        Authorize(client, "engineer", "Engineer");
+        var traceOptions = await client.GetAsync($"/api/production-tracking/releases/{release.Id}/external-suppliers");
+        Assert.Equal(HttpStatusCode.OK, traceOptions.StatusCode);
+        var traceChoices = (await traceOptions.Content.ReadFromJsonAsync<ProductionSupplierChoices>())!;
+        Assert.Equal(supplierId, Assert.Single(traceChoices.Suppliers).Id);
+        Assert.Equal(categoryId, Assert.Single(traceChoices.Categories).Id);
+        Assert.DoesNotContain("私有联系人", await traceOptions.Content.ReadAsStringAsync());
+        Assert.DoesNotContain("contact", await traceOptions.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/production-suppliers")).StatusCode);
+        var blockedRoleName = "无项目内容" + Guid.NewGuid().ToString("N");
+        var blockedRole = (await repository.CreateRoleAsync(blockedRoleName, "追溯权限验证", "Engineer", default)).Roles.Single(item => item.Name == blockedRoleName);
+        await repository.SetRolePermissionsAsync(blockedRole.Role, [], default);
+        var blockedUser = "blocked-" + Guid.NewGuid().ToString("N");
+        await repository.CreateUserAsync(new(Guid.NewGuid(), blockedUser, "无项目内容", "unused", UserRole.Engineer, true, CompanyId: company, RoleCode: blockedRole.Role), default);
+        await repository.SetUserCompanyScopeAsync(blockedUser, company, false, [], "admin", default);
+        Authorize(client, blockedUser, "Engineer");
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"/api/production-tracking/releases/{release.Id}/external-suppliers")).StatusCode);
+        Authorize(client, "admin", "Administrator");
         var update = new UpdateProductionLotAllocation(lot.Id, "Self", 2, null, "机加", null, "改为内部加工", Guid.NewGuid(), allocationRecord.RowVersion);
         var edited = await client.PutAsJsonAsync($"/api/production-tracking/releases/{release.Id}/lot-allocation", update);
         Assert.Equal(HttpStatusCode.OK, edited.StatusCode);
@@ -97,6 +126,8 @@ public sealed class ProductionTrackingApiTests(PdmApiFactory factory) : IClassFi
         Assert.Equal(lot.Id, Assert.Single(outsourcedRecord.State.Lots).Id);
         selfOnly = (await client.GetFromJsonAsync<ProductionTrackingProject[]>("/api/production-tracking/projects?selfOnly=true"))!;
         Assert.DoesNotContain(selfOnly.SelectMany(project => project.Packages), package => package.ReleasePackageId == release.Id);
+        var externalOnly = (await client.GetFromJsonAsync<ProductionTrackingProject[]>("/api/production-tracking/projects?externalOnly=true"))!;
+        Assert.Equal(2, externalOnly.SelectMany(project => project.Packages).Single(package => package.ReleasePackageId == release.Id).TotalQuantity);
         var replay = await client.PutAsJsonAsync($"/api/production-tracking/releases/{release.Id}/lot-allocation", outsource);
         Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
         Assert.Equal(outsourcedRecord.RowVersion, (await replay.Content.ReadFromJsonAsync<ProductionTrackingRecord>())!.RowVersion);

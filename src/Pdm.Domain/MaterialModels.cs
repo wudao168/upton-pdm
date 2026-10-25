@@ -291,7 +291,8 @@ public sealed record StandardLibraryCategory(
     DateTimeOffset CreatedAt,
     string UpdatedBy,
     DateTimeOffset UpdatedAt,
-    long RowVersion);
+    long RowVersion,
+    string? Code = null);
 
 public sealed record StandardLibraryMembership(
     Guid CategoryId,
@@ -302,7 +303,8 @@ public sealed record StandardLibraryMembership(
 public sealed record StandardLibraryMaterial(
     PdmMaterial Material,
     IReadOnlyList<StandardLibraryCategory> Categories,
-    MaterialAttachment? CoverImage);
+    MaterialAttachment? CoverImage,
+    EngineeringKit? Kit = null);
 
 public sealed record StandardLibraryMaterialPage(
     IReadOnlyList<StandardLibraryMaterial> Items,

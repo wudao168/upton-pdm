@@ -6,6 +6,7 @@ import type { ProductionDrawingItem } from '../types'
 import type { ProductionLine, ProductionReleaseState } from '../productionTracking'
 import { ElMessage } from '../statusMessage'
 import { userErrorMessage } from '../userErrorMessage'
+import { drawingsForProductionLine } from '../productionDrawingSelection'
 
 const props = defineProps<{ token: string; state: ProductionReleaseState; line: ProductionLine; action: 'preview' | 'download' }>()
 const emit = defineEmits<{ close: [] }>()
@@ -36,11 +37,7 @@ onMounted(async () => {
   try {
     const items = await listProductionDrawings(props.token, true, props.state.projectId)
     if (disposed) return
-    const packageId = props.state.formalReleasePackageId || props.state.releasePackageId
-    drawings.value = items.filter(item => item.releasePackageId === packageId && (
-      item.bomQuantities?.some(quantity => quantity.materialKey === props.line.materialKey)
-      || item.bomItems?.some(bom => bom.id && props.line.sourceBomItemIds?.includes(bom.id))
-      || item.documentId === props.line.sourceDocumentId && (!props.line.sourceVersionId || item.versionId === props.line.sourceVersionId)))
+    drawings.value = drawingsForProductionLine(items, props.state, props.line)
     if (!drawings.value.length) error.value = '该物料在此发布包中没有可用的正式图纸，请到图纸资料核对。'
     else if (drawings.value.length === 1 && drawings.value[0].pdfReady) {
       if (props.action === 'download') await download(drawings.value[0], true)

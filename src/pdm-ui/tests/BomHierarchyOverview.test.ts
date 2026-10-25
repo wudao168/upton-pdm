@@ -234,7 +234,7 @@ describe('BomHierarchyOverview', () => {
     const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root, child], token: 'token', editable: false } })
     await flushPromises()
     expect(wrapper.get('button[aria-label="折叠P-CHILD的三类BOM"]').attributes('aria-expanded')).toBe('true')
-    for (const [label, kind] of [['标准件BOM', 'Standard'], ['非标件BOM', 'NonStandard'], ['电气BOM', 'Electrical']]) {
+    for (const [label, kind] of [['标准件BOM', 'Standard'], ['非标件BOM', 'NonStandard'], ['电气件BOM', 'Electrical']]) {
       await wrapper.get(`button[aria-label="进入P-CHILD的${label}"]`).trigger('click')
       expect(wrapper.emitted('openBom')?.at(-1)).toEqual(['child', kind])
     }

@@ -29,10 +29,8 @@ public sealed class BrowserCadArchiveHostedService(IServiceScopeFactory scopes, 
                 catch (Exception error)
                 {
                     logger.LogError(error, "网页存档任务 {JobId} 未完成，已保留上传文件", job.Id);
-                    var message = error is PdmRuleException or PdmConflictException or UnauthorizedAccessException ? error.Message
-                        : "存档暂未完成，上传文件已保留，请稍后重试；详细原因已记入服务器日志。";
-                    var latest = queue.Read(job.Id) ?? job;
-                    await queue.SaveAsync(latest with { State = "Failed", Stage = "存档未完成，文件已保留", Error = message }, CancellationToken.None);
+                    using var scope = scopes.CreateScope();
+                    await scope.ServiceProvider.GetRequiredService<BrowserCadArchiveService>().RecordFailureAsync(job, error, CancellationToken.None);
                 }
                 finally { TenantContext.Clear(); queue.Gate(job.Id).Release(); }
             }

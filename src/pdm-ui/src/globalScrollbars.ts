@@ -6,8 +6,55 @@ import './styles/scrollbars.css'
 const candidates = 'div, section, main, aside, nav, ol, ul, pre, article, form, header, footer, fieldset, menu, dl, figure'
 const ignored = '.el-scrollbar, [class^="os-"]'
 
+// Firefox has no scrollbar hover pseudo-element; reveal native bars only in their gutter.
+function installNativeScrollbarHover(owner: Document) {
+  const view = owner.defaultView
+  if (!view || view.CSS?.supports?.('selector(::-webkit-scrollbar)')) return () => {}
+  let hovered: HTMLElement | undefined, dragging = false
+  const clear = () => { hovered?.removeAttribute('data-pdm-native-scrollbar-hover'); hovered = undefined }
+  function update(event: PointerEvent) {
+    if (dragging) return
+    const next = event.composedPath().find(node => {
+      if (!(node instanceof HTMLElement) || node.matches('[data-overlayscrollbars-viewport], .el-scrollbar__wrap')) return false
+      const root = node === owner.scrollingElement, style = getComputedStyle(node)
+      if (style.scrollbarWidth === 'none') return false
+      const x = node.scrollWidth > node.clientWidth && (root || /^(auto|scroll)$/.test(style.overflowX))
+      const y = node.scrollHeight > node.clientHeight && (root || /^(auto|scroll)$/.test(style.overflowY))
+      if (!x && !y) return false
+      const rect = root ? { left: 0, top: 0, right: view!.innerWidth, bottom: view!.innerHeight } : node.getBoundingClientRect()
+      const vertical = Math.max(12, root ? view!.innerWidth - node.clientWidth : node.offsetWidth - node.clientWidth)
+      const horizontal = Math.max(12, root ? view!.innerHeight - node.clientHeight : node.offsetHeight - node.clientHeight)
+      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return false
+      return y && (style.direction === 'rtl' ? event.clientX < rect.left + vertical : event.clientX > rect.right - vertical)
+        || x && event.clientY > rect.bottom - horizontal
+    }) as HTMLElement | undefined
+    if (next === hovered) return
+    clear(); hovered = next; hovered?.setAttribute('data-pdm-native-scrollbar-hover', '')
+  }
+  const down = (event: PointerEvent) => { update(event); dragging = event.button === 0 && !!hovered }
+  const up = (event: PointerEvent) => { dragging = false; update(event) }
+  const cancel = () => { dragging = false; clear() }
+  const leave = (event: PointerEvent) => { if (!dragging && (event.target === owner || event.target === owner.documentElement)) clear() }
+  owner.addEventListener('pointermove', update, true)
+  owner.addEventListener('pointerdown', down, true)
+  owner.addEventListener('pointerup', up, true)
+  owner.addEventListener('pointercancel', cancel, true)
+  owner.addEventListener('pointerleave', leave, true)
+  view.addEventListener('blur', cancel)
+  return () => {
+    owner.removeEventListener('pointermove', update, true)
+    owner.removeEventListener('pointerdown', down, true)
+    owner.removeEventListener('pointerup', up, true)
+    owner.removeEventListener('pointercancel', cancel, true)
+    owner.removeEventListener('pointerleave', leave, true)
+    view.removeEventListener('blur', cancel)
+    cancel()
+  }
+}
+
 /** Keep the original viewport and its children: sticky headers, scroll refs and Vue ownership stay intact. */
 export function installGlobalScrollbars(app: App, owner: Document = document) {
+  const disposeNativeHover = installNativeScrollbarHover(owner)
   OverlayScrollbars.plugin(ClickScrollPlugin)
   const instances = new Map<HTMLElement, ScrollbarInstance>()
   const pending = new Set<Element>()
@@ -73,6 +120,7 @@ export function installGlobalScrollbars(app: App, owner: Document = document) {
   owner.addEventListener('load', rescan, true)
   schedule(owner.body)
   app.onUnmount(() => {
+    disposeNativeHover()
     observer.disconnect()
     cancelAnimationFrame(frame)
     window.removeEventListener('resize', rescan)

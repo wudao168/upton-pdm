@@ -10,7 +10,8 @@ public sealed class U9ProcurementService(
     IU9SecretProtector secretProtector,
     IU9OpenApiClient authenticationClient,
     IU9ProcurementClient procurementClient,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    ProductionTrackingService? production = null)
 {
     public async Task<ProjectProcurementTrackingResult> ListProjectAsync(
         Guid projectId,
@@ -28,16 +29,18 @@ public sealed class U9ProcurementService(
             : await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, cancellationToken)
                 ?? throw new PdmNotFoundException("主项目不存在。");
         var subprojectCode = project.ParentProjectId is null ? null : project.Code;
-        var sourceRows = await procurement.ListForProjectAsync(root.Code, subprojectCode, cancellationToken);
-        var published = await ListPublishedBomAsync(projectId, cancellationToken);
+        var releases = await repository.ListReleasePackagesAsync(projectId, cancellationToken);
+        var published = await ListPublishedBomAsync(projectId, releases, cancellationToken);
+        var hasPurchased = published.Any(line => line.BomKind != "非标件");
+        var sourceRows = hasPurchased ? await procurement.ListForProjectAsync(root.Code, subprojectCode, cancellationToken) : [];
         // 装配、调试起始日期取自项目计划对应阶段的主任务计划开始日期。
         var plan = await plans.FindPlanAsync(projectId, cancellationToken);
         var assemblyStartDate = StageStartDate(plan, ProjectPlanStage.Assembly);
         var commissioningStartDate = StageStartDate(plan, ProjectPlanStage.Commissioning);
-        var latestRun = await procurement.GetLatestRunAsync(cancellationToken);
+        var latestRun = hasPurchased ? await procurement.GetLatestRunAsync(cancellationToken) : null;
 
         var output = new List<ProjectProcurementTrackingItem>(published.Count);
-        foreach (var line in published.OrderBy(item => item.BomKind).ThenBy(item => item.Item.Sequence).ThenBy(item => item.Item.Id))
+        foreach (var line in published.Where(line => line.BomKind != "非标件").OrderBy(item => item.BomKind).ThenBy(item => item.Item.Sequence).ThenBy(item => item.Item.Id))
         {
             var material = await materials.FindMaterialBySourceBomItemAsync(line.Item.Id, cancellationToken);
             var materialCode = Clean(material?.U9ItemCode) ?? Clean(material?.MaterialCode) ?? line.Item.DrawingNumber.Trim();
@@ -94,14 +97,46 @@ public sealed class U9ProcurementService(
             });
         }
 
+        var manufacturing = new List<ProjectProcurementTrackingItem>();
+        var records = production is not null && releases.Any(p => p.State == ReleasePackageState.Published
+            && p.Scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardLongLead or ReleaseScope.NonStandardSupplement)
+            ? await production.ProcurementAsync(projectId, actor, role, cancellationToken) : [];
+        var covered = new HashSet<Guid>();
+        var coveredItems = new HashSet<Guid>();
+        foreach (var record in records)
+        {
+            var package = releases.FirstOrDefault(p => p.Id == record.State.ReleasePackageId);
+            if (package is null) continue;
+            var frozen = ProductionDrawingQuantities.FrozenItems(package);
+            foreach (var line in record.State.Lines)
+            {
+                covered.UnionWith(line.SourceTrackingIds);
+                coveredItems.UnionWith(line.SourceBomItemIds);
+                var item = frozen.FirstOrDefault(i => line.SourceBomItemIds.Contains(i.Id));
+                manufacturing.Add(ManufacturingProcurementTracking.Row(root, project, package, line, record.State, item, assemblyStartDate, commissioningStartDate));
+            }
+        }
+        foreach (var line in published.Where(line => line.BomKind == "非标件" && !covered.Contains(line.Item.ReleaseTrackingId) && !coveredItems.Contains(line.Item.Id)))
+        {
+            var package = releases.Where(p => p.State == ReleasePackageState.Published && line.PackageNumbers.Split('、').Contains(p.Number))
+                .OrderByDescending(p => p.PublishedAt).First();
+            var delivery = package.BomItemDeliveryOverrides.GetValueOrDefault(line.Item.Id);
+            var pending = new ProductionLine(line.Item.Id, BomReleaseAggregation.MaterialKey(line.Item), [line.Item.Id],
+                line.Item.Specification ?? "", line.Item.Name, line.Item.Revision, line.Item.Unit, line.Quantity,
+                delivery?.Priority ?? package.DrawingPriority, delivery?.RequiredOn ?? package.DrawingRequiredOn,
+                line.Item.Material, line.Item.SurfaceTreatment, line.Item.HeatTreatment, line.Item.SourceDocumentId) { MaterialCode = line.Item.DrawingNumber };
+            manufacturing.Add(ManufacturingProcurementTracking.Row(root, project, package, pending, null, line.Item, assemblyStartDate, commissioningStartDate));
+        }
+        var rows = ProcurementTrackingAggregation.Group(output, sourceRows).Concat(manufacturing)
+            .Select((row, index) => row with { Sequence = index + 1 }).ToArray();
         return new ProjectProcurementTrackingResult(
             projectId,
             root.Code,
             subprojectCode,
-            ProcurementTrackingAggregation.Group(output, sourceRows),
+            rows,
             latestRun?.Status == U9InventorySyncStatus.Succeeded ? latestRun.CompletedAt : null,
             latestRun?.Status == U9InventorySyncStatus.Failed ? latestRun.LastError : null,
-            published.Count > 0);
+            published.Count > 0 || manufacturing.Count > 0) { ManufacturingReadAt = manufacturing.Count > 0 ? timeProvider.GetUtcNow() : null };
     }
 
     private static DateOnly? StageStartDate(ProjectPlan? plan, string stage)
@@ -222,9 +257,9 @@ public sealed class U9ProcurementService(
         }
     }
 
-    private async Task<IReadOnlyList<PublishedBomLine>> ListPublishedBomAsync(Guid projectId, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<PublishedBomLine>> ListPublishedBomAsync(Guid projectId, IReadOnlyList<ReleasePackage> releases, CancellationToken cancellationToken)
     {
-        var packages = (await repository.ListReleasePackagesAsync(projectId, cancellationToken))
+        var packages = releases
             .Where(package => package.State == ReleasePackageState.Published && package.PublishedAt.HasValue)
             .OrderBy(package => package.PublishedAt ?? package.CreatedAt)
             .ToArray();

@@ -7,9 +7,49 @@ namespace Upton.Pdm.SolidWorks;
 
 internal static class NativeArchiveManifest
 {
+    internal static void ConfirmFileScope(CadTreeNode root, IReadOnlyList<string> nativeFiles)
+    {
+        var listed = new HashSet<string>(nativeFiles.Where(path => !string.IsNullOrWhiteSpace(path)), StringComparer.OrdinalIgnoreCase);
+        var visited = new HashSet<CadTreeNode>();
+        if (!listed.Contains(root.FullPath) && DocumentRuleGate.ShouldBlock("B16", "原生文件清单未包含当前根图档，请重新读取后存档：" + root.FileName))
+            throw new InvalidOperationException("原生文件清单未包含当前根图档，请重新读取后存档：" + root.FileName);
+        void Confirm(CadTreeNode node)
+        {
+            if (!visited.Add(node)) return;
+            node.NativeFileScopeVerified = true;
+            node.NativeFileScopePaths = listed;
+            if (node.Status == CadReferenceStatus.Missing && listed.Contains(node.FullPath) && File.Exists(node.FullPath))
+            {
+                node.Status = CadReferenceStatus.Normal;
+                node.StructureIndexPending = true;
+                PluginDiagnosticLog.Record("结构待补全", "原生文件清单中存在该文件，缺失状态按索引待核对处理：" + node.FileName);
+            }
+            node.StructureIndexPending |= !string.IsNullOrWhiteSpace(node.ArchiveReadError)
+                || SuppressedAssemblyArchive.IsUnexpanded(node) && !SuppressedAssemblyArchive.CanReuse(node)
+                    && !SuppressedAssemblyLocalStructure.CanUse(node);
+            // A saved path outside the package is not another mandatory upload.
+            // Keep the visible node for diagnosis, but never manufacture its identity.
+            node.IsOutsideNativeFileScope = node != root && node.Status != CadReferenceStatus.Virtual
+                && !File.Exists(node.FullPath) && !listed.Contains(node.FullPath);
+            foreach (var child in node.Children) Confirm(child);
+            foreach (var model in node.ReferencedModels) Confirm(model);
+            if (node.Children.Any(child => child.IsOutsideNativeFileScope)
+                || node.ReferencedModels.Any(model => model.IsOutsideNativeFileScope)) node.StructureIndexPending = true;
+            if (node.StructureIndexPending)
+                PluginDiagnosticLog.Record("结构待补全", node.FileName + "：按原生文件清单保存；不据此删除BOM物料。");
+        }
+        Confirm(root);
+    }
     internal static string[] ReadFiles(CadTreeNode root, IEnumerable<string> entries)
     {
         var files = new List<string>();
+        var directory = Path.GetDirectoryName(root.FullPath);
+        var hasBinding = PdmDocumentIdentityStore.TryReadLocalMetadata(root.FullPath, out var rootBinding);
+        var controlled = hasBinding && rootBinding.ProjectId.HasValue && rootBinding.VersionId.HasValue
+            && root.DocumentId == rootBinding.DocumentId && PdmDocumentIdentityStore.IsControlledWorkspacePath(root.FullPath);
+        var actualPaths = new HashSet<string>(Walk(root).SelectMany(node => new[] { node }.Concat(node.ReferencedModels))
+            .Where(node => node.Role != CadReferenceRole.ExternalFileDependency && !node.IsOutsideNativeFileScope)
+            .Select(node => node.FullPath).Where(path => !string.IsNullOrWhiteSpace(path)), StringComparer.OrdinalIgnoreCase);
         var index = 0;
         foreach (var entry in entries)
         {
@@ -27,8 +67,23 @@ internal static class NativeArchiveManifest
             else parts = new[] { entry };
             foreach (var part in parts)
             {
-                try { files.Add(ArchiveReferencePath.Resolve(part, Path.GetDirectoryName(root.FullPath), step,
-                    root.FullPath, root.InstancePath, root.Configuration)); }
+                try
+                {
+                    var path = ArchiveReferencePath.Resolve(part, directory, step, root.FullPath, root.InstancePath, root.Configuration);
+                    if (controlled && !actualPaths.Contains(path) && new[] { ".SLDASM", ".SLDPRT", ".SLDDRW" }
+                        .Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))
+                    {
+                        var peer = Path.Combine(directory, Path.GetFileName(path));
+                        if (!string.Equals(path, peer, StringComparison.OrdinalIgnoreCase) && File.Exists(peer)
+                            && PdmDocumentIdentityStore.TryReadLocalMetadata(peer, out var binding)
+                            && binding.ProjectId == rootBinding.ProjectId && binding.VersionId.HasValue)
+                        {
+                            PluginDiagnosticLog.Record("受控存档范围", "旧清单地址采用当前PLM工作副本；旧文件保留：" + path + " → " + peer);
+                            path = peer;
+                        }
+                    }
+                    files.Add(path);
+                }
                 catch (ArchiveReferencePathException error)
                 {
                     // Actual tree paths are checked independently. A malformed historical
@@ -57,6 +112,11 @@ internal static class NativeArchiveManifest
         var directory = Path.GetDirectoryName(ArchiveReferencePath.Resolve(root.FullPath, null, "核对存档根路径", root.FullPath));
         var nodes = Walk(root).ToArray();
         var failures = new List<string>();
+        void AddFailure(string ruleId, string message)
+        {
+            if (DocumentRuleGate.ShouldBlock(ruleId, message)) failures.Add(message);
+            else root.StructureIndexPending = true;
+        }
         var external = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var embeddedNodes = new HashSet<CadTreeNode>(EmbeddedVirtualNodes(root, false));
         var embeddedPaths = EmbeddedPaths(embeddedNodes);
@@ -64,19 +124,20 @@ internal static class NativeArchiveManifest
             .ToDictionary(group => group.Key, group => group.Distinct(StringComparer.OrdinalIgnoreCase).Count(), StringComparer.OrdinalIgnoreCase);
         foreach (var node in nodes)
         {
+            if (node.IsOutsideNativeFileScope) continue;
             if (IsInterconnectCachePath(node.FullPath) && (!node.IsStoredImport || !ImportedComponentStorage.IsStableOwner(node.ImportedStorageOwnerPath)))
-                failures.Add("树内导入组件尚未形成可确认的原生存档内容，请将其保存为稳定原生文件或确认随父装配嵌入保存：" + node.FileName + "；实例：" + node.InstancePath);
+                AddFailure("B11", "树内导入组件尚未形成可确认的原生存档内容，请将其保存为稳定原生文件或确认随父装配嵌入保存：" + node.FileName + "；实例：" + node.InstancePath);
             else if (node.Status != CadReferenceStatus.Virtual && !embeddedNodes.Contains(node)
                 && PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath))
-                failures.Add("树内临时组件的嵌入归属尚未确认：" + node.FileName);
+                AddFailure("B11", "树内临时组件的嵌入归属尚未确认：" + node.FileName);
             else if (node.Status == CadReferenceStatus.Virtual || embeddedNodes.Contains(node))
             {
-                if (!embeddedNodes.Contains(node)) failures.Add("树内虚拟组件的保存归属尚未确认：" + node.FileName);
+                if (!embeddedNodes.Contains(node)) AddFailure("B11", "树内虚拟组件的保存归属尚未确认：" + node.FileName);
             }
             else if (string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
-                failures.Add("树内图档缺失，不能完整存档：" + node.FileName + "；路径：" + node.FullPath);
+                AddFailure("B09", "树内图档缺失，不能完整存档：" + node.FileName + "；路径：" + node.FullPath);
             else if (new FileInfo(node.FullPath).Length == 0)
-                failures.Add("树内图档为空，不能完整存档：" + node.FileName);
+                AddFailure("B10", "树内图档为空，不能完整存档：" + node.FileName);
         }
         var ordinary = nodes.Where(node => node.Status != CadReferenceStatus.Virtual && !embeddedNodes.Contains(node)
             && !string.IsNullOrWhiteSpace(node.FullPath)).ToArray();
@@ -90,12 +151,16 @@ internal static class NativeArchiveManifest
             var key = VirtualComponentKey(path);
             if (key != null && embeddedKeys.TryGetValue(key, out var count))
             {
-                if (count != 1) failures.Add("树内嵌入组件的原生路径对应不唯一：" + original);
+                if (count != 1)
+                {
+                    root.StructureIndexPending = true;
+                    PluginDiagnosticLog.Record("嵌入索引待确认", "嵌入内容随父装配保存，旧地址不能唯一匹配实例：" + original);
+                }
                 continue;
             }
             if (paths.Contains(path)) continue;
-            // The loaded tree owns the archive scope. A saved source path outside it
-            // is not another version of the current component and must not be read.
+            // Available native-inventory files have already been added by Collect.
+            // Remaining old addresses do not create new mandatory uploads.
             external.Add(original);
         }
         if (failures.Count > 0)
@@ -135,7 +200,7 @@ internal static class NativeArchiveManifest
     private static IEnumerable<CadTreeNode> Walk(CadTreeNode node)
     {
         yield return node;
-        foreach (var child in node.Children.Where(child => child.Role != CadReferenceRole.ExternalFileDependency))
+        foreach (var child in node.Children)
             foreach (var descendant in Walk(child)) yield return descendant;
     }
 

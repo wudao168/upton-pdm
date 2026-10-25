@@ -13,10 +13,26 @@ const record = (): ReleaseExecutionView => ({ id: 'release', state: 'Published',
 beforeEach(() => { vi.clearAllMocks(); vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] }); vi.mocked(readReleaseExecution).mockResolvedValue(record()); vi.mocked(acknowledgeReleaseDepartment).mockResolvedValue({}); vi.mocked(retryReleaseNotification).mockResolvedValue({}) })
 afterEach(() => vi.useRealTimers())
 
+it('显示审批通知队列的助理接收状态，不误报未配置通知', async () => {
+  const view = { ...record(), workflowNotifications: [{ state: 'Attention', message: 'T2机械组／技术助理没有有效人员', enabled: true }] }
+  view.progress!.notificationRules = []
+  vi.mocked(readReleaseExecution).mockResolvedValue(view)
+  const wrapper = mount(ReleaseExecutionPanel, { props: { packageId: 'release', token: 'fixture', canManage: true } }); await flushPromises()
+  expect(wrapper.text()).toContain('部门助理通知待处理')
+  expect(wrapper.text()).not.toContain('部门助理站内通知：')
+  expect(wrapper.text()).not.toContain('T2机械组／技术助理没有有效人员')
+  expect(wrapper.text()).not.toContain('未配置通知')
+  vi.mocked(readReleaseExecution).mockResolvedValue({ ...view, workflowNotifications: [{ state: 'Sent', message: '已生成1条站内通知', enabled: true }] })
+  await vi.advanceTimersByTimeAsync(15000); await flushPromises()
+  expect(wrapper.text()).toContain('已发送部门助理站内消息')
+  wrapper.unmount()
+})
+
 it('separates publication from U9, drawing and notification completion and shows the pinned scope', async () => {
   const wrapper = mount(ReleaseExecutionPanel, { props: { packageId: 'release', token: 'fixture', canManage: true } }); await flushPromises()
   expect(wrapper.text()).toContain('等待同步回查'); expect(wrapper.text()).toContain('发送结果待核对')
-  expect(wrapper.text()).toContain('未齐套不代表生产资料已全部可用')
+  expect(wrapper.text()).not.toContain('未齐套不代表生产资料已全部可用')
+  expect(wrapper.text()).not.toContain('等待本发布版本回查')
   expect(wrapper.text()).toContain('保留引用，不随本次升版')
   expect(wrapper.text()).not.toContain('本发布版本的U9同步和所需生产图纸已齐套')
   const retry = wrapper.findAll('button').find(button => button.text() === '重试此通知')!

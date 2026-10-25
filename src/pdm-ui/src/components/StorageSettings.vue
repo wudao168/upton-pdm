@@ -18,7 +18,7 @@ const props = defineProps<{
 }>()
 
 const activeTab = ref('storage')
-const storageDraft = reactive<PdmSystemSettings>({ vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: [], validationRules: { standard: [], nonStandard: [], electrical: [] }, drawingQrPolicy: { enabled: true, sourceProperty: '型号', ruleVersion: '1', sizeMillimeters: 20, marginMillimeters: 5, everySheet: true } })
+const storageDraft = reactive<PdmSystemSettings>({ vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 60, checkoutLeaseMinutes: 5, checkoutOfflineGraceMinutes: 30, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, checkoutAutoReleaseEnabled: true, checkoutIdleReleaseMinutes: 30, checkoutReleaseCountdownSeconds: 60, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: [], validationRules: { standard: [], nonStandard: [], electrical: [] }, drawingQrPolicy: { enabled: true, sourceProperty: '型号', ruleVersion: '1', sizeMillimeters: 20, marginMillimeters: 5, everySheet: true } })
 const previewConversionDraft = reactive({ mode: 'Local' as 'Local' | 'Remote', agentUrl: '', agentToken: '', timeoutMinutes: 30 })
 const previewAgentProbe = ref('')
 const previewAgentTesting = ref(false)
@@ -29,7 +29,7 @@ const counterDrafts = ref<Array<{ id: string; name: string; project: number; ser
 const validationKinds = [
   { key: 'standard' as const, label: '标准件 BOM', note: '建议要求型号与品牌' },
   { key: 'nonStandard' as const, label: '非标件 BOM', note: '建议要求材质与表面处理' },
-  { key: 'electrical' as const, label: '电气 BOM', note: '不校验材质，建议要求型号与品牌' },
+  { key: 'electrical' as const, label: '电气件BOM', note: '不校验材质，建议要求型号与品牌' },
 ]
 const validationFields: Array<{ key: BomValidationField; label: string; core?: boolean }> = [
   { key: 'drawingNumber', label: '物料编码', core: true },
@@ -51,6 +51,9 @@ const knownSolidWorksProperties = [
 
 watch(() => props.settings, settings => Object.assign(storageDraft, {
   ...settings,
+  checkoutAutoReleaseEnabled: settings.checkoutAutoReleaseEnabled ?? true,
+  checkoutIdleReleaseMinutes: settings.checkoutIdleReleaseMinutes ?? 30,
+  checkoutReleaseCountdownSeconds: settings.checkoutReleaseCountdownSeconds ?? 60,
   bomPropertyMappings: (settings.bomPropertyMappings ?? []).map(mapping => ({ ...mapping })),
   validationRules: {
     standard: [...settings.validationRules.standard],
@@ -289,14 +292,18 @@ async function saveCounters(row: { id: string; project: number; serial: number }
       </el-tab-pane>
       <el-tab-pane label="编辑权限" name="checkout-policy">
         <section class="pdm-panel pdm-manager-panel">
-          <header class="pdm-manager-heading"><div><h2>自动结束编辑与离线保护</h2><p>关闭图档后，插件校验文件并保留必要草稿，自动结束编辑。断网期间保留占用；超过租约及离线宽限后，本人或授权人员可处理异常占用。在线编辑不会因时长被强制释放。</p></div></header>
+          <header class="pdm-manager-heading"><div><h2>自动结束编辑与离线保护</h2><p>关闭图档后先保留必要草稿。闲置且确认无修改时，由插件倒计时释放；持续离线达到回收时限后，服务器撤销旧会话。在线有未提交修改时由负责人处理，接手人使用服务器最后存档版本。</p></div></header>
           <div class="pdm-settings-form pdm-lock-policy-grid">
-            <label>插件心跳（秒）<input v-model.number="storageDraft.checkoutHeartbeatSeconds" type="number" min="30" max="600"><small>建议180秒</small></label>
-            <label>编辑租约（分钟）<input v-model.number="storageDraft.checkoutLeaseMinutes" type="number" min="2" max="60"><small>建议15分钟，至少为心跳的两倍</small></label>
-            <label>离线宽限（分钟）<input v-model.number="storageDraft.checkoutOfflineGraceMinutes" type="number" min="5" max="1440"><small>建议60分钟</small></label>
+            <label>插件心跳（秒）<input v-model.number="storageDraft.checkoutHeartbeatSeconds" type="number" min="30" max="600"><small>建议60秒</small></label>
+            <label>编辑租约（分钟）<input v-model.number="storageDraft.checkoutLeaseMinutes" type="number" min="2" max="60"><small>建议5分钟，至少为心跳的两倍</small></label>
+            <label>离线宽限（分钟）<input v-model.number="storageDraft.checkoutOfflineGraceMinutes" type="number" min="5" max="1440"><small>建议30分钟，之后可人工接管</small></label>
             <label>首次提醒（小时）<input v-model.number="storageDraft.checkoutReminderHours" type="number" min="1" max="720"><small>建议4小时</small></label>
             <label>强提醒（小时）<input v-model.number="storageDraft.checkoutStrongReminderHours" type="number" min="2" max="720"><small>建议8小时</small></label>
             <label>超时标记（小时）<input v-model.number="storageDraft.checkoutOverdueHours" type="number" min="3" max="720"><small>建议24小时</small></label>
+            <label><span>启用自动释放</span><input v-model="storageDraft.checkoutAutoReleaseEnabled" type="checkbox"><small>关闭后暂停闲置释放和长期离线自动回收，人工处理仍可用。</small></label>
+            <label>无修改闲置（分钟）<input v-model.number="storageDraft.checkoutIdleReleaseMinutes" type="number" min="5" max="1440"><small>建议30分钟，须由插件确认无未提交修改。</small></label>
+            <label>释放倒计时（秒）<input v-model.number="storageDraft.checkoutReleaseCountdownSeconds" type="number" min="30" max="300"><small>建议60秒，可点击“继续编辑”延期。</small></label>
+            <label>持续离线回收（小时）<input v-model.number="storageDraft.checkoutForceReleaseHours" type="number" min="24" max="720"><small>建议48小时；旧会话失效，未上传修改须从原电脑恢复比对。</small></label>
           </div>
           <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveCheckoutPolicy">保存编辑权限策略</button></div>
         </section>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SquareLoader from './SquareLoader.vue'
 import { getValidationEmergencyCapability, emergencyDecideValidationPlan } from '../api'
 import { ArrowLeft, CalendarDays, CheckCircle2, Download, FileUp, LibraryBig, ListChecks, Paperclip, Plus, RotateCcw, Save, Send, Trash2, XCircle } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
@@ -849,7 +850,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
     </header>
 
     <template v-if="view === 'summary'">
-      <div v-if="loading" class="validation-plan__empty">正在加载项目验证计划列表…</div>
+      <div v-if="loading" class="validation-plan__empty pdm-loading-page"><SquareLoader label="正在加载项目验证计划列表…" /><span class="pdm-loading-copy">正在加载项目验证计划列表…</span></div>
       <div v-else class="validation-plan__table-scroll">
         <table class="validation-plan-summary__table">
           <thead><tr><th>项目代号</th><th>项目名称</th><th>项目类型</th><th>{{ qualityAcceptance ? '验收项数' : '验证项数' }}</th><th>编制人</th><th>编制日期</th><th>最近保存</th><th>状态</th><th>{{ qualityAcceptance ? '质量验收' : '验证计划' }}</th><th>附件</th></tr></thead>
@@ -921,7 +922,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
       <span v-if="dirty" class="validation-plan__dirty">有未保存修改</span>
     </div>
 
-    <div v-if="loading" class="validation-plan__empty">正在加载验证计划…</div>
+    <div v-if="loading" class="validation-plan__empty pdm-loading-page"><SquareLoader label="正在加载验证计划…" /><span class="pdm-loading-copy">正在加载验证计划…</span></div>
     <div v-else-if="rows.length" class="validation-plan__table-scroll">
       <table class="validation-plan__table">
         <thead><tr><th>序号</th><th>分类</th><th>{{ qualityAcceptance ? '验收内容' : '验证内容' }}</th><th>{{ qualityAcceptance ? '验收标准' : '验证标准' }}</th><th>信息来源</th><th>{{ qualityAcceptance ? '验收日期' : '验证日期' }}</th><th>责任人</th><th>结果</th><th>审核人</th><th>备注</th><th>操作</th></tr></thead>

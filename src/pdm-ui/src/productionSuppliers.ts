@@ -19,4 +19,6 @@ export interface ProductionSupplierCatalog {
   suppliers: ProductionSupplier[]
   rowVersion: number
 }
+export type ProductionSupplierChoice = Pick<ProductionSupplier, 'id' | 'code' | 'name' | 'categoryIds' | 'isActive'>
+export interface ProductionSupplierChoices { companyId: string; categories: ProductionSupplierCategory[]; suppliers: ProductionSupplierChoice[] }
 export type SaveProductionSupplier = Omit<ProductionSupplier, 'id' | 'updatedAt'> & { expectedRowVersion: number }

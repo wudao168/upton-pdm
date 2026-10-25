@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using PdfSharp.Pdf.IO;
 using Upton.Pdm.Application;
 using ZXing;
 using ZXing.Common;
@@ -31,8 +32,24 @@ internal static class PdfReleasePageEditor
     internal static IReadOnlyList<Layout> Prepare(string input, string output, Guid drawingId, IReadOnlySet<string> cadCodes)
     {
         Init();
-        var document = Native.FPDF_LoadDocument(input, null);
-        if (document == 0) throw new PdmRuleException("PDF无法读取，请重新转换该图纸后重试标识。");
+        using var buffer = new MemoryStream();
+        using (var original = PdfReader.Open(input, PdfDocumentOpenMode.Modify))
+        {
+            // SolidWorks can split a path or text state across content streams. PDFium regenerates
+            // only dirty streams, so join their original bytes first to preserve that shared state.
+            foreach (var page in original.Pages)
+                if (page.Contents.Elements.Count > 1)
+                {
+                    var content = page.Contents.CreateSingleContent().Stream.Value;
+                    page.Contents.Elements.Clear();
+                    page.Contents.AppendContent().CreateStream(content);
+                }
+            original.Save(buffer, false);
+        }
+        var bytes = buffer.ToArray();
+        var pin = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+        var document = Native.FPDF_LoadMemDocument64(pin.AddrOfPinnedObject(), (nuint)bytes.Length, null);
+        if (document == 0) { pin.Free(); throw new PdmRuleException("PDF无法读取，请重新转换该图纸后重试标识。"); }
         try
         {
             var result = new List<Layout>();
@@ -73,7 +90,8 @@ internal static class PdfReleasePageEditor
                         Native.FPDFPageObj_Destroy(item.Handle);
                     }
                     var headings = items.Where(item => !removed.Contains(item.Handle) && item.Type == 1
-                        && item.Value.Trim().TrimEnd('：', ':') == "技术要求" && item.Bounds.Left >= left - 5 && item.Bounds.Right <= right).ToArray();
+                        && item.Value.Trim().TrimEnd('：', ':') == "技术要求" && item.Bounds.Left >= left - frame.Width && item.Bounds.Right <= right
+                        && item.Bounds.Bottom >= top && item.Bounds.Top <= top + 110).ToArray();
                     var requirements = headings.Length == 1
                         ? items.Where(item => !removed.Contains(item.Handle) && item.Type == 1
                             && Math.Abs(item.Bounds.Left - headings[0].Bounds.Left) < 5
@@ -109,7 +127,7 @@ internal static class PdfReleasePageEditor
             GC.KeepAlive(callback);
             return result;
         }
-        finally { Native.FPDF_CloseDocument(document); }
+        finally { Native.FPDF_CloseDocument(document); pin.Free(); }
     }
 
     private static bool Collides(Box area, IReadOnlyList<Item> items, IReadOnlyList<Line> lines, HashSet<nint> ignored)

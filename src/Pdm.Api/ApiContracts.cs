@@ -4,9 +4,9 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Api;
 
-public sealed record LoginRequest(string Username, string Password);
+public sealed record LoginRequest(string Username, string Password, string? ClientInstanceId = null, string? ClientType = null);
 
-public sealed record ResumeSessionRequest(string ResumeToken);
+public sealed record ResumeSessionRequest(string ResumeToken, string? ClientInstanceId = null, bool DesktopHandoff = false, string? ClientType = null);
 
 public sealed record CompanyOption(Guid Id, string Name, string Code);
 
@@ -97,9 +97,9 @@ public sealed record UpdateSystemSettingsRequest(
     string VaultRoot,
     string ReleaseRoot,
     string? MaterialAttachmentRoot = null,
-    int CheckoutHeartbeatSeconds = 180,
-    int CheckoutLeaseMinutes = 15,
-    int CheckoutOfflineGraceMinutes = 60,
+    int CheckoutHeartbeatSeconds = 60,
+    int CheckoutLeaseMinutes = 5,
+    int CheckoutOfflineGraceMinutes = 30,
     int CheckoutReminderHours = 4,
     int CheckoutStrongReminderHours = 8,
     int CheckoutOverdueHours = 24,
@@ -121,7 +121,10 @@ public sealed record UpdateSystemSettingsRequest(
     IReadOnlyDictionary<string, string>? ReleaseChangeReasonLabels = null,
     FormalSupplementPolicies? FormalSupplementPolicies = null,
     DrawingQrPolicy? DrawingQrPolicy = null,
-    PreviewConversionSettings? PreviewConversion = null);
+    PreviewConversionSettings? PreviewConversion = null,
+    bool? CheckoutAutoReleaseEnabled = null,
+    int? CheckoutIdleReleaseMinutes = null,
+    int? CheckoutReleaseCountdownSeconds = null);
 
 public sealed record SetBomEmptyDeclarationRequest(bool DeclaredEmpty);
 
@@ -273,6 +276,8 @@ public sealed record CancelArchiveRegistrationRequest(Guid SessionId);
 public sealed record EditSessionHeartbeatRequest(string MachineName, IReadOnlyList<Guid> DocumentIds);
 
 public sealed record EditLockActionRequest(string Reason);
+public sealed record EmergencyEditReleaseRequest(Guid SessionId, DateTimeOffset CheckedOutAt, string Reason);
+public sealed record AutoEditReleaseRequest(Guid SessionId, DateTimeOffset CheckedOutAt, Guid BaseVersionId, string Sha256);
 public sealed record CloseEditRequest(Guid SessionId, DateTimeOffset CheckedOutAt, string Sha256, bool DraftPreserved);
 
 public sealed record LifecycleActionRequest(string Comment);
@@ -293,7 +298,9 @@ public sealed record CheckInRequest(
     string? FileName = null,
     Guid? DrawingReviewWritebackId = null,
     Guid? ExpectedVersionId = null,
-    bool DeferBomRefresh = false);
+    bool DeferBomRefresh = false,
+    bool KeepEditing = false,
+    string? HandoffTo = null);
 
 public sealed record CheckInPreflightRequest(
     Guid ProjectId,
@@ -306,7 +313,9 @@ public sealed record CheckInPreflightRequest(
     string? FileName = null,
     Guid? DrawingReviewWritebackId = null,
     Guid? ExpectedVersionId = null,
-    IReadOnlyList<Guid>? PlannedDocumentIds = null);
+    IReadOnlyList<Guid>? PlannedDocumentIds = null,
+    bool KeepEditing = false,
+    string? HandoffTo = null);
 
 public sealed record CompleteEditRequest(string Sha256, Guid CheckoutSessionId);
 public sealed record ArchiveBatchFileRequest(Guid DocumentId, CheckInRequest Request);

@@ -9,38 +9,17 @@ namespace Upton.Pdm.SolidWorks;
 
 internal sealed class PluginSettings
 {
-    private const double DefaultDrawingQrXMillimeters = 10d;
-    private const double DefaultDrawingQrYMillimeters = 55d;
-    private const double DefaultDrawingQrSizeMillimeters = 20d;
-
     public int SchemaVersion { get; set; } = 3;
     public string ServerAddress { get; set; } = string.Empty;
     public bool AutomaticUpdatesEnabled { get; set; } = true;
     public int PlannedTaskScrollIntervalSeconds { get; set; } = 30;
-    public bool UseCustomDrawingQrPosition { get; set; }
-    public double DrawingQrXMillimeters { get; set; } = DefaultDrawingQrXMillimeters;
-    public double DrawingQrYMillimeters { get; set; } = DefaultDrawingQrYMillimeters;
-    public double DrawingQrLengthMillimeters { get; set; } = DefaultDrawingQrSizeMillimeters;
-    public double DrawingQrWidthMillimeters { get; set; } = DefaultDrawingQrSizeMillimeters;
 
     public void Normalize()
     {
         SchemaVersion = 3;
         if (PlannedTaskScrollIntervalSeconds != 15 && PlannedTaskScrollIntervalSeconds != 30 && PlannedTaskScrollIntervalSeconds != 60)
             PlannedTaskScrollIntervalSeconds = 30;
-        DrawingQrXMillimeters = Clamp(DrawingQrXMillimeters, 0d, 2000d);
-        DrawingQrYMillimeters = Clamp(DrawingQrYMillimeters, 0d, 2000d);
-        DrawingQrLengthMillimeters = ClampSize(DrawingQrLengthMillimeters);
-        DrawingQrWidthMillimeters = ClampSize(DrawingQrWidthMillimeters);
     }
-
-    private static double Clamp(double value, double minimum, double maximum) =>
-        double.IsNaN(value) || double.IsInfinity(value) ? minimum : Math.Max(minimum, Math.Min(maximum, value));
-
-    private static double ClampSize(double value) =>
-        value <= 0d || double.IsNaN(value) || double.IsInfinity(value)
-            ? DefaultDrawingQrSizeMillimeters
-            : Clamp(value, 8d, 2000d);
 }
 
 internal static class PluginSettingsStore

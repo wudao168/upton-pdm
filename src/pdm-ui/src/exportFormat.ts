@@ -1,5 +1,6 @@
 import { strToU8, strFromU8, unzipSync, zipSync } from 'three/examples/jsm/libs/fflate.module.js'
 import { exportCompanyLogo } from './exportCompanyLogo'
+import { markStockedMaterials } from './materialStockWorkbook'
 export type ProjectExportMetadata = { title: string; company: string; scope: string; versionLabel: string; version: string; exportedAt: string; exportedBy: string; notes?:string; fields: Array<{key:string;value:string}> }
 const ns='http://schemas.openxmlformats.org/spreadsheetml/2006/main', rel='http://schemas.openxmlformats.org/package/2006/relationships', docRel='http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 const xml=(v:string)=>v.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
@@ -71,5 +72,5 @@ export function formatProjectWorkbook(bytes:Uint8Array, metadata:ProjectExportMe
     files['xl/drawings/_rels/'+drawing+'.rels']=strToU8(`<Relationships xmlns="${rel}"><Relationship Id="image" Type="${docRel}/image" Target="../media/uplm-company-logo.png"/></Relationships>`);override('xl/drawings/'+drawing,'application/vnd.openxmlformats-officedocument.drawing+xml')
     ;[...defined!.children].filter(e=>e.getAttribute('localSheetId')===String(index)&&e.getAttribute('name')==='_xlnm.Print_Titles').forEach(e=>e.remove());const definition=book.createElementNS(ns,'definedName');definition.setAttribute('name','_xlnm.Print_Titles');definition.setAttribute('localSheetId',String(index));definition.textContent=`'${bookSheets[index]!.getAttribute('name')!.replace(/'/g,"''")}'!$1:$${repeat}`;defined!.appendChild(definition)
     const order='sheetPr dimension sheetViews sheetFormatPr cols sheetData sheetProtection protectedRanges scenarios autoFilter sortState dataConsolidate customSheetViews mergeCells phoneticPr conditionalFormatting dataValidations hyperlinks printOptions pageMargins pageSetup headerFooter rowBreaks colBreaks drawing legacyDrawing legacyDrawingHF picture tableParts extLst'.split(' ');const children=[...root.children].sort((a,b)=>(order.indexOf(a.localName)<0?99:order.indexOf(a.localName))-(order.indexOf(b.localName)<0?99:order.indexOf(b.localName)));root.replaceChildren(...children);files[path]=strToU8(serializer.serializeToString(sheet).replace('<!--uplm-data-rows-->',shiftedData))
-  });save('xl/workbook.xml',book);save('[Content_Types].xml',types);return zipSync(Object.fromEntries(Object.entries(files).map(([name, content])=>[name,new Uint8Array(content)])))
+  });save('xl/workbook.xml',book);save('[Content_Types].xml',types);return markStockedMaterials(zipSync(Object.fromEntries(Object.entries(files).map(([name, content])=>[name,new Uint8Array(content)]))))
 }

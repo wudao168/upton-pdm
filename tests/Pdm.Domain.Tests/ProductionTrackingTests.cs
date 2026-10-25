@@ -40,6 +40,9 @@ public sealed class ProductionTrackingTests
         Assert.Equal(package.Id, result.ReleasePackageId);
         Assert.Equal("PLM-RENAMED-123", result.DrawingNumber);
         var released = await fixture.Repository.PublishDocumentVersionAsync(drawing.Id, version.Id, package.Id, approvalId, "admin", Ct);
+        var withoutPdf = Assert.Single(await fixture.Service.ResolveScanAsync(
+            PdfReleaseIdentity.Display("PLM-RENAMED-123", released.Revision.Display), "admin", UserRole.Administrator, Ct));
+        Assert.Equal(package.Id, withoutPdf.ReleasePackageId);
         await fixture.Repository.AttachReleasePreviewArtifactsAsync(package.Id,
             new Dictionary<Guid, DocumentPreviewArtifact> { [drawing.Id] = new(DocumentPreviewFormat.Pdf, "verified.pdf", 128, hash, hash) }, Ct);
         var readable = PdfReleaseIdentity.Display("PLM-RENAMED-123", released.Revision.Display);
@@ -48,6 +51,15 @@ public sealed class ProductionTrackingTests
         Assert.Equal("PLM-RENAMED-123", readableResult.DrawingNumber);
         Assert.Empty(await fixture.Service.ResolveScanAsync(PdfReleaseIdentity.Display("WRONG-MODEL", released.Revision.Display), "admin", UserRole.Administrator, Ct));
         Assert.Empty(await fixture.Service.ResolveScanAsync(PdfReleaseIdentity.Display("PLM-RENAMED-123", "Z"), "admin", UserRole.Administrator, Ct));
+        var versionStore = (System.Collections.Concurrent.ConcurrentDictionary<Guid, DocumentVersion>)typeof(InMemoryPdmRepository)
+            .GetField("versions", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(fixture.Repository)!;
+        versionStore[released.Id] = released with { SourceVersionId = null, Preview = null };
+        var packageStore = (System.Collections.Concurrent.ConcurrentDictionary<Guid, ReleasePackage>)typeof(InMemoryPdmRepository)
+            .GetField("packages", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(fixture.Repository)!;
+        packageStore[package.Id] = package with { VersionBindings = [] };
+        var legacy = Assert.Single(await fixture.Service.ResolveScanAsync(readable, "admin", UserRole.Administrator, Ct));
+        Assert.Equal(package.Id, legacy.ReleasePackageId);
+        packageStore[package.Id] = package;
         await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.ResolveScanAsync(
             PdfReleaseIdentity.Encode(package.Id, Guid.NewGuid()), "admin", UserRole.Administrator, Ct));
         await fixture.Repository.SetRolePermissionsAsync("Engineer", [], Ct);
@@ -141,6 +153,14 @@ public sealed class ProductionTrackingTests
         Assert.Equal(4, summary.TotalQuantity);
         Assert.Equal(0, summary.AtRiskLines);
         Assert.Equal(2, Assert.Single(await fixture.Service.ListAsync("admin", UserRole.Administrator, Ct)).Packages.Count);
+        var external = Assert.Single(await fixture.Service.ListAsync("admin", UserRole.Administrator, Ct, externalOnly: true));
+        Assert.Equal(2, external.Packages.Count);
+        Assert.Equal(6, external.Packages.Single(item => item.ReleasePackageId == fixture.Package.Id).TotalQuantity);
+        Assert.Equal(10, external.Packages.Single(item => item.ReleasePackageId == otherPackage.Id).TotalQuantity);
+        var externalState = ProductionTrackingRules.ExternalProduction(assigned.State)!;
+        Assert.All(externalState.Lots, lot => Assert.Equal("External", lot.Route));
+        Assert.Equal(6, Assert.Single(externalState.Lines).RequiredQuantity);
+        await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.ListAsync("admin", UserRole.Administrator, Ct, selfOnly: true, externalOnly: true));
         var self = assigned.State.Lots.Single(lot => lot.Route == "Self");
         await fixture.Service.UpdateAllocationAsync(fixture.Package.Id,
             new(self.Id, "External", 4, "外协厂", null, DateOnly.FromDateTime(DateTime.UtcNow.AddDays(3)), null, Guid.NewGuid(), assigned.RowVersion),

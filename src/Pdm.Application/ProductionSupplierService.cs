@@ -9,6 +9,8 @@ public sealed record ProductionSupplier(Guid Id, string Code, string Name, strin
 public sealed record ProductionSupplierCatalog(Guid CompanyId,
     IReadOnlyList<ProductionSupplierCategory> Categories, IReadOnlyList<ProductionSupplier> Suppliers,
     long RowVersion = 0);
+public sealed record ProductionSupplierChoice(Guid Id, string Code, string Name, IReadOnlyList<Guid> CategoryIds, bool IsActive);
+public sealed record ProductionSupplierChoices(Guid CompanyId, IReadOnlyList<ProductionSupplierCategory> Categories, IReadOnlyList<ProductionSupplierChoice> Suppliers);
 public sealed record SaveProductionSupplierCategory(string Name, bool IsActive, long ExpectedRowVersion);
 public sealed record SaveProductionSupplier(string Code, string Name, string FullName,
     IReadOnlyList<Guid> CategoryIds, bool IsActive, long ExpectedRowVersion,
@@ -23,19 +25,40 @@ public interface IProductionSupplierStore
 
 public sealed class ProductionSupplierService(IPdmRepository repository, IProductionSupplierStore store, TimeProvider clock)
 {
-    private async Task<Guid> RequireCompanyAsync(string actor, UserRole role, CancellationToken ct)
+    private async Task<Guid> RequireCompanyAsync(string actor, UserRole role, string permission, CancellationToken ct)
     {
-        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProductionAssign, ct))
-            throw new UnauthorizedAccessException("没有维护或选择生产供应商的权限。");
+        if (!await repository.HasUserPermissionAsync(actor, role, permission, ct))
+            throw new UnauthorizedAccessException(permission == PermissionCodes.ProductionSupplierManage ? "没有维护供应商库的权限，请联系管理员在系统设置中授权。"
+                : permission == PermissionCodes.ProductionSupplierView ? "没有查看供应商库的权限，请联系管理员在系统设置中授权。" : "没有选择外协供应商的权限。");
         return TenantContext.CompanyId ?? throw new PdmRuleException("请先选择所属公司。");
     }
 
     public async Task<ProductionSupplierCatalog> ReadAsync(string actor, UserRole role, CancellationToken ct) =>
-        await store.ReadAsync(await RequireCompanyAsync(actor, role, ct), ct);
+        await store.ReadAsync(await RequireCompanyAsync(actor, role, PermissionCodes.ProductionSupplierView, ct), ct);
+
+    public async Task<ProductionSupplierChoices> ChoicesAsync(string actor, UserRole role, CancellationToken ct)
+    {
+        var catalog = await store.ReadAsync(await RequireCompanyAsync(actor, role, PermissionCodes.ProductionAssign, ct), ct);
+        var categories = catalog.Categories.Where(item => item.IsActive).ToArray();
+        var ids = categories.Select(item => item.Id).ToHashSet();
+        return new(catalog.CompanyId, categories, catalog.Suppliers.Where(item => item.IsActive && item.CategoryIds.Any(ids.Contains))
+            .Select(item => new ProductionSupplierChoice(item.Id, item.Code, item.Name, item.CategoryIds.Where(ids.Contains).ToArray(), true)).ToArray());
+    }
+
+    internal async Task<ProductionSupplierChoices> TrackingChoicesAsync(ProductionTrackingState state, CancellationToken ct)
+    {
+        var catalog = await store.ReadAsync(state.CompanyId, ct);
+        var lots = state.Lots.Where(item => item.Route == "External").ToArray();
+        var suppliers = catalog.Suppliers.Where(item => lots.Any(lot => lot.SupplierId.HasValue
+            ? lot.SupplierId == item.Id : item.Name.Equals(lot.Supplier, StringComparison.OrdinalIgnoreCase))).ToArray();
+        var categoryIds = suppliers.SelectMany(item => item.CategoryIds).ToHashSet();
+        return new(catalog.CompanyId, catalog.Categories.Where(item => categoryIds.Contains(item.Id)).ToArray(),
+            suppliers.Select(item => new ProductionSupplierChoice(item.Id, item.Code, item.Name, item.CategoryIds, item.IsActive)).ToArray());
+    }
 
     public async Task<ProductionSupplier> ResolveAsync(Guid? id, string? name, string actor, UserRole role, CancellationToken ct)
     {
-        var catalog = await ReadAsync(actor, role, ct);
+        var catalog = await store.ReadAsync(await RequireCompanyAsync(actor, role, PermissionCodes.ProductionAssign, ct), ct);
         var supplier = catalog.Suppliers.FirstOrDefault(item => item.IsActive && (id.HasValue
             ? item.Id == id.Value : item.Name.Equals(name?.Trim(), StringComparison.OrdinalIgnoreCase)));
         if (supplier is null || !supplier.CategoryIds.Any(categoryId =>
@@ -47,7 +70,7 @@ public sealed class ProductionSupplierService(IPdmRepository repository, IProduc
     public async Task<ProductionSupplierCatalog> SaveCategoryAsync(Guid id, SaveProductionSupplierCategory input,
         string actor, UserRole role, CancellationToken ct)
     {
-        var catalog = await ReadAsync(actor, role, ct);
+        var catalog = await store.ReadAsync(await RequireCompanyAsync(actor, role, PermissionCodes.ProductionSupplierManage, ct), ct);
         CheckVersion(catalog, input.ExpectedRowVersion);
         var name = Text(input.Name, 80, "分类名称", true);
         if (id == Guid.Empty) throw new PdmRuleException("分类编号无效，请重新打开表单。");
@@ -63,7 +86,7 @@ public sealed class ProductionSupplierService(IPdmRepository repository, IProduc
     public async Task<ProductionSupplierCatalog> SaveSupplierAsync(Guid id, SaveProductionSupplier input,
         string actor, UserRole role, CancellationToken ct)
     {
-        var catalog = await ReadAsync(actor, role, ct);
+        var catalog = await store.ReadAsync(await RequireCompanyAsync(actor, role, PermissionCodes.ProductionSupplierManage, ct), ct);
         CheckVersion(catalog, input.ExpectedRowVersion);
         if (id == Guid.Empty) throw new PdmRuleException("供应商编号无效，请重新打开表单。");
         var code = Text(input.Code, 50, "供应商编码", true);

@@ -163,6 +163,8 @@ builder.Services.AddScoped<MySqlMigrationRunner>();
 builder.Services.AddSingleton<IPasswordService, Pbkdf2PasswordService>();
 builder.Services.AddSingleton<ITokenIssuer, JwtTokenIssuer>();
 builder.Services.AddSingleton<IPersistentSessionTokenService, PersistentSessionTokenService>();
+builder.Services.AddSingleton<LoginSecurityStore>();
+builder.Services.AddSingleton<LoginSecurityService>();
 builder.Services.AddScoped<IFileStorage, LocalFileStorage>();
 builder.Services.AddScoped<IMaterialAttachmentStorage, LocalMaterialAttachmentStorage>();
 builder.Services.AddScoped<IProgramTemplateStorage, LocalProgramTemplateStorage>();
@@ -175,6 +177,8 @@ builder.Services.AddScoped<IPdfReleaseStampProcessor, PdfReleaseStampProcessor>(
 builder.Services.AddScoped<IServerPreviewConverter>(provider => new SolidWorksServerPreviewConverter(
     provider.GetRequiredService<IOptions<PdmPreviewWorkerOptions>>(),
     provider.GetRequiredService<IPdmRepository>(), pdfReleaseStamp: provider.GetRequiredService<IPdfReleaseStampProcessor>()));
+builder.Services.AddScoped<IAssemblyPreviewConverter>(provider => new SolidWorksServerPreviewConverter(
+    provider.GetRequiredService<IOptions<PdmPreviewWorkerOptions>>(), provider.GetRequiredService<IPdmRepository>()));
 builder.Services.AddScoped<IReleasePackagePublisher, AtomicReleasePackagePublisher>();
 builder.Services.AddSingleton<ICrmCredentialProtector, DataProtectionCrmCredentialProtector>();
 builder.Services.AddSingleton<IU9SecretProtector, DataProtectionU9SecretProtector>();
@@ -194,6 +198,7 @@ builder.Services.AddScoped<CrmCustomerIntegrationService>();
 builder.Services.AddScoped<MaterialService>();
 builder.Services.AddScoped<MaterialAttachmentService>();
 builder.Services.AddScoped<StandardLibraryService>();
+builder.Services.AddScoped<StandardLibraryImportService>();
 builder.Services.AddScoped<StandardStructureService>();
 builder.Services.AddSingleton<BrowserCadArchiveQueue>();
 builder.Services.AddSingleton<IBrowserCadReader, FileBrowserCadReader>();
@@ -227,6 +232,8 @@ builder.Services.AddScoped<ProjectContactInformationService>();
 builder.Services.AddScoped<IProjectApplicationRepository>(provider => (IProjectApplicationRepository)provider.GetRequiredService<IPdmRepository>());
 builder.Services.AddScoped<ProjectApplicationService>();
 builder.Services.AddScoped<WorkHoursService>();
+builder.Services.AddSingleton<IWorkHoursCalendar, WorkHoursCalendar>();
+builder.Services.AddHostedService<WorkHoursReminderHostedService>();
 builder.Services.AddScoped<ProjectOplService>();
 builder.Services.AddSingleton<ProjectOplViewState>();
 builder.Services.Configure<DingTalkOplOptions>(builder.Configuration.GetSection("DingTalkOpl"));
@@ -289,10 +296,12 @@ builder.Services.AddHostedService<ProjectContentResetCleanupService>();
 builder.Services.AddHostedService<ArchiveBatchRecoveryService>();
 builder.Services.AddHostedService<ProjectPlanningReminderHostedService>();
 builder.Services.AddHostedService<DrawingReviewWritebackTimeoutHostedService>();
+builder.Services.AddHostedService<EditCollaborationHostedService>();
 
 builder.Services.AddCors(options => options.AddPolicy("PdmClients", policy => policy
     .WithOrigins("http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:5175", "http://localhost:5175", "https://appassets.pdm.local")
     .AllowAnyHeader()
+    .WithExposedHeaders("X-UPLM-Session-Final")
     .AllowAnyMethod()));
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -316,17 +325,28 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             OnTokenValidated = async context =>
             {
                 var versionText = context.Principal?.FindFirst("token_version")?.Value;
-                if (versionText is null) return;
-
                 var username = context.Principal?.Identity?.Name;
                 var repository = context.HttpContext.RequestServices.GetRequiredService<IPdmRepository>();
                 var account = string.IsNullOrWhiteSpace(username)
                     ? null
                     : await repository.FindUserAsync(username, context.HttpContext.RequestAborted);
-                if (account is null || !account.IsActive || !long.TryParse(versionText, out var version) || version != account.TokenVersion)
+                if (versionText is not null && (account is null || !account.IsActive || !long.TryParse(versionText, out var version) || version != account.TokenVersion))
                 {
                     context.Fail("登录状态已失效，请重新登录。");
+                    return;
                 }
+                var security = context.HttpContext.RequestServices.GetRequiredService<LoginSecurityService>();
+                var error = await security.ValidateAsync(username ?? "", context.Principal?.FindFirst("sid")?.Value,
+                    context.HttpContext.Request, context.HttpContext.RequestAborted);
+                if (error is not null) { context.HttpContext.Items["LoginSecurityError"] = error; context.Fail(error); }
+            },
+            OnChallenge = async context =>
+            {
+                if (context.HttpContext.Items["LoginSecurityError"] is not string error) return;
+                context.HandleResponse();
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                context.Response.Headers["X-UPLM-Session-Final"] = "true";
+                await context.Response.WriteAsJsonAsync(new { message = error });
             }
         };
     });
@@ -334,9 +354,16 @@ builder.Services.AddAuthorization();
 builder.Services.AddScoped<CompanySessionService>();
 builder.Services.AddProblemDetails();
 builder.Services.AddClientLogs(builder.Configuration);
+builder.Services.AddSingleton<UserTablePreferenceStore>();
 builder.Services.AddScoped<UserTodoService>();
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.MimeTypes = Microsoft.AspNetCore.ResponseCompression.ResponseCompressionDefaults.MimeTypes.Concat(["application/wasm"]);
+});
 
 var app = builder.Build();
+app.UseResponseCompression();
 // 固定内存模式的启用时点；不能等首次打开生产工作台才开始计算新发布范围。
 if (!string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgnoreCase))
     _ = app.Services.GetRequiredService<IProductionTrackingStore>();
@@ -409,6 +436,9 @@ app.UseAuthorization();
 app.UseMiddleware<FunctionPermissionMiddleware>();
 app.UseRateLimiter();
 app.MapClientLogs();
+app.MapUserTablePreferences();
+app.MapLoginSecurity();
+app.MapDocumentOperationRules();
 app.MapPdmEndpoints();
 app.MapPdmMaterialEndpoints();
 app.MapPdmInventoryEndpoints();

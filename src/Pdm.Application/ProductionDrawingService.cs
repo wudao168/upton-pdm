@@ -40,6 +40,7 @@ public sealed record ProductionDrawingItem(
     public IReadOnlyList<ProductionDrawingBomQuantity> BomQuantities { get; init; } = [];
     public IReadOnlyList<ProductionDrawingModelFile> ModelFiles { get; init; } = [];
     public string PublishedBy { get; init; } = string.Empty;
+    public string QrContent { get; init; } = string.Empty;
     public string? Division { get; init; }
     public string? ProjectManager { get; init; }
 }
@@ -77,7 +78,7 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                 .Where(item => item.SourceDocumentId.HasValue)
                 .GroupBy(item => item.SourceDocumentId!.Value)
                 .ToDictionary(group => group.Key, group => group.OrderBy(item => item.Sequence).ToArray()));
-            var allVersions = await repository.ListProjectDocumentVersionsAsync(project.Id, cancellationToken);
+            var allVersions = await repository.ListProductionDrawingVersionsAsync(project.Id, cancellationToken);
             var versionsById = allVersions.ToDictionary(version => version.Id);
             var uses = allVersions
                 .Where(version => version.Status == DocumentVersionStatus.Released
@@ -140,6 +141,9 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                                     modelDocument.DrawingNumber, modelDocument.Name, modelVersion?.Revision.Display ?? "—", stepReady);
                             }).ToArray()
                         : [];
+                    var qrSource = source ?? version;
+                    var qrModels = ReleaseBoundSourceReader.ModelDocumentIds(qrSource.ReferenceSnapshot).ToHashSet();
+                    if (qrModels.Count == 0 && relatedModels.TryGetValue(document.Id, out var qrRelatedModels)) qrModels.UnionWith(qrRelatedModels);
                     results.Add(new ProductionDrawingItem(
                         project.Id, project.Code, project.Name, document.Id, version.Id, package.Id, package.Number,
                         document.DrawingNumber, Model(version.PropertySnapshot, document), document.Name, version.Revision.Display,
@@ -152,6 +156,7 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                         legacy,
                         version.Id == current.Version.Id ? null : current.Version.CreatedAt)
                     {
+                        QrContent = PdfReleaseIdentity.Display(ReleaseBoundSourceReader.DrawingModel(package, qrSource, qrModels, document.DrawingNumber), version.Revision.Display),
                         BomItems = bomItems,
                         BomQuantities = packageQuantities[package.Id].Where(quantity =>
                             bomItems.Any(item => quantity.SourceBomItemIds.Contains(item.Id))).ToArray(),

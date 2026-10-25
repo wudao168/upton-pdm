@@ -4,12 +4,13 @@ using System.Reflection;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-internal static class Program
+internal static partial class Program
 {
     const BindingFlags Flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
     // Desktop assembly, readable drawing, display-data failure, repaired drawing, readable model.
     [STAThread] static int Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--assembly") return CheckAssemblyPreview(args);
         var dll = Path.GetFullPath(args[0]);
         AppDomain.CurrentDomain.AssemblyResolve += (_, e) =>
         {

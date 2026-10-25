@@ -11,6 +11,70 @@ using System.Web.Script.Serialization;
 
 internal static partial class Program
 {
+    private static void TestRootRevisionDisplay()
+    {
+        var capture = Type("PdmApiClient").GetMethod("CaptureArchiveSnapshot", Members);
+        foreach (var mode in new[] { "A*", "W2*", "A-W1*", "bound-modified", "opened-modified", "wrong-binding", "unknown" })
+        {
+            var root = Node("REVISION-" + mode + ".SLDPRT", Guid.NewGuid());
+            var path = (string)Get(root, "FullPath");
+            // Windows filenames cannot contain the UI's modification star.
+            path = path.Replace("*", "-star"); Set(root, "FullPath", path); Set(root, "FileName", System.IO.Path.GetFileName(path));
+            System.IO.File.WriteAllText(path, "saved model bytes");
+            Set(root, "Revision", mode.EndsWith("*") ? mode : "本地修改");
+            var id = (Guid)Get(root, "DocumentId"); var version = Guid.NewGuid();
+            if (mode == "bound-modified" || mode == "wrong-binding")
+                Assert((bool)Type("PdmDocumentIdentityStore").GetMethod("TryWriteControlledVersion", Members).Invoke(null,
+                    new object[] { path, mode == "wrong-binding" ? Guid.NewGuid() : id, Guid.NewGuid(), version, "A", new string('A', 64), 17L }), "fixture binding missing");
+            if (mode == "opened-modified") { Set(root, "OpenedVersionId", version); Set(root, "OpenedRevision", "A"); }
+            var failed = false;
+            try
+            {
+                var snapshot = capture.Invoke(null, new object[] { root, new[] { path } });
+                var frozen = (Dictionary<string, object>)Call(snapshot, "CreateRoot");
+                Assert(frozen["revision"] != null, "recorded revision disappeared");
+                var revision = (Dictionary<string, object>)frozen["revision"];
+                Assert(Convert.ToInt32(revision["workIteration"]) == (mode == "W2*" ? 2 : mode == "A-W1*" ? 1 : 0)
+                    && Convert.ToString(revision["baseRevision"]) == (mode == "W2*" ? "" : "A"), "recorded root revision was substituted");
+                Assert((string)Get(root, "Revision") == (mode.EndsWith("*") ? mode : "本地修改"), "snapshot capture rewrote UI state");
+            }
+            catch (TargetInvocationException error) when (error.InnerException is InvalidOperationException) { failed = true; }
+            Assert(failed == (mode == "wrong-binding" || mode == "unknown"), "incorrect root revision fallback: " + mode);
+        }
+    }
+
+    private static void TestPendingNativeInventory()
+    {
+        var root = Node("PENDING-ROOT.SLDASM", Guid.NewGuid(), 0);
+        var unknown = Node("UNREAD-OCCURRENCE.SLDASM", null, 0);
+        var part = Node("KNOWN-PART.SLDPRT", Guid.NewGuid());
+        foreach (var node in new[] { root, unknown, part })
+        {
+            Set(node, "NativeFileScopeVerified", true);
+            Set(node, "Revision", "W1"); Set(node, "CurrentRevision", "W1");
+        }
+        Children(root).Add(unknown); Children(unknown).Add(part);
+        var paths = new HashSet<string>(new[] { (string)Get(root, "FullPath"), (string)Get(part, "FullPath") }, StringComparer.OrdinalIgnoreCase);
+        foreach (var path in paths) System.IO.File.WriteAllText(path, "native bytes");
+        Set(root, "NativeFileScopePaths", paths);
+        var capture = Type("PdmApiClient").GetMethod("CaptureArchiveSnapshot", Members);
+        var snapshot = capture.Invoke(null, new object[] { root, paths.ToArray() });
+        Assert((bool)Get(snapshot, "HasPendingStructureIndex"), "incomplete occurrence was reported complete");
+        var frozen = (Dictionary<string, object>)Call(snapshot, "CreateRoot");
+        var children = ((object[])frozen["children"]).Cast<Dictionary<string, object>>().ToArray();
+        Assert(children.Any(child => (string)child["documentId"] == Get(part, "DocumentId").ToString()), "known native child was dropped with unread occurrence");
+        Assert(!children.Any(child => (string)child["fileName"] == "UNREAD-OCCURRENCE.SLDASM"), "unknown index was guessed");
+        var unregistered = Node("UNREGISTERED.SLDPRT", null);
+        Set(unregistered, "NativeFileScopeVerified", true);
+        var unregisteredPath = (string)Get(unregistered, "FullPath");
+        System.IO.File.WriteAllText(unregisteredPath, "real unregistered bytes"); paths.Add(unregisteredPath);
+        Children(root).Add(unregistered);
+        var rejected = false;
+        try { capture.Invoke(null, new object[] { root, paths.ToArray() }); }
+        catch (TargetInvocationException error) when (error.InnerException is InvalidOperationException) { rejected = true; }
+        Assert(rejected, "actual native bytes without vault identity silently disappeared");
+    }
+
     private static void TestFrozenBatchReferences()
     {
         foreach (var changedFiles in new[] { 4, 7 })
@@ -41,18 +105,21 @@ internal static partial class Program
                 plugin.GetType().GetField("apiClient", Members).SetValue(plugin, client);
                 var sequential = Type("PdmApiClient").GetMethod("PrepareArchiveSnapshotAsync", Members);
                 var scope = roots.Select(node => (string)Get(node, "FullPath")).ToArray();
-                var reproduced = false;
-                try
+                var missingVersionDeferred = false;
                 {
                     foreach (var selected in roots)
                     {
                         var args = new object[] { selected, scope, null, CancellationToken.None };
                         if (sequential.GetParameters().Length == 5) args = args.Concat(new object[] { null }).ToArray();
-                        ((Task)sequential.Invoke(client, args)).GetAwaiter().GetResult();
+                        var task = (Task)sequential.Invoke(client, args);
+                        task.GetAwaiter().GetResult();
+                        var snapshot = task.GetType().GetProperty("Result").GetValue(task);
+                        var payload = new JavaScriptSerializer().Serialize(Call(snapshot, "CreateRoot"));
+                        if (payload.Contains("\"revision\":null")) missingVersionDeferred = true;
                     }
                 }
-                catch (InvalidOperationException) { reproduced = true; }
-                Assert(reproduced && handler.Reads == 1, "legacy per-file capture did not reproduce reference-version loss");
+                Assert(missingVersionDeferred && handler.Reads == roots.Count && handler.Writes == 0,
+                    "missing local reference metadata was not deferred to authoritative server preflight");
                 foreach (var reference in references) Set(reference, "CurrentRevision", "W1");
                 handler.Reads = 0;
                 var preparedType = Type("PdmAddin").GetNestedType("PreparedArchiveFile", Members);

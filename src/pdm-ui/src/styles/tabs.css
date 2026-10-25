@@ -92,12 +92,23 @@
   box-shadow: none !important;
   color: var(--pdm-muted) !important;
   font-family: var(--pdm-font-ui);
-  font-size: var(--pdm-font-size-body) !important;
+  font-size: 13px !important;
   font-weight: 700 !important;
   line-height: 1.4;
   text-decoration: none;
   white-space: nowrap;
   transition: background-color 140ms ease, box-shadow 140ms ease, color 140ms ease;
+}
+
+:root body [role="tab"],
+:root body :is(.production-scan-settings__tabs, .wh-report-modes) > button {
+  font-size: 13px !important;
+}
+
+:root body [role="tab"] *,
+:root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item) *,
+:root body .pdm-tabs .el-radio-button__inner * {
+  font-size: inherit !important;
 }
 
 :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):hover:not(:disabled):not(.is-disabled):not(:is(.is-active, [aria-selected="true"], [aria-pressed="true"], [aria-current="page"])),

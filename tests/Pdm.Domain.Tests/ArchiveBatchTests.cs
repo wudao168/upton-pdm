@@ -6,6 +6,38 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class ArchiveBatchTests
 {
+    [Fact]
+    public async Task ChangedPartAndItsDrawingBindTheSameNewVersionWithoutAdvancingParent()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new("LINKED-" + Guid.NewGuid().ToString("N"), "图模联动", "admin", "vault", "release"), "admin", default);
+        var session = Guid.NewGuid();
+        var part = await Register(repository, project, "PART", DocumentKind.Part, session);
+        var parent = await Register(repository, project, "ROOT", DocumentKind.Assembly, session);
+        var drawing = await repository.RegisterDocumentAsync(new(project.Id, "DRAWING", "不同名工程图", "DRAWING.SLDDRW", DocumentKind.Drawing, RelatedModelDocumentId: part.Id), "admin", default);
+        drawing = await repository.CheckoutAsync(drawing.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+        await repository.CheckInBatchVersionsAsync(Guid.NewGuid(), "initial", "admin", session,
+            [new(part.Id, Commit(project, part, Node(part), 'A')),
+             new(parent.Id, Commit(project, parent, Node(parent) with { Children = [Node(part)] }, 'B', true)),
+             new(drawing.Id, Commit(project, drawing, Node(drawing) with { Children = [Node(part)] }, 'C'))], default);
+        var originalParent = Assert.Single(await repository.ListDocumentVersionsAsync(parent.Id, default));
+        var partBase = Assert.Single(await repository.ListDocumentVersionsAsync(part.Id, default));
+        var drawingBase = Assert.Single(await repository.ListDocumentVersionsAsync(drawing.Id, default));
+        part = await repository.CheckoutAsync(part.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+        drawing = await repository.CheckoutAsync(drawing.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+        var receipt = await repository.CheckInBatchVersionsAsync(Guid.NewGuid(), "update", "admin", session,
+            [new(part.Id, Commit(project, part, Node(part), 'D') with { ExpectedVersionId = partBase.Id }),
+             new(drawing.Id, Commit(project, drawing, Node(drawing) with { Children = [Node(part)] }, 'E') with { ExpectedVersionId = drawingBase.Id })], default);
+        Assert.All(receipt.Results, result => Assert.True(result.VersionCreated));
+        var partVersion = (await repository.ListDocumentVersionsAsync(part.Id, default)).First();
+        var drawingVersion = (await repository.ListDocumentVersionsAsync(drawing.Id, default)).First();
+        Assert.Equal(partVersion.Revision, Assert.Single(drawingVersion.ReferenceSnapshot.Children).Revision);
+        Assert.Equal("W2", partVersion.Revision.Display);
+        Assert.Equal("W2", drawingVersion.Revision.Display);
+        Assert.Equal(originalParent.Id, Assert.Single(await repository.ListDocumentVersionsAsync(parent.Id, default)).Id);
+        Assert.Single(await repository.ListDocumentRelationsAsync(project.Id, default));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

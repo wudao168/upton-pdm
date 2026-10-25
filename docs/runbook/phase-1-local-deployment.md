@@ -121,7 +121,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\deploy\Register-SolidWorksAddin.p
 
 ## BOM、审批与生产发包
 
-1. Windows 客户端的机械 BOM 读取结构快照；电气 BOM 可手工维护或导入标准 XLSX，并可导出。
+1. Windows 客户端的机械 BOM 读取结构快照；电气件BOM 可手工维护或导入标准 XLSX，并可导出。
 2. 创建发布包后依次提交工艺审核和批准。退回后修改并重新提交，历史审批记录保留。
 3. 签入阶段只保存 SolidWorks 源文件。最终批准成功后，API 服务器上的预览转换程序才打开批准快照中的源文件，零件/装配生成 STEP、工程图生成 PDF，并把它们与两类 BOM、清单、审批记录和 SHA-256 文件原子投放到项目 `ReleaseLocation`。历史 DWG 文件保留，但新发布不再生成、校验或引用 DWG。
 4. 任一文件准备、哈希、审批或投放失败时，发布包不进入已发布状态，生产目录不会出现半成品。
@@ -168,6 +168,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy\Test-Phase1Api.
 ```
 
 SolidWorks 真实验收必须关闭生产编辑会话，仅对指定装配执行只读打开；当前结果见 `docs\acceptance\phase-1-checklist.md`。
+
+原生验收不得临时改写或删除 `HKCU\Software\SolidWorks\AddInsStartup`。需要停用插件干预时，只对已核对 PID、由验收工具独立创建的会话调用 `UnloadAddIn`，不按旧注册表快照恢复用户偏好。启动加载回归入口为 `tools/Pdm.AddinStartupAcceptance`：连续三次实际启动、取得自动加载的 UPLM 对象，并核对启动项始终为 `1`；首轮同时验证会话内卸载和重载不影响启动设置。启动项核对必须在真实交互用户下执行，受限测试账号的 HKCU 不能作为本机用户配置的证据。
 
 ## 文件存放地点
 

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -8,7 +8,7 @@ using Upton.Pdm.LocalSettings;
 
 namespace Upton.Pdm.SolidWorks;
 
-internal sealed class ControlledWorkspaceManager
+internal sealed partial class ControlledWorkspaceManager
 {
     private readonly PdmApiClient apiClient;
     private readonly string workspaceRoot;
@@ -16,6 +16,7 @@ internal sealed class ControlledWorkspaceManager
     public ControlledWorkspaceManager(PdmApiClient apiClient)
         : this(apiClient, WorkspaceSettingsStore.GetWorkspaceRoot())
     {
+        machineFallbackEnabled = true;
     }
 
     internal ControlledWorkspaceManager(PdmApiClient apiClient, string workspaceRoot)
@@ -29,12 +30,23 @@ internal sealed class ControlledWorkspaceManager
         bool historicalPreview,
         CancellationToken cancellationToken)
     {
+        try { return await PrepareReadOnlyCoreAsync(manifest, historicalPreview, cancellationToken).ConfigureAwait(false); }
+        catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
+        {
+            PluginDiagnosticLog.Record("PLM版本优先", "旧只读缓存不可用，改为重新取回；旧文件不拦截打开：" + error);
+            return await DownloadFreshServerCopyAsync(manifest, historicalPreview, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<string> PrepareReadOnlyCoreAsync(
+        ControlledOpenManifestDto manifest, bool historicalPreview, CancellationToken cancellationToken)
+    {
         if (manifest?.Files == null || manifest.Files.Count == 0)
         {
             throw new InvalidDataException("PLM返回的打开清单为空。");
         }
 
-        var target = ReadOnlyDirectory(manifest, historicalPreview);
+        var target = SelectReadOnlyTarget(ReadOnlyDirectory(manifest, historicalPreview), manifest);
         if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
         {
             SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
@@ -49,10 +61,7 @@ internal sealed class ControlledWorkspaceManager
         Directory.CreateDirectory(staging);
         try
         {
-            foreach (var file in manifest.Files)
-            {
-                await apiClient.DownloadControlledOpenFileAsync(file, staging, cancellationToken).ConfigureAwait(false);
-            }
+            await DownloadManifestFilesAsync(manifest, staging, cancellationToken).ConfigureAwait(false);
             if (!ValidateWorkspace(staging, manifest.Files))
             {
                 throw new InvalidDataException("受控工作区整体校验失败，未打开图档。");
@@ -110,41 +119,8 @@ internal sealed class ControlledWorkspaceManager
         return ResolveRootPath(target, manifest);
     }
 
-    public async Task<string> PrepareHistoricalDerivedCopyAsync(
-        ControlledOpenManifestDto manifest,
-        CancellationToken cancellationToken)
-    {
-        var readOnlyRootPath = await PrepareReadOnlyAsync(manifest, true, cancellationToken).ConfigureAwait(false);
-        var source = Path.GetDirectoryName(readOnlyRootPath) ?? throw new InvalidDataException("历史只读工作区路径无效。");
-        var target = HistoricalDerivedDirectory(manifest);
-        if (Directory.Exists(target))
-        {
-            if (!ValidateWorkspace(target, manifest.Files))
-            {
-                throw new InvalidDataException(
-                    "该历史版本的派生编辑工作区已存在变化或不完整，已停止覆盖。请先提交、备份或清理该派生工作区后重试。");
-            }
-
-            SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
-            return ResolveRootPath(target, manifest);
-        }
-
-        try
-        {
-            CopyDirectory(source, target);
-            if (!ValidateWorkspace(target, manifest.Files))
-            {
-                throw new InvalidDataException("历史版本派生工作区复制校验失败。");
-            }
-            SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
-            return ResolveRootPath(target, manifest);
-        }
-        catch
-        {
-            if (Directory.Exists(target)) DeleteDirectory(target);
-            throw;
-        }
-    }
+    public Task<string> PrepareHistoricalDerivedCopyAsync(ControlledOpenManifestDto manifest, CancellationToken cancellationToken)
+        => PrepareServerWorkingCopyAsync(manifest, Array.Empty<Guid>(), true, cancellationToken);
 
     public string ApplyHistoricalDerivedPermissions(
         ControlledOpenManifestDto manifest,
@@ -243,6 +219,27 @@ internal sealed class ControlledWorkspaceManager
     public string GetReadOnlyDirectory(ControlledOpenManifestDto manifest, bool historicalPreview = false) =>
         ReadOnlyDirectory(manifest, historicalPreview);
 
+    internal static string SelectReadOnlyTarget(string preferred, ControlledOpenManifestDto manifest)
+    {
+        bool Valid(string path)
+        {
+            try { return ValidateWorkspace(path, manifest.Files); }
+            catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
+            { PluginDiagnosticLog.Record("只读副本恢复", "旧副本当前不可校验，保留后另行取回：" + path + "；" + error); return false; }
+        }
+        if (!Directory.Exists(preferred) || Valid(preferred)) return preferred;
+        // F11/I10: retain a changed cache, including new drawings, and fetch a fresh
+        // immutable copy. A broken old cache must not prevent opening server content.
+        var parent = Path.GetDirectoryName(preferred);
+        var prefix = Path.GetFileName(preferred) + ".isolated-";
+        foreach (var candidate in Directory.EnumerateDirectories(parent, prefix + "*"))
+            if (Valid(candidate)) return candidate;
+        var target = Path.Combine(parent, prefix + manifest.Id.ToString("N"));
+        if (Directory.Exists(target)) target += "-" + Guid.NewGuid().ToString("N");
+        PluginDiagnosticLog.Record("只读副本恢复", "原目录及本地内容已保留，另行取回服务器副本：" + target);
+        return target;
+    }
+
     private string SnapshotRoot(ControlledOpenManifestDto manifest)
     {
         return Path.Combine(
@@ -267,6 +264,7 @@ internal sealed class ControlledWorkspaceManager
 
     private string WorkingDirectory(ControlledOpenManifestDto manifest)
     {
+        if (serverWorkingDirectories.TryGetValue(manifest.RootDocumentId, out var prepared)) return prepared;
         var project = ProjectViewDirectory(workspaceRoot, manifest.ProjectCode);
         var legacyRoot = Path.Combine(project, manifest.RootRelativePath ?? "");
         if (PdmDocumentIdentityStore.TryReadLocalMetadata(legacyRoot, out var metadata)
@@ -275,7 +273,7 @@ internal sealed class ControlledWorkspaceManager
     }
 
     private string HistoricalDerivedDirectory(ControlledOpenManifestDto manifest) =>
-        Path.Combine(
+        serverDerivedDirectories.TryGetValue(manifest.RootDocumentId, out var prepared) ? prepared : Path.Combine(
             workspaceRoot,
             ".uplm",
             "Derived",
@@ -364,7 +362,7 @@ internal sealed class ControlledWorkspaceManager
             var path = ManifestPath(directory, file);
             var attributes = File.GetAttributes(path) | FileAttributes.ReadOnly;
             if (editableIds.Contains(file.DocumentId)) attributes &= ~FileAttributes.ReadOnly;
-            File.SetAttributes(path, attributes);
+            if (File.GetAttributes(path) != attributes) File.SetAttributes(path, attributes);
         }
     }
 
@@ -541,7 +539,7 @@ internal sealed class ControlledWorkspaceManager
             return;
         }
 
-        var temporary = string.Concat(target, ".pdm-update-", Guid.NewGuid().ToString("N"));
+        var temporary = Path.Combine(Path.GetDirectoryName(target), ".pdm-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
             using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))

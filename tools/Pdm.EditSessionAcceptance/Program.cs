@@ -11,7 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 
-internal static class Program
+internal static partial class Program
 {
     const BindingFlags Flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
     static Assembly assembly;
@@ -23,7 +23,36 @@ internal static class Program
         assembly = Assembly.LoadFrom(Path.GetFullPath(args[0]));
         try
         {
+            if (args.Length > 1 && args[1] == "--edit-collaboration")
+            {
+                EditCollaborationSafetyScenario();
+                EditCollaborationUiScenario();
+                return 0;
+            }
+            if (args.Length > 1 && args[1] == "--plm-backup-failure")
+            {
+                PlmBackupFailureScenario();
+                return 0;
+            }
+            if (args.Length > 1 && args[1] == "--plm-authority")
+            {
+                PlmAuthorityScenario().GetAwaiter().GetResult();
+                return 0;
+            }
+            if (args.Length > 1 && args[1] == "--maintenance-regression")
+            {
+                DraftRelocatedBaselineScenario();
+                DiscardRestoreScenario().GetAwaiter().GetResult();
+                DiscardRestoreScenario(true).GetAwaiter().GetResult();
+                StandardPreviewFailureScenario();
+                return 0;
+            }
             if (args.Length > 1) { SourceWriteLock(args[1] == "--expect-file-lock"); return 0; }
+            PlmBackupFailureScenario();
+            DraftRelocatedBaselineScenario();
+            DiscardRestoreScenario().GetAwaiter().GetResult();
+            DiscardRestoreScenario(true).GetAwaiter().GetResult();
+            StandardPreviewFailureScenario();
             Scenario(false, false).GetAwaiter().GetResult();
             Scenario(true, false).GetAwaiter().GetResult();
             Scenario(true, true).GetAwaiter().GetResult();
@@ -121,6 +150,7 @@ internal static class Program
         var appType = plugin.GetType().GetField("application", Flags).FieldType;
         SetField(plugin, "application", new Proxy(appType, call =>
         {
+            if (call.MethodName == "get_StartupProcessCompleted") return true;
             if (call.MethodName == "GetRunningCommandInfo")
                 return new ReturnMessage(null, new object[] { 0, "", false }, 3, call.LogicalCallContext, call);
             if (call.MethodName == "GetDocuments") return Array.Empty<object>();
@@ -302,6 +332,7 @@ internal static class Program
         var documentReads = 0;
         SetField(plugin, "application", new Proxy(appType, call =>
         {
+            if (call.MethodName == "get_StartupProcessCompleted") return true;
             if (call.MethodName == "GetRunningCommandInfo")
             {
                 if (commandQueryFails) throw new InvalidOperationException("模拟命令状态暂不可读");
@@ -312,12 +343,11 @@ internal static class Program
             throw new Exception("Unexpected application call: " + call.MethodName);
         }).GetTransparentProxy());
         SetField(plugin, "pendingTreeRefresh", 1);
-        SetField(plugin, "pendingDrawingQrGraphicsRefresh", 1);
         Invoke(plugin, "OnSolidWorksIdle");
         Invoke(plugin, "RefreshTree", false, false);
         Require(((ICollection)Invoke(plugin, "PrepareClosedEdits")).Count == 0, "Command-time maintenance ran");
         Require(documentReads == 0 && saves == 0 && !(bool)Get(entry, "ObservedOpen"), "Insertion triggered native reads/save/close");
-        Require((int)Field(plugin, "pendingTreeRefresh") == 1 && (int)Field(plugin, "pendingDrawingQrGraphicsRefresh") == 1,
+        Require((int)Field(plugin, "pendingTreeRefresh") == 1,
             "Deferred work was lost");
         commandActive = false; commandQueryFails = true;
         Invoke(plugin, "OnSolidWorksIdle");

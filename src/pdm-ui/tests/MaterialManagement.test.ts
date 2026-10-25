@@ -29,6 +29,8 @@ const api = vi.hoisted(() => ({
   deleteMaterial: vi.fn(),
   listMaterialAttachments: vi.fn(),
   uploadMaterialAttachment: vi.fn(),
+  materialAttachmentObjectUrl: vi.fn(),
+  setMaterialCover: vi.fn(),
   downloadMaterialAttachment: vi.fn(),
   getMaterialRemovalReadiness: vi.fn(),
   approveMaterial: vi.fn(),
@@ -1094,7 +1096,7 @@ describe('MaterialManagement', () => {
       },
       {
         id: 'rejected-1', applicationType: 'StandardBomItem' as const, bomItemId: 'rejected-item', bomHeaderKind: 'Standard' as const,
-        projectId: 'project-2', projectCode: 'P700004', projectName: '氦检设备', categoryCode: '0201', applicationName: '已退回电气BOM',
+        projectId: 'project-2', projectCode: 'P700004', projectName: '氦检设备', categoryCode: '0201', applicationName: '已退回电气件BOM',
         status: 'Rejected' as const, workflowState: 'Rejected' as const, requestedBy: 'developer', requestedAt: '2026-08-26T11:01:00Z', decidedBy: 'standardizer', rowVersion: 3,
       },
     ]
@@ -1245,7 +1247,7 @@ describe('MaterialManagement', () => {
       { id: 'master', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'Master' as const, categoryCode: '0302', applicationName: 'P700002 项目主BOM', rowVersion: 1 },
       { id: 'standard', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'Standard' as const, categoryCode: '0201', applicationName: 'P700002 标准件BOM', rowVersion: 2 },
       { id: 'non-standard', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'NonStandard' as const, categoryCode: '0201', applicationName: 'P700002 非标件BOM', rowVersion: 3 },
-      { id: 'electrical', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'Electrical' as const, categoryCode: '0201', applicationName: 'P700002 电气BOM', rowVersion: 4 },
+      { id: 'electrical', applicationType: 'BomHeader' as const, bomItemId: null, bomHeaderKind: 'Electrical' as const, categoryCode: '0201', applicationName: 'P700002 电气件BOM', rowVersion: 4 },
     ].map((application, index) => ({
       ...application,
       projectId: 'project-2', projectCode: 'P700002', projectName: 'XXX设备', status: 'Pending' as const,
@@ -1351,7 +1353,7 @@ describe('MaterialManagement', () => {
       {
         id: 'application-1', applicationType: 'StandardBomItem' as const, bomItemId: 'item-1', bomHeaderKind: 'Standard' as const,
         projectId: 'project-1', projectCode: 'P700003', projectName: '氮检设备', categoryCode: '0201',
-        applicationName: 'P700003 电气BOM', status: 'Pending' as const, requestedBy: 'developer',
+        applicationName: 'P700003 电气件BOM', status: 'Pending' as const, requestedBy: 'developer',
         requestedAt: '2026-08-23T14:47:51Z', createdAt: '2026-08-23T14:47:51Z', updatedAt: '2026-08-23T14:47:51Z', rowVersion: 7,
       },
       {
@@ -1465,19 +1467,19 @@ describe('MaterialManagement', () => {
     expect((categoryItem.get('input').element as HTMLInputElement).value).toBe('')
     expect(categoryItem.text()).toContain('请选择U9C对应分类')
     expect(categoryItem.text()).not.toContain('新增时必须主动选择')
-    expect(codeItem.text()).toContain('从PLM分类当前基线向后预留编号')
-    expect(codeItem.text()).toContain('U9C在后台同步')
+    expect(codeItem.text()).not.toContain('从PLM分类当前基线向后预留编号')
+    expect(codeItem.text()).not.toContain('U9C在后台同步')
     expect(wrapper.text()).toContain('001 个')
     expect(wrapper.text()).not.toContain('PLM直接保存并使用U9C计量单位编码')
     expect(wrapper.get('.material-editor-dialog').text()).not.toContain('供给方式')
     expect(wrapper.getComponent({ name: 'ElDialog' }).props('width')).toBe('688px')
     expect(wrapper.text()).toContain('料品采购链接')
-    expect(wrapper.get('.material-editor-grid').findAll('.el-form-item')).toHaveLength(18)
+    expect(wrapper.get('.material-editor-grid').findAll('.el-form-item')).toHaveLength(15)
     expect(wrapper.text()).toContain('选型建议')
     expect(wrapper.text()).toContain('参考价格')
     expect(wrapper.text()).toContain('3D')
     expect(wrapper.text()).toContain('资料')
-    expect(wrapper.findAll('button').filter(button => button.text() === '保存后上传')).toHaveLength(3)
+    expect(wrapper.findAll('button').filter(button => button.text().includes('保存后上传'))).toHaveLength(3)
     const editorItems = wrapper.get('.material-editor-grid').findAll('.el-form-item')
     const remarkItem = editorItems.find(item => item.text().includes('备注'))!
     const selectionAdviceItem = editorItems.find(item => item.text().includes('选型建议'))!
@@ -1522,9 +1524,52 @@ describe('MaterialManagement', () => {
 
     expect(api.listMaterialAttachments).toHaveBeenCalledWith('material-1', 'token')
     expect(wrapper.findAll('button').filter(button => button.text() === '上传附件')).toHaveLength(2)
-    const downloadButton = wrapper.findAll('button').find(button => button.text() === 'sensor.step')!
+    const downloadButton = wrapper.findAll('button').find(button => button.attributes('aria-label') === '下载 sensor.step')!
     await downloadButton.trigger('click')
     expect(api.downloadMaterialAttachment).toHaveBeenCalledWith('material-1', attachment, 'token')
+  })
+
+  it('料品主档删除附件后更新列表数量且保留其他附件', async () => {
+    const material = { ...(await api.listMaterials())[0] }
+    const model = { id: 'model-delete', materialId: material.id, kind: 'Model3D', originalFileName: '模型.step' }
+    const document = { ...model, id: 'document-delete', kind: 'Document', originalFileName: '资料.pdf' }
+    api.listMaterials.mockResolvedValueOnce([material])
+    api.listMaterialAttachments.mockResolvedValueOnce([model, document])
+    const wrapper = mount(MaterialManagement, { props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const table = wrapper.findComponent({ name: 'ElTable' })
+    table.vm.$emit('selection-change', [material]); await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === '编辑')!.trigger('click'); await flushPromises()
+    const editor = wrapper.getComponent({ name: 'MaterialEditorDialog' })
+    editor.vm.$emit('attachmentDeleted', model); await flushPromises()
+    expect(editor.props('attachments')).toEqual([document])
+    expect(table.props('data')[0].model3DAttachmentCount).toBe(0)
+    editor.vm.$emit('attachmentDeleted', document); await flushPromises()
+    expect(editor.props('attachments')).toEqual([])
+    expect(table.props('data')[0].documentAttachmentCount).toBe(0)
+    wrapper.unmount()
+  })
+
+  it('在料品主档切换封面时更新版本，并拒绝超出三张的图片批次', async () => {
+    const material = { ...(await api.listMaterials())[0], coverImageAttachmentId: 'one' }
+    const initialVersion = material.rowVersion
+    const first = { id: 'one', materialId: material.id, kind: 'CoverImage', originalFileName: '第一张.png' }
+    const second = { ...first, id: 'two', originalFileName: '第二张.png' }
+    api.listMaterials.mockResolvedValueOnce([material])
+    api.listMaterialAttachments.mockResolvedValueOnce([first, second])
+    api.materialAttachmentObjectUrl.mockResolvedValue('blob:cover')
+    api.setMaterialCover.mockResolvedValueOnce({ ...material, coverImageAttachmentId: 'two', rowVersion: material.rowVersion + 1 })
+    const wrapper = mount(MaterialManagement, { attachTo: document.body, props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    wrapper.findComponent({ name: 'ElTable' }).vm.$emit('selection-change', [material]); await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === '编辑')!.trigger('click'); await flushPromises()
+    const editor = wrapper.getComponent({ name: 'MaterialEditorDialog' })
+    editor.vm.$emit('setCover', second); await flushPromises()
+    expect(api.setMaterialCover).toHaveBeenCalledWith(material.id, 'two', initialVersion, 'token')
+    expect(editor.props('coverAttachmentId')).toBe('two')
+    editor.vm.$emit('attachmentFiles', 'CoverImage', { target: { files: [new File(['one'], '第三张.png'), new File(['two'], '第四张.png')], value: 'selected' } }); await flushPromises()
+    expect(api.uploadMaterialAttachment).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   it('料品操作移到列表上方并通过复选框选择', async () => {
@@ -2011,7 +2056,7 @@ describe('MaterialManagement', () => {
         createdAt: '2026-08-24T10:00:00Z', updatedAt: '2026-08-24T10:00:00Z',
       },
       {
-        id: 'task-succeeded', materialId: 'material-3', materialCode: '02010000103', materialName: '电气BOM', operation: 'Create' as const,
+        id: 'task-succeeded', materialId: 'material-3', materialCode: '02010000103', materialName: '电气件BOM', operation: 'Create' as const,
         status: 'Succeeded' as const, correlationId: 'done-v1', payloadJson: '{}', payloadSha256: 'DONE', attemptCount: 1,
         createdAt: '2026-08-24T10:02:00Z', updatedAt: '2026-08-24T10:02:00Z',
       },

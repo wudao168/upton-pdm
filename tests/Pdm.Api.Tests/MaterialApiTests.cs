@@ -11,7 +11,7 @@ using Upton.Pdm.Application;
 
 namespace Upton.Pdm.Api.Tests;
 
-public sealed class MaterialApiTests : IClassFixture<PdmApiFactory>
+public sealed partial class MaterialApiTests : IClassFixture<PdmApiFactory>
 {
     private readonly HttpClient client;
     private readonly PdmApiFactory factory;

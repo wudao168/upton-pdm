@@ -201,9 +201,9 @@ try {
     $stage = 'bom-write-export'
     $electrical = @(@{ sequence = 1; drawingNumber = 'QA-E-001'; name = '验收电气件'; quantity = 3; unit = '件'; material = $null; specification = '24VDC'; revision = 'W1'; isComplete = $true })
     $savedBom = @(Invoke-PdmJson 'Put' "/api/projects/$($project.id)/boms/Electrical" @{ items = $electrical } $headers)
-    Assert-Phase1 ($savedBom.Count -eq 1 -and $savedBom[0].quantity -eq 3) '电气BOM手工保存失败。'
+    Assert-Phase1 ($savedBom.Count -eq 1 -and $savedBom[0].quantity -eq 3) '电气件BOM手工保存失败。'
     $xlsx = Invoke-WebRequest -UseBasicParsing -Uri "$apiBase/api/projects/$($project.id)/boms/Electrical/export" -Headers $headers -TimeoutSec 30
-    Assert-Phase1 ($xlsx.RawContentLength -gt 1000) '电气BOM XLSX导出失败。'
+    Assert-Phase1 ($xlsx.RawContentLength -gt 1000) '电气件BOM XLSX导出失败。'
 
     $stage = 'release-package-create-upload'
     $packageNumber = 'RP-QA-' + [DateTimeOffset]::Now.ToString('yyyyMMddHHmmssfff')

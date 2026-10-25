@@ -5,12 +5,19 @@ import { fileURLToPath } from 'node:url'
 
 const projectRoot = fileURLToPath(new URL('.', import.meta.url))
 const require = createRequire(import.meta.url)
+const { generatePlmIconAssets } = require(projectRoot + 'tools/generate-plm-icon-assets.cjs')
 const vueRequire = createRequire(require.resolve('vue/package.json'))
 const vueShared = vueRequire.resolve('@vue/shared/dist/shared.esm-bundler.js')
 
 export default defineConfig({
   base: './',
-  plugins: [vue()],
+  plugins: [{
+    name: 'plm-shared-icon-assets',
+    async configResolved() { await generatePlmIconAssets() },
+    async handleHotUpdate({ file }) {
+      if (file.replaceAll('\\', '/').endsWith('/src/assets/plm-app-icon.svg') || file.replaceAll('\\', '/').endsWith('/src/assets/upton-wordmark.png')) await generatePlmIconAssets()
+    },
+  }, vue()],
   resolve: {
     // Element Plus imports this Vue runtime helper directly. Resolve it from
     // Vue's own dependency tree so pnpm's isolated linker can bundle it.

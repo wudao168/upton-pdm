@@ -335,6 +335,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     {
         systemSettings = BomPropertyMappingCatalog.Apply(settings with
         {
+            DrawingQrPolicy = settings.DrawingQrPolicy with { Enabled = false },
             ApprovalWorkflows = ReleaseApprovalSettings.UseOrganizationHierarchy(settings.ApprovalWorkflows)
         });
         return Task.FromResult(systemSettings);
@@ -1040,7 +1041,15 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     }
 
     private PdmDocument WithStoredVersionCount(PdmDocument document) =>
-        document with { StoredVersionCount = versions.Values.Count(version => version.DocumentId == document.Id) };
+        document with
+        {
+            StoredVersionCount = versions.Values.Count(version => version.DocumentId == document.Id),
+            DrawingVersionNumber = versions.Values.Where(version => version.DocumentId == document.Id).Max(version => version.DrawingVersionNumber),
+            PublishedVersion = versions.Values.Where(version => version.DocumentId == document.Id
+                    && version.Status == DocumentVersionStatus.Released && version.ReleasePackageId.HasValue
+                    && packages.TryGetValue(version.ReleasePackageId.Value, out var package) && package.State == ReleasePackageState.Published)
+                .OrderByDescending(version => version.Revision.BaseRevision).FirstOrDefault()?.Revision.Display ?? "未发布"
+        };
 
     public Task<IReadOnlyList<DocumentModelDrawingRelation>> ListDocumentRelationsAsync(Guid projectId, CancellationToken cancellationToken)
     {
@@ -1048,8 +1057,22 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         var rootId = project.RootProjectId ?? project.Id;
         var projectIds = projects.Values.Where(item => item.Id == rootId || item.RootProjectId == rootId).Select(item => item.Id).ToHashSet();
         var documentIds = documents.Values.Where(item => projectIds.Contains(item.ProjectId)).Select(item => item.Id).ToHashSet();
+        var liveDocuments = documents.Values.Where(item => documentIds.Contains(item.Id) && !item.DeletedAt.HasValue && !item.PurgedAt.HasValue)
+            .ToDictionary(item => item.Id);
+        var storedVersions = versions.Values.Where(version => liveDocuments.ContainsKey(version.DocumentId)).ToArray();
+        var pendingDrawings = storedVersions.Where(version => liveDocuments[version.DocumentId].Kind == DocumentKind.Drawing)
+            .GroupBy(version => version.DocumentId).Select(group => group
+                .OrderByDescending(version => version.Revision == liveDocuments[version.DocumentId].Revision)
+                .ThenByDescending(version => version.CreatedAt).First())
+            .Where(version => version.ReferenceSnapshot.StructureIndexPending)
+            .Select(version => new PendingDrawingRelationSource(version.DocumentId, liveDocuments[version.DocumentId].ProjectId,
+                liveDocuments[version.DocumentId].FileName, version.ReferenceSnapshot));
+        var modelVersions = storedVersions.Select(version => new DrawingRelationModelVersion(version.DocumentId,
+            liveDocuments[version.DocumentId].ProjectId, liveDocuments[version.DocumentId].FileName,
+            liveDocuments[version.DocumentId].Kind.ToString(), version.Revision.Display));
         return Task.FromResult<IReadOnlyList<DocumentModelDrawingRelation>>(documentRelations.Values
             .Where(item => documentIds.Contains(item.ModelDocumentId) && documentIds.Contains(item.DrawingDocumentId))
+            .Concat(PendingDrawingRelations.Recover(pendingDrawings, modelVersions)).Distinct()
             .OrderBy(item => item.ModelDocumentId)
             .ThenBy(item => item.DrawingDocumentId)
             .ToArray());
@@ -1103,7 +1126,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     {
         documents.TryGetValue(documentId, out var document);
         document ??= pendingArchiveDocuments.GetValueOrDefault(documentId)?.Document;
-        return Task.FromResult(document is { DeletedAt: null, PurgedAt: null } ? document : null);
+        return Task.FromResult(document is { DeletedAt: null, PurgedAt: null } ? WithStoredVersionCount(document) : null);
     }
 
     public Task<IReadOnlyList<PdmDocument>> ListDeletedDocumentsAsync(Guid projectId, CancellationToken cancellationToken) =>
@@ -1252,7 +1275,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     }
 
     public Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken, int? limit = null) =>
-        Task.FromResult<IReadOnlyList<DocumentVersion>>(versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).Take(limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : int.MaxValue).ToArray());
+        Task.FromResult<IReadOnlyList<DocumentVersion>>(versions.Values.Where(version => version.DocumentId == documentId).OrderByDescending(version => version.CreatedAt).Take(limit.HasValue ? Math.Clamp(limit.Value, 1, 1000) : int.MaxValue)
+            .Select(WithBusinessVersion).ToArray());
+
+    private DocumentVersion WithBusinessVersion(DocumentVersion version) => version with
+    { LatestPublishedVersion = documents.TryGetValue(version.DocumentId, out var document) ? WithStoredVersionCount(document).PublishedVersion : "未发布" };
 
     public Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken)
     {
@@ -1266,7 +1293,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 .Where(version => projectDocumentIds.Contains(version.DocumentId))
                 .OrderBy(version => version.DocumentId)
                 .ThenByDescending(version => version.CreatedAt)
-                .ToArray());
+                .Select(WithBusinessVersion).ToArray());
         }
     }
 
@@ -1303,7 +1330,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken)
     {
         versions.TryGetValue(versionId, out var version);
-        return Task.FromResult(version?.DocumentId == documentId ? version : null);
+        return Task.FromResult(version?.DocumentId == documentId ? WithBusinessVersion(version) : null);
     }
 
     public Task<DocumentReferenceNode?> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken) =>
@@ -1537,7 +1564,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<BomVersion> SaveBomDraftAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, string actor, CancellationToken cancellationToken)
     {
         if (kind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical))
-            throw new PdmRuleException("只有标准件、非标件和电气BOM支持独立版本控制。");
+            throw new PdmRuleException("只有标准件、非标件和电气件BOM支持独立版本控制。");
         lock (gate)
         {
             var now = timeProvider.GetUtcNow();
@@ -1663,6 +1690,9 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 throw new PdmConflictException($"图档正在由{document.CheckedOutBy}编辑。 ");
             }
 
+            RequireHandoffRecipient(documentId, actor);
+            editHandoffs.Remove(documentId);
+
             var updated = document with
             {
                 CheckedOutBy = actor,
@@ -1753,9 +1783,9 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         lock (gate)
         {
             if (!documents.TryGetValue(documentId, out var document)) throw new PdmNotFoundException("图档不存在。");
-            if (string.IsNullOrWhiteSpace(document.CheckedOutBy)) throw new PdmConflictException("图档当前没有可申请释放的编辑权限。");
+            if (string.IsNullOrWhiteSpace(document.CheckedOutBy) || document.CheckedOutBy.Equals(requestedBy, StringComparison.OrdinalIgnoreCase)) throw new PdmConflictException("图档当前没有可申请释放的编辑权限。");
             var now = timeProvider.GetUtcNow();
-            var updated = document with { CheckoutReleaseRequestedBy = requestedBy, CheckoutReleaseRequestedAt = now, CheckoutReleaseRequestReason = reason.Trim(), UpdatedAt = now };
+            var updated = document with { CheckoutReleaseRequestedBy = document.CheckoutReleaseRequestedBy ?? requestedBy, CheckoutReleaseRequestedAt = document.CheckoutReleaseRequestedAt ?? now, CheckoutReleaseRequestReason = document.CheckoutReleaseRequestReason ?? reason.Trim(), UpdatedAt = now };
             documents[documentId] = updated;
             return Task.FromResult(updated);
         }
@@ -1875,11 +1905,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                     referenceSnapshotHistory[referenceSnapshots[document.ProjectId].SnapshotId] = referenceSnapshots[document.ProjectId];
                 }
 
-                var unchanged = ClearEditLock(renamedDocument, timeProvider.GetUtcNow());
+                var unchanged = ApplyArchiveEditDisposition(renamedDocument, commit, actor, latest.Id, timeProvider.GetUtcNow());
                 documents[documentId] = unchanged;
                 if (!string.IsNullOrWhiteSpace(sourceFileSha256)) documentSourceFingerprints[documentId] = sourceFileSha256;
                 if (!archiveBatchId.HasValue) RefreshWorkingReferenceRoots(document.ProjectId, actor, timeProvider.GetUtcNow());
-                return Task.FromResult(new DocumentCheckInResult(unchanged, null, false));
+                return Task.FromResult(new DocumentCheckInResult(unchanged, null, false) { HandoffTo = commit.HandoffTo });
             }
             var revision = versions.Values.Any(version => version.DocumentId == documentId) || document.Revision.IsReleased ? document.Revision.NextWork() : RevisionLabel.InitialWork();
             commit = commit with { ReferenceSnapshot = commit.ReferenceSnapshot with
@@ -1887,10 +1917,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var version = new DocumentVersion(Guid.NewGuid(), documentId, revision, DocumentVersionStatus.Work, commit.File.RelativePath, commit.File.Length, commit.File.Sha256, actor, DateTimeOffset.UtcNow, commit.ChangeNote, commit.Properties, commit.ReferenceSnapshot.Root, commit.MechanicalBomSnapshot, commit.ElectricalBomSnapshot, commit.SourceVersionId, commit.SourceDescription, null, null)
             {
                 // 受控属性回写只写入属性、不修改几何。
-                ChangeKind = controlledWriteback ? DocumentVersionChangeKind.PropertyWriteback : commit.ChangeKind
+                ChangeKind = controlledWriteback ? DocumentVersionChangeKind.PropertyWriteback : commit.ChangeKind,
+                DrawingVersionNumber = (versions.Values.Where(item => item.DocumentId == documentId).Max(item => item.DrawingVersionNumber) ?? 0) + 1
             };
             versions[version.Id] = version;
-            var updated = ClearEditLock(renamedDocument with { Revision = revision, State = DocumentLifecycleState.Work }, version.CreatedAt);
+            var updated = ApplyArchiveEditDisposition(renamedDocument with { Revision = revision, State = DocumentLifecycleState.Work }, commit, actor, version.Id, timeProvider.GetUtcNow());
             documents[documentId] = updated;
             if (!string.IsNullOrWhiteSpace(sourceFileSha256)) documentSourceFingerprints[documentId] = sourceFileSha256;
             if (commit.IsProjectRoot)
@@ -1904,7 +1935,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
             if (!archiveBatchId.HasValue) RefreshWorkingReferenceRoots(document.ProjectId, actor, version.CreatedAt);
 
-            return Task.FromResult(new DocumentCheckInResult(updated, version, true));
+            return Task.FromResult(new DocumentCheckInResult(updated, version, true) { HandoffTo = commit.HandoffTo });
         }
     }
 
@@ -2624,6 +2655,9 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     public Task<IReadOnlyList<AuditEntry>> ListAuditAsync(string actor, UserRole role, int take, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<AuditEntry>>(audits.Where(entry => HasUserPermission(actor, role, PermissionCodes.AuditView) || string.Equals(entry.Actor, actor, StringComparison.OrdinalIgnoreCase)).OrderByDescending(entry => entry.OccurredAt).Take(Math.Clamp(take, 1, 500)).ToArray());
+
+    public Task<IReadOnlyList<AuditEntry>> ListStandardStructureReferenceAuditsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<AuditEntry>>(audits.Where(entry => entry.Action == "standard-structure.reference" && entry.EntityType == "StandardStructure").ToArray());
 
     public Task<IReadOnlyList<AuditEntry>> ListProjectAuditAsync(Guid projectId, int take, CancellationToken cancellationToken)
     {

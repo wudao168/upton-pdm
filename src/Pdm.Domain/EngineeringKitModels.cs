@@ -8,7 +8,7 @@ public enum EngineeringKitRevisionState
 
 public enum EngineeringKitModelMode
 {
-    /// <summary>首次发布时按“标准代码-分类代码-序列号”自动生成型号。</summary>
+    /// <summary>首次发布时按“标准分类代码-序列号”自动生成型号。</summary>
     Auto = 0,
     /// <summary>型号由用户手动填写。</summary>
     Manual = 1
@@ -52,7 +52,10 @@ public sealed record EngineeringKitComponent(
     decimal Quantity,
     string Unit,
     bool IsOptional,
-    int SortOrder);
+    int SortOrder,
+    string? Specification = null,
+    string? Brand = null,
+    string? Remark = null);
 
 public sealed record EngineeringKitRevision(
     Guid Id,
@@ -64,7 +67,8 @@ public sealed record EngineeringKitRevision(
     string CreatedBy,
     DateTimeOffset CreatedAt,
     string? PublishedBy,
-    DateTimeOffset? PublishedAt);
+    DateTimeOffset? PublishedAt,
+    Guid? StandardLibraryCategoryId = null);
 
 public sealed record EngineeringKit(
     Guid Id,
@@ -84,8 +88,18 @@ public sealed record EngineeringKit(
     string? StandardName = null,
     string? StandardCode = null,
     string? CategoryName = null,
-    string? CategoryCode = null)
+    string? CategoryCode = null,
+    Guid? StandardLibraryCategoryId = null)
 {
+    public bool IsActive { get; init; } = true;
+    public string? SelectionAdvice { get; init; }
+    public decimal? ReferencePrice { get; init; }
+    public bool IsRecommended { get; init; }
+    public Guid? CoverImageAttachmentId { get; init; }
+    public int ReferenceCount { get; init; }
+    public int Model3DAttachmentCount { get; init; }
+    public int DocumentAttachmentCount { get; init; }
+
     public EngineeringKitRevision? DraftRevision => Revisions
         .Where(item => item.State == EngineeringKitRevisionState.Draft)
         .OrderByDescending(item => item.VersionNumber)

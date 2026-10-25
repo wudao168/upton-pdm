@@ -12,7 +12,8 @@ public sealed record BrowserCadBase(PdmDocument Document, DocumentVersion? Versi
 public sealed record BrowserCadJob(Guid Id, Guid CompanyId, string Owner, BrowserCadArchiveTarget Target,
     string State, string Stage, IReadOnlyList<BrowserCadArchiveFile> Files, IReadOnlyList<BrowserCadBase> Baselines,
     string? RootPath = null, string? Error = null, int ArchivedFiles = 0, int NewVersions = 0,
-    string? ResultCode = null, IReadOnlyList<string>? Warnings = null);
+    string? ResultCode = null, IReadOnlyList<string>? Warnings = null, bool PreviewsPending = false, bool PreviewRetryable = false,
+    IReadOnlyList<BrowserCadArchiveFile>? CompanionFiles = null);
 
 public sealed class BrowserCadArchiveQueue(IOptions<PdmStorageOptions> options)
 {
@@ -49,11 +50,20 @@ public sealed class BrowserCadArchiveQueue(IOptions<PdmStorageOptions> options)
             {
                 BrowserCadJob? job = null;
                 try { job = Read(id); } catch (IOException) { } catch (JsonException) { }
-                if (job?.State is "Queued" or "Processing" or "Committing") yield return job;
+                if (job?.State is "Queued" or "Processing" or "Committing"
+                    || job?.State == "Succeeded" && job.Target.ProjectId.HasValue && File.Exists(Under(job.Id, "native-preview-bindings.json")) && (job.PreviewsPending
+                        || File.Exists(Under(job.Id, "native-previews.json"))
+                            && File.GetLastWriteTimeUtc(Under(job.Id, "native-previews.json")) > File.GetLastWriteTimeUtc(Under(job.Id, "native-previews-attached.json")))) yield return job;
             }
     }
     public static BrowserCadArchiveView View(BrowserCadJob job) => new(job.Id, job.State, job.Stage, job.Files,
-        job.RootPath, job.Error, job.ArchivedFiles, job.NewVersions, job.ResultCode, job.Warnings);
+        job.RootPath, job.Error, job.ArchivedFiles, job.NewVersions, job.ResultCode, job.Warnings, job.PreviewsPending, job.PreviewRetryable);
+    public async Task WriteAsync(Guid id, string relative, string value, CancellationToken ct)
+    {
+        var path = Under(id, relative); var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        await File.WriteAllTextAsync(temporary, value, ct);
+        File.Move(temporary, path, true);
+    }
     public static void RequireOwner(BrowserCadJob job, string actor)
     {
         if (job.CompanyId != TenantContext.CompanyId || !string.Equals(job.Owner, actor, StringComparison.OrdinalIgnoreCase))
@@ -74,18 +84,20 @@ public sealed class FileBrowserCadReader : IBrowserCadReader
         if (!File.Exists(result))
         {
             var request = Path.Combine(directory, "native-request.json");
-            var temporary = request + ".tmp";
-            await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(input, BrowserCadArchiveQueue.Json), ct);
-            File.Move(temporary, request, true);
-            var until = DateTimeOffset.UtcNow.AddMinutes(31);
-            while (!File.Exists(result))
+            if (!File.Exists(request))
             {
-                ct.ThrowIfCancellationRequested();
-                if (DateTimeOffset.UtcNow > until) throw new PdmRuleException("后台解析服务暂未完成任务，上传文件已保留，可稍后继续。");
-                await Task.Delay(1000, ct);
+                var temporary = request + ".tmp";
+                await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(input, BrowserCadArchiveQueue.Json), ct);
+                File.Move(temporary, request, true);
             }
+            // Queue waiting is not native parsing time. Let the hosted service process other jobs and
+            // attach their previews; the worker owns the timeout after it actually starts this request.
+            ct.ThrowIfCancellationRequested();
+            throw new BrowserCadReadPendingException();
         }
         return JsonSerializer.Deserialize<BrowserCadNativeResult>(await File.ReadAllTextAsync(result, ct), BrowserCadArchiveQueue.Json)
             ?? throw new PdmRuleException("后台解析结果无法读取，上传文件已保留。");
     }
 }
+
+internal sealed class BrowserCadReadPendingException : Exception;

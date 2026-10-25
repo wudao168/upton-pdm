@@ -11,6 +11,58 @@ const create = (value = record()) => mount(ProductionOperationPanel, { props: { 
 beforeEach(() => { sessionStorage.clear(); vi.spyOn(api, 'readProductionTrackingRelease').mockResolvedValue(record()) })
 afterEach(() => vi.restoreAllMocks())
 describe('按岗位扫码办理', () => {
+  it('无批次时也可取消未分配需求，响应丢失后沿用同一编号重试', async () => {
+    const value = record(); value.state.lots = []
+    vi.spyOn(api, 'readProductionActions').mockResolvedValue({ actions: [], hint: '尚未分配', canCancelUnassignedDemand: true })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const save = vi.spyOn(api, 'cancelUnassignedProductionDemand').mockRejectedValueOnce(new Error('保存结果未确认，请重试。')).mockResolvedValue(value)
+    const wrapper = create(value); await flushPromises()
+    await wrapper.get('input[type=number]').setValue(2)
+    await wrapper.get('input:not([type=number])').setValue('取消未投产需求')
+    await wrapper.findAll('button').find(item => item.text() === '确认取消未分配需求')!.trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('待核实上次需求取消：2')
+    await wrapper.findAll('button').find(item => item.text() === '重试取消未分配需求')!.trigger('click'); await flushPromises()
+    expect(save.mock.calls[1][1]).toEqual(save.mock.calls[0][1])
+    expect(window.confirm).toHaveBeenCalledOnce()
+    expect(sessionStorage.getItem('pdm-production-pending-operator-release-demand')).toBeNull()
+    wrapper.unmount()
+  })
+  it('按环节部分取消需求，要求原因和确认且不冒充工位', async () => {
+    const control = { ...action('one'), kind: 'Cancelled' as const, label: '取消业务需求', sourceKind: 'Pass', sourceName: '合格待领用', remainingQuantity: 2, post: 'Control', workstationId: '', workstationName: '流程管理', bindingId: '' }
+    vi.spyOn(api, 'readProductionActions').mockResolvedValue({ actions: [control], hint: '' })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const save = vi.spyOn(api, 'recordProductionMovement').mockResolvedValue(record())
+    const wrapper = create(); await flushPromises()
+    const button = wrapper.findAll('button').find(item => item.text() === '确认处理')!
+    await wrapper.get('[aria-label="处理操作及发生环节"]').setValue('Cancelled:Pass')
+    await button.trigger('click'); expect(save).not.toHaveBeenCalled(); expect(wrapper.text()).toContain('请填写处理原因及实物去向')
+    await wrapper.get('[aria-label="处理原因及实物去向"]').setValue('项目取消，合格件留库')
+    await wrapper.get('[aria-label="本次处理数量"]').setValue(1)
+    await button.trigger('click'); await flushPromises()
+    expect(window.confirm).toHaveBeenCalledOnce()
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('会减少业务需求'))
+    expect(save).toHaveBeenCalledWith('release', expect.objectContaining({ kind: 'Cancelled', sourceKind: 'Pass', lotId: 'one', quantity: 1, note: '项目取消，合格件留库' }), 'token')
+    expect(save.mock.calls[0]![1].workstationId).toBeUndefined()
+    wrapper.unmount()
+  })
+  it.each(['Pause', 'Resume', 'TaskCancelled', 'StageScrap'] as const)('外协支持%s，拦截超量并传递发生环节', async kind => {
+    const value = record(); value.state.lots = [{ ...value.state.lots[0], route: 'External' }]
+    const control = { ...action('one'), kind, label: kind, sourceKind: 'ExternalDelivered', sourceName: '待质检收料', post: 'Control', workstationId: '' }
+    vi.spyOn(api, 'readProductionActions').mockResolvedValue({ actions: [control], hint: '' })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const save = vi.spyOn(api, 'recordProductionMovement').mockResolvedValue(value)
+    const wrapper = create(value); await flushPromises()
+    await wrapper.get('[aria-label="处理操作及发生环节"]').setValue(`${kind}:ExternalDelivered`)
+    await wrapper.get('[aria-label="处理原因及实物去向"]').setValue('数量核对，实物已隔离')
+    await wrapper.get('[aria-label="本次处理数量"]').setValue(3)
+    await wrapper.get('.production-operation__controls button').trigger('click')
+    expect(save).not.toHaveBeenCalled(); expect(wrapper.text()).toContain('不能超过该环节可处理数量')
+    await wrapper.get('[aria-label="本次处理数量"]').setValue(1)
+    await wrapper.get('.production-operation__controls button').trigger('click'); await flushPromises()
+    expect(save).toHaveBeenCalledWith('release', expect.objectContaining({ kind, quantity: 1, sourceKind: 'ExternalDelivered' }), 'token')
+    if (kind === 'TaskCancelled' || kind === 'StageScrap') expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('原业务需求保留'))
+    wrapper.unmount()
+  })
   it('只显示服务端允许的步骤，多批次不默认选择第一批', async () => {
     vi.spyOn(api, 'readProductionActions').mockResolvedValue({ actions: [action('one'), action('two')], hint: '核对数量后确认' })
     const save = vi.spyOn(api, 'recordProductionMovement').mockResolvedValue(record())

@@ -1,4 +1,4 @@
-/* Native content containers and Element Plus tables share the same visible pill dimensions. */
+/* Transparent until the pointer reaches this scrollbar; dragging keeps it visible. */
 .os-theme-pdm {
   z-index: 20;
   --os-size: 12px;
@@ -17,3 +17,7 @@
 .os-theme-pdm:hover { --os-padding-perpendicular: 1px; }
 .os-theme-pdm .os-scrollbar-handle { border-radius: 999px; }
 [data-overlayscrollbars-viewport] { scrollbar-gutter: auto; }
+
+.os-theme-pdm.os-scrollbar { opacity: 0 !important; transition: none; }
+.os-theme-pdm.os-scrollbar:hover,
+.os-theme-pdm.os-scrollbar:active { opacity: 1 !important; }

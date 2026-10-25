@@ -6,6 +6,12 @@ namespace Upton.Pdm.Infrastructure;
 
 public sealed partial class MySqlPdmRepository
 {
+    public async Task ResolveWorkHoursNotificationsAsync(string recipient, Guid companyId, DateTimeOffset readAt, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        await connection.ExecuteAsync(new CommandDefinition("UPDATE user_notification SET read_at=@readAt WHERE recipient_username=@recipient AND category='work-hours' AND source_key LIKE @prefix AND read_at IS NULL",
+            new { recipient, readAt = readAt.UtcDateTime, prefix = $"work-hours:{companyId:N}:%" }, cancellationToken: ct));
+    }
     public async Task<IReadOnlyList<string>> ListNotificationRecipientsAsync(string sourceKey, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -37,6 +43,7 @@ public sealed partial class MySqlPdmRepository
             FROM user_notification n
             WHERE recipient_username=@Recipient
               AND (n.source_key NOT LIKE 'calendar-todo:%' OR n.source_key LIKE @CalendarPrefix)
+              AND (n.category NOT IN ('work-hours','work-hours-correction') OR n.source_key LIKE @HoursPrefix OR n.source_key LIKE @CorrectionPrefix)
               AND NOT (category='project-plan' AND source_key LIKE '%:overdue:%')
               AND (n.category<>'project-plan' OR n.source_key NOT LIKE 'project-plan:%' OR NOT EXISTS (
                   SELECT 1 FROM user_notification newer
@@ -48,7 +55,9 @@ public sealed partial class MySqlPdmRepository
             ORDER BY created_at DESC,id DESC
             LIMIT @Take
             """,
-            new { Recipient = recipient, Take = Math.Clamp(take, 1, 200), CalendarPrefix = $"calendar-todo:{TenantContext.CompanyId:N}:%" },
+            new { Recipient = recipient, Take = Math.Clamp(take, 1, 200), CalendarPrefix = $"calendar-todo:{TenantContext.CompanyId:N}:%",
+                HoursPrefix = TenantContext.CompanyId is Guid company ? $"work-hours:{company:N}:%" : "work-hours:%",
+                CorrectionPrefix = TenantContext.CompanyId is Guid correctionCompany ? $"work-hours-correction:{correctionCompany:N}:%" : "work-hours-correction:%" },
             cancellationToken: cancellationToken));
         return rows.Select(MapUserNotification).ToArray();
     }

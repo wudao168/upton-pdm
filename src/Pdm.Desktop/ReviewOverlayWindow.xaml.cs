@@ -20,9 +20,10 @@ public partial class ReviewOverlayWindow : Window
     private string? pendingStateJson;
     private bool navigationReady;
     private bool allowClose;
+    private readonly Action<CoreWebView2>? configureRequests;
 
     public ReviewOverlayWindow(Window owner, CoreWebView2Environment environment, string uiFolder, long uiVersion,
-        string? serverUiBaseUrl = null, string configurationVersion = "")
+        string? serverUiBaseUrl = null, string configurationVersion = "", Action<CoreWebView2>? configureRequests = null)
     {
         InitializeComponent();
         Owner = owner;
@@ -31,6 +32,7 @@ public partial class ReviewOverlayWindow : Window
         this.uiVersion = uiVersion;
         this.serverUiBaseUrl = serverUiBaseUrl;
         this.configurationVersion = configurationVersion;
+        this.configureRequests = configureRequests;
         ReviewView.DefaultBackgroundColor = Color.Transparent;
         Activated += (_, _) => ActivityChanged?.Invoke();
         Deactivated += (_, _) => ActivityChanged?.Invoke();
@@ -106,10 +108,8 @@ public partial class ReviewOverlayWindow : Window
         }
 
         await ReviewView.EnsureCoreWebView2Async(environment);
-        ReviewView.CoreWebView2.SetVirtualHostNameToFolderMapping(
-            MainWindow.UiHostName,
-            uiFolder,
-            CoreWebView2HostResourceAccessKind.DenyCors);
+        if (configureRequests != null) configureRequests(ReviewView.CoreWebView2);
+        else ReviewView.CoreWebView2.SetVirtualHostNameToFolderMapping(MainWindow.UiHostName, uiFolder, CoreWebView2HostResourceAccessKind.DenyCors);
         ReviewView.CoreWebView2.WebMessageReceived += (_, eventArgs) => MessageReceived?.Invoke(eventArgs.WebMessageAsJson);
         ReviewView.NavigationCompleted += (_, eventArgs) =>
         {

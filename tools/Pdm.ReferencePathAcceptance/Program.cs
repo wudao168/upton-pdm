@@ -114,13 +114,16 @@ internal static partial class Program
                     case "GetDocumentDependencies2": return new[] { "PART", drawingReference }; default: throw new Exception("Unexpected write " + call.MethodName); }
             }).GetTransparentProxy();
             scanner = New("SolidWorksReferenceTreeScanner", app); SetField(scanner, "strictStructure", true);
-            ExpectInvalid(() => Invoke(scanner, "AddRelatedDrawingPaths", root, new[] { drawing }, true), "未能对应到树内模型");
+            var pendingDrawing = Node(drawing, "Drawing"); ((IList)Get(root, "Children")).Add(pendingDrawing);
+            Invoke(scanner, "AddRelatedDrawingPaths", root, new[] { drawing }, true);
+            Require((bool)Get(pendingDrawing, "StructureIndexPending") && ((IList)Get(pendingDrawing, "ReferencedModels")).Count == 0, "unresolved drawing fabricated model relation or lost pending state");
             Require(cwd == "original working directory", "drawing working directory changed");
-            Pass("known drawing with no verifiable tree model still blocks and restores working directory");
+            Pass("known drawing with unresolved model keeps its native file and pending index without a fabricated relation");
             drawingReference = "";
-            ExpectInvalid(() => Invoke(scanner, "AddRelatedDrawingPaths", root, new[] { drawing }, true), "未能对应到树内模型");
+            Invoke(scanner, "AddRelatedDrawingPaths", root, new[] { drawing }, true);
+            Require(((IList)Get(root, "Children")).Contains(pendingDrawing) && ((IList)Get(pendingDrawing, "ReferencedModels")).Count == 0, "pure 2D drawing was removed or given a fake reference");
             Require(cwd == "original working directory", "empty drawing reference changed working directory");
-            Pass("empty drawing model reference blocks whole submission without skipping the file");
+            Pass("pure 2D drawing remains eligible for native archive without a 3D reference");
             var report = (string)InvokeStatic("PluginDiagnosticLog", "BuildReport", "QA", folder);
             Require(report.Contains("路径诊断") && report.Contains("U+0000") && report.Contains("\\u0000") && report.Contains("结构内原生引用"), "exported report lost raw path diagnostics");
             Require(File.ReadAllText(rootPath) == "unchanged assembly bytes" && File.ReadAllText(partPath) == "unchanged part bytes", "source bytes changed");
@@ -180,14 +183,13 @@ internal static partial class Program
             var model = new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2", true), call => call.MethodName == "get_Extension" ? extension : call.MethodName == "GetPathName" ? rootPath : call.MethodName == "GetTitle" ? Path.GetFileName(rootPath) : throw new Exception(call.MethodName)).GetTransparentProxy();
                 activeNative = model;
             if (mode == "known-missing") File.Delete(drawing);
-            if (mode == "related-partial" || mode == "known-unreadable")
-                ExpectInvalid(() => Invoke(scanner, "AddNativeAssociatedDrawings", model, root), "引用未完整读取");
-            else if (mode == "known-missing")
+            if (mode == "known-missing")
                 ExpectInvalid(() => Invoke(scanner, "AddNativeAssociatedDrawings", model, root), "工程图不存在");
             else
             {
                 Invoke(scanner, "AddNativeAssociatedDrawings", model, root);
-                Require(((IList)Get(part, "Children")).Count == (mode.StartsWith("related") ? 1 : 0), "drawing discovery lost a real drawing or included an unrelated candidate");
+                Require(((IList)Get(part, "Children")).Count == (mode.StartsWith("related") || mode == "known-unreadable" ? 1 : 0), "drawing discovery lost a real drawing or included an unrelated candidate");
+                if (mode == "known-unreadable" || mode == "related-partial") Require((bool)Get(((IList)Get(part, "Children"))[0], "StructureIndexPending"), "unreadable drawing lost its pending index marker: " + mode);
             }
             if (mode == "known-missing") File.WriteAllText(drawing, "unchanged candidate bytes");
             Require(File.ReadAllText(drawing) == "unchanged candidate bytes", "discovery altered candidate bytes");
@@ -365,6 +367,7 @@ internal static partial class Program
         ((IList)Get(legacy,"Children")).Add(part);
         var extra=Node(Path.Combine(folder,"历史外围.SLDASM"),"Assembly");Set(extra,"Role",Enum.Parse(Type("CadReferenceRole"),"ExternalFileDependency"));
         ((IList)Get(legacy,"Children")).Add(extra);
+        InvokeStatic("NativeArchiveManifest","ConfirmFileScope",legacy,new[]{rootPath,partPath});
         var selected=(IList)InvokeStatic("PdmAddin","BuildBatchOperationItems",legacy);
         Require(selected.Count==2,"legacy auxiliary entry returned to new submission");
         var capture=InvokeStatic("PdmApiClient","CaptureArchiveSnapshot",legacy,new System.Collections.Generic.HashSet<string>(new[]{rootPath,partPath}));
@@ -493,8 +496,8 @@ internal static partial class Program
             Require(failed == (mode != "inactive" && mode != "active"), "unexpected inventory outcome " + mode);
             Require(active == previous, "original active document not restored " + mode);
             Require(!(bool)Type("ImportedComponentStorage").GetProperty("IsReadingInventory", Flags).GetValue(null), "inventory guard leaked " + mode);
-            Require(activations == (mode == "active" || mode == "activation-error" ? 1 : 2), "unexpected document switches " + mode);
-            Require(calls == (mode == "activation-error" ? 0 : 1), "unexpected inventory reads " + mode);
+            Require(activations == (mode == "active" ? 1 : mode == "wrong-inventory" ? 3 : 2), "unexpected document switches " + mode);
+            Require(calls == (mode == "activation-error" ? 0 : mode == "wrong-inventory" ? 2 : 1), "unexpected inventory reads " + mode);
             Require(File.ReadAllText(ownerPath) == "unchanged assembly bytes" && File.ReadAllText(otherPath) == "other unchanged assembly", "CAD bytes changed");
             Pass("import storage inventory uses its owner and restores active document without saving: " + mode);
         }

@@ -1,4 +1,8 @@
 import { vi } from 'vitest'
+import { config } from '@vue/test-utils'
+import { stockedMaterial } from '../src/materialStockPlans'
+
+config.global.directives['stocked-material'] = stockedMaterial
 
 class ResizeObserverMock {
   observe() {}

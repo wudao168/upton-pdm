@@ -6,7 +6,7 @@ import * as api from '../src/api'
 import type { ProductionReleaseRecord } from '../src/productionTracking'
 
 vi.mock('../src/statusMessage', () => ({ ElMessage: { success: vi.fn(), warning: vi.fn() } }))
-beforeEach(() => vi.spyOn(api, 'readProductionSuppliers').mockResolvedValue({ companyId: 'company', rowVersion: 1, categories: [{ id: 'category', name: '机加工', isActive: true }], suppliers: [{ id: 'supplier', code: 'S01', name: '外协厂', fullName: '外协厂有限公司', categoryIds: ['category'], isActive: true, address: '', phone: '', contact: '', contactPhone: '', remarks: '', updatedAt: '' }] }))
+beforeEach(() => vi.spyOn(api, 'readProductionSupplierChoices').mockResolvedValue({ companyId: 'company', categories: [{ id: 'category', name: '机加工', isActive: true }], suppliers: [{ id: 'supplier', code: 'S01', name: '外协厂', categoryIds: ['category'], isActive: true }] }))
 afterEach(() => vi.restoreAllMocks())
 function record(): ProductionReleaseRecord {
   return { rowVersion: 7, state: { releasePackageId: 'release', projectId: 'project', companyId: 'company', projectCode: 'P001', projectName: '项目', packageNumber: 'RP001', scope: 'NonStandardWithDrawing', publishedAt: '', movements: [],

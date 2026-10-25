@@ -4,6 +4,11 @@ namespace Upton.Pdm.Application;
 
 public sealed partial class PdmWorkflowService
 {
+    private static void RequireCompleteReleaseIndex(CadReferenceSnapshot? snapshot)
+    {
+        if (snapshot?.Root.HasPendingStructureIndex == true)
+            throw new PdmRuleException("原生图档已存档，所选范围的结构或图模关联仍待补全；已有BOM保留，补全并核对后才能正式发布。");
+    }
     private async Task<IReadOnlyList<Guid>> ValidateRelatedOplIssuesAsync(Guid projectId, ReleaseScope scope,
         IReadOnlyList<Guid>? ids, string actor, UserRole role, CancellationToken ct)
     {
@@ -29,6 +34,7 @@ public sealed partial class PdmWorkflowService
         var bindings = new Dictionary<Guid, ReleaseVersionBinding>();
         var drawingIds = new HashSet<Guid>();
         var reference = package.ReferenceSnapshotId.HasValue ? await repository.FindReferenceSnapshotAsync(package.ReferenceSnapshotId.Value, ct) : null;
+        await RequireCompletePackageReleaseIndexAsync(package, reference, ct);
         static IEnumerable<DocumentReferenceNode> Tree(DocumentReferenceNode node)
         {
             if (node.Role == ReferenceRole.ExternalFileDependency) yield break;
@@ -43,6 +49,8 @@ public sealed partial class PdmWorkflowService
             var history = await repository.ListDocumentVersionsAsync(id, ct);
             var version = revision is null ? history.FirstOrDefault() : history.FirstOrDefault(value => value.Revision == revision);
             if (version is null) throw new PdmRuleException($"图档{document.FileName}的发布引用版本不存在，请核对后重试。");
+            if (!IsLongLeadScope(package.Scope) && version.ReferenceSnapshot.HasPendingStructureIndex)
+                throw new PdmRuleException($"图档{document.FileName}已保存，但结构或图模关联仍待补全，暂不能用于正式发布。");
             // A formal promotion preserves this source design; reuse it instead of promoting the same work file again.
             if (version.Status == DocumentVersionStatus.Work)
                 version = history.FirstOrDefault(value => value.Status == DocumentVersionStatus.Released && value.SourceVersionId == version.Id) ?? version;
@@ -55,6 +63,11 @@ public sealed partial class PdmWorkflowService
                 return;
             }
             var selectedForPublication = publishIds.Contains(id) && !IsLongLeadScope(package.Scope);
+            if (selectedForPublication && document.Kind == DocumentKind.Drawing)
+            {
+                var targetRevision = version.Status == DocumentVersionStatus.Work ? version.Revision.Release().Display : version.Revision.Display;
+                BomDrawingRevision.ValidateDrawingProperties(version, targetRevision, document.FileName);
+            }
             if (selectedForPublication && document.Kind == DocumentKind.Drawing) drawingIds.Add(id);
             var storedName = ReleaseBoundSourceReader.FileName(version.ReferenceSnapshot.DocumentId == id ? version.ReferenceSnapshot.FileName : document.FileName);
             bindings[id] = new(id, version.Id, version.Revision.Display, version.Sha256, selectedForPublication, storedName,
@@ -63,7 +76,6 @@ public sealed partial class PdmWorkflowService
                 selectedForPublication ? version.Status == DocumentVersionStatus.Work ? version.Revision.Release().Display : version.Revision.Display : "");
             async Task VisitAsync(DocumentReferenceNode node)
             {
-                if (node.Role == ReferenceRole.ExternalFileDependency) return;
                 if (node.DocumentId is Guid childId && childId != id) await AddAsync(childId, node.Revision);
                 else foreach (var child in node.Children) await VisitAsync(child);
             }
@@ -85,11 +97,17 @@ public sealed partial class PdmWorkflowService
 
     private async Task ValidateReleaseVersionsAsync(ReleasePackage package, CancellationToken ct)
     {
+        await RequireCompletePackageReleaseIndexAsync(package, package.ReferenceSnapshotId.HasValue
+            ? await repository.FindReferenceSnapshotAsync(package.ReferenceSnapshotId.Value, ct) : null, ct);
         if (package.VersionBindings is null) return; // Existing in-flight packages keep their original rules.
-        foreach (var binding in package.VersionBindings.Where(item => item.Publish && item.RequiresPromotion))
+        foreach (var binding in package.VersionBindings.Where(item => item.Publish))
         {
-            var latest = (await repository.ListDocumentVersionsAsync(binding.DocumentId, ct)).FirstOrDefault();
-            if (latest?.Id != binding.VersionId || latest.Sha256 != binding.Sha256)
+            var history = await repository.ListDocumentVersionsAsync(binding.DocumentId, ct);
+            var bound = history.FirstOrDefault(version => version.Id == binding.VersionId);
+            if (bound?.ReferenceSnapshot.HasPendingStructureIndex == true)
+                throw new PdmRuleException("本次发布图档的结构或图模关联仍待补全，原生文件已保留，请补全后再发布。");
+            var latest = history.FirstOrDefault();
+            if (binding.RequiresPromotion && (latest?.Id != binding.VersionId || latest.Sha256 != binding.Sha256))
                 throw new PdmConflictException("本次发布绑定的图纸版本已变化，请刷新发布草稿并重新核对；系统不会自动切换到新版本。");
         }
     }

@@ -162,13 +162,13 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
             "其他"
         ];
 
-    public int CheckoutHeartbeatSeconds { get; init; } = 180;
+    public int CheckoutHeartbeatSeconds { get; init; } = 60;
 
     public string MaterialAttachmentRoot { get; init; } = string.Empty;
 
-    public int CheckoutLeaseMinutes { get; init; } = 15;
+    public int CheckoutLeaseMinutes { get; init; } = 5;
 
-    public int CheckoutOfflineGraceMinutes { get; init; } = 60;
+    public int CheckoutOfflineGraceMinutes { get; init; } = 30;
 
     public int CheckoutReminderHours { get; init; } = 4;
 
@@ -177,6 +177,9 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
     public int CheckoutOverdueHours { get; init; } = 24;
 
     public int CheckoutForceReleaseHours { get; init; } = 48;
+    public bool CheckoutAutoReleaseEnabled { get; init; } = true;
+    public int CheckoutIdleReleaseMinutes { get; init; } = 30;
+    public int CheckoutReleaseCountdownSeconds { get; init; } = 60;
 
     public string BomDrawingNumberProperty { get; init; } = "物料编码";
 
@@ -227,7 +230,7 @@ public sealed record DrawingQrPolicy(
     int MarginMillimeters,
     bool EverySheet)
 {
-    public static DrawingQrPolicy Default { get; } = new(true, "型号", "1", 20, 5, true);
+    public static DrawingQrPolicy Default { get; } = new(false, "型号", "1", 20, 5, true);
 }
 
 public sealed record FormalSupplementPolicy(int? MaximumCount, int? ValidDays)
@@ -467,6 +470,10 @@ public sealed record PdmDocument(
 
     public int? StoredVersionCount { get; init; }
 
+    public int? DrawingVersionNumber { get; init; }
+    public string DrawingVersion => DrawingVersionNumber is > 0 ? $"V{DrawingVersionNumber}" : StoredVersionCount == 0 ? "未存档" : "待核对";
+    public string PublishedVersion { get; init; } = "未发布";
+
     public DateTimeOffset? CheckedOutAt { get; init; }
 
     public Guid? CheckoutSessionId { get; init; }
@@ -545,7 +552,17 @@ public sealed record EditLockSummary(
     string? ReleaseRequestReason,
     bool OwnedByCurrentUser,
     bool CanRequestRelease,
-    bool CanForceRelease);
+    bool CanForceRelease)
+{
+    public Guid? SessionId { get; init; }
+    public bool CanEmergencyRelease { get; init; }
+}
+
+public sealed record EditHandoff(Guid DocumentId, Guid ProjectId, string FromUser, string ToUser, Guid VersionId, DateTimeOffset ExpiresAt)
+{
+    public string? WaitSourceKey { get; init; }
+    public static string WaitingKey(PdmDocument document) => $"edit-wait:{document.Id:N}:{document.CheckoutSessionId:N}:{document.CheckoutReleaseRequestedAt?.UtcTicks}";
+}
 
 public sealed record FolderPermissionRule(
     Guid Id,
@@ -597,6 +614,8 @@ public sealed record BomItem(
     string Revision,
     bool IsComplete)
 {
+    public string? DisplayRevision { get; init; }
+
     public BomItem? MaintainedItem { get; init; }
 
     public IReadOnlyList<Guid>? SummaryItemIds { get; init; }

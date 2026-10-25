@@ -85,20 +85,32 @@ internal sealed class ImportedComponentStorage
         {
             // GetPackAndGo can return the active document's inventory even when called
             // through another loaded model's Extension. Activate without rebuilding/saving.
-            Activate(owner);
-            pack = owner.Extension.GetPackAndGo() as IPackAndGo;
-            if (pack == null) throw new InvalidOperationException("无法读取所属装配的原生打包清单：" + ownerPath);
-            pack.IncludeDrawings = includeDrawings;
-            pack.IncludeSuppressed = true;
-            if (!pack.GetDocumentNames(out var values) || !(values is Array names))
-                throw new InvalidOperationException("所属装配未返回可核对的原生打包清单：" + ownerPath);
-            var files = names.Cast<object>().Select(Convert.ToString).ToArray();
-            if (files.Length == 0 || !string.Equals(files[0], ownerPath, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("原生打包清单与所属装配不一致，已停止存档并保留本地文件。所属装配：" + ownerPath
-                    + "；清单根图档：" + files.FirstOrDefault());
-            PluginDiagnosticLog.Record("原生文件清单", "所属图档=" + ownerPath + "；原活动图档=" + previous?.GetPathName()
-                + "；已核对清单根图档；包含工程图=" + includeDrawings + "；文件数=" + files.Length + "；未执行保存或重建。");
-            return files;
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    Activate(owner);
+                    pack = owner.Extension.GetPackAndGo() as IPackAndGo;
+                    if (pack == null) throw new InvalidOperationException("无法读取所属装配的原生打包清单：" + ownerPath);
+                    pack.IncludeDrawings = includeDrawings;
+                    pack.IncludeSuppressed = true;
+                    if (!pack.GetDocumentNames(out var values) || !(values is Array names))
+                        throw new InvalidOperationException("所属装配未返回可核对的原生打包清单：" + ownerPath);
+                    var files = names.Cast<object>().Select(Convert.ToString).ToArray();
+                    if (files.Length == 0 || !string.Equals(files[0], ownerPath, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("原生打包清单与所属装配不一致，已保留本地文件。所属装配：" + ownerPath
+                            + "；清单根图档：" + files.FirstOrDefault());
+                    PluginDiagnosticLog.Record("原生文件清单", "所属图档=" + ownerPath + "；原活动图档=" + previous?.GetPathName()
+                        + "；已核对清单根图档；包含工程图=" + includeDrawings + "；文件数=" + files.Length + "；未执行保存或重建。");
+                    return files;
+                }
+                catch (Exception error) when (attempt == 0 && (error is COMException || error is InvalidOperationException))
+                {
+                    PluginDiagnosticLog.Record("原生文件清单", "重新激活目标图档后再读取一次：" + error);
+                    if (pack != null && Marshal.IsComObject(pack)) Marshal.ReleaseComObject(pack);
+                    pack = null;
+                }
+            }
         }
         finally
         {
@@ -106,7 +118,8 @@ internal sealed class ImportedComponentStorage
             {
                 if (pack != null && Marshal.IsComObject(pack)) Marshal.ReleaseComObject(pack);
                 if (previous != null && !string.Equals((application.ActiveDoc as IModelDoc2)?.GetPathName(), previous.GetPathName(), StringComparison.OrdinalIgnoreCase))
-                    Activate(previous);
+                    try { Activate(previous); }
+                    catch (Exception error) { PluginDiagnosticLog.Record("图档恢复", "原生清单读取后恢复原活动文档失败，清单仍有效：" + error); }
             }
             finally { inventoryReadDepth--; }
         }

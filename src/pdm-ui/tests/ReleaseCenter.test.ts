@@ -5,6 +5,19 @@ import * as api from '../src/api'
 import type { BomItem, CreateReleasePackageInput, ReleasePackageSummary } from '../src/types'
 
 describe('ReleaseCenter', () => {
+  it('发布记录显示整包日期和汇总物料的逐项交付要求，旧记录显示未设置', async () => {
+    const item: BomItem = { id: 'delivery-a', kind: 'Standard', sequence: 1, drawingNumber: 'STD-DATE', name: '接头', quantity: 1, unit: '个', revision: 'A', complete: true }
+    const release = { ...publishedFormal('StandardFormal'), drawingRequiredOn: '2026-11-02', standardBomSnapshot: [item, { ...item, id: 'delivery-b' }],
+      bomItemDeliveryOverrides: { 'delivery-b': { priority: 'Urgent' as const, requiredOn: '2026-10-30' } } }
+    const wrapper = mount(ReleaseCenter, { props: { ...frozenProps, releasePackage: release } })
+    expect(wrapper.get('.pdm-release-summary').text()).toContain('整包需求日期2026-11-02')
+    expect(wrapper.get('.pdm-release-delivery').text()).toBe('普通 · 2026-11-02；紧急 · 2026-10-30')
+    await wrapper.setProps({ releasePackage: { ...release, standardBomSnapshot: [{ ...item, quantity: 2, summaryItemIds: ['delivery-a', 'delivery-b'] }] } })
+    expect(wrapper.get('.pdm-release-delivery').text()).toBe('普通 · 2026-11-02；紧急 · 2026-10-30')
+    await wrapper.setProps({ releasePackage: { ...release, drawingRequiredOn: null, bomItemDeliveryOverrides: {} } })
+    expect(wrapper.get('.pdm-release-delivery').text()).toBe('普通 · 未设置')
+    wrapper.unmount()
+  })
   it('requires an explicit deletion choice and never expands an empty selection to the whole BOM', async () => {
     const removed: BomItem = { id: 'removed', kind: 'Standard', sequence: 1, drawingNumber: 'REMOVE-1', name: '待删除项', specification: 'M5', brand: '国优', quantity: 1, unit: '个', revision: 'A', complete: true }
     const wrapper = mount(ReleaseCenter, { props: { releasePackage: null, username: 'admin', pending: false, progress: 0, error: '', canManage: true, canDecide: true,
@@ -94,7 +107,7 @@ describe('ReleaseCenter', () => {
     expect(input.selectedBomItemIds).toEqual(['a', 'b'])
     wrapper.unmount()
   })
-  it('电气BOM为空时不回退标准件且禁止创建草稿，有电气物料时仅发布电气项', async () => {
+  it('电气件BOM为空时不回退标准件且禁止创建草稿，有电气物料时仅发布电气项', async () => {
     const standard: BomItem = { id: 'standard', kind: 'Standard', sequence: 1, drawingNumber: 'STD-001', name: '标准接头', quantity: 1, unit: '001', revision: 'W1', complete: true }
     const electrical: BomItem = { ...standard, id: 'electrical', kind: 'Electrical', drawingNumber: 'ELEC-001', name: '电气模块' }
     const wrapper = mount(ReleaseCenter, { props: { releasePackage: null, standardItems: [standard], releaseItems: [], allowedScopes: ['ElectricalFormal'], preferredScope: 'ElectricalFormal', username: 'engineer', pending: false, progress: 0, error: '', canManage: true, canDecide: false } })
@@ -167,6 +180,24 @@ describe('ReleaseCenter', () => {
     standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], steps: [],
   })
 
+  it.each(['StandardLongLead', 'StandardFormal', 'StandardSupplement', 'ElectricalLongLead', 'ElectricalFormal', 'ElectricalSupplement', 'NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement'] as const)('defaults approval history and package information to collapsed for %s', async scope => {
+    const release = { ...publishedFormal(scope), steps: [{ id: 'approved', stage: '工程师自检', assignee: 'engineer', status: 'approved' as const, detail: '已同意' }] }
+    const wrapper = mount(ReleaseCenter, { props: { ...frozenProps, releasePackage: release } })
+    const approval = wrapper.get('details[aria-label="审批流程"]')
+    const information = wrapper.get('details[aria-label="发布包信息"]')
+    expect(approval.attributes('open')).toBeUndefined()
+    expect(information.attributes('open')).toBeUndefined()
+    expect(approval.text()).toContain('工程师自检')
+    expect(information.text()).toContain(release.number)
+    // A newly selected package starts closed even after opening the previous record.
+    approval.element.setAttribute('open', '')
+    information.element.setAttribute('open', '')
+    await wrapper.setProps({ releasePackage: { ...release, id: 'next-package' } })
+    expect(wrapper.get('details[aria-label="审批流程"]').attributes('open')).toBeUndefined()
+    expect(wrapper.get('details[aria-label="发布包信息"]').attributes('open')).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it.each(['StandardSupplement', 'ElectricalSupplement', 'NonStandardSupplement'] as const)('shows the OPL selector only for %s and restores its draft selections', async scope => {
     const item = { ...frozenItem('opl-item'), kind: scope === 'StandardSupplement' ? 'Standard' as const : scope === 'ElectricalSupplement' ? 'Electrical' as const : 'NonStandard' as const }
     const formalScope = scope === 'StandardSupplement' ? 'StandardFormal' : scope === 'ElectricalSupplement' ? 'ElectricalFormal' : 'NonStandardWithDrawing'
@@ -199,10 +230,10 @@ describe('ReleaseCenter', () => {
     expect(rows()).toHaveLength(2)
     expect(rows().map(row => row.findAll('td')[1]!.text())).toEqual(['new-1', 'new-2'])
     expect(wrapper.get('.pdm-release-diff-summary').text()).toContain('新增 2')
-    expect(wrapper.findAll('.pdm-release-frozen-table th')).toHaveLength(11)
+    expect(wrapper.findAll('.pdm-release-frozen-table th')).toHaveLength(12)
     await click('查看完整BOM')
     expect(rows()).toHaveLength(30)
-    expect(wrapper.findAll('.pdm-release-frozen-table th')).toHaveLength(9)
+    expect(wrapper.findAll('.pdm-release-frozen-table th')).toHaveLength(10)
     expect(wrapper.find('[aria-label="审批快照显示方式"]').exists()).toBe(false)
     expect(rows()).toHaveLength(30)
     await click('仅看本次变更')
@@ -228,7 +259,7 @@ describe('ReleaseCenter', () => {
     expect(deleted.find('button').exists()).toBe(false)
     await wrapper.setProps({ releasePackage: frozenPackage(previous) })
     expect(wrapper.get('.pdm-empty-info').text()).toContain('本次没有增补或变更内容')
-    expect(wrapper.get('.pdm-empty-info').attributes('colspan')).toBe('11')
+    expect(wrapper.get('.pdm-empty-info').attributes('colspan')).toBe('12')
     wrapper.unmount()
   })
 
@@ -266,7 +297,7 @@ describe('ReleaseCenter', () => {
       username: 'reviewer', pending: false, progress: 0, error: '', canManage: false, canDecide: false } })
     try {
       await flushPromises()
-      expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '版本', '品牌', '备注', 'BOM总量', '前期已发布', '本次新增下发', '批注'])
+      expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '版本', '品牌', '备注', 'BOM总量', '前期已发布', '本次新增下发', '批注', '紧急程度 / 需求日期'])
       expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(7, 10).map(cell => cell.text())).toEqual(['4', '4', '0'])
       expect(wrapper.get('.pdm-item-comment-action').classes()).toContain('has-comments')
       expect(wrapper.get('.pdm-item-comment-action').text()).toBe('批注（1）')
@@ -274,7 +305,7 @@ describe('ReleaseCenter', () => {
       expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(7, 10).map(cell => cell.text())).toEqual(['12', '4', '8'])
       await wrapper.setProps({ releasePackages: [history[0]!] })
       expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(7, 10).map(cell => cell.text())).toEqual(['12', '1', '11'])
-      expect(wrapper.findAll('.pdm-release-frozen-table th')).toHaveLength(11)
+      expect(wrapper.findAll('.pdm-release-frozen-table th')).toHaveLength(12)
       expect(wrapper.findAll('.pdm-release-frozen-table tbody td').slice(7, 10).map(cell => cell.text())).toEqual(['12', '1', '11'])
     } finally { wrapper.unmount(); comments.mockRestore() }
   })
@@ -447,10 +478,10 @@ describe('ReleaseCenter', () => {
     expect(wrapper.text()).not.toContain('生效序列号')
     expect(wrapper.text()).toContain('EL-001')
     expect(wrapper.text()).toContain('修改 1')
-    expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '版本', '品牌', '备注', 'BOM总量', '前期已发布', '本次新增下发', '批注'])
-    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td').map(cell => cell.text())).toEqual(['1', 'EL-001', '电气元件', 'M18', 'W2', 'SMC', '安装备注', '2', '0', '2', '批注'])
-    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td.is-release-centered')).toHaveLength(8)
-    expect(wrapper.findAll('.pdm-release-frozen-table col')).toHaveLength(11)
+    expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '版本', '品牌', '备注', 'BOM总量', '前期已发布', '本次新增下发', '批注', '紧急程度 / 需求日期'])
+    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td').map(cell => cell.text())).toEqual(['1', 'EL-001', '电气元件', 'M18', '未发布', 'SMC', '安装备注', '2', '0', '2', '批注', '普通 · 未设置'])
+    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td.is-release-centered')).toHaveLength(9)
+    expect(wrapper.findAll('.pdm-release-frozen-table col')).toHaveLength(12)
     const topWorkflow = wrapper.get('.pdm-release-top-workflow')
     const summary = wrapper.get('.pdm-release-summary')
     expect(topWorkflow.find('.pdm-release-preparation').exists()).toBe(true)

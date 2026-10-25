@@ -65,7 +65,7 @@ internal static class Program
             Run("只读打开保护总装及全部引用，并保留Working本地修改", ReadOnlyWorkspace);
             Run("工程图模型引用变化参与升版判断", DrawingReferences);
             Run("已纳入树的子装配体不自动成为独立根", RootAdmission);
-            Run("分散导入缓存允许存档，跨项目与未知受控身份仍阻止", ExternalImport);
+            Run("分散文件的目录位置不阻止存档，跨项目与未知受控来源仍被识别", ExternalImport);
             Run("压缩零件保留引用，缺失文件及未展开子装配体阻止漏传", SuppressedReferences);
             Run("已存档压缩子装配体沿用准确版本及内部结构，修改和配置冲突仍拦截", ArchivedSuppressedAssembly);
             Run("跨子项目已存档同名零件按当前项目文件内容复用并锁定引用版本", SubprojectReference);
@@ -75,7 +75,7 @@ internal static class Program
             Run("工程图内的独立模型引用同步身份和准确版本，双向关系不会递归溢出", NestedDrawingReferenceIdentity);
             Run("失败登记不写永久身份，旧空登记可重新准备，历史和跨项目身份保持", PendingRegistrationIdentity);
             Run("预检与提交复用固定快照，多配置及工程图引用不能被异步刷新改写", FrozenArchiveSnapshot);
-            Run("计划内引用保留待绑定版本，缺失身份及计划外缺失版本仍在上传前拦截", IncompletePlannedSnapshot);
+            Run("快照拒绝缺失身份，计划内与待服务端核对引用不猜测最新版本", IncompletePlannedSnapshot);
             Run("中断批次记录隔离服务器与账号，存活进程不被误清理", InterruptedBatchJournal);
             Run("重启后核对已提交、未提交、并发完成和服务器不可达的批次", InterruptedBatchRecovery);
             if (args.Length > 2) Run("实际P700012发布版本与工作区编辑基准兼容", () => RealReleasedBaseline(args[2]));
@@ -384,7 +384,9 @@ internal static class Program
         var planned=Static("PdmApiClient","CaptureArchiveSnapshot",root,paths);
         var body=Json.Deserialize<Dictionary<string,object>>(Json.Serialize(Call(planned,"CreateRoot")));
         Assert(((Dictionary<string,object>)((IList)body["children"])[0])["revision"]==null,"invented a revision before the child committed");
-        Expect<InvalidOperationException>(()=>Static("PdmApiClient","CaptureArchiveSnapshot",root,new HashSet<string>()));
+        var unresolved=Static("PdmApiClient","CaptureArchiveSnapshot",root,new HashSet<string>());
+        var unresolvedBody=Json.Deserialize<Dictionary<string,object>>(Json.Serialize(Call(unresolved,"CreateRoot")));
+        Assert(((Dictionary<string,object>)((IList)unresolvedBody["children"])[0])["revision"]==null,"unknown existing reference guessed a latest version before server preflight");
         Set(child,"Revision","W1");Static("PdmApiClient","CaptureArchiveSnapshot",root,paths);
     }
     static void InterruptedBatchJournal()
@@ -565,6 +567,9 @@ internal static class Program
                 var path=Path.Combine(cache,name);File.WriteAllText(path,"archived bytes");
                 var file=New("ControlledOpenFileDto");Set(file,"DocumentId",name=="ROOT.SLDASM"?Get(manifest,"RootDocumentId"):Guid.NewGuid());Set(file,"VersionId",Guid.NewGuid());Set(file,"FileName",name);Set(file,"RelativePath",name);Set(file,"FileLength",new FileInfo(path).Length);Set(file,"Sha256",Hash(path));Set(file,"Revision","W1");Set(file,"IsRoot",name=="ROOT.SLDASM");((IList)list).Add(file);
             }
+            var populatedCache=(string)Call(manager,"ReadOnlyDirectory",manifest,false);Directory.CreateDirectory(populatedCache);
+            foreach(var path in Directory.GetFiles(cache))File.Copy(path,Path.Combine(populatedCache,Path.GetFileName(path)));
+            cache=populatedCache;
             var working=(string)Call(manager,"WorkingDirectory",manifest);Directory.CreateDirectory(working);var local=Path.Combine(working,"ROOT.SLDASM");File.WriteAllText(local,"local changes must survive");
             var opened=(string)Await(Call(manager,"PrepareReadOnlyAsync",manifest,false,CancellationToken.None));
             Assert(opened==Path.Combine(cache,"ROOT.SLDASM"),"used editable Working file");
@@ -862,7 +867,8 @@ internal static class Program
         Assert((bool)Static("PdmDocumentIdentityStore", "TryWriteControlledVersion", path, Guid.NewGuid(), project, Guid.NewGuid(), "W1", Hash(path), new FileInfo(path).Length), "same-project binding failed");
         Assert(!(bool)Static("PdmAddin", "RequiresExternalReferenceCopy", node, project), "same-project source blocked");
         Assert((bool)Static("PdmAddin", "RequiresExternalReferenceCopy", node, Guid.NewGuid()), "foreign project binding allowed");
-        Expect<InvalidOperationException>(() => Static("PdmAddin", "ValidateNewAssemblyReferenceLocations", items, Guid.NewGuid()));
+        Static("PdmAddin", "ValidateNewAssemblyReferenceLocations", items, Guid.NewGuid());
+        Assert(Get(node, "DocumentId") == null, "directory validation silently adopted foreign document identity");
         var unbound = Path.Combine(directory, "workspace", "unknown.SLDPRT");
         Directory.CreateDirectory(Path.GetDirectoryName(unbound)); File.WriteAllText(unbound, "unknown"); Set(node, "FullPath", unbound);
         Assert((bool)Static("PdmAddin", "RequiresExternalReferenceCopy", node, project), "unbound workspace file allowed");
@@ -927,7 +933,11 @@ internal static class Program
     }
     static object Get(object value, string name) => value.GetType().GetProperty(name, Flags).GetValue(value);
     static void Set(object value, string name, object data) => value.GetType().GetProperty(name, Flags).SetValue(value, data);
-    static object Call(object value, string name, params object[] args) => value.GetType().GetMethod(name, Flags).Invoke(value, args);
+    static object Call(object value, string name, params object[] args)
+    {
+        var method = value.GetType().GetMethod(name, Flags);
+        return method.Invoke(value, args.Concat(method.GetParameters().Skip(args.Length).Select(parameter => parameter.DefaultValue)).ToArray());
+    }
     static object Static(string type, string name, params object[] args) => T(type).GetMethod(name, Flags).Invoke(null, args);
     static string Hash(string path) { using (var hash = SHA256.Create()) using (var file = File.OpenRead(path)) return BitConverter.ToString(hash.ComputeHash(file)).Replace("-", ""); }
     static void Assert(bool condition, string message) { if (!condition) throw new Exception(message); }

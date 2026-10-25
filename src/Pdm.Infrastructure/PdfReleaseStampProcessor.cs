@@ -60,7 +60,13 @@ public sealed class PdfReleaseStampProcessor(IPdmRepository repository, ILogger<
             var cadCode = version.PropertySnapshot.FirstOrDefault(item => item.Key.Split('/').Last() == "UPLM_QR_CONTENT").Value;
             var cadRule = version.PropertySnapshot.FirstOrDefault(item => item.Key.Split('/').Last() == "UPLM_QR_RULE_VERSION").Value;
             var cadCodes = new HashSet<string>(StringComparer.Ordinal);
-            if (!string.IsNullOrWhiteSpace(cadCode) && !string.IsNullOrWhiteSpace(cadRule)) cadCodes.Add(cadCode);
+            // The legacy release worker stored its formal code without the independent CAD plug-in's policy version.
+            // Its frozen content still identifies the owned image after a drawing is copied or registered under a new id.
+            var legacy = cadCode?.Split('|');
+            var frozenFormalCode = legacy is { Length: 4 } && legacy[0] == "UPLM-DRAWING"
+                && !string.IsNullOrWhiteSpace(legacy[1]) && legacy[2].Length == 1 && legacy[2][0] is >= 'A' and <= 'Z'
+                && Guid.TryParseExact(legacy[3], "N", out var legacyDrawingId) && legacyDrawingId != Guid.Empty;
+            if (!string.IsNullOrWhiteSpace(cadCode) && (!string.IsNullOrWhiteSpace(cadRule) || frozenFormalCode)) cadCodes.Add(cadCode);
             cancellationToken.ThrowIfCancellationRequested();
             lock (PdfReleasePageEditor.Gate) Apply(stamp, source.DocumentId, pdfPath, cadCodes);
         }

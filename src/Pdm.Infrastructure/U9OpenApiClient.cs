@@ -378,7 +378,7 @@ public sealed partial class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiC
                 ReadDecimal(row, "Weight", "m_weight"),
                 ReadEntityString(row, "WeightUom", "Code"),
                 ReadEntityString(row, "DescFlexField", U9MaterialContract.PurchaseLinkPublicSegment))
-                { CreationAttributes = U9MaterialCreationRules.ReadAttributes(row) })
+                { CreationAttributes = U9MaterialCreationRules.ReadAttributes(row), StockPlan = ReadStockPlan(row) })
             .Where(item => !string.IsNullOrWhiteSpace(item.U9ItemId) || !string.IsNullOrWhiteSpace(item.U9ItemCode))
             .ToArray();
         // The standard DTO omits IsExpandByOrder; query only IDs already returned by this authenticated lookup.
@@ -515,6 +515,16 @@ public sealed partial class U9OpenApiClient(HttpClient httpClient) : IU9OpenApiC
             }).ToArray() }).ToArray();
         }
         return new U9BomQueryResult(responseCode, ReadMessage(root), boms);
+    }
+
+    private static U9ItemStockPlan ReadStockPlan(JsonElement row)
+    {
+        decimal? Decimal(string field) => decimal.TryParse(ReadEntityString(row, "InventoryInfo", field),
+            System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var value) ? value : null;
+        var effective = ReadEntityString(row, "Effective", "IsEffective");
+        bool? isEffective = bool.TryParse(effective, out var flag) ? flag : effective == "1" ? true : effective == "0" ? false : null;
+        return new(ReadEntityString(row, "Org", "Code"), isEffective, Decimal("SafetyStockQty"), Decimal("ReorderQty"),
+            ReadEntityString(row, "InventoryUOM", "Code"), ReadEntityString(row, "InventoryUOM", "Name"));
     }
 
     private async Task<IReadOnlyList<JsonElement>> QueryCreationFlagsAsync(string baseUrl, string token,

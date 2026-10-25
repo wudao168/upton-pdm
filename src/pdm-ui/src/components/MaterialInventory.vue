@@ -237,8 +237,8 @@ onMounted(() => {
         <div class="material-inventory__table">
           <el-table :data="rows" height="100%" stripe show-summary :summary-method="inventorySummary" empty-text="尚无符合条件的库存记录">
             <el-table-column align="center" prop="warehouseName" label="存储地点名称" min-width="150" show-overflow-tooltip />
-            <el-table-column align="center" prop="materialCode" label="料号" min-width="130" show-overflow-tooltip />
-            <el-table-column align="center" prop="itemName" label="品名" min-width="150" show-overflow-tooltip />
+            <el-table-column align="center" prop="materialCode" label="料号" min-width="130" show-overflow-tooltip ><template #default="{ row }"><span v-stocked-material="row.materialCode">{{ row.materialCode }}</span></template></el-table-column>
+            <el-table-column align="center" prop="itemName" label="品名" min-width="150" show-overflow-tooltip ><template #default="{ row }"><span v-stocked-material="row.materialCode">{{ row.itemName }}</span></template></el-table-column>
             <el-table-column align="center" label="品牌" min-width="110" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
             <el-table-column align="center" label="规格" min-width="190" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
             <el-table-column v-if="similarMode" align="center" label="相似度" min-width="90"><template #default="{ row }">{{ row.similarityPercent == null ? '—' : `${Number(row.similarityPercent).toFixed(1)}%` }}</template></el-table-column>

@@ -6,6 +6,24 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class MaterialImportWorkbookTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void CodeOnlyWorkbookPreservesZerosAndReadsNamedColumnOrFirstColumn(bool header)
+    {
+        using var workbook = new MemoryStream();
+        using (var archive = new ZipArchive(workbook, ZipArchiveMode.Create, true))
+        {
+            using var writer = new StreamWriter(archive.CreateEntry("xl/worksheets/sheet1.xml").Open(), new UTF8Encoding(false));
+            writer.Write("<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>");
+            if (header) writer.Write("<row><c r=\"A1\" t=\"inlineStr\"><is><t>名称</t></is></c><c r=\"B1\" t=\"inlineStr\"><is><t>料号</t></is></c></row>");
+            foreach (var row in new[] { 2, 3 }) writer.Write($"<row><c r=\"{(header ? "B" : "A")}{row}\" t=\"inlineStr\"><is><t>00001234</t></is></c></row>");
+            writer.Write("</sheetData></worksheet>");
+        }
+        workbook.Position = 0;
+        Assert.Equal("00001234", Assert.Single(MaterialImportWorkbook.ReadMaterialCodes(workbook)));
+    }
+
     [Fact]
     public void Read_MapsFilledRowAndIgnoresRowsContainingOnlyDefaultUnit()
     {

@@ -168,13 +168,16 @@ public sealed partial class MySqlPdmRepository
         {
             BrowserCadArchiveEnabled = !values.TryGetValue("browser_cad_archive_enabled", out var browserArchive) || browserArchive != "false",
             MaterialAttachmentRoot = ReadString(values, "material_attachment_root", Path.Combine(Path.GetDirectoryName(vaultRoot) ?? vaultRoot, "MaterialAttachments")),
-            CheckoutHeartbeatSeconds = ReadInt(values, "checkout_heartbeat_seconds", 180),
-            CheckoutLeaseMinutes = ReadInt(values, "checkout_lease_minutes", 15),
-            CheckoutOfflineGraceMinutes = ReadInt(values, "checkout_offline_grace_minutes", 60),
+            CheckoutHeartbeatSeconds = ReadInt(values, "checkout_heartbeat_seconds", 60),
+            CheckoutLeaseMinutes = ReadInt(values, "checkout_lease_minutes", 5),
+            CheckoutOfflineGraceMinutes = ReadInt(values, "checkout_offline_grace_minutes", 30),
             CheckoutReminderHours = ReadInt(values, "checkout_reminder_hours", 4),
             CheckoutStrongReminderHours = ReadInt(values, "checkout_strong_reminder_hours", 8),
             CheckoutOverdueHours = ReadInt(values, "checkout_overdue_hours", 24),
             CheckoutForceReleaseHours = ReadInt(values, "checkout_force_release_hours", 48),
+            CheckoutAutoReleaseEnabled = !values.TryGetValue("checkout_auto_release_enabled", out var autoRelease) || autoRelease != "false",
+            CheckoutIdleReleaseMinutes = ReadInt(values, "checkout_idle_release_minutes", 30),
+            CheckoutReleaseCountdownSeconds = ReadInt(values, "checkout_release_countdown_seconds", 60),
             BomDrawingNumberProperty = ReadString(values, "bom_drawing_number_property", "物料编码"),
             BomNameProperty = ReadString(values, "bom_name_property", "物料名称"),
             BomDescriptionProperty = ReadString(values, "bom_description_property", "备注"),
@@ -250,6 +253,9 @@ public sealed partial class MySqlPdmRepository
             new { Key = "checkout_strong_reminder_hours", Value = settings.CheckoutStrongReminderHours.ToString() },
             new { Key = "checkout_overdue_hours", Value = settings.CheckoutOverdueHours.ToString() },
             new { Key = "checkout_force_release_hours", Value = settings.CheckoutForceReleaseHours.ToString() },
+            new { Key = "checkout_auto_release_enabled", Value = settings.CheckoutAutoReleaseEnabled ? "true" : "false" },
+            new { Key = "checkout_idle_release_minutes", Value = settings.CheckoutIdleReleaseMinutes.ToString() },
+            new { Key = "checkout_release_countdown_seconds", Value = settings.CheckoutReleaseCountdownSeconds.ToString() },
             new { Key = "bom_drawing_number_property", Value = settings.BomDrawingNumberProperty },
             new { Key = "bom_name_property", Value = settings.BomNameProperty },
             new { Key = "bom_description_property", Value = settings.BomDescriptionProperty },
@@ -268,7 +274,7 @@ public sealed partial class MySqlPdmRepository
             new { Key = "release_change_reason_types", Value = JsonSerializer.Serialize(settings.ReleaseChangeReasonTypes, jsonOptions) },
             new { Key = "release_change_reason_labels", Value = JsonSerializer.Serialize(settings.ReleaseChangeReasonLabels, jsonOptions) },
             new { Key = "formal_supplement_policies", Value = JsonSerializer.Serialize(settings.FormalSupplementPolicies, jsonOptions) },
-            new { Key = "drawing_qr_policy", Value = JsonSerializer.Serialize(settings.DrawingQrPolicy, jsonOptions) },
+            new { Key = "drawing_qr_policy", Value = JsonSerializer.Serialize(settings.DrawingQrPolicy with { Enabled = false }, jsonOptions) },
             new { Key = "preview_conversion", Value = JsonSerializer.Serialize(settings.PreviewConversion, jsonOptions) },
             new { Key = "program_template_options", Value = JsonSerializer.Serialize(settings.ProgramTemplateOptions, jsonOptions) },
             new { Key = "engineering_kit_options", Value = JsonSerializer.Serialize(settings.EngineeringKitOptions, jsonOptions) }
@@ -297,7 +303,7 @@ public sealed partial class MySqlPdmRepository
             return DrawingQrPolicy.Default;
         try
         {
-            return JsonSerializer.Deserialize<DrawingQrPolicy>(json, jsonOptions) ?? DrawingQrPolicy.Default;
+            return (JsonSerializer.Deserialize<DrawingQrPolicy>(json, jsonOptions) ?? DrawingQrPolicy.Default) with { Enabled = false };
         }
         catch (JsonException)
         {

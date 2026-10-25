@@ -6,14 +6,16 @@ public sealed class MaterialAttachmentService(
     IMaterialRepository materials,
     IPdmRepository repository,
     IMaterialAttachmentStorage storage,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    IEngineeringKitRepository? kits = null)
 {
     public async Task<IReadOnlyList<MaterialAttachment>> ListAsync(Guid materialId, MaterialAttachmentKind? kind, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireReadPermissionAsync(actor, role, cancellationToken);
-        _ = await materials.FindMaterialAsync(materialId, cancellationToken)
-            ?? throw new PdmNotFoundException("料品主档不存在。");
-        return await materials.ListMaterialAttachmentsAsync(materialId, kind, cancellationToken);
+        if (await materials.FindMaterialAsync(materialId, cancellationToken) is not null)
+            return await materials.ListMaterialAttachmentsAsync(materialId, kind, cancellationToken);
+        await RequireReleasedKitAsync(materialId, actor, role, false, cancellationToken);
+        return await kits!.ListLibraryAttachmentsAsync(materialId, kind, cancellationToken);
     }
 
     public async Task<MaterialAttachmentUploadSession> StartUploadAsync(
@@ -26,15 +28,23 @@ public sealed class MaterialAttachmentService(
         UserRole role,
         CancellationToken cancellationToken)
     {
-        await RequireAttachmentWritePermissionAsync(actor, role, kind, cancellationToken);
-        var material = await materials.FindMaterialAsync(materialId, cancellationToken)
-            ?? throw new PdmNotFoundException("料品主档不存在。");
-        if (material.IsArchived) throw new PdmRuleException("已停用料品不能上传附件。");
+        var material = await materials.FindMaterialAsync(materialId, cancellationToken);
+        EngineeringKit? kit = null;
+        if (material is null)
+        {
+            kit = await RequireReleasedKitAsync(materialId, actor, role, true, cancellationToken);
+            if (kind is not (MaterialAttachmentKind.CoverImage or MaterialAttachmentKind.Model3D or MaterialAttachmentKind.Document)) throw new PdmRuleException("不支持该套件附件类型。");
+        }
+        else
+        {
+            await RequireAttachmentWritePermissionAsync(actor, role, kind, cancellationToken);
+            if (material.IsArchived) throw new PdmRuleException("已停用料品不能上传附件。");
+        }
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
         if (string.IsNullOrWhiteSpace(settings.MaterialAttachmentRoot))
             throw new PdmRuleException("料品资料存档根目录尚未配置。");
         return await storage.StartUploadAsync(
-            material.Id, material.MaterialCode, kind, fileName, totalLength, sha256,
+            materialId, material?.MaterialCode ?? kit!.Code!, kind, fileName, totalLength, sha256,
             settings.MaterialAttachmentRoot, actor, cancellationToken);
     }
 
@@ -59,10 +69,24 @@ public sealed class MaterialAttachmentService(
         await RequireAnyAttachmentWritePermissionAsync(actor, role, cancellationToken);
         var stored = await storage.CompleteUploadAsync(sessionId, actor, cancellationToken);
         var material = await materials.FindMaterialAsync(stored.MaterialId, cancellationToken);
-        if (material is null || material.IsArchived)
+        EngineeringKit? kit = null;
+        try
+        {
+            if (material is null)
+            {
+                kit = await RequireReleasedKitAsync(stored.MaterialId, actor, role, true, cancellationToken);
+                if (stored.Kind is not (MaterialAttachmentKind.CoverImage or MaterialAttachmentKind.Model3D or MaterialAttachmentKind.Document)) throw new PdmRuleException("不支持该套件附件类型。");
+            }
+            else
+            {
+                await RequireAttachmentWritePermissionAsync(actor, role, stored.Kind, cancellationToken);
+                if (material.IsArchived) throw new PdmRuleException("料品已停用，附件未入库。");
+            }
+        }
+        catch
         {
             await storage.DiscardAsync(stored, cancellationToken);
-            throw new PdmRuleException("料品不存在或已停用，附件未入库。");
+            throw;
         }
 
         var attachment = new MaterialAttachment(
@@ -70,7 +94,9 @@ public sealed class MaterialAttachmentService(
             stored.RelativePath, stored.Length, stored.Sha256, actor, stored.StoredAt);
         try
         {
-            attachment = await materials.CreateMaterialAttachmentAsync(attachment, cancellationToken);
+            attachment = material is null
+                ? await kits!.CreateLibraryAttachmentAsync(attachment, cancellationToken)
+                : await materials.CreateMaterialAttachmentAsync(attachment, cancellationToken);
         }
         catch
         {
@@ -80,7 +106,7 @@ public sealed class MaterialAttachmentService(
 
         await repository.AppendAuditAsync(new AuditEntry(
             Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "material.attachment.upload", nameof(MaterialAttachment),
-            attachment.Id.ToString(), $"{material.MaterialCode} · {attachment.Kind} · {attachment.OriginalFileName} · {attachment.Sha256}"), cancellationToken);
+            attachment.Id.ToString(), $"{material?.MaterialCode ?? kit!.Code} · {attachment.Kind} · {attachment.OriginalFileName} · {attachment.Sha256}"), cancellationToken);
         return attachment;
     }
 
@@ -93,6 +119,12 @@ public sealed class MaterialAttachmentService(
     {
         await RequireReadPermissionAsync(actor, role, cancellationToken);
         var attachment = await materials.FindMaterialAttachmentAsync(attachmentId, cancellationToken);
+        if (attachment is null && kits is not null)
+        {
+            attachment = await kits.FindLibraryAttachmentAsync(attachmentId, cancellationToken);
+            if (attachment is not null && attachment.MaterialId == materialId)
+                await RequireReleasedKitAsync(materialId, actor, role, false, cancellationToken);
+        }
         if (attachment is null || attachment.MaterialId != materialId) throw new PdmNotFoundException("料品附件不存在。");
         await storage.VerifyAsync(attachment, cancellationToken);
         var content = await storage.OpenReadAsync(attachment, cancellationToken);
@@ -100,6 +132,36 @@ public sealed class MaterialAttachmentService(
             Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "material.attachment.download", nameof(MaterialAttachment),
             attachment.Id.ToString(), $"下载料品附件：{attachment.OriginalFileName}"), cancellationToken);
         return new(attachment, content);
+    }
+
+    public async Task DeleteAsync(Guid materialId, Guid attachmentId, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireAnyAttachmentWritePermissionAsync(actor, role, cancellationToken);
+        var material = await materials.FindMaterialAsync(materialId, cancellationToken);
+        EngineeringKit? kit = null;
+        MaterialAttachment? attachment;
+        if (material is null)
+        {
+            kit = await RequireReleasedKitAsync(materialId, actor, role, true, cancellationToken);
+            attachment = await kits!.FindLibraryAttachmentAsync(attachmentId, cancellationToken);
+        }
+        else
+        {
+            await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
+            if (material.IsArchived) throw new PdmRuleException("已停用料品不能删除附件，请先恢复启用。");
+            attachment = await materials.FindMaterialAttachmentAsync(attachmentId, cancellationToken);
+        }
+        if (attachment is null || attachment.MaterialId != materialId) throw new PdmNotFoundException("料品附件不存在。");
+        if (attachment.Kind is not (MaterialAttachmentKind.Model3D or MaterialAttachmentKind.Document))
+            throw new PdmRuleException("此处只能删除3D或资料附件。");
+        var deleted = material is null
+            ? await kits!.DeleteLibraryAttachmentAsync(materialId, attachmentId, cancellationToken)
+            : await materials.DeleteMaterialAttachmentAsync(materialId, attachmentId, cancellationToken);
+        if (!deleted)
+            throw new PdmConflictException("附件已被删除或料品状态已变化，请刷新后重试。");
+        await repository.AppendAuditAsync(new AuditEntry(
+            Guid.NewGuid(), timeProvider.GetUtcNow(), actor, material is null ? "engineering-kit.attachment.delete" : "material.attachment.delete", nameof(MaterialAttachment),
+            attachment.Id.ToString(), $"删除附件记录：{material?.MaterialCode ?? kit!.Code} · {attachment.Kind} · {attachment.OriginalFileName} · {attachment.Sha256}；存档文件保留。"), cancellationToken);
     }
 
     public async Task<PdmMaterial> SetCoverAsync(
@@ -130,6 +192,19 @@ public sealed class MaterialAttachmentService(
             Guid.NewGuid(), timeProvider.GetUtcNow(), actor, attachmentId is null ? "material.cover.clear" : "material.cover.set",
             nameof(PdmMaterial), materialId.ToString(), attachmentId is null ? "清除当前封面指针；历史图片保留。" : $"切换当前封面：{attachmentId}"), cancellationToken);
         return saved;
+    }
+
+    private async Task<EngineeringKit> RequireReleasedKitAsync(Guid id, string actor, UserRole role, bool write, CancellationToken cancellationToken)
+    {
+        var kit = kits is null ? null : await kits.FindAsync(id, cancellationToken);
+        if (kit?.CurrentReleasedRevisionId is null) throw new PdmNotFoundException("料品或已发布套件不存在。");
+        if (write)
+        {
+            await RequireAnyAttachmentWritePermissionAsync(actor, role, cancellationToken);
+            if (!kit.IsActive) throw new PdmRuleException("已停用套件不能维护资料，请先恢复启用。");
+        }
+        else await RequirePermissionAsync(actor, role, PermissionCodes.StandardLibraryView, cancellationToken);
+        return kit;
     }
 
     private async Task RequirePermissionAsync(string actor, UserRole role, string permissionCode, CancellationToken cancellationToken)

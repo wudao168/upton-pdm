@@ -10,32 +10,38 @@ public sealed class BomSavePerformanceTests
     [Theory]
     [InlineData(BomKind.Standard)]
     [InlineData(BomKind.NonStandard)]
-    public async Task ChangedInstancesShareVersionReadAndEnqueueOneBatch(BomKind kind)
+    public async Task ChangedInstancesShareLightweightVersionReadAndEnqueueOneBatch(BomKind kind)
     {
         var projectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
         var repository = new InMemoryPdmRepository(TimeProvider.System);
-        var document = (await repository.ListDocumentsAsync(projectId, default)).First();
+        var documents = Enumerable.Range(0, 17).Select(_ => Guid.NewGuid()).ToArray();
         var rows = Enumerable.Range(1, 1000).Select(index => new BomItem(Guid.NewGuid(), projectId, kind,
             index, "MAT-1", "物料", 1, "001", "钢", "M1", "W1", true)
-        { Source = "Auto", SourceDocumentId = document.Id, SourceInstancePath = $"root/{index}" }).ToArray();
+        { Source = "Auto", SourceDocumentId = documents[index % documents.Length], SourceInstancePath = $"root/{index}" }).ToArray();
         await repository.ReplaceBomAsync(projectId, kind, rows, default);
         var proxy = DispatchProxy.Create<IPdmRepository, CountingRepository>();
         var counter = (CountingRepository)(object)proxy;
         counter.Target = repository;
-        counter.Version = new DocumentVersion(Guid.NewGuid(), document.Id, document.Revision,
-            DocumentVersionStatus.Work, "test", 0, "hash", "admin", DateTimeOffset.UtcNow, "test",
-            new Dictionary<string, string?>(), null!, [], [], null, null, null, null);
+        counter.LatestVersions = documents.ToDictionary(id => id,
+            id => new DocumentVersionVerification(Guid.NewGuid(), id, "W3", 0, "hash", null));
         var workflow = new PdmWorkflowService(proxy, null!, null!, TimeProvider.System);
         var inputs = rows.Select(row => new BomItemInput(row.Sequence, row.DrawingNumber, row.Name, row.Quantity,
             row.Unit, row.Material, row.Specification, row.Revision, true, SourceDocumentId: row.SourceDocumentId,
             Id: row.Id, SourceInstancePath: row.SourceInstancePath, Brand: "更新品牌")).ToArray();
         await workflow.ReplaceBomAsync(projectId, kind, inputs, "admin", UserRole.Administrator, default);
         Assert.Equal(1, counter.SettingsReads);
-        Assert.Equal(1, counter.VersionReads);
+        Assert.Equal(0, counter.VersionReads);
+        Assert.Equal(1, counter.VersionVerificationReads);
+        Assert.Equal(documents.Order(), counter.RequestedDocuments.Order());
         Assert.Equal(1, counter.WritebackBatches);
         Assert.Equal(1000, counter.WritebackCount);
         var requests = await repository.ListCadPropertyWritebacksAsync(projectId, default);
         Assert.Equal(1000, requests.Count(request => rows.Any(row => row.Id == request.BomItemId)));
+        Assert.All(requests.Where(request => rows.Any(row => row.Id == request.BomItemId)), request => {
+            Assert.Equal(counter.LatestVersions[request.SourceDocumentId].Id, request.ExpectedVersionId);
+            Assert.Equal("W3", request.ExpectedRevision);
+            Assert.Equal("更新品牌", request.Properties["品牌"]);
+        });
     }
 
     [Theory]
@@ -66,8 +72,34 @@ public sealed class BomSavePerformanceTests
         var saved = await workflow.ReplaceBomAsync(projectId, BomKind.Standard, inputs, "admin", UserRole.Administrator, default);
 
         Assert.Equal(includeManual ? 1 : 0, counter.SnapshotReads);
+        if (!includeManual) Assert.Equal(0, counter.VersionReads);
+        Assert.Equal(0, counter.VersionVerificationReads);
         Assert.Equal(rows.Select(row => (row.Id, row.Quantity, row.SourceInstancePath)),
             saved.Select(row => (row.Id, row.Quantity, row.SourceInstancePath)));
+    }
+
+    [Theory]
+    [InlineData(BomKind.Standard)]
+    [InlineData(BomKind.Electrical)]
+    public async Task MissingArchivedVersionDoesNotCreateWritebacksOrReadFullSnapshots(BomKind kind)
+    {
+        var projectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var row = new BomItem(Guid.NewGuid(), projectId, kind, 1, "", "未存档物料", 1, "001", null, "M1", "W1", false)
+        { Source = "Auto", SourceDocumentId = Guid.NewGuid(), SourceInstancePath = "root/part" };
+        await repository.ReplaceBomAsync(projectId, kind, [row], default);
+        var proxy = DispatchProxy.Create<IPdmRepository, CountingRepository>();
+        var counter = (CountingRepository)(object)proxy;
+        counter.Target = repository;
+        var workflow = new PdmWorkflowService(proxy, null!, null!, TimeProvider.System);
+        var saved = await workflow.ReplaceBomAsync(projectId, kind,
+            [new(1, "", row.Name, 1, "001", null, "M1", "W1", false,
+                SourceDocumentId: row.SourceDocumentId, Id: row.Id, SourceInstancePath: row.SourceInstancePath, Brand: "更新品牌")],
+            "admin", UserRole.Administrator, default);
+        Assert.Equal("更新品牌", Assert.Single(saved).Brand);
+        Assert.Equal(0, counter.VersionReads);
+        Assert.Equal(kind == BomKind.Electrical ? 0 : 1, counter.VersionVerificationReads);
+        Assert.Equal(0, counter.WritebackBatches);
     }
 
     public class CountingRepository : DispatchProxy
@@ -78,7 +110,9 @@ public sealed class BomSavePerformanceTests
         public int VersionReads;
         public int WritebackBatches;
         public int WritebackCount;
-        public DocumentVersion? Version;
+        public int VersionVerificationReads;
+        public List<Guid> RequestedDocuments = [];
+        public Dictionary<Guid, DocumentVersionVerification> LatestVersions = [];
         protected override object? Invoke(MethodInfo? method, object?[]? args)
         {
             if (method!.Name == nameof(IPdmRepository.GetLatestReferenceSnapshotAsync)) SnapshotReads++;
@@ -86,7 +120,14 @@ public sealed class BomSavePerformanceTests
             if (method.Name == nameof(IPdmRepository.ListDocumentVersionsAsync))
             {
                 VersionReads++;
-                if (Version is not null) return Task.FromResult<IReadOnlyList<DocumentVersion>>([Version]);
+            }
+            if (method.Name == nameof(IPdmRepository.ListDocumentVersionVerificationsAsync))
+            {
+                VersionVerificationReads++;
+                var requests = (IReadOnlyList<DocumentVersionVerificationRequest>)args![0]!;
+                RequestedDocuments.AddRange(requests.Select(request => request.DocumentId));
+                return Task.FromResult<IReadOnlyList<DocumentVersionVerificationResult>>(requests.Select(request =>
+                    new DocumentVersionVerificationResult(request.DocumentId, LatestVersions.GetValueOrDefault(request.DocumentId), null)).ToArray());
             }
             if (method.Name == nameof(IPdmRepository.EnqueueCadPropertyWritebackBatchAsync))
             {

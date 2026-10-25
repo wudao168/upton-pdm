@@ -13,7 +13,8 @@ internal static partial class Program
  {
   foreach(var mode in new[]{"loaded","closed","lightweight","ancestor-lightweight","suppressed","not-attached","wrong-path","read-only","patterned","held-tree","embedded-unloaded"})
    ComponentRenameCheck(host,mode);
-  ModelFillCheck(false);ModelFillCheck(true);PropertyReadFailureCheck();
+  ModelFillCheck(false);ModelFillCheck(true);PropertyReadFailureCheck();PartialPropertyReadCheck();PartialPropertyCardScenario();
+  ProjectIdentityFillCheck();
  }
 
  static void ComponentRenameCheck(Form host,string mode)
@@ -118,6 +119,47 @@ internal static partial class Program
 
  static object RenamePropertyItem(object node,Dictionary<string,string> values) => New("BatchPropertyEditItem",New("BatchOperationItem",node,1),"","","默认",values,new Dictionary<string,string>(),values.Keys.ToArray(),"","");
 
+ static void ProjectIdentityFillCheck()
+ {
+  var folder=Path.Combine(Path.GetTempPath(),"pdm-project-column-fill-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+  var cardPath=Path.Combine(folder,"identity.prtprp");
+  File.WriteAllText(cardPath,"<Root><Control PropName=\"项目号\" Label=\"项目号\" ApplyTo=\"Config\"/><Control PropName=\"项目名称\" Label=\"项目名称\"/><Control PropName=\"材料\" Label=\"材料\"/></Root>");
+  var template=Type("NativePropertyCardTemplate").GetMethod("Load",Flags).Invoke(null,new object[]{cardPath});
+  var list=Array.CreateInstance(Type("BatchPropertyEditItem"),3);object model=null;
+  for(var i=0;i<3;i++)
+  {
+   var node=New("CadTreeNode");Set(node,"FileName",i==2?"ROOT.SLDDRW":i==0?"ROOT.SLDPRT":"UNCHECKED.SLDPRT");Set(node,"FullPath",Path.Combine(folder,(string)Get(node,"FileName")));Set(node,"Kind",Enum.ToObject(Type("CadDocumentKind"),i==2?2:1));Set(node,"DocumentId",Guid.NewGuid());
+   if(i==0)model=node;if(i==2)Set(node,"RelatedModelDocumentId",Get(model,"DocumentId"));
+   File.WriteAllText((string)Get(node,"FullPath"),"unchanged CAD bytes");
+   var item=New("BatchPropertyEditItem",New("BatchOperationItem",node,1),"P-ORIGINAL","原项目","默认",new Dictionary<string,string>(),new Dictionary<string,string>(),new string[0],"P-ORIGINAL","原项目");
+   if(i==0)Type("BatchPropertyEditItem").GetMethod("SetActivePropertyCard",Flags).Invoke(item,new[]{template});
+   if((bool)Get(item,"HasChanges"))throw new Exception("选择属性卡不应把原项目字段误判为空值变更");
+   Set(item,"Selected",i==0);list.SetValue(item,i);
+  }
+  using(var dialog=(Form)New("BatchPropertyEditDialog",list,Array.CreateInstance(Type("PropertyWritebackPreviewItem"),0),0,Enum.ToObject(Type("PropertyOperationMode"),0),null,null,null,null,null,null,null,null,IntPtr.Zero))
+  {
+   var property=(ComboBox)Field(dialog,"fillProperty");var value=(TextBox)Field(dialog,"fillValue");
+   if(!property.Items.Contains("项目号")||!property.Items.Contains("项目名称"))throw new Exception("整列填充缺少项目字段");
+   property.SelectedItem="项目号";value.Text="P700017-2";Type("BatchPropertyEditDialog").GetMethod("FillSelectedRows",Flags).Invoke(dialog,null);
+   property.SelectedItem="项目名称";value.Text="自动上料单元";Type("BatchPropertyEditDialog").GetMethod("FillSelectedRows",Flags).Invoke(dialog,null);
+   foreach(var i in new[]{0,2})
+   {
+    var item=list.GetValue(i);
+    if((string)Get(item,"ProjectNumber")!="P700017-2"||(string)Get(item,"ProjectName")!="自动上料单元")throw new Exception("项目整列填充未更新实际绑定字段或关联工程图");
+    var changes=((IEnumerable)Type("BatchPropertyEditItem").GetMethod("ChangedProperties",Flags).Invoke(item,null)).Cast<object>().ToArray();
+    var pairs=changes.ToDictionary(x=>(string)Get(x,"Key"),x=>(string)Get(x,"Value"));
+    if(pairs["项目号"]!="P700017-2"||pairs["项目名称"]!="自动上料单元")throw new Exception("项目字段未进入批量写入变更列表");
+    Type("BatchPropertyEditItem").GetMethod("AcceptChanges",Flags).Invoke(item,null);
+    if((bool)Get(item,"HasChanges"))throw new Exception("写入确认后仍残留项目字段变更");
+   }
+   var untouched=list.GetValue(1);if((string)Get(untouched,"ProjectNumber")!="P-ORIGINAL"||(string)Get(untouched,"ProjectName")!="原项目"||(bool)Get(untouched,"HasChanges"))throw new Exception("修改了未勾选图档的项目字段");
+   var scope=(string)Type("BatchPropertyEditItem").GetMethod("PropertyScope",Flags).Invoke(list.GetValue(0),new object[]{"项目号"});if(scope!="配置:默认")throw new Exception("项目号配置属性范围丢失");
+   if(Directory.GetFiles(folder,"*.SLD*").Any(path=>File.ReadAllText(path)!="unchanged CAD bytes"))throw new Exception("整列填充预览未经批量写入就改动原图档");
+   foreach(var item in list)Set(item,"Selected",false);Type("BatchPropertyEditDialog").GetMethod("RefreshFillPropertyOptions",Flags).Invoke(dialog,null);if(property.Items.Count!=0)throw new Exception("未勾选图档时仍保留填充选项");
+  }
+  Console.WriteLine("PASS: 项目号及项目名称整列填充、原值保留、关联工程图、未勾选行、配置范围和批量写入变更列表");
+ }
+
  static void ModelFillCheck(bool conflictingSameName)
  {
   var folder=Path.Combine(Path.GetTempPath(),"pdm-model-fill-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
@@ -154,11 +196,29 @@ internal static partial class Program
    var model=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetPathName"?path:call.MethodName=="get_Extension"?extension:throw new Exception("Unexpected model write "+call.MethodName)).GetTransparentProxy();
    var app=new Proxy(appType,call=>call.MethodName=="GetDocuments"?new[]{model}:throw new Exception(call.MethodName)).GetTransparentProxy();
    var node=New("CadTreeNode");Set(node,"FullPath",path);Set(node,"FileName",Path.GetFileName(path));Set(node,"Kind",Enum.ToObject(Type("CadDocumentKind"),1));Set(node,"Configuration","默认");
-   var plugin=New("PdmAddin");SetField(plugin,"application",app);var rejected=false;
-   try{var result=(IDictionary)Type("PdmAddin").GetMethod("ReadBatchPropertyValues",Flags).Invoke(plugin,new[]{node});if(result.Count!=0)throw new Exception("Empty property set misread");}
-   catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){rejected=error.InnerException.Message.Contains("未完整读取");}
-   if(rejected!=failed||File.ReadAllText(path)!="original file")throw new Exception("Read failure treated as an empty set or changed source");
-   Console.WriteLine("PASS: unreadable properties stop editing instead of masquerading as empty values "+failed);
+   var plugin=New("PdmAddin");SetField(plugin,"application",app);
+   var result=(IDictionary)Type("PdmAddin").GetMethod("ReadBatchPropertyValues",Flags).Invoke(plugin,new object[]{node,new HashSet<string>()});
+   if((result==null)!=failed || result!=null&&result.Count!=0 || File.ReadAllText(path)!="original file")throw new Exception("Read failure treated as an empty set or changed source");
+   Console.WriteLine("PASS: unreadable property scope is skipped without being treated as empty; other files may continue "+failed);
   }
+ }
+ static void PartialPropertyReadCheck()
+ {
+  var interop=Type("PdmAddin").GetField("application",Flags).FieldType.Assembly;
+  var manager=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.CustomPropertyManager",true),call=>{
+   if(call.MethodName=="get_Count")return 2;
+   if(call.MethodName=="GetNames")return new[]{"名称","材料"};
+   if(call.MethodName=="Get6"){
+    if((string)call.Args[0]=="材料")throw new IOException("field unreadable");
+    return new ReturnMessage(2,new object[]{"名称",true,"原名称","原名称",true,false},6,call.LogicalCallContext,call);
+   }
+   throw new Exception("Unexpected property write: "+call.MethodName);
+  }).GetTransparentProxy();
+  var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="get_CustomPropertyManager"?manager:throw new Exception(call.MethodName)).GetTransparentProxy();
+  var model=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),call=>call.MethodName=="get_Extension"?extension:throw new Exception(call.MethodName)).GetTransparentProxy();
+  var unread=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+  var values=(IReadOnlyDictionary<string,string>)Type("PdmAddin").GetMethod("ReadEditableProperties",Flags).Invoke(null,new object[]{model,"",false,unread});
+  if(values.Count!=1||values["全局/名称"]!="原名称"||!unread.Contains("材料"))throw new Exception("Unread field became empty or suppressed a readable field");
+  Console.WriteLine("PASS: partial property failure preserves unread field and retains readable fields without model writes");
  }
 }

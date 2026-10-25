@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import QuantityInputNumber from './QuantityInputNumber.vue'
 import { ElMessage } from '../statusMessage'
 import { computed, reactive, ref } from 'vue'
 import { executeU9BomWrite, previewU9BomWrite, queryU9Bom } from '../api'
@@ -151,7 +152,7 @@ async function executeWrite() {
         <el-form-item label="母件料号" required><el-input v-model="form.itemCode" name="u9BomItemCode" clearable /></el-form-item>
         <el-form-item label="BOM版本"><el-input v-model="form.bomVersionCode" name="u9BomVersionCode" clearable /></el-form-item>
         <el-form-item label="组织编码"><el-input :model-value="organizationCode" name="u9BomOrganizationCode" disabled /></el-form-item>
-        <el-form-item label="批量"><el-input-number v-model="form.lot" name="u9BomLot" :min="0" controls-position="right" /></el-form-item>
+        <el-form-item label="批量"><QuantityInputNumber v-model="form.lot" name="u9BomLot" :min="0" controls-position="right" /></el-form-item>
         <el-form-item label="生产单位编码"><el-input v-model="form.productUomCode" name="u9BomProductUomCode" clearable /></el-form-item>
         <div class="u9-bom-query__action"><el-button type="primary" native-type="submit" :loading="querying">查询U9C</el-button></div>
       </div>
@@ -167,8 +168,8 @@ async function executeWrite() {
               <h3>子项明细（{{ row.components.length }}）</h3>
               <el-table :data="row.components" size="small" empty-text="该BOM没有返回子项">
                 <el-table-column prop="sequence" label="项次" width="70" />
-                <el-table-column prop="itemCode" label="子件料号" min-width="130" />
-                <el-table-column prop="itemName" label="名称" min-width="130" show-overflow-tooltip />
+                <el-table-column prop="itemCode" label="子件料号" min-width="130"><template #default="{ row }"><span v-stocked-material="row.itemCode">{{ row.itemCode }}</span></template></el-table-column>
+                <el-table-column prop="itemName" label="名称" min-width="130" show-overflow-tooltip ><template #default="{ row }"><span v-stocked-material="row.itemCode">{{ row.itemName }}</span></template></el-table-column>
                 <el-table-column prop="itemVersionCode" label="版本" width="80" />
                 <el-table-column prop="usageQty" label="用量" width="90" />
                 <el-table-column label="发料单位" width="105"><template #default="scope">{{ scope.row.issueUomName || scope.row.issueUomCode || '—' }}</template></el-table-column>
@@ -178,8 +179,8 @@ async function executeWrite() {
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="itemCode" label="母件料号" min-width="135" />
-        <el-table-column prop="itemName" label="母件名称" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="itemCode" label="母件料号" min-width="135"><template #default="{ row }"><span v-stocked-material="row.itemCode">{{ row.itemCode }}</span></template></el-table-column>
+        <el-table-column prop="itemName" label="母件名称" min-width="150" show-overflow-tooltip ><template #default="{ row }"><span v-stocked-material="row.itemCode">{{ row.itemName }}</span></template></el-table-column>
         <el-table-column prop="bomVersionCode" label="BOM版本" width="100" />
         <el-table-column prop="organizationCode" label="组织" width="80" />
         <el-table-column label="生产单位" width="100"><template #default="scope">{{ scope.row.productUomName || scope.row.productUomCode || '—' }}</template></el-table-column>
@@ -201,7 +202,7 @@ async function executeWrite() {
           <el-form-item label="母件料号" required><el-input v-model="editor.itemCode" name="u9BomWriteItemCode" :disabled="editor.operation !== 0" /></el-form-item>
           <el-form-item label="BOM版本（固定）" required><el-input v-model="editor.bomVersionCode" name="u9BomWriteVersionCode" disabled /></el-form-item>
           <el-form-item label="产品单位编码" required><el-input v-model="editor.productUomCode" name="u9BomWriteProductUom" /></el-form-item>
-          <el-form-item label="生产批量" required><el-input-number v-model="editor.lot" name="u9BomWriteLot" :min="1" /></el-form-item>
+          <el-form-item label="生产批量" required><QuantityInputNumber v-model="editor.lot" name="u9BomWriteLot" :min="1" /></el-form-item>
           <el-form-item label="生效日期"><el-date-picker v-model="editor.effectiveDate" value-format="YYYY-MM-DD" /></el-form-item>
           <el-form-item label="失效日期"><el-date-picker v-model="editor.disableDate" value-format="YYYY-MM-DD" /></el-form-item>
           <el-form-item label="工程图号"><el-input v-model="editor.projectMapNum" /></el-form-item>
@@ -211,9 +212,9 @@ async function executeWrite() {
         <el-table :data="editor.components" size="small" class="u9-bom-editor__table">
           <el-table-column label="项次" width="90"><template #default="scope"><el-input-number v-model="scope.row.sequence" :min="1" :controls="false" :disabled="isExistingComponent(scope.row)" /></template></el-table-column>
           <el-table-column label="子件料号" min-width="145"><template #default="scope"><el-input v-model="scope.row.itemCode" :disabled="isExistingComponent(scope.row)" /></template></el-table-column>
-          <el-table-column label="用量" width="105"><template #default="scope"><el-input-number v-model="scope.row.usageQty" :min="0.000001" :controls="false" :disabled="isExistingComponent(scope.row)" /></template></el-table-column>
+          <el-table-column label="用量" width="105"><template #default="scope"><QuantityInputNumber v-model="scope.row.usageQty" :min="0.000001" :controls="false" :disabled="isExistingComponent(scope.row)" /></template></el-table-column>
           <el-table-column label="发料单位" width="105"><template #default="scope"><el-input v-model="scope.row.issueUomCode" :disabled="isExistingComponent(scope.row)" /></template></el-table-column>
-          <el-table-column label="母件底数" width="105"><template #default="scope"><el-input-number v-model="scope.row.parentQty" :min="0.000001" :controls="false" :disabled="isExistingComponent(scope.row)" /></template></el-table-column>
+          <el-table-column label="母件底数" width="105"><template #default="scope"><QuantityInputNumber v-model="scope.row.parentQty" :min="0.000001" :controls="false" :disabled="isExistingComponent(scope.row)" /></template></el-table-column>
           <el-table-column label="备注" min-width="130"><template #default="scope"><el-input v-model="scope.row.remark" :disabled="isExistingComponent(scope.row)" /></template></el-table-column>
           <el-table-column label="状态/操作" width="110"><template #default="scope"><el-tag v-if="isExistingComponent(scope.row)" type="info" size="small">U9C既有·保留</el-tag><el-button v-else link type="danger" @click="removeComponent(scope.$index)">移除</el-button></template></el-table-column>
         </el-table>

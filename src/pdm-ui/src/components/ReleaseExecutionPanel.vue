@@ -7,9 +7,12 @@ const props = defineProps<{ packageId: string; token: string; canManage: boolean
 const view = ref<ReleaseExecutionView | null>(null), error = ref(''), pending = ref(false)
 const notes = ref<Record<string, string>>({}), retryConfirmation = ref<Record<string, boolean>>({})
 const labels: Record<string, string> = { Pending: '待处理', Sending: '发送中', Running: '处理中', Succeeded: '已完成', Failed: '未完成', Unknown: '结果待核对', Published: '已发布', Draft: '草稿', ProcessReview: '审核中', Approval: '审批中', Publishing: '发布处理中', PublishFailed: '发布失败', Rejected: '已退回', None: '待转换' }
-const kindLabels: Record<string, string> = { Standard: '标准件', NonStandard: '非标件', Electrical: '电气件', All: '全部' }
 const progress = computed(() => view.value?.progress)
+const workflowNotices = computed(() => view.value?.workflowNotifications?.filter(item => item.enabled) ?? [])
 const notificationStatus = computed(() => {
+  if (workflowNotices.value.some(item => item.state === 'Attention')) return '部门助理通知待处理'
+  if (workflowNotices.value.some(item => !['Sent', 'Cancelled'].includes(item.state))) return '部门助理通知待发送'
+  if (workflowNotices.value.some(item => item.state === 'Sent') && !progress.value?.notificationRules.length) return '已发送部门助理站内消息'
   if (!progress.value) return '发布后生成'
   if (!progress.value.notificationRules.length) return '未配置通知'
   if (progress.value.departments.some(item => !item.recipients.length)) return '部分部门无可接收人员'
@@ -53,8 +56,6 @@ const eventLabel = (event: string) => notificationEvents[event as keyof typeof n
         <div><span>生产图纸</span><strong>{{ !progress ? '发布后处理' : !progress.previewRequired ? '本次不需转图' : labels[progress.previewState] ?? progress.previewState }}</strong></div>
         <div><span>部门通知</span><strong>{{ notificationStatus }}</strong></div>
       </div>
-      <p v-if="view.state === 'Published'" class="execution-hint">{{ view.ready ? '本发布版本的U9同步和所需生产图纸已齐套。' : '发布已生效；请分别核对U9及转图状态，未齐套不代表生产资料已全部可用。' }}</p>
-      <ul v-if="progress" class="execution-hint"><li v-for="(item, kind) in progress.u9" :key="kind">{{ kindLabels[kind] ?? kind }} U9：{{ item.message }}</li><li v-if="progress.previewRequired && progress.previewMessage">转图：{{ progress.previewMessage }}</li></ul>
       <details v-if="view.versionBindings?.length"><summary>本次固定的图纸版本（{{ view.versionBindings.filter(item => item.publish).length }} 项发布，其余仅用于完整打开）</summary><div class="execution-table"><table><thead><tr><th>图档</th><th>上一正式版</th><th>本次源版本 / 发布版</th><th>本次处理</th></tr></thead><tbody><tr v-for="item in view.versionBindings" :key="item.documentId"><td>{{ item.fileName || item.documentId }}</td><td>{{ item.previousReleasedRevision || '—' }}</td><td>{{ item.revision }}{{ item.targetRevision ? ` / ${item.targetRevision}` : '' }}</td><td>{{ item.publish ? item.requiresPromotion === false ? '复用已审核正式图纸' : '发布该版本' : '保留引用，不随本次升版' }}</td></tr></tbody></table></div></details>
       <p v-if="view.confirmedRemovedBomItemIds.length" class="execution-hint">本次已明确确认删除 {{ view.confirmedRemovedBomItemIds.length }} 项；未确认的删除项保留上一正式值。</p>
       <div v-if="progress?.departments.length" class="execution-table"><table><thead><tr><th>通知部门 / 事件</th><th>接收情况</th><th>执行情况</th><th>部门确认</th></tr></thead><tbody>

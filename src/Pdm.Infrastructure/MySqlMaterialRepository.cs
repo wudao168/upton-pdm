@@ -7,7 +7,7 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Infrastructure;
 
-public sealed class MySqlMaterialRepository : IMaterialRepository
+public sealed partial class MySqlMaterialRepository : IMaterialRepository
 {
     private const string BomHeaderMaterialLinksSql = """
         SELECT material_id AS MaterialId,project_id AS ProjectId,bom_kind AS Kind FROM project_bom_header
@@ -45,6 +45,15 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         await using var connection = await OpenAsync(cancellationToken);
         var normalizedQuery = string.IsNullOrWhiteSpace(query) ? null : $"%{query.Trim()}%";
         var normalizedCategory = string.IsNullOrWhiteSpace(categoryCode) ? null : categoryCode.Trim();
+        if (query?.Trim() is { Length: 11 } exactCode && exactCode.All(char.IsAsciiDigit))
+        {
+            var exact = (await connection.QueryAsync<MaterialRow>(new CommandDefinition(
+                MaterialSelect + " WHERE material_code=@ExactCode AND (@IncludeArchived=1 OR is_archived=0)"
+                    + " AND (@CategoryCode IS NULL OR category_code=@CategoryCode)",
+                new { ExactCode = exactCode, IncludeArchived = includeArchived, CategoryCode = normalizedCategory },
+                cancellationToken: cancellationToken))).ToArray();
+            if (exact.Length > 0) return exact.Select(MapMaterial).ToArray();
+        }
         var rows = await connection.QueryAsync<MaterialRow>(new CommandDefinition(
             MaterialSelect +
             " WHERE (@IncludeArchived=1 OR is_archived=0)" +
@@ -272,6 +281,17 @@ public sealed class MySqlMaterialRepository : IMaterialRepository
         {
             throw new PdmConflictException("料品附件已经存在。");
         }
+    }
+
+    public async Task<bool> DeleteMaterialAttachmentAsync(Guid materialId, Guid attachmentId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return await connection.ExecuteAsync(new CommandDefinition("""
+            DELETE attachment FROM material_attachment AS attachment
+            INNER JOIN material_master AS material ON material.id=attachment.material_id
+            WHERE attachment.id=@AttachmentId AND attachment.material_id=@MaterialId
+              AND material.is_archived=0 AND attachment.attachment_kind IN ('Model3D','Document')
+            """, new { MaterialId = materialId, AttachmentId = attachmentId }, cancellationToken: cancellationToken)) == 1;
     }
 
     public async Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsBySpecificationAsync(string specification, CancellationToken cancellationToken)

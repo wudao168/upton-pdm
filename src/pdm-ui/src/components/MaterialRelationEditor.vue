@@ -182,8 +182,8 @@ async function publish() {
 <template>
   <section v-loading="loading" class="material-relation-editor" aria-label="关联物料">
     <div class="material-relation-summary">
-      <div><span>物料料号</span><strong>{{ mainMaterial.materialCode }}</strong></div>
-      <div><span>名称</span><strong>{{ mainMaterial.name || '—' }}</strong></div>
+      <div><span>物料料号</span><strong v-stocked-material="mainMaterial.materialCode">{{ mainMaterial.materialCode }}</strong></div>
+      <div><span>名称</span><strong v-stocked-material="mainMaterial.materialCode">{{ mainMaterial.name || '—' }}</strong></div>
       <div><span>型号</span><strong>{{ mainMaterial.specification || '—' }}</strong></div>
       <div><span>品牌</span><strong>{{ mainMaterial.brand || '—' }}</strong></div>
       <div><span>备注</span><strong>{{ mainMaterial.remark || '—' }}</strong></div>
@@ -209,12 +209,12 @@ async function publish() {
         <div class="material-relation-option-table">
           <div class="material-relation-option-head"><span>料号</span><span>名称</span><span>型号</span><span>品牌</span><span>备注</span><span>选型建议</span><span>数量计算</span><span>每套数量</span><span>优先推荐</span><span>操作</span></div>
           <div v-for="(option, optionIndex) in group.options" :key="optionIndex" class="material-relation-option-row">
-            <el-select v-model="option.materialId" filterable remote :remote-method="searchMaterialOptions" :loading="materialSearchLoading" popper-class="material-relation-material-popper" :disabled="!canManage" placeholder="输入料号或型号搜索">
+            <el-select v-stocked-material="relationMaterial(option.materialId)?.materialCode" v-model="option.materialId" filterable remote :remote-method="searchMaterialOptions" :loading="materialSearchLoading" popper-class="material-relation-material-popper" :disabled="!canManage" placeholder="输入料号或型号搜索">
               <el-option v-for="item in approvedMaterials" :key="item.id" :value="item.id" :label="item.materialCode">
-                <span class="material-relation-select-option"><b>{{ item.materialCode }}</b><span>{{ item.name || '—' }}</span><span>{{ item.specification || '—' }}</span><span>{{ item.remark || '—' }}</span></span>
+                <span class="material-relation-select-option"><b v-stocked-material="item.materialCode">{{ item.materialCode }}</b><span v-stocked-material="item.materialCode">{{ item.name || '—' }}</span><span>{{ item.specification || '—' }}</span><span>{{ item.remark || '—' }}</span></span>
               </el-option>
             </el-select>
-            <span :title="relationMaterial(option.materialId)?.name || ''">{{ relationMaterial(option.materialId)?.name || '—' }}</span>
+            <span v-stocked-material="relationMaterial(option.materialId)?.materialCode" :title="relationMaterial(option.materialId)?.name || ''">{{ relationMaterial(option.materialId)?.name || '—' }}</span>
             <span :title="relationMaterial(option.materialId)?.specification || ''">{{ relationMaterial(option.materialId)?.specification || '—' }}</span>
             <span :title="relationMaterial(option.materialId)?.brand || ''">{{ relationMaterial(option.materialId)?.brand || '—' }}</span>
             <span :title="relationMaterial(option.materialId)?.remark || ''">{{ relationMaterial(option.materialId)?.remark || '—' }}</span>

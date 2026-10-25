@@ -37,6 +37,8 @@ public static class BrowserCadArchiveEndpoints
         api.MapGet("/{id:guid}", (Guid id, HttpContext context, BrowserCadArchiveService service) => Results.Ok(service.Read(id, User(context).Actor)));
         api.MapPost("/{id:guid}/start", async (Guid id, BrowserCadArchiveStart input, HttpContext context, BrowserCadArchiveService service, CancellationToken ct) =>
         { var (actor, role) = User(context); return Results.Ok(await service.StartAsync(id, input.RootPath, actor, role, ct)); });
+        api.MapPost("/{id:guid}/previews/retry", async (Guid id, HttpContext context, BrowserCadArchiveService service, CancellationToken ct) =>
+        { var (actor, role) = User(context); return Results.Ok(await service.RetryPreviewsAsync(id, actor, role, ct)); });
     }
 }
 public sealed record BrowserCadArchiveSettings(bool Enabled);

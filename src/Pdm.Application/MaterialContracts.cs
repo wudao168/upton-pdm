@@ -173,7 +173,11 @@ public sealed record U9ItemReference(
     string? U9PurchaseLink = null)
 {
     public IReadOnlyDictionary<string, string?> CreationAttributes { get; init; } = new Dictionary<string, string?>();
+    public U9ItemStockPlan? StockPlan { get; init; }
 }
+
+public sealed record U9ItemStockPlan(string? OrganizationCode, bool? IsEffective, decimal? SafetyStockQuantity,
+    decimal? ReorderQuantity, string? UnitCode, string? UnitName);
 
 public sealed record U9ItemQueryResult(
     int ResponseCode,
@@ -271,6 +275,9 @@ public sealed record U9ConnectionTestResult(
 
 public interface IU9OpenApiClient
 {
+    Task<IReadOnlyList<MaterialStockPlan>?> QueryStockPlansAsync(string baseUrl, string token, string enterpriseCode,
+        string organizationCode, DateTimeOffset syncedAt, CancellationToken cancellationToken, IReadOnlyList<string>? materialCodes = null) =>
+        Task.FromResult<IReadOnlyList<MaterialStockPlan>?>(null);
     Task<U9AuthenticationResult> AuthenticateAsync(U9AuthenticationRequest request, CancellationToken cancellationToken);
     Task<U9BusinessBatchResult> PostBatchAsync(
         string baseUrl,
@@ -299,6 +306,8 @@ public interface IU9OpenApiClient
 
 public interface IMaterialRepository
 {
+    Task SaveStockPlansAsync(IReadOnlyList<MaterialStockPlan> plans, CancellationToken cancellationToken);
+    Task<IReadOnlyList<MaterialStockPlan>> ListStockedMaterialPlansAsync(string enterpriseCode, string organizationCode, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomHeaderMaterialLink>> ListBomHeaderMaterialLinksAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<string>> ListMaterialBrandsAsync(string? query, CancellationToken cancellationToken);
 
@@ -313,6 +322,7 @@ public interface IMaterialRepository
     Task<IReadOnlyList<MaterialAttachment>> ListMaterialAttachmentsAsync(Guid materialId, MaterialAttachmentKind? kind, CancellationToken cancellationToken);
     Task<MaterialAttachment?> FindMaterialAttachmentAsync(Guid attachmentId, CancellationToken cancellationToken);
     Task<MaterialAttachment> CreateMaterialAttachmentAsync(MaterialAttachment attachment, CancellationToken cancellationToken);
+    Task<bool> DeleteMaterialAttachmentAsync(Guid materialId, Guid attachmentId, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsBySpecificationAsync(string specification, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsByBrandAndSpecificationAsync(string brand, string specification, CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialCodeApplication>> ListMaterialCodeApplicationsAsync(Guid? projectId, MaterialCodeApplicationStatus? status, CancellationToken cancellationToken);

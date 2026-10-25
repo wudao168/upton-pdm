@@ -44,6 +44,7 @@ public sealed class StandardStructureApiTests
             var repository = factory.Services.GetRequiredService<IPdmRepository>();
             await repository.CreateUserAsync(new(Guid.NewGuid(), "std", "标准化工程师", "unused", UserRole.ProcessReviewer, true), default);
             await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "管理员", "unused", UserRole.Administrator, true), default);
+            await repository.CreateUserAsync(new(Guid.NewGuid(), "engineer", "工程师", "unused", UserRole.Engineer, true), default);
             var company = Guid.Parse("70000000-0000-0000-0000-000000000001");
             var department = await repository.SaveOrganizationUnitAsync(new(null, company, null, "STD-HTTP", "标准化部", OrganizationUnitKind.BusinessDivision, true, 1, false, true), default);
             await repository.SetOrganizationMembershipsAsync("std", [department.Id], department.Id, default);
@@ -77,7 +78,10 @@ public sealed class StandardStructureApiTests
             Assert.Equal(HttpStatusCode.OK, archivedResponse.StatusCode);
             var structure = (await archivedResponse.Content.ReadFromJsonAsync<StandardStructure>(Json))!;
             Assert.Equal("UPST-1-0001", structure.Code);
-            Assert.Equal(StandardStructureRules.UnclassifiedId, structure.CategoryId);
+            var archivedCatalog = (await client.GetFromJsonAsync<StandardStructureView>(path, Json))!.Catalog;
+            var modelCategory = Assert.Single(archivedCatalog.Categories, c => c.Id == structure.CategoryId);
+            Assert.Equal("UPST-1-0001-V01", modelCategory.Name);
+            Assert.Equal(StandardStructureRules.UnclassifiedId, modelCategory.ParentId);
             Assert.Equal("test.SLDASM", structure.Revisions[0].Root.FileName);
             var revision = Assert.Single(structure.Revisions);
             Assert.Equal(2, revision.Files.Count);
@@ -115,6 +119,25 @@ public sealed class StandardStructureApiTests
             var current = (await client.GetFromJsonAsync<StandardStructureView>(path, Json))!;
             Assert.False(current.CanArchive);
             Assert.Equal(HttpStatusCode.BadRequest, (await client.PutAsJsonAsync(path + "/storage", new { storageRoot = root + "-other", expectedRowVersion = current.Catalog.RowVersion })).StatusCode);
+            var snapshots = JsonSerializer.Serialize(Assert.Single(current.Catalog.Structures).Revisions, Json);
+            Authenticate(client, "engineer", "Engineer");
+            Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync($"{path}/{structure.Id}/state", new ChangeStandardStructureState("Delete", current.Catalog.RowVersion))).StatusCode);
+            Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"{path}/{structure.Id}/references")).StatusCode);
+            Authenticate(client, "admin", "Administrator");
+            Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync($"{path}/{structure.Id}/state", new ChangeStandardStructureState("Disable", 0))).StatusCode);
+            Assert.Empty((await client.GetFromJsonAsync<StandardStructureReference[]>($"{path}/{structure.Id}/references", Json))!);
+            foreach (var action in new[] { "Disable", "Delete", "Restore", "Enable" })
+            {
+                var response = await client.PostAsJsonAsync($"{path}/{structure.Id}/state", new ChangeStandardStructureState(action, current.Catalog.RowVersion));
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                var changed = (await response.Content.ReadFromJsonAsync<StandardStructureCatalog>(Json))!;
+                var saved = Assert.Single(changed.Structures);
+                Assert.Equal(action == "Delete", saved.DeletedAt is not null);
+                Assert.Equal(action == "Enable", saved.IsActive);
+                Assert.Equal(snapshots, JsonSerializer.Serialize(saved.Revisions, Json));
+                Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"{path}/revisions/{revision.Id}/preview/preview")).StatusCode);
+                current = current with { Catalog = changed };
+            }
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }

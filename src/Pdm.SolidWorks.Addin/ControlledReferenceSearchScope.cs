@@ -26,25 +26,24 @@ internal sealed class ControlledReferenceSearchScope : IDisposable
         {
             application.SetCurrentWorkingDirectory(directory);
             if (!application.SetSearchFolders((int)swSearchFolderTypes_e.swDocumentType, string.Join(";", folders)))
-                throw new InvalidOperationException("SolidWorks无法设置本次受控文件搜索目录，已停止打开。");
+                PluginDiagnosticLog.Record("受控搜索目录", "搜索目录设置未完成，将核对实际加载来源。");
             application.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules, true);
             if (!application.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules))
-                throw new InvalidOperationException("SolidWorks无法启用受控文件搜索规则，已停止打开。");
+                PluginDiagnosticLog.Record("受控搜索目录", "搜索规则未启用，将核对实际加载来源。");
         }
-        catch
+        catch (Exception error)
         {
-            Dispose();
-            throw;
+            PluginDiagnosticLog.Record("受控搜索目录", "搜索目录设置失败，将尝试原生打开并核对实际来源：" + error);
         }
     }
 
     public void Dispose()
     {
         try { application.SetSearchFolders((int)swSearchFolderTypes_e.swDocumentType, previousFolders); }
-        finally
-        {
-            try { application.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules, previousSearchRules); }
-            finally { application.SetCurrentWorkingDirectory(previousDirectory); }
-        }
+        catch (Exception error) { PluginDiagnosticLog.Record("受控搜索目录", "恢复原搜索目录失败：" + error); }
+        try { application.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules, previousSearchRules); }
+        catch (Exception error) { PluginDiagnosticLog.Record("受控搜索目录", "恢复原搜索规则失败：" + error); }
+        try { application.SetCurrentWorkingDirectory(previousDirectory); }
+        catch (Exception error) { PluginDiagnosticLog.Record("受控搜索目录", "恢复原工作目录失败：" + error); }
     }
 }

@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS login_security_state (
+    state_key VARCHAR(100) NOT NULL PRIMARY KEY,
+    state_json LONGTEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

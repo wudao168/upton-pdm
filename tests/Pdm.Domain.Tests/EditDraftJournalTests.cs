@@ -6,6 +6,46 @@ public sealed class EditDraftJournalTests : IDisposable
 {
     private readonly string root = Path.Combine(Path.GetTempPath(), "pdm-edit-draft-tests", Guid.NewGuid().ToString("N"));
 
+    [Fact]
+    public void ExplicitDiscardSurvivesRestartRestoresServerBytesAndPreservesManualRecovery()
+    {
+        var (journal, entry, snapshot) = Create();
+        journal.Preserve(entry, snapshot, true);
+        File.WriteAllText(entry.SourcePath, "saved changes being discarded");
+        journal.MarkDiscarded(entry);
+        var recovered = Assert.Single(new EditDraftJournal(root, "server|company|user").ReadAll());
+        Assert.True(recovered.DiscardPending);
+        Assert.False(recovered.RestoreOnOpen);
+        Assert.False(journal.Restore(recovered, entry.SourcePath, entry.BaseVersionId));
+        var archived = Path.Combine(root, "server.SLDPRT");
+        File.WriteAllText(archived, "latest archived version");
+        journal.RestoreDiscardedFile(recovered, archived, EditDraftJournal.Hash(archived));
+        Assert.Equal("latest archived version", File.ReadAllText(entry.SourcePath));
+        Assert.Equal("saved changes being discarded", File.ReadAllText(recovered.DiscardBackupPath));
+        Assert.True(journal.HasVerifiedDraft(recovered));
+        Assert.True(recovered.DiscardPending); // Binding completion is a separate durable step.
+        Assert.True((File.GetAttributes(entry.SourcePath) & FileAttributes.ReadOnly) != 0);
+        var backup = recovered.DiscardBackupPath;
+        journal.RestoreDiscardedFile(recovered, archived, EditDraftJournal.Hash(archived));
+        Assert.Equal(backup, recovered.DiscardBackupPath);
+    }
+
+    [Fact]
+    public void FailedDiscardDownloadOrNewLocalEditCannotOverwriteTheWorkingFile()
+    {
+        var (journal, entry, _) = Create();
+        journal.MarkDiscarded(entry);
+        Assert.Throws<FileNotFoundException>(() => journal.RestoreDiscardedFile(entry, Path.Combine(root, "missing"), "HASH"));
+        var archived = Path.Combine(root, "server.SLDPRT");
+        File.WriteAllText(archived, "server");
+        Assert.Throws<IOException>(() => journal.RestoreDiscardedFile(entry, archived, "wrong-hash"));
+        Assert.Equal("base", File.ReadAllText(entry.SourcePath));
+        File.WriteAllText(entry.SourcePath, "subsequent unrelated edit");
+        Assert.Throws<IOException>(() => journal.RestoreDiscardedFile(entry, archived, EditDraftJournal.Hash(archived)));
+        Assert.Equal("subsequent unrelated edit", File.ReadAllText(entry.SourcePath));
+        Assert.True(Assert.Single(journal.ReadAll()).DiscardPending);
+    }
+
     private (EditDraftJournal Journal, LocalEditDraft Entry, string Snapshot) Create()
     {
         Directory.CreateDirectory(root);
@@ -18,6 +58,68 @@ public sealed class EditDraftJournalTests : IDisposable
             DocumentId = Guid.NewGuid(), ProjectId = Guid.NewGuid(), SessionId = Guid.NewGuid(),
             SourcePath = source, BaseVersionId = Guid.NewGuid(), BaseSha256 = EditDraftJournal.Hash(source)
         }, snapshot);
+    }
+
+    [Fact]
+    public void ExplicitDiscardCanRecreateADeletedWorkingFileWithoutRevivingItsDraft()
+    {
+        var (journal, entry, snapshot) = Create();
+        journal.Preserve(entry, snapshot, true);
+        journal.MarkDiscarded(entry);
+        File.Delete(entry.SourcePath);
+        var archived = Path.Combine(root, "server.SLDPRT");
+        File.WriteAllText(archived, "verified server bytes");
+        journal.RestoreDiscardedFile(entry, archived, EditDraftJournal.Hash(archived));
+        Assert.Equal("verified server bytes", File.ReadAllText(entry.SourcePath));
+        Assert.True(journal.HasVerifiedDraft(entry));
+        Assert.False(entry.RestoreOnOpen);
+        Assert.True(entry.DiscardPending);
+    }
+
+    [Fact]
+    public void AlreadyRestoredDiscardStillProtectsTheWorkingCopyAsReadOnly()
+    {
+        var (journal, entry, _) = Create();
+        journal.MarkDiscarded(entry);
+        var archived = Path.Combine(root, "server.SLDPRT");
+        File.Copy(entry.SourcePath, archived);
+        journal.RestoreDiscardedFile(entry, archived, EditDraftJournal.Hash(archived));
+        Assert.True((File.GetAttributes(entry.SourcePath) & FileAttributes.ReadOnly) != 0);
+        Assert.Null(entry.DiscardBackupPath);
+    }
+
+    [Fact]
+    public void VerifiedRelocatedBaseAllowsDraftRestoreButDoesNotAllowSubsequentLocalChanges()
+    {
+        var (journal, entry, snapshot) = Create();
+        journal.Preserve(entry, snapshot, true);
+        File.WriteAllText(entry.SourcePath, "verified relocated base");
+        var verified = EditDraftJournal.Hash(entry.SourcePath);
+        Assert.Throws<InvalidOperationException>(() => journal.Restore(entry, entry.SourcePath, entry.BaseVersionId, entry.BaseSha256));
+        Assert.True(journal.RestoreWithVerifiedBase(entry, entry.SourcePath, entry.BaseVersionId, entry.BaseSha256, verified));
+        Assert.Equal("unsaved changes", File.ReadAllText(entry.SourcePath));
+        File.WriteAllText(entry.SourcePath, "new unrelated edits");
+        Assert.Throws<InvalidOperationException>(() => journal.RestoreWithVerifiedBase(entry, entry.SourcePath,
+            entry.BaseVersionId, entry.BaseSha256, verified));
+        Assert.Equal("new unrelated edits", File.ReadAllText(entry.SourcePath));
+    }
+
+    [Fact]
+    public void RenameReplacementRetainsOriginalAndRejectsAnUnrecognizedTarget()
+    {
+        var (_, entry, _) = Create();
+        var temporary = entry.SourcePath + ".restore";
+        File.WriteAllText(temporary, "server bytes");
+        var previous = EditDraftJournal.Hash(entry.SourcePath);
+        var replacement = EditDraftJournal.Hash(temporary);
+        File.WriteAllText(entry.SourcePath, "new unrelated edits");
+        var error = Assert.Throws<IOException>(() => EditDraftJournal.ReplaceByRenaming(temporary, entry.SourcePath, previous, replacement));
+        Assert.Contains(entry.SourcePath, error.Message);
+        Assert.Equal("new unrelated edits", File.ReadAllText(entry.SourcePath));
+        Assert.Equal("server bytes", File.ReadAllText(temporary));
+        EditDraftJournal.ReplaceByRenaming(temporary, entry.SourcePath, EditDraftJournal.Hash(entry.SourcePath), replacement);
+        Assert.Equal("server bytes", File.ReadAllText(entry.SourcePath));
+        Assert.Equal("new unrelated edits", File.ReadAllText(Assert.Single(Directory.GetFiles(root, "*.discard-backup-*"))));
     }
 
     [Fact]
@@ -43,6 +145,18 @@ public sealed class EditDraftJournalTests : IDisposable
         File.WriteAllText(entry.SourcePath, "other edits");
         Assert.Throws<InvalidOperationException>(() => journal.Restore(entry, entry.SourcePath, entry.BaseVersionId));
         Assert.Equal("other edits", File.ReadAllText(entry.SourcePath));
+        Assert.True(journal.HasVerifiedDraft(entry));
+    }
+
+    [Fact]
+    public void RetainedDraftCanResumeAfterWorkingDirectoryWasReplacedWithTheVerifiedBase()
+    {
+        var (journal, entry, snapshot) = Create();
+        File.WriteAllText(entry.SourcePath, "previous disk edit");
+        journal.Preserve(entry, snapshot, true);
+        File.WriteAllText(entry.SourcePath, "base"); // Clean download after clearing/recreating the working directory.
+        Assert.True(journal.Restore(entry, entry.SourcePath, entry.BaseVersionId, entry.BaseSha256));
+        Assert.Equal("unsaved changes", File.ReadAllText(entry.SourcePath));
         Assert.True(journal.HasVerifiedDraft(entry));
     }
 
@@ -147,5 +261,10 @@ public sealed class EditDraftJournalTests : IDisposable
         Assert.True(journal.HasVerifiedDraft(entry));
     }
 
-    public void Dispose() { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    public void Dispose()
+    {
+        if (!Directory.Exists(root)) return;
+        foreach (var file in Directory.GetFiles(root, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
+        Directory.Delete(root, true);
+    }
 }

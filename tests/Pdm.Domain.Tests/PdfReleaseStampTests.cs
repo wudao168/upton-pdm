@@ -77,6 +77,110 @@ public sealed class PdfReleaseStampTests : IDisposable
         Assert.Equal(first, await File.ReadAllBytesAsync(path));
     }
 
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public async Task CopiedLegacyDrawingCodeUsesExactFrozenContentWithoutPluginPolicyVersion(bool frozenMatches, bool withoutNote)
+    {
+        var code = $"UPLM-DRAWING|OLD-MODEL|A|{Guid.NewGuid():N}";
+        var recorded = frozenMatches ? code : $"UPLM-DRAWING|OLD-MODEL|A|{Guid.NewGuid():N}";
+        var (service, source, project, package, path) = Fixture(true, 2, legacyCode: code, frozenCode: recorded, legacyNote: !withoutNote);
+        var before = await File.ReadAllBytesAsync(path);
+        if (!frozenMatches)
+        {
+            await Assert.ThrowsAsync<PdmRuleException>(() => service.ApplyAsync(package, project, source, path, default));
+            Assert.Equal(before, await File.ReadAllBytesAsync(path));
+            return;
+        }
+        await service.ApplyAsync(package, project, source, path, default);
+        Assert.True(service.IsStamped(path, package.Id, source.SourceVersionId));
+        lock (PdfReleasePageEditor.Gate)
+        {
+            for (var i = 0; i < 2; i++) Assert.Equal("NEW-MODEL-123\nB", PdfReleasePageEditor.DecodePage(path, i));
+            Assert.DoesNotContain(PdfReleasePageEditor.Texts(File.ReadAllBytes(path)), t => t.Value.Contains("OLD-MODEL"));
+        }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("THIRD-PARTY")]
+    [InlineData("UPLM-DRAWING|OLD-MODEL|A|not-a-document-id")]
+    public async Task UnknownCodeWithoutPolicyVersionCannotBeRemoved(string? code)
+    {
+        var frozenCode = code;
+        code ??= $"UPLM-DRAWING|OLD-MODEL|A|{Guid.NewGuid():N}";
+        var (service, source, project, package, path) = Fixture(true, 1, legacyCode: code, frozenCode: frozenCode);
+        var before = await File.ReadAllBytesAsync(path);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.ApplyAsync(package, project, source, path, default));
+        Assert.Equal(before, await File.ReadAllBytesAsync(path));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RequirementsStartingLeftOfLogoMoveTogetherOnlyWhenSpaceIsClear(bool crowded)
+    {
+        var code = $"UPLM-DRAWING|OLD-MODEL|A|{Guid.NewGuid():N}";
+        var (service, source, project, package, path) = Fixture(true, 1, legacyCode: code, frozenCode: code, offsetRequirements: true, crowdedRequirements: crowded);
+        var before = await File.ReadAllBytesAsync(path);
+        if (crowded)
+        {
+            var error = await Assert.ThrowsAsync<PdmRuleException>(() => service.ApplyAsync(package, project, source, path, default));
+            Assert.Contains("空间不足", error.Message);
+            Assert.Equal(before, await File.ReadAllBytesAsync(path));
+            return;
+        }
+        await service.ApplyAsync(package, project, source, path, default);
+        lock (PdfReleasePageEditor.Gate)
+        {
+            var texts = PdfReleasePageEditor.Texts(File.ReadAllBytes(path));
+            var original = PdfReleasePageEditor.Texts(before).Where(t => t.Value.Trim().StartsWith("技术要求") || t.Value.StartsWith("1.") || t.Value.StartsWith("2.") || t.Value.StartsWith("3.")).ToArray();
+            Assert.Equal(4, original.Length);
+            foreach (var text in original)
+            {
+                var moved = Assert.Single(texts, t => t.Value == text.Value);
+                Assert.Equal(text.Bounds.Left, moved.Bounds.Left, .01);
+                Assert.Equal(text.Bounds.Bottom + 68, moved.Bounds.Bottom, .01);
+            }
+            Assert.Equal("NEW-MODEL-123\nB", PdfReleasePageEditor.DecodePage(path, 0));
+        }
+    }
+
+    [Fact]
+    public async Task ContentStreamsSplitInsideTextAndPathsRetainUnrelatedDrawingContent()
+    {
+        var (service, source, project, package, path) = Fixture(true, 1);
+        lock (PdfReleasePageEditor.Gate)
+        {
+            using var pdf = PdfReader.Open(path, PdfDocumentOpenMode.Modify);
+            var page = pdf.Pages[0];
+            using (var graphics = XGraphics.FromPdfPage(page, XGraphicsPdfPageOptions.Append))
+            {
+                graphics.DrawString("保留的尺寸与图纸正文", new XFont("UPLM-YaHei", 10), XBrushes.Black, 100, 100);
+                graphics.DrawLines(XPens.Black, [new(100,120),new(200,120),new(200,200),new(100,200)]);
+            }
+            var content = page.Contents.CreateSingleContent().Stream.Value;
+            page.Contents.Elements.Clear();
+            for (var start = 0; start < content.Length;)
+            {
+                var end = Array.IndexOf(content, (byte)'\n', Math.Min(start + 200, content.Length));
+                if (end < 0) end = content.Length - 1;
+                page.Contents.AppendContent().CreateStream(content[start..(end + 1)]);
+                start = end + 1;
+            }
+            pdf.Save(path);
+        }
+        await service.ApplyAsync(package, project, source, path, default);
+        lock (PdfReleasePageEditor.Gate)
+        {
+            var texts = PdfReleasePageEditor.Texts(File.ReadAllBytes(path));
+            Assert.Contains(texts, t => t.Value == "保留的尺寸与图纸正文" && Math.Abs(t.Bounds.Left - 100) < 1);
+            Assert.Contains(texts, t => t.Value.Contains("UPTON Automation Systems"));
+            Assert.Equal("NEW-MODEL-123\nB", PdfReleasePageEditor.DecodePage(path, 0));
+        }
+    }
+
     [Fact]
     public async Task UnknownTitleBlockDoesNotModifyOrCoverAnyContent()
     {
@@ -98,7 +202,7 @@ public sealed class PdfReleaseStampTests : IDisposable
     }
 
     private (PdfReleaseStampProcessor Service, ReleasePreviewSource Source, Project Project, ReleasePackage Package, string Path)
-        Fixture(bool legacy, int pages, bool logo = true, bool cadOnly = false)
+        Fixture(bool legacy, int pages, bool logo = true, bool cadOnly = false, string? legacyCode = null, string? frozenCode = null, bool legacyNote = true, bool offsetRequirements = false, bool crowdedRequirements = false)
     {
         Directory.CreateDirectory(root);
         var drawingId = Guid.NewGuid(); var modelId = Guid.NewGuid(); var sourceId = Guid.NewGuid();
@@ -108,6 +212,7 @@ public sealed class PdfReleaseStampTests : IDisposable
         var sha = new string('A', 64);
         var properties = new Dictionary<string, string?> { ["型号"] = "OLD-MODEL" };
         if (cadOnly) { properties["UPLM_QR_CONTENT"] = "OLD-MODEL"; properties["UPLM_QR_RULE_VERSION"] = "1"; }
+        if (frozenCode is not null) properties["全局/UPLM_QR_CONTENT"] = frozenCode;
         var version = new DocumentVersion(sourceId, drawingId, new('A', 1, false), DocumentVersionStatus.Work, "frozen.SLDDRW", 10, sha,
             "admin", DateTimeOffset.UtcNow, "", properties, drawing, [], [], null, null, null, null);
         var repository = DispatchProxy.Create<IPdmRepository, FrozenRepository>();
@@ -141,16 +246,17 @@ public sealed class PdfReleaseStampTests : IDisposable
                     graphics.DrawString("UPTON Automation Systems (Kunshan) Co., Ltd.", new XFont("UPLM-YaHei", 5.3), XBrushes.Black, 965, h - 120);
                 }
                 foreach (var (text, y) in new[] { ("技术要求：", 212d), ("1.去毛刺、锐角倒钝；", 197d),
-                    ("2.表面不允许划伤；", 182d), ("3.尺寸为最终尺寸；", 167d) })
-                    graphics.DrawString(text, font, XBrushes.Black, 966, h - y);
+                    ("2.表面不允许有划痕、擦伤等缺陷；", 182d), ("3.所有尺寸除有特殊说明外，均为最终尺寸；", 167d) })
+                    graphics.DrawString(text, font, XBrushes.Black, offsetRequirements ? 873 : 966, h - y);
+                if (crowdedRequirements) graphics.DrawString("保留的尺寸说明", font, XBrushes.Black, 873, h - 265);
                 if (legacy)
                 {
-                    using var code = QRCodeGenerator.GenerateQrCode("OLD-MODEL", QRCodeGenerator.ECCLevel.M);
+                    using var code = QRCodeGenerator.GenerateQrCode(legacyCode ?? "OLD-MODEL", QRCodeGenerator.ECCLevel.M);
                     using var bitmap = new BitmapByteQRCode(code);
                     using var stream = new MemoryStream(bitmap.GetGraphic(4));
                     using var image = XImage.FromStream(stream);
                     graphics.DrawImage(image, 1119, h - 198, 57, 57);
-                    if (!cadOnly) graphics.DrawString("型号 OLD-MODEL · 正式版次 A", font, XBrushes.Blue, 1035, h - 193);
+                    if (!cadOnly && legacyNote) graphics.DrawString("型号 OLD-MODEL · 正式版次 A", font, XBrushes.Blue, 1035, h - 193);
                 }
             }
             pdf.Save(path);

@@ -90,14 +90,16 @@ public sealed partial class MySqlPdmRepository
             if (commit.ReferenceSnapshot.Root.Kind == DocumentKind.Drawing)
             {
                 var models = commit.ReferenceSnapshot.Root.Children.Where(node => node.Kind is DocumentKind.Assembly or DocumentKind.Part)
-                    .Where(node => node.Status != ReferenceNodeStatus.Virtual && node.DocumentId.HasValue).Select(node => node.DocumentId!.Value).Distinct().ToArray();
-                if (models.Length == 0) throw new PdmRuleException("工程图缺少实际模型关联，整批提交已取消：" + commit.ReferenceSnapshot.Root.FileName);
-                await connection.ExecuteAsync(new CommandDefinition("DELETE FROM document_model_drawing_relation WHERE drawing_document_id=@Id",
-                    new { Id = file.DocumentId }, transaction, cancellationToken: cancellationToken));
+                    .Where(node => node.Status is not (ReferenceNodeStatus.Virtual or ReferenceNodeStatus.Missing) && node.DocumentId.HasValue).Select(node => node.DocumentId!.Value).Distinct().ToArray();
+                // A partial read may add verified models, but cannot prove that an old relation was removed.
+                if (!commit.ReferenceSnapshot.Root.StructureIndexPending)
+                    await connection.ExecuteAsync(new CommandDefinition("DELETE FROM document_model_drawing_relation WHERE drawing_document_id=@Id",
+                        new { Id = file.DocumentId }, transaction, cancellationToken: cancellationToken));
                 foreach (var modelId in models)
                     await connection.ExecuteAsync(new CommandDefinition("""
                         INSERT INTO document_model_drawing_relation(drawing_document_id,model_document_id,project_id,created_at,updated_at)
                         VALUES(@DrawingId,@ModelId,@ProjectId,@Now,@Now)
+                        ON DUPLICATE KEY UPDATE updated_at=@Now
                         """, new { DrawingId = file.DocumentId, ModelId = modelId, ProjectId = projectId, Now = timeProvider.GetUtcNow().UtcDateTime },
                         transaction, cancellationToken: cancellationToken));
             }

@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "source": {
+    "path": "src/pdm-ui/src/assets/plm-app-icon.svg",
+    "sha256": "bc29d3f1bc53a0389ab8d92ef7fc953c40bf33a005c8da33ce171211605dd8b0"
+  },
+  "wordmark": {
+    "path": "src/pdm-ui/src/assets/upton-wordmark.png",
+    "sha256": "108c87a80e6611da314b3da0ffeaabe169ed20a51fccb41807fafc70a6294b43"
+  },
+  "generator": {
+    "path": "src/pdm-ui/tools/generate-plm-icon-assets.cjs",
+    "sha256": "6602b66d6f6e36d8075a482db1fa733d3099e7955afb9ca85a141d2b75ac7075"
+  },
+  "bounds": {
+    "left": 123,
+    "top": 70,
+    "width": 778,
+    "height": 883
+  },
+  "desktop": {
+    "background": "white-rounded",
+    "subjectHeightRatio": 0.86,
+    "cornerRadius": 218.24
+  },
+  "navigation": {
+    "gapCssPixels": 7.251748251748252,
+    "wordmarkHeightCssPixels": 15.412587412587413,
+    "groupCentered": true
+  },
+  "outputs": [
+    {
+      "path": "src/pdm-ui/src/assets/pdm-client-icon.png",
+      "sha256": "44b26e18002f6999b7da0ad4ba9660a023faeb8b2ac268856043efbd03bdecfa"
+    },
+    {
+      "path": "src/pdm-ui/src/assets/plm-favicon.png",
+      "sha256": "a31cbd16d9904e320805f636a211ccfd1e57b4e90ad2e8357581eaae70b89d0d"
+    },
+    {
+      "path": "src/pdm-ui/public/favicon.ico",
+      "sha256": "10a76f56839c29748e4bb7e13b6d045b6a3ba75765a2965e1a9b377ceb8df069"
+    },
+    {
+      "path": "src/Pdm.Desktop/Assets/PdmClient.ico",
+      "sha256": "10a76f56839c29748e4bb7e13b6d045b6a3ba75765a2965e1a9b377ceb8df069"
+    },
+    {
+      "path": "src/pdm-ui/src/assets/plm-desktop-icon.svg",
+      "sha256": "a9c455bfe024ab43e732cd7993f142df197cddf6ce1e754f77900f97ec44b07c"
+    },
+    {
+      "path": "src/pdm-ui/src/assets/plm-desktop-icon.png",
+      "sha256": "adcbc808045662fa57e163733bb83a412e77dd2cbbea0b3ecb04cff2e89fb1c5"
+    },
+    {
+      "path": "src/Pdm.Desktop/Assets/UPTON-PLM.ico",
+      "sha256": "b7e2f8532c21cd03378e38b27b9b12fe25ef498434e968969628e09a78755461"
+    },
+    {
+      "path": "src/pdm-ui/src/assets/upton-nav-icon.png",
+      "sha256": "affb204b493c807f01bcb7c76a3870d3ce611dafdb2d8fda70892acb0246a07f"
+    },
+    {
+      "path": "src/pdm-ui/src/assets/upton-nav-lockup.svg",
+      "sha256": "dbfac366bcbf470ad83db57c39476ce18ccb34a719efb40e7d7ac54f13036da0"
+    },
+    {
+      "path": "src/pdm-ui/src/assets/upton-nav-lockup.png",
+      "sha256": "67407a3ef06233cb9c2871510fd7065e5326b1160c822e31e0c8be2570ddf278"
+    }
+  ]
+}

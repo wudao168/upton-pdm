@@ -8,9 +8,11 @@ public sealed record ProductionLine(
     DateOnly? RequiredOn, string? Material, string? SurfaceTreatment, string? HeatTreatment,
     Guid? SourceDocumentId)
 {
+    public string? DisplayRevision { get; init; }
     public string MaterialCode { get; init; } = string.Empty;
     public IReadOnlyList<Guid> SourceTrackingIds { get; init; } = [];
     public Guid? SourceVersionId { get; init; }
+    public decimal? SourceUnassignedQuantity { get; init; }
 }
 
 public sealed record ProductionLot(
@@ -39,6 +41,9 @@ public sealed record ProductionMovement(
     public string? FromStage { get; init; }
     public string? ToStage { get; init; }
     public bool ResetsFlow { get; init; }
+    public string? OperationName { get; init; }
+    public string? SourceKind { get; init; }
+    public IReadOnlyList<ProductionFlowCredit> FlowCredits { get; init; } = [];
 }
 
 public sealed record ProductionTrackingState(
@@ -48,10 +53,16 @@ public sealed record ProductionTrackingState(
     IReadOnlyList<ProductionMovement> Movements, string? ReceivedBy = null,
     DateTimeOffset? ReceivedAt = null)
 {
+    public string FlowMode { get; init; } = "ResourceOperations";
+    public IReadOnlyList<ProductionFlowNode>? FlowNodes { get; init; }
     public Guid? FormalReleasePackageId { get; init; }
     public IReadOnlyList<ProductionLineAdjustment> DeliveryAdjustments { get; init; } = [];
     public IReadOnlyList<ProductionRevisionDecision> RevisionDecisions { get; init; } = [];
+    public IReadOnlyList<ProductionDemandCancellation> DemandCancellations { get; init; } = [];
 }
+
+public sealed record ProductionDemandCancellation(Guid RequestId, Guid LineId, decimal Quantity, string Reason, string Actor, DateTimeOffset OccurredAt);
+public sealed record CancelUnassignedProductionDemand(Guid LineId, decimal Quantity, string Reason, Guid RequestId);
 
 public sealed record ProductionLineAdjustment(Guid Id, Guid RequestId, Guid LineId,
     string Priority, DateOnly? RequiredOn, string Reason, string Actor, DateTimeOffset UpdatedAt);
@@ -127,20 +138,23 @@ public sealed record BatchProductionAllocation(IReadOnlyList<Guid> LineIds, stri
     Guid RequestId, long ExpectedRowVersion, Guid? SupplierId = null);
 
 public sealed record RecordProductionMovement(Guid LotId, string Kind, decimal Quantity,
-    Guid RequestId, string? Note = null, string? Recipient = null, Guid? WorkstationId = null);
+    Guid RequestId, string? Note = null, string? Recipient = null, Guid? WorkstationId = null, string? SourceKind = null);
 
 public static class ProductionTrackingRules
 {
-    public static ProductionTrackingState? SelfProduction(ProductionTrackingState state)
+    public static ProductionTrackingState? SelfProduction(ProductionTrackingState state) => ForRoute(state, "Self");
+    public static ProductionTrackingState? ExternalProduction(ProductionTrackingState state) => ForRoute(state, "External");
+    private static ProductionTrackingState? ForRoute(ProductionTrackingState state, string route)
     {
-        var lots = state.Lots.Where(lot => lot.Route == "Self").ToArray();
+        var lots = state.Lots.Where(lot => lot.Route == route).ToArray();
         if (lots.Length == 0) return null;
-        var quantities = lots.GroupBy(lot => lot.LineId).ToDictionary(group => group.Key, group => group.Sum(lot => lot.Quantity));
+        var quantities = lots.GroupBy(lot => lot.LineId).ToDictionary(group => group.Key,
+            group => group.Sum(lot => lot.Quantity - Total(state, lot.Id, "Scrap") - Total(state, lot.Id, "TaskCancelled")));
         var lotIds = lots.Select(lot => lot.Id).ToHashSet();
         return state with
         {
             Lines = state.Lines.Where(line => quantities.ContainsKey(line.Id))
-                .Select(line => line with { RequiredQuantity = quantities[line.Id] }).ToArray(),
+                .Select(line => line with { RequiredQuantity = quantities[line.Id], SourceUnassignedQuantity = Unassigned(state, line) }).ToArray(),
             Lots = lots, Movements = state.Movements.Where(item => lotIds.Contains(item.LotId)).ToArray()
         };
     }
@@ -154,17 +168,23 @@ public static class ProductionTrackingRules
     }
 
     public static decimal Total(ProductionTrackingState state, Guid lotId, string kind) =>
-        ProductionFlowRules.ActiveMovements(state, lotId).Where(item => item.Kind == kind).Sum(item => item.Quantity);
+        ProductionFlowRules.ActiveMovements(state, lotId).Where(item => item.Kind == kind || kind == "Scrap" && item.Kind == "StageScrap").Sum(item => item.Quantity);
 
     public static decimal Qualified(ProductionTrackingState state, Guid lineId) =>
-        state.Lots.Where(lot => lot.LineId == lineId).Sum(lot => Total(state, lot.Id, "Pass"));
+        state.Lots.Where(lot => lot.LineId == lineId).Sum(lot => ProductionQuantityFlow.Qualified(state, lot));
+
+    public static decimal Unassigned(ProductionTrackingState state, ProductionLine line) => line.SourceUnassignedQuantity ?? Math.Max(0,
+        line.RequiredQuantity - state.DemandCancellations.Where(item => item.LineId == line.Id).Sum(item => item.Quantity)
+            - state.Lots.Where(lot => lot.LineId == line.Id)
+            .Sum(lot => lot.Quantity - Total(state, lot.Id, "Scrap") - Total(state, lot.Id, "TaskCancelled")));
 
     public static decimal Issued(ProductionTrackingState state, Guid lineId) =>
         state.Lots.Where(lot => lot.LineId == lineId).Sum(lot => Total(state, lot.Id, "Issue"));
 
     public static decimal EffectiveDemand(ProductionTrackingState state, ProductionLine line) =>
         Math.Max(0, line.RequiredQuantity - state.Lots.Where(lot => lot.LineId == line.Id)
-            .Sum(lot => Total(state, lot.Id, "Cancelled") + Total(state, lot.Id, "Transferred")));
+            .Sum(lot => Total(state, lot.Id, "Cancelled") + Total(state, lot.Id, "Transferred"))
+            - (line.SourceUnassignedQuantity.HasValue ? 0 : state.DemandCancellations.Where(item => item.LineId == line.Id).Sum(item => item.Quantity)));
 
     public static int QualifiedLines(ProductionTrackingState state) =>
         state.Lines.Count(line => EffectiveDemand(state, line) > 0
@@ -177,14 +197,25 @@ public static class ProductionTrackingRules
     public static string Status(ProductionTrackingState state)
     {
         if (state.ReceivedAt is null) return "待接收";
-        if (state.Lots.Any(lot => lot.Frozen && !state.RevisionDecisions.Any(decision =>
+        if (state.Lots.Any(lot => lot.Frozen && (state.FlowMode != "DepartmentHandover" || ProductionDepartmentFlow.Outstanding(state, lot) > 0) && !state.RevisionDecisions.Any(decision =>
                 decision.OldLotId == lot.Id && decision.ChangedReleasePackageId == lot.FrozenByReleasePackageId)))
             return "变更待处理";
         if (state.Lines.Count == 0) return "无新增生产需求";
-        if (state.Lines.All(line => state.Lots.Where(lot => lot.LineId == line.Id)
-                .Sum(lot => Total(state, lot.Id, "Issue") + Total(state, lot.Id, "Transferred")
-                    + Total(state, lot.Id, "Cancelled")) >= line.RequiredQuantity))
-            return state.Movements.Any(item => item.Kind is "Transferred" or "Cancelled")
+        if (state.Lines.Any(line => Unassigned(state, line) > 0
+            && state.Lots.Any(lot => lot.LineId == line.Id && Total(state, lot.Id, "Scrap") + Total(state, lot.Id, "TaskCancelled") > 0)))
+            return "数量不足，待补齐";
+        if (state.FlowMode == "DepartmentHandover" && state.Lines.All(line => Issued(state, line.Id) >= EffectiveDemand(state, line)))
+            return state.DemandCancellations.Count > 0 || state.Movements.Any(m => m.Kind is "Cancelled" or "Transferred") ? "变更已结案"
+                : state.Lots.All(lot => lot.Route == "Self") ? "领料完成" : "已完结";
+        if (state.FlowMode == "DepartmentHandover")
+        {
+            if (state.Lots.Count == 0) return "待分配";
+            if (state.Lines.Any(line => state.Lots.Where(lot => lot.LineId == line.Id).Sum(lot => lot.Quantity) < line.RequiredQuantity)) return "部分分配";
+            var stages = state.Lots.Select(lot => ProductionFlowRules.Stage(state, lot)).Distinct().ToArray();
+            return stages.Length == 1 ? stages[0] : "分批流转";
+        }
+        if (state.Lines.All(line => Issued(state, line.Id) >= EffectiveDemand(state, line)))
+            return state.DemandCancellations.Count > 0 || state.Movements.Any(item => item.Kind is "Transferred" or "Cancelled")
                 ? "变更已结案" : "已完结";
         if (state.Lines.Count > 0 && IssuedLines(state) == state.Lines.Count) return "已完结";
         if (state.Lines.Count > 0 && QualifiedLines(state) == state.Lines.Count) return "已齐套待领用";
@@ -228,6 +259,31 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
     private static bool TrackedScope(ReleaseScope scope) => scope is ReleaseScope.NonStandardLongLead
         or ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement;
 
+    public async Task<ProductionTrackingRecord> CancelUnassignedDemandAsync(Guid id, CancelUnassignedProductionDemand input,
+        string actor, UserRole role, CancellationToken ct)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.ProductionAssign, ct);
+        if (input.RequestId == Guid.Empty || input.Quantity <= 0 || string.IsNullOrWhiteSpace(input.Reason))
+            throw new PdmRuleException("请填写大于零的取消数量及需求取消原因。");
+        var current = await FindAsync(id, actor, role, ct);
+        if (!(await scanService.ActionsAsync(current.State, actor, role, ct)).CanCancelUnassignedDemand)
+            throw new UnauthorizedAccessException("当前账号未获授权取消制造需求。");
+        return await MutateAsync(id, actor, role, state =>
+        {
+            if (state.DemandCancellations.FirstOrDefault(item => item.RequestId == input.RequestId) is { } existing)
+            {
+                if (existing.LineId != input.LineId || existing.Quantity != input.Quantity || existing.Actor != actor || existing.Reason != input.Reason.Trim())
+                    throw new PdmConflictException("本次操作编号已用于其他需求取消记录，请刷新后重试。");
+                return state;
+            }
+            var line = state.Lines.FirstOrDefault(item => item.Id == input.LineId) ?? throw new PdmNotFoundException("生产物料不存在。");
+            if (input.Quantity > ProductionTrackingRules.Unassigned(state, line))
+                throw new PdmRuleException("取消数量超过未分配需求；已分配数量请在对应批次按实际环节处理。");
+            return state with { DemandCancellations = state.DemandCancellations.Append(new(input.RequestId, input.LineId,
+                input.Quantity, input.Reason.Trim(), actor, clock.GetUtcNow())).ToArray() };
+        }, ct);
+    }
+
     private async Task<Project> RequireProjectAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
     {
         var project = await repository.FindProjectAsync(projectId, ct)
@@ -256,8 +312,9 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
         await EnsureProjectAsync(project, ct);
     }
 
-    public async Task<IReadOnlyList<ProductionTrackingProject>> ListAsync(string actor, UserRole role, CancellationToken ct, bool selfOnly = false)
+    public async Task<IReadOnlyList<ProductionTrackingProject>> ListAsync(string actor, UserRole role, CancellationToken ct, bool selfOnly = false, bool externalOnly = false)
     {
+        if (selfOnly && externalOnly) throw new PdmRuleException("请分别查看自制追溯或外协追溯。");
         var projects = await repository.ListProjectsForUserAsync(actor, role, ct);
         var result = new List<ProductionTrackingProject>();
         foreach (var group in projects.Where(item => item.CanReadContent).Chunk(8))
@@ -269,6 +326,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
                 var packages = await EnsureProjectAsync(project, ct);
                 var states = packages.Select(item => item.State);
                 if (selfOnly) states = states.Select(ProductionTrackingRules.SelfProduction).OfType<ProductionTrackingState>();
+                if (externalOnly) states = states.Select(ProductionTrackingRules.ExternalProduction).OfType<ProductionTrackingState>();
                 var summaries = states.Select(ProductionTrackingRules.Summary).ToArray();
                 return summaries.Length == 0 ? null : new ProductionTrackingProject(project.Id,
                     project.Code, project.Name,
@@ -286,7 +344,32 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
         var project = await RequireProjectAsync(package.ProjectId, actor, role, ct);
         await EnsureProjectAsync(project, ct);
         var record = await store.FindAsync(releasePackageId, ct);
-        return record ?? throw new PdmNotFoundException("该发布包尚未纳入生产跟踪。");
+        var result = await scanService.ApplyFlowAsync(record ?? throw new PdmNotFoundException("该发布包尚未纳入生产跟踪。"), ct);
+        var frozen = ProductionDrawingQuantities.FrozenItems(package);
+        return result with { State = result.State with { Lines = result.State.Lines.Select(line =>
+        {
+            var source = frozen.FirstOrDefault(item => line.SourceBomItemIds.Contains(item.Id));
+            return line with { DisplayRevision = source is null || !DrawingRevision.IsWork(line.Revision)
+                ? DrawingRevision.Display(line.Revision) : BomDrawingRevision.ForPackage(source, package) };
+        }).ToArray() } };
+    }
+
+    internal async Task<IReadOnlyList<ProductionTrackingRecord>> ProcurementAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
+    {
+        var project = await repository.FindProjectAsync(projectId, ct) ?? throw new PdmNotFoundException("项目不存在。");
+        // This projection uses the existing procurement view permission, without granting manufacturing operations.
+        if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, ct)
+            || project.OrganizationId is Guid company && TenantContext.CompanyId is Guid active && company != active)
+            throw new UnauthorizedAccessException("当前用户没有项目采购跟踪查看权限。");
+        return await EnsureProjectAsync(project, ct);
+    }
+
+    public async Task<ProductionSupplierChoices> ExternalSupplierChoicesAsync(Guid releasePackageId,
+        string actor, UserRole role, CancellationToken ct)
+    {
+        var record = await FindAsync(releasePackageId, actor, role, ct);
+        return suppliers is null ? new(record.State.CompanyId, [], [])
+            : await suppliers.TrackingChoicesAsync(record.State, ct);
     }
 
     public async Task<ProductionTrackingState> PreviewExistingAsync(Guid releasePackageId,
@@ -458,7 +541,9 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
                         if (!affected.Contains(lot.LineId) || lot.Frozen ||
                             ProductionTrackingRules.Total(current.State, lot.Id, "Issue")
                                 + ProductionTrackingRules.Total(current.State, lot.Id, "Transferred")
-                                + ProductionTrackingRules.Total(current.State, lot.Id, "Cancelled") >= lot.Quantity ||
+                                + ProductionTrackingRules.Total(current.State, lot.Id, "Cancelled")
+                                + ProductionTrackingRules.Total(current.State, lot.Id, "TaskCancelled")
+                                + ProductionTrackingRules.Total(current.State, lot.Id, "Scrap") >= lot.Quantity ||
                             current.State.RevisionDecisions.Any(decision => decision.OldLotId == lot.Id
                                 && decision.ChangedReleasePackageId == change.Id)) return lot;
                         return lot with { Frozen = true, FrozenByReleasePackageId = change.Id,
@@ -474,7 +559,9 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
                 }
             }
         }
-        return records.Values.OrderByDescending(item => item.State.PublishedAt).ToArray();
+        var catalog = await store.ScanCatalogAsync(project.OrganizationId ?? TenantContext.CompanyId ?? Guid.Empty, ct);
+        return records.Values.Select(item => item with { State = ProductionDepartmentFlow.ApplyCatalog(item.State, catalog) })
+            .OrderByDescending(item => item.State.PublishedAt).ToArray();
     }
 
     private static ProductionTrackingState BuildInitial(Project project, ReleasePackage package,
@@ -510,6 +597,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
                 delivery?.RequiredOn ?? package.DrawingRequiredOn, first.Material,
                 first.SurfaceTreatment, first.HeatTreatment, first.SourceDocumentId)
             {
+                DisplayRevision = BomDrawingRevision.ForPackage(first, package),
                 MaterialCode = first.DrawingNumber,
                 SourceTrackingIds = group.Select(item => item.ReleaseTrackingId).Distinct().ToArray(),
                 SourceVersionId = package.VersionBindings?.FirstOrDefault(binding =>
@@ -550,13 +638,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
             if (state.ReceivedAt is null) throw new PdmRuleException("请先接收发布包，再分配自制或外协。");
             var line = state.Lines.FirstOrDefault(item => item.Id == input.LineId)
                 ?? throw new PdmNotFoundException("生产物料不存在，请刷新发布包明细。");
-            var assigned = state.Lots.Where(item => item.LineId == line.Id).Sum(item => item.Quantity);
-            var scrapped = state.Lots.Where(item => item.LineId == line.Id)
-                .Sum(item => ProductionTrackingRules.Total(state, item.Id, "Scrap"));
-            var retired = state.Lots.Where(item => item.LineId == line.Id)
-                .Sum(item => ProductionTrackingRules.Total(state, item.Id, "Cancelled")
-                    + ProductionTrackingRules.Total(state, item.Id, "Transferred"));
-            if (assigned + input.Quantity > line.RequiredQuantity + scrapped - retired)
+            if (input.Quantity > ProductionTrackingRules.Unassigned(state, line))
                 throw new PdmRuleException("本次分配数量超过尚未分配的需求数量。");
             var lot = new ProductionLot(Guid.NewGuid(), line.Id, input.Route, input.Quantity,
                 input.Route == "External" ? input.Supplier?.Trim() : null, input.Assignee?.Trim(), input.PromisedOn,
@@ -584,10 +666,11 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
         if (ProductionTrackingRules.AllocationChangeBlockReason(state, lot) is string blocked)
             throw new PdmConflictException(blocked);
         var line = state.Lines.First(item => item.Id == lot.LineId);
-        var otherAssigned = state.Lots.Where(item => item.LineId == line.Id && item.Id != lot.Id).Sum(item => item.Quantity);
+        var otherAssigned = state.Lots.Where(item => item.LineId == line.Id && item.Id != lot.Id)
+            .Sum(item => item.Quantity - ProductionTrackingRules.Total(state, item.Id, "TaskCancelled"));
         var scrapped = state.Lots.Where(item => item.LineId == line.Id)
             .Sum(item => ProductionTrackingRules.Total(state, item.Id, "Scrap"));
-        if (otherAssigned + input.Quantity > line.RequiredQuantity + scrapped)
+        if (otherAssigned + input.Quantity > line.RequiredQuantity + scrapped - state.DemandCancellations.Where(item => item.LineId == line.Id).Sum(item => item.Quantity))
             throw new PdmRuleException("修改后的分配数量超过物料需求，请保留其他批次已分配的数量。");
         if (input.Route == "External" && (input.SupplierId.HasValue || suppliers is not null))
         {
@@ -641,7 +724,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
                 ?? throw new PdmNotFoundException("所选生产物料不存在，请刷新后重新选择。");
             if (line.RequiredQuantity <= 0) throw new PdmRuleException($"{line.DrawingNumber} 的BOM数量为零，无需分配。");
             var lineLots = state.Lots.Where(item => item.LineId == lineId).ToArray();
-            if (lineLots.Sum(lot => lot.Quantity) > line.RequiredQuantity)
+            if (lineLots.Sum(lot => lot.Quantity) > ProductionTrackingRules.EffectiveDemand(state, line))
                 throw new PdmConflictException($"{line.DrawingNumber} 的现有分配超过BOM数量，请先核对已有批次。");
             foreach (var lot in lineLots)
             {
@@ -654,7 +737,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
                 movements.Add(new ProductionMovement(Guid.NewGuid(), input.RequestId, lot.Id, "AllocationChanged",
                     lot.Quantity, actor, clock.GetUtcNow(), AllocationNote(lot, changed, input.Reason)) { ResetsFlow = lot.Route != changed.Route });
             }
-            var remaining = line.RequiredQuantity - lineLots.Sum(lot => lot.Quantity);
+            var remaining = ProductionTrackingRules.Unassigned(state, line);
             if (remaining <= 0) continue;
             var added = new ProductionLot(Guid.NewGuid(), lineId, input.Route, remaining,
                 input.Route == "External" ? input.Supplier?.Trim() : null, input.Assignee?.Trim(), input.PromisedOn,
@@ -776,6 +859,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
                 throw new PdmConflictException("旧版图档已作废，不能继续按旧版生产。");
             var remaining = lot.Quantity - ProductionTrackingRules.Total(previous.State, lot.Id, "Issue")
                 - ProductionTrackingRules.Total(previous.State, lot.Id, "Cancelled")
+                - ProductionTrackingRules.Total(previous.State, lot.Id, "TaskCancelled")
                 - ProductionTrackingRules.Total(previous.State, lot.Id, "Transferred");
             if (remaining <= 0) throw new PdmConflictException("该批次已无待处置数量。");
             var dispositionQuantity = input.Action == "CancelRemaining" ? input.Quantity ?? 0 : remaining;
@@ -850,51 +934,74 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
     public async Task<ProductionTrackingRecord> RecordAsync(Guid id, RecordProductionMovement input,
         string actor, UserRole role, CancellationToken ct)
     {
-        if (!ProductionFlowRules.Labels.ContainsKey(input.Kind)) throw new PdmRuleException("生产操作类型无效。");
         if (input.RequestId == Guid.Empty || input.Quantity <= 0) throw new PdmRuleException("请输入有效的操作编号和大于零的本次数量。");
         var current = await FindAsync(id, actor, role, ct);
         var originalLot = current.State.Lots.FirstOrDefault(item => item.Id == input.LotId)
             ?? throw new PdmNotFoundException("生产批次不存在，请重新扫码或刷新页面。");
-        await RequirePermissionAsync(actor, role, ProductionFlowRules.Permission(input.Kind, originalLot.Route), ct);
+        if (!ProductionFlowRules.Labels.ContainsKey(input.Kind) && ProductionDepartmentFlow.Node(current.State, originalLot, input.Kind) is null)
+            throw new PdmRuleException("生产操作类型无效，请刷新可办理步骤。");
+        await RequirePermissionAsync(actor, role, ProductionFlowRules.Permission(current.State, originalLot, input.Kind), ct);
         void CheckReplay(ProductionMovement movement)
         {
             if (movement.Actor != actor || movement.Kind != input.Kind || movement.LotId != input.LotId || movement.Quantity != input.Quantity
-                || input.WorkstationId.HasValue && movement.WorkstationId != input.WorkstationId
-                || (movement.Note ?? "") != (input.Note?.Trim() ?? "") || (movement.Recipient ?? "") != (input.Recipient?.Trim() ?? ""))
+                || input.WorkstationId.HasValue && (movement.WorkstationId ?? Guid.Empty) != input.WorkstationId
+                || input.SourceKind is not null && movement.SourceKind != input.SourceKind
+                || (movement.Note ?? "") != (input.Note?.Trim() ?? "") || (movement.Recipient ?? "") != (input.Kind == "Issue" ? input.Recipient?.Trim() ?? "" : ""))
                 throw new PdmConflictException("本次操作编号已用于其他内容，请刷新后重新确认。");
         }
         if (current.State.Movements.FirstOrDefault(item => item.RequestId == input.RequestId) is { } replay) { CheckReplay(replay); return current; }
-        if (originalLot.Frozen || originalLot.Paused) throw new PdmConflictException("该生产批次已暂停或因图纸变更冻结，请先处理后再操作。");
-        if (ProductionTrackingRules.Total(current.State, originalLot.Id, "Transferred") + ProductionTrackingRules.Total(current.State, originalLot.Id, "Cancelled") >= originalLot.Quantity)
+        if ((originalLot.Frozen || originalLot.Paused) && !ProductionDepartmentFlow.IsControl(input.Kind)) throw new PdmConflictException("该生产批次已暂停或因图纸变更冻结，请先处理后再操作。");
+        if (ProductionTrackingRules.Total(current.State, originalLot.Id, "Transferred") + ProductionTrackingRules.Total(current.State, originalLot.Id, "Cancelled")
+            + ProductionTrackingRules.Total(current.State, originalLot.Id, "TaskCancelled") >= originalLot.Quantity)
             throw new PdmConflictException("该批次剩余数量已转版或取消，不能继续登记旧版生产记录。");
         var context = await scanService.ActionsAsync(current.State, actor, role, ct);
         var options = context.Actions.Where(item => item.LotId == input.LotId && item.Kind == input.Kind
-            && (!input.WorkstationId.HasValue || item.WorkstationId == input.WorkstationId)).ToArray();
+            && (!input.WorkstationId.HasValue || item.WorkstationId == input.WorkstationId)
+            && (input.SourceKind is null || item.SourceKind == input.SourceKind)).ToArray();
         if (options.Length != 1) throw new PdmRuleException(options.Length == 0
-            ? "当前账号、工位或前序环节不允许办理此步骤，请刷新可办理步骤后重新选择。" : "请选择本次办理的具体工位。");
+            ? "当前账号、工位或前序环节不允许办理此步骤，请刷新可办理步骤后重新选择。" : "请选择本次办理的具体工位或异常发生环节。");
         var grant = options[0];
         if (input.Quantity > grant.RemainingQuantity) throw new PdmRuleException("本次数量超过当前岗位和工位的可办理数量，请核对后重新确认。");
+        if (input.Kind == "Resume" && grant.SourceKind is null && input.Quantity != grant.RemainingQuantity)
+            throw new PdmRuleException("历史整批暂停请先全部恢复，再按环节和数量暂停。");
         var account = await repository.FindUserAsync(actor, ct);
         return await MutateAsync(id, actor, role, state =>
         {
             if (state.Movements.FirstOrDefault(item => item.RequestId == input.RequestId) is { } existing) { CheckReplay(existing); return state; }
             var lot = state.Lots.FirstOrDefault(item => item.Id == input.LotId) ?? throw new PdmNotFoundException("生产批次不存在。");
-            if (ProductionFlowRules.Post(input.Kind, lot.Route) != grant.Post
-                || input.Quantity > ProductionFlowRules.Remaining(state, lot, input.Kind, grant.ResourceGroup))
+            var control = ProductionDepartmentFlow.IsControl(input.Kind);
+            var available = control ? ProductionQuantityFlow.ControlRemaining(state, lot, input.Kind, grant.SourceKind)
+                : ProductionFlowRules.Remaining(state, lot, input.Kind, grant.ResourceGroup);
+            if (ProductionFlowRules.Post(state, lot, input.Kind) != grant.Post || input.Quantity > available)
                 throw new PdmConflictException("该批次环节或可办理数量已变化，请刷新后重新确认。");
             if (input.Kind is "Rework" or "Scrap" && string.IsNullOrWhiteSpace(input.Note)) throw new PdmRuleException("返工或报废必须填写原因。");
+            if (control && string.IsNullOrWhiteSpace(input.Note)) throw new PdmRuleException("暂停、恢复、取消或环节报废必须填写原因及实物处理说明。");
             if (input.Kind == "Issue" && string.IsNullOrWhiteSpace(input.Recipient)) throw new PdmRuleException("领料时必须填写实际领料人。");
+            var source = grant.SourceKind;
+            if (input.Kind == "Scrap")
+            {
+                var steps = ProductionQuantityFlow.Steps(state, lot);
+                var index = Array.IndexOf(steps, "Pass");
+                source = index > 0 ? steps[index - 1] : "Assigned";
+            }
             var movement = new ProductionMovement(Guid.NewGuid(), input.RequestId, lot.Id, input.Kind, input.Quantity,
                 actor, clock.GetUtcNow(), input.Note?.Trim(), input.Kind == "Issue" ? input.Recipient?.Trim() : null)
             {
                 ActorName = account?.DisplayName ?? actor, ActorRoles = string.Join(",", account?.EffectiveRoleCodes ?? [role.ToString()]),
-                BindingId = grant.BindingId, Post = grant.Post, WorkstationId = grant.WorkstationId,
-                WorkstationName = grant.WorkstationName, ResourceGroup = grant.Post == "Machining" ? grant.ResourceGroup : null,
-                FromStage = ProductionFlowRules.Stage(state, lot)
+                BindingId = grant.BindingId == Guid.Empty ? null : grant.BindingId, Post = grant.Post, WorkstationId = grant.WorkstationId == Guid.Empty ? null : grant.WorkstationId,
+                WorkstationName = grant.WorkstationId == Guid.Empty ? null : grant.WorkstationName, ResourceGroup = grant.Post is "Machining" or "Trace" ? grant.ResourceGroup : null,
+                FromStage = grant.SourceName ?? ProductionFlowRules.Stage(state, lot), OperationName = grant.Label, SourceKind = source,
+                FlowCredits = ProductionQuantityFlow.IsRemoval(input.Kind) && source is not null
+                    ? ProductionQuantityFlow.RemovalCredits(state, lot, source, input.Quantity) : []
             };
             var after = state with { Movements = state.Movements.Append(movement).ToArray() };
-            movement = movement with { ToStage = ProductionFlowRules.Stage(after, lot) };
-            return state with { Movements = state.Movements.Append(movement).ToArray() };
+            var open = ProductionQuantityFlow.Outstanding(after, lot);
+            var changedLot = lot with { Paused = open > 0 && ProductionQuantityFlow.Paused(after, lot) >= open };
+            if (input.Kind is "Cancelled" or "TaskCancelled" && open == 0)
+                changedLot = changedLot with { Schedule = [], EstimatedHours = 0, PlannedOn = null, ResourceGroupId = null };
+            after = after with { Lots = state.Lots.Select(item => item.Id == lot.Id ? changedLot : item).ToArray() };
+            movement = movement with { ToStage = ProductionFlowRules.Stage(after, changedLot) };
+            return after with { Movements = state.Movements.Append(movement).ToArray() };
         }, ct);
     }
 
@@ -945,6 +1052,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
             var candidate = current with { State = state, RowVersion = current.RowVersion + 1 };
             if (await store.SaveScheduleAsync(candidate, current.RowVersion, ct)) return candidate;
             current = await store.FindAsync(id, ct) ?? throw new PdmNotFoundException("发布跟踪单不存在。");
+            current = await scanService.ApplyFlowAsync(current, ct);
         }
         throw new PdmConflictException("排产正被其他人员调整，请刷新后重试。");
     }
@@ -1033,13 +1141,32 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
             .Where(item => item.Revision == revision))
         {
             var formal = await repository.FindDocumentVersionAsync(drawing.DocumentId, drawing.VersionId, ct);
-            if (formal?.SourceVersionId is null || formal.Preview?.Format != DocumentPreviewFormat.Pdf
-                || !string.Equals(formal.Preview.SourceSha256, formal.Sha256, StringComparison.OrdinalIgnoreCase)) continue;
+            if (formal is null) continue;
             if (!packages.TryGetValue(drawing.ReleasePackageId, out var package))
             {
                 package = await repository.FindReleasePackageAsync(drawing.ReleasePackageId, ct)
                     ?? throw new PdmNotFoundException("二维码对应的发布记录不存在。");
                 packages[package.Id] = package;
+            }
+            if (formal.SourceVersionId is null)
+            {
+                var legacyModels = ReleaseBoundSourceReader.ModelDocumentIds(formal.ReferenceSnapshot).ToHashSet();
+                if (legacyModels.Count == 0) legacyModels.UnionWith((await repository.ListDocumentRelationsAsync(package.ProjectId, ct))
+                    .Where(item => item.DrawingDocumentId == drawing.DocumentId).Select(item => item.ModelDocumentId));
+                if (!string.Equals(ReleaseBoundSourceReader.DrawingModel(package, formal, legacyModels, drawing.DrawingNumber), model,
+                    StringComparison.OrdinalIgnoreCase)) continue;
+                await drawings.EnsureProductionUseAllowedAsync(drawing.DocumentId, formal.Id, ct);
+                var project = await RequireProjectAsync(drawing.ProjectId, actor, role, ct);
+                var frozenBom = ProductionDrawingQuantities.FrozenItems(package);
+                var legacyBom = frozenBom.Where(item => item.SourceDocumentId.HasValue && legacyModels.Contains(item.SourceDocumentId.Value)).ToArray();
+                if (legacyBom.Length == 0) legacyBom = frozenBom.Where(item => string.Equals(item.DrawingNumber, drawing.DrawingNumber, StringComparison.OrdinalIgnoreCase)).ToArray();
+                foreach (var record in (await EnsureProjectAsync(project, ct)).Where(record => record.State.ReleasePackageId == package.Id
+                    || record.State.FormalReleasePackageId == package.Id))
+                foreach (var line in record.State.Lines.Where(line => legacyBom.Any(item => line.SourceBomItemIds.Contains(item.Id)
+                    || line.MaterialKey == BomReleaseAggregation.MaterialKey(item))))
+                    results.Add(new(record.State.ReleasePackageId, line.Id, null, record.State.PackageNumber,
+                        line.DrawingNumber, line.Name, line.Revision, ProductionTrackingRules.Status(record.State)));
+                continue;
             }
             var binding = package.VersionBindings?.FirstOrDefault(item => item.DocumentId == drawing.DocumentId);
             if (binding is null) continue;
@@ -1098,6 +1225,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
             var candidate = current with { State = updated, RowVersion = current.RowVersion + 1 };
             if (await store.SaveAsync(candidate, current.RowVersion, ct)) return candidate;
             current = await store.FindAsync(id, ct) ?? throw new PdmNotFoundException("发布跟踪单不存在。");
+            current = await scanService.ApplyFlowAsync(current, ct);
         }
         throw new PdmConflictException("生产记录正被其他人员更新，请刷新后重试。");
     }

@@ -9,7 +9,7 @@ const emit = defineEmits<{ open: [] }>()
 const rows = computed(() => [
   { name: '标准件BOM', source: '设计树自动生成', items: props.standard },
   { name: '非标件BOM', source: '设计树自动生成', items: props.nonStandard },
-  { name: '电气BOM', source: '服务端电气BOM', items: props.electrical },
+  { name: '电气件BOM', source: '服务端电气件BOM', items: props.electrical },
 ].map((row) => ({
   ...row,
   incomplete: row.items.filter((item) => !item.complete).length,

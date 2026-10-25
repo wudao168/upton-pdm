@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { documentVersionSummary, documentDrawingVersion, documentPublishedVersion } from '../drawingRevision'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RotateCw, Search } from '@lucide/vue'
 import { postDesktopMessage } from '../api'
@@ -121,18 +122,28 @@ onBeforeUnmount(() => {
         <small>{{ item.value === 'all' ? allCount : item.value === 'model' ? modelCount : item.value === 'drawing' ? drawingCount : warningCount }}</small>
       </button>
     </div>
-    <div class="pdm-tree-columns" aria-hidden="true"><span>名称</span><span>本地状态 / PLM版本</span></div>
+    <div class="pdm-tree-columns" aria-hidden="true"><span>名称</span><span>图纸版本 / 发布版本</span></div>
     <ul v-if="filter === 'drawing' && drawings.length" ref="drawingList" class="pdm-tree pdm-drawing-list" aria-label="2D工程图列表">
       <li v-for="drawing in visibleDrawings" :key="drawing.id">
         <button
           type="button"
           class="pdm-tree-row"
-          :class="{ 'is-selected': drawing.id === selectedId }"
+          :class="{ 'is-selected': drawing.id === selectedId, 'has-version-warning': drawing.versionAlignment === 'StructureStale' || drawing.versionAlignment === 'NotSnapshotted', 'has-version-conflict': drawing.versionAlignment === 'VersionConflict' }"
           @click="emit('select', drawing)"
           @contextmenu.prevent="showContext(drawing, $event)"
         >
           <span class="pdm-tree-row__content"><CadDocumentIcon :kind="drawing.kind" :status="drawing.status" :size="17" /><span class="pdm-tree-row__label"><strong>{{ drawing.drawingNumber }}</strong><small>{{ drawing.name }}</small></span></span>
-          <span class="pdm-tree-row__version"><em>{{ drawing.version }}</em><small v-if="drawing.status === 'Unarchived'">未存档</small><small v-if="drawing.documentId && localStates[drawing.documentId]" class="pdm-local-state" :class="`is-${localStates[drawing.documentId].localState}`" :title="localStates[drawing.documentId].message">{{ localStates[drawing.documentId].localStateLabel }}</small><small v-if="drawing.documentId && reviewStates[drawing.documentId]" class="pdm-review-badge" :class="`is-${reviewStates[drawing.documentId].tone}`">{{ reviewStates[drawing.documentId].label }}</small></span>
+          <span class="pdm-tree-row__version" :title="`${documentVersionSummary(drawing)}；存档版本：${drawing.version}`">
+            <span class="pdm-tree-row__states">
+              <small v-if="drawing.documentId && reviewStates[drawing.documentId]" class="pdm-review-badge" :class="`is-${reviewStates[drawing.documentId].tone}`" :title="reviewStates[drawing.documentId].label">{{ reviewStates[drawing.documentId].label }}</small>
+              <small v-if="drawing.documentId && localStates[drawing.documentId]" class="pdm-local-state" :class="`is-${localStates[drawing.documentId].localState}`" :title="localStates[drawing.documentId].message">{{ localStates[drawing.documentId].localStateLabel }}</small>
+              <small v-if="drawing.status === 'Unarchived'">未存档</small>
+            </span>
+            <span class="pdm-tree-row__versions">
+              <em class="pdm-tree-drawing-version" :title="drawing.versionAlignment === 'StructureStale' ? '引用版本较旧，请在插件中核对引用版本。' : `图纸版本 ${documentDrawingVersion(drawing)}`">{{ documentDrawingVersion(drawing) }}</em>
+              <small class="pdm-tree-published-version" :title="`发布版本 ${documentPublishedVersion(drawing)}`">{{ documentPublishedVersion(drawing) }}</small>
+            </span>
+          </span>
         </button>
       </li>
       <li v-if="drawingPageCount > 1" class="pdm-drawing-pages">
@@ -155,13 +166,14 @@ onBeforeUnmount(() => {
       :style="{ left: `${contextLeft}px`, top: `${contextTop}px` }"
       @click.stop
     >
-      <strong>{{ contextNode.drawingNumber }} · <template v-if="contextNode.snapshotVersion !== undefined">{{ contextNode.snapshotVersion }} / </template>{{ contextNode.version }}</strong>
+      <strong>{{ contextNode.drawingNumber }} · {{ documentVersionSummary(contextNode) }}</strong>
       <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReadOnly')"><span>只读打开最新受控版</span><small v-if="contextRevision">当前 {{ contextRevision }}，不占用编辑权限</small></button>
       <button type="button" role="menuitem" :disabled="!canEdit || !solidWorksAvailable || !contextNode.documentId" @click="open('LatestEdit')"><span>获取权限并编辑最新受控版</span><small v-if="contextRevision">将锁定当前 {{ contextRevision }}，提交后生成新工作版</small></button>
       <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReleased')"><span>只读打开最近正式发布版</span><small v-if="contextRevision">最近一次正式发布基线，永久不可变</small></button>
       <button type="button" role="menuitem" :disabled="!contextNode.documentId" @click="emit('versions', contextNode); closeContext()">查看/对比历史版本…</button>
       <button type="button" role="menuitem" @click="emit('openFolder', contextNode); closeContext()">打开所在文件夹</button>
-      <small v-if="!contextNode.documentId">该引用尚未入库，请先在SolidWorks插件中提交整套存档</small>
+      <small v-if="contextNode.status === 'Virtual'">内容随父装配存档，请打开父装配查看或编辑，无需单独登记。</small>
+      <small v-else-if="!contextNode.documentId">该引用尚未入库，请先在SolidWorks插件中提交整套存档</small>
       <small v-if="!solidWorksAvailable">当前电脑未安装SolidWorks或UPLM插件</small>
     </div>
     <footer class="pdm-tree-legend">

@@ -9,6 +9,41 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class StandardStructureTests
 {
+    [Theory]
+    [InlineData("参数.txt")]
+    [InlineData("设计表.xlsx")]
+    public async Task DesignDependencyFilesAreStoredWithNativeWithoutAddingBomItems(string fileName)
+    {
+        using var f = new Fixture();
+        var node = Fixture.Node() with { PreviewFileKey = null };
+        using var native = new MemoryStream(Encoding.UTF8.GetBytes("native assembly"));
+        using var dependency = new MemoryStream(Encoding.UTF8.GetBytes("design dependency bytes"));
+        var archived = await f.Service.ArchiveAsync(new(Guid.NewGuid(), 1, "含设计依赖", node, [], Guid.NewGuid(), null),
+            [new("native", node.FileName, native), new("dependency", fileName, dependency)],
+            "std", UserRole.ProcessReviewer, default);
+        var revision = Assert.Single(archived.Revisions);
+        Assert.Equal(2, revision.Files.Count);
+        Assert.Contains(revision.Files, file => file.FileName == fileName && file.Length == dependency.Length);
+        Assert.Empty(revision.Bom);
+        Assert.Empty(revision.Root.Children);
+    }
+
+    [Fact]
+    public async Task NativeOnlyArchiveKeepsEmbeddedStructureWhenPreviewGenerationFailed()
+    {
+        using var f = new Fixture();
+        var node = Fixture.Node() with { PreviewFileKey = null, Children = [
+            new("embedded", "INNER", "嵌入零件", "INNER.SLDPRT", "Part", null, null, true, 1, [])] };
+        using var native = new MemoryStream(Encoding.UTF8.GetBytes("native embedded assembly"));
+        var archived = await f.Service.ArchiveAsync(new(Guid.NewGuid(), 1, "预览失败的原生存档", node, [], Guid.NewGuid(), null),
+            [new("native", node.FileName, native)], "std", UserRole.ProcessReviewer, default);
+        var revision = Assert.Single(archived.Revisions);
+        Assert.Null(revision.Root.PreviewFileKey);
+        Assert.True(Assert.Single(revision.Root.Children).Embedded);
+        Assert.Equal("native", revision.Root.FileKey);
+        Assert.Single((await f.Catalog()).Structures);
+    }
+
     private sealed class Fixture : IDisposable
     {
         public Guid Company { get; } = Guid.Parse("70000000-0000-0000-0000-000000000001");
@@ -61,7 +96,8 @@ public sealed class StandardStructureTests
         Assert.Equal(StandardStructureRules.GroupId, view.Catalog.CompanyId);
         Assert.Contains(view.Catalog.Categories, c => c.Id == category);
         Assert.Equal(archived.Id, Assert.Single(view.Catalog.Structures).Id);
-        Assert.Empty(await new InMemoryStandardLibraryRepository().ListCategoriesAsync(true, default));
+        var materialCategories = await new InMemoryStandardLibraryRepository().ListCategoriesAsync(true, default);
+        Assert.DoesNotContain(materialCategories, c => c.Id == category || c.Id == archived.CategoryId);
         var (stream, _) = await f.Service.PreviewAsync(archived.Revisions[0].Id, "preview", "std", UserRole.ProcessReviewer, default);
         await using (stream) Assert.True(stream.Length > 0);
     }
@@ -75,7 +111,9 @@ public sealed class StandardStructureTests
             var item = await f.Archive(type);
             Assert.Equal($"UPST-{type}-0001", item.Code);
             Assert.Equal(type, item.DrawingType);
-            Assert.Equal(StandardStructureRules.UnclassifiedId, item.CategoryId);
+            var category = Assert.Single((await f.Catalog()).Categories, c => c.Id == item.CategoryId);
+            Assert.Equal(StandardStructureRules.UnclassifiedId, category.ParentId);
+            Assert.Equal($"{item.Code}-V01", category.Name);
             Assert.Equal("V01", StandardStructureRules.Version(item.Revisions[0].Version));
             Assert.Equal("正式料号-001", item.Revisions[0].Root.DrawingNumber);
             Assert.Equal(Fixture.Node(type).FileName, item.Revisions[0].Root.FileName);
@@ -91,11 +129,13 @@ public sealed class StandardStructureTests
         var items = await Task.WhenAll(Enumerable.Range(0, 12).Select(_ => f.Archive()));
         Assert.Equal(12, items.Select(s => s.Code).Distinct().Count());
         Assert.Equal(12, (await f.Catalog()).Sequences[1]);
+        Assert.Equal(12, (await f.Catalog()).Categories.Count(c => c.ParentId == StandardStructureRules.UnclassifiedId));
         var request = Guid.NewGuid(); var id = Guid.NewGuid();
         var first = await f.Archive(id: id, request: request);
         var retry = await f.Archive(id: id, request: request);
         Assert.Equal(first.Code, retry.Code); Assert.Single(retry.Revisions);
         Assert.Equal(13, (await f.Catalog()).Sequences[1]);
+        Assert.Equal(13, (await f.Catalog()).Categories.Count(c => c.ParentId == StandardStructureRules.UnclassifiedId));
         await Assert.ThrowsAsync<PdmConflictException>(() => f.Archive(id: id, request: request, root: Fixture.Node() with { Name = "不同内容" }));
     }
 
@@ -123,6 +163,32 @@ public sealed class StandardStructureTests
         await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.DeleteCategoryAsync(StandardStructureRules.UnclassifiedId, c.RowVersion, "std", UserRole.ProcessReviewer, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.SaveCategoryAsync(StandardStructureRules.UnclassifiedId, new("重命名", null, 0, false, c.RowVersion), "std", UserRole.ProcessReviewer, default));
         await Assert.ThrowsAsync<PdmConflictException>(() => f.Service.SaveCategoryAsync(child, new("过期", root, 1, true, 0), "std", UserRole.ProcessReviewer, default));
+    }
+
+    [Fact]
+    public async Task ArchiveCreatesOneModelFolderWithWholeStructureAndKeepsItOnUpgrade()
+    {
+        using var f = new Fixture();
+        var node = Fixture.Node() with { Children = [new("embedded", "INNER", "嵌入零件", "INNER.SLDPRT", "Part", null, null, true, 2, [])] };
+        StandardStructureBomLine[] bom = [new("line", BomKind.NonStandard, "INNER", "嵌入零件", 2, "件", "A")];
+        var request = Guid.NewGuid();
+        var item = await f.Archive(root: node, bom: bom, request: request);
+        var catalog = await f.Catalog();
+        var folder = Assert.Single(catalog.Categories, c => c.ParentId == StandardStructureRules.UnclassifiedId);
+        Assert.Equal("UPST-1-0001-V01", folder.Name);
+        Assert.Equal(folder.Id, item.CategoryId);
+        Assert.True(folder.IsActive);
+        Assert.Equal("embedded", Assert.Single(item.Revisions[0].Root.Children).Id);
+        Assert.Equal("INNER", Assert.Single(item.Revisions[0].Bom).DrawingNumber);
+        await f.Archive(id: item.Id, root: node, bom: bom, request: request);
+        var upgraded = await f.Archive(id: item.Id, root: node, bom: bom);
+        Assert.Equal(folder.Id, upgraded.CategoryId);
+        Assert.Equal(2, upgraded.Revisions.Count);
+        Assert.Equal(folder, Assert.Single((await f.Catalog()).Categories, c => c.ParentId == StandardStructureRules.UnclassifiedId));
+        // 自动目录可维护，未分类本身仍保持系统固定分类。
+        catalog = await f.Catalog();
+        await f.Service.SaveCategoryAsync(folder.Id, new("自定义型号目录", StandardStructureRules.UnclassifiedId, 1, true, catalog.RowVersion), "std", UserRole.ProcessReviewer, default);
+        Assert.Equal("自定义型号目录", Assert.Single((await f.Catalog()).Categories, c => c.Id == folder.Id).Name);
     }
 
     [Fact]
@@ -193,6 +259,68 @@ public sealed class StandardStructureTests
     }
 
     [Fact]
+    public async Task LifecycleKeepsAllSnapshotsAndDeletedFilesCanBeRestored()
+    {
+        using var f = new Fixture();
+        var item = await f.Archive(bom: [new("line", BomKind.NonStandard, "P1", "底板", 2, "件", "A")]);
+        item = await f.Archive(id: item.Id, bom: item.Revisions[0].Bom);
+        var snapshots = JsonSerializer.Serialize(item.Revisions);
+        var catalog = await f.Catalog();
+        catalog = await f.Service.ChangeStateAsync(item.Id, new("Disable", catalog.RowVersion), "std", UserRole.ProcessReviewer, default);
+        Assert.False(Assert.Single(catalog.Structures).IsActive);
+        var upgraded = await f.Archive(id: item.Id, bom: item.Revisions[0].Bom);
+        Assert.False(upgraded.IsActive);
+        catalog = await f.Catalog();
+        catalog = await f.Service.ChangeStateAsync(item.Id, new("Delete", catalog.RowVersion), "std", UserRole.ProcessReviewer, default);
+        Assert.NotNull(Assert.Single(catalog.Structures).DeletedAt);
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Archive(id: item.Id));
+        var (stream, _) = await f.Service.PreviewAsync(item.Revisions[0].Id, "preview", "std", UserRole.ProcessReviewer, default);
+        await using (stream) Assert.True(stream.Length > 0);
+        catalog = await f.Service.ChangeStateAsync(item.Id, new("Restore", catalog.RowVersion), "std", UserRole.ProcessReviewer, default);
+        var restored = Assert.Single(catalog.Structures);
+        Assert.Null(restored.DeletedAt); Assert.False(restored.IsActive);
+        Assert.Equal(snapshots, JsonSerializer.Serialize(restored.Revisions.Take(2).ToArray()));
+        Assert.Equal(3, restored.Revisions.Count);
+        await Assert.ThrowsAsync<PdmConflictException>(() => f.Service.ChangeStateAsync(item.Id, new("Enable", 0), "std", UserRole.ProcessReviewer, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => f.Service.ChangeStateAsync(item.Id, new("Enable", catalog.RowVersion), "engineer", UserRole.Engineer, default));
+        Assert.Contains(await f.Repository.ListAuditAsync("admin", UserRole.Administrator, 500, default), a => a.Action == "standard-structure.delete");
+    }
+
+    [Fact]
+    public async Task LegacyReferencesFromOtherActorsStillPreventDeletionBeyondOrdinaryAuditLimit()
+    {
+        using var f = new Fixture();
+        var item = await f.Archive();
+        var input = new ReferenceStandardStructure(item.Revisions[0].Id, Guid.NewGuid(), BomKind.NonStandard, 2, Guid.NewGuid());
+        await f.Repository.AppendAuditAsync(new(Guid.NewGuid(), DateTimeOffset.UtcNow, "another-user", "standard-structure.reference", "StandardStructure", input.ProjectId.ToString(), JsonSerializer.Serialize(new { input, item.Code, Version = 1 })), default);
+        for (var i = 0; i < 600; i++) await f.Repository.AppendAuditAsync(new(Guid.NewGuid(), DateTimeOffset.UtcNow, "std", "other.action", "Other", "test", "test"), default);
+        var references = await f.Service.ListReferencesAsync(item.Id, "std", UserRole.ProcessReviewer, default);
+        Assert.Equal(input.ProjectId, Assert.Single(references).ProjectId);
+        var catalog = await f.Catalog();
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.ChangeStateAsync(item.Id, new("Delete", catalog.RowVersion), "std", UserRole.ProcessReviewer, default));
+        catalog = await f.Service.ChangeStateAsync(item.Id, new("Disable", catalog.RowVersion), "std", UserRole.ProcessReviewer, default);
+        Assert.False(Assert.Single(catalog.Structures).IsActive);
+    }
+
+    [Fact]
+    public async Task ReferenceAndDeleteCannotBothSucceed()
+    {
+        using var f = new Fixture();
+        var item = await f.Archive(bom: [new("line", BomKind.NonStandard, "P-1", "底板", 1, "件", "A", "钢")]);
+        f.SetRole("Administrator");
+        var project = await f.Repository.CreateNumberedProjectAsync(new(f.Company, "C", 2, Guid.Parse("c0046500-0000-0000-0000-000000000001"), "并发引用", null, new(2026, 10, 20), 1, "admin", "D:/PDM/Vault", "D:/PDM/Release"), default);
+        var workflow = new PdmWorkflowService(f.Repository, null!, null!, TimeProvider.System);
+        var catalog = await f.Catalog();
+        var errors = await Task.WhenAll(
+            Record.ExceptionAsync(() => f.Service.ReferenceAsync(new(item.Revisions[0].Id, project.Id, BomKind.NonStandard, 1, Guid.NewGuid()), workflow, "admin", UserRole.Administrator, default)),
+            Record.ExceptionAsync(() => f.Service.ChangeStateAsync(item.Id, new("Delete", catalog.RowVersion), "std", UserRole.ProcessReviewer, default)));
+        Assert.Single(errors, error => error is null);
+        var saved = Assert.Single((await f.Catalog()).Structures);
+        var bom = await f.Repository.GetBomAsync(project.Id, BomKind.NonStandard, default);
+        Assert.Equal(saved.DeletedAt is null ? 1 : 0, bom.Count);
+    }
+
+    [Fact]
     public async Task ReferenceCopiesPinnedQuantitiesKeepsExistingRowsAndDoesNotRepeatRetries()
     {
         using var f = new Fixture();
@@ -205,10 +333,29 @@ public sealed class StandardStructureTests
         var input = new ReferenceStandardStructure(rev.Id, project.Id, BomKind.NonStandard, 3, Guid.NewGuid());
         Assert.Equal(1, (await f.Service.ReferenceAsync(input, workflow, "admin", UserRole.Administrator, default)).AddedCount);
         Assert.Equal(0, (await f.Service.ReferenceAsync(input, workflow, "admin", UserRole.Administrator, default)).AddedCount);
+        var usage = Assert.Single((await f.Catalog()).Structures.Single().References);
+        Assert.False(usage.Pending); Assert.Equal(input.ProjectId, usage.ProjectId);
         var imported = Assert.Single(await f.Repository.GetBomAsync(project.Id, BomKind.NonStandard, default));
         Assert.Equal(15, imported.Quantity); Assert.Contains("UPST-1-0001 / V01", imported.Remark);
         f.SetRole("ProcessReviewer"); await f.Archive(id: item.Id, bom: [line with { Quantity = 99 }]);
         Assert.Equal(15, (await f.Repository.GetBomAsync(project.Id, BomKind.NonStandard, default)).Single().Quantity);
+        var catalog = await f.Catalog();
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.ChangeStateAsync(item.Id, new("Delete", catalog.RowVersion), "std", UserRole.ProcessReviewer, default));
+        catalog = await f.Service.ChangeStateAsync(item.Id, new("Disable", catalog.RowVersion), "std", UserRole.ProcessReviewer, default);
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.ReferenceAsync(input with { RequestId = Guid.NewGuid() }, workflow, "admin", UserRole.Administrator, default));
+        catalog = await f.Service.ChangeStateAsync(item.Id, new("Enable", catalog.RowVersion), "std", UserRole.ProcessReviewer, default);
+        var folder = catalog.Categories.Single(c => c.Id == item.CategoryId);
+        catalog = await f.Service.SaveCategoryAsync(folder.Id, new(folder.Name, folder.ParentId, folder.SortOrder, false, catalog.RowVersion), "std", UserRole.ProcessReviewer, default);
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.ReferenceAsync(input with { RequestId = Guid.NewGuid() }, workflow, "admin", UserRole.Administrator, default));
+        Assert.Equal(15, (await f.Repository.GetBomAsync(project.Id, BomKind.NonStandard, default)).Single().Quantity);
+        var parent = await f.Category("停用父分类");
+        catalog = await f.Catalog();
+        catalog = await f.Service.SaveCategoryAsync(folder.Id, new(folder.Name, parent, folder.SortOrder, true, catalog.RowVersion), "std", UserRole.ProcessReviewer, default);
+        catalog = await f.Service.SaveCategoryAsync(parent, new("停用父分类", null, 1, false, catalog.RowVersion), "std", UserRole.ProcessReviewer, default);
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.ReferenceAsync(input with { RequestId = Guid.NewGuid() }, workflow, "admin", UserRole.Administrator, default));
+        catalog = await f.Service.ChangeStateAsync(item.Id, new("Disable", catalog.RowVersion), "std", UserRole.ProcessReviewer, default);
+        catalog = await f.Service.SaveCategoryAsync(parent, new("停用父分类", null, 1, true, catalog.RowVersion), "std", UserRole.ProcessReviewer, default);
+        Assert.False(Assert.Single(catalog.Structures).IsActive);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => f.Service.ReferenceAsync(input with { RequestId = Guid.NewGuid() }, workflow, "std", UserRole.ProcessReviewer, default));
     }
 }

@@ -19,14 +19,6 @@ using Microsoft.Win32;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
-using System.Windows.Media.Media3D;
-using MediaBrush = System.Windows.Media.Brush;
-using MediaColor = System.Windows.Media.Color;
-using MediaFontFamily = System.Windows.Media.FontFamily;
-using WpfBrushes = System.Windows.Media.Brushes;
-using WpfFlowDirection = System.Windows.FlowDirection;
-using WpfPoint = System.Windows.Point;
 using Microsoft.Web.WebView2.Core;
 using Upton.Pdm.ClientShared;
 using Upton.Pdm.LocalSettings;
@@ -103,7 +95,6 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        LoadingPanel.Loaded += (_, _) => InitializeLoadingAnimation();
         SourceInitialized += OnSourceInitialized;
         Loaded += OnLoaded;
         SizeChanged += (_, _) => ApplyPreviewSurfaces();
@@ -125,101 +116,6 @@ public partial class MainWindow : Window
             ShowInTaskbar = false;
             WindowState = WindowState.Minimized;
         }
-    }
-
-    private void InitializeLoadingAnimation()
-    {
-        var red = MediaColor.FromRgb(0xFF, 0x3D, 0x00);
-        var orange = MediaColor.FromRgb(0xFF, 0x98, 0x00);
-        var yellow = MediaColor.FromRgb(0xFF, 0xD6, 0x00);
-        var green = MediaColor.FromRgb(0x49, 0xB6, 0x53);
-        var blue = MediaColor.FromRgb(0x24, 0x95, 0xE8);
-        var white = MediaColor.FromRgb(0xF8, 0xFA, 0xFC);
-        var cube = new Model3DGroup();
-        cube.Children.Add(CreateLoadingCubeFace(
-            new[] { new Point3D(-.5, .5, .5), new Point3D(.5, .5, .5), new Point3D(.5, -.5, .5), new Point3D(-.5, -.5, .5) },
-            "L", true, new[] { orange, green, blue, blue, white, red, yellow, orange, green }));
-        cube.Children.Add(CreateLoadingCubeFace(
-            new[] { new Point3D(.5, .5, -.5), new Point3D(-.5, .5, -.5), new Point3D(-.5, -.5, -.5), new Point3D(.5, -.5, -.5) },
-            "阿", false, new[] { blue, yellow, red, white, green, orange, red, blue, yellow }));
-        cube.Children.Add(CreateLoadingCubeFace(
-            new[] { new Point3D(.5, .5, .5), new Point3D(.5, .5, -.5), new Point3D(.5, -.5, -.5), new Point3D(.5, -.5, .5) },
-            "M", true, new[] { yellow, red, blue, red, white, green, blue, green, yellow }));
-        cube.Children.Add(CreateLoadingCubeFace(
-            new[] { new Point3D(-.5, .5, -.5), new Point3D(-.5, .5, .5), new Point3D(-.5, -.5, .5), new Point3D(-.5, -.5, -.5) },
-            "顿", false, new[] { orange, blue, white, green, red, yellow, blue, white, green }));
-        cube.Children.Add(CreateLoadingCubeFace(
-            new[] { new Point3D(-.5, .5, -.5), new Point3D(.5, .5, -.5), new Point3D(.5, .5, .5), new Point3D(-.5, .5, .5) },
-            "P", true, new[] { red, green, blue, green, white, yellow, blue, yellow, red }));
-        cube.Children.Add(CreateLoadingCubeFace(
-            new[] { new Point3D(-.5, -.5, .5), new Point3D(.5, -.5, .5), new Point3D(.5, -.5, -.5), new Point3D(-.5, -.5, -.5) },
-            "普", false, new[] { white, green, orange, red, blue, yellow, green, orange, red }));
-        LoadingCubeVisual.Content = cube;
-
-        var alignCornerY = new AxisAngleRotation3D(new Vector3D(0, 1, 0), -45);
-        var alignCornerX = new AxisAngleRotation3D(new Vector3D(1, 0, 0), -54.736);
-        var axialRotation = new AxisAngleRotation3D(new Vector3D(0, 1, 0), 0);
-        var transforms = new Transform3DGroup();
-        transforms.Children.Add(new RotateTransform3D(alignCornerY));
-        transforms.Children.Add(new RotateTransform3D(alignCornerX));
-        transforms.Children.Add(new RotateTransform3D(axialRotation));
-        LoadingCubeVisual.Transform = transforms;
-        BeginContinuousRotation(axialRotation, 0, 360, 1.5);
-    }
-
-    private static GeometryModel3D CreateLoadingCubeFace(Point3D[] positions, string label, bool latin, MediaColor[] colors)
-    {
-        var mesh = new MeshGeometry3D
-        {
-            Positions = new Point3DCollection(positions),
-            TextureCoordinates = new PointCollection
-            {
-                new WpfPoint(0, 0), new WpfPoint(1, 0), new WpfPoint(1, 1), new WpfPoint(0, 1)
-            },
-            TriangleIndices = new Int32Collection { 0, 1, 2, 0, 2, 3 }
-        };
-        var material = new EmissiveMaterial(CreateLoadingFaceBrush(label, latin, colors));
-        return new GeometryModel3D(mesh, material) { BackMaterial = material };
-    }
-
-    private static MediaBrush CreateLoadingFaceBrush(string label, bool latin, IReadOnlyList<MediaColor> colors)
-    {
-        const double faceSize = 90;
-        const double tileSize = faceSize / 3;
-        var visual = new DrawingVisual();
-        using (var context = visual.RenderOpen())
-        {
-            context.DrawRectangle(new SolidColorBrush(MediaColor.FromRgb(0x07, 0x19, 0x36)), null, new Rect(0, 0, faceSize, faceSize));
-            for (var index = 0; index < colors.Count; index++)
-            {
-                var left = index % 3 * tileSize + .6;
-                var top = index / 3 * tileSize + .6;
-                context.DrawRectangle(new SolidColorBrush(colors[index]), null, new Rect(left, top, tileSize - 1.2, tileSize - 1.2));
-            }
-
-            var typeface = new Typeface(new MediaFontFamily("Microsoft YaHei UI"), FontStyles.Normal, FontWeights.ExtraBold, FontStretches.Normal);
-            var fontSize = latin ? 58 : 48;
-            var shadow = new FormattedText(label, CultureInfo.GetCultureInfo("zh-CN"), WpfFlowDirection.LeftToRight,
-                typeface, fontSize, new SolidColorBrush(MediaColor.FromArgb(230, 0x05, 0x17, 0x36)), 1);
-            var foreground = new FormattedText(label, CultureInfo.GetCultureInfo("zh-CN"), WpfFlowDirection.LeftToRight,
-                typeface, fontSize, WpfBrushes.White, 1);
-            var origin = new WpfPoint((faceSize - foreground.Width) / 2, (faceSize - foreground.Height) / 2);
-            foreach (var offset in new[] { new Vector(-1.4, 0), new Vector(1.4, 0), new Vector(0, -1.4), new Vector(0, 1.4) })
-            {
-                context.DrawText(shadow, origin + offset);
-            }
-            context.DrawText(foreground, origin);
-        }
-
-        return new VisualBrush(visual) { Stretch = Stretch.Fill };
-    }
-
-    private static void BeginContinuousRotation(AxisAngleRotation3D rotation, double from, double to, double seconds)
-    {
-        rotation.BeginAnimation(AxisAngleRotation3D.AngleProperty, new DoubleAnimation(from, to, TimeSpan.FromSeconds(seconds))
-        {
-            RepeatBehavior = RepeatBehavior.Forever
-        });
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -299,7 +195,7 @@ public partial class MainWindow : Window
         };
         var uiVersion = File.GetLastWriteTimeUtc(indexFile).Ticks;
         reviewOverlay = new ReviewOverlayWindow(this, WorkspaceView.CoreWebView2.Environment, uiFolder, uiVersion,
-            bootstrapConfiguration.UiBaseUrl, bootstrapConfiguration.ConfigurationVersion);
+            bootstrapConfiguration.UiBaseUrl, bootstrapConfiguration.ConfigurationVersion, core => ConfigureLocalUiRequests(core, uiFolder));
         reviewOverlay.MessageReceived += OnReviewOverlayMessageReceived;
         reviewOverlay.ActivityChanged += ApplyPreviewSurfaces;
         usingServerUi = Uri.TryCreate(bootstrapConfiguration.UiBaseUrl, UriKind.Absolute, out var serverUiUrl)
@@ -434,6 +330,19 @@ public partial class MainWindow : Window
 
     private void ConfigureLocalUiRequests(CoreWebView2 webView, string uiFolder)
     {
+        webView.DownloadStarting += OnDownloadStarting;
+        webView.AddWebResourceRequestedFilter("*://*/api/*", CoreWebView2WebResourceContext.All);
+        webView.WebResourceRequested += (_, args) =>
+        {
+            var uri = new Uri(args.Request.Uri);
+            var api = new Uri(bootstrapConfiguration.ApiBaseUrl);
+            if (!uri.AbsolutePath.StartsWith("/api/", StringComparison.OrdinalIgnoreCase)
+                || (!string.Equals(uri.Authority, api.Authority, StringComparison.OrdinalIgnoreCase) && !string.Equals(uri.Host, UiHostName, StringComparison.OrdinalIgnoreCase))) return;
+            var authorization = args.Request.Headers.Contains("Authorization") ? args.Request.Headers.GetHeader("Authorization") : "";
+            var proof = ClientDeviceIdentity.Headers(args.Request.Method, uri, authorization);
+            args.Request.Headers.SetHeader("X-UPLM-Device", proof.Item1);
+            args.Request.Headers.SetHeader("X-UPLM-Proof", proof.Item2);
+        };
         // Virtual-host folder mapping bypasses WebResourceRequested, so serve both
         // bundled assets and API requests through the same intercepted origin.
         webView.AddWebResourceRequestedFilter($"https://{UiHostName}/*", CoreWebView2WebResourceContext.All);
@@ -572,7 +481,8 @@ public partial class MainWindow : Window
             && handoffArgumentIndex + 1 < arguments.Count
             && DesktopAuthHandoffStore.TryConsume(arguments[handoffArgumentIndex + 1], out var sessionJson))
         {
-            var session = new JavaScriptSerializer().DeserializeObject(sessionJson);
+            var session = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(sessionJson);
+            session["desktopHandoff"] = true;
             pendingExternalRequestArgs = arguments
                 .Where((_, index) => index != handoffArgumentIndex && index != handoffArgumentIndex + 1)
                 .ToArray();
@@ -947,6 +857,11 @@ public partial class MainWindow : Window
         var generation = Interlocked.Increment(ref workspaceStateGeneration);
         var verificationScope = bootstrapConfiguration.ApiBaseUrl + "|" + activeCompanyId + "|" + request.CurrentUsername + "|" + request.ProjectId;
         var verificationToken = accessToken;
+        var draftScope = new Uri(bootstrapConfiguration.ApiBaseUrl.TrimEnd('/') + "/").AbsoluteUri.ToLowerInvariant()
+            + "|" + (Guid.TryParse(activeCompanyId, out var draftCompany) ? draftCompany : Guid.Empty).ToString("N")
+            + "|" + (request.CurrentUsername ?? string.Empty).ToLowerInvariant();
+        var draftJournal = new EditDraftJournal(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "UPTON PDM", "edit-drafts"), draftScope);
         bool SameVerificationContext() => verificationToken == accessToken
             && verificationScope == bootstrapConfiguration.ApiBaseUrl + "|" + activeCompanyId + "|"
                 + workspaceStateRequest?.CurrentUsername + "|" + workspaceStateRequest?.ProjectId;
@@ -965,7 +880,7 @@ public partial class MainWindow : Window
                 request.ProjectId,
                 request.ProjectCode,
                 request.CurrentUsername,
-                request.Documents));
+                request.Documents, draftJournal));
             if (generation != workspaceStateGeneration) return;
             var recovered = false;
             var pending = snapshot.Items.Where(item => item.LocalState == "IntegrityMismatch")
@@ -1006,7 +921,7 @@ public partial class MainWindow : Window
                             }
                             else
                             {
-                                var current = await Task.Run(() => WorkspaceLocalStateReader.Recheck(item, request.ProjectId, request.CurrentUsername));
+                                var current = await Task.Run(() => WorkspaceLocalStateReader.Recheck(item, request.ProjectId, request.CurrentUsername, draftJournal));
                                 if (current.LocalState != "IntegrityMismatch") recovered = true;
                                 else ClientDiagnostics.Record("error", "工作区校验不一致", item.FileName
                                     + "：校验或绑定恢复未通过，已保留文件和原校验记录；内容或绑定变化前不重复核对。路径="
@@ -1027,7 +942,7 @@ public partial class MainWindow : Window
             }
             if (recovered)
                 snapshot = await Task.Run(() => WorkspaceLocalStateReader.Read(WorkspaceSettingsStore.GetWorkspaceRoot(),
-                    request.ProjectId, request.ProjectCode, request.CurrentUsername, request.Documents));
+                    request.ProjectId, request.ProjectCode, request.CurrentUsername, request.Documents, draftJournal));
             if (generation != workspaceStateGeneration) return;
             workspaceStateSnapshot = snapshot;
             if (selectedDocumentId.HasValue) _ = PublishLightweightPreviewAsync(selectedDocumentId.Value);
@@ -1626,6 +1541,7 @@ public partial class MainWindow : Window
     private async Task PreviewDocumentAsync(IReadOnlyDictionary<string, object> payload)
     {
         var requestGeneration = Interlocked.Increment(ref previewRequestGeneration);
+        assemblyPreviewCancellation?.Cancel();
         await previewOpenGate.WaitAsync();
         try
         {
@@ -1687,7 +1603,15 @@ public partial class MainWindow : Window
             var cacheDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPTON", "PDM", "Preview", documentId.ToString("N"), version.Id.ToString("N"));
             Directory.CreateDirectory(cacheDirectory);
             var cachedFile = Path.Combine(cacheDirectory, fileName);
-            if (!await IsValidCacheAsync(cachedFile, version.FileLength, version.Sha256))
+            if (!requestedVersionId.HasValue && string.Equals(Path.GetExtension(fileName), ".sldasm", StringComparison.OrdinalIgnoreCase))
+            {
+                previewStep = "生成最新装配预览";
+                var assembly = await DownloadLatestAssemblyPreviewAsync(documentId);
+                version = assembly.Version;
+                cachedFile = assembly.Path;
+                cacheDirectory = Path.GetDirectoryName(cachedFile)!;
+            }
+            else if (!await IsValidCacheAsync(cachedFile, version.FileLength, version.Sha256))
             {
                 previewStep = "下载预览源文件";
                 var temporaryFile = cachedFile + ".download";
@@ -2119,6 +2043,7 @@ public partial class MainWindow : Window
     private void HideEmbeddedPreview(bool closeDocument)
     {
         Interlocked.Increment(ref previewRequestGeneration);
+        assemblyPreviewCancellation?.Cancel();
         previewHostSuspended = false;
         previewDocumentReady = false;
         previewRequestedDocumentId = null;
@@ -2259,6 +2184,13 @@ public partial class MainWindow : Window
 
     private void DisposeClientResources()
     {
+        if (!string.IsNullOrWhiteSpace(accessToken))
+        {
+            using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
+            using (var request = CreateApiRequest(HttpMethod.Post, "api/auth/logout"))
+                try { using (var response = apiClient.SendAsync(request, timeout.Token).GetAwaiter().GetResult()) { } }
+                catch (Exception error) { AppendClientDiagnostic("退出登录时未能连接服务器：" + error.Message); }
+        }
         bootstrapLifetime.Cancel();
         if (reviewOverlay != null)
         {

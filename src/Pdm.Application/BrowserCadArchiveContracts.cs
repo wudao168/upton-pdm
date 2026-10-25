@@ -14,13 +14,14 @@ public sealed record BrowserCadArchiveTarget(Guid? ProjectId = null, Guid? Struc
 public sealed record BrowserCadArchiveFile(string RelativePath, long Length);
 public sealed record BrowserCadArchiveView(Guid Id, string State, string Stage, IReadOnlyList<BrowserCadArchiveFile> Files,
     string? RootPath = null, string? Error = null, int ArchivedFiles = 0, int NewVersions = 0,
-    string? ResultCode = null, IReadOnlyList<string>? Warnings = null);
+    string? ResultCode = null, IReadOnlyList<string>? Warnings = null, bool PreviewsPending = false, bool PreviewRetryable = false);
 public sealed record BrowserCadArchiveCapability(bool Enabled, bool CanArchive, bool CanConfigure, string? Reason = null);
 public sealed record BrowserCadNativeFile(Guid Key, string RelativePath, string FileName, long Length, string Sha256,
-    DocumentReferenceNode Root, IReadOnlyDictionary<string, string?> Properties, string? PreviewPath = null, string? InputRelativePath = null);
+    DocumentReferenceNode Root, IReadOnlyDictionary<string, string?> Properties, string? PreviewPath = null, string? InputRelativePath = null,
+    string? PreviewSha256 = null, long? PreviewLength = null);
 public sealed record BrowserCadNativeResult(bool Success, Guid RootKey, IReadOnlyList<BrowserCadNativeFile> Files,
-    string? Error = null, IReadOnlyList<string>? Warnings = null);
-public sealed record BrowserCadNativeRequest(string Directory, string RootPath, bool Previews);
+    string? Error = null, IReadOnlyList<string>? Warnings = null, bool PreviewsPending = false, string? ArchiveSourceSha256 = null);
+public sealed record BrowserCadNativeRequest(string Directory, string RootPath, bool Previews, bool ArchiveBeforePreviews = false);
 public interface IBrowserCadReader
 {
     Task<BrowserCadNativeResult> ReadAsync(string directory, BrowserCadNativeRequest input, CancellationToken ct);

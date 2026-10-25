@@ -5,6 +5,59 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class DocumentVersionTests
 {
     [Fact]
+    public async Task DrawingVersionsAdvanceAcrossReleasesAndOnlySuccessfulPublicationChangesThePublishedLabel()
+    {
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new("QA-BUSINESS-VERSIONS", "双版本回归", "admin", "vault", "release"), "admin", default);
+        var document = await RegisterAndCheckInAsync(repository, project, "PART", new string('A', 64));
+        Assert.Equal("V1", (await repository.ListDocumentVersionsAsync(document.Id, default)).Single().DrawingVersion);
+        document = await repository.CheckoutAsync(document.Id, "engineer", default);
+        var second = await repository.CheckInVersionAsync(document.Id, "engineer",
+            Commit(project, document, ReferenceRoot(document, "engineer"), new string('B', 64), "修改设计"), default);
+        Assert.Equal("V2", second.Version!.DrawingVersion);
+
+        var packageId = Guid.NewGuid();
+        var taskId = Guid.NewGuid();
+        await repository.CreateReleasePackageAsync(new(packageId, project.Id, "RP-VERSIONS", ReleasePackageState.Publishing,
+            Guid.NewGuid(), "N-V01", "E-V01", [new(taskId, packageId, ApprovalStage.Approval, "admin", "admin", ApprovalDecision.Approved, "通过", DateTimeOffset.UtcNow)],
+            DateTimeOffset.UtcNow, null, null), default);
+        var released = await repository.PublishDocumentVersionAsync(document.Id, second.Version.Id, packageId, taskId, "admin", default);
+        Assert.Equal("V2", released.DrawingVersion);
+        Assert.Equal(second.Version.Id, released.SourceVersionId);
+        Assert.Equal("未发布", (await repository.FindDocumentAsync(document.Id, default))!.PublishedVersion);
+        await repository.MarkPublishedAsync(packageId, "release", DateTimeOffset.UtcNow, default);
+        var published = (await repository.FindDocumentAsync(document.Id, default))!;
+        Assert.Equal("V2", published.DrawingVersion);
+        Assert.Equal("A", published.PublishedVersion);
+
+        document = await repository.CheckoutAsync(document.Id, "engineer", default);
+        var third = await repository.CheckInVersionAsync(document.Id, "engineer",
+            Commit(project, document, ReferenceRoot(document, "engineer"), new string('C', 64), "发布后继续设计"), default);
+        Assert.Equal("V3", third.Version!.DrawingVersion);
+        var current = (await repository.ListDocumentsAsync(project.Id, default)).Single();
+        Assert.Equal("V3", current.DrawingVersion);
+        Assert.Equal("A", current.PublishedVersion);
+        var limited = (await repository.ListDocumentVersionsAsync(document.Id, default, 1)).Single();
+        Assert.Equal("V3", limited.DrawingVersion);
+        Assert.Equal("A", limited.LatestPublishedVersion);
+    }
+
+    [Fact]
+    public async Task NativeDrawingQrPolicyCannotBeReenabledByLegacySettings()
+    {
+        Assert.False(DrawingQrPolicy.Default.Enabled);
+        var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var settings = await repository.GetSystemSettingsAsync(default);
+        var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
+        var saved = await workflow.UpdateSystemSettingsAsync(settings with
+        {
+            DrawingQrPolicy = DrawingQrPolicy.Default with { Enabled = true }
+        }, "admin", UserRole.Administrator, default);
+        Assert.False(saved.DrawingQrPolicy.Enabled);
+        Assert.False((await repository.GetSystemSettingsAsync(default)).DrawingQrPolicy.Enabled);
+    }
+
+    [Fact]
     public async Task PendingDrawingRegistrationAcceptsOnlyItsOwnBatchModel()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
@@ -895,7 +948,7 @@ public sealed class DocumentVersionTests
     }
 
     [Fact]
-    public async Task CheckInWithSameFileHash_ReferenceChangeCreatesNextWorkVersion()
+    public async Task CheckInWithSameFileHash_OpeningDifferentPartConfigurationDoesNotCreateVersion()
     {
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(CancellationToken.None));
@@ -908,8 +961,8 @@ public sealed class DocumentVersionTests
             Commit(project, document, ReferenceRoot(document, "engineer") with { Configuration = "Changed" }, new string('6', 64), "reference changed", forceVersion: true),
             CancellationToken.None);
 
-        Assert.True(result.VersionCreated);
-        Assert.Equal("W2", Assert.IsType<DocumentVersion>(result.Version).Revision.Display);
+        Assert.False(result.VersionCreated);
+        Assert.Null(result.Version);
     }
 
     [Fact]

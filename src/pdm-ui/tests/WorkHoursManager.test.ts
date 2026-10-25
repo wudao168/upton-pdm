@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus, { ElSelect } from 'element-plus'
+import ElementPlus, { ElDatePicker, ElSelect } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import WorkHoursManager from '../src/components/WorkHoursManager.vue'
@@ -17,13 +17,74 @@ const view = (): WorkHoursView => ({ today: '2026-10-20', startDate: '2026-10-12
 // 真实下拉搜索及布局由内网 Playwright 覆盖；jsdom 使用原生控件，避免 Element Plus 的布局观察循环。
 const selectStub = defineComponent({ name: 'ElSelect', props: ['modelValue', 'disabled'], emits: ['update:modelValue'], template: '<select :value="modelValue" :disabled="disabled" @change="$emit(\'update:modelValue\',$event.target.value)"><slot /></select>' })
 const optionStub = defineComponent({ name: 'ElOption', props: ['value','label'], template: '<option :value="value">{{ label }}</option>' })
-const mountManager = () => mount(WorkHoursManager, { props: { token: 'token', companyId: 'c', active: true }, global: { plugins: [ElementPlus], stubs: { teleport: true, ElSelect: selectStub, ElOption: optionStub } } })
+const treeSelectStub = defineComponent({name:'ElTreeSelect',props:['modelValue','data'],emits:['update:modelValue'],template:'<div data-testid="department-tree" />'})
+const mountManager = () => mount(WorkHoursManager, { props: { token: 'token', companyId: 'c', active: true }, global: { plugins: [ElementPlus], stubs: { teleport: true, ElSelect: selectStub, ElOption: optionStub, ElTreeSelect: treeSelectStub } } })
 type Wrapper = ReturnType<typeof mountManager>
 const button = (wrapper: Wrapper, text: string) => wrapper.findAll('button').find(x => x.text() === text)!
 beforeEach(() => { vi.spyOn(calendar,'chinaToday').mockReturnValue('2026-10-20'); vi.spyOn(api,'readWorkHours').mockImplementation(async () => view()); vi.spyOn(api,'saveWorkHours').mockImplementation(async () => view()) })
 afterEach(() => vi.restoreAllMocks())
 
 describe('工时填报与汇总', () => {
+  it('单框选择跨月区间后清除旧汇总，查询使用完整起止日期', async () => {
+    const w = mountManager(); await flushPromises(); await button(w, '汇总工时').trigger('click'); await flushPromises()
+    const range = w.findComponent(ElDatePicker)
+    range.vm.$emit('update:modelValue', ['2026-09-30', '2026-10-19']); await flushPromises()
+    expect(w.find('.wh-report-summary').exists()).toBe(false)
+    await w.get('form.wh-report-filters').trigger('submit'); await flushPromises()
+    expect(api.readWorkHours).toHaveBeenLastCalledWith('2026-09-30', '2026-10-19', true, 'token')
+    expect(w.get('.wh-report-summary').text()).toContain('8 小时')
+    range.vm.$emit('update:modelValue', null); await flushPromises()
+    vi.mocked(api.readWorkHours).mockClear()
+    await w.get('form.wh-report-filters').trigger('submit'); await flushPromises()
+    expect(api.readWorkHours).not.toHaveBeenCalled()
+    w.unmount()
+  })
+  it('仅显示参与部门，清除已停用的默认及当前部门筛选，并保留历史汇总导出', async()=>{
+    const data=view();data.defaultDepartmentId='t3';data.participatingDepartmentIds=['t2','child']
+    data.organizationUnits=[{id:'t2',parentUnitId:null,name:'T2事业部',sortOrder:1,isActive:true},{id:'child',parentUnitId:'t2',name:'机械组',sortOrder:1,isActive:true},{id:'t3',parentUnitId:null,name:'T3事业部',sortOrder:2,isActive:true}]
+    data.people[0]!.departmentId='child'
+    const download=vi.spyOn(workbook,'downloadProcurementWorkbook').mockImplementation(()=>{})
+    vi.mocked(api.readWorkHours).mockImplementation(async()=>structuredClone(data))
+    const w=mountManager();await flushPromises();await button(w,'汇总工时').trigger('click');await flushPromises()
+    const tree=w.findComponent(treeSelectStub)
+    expect(tree.props('data').map((x:{id:string})=>x.id)).toEqual(['t2']);expect(tree.props('modelValue')).toBe('')
+    tree.vm.$emit('update:modelValue','t2');await flushPromises()
+    data.participatingDepartmentIds=[]
+    await w.get('form.wh-report-filters').trigger('submit');await flushPromises()
+    expect(tree.props('data')).toEqual([]);expect(tree.props('modelValue')).toBe('')
+    expect(w.get('.wh-report-summary').text()).toContain('8 小时')
+    await button(w,'导出Excel').trigger('click');expect(download.mock.calls[0]![2][0]).toContain(8)
+    w.unmount()
+  })
+  it('组织树联动人员范围，切换部门清除不匹配人员并同步汇总和完整性',async()=>{
+    const download=vi.spyOn(workbook,'downloadProcurementWorkbook').mockImplementation(()=>{})
+    const value=view();value.defaultDepartmentId='t2-mech';value.organizationUnits=[
+      {id:'t2',parentUnitId:null,name:'T2事业部',sortOrder:1,isActive:true},{id:'t2-mech',parentUnitId:'t2',name:'机械组',sortOrder:1,isActive:true},{id:'t2-elec',parentUnitId:'t2',name:'电气组',sortOrder:2,isActive:true},
+      {id:'t3',parentUnitId:null,name:'T3事业部',sortOrder:2,isActive:true},{id:'t3-mech',parentUnitId:'t3',name:'机械组',sortOrder:1,isActive:true}]
+    value.people=[{username:'a',displayName:'员工甲',department:'机械组',departmentId:'t2-mech',isActive:true},{username:'b',displayName:'员工乙',department:'电气组',departmentId:'t2-elec',isActive:true},{username:'c',displayName:'员工丙',department:'机械组',departmentId:'t3-mech',isActive:true}]
+    const first=value.sheets.find(x=>x.month==='2026-10')!,entry=first.entries[0]!
+    value.sheets=[first,{...first,username:'b',entries:[{...entry,id:'b',hours:4}]},{...first,username:'c',entries:[{...entry,id:'c',hours:6}]}]
+    value.compliance=value.people.map(p=>({username:p.username,days:[{date:'2026-10-19',expected:8,actual:0,status:'未填写',muted:false,reason:''}]}))
+    vi.mocked(api.readWorkHours).mockResolvedValue(value)
+    const w=mountManager();await flushPromises();await button(w,'汇总工时').trigger('click');await flushPromises()
+    const tree=w.findComponent(treeSelectStub)
+    expect(tree.props('data')[0].children).toHaveLength(2)
+    expect(w.get('[aria-label="汇总人员"]').findAll('option').map(x=>x.text())).toEqual(['全部','员工甲'])
+    tree.vm.$emit('update:modelValue','t2');await flushPromises()
+    expect(w.get('[aria-label="汇总人员"]').findAll('option').map(x=>x.text())).toEqual(['全部','员工甲','员工乙'])
+    await w.get('[aria-label="汇总人员"]').setValue('b')
+    tree.vm.$emit('update:modelValue','t3');await flushPromises()
+    expect((w.get('[aria-label="汇总人员"]').element as HTMLSelectElement).value).toBe('')
+    expect(w.get('[aria-label="汇总人员"]').findAll('option').map(x=>x.text())).toEqual(['全部','员工丙'])
+    expect(w.get('.wh-report-summary').text()).toContain('6 小时')
+    expect(w.get('.wh-report-table tbody').text()).toContain('员工丙');expect(w.get('.wh-report-table tbody').text()).not.toContain('员工甲')
+    expect(w.get('.wh-compliance tbody').text()).toContain('员工丙');expect(w.get('.wh-compliance tbody').text()).not.toContain('员工乙')
+    await button(w,'导出Excel').trigger('click')
+    expect(download.mock.calls[0]![2]).toEqual([['员工丙','机械组',1,6,6,0,1,'2026-10-19']])
+    tree.vm.$emit('update:modelValue',undefined);await flushPromises()
+    expect(w.get('[aria-label="汇总人员"]').findAll('option')).toHaveLength(4)
+    expect(w.get('.wh-report-summary').text()).toContain('18 小时');w.unmount()
+  })
   it('日历逐条显示项目号、名称及小时数，同项目不同所在地分别保留且不再显示已填', async () => {
     const data = view()
     const sheet = data.sheets.find(x => x.month === '2026-10')!
@@ -85,6 +146,11 @@ describe('工时填报与汇总', () => {
     const download = vi.spyOn(workbook,'downloadProcurementWorkbook').mockImplementation(() => {})
     const wrapper = mountManager(); await flushPromises(); await button(wrapper,'汇总工时').trigger('click'); await flushPromises()
     expect(wrapper.get('.wh-report-summary').text()).toContain('8 小时')
+    expect(wrapper.find('.wh-toolbar').exists()).toBe(false)
+    const projectBar = wrapper.get('.wh-project-bars button')
+    expect(projectBar.attributes('title')).toContain('P700012 · 设备 厂内8小时，厂外0小时')
+    await projectBar.trigger('click'); await flushPromises()
+    expect(wrapper.get('.el-drawer__body').text()).toContain('上料单元')
     await button(wrapper,'按项目').trigger('click'); await flushPromises()
     expect(wrapper.get('.wh-report-table tbody').text()).toContain('P700012')
     expect(wrapper.get('.wh-report-table tbody').text()).toContain('8小时')

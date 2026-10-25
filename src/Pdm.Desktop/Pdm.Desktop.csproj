@@ -38,10 +38,13 @@
     <Compile Include="..\Pdm.LocalSettings\WorkspaceSettingsStore.cs" Link="WorkspaceSettingsStore.cs" />
     <Compile Include="..\Pdm.Client.Shared\ClientBootstrap.cs" Link="ClientBootstrap.cs" />
     <Compile Include="..\Pdm.Client.Shared\ClientDiagnostics.cs" Link="ClientDiagnostics.cs" />
+    <Compile Include="..\Pdm.Client.Shared\ClientDeviceIdentity.cs" Link="ClientDeviceIdentity.cs" />
     <Compile Include="..\Pdm.Client.Shared\ClientLogRedaction.cs" Link="ClientLogRedaction.cs" />
     <Compile Include="..\Pdm.Client.Shared\DesktopAuthHandoffStore.cs" Link="DesktopAuthHandoffStore.cs" />
     <Compile Include="..\Pdm.SolidWorks.Addin\PdmDocumentIdentityStore.cs" Link="Workspace\PdmDocumentIdentityStore.cs" />
     <Compile Include="..\Pdm.SolidWorks.Addin\WorkspaceLocalStateReader.cs" Link="Workspace\WorkspaceLocalStateReader.cs" />
+    <Compile Include="..\Pdm.SolidWorks.Addin\EditDraftJournal.cs" Link="Workspace\EditDraftJournal.cs" />
     <Compile Include="..\Pdm.SolidWorks.Addin\ArchiveFileFingerprint.cs" Link="Workspace\ArchiveFileFingerprint.cs" />
   </ItemGroup>
+  <Import Project="..\Pdm.Client.Shared\PlmBrandAssets.targets" />
 </Project>

@@ -138,7 +138,7 @@ describe('MyTasks', () => {
     expect(wrapper.get('[role="tab"]:nth-of-type(3)').text()).toBe('料号审批（1）')
     expect(wrapper.findAll('tbody tr')).toHaveLength(1)
     expect(wrapper.text()).toContain('P700002 BOM料号审批（4项）')
-    expect(wrapper.text()).toContain('项目主BOM、标准件BOM、非标件BOM、电气BOM')
+    expect(wrapper.text()).toContain('项目主BOM、标准件BOM、非标件BOM、电气件BOM')
     expect(wrapper.text()).toContain('共4项')
 
     await wrapper.get('.pdm-text-action').trigger('click')

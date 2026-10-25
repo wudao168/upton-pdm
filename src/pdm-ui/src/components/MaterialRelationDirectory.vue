@@ -155,8 +155,8 @@ function refresh() {
       <span>共 {{ filteredRelations.length }} 个已配置物料</span>
     </div>
     <el-table v-loading="directoryLoading" :data="filteredRelations" row-key="id" height="100%" stripe empty-text="暂无已配置关联物料">
-      <el-table-column prop="mainMaterialCode" label="物料编码" min-width="150" show-overflow-tooltip />
-      <el-table-column prop="mainMaterialName" label="物料名称" min-width="180" show-overflow-tooltip />
+      <el-table-column prop="mainMaterialCode" label="物料编码" min-width="150" show-overflow-tooltip><template #default="{ row }"><span v-stocked-material="row.mainMaterialCode">{{ row.mainMaterialCode }}</span></template></el-table-column>
+      <el-table-column prop="mainMaterialName" label="物料名称" min-width="180" show-overflow-tooltip><template #default="{ row }"><span v-stocked-material="row.mainMaterialCode">{{ row.mainMaterialName }}</span></template></el-table-column>
       <el-table-column label="规格" min-width="190" show-overflow-tooltip><template #default="{ row }">{{ directoryMaterial(row)?.specification || '—' }}</template></el-table-column>
       <el-table-column label="品牌" min-width="100" show-overflow-tooltip><template #default="{ row }">{{ directoryMaterial(row)?.brand || '—' }}</template></el-table-column>
       <el-table-column label="分类" min-width="95" show-overflow-tooltip><template #default="{ row }">{{ directoryMaterial(row)?.categoryCode || directoryMaterial(row)?.u9CategoryCode || '—' }}</template></el-table-column>
@@ -182,7 +182,7 @@ function refresh() {
       />
     </el-dialog>
     <el-dialog v-model="createDialogOpen" title="新增关联配置" width="480px" destroy-on-close>
-      <el-form label-position="top"><el-form-item label="主料品"><el-select v-model="createMaterialId" clearable filterable remote reserve-keyword :remote-method="searchCreateCandidates" :loading="createLoading" placeholder="搜索已批准料品"><el-option v-for="material in createCandidates" :key="material.id" :label="`${material.materialCode} · ${material.name}${material.specification ? ` · ${material.specification}` : ''}`" :value="material.id" /></el-select></el-form-item></el-form>
+      <el-form label-position="top"><el-form-item label="主料品"><el-select v-model="createMaterialId" clearable filterable remote reserve-keyword :remote-method="searchCreateCandidates" :loading="createLoading" placeholder="搜索已批准料品"><el-option v-for="material in createCandidates" :key="material.id" :label="`${material.materialCode} · ${material.name}${material.specification ? ` · ${material.specification}` : ''}`" :value="material.id"><span v-stocked-material="material.materialCode">{{ material.materialCode }} · {{ material.name }}</span></el-option></el-select></el-form-item></el-form>
       <template #footer><el-button @click="createDialogOpen = false">取消</el-button><el-button type="primary" :disabled="!createMaterialId" @click="startNewConfiguration">开始配置</el-button></template>
     </el-dialog>
   </section>

@@ -13,6 +13,8 @@ import './styles/themes.css'
 import './styles/app.css'
 import './styles/ui-consistency.css'
 import './styles/tabs.css'
+import './styles/material-stock-plans.css'
+import { stockedMaterial } from './materialStockPlans'
 import App from './App.vue'
 import { installClientDiagnostics } from './clientDiagnostics'
 import { isPdmTheme } from './themes'
@@ -25,6 +27,7 @@ const root = query.has('dingtalkOpl')
   : query.has('productionScan')
     ? defineAsyncComponent(() => import('./components/ProductionScanPage.vue')) : App
 const app = createApp(root).use(ElementPlus, { locale: zhCn })
+app.directive('stocked-material', stockedMaterial)
 installClientDiagnostics(app)
 installPanelHeaderActions(app)
 installColumnResize(app)

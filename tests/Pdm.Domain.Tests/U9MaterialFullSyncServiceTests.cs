@@ -8,6 +8,41 @@ namespace Pdm.Domain.Tests;
 public sealed class U9MaterialFullSyncServiceTests
 {
     [Fact]
+    public async Task StockPlanning_StillRefreshesWhenAllMaterialCreationCategoriesAreClosed()
+    {
+        var materials = new InMemoryMaterialRepository(TimeProvider.System);
+        var now = DateTimeOffset.UtcNow;
+        await materials.SaveIntegrationConfigurationAsync(new("http://u9.test", "01", "7", "pdm", "PDM", "protected:secret", U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, false, "admin", now), default);
+        foreach (var category in await materials.ListCategoriesAsync(true, default))
+            await materials.SaveCategoryAsync(category with { AllowCreate = false }, category.RowVersion, default);
+        var plan = new MaterialStockPlan("01", "7", "01020014079", 10, 30, true, "001", "个", now);
+        var client = new RecordingClient { NonZeroStockPlans = [plan] };
+        var run = await new U9MaterialFullSyncService(materials, new InMemoryPdmRepository(TimeProvider.System), new TestProtector(), client, TimeProvider.System).SynchronizeAsync("admin", "Test", default);
+        Assert.Equal(U9MaterialFullSyncStatus.Succeeded, run.Status);
+        Assert.Empty(client.QueriedCategories);
+        Assert.Single(await materials.ListStockedMaterialPlansAsync("01", "7", default));
+    }
+    [Fact]
+    public async Task StockPlanning_RechecksDisappearingCodesAndOnlyClearsConfirmedZeroOrInactive()
+    {
+        var materials = new InMemoryMaterialRepository(TimeProvider.System);
+        var now = DateTimeOffset.UtcNow;
+        await materials.SaveIntegrationConfigurationAsync(new("http://u9.test", "01", "7", "pdm", "PDM", "protected:secret", U9MaterialContract.CreatePath, U9MaterialContract.QueryPath, false, "admin", now), default);
+        var prior = new MaterialStockPlan("01", "7", "clear", 10, 30, true, "001", "个", now.AddDays(-1));
+        await materials.SaveStockPlansAsync([prior, prior with { MaterialCode = "missing" }, prior with { MaterialCode = "inactive" }, prior with { OrganizationCode = "8" }], default);
+        var client = new RecordingClient { NonZeroStockPlans = [prior with { MaterialCode = "fresh", SyncedAt = now }] };
+        client.RecheckedStockPlans["clear"] = prior with { SafetyStockQuantity = 0, SyncedAt = now };
+        client.RecheckedStockPlans["inactive"] = prior with { MaterialCode = "inactive", IsEffective = false, SyncedAt = now };
+        await new U9MaterialFullSyncService(materials, new InMemoryPdmRepository(TimeProvider.System), new TestProtector(), client, TimeProvider.System).SynchronizeAsync("admin", "Test", default);
+        var plans = await materials.ListStockedMaterialPlansAsync("01", "7", default);
+        Assert.Contains(plans, plan => plan.MaterialCode == "fresh");
+        Assert.Contains(plans, plan => plan.MaterialCode == "missing");
+        Assert.DoesNotContain(plans, plan => plan.MaterialCode is "clear" or "inactive");
+        Assert.Single(await materials.ListStockedMaterialPlansAsync("01", "8", default));
+        Assert.Contains(client.StockPlanQueries.SelectMany(codes => codes), code => code == "clear");
+        Assert.DoesNotContain(client.StockPlanQueries.SelectMany(codes => codes), code => code == "fresh");
+    }
+    [Fact]
     public async Task SynchronizeAsync_UsesDynamicCreatableCategoriesAndOnlyReadsU9()
     {
         var timeProvider = TimeProvider.System;
@@ -45,7 +80,7 @@ public sealed class U9MaterialFullSyncServiceTests
         Assert.Equal(U9MaterialFullSyncStatus.Succeeded, run.Status);
         Assert.DoesNotContain("0101", client.QueriedCategories);
         Assert.Contains("0102", client.QueriedCategories);
-        Assert.Equal(client.QueriedCategories.Count, client.AuthenticationCallCount);
+        Assert.Equal(client.QueriedCategories.Count + 1, client.AuthenticationCallCount);
         Assert.Equal([1, 1], client.QueriedPages["0102"]);
         Assert.DoesNotContain("Code >", client.QueriedFilters["0102"][0]);
         Assert.Contains("Code > '01020000151'", client.QueriedFilters["0102"][1]);
@@ -63,6 +98,9 @@ public sealed class U9MaterialFullSyncServiceTests
         Assert.Equal("U9品牌", imported?.Brand);
         Assert.Equal(151, (await materials.FindCategoryAsync("0102", default))?.CurrentSequence);
         Assert.Equal(run.Id, (await service.GetLatestRunAsync(default))?.Id);
+        var stockPlans = await materials.ListStockedMaterialPlansAsync("01", "7", default);
+        Assert.Equal(2, stockPlans.Count);
+        Assert.Contains(stockPlans, plan => plan.MaterialCode == "01020000151"); // PLM主控也同步库存规划。
     }
 
     [Fact]
@@ -96,7 +134,7 @@ public sealed class U9MaterialFullSyncServiceTests
         var run = await service.SynchronizeAsync("system:test", "Test", default);
 
         Assert.Equal(U9MaterialFullSyncStatus.Succeeded, run.Status);
-        Assert.Equal(2, client.AuthenticationCallCount);
+        Assert.Equal(3, client.AuthenticationCallCount);
         Assert.Equal(1, client.ExpiredDetailResponseCount);
         Assert.Equal(2, run.CreatedCount);
     }
@@ -123,7 +161,7 @@ public sealed class U9MaterialFullSyncServiceTests
         var run = await service.SynchronizeAsync("system:test", "Test", default);
 
         Assert.Equal(U9MaterialFullSyncStatus.Succeeded, run.Status);
-        Assert.Equal(2, client.AuthenticationCallCount);
+        Assert.Equal(3, client.AuthenticationCallCount);
         Assert.Equal([1000, 200, 200], client.QueriedPageSizes["0102"]);
         Assert.Equal(2, run.CreatedCount);
     }
@@ -193,6 +231,16 @@ public sealed class U9MaterialFullSyncServiceTests
         public int AuthenticationCallCount { get; private set; }
         public int PostCallCount { get; private set; }
         public int ExpiredDetailResponseCount { get; private set; }
+        public IReadOnlyList<MaterialStockPlan>? NonZeroStockPlans { get; init; }
+        public Dictionary<string, MaterialStockPlan> RecheckedStockPlans { get; } = new();
+        public List<string[]> StockPlanQueries { get; } = [];
+        public Task<IReadOnlyList<MaterialStockPlan>?> QueryStockPlansAsync(string baseUrl, string token, string enterpriseCode,
+            string organizationCode, DateTimeOffset syncedAt, CancellationToken cancellationToken, IReadOnlyList<string>? materialCodes = null)
+        {
+            if (materialCodes is null) return Task.FromResult(NonZeroStockPlans);
+            StockPlanQueries.Add(materialCodes.ToArray());
+            return Task.FromResult<IReadOnlyList<MaterialStockPlan>?>(materialCodes.Where(RecheckedStockPlans.ContainsKey).Select(code => RecheckedStockPlans[code]).ToArray());
+        }
 
         public Task<U9AuthenticationResult> AuthenticateAsync(U9AuthenticationRequest request, CancellationToken cancellationToken)
         {
@@ -222,7 +270,8 @@ public sealed class U9MaterialFullSyncServiceTests
                     && !string.Equals(code, missingDetailCode, StringComparison.OrdinalIgnoreCase))
                 .Select(code => new U9ItemReference(
                     $"u9-{code}", code, $"U9-{code}", $"SPEC-{code}", "0102", "机械外购件", "001",
-                    9, "U9品牌", null, null, null, null, null, null))
+                    9, "U9品牌", null, null, null, null, null, null)
+                    { StockPlan = new("7", true, 10, 30, "001", "个") })
                 .ToArray();
             return Task.FromResult(new U9ItemQueryResult(0, null, items));
         }

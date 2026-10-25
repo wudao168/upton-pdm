@@ -27,8 +27,6 @@
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchPropertyFilterRule.cs" Link="BatchPropertyFilterRule.cs" />
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchLocalDocumentRule.cs" Link="BatchLocalDocumentRule.cs" />
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchRenameRule.cs" Link="BatchRenameRule.cs" />
-    <Compile Include="..\..\src\Pdm.SolidWorks.Addin\DrawingQrLayoutRule.cs" Link="DrawingQrLayoutRule.cs" />
-    <Compile Include="..\..\src\Pdm.SolidWorks.Addin\DrawingQrDeletionRule.cs" Link="DrawingQrDeletionRule.cs" />
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchProjectRootRule.cs" Link="BatchProjectRootRule.cs" />
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchCheckInDependencyRule.cs" Link="BatchCheckInDependencyRule.cs" />
     <Compile Include="..\..\src\Pdm.SolidWorks.Addin\BatchCheckInRegistrationOrderRule.cs" Link="BatchCheckInRegistrationOrderRule.cs" />

@@ -38,8 +38,8 @@ describe('PreviewWorkspace 网页端预览版本回退', () => {
 
     // 不是报“该历史版本尚未生成预览”，而是取正式版本的预览文件
     expect(api.readDocumentPreviewFile).toHaveBeenCalledWith('document-1', 'v-released', 'token')
-    expect(wrapper.get('.pdm-preview-notice').text()).toContain('A-W1 版本还没有预览')
-    expect(wrapper.get('.pdm-preview-notice').text()).toContain('A 版本')
+    expect(wrapper.get('.pdm-preview-notice').text()).toContain('存档版本 A-W1 还没有预览')
+    expect(wrapper.get('.pdm-preview-notice').text()).toContain('存档版本 A 的预览')
     wrapper.unmount()
   })
 

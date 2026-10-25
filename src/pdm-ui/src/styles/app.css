@@ -43,13 +43,11 @@
 .pdm-brand__mark { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; background: var(--shell-brand); color: #fff; font-size: 18px; font-weight: 500; }
 .pdm-plain-button, .pdm-preview-actions button { position: relative; width: var(--pdm-symbol-toolbar); height: var(--pdm-symbol-toolbar); display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px; background: transparent; color: inherit; }
 .pdm-sidebar { position: relative; z-index: 3; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--pdm-sidebar); border-right: 1px solid var(--pdm-sidebar); color: var(--pdm-sidebar-text); }
-.pdm-sidebar__brand { position: relative; height: 62px; display: flex; flex: 0 0 62px; align-items: center; justify-content: flex-start; gap: 7px; padding: 12px; color: #fff; }
-.pdm-sidebar__brand-mark { width: 38px; height: 38px; display: grid; flex: 0 0 38px; place-items: center; }
-.pdm-sidebar__brand-copy { min-width: 0; width: 84px; height: 38px; display: flex; align-items: center; }
-.pdm-sidebar__brand-logo { width: 84px; height: 19px; display: block; object-fit: contain; object-position: left bottom; }
+.pdm-sidebar__brand { position: relative; height: 62px; display: flex; flex: 0 0 62px; align-items: center; justify-content: center; padding: 12px; color: #fff; }
+.pdm-sidebar__brand-logo { width: 100%; min-width: 0; height: 38px; display: block; object-fit: contain; }
 .pdm-sidebar.is-collapsed .pdm-sidebar__brand { justify-content: center; padding-inline: 0; }
-.pdm-sidebar.is-collapsed .pdm-sidebar__brand-mark { width: 38px; height: 38px; flex-basis: 38px; }
-.pdm-sidebar.is-collapsed .pdm-sidebar__brand-copy, .pdm-sidebar.is-collapsed .pdm-nav-item span { display: none; }
+.pdm-sidebar.is-collapsed .pdm-sidebar__brand-logo { width: 38px; height: 38px; flex: 0 0 38px; }
+.pdm-sidebar.is-collapsed .pdm-nav-item span { display: none; }
 .pdm-sidebar.is-collapsed .pdm-nav-item { justify-content: center; gap: 0; padding-inline: 0; }
 .pdm-sidebar.is-collapsed .pdm-nav-item em { position: absolute; top: 7px; right: 4px; min-width: 16px; height: 16px; padding: 0 4px; font-size: 11px; line-height: 16px; }
 .pdm-sidebar__nav { min-height: 0; display: flex; flex: 1; flex-direction: column; overflow-x: hidden; overflow-y: auto; }
@@ -185,6 +183,11 @@
 .pdm-tree-summary .is-warning { color: var(--pdm-orange); }
 .pdm-tree-version-guide { flex-basis: 100%; }
 .pdm-tree, .pdm-tree-children { margin: 0; padding: 0; list-style: none; }
+.pdm-tree-item { position: relative; }
+.pdm-tree-children > .pdm-tree-item::before { content: ''; position: absolute; top: 0; bottom: 0; left: calc(4px + var(--tree-level) * 8px); border-left: 1px dashed var(--pdm-border); opacity: .55; pointer-events: none; }
+.pdm-tree-children > .pdm-tree-item:last-child::before { bottom: auto; height: 16px; }
+.pdm-tree-children > .pdm-tree-item::after { content: ''; position: absolute; top: 16px; left: calc(4px + var(--tree-level) * 8px); width: 8px; border-top: 1px dashed var(--pdm-border); opacity: .55; pointer-events: none; }
+.pdm-tree-item > .pdm-tree-row[aria-expanded="true"]::after { content: ''; position: absolute; top: 24px; bottom: 0; left: calc(12px + var(--tree-level) * 8px); border-left: 1px dashed var(--pdm-border); opacity: .55; pointer-events: none; }
 .pdm-tree { min-height: 0; flex: 1 1 auto; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 7px 0; }
 .pdm-drawing-list .pdm-tree-row { padding-left: 6px; }
 .pdm-drawing-pages { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 4px; color: var(--pdm-muted); font-size: 11px; }
@@ -192,20 +195,25 @@
 .pdm-drawing-pages button:disabled { opacity: .5; cursor: default; }
 .pdm-tree-empty { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; padding: 18px; color: var(--pdm-muted); text-align: center; }
 .pdm-tree-empty strong { color: var(--pdm-text); font-size: 12px; }.pdm-tree-empty span { font-size: 11px; }
-.pdm-tree-row { width: 100%; min-height: 39px; display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 4px 6px 4px calc(5px + var(--tree-level) * 13px); border: 0; border-radius: 5px; background: transparent; color: var(--pdm-text); text-align: left; }
+.pdm-tree-row { position: relative; width: 100%; height: 50px; min-height: 50px; box-sizing: border-box; display: flex; align-items: flex-start; justify-content: space-between; gap: 4px; padding: 7px 6px 7px calc(5px + var(--tree-level) * 8px); border: 0; border-radius: 5px; background: transparent; color: var(--pdm-text); text-align: left; }
 .pdm-tree-row:hover { background: var(--pdm-surface-muted); }
 .pdm-tree-row.is-selected { background: var(--pdm-blue-soft); color: var(--pdm-blue); }
 .pdm-tree-row.has-warning { color: var(--pdm-danger); }
-.pdm-tree-row__content { min-width: 0; display: flex; align-items: center; gap: 4px; }
+.pdm-tree-row__content { min-width: 0; flex: 1 1 0; height: 36px; display: flex; align-items: flex-start; gap: 2px; }
 .pdm-cad-icon { flex: 0 0 auto; overflow: visible; shape-rendering: geometricPrecision; }
-.pdm-tree-row__toggle { display: inline-flex; flex: 0 0 auto; }
-.pdm-tree-row__thumb{width:28px;height:20px;flex:0 0 auto;object-fit:contain;border:1px solid var(--pdm-border-soft);border-radius:3px;background:var(--pdm-surface)}.pdm-tree-row__label { min-width: 0; display: flex; flex-direction: column; }
-.pdm-tree-row__label strong, .pdm-tree-row__label small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pdm-tree-row__toggle { display: inline-flex; align-items: center; height: 18px; flex: 0 0 auto; }
+.pdm-tree-row__thumb{width:28px;height:20px;flex:0 0 auto;object-fit:contain;border:1px solid var(--pdm-border-soft);border-radius:3px;background:var(--pdm-surface)}.pdm-tree-row__label { min-width: 0; flex: 1 1 0; display: flex; flex-direction: column; }
+.pdm-tree-row__label strong, .pdm-tree-row__label small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 18px; }
 .pdm-tree-row__label strong { font-size: 11px; font-weight: 500; }
+.pdm-tree-row.is-assembly .pdm-tree-row__label strong { font-weight: 700; }
 .pdm-tree-row__label small { color: var(--pdm-muted); font-size: 11px; }
 .pdm-tree-row > em { flex: 0 0 auto; color: var(--pdm-muted); font-size: 11px; font-style: normal; }
 .pdm-tree-row.has-warning > em { color: var(--pdm-danger); }
-.pdm-tree-row__version { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; color: var(--pdm-muted); line-height: 1.2; }
+.pdm-tree-row__version { min-width: 0; max-width: 42%; height: 36px; flex: 0 1 auto; display: flex; flex-direction: column; align-items: flex-end; justify-content: space-between; color: var(--pdm-muted); line-height: 18px; }
+.pdm-tree-row__states { min-width: 0; max-width: 100%; height: 18px; display: flex; align-items: center; gap: 3px; }
+.pdm-tree-row__states > small { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 14px; }
+.pdm-tree-row__versions { min-width: 0; max-width: 100%; height: 18px; display: flex; align-items: center; gap: 8px; }
+.pdm-tree-row__versions > em, .pdm-tree-row__versions > small { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pdm-tree-row__version em { font-size: 11px; font-style: normal; white-space: nowrap; }
 .pdm-tree-row__version small { font-size: 11px; white-space: nowrap; }
 .pdm-tree-row__version .pdm-review-badge { padding: 1px 4px; border-radius: 7px; background: var(--pdm-surface-muted); color: var(--pdm-muted); font-size: 11px; font-weight: 500; }
@@ -213,7 +221,7 @@
 .pdm-tree-row__version .pdm-review-badge.is-warning { background: var(--pdm-orange-soft); color: var(--pdm-orange); }
 .pdm-tree-row__version .pdm-review-badge.is-success { background: var(--pdm-green-soft); color: var(--pdm-green); }
 .pdm-tree-row__version .pdm-review-badge.is-danger { background: var(--pdm-danger-soft); color: var(--pdm-danger); }
-.pdm-tree-row.has-version-warning .pdm-tree-row__version { color: var(--pdm-orange); }
+.pdm-tree-row.has-version-warning .pdm-tree-drawing-version { color: var(--pdm-orange); font-weight: 700; }
 .pdm-tree-row.has-version-conflict .pdm-tree-row__version { color: var(--pdm-danger); }
 .pdm-tree-legend { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 8px; border-top: 1px solid var(--pdm-border-soft); color: var(--pdm-muted); font-size: 11px; }
 .pdm-tree-legend span { display: inline-flex; align-items: center; gap: 3px; }
@@ -640,7 +648,7 @@
 .pdm-preview-markup-row .pdm-markup-save:hover:not(:disabled) { border-color: var(--shell-accent-hover); background: var(--shell-accent-hover); }
 .pdm-preview-markup-row .pdm-markup-save.is-markup-dirty { box-shadow: 0 0 0 3px var(--pdm-theme-accent-focus); }
 .pdm-preview-markup-row .pdm-markup-save.is-markup-dirty:hover:not(:disabled) { box-shadow: 0 0 0 3px var(--pdm-theme-accent-focus); }
-/* 全局滚动条：12px 抓取区域内显示 8px 胶囊滑块，悬停时扩至 10px，避免内容跳动。 */
+/* 全局滚动条：12px 抓取区域保持透明，仅悬停或拖动对应滚动条时显示。 */
 :root {
   --pdm-scrollbar-thumb: color-mix(in srgb, var(--pdm-text-soft) 30%, transparent);
   --pdm-scrollbar-thumb-hover: color-mix(in srgb, var(--pdm-text-soft) 46%, transparent);
@@ -653,7 +661,7 @@
   --pdm-scrollbar-thumb-active: rgba(255, 255, 255, .64);
   --pdm-scrollbar-track-hover: rgba(255, 255, 255, .04);
 }
-::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar { width: 12px; height: 12px; background: transparent; }
 ::-webkit-scrollbar-track { border-radius: 6px; background: transparent; }
 ::-webkit-scrollbar-track:hover { background: var(--pdm-scrollbar-track-hover); }
 ::-webkit-scrollbar-thumb {
@@ -661,7 +669,7 @@
   min-height: 32px;
   border: 2px solid transparent;
   border-radius: 6px;
-  background: var(--pdm-scrollbar-thumb);
+  background: transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover { border-width: 1px; background-color: var(--pdm-scrollbar-thumb-hover); }
@@ -669,15 +677,16 @@
 ::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
 ::-webkit-scrollbar-corner { background: transparent; }
 @supports not selector(::-webkit-scrollbar) {
-  * { scrollbar-width: thin; scrollbar-color: var(--pdm-scrollbar-thumb) transparent; }
-  *:hover { scrollbar-color: var(--pdm-scrollbar-thumb-hover) transparent; }
+  * { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+  [data-pdm-native-scrollbar-hover] { scrollbar-color: var(--pdm-scrollbar-thumb-hover) transparent; }
 }
-.el-scrollbar__bar { border-radius: 6px; }
+.el-scrollbar__bar { border-radius: 6px; background: transparent; opacity: 0 !important; transition: none !important; }
+.el-scrollbar__bar:hover, .el-scrollbar__bar:active { opacity: 1 !important; }
 .el-scrollbar__bar.is-horizontal { height: 12px; }
 .el-scrollbar__bar.is-vertical { width: 12px; }
-/* Element Plus 仅在存在相应方向的滑块尺寸时常显，保留无溢出容器的隐藏状态。 */
+/* 保留溢出方向的透明抓取区域，不随整个容器悬停而显露。 */
 .el-scrollbar__bar.is-horizontal:has(> .el-scrollbar__thumb[style*="width:"]),
-.el-scrollbar__bar.is-vertical:has(> .el-scrollbar__thumb[style*="height:"]) { display: block !important; opacity: 1 !important; }
+.el-scrollbar__bar.is-vertical:has(> .el-scrollbar__thumb[style*="height:"]) { display: block !important; }
 .el-scrollbar .el-scrollbar__thumb {
   box-sizing: border-box;
   border: 2px solid transparent;

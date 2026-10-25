@@ -85,6 +85,7 @@ internal static partial class Program
             PdmDocumentIdentityStore.TryWriteControlledVersion(path,document,project,Guid.Empty,"W1",Hash(path),new FileInfo(path).Length);
             Check(Read().LocalState=="NeedsUpdate", "缺少有效存档版本的记录不能宣称校验正常");
             VerifyBatches(root).GetAwaiter().GetResult();
+            VerifyDraftState(root);
             Console.WriteLine("全部工作区校验验收通过。"); return 0;
         }
         catch (Exception error) { Console.Error.WriteLine(error); return 1; }

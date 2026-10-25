@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { readProductionSuppliers } from '../api'
-import type { ProductionSupplier, ProductionSupplierCatalog } from '../productionSuppliers'
+import { readProductionSupplierChoices } from '../api'
+import type { ProductionSupplierChoice, ProductionSupplierChoices } from '../productionSuppliers'
 import { ElMessage } from '../statusMessage'
 
 const props = defineProps<{ token: string; modelValue: string; disabled?: boolean }>()
-const emit = defineEmits<{ 'update:modelValue': [id: string]; selected: [supplier: ProductionSupplier | undefined] }>()
-const catalog = ref<ProductionSupplierCatalog>(), categoryId = ref(''), pending = ref(false)
+const emit = defineEmits<{ 'update:modelValue': [id: string]; selected: [supplier: ProductionSupplierChoice | undefined] }>()
+const catalog = ref<ProductionSupplierChoices>(), categoryId = ref(''), pending = ref(false)
 const categories = computed(() => catalog.value?.categories.filter(item => item.isActive) ?? [])
 const choices = computed(() => catalog.value?.suppliers.filter(item => item.isActive
   && item.categoryIds.some(id => categories.value.some(category => category.id === id))
@@ -22,7 +22,7 @@ async function load() {
   const current = ++generation
   pending.value = true
   try {
-    const value = await readProductionSuppliers(props.token)
+    const value = await readProductionSupplierChoices(props.token)
     if (current !== generation) return
     catalog.value = value
     if (categoryId.value && !categories.value.some(item => item.id === categoryId.value)) categoryId.value = ''
@@ -40,7 +40,7 @@ watch(categoryId, () => { if (props.modelValue && !choices.value.some(item => it
     <label>供应商分类<select v-model="categoryId" aria-label="供应商分类" :disabled="disabled || pending"><option value="">全部分类</option><option v-for="item in categories" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
     <label class="production-supplier-picker__supplier">供应商<select :value="modelValue" aria-label="供应商" :disabled="disabled || pending" @change="choose(($event.target as HTMLSelectElement).value)"><option value="">{{ pending ? '正在读取供应商…' : '请选择供应商' }}</option><option v-for="item in choices" :key="item.id" :value="item.id">{{ item.code }} · {{ item.name }}</option></select></label>
     <button type="button" :disabled="disabled || pending" aria-label="刷新供应商" @click="load">刷新</button>
-    <small v-if="catalog && !choices.length && !pending">暂无符合条件的启用供应商，请在“供应商管理”中维护。</small>
+    <small v-if="catalog && !choices.length && !pending">暂无符合条件的启用供应商，请联系供应商库维护人员检查分类和启用状态。</small>
   </div>
 </template>
 

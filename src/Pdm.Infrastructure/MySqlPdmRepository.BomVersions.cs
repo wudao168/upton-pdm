@@ -250,7 +250,7 @@ public sealed partial class MySqlPdmRepository
     private static void EnsureVersionedBomKind(BomKind kind)
     {
         if (kind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical))
-            throw new PdmRuleException("只有标准件、非标件和电气BOM支持独立版本控制。");
+            throw new PdmRuleException("只有标准件、非标件和电气件BOM支持独立版本控制。");
     }
 
     private static ProjectBomHeaderKind HeaderKind(BomKind kind) => kind switch

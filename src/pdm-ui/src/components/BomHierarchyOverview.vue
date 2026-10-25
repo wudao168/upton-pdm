@@ -35,7 +35,7 @@ const categoryOrder: VisibleBomKind[] = ['Standard', 'NonStandard', 'Electrical'
 const categoryLabels: Record<VisibleBomKind, string> = {
   Standard: '标准件BOM',
   NonStandard: '非标件BOM',
-  Electrical: '电气BOM',
+  Electrical: '电气件BOM',
 }
 const longLeadScopes: Record<VisibleBomKind, ReleaseScope> = {
   Standard: 'StandardLongLead',
@@ -410,7 +410,7 @@ async function fetchProjectDetail(projectId: string): Promise<ProjectDetail> {
   const [standard, nonStandard, electrical, versions, headers, releases] = await Promise.all([
     fromModule('标准件BOM', listBom(projectId, 'Standard', props.token)),
     fromModule('非标件BOM', listBom(projectId, 'NonStandard', props.token)),
-    fromModule('电气BOM', listBom(projectId, 'Electrical', props.token)),
+    fromModule('电气件BOM', listBom(projectId, 'Electrical', props.token)),
     fromModule('BOM版本', listBomVersions(projectId, props.token)),
     fromModule('BOM表头', listProjectBomHeaders(projectId, props.token)),
     fromModule('发布记录', listReleasePackages(projectId, props.token)),
@@ -493,8 +493,8 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
               <span class="bom-overview__project" :style="{ paddingLeft: `${row.depth * 18}px` }"><button v-if="row.isMaster && row.project.parentProjectId" type="button" class="bom-overview__toggle" :aria-expanded="isProjectExpanded(row.project)" :aria-label="`${isProjectExpanded(row.project) ? '折叠' : '展开'}${row.project.code}的三类BOM`" @click="toggleProject(row.project)">{{ isProjectExpanded(row.project) ? '▾' : '▸' }}</button><i v-if="!row.isMaster">↳</i><strong v-if="row.isMaster">{{ row.project.code }}</strong><span v-if="row.isMaster">{{ row.project.name }} · 项目主BOM</span><button v-else type="button" class="bom-overview__link" :aria-label="`进入${row.project.code}的${row.label}`" :title="`进入${row.project.code}的${row.label}`" @click="emit('openBom', row.project.id, row.kind as VisibleBomKind)">{{ row.label }}</button></span>
             </td>
             <td>{{ headerCategoryLabel(row.project, row.headerKind) }}</td>
-            <td><span :class="row.header?.materialCode ? '' : isHeaderEligible(row) ? 'is-warning' : 'is-muted'" :title="isHeaderEligible(row) ? headerCodeTitle(row.header) : '主项目已有子项目，本级三类BOM不申请料号'">{{ headerCodeText(row.header, isHeaderEligible(row)) }}</span></td>
-            <td><span :class="row.parentHeader?.materialCode ? '' : row.parentHeader?.materialId ? 'is-warning' : 'is-muted'">{{ row.parentHeader ? headerCodeText(row.parentHeader) : '—' }}</span></td>
+            <td><span v-stocked-material="row.header?.materialCode" :class="row.header?.materialCode ? '' : isHeaderEligible(row) ? 'is-warning' : 'is-muted'" :title="isHeaderEligible(row) ? headerCodeTitle(row.header) : '主项目已有子项目，本级三类BOM不申请料号'">{{ headerCodeText(row.header, isHeaderEligible(row)) }}</span></td>
+            <td><span v-stocked-material="row.parentHeader?.materialCode" :class="row.parentHeader?.materialCode ? '' : row.parentHeader?.materialId ? 'is-warning' : 'is-muted'">{{ row.parentHeader ? headerCodeText(row.parentHeader) : '—' }}</span></td>
             <td>{{ row.itemCount }}</td>
             <td>{{ row.version }}</td>
             <td><span :class="row.releaseStatus === '正式发布' ? 'is-success' : row.releaseStatus === '未发布' ? 'is-warning' : 'is-muted'">{{ row.releaseStatus }}</span></td>

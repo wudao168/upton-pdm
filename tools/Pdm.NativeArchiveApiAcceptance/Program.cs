@@ -24,12 +24,13 @@ internal static class NativeArchiveRunner
 
     public static async Task<int> Main(string[] args)
     {
-        if (args.Length != 3)
+        if (args.Length != 3 && !(args.Length == 4 && args[3] is "--keep-open" or "--keep-open-formal"))
         {
             Console.Error.WriteLine("Usage: <workspace> <existing-native-qa-directory> <new-api-qa-directory>");
             return 2;
         }
         var workspace = Path.GetFullPath(args[0]);
+        var keepOpen = args.Length == 4;
         var nativeRoot = Within(Path.Combine(workspace, "tmp"), args[1]);
         var qaRoot = Within(Path.Combine(workspace, "tmp"), args[2]);
         Require(Directory.Exists(nativeRoot) && !Directory.Exists(qaRoot), "验收源目录必须存在，API验收目录必须是新目录。");
@@ -67,16 +68,102 @@ internal static class NativeArchiveRunner
         api.Timeout = TimeSpan.FromMinutes(10);
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         Require(repository is InMemoryPdmRepository, "验收必须使用隔离内存数据库。");
+        if (keepOpen && await repository.FindUserAsync("admin", default) == null)
+            await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "隔离验收admin", "unused", UserRole.Administrator, true), default);
         Require(factory.Services.GetRequiredService<IOptions<PdmStorageOptions>>().Value.UploadTempRoot
             == Path.Combine(ownedFiles, "uploads"), "验收上传目录未隔离。");
         api.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", Token());
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [] });
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback, 0));
+        builder.WebHost.ConfigureKestrel(server =>
+        {
+            server.Limits.MaxRequestBodySize = 2L * 1024 * 1024 * 1024;
+            server.Listen(IPAddress.Loopback, 0);
+        });
         await using var host = builder.Build();
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
         var used = 0;
         var passed = false;
+        var session = keepOpen ? new LiveSession { SeedFormalFixture = args[3] == "--keep-open-formal" } : null;
+        host.MapMethods("/api/{**path}", ["GET", "POST", "PUT", "PATCH", "DELETE"], async (HttpContext context) =>
+        {
+            if (!keepOpen || context.Request.Headers.Authorization != "Bearer " + token)
+            { context.Response.StatusCode = 401; return; }
+            using var forwarded = new HttpRequestMessage(new HttpMethod(context.Request.Method), context.Request.Path + context.Request.QueryString);
+            if (context.Request.ContentLength > 0 || context.Request.Headers.ContainsKey("Transfer-Encoding"))
+            {
+                var body = new MemoryStream(); await context.Request.Body.CopyToAsync(body); body.Position = 0;
+                forwarded.Content = new StreamContent(body);
+                if (context.Request.ContentType != null) forwarded.Content.Headers.TryAddWithoutValidation("Content-Type", context.Request.ContentType);
+            }
+            using var response = await api.SendAsync(forwarded);
+            context.Response.StatusCode = (int)response.StatusCode;
+            if (response.Content.Headers.ContentType != null) context.Response.ContentType = response.Content.Headers.ContentType.ToString();
+            await response.Content.CopyToAsync(context.Response.Body);
+        });
+        host.MapGet("/qa/snapshot", async (HttpContext context) =>
+        {
+            if (!keepOpen || context.Request.Headers.Authorization != "Bearer " + token) return Results.Unauthorized();
+            if (session?.ProjectId is not Guid projectId) return Results.Conflict();
+            var documents = await repository.ListDocumentsAsync(projectId, default);
+            var versions = await repository.ListProjectDocumentVersionsAsync(projectId, default);
+            return Results.Json(new { projectId, session.RootDocumentId, documents,
+                versions = versions.Select(version => new { version.Id, version.DocumentId, version.Revision, version.Sha256,
+                    version.PropertySnapshot, version.ReferenceSnapshot, version.ChangeNote }),
+                relations = await repository.ListDocumentRelationsAsync(projectId, default),
+                currentTree = await repository.GetLatestReferenceSnapshotAsync(projectId, default) }, Json);
+        });
+        host.MapPost("/qa/stop", (HttpContext context) =>
+        {
+            if (!keepOpen || context.Request.Headers.Authorization != "Bearer " + token) return Results.Unauthorized();
+            context.Response.OnCompleted(() => { host.Lifetime.StopApplication(); return Task.CompletedTask; });
+            return Results.Ok();
+        });
+        host.MapPost("/qa/check-change", async (HttpContext context) =>
+        {
+            if (!keepOpen || context.Request.Headers.Authorization != "Bearer " + token) return Results.Unauthorized();
+            if (session?.ProjectId is not Guid projectId) return Results.Conflict();
+            try
+            {
+                var input = (await context.Request.ReadFromJsonAsync<ChangeCheckRequest>())!;
+                var versions = await repository.ListProjectDocumentVersionsAsync(projectId, default);
+                var latest = versions.GroupBy(v => v.DocumentId).ToDictionary(g => g.Key, g => g.OrderByDescending(v => v.CreatedAt).First());
+                var changed = latest.Where(pair => session.VersionIds.GetValueOrDefault(pair.Key) != pair.Value.Id).Select(pair => pair.Key).ToHashSet();
+                Require(changed.SetEquals([input.ModelId, input.DrawingId]), "模型或2D漏升版，或存在无关图档误升版。");
+                foreach (var id in changed) Require(latest[id].Sha256 != session.Hashes[id], "新增版本没有实际文件内容变化。");
+                foreach (var user in new[] { "admin", "qa-reviewer", "qa-manager" })
+                    if (await repository.FindUserAsync(user, default) == null)
+                        await repository.CreateUserAsync(new(Guid.NewGuid(), user, "隔离验收" + user, "unused", UserRole.Administrator, true), default);
+                if (session.ReviewDepartmentId == null)
+                {
+                    var unit = await repository.SaveOrganizationUnitAsync(new(null, Guid.Parse("70000000-0000-0000-0000-000000000001"), null,
+                        "QA-" + Guid.NewGuid().ToString("N"), "隔离验收机械部门", OrganizationUnitKind.Department, true, 0), default);
+                    await repository.SetOrganizationMembershipsAsync("admin", [unit.Id], unit.Id, default);
+                    await repository.SetOrganizationUnitManagersAsync(unit.Id, "qa-manager", [], default);
+                    session.ReviewDepartmentId = unit.Id;
+                }
+                using var serviceScope = factory.Services.CreateScope();
+                var workflow = serviceScope.ServiceProvider.GetRequiredService<PdmWorkflowService>();
+                var candidates = await workflow.ListDrawingReviewCandidatesAsync(projectId, "admin", UserRole.Administrator, default);
+                var candidate = candidates.SingleOrDefault(c => c.ModelDocumentId == input.ModelId && c.DrawingDocumentId == input.DrawingId);
+                Require(candidate != null && candidate.Selectable, "修改后的图模不能正常进入审核候选：" + candidate?.Reason);
+                var review = await Post<DrawingReviewPackage>(api, $"/api/projects/{projectId}/drawing-reviews", new CreateDrawingReviewRequest([input.ModelId], ["qa-reviewer"]));
+                Require(review.State == DrawingReviewPackageState.InReview, "真实发起审核后未进入审核中状态。");
+                Require(review.Items.All(item => item.ModelVersionId == latest[input.ModelId].Id && item.DrawingVersionId == latest[input.DrawingId].Id), "审核绑定了旧模型或旧2D版本。");
+                await Post<DrawingReviewPackage>(api, $"/api/drawing-reviews/{review.Id}/withdraw", new WithdrawDrawingReviewRequest("隔离验收已确认新版本可正常发起审核，撤回以继续第二轮测试。"));
+                foreach (var pair in latest) { session.VersionIds[pair.Key] = pair.Value.Id; session.Hashes[pair.Key] = pair.Value.Sha256; }
+                var report = new { passed = true, input.Cycle, input.ModelId, input.DrawingId, changed = changed.ToArray(),
+                    modelRevision = latest[input.ModelId].Revision.Display, drawingRevision = latest[input.DrawingId].Revision.Display,
+                    candidate, reviewId = review.Id, reviewBindsNewVersions = true, unrelatedVersionsUnchanged = true };
+                await File.WriteAllTextAsync(Path.Combine(qaRoot, "change-cycle" + input.Cycle + ".json"), JsonSerializer.Serialize(report, Json));
+                return Results.Json(report, Json);
+            }
+            catch (Exception error)
+            {
+                await File.WriteAllTextAsync(Path.Combine(qaRoot, "change-failure.txt"), error.ToString());
+                return Results.Json(new { passed = false, error = error.ToString() }, statusCode: 500);
+            }
+        });
         host.MapPost("/qa/native-archive", async (HttpContext context) =>
         {
             if (context.Request.Headers["X-QA-Token"] != token) return Results.Unauthorized();
@@ -86,19 +173,20 @@ internal static class NativeArchiveRunner
             {
                 var request = await context.Request.ReadFromJsonAsync<NativeArchiveRequest>(Json)
                     ?? throw new InvalidOperationException("验收清单为空。");
-                result = await Verify(api, repository, nativeRoot, ownedFiles, request);
+                result = await Verify(api, repository, nativeRoot, ownedFiles, request, session);
                 passed = true;
             }
             catch (Exception error) { result = new { passed = false, error = error.ToString() }; }
             await File.WriteAllTextAsync(Path.Combine(qaRoot, "result.json"), JsonSerializer.Serialize(result, Json));
-            context.Response.OnCompleted(() => { host.Lifetime.StopApplication(); return Task.CompletedTask; });
+            if (session != null && passed) await File.WriteAllTextAsync(Path.Combine(qaRoot, "live-state.json"), JsonSerializer.Serialize(session, Json));
+            if (!keepOpen) context.Response.OnCompleted(() => { host.Lifetime.StopApplication(); return Task.CompletedTask; });
             return Results.Json(result, Json, statusCode: passed ? 200 : 500);
         });
         try
         {
             await host.StartAsync();
             var address = host.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
-            await File.WriteAllTextAsync(Path.Combine(qaRoot, "ready.json"), JsonSerializer.Serialize(new { url = address + "/qa/native-archive", token, nativeRoot }, Json));
+            await File.WriteAllTextAsync(Path.Combine(qaRoot, "ready.json"), JsonSerializer.Serialize(new { url = address + "/qa/native-archive", apiBaseUrl = address, token, nativeRoot, keepOpen }, Json));
             Console.WriteLine("READY " + Path.Combine(qaRoot, "ready.json"));
             await host.WaitForShutdownAsync();
         }
@@ -114,7 +202,7 @@ internal static class NativeArchiveRunner
         return passed ? 0 : 1;
     }
 
-    private static async Task<object> Verify(HttpClient api, IPdmRepository repository, string nativeRoot, string ownedFiles, NativeArchiveRequest request)
+    private static async Task<object> Verify(HttpClient api, IPdmRepository repository, string nativeRoot, string ownedFiles, NativeArchiveRequest request, LiveSession? liveSession = null)
     {
         var files = request.Files;
         Require(files.Length > 0 && files.Select(file => file.Key).Distinct().Count() == files.Length, "图档清单必须非空且身份唯一。");
@@ -233,6 +321,28 @@ internal static class NativeArchiveRunner
         await Post<ArchiveBatchReceipt>(api, "/api/archive-batches", new ArchiveBatchRequest(Guid.NewGuid(), session, unchanged));
         foreach (var document in documents.Values) Require((await repository.ListDocumentVersionsAsync(document.Id, default)).Count == 1, "无修改新批次造成重复升版。");
         var rootDocument = documents[files.Single(file => file.IsProjectRoot).Key];
+        if (liveSession?.SeedFormalFixture == true)
+        {
+            // Fixture setup for editing a previously released assembly. This does not
+            // claim to test the release approval UI or generated production deliverables.
+            var packageId = Guid.NewGuid(); var approvalId = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
+            var package = new ReleasePackage(packageId, project.Id, "QA-PREVIOUS-RELEASE", ReleasePackageState.Publishing,
+                null, "V1", "V1", [new(approvalId, packageId, ApprovalStage.Approval, "qa-prior-approver", "qa-prior-approver", ApprovalDecision.Approved, "隔离测试前置正式基线", now)], now, null, null)
+                { RootDocumentId = rootDocument.Id, LocksDocuments = false, VersionBindings = [] };
+            await repository.CreateReleasePackageAsync(package, default);
+            var formalModels = (await repository.ListDocumentRelationsAsync(project.Id, default)).Select(relation => relation.ModelDocumentId)
+                .Where(id => documents.Values.Any(document => document.Id == id && document.Kind == DocumentKind.Part)).ToHashSet();
+            var formalIds = formalModels.Concat((await repository.ListDocumentRelationsAsync(project.Id, default))
+                .Where(relation => formalModels.Contains(relation.ModelDocumentId)).Select(relation => relation.DrawingDocumentId)).ToHashSet();
+            Require(formalModels.Count > 0, "没有可用于既有正式版本变更验收的图模配套零件。");
+            foreach (var document in documents.Values.Where(document => formalIds.Contains(document.Id)))
+            {
+                var formal = await repository.PublishDocumentVersionAsync(document.Id, baselines[document.Id], packageId, approvalId, "qa-prior-approver", default);
+                Require(formal.Revision.Display == "A", "前置正式基线未形成A版。");
+                baselines[document.Id] = formal.Id;
+            }
+            await repository.MarkPublishedAsync(packageId, "isolated-fixture-no-production-delivery", now, default);
+        }
         // Normal workspace acquisition includes related drawings. Historical root-only
         // opening intentionally does not infer drawing versions from today's relations.
         var manifest = await Post<ControlledOpenManifest>(api, $"/api/documents/{rootDocument.Id}/open-manifest",
@@ -256,7 +366,7 @@ internal static class NativeArchiveRunner
         }
         Require(before.All(pair => Hash(pair.Key) == pair.Value), "验收改写了原生源文件或准备副本。");
         var drawingSource = files.FirstOrDefault(file => file.Root.Kind == DocumentKind.Drawing);
-        if (drawingSource != null)
+        if (drawingSource != null && liveSession == null)
         {
             // Add one drawing after the model is already archived. No model checkout,
             // upload or version change is needed for this independent drawing batch.
@@ -292,13 +402,35 @@ internal static class NativeArchiveRunner
                 && addedManifest.Files.Any(file => file.DocumentId == documents[modelKey].Id && file.VersionId == baselines[documents[modelKey].Id]),
                 "新工程图取回未包含原有模型的正确版本。");
         }
+        if (liveSession != null)
+        {
+            liveSession.ProjectId = project.Id; liveSession.RootDocumentId = rootDocument.Id;
+            liveSession.RootFileName = rootDocument.FileName; liveSession.RecoveredDirectory = recovered;
+            liveSession.Files = manifest.Files;
+            liveSession.VersionIds = manifest.Files.ToDictionary(file => file.DocumentId, file => file.VersionId);
+            liveSession.Hashes = manifest.Files.ToDictionary(file => file.DocumentId, file => file.Sha256);
+        }
         return new { passed = true, files = files.Length, drawings = files.Count(file => file.Root.Kind == DocumentKind.Drawing), uploadedBytes,
             failedFileZeroVersions = true, failedDrawingZeroVersions = files.Any(file => file.Root.Kind == DocumentKind.Drawing),
-            lostResponseReplaySingleVersion = true, unchangedBatchSingleVersion = true, drawingOnlyKeepsExistingModelVersion = drawingSource != null,
+            lostResponseReplaySingleVersion = true, unchangedBatchSingleVersion = true, drawingOnlyKeepsExistingModelVersion = drawingSource != null && liveSession == null,
             archivedBytesMatch = true, referenceConfigurationsPreserved = true, sourceFilesUnchanged = true,
             restoredFiles = manifest.Files.Count, recoveredDirectory = recovered, recoveredRoot = Path.Combine(recovered, manifest.RootRelativePath),
-            storage = "isolated-in-memory", productionDatabaseTouched = false };
+            storage = "isolated-in-memory", productionDatabaseTouched = false, seededFormalFixture = liveSession?.SeedFormalFixture == true };
     }
+
+    private sealed class LiveSession
+    {
+        public Guid? ProjectId { get; set; }
+        public Guid RootDocumentId { get; set; }
+        public string? RootFileName { get; set; }
+        public string? RecoveredDirectory { get; set; }
+        public IReadOnlyList<ControlledOpenFile> Files { get; set; } = [];
+        public Dictionary<Guid, Guid> VersionIds { get; set; } = [];
+        public Dictionary<Guid, string> Hashes { get; set; } = [];
+        public Guid? ReviewDepartmentId { get; set; }
+        public bool SeedFormalFixture { get; set; }
+    }
+    private sealed record ChangeCheckRequest(Guid ModelId, Guid DrawingId, int Cycle);
 
     private static string Shape(DocumentReferenceNode root)
     {
@@ -318,7 +450,7 @@ internal static class NativeArchiveRunner
         if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"API {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
     }
     private static string Token() => new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken("upton-pdm", "upton-pdm-clients",
-        [new Claim(ClaimTypes.Name, "admin"), new Claim(ClaimTypes.Role, "Administrator")], expires: DateTime.UtcNow.AddHours(1),
+        [new Claim(ClaimTypes.Name, "admin"), new Claim(ClaimTypes.Role, "Administrator")], expires: DateTime.UtcNow.AddHours(8),
         signingCredentials: new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")), SecurityAlgorithms.HmacSha256)));
     private static string Hash(string path)
     {

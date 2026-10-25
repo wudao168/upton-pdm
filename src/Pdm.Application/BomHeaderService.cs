@@ -671,7 +671,7 @@ public sealed partial class BomHeaderService(
         ProjectBomHeaderKind.Master => "项目主BOM",
         ProjectBomHeaderKind.Standard => "标准件BOM",
         ProjectBomHeaderKind.NonStandard => "非标件BOM",
-        ProjectBomHeaderKind.Electrical => "电气BOM",
+        ProjectBomHeaderKind.Electrical => "电气件BOM",
         _ => kind.ToString()
     };
 }

@@ -72,6 +72,20 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
         foreach (var flow in flows) await CaptureAsync("Release", package.Id, package.ProjectId, first.Assignee, first.Id.ToString("N"), flow, ct, restart);
     }
 
+    public async Task<IReadOnlyList<WorkflowNoticeJob>> ReleaseRecordsAsync(ReleasePackage package, CancellationToken ct)
+    {
+        var project = await repository.FindProjectAsync(package.ProjectId, ct);
+        var first = package.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault();
+        if (project?.OrganizationId is not Guid company || first is null) return [];
+        var jobs = new List<WorkflowNoticeJob>();
+        foreach (var flow in new[] { "standard-release", "nonstandard-release", "electrical-release" })
+        {
+            var job = await store.FindSourceAsync(company, $"workflow-notice:{flow}:{package.Id:N}:{first.Id:N}", ct);
+            if (job is not null) jobs.Add(job);
+        }
+        return jobs;
+    }
+
     public Task CaptureValidationAsync(ProjectValidationPlan plan, CancellationToken ct) =>
         CaptureAsync("ValidationPlan", plan.Id, plan.ProjectId, plan.SubmittedBy ?? plan.CreatedBy,
             plan.ApprovalTasks.OrderBy(task => task.StepOrder).First().Id.ToString("N"), "validation-plan", ct);
@@ -201,7 +215,23 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
                 if (selectedRole is null || recipient.DepartmentSource is not ("Fixed" or "SubmitterDepartment" or "CompanyRole")
                     || recipient.DepartmentSource != "CompanyRole" && (unitId is null || !units.Contains(unitId.Value)))
                 { warnings.Add("接收部门或角色失效，或提交人未配置有效主部门"); continue; }
-                var members = directory.Memberships.Where(item => item.UnitId == unitId).Select(item => item.Username).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var recipientUnits = new HashSet<Guid>();
+                if (unitId is Guid selectedUnit) recipientUnits.Add(selectedUnit);
+                // 提交人所在机械/电气组与技术助理组同属事业部，按事业部范围匹配部门助理。
+                if (recipient.DepartmentSource == "SubmitterDepartment" && selectedRole.Role.Equals("TechnicalAssistant", StringComparison.OrdinalIgnoreCase))
+                {
+                    var department = directory.Units.First(item => item.Id == unitId);
+                    while (department.Kind != OrganizationUnitKind.BusinessDivision && department.ParentUnitId is Guid parent && units.Contains(parent))
+                        department = directory.Units.First(item => item.Id == parent);
+                    recipientUnits = [department.Id];
+                    for (var previous = -1; previous != recipientUnits.Count;)
+                    {
+                        previous = recipientUnits.Count;
+                        foreach (var childUnit in directory.Units.Where(item => units.Contains(item.Id) && item.ParentUnitId is Guid parent && recipientUnits.Contains(parent)))
+                            recipientUnits.Add(childUnit.Id);
+                    }
+                }
+                var members = directory.Memberships.Where(item => recipientUnits.Contains(item.UnitId)).Select(item => item.Username).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var matching = directory.Users.Where(user => CompanyUser(directory, user.Username, job.CompanyId) && user.EffectiveRoleCodes.Contains(selectedRole.Role, StringComparer.OrdinalIgnoreCase)
                     && (recipient.DepartmentSource == "CompanyRole" || members.Contains(user.Username))).Select(user => user.Username).ToArray();
                 if (matching.Length == 0) warnings.Add($"{(recipient.DepartmentSource == "CompanyRole" ? "当前公司" : directory.Units.First(item => item.Id == unitId).Name)}／{selectedRole.Name}没有有效人员");

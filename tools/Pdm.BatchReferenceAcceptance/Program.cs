@@ -40,6 +40,8 @@ internal static partial class Program
             .SetValue(null, new Func<string>(() => Path.Combine(directory, "workspace")));
         if (args.Length == 3 && args[2] == "--snapshot-only")
         {
+            Test("modified display state uses recorded root revision without guessing latest", TestRootRevisionDisplay);
+            Test("native inventory survives an incomplete index without accepting unregistered bytes", TestPendingNativeInventory);
             Test("metadata refresh during base lookup cannot clear repeated reference versions", TestFrozenBatchReferences);
             Console.WriteLine($"Passed={passed}; Failed={failed}; no SolidWorks COM or production API calls.");
             return failed == 0 ? 0 : 1;
@@ -54,6 +56,7 @@ internal static partial class Program
         {
             Test("desktop workspace identity and local changes", TestWorkspaceLocalStates);
             Test("committed version binding", TestBatchControlledVersionBinding);
+            Test("newly scanned drawing references follow committed file without changing historical copies", TestRefreshedDrawingReference);
             Test("manifest refresh retains committed metadata", TestCheckedInManifestRefresh);
             Test("external file archive cache", TestBatchArchiveSeedsProjectCache);
             Test("downloaded normalized copy binding", TestDownloadedCopyBinding);
@@ -70,14 +73,16 @@ internal static partial class Program
             return failed == 0 ? 0 : 1;
         }
         Test("stale source is updated alongside the refreshed UI tree", TestStaleSource);
+        Test("newly scanned drawing references follow committed file without changing historical copies", TestRefreshedDrawingReference);
         Test("300 repeated references resolve once to the matching historical version", TestResolveDuplicates);
         Test("changed reference is blocked, never assigned the latest version", TestChangedReference);
         Test("cancelled preflight makes no requests", TestCancellation);
         Test("embedded components skip independent registration and history checks but retain external dependencies", TestVirtualReferences);
+        Test("readonly design source archive does not change source attributes or require a CAD editor", TestReadonlyDesignDependencyPermission);
         Test("archive dialog displays embedded hierarchy without separate upload selections", TestVirtualDialog);
         RunReferenceCacheTests();
         Test("successful child updates all operation instances but not a different local file", TestOperationInstances);
-        Test("reference validation rejects unknown versions before upload", TestValidation);
+        Test("reference capture leaves unknown versions for server preflight without guessing latest", TestValidation);
         Test("copied legacy IDs are hints only, never automatic associations", TestLegacyIdentity);
         Test("10 controlled plus 10 new files retain independent identities on retry", TestIncrementalIdentity);
         Test("copied bindings cannot be replayed at another path or machine", TestBindingValidation);
@@ -127,6 +132,44 @@ internal static partial class Program
         Call(plugin, "ApplyResolvedWorkingVersionToMatchingInstances", source, version);
         Assert((string)Get(source, "CurrentRevision") == "W2", "source version not updated");
         Assert((string)Get(uiNode, "CurrentRevision") == "W2", "UI version not updated");
+    }
+
+    private static void TestRefreshedDrawingReference()
+    {
+        var plugin = New("PdmAddin");
+        var source = Node("committed-model.SLDPRT", Guid.NewGuid());
+        var drawing = Node("committed-drawing.SLDDRW", Guid.NewGuid(), 2);
+        Children(source).Add(drawing);
+        var oldReference = Node("committed-model.SLDPRT", (Guid)Get(source, "DocumentId"));
+        var references = (IList)Get(drawing, "ReferencedModels");
+        references.Add(oldReference);
+        var oldOperationNodes = TypedArray("CadTreeNode", source, drawing, oldReference);
+        references.Clear(); // Native view scanning replaces reference objects during upload preparation.
+        var currentReference = Node("committed-model.SLDPRT", (Guid)Get(source, "DocumentId"));
+        var historicalReference = Node("history/committed-model.SLDPRT", (Guid)Get(source, "DocumentId"));
+        var wrongIdentity = Node("committed-model.SLDPRT", Guid.NewGuid());
+        foreach (var node in new[] { currentReference, historicalReference, wrongIdentity })
+        { Set(node, "CurrentRevision", "A"); references.Add(node); }
+        plugin.GetType().GetField("currentTree", Members).SetValue(plugin, source);
+        var matches = ((IEnumerable)Call(plugin, "FindMatchingDocumentInstances", source, Get(source, "DocumentId"))).Cast<object>().ToArray();
+        Assert(matches.Contains(currentReference), "fresh drawing view was omitted from successful commit synchronization");
+        Assert(!matches.Contains(historicalReference) && !matches.Contains(wrongIdentity), "unrelated drawing view was included");
+        Call(plugin, "ApplyResolvedWorkingVersionToMatchingInstances", source, Version("A-W1", "hash"));
+        Static("PdmAddin", "UpdateBatchDocumentInstances", source, oldOperationNodes);
+        Assert((string)Get(currentReference, "CurrentRevision") == "A-W1", "fresh drawing view retains old model revision");
+        Assert((string)Get(historicalReference, "CurrentRevision") == "A" && (string)Get(wrongIdentity, "CurrentRevision") == "A", "historical or foreign reference changed");
+        var previousContext = SynchronizationContext.Current;
+        try
+        {
+            using var pane = (Control)New("PdmTaskPaneControl", "");
+            plugin.GetType().GetField("taskPaneControl", Members).SetValue(plugin, pane);
+            var document = New("DocumentDto"); Set(document, "Id", Get(source, "DocumentId"));
+            var version = Version("A-W2", "hash2"); Set(document, "Revision", Get(version, "Revision"));
+            Call(plugin, "ApplyCheckedInDocumentToMatchingInstances", source, document, version);
+            Assert((string)Get(currentReference, "CurrentRevision") == "A-W2", "successful commit leaves freshly scanned reference stale");
+            Assert((string)Get(historicalReference, "CurrentRevision") == "A" && (string)Get(wrongIdentity, "CurrentRevision") == "A", "commit touched a historical or foreign reference");
+        }
+        finally { SynchronizationContext.SetSynchronizationContext(previousContext); }
     }
 
     private static void TestResolveDuplicates()
@@ -360,6 +403,47 @@ internal static partial class Program
         Assert(handler.Requests == 1, "real external dependency beneath a virtual assembly was silently skipped");
     }
 
+    private static void TestReadonlyDesignDependencyPermission()
+    {
+        var id = Guid.NewGuid();
+        var node = Node("readonly-design-source.txt", id, 5);
+        Set(node, "Role", Enum.Parse(Type("CadReferenceRole"), "ExternalFileDependency"));
+        var path = (string)Get(node, "FullPath");
+        File.WriteAllText(path, "saved equation data");
+        File.SetAttributes(path, FileAttributes.ReadOnly);
+        try
+        {
+            using var handler = new DependencyCheckoutHandler { Id = id };
+            var plugin = Plugin(handler);
+            plugin.GetType().GetField("authenticatedUsername", Members).SetValue(plugin, "qa");
+            handler.Session = (Guid)Field(plugin, "checkoutSessionId");
+            ((Task)Call(plugin, "PrepareBatchCheckInPermissionAsync", New("BatchOperationItem", node, 0),
+                Guid.NewGuid(), CancellationToken.None, null, null, null)).GetAwaiter().GetResult();
+            Assert(handler.Writes == 1, "dependency did not acquire its server archive session");
+            Assert((File.GetAttributes(path) & FileAttributes.ReadOnly) != 0
+                && File.ReadAllText(path) == "saved equation data", "dependency archive mutated readonly source");
+        }
+        finally { File.SetAttributes(path, FileAttributes.Normal); }
+    }
+
+    private sealed class DependencyCheckoutHandler : HttpMessageHandler
+    {
+        internal Guid Id, Session;
+        internal int Writes;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            Assert(request.Method == HttpMethod.Post && request.RequestUri.AbsolutePath == "/api/documents/" + Id + "/checkout",
+                "unexpected dependency operation");
+            Writes++;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) {
+                Content = new StringContent(new JavaScriptSerializer().Serialize(new {
+                    id = Id, fileName = "readonly-design-source.txt", kind = 5, checkedOutBy = "qa",
+                    checkoutSessionId = Session, revision = new { display = "W1" }
+                }))
+            });
+        }
+    }
+
     private static void TestVirtualDialog()
     {
         var previousContext = SynchronizationContext.Current;
@@ -391,7 +475,7 @@ internal static partial class Program
         Call(pane, "UpdateSelected", nested);
         var detail = ((Label)Field(pane, "selectedMeta")).Text;
         Assert(detail.Contains("随父装配") && !detail.Contains("W99") && !detail.Contains("未归档") && !detail.Contains("未检出"),
-            "embedded details show an independent version or checkout requirement");
+            "embedded details show an independent version or checkout requirement: " + detail);
         foreach (var node in new[] { nested, first, second })
         {
             Set(node, "ImportedSourcePath", Path.Combine(directory, "YIHEDA_CDL21D150P", "CDL21-D150-P.stp"));
@@ -399,7 +483,7 @@ internal static partial class Program
         }
         Call(pane, "SetTree", root); Call(pane, "UpdateSelected", nested);
         var importedDetail = ((Label)Field(pane, "selectedMeta")).Text;
-        Assert(importedDetail.Contains("不随存档") && importedDetail.Contains("CDL21-D150-P.stp")
+        Assert(importedDetail.Contains("核对有效链接") && importedDetail.Contains("CDL21-D150-P.stp")
             && importedDetail.Contains("待确认保存归属") && !importedDetail.Contains("保存在所属装配体内")
             && !importedDetail.Contains("存储：所属父装配体内") && !importedDetail.Contains("W99"),
             "IC import was presented as verified self-contained embedded data");
@@ -438,11 +522,20 @@ internal static partial class Program
 
     private static void TestValidation()
     {
-        var root = Node("validate.SLDASM", null, 0);
+        var root = Node("validate.SLDASM", Guid.NewGuid(), 0);
+        Set(root, "Revision", "W1");
         var child = Node("validate.SLDPRT", Guid.NewGuid());
         Set(child, "LatestRevision", "W8");
         Children(root).Add(child);
+        Static("PdmApiClient", "ValidateCheckInReferences", root);
+        var snapshot = Static("PdmApiClient", "CaptureArchiveSnapshot", root, null);
+        var serializer = new JavaScriptSerializer();
+        var captured = serializer.Deserialize<Dictionary<string, object>>(serializer.Serialize(Call(snapshot, "CreateRoot")));
+        Assert(((Dictionary<string, object>)((IList)captured["children"])[0])["revision"] == null,
+            "unknown local reference version was replaced with displayed latest revision");
+        Set(child, "DocumentId", null);
         Expect<InvalidOperationException>(() => Static("PdmApiClient", "ValidateCheckInReferences", root));
+        Set(child, "DocumentId", Guid.NewGuid());
         foreach (var revision in new[] { "W1", "W2*", "A", "A-W2" })
         {
             Set(child, "CurrentRevision", revision);
@@ -1319,7 +1412,7 @@ internal static partial class Program
         return (bool)Type("PdmDocumentIdentityStore").GetMethod(method, Members).Invoke(null, args) ? (Guid?)args[1] : null;
     }
 
-    private static object Plugin(VersionsHandler handler)
+    private static object Plugin(HttpMessageHandler handler)
     {
         var plugin = New("PdmAddin");
         var client = New("PdmApiClient", "http://fixture.invalid/");

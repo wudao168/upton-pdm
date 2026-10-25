@@ -27,11 +27,373 @@ internal static partial class Program
  {
   AppDomain.CurrentDomain.AssemblyResolve+=(_,e)=>{var path=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0])),new AssemblyName(e.Name).Name+".dll");return File.Exists(path)?Assembly.LoadFrom(path):null;};
   assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));
+  if(args.Length>1&&args[1]=="--archive-confirm-selection-regression")
+  {
+   using(var confirmHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    confirmHost.Shown+=async(_,__)=>{try{await ArchiveConfirmSelectionScenario(confirmHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{confirmHost.Close();}};
+    Application.Run(confirmHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--delete-permission-guard-regression")
+  {
+   try{DeletePermissionGuardScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--acquire-assembly-edit-regression")
+  {
+   try{AcquireAssemblyEditScenario().GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-structure-reuse-regression")
+  {
+   try{ArchiveStructureReuseScenario().GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--new-drawing-discovery-regression")
+  {
+   using(var discoveryHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    discoveryHost.Shown+=async(_,__)=>{try{await NewDrawingDiscoveryScenario(args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{discoveryHost.Close();}};
+    Application.Run(discoveryHost);
+   }
+   return;
+  }
+  if(args.Length>1&&(args[1]=="--archive-selection-columns-regression"||args[1]=="--legacy-drawing-index-regression"))
+  {
+   using(var selectionHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    selectionHost.Shown+=async(_,__)=>{try{if(args[1]=="--archive-selection-columns-regression")await ArchiveSelectionColumnsScenario(selectionHost,args[2]);else await LegacyDrawingIndexScenario(args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{selectionHost.Close();}};
+    Application.Run(selectionHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-checked-visibility-regression")
+  {
+   using(var checkedHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    checkedHost.Shown+=async(_,__)=>{try{await ArchiveCheckedVisibilityScenario(checkedHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{checkedHost.Close();}};
+    Application.Run(checkedHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--discard-owner-repeat-regression")
+  {
+   using(var ownerHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    ownerHost.Shown+=async(_,__)=>{try{await DiscardOwnerRepeatScenario();}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{ownerHost.Close();}};
+    Application.Run(ownerHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--assembly-noop-discard-regression")
+  {
+   using(var assemblyHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    assemblyHost.Shown+=async(_,__)=>{try{await AssemblyNoopDiscardScenario(args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{assemblyHost.Close();}};
+    Application.Run(assemblyHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-auto-scope-regression")
+  {
+   using(var scopeHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    scopeHost.Shown+=async(_,__)=>{try{await ArchiveAutoScopeScenario(scopeHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{scopeHost.Close();}};
+    Application.Run(scopeHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--linked-drawing-discard-regression")
+  {
+   using(var linkedHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    linkedHost.Shown+=async(_,__)=>{try{await LinkedDrawingDiscardScenario();}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{linkedHost.Close();}};
+    Application.Run(linkedHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--drawing-open-context-regression")
+  {
+   using(var drawingHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    drawingHost.Shown+=async(_,__)=>{try{await DrawingOpenContextScenario();}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{drawingHost.Close();}};
+    Application.Run(drawingHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--compare-brand-baseline")
+  {
+   try{CompareBrandBaseline(args[2],args[3]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-compact-workflow-regression")
+  {
+   using(var compactHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    compactHost.Shown+=async(_,__)=>{try{await ArchiveCompactWorkflowScenario(compactHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{compactHost.Close();}};
+    Application.Run(compactHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--paired-drawing-workflow-regression")
+  {
+   using(var pairedHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    pairedHost.Shown+=async(_,__)=>{try{await PairedDrawingWorkflowScenario();}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{pairedHost.Close();}};
+    Application.Run(pairedHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--native-drawing-qr-removal-regression")
+  {
+   try{NativeDrawingQrRemovalScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-selection-rules-regression")
+  {
+   using(var archiveHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    archiveHost.Shown+=async(_,__)=>{try{await ArchiveSelectionRulesScenario(archiveHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{archiveHost.Close();}};
+    Application.Run(archiveHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-session-regression")
+  {
+   using(var archiveHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    archiveHost.Shown+=async(_,__)=>{try{await ArchiveSessionScenario(archiveHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{archiveHost.Close();}};
+    Application.Run(archiveHost);
+   }
+   return;
+  }
+  if(args.Length>1&&(args[1]=="--acquire-window-regression"||args[1]=="--acquire-window-failure-regression"))
+  {
+   using(var acquireHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    acquireHost.Shown+=async(_,__)=>{try{await AcquireWindowRecoveryScenario(args[1]=="--acquire-window-failure-regression");}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{acquireHost.Close();}};
+    Application.Run(acquireHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--design-tree-columns-regression")
+  {
+   using(var columnsHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    columnsHost.Shown+=async(_,__)=>{try{await DesignTreeColumnsScenario(columnsHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{columnsHost.Close();}};
+    Application.Run(columnsHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--workspace-root-choice-regression")
+  {
+   using(var workspaceHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    workspaceHost.Shown+=async(_,__)=>{try{await WorkspaceRootChoiceScenario(workspaceHost);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{workspaceHost.Close();}};
+    Application.Run(workspaceHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--window-preview-drawing-regression")
+  {
+   try{DrawingEditingScenario();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--window-tree-speed-regression")
+  {
+   using(var windowHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    windowHost.Shown+=async(_,__)=>{try{await WindowTreeSpeedScenario(windowHost);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{windowHost.Close();}};
+    Application.Run(windowHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--permission-operation-speed-regression")
+  {
+   using(var permissionHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    permissionHost.Shown+=async(_,__)=>{try{await LatestReadOnlyWorkingScenario(true);await DiscardFocusScenario(true);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{permissionHost.Close();}};
+    Application.Run(permissionHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--discard-focus-open-speed-regression")
+  {
+   using(var speedHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    speedHost.Shown+=async(_,__)=>{try{await DiscardFocusScenario();ControlledNativeFirstScenario();await ControlledDownloadConcurrencyScenario();}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{speedHost.Close();}};
+    Application.Run(speedHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--latest-readonly-working-regression")
+  {
+   using(var latestHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    latestHost.Shown+=async(_,__)=>{try{await LatestReadOnlyWorkingScenario();}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{latestHost.Close();}};
+    Application.Run(latestHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--open-activation-identity-regression")
+  {
+   try{OpenActivationIdentityScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--discard-working-path-regression")
+  {
+   using(var discardHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    discardHost.Shown+=async(_,__)=>{try{await DiscardWorkingPathScenario();}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{discardHost.Close();}};
+    Application.Run(discardHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--batch-changed-selection-regression")
+  {
+   try{BatchChangedSelectionScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--historical-scope-regression")
+  {
+   try{HistoricalReferenceScopeScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&(args[1]=="--tree-refresh-regression"||args[1]=="--working-copy-reuse-regression"))
+  {
+   using(var regressionHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    regressionHost.Shown+=async(_,__)=>{try{
+     if(args[1]=="--tree-refresh-regression")await TreeRefreshScenario(regressionHost);
+     else await WorkingCopyReuseScenario(args[2]);
+    }catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{regressionHost.Close();}};
+    Application.Run(regressionHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--drawing-sheet-reference-regression")
+  {
+   try{DrawingSheetReferenceScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--browser-native-scope-regression")
+  {
+   try{BrowserNativeScopeScenario();BrowserCompanionPreviewScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--own-file-context-regression")
+  {
+   try{OwnFileContextScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>2&&args[1]=="--worker-preview-state-regression")
+  {
+   try{WorkerPreviewStateScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--browser-preview-regression")
+  {
+   try{BrowserPreviewRecoveryScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--pending-index-regression")
+  {
+   try{PendingIndexCompletionScenario().GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--drawing-candidate-index-regression")
+  {
+   try{DrawingCandidateIndexScenario(args.Length>2?args[2]:"all").GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--partial-property-card-regression")
+  {
+   try{PartialPropertyReadCheck();PartialPropertyCardScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--configuration-regression")
+  {
+   try{ReferenceConfigurationPropertiesScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--rule-switch-regression")
+  {
+   try{RuleSwitchScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&(args[1]=="--linked-archive-regression"||args[1]=="--linked-drawing-plan-regression"))
+  {
+   using(var linkedHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    linkedHost.Shown+=async(_,__)=>{try{await LinkedArchiveScenario(args[1]=="--linked-drawing-plan-regression");}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{linkedHost.Close();}};
+    Application.Run(linkedHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--formal-rules-regression")
+  {
+   try{OperationRuleScenario();LegacyDesignReferenceScenario();ControlledReferenceScenario();ControlledParameterIntegrityScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--historical-owner-regression")
+  {
+   try{HistoricalOwnerScenario();BusyControlledOpenScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--design-dependency-regression")
+  {
+   try{NativeDesignDependencyScenario();LegacyDesignReferenceScenario();ControlledParameterIntegrityScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
   Exception failure=null;
   using(var host=new Form{Opacity=0,ShowInTaskbar=false})
   using(var timer=new System.Windows.Forms.Timer{Interval=50})
   {
-   timer.Tick+=(_,__)=>{var dialog=FindWindow("#32770","整体存档前保存文件");if(dialog!=IntPtr.Zero)SendMessage(dialog,0x111,new IntPtr(6),IntPtr.Zero);if(args.Length>1){dialog=FindWindow("#32770","UPLM");if(dialog!=IntPtr.Zero){GetWindowThreadProcessId(dialog,out var process);if(process==(uint)System.Diagnostics.Process.GetCurrentProcess().Id)SendMessage(dialog,0x111,new IntPtr(1),IntPtr.Zero);}}};
+   timer.Tick+=(_,__)=>{var dialog=FindWindow("#32770","整体存档前保存文件");if(dialog!=IntPtr.Zero){GetWindowThreadProcessId(dialog,out var ownerProcess);if(ownerProcess==(uint)System.Diagnostics.Process.GetCurrentProcess().Id)SendMessage(dialog,0x111,new IntPtr(6),IntPtr.Zero);}if(args.Length>1){dialog=FindWindow("#32770","UPLM");if(dialog!=IntPtr.Zero){GetWindowThreadProcessId(dialog,out var process);if(process==(uint)System.Diagnostics.Process.GetCurrentProcess().Id)SendMessage(dialog,0x111,new IntPtr(1),IntPtr.Zero);}}};
    host.Shown+=async (_,__)=>{try{if(args.Length>1&&args[1]=="--scoped-edit-regression"){await ScopedEditArchiveScenario();return;}if(args.Length>1&&args[1]=="--archive-usability-regression"){ArchiveUsabilityScenario();return;}if(args.Length>1&&args[1]=="--drawing-edit-regression"){DrawingEditingScenario();return;}if(args.Length>1&&args[1]=="--rename-fill-regression"){ComponentRenameAndFillScenario(host);return;}if(args.Length>1&&args[1]=="--document-rename-regression"){RootRenameScenario();return;}if(args.Length>1&&args[1]=="--archive-network-regression"){await ArchiveNetworkScenario();return;}if(args.Length>1&&args[1]=="--cycle-scan-regression"){VisualReferenceCycleScenario();return;}if(args.Length>1&&args[1]=="--strict-scan-matrix"){VisualReferenceCycleScenario();StrictScanMatrix();SixDrawingDiscoveryScenario();NativeManifestScenario();RootRenameScenario();PlannedTaskTimerScenario(host);SuppressedReadScenario();return;}if(args.Length>1){await OpenDispatcherScenario(args[1]=="--expect-handle-failure");return;}DrawingEditingScenario();await OpenDispatcherScenario(false);VisualReferenceCycleScenario();StrictScanMatrix();SixDrawingDiscoveryScenario();NativeManifestScenario();RootRenameScenario();ComponentRenameAndFillScenario(host);PlannedTaskTimerScenario(host);DrawingDiscoveryScenario();ControlledReferenceScenario();ControlledScannerScenario();SearchScopeScenario();PropertyCompletenessScenario();await PreflightGateScenario(host);await ArchiveNetworkScenario();await LatePreparationGate(host);ArchiveUsabilityScenario();await ScopedEditArchiveScenario();SuppressedReadScenario();ReadOnlyOpenScenario();DiagnosticTabScenario(host);CenteringScenario();CloseReferencedScenario();await EntryScenario(host);await Scenario(false,false);await Scenario(true,false);await Scenario(true,true);}catch(Exception e){failure=e;}finally{host.Close();}};
    timer.Start();Application.Run(host);
   }
@@ -301,7 +663,7 @@ internal static partial class Program
    var items=Array.CreateInstance(Type("BatchOperationItem"),2);
    for(var i=0;i<2;i++){var node=New("CadTreeNode");Set(node,"DocumentId",Guid.NewGuid());Set(node,"FileName","PART"+i+".SLDPRT");Set(node,"FullPath",Path.Combine(Path.GetTempPath(),"NETWORK-PART"+i+".SLDPRT"));Set(node,"Revision","W1");Set(node,"CurrentRevision","W1");Set(node,"Kind",Enum.ToObject(Type("CadDocumentKind"),1));items.SetValue(New("BatchOperationItem",node,0),i);}
    var rejected=false;
-   try{await (Task)Type("PdmAddin").GetMethod("PreflightBatchCheckInItemsAsync",Flags).Invoke(plugin,new object[]{items,Guid.NewGuid(),null,null,null,new HashSet<string>(),null,cancellation.Token,Activator.CreateInstance(typeof(List<>).MakeGenericType(Type("BatchOperationItem"))),new List<string>(),null,null});}
+   try{await (Task)Type("PdmAddin").GetMethod("PreflightBatchCheckInItemsAsync",Flags).Invoke(plugin,new object[]{items,Guid.NewGuid(),null,null,null,new HashSet<string>(),null,cancellation.Token,Activator.CreateInstance(typeof(List<>).MakeGenericType(Type("BatchOperationItem"))),new List<string>(),null,null,false,null});}
    catch(OperationCanceledException)when(mode=="cancelled"&&cancellation.IsCancellationRequested){rejected=true;}
    catch(InvalidOperationException error)when(mode!="cancelled"){rejected=error.Message.Contains("服务器")&&error.Message.Contains("尚未上传")&&!error.Message.Contains("保存文件");}
    if(!rejected||handler.Preflights!=(mode.StartsWith("get-")?0:1)||handler.Reads!=1||handler.Uploads!=0)throw new Exception("Server outage did not stop the batch before later requests/uploads: "+mode);
@@ -381,11 +743,9 @@ internal static partial class Program
   if(!dirty)throw new Exception("Reference-only model edits were cleared");
   Console.WriteLine("PASS: New drawing can reference a stored model without clearing its unsaved in-memory state");
  }
- static void ControlledReferenceScenario()
+ static void ControlledReferenceScenario(bool pathsDisabled=false)
  {
-  ImportedControlledReferences();
-  StoredImportControlledReferences();
-  NativeImportFeatureOwnership();
+  if(!pathsDisabled){ImportedControlledReferences();StoredImportControlledReferences();NativeImportFeatureOwnership();}
   var interop=Type("PdmAddin").GetField("application",Flags).FieldType.Assembly;
   var folder=Path.Combine(Path.GetTempPath(),"pdm-controlled-ref-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
   var path=Path.Combine(folder,"PART.SLDPRT");var old=Path.Combine(folder,"legacy","PART.SLDPRT");Directory.CreateDirectory(Path.GetDirectoryName(old));File.WriteAllText(old,"uncontrolled");
@@ -404,14 +764,15 @@ internal static partial class Program
    var rejected=false;
    try{Type("PdmAddin").GetMethod("ValidateHistoricalControlledOpenReferences",Flags).Invoke(null,new object[]{root,Path.Combine(folder,"ROOT.SLDASM"),manifest,null});}
    catch(TargetInvocationException e)when(e.InnerException is InvalidOperationException){rejected=true;}
-   if(rejected!=(mode!="loaded-correct"&&mode!="suppressed"&&mode!="lightweight"))throw new Exception("Wrong controlled reference outcome "+mode);
+   var expectedRejection=mode=="corrupt"||mode=="missing"||!pathsDisabled&&(mode=="loaded-wrong"||mode=="suppressed-loaded-wrong");
+   if(rejected!=expectedRejection)throw new Exception("Wrong controlled reference outcome "+mode);
    if(mode=="loaded-correct"||mode=="loaded-wrong")
    {
     var app=new Proxy(Type("PdmAddin").GetField("application",Flags).FieldType,call=>call.MethodName=="GetType"?Type("PdmAddin").GetField("application",Flags).FieldType:throw new Exception("Unexpected application access "+call.MethodName)).GetTransparentProxy();
     var scanner=New("SolidWorksReferenceTreeScanner",app);var resolved=(string)Type("SolidWorksReferenceTreeScanner").GetMethod("ResolveComponentPath",Flags).Invoke(scanner,new[]{component});
     if(resolved!=(mode=="loaded-correct"?path:old))throw new Exception("Scanner ignored actual loaded model path");
    }
-   Console.WriteLine("PASS: Controlled reference validation "+mode);
+   Console.WriteLine("PASS: Controlled reference validation "+mode+" F20-disabled="+pathsDisabled);
   }
  }
  static void ImportedControlledReferences()
@@ -451,12 +812,12 @@ internal static partial class Program
     if(call.MethodName=="GetDocumentNames"){var output=(object[])call.Args.Clone();output[0]=mode=="unverified-cache"?new[]{owner,native}:new[]{owner};return new ReturnMessage(true,output,output.Length,call.LogicalCallContext,call);}
     throw new Exception(call.MethodName);
    }).GetTransparentProxy();
-   var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="GetPackAndGo"?pack:throw new Exception(call.MethodName)).GetTransparentProxy();
-   var model=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetPathName"?native:throw new Exception(call.MethodName)).GetTransparentProxy();
+   var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="GetPackAndGo"?pack:call.MethodName=="ListExternalFileReferences2"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
+   var model=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetPathName"?native:call.MethodName=="GetType"?1:call.MethodName=="get_Extension"?extension:call.MethodName=="GetEquationMgr"||call.MethodName=="GetDesignTable"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
    var component=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),call=>{
      switch(call.MethodName){case "get_IsVirtual":return false;case "GetParent":return null;case "GetPathName":return native;case "GetModelDoc2":return model;case "get_Name2":return "import-1";case "GetImportedPath":return mode=="outside-source-record"?@"Z:\history\source.STEP":oldSource;default:throw new Exception(call.MethodName);}
    }).GetTransparentProxy();
-   var root=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetType"?2:call.MethodName=="GetComponents"?new[]{component,component}:call.MethodName=="GetPathName"?owner:call.MethodName=="FeatureByName"?null:call.MethodName=="GetTitle"?Path.GetFileName(owner):call.MethodName=="get_Extension"?extension:throw new Exception(call.MethodName)).GetTransparentProxy();
+   var root=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetType"?2:call.MethodName=="GetComponents"?new[]{component,component}:call.MethodName=="GetPathName"?owner:call.MethodName=="FeatureByName"?null:call.MethodName=="GetTitle"?Path.GetFileName(owner):call.MethodName=="get_Extension"?extension:call.MethodName=="GetEquationMgr"||call.MethodName=="GetDesignTable"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
    var manifest=New("ControlledOpenManifestDto");var files=(IList)Activator.CreateInstance(Property(manifest,"Files").PropertyType);var file=New("ControlledOpenFileDto");
    Set(file,"FileName","OWNER.SLDASM");Set(file,"RelativePath","OWNER.SLDASM");Set(file,"Sha256",hash);Set(file,"FileLength",length);files.Add(file);Set(manifest,"Files",files);
    var ownerApp=new Proxy(Type("PdmAddin").GetField("application",Flags).FieldType,call=>call.MethodName=="get_ActiveDoc"||call.MethodName=="ActivateDoc3"?root:throw new Exception("Unexpected native write "+call.MethodName)).GetTransparentProxy();
@@ -510,7 +871,7 @@ internal static partial class Program
    }).GetTransparentProxy();
    var manifest=New("ControlledOpenManifestDto");var files=(IList)Activator.CreateInstance(Property(manifest,"Files").PropertyType);var file=New("ControlledOpenFileDto");Set(file,"FileName","PART.SLDPRT");files.Add(file);Set(manifest,"Files",files);
    try{using(var scope=(IDisposable)New("ControlledReferenceSearchScope",app,"C:\\controlled\\ROOT.SLDASM",manifest))
-    {if(cwd!="C:\\controlled"||folders!="C:\\controlled"||!enabled)throw new Exception("Controlled search not applied");if(mode=="open-error")throw new IOException("simulated open failure");}}
+    {if(cwd!="C:\\controlled"||mode!="set-error"&&folders!="C:\\controlled"||!enabled)throw new Exception("Controlled search not applied");if(mode=="open-error")throw new IOException("simulated open failure");}}
    catch(IOException)when(mode=="open-error"){}
    catch(TargetInvocationException e)when(mode=="set-error"&&e.InnerException is InvalidOperationException){}
    if(cwd!="C:\\original"||folders!="C:\\library;D:\\parts"||enabled)throw new Exception("User search settings not restored "+mode);
@@ -742,8 +1103,9 @@ internal static partial class Program
  static void ReferenceConfigurationPropertiesScenario()
  {
   var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var interop=appType.Assembly;
-  foreach(var missing in new[]{false,true})
+  foreach(var mode in new[]{"complete","missing","index-unavailable"})
   {
+   var missing=mode=="missing";var unavailable=mode=="index-unavailable";
    var lookups=new List<string>();var path=Path.Combine(Path.GetTempPath(),"MULTI.SLDPRT");
    Func<string,object> manager=scope=>new Proxy(interop.GetType("SolidWorks.Interop.sldworks.CustomPropertyManager",true),call=>{
     if(call.MethodName=="get_Count")return 1;if(call.MethodName=="GetNames")return new object[]{"编号"};
@@ -754,7 +1116,8 @@ internal static partial class Program
    var configuration=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Configuration",true),call=>throw new Exception("Unexpected configuration mutation "+call.MethodName)).GetTransparentProxy();
    var document=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),call=>{
     if(call.MethodName=="GetPathName")return path;if(call.MethodName=="GetSaveFlag")return false;if(call.MethodName=="get_Extension")return extension;
-    if(call.MethodName=="GetConfigurationByName"){lookups.Add((string)call.Args[0]);return missing&&(string)call.Args[0]=="Alternate"?null:configuration;}
+    if(call.MethodName=="GetConfigurationByName"){lookups.Add((string)call.Args[0]);return (missing||unavailable)&&(string)call.Args[0]=="Alternate"?null:configuration;}
+    if(call.MethodName=="GetConfigurationNames"){if(unavailable)throw new COMException("index unavailable");return missing?new[]{"Default"}:new[]{"Default","Alternate"};}
     throw new Exception("Read-only multi-configuration validation mutated or switched the model: "+call.MethodName);
    }).GetTransparentProxy();
    var plugin=New("PdmAddin");SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?new[]{document}:throw new Exception(call.MethodName)).GetTransparentProxy());
@@ -764,7 +1127,7 @@ internal static partial class Program
    try{
     var values=(IReadOnlyDictionary<string,string>)Type("PdmAddin").GetMethod("ReadArchivePreflightProperties",Flags).Invoke(plugin,
       new object[]{node,cards,new Dictionary<string,IReadOnlyList<string>>{{path,new[]{"Default","Alternate"}}}});
-    if(!missing){
+    if(!missing&&!unavailable){
      if(values["配置:Default/编号"]!="Default-resolved"||values["配置:Alternate/编号"]!="Alternate-resolved")throw new Exception("Referenced configuration properties were not retained");
      var prepared=new Dictionary<string,string>{{"配置:Default/编号","saved-primary"}};
      var merged=(IReadOnlyDictionary<string,string>)Type("PdmAddin").GetMethod("PreserveInspectedConfigurationProperties",Flags).Invoke(null,new object[]{node,prepared,values});
@@ -772,8 +1135,9 @@ internal static partial class Program
     }
    }
    catch(TargetInvocationException e)when(missing&&e.InnerException is InvalidOperationException&&e.InnerException.Message.Contains("Alternate")){rejected=true;}
-   if(rejected!=missing||!lookups.SequenceEqual(new[]{"Default","Alternate"}))throw new Exception("Not every referenced configuration was validated");
-   Console.WriteLine("PASS: every referenced configuration checked without switching, rebuilding or saving; missing="+missing);
+   if(rejected!=missing||!lookups.Contains("Alternate")||(!missing&&!lookups.Contains("Default")))throw new Exception("Referenced configuration was not correctly validated: "+mode);
+   if(unavailable&&!(bool)Get(node,"StructureIndexPending"))throw new Exception("Unavailable configuration index lost its pending marker");
+   Console.WriteLine("PASS: configuration validation preserves native data without switching/rebuilding/saving; mode="+mode);
   }
  }
  static async Task SharedAssemblySaveScenario()
@@ -937,7 +1301,7 @@ internal static partial class Program
     object result=null;var rejected=false;
     try{result=Type("SolidWorksReferenceTreeScanner").GetMethod("GetStatus",Flags).Invoke(null,new object[]{component,partPath,true});}
     catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){rejected=true;}
-    var blocked=mode=="speedpak"||mode=="state-error"||mode=="invalid-state";
+    var blocked=mode=="state-error"||mode=="invalid-state";
     var expected=mode=="virtual"?"Virtual":mode=="hidden"?"Hidden":mode=="suppressed"?"Suppressed":mode.Contains("lightweight")?"Lightweight":"Normal";
     if(rejected!=blocked||!blocked&&result.ToString()!=expected)throw new Exception("Incorrect strict component state: "+mode);
     Console.WriteLine("PASS: strict component state "+mode+(rejected?" rejected":" retained as "+expected));
@@ -976,7 +1340,7 @@ internal static partial class Program
     var scanner=New("SolidWorksReferenceTreeScanner",app);var rejected=false;object result=null;
     try{result=Type("SolidWorksReferenceTreeScanner").GetMethod("ScanDocument",Flags).Invoke(scanner,new object[]{model,true});}
     catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){rejected=true;}
-    var blocked=mode!="multi-configuration"&&mode!="mixed-states"&&mode!="leaf-null";
+    var blocked=mode!="multi-configuration"&&mode!="mixed-states"&&mode!="leaf-null"&&mode!="view-only";
     if(rejected!=blocked)throw new Exception("Incorrect strict structure gate: "+mode+" rejected="+rejected);
     if(!blocked)
     {
@@ -1002,6 +1366,11 @@ internal static partial class Program
  }
  static void SixDrawingDiscoveryScenario()
  {
+  NativeDesignDependencyScenario();
+  LegacyDesignReferenceScenario();
+  HistoricalOwnerScenario();
+  BusyControlledOpenScenario();
+  ControlledParameterIntegrityScenario();
   var folder=Path.Combine(Path.GetTempPath(),"pdm-six-drawings-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
   try
   {
@@ -1019,6 +1388,7 @@ internal static partial class Program
     var app=new Proxy(appType,call=>{
      if(call.MethodName=="GetType")return appType;
      if(call.MethodName=="get_ActiveDoc"||call.MethodName=="ActivateDoc3")return activeNative;
+     if(call.MethodName=="GetOpenDocumentByName")return (string)call.Args[0]==modelPath?activeNative:null;
      if(call.MethodName=="GetCurrentWorkingDirectory")return cwd;
      if(call.MethodName=="SetCurrentWorkingDirectory"){cwd=(string)call.Args[0];return true;}
      if(call.MethodName=="GetDocumentDependencies2")
@@ -1035,18 +1405,89 @@ internal static partial class Program
      if(call.MethodName=="GetDocumentNames"){var output=(object[])call.Args.Clone();output[0]=new[]{modelPath}.Concat(drawings).ToArray();return new ReturnMessage(true,output,output.Length,call.LogicalCallContext,call);}
      throw new Exception("Unexpected PackAndGo mutation "+call.MethodName);
     }).GetTransparentProxy();
-    var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="GetType"?interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true):call.MethodName=="GetPackAndGo"?pack:throw new Exception(call.MethodName)).GetTransparentProxy();
-    var model=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetType"?interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true):call.MethodName=="get_Extension"?extension:call.MethodName=="GetPathName"?modelPath:call.MethodName=="GetTitle"?Path.GetFileName(modelPath):throw new Exception(call.MethodName)).GetTransparentProxy();
+    var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="GetType"?interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true):call.MethodName=="GetPackAndGo"?pack:call.MethodName=="ListExternalFileReferences2"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
+    var model=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetType"?1:call.MethodName=="get_Extension"?extension:call.MethodName=="GetPathName"?modelPath:call.MethodName=="GetTitle"?Path.GetFileName(modelPath):call.MethodName=="GetEquationMgr"||call.MethodName=="GetDesignTable"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
     activeNative=model;
     var scanner=New("SolidWorksReferenceTreeScanner",app);var rejected=false;
     try{Type("SolidWorksReferenceTreeScanner").GetMethod("AddNativeAssociatedDrawings",Flags).Invoke(scanner,new[]{model,root});}
     catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){rejected=true;}
-    if(rejected!=(mode!="all-six")||readPaths.Count!=6||cwd!="original-cwd")throw new Exception("Incomplete six-drawing scan reported success or changed search directory: "+mode);
+    if(rejected||readPaths.Count!=6||cwd!="original-cwd")throw new Exception("Drawing index failure blocked native file collection or changed search directory: "+mode);
     var included=((IEnumerable)Get(root,"Children")).Cast<object>().Select(node=>(string)Get(node,"FullPath")).ToArray();
     if(!rejected&&(included.Length!=6||drawings.Except(included,StringComparer.OrdinalIgnoreCase).Any()))throw new Exception("One of six associated drawings was silently omitted");
     if(drawings.Any(path=>File.ReadAllText(path)!="drawing fixture"))throw new Exception("Drawing discovery changed source bytes");
-    Console.WriteLine("PASS: six associated drawings "+mode+(rejected?" blocks whole operation":" all discovered"));
+    Console.WriteLine("PASS: six associated drawings "+mode+" all preserved; incomplete index does not block native files");
    }
+  }
+  finally{Directory.Delete(folder,true);}
+ }
+ static void NativeDesignDependencyScenario()
+ {
+  var interop=Type("PdmAddin").GetField("application",Flags).FieldType.Assembly;
+  foreach(var linked in new[]{false,true})
+  {
+   var sources=new[]{@"C:\source\broken.SLDPRT",@"C:\source\locked.SLDPRT",@"C:\source\active.SLDPRT",@"C:\source\out-of-context.SLDPRT",@"C:\source\dangling.STEP"};
+   var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>{
+    if(call.MethodName!="ListExternalFileReferences2")throw new Exception(call.MethodName);
+    var output=(object[])call.Args.Clone();output[0]=sources;output[4]=new[]{0,1,3,4,5};
+    return new ReturnMessage(null,output,output.Length,call.LogicalCallContext,call);
+   }).GetTransparentProxy();
+   var equations=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.EquationMgr",true),call=>
+    call.MethodName=="get_LinkToFile"?linked:call.MethodName=="get_FilePath"?@"C:\source\参数.txt":throw new Exception(call.MethodName)).GetTransparentProxy();
+   var model=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>
+    call.MethodName=="GetType"?1:call.MethodName=="get_Extension"?extension:call.MethodName=="GetEquationMgr"?equations:call.MethodName=="GetDesignTable"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
+   var actual=((IEnumerable)Type("NativeDesignDependencies").GetMethod("Read",Flags).Invoke(null,new[]{model})).Cast<string>().ToArray();
+   if(sources.Take(2).Intersect(actual).Any()||sources.Skip(2).Except(actual).Any()
+      ||actual.Contains(@"C:\source\参数.txt")!=linked)throw new Exception("有效设计源、断链历史或方程链接分类错误");
+   Console.WriteLine("PASS: active design sources retained; locked and broken history excluded; equation linked="+linked);
+  }
+  foreach(var states in new[]{new[]{1,1},new[]{1,3},new[]{1,4},new[]{1,5},new[]{1},null})
+  {
+   var source=@"C:\source\shared.SLDPRT";
+   var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>{
+    if(call.MethodName!="ListExternalFileReferences2")throw new Exception(call.MethodName);
+    var output=(object[])call.Args.Clone();output[0]=new[]{source,source};output[4]=states;
+    return new ReturnMessage(null,output,output.Length,call.LogicalCallContext,call);
+   }).GetTransparentProxy();
+   var model=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>
+    call.MethodName=="GetType"?1:call.MethodName=="get_Extension"?extension:call.MethodName=="GetPathName"?@"C:\controlled\OWNER.SLDPRT":call.MethodName=="GetEquationMgr"||call.MethodName=="GetDesignTable"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
+   var actual=((IEnumerable)Type("NativeDesignDependencies").GetMethod("Read",Flags).Invoke(null,new[]{model})).Cast<string>().ToArray();
+   var required=states==null||states.Length!=2||states[1]!=1;
+   if(actual.Contains(source)!=required)throw new Exception("Active or unknown reference was hidden by another locked reference");
+   Type("NativeDesignDependencies").GetMethod("Validate",Flags).Invoke(null,new object[]{model,new Dictionary<string,string>()});
+   Exception failure=null;
+   try{Type("NativeDesignDependencies").GetMethod("Validate",Flags).Invoke(null,new object[]{model,new Dictionary<string,string>{{"shared.SLDPRT",@"C:\controlled\shared.SLDPRT"}}});}
+   catch(TargetInvocationException error){failure=error.InnerException;}
+   if(failure!=null)throw new Exception("Saved feature addresses are diagnostic only; actual loaded paths are checked separately",failure);
+   if(failure!=null)
+   {
+    var message=(string)Type("PdmAddin").GetMethod("OpenDocumentErrorMessage",Flags).Invoke(null,new object[]{failure});
+    if(!message.Contains("OWNER.SLDPRT")||!message.Contains("shared.SLDPRT")||message.Contains("被占用"))throw new Exception("Design-reference failure was reported as a file-lock error");
+   }
+   Console.WriteLine("PASS: outside-package history does not block; packaged source status="+(states==null?"unknown":string.Join(",",states))+" validated="+required);
+  }
+ }
+ static void ControlledParameterIntegrityScenario()
+ {
+  var folder=Path.Combine(Path.GetTempPath(),"pdm-parameter-integrity-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+  try
+  {
+   var root=Path.Combine(folder,"ROOT.SLDASM");var source=Path.Combine(folder,"参数.txt");
+   File.WriteAllText(root,"unchanged native");File.WriteAllText(source,"changed parameters");
+   var manifest=New("ControlledOpenManifestDto");var files=(IList)Activator.CreateInstance(Property(manifest,"Files").PropertyType);
+   foreach(var path in new[]{root,source})
+   {
+    var file=New("ControlledOpenFileDto");Set(file,"FileName",Path.GetFileName(path));Set(file,"RelativePath",Path.GetFileName(path));
+    Set(file,"Sha256",path==source?new string('F',64):(string)Type("PdmAddin").GetMethod("ComputeFileHash",Flags).Invoke(null,new object[]{path}));
+    files.Add(file);
+   }
+   Set(manifest,"Files",files);
+   var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
+   var app=new Proxy(appType,call=>call.MethodName=="GetDocuments"?null:throw new Exception("Native access before dependency integrity check: "+call.MethodName)).GetTransparentProxy();
+   var rejected=false;
+   try{Type("ControlledReferenceMaterializer").GetMethod("Prepare",Flags).Invoke(null,new[]{app,(object)root,manifest});}
+   catch(TargetInvocationException error)when(error.InnerException is IOException){rejected=true;}
+   if(!rejected||File.ReadAllText(root)!="unchanged native"||File.ReadAllText(source)!="changed parameters")throw new Exception("Changed parameter source was used or overwritten");
+   Console.WriteLine("PASS: changed parameter source blocks before any native rewrite; all files preserved");
   }
   finally{Directory.Delete(folder,true);}
  }
@@ -1128,8 +1569,8 @@ internal static partial class Program
    Set(ambiguous,"Status",Enum.Parse(Type("CadReferenceStatus"),"Virtual"));((IList)Get(root,"Children")).Add(ambiguous);
    var rejectedAmbiguous=false;try{validate.Invoke(null,new object[]{root,priorSessionFiles});}
    catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){rejectedAmbiguous=true;}
-   if(!rejectedAmbiguous)throw new Exception("Ambiguous stale virtual hierarchy was automatically rebound");
-   Console.WriteLine("PASS: ambiguous historical virtual path remains blocked");
+   if(rejectedAmbiguous||!(bool)Get(root,"StructureIndexPending")||(string)Get(ambiguous,"FullPath")!=ambiguousPath)throw new Exception("Ambiguous embedded history must retain native parent and report pending index without rebinding");
+   Console.WriteLine("PASS: ambiguous historical virtual address preserves embedded parent and marks index pending without rebinding");
    if(File.ReadAllText(partPath)!="PART.SLDPRT")throw new Exception("Native manifest modified a source CAD file");
   }
   finally{Directory.Delete(directory,true);if(Directory.Exists(virtualTop))Directory.Delete(virtualTop,true);}
@@ -1177,6 +1618,7 @@ internal static partial class Program
     var app=new Proxy(appType,call=>{
      if(call.MethodName=="GetType")return appType;
      if(call.MethodName=="get_ActiveDoc"||call.MethodName=="ActivateDoc3")return activeNative;
+     if(call.MethodName=="GetOpenDocumentByName")return (string)call.Args[0]==current?activeNative:null;
      if(call.MethodName=="GetCurrentWorkingDirectory")return cwd;
      if(call.MethodName=="SetCurrentWorkingDirectory"){cwd=(string)call.Args[0];return true;}
      if(call.MethodName=="GetDocumentDependencies2"){
@@ -1194,15 +1636,15 @@ internal static partial class Program
      if(call.MethodName=="GetDocumentNames"){var output=(object[])call.Args.Clone();output[0]=new object[]{current,drawing};return new ReturnMessage(true,output,output.Length,call.LogicalCallContext,call);}
      throw new Exception("Unexpected PackAndGo write "+call.MethodName);
     }).GetTransparentProxy();
-    var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="GetType"?interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true):call.MethodName=="GetPackAndGo"?pack:throw new Exception(call.MethodName)).GetTransparentProxy();
-    var model=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetType"?interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true):call.MethodName=="get_Extension"?extension:call.MethodName=="GetPathName"?current:call.MethodName=="GetTitle"?Path.GetFileName(current):throw new Exception(call.MethodName)).GetTransparentProxy();
+    var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="GetType"?interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true):call.MethodName=="GetPackAndGo"?pack:call.MethodName=="ListExternalFileReferences2"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
+    var model=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetType"?1:call.MethodName=="get_Extension"?extension:call.MethodName=="GetPathName"?current:call.MethodName=="GetTitle"?Path.GetFileName(current):call.MethodName=="GetEquationMgr"||call.MethodName=="GetDesignTable"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
     activeNative=model;
     var scanner=New("SolidWorksReferenceTreeScanner",app);var failed=false;
     try{Type("SolidWorksReferenceTreeScanner").GetMethod("AddNativeAssociatedDrawings",Flags).Invoke(scanner,new[]{model,root});}
     catch(TargetInvocationException e)when(e.InnerException is InvalidOperationException){failed=true;}
-    if(failed!=(mode=="read-error"||mode=="missing-drawing"))throw new Exception("Incorrect drawing discovery gate "+mode);
+    if(failed!=(mode=="missing-drawing"))throw new Exception("Incorrect drawing discovery gate "+mode);
     if(!include||!suppressed||cwd!="original-working-directory")throw new Exception("Native drawing scan mutated user settings "+mode);
-    if(!failed && mode!="foreign-project" && (((IList)Get(part,"Children")).Count!=1||((IList)Get(repeated,"Children")).Count!=1))throw new Exception("Drawing missing from repeated/configuration instances "+mode+" counts="+((IList)Get(part,"Children")).Count+"/"+((IList)Get(repeated,"Children")).Count+" deps="+dependenciesRead);
+    if(!failed && mode!="foreign-project" && mode!="read-error" && (((IList)Get(part,"Children")).Count!=1||((IList)Get(repeated,"Children")).Count!=1))throw new Exception("Drawing missing from repeated/configuration instances "+mode+" counts="+((IList)Get(part,"Children")).Count+"/"+((IList)Get(repeated,"Children")).Count+" deps="+dependenciesRead);
     if(File.ReadAllText(current)!="model"||File.ReadAllText(original)!="model")throw new Exception("Discovery changed model bytes");
     Console.WriteLine("PASS: Native associated drawing discovery "+mode);
    }
@@ -1242,6 +1684,11 @@ internal static partial class Program
   public Handler(List<object> nodes,Guid project,Guid session,List<string> events,bool denied){this.nodes=nodes;this.project=project;this.session=session;this.events=events;this.denied=denied;}
   protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
   {
+    if(request.RequestUri.AbsolutePath.EndsWith("/versions"))
+    {
+     var source=nodes.Single(n=>request.RequestUri.AbsolutePath.Contains(((Guid)Get(n,"DocumentId")).ToString()));
+     return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent(new JavaScriptSerializer().Serialize(new[]{LinkedVersion(source,LinkedSnapshot(source))}))});
+    }
    if(!request.RequestUri.AbsolutePath.EndsWith("/checkout"))throw new Exception("Unexpected business write "+request.RequestUri.AbsolutePath);
    var node=nodes.Single(n=>request.RequestUri.AbsolutePath.Contains(((Guid)Get(n,"DocumentId")).ToString()));
    events.Add("checkout:"+(string)Get(node,"FileName"));

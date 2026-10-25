@@ -18,11 +18,6 @@ internal sealed class PluginSettingsDialog : Form
     private readonly ProgressBar updateProgress = new ProgressBar();
     private readonly CheckBox automaticUpdates = new CheckBox();
     private readonly ComboBox plannedTaskScrollInterval = new ComboBox();
-    private readonly CheckBox useCustomDrawingQrPosition = new CheckBox();
-    private readonly NumericUpDown drawingQrXMillimeters = new NumericUpDown();
-    private readonly NumericUpDown drawingQrYMillimeters = new NumericUpDown();
-    private readonly NumericUpDown drawingQrLengthMillimeters = new NumericUpDown();
-    private readonly NumericUpDown drawingQrWidthMillimeters = new NumericUpDown();
     private readonly Button checkUpdateButton = new Button();
     private readonly Button installUpdateButton = new Button();
     private readonly Button saveButton = new Button();
@@ -58,7 +53,7 @@ internal sealed class PluginSettingsDialog : Form
         MaximizeBox = false;
         ShowInTaskbar = false;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(540, 780);
+        ClientSize = new Size(540, 600);
         Font = new Font("Microsoft YaHei UI", 9F);
 
         var root = new TableLayoutPanel
@@ -66,10 +61,9 @@ internal sealed class PluginSettingsDialog : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(16),
             ColumnCount = 1,
-            RowCount = 5
+            RowCount = 4
         };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 145F));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 180F));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
@@ -129,57 +123,6 @@ internal sealed class PluginSettingsDialog : Form
         connectionLayout.Controls.Add(addressHint, 0, 2);
         root.Controls.Add(connectionGroup, 0, 0);
 
-        var qrPositionGroup = new GroupBox { Text = "工程图二维码位置与尺寸", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 6) };
-        var qrPositionLayout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(10, 7, 10, 7),
-            ColumnCount = 4,
-            RowCount = 5
-        };
-        qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90F));
-        qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-        qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90F));
-        qrPositionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
-        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
-        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
-        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 6F));
-        qrPositionLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-        qrPositionGroup.Controls.Add(qrPositionLayout);
-
-        useCustomDrawingQrPosition.Text = "使用自定义坐标";
-        useCustomDrawingQrPosition.Checked = initialSettings.UseCustomDrawingQrPosition;
-        useCustomDrawingQrPosition.Dock = DockStyle.Fill;
-        useCustomDrawingQrPosition.CheckedChanged += (_, _) => UpdateQrPositionControls();
-        qrPositionLayout.Controls.Add(useCustomDrawingQrPosition, 0, 0);
-        qrPositionLayout.SetColumnSpan(useCustomDrawingQrPosition, 4);
-
-        qrPositionLayout.Controls.Add(new Label { Text = "X（毫米）", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 1);
-        ConfigureCoordinateInput(drawingQrXMillimeters, initialSettings.DrawingQrXMillimeters, "二维码 X 坐标（距图纸右边，向左）");
-        qrPositionLayout.Controls.Add(drawingQrXMillimeters, 1, 1);
-        qrPositionLayout.Controls.Add(new Label { Text = "Y（毫米）", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 2, 1);
-        ConfigureCoordinateInput(drawingQrYMillimeters, initialSettings.DrawingQrYMillimeters, "二维码 Y 坐标（距图纸下边，向上）");
-        qrPositionLayout.Controls.Add(drawingQrYMillimeters, 3, 1);
-
-        qrPositionLayout.Controls.Add(new Label { Text = "长（毫米）", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 2);
-        ConfigureSizeInput(drawingQrLengthMillimeters, initialSettings.DrawingQrLengthMillimeters, "二维码长度");
-        qrPositionLayout.Controls.Add(drawingQrLengthMillimeters, 1, 2);
-        qrPositionLayout.Controls.Add(new Label { Text = "宽（毫米）", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 2, 2);
-        ConfigureSizeInput(drawingQrWidthMillimeters, initialSettings.DrawingQrWidthMillimeters, "二维码宽度");
-        qrPositionLayout.Controls.Add(drawingQrWidthMillimeters, 3, 2);
-
-        var qrPositionHint = new Label
-        {
-            Text = "以上尺寸均基于图纸右下角，X 向左、Y 向上设置。",
-            ForeColor = Color.FromArgb(95, 108, 124),
-            Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.TopLeft
-        };
-        qrPositionLayout.SetColumnSpan(qrPositionHint, 4);
-        qrPositionLayout.Controls.Add(qrPositionHint, 0, 4);
-        root.Controls.Add(qrPositionGroup, 0, 1);
-
         var taskGroup = new GroupBox { Text = "任务计划显示", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 6) };
         var taskLayout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(10, 5, 10, 5), ColumnCount = 3, RowCount = 1 };
         taskLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130F));
@@ -195,7 +138,7 @@ internal sealed class PluginSettingsDialog : Form
         plannedTaskScrollInterval.AccessibleName = "任务滚动间隔";
         taskLayout.Controls.Add(plannedTaskScrollInterval, 1, 0);
         taskGroup.Controls.Add(taskLayout);
-        root.Controls.Add(taskGroup, 0, 2);
+        root.Controls.Add(taskGroup, 0, 1);
 
         var updateGroup = new GroupBox { Text = "版本与更新", Dock = DockStyle.Fill, Margin = Padding.Empty };
         var updateLayout = new TableLayoutPanel
@@ -246,7 +189,7 @@ internal sealed class PluginSettingsDialog : Form
         updateActions.Controls.Add(checkUpdateButton);
         updateLayout.Controls.Add(updateActions, 0, 6);
         updateLayout.SetColumnSpan(updateActions, 3);
-        root.Controls.Add(updateGroup, 0, 3);
+        root.Controls.Add(updateGroup, 0, 2);
 
         var footer = new FlowLayoutPanel
         {
@@ -268,12 +211,11 @@ internal sealed class PluginSettingsDialog : Form
         cancelButton.DialogResult = DialogResult.Cancel;
         footer.Controls.Add(saveButton);
         footer.Controls.Add(cancelButton);
-        root.Controls.Add(footer, 0, 4);
+        root.Controls.Add(footer, 0, 3);
 
         AcceptButton = saveButton;
         CancelButton = cancelButton;
         ApplySnapshot(initialSnapshot ?? new PluginUpdateSnapshot());
-        UpdateQrPositionControls();
         refreshTimer.Interval = 500;
         refreshTimer.Tick += (_, _) =>
         {
@@ -359,11 +301,6 @@ internal sealed class PluginSettingsDialog : Form
                     : plannedTaskScrollInterval.SelectedIndex == 2 ? 60 : 30,
                 ServerAddress = serverAddress.Text,
                 AutomaticUpdatesEnabled = automaticUpdates.Checked,
-                UseCustomDrawingQrPosition = useCustomDrawingQrPosition.Checked,
-                DrawingQrXMillimeters = decimal.ToDouble(drawingQrXMillimeters.Value),
-                DrawingQrYMillimeters = decimal.ToDouble(drawingQrYMillimeters.Value),
-                DrawingQrLengthMillimeters = decimal.ToDouble(drawingQrLengthMillimeters.Value),
-                DrawingQrWidthMillimeters = decimal.ToDouble(drawingQrWidthMillimeters.Value)
             });
             connectionStatus.ForeColor = Color.FromArgb(0, 128, 96);
             connectionStatus.Text = result?.Message ?? "设置已保存";
@@ -387,8 +324,6 @@ internal sealed class PluginSettingsDialog : Form
         serverAddress.Enabled = !running;
         automaticUpdates.Enabled = !running;
         plannedTaskScrollInterval.Enabled = !running;
-        useCustomDrawingQrPosition.Enabled = !running;
-        UpdateQrPositionControls();
         testConnectionButton.Enabled = !running;
         checkUpdateButton.Enabled = !running;
         saveButton.Enabled = !running;
@@ -423,47 +358,6 @@ internal sealed class PluginSettingsDialog : Form
         if (string.IsNullOrWhiteSpace(version)) return "—";
         var value = version.Trim();
         return value.StartsWith("V", StringComparison.OrdinalIgnoreCase) ? value : string.Concat("V", value);
-    }
-
-    private void UpdateQrPositionControls()
-    {
-        var enabled = !actionRunning && useCustomDrawingQrPosition.Checked;
-        drawingQrXMillimeters.Enabled = enabled;
-        drawingQrYMillimeters.Enabled = enabled;
-        drawingQrLengthMillimeters.Enabled = !actionRunning;
-        drawingQrWidthMillimeters.Enabled = !actionRunning;
-    }
-
-    private static void ConfigureCoordinateInput(NumericUpDown input, double value, string accessibleName)
-    {
-        input.DecimalPlaces = 1;
-        input.Increment = 1M;
-        input.Minimum = 0M;
-        input.Maximum = 2000M;
-        input.Dock = DockStyle.None;
-        input.Anchor = AnchorStyles.Left | AnchorStyles.Right;
-        input.AutoSize = false;
-        input.MinimumSize = new Size(0, 30);
-        input.Margin = new Padding(0, 3, 6, 3);
-        input.AccessibleName = accessibleName;
-        var safeValue = double.IsNaN(value) || double.IsInfinity(value) ? 0M : (decimal)value;
-        input.Value = Math.Max(input.Minimum, Math.Min(input.Maximum, safeValue));
-    }
-
-    private static void ConfigureSizeInput(NumericUpDown input, double value, string accessibleName)
-    {
-        input.DecimalPlaces = 1;
-        input.Increment = 1M;
-        input.Minimum = 8M;
-        input.Maximum = 2000M;
-        input.Dock = DockStyle.None;
-        input.Anchor = AnchorStyles.Left | AnchorStyles.Right;
-        input.AutoSize = false;
-        input.MinimumSize = new Size(0, 30);
-        input.Margin = new Padding(0, 3, 6, 3);
-        input.AccessibleName = accessibleName;
-        var safeValue = double.IsNaN(value) || double.IsInfinity(value) || value <= 0d ? 20M : (decimal)value;
-        input.Value = Math.Max(input.Minimum, Math.Min(input.Maximum, safeValue));
     }
 
     private static void ConfigureDialogButton(Button button)

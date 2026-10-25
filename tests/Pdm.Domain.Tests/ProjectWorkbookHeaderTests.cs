@@ -28,7 +28,7 @@ public class ProjectWorkbookHeaderTests
         using var stream=new MemoryStream();stream.Write(bytes);stream.Position=0;
         using(var zip=new ZipArchive(stream,ZipArchiveMode.Update,true)){
           XNamespace ns="http://schemas.openxmlformats.org/spreadsheetml/2006/main";var entry=zip.GetEntry("xl/worksheets/sheet1.xml")!;XDocument sheet;using(var source=entry.Open())sheet=XDocument.Load(source);
-          var header=sheet.Descendants(ns+"row").Single(r=>(string?)r.Attribute("r")=="7");var cell=header.Elements(ns+"c").Single(c=>c.Value=="版本");var column=new string(((string)cell.Attribute("r")!).Where(char.IsLetter).ToArray());sheet.Descendants(ns+"c").Where(c=>((string?)c.Attribute("r"))?.StartsWith(column)==true).ToArray().ToList().ForEach(c=>c.Remove());entry.Delete();using var target=zip.CreateEntry("xl/worksheets/sheet1.xml").Open();sheet.Save(target);
+          var header=sheet.Descendants(ns+"row").Single(r=>(string?)r.Attribute("r")=="7");var cell=header.Elements(ns+"c").Single(c=>c.Value is "版本" or "发布版本");var column=new string(((string)cell.Attribute("r")!).Where(char.IsLetter).ToArray());sheet.Descendants(ns+"c").Where(c=>((string?)c.Attribute("r"))?.StartsWith(column)==true).ToArray().ToList().ForEach(c=>c.Remove());entry.Delete();using var target=zip.CreateEntry("xl/worksheets/sheet1.xml").Open();sheet.Save(target);
         }
         stream.Position=0;Assert.Equal("W9",Assert.Single(BomWorkbook.Read(stream)).Revision);
     }

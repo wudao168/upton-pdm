@@ -139,7 +139,7 @@ public sealed class FullWorkflowAcceptanceTests
             (await repository.FindDrawingReviewPackageAsync(review.Id, default))!.State);
 
         var standardBom = await workflow.ReplaceBomAsync(child.Id, BomKind.Standard, [], "qa_engineer", UserRole.Engineer, default);
-        // 三类BOM编辑权限按专业拆分：电气BOM由电气/硬件工程师维护，机械工程师只维护标准件与非标件。
+        // 三类BOM编辑权限按专业拆分：电气件BOM由电气/硬件工程师维护，机械工程师只维护标准件与非标件。
         var electricalBom = await workflow.ReplaceBomAsync(child.Id, BomKind.Electrical,
             [new(1, "QA-EL-001", "QA电气件", 1, "件", null, "24VDC", "W1", true)],
             "qa_electrical", UserRole.Engineer, default);
@@ -149,7 +149,7 @@ public sealed class FullWorkflowAcceptanceTests
             [new(1, "QA-PART-001", "QA测试零件", 1, "件", "Q235B", null, "W1", true, model.Id, "默认",
                 SourceInstancePath: "QA-ASM-ROOT/QA-PART-001")],
             "qa_engineer", UserRole.Engineer, default);
-        Assert.All(electricalBom, item => Assert.True(item.IsComplete, $"电气BOM未完整：{item.DrawingNumber}"));
+        Assert.All(electricalBom, item => Assert.True(item.IsComplete, $"电气件BOM未完整：{item.DrawingNumber}"));
         Assert.All(nonStandardBom, item => Assert.True(item.IsComplete, $"非标BOM未完整：{item.DrawingNumber}"));
         Assert.All(electricalBom.Concat(nonStandardBom), item => Assert.False(
             item.IsPendingRemoval || item.IsPendingClassification || item.IsManualUnmatched,

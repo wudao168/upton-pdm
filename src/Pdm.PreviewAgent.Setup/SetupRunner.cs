@@ -62,13 +62,16 @@ internal sealed class SetupRunner
         catch (Exception exception) { return local + "\r\nPLM队列暂不可读：" + Describe(exception); }
     }
 
-    private sealed class AgentStatus { public string Name { get; set; } public string Machine { get; set; } public bool Busy { get; set; } public int Queued { get; set; } public string CurrentTask { get; set; } public bool SolidWorksRunning { get; set; } public int SolidWorksPid { get; set; } public string ConversionStage { get; set; } public int Completed { get; set; } public int Total { get; set; } public string ProgressUpdatedAt { get; set; } }
+    private sealed class AgentStatus { public string Name { get; set; } public string Machine { get; set; } public bool Busy { get; set; } public bool? Processing { get; set; } public int Queued { get; set; } public string CurrentTask { get; set; } public bool SolidWorksRunning { get; set; } public int SolidWorksPid { get; set; } public string ConversionStage { get; set; } public int Completed { get; set; } public int Total { get; set; } public string ProgressUpdatedAt { get; set; } }
     private sealed class QueueStatus { public SchedulingStatus Scheduling { get; set; } public string[] PendingPublishing { get; set; } }
     private sealed class SchedulingStatus { public string[] Queued { get; set; } public ExecutionStatus[] Executing { get; set; } }
     private sealed class ExecutionStatus { public string Server { get; set; } public string Task { get; set; } }
 
     public async Task<bool> InstallAsync()
     {
+        ValidateInstallDirectory(false);
+        if (options.Port < 1 || options.Port > 65535) throw new InvalidOperationException("代理端口必须在1到65535之间。");
+        if (options.TimeoutMinutes < 1 || options.TimeoutMinutes > 120) throw new InvalidOperationException("转换超时必须在1到120分钟之间。");
         if (string.IsNullOrWhiteSpace(options.ServerUrl)) throw new InvalidOperationException("请填写 PLM 服务器地址，例如 http://192.168.2.8:5173。");
         if (!Uri.TryCreate(options.ServerUrl.TrimEnd('/'), UriKind.Absolute, out var serverUri) || serverUri.Scheme is not ("http" or "https"))
             throw new InvalidOperationException("PLM 服务器地址格式不正确，请填写 http:// 或 https:// 开头的完整地址。");
@@ -77,6 +80,7 @@ internal sealed class SetupRunner
         if (string.IsNullOrWhiteSpace(options.Token)) options.Token = SetupOptions.GenerateToken();
 
         var serverUrl = await ResolveServerUrlAsync();
+        options.ServerUrl = serverUrl;
         log($"   已连接PLM服务器：{serverUrl}");
         var agentDirectory = options.InstallDirectory;
         log($"安装目录：{agentDirectory}");
@@ -87,7 +91,8 @@ internal sealed class SetupRunner
             try { installedStatus = Serializer.Deserialize<AgentStatus>(await client.GetStringAsync($"http://127.0.0.1:{options.Port}/health")); }
             catch (HttpRequestException) { }
             catch (TaskCanceledException) { }
-            if (installedStatus?.Busy == true) throw new InvalidOperationException("本机正在转换图纸，请等当前任务完成后再更新代理。");
+            if (installedStatus != null && ((installedStatus.Processing ?? installedStatus.Busy) || installedStatus.Queued > 0))
+                throw new InvalidOperationException("本机正在转换图纸或仍有排队任务，请等任务完成后再更新代理。");
         }
         StopAgentProcesses();
         StopInstalledManagerAndWorker();
@@ -102,7 +107,7 @@ internal sealed class SetupRunner
         log("3/7 放通防火墙端口…");
         RunTool("netsh", $"advfirewall firewall delete rule name=\"{SetupOptions.FirewallRuleName}\"");
         var firewall = RunTool("netsh", $"advfirewall firewall add rule name=\"{SetupOptions.FirewallRuleName}\" dir=in action=allow protocol=TCP localport={options.Port}");
-        if (firewall.ExitCode != 0) log($"   防火墙规则添加返回：{firewall.Output.Trim()}");
+        if (firewall.ExitCode != 0) { RecordDiagnostic(firewall.Output); throw new InvalidOperationException("防火墙规则添加失败，请以管理员身份运行，并检查系统防火墙服务后重试。"); }
 
         log("4/7 注册开机自启…");
         var agentExe = Path.Combine(agentDirectory, "Upton.Pdm.PreviewAgent.exe");
@@ -111,14 +116,13 @@ internal sealed class SetupRunner
         if (!string.Equals(Path.GetFullPath(currentExe), Path.GetFullPath(managerExe), StringComparison.OrdinalIgnoreCase))
             File.Copy(currentExe, managerExe, true);
         RunTool("schtasks", $"/Delete /TN \"{SetupOptions.DefaultTaskName}\" /F");
-        var task = RunTool("schtasks", $"/Create /TN \"{SetupOptions.DefaultTaskName}\" /TR \"\\\"{agentExe}\\\"\" /SC ONLOGON /RL HIGHEST /F");
-        if (task.ExitCode != 0) throw new InvalidOperationException($"代理自启任务创建失败：{task.Output.Trim()}");
-        var managerTask = RunTool("schtasks", $"/Create /TN \"{SetupOptions.DefaultTaskName} Manager\" /TR \"\\\"{managerExe}\\\" /tray\" /SC ONLOGON /IT /RL HIGHEST /F");
-        if (managerTask.ExitCode != 0) throw new InvalidOperationException($"托盘管理窗口自启任务创建失败：{managerTask.Output.Trim()}");
+        var task = RunTool("schtasks", $"/Create /TN \"{SetupOptions.DefaultTaskName}\" /TR \"\\\"{agentExe}\\\" --startup\" /SC ONLOGON /IT /RL HIGHEST /F");
+        if (task.ExitCode != 0) { RecordDiagnostic(task.Output); throw new InvalidOperationException("代理登录启动任务创建失败，请检查管理员权限及Windows任务计划服务后重试。"); }
+        RunTool("schtasks", $"/Delete /TN \"{SetupOptions.DefaultTaskName} Manager\" /F");
 
         log("5/7 启动转图代理…");
         StopAgentProcesses();
-        Process.Start(new ProcessStartInfo(agentExe) { WorkingDirectory = agentDirectory, UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden });
+        Process.Start(new ProcessStartInfo(agentExe) { WorkingDirectory = agentDirectory, UseShellExecute = true, WindowStyle = ProcessWindowStyle.Normal });
         var health = await WaitForHealthAsync(agentExe);
         if (health is null) throw new InvalidOperationException($"转图代理启动后 /health 探测失败，请查看 {Path.Combine(agentDirectory, "setup.log")} 与代理窗口输出。");
         log($"5/7 代理已就绪：机器 {health.Machine}，转换程序存在={health.WorkerExists}");
@@ -165,8 +169,57 @@ internal sealed class SetupRunner
         return true;
     }
 
+    public async Task<bool> UpgradeAsync()
+    {
+        ValidateInstallDirectory(true);
+        var configuration = Path.Combine(options.InstallDirectory, "PdmPreviewAgent.json");
+        if (!File.Exists(configuration)) throw new InvalidOperationException("目标目录未安装转图代理，请先使用“一键安装并登记”，或选择正确的安装目录。");
+        var hash = FileHash(configuration);
+        var extractionRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "UPLM-PreviewAgent-Setup"));
+        var temporary = Path.Combine(extractionRoot, Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temporary);
+        try
+        {
+            log("1/3 校验并准备完整更新文件，保留现有服务器、端口及访问令牌…");
+            ExtractPayload(Path.Combine(temporary, "payload"));
+            var assembly = Assembly.GetExecutingAssembly();
+            foreach (var name in new[] { "Update-PreviewAgent.ps1", "files.json" })
+                using (var source = assembly.GetManifestResourceStream("upgrade." + name))
+                using (var target = File.Create(Path.Combine(temporary, name)))
+                {
+                    if (source == null) throw new InvalidOperationException("安装包缺少升级校验文件，请使用完整安装包重试。");
+                    source.CopyTo(target);
+                }
+            log("2/3 更新代理和转换程序，切换为交互式前台启动；失败自动恢复原文件和任务…");
+            var script = Path.Combine(temporary, "Update-PreviewAgent.ps1");
+            var result = await Task.Run(() => RunTool("powershell.exe", "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + script
+                + "\" -InstallRoot \"" + options.InstallDirectory + "\" -PreserveProcessId " + Process.GetCurrentProcess().Id, Encoding.UTF8));
+            File.WriteAllText(Path.Combine(options.InstallDirectory, "upgrade-installer.log"), Upton.Pdm.ClientShared.ClientLogRedaction.Clean(result.Output), new UTF8Encoding(false));
+            if (result.ExitCode != 0) throw new InvalidOperationException("升级未完成，请根据上方中文提示检查代理状态；原文件和回退结果保留在安装目录的备份文件夹中。");
+            if (FileHash(configuration) != hash) throw new InvalidOperationException("升级后的原连接配置校验不一致，请检查备份配置后重试。");
+            var manager = Path.Combine(options.InstallDirectory, "UplmPreviewAgentSetup.exe");
+            var current = assembly.Location;
+            if (!string.Equals(Path.GetFullPath(current), Path.GetFullPath(manager), StringComparison.OrdinalIgnoreCase)) File.Copy(current, manager, true);
+            log("3/3 升级完成，原连接配置已保留，前台代理已启动。");
+            return true;
+        }
+        finally
+        {
+            // Only this invocation's randomly named extraction directory is removed.
+            if (Directory.Exists(temporary) && Path.GetFullPath(temporary).StartsWith(extractionRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) Directory.Delete(temporary, true);
+        }
+    }
+
+    private static string FileHash(string path)
+    {
+        using (var input = File.OpenRead(path))
+        using (var algorithm = System.Security.Cryptography.SHA256.Create())
+            return BitConverter.ToString(algorithm.ComputeHash(input));
+    }
+
     public async Task<bool> UninstallAsync()
     {
+        ValidateInstallDirectory(true);
         log("1/5 停止转图代理…");
         StopAgentProcesses();
         log("2/5 删除开机自启…");
@@ -224,6 +277,24 @@ internal sealed class SetupRunner
         return true;
     }
 
+    private void ValidateInstallDirectory(bool requireInstalled)
+    {
+        if (string.IsNullOrWhiteSpace(options.InstallDirectory) || !Path.IsPathRooted(options.InstallDirectory))
+            throw new InvalidOperationException("请选择转图代理的独立安装文件夹，例如 C:\\Program Files\\UPLM Preview Agent。");
+        var root = Path.GetFullPath(options.InstallDirectory).TrimEnd('\\', '/');
+        var protectedRoots = new[] { Path.GetPathRoot(root), Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory) };
+        if (protectedRoots.Any(path => !string.IsNullOrWhiteSpace(path) && string.Equals(root, path.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("不能使用磁盘根目录或系统公共目录，请选择转图代理的独立安装文件夹。");
+        var installed = File.Exists(Path.Combine(root, "Upton.Pdm.PreviewAgent.exe"));
+        if (requireInstalled && (!installed || !File.Exists(Path.Combine(root, "PdmPreviewAgent.json"))))
+            throw new InvalidOperationException("所选目录不是已安装的转图代理，请检查安装目录后重试。");
+        if (!requireInstalled && Directory.Exists(root) && Directory.EnumerateFileSystemEntries(root).Any() && !installed)
+            throw new InvalidOperationException("所选目录已有其他文件，请选择空文件夹或已有转图代理的专用安装目录。");
+        options.InstallDirectory = root;
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool MoveFileEx(string existingFileName, string newFileName, int flags);
 
@@ -264,6 +335,10 @@ internal sealed class SetupRunner
         var configuration = new Dictionary<string, object>
         {
             ["Port"] = options.Port,
+            ["ServerUrl"] = options.ServerUrl,
+            ["ShowMainWindow"] = true,
+            ["CloseToTray"] = true,
+            ["StartWithWindows"] = true,
             ["Name"] = options.Name,
             ["BindAddress"] = "0.0.0.0",
             ["Token"] = options.Token,
@@ -359,7 +434,7 @@ internal sealed class SetupRunner
             var payload = Serializer.Serialize(new { name = options.Name, agentUrl, agentToken = options.Token, timeoutMinutes = options.TimeoutMinutes });
             var response = await client.PostAsync($"{serverUrl}/api/system-settings/preview-agent/register", new StringContent(payload, Encoding.UTF8, "application/json"));
             var body = await response.Content.ReadAsStringAsync();
-            if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"登记转图服务器失败（{(int)response.StatusCode}）：{body}");
+            if (!response.IsSuccessStatusCode) { RecordDiagnostic(body); throw new InvalidOperationException($"登记转图服务器失败（HTTP {(int)response.StatusCode}），请检查当前账号的系统设置权限及代理地址后重试。"); }
             var result = Serializer.Deserialize<RegisterResult>(body);
             log($"   已登记：{result?.AgentUrl ?? agentUrl}（超时 {result?.TimeoutMinutes ?? options.TimeoutMinutes} 分钟）");
         }
@@ -372,7 +447,7 @@ internal sealed class SetupRunner
             var payload = Serializer.Serialize(new { agentUrl = string.Empty, agentToken = options.Token, timeoutMinutes = options.TimeoutMinutes });
             var response = await client.PostAsync($"{serverUrl}/api/system-settings/preview-agent/test", new StringContent(payload, Encoding.UTF8, "application/json"));
             var body = await response.Content.ReadAsStringAsync();
-            if (!response.IsSuccessStatusCode) return $"服务器侧连通性测试未通过（{(int)response.StatusCode}）：{body}";
+            if (!response.IsSuccessStatusCode) { RecordDiagnostic(body); return $"服务器侧连通性测试未通过（HTTP {(int)response.StatusCode}），请检查目标服务器地址、端口和防火墙。"; }
             var result = Serializer.Deserialize<ProbeResult>(body);
             return result?.Message ?? "服务器侧连通性测试完成。";
         }
@@ -433,18 +508,31 @@ internal sealed class SetupRunner
     /// <summary>把 HttpRequestException 里的内层原因（拒绝连接/超时/DNS）取出来，便于排查。</summary>
     internal static string Describe(Exception exception)
     {
+        if (exception is UnauthorizedAccessException) return "权限不足，请以管理员身份运行，并检查安装目录的读写权限。";
+        if (exception is IOException) return "文件读写未完成，请检查文件是否被占用、目录权限和磁盘空间后重试。";
+        if (exception is HttpRequestException) return "无法连接PLM服务器，请检查服务器地址、网络和防火墙后重试。";
+        if (!(exception is OperationCanceledException) && (exception.Message == null || !exception.Message.Any(value => value >= '\u4e00' && value <= '\u9fff')
+            || exception.Message.Contains("Exception") || exception.Message.Contains("System."))) return "操作未完成，请检查输入信息和安装日志后重试。";
         var messages = new List<string>();
         for (var current = exception; current != null; current = current.InnerException)
         {
             var message = current is System.Threading.Tasks.TaskCanceledException || current is OperationCanceledException
                 ? "连接超时（可能被防火墙拦截或地址不可达）"
                 : current.Message?.Trim();
-            if (!string.IsNullOrWhiteSpace(message) && !messages.Contains(message)) messages.Add(message);
+            if (!string.IsNullOrWhiteSpace(message) && message.Any(value => value >= '\u4e00' && value <= '\u9fff') && !messages.Contains(message)) messages.Add(message);
         }
         return string.Join(" ← ", messages);
     }
 
-    private static ToolResult RunTool(string fileName, string arguments)
+    internal static void RecordDiagnostic(string text)
+    {
+        var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPLM");
+        Directory.CreateDirectory(directory);
+        File.AppendAllText(Path.Combine(directory, "preview-agent-setup-diagnostics.log"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+            + " " + Upton.Pdm.ClientShared.ClientLogRedaction.Clean(text) + Environment.NewLine, Encoding.UTF8);
+    }
+
+    private static ToolResult RunTool(string fileName, string arguments, Encoding encoding = null)
     {
         var startInfo = new ProcessStartInfo(fileName, arguments)
         {
@@ -453,6 +541,7 @@ internal sealed class SetupRunner
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
+        if (encoding != null) { startInfo.StandardOutputEncoding = encoding; startInfo.StandardErrorEncoding = encoding; }
         using (var process = Process.Start(startInfo))
         {
             var output = (process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd()).Trim();

@@ -39,6 +39,7 @@ public sealed partial class MySqlPdmRepository
             "SELECT id FROM document WHERE id=@DocumentId FOR UPDATE",
             new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken));
         if (!lockedDocumentId.HasValue) throw new PdmNotFoundException("图档不存在。 ");
+        await RequireHandoffRecipientAsync(connection, transaction, documentId, actor, cancellationToken);
         var drawingReviewLocked = await IsDocumentUnderActiveDrawingReviewAsync(connection, transaction, documentId, cancellationToken);
         var controlledWriteback = drawingReviewWritebackId.HasValue
             && await IsActiveDrawingReviewWritebackAsync(connection, transaction, documentId, drawingReviewWritebackId.Value, cancellationToken);
@@ -80,6 +81,7 @@ public sealed partial class MySqlPdmRepository
 
         var updated = await FindDocumentAsync(connection, transaction, documentId, cancellationToken)
             ?? throw new PdmNotFoundException("图档不存在。 ");
+        await connection.ExecuteAsync(new CommandDefinition("DELETE FROM document_edit_handoff WHERE document_id=@documentId", new { documentId }, transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
         return updated;
     }
@@ -162,15 +164,18 @@ public sealed partial class MySqlPdmRepository
     {
         var now = timeProvider.GetUtcNow().UtcDateTime;
         await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var affected = await connection.ExecuteAsync(new CommandDefinition(
             """
-            UPDATE document SET checkout_release_requested_by=@RequestedBy,checkout_release_requested_at=@Now,
-                checkout_release_request_reason=@Reason,updated_at=@Now,row_version=row_version+1
-            WHERE id=@DocumentId AND checked_out_by IS NOT NULL
+            UPDATE document SET checkout_release_requested_by=COALESCE(checkout_release_requested_by,@RequestedBy),checkout_release_requested_at=COALESCE(checkout_release_requested_at,@Now),
+                checkout_release_request_reason=COALESCE(checkout_release_request_reason,@Reason),updated_at=@Now,row_version=row_version+1
+            WHERE id=@DocumentId AND checked_out_by IS NOT NULL AND checked_out_by<>@RequestedBy
             """,
-            new { DocumentId = documentId, RequestedBy = requestedBy, Reason = reason.Trim(), Now = now }, cancellationToken: cancellationToken));
+            new { DocumentId = documentId, RequestedBy = requestedBy, Reason = reason.Trim(), Now = now }, transaction, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("图档当前没有可申请释放的编辑权限。");
-        return await FindDocumentAsync(documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
+        var result = await FindDocumentAsync(connection, transaction, documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。");
+        await transaction.CommitAsync(cancellationToken);
+        return result;
     }
 
     public async Task<PdmDocument> ForceReleaseCheckoutAsync(Guid documentId, string releasedBy, string reason, CancellationToken cancellationToken)

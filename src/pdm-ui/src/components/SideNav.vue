@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { Boxes, ClipboardCheck, Clock, FileText, FolderKanban, LayoutDashboard, Library, Settings } from '@lucide/vue'
-import uptonLogo from '../assets/upton-logo-white.png'
 import { repairMojibake } from '../mojibake'
-import PlmCubeIcon from './PlmCubeIcon.vue'
+import navBrandLogo from '../assets/upton-nav-lockup.svg'
+import navBrandIcon from '../assets/upton-nav-icon.png'
 import ConnectionLights from './ConnectionLights.vue'
 
 type NavKey = 'work-hours' | 'project-applications' | 'project-calendar' | 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
@@ -138,10 +138,7 @@ const items = [
 <template>
   <aside class="pdm-sidebar" :class="{ 'is-collapsed': props.collapsed }" aria-label="主导航">
     <div class="pdm-sidebar__brand">
-      <PlmCubeIcon class="pdm-sidebar__brand-mark" />
-      <div class="pdm-sidebar__brand-copy">
-        <img class="pdm-sidebar__brand-logo" :src="uptonLogo" alt="UPTON">
-      </div>
+      <img class="pdm-sidebar__brand-logo" :src="props.collapsed ? navBrandIcon : navBrandLogo" alt="UPTON PLM" draggable="false">
     </div>
     <nav class="pdm-sidebar__nav">
       <button

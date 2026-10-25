@@ -1,6 +1,8 @@
 #nullable disable
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Security.Cryptography;
@@ -17,6 +19,7 @@ internal static class PdmDocumentIdentityStore
     {
         bindingDirectory = Path.Combine(root, "_bindings");
         workspaceRootResolver = () => root;
+        isolatedReadScope = true;
     }
 
     private const string StreamName = ":UptonPdm.DocumentId";
@@ -30,6 +33,7 @@ internal static class PdmDocumentIdentityStore
     private static string bindingDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPTON PDM", "document-bindings");
     private static Func<string> workspaceRootResolver = WorkspaceSettingsStore.GetWorkspaceRoot;
+    private static bool isolatedReadScope;
     private static readonly object bindingSync = new object();
 
     public static bool TryRead(string filePath, out Guid documentId)
@@ -64,6 +68,7 @@ internal static class PdmDocumentIdentityStore
             Revision = binding.Revision ?? string.Empty,
             Sha256 = binding.Sha256 ?? string.Empty,
             ResolvedReferenceSha256 = binding.ResolvedReferenceSha256 ?? string.Empty,
+            ServerMaterializedAtUtc = binding.ServerMaterializedAtUtc,
             FileLength = binding.FileLength
         };
         return true;
@@ -88,17 +93,22 @@ internal static class PdmDocumentIdentityStore
         if (string.IsNullOrWhiteSpace(filePath)) return false;
         try
         {
-            var workspaceRoot = Path.GetFullPath(workspaceRootResolver())
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                + Path.DirectorySeparatorChar;
             var fullPath = Path.GetFullPath(filePath);
-            return fullPath.StartsWith(workspaceRoot, StringComparison.OrdinalIgnoreCase);
+            return ManagedWorkspaceRoots(workspaceRootResolver()).Any(root => fullPath.StartsWith(
+                root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase));
         }
         catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException || e is NotSupportedException)
         {
             return false;
         }
     }
+
+    internal static string[] ManagedWorkspaceRoots(string configuredRoot) =>
+        (isolatedReadScope ? new[] { configuredRoot } : new[] { configuredRoot,
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPTON PDM", "Workspace"),
+            Path.Combine(Path.GetTempPath(), "UPLM", "ManagedWorkspace") })
+        .Where(root => !string.IsNullOrWhiteSpace(root)).Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
     // A stream may travel with a copied/packed CAD file. It is provenance only, not a binding.
     public static bool TryReadUnverifiedIdentity(string filePath, out Guid documentId)
@@ -182,6 +192,11 @@ internal static class PdmDocumentIdentityStore
         && TryWriteBinding(path, expected.DocumentId, expected.ProjectId, expected.VersionId, expected.Revision,
             expected.Sha256, expected.FileLength, expected, actualHash);
 
+    internal static bool TryRecordServerMaterialization(string path, DateTime atUtc) =>
+        TryReadLocalMetadata(path, out var metadata) && TryWriteBinding(path, metadata.DocumentId, metadata.ProjectId,
+            metadata.VersionId, metadata.Revision, metadata.Sha256, metadata.FileLength, metadata,
+            metadata.ResolvedReferenceSha256, atUtc);
+
     internal static void RestoreLocalMetadata(string path, PdmControlledFileMetadata previous)
     {
         if (previous != null)
@@ -206,7 +221,7 @@ internal static class PdmDocumentIdentityStore
         string revision,
         string sha256,
         long? fileLength,
-        PdmControlledFileMetadata expected = null, string resolvedReferenceSha256 = null)
+        PdmControlledFileMetadata expected = null, string resolvedReferenceSha256 = null, DateTime? serverMaterializedAtUtc = null)
     {
         if (documentId == Guid.Empty || string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return false;
         lock (bindingSync)
@@ -236,13 +251,15 @@ internal static class PdmDocumentIdentityStore
                     ?? (previous?.DocumentId == documentId && previous.VersionId == retainedVersionId
                         && string.Equals(previous.Sha256, retainedSha256, StringComparison.OrdinalIgnoreCase)
                         ? previous.ResolvedReferenceSha256 : null);
+                var materializedAt = serverMaterializedAtUtc ?? (previous?.DocumentId == documentId ? previous.ServerMaterializedAtUtc : null);
                 if (previous?.DocumentId == documentId
                     && previous.ProjectId == retainedProjectId
                     && previous.VersionId == retainedVersionId
                     && string.Equals(previous.Revision ?? string.Empty, retainedRevision ?? string.Empty, StringComparison.Ordinal)
                     && string.Equals(previous.Sha256 ?? string.Empty, retainedSha256 ?? string.Empty, StringComparison.OrdinalIgnoreCase)
                     && previous.FileLength == retainedFileLength
-                    && string.Equals(previous.ResolvedReferenceSha256, retainedResolvedHash, StringComparison.OrdinalIgnoreCase))
+                    && string.Equals(previous.ResolvedReferenceSha256, retainedResolvedHash, StringComparison.OrdinalIgnoreCase)
+                    && previous.ServerMaterializedAtUtc == materializedAt)
                     return true;
                 var binding = new DocumentBinding
                 {
@@ -255,6 +272,7 @@ internal static class PdmDocumentIdentityStore
                     Revision = retainedRevision,
                     Sha256 = retainedSha256,
                     ResolvedReferenceSha256 = retainedResolvedHash,
+                    ServerMaterializedAtUtc = materializedAt,
                     FileLength = retainedFileLength
                 };
                 Directory.CreateDirectory(bindingDirectory);
@@ -321,6 +339,7 @@ internal static class PdmDocumentIdentityStore
         public string Revision { get; set; }
         public string Sha256 { get; set; }
         public string ResolvedReferenceSha256 { get; set; }
+        public DateTime? ServerMaterializedAtUtc { get; set; }
         public long? FileLength { get; set; }
     }
 
@@ -408,5 +427,6 @@ internal sealed class PdmControlledFileMetadata
     public string Revision { get; set; } = string.Empty;
     public string Sha256 { get; set; } = string.Empty;
     public string ResolvedReferenceSha256 { get; set; } = string.Empty;
+    public DateTime? ServerMaterializedAtUtc { get; set; }
     public long? FileLength { get; set; }
 }

@@ -1,43 +1,27 @@
 <script setup lang="ts">
+import { documentVersionSummary } from './drawingRevision'
 import { drawingReviewTreeBadges } from './drawingReviewLabels'
 import { executeDrawingReviewBatch } from './drawingReviewBatch'
 import { clearGlobalStatus, ElMessage } from './statusMessage'
 import { ElMessageBox } from 'element-plus'
-import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import AppHeader from './components/AppHeader.vue'
 import AuditLog from './components/AuditLog.vue'
-import BomManager from './components/BomManager.vue'
 import DocumentTree from './components/DocumentTree.vue'
 import BrowserCadArchiveButton from './components/BrowserCadArchiveButton.vue'
 import DrawingReviewPanel from './components/DrawingReviewPanel.vue'
 import DrawingReviewAnnotationCard from './components/DrawingReviewAnnotationCard.vue'
-import ProjectFileLibrary from './components/ProjectFileLibrary.vue'
-import QualityManager from './components/QualityManager.vue'
-import ProjectInformation from './components/ProjectInformation.vue'
 import LoginView from './components/LoginView.vue'
-import MaterialManagement from './components/MaterialManagement.vue'
-import StandardLibrary from './components/StandardLibrary.vue'
-import StandardStructureLibrary from './components/StandardStructureLibrary.vue'
-import MyTasks from './components/MyTasks.vue'
-import PreviewWorkspace from './components/PreviewWorkspace.vue'
 import PlmCubeIcon from './components/PlmCubeIcon.vue'
-import ProgramTemplateLibrary from './components/ProgramTemplateLibrary.vue'
-import ProjectManager from './components/ProjectManager.vue'
-import ProjectApplications from './components/ProjectApplications.vue'
-import WorkHoursManager from './components/WorkHoursManager.vue'
-import ProjectWorkbench from './components/ProjectWorkbench.vue'
-import ProjectCalendar from './components/ProjectCalendar.vue'
-import ProjectPlanManager from './components/ProjectPlanManager.vue'
-import ProjectBudgetManager from './components/ProjectBudgetManager.vue'
-import ProjectOplManager from './components/ProjectOplManager.vue'
+import { pagePreferenceScopeKey, readPagePreference, writePagePreference } from './pagePreference'
+import { refreshTablePreferences } from './tablePreferences'
+import { refreshMaterialStockPlans, setMaterialStockContext } from './materialStockPlans'
+import { listMaterialStockPlans } from './api'
 import ProjectWorkspaceHeader from './components/ProjectWorkspaceHeader.vue'
 import type { ProjectTab } from './components/ProjectWorkspaceHeader.vue'
-import ProcurementTracking from './components/ProcurementTracking.vue'
-import ProductionWorkbench from './components/ProductionWorkbench.vue'
 import SideNav from './components/SideNav.vue'
+import { currentMaterialSyncTasks } from './materialWorkflow'
 import SquareLoader from './components/SquareLoader.vue'
-import SystemManagement from './components/SystemManagement.vue'
-import WorkbenchHome from './components/WorkbenchHome.vue'
 import WorkspaceExplorerBar from './components/WorkspaceExplorerBar.vue'
 import U9SyncBlockerDrawer from './components/U9SyncBlockerDrawer.vue'
 import { postDesktopMessage } from './api'
@@ -46,6 +30,29 @@ import { usePdmWorkspace } from './composables/usePdmWorkspace'
 import type { AddDrawingReviewMarkupInput, DocumentNode, DrawingReviewBatchEntry, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, UserNotification, WorkspaceLocalFileState, WorkspaceLocalStateSnapshot } from './types'
 import { resolveUserDisplayName, userDisplayNameKey } from './userDisplay'
 import { isPdmTheme, type PdmTheme } from './themes'
+
+const BomManager = defineAsyncComponent(() => import('./components/BomManager.vue'))
+const ProjectFileLibrary = defineAsyncComponent(() => import('./components/ProjectFileLibrary.vue'))
+const QualityManager = defineAsyncComponent(() => import('./components/QualityManager.vue'))
+const ProjectInformation = defineAsyncComponent(() => import('./components/ProjectInformation.vue'))
+const MaterialManagement = defineAsyncComponent(() => import('./components/MaterialManagement.vue'))
+const StandardLibrary = defineAsyncComponent(() => import('./components/StandardLibrary.vue'))
+const StandardStructureLibrary = defineAsyncComponent(() => import('./components/StandardStructureLibrary.vue'))
+const MyTasks = defineAsyncComponent(() => import('./components/MyTasks.vue'))
+const PreviewWorkspace = defineAsyncComponent(() => import('./components/PreviewWorkspace.vue'))
+const ProgramTemplateLibrary = defineAsyncComponent(() => import('./components/ProgramTemplateLibrary.vue'))
+const ProjectManager = defineAsyncComponent(() => import('./components/ProjectManager.vue'))
+const ProjectApplications = defineAsyncComponent(() => import('./components/ProjectApplications.vue'))
+const WorkHoursManager = defineAsyncComponent(() => import('./components/WorkHoursManager.vue'))
+const ProjectWorkbench = defineAsyncComponent(() => import('./components/ProjectWorkbench.vue'))
+const ProjectCalendar = defineAsyncComponent(() => import('./components/ProjectCalendar.vue'))
+const ProjectPlanManager = defineAsyncComponent(() => import('./components/ProjectPlanManager.vue'))
+const ProjectBudgetManager = defineAsyncComponent(() => import('./components/ProjectBudgetManager.vue'))
+const ProjectOplManager = defineAsyncComponent(() => import('./components/ProjectOplManager.vue'))
+const ProcurementTracking = defineAsyncComponent(() => import('./components/ProcurementTracking.vue'))
+const ProductionWorkbench = defineAsyncComponent(() => import('./components/ProductionWorkbench.vue'))
+const SystemManagement = defineAsyncComponent(() => import('./components/SystemManagement.vue'))
+const WorkbenchHome = defineAsyncComponent(() => import('./components/WorkbenchHome.vue'))
 
 const workspace = usePdmWorkspace()
 function refreshCurrentBom() {
@@ -89,7 +96,8 @@ const workspaceLocalSnapshot = ref<WorkspaceLocalStateSnapshot>()
 const workspaceLocalRefreshing = ref(false)
 const workspaceLocalStates = computed<Record<string, WorkspaceLocalFileState>>(() => Object.fromEntries((workspaceLocalSnapshot.value?.items ?? []).map(item => [item.documentId, item])))
 const selectedWorkspaceLocalState = computed(() => workspace.selectedNode.value.documentId ? workspaceLocalStates.value[workspace.selectedNode.value.documentId] : undefined)
-const canManageSystem = computed(() => desktopAvailable || ['production.scan.manage', 'settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.project-permission.view', 'audit.view'].some(workspace.hasPermission))
+const canManageSystem = computed(() => [workspace.currentRole.value, ...workspace.currentRoles.value]
+  .some(role => ['administrator', 'platformadministrator', 'platform_admin', 'developer'].includes(role.toLowerCase())))
 const requestedPlanTaskId = ref<string>()
 const projectTab = ref<ProjectTab>('overview')
 watch([activeView, projectTab, () => workspace.project.value.id], clearGlobalStatus, { flush: 'sync' })
@@ -98,7 +106,7 @@ const mountedDocumentsProjectId = ref('')
 const materialRequestedTab = ref('materials')
 const requestedProgramTemplateId = ref('')
 // 默认展开审核栏，与网页端/客户端保持一致；用户手动折叠后按用户选择。
-const drawingReviewPanelCollapsed = ref(false)
+const drawingReviewPanelCollapsed = ref(true)
 const drawingReviewPackageId = ref('')
 const requestedReleasePackageId = ref('')
 const requestedValidationPlanProjectId = ref('')
@@ -107,6 +115,18 @@ const requestedQualitySection = ref('quality')
 const requestedBomKind = ref<'Overview' | 'Source' | 'WearPart' | 'Release' | import('./types').BomKind>()
 const visitedViews = ref(new Set<ActiveView>())
 const navigationContextKey = computed(() => JSON.stringify([workspace.currentUsername.value, workspace.activeCompanyId.value]))
+watch([workspace.authenticated, workspace.ready, navigationContextKey], ([authenticated, ready, context], previous) => {
+  if (!authenticated || previous?.[2] !== context) setMaterialStockContext(authenticated ? context : '')
+  if (authenticated && ready) void refreshMaterialStockPlans(() => listMaterialStockPlans(workspace.getAccessToken()))
+}, { immediate: true })
+const stockPlanRefreshTimer = window.setInterval(() => {
+  if (workspace.authenticated.value && workspace.ready.value) void refreshMaterialStockPlans(() => listMaterialStockPlans(workspace.getAccessToken()))
+}, 5 * 60 * 1000)
+onBeforeUnmount(() => window.clearInterval(stockPlanRefreshTimer))
+provide(pagePreferenceScopeKey, navigationContextKey)
+watch([activeView, projectTab, workspace.ready, () => workspace.project.value?.id], () => {
+  if (workspace.authenticated.value && workspace.ready.value) void refreshTablePreferences()
+})
 watch([activeView, workspace.ready, workspace.authenticated, navigationContextKey], ([view, ready, authenticated, context], previous) => {
   if (!authenticated || previous && previous[3] !== context) {
     visitedViews.value = new Set()
@@ -163,8 +183,8 @@ function updateMaterialNoticeCount(counts: { syncTasks: number; codeApprovals: n
 }
 watch([workspace.materialSyncTasks, workspace.materialCodeApprovalTasks], ([syncTasks, codeApprovals]) => {
   updateMaterialNoticeCount({
-    syncTasks: syncTasks.filter(task => !['Succeeded', 'Superseded'].includes(task.status)).length,
-    codeApprovals: codeApprovals.length,
+    syncTasks: currentMaterialSyncTasks(syncTasks, codeApprovals).length,
+    codeApprovals: codeApprovals.filter(application => application.applicationType !== 'BomHeader').length,
   })
 }, { immediate: true })
 const systemOrganizationId = computed(() => workspace.activeCompanyId.value)
@@ -355,6 +375,7 @@ const drawingReviewOverlayState = computed(() => ({
   defaultReviewers: drawingReviewDefaultReviewers.value,
   selectedDocumentId: workspace.selectedNode.value.documentId,
   currentUsername: workspace.currentUsername.value,
+  companyId: workspace.activeCompanyId.value,
   pending: workspace.operationPending.value,
   canSubmit: workspace.hasPermission('drawing-review.submit'),
   canManageWithdraw: canManageDrawingReviewWithdrawal.value,
@@ -464,11 +485,27 @@ function readRememberedProjectCenterPage() {
 }
 
 function rememberNavigation(key: NavKey) {
+  writePagePreference(navigationMemoryKey(activeNavigationMemoryKey), key)
   try {
     window.localStorage.setItem(activeNavigationMemoryKey, key)
+    window.localStorage.setItem(`${activeNavigationMemoryKey}:owner`, navigationContextKey.value)
   } catch {
     // Local storage may be unavailable in restricted WebView environments.
   }
+}
+
+function readRememberedNavigation(): NavKey | null {
+  try {
+    const ownPage = readPagePreference(navigationMemoryKey(activeNavigationMemoryKey))
+    const owner = ownPage ? null : window.localStorage.getItem(`${activeNavigationMemoryKey}:owner`)
+    const saved = ownPage
+      ?? ([null, navigationContextKey.value].includes(owner)
+        ? window.localStorage.getItem(activeNavigationMemoryKey) : null)
+    const pages: NavKey[] = ['project-center', 'project-workbench', 'project-calendar', 'projects', 'project-applications', 'production-drawings', 'work-hours', 'tasks', 'materials', 'standard-library', 'standard-structure', 'program-templates', 'admin']
+    if (!pages.includes(saved as NavKey)) return null
+    if (saved === 'admin' && !canManageSystem.value || saved === 'materials' && !workspace.hasPermission('material.view')) return null
+    return saved as NavKey
+  } catch { return null }
 }
 
 async function openProjectTab(tab: ProjectTab) {
@@ -542,6 +579,7 @@ function handleNavigationTabChange(name: string | number) {
 }
 
 async function handleNavigation(key: NavKey) {
+  if (key === 'admin' && !canManageSystem.value) return
   if (key === 'project-applications' && !workspace.hasPermission('project.application.submit') && !workspace.hasPermission('project.application.approve')) key = 'project-workbench'
   if (['standard-library', 'standard-structure'].includes(key) && !workspace.hasPermission('standard-library.view')) key = 'program-templates'
   initialPageRestored = true
@@ -648,6 +686,10 @@ async function openHierarchyBom(projectId: string, kind: Exclude<import('./types
 
 async function openNotification(notification: UserNotification) {
   await workspace.markNotificationRead(notification.id)
+  if (notification.category === 'work-hours' || notification.category === 'work-hours-correction') {
+    await handleNavigation('work-hours')
+    return
+  }
   if (notification.category === 'project-application') {
     requestedApplicationId.value = ''
     await nextTick()
@@ -760,7 +802,9 @@ async function restoreLastPage() {
     || !workspace.authenticated.value
     || !workspace.ready.value) return
   initialPageRestored = true
-  await openProjectCenter()
+  const remembered = readRememberedNavigation()
+  if (remembered) await handleNavigation(remembered)
+  else await openProjectCenter()
 }
 
 async function applyPendingProjectNavigation() {
@@ -789,7 +833,8 @@ function handleProjectNavigation(event: Event) {
   void applyPendingProjectNavigation()
 }
 
-watch([workspace.authenticated, workspace.ready], ([authenticated, ready]) => {
+watch([workspace.authenticated, workspace.ready, navigationContextKey], ([authenticated, ready, context], previous) => {
+  if (previous && previous[2] !== context) initialPageRestored = false
   if (!authenticated) {
     initialPageRestored = false
     activeView.value = 'project-center'
@@ -808,6 +853,14 @@ watch([workspace.authenticated, workspace.ready], ([authenticated, ready]) => {
     await restoreLastPage()
   })()
 }, { immediate: true })
+
+watch([canManageSystem, activeView], ([allowed, view]) => {
+  if (allowed || view !== 'admin') return
+  visitedViews.value.delete('admin')
+  activeView.value = 'project-center'
+  initialPageRestored = false
+  if (workspace.authenticated.value && workspace.ready.value) void handleNavigation('project-center')
+}, { flush: 'sync' })
 
 async function refreshDocumentTree() {
   if (workspace.loading.value || !workspace.project.value.id) return
@@ -1012,9 +1065,8 @@ function handleReviewOverlayAction(event: MessageEvent) {
   }
 }
 
-watch([projectTab, () => workspace.project.value.id, () => workspace.drawingReviews.value.length > 0], ([tab, , hasReviews]) => {
-  if (tab !== 'documents') drawingReviewPanelCollapsed.value = true
-  else if (hasReviews) drawingReviewPanelCollapsed.value = false
+watch([projectTab, () => workspace.project.value.id], () => {
+  drawingReviewPanelCollapsed.value = true
 }, { flush: 'sync', immediate: true })
 
 watch(activeView, (view, previousView) => {
@@ -1031,7 +1083,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
 </script>
 
 <template>
-  <div class="pdm-app-shell" :class="`theme-${theme}`">
+  <div class="pdm-app-shell" :class="`theme-${theme}`" :data-pdm-preference-scope="navigationContextKey">
     <div v-if="!workspace.authInitialized.value" class="pdm-session-restoring" role="status" aria-label="正在恢复登录状态">
       <span class="pdm-session-restoring__spinner" aria-hidden="true" />
       <span>正在恢复登录状态…</span>
@@ -1096,7 +1148,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
             :password-reset-tasks="workspace.passwordResetTasks.value"
             :pending="workspace.operationPending.value"
             :on-request-release="workspace.requestEditLockRelease"
-            :on-force-release="workspace.forceReleaseEditLock"
+            :on-force-release="workspace.forceReleaseEditLock" :on-emergency-release="workspace.emergencyReleaseEditLock"
             :on-reset-password="workspace.resetRequestedPassword"
             :on-mark-all-notifications-read="workspace.markAllNotificationsRead"
             @refresh="runOperation(workspace.loadMyApprovalTasks, '待办任务已刷新')"
@@ -1108,10 +1160,10 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           />
         </el-drawer>
         <main :key="navigationContextKey" class="pdm-main" :class="{ 'is-project-workspace': activeView === 'workspace' }">
-        <section v-if="workspace.loading.value && !workspace.ready.value" class="pdm-panel pdm-workspace-state" aria-live="polite">
+        <section v-if="workspace.loading.value && !workspace.ready.value" class="pdm-panel pdm-workspace-state pdm-loading-page" aria-live="polite">
           <SquareLoader label="正在加载权限内项目和待办任务" />
-          <h1>正在读取PLM数据</h1>
-          <p>正在加载权限内项目和待办任务…</p>
+          <div class="pdm-loading-copy"><h1>正在读取PLM数据</h1>
+          <p>正在加载权限内项目和待办任务…</p></div>
         </section>
         <section v-else-if="workspace.loadError.value && !workspace.ready.value" class="pdm-panel pdm-workspace-state is-error" role="alert">
           <h1>数据加载失败</h1>
@@ -1126,10 +1178,10 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           <strong>部分数据刷新失败</strong><span>{{ workspace.loadError.value }}</span>
           <button type="button" @click="workspace.reload()">重试</button>
         </section>
-        <section v-if="activeView === 'project-center'" class="pdm-panel pdm-workspace-state" aria-live="polite" aria-label="正在打开项目中心">
+        <section v-if="activeView === 'project-center'" class="pdm-panel pdm-workspace-state pdm-loading-page" aria-live="polite" aria-label="正在打开项目中心">
           <SquareLoader label="正在打开最近项目" />
-          <h1>正在打开项目中心</h1>
-          <p>{{ projectCenterOpening ? '正在读取最近打开或负责的项目…' : '正在准备项目数据…' }}</p>
+          <div class="pdm-loading-copy"><h1>正在打开项目中心</h1>
+          <p>{{ projectCenterOpening ? '正在读取最近打开或负责的项目…' : '正在准备项目数据…' }}</p></div>
         </section>
         <el-tabs v-if="activeNavigationTabs.length" :key="activeNav" :model-value="activeView" class="pdm-settings-tabs pdm-navigation-tabs" @tab-change="handleNavigationTabChange">
           <el-tab-pane v-for="tab in activeNavigationTabs" :key="tab.key" :name="tab.key" :label="tab.label" />
@@ -1189,7 +1241,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           <WorkHoursManager :token="workspace.getAccessToken()" :company-id="workspace.activeCompanyId.value" :active="activeView === 'work-hours'" />
         </div>
         <div v-if="visitedViews.has('tasks')" v-show="activeView === 'tasks'" class="pdm-navigation-page" data-navigation-page="tasks">
-        <MyTasks  :tasks="workspace.myApprovalTasks.value" :notifications="workspace.notifications.value" :material-code-tasks="workspace.materialCodeApprovalTasks.value" :program-template-tasks="workspace.programTemplateTasks.value" :locks="workspace.editLocks.value" :password-reset-tasks="workspace.passwordResetTasks.value" :pending="workspace.operationPending.value" :on-request-release="workspace.requestEditLockRelease" :on-force-release="workspace.forceReleaseEditLock" :on-reset-password="workspace.resetRequestedPassword" :on-mark-all-notifications-read="workspace.markAllNotificationsRead" @refresh="runOperation(workspace.loadMyApprovalTasks, '待办任务已刷新')" @open="openReleasePackage" @open-validation-plan="openValidationPlan" @open-notification="openNotification" @open-material-approvals="openMaterialApprovals" @open-program-template="openProgramTemplate" />
+        <MyTasks  :tasks="workspace.myApprovalTasks.value" :notifications="workspace.notifications.value" :material-code-tasks="workspace.materialCodeApprovalTasks.value" :program-template-tasks="workspace.programTemplateTasks.value" :locks="workspace.editLocks.value" :password-reset-tasks="workspace.passwordResetTasks.value" :pending="workspace.operationPending.value" :on-request-release="workspace.requestEditLockRelease" :on-force-release="workspace.forceReleaseEditLock" :on-emergency-release="workspace.emergencyReleaseEditLock" :on-reset-password="workspace.resetRequestedPassword" :on-mark-all-notifications-read="workspace.markAllNotificationsRead" @refresh="runOperation(workspace.loadMyApprovalTasks, '待办任务已刷新')" @open="openReleasePackage" @open-validation-plan="openValidationPlan" @open-notification="openNotification" @open-material-approvals="openMaterialApprovals" @open-program-template="openProgramTemplate" />
         </div>
         <div v-if="visitedViews.has('program-templates')" v-show="activeView === 'program-templates'" class="pdm-navigation-page" data-navigation-page="program-templates">
         <ProgramTemplateLibrary
@@ -1212,6 +1264,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           :can-manage-relations="workspace.hasPermission('material-relation.manage')"
           :can-publish-relations="workspace.hasPermission('material-relation.publish')"
           :can-manage-kits="workspace.hasPermission('standard-library.manage')"
+          :active="activeView === 'materials'"
           :requested-tab="materialRequestedTab"
           @notice-counts-change="updateMaterialNoticeCount"
         />
@@ -1219,6 +1272,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
         <div v-if="visitedViews.has('standard-library')" v-show="activeView === 'standard-library'" class="pdm-navigation-page" data-navigation-page="standard-library">
         <StandardLibrary
           :token="workspace.getAccessToken()"
+          :active="activeView === 'standard-library'"
           :can-manage="workspace.hasPermission('standard-library.manage')"
           :can-edit="workspace.hasPermission('material.manage')"
         />
@@ -1226,7 +1280,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
         <div v-if="visitedViews.has('standard-structure')" v-show="activeView === 'standard-structure'" data-navigation-page="standard-structure" class="pdm-navigation-page">
           <StandardStructureLibrary :token="workspace.getAccessToken()" :projects="workspace.projects.value" :can-reference="workspace.hasPermission('bom.mechanical.edit')" :active="activeView === 'standard-structure'" />
         </div>
-        <div v-if="visitedViews.has('admin')" v-show="activeView === 'admin'" class="pdm-navigation-page" data-navigation-page="admin">
+        <div v-if="canManageSystem && visitedViews.has('admin')" v-show="activeView === 'admin'" class="pdm-navigation-page" data-navigation-page="admin">
         <SystemManagement
           :token="workspace.getAccessToken()"
           :customers="workspace.customers.value"
@@ -1385,7 +1439,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
 
     <el-drawer v-if="workspace.authenticated.value" v-model="workspace.versionDrawerOpen.value" title="图档历史版本对比" size="680px">
       <div class="pdm-version-summary">
-        <strong>{{ workspace.selectedNode.value.drawingNumber }} · {{ workspace.selectedNode.value.version }}</strong>
+        <strong>{{ workspace.selectedNode.value.drawingNumber }} · {{ documentVersionSummary(workspace.selectedNode.value) }}</strong>
         <span>{{ workspace.selectedNode.value.fileName }} · 历史版本永久不可变</span>
       </div>
       <div v-if="workspace.versionLoading.value" class="pdm-empty-info">正在读取版本与快照差异…</div>
@@ -1393,12 +1447,12 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
       <p v-else-if="workspace.versions.value.length === 0" class="pdm-empty-info">该图档尚无版本记录。</p>
       <template v-else>
         <div class="pdm-version-selectors">
-          <label>左侧版本<el-select v-model="workspace.leftVersionId.value" @change="workspace.compareVersions"><el-option v-for="version in workspace.versions.value" :key="version.id" :label="`${version.revision.display} · ${displayUserName(version.createdBy)} · ${new Date(version.createdAt).toLocaleString()}`" :value="version.id" /></el-select></label>
+          <label>左侧版本<el-select v-model="workspace.leftVersionId.value" @change="workspace.compareVersions"><el-option v-for="version in workspace.versions.value" :key="version.id" :label="`${documentVersionSummary(version)} · ${displayUserName(version.createdBy)} · ${new Date(version.createdAt).toLocaleString()}`" :value="version.id" /></el-select></label>
           <label>右侧版本<el-select v-model="workspace.rightVersionId.value" @change="workspace.compareVersions"><el-option v-for="version in workspace.versions.value" :key="version.id" :label="`${version.revision.display} · ${displayUserName(version.createdBy)} · ${new Date(version.createdAt).toLocaleString()}`" :value="version.id" /></el-select></label>
         </div>
         <div class="pdm-version-actions"><button v-if="desktopAvailable" type="button" class="pdm-secondary-action" :disabled="!workspace.leftVersionId.value" @click="workspace.openDocument(workspace.selectedNode.value, 'SpecificReadOnly', workspace.leftVersionId.value)">只读打开左版</button><button type="button" class="pdm-secondary-action" @click="workspace.downloadVersionFile(workspace.leftVersionId.value)">下载左版原始文件</button></div>
         <div v-if="workspace.versionComparison.value" class="pdm-diff-sections">
-          <section><h3>版本信息</h3><p>左：{{ workspace.versionComparison.value.left.revision.display }} · {{ versionStatus(workspace.versionComparison.value.left.status) }} · {{ displayUserName(workspace.versionComparison.value.left.createdBy) }} · {{ new Date(workspace.versionComparison.value.left.createdAt).toLocaleString() }} · {{ workspace.versionComparison.value.left.changeNote }}</p><p>右：{{ workspace.versionComparison.value.right.revision.display }} · {{ versionStatus(workspace.versionComparison.value.right.status) }} · {{ displayUserName(workspace.versionComparison.value.right.createdBy) }} · {{ new Date(workspace.versionComparison.value.right.createdAt).toLocaleString() }} · {{ workspace.versionComparison.value.right.changeNote }}</p></section>
+          <section><h3>版本信息</h3><p>左：{{ documentVersionSummary(workspace.versionComparison.value.left) }} · {{ versionStatus(workspace.versionComparison.value.left.status) }} · {{ displayUserName(workspace.versionComparison.value.left.createdBy) }} · {{ new Date(workspace.versionComparison.value.left.createdAt).toLocaleString() }} · {{ workspace.versionComparison.value.left.changeNote }}</p><p>右：{{ documentVersionSummary(workspace.versionComparison.value.right) }} · {{ versionStatus(workspace.versionComparison.value.right.status) }} · {{ displayUserName(workspace.versionComparison.value.right.createdBy) }} · {{ new Date(workspace.versionComparison.value.right.createdAt).toLocaleString() }} · {{ workspace.versionComparison.value.right.changeNote }}</p></section>
           <section><h3>属性差异（{{ workspace.versionComparison.value.propertyChanges.length }}）</h3><ul><li v-for="(change, index) in workspace.versionComparison.value.propertyChanges" :key="`p-${index}`">【{{ propertyChangeKind(change.kind) }}】{{ change.name }}：{{ change.previousValue ?? '无' }} → {{ change.currentValue ?? '无' }}</li></ul><p v-if="!workspace.versionComparison.value.propertyChanges.length">无变化</p></section>
           <section><h3>引用树差异（{{ workspace.versionComparison.value.referenceChanges.length }}）</h3><ul><li v-for="(change, index) in workspace.versionComparison.value.referenceChanges" :key="`r-${index}`">【{{ referenceChangeKind(change.kind) }}】{{ change.instancePath }}：{{ change.previousValue ?? '无' }} → {{ change.currentValue ?? '无' }}</li></ul><p v-if="!workspace.versionComparison.value.referenceChanges.length">无变化</p></section>
           <section><h3>BOM差异（{{ workspace.versionComparison.value.bomChanges.length }}）</h3><ul><li v-for="(change, index) in workspace.versionComparison.value.bomChanges" :key="`b-${index}`">【{{ bomChangeKind(change.kind) }}】{{ change.drawingNumber }} · {{ change.field }}：{{ change.previousValue ?? '无' }} → {{ change.currentValue ?? '无' }}</li></ul><p v-if="!workspace.versionComparison.value.bomChanges.length">无变化</p></section>

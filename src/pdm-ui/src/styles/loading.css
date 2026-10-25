@@ -1,0 +1,107 @@
+:root { --pdm-loading-icon-size: 144px; }
+
+@keyframes pdm-loading-breath {
+  0%, 100% { transform: scale(.97); opacity: .78; }
+  50% { transform: scale(1.03); opacity: 1; }
+}
+
+.pdm-loading-logo {
+  display: block;
+  width: var(--pdm-loading-icon-size);
+  height: var(--pdm-loading-icon-size);
+  object-fit: contain;
+  transform-origin: center;
+  animation: pdm-loading-breath 2.4s ease-in-out infinite;
+}
+
+.pdm-boot-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: #fff;
+  color: #536781;
+  font: 14px/1.5 "Microsoft YaHei UI", "Microsoft YaHei", Arial, sans-serif;
+}
+
+.pdm-boot-loader > .pdm-loading-logo,
+.pdm-loading-page > .pdm-square-loader {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  margin: 0;
+}
+
+.pdm-boot-loader > .pdm-loading-anchor {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: var(--pdm-loading-icon-size);
+  height: var(--pdm-loading-icon-size);
+  transform: translate(-50%, -50%);
+}
+
+.pdm-loading-page > .pdm-square-loader { transform: translate(-50%, -50%); }
+
+.pdm-loading-page { position: relative; min-height: 320px; }
+.pdm-workspace-state.pdm-loading-page {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  border-color: transparent;
+}
+
+.pdm-boot-loader > .pdm-loading-copy,
+.pdm-loading-page > .pdm-loading-copy {
+  position: absolute;
+  top: calc(50% + var(--pdm-loading-icon-size) / 2 + 14px);
+  left: 16px;
+  right: 16px;
+  margin: 0;
+  text-align: center;
+}
+
+.pdm-loading-copy > h1 { margin-top: 0; }
+
+.el-loading-mask .el-loading-spinner {
+  left: 50%;
+  top: 50%;
+  width: min(var(--pdm-loading-icon-size), 80cqw, 80cqh);
+  height: min(var(--pdm-loading-icon-size), 80cqw, 80cqh);
+  margin: 0;
+  transform: translate(-50%, -50%);
+}
+
+.el-loading-mask { container-type: size; }
+
+.el-loading-mask .el-loading-spinner::before {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: url('../assets/plm-app-icon.svg') center / contain no-repeat;
+  transform-origin: center;
+  animation: pdm-loading-breath 2.4s ease-in-out infinite;
+}
+
+.el-loading-mask .el-loading-spinner > .circular,
+.el-loading-mask .el-loading-spinner > .el-icon { display: none; }
+
+.el-loading-mask .el-loading-spinner > .el-loading-text {
+  position: absolute;
+  left: -64px;
+  right: -64px;
+  top: calc(100% + 14px);
+  margin: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pdm-loading-logo,
+  .el-loading-mask .el-loading-spinner::before {
+    animation: none;
+    transform: none;
+    opacity: 1;
+  }
+}

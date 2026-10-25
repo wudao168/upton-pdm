@@ -119,6 +119,8 @@ public sealed record DocumentVersionCommit(
     public Guid? ExpectedVersionId { get; init; }
     public bool RequireBaseVersion { get; init; }
     public bool IsHistoricalRestore { get; init; }
+    public bool KeepEditing { get; init; }
+    public string? HandoffTo { get; init; }
 }
 
 public sealed record ReleasePreviewSource(
@@ -154,6 +156,7 @@ public sealed record DocumentCheckInResult(
 {
     public IReadOnlyList<string> AffectedAssemblies { get; init; } = [];
     public bool BomRefreshDeferred { get; init; }
+    public string? HandoffTo { get; init; }
 }
 
 public sealed record ControlledOpenFile(
@@ -206,7 +209,8 @@ public sealed record ArchiveBatchReceipt(Guid BatchId, Guid ProjectId, string Ac
 public sealed record ArchiveBatchFollowup(ArchiveBatchReceipt Receipt, IReadOnlyList<PdmDocument> PreviousDocuments);
 public sealed record ArchiveBatchInput(Guid DocumentId, StoredFile File, IReadOnlyDictionary<string, string?> Properties,
     CadReferenceSnapshot Snapshot, string Comment, bool IsProjectRoot, Guid? ExpectedVersionId,
-    string? DrawingNumber = null, string? Name = null, string? FileName = null, Guid? DrawingReviewWritebackId = null);
+    string? DrawingNumber = null, string? Name = null, string? FileName = null, Guid? DrawingReviewWritebackId = null,
+    bool KeepEditing = false, string? HandoffTo = null);
 
 public sealed record DocumentRegistrationCandidate(
     string CandidateKey,
@@ -489,6 +493,10 @@ public interface IPdmRepository
     Task<IReadOnlyList<EquipmentTypeDefinition>> ListEquipmentTypesAsync(bool includeInactive, CancellationToken cancellationToken);
     Task<EquipmentTypeDefinition> SaveEquipmentTypeAsync(int code, string name, bool isActive, CancellationToken cancellationToken);
     Task<PdmSystemSettings> GetSystemSettingsAsync(CancellationToken cancellationToken);
+    Task<DocumentOperationRuleSettings> GetDocumentOperationRulesAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(DocumentOperationRuleSettings.Default);
+    Task<DocumentOperationRuleSettings> SetDocumentOperationRuleAsync(string ruleId, bool enabled, long expectedRevision, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("当前存储未实现图档规则设置。");
     Task<PdmSystemSettings> UpdateSystemSettingsAsync(PdmSystemSettings settings, CancellationToken cancellationToken);
     async Task SetBrowserCadArchiveEnabledAsync(bool enabled, CancellationToken ct) =>
         await UpdateSystemSettingsAsync((await GetSystemSettingsAsync(ct)) with { BrowserCadArchiveEnabled = enabled }, ct);
@@ -548,6 +556,8 @@ public interface IPdmRepository
     Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken, int? limit = null);
     Task<IReadOnlyList<DocumentVersionVerificationResult>> ListDocumentVersionVerificationsAsync(IReadOnlyList<DocumentVersionVerificationRequest> requests, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<DocumentVersion>> ListProductionDrawingVersionsAsync(Guid projectId, CancellationToken cancellationToken) =>
+        ListProjectDocumentVersionsAsync(projectId, cancellationToken);
     async Task<IReadOnlyDictionary<Guid, Guid>> LatestDocumentVersionIdsAsync(Guid projectId, CancellationToken cancellationToken) =>
         (await ListProjectDocumentVersionsAsync(projectId, cancellationToken)).GroupBy(version => version.DocumentId)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(version => version.CreatedAt).First().Id);
@@ -639,6 +649,9 @@ public interface IPdmRepository
     Task<PdmDocument> RequestCheckoutReleaseAsync(Guid documentId, string requestedBy, string reason, CancellationToken cancellationToken);
     Task<PdmDocument> ForceReleaseCheckoutAsync(Guid documentId, string releasedBy, string reason, CancellationToken cancellationToken);
     Task<PdmDocument> ForceReleaseOfflineCheckoutAsync(Guid documentId, Guid? expectedSessionId, DateTimeOffset heartbeatBefore, DateTimeOffset now, CancellationToken cancellationToken);
+    Task<PdmDocument> ReclaimCheckoutAsync(Guid documentId, Guid expectedSessionId, DateTimeOffset expectedCheckoutAt, DateTimeOffset? heartbeatBefore, DateTimeOffset now, CancellationToken cancellationToken) => throw new NotSupportedException("当前仓储不支持编辑接管。");
+    Task<IReadOnlyList<EditHandoff>> ListEditHandoffsAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<EditHandoff>>([]);
+    Task<bool> ExpireEditHandoffAsync(EditHandoff handoff, DateTimeOffset now, CancellationToken cancellationToken) => Task.FromResult(false);
     Task<PdmDocument> CloseCheckoutAsync(Guid documentId, string actor, Guid sessionId, DateTimeOffset checkedOutAt, string sha256, bool draftPreserved, CancellationToken cancellationToken);
     Task<IReadOnlyList<string>> ListNotificationRecipientsAsync(string sourceKey, CancellationToken cancellationToken);
     Task<DocumentCheckInResult> CheckInVersionAsync(Guid documentId, string actor, DocumentVersionCommit commit, CancellationToken cancellationToken);
@@ -692,6 +705,7 @@ public interface IPdmRepository
     Task CreateUserNotificationsAsync(IReadOnlyList<UserNotification> notifications, CancellationToken cancellationToken);
     Task MarkUserNotificationReadAsync(Guid notificationId, string recipient, DateTimeOffset readAt, CancellationToken cancellationToken);
     Task MarkAllUserNotificationsReadAsync(string recipient, DateTimeOffset readAt, CancellationToken cancellationToken);
+    Task ResolveWorkHoursNotificationsAsync(string recipient, Guid companyId, DateTimeOffset readAt, CancellationToken ct);
     Task<PdmDocument> ObsoleteDocumentAsync(Guid documentId, string actor, CancellationToken cancellationToken);
     Task MarkPublishedAsync(Guid releasePackageId, string publishedPath, DateTimeOffset publishedAt, CancellationToken cancellationToken);
     Task<ManufacturingBomBaseline> MarkPublishedWithBomBaselineAsync(ReleasePackage package, string publishedPath, DateTimeOffset publishedAt, string actor, CancellationToken cancellationToken);
@@ -708,6 +722,7 @@ public interface IPdmRepository
     Task<UserAccount> UpdateUserAsync(string username, string displayName, UserRole role, string roleCode, IReadOnlyList<string> roleCodes, bool isActive, CancellationToken cancellationToken);
     Task AppendAuditAsync(AuditEntry entry, CancellationToken cancellationToken);
     Task<IReadOnlyList<AuditEntry>> ListAuditAsync(string actor, UserRole role, int take, CancellationToken cancellationToken);
+    Task<IReadOnlyList<AuditEntry>> ListStandardStructureReferenceAuditsAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<AuditEntry>> ListProjectAuditAsync(Guid projectId, int take, CancellationToken cancellationToken);
 }
 
@@ -785,7 +800,7 @@ public interface IPasswordService
 
 public interface ITokenIssuer
 {
-    string Issue(UserAccount account, TimeSpan lifetime);
+    string Issue(UserAccount account, TimeSpan lifetime, string? sessionId = null);
 }
 
 public sealed class ReleaseConversionPendingException(string message, Exception innerException) : Exception(message, innerException);

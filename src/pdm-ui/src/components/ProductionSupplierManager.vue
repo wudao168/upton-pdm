@@ -5,7 +5,7 @@ import { productionRequestId } from '../productionTracking'
 import type { ProductionSupplier, ProductionSupplierCatalog, ProductionSupplierCategory, SaveProductionSupplier } from '../productionSuppliers'
 import { ElMessage } from '../statusMessage'
 
-const props = defineProps<{ token: string }>()
+const props = defineProps<{ token: string; canManage?: boolean }>()
 const catalog = ref<ProductionSupplierCatalog>(), pending = ref(false), query = ref(''), categoryFilter = ref(''), includeInactive = ref(false)
 const categoryForm = ref({ id: '', name: '', isActive: true, expectedRowVersion: 0 })
 const categoryManagerOpen = ref(false), categoryFormOpen = ref(false)
@@ -26,17 +26,19 @@ async function load() {
   finally { if (current === generation) pending.value = false }
 }
 watch(() => props.token, () => { if (props.token) void load() }, { immediate: true })
+watch(() => props.canManage, allowed => { if (!allowed) { form.value = null; categoryManagerOpen.value = false; categoryFormOpen.value = false } })
 function openCategoryManager() {
+  if (!props.canManage) return
   categoryFormOpen.value = false
   categoryManagerOpen.value = true
 }
 function editCategory(category?: ProductionSupplierCategory) {
-  if (pending.value || !catalog.value) return
+  if (!props.canManage || pending.value || !catalog.value) return
   categoryForm.value = { id: category?.id ?? '', name: category?.name ?? '', isActive: category?.isActive ?? true, expectedRowVersion: catalog.value?.rowVersion ?? 0 }
   categoryFormOpen.value = true
 }
 async function saveCategory() {
-  if (pending.value || !catalog.value) return
+  if (!props.canManage || pending.value || !catalog.value) return
   if (!categoryForm.value.name.trim()) { ElMessage.warning('请填写供应商分类名称。'); return }
   if (!categoryForm.value.id) { categoryForm.value.id = productionRequestId(); categoryForm.value.expectedRowVersion = catalog.value.rowVersion }
   pending.value = true
@@ -47,12 +49,12 @@ async function saveCategory() {
   finally { pending.value = false }
 }
 function edit(supplier?: ProductionSupplier) {
-  if (!catalog.value) return
+  if (!props.canManage || !catalog.value) return
   form.value = supplier ? { ...supplier, categoryIds: [...supplier.categoryIds], expectedRowVersion: catalog.value.rowVersion }
     : { id: productionRequestId(), code: '', name: '', fullName: '', address: '', phone: '', contact: '', contactPhone: '', remarks: '', categoryIds: [], isActive: true, expectedRowVersion: catalog.value.rowVersion }
 }
 async function save() {
-  if (!form.value || pending.value) return
+  if (!props.canManage || !form.value || pending.value) return
   if (!form.value.code.trim() || !form.value.name.trim() || !form.value.fullName.trim() || !form.value.categoryIds.length) {
     ElMessage.warning('请填写供应商编码、简称、全称，并选择至少一个分类。'); return
   }
@@ -64,7 +66,7 @@ async function save() {
   finally { pending.value = false }
 }
 async function toggleSupplier(supplier: ProductionSupplier) {
-  if (!catalog.value || pending.value) return
+  if (!props.canManage || !catalog.value || pending.value) return
   pending.value = true
   try {
     catalog.value = await saveProductionSupplier(supplier.id, { ...supplier, isActive: !supplier.isActive, expectedRowVersion: catalog.value.rowVersion }, props.token)
@@ -77,21 +79,21 @@ function close() { if (!pending.value) form.value = null }
 
 <template>
   <section class="production-suppliers" aria-label="供应商库">
-    <header><h2>供应商库</h2><span>按分类维护供应商台账，外协分配从启用供应商中选择。</span><button type="button" class="pdm-secondary-action" :disabled="pending || !catalog" @click="edit()">新建供应商</button><button type="button" class="pdm-secondary-action" :disabled="pending" @click="load">刷新</button></header>
+    <header><h2>供应商库</h2><span>按分类维护供应商台账，外协分配从启用供应商中选择。</span><button v-if="props.canManage" type="button" class="pdm-secondary-action" :disabled="pending || !catalog" @click="edit()">新建供应商</button><button type="button" class="pdm-secondary-action" :disabled="pending" @click="load">刷新</button></header>
     <div class="production-suppliers__layout">
       <aside class="pdm-panel production-suppliers__categories">
         <h3>供应商分类</h3>
         <button type="button" class="production-suppliers__category-filter" :class="{ 'is-active': !categoryFilter }" @click="categoryFilter = ''">全部供应商</button>
         <button v-for="category in catalog?.categories ?? []" :key="category.id" type="button" class="production-suppliers__category-filter" :class="{ 'is-active': categoryFilter === category.id }" @click="categoryFilter = category.id">{{ category.name }}<small v-if="!category.isActive">（停用）</small></button>
-        <div class="production-suppliers__category-actions"><el-button type="primary" size="small" :disabled="pending || !catalog" @click="openCategoryManager">分类维护</el-button></div>
-        <p v-if="catalog && !catalog.categories.length">请先维护分类，再登记供应商。</p>
+        <div v-if="props.canManage" class="production-suppliers__category-actions"><el-button type="primary" size="small" :disabled="pending || !catalog" @click="openCategoryManager">分类维护</el-button></div>
+        <p v-if="catalog && !catalog.categories.length">{{ props.canManage ? '请先维护分类，再登记供应商。' : '暂无供应商分类，请联系维护人员补充。' }}</p>
       </aside>
       <main class="pdm-panel production-suppliers__main">
         <div class="production-suppliers__filters"><input v-model="query" type="search" aria-label="搜索供应商" placeholder="搜索编码、简称、全称或联系人"><select v-model="categoryFilter" aria-label="按供应商分类筛选"><option value="">全部分类</option><option v-for="category in catalog?.categories ?? []" :key="category.id" :value="category.id">{{ category.name }}</option></select><label class="production-suppliers__check"><input v-model="includeInactive" type="checkbox">包含停用</label><span>共 {{ rows.length }} 家</span></div>
-        <div class="production-suppliers__table"><table class="pdm-fit-columns"><thead><tr><th>编码</th><th>简称</th><th>全称</th><th>分类</th><th>联系人</th><th>联系电话</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="supplier in rows" :key="supplier.id"><td>{{ supplier.code }}</td><td :title="supplier.name">{{ supplier.name }}</td><td :title="supplier.fullName">{{ supplier.fullName }}</td><td :title="categoryNames(supplier)">{{ categoryNames(supplier) }}</td><td>{{ supplier.contact || '—' }}</td><td>{{ supplier.contactPhone || supplier.phone || '—' }}</td><td>{{ supplier.isActive ? '启用' : '停用' }}</td><td><button type="button" :disabled="pending" @click="edit(supplier)">编辑</button><button type="button" :disabled="pending" @click="toggleSupplier(supplier)">{{ supplier.isActive ? '停用' : '启用' }}</button></td></tr></tbody></table><p v-if="!pending && !rows.length">暂无符合条件的供应商。</p></div>
+        <div class="production-suppliers__table"><table class="pdm-fit-columns"><thead><tr><th>编码</th><th>简称</th><th>全称</th><th>分类</th><th>联系人</th><th>联系电话</th><th>状态</th><th v-if="props.canManage">操作</th></tr></thead><tbody><tr v-for="supplier in rows" :key="supplier.id"><td>{{ supplier.code }}</td><td :title="supplier.name">{{ supplier.name }}</td><td :title="supplier.fullName">{{ supplier.fullName }}</td><td :title="categoryNames(supplier)">{{ categoryNames(supplier) }}</td><td>{{ supplier.contact || '—' }}</td><td>{{ supplier.contactPhone || supplier.phone || '—' }}</td><td>{{ supplier.isActive ? '启用' : '停用' }}</td><td v-if="props.canManage"><button type="button" :disabled="pending" @click="edit(supplier)">编辑</button><button type="button" :disabled="pending" @click="toggleSupplier(supplier)">{{ supplier.isActive ? '停用' : '启用' }}</button></td></tr></tbody></table><p v-if="!pending && !rows.length">暂无符合条件的供应商。</p></div>
       </main>
     </div>
-    <el-dialog v-model="categoryManagerOpen" title="供应商分类维护" width="min(860px, calc(100vw - 32px))" :close-on-click-modal="!pending" :close-on-press-escape="!pending" :show-close="!pending">
+    <el-dialog v-if="props.canManage" v-model="categoryManagerOpen" title="供应商分类维护" width="min(860px, calc(100vw - 32px))" :close-on-click-modal="!pending" :close-on-press-escape="!pending" :show-close="!pending">
       <div class="supplier-category-manager">
         <section class="supplier-category-manager__list">
           <header class="supplier-category-manager__header"><strong>供应商分类</strong><el-button type="primary" size="small" :disabled="pending" @click="editCategory()">新增分类</el-button></header>
@@ -114,7 +116,7 @@ function close() { if (!pending.value) form.value = null }
       </div>
       <template #footer><el-button :disabled="pending" @click="categoryManagerOpen = false">关闭</el-button></template>
     </el-dialog>
-    <div v-if="form" class="production-suppliers__backdrop" @click.self="close"><section class="pdm-panel production-suppliers__editor" role="dialog" aria-modal="true" aria-label="维护供应商"><header><h2>维护供应商</h2><button type="button" aria-label="关闭供应商表单" :disabled="pending" @click="close">×</button></header><form novalidate @submit.prevent="save"><fieldset :disabled="pending">
+    <div v-if="form && props.canManage" class="production-suppliers__backdrop" @click.self="close"><section class="pdm-panel production-suppliers__editor" role="dialog" aria-modal="true" aria-label="维护供应商"><header><h2>维护供应商</h2><button type="button" aria-label="关闭供应商表单" :disabled="pending" @click="close">×</button></header><form novalidate @submit.prevent="save"><fieldset :disabled="pending">
       <label>供应商编码<input v-model="form.code" maxlength="50"></label><label>公司简称<input v-model="form.name" maxlength="100"></label><label>公司全称<input v-model="form.fullName" maxlength="200"></label><label>公司地址<input v-model="form.address" maxlength="400"></label><label>公司电话<input v-model="form.phone" maxlength="60"></label><label>联系人<input v-model="form.contact" maxlength="100"></label><label>联系人电话<input v-model="form.contactPhone" maxlength="60"></label><label>备注<input v-model="form.remarks" maxlength="1000"></label>
       <div class="production-suppliers__classification"><span>分类（可多选）</span><label v-for="category in catalog?.categories ?? []" :key="category.id" class="production-suppliers__check"><input v-model="form.categoryIds" type="checkbox" :value="category.id" :disabled="!category.isActive && !form.categoryIds.includes(category.id)">{{ category.name }}{{ category.isActive ? '' : '（停用）' }}</label><p v-if="!catalog?.categories.length">请关闭表单，先维护供应商分类。</p></div><label class="production-suppliers__check"><input v-model="form.isActive" type="checkbox">启用供应商</label>
     </fieldset><footer><button type="button" class="pdm-secondary-action" :disabled="pending" @click="close">取消</button><button type="submit" class="pdm-primary-action" :disabled="pending">保存供应商</button></footer></form></section></div>

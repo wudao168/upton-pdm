@@ -213,7 +213,7 @@ public sealed partial class PdmWorkflowService(
             throw new PdmRuleException("工程图二维码尺寸必须为8到100毫米。");
         if (input.MarginMillimeters is < 0 or > 100)
             throw new PdmRuleException("工程图二维码边距必须为0到100毫米。");
-        return input with { SourceProperty = sourceProperty, RuleVersion = ruleVersion };
+        return input with { Enabled = false, SourceProperty = sourceProperty, RuleVersion = ruleVersion };
     }
 
     /// <summary>
@@ -343,7 +343,7 @@ public sealed partial class PdmWorkflowService(
             if (policy.ValidDays is < 1 or > 3650) throw new PdmRuleException($"{label}正式补充有效期必须为1到3650天，或选择不限时间。");
             return policy;
         }
-        return new FormalSupplementPolicies(Normalize(input.Standard, "标准件BOM"), Normalize(input.Electrical, "电气BOM"));
+        return new FormalSupplementPolicies(Normalize(input.Standard, "标准件BOM"), Normalize(input.Electrical, "电气件BOM"));
     }
 
     private static string FormalSupplementPolicySummary(FormalSupplementPolicy policy) =>
@@ -1067,7 +1067,6 @@ public sealed partial class PdmWorkflowService(
             throw new UnauthorizedAccessException("当前用户没有目标项目的图档权限。");
         await RequireProjectSubmissionAccessAsync(projectId, actor, role, "登记并提交图档", cancellationToken);
         if (candidates is null || candidates.Count == 0) return Array.Empty<DocumentRegistrationMatch>();
-        if (candidates.Count > 2000) throw new PdmRuleException("单次最多检查2000个待入库图档。");
 
         var normalized = candidates.Select(candidate => candidate with
         {
@@ -1132,11 +1131,11 @@ public sealed partial class PdmWorkflowService(
             throw new PdmRuleException("图号、名称和文件名不能为空。");
         }
 
-        var importedStepSource = archiveContext is not null && command.Kind == DocumentKind.Other
-            && new[] { ".stp", ".step" }.Contains(Path.GetExtension(command.FileName), StringComparer.OrdinalIgnoreCase);
-        if (command.Kind is not (DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing) && !importedStepSource)
+        var designDependency = archiveContext is not null && command.Kind == DocumentKind.Other
+            && new[] { ".stp", ".step", ".txt", ".xls", ".xlsx" }.Contains(Path.GetExtension(command.FileName), StringComparer.OrdinalIgnoreCase);
+        if (command.Kind is not (DocumentKind.Assembly or DocumentKind.Part or DocumentKind.Drawing) && !designDependency)
         {
-            throw new PdmRuleException("只有SolidWorks装配体、零件和工程图可以登记；STEP导入源资料须随整批存档一同提交。");
+            throw new PdmRuleException("只有SolidWorks装配体、零件和工程图可以独立登记；导入源、方程和设计表须随整批存档一同提交。");
         }
 
         if (string.IsNullOrWhiteSpace(command.SourceSha256))
@@ -1281,11 +1280,13 @@ public sealed partial class PdmWorkflowService(
         Guid? drawingReviewWritebackId = null,
         Guid? expectedVersionId = null,
         bool requireBaseVersion = false,
-        bool deferBomRefresh = false)
+        bool deferBomRefresh = false,
+        bool keepEditing = false,
+        string? handoffTo = null)
     {
         var document = await repository.FindDocumentAsync(documentId, cancellationToken) ?? throw new PdmNotFoundException("图档不存在。 ");
         if (document.CheckoutSessionId is null) throw new PdmConflictException("当前编辑权限没有有效会话，请重新获取权限。");
-        return await CheckInAsync(documentId, actor, role, document.CheckoutSessionId.Value, file, changeNote, properties, snapshot, isProjectRoot, forceVersion, cancellationToken, drawingNumber, name, fileName, drawingReviewWritebackId, expectedVersionId, requireBaseVersion, deferBomRefresh);
+        return await CheckInAsync(documentId, actor, role, document.CheckoutSessionId.Value, file, changeNote, properties, snapshot, isProjectRoot, forceVersion, cancellationToken, drawingNumber, name, fileName, drawingReviewWritebackId, expectedVersionId, requireBaseVersion, deferBomRefresh, keepEditing, handoffTo);
     }
 
     public async Task<DocumentCheckInResult> CheckInAsync(
@@ -1306,14 +1307,29 @@ public sealed partial class PdmWorkflowService(
         Guid? drawingReviewWritebackId = null,
         Guid? expectedVersionId = null,
         bool requireBaseVersion = false,
-        bool deferBomRefresh = false)
+        bool deferBomRefresh = false,
+        bool keepEditing = false,
+        string? handoffTo = null)
     {
+        await ValidateEditDispositionAsync(documentId, actor, keepEditing, handoffTo, drawingReviewWritebackId, cancellationToken);
         // The server may commit a version and lose the HTTP response during a restart.
         // Replaying that exact stored file must return the committed version instead of
         // failing because the successful check-in already released its edit session.
         var current = await repository.FindDocumentAsync(documentId, cancellationToken)
             ?? throw new PdmNotFoundException("图档不存在。 ");
         await ProjectPermissionPolicy.RequireAsync(repository, current.ProjectId, actor, role, "document.archive", cancellationToken);
+        if (keepEditing && requireBaseVersion && current.CheckoutSessionId == checkoutSessionId)
+        {
+            var committed = (await repository.ListDocumentVersionsAsync(documentId, cancellationToken)).FirstOrDefault();
+            if (committed is not null && committed.Id != expectedVersionId && committed.CreatedBy.Equals(actor, StringComparison.OrdinalIgnoreCase)
+                && committed.StorageRelativePath.Equals(file.RelativePath, StringComparison.OrdinalIgnoreCase)
+                && committed.Sha256.Equals(file.Sha256, StringComparison.OrdinalIgnoreCase) && committed.FileLength == file.Length)
+            {
+                await RequirePermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken);
+                await RequireDocumentAccessAsync(documentId, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
+                return new DocumentCheckInResult(current, committed, true);
+            }
+        }
         if (current.CheckoutSessionId != checkoutSessionId)
         {
             await RequirePermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken);
@@ -1349,6 +1365,8 @@ public sealed partial class PdmWorkflowService(
 
         var latestVersion = (await repository.ListDocumentVersionsAsync(documentId, cancellationToken)).FirstOrDefault();
         ArchiveVersionGuard.ValidateBaseVersion(latestVersion?.Id, expectedVersionId, requireBaseVersion);
+        if (expectedVersionId == latestVersion?.Id)
+            snapshot = ArchiveReferenceVersions.RestoreMissing(snapshot, latestVersion?.ReferenceSnapshot);
         if (requireBaseVersion || FlattenOpenNodes(snapshot.Root).Any(node => node.Status == ReferenceNodeStatus.Suppressed))
             await ValidateArchivedReferencesAsync(snapshot.Root, documentId, cancellationToken);
         var authoritativeProperties = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
@@ -1411,7 +1429,9 @@ public sealed partial class PdmWorkflowService(
                 FileName: normalizedFileName)
             {
                 ExpectedVersionId = expectedVersionId,
-                RequireBaseVersion = requireBaseVersion
+                RequireBaseVersion = requireBaseVersion,
+                KeepEditing = keepEditing,
+                HandoffTo = string.IsNullOrWhiteSpace(handoffTo) ? null : handoffTo.Trim()
             },
             drawingReviewWritebackId,
             cancellationToken);
@@ -1434,7 +1454,7 @@ public sealed partial class PdmWorkflowService(
                 string.Concat(document.DrawingNumber, " / ", document.Name, " -> ", result.Document.DrawingNumber, " / ", result.Document.Name),
                 cancellationToken);
         }
-        await NotifyEditReleasedAsync(document, cancellationToken);
+        if (result.Document.CheckedOutBy is null) await NotifyEditReleasedAsync(document, cancellationToken, result.HandoffTo);
         result = result with { BomRefreshDeferred = deferBomRefresh && !isProjectRoot };
         if (result.VersionCreated && !result.BomRefreshDeferred)
         {
@@ -1487,7 +1507,7 @@ public sealed partial class PdmWorkflowService(
     public async Task<ArchiveBatchReceipt> CheckInBatchAsync(Guid batchId, string requestHash, string actor, UserRole role, Guid sessionId,
         IReadOnlyList<ArchiveBatchInput> inputs, CancellationToken cancellationToken)
     {
-        if (batchId == Guid.Empty || sessionId == Guid.Empty || inputs.Count == 0 || inputs.Count > 2000
+        if (batchId == Guid.Empty || sessionId == Guid.Empty || inputs.Count == 0
             || inputs.Select(input => input.DocumentId).Distinct().Count() != inputs.Count
             || inputs.Select(input => input.Snapshot.ProjectId).Distinct().Count() != 1)
             throw new PdmRuleException("整批存档清单为空、重复或跨项目，尚未提交任何图档。");
@@ -1511,11 +1531,12 @@ public sealed partial class PdmWorkflowService(
         {
             var latest = (await ReadArchiveHistoryAsync(input.DocumentId, cancellationToken, histories)).FirstOrDefault();
             ArchiveVersionGuard.ValidateBaseVersion(latest?.Id, input.ExpectedVersionId, true);
-            var validation = await ValidateCheckInRequestAsync(input.DocumentId, actor, role, sessionId, input.Properties, input.Snapshot,
+            var snapshot = ArchiveReferenceVersions.RestoreMissing(input.Snapshot, latest?.ReferenceSnapshot, planned);
+            var validation = await ValidateCheckInRequestAsync(input.DocumentId, actor, role, sessionId, input.Properties, snapshot,
                 input.IsProjectRoot, cancellationToken, input.DrawingNumber, input.Name, input.FileName,
                 input.DrawingReviewWritebackId);
             referenceDocuments[input.DocumentId] = validation.Document;
-            await ValidateArchivedReferencesAsync(input.Snapshot.Root, input.DocumentId, cancellationToken, planned, actor, sessionId,
+            await ValidateArchivedReferencesAsync(snapshot.Root, input.DocumentId, cancellationToken, planned, actor, sessionId,
                 referenceDocuments, histories);
             await fileStorage.VerifyStoredFileAsync(validation.Project, input.File, cancellationToken);
             var properties = latest is null ? new Dictionary<string, string?>(input.Properties, StringComparer.OrdinalIgnoreCase)
@@ -1537,10 +1558,11 @@ public sealed partial class PdmWorkflowService(
                 .Concat(await repository.GetBomAsync(validation.Project.Id, BomKind.NonStandard, cancellationToken))
                 .Concat(await repository.GetBomAsync(validation.Project.Id, BomKind.Mechanical, cancellationToken)).Where(item => !item.IsManuallyExcluded).ToArray();
             electrical ??= await repository.GetBomAsync(validation.Project.Id, BomKind.Electrical, cancellationToken);
-            var commit = new DocumentVersionCommit(input.File, input.Comment.Trim(), properties, input.Snapshot, mechanical, electrical,
+            var commit = new DocumentVersionCommit(input.File, input.Comment.Trim(), properties, snapshot, mechanical, electrical,
                 IsProjectRoot: input.IsProjectRoot, DrawingNumber: latest is null ? input.DrawingNumber : null,
                 Name: latest is null ? input.Name : null, FileName: input.FileName)
-            { ExpectedVersionId = input.ExpectedVersionId, RequireBaseVersion = true };
+            { ExpectedVersionId = input.ExpectedVersionId, RequireBaseVersion = true, KeepEditing = input.KeepEditing, HandoffTo = string.IsNullOrWhiteSpace(input.HandoffTo) ? null : input.HandoffTo.Trim() };
+            await ValidateEditDispositionAsync(input.DocumentId, actor, input.KeepEditing, input.HandoffTo, input.DrawingReviewWritebackId, cancellationToken);
             commits.Add(new ArchiveBatchFile(input.DocumentId, commit, input.DrawingReviewWritebackId));
         }
         var receipt = await repository.CheckInBatchVersionsAsync(batchId, requestHash, actor, sessionId, commits, cancellationToken);
@@ -1552,9 +1574,13 @@ public sealed partial class PdmWorkflowService(
     public async Task CompleteArchiveBatchFollowupAsync(ArchiveBatchFollowup followup, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        foreach (var document in followup.PreviousDocuments) await NotifyEditReleasedAsync(document, cancellationToken);
+        foreach (var document in followup.PreviousDocuments)
+        {
+            var result = followup.Receipt.Results.Single(item => item.Document.Id == document.Id);
+            if (result.Document.CheckedOutBy is null) await NotifyEditReleasedAsync(document, cancellationToken, result.HandoffTo);
+        }
         var snapshot = await repository.GetLatestReferenceSnapshotAsync(followup.Receipt.ProjectId, cancellationToken);
-        if (snapshot is not null)
+        if (snapshot is not null && !snapshot.Root.HasPendingStructureIndex)
         {
             await EnsureBomChangeAllowedAsync(followup.Receipt.ProjectId, cancellationToken, BomKind.Standard, BomKind.NonStandard);
             await GenerateMechanicalBomFromSnapshotAsync(followup.Receipt.ProjectId, snapshot, followup.Receipt.Actor, cancellationToken, true);
@@ -1653,6 +1679,8 @@ public sealed partial class PdmWorkflowService(
     {
         var latest = (await repository.ListDocumentVersionsAsync(documentId, cancellationToken)).FirstOrDefault();
         ArchiveVersionGuard.ValidateBaseVersion(latest?.Id, expectedVersionId, requireBaseVersion);
+        if (expectedVersionId == latest?.Id)
+            snapshot = ArchiveReferenceVersions.RestoreMissing(snapshot, latest?.ReferenceSnapshot, plannedDocumentIds);
         _ = await ValidateCheckInRequestAsync(
             documentId,
             actor,
@@ -1785,6 +1813,7 @@ public sealed partial class PdmWorkflowService(
     {
         var canRequestPermission = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DocumentLockRequestRelease, cancellationToken);
         var canForcePermission = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DocumentLockForceRelease, cancellationToken);
+        var canEmergencyPermission = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DocumentLockEmergencyRelease, cancellationToken);
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
         var now = timeProvider.GetUtcNow();
         var result = new List<EditLockSummary>();
@@ -1797,9 +1826,10 @@ public sealed partial class PdmWorkflowService(
             var canEditDocument = !owned && canRequestPermission
                 && await repository.HasDocumentAccessAsync(document.Id, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
             var lockManager = canForcePermission && IsProjectLockManager(project, actor, role);
+            var emergencyManager = canEmergencyPermission && IsProjectLockManager(project, actor, role);
             var canReleaseOwn = owned && await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken)
                 && await repository.HasDocumentAccessAsync(document.Id, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
-            if (!owned && !canEditDocument && !lockManager) continue;
+            if (!owned && !canEditDocument && !lockManager && !emergencyManager) continue;
 
             var checkedOutAt = document.CheckedOutAt ?? document.UpdatedAt;
             var heartbeatAt = document.CheckoutLastHeartbeatAt ?? checkedOutAt;
@@ -1815,7 +1845,9 @@ public sealed partial class PdmWorkflowService(
                 document.Id, document.ProjectId, project.Code, project.Name, document.DrawingNumber, document.Name, document.FileName,
                 document.CheckedOutBy, checkedOutAt, document.CheckoutMachine, heartbeatAt, leaseExpiresAt, connectionState, attention,
                 document.CheckoutReleaseRequestedBy, document.CheckoutReleaseRequestedAt, document.CheckoutReleaseRequestReason,
-                owned, canEditDocument, (lockManager || canReleaseOwn) && connectionState == EditLockConnectionState.Offline));
+                owned, canEditDocument, (lockManager || canReleaseOwn) && connectionState == EditLockConnectionState.Offline)
+            { SessionId = document.CheckoutSessionId, CanEmergencyRelease = canEmergencyPermission && IsProjectLockManager(project, actor, role)
+                && document.State is not (DocumentLifecycleState.InReview or DocumentLifecycleState.Obsolete) && !document.DrawingReviewLocked });
         }
         return result.OrderByDescending(item => item.AttentionLevel).ThenBy(item => item.CheckedOutAt).ToArray();
     }
@@ -1828,12 +1860,12 @@ public sealed partial class PdmWorkflowService(
         if (string.IsNullOrWhiteSpace(current.CheckedOutBy)) throw new PdmConflictException("图档当前没有编辑权限可申请释放。");
         if (string.Equals(current.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase)) throw new PdmRuleException("当前编辑权限属于本人，请在SolidWorks中提交存档或放弃编辑。");
         reason = RequiredReason(reason);
-        var sourceKey = $"edit-wait:{documentId:N}:{current.CheckoutSessionId:N}";
+        current = await repository.RequestCheckoutReleaseAsync(documentId, actor, reason, cancellationToken);
+        var sourceKey = EditHandoff.WaitingKey(current);
         await repository.CreateUserNotificationsAsync([
             new(Guid.NewGuid(), actor, "EditLockWaiting", "已申请编辑图档", $"{current.FileName}：系统将在本次编辑结束后通知您。", current.ProjectId, null, sourceKey, timeProvider.GetUtcNow(), null),
-            new(Guid.NewGuid(), current.CheckedOutBy, "EditLockRequested", "有人需要编辑图档", $"{actor}需要编辑{current.FileName}。关闭图档后系统会自动保留草稿并结束编辑；仍需继续工作时可以保持打开。", current.ProjectId, null, $"edit-request:{documentId:N}:{current.CheckoutSessionId:N}:{actor}", timeProvider.GetUtcNow(), null)
+            new(Guid.NewGuid(), current.CheckedOutBy!, "EditLockRequested", "有人需要编辑图档", $"{actor}需要编辑{current.FileName}。请存档交接或说明继续编辑原因。申请说明：{reason}", current.ProjectId, null, $"edit-request:{sourceKey}:{actor}", timeProvider.GetUtcNow(), null)
         ], cancellationToken);
-        await repository.RequestCheckoutReleaseAsync(documentId, actor, reason, cancellationToken);
         await AuditAsync(actor, "document.checkout.release-request", nameof(PdmDocument), documentId.ToString(), $"当前编辑人：{current.CheckedOutBy}；原因：{reason}", cancellationToken);
         var summary = (await ListEditLocksAsync(actor, role, cancellationToken)).FirstOrDefault(item => item.DocumentId == documentId);
         if (summary is null) throw new PdmConflictException("该图档已结束编辑，请刷新后直接点击编辑。");
@@ -1858,7 +1890,9 @@ public sealed partial class PdmWorkflowService(
         reason = RequiredReason(reason);
         var priorOwner = current.CheckedOutBy;
         var priorSession = current.CheckoutSessionId;
-        var updated = await repository.ForceReleaseOfflineCheckoutAsync(documentId, priorSession, heartbeatBefore, now, cancellationToken);
+        var updated = priorSession is Guid activeSession && current.CheckedOutAt is DateTimeOffset started
+            ? await repository.ReclaimCheckoutAsync(documentId, activeSession, started, heartbeatBefore, now, cancellationToken)
+            : await repository.ForceReleaseOfflineCheckoutAsync(documentId, priorSession, heartbeatBefore, now, cancellationToken);
         await AuditAsync(actor, "document.checkout.force-release", nameof(PdmDocument), documentId.ToString(), $"原编辑人：{priorOwner}；原会话：{priorSession}；电脑：{current.CheckoutMachine ?? "未知"}；原因：{reason}", cancellationToken);
         await NotifyEditReleasedAsync(current, cancellationToken);
         await repository.CreateUserNotificationsAsync([new(Guid.NewGuid(), priorOwner!, "EditLockReleased", "离线图档已结束占用", $"{current.FileName}的离线占用已由{actor}处理。本地修改仍可保留，再次编辑时请核对服务器版本。", current.ProjectId, null, $"edit-reclaimed:{documentId:N}:{priorSession:N}", now, null)], cancellationToken);
@@ -1884,12 +1918,18 @@ public sealed partial class PdmWorkflowService(
         return updated;
     }
 
-    private async Task NotifyEditReleasedAsync(PdmDocument prior, CancellationToken cancellationToken)
+    private async Task NotifyEditReleasedAsync(PdmDocument prior, CancellationToken cancellationToken, string? handoffTo = null)
     {
-        var recipients = await repository.ListNotificationRecipientsAsync($"edit-wait:{prior.Id:N}:{prior.CheckoutSessionId:N}", cancellationToken);
+        var recipients = await repository.ListNotificationRecipientsAsync(EditHandoff.WaitingKey(prior), cancellationToken);
         await repository.CreateUserNotificationsAsync(recipients.Select(recipient => new UserNotification(
-            Guid.NewGuid(), recipient, "EditLockAvailable", "图档已结束编辑", $"{prior.FileName}的原编辑会话已结束，可打开图档尝试编辑。", prior.ProjectId, null,
-            $"edit-available:{prior.Id:N}:{prior.CheckoutSessionId:N}", timeProvider.GetUtcNow(), null)).ToArray(), cancellationToken);
+            Guid.NewGuid(), recipient, "EditLockAvailable", handoffTo is null ? "图档已结束编辑" : "图档已定向交接",
+            handoffTo is null ? $"{prior.FileName}的原编辑会话已结束，可打开图档尝试编辑。" : $"{prior.FileName}已存档并交接给{handoffTo}，为其预留5分钟接手时间。", prior.ProjectId, null,
+            $"edit-available:{EditHandoff.WaitingKey(prior)}", timeProvider.GetUtcNow(), null)).ToArray(), cancellationToken);
+        if (handoffTo is not null)
+        {
+            await EditNoticeAsync([handoffTo], "EditLockHandoff", "请接收图档交接", $"{prior.CheckedOutBy}已将{prior.FileName}存档并交接给您，请在5分钟内从PLM获取最新版本并编辑。", prior.ProjectId, $"edit-handoff:{prior.Id:N}:{prior.CheckoutSessionId:N}:{prior.CheckedOutAt?.UtcTicks}", cancellationToken);
+            await AuditAsync(prior.CheckedOutBy ?? "system", "document.checkout.handoff", nameof(PdmDocument), prior.Id.ToString(), "存档后定向交接给" + handoffTo + "；预留5分钟", cancellationToken);
+        }
     }
 
     public async Task<(PdmDocument Document, DocumentVersion Version)> RestoreVersionAsync(
@@ -2056,6 +2096,8 @@ public sealed partial class PdmWorkflowService(
             versionsByDocument[targetDocumentId] = loadedVersions;
             return loadedVersions;
         }
+        // F03: expand only from a captured native file inventory, not old feature-source discovery.
+        if (rootVersion.ReferenceSnapshot.UsesNativeFileInventory) treeScopeOnly = false;
         var scopedRoot = treeScopeOnly ? ArchiveSafety.StructureOnly(rootVersion.ReferenceSnapshot) : rootVersion.ReferenceSnapshot;
         if (allowCurrentVersionFallback)
         {
@@ -2077,6 +2119,8 @@ public sealed partial class PdmWorkflowService(
             var optionalCurrentDrawing = allowCurrentVersionFallback
                 && !isRoot
                 && node.Kind == DocumentKind.Drawing;
+            try
+            {
             if (node.Status == ReferenceNodeStatus.Missing)
             {
                 if (optionalCurrentDrawing)
@@ -2123,7 +2167,7 @@ public sealed partial class PdmWorkflowService(
                 referencedDocumentId = matches[0].Id;
             }
 
-            if (!isRoot && authorizedDocumentIds.Add(referencedDocumentId))
+            if (!isRoot && !authorizedDocumentIds.Contains(referencedDocumentId))
             {
                 if (currentProjectDocumentsById.TryGetValue(referencedDocumentId, out var referencedDocument))
                 {
@@ -2133,6 +2177,7 @@ public sealed partial class PdmWorkflowService(
                 {
                     await RequireDocumentAccessAsync(referencedDocumentId, actor, role, FolderAccess.View, cancellationToken);
                 }
+                authorizedDocumentIds.Add(referencedDocumentId);
             }
 
             DocumentVersion? version;
@@ -2263,6 +2308,13 @@ public sealed partial class PdmWorkflowService(
             files.Add(item);
             filesByDocument.Add(referencedDocumentId, item);
             fileNames[fileName] = referencedDocumentId;
+            }
+            catch (Exception error) when (optionalCurrentDrawing && (error is UnauthorizedAccessException || error is PdmRuleException || error is PdmNotFoundException || error is PdmConflictException || error is IOException))
+            {
+                warnings.Add(error is UnauthorizedAccessException
+                    ? "部分辅助工程图无读取权限，模型可继续打开。"
+                    : $"辅助工程图{node.FileName}暂未取回，模型可继续打开；该工程图仍待处理。");
+            }
         }
 
         if (allowCurrentVersionFallback)
@@ -2277,9 +2329,12 @@ public sealed partial class PdmWorkflowService(
                     continue;
                 }
 
-                if (authorizedDocumentIds.Add(drawingDocument.Id))
+                try
+                {
+                if (!authorizedDocumentIds.Contains(drawingDocument.Id))
                 {
                     RequireProjectDocumentAccess(drawingDocument, FolderAccess.View);
+                    authorizedDocumentIds.Add(drawingDocument.Id);
                 }
                 var drawingVersions = await ListOpenVersionsAsync(drawingDocument.Id);
                 var modelFile = filesByDocument[relation.ModelDocumentId];
@@ -2323,6 +2378,13 @@ public sealed partial class PdmWorkflowService(
                 files.Add(drawingFile);
                 filesByDocument.Add(drawingDocument.Id, drawingFile);
                 fileNames[drawingFileName] = drawingDocument.Id;
+                }
+                catch (Exception error) when (error is UnauthorizedAccessException || error is PdmRuleException || error is PdmNotFoundException || error is PdmConflictException || error is IOException)
+                {
+                    warnings.Add(error is UnauthorizedAccessException
+                        ? "部分辅助工程图无读取权限，模型可继续打开。"
+                        : $"辅助工程图{drawingDocument.FileName}暂未取回，模型可继续打开；该工程图仍待处理。" );
+                }
             }
         }
 
@@ -2426,6 +2488,7 @@ public sealed partial class PdmWorkflowService(
 
         var snapshot = await repository.GetLatestReferenceSnapshotAsync(projectId, cancellationToken)
             ?? throw new PdmRuleException("项目尚无已存档的引用树快照，不能创建发布包。");
+        RequireCompleteReleaseIndex(snapshot);
         if (referenceSnapshotId.HasValue && referenceSnapshotId.Value != Guid.Empty && referenceSnapshotId.Value != snapshot.SnapshotId)
         {
             throw new PdmConflictException("指定的引用树快照不是项目当前最新快照，请刷新后重试。");
@@ -2446,7 +2509,7 @@ public sealed partial class PdmWorkflowService(
             || (!legacyMode && !BomReady(BomKind.NonStandard, nonStandard, validationRules))
             || !BomReady(BomKind.Electrical, electrical, validationRules))
         {
-            throw new PdmRuleException("标准件BOM、非标件BOM和电气BOM中的有效物料资料必须齐全；空BOM自动按无此类物料处理。");
+            throw new PdmRuleException("标准件BOM、非标件BOM和电气件BOM中的有效物料资料必须齐全；空BOM自动按无此类物料处理。");
         }
 
         var standardVersion = await ResolveBomVersionForReleaseAsync(projectId, BomKind.Standard, standard.Where(IsPublishableBomItem).ToArray(), actor, changeNumber, changeReason, effectiveSerialFrom, effectiveSerialTo, validationRules, cancellationToken);
@@ -2577,7 +2640,7 @@ public sealed partial class PdmWorkflowService(
             (targetKind == BomKind.Standard ? standard : targetKind == BomKind.NonStandard ? nonStandard : electrical).Where(InRoot).ToArray(),
             cancellationToken, rootDocumentId: rootDocumentId, hasConfirmedRemovals: confirmedRemovedBomItemIds?.Count > 0);
         if (!BomReady(targetKind, targetItems, settings.ValidationRules))
-            throw new PdmRuleException($"{BomKindLabel(targetKind)}BOM仍有资料不完整的物料，不能创建发布包。{MissingBomSummary(targetKind, targetItems, settings.ValidationRules)}");
+            throw new PdmRuleException($"{BomName(targetKind)}仍有资料不完整的物料，不能创建发布包。{MissingBomSummary(targetKind, targetItems, settings.ValidationRules)}");
         if (targetKind != BomKind.Electrical)
         {
             var unresolved = await repository.GetBomAsync(projectId, BomKind.Unclassified, cancellationToken);
@@ -2589,6 +2652,8 @@ public sealed partial class PdmWorkflowService(
         BomVersion? nonStandardVersion = null;
         BomVersion? electricalVersion = null;
         var snapshotItems = await SupplementSnapshotItemsAsync(projectId, scope, targetKind, targetItems, cancellationToken, confirmedRemovedBomItemIds);
+        await RequireCompleteScopedReleaseIndexAsync(snapshot, scope, targetItems, confirmedRemovedBomItemIds,
+            rootDocumentId, projectId, cancellationToken);
         number = await repository.ReserveBusinessNumberAsync(numberPrefix, cancellationToken);
         if (!IsSupplementScope(scope)) changeNumber = number;
         if (!IsLongLeadScope(scope))
@@ -2740,7 +2805,7 @@ public sealed partial class PdmWorkflowService(
             if (targetKind == BomKind.Standard) await EnsureStandardMaterialMasterReadyAsync(selectedItems, cancellationToken);
             await EnsureReleaseScopeAvailableAsync(package.ProjectId, package.Scope, selectedItems, currentItems, cancellationToken, package.Id, package.RootDocumentId);
             if (!BomReady(targetKind, selectedItems, settings.ValidationRules))
-                throw new PdmRuleException($"{BomKindLabel(targetKind)}BOM仍有资料不完整的物料，不能保存发布草稿。{MissingBomSummary(targetKind, selectedItems, settings.ValidationRules)}");
+                throw new PdmRuleException($"{BomName(targetKind)}仍有资料不完整的物料，不能保存发布草稿。{MissingBomSummary(targetKind, selectedItems, settings.ValidationRules)}");
             updated = updated with
             {
                 ReferenceSnapshotId = snapshot?.SnapshotId,
@@ -2778,9 +2843,13 @@ public sealed partial class PdmWorkflowService(
             if (targetKind == BomKind.Standard) await EnsureStandardMaterialMasterReadyAsync(selectedItems, cancellationToken);
             await EnsureReleaseScopeAvailableAsync(package.ProjectId, package.Scope, selectedItems, currentItems, cancellationToken, package.Id, package.RootDocumentId, updated.ConfirmedRemovedBomItemIds.Count > 0);
             if (!BomReady(targetKind, selectedItems, settings.ValidationRules))
-                throw new PdmRuleException($"{BomKindLabel(targetKind)}BOM仍有资料不完整的物料，不能保存发布草稿。{MissingBomSummary(targetKind, selectedItems, settings.ValidationRules)}");
+                throw new PdmRuleException($"{BomName(targetKind)}仍有资料不完整的物料，不能保存发布草稿。{MissingBomSummary(targetKind, selectedItems, settings.ValidationRules)}");
+            var snapshotItems = await SupplementSnapshotItemsAsync(package.ProjectId, package.Scope, targetKind, selectedItems, cancellationToken, updated.ConfirmedRemovedBomItemIds);
+            await RequireCompleteScopedReleaseIndexAsync(snapshot, package.Scope, selectedItems, updated.ConfirmedRemovedBomItemIds,
+                package.RootDocumentId, package.ProjectId, cancellationToken,
+                targetKind == BomKind.Standard ? package.StandardBomVersionId : package.NonStandardBomVersionId);
             var targetVersion = await ResolveBomVersionForReleaseAsync(
-                package.ProjectId, targetKind, await SupplementSnapshotItemsAsync(package.ProjectId, package.Scope, targetKind, selectedItems, cancellationToken, updated.ConfirmedRemovedBomItemIds), actor,
+                package.ProjectId, targetKind, snapshotItems, actor,
                 package.ChangeNumber ?? package.Number, normalizedReason,
                 package.EffectiveSerialFrom ?? project.SerialNumbers.FirstOrDefault() ?? "未指定",
                 package.EffectiveSerialTo, settings.ValidationRules, cancellationToken);
@@ -2874,7 +2943,8 @@ public sealed partial class PdmWorkflowService(
     {
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
-        var items = await repository.GetBomAsync(projectId, kind, cancellationToken);
+        var items = await BomDrawingRevision.CurrentAsync(repository,
+            await repository.GetBomAsync(projectId, kind, cancellationToken), cancellationToken);
         if (kind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical))
             return items.Select(item => item with { IsComplete = false }).ToArray();
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
@@ -3081,7 +3151,7 @@ public sealed partial class PdmWorkflowService(
                 || string.IsNullOrWhiteSpace(input.Revision))
             {
                 throw new PdmRuleException(kind == BomKind.Electrical
-                    ? "电气BOM序号、名称、数量、单位和版本必须有效。"
+                    ? "电气件BOM序号、名称、数量、单位和版本必须有效。"
                     : "BOM序号、名称、数量、单位和版本必须有效。");
             }
 
@@ -3178,7 +3248,13 @@ public sealed partial class PdmWorkflowService(
         var saved = await repository.ReplaceBomAsync(projectId, kind, items, cancellationToken);
         var writebacks = new List<CadPropertyWriteback>();
         var writebackAudits = new List<AuditEntry>();
-        var writebackVersions = new Dictionary<Guid, DocumentVersion?>();
+        var writebackDocuments = saved.Where(item => writebackIds.Contains(item.Id))
+            .Select(item => item.SourceDocumentId!.Value).Distinct()
+            .Select(id => new DocumentVersionVerificationRequest(id, null)).ToArray();
+        var writebackVersions = writebackDocuments.Length == 0
+            ? new Dictionary<Guid, DocumentVersionVerification?>()
+            : (await repository.ListDocumentVersionVerificationsAsync(writebackDocuments, cancellationToken))
+                .ToDictionary(result => result.DocumentId, result => result.Latest);
         foreach (var item in saved.Where(item => writebackIds.Contains(item.Id)))
         {
             var request = await CreateCadPropertyWritebackAsync(item, actor, saveSettings, cancellationToken, writebackVersions);
@@ -3266,7 +3342,7 @@ public sealed partial class PdmWorkflowService(
                             IsComplete = false,
                             IsPendingClassification = false,
                             ReconciliationStatus = item.Kind.ToString(),
-                            ReconciliationNote = $"{BomKindLabel(item.Kind)}仅保留在源数据中，不进入标准件、非标件或电气BOM。",
+                            ReconciliationNote = $"{BomKindLabel(item.Kind)}仅保留在源数据中，不进入标准件、非标件或电气件BOM。",
                             ReconciliationUpdatedBy = actor,
                             ReconciliationUpdatedAt = now
                         };
@@ -3352,9 +3428,9 @@ public sealed partial class PdmWorkflowService(
                 break;
             case "classify":
                 if (command.TargetKind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical))
-                    throw new PdmRuleException("待分类物料只能归入标准件、非标件或电气BOM。");
+                    throw new PdmRuleException("待分类物料只能归入标准件、非标件或电气件BOM。");
                 if (item.SourceDocumentId.HasValue && command.TargetKind == BomKind.Electrical)
-                    throw new PdmRuleException("图档源数据只能归入标准件或非标件BOM；电气BOM独立维护。");
+                    throw new PdmRuleException("图档源数据只能归入标准件或非标件BOM；电气件BOM独立维护。");
                 resolved = item with
                 {
                     Kind = command.TargetKind.Value,
@@ -3365,7 +3441,7 @@ public sealed partial class PdmWorkflowService(
                     IsManuallyRetained = false,
                     IsComplete = HasRequiredBomValues(item with { Kind = command.TargetKind.Value }, command.TargetKind.Value, validationRules),
                     ReconciliationStatus = ReconcileManuallyClassified,
-                    ReconciliationNote = $"图档未提供有效分类，已由{actor}归入{BomKindLabel(command.TargetKind.Value)}BOM。",
+                    ReconciliationNote = $"图档未提供有效分类，已由{actor}归入{BomName(command.TargetKind.Value)}。",
                     ReconciliationUpdatedBy = actor,
                     ReconciliationUpdatedAt = now,
                     PropertyWritebackStatus = item.SourceDocumentId.HasValue ? CadPropertyWritebackStatus.PendingSave : item.PropertyWritebackStatus
@@ -3446,7 +3522,7 @@ public sealed partial class PdmWorkflowService(
         if (originals.Values.Any(item => item.IsManuallyExcluded))
             throw new PdmRuleException("回收站中的物料不能直接编辑，请先执行恢复。");
         if (fields.Contains("kind") && command.TargetKind == BomKind.Electrical && originals.Values.Any(item => item.SourceDocumentId.HasValue))
-            throw new PdmRuleException("图档源数据只能归入标准件或非标件BOM；电气BOM独立维护。");
+            throw new PdmRuleException("图档源数据只能归入标准件或非标件BOM；电气件BOM独立维护。");
         if (fields.Contains("kind") && command.TargetKind is (BomKind.Virtual or BomKind.ComponentDrawing) && originals.Values.Any(item => !item.SourceDocumentId.HasValue))
             throw new PdmRuleException("虚拟件和部件图仅适用于有图档来源的物料。");
         var updatedById = new Dictionary<Guid, BomItem>();
@@ -3483,7 +3559,7 @@ public sealed partial class PdmWorkflowService(
                 ReconciliationNote = fields.Contains("kind")
                     ? targetKind is BomKind.Virtual or BomKind.ComponentDrawing
                         ? $"已由{actor}标记为{BomKindLabel(targetKind)}，仅保留在源数据中。"
-                        : $"已由{actor}人工归入{BomKindLabel(targetKind)}BOM。"
+                        : $"已由{actor}人工归入{BomName(targetKind)}。"
                     : original.ReconciliationNote,
                 ReconciliationUpdatedBy = fields.Contains("kind") ? actor : original.ReconciliationUpdatedBy,
                 ReconciliationUpdatedAt = fields.Contains("kind") ? reconciliationTime : original.ReconciliationUpdatedAt
@@ -4897,7 +4973,7 @@ public sealed partial class PdmWorkflowService(
                 SelectScopedReleaseItems(targetKind, targetItems, package.SelectedBomItemIds, package.ConfirmedRemovedBomItemIds.Count > 0), targetKind, validationRules);
             if (targetKind == BomKind.Standard) await EnsureStandardMaterialMasterReadyAsync(targetItems, cancellationToken);
             if (!BomReady(targetKind, targetItems, validationRules))
-                throw new PdmRuleException($"{BomKindLabel(targetKind)}BOM仍有资料不完整的物料，不能提交审批。");
+                throw new PdmRuleException($"{BomName(targetKind)}仍有资料不完整的物料，不能提交审批。");
             if (targetKind != BomKind.Electrical && (await repository.GetBomAsync(package.ProjectId, BomKind.Unclassified, cancellationToken)).Any(item => !item.IsManuallyExcluded))
                 throw new PdmRuleException("源数据中仍有待分类或待确认物料，请处理完成后再提交机械发布包。");
             var targetVersionId = targetKind == BomKind.Standard ? package.StandardBomVersionId
@@ -4906,10 +4982,10 @@ public sealed partial class PdmWorkflowService(
             var targetVersion = targetVersionId.HasValue
                 ? await repository.FindBomVersionAsync(package.ProjectId, targetVersionId.Value, cancellationToken)
                 : null;
-            if (targetVersion is null) throw new PdmConflictException($"发布包绑定的{BomKindLabel(targetKind)}BOM版本不存在。");
+            if (targetVersion is null) throw new PdmConflictException($"发布包绑定的{BomName(targetKind)}版本不存在。");
             if (!BomSnapshotsEqual(targetVersion.Items, WithCurrentCompleteness(
                 await SupplementSnapshotItemsAsync(package.ProjectId, package.Scope, targetKind, targetItems, cancellationToken, package.ConfirmedRemovedBomItemIds), targetKind, validationRules)))
-                throw new PdmConflictException($"{BomKindLabel(targetKind)}BOM在发布包创建后已变化，请撤销该草稿并重新创建。");
+                throw new PdmConflictException($"{BomName(targetKind)}在发布包创建后已变化，请撤销该草稿并重新创建。");
             versionsForReview.Add(targetVersion);
         }
         if (package.Scope == ReleaseScope.LegacyCombined || IsNonStandardScope(package.Scope))
@@ -5351,6 +5427,9 @@ public sealed partial class PdmWorkflowService(
         if (settings.CheckoutLeaseMinutes is < 2 or > 60 || settings.CheckoutLeaseMinutes * 60 < settings.CheckoutHeartbeatSeconds * 2)
             throw new PdmRuleException("编辑租约必须为2到60分钟，且至少是心跳间隔的两倍。");
         if (settings.CheckoutOfflineGraceMinutes is < 5 or > 1440) throw new PdmRuleException("离线宽限必须为5到1440分钟。");
+        if (settings.CheckoutIdleReleaseMinutes is < 5 or > 1440 || settings.CheckoutReleaseCountdownSeconds is < 30 or > 300)
+            throw new PdmRuleException("闲置释放等待须为5到1440分钟，倒计时须为30到300秒。");
+        if (settings.CheckoutForceReleaseHours is < 24 or > 720) throw new PdmRuleException("长期离线自动回收须为24到720小时。");
         if (settings.CheckoutReminderHours < 1
             || settings.CheckoutStrongReminderHours <= settings.CheckoutReminderHours
             || settings.CheckoutOverdueHours <= settings.CheckoutStrongReminderHours
@@ -5372,6 +5451,10 @@ public sealed partial class PdmWorkflowService(
         bool apply,
         bool preserveManualOverrides = true)
     {
+        // B05/E11: incomplete indexing must never be interpreted as deleted material.
+        // The native file batch is already committed; only BOM derivation waits.
+        if (snapshot.Root.HasPendingStructureIndex)
+            throw new PdmRuleException("图档已存档，装配结构仍待补全。现有BOM已保留；请完整读取结构并重新存档后再更新BOM。");
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
         var documents = (await repository.ListDocumentsAsync(projectId, cancellationToken)).ToDictionary(item => item.Id);
         var electrical = (await repository.GetBomAsync(projectId, BomKind.Electrical, cancellationToken)).ToArray();
@@ -5408,7 +5491,7 @@ public sealed partial class PdmWorkflowService(
         async Task VisitAsync(DocumentReferenceNode node, decimal parentQuantity, bool isRoot, string? parentDrawingNumber)
         {
             if (node.Role == ReferenceRole.ExternalFileDependency) return;
-            if (node.Status == ReferenceNodeStatus.Suppressed || node.Status == ReferenceNodeStatus.Missing) return;
+            if (node.IsSuppressed || node.Status == ReferenceNodeStatus.Suppressed || node.Status == ReferenceNodeStatus.Missing) return;
             var quantity = parentQuantity * Math.Max(node.Quantity, 1);
             if (node.Kind == DocumentKind.Drawing) return;
 
@@ -5494,7 +5577,7 @@ public sealed partial class PdmWorkflowService(
                     reconciliationStatus = ReconcileAutoAdded;
                     reconciliationNote = resolvedKind is BomKind.Virtual or BomKind.ComponentDrawing
                         ? $"图档源数据新增，已识别为{BomKindLabel(resolvedKind)}，仅保留在源数据中。"
-                        : $"图档源数据新增，已根据物料分类自动进入{BomKindLabel(resolvedKind)}BOM。";
+                        : $"图档源数据新增，已根据物料分类自动进入{BomName(resolvedKind)}。";
                     reconciliationUpdatedBy = actor;
                     reconciliationUpdatedAt = reconciliationTime;
                 }
@@ -5503,7 +5586,7 @@ public sealed partial class PdmWorkflowService(
                     reconciliationStatus = ReconcileRestored;
                     reconciliationNote = resolvedKind is BomKind.Virtual or BomKind.ComponentDrawing
                         ? $"图档源数据中已重新出现，已恢复为仅保留在源数据中的{BomKindLabel(resolvedKind)}。"
-                        : $"图档源数据中已重新出现，已恢复到{BomKindLabel(resolvedKind)}BOM。";
+                        : $"图档源数据中已重新出现，已恢复到{BomName(resolvedKind)}。";
                     reconciliationUpdatedBy = actor;
                     reconciliationUpdatedAt = reconciliationTime;
                 }
@@ -5513,7 +5596,7 @@ public sealed partial class PdmWorkflowService(
                     reconciliationNote = previous.IsPendingClassification
                         ? resolvedKind is BomKind.Virtual or BomKind.ComponentDrawing
                             ? $"图档源数据已补充分类，已识别为{BomKindLabel(resolvedKind)}，仅保留在源数据中。"
-                            : $"图档源数据已补充分类，已自动进入{BomKindLabel(resolvedKind)}BOM。"
+                            : $"图档源数据已补充分类，已自动进入{BomName(resolvedKind)}。"
                         : resolvedKind is BomKind.Virtual or BomKind.ComponentDrawing
                             ? $"图档源数据分类由{BomKindLabel(previous.Kind)}变更为{BomKindLabel(resolvedKind)}，已移出维护BOM。"
                             : $"图档源数据分类由{BomKindLabel(previous.Kind)}变更为{BomKindLabel(resolvedKind)}，已自动迁移。";
@@ -5721,7 +5804,7 @@ public sealed partial class PdmWorkflowService(
             await repository.SaveBomDraftAsync(projectId, BomKind.NonStandard, nonStandard.Where(IsPublishableBomItem).ToArray(), actor, cancellationToken);
             if (standard.Any(item => !item.IsPendingRemoval && !item.IsManuallyExcluded)) await repository.SetBomEmptyDeclarationAsync(projectId, BomKind.Standard, false, actor, cancellationToken);
             if (nonStandard.Any(item => !item.IsPendingRemoval && !item.IsManuallyExcluded)) await repository.SetBomEmptyDeclarationAsync(projectId, BomKind.NonStandard, false, actor, cancellationToken);
-            await AuditAsync(actor, "bom.generate", nameof(BomItem), projectId.ToString(), $"标准件{standard.Length}；非标件{nonStandard.Length}；电气BOM独立维护；虚拟件{virtualCount}；部件图{componentDrawingItems.Length}；待分类{unclassifiedCount}；待移除{pendingRemovalCount}；人工待确认{manualUnmatchedCount}", cancellationToken);
+            await AuditAsync(actor, "bom.generate", nameof(BomItem), projectId.ToString(), $"标准件{standard.Length}；非标件{nonStandard.Length}；电气件BOM独立维护；虚拟件{virtualCount}；部件图{componentDrawingItems.Length}；待分类{unclassifiedCount}；待移除{pendingRemovalCount}；人工待确认{manualUnmatchedCount}", cancellationToken);
         }
         return new BomGenerationResult(standard, nonStandard, electrical, unclassified, virtualItems, componentDrawingItems, virtualCount, unclassifiedCount, pendingRemovalCount, manualUnmatchedCount, apply);
     }
@@ -6086,6 +6169,8 @@ public sealed partial class PdmWorkflowService(
     private static IReadOnlyList<string> ReleaseRequiredFields(BomKind kind, BomValidationRules validationRules) =>
         BomValidationFieldCatalog.ReleaseRequiredFields(kind, validationRules);
 
+    private static string BomName(BomKind kind) => kind == BomKind.Electrical ? "电气件BOM" : BomKindLabel(kind) + "BOM";
+
     private static string BomKindLabel(BomKind kind) => kind switch
     {
         BomKind.Standard => "标准件",
@@ -6126,13 +6211,14 @@ public sealed partial class PdmWorkflowService(
     }
 
     private async Task<CadPropertyWriteback?> CreateCadPropertyWritebackAsync(BomItem item, string actor, PdmSystemSettings settings, CancellationToken cancellationToken,
-        Dictionary<Guid, DocumentVersion?>? versions = null)
+        Dictionary<Guid, DocumentVersionVerification?>? versions = null)
     {
         if (!item.SourceDocumentId.HasValue || item.Kind == BomKind.Electrical) return null;
-        DocumentVersion? latest;
+        DocumentVersionVerification? latest;
         if (versions is null || !versions.TryGetValue(item.SourceDocumentId.Value, out latest))
         {
-            latest = (await repository.ListDocumentVersionsAsync(item.SourceDocumentId.Value, cancellationToken)).FirstOrDefault();
+            latest = (await repository.ListDocumentVersionVerificationsAsync(
+                [new(item.SourceDocumentId.Value, null)], cancellationToken)).Single().Latest;
             if (versions is not null) versions[item.SourceDocumentId.Value] = latest;
         }
         if (latest is null) return null;
@@ -6156,7 +6242,7 @@ public sealed partial class PdmWorkflowService(
         Set(settings.BomWeightProperty, item.Weight);
         return new CadPropertyWriteback(
             Guid.NewGuid(), item.ProjectId, item.Id, item.SourceDocumentId.Value, item.SourceConfiguration,
-            latest.Id, latest.Revision.Display, properties, CadPropertyWritebackStatus.Pending, actor, timeProvider.GetUtcNow());
+            latest.Id, latest.Revision, properties, CadPropertyWritebackStatus.Pending, actor, timeProvider.GetUtcNow());
     }
 
     private async Task EnqueueLinkedDrawingMaterialCodeWritebacksAsync(BomItem item, string actor, CancellationToken cancellationToken)
@@ -6354,11 +6440,11 @@ public sealed partial class PdmWorkflowService(
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Select(BomValidationFieldCatalog.Label)
             .ToArray();
-        return missing.Length == 0 ? null : $"{BomKindLabel(kind)}BOM缺少{string.Join('、', missing)}";
+        return missing.Length == 0 ? null : $"{BomName(kind)}缺少{string.Join('、', missing)}";
     }
 
     private static bool IsProjectLockManager(Project project, string actor, UserRole role) =>
-        role == UserRole.Administrator
+        role is UserRole.Administrator or UserRole.PlatformAdministrator
         || string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
         || project.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)
         || project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
@@ -6474,7 +6560,7 @@ public sealed partial class PdmWorkflowService(
             throw new UnauthorizedAccessException("当前角色未配置执行此操作的权限。");
     }
 
-    /// <summary>三类BOM明细的编辑权限按专业拆分（可在角色权限页面配置）：电气BOM用电气权限，其余用机械权限。</summary>
+    /// <summary>三类BOM明细的编辑权限按专业拆分（可在角色权限页面配置）：电气件BOM用电气权限，其余用机械权限。</summary>
     private static string BomEditPermission(BomKind kind) =>
         kind == BomKind.Electrical ? PermissionCodes.BomElectricalEdit : PermissionCodes.BomMechanicalEdit;
 
@@ -6718,7 +6804,7 @@ public sealed partial class PdmWorkflowService(
     {
         if (latest.Id == reviewedVersionId) return true;
         if (latest.Status != DocumentVersionStatus.Released || latest.SourceVersionId != reviewedVersionId) return false;
-        // 正式源图会写入版次与二维码，字节指纹必然不同；来源版本关系才是审核继承依据。
+        // 正式版本沿用审批冻结源图；依据来源版本关系继承审核结论，不向原图写入版次或二维码。
         return latest.ReleasePackageId.HasValue && versions.Any(version => version.Id == reviewedVersionId);
     }
 
@@ -6984,7 +7070,7 @@ public sealed partial class PdmWorkflowService(
             && (package.Scope == ReleaseScope.LegacyCombined && PackageBomVersionIds(package).Length == 3
                 || package.Scope != ReleaseScope.LegacyCombined && !IsLongLeadScope(package.Scope) && ReleaseScopeBomKind(package.Scope) == targetKind));
         if (active is not null)
-            throw new PdmConflictException($"发布包{active.Number}正在审批或发布，{BomKindLabel(targetKind)}BOM暂时锁定。");
+            throw new PdmConflictException($"发布包{active.Number}正在审批或发布，{BomName(targetKind)}暂时锁定。");
     }
 
     private static FormalSupplementPolicy FormalSupplementPolicyForScope(FormalSupplementPolicies policies, ReleaseScope scope) =>
@@ -7018,7 +7104,7 @@ public sealed partial class PdmWorkflowService(
             .Where(package => package.Scope == formalScope && package.State == ReleasePackageState.Published && package.PublishedAt.HasValue)
             .OrderBy(package => package.PublishedAt)
             .FirstOrDefault()
-            ?? throw new PdmRuleException($"{BomKindLabel(ReleaseScopeBomKind(supplementScope))}BOM尚未完成首次正式发布，不能发起增补/变更。");
+            ?? throw new PdmRuleException($"{BomName(ReleaseScopeBomKind(supplementScope))}尚未完成首次正式发布，不能发起增补/变更。");
         var policy = formal.FormalSupplementPolicySnapshotted
             ? new FormalSupplementPolicy(formal.FormalSupplementMaximumCount, formal.FormalSupplementValidDays)
             : FormalSupplementPolicyForScope(configuredPolicies, supplementScope);
@@ -7052,7 +7138,7 @@ public sealed partial class PdmWorkflowService(
                     && (normalizedKinds.Count == 0 || normalizedKinds.Contains(ReleaseScopeBomKind(package.Scope)))));
         if (active is not null)
         {
-            var scopeLabel = active.Scope == ReleaseScope.LegacyCombined ? "三个BOM" : $"{BomKindLabel(ReleaseScopeBomKind(active.Scope))}BOM";
+            var scopeLabel = active.Scope == ReleaseScope.LegacyCombined ? "三个BOM" : $"{BomName(ReleaseScopeBomKind(active.Scope))}";
             throw new PdmConflictException($"发布包{active.ChangeNumber ?? active.Number}正在审批或发布，{scopeLabel}已锁定；请先完成、退回或撤回。");
         }
     }
@@ -7142,7 +7228,7 @@ public sealed partial class PdmWorkflowService(
         if (selectedIds.Count == 0) throw new PdmRuleException($"长交期发布必须至少选择一个{label}物料。");
         var selectedItems = currentItems.Where(item => selectedIds.Contains(item.Id)).ToArray();
         if (selectedItems.Length != selectedIds.Count)
-            throw new PdmRuleException($"长交期发布选择中包含已删除或不属于{label}BOM的物料。");
+            throw new PdmRuleException($"长交期发布选择中包含已删除或不属于{BomName(kind)}的物料。");
         if (selectedBomItemQuantities is null) return selectedItems;
         if (selectedBomItemQuantities.Keys.Any(id => !selectedIds.Contains(id)))
             throw new PdmRuleException($"长交期发布数量中包含未选择的{label}物料。");
@@ -7164,7 +7250,6 @@ public sealed partial class PdmWorkflowService(
         IReadOnlyList<BomItem> items,
         IReadOnlyList<Guid>? selectedBomItemIds, bool allowRemovalOnly = false)
     {
-        var label = BomKindLabel(kind);
         var selectedIds = (selectedBomItemIds ?? []).Distinct().ToHashSet();
         if (selectedIds.Count == 0)
         {
@@ -7173,7 +7258,7 @@ public sealed partial class PdmWorkflowService(
         }
         var selectedItems = items.Where(item => selectedIds.Contains(item.Id)).ToArray();
         if (selectedItems.Length != selectedIds.Count)
-            throw new PdmRuleException($"发布范围选择中包含已删除或不属于{label}BOM的物料。");
+            throw new PdmRuleException($"发布范围选择中包含已删除或不属于{BomName(kind)}的物料。");
 
         static string MaterialKey(BomItem item) => string.IsNullOrWhiteSpace(item.DrawingNumber)
             ? $"item:{item.Id:N}"

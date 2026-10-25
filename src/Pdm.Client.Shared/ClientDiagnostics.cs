@@ -38,6 +38,7 @@ public static class ClientDiagnostics
 
     public static void Initialize(string source, string build)
     {
+        ClientDeviceIdentity.Initialize(source);
         try
         {
             lock (Sync)
@@ -219,6 +220,7 @@ public static class ClientDiagnostics
                     using (var request = new HttpRequestMessage(HttpMethod.Post, new Uri(new Uri(target), "api/client-logs/batches")))
                     {
                         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential);
+                        ClientDeviceIdentity.Apply(request);
                         if (!string.IsNullOrEmpty(tenant)) request.Headers.Add("X-Company-Id", tenant);
                         request.Content = new ByteArrayContent(compressed.ToArray());
                         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/gzip");
@@ -322,6 +324,7 @@ public sealed class ClientDiagnosticHandler : DelegatingHandler
     public ClientDiagnosticHandler() : base(new HttpClientHandler()) { }
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        ClientDeviceIdentity.Apply(request);
         var id = request.Headers.TryGetValues("X-PDM-Request-ID", out var ids) ? ids.First() : Guid.NewGuid().ToString("N");
         if (!request.Headers.Contains("X-PDM-Request-ID")) request.Headers.Add("X-PDM-Request-ID", id);
         var action = request.Method + " " + request.RequestUri.AbsolutePath;

@@ -50,9 +50,14 @@ internal static class WorkspaceLocalStateReader
         Guid projectId,
         string projectCode,
         string currentUsername,
-        IReadOnlyCollection<WorkspaceDocumentStateRequest> documents)
+        IReadOnlyCollection<WorkspaceDocumentStateRequest> documents,
+        EditDraftJournal draftJournal = null)
     {
-        var projectDirectory = ProjectDirectory(workspaceRoot, projectCode);
+        var directories = PdmDocumentIdentityStore.ManagedWorkspaceRoots(workspaceRoot)
+            .SelectMany(root => new[] { ProjectDirectory(root, projectCode),
+                Path.Combine(root, ".uplm", "Snapshots", SafeSegment(projectCode)) })
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var projectDirectory = directories.FirstOrDefault(Directory.Exists) ?? directories[0];
         var result = new WorkspaceLocalStateSnapshot
         {
             ProjectId = projectId,
@@ -72,7 +77,7 @@ internal static class WorkspaceLocalStateReader
         }
 
         var pathsByDocument = new Dictionary<Guid, List<Tuple<string, PdmControlledFileMetadata>>>();
-        foreach (var path in Directory.EnumerateFiles(projectDirectory, "*", SearchOption.AllDirectories))
+        foreach (var path in directories.SelectMany(EnumerateAccessibleFiles))
         {
             if (!PdmDocumentIdentityStore.TryReadControlledMetadata(path, out var metadata)
                 || metadata.DocumentId == Guid.Empty
@@ -85,6 +90,7 @@ internal static class WorkspaceLocalStateReader
             paths.Add(Tuple.Create(path, metadata));
         }
 
+        var drafts = ReadDraftEntries(draftJournal);
         foreach (var document in uniqueDocuments)
         {
             if (!pathsByDocument.TryGetValue(document.DocumentId, out var paths))
@@ -92,7 +98,11 @@ internal static class WorkspaceLocalStateReader
                 result.Items.Add(NotDownloaded(document));
                 continue;
             }
-            var states = paths.Select(local => Evaluate(document, local.Item1, local.Item2, currentUsername)).ToArray();
+            var materialized = paths.Max(local => local.Item2.ServerMaterializedAtUtc);
+            if (materialized.HasValue)
+                paths = paths.Where(local => local.Item2.ServerMaterializedAtUtc == materialized).ToList();
+            var states = paths.Select(local => ApplyDraftState(
+                Evaluate(document, local.Item1, local.Item2, currentUsername), local.Item2, draftJournal, drafts)).ToArray();
             var edits = states.Where(item => item.LocalState == "Modified").ToArray();
             var valid = states.Where(item => item.LocalState != "IntegrityMismatch"
                 && paths.Any(local => local.Item1 == item.FullPath && !string.IsNullOrWhiteSpace(local.Item2.Sha256))).ToArray();
@@ -122,6 +132,28 @@ internal static class WorkspaceLocalStateReader
     {
         var root = Path.GetFullPath(workspaceRoot ?? throw new ArgumentNullException(nameof(workspaceRoot)));
         return Path.Combine(root, "View", SafeSegment(projectCode));
+    }
+
+    private static IEnumerable<string> EnumerateAccessibleFiles(string directory)
+    {
+        var pending = new Stack<string>();
+        pending.Push(directory);
+        while (pending.Count > 0)
+        {
+            var current = pending.Pop();
+            string[] files;
+            string[] children;
+            try { files = Directory.GetFiles(current); children = Directory.GetDirectories(current); }
+            catch (IOException) { continue; }
+            catch (UnauthorizedAccessException) { continue; }
+            foreach (var file in files) yield return file;
+            foreach (var child in children)
+            {
+                try { if ((File.GetAttributes(child) & FileAttributes.ReparsePoint) == 0) pending.Push(child); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
     }
 
     internal static bool RecoverArchivedBinding(WorkspaceLocalFileState state, Guid projectId, Guid versionId,
@@ -154,12 +186,52 @@ internal static class WorkspaceLocalStateReader
         }
     }
 
-    internal static WorkspaceLocalFileState Recheck(WorkspaceLocalFileState state, Guid projectId, string currentUsername)
+    internal static WorkspaceLocalFileState Recheck(WorkspaceLocalFileState state, Guid projectId, string currentUsername,
+        EditDraftJournal draftJournal = null)
     {
         if (!PdmDocumentIdentityStore.TryReadControlledMetadata(state.FullPath, out var metadata)
             || metadata.DocumentId != state.DocumentId || metadata.ProjectId != projectId) return state;
-        return Evaluate(new WorkspaceDocumentStateRequest { DocumentId = state.DocumentId, FileName = state.FileName,
-            LatestRevision = state.LatestRevision, CheckedOutBy = state.CheckedOutBy }, state.FullPath, metadata, currentUsername);
+        return ApplyDraftState(Evaluate(new WorkspaceDocumentStateRequest { DocumentId = state.DocumentId, FileName = state.FileName,
+            LatestRevision = state.LatestRevision, CheckedOutBy = state.CheckedOutBy }, state.FullPath, metadata, currentUsername),
+            metadata, draftJournal, ReadDraftEntries(draftJournal));
+    }
+
+    private static IReadOnlyList<LocalEditDraft> ReadDraftEntries(EditDraftJournal journal)
+    {
+        try { return journal?.ReadAll() ?? Array.Empty<LocalEditDraft>(); }
+        catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is InvalidOperationException)
+        { return Array.Empty<LocalEditDraft>(); }
+    }
+
+    private static WorkspaceLocalFileState ApplyDraftState(WorkspaceLocalFileState state,
+        PdmControlledFileMetadata metadata, EditDraftJournal journal, IReadOnlyList<LocalEditDraft> drafts)
+    {
+        if (journal == null || state.LocalState != "IntegrityMismatch" && state.LocalState != "Modified" && state.LocalState != "ReadOnlyCache") return state;
+        try
+        {
+            var entries = drafts.Where(entry => entry.DocumentId == state.DocumentId
+                && entry.ProjectId == metadata.ProjectId && !string.IsNullOrWhiteSpace(entry.SourcePath)
+                && string.Equals(Path.GetFullPath(entry.SourcePath), state.FullPath, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (entries.Length == 0) return state;
+            if (string.IsNullOrWhiteSpace(state.ContentSha256)) state.ContentSha256 = ComputeHash(state.FullPath);
+            if (entries.Any(entry => entry.DiscardPending))
+            {
+                state.LocalState = "NeedsUpdate";
+                state.LocalStateLabel = "待恢复存档";
+                state.Message = "已放弃编辑，工作文件等待恢复为服务器版本；请从PLM重新打开，已放弃的修改不会作为草稿恢复。";
+            }
+            else if (entries.Any(entry => entry.RestoreOnOpen
+                && entry.BaseVersionId == metadata.VersionId
+                && string.Equals(entry.DiskSha256, state.ContentSha256, StringComparison.OrdinalIgnoreCase)
+                && journal.HasVerifiedDraft(entry)))
+            {
+                state.LocalState = "Modified";
+                state.LocalStateLabel = "待恢复草稿";
+                state.Message = "已验证的未提交草稿保留在本机，获取编辑权限后可继续；尚未形成存档版本。";
+            }
+        }
+        catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is InvalidOperationException) { }
+        return state;
     }
 
     private static WorkspaceLocalFileState Evaluate(

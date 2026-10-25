@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { drawingRevisionHint, packageRevisionLabel } from '../drawingRevision'
+import { vQuantity } from '../quantityInput'
 import { getApprovalEmergencyCapability } from '../api'
 import RawDrawerPanel from './RawDrawerPanel.vue'
 import ReleaseExecutionPanel from './ReleaseExecutionPanel.vue'
@@ -64,8 +66,8 @@ const releaseTypes: { value: Exclude<ReleaseScope, 'LegacyCombined'>; label: str
   { value: 'StandardLongLead', label: '标准件 · 长交期BOM发布' },
   { value: 'StandardFormal', label: '标准件 · 正式发布' },
   { value: 'StandardSupplement', label: '标准件 · 增补/变更' },
-  { value: 'ElectricalFormal', label: '电气BOM · 正式发布' },
-  { value: 'ElectricalSupplement', label: '电气BOM · 增补/变更' },
+  { value: 'ElectricalFormal', label: '电气件BOM · 正式发布' },
+  { value: 'ElectricalSupplement', label: '电气件BOM · 增补/变更' },
   { value: 'ElectricalLongLead', label: '电气件 · 长交期BOM发布' },
   { value: 'NonStandardLongLead', label: '非标件 · 长交期BOM发布' },
   { value: 'NonStandardWithDrawing', label: '非标件BOM + 图纸 · 正式发布' },
@@ -639,7 +641,7 @@ async function exportFrozenBom() {
   if (frozenExporting.value || !release || !supportsFrozenExport.value || !frozenExportRowCount.value || !projectId || !props.token) return
   const materialHeaders = ['序号', '物料编码', '物料名称', '型号', '版本', '品牌', '材质', '表面处理', '热处理', '单位']
   const materialValues = (item: BomItem, index: number) => [index + 1, item.drawingNumber || '', item.name || '', item.specification || '',
-    item.revision || '', item.brand || '', item.material || '', item.surfaceTreatment || '', item.heatTreatment || '', item.unit || '']
+    packageRevisionLabel(item, release), item.brand || '', item.material || '', item.surfaceTreatment || '', item.heatTreatment || '', item.unit || '']
   const supplement = isFrozenSupplement.value
   const formal = isFrozenFormal.value
   const headers = [...materialHeaders, ...(supplement ? ['数量（净变更）', '变更前数量', '变更后数量', '备注', '变更', '变更明细']
@@ -678,6 +680,21 @@ const frozenChangeRows = computed<FrozenDisplayRow[]>(() => frozenChanges.value.
     .filter(item => row.item.summaryItemIds?.some(id => releaseInstanceIds(item).includes(id))),
 })))
 const frozenDisplayRows = computed(() => showFrozenChanges.value ? frozenChangeRows.value : frozenSummaryRows.value)
+function frozenDeliveryLabel(row: FrozenDisplayRow) {
+  if (row.change === '删除') return '—'
+  const release = props.releasePackage
+  const labels = row.sourceItems.flatMap(item => {
+    const drawingId = props.drawingReviewCandidates.find(candidate => candidate.bomItemId === item.id)?.drawingDocumentId
+    const ids = releaseInstanceIds(item)
+    return (ids.length ? ids : ['']).map(id => {
+      const override = release?.bomItemDeliveryOverrides?.[id]
+        ?? (drawingId ? release?.drawingDeliveryOverrides?.[drawingId] : undefined)
+      const priority = override?.priority ?? release?.drawingPriority ?? 'Normal'
+      return `${({ Normal: '普通', Priority: '优先', Urgent: '紧急' })[priority]} · ${override?.requiredOn || release?.drawingRequiredOn || '未设置'}`
+    })
+  })
+  return [...new Set(labels)].join('；') || `普通 · ${release?.drawingRequiredOn || '未设置'}`
+}
 const frozenPageCount = computed(() => Math.max(1, Math.ceil(frozenDisplayRows.value.length / releasePageSize)))
 const showFormalIssueQuantities = isFrozenFormal
 const issueUnitAliases: Record<string, string> = { EA: '001', 件: '001', 个: '001', 台: '002', 盒: '004', 卷: '005', 捆: '006', 双: '007', 片: '008', 桶: '009', 支: '010', 组: '011', 套: '011', 箱: '012', 包: '013' }
@@ -1119,14 +1136,14 @@ async function saveItemComment() {
               <template v-if="isLongLeadRelease">
                 <tr v-for="(row, index) in pagedLongLeadItems" :key="row.key">
                   <td class="is-release-centered"><input :checked="selectedLongLeadKeys.includes(row.key)" type="checkbox" :aria-label="`选择长交期物料 ${row.item.drawingNumber}`" :disabled="scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row)" :title="scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row) ? releaseRowDrawingReviewStatus(row) : undefined" @change="toggleLongLeadSelection(row.key, ($event.target as HTMLInputElement).checked, Number(row.item.quantity))"></td>
-                  <td class="is-release-centered">{{ (longLeadPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered"><input v-if="selectedLongLeadKeys.includes(row.key)" v-model.number="longLeadRequestedQuantities[row.key]" class="long-lead-quantity-input" type="number" min="0.000001" :max="row.item.quantity" step="any" :aria-label="`本次发布数量 ${row.item.drawingNumber}`"><span v-else>—</span></td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row) }">{{ scope === 'NonStandardLongLead' ? releaseRowDrawingReviewStatus(row) : '剩余可发布' }}</span></td>
+                  <td class="is-release-centered">{{ (longLeadPage - 1) * releasePageSize + index + 1 }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.drawingNumber || '—' }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered"><input v-quantity v-if="selectedLongLeadKeys.includes(row.key)" v-model.number="longLeadRequestedQuantities[row.key]" class="long-lead-quantity-input" type="number" min="0.000001" :max="row.item.quantity" step="any" :aria-label="`本次发布数量 ${row.item.drawingNumber}`"><span v-else>—</span></td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row) }">{{ scope === 'NonStandardLongLead' ? releaseRowDrawingReviewStatus(row) : '剩余可发布' }}</span></td>
                   <td><select :value="itemDeliveryOverride(row.item.id!).priority" :aria-label="`${deliveryItemLabel(row.item)}紧急程度`" @change="setBomItemDeliveryOverride(row.item.id!, ($event.target as HTMLSelectElement).value as DrawingPriority, itemDeliveryOverride(row.item.id!).requiredOn)"><option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option></select></td>
                   <td><input type="date" :value="itemDeliveryOverride(row.item.id!).requiredOn" :aria-label="`${deliveryItemLabel(row.item)}需求时间`" @change="setBomItemDeliveryOverride(row.item.id!, itemDeliveryOverride(row.item.id!).priority, ($event.target as HTMLInputElement).value)"></td>
                 </tr>
               </template>
               <template v-else-if="isFormalRelease">
                 <tr v-for="(row, index) in pagedFormalReleaseRows" :key="row.key" :class="{ 'is-release-unselected': !selectedFormalKeys.includes(row.key) }">
-                  <td class="is-release-centered"><input :checked="selectedFormalKeys.includes(row.key)" type="checkbox" :disabled="isFormalRowFullyPublished(row)" :title="isFormalRowFullyPublished(row) ? formalRowPublishTitle(row) : undefined" :aria-label="`本次发布物料 ${row.item.drawingNumber}`" @change="toggleFormalSelection(row.key, ($event.target as HTMLInputElement).checked)"></td><td class="is-release-centered">{{ (formalPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.remainingQuantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': Number(wholeSetMultiplier) !== 1 && selectedFormalKeys.includes(row.key) }">{{ selectedFormalKeys.includes(row.key) ? formalRowPublishQuantity(row) : '—' }}</td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td>
+                  <td class="is-release-centered"><input :checked="selectedFormalKeys.includes(row.key)" type="checkbox" :disabled="isFormalRowFullyPublished(row)" :title="isFormalRowFullyPublished(row) ? formalRowPublishTitle(row) : undefined" :aria-label="`本次发布物料 ${row.item.drawingNumber}`" @change="toggleFormalSelection(row.key, ($event.target as HTMLInputElement).checked)"></td><td class="is-release-centered">{{ (formalPage - 1) * releasePageSize + index + 1 }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.drawingNumber || '—' }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.remainingQuantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': Number(wholeSetMultiplier) !== 1 && selectedFormalKeys.includes(row.key) }">{{ selectedFormalKeys.includes(row.key) ? formalRowPublishQuantity(row) : '—' }}</td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td>
                   <td class="is-release-centered"><span v-if="!selectedFormalKeys.includes(row.key)" class="release-status-tag">本次不发布</span><span v-else-if="scope === 'NonStandardWithDrawing'" class="release-status-tag" :class="{ 'is-blocked': !releaseRowDrawingReviewReady(row) }">{{ releaseRowDrawingReviewStatus(row) }}</span><span v-else-if="row.longLeadPublishedQuantity > 0" class="long-lead-tag" :title="formalRowPublishTitle(row)">已发布 {{ row.longLeadPublishedQuantity }}/{{ row.item.quantity }}</span><span v-else class="release-status-tag">本次发布</span></td>
                   <td><select :value="itemDeliveryOverride(row.item.id!).priority" :aria-label="`${deliveryItemLabel(row.item)}紧急程度`" @change="setBomItemDeliveryOverride(row.item.id!, ($event.target as HTMLSelectElement).value as DrawingPriority, itemDeliveryOverride(row.item.id!).requiredOn)"><option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option></select></td>
                   <td><input type="date" :value="itemDeliveryOverride(row.item.id!).requiredOn" :aria-label="`${deliveryItemLabel(row.item)}需求时间`" @change="setBomItemDeliveryOverride(row.item.id!, itemDeliveryOverride(row.item.id!).priority, ($event.target as HTMLInputElement).value)"></td>
@@ -1134,7 +1151,7 @@ async function saveItemComment() {
               </template>
               <template v-else>
                 <tr v-for="(row, index) in pagedSupplementRows" :key="`${row.change}-${row.item.id}-${index}`" :class="{ 'is-release-unselected': supplementRowSelectable(row) && !selectedSupplementKeys.includes(supplementRowKey(row)) }">
-                  <td class="is-release-centered"><input v-if="supplementRowSelectable(row)" :disabled="pending || !supplementRowReady(row)" :checked="selectedSupplementKeys.includes(supplementRowKey(row))" type="checkbox" :aria-label="`本次纳入 ${row.item.drawingNumber || row.item.name}`" :title="row.change === '删除' ? '明确确认本次删除；未勾选时保留上一正式值' : '取消勾选后顺延到下一次增补/变更'" @change="toggleSupplementSelection(row, ($event.target as HTMLInputElement).checked)"><input v-else type="checkbox" checked disabled :title="row.change === '修改' ? '已发布物料的修改随本次变更单一起发布，不能单独顺延' : '删除项必须明确确认后才生效'"><span :class="`release-change-tag is-${row.change}`">{{ row.change }}</span></td><td class="is-release-centered">{{ (supplementPage - 1) * releasePageSize + index + 1 }}</td><td>{{ row.item.drawingNumber || '—' }}</td><td>{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': row.change !== '删除' && Number(wholeSetMultiplier) !== 1 }">{{ row.change === '删除' || isDeferredSupplementRow(row) ? '—' : Number(row.item.quantity) * Number(wholeSetMultiplier) }}</td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span v-if="supplementRowReady(row) && !selectedSupplementKeys.includes(supplementRowKey(row))" class="release-status-tag">本次不发布</span><span v-else class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardSupplement' && row.change !== '删除' && !itemDrawingReviewReady(row.item) }">{{ scope === 'NonStandardSupplement' && row.change !== '删除' ? drawingReviewStatusForItem(row.item) : '待纳入变更' }}</span></td>
+                  <td class="is-release-centered"><input v-if="supplementRowSelectable(row)" :disabled="pending || !supplementRowReady(row)" :checked="selectedSupplementKeys.includes(supplementRowKey(row))" type="checkbox" :aria-label="`本次纳入 ${row.item.drawingNumber || row.item.name}`" :title="row.change === '删除' ? '明确确认本次删除；未勾选时保留上一正式值' : '取消勾选后顺延到下一次增补/变更'" @change="toggleSupplementSelection(row, ($event.target as HTMLInputElement).checked)"><input v-else type="checkbox" checked disabled :title="row.change === '修改' ? '已发布物料的修改随本次变更单一起发布，不能单独顺延' : '删除项必须明确确认后才生效'"><span :class="`release-change-tag is-${row.change}`">{{ row.change }}</span></td><td class="is-release-centered">{{ (supplementPage - 1) * releasePageSize + index + 1 }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.drawingNumber || '—' }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': row.change !== '删除' && Number(wholeSetMultiplier) !== 1 }">{{ row.change === '删除' || isDeferredSupplementRow(row) ? '—' : Number(row.item.quantity) * Number(wholeSetMultiplier) }}</td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span v-if="supplementRowReady(row) && !selectedSupplementKeys.includes(supplementRowKey(row))" class="release-status-tag">本次不发布</span><span v-else class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardSupplement' && row.change !== '删除' && !itemDrawingReviewReady(row.item) }">{{ scope === 'NonStandardSupplement' && row.change !== '删除' ? drawingReviewStatusForItem(row.item) : '待纳入变更' }}</span></td>
                   <td class="release-change-details" :title="row.details.join('；')"><div v-for="detail in row.details" :key="detail">{{ detail }}</div></td>
                   <td><select :value="itemDeliveryOverride(row.item.id!).priority" :aria-label="`${deliveryItemLabel(row.item)}紧急程度`" @change="setBomItemDeliveryOverride(row.item.id!, ($event.target as HTMLSelectElement).value as DrawingPriority, itemDeliveryOverride(row.item.id!).requiredOn)"><option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option></select></td>
                   <td><input type="date" :value="itemDeliveryOverride(row.item.id!).requiredOn" :aria-label="`${deliveryItemLabel(row.item)}需求时间`" @change="setBomItemDeliveryOverride(row.item.id!, itemDeliveryOverride(row.item.id!).priority, ($event.target as HTMLInputElement).value)"></td>
@@ -1159,6 +1176,8 @@ async function saveItemComment() {
         审批已完成。{{ releasePublishingMessage(releasePackage) }}<template v-if="releasePackage.previewUpdatedAt"> 最近转图状态更新：{{ new Date(releasePackage.previewUpdatedAt).toLocaleString('zh-CN', { hour12: false }) }}</template>
       </p>
       <section class="pdm-release-top-workflow" aria-label="发布审批流程与操作">
+        <details :key="releasePackage.id" class="pdm-release-details" aria-label="审批流程">
+          <summary>审批流程</summary>
         <div class="pdm-approval-chain">
           <article v-for="step in releasePackage.steps" :key="step.id" :class="`is-${step.status}`">
             <span>{{ step.status === 'approved' || step.status === 'done' ? '✓' : step.status === 'rejected' ? '×' : step.status === 'current' ? '●' : step.status === 'skipped' ? '—' : '○' }}</span>
@@ -1170,6 +1189,7 @@ async function saveItemComment() {
             </div>
           </article>
         </div>
+        </details>
 
         <PanelActions><div v-if="canManage && releasePackage.state === '草稿'" class="pdm-manager-actions pdm-release-draft-management">
           <button type="button" class="pdm-secondary-action" :disabled="pending" @click="startDraftEdit">编辑草稿</button>
@@ -1215,17 +1235,21 @@ async function saveItemComment() {
         </div>
       </section>
 
-      <div class="pdm-release-summary">
+      <details :key="releasePackage.id" class="pdm-release-details" aria-label="发布包信息">
+        <summary>发布包信息</summary>
+        <div class="pdm-release-summary">
         <div><small>发布包</small><strong>{{ releasePackage.number }}</strong></div>
         <div><small>发布范围</small><strong>{{ scopeLabels[releasePackage.scope] || '旧版组合发布' }}</strong></div>
         <div><small>当前状态</small><strong>{{ releaseStateLabel }}</strong></div>
         <div><small>审批模板</small><strong>{{ releaseWorkflowLabel }}</strong></div>
         <div><small>整套倍率</small><strong>× {{ releasePackage.wholeSetMultiplier ?? 1 }}</strong></div>
+        <div><small>整包需求日期</small><strong>{{ releasePackage.drawingRequiredOn || '未设置' }}</strong></div>
         <div v-if="releasePackage.changeNumber && releasePackage.changeNumber !== releasePackage.number"><small>变更单号</small><strong>{{ releasePackage.changeNumber }}</strong></div>
-        <div><small>BOM版本</small><strong>{{ releaseBomRevisionLabel }}</strong></div>
+        <div><small>BOM 发布版本</small><strong>{{ releaseBomRevisionLabel }}</strong></div>
         <div><small>制造基线</small><strong>{{ releasePackage.createsManufacturingBaseline ? '发布后生成新基线' : isLongLeadScope(releasePackage.scope) ? '不更新（长交期BOM输出）' : '三条正式流齐备后生成' }}</strong></div>
         <div><small>发布目录</small><strong>{{ releasePackage.publishedPath || '审批通过后自动投放' }}</strong></div>
-      </div>
+        </div>
+      </details>
       <p v-if="releasePackage.changeReason" class="pdm-release-change-reason"><strong>{{ isSupplementScope(releasePackage.scope) ? '变更原因' : '备注' }}：</strong>{{ releasePackage.changeReason }}</p>
 
       <section class="pdm-release-frozen-snapshot" aria-label="审批固化快照">
@@ -1242,23 +1266,24 @@ async function saveItemComment() {
         <p v-if="itemCommentsError && !itemCommentOpen" class="pdm-inline-error pdm-item-comments-load-error">批注加载失败：{{ itemCommentsError }}</p>
         <div class="pdm-table-scroll">
           <table class="pdm-edit-table pdm-release-frozen-table" :class="{ 'is-formal-issue-view': showFormalIssueQuantities, 'is-change-view': showFrozenChanges }">
-            <colgroup><col><col><col><col><col><col><col><template v-if="showFormalIssueQuantities"><col><col></template><col><col><template v-if="showFrozenChanges"><col><col></template></colgroup>
-            <thead><tr><th>序号</th><th>物料编码</th><th>物料名称</th><th>型号</th><th>版本</th><th>品牌</th><th>备注</th><th>{{ showFormalIssueQuantities ? 'BOM总量' : '数量' }}</th><template v-if="showFormalIssueQuantities"><th>前期已发布</th><th>本次新增下发</th></template><th>批注</th><template v-if="showFrozenChanges"><th>变更</th><th title="原值 → 新值">变更明细</th></template></tr></thead>
+            <colgroup><col><col><col><col><col><col><col><template v-if="showFormalIssueQuantities"><col><col></template><col><col><template v-if="showFrozenChanges"><col><col></template><col class="pdm-release-delivery-column"></colgroup>
+            <thead><tr><th>序号</th><th>物料编码</th><th>物料名称</th><th>型号</th><th>版本</th><th>品牌</th><th>备注</th><th>{{ showFormalIssueQuantities ? 'BOM总量' : '数量' }}</th><template v-if="showFormalIssueQuantities"><th>前期已发布</th><th>本次新增下发</th></template><th>批注</th><template v-if="showFrozenChanges"><th>变更</th><th title="原值 → 新值">变更明细</th></template><th>紧急程度 / 需求日期</th></tr></thead>
             <tbody>
               <tr v-for="(row, index) in pagedFrozenRows" :key="row.key">
                 <td class="is-release-centered">{{ (frozenPage - 1) * releasePageSize + index + 1 }}</td>
-                <td class="is-release-centered">{{ row.item.drawingNumber || '—' }}</td>
-                <td class="pdm-frozen-item-name">{{ row.item.name || '—' }}</td>
+                <td class="is-release-centered" v-stocked-material="row.item.drawingNumber">{{ row.item.drawingNumber || '—' }}</td>
+                <td class="pdm-frozen-item-name" v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}</td>
                 <td>{{ row.item.specification || '—' }}</td>
-                <td class="is-release-centered">{{ row.item.revision || '—' }}</td>
+                <td class="is-release-centered" :title="`${drawingRevisionHint(row.item.revision, packageRevisionLabel(row.item, releasePackage))}；存档版本：${row.item.revision}`">{{ packageRevisionLabel(row.item, releasePackage) }}</td>
                 <td class="is-release-centered">{{ row.item.brand || '—' }}</td>
                 <td>{{ row.item.remark || '—' }}</td>
                 <td class="is-release-centered">{{ row.item.quantity }}</td>
                 <template v-if="showFormalIssueQuantities"><td class="is-release-centered">{{ priorQuantityForRow(row) }}</td><td class="is-release-centered is-new-issue-quantity">{{ newIssueQuantityForRow(row) }}</td></template>
                 <td class="is-release-centered"><span v-if="row.change === '删除'">—</span><button v-else type="button" class="pdm-item-comment-action" :class="{ 'has-comments': commentsForRow(row).length > 0 }" :aria-label="`查看或添加物料批注 ${row.item.drawingNumber || row.item.name}`" @click="openItemComment(row)">批注<span v-if="commentsForRow(row).length">（{{ commentsForRow(row).length }}）</span></button></td>
                 <template v-if="showFrozenChanges"><td class="is-release-centered"><span class="release-change-tag" :class="`is-${row.change}`">{{ row.change }}</span></td><td class="pdm-frozen-change-details"><div v-for="detail in row.details" :key="detail">{{ detail }}</div></td></template>
+                <td class="is-release-centered pdm-release-delivery">{{ frozenDeliveryLabel(row) }}</td>
               </tr>
-              <tr v-if="!frozenDisplayRows.length"><td :colspan="showFormalIssueQuantities || showFrozenChanges ? 11 : 9" class="pdm-empty-info">{{ showFrozenChanges ? '与上一发布版相比，本次没有增补或变更内容。' : '该发布包没有BOM快照数据。' }}</td></tr>
+              <tr v-if="!frozenDisplayRows.length"><td :colspan="showFormalIssueQuantities || showFrozenChanges ? 12 : 10" class="pdm-empty-info">{{ showFrozenChanges ? '与上一发布版相比，本次没有增补或变更内容。' : '该发布包没有BOM快照数据。' }}</td></tr>
             </tbody>
           </table>
         </div>
@@ -1315,6 +1340,8 @@ async function saveItemComment() {
 </template>
 
 <style scoped>
+.pdm-release-details{margin-bottom:8px}.pdm-release-details>summary{padding:5px 0;color:var(--pdm-text-soft);font-weight:600;cursor:pointer}.pdm-release-details[open]>summary{margin-bottom:6px}
+.pdm-release-frozen-table col.pdm-release-delivery-column{width:130px}.pdm-release-frozen-table .pdm-release-delivery{font-variant-numeric:tabular-nums}
 .pdm-inline-info{margin:0 0 8px;padding:7px 10px;border:1px solid var(--pdm-green-border);border-radius:6px;background:var(--pdm-green-soft);color:var(--pdm-green);white-space:normal}
 .pdm-release-preview-state{margin:0 0 8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface-muted);color:var(--pdm-text-soft);font-size:12px;white-space:normal}
 .pdm-release-preview-state .is-error{color:var(--pdm-danger)}

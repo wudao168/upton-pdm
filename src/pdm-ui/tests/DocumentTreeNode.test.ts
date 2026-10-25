@@ -21,6 +21,36 @@ function node(id: string, name: string, children: DocumentNode[] = []): Document
 }
 
 describe('DocumentTreeNode', () => {
+  it('同时展示图纸版本和发布版本，升档后仍保持上次发布版本', async () => {
+    const root = { ...node('part', '零件'), drawingVersionNumber: 3, publishedVersion: 'A' }
+    const wrapper = mount(DocumentTreeNode, { props: { node: root, selectedId: '' } })
+    expect(wrapper.get('.pdm-tree-drawing-version').text()).toBe('V3')
+    expect(wrapper.get('.pdm-tree-published-version').text()).toBe('A')
+    await wrapper.setProps({ node: { ...root, drawingVersionNumber: 4, version: 'A-W1' } })
+    expect(wrapper.get('.pdm-tree-drawing-version').text()).toBe('V4')
+    expect(wrapper.get('.pdm-tree-published-version').text()).toBe('A')
+    expect(wrapper.text()).not.toContain('B-D')
+  })
+  it('引用旧版不再占用文字行，保留版本和悬停原因，审核状态位于上行', () => {
+    const root: DocumentNode = { ...node('700022.00-01', '顶板-30'), drawingVersionNumber: 4, publishedVersion: 'A', snapshotVersion: 'W1', version: 'A-W1', versionAlignment: 'StructureStale' }
+    const wrapper = mount(DocumentTreeNode, { props: { node: root, selectedId: '', reviewStates: { [root.documentId!]: { label: '已批准', tone: 'success' } } } })
+    expect(wrapper.get('.pdm-tree-row__states').text()).toBe('已批准')
+    expect(wrapper.get('.pdm-tree-row__versions').text()).toBe('V4A')
+    expect(wrapper.text()).not.toContain('引用版本较旧')
+    expect(wrapper.text()).not.toContain('图纸版本')
+    expect(wrapper.text()).not.toContain('发布版本')
+    expect(wrapper.get('.pdm-tree-row').classes()).toContain('has-version-warning')
+    expect(wrapper.get('.pdm-tree-drawing-version').attributes('title')).toContain('引用版本较旧')
+  })
+  it('嵌入组件显示随父装配存档，不显示缺失或未入库', () => {
+    const embedded: DocumentNode = { ...node('embedded', '嵌入零件'), documentId: undefined, status: 'Virtual', version: '—', snapshotVersion: '—' }
+    const wrapper = mount(DocumentTreeNode, { props: { node: embedded, selectedId: '' } })
+    expect(wrapper.text()).toContain('随父装配')
+    expect(wrapper.text()).toContain('嵌入存储')
+    expect(wrapper.text()).not.toContain('未入库')
+    expect(wrapper.get('.pdm-tree-row').classes()).not.toContain('has-warning')
+  })
+
   it('收到客户端本地轻量预览缩略图后在图标前显示小图，未返回时只显示原图标', async () => {
     const root = node('thumb-1', '切料机构')
     const wrapper = mount(DocumentTreeNode, { props: { node: root, selectedId: '' } })

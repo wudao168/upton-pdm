@@ -1,6 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { refreshMaterialStockPlans, setMaterialStockContext } from '../src/materialStockPlans'
 import ProcurementTracking from '../src/components/ProcurementTracking.vue'
 import { downloadProcurementWorkbook } from '../src/procurementWorkbook'
 
@@ -17,6 +18,30 @@ const api = vi.hoisted(() => ({
 vi.mock('../src/api', () => api)
 
 describe('ProcurementTracking', () => {
+  afterEach(() => setMaterialStockContext(''))
+  it('常备件替换两列采购状态，筛选和导出一致且不修改采购数量', async () => {
+    const base = await api.getProjectProcurementTracking()
+    api.getProjectProcurementTracking.mockResolvedValue({ ...base, items: [{ ...base.items[0], purchaseRequisitionNumbers: [], purchaseOrderNumbers: [], purchaseRequisitionStatus: '未请购', purchaseOrderStatus: '未采购' }] })
+    setMaterialStockContext('procurement-test')
+    await refreshMaterialStockPlans(async () => ({ enterpriseCode: '01', organizationCode: '7', items: [{ enterpriseCode: '01', organizationCode: '7', materialCode: '01020000089', isEffective: true, safetyStockQuantity: 15, reorderQuantity: 50, unitName: '个', syncedAt: '2026-10-23T08:00:00Z' }] }))
+    const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const table = wrapper.get('.el-table__body-wrapper')
+    expect(table.text()).toContain('常备件')
+    expect(table.text()).not.toContain('未请购')
+    expect(table.text()).not.toContain('未采购')
+    expect(table.find('.is-procurement-missing').exists()).toBe(false)
+    await wrapper.get('[aria-label="筛选请购状态"]').trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('常备件')
+    await wrapper.findAll('button').find(button => button.text() === '导出 Excel')!.trigger('click'); await flushPromises()
+    const args = vi.mocked(downloadProcurementWorkbook).mock.calls[0]!, headers = args[1], row = args[2][0]!
+    expect(row[headers.indexOf('请购状态')]).toBe('常备件')
+    expect(row[headers.indexOf('采购状态')]).toBe('常备件')
+    expect(row[headers.indexOf('购买数')]).toBe(4)
+    expect(row[headers.indexOf('到货数')]).toBe(2)
+    expect(base.items[0].purchaseRequisitionStatus).toBe('已核准')
+    wrapper.unmount()
+  })
   beforeEach(() => {
     vi.clearAllMocks()
     api.getProjectExportMetadata.mockResolvedValue({title:'清单',company:'公司',scope:'当前项目',versionLabel:'版本',version:'V1',exportedAt:'2026-10-14T09:00:00+08:00',exportedBy:'工程师',fields:[]})
@@ -43,6 +68,45 @@ describe('ProcurementTracking', () => {
     api.refreshProjectProcurementTracking.mockResolvedValue({ message: '只读刷新已启动' })
   })
 
+  it('非标件仅查询制造数据，批次可展开，导出合格领用口径且刷新不访问U9C',async()=>{
+    const base=await api.getProjectProcurementTracking()
+    const movement={id:'move',requestId:'req',lotId:'lot',kind:'QualityReceived',quantity:8,actor:'worker',occurredAt:'2026-10-21T10:00:00+08:00',note:'分批交检'}
+    const manufacturing={releasePackageId:'release',lineId:'line',revision:'A',publishedAt:'2026-10-20T10:00:00+08:00',receivedAt:'2026-10-21T09:00:00+08:00',status:'质检',assignedQuantity:10,submittedQuantity:8,qualifiedQuantity:5,issuedQuantity:2,responsible:'制造负责人',suppliers:'外协厂',requiredOn:'2026-10-24',forecastOn:'2026-10-26',qualifiedAt:'2026-10-21',issuedAt:'2026-10-21',batches:[{id:'lot',route:'External',quantity:10,status:'质检',supplier:'外协厂',assignee:'制造负责人',promisedOn:'2026-10-26',deliveredQuantity:10,submittedQuantity:8,qualifiedQuantity:5,issuedQuantity:2,history:[movement]}]}
+    api.getProjectProcurementTracking.mockResolvedValue({...base,manufacturingReadAt:'2026-10-22T10:00:00+08:00',items:[{...base.items[0],bomKind:'非标件',quantity:10,manufacturing,purchaseQuantity:999,arrivedQuantity:999,purchaseOrderNumbers:[],purchaseRequisitionNumbers:[],warehouseMovements:[]}]})
+    const wrapper=mount(ProcurementTracking,{props:{projectId:'project-1',token:'token',username:'engineer'},global:{plugins:[ElementPlus],stubs:{teleport:true}}});await flushPromises()
+    expect(api.listMaterialInventory).not.toHaveBeenCalled()
+    const originalHeaders=['库存','请购状态','请购日期','PO','采购状态','采购员','购买数','到货数','采购备注','预计交期','入库日期','入库数','出库日期','出库数']
+    const headersBefore=wrapper.findAll('.el-table__header-wrapper th').map(h=>h.text())
+    expect(headersBefore).toEqual(expect.arrayContaining(originalHeaders))
+    expect(headersBefore.some(label=>/[／/]/.test(label))).toBe(false)
+    expect(wrapper.get('[aria-label="筛选请购状态"]').text()).toBe('全部请购状态')
+    expect(wrapper.get('[aria-label="筛选采购状态"]').text()).toBe('全部采购状态')
+    expect(wrapper.get('[aria-label="筛选采购员"]').text()).toBe('全部采购员')
+    expect(wrapper.find('[title="非标件显示已交检数量，尚不代表检验合格。"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('齐套率');expect(wrapper.text()).not.toContain('无PO')
+    await wrapper.get('[aria-label="查看接头制造明细"]').trigger('click');await flushPromises()
+    expect(wrapper.text()).toContain('外协厂');expect(wrapper.text()).toContain('分批交检');expect(wrapper.text()).toContain('质检收料')
+    await wrapper.findAll('button').find(b=>b.text()==='导出 Excel')!.trigger('click');await flushPromises()
+    const args=vi.mocked(downloadProcurementWorkbook).mock.calls[0]!,headers=args[1],values=args[2][0]!
+    expect(headers).toEqual(expect.arrayContaining(originalHeaders))
+    expect(headers.some(label=>/[／/]/.test(label))).toBe(false)
+    expect(values[headers.indexOf('到货数')]).toBe(8);expect(values[headers.indexOf('入库数')]).toBe(5)
+    expect(values[headers.indexOf('库存')]).toBe(3);expect(values[headers.indexOf('出库数')]).toBe(2)
+    await wrapper.findAll('button').find(b=>b.text()==='立即刷新')!.trigger('click');await flushPromises()
+    expect(api.refreshProjectProcurementTracking).not.toHaveBeenCalled();expect(api.listMaterialInventory).not.toHaveBeenCalled()
+    const nonStandard={...base.items[0],bomKind:'非标件',quantity:10,manufacturing,purchaseQuantity:999,arrivedQuantity:999,warehouseMovements:[]}
+    api.getProjectProcurementTracking.mockResolvedValue({...base,items:[base.items[0],nonStandard]})
+    await wrapper.findAll('button').find(b=>b.text()==='立即刷新')!.trigger('click');await flushPromises()
+    expect(wrapper.findAll('.el-table__header-wrapper th').map(h=>h.text())).toEqual(expect.arrayContaining(originalHeaders))
+    await wrapper.get('select[aria-label="筛选物料分类"]').setValue('非标件');await flushPromises()
+    expect(wrapper.findAll('.el-table__header-wrapper th').map(h=>h.text())).toEqual(headersBefore)
+    await wrapper.findAll('button').find(b=>b.text()==='列设置')!.trigger('click');await flushPromises()
+    const settings=wrapper.get('.procurement-tracking__column-list')
+    expect(settings.text()).toContain('PR');expect(settings.text()).toContain('采购员')
+    expect(settings.text()).not.toContain('／');expect(settings.text()).not.toContain('制造负责人')
+    wrapper.unmount()
+  })
+
   it('使用当前BOM影响属性覆盖已发布备料快照且不改变其他字段', async () => {
     api.listBom.mockImplementation(async (_projectId: string, kind: string) => kind === 'Standard' ? [{
       drawingNumber: '01020000089', impactStage: 'Assembly', name: '当前名称', quantity: 99,
@@ -58,7 +122,7 @@ describe('ProcurementTracking', () => {
     wrapper.unmount()
   })
 
-  it('列表上方按整个项目显示到货率、超期、交期不符、缺料风险、关键物料与未下单统计卡', async () => {
+  it('统计按有效需求行计算齐套率，购买数到齐但不足需求不能计齐套', async () => {
     const base = await api.getProjectProcurementTracking()
     api.getProjectProcurementTracking.mockResolvedValue({
       ...base,
@@ -76,19 +140,50 @@ describe('ProcurementTracking', () => {
 
     const cards = wrapper.findAll('.procurement-stats-card')
     expect(cards).toHaveLength(6)
-    expect(cards[0].text()).toContain('到货率')
-    // 数量口径 (2+2)/(4+2)=66.7%；行口径 1/2 行已到齐。
-    expect(cards[0].text()).toContain('66.7%')
-    expect(cards[0].text()).toContain('1/2')
+    expect(cards[0].text()).toContain('齐套率')
+    // 第二行虽已买齐2件，但需求为4件，两行都未齐套。
+    expect(cards[0].text()).toContain('0%')
+    expect(cards[0].text()).toContain('0/2')
     expect(cards[1].text()).toContain('超期物料')
-    expect(cards[1].text()).toContain('1')
+    expect(cards[1].text()).toContain('2')
     expect(cards[2].text()).toContain('交期不符')
     expect(cards[2].text()).toContain('2')
     expect(cards[3].text()).toContain('缺料风险')
     expect(cards[4].text()).toContain('关键物料')
-    expect(cards[4].text()).toContain('100%')
-    expect(cards[5].text()).toContain('未下单')
-    expect(cards[5].text()).toContain('0 / 0')
+    expect(cards[4].text()).toContain('0%')
+    expect(cards[5].text()).toContain('待落实物料')
+    expect(cards[5].text()).toContain('1')
+    wrapper.unmount()
+  })
+
+  it('混合BOM合并六项统计，排除明细和无效需求，切换类别保持同一口径', async () => {
+    const base = await api.getProjectProcurementTracking()
+    const purchased = { ...base.items[0], quantity: 4, arrivedQuantity: 4, impactStage: 'Assembly', assemblyStartDate: '2000-01-01' }
+    const manufacturing = { receivedAt: null, assignedQuantity: 0, submittedQuantity: 100, qualifiedQuantity: 1, forecastOn: '2000-01-03', requiredOn: '2000-01-01', batches: [] }
+    const manufactured = { ...purchased, sequence: 2, bomKind: '非标件', manufacturing, arrivedQuantity: 999 }
+    const electrical = { ...purchased, sequence: 3, bomKind: '电气件', quantity: 10, purchaseQuantity: 0, arrivedQuantity: 0, purchaseOrderNumbers: [], purchaseRequisitionNumbers: [], latestDeliveryDate: null, purchaseDeliveryDate: null }
+    api.getProjectProcurementTracking.mockResolvedValue({ ...base, items: [purchased, manufactured, electrical, { ...purchased, quantity: 0 }, { ...manufactured, isWarehouseMovementRow: true }] })
+    const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'engineer' }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const labels = () => wrapper.findAll('.procurement-stats-card__label').map(card => card.text())
+    const values = () => wrapper.findAll('.procurement-stats-card__value').map(card => card.text())
+    const names = ['齐套率', '超期物料', '交期不符', '缺料风险', '关键物料', '待落实物料']
+    expect(labels()).toEqual(names)
+    expect(values()).toEqual(['33.3%', '1', '2', '1', '3', '2'])
+    expect(wrapper.findAll('.procurement-stats-card')[4]!.text()).toContain('齐套率 33.3%')
+    // 未接收且未分配只计一行；交检数、采购快照999均不算制造齐套。
+    await wrapper.get('select[aria-label="筛选物料分类"]').setValue('非标件')
+    expect(labels()).toEqual(names)
+    expect(values()).toEqual(['0%', '1', '1', '1', '1', '1'])
+    await wrapper.get('select[aria-label="筛选物料分类"]').setValue('标准件')
+    expect(labels()).toEqual(names)
+    expect(values()).toEqual(['100%', '0', '1', '0', '1', '0'])
+    await wrapper.get('select[aria-label="筛选物料分类"]').setValue('电气件')
+    expect(labels()).toEqual(names)
+    expect(values()).toEqual(['0%', '0', '0', '0', '1', '1'])
+    await wrapper.get('select[aria-label="筛选物料分类"]').setValue('')
+    await wrapper.get('input[placeholder="搜索料号、名称、型号"]').setValue('不存在')
+    expect(values()).toEqual(['33.3%', '1', '2', '1', '3', '2'])
     wrapper.unmount()
   })
 
@@ -401,7 +496,7 @@ describe('ProcurementTracking', () => {
     expect(headers).toEqual([
       '序号', '项目号', '子项目号', '物料编码', '物料名称', '关键', '型号', '备注', '品牌', '数量', '库存',
       '装配日期', '调试日期',
-      '请购状态', '请购日期', '需求日期', 'PO编号', '采购状态', '采购员', '购买数',
+      '请购状态', '请购日期', '需求日期', 'PO', '采购状态', '采购员', '购买数',
       '到货数', '采购备注', '预计交期', '最新交期',
       '入库日期', '入库数', '出库日期', '出库数',
     ])
@@ -581,25 +676,25 @@ describe('ProcurementTracking', () => {
     expect(wrapper.find('.procurement-tracking__settings-note').text()).toContain('选择显示列')
     expect(wrapper.find('.procurement-tracking__settings-note').text()).not.toContain('调整列顺序')
     expect(wrapper.findAll('.procurement-tracking__column-list button')).toHaveLength(0)
-    const prCheckbox = wrapper.findAll('.el-checkbox').find(item => item.text() === 'PR编号')!.find('input')
+    const prCheckbox = wrapper.findAll('.el-checkbox').find(item => item.text() === 'PR')!.find('input')
     expect((prCheckbox.element as HTMLInputElement).checked).toBe(false)
     await prCheckbox.setValue(true)
     await wrapper.findAll('button').find(button => button.text().trim() === '保存')!.trigger('click')
     await flushPromises()
-    expect(wrapper.find('.el-table__header-wrapper').text()).toContain('PR编号')
+    expect(wrapper.find('.el-table__header-wrapper').text()).toContain('PR')
     const savedColumns = JSON.parse(window.localStorage.getItem('upton-pdm:procurement-columns:engineer')!)
     expect(savedColumns.visible).toContain('purchaseRequisitionNumbers')
-    expect(savedColumns).toEqual(expect.objectContaining({ version: 3 }))
+    expect(savedColumns).toEqual(expect.objectContaining({ version: 4 }))
     expect(savedColumns).not.toHaveProperty('order')
     wrapper.unmount()
     wrapper = mount(ProcurementTracking, options)
     await flushPromises()
-    expect(wrapper.find('.el-table__header-wrapper').text()).toContain('PR编号')
+    expect(wrapper.find('.el-table__header-wrapper').text()).toContain('PR')
     await wrapper.findAll('button').find(button => button.text().trim() === '列设置')!.trigger('click')
     await flushPromises()
     await wrapper.findAll('button').find(button => button.text().trim() === '恢复默认')!.trigger('click')
     await flushPromises()
-    expect(wrapper.find('.el-table__header-wrapper').text()).not.toContain('PR编号')
+    expect(wrapper.find('.el-table__header-wrapper').text()).not.toContain('PR')
     wrapper.unmount()
   })
 

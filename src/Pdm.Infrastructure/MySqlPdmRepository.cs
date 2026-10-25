@@ -430,7 +430,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                    d.checkout_lease_expires_at,d.checkout_release_requested_by,d.checkout_release_requested_at,
                    d.checkout_release_request_reason,d.row_version,d.updated_at,d.deleted_at,d.deleted_by,d.delete_reason,d.purged_at,
                    (SELECT v.property_snapshot_json FROM document_version v WHERE v.document_id=d.id ORDER BY v.created_at DESC LIMIT 1) latest_property_snapshot_json,
-                   (SELECT COUNT(*) FROM document_version v WHERE v.document_id=d.id) stored_version_count
+                   (SELECT COUNT(*) FROM document_version v WHERE v.document_id=d.id) stored_version_count,
+                   (SELECT MAX(v.drawing_version_number) FROM document_version v WHERE v.document_id=d.id) drawing_version_number,
+                   (SELECT v.revision_label FROM document_version v JOIN release_package p ON p.id=v.release_package_id
+                    WHERE v.document_id=d.id AND v.version_status='Released' AND p.state='Published'
+                    ORDER BY v.revision_label DESC LIMIT 1) published_version
             FROM document d
             WHERE d.project_id = @ProjectId AND d.deleted_at IS NULL AND d.purged_at IS NULL
             ORDER BY d.drawing_number, d.kind
@@ -451,7 +455,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                    d.checkout_lease_expires_at,d.checkout_release_requested_by,d.checkout_release_requested_at,
                    d.checkout_release_request_reason,d.row_version,d.updated_at,d.deleted_at,d.deleted_by,d.delete_reason,d.purged_at,
                    (SELECT v.property_snapshot_json FROM document_version v WHERE v.document_id=d.id ORDER BY v.created_at DESC LIMIT 1) latest_property_snapshot_json,
-                   (SELECT COUNT(*) FROM document_version v WHERE v.document_id=d.id) stored_version_count
+                   (SELECT COUNT(*) FROM document_version v WHERE v.document_id=d.id) stored_version_count,
+                   (SELECT MAX(v.drawing_version_number) FROM document_version v WHERE v.document_id=d.id) drawing_version_number,
+                   (SELECT v.revision_label FROM document_version v JOIN release_package p ON p.id=v.release_package_id
+                    WHERE v.document_id=d.id AND v.version_status='Released' AND p.state='Published'
+                    ORDER BY v.revision_label DESC LIMIT 1) published_version
             FROM document d
             INNER JOIN project requested ON requested.id=@ProjectId
             INNER JOIN project owner_project ON owner_project.id=d.project_id
@@ -502,7 +510,42 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """,
             new { ProjectId = projectId },
             cancellationToken: cancellationToken));
-        return rows.ToArray();
+        var pendingRows = await connection.QueryAsync<PendingDrawingRelationRow>(new CommandDefinition(
+            """
+            SELECT d.id DocumentId,d.project_id ProjectId,d.file_name FileName,v.reference_snapshot_json ReferenceSnapshotJson
+            FROM document d
+            INNER JOIN project requested ON requested.id=@ProjectId
+            INNER JOIN project owner_project ON owner_project.id=d.project_id
+            INNER JOIN document_version v ON v.id=(SELECT current_version.id FROM document_version current_version
+                WHERE current_version.document_id=d.id
+                ORDER BY (current_version.revision_label=d.revision_label) DESC,current_version.created_at DESC LIMIT 1)
+            WHERE (owner_project.id=COALESCE(requested.parent_project_id,requested.id)
+               OR owner_project.parent_project_id=COALESCE(requested.parent_project_id,requested.id))
+              AND d.kind='Drawing' AND d.deleted_at IS NULL AND d.purged_at IS NULL
+              AND JSON_EXTRACT(v.reference_snapshot_json,'$.structureIndexPending')=TRUE
+            """, new { ProjectId = projectId }, cancellationToken: cancellationToken));
+        var sources = pendingRows.Select(row => new PendingDrawingRelationSource(row.DocumentId, row.ProjectId, row.FileName,
+            JsonSerializer.Deserialize<DocumentReferenceNode>(row.ReferenceSnapshotJson, jsonOptions)!)).ToArray();
+        if (sources.Length == 0) return rows.ToArray();
+        var modelIds = sources.SelectMany(source => source.Root.Children).Where(node => node.DocumentId.HasValue)
+            .Select(node => node.DocumentId!.Value).Distinct().ToArray();
+        if (modelIds.Length == 0) return rows.ToArray();
+        var modelVersions = await connection.QueryAsync<DrawingRelationModelVersion>(new CommandDefinition(
+            """
+            SELECT d.id DocumentId,d.project_id ProjectId,d.file_name FileName,d.kind Kind,v.revision_label RevisionLabel
+            FROM document d INNER JOIN document_version v ON v.document_id=d.id
+            WHERE d.id IN @ModelIds AND d.kind IN ('Part','Assembly') AND d.deleted_at IS NULL AND d.purged_at IS NULL
+            """, new { ModelIds = modelIds }, cancellationToken: cancellationToken));
+        return rows.Concat(PendingDrawingRelations.Recover(sources, modelVersions)).Distinct()
+            .OrderBy(relation => relation.ModelDocumentId).ThenBy(relation => relation.DrawingDocumentId).ToArray();
+    }
+
+    private sealed class PendingDrawingRelationRow
+    {
+        public Guid DocumentId { get; init; }
+        public Guid ProjectId { get; init; }
+        public string FileName { get; init; } = "";
+        public string ReferenceSnapshotJson { get; init; } = "{}";
     }
 
     public async Task<IReadOnlyList<DocumentWhereUsed>> ListWhereUsedAsync(Guid documentId, CancellationToken cancellationToken)
@@ -1267,6 +1310,15 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return rows.Select(row => new AuditEntry(row.Id, DateTime.SpecifyKind(row.OccurredAt, DateTimeKind.Utc), row.Actor, row.ActionName, row.EntityType, row.EntityId, ReadAuditDetail(row.DetailJson))).ToArray();
     }
 
+    public async Task<IReadOnlyList<AuditEntry>> ListStandardStructureReferenceAuditsAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<AuditRow>(new CommandDefinition(
+            "SELECT id,occurred_at,actor,action_name,entity_type,entity_id,detail_json FROM audit_entry WHERE action_name='standard-structure.reference' AND entity_type='StandardStructure' ORDER BY occurred_at DESC",
+            cancellationToken: cancellationToken));
+        return rows.Select(row => new AuditEntry(row.Id, DateTime.SpecifyKind(row.OccurredAt, DateTimeKind.Utc), row.Actor, row.ActionName, row.EntityType, row.EntityId, ReadAuditDetail(row.DetailJson))).ToArray();
+    }
+
     public async Task<IReadOnlyList<AuditEntry>> ListProjectAuditAsync(Guid projectId, int take, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -1354,7 +1406,12 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SELECT id,project_id,folder_id,drawing_number,name,file_name,kind,lifecycle_state,revision_label,
                    checked_out_by,checked_out_at,checkout_session_id,checkout_machine,checkout_last_heartbeat_at,
                    checkout_lease_expires_at,checkout_release_requested_by,checkout_release_requested_at,
-                   checkout_release_request_reason,row_version,updated_at,deleted_at,deleted_by,delete_reason,purged_at
+                   checkout_release_request_reason,row_version,updated_at,deleted_at,deleted_by,delete_reason,purged_at,
+                   (SELECT COUNT(*) FROM document_version v WHERE v.document_id=document.id) stored_version_count,
+                   (SELECT MAX(v.drawing_version_number) FROM document_version v WHERE v.document_id=document.id) drawing_version_number,
+                   (SELECT v.revision_label FROM document_version v JOIN release_package p ON p.id=v.release_package_id
+                    WHERE v.document_id=document.id AND v.version_status='Released' AND p.state='Published'
+                    ORDER BY v.revision_label DESC LIMIT 1) published_version
             FROM document WHERE id = @DocumentId AND deleted_at IS NULL AND purged_at IS NULL
             """,
             new { DocumentId = documentId },
@@ -1738,6 +1795,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             RowVersion = row.RowVersion > 0 ? row.RowVersion : 1,
             FolderId = row.FolderId,
             StoredVersionCount = row.StoredVersionCount,
+            DrawingVersionNumber = row.DrawingVersionNumber,
+            PublishedVersion = row.PublishedVersion ?? "未发布",
             CheckedOutAt = AsNullableUtc(row.CheckedOutAt),
             CheckoutSessionId = row.CheckoutSessionId,
             CheckoutMachine = row.CheckoutMachine,
@@ -2035,6 +2094,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public Guid ProjectId { get; init; }
         public Guid? FolderId { get; init; }
         public int? StoredVersionCount { get; init; }
+        public int? DrawingVersionNumber { get; init; }
+        public string? PublishedVersion { get; init; }
         public string DrawingNumber { get; init; } = string.Empty;
         public string Name { get; init; } = string.Empty;
         public string? LatestPropertySnapshotJson { get; init; }

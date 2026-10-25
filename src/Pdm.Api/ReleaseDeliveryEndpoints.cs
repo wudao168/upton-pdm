@@ -19,15 +19,16 @@ public static class ReleaseDeliveryEndpoints
         { var (actor, role) = User(context); return Results.Ok(await service.GetAsync(actor, role, ct)); });
         api.MapPut("/settings/release-notifications", async (SaveReleaseNotificationSettings input, HttpContext context, ReleaseNotificationSettingsService service, CancellationToken ct) =>
         { var (actor, role) = User(context); return Results.Ok(await service.SaveAsync(input, actor, role, ct)); });
-        api.MapGet("/release-packages/{id:guid}/execution", async (Guid id, HttpContext context, IPdmRepository repository, ReleaseDeliveryService service, CancellationToken ct) =>
+        api.MapGet("/release-packages/{id:guid}/execution", async (Guid id, HttpContext context, IPdmRepository repository, ReleaseDeliveryService service, WorkflowNotificationService notifications, CancellationToken ct) =>
         {
             var (actor, role) = User(context);
             var package = await repository.FindReleasePackageAsync(id, ct) ?? throw new PdmNotFoundException("发布包不存在。");
             if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, ct)) throw new UnauthorizedAccessException("无权查看该项目发布资料。");
             var progress = package.State == ReleasePackageState.Published ? (await service.EnsureAsync(id, ct)).State : null;
             var acknowledgementIds = progress is null ? [] : await service.AcknowledgementIdsAsync(progress, actor, ct);
+            var workflowNotifications = (await notifications.ReleaseRecordsAsync(package, ct)).Select(job => new { job.State, job.Message, job.Rule.Enabled });
             return Results.Ok(new { package.Id, state = package.State.ToString(), package.VersionBindings, package.SelectedBomItemIds,
-                package.ConfirmedRemovedBomItemIds, progress, acknowledgementIds, ready = progress is not null && ReleaseDeliveryService.Ready(progress) });
+                package.ConfirmedRemovedBomItemIds, progress, acknowledgementIds, workflowNotifications, ready = progress is not null && ReleaseDeliveryService.Ready(progress) });
         });
         api.MapPost("/release-packages/{id:guid}/department-acknowledgements", async (Guid id, ReleaseDepartmentAcknowledgement input,
             HttpContext context, ReleaseDeliveryService service, CancellationToken ct) =>

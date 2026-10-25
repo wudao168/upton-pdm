@@ -141,9 +141,10 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
                     try
                     {
                         var value = await procurement.ListProjectAsync(project.Id, actor, role, ct);
-                        var items = value.Items.Where(item => !item.IsWarehouseMovementRow).ToArray();
-                        purchasing = new(value.HasPublishedBom, items.Count(item => item.PurchaseOrderNumbers.Count == 0 && !item.IsFullyReceived),
-                            items.Count(item => !item.IsFullyReceived), items.Count(item => item.HasDeliveryDelay && !item.IsFullyReceived), value.LastSuccessfulRefreshAt, value.LastRefreshError);
+                        var items = value.Items.Where(item => !item.IsWarehouseMovementRow && (item.Manufacturing is null || item.Quantity > 0)).ToArray();
+                        purchasing = new(value.HasPublishedBom, items.Count(item => !item.IsFullyReceived && (item.Manufacturing is { } m
+                                ? m.AssignedQuantity < item.Quantity : item.PurchaseOrderNumbers.Count == 0)),
+                            items.Count(item => !item.IsFullyReceived), items.Count(item => item.HasDeliveryDelay && !item.IsFullyReceived), value.LastSuccessfulRefreshAt ?? value.ManufacturingReadAt, value.LastRefreshError);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add("采购跟踪暂时无法读取"); }
                 }

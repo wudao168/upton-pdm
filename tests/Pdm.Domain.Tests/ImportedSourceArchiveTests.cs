@@ -8,9 +8,13 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class ImportedSourceArchiveTests
 {
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task StepSourceAndParentCommitAtomicallyAndReplayWithoutAnotherVersion(bool rejectSource)
+    [InlineData(false, "SOURCE.stp")]
+    [InlineData(true, "SOURCE.stp")]
+    [InlineData(false, "参数.txt")]
+    [InlineData(true, "参数.txt")]
+    [InlineData(false, "设计表.xlsx")]
+    [InlineData(true, "设计表.xlsx")]
+    public async Task DesignSourceAndParentCommitAtomicallyAndReplayWithoutAnotherVersion(bool rejectSource, string sourceName)
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var storage = DispatchProxy.Create<IFileStorage, ArchiveBatchReadReuseTests.Files>();
@@ -19,7 +23,7 @@ public sealed class ImportedSourceArchiveTests
         var project = await repository.CreateProjectAsync(new("STEP-" + Guid.NewGuid().ToString("N"), "导入源整批存档", "admin", "vault", "release"), "admin", default);
         var batch = Guid.NewGuid(); var session = Guid.NewGuid(); var context = new ArchiveRegistrationContext(batch, session, "QA");
         var root = await workflow.RegisterDocumentAsync(new(project.Id, "ROOT", "总装", "ROOT.SLDASM", DocumentKind.Assembly, SourceSha256: new string('A', 64)), "admin", UserRole.Administrator, default, context);
-        var source = await workflow.RegisterDocumentAsync(new(project.Id, "SOURCE", "STEP导入源", "SOURCE.stp", DocumentKind.Other, SourceSha256: new string('B', 64)), "admin", UserRole.Administrator, default, context);
+        var source = await workflow.RegisterDocumentAsync(new(project.Id, "SOURCE", "设计依赖源", sourceName, DocumentKind.Other, SourceSha256: new string('B', 64)), "admin", UserRole.Administrator, default, context);
         Assert.Empty(await repository.ListDocumentsAsync(project.Id, default));
         var sourceNode = ArchiveBatchTests.Node(source) with { Role = ReferenceRole.ExternalFileDependency, Revision = null };
         var generated = ArchiveBatchTests.Node(root) with { DocumentId = null, FileName = "SOURCE.stp.SLDPRT", Kind = DocumentKind.Part, Status = ReferenceNodeStatus.Virtual, Revision = null };
@@ -49,6 +53,8 @@ public sealed class ImportedSourceArchiveTests
 
     [Theory]
     [InlineData("SOURCE.stp", false)]
+    [InlineData("参数.txt", false)]
+    [InlineData("设计表.xlsx", false)]
     [InlineData("SOURCE.exe", true)]
     [InlineData("SOURCE.zip", true)]
     public async Task OtherFilesCannotBypassRegistrationRules(string name, bool batch)

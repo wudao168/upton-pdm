@@ -205,7 +205,7 @@ internal static class BatchRenameRule
         {
             throw new InvalidOperationException("新文件名包含Windows不允许的字符，或以句点、空格结尾。");
         }
-        if (name.Length + (extension?.Length ?? 0) > 240)
+        if (name.Length + (extension?.Length ?? 0) > 240 && Upton.Pdm.Domain.DocumentRuleRuntime.ShouldBlock("H04", "新文件名过长。"))
         {
             throw new InvalidOperationException("新文件名过长。");
         }

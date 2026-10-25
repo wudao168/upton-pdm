@@ -19,6 +19,7 @@ const props = withDefaults(defineProps<{
   pending: boolean
   onRequestRelease: (documentId: string, reason: string) => Promise<void>
   onForceRelease: (documentId: string, reason: string) => Promise<void>
+  onEmergencyRelease?: (documentId: string, sessionId: string, checkedOutAt: string, reason: string) => Promise<void>
   onResetPassword: (taskId: string) => Promise<void>
   onMarkAllNotificationsRead?: () => Promise<void>
 }>(), {
@@ -46,7 +47,7 @@ type TaskCenterRow = {
 }
 
 const bomHeaderLabels = {
-  Master: '项目主BOM', Standard: '标准件BOM', NonStandard: '非标件BOM', Electrical: '电气BOM',
+  Master: '项目主BOM', Standard: '标准件BOM', NonStandard: '非标件BOM', Electrical: '电气件BOM',
 } as const
 const bomHeaderOrder = ['Master', 'Standard', 'NonStandard', 'Electrical'] as const
 
@@ -112,11 +113,12 @@ const commonForceReleaseReasons = ['编辑人长期离线未处理', '项目交�
 const forceReleaseDialogOpen = ref(false)
 const forceReleaseDialogTargets = ref<EditLockSummary[]>([])
 const forceReleaseReason = ref('')
+const emergencyRelease = ref(false)
 const forceReleaseSubmitting = ref(false)
 const requestReleaseSubmitting = ref(false)
 const forceReleaseDialogSummary = computed(() => {
   const targets = forceReleaseDialogTargets.value
-  return targets.length ? `将结束 ${targets[0].projectCode} 项目下 ${targets.length} 个离线图档的占用。本地修改仍会保留；旧会话将失效，再次编辑时必须核对服务器版本。` : ''
+  return targets.length ? `将结束 ${targets[0].projectCode} 项目下 ${targets.length} 个${emergencyRelease.value ? '在线或离线' : '离线'}图档的占用。旧会话将失效；未上传修改需要在原电脑另存并与服务器最新版比对。${emergencyRelease.value ? '存档中、审核中或会话已经变化的图档会被拒绝接管。' : ''}` : ''
 })
 
 function stageLabel(stage: string | number) {
@@ -280,9 +282,10 @@ function requestReleaseLabel(locks: EditLockSummary[] = []) {
   return count > 1 ? `我需要编辑（${count}）` : '我需要编辑'
 }
 
-function openForceRelease(locks: EditLockSummary[]) {
-  const targets = forceReleaseTargets(locks)
+function openForceRelease(locks: EditLockSummary[], emergency = false) {
+  const targets = emergency ? locks.filter(lock => lock.canEmergencyRelease && lock.sessionId) : forceReleaseTargets(locks)
   if (!targets.length) return
+  emergencyRelease.value = emergency
   forceReleaseDialogTargets.value = targets
   forceReleaseReason.value = ''
   forceReleaseDialogOpen.value = true
@@ -318,11 +321,14 @@ async function confirmForceRelease() {
   forceReleaseSubmitting.value = true
   try {
     for (const lock of targets) {
-      await props.onForceRelease(lock.documentId, reason)
+      if (emergencyRelease.value) {
+        if (!props.onEmergencyRelease || !lock.sessionId) throw new Error('当前页面不支持紧急接管，请刷新后重试。')
+        await props.onEmergencyRelease(lock.documentId, lock.sessionId, lock.checkedOutAt, reason)
+      } else await props.onForceRelease(lock.documentId, reason)
       completed++
     }
     forceReleaseDialogOpen.value = false
-    ElMessage.success(`已统一释放 ${completed} 个超时编辑权限`)
+    ElMessage.success(`已${emergencyRelease.value ? '紧急接管' : '统一释放'} ${completed} 个编辑权限`)
   } catch (error) {
     const message = error instanceof Error ? error.message : '强制释放失败'
     ElMessage.error(completed ? `已释放 ${completed} 个，其余未完成：${message}` : message)
@@ -382,6 +388,7 @@ async function resetPassword(task: PasswordResetTask) {
                 <span v-else-if="row.locks?.some(lock => lock.releaseRequestedBy)">已申请</span>
                 <span v-else-if="row.locks?.some(lock => lock.ownedByCurrentUser)" class="pdm-lock-own">关闭图档后自动结束编辑</span>
                 <span v-else>—</span>
+                <button v-if="onEmergencyRelease && row.locks?.some(lock => lock.canEmergencyRelease && lock.sessionId)" type="button" class="pdm-text-action is-danger" :disabled="pending" @click.stop="openForceRelease(row.locks!, true)">紧急接管</button>
               </td>
             </tr>
           </tbody>
@@ -398,7 +405,7 @@ async function resetPassword(task: PasswordResetTask) {
       </footer>
     </section>
 
-    <el-dialog v-if="forceReleaseDialogOpen" v-model="forceReleaseDialogOpen" class="pdm-force-release-dialog" modal-class="pdm-force-release-overlay" title="批量强制释放超时权限" width="520px" :close-on-click-modal="false" append-to-body>
+    <el-dialog v-if="forceReleaseDialogOpen" v-model="forceReleaseDialogOpen" class="pdm-force-release-dialog" modal-class="pdm-force-release-overlay" :title="emergencyRelease ? '紧急接管编辑权限' : '批量强制释放超时权限'" width="520px" :close-on-click-modal="false" append-to-body>
       <div class="pdm-force-release-form">
         <p>{{ forceReleaseDialogSummary }}</p>
         <fieldset>

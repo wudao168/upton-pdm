@@ -4,10 +4,10 @@ $ErrorActionPreference = 'Stop'
 $web = Join-Path $ProjectRoot '.local\api\wwwroot'
 $manifest = Join-Path $web 'client-bootstrap.json'
 $targets = @((Join-Path $ProjectRoot '.local\client\ui'), (Join-Path $ProjectRoot '.local\solidworks-addin\ui'), (Join-Path $env:LOCALAPPDATA 'UPLM\client\ui'), (Join-Path $env:LOCALAPPDATA 'UPLM\solidworks-addin\ui')) | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
-$files = @('index.html','review-overlay.html','server-settings.html')
-foreach ($entry in @('index.html','review-overlay.html')) {
+$files = @('index.html','review-overlay.html','server-settings.html','favicon.ico')
+foreach ($entry in @('index.html','review-overlay.html','server-settings.html')) {
     $html = [IO.File]::ReadAllText((Join-Path $web $entry))
-    $files += @([regex]::Matches($html, '(?:src|href)="\./(assets/[^"?]+\.(?:js|css))"') | ForEach-Object { $_.Groups[1].Value })
+    $files += @([regex]::Matches($html, '(?:src|href)="\./(assets/[^"?]+\.(?:js|css|png|svg|ico))"') | ForEach-Object { $_.Groups[1].Value })
 }
 $files = @($files | Select-Object -Unique)
 foreach ($target in $targets) {

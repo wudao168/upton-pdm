@@ -2018,6 +2018,7 @@ public sealed class PdmApiFactory : WebApplicationFactory<Program>
             // Endpoint tests drive synchronization explicitly; the polling worker must not consume their queued U9 responses.
             foreach (var registration in services.Where(service =>
                 service.ImplementationType == typeof(Upton.Pdm.Api.MaterialU9SyncBatchHostedService) || service.ImplementationType == typeof(Upton.Pdm.Api.DingTalkStreamService)
+                || service.ImplementationType == typeof(Upton.Pdm.Api.EditCollaborationHostedService)
                 || service.ImplementationType == typeof(Upton.Pdm.Api.ReleaseDeliveryHostedService)).ToArray())
                 services.Remove(registration);
             services.AddDataProtection().UseEphemeralDataProtectionProvider();
@@ -2043,10 +2044,10 @@ public sealed class TestPersistentSessionTokenService : IPersistentSessionTokenS
 {
     private readonly Dictionary<string, PersistentSessionTicket> tickets = [];
 
-    public string Issue(UserAccount account)
+    public string Issue(UserAccount account, string? sessionId = null)
     {
         var token = Guid.NewGuid().ToString("N");
-        tickets[token] = new PersistentSessionTicket(account.Username, account.TokenVersion);
+        tickets[token] = new PersistentSessionTicket(account.Username, account.TokenVersion, sessionId);
         return token;
     }
 

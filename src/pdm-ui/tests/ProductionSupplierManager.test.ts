@@ -11,12 +11,18 @@ const initialCatalog = (): ProductionSupplierCatalog => ({ companyId: 'company',
   categories: [{ id: 'machining', name: '机加工', isActive: true }, { id: 'surface', name: '表面处理', isActive: true }],
   suppliers: [{ id: 'supplier', code: 'S001', name: '综合加工厂', fullName: '综合加工有限公司', categoryIds: ['machining', 'surface'],
     isActive: true, address: '', phone: '', contact: '', contactPhone: '', remarks: '', updatedAt: '' }] })
-const createWrapper = () => mount(ProductionSupplierManager, { props: { token: 'token' }, global: { plugins: [ElementPlus], stubs: { teleport: true } } })
+const createWrapper = (canManage = true) => mount(ProductionSupplierManager, { props: { token: 'token', canManage }, global: { plugins: [ElementPlus], stubs: { teleport: true } } })
 
 beforeEach(() => vi.spyOn(api, 'readProductionSuppliers').mockResolvedValue(initialCatalog()))
 afterEach(() => vi.restoreAllMocks())
 
 describe('供应商分类维护', () => {
+  it('只读权限可查看台账但没有新增、编辑、停用和分类维护入口，撤销维护权限会关闭表单', async () => {
+    const wrapper=createWrapper(false);await flushPromises();expect(wrapper.text()).toContain('综合加工有限公司')
+    expect(wrapper.find('.production-suppliers__category-actions').exists()).toBe(false);expect(wrapper.findAll('tbody button')).toHaveLength(0);expect(wrapper.findAll('button').some(button=>button.text()==='新建供应商')).toBe(false)
+    await wrapper.setProps({canManage:true});await wrapper.findAll('tbody button').find(button=>button.text()==='编辑')!.trigger('click');expect(wrapper.find('[aria-label="维护供应商"]').exists()).toBe(true)
+    await wrapper.setProps({canManage:false});expect(wrapper.find('[aria-label="维护供应商"]').exists()).toBe(false);wrapper.unmount()
+  })
   it('从维护弹窗新增分类，保存后保持维护列表打开，并使用最新版本编辑已有分类', async () => {
     const savedCatalog = initialCatalog()
     const saveCategory = vi.spyOn(api, 'saveProductionSupplierCategory').mockImplementation(async (id, input) => {

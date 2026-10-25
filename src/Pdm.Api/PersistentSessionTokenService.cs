@@ -5,11 +5,11 @@ using Upton.Pdm.Application;
 
 namespace Upton.Pdm.Api;
 
-public sealed record PersistentSessionTicket(string Username, long TokenVersion);
+public sealed record PersistentSessionTicket(string Username, long TokenVersion, string? SessionId = null, DateTimeOffset? ExpiresAt = null);
 
 public interface IPersistentSessionTokenService
 {
-    string Issue(UserAccount account);
+    string Issue(UserAccount account, string? sessionId = null);
     bool TryRead(string token, out PersistentSessionTicket ticket);
 }
 
@@ -17,8 +17,8 @@ public sealed class PersistentSessionTokenService(IDataProtectionProvider dataPr
 {
     private readonly IDataProtector protector = dataProtectionProvider.CreateProtector("Upton.Pdm.PersistentSession.v1");
 
-    public string Issue(UserAccount account) => protector.Protect(JsonSerializer.Serialize(
-        new PersistentSessionTicket(account.Username, account.TokenVersion)));
+    public string Issue(UserAccount account, string? sessionId = null) => protector.Protect(JsonSerializer.Serialize(
+        new PersistentSessionTicket(account.Username, account.TokenVersion, sessionId, DateTimeOffset.UtcNow.AddDays(30))));
 
     public bool TryRead(string token, out PersistentSessionTicket ticket)
     {
@@ -28,7 +28,7 @@ public sealed class PersistentSessionTokenService(IDataProtectionProvider dataPr
         try
         {
             var value = JsonSerializer.Deserialize<PersistentSessionTicket>(protector.Unprotect(token));
-            if (value is null || string.IsNullOrWhiteSpace(value.Username)) return false;
+            if (value is null || string.IsNullOrWhiteSpace(value.Username) || value.ExpiresAt <= DateTimeOffset.UtcNow) return false;
             ticket = value;
             return true;
         }

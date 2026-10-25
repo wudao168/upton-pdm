@@ -6,18 +6,108 @@ public sealed class EngineeringKitService(
     IEngineeringKitRepository kits,
     IMaterialRepository materials,
     IPdmRepository repository,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    IStandardLibraryRepository standardLibrary)
 {
     public async Task<IReadOnlyList<EngineeringKit>> ListAsync(bool releasedOnly, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireAsync(actor, role, releasedOnly ? PermissionCodes.StandardLibraryView : PermissionCodes.StandardLibraryManage, cancellationToken);
-        return await kits.ListAsync(releasedOnly, cancellationToken);
+        var rows = await kits.ListAsync(releasedOnly, cancellationToken);
+        return releasedOnly ? rows.Select(ReleasedOnly).ToArray() : rows;
     }
 
     public async Task<EngineeringKit> GetAsync(Guid kitId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireAsync(actor, role, PermissionCodes.StandardLibraryView, cancellationToken);
-        return await kits.FindAsync(kitId, cancellationToken) ?? throw new PdmNotFoundException("套件不存在。");
+        var kit = await kits.FindAsync(kitId, cancellationToken) ?? throw new PdmNotFoundException("套件不存在。");
+        if (await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken)) return kit;
+        if (kit.CurrentReleasedRevisionId is null) throw new PdmNotFoundException("套件尚未发布。");
+        return ReleasedOnly(kit);
+    }
+
+    private static EngineeringKit ReleasedOnly(EngineeringKit kit) => kit with
+    { Revisions = kit.Revisions.Where(item => item.State == EngineeringKitRevisionState.Released).ToArray() };
+
+    public async Task<EngineeringKit> SaveLibraryMetadataAsync(Guid kitId, SaveEngineeringKitLibraryMetadataCommand command, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken)
+            && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken))
+            throw new UnauthorizedAccessException("当前角色无权维护套件资料。");
+        var kit = await kits.FindAsync(kitId, cancellationToken) ?? throw new PdmNotFoundException("套件不存在。");
+        if (kit.CurrentReleasedRevisionId is null) throw new PdmRuleException("套件发布后才能维护资料。");
+        if (!kit.IsActive) throw new PdmRuleException("已停用套件不能维护资料，请先恢复启用。");
+        var remark = string.IsNullOrWhiteSpace(command.Remark) ? null : command.Remark.Trim();
+        var advice = string.IsNullOrWhiteSpace(command.SelectionAdvice) ? null : command.SelectionAdvice.Trim();
+        if (remark?.Length > 500) throw new PdmRuleException("套件备注不能超过500个字符。");
+        if (advice?.Length > 1000) throw new PdmRuleException("选型建议不能超过1000个字符。");
+        if (command.ReferencePrice is < 0 or > 9999999999999999.99m) throw new PdmRuleException("参考价格须为有效的非负金额。");
+        if (command.CoverImageAttachmentId is Guid coverId)
+        {
+            var cover = await kits.FindLibraryAttachmentAsync(coverId, cancellationToken);
+            if (cover?.MaterialId != kitId || cover.Kind != MaterialAttachmentKind.CoverImage)
+                throw new PdmRuleException("只能将本套件的图片附件设为封面。");
+        }
+        var saved = await kits.UpdateLibraryMetadataAsync(kit with { Description = remark, SelectionAdvice = advice,
+            ReferencePrice = command.ReferencePrice, IsRecommended = command.IsRecommended, CoverImageAttachmentId = command.CoverImageAttachmentId,
+            UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() }, command.ExpectedRowVersion, cancellationToken);
+        await AuditAsync(actor, "engineering-kit.library-metadata.update", kitId, "维护套件备注、选型建议、参考价格、推荐和封面；组成版本保持不变", cancellationToken);
+        return ReleasedOnly(saved);
+    }
+
+    public async Task<IReadOnlyList<EngineeringKit>> ListLibraryAsync(Guid? categoryId, string? query, string? brand, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        var rows = await ListAsync(true, actor, role, cancellationToken);
+        var categories = await standardLibrary.ListCategoriesAsync(true, cancellationToken);
+        var scope = categoryId is null ? null : new HashSet<Guid> { categoryId.Value };
+        if (scope is not null)
+            while (true)
+            {
+                var children = categories.Where(item => item.ParentId.HasValue && scope.Contains(item.ParentId.Value) && !scope.Contains(item.Id)).ToArray();
+                if (children.Length == 0) break;
+                foreach (var child in children) scope.Add(child.Id);
+            }
+        return rows.Where(kit => (scope is null || kit.StandardLibraryCategoryId.HasValue && scope.Contains(kit.StandardLibraryCategoryId.Value))
+            && (string.IsNullOrWhiteSpace(brand) || string.Equals(kit.Brand, brand.Trim(), StringComparison.OrdinalIgnoreCase))
+            && (string.IsNullOrWhiteSpace(query) || new[] { kit.Code, kit.Name, kit.Model, kit.Brand }.Any(value => value?.Contains(query.Trim(), StringComparison.OrdinalIgnoreCase) == true))).ToArray();
+    }
+
+    public async Task<EngineeringKit> MoveCategoryAsync(Guid kitId, Guid categoryId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken);
+        await RequireCategoryAsync(categoryId, cancellationToken);
+        var saved = await kits.MoveCategoryAsync(kitId, categoryId, expectedRowVersion, actor, timeProvider.GetUtcNow(), cancellationToken);
+        await AuditAsync(actor, "engineering-kit.category.move", kitId, $"套件归入标准分类：{categoryId}", cancellationToken);
+        return saved;
+    }
+
+    public async Task<EngineeringKit> SetActiveAsync(Guid kitId, bool isActive, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken);
+        var saved = await kits.SetActiveAsync(kitId, isActive, expectedRowVersion, actor, timeProvider.GetUtcNow(), cancellationToken);
+        await AuditAsync(actor, isActive ? "engineering-kit.activate" : "engineering-kit.deactivate", kitId,
+            $"{(isActive ? "恢复启用" : "停用")}套件：{saved.Code ?? saved.Name}", cancellationToken);
+        return saved;
+    }
+
+    private async Task<StandardLibraryCategory> RequireCategoryAsync(Guid? categoryId, CancellationToken cancellationToken)
+    {
+        if (categoryId is null) throw new PdmRuleException("请选择标准物料分类。");
+        var category = await standardLibrary.FindCategoryAsync(categoryId.Value, cancellationToken);
+        if (category is null || !category.IsActive || StandardLibraryDefaults.IsUncategorized(category))
+            throw new PdmRuleException("请选择已启用的具体标准物料分类。");
+        return category;
+    }
+
+    private async Task<string?> RootCategoryCodeAsync(StandardLibraryCategory category, CancellationToken cancellationToken)
+    {
+        var seen = new HashSet<Guid> { category.Id };
+        while (category.ParentId is Guid parentId)
+        {
+            if (!seen.Add(parentId)) throw new PdmRuleException("标准分类层级异常，请联系标准化维护。");
+            category = await standardLibrary.FindCategoryAsync(parentId, cancellationToken)
+                ?? throw new PdmRuleException("标准分类的上级分类不存在，请刷新后重试。");
+        }
+        return category.Code;
     }
 
     /// <summary>套件型号自动生成用的标准代码/分类代码选项：查看权限即可读取。</summary>
@@ -67,30 +157,17 @@ public sealed class EngineeringKitService(
         var brand = Required(command.Brand, 160, "套件品牌");
         var description = Optional(command.Description, 500, "套件说明");
         var changeNote = Optional(command.ChangeNote, 500, "变更说明");
-        // 型号可手动填写，也可按“标准代码-分类代码-序列号”在首次发布时自动生成。
-        var manualModel = command.ModelMode == EngineeringKitModelMode.Manual
+        var existing = kitId is null ? null : await kits.FindAsync(kitId.Value, cancellationToken) ?? throw new PdmNotFoundException("套件不存在。");
+        var category = await RequireCategoryAsync(command.StandardLibraryCategoryId, cancellationToken);
+        var manualModel = existing?.CurrentReleasedRevisionId is not null ? existing.Model : command.ModelMode == EngineeringKitModelMode.Manual
             ? Required(command.Model ?? string.Empty, 160, "套件型号")
-            : Optional(command.Model, 160, "套件型号");
-        var standardCode = Optional(command.StandardCode, 32, "标准代码");
-        var categoryCode = Optional(command.CategoryCode, 32, "分类代码");
-        var standardName = Optional(command.StandardName, 60, "标准名称");
-        var categoryName = Optional(command.CategoryName, 60, "分类名称");
+            : null;
+        string? standardCode = null, standardName = null;
+        var categoryCode = await RootCategoryCodeAsync(category, cancellationToken);
+        var categoryName = category.Name;
         if (command.ModelMode == EngineeringKitModelMode.Auto && manualModel is null)
         {
-            // 已经生成过型号的套件（存量数据）允许不带代码继续维护；尚未生成型号的必须选好标准代码与分类代码。
-            var existingModel = kitId is null ? null : (await kits.FindAsync(kitId.Value, cancellationToken))?.Model;
-            if (string.IsNullOrWhiteSpace(existingModel))
-            {
-                if (standardName is null) throw new PdmRuleException("选择自动生成型号时必须先选择标准名称。");
-                if (categoryName is null) throw new PdmRuleException("选择自动生成型号时必须先选择分类名称。");
-                var options = (await repository.GetSystemSettingsAsync(cancellationToken)).EngineeringKitOptions;
-                var standard = options.FindStandard(standardName)
-                    ?? throw new PdmRuleException($"标准“{standardName}”未在代码维护中登记，请先维护对应代码。");
-                var category = options.FindCategory(categoryName)
-                    ?? throw new PdmRuleException($"分类“{categoryName}”未在代码维护中登记，请先维护对应代码。");
-                standardCode = standard.Code;
-                categoryCode = category.Code;
-            }
+            EngineeringKitNumbering.Model(categoryCode, 1);
         }
         var normalized = command.Components.OrderBy(item => item.SortOrder).ToArray();
         if (normalized.Length == 0) throw new PdmRuleException("套件至少需要一个明细物料。");
@@ -116,23 +193,23 @@ public sealed class EngineeringKitService(
             var id = Guid.NewGuid();
             var revisionId = Guid.NewGuid();
             revision = new(revisionId, id, 1, EngineeringKitRevisionState.Draft, changeNote,
-                Components(revisionId, normalized, materialRows), actor, now, null, null);
+                Components(revisionId, normalized, materialRows), actor, now, null, null, category.Id);
             kit = new(id, null, manualModel, name, brand, description, null, [revision], actor, now, actor, now, 1,
                 command.ModelMode, standardName, standardCode, categoryName, categoryCode);
         }
         else
         {
-            var current = await kits.FindAsync(kitId.Value, cancellationToken) ?? throw new PdmNotFoundException("套件不存在。");
+            var current = existing!;
             if (command.ExpectedRowVersion is null) throw new PdmRuleException("编辑套件时必须提供当前数据版本。");
             var draft = current.DraftRevision;
             var versionNumber = draft?.VersionNumber ?? current.Revisions.Select(item => item.VersionNumber).DefaultIfEmpty(0).Max() + 1;
             var revisionId = draft?.Id ?? Guid.NewGuid();
             revision = new(revisionId, current.Id, versionNumber, EngineeringKitRevisionState.Draft, changeNote,
-                Components(revisionId, normalized, materialRows), draft?.CreatedBy ?? actor, draft?.CreatedAt ?? now, null, null);
+                Components(revisionId, normalized, materialRows), draft?.CreatedBy ?? actor, draft?.CreatedAt ?? now, null, null, category.Id);
             kit = current with
             {
                 Model = manualModel,
-                ModelMode = command.ModelMode,
+                ModelMode = current.CurrentReleasedRevisionId is not null ? current.ModelMode : command.ModelMode,
                 StandardName = standardName,
                 StandardCode = standardCode,
                 CategoryName = categoryName,
@@ -154,10 +231,15 @@ public sealed class EngineeringKitService(
     {
         await RequireAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken);
         var current = await kits.FindAsync(kitId, cancellationToken) ?? throw new PdmNotFoundException("套件不存在。");
+        if (!current.IsActive) throw new PdmRuleException("套件已停用，请恢复启用后再发布。");
         var draft = current.DraftRevision ?? throw new PdmRuleException("套件没有待发布草稿。");
         if (draft.Components.Count == 0)
             throw new PdmRuleException("套件至少需要一个明细物料。");
-        var saved = await kits.PublishAsync(kitId, expectedRowVersion, actor, timeProvider.GetUtcNow(), cancellationToken);
+        var category = await RequireCategoryAsync(draft.StandardLibraryCategoryId, cancellationToken);
+        var categoryCode = await RootCategoryCodeAsync(category, cancellationToken);
+        if (current.Code is null && current.ModelMode == EngineeringKitModelMode.Auto)
+            EngineeringKitNumbering.Model(categoryCode, 1);
+        var saved = await kits.PublishAsync(kitId, expectedRowVersion, actor, timeProvider.GetUtcNow(), categoryCode, cancellationToken);
         await AuditAsync(actor, "engineering-kit.publish", saved.Id, $"{saved.Code} / V{draft.VersionNumber:D2}", cancellationToken);
         return saved;
     }
@@ -167,6 +249,7 @@ public sealed class EngineeringKitService(
         await RequireAsync(actor, role, PermissionCodes.StandardLibraryView, cancellationToken);
         if (command.Quantity <= 0) throw new PdmRuleException("套件数量必须大于0。");
         var kit = await kits.FindAsync(kitId, cancellationToken) ?? throw new PdmNotFoundException("套件不存在。");
+        if (!kit.IsActive) throw new PdmRuleException("套件已停用，请恢复启用后再引用。");
         var revision = command.RevisionId is null
             ? kit.CurrentReleasedRevision
             : kit.Revisions.FirstOrDefault(item => item.Id == command.RevisionId.Value && item.State == EngineeringKitRevisionState.Released);
@@ -202,7 +285,7 @@ public sealed class EngineeringKitService(
         IReadOnlyList<PdmMaterial> materials) =>
         commands.Select((command, index) => new EngineeringKitComponent(
             Guid.NewGuid(), revisionId, command.MaterialId, materials[index].MaterialCode, materials[index].Name,
-            command.Quantity, materials[index].UnitCode, command.IsOptional, index + 1)).ToArray();
+            command.Quantity, materials[index].UnitCode, command.IsOptional, index + 1, materials[index].Specification, materials[index].Brand, materials[index].Remark)).ToArray();
 
     private static string Required(string value, int maxLength, string label)
     {

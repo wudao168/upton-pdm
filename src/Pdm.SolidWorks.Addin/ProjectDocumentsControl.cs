@@ -405,7 +405,10 @@ internal sealed class ProjectDocumentsControl : UserControl
         }
         else if (!node.DocumentId.HasValue)
         {
-            SetSelectionMessage("尚未纳入PLM", "该文件不能从项目工作区打开", Color.FromArgb(174, 94, 0));
+            if (IsWorkspaceGroup(node))
+                SetSelectionMessage("请选择要打开的图档", "展开分组，选择装配、零件或工程图后再点击打开", Color.FromArgb(90, 107, 128));
+            else
+                SetSelectionMessage("尚未纳入PLM", "该文件不能从项目工作区打开", Color.FromArgb(174, 94, 0));
         }
         else if (node.CheckoutSessionLost)
         {
@@ -630,7 +633,7 @@ internal sealed class ProjectDocumentsControl : UserControl
         var textColor = Color.FromArgb(70, 82, 96);
         TextRenderer.DrawText(eventArgs.Graphics, "名称", Font, new Rectangle(5, 0, Math.Max(0, nameX - 9), 22), textColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
         TextRenderer.DrawText(eventArgs.Graphics, "本地状态", Font, new Rectangle(nameX + 5, 0, Math.Max(0, localX - nameX - 9), 22), textColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-        TextRenderer.DrawText(eventArgs.Graphics, "PLM状态", Font, new Rectangle(localX + 5, 0, Math.Max(0, tree.ClientSize.Width - localX - 9), 22), textColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        TextRenderer.DrawText(eventArgs.Graphics, "图纸版本 / 发布版本", Font, new Rectangle(localX + 5, 0, Math.Max(0, tree.ClientSize.Width - localX - 9), 22), textColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
     }
 
     private void DrawNode(object sender, DrawTreeNodeEventArgs eventArgs)
@@ -679,7 +682,7 @@ internal sealed class ProjectDocumentsControl : UserControl
         var plmBounds = new Rectangle(localX + 5, eventArgs.Bounds.Top, Math.Max(0, tree.ClientSize.Width - localX - 9), eventArgs.Bounds.Height);
         TextRenderer.DrawText(eventArgs.Graphics, eventArgs.Node.Text, eventArgs.Node.NodeFont ?? tree.Font, nameBounds, foreground, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         TextRenderer.DrawText(eventArgs.Graphics, LocalStateText(model), tree.Font, localBounds, foreground, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-        TextRenderer.DrawText(eventArgs.Graphics, PlmStateText(model), tree.Font, plmBounds, foreground, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        TextRenderer.DrawText(eventArgs.Graphics, IsWorkspaceGroup(model) ? string.Empty : model.Status == CadReferenceStatus.Virtual ? "随父装配" : model.BusinessVersionText, tree.Font, plmBounds, foreground, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
 
         if ((eventArgs.State & TreeNodeStates.Focused) == TreeNodeStates.Focused)
         {
@@ -719,6 +722,7 @@ internal sealed class ProjectDocumentsControl : UserControl
 
     private string LocalStateText(CadTreeNode node)
     {
+        if (IsWorkspaceGroup(node)) return string.Empty;
         if (node.IsExternalProvenance) return "外部副本";
         if (node.Status == CadReferenceStatus.Missing) return "文件缺失";
         if (string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath)) return "未下载";
@@ -729,6 +733,9 @@ internal sealed class ProjectDocumentsControl : UserControl
                 && string.Equals(node.CheckedOutBy, authenticatedUsername, StringComparison.OrdinalIgnoreCase))) return "可编辑";
         return "只读缓存";
     }
+
+    private static bool IsWorkspaceGroup(CadTreeNode node) =>
+        !node.DocumentId.HasValue && string.IsNullOrWhiteSpace(node.FileName) && node.Children.Count > 0;
 
     private string PlmStateText(CadTreeNode node)
     {

@@ -70,7 +70,7 @@ describe('PreviewWorkspace', () => {
 
     const bar = wrapper.get('.pdm-preview-properties-bar')
     expect(bar.find('.pdm-preview-properties').exists()).toBe(true)
-    expect(bar.findAll('.pdm-preview-properties > div')).toHaveLength(8)
+    expect(bar.findAll('.pdm-preview-properties > div')).toHaveLength(10)
     expect(wrapper.find('.pdm-preview-properties-toggle').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="折叠图档属性"]').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="折叠图档信息卡"]').exists()).toBe(false)

@@ -14,6 +14,7 @@ internal static class DialogWindowSizing
         dialog.StartPosition = FormStartPosition.Manual;
         dialog.Load += (_, __) =>
         {
+            if (!dialog.TopLevel) return;
             var owner = GetWindow(dialog.Handle, 4); // GW_OWNER, including native SolidWorks owners.
             var area = owner == IntPtr.Zero
                 ? Screen.FromPoint(Cursor.Position).WorkingArea

@@ -8,6 +8,25 @@ namespace Upton.Pdm.Infrastructure;
 
 public static class MaterialImportWorkbook
 {
+    public static IReadOnlyList<string> ReadMaterialCodes(Stream input)
+    {
+        using var archive = new ZipArchive(input, ZipArchiveMode.Read, true);
+        var sheet = archive.GetEntry("xl/worksheets/sheet1.xml") ?? throw new PdmRuleException("Excel中未找到第一张工作表。");
+        if (sheet.Length > 5 * 1024 * 1024 || archive.GetEntry("xl/sharedStrings.xml")?.Length > 5 * 1024 * 1024) throw new PdmRuleException("Excel工作表过大，单次最多导入200个料号。");
+        var strings = ReadSharedStrings(archive);
+        using var stream = sheet.Open();
+        XNamespace ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        var rows = XDocument.Load(stream).Descendants(ns + "row").Select(row => ReadCells(row, ns, strings)).ToArray();
+        var names = new[] { "料号", "物料编码", "料品编码", "MaterialCode", "Code" };
+        var header = Array.FindIndex(rows, row => row.Values.Any(value => names.Contains(value, StringComparer.OrdinalIgnoreCase)));
+        var column = header < 0 ? 0 : rows[header].First(cell => names.Contains(cell.Value, StringComparer.OrdinalIgnoreCase)).Key;
+        var codes = rows.Skip(header + 1).Select(row => Value(row, column)).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (codes.Length is < 1 or > 200) throw new PdmRuleException("Excel需包含1至200个料号，料号列可命名为“料号”或放在第一列。");
+        if (codes.Any(code => System.Text.RegularExpressions.Regex.IsMatch(code, @"^\d+(\.\d+)?[Ee][+-]?\d+$")))
+            throw new PdmRuleException("料号包含科学计数格式，请将Excel料号列按文本保存后重试，避免前导0或数字丢失。");
+        return codes;
+    }
+
     private static readonly string[] RequiredHeaders = ["U9C分类编码", "物料名称", "计量单位", "规格型号"];
     private static readonly string[] OptionalHeaders = ["材质", "品牌", "表面处理", "重量", "重量单位", "备注", "采购链接", "选型建议", "参考价格", "3D链接", "资料链接", "优先推荐"];
 

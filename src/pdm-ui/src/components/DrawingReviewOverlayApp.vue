@@ -14,6 +14,7 @@ interface ReviewOverlayState {
   defaultReviewers: string[]
   selectedDocumentId?: string
   currentUsername: string
+  companyId: string
   pending: boolean
   canSubmit: boolean
   canManageWithdraw: boolean
@@ -33,6 +34,7 @@ const state = reactive<ReviewOverlayState>({
   defaultReviewers: [],
   selectedDocumentId: undefined,
   currentUsername: '',
+  companyId: '',
   pending: false,
   canSubmit: false,
   canManageWithdraw: false,
@@ -69,7 +71,7 @@ onBeforeUnmount(() => window.chrome?.webview?.removeEventListener?.('message', u
 </script>
 
 <template>
-  <main class="pdm-review-overlay pdm-app-shell" :class="`theme-${state.theme}`">
+  <main class="pdm-review-overlay pdm-app-shell" :class="`theme-${state.theme}`" :data-pdm-preference-scope="JSON.stringify([state.currentUsername, state.companyId])">
     <DrawingReviewPanel
       v-if="state.visible"
       :collapsed="state.collapsed"

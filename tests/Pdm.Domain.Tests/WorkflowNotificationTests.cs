@@ -7,6 +7,29 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class WorkflowNotificationTests
 {
+    [Fact]
+    public async Task ReleaseAssistantInSiblingGroupReceivesQueuedNoticeWithinTheSubmitterDivisionOnly()
+    {
+        using var f = await Fixture.Create(); f.SetCompany(f.Company);
+        var mechanical = await f.Repository.SaveOrganizationUnitAsync(new(null, f.Company, f.First, "NOTICE-MECH", "机械组", OrganizationUnitKind.Department, true, 0), default);
+        var assistants = await f.Repository.SaveOrganizationUnitAsync(new(null, f.Company, f.First, "NOTICE-ASSIST", "技术助理组", OrganizationUnitKind.Department, true, 1), default);
+        await f.Repository.SetOrganizationMembershipsAsync("submitter", [mechanical.Id], mechanical.Id, default);
+        await f.Repository.SetOrganizationMembershipsAsync("assistant-a", [f.Supply], f.Supply, default);
+        await f.Rule("standard-release", true, [new("SubmitterDepartment", null, RoleCode: "TechnicalAssistant")]);
+        var package = await f.Release(ReleaseScope.StandardSupplement, "standard-release");
+        await f.Service.CaptureReleaseAsync(package, default);
+        await f.Repository.MarkPublishedAsync(package.Id, "unused", DateTimeOffset.UtcNow, default);
+        var job = await f.Job("standard-release");
+        await f.Service.ProcessAsync(job.Id, default);
+        Assert.Equal("Attention", (await f.Store.FindJobAsync(job.Id, default))!.State);
+        await f.Repository.SetOrganizationMembershipsAsync("assistant-a", [assistants.Id], assistants.Id, default);
+        await f.Service.ProcessAsync(job.Id, default);
+        await f.Service.ProcessAsync(job.Id, default);
+        Assert.Equal(1, await f.Notices("assistant-a"));
+        Assert.Equal(0, await f.Notices("assistant-b"));
+        Assert.Equal("Sent", Assert.Single(await f.Service.ReleaseRecordsAsync(package, default)).State);
+    }
+
     private sealed class Fixture : IDisposable
     {
         public InMemoryPdmRepository Repository { get; } = new(TimeProvider.System);

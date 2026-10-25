@@ -20,9 +20,9 @@ public sealed class LocalStandardStructureFiles(IOptions<PdmStorageOptions> opti
         if (key.Length is < 1 or > 80 || key.Any(c => !char.IsAsciiLetterOrDigit(c) && c != '-' && c != '_'))
             throw new PdmRuleException("存档文件标识无效。");
         var extension = Path.GetExtension(name).ToLowerInvariant();
-        if (!new[] { ".sldasm", ".sldprt", ".slddrw", ".step", ".stp", ".pdf" }.Contains(extension)
+        if (!new[] { ".sldasm", ".sldprt", ".slddrw", ".step", ".stp", ".pdf", ".txt", ".xls", ".xlsx" }.Contains(extension)
             || name != Path.GetFileName(name) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
-            throw new PdmRuleException("仅支持原生SolidWorks图档、STEP及PDF，文件名不能包含路径。");
+            throw new PdmRuleException("仅支持原生SolidWorks图档、STEP、PDF及方程或设计表文件，文件名不能包含路径。");
         return Path.Combine(DirectoryFor(root, companyId, revisionId), key + extension);
     }
     public async Task<IReadOnlyList<StandardStructureFile>> WriteAsync(string root, Guid companyId, Guid revisionId,

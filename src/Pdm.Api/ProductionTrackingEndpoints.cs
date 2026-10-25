@@ -38,15 +38,21 @@ public static class ProductionTrackingEndpoints
             var record = await tracking.FindAsync(id, actor, role, ct);
             return Results.Ok(await scan.ActionsAsync(record.State, actor, role, ct));
         });
-        api.MapGet("/projects", async (HttpContext context, ProductionTrackingService service, CancellationToken ct, bool selfOnly = false) =>
+        api.MapGet("/projects", async (HttpContext context, ProductionTrackingService service, CancellationToken ct, bool selfOnly = false, bool externalOnly = false) =>
         {
             var (actor, role) = User(context);
-            return Results.Ok(await service.ListAsync(actor, role, ct, selfOnly));
+            return Results.Ok(await service.ListAsync(actor, role, ct, selfOnly, externalOnly));
         });
         api.MapGet("/releases/{id:guid}", async (Guid id, HttpContext context, ProductionTrackingService service, CancellationToken ct) =>
         {
             var (actor, role) = User(context);
             return Results.Ok(await service.FindAsync(id, actor, role, ct));
+        });
+        api.MapGet("/releases/{id:guid}/external-suppliers", async (Guid id, HttpContext context,
+            ProductionTrackingService service, CancellationToken ct) =>
+        {
+            var (actor, role) = User(context);
+            return Results.Ok(await service.ExternalSupplierChoicesAsync(id, actor, role, ct));
         });
         api.MapGet("/releases/{id:guid}/opening-preview", async (Guid id, HttpContext context,
             ProductionTrackingService service, CancellationToken ct) =>
@@ -96,6 +102,12 @@ public static class ProductionTrackingEndpoints
         {
             var (actor, role) = User(context);
             return Results.Ok(await service.UpdateLotPromiseAsync(id, input, actor, role, ct));
+        });
+        api.MapPost("/releases/{id:guid}/cancel-unassigned-demand", async (Guid id, CancelUnassignedProductionDemand input,
+            HttpContext context, ProductionTrackingService service, CancellationToken ct) =>
+        {
+            var (actor, role) = User(context);
+            return Results.Ok(await service.CancelUnassignedDemandAsync(id, input, actor, role, ct));
         });
         api.MapPost("/releases/{id:guid}/movements", async (Guid id, RecordProductionMovement input,
             HttpContext context, ProductionTrackingService service, CancellationToken ct) =>

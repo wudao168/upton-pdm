@@ -7,6 +7,26 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class TreeScopeArchiveTests
 {
     [Fact]
+    public void WorkingTreePreservesManagedDesignDependenciesAndSuppressedEmbeddedState()
+    {
+        var source = new DocumentReferenceNode(Guid.NewGuid(), Guid.NewGuid(), "ROOT/依赖/参数.txt", "参数.txt", "方程",
+            DocumentKind.Other, "", 1, ReferenceNodeStatus.Normal, RevisionLabel.InitialWork(), null, [])
+            { Role = ReferenceRole.ExternalFileDependency };
+        var embedded = source with { DocumentId = null, InstancePath = "ROOT/EMBEDDED", FileName = "EMBEDDED.SLDASM",
+            Kind = DocumentKind.Assembly, Role = ReferenceRole.Component, Status = ReferenceNodeStatus.Virtual,
+            IsSuppressed = true, Revision = null };
+        var root = source with { DocumentId = Guid.NewGuid(), InstancePath = "ROOT", FileName = "ROOT.SLDASM",
+            Kind = DocumentKind.Assembly, Role = ReferenceRole.Component, IncludesDesignDependencies = true,
+            Children = [embedded, source] };
+        var resolved = WorkingReferenceTree.Resolve(root, new Dictionary<Guid, DocumentReferenceNode> { [root.DocumentId!.Value] = root });
+        Assert.Equal(source, Assert.Single(resolved.Children, child => child.Role == ReferenceRole.ExternalFileDependency));
+        Assert.True(Assert.Single(resolved.Children, child => child.Status == ReferenceNodeStatus.Virtual).IsSuppressed);
+        Assert.False(ArchiveSafety.SameReferences(root, root with { Children = [embedded with { IsSuppressed = false }, source] }));
+        Assert.Contains(ReferenceTreeDiff.Compare(root, root with { Children = [embedded with { IsSuppressed = false }, source] }),
+            change => change.Kind == ReferenceChangeKind.StatusChanged && change.PreviousValue == "嵌入，压缩" && change.CurrentValue == "嵌入，未压缩");
+    }
+
+    [Fact]
     public void ParentOwnChangeComparisonIgnoresChildVersionsAndOpeningConfigurationButRetainsDirectEdits()
     {
         var child = new DocumentReferenceNode(Guid.NewGuid(), Guid.NewGuid(), "ROOT/CHILD", "CHILD.SLDPRT", "子件",

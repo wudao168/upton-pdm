@@ -22,6 +22,7 @@ public sealed partial class InMemoryPdmRepository
             var oldSnapshots = referenceSnapshots.ToDictionary(); var oldRoots = referenceRoots.ToDictionary();
             var oldHistory = referenceSnapshotHistory.ToDictionary(); var oldFingerprints = documentSourceFingerprints.ToDictionary();
             var oldPending = pendingArchiveDocuments.ToDictionary(); var oldRelations = documentRelations.ToDictionary();
+            var oldHandoffs = editHandoffs.ToDictionary();
             try
             {
                 var ordered = ArchiveBatchRules.Order(files);
@@ -59,9 +60,10 @@ public sealed partial class InMemoryPdmRepository
                     if (commit.ReferenceSnapshot.Root.Kind == DocumentKind.Drawing)
                     {
                         var models = commit.ReferenceSnapshot.Root.Children.Where(node => node.Kind is DocumentKind.Assembly or DocumentKind.Part)
-                            .Where(node => node.Status != ReferenceNodeStatus.Virtual && node.DocumentId.HasValue).Select(node => node.DocumentId!.Value).Distinct().ToArray();
-                        if (models.Length == 0) throw new PdmRuleException("工程图缺少实际模型关联，整批提交已取消：" + commit.ReferenceSnapshot.Root.FileName);
-                        foreach (var key in documentRelations.Keys.Where(key => key.DrawingId == file.DocumentId).ToArray()) documentRelations.TryRemove(key, out _);
+                            .Where(node => node.Status is not (ReferenceNodeStatus.Virtual or ReferenceNodeStatus.Missing) && node.DocumentId.HasValue).Select(node => node.DocumentId!.Value).Distinct().ToArray();
+                        // A partial read may add verified models, but cannot prove that an old relation was removed.
+                        if (!commit.ReferenceSnapshot.Root.StructureIndexPending)
+                            foreach (var key in documentRelations.Keys.Where(key => key.DrawingId == file.DocumentId).ToArray()) documentRelations.TryRemove(key, out _);
                         foreach (var modelId in models) documentRelations[(file.DocumentId, modelId)] = new(modelId, file.DocumentId);
                     }
                 }
@@ -84,6 +86,7 @@ public sealed partial class InMemoryPdmRepository
                 RestoreArchiveState(referenceSnapshots, oldSnapshots); RestoreArchiveState(referenceRoots, oldRoots);
                 RestoreArchiveState(referenceSnapshotHistory, oldHistory); RestoreArchiveState(documentSourceFingerprints, oldFingerprints);
                 RestoreArchiveState(pendingArchiveDocuments, oldPending); RestoreArchiveState(documentRelations, oldRelations);
+                RestoreArchiveState(editHandoffs, oldHandoffs);
                 throw;
             }
         }

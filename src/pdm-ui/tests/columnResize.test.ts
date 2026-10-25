@@ -18,9 +18,56 @@ function rect(element: Element, left: number, width: number) {
 function pointer(element: Element | Document, type: string, x: number) {
   element.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, button: 0 }))
 }
-afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.restoreAllMocks() })
+afterEach(() => { dispose?.(); document.body.innerHTML = ''; window.localStorage.clear(); vi.restoreAllMocks() })
 
 describe('global column resizing', () => {
+  it('restores native column proportions after remount and isolates accounts and changed schemas', () => {
+    const html = '<div data-pdm-preference-scope=\'["alice","company"]\' data-navigation-page="projects"><table><thead><tr><th>名称</th><th>操作</th></tr></thead></table></div>'
+    setup(html,400)
+    const headers=document.querySelectorAll('th');rect(headers[0]!,0,160);rect(headers[1]!,160,240)
+    pointer(headers[0]!,'pointerdown',158);pointer(document,'pointermove',198);pointer(document,'pointerup',198)
+    expect(window.localStorage.length).toBe(1)
+    dispose();setup(html,800)
+    expect([...document.querySelectorAll('col')].map(x=>parseFloat(x.style.width))).toEqual([50,50])
+    dispose();setup(html.replace('alice','bob'),800)
+    expect(document.querySelector('colgroup')).toBeNull()
+    dispose();setup(html.replace('名称','料号'),800)
+    expect(document.querySelector('colgroup')).toBeNull()
+    dispose();setup(html.replace('company','another-company'),800)
+    expect(document.querySelector('colgroup')).toBeNull()
+  })
+  it('restores lazily recreated tables and ignores corrupt stored widths', async () => {
+    const html='<div data-pdm-preference-scope=\'["alice","company"]\'><table><thead><tr><th>名称</th><th>操作</th></tr></thead></table></div>'
+    setup(html,300)
+    const headers=document.querySelectorAll('th');rect(headers[0]!,0,150);rect(headers[1]!,150,150)
+    pointer(headers[0]!,'pointerdown',148);pointer(document,'pointermove',178);pointer(document,'pointerup',178)
+    document.body.firstElementChild!.innerHTML='<table><thead><tr><th>名称</th><th>操作</th></tr></thead></table>'
+    await new Promise(resolve=>setTimeout(resolve,0))
+    expect(parseFloat(document.querySelector('col')!.style.width)).toBeCloseTo(60)
+    const key=window.localStorage.key(0)!
+    window.localStorage.setItem(key,'[-1,0]')
+    dispose();setup(html,300)
+    expect(document.querySelector('colgroup')).toBeNull()
+  })
+  it.each(['gantt','browser'])('restores saved %s grid columns after remount', kind => {
+    const gantt=kind==='gantt'
+    const rootClass=gantt?'pdm-gantt-table':'pdm-project-browser-list'
+    const headClass=gantt?'pdm-gantt-info-head':'pdm-project-browser-table-head'
+    const html=`<div class="${rootClass}" data-pdm-preference-scope='["alice","company"]'><div class="${headClass}"><span>名称</span><span>责任人</span></div></div>`
+    setup(html,400)
+    const headers=document.querySelectorAll(`.${headClass} span`);rect(headers[0]!,0,150);rect(headers[1]!,150,250)
+    pointer(headers[0]!,'pointerdown',148);pointer(document,'pointermove',178);pointer(document,'pointerup',178)
+    dispose();setup(html,400)
+    expect((document.body.firstElementChild as HTMLElement).style.getPropertyValue(gantt?'--pdm-resized-gantt-columns':'--pdm-resized-list-columns')).toBe(gantt?'180px 220px':'180fr 220fr')
+  })
+  it('continues resizing when browser storage is unavailable', () => {
+    setup('<div data-pdm-preference-scope=\'["alice","company"]\'><table><thead><tr><th>名称</th><th>操作</th></tr></thead></table></div>',300)
+    vi.spyOn(Storage.prototype,'setItem').mockImplementation(()=>{throw new Error('quota')})
+    const headers=document.querySelectorAll('th');rect(headers[0]!,0,150);rect(headers[1]!,150,150)
+    pointer(headers[0]!,'pointerdown',148);pointer(document,'pointermove',178)
+    expect(()=>pointer(document,'pointerup',178)).not.toThrow()
+    expect(parseFloat(document.querySelector('col')!.style.width)).toBeCloseTo(60)
+  })
   it('fits initial Element Plus columns and refits after a window resize', async () => {
     const Original = globalThis.ResizeObserver
     const observers: Array<{ callback: ResizeObserverCallback; root?: Element }> = []

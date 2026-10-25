@@ -36,10 +36,14 @@ const emit = defineEmits<{ documents: []; information: []; bom: []; projectPlan:
 
 const activeProject = computed(() => props.projects.find(item => item.id === props.project.id) ?? props.project)
 const rootProject = computed(() => {
-  if (!activeProject.value.parentProjectId) return activeProject.value
-  return props.projects.find(item => item.id === activeProject.value.parentProjectId) ?? activeProject.value
+  const rootId = activeProject.value.rootProjectId ?? activeProject.value.parentProjectId
+  return rootId ? props.projects.find(item => item.id === rootId) ?? activeProject.value : activeProject.value
 })
 
+const recordProjects = computed(() => [...new Map([rootProject.value, ...props.projects, activeProject.value]
+  .filter(item => item.id === rootProject.value.id || item.parentProjectId === rootProject.value.id || item.rootProjectId === rootProject.value.id)
+  .map(item => [item.id, item])).values()])
+const projectRecordError = ref('')
 const planPortfolio = ref<ProjectPlanPortfolio | null>(null)
 const initialBaseline = ref<ProjectPlan | null>(null)
 const baselineUnavailable = ref(false)
@@ -70,26 +74,30 @@ function projectDesignLeads(project: ProjectSummary) {
 }
 
 async function fetchOperationalSummary() {
-  const requestId = ++overviewRequestId
-  const token = props.token
+  const requestId = ++overviewRequestId, token = props.token
   if (!token) {
-    initialBaseline.value = null
-    baselineUnavailable.value = false
-    planPortfolio.value = null
-    validationPlan.value = null
-    relationCompleteness.value = null
-    managerNotes.value = []
+    initialBaseline.value = null; baselineUnavailable.value = false; planPortfolio.value = null
+    validationPlan.value = null; relationCompleteness.value = null
+    managerNotes.value = []; projectRecordHistory.value = []; projectRecordError.value = ''
     return
   }
-  const [planResult, validationResult, relationResult] = await Promise.allSettled([
-    readProjectPlanPortfolio(rootProject.value.id, token),
-    readProjectValidationPlan(activeProject.value.id, token),
-    getMaterialRelationCompleteness(activeProject.value.id, token),
+  const visibleProjects = recordProjects.value
+  const [summaryResults, noteResults] = await Promise.all([
+    Promise.allSettled([readProjectPlanPortfolio(rootProject.value.id, token), readProjectValidationPlan(activeProject.value.id, token), getMaterialRelationCompleteness(activeProject.value.id, token)]),
+    Promise.allSettled(visibleProjects.map(item => listProjectAudit(item.id, token))),
   ])
   if (requestId !== overviewRequestId) return
+  const [planResult, validationResult, relationResult] = summaryResults
   planPortfolio.value = planResult.status === 'fulfilled' ? planResult.value : null
   validationPlan.value = validationResult.status === 'fulfilled' ? validationResult.value : null
   relationCompleteness.value = relationResult.status === 'fulfilled' ? relationResult.value : null
+  const visibleIds = new Set(visibleProjects.map(item => item.id.toLowerCase()))
+  const projectAudits = [...new Map(noteResults.flatMap(result => result.status === 'fulfilled' ? result.value : [])
+    .filter(entry => visibleIds.has(entry.entityId.toLowerCase())).map(entry => [entry.id, entry])).values()]
+    .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+  managerNotes.value = projectAudits.filter(entry => entry.action === 'project.manager-note').slice(0, 30)
+  projectRecordHistory.value = projectAudits.filter(isProjectRecordHistoryEntry).slice(0, 50)
+  projectRecordError.value = noteResults.some(result => result.status === 'rejected') ? '部分项目记录读取失败，请关闭后刷新项目概览重试。' : ''
   if (planResult.status === 'fulfilled') {
     const current = activePlan.value
     if (current?.baselineVersion) {
@@ -100,32 +108,13 @@ async function fetchOperationalSummary() {
         initialBaseline.value = [...versions.map(item => item.snapshot), current]
           .filter(item => item.baselineVersion > 0)
           .sort((a, b) => a.baselineVersion - b.baselineVersion || a.updatedAt.localeCompare(b.updatedAt))[0] ?? null
-        if (initialBaseline.value?.baselineVersion !== 1) {
-          initialBaseline.value = null
-          baselineUnavailable.value = true
-        }
+        if (initialBaseline.value?.baselineVersion !== 1) { initialBaseline.value = null; baselineUnavailable.value = true }
       } catch {
         if (requestId !== overviewRequestId) return
         baselineUnavailable.value = true
       }
-    } else {
-      initialBaseline.value = null
-      baselineUnavailable.value = false
-    }
-
-    const noteResults = await Promise.allSettled((planResult.value.projects ?? []).map(item => listProjectAudit(item.projectId, token)))
-    if (requestId !== overviewRequestId) return
-    const projectAudits = noteResults.flatMap(result => result.status === 'fulfilled' ? result.value : [])
-    managerNotes.value = projectAudits.filter(entry => entry.action === 'project.manager-note')
-      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
-      .slice(0, 30)
-    projectRecordHistory.value = projectAudits.filter(isProjectRecordHistoryEntry)
-      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
-      .slice(0, 50)
-  } else {
-    managerNotes.value = []
-    projectRecordHistory.value = []
-  }
+    } else { initialBaseline.value = null; baselineUnavailable.value = false }
+  } else { initialBaseline.value = null; baselineUnavailable.value = false }
 }
 
 const refreshingOverview = ref(false)
@@ -136,7 +125,9 @@ async function loadOperationalSummary() {
   try { await fetchOperationalSummary() }
   finally { if (requestId === overviewRequestId) refreshingOverview.value = false }
 }
-watch(() => [props.project.id, props.token], () => {
+watch([() => props.project.id, () => props.token, () => recordProjects.value.map(item => item.id).join('|')], () => {
+  managerNotes.value = []; projectRecordHistory.value = []; projectRecordError.value = ''
+  managerNoteDialogOpen.value = false; managerNoteTarget.value = null
   initialBaseline.value = null
   baselineUnavailable.value = false
   return loadOperationalSummary()
@@ -207,7 +198,7 @@ const documentRows = computed(() => [
 const bomRows = computed(() => [
   { key: 'standard', label: '标准件', count: props.standardCount, approval: bomApprovalStatus(['StandardLongLead', 'StandardFormal', 'StandardSupplement']), application: materialApplicationStatus(props.standardItemIds) },
   { key: 'non-standard', label: '非标件', count: props.nonStandardCount, approval: bomApprovalStatus(['NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement']), application: materialApplicationStatus(props.nonStandardItemIds) },
-  { key: 'electrical', label: '电气', count: props.electricalCount, approval: bomApprovalStatus(['ElectricalFormal', 'ElectricalSupplement']), application: materialApplicationStatus(props.electricalItemIds) },
+  { key: 'electrical', label: '电气件', count: props.electricalCount, approval: bomApprovalStatus(['ElectricalFormal', 'ElectricalSupplement']), application: materialApplicationStatus(props.electricalItemIds) },
 ])
 
 const bomApprovalSummary = computed(() => {
@@ -389,7 +380,6 @@ function addProjectRecordHistory(entries: AuditEntry[]) {
 }
 
 function openManagerNote(projectId: string, projectCode: string, projectName: string) {
-  if (!props.canAddManagerNote) return ElMessage.warning('仅项目经理可以维护项目备注')
   managerNoteTarget.value = { id: projectId, code: projectCode, name: projectName }
   managerNoteContent.value = ''
   todoDueDate.value = undefined
@@ -398,6 +388,7 @@ function openManagerNote(projectId: string, projectCode: string, projectName: st
 }
 
 async function saveManagerNote() {
+  if (!props.canAddManagerNote) return ElMessage.warning('当前账号仅可查看项目记录。')
   const content = managerNoteContent.value.trim()
   const target = managerNoteTarget.value
   if (!target || !content) return ElMessage.warning('请输入项目备注')
@@ -478,11 +469,11 @@ const overviewAlerts = computed(() => [
 
       <div class="pdm-overview-bottom">
         <article class="pdm-panel pdm-project-portfolio" aria-label="项目总览">
-          <header><span><FolderTree :size="18" /></span><h2>项目总览</h2><p>当前主项目及全部子项目的阶段、负责人和计划风险</p><button type="button" class="pdm-overview-link" @click="emit('projectPlan')">进入项目计划 <ChevronRight :size="13" /></button></header>
+          <header><span><FolderTree :size="18" /></span><h2>项目总览</h2><p>当前主项目及全部子项目的阶段、负责人和计划风险</p><button v-if="!portfolioRows.length && token" type="button" class="pdm-text-action" @click="openManagerNote(activeProject.id, activeProject.code, activeProject.name)">查看记录</button><button type="button" class="pdm-overview-link" @click="emit('projectPlan')">进入项目计划 <ChevronRight :size="13" /></button></header>
           <div class="pdm-project-portfolio__table-wrap">
             <table><thead><tr><th>项目</th><th>执行</th><th>阶段</th><th>计划完成</th><th>剩余工期</th><th>进度</th><th>负责人</th><th>当前</th><th>状态</th><th>备注</th></tr></thead><tbody>
               <tr v-for="row in portfolioRows" :key="row.projectId" :class="{ 'is-root': row.isRoot }" tabindex="0" @click="emit('projectPlan')" @keydown.enter="emit('projectPlan')">
-                <td><strong>{{ row.projectCode }}</strong><small>{{ row.projectName }}</small></td><td :class="{ 'is-pending': row.engineers === '待分配' }">{{ row.engineers }}</td><td>{{ row.stageLabel }}</td><td :title="row.currentStageFinish ? `当前主任务“${row.stageLabel}”计划完成 ${displayDate(row.currentStageFinish)}` : '当前主任务未排期'">{{ displayDate(row.currentStageFinish) }}</td><td><span :class="`is-${row.remainingWorkPeriod.tone}`" :title="row.remainingWorkPeriod.basis">{{ row.remainingWorkPeriod.label }}</span></td><td><span class="pdm-project-portfolio__progress"><em>{{ row.hasPlan ? `${row.completionPercent}%` : '—' }}</em><i><em :style="{ width: `${row.completionPercent}%` }" /></i></span></td><td :class="{ 'is-pending': row.owner === '待分配' }">{{ row.owner }}</td><td class="pdm-project-portfolio__task" :title="row.currentTask?.name"><strong v-if="row.currentTask">{{ row.currentTask.name }}</strong><small v-if="row.currentTask">{{ personName(row.currentTask.assignee) }} · {{ displayDate(row.currentTask.plannedFinish) }}</small><span v-else>暂无待办</span></td><td><span class="pdm-project-portfolio__overdue" :class="`is-${row.overdueTaskSummary.tone}`" :title="row.overdueTaskSummary.basis"><i v-for="line in row.overdueTaskSummary.lines" :key="line">{{ line }}</i></span></td><td class="pdm-project-portfolio__notes" @click.stop><ol><li v-for="note in notesForProject(row.projectId)" :key="note.id"><span :title="note.detail">{{ note.detail }}</span></li><li v-if="!notesForProject(row.projectId).length" class="is-empty">暂无备注</li></ol><button type="button" class="pdm-text-action" :aria-label="`维护 ${row.projectCode} 的记录`" @click="openManagerNote(row.projectId, row.projectCode, row.projectName)">记录</button></td>
+                <td><strong>{{ row.projectCode }}</strong><small>{{ row.projectName }}</small></td><td :class="{ 'is-pending': row.engineers === '待分配' }">{{ row.engineers }}</td><td>{{ row.stageLabel }}</td><td :title="row.currentStageFinish ? `当前主任务“${row.stageLabel}”计划完成 ${displayDate(row.currentStageFinish)}` : '当前主任务未排期'">{{ displayDate(row.currentStageFinish) }}</td><td><span :class="`is-${row.remainingWorkPeriod.tone}`" :title="row.remainingWorkPeriod.basis">{{ row.remainingWorkPeriod.label }}</span></td><td><span class="pdm-project-portfolio__progress"><em>{{ row.hasPlan ? `${row.completionPercent}%` : '—' }}</em><i><em :style="{ width: `${row.completionPercent}%` }" /></i></span></td><td :class="{ 'is-pending': row.owner === '待分配' }">{{ row.owner }}</td><td class="pdm-project-portfolio__task" :title="row.currentTask?.name"><strong v-if="row.currentTask">{{ row.currentTask.name }}</strong><small v-if="row.currentTask">{{ personName(row.currentTask.assignee) }} · {{ displayDate(row.currentTask.plannedFinish) }}</small><span v-else>暂无待办</span></td><td><span class="pdm-project-portfolio__overdue" :class="`is-${row.overdueTaskSummary.tone}`" :title="row.overdueTaskSummary.basis"><i v-for="line in row.overdueTaskSummary.lines" :key="line">{{ line }}</i></span></td><td class="pdm-project-portfolio__notes" @click.stop><ol><li v-for="note in notesForProject(row.projectId)" :key="note.id"><span :title="note.detail">{{ note.detail }}</span></li><li v-if="!notesForProject(row.projectId).length" class="is-empty">暂无备注</li></ol><button type="button" class="pdm-text-action" :aria-label="`${canAddManagerNote ? '维护' : '查看'} ${row.projectCode} 的记录`" @click="openManagerNote(row.projectId, row.projectCode, row.projectName)">记录</button></td>
               </tr>
               <tr v-if="!portfolioRows.length" class="is-empty"><td colspan="10">尚未加载项目计划总览</td></tr>
             </tbody></table>
@@ -492,11 +483,12 @@ const overviewAlerts = computed(() => [
       </div>
     </div>
 
-    <el-dialog v-model="managerNoteDialogOpen" class="pdm-manager-note-dialog" :title="managerNoteTarget ? `维护项目记录 · ${managerNoteTarget.code}` : '维护项目记录'" width="520px" append-to-body>
-      <label class="pdm-dialog-field">备注内容<textarea v-model="managerNoteContent" class="pdm-manager-note-dialog__input" maxlength="1000" rows="5" placeholder="记录进度、风险或需要跟进的事项" aria-label="项目备注内容" /></label>
-      <ProjectTodoFields v-model:due-date="todoDueDate" v-model:recipients="todoRecipients" :users="todoRecipientCandidates" :pending="savingManagerNote" />
+    <el-dialog v-model="managerNoteDialogOpen" class="pdm-manager-note-dialog" :title="managerNoteTarget ? `${canAddManagerNote ? '维护' : '查看'}项目记录 · ${managerNoteTarget.code}` : '项目记录'" width="520px" append-to-body>
+      <template v-if="canAddManagerNote"><label class="pdm-dialog-field">备注内容<textarea v-model="managerNoteContent" class="pdm-manager-note-dialog__input" maxlength="1000" rows="5" placeholder="记录进度、风险或需要跟进的事项" aria-label="项目备注内容" /></label>
+      <ProjectTodoFields v-model:due-date="todoDueDate" v-model:recipients="todoRecipients" :users="todoRecipientCandidates" :pending="savingManagerNote" /></template>
       <section class="pdm-project-record-history" aria-label="当前项目及子项目历史记录">
         <header><strong>历史记录</strong><span>当前项目及子项目</span></header>
+        <p v-if="projectRecordError" role="alert">{{ projectRecordError }}</p>
         <div v-if="projectRecordHistory.length" class="pdm-project-record-history__list">
           <article v-for="entry in projectRecordHistory" :key="entry.id">
             <header><strong>{{ projectRecordHistoryLabel(entry) }}</strong><span>{{ projectRecordHistoryType(entry) }}</span></header>
@@ -504,9 +496,9 @@ const overviewAlerts = computed(() => [
             <small>{{ entry.detail }}</small>
           </article>
         </div>
-        <p v-else class="pdm-project-record-history__empty">暂无历史记录</p>
+        <p v-else-if="!projectRecordError" class="pdm-project-record-history__empty">暂无历史记录</p>
       </section>
-      <template #footer><el-button @click="managerNoteDialogOpen=false">取消</el-button><el-button type="primary" :loading="savingManagerNote" @click="saveManagerNote">保存记录</el-button></template>
+      <template #footer><el-button @click="managerNoteDialogOpen=false">{{ canAddManagerNote ? '取消' : '关闭' }}</el-button><el-button v-if="canAddManagerNote" type="primary" :loading="savingManagerNote" @click="saveManagerNote">保存记录</el-button></template>
     </el-dialog>
 
 

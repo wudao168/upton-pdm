@@ -1,3 +1,5 @@
+import navBrandLogo from '../src/assets/upton-nav-lockup.svg'
+import navBrandIcon from '../src/assets/upton-nav-icon.png'
 import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -47,34 +49,28 @@ describe('SideNav', () => {
     expect(materialItem.get('em').text()).toBe('3')
   })
 
-  it('uses the six-face animated PLM cube for the web and desktop shell brand', () => {
-    const wrapper = mount(SideNav, {
-      props: {
-        active: 'projects',
-      },
-    })
+  it('uses the uploaded horizontal lockup as a single sidebar brand image', () => {
+    const wrapper = mount(SideNav, { props: { active: 'projects' } })
+    const brand = wrapper.get('.pdm-sidebar__brand')
 
-    const brandMark = wrapper.get('.pdm-sidebar__brand-mark')
-    expect(brandMark.element.tagName).toBe('SPAN')
-    expect(brandMark.attributes('aria-hidden')).toBe('true')
-    expect(brandMark.findAll('.plm-cube-icon__face').map(face => face.text())).toEqual(['P', 'L', 'M', '阿', '普', '顿'])
-    expect(brandMark.findAll('.plm-cube-icon__tile')).toHaveLength(24)
-    expect(brandMark.findAll('.plm-cube-icon__label.is-latin').map(label => label.text())).toEqual(['P', 'L', 'M'])
+    expect(brand.findAll('img')).toHaveLength(1)
+    expect(brand.get('img').attributes('src')).toBe(navBrandLogo)
+    expect(brand.get('img').attributes('alt')).toBe('UPTON PLM')
   })
 
-  it('uses the UPTON wordmark beside the cube', () => {
+  it('replaces the former separate icon and text with the new lockup', () => {
     const wrapper = mount(SideNav, { props: { active: 'projects' } })
 
-    const logo = wrapper.get('.pdm-sidebar__brand-logo')
-    expect(logo.attributes('src')).toContain('upton-logo-white.png')
-    expect(logo.attributes('alt')).toBe('UPTON')
-    expect(wrapper.get('.pdm-sidebar__brand-copy').text()).toBe('')
+    expect(wrapper.find('.pdm-sidebar__brand-copy').exists()).toBe(false)
+    expect(wrapper.find('.pdm-sidebar__brand-mark').exists()).toBe(false)
+    expect(wrapper.get('.pdm-sidebar__brand').text()).toBe('')
   })
 
   it('exposes navigation labels in collapsed mode', () => {
     const wrapper = mount(SideNav, { props: { active: 'materials', collapsed: true, canManageSystem: true, canViewMaterials: true } })
 
     expect(wrapper.get('.pdm-sidebar').classes()).toContain('is-collapsed')
+    expect(wrapper.get('.pdm-sidebar__brand-logo').attributes('src')).toBe(navBrandIcon)
     expect(wrapper.get('.pdm-nav-item[aria-label="料品管理"]').attributes('title')).toBe('料品管理')
     expect(wrapper.get('.pdm-sidebar__settings').attributes('title')).toBe('系统设置')
   })

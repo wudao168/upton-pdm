@@ -111,116 +111,56 @@
 
         <Border x:Name="LoadingPanel" Grid.Row="1" Panel.ZIndex="100" Background="#FFFFFF">
             <Grid>
-                <!-- 工业风底纹：蓝图网格 + 齿轮轮廓，与网页端登录页保持一致的视觉语言 -->
-                <Rectangle Opacity="0.55">
-                    <Rectangle.Fill>
-                        <DrawingBrush TileMode="Tile" Viewport="0,0,40,40" ViewportUnits="Absolute" Stretch="None">
-                            <DrawingBrush.Drawing>
-                                <GeometryDrawing>
-                                    <GeometryDrawing.Pen>
-                                        <Pen Brush="#D7E3EF" Thickness="1" />
-                                    </GeometryDrawing.Pen>
-                                    <GeometryDrawing.Geometry>
-                                        <GeometryGroup>
-                                            <LineGeometry StartPoint="0,0" EndPoint="0,40" />
-                                            <LineGeometry StartPoint="0,0" EndPoint="40,0" />
-                                        </GeometryGroup>
-                                    </GeometryDrawing.Geometry>
-                                </GeometryDrawing>
-                            </DrawingBrush.Drawing>
-                        </DrawingBrush>
-                    </Rectangle.Fill>
-                </Rectangle>
-                <Path HorizontalAlignment="Left"
-                      VerticalAlignment="Top"
-                      Margin="72,86,0,0"
-                      Data="M0,44 A44,44 0 1 1 88,44 A44,44 0 1 1 0,44 M30,44 A14,14 0 1 1 58,44 A14,14 0 1 1 30,44 M44,-6 V6 M44,82 V94 M-6,44 H6 M82,44 H94"
-                      Stroke="#C3D5E6"
-                      StrokeThickness="3"
-                      StrokeStartLineCap="Round"
-                      StrokeEndLineCap="Round"
-                      RenderTransformOrigin="0.5,0.5">
-                    <Path.RenderTransform>
-                        <RotateTransform x:Name="LoadingGearRotation" CenterX="44" CenterY="44" />
-                    </Path.RenderTransform>
-                    <Path.Triggers>
-                        <EventTrigger RoutedEvent="Loaded">
-                            <BeginStoryboard>
-                                <Storyboard RepeatBehavior="Forever">
-                                    <DoubleAnimation Storyboard.TargetName="LoadingGearRotation"
-                                                     Storyboard.TargetProperty="Angle"
-                                                     From="0"
-                                                     To="360"
-                                                     Duration="0:0:24" />
-                                </Storyboard>
-                            </BeginStoryboard>
-                        </EventTrigger>
-                    </Path.Triggers>
-                </Path>
-                <Path HorizontalAlignment="Right"
-                      VerticalAlignment="Bottom"
-                      Margin="0,0,86,104"
-                      Data="M0,28 A28,28 0 1 1 56,28 A28,28 0 1 1 0,28 M20,28 A8,8 0 1 1 36,28 A8,8 0 1 1 20,28 M28,0 V6 M28,50 V56 M0,28 H6 M50,28 H56"
-                      Stroke="#CFDFEE"
-                      StrokeThickness="3"
-                      StrokeStartLineCap="Round"
-                      StrokeEndLineCap="Round"
-                      RenderTransformOrigin="0.5,0.5">
-                    <Path.RenderTransform>
-                        <RotateTransform x:Name="LoadingGearRotationSecondary" CenterX="28" CenterY="28" />
-                    </Path.RenderTransform>
-                    <Path.Triggers>
-                        <EventTrigger RoutedEvent="Loaded">
-                            <BeginStoryboard>
-                                <Storyboard RepeatBehavior="Forever">
-                                    <DoubleAnimation Storyboard.TargetName="LoadingGearRotationSecondary"
-                                                     Storyboard.TargetProperty="Angle"
-                                                     From="360"
-                                                     To="0"
-                                                     Duration="0:0:32" />
-                                </Storyboard>
-                            </BeginStoryboard>
-                        </EventTrigger>
-                    </Path.Triggers>
-                </Path>
-                <StackPanel HorizontalAlignment="Center"
-                            VerticalAlignment="Center"
-                            SnapsToDevicePixels="True">
-                    <!-- 启动页图标使用 1024px PNG：WPF 解码 .ico 时只取 16x16 帧，放大到 132 会糊 -->
-                    <Image Width="132"
-                           Height="132"
-                           HorizontalAlignment="Center"
-                           RenderOptions.BitmapScalingMode="HighQuality"
+                <Grid Visibility="Collapsed">
+                    <Path><Path.RenderTransform><RotateTransform x:Name="LoadingGearRotation" /></Path.RenderTransform></Path>
+                    <Path><Path.RenderTransform><RotateTransform x:Name="LoadingGearRotationSecondary" /></Path.RenderTransform></Path>
+                </Grid>
+                <Canvas Width="144" Height="144" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Image Width="144" Height="144"
                            Source="Assets/PdmClientSplash.png"
-                           Stretch="Uniform" />
-                    <Grid Width="112" Height="112" Margin="0,14,0,0">
-                    <Viewport3D x:Name="LoadingCubeViewport"
-                                Width="112"
-                                Height="112"
-                                HorizontalAlignment="Center"
-                                VerticalAlignment="Center"
-                                ClipToBounds="False">
-                        <Viewport3D.Camera>
-                            <PerspectiveCamera Position="0,0,3.15"
-                                               LookDirection="0,0,-3.15"
-                                               UpDirection="0,1,0"
-                                               FieldOfView="34" />
-                        </Viewport3D.Camera>
-                        <ModelVisual3D x:Name="LoadingCubeVisual" />
-                    </Viewport3D>
-                    </Grid>
-                    <TextBlock Margin="0,12,0,0"
-                               HorizontalAlignment="Center"
-                               Foreground="#27364A"
-                               FontSize="16"
-                               FontWeight="SemiBold"
-                               Text="UPLM 产品生命周期管理" />
-                    <TextBlock Margin="0,6,0,0"
-                               HorizontalAlignment="Center"
-                               Foreground="#6B7C91"
-                               FontSize="12"
-                               Text="正在加载设计协同工作台…" />
-                </StackPanel>
+                           Stretch="Uniform"
+                           RenderOptions.BitmapScalingMode="HighQuality"
+                           RenderTransformOrigin="0.5,0.5"
+                           Tag="{x:Static SystemParameters.ClientAreaAnimation}">
+                        <Image.RenderTransform><ScaleTransform ScaleX="1" ScaleY="1" /></Image.RenderTransform>
+                        <Image.Style>
+                            <Style TargetType="Image">
+                                <Style.Triggers>
+                                    <MultiTrigger>
+                                        <MultiTrigger.Conditions>
+                                            <Condition Property="IsVisible" Value="True" />
+                                            <Condition Property="Tag"><Condition.Value><sys:Boolean xmlns:sys="clr-namespace:System;assembly=mscorlib">True</sys:Boolean></Condition.Value></Condition>
+                                        </MultiTrigger.Conditions>
+                                        <MultiTrigger.EnterActions>
+                                            <BeginStoryboard Name="LoadingBreath">
+                                                <Storyboard RepeatBehavior="Forever">
+                                                    <DoubleAnimationUsingKeyFrames Storyboard.TargetProperty="Opacity">
+                                                        <DiscreteDoubleKeyFrame KeyTime="0:0:0" Value="0.78" />
+                                                        <SplineDoubleKeyFrame KeyTime="0:0:1.2" Value="1" KeySpline="0.42,0 0.58,1" />
+                                                        <SplineDoubleKeyFrame KeyTime="0:0:2.4" Value="0.78" KeySpline="0.42,0 0.58,1" />
+                                                    </DoubleAnimationUsingKeyFrames>
+                                                    <DoubleAnimationUsingKeyFrames Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)">
+                                                        <DiscreteDoubleKeyFrame KeyTime="0:0:0" Value="0.97" />
+                                                        <SplineDoubleKeyFrame KeyTime="0:0:1.2" Value="1.03" KeySpline="0.42,0 0.58,1" />
+                                                        <SplineDoubleKeyFrame KeyTime="0:0:2.4" Value="0.97" KeySpline="0.42,0 0.58,1" />
+                                                    </DoubleAnimationUsingKeyFrames>
+                                                    <DoubleAnimationUsingKeyFrames Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)">
+                                                        <DiscreteDoubleKeyFrame KeyTime="0:0:0" Value="0.97" />
+                                                        <SplineDoubleKeyFrame KeyTime="0:0:1.2" Value="1.03" KeySpline="0.42,0 0.58,1" />
+                                                        <SplineDoubleKeyFrame KeyTime="0:0:2.4" Value="0.97" KeySpline="0.42,0 0.58,1" />
+                                                    </DoubleAnimationUsingKeyFrames>
+                                                </Storyboard>
+                                            </BeginStoryboard>
+                                        </MultiTrigger.EnterActions>
+                                        <MultiTrigger.ExitActions><RemoveStoryboard BeginStoryboardName="LoadingBreath" /></MultiTrigger.ExitActions>
+                                    </MultiTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Image.Style>
+                    </Image>
+                    <TextBlock Canvas.Top="158" Canvas.Left="-48" Width="240"
+                               TextAlignment="Center" FontSize="14" Foreground="#536781" Text="正在加载…" />
+                </Canvas>
             </Grid>
         </Border>
     </Grid>

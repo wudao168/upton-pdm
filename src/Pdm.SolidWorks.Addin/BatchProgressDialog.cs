@@ -12,11 +12,15 @@ internal sealed class BatchProgressDialog : Form
     private readonly Button close = new Button();
     private bool canClose;
     private bool cancellationRequested;
+    private readonly ArchiveSession session;
 
     public event EventHandler CancelRequested;
+    public bool IsSessionProxy => session != null;
 
     public BatchProgressDialog(int totalFiles)
     {
+        session = ArchiveSession.Current;
+        if (session != null) { session.CancelRequested += ForwardCancellation; return; }
         Text = "整套提交存档";
         DialogWindowSizing.CenterOnOwnerScreen(this);
         TopMost = true;
@@ -59,6 +63,7 @@ internal sealed class BatchProgressDialog : Form
 
     public void SetStage(string message)
     {
+        if (session != null) { session.SetStage(message); return; }
         if (InvokeRequired)
         {
             BeginInvoke((Action)(() => SetStage(message)));
@@ -72,6 +77,7 @@ internal sealed class BatchProgressDialog : Form
 
     public void ReportFile(int completed, int total, string fileName, string message)
     {
+        if (session != null) { session.ReportFile(completed, total, fileName, message); return; }
         if (InvokeRequired)
         {
             BeginInvoke((Action)(() => ReportFile(completed, total, fileName, message)));
@@ -86,6 +92,7 @@ internal sealed class BatchProgressDialog : Form
 
     public void Complete(string message, bool hasFailures, bool hasBomWarnings = false)
     {
+        if (session != null) { session.Complete(message, hasFailures, hasBomWarnings); return; }
         if (InvokeRequired)
         {
             BeginInvoke((Action)(() => Complete(message, hasFailures, hasBomWarnings)));
@@ -108,6 +115,7 @@ internal sealed class BatchProgressDialog : Form
 
     public void Fail(string message)
     {
+        if (session != null) { session.Fail(message); return; }
         if (InvokeRequired)
         {
             BeginInvoke((Action)(() => Fail(message)));
@@ -123,6 +131,17 @@ internal sealed class BatchProgressDialog : Form
         close.Enabled = true;
         close.Focus();
         Invalidate(true);
+    }
+
+    public new void Show(IWin32Window owner) { if (session != null) session.BringToFront(); else base.Show(owner); }
+    public new void BringToFront() { if (session != null) session.BringToFront(); else base.BringToFront(); }
+    public new void Activate() { if (session != null) session.BringToFront(); else base.Activate(); }
+    public new void Refresh() { if (session == null) base.Refresh(); }
+    private void ForwardCancellation(object sender, EventArgs args) => CancelRequested?.Invoke(this, args);
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && session != null) session.CancelRequested -= ForwardCancellation;
+        base.Dispose(disposing);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs eventArgs)

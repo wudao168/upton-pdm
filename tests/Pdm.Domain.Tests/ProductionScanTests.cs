@@ -51,6 +51,153 @@ public sealed class ProductionScanTests : IDisposable
             [new("CNC组", date, 1), new("车床组", date, 1)], date, Guid.NewGuid()), "admin", UserRole.Administrator, default);
     }
 
+    private async Task ConfigureDepartmentAsync()
+    {
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "control-manager", "流程经理", "unused", UserRole.Administrator, true,
+            CompanyId: company, RoleCode: "ProductionManager"), default);
+        await Scan.SaveAsync(new(Stations, [Bind("receive", "Reception", reception), Bind("machine", "MachiningReception", cnc),
+            Bind("machine", "Trace", cnc, lathe), Bind("packing", "Packing", packing), Bind("quality", "QualityReceiving", quality),
+            Bind("quality", "Inspection", quality), Bind("issue", "Issue", issue)], 0)
+        { FlowMode = "DepartmentHandover", ControlRoleCodes = ["ProductionManager"] }, "admin", UserRole.Administrator, default);
+    }
+
+    [Fact]
+    public async Task DepartmentHandoverHasOptionalTraceAndNoResourceCompletionOrScheduleGate()
+    {
+        var record = await CreateAsync(); await ConfigureDepartmentAsync();
+        record = await Tracking.FindAsync(record.State.ReleasePackageId, "admin", UserRole.Administrator, default);
+        Assert.Equal("DepartmentHandover", record.State.FlowMode);
+        await Assert.ThrowsAsync<PdmRuleException>(() => Move(record, "machine", "Trace", 1, cnc));
+        record = await Move(record, "receive", "ProductionReceived", 4, reception);
+        Assert.Equal("排产", ProductionFlowRules.Stage(record.State, record.State.Lots[0]));
+        record = await Move(record, "machine", "MachiningReceived", 4, cnc);
+        Assert.Equal("机加", ProductionFlowRules.Stage(record.State, record.State.Lots[0]));
+        record = await Move(record, "machine", "Trace", 2, cnc, note: "CNC图纸追溯");
+        record = await Move(record, "machine", "Trace", 2, cnc);
+        Assert.Equal("CNC组", record.State.Movements.Last().ResourceGroup);
+        Assert.Equal(record.State.Movements.Last().FromStage, record.State.Movements.Last().ToStage);
+        Assert.Equal(4, ProductionFlowRules.Remaining(record.State, record.State.Lots[0], "PackingStarted"));
+        record = await Move(record, "packing", "PackingStarted", 4, packing);
+        Assert.Equal("包装", ProductionFlowRules.Stage(record.State, record.State.Lots[0]));
+        Assert.True((await Scan.ActionsAsync(record.State, "packing", UserRole.Administrator, default)).CanPrintLabels);
+        Assert.False((await Scan.ActionsAsync(record.State, "quality", UserRole.Administrator, default)).CanPrintLabels);
+        record = await Move(record, "quality", "QualityReceived", 4, quality);
+        Assert.Equal("质检", ProductionFlowRules.Stage(record.State, record.State.Lots[0]));
+        record = await Move(record, "quality", "Pass", 4, quality);
+        Assert.Equal("质检完成", ProductionFlowRules.Stage(record.State, record.State.Lots[0]));
+        record = await Move(record, "issue", "Issue", 4, issue, recipient: "装配领料人");
+        Assert.Equal("领料完成", ProductionTrackingRules.Status(record.State));
+        Assert.Empty((await Scan.ActionsAsync(record.State, "machine", UserRole.Administrator, default)).Actions);
+    }
+
+    [Fact]
+    public async Task ConfiguredControlRolesCanPauseResumeAndCancelOnlyOutstandingQuantityWithAudit()
+    {
+        var record = await CreateAsync(); await ConfigureDepartmentAsync();
+        record = await Move(record, "receive", "ProductionReceived", 4, reception);
+        record = await Plan(record);
+        async Task<ProductionTrackingRecord> Control(string actor, string kind, decimal quantity, string? note = "流程调整", Guid? request = null) =>
+            await Tracking.RecordAsync(record.State.ReleasePackageId, new(record.State.Lots[0].Id, kind, quantity, request ?? Guid.NewGuid(), note), actor, UserRole.Administrator, default);
+        await Assert.ThrowsAsync<PdmRuleException>(() => Control("machine", "Pause", 4));
+        await Assert.ThrowsAsync<PdmRuleException>(() => Control("control-manager", "Pause", 4, null));
+        record = await Control("control-manager", "Pause", 2);
+        Assert.False(record.State.Lots[0].Paused);
+        record = await Control("control-manager", "Resume", 2);
+        record = await Control("control-manager", "Pause", 4);
+        Assert.True(record.State.Lots[0].Paused);
+        Assert.Empty((await Scan.ActionsAsync(record.State, "machine", UserRole.Administrator, default)).Actions);
+        var request = Guid.NewGuid(); record = await Control("control-manager", "Resume", 4, request: request);
+        Assert.Equal(record.RowVersion, (await Control("control-manager", "Resume", 4, request: request)).RowVersion);
+        record = await Move(record, "machine", "MachiningReceived", 4, cnc);
+        record = await Move(record, "packing", "PackingStarted", 4, packing);
+        record = await Move(record, "quality", "QualityReceived", 4, quality);
+        record = await Move(record, "quality", "Pass", 4, quality);
+        record = await Move(record, "issue", "Issue", 1, issue, recipient: "领料人");
+        Assert.True(await store.SaveAsync(record with { State = record.State with { Lots = [record.State.Lots[0] with { Frozen = true, FreezeReason = "图纸变更" }] } }, record.RowVersion, default));
+        record = await Control("control-manager", "Cancelled", 3);
+        Assert.Equal(1, ProductionFlowRules.Total(record.State, record.State.Lots[0], "Issue"));
+        Assert.Equal(3, ProductionFlowRules.Total(record.State, record.State.Lots[0], "Cancelled"));
+        Assert.Empty(record.State.Lots[0].Schedule);
+        Assert.Equal("已取消剩余流程", ProductionFlowRules.Stage(record.State, record.State.Lots[0]));
+        Assert.Equal("变更已结案", ProductionTrackingRules.Status(record.State));
+        Assert.Equal("control-manager", record.State.Movements.Last().Actor);
+        Assert.Null(record.State.Movements.Last().WorkstationId);
+        Assert.Empty((await Scan.ActionsAsync(record.State, "control-manager", UserRole.Administrator, default)).Actions);
+    }
+
+    [Fact]
+    public async Task DepartmentPackingAcceptsRolesAndControlRolesAndLabelSizesAreValidated()
+    {
+        await CreateAsync();
+        var input = new SaveProductionScanCatalog(Stations, [new(Guid.NewGuid(), "Role", "Administrator", "Packing", [packing.Id], true)], 0)
+        { FlowMode = "DepartmentHandover" };
+        var saved = await Scan.SaveAsync(input, "admin", UserRole.Administrator, default);
+        Assert.Equal("Role", Assert.Single(saved.Bindings).SubjectType);
+        input = input with { ExpectedRowVersion = saved.RowVersion };
+        await Assert.ThrowsAsync<PdmRuleException>(() => Scan.SaveAsync(input with { Bindings = [], ControlRoleCodes = ["missing-role"] }, "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => Scan.SaveAsync(input with { Bindings = [], LabelWidthMm = 1 }, "admin", UserRole.Administrator, default));
+    }
+
+    [Fact]
+    public async Task ConfiguredNodesGatePartialQuantitiesAndKeepNamesAfterNodeDeletion()
+    {
+        var record = await CreateAsync();
+        var nodes = ProductionDepartmentFlow.DefaultNodes.ToList();
+        var custom = new ProductionFlowNode(Guid.NewGuid(), "清洗接收", "清洗", "Reception", "");
+        custom = custom with { Kind = $"Step:{custom.Id:N}" }; nodes.Insert(1, custom);
+        var configured = new SaveProductionScanCatalog(Stations,
+            [Bind("receive", "Reception", reception) with { FlowNodeId = nodes[0].Id },
+             Bind("machine", "Reception", cnc) with { FlowNodeId = custom.Id }, Bind("machine", "MachiningReception", cnc),
+             Bind("packing", "Packing", packing), Bind("quality", "QualityReceiving", quality), Bind("quality", "Inspection", quality), Bind("issue", "Issue", issue)], 0)
+            { FlowMode = "DepartmentHandover", FlowNodes = nodes };
+        var catalog = await Scan.SaveAsync(configured, "admin", UserRole.Administrator, default);
+        Assert.Empty((await Scan.ActionsAsync(record.State, "machine", UserRole.Administrator, default)).Actions);
+        record = await Move(record, "receive", "ProductionReceived", 2, reception);
+        Assert.Equal(custom.Kind, Assert.Single((await Scan.ActionsAsync(record.State, "machine", UserRole.Administrator, default)).Actions).Kind);
+        await Assert.ThrowsAsync<PdmRuleException>(() => Move(record, "machine", custom.Kind, 3, cnc));
+        record = await Move(record, "machine", custom.Kind, 2, cnc);
+        var movement = record.State.Movements.Last();
+        Assert.Equal("清洗接收", movement.OperationName); Assert.Equal("排产", movement.FromStage); Assert.Equal("清洗", movement.ToStage);
+        Assert.Equal("machine", movement.Actor); Assert.Equal(cnc.Id, movement.WorkstationId);
+        var action = Assert.Single((await Scan.ActionsAsync(record.State, "machine", UserRole.Administrator, default)).Actions);
+        Assert.Equal("MachiningReceived", action.Kind); Assert.Equal(2, action.RemainingQuantity);
+        await Scan.SaveAsync(configured with { ExpectedRowVersion = catalog.RowVersion, FlowNodes = nodes.Where(node => node.Id != custom.Id).ToArray(), Bindings = configured.Bindings.Where(binding => binding.FlowNodeId != custom.Id).ToArray() }, "admin", UserRole.Administrator, default);
+        record = await Tracking.FindAsync(record.State.ReleasePackageId, "admin", UserRole.Administrator, default);
+        Assert.Equal("清洗接收", record.State.Movements.Last().OperationName);
+        Assert.DoesNotContain(record.State.FlowNodes!, node => node.Id == custom.Id);
+    }
+
+    [Fact]
+    public async Task NodeOrderActuallyChangesFirstStepAndInvalidReferencesAreRejected()
+    {
+        var record = await CreateAsync();
+        var defaults = ProductionDepartmentFlow.DefaultNodes;
+        var nodes = new[] { defaults[1], defaults[0] }.Concat(defaults.Skip(2)).ToArray();
+        var input = new SaveProductionScanCatalog(Stations, [Bind("machine", "MachiningReception", cnc), Bind("receive", "Reception", reception)], 0)
+            { FlowMode = "DepartmentHandover", FlowNodes = nodes };
+        await Assert.ThrowsAsync<PdmRuleException>(() => Scan.SaveAsync(input with { FlowNodes = nodes.Reverse().ToArray() }, "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => Scan.SaveAsync(input with { FlowNodes = nodes.Select(node => node.Kind == "Trace" ? node with { AfterNodeId = Guid.NewGuid() } : node).ToArray() }, "admin", UserRole.Administrator, default));
+        await Scan.SaveAsync(input, "admin", UserRole.Administrator, default);
+        Assert.Empty((await Scan.ActionsAsync(record.State, "receive", UserRole.Administrator, default)).Actions);
+        Assert.Equal("MachiningReceived", Assert.Single((await Scan.ActionsAsync(record.State, "machine", UserRole.Administrator, default)).Actions).Kind);
+        record = await Move(record, "machine", "MachiningReceived", 4, cnc);
+        Assert.Equal("机加", ProductionFlowRules.Stage(record.State, record.State.Lots[0]));
+        Assert.Equal("ProductionReceived", Assert.Single((await Scan.ActionsAsync(record.State, "receive", UserRole.Administrator, default)).Actions).Kind);
+    }
+
+    [Fact]
+    public async Task OlderSettingsRequestsCannotEraseConfiguredNodesOrBindingScope()
+    {
+        await CreateAsync();
+        var nodes = ProductionDepartmentFlow.DefaultNodes;
+        var binding = Bind("receive", "Reception", reception) with { FlowNodeId = nodes[0].Id };
+        var saved = await Scan.SaveAsync(new(Stations, [binding], 0) { FlowMode = "DepartmentHandover", FlowNodes = nodes }, "admin", UserRole.Administrator, default);
+        var legacyRequest = new SaveProductionScanCatalog(Stations, [binding with { FlowNodeId = null }], saved.RowVersion) { FlowMode = "DepartmentHandover" };
+        saved = await Scan.SaveAsync(legacyRequest, "admin", UserRole.Administrator, default);
+        Assert.Equal(nodes, saved.FlowNodes);
+        Assert.Equal(nodes[0].Id, Assert.Single(saved.Bindings).FlowNodeId);
+    }
+
     [Fact]
     public async Task EmptyConfigurationGrantsNobodyAnOperationAndPersonalBindingsOverrideRoles()
     {

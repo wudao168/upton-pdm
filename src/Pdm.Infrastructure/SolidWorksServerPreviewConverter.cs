@@ -23,7 +23,7 @@ public sealed class PdmPreviewWorkerOptions
     public int TimeoutMinutes { get; set; } = 30;
 }
 
-public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
+public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewConverter, IAssemblyPreviewConverter
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private readonly PdmPreviewWorkerOptions settings;
@@ -61,6 +61,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
             if (version.Status != DocumentVersionStatus.Work || !string.Equals(version.Sha256, source.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new PdmConflictException($"工程图{source.DrawingNumber}的审批源版本不匹配。");
             var revision = version.Revision.Release().Display;
+            BomDrawingRevision.ValidateDrawingProperties(version, revision, source.FileName);
             if (!string.IsNullOrWhiteSpace(source.ExpectedFormalRevision)
                 && !string.Equals(source.ExpectedFormalRevision, revision, StringComparison.OrdinalIgnoreCase))
                 throw new PdmConflictException($"工程图{source.DrawingNumber}的冻结版次已变化。");
@@ -157,7 +158,8 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
             {
                 var runJobs = pendingJobs.Concat(referenceJobs).ToArray();
                 errors = remote
-                    ? await RunRemoteAgentAsync(conversionSettings, runJobs, workRoot, outputRoot, cancellationToken, package.State == ReleasePackageState.Publishing ? package.Id : null)
+                    ? await RunRemoteAgentAsync(conversionSettings, runJobs, workRoot, outputRoot, cancellationToken, package.State == ReleasePackageState.Publishing ? package.Id : null,
+                        new PreviewAgentContext(null, project.Code, "PLM发布转图", runJobs.FirstOrDefault(job => job.DocumentId == package.RootDocumentId)?.FileName, package.Number))
                     : await RunLocalWorkerAsync(conversionSettings, runJobs, sourceRoot, workRoot, outputRoot, cancellationToken);
                 foreach (var job in pendingJobs.Where(job => !errors.ContainsKey(job.DocumentId))) await StoreToCacheAsync(cacheRoot, cacheFingerprint, job, cancellationToken);
                 PrunePreviewCache(cacheRoot);
@@ -241,7 +243,9 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         {
             var workspaceSourcePath = Path.Combine(sourceRoot, job.FileName);
             File.Copy(job.SourcePath, workspaceSourcePath, false);
-            workerJobs.Add(new PreviewWorkerJob(job.DocumentId, workspaceSourcePath, job.OutputPath, job.Kind.ToString(), job.Convert, job.ReleaseRevision, job.QrContent));
+            if (jobs.Any(item => item.AssemblyPreview))
+                File.SetAttributes(workspaceSourcePath, File.GetAttributes(workspaceSourcePath) & ~FileAttributes.ReadOnly);
+            workerJobs.Add(new PreviewWorkerJob(job.DocumentId, workspaceSourcePath, job.OutputPath, job.Kind.ToString(), job.Convert, job.ReleaseRevision, job.QrContent, job.AssemblyPreview, job.Configuration));
         }
         var manifestPath = Path.Combine(workRoot, "manifest.json");
         var resultPath = Path.Combine(workRoot, "result.json");
@@ -258,7 +262,7 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         IReadOnlyList<PreviewJob> jobs,
         string workRoot,
         string outputRoot,
-        CancellationToken cancellationToken, Guid? publishingPackageId = null)
+        CancellationToken cancellationToken, Guid? publishingPackageId = null, PreviewAgentContext? context = null)
     {
         if (publishingPackageId is Guid waitingId) ReleasePublishingProgress.Set(waitingId, "等待空闲转图服务器");
         using var lease = conversion.Servers.Count == 0 ? null : await PreviewAgentPool.AcquireAsync(conversion,
@@ -269,8 +273,8 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
         if (publishingPackageId is Guid assignedId) ReleasePublishingProgress.Set(assignedId, $"已分配 {serverName}，准备发送转图文件");
         var requestPath = Path.Combine(workRoot, "request.zip");
         var manifest = new PreviewAgentManifest(jobs
-            .Select(job => new PreviewAgentJob(job.DocumentId, job.Kind.ToString(), job.FileName, Path.GetFileName(job.OutputPath), job.Convert, job.ReleaseRevision, job.QrContent))
-            .ToArray());
+            .Select(job => new PreviewAgentJob(job.DocumentId, job.Kind.ToString(), job.FileName, Path.GetFileName(job.OutputPath), job.Convert, job.ReleaseRevision, job.QrContent, job.AssemblyPreview, job.Configuration))
+            .ToArray(), context);
         using (var archive = ZipFile.Open(requestPath, ZipArchiveMode.Create))
         {
             var manifestEntry = archive.CreateEntry("manifest.json", CompressionLevel.Fastest);
@@ -411,6 +415,8 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
 
     private static IReadOnlyDictionary<Guid, string> ValidateWorkerResult(PreviewWorkerResult result, IReadOnlyList<PreviewJob> jobs)
     {
+        if (jobs.Any(job => job.AssemblyPreview) && result.AssemblyPreviewVersion != 1)
+            throw new PdmRuleException("转图代理尚不支持最新装配预览，请更新转图代理及转换程序后重试，不能用旧装配显示数据代替最新预览。");
         if (result.Items is null)
         {
             if (!result.Success) throw new PdmRuleException(string.IsNullOrWhiteSpace(result.Error) ? "转图服务器生成STEP/PDF失败。" : result.Error);
@@ -561,13 +567,14 @@ public sealed class SolidWorksServerPreviewConverter : IServerPreviewConverter
     }
 
     private sealed record PreviewWorkerManifest(IReadOnlyList<PreviewWorkerJob> Jobs);
-    private sealed record PreviewWorkerJob(Guid DocumentId, string SourcePath, string OutputPath, string Kind, bool Convert = true, string? ReleaseRevision = null, string? QrContent = null);
-    private sealed record PreviewWorkerResult(bool Success, string? Error, IReadOnlyList<PreviewWorkerItem>? Items = null);
+    private sealed record PreviewWorkerJob(Guid DocumentId, string SourcePath, string OutputPath, string Kind, bool Convert = true, string? ReleaseRevision = null, string? QrContent = null, bool AssemblyPreview = false, string? Configuration = null);
+    private sealed record PreviewWorkerResult(bool Success, string? Error, IReadOnlyList<PreviewWorkerItem>? Items = null, int AssemblyPreviewVersion = 0);
     private sealed record PreviewWorkerItem(Guid DocumentId, bool Success, string? Error);
 
-    private sealed record PreviewJob(Guid DocumentId, DocumentKind Kind, string FileName, string SourcePath, string OutputPath, string SourceSha256, bool Convert = true, string? ReleaseRevision = null, string? QrContent = null);
-    private sealed record PreviewAgentManifest(IReadOnlyList<PreviewAgentJob> Jobs);
-    private sealed record PreviewAgentJob(Guid DocumentId, string Kind, string FileName, string OutputName, bool Convert = true, string? ReleaseRevision = null, string? QrContent = null);
+    private sealed record PreviewJob(Guid DocumentId, DocumentKind Kind, string FileName, string SourcePath, string OutputPath, string SourceSha256, bool Convert = true, string? ReleaseRevision = null, string? QrContent = null, bool AssemblyPreview = false, string? Configuration = null);
+    private sealed record PreviewAgentContext(string? Initiator, string ProjectCode, string Source, string? RootFileName, string RequestId);
+    private sealed record PreviewAgentManifest(IReadOnlyList<PreviewAgentJob> Jobs, PreviewAgentContext? Context = null);
+    private sealed record PreviewAgentJob(Guid DocumentId, string Kind, string FileName, string OutputName, bool Convert = true, string? ReleaseRevision = null, string? QrContent = null, bool AssemblyPreview = false, string? Configuration = null);
 }
 
 /// <summary>API服务器与转图电脑上“转图代理”之间的约定（zip 包结构：manifest.json + sources/**；返回 result.json + outputs/**）。</summary>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { vQuantity } from '../quantityInput'
 import { computed, onMounted, ref, watch } from 'vue'
 import { includeExistingProductionRelease, listProjects, listReleasePackages,
   previewExistingProductionRelease } from '../api'
@@ -115,7 +116,7 @@ onMounted(async () => {
           <header><label><input v-model="checkedKeys" type="checkbox" :value="item.materialKey">已核对 {{ item.drawingNumber }} · {{ item.name }} · {{ item.revision }} · 需求 {{ item.requiredQuantity }} {{ item.unit }}</label><button type="button" @click="addRow(item)">添加拆分批次</button></header>
           <div v-for="row in lineRows(item.materialKey)" :key="row.id" class="production-opening__row">
             <label>方式<select :value="row.route" @change="chooseRoute(row, ($event.target as HTMLSelectElement).value)"><option value="">未分配</option><option value="Self">自制</option><option value="External">外协</option></select></label>
-            <template v-if="row.route"><label>数量<input v-model.number="row.quantity" type="number" min="0" step="any"></label><label>当前环节<select v-model="row.stage"><option v-for="stage in stages(row.route)" :key="stage.value" :value="stage.value">{{ stage.label }}</option></select></label><label v-if="row.route === 'External'">供应商<input v-model="row.supplier" placeholder="供应商"></label><label v-else>生产负责人<input v-model="row.assignee" placeholder="负责人"></label><label>预计完成<input v-model="row.promisedOn" type="date"></label><label v-if="row.stage === 'Issued'">实际领料人<input v-model="row.recipient" placeholder="领料人"></label></template>
+            <template v-if="row.route"><label>数量<input v-quantity v-model.number="row.quantity" type="number" min="0" step="any"></label><label>当前环节<select v-model="row.stage"><option v-for="stage in stages(row.route)" :key="stage.value" :value="stage.value">{{ stage.label }}</option></select></label><label v-if="row.route === 'External'">供应商<input v-model="row.supplier" placeholder="供应商"></label><label v-else>生产负责人<input v-model="row.assignee" placeholder="负责人"></label><label>预计完成<input v-model="row.promisedOn" type="date"></label><label v-if="row.stage === 'Issued'">实际领料人<input v-model="row.recipient" placeholder="领料人"></label></template>
             <button v-if="lineRows(item.materialKey).length > 1" type="button" @click="rows = rows.filter(entry => entry.id !== row.id)">移除</button>
           </div>
         </section>

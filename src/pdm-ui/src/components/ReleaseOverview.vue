@@ -36,7 +36,7 @@ function requestConversionRetry(releasePackageId: string) {
 const streams = [
   { kind: 'Standard', label: '标准件BOM', scopes: ['StandardLongLead', 'StandardFormal', 'StandardSupplement'] as ReleaseScope[] },
   { kind: 'NonStandard', label: '非标件BOM + 图纸', scopes: ['NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement'] as ReleaseScope[] },
-  { kind: 'Electrical', label: '电气BOM', scopes: ['ElectricalLongLead', 'ElectricalFormal', 'ElectricalSupplement'] as ReleaseScope[] },
+  { kind: 'Electrical', label: '电气件BOM', scopes: ['ElectricalLongLead', 'ElectricalFormal', 'ElectricalSupplement'] as ReleaseScope[] },
 ].map(stream => computed(() => {
   const packages = props.releasePackages.filter(item => stream.scopes.includes(item.scope))
     .sort((left, right) => (right.createdAt ?? '').localeCompare(left.createdAt ?? ''))
@@ -61,7 +61,7 @@ const latestReleasedBomVersions = computed(() => (['Standard', 'NonStandard', 'E
   .filter((version): version is BomVersion => Boolean(version)))
 const latestBomFilterOptions = computed(() => latestReleasedBomVersions.value.map(version => ({
   ...version,
-  kindLabel: version.kind === 'Standard' ? '标准件BOM' : version.kind === 'NonStandard' ? '非标件BOM' : '电气BOM',
+  kindLabel: version.kind === 'Standard' ? '标准件BOM' : version.kind === 'NonStandard' ? '非标件BOM' : '电气件BOM',
 })))
 const selectedLatestBomVersion = computed(() => latestBomFilterOptions.value.find(version => version.id === previewLatestBomFilter.value))
 function releaseBomVersionId(release: ReleasePackageSummary, kind: BomVersion['kind']) {
@@ -332,8 +332,8 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
                 <tr v-for="item in pagedPreviewItems" :key="previewItemKey(item)">
                   <td class="pdm-release-preview-check"><input type="checkbox" :aria-label="`选择 ${item.drawingNumber}`" :checked="selectedPreviewKeys.includes(previewItemKey(item))" @change="togglePreviewItem(item, ($event.target as HTMLInputElement).checked)"></td>
                   <td>{{ item.releasePackageNumber }}</td>
-                  <td>{{ item.drawingNumber }}</td>
-                  <td><span class="pdm-release-preview-name" :title="item.fileName">{{ item.fileName }}</span></td>
+                  <td v-stocked-material="item.drawingNumber">{{ item.drawingNumber }}</td>
+                  <td><span v-stocked-material="item.drawingNumber" class="pdm-release-preview-name" :title="item.fileName">{{ item.fileName }}</span></td>
                   <td>{{ previewFormatLabel(item) }}</td>
                   <td><span :class="item.succeeded ? 'pdm-release-preview-ok' : previewItemState(item) === '失败' ? 'pdm-release-preview-failed' : 'pdm-release-preview-pending'">{{ previewItemState(item) }}</span></td>
                   <td>{{ item.succeeded ? formatSize(item.fileLength) : '—' }}</td>

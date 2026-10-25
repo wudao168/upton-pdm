@@ -13,7 +13,33 @@ describe('global content scrollbars', () => {
   const install = () => installGlobalScrollbars({ onUnmount(callback: () => void) { dispose = callback } } as App)
   const flush = () => vi.advanceTimersByTimeAsync(32)
   beforeEach(() => { vi.useFakeTimers(); vi.mocked(OverlayScrollbars).mockClear() })
-  afterEach(() => { dispose?.(); dispose = undefined; document.body.innerHTML = ''; vi.useRealTimers() })
+  afterEach(() => { dispose?.(); dispose = undefined; document.body.innerHTML = ''; vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers() })
+
+  it('reveals fallback native bars only at their gutter and retains visibility while dragging', async () => {
+    vi.stubGlobal('CSS', { supports: () => false })
+    const textarea = document.createElement('textarea')
+    textarea.style.overflowX = 'auto'; textarea.style.overflowY = 'auto'
+    Object.defineProperties(textarea, { clientWidth:{value:88},clientHeight:{value:88},offsetWidth:{value:100},offsetHeight:{value:100},scrollWidth:{value:200},scrollHeight:{value:200} })
+    vi.spyOn(textarea,'getBoundingClientRect').mockReturnValue({left:10,top:10,right:110,bottom:110,width:100,height:100,x:10,y:10,toJSON:()=>({})})
+    document.body.append(textarea);install();await flush()
+    const pointer = (type:string,x:number,y:number) => textarea.dispatchEvent(new MouseEvent(type,{bubbles:true,clientX:x,clientY:y,button:0}))
+    pointer('pointermove',50,50);expect(textarea.hasAttribute('data-pdm-native-scrollbar-hover')).toBe(false)
+    pointer('pointermove',105,50);expect(textarea.hasAttribute('data-pdm-native-scrollbar-hover')).toBe(true)
+    pointer('pointermove',50,50);expect(textarea.hasAttribute('data-pdm-native-scrollbar-hover')).toBe(false)
+    pointer('pointermove',50,105);expect(textarea.hasAttribute('data-pdm-native-scrollbar-hover')).toBe(true)
+    pointer('pointerdown',105,50);pointer('pointermove',200,200)
+    expect(textarea.hasAttribute('data-pdm-native-scrollbar-hover')).toBe(true)
+    pointer('pointerup',200,200);expect(textarea.hasAttribute('data-pdm-native-scrollbar-hover')).toBe(false)
+    pointer('pointermove',105,50);dispose?.();dispose=undefined
+    expect(textarea.hasAttribute('data-pdm-native-scrollbar-hover')).toBe(false)
+    pointer('pointermove',105,50);expect(textarea.hasAttribute('data-pdm-native-scrollbar-hover')).toBe(false)
+  })
+
+  it('keeps native hover handling in CSS for Chromium', async () => {
+    vi.stubGlobal('CSS', { supports: () => true })
+    const add=vi.spyOn(document,'addEventListener');install();await flush()
+    expect(add.mock.calls.some(([name])=>name==='pointermove')).toBe(false)
+  })
 
   it('uses each original scroll viewport without reparenting business content', async () => {
     document.body.innerHTML = '<section style="overflow-y:auto;overflow-x:hidden"><header>固定表头</header><div style="overflow-x:auto;overflow-y:auto">嵌套列表</div></section>'

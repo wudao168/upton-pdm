@@ -1,5 +1,8 @@
 using System;
 using System.IO;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Web.Script.Serialization;
 using Upton.Pdm.ClientShared;
@@ -20,6 +23,7 @@ internal static class Program
 
     private static void Main(string[] args)
     {
+        CheckLocalStartupConfiguration();
         if (Array.IndexOf(args, "--persistence") >= 0) CheckPersistence();
         var source = new Uri("http://192.168.2.8/client-bootstrap.json");
         var locatorPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "uplm-bootstrap.json");
@@ -72,6 +76,26 @@ internal static class Program
             try { ClientServerSettingsStore.NormalizeServerAddress(invalid); throw new Exception("Invalid server accepted: " + invalid); }
             catch (InvalidOperationException) { Check(true, "Invalid server address rejected: " + invalid); }
         }
+    }
+
+    private static void CheckLocalStartupConfiguration()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var url = new Uri("http://127.0.0.1:" + ((IPEndPoint)listener.LocalEndpoint).Port + "/" + Guid.NewGuid().ToString("N") + "/client-bootstrap.json");
+        var path = (string)Call("GetCachePath", url)!;
+        try
+        {
+            var watch = Stopwatch.StartNew();
+            var local = ClientBootstrapLoader.LoadLocalConfiguration(url);
+            Check(watch.Elapsed < TimeSpan.FromSeconds(1) && !listener.Pending(), "Local startup reads no server and does not wait for HTTP.");
+            var config = new ClientBootstrapConfiguration { ConfigurationVersion = "startup-fixture", UiBaseUrl = url.GetLeftPart(UriPartial.Authority) + "/", ApiBaseUrl = url.GetLeftPart(UriPartial.Authority) + "/" };
+            Call("SaveCache", config, url);
+            Check(ClientBootstrapLoader.LoadLocalConfiguration(url).ConfigurationVersion == "startup-fixture" && !listener.Pending(), "Local startup uses only the matching server cache.");
+            File.WriteAllText(path, "invalid-cache");
+            Check(ClientBootstrapLoader.LoadLocalConfiguration(url).ConfigurationVersion != "startup-fixture" && !listener.Pending(), "Invalid local cache falls back without blocking add-in loading.");
+        }
+        finally { listener.Stop(); if (File.Exists(path)) File.Delete(path); }
     }
 
     private static void CheckPersistence()

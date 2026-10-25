@@ -36,6 +36,7 @@ public static class PermissionCodes
     public const string DocumentRecycle = "document.recycle";
     public const string DocumentLockRequestRelease = "document.lock.request-release";
     public const string DocumentLockForceRelease = "document.lock.force-release";
+    public const string DocumentLockEmergencyRelease = "document.lock.emergency-release";
     public const string BomEdit = "bom.edit";
     public const string BomMechanicalEdit = "bom.mechanical.edit";
     public const string BomElectricalEdit = "bom.electrical.edit";
@@ -50,6 +51,8 @@ public static class PermissionCodes
     public const string ReleaseManage = "release.manage";
     public const string ProductionDrawingManage = "production.drawing.manage";
     public const string ProductionAssign = "production.assign";
+    public const string ProductionSupplierView = "production.supplier.view";
+    public const string ProductionSupplierManage = "production.supplier.manage";
     public const string ProductionExecute = "production.execute";
     public const string ProductionInspect = "production.inspect";
     public const string ProductionIssue = "production.issue";
@@ -117,9 +120,10 @@ public static class RolePermissionCatalog
         new(PermissionCodes.DocumentRecycle, "管理受控图档回收站", "项目内容", "将未发布且无受控引用的图档移入回收站，并可在30天内恢复；已发布图档只能作废。", Sensitive: true),
         new(PermissionCodes.DocumentLockRequestRelease, "催办并申请释放编辑权限", "项目内容"),
         new(PermissionCodes.DocumentLockForceRelease, "强制释放超时编辑权限", "项目内容", "仅限本人负责项目，系统管理员不受项目岗位限制。", Sensitive: true),
+        new(PermissionCodes.DocumentLockEmergencyRelease, "紧急接管在线图档", "项目内容", "仅授权项目负责人或系统管理员使用，必须填写原因；存档处理中及审核锁不可接管。", Sensitive: true),
         new(PermissionCodes.BomEdit, "维护BOM相关数据", "项目内容", "料品、BOM表头料号与关联配置维护；三类BOM明细的编辑权限见下面两个分类权限。"),
         new(PermissionCodes.BomMechanicalEdit, "维护标准件与非标件BOM", "项目内容", "维护项目标准件BOM和非标件BOM明细（默认给机械工程师、机械经理、技术助理、调试工程师）。", Sensitive: true),
-        new(PermissionCodes.BomElectricalEdit, "维护电气BOM", "项目内容", "维护项目电气BOM明细（默认给电气工程师、硬件工程师）。", Sensitive: true),
+        new(PermissionCodes.BomElectricalEdit, "维护电气件BOM", "项目内容", "维护项目电气件BOM明细（默认给电气工程师、硬件工程师）。", Sensitive: true),
         new(PermissionCodes.ValidationPlanEdit, "维护项目验证计划", "项目内容"),
         new(PermissionCodes.ValidationCatalogManage, "管理验证检查项库", "标准库", "维护全局验证分类和检查项；已被项目引用的内容只能停用，不能删除。", Sensitive: true),
         new(PermissionCodes.MaterialView, "查看料品管理", "料品管理", "查看料品主档、审批状态和U9C同步结果。"),
@@ -131,6 +135,8 @@ public static class RolePermissionCatalog
         new(PermissionCodes.ReleaseManage, "创建并提交发布包", "审批发布", Sensitive: true),
         new(PermissionCodes.ProductionDrawingManage, "调整生产图纸发图信息", "审批发布", "仅调整紧急程度和需求日期，不改变图纸版本。", Sensitive: true),
         new(PermissionCodes.ProductionAssign, "分配非标件自制与外协", "生产跟踪", "供应链接收发布包并分配自制或外协批次。", Sensitive: true),
+        new(PermissionCodes.ProductionSupplierView, "查看供应商库", "供应商库", "查看当前公司的供应商分类及完整台账。") { Routes = [new("GET", "/api/production-suppliers")] },
+        new(PermissionCodes.ProductionSupplierManage, "维护供应商库", "供应商库", "新增、编辑及停用供应商和分类。", Sensitive: true) { Routes = [new("PUT", "/api/production-suppliers/{id}"), new("PUT", "/api/production-suppliers/categories/{id}")] },
         new(PermissionCodes.ProductionExecute, "登记自制加工进度", "生产跟踪", "按授权批次记录内部加工与交检数量。", Sensitive: true),
         new(PermissionCodes.ProductionInspect, "登记生产质量检验", "生产跟踪", "记录质量收料、合格、返工和报废数量。", Sensitive: true),
         new(PermissionCodes.ProductionIssue, "登记项目领料", "生产跟踪", "记录质量放行后的实际领料人和数量。", Sensitive: true),

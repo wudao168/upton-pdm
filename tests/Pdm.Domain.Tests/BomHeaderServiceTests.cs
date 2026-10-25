@@ -323,7 +323,7 @@ public sealed class BomHeaderServiceTests
 
         await service.EnsureReleaseReadyAsync(ProjectId, ReleaseScope.StandardFormal, default);
         var exception = await Assert.ThrowsAsync<PdmRuleException>(() => service.EnsureReleaseReadyAsync(ProjectId, ReleaseScope.ElectricalFormal, default));
-        Assert.Contains("电气BOM", exception.Message);
+        Assert.Contains("电气件BOM", exception.Message);
     }
 
     [Fact]

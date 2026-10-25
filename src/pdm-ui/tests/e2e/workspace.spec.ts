@@ -5,7 +5,667 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { budgetCategories, calculateBudgetRow, assessmentItemTotal, assessmentSum } from '../../src/projectBudget'
 import type { ProjectApplication, ProjectApplicationEvent, ProjectApplicationInput } from '../../src/projectApplications'
-import type { SaveWorkHours, WorkHoursView } from '../../src/workHours'
+import type { SaveWorkHours, WorkHoursView, WorkHoursManagement } from '../../src/workHours'
+
+test('engineering kit library metadata uses material editor with read-only identity over LAN HTTP', async ({ page }, testInfo) => {
+  await mockPlanCompanionPanels(page)
+  await page.setViewportSize({ width: 1959, height: 1080 })
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  await page.route('**/client-bootstrap.json*', route => route.fulfill({ json: { ConfigurationVersion:'2026.10.23.kit-metadata-qa', Desktop:{Version:'QA'}, SolidWorksAddin:{Version:'QA'} } }))
+  await page.route('**/api/material-stock-plans', route => route.fulfill({json:[]}))
+  await page.route('**/api/auth/heartbeat', route => route.fulfill({json:{}}))
+  let kit = { id:'kit-metadata-qa',code:'UKIT-000003',name:'套件资料验证样本',model:'UTJ-10-0001',brand:'UPTON',description:'原备注',selectionAdvice:'',referencePrice:null as number|null,isRecommended:false,coverImageAttachmentId:null as string|null,
+    currentReleasedRevisionId:'kit-released',revisions:[{id:'kit-released',kitId:'kit-metadata-qa',versionNumber:1,state:'Released',components:[]}],rowVersion:2,createdBy:'admin',createdAt:'2026-10-23T01:00:00Z',updatedBy:'admin',updatedAt:'2026-10-23T01:00:00Z' }
+  const attachments: Array<{id:string;materialId:string;kind:string;originalFileName:string}> = []
+  const requests: Array<Record<string,unknown>> = []
+  const uploads = new Map<string,{kind:string;fileName:string}>()
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR0kAAAAASUVORK5CYII=','base64')
+  await page.route(/\/api\/standard-library\/categories(?:\?.*)?$/, route => route.fulfill({json:[]}))
+  await page.route('**/api/standard-library/materials?*', route => route.fulfill({json:{items:[{kit,categories:[],coverImage:attachments.find(item=>item.id===kit.coverImageAttachmentId)??null,
+    material:{id:kit.id,materialCode:kit.code,name:kit.name,specification:kit.model,brand:kit.brand,remark:kit.description,selectionAdvice:kit.selectionAdvice,isRecommended:kit.isRecommended,coverImageAttachmentId:kit.coverImageAttachmentId,referencePrice:kit.referencePrice,
+      rowVersion:kit.rowVersion,kind:'Standard',supplyMode:'Purchase',unitCode:'001',approvalStatus:'Approved',syncStatus:'Succeeded',u9SyncConfirmed:true,model3DAttachmentCount:attachments.filter(a=>a.kind==='Model3D').length,documentAttachmentCount:attachments.filter(a=>a.kind==='Document').length}}],total:1,page:1,pageSize:50}}))
+  await page.route('**/api/materials/kit-metadata-qa/attachments', route => route.fulfill({json:attachments}))
+  await page.route('**/api/materials/kit-metadata-qa/attachments/*/file', route => route.fulfill({contentType:'image/png',body:png}))
+  await page.route('**/api/materials/kit-metadata-qa/attachments/uploads', route => {
+    const input=route.request().postDataJSON();const id='kit-upload-'+uploads.size;uploads.set(id,input);return route.fulfill({json:{id,chunkSize:1024}})
+  })
+  await page.route('**/api/material-attachment-uploads/*/chunks/*', route => route.fulfill({status:204}))
+  await page.route('**/api/material-attachment-uploads/*/complete', route => {
+    const id=new URL(route.request().url()).pathname.split('/')[3]!,file=uploads.get(id)!
+    const attachment={id:'attachment-'+id,materialId:kit.id,kind:file.kind,originalFileName:file.fileName};attachments.push(attachment);return route.fulfill({json:attachment})
+  })
+  await page.route('**/api/engineering-kits/kit-metadata-qa/library-metadata', route => {
+    const input=route.request().postDataJSON();requests.push(input)
+    expect(input.expectedRowVersion).toBe(kit.rowVersion);expect(input).not.toHaveProperty('name');expect(input).not.toHaveProperty('components')
+    kit={...kit,description:input.remark,selectionAdvice:input.selectionAdvice??'',referencePrice:input.referencePrice??null,isRecommended:input.isRecommended,coverImageAttachmentId:input.coverImageAttachmentId,rowVersion:kit.rowVersion+1}
+    return route.fulfill({json:kit})
+  })
+  await page.goto('/')
+  await expect(page).toHaveTitle('UPTON-PLM');await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  const login=page.getByLabel('登录PLM');await login.getByRole('textbox',{name:'账号'}).fill('admin');await login.getByRole('textbox',{name:'密码'}).fill('correct-password');await login.getByRole('button',{name:'登录',exact:true}).click()
+  await page.locator('.pdm-sidebar').getByRole('button',{name:'标准物料',exact:true}).click()
+  const open = async () => {const row=page.locator('.material-list-table .el-table__body tr').filter({hasText:'套件资料验证样本'});await expect(row.getByRole('button',{name:'套件资料验证样本',exact:true})).toHaveCount(0);await row.getByText('套件资料验证样本',{exact:true}).click();await expect(page.getByRole('dialog',{name:'套件资料维护'})).not.toBeVisible();if(!await row.getByRole('checkbox').isChecked())await row.locator('label.el-checkbox').click();await page.getByRole('button',{name:'维护',exact:true}).click();return page.getByRole('dialog',{name:'套件资料维护'})}
+  let dialog=await open()
+  for(const label of ['料号','名称','型号','品牌']) await expect(dialog.getByLabel(label,{exact:true})).toBeDisabled()
+  await expect(dialog.getByLabel('料号',{exact:true})).toHaveValue('UKIT-000003');await expect(dialog.getByLabel('型号',{exact:true})).toHaveValue('UTJ-10-0001')
+  await dialog.getByLabel('备注',{exact:true}).fill('适用于真空泵组合')
+  await dialog.getByLabel('选型建议',{exact:true}).fill('优先用于真空系统，安装前核对接口')
+  await dialog.getByLabel('选择套件图片').setInputFiles([{name:'封面.png',mimeType:'image/png',buffer:png},{name:'细节.png',mimeType:'image/png',buffer:png}])
+  await expect(dialog.locator('.material-image-card')).toHaveCount(2)
+  expect(requests[0]?.remark).toBe('原备注');await expect(dialog.getByLabel('备注',{exact:true})).toHaveValue('适用于真空泵组合')
+  await dialog.getByRole('button',{name:'将 细节.png 设为封面',exact:true}).click()
+  await expect.poll(()=>kit.coverImageAttachmentId).toBe(attachments[1]!.id)
+  await dialog.getByRole('button',{name:'清除当前封面'}).click();await expect.poll(()=>kit.coverImageAttachmentId).toBe(null)
+  await expect(dialog.locator('.material-image-card')).toHaveCount(2)
+  await dialog.getByRole('button',{name:'将 封面.png 设为封面',exact:true}).click();await expect.poll(()=>kit.coverImageAttachmentId).toBe(attachments[0]!.id)
+  await dialog.getByLabel('上传套件3D附件').setInputFiles({name:'组合泵.step',mimeType:'application/octet-stream',buffer:Buffer.from('step fixture')})
+  await expect(dialog.getByRole('cell',{name:'组合泵.step',exact:true})).toBeVisible()
+  await dialog.getByLabel('上传套件资料附件').setInputFiles({name:'选型资料.pdf',mimeType:'application/pdf',buffer:Buffer.from('pdf fixture')})
+  await expect(dialog.getByRole('cell',{name:'选型资料.pdf',exact:true})).toBeVisible()
+  await page.screenshot({path:testInfo.outputPath('kit-material-editor-desktop.png'),fullPage:false})
+  await page.setViewportSize({width:780,height:900});await expect(dialog.getByRole('button',{name:'保存修改'})).toBeVisible()
+  expect(await page.locator('body').evaluate(element=>element.scrollWidth<=innerWidth)).toBe(true)
+  await page.screenshot({path:testInfo.outputPath('kit-material-editor-narrow.png'),fullPage:false})
+  await dialog.getByRole('button',{name:'保存修改'}).click();await expect(dialog).not.toBeVisible()
+  expect(kit.description).toBe('适用于真空泵组合');expect(kit.selectionAdvice).toBe('优先用于真空系统，安装前核对接口');expect(kit.currentReleasedRevisionId).toBe('kit-released')
+  dialog=await open();await expect(dialog.getByLabel('备注',{exact:true})).toHaveValue(kit.description)
+  await expect(dialog.getByLabel('选型建议',{exact:true})).toHaveValue(kit.selectionAdvice);await expect(dialog.locator('.material-image-card')).toHaveCount(2)
+  expect(errors).toEqual([])
+})
+
+test('folder template save refreshes existing project permissions on LAN HTTP', async ({ page }) => {
+  test.setTimeout(120_000)
+  await mockPlanCompanionPanels(page)
+  await page.route('**/api/material-stock-plans', route => route.fulfill({ json: { enterpriseCode: '01', organizationCode: '7', items: [] } }))
+  await page.setViewportSize({ width: 1959, height: 1080 })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  let saved = false
+  let reads = 0
+  let created = false
+  const folders = () => [
+    { id: 'acl-root', rootProjectId: projectId, folderKey: 'root', templateKey: 'root', name: 'PRJ-REAL-001', purpose: 0, sortOrder: 0, isSystem: true, inheritPermissions: true, effectiveAccess: 127, permissions: [] },
+    { id: 'acl-inherited', rootProjectId: projectId, parentFolderId: 'acl-root', folderKey: 'project-files', templateKey: 'project-files', name: '项目资料', purpose: 5, sortOrder: 10, isSystem: true, inheritPermissions: !saved, effectiveAccess: saved ? 3 : 15, permissions: [] },
+    { id: 'acl-independent', rootProjectId: projectId, parentFolderId: 'acl-root', folderKey: 'purchase', templateKey: 'purchase', name: '独立权限目录', purpose: 5, sortOrder: 20, isSystem: true, inheritPermissions: true, effectiveAccess: 15, permissions: [{ principalType: 0, principalKey: 'Engineer', access: 15 }] },
+    ...(created ? [{ id: 'acl-created', rootProjectId: projectId, parentFolderId: 'acl-inherited', folderKey: 'custom:created', templateKey: 'custom', name: '新建资料子目录', purpose: 5, sortOrder: 10, isSystem: false, inheritPermissions: true, effectiveAccess: saved ? 3 : 15, permissions: [] }] : []),
+  ]
+  await page.route(`**/api/projects/${projectId}/folders`, route => { reads++; return route.fulfill({ json: folders() }) })
+  await page.route(`**/api/projects/${projectId}/folders/acl-inherited/children`, async route => {
+    expect(route.request().postDataJSON().name).toBe('新建资料子目录')
+    created = true; await route.fulfill({ json: folders().find(folder => folder.id === 'acl-created') })
+  })
+  await page.route('**/api/folder-template', async route => {
+    if (route.request().method() === 'PUT') { saved = true; return route.fulfill({ json: route.request().postDataJSON().nodes }) }
+    return route.fulfill({ json: [{ folderKey: 'project-files', name: '项目资料', purpose: 5, sortOrder: 10, isSystem: true, inheritPermissions: true, permissions: [] }] })
+  })
+  await page.route(`**/api/projects/${projectId}/files?*`, route => route.fulfill({ json: [] }))
+  await page.goto('/'); await expect(page).toHaveTitle('UPTON-PLM')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await enterProject(page); await page.getByRole('button', { name: '文件', exact: true }).click()
+  await page.locator('.pdm-folder-pane').getByText('项目资料', { exact: true }).click()
+  await page.getByRole('button', { name: '新建文件夹', exact: true }).click()
+  const prompt = page.getByRole('dialog', { name: '新建文件夹', exact: true })
+  await prompt.getByRole('textbox').fill('新建资料子目录')
+  await prompt.getByRole('button', { name: '确定', exact: true }).click()
+  await expect.poll(() => created).toBe(true)
+  await expect(page.locator('.pdm-global-status')).toContainText('文件夹已创建')
+  await page.locator('.pdm-folder-pane .el-tree-node__content').filter({ hasText: '项目资料' }).locator('.el-tree-node__expand-icon').click()
+  await expect(page.locator('.pdm-folder-pane')).toContainText('新建资料子目录')
+  await page.getByRole('button', { name: '系统设置', exact: true }).click()
+  await page.getByRole('button', { name: '文件夹模板', exact: true }).click()
+  await page.locator('.pdm-template-settings tbody tr').first().locator('.el-switch').click()
+  const beforeSave = reads
+  await page.getByRole('button', { name: '保存模板', exact: true }).click()
+  await expect.poll(() => reads).toBeGreaterThan(beforeSave)
+  await expect(page.locator('.pdm-global-status')).toContainText('独立权限保持不变')
+  await page.locator('.pdm-sidebar').getByRole('button', { name: '项目中心', exact: true }).click()
+  await page.getByRole('button', { name: '文件', exact: true }).click()
+  await page.locator('.pdm-folder-pane').getByText('项目资料', { exact: true }).click()
+  await expect(page.getByRole('button', { name: '新建文件夹', exact: true })).toHaveCount(0)
+  await page.locator('.pdm-folder-pane').getByText('独立权限目录', { exact: true }).click()
+  await expect(page.getByRole('button', { name: '新建文件夹', exact: true })).toBeVisible()
+  await page.screenshot({ path: join(tmpdir(), 'pdm-folder-template-preserved.png'), fullPage: false })
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
+})
+
+test('table column settings follow the account after clearing browser storage', async ({ page }) => {
+  await mockPlanCompanionPanels(page)
+  await page.route('**/api/material-code/resolve', route => route.fulfill({ json: [] }))
+  await page.setViewportSize({ width: 1959, height: 1080 })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  const login = async (username: string) => {
+    const form = page.getByLabel('登录PLM')
+    await form.getByRole('textbox', { name: '账号' }).fill(username)
+    await form.getByRole('textbox', { name: '密码' }).fill('correct-password')
+    await form.getByRole('button', { name: '登录', exact: true }).click()
+    await enterProject(page)
+  }
+  const procurement = async () => {
+    await page.getByRole('button', { name: '备料', exact: true }).click()
+    return page.getByLabel('采购跟踪', { exact: true })
+  }
+  await page.goto('/'); await login('engineer')
+  let panel = await procurement()
+  await panel.getByRole('button', { name: '列设置', exact: true }).click()
+  let dialog = page.getByRole('dialog', { name: '采购跟踪列设置', exact: true })
+  await dialog.getByText('PR', { exact: true }).click()
+  await dialog.getByText('品牌', { exact: true }).click()
+  await dialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(dialog).not.toBeVisible()
+  await expect(panel.getByRole('columnheader', { name: 'PR', exact: true })).toBeVisible()
+  await expect(panel.getByRole('columnheader', { name: '品牌', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'BOM', exact: true }).click()
+  await page.getByRole('tab', { name: '标准件BOM' }).click()
+  await page.getByRole('button', { name: '列设置', exact: true }).click()
+  const bomDialog = page.getByRole('dialog', { name: 'BOM列设置', exact: true })
+  await bomDialog.getByText('备注信息', { exact: true }).click()
+  await bomDialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(bomDialog).not.toBeVisible()
+  await page.evaluate(() => { localStorage.clear(); sessionStorage.clear() }); await page.reload(); await login('engineer')
+  panel = await procurement()
+  await expect(panel.getByRole('columnheader', { name: 'PR', exact: true })).toBeVisible()
+  await expect(panel.getByRole('columnheader', { name: '品牌', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'BOM', exact: true }).click()
+  await page.getByRole('tab', { name: '标准件BOM' }).click()
+  await expect(page.locator('.pdm-bom-table').getByRole('columnheader', { name: '备注信息', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: '退出', exact: true }).click(); await login('admin')
+  panel = await procurement()
+  await expect(panel.getByRole('columnheader', { name: 'PR', exact: true })).toHaveCount(0)
+  await expect(panel.getByRole('columnheader', { name: '品牌', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '退出', exact: true }).click(); await login('engineer')
+  panel = await procurement()
+  await expect(panel.getByRole('columnheader', { name: 'PR', exact: true })).toBeVisible()
+  await panel.getByRole('button', { name: '列设置', exact: true }).click()
+  dialog = page.getByRole('dialog', { name: '采购跟踪列设置', exact: true })
+  await expect(dialog.getByRole('checkbox', { name: 'PR', exact: true })).toBeChecked()
+  await expect(dialog.getByRole('checkbox', { name: '品牌', exact: true })).not.toBeChecked()
+  await page.screenshot({ path: join(tmpdir(), 'account-table-preferences-restored.png'), fullPage: false })
+  await dialog.getByRole('button', { name: '恢复默认', exact: true }).click()
+  await dialog.getByRole('button', { name: '保存', exact: true }).click(); await expect(dialog).not.toBeVisible()
+  await page.evaluate(() => { localStorage.clear(); sessionStorage.clear() }); await page.reload(); await login('engineer')
+  panel = await procurement()
+  await expect(panel.getByRole('columnheader', { name: 'PR', exact: true })).toHaveCount(0)
+  await expect(panel.getByRole('columnheader', { name: '品牌', exact: true })).toBeVisible()
+  expect(errors).toEqual([])
+})
+
+for (const [field,lookup] of [['型号','PK-MOUNT-01'],['物料编码','UKIT-000001']]) {
+  test('BOM paginated insertion keeps typing visible and confirms kit details via '+field,async({page})=>{
+    test.setTimeout(120_000);await mockPlanCompanionPanels(page);await page.setViewportSize({width:1958,height:1080})
+    const errors:string[]=[],saves:any[]=[],expansions:any[]=[];page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')errors.push(m.text())})
+    const original=Array.from({length:160},(_,i)=>({id:'page-item-'+i,kind:'Standard',sequence:i+1,drawingNumber:'0102'+String(i+1).padStart(7,'0'),name:'已有物料'+i,specification:'ORIGINAL-'+i,brand:'UPTON',quantity:1,unit:'001',revision:'W1',complete:true,source:'Manual'}))
+    const kit={id:'page-kit',code:'UKIT-000001',model:'PK-MOUNT-01',name:'分页确认套件',brand:'UPTON',currentReleasedRevisionId:'page-kit-release',revisions:[{id:'page-kit-release',versionNumber:1,state:'Released',components:[{id:'page-part-1',materialCode:'01029999001',materialName:'安装螺栓',specification:'M8',brand:'UPTON',quantity:5,unit:'001'},{id:'page-part-2',materialCode:'01029999002',materialName:'安装垫圈',specification:'D8',brand:'UPTON',quantity:2,unit:'001'}]}]}
+    await page.route('**/api/engineering-kits?*',r=>r.fulfill({json:[kit]}));await page.route('**/api/material-code/resolve',r=>r.fulfill({json:[]}));await page.route('**/api/material-code/validate',r=>r.fulfill({json:[]}))
+    await page.route('**/api/engineering-kits/*/expand',r=>{const input=r.request().postDataJSON();expansions.push(input);return r.fulfill({json:{referenceId:'page-reference',kitId:kit.id,revisionId:'page-kit-release',kitCode:kit.code,kitName:kit.name,versionNumber:1,kitQuantity:input.quantity,lines:kit.revisions[0]!.components.map(c=>({kitComponentId:c.id,materialCode:c.materialCode,materialName:c.materialName,specification:c.specification,brand:c.brand,quantity:c.quantity*input.quantity,unit:c.unit,isOptional:false}))}})})
+    await page.route('**/api/projects/*/boms/Standard**',r=>{if(r.request().method()==='GET')return r.fulfill({json:original});const items=r.request().postDataJSON().items;saves.push(items);return r.fulfill({json:{items,draft:{id:'paged-draft',projectId,kind:'Standard',state:'Draft',versionNumber:1,label:'S-PAGED-V01',items:[],createdBy:'engineer',createdAt:'2026-10-23T04:00:00Z',updatedBy:'engineer',updatedAt:'2026-10-23T04:00:00Z'},draftItemIds:items.map((x:any)=>x.id),draftItemOverrides:[]}})})
+    await page.goto('/',{waitUntil:'domcontentloaded'});const login=page.getByLabel('登录PLM');await login.getByRole('textbox',{name:'账号'}).fill('engineer');await login.getByRole('textbox',{name:'密码'}).fill('correct-password');await login.getByRole('button',{name:'登录',exact:true}).click();await enterProject(page);await page.getByRole('button',{name:'BOM',exact:true}).click();await page.getByRole('tab',{name:'标准件BOM'}).click()
+    await expect(page.getByLabel('BOM明细分页',{exact:true})).toContainText('1 / 4')
+    if(field==='物料编码')await page.getByRole('button',{name:'在第 50 行下方插入物料',exact:true}).click()
+    const name=field==='型号'?page.locator('tr.is-quick-entry input[aria-label="物料名称"]'):page.locator('tr.is-inserted-row input[aria-label="物料名称"]');await name.click();await page.keyboard.type('NEW-ROW',{delay:20})
+    const row=page.locator('tr.is-inserted-row');await expect(row).toHaveAttribute('data-row-index','50');await expect(row.getByLabel('物料名称',{exact:true})).toHaveValue('NEW-ROW');await expect(row.getByLabel('物料名称',{exact:true})).toBeFocused();await expect(page.getByLabel('BOM明细分页',{exact:true})).toContainText('2 / 4')
+    const input=row.getByLabel(field!,{exact:true});await input.click();await page.keyboard.type(lookup!,{delay:20});await page.keyboard.press('Tab')
+    const dialog=page.getByRole('dialog',{name:'确认添加套件',exact:true});await expect(dialog).toBeVisible();const preview=dialog.getByRole('table',{name:'套件展开明细',exact:true});await expect(preview.locator('tbody tr')).toHaveCount(2);expect(expansions).toHaveLength(0);await dialog.getByLabel('套件数量',{exact:true}).fill('2');await expect(preview.locator('tbody tr').first().locator('td').last()).toHaveText('10');await expect(preview.locator('tbody tr').nth(1).locator('td').last()).toHaveText('4')
+    await page.screenshot({path:join(tmpdir(),'pdm-kit-confirm-'+(field==='型号'?'model':'code')+'.png'),fullPage:false})
+    await dialog.getByRole('button',{name:'取消',exact:true}).click();await expect(dialog).not.toBeVisible();expect(expansions).toHaveLength(0);await expect(row.getByLabel('物料名称',{exact:true})).toHaveValue('NEW-ROW');expect(saves).toHaveLength(0)
+    await input.press('Enter');await expect(dialog).toBeVisible();await dialog.getByLabel('套件数量',{exact:true}).fill('2');await dialog.getByRole('button',{name:'确认添加到BOM',exact:true}).click();await expect(dialog).not.toBeVisible();expect(expansions).toHaveLength(1);await expect(page.locator('tr.is-inserted-row')).toHaveCount(2);await expect(page.getByLabel('BOM明细分页',{exact:true})).toContainText('2 / 4');await expect(page.locator('tr.is-inserted-row').first().getByLabel('物料名称',{exact:true})).toHaveValue('安装螺栓')
+    await page.screenshot({path:join(tmpdir(),'pdm-kit-insert-visible-'+(field==='型号'?'model':'code')+'.png'),fullPage:false})
+    await page.locator('.pdm-bom-save-action').click();await expect.poll(()=>saves.length).toBe(1);expect(saves[0]).toHaveLength(162);expect(saves[0][50].drawingNumber).toBe('01029999001');expect(saves[0][51].drawingNumber).toBe('01029999002');expect(saves[0].filter((x:any)=>x.source==='EngineeringKit').map((x:any)=>x.quantity)).toEqual([10,4]);expect(saves[0].some((x:any)=>x.drawingNumber.startsWith('UKIT-'))).toBe(false);expect(original.every(old=>saves[0].some((x:any)=>x.id===old.id&&x.drawingNumber===old.drawingNumber&&x.quantity===1))).toBe(true)
+    await expect(page.locator('vite-error-overlay')).toHaveCount(0);expect(errors).toEqual([])
+  })
+}
+
+test('project record viewers can read history without note maintenance or plan access on LAN HTTP',async({page})=>{
+  test.setTimeout(120_000);await mockPlanCompanionPanels(page);await page.setViewportSize({width:1959,height:1080})
+  const errors:string[]=[],recordReads:string[]=[],writes:string[]=[];let planDenied=false
+  page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error'&&!m.location().url.includes('/plan/portfolio'))errors.push(m.text())});page.on('request',r=>{const u=new URL(r.url());if(r.method()!=='GET'&&(u.pathname.endsWith('/manager-notes')||u.pathname.endsWith('/todos')))writes.push(u.pathname)})
+  await page.route('**/api/projects/*/plan/portfolio',r=>r.fulfill(planDenied?{status:403,json:{message:'当前角色无权查看计划'}}:{json:{rootProjectId:projectId,currentStage:'Design',completionPercent:0,laggingProjectCount:0,riskProjectCount:0,projects:[{projectId,projectCode:'PRJ-REAL-001',projectName:'真实装配项目',isRoot:true,hasPlan:false,completionPercent:0,isLagging:false,isAtRisk:false}]}}))
+  await page.route('**/api/projects/*/audit?*',r=>{const id=new URL(r.request().url()).pathname.split('/')[3]!;recordReads.push(id);return r.fulfill({json:[{id:'record-'+id,actor:'project-manager',action:'project.manager-note',entityType:'Project',entityId:id,detail:'项目经理填写的可见记录',occurredAt:'2026-10-23T06:00:00Z'}]})})
+  await page.goto('/',{waitUntil:'domcontentloaded'});expect(await page.title()).toBe('UPTON-PLM');const login=page.getByLabel('登录PLM');await login.getByRole('textbox',{name:'账号'}).fill('engineer');await login.getByRole('textbox',{name:'密码'}).fill('correct-password');await login.getByRole('button',{name:'登录',exact:true}).click();await enterProject(page)
+  const record=page.getByRole('button',{name:'查看 PRJ-REAL-001 的记录',exact:true});await expect(record).toBeVisible();await record.click()
+  const dialog=page.getByRole('dialog',{name:'查看项目记录 · PRJ-REAL-001',exact:true});await expect(dialog).toBeVisible();await expect(dialog).toContainText('项目经理填写的可见记录');await expect(dialog.getByLabel('项目备注内容',{exact:true})).toHaveCount(0);await expect(dialog.getByLabel('待办接收人',{exact:true})).toHaveCount(0);await expect(dialog.getByRole('button',{name:'保存记录',exact:true})).toHaveCount(0);await expect.poll(async()=>{const b=(await dialog.boundingBox())!;return b.x+b.width}).toBeLessThanOrEqual(1960);await expect.poll(()=>dialog.evaluate(el=>getComputedStyle(el).opacity)).toBe('1');await page.screenshot({path:join(tmpdir(),'pdm-project-record-readonly.png'),fullPage:false});await dialog.getByRole('button',{name:'关闭',exact:true}).click();await expect(dialog).not.toBeVisible()
+  planDenied=true;const denied=page.waitForResponse(r=>new URL(r.url()).pathname.endsWith('/plan/portfolio')&&r.status()===403);await page.getByRole('button',{name:'刷新项目概览',exact:true}).click();await denied
+  const fallback=page.getByRole('button',{name:'查看记录',exact:true});await expect(fallback).toBeVisible();await fallback.click();await expect(dialog).toBeVisible();await expect(dialog).toContainText('项目经理填写的可见记录');await expect(dialog.getByRole('button',{name:'保存记录',exact:true})).toHaveCount(0);expect(recordReads).toContain(projectId);expect(writes).toEqual([])
+  await page.setViewportSize({width:1000,height:900});await expect(dialog).toBeVisible();await expect.poll(async()=>{const b=(await dialog.boundingBox())!;return b.x+b.width}).toBeLessThanOrEqual(1001);await expect.poll(()=>dialog.evaluate(el=>getComputedStyle(el).opacity)).toBe('1');await page.screenshot({path:join(tmpdir(),'pdm-project-record-readonly-without-plan.png'),fullPage:false});await dialog.getByRole('button',{name:'关闭',exact:true}).click();await expect(page.locator('vite-error-overlay')).toHaveCount(0);expect(errors).toEqual([])
+})
+
+test('BOM indexes released kits by model and confirms duplicate models on LAN HTTP',async({page})=>{
+  test.setTimeout(120_000);await mockPlanCompanionPanels(page);await page.setViewportSize({width:1958,height:1080})
+  const errors:string[]=[],saves:any[]=[],expansions:any[]=[];let duplicate=false
+  page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')errors.push(m.text())})
+  const kit={id:'kit-model-one',code:'UKIT-000001',model:'PK-MOUNT-01',name:'型号索引套件',brand:'UPTON',currentReleasedRevisionId:'kit-release',revisions:[{id:'kit-release',versionNumber:1,state:'Released',components:[{id:'kit-part-1',materialCode:'01029999001',materialName:'安装螺栓',specification:'M8',brand:'UPTON',quantity:5,unit:'001'},{id:'kit-part-2',materialCode:'01029999002',materialName:'安装垫圈',specification:'D8',brand:'UPTON',quantity:2,unit:'001'}]}]}
+  await page.route('**/api/engineering-kits?*',r=>r.fulfill({json:duplicate?[kit,{...kit,id:'kit-model-two',code:'UKIT-000002',name:'同型号另一套件'}]:[kit]}))
+  await page.route('**/api/engineering-kits/*/expand',async r=>{const input=r.request().postDataJSON();expansions.push(input);return r.fulfill({json:{referenceId:'kit-ref-'+expansions.length,kitId:kit.id,revisionId:'kit-release',kitCode:kit.code,kitName:kit.name,versionNumber:1,kitQuantity:input.quantity,lines:[{kitComponentId:'kit-part-1',materialCode:'01029999001',materialName:'安装螺栓',quantity:5*input.quantity,unit:'001',specification:'M8',brand:'UPTON',material:'钢',isOptional:false},{kitComponentId:'kit-part-2',materialCode:'01029999002',materialName:'安装垫圈',quantity:2*input.quantity,unit:'001',specification:'D8',brand:'UPTON',material:'钢',isOptional:false}]}})})
+  await page.route('**/api/material-code/resolve',r=>r.fulfill({json:[]}))
+  await page.route('**/api/material-code/validate',r=>r.fulfill({json:[]}))
+  await page.route('**/boms/Standard?includeDraft=true',async r=>{const items=r.request().postDataJSON().items;saves.push(items);return r.fulfill({json:{items,draft:{id:'kit-saved-draft',projectId,kind:'Standard',state:'Draft',versionNumber:1,label:'S-KIT-V01',items:[],createdBy:'engineer',createdAt:'2026-10-23T03:00:00Z',updatedBy:'engineer',updatedAt:'2026-10-23T03:00:00Z'},draftItemIds:items.map((x:any)=>x.id),draftItemOverrides:[]}})})
+  await page.goto('/',{waitUntil:'domcontentloaded'});expect(await page.title()).toBe('UPTON-PLM');const login=page.getByLabel('登录PLM');await login.getByRole('textbox',{name:'账号'}).fill('engineer');await login.getByRole('textbox',{name:'密码'}).fill('correct-password');await login.getByRole('button',{name:'登录',exact:true}).click()
+  await enterProject(page);await page.getByRole('button',{name:'BOM',exact:true}).click();await page.getByRole('tab',{name:'标准件BOM'}).click()
+  let model=page.locator('tr.is-quick-entry input[aria-label="型号"]');await model.fill(' pk-mount-01 ');await model.press('Enter')
+  const confirmation=page.getByRole('dialog',{name:'确认添加套件',exact:true});await expect(confirmation).toBeVisible();expect(expansions).toHaveLength(0);await expect(confirmation.getByRole('table',{name:'套件展开明细',exact:true}).locator('tbody tr')).toHaveCount(2);await confirmation.getByRole('button',{name:'确认添加到BOM',exact:true}).click();await expect.poll(()=>expansions.length).toBe(1);await expect(page.locator('.pdm-global-status')).toContainText('已确认添加套件 UKIT-000001');expect(saves).toHaveLength(0)
+  await page.screenshot({path:join(tmpdir(),'pdm-bom-kit-model-expanded.png'),fullPage:false})
+  await page.locator('.pdm-bom-save-action').click();await expect.poll(()=>saves.length).toBe(1)
+  const children=saves[0].filter((x:any)=>x.source==='EngineeringKit');expect(children.map((x:any)=>x.drawingNumber)).toEqual(['01029999001','01029999002']);expect(children.map((x:any)=>x.quantity)).toEqual([5,2]);expect(children.every((x:any)=>x.engineeringKitRevisionId==='kit-release')).toBe(true)
+  duplicate=true;model=page.locator('tr.is-quick-entry input[aria-label="型号"]');await model.fill('PK-MOUNT-01');await model.press('Tab')
+  const choice=page.getByRole('dialog',{name:'确认添加套件',exact:true});await expect(choice).toBeVisible();await expect(choice.locator('.pdm-kit-reference-list tbody tr')).toHaveCount(2);await expect(choice.getByRole('columnheader',{name:'型号',exact:true})).toBeVisible();expect(expansions).toHaveLength(1)
+  await choice.getByLabel('搜索套件',{exact:true}).fill('mount');await expect(choice.locator('.pdm-kit-reference-list tbody tr')).toHaveCount(2);await choice.getByLabel('套件数量',{exact:true}).fill('2')
+  await page.screenshot({path:join(tmpdir(),'pdm-bom-kit-model-choices.png'),fullPage:false})
+  await page.setViewportSize({width:1000,height:900});await expect(choice).toBeVisible();const box=(await choice.boundingBox())!;expect(box.x+box.width).toBeLessThanOrEqual(1001);await page.screenshot({path:join(tmpdir(),'pdm-bom-kit-model-choices-narrow.png'),fullPage:false})
+  await choice.getByRole('button',{name:'取消',exact:true}).click();await expect(choice).not.toBeVisible();await page.setViewportSize({width:1958,height:1080});await page.locator('.pdm-bom-save-action').click();await expect(page.locator('.pdm-global-status')).toContainText('套件型号尚未展开');expect(saves).toHaveLength(1)
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0);expect(errors).toEqual([])
+})
+
+test('manual work hour reminders repeat and show explicit skip reasons on LAN HTTP',async({page})=>{
+  test.setTimeout(120_000)
+  await mockPlanCompanionPanels(page);await page.setViewportSize({width:1958,height:1080});await page.clock.setFixedTime(new Date('2026-10-23T01:20:00Z'))
+  const errors:string[]=[],sent:string[][]=[];let paused=false
+  page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')errors.push(m.text())})
+  const view:WorkHoursView={today:'2026-10-23',startDate:'2026-10-22',username:'engineer',displayName:'技术助理',scope:'授权部门',defaultDepartment:'设计部',canManage:true,manageableUsernames:['worker'],people:[{username:'worker',displayName:'员工甲',department:'设计部',isActive:true}],projects:[],sheets:[],compliance:[{username:'worker',days:[{date:'2026-10-22',expected:8,actual:0,status:'未填写',muted:false,reason:''}]}]}
+  await page.route('**/api/work-hours**',async r=>{if(r.request().method()==='POST'&&new URL(r.request().url()).pathname.endsWith('/remind')){const names=r.request().postDataJSON().usernames;sent.push(names);return r.fulfill({json:{sent:paused?0:1,skipped:paused?1:0,results:[{username:'worker',displayName:'员工甲',sent:!paused,reason:paused?'缺填日期已暂停提醒':'已发送站内工时提醒'}]}})}return r.fulfill({json:view})})
+  await page.goto('/',{waitUntil:'domcontentloaded'});expect(await page.title()).toBe('UPTON-PLM');const login=page.getByLabel('登录PLM');await login.getByRole('textbox',{name:'账号'}).fill('engineer');await login.getByRole('textbox',{name:'密码'}).fill('correct-password');await login.getByRole('button',{name:'登录',exact:true}).click()
+  await page.locator('.pdm-sidebar').getByRole('button',{name:'工时管理',exact:true}).click();const panel=page.getByRole('region',{name:'工时管理',exact:true});await panel.getByRole('button',{name:'汇总工时',exact:true}).click();const checks=panel.getByRole('region',{name:'人员填报完整性',exact:true})
+  await expect(checks).not.toContainText('每人每天最多一次');await expect(checks).not.toContainText('手动提醒可以再次发送')
+  for(let i=0;i<2;i++){await checks.getByRole('button',{name:'提醒',exact:true}).click();await expect.poll(()=>sent.length).toBe(i+1);await expect(page.locator('.pdm-global-status')).toContainText('已向1人发送站内工时提醒')}
+  await checks.getByRole('button',{name:'提醒当前缺填人员',exact:true}).click();await expect.poll(()=>sent.length).toBe(3);expect(sent).toEqual([['worker'],['worker'],['worker']]);await expect(checks).toContainText('1天待处理')
+  await page.screenshot({path:join(tmpdir(),'pdm-work-hours-manual-reminder.png'),fullPage:false})
+  paused=true;await checks.getByRole('button',{name:'提醒',exact:true}).click();await expect(page.locator('.pdm-global-status')).toContainText('本次未发送提醒：员工甲：缺填日期已暂停提醒。');await expect(page.locator('.pdm-global-status')).not.toHaveClass(/is-success/)
+  await page.screenshot({path:join(tmpdir(),'pdm-work-hours-reminder-skip.png'),fullPage:false});await page.setViewportSize({width:1000,height:900});await expect(checks).toBeVisible();await page.screenshot({path:join(tmpdir(),'pdm-work-hours-reminder-narrow.png'),fullPage:false});expect(errors).toEqual([]);await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+})
+
+test('drawing revisions use formal letters and pending status on LAN HTTP without changing archive ids', async ({ page }) => {
+  await mockPlanCompanionPanels(page)
+  await page.route('**/api/material-code/resolve', route => route.fulfill({ json: [] }))
+  await page.setViewportSize({ width: 1959, height: 1080 })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(`${message.text()} ${message.location().url}`) })
+  const rows = [
+    { id: 'revision-a', sourceDocumentId: 'doc-part', sequence: 1, drawingNumber: 'PART-A', name: '已发布底板', revision: 'W1' },
+    { id: 'revision-b', sourceDocumentId: 'model-b', sequence: 2, drawingNumber: 'PART-B', name: '修改中的支架', revision: 'A-W2' },
+    { id: 'revision-first', sourceDocumentId: 'model-first', sequence: 3, drawingNumber: 'PART-FIRST', name: '首次设计件', revision: 'W7' },
+  ].map(item => ({ ...item, kind: 'NonStandard', quantity: 1, unit: '001', material: '钢', isComplete: true, source: 'Auto' }))
+  await page.route(new RegExp(`/api/projects/${projectId}/boms/NonStandard(?:\\?.*)?$`), route => route.fulfill({ json: rows }))
+  await page.route(`**/api/projects/${projectId}/release-packages`, route => route.fulfill({ json: [{
+    id: 'revision-release', number: 'RP-REVISION-A', state: 5, scope: 'NonStandardWithDrawing', createdAt: '2026-10-21T00:00:00Z', publishedAt: '2026-10-21T01:00:00Z',
+    standardBomSnapshot: [], nonStandardBomSnapshot: [rows[0]], electricalBomSnapshot: [], selectedBomItemIds: ['revision-a'], approvalTasks: [],
+    versionBindings: [{ documentId: 'doc-part', versionId: 'frozen-work', revision: 'W1', targetRevision: 'A', publish: true, requiresPromotion: true, sha256: 'hash' }],
+  }] }))
+  await page.goto('/')
+  await expect(page).toHaveTitle('UPTON-PLM')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await enterProject(page)
+  await page.getByRole('button', { name: 'BOM', exact: true }).click()
+  await page.getByRole('tab', { name: '非标件BOM' }).click()
+  const table = page.locator('.pdm-bom-table')
+  await expect(table.getByRole('columnheader', { name: '图纸版次', exact: true })).toBeVisible()
+  const first = table.locator('tbody tr').filter({ hasText: '已发布底板' })
+  await expect(first.locator('[title="已发布；存档版本：W1"]')).toHaveText('A')
+  await expect(table.locator('tbody tr').filter({ hasText: '修改中的支架' })).toContainText('B-D')
+  const pendingRevision = table.locator('[title="修订中；当前生产使用 A 版；存档版本：A-W2"]')
+  expect(await pendingRevision.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+  await expect(table.locator('tbody tr').filter({ hasText: '首次设计件' })).toContainText('A-D')
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  if (process.env.PDM_REVISION_SCREENSHOT_DIR) {
+    await page.screenshot({ path: join(process.env.PDM_REVISION_SCREENSHOT_DIR, 'drawing-revision-desktop.png'), fullPage: false })
+  }
+  await page.getByRole('tab', { name: '标准件BOM' }).click()
+  await page.getByRole('tab', { name: '非标件BOM' }).click()
+  await expect(first.locator('[title="已发布；存档版本：W1"]')).toHaveText('A')
+  await page.setViewportSize({ width: 1000, height: 900 })
+  await expect(table.locator('tbody tr').filter({ hasText: '修改中的支架' })).toContainText('B-D')
+  if (process.env.PDM_REVISION_SCREENSHOT_DIR) {
+    await page.screenshot({ path: join(process.env.PDM_REVISION_SCREENSHOT_DIR, 'drawing-revision-narrow.png'), fullPage: false })
+  }
+  expect(rows.map(item => item.revision)).toEqual(['W1', 'A-W2', 'W7'])
+  expect(errors).toEqual([])
+})
+
+test('nonstandard procurement uses manufacturing quantities, batches and exports on LAN HTTP',async({page})=>{
+  await mockPlanCompanionPanels(page)
+  await page.setViewportSize({width:1916,height:1080})
+  const errors:string[]=[],inventoryRequests:string[]=[],refreshRequests:string[]=[]
+  page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')errors.push(m.text())})
+  page.on('request',r=>{if(r.url().includes('/api/material-inventory'))inventoryRequests.push(r.url());if(r.url().includes('/procurement-tracking/refresh'))refreshRequests.push(r.url())})
+  const base={projectCode:'PRJ-REAL-001',materialCode:'02040001',materialName:'非标底板',specification:'BASE-42',quantity:10,bomKind:'非标件',releasePackageNumber:'RP-MFG-0001',purchaseRequisitionNumbers:[],purchaseRequisitionStatus:'',purchaseOrderNumbers:[],purchaseOrderStatus:'',purchaseQuantity:999,arrivedQuantity:999,requestedQuantity:null,approvedQuantity:null,warehouseMovements:[],details:[]}
+  const movement={id:'move',requestId:'req',lotId:'lot',kind:'QualityReceived',quantity:8,actor:'制造人员',occurredAt:'2026-10-21T10:00:00+08:00',note:'分批交检，待完成检验'}
+  const manufacturing={releasePackageId:'release',lineId:'line',revision:'A',publishedAt:'2026-10-20T10:00:00+08:00',receivedAt:'2026-10-21T09:00:00+08:00',status:'质检',assignedQuantity:10,submittedQuantity:8,qualifiedQuantity:5,issuedQuantity:2,responsible:'制造负责人',suppliers:'外协厂',requiredOn:'2026-10-24',forecastOn:'2026-10-26',qualifiedAt:'2026-10-21',issuedAt:'2026-10-21',batches:[{id:'batch-external',route:'External',quantity:10,status:'质检',supplier:'外协厂',assignee:'制造负责人',promisedOn:'2026-10-26',deliveredQuantity:10,submittedQuantity:8,qualifiedQuantity:5,issuedQuantity:2,history:[movement]}]}
+  const response:any={projectId,projectCode:'PRJ-REAL-001',hasPublishedBom:true,manufacturingReadAt:'2026-10-22T10:00:00+08:00',items:[{...base,sequence:1,manufacturing},{...base,sequence:2,quantity:2,manufacturing:{...manufacturing,lineId:'line-b',revision:'B',receivedAt:null,status:'待生产接收',assignedQuantity:0,submittedQuantity:0,qualifiedQuantity:0,issuedQuantity:0,responsible:null,suppliers:null,forecastOn:null,batches:[]}}]}
+  await page.route(`**/api/projects/${projectId}/procurement-tracking`,r=>r.fulfill({json:response}))
+  await page.route(`**/api/projects/${projectId}/export-metadata`,r=>r.fulfill({json:{title:'物料跟踪',company:'测试公司',scope:'当前项目',versionLabel:'版本',version:'测试',exportedAt:'2026-10-22T10:00:00+08:00',exportedBy:'测试人员',fields:[]}}))
+  await page.route('**/api/material-inventory?*',r=>r.fulfill({json:{items:[],total:0,lastSuccessfulRefreshAt:'2026-10-22T10:00:00+08:00',warehouseNames:[]}}))
+  await page.goto('/');expect(await page.title()).toBe('UPTON-PLM')
+  const login=page.getByLabel('登录PLM');await login.getByRole('textbox',{name:'账号'}).fill('engineer');await login.getByRole('textbox',{name:'密码'}).fill('correct-password');await login.getByRole('button',{name:'登录',exact:true}).click()
+  await enterProject(page);await page.getByRole('button',{name:'备料',exact:true}).click()
+  const panel=page.getByLabel('采购跟踪',{exact:true}),rows=panel.locator('.el-table__body tbody tr')
+  const expectOriginalHeaders=async()=>{
+    const headers=(await panel.locator('.el-table__header th').allTextContents()).map(label=>label.trim())
+    expect(headers).toEqual(expect.arrayContaining(['库存','请购状态','请购日期','PO','采购状态','采购员','购买数','到货数','入库日期','入库数','出库日期','出库数']))
+    expect(headers.some(label=>/[／/]/.test(label))).toBe(false)
+    await expect(panel.getByRole('button',{name:'筛选请购状态',exact:true})).toHaveText('全部请购状态')
+    await expect(panel.getByRole('button',{name:'筛选采购状态',exact:true})).toHaveText('全部采购状态')
+    await expect(panel.getByRole('button',{name:'筛选采购员',exact:true})).toHaveText('全部采购员')
+  }
+  const stats = panel.locator('.procurement-stats-card')
+  const statsLabels = ['齐套率','超期物料','交期不符','缺料风险','关键物料','待落实物料']
+  await expect(rows).toHaveCount(2);await expect(stats.locator('.procurement-stats-card__label')).toHaveText(statsLabels);await expect(panel).not.toContainText('无PO')
+  await expect(stats.first()).toContainText('0/2 项已齐套')
+  await expect(stats.last().locator('.procurement-stats-card__value')).toHaveText('1')
+  await expectOriginalHeaders()
+  await panel.getByRole('button',{name:'列设置',exact:true}).click()
+  const columnSettings=page.getByRole('dialog',{name:'采购跟踪列设置',exact:true})
+  await columnSettings.getByText('PR',{exact:true}).click()
+  await expect(columnSettings.getByRole('checkbox',{name:'PR',exact:true})).toBeChecked()
+  await columnSettings.getByRole('button',{name:'保存',exact:true}).click()
+  await expect(panel.getByRole('columnheader',{name:'PR',exact:true})).toBeVisible()
+  await expect(panel.getByRole('columnheader',{name:'PO',exact:true})).toBeVisible()
+  await expect(panel.getByRole('button',{name:'库存设置',exact:true})).toHaveCount(0)
+  const first=rows.first();await expect(first).toContainText('制造中心');await expect(first).not.toContainText('999')
+  expect(inventoryRequests).toEqual([])
+  await panel.getByRole('button',{name:'查看非标底板制造明细',exact:true}).first().click()
+  const drawer=page.getByRole('dialog',{name:'非标件制造明细',exact:true});await expect(drawer).toContainText('RP-MFG-0001');await expect(drawer).toContainText('外协厂');await expect(drawer).toContainText('分批交检，待完成检验')
+  await expect.poll(async()=>{const b=(await drawer.boundingBox())!;return b.x+b.width}).toBeLessThanOrEqual(1917)
+  await page.screenshot({path:join(tmpdir(),'pdm-procurement-manufacturing-batches.png'),fullPage:false})
+  await drawer.getByRole('button',{name:'关闭此对话框'}).click();await expect(drawer).not.toBeVisible()
+  const downloaded=page.waitForEvent('download');await panel.getByRole('button',{name:'导出 Excel',exact:true}).click();expect((await downloaded).suggestedFilename()).toMatch(/物料状态清单.*xlsx$/)
+  await panel.getByRole('button',{name:'立即刷新',exact:true}).click();expect(refreshRequests).toEqual([]);expect(inventoryRequests).toEqual([])
+  await page.screenshot({path:join(tmpdir(),'pdm-procurement-manufacturing.png'),fullPage:false})
+  await page.setViewportSize({width:1000,height:900});await expect(panel).toBeVisible();await panel.getByRole('button',{name:'查看非标底板制造明细',exact:true}).first().click();await expect(drawer).toContainText('外协厂');await expect.poll(async()=>{const b=(await drawer.boundingBox())!;return b.x+b.width}).toBeLessThanOrEqual(1001);await page.screenshot({path:join(tmpdir(),'pdm-procurement-manufacturing-narrow.png'),fullPage:false})
+  await drawer.getByRole('button',{name:'关闭此对话框'}).click();await expect(drawer).not.toBeVisible();await page.setViewportSize({width:1916,height:1080})
+  response.items.push({...base,sequence:3,bomKind:'标准件',materialName:'标准紧固件',quantity:2,purchaseOrderNumbers:['PO-STD'],purchaseRequisitionNumbers:['PR-STD'],purchaseRequisitionStatus:'已核准',purchaseOrderStatus:'执行中',purchaseQuantity:2,arrivedQuantity:1})
+  await panel.getByRole('button',{name:'立即刷新',exact:true}).click();await expect(rows).toHaveCount(3)
+  await expectOriginalHeaders()
+  await expect(stats.locator('.procurement-stats-card__label')).toHaveText(statsLabels);await expect(stats.first()).toContainText('0/3 项已齐套');await expect(rows.last()).toContainText('PO-STD');await expect(rows.last()).toContainText('U9C')
+  await expect.poll(()=>inventoryRequests.length).toBeGreaterThan(0)
+  await page.screenshot({path:join(tmpdir(),'pdm-procurement-mixed-sources.png'),fullPage:false})
+  await panel.getByLabel('筛选物料分类').selectOption('标准件');await expect(rows).toHaveCount(1);await expectOriginalHeaders()
+  await expect(stats.locator('.procurement-stats-card__label')).toHaveText(statsLabels);await expect(stats.first()).toContainText('0/1 项已齐套')
+  await panel.getByLabel('筛选物料分类').selectOption('非标件');await expect(rows).toHaveCount(2);await expectOriginalHeaders()
+  await expect(stats.locator('.procurement-stats-card__label')).toHaveText(statsLabels);await expect(stats.first()).toContainText('0/2 项已齐套')
+  await panel.getByRole('button',{name:'筛选采购状态',exact:true}).click();await page.locator('.procurement-tracking__multi-options:visible').getByRole('checkbox',{name:'待生产接收',exact:true}).check();await expect(rows).toHaveCount(1);await expect(rows).toContainText('B')
+  expect(errors).toEqual([]);await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+})
+
+test('work hours organization tree scopes personnel, charts and completeness on LAN HTTP',async({page})=>{
+  await mockPlanCompanionPanels(page)
+  await page.clock.setFixedTime(new Date('2026-10-21T02:00:00Z'))
+  await page.setViewportSize({width:1916,height:1080})
+  const errors:string[]=[]
+  page.on('pageerror',error=>errors.push(error.message))
+  page.on('console',message=>{if((message.type()==='error'||message.type()==='warning')&&!/Component "El(Drawer|Dialog)" has already been registered/.test(message.text()))errors.push(message.text())})
+  const project={id:'hours-root',code:'P700012',name:'装配设备',rootProjectId:'hours-root',rootProjectCode:'P700012',rootProjectName:'装配设备'}
+  const people=[{username:'a',displayName:'员工甲',department:'机械组',departmentId:'t2-mech',isActive:true},{username:'b',displayName:'员工乙',department:'电气组',departmentId:'t2-elec',isActive:true},{username:'c',displayName:'员工丙',department:'机械组',departmentId:'t3-mech',isActive:true}]
+  const value:WorkHoursView={today:'2026-10-21',startDate:'2026-10-20',username:'admin',displayName:'系统管理员',scope:'当前公司',people,projects:[project],defaultDepartmentId:'t2-mech',organizationUnits:[
+    {id:'t2',parentUnitId:null,name:'T2事业部',sortOrder:1,isActive:true},{id:'t2-mech',parentUnitId:'t2',name:'机械组',sortOrder:1,isActive:true},{id:'t2-elec',parentUnitId:'t2',name:'电气组',sortOrder:2,isActive:true},
+    {id:'t3',parentUnitId:null,name:'T3事业部',sortOrder:2,isActive:true},{id:'t3-mech',parentUnitId:'t3',name:'机械组',sortOrder:1,isActive:true}],
+    sheets:people.map((p,i)=>({companyId:'org-ks',username:p.username,month:'2026-10',rowVersion:1,history:[],entries:[{...project,id:`entry-${i}`,projectId:project.id,projectCode:project.code,projectName:project.name,date:'2026-10-20',location:'厂内',hours:[8,4,6][i]!}]})),
+    compliance:people.map((p,i)=>({username:p.username,days:[{date:'2026-10-20',expected:8,actual:[8,4,6][i]!,status:i===0?'完整':'填写不完整',muted:false,reason:''}]}))}
+  await page.route('**/api/work-hours**',route=>route.fulfill({json:value}))
+  await page.goto('/')
+  expect(await page.title()).toBe('UPTON-PLM')
+  const login=page.getByLabel('登录PLM')
+  await login.getByRole('textbox',{name:'账号'}).fill('admin');await login.getByRole('textbox',{name:'密码'}).fill('correct-password');await login.getByRole('button',{name:'登录',exact:true}).click()
+  await page.locator('.pdm-sidebar').getByRole('button',{name:'工时管理',exact:true}).click()
+  const panel=page.getByRole('region',{name:'工时管理',exact:true})
+  await panel.getByRole('button',{name:'汇总工时',exact:true}).click()
+  const department=panel.getByRole('combobox',{name:'汇总部门',exact:true}),staff=panel.getByLabel('汇总人员',{exact:true})
+  await expect(staff.locator('option')).toHaveText(['全部','员工甲'])
+  await expect(panel.locator('.wh-toolbar')).toHaveCount(0)
+  const bottom=panel.locator('.wh-report-bottom'),left=bottom.getByRole('region',{name:'人员填报完整性',exact:true}),right=bottom.getByRole('region',{name:'工时统计列表',exact:true})
+  const [lb,rb,dc,pc]=await Promise.all([left.boundingBox(),right.boundingBox(),panel.locator('.wh-charts>section').nth(0).boundingBox(),panel.locator('.wh-charts>section').nth(1).boundingBox()])
+  expect(Math.abs(lb!.width-rb!.width)).toBeLessThan(1);expect(lb!.height).toBe(rb!.height);expect(lb!.y).toBe(rb!.y);expect(rb!.x).toBeGreaterThan(lb!.x)
+  expect(Math.abs(dc!.width-pc!.width)).toBeLessThan(1);expect(dc!.height).toBe(pc!.height);expect(dc!.y).toBe(pc!.y)
+  await expect(left).not.toContainText('暂停提醒仍显示缺填');await expect(left).not.toContainText('自动提醒在北京时间9点后检查')
+  await expect(right.getByRole('button',{name:'导出Excel',exact:true})).toBeVisible()
+  await department.click()
+  const tree=page.getByRole('tree')
+  const t2=tree.getByRole('treeitem').filter({has:page.getByRole('option',{name:'T2事业部',exact:true})}).first()
+  if(await t2.getAttribute('aria-expanded')==='true')await t2.locator(':scope > .el-tree-node__content > .el-tree-node__expand-icon').click()
+  await t2.locator(':scope > .el-tree-node__content > .el-tree-node__expand-icon').click()
+  await expect(t2.getByText('机械组',{exact:true})).toBeVisible()
+  await expect(t2.getByText('电气组',{exact:true})).toBeVisible()
+  await expect.poll(async()=> (await t2.boundingBox())!.height).toBeGreaterThan(70)
+  await page.screenshot({path:join(tmpdir(),'pdm-work-hours-organization-tree.png'),fullPage:false})
+  await t2.getByText('T2事业部',{exact:true}).click()
+  await expect(staff.locator('option')).toHaveText(['全部','员工甲','员工乙'])
+  await expect(panel.locator('.wh-report-summary').locator('b').first()).toHaveText('12')
+  await staff.selectOption('b')
+  await expect(panel.locator('.wh-report-summary').locator('b').first()).toHaveText('4')
+  await department.click();await tree.getByText('T3事业部',{exact:true}).click()
+  await expect(staff).toHaveValue('')
+  await expect(staff.locator('option')).toHaveText(['全部','员工丙'])
+  await expect(panel.locator('.wh-report-summary').locator('b').first()).toHaveText('6')
+  await expect(panel.locator('.wh-report-table tbody')).toContainText('员工丙')
+  await expect(panel.locator('.wh-report-table tbody')).not.toContainText('员工甲')
+  await expect(panel.getByRole('region',{name:'人员填报完整性'}).locator('tbody')).toContainText('员工丙')
+  await expect(panel.getByRole('region',{name:'人员填报完整性'}).locator('tbody')).not.toContainText('员工乙')
+  await expect(panel.getByRole('img',{name:'按日期显示厂内、厂外工时'})).toContainText('6')
+  const projectBars=panel.getByRole('group',{name:'按项目显示厂内、厂外工时',exact:true})
+  await expect(projectBars.locator('button')).toHaveCount(1);await expect(projectBars).toContainText('6')
+  await projectBars.getByRole('button',{name:'查看P700012项目工时明细',exact:true}).click()
+  const projectDetail=page.getByRole('dialog',{name:'P700012 · 装配设备',exact:true});await expect(projectDetail).toContainText('员工丙');await projectDetail.getByRole('button',{name:'关闭此对话框'}).click();await expect(projectDetail).not.toBeVisible()
+  await right.getByRole('button',{name:'按项目',exact:true}).click();await expect(right.locator('tbody')).toContainText('6小时')
+  await right.getByRole('button',{name:'填报明细',exact:true}).click();await expect(right.locator('thead')).toContainText('日期');await expect(right.locator('tbody')).toContainText('装配设备')
+  await right.getByRole('button',{name:'按人员',exact:true}).click();await expect(right.locator('tbody')).toContainText('员工丙')
+  const download=page.waitForEvent('download');await panel.getByRole('button',{name:'导出Excel',exact:true}).click();expect((await download).suggestedFilename()).toMatch(/工时汇总.*\.xlsx$/)
+  await page.screenshot({path:join(tmpdir(),'pdm-work-hours-organization-filtered.png'),fullPage:false})
+  await department.hover();await panel.locator('.el-select__clear').click()
+  await expect(staff.locator('option')).toHaveText(['全部','员工甲','员工乙','员工丙'])
+  await expect(panel.locator('.wh-report-summary').locator('b').first()).toHaveText('18')
+  await page.setViewportSize({width:1000,height:900})
+  await expect(department).toBeVisible();await department.click();await tree.getByText('T3事业部',{exact:true}).click()
+  await expect(staff.locator('option')).toHaveText(['全部','员工丙'])
+  await expect(tree).not.toBeVisible()
+  await page.screenshot({path:join(tmpdir(),'pdm-work-hours-organization-narrow.png'),fullPage:false})
+  const [narrowLeft,narrowRight]=await Promise.all([left.boundingBox(),right.boundingBox()]);expect(narrowLeft!.width).toBe(narrowRight!.width);expect(narrowLeft!.height).toBe(narrowRight!.height);expect(narrowRight!.y).toBeGreaterThanOrEqual(narrowLeft!.y+narrowLeft!.height)
+  await panel.getByLabel('汇总所在地',{exact:true}).selectOption('厂外');await expect(panel.locator('.wh-project-empty')).toHaveText('当前范围暂无工时记录');await expect(right.locator('.wh-empty')).toContainText('没有填报记录');await expect(left).toContainText('员工丙')
+  expect(errors).toEqual([]);await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+})
+
+test('work hours settings, completeness, mute and audited correction work on LAN HTTP', async ({ page }) => {
+  test.setTimeout(90_000)
+  await mockPlanCompanionPanels(page)
+  await page.clock.setFixedTime(new Date('2026-10-21T02:00:00Z'))
+  await page.setViewportSize({width:1916,height:1080})
+  const errors: string[] = [], writes: Array<{path:string;input:any}> = []
+  page.on('pageerror',error=>errors.push(error.message))
+  page.on('console',message=>{if(message.type()==='error')errors.push(message.text())})
+  const person={username:'hours-worker',displayName:'员工甲',department:'设计部',isActive:true}
+  const project={id:'hours-child',code:'P700012-1',name:'上料单元',rootProjectId:'hours-root',rootProjectCode:'P700012',rootProjectName:'装配设备'}
+  const entry={...project,id:'hours-entry',projectId:project.id,projectCode:project.code,projectName:project.name,date:'2026-10-20',location:'厂内',hours:4}
+  const value:WorkHoursView={today:'2026-10-21',startDate:'2026-10-20',username:'admin',displayName:'系统管理员',scope:'当前公司',people:[person,{username:'test',displayName:'测试账号',department:'设计部',isActive:true}],projects:[project],sheets:[{companyId:'org-ks',username:person.username,month:'2026-10',rowVersion:1,entries:[entry],history:[]}],canManage:true,manageableUsernames:[person.username],defaultDepartment:'设计部',compliance:[{username:person.username,days:[{date:'2026-10-20',expected:8,actual:4,status:'填写不完整',muted:false,reason:''}]}]}
+  const settings:WorkHoursManagement={today:value.today,rowVersion:1,canAuthorize:true,scope:'当前公司',people:value.people,units:[{id:'unit-design',name:'设计部'}],assistants:[{username:'assistant',displayName:'技术助理',department:'设计部',isActive:true}],requirements:[{id:'requirement',username:person.username,from:'2026-10-20',to:null,hours:8}],exceptions:[],grants:[],history:[]}
+  settings.departmentGroups=[{id:'unit-design',name:'设计部',participating:true,people:[{...person,required:true,canEdit:false}]},{id:'unit-assembly',name:'装配部',participating:true,people:[{username:'assembly-worker',displayName:'员工乙',department:'装配组',isActive:true,required:false,canEdit:false}]}]
+  await page.route('**/api/work-hours**',async route=>{
+    const request=route.request(),path=new URL(request.url()).pathname
+    if(request.method()!=='GET'){
+      const input=request.postDataJSON();writes.push({path,input})
+      if(path.endsWith('/settings')){settings.rowVersion++;for(const change of input.departments){settings.departmentGroups!.find(g=>g.id===change.unitId)!.participating=change.participating}return route.fulfill({json:settings})}
+      if(path.endsWith('/requirements')){settings.rowVersion++;settings.requirements[0]!.to='2026-10-20';settings.requirements.push({id:'new',username:person.username,from:input.from,to:input.to,hours:input.hours});return route.fulfill({json:settings})}
+      if(path.endsWith('/exceptions')){settings.rowVersion++;settings.exceptions.push({...input,id:'exception'});const day=value.compliance![0]!.days[0]!;day.muted=true;day.reason=`暂停提醒：${input.reason}`;return route.fulfill({json:settings})}
+      if(path.endsWith('/correction')){const sheet=value.sheets[0]!;sheet.history.push({id:'rev',at:'2026-10-21T02:00:00Z',actor:'admin',dates:['2026-10-20'],before:[{...entry}],after:[{...entry,hours:8}],reason:input.reason});entry.hours=8;sheet.rowVersion++;Object.assign(value.compliance![0]!.days[0]!,{actual:8,status:'完整'});return route.fulfill({status:204})}
+      if(path.endsWith('/remind'))return route.fulfill({json:{sent:1,skipped:0}})
+    }
+    if(path.endsWith('/correction'))return route.fulfill({json:{sheet:value.sheets[0],projects:[project]}})
+    if(path.includes('/settings'))return route.fulfill({json:settings})
+    return route.fulfill({json:value})
+  })
+  await page.goto('/')
+  expect(await page.title()).toBe('UPTON-PLM')
+  const login=page.getByLabel('登录PLM')
+  const loginResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/auth/login')
+  await login.getByRole('textbox',{name:'账号'}).fill('admin');await login.getByRole('textbox',{name:'密码'}).fill('correct-password');await login.getByRole('button',{name:'登录',exact:true}).click()
+  const loginSession = await (await loginResponse).json()
+  await page.route('**/api/auth/resume', route => route.fulfill({json:loginSession}))
+  await page.locator('.pdm-sidebar').getByRole('button',{name:'工时管理',exact:true}).click()
+  const panel=page.getByRole('region',{name:'工时管理',exact:true})
+  await panel.getByRole('button',{name:'工时设置',exact:true}).click()
+  await expect(panel.getByRole('region',{name:'工时设置',exact:true})).toBeVisible()
+  await expect(panel.getByRole('region',{name:'设计部',exact:true})).toBeVisible()
+  await expect(panel.getByRole('region',{name:'装配部',exact:true})).toBeVisible()
+  await expect(panel.getByRole('checkbox',{name:'设计部员工甲需要填报',exact:true})).toBeDisabled()
+  await panel.getByRole('checkbox',{name:'设计部参与工时',exact:true}).uncheck()
+  await panel.getByRole('button',{name:'保存设置',exact:true}).click()
+  await expect.poll(()=>writes.filter(x=>x.path.endsWith('/settings')).length).toBe(1)
+  expect(writes[0]!.input).toMatchObject({companyId:'org-ks',rowVersion:1,departments:[{unitId:'unit-design',participating:false}],people:[]})
+  await panel.getByRole('checkbox',{name:'设计部参与工时',exact:true}).check()
+  await panel.getByRole('button',{name:'保存设置',exact:true}).click()
+  await expect.poll(()=>writes.filter(x=>x.path.endsWith('/settings')).length).toBe(2)
+  await page.reload()
+  await expect(panel.getByRole('button',{name:'工时设置',exact:true})).toHaveClass(/active/)
+  await expect(panel.getByRole('checkbox',{name:'设计部员工甲需要填报',exact:true})).toBeChecked()
+  await page.screenshot({path:join(tmpdir(),'pdm-work-hours-settings.png'),fullPage:false})
+  await panel.getByRole('button',{name:'汇总工时',exact:true}).click()
+  const checks=panel.getByRole('region',{name:'人员填报完整性'})
+  await expect(checks.locator('tbody')).toContainText('员工甲')
+  await expect(checks.locator('tbody')).not.toContainText('测试账号')
+  await expect(checks.locator('tbody')).toContainText('1天待处理')
+  await panel.getByLabel('汇总所在地',{exact:true}).selectOption('厂外')
+  await expect(checks.locator('tbody')).toContainText('1天待处理')
+  await page.screenshot({path:join(tmpdir(),'pdm-work-hours-completeness.png'),fullPage:false})
+  await checks.getByRole('button',{name:'逐日检查',exact:true}).click()
+  const drawer=page.getByRole('dialog',{name:'员工甲 · 逐日填报检查'})
+  await drawer.getByRole('button',{name:'调整应填／暂停提醒',exact:true}).click()
+  const special=page.getByRole('dialog',{name:'特殊情况处理',exact:true})
+  await special.getByLabel('特殊处理方式').selectOption('mute');await special.getByLabel('特殊处理原因').fill('特殊情况暂缓提醒')
+  await special.getByRole('button',{name:'保存特殊处理'}).click()
+  await expect(special).not.toBeVisible()
+  await expect(checks.locator('tbody')).toContainText('已暂停提醒')
+  await expect(drawer.locator('tbody')).toContainText('填写不完整')
+  await drawer.getByRole('button',{name:'代更正实际工时'}).click()
+  const correction=page.getByRole('dialog',{name:'员工甲 · 2026-10-20 · 代更正工时',exact:true})
+  await correction.getByLabel('代更正小时').fill('8');await correction.getByLabel('代更正原因').fill('核对项目投入后补正')
+  await correction.getByRole('button',{name:'保存代更正'}).click()
+  await expect(correction).not.toBeVisible();await expect(drawer.locator('tbody')).toContainText('完整')
+  expect(writes.find(x=>x.path.endsWith('/correction'))!.input).toMatchObject({username:'hours-worker',reason:'核对项目投入后补正',sheet:{versions:[{month:'2026-10',rowVersion:1}],entries:[{date:'2026-10-20',projectId:'hours-child',location:'厂内',hours:8}]}})
+  await drawer.getByRole('button',{name:'代更正实际工时'}).click()
+  await correction.locator('.wh-check-history>summary').click()
+  await correction.locator('.wh-check-history details>summary').click()
+  await expect(correction).toContainText('修改前');await expect(correction).toContainText('4小时');await expect(correction).toContainText('8小时')
+  await page.screenshot({path:join(tmpdir(),'pdm-work-hours-correction-history.png'),fullPage:false})
+  await correction.getByRole('button',{name:'关闭此对话框'}).click();await drawer.getByRole('button',{name:'关闭此对话框'}).click();await expect(drawer).not.toBeVisible()
+  await page.setViewportSize({width:1000,height:900})
+  await expect(checks).toBeVisible();await page.screenshot({path:join(tmpdir(),'pdm-work-hours-completeness-narrow.png'),fullPage:false})
+  expect(await page.locator('vite-error-overlay').count()).toBe(0);expect(errors).toEqual([])
+})
+
+test('work hours assistant edits several department rosters together on one page',async({page})=>{
+  await mockPlanCompanionPanels(page)
+  await page.setViewportSize({width:1916,height:1080})
+  const errors:string[]=[],saved:any[]=[]
+  page.on('pageerror',error=>errors.push(error.message))
+  page.on('console',message=>{if(message.type()==='error')errors.push(message.text())})
+  const view:WorkHoursView={today:'2026-10-21',startDate:'2026-10-20',username:'engineer',displayName:'部门助理',scope:'授权部门',people:[],projects:[],sheets:[],canManage:false,canManageSettings:true}
+  const settings:WorkHoursManagement={today:view.today,rowVersion:2,canAuthorize:false,scope:'授权部门',people:[],units:[],assistants:[],requirements:[],exceptions:[],grants:[],history:[],departmentGroups:[
+    {id:'t2',name:'T2事业部',participating:true,people:[{username:'a',displayName:'员工甲',department:'T2机械组',isActive:true,required:true,canEdit:true},{username:'b',displayName:'员工乙',department:'T2电气组',isActive:true,required:false,canEdit:true}]},
+    {id:'t3',name:'T3事业部',participating:true,people:[{username:'c',displayName:'员工丙',department:'T3项目组',isActive:true,required:false,canEdit:true}]},
+    {id:'production',name:'生产部',participating:true,people:[{username:'d',displayName:'员工丁',department:'装配组',isActive:true,required:false,canEdit:false}]}
+  ]}
+  await page.route('**/api/work-hours**',async route=>{
+    const path=new URL(route.request().url()).pathname
+    if(path.endsWith('/settings')&&route.request().method()==='PUT'){
+      const input=route.request().postDataJSON();saved.push(input);settings.rowVersion++
+      for(const group of settings.departmentGroups!)for(const person of group.people){const change=input.people.find((x:any)=>x.username===person.username);if(change)person.required=change.required}
+      return route.fulfill({json:settings})
+    }
+    return route.fulfill({json:path.endsWith('/settings')?settings:view})
+  })
+  await page.goto('/')
+  const login=page.getByLabel('登录PLM')
+  await login.getByRole('textbox',{name:'账号'}).fill('engineer');await login.getByRole('textbox',{name:'密码'}).fill('correct-password');await login.getByRole('button',{name:'登录',exact:true}).click()
+  await page.locator('.pdm-sidebar').getByRole('button',{name:'工时管理',exact:true}).click()
+  const panel=page.getByRole('region',{name:'工时管理',exact:true})
+  await panel.getByRole('button',{name:'工时设置',exact:true}).click()
+  await expect(panel.getByRole('checkbox',{name:'T2事业部参与工时',exact:true})).toBeDisabled()
+  await expect(panel.getByRole('checkbox',{name:'生产部员工丁需要填报',exact:true})).toBeDisabled()
+  await panel.getByRole('checkbox',{name:'T2事业部员工乙需要填报',exact:true}).check()
+  await panel.getByRole('checkbox',{name:'T3事业部员工丙需要填报',exact:true}).check()
+  await panel.getByRole('button',{name:'T2事业部',exact:true}).click()
+  await expect(panel.getByRole('checkbox',{name:'T3事业部员工丙需要填报',exact:true})).toBeVisible()
+  await panel.getByRole('button',{name:'汇总工时',exact:true}).click()
+  await expect(panel.getByRole('button',{name:'工时设置',exact:true})).toHaveClass(/active/)
+  await panel.getByRole('button',{name:'T2事业部',exact:true}).click()
+  await panel.getByRole('button',{name:'保存设置',exact:true}).click()
+  await expect.poll(()=>saved.length).toBe(1)
+  expect(saved[0]).toEqual({companyId:'org-ks',rowVersion:2,departments:[],people:[{username:'b',required:true},{username:'c',required:true}]})
+  await expect(panel.getByRole('button',{name:'保存设置',exact:true})).toBeDisabled()
+  await page.screenshot({path:join(tmpdir(),'pdm-work-hours-groups-assistant.png'),fullPage:false})
+  await page.setViewportSize({width:1000,height:900})
+  await expect(panel.getByRole('checkbox',{name:'T2事业部员工乙需要填报',exact:true})).toBeVisible()
+  await expect(panel.getByRole('checkbox',{name:'T3事业部员工丙需要填报',exact:true})).toBeVisible()
+  await page.screenshot({path:join(tmpdir(),'pdm-work-hours-groups-narrow.png'),fullPage:false})
+  expect(errors).toEqual([]);await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+})
+
+test('refresh restores navigation, internal tabs and native and Element Plus column widths', async ({ page }) => {
+  test.setTimeout(90_000)
+  await mockPlanCompanionPanels(page)
+  await page.setViewportSize({ width: 1916, height: 1080 })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  const hours: WorkHoursView = { today: '2026-10-20', startDate: '2026-10-20', username: 'admin', displayName: '系统管理员', scope: '当前公司', people: [{ username: 'admin', displayName: '系统管理员', department: '设计部', isActive: true }], projects: [], sheets: [] }
+  await page.route('**/api/work-hours**', route => route.fulfill({ json: hours }))
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  const sidebar = page.locator('.pdm-sidebar')
+  async function resize(header: ReturnType<Page['locator']>, delta = 45) {
+    await header.scrollIntoViewIfNeeded()
+    const before = (await header.boundingBox())!
+    await page.mouse.move(before.x + before.width - 2, before.y + before.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(before.x + before.width - 2 + delta, before.y + before.height / 2, { steps: 5 })
+    await page.mouse.up()
+    await expect.poll(async () => (await header.boundingBox())!.width - before.width).toBeGreaterThan(20)
+    return (await header.boundingBox())!.width
+  }
+  async function sameWidth(header: ReturnType<Page['locator']>, width: number) {
+    await expect.poll(async () => Math.abs((await header.boundingBox())!.width - width)).toBeLessThan(2)
+  }
+  await sidebar.getByRole('button', { name: '项目总览', exact: true }).click()
+  await page.locator('.pdm-navigation-tabs').getByRole('tab', { name: '项目列表', exact: true }).click()
+  const projectHeader = page.locator('[data-navigation-page="projects"] .pdm-project-table thead th').nth(1)
+  const projectWidth = await resize(projectHeader)
+  await page.reload()
+  await expect(page.locator('[data-navigation-page="projects"]')).toBeVisible()
+  await sameWidth(projectHeader, projectWidth)
+  await page.screenshot({ path: join(tmpdir(),'pdm-refresh-project-columns.png'), fullPage: false })
+  await sidebar.getByRole('button', { name: '工时管理', exact: true }).click()
+  const panel = page.getByRole('region', { name: '工时管理', exact: true })
+  await panel.getByRole('button', { name: '汇总工时', exact: true }).click()
+  await panel.getByRole('button', { name: '填报明细', exact: true }).click()
+  const hoursHeader = panel.locator('.wh-report-table thead th').nth(2)
+  const hoursWidth = await resize(hoursHeader)
+  await page.reload()
+  await expect(panel.getByRole('button', { name: '汇总工时', exact: true })).toHaveClass(/active/)
+  await expect(panel.getByRole('button', { name: '填报明细', exact: true })).toHaveClass(/active/)
+  await sameWidth(hoursHeader, hoursWidth)
+  await page.screenshot({ path: join(tmpdir(),'pdm-refresh-hours-columns.png'), fullPage: false })
+  await sidebar.getByRole('button', { name: '料品管理', exact: true }).click()
+  const materialHeader = page.locator('[data-navigation-page="materials"] .material-table .el-table__header th').nth(2)
+  const materialWidth = await resize(materialHeader, 60)
+  await page.reload()
+  await expect(page.locator('[data-navigation-page="materials"]')).toBeVisible()
+  await sameWidth(materialHeader, materialWidth)
+  await page.screenshot({ path: join(tmpdir(),'pdm-refresh-material-columns.png'), fullPage: false })
+  await sidebar.getByRole('button', { name: '项目中心', exact: true }).click()
+  await page.locator('.pdm-project-tabs').getByRole('button', { name: 'BOM', exact: true }).click()
+  await page.reload()
+  await expect(page.locator('.pdm-project-tabs').getByRole('button', { name: 'BOM', exact: true })).toHaveClass(/is-active/)
+  expect(await page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith('upton-pdm-column-widths:v1:')).length)).toBeGreaterThanOrEqual(3)
+  expect(errors).toEqual([])
+})
 
 test('work hours calendar, weekly entry and reports preserve data and export on LAN HTTP', async ({ page }) => {
   const longProjectName = '上料单元及自动化装配检测设备现场安装调试项目名称'
@@ -70,6 +730,9 @@ test('work hours calendar, weekly entry and reports preserve data and export on 
   await expect(panel.locator('.wh-week-table tfoot')).toContainText('14')
   await page.screenshot({ path: join(tmpdir(), 'pdm-work-hours-week.png'), fullPage: false })
   await panel.getByRole('button', { name: '汇总工时', exact: true }).click()
+  await expect(panel.getByLabel('汇总结束日期')).toHaveValue('2026-10-19')
+  await panel.getByLabel('汇总结束日期').fill('2026-10-20')
+  await panel.getByRole('button', { name: '查询', exact: true }).click()
   await expect(panel.locator('.wh-report-summary')).toContainText('14 小时')
   await panel.getByRole('button', { name: '按项目', exact: true }).click()
   await expect(panel.locator('.wh-report-table tbody')).toContainText('P700012')
@@ -88,6 +751,108 @@ test('work hours calendar, weekly entry and reports preserve data and export on 
   expect(errors).toEqual([])
 })
 
+test('standard library shows nonempty asset icons and previews attachments before downloading', async ({ page }) => {
+  await mockPlanCompanionPanels(page)
+  const errors: string[] = [], downloads: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  page.on('download', download => downloads.push(download.suggestedFilename()))
+  const material = { id: 'asset-material', materialCode: '01021000205', name: '真空发生器', specification: 'EZH10DLA-06-06-08N', brand: '亿太诺', kind: 'Standard', supplyMode: 'Purchase', unitCode: '001', model3DAttachmentCount: 2, documentAttachmentCount: 3, referenceCount: 0 }
+  await page.route('**/api/material-categories?*', route => route.fulfill({ json: [] }))
+  await page.route('**/api/standard-library/categories*', route => route.fulfill({ json: [] }))
+  await page.route('**/api/standard-library/materials?*', route => route.fulfill({ json: { items: [{ material, categories: [], coverImage: null }, { material: { ...material, id: 'empty-material', materialCode: '01021000206', name: '暂无附件物料', model3DAttachmentCount: 0, documentAttachmentCount: 0 }, categories: [], coverImage: null }], total: 2, page: 1, pageSize: 50 } }))
+  const attachments = [{ id: 'manual', materialId: material.id, kind: 'Document', originalFileName: '产品说明.pdf', uploadedBy: '工程师' }, { id: 'photo', materialId: material.id, kind: 'Document', originalFileName: '产品外观.png', uploadedBy: '工程师' }, { id: 'word', materialId: material.id, kind: 'Document', originalFileName: '说明.docx', uploadedBy: '工程师' }]
+  await page.route('**/api/materials/asset-material/attachments?*', route => route.fulfill({ json: attachments }))
+  const pdfStream = 'BT /F1 20 Tf 50 250 Td (Product Manual / Preview) Tj ET\n50 80 400 100 re S\n'
+  const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 500 350] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>', `<< /Length ${Buffer.byteLength(pdfStream)} >>\nstream\n${pdfStream}endstream`, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>']
+  let pdf = '%PDF-1.4\n'; const offsets = [0]
+  objects.forEach((object, index) => { offsets.push(Buffer.byteLength(pdf)); pdf += `${index + 1} 0 obj\n${object}\nendobj\n` })
+  const xref = Buffer.byteLength(pdf)
+  pdf += `xref\n0 6\n0000000000 65535 f \n${offsets.slice(1).map(offset => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`
+  await page.route('**/api/materials/asset-material/attachments/*/file', route => route.request().url().includes('/manual/') ? route.fulfill({ contentType: 'application/pdf', body: Buffer.from(pdf) }) : route.fulfill({ contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=', 'base64') }))
+  await page.goto('/', { waitUntil: 'domcontentloaded' }); await expect(page).toHaveTitle(/PLM|UPLM|PDM/)
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin'); await login.getByRole('textbox', { name: '密码' }).fill('correct-password'); await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.locator('.pdm-sidebar').getByRole('button', { name: '标准物料', exact: true }).click()
+  const library = page.getByRole('region', { name: '标准库', exact: true }), rows = library.locator('.material-list-table .el-table__body tbody tr')
+  await expect(rows).toHaveCount(2)
+  await expect(rows.first().getByRole('button', { name: '01021000205 · 2 个3D文件', exact: true })).toBeVisible()
+  await expect(rows.last().locator('td').nth(8)).toHaveText(''); await expect(rows.last().locator('td').nth(9)).toHaveText('')
+  const screenshotRoot = process.env.PDM_STANDARD_LIBRARY_SCREENSHOTS || tmpdir()
+  await page.screenshot({ path: join(screenshotRoot, 'standard-library-asset-icons.png'), fullPage: false })
+  await library.getByRole('button', { name: '01021000205 · 3 份资料', exact: true }).click()
+  const list = page.getByRole('dialog', { name: '01021000205 · 资料', exact: true }), pdfRow = list.getByRole('row').filter({ hasText: '产品说明.pdf' })
+  await expect(list.getByRole('row').filter({ hasText: '说明.docx' }).getByRole('button', { name: '预览', exact: true })).toBeDisabled()
+  await pdfRow.getByRole('button', { name: '预览', exact: true }).click()
+  const preview = page.getByRole('dialog', { name: '产品说明.pdf', exact: true })
+  await expect(preview.locator('canvas')).toBeVisible(); expect(downloads).toEqual([])
+  await page.screenshot({ path: join(screenshotRoot, 'standard-library-attachment-pdf.png'), fullPage: false })
+  await page.setViewportSize({ width: 1000, height: 900 }); await expect(preview.locator('canvas')).toBeVisible()
+  const box = (await preview.boundingBox())!; expect(box.x + box.width).toBeLessThanOrEqual(1001)
+  await preview.getByRole('button', { name: '关闭此对话框', exact: true }).click(); await expect(preview).toBeHidden()
+  await list.getByRole('row').filter({ hasText: '产品外观.png' }).getByRole('button', { name: '预览', exact: true }).click()
+  const imagePreview = page.getByRole('dialog', { name: '产品外观.png', exact: true }); await expect(imagePreview.getByRole('img', { name: '产品外观.png', exact: true })).toBeVisible()
+  await expect.poll(() => imagePreview.getByRole('img', { name: '产品外观.png', exact: true }).evaluate(image => (image as HTMLImageElement).naturalWidth)).toBe(1)
+  await imagePreview.getByRole('button', { name: '关闭此对话框', exact: true }).click()
+  const download = page.waitForEvent('download'); await pdfRow.getByRole('button', { name: '下载', exact: true }).click(); expect((await download).suggestedFilename()).toBe('产品说明.pdf')
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0); expect(errors).toEqual([])
+})
+
+test('standard structure lifecycle preserves whole snapshots and prevents deleting referenced structures', async ({ page }) => {
+  await mockPlanCompanionPanels(page)
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message)); page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  await page.route('**/api/standard-library/**', route => route.fulfill({ json: route.request().url().includes('/materials') ? { items: [], total: 0, page: 1, pageSize: 50 } : [] }))
+  await page.route('**/api/browser-archives/capabilities*', route => route.fulfill({ json: { enabled: false, canArchive: false } }))
+  const root = { id: 'root', drawingNumber: 'D-01', name: '历史总装', fileName: 'main.SLDASM', kind: 'Assembly', fileKey: 'native', previewFileKey: null, embedded: false, quantity: 1, children: [{ id: 'inner', drawingNumber: 'D-02', name: '嵌入零件', fileName: 'inner.SLDPRT', kind: 'Part', fileKey: null, previewFileKey: null, embedded: true, quantity: 1, children: [] }] }
+  const revision = { id: 'rev-one', version: 1, archivedAt: '2026-10-20T01:00:00Z', archivedBy: 'std', root, files: [], bom: [{ id: 'line', kind: 'Standard', drawingNumber: 'P-01', name: '气缸', quantity: 1, unit: '个', revision: 'A' }] }
+  const catalog = { companyId: 'org-ks', rowVersion: 1, storageRoot: 'D:/Standard', categories: [{ id: 'category', name: '批量分类', parentId: null, sortOrder: 1, isActive: true }], structures: [
+    { id: 'unused', code: 'UPST-1-0001', name: '未引用总装', categoryId: 'category', isActive: true, deletedAt: null as string | null, revisions: [revision, { ...revision, id: 'rev-two', version: 2 }] },
+    { id: 'used', code: 'UPST-1-0002', name: '已引用总装', categoryId: 'category', isActive: true, deletedAt: null as string | null, revisions: [{ ...revision, id: 'rev-used' }] },
+  ] }
+  const snapshots = JSON.stringify(catalog.structures.map(s => s.revisions)), actions: string[] = []
+  await page.route('**/api/standard-structures**', async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/references')) return route.fulfill({ json: path.includes('/used/') ? [{ projectId, projectCode: 'P700016', revisionId: 'rev-used', version: 1, kind: 'Standard', quantity: 2, actor: '工程师', referencedAt: '2026-10-21T01:00:00Z', pending: false }] : [] })
+    if (path.endsWith('/state')) {
+      const input = route.request().postDataJSON(); expect(input.expectedRowVersion).toBe(catalog.rowVersion)
+      const item = catalog.structures.find(s => path.includes(`/${s.id}/`))!; actions.push(input.action)
+      if (input.action === 'Disable') item.isActive = false
+      if (input.action === 'Enable') item.isActive = true
+      if (input.action === 'Delete') item.deletedAt = '2026-10-23T09:00:00Z'
+      if (input.action === 'Restore') item.deletedAt = null
+      catalog.rowVersion++; return route.fulfill({ json: catalog })
+    }
+    if (route.request().method() === 'PUT') { catalog.categories[0]!.isActive = route.request().postDataJSON().isActive; catalog.rowVersion++; return route.fulfill({ json: catalog }) }
+    return route.fulfill({ json: { catalog, canManage: true, canArchive: true, canConfigureStorage: true } })
+  })
+  await page.goto('/', { waitUntil: 'domcontentloaded' }); await expect(page).toHaveTitle(/PLM|UPLM|PDM/)
+  const login = page.getByLabel('登录PLM'); await login.getByRole('textbox', { name: '账号' }).fill('admin'); await login.getByRole('textbox', { name: '密码' }).fill('correct-password'); await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.locator('.pdm-sidebar').getByRole('button', { name: '标准物料', exact: true }).click(); await page.locator('.pdm-navigation-tabs').getByRole('tab', { name: '标准结构', exact: true }).click()
+  const workspace = page.getByRole('region', { name: '标准结构', exact: true }), filter = workspace.getByLabel('标准结构状态', { exact: true })
+  await expect(workspace.locator('.standard-structure__properties')).toContainText('UPST-1-0001-V02')
+  for (const [button, confirmation, state] of [['停用', '确认停用', 'inactive'], ['删除', '确认移入回收站', 'deleted'], ['恢复', '确认恢复', 'inactive'], ['启用', '确认启用', 'active']]) {
+    await workspace.getByRole('button', { name: button, exact: true }).click(); await page.getByRole('button', { name: confirmation, exact: true }).click()
+    await expect(filter).toHaveValue(state!)
+    await expect(workspace.locator('.standard-structure__properties')).toContainText('UPST-1-0001-V02')
+    await expect(workspace.getByLabel('标准结构版本', { exact: true })).toHaveValue('rev-two')
+    expect(JSON.stringify(catalog.structures.map(s => s.revisions))).toBe(snapshots)
+  }
+  expect(actions).toEqual(['Disable', 'Delete', 'Restore', 'Enable'])
+  await workspace.locator('.standard-structure__drawing-tree').getByText('UPST-1-0002-V01', { exact: true }).click()
+  await workspace.getByRole('button', { name: '删除', exact: true }).click()
+  const usage = page.getByRole('dialog', { name: 'UPST-1-0002 · 项目引用', exact: true }); await expect(usage).toContainText('P700016'); expect(actions).toHaveLength(4)
+  await usage.getByRole('button', { name: '关闭此对话框', exact: true }).click()
+  await workspace.locator('.standard-structure__categories').getByText('批量分类', { exact: true }).click()
+  await workspace.getByRole('button', { name: '停用分类', exact: true }).click(); await page.getByRole('button', { name: '确认停用', exact: true }).click(); await expect(filter).toHaveValue('inactive')
+  await workspace.getByRole('navigation', { name: '标准结构功能' }).getByRole('button', { name: 'BOM', exact: true }).click(); await expect(workspace.getByRole('button', { name: '引用到项目', exact: true })).toBeDisabled()
+  const screenshotRoot = process.env.PDM_LIFECYCLE_SCREENSHOTS || tmpdir()
+  await page.screenshot({ path: join(screenshotRoot, 'standard-structure-lifecycle.png'), fullPage: false })
+  await page.setViewportSize({ width: 1000, height: 900 }); await expect(workspace).toBeVisible(); expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 2)).toBe(false)
+  await workspace.getByRole('button', { name: '启用分类', exact: true }).click(); await page.getByRole('button', { name: '确认启用', exact: true }).click(); await expect(filter).toHaveValue('active')
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0); expect(errors).toEqual([])
+})
+
 test('standard structure uses independent categories, readonly previews and pinned project BOM references', async ({ page }) => {
   test.setTimeout(90_000)
   await mockPlanCompanionPanels(page)
@@ -97,13 +862,15 @@ test('standard structure uses independent categories, readonly previews and pinn
   await page.setViewportSize({ width: 1920, height: 1080 })
   await page.route('**/client-bootstrap.json*', route => route.fulfill({ json: { ConfigurationVersion: '2026.10.20.standard-structure-qa', Desktop: { Version: 'QA' }, SolidWorksAddin: { Version: 'QA' } } }))
   await page.route('**/api/standard-library/**', route => route.fulfill({ json: route.request().url().includes('/materials') ? { items: [], total: 0, page: 1, pageSize: 50 } : [] }))
+  await page.route('**/api/browser-archives/capabilities*', route => route.fulfill({ json: { enabled: false, canArchive: false } }))
   await page.route('**/api/workbench**', route => route.fulfill({ json: { projects: [], notes: [], risks: [], scope: 'company', companyName: '测试公司' } }))
-  const category = { id: 'cat-lift', name: '气缸升降', parentId: 'cat-handling', sortOrder: 1, isActive: true }
+  const unclassified = { id: '55505354-0000-0000-0000-000000000002', name: '未分类', parentId: null, sortOrder: 0, isActive: true }
+  const category = { id: 'cat-lift', name: 'UPST-1-0001-V01', parentId: unclassified.id, sortOrder: 1, isActive: true }
   const part = { id: 'part', drawingNumber: 'BZ-SJ-001-01', name: '升降底板', fileName: 'BZ-SJ-001-01.SLDPRT', kind: 'Part', fileKey: 'part', previewFileKey: null, embedded: false, quantity: 2, children: [] }
   const drawing = { ...part, id: 'drawing', drawingNumber: 'BZ-SJ-001工程图', fileName: 'BZ-SJ-001.SLDDRW', kind: 'Drawing', previewFileKey: 'drawing-pdf' }
   const root = { ...part, id: 'root', drawingNumber: 'BZ-SJ-001', name: '气缸升降组件', fileName: 'BZ-SJ-001.SLDASM', kind: 'Assembly', children: [part, { ...part, id: 'embedded', drawingNumber: '嵌入导向组件', name: '嵌入导向组件', fileKey: null, embedded: true }, drawing] }
   const catalog = { companyId: 'org-ks', rowVersion: 1, storageRoot: 'D:/PLM/StandardStructures',
-    categories: [{ id: 'cat-handling', name: '搬运机构', parentId: null, sortOrder: 1, isActive: true }, category, { id: 'cat-position', name: '定位夹紧', parentId: null, sortOrder: 2, isActive: true }],
+    categories: [unclassified, { id: 'cat-handling', name: '搬运机构', parentId: null, sortOrder: 1, isActive: true }, category, { id: 'cat-position', name: '定位夹紧', parentId: null, sortOrder: 2, isActive: true }],
     structures: [{ id: 'structure', categoryId: category.id, code: 'UPST-1-0001', drawingType: 1, name: '气缸升降组件', revisions: [{ id: 'revision', version: 1, archivedAt: '2026-10-20T01:00:00Z', archivedBy: 'std', root,
       files: [{ key: 'drawing-pdf', fileName: 'BZ-SJ-001.pdf', length: 100, sha256: 'a' }],
       bom: [{ id: 'std', kind: 'Standard', drawingNumber: '010200001', name: '气缸', quantity: 1, unit: '个', revision: 'W1', brand: '示例品牌' }, { id: 'nonstd', kind: 'NonStandard', drawingNumber: 'BZ-SJ-001-01', name: '升降底板', quantity: 2, unit: '件', revision: 'W1', material: 'Q235B' }] }] }] }
@@ -149,8 +916,12 @@ test('standard structure uses independent categories, readonly previews and pinn
   await expect(workspace).not.toContainText('审核')
   await expect(workspace).not.toContainText('批注')
   const categories = workspace.locator('.standard-structure__categories')
-  await categories.getByText('气缸升降', { exact: true }).click()
-  await expect(workspace.locator('.standard-structure__breadcrumb')).toContainText('气缸升降')
+  await categories.getByText('未分类', { exact: true }).click()
+  await expect(workspace.locator('.standard-structure__drawing-tree')).toContainText('UPST-1-0001-V01')
+  const unclassifiedNode = categories.locator(`[data-key="${unclassified.id}"]`)
+  if (await unclassifiedNode.getAttribute('aria-expanded') === 'false') await unclassifiedNode.locator(':scope > .el-tree-node__content .el-tree-node__expand-icon').click()
+  await categories.getByText('UPST-1-0001-V01', { exact: true }).click()
+  await expect(workspace.locator('.standard-structure__breadcrumb')).toContainText('未分类 › UPST-1-0001-V01')
   const screenshots = process.env.PDM_STANDARD_STRUCTURE_SCREENSHOTS || tmpdir()
   await page.screenshot({ path: join(screenshots, 'standard-structure-drawings-desktop.png'), fullPage: false })
   await workspace.locator('.standard-structure__drawing-tree').getByText('BZ-SJ-001工程图', { exact: true }).click()
@@ -164,7 +935,7 @@ test('standard structure uses independent categories, readonly previews and pinn
   await workspace.getByRole('button', { name: '引用到项目', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: '引用标准结构BOM到项目' })
   await dialog.getByRole('combobox').click()
-  await page.getByRole('option').first().click()
+  await page.locator('.el-select-dropdown:visible').getByRole('option').first().click()
   await dialog.getByRole('spinbutton').fill('3')
   await dialog.getByRole('button', { name: '确认引用', exact: true }).click()
   await expect(dialog).toBeHidden()
@@ -459,6 +1230,68 @@ test('DingTalk self-service application settings and shared project group bindin
   expect(errors).toEqual([])
 })
 
+test('edit collaboration emergency takeover and policy switch work over LAN HTTP', async ({ page }, testInfo) => {
+  await mockPlanCompanionPanels(page)
+  await page.route('**/client-bootstrap.json*', route => route.fulfill({ json: { ConfigurationVersion: '2026.10.23.edit-collaboration-qa', Desktop: { Version: 'QA' }, SolidWorksAddin: { Version: 'QA' } } }))
+  await page.route('**/api/standard-structures/storage', route => route.fulfill({ json: { storageRoot: 'D:/PDM/Standard', rowVersion: 1 } }))
+  await page.route('**/api/browser-archives/capabilities', route => route.fulfill({ json: { enabled: false, canConfigure: false } }))
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  let takeover: Record<string, unknown> | undefined
+  let settings = { vaultRoot: 'D:\\PDM\\Vault', releaseRoot: 'D:\\PDM\\Release', checkoutHeartbeatSeconds: 60, checkoutLeaseMinutes: 5, checkoutOfflineGraceMinutes: 30, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, checkoutAutoReleaseEnabled: true, checkoutIdleReleaseMinutes: 30, checkoutReleaseCountdownSeconds: 60 }
+  await page.route('**/api/system-settings', async route => {
+    if (route.request().method() === 'PUT') settings = route.request().postDataJSON()
+    await route.fulfill({ json: settings })
+  })
+  await page.route('**/api/edit-locks', route => route.fulfill({ json: takeover ? [] : [{
+    documentId: 'edit-qa', projectId, projectCode: 'PRJ-REAL-001', projectName: '协作项目', drawingNumber: 'EDIT-001', documentName: '机架', fileName: 'EDIT-001.SLDPRT',
+    checkedOutBy: 'designer', checkedOutAt: '2026-10-23T00:00:00Z', lastHeartbeatAt: '2026-10-23T00:01:00Z', leaseExpiresAt: '2026-10-23T00:06:00Z',
+    connectionState: 'Active', attentionLevel: 'Normal', ownedByCurrentUser: false, canRequestRelease: true, canForceRelease: false, canEmergencyRelease: true, sessionId: 'original-session',
+  }] }))
+  await page.route('**/api/documents/edit-qa/emergency-release', async route => {
+    takeover = route.request().postDataJSON(); await route.fulfill({ json: {} })
+  })
+  await page.goto('/')
+  expect(page.url()).toMatch(/^http:\/\/(?:192\.168\.2\.8|127\.0\.0\.1):\d+\//)
+  await expect(page).toHaveTitle('UPTON-PLM')
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: /^消息/ }).click()
+  await page.getByRole('button', { name: '紧急接管', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '紧急接管编辑权限' })
+  await dialog.getByRole('button', { name: '确认释放' }).click()
+  expect(takeover).toBeUndefined()
+  await dialog.getByRole('textbox').fill('项目负责人确认交接')
+  await page.screenshot({ path: testInfo.outputPath('emergency-takeover.png'), fullPage: false })
+  await dialog.getByRole('button', { name: '确认释放' }).click()
+  await expect(dialog).not.toBeVisible()
+  expect(takeover).toEqual({ sessionId: 'original-session', checkedOutAt: '2026-10-23T00:00:00Z', reason: '项目负责人确认交接' })
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.el-overlay.is-drawer:visible')).toHaveCount(0)
+  await page.getByRole('button', { name: '系统设置', exact: true }).click()
+  await page.getByRole('button', { name: '编号与存储', exact: true }).click()
+  await page.getByRole('tab', { name: '编辑权限', exact: true }).click()
+  const toggle = page.getByRole('checkbox', { name: /启用自动释放/ })
+  await expect(toggle).toBeChecked()
+  await expect(page.getByLabel(/持续离线回收/)).toHaveValue('48')
+  await toggle.uncheck()
+  await page.getByRole('button', { name: '保存编辑权限策略' }).click()
+  await expect.poll(() => settings.checkoutAutoReleaseEnabled).toBe(false)
+  await toggle.check()
+  await page.getByRole('button', { name: '保存编辑权限策略' }).click()
+  await expect.poll(() => settings.checkoutAutoReleaseEnabled).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('edit-policy.png'), fullPage: false })
+  await page.setViewportSize({ width: 780, height: 900 })
+  await expect(toggle).toBeVisible()
+  expect(await page.locator('body').evaluate(element => element.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('edit-policy-narrow.png'), fullPage: false })
+  expect(errors).toEqual([])
+})
+
 test('editing request needs one click and no reason dialog over HTTP', async ({ page }) => {
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
@@ -549,7 +1382,7 @@ test('project review workbench follows OPL and records across dozens of projects
   await page.locator('.pdm-sidebar__nav').getByRole('button',{name:/^(项目工作台|项目总览)$/}).click()
   const panel=page.locator('.review-workbench')
   await expect(panel.locator('.wr-project')).toHaveCount(46)
-  await expect(panel.locator('.wr-project-second').first()).toContainText('阶段 装配')
+  await expect(panel.locator('.wr-project-second').first()).toContainText('装配')
   await panel.getByLabel('筛选阶段',{exact:true}).selectOption('装配')
   await panel.getByLabel('筛选项目经理',{exact:true}).selectOption('admin')
   await panel.getByLabel('筛选事业部',{exact:true}).selectOption('T2事业部')
@@ -588,6 +1421,23 @@ test('project review workbench follows OPL and records across dozens of projects
   await note.getByRole('button',{name:'保存记录',exact:true}).click()
   await expect(note).not.toBeVisible()
   await expect(panel.getByLabel('跟进记录',{exact:true})).toContainText('本周确认到货安排')
+  for (const size of [{width:1959,height:1080},{width:1518,height:855},{width:1000,height:760}]) {
+    await page.setViewportSize(size)
+    const layout = await panel.evaluate(element => {
+      const rect = (selector: string) => element.querySelector(selector)!.getBoundingClientRect().toJSON()
+      return {opl:rect('.wr-opl'),tasks:rect('.wr-tasks'),records:rect('.wr-bottom')}
+    })
+    expect(layout.opl.bottom).toBeLessThanOrEqual(layout.tasks.top)
+    if (size.width > 1000) {
+      expect(Math.abs(layout.tasks.width-layout.records.width)).toBeLessThanOrEqual(1)
+      expect(Math.abs(layout.tasks.top-layout.records.top)).toBeLessThanOrEqual(1)
+      expect(Math.abs(layout.tasks.bottom-layout.records.bottom)).toBeLessThanOrEqual(1)
+      expect(layout.tasks.right).toBeLessThan(layout.records.left)
+    } else {
+      expect(layout.tasks.bottom).toBeLessThanOrEqual(layout.records.top)
+    }
+    if(size.width===1959)await page.screenshot({path:join(tmpdir(),'pdm-workbench-opl-above.png'),animations:'disabled'})
+  }
   await panel.getByRole('button',{name:'下一项目',exact:true}).click()
   await expect(panel.locator('.wr-identity')).toContainText('P700013')
   for(const size of [{width:1518,height:855},{width:1000,height:760}]){await page.setViewportSize(size);expect(await panel.evaluate(el=>el.scrollHeight<=el.clientHeight+2 && el.scrollWidth<=el.clientWidth+2)).toBe(true)}
@@ -599,7 +1449,7 @@ test('project review workbench follows OPL and records across dozens of projects
   for(const [index,ratio] of [5,1,1,1,2].entries()) expect(Math.abs(statusWidths[index]!/statusWidths[1]!-ratio)).toBeLessThan(.03)
   await page.screenshot({path:join(tmpdir(),'pdm-workbench-review.png')})
   const colors=[]
-  for (const label of ['石墨青绿','暖橙活力']) {
+  for (const label of ['松石青','琥珀橙']) {
     await page.locator('.pdm-theme-trigger').click()
     await page.getByRole('menuitem').filter({hasText:label}).click()
     colors.push(await panel.locator('.wr-project.selected').evaluate(el=>getComputedStyle(el).backgroundColor))
@@ -961,6 +1811,145 @@ test('assessment labor rates are configured separately from design lead estimate
 })
 
 const projectId = '11111111-1111-1111-1111-111111111111'
+
+test('document tree uses 50px two-line rows and highlights only stale drawing versions', async ({ page }) => {
+  await mockPlanCompanionPanels(page)
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  const common = { projectId, folderId: 'folder-main-mechanical', storedVersionCount: 4, drawingVersionNumber: 4, publishedVersion: 'A', checkedOutBy: null }
+  const documents = [
+    { ...common, id: 'doc-root', drawingNumber: '700022.00', name: '四立柱机构', fileName: '700022.00.SLDASM', kind: 0, revision: { display: 'A' } },
+    { ...common, id: 'doc-part', drawingNumber: '700022.00-01', name: '顶板-30', fileName: '700022.00-01.SLDPRT', kind: 1, revision: { display: 'A-W1' } },
+    { ...common, id: 'doc-drawing', drawingNumber: '700022.00-01', name: '顶板工程图', fileName: '700022.00-01.SLDDRW', kind: 2, revision: { display: 'A-W1' } },
+    ...Array.from({length:5},(_,index)=>({...common,id:`sub-${index}`,drawingNumber:`SUB-0${index+1}`,name:`第${index+1}层装配`,fileName:`SUB-0${index+1}.SLDASM`,kind:0,revision:{display:'A'}})),
+    {...common,id:'deep-part',drawingNumber:'DEEP-PRT-001',name:'深层名称显示优化样本',fileName:'DEEP-PRT-001.SLDPRT',kind:1,revision:{display:'A'}},
+  ]
+  let deepBranch: Record<string,unknown> = {nodeId:'deep-part',documentId:'deep-part',instancePath:'root/deep/part',fileName:'DEEP-PRT-001.SLDPRT',kind:1,quantity:1,revision:{display:'A'},children:[]}
+  for(let index=4;index>=0;index--)deepBranch={nodeId:`sub-${index}`,documentId:`sub-${index}`,instancePath:`root/deep/${index}`,fileName:`SUB-0${index+1}.SLDASM`,kind:0,quantity:1,revision:{display:'A'},children:[deepBranch]}
+  await page.route('**/api/projects/*/documents', route => route.fulfill({ json: documents }))
+  await page.route('**/api/projects/*/folder-documents', route => route.fulfill({ json: documents }))
+  await page.route('**/api/projects/*/reference-tree', route => route.fulfill({ json: { nodeId: 'root', documentId: 'doc-root', instancePath: 'root', fileName: documents[0].fileName, kind: 0, quantity: 1, revision: { display: 'A' }, children: [
+    { nodeId: 'stale-part', documentId: 'doc-part', instancePath: 'root/part', fileName: documents[1].fileName, kind: 1, quantity: 1, revision: { display: 'A' }, children: [] },
+    deepBranch,
+  ] } }))
+  await page.route('**/api/projects/*/drawing-review-candidates', route => route.fulfill({ json: [{ candidateId: 'approved-part', modelDocumentId: 'doc-part', drawingDocumentId: 'doc-drawing', drawingNumber: '700022.00-01', bomKinds: ['NonStandard'], state: 'ApprovedCurrent', selectable: false }] }))
+  await page.route('**/api/projects/*/drawing-reviews', route => route.fulfill({ json: [] }))
+  await page.setViewportSize({ width: 1959, height: 1080 })
+  await page.goto('/')
+  await expect(page).toHaveTitle('UPTON-PLM')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', {name:'账号'}).fill('admin')
+  await login.getByRole('textbox', {name:'密码'}).fill('correct-password')
+  await login.getByRole('button', {name:'登录',exact:true}).click()
+  await enterProject(page)
+  await page.getByRole('navigation', {name:'项目功能'}).getByRole('button', {name:'图档',exact:true}).click()
+  const tree = page.getByLabel('项目设计树')
+  const stale = tree.locator('.pdm-tree-row.has-version-warning').filter({hasText:'顶板-30'})
+  await expect(stale).toHaveCSS('height','50px')
+  await expect(stale.locator('.pdm-tree-row__states')).toHaveText('已批准')
+  await expect(stale.locator('.pdm-tree-drawing-version')).toHaveText('V4')
+  await expect(stale.locator('.pdm-tree-published-version')).toHaveText('A')
+  await expect(stale.locator('.pdm-tree-drawing-version')).toHaveCSS('font-weight','700')
+  await expect(stale).not.toContainText('引用版本较旧')
+  await expect(stale.locator('.pdm-tree-drawing-version')).toHaveAttribute('title',/引用版本较旧/)
+  for(let index=0;index<5;index++)await tree.locator('.pdm-tree-row').filter({has:page.getByText(`SUB-0${index+1}`,{exact:true})}).locator('.pdm-tree-row__toggle').click()
+  const deepRow=tree.locator('.pdm-tree-row').filter({has:page.getByText('DEEP-PRT-001',{exact:true})})
+  await expect(deepRow).toBeVisible()
+  await expect(deepRow).toHaveCSS('padding-left','53px')
+  await expect(tree.locator('.pdm-tree-row').filter({has:page.getByText('SUB-05',{exact:true})}).locator('.pdm-tree-row__label strong')).toHaveCSS('font-weight','700')
+  await expect(deepRow.locator('.pdm-tree-row__label strong')).toHaveCSS('font-weight','500')
+  await expect(deepRow.locator('.pdm-tree-row__content')).toHaveCSS('gap','2px')
+  await expect(deepRow.locator('.pdm-tree-row__label')).toHaveAttribute('title',/深层名称显示优化样本/)
+  const guide=await deepRow.evaluate(element=>{const style=getComputedStyle(element.parentElement!,'::before');return{content:style.content,width:style.borderLeftWidth}})
+  expect(guide.content).not.toBe('none')
+  expect(guide.width).toBe('1px')
+  for (const width of [1959,1000]) {
+    await page.setViewportSize({width,height:1080})
+    expect((await tree.boundingBox())!.width).toBe(width === 1959 ? 250 : 190)
+    expect(await tree.locator('.pdm-tree-row').evaluateAll(rows=>rows.every(row=>row.getBoundingClientRect().height===50))).toBe(true)
+    const versionBounds=await tree.locator('.pdm-tree-row').evaluateAll(rows=>rows.map(row=>{const versions=row.querySelector('.pdm-tree-row__versions')!;const rect=versions.getBoundingClientRect();return{text:versions.textContent?.replace(/\s/g,''),width:rect.width,inside:rect.right<=row.getBoundingClientRect().right}}))
+    expect(versionBounds.every(item=>item.text==='V4A' && item.width>20 && item.inside),JSON.stringify(versionBounds)).toBe(true)
+    const layout = await stale.evaluate(element => {
+      const rect = (selector:string) => element.querySelector(selector)!.getBoundingClientRect().toJSON()
+      const version = element.querySelector('.pdm-tree-drawing-version')!
+      return {row:element.getBoundingClientRect().toJSON(),number:rect('.pdm-tree-row__label strong'),name:rect('.pdm-tree-row__label small'),state:rect('.pdm-tree-row__states'),versions:rect('.pdm-tree-row__versions'),orange:getComputedStyle(element).getPropertyValue('--pdm-orange').trim(),color:getComputedStyle(version).color,publishedColor:getComputedStyle(element.querySelector('.pdm-tree-published-version')!).color}
+    })
+    expect(layout.row.height).toBe(50)
+    expect(Math.abs(layout.number.top-layout.state.top)).toBeLessThanOrEqual(1)
+    expect(Math.abs(layout.name.top-layout.versions.top)).toBeLessThanOrEqual(1)
+    expect(layout.name.bottom).toBeLessThanOrEqual(layout.row.bottom)
+    expect(layout.versions.right).toBeLessThanOrEqual(layout.row.right)
+    expect(layout.color).not.toBe(layout.publishedColor)
+    await expect(stale.locator('.pdm-tree-drawing-version')).toHaveCSS('color',await stale.evaluate(element=>{const probe=document.createElement('span');probe.style.color='var(--pdm-orange)';element.append(probe);const color=getComputedStyle(probe).color;probe.remove();return color}))
+    if(width===1959)await tree.locator('.pdm-tree > .pdm-tree-item').screenshot({path:join(tmpdir(),'pdm-tree-hierarchy-guides.png'),animations:'disabled'})
+  }
+  await tree.getByRole('tab',{name:/^2D/}).click()
+  await expect(tree.locator('.pdm-drawing-list .pdm-tree-row')).toHaveCSS('height','50px')
+  await expect(tree.locator('.pdm-drawing-list .pdm-tree-drawing-version')).toHaveText('V4')
+  await expect(tree.locator('.pdm-drawing-list .pdm-tree-published-version')).toHaveText('A')
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
+})
+
+test('drawing V versions and published letters remain separate over LAN HTTP', async ({ page }) => {
+  await mockPlanCompanionPanels(page)
+  await page.route('http://192.168.2.8:5173/**', async route => {
+    const url = new URL(route.request().url())
+    if (url.pathname.startsWith('/api/') || url.pathname === '/health') return route.fallback()
+    if (url.pathname === '/client-bootstrap.json') return route.fulfill({ json: { ConfigurationVersion: 'business-versions-qa' } })
+    const response = await route.fetch({ url: `http://127.0.0.1:5193${url.pathname}${url.search}` })
+    return route.fulfill({ response })
+  })
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  const errors: string[] = []
+  const failedRequests: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('response', response => { if (response.status() >= 400 && new URL(response.url()).pathname.startsWith('/api/')) failedRequests.push(new URL(response.url()).pathname) })
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  await page.route('**/api/browser-archives/capabilities**', route => route.fulfill({ json: { enabled: false, canArchive: false, canConfigure: false } }))
+  await page.route('**/api/material-code/resolve', route => route.fulfill({ json: [] }))
+  let number = 3
+  const documents = () => [
+    { id: 'doc-root', projectId, folderId: 'folder-main-mechanical', drawingNumber: 'REAL-ASM-001', name: '双版本总装', fileName: 'REAL-ASM-001.SLDASM', kind: 0, revision: { display: number === 3 ? 'A' : 'A-W1' }, drawingVersionNumber: number, drawingVersion: `V${number}`, publishedVersion: 'A', storedVersionCount: number + 1 },
+    { id: 'doc-drawing', projectId, folderId: 'folder-main-mechanical', drawingNumber: 'REAL-ASM-001', name: '双版本工程图', fileName: 'REAL-ASM-001.SLDDRW', kind: 2, revision: { display: 'A-W1' }, drawingVersionNumber: 4, drawingVersion: 'V4', publishedVersion: 'A', storedVersionCount: 5 },
+  ]
+  await page.route('**/api/projects/*/documents', route => route.fulfill({ json: documents() }))
+  await page.route('**/api/projects/*/folder-documents', route => route.fulfill({ json: documents() }))
+  await page.route('**/api/projects/*/reference-tree', route => route.fulfill({ json: { nodeId: 'root', documentId: 'doc-root', instancePath: 'root', fileName: 'REAL-ASM-001.SLDASM', displayName: '双版本总装', kind: 0, quantity: 1, children: [] } }))
+  await page.route('**/api/projects/*/boms/Standard**', route => route.fulfill({ json: [{ id: 'bom-version-qa', projectId, kind: 'Standard', sequence: 1, drawingNumber: 'REAL-ASM-001', name: '双版本总装', quantity: 1, unit: '个', revision: 'A-W1', displayRevision: 'A', isComplete: true, sourceDocumentId: 'doc-root' }] }))
+  await page.goto('http://192.168.2.8:5173/')
+  await expect(page).toHaveTitle('UPTON-PLM')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await enterProject(page)
+  await page.getByRole('button', { name: '图档', exact: true }).click()
+  const tree = page.getByLabel('项目设计树')
+  await expect(tree.locator('.pdm-tree-drawing-version').first()).toHaveText('V3')
+  await expect(tree.locator('.pdm-tree-published-version').first()).toHaveText('A')
+  number = 4
+  await tree.getByRole('button', { name: '刷新设计树', exact: true }).click()
+  await expect(tree.locator('.pdm-tree-drawing-version').first()).toHaveText('V4')
+  await expect(tree.locator('.pdm-tree-published-version').first()).toHaveText('A')
+  await page.screenshot({ path: join(tmpdir(), 'pdm-business-versions-desktop.png') })
+  await page.getByRole('tab', { name: /^2D/ }).click()
+  await expect(tree.locator('.pdm-drawing-list .pdm-tree-drawing-version')).toHaveText('V4')
+  await expect(tree.locator('.pdm-drawing-list .pdm-tree-published-version')).toHaveText('A')
+  await page.setViewportSize({ width: 780, height: 900 })
+  await page.screenshot({ path: join(tmpdir(), 'pdm-business-versions-narrow.png') })
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  await page.getByRole('button', { name: 'BOM', exact: true }).click()
+  await page.getByRole('tab', { name: /^标准件BOM/ }).click()
+  await expect(page.locator('.pdm-bom-table thead')).toContainText('发布版本')
+  await expect(page.locator('.pdm-bom-table tbody')).toContainText('双版本总装')
+  await expect(page.locator('.pdm-bom-table tbody')).not.toContainText('A-W1')
+  await expect(page.locator('.pdm-bom-table tbody')).not.toContainText('B-D')
+  await page.screenshot({ path: join(tmpdir(), 'pdm-business-versions-bom.png') })
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
+  expect(failedRequests).toEqual([])
+})
 test('project list separates project types while preserving child hierarchy and search over LAN HTTP', async ({ page }) => {
   await page.setViewportSize({ width: 1916, height: 1080 })
   const errors: string[] = []
@@ -1080,10 +2069,21 @@ const referenceChildren = Array.from({ length: 40 }, (_, index) => ({
 test.beforeEach(async ({ page }) => {
   materialCodeApplications = []
   let currentUsername = 'engineer'
+  const tablePreferences = new Map<string, Record<string, string>>()
   await page.route(/^http:\/\/(?:127\.0\.0\.1:\d+|192\.168\.2\.8:\d+)\/(?:api(?:\/.*)?|health)(?:\?.*)?$/, async (route) => {
     const path = new URL(route.request().url()).pathname
     const fulfill = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
     if (path === '/health') return fulfill({ status: 'ok' })
+    if (path === '/api/material-stock-plans') return fulfill({ enterpriseCode: '01', organizationCode: '7', items: [] })
+    if (path === '/api/me/table-preferences') {
+      if (route.request().method() === 'PUT') {
+        const input = route.request().postDataJSON() as { key: string; value: string }
+        tablePreferences.set(currentUsername, { ...tablePreferences.get(currentUsername), [input.key]: input.value })
+        return route.fulfill({ status: 204 })
+      }
+      return fulfill({ preferences: tablePreferences.get(currentUsername) ?? {} })
+    }
+    if (path === '/api/auth/logout') return fulfill(true)
     if (path === '/api/auth/login') {
       const credentials = route.request().postDataJSON() as { username?: string }
       const administrator = credentials.username === 'admin'
@@ -1744,7 +2744,9 @@ test('procurement BOM kind filter stays on one line and filters all three kinds'
 
   const kindFilter = page.getByLabel('筛选物料分类')
   const procurement = page.getByLabel('采购跟踪', { exact: true })
-  expect(await procurement.locator('.procurement-tracking__heading button, .procurement-tracking__pagination button').evaluateAll(buttons => buttons.filter(button => Math.abs(button.getBoundingClientRect().width - 60) >= 1).map(button => ({ text: button.textContent, width: button.getBoundingClientRect().width })))).toEqual([])
+  expect(await procurement.locator('.procurement-tracking__heading button, .procurement-tracking__pagination button').evaluateAll(buttons => buttons.filter(button => Math.abs(button.getBoundingClientRect().width - (button.classList.contains('procurement-tracking__multi-filter') ? 80 : 60)) >= 1).map(button => ({ text: button.textContent, width: button.getBoundingClientRect().width })))).toEqual([])
+  expect(await procurement.locator('.procurement-tracking__brand-filter, .procurement-tracking__kind-filter').evaluateAll(controls => controls.map(control => Math.round(control.getBoundingClientRect().width)))).toEqual([80, 80])
+  await expect(procurement.locator('.procurement-tracking__filters [aria-hidden="true"]')).toHaveCount(0)
   expect(await procurement.locator('.procurement-tracking__heading input:not([type=checkbox]), .procurement-tracking__heading select, .procurement-tracking__heading button, .procurement-tracking__delay-filter').evaluateAll(controls => controls.filter(control => getComputedStyle(control).fontSize !== '11px').map(control => ({ tag: control.tagName, type: control.getAttribute('type'), font: getComputedStyle(control).fontSize })))).toEqual([])
   await expect(kindFilter.locator('option')).toHaveText(['全部分类', '标准件', '非标件', '电气件'])
   const layout = await page.locator('.procurement-tracking__heading').evaluate(heading => {
@@ -1922,7 +2924,7 @@ test('related materials use a scoped right drawer for electrical BOM', async ({ 
   await login.getByRole('button', { name: '登录', exact: true }).click()
   await enterProject(page)
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
-  await page.getByRole('tab', { name: /电气BOM/ }).click()
+  await page.getByRole('tab', { name: /电气件BOM/ }).click()
   await page.getByRole('button', { name: '关联物料', exact: true }).click()
 
   const drawer = page.getByRole('dialog', { name: 'BOM 关联物料核对' })
@@ -2166,7 +3168,7 @@ test('hierarchy category links open the owning project BOM', async ({ page }, te
   await enterProject(page)
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
   await page.getByRole('tab', { name: '多级总览' }).click()
-  for (const category of ['标准件BOM', '非标件BOM', '电气BOM']) {
+  for (const category of ['标准件BOM', '非标件BOM', '电气件BOM']) {
     const expandChild = page.getByRole('button', { name: '展开PRJ-REAL-001-1的三类BOM', exact: true })
     if (await expandChild.isVisible()) await expandChild.click()
     await expect(page.getByRole('button', { name: `进入PRJ-REAL-001-1的${category}`, exact: true })).toBeVisible()
@@ -2216,6 +3218,53 @@ test('hierarchy category links open the owning project BOM', async ({ page }, te
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
   expect(await page.title()).not.toBe('')
   expect(errors).toEqual([])
+})
+
+test('login security settings switches and device approval work on LAN HTTP', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  const policy = { singleSessionEnabled: false, deviceBindingEnabled: false, version: 'initial' }
+  const device = { id: 'device-one', machine: '设计电脑-LI', mac: '001122334455', approved: false, requestedAt: '2026-10-22T01:00:00Z', lastSeenAt: new Date().toISOString() }
+  const session = { id: 'plugin-session', type: 'solidworks', machine: device.machine, version: 'initial', revoked: false, createdAt: device.requestedAt, lastSeenAt: device.lastSeenAt }
+  const writes: string[] = []
+  await mockPlanCompanionPanels(page)
+  await page.route('**/api/login-security**', async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/policy')) { Object.assign(policy, route.request().postDataJSON(), { version: 'enabled' }); writes.push('policy'); return route.fulfill({ json: policy }) }
+    if (path.endsWith('/devices/device-one')) { device.approved = route.request().postDataJSON().approved; writes.push('device'); return route.fulfill({ json: true }) }
+    if (path.endsWith('/sessions/plugin-session')) { session.revoked = true; writes.push('logout'); return route.fulfill({ json: true }) }
+    return route.fulfill({ json: { policy, canEditPolicy: true, users: [{ username: 'li.pw', devices: [device], sessions: [session] }] } })
+  })
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  await page.goto('/')
+  expect(await page.title()).toBe('UPTON-PLM')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.locator('.pdm-sidebar').getByRole('button', { name: '系统设置', exact: true }).click()
+  await page.getByRole('button', { name: '登录安全', exact: true }).click()
+  const panel = page.getByLabel('登录安全设置')
+  await expect(panel).toBeVisible()
+  await expect(panel.getByRole('switch')).toHaveCount(2)
+  for (const item of await panel.getByRole('switch').all()) await expect(item).not.toBeChecked()
+  await panel.getByRole('switch', { name: /启用同端登录限制/ }).check()
+  await panel.getByRole('button', { name: '保存设置' }).click()
+  await expect(panel.getByRole('status')).toContainText('所有旧登录需要重新登录')
+  page.on('dialog', dialog => dialog.accept())
+  await panel.getByRole('button', { name: '确认绑定' }).click()
+  await expect(panel.getByRole('button', { name: '解除绑定' })).toBeVisible()
+  await panel.getByRole('button', { name: '强制下线' }).click()
+  await expect(panel.getByRole('button', { name: '强制下线' })).toBeDisabled()
+  await expect(panel).toContainText('网页端只限制登录会话，不限制电脑')
+  await page.screenshot({ path: join(tmpdir(), 'pdm-login-security-desktop.png'), fullPage: false })
+  await page.setViewportSize({ width: 1100, height: 800 })
+  await expect(panel.getByRole('switch', { name: /启用同端登录限制/ })).toBeVisible()
+  await page.screenshot({ path: join(tmpdir(), 'pdm-login-security-narrow.png'), fullPage: false })
+  expect(writes).toEqual(['policy', 'device', 'logout'])
+  expect(errors).toEqual([])
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
 })
 
 async function mockPlanCompanionPanels(page: Page) {
@@ -3563,7 +4612,7 @@ test('project permission matrix preserves budget and other positions when saving
   await matrix.getByRole('checkbox', { name: '主设：维护质量计划（质量）', exact: true }).check()
   await panel.getByRole('button', { name: '保存并立即生效' }).click()
   await expect.poll(() => savedRules).toEqual({ ...initialRules, MainManager: ['project.edit'], MainDesigner: ['validation-plan.edit'] })
-  await expect(matrix.getByRole('checkbox', { name: '执行工程师／电气硬件：电气BOM（BOM）', exact: true })).toBeChecked()
+  await expect(matrix.getByRole('checkbox', { name: '执行工程师／电气硬件：电气件BOM（BOM）', exact: true })).toBeChecked()
   await expect(matrix.getByRole('checkbox', { name: '主项目经理／协同项目经理：查看项目预算（预算）', exact: true })).not.toBeChecked()
   await expect(panel.getByRole('button', { name: '保存并立即生效' })).toBeDisabled()
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
@@ -3822,7 +4871,7 @@ test('electrical BOM exposes code verification and application actions', async (
   await login.getByRole('button', { name: '登录', exact: true }).click()
   await enterProject(page)
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
-  await page.getByRole('tab', { name: /电气BOM/ }).click()
+  await page.getByRole('tab', { name: /电气件BOM/ }).click()
   await page.locator('.pdm-bom-table').getByRole('checkbox', { name: '选择物料', exact: true }).check()
   await page.getByRole('button', { name: '核对料号', exact: true }).click()
   await expect(page.locator('.pdm-bom-table')).not.toContainText('INVALID-ELECTRICAL')
@@ -3925,6 +4974,61 @@ test('material master shares duplicate queries and keeps the latest search resul
   expect(await page.title()).toBe('UPTON-PLM')
   expect(errors).toEqual([])
   await page.screenshot({ path: testInfo.outputPath('material-latest-query.png'), fullPage: false })
+})
+
+test('material badge matches ordinary pending work and stays clear after refresh over LAN HTTP', async ({ page }) => {
+  await mockPlanCompanionPanels(page)
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  await page.route('**/api/workbench*', route => route.fulfill({ json: { views: [], view: 'manager', projects: [], risks: [] } }))
+  let ordinaryStatus = ''
+  const syncUrls: string[] = []
+  const header = { id: 'automatic-header', materialId: 'header-material', bomHeaderKind: 'Standard', operation: 'Create', status: 'Failed', materialCode: 'P-HEADER', createdAt: '2026-10-23T00:00:00Z', updatedAt: '2026-10-23T00:00:00Z' }
+  await page.route('**/api/material-sync-tasks*', route => {
+    syncUrls.push(route.request().url())
+    return route.fulfill({ json: [header, ...(ordinaryStatus ? [{ ...header, id: 'ordinary', materialId: 'ordinary-material', bomHeaderKind: null,
+      materialCode: '01020001', materialName: '待处理普通料品', status: ordinaryStatus, lastError: '请重新同步', payloadJson: '[]' }] : [])] })
+  })
+  await page.route('**/api/material-code/applications*', route => route.fulfill({ json: [{ id: 'header-application', projectId, materialId: 'header-material',
+    applicationType: 'BomHeader', bomHeaderKind: 'Standard', status: 'Pending', workflowState: 'PendingApproval', canDecide: true, requestedBy: 'admin', requestedAt: '2026-10-23T00:00:00Z' }] }))
+  await page.goto('/')
+  await expect(page).toHaveTitle('UPTON-PLM')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', {name:'账号'}).fill('admin')
+  await login.getByRole('textbox', {name:'密码'}).fill('correct-password')
+  await login.getByRole('button', {name:'登录',exact:true}).click()
+  const sidebar = page.locator('.pdm-sidebar')
+  const materialNav = sidebar.getByRole('button', {name:/料品管理/})
+  await expect(materialNav).toBeVisible()
+  await expect(materialNav.locator('em')).toHaveCount(0)
+  await materialNav.click()
+  await page.getByRole('tab', {name:/料号审批/}).click()
+  const workflow = page.getByLabel('料号审批与U9C同步', {exact:true})
+  await expect(workflow.locator('tbody')).not.toContainText('P-HEADER')
+  await expect(materialNav.locator('em')).toHaveCount(0)
+  await sidebar.getByRole('button', {name:/我的待办/}).click()
+  await expect(materialNav.locator('em')).toHaveCount(0)
+  ordinaryStatus = 'Failed'
+  await materialNav.click()
+  await sidebar.getByRole('button', {name:/我的待办/}).click()
+  await expect(materialNav.locator('em')).toHaveText('1')
+  await materialNav.click()
+  await page.locator('.material-code-refresh-toolbar').getByRole('button', {name:'刷新',exact:true}).click()
+  await expect(workflow).toContainText('待处理普通料品')
+  await expect(materialNav.locator('em')).toHaveText('1')
+  ordinaryStatus = 'Succeeded'
+  await page.locator('.material-code-refresh-toolbar').getByRole('button', {name:'刷新',exact:true}).click()
+  await expect(workflow).not.toContainText('待处理普通料品')
+  await expect(materialNav.locator('em')).toHaveCount(0)
+  await sidebar.getByRole('button', {name:/我的待办/}).click()
+  await expect(materialNav.locator('em')).toHaveCount(0)
+  await materialNav.click()
+  await page.screenshot({path:join(tmpdir(),'pdm-material-badge-consistency.png'),animations:'disabled'})
+  expect(syncUrls.length).toBeGreaterThan(3)
+  expect(syncUrls.every(url => url.includes('ordinaryOnly=true'))).toBe(true)
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
 })
 
 test('material master loads and searches without waiting for background approvals', async ({ page }, testInfo) => {
@@ -4278,7 +5382,9 @@ test('production package search has synchronized package item and quantity total
     qualifiedLines: 0, issuedLines: 0, urgentLines: 0, priorityLines: 0, atRiskLines: 0, unplannedLines: totalLines,
   })
   const packages = [summary('one', 3, 30), summary('two', 2, 5.25, '待接收'), summary('three', 1, 0.75), summary('closed', 4, 12, '已完结')]
-  await page.route('**/api/production-tracking/projects', route => route.fulfill({ json: [
+  await page.route('**/api/production-tracking/releases/*/external-suppliers', route => route.fulfill({ json: { companyId: 'org-ks', suppliers: [], categories: [] } }))
+  await page.route('**/api/production-tracking/capacity', route => route.fulfill({ json: { calendar: { rowVersion: 1, days: [] }, usage: [] } }))
+  await page.route('**/api/production-tracking/projects*', route => route.fulfill({ json: [
     { id: projectId, code: 'P001', name: '生产统计验收', packages: packages.slice(0, 2) },
     { id: 'other-project', code: 'P002', name: '第二组', packages: packages.slice(2) },
   ] }))
@@ -4295,13 +5401,25 @@ test('production package search has synchronized package item and quantity total
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
   await page.getByRole('button', { name: '制造中心', exact: true }).click()
+  for (const tab of ['发布跟踪', '外协追溯', '自制追溯']) {
+    await page.getByRole('button', { name: tab, exact: true }).click()
+    await expect(page.locator('.production-workbench__package')).toHaveCount(3)
+    const appearance = await page.locator('.production-workbench__tree').evaluate(element => {
+      const button = getComputedStyle(element.querySelector('.production-workbench__all-categories')!)
+      return { solid: button.backgroundColor !== 'rgba(0, 0, 0, 0)' && button.backgroundColor !== button.color,
+        unselected: [...element.querySelectorAll('.production-workbench__package:not(.selected)')].map(item => ({ border: getComputedStyle(item).borderLeftColor, shadow: getComputedStyle(item).boxShadow })) }
+    })
+    expect(appearance.solid).toBe(true); expect(appearance.unselected.length).toBeGreaterThan(0)
+    expect(appearance.unselected.every(item => item.border === 'rgba(0, 0, 0, 0)' && item.shadow === 'none')).toBe(true)
+  }
+  await page.getByRole('button', { name: '发布跟踪', exact: true }).click()
   const totals = page.getByLabel('筛选发布包统计', { exact: true })
   const compactText = () => totals.innerText().then(text => text.replace(/\s/g, ''))
   await expect.poll(compactText).toBe('3包6项36个')
   const checkGeometry = async () => {
     const geometry = await page.locator('.production-workbench__tree-search').evaluate(element => {
       const row = element.getBoundingClientRect(), input = element.querySelector('input')!.getBoundingClientRect(), stats = element.querySelector('[role=status]')!.getBoundingClientRect()
-      return { inputWidth: input.width, separated: input.right <= stats.left, fits: stats.right <= row.right + 1, overflow: element.scrollWidth > element.clientWidth + 1 }
+      return { inputWidth: input.width, separated: input.right <= stats.left || input.bottom <= stats.top || stats.bottom <= input.top, fits: stats.right <= row.right + 1, overflow: element.scrollWidth > element.clientWidth + 1 }
     })
     expect(geometry).toMatchObject({ separated: true, fits: true, overflow: false })
     expect(geometry.inputWidth).toBeGreaterThan(35)
@@ -4590,7 +5708,7 @@ test('BOM release buttons remain inside the right edge at all widths', async ({ 
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
   for (const width of [1552, 994, 834]) {
     await page.setViewportSize({ width, height: 855 })
-    for (const category of ['标准件BOM', '非标件BOM', '电气BOM', '易损件BOM']) {
+    for (const category of ['标准件BOM', '非标件BOM', '电气件BOM', '易损件BOM']) {
       await page.getByRole('tab', { name: new RegExp(category) }).click()
       const strip = page.locator('.pdm-bom-release-strip').first()
       await expect(strip).toBeVisible()
@@ -4681,6 +5799,7 @@ test('project calendar LCD watermark and grouped toolbar stay usable', async ({ 
 })
 
 test('drawing review automatically checks drawings awaiting the current reviewer', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1959, height: 1080 })
   await page.route('**/api/projects/*/drawing-review-candidates', route => route.fulfill({ json: [{ candidateId: 'review-candidate', modelDocumentId: 'doc-assembly', drawingDocumentId: 'doc-drawing', drawingNumber: 'DRAW-REVIEW', name: '待审核图纸', bomKinds: ['NonStandard'], state: 'InReview', selectable: false }] }))
   await page.route('**/api/projects/*/drawing-reviews', route => route.fulfill({ json: [{ id: 'auto-review', projectId, number: 'DR-AUTO', state: 'InReview', createdBy: 'engineer', createdAt: '2026-10-10T00:00:00Z', assignedReviewers: ['admin'], items: [{ id: 'review-item', packageId: 'auto-review', modelDocumentId: 'doc-assembly', drawingDocumentId: 'doc-drawing', drawingNumber: 'DRAW-REVIEW', name: '待审核图纸', drawingState: 'Pending', modelState: 'NotRequired', drawingCreatedBy: 'engineer' }], markups: [] }] }))
   await page.goto('/')
@@ -4689,8 +5808,18 @@ test('drawing review automatically checks drawings awaiting the current reviewer
   await page.getByLabel('登录PLM').getByRole('button', { name: '登录', exact: true }).click()
   await enterProject(page)
   await page.getByRole('navigation', { name: '项目功能' }).getByRole('button', { name: '图档', exact: true }).click()
+  await expect(page.getByLabel('图纸审核面板', { exact: true })).toHaveClass(/is-collapsed/)
+  await expect(page.locator('.drawing-review-panel')).toHaveCSS('width', '34px')
+  await page.screenshot({ path: join(tmpdir(), 'pdm-drawing-review-default-collapsed.png'), animations: 'disabled' })
+  await page.getByRole('button', { name: '展开图纸审核栏', exact: true }).click()
   await expect(page.getByLabel('选择图纸 DRAW-REVIEW')).toBeChecked()
   await expect(page.locator('.drawing-review-overview__batch')).toContainText('已选 1 张')
+  await page.getByRole('button', { name: '折叠图纸审核栏', exact: true }).click()
+  await expect(page.getByLabel('图纸审核面板', { exact: true })).toHaveClass(/is-collapsed/)
+  const projectNavigation = page.getByRole('navigation', { name: '项目功能' })
+  await projectNavigation.getByRole('button', { name: '信息', exact: true }).click()
+  await projectNavigation.getByRole('button', { name: '图档', exact: true }).click()
+  await expect(page.getByLabel('图纸审核面板', { exact: true })).toHaveClass(/is-collapsed/)
   await page.screenshot({ path: testInfo.outputPath('drawing-review-auto-selected.png') })
 })
 
@@ -4721,6 +5850,63 @@ test('drawing review select all excludes approved and unavailable drawings', asy
   await page.screenshot({ path: testInfo.outputPath('drawing-review-choose-reviewer.png') })
 })
 
+test('all release pages collapse workflow and package information and omit execution notes over LAN HTTP', async ({ page }, testInfo) => {
+  test.setTimeout(120_000)
+  await mockPlanCompanionPanels(page)
+  await page.route('**/api/material-code/resolve', route => route.fulfill({ json: [] }))
+  await page.setViewportSize({ width: 1959, height: 1080 })
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  const scopes = ['StandardLongLead', 'StandardFormal', 'StandardSupplement', 'NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement', 'ElectricalLongLead', 'ElectricalFormal', 'ElectricalSupplement']
+  const releases = scopes.map((scope, index) => ({ id: `compact-release-${index}`, projectId, number: `RP-COMPACT-${index}`, scope, state: 'Published', workflowVersion: 1,
+    createdAt: '2026-10-23T00:00:00Z', publishedAt: '2026-10-23T01:00:00Z', selectedBomItemIds: [], standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [],
+    approvalTasks: [{ id: `approved-${index}`, stepName: '工程师自检', stage: 0, assignee: 'engineer', decisionBy: 'engineer', decision: 'Approved', decidedAt: '2026-10-23T01:00:00Z', comment: '提交人自检' }] }))
+  await page.route('**/api/projects/*/release-packages', route => route.fulfill({ json: releases }))
+  await page.route('**/api/projects/*/release-preview-items*', route => route.fulfill({ json: [] }))
+  await page.route('**/api/release-packages/*/item-comments', route => route.fulfill({ json: [] }))
+  await page.route('**/api/release-packages/*/execution', route => route.fulfill({ json: { id: 'execution', state: 'Published', ready: true, acknowledgementIds: [], confirmedRemovedBomItemIds: [],
+    workflowNotifications: [{ enabled: true, state: 'Sent', message: '应删除的通知说明' }],
+    progress: { u9: { Standard: { state: 'Succeeded', message: '应删除的U9说明' } }, previewRequired: false, previewState: 'Succeeded', notificationRules: [], departments: [], deliveries: [] } } }))
+  await page.goto('/')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await enterProject(page)
+  await page.getByRole('button', { name: '发布', exact: true }).click()
+  const overview = page.getByRole('region', { name: '发布总览' })
+  const drawer = page.locator('.pdm-bom-release-drawer')
+  for (const release of releases) {
+    await page.getByRole('button', { name: '发布', exact: true }).click()
+    await overview.getByRole('button', { name: new RegExp(`${release.number} ·`) }).click()
+    await expect(drawer).toBeVisible()
+    const workflow = drawer.locator('details[aria-label="审批流程"]')
+    const information = drawer.locator('details[aria-label="发布包信息"]')
+    await expect(drawer.locator('.pdm-approval-chain')).toBeHidden()
+    await expect(drawer.locator('.pdm-release-summary')).toBeHidden()
+    await expect(drawer.locator('.execution-statuses')).toContainText('已回查确认')
+    await expect(drawer).not.toContainText('应删除的通知说明')
+    await expect(drawer).not.toContainText('应删除的U9说明')
+    await expect(drawer).not.toContainText('本发布版本的U9同步和所需生产图纸已齐套')
+    if (release === releases[0]) await drawer.screenshot({ path: join(tmpdir(), 'pdm-release-default-collapsed.png'), animations: 'disabled' })
+    await workflow.locator('summary').click()
+    await expect(drawer.locator('.pdm-approval-chain')).toBeVisible()
+    await expect(workflow).toContainText('工程师自检')
+    await information.locator('summary').click()
+    await expect(drawer.locator('.pdm-release-summary')).toBeVisible()
+    await expect(information).toContainText(release.number)
+    await workflow.locator('summary').click()
+    await information.locator('summary').click()
+    await expect(drawer.locator('.pdm-approval-chain')).toBeHidden()
+    await expect(drawer.locator('.pdm-release-summary')).toBeHidden()
+    await drawer.locator('.el-drawer__close-btn').click()
+    await expect(drawer).toBeHidden()
+  }
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
+})
+
 test('empty electrical release never displays standard BOM items', async ({ page }, testInfo) => {
   await page.route('**/api/projects/*/boms/Electrical**', route => route.fulfill({ json: [] }))
   const releaseProject = { id: projectId, code: 'PRJ-REAL-001', name: '电气发布项目', owner: 'admin', vaultLocation: 'D:/PDM', releaseLocation: 'D:/Release', isActive: true, quantity: 1, serialNumbers: [], designers: [], canReadContent: true, effectiveProjectPermissions: ['project.edit', 'bom.electrical.edit', 'release.manage'] }
@@ -4733,10 +5919,10 @@ test('empty electrical release never displays standard BOM items', async ({ page
   await page.getByLabel('登录PLM').getByRole('button', { name: '登录', exact: true }).click()
   await enterProject(page)
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
-  await page.getByRole('tab', { name: /电气BOM/ }).click()
+  await page.getByRole('tab', { name: /电气件BOM/ }).click()
   await page.getByRole('button', { name: '发起发布', exact: true }).click()
   const drawer = page.locator('.pdm-bom-release-drawer')
-  await expect(drawer).toContainText('电气BOM审批发布')
+  await expect(drawer).toContainText('电气件BOM审批发布')
   await drawer.getByLabel('发布类型', { exact: true }).selectOption('ElectricalFormal')
   await drawer.getByLabel('整包需求日期').fill('2026-10-20')
   await expect(drawer).toContainText('当前没有可发布的物料')

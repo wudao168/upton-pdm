@@ -395,6 +395,9 @@ export interface PdmSystemSettings {
   checkoutStrongReminderHours: number
   checkoutOverdueHours: number
   checkoutForceReleaseHours: number
+  checkoutAutoReleaseEnabled?: boolean
+  checkoutIdleReleaseMinutes?: number
+  checkoutReleaseCountdownSeconds?: number
   bomDrawingNumberProperty: string
   bomNameProperty: string
   bomDescriptionProperty: string
@@ -488,6 +491,10 @@ export interface SaveProjectOrganizationInput { id?: string; name: string; proje
 export interface SaveOrganizationUnitInput { id?: string; organizationId: string; parentUnitId?: string; code: string; name: string; kind: OrganizationUnitKind; canArchiveStandardLibrary?: boolean; canManufacture: boolean; isActive: boolean; sortOrder: number }
 export interface MainProjectStaffingInput { primaryProjectManager: string; collaborativeProjectManagers: string[]; designLeads: string[] }
 export interface DocumentNode {
+  drawingVersion?: string
+  drawingVersionNumber?: number | null
+  publishedVersion?: string
+  structureIndexPending?: boolean
   isVirtualGroup?: boolean
   /** Unique assembly occurrence. Tree selection and rendering must use this value. */
   id: string
@@ -585,6 +592,9 @@ export interface ProjectFolderTemplateNode {
   permissions: FolderPermissionRule[]
 }
 export interface ManagedDocument {
+  drawingVersion?: string
+  drawingVersionNumber?: number | null
+  publishedVersion?: string
   id: string
   projectId: string
   folderId?: string
@@ -699,9 +709,12 @@ export interface EditLockSummary {
   ownedByCurrentUser: boolean
   canRequestRelease: boolean
   canForceRelease: boolean
+  sessionId?: string
+  canEmergencyRelease?: boolean
 }
 
 export interface BomItem {
+  displayRevision?: string
   maintainedItem?: BomItem
   summaryItemIds?: string[]
   summaryFingerprint?: string
@@ -774,6 +787,9 @@ export interface EngineeringKitComponent {
   unit: string
   isOptional: boolean
   sortOrder: number
+  specification?: string | null
+  brand?: string | null
+  remark?: string | null
 }
 
 export interface EngineeringKitRevision {
@@ -787,9 +803,18 @@ export interface EngineeringKitRevision {
   createdAt: string
   publishedBy?: string
   publishedAt?: string
+  standardLibraryCategoryId?: string | null
 }
 
 export interface EngineeringKit {
+  selectionAdvice?: string | null
+  referencePrice?: number | null
+  isRecommended?: boolean
+  coverImageAttachmentId?: string | null
+  isActive?: boolean
+  referenceCount?: number
+  model3DAttachmentCount?: number
+  documentAttachmentCount?: number
   id: string
   code?: string
   model?: string
@@ -808,6 +833,7 @@ export interface EngineeringKit {
   standardCode?: string | null
   categoryName?: string | null
   categoryCode?: string | null
+  standardLibraryCategoryId?: string | null
 }
 
 export interface EngineeringKitOptionEntry {
@@ -1021,6 +1047,7 @@ export interface ProductionDrawingBomQuantity {
   totalQuantity: number; priorReleasedQuantity: number; netIssueQuantity: number
 }
 export interface ProductionDrawingItem {
+  qrContent?: string | null
   projectId: string; projectCode: string; projectName: string
   publishedBy?: string | null; division?: string | null; projectManager?: string | null
   documentId: string; versionId: string; releasePackageId: string; releasePackageNumber: string
@@ -1094,6 +1121,7 @@ export interface ReleasePackageSummary {
   workflowCode?: string
   workflowVersion: number
   selectedBomItemIds: string[]
+  versionBindings?: Array<{ documentId: string; versionId: string; revision: string; sha256: string; publish: boolean; fileName?: string; requiresPromotion?: boolean; previousReleasedRevision?: string; targetRevision?: string }> | null
   createsManufacturingBaseline: boolean
   locksDocuments: boolean
   wholeSetMultiplier?: number
@@ -1286,6 +1314,9 @@ export interface ProjectVersionItem {
 }
 
 export interface DocumentVersionSummary {
+  drawingVersion?: string
+  drawingVersionNumber?: number | null
+  publishedVersion?: string
   id: string
   documentId: string
   revision: { display: string }
@@ -1296,6 +1327,7 @@ export interface DocumentVersionSummary {
   createdAt: string
   changeNote: string
   sourceDescription?: string
+  sourceVersionId?: string | null
   releasePackageId?: string
   preview?: {
     format: 'Step' | 'Pdf' | 0 | 1
@@ -1441,6 +1473,7 @@ export interface MaterialDuplicateRule {
 }
 
 export interface StandardLibraryCategory {
+  code?: string | null
   id: string
   name: string
   parentId?: string | null
@@ -1452,6 +1485,9 @@ export interface StandardLibraryCategory {
   updatedAt: string
   rowVersion: number
 }
+
+export interface StandardLibraryImportRow { materialCode: string; status: 'Imported' | 'Existing' | 'Failed'; message: string; name?: string | null; specification?: string | null; brand?: string | null }
+export interface StandardLibraryImportResult { rows: StandardLibraryImportRow[]; importedCount: number; existingCount: number; failedCount: number }
 
 export type MaterialRelationSelectionMode = 'Single' | 'Multiple'
 export type MaterialRelationQuantityMode = 'PerMainQuantity' | 'Fixed'
@@ -1576,6 +1612,7 @@ export interface MaterialRelationCompleteness {
 }
 
 export interface StandardLibraryMaterial {
+  kit?: EngineeringKit | null
   material: PdmMaterial
   categories: StandardLibraryCategory[]
   coverImage?: MaterialAttachment | null
@@ -2253,6 +2290,19 @@ export interface ProjectProcurementTrackingItem {
   isWarehouseMovementRow?: boolean
   isFullyReceived?: boolean
   details: ProcurementDocumentDetail[]
+  manufacturing?: ProcurementManufacturing | null
+}
+
+export interface ProcurementManufacturing {
+  releasePackageId: string; lineId: string; revision: string; publishedAt: string; receivedAt?: string | null
+  status: string; assignedQuantity: number; submittedQuantity: number; qualifiedQuantity: number; issuedQuantity: number
+  requiredOn?: string | null; forecastOn?: string | null; responsible?: string | null; suppliers?: string | null; latestNote?: string | null
+  qualifiedAt?: string | null; issuedAt?: string | null; batches: ProcurementManufacturingBatch[]
+}
+export interface ProcurementManufacturingBatch {
+  id: string; route: string; quantity: number; status: string; supplier?: string | null; assignee?: string | null
+  promisedOn?: string | null; deliveredQuantity: number; submittedQuantity: number; qualifiedQuantity: number; issuedQuantity: number
+  history: import('./productionTracking').ProductionMovement[]
 }
 
 export interface ProjectProcurementTrackingResult {
@@ -2263,6 +2313,7 @@ export interface ProjectProcurementTrackingResult {
   lastSuccessfulRefreshAt?: string | null
   lastRefreshError?: string | null
   hasPublishedBom: boolean
+  manufacturingReadAt?: string | null
 }
 
 export interface U9ProcurementSyncSettings {

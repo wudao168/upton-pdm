@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { rememberedTab } from '../pagePreference'
 import { projectHeaderHtml, projectHeaderCss } from '../exportFormat'
 import { clearGlobalStatus, ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
@@ -70,6 +71,7 @@ import type {
 import { downloadMaterialImportTemplate } from '../materialImportWorkbook'
 import { u9UnitLabel, u9UnitOptions } from '../u9Units'
 import { useUserDisplayName } from '../userDisplay'
+import { currentMaterialSyncTasks } from '../materialWorkflow'
 
 const displayUserName = useUserDisplayName()
 
@@ -85,11 +87,12 @@ const props = withDefaults(defineProps<{
   canManageRelations?: boolean
   canPublishRelations?: boolean
   canManageKits?: boolean
+  active?: boolean
 }>(), { canCreate: false, canDecideMaterialCode: false, requestedTab: 'materials', canViewRelations: false, canManageRelations: false, canPublishRelations: false, canManageKits: false })
 const emit = defineEmits<{ noticeCountsChange: [counts: { syncTasks: number; codeApprovals: number }] }>()
 const canCreateMaterial = computed(() => props.canCreate || props.canEdit)
 
-const activeTab = ref('materials')
+const activeTab = rememberedTab<string>('materials.tab', 'materials', ['materials','inventory','relations','kits','bom-headers','code-approvals','numbering-settings','rules'])
 const inventoryRequestedMaterialCode = ref('')
 const inventoryRequestKey = ref(0)
 const rowInventoryLoading = reactive<Record<string, boolean>>({})
@@ -130,6 +133,7 @@ type MaterialCodeWorkflowRow = {
 }
 const codeApplications = ref<MaterialCodeApplication[]>([])
 const codeApplicationsLoading = ref(false)
+const codeApplicationsLoaded = ref(false)
 const pendingMasterMaterials = ref<PdmMaterial[]>([])
 const masterApprovalMaterials = computed(() => {
   const applicationMaterials = new Set(codeApplications.value.map(item => item.materialId))
@@ -274,16 +278,7 @@ const approvedApplicationsAwaitingSync = computed(() => codeApplications.value
 const applicationsForSyncTask = (task: MaterialSyncTask) => approvedApplicationsAwaitingSync.value
   .filter(application => application.materialId === task.materialId)
 const currentSynchronizationTasks = computed(() => {
-  const seenMaterials = new Set<string>()
-  const automaticHeaderMaterials = new Set(codeApplications.value
-    .filter(application => application.applicationType === 'BomHeader')
-    .map(application => application.materialId))
-  return tasks.value.filter(task => {
-    if (task.bomHeaderKind || automaticHeaderMaterials.has(task.materialId)) return false
-    if (task.status === 'Superseded' || seenMaterials.has(task.materialId)) return false
-    seenMaterials.add(task.materialId)
-    return task.status !== 'Succeeded' || applicationsForSyncTask(task).length > 0
-  }).sort((left, right) => {
+  return currentMaterialSyncTasks(tasks.value, codeApplications.value).sort((left, right) => {
     const leftCode = left.materialCode?.trim() ?? ''
     const rightCode = right.materialCode?.trim() ?? ''
     if (!leftCode || !rightCode) return leftCode ? -1 : rightCode ? 1 : 0
@@ -325,7 +320,8 @@ const pagedHistoryCodeWorkflowRows = computed(() => historyCodeWorkflowRows.valu
   (historyWorkflowPage.value - 1) * workflowPageSize,
   historyWorkflowPage.value * workflowPageSize,
 ))
-watch([syncTaskNoticeCount, codeApprovalNoticeCount], ([syncTasks, codeApprovals]) => {
+watch([syncTaskNoticeCount, codeApprovalNoticeCount, codeApplicationsLoaded], ([syncTasks, codeApprovals, loaded]) => {
+  if (!loaded) return
   emit('noticeCountsChange', { syncTasks, codeApprovals })
 }, { immediate: true })
 
@@ -397,7 +393,7 @@ const syncLabels: Record<string, string> = {
 const workflowLabels: Record<string, string> = {
   PendingMaterialSync: '待同步料品', MaterialSyncFailed: '料品同步失败', PendingBomSync: '待同步A1 BOM', BomSyncFailed: 'A1 BOM同步失败',
 }
-const bomHeaderLabels: Record<string, string> = { Master: '项目主BOM', Standard: '标准件BOM', NonStandard: '非标件BOM', Electrical: '电气BOM' }
+const bomHeaderLabels: Record<string, string> = { Master: '项目主BOM', Standard: '标准件BOM', NonStandard: '非标件BOM', Electrical: '电气件BOM' }
 const pendingCodeApplicationRows = computed<MaterialCodeApprovalRow[]>(() => [
   ...codeApplications.value.filter(application => application.status === 'Pending' && application.applicationType !== 'BomHeader'),
   ...masterApprovalMaterials.value.map(material => ({
@@ -732,11 +728,16 @@ function replaceCoverUrl(next: string) {
   coverUrl.value = next
 }
 
+const changingCover = ref(false)
 async function handleAttachmentFiles(kind: MaterialAttachmentKind, event: Event) {
   const input = event.target as HTMLInputElement
   const files = Array.from(input.files ?? [])
   input.value = ''
-  if (!editingId.value || files.length === 0) return
+  if (!editingId.value || files.length === 0 || uploadingAttachmentKind.value || changingCover.value) return
+  if (kind === 'CoverImage' && editorAttachments.value.filter(item => item.kind === 'CoverImage').length + files.length > 3) {
+    ElMessage.warning('每个料品最多上传3张图片，请减少本次选择的图片数量。')
+    return
+  }
   const materialId = editingId.value
   uploadingAttachmentKind.value = kind
   attachmentUploadProgress.value = 0
@@ -753,11 +754,13 @@ async function handleAttachmentFiles(kind: MaterialAttachmentKind, event: Event)
         if (kind === 'CoverImage') {
           const current = materials.value.find(item => item.id === materialId)
           if (!current) throw new Error('料品主档已刷新，请重新打开编辑器')
-          const saved = await setMaterialCover(materialId, attachment.id, current.rowVersion, props.token)
-          const materialIndex = materials.value.findIndex(item => item.id === materialId)
-          if (materialIndex >= 0) materials.value[materialIndex] = saved
-          form.expectedRowVersion = saved.rowVersion
-          replaceCoverUrl(await materialAttachmentObjectUrl(materialId, attachment.id, props.token))
+          if (!current.coverImageAttachmentId && !coverUrl.value) {
+            const saved = await setMaterialCover(materialId, attachment.id, current.rowVersion, props.token)
+            const materialIndex = materials.value.findIndex(item => item.id === materialId)
+            if (materialIndex >= 0) Object.assign(materials.value[materialIndex], saved)
+            form.expectedRowVersion = saved.rowVersion
+            replaceCoverUrl(await materialAttachmentObjectUrl(materialId, attachment.id, props.token))
+          }
         }
         uploaded++
       } catch (error) {
@@ -769,7 +772,7 @@ async function handleAttachmentFiles(kind: MaterialAttachmentKind, event: Event)
       if (kind === 'Model3D') material.model3DAttachmentCount = (material.model3DAttachmentCount ?? 0) + uploaded
       if (kind === 'Document') material.documentAttachmentCount = (material.documentAttachmentCount ?? 0) + uploaded
     }
-    if (uploaded > 0) ElMessage.success(kind === 'CoverImage' ? '封面图片已存档并设为当前封面' : `已上传 ${uploaded} 个${kind === 'Model3D' ? '3D' : '资料'}附件`)
+    if (uploaded > 0) ElMessage.success(`已上传 ${uploaded} 个${kind === 'CoverImage' ? '图片' : kind === 'Model3D' ? '3D' : '资料'}附件`)
     if (failures.length > 0) ElMessage.error(failures.join('；'))
   } finally {
     uploadingAttachmentKind.value = null
@@ -777,20 +780,29 @@ async function handleAttachmentFiles(kind: MaterialAttachmentKind, event: Event)
   }
 }
 
-async function clearCover() {
-  if (!editingId.value) return
+function editorAttachmentDeleted(attachment: MaterialAttachment) {
+  editorAttachments.value = editorAttachments.value.filter(item => item.id !== attachment.id)
+  const material = materials.value.find(item => item.id === attachment.materialId)
+  if (!material) return
+  const key = attachment.kind === 'Model3D' ? 'model3DAttachmentCount' : 'documentAttachmentCount'
+  material[key] = editorAttachments.value.filter(item => item.kind === attachment.kind).length
+}
+
+async function changeCover(attachment: MaterialAttachment | null) {
+  if (!editingId.value || changingCover.value || uploadingAttachmentKind.value || !props.canEdit) return
+  changingCover.value = true
   try {
     const current = materials.value.find(item => item.id === editingId.value)
     if (!current) return
-    const saved = await setMaterialCover(current.id, null, current.rowVersion, props.token)
+    const saved = await setMaterialCover(current.id, attachment?.id ?? null, current.rowVersion, props.token)
     const index = materials.value.findIndex(item => item.id === current.id)
-    if (index >= 0) materials.value[index] = saved
+    if (index >= 0) Object.assign(materials.value[index], saved)
     form.expectedRowVersion = saved.rowVersion
-    replaceCoverUrl('')
-    ElMessage.success('当前封面已清除，历史图片仍保留')
+    replaceCoverUrl(attachment ? await materialAttachmentObjectUrl(current.id, attachment.id, props.token) : '')
+    ElMessage.success(attachment ? '已设为封面' : '当前封面已清除，历史图片仍保留')
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '封面清除失败')
-  }
+    ElMessage.error(error instanceof Error ? error.message : '封面设置失败')
+  } finally { changingCover.value = false }
 }
 
 const attachmentViewerTitle = computed(() => {
@@ -974,6 +986,7 @@ async function loadCodeApplications() {
     codeApplications.value = applications
     pendingMasterMaterials.value = masters
     tasks.value = syncTasks
+    codeApplicationsLoaded.value = true
     selectedCodeApplications.value = []
     selectedSyncTasks.value = []
   }
@@ -1683,7 +1696,8 @@ function showPreview(task: MaterialSyncTask) {
 const normalizeRequestedTab = (value: string) => value === 'tasks' ? 'code-approvals' : value
 watch(() => props.requestedTab, value => { if (value) activeTab.value = normalizeRequestedTab(value) })
 onMounted(() => {
-  activeTab.value = normalizeRequestedTab(props.requestedTab)
+  if (props.requestedTab !== 'materials') activeTab.value = normalizeRequestedTab(props.requestedTab)
+  if (activeTab.value === 'relations' && !props.canViewRelations || activeTab.value === 'numbering-settings' && !props.canManageIntegration) activeTab.value = 'materials'
   void loadMainDirectory()
   void resumeMaterialSyncBatch()
 })
@@ -1714,8 +1728,8 @@ onMounted(() => {
               <SquareLoader v-if="materialPageLoading" overlay label="正在查询料品主档" />
               <el-table ref="materialTable" class="material-table" :data="pagedMaterials" :row-class-name="materialRowClass" height="100%" stripe row-key="id" table-layout="fixed" :fit="true" empty-text="尚未创建PLM料品" :default-sort="{ prop: 'createdAt', order: 'descending' }" @sort-change="sortMaterials" @selection-change="selectedMaterials = $event">
           <el-table-column type="selection" width="38" />
-          <el-table-column prop="materialCode" label="物料编码" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="100" show-overflow-tooltip />
-          <el-table-column prop="name" label="名称" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="112" show-overflow-tooltip><template #default="{ row }"><el-tag v-if="row.isRecommended" size="small" type="warning">推荐</el-tag> {{ row.name }}</template></el-table-column>
+          <el-table-column prop="materialCode" label="物料编码" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="100" show-overflow-tooltip ><template #default="{ row }"><span v-stocked-material="row.materialCode">{{ row.materialCode }}</span></template></el-table-column>
+          <el-table-column prop="name" label="名称" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="112" show-overflow-tooltip><template #default="{ row }"><el-tag v-if="row.isRecommended" size="small" type="warning">推荐</el-tag> <span v-stocked-material="row.materialCode">{{ row.name }}</span></template></el-table-column>
           <el-table-column v-if="canViewRelations" label="关联配置" min-width="88"><template #default="{ row }"><el-button link :type="relationStatus(row).type" :aria-label="`查看 ${row.materialCode} 的关联物料`" @click.stop="openRelationDetail(row)">{{ relationStatus(row).label }}</el-button></template></el-table-column>
           <el-table-column label="引用" min-width="48"><template #default="{ row }">{{ row.referenceCount ?? 0 }}</template></el-table-column>
           <el-table-column label="库存" min-width="72"><template #default="{ row }"><el-tooltip :content="rowInventoryTooltip(row)" placement="top"><el-button link :type="rowInventoryErrors[row.id] ? 'danger' : 'primary'" :disabled="!row.materialCode || queryingInventory" :loading="rowInventoryLoading[row.id]" :aria-label="`查询 ${row.materialCode} 的库存`" @click.stop="queryRowInventory(row)">{{ rowInventoryErrors[row.id] ? '查询失败' : rowInventoryResults[row.id] ? formatInventoryQuantity(rowInventoryResults[row.id].quantity) : '查询' }}</el-button></el-tooltip></template></el-table-column>
@@ -1762,7 +1776,7 @@ onMounted(() => {
 
       <el-tab-pane label="料品套件" name="kits">
         <template #label><span class="material-tab-label"><Package :size="16" />料品套件</span></template>
-        <EngineeringKitLibrary v-if="activeTab === 'kits'" :token="token" :can-manage="canManageKits" />
+        <EngineeringKitLibrary v-if="activeTab === 'kits'" :token="token" :can-manage="canManageKits" :active="active !== false" />
       </el-tab-pane>
 
       <el-tab-pane label="BOM料号" name="bom-headers">
@@ -1796,8 +1810,8 @@ onMounted(() => {
                   <el-table-column label="来源" width="150" show-overflow-tooltip><template #default="{ row }">{{ workflowRowSourceLabel(row) }}</template></el-table-column>
                   <el-table-column label="BOM层级" width="88" show-overflow-tooltip><template #default="{ row }">{{ workflowRowTargetLabel(row) }}</template></el-table-column>
                   <el-table-column label="料号分类" width="148"><template #default="{ row }"><el-select v-if="row.approval?.status === 'Pending' && !row.approval.masterMaterial && canDecideMaterialCode" class="material-code-approval-category" :model-value="approvalCategoryCode(row.approval)" filterable :disabled="decidingApplicationId === row.approval.id || batchDecidingApplications" @update:model-value="setApprovalCategoryCode(row.approval, String($event))"><el-option v-for="category in creatableCategories" :key="category.code" :label="`${category.code} ${category.name}`" :value="category.code" /></el-select><span v-else>{{ row.approval?.categoryCode || row.syncTask?.categoryCode || defaultStandardApprovalCategoryCode || '—' }}</span></template></el-table-column>
-                  <el-table-column label="PLM料号" width="110" show-overflow-tooltip><template #default="{ row }">{{ workflowRowMaterialCode(row) || '—' }}</template></el-table-column>
-                  <el-table-column label="名称" width="110" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.applicationName || row.approval?.bomItemName || row.syncTask?.materialName || '—' }}</template></el-table-column>
+                  <el-table-column label="PLM料号" width="110" show-overflow-tooltip><template #default="{ row }"><span v-stocked-material="workflowRowMaterialCode(row)">{{ workflowRowMaterialCode(row) || '—' }}</span></template></el-table-column>
+                  <el-table-column label="名称" width="110" show-overflow-tooltip><template #default="{ row }"><span v-stocked-material="workflowRowMaterialCode(row)">{{ row.approval?.applicationName || row.approval?.bomItemName || row.syncTask?.materialName || '—' }}</span></template></el-table-column>
                   <el-table-column label="型号" width="90" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.specification || row.syncTask?.specification || '—' }}</template></el-table-column>
                   <el-table-column label="品牌" width="72" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.brand || row.syncTask?.brand || '—' }}</template></el-table-column>
                   <el-table-column label="申请人" width="82" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.approval?.requestedBy || row.syncTask?.requestedBy || '') }}</template></el-table-column>
@@ -1820,8 +1834,8 @@ onMounted(() => {
                   <el-table-column label="来源" width="150" show-overflow-tooltip><template #default="{ row }">{{ workflowRowSourceLabel(row) }}</template></el-table-column>
                   <el-table-column label="BOM层级" width="88" show-overflow-tooltip><template #default="{ row }">{{ workflowRowTargetLabel(row) }}</template></el-table-column>
                   <el-table-column label="料号分类" width="148"><template #default="{ row }">{{ row.approval?.categoryCode || row.syncTask?.categoryCode || defaultStandardApprovalCategoryCode || '—' }}</template></el-table-column>
-                  <el-table-column label="PLM料号" width="110" show-overflow-tooltip><template #default="{ row }">{{ workflowRowMaterialCode(row) || '—' }}</template></el-table-column>
-                  <el-table-column label="名称" width="110" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.applicationName || row.approval?.bomItemName || row.syncTask?.materialName || '—' }}</template></el-table-column>
+                  <el-table-column label="PLM料号" width="110" show-overflow-tooltip><template #default="{ row }"><span v-stocked-material="workflowRowMaterialCode(row)">{{ workflowRowMaterialCode(row) || '—' }}</span></template></el-table-column>
+                  <el-table-column label="名称" width="110" show-overflow-tooltip><template #default="{ row }"><span v-stocked-material="workflowRowMaterialCode(row)">{{ row.approval?.applicationName || row.approval?.bomItemName || row.syncTask?.materialName || '—' }}</span></template></el-table-column>
                   <el-table-column label="型号" width="90" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.specification || row.syncTask?.specification || '—' }}</template></el-table-column>
                   <el-table-column label="品牌" width="72" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.brand || row.syncTask?.brand || '—' }}</template></el-table-column>
                   <el-table-column label="申请人" width="82" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.approval?.requestedBy || row.syncTask?.requestedBy || '') }}</template></el-table-column>
@@ -1910,6 +1924,7 @@ onMounted(() => {
       :main-material="editingMaterial"
       :initial-tab="editorInitialTab"
       :can-edit="canEdit || (!editingId && canCreateMaterial)"
+      :can-delete-attachments="canEdit"
       :can-view-relations="canViewRelations"
       :can-manage-relations="canManageRelations"
       :can-publish-relations="canPublishRelations"
@@ -1918,15 +1933,19 @@ onMounted(() => {
       :brands="brandOptions"
       :material-code-placeholder="materialCodePlaceholder"
       :attachments="editorAttachments"
-      :saving="saving"
+      :saving="saving || changingCover"
       :uploading-kind="uploadingAttachmentKind"
       :upload-progress="attachmentUploadProgress"
       :cover-url="coverUrl"
+      :cover-attachment-id="editingMaterial?.coverImageAttachmentId"
+      :changing-cover="changingCover"
       :u9-fields-locked="editorU9FieldsLocked" :u9-review-required="editingMaterial?.syncStatus === 'NeedsReview' && !editingMaterial?.u9SyncConfirmed"
       @category-change="applyCategoryDefaults"
       @attachment-files="handleAttachmentFiles"
       @download-attachment="downloadAttachment"
-      @clear-cover="clearCover"
+      @attachment-deleted="editorAttachmentDeleted"
+      @clear-cover="changeCover(null)"
+      @set-cover="changeCover"
       @save="saveMaterial"
       @relations-changed="handleRelationsChanged"
     />

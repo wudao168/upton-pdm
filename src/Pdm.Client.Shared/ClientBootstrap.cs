@@ -90,6 +90,14 @@ internal static class ClientBootstrapLoader
     private const string DefaultBootstrapUrl = "http://127.0.0.1:5173/client-bootstrap.json";
     private static readonly JavaScriptSerializer Serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
 
+    public static ClientBootstrapConfiguration LoadLocalConfiguration() => LoadLocalConfiguration(ResolveBootstrapUrl());
+
+    internal static ClientBootstrapConfiguration LoadLocalConfiguration(Uri bootstrapUrl)
+    {
+        if (bootstrapUrl == null) throw new ArgumentNullException(nameof(bootstrapUrl));
+        return TryLoadCache(bootstrapUrl) ?? Normalize(new ClientBootstrapConfiguration(), bootstrapUrl);
+    }
+
     public static async Task<ClientBootstrapConfiguration> LoadAsync(CancellationToken cancellationToken)
     {
         return await LoadAsync(ResolveBootstrapUrl(), cancellationToken).ConfigureAwait(false);
