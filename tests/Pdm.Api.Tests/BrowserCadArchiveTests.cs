@@ -228,6 +228,10 @@ public sealed class BrowserCadArchiveTests
         foreach (var document in documents)
             Assert.Equal(document.Id == root.Id ? 2 : 1, (await fixture.Repository.ListDocumentVersionsAsync(document.Id, default)).Count);
         var other = (await fixture.Repository.ListDocumentsAsync(fixture.Project.Id, default)).Single(doc => doc.Kind == DocumentKind.Other);
+        var nativeIndexes = await fixture.Repository.ListNativeReferenceIndexesAsync(fixture.Project.Id, default);
+        Assert.True(nativeIndexes.Any(index => index.DocumentId == root.Id
+            && index.Children.Any(child => child.DocumentId == other.Id)),
+            string.Join(" | ", nativeIndexes.Select(index => $"{index.DocumentId}/{index.Configuration}/{index.Revision?.Display}/{index.Children.Count}")));
         var opened = await fixture.Client.PostAsJsonAsync($"/api/documents/{root.Id}/open-manifest", new { treeScopeOnly = true });
         Assert.True(opened.IsSuccessStatusCode, await opened.Content.ReadAsStringAsync());
         var manifest = (await opened.Content.ReadFromJsonAsync<ControlledOpenManifest>())!;

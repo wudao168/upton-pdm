@@ -209,6 +209,7 @@ internal sealed class ProjectBrowserDialog : Form
         ForeColor = Color.FromArgb(54, 76, 102)
     };
     private readonly Button confirm = new Button { Text = "确认选择", AutoSize = false, Size = new Size(96, 30), Margin = Padding.Empty };
+    private readonly TableLayoutPanel layout;
     private readonly Guid? initialProjectId;
     private readonly bool requireSubmissionAccess;
 
@@ -252,10 +253,12 @@ internal sealed class ProjectBrowserDialog : Form
         }, 0, 0);
         searchPanel.Controls.Add(search, 1, 0);
 
-        var columns = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
-        columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
-        columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
-        columns.Controls.Add(BuildProjectGroup("1. 主项目", mainProjects, null), 0, 0);
+        var columns = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35));
+        columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 65));
+        var mainGroup = BuildProjectGroup("1. 主项目", mainProjects, null);
+        mainGroup.Margin = new Padding(0, 0, 8, 0);
+        columns.Controls.Add(mainGroup, 0, 0);
         columns.Controls.Add(BuildProjectGroup("2. 图档归属（必选）", childProjects, childHint), 1, 0);
 
         var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = false, Size = new Size(96, 30), Margin = new Padding(0, 0, 6, 0) };
@@ -270,14 +273,14 @@ internal sealed class ProjectBrowserDialog : Form
         buttons.Controls.Add(cancel);
         buttons.Controls.Add(confirm);
 
-        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0, 6, 0, 0) };
+        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0, 10, 0, 0) };
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 198));
         selection.Margin = new Padding(0, 0, 6, 0);
         footer.Controls.Add(selection, 0, 0);
         footer.Controls.Add(buttons, 1, 0);
 
-        var layout = new TableLayoutPanel
+        layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
@@ -287,7 +290,7 @@ internal sealed class ProjectBrowserDialog : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
         layout.Controls.Add(searchPanel, 0, 0);
         layout.Controls.Add(new Label
         {
@@ -316,10 +319,13 @@ internal sealed class ProjectBrowserDialog : Form
         }
     }
 
+    internal void ConfigureInlineLayout() => layout.Padding = Padding.Empty;
+
     private static Control BuildProjectGroup(string title, Control list, Control footer)
     {
-        var group = new GroupBox { Text = title, Dock = DockStyle.Fill, Padding = new Padding(8) };
+        var group = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
         group.Controls.Add(list);
+        group.Controls.Add(new Label { Text = title, Dock = DockStyle.Top, Height = 24, TextAlign = ContentAlignment.MiddleLeft });
         if (footer != null)
         {
             group.Controls.Add(footer);
@@ -334,7 +340,7 @@ internal sealed class ProjectBrowserDialog : Form
         var query = search.Text.Trim();
         var roots = projects
             .Where(project => !project.ParentProjectId.HasValue)
-            .Where(project => Matches(project, query)
+            .Where(project => Matches(project, query) || MatchesMainDocuments(project, query)
                 || projects.Any(child => child.ParentProjectId == project.Id && Matches(child, query)))
             .OrderBy(project => project.Code, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -346,6 +352,7 @@ internal sealed class ProjectBrowserDialog : Form
 
         var restoreId = selectedMainId ?? ResolveInitialMainProjectId();
         SelectListItem(mainProjects, restoreId);
+        if (mainProjects.SelectedIndex < 0 && roots.Length == 1 && query.Length > 0) mainProjects.SelectedIndex = 0;
         RefreshChildren();
     }
 
@@ -547,11 +554,11 @@ internal sealed class ProjectBrowserDialog : Form
             return;
         }
 
-        const int documentStatusWidth = 96;
-        const int businessStatusWidth = 96;
-        const int submissionStatusWidth = 104;
         var available = Math.Max(0, childProjects.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4);
-        childProjects.Columns[0].Width = Math.Max(150, available - documentStatusWidth - businessStatusWidth - submissionStatusWidth);
+        var documentStatusWidth = Math.Max(68, Math.Min(96, available * 17 / 100));
+        var businessStatusWidth = Math.Max(68, Math.Min(96, available * 17 / 100));
+        var submissionStatusWidth = Math.Max(76, Math.Min(104, available * 20 / 100));
+        childProjects.Columns[0].Width = Math.Max(120, available - documentStatusWidth - businessStatusWidth - submissionStatusWidth);
         childProjects.Columns[1].Width = documentStatusWidth;
         childProjects.Columns[2].Width = businessStatusWidth;
         childProjects.Columns[3].Width = submissionStatusWidth;

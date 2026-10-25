@@ -27,6 +27,34 @@ internal static partial class Program
  {
   AppDomain.CurrentDomain.AssemblyResolve+=(_,e)=>{var path=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0])),new AssemblyName(e.Name).Name+".dll");return File.Exists(path)?Assembly.LoadFrom(path):null;};
   assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));
+  if(args.Length>1&&args[1]=="--archive-native-reference-regression")
+  {
+   try{ArchiveNativeReferenceScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
+  }
+  if(args.Length>1&&args[1]=="--archive-project-picker-regression")
+  {
+   using(var projectHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    projectHost.Shown+=async(_,__)=>{try{await ArchiveProjectPickerScenario(projectHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{projectHost.Close();}};
+    Application.Run(projectHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--native-materialization-regression")
+  {
+   try{NativeMaterializationScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
+  }
+  if(args.Length>1&&args[1]=="--historical-reference-repair-regression")
+  {
+   using(var historicalHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    historicalHost.Shown+=async(_,__)=>{try{await HistoricalReferenceRepairScenario(args[2],args[3]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{historicalHost.Close();}};
+    Application.Run(historicalHost);
+   }
+   return;
+  }
   if(args.Length>1&&args[1]=="--archive-confirm-selection-regression")
   {
    using(var confirmHost=new Form{Opacity=0,ShowInTaskbar=false})

@@ -225,7 +225,7 @@ internal sealed class ArchiveSessionWindow : Form
     {
         this.session = session;
         Text = "UPLM 存档"; Font = new Font("Microsoft YaHei UI", 9F);
-        ClientSize = new Size(1240, 860); MinimumSize = new Size(1200, 820);
+        ClientSize = new Size(1480, 860); MinimumSize = new Size(1200, 820);
         ShowInTaskbar = false; TopMost = true;
         DialogWindowSizing.CenterOnOwnerScreen(this);
         confirmationHost.Controls.Add(confirmation); confirmationHost.Controls.Add(confirmationActions); confirmationHost.Controls.Add(confirmationTitle);
@@ -235,6 +235,7 @@ internal sealed class ArchiveSessionWindow : Form
         informationHeader.Controls.Add(progress); informationHeader.Controls.Add(file);
         informationHeader.Controls.Add(stage); informationHeader.Controls.Add(elapsed); informationHeader.Controls.Add(stop);
         processRecords.Controls.Add(history); processRecords.Controls.Add(confirmationHost);
+        processRecords.Resize += (_, __) => ResizeProjectConfirmation();
         information.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         information.RowStyles.Add(new RowStyle(SizeType.Absolute, 128));
         information.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -242,8 +243,8 @@ internal sealed class ArchiveSessionWindow : Form
         information.Controls.Add(informationHeader, 0, 0); information.Controls.Add(processRecords, 0, 1);
         information.Resize += (_, __) => AlignProcessRecords();
         var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(4) };
-        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 66.66667F));
-        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33333F));
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 820));
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         body.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         selection.Margin = Padding.Empty;
         body.Controls.Add(selection, 0, 0); body.Controls.Add(information, 1, 0);
@@ -269,12 +270,19 @@ internal sealed class ArchiveSessionWindow : Form
     {
         var batch = selection.Controls.OfType<BatchOperationDialog>().FirstOrDefault(form => form.Visible);
         if (batch == null || !batch.IsHandleCreated) return;
-        var bounds = information.RectangleToClient(batch.FileListContainer.RectangleToScreen(batch.FileListContainer.ClientRectangle));
+        var list = batch.FileListContent;
+        var bounds = information.RectangleToClient(list.Parent.RectangleToScreen(list.Bounds));
         var top = Math.Max(0, bounds.Top);
         var bottom = Math.Max(0, information.ClientSize.Height - bounds.Bottom);
         if (information.RowStyles[0].Height == top && information.RowStyles[2].Height == bottom) return;
         information.RowStyles[0].Height = top;
         information.RowStyles[2].Height = bottom;
+    }
+
+    private void ResizeProjectConfirmation()
+    {
+        if (confirmation.Controls.OfType<ProjectBrowserDialog>().Any(form => form.Visible))
+            confirmationHost.Height = Math.Max(300, Math.Min(420, processRecords.ClientSize.Height * 3 / 5));
     }
 
     public void Report(string message, string fileName, int completed, int total)
@@ -315,6 +323,9 @@ internal sealed class ArchiveSessionWindow : Form
         var previousActions = confirmationActions.Controls.Cast<Control>().ToArray();
         var previousAccept = AcceptButton; var previousCancel = CancelButton;
         var previousSelectionEnabled = selection.Enabled;
+        var inlineProject = !isSelection && form is ProjectBrowserDialog;
+        var previousConfirmationHeight = confirmationHost.Height;
+        var previousAutoScroll = confirmation.AutoScroll;
         if (isSelection && form is BatchOperationDialog) stop.Hide();
         if (!isSelection) selection.Enabled = false;
         confirmationHost.Visible = !isSelection;
@@ -325,7 +336,14 @@ internal sealed class ArchiveSessionWindow : Form
         form.Dock = DockStyle.Fill;
         if (!isSelection)
         {
-            form.Dock = DockStyle.Top; form.Height = Math.Max(220, form.Height);
+            if (inlineProject)
+            {
+                ((ProjectBrowserDialog)form).ConfigureInlineLayout();
+                confirmation.AutoScroll = false;
+                confirmation.AutoScrollPosition = Point.Empty;
+            }
+            else { form.Dock = DockStyle.Top; form.Height = Math.Max(220, form.Height); }
+            confirmationActions.Visible = !inlineProject;
             confirmationTitle.Text = "请确认：" + form.Text;
             Append("等待确认：" + form.Text);
         }
@@ -334,6 +352,8 @@ internal sealed class ArchiveSessionWindow : Form
         {
             batchLayout.FileListContainer.LocationChanged += (_, __) => AlignProcessRecords();
             batchLayout.FileListContainer.SizeChanged += (_, __) => AlignProcessRecords();
+            batchLayout.FileListContent.LocationChanged += (_, __) => AlignProcessRecords();
+            batchLayout.FileListContent.SizeChanged += (_, __) => AlignProcessRecords();
         }
         var done = false; var result = DialogResult.Cancel;
         var buttons = EnumerateControls(form).OfType<Button>().Where(button => button.DialogResult != DialogResult.None).ToArray();
@@ -341,7 +361,7 @@ internal sealed class ArchiveSessionWindow : Form
         var closeHandlers = new Dictionary<Button, EventHandler>();
         foreach (var button in buttons)
         {
-            if (!isSelection) confirmationActions.Controls.Add(button);
+            if (!isSelection && !inlineProject) confirmationActions.Controls.Add(button);
             EventHandler handler = (_, __) => { form.DialogResult = button.DialogResult; form.Close(); };
             closeHandlers[button] = handler; button.Click += handler;
         }
@@ -354,6 +374,7 @@ internal sealed class ArchiveSessionWindow : Form
         AcceptButton = form.AcceptButton; CancelButton = form.CancelButton;
         form.Show();
         AlignProcessRecords();
+        ResizeProjectConfirmation();
         while (!done && !session.Token.IsCancellationRequested && !IsDisposed)
         {
             // This nested pump belongs only to the presentation STA; it never dispatches CAD work.
@@ -383,6 +404,9 @@ internal sealed class ArchiveSessionWindow : Form
             selection.Enabled = previousSelectionEnabled;
             confirmationTitle.Text = "确认区：暂无待确认事项";
             confirmationHost.Hide();
+            confirmationHost.Height = previousConfirmationHeight;
+            confirmation.AutoScroll = previousAutoScroll;
+            confirmationActions.Show();
             Append("确认结果：" + form.Text + "　" + ResultText(result));
         }
         return session.Token.IsCancellationRequested ? DialogResult.Cancel : result;

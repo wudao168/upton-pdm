@@ -35,6 +35,7 @@ public static class ReleaseBoundSourceReader
         ReleasePackage package, bool previewsOnly, CancellationToken ct)
     {
         var result = new List<ReleasePreviewSource>();
+        var nativeIndexes = await repository.ListNativeReferenceIndexesAsync(package.ProjectId, ct);
         foreach (var binding in package.VersionBindings ?? [])
         {
             if (previewsOnly && !binding.Publish) continue;
@@ -51,8 +52,9 @@ public static class ReleaseBoundSourceReader
             if (package.State == ReleasePackageState.Published && binding.Publish && source.Status != DocumentVersionStatus.Released)
                 throw new PdmConflictException("发布图档尚无对应正式版本，不能标记资料齐套。");
             source.PropertySnapshot.TryGetValue("SourceFileSha256", out var originalHash);
+            var independent = ArchiveSafety.NativeCopy(nativeIndexes, document.Id, source);
             result.Add(new(document.Id, source.Id, document.DrawingNumber, FileName(string.IsNullOrWhiteSpace(binding.FileName) ? document.FileName : binding.FileName),
-                document.Kind, source.StorageRelativePath, source.FileLength, source.Sha256,
+                document.Kind, independent?.RelativePath ?? source.StorageRelativePath, independent?.Length ?? source.FileLength, independent?.Sha256 ?? source.Sha256,
                 source.Status == DocumentVersionStatus.Released || string.IsNullOrWhiteSpace(originalHash) ? source.Sha256 : originalHash,
                 source.Status == DocumentVersionStatus.Released ? source.Revision.Display : source.Revision.Release().Display,
                 source.Status == DocumentVersionStatus.Released));

@@ -1339,6 +1339,14 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<CadReferenceSnapshot?> GetLatestReferenceSnapshotAsync(Guid projectId, CancellationToken cancellationToken) =>
         Task.FromResult<CadReferenceSnapshot?>(referenceSnapshots.GetValueOrDefault(projectId));
 
+    public Task<IReadOnlyList<DocumentReferenceNode>> ListNativeReferenceIndexesAsync(Guid projectId, CancellationToken cancellationToken)
+    { lock (gate) return Task.FromResult(NativeReferenceIndexes(projectId)); }
+
+    private IReadOnlyList<DocumentReferenceNode> NativeReferenceIndexes(Guid projectId) => referenceSnapshotHistory.Values
+            .Where(snapshot => snapshot.ProjectId == projectId && snapshot.Root.UsesNativeFileInventory)
+            .GroupBy(snapshot => (snapshot.RootDocumentId, snapshot.Root.Configuration, snapshot.Root.Revision))
+            .Select(group => group.OrderByDescending(snapshot => snapshot.CapturedAt).First().Root).ToArray();
+
     public Task<CadReferenceSnapshot?> GetProjectReferenceRootAsync(Guid projectId, Guid rootDocumentId, CancellationToken cancellationToken) =>
         Task.FromResult<CadReferenceSnapshot?>(referenceRoots.GetValueOrDefault((projectId, rootDocumentId)));
 
@@ -1893,10 +1901,49 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                     || (!string.IsNullOrWhiteSpace(latestSourceSha256)
                         && !string.IsNullOrWhiteSpace(sourceFileSha256)
                         && string.Equals(latestSourceSha256, sourceFileSha256, StringComparison.OrdinalIgnoreCase)));
-            if (!commit.IsHistoricalRestore && sameFile && latest is not null && ArchiveSafety.SameProperties(latest.PropertySnapshot, commit.Properties)
-                && ArchiveSafety.SameOwnDesignReferences(latest.ReferenceSnapshot, commit.ReferenceSnapshot.Root))
+            if (commit.ReferenceSnapshot.Root.NativeIsolation != null)
             {
-                if (commit.IsProjectRoot && !referenceRoots.ContainsKey((document.ProjectId, documentId)))
+                if (latest == null || !ArchiveSafety.SameProperties(latest.PropertySnapshot, commit.Properties)
+                    || !(ArchiveSafety.SameOwnDesignReferences(latest.ReferenceSnapshot, commit.ReferenceSnapshot.Root)
+                        || ArchiveSafety.IsNativeIndexOnlyUpdate(latest.ReferenceSnapshot, commit.ReferenceSnapshot.Root)))
+                    throw new PdmConflictException("固化副本的来源内容或设计属性已经变化，不能作为原版本的技术副本保存。");
+                NativeFileIsolation isolated;
+                try { isolated = ArchiveSafety.ValidateNativeIsolation(commit.ReferenceSnapshot, latest.Id, latest.Sha256,
+                    commit.File.RelativePath, commit.File.Length, commit.File.Sha256); }
+                catch (InvalidOperationException error) { throw new PdmRuleException(error.Message); }
+                commit = commit with { ReferenceSnapshot = commit.ReferenceSnapshot with
+                    { Root = commit.ReferenceSnapshot.Root with { NativeIsolation = isolated, UsesNativeFileInventory = true } } };
+                sameFile = true;
+            }
+            if (!commit.IsHistoricalRestore && sameFile && latest is not null && ArchiveSafety.SameProperties(latest.PropertySnapshot, commit.Properties)
+                && (ArchiveSafety.SameOwnDesignReferences(latest.ReferenceSnapshot, commit.ReferenceSnapshot.Root)
+                    || ArchiveSafety.IsNativeIndexOnlyUpdate(latest.ReferenceSnapshot, commit.ReferenceSnapshot.Root)))
+            {
+                commit = commit with { ReferenceSnapshot = commit.ReferenceSnapshot with
+                    { Root = commit.ReferenceSnapshot.Root with { Revision = latest.Revision, CheckedOutBy = null } } };
+                var previousIndex = referenceSnapshotHistory.Values.Where(snapshot => snapshot.ProjectId == document.ProjectId
+                    && snapshot.RootDocumentId == documentId && snapshot.Root.Configuration == commit.ReferenceSnapshot.Root.Configuration
+                    && snapshot.Root.Revision == latest.Revision && snapshot.Root.UsesNativeFileInventory)
+                    .OrderByDescending(snapshot => snapshot.CapturedAt).FirstOrDefault();
+                if (commit.ReferenceSnapshot.Root.NativeIsolation == null && previousIndex?.Root.NativeIsolation is NativeFileIsolation existing
+                    && existing.SourceVersionId == latest.Id && existing.SourceSha256 == latest.Sha256
+                    && existing.ReferenceScopeSha256 == ArchiveSafety.NativeIsolationScope(commit.ReferenceSnapshot.Root))
+                    commit = commit with { ReferenceSnapshot = commit.ReferenceSnapshot with
+                        { Root = commit.ReferenceSnapshot.Root with { NativeIsolation = existing } } };
+                commit = commit with { ReferenceSnapshot = ArchiveSafety.Rehash(commit.ReferenceSnapshot) };
+                var indexChanged = commit.ReferenceSnapshot.Root.UsesNativeFileInventory
+                    && (previousIndex == null || !ArchiveSafety.SameReferences(previousIndex.Root, commit.ReferenceSnapshot.Root)
+                        || previousIndex.Root.NativeIsolation != commit.ReferenceSnapshot.Root.NativeIsolation
+                        || previousIndex.Root.NativeIsolationVerified != commit.ReferenceSnapshot.Root.NativeIsolationVerified);
+                if (indexChanged)
+                {
+                    var capturedAt = timeProvider.GetUtcNow();
+                    if (previousIndex is not null && capturedAt <= previousIndex.CapturedAt)
+                        capturedAt = previousIndex.CapturedAt.AddMilliseconds(1);
+                    commit = commit with { ReferenceSnapshot = commit.ReferenceSnapshot with { CapturedAt = capturedAt } };
+                    referenceSnapshotHistory[commit.ReferenceSnapshot.SnapshotId] = commit.ReferenceSnapshot;
+                }
+                if (commit.IsProjectRoot && (!referenceRoots.ContainsKey((document.ProjectId, documentId)) || indexChanged))
                 {
                     var previousRoot = referenceSnapshots.GetValueOrDefault(document.ProjectId);
                     referenceSnapshots[document.ProjectId] = ProjectReferenceForest.Merge(previousRoot?.CapturedBy == "seed" ? null : previousRoot, commit.ReferenceSnapshot);
@@ -1947,11 +1994,12 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 return latest.ReferenceSnapshot with { Revision = latest.Revision }; });
         var activeRoots = referenceSnapshots.TryGetValue(projectId, out var active)
             ? ProjectReferenceForest.Roots(active).Select(root => root.DocumentId).ToHashSet() : [];
+        var nativeIndexes = NativeReferenceIndexes(projectId);
         var roots = referenceRoots.Where(pair => pair.Key.Item1 == projectId && activeRoots.Contains(pair.Key.Item2)).ToArray();
         CadReferenceSnapshot? aggregate = null;
         foreach (var pair in roots.OrderBy(pair => pair.Value.Root.FileName, StringComparer.OrdinalIgnoreCase))
         {
-            var refreshed = WorkingReferenceTree.Refresh(pair.Value, current, at, actor);
+            var refreshed = WorkingReferenceTree.Refresh(pair.Value, current, at, actor, nativeIndexes);
             referenceRoots[pair.Key] = refreshed;
             referenceSnapshotHistory[refreshed.SnapshotId] = refreshed;
             aggregate = ProjectReferenceForest.Merge(aggregate, refreshed);

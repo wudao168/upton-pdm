@@ -41,6 +41,8 @@ internal enum CadWorkState
 internal sealed class CadTreeNode
 {
     public string SuppressedLocalStructureSha256 { get; set; }
+    public HistoricalReferenceRepair HistoricalRepair { get; set; }
+    public bool NativeIsolationOnly { get; set; }
 
     public Guid NodeId { get; set; } = Guid.NewGuid();
 

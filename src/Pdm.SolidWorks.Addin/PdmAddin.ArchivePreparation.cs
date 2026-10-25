@@ -69,7 +69,11 @@ public sealed partial class PdmAddin
         {
             token.ThrowIfCancellationRequested();
             ArchiveSession.Current?.ReportFile(0, 0, file.Node.FileName, "正在固定本次存档的引用和文件校验记录…");
-            try { file.ReferenceSnapshot = PdmApiClient.CaptureArchiveSnapshot(file.Node, plannedPaths); }
+            try
+            {
+                file.ReferenceSnapshot = PdmApiClient.CaptureArchiveSnapshot(file.Node, plannedPaths);
+                if (file.NativeIsolationVerified) file.ReferenceSnapshot = file.ReferenceSnapshot.WithNativeIsolationVerified();
+            }
             catch (Exception exception) when (!(exception is OperationCanceledException))
             {
                 LogDiagnostic("Archive snapshot capture. file=" + file.Node.FileName, exception);
@@ -270,7 +274,7 @@ public sealed partial class PdmAddin
                 token.ThrowIfCancellationRequested();
                 var node = item.Node;
                 report?.Invoke("存档准备：正在核对已打开图档… " + node.FileName);
-                if (node.Role == CadReferenceRole.ExternalFileDependency) continue; // File companions are preserved, not opened or rebuilt as BOM components.
+                if (node.Role == CadReferenceRole.ExternalFileDependency || node.HistoricalRepair != null) continue; // Preserve companions and historical bytes without opening/rebuilding them.
                 token.ThrowIfCancellationRequested();
                 var document = Existing(node.FullPath);
                 if (document == null)
@@ -322,6 +326,8 @@ public sealed partial class PdmAddin
         IReadOnlyList<BatchOperationItem> selected, Guid projectId, CancellationToken token)
     {
         await apiClient.RefreshDocumentRulesAsync(token);
+        // Catch known historical ownership/content conflicts before the expensive native scan.
+        await IncludeHistoricalReferenceRepairsAsync(currentTree, selected, projectId, token, validateOnly: true);
         if (IsSolidWorksCommandActive())
         {
             if (DocumentRuleGate.ShouldBlock("A10", "请先完成SolidWorks当前编辑或保存操作，再提交存档。"))
@@ -438,6 +444,14 @@ public sealed partial class PdmAddin
             .Where(node => node.Role == CadReferenceRole.ExternalFileDependency).Select(node => node.FullPath),
             StringComparer.OrdinalIgnoreCase);
         complete = complete.Concat(all.Where(item => dependencyPaths.Contains(item.Node.FullPath)))
+            .GroupBy(item => item.Node.FullPath, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
+        complete = await IncludeHistoricalReferenceRepairsAsync(verified, complete, projectId, token);
+        var requiredPaths = new HashSet<string>(complete.SelectMany(item => EnumerateArchiveNodes(item.Node))
+            .Where(node => !node.DocumentId.HasValue && node.Status != CadReferenceStatus.Virtual
+                && !IsSolidWorksTemporaryVirtualComponentPath(node.FullPath)
+                && node.NativeFileScopePaths?.Contains(node.FullPath) == true)
+            .Select(node => node.FullPath), StringComparer.OrdinalIgnoreCase);
+        complete = complete.Concat(all.Where(item => requiredPaths.Contains(item.Node.FullPath)))
             .GroupBy(item => item.Node.FullPath, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
         foreach (var item in complete) PdmApiClient.ValidateArchiveReferenceCompleteness(item.Node);
 

@@ -36,16 +36,12 @@ public sealed partial class PdmAddin
             return latest != null && node.OpenedVersionId.HasValue && node.OpenedVersionId != latest.Id
                 && !string.Equals(node.CheckedOutBy, username, StringComparison.OrdinalIgnoreCase) ? ArchiveSelectionState.Pending : ArchiveSelectionState.Changed;
         if (node.RequiresModelUpdate) return ArchiveSelectionState.Changed;
-        if (node.Role != CadReferenceRole.ExternalFileDependency && (node.Kind == CadDocumentKind.Assembly || node.Kind == CadDocumentKind.Drawing))
+        // Identical native model bytes are not an engineering edit. A fuller file
+        // inventory/index is completed separately without revising the model.
+        if (node.Kind == CadDocumentKind.Part || node.Kind == CadDocumentKind.Assembly)
+            return ArchiveSelectionState.Unchanged;
+        if (node.Role != CadReferenceRole.ExternalFileDependency && node.Kind == CadDocumentKind.Drawing)
         {
-            // Expanding a stored assembly can enrich its index or expose imported
-            // children. Exact unchanged server bytes without an edit lease are
-            // not a new engineering change merely because that tree differs.
-            if (node.Kind == CadDocumentKind.Assembly && latest != null
-                && !string.Equals(node.CheckedOutBy, username, StringComparison.OrdinalIgnoreCase)
-                && PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out var binding)
-                && binding.DocumentId == node.DocumentId && binding.VersionId == latest.Id)
-                return ArchiveSelectionState.Unchanged;
             var archived = latest?.ReferenceSnapshot;
             // Completing a legacy drawing index does not change its saved file.
             if (node.DrawingReferenceIndexPending && archived?.DocumentId == node.DocumentId
@@ -53,8 +49,7 @@ public sealed partial class PdmAddin
                 && string.Equals(archived.FileName, node.FileName, StringComparison.OrdinalIgnoreCase)) return ArchiveSelectionState.Unchanged;
             if (archived == null || node.StructureIndexPending || node.HasUnverifiedDrawingIndex) return ArchiveSelectionState.Pending;
             if (node.Kind == CadDocumentKind.Drawing && !node.DrawingViewsRead) return ArchiveSelectionState.Pending;
-            var referencesMatch = node.Kind == CadDocumentKind.Assembly ? OwnAssemblyStructureMatches(archived, node)
-                : ReferenceSnapshotMatchesTree(archived, node);
+            var referencesMatch = ReferenceSnapshotMatchesTree(archived, node);
             if (!referencesMatch || ArchiveIndexWasCompleted(archived, node)) return ArchiveSelectionState.Changed;
         }
         return ArchiveSelectionState.Unchanged;

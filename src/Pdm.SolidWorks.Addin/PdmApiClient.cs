@@ -488,6 +488,9 @@ internal sealed partial class PdmApiClient : IDisposable
                 if (node == root || node.Kind == CadDocumentKind.Drawing || node.Status == CadReferenceStatus.Virtual
                     || !node.DocumentId.HasValue || node.DocumentId == root.DocumentId
                     || !root.NativeFileScopePaths.Contains(node.FullPath) || !inventoryIds.Add(node.DocumentId.Value)) continue;
+                // Drawing model associations already identify these files. A second
+                // inventory child would duplicate the same model relationship.
+                if (root.Kind == CadDocumentKind.Drawing && root.ReferencedModels.Any(model => model.DocumentId == node.DocumentId)) continue;
                 var entry = (Dictionary<string, object>)json.DeserializeObject(json.Serialize(ToRequestNode(node, false, plannedPaths)));
                 entry["children"] = Array.Empty<object>();
                 entry["role"] = (int)CadReferenceRole.ExternalFileDependency;
@@ -528,9 +531,11 @@ internal sealed partial class PdmApiClient : IDisposable
             {
                 root.StructureIndexPending = true;
                 capturedRoot["structureIndexPending"] = true;
-                capturedRoot["children"] = ((object[])capturedRoot["children"]).Concat(inventory).ToArray();
-                serialized = json.Serialize(capturedRoot);
             }
+            // Persist the complete, canonical native-file inventory on every capture.
+            // It must survive both legacy empty indexes and subsequent unchanged saves.
+            capturedRoot["children"] = ((object[])capturedRoot["children"]).Concat(inventory).ToArray();
+            serialized = json.Serialize(capturedRoot);
         }
         var requiredIds = new HashSet<Guid>();
         Action<Dictionary<string, object>, bool> validate = null;
@@ -577,6 +582,21 @@ internal sealed partial class PdmApiClient : IDisposable
             || node.TryGetValue("children", out var children) && ((object[])children)
                 .Cast<Dictionary<string, object>>().Any(HasPendingIndex);
         public ArchiveReferenceSnapshot WithBaseVersion(Guid? id) => new ArchiveReferenceSnapshot(serializedRoot, FileName, PlannedDocumentIds.ToArray(), id);
+        public ArchiveReferenceSnapshot WithNativeIsolationVerified()
+        {
+            var root = (Dictionary<string, object>)CreateRoot();
+            root["nativeIsolationVerified"] = true;
+            root["usesNativeFileInventory"] = true;
+            return new ArchiveReferenceSnapshot(new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(root), FileName, PlannedDocumentIds.ToArray(), ExpectedVersionId);
+        }
+        public ArchiveReferenceSnapshot WithNativeIsolation(NativeFileIsolationDto copy)
+        {
+            var root = (Dictionary<string, object>)CreateRoot();
+            root["nativeIsolation"] = new { sourceVersionId = copy.SourceVersionId, sourceSha256 = copy.SourceSha256,
+                relativePath = copy.RelativePath, length = copy.Length, sha256 = copy.Sha256,
+                geometryEvidenceSha256 = copy.GeometryEvidenceSha256, policyVersion = 1 };
+            return new ArchiveReferenceSnapshot(new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(root), FileName, PlannedDocumentIds.ToArray(), ExpectedVersionId);
+        }
         public object CreateRoot() => new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(serializedRoot);
     }
 
@@ -780,14 +800,30 @@ internal sealed partial class PdmApiClient : IDisposable
         var partialPath = path + ".download";
         try
         {
+            string contentSha256 = expectedSha256;
+            long? sourceLength = null, contentLength = null;
+            Guid? nativeSnapshotId = null;
             using (var response = await httpClient.GetAsync(
-                string.Concat("api/documents/", documentId, "/versions/", versionId, "/file?download=false"),
+                string.Concat("api/documents/", documentId, "/versions/", versionId, "/file?download=false&preferNativeIsolation=true"),
                 cancellationToken).ConfigureAwait(false))
             {
                 if (!response.IsSuccessStatusCode)
                 {
                     ThrowAuthenticationExpiredIfNeeded(response);
                     throw new InvalidOperationException("PLM最新版本文件读取失败。");
+                }
+
+                string Header(string name) => response.Headers.TryGetValues(name, out var values) ? values.SingleOrDefault() : null;
+                if (Header("X-UPLM-Native-Snapshot-Id") is string snapshot)
+                {
+                    if (!Guid.TryParse(snapshot, out var id) || id == Guid.Empty
+                        || !string.Equals(Header("X-UPLM-Native-Source-Sha256"), expectedSha256, StringComparison.OrdinalIgnoreCase)
+                        || !long.TryParse(Header("X-UPLM-Native-Source-Length"), out var originalLength) || originalLength <= 0
+                        || !long.TryParse(Header("X-UPLM-Native-Content-Length"), out var independentLength) || independentLength <= 0
+                        || Header("X-UPLM-Native-Content-Sha256") is not string independentSha
+                        || independentSha.Length != 64 || !independentSha.All(Uri.IsHexDigit))
+                        throw new InvalidDataException("PLM独立副本的来源校验记录不完整，未更新本地文件。");
+                    nativeSnapshotId = id; sourceLength = originalLength; contentLength = independentLength; contentSha256 = independentSha;
                 }
 
                 using (var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
@@ -798,12 +834,18 @@ internal sealed partial class PdmApiClient : IDisposable
             }
 
             var actualSha256 = ComputeFileSha256(partialPath);
-            if (!string.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(actualSha256, contentSha256, StringComparison.OrdinalIgnoreCase)
+                || contentLength.HasValue && new FileInfo(partialPath).Length != contentLength.Value)
             {
                 throw new InvalidDataException("PLM最新版本文件校验失败，未更新本地工作文件。");
             }
 
             File.Move(partialPath, path);
+            if (nativeSnapshotId.HasValue && (!PdmDocumentIdentityStore.TryWriteControlledVersion(path, documentId, null,
+                    versionId, string.Empty, expectedSha256, sourceLength.Value)
+                || !PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var metadata)
+                || !PdmDocumentIdentityStore.TryRecordNativeIsolation(path, metadata, nativeSnapshotId.Value, actualSha256)))
+                throw new IOException("独立副本已读取，但来源版本记录未能保存，未更新本地工作文件。");
             return path;
         }
         catch
@@ -833,7 +875,8 @@ internal sealed partial class PdmApiClient : IDisposable
         try
         {
             using (var response = await httpClient.GetAsync(
-                string.Concat("api/documents/", file.DocumentId, "/versions/", file.VersionId, "/file?download=false"),
+                string.Concat("api/documents/", file.DocumentId, "/versions/", file.VersionId, "/file?download=false",
+                    file.NativeIsolation == null ? "" : "&nativeIsolationSnapshotId=" + file.NativeIsolation.ReferenceSnapshotId),
                 HttpCompletionOption.ResponseHeadersRead,
                 cancellationToken).ConfigureAwait(false))
             {
@@ -851,13 +894,19 @@ internal sealed partial class PdmApiClient : IDisposable
             }
 
             var info = new FileInfo(partialPath);
-            if (info.Length != file.FileLength
-                || !string.Equals(ComputeFileSha256(partialPath), file.Sha256, StringComparison.OrdinalIgnoreCase))
+            if (info.Length != (file.NativeIsolation?.Length ?? file.FileLength)
+                || !string.Equals(ComputeFileSha256(partialPath), file.NativeIsolation?.Sha256 ?? file.Sha256, StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidDataException(string.Concat(file.FileName, "的长度或SHA-256校验失败。"));
             }
 
             File.Move(partialPath, path);
+            if ((file.NativeIsolation != null || file.IsNativeIsolated) && (!PdmDocumentIdentityStore.TryWriteControlledVersion(path, file.DocumentId,
+                    null, file.VersionId, file.Revision, file.Sha256, file.FileLength)
+                || !PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var binding)
+                || !PdmDocumentIdentityStore.TryRecordNativeIsolation(path, binding,
+                    file.NativeIsolation?.ReferenceSnapshotId ?? file.VersionId, file.NativeIsolation?.Sha256 ?? file.Sha256)))
+                throw new IOException("独立原生副本已下载，但固化来源校验记录未能保存。");
             return path;
         }
         catch
@@ -1518,6 +1567,8 @@ internal sealed class ControlledOpenManifestDto
 }
 internal sealed class ControlledOpenFileDto
 {
+    public bool IsNativeIsolated { get; set; }
+    public NativeFileIsolationDto NativeIsolation { get; set; }
     public Guid DocumentId { get; set; }
     public Guid VersionId { get; set; }
     public string Revision { get; set; }
@@ -1527,6 +1578,18 @@ internal sealed class ControlledOpenFileDto
     public string Sha256 { get; set; }
     public string Configuration { get; set; }
     public bool IsRoot { get; set; }
+}
+internal sealed class NativeFileIsolationDto
+{
+    public Guid SourceVersionId { get; set; }
+    public string SourceSha256 { get; set; }
+    public string RelativePath { get; set; }
+    public long Length { get; set; }
+    public string Sha256 { get; set; }
+    public string GeometryEvidenceSha256 { get; set; }
+    public int PolicyVersion { get; set; }
+    public Guid ReferenceSnapshotId { get; set; }
+    public string ReferenceScopeSha256 { get; set; }
 }
 internal sealed class UploadSessionDto
 {

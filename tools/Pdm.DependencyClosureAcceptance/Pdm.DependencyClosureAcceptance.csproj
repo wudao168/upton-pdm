@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+ <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ServerDirectory Condition="'$(ServerDirectory)' == ''">../../.local/api</ServerDirectory></PropertyGroup>
+ <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App"/>
+  <Reference Include="Pdm.Domain"><HintPath>$(ServerDirectory)/Pdm.Domain.dll</HintPath></Reference>
+  <Reference Include="Pdm.Application"><HintPath>$(ServerDirectory)/Pdm.Application.dll</HintPath></Reference>
+  <Reference Include="Pdm.Infrastructure"><HintPath>$(ServerDirectory)/Pdm.Infrastructure.dll</HintPath></Reference>
+  <Reference Include="MySqlConnector"><HintPath>$(ServerDirectory)/MySqlConnector.dll</HintPath></Reference>
+  <Reference Include="Dapper"><HintPath>$(ServerDirectory)/Dapper.dll</HintPath></Reference>
+ </ItemGroup>
+</Project>

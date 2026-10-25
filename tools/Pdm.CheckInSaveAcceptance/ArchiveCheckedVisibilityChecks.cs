@@ -78,15 +78,15 @@ internal static partial class Program
     ArchiveUi(session,()=>{
      var window=ArchiveWindow(session);window.TopMost=false;window.Opacity=0;
      var form=((Panel)Field(window,"selection")).Controls.OfType<Form>().Single();form.Opacity=1;
-     var list=(Control)Field(form,"fileDetails");var process=(Control)Field(window,"processRecords");var summary=(Label)Field(form,"selectionSummary");
+     var container=(Control)Field(form,"fileDetails");var list=(Control)Field(form,"files");var history=(Control)Field(window,"history");var summary=(Label)Field(form,"selectionSummary");
      void LayoutCheck(string label)
      {
       window.PerformLayout();form.PerformLayout();
-      var left=list.RectangleToScreen(list.ClientRectangle);var right=process.RectangleToScreen(process.ClientRectangle);
+      var left=list.Parent.RectangleToScreen(list.Bounds);var right=history.Parent.RectangleToScreen(history.Bounds);
       Console.WriteLine(label+"容器："+left+" / "+right);
-      Check(Math.Abs(left.Top-right.Top)<=1&&Math.Abs(left.Bottom-right.Bottom)<=1,label+"：左右图档和过程容器上下边缘对齐");
+      Check(Math.Abs(left.Top-right.Top)<=1&&Math.Abs(left.Bottom-right.Bottom)<=1,label+"：过程记录框与左侧白色列表内容区上下边缘对齐");
       var needed=TextRenderer.MeasureText(summary.Text,summary.Font,new Size(summary.Width,10000),TextFormatFlags.WordBreak).Height+summary.Padding.Vertical;
-      Check(summary.Visible&&summary.Height>=needed&&summary.Bottom<=list.Top,label+"：勾选数量在图档上方完整显示");
+      Check(summary.Visible&&summary.Height>=needed&&summary.Bottom<=container.Top,label+"：勾选数量在图档上方完整显示");
      }
      LayoutCheck("默认窗口");Save(window,"aligned-default");
      window.Size=window.MinimumSize;TreeCall(window,"Report","正在处理当前图档",(string)Get(part,"FileName"),1,3);LayoutCheck("最小窗口和当前文件提示");

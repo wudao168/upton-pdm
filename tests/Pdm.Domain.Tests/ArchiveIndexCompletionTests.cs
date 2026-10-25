@@ -33,11 +33,18 @@ public sealed class ArchiveIndexCompletionTests
                 "重新读取完整索引", true, baseline.Id);
             var receipt = await workflow.CheckInBatchAsync(Guid.NewGuid(), "index-" + repeat, "admin", UserRole.Administrator, session, [input], default);
             var result = Assert.Single(receipt.Results);
-            Assert.Equal(!repeat, result.VersionCreated);
+            Assert.Equal(kind == DocumentKind.Drawing && !repeat, result.VersionCreated);
             baseline = (await repository.ListDocumentVersionsAsync(document.Id, default)).First();
-            Assert.False(baseline.ReferenceSnapshot.HasPendingStructureIndex);
+            Assert.Equal(kind != DocumentKind.Drawing, baseline.ReferenceSnapshot.HasPendingStructureIndex);
+            if (kind != DocumentKind.Drawing)
+            {
+                var index = Assert.Single(await repository.ListNativeReferenceIndexesAsync(project.Id, default),
+                    item => item.DocumentId == document.Id);
+                Assert.False(index.StructureIndexPending);
+            }
             Assert.Equal(stored.Version!.Sha256, baseline.Sha256);
-            Assert.Equal(2, (await repository.ListDocumentVersionsAsync(document.Id, default)).Count);
+            Assert.Equal(kind == DocumentKind.Drawing ? 2 : 1,
+                (await repository.ListDocumentVersionsAsync(document.Id, default)).Count);
         }
     }
 

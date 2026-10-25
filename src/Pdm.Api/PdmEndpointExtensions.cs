@@ -862,7 +862,7 @@ public static class PdmEndpointExtensions
             return Results.Ok(version);
         });
 
-        api.MapGet("/documents/{documentId:guid}/versions/{versionId:guid}/file", async (Guid documentId, Guid versionId, bool download, HttpContext context, IPdmRepository repository, IFileStorage storage, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapGet("/documents/{documentId:guid}/versions/{versionId:guid}/file", async (Guid documentId, Guid versionId, bool download, Guid? nativeIsolationSnapshotId, bool? preferNativeIsolation, HttpContext context, IPdmRepository repository, IFileStorage storage, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var document = await repository.FindDocumentAsync(documentId, cancellationToken);
@@ -871,8 +871,29 @@ public static class PdmEndpointExtensions
             var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken);
             if (project is null) return Results.NotFound();
             await workflow.AuditVersionReadAsync(documentId, versionId, actor, role, download ? "document.version.download" : "document.version.read", cancellationToken);
-            await storage.VerifyVersionReadAsync(project, new StoredFile(version.StorageRelativePath, version.FileLength, version.Sha256, version.CreatedAt), cancellationToken);
-            var path = StorageLocationPolicy.ResolveUnder(project.VaultLocation, version.StorageRelativePath);
+            var nativeFile = new StoredFile(version.StorageRelativePath, version.FileLength, version.Sha256, version.CreatedAt);
+            if (!nativeIsolationSnapshotId.HasValue && preferNativeIsolation == true)
+                nativeIsolationSnapshotId = (await repository.ListNativeReferenceIndexesAsync(project.Id, cancellationToken))
+                    .Where(index => index.DocumentId == documentId).Select(index => index.NativeIsolation)
+                    .FirstOrDefault(copy => copy != null && copy.SourceVersionId == version.Id
+                        && string.Equals(copy.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase))?.ReferenceSnapshotId;
+            if (nativeIsolationSnapshotId.HasValue)
+            {
+                var snapshot = await repository.FindReferenceSnapshotAsync(nativeIsolationSnapshotId.Value, cancellationToken);
+                var isolated = snapshot?.Root.NativeIsolation;
+                if (snapshot == null || snapshot.ProjectId != project.Id || snapshot.RootDocumentId != documentId || isolated == null
+                    || isolated.ReferenceSnapshotId != snapshot.SnapshotId || isolated.SourceVersionId != version.Id
+                    || isolated.PolicyVersion != 1 || !string.Equals(isolated.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase))
+                    return Results.BadRequest(new { message = "独立原生副本与请求的项目、图档或来源版本不一致。" });
+                nativeFile = new StoredFile(isolated.RelativePath, isolated.Length, isolated.Sha256, version.CreatedAt);
+                context.Response.Headers["X-UPLM-Native-Source-Sha256"] = version.Sha256;
+                context.Response.Headers["X-UPLM-Native-Source-Length"] = version.FileLength.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                context.Response.Headers["X-UPLM-Native-Content-Sha256"] = isolated.Sha256;
+                context.Response.Headers["X-UPLM-Native-Content-Length"] = isolated.Length.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                context.Response.Headers["X-UPLM-Native-Snapshot-Id"] = snapshot.SnapshotId.ToString("D");
+            }
+            await storage.VerifyVersionReadAsync(project, nativeFile, cancellationToken);
+            var path = StorageLocationPolicy.ResolveUnder(project.VaultLocation, nativeFile.RelativePath);
             var stream = await storage.OpenReadAsync(path, cancellationToken);
             return Results.File(stream, "application/octet-stream", download ? document.FileName : null, enableRangeProcessing: true);
         });

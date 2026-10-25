@@ -494,14 +494,19 @@ public sealed class BrowserCadArchiveService(IPdmRepository repository, PdmWorkf
                 Children = node.Children.Where(c => c.Role != ReferenceRole.ExternalFileDependency
                     || c.DocumentId is Guid key && verifiedFiles.Contains(key) && mapped.ContainsKey(key)).Select(c => Map(c, planned)).ToArray()
             };
+            var nativeIndexes = await repository.ListNativeReferenceIndexesAsync(project.Id, ct);
             var changed = analysis.Files.Where(file =>
             {
                 var latest = mapped[file.Key].Version;
                 if (!UploadedFiles(job).Any(f => f.RelativePath == (file.InputRelativePath ?? file.RelativePath))) return false;
                 var raw = file.Properties.GetValueOrDefault("SourceFileSha256");
+                var root = Map(file.Root);
+                var index = latest == null || !root.UsesNativeFileInventory ? null : nativeIndexes.FirstOrDefault(item =>
+                    item.DocumentId == mapped[file.Key].Doc.Id && item.Configuration == root.Configuration && item.Revision == latest.Revision);
                 return latest == null || !(latest.Sha256 == raw || latest.PropertySnapshot.GetValueOrDefault("SourceFileSha256") == raw)
                     || !ArchiveSafety.SameProperties(latest.PropertySnapshot, file.Properties)
-                    || !ArchiveSafety.SameOwnDesignReferences(latest.ReferenceSnapshot, Map(file.Root));
+                    || !ArchiveSafety.SameOwnDesignReferences(latest.ReferenceSnapshot, root)
+                    || root.UsesNativeFileInventory && (index == null || !ArchiveSafety.SameReferences(index, root));
             }).ToArray();
             var changedCompanions = changed.Where(file => file.Root.Kind == DocumentKind.Other).Select(file => file.Key).ToHashSet();
             if (changedCompanions.Count > 0)

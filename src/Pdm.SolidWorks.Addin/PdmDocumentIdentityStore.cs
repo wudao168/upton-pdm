@@ -68,6 +68,7 @@ internal static class PdmDocumentIdentityStore
             Revision = binding.Revision ?? string.Empty,
             Sha256 = binding.Sha256 ?? string.Empty,
             ResolvedReferenceSha256 = binding.ResolvedReferenceSha256 ?? string.Empty,
+            NativeIsolationSnapshotId = binding.NativeIsolationSnapshotId,
             ServerMaterializedAtUtc = binding.ServerMaterializedAtUtc,
             FileLength = binding.FileLength
         };
@@ -192,6 +193,11 @@ internal static class PdmDocumentIdentityStore
         && TryWriteBinding(path, expected.DocumentId, expected.ProjectId, expected.VersionId, expected.Revision,
             expected.Sha256, expected.FileLength, expected, actualHash);
 
+    internal static bool TryRecordNativeIsolation(string path, PdmControlledFileMetadata expected, Guid snapshotId, string actualHash) =>
+        snapshotId != Guid.Empty && expected?.VersionId != null && !string.IsNullOrWhiteSpace(actualHash)
+        && TryWriteBinding(path, expected.DocumentId, expected.ProjectId, expected.VersionId, expected.Revision,
+            expected.Sha256, expected.FileLength, expected, actualHash, nativeIsolationSnapshotId: snapshotId);
+
     internal static bool TryRecordServerMaterialization(string path, DateTime atUtc) =>
         TryReadLocalMetadata(path, out var metadata) && TryWriteBinding(path, metadata.DocumentId, metadata.ProjectId,
             metadata.VersionId, metadata.Revision, metadata.Sha256, metadata.FileLength, metadata,
@@ -202,7 +208,7 @@ internal static class PdmDocumentIdentityStore
         if (previous != null)
         {
             if (!TryWriteBinding(path, previous.DocumentId, previous.ProjectId, previous.VersionId, previous.Revision,
-                previous.Sha256, previous.FileLength, null, previous.ResolvedReferenceSha256))
+                previous.Sha256, previous.FileLength, null, previous.ResolvedReferenceSha256, nativeIsolationSnapshotId: previous.NativeIsolationSnapshotId ?? Guid.Empty))
                 throw new IOException("工作区文件已回滚，但原始版本记录未能恢复：" + Path.GetFileName(path));
             return;
         }
@@ -221,7 +227,8 @@ internal static class PdmDocumentIdentityStore
         string revision,
         string sha256,
         long? fileLength,
-        PdmControlledFileMetadata expected = null, string resolvedReferenceSha256 = null, DateTime? serverMaterializedAtUtc = null)
+        PdmControlledFileMetadata expected = null, string resolvedReferenceSha256 = null, DateTime? serverMaterializedAtUtc = null,
+        Guid? nativeIsolationSnapshotId = null)
     {
         if (documentId == Guid.Empty || string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return false;
         lock (bindingSync)
@@ -239,7 +246,8 @@ internal static class PdmDocumentIdentityStore
                 var previous = ReadBinding(filePath);
                 if (expected != null && (previous == null || previous.DocumentId != expected.DocumentId
                     || previous.ProjectId != expected.ProjectId || previous.VersionId != expected.VersionId
-                    || previous.Revision != expected.Revision || previous.FileLength != expected.FileLength
+                    || !string.Equals(previous.Revision ?? string.Empty, expected.Revision ?? string.Empty, StringComparison.Ordinal) || previous.FileLength != expected.FileLength
+                    || previous.NativeIsolationSnapshotId != expected.NativeIsolationSnapshotId
                     || !string.Equals(previous.Sha256, expected.Sha256, StringComparison.OrdinalIgnoreCase)
                     || !string.Equals(previous.ResolvedReferenceSha256 ?? string.Empty, expected.ResolvedReferenceSha256 ?? string.Empty, StringComparison.OrdinalIgnoreCase))) return false;
                 var retainedProjectId = projectId ?? (previous?.DocumentId == documentId ? previous.ProjectId : null);
@@ -252,6 +260,9 @@ internal static class PdmDocumentIdentityStore
                         && string.Equals(previous.Sha256, retainedSha256, StringComparison.OrdinalIgnoreCase)
                         ? previous.ResolvedReferenceSha256 : null);
                 var materializedAt = serverMaterializedAtUtc ?? (previous?.DocumentId == documentId ? previous.ServerMaterializedAtUtc : null);
+                var isolationId = nativeIsolationSnapshotId == Guid.Empty ? null : nativeIsolationSnapshotId
+                    ?? (previous?.DocumentId == documentId && previous.VersionId == retainedVersionId
+                        && string.Equals(previous.Sha256, retainedSha256, StringComparison.OrdinalIgnoreCase) ? previous.NativeIsolationSnapshotId : null);
                 if (previous?.DocumentId == documentId
                     && previous.ProjectId == retainedProjectId
                     && previous.VersionId == retainedVersionId
@@ -259,6 +270,7 @@ internal static class PdmDocumentIdentityStore
                     && string.Equals(previous.Sha256 ?? string.Empty, retainedSha256 ?? string.Empty, StringComparison.OrdinalIgnoreCase)
                     && previous.FileLength == retainedFileLength
                     && string.Equals(previous.ResolvedReferenceSha256, retainedResolvedHash, StringComparison.OrdinalIgnoreCase)
+                    && previous.NativeIsolationSnapshotId == isolationId
                     && previous.ServerMaterializedAtUtc == materializedAt)
                     return true;
                 var binding = new DocumentBinding
@@ -272,6 +284,7 @@ internal static class PdmDocumentIdentityStore
                     Revision = retainedRevision,
                     Sha256 = retainedSha256,
                     ResolvedReferenceSha256 = retainedResolvedHash,
+                    NativeIsolationSnapshotId = isolationId,
                     ServerMaterializedAtUtc = materializedAt,
                     FileLength = retainedFileLength
                 };
@@ -339,6 +352,7 @@ internal static class PdmDocumentIdentityStore
         public string Revision { get; set; }
         public string Sha256 { get; set; }
         public string ResolvedReferenceSha256 { get; set; }
+        public Guid? NativeIsolationSnapshotId { get; set; }
         public DateTime? ServerMaterializedAtUtc { get; set; }
         public long? FileLength { get; set; }
     }
@@ -427,6 +441,7 @@ internal sealed class PdmControlledFileMetadata
     public string Revision { get; set; } = string.Empty;
     public string Sha256 { get; set; } = string.Empty;
     public string ResolvedReferenceSha256 { get; set; } = string.Empty;
+    public Guid? NativeIsolationSnapshotId { get; set; }
     public DateTime? ServerMaterializedAtUtc { get; set; }
     public long? FileLength { get; set; }
 }

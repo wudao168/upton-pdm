@@ -24,6 +24,17 @@ internal static class ControlledReferenceMaterializer
 
     private static bool MatchesHash(string path, ControlledOpenFileDto file, string hash)
     {
+        if (file.NativeIsolation != null)
+            return string.Equals(hash, file.NativeIsolation.Sha256, StringComparison.OrdinalIgnoreCase)
+                || PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var isolated)
+                    && isolated.DocumentId == file.DocumentId && isolated.VersionId == file.VersionId
+                    && isolated.NativeIsolationSnapshotId == file.NativeIsolation.ReferenceSnapshotId
+                    && PdmDocumentIdentityStore.MatchesResolvedVersion(path, file.VersionId, file.Sha256, hash);
+        if (file.IsNativeIsolated)
+            return string.Equals(hash, file.Sha256, StringComparison.OrdinalIgnoreCase)
+                || PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var independent)
+                    && independent.DocumentId == file.DocumentId && independent.NativeIsolationSnapshotId == file.VersionId
+                    && PdmDocumentIdentityStore.MatchesResolvedVersion(path, file.VersionId, file.Sha256, hash);
         return string.Equals(hash, file.Sha256, StringComparison.OrdinalIgnoreCase)
             || PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var metadata)
                 && metadata.DocumentId == file.DocumentId
@@ -85,11 +96,12 @@ internal static class ControlledReferenceMaterializer
                 }
                 for (var index = 1; index < values.Length; index += 2)
                 {
-                    var native = (Convert.ToString(values.GetValue(index)) ?? "").Split('|')[0];
-                    if (!IsNative(native)) continue;
-                    if (!files.TryGetValue(Path.GetFileName(native), out var target)) continue;
-                    var destination = LocalPath(directory, target);
-                    if (!string.Equals(native, destination, StringComparison.OrdinalIgnoreCase)) replacements[native] = destination;
+                    foreach (var native in (Convert.ToString(values.GetValue(index)) ?? "").Split('|'))
+                    {
+                        if (!files.TryGetValue(Path.GetFileName(native), out var target)) continue;
+                        var destination = LocalPath(directory, target);
+                        if (!string.Equals(native, destination, StringComparison.OrdinalIgnoreCase)) replacements[native] = destination;
+                    }
                 }
             }
             catch (Exception error)
@@ -152,7 +164,9 @@ internal static class ControlledReferenceMaterializer
         if (!PdmDocumentIdentityStore.TryWriteControlledVersion(target, baseline.DocumentId, baseline.ProjectId,
             baseline.VersionId.Value, baseline.Revision, baseline.Sha256, baseline.FileLength ?? new FileInfo(source).Length)
             || !PdmDocumentIdentityStore.TryReadLocalMetadata(target, out var copied)
-            || !PdmDocumentIdentityStore.TryRecordResolvedReferences(target, copied, hash))
+            || !(baseline.NativeIsolationSnapshotId.HasValue
+                ? PdmDocumentIdentityStore.TryRecordNativeIsolation(target, copied, baseline.NativeIsolationSnapshotId.Value, hash)
+                : PdmDocumentIdentityStore.TryRecordResolvedReferences(target, copied, hash)))
             throw new IOException("工作副本引用校验记录未能保存：" + Path.GetFileName(target));
     }
 }

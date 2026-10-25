@@ -31,7 +31,7 @@ internal static partial class Program
     var versions=new Dictionary<Guid,object>();
     foreach(var node in nodes)
     {
-     Set(node,"Role",Enum.Parse(Type("CadReferenceRole"),"ExternalFileDependency"));Set(node,"CheckedOutBy","tester");Set(node,"CheckoutSessionId",checkout);Set(node,"DrawingVersion","V1");
+     Set(node,"Role",Enum.Parse(Type("CadReferenceRole"),"ExternalFileDependency"));Set(node,"CheckedOutBy","tester");Set(node,"CheckoutSessionId",checkout);Set(node,"DrawingVersion","V1");Set(node,"Revision","A");Set(node,"OpenedRevision","A");
      Set(node,"StoredVersionStateKnown",true);Set(node,"HasStoredVersion",true);Set(node,"NativeFileScopeVerified",true);Set(node,"LatestStructureIndexPending",false);
      var snapshot=LinkedSnapshot(node);Set(snapshot,"Role",1);var version=LinkedVersion(node,snapshot);Set(version,"DrawingVersion","V1");Set(version,"StorageRelativePath","qa/"+Get(node,"FileName"));Set(version,"PropertySnapshot",new Dictionary<string,string>());versions[(Guid)Get(node,"DocumentId")]=version;
      Set(node,"LatestStoredSha256",Get(version,"Sha256"));Set(node,"LatestVersionSha256",Get(version,"Sha256"));Set(node,"OpenedVersionId",Get(version,"Id"));
@@ -40,10 +40,10 @@ internal static partial class Program
     }
     ((IList)Get(nodes[0],"Children")).Add(nodes[1]);archiveRuleVersions=versions.ToDictionary(p=>p.Key,p=>new[]{p.Value});
     var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var nativeWrites=0;
-    SetField(plugin,"application",new Proxy(appType,call=>{
+    SetField(plugin,"application",ArchiveNativeMock(appType,call=>{
      if(call.MethodName=="GetDocuments")return Array.Empty<object>();if(call.MethodName=="get_ActiveDoc")return null;if(call.MethodName=="GetUserPreferenceStringValue")return "";
      nativeWrites++;throw new Exception("Unexpected native mutation "+call.MethodName);
-    }).GetTransparentProxy());
+    }));
     SetField(plugin,"currentTree",nodes[0]);SetField(plugin,"currentProjectId",project);SetField(plugin,"authenticatedUsername","tester");
     using(var handler=new ArchiveGateHandler(nodes,versions,project,checkout,mode))
     using(var client=(IDisposable)New("PdmApiClient","http://archive-gate.invalid/"))

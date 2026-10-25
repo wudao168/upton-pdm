@@ -787,6 +787,31 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             cancellationToken: cancellationToken));
     }
 
+    public async Task<IReadOnlyList<DocumentReferenceNode>> ListNativeReferenceIndexesAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        return await ListNativeReferenceIndexesCoreAsync(connection, null, projectId, cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<DocumentReferenceNode>> ListNativeReferenceIndexesCoreAsync(
+        System.Data.Common.DbConnection connection, System.Data.Common.DbTransaction? transaction,
+        Guid projectId, CancellationToken cancellationToken)
+    {
+        var roots = await connection.QueryAsync<string>(new CommandDefinition(
+            """
+            SELECT rs.root_json FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY root_document_id, JSON_UNQUOTE(JSON_EXTRACT(root_json,'$.configuration')),
+                        JSON_UNQUOTE(JSON_EXTRACT(root_json,'$.revision.display'))
+                    ORDER BY captured_at DESC, id DESC) AS index_rank
+                FROM reference_snapshot WHERE project_id=@ProjectId
+                    AND JSON_EXTRACT(root_json,'$.usesNativeFileInventory')=TRUE
+            ) native_indexes JOIN reference_snapshot rs ON rs.id=native_indexes.id WHERE index_rank=1
+            """, new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
+        return roots.Select(root => JsonSerializer.Deserialize<DocumentReferenceNode>(root, jsonOptions)
+            ?? throw new InvalidDataException("原生引用索引损坏。")).ToArray();
+    }
+
     public async Task<CadReferenceSnapshot?> GetProjectReferenceRootAsync(Guid projectId, Guid rootDocumentId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

@@ -168,7 +168,11 @@ public sealed record ControlledOpenFile(
     long FileLength,
     string Sha256,
     string Configuration,
-    bool IsRoot);
+    bool IsRoot)
+{
+    public NativeFileIsolation? NativeIsolation { get; init; }
+    public bool IsNativeIsolated { get; init; }
+}
 
 public sealed record ControlledOpenManifest(
     Guid Id,
@@ -567,6 +571,8 @@ public interface IPdmRepository
     Task<DocumentVersion?> FindDocumentVersionAsync(Guid documentId, Guid versionId, CancellationToken cancellationToken);
     Task<DocumentReferenceNode?> GetReferenceTreeAsync(Guid projectId, CancellationToken cancellationToken);
     Task<CadReferenceSnapshot?> GetLatestReferenceSnapshotAsync(Guid projectId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<DocumentReferenceNode>> ListNativeReferenceIndexesAsync(Guid projectId, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<DocumentReferenceNode>>([]);
     Task<CadReferenceSnapshot?> GetProjectReferenceRootAsync(Guid projectId, Guid rootDocumentId, CancellationToken cancellationToken);
     Task<CadReferenceSnapshot?> FindReferenceSnapshotAsync(Guid snapshotId, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken);

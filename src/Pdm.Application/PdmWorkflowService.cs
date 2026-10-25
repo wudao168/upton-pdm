@@ -2085,6 +2085,7 @@ public sealed partial class PdmWorkflowService(
         var normalizedConflictDocumentIds = new HashSet<Guid>();
         var fileNames = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
         var allowCurrentVersionFallback = !versionId.HasValue && !releasedOnly;
+        var nativeIndexes = await repository.ListNativeReferenceIndexesAsync(project.Id, cancellationToken);
         var authorizedDocumentIds = new HashSet<Guid> { documentId };
         async Task<IReadOnlyList<DocumentVersion>> ListOpenVersionsAsync(Guid targetDocumentId)
         {
@@ -2108,7 +2109,18 @@ public sealed partial class PdmWorkflowService(
                 return (treeScopeOnly ? ArchiveSafety.StructureOnly(currentVersion.ReferenceSnapshot) : currentVersion.ReferenceSnapshot)
                     with { Revision = currentVersion.Revision };
             });
-            scopedRoot = WorkingReferenceTree.Resolve(scopedRoot, currentDesigns);
+            var effectiveIndexes = nativeIndexes.Select(index =>
+            {
+                if (index.DocumentId is not Guid id || !currentDesigns.TryGetValue(id, out var design)
+                    || index.Revision == design.Revision || !versionsByDocument.TryGetValue(id, out var history)) return index;
+                var captured = history.FirstOrDefault(version => version.Revision == index.Revision);
+                var currentVersion = history.FirstOrDefault(version => version.Revision == design.Revision);
+                // Publishing identical native bytes changes the label, not the file's dependencies.
+                return captured != null && currentVersion != null
+                    && string.Equals(captured.Sha256, currentVersion.Sha256, StringComparison.OrdinalIgnoreCase)
+                    ? index with { Revision = design.Revision } : index;
+            }).ToArray();
+            scopedRoot = WorkingReferenceTree.Resolve(scopedRoot, currentDesigns, effectiveIndexes);
         }
         var nodes = FlattenOpenNodes(scopedRoot).ToList();
         var expandedDrawingModelVersions = new HashSet<Guid>();
@@ -2305,6 +2317,16 @@ public sealed partial class PdmWorkflowService(
                 version.Sha256,
                 node.Configuration,
                 isRoot);
+            var isolated = ArchiveSafety.NativeCopy(nativeIndexes, referencedDocumentId, version);
+            if (isolated != null)
+            {
+                await fileStorage.ValidateStoredFileMetadataAsync(project,
+                    new StoredFile(isolated.RelativePath, isolated.Length, isolated.Sha256, version.CreatedAt), cancellationToken);
+                item = item with { NativeIsolation = isolated };
+            }
+            item = item with { IsNativeIsolated = isolated != null || version.ReferenceSnapshot.NativeIsolationVerified
+                || nativeIndexes.Any(index => index.DocumentId == referencedDocumentId && index.Revision == version.Revision
+                    && index.NativeIsolation == null && index.NativeIsolationVerified) };
             files.Add(item);
             filesByDocument.Add(referencedDocumentId, item);
             fileNames[fileName] = referencedDocumentId;

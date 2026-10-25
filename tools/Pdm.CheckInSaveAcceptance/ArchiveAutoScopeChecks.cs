@@ -40,8 +40,11 @@ internal static partial class Program
    TreeCheck(Classify(imported)=="Unchanged","嵌入导入结构索引补全被误判工程修改");Console.WriteLine("PASS: unchanged imported assembly remains unchanged when embedded tree and historical index become complete");
    Set(valve,"IsModifiedInSolidWorks",true);TreeCheck(Classify(valve)=="Pending","真实未保存修改被未变更规则掩盖");Set(valve,"IsModifiedInSolidWorks",false);
    Console.WriteLine("PASS: an actual native unsaved flag still requires validation and is not hidden by unchanged disk bytes");
-   Set(valve,"CheckedOutBy","tester");TreeCheck(Classify(valve)=="Changed","已授权的真实结构修改被忽略");Set(valve,"CheckedOutBy",null);
-   Console.WriteLine("PASS: explicitly editable assembly structure changes still remain archive candidates");
+   Set(valve,"CheckedOutBy","tester");TreeCheck(Classify(valve)=="Unchanged","仅获取权限不能把相同原生字节误判为修改");
+   Console.WriteLine("PASS: acquiring permission alone does not revise identical native assembly bytes");
+   var valvePath=(string)Get(valve,"FullPath");var valveBytes=File.ReadAllBytes(valvePath);File.SetAttributes(valvePath,FileAttributes.Normal);File.AppendAllText(valvePath," saved structure change");
+   TreeCheck(Classify(valve)=="Changed","已保存的真实结构修改被忽略");File.WriteAllBytes(valvePath,valveBytes);File.SetAttributes(valvePath,FileAttributes.ReadOnly);Set(valve,"CheckedOutBy",null);
+   Console.WriteLine("PASS: an actual saved assembly structure change remains an archive candidate");
    File.SetAttributes((string)Get(part,"FullPath"),FileAttributes.Normal);File.AppendAllText((string)Get(part,"FullPath")," actual geometry change");Set(part,"CheckedOutBy","tester");
    Set(drawing,"DrawingViewsRead",true);Set(drawing,"RequiresModelUpdate",true);
    TreeCheck(Classify(part)=="Changed"&&Classify(drawing)=="DrawingUpdate","零件真实修改或配套2D更新被漏掉");Console.WriteLine("PASS: changed 7000093 model and its paired 2D remain actionable while other 213 files stay unchanged");

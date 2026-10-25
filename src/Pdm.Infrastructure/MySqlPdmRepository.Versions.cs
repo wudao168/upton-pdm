@@ -192,13 +192,60 @@ public sealed partial class MySqlPdmRepository
                     && string.Equals(latestFile.SourceFileSha256, sourceFileSha256, StringComparison.OrdinalIgnoreCase)));
         var sameProperties = latestFile is not null && ArchiveSafety.SameProperties(
             JsonSerializer.Deserialize<Dictionary<string, string?>>(latestFile.PropertySnapshotJson, jsonOptions) ?? [], commit.Properties);
-        if (!commit.IsHistoricalRestore && sameFile && sameProperties && ArchiveSafety.SameOwnDesignReferences(previousReferences, commit.ReferenceSnapshot.Root))
+        if (commit.ReferenceSnapshot.Root.NativeIsolation != null)
         {
-            if (commit.IsProjectRoot && !await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
-                "SELECT EXISTS(SELECT 1 FROM project_reference_roots WHERE project_id=@ProjectId AND root_document_id=@DocumentId)",
-                new { commit.ReferenceSnapshot.ProjectId, DocumentId = documentId }, transaction, cancellationToken: cancellationToken)))
+            if (latestFile == null || !sameProperties || previousReferences == null
+                || !(ArchiveSafety.SameOwnDesignReferences(previousReferences, commit.ReferenceSnapshot.Root)
+                    || ArchiveSafety.IsNativeIndexOnlyUpdate(previousReferences, commit.ReferenceSnapshot.Root)))
+                throw new PdmConflictException("固化副本的来源内容或设计属性已经变化，不能作为原版本的技术副本保存。");
+            NativeFileIsolation isolated;
+            try { isolated = ArchiveSafety.ValidateNativeIsolation(commit.ReferenceSnapshot, latestFile.Id, latestFile.Sha256,
+                commit.File.RelativePath, commit.File.Length, commit.File.Sha256); }
+            catch (InvalidOperationException error) { throw new PdmRuleException(error.Message); }
+            commit = commit with { ReferenceSnapshot = commit.ReferenceSnapshot with
+                { Root = commit.ReferenceSnapshot.Root with { NativeIsolation = isolated, UsesNativeFileInventory = true } } };
+            sameFile = true;
+        }
+        if (!commit.IsHistoricalRestore && sameFile && sameProperties
+            && (ArchiveSafety.SameOwnDesignReferences(previousReferences, commit.ReferenceSnapshot.Root)
+                || previousReferences != null && ArchiveSafety.IsNativeIndexOnlyUpdate(previousReferences, commit.ReferenceSnapshot.Root)))
+        {
+            commit = commit with { ReferenceSnapshot = commit.ReferenceSnapshot with
+                { Root = commit.ReferenceSnapshot.Root with { Revision = RevisionLabel.Parse(locked.RevisionLabel), CheckedOutBy = null } } };
+            var previousIndexRow = await connection.QueryFirstOrDefaultAsync<ReferenceSnapshotRow>(new CommandDefinition(
+                """
+                SELECT id,captured_at,root_json FROM reference_snapshot WHERE id=(
+                    SELECT id FROM reference_snapshot WHERE project_id=@ProjectId AND root_document_id=@DocumentId
+                    AND JSON_EXTRACT(root_json,'$.usesNativeFileInventory')=TRUE
+                    AND JSON_UNQUOTE(JSON_EXTRACT(root_json,'$.configuration'))=@Configuration
+                    AND JSON_UNQUOTE(JSON_EXTRACT(root_json,'$.revision.display'))=@Revision
+                    ORDER BY captured_at DESC,id DESC LIMIT 1)
+                """, new { commit.ReferenceSnapshot.ProjectId, DocumentId = documentId,
+                    commit.ReferenceSnapshot.Root.Configuration, Revision = previousReferences?.Revision?.Display }, transaction, cancellationToken: cancellationToken));
+            var previousIndex = previousIndexRow == null ? null : JsonSerializer.Deserialize<DocumentReferenceNode>(previousIndexRow.RootJson, jsonOptions);
+            if (commit.ReferenceSnapshot.Root.NativeIsolation == null && previousIndex?.NativeIsolation is NativeFileIsolation existing
+                && existing.SourceVersionId == latestFile!.Id && existing.SourceSha256 == latestFile.Sha256
+                && existing.ReferenceScopeSha256 == ArchiveSafety.NativeIsolationScope(commit.ReferenceSnapshot.Root))
+                commit = commit with { ReferenceSnapshot = commit.ReferenceSnapshot with
+                    { Root = commit.ReferenceSnapshot.Root with { NativeIsolation = existing } } };
+            commit = commit with { ReferenceSnapshot = ArchiveSafety.Rehash(commit.ReferenceSnapshot) };
+            var indexChanged = commit.ReferenceSnapshot.Root.UsesNativeFileInventory
+                && (previousIndex == null || !ArchiveSafety.SameReferences(previousIndex, commit.ReferenceSnapshot.Root)
+                    || previousIndex.NativeIsolation != commit.ReferenceSnapshot.Root.NativeIsolation
+                    || previousIndex.NativeIsolationVerified != commit.ReferenceSnapshot.Root.NativeIsolationVerified);
+            if (indexChanged)
             {
+                var capturedAt = timeProvider.GetUtcNow();
+                if (previousIndexRow is not null && capturedAt <= AsUtc(previousIndexRow.CapturedAt))
+                    capturedAt = AsUtc(previousIndexRow.CapturedAt).AddMilliseconds(1);
+                commit = commit with { ReferenceSnapshot = commit.ReferenceSnapshot with { CapturedAt = capturedAt } };
                 await InsertReferenceSnapshotAsync(connection, transaction, commit.ReferenceSnapshot, cancellationToken);
+            }
+            if (commit.IsProjectRoot && (indexChanged || !await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
+                "SELECT EXISTS(SELECT 1 FROM project_reference_roots WHERE project_id=@ProjectId AND root_document_id=@DocumentId)",
+                new { commit.ReferenceSnapshot.ProjectId, DocumentId = documentId }, transaction, cancellationToken: cancellationToken))))
+            {
+                if (!indexChanged) await InsertReferenceSnapshotAsync(connection, transaction, commit.ReferenceSnapshot, cancellationToken);
                 await SetProjectReferenceRootAsync(connection, transaction, commit.ReferenceSnapshot, cancellationToken);
             }
 
@@ -771,12 +818,13 @@ public sealed partial class MySqlPdmRepository
         var current = latest.ToDictionary(row => row.DocumentId, row =>
             (JsonSerializer.Deserialize<DocumentReferenceNode>(row.RootJson, jsonOptions)
                 ?? throw new InvalidDataException("当前图档结构记录无法读取。")) with { Revision = RevisionLabel.Parse(row.Revision) });
+        var nativeIndexes = await ListNativeReferenceIndexesCoreAsync(connection, transaction, projectId, cancellationToken);
         foreach (var row in rows)
         {
             var root = JsonSerializer.Deserialize<DocumentReferenceNode>(row.RootJson, jsonOptions)
                 ?? throw new InvalidDataException("当前项目结构无法读取。");
             var original = new CadReferenceSnapshot(row.Id, row.ProjectId, row.RootDocumentId, AsUtc(row.CapturedAt), row.CapturedBy, root, row.Sha256);
-            var refreshed = WorkingReferenceTree.Refresh(original, current, at, actor);
+            var refreshed = WorkingReferenceTree.Refresh(original, current, at, actor, nativeIndexes);
             if (refreshed.SnapshotId == original.SnapshotId) continue;
             await InsertReferenceSnapshotAsync(connection, transaction, refreshed, cancellationToken);
             await SetProjectReferenceRootAsync(connection, transaction, refreshed, cancellationToken);

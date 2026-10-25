@@ -6,6 +6,44 @@ namespace Upton.Pdm.Domain;
 
 public static class ArchiveSafety
 {
+    public static NativeFileIsolation? NativeCopy(IEnumerable<DocumentReferenceNode> indexes, Guid documentId, DocumentVersion version) =>
+        indexes.Where(index => index.DocumentId == documentId).Select(index => index.NativeIsolation)
+            .FirstOrDefault(copy => copy != null && copy.PolicyVersion == 1 && copy.ReferenceSnapshotId != Guid.Empty
+                && copy.SourceVersionId == version.Id && string.Equals(copy.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase));
+
+    public static CadReferenceSnapshot Rehash(CadReferenceSnapshot snapshot) => snapshot with
+    {
+        Sha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            JsonSerializer.Serialize(snapshot.Root, new JsonSerializerOptions(JsonSerializerDefaults.Web)))))
+    };
+
+    public static string NativeIsolationScope(DocumentReferenceNode root)
+    {
+        var files = new SortedSet<string>(StringComparer.Ordinal);
+        void Add(DocumentReferenceNode node)
+        {
+            if (node.DocumentId.HasValue && node.Status != ReferenceNodeStatus.Virtual)
+                files.Add(node.DocumentId.Value.ToString("N") + "|" + node.Configuration + "|" + node.Revision?.Display);
+            foreach (var child in node.Children) Add(child);
+        }
+        Add(root);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", files))));
+    }
+
+    public static NativeFileIsolation ValidateNativeIsolation(CadReferenceSnapshot snapshot,
+        Guid sourceVersionId, string sourceSha256, string relativePath, long length, string sha256)
+    {
+        var copy = snapshot.Root.NativeIsolation ?? throw new InvalidOperationException("缺少原生文件固化校验记录。");
+        static bool Hash(string value) => value is { Length: 64 } && value.All(Uri.IsHexDigit);
+        if (copy.PolicyVersion != 1 || copy.SourceVersionId != sourceVersionId
+            || !string.Equals(copy.SourceSha256, sourceSha256, StringComparison.OrdinalIgnoreCase)
+            || copy.RelativePath != relativePath || copy.Length != length || length <= 0
+            || !string.Equals(copy.Sha256, sha256, StringComparison.OrdinalIgnoreCase)
+            || !Hash(copy.GeometryEvidenceSha256) || !Hash(sha256))
+            throw new InvalidOperationException("原生文件固化副本与来源版本或上传文件不一致，未提交任何变更。");
+        return copy with { ReferenceSnapshotId = snapshot.SnapshotId, ReferenceScopeSha256 = NativeIsolationScope(snapshot.Root) };
+    }
+
     public static bool SameProperties(IReadOnlyDictionary<string, string?> previous, IReadOnlyDictionary<string, string?> current)
     {
         static bool Meaningful(string key) => key is not ("FileName" or "Extension" or "LastWriteTimeUtc" or "SourceFileSha256")
@@ -57,10 +95,6 @@ public static class ArchiveSafety
         if (previous is null) return false;
         if (current.UsesNativeFileInventory)
         {
-            static HashSet<string> FileClosure(DocumentReferenceNode node) => (node.UsesNativeFileInventory ? node.Children : [])
-                .Where(child => child.Role == ReferenceRole.ExternalFileDependency)
-                .Select(child => $"{child.DocumentId:N}|{child.FileName}|{child.Kind}|{child.Revision?.Display}|{child.StructureIndexPending}")
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
             if (!FileClosure(previous).SetEquals(FileClosure(current))) return false;
         }
         // Verification metadata alone is not a new native file version. Verified file-closure
@@ -92,6 +126,23 @@ public static class ArchiveSafety
         };
         return SameReferences(Own(previous), Own(current));
     }
+
+    internal static bool IsNativeInventoryEntry(DocumentReferenceNode owner, DocumentReferenceNode child) =>
+        owner.UsesNativeFileInventory && child.Role == ReferenceRole.ExternalFileDependency && child.DocumentId is Guid id
+        && string.Equals(child.InstancePath, owner.InstancePath.TrimEnd('/') + "/native-file/" + id.ToString("N"), StringComparison.OrdinalIgnoreCase);
+
+    private static HashSet<string> FileClosure(DocumentReferenceNode node) => (node.UsesNativeFileInventory ? node.Children : [])
+        .Where(child => child.Role == ReferenceRole.ExternalFileDependency && !IsNativeInventoryEntry(node, child))
+        .Select(child => $"{child.DocumentId:N}|{child.FileName}|{child.Kind}|{child.Revision?.Display}|{child.StructureIndexPending}")
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    // Callers must also prove identical native bytes/properties and the exact base version.
+    public static bool IsNativeIndexOnlyUpdate(DocumentReferenceNode previous, DocumentReferenceNode current) =>
+        current.UsesNativeFileInventory && (current.Kind is DocumentKind.Part or DocumentKind.Assembly)
+        && previous.DocumentId == current.DocumentId && previous.Kind == current.Kind
+        && string.Equals(previous.FileName, current.FileName, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(previous.Configuration, current.Configuration, StringComparison.Ordinal)
+        && FileClosure(previous).SetEquals(FileClosure(current));
 
     private static ReferenceNodeStatus NormalizeStatus(ReferenceNodeStatus status) =>
         status == ReferenceNodeStatus.Lightweight ? ReferenceNodeStatus.Normal : status;

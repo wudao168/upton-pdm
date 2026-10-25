@@ -21,9 +21,21 @@ public sealed record DocumentReferenceNode(
     public bool IncludesDesignDependencies { get; init; }
     public bool UsesNativeFileInventory { get; init; }
     public bool StructureIndexPending { get; init; }
+    public NativeFileIsolation? NativeIsolation { get; init; }
+    public bool NativeIsolationVerified { get; init; }
     public bool HasPendingStructureIndex => StructureIndexPending || Children.Any(child => child.HasPendingStructureIndex);
 
     public bool HasBlockingIssue => Status == ReferenceNodeStatus.Missing || Children.Any(child => child.HasBlockingIssue);
+}
+
+// A verified, independent native copy is a technical projection of an immutable
+// source version. It does not create an engineering version or replace its bytes.
+public sealed record NativeFileIsolation(Guid SourceVersionId, string SourceSha256,
+    string RelativePath, long Length, string Sha256, string GeometryEvidenceSha256)
+{
+    public int PolicyVersion { get; init; } = 1;
+    public Guid ReferenceSnapshotId { get; init; }
+    public string ReferenceScopeSha256 { get; init; } = "";
 }
 
 public sealed record CadReferenceSnapshot(

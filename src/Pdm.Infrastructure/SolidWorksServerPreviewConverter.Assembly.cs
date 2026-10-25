@@ -57,12 +57,18 @@ public sealed partial class SolidWorksServerPreviewConverter
                     var owner = document.ProjectId == project.Id ? project
                         : await repository.FindProjectAsync(document.ProjectId, cancellationToken)
                             ?? throw new PdmNotFoundException("装配引用项目不存在。");
-                    var source = StorageLocationPolicy.ResolveUnder(owner.VaultLocation, version.StorageRelativePath);
+                    var independent = file.NativeIsolation;
+                    if (independent != null && (independent.SourceVersionId != version.Id
+                        || !string.Equals(independent.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase)))
+                        throw new PdmConflictException("装配预览的独立副本与冻结来源版本不一致。");
+                    var source = StorageLocationPolicy.ResolveUnder(owner.VaultLocation, independent?.RelativePath ?? version.StorageRelativePath);
+                    var contentLength = independent?.Length ?? file.FileLength;
+                    var contentSha256 = independent?.Sha256 ?? file.Sha256;
                     if (version.Sha256 != file.Sha256 || version.FileLength != file.FileLength
-                        || !await ReleaseDeliveryFiles.MatchesAsync(source, file.FileLength, file.Sha256, cancellationToken))
+                        || !await ReleaseDeliveryFiles.MatchesAsync(source, contentLength, contentSha256, cancellationToken))
                         throw new PdmConflictException("装配预览源文件校验失败，请检查存储目录后重试。");
                     jobs.Add(new PreviewJob(file.DocumentId, file.IsRoot ? DocumentKind.Assembly : document.Kind, file.FileName,
-                        source, Path.Combine(outputRoot, file.IsRoot ? "preview.easm" : file.DocumentId + ".easm"), file.Sha256,
+                        source, Path.Combine(outputRoot, file.IsRoot ? "preview.easm" : file.DocumentId + ".easm"), contentSha256,
                         Convert: file.IsRoot, AssemblyPreview: file.IsRoot, Configuration: file.Configuration));
                 }
                 var errors = conversion.Mode == PreviewConversionMode.Remote

@@ -154,7 +154,9 @@ internal static partial class Program
   Set(nodes[7],"CurrentRevision","W99");
   Check(Classify(root,archiveRuleVersions[(Guid)Get(root,"DocumentId")][0])=="Unchanged","child version changes alone do not mark the parent assembly changed");
   Set(nodes[7],"Quantity",2);
-  Check(Classify(root,archiveRuleVersions[(Guid)Get(root,"DocumentId")][0])=="Changed","actual component quantity change makes the assembly selectable");Set(nodes[7],"Quantity",1);
+  Check(Classify(root,archiveRuleVersions[(Guid)Get(root,"DocumentId")][0])=="Unchanged","quantity indexing alone does not revise identical saved assembly bytes");
+  var assemblyPath=(string)Get(root,"FullPath");var assemblyBytes=File.ReadAllBytes(assemblyPath);File.AppendAllText(assemblyPath," saved quantity change");
+  Check(Classify(root,archiveRuleVersions[(Guid)Get(root,"DocumentId")][0])=="Changed","a saved native quantity change makes the assembly selectable");File.WriteAllBytes(assemblyPath,assemblyBytes);Set(nodes[7],"Quantity",1);
   var first=Node("FIRST.SLDPRT");Set(first,"DocumentId",null);
   Check(Classify(first,archiveRuleVersions[(Guid)Get(nodes[8],"DocumentId")][0])=="New","unregistered local files remain first-archive candidates");
   var drawing=Node("DRAWING.SLDDRW","Drawing");Set(drawing,"DrawingViewsRead",true);var drawingVersion=Version(drawing);

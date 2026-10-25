@@ -19,6 +19,8 @@ public sealed partial class PdmAddin
     private IModelDoc2 OpenControlledReadOnlyDocumentCore(string path, int documentType, string configuration,
         ControlledOpenManifestDto manifest, bool preserveLoadedContext)
     {
+        var beforeOpen = new HashSet<string>(((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
+            .Select(model => model.GetPathName()).Where(value => !string.IsNullOrWhiteSpace(value)), StringComparer.OrdinalIgnoreCase);
         var preserved = new HashSet<string>(preserveLoadedContext
             ? ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
                 .Select(model => model.GetPathName()).Where(value => !string.IsNullOrWhiteSpace(value))
@@ -28,6 +30,26 @@ public sealed partial class PdmAddin
             && PdmDocumentIdentityStore.IsControlledWorkspacePath(path)
             && path.IndexOf(Path.DirectorySeparatorChar + "View" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) >= 0;
         var wasLoaded = FindLoadedDocument(path) != null;
+        if (nativeFirst && !wasLoaded)
+        {
+            try
+            {
+                var saved = application.GetDocumentDependencies2(path, true, false, false) as Array;
+                if (saved != null)
+                    for (var index = 1; index < saved.Length; index += 2)
+                        foreach (var source in (Convert.ToString(saved.GetValue(index)) ?? string.Empty).Split('|'))
+                        {
+                            var file = manifest.Files.FirstOrDefault(candidate => string.Equals(candidate.FileName, Path.GetFileName(source), StringComparison.OrdinalIgnoreCase));
+                            if (file != null && !PathsEqual(source, ControlledReferenceMaterializer.LocalPath(Path.GetDirectoryName(path), file)))
+                                nativeFirst = false;
+                        }
+            }
+            catch (Exception error)
+            {
+                nativeFirst = false;
+                PluginDiagnosticLog.Record("受控引用核对", "原生依赖预检查未完成，将先准备受控引用：" + error);
+            }
+        }
         for (var attempt = 0; attempt < (nativeFirst ? 2 : 1); attempt++)
         {
             var prepareReferences = !nativeFirst || attempt > 0;
@@ -48,16 +70,17 @@ public sealed partial class PdmAddin
                     foreach (var file in manifest.Files)
                         if (!ControlledReferenceMaterializer.Matches(ControlledReferenceMaterializer.LocalPath(Path.GetDirectoryName(path), file), file))
                             throw new IOException("受控文件在打开期间发生变化，未认定打开完成：" + file.FileName);
-                    ValidateControlledLoadedPathsCore(opened, path, manifest, application, true);
                 }
-                ValidateHistoricalControlledOpenReferences(opened, path, manifest, application);
-                if (documentType == (int)swDocumentTypes_e.swDocDRAWING)
-                    ValidateControlledLoadedPathsCore(opened, path, manifest, application, true);
+                var embeddedSources = ValidateHistoricalControlledOpenReferences(opened, path, manifest, application)
+                    ?? ValidateControlledLoadedSources(opened, path, manifest, application);
                 var expected = new HashSet<string>(manifest.Files.Select(file =>
                     Path.GetFullPath(Path.Combine(Path.GetDirectoryName(path), file.RelativePath ?? file.FileName))), StringComparer.OrdinalIgnoreCase);
                 foreach (var loaded in (application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
                 {
                     var actual = loaded.GetPathName();
+                    if (!string.IsNullOrWhiteSpace(actual) && !beforeOpen.Contains(actual)
+                        && !expected.Contains(Path.GetFullPath(actual)) && !embeddedSources.Contains(actual))
+                        throw new InvalidOperationException("本次打开加载了受控范围之外的上下文文件，尚未认定打开成功：" + actual);
                     if (!string.IsNullOrWhiteSpace(actual) && expected.Contains(Path.GetFullPath(actual)) && !preserved.Contains(actual))
                         EnsureDocumentOpenedReadOnly(loaded, actual);
                 }
@@ -80,6 +103,19 @@ public sealed partial class PdmAddin
                 if (FindLoadedDocument(path) != null)
                     throw new IOException("本次打开的只读窗口尚未关闭，未重试引用定位。", error);
                 if (!nativeFirst || attempt > 0 || !(error is InvalidOperationException)) throw;
+                // Release only models loaded by this failed attempt, so the reference
+                // API can repair closed copies. Every pre-existing user document stays open.
+                var remaining = ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>()).ToArray();
+                foreach (var model in remaining.Where(model => !beforeOpen.Contains(model.GetPathName())))
+                {
+                    if (model.GetSaveFlag())
+                        throw new IOException("新加载的文件出现未保存内容，已保留窗口及内容，未自动关闭重试。", error);
+                    var titleToClose = model.GetTitle();
+                    if (remaining.Any(other => beforeOpen.Contains(other.GetPathName())
+                        && string.Equals(other.GetTitle(), titleToClose, StringComparison.OrdinalIgnoreCase)))
+                        throw new IOException("新加载文件与原有窗口同名，原窗口及文件均已保留，未继续自动重试。", error);
+                    application.CloseDoc(titleToClose);
+                }
                 LogDiagnostic("原生打开的引用来源未通过，回退到逐文件定位后重试", error);
             }
         }
@@ -111,13 +147,13 @@ public sealed partial class PdmAddin
             {
                 var stage = await apiClient.DownloadVersionToWorkspaceStageAsync(group.Key.Id, version.Id,
                     node.FileName, version.Sha256, token);
-                try { File.Copy(stage, target, false); }
+                try { File.Copy(stage, target, false); ControlledReferenceMaterializer.CopyResolvedBinding(stage, target); }
                 finally { DeleteWorkspaceStage(stage); }
             }
-            if (!string.Equals(ComputeFileHash(target), version.Sha256, StringComparison.OrdinalIgnoreCase))
+            if (!VersionMatchesLocalFile(version, target, ComputeFileHash(target)))
                 throw new IOException("补齐的受控引用文件校验不一致，已保留文件，请重新获取：" + node.FileName);
             if (!PdmDocumentIdentityStore.TryWriteControlledVersion(target, group.Key.Id, projectId, version.Id,
-                version.Revision?.Display, version.Sha256, new FileInfo(target).Length))
+                version.Revision?.Display, version.Sha256, version.FileLength))
                 throw new IOException("补齐引用后无法保存版本记录：" + node.FileName);
             SetFileReadOnly(target, true);
             foreach (var occurrence in group)
@@ -137,12 +173,105 @@ public sealed partial class PdmAddin
 
     private static void ValidateControlledLoadedPathsCore(IModelDoc2 opened, string rootPath,
         ControlledOpenManifestDto manifest, ISldWorks app, bool requireExactSources)
+        => ValidateControlledLoadedSources(opened, rootPath, manifest, app);
+
+    private static HashSet<string> ValidateControlledLoadedSources(IModelDoc2 opened, string rootPath,
+        ControlledOpenManifestDto manifest, ISldWorks app)
     {
         var directory = Path.GetDirectoryName(Path.GetFullPath(rootPath));
         var expected = manifest.Files.ToDictionary(file => file.FileName,
             file => ControlledReferenceMaterializer.LocalPath(directory, file), StringComparer.OrdinalIgnoreCase);
         var failures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var deferredAssemblies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var verifiedCopies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var embeddedSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        bool SavedImportedOwner(string ownerPath, string configuration)
+        {
+            // A closed imported container can retain a cache address from another
+            // session. Verify native import ownership instead of classifying by name.
+            var before = new HashSet<string>(((app.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
+                .Select(model => model.GetPathName()), StringComparer.OrdinalIgnoreCase);
+            var previous = app.ActiveDoc as IModelDoc2;
+            var visible = app.GetDocumentVisible((int)swDocumentTypes_e.swDocASSEMBLY);
+            IModelDoc2 probe = null;
+            try
+            {
+                app.DocumentVisible(false, (int)swDocumentTypes_e.swDocASSEMBLY);
+                var errors = 0; var warnings = 0;
+                probe = app.OpenDoc6(ownerPath, (int)swDocumentTypes_e.swDocASSEMBLY,
+                    (int)(swOpenDocOptions_e.swOpenDocOptions_Silent | swOpenDocOptions_e.swOpenDocOptions_ReadOnly
+                        | swOpenDocOptions_e.swOpenDocOptions_OverrideDefaultLoadLightweight), configuration, ref errors, ref warnings);
+                if (probe == null || errors != 0 || !PathsEqual(probe.GetPathName(), ownerPath) || !(probe is IAssemblyDoc assembly)) return false;
+                var imported = new ImportedComponentStorage(app);
+                foreach (var component in ((assembly.GetComponents(false) as Array)?.OfType<IComponent2>() ?? Enumerable.Empty<IComponent2>()))
+                    if (PathsEqual(imported.FindOwner(component, probe), ownerPath))
+                    {
+                        PluginDiagnosticLog.Record("嵌入归属", "未加载导入容器已只读核对原生保存归属：" + ownerPath);
+                        return true;
+                    }
+                return false;
+            }
+            catch (Exception error) { PluginDiagnosticLog.Record("嵌入归属", ownerPath + "：" + error); return false; }
+            finally
+            {
+                if (probe != null && PathsEqual(probe.GetPathName(), ownerPath) && !before.Contains(ownerPath)) app.CloseDoc(probe.GetTitle());
+                app.DocumentVisible(visible, (int)swDocumentTypes_e.swDocASSEMBLY);
+                if (previous != null && !PathsEqual((app.ActiveDoc as IModelDoc2)?.GetPathName(), previous.GetPathName()))
+                {
+                    var errors = 0;
+                    app.ActivateDoc3(previous.GetTitle(), false, (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref errors);
+                }
+            }
+        }
+        void CheckDeferred(string path, string name, bool embedded)
+        {
+            if (embedded) return;
+            var fileName = string.IsNullOrWhiteSpace(path) ? string.Empty : Path.GetFileName(path);
+            if (!expected.TryGetValue(fileName, out var local))
+            {
+                failures.Add(name + "：未加载组件缺少服务器受控文件；原引用：" + path);
+                return;
+            }
+            var file = manifest.Files.First(candidate => string.Equals(candidate.FileName, fileName, StringComparison.OrdinalIgnoreCase));
+            if (!PathsEqual(ArchiveReferencePath.Resolve(path, directory, "核对未加载组件引用", rootPath), local))
+                failures.Add(name + "：未加载组件仍指向原目录，尚未完成受控引用定位");
+            if (verifiedCopies.Add(local) && !ControlledReferenceMaterializer.Matches(local, file))
+                failures.Add(name + "：未加载组件的受控文件内容校验失败");
+            if (!Path.GetExtension(local).Equals(".SLDASM", StringComparison.OrdinalIgnoreCase)
+                || !deferredAssemblies.Add(local)) return;
+            Array dependencies;
+            try { dependencies = app.GetDocumentDependencies2(local, false, false, false) as Array; }
+            catch (Exception error)
+            {
+                PluginDiagnosticLog.Record("受控引用核对", local + "：" + error);
+                failures.Add(name + "：未加载子装配的原生依赖未能读取"); return;
+            }
+            if (dependencies == null) return; // A physically empty assembly has no file dependencies.
+            if (dependencies.Length % 2 != 0) { failures.Add(name + "：原生依赖清单不完整"); return; }
+            for (var index = 1; index < dependencies.Length; index += 2)
+            {
+                var source = (Convert.ToString(dependencies.GetValue(index)) ?? string.Empty).Split('|');
+                var native = source[0];
+                // These generated files are embedded in the already verified owner.
+                // Ordinary disk components never use this virtual-component storage path.
+                if (IsSolidWorksTemporaryVirtualComponentPath(native)) continue;
+                if (source.Length == 2 && NativeArchiveManifest.IsInterconnectCachePath(native)) continue;
+                if (!new[] { ".SLDPRT", ".SLDASM" }.Contains(Path.GetExtension(native), StringComparer.OrdinalIgnoreCase)) continue;
+                if (!expected.TryGetValue(Path.GetFileName(native), out var target))
+                {
+                    if (NativeArchiveManifest.IsInterconnectCachePath(native)
+                        && ImportedComponentStorage.IsStableOwner(local) && SavedImportedOwner(local, file.Configuration)) continue;
+                    failures.Add(name + "：内部引用缺少服务器受控文件：" + Path.GetFileName(native));
+                    PluginDiagnosticLog.Record("受控引用核对", "未确认的内部引用；所属=" + local + "；原始=" + string.Join("|", source));
+                }
+                else
+                {
+                    if (!PathsEqual(native, target)) failures.Add(name + "：内部引用尚未定位到受控工作区：" + Path.GetFileName(native));
+                    CheckDeferred(target, name + "/" + Path.GetFileName(native), false);
+                }
+            }
+        }
         void Check(string path, string name, bool embedded)
         {
             if (embedded || string.IsNullOrWhiteSpace(path)) return;
@@ -181,9 +310,9 @@ public sealed partial class PdmAddin
                             componentOwner = importedOwner;
                         }
                     }
-                    // F21/F23: an unloaded component's stored address is not its loaded source.
                     if (loaded != null) Check(path, component.Name2, embedded);
-                    else PluginDiagnosticLog.Record("组件加载", component.Name2 + "：当前未加载，旧地址不作为实际来源。");
+                    else CheckDeferred(path, component.Name2, embedded);
+                    if (embedded && !string.IsNullOrWhiteSpace(path)) embeddedSources.Add(path);
                     Visit(loaded, componentOwner);
                 }
             }
@@ -195,13 +324,16 @@ public sealed partial class PdmAddin
                     var path = loaded?.GetPathName();
                     if (string.IsNullOrWhiteSpace(path)) path = view.GetReferencedModelName();
                     if (loaded != null) Check(path, "工程图模型", false);
+                    else CheckDeferred(path, "工程图模型", false);
                     Visit(loaded);
                 }
         }
         Check(opened?.GetPathName(), "当前图档", false);
         Visit(opened);
-        if (failures.Count > 0 && (requireExactSources || DocumentRuleGate.ShouldBlock("F20", string.Join("；", failures))))
+        // A real missing file or wrong loaded source cannot be downgraded to a warning.
+        if (failures.Count > 0)
             throw new InvalidOperationException("PLM图档未能仅使用本次受控副本打开，已停止使用外部文件。请补齐存档引用后重新打开：\r\n"
                 + string.Join("\r\n", failures.OrderBy(value => value, StringComparer.OrdinalIgnoreCase)));
+        return embeddedSources;
     }
 }

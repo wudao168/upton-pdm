@@ -77,14 +77,14 @@ internal static partial class Program
     var rejected=false;
     try{Type("PdmAddin").GetMethod("ValidateControlledLoadedPaths",Flags).Invoke(null,new[]{drawing,(object)drawingPath,manifest,app});}
     catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException)
-    {if(!error.InnerException.Message.Contains("UNRELATED.SLDPRT"))throw;rejected=true;}
-    if(rejected!=(mode=="real-outside-model"))throw new Exception("Actual loaded-view isolation was weakened or a sheet-only property owner caused rejection");
+    {if(!error.InnerException.Message.Contains(mode=="real-missing-model"?"ACTUAL-MISSING.SLDPRT":"UNRELATED.SLDPRT"))throw;rejected=true;}
+    if(rejected!=(mode=="real-outside-model"||mode=="real-missing-model"))throw new Exception("Actual loaded-view isolation was weakened or a sheet-only property owner caused rejection");
     Console.WriteLine("PASS: controlled open ignores sheet metadata but still rejects a real outside model view: "+mode);
     if(mode=="real-missing-model")
     {
      rejected=false;try{Type("PdmApiClient").GetMethod("CaptureArchiveSnapshot",Flags).Invoke(null,new object[]{root,inventory});}
      catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException)
-     {rejected=error.InnerException.Message.Contains("ACTUAL-MISSING.SLDPRT")&&error.InnerException.Message.Contains("以下存档所需文件尚未定位");}
+     {rejected=error.InnerException.Message.Contains("ACTUAL-MISSING.SLDPRT")&&(error.InnerException.Message.Contains("缺失")||error.InnerException.Message.Contains("尚未定位"));}
      if(!rejected)throw new Exception("A real missing drawing view in native scope no longer fails B09");
      Console.WriteLine("PASS: first real model view is retained and native-scope missing view still fails B09");
     }

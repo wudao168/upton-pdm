@@ -153,6 +153,13 @@ public sealed class ProjectCopyService(
         var latestVersions = (await repository.ListProjectDocumentVersionsAsync(source.Id, cancellationToken))
             .GroupBy(version => version.DocumentId)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(version => version.CreatedAt).First());
+        var nativeIndexes = await repository.ListNativeReferenceIndexesAsync(source.Id, cancellationToken);
+        StoredFile NativeFile(PdmDocument document, DocumentVersion version)
+        {
+            var independent = ArchiveSafety.NativeCopy(nativeIndexes, document.Id, version);
+            return new(independent?.RelativePath ?? version.StorageRelativePath, independent?.Length ?? version.FileLength,
+                independent?.Sha256 ?? version.Sha256, version.CreatedAt);
+        }
         var selectedDocuments = sourceDocuments
             .Where(document => document.Kind == DocumentKind.Drawing ? options.CopyDrawings : options.CopyModels)
             .OrderBy(document => document.Kind == DocumentKind.Drawing ? 1 : 0)
@@ -161,8 +168,7 @@ public sealed class ProjectCopyService(
         foreach (var sourceDocument in selectedDocuments)
         {
             var version = latestVersions[sourceDocument.Id];
-            await documentStorage.VerifyStoredFileAsync(source,
-                new StoredFile(version.StorageRelativePath, version.FileLength, version.Sha256, version.CreatedAt), cancellationToken);
+            await documentStorage.VerifyStoredFileAsync(source, NativeFile(sourceDocument, version), cancellationToken);
         }
         var eligibleProjectFolders = sourceFolders.Where(folder => folder.Purpose == ProjectFolderPurpose.Standard).ToArray();
         var selectedProjectFolderIds = ExpandedSelectedFolderIds(eligibleProjectFolders, options.FolderIds);
@@ -199,12 +205,16 @@ public sealed class ProjectCopyService(
             var copiedFile = await documentStorage.CopyVersionAsync(
                 source,
                 target,
-                new StoredFile(sourceVersion.StorageRelativePath, sourceVersion.FileLength, sourceVersion.Sha256, sourceVersion.CreatedAt),
+                NativeFile(sourceDocument, sourceVersion),
                 Path.Combine(".versions", targetDocumentId.ToString("N"), "W1", sourceDocument.FileName),
                 cancellationToken);
             var checkoutSessionId = Guid.NewGuid();
             await repository.CheckoutAsync(targetDocumentId, actor, checkoutSessionId, "PROJECT-COPY", timeProvider.GetUtcNow().AddMinutes(30), cancellationToken);
-            var remappedRoot = RemapReference(sourceVersion.ReferenceSnapshot, documentMap);
+            var sourceReference = nativeIndexes.FirstOrDefault(index => index.DocumentId == sourceDocument.Id
+                && index.Revision == sourceVersion.Revision && index.Configuration == sourceVersion.ReferenceSnapshot.Configuration)
+                ?? sourceVersion.ReferenceSnapshot;
+            var remappedRoot = RemapReference(sourceReference, documentMap) with
+                { NativeIsolationVerified = sourceReference.NativeIsolationVerified || ArchiveSafety.NativeCopy(nativeIndexes, sourceDocument.Id, sourceVersion) != null };
             var targetSnapshot = new CadReferenceSnapshot(
                 Guid.NewGuid(), target.Id, targetDocumentId, timeProvider.GetUtcNow(), actor, remappedRoot, HashReference(remappedRoot));
             await repository.CheckInVersionAsync(targetDocumentId, actor, checkoutSessionId, new DocumentVersionCommit(
@@ -221,7 +231,7 @@ public sealed class ProjectCopyService(
                 DrawingNumber: sourceDocument.DrawingNumber,
                 Name: sourceDocument.Name,
                 FileName: sourceDocument.FileName), cancellationToken);
-            documentBytes += sourceVersion.FileLength;
+            documentBytes += copiedFile.Length;
         }
 
         var copiedBomCount = 0;
@@ -421,6 +431,7 @@ public sealed class ProjectCopyService(
             DocumentId = documentId,
             Revision = source.DocumentId.HasValue ? RevisionLabel.InitialWork() : source.Revision,
             CheckedOutBy = null,
+            NativeIsolation = null,
             Children = source.Children.Select(child => RemapReference(child, map)).ToArray()
         };
     }

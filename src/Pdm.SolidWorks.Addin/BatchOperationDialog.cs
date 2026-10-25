@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -96,6 +96,7 @@ internal sealed partial class BatchOperationDialog : Form
     private readonly Panel filesHeader = new Panel();
     private readonly Panel fileDetails = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
     internal Control FileListContainer => fileDetails;
+    internal Control FileListContent => files;
     private readonly ImageList selectionImages = BuildSelectionImages();
     private readonly ImageList structureImages = PdmTaskPaneControl.BuildStructureImages();
     private IReadOnlyList<BatchOperationItem> operationItems;
@@ -531,15 +532,15 @@ internal sealed partial class BatchOperationDialog : Form
     }
 
     private string ExistingReferenceSummary() => existingReferenceOwners.Count == 0 ? string.Empty
-        : "；另有 " + existingReferenceOwners.Count + " 项历史已有引用待补全，未纳入本次修改";
+        : "；另有 " + existingReferenceOwners.Count + " 项历史引用，提交相关装配时自动核对补齐（不计本次修改）";
 
     private void ShowExistingReferences()
     {
         var details = existingReferenceOwners.Select(pair =>
             Path.GetFileName(pair.Key) + "\r\n所属存档装配：" + pair.Value.FileName + "\r\n实际引用路径：" + pair.Key);
         TopMostMessageBox.Show(this,
-            "以下引用已经存在于原存档装配中，但尚未取得本项目的图档关联。它们不是本次新建文件，不能按名称绑定其他项目或随本次修改自动登记。\r\n"
-            + "请先核对原文件及其归属，明确补全原存档结构后再提交受影响的装配体。\r\n\r\n" + string.Join("\r\n\r\n", details),
+            "以下文件属于原存档装配的历史遗漏引用，不计入本次工程变更。提交相关装配时将自动核对并补齐实际文件，保留原装配版本。\r\n"
+            + "仅复用当前项目内内容相符的版本；不会按名称绑定其他项目。原文件缺失、内容变化或身份冲突会在上传前说明原因。\r\n\r\n" + string.Join("\r\n\r\n", details),
             "历史已有引用待补全", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
@@ -925,15 +926,7 @@ internal sealed partial class BatchOperationDialog : Form
     }
 
     internal static CadTreeNode ExistingArchivedReferenceOwner(BatchOperationItem item)
-    {
-        if (item?.Node == null || item.Node.DocumentId.HasValue || IsEmbedded(item.Node)
-            || (item.Node.Kind != CadDocumentKind.Part && item.Node.Kind != CadDocumentKind.Assembly)) return null;
-        return item.Ancestors.LastOrDefault(ancestor => ancestor.Kind == CadDocumentKind.Assembly && ancestor.DocumentId.HasValue
-            && !ancestor.IsModifiedInSolidWorks && !ancestor.IsRenamePendingSave
-            && ancestor.SuppressedArchiveVersion?.ReferenceSnapshot?.DocumentId == ancestor.DocumentId
-            && !string.IsNullOrWhiteSpace(ancestor.SuppressedLocalStructureSha256)
-            && string.Equals(ancestor.SuppressedLocalStructureSha256, ancestor.SuppressedArchiveSha256, StringComparison.OrdinalIgnoreCase));
-    }
+        => HistoricalReferenceRepair.Owner(item);
 
     private HashSet<string> UpdateTreeNode(TreeNode node)
     {
@@ -1196,7 +1189,7 @@ internal sealed partial class BatchOperationDialog : Form
         CanSelectForCheckIn(node, username)
         && (!node.DocumentId.HasValue || node.StoredVersionStateKnown && !node.HasStoredVersion);
 
-    private static bool IsEmbedded(CadTreeNode node) => node.Status == CadReferenceStatus.Virtual
+    internal static bool IsEmbedded(CadTreeNode node) => node.Status == CadReferenceStatus.Virtual
         || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath);
 
     private static bool IsSupported(CadDocumentKind kind) =>

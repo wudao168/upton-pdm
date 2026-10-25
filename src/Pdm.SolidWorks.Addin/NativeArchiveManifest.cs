@@ -101,10 +101,25 @@ internal static class NativeArchiveManifest
         if (string.IsNullOrWhiteSpace(path)) return false;
         var temp = Path.GetFullPath(Path.GetTempPath()).TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
         var full = Path.GetFullPath(path);
-        if (!full.StartsWith(temp, StringComparison.OrdinalIgnoreCase)) return false;
-        var parts = full.Substring(temp.Length).Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
-        return parts.Length >= 3 && parts[0].StartsWith("swx", StringComparison.OrdinalIgnoreCase)
-            && parts[1].Equals("IC~~", StringComparison.OrdinalIgnoreCase);
+        if (full.StartsWith(temp, StringComparison.OrdinalIgnoreCase))
+        {
+            var local = full.Substring(temp.Length).Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+            if (local.Length >= 3 && local[0].StartsWith("swx", StringComparison.OrdinalIgnoreCase)
+                && local[1].Equals("IC~~", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        var parts = full.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+        var marker = Array.FindIndex(parts, part => part.Equals("IC~~", StringComparison.OrdinalIgnoreCase));
+        // Some saved imports retain the user-profile swx cache location rather
+        // than AppData/Local/Temp. Storage ownership still requires native proof.
+        if (marker == 4 && marker < parts.Length - 1
+            && parts[1].Equals("Users", StringComparison.OrdinalIgnoreCase)
+            && parts[3].StartsWith("swx", StringComparison.OrdinalIgnoreCase)) return true;
+        return marker >= 6 && marker < parts.Length - 1
+            && parts[marker - 6].Equals("Users", StringComparison.OrdinalIgnoreCase)
+            && parts[marker - 4].Equals("AppData", StringComparison.OrdinalIgnoreCase)
+            && parts[marker - 3].Equals("Local", StringComparison.OrdinalIgnoreCase)
+            && parts[marker - 2].Equals("Temp", StringComparison.OrdinalIgnoreCase)
+            && parts[marker - 1].StartsWith("swx", StringComparison.OrdinalIgnoreCase);
     }
 
     public static IReadOnlyList<string> Validate(CadTreeNode root, IReadOnlyList<string> nativeFiles)
@@ -124,7 +139,6 @@ internal static class NativeArchiveManifest
             .ToDictionary(group => group.Key, group => group.Distinct(StringComparer.OrdinalIgnoreCase).Count(), StringComparer.OrdinalIgnoreCase);
         foreach (var node in nodes)
         {
-            if (node.IsOutsideNativeFileScope) continue;
             if (IsInterconnectCachePath(node.FullPath) && (!node.IsStoredImport || !ImportedComponentStorage.IsStableOwner(node.ImportedStorageOwnerPath)))
                 AddFailure("B11", "树内导入组件尚未形成可确认的原生存档内容，请将其保存为稳定原生文件或确认随父装配嵌入保存：" + node.FileName + "；实例：" + node.InstancePath);
             else if (node.Status != CadReferenceStatus.Virtual && !embeddedNodes.Contains(node)
@@ -135,9 +149,9 @@ internal static class NativeArchiveManifest
                 if (!embeddedNodes.Contains(node)) AddFailure("B11", "树内虚拟组件的保存归属尚未确认：" + node.FileName);
             }
             else if (string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
-                AddFailure("B09", "树内图档缺失，不能完整存档：" + node.FileName + "；路径：" + node.FullPath);
+                failures.Add("实际引用文件缺失，不能完整存档：" + node.FileName + "；路径：" + node.FullPath);
             else if (new FileInfo(node.FullPath).Length == 0)
-                AddFailure("B10", "树内图档为空，不能完整存档：" + node.FileName);
+                failures.Add("实际引用文件为空，不能完整存档：" + node.FileName);
         }
         var ordinary = nodes.Where(node => node.Status != CadReferenceStatus.Virtual && !embeddedNodes.Contains(node)
             && !string.IsNullOrWhiteSpace(node.FullPath)).ToArray();
