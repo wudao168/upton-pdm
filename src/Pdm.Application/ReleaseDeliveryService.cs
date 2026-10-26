@@ -97,7 +97,8 @@ public sealed class ReleaseDeliveryService(IPdmRepository repository, IReleaseDe
             var unitIds = Units(directory, department.Id, includeChildren);
             var names = directory.Memberships.Where(member => unitIds.Contains(member.UnitId)).Select(member => member.Username).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var members = new List<ReleaseNoticeRecipient>();
-            foreach (var user in directory.Users.Where(user => user.IsActive && names.Contains(user.Username)))
+            foreach (var user in directory.Users.Where(user => user.IsActive && names.Contains(user.Username)
+                && !NotificationRecipientPolicy.SystemOnly(user.EffectiveRoleCodes)))
                 if (await repository.HasProjectContentReadAccessAsync(state.ProjectId, user.Username, user.Role, ct)) members.Add(new(user.Username, null));
             receipts.Add(new() { Id = Guid.NewGuid(), DepartmentId = department.Id, DepartmentName = department.Name, Event = eventKind,
                 IncludeChildren = includeChildren, RequireExecution = group.Any(item => item.Rule.RequireExecution), Recipients = members });
@@ -171,7 +172,10 @@ public sealed class ReleaseDeliveryService(IPdmRepository repository, IReleaseDe
                 ReleaseSendResult result;
                 try
                 {
-                    if (delivery.Channel == "InApp")
+                    var recipient = delivery.Channel is "InApp" or "Email" ? await repository.FindUserAsync(delivery.Destination, ct) : null;
+                    if (NotificationRecipientPolicy.SystemOnly(recipient))
+                        result = new("Succeeded", "当前账号仅有系统管理角色，已跳过本条业务通知");
+                    else if (delivery.Channel == "InApp")
                     {
                         var user = await repository.FindUserAsync(delivery.Destination, ct);
                         if (user?.IsActive != true || !await repository.HasProjectContentReadAccessAsync(record.State.ProjectId, user.Username, user.Role, ct))

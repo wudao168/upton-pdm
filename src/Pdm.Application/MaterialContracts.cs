@@ -323,6 +323,7 @@ public interface IMaterialRepository
     Task<MaterialAttachment?> FindMaterialAttachmentAsync(Guid attachmentId, CancellationToken cancellationToken);
     Task<MaterialAttachment> CreateMaterialAttachmentAsync(MaterialAttachment attachment, CancellationToken cancellationToken);
     Task<bool> DeleteMaterialAttachmentAsync(Guid materialId, Guid attachmentId, CancellationToken cancellationToken);
+    Task<PdmMaterial> ReplaceMaterialImagesAsync(PdmMaterial material, IReadOnlyList<Guid> attachmentIds, long expectedRowVersion, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsBySpecificationAsync(string specification, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsByBrandAndSpecificationAsync(string brand, string specification, CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialCodeApplication>> ListMaterialCodeApplicationsAsync(Guid? projectId, MaterialCodeApplicationStatus? status, CancellationToken cancellationToken);

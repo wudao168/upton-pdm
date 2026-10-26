@@ -1,0 +1,126 @@
+/* 经确认的 Uiverse 按钮：删除 cssbuttons-io，确认 Gaurang7717，添加 UtariD86。
+   保留每个业务按钮原来的宽、高、内边距及布局；表现层不改写 Vue 子节点。 */
+:root body button[data-pdm-button-kind] {
+  --pdm-button-fill: #00a600;
+  --pdm-button-hover: #00a600;
+  --pdm-button-divider: #007300;
+  --pdm-button-icon-width: min(26px, 34%);
+  --pdm-button-icon-size: 15px;
+  border-radius: 5px !important;
+  border-color: transparent !important;
+  background: var(--pdm-surface) !important;
+  color: var(--pdm-theme-accent) !important;
+  box-shadow: 1px 1px 3px rgba(0, 0, 0, .15) !important;
+  transition: background-color 200ms ease, color 200ms ease, border-color 200ms ease, box-shadow 200ms ease;
+}
+
+:root body button[data-pdm-button-kind="outline"] {
+  outline: 1px solid var(--pdm-theme-accent);
+  outline-offset: -1px;
+}
+
+:root body button[data-pdm-button-kind="outline"]:hover:not(:disabled):not(.is-disabled):not([aria-disabled="true"]) {
+  background: var(--pdm-theme-accent-soft) !important;
+}
+
+:root body button[data-pdm-button-kind]:not([data-pdm-button-kind="outline"]) {
+  position: relative;
+  overflow: hidden;
+  border-color: transparent !important;
+  background: var(--pdm-button-fill) !important;
+  color: transparent !important;
+  box-shadow: 1px 1px 3px rgba(0, 0, 0, .15) !important;
+}
+
+:root body button[data-pdm-button-kind="delete"] {
+  --pdm-button-fill: #e62222;
+  --pdm-button-hover: #ff3636;
+  --pdm-button-divider: #c41b1b;
+  --pdm-button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 6h18M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M5 6l1 14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-14M10 10v7M14 10v7'/%3E%3C/svg%3E");
+}
+
+:root body button[data-pdm-button-kind="confirm"] {
+  --pdm-button-icon-size: 18px;
+  --pdm-button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m20 6-11 11-5-5'/%3E%3C/svg%3E");
+}
+
+:root body button[data-pdm-button-kind="add"] {
+  --pdm-button-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E");
+}
+
+:root body button[data-pdm-button-kind]:not([data-pdm-button-kind="outline"]) > * {
+  opacity: 0;
+}
+
+:root body button[data-pdm-button-kind]:not([data-pdm-button-kind="outline"])::before {
+  /* 空的替代文本避免生成内容重复加入按钮的可访问名称。 */
+  content: attr(data-pdm-button-label) / "";
+  position: absolute;
+  inset: 0 var(--pdm-button-icon-width) 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+  transition: opacity 200ms ease;
+}
+
+:root body button[data-pdm-button-kind]:not([data-pdm-button-kind="outline"])::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  right: 0;
+  bottom: 4px;
+  width: var(--pdm-button-icon-width);
+  border-left: 1px solid var(--pdm-button-divider);
+  background: var(--pdm-button-icon) center / var(--pdm-button-icon-size) var(--pdm-button-icon-size) no-repeat;
+  pointer-events: none;
+  transition: width 200ms ease, border-color 200ms ease, background-size 200ms ease;
+}
+
+:root body button[data-pdm-button-kind]:not([data-pdm-button-kind="outline"]):hover:not(:disabled):not(.is-disabled):not([aria-disabled="true"]) {
+  background: var(--pdm-button-hover) !important;
+}
+
+:root body button[data-pdm-button-kind]:not([data-pdm-button-kind="outline"]):hover:not(:disabled):not(.is-disabled):not([aria-disabled="true"])::before {
+  opacity: 0;
+}
+
+:root body button[data-pdm-button-kind]:not([data-pdm-button-kind="outline"]):hover:not(:disabled):not(.is-disabled):not([aria-disabled="true"])::after,
+:root body button[data-pdm-button-kind][data-pdm-button-icon-only="true"]::after {
+  width: 100%;
+  border-color: transparent;
+}
+
+:root body button[data-pdm-button-kind][data-pdm-button-icon-only="true"]::before {
+  display: none;
+}
+
+:root body button[data-pdm-button-kind]:not([data-pdm-button-kind="outline"]):active:not(:disabled):not(.is-disabled)::after {
+  background-size: calc(var(--pdm-button-icon-size) * .8) calc(var(--pdm-button-icon-size) * .8);
+}
+
+:root body button:is([data-pdm-button-kind="add"], [data-pdm-button-kind="confirm"]):active:not(:disabled):not(.is-disabled) {
+  background: #00cc00 !important;
+}
+
+:root body button[data-pdm-button-kind]:focus-visible {
+  outline: 2px solid var(--pdm-theme-accent) !important;
+  outline-offset: 2px;
+}
+
+:root body button[data-pdm-button-kind]:is(:disabled, .is-disabled, [aria-disabled="true"]) {
+  cursor: not-allowed;
+  opacity: .38 !important;
+  box-shadow: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root body button[data-pdm-button-kind],
+  :root body button[data-pdm-button-kind]::before,
+  :root body button[data-pdm-button-kind]::after {
+    transition: none !important;
+  }
+}

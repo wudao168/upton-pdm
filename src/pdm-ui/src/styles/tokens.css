@@ -18,8 +18,9 @@
   --pdm-tab-primary: 34px;
   --pdm-tabs-selected: var(--pdm-theme-accent-soft-strong);
   --pdm-tabs-spacing: 5px;
-  --pdm-tabs-radius: 10px;
-  --pdm-tabs-shadow: 0 1px 4px var(--pdm-shadow);
+  --pdm-tabs-padding: 4px;
+  --pdm-tabs-radius: 8px;
+  --pdm-tabs-shadow: 0 2px 8px rgba(0, 0, 0, .1);
   --pdm-symbol-small: 20px;
   --pdm-symbol-compact: 24px;
   --pdm-symbol-toolbar: 28px;

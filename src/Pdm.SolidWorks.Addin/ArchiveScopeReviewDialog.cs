@@ -11,7 +11,7 @@ internal sealed class ArchiveScopeReviewDialog : Form
         Text = "确认本次存档范围";
         Font = new Font("Microsoft YaHei UI", 9F);
         ClientSize = new Size(920, 520); MinimumSize = new Size(660, 380);
-        ShowInTaskbar = false; MinimizeBox = false; MaximizeBox = false; TopMost = true;
+        ShowInTaskbar = false; MinimizeBox = false; MaximizeBox = false; TopMost = false;
         DialogWindowSizing.CenterOnOwnerScreen(this);
         var summary = new Label { Dock = DockStyle.Top, Height = 70, Padding = new Padding(14), Text =
             "本次拟提交 " + planned + " 个文件；" + reused + " 个未变化文件沿用已有版本。\r\n仅处理当前设计树及关联工程图；嵌入组件随父装配保存。最终核对无变化的文件不会生成新版本。" };

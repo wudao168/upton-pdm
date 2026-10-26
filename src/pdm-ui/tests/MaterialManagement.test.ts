@@ -1550,7 +1550,7 @@ describe('MaterialManagement', () => {
     wrapper.unmount()
   })
 
-  it('在料品主档切换封面时更新版本，并拒绝超出三张的图片批次', async () => {
+  it('在料品主档切换封面时更新版本，并拒绝超出五张的图片批次', async () => {
     const material = { ...(await api.listMaterials())[0], coverImageAttachmentId: 'one' }
     const initialVersion = material.rowVersion
     const first = { id: 'one', materialId: material.id, kind: 'CoverImage', originalFileName: '第一张.png' }
@@ -1567,7 +1567,7 @@ describe('MaterialManagement', () => {
     editor.vm.$emit('setCover', second); await flushPromises()
     expect(api.setMaterialCover).toHaveBeenCalledWith(material.id, 'two', initialVersion, 'token')
     expect(editor.props('coverAttachmentId')).toBe('two')
-    editor.vm.$emit('attachmentFiles', 'CoverImage', { target: { files: [new File(['one'], '第三张.png'), new File(['two'], '第四张.png')], value: 'selected' } }); await flushPromises()
+    editor.vm.$emit('attachmentFiles', 'CoverImage', { target: { files: Array.from({length:4}, (_, index) => new File(['image'], index + '.png')), value: 'selected' } }); await flushPromises()
     expect(api.uploadMaterialAttachment).not.toHaveBeenCalled()
     wrapper.unmount()
   })

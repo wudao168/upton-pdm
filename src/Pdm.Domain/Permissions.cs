@@ -220,6 +220,7 @@ public static class RolePermissionCatalog
         new("MechanicalManager", "机械经理", "负责机械专业复核、发布准备及受控编辑协调。", UserRole.Approver, true),
         new("DrawingReviewer", "审图员", "负责机械图纸审核，可由任意具备审图权限的人员并行处理。", UserRole.ProcessReviewer, true),
         new("TechnicalAssistant", "技术助理", "协助维护技术图档、BOM和项目资料。", UserRole.Engineer, true),
+        new("StandardizationAssistant", "标准化助理", "维护标准物料与常备件库存规划，接收低库存提醒。", UserRole.Engineer, true),
         new(UserRole.BusinessUnitManager.ToString(), "事业部经理", "负责事业部项目分工、审批及紧急代批。", UserRole.Approver, true),
         new(UserRole.ProcessReviewer.ToString(), "标准化工程师", "负责标准化检查并处理分配的审批任务。", UserRole.ProcessReviewer, true),
         new("ProjectManager", "项目经理", "负责项目建立、人员分工及发布组织。", UserRole.Engineer, true),
@@ -251,6 +252,7 @@ public static class RolePermissionCatalog
     private static IReadOnlyDictionary<string, IReadOnlySet<string>> InitialRoleDefaults { get; } =
         new Dictionary<string, IReadOnlySet<string>>(StringComparer.OrdinalIgnoreCase)
         {
+            ["StandardizationAssistant"] = Set(PermissionCodes.MaterialView, PermissionCodes.StandardLibraryView, PermissionCodes.StandardLibraryManage),
             [UserRole.Engineer.ToString()] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.BomMechanicalEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.MaterialApply, PermissionCodes.DrawingReviewSubmit, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
             ["ElectricalEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.BomElectricalEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.MaterialApply, PermissionCodes.ReleaseManage, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateSubmit, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),
             ["CommissioningEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DocumentEdit, PermissionCodes.DocumentLockRequestRelease, PermissionCodes.BomEdit, PermissionCodes.BomMechanicalEdit, PermissionCodes.ValidationPlanEdit, PermissionCodes.MaterialView, PermissionCodes.MaterialApply, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateSubmit, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialRelationView),

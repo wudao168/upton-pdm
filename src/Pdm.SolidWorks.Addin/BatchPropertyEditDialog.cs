@@ -691,7 +691,7 @@ internal sealed class BatchPropertyEditDialog : Form
             ? "属性回写确认"
             : "属性";
         MinimumSize = new Size(1100, 560);
-        TopMost = true;
+        TopMost = false;
         DialogWindowSizing.FitToOwner(this, solidWorksWindowHandle, 0.95, 24);
         DialogWindowSizing.CenterOnOwnerScreen(this);
         FormBorderStyle = FormBorderStyle.Sizable;

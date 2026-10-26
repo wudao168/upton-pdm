@@ -85,10 +85,12 @@ async function generatePlmIconAssets(uiRoot = path.resolve(__dirname, '..')) {
   const word = await sharp(wordmark).metadata()
   const iconHeight = 141, iconWidth = iconHeight * bounds.width / bounds.height
   const gap = 16 + 3 * 143 / 38
-  const groupWidth = iconWidth + gap + word.width
-  const iconX = (481 - groupWidth) / 2
+  const wordmarkScale = .8
+  const wordWidth = word.width * wordmarkScale, wordHeight = word.height * wordmarkScale
+  const originalGroupWidth = iconWidth + gap + word.width
+  const iconX = (481 - originalGroupWidth) / 2
   const wordX = iconX + iconWidth + gap
-  const navSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="481" height="143" viewBox="0 0 481 143" data-plm-source-sha256="${sourceHash}"><title>UPTON PLM</title><svg x="${iconX}" y="1" width="${iconWidth}" height="141" viewBox="${left} ${top} ${bounds.width} ${bounds.height}">${artwork}</svg><image x="${wordX}" y="${(143 - word.height) / 2}" width="${word.width}" height="${word.height}" href="data:image/png;base64,${wordmark.toString('base64')}"/></svg>`
+  const navSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="481" height="143" viewBox="0 0 481 143" data-plm-source-sha256="${sourceHash}"><title>UPTON PLM</title><svg x="${iconX}" y="1" width="${iconWidth}" height="141" viewBox="${left} ${top} ${bounds.width} ${bounds.height}">${artwork}</svg><image x="${wordX}" y="${(143 - wordHeight) / 2}" width="${wordWidth}" height="${wordHeight}" href="data:image/png;base64,${wordmark.toString('base64')}"/></svg>`
   output('src/pdm-ui/src/assets/upton-nav-lockup.svg', Buffer.from(navSvg))
   output('src/pdm-ui/src/assets/upton-nav-lockup.png', await sharp(Buffer.from(navSvg)).png({ compressionLevel: 9 }).toBuffer())
 
@@ -102,7 +104,7 @@ async function generatePlmIconAssets(uiRoot = path.resolve(__dirname, '..')) {
     wordmark: { path: 'src/pdm-ui/src/assets/upton-wordmark.png', sha256: sha256(wordmark) },
     generator: { path: 'src/pdm-ui/tools/generate-plm-icon-assets.cjs', sha256: sha256(fs.readFileSync(__filename)) },
     bounds, desktop: { background: 'white-rounded', subjectHeightRatio: .86, cornerRadius: 218.24 },
-    navigation: { gapCssPixels: gap * 38 / 143, wordmarkHeightCssPixels: word.height * 38 / 143, groupCentered: true },
+    navigation: { gapCssPixels: gap * 38 / 143, wordmarkScale, wordmarkHeightCssPixels: wordHeight * 38 / 143, groupCentered: false },
     outputs,
   }
   writeChanged(manifestPath(uiRoot), JSON.stringify(manifest, null, 2) + '\n')

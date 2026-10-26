@@ -12,7 +12,7 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Api.Tests;
 
-public sealed class DingTalkConfigurationTests
+public sealed partial class DingTalkConfigurationTests
 {
     private sealed class BotHandler : HttpMessageHandler
     {
@@ -61,6 +61,8 @@ public sealed class DingTalkConfigurationTests
         Assert.False(await discovery.RegisterGroupAsync(company,"test-corp","test-key","other-robot",eventBody,default));
         Assert.True(await discovery.RegisterGroupAsync(company,"test-corp","test-key","robot-test",eventBody,default));
         Assert.True(await discovery.RegisterGroupAsync(company,"test-corp","test-key","robot-test",eventBody,default));
+        var copiedCommand=JsonSerializer.SerializeToElement(new {conversationType="2",chatbotCorpId="test-corp",robotCode="robot-test",conversationId="cid-shared",conversationTitle="共享测试群",text=new {content="@UPLM 登记项目群"}});
+        Assert.True(await discovery.RegisterGroupAsync(company,"test-corp","test-key","robot-test",copiedCommand,default));
         var discovered=await client.GetFromJsonAsync<JsonElement>(" /api/settings/dingtalk".Trim());
         Assert.Equal(2,discovered.GetProperty("rowVersion").GetInt64());
         var groupId=discovered.GetProperty("groups")[0].GetProperty("id").GetGuid();
@@ -101,13 +103,24 @@ public sealed class DingTalkConfigurationTests
         var bindingOptions = await discovery.LoadAsync(company, default);
         var alias = Guid.NewGuid();
         bindingOptions.Groups[alias] = new() { Name = "同群的旧登记", OpenConversationId = "cid-shared" };
+        var stale = Guid.NewGuid();
+        bindingOptions.Groups[stale] = new() { Name = "共享测试群", OpenConversationId = "" };
+        bindingOptions.Bindings[Guid.NewGuid()] = groupId; // 已删除项目的历史绑定不能占用或显示为有效项目。
         var protector = factory.Services.GetRequiredService<Microsoft.AspNetCore.DataProtection.IDataProtectionProvider>().CreateProtector("Upton.Pdm.DingTalk.Configuration.v1");
         await configs.SaveAsync(new(company, protector.Protect(JsonSerializer.Serialize(bindingOptions, new JsonSerializerOptions(JsonSerializerDefaults.Web))), bindingOptions.RowVersion), 7, default);
+        var listed = (await client.GetFromJsonAsync<JsonElement>("/api/settings/dingtalk")).GetProperty("groups");
+        var singleGroup = Assert.Single(listed.EnumerateArray());
+        Assert.Equal(1, singleGroup.GetProperty("projectCount").GetInt32());
+        Assert.Equal(second.Id, Assert.Single(singleGroup.GetProperty("boundProjects").EnumerateArray()).GetProperty("id").GetGuid());
+        var currentBinding = await client.GetFromJsonAsync<JsonElement>($"/api/projects/{second.Id}/dingtalk");
+        Assert.Equal(groupId, currentBinding.GetProperty("groupId").GetGuid());
+        Assert.Equal(groupId, Assert.Single(currentBinding.GetProperty("groups").EnumerateArray()).GetProperty("id").GetGuid());
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PutAsJsonAsync($"/api/projects/{RootId}/dingtalk", new { groupId = alias, expectedRowVersion = 8 })).StatusCode);
         var renamedEvent=JsonSerializer.SerializeToElement(new {conversationType="2",chatbotCorpId="test-corp",robotCode="robot-test",conversationId="cid-shared",conversationTitle="改名后的项目群",text=new {content="登记项目群"}});
         Assert.True(await discovery.RegisterGroupAsync(company,"test-corp","test-key","robot-test",renamedEvent,default));
         var renamed=await discovery.LoadAsync(company,default);
         Assert.Equal("改名后的项目群",renamed.Groups[groupId].Name);
+        Assert.Equal("改名后的项目群",renamed.Groups[alias].Name);
         Assert.Equal(groupId,renamed.Bindings[second.Id]);
         await repository.CreateUserAsync(new(Guid.NewGuid(), "other", "普通用户", "unused", UserRole.Engineer, true), default);
         await repository.SetUserCompanyScopeAsync("other", company, false, [], "admin", default);

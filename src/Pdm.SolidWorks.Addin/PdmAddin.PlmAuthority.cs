@@ -73,10 +73,10 @@ public sealed partial class PdmAddin
         return new WorkspaceAcquireResult(initialResult.CheckedOutFiles + ids.Length, initialResult.UpdatedFiles + (reused ? 0 : ids.Length));
     }
 
-    private string CloseLocalContextsForPlmOpen(ControlledOpenManifestDto manifest)
-        => CloseLocalContextsForPlmOpenCore(manifest, false);
+    private string CloseLocalContextsForPlmOpen(ControlledOpenManifestDto manifest, string preparedRootPath = null)
+        => CloseLocalContextsForPlmOpenCore(manifest, false, preparedRootPath);
 
-    private string CloseLocalContextsForPlmOpenCore(ControlledOpenManifestDto manifest, bool preserveUnsaved)
+    private string CloseLocalContextsForPlmOpenCore(ControlledOpenManifestDto manifest, bool preserveUnsaved, string preparedRootPath = null)
     {
         var names = new HashSet<string>(manifest.Files.Select(file => file.FileName), StringComparer.OrdinalIgnoreCase);
         var models = ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>()).ToArray();
@@ -93,6 +93,13 @@ public sealed partial class PdmAddin
                 if (PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var binding)
                     && binding.ProjectId == manifest.ProjectId && manifestIds.Contains(binding.DocumentId))
                     authorized.Add(model);
+                var preparedFile = preparedRootPath == null ? null : manifest.Files.FirstOrDefault(file => PathsEqual(path,
+                    Path.Combine(Path.GetDirectoryName(preparedRootPath), file.RelativePath ?? file.FileName)));
+                if (preparedRootPath != null && preparedFile != null && authorized.Contains(model))
+                {
+                    references[model] = LoadedModelReferencePaths(model);
+                    continue;
+                }
                 if (names.Contains(Path.GetFileName(path)) || names.Contains(model.GetTitle()))
                 {
                     selected.Add(model);
@@ -102,6 +109,11 @@ public sealed partial class PdmAddin
             }
             catch (System.Runtime.InteropServices.COMException error) { LogDiagnostic("PLM取回前读取旧窗口", error); }
         }
+        // A same-name drawing from another directory/project is not authorization
+        // to close it. Leave every original window open when an identity conflicts.
+        if (selected.Any(model => !authorized.Contains(model)))
+            throw new InvalidOperationException("其他来源的同名图档仍在使用，已保留全部窗口和修改。请核对并关闭冲突图档后再获取受控版本："
+                + string.Join("、", selected.Where(model => !authorized.Contains(model)).Select(model => model.GetTitle())));
         while (true)
         {
             var owners = references.Where(pair => !selected.Contains(pair.Key)
@@ -113,6 +125,9 @@ public sealed partial class PdmAddin
                 if (!string.IsNullOrWhiteSpace(owner.GetPathName())) selectedPaths.Add(owner.GetPathName());
             }
         }
+        if (selected.Any(model => !authorized.Contains(model)))
+            throw new InvalidOperationException("待更新文件仍被其他窗口引用，已保留全部窗口和修改。请先保存并关闭相关窗口后再获取："
+                + string.Join("、", selected.Where(model => !authorized.Contains(model)).Select(model => model.GetTitle())));
         if (preserveUnsaved)
         {
             var affectedPaths = new HashSet<string>(selectedPaths, StringComparer.OrdinalIgnoreCase);

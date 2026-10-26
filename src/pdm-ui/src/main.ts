@@ -1,5 +1,6 @@
 import { installGlobalScrollbars } from './globalScrollbars'
 import { installButtonTypography } from './buttonTypography'
+import { installButtonStyles } from './buttonStyles'
 import { installPanelHeaderActions } from './panelHeaderActions'
 import { installColumnResize } from './columnResize'
 import { installDatePickers } from './datePickers'
@@ -33,5 +34,6 @@ installPanelHeaderActions(app)
 installColumnResize(app)
 installDatePickers(app)
 installButtonTypography(app)
+installButtonStyles(app)
 installGlobalScrollbars(app)
 app.mount('#app')

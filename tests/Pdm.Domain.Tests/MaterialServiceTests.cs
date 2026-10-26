@@ -1624,6 +1624,33 @@ public sealed class MaterialServiceTests
     }
 
     [Fact]
+    public async Task AutomaticBomHeaderApplications_AreRetainedWithoutManualApprovalCapabilities()
+    {
+        var service = CreateService(out var materials);
+        foreach (var kind in Enum.GetValues<ProjectBomHeaderKind>())
+            await materials.CreateMaterialCodeApplicationAsync(new(Guid.NewGuid(), ProjectId, null,
+                MaterialCodeApplicationStatus.Pending, "engineer", DateTimeOffset.UtcNow,
+                null, null, null, null, null, 1, kind), default);
+        var ordinaryId = Guid.NewGuid();
+        await materials.CreateMaterialCodeApplicationAsync(new(ordinaryId, ProjectId, Guid.NewGuid(),
+            MaterialCodeApplicationStatus.Pending, "engineer", DateTimeOffset.UtcNow,
+            null, null, null, null, null, 1), default);
+
+        var applications = await service.ListCodeApplicationsAsync(ProjectId, MaterialCodeApplicationStatus.Pending,
+            "admin", UserRole.Administrator, default);
+
+        var headers = applications.Where(application => application.BomHeaderKind is not null).ToArray();
+        Assert.Equal(Enum.GetValues<ProjectBomHeaderKind>().Length, headers.Length);
+        Assert.All(headers, application => {
+            Assert.False(application.CanDecide);
+            Assert.False(application.CanEmergencyDecide);
+            Assert.Equal(MaterialCodeApplicationStatus.Pending, application.Status);
+            Assert.Equal(1, application.RowVersion);
+        });
+        Assert.True(applications.Single(application => application.Id == ordinaryId).CanDecide);
+    }
+
+    [Fact]
     public async Task BomHeaderMaterialCodeApproval_ApprovesDraftAndCreatesTraceableU9Preview()
     {
         var service = CreateService(out var materials, out var u9Client);

@@ -154,6 +154,8 @@ internal sealed class CadTreeNode
 
     public bool IsModifiedInSolidWorks { get; set; }
     public string ArchiveReadError { get; set; }
+    public List<string> ReferenceWarnings { get; } = new List<string>();
+    public IReadOnlyList<string> StoredReferenceWarnings { get; set; } = Array.Empty<string>();
     public bool NativeFileScopeVerified { get; set; }
     internal ISet<string> NativeFileScopePaths { get; set; }
     public bool IsOutsideNativeFileScope { get; set; }

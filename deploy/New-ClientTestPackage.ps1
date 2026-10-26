@@ -56,10 +56,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw '桌面客户端依赖还原失败。' }
     & $dotnet restore 'src\Pdm.SolidWorks.Addin\Pdm.SolidWorks.Addin.csproj' --nologo -p:NuGetAudit=false
     if ($LASTEXITCODE -ne 0) { throw 'SolidWorks 插件依赖还原失败。' }
+    & $dotnet restore 'src\Pdm.CadArchiveWorker\Pdm.CadArchiveWorker.csproj' --nologo -p:NuGetAudit=false
+    if ($LASTEXITCODE -ne 0) { throw '独立归档组件依赖还原失败。' }
     & $dotnet build 'src\Pdm.Desktop\Pdm.Desktop.csproj' --configuration Release --no-restore --nologo
     if ($LASTEXITCODE -ne 0) { throw '桌面客户端构建失败。' }
     & $dotnet build 'src\Pdm.SolidWorks.Addin\Pdm.SolidWorks.Addin.csproj' --configuration Release --no-restore --nologo
     if ($LASTEXITCODE -ne 0) { throw 'SolidWorks 插件构建失败。' }
+    & $dotnet build 'src\Pdm.CadArchiveWorker\Pdm.CadArchiveWorker.csproj' --configuration Release --no-restore --nologo
+    if ($LASTEXITCODE -ne 0) { throw '独立归档组件构建失败。' }
 }
 finally { Pop-Location }
 
@@ -70,6 +74,10 @@ Get-ChildItem -LiteralPath $desktopBuild | Where-Object { $_.Name -ne 'Upton.Pdm
 }
 Get-ChildItem -LiteralPath $addinBuild | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $addinOutput $_.Name) -Recurse -Force
+}
+$archiveReaderBuild = Join-Path $root 'src\Pdm.CadArchiveWorker\bin\Release\net48'
+foreach ($readerFile in @('Upton.Pdm.CadArchiveWorker.exe', 'Upton.Pdm.CadArchiveWorker.exe.config')) {
+    Copy-Item -LiteralPath (Join-Path $archiveReaderBuild $readerFile) -Destination (Join-Path $addinOutput $readerFile) -Force
 }
 # Both native components carry the exact same UI snapshot, including the review overlay.
 if ([string]::IsNullOrWhiteSpace($clientUiSourceFull)) { $clientUiSourceFull = [IO.Path]::GetFullPath((Join-Path $root 'src\pdm-ui\dist')) }

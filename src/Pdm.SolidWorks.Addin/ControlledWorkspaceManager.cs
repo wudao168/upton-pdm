@@ -10,8 +10,10 @@ namespace Upton.Pdm.SolidWorks;
 
 internal sealed partial class ControlledWorkspaceManager
 {
+    internal Action<string, int, int> PreparationProgress { get; set; }
     private readonly PdmApiClient apiClient;
     private readonly string workspaceRoot;
+    internal string WorkspaceRoot => workspaceRoot;
 
     public ControlledWorkspaceManager(PdmApiClient apiClient)
         : this(apiClient, WorkspaceSettingsStore.GetWorkspaceRoot())
@@ -50,6 +52,7 @@ internal sealed partial class ControlledWorkspaceManager
         if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
         {
             SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
+            verifiedSnapshotDirectories[manifest.RootDocumentId] = target;
             return ResolveRootPath(target, manifest);
         }
 
@@ -69,6 +72,7 @@ internal sealed partial class ControlledWorkspaceManager
 
             ReplaceDirectory(staging, target);
             SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
+            verifiedSnapshotDirectories[manifest.RootDocumentId] = target;
             return ResolveRootPath(target, manifest);
         }
         finally
@@ -82,6 +86,12 @@ internal sealed partial class ControlledWorkspaceManager
         IReadOnlyCollection<Guid> editableDocumentIds,
         CancellationToken cancellationToken)
     {
+        var target = WorkingDirectory(manifest);
+        if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
+        {
+            SetWorkspaceAttributes(target, manifest, editableDocumentIds ?? Array.Empty<Guid>());
+            return ResolveRootPath(target, manifest);
+        }
         var readOnlyRootPath = await PrepareReadOnlyAsync(manifest, false, cancellationToken).ConfigureAwait(false);
         var source = Path.GetDirectoryName(readOnlyRootPath) ?? throw new InvalidDataException("只读工作区路径无效。");
         return CopyWorkingContext(manifest, source, editableDocumentIds);

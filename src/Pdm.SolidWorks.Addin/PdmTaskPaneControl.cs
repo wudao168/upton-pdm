@@ -60,7 +60,10 @@ internal sealed class PdmTaskPaneControl : UserControl
     private readonly Button settingsButton = new Button();
     private readonly Panel workspaceOperationPanel = new Panel();
     private readonly Label workspaceOperationStatus = new Label();
-    private readonly PdmQuantityProgressBar workspaceOperationProgress = new PdmQuantityProgressBar();
+    private readonly PdmQuantityProgressBar workspaceOperationProgress = new PdmQuantityProgressBar { Visible = false };
+    private readonly System.Windows.Forms.Timer workspaceElapsedTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+    private DateTime? workspaceElapsedStartedUtc;
+    private string workspaceStageMessage;
     private readonly PdmSegmentedTabControl tabs = new PdmSegmentedTabControl();
     private readonly Panel tabsHost = new Panel();
     private readonly Control projectPanel;
@@ -148,6 +151,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     public PdmTaskPaneControl(string installedVersion = "")
     {
+        workspaceElapsedTimer.Tick += (_, _) => UpdateWorkspaceElapsed();
         uiContext = new TaskPaneSynchronizationContext(this);
         installedPluginVersion = installedVersion?.Trim() ?? string.Empty;
         Dock = DockStyle.Fill;
@@ -189,6 +193,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             plannedTaskTimer.Dispose();
             plannedTaskRefreshTimer.Dispose();
             plannedTaskAnimation.Dispose();
+            workspaceElapsedTimer.Dispose();
             emphasizedNodeFont?.Dispose();
             structureImages?.Dispose();
             headerLogoImage?.Dispose();
@@ -267,7 +272,32 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     public void SetProjectTree(Guid projectId, CadTreeNode root) => RunOnUiThread(() =>
     {
-        if (projectDocuments.SelectedProjectId == projectId) projectDocuments.SetTree(root);
+        if (projectDocuments.SelectedProjectId != projectId) return;
+        projectDocuments.ConfigureStructureLoading(null, null);
+        projectDocuments.SetTree(root);
+    });
+
+    public void SetProjectNavigation(Guid projectId, CadTreeNode root, Func<CadTreeNode, Task> loader, ISet<Guid> pending) => RunOnUiThread(() =>
+    {
+        if (projectDocuments.SelectedProjectId != projectId) return;
+        projectDocuments.ConfigureStructureLoading(loader, pending);
+        projectDocuments.SetTree(root);
+    });
+
+    public void SetProjectLoadingStatus(Guid projectId, string message) => RunOnUiThread(() =>
+    {
+        if (projectDocuments.SelectedProjectId == projectId) projectDocuments.SetLoadingStatus(message);
+    });
+
+    public void SetTreeLoadingStatus(string message) => RunOnUiThread(() =>
+    {
+        if (workspaceOperationActive) return;
+        SetWorkspaceStage(message);
+        workspaceOperationProgress.SetProgress(0, 0);
+        workspaceOperationProgress.Visible = !string.IsNullOrWhiteSpace(message);
+        actionToolTip.SetToolTip(workspaceOperationStatus, workspaceOperationStatus.Text);
+        workspaceOperationPanel.Update();
+        workspaceOperationProgress.Update();
     });
 
     public void ShowStructureTab() => RunOnUiThread(() =>
@@ -311,11 +341,10 @@ internal sealed class PdmTaskPaneControl : UserControl
                     ? message + "\r\n项目：" + currentProject.Text + "\r\n图档：" + rootNode?.FullPath
                     : "操作已结束，请结合结果记录确认成功或失败。");
             workspaceOperationActive = active;
-            workspaceOperationStatus.Text = active
-                ? string.Concat("运行状态：处理中", Environment.NewLine, string.IsNullOrWhiteSpace(message) ? "PLM工作文件操作" : message.Trim())
-                : string.Concat("运行状态：空闲", Environment.NewLine, "当前无进行中的操作");
+            SetWorkspaceStage(active ? (string.IsNullOrWhiteSpace(message) ? "PLM工作文件操作" : message.Trim()) : null);
             actionToolTip.SetToolTip(workspaceOperationStatus, workspaceOperationStatus.Text);
             workspaceOperationProgress.SetProgress(0, 0);
+            workspaceOperationProgress.Visible = active;
             serviceStatus.Active = active;
             actionToolTip.SetToolTip(serviceStatus, active ? "PLM正在处理工作文件" : serviceStatus.AccessibleDescription);
             structureMenu.Enabled = !active;
@@ -341,14 +370,35 @@ internal sealed class PdmTaskPaneControl : UserControl
                 return;
             }
 
-            workspaceOperationStatus.Text = string.Concat(
-                "运行状态：处理中",
-                Environment.NewLine,
-                string.IsNullOrWhiteSpace(message) ? "PLM工作文件操作" : message.Trim());
+            SetWorkspaceStage(string.IsNullOrWhiteSpace(message) ? "PLM工作文件操作" : message.Trim());
             actionToolTip.SetToolTip(workspaceOperationStatus, workspaceOperationStatus.Text);
             workspaceOperationProgress.SetProgress(completed, total);
             RefreshWorkspaceOperationUi();
         });
+    }
+
+    private void SetWorkspaceStage(string message)
+    {
+        workspaceStageMessage = message;
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            workspaceElapsedStartedUtc = null;
+            workspaceElapsedTimer.Stop();
+            workspaceOperationStatus.Text = "运行状态：空闲\r\n当前无进行中的操作";
+            return;
+        }
+        if (!workspaceElapsedStartedUtc.HasValue) workspaceElapsedStartedUtc = DateTime.UtcNow;
+        workspaceElapsedTimer.Start();
+        UpdateWorkspaceElapsed();
+    }
+
+    private void UpdateWorkspaceElapsed()
+    {
+        if (!workspaceElapsedStartedUtc.HasValue || IsDisposed) return;
+        workspaceOperationStatus.Text = "运行状态：" + (workspaceOperationActive ? "处理中" : "正在加载设计树")
+            + "  用时 " + (DateTime.UtcNow - workspaceElapsedStartedUtc.Value).ToString(@"hh\:mm\:ss")
+            + Environment.NewLine + workspaceStageMessage;
+        actionToolTip.SetToolTip(workspaceOperationStatus, workspaceOperationStatus.Text);
     }
 
     public void ShowVersions(Guid documentId, string fileName, IReadOnlyList<DocumentVersionDto> versions)
@@ -358,6 +408,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             displayedVersionDocumentId = documentId;
             displayedVersionFileName = fileName ?? string.Empty;
             versionList.BeginUpdate();
+            versionList.ShowItemToolTips = true;
             versionList.Items.Clear();
             foreach (var version in versions)
             {
@@ -365,7 +416,10 @@ internal sealed class PdmTaskPaneControl : UserControl
                 item.SubItems.Add(version.Status == 1 ? "正式" : "工作");
                 item.SubItems.Add(DisplayUserName(version.CreatedBy));
                 item.SubItems.Add(version.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm"));
-                item.SubItems.Add(version.ChangeNote ?? string.Empty);
+                var referenceWarnings = version.ReferenceSnapshot?.ReferenceWarnings ?? new List<string>();
+                item.SubItems.Add((version.ChangeNote ?? string.Empty) + (referenceWarnings.Count == 0 ? string.Empty
+                    : "　引用提示 " + referenceWarnings.Count + " 项"));
+                item.ToolTipText = string.Join(Environment.NewLine, referenceWarnings);
                 versionList.Items.Add(item);
             }
             versionList.EndUpdate();
@@ -2910,6 +2964,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         var workStateText = WorkStateText(node);
         var embedded = node.Status == CadReferenceStatus.Virtual || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath);
         var editState = string.IsNullOrWhiteSpace(workStateText) ? string.Empty : string.Concat("　状态：", workStateText);
+        if (node.StoredReferenceWarnings.Count > 0) editState += "　最新存档有引用提示 " + node.StoredReferenceWarnings.Count + " 项（版本记录中查看）";
         var selectedVersionText = node.IsInterconnectImport ? "随总装核对" : embedded ? "随父装配" : string.IsNullOrWhiteSpace(node.CurrentRevision)
             ? string.IsNullOrWhiteSpace(node.Revision) ? "未归档" : node.BusinessVersionText
             : VersionText(node);
@@ -2937,6 +2992,8 @@ internal sealed class PdmTaskPaneControl : UserControl
                 : node.IsInterconnectImport ? "\r\n存档：尚未确认原生保存归属，请保存所属装配后重试。"
                 : embedded ? "\r\n存储：所属父装配体内" : "\r\n路径：" + (string.IsNullOrWhiteSpace(node.FullPath) ? "-" : node.FullPath));
         var localFileExists = !string.IsNullOrWhiteSpace(node.FullPath) && File.Exists(node.FullPath);
+        actionToolTip.SetToolTip(selectedMeta, selectedMeta.Text + (node.StoredReferenceWarnings.Count == 0 ? string.Empty
+            : "\r\n最新版本引用提示：\r\n" + string.Join("\r\n", node.StoredReferenceWarnings)));
         var canRegister = !embedded && !node.DocumentId.HasValue
             && localFileExists
             && (node.Kind == CadDocumentKind.Assembly || node.Kind == CadDocumentKind.Part || node.Kind == CadDocumentKind.Drawing);

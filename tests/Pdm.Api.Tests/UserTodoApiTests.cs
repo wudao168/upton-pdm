@@ -12,7 +12,7 @@ namespace Upton.Pdm.Api.Tests;
 public sealed class UserTodoApiTests
 {
     private static string Token(string actor) => new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken("upton-pdm", "upton-pdm-clients",
-        [new Claim(ClaimTypes.Name, actor), new Claim(ClaimTypes.Role, "Administrator")], expires: DateTime.UtcNow.AddMinutes(10),
+        [new Claim(ClaimTypes.Name, actor), new Claim(ClaimTypes.Role, "Engineer")], expires: DateTime.UtcNow.AddMinutes(10),
         signingCredentials: new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")), SecurityAlgorithms.HmacSha256)));
     [Fact]
     public async Task CalendarTodo_IsSharedWithTheExistingInbox_AndPrivateAgainstOtherAdmins()
@@ -21,7 +21,7 @@ public sealed class UserTodoApiTests
         var client = factory.CreateClient();
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
         foreach (var actor in new[] { "todo-creator", "todo-recipient", "todo-outsider" })
-            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), actor, actor, "unused", UserRole.Administrator, true), default);
+            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), actor, actor, "unused", UserRole.Engineer, true), default);
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("todo-creator"));
         var response = await client.PostAsJsonAsync("/api/todos", new { content = "仅接收人可见的资料跟进", dueDate = "2026-10-16", recipientUsernames = new[] { "todo-recipient" } });
         response.EnsureSuccessStatusCode();

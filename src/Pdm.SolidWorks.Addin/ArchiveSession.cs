@@ -21,6 +21,7 @@ internal sealed class ArchiveSession : IDisposable
     private int finished;
     private string resultTitle;
     private string resultMessage;
+    private bool resultFailed = true;
     public static ArchiveSession Current => Volatile.Read(ref current);
     public Task Ready => ready.Task;
     public Task Closed => closed.Task;
@@ -75,7 +76,7 @@ internal sealed class ArchiveSession : IDisposable
     public void CloseForShutdown()
     {
         cancellation.Cancel();
-        Post(() => { Interlocked.Exchange(ref finished, 1); window.Finish("存档操作已停止。", "插件正在关闭，请保留本地文件，重新连接后核对服务器结果。"); window.Close(); });
+        Post(() => { Interlocked.Exchange(ref finished, 1); window.Finish("存档操作已停止。", "插件正在关闭，请保留本地文件，重新连接后核对服务器结果。", true); window.Close(); });
     }
 
     private sealed class NativeOwner : IWin32Window
@@ -142,10 +143,12 @@ internal sealed class ArchiveSession : IDisposable
         {
             if (IsFinished) return;
             PluginDiagnosticLog.Record(failed ? "失败" : "结果", message);
-            resultTitle = failed ? "存档未完成，请查看原因和处理建议。" : warnings ? "存档已完成，请查看处理提醒。" : "存档操作已完成。";
+            resultTitle = failed ? "存档未完成，请查看原因和处理建议。" : warnings && message.Contains("引用提示")
+                ? "存档成功（有引用提示）" : warnings ? "存档已完成，请查看处理提醒。" : "存档操作已完成。";
             resultMessage = message;
+            resultFailed = failed;
             if (WorkflowStarted) window.Report("正在结束本次操作并核对清理状态…", null, 0, 0);
-            else { Interlocked.Exchange(ref finished, 1); window.Finish(resultTitle, resultMessage); }
+            else { Interlocked.Exchange(ref finished, 1); window.Finish(resultTitle, resultMessage, resultFailed); }
         });
     }
     public void Fail(string message) => Complete(message, true);
@@ -153,7 +156,7 @@ internal sealed class ArchiveSession : IDisposable
     {
         if (Interlocked.Exchange(ref finished, 1) == 0)
             window.Finish(resultTitle ?? "本次存档操作已停止。", resultMessage
-                ?? "本地文件已保留。请查看本次过程记录；如已开始服务器提交，请刷新项目核对最终结果。");
+                ?? "本地文件已保留。请查看本次过程记录；如已开始服务器提交，请刷新项目核对最终结果。", resultFailed);
     });
 
     public void RequestCancellation()
@@ -200,10 +203,17 @@ internal sealed class ArchiveSession : IDisposable
 internal sealed class ArchiveSessionWindow : Form
 {
     private readonly ArchiveSession session;
-    private readonly Label stage = new Label { Dock = DockStyle.Top, Height = 42, Text = "正在准备存档窗口…" };
-    private readonly Label file = new Label { Dock = DockStyle.Top, Height = 28, AutoEllipsis = true, Visible = false };
-    private readonly Label elapsed = new Label { Dock = DockStyle.Top, Height = 28, Text = "处理信息　　总耗时 00:00:00" };
-    private readonly ProgressBar progress = new ProgressBar { Dock = DockStyle.Top, Height = 4, Style = ProgressBarStyle.Marquee };
+    private readonly Label stage = InformationField("处理信息", "正在准备存档窗口…");
+    private readonly Label file = InformationField("当前图档", "—");
+    private readonly Label elapsed = new Label { Dock = DockStyle.Right, Width = 132, TextAlign = ContentAlignment.MiddleRight,
+        Padding = new Padding(0, 0, 6, 0), Text = "总耗时 00:00:00" };
+    private readonly Panel resultPanel = new Panel { BorderStyle = BorderStyle.FixedSingle };
+    private readonly Label resultState = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(6, 0, 0, 0) };
+    private readonly ArchiveProgressBar progress = new ArchiveProgressBar();
+    private readonly Panel informationHeader = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+    private readonly Label[] informationLabels;
+    private readonly Control[] informationFields;
+    private readonly Label historyTitle = new Label { Text = "过程记录（完整保留）", Dock = DockStyle.Bottom, Height = 24 };
     private readonly TextBox history = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, WordWrap = true, MaxLength = int.MaxValue };
     private readonly Panel selection = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
     private readonly TableLayoutPanel information = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3,
@@ -225,19 +235,25 @@ internal sealed class ArchiveSessionWindow : Form
     {
         this.session = session;
         Text = "UPLM 存档"; Font = new Font("Microsoft YaHei UI", 9F);
-        ClientSize = new Size(1480, 860); MinimumSize = new Size(1200, 820);
-        ShowInTaskbar = false; TopMost = true;
+        ClientSize = new Size(1640, 960); MinimumSize = new Size(1200, 860);
+        ShowInTaskbar = false; TopMost = false;
         DialogWindowSizing.CenterOnOwnerScreen(this);
         confirmationHost.Controls.Add(confirmation); confirmationHost.Controls.Add(confirmationActions); confirmationHost.Controls.Add(confirmationTitle);
-        var informationHeader = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
-        informationHeader.Controls.Add(new Label { Text = "过程记录（完整保留）", Dock = DockStyle.Bottom, Height = 26 });
-        progress.Dock = DockStyle.Bottom;
-        informationHeader.Controls.Add(progress); informationHeader.Controls.Add(file);
-        informationHeader.Controls.Add(stage); informationHeader.Controls.Add(elapsed); informationHeader.Controls.Add(stop);
+        resultPanel.Controls.Add(resultState); resultPanel.Controls.Add(elapsed);
+        SetResultState(null);
+        informationFields = new Control[] { stage, file, resultPanel, progress };
+        informationLabels = new[] { "处理信息", "当前图档", "存档结果", "当前进度" }
+            .Select(text => new Label { Text = text, TextAlign = ContentAlignment.MiddleLeft }).ToArray();
+        for (var index = 0; index < informationFields.Length; index++)
+        {
+            informationFields[index].AccessibleName = informationLabels[index].Text;
+            informationHeader.Controls.Add(informationLabels[index]); informationHeader.Controls.Add(informationFields[index]);
+        }
+        informationHeader.Controls.Add(historyTitle);
+        informationHeader.Layout += (_, __) => LayoutInformationRows();
         processRecords.Controls.Add(history); processRecords.Controls.Add(confirmationHost);
-        processRecords.Resize += (_, __) => ResizeProjectConfirmation();
         information.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        information.RowStyles.Add(new RowStyle(SizeType.Absolute, 128));
+        information.RowStyles.Add(new RowStyle(SizeType.Absolute, 156));
         information.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         information.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
         information.Controls.Add(informationHeader, 0, 0); information.Controls.Add(processRecords, 0, 1);
@@ -250,13 +266,19 @@ internal sealed class ArchiveSessionWindow : Form
         body.Controls.Add(selection, 0, 0); body.Controls.Add(information, 1, 0);
         selection.Controls.Add(new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter,
             Text = "正在读取图档与结构，请稍候。检查完成后在此选择项目和图档。" });
+        var initialActions = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40,
+            FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 4, 8, 4) };
+        stop.Dock = DockStyle.None; initialActions.Controls.Add(stop); selection.Controls.Add(initialActions);
         ArchiveCommandAppearance.Apply(stop, Color.FromArgb(230, 126, 34));
         stop.Click += (_, __) => CancelOrClose();
         Controls.Add(body);
+        LayoutInformationRows();
+        Shown += (_, __) => LayoutInformationRows();
         timer.Tick += (_, __) =>
         {
             RefreshTicks++;
-            elapsed.Text = "处理信息　　总耗时 " + clock.Elapsed.ToString(@"hh\:mm\:ss");
+            elapsed.Text = "总耗时 " + clock.Elapsed.ToString(@"hh\:mm\:ss");
+            progress.Animate();
         };
         timer.Start();
         FormClosing += (_, args) =>
@@ -274,15 +296,39 @@ internal sealed class ArchiveSessionWindow : Form
         var bounds = information.RectangleToClient(list.Parent.RectangleToScreen(list.Bounds));
         var top = Math.Max(0, bounds.Top);
         var bottom = Math.Max(0, information.ClientSize.Height - bounds.Bottom);
-        if (information.RowStyles[0].Height == top && information.RowStyles[2].Height == bottom) return;
-        information.RowStyles[0].Height = top;
-        information.RowStyles[2].Height = bottom;
+        if (information.RowStyles[0].Height != top) information.RowStyles[0].Height = top;
+        if (information.RowStyles[2].Height != bottom) information.RowStyles[2].Height = bottom;
+        LayoutInformationRows();
     }
 
-    private void ResizeProjectConfirmation()
+    private static Label InformationField(string name, string text) => new Label { AccessibleName = name,
+        Text = text, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, BorderStyle = BorderStyle.FixedSingle,
+        BackColor = Color.White, Padding = new Padding(6, 0, 6, 0) };
+
+    private void LayoutInformationRows()
     {
-        if (confirmation.Controls.OfType<ProjectBrowserDialog>().Any(form => form.Visible))
-            confirmationHost.Height = Math.Max(300, Math.Min(420, processRecords.ClientSize.Height * 3 / 5));
+        var batch = selection.Controls.OfType<BatchOperationDialog>().FirstOrDefault(form => form.Visible);
+        var rows = batch?.InformationRows(informationHeader);
+        var labelWidth = Math.Max(72, TextRenderer.MeasureText("处理信息", Font).Width + 8);
+        informationHeader.SuspendLayout();
+        for (var index = 0; index < informationFields.Length; index++)
+        {
+            var row = index < 3 && rows != null ? rows[index]
+                : new Rectangle(0, index == 3 && rows != null ? rows[2].Bottom + 4 : 8 + index * 32, 0, rows == null ? 28 : rows[0].Height);
+            informationLabels[index].SetBounds(0, row.Top, labelWidth, row.Height);
+            informationFields[index].SetBounds(labelWidth, row.Top, Math.Max(1, informationHeader.ClientSize.Width - labelWidth), row.Height);
+        }
+        elapsed.Width = TextRenderer.MeasureText("总耗时 00:00:00", elapsed.Font).Width + 12;
+        informationHeader.ResumeLayout(false);
+    }
+
+    private void SetResultState(bool? failed)
+    {
+        resultPanel.BackColor = !failed.HasValue ? Color.FromArgb(255, 243, 205)
+            : failed.Value ? Color.FromArgb(251, 231, 231) : Color.FromArgb(228, 244, 232);
+        resultPanel.ForeColor = !failed.HasValue ? Color.FromArgb(128, 94, 19)
+            : failed.Value ? Color.FromArgb(163, 47, 47) : Color.FromArgb(35, 107, 55);
+        resultState.Text = !failed.HasValue ? "● 运行中" : failed.Value ? "× 失败" : "✓ 成功";
     }
 
     public void Report(string message, string fileName, int completed, int total)
@@ -290,11 +336,9 @@ internal sealed class ArchiveSessionWindow : Form
         if (finished) return;
         stage.Text = session.Token.IsCancellationRequested && (message == null || !message.Contains("取消"))
             ? "正在取消，等待当前步骤安全结束：" + message : message ?? string.Empty;
-        file.Text = string.IsNullOrWhiteSpace(fileName) ? "" : "当前图档：" + fileName;
-        file.Visible = !string.IsNullOrWhiteSpace(fileName);
+        if (!string.IsNullOrWhiteSpace(fileName)) file.Text = fileName;
         (selectionForm as BatchOperationDialog)?.SetWorkflowFile(fileName, message);
-        if (total > 0) { progress.Style = ProgressBarStyle.Continuous; progress.Maximum = Math.Max(1, total); progress.Value = Math.Max(0, Math.Min(total, completed)); file.Text += "　已完成 " + Math.Min(completed, total) + " / " + total; }
-        else progress.Style = ProgressBarStyle.Marquee;
+        progress.Report(completed, total);
         Append(message + (string.IsNullOrWhiteSpace(fileName) ? "" : "　" + fileName));
     }
 
@@ -306,10 +350,13 @@ internal sealed class ArchiveSessionWindow : Form
     }
     public void RecordConfirmation(string caption, string message) => Append(caption + Environment.NewLine + message);
 
-    public void Finish(string title, string message)
+    public void Finish(string title, string message, bool failed)
     {
-        finished = true; clock.Stop(); stage.Text = title; file.Text = "";
-        Append(title); Append(message); progress.Style = ProgressBarStyle.Continuous;
+        finished = true; clock.Stop(); stage.Text = title;
+        elapsed.Text = "总耗时 " + clock.Elapsed.ToString(@"hh\:mm\:ss");
+        SetResultState(failed); progress.Finish(failed);
+        if (!failed && title == "存档成功（有引用提示）") resultState.Text = "✓ 成功（有引用提示）";
+        Append(title); Append(message);
         stop.Text = "关闭"; stop.Enabled = true;
         (selectionForm as BatchOperationDialog)?.FinishWorkflow();
         confirmationTitle.Text = "确认区：本次操作已结束";
@@ -324,8 +371,11 @@ internal sealed class ArchiveSessionWindow : Form
         var previousAccept = AcceptButton; var previousCancel = CancelButton;
         var previousSelectionEnabled = selection.Enabled;
         var inlineProject = !isSelection && form is ProjectBrowserDialog;
+        var inlineProjectPage = inlineProject || (!isSelection && form is ProjectAdmissionConfirmationDialog);
         var previousConfirmationHeight = confirmationHost.Height;
         var previousAutoScroll = confirmation.AutoScroll;
+        var previousConfirmationDock = confirmationHost.Dock;
+        var previousStage = stage.Text;
         if (isSelection && form is BatchOperationDialog) stop.Hide();
         if (!isSelection) selection.Enabled = false;
         confirmationHost.Visible = !isSelection;
@@ -336,14 +386,20 @@ internal sealed class ArchiveSessionWindow : Form
         form.Dock = DockStyle.Fill;
         if (!isSelection)
         {
-            if (inlineProject)
+            if (inlineProjectPage)
             {
-                ((ProjectBrowserDialog)form).ConfigureInlineLayout();
+                if (inlineProject) ((ProjectBrowserDialog)form).ConfigureInlineLayout();
                 confirmation.AutoScroll = false;
                 confirmation.AutoScrollPosition = Point.Empty;
+                confirmationHost.Dock = DockStyle.Fill;
+                history.Hide();
+                confirmationTitle.Hide();
+                historyTitle.Text = inlineProject ? "选择项目" : "确认项目归属";
+                stage.Text = inlineProject ? "请选择图档归属项目，确认后继续存档。" : "请核对图档归属项目，确认后继续存档。";
+                progress.Hint = inlineProject ? "等待选择项目" : "等待确认项目归属";
             }
             else { form.Dock = DockStyle.Top; form.Height = Math.Max(220, form.Height); }
-            confirmationActions.Visible = !inlineProject;
+            confirmationActions.Visible = !inlineProjectPage;
             confirmationTitle.Text = "请确认：" + form.Text;
             Append("等待确认：" + form.Text);
         }
@@ -361,7 +417,7 @@ internal sealed class ArchiveSessionWindow : Form
         var closeHandlers = new Dictionary<Button, EventHandler>();
         foreach (var button in buttons)
         {
-            if (!isSelection && !inlineProject) confirmationActions.Controls.Add(button);
+            if (!isSelection && !inlineProjectPage) confirmationActions.Controls.Add(button);
             EventHandler handler = (_, __) => { form.DialogResult = button.DialogResult; form.Close(); };
             closeHandlers[button] = handler; button.Click += handler;
         }
@@ -374,7 +430,6 @@ internal sealed class ArchiveSessionWindow : Form
         AcceptButton = form.AcceptButton; CancelButton = form.CancelButton;
         form.Show();
         AlignProcessRecords();
-        ResizeProjectConfirmation();
         while (!done && !session.Token.IsCancellationRequested && !IsDisposed)
         {
             // This nested pump belongs only to the presentation STA; it never dispatches CAD work.
@@ -405,8 +460,15 @@ internal sealed class ArchiveSessionWindow : Form
             confirmationTitle.Text = "确认区：暂无待确认事项";
             confirmationHost.Hide();
             confirmationHost.Height = previousConfirmationHeight;
+            confirmationHost.Dock = previousConfirmationDock;
             confirmation.AutoScroll = previousAutoScroll;
             confirmationActions.Show();
+            confirmationTitle.Show();
+            if (inlineProjectPage)
+            {
+                history.Show(); historyTitle.Text = "过程记录（完整保留）";
+                if (!finished) { stage.Text = previousStage; progress.Hint = null; }
+            }
             Append("确认结果：" + form.Text + "　" + ResultText(result));
         }
         return session.Token.IsCancellationRequested ? DialogResult.Cancel : result;

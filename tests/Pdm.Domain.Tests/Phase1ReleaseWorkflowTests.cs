@@ -2698,7 +2698,7 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
         await ConfigureApprovalWorkflowsAsync(repository);
         await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow, completePropertyWriteback: true);
 
-        // 先按错误数量（2）创建草稿，让发布快照固化下来。
+        // 先按人工维护数量（2）创建草稿，让发布快照固化下来。
         var inflated = (await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default))
             .Select(item => item with { Quantity = 2 })
             .ToArray();
@@ -2707,7 +2707,7 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
             ProjectId, null, string.Empty, string.Empty, string.Empty, "未指定", null,
             ReleaseScope.NonStandardWithDrawing, CurrentIds(repository, BomKind.NonStandard), "admin", UserRole.Administrator, default);
 
-        // 修正当前BOM数量后提交：应提示刷新草稿，而不是继续报“数量与设计树不一致”。
+        // 草稿创建后再次修改当前BOM数量，仍应提示刷新草稿。
         var corrected = inflated.Select(item => item with { Quantity = 1 }).ToArray();
         await repository.ReplaceBomAsync(ProjectId, BomKind.NonStandard, corrected, default);
         // 保存BOM会刷新草稿版本，但发布包里固化的快照仍是创建时的数量。
@@ -2717,6 +2717,55 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
             workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default));
 
         Assert.Contains("发布草稿创建后已变化", blocked.Message);
+    }
+
+    [Theory]
+    [InlineData(BomKind.Standard, ReleaseScope.StandardFormal, ReleaseScope.StandardSupplement)]
+    [InlineData(BomKind.NonStandard, ReleaseScope.NonStandardWithDrawing, ReleaseScope.NonStandardSupplement)]
+    [InlineData(BomKind.Electrical, ReleaseScope.ElectricalFormal, ReleaseScope.ElectricalSupplement)]
+    public async Task ManualQuantityChangePublishesNormallyWithoutChangingCad(BomKind kind, ReleaseScope formalScope, ReleaseScope changeScope)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        if (kind == BomKind.NonStandard) await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var items = (await repository.GetBomAsync(ProjectId, kind, default)).ToArray();
+        items[0] = items[0] with { Quantity = 4, IsManuallyOverridden = true };
+        await repository.ReplaceBomAsync(ProjectId, kind, items, default);
+        async Task<ReleasePackage> Complete(ReleasePackage package)
+        {
+            package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+            for (var step = 0; step < 10 && package.State != ReleasePackageState.Published; step++)
+            {
+                var task = package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder).First();
+                package = await workflow.DecideAsync(task.Id, task.Assignee, UserRole.Administrator, ApprovalDecision.Approved, "数量变更审批通过", default);
+            }
+            Assert.Equal(ReleasePackageState.Published, package.State);
+            return package;
+        }
+        var formal = await Complete(await workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", "", "未指定", null,
+            formalScope, items.Select(item => item.Id).ToArray(), "admin", UserRole.Administrator, default));
+        var referenceId = (await repository.GetLatestReferenceSnapshotAsync(ProjectId, default))?.SnapshotId;
+        var versionCounts = new Dictionary<Guid, int>();
+        foreach (var document in await repository.ListDocumentsAsync(ProjectId, default))
+            versionCounts[document.Id] = (await repository.ListDocumentVersionsAsync(document.Id, default)).Count;
+        var modified = (await repository.GetBomAsync(ProjectId, kind, default)).ToArray();
+        var index = Array.FindIndex(modified, item => item.Id == items[0].Id);
+        modified[index] = modified[index] with { Quantity = 6, IsManuallyOverridden = true };
+        await repository.ReplaceBomAsync(ProjectId, kind, modified, default);
+        var change = await Complete(await workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", "设计问题 / 设计变更", "未指定", null,
+            changeScope, [items[0].Id], "admin", UserRole.Administrator, default));
+        IReadOnlyList<BomItem> Snapshot(ReleasePackage package) => kind switch {
+            BomKind.Standard => package.StandardBomSnapshot, BomKind.NonStandard => package.NonStandardBomSnapshot, _ => package.ElectricalBomSnapshot
+        };
+        Assert.Equal(4, Snapshot(formal).Single(item => item.Id == items[0].Id).Quantity);
+        Assert.Equal(6, Snapshot(change).Single(item => item.Id == items[0].Id).Quantity);
+        Assert.Equal(6, (await repository.GetBomAsync(ProjectId, kind, default)).Single(item => item.Id == items[0].Id).Quantity);
+        Assert.Equal(referenceId, (await repository.GetLatestReferenceSnapshotAsync(ProjectId, default))?.SnapshotId);
+        foreach (var original in versionCounts)
+            Assert.Equal(original.Value, (await repository.ListDocumentVersionsAsync(original.Key, default)).Count);
     }
 
     [Fact]

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import RawDrawerPanel from './RawDrawerPanel.vue'
 import PanelActions from './PanelActions.vue'
+import { ElAutocomplete } from 'element-plus'
 
 import { Boxes, Calendar, ClipboardCheck, ClipboardList, FolderOpen, FolderTree, Info, LayoutDashboard, Rocket, Search, Settings, ShoppingCart, Wallet } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
@@ -91,6 +92,7 @@ const visibleTabs = computed(() => tabs.filter(tab => props.project.canReadConte
 const switchConfirmationPending = ref(false)
 const projectSettingsOpen = ref(false)
 const projectBrowserOpen = ref(false)
+const quickProjectQuery = ref('')
 const projectSearchQuery = ref('')
 const projectCustomerFilter = ref('')
 const projectExecutionUnitFilter = ref('')
@@ -101,10 +103,23 @@ const normalizedProjectSearchQuery = computed(() => projectSearchQuery.value.tri
 const projectCustomerOptions = computed(() => [...new Set(rootProjects.value.map(item => item.customerName).filter((item): item is string => Boolean(item)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
 const projectExecutionUnitOptions = computed(() => [...new Set(rootProjects.value.map(item => item.executionUnitName).filter((item): item is string => Boolean(item)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
 const projectPersonOptions = computed(() => [...new Set(rootProjects.value.flatMap(item => [item.primaryProjectManager, ...item.collaborativeProjectManagers, ...projectDesignLeads(item), ...item.designers]).filter((item): item is string => Boolean(item)))].sort((left, right) => displayUserName(left).localeCompare(displayUserName(right), 'zh-CN')))
+function matchesProjectSearch(item: ProjectSummary, query: string) {
+  return !query || [item.code, item.name, item.projectAlias, item.customerName, item.deviceModel, ...item.serialNumbers].some(value => value?.toLocaleLowerCase().includes(query))
+}
+function quickProjectSuggestions(query: string, callback: (items: Array<{ id: string; code: string; name: string; value: string }>) => void) {
+  const normalized = query.trim().toLocaleLowerCase()
+  callback(rootProjects.value.filter(item => matchesProjectSearch(item, normalized))
+    .sort((left, right) => right.code.localeCompare(left.code, 'zh-CN', { numeric: true, sensitivity: 'base' }))
+    .slice(0, 20).map(item => ({ id: item.id, code: item.code, name: item.name, value: `${item.code} · ${item.name}` })))
+}
+function selectQuickProject(projectId: string) {
+  confirmProjectSwitch(projectId)
+  quickProjectQuery.value = ''
+}
 const filteredRootProjects = computed(() => {
   const query = normalizedProjectSearchQuery.value
   return rootProjects.value.filter(item => {
-    if (query && ![item.code, item.name, item.projectAlias, item.customerName, item.deviceModel, ...item.serialNumbers].some(value => value?.toLocaleLowerCase().includes(query))) return false
+    if (!matchesProjectSearch(item, query)) return false
     if (projectCustomerFilter.value && item.customerName !== projectCustomerFilter.value) return false
     if (projectExecutionUnitFilter.value && item.executionUnitName !== projectExecutionUnitFilter.value) return false
     if (projectPersonFilter.value && ![item.primaryProjectManager, ...item.collaborativeProjectManagers, ...projectDesignLeads(item), ...item.designers].includes(projectPersonFilter.value)) return false
@@ -120,9 +135,10 @@ const pagedRootProjects = computed(() => {
 watch([projectSearchQuery, projectCustomerFilter, projectExecutionUnitFilter, projectPersonFilter, projectPageSize], () => { projectPage.value = 1 })
 watch(projectPageCount, pageCount => { if (projectPage.value > pageCount) projectPage.value = pageCount })
 watch(() => props.project.id, () => { projectSettingsOpen.value = false })
+watch(() => rootProject.value.id, () => { quickProjectQuery.value = '' })
 
 function confirmProjectSwitch(projectId: string) {
-  if (switchConfirmationPending.value || projectId === rootProject.value.id) return false
+  if (switchConfirmationPending.value || props.switchingProjectId || projectId === rootProject.value.id) return false
   const target = props.projects.find(item => item.id === projectId)
   if (!target) return false
 
@@ -182,10 +198,14 @@ function drawingDocumentCount(project: ProjectSummary) {
     <aside class="pdm-project-sidebar-stack" aria-label="项目基本信息与全部项目号">
       <section class="pdm-project-sidebar__context" aria-label="当前项目">
         <div class="pdm-project-switcher">
-          <button type="button" class="pdm-project-switcher__display" aria-label="浏览项目" aria-haspopup="dialog" :aria-expanded="projectBrowserOpen" :disabled="switchConfirmationPending || Boolean(switchingProjectId)" :title="`${rootProject.code} · ${rootProject.name}`" @click="projectBrowserOpen = true">
-            <span>{{ rootProject.code }} · {{ rootProject.name }}</span>
-            <span class="pdm-project-switcher__search-icon" aria-hidden="true"><Search :size="12" /></span>
-          </button>
+          <div class="pdm-project-switcher__display" :class="{ 'is-disabled': switchConfirmationPending || Boolean(switchingProjectId) }" @keydown.esc.capture="quickProjectQuery = ''">
+            <ElAutocomplete v-model="quickProjectQuery" class="pdm-project-switcher__input" aria-label="快速搜索项目" :placeholder="`${rootProject.code} · ${rootProject.name}`" :title="`${rootProject.code} · ${rootProject.name}`"
+              :fetch-suggestions="quickProjectSuggestions" :debounce="100" :highlight-first-item="true" popper-class="pdm-project-quick-search" :disabled="switchConfirmationPending || Boolean(switchingProjectId)"
+              @select="item => selectQuickProject(item.id)" @blur="quickProjectQuery = ''">
+              <template #default="{ item }"><strong :title="item.code">{{ item.code }}</strong><small :title="item.name">{{ item.name }}</small></template>
+            </ElAutocomplete>
+            <button type="button" class="pdm-project-switcher__search-icon" aria-label="浏览项目" aria-haspopup="dialog" :aria-expanded="projectBrowserOpen" :disabled="switchConfirmationPending || Boolean(switchingProjectId)" title="浏览项目" @click="projectBrowserOpen = true"><Search :size="12" /></button>
+          </div>
         </div>
       </section>
 

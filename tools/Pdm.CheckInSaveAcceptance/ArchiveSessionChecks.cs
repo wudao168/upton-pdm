@@ -142,8 +142,23 @@ internal static partial class Program
                 {
                     var window = ArchiveWindow(session);
                     var form = ((Panel)Field(window, "confirmation")).Controls.OfType<Form>().Single(f => f.Text == "新增图档归属确认");
+                    var records = (Panel)Field(window, "processRecords");
+                    TreeCheck(form.RectangleToScreen(form.ClientRectangle) == records.RectangleToScreen(records.ClientRectangle)
+                        && !((TextBox)Field(window, "history")).Visible
+                        && !((FlowLayoutPanel)Field(window, "confirmationActions")).Visible,
+                        "项目归属确认没有完整占用过程记录区域");
+                    var execute = ArchiveControls(form).OfType<Button>().Single(button => button.DialogResult == DialogResult.OK);
+                    var cancel = ArchiveControls(form).OfType<Button>().Single(button => button.DialogResult == DialogResult.Cancel);
+                    TreeCheck(!execute.Enabled && cancel.Visible && !form.TopLevel && !form.TopMost,
+                        "项目归属确认丢失二次确认、返回修改或所属窗口层级");
+                    using (var bitmap = new Bitmap(window.Width, window.Height))
+                    {
+                        window.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                        bitmap.Save(Path.Combine(output, "archive-project-admission.png"), ImageFormat.Png);
+                    }
+                    Console.WriteLine("PASS: Project admission fills the complete record area with both actions inside the original archive window");
                     ArchiveControls(form).OfType<Button>().Single(button => button.Text == "确认").PerformClick();
-                    ((FlowLayoutPanel)Field(window, "confirmationActions")).Controls.OfType<Button>().Single(button => button.DialogResult == DialogResult.OK).PerformClick();
+                    execute.PerformClick();
                     return true;
                 });
             }
@@ -164,6 +179,41 @@ internal static partial class Program
             && ArchiveUi(session, () => ((Panel)Field(ArchiveWindow(session), "selection")).Controls.OfType<Form>().Any(f => !((Button)Field(f, "execute")).Enabled)),
             "确认后未保留原选择区域");
         Console.WriteLine("PASS: File selection, nested project admission and frozen selection remain in the same session with safe UI-thread snapshots");
+        var originalHistory = ArchiveHistory(session);
+        var originalStage = ArchiveUi(session, () => ((Label)Field(ArchiveWindow(session), "stage")).Text);
+        var cancelDriver = Task.Run(async () =>
+        {
+            try
+            {
+                await TreeWait(() => ArchiveUi(session, () => ((Panel)Field(ArchiveWindow(session), "confirmation")).Controls.OfType<Form>()
+                    .Any(form => form.Text == "新增图档归属确认")), "再次确认归属没有显示");
+                ArchiveUi(session, () =>
+                {
+                    var window = ArchiveWindow(session); var previousSize = window.ClientSize;
+                    window.Size = window.MinimumSize;
+                    var form = ((Panel)Field(window, "confirmation")).Controls.OfType<Form>().Single();
+                    var records = (Panel)Field(window, "processRecords");
+                    var cancel = ArchiveControls(form).OfType<Button>().Single(button => button.DialogResult == DialogResult.Cancel);
+                    TreeCheck(form.RectangleToScreen(form.ClientRectangle) == records.RectangleToScreen(records.ClientRectangle)
+                        && records.RectangleToScreen(records.ClientRectangle).Contains(cancel.RectangleToScreen(cancel.ClientRectangle)),
+                        "缩小存档窗口后确认区没有填满或返回修改按钮被裁切");
+                    Console.WriteLine("PASS: Admission confirmation resizes with the complete record area and keeps return action reachable at minimum size");
+                    window.ClientSize = previousSize; cancel.PerformClick(); return true;
+                });
+            }
+            catch { TreeCall(session, "RequestCancellation"); throw; }
+        });
+        var cancelled = ArchiveUi(session, () =>
+        {
+            using (var form = (Form)New("ProjectAdmissionConfirmationDialog", project, null, 1, null))
+                return (DialogResult)TreeCall(session, "ShowInline", form, false);
+        });
+        await cancelDriver;
+        TreeCheck(cancelled == DialogResult.Cancel && ArchiveUi(session, () => ((TextBox)Field(ArchiveWindow(session), "history")).Visible)
+            && ArchiveHistory(session).StartsWith(originalHistory, StringComparison.Ordinal)
+            && ArchiveUi(session, () => ((Label)Field(ArchiveWindow(session), "stage")).Text) == originalStage,
+            "返回修改没有恢复处理信息及完整过程记录");
+        Console.WriteLine("PASS: Returning from project admission restores the full original history and processing status");
     }
 
     static System.Collections.Generic.IEnumerable<Control> ArchiveControls(Control parent)

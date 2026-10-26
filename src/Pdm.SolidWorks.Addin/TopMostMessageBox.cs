@@ -14,9 +14,9 @@ internal static class TopMostMessageBox
         if (session != null && !session.IsClosed) return session.Confirm(message, caption, buttons, defaultButton);
         var handle = owner?.Handle ?? IntPtr.Zero;
         var root = handle == IntPtr.Zero ? IntPtr.Zero : GetAncestor(handle, 2);
-        // Preserve the owner and default choice while keeping confirmations above progress windows.
+        // Owned prompts stay above SolidWorks without entering the system-wide topmost band.
         return (DialogResult)MessageBox(root == IntPtr.Zero ? handle : root, message, caption,
-            (uint)buttons | (uint)icon | (uint)defaultButton | 0x00040000u | 0x00010000u);
+            (uint)buttons | (uint)icon | (uint)defaultButton);
     }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "MessageBoxW")]

@@ -28,7 +28,12 @@ public sealed class RolePermissionCatalogTests
     [Fact]
     public void InitialRoles_ContainConfirmedBusinessRolesWithLeastPrivilegeDefaults()
     {
-        Assert.Equal(33, RolePermissionCatalog.Roles.Count);
+        Assert.Equal(34, RolePermissionCatalog.Roles.Count);
+        Assert.Contains(RolePermissionCatalog.Roles, role => role.RoleCode == "StandardizationAssistant" && role.Name == "标准化助理");
+        var standardAssistant = RolePermissionCatalog.InitialPermissions("StandardizationAssistant", UserRole.Engineer);
+        Assert.Contains(PermissionCodes.StandardLibraryManage, standardAssistant);
+        Assert.Contains(PermissionCodes.MaterialView, standardAssistant);
+        Assert.DoesNotContain(PermissionCodes.StorageSettingsManage, standardAssistant);
         Assert.Equal(RolePermissionCatalog.Roles.Count, RolePermissionCatalog.Roles.Select(role => role.RoleCode).Distinct(StringComparer.OrdinalIgnoreCase).Count());
         Assert.Contains(RolePermissionCatalog.Roles, role => role.Name == "机械工程师" && role.IsSystem);
         Assert.Contains(RolePermissionCatalog.Roles, role => role.Name == "标准化主管" && role.IsSystem);

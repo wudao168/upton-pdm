@@ -42,6 +42,8 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
             var selectedRole = roles.FirstOrDefault(item => item.Role.Equals(recipient.RoleCode?.Trim(), StringComparison.OrdinalIgnoreCase));
             if (selectedRole is null || recipient.PositionId != Guid.Empty)
                 throw new PdmRuleException("请选择有效的接收角色；原接收配置请重新选择角色后保存。");
+            if (NotificationRecipientPolicy.SystemOnly([selectedRole.Role]))
+                throw new PdmRuleException("系统管理员角色不用于业务通知，请选择业务接收角色。");
             recipients.Add(recipient with { RoleCode = selectedRole.Role });
         }
         var rule = new WorkflowNotificationRule(flowCode, input.Enabled, recipients.Distinct().ToArray());
@@ -146,6 +148,7 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
             foreach (var message in job.Messages)
             {
                 var user = await repository.FindUserAsync(message.Username, ct);
+                if (NotificationRecipientPolicy.SystemOnly(user)) continue;
                 if (user is null || !CompanyUser(directory, user.Username, job.CompanyId)) { skipped = true; continue; }
                 var canRead = await repository.HasProjectContentReadAccessAsync(job.ProjectId, user.Username, user.Role, ct);
                 if (!canRead && !message.RoleRecipient) { skipped = true; continue; }
@@ -268,6 +271,7 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
         foreach (var recipient in recipients)
         {
             var user = directory.Users.FirstOrDefault(user => user.Username.Equals(recipient, StringComparison.OrdinalIgnoreCase));
+            if (user is not null && NotificationRecipientPolicy.SystemOnly(user.EffectiveRoleCodes)) continue;
             if (user is null || !CompanyUser(directory, recipient, job.CompanyId))
             { warnings.Add($"接收人{recipient}已停用或不属于当前公司"); continue; }
             var canRead = await repository.HasProjectContentReadAccessAsync(job.ProjectId, user.Username, user.Role, ct);

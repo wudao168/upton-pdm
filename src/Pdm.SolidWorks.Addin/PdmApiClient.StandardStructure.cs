@@ -62,9 +62,24 @@ internal sealed class StandardStructureDto
     public string Code { get; set; }
     public string Name { get; set; }
     public int DrawingType { get; set; }
+    public bool IsActive { get; set; } = true;
+    public DateTime? DeletedAt { get; set; }
     public List<StandardStructureRevisionDto> Revisions { get; set; } = new List<StandardStructureRevisionDto>();
 }
-internal sealed class StandardStructureRevisionDto { public Guid Id { get; set; } public int Version { get; set; } }
+internal sealed class StandardStructureRevisionDto
+{
+    public Guid Id { get; set; }
+    public int Version { get; set; }
+    public StandardStructureNodeDto Root { get; set; }
+    public List<StandardStructureFileDto> Files { get; set; } = new List<StandardStructureFileDto>();
+}
+internal sealed class StandardStructureFileDto
+{
+    public string Key { get; set; }
+    public string FileName { get; set; }
+    public long Length { get; set; }
+    public string Sha256 { get; set; }
+}
 internal sealed class StandardStructureNodeDto
 {
     public string Id { get; set; }

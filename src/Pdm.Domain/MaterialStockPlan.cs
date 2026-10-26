@@ -12,4 +12,6 @@ public sealed record MaterialStockPlan(
     DateTimeOffset SyncedAt)
 {
     public bool IsStocked => IsEffective && SafetyStockQuantity > 0;
+    public decimal? StockQuantity { get; init; }
+    public DateTimeOffset? InventorySyncedAt { get; init; }
 }

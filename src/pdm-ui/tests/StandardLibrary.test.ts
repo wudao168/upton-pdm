@@ -2,6 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus, { ElMessageBox } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import StandardLibrary from '../src/components/StandardLibrary.vue'
+import type { PdmMaterial } from '../src/types'
 
 const api = vi.hoisted(() => ({
   listStandardLibraryCategories: vi.fn(),
@@ -27,6 +28,7 @@ const api = vi.hoisted(() => ({
   updateMaterial: vi.fn(),
   uploadMaterialAttachment: vi.fn(),
   setMaterialCover: vi.fn(),
+  replaceMaterialImages: vi.fn(),
 }))
 vi.mock('../src/api', () => api)
 
@@ -359,13 +361,13 @@ describe('StandardLibrary', () => {
   })
 
   it('rejects picture uploads past the limit in the parent handler too', async () => {
-    api.listMaterialAttachments.mockResolvedValueOnce(['one', 'two', 'three'].map(id => ({ id, materialId: material.id, kind: 'CoverImage', originalFileName: `${id}.png` })))
+    api.listMaterialAttachments.mockResolvedValueOnce(['one', 'two', 'three', 'four', 'five'].map(id => ({ id, materialId: material.id, kind: 'CoverImage', originalFileName: `${id}.png` })))
     api.materialAttachmentObjectUrl.mockResolvedValue('blob:image')
     const wrapper = assetPreviewWrapper = mount(StandardLibrary, { attachTo: document.body, props: { token: 'token', canManage: true, canEdit: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     wrapper.getComponent({ name: 'ElTable' }).vm.$emit('selection-change', [{ material, categories: [], coverImage: null }]); await flushPromises()
     await wrapper.findAll('button').find(button => button.text() === '维护')!.trigger('click'); await flushPromises()
-    wrapper.getComponent({ name: 'MaterialEditorDialog' }).vm.$emit('attachmentFiles', 'CoverImage', { target: { files: [new File(['image'], '第四张.png')], value: 'selected' } }); await flushPromises()
+    wrapper.getComponent({ name: 'MaterialEditorDialog' }).vm.$emit('attachmentFiles', 'CoverImage', { target: { files: [new File(['image'], '第六张.png')], value: 'selected' } }); await flushPromises()
     expect(api.uploadMaterialAttachment).not.toHaveBeenCalled()
   })
 
@@ -390,6 +392,105 @@ describe('StandardLibrary', () => {
     const batchSave = wrapper.findAll('button').find(button => button.text() === '批量保存')!
     expect((batchSave.element as HTMLButtonElement).disabled).toBe(true)
     wrapper.unmount()
+  })
+
+  async function openImageBatch(canEdit = true) {
+    URL.createObjectURL = vi.fn(() => 'blob:batch-image')
+    URL.revokeObjectURL = vi.fn()
+    const selected = [material, secondMaterial].map(item => ({ material: { ...item } as PdmMaterial, categories: [], coverImage: null }))
+    api.listStandardLibraryMaterials.mockResolvedValue({ items: selected, total: 2, page: 1, pageSize: 50 })
+    api.listMaterialAttachments.mockReset().mockResolvedValue([])
+    api.uploadMaterialAttachment.mockReset()
+    api.setMaterialCover.mockReset().mockImplementation(async (id, attachmentId, version) => ({ ...selected.find(row => row.material.id === id)!.material, rowVersion: version + 1, coverImageAttachmentId: attachmentId }))
+    api.replaceMaterialImages.mockReset().mockImplementation(async (id, _images, coverId, version) => ({ ...selected.find(row => row.material.id === id)!.material, rowVersion: version + 1, coverImageAttachmentId: coverId }))
+    const wrapper = assetPreviewWrapper = mount(StandardLibrary, { attachTo: document.body, props: { token: 'token', canManage: true, canEdit }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    wrapper.getComponent({ name: 'ElTable' }).vm.$emit('selection-change', selected); await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === '维护')!.trigger('click'); await flushPromises()
+    const input = document.querySelector<HTMLInputElement>('[aria-label="选择批量料品图片"]')!
+    const selectImages = async (names = ['共同图片.png']) => {
+      Object.defineProperty(input, 'files', { configurable: true, value: names.map(name => new File(['image'], name, { type: 'image/png' })) })
+      input.dispatchEvent(new Event('change')); await flushPromises()
+    }
+    const save = async () => { await wrapper.findAll('button').find(button => button.text() === '批量保存')!.trigger('click'); await flushPromises() }
+    return { wrapper, selected, input, selectImages, save }
+  }
+
+  it('replaces images and the selected cover for every material including those with an existing cover', async () => {
+    const { wrapper, selected, selectImages, save } = await openImageBatch()
+    selected[1]!.material.coverImageAttachmentId = 'existing-cover'
+    api.uploadMaterialAttachment.mockImplementation(async (id, kind, file) => ({ id: `${id}-${file.name}`, materialId: id, kind, originalFileName: file.name }))
+    await selectImages(['正面.png', '侧面.png'])
+    await wrapper.findAll('button').find(button => button.attributes('aria-label') === '将 侧面.png 设为封面')!.trigger('click')
+    expect(api.uploadMaterialAttachment).not.toHaveBeenCalled()
+    const fields = wrapper.findAllComponents({ name: 'ElFormItem' })
+    expect(fields.find(field => field.props('label') === '物料名称')!.get('input').attributes('disabled')).toBeDefined()
+    expect((fields.find(field => field.props('label') === '规格/型号')!.get('input').element as HTMLInputElement).value).toBe('多个值（分别保留）')
+    await save()
+    expect(api.uploadMaterialAttachment).toHaveBeenCalledTimes(4)
+    for (const row of selected) expect(api.replaceMaterialImages).toHaveBeenCalledWith(row.material.id, [`${row.material.id}-正面.png`, `${row.material.id}-侧面.png`], `${row.material.id}-侧面.png`, material.rowVersion, 'token')
+    expect(api.setMaterialCover).not.toHaveBeenCalled()
+    expect(api.changeApprovedMaterial).not.toHaveBeenCalled()
+    expect(api.updateMaterial).not.toHaveBeenCalled()
+  })
+
+  it('replaces an already full gallery without counting the old images towards the new limit', async () => {
+    const { selectImages, save } = await openImageBatch()
+    api.listMaterialAttachments.mockImplementation(async id => id === secondMaterial.id ? ['1', '2', '3', '4', '5'].map(id => ({ id, kind: 'CoverImage' })) : [])
+    api.uploadMaterialAttachment.mockImplementation(async (id, kind, file) => ({ id: `image-${id}`, materialId: id, kind, originalFileName: file.name }))
+    await selectImages(); await save()
+    expect(api.uploadMaterialAttachment).toHaveBeenCalledTimes(2)
+    expect(api.replaceMaterialImages).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries an interrupted batch without uploading completed images twice', async () => {
+    const { selectImages, save } = await openImageBatch()
+    const stored = new Map<string, unknown[]>()
+    api.listMaterialAttachments.mockImplementation(async id => stored.get(id) ?? [])
+    let failed = false
+    api.uploadMaterialAttachment.mockImplementation(async (id, kind, file) => {
+      if (id === secondMaterial.id && !failed) { failed = true; throw new Error('网络中断，请重试。') }
+      const attachment = { id: `image-${id}`, materialId: id, kind, originalFileName: file.name }
+      stored.set(id, [attachment]); return attachment
+    })
+    await selectImages(); await save(); await save()
+    expect(api.uploadMaterialAttachment.mock.calls.filter(call => call[0] === material.id)).toHaveLength(1)
+    expect(api.uploadMaterialAttachment.mock.calls.filter(call => call[0] === secondMaterial.id)).toHaveLength(2)
+    expect(api.replaceMaterialImages).toHaveBeenCalledTimes(2)
+  })
+
+  it('applies only changed metadata and preserves image sets when the image option is not enabled', async () => {
+    const { wrapper, save } = await openImageBatch()
+    const field = wrapper.findAllComponents({ name: 'ElFormItem' }).find(item => item.props('label') === '选型建议')!
+    field.getComponent({ name: 'ElCheckbox' }).vm.$emit('update:modelValue', true); await flushPromises()
+    field.getComponent({ name: 'ElInput' }).vm.$emit('update:modelValue', '统一选型建议'); await flushPromises()
+    api.changeApprovedMaterial.mockImplementation(async (id, input) => ({ material: { ...material, ...input, id, rowVersion: input.expectedRowVersion + 1 }, task: null }))
+    await save()
+    expect(api.changeApprovedMaterial).toHaveBeenCalledTimes(2)
+    expect(api.changeApprovedMaterial.mock.calls.every(call => call[1].selectionAdvice === '统一选型建议')).toBe(true)
+    expect(api.replaceMaterialImages).not.toHaveBeenCalled()
+    expect(api.uploadMaterialAttachment).not.toHaveBeenCalled()
+  })
+
+  it('clears all selected image sets and covers only when explicitly enabled with no images', async () => {
+    const { wrapper, save } = await openImageBatch()
+    wrapper.findAllComponents({ name: 'ElCheckbox' }).find(item => item.text() === '修改图片与封面')!.vm.$emit('update:modelValue', true); await flushPromises()
+    await save()
+    expect(api.uploadMaterialAttachment).not.toHaveBeenCalled()
+    for (const item of [material, secondMaterial]) expect(api.replaceMaterialImages).toHaveBeenCalledWith(item.id, [], null, item.rowVersion, 'token')
+  })
+
+  it('does not upload when batch maintenance is cancelled or editing permission is absent', async () => {
+    const { wrapper, selectImages } = await openImageBatch()
+    await selectImages()
+    const batch = wrapper.findAllComponents({ name: 'MaterialEditorDialog' }).find(editor => editor.props('title') === '批量维护标准物料')!
+    batch.vm.$emit('update:modelValue', false); await flushPromises()
+    expect(api.uploadMaterialAttachment).not.toHaveBeenCalled()
+    wrapper.unmount(); assetPreviewWrapper = undefined
+    const readonly = await openImageBatch(false)
+    expect(readonly.input.disabled).toBe(true)
+    await readonly.selectImages()
+    expect((readonly.wrapper.findAll('button').find(button => button.text() === '批量保存')!.element as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('still opens single-material maintenance when the attachment list cannot be loaded', async () => {

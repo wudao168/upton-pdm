@@ -8,6 +8,7 @@ import U9IntegrationManagement from './U9IntegrationManagement.vue'
 import StorageSettings from './StorageSettings.vue'
 import DingTalkSettings from './DingTalkSettings.vue'
 import ReleaseNotificationSettings from './ReleaseNotificationSettings.vue'
+import StockedMaterialSettings from './StockedMaterialSettings.vue'
 import ApprovalWorkflowSettings from './ApprovalWorkflowSettings.vue'
 import FolderTemplateSettings from './FolderTemplateSettings.vue'
 import UserSettings from './UserSettings.vue'
@@ -53,8 +54,8 @@ const props = defineProps<{
 }>()
 defineEmits<{ refreshAudit: []; updateActiveOrganizationId: [organizationId: string] }>()
 
-type AdminTab = 'u9' | 'users' | 'project-permissions' | 'folders' | 'settings' | 'dingtalk' | 'release-notifications' | 'approval' | 'audit' | 'client-logs' | 'production-scan' | 'document-rules' | 'login-security'
-const activeTab = rememberedTab<AdminTab>('system.tab', 'u9', ['u9','users','project-permissions','folders','settings','dingtalk','release-notifications','approval','audit','client-logs','production-scan','document-rules','login-security'])
+type AdminTab = 'u9' | 'users' | 'project-permissions' | 'folders' | 'settings' | 'dingtalk' | 'release-notifications' | 'stocked-materials' | 'approval' | 'audit' | 'client-logs' | 'production-scan' | 'document-rules' | 'login-security'
+const activeTab = rememberedTab<AdminTab>('system.tab', 'u9', ['u9','users','project-permissions','folders','settings','dingtalk','release-notifications','stocked-materials','approval','audit','client-logs','production-scan','document-rules','login-security'])
 const hasPermission = (code: string) => props.permissions.includes(code)
 const availableTabs = computed<AdminTab[]>(() => [
   (hasPermission('settings.customer.manage') || hasPermission('settings.storage.manage')) && 'u9',
@@ -65,6 +66,7 @@ const availableTabs = computed<AdminTab[]>(() => [
   'document-rules',
   hasPermission('settings.storage.manage') && 'dingtalk',
   hasPermission('settings.storage.manage') && 'release-notifications',
+  hasPermission('settings.storage.manage') && 'stocked-materials',
   hasPermission('settings.storage.manage') && 'approval',
   hasPermission('production.scan.manage') && 'production-scan',
   hasPermission('audit.view') && 'audit',
@@ -85,6 +87,7 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
       <button v-if="availableTabs.includes('document-rules')" type="button" :class="{ 'is-active': activeTab === 'document-rules' }" @click="activeTab='document-rules'">图档操作规则</button>
       <button v-if="availableTabs.includes('dingtalk')" type="button" :class="{ 'is-active': activeTab === 'dingtalk' }" @click="activeTab='dingtalk'">钉钉应用</button>
       <button v-if="availableTabs.includes('release-notifications')" type="button" :class="{ 'is-active': activeTab === 'release-notifications' }" @click="activeTab='release-notifications'">发布通知</button>
+      <button v-if="availableTabs.includes('stocked-materials')" type="button" :class="{ 'is-active': activeTab === 'stocked-materials' }" @click="activeTab='stocked-materials'">常备件设置</button>
       <button v-if="availableTabs.includes('approval')" type="button" :class="{ 'is-active': activeTab === 'approval' }" @click="activeTab='approval'">审批流程</button>
       <button v-if="availableTabs.includes('production-scan')" type="button" :class="{ 'is-active': activeTab === 'production-scan' }" @click="activeTab='production-scan'">生产扫码设置</button>
       <button v-if="availableTabs.includes('audit')" type="button" :class="{ 'is-active': activeTab === 'audit' }" @click="activeTab='audit'">全局审计</button>
@@ -111,6 +114,7 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
     <DocumentOperationRules v-else-if="activeTab === 'document-rules'" :key="activeOrganizationId" :token="token" :can-edit="hasPermission('settings.storage.manage')" />
     <DingTalkSettings v-else-if="activeTab === 'dingtalk'" :key="activeOrganizationId" :token="token" />
     <ReleaseNotificationSettings v-else-if="activeTab === 'release-notifications'" :key="activeOrganizationId" :token="token" />
+    <StockedMaterialSettings v-else-if="activeTab === 'stocked-materials'" :key="activeOrganizationId" :token="token" />
     <ClientLogManagement v-else-if="activeTab === 'client-logs'" :key="activeOrganizationId" :token="token" />
     <LoginSecuritySettings v-else-if="activeTab === 'login-security'" :key="activeOrganizationId" :token="token" />
     <ApprovalWorkflowSettings v-else-if="activeTab === 'approval'" :token="token" :company-id="activeOrganizationId" :settings="settings" :directory="organizationDirectory" :roles="rolePermissionDirectory.roles" :pending="pending" :on-save="onSaveSettings" />

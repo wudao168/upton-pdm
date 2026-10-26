@@ -11,6 +11,12 @@ namespace Upton.Pdm.SolidWorks;
 internal static class NativeDesignDependencies
 {
     internal static IReadOnlyList<string> Read(IModelDoc2 model)
+        => ReadSources(model, false);
+
+    internal static IReadOnlyList<string> ReadManaged(IModelDoc2 model)
+        => ReadSources(model, true);
+
+    private static IReadOnlyList<string> ReadSources(IModelDoc2 model, bool includeLocked)
     {
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (model == null || model.GetType() == (int)swDocumentTypes_e.swDocDRAWING) return paths.ToArray();
@@ -27,7 +33,7 @@ internal static class NativeDesignDependencies
                     // Locked references retain their saved geometry without updating from
                     // the source. Preserve the lock; do not require its historical file.
                     if (state == swExternalReferenceStatus_e.swExternalReferenceBroken
-                        || state == swExternalReferenceStatus_e.swExternalReferenceLocked) continue;
+                        || !includeLocked && state == swExternalReferenceStatus_e.swExternalReferenceLocked) continue;
                 }
                 var path = Convert.ToString(references.GetValue(i));
                 if (!string.IsNullOrWhiteSpace(path)) paths.Add(path);
@@ -38,7 +44,64 @@ internal static class NativeDesignDependencies
         var table = model.GetDesignTable() as IDesignTable;
         if (table != null && table.LinkToFile && !string.IsNullOrWhiteSpace(table.FileName))
             paths.Add(table.FileName);
+        if (includeLocked)
+        {
+            paths.UnionWith(ImportSources(model));
+            foreach (var feature in ArchiveSmartComponentLinks.Features(model))
+                if (feature.GetTypeName2() == "LibraryFeature" && feature.GetDefinition() is ILibraryFeatureData library
+                    && library.LinkToLibraryPart && !string.IsNullOrWhiteSpace(library.LibraryPart)) paths.Add(library.LibraryPart);
+            foreach (var block in (model.SketchManager.GetSketchBlockDefinitions() as Array)?.OfType<ISketchBlockDefinition>()
+                ?? Enumerable.Empty<ISketchBlockDefinition>())
+                if (block.LinkToFile && !string.IsNullOrWhiteSpace(block.FileName)) paths.Add(block.FileName);
+        }
         return paths.ToArray();
+    }
+
+    private static IEnumerable<string> ImportSources(IModelDoc2 model)
+    {
+        foreach (var feature in ArchiveSmartComponentLinks.Features(model).Where(feature => feature.Is3DInterconnectFeature))
+        {
+            if (feature.GetImportedFeatureParameters(out var parameters) != 0 || !(parameters is IImport3DInterconnectData imported))
+                throw new IOException("导入特征的实际来源未完整读取，已停止核对：" + feature.Name);
+            var path = imported.GetReferencedFileName();
+            if (!string.IsNullOrWhiteSpace(path)) yield return path;
+        }
+    }
+
+    internal static void ValidateManaged(IModelDoc2 model, IReadOnlyDictionary<string, string> controlled)
+    {
+        foreach (var path in ReadSources(model, true))
+            if ((!controlled.Values.Contains(path, StringComparer.OrdinalIgnoreCase) || !File.Exists(path))
+                && !HasManagedDerivedSource(model, path, controlled))
+            {
+                PluginDiagnosticLog.Record("受控设计来源", "文件=" + model.GetPathName() + "；接口来源=" + path
+                    + "；受控目标=" + string.Join(";", controlled.Values));
+                throw new IOException("图档“" + Path.GetFileName(model.GetPathName()) + "”仍依赖受控范围之外的设计来源，已在上传前停止："
+                    + Path.GetFileName(path));
+            }
+    }
+
+    private static bool HasManagedDerivedSource(IModelDoc2 model, string historical, IReadOnlyDictionary<string, string> controlled)
+    {
+        foreach (var feature in ArchiveSmartComponentLinks.Features(model))
+        {
+            if (feature.Is3DInterconnectFeature && feature.GetImportedFeatureParameters(out var parameters) == 0
+                && parameters is IImport3DInterconnectData imported)
+            {
+                var actual = imported.GetReferencedFileName();
+                if (controlled.Values.Contains(actual, StringComparer.OrdinalIgnoreCase) && File.Exists(actual)
+                    && string.Equals(Path.GetFileName(actual), Path.GetFileName(historical), StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            if (!(feature.GetDefinition() is IDerivedPartFeatureData derived)) continue;
+            var saved = derived.PathName;
+            var loaded = derived.GetModelDoc()?.GetPathName();
+            PluginDiagnosticLog.Record("派生来源核对", "图档=" + model.GetPathName() + "；特征=" + feature.Name
+                + "；保存来源=" + saved + "；实际来源=" + loaded + "；接口旧记录=" + historical);
+            if (controlled.Values.Contains(saved, StringComparer.OrdinalIgnoreCase) && File.Exists(saved)
+                && string.Equals(saved, loaded, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(Path.GetFileName(saved), Path.GetFileName(historical), StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
     }
 
     internal static void Collect(ISldWorks app, CadTreeNode root, IReadOnlyList<string> nativeFiles)
@@ -105,6 +168,7 @@ internal static class NativeDesignDependencies
     {
         var changed = false; // F25: never lock, break or convert native design content on open.
         var active = new HashSet<string>(Read(model), StringComparer.OrdinalIgnoreCase);
+        active.UnionWith(ImportSources(model));
         if (active.Count == 0) return changed;
         string Target(string source)
         {
@@ -113,7 +177,7 @@ internal static class NativeDesignDependencies
             return controlled.TryGetValue(name, out var target)
                 && !string.Equals(source, target, StringComparison.OrdinalIgnoreCase) ? target : null;
         }
-        for (var feature = model.FirstFeature() as IFeature; feature != null; feature = feature.GetNextFeature() as IFeature)
+        foreach (var feature in ArchiveSmartComponentLinks.Features(model))
         {
             if (feature.Is3DInterconnectFeature)
             {
@@ -121,7 +185,10 @@ internal static class NativeDesignDependencies
                     && Target(data.GetReferencedFileName()) is string destination)
                 {
                     data.SetReferencedFileName(destination);
-                    if (feature.SetImportedFeatureParameters(data) != 0)
+                    var result = feature.SetImportedFeatureParameters(data);
+                    PluginDiagnosticLog.Record("原生导入来源重定位", "图档=" + model.GetPathName() + "；特征=" + feature.Name
+                        + "；目标=" + destination + "；原生结果=" + result);
+                    if (result != 0)
                         throw new IOException("无法重定位导入模型的受控源文件：" + Path.GetFileName(destination));
                     changed = true;
                 }

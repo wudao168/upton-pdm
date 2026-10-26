@@ -228,6 +228,23 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
         return Task.FromResult(attachments.TryRemove(attachmentId, out _));
     }
 
+    public Task<PdmMaterial> ReplaceMaterialImagesAsync(PdmMaterial material, IReadOnlyList<Guid> attachmentIds, long expectedRowVersion, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!materials.TryGetValue(material.Id, out var current)) throw new PdmNotFoundException("料品主档不存在。");
+            if (current.IsArchived || current.RowVersion != expectedRowVersion) throw new PdmConflictException("料品已停用或被其他用户修改，请刷新后重试。");
+            var keep = attachmentIds.ToHashSet();
+            if (keep.Any(id => !attachments.TryGetValue(id, out var image) || image.MaterialId != material.Id || image.Kind != MaterialAttachmentKind.CoverImage))
+                throw new PdmConflictException("替换图片已变化，请刷新后重试。");
+            var saved = current with { CoverImageAttachmentId = material.CoverImageAttachmentId, UpdatedBy = material.UpdatedBy, UpdatedAt = material.UpdatedAt, RowVersion = expectedRowVersion + 1 };
+            materials[material.Id] = saved;
+            foreach (var image in attachments.Values.Where(image => image.MaterialId == material.Id && image.Kind == MaterialAttachmentKind.CoverImage && !keep.Contains(image.Id)))
+                attachments.TryRemove(image.Id, out _);
+            return Task.FromResult(saved);
+        }
+    }
+
     public Task<IReadOnlyList<PdmMaterial>> FindApprovedMaterialsBySpecificationAsync(string specification, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<PdmMaterial>>(materials.Values
             .Where(item => item.ApprovalStatus == MaterialApprovalStatus.Approved && !item.IsArchived)

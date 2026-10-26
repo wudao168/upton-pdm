@@ -63,12 +63,12 @@ describe('套件资料维护', () => {
     expect(api.saveEngineeringKitLibraryMetadata).toHaveBeenCalledWith(kit.id, expect.objectContaining({ remark:kit.description, coverImageAttachmentId:'attachment-1', expectedRowVersion:2 }), 'token')
     expect(w.emitted('changed')).toHaveLength(1); w.unmount()
   })
-  it('rejects a fourth picture and preserves entered text after a version conflict', async () => {
+  it('rejects a sixth picture and preserves entered text after a version conflict', async () => {
     const w = mountAssets(); await flushPromises()
     const input = w.get('[aria-label="选择套件图片"]')
-    Object.defineProperty(input.element, 'files', { value: Array.from({length:4}, (_, i) => new File(['png'], i+'.png')) })
+    Object.defineProperty(input.element, 'files', { value: Array.from({length:6}, (_, i) => new File(['png'], i+'.png')) })
     await input.trigger('change'); await flushPromises()
-    expect(w.text()).toContain('最多上传3张图片'); expect(api.uploadMaterialAttachment).not.toHaveBeenCalled()
+    expect(w.text()).toContain('最多上传5张图片'); expect(api.uploadMaterialAttachment).not.toHaveBeenCalled()
     api.saveEngineeringKitLibraryMetadata.mockRejectedValueOnce(new Error('套件已被其他用户修改，请刷新后重试。'))
     const remark = w.findAll('.el-form-item').find(item => item.find('.el-form-item__label').exists() && item.find('.el-form-item__label').text() === '备注')!.get('input')
     await remark.setValue('保留的输入')

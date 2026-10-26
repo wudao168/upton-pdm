@@ -1,4 +1,5 @@
-/* 主界面、详情、弹窗及审核浮层共用的 iOS 分段页签。
+/* 分段页签样式参考 Uiverse.io by 00Kubi，颜色与全局主题联动。
+   主界面、详情、弹窗及审核浮层共用。
    外观统一覆盖页面内的旧样式；保留业务布局、切换事件及 Element Plus 滚动机制。 */
 :root body :where(.el-tabs, .pdm-tabs, [role="tablist"]:not(.el-tabs__nav)) {
   --pdm-tabs-height: var(--pdm-tab-secondary);
@@ -20,10 +21,10 @@
   max-width: 100%;
   margin: 0 0 var(--pdm-tabs-spacing) !important;
   padding: 0 !important;
-  border: 1px solid var(--pdm-border) !important;
-  border-radius: 7px !important;
-  background: var(--pdm-surface) !important;
-  box-shadow: none;
+  border: 0 !important;
+  border-radius: var(--pdm-tabs-radius) !important;
+  background: var(--pdm-tabs-track) !important;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .06);
 }
 
 :root body .el-tabs > .el-tabs__header .el-tabs__nav-wrap::after,
@@ -35,9 +36,9 @@
   display: flex;
   align-items: center;
   gap: 2px !important;
-  padding: var(--pdm-tabs-spacing) !important;
+  padding: var(--pdm-tabs-padding) !important;
   border: 0 !important;
-  border-radius: calc(var(--pdm-tabs-radius) + 2px) !important;
+  border-radius: var(--pdm-tabs-radius) !important;
   background: var(--pdm-tabs-track) !important;
   box-shadow: none !important;
 }
@@ -49,7 +50,7 @@
   width: fit-content;
   min-width: 0;
   max-width: 100%;
-  min-height: calc(var(--pdm-tabs-height) + 2 * var(--pdm-tabs-spacing));
+  min-height: calc(var(--pdm-tabs-height) + 2 * var(--pdm-tabs-padding));
   margin-block: 0 var(--pdm-tabs-spacing) !important;
   overflow-x: auto;
   overflow-y: hidden;
@@ -74,6 +75,25 @@
   padding-inline: var(--pdm-tabs-spacing) !important;
 }
 
+.pdm-tree-panel { container: pdm-document-tree / inline-size; }
+:root body .pdm-tree-panel .pdm-document-filters {
+  align-self: stretch;
+  width: 100%;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+:root body .pdm-tree-panel .pdm-document-filters > button {
+  flex: 1 0 auto;
+  min-width: max-content;
+  gap: 2px;
+  padding-inline: 2px !important;
+}
+:root body .pdm-tree-panel .pdm-document-filters > button small { padding-inline: 2px; }
+@container pdm-document-tree (max-width: 210px) {
+  :root body .pdm-tree-panel .pdm-document-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  :root body .pdm-tree-panel .pdm-document-filters > button { min-width: 0; }
+}
+
 :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item),
 :root body .pdm-tabs .el-radio-button__inner {
   box-sizing: border-box;
@@ -88,41 +108,88 @@
   padding: 0 12px !important;
   border: 0 !important;
   border-radius: var(--pdm-tabs-radius) !important;
-  background: var(--pdm-tabs-track) !important;
+  background: transparent !important;
   box-shadow: none !important;
-  color: var(--pdm-muted) !important;
-  font-family: var(--pdm-font-ui);
-  font-size: 13px !important;
-  font-weight: 700 !important;
+  color: rgb(30, 41, 59) !important;
+  font-family: var(--pdm-font-ui) !important;
+  font-size: 14px !important;
+  font-weight: 400 !important;
   line-height: 1.4;
   text-decoration: none;
   white-space: nowrap;
-  transition: background-color 140ms ease, box-shadow 140ms ease, color 140ms ease;
+  transition: background-color 150ms ease-in-out, box-shadow 150ms ease-in-out, color 150ms ease-in-out;
 }
 
 :root body [role="tab"],
 :root body :is(.production-scan-settings__tabs, .wh-report-modes) > button {
-  font-size: 13px !important;
+  color: rgb(30, 41, 59) !important;
+  font-family: var(--pdm-font-ui) !important;
+  font-size: 14px !important;
 }
 
 :root body [role="tab"] *,
 :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item) *,
 :root body .pdm-tabs .el-radio-button__inner * {
+  color: inherit !important;
+  font-family: var(--pdm-font-ui) !important;
   font-size: inherit !important;
 }
 
 :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):hover:not(:disabled):not(.is-disabled):not(:is(.is-active, [aria-selected="true"], [aria-pressed="true"], [aria-current="page"])),
 :root body .pdm-tabs .el-radio-button:not(.is-disabled):not(.is-active):hover .el-radio-button__inner {
-  background: var(--pdm-tabs-track) !important;
-  color: var(--pdm-theme-accent) !important;
+  background: rgba(255, 255, 255, .5) !important;
+  color: rgb(30, 41, 59) !important;
 }
 
 :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):is(.is-active, [aria-selected="true"], [aria-pressed="true"], [aria-current="page"]),
 :root body .pdm-tabs .el-radio-button.is-active .el-radio-button__inner {
+  position: relative;
+  z-index: 1;
   background: var(--pdm-tabs-selected) !important;
   box-shadow: var(--pdm-tabs-shadow) !important;
-  color: var(--pdm-theme-accent-hover) !important;
-  font-weight: 700 !important;
+  color: var(--pdm-theme-accent) !important;
+  font-weight: 600 !important;
+  animation: pdm-tab-select 300ms ease;
+}
+
+:root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):is(.is-active, [aria-selected="true"], [aria-pressed="true"], [aria-current="page"])::before,
+:root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):is(.is-active, [aria-selected="true"], [aria-pressed="true"], [aria-current="page"])::after,
+:root body .pdm-tabs .el-radio-button.is-active .el-radio-button__inner::before,
+:root body .pdm-tabs .el-radio-button.is-active .el-radio-button__inner::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--pdm-theme-accent);
+  opacity: 0;
+  pointer-events: none;
+  animation: pdm-tab-particles 500ms ease forwards;
+}
+
+:root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item)::before,
+:root body .pdm-tabs .el-radio-button__inner::before {
+  top: 2px;
+  --pdm-tab-particle-direction: -10px;
+}
+
+:root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item)::after,
+:root body .pdm-tabs .el-radio-button__inner::after {
+  bottom: 2px;
+  --pdm-tab-particle-direction: 10px;
+}
+
+@keyframes pdm-tab-select {
+  0% { transform: scale(.95); }
+  50% { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+
+@keyframes pdm-tab-particles {
+  0% { opacity: 0; transform: translateX(-50%) translateY(0); }
+  50% { opacity: 1; }
+  100% { opacity: 0; transform: translateX(-50%) translateY(var(--pdm-tab-particle-direction)); }
 }
 
 :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):focus-visible,
@@ -180,7 +247,6 @@
   margin-bottom: 0;
 }
 
-:root body :is(.pdm-tabs:not(.pdm-project-tabs), [role="tablist"]:not(.el-tabs__nav, .pdm-project-tabs)),
 :root body .material-tabs > .el-tabs__content {
   border: 1px solid var(--pdm-border) !important;
   border-radius: 7px !important;
@@ -188,7 +254,8 @@
 }
 
 :root body :is(.pdm-tabs:not(.pdm-project-tabs), [role="tablist"]:not(.el-tabs__nav, .pdm-project-tabs)) {
-  min-height: calc(var(--pdm-tabs-height) + 2 * var(--pdm-tabs-spacing) + 2px);
+  min-height: calc(var(--pdm-tabs-height) + 2 * var(--pdm-tabs-padding));
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .06) !important;
 }
 
 :root body :is(.production-workbench__tabs, .pdm-admin-tabs, .user-settings-tabs,
@@ -216,5 +283,13 @@
   :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item),
   :root body .pdm-tabs .el-radio-button__inner {
     transition: none;
+    animation: none !important;
+  }
+
+  :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item)::before,
+  :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item)::after,
+  :root body .pdm-tabs .el-radio-button__inner::before,
+  :root body .pdm-tabs .el-radio-button__inner::after {
+    animation: none !important;
   }
 }

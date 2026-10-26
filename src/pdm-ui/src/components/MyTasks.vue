@@ -132,6 +132,7 @@ function stageLabel(stage: string | number) {
 }
 
 function notificationActionLabel(notification: UserNotification) {
+  if (notification.category === 'stocked-material') return '查看常备件'
   if (notification.category === 'project-application') return '查看立项申请'
   if (notification.category.startsWith('EditLock')) return '查看图档'
   if (notification.category === 'ProjectTodo') return notification.projectId ? '查看项目' : '查看待办'

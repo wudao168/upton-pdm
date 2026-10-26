@@ -254,6 +254,7 @@ internal sealed class ProjectBrowserDialog : Form
         searchPanel.Controls.Add(search, 1, 0);
 
         var columns = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        columns.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35));
         columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 65));
         var mainGroup = BuildProjectGroup("1. 主项目", mainProjects, null);
@@ -555,10 +556,10 @@ internal sealed class ProjectBrowserDialog : Form
         }
 
         var available = Math.Max(0, childProjects.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4);
-        var documentStatusWidth = Math.Max(68, Math.Min(96, available * 17 / 100));
-        var businessStatusWidth = Math.Max(68, Math.Min(96, available * 17 / 100));
-        var submissionStatusWidth = Math.Max(76, Math.Min(104, available * 20 / 100));
-        childProjects.Columns[0].Width = Math.Max(120, available - documentStatusWidth - businessStatusWidth - submissionStatusWidth);
+        var documentStatusWidth = Math.Max(60, Math.Min(96, available * 17 / 100));
+        var businessStatusWidth = Math.Max(60, Math.Min(96, available * 17 / 100));
+        var submissionStatusWidth = Math.Max(68, Math.Min(104, available * 20 / 100));
+        childProjects.Columns[0].Width = Math.Max(96, available - documentStatusWidth - businessStatusWidth - submissionStatusWidth);
         childProjects.Columns[1].Width = documentStatusWidth;
         childProjects.Columns[2].Width = businessStatusWidth;
         childProjects.Columns[3].Width = submissionStatusWidth;

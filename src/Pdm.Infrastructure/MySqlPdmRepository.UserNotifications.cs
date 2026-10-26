@@ -22,6 +22,7 @@ public sealed partial class MySqlPdmRepository
 
     public async Task<IReadOnlyList<UserNotification>> ListDatedUserTodosAsync(string recipient, Guid companyId, DateOnly from, DateOnly to, CancellationToken ct)
     {
+        if (NotificationRecipientPolicy.SystemOnly(await FindUserAsync(recipient, ct))) return [];
         await using var connection = await OpenAsync(ct);
         var rows = await connection.QueryAsync<UserNotificationRow>(new CommandDefinition(
             """
@@ -36,14 +37,17 @@ public sealed partial class MySqlPdmRepository
 
     public async Task<IReadOnlyList<UserNotification>> ListUserNotificationsAsync(string recipient, int take, CancellationToken cancellationToken)
     {
+        var systemOnly = NotificationRecipientPolicy.SystemOnly(await FindUserAsync(recipient, cancellationToken));
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<UserNotificationRow>(new CommandDefinition(
             """
             SELECT id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date
             FROM user_notification n
             WHERE recipient_username=@Recipient
+              AND (@SystemOnly=0 OR (n.category='System' AND n.project_id IS NULL AND n.release_package_id IS NULL))
               AND (n.source_key NOT LIKE 'calendar-todo:%' OR n.source_key LIKE @CalendarPrefix)
               AND (n.category NOT IN ('work-hours','work-hours-correction') OR n.source_key LIKE @HoursPrefix OR n.source_key LIKE @CorrectionPrefix)
+              AND (n.category<>'stocked-material' OR n.source_key LIKE @StockedPrefix)
               AND NOT (category='project-plan' AND source_key LIKE '%:overdue:%')
               AND (n.category<>'project-plan' OR n.source_key NOT LIKE 'project-plan:%' OR NOT EXISTS (
                   SELECT 1 FROM user_notification newer
@@ -55,15 +59,18 @@ public sealed partial class MySqlPdmRepository
             ORDER BY created_at DESC,id DESC
             LIMIT @Take
             """,
-            new { Recipient = recipient, Take = Math.Clamp(take, 1, 200), CalendarPrefix = $"calendar-todo:{TenantContext.CompanyId:N}:%",
+            new { Recipient = recipient, SystemOnly = systemOnly, Take = Math.Clamp(take, 1, 200), CalendarPrefix = $"calendar-todo:{TenantContext.CompanyId:N}:%",
                 HoursPrefix = TenantContext.CompanyId is Guid company ? $"work-hours:{company:N}:%" : "work-hours:%",
-                CorrectionPrefix = TenantContext.CompanyId is Guid correctionCompany ? $"work-hours-correction:{correctionCompany:N}:%" : "work-hours-correction:%" },
+                CorrectionPrefix = TenantContext.CompanyId is Guid correctionCompany ? $"work-hours-correction:{correctionCompany:N}:%" : "work-hours-correction:%",
+                StockedPrefix = TenantContext.CompanyId is Guid stockedCompany ? $"stocked-low:{stockedCompany:N}:%" : "stocked-low:%" },
             cancellationToken: cancellationToken));
         return rows.Select(MapUserNotification).ToArray();
     }
 
     public async Task CreateUserNotificationsAsync(IReadOnlyList<UserNotification> notifications, CancellationToken cancellationToken)
     {
+        if (notifications.Count == 0) return;
+        notifications = await NotificationRecipientPolicy.FilterAsync(this, notifications, cancellationToken);
         if (notifications.Count == 0) return;
         await using var connection = await OpenAsync(cancellationToken);
         await connection.ExecuteAsync(new CommandDefinition(
@@ -100,10 +107,11 @@ public sealed partial class MySqlPdmRepository
 
     public async Task MarkAllUserNotificationsReadAsync(string recipient, DateTimeOffset readAt, CancellationToken cancellationToken)
     {
+        var systemOnly = NotificationRecipientPolicy.SystemOnly(await FindUserAsync(recipient, cancellationToken));
         await using var connection = await OpenAsync(cancellationToken);
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE user_notification SET read_at=@ReadAt WHERE recipient_username=@Recipient AND read_at IS NULL",
-            new { Recipient = recipient, ReadAt = readAt.UtcDateTime },
+            "UPDATE user_notification SET read_at=@ReadAt WHERE recipient_username=@Recipient AND read_at IS NULL AND (@SystemOnly=0 OR (category='System' AND project_id IS NULL AND release_package_id IS NULL))",
+            new { Recipient = recipient, SystemOnly = systemOnly, ReadAt = readAt.UtcDateTime },
             cancellationToken: cancellationToken));
     }
 

@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace Upton.Pdm.SolidWorks;
@@ -56,12 +59,21 @@ internal sealed class ProjectDocumentsControl : UserControl
     private readonly Label selectedState = new Label();
     private readonly Label workspaceLocation = new Label();
     private readonly Label selectedHint = new Label();
+    private readonly Label loadingStatus = new Label { Dock = DockStyle.Bottom, Height = 24, AutoEllipsis = true,
+        ForeColor = Color.FromArgb(59, 104, 153), TextAlign = ContentAlignment.MiddleLeft };
     private readonly ContextMenuStrip menu = new ContextMenuStrip();
     private readonly ToolTip toolTip = new ToolTip();
     private Func<string> workspaceRootResolver = Upton.Pdm.LocalSettings.WorkspaceSettingsStore.GetWorkspaceRoot;
     private CadTreeNode root;
     private string authenticatedUsername = string.Empty;
     private IReadOnlyDictionary<string, string> userDisplayNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    private Func<CadTreeNode, Task> structureLoader;
+    private ISet<Guid> pendingStructures = new HashSet<Guid>();
+    private readonly HashSet<Guid> loadingStructures = new HashSet<Guid>();
+    private CancellationTokenSource localPathsCancellation;
+    private Dictionary<Guid, string> localPaths;
+    private string localPathsDirectory;
+    private DateTime localPathsExpiresUtc;
 
     public ProjectDocumentsControl()
     {
@@ -93,6 +105,9 @@ internal sealed class ProjectDocumentsControl : UserControl
         projectSelector.Margin = Padding.Empty;
         projectSelector.SelectedProjectChanged += (_, _) =>
         {
+            ConfigureStructureLoading(null, null);
+            localPathsCancellation?.Cancel();
+            localPaths = null;
             SetTree(null);
             UpdateWorkspaceLocation();
             if (projectSelector.SelectedProjectId.HasValue)
@@ -170,7 +185,34 @@ internal sealed class ProjectDocumentsControl : UserControl
         tree.DrawMode = TreeViewDrawMode.OwnerDrawAll;
         tree.DrawNode += DrawNode;
         tree.AfterSelect += (_, _) => UpdateSelectionState();
-        tree.BeforeExpand += (_, args) => Materialize(args.Node);
+        tree.BeforeExpand += async (_, args) =>
+        {
+            if (args.Node.Tag is CadTreeNode model && model.DocumentId.HasValue
+                && pendingStructures.Contains(model.DocumentId.Value) && structureLoader != null)
+            {
+                args.Cancel = true;
+                var id = model.DocumentId.Value;
+                var projectId = SelectedProjectId;
+                if (!loadingStructures.Add(id)) return;
+                var loader = structureLoader;
+                try
+                {
+                    await Task.Yield();
+                    await loader(model);
+                    if (!IsDisposed && SelectedProjectId == projectId && !pendingStructures.Contains(id))
+                        TreeRows(tree.Nodes).FirstOrDefault(row => (row.Tag as CadTreeNode)?.DocumentId == id)?.Expand();
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception error)
+                {
+                    PluginDiagnosticLog.Record("异常", "读取项目装配结构：" + error);
+                    SetLoadingStatus("装配结构暂未读取完整，请再次展开重试。");
+                }
+                finally { loadingStructures.Remove(id); }
+                return;
+            }
+            Materialize(args.Node);
+        };
         tree.MouseDown += (_, args) =>
         {
             var rowNode = GetNodeAtRow(args.Y);
@@ -251,6 +293,7 @@ internal sealed class ProjectDocumentsControl : UserControl
         var treeHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(3, 0, 3, 3), BackColor = BackColor };
         treeHost.Controls.Add(treeSurface);
         treeHost.Controls.Add(empty);
+        treeHost.Controls.Add(loadingStatus);
 
         Controls.Add(treeHost);
         Controls.Add(selectionPanel);
@@ -300,10 +343,25 @@ internal sealed class ProjectDocumentsControl : UserControl
         SetTree(null);
     }
 
+    public void ConfigureStructureLoading(Func<CadTreeNode, Task> loader, ISet<Guid> pending)
+    {
+        structureLoader = loader;
+        pendingStructures = pending ?? new HashSet<Guid>();
+    }
+
+    public void SetLoadingStatus(string message)
+    {
+        loadingStatus.Text = message ?? string.Empty;
+        loadingStatus.Visible = !string.IsNullOrWhiteSpace(message);
+        toolTip.SetToolTip(loadingStatus, loadingStatus.Text);
+    }
+
     public void SetTree(CadTreeNode value)
     {
+        var expanded = new HashSet<Guid>(TreeRows(tree.Nodes).Where(row => row.IsExpanded && (row.Tag as CadTreeNode)?.DocumentId != null)
+            .Select(row => ((CadTreeNode)row.Tag).DocumentId.Value));
+        var selectedId = (tree.SelectedNode?.Tag as CadTreeNode)?.DocumentId;
         root = value;
-        RefreshLocalWorkspacePaths(false);
         tree.BeginUpdate();
         tree.Nodes.Clear();
         if (root != null)
@@ -313,11 +371,35 @@ internal sealed class ProjectDocumentsControl : UserControl
             Materialize(node);
             node.Expand();
             tree.SelectedNode = node;
+            RestoreExpanded(node, expanded, selectedId);
         }
         tree.EndUpdate();
         empty.Visible = root == null;
         treeSurface.Visible = root != null;
         UpdateSelectionState();
+        RefreshLocalWorkspacePaths();
+    }
+
+    private static IEnumerable<TreeNode> TreeRows(TreeNodeCollection rows)
+    {
+        foreach (TreeNode row in rows)
+        {
+            yield return row;
+            foreach (var child in TreeRows(row.Nodes)) yield return child;
+        }
+    }
+
+    private void RestoreExpanded(TreeNode row, ISet<Guid> expanded, Guid? selectedId)
+    {
+        if (!(row.Tag is CadTreeNode model)) return;
+        if (model.DocumentId.HasValue && expanded.Contains(model.DocumentId.Value)
+            || !model.DocumentId.HasValue)
+        {
+            Materialize(row);
+            row.Expand();
+        }
+        if (selectedId.HasValue && model.DocumentId == selectedId) tree.SelectedNode = row;
+        foreach (TreeNode child in row.Nodes) RestoreExpanded(child, expanded, selectedId);
     }
 
     private void BuildContextMenu()
@@ -453,7 +535,7 @@ internal sealed class ProjectDocumentsControl : UserControl
         toolTip.SetToolTip(workspaceLocation, path);
     }
 
-    private void RefreshLocalWorkspacePaths(bool updateUi = true)
+    private async void RefreshLocalWorkspacePaths()
     {
         var project = projectSelector.SelectedProject;
         if (root == null || project == null || string.IsNullOrWhiteSpace(project.Code))
@@ -461,46 +543,28 @@ internal sealed class ProjectDocumentsControl : UserControl
             return;
         }
 
+        localPathsCancellation?.Cancel();
+        var owner = new CancellationTokenSource();
+        localPathsCancellation = owner;
+        var token = owner.Token;
+        var target = root;
         try
         {
             var directory = ControlledWorkspaceManager.ProjectViewDirectory(
                 workspaceRootResolver(),
                 project.Code);
-            if (!Directory.Exists(directory))
-            {
-                return;
-            }
-
-            var pathsByDocument = new Dictionary<Guid, string>();
-            var ambiguousDocuments = new HashSet<Guid>();
-            foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
-            {
-                Guid documentId;
-                Guid? boundProjectId;
-                if (PdmDocumentIdentityStore.TryRead(path, out documentId))
-                {
-                    boundProjectId = PdmDocumentIdentityStore.ReadProjectId(path);
-                }
-                else if (!PdmDocumentIdentityStore.TryReadProvenance(path, out documentId, out boundProjectId))
-                {
-                    continue;
-                }
-
-                if (documentId == Guid.Empty || (boundProjectId.HasValue && boundProjectId.Value != project.Id))
-                {
-                    continue;
-                }
-                if (pathsByDocument.TryGetValue(documentId, out var existing)
-                    && !string.Equals(existing, path, StringComparison.OrdinalIgnoreCase))
-                {
-                    ambiguousDocuments.Add(documentId);
-                    continue;
-                }
-                pathsByDocument[documentId] = path;
-            }
-            foreach (var documentId in ambiguousDocuments) pathsByDocument.Remove(documentId);
-            ApplyLocalWorkspacePaths(root, directory, pathsByDocument);
+            var pathsByDocument = localPaths != null && localPathsDirectory == directory && localPathsExpiresUtc > DateTime.UtcNow
+                ? localPaths : await Task.Run(() => ReadLocalWorkspacePaths(directory, project.Id, token), token);
+            token.ThrowIfCancellationRequested();
+            if (IsDisposed || !ReferenceEquals(root, target) || SelectedProjectId != project.Id) return;
+            localPaths = pathsByDocument;
+            localPathsDirectory = directory;
+            localPathsExpiresUtc = DateTime.UtcNow.AddSeconds(2);
+            ApplyLocalWorkspacePaths(target, directory, pathsByDocument);
+            tree.Invalidate();
+            UpdateSelectionState();
         }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception exception) when (exception is IOException
             || exception is UnauthorizedAccessException
             || exception is ArgumentException
@@ -508,11 +572,46 @@ internal sealed class ProjectDocumentsControl : UserControl
         {
             // Local status is advisory. A transient directory read must not block PLM actions.
         }
-
-        if (updateUi)
+        finally
         {
-            UpdateSelectionState();
+            if (ReferenceEquals(localPathsCancellation, owner)) localPathsCancellation = null;
+            owner.Dispose();
         }
+    }
+
+    private static Dictionary<Guid, string> ReadLocalWorkspacePaths(string directory, Guid projectId, CancellationToken token)
+    {
+        var pathsByDocument = new Dictionary<Guid, string>();
+        if (!Directory.Exists(directory)) return pathsByDocument;
+        var ambiguousDocuments = new HashSet<Guid>();
+        foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+        {
+            token.ThrowIfCancellationRequested();
+            Guid documentId;
+            Guid? boundProjectId;
+            if (PdmDocumentIdentityStore.TryRead(path, out documentId))
+            {
+                boundProjectId = PdmDocumentIdentityStore.ReadProjectId(path);
+            }
+            else if (!PdmDocumentIdentityStore.TryReadProvenance(path, out documentId, out boundProjectId))
+            {
+                continue;
+            }
+
+            if (documentId == Guid.Empty || (boundProjectId.HasValue && boundProjectId.Value != projectId))
+            {
+                continue;
+            }
+            if (pathsByDocument.TryGetValue(documentId, out var existing)
+                && !string.Equals(existing, path, StringComparison.OrdinalIgnoreCase))
+            {
+                ambiguousDocuments.Add(documentId);
+                continue;
+            }
+            pathsByDocument[documentId] = path;
+        }
+        foreach (var documentId in ambiguousDocuments) pathsByDocument.Remove(documentId);
+        return pathsByDocument;
     }
 
     private static void ApplyLocalWorkspacePaths(
@@ -585,13 +684,14 @@ internal sealed class ProjectDocumentsControl : UserControl
     {
         if (disposing)
         {
+            localPathsCancellation?.Cancel();
             structureImages?.Dispose();
             toolTip?.Dispose();
         }
         base.Dispose(disposing);
     }
 
-    private static TreeNode CreateNode(CadTreeNode model)
+    private TreeNode CreateNode(CadTreeNode model)
     {
         var imageKey = PdmTaskPaneControl.StructureImageKey(model.Kind);
         var node = new TreeNode(string.IsNullOrWhiteSpace(model.DisplayName) ? model.FileName : model.DisplayName)
@@ -601,11 +701,12 @@ internal sealed class ProjectDocumentsControl : UserControl
             SelectedImageKey = imageKey,
             ToolTipText = string.Concat(model.FileName, " · ", model.Configuration)
         };
-        if (model.Children.Count > 0) node.Nodes.Add(new TreeNode { Tag = LazyPlaceholder.Instance });
+        if (model.Children.Count > 0 || model.DocumentId.HasValue && pendingStructures.Contains(model.DocumentId.Value))
+            node.Nodes.Add(new TreeNode { Tag = LazyPlaceholder.Instance });
         return node;
     }
 
-    private static void Materialize(TreeNode parent)
+    private void Materialize(TreeNode parent)
     {
         if (!(parent.Tag is CadTreeNode model)
             || parent.Nodes.Count != 1
@@ -725,7 +826,8 @@ internal sealed class ProjectDocumentsControl : UserControl
         if (IsWorkspaceGroup(node)) return string.Empty;
         if (node.IsExternalProvenance) return "外部副本";
         if (node.Status == CadReferenceStatus.Missing) return "文件缺失";
-        if (string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath)) return "未下载";
+        if (string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
+            return localPathsCancellation != null ? "正在核对" : "未下载";
         if (node.WorkState == CadWorkState.ModifiedUnsaved) return "修改未保存";
         if (node.WorkState == CadWorkState.PendingCheckIn) return "待签入";
         if (node.WorkState == CadWorkState.Editable

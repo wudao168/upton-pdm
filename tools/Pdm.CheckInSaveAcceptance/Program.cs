@@ -27,6 +27,86 @@ internal static partial class Program
  {
   AppDomain.CurrentDomain.AssemblyResolve+=(_,e)=>{var path=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0])),new AssemblyName(e.Name).Name+".dll");return File.Exists(path)?Assembly.LoadFrom(path):null;};
   assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));
+  if(args.Length>1&&args[1]=="--archive-file-locations-regression")
+  {
+   try{ArchiveFileLocationsScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--reference-notice-contracts-regression")
+  {
+   try{ReferenceNoticeContractsScenario().GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--background-tree-safety-regression")
+  {
+   try{BackgroundTreeSafetyScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-reference-recovery-regression")
+  {
+   try{ArchiveReferenceRecoveryScenario(args[2]).GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-dependency-paths-regression")
+  {
+   try{ArchiveDependencyPathScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--dialog-owner-layer-regression")
+  {
+   using(var ownerHost=new Form{Opacity=0,ShowInTaskbar=false,Text="SolidWorks 所属窗口模拟"})
+   {
+    ownerHost.Shown+=async(_,__)=>{try{await DialogOwnerLayerScenario(ownerHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{ownerHost.Close();}};
+    Application.Run(ownerHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--workspace-navigation-speed-regression")
+  {
+   using(var navigationHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    navigationHost.Shown+=async(_,__)=>{try{await WorkspaceNavigationSpeedScenario(navigationHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{navigationHost.Close();}};
+    Application.Run(navigationHost);
+   }
+   return;
+  }
+  if(args.Length>1&&(args[1]=="--embedded-design-table-file"||args[1]=="--embedded-design-table-clean"||args[1]=="--embedded-static-picture-file"))
+  {
+   try
+   {
+    var bytes=File.ReadAllBytes(args[2]);var ole=Type("PdmAddin").GetField("application",Flags).FieldType.Assembly.GetType("SolidWorks.Interop.sldworks.SwOLEObject",true);
+    var item=new Proxy(ole,call=>call.MethodName=="get_IsLinked"?false:call.MethodName=="get_Clsid"?(args[1]=="--embedded-static-picture-file"?"{00000316-0000-0000-C000-000000000046}":"{00020830-0000-0000-C000-000000000046}"):call.MethodName=="get_Buffer"?bytes:call.MethodName=="get_BufferSize"?bytes.Length:throw new Exception(call.MethodName)).GetTransparentProxy();
+    if(args[1]=="--embedded-design-table-clean")
+    {
+     var data=(byte[])Type("ArchiveEmbeddedPackageInspection").GetMethod("ReadWorkbook",Flags).Invoke(null,new[]{item});
+     var clean=(byte[])Type("ArchiveEmbeddedPackageInspection").GetMethod("RemoveWorkbookLinks",Flags).Invoke(null,new object[]{data});File.WriteAllBytes(args[3],clean);
+    }
+    else if(!(bool)Type("ArchiveEmbeddedPackageInspection").GetMethod("IsSelfContained",Flags).Invoke(null,new[]{item}))throw new Exception("真实内嵌设计表未通过自包含核对");
+    Console.WriteLine(args[1]=="--embedded-static-picture-file"?"PASS: actual native static picture is self-contained; complete stored bitmap validated without activation or pixel changes":"PASS: actual native embedded design table is self-contained; bytes inspected without Excel activation or configuration changes");
+   }
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
+  }
+  if(args.Length>1&&args[1]=="--archive-native-process-regression")
+  {
+   try{ArchiveNativeProcessScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
+  }
+  if(args.Length>1&&args[1]=="--archive-status-layout-regression")
+  {
+   using(var statusHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    statusHost.Shown+=async(_,__)=>{try{await ArchiveStatusLayoutScenario(statusHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{statusHost.Close();}};
+    Application.Run(statusHost);
+   }
+   return;
+  }
   if(args.Length>1&&args[1]=="--archive-native-reference-regression")
   {
    try{ArchiveNativeReferenceScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
@@ -1725,7 +1805,28 @@ internal static partial class Program
   }
  }
  static System.Type Type(string name)=>assembly.GetType("Upton.Pdm.SolidWorks."+name,true);
- static object New(string name,params object[] args)=>Activator.CreateInstance(Type(name),Flags&~BindingFlags.Static,null,args,null);
+ static object New(string name,params object[] args)
+ {
+  var instance=Activator.CreateInstance(Type(name),Flags&~BindingFlags.Static,null,args,null);
+  if(name=="PdmAddin")
+  {
+   // Business regressions use owned fake CAD copies; real native processes are
+   // exercised by Pdm.NativeIsolationAcceptance against the same candidate.
+   var provider=Type(name).GetField("nativeIsolationProvider",Flags);
+   if(provider!=null)
+   {
+    var parameters=provider.FieldType.GetMethod("Invoke").GetParameters().Select(p=>System.Linq.Expressions.Expression.Parameter(p.ParameterType,p.Name)).ToArray();
+    var workspace=Type("ArchiveNativeCopyWorkspace");var constructor=workspace.GetConstructors(Flags).Single(c=>c.GetParameters().Length==5);
+    var appType=Type(name).GetField("application",Flags).FieldType;
+    var reader=ArchiveNativeMock(appType,call=>call.MethodName=="GetType"?appType:call.MethodName=="GetDocuments"?new object[0]:call.MethodName=="get_ActiveDoc"?null:throw new Exception("独立读取器不应访问用户会话："+call.MethodName));
+    var app=System.Linq.Expressions.Expression.Constant(reader,appType);
+    var created=System.Linq.Expressions.Expression.New(constructor,app,parameters[0],parameters[1],System.Linq.Expressions.Expression.Constant(null,typeof(string)),parameters[2]);
+    var completed=System.Linq.Expressions.Expression.Call(typeof(Task).GetMethod("FromResult").MakeGenericMethod(workspace),created);
+    provider.SetValue(instance,System.Linq.Expressions.Expression.Lambda(provider.FieldType,completed,parameters).Compile());
+   }
+  }
+  return instance;
+ }
  static PropertyInfo Property(object o,string name)=>o.GetType().GetProperty(name,Flags);
  static object Get(object o,string name)=>Property(o,name).GetValue(o);
  static void Set(object o,string name,object value)=>Property(o,name).SetValue(o,value);

@@ -207,7 +207,7 @@ public sealed class MaterialService(
         return tasks.Where(task => !headers.Contains(task.MaterialId)).ToArray();
     }
 
-    public async Task<IReadOnlyList<MaterialCodeApplication>> ListCodeApplicationsAsync(Guid? projectId, MaterialCodeApplicationStatus? status, string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<MaterialCodeApplication>> ListCodeApplicationsAsync(Guid? projectId, MaterialCodeApplicationStatus? status, string actor, UserRole role, CancellationToken cancellationToken, bool businessInbox = false)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken);
         var result = new List<MaterialCodeApplication>();
@@ -218,7 +218,7 @@ public sealed class MaterialService(
             if (!projectAccess.TryGetValue(application.ProjectId, out var canRead))
                 projectAccess[application.ProjectId] = canRead = await repository.HasProjectContentReadAccessAsync(application.ProjectId, actor, role, cancellationToken);
             if (!canRead) continue;
-            result.Add(await WithApprovalCapabilitiesAsync(application, actor, role, cancellationToken, legacyRoles));
+            result.Add(await WithApprovalCapabilitiesAsync(application, actor, role, cancellationToken, legacyRoles, businessInbox));
         }
         return result;
     }
@@ -569,16 +569,22 @@ public sealed class MaterialService(
         _ => null
     };
 
-    private async Task<MaterialCodeApplication> WithApprovalCapabilitiesAsync(MaterialCodeApplication application, string actor, UserRole role, CancellationToken ct, IReadOnlyList<string>? legacyRoles = null)
+    private async Task<MaterialCodeApplication> WithApprovalCapabilitiesAsync(MaterialCodeApplication application, string actor, UserRole role, CancellationToken ct, IReadOnlyList<string>? legacyRoles = null, bool businessInbox = false)
     {
+        var requiresManualApproval = application.BomHeaderKind is null;
         var node = application.ApprovalWorkflow?.Nodes.OrderBy(item => item.Order).FirstOrDefault(item => item.Decision is null);
         legacyRoles ??= application.ApprovalWorkflow is null ? (await repository.GetSystemSettingsAsync(ct)).MaterialCodeApproval.ApproverRoleCodes : [];
+        var inboxRoles = businessInbox ? TenantContext.Current?.EffectiveRoleCodes
+            ?? (await repository.FindUserAsync(actor, ct))?.EffectiveRoleCodes ?? [role.ToString()] : [];
+        var legacyCanDecide = businessInbox && NotificationRecipientPolicy.HasSystemAdministrator(inboxRoles)
+            ? legacyRoles.Intersect(NotificationRecipientPolicy.BusinessRoles(inboxRoles), StringComparer.OrdinalIgnoreCase).Any()
+            : role == UserRole.Administrator || legacyRoles.Contains(role.ToString(), StringComparer.OrdinalIgnoreCase);
         return application with {
-            CanDecide = application.Status == MaterialCodeApplicationStatus.Pending && (application.ApprovalWorkflow is null
-                ? role == UserRole.Administrator || legacyRoles.Contains(role.ToString(), StringComparer.OrdinalIgnoreCase)
+            CanDecide = requiresManualApproval && application.Status == MaterialCodeApplicationStatus.Pending && (application.ApprovalWorkflow is null
+                ? legacyCanDecide
                 : node?.Assignees.Contains(actor, StringComparer.OrdinalIgnoreCase) == true),
-            CanEmergencyDecide = application.Status == MaterialCodeApplicationStatus.Pending && node is not null
-                && await ApprovalEmergencyPolicy.CanAsync(repository, application.ProjectId, application.ApprovalWorkflow!.EmergencyRoleCodes, actor, role, ct)
+            CanEmergencyDecide = requiresManualApproval && application.Status == MaterialCodeApplicationStatus.Pending && node is not null
+                && await ApprovalEmergencyPolicy.CanAsync(repository, application.ProjectId, application.ApprovalWorkflow!.EmergencyRoleCodes, actor, role, ct, businessInbox)
         };
     }
 

@@ -855,7 +855,7 @@ public sealed class DrawingReviewWorkflowTests
     }
 
     [Fact]
-    public async Task FormalReleaseRejectsNonStandardQuantityMismatch()
+    public async Task ManualNonStandardQuantityStillRequiresCompletedDrawingReview()
     {
         var (repository, workflow, _, _) = await PrepareReviewAsync();
         var items = (await repository.GetBomAsync(ProjectId, BomKind.NonStandard, default))
@@ -867,8 +867,7 @@ public sealed class DrawingReviewWorkflowTests
         var blocked = await Assert.ThrowsAsync<PdmRuleException>(() =>
             workflow.SubmitReleasePackageAsync(release.Id, "admin", UserRole.Administrator, default));
 
-        Assert.Contains("BOM数量与最新设计树数量不一致", blocked.Message);
-        Assert.Contains("A01-100（BOM 2 / 源 1）", blocked.Message);
+        Assert.Contains("尚无已完成的2D图纸审核", blocked.Message);
     }
 
     [Fact]

@@ -19,6 +19,8 @@ internal sealed class ImportedComponentStorage
 
     internal ImportedComponentStorage(ISldWorks application) => this.application = application ?? throw new ArgumentNullException(nameof(application));
 
+    internal bool AllowInventory { get; set; } = true;
+
     internal string FindOwner(IComponent2 component, IModelDoc2 root)
     {
         var cache = (component.GetModelDoc2() as IModelDoc2)?.GetPathName() ?? component.GetPathName();
@@ -43,6 +45,7 @@ internal sealed class ImportedComponentStorage
         // Pack and Go may still list those IC caches as associative references after a
         // reopen; their presence is not evidence that the native parent lacks the data.
         if (IsNativeImportedComponent(importedRoot, root)) return ownerPath;
+        if (!AllowInventory) return null;
         var rootPath = root?.GetPathName();
         if (!IsStableOwner(rootPath)) return null;
         if (!inventories.TryGetValue(rootPath, out var files))

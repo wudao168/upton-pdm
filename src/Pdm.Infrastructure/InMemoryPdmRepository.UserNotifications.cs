@@ -22,6 +22,8 @@ public sealed partial class InMemoryPdmRepository
 
     public Task<IReadOnlyList<UserNotification>> ListDatedUserTodosAsync(string recipient, Guid companyId, DateOnly from, DateOnly to, CancellationToken ct)
     {
+        if (NotificationRecipientPolicy.SystemOnly(users.Values.FirstOrDefault(user => user.Username.Equals(recipient, StringComparison.OrdinalIgnoreCase))))
+            return Task.FromResult<IReadOnlyList<UserNotification>>([]);
         lock (gate) return Task.FromResult<IReadOnlyList<UserNotification>>(userNotifications.Values.Where(item =>
             item.Recipient.Equals(recipient, StringComparison.OrdinalIgnoreCase) && item.Category == "ProjectTodo" && item.DueDate >= from && item.DueDate <= to
             && (item.SourceKey.StartsWith($"calendar-todo:{companyId:N}:", StringComparison.Ordinal)
@@ -32,10 +34,13 @@ public sealed partial class InMemoryPdmRepository
     {
         lock (gate)
         {
+            var systemOnly = NotificationRecipientPolicy.SystemOnly(users.Values.FirstOrDefault(user => user.Username.Equals(recipient, StringComparison.OrdinalIgnoreCase)));
             return Task.FromResult<IReadOnlyList<UserNotification>>(userNotifications.Values
                 .Where(item => string.Equals(item.Recipient, recipient, StringComparison.OrdinalIgnoreCase))
+                .Where(item => !systemOnly || NotificationRecipientPolicy.IsSystemMessage(item))
                 .Where(item => !item.SourceKey.StartsWith("calendar-todo:", StringComparison.Ordinal) || TenantContext.CompanyId is Guid company && item.SourceKey.StartsWith($"calendar-todo:{company:N}:", StringComparison.Ordinal))
                 .Where(item => item.Category is not ("work-hours" or "work-hours-correction") || TenantContext.CompanyId is not Guid hoursCompany || item.SourceKey.StartsWith($"{item.Category}:{hoursCompany:N}:", StringComparison.Ordinal))
+                .Where(item => item.Category != "stocked-material" || TenantContext.CompanyId is not Guid stockedCompany || item.SourceKey.StartsWith($"stocked-low:{stockedCompany:N}:", StringComparison.Ordinal))
                 .Where(item => !item.IsPlanOverdueReminder)
                 .OrderByDescending(item => item.CreatedAt)
                 .ThenByDescending(item => item.Id)
@@ -46,8 +51,9 @@ public sealed partial class InMemoryPdmRepository
         }
     }
 
-    public Task CreateUserNotificationsAsync(IReadOnlyList<UserNotification> notifications, CancellationToken cancellationToken)
+    public async Task CreateUserNotificationsAsync(IReadOnlyList<UserNotification> notifications, CancellationToken cancellationToken)
     {
+        notifications = await NotificationRecipientPolicy.FilterAsync(this, notifications, cancellationToken);
         lock (gate)
         {
             foreach (var notification in notifications)
@@ -58,7 +64,6 @@ public sealed partial class InMemoryPdmRepository
                 userNotifications[notification.Id] = notification;
             }
         }
-        return Task.CompletedTask;
     }
 
     public Task MarkUserNotificationReadAsync(Guid notificationId, string recipient, DateTimeOffset readAt, CancellationToken cancellationToken)
@@ -76,8 +81,10 @@ public sealed partial class InMemoryPdmRepository
     {
         lock (gate)
         {
+            var systemOnly = NotificationRecipientPolicy.SystemOnly(users.Values.FirstOrDefault(user => user.Username.Equals(recipient, StringComparison.OrdinalIgnoreCase)));
             foreach (var notification in userNotifications.Values
                 .Where(item => item.ReadAt is null && string.Equals(item.Recipient, recipient, StringComparison.OrdinalIgnoreCase))
+                .Where(item => !systemOnly || NotificationRecipientPolicy.IsSystemMessage(item))
                 .ToArray())
                 userNotifications[notification.Id] = notification with { ReadAt = readAt };
         }

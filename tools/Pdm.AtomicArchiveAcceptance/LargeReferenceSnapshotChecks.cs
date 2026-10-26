@@ -37,7 +37,7 @@ internal static class LargeReferenceSnapshotChecks
             new Dictionary<string, string?>(), new(Guid.NewGuid(), project.Id, document.Id, DateTimeOffset.UtcNow, "qa", tree, new string('D', 64)), [], [], IsProjectRoot: isRoot)
             { RequireBaseVersion = true };
         var files = new List<ArchiveBatchFile> {
-            new(root.Id, Commit(root, Node(root) with { Children = embedded }, true)),
+            new(root.Id, Commit(root, Node(root) with { Children = embedded, UsesNativeFileInventory = true }, true)),
             new(other.Id, Commit(other, Node(other), true))
         };
         files.AddRange(drawings.Select(document => new ArchiveBatchFile(document.Id, Commit(document, Node(document) with { Children = [Node(root)] }))));
@@ -67,6 +67,9 @@ internal static class LargeReferenceSnapshotChecks
         Require(saved.Children.Count == embedded.Length && saved.Children.All(node => node.Status == ReferenceNodeStatus.Virtual && node.DocumentId is null)
             && saved.Children.Select(node => node.Configuration).Distinct().Count() == 3, "Embedded instances or configurations lost");
         Require((await repository.ListDocumentRelationsAsync(project.Id, default)).Count == 6, "Six drawing relations incomplete");
+        var indexes = await repository.ListNativeReferenceIndexesAsync(project.Id, default);
+        Require(indexes.Count == 1 && indexes[0].Children.Count == embedded.Length,
+            "Large native reference index or embedded instances lost");
         Console.WriteLine("PASS MySQL large-reference commit preserves six drawings, 600 embedded instances, three configurations and root ordering");
         var nextBatch = Guid.NewGuid();
         var unchanged = new List<ArchiveBatchFile>();
@@ -80,6 +83,32 @@ internal static class LargeReferenceSnapshotChecks
         Require(repeated.Results.All(result => !result.VersionCreated), "Unchanged retry created new versions");
         foreach (var file in files) Require((await repository.ListDocumentVersionsAsync(file.DocumentId, default)).Count == 1, "Unexpected extra version");
         Console.WriteLine("PASS MySQL lost-response replay and unchanged new batch keep exactly one version per physical file");
+        var source = System.Text.Json.Nodes.JsonNode.Parse(await connection.QuerySingleAsync<string>(
+            "SELECT root_json FROM reference_snapshot WHERE root_document_id=@Id AND JSON_EXTRACT(root_json,'$.usesNativeFileInventory')=TRUE LIMIT 1",
+            new { Id = root.Id }))!;
+        var at = DateTime.UtcNow.AddMinutes(1);
+        async Task AddIndex(Guid id, string configuration, string revision, string name, DateTime capturedAt)
+        {
+            var tree = source.DeepClone();
+            tree["configuration"] = configuration;
+            tree["revision"] = System.Text.Json.JsonSerializer.SerializeToNode(RevisionLabel.Parse(revision),
+                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+            tree["displayName"] = name;
+            await connection.ExecuteAsync("""
+                INSERT INTO reference_snapshot(id,project_id,root_document_id,captured_at,captured_by,sha256,root_json)
+                VALUES(@Id,@Project,@Root,@At,'qa',@Hash,@Json)
+                """, new { Id = id, Project = project.Id, Root = root.Id, At = capturedAt, Hash = new string('E', 64), Json = tree.ToJsonString() });
+        }
+        await AddIndex(Guid.Parse("00000000-0000-0000-0000-000000000001"), "Default", "W1", "tie-old", at);
+        await AddIndex(Guid.Parse("00000000-0000-0000-0000-000000000002"), "Default", "W1", "tie-new", at);
+        await AddIndex(Guid.NewGuid(), "Default", "W1", "older", at.AddSeconds(-1));
+        await AddIndex(Guid.NewGuid(), "Default", "W2", "other-version", at);
+        await AddIndex(Guid.NewGuid(), "default", "W1", "other-configuration", at);
+        var history = await repository.ListNativeReferenceIndexesAsync(project.Id, default);
+        Require(history.Count == 3 && history.Select(node => node.DisplayName).Order().SequenceEqual(
+            new[] { "other-configuration", "other-version", "tie-new" }), "Native index ranking lost configuration, version or timestamp/ID precedence");
+        Require(history.All(node => node.Children.Count == embedded.Length), "Native index ranking truncated payloads");
+        Console.WriteLine("PASS MySQL native index keeps latest timestamp/ID per exact configuration and revision without sorting JSON");
     }
 
     private static void Require(bool condition, string message) { if (!condition) throw new Exception(message); }

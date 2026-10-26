@@ -164,6 +164,25 @@ public sealed class MaterialAttachmentService(
             attachment.Id.ToString(), $"删除附件记录：{material?.MaterialCode ?? kit!.Code} · {attachment.Kind} · {attachment.OriginalFileName} · {attachment.Sha256}；存档文件保留。"), cancellationToken);
     }
 
+    public async Task<PdmMaterial> ReplaceImagesAsync(Guid materialId, IReadOnlyList<Guid> attachmentIds, Guid? coverAttachmentId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireAnyAttachmentWritePermissionAsync(actor, role, cancellationToken);
+        if (attachmentIds is null || attachmentIds.Count > 5 || attachmentIds.Distinct().Count() != attachmentIds.Count)
+            throw new PdmRuleException("每个料品最多5张图片，不能重复选择同一图片。");
+        if (coverAttachmentId is not null && !attachmentIds.Contains(coverAttachmentId.Value))
+            throw new PdmRuleException("封面必须是本次保留的图片之一。");
+        var material = await materials.FindMaterialAsync(materialId, cancellationToken) ?? throw new PdmNotFoundException("料品主档不存在。");
+        if (material.IsArchived) throw new PdmRuleException("已停用料品不能维护图片，请先恢复启用。");
+        var images = await materials.ListMaterialAttachmentsAsync(materialId, MaterialAttachmentKind.CoverImage, cancellationToken);
+        if (attachmentIds.Any(id => images.All(image => image.Id != id)))
+            throw new PdmRuleException("只能使用当前料品的图片，不能使用其他料品或资料附件。");
+        if (material.CoverImageAttachmentId == coverAttachmentId && images.Select(image => image.Id).ToHashSet().SetEquals(attachmentIds)) return material;
+        var saved = await materials.ReplaceMaterialImagesAsync(material with { CoverImageAttachmentId = coverAttachmentId, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() }, attachmentIds, expectedRowVersion, cancellationToken);
+        await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "material.images.replace", nameof(PdmMaterial), materialId.ToString(),
+            $"替换料品图片：{material.MaterialCode}；原图片：{string.Join(',', images.Select(image => image.Id))}；新图片：{string.Join(',', attachmentIds)}；封面：{coverAttachmentId}；原存档文件保留。"), cancellationToken);
+        return saved;
+    }
+
     public async Task<PdmMaterial> SetCoverAsync(
         Guid materialId,
         Guid? attachmentId,

@@ -21,6 +21,8 @@ public sealed record DocumentReferenceNode(
     public bool IncludesDesignDependencies { get; init; }
     public bool UsesNativeFileInventory { get; init; }
     public bool StructureIndexPending { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? ReferenceWarnings { get; init; }
     public NativeFileIsolation? NativeIsolation { get; init; }
     public bool NativeIsolationVerified { get; init; }
     public bool HasPendingStructureIndex => StructureIndexPending || Children.Any(child => child.HasPendingStructureIndex);

@@ -5015,7 +5015,6 @@ public sealed partial class PdmWorkflowService(
                 package.ProjectId,
                 package.NonStandardBomSnapshot,
                 cancellationToken,
-                package.Scope != ReleaseScope.NonStandardLongLead,
                 await CurrentNonStandardReleaseItemsAsync(package, cancellationToken),
                 package.Scope == ReleaseScope.NonStandardSupplement ? package.SelectedBomItemIds : null,
                 package.VersionBindings);
@@ -5130,12 +5129,12 @@ public sealed partial class PdmWorkflowService(
         return transferred;
     }
 
-    public async Task<bool> CanEmergencyDecideAsync(Guid taskId, string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<bool> CanEmergencyDecideAsync(Guid taskId, string actor, UserRole role, CancellationToken cancellationToken, bool businessInbox = false)
     {
         var package = await repository.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken);
         return package?.State is ReleasePackageState.ProcessReview or ReleasePackageState.Approval
             && package.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder).FirstOrDefault()?.Id == taskId
-            && await ApprovalEmergencyPolicy.CanAsync(repository, package.ProjectId, package.EmergencyRoleCodes, actor, role, cancellationToken);
+            && await ApprovalEmergencyPolicy.CanAsync(repository, package.ProjectId, package.EmergencyRoleCodes, actor, role, cancellationToken, businessInbox);
     }
 
     public async Task<ReleasePackage> EmergencyDecideAsync(Guid taskId, string actor, UserRole role, ApprovalDecision decision, string reason, CancellationToken cancellationToken, bool publishImmediately = true)
@@ -5170,7 +5169,6 @@ public sealed partial class PdmWorkflowService(
                 pendingPackage.ProjectId,
                 pendingPackage.NonStandardBomSnapshot,
                 cancellationToken,
-                pendingPackage.Scope != ReleaseScope.NonStandardLongLead,
                 await CurrentNonStandardReleaseItemsAsync(pendingPackage, cancellationToken),
                 pendingPackage.Scope == ReleaseScope.NonStandardSupplement ? pendingPackage.SelectedBomItemIds : null,
                 pendingPackage.VersionBindings);
@@ -6705,12 +6703,11 @@ public sealed partial class PdmWorkflowService(
         Guid projectId,
         IReadOnlyList<BomItem> snapshot,
         CancellationToken cancellationToken,
-        bool requireExactQuantities = true,
         IReadOnlyList<BomItem>? currentItems = null,
         IReadOnlyList<Guid>? selectedBomItemIds = null,
         IReadOnlyList<ReleaseVersionBinding>? versionBindings = null)
     {
-        // 草稿固化的快照与当前BOM不一致时，先提示刷新草稿：否则会误报成“BOM数量与设计树不一致”。
+        // 发布数量以维护后的BOM为准；设计树只核对来源，草稿仍须与当前BOM一致。
         if (currentItems is not null && !BomSnapshotsEqual(snapshot, currentItems))
             throw new PdmConflictException("非标件BOM在发布草稿创建后已变化，请删除该草稿并重新发起发布。");
         var effectiveItems = snapshot
@@ -6721,7 +6718,7 @@ public sealed partial class PdmWorkflowService(
         if (withoutDrawingSource.Length > 0)
             throw new PdmRuleException($"以下非标件没有来源模型，无法定位2D工程图，不能进入非标件BOM审核发布：{string.Join("、", withoutDrawingSource.Take(12))}。");
         var referenceSnapshot = await repository.GetLatestReferenceSnapshotAsync(projectId, cancellationToken)
-            ?? throw new PdmRuleException("项目尚无最新设计树，不能核对非标件BOM数量。");
+            ?? throw new PdmRuleException("项目尚无最新设计树，不能核对非标件BOM来源。");
         var generated = await GenerateMechanicalBomFromSnapshotAsync(projectId, referenceSnapshot, "release-validation", cancellationToken, false, false);
         var currentSources = generated.StandardItems
             .Concat(generated.NonStandardItems)
@@ -6729,7 +6726,6 @@ public sealed partial class PdmWorkflowService(
             .Where(item => item.SourceDocumentId.HasValue && !item.IsPendingRemoval && !item.IsManualUnmatched && !item.IsManuallyExcluded)
             .ToArray();
         var missingSources = new List<string>();
-        var quantityMismatches = new List<string>();
         foreach (var item in effectiveItems)
         {
             var source = currentSources.FirstOrDefault(candidate => SameBomSource(item, candidate));
@@ -6738,13 +6734,9 @@ public sealed partial class PdmWorkflowService(
                 missingSources.Add(item.DrawingNumber);
                 continue;
             }
-            if (requireExactQuantities && item.Quantity != source.Quantity)
-                quantityMismatches.Add($"{item.DrawingNumber}（BOM {item.Quantity} / 源 {source.Quantity}）");
         }
         if (missingSources.Count > 0)
             throw new PdmRuleException($"以下非标件未在最新设计树中找到对应BOM来源，不能发布：{string.Join("、", missingSources.Take(12))}{(missingSources.Count > 12 ? $"等{missingSources.Count}项" : string.Empty)}。");
-        if (quantityMismatches.Count > 0)
-            throw new PdmRuleException($"以下非标件BOM数量与最新设计树数量不一致，不能发布：{string.Join("、", quantityMismatches.Take(12))}{(quantityMismatches.Count > 12 ? $"等{quantityMismatches.Count}项" : string.Empty)}。");
         var sourceItems = effectiveItems
             .GroupBy(item => item.SourceDocumentId!.Value)
             .Select(group => group.OrderBy(item => item.Sequence).First())

@@ -106,10 +106,14 @@ public static class ProgramTemplateEndpointExtensions
         api.MapGet("/tasks/mine", async (HttpContext context, ProgramTemplateService service, IProgramTemplateRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
+            if (NotificationRecipientPolicy.SystemOnly(TenantContext.Current?.EffectiveRoleCodes ?? [role.ToString()])) return Results.Ok(Array.Empty<ProgramTemplateTaskResponse>());
             var tasks = await service.ListMyTasksAsync(actor, role, cancellationToken);
             var results = new List<ProgramTemplateTaskResponse>();
             foreach (var task in tasks)
             {
+                var roles = TenantContext.Current?.EffectiveRoleCodes ?? [role.ToString()];
+                if (NotificationRecipientPolicy.HasSystemAdministrator(roles) && task.Assignee is null
+                    && !NotificationRecipientPolicy.BusinessRoles(roles).Contains(task.AssigneeRoleCode, StringComparer.OrdinalIgnoreCase)) continue;
                 var revision = await repository.FindRevisionAsync(task.RevisionId, cancellationToken);
                 if (revision is null) continue;
                 var template = await repository.FindAsync(revision.TemplateId, cancellationToken);

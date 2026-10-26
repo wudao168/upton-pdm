@@ -70,6 +70,16 @@ internal static class NativeArchiveManifest
                 try
                 {
                     var path = ArchiveReferencePath.Resolve(part, directory, step, root.FullPath, root.InstancePath, root.Configuration);
+                    if (!File.Exists(path))
+                    {
+                        var peer = Path.Combine(directory, Path.GetFileName(path));
+                        if (File.Exists(peer) && (!controlled || PdmDocumentIdentityStore.TryReadLocalMetadata(peer, out var peerBinding)
+                            && peerBinding.ProjectId == rootBinding.ProjectId && peerBinding.VersionId.HasValue))
+                        {
+                            PluginDiagnosticLog.Record("原生来源定位", "旧地址不可用，采用同套目录内的实际文件：" + path + " → " + peer);
+                            path = peer;
+                        }
+                    }
                     if (controlled && !actualPaths.Contains(path) && new[] { ".SLDASM", ".SLDPRT", ".SLDDRW" }
                         .Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))
                     {
@@ -223,8 +233,25 @@ internal static class NativeArchiveManifest
         var paths = EmbeddedPaths(EmbeddedVirtualNodes(root, false));
         var keys = paths.Where(path => VirtualComponentKey(path) != null).GroupBy(VirtualComponentKey, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.Distinct(StringComparer.OrdinalIgnoreCase).Count(), StringComparer.OrdinalIgnoreCase);
+        // A reopened import has a different user/session cache directory. Match only
+        // the native cache identity whose storage was verified in this exact owner.
+        var imports = Walk(root).Where(node => node.IsStoredImport
+                && string.Equals(node.ImportedStorageOwnerPath, root.FullPath, StringComparison.OrdinalIgnoreCase)
+                && ImportedComponentStorage.IsStableOwner(node.ImportedStorageOwnerPath))
+            .Select(node => node.FullPath).Where(path => ImportCacheKey(path) != null)
+            .GroupBy(ImportCacheKey, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Distinct(StringComparer.OrdinalIgnoreCase).Count(), StringComparer.OrdinalIgnoreCase);
         return new HashSet<string>(nativeFiles.Where(path => paths.Contains(Path.GetFullPath(path))
-            || VirtualComponentKey(path) is string key && keys.TryGetValue(key, out var count) && count == 1), StringComparer.OrdinalIgnoreCase);
+            || VirtualComponentKey(path) is string key && keys.TryGetValue(key, out var count) && count == 1
+            || ImportCacheKey(path) is string importKey && imports.TryGetValue(importKey, out var matches) && matches == 1), StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string ImportCacheKey(string path)
+    {
+        if (!IsInterconnectCachePath(path)) return null;
+        var parts = Path.GetFullPath(path).Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+        var marker = Array.FindIndex(parts, part => part.Equals("IC~~", StringComparison.OrdinalIgnoreCase));
+        return string.Join("/", parts.Skip(marker + 1));
     }
 
     private static HashSet<string> EmbeddedPaths(IEnumerable<CadTreeNode> nodes) => new HashSet<string>(

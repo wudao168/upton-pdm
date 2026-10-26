@@ -26,6 +26,7 @@ import {
   materialAttachmentObjectUrl,
   saveStandardLibraryCategory,
   setMaterialCover,
+  replaceMaterialImages,
   setStandardLibraryRecommendation,
   updateMaterial,
   uploadMaterialAttachment,
@@ -33,6 +34,9 @@ import {
 import type { EngineeringKit, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, PdmMaterial, SaveMaterialInput, StandardLibraryCategory, StandardLibraryMaterial, StandardLibraryImportResult } from '../types'
 import { userErrorMessage } from '../userErrorMessage'
 import { standardCategoryCode } from '../standardLibraryCategories'
+import { u9UnitOptions } from '../u9Units'
+import MaterialImageAdd from './MaterialImageAdd.vue'
+import { materialImageAccept, materialImageLimit } from '../materialImages'
 
 const PdfDrawingViewer = defineAsyncComponent(() => import('./PdfDrawingViewer.vue'))
 const props = defineProps<{ token: string; canManage: boolean; canEdit: boolean; active?: boolean }>()
@@ -72,6 +76,55 @@ const batchSelectionAdviceEnabled = ref(false)
 const batchSelectionAdvice = ref('')
 const batchReferencePriceEnabled = ref(false)
 const batchReferencePrice = ref<number | null>(null)
+const batchImages = ref<Array<{ file: File; url: string }>>([])
+const batchImagesEnabled = ref(false)
+const batchCoverFile = ref<File | null>(null)
+const batchImageInput = ref<HTMLInputElement | null>(null)
+const batchError = ref('')
+const batchProgress = ref('')
+const batchUploadedImages = new Map<string, Map<File, MaterialAttachment>>()
+const batchReplacedImages = new Map<string, string>()
+const batchReadonlyFields: Array<{ key: keyof PdmMaterial; label: string }> = [
+  { key: 'materialCode', label: 'PLM物料编码' }, { key: 'name', label: '物料名称' }, { key: 'categoryCode', label: 'U9C对应分类' },
+  { key: 'kind', label: 'PLM业务类型' }, { key: 'unitCode', label: '计量单位' }, { key: 'specification', label: '规格/型号' },
+  { key: 'material', label: '材质' }, { key: 'brand', label: '品牌' }, { key: 'surfaceTreatment', label: '表面处理' }, { key: 'weight', label: '重量' },
+]
+function batchValue(key: keyof PdmMaterial) {
+  const values = selectedRows.value.map(({ material }) => {
+    if (key === 'kind') return ({ Electrical: '电气件', Standard: '机械外购件', NonStandard: '非标机加件', Product: '产品/组件' })[material.kind]
+    if (key === 'unitCode') return u9UnitOptions.find(unit => unit.code === material.unitCode)?.name ?? material.unitCode
+    if (key === 'categoryCode') return material.categoryCode || material.u9CategoryCode || '—'
+    if (key === 'isRecommended') return material.isRecommended ? '已推荐' : '未推荐'
+    return String(material[key] ?? '').trim() || '—'
+  })
+  return new Set(values).size > 1 ? '多个值（分别保留）' : values[0] ?? '—'
+}
+function clearBatchImages() {
+  for (const image of batchImages.value) URL.revokeObjectURL(image.url)
+  batchImages.value = []
+  batchImagesEnabled.value = false
+  batchCoverFile.value = null
+  batchUploadedImages.clear()
+  batchReplacedImages.clear()
+}
+function selectBatchImages(event: Event) {
+  const input = event.target as HTMLInputElement, files = Array.from(input.files ?? [])
+  input.value = ''
+  if (!batchCanUploadImages.value || batchSaving.value || !files.length) return
+  batchError.value = ''
+  if (batchImages.value.length + files.length > materialImageLimit) { batchError.value = `每个料品最多${materialImageLimit}张图片，请减少本次选择的图片数量。`; return }
+  if (files.some(file => !/\.(jpe?g|png|webp)$/i.test(file.name))) { batchError.value = '请选择JPG、PNG或WebP格式的图片。'; return }
+  batchImages.value.push(...files.map(file => ({ file, url: URL.createObjectURL(file) })))
+  batchImagesEnabled.value = true
+  batchCoverFile.value ??= files[0]!
+}
+function removeBatchImage(index: number) {
+  const image = batchImages.value.splice(index, 1)[0]
+  if (image) URL.revokeObjectURL(image.url)
+  if (image?.file === batchCoverFile.value) batchCoverFile.value = batchImages.value[0]?.file ?? null
+  batchError.value = ''
+}
+watch(batchEditorOpen, open => { if (!open) clearBatchImages() })
 
 const categoryManagerOpen = ref(false)
 const categoryFormOpen = ref(false)
@@ -210,7 +263,8 @@ const removeDisabledReason = computed(() => !props.canManage ? '需要标准物�
   : !selectedRows.value.length ? '请先勾选要移除的物料'
   : selectedRows.value.some(row => row.kit) ? '套件由发布自动收录，请通过维护停用或调整分类'
   : selectedRows.value.some(row => !row.categories.length) ? '物料分类信息已变化，请刷新后重试' : '')
-const batchHasChanges = computed(() => (props.canManage && batchRecommendation.value !== 'Keep') || (props.canEdit && (batchSelectionAdviceEnabled.value || batchReferencePriceEnabled.value)))
+const batchCanUploadImages = computed(() => props.canEdit && selectedRows.value.every(row => !row.material.isArchived))
+const batchHasChanges = computed(() => (props.canManage && batchRecommendation.value !== 'Keep') || (props.canEdit && (batchSelectionAdviceEnabled.value || batchReferencePriceEnabled.value)) || (batchCanUploadImages.value && batchImagesEnabled.value))
 
 async function load(refreshCategories = true) {
   loading.value = true
@@ -418,6 +472,8 @@ function openSelectedMaintenance() {
   batchSelectionAdvice.value = ''
   batchReferencePriceEnabled.value = false
   batchReferencePrice.value = null
+  clearBatchImages()
+  batchError.value = ''; batchProgress.value = ''
   batchEditorOpen.value = true
 }
 
@@ -500,13 +556,17 @@ async function saveKitCategory() {
 async function saveBatchMaintenance() {
   if (!batchHasChanges.value || batchSaving.value) return
   batchSaving.value = true
+  batchError.value = ''
+  const selected = [...selectedRows.value]
   let completed = 0
   try {
-    for (const row of selectedRows.value) {
+    for (const row of selected) {
+      batchProgress.value = `正在保存 ${completed + 1}/${selected.length}：${row.material.materialCode}`
       let current = row.material
       if (props.canManage && batchRecommendation.value !== 'Keep') {
         const isRecommended = batchRecommendation.value === 'Recommended'
         if (current.isRecommended !== isRecommended) current = await setStandardLibraryRecommendation(current.id, isRecommended, current.rowVersion, props.token)
+        row.material = current
       }
       if (props.canEdit && (batchSelectionAdviceEnabled.value || batchReferencePriceEnabled.value)) {
         const input = materialInput(current)
@@ -516,6 +576,31 @@ async function saveBatchMaintenance() {
           ? await changeApprovedMaterial(current.id, input, props.token)
           : { material: await updateMaterial(current.id, input, props.token), task: null }
         if (result.task) throw new Error('PLM专属字段产生了非预期的U9C任务，请人工复核')
+        current = result.material
+        row.material = current
+      }
+      if (batchCanUploadImages.value && batchImagesEnabled.value) {
+        let uploaded = batchUploadedImages.get(current.id)
+        if (!uploaded) { uploaded = new Map(); batchUploadedImages.set(current.id, uploaded) }
+        const replacements: MaterialAttachment[] = []
+        for (const image of batchImages.value) {
+          let attachment = uploaded.get(image.file)
+          if (!attachment) {
+            attachment = await uploadMaterialAttachment(current.id, 'CoverImage', image.file, props.token, percent => {
+              batchProgress.value = `正在上传 ${completed + 1}/${selected.length}：${current.materialCode} · ${image.file.name} ${percent}%`
+            })
+            uploaded.set(image.file, attachment)
+          }
+          replacements.push(attachment)
+        }
+        const cover = batchCoverFile.value ? uploaded.get(batchCoverFile.value) ?? null : null
+        const signature = JSON.stringify([replacements.map(image => image.id), cover?.id ?? null])
+        if (batchReplacedImages.get(current.id) !== signature) {
+          current = await replaceMaterialImages(current.id, replacements.map(image => image.id), cover?.id ?? null, current.rowVersion, props.token)
+          row.material = current
+          row.coverImage = cover
+          batchReplacedImages.set(current.id, signature)
+        }
       }
       completed += 1
     }
@@ -525,10 +610,11 @@ async function saveBatchMaintenance() {
     await load(false)
     ElMessage.success(`已批量维护 ${completed} 个料品`)
   } catch (error) {
-    await load(false)
-    ElMessage.error(`已完成 ${completed}/${selectedRows.value.length}；${error instanceof Error ? error.message : '批量维护失败'}`)
+    batchError.value = `已完成 ${completed}/${selected.length}；${userErrorMessage(error instanceof Error ? error.message : '批量维护失败，请重试。')}`
+    ElMessage.error(batchError.value)
   } finally {
     batchSaving.value = false
+    batchProgress.value = ''
   }
 }
 
@@ -618,8 +704,8 @@ async function handleEditorFiles(kind: MaterialAttachmentKind, event: Event) {
   input.value = ''
   const current = editingMaterial.value
   if (!current || files.length === 0 || uploadingKind.value || changingEditorCover.value) return
-  if (kind === 'CoverImage' && editorAttachments.value.filter(item => item.kind === 'CoverImage').length + files.length > 3) {
-    ElMessage.warning('每个料品最多上传3张图片，请减少本次选择的图片数量。')
+  if (kind === 'CoverImage' && editorAttachments.value.filter(item => item.kind === 'CoverImage').length + files.length > materialImageLimit) {
+    ElMessage.warning(`每个料品最多上传${materialImageLimit}张图片，请减少本次选择的图片数量。`)
     return
   }
   uploadingKind.value = kind
@@ -662,6 +748,7 @@ onMounted(async () => {
   await load()
 })
 onBeforeUnmount(() => {
+  clearBatchImages()
   closeAttachmentPreview()
   cancelEligibleSearch()
   for (const url of Object.values(coverUrls)) if (url.startsWith('blob:')) URL.revokeObjectURL(url)
@@ -812,19 +899,28 @@ onBeforeUnmount(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="batchEditorOpen" title="批量维护标准物料" width="520px">
-      <p class="batch-editor-summary">已选择 {{ selectedRows.length }} 个料品；仅批量修改PLM专属字段，不生成U9C任务。</p>
-      <el-form label-position="top">
-        <el-form-item v-if="canManage" label="推荐属性"><el-select v-model="batchRecommendation"><el-option label="保持不变" value="Keep" /><el-option label="设为推荐" value="Recommended" /><el-option label="取消推荐" value="NotRecommended" /></el-select></el-form-item>
-        <template v-if="canEdit">
-          <el-checkbox v-model="batchSelectionAdviceEnabled">修改选型建议</el-checkbox>
-          <el-input v-if="batchSelectionAdviceEnabled" v-model="batchSelectionAdvice" type="textarea" :rows="3" maxlength="1000" show-word-limit />
-          <el-checkbox v-model="batchReferencePriceEnabled">修改参考价格</el-checkbox>
-          <el-input-number v-if="batchReferencePriceEnabled" v-model="batchReferencePrice" :min="0" :precision="2" controls-position="right" placeholder="留空表示清除" />
-        </template>
-      </el-form>
-      <template #footer><el-button @click="batchEditorOpen = false">取消</el-button><el-button type="primary" :loading="batchSaving" :disabled="!batchHasChanges" @click="saveBatchMaintenance">批量保存</el-button></template>
-    </el-dialog>
+    <MaterialEditorDialog v-if="batchEditorOpen" v-model="batchEditorOpen" title="批量维护标准物料" :token="token" :form="editorForm" :categories="materialCategories" material-code-placeholder="" :attachments="[]" :saving="batchSaving" :can-edit="!batchSaving && (canEdit || canManage)">
+      <template #intro><p class="batch-material-note">已选择 {{ selectedRows.length }} 个料品；仅批量修改PLM专属字段，不生成U9C任务。其他字段只读显示，不同值分别保留。</p></template>
+      <template #images>
+        <section class="batch-material-images" aria-label="批量料品图片">
+          <header><strong>图片（{{ batchImages.length }}/{{ materialImageLimit }}）</strong><el-checkbox v-model="batchImagesEnabled" :disabled="!batchCanUploadImages || batchSaving">修改图片与封面</el-checkbox><el-button v-if="batchImagesEnabled && batchCoverFile" link :disabled="batchSaving" @click="batchCoverFile = null">清除封面</el-button><el-button :disabled="!batchCanUploadImages || batchSaving || batchImages.length >= materialImageLimit" @click="batchImageInput?.click()">上传图片</el-button></header>
+          <input ref="batchImageInput" class="batch-material-file-input" type="file" :accept="materialImageAccept" multiple :disabled="!batchCanUploadImages || batchSaving" aria-label="选择批量料品图片" @change="selectBatchImages">
+          <div class="batch-material-image-cards"><article v-for="(image, index) in batchImages" :key="image.url"><img :src="image.url" :alt="image.file.name"><span :title="image.file.name">{{ image.file.name }}</span><span v-if="image.file === batchCoverFile" class="batch-material-cover">封面</span><el-button v-else link type="primary" :disabled="batchSaving" :aria-label="`将 ${image.file.name} 设为封面`" @click="batchCoverFile = image.file; batchImagesEnabled = true">设为封面</el-button><el-button link type="danger" :disabled="batchSaving" :aria-label="`移除本次图片 ${image.file.name}`" @click="removeBatchImage(index)">移除</el-button></article><MaterialImageAdd v-if="batchImages.length < materialImageLimit" :disabled="!batchCanUploadImages || batchSaving" @click="batchImageInput?.click()" /></div>
+          <p class="batch-material-note">勾选后，以上图片及封面将统一替换所有已选料品的原图片和封面；未勾选则保持各自原值。每个料品最多{{ materialImageLimit }}张，勾选但不保留图片时将清空图片与封面。</p>
+          <p v-if="!batchCanUploadImages" class="batch-material-note">{{ canEdit ? '所选料品包含已停用料品，图片仅供查看。' : '当前权限下图片仅供查看。' }}</p>
+        </section>
+      </template>
+      <template #fields>
+        <el-form-item v-for="field in batchReadonlyFields" :key="field.key" :label="field.label"><el-input :model-value="batchValue(field.key)" :title="batchValue(field.key)" disabled /></el-form-item>
+        <el-form-item label="参考价格"><template #label><el-checkbox v-model="batchReferencePriceEnabled" :disabled="!canEdit">修改参考价格</el-checkbox></template><el-input-number v-if="batchReferencePriceEnabled && canEdit" v-model="batchReferencePrice" :min="0" :precision="2" :step="10" controls-position="right" placeholder="留空表示清除" /><el-input v-else :model-value="batchValue('referencePrice')" disabled /></el-form-item>
+        <el-form-item label="推荐属性"><el-select v-if="canManage" v-model="batchRecommendation" :disabled="batchSaving"><el-option label="保持不变" value="Keep" /><el-option label="设为推荐" value="Recommended" /><el-option label="取消推荐" value="NotRecommended" /></el-select><el-input v-else :model-value="batchValue('isRecommended')" disabled /></el-form-item>
+        <el-form-item label="料品采购链接"><el-input :model-value="batchValue('purchaseLink')" disabled /></el-form-item>
+        <el-form-item class="material-editor-grid__wide" label="备注"><el-input :model-value="batchValue('remark')" disabled /></el-form-item>
+        <el-form-item label="选型建议"><template #label><el-checkbox v-model="batchSelectionAdviceEnabled" :disabled="!canEdit">修改选型建议</el-checkbox></template><el-input v-if="batchSelectionAdviceEnabled && canEdit" v-model="batchSelectionAdvice" maxlength="1000" show-word-limit /><el-input v-else :model-value="batchValue('selectionAdvice')" disabled /></el-form-item>
+      </template>
+      <template #assets><section class="batch-material-assets" aria-label="料品附件（只读）"><section v-for="kind in ['Model3D', 'Document']" :key="kind"><header><strong>{{ kind === 'Model3D' ? '3D' : '资料' }}附件</strong><span>只读，按料品分别保留</span></header><table><thead><tr><th>料号</th><th>附件数量</th></tr></thead><tbody><tr v-for="row in selectedRows" :key="row.material.id"><td>{{ row.material.materialCode }}</td><td>{{ (kind === 'Model3D' ? row.material.model3DAttachmentCount : row.material.documentAttachmentCount) ?? 0 }}</td></tr></tbody></table></section></section></template>
+      <template #footer><p v-if="batchProgress" class="batch-material-note" role="status">{{ batchProgress }}</p><el-alert v-if="batchError" class="batch-material-error" type="error" :closable="false" show-icon :title="batchError" /><el-button :disabled="batchSaving" @click="batchEditorOpen = false">取消</el-button><el-button type="primary" :loading="batchSaving" :disabled="!batchHasChanges" @click="saveBatchMaintenance">批量保存</el-button></template>
+    </MaterialEditorDialog>
 
     <el-dialog v-model="attachmentDialogOpen" :title="attachmentDialogTitle" width="620px" @close="closeAttachmentPreview"><el-table :data="attachmentItems" max-height="420"><el-table-column prop="originalFileName" label="文件名" min-width="260" show-overflow-tooltip /><el-table-column prop="uploadedBy" label="上传人" width="100" /><el-table-column label="操作" width="140"><template #default="{ row }"><el-button link type="primary" :disabled="!canPreviewAttachment(row)" :title="canPreviewAttachment(row) ? '预览附件' : '此格式暂不支持在线预览，请下载查看'" @click="previewAttachment(row)">预览</el-button><el-button link type="primary" @click="downloadAttachment(row)">下载</el-button></template></el-table-column></el-table></el-dialog>
 
@@ -843,11 +939,9 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.material-list-table{--pdm-detail-row-height:30px}
+.batch-material-note{margin:6px 0 12px;color:var(--pdm-muted);font-size:12px;line-height:1.6}.batch-material-images{margin-bottom:12px}.batch-material-images header,.batch-material-assets header{display:flex;align-items:center;gap:8px;margin-bottom:8px}.batch-material-images header strong,.batch-material-assets header strong{flex:1}.batch-material-image-cards{display:flex;flex-wrap:wrap;gap:8px}.batch-material-image-cards article{display:flex;flex-direction:column;align-items:center;box-sizing:border-box;width:112px;padding:4px;border:1px solid var(--pdm-border);border-radius:4px;gap:3px;overflow:hidden}.batch-material-image-cards img{width:102px;height:82px;object-fit:contain;background:var(--pdm-surface-muted)}.batch-material-image-cards article>span{width:100%;font-size:11px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.batch-material-cover{display:flex;align-items:center;justify-content:center;height:24px;color:var(--pdm-theme-accent);font-size:12px}.batch-material-image-cards :deep(.el-button){height:24px;min-height:0}.batch-material-file-input{position:absolute;width:1px;height:1px;opacity:0}.batch-material-assets{display:flex;flex-direction:column;gap:12px;margin-top:12px}.batch-material-assets header>span{color:var(--pdm-muted);font-size:12px}.batch-material-assets table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:12px}.batch-material-assets th,.batch-material-assets td{height:30px;padding:0 8px;border-bottom:1px solid var(--pdm-border-soft);text-align:left}.batch-material-assets th{background:var(--pdm-table-header)}.batch-material-assets th:last-child,.batch-material-assets td:last-child{width:128px;text-align:center}.material-editor-grid__wide{grid-column:span 2}.batch-material-error{margin-bottom:10px;text-align:left;overflow-wrap:anywhere}@media(max-width:760px){.material-editor-grid__wide{grid-column:auto}}
 .cover-preview-button{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;margin:0;padding:0;border:0;background:transparent;vertical-align:middle;cursor:pointer}
 .cover-preview-button .cover-thumb{width:26px;height:26px;border-radius:3px}
-.material-list-table :deep(.el-table__body .el-table__cell){height:30px;padding-top:0;padding-bottom:0;box-sizing:border-box}
-.material-list-table :deep(.el-table__body .cell){height:29px;line-height:29px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .material-list-table :deep(.el-table__body .el-button){height:24px;min-height:0;padding-top:0;padding-bottom:0;vertical-align:middle}
 .material-sync-consistent{color:var(--el-color-success,var(--pdm-green))}
 .standard-library{font-size:var(--pdm-font-size-body);display:flex;flex:1 1 auto;height:100%;min-height:0;flex-direction:column;overflow:hidden}.standard-library__header{display:flex;padding:16px 20px;border-bottom:1px solid var(--pdm-border-soft);align-items:center;justify-content:space-between}.standard-library__header h1{margin:0;font-size:18px}.standard-library__header p{margin:4px 0 0;color:var(--pdm-muted);font-size:12px}.standard-library__body{display:grid;min-height:0;flex:1}.standard-library .standard-library__tree{box-sizing:border-box;width:100%;max-width:none;display:flex;min-height:0;padding:10px 6px;flex-direction:column;overflow:auto;font-size:var(--pdm-font-size-body)}.standard-library .standard-library__tree :deep(.el-tree-node__content){border-radius:0}.standard-library .standard-library__tree :deep(.el-tree--highlight-current .el-tree-node.is-current > .el-tree-node__content){color:inherit}.standard-library__category-title{padding:5px 10px 12px;border-bottom:1px solid var(--pdm-border-soft)}.standard-library__all{border:0;border-radius:5px;background:transparent;text-align:left;padding:10px;margin:6px 0;color:var(--pdm-text);font:inherit;cursor:pointer}.standard-library__all.is-active{background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent)}.standard-library__category-label{width:100%;display:flex;gap:6px;align-items:center;overflow:hidden}.standard-library__category-label svg{flex-shrink:0;color:var(--pdm-theme-accent)}.standard-library__category-label.is-inactive,.standard-library__category-label small{color:var(--pdm-muted)}.standard-library__category-actions{margin-top:auto;padding:14px 8px 5px}.standard-library .standard-library__tree .standard-library__category-actions :deep(.el-button){font-size:12px}.all-category{margin-bottom:6px;padding:8px;border:0;border-radius:5px;background:transparent;text-align:left;cursor:pointer}.all-category.active{background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent)}.standard-library__content{display:flex;min-width:0;max-width:100%;min-height:0;padding:12px;flex-direction:column;gap:10px}.standard-library__toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px}.scope-label{margin-left:12px;color:var(--pdm-muted)}.filters{display:flex;align-items:center;gap:8px}.filters .el-input{width:250px}.filters .el-select{width:130px}.category-tags{display:flex;flex-wrap:wrap;gap:3px}.cover-thumb{width:44px;height:44px;border-radius:5px}.standard-library__content :deep(.el-table){flex:1}.standard-library__content :deep(.el-pagination){justify-content:flex-end}.category-manager{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(270px,.85fr);gap:14px;font-size:12px}.category-manager :deep(.el-button),.category-manager :deep(.el-tag),.category-manager :deep(.el-form-item__label),.category-manager :deep(.el-input__inner),.category-manager :deep(.el-select__selected-item),.category-manager :deep(.el-switch__label){font-size:12px}.category-manager__list,.category-manager__editor{min-width:0;padding:12px;border:1px solid var(--pdm-border-soft);border-radius:8px}.category-manager__header{display:flex;margin-bottom:10px;align-items:center;justify-content:space-between;gap:12px}.category-manager__header div{display:flex;flex-direction:column;gap:3px}.category-manager__header span,.category-manager__placeholder p{color:var(--pdm-muted);font-size:12px}.category-manager__rows{max-height:500px;border-top:1px solid var(--pdm-surface-muted);overflow:auto}.category-manager__row{display:flex;min-height:42px;padding:6px 4px;border-bottom:1px solid var(--pdm-surface-muted);align-items:center;justify-content:space-between;gap:10px}.category-manager__name{display:flex;min-width:0;align-items:center;gap:6px}.category-manager__name strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.category-manager__row.is-child .category-manager__name strong{font-weight:400}.category-branch{color:var(--pdm-muted)}.category-manager__actions{display:flex;flex-shrink:0;align-items:center;gap:1px}.category-manager__actions :deep(.el-button+.el-button){margin-left:3px}.category-manager__empty{padding:40px 12px;color:var(--pdm-muted);text-align:center}.category-manager__editor{background:var(--pdm-table-header)}.category-manager__editor h3{margin:0 0 14px;font-size:14px}.category-manager__editor :deep(.el-select){width:100%}.category-manager__editor-actions{display:flex;justify-content:flex-end;gap:8px}.category-manager__placeholder{padding:34px 10px;text-align:center}.category-manager__placeholder p{line-height:1.4}:global(.standard-library-add-dialog .el-dialog__body){display:flex;min-height:0}.add-material-dialog-body{display:flex;min-height:0;flex:1}.add-material-dialog-body,.add-material-dialog-body :deep(.el-table),.add-material-dialog-body :deep(.el-button),.add-material-dialog-body :deep(.el-form-item__label),.add-material-dialog-body :deep(.el-tree-node__label){font-size:12px}.add-material-layout{display:grid;min-height:0;flex:1;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 300px;gap:12px}.add-material-pane{display:flex;min-width:0;min-height:0;padding:12px;border:1px solid var(--pdm-border-soft);border-radius:8px;background:var(--pdm-surface);flex-direction:column}.add-material-pane--selected,.add-material-pane--categories{background:var(--pdm-table-header)}.add-material-pane__header{box-sizing:border-box;display:flex;height:82px;min-height:82px;margin-bottom:10px;align-items:flex-start;justify-content:space-between;gap:12px}.add-material-pane__header div{display:flex;align-items:center;gap:8px}.add-material-pane__header strong{font-size:12px}.add-material-pane__header span{color:var(--pdm-muted);font-size:12px}.add-material-pane__header p{margin:4px 0 6px;color:var(--pdm-muted);font-size:12px}.add-material-pane__header:not(.selected-material-header){display:block}.searchable-material-header :deep(.el-input__wrapper){min-height:28px}.add-material-pane :deep(.el-table){min-height:0;flex:1}.add-material-target{margin-bottom:0}.required-mark{color:var(--pdm-danger)}.add-material-category-tree{box-sizing:border-box;width:100%;min-height:0;flex:1;overflow:auto;padding:6px 8px;border:1px solid var(--pdm-border);border-radius:4px}.add-material-category-tree :deep(.el-tree-node__content){height:26px}.field-help{margin:5px 0 0;color:var(--pdm-muted);font-size:12px;line-height:1.4}@media(max-width:1000px){.standard-library__toolbar{align-items:flex-start;flex-direction:column}.filters{width:100%;flex-wrap:wrap}.category-manager,.add-material-layout{grid-template-columns:1fr}.add-material-pane{min-height:520px}}

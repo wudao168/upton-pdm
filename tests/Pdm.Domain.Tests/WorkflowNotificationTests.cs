@@ -45,7 +45,7 @@ public sealed class WorkflowNotificationTests
             TenantContext.Clear(); var f = new Fixture();
             f.Company = (await f.Repository.GetOrganizationDirectoryAsync(default)).Organizations.First(item => item.IsActive).Id;
             foreach (var name in new[] { "submitter", "assistant-a", "assistant-b", "supply", "engineer-a", "engineer-b" })
-                await f.Repository.CreateUserAsync(new(Guid.NewGuid(), name, "示例" + name, "unused", UserRole.Administrator, true, CompanyId: f.Company, RoleCodes: name.StartsWith("assistant-") ? ["Administrator", "TechnicalAssistant"] : name == "supply" ? ["Administrator", "SupplyChain"] : ["Administrator"]), default);
+                await f.Repository.CreateUserAsync(new(Guid.NewGuid(), name, "示例" + name, "unused", UserRole.Administrator, true, RoleCode: "developer", CompanyId: f.Company, RoleCodes: name.StartsWith("assistant-") ? ["developer", "TechnicalAssistant"] : name == "supply" ? ["developer", "SupplyChain"] : ["developer"]), default);
             var customer = (await f.Repository.ListCustomersAsync(false, default)).First();
             var equipment = (await f.Repository.ListEquipmentTypesAsync(false, default)).First();
             f.Project = await f.Repository.CreateNumberedProjectAsync(new(f.Company, "P", equipment.Code, customer.Id, "通知隔离项目", null, DateOnly.FromDateTime(DateTime.UtcNow), 1, "submitter", Path.Combine(Path.GetTempPath(), "workflow-notice-vault"), Path.Combine(Path.GetTempPath(), "workflow-notice-release")), default);

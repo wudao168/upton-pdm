@@ -71,4 +71,24 @@ describe('LoginView', () => {
     expect(pupil.attributes('style')).not.toBe(initialPupilTransform)
     wrapper.unmount()
   })
+  it('keeps login submission and password visibility independent from the WebGPU frame', async () => {
+    const wrapper = mount(LoginView, {
+      props: { pending: false, error: '', online: true, compact: true },
+      global: { stubs: { ElButton: true, ElDialog: true, ElForm: true, ElFormItem: true, ElInput: true } },
+    })
+    expect(wrapper.get('iframe').attributes('src')).toContain('melon-jelly.html')
+    expect(wrapper.get('iframe').attributes('sandbox')).toBe('allow-scripts')
+    expect(wrapper.get('iframe').attributes('title')).toContain('西瓜软糖')
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('input[name="username"]').setValue(' test-user ')
+    await wrapper.get('input[name="password"]').setValue('test-only-password')
+    await wrapper.get('button[aria-label="显示密码"]').trigger('click')
+    expect(wrapper.get('input[name="password"]').attributes('type')).toBe('text')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('submit')?.[0]).toEqual(['test-user', 'test-only-password', false])
+    await wrapper.setProps({ pending: true })
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
 })

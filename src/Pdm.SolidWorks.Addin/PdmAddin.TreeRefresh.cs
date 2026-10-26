@@ -8,7 +8,12 @@ public sealed partial class PdmAddin
     {
         CancelMetadataRefresh();
         if (currentProjectId.HasValue)
-            lock (metadataCacheSync) projectDocumentsCache.Remove(currentProjectId.Value);
+            lock (metadataCacheSync)
+            {
+                projectDocumentsCache.Remove(currentProjectId.Value);
+                navigationRelations.Remove(currentProjectId.Value);
+                navigationVersions.Clear();
+            }
         // Permission changes update the existing nodes. Structural events still
         // invalidate the cached tree and retain their pending forced scan.
         ScheduleTreeRefresh(forceScan: false);

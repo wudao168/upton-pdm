@@ -40,6 +40,16 @@ internal static partial class Program
             TreeCall(workspace, "SetProjects", projects); TreeCall(selector, "SelectProject", handler.Project);
             TreeCall(workspace, "SetAuthenticatedUser", "tester");
             await (Task)TreeCall(plugin, "LoadProjectTreeAsync", handler.Project);
+            if (workspace.GetType().GetField("pendingStructures", Flags) != null)
+            {
+                while (((ISet<Guid>)Field(workspace, "pendingStructures")).Count > 0)
+                {
+                    var id = ((ISet<Guid>)Field(workspace, "pendingStructures")).First();
+                    var model = ((IEnumerable)TreeCall(plugin, "EnumerateCadNodes", Field(workspace, "root"))).Cast<object>()
+                        .First(node => Equals(Get(node, "DocumentId"), id));
+                    await (Task)((Delegate)Field(workspace, "structureLoader")).DynamicInvoke(model);
+                }
+            }
             var tree = (TreeView)Field(workspace, "tree");
             TreeCheck(tree.Nodes.Count == 1, mode + "：工作区没有加载图档");
             tree.ExpandAll();
@@ -98,7 +108,11 @@ internal static partial class Program
     {
         foreach (TreeNode node in nodes)
         {
-            TreeCall(workspace, "Materialize", node);
+            if (node.Tag == null || node.Tag.GetType() != Type("CadTreeNode")) continue;
+            var pendingField = workspace.GetType().GetField("pendingStructures", Flags);
+            var id = (Guid?)Get(node.Tag, "DocumentId");
+            if (pendingField == null || !id.HasValue || !((ISet<Guid>)pendingField.GetValue(workspace)).Contains(id.Value))
+                TreeCall(workspace, "Materialize", node);
             yield return node;
             foreach (var child in WorkspaceRows(node.Nodes, workspace)) yield return child;
         }

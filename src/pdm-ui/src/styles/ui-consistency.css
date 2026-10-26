@@ -3,7 +3,7 @@
 .el-dialog .el-table,
 .el-drawer .el-table {
   --el-table-header-bg-color: var(--pdm-table-header);
-  --el-table-header-text-color: var(--pdm-muted);
+  --el-table-header-text-color: rgb(30, 41, 59);
   --el-table-text-color: var(--pdm-text);
   --el-table-border-color: var(--pdm-border-soft);
   --el-table-tr-bg-color: var(--pdm-surface);
@@ -19,9 +19,42 @@
   font-weight: 500;
 }
 
+:root body :is(.material-list-table, .stocked-table) {
+  --pdm-detail-row-height: 40px;
+}
+:root body :is(.material-list-table, .stocked-table) .el-table__body td.el-table__cell {
+  height: var(--pdm-detail-row-height);
+  padding-block: 0;
+  box-sizing: border-box;
+  vertical-align: middle;
+}
+:root body :is(.material-list-table, .stocked-table) .el-table__body .cell {
+  height: calc(var(--pdm-detail-row-height) - 1px);
+  line-height: calc(var(--pdm-detail-row-height) - 1px);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+:root body :is(.material-list-table, .stocked-table) .el-table__body :is(.cover-preview-button, .cover-button) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+}
+
 .pdm-app-shell :is(.pdm-edit-table, .pdm-project-table, .pdm-bom-table, .pdm-file-detail-table) th {
   background: var(--pdm-table-header);
   font-weight: 500;
+}
+
+:root body :is(th, thead td, [role="columnheader"], .pdm-tree-columns, .pdm-project-browser-table-head,
+    .drawing-review-overview > header, .pdm-gantt-head, .pdm-template-head, .material-relation-option-head,
+    .production-scan-settings__station-columns, .notification-columns),
+:root body :is(th, thead td, [role="columnheader"], .pdm-tree-columns, .pdm-project-browser-table-head,
+    .drawing-review-overview > header, .pdm-gantt-head, .pdm-template-head, .material-relation-option-head,
+    .production-scan-settings__station-columns, .notification-columns) :is(div, span, small, strong, em, a, button, input, select, label, p, .cell) {
+  color: rgb(30, 41, 59) !important;
+  font-family: var(--pdm-font-ui) !important;
 }
 
 .pdm-app-shell .el-tree-node__label {

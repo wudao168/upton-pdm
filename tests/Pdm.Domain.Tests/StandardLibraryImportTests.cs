@@ -72,7 +72,7 @@ public sealed class StandardLibraryImportTests
         public InMemoryPdmRepository Repository { get; } = new(TimeProvider.System);
         public Client Client { get; } = new();
         public StandardLibraryService Library => new(Store, Materials, Repository, TimeProvider.System);
-        public StandardLibraryImportService Import => new(Store, Library, Materials, Repository, new Protector(), Client, TimeProvider.System);
+        public StandardLibraryImportService Import => new(Store, Materials, Repository, new Protector(), Client, TimeProvider.System);
         public static async Task<Fixture> Create()
         {
             var f = new Fixture(); var configuration = await f.Materials.GetIntegrationConfigurationAsync(default);

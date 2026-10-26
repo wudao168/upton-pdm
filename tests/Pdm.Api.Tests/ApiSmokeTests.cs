@@ -1464,7 +1464,7 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     [Fact]
     public async Task ProjectWorkspaceFeeds_ReturnOnlyAccessibleProjectDataAndAssignedTasks()
     {
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("赵经理", "Administrator"));
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("赵经理", "Engineer"));
 
         var taskResponse = await client.GetAsync("/api/approval-tasks/mine");
         Assert.Equal(HttpStatusCode.OK, taskResponse.StatusCode);

@@ -1169,8 +1169,8 @@ test('client diagnostic logs filter and download with Chinese status', async ({ 
 
 test('DingTalk self-service application settings and shared project group binding', async ({ page }) => {
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
-  const group = { id: 'shared-group', name: '设备项目共享群', projectCount: 2, registered: true, entryUrl: 'http://192.168.2.8:5173/?dingtalkOpl=1&companyId=org-ks&groupId=shared-group' }
-  let saved = false, bound = false, entrySent = false
+  const group = { id: 'shared-group', name: '设备项目共享群', projectCount: 1, registered: true, entryUrl: 'http://192.168.2.8:5173/?dingtalkOpl=1&companyId=org-ks&groupId=shared-group' }
+  let saved = false, bound = false, entrySent = false, commandGenerated = false
   const settings = { notificationTemplate: '问题描述：{问题描述}\n负责人：{负责人}', defaultNotificationTemplate: '问题描述：{问题描述}\n负责人：{负责人}', notificationFields: ['问题描述','负责人','实施状态'], enabled: false, corpId: 'ding-test-corp', appKey: 'test-app-key', hasAppSecret: true, publicUrl: 'http://192.168.2.8:5173', companyId: 'org-ks', rowVersion: 2, users: [{ dingTalkUserId: 'ding-user', username: 'engineer' }], groups: [group], entryUrl: 'http://192.168.2.8:5173/?dingtalkOpl=1&companyId=org-ks' }
   await page.route('**/api/settings/dingtalk', async route => {
     if (route.request().method() === 'PUT') { expect(route.request().postDataJSON().appSecret).toBe(''); expect(route.request().postDataJSON().robotCode).toBe('ding-robot-test'); expect(route.request().postDataJSON().notificationTemplate).toBe('内容：{问题描述}'); saved = true }
@@ -1180,9 +1180,11 @@ test('DingTalk self-service application settings and shared project group bindin
     entrySent = true
     await route.fulfill({ json: { sent: true, message: '入口已发送' } })
   })
+  const command = '绑定项目 PRJ-REAL-001 11223344AABBCCDD'
+  await page.route('**/api/projects/*/dingtalk/binding-command', route => { commandGenerated = true; return route.fulfill({ json: { command, expiresAt: '2026-10-26T13:00:00+08:00' } }) })
   await page.route('**/api/projects/*/dingtalk', async route => {
-    if (route.request().method() === 'PUT') { expect(route.request().postDataJSON().groupId).toBe(group.id); expect(route.request().postDataJSON().webhook).toBeUndefined(); bound = true }
-    await route.fulfill({ json: { rootProjectId: projectId, canManage: true, rowVersion: 2, groupId: group.id, groups: [group], enabled: false, entryUrl: group.entryUrl } })
+    expect(route.request().method()).toBe('GET')
+    await route.fulfill({ json: { rootProjectId: projectId, canManage: true, rowVersion: 2, groupId: bound ? group.id : null, groups: bound ? [group] : [], enabled: true, entryUrl: bound ? group.entryUrl : '' } })
   })
   await page.goto('/')
   const login = page.getByLabel('登录PLM')
@@ -1190,12 +1192,18 @@ test('DingTalk self-service application settings and shared project group bindin
   await page.getByRole('button', { name: '项目设置', exact: true }).click()
   const drawer = page.getByRole('dialog', { name: /项目设置/ })
   await drawer.getByRole('tab', { name: '钉钉群绑定', exact: true }).click()
-  await expect(drawer.getByLabel('群快捷入口地址')).toHaveValue(group.entryUrl)
-  const saveBinding = drawer.getByRole('button', { name: '保存群绑定' })
-  await expect(saveBinding).toBeVisible()
+  await expect(drawer.getByRole('combobox')).toHaveCount(0)
+  await drawer.getByRole('button', { name: '生成并复制项目绑定码', exact: true }).click()
+  await expect.poll(() => commandGenerated).toBe(true)
+  await expect(drawer.getByLabel('项目绑定码')).toHaveValue(command)
+  await expect(drawer.getByRole('button', { name: '保存群绑定' })).toHaveCount(0)
+  bound = true // 模拟目标群收到专用指令后，服务端已完成绑定。
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect(drawer.getByLabel('快捷入口地址')).toHaveValue(group.entryUrl)
+  const unlinkBinding = drawer.getByRole('button', { name: '解除群绑定' })
+  await expect(unlinkBinding).toBeVisible()
   await expect(drawer.getByRole('button', { name: '重新检查范围' })).toHaveCount(0)
-  expect((await saveBinding.boundingBox())!.y).toBeLessThan((await drawer.getByRole('heading', { name: '钉钉群绑定' }).boundingBox())!.y)
-  await saveBinding.click(); await expect.poll(() => bound).toBe(true)
+  expect((await unlinkBinding.boundingBox())!.y).toBeLessThan((await drawer.getByRole('heading', { name: '使用说明' }).boundingBox())!.y)
   await drawer.getByRole('button', { name: '重发提交入口' }).click()
   await expect.poll(() => entrySent).toBe(true)
   await expect(drawer.getByText('新增群机器人', { exact: true })).toHaveCount(0)
@@ -1811,6 +1819,73 @@ test('assessment labor rates are configured separately from design lead estimate
 })
 
 const projectId = '11111111-1111-1111-1111-111111111111'
+
+test('project switcher supports inline search while its magnifier keeps the project drawer', async ({ page }) => {
+  test.setTimeout(60_000)
+  await mockPlanCompanionPanels(page)
+  const errors: string[] = []
+  page.on('pageerror',error=>errors.push(error.message))
+  const base = {owner:'admin',vaultLocation:'D:/PDM',releaseLocation:'D:/Release',isActive:true,quantity:1,serialNumbers:[],designers:[],collaborativeProjectManagers:[],primaryProjectManager:'admin',canReadContent:true,effectiveProjectPermissions:['project.edit','bom.mechanical.edit']}
+  const first={...base,id:projectId,code:'P700014',name:'装配源项目'}
+  const second={...base,id:'22222222-2222-2222-2222-222222222222',code:'P700015',name:'检测目标设备',customerName:'索引客户',deviceModel:'QA-INDEX',serialNumbers:['80000015']}
+  await page.route('**/api/projects**',async route=>{
+    const url=new URL(route.request().url())
+    if(url.pathname==='/api/projects')return route.fulfill({json:[first,second]})
+    if(url.pathname===`/api/projects/${first.id}`)return route.fulfill({json:first})
+    if(url.pathname===`/api/projects/${second.id}`)return route.fulfill({json:second})
+    if(url.pathname.startsWith(`/api/projects/${second.id}/`))return route.fallback({url:url.toString().replace(second.id,first.id)})
+    return route.fallback()
+  })
+  await page.setViewportSize({width:1959,height:1080})
+  await page.goto('/')
+  await expect(page).toHaveTitle('UPTON-PLM')
+  const login=page.getByLabel('登录PLM')
+  await login.getByRole('textbox',{name:'账号'}).fill('admin')
+  await login.getByRole('textbox',{name:'密码'}).fill('correct-password')
+  await login.getByRole('button',{name:'登录',exact:true}).click()
+  await enterProject(page)
+  const input=page.getByRole('textbox',{name:'快速搜索项目'})
+  await expect(input).toBeVisible()
+  const original=(await input.getAttribute('placeholder'))!.startsWith(first.code)?first:second
+  const destination=original.id===first.id?second:first
+  await input.click()
+  await expect(page.getByRole('dialog',{name:'浏览项目',exact:true})).toHaveCount(0)
+  await input.fill(destination.name)
+  const suggestion=page.locator('.pdm-project-quick-search').getByRole('option').filter({hasText:destination.code})
+  await expect(suggestion).toBeVisible()
+  await expect(input).toHaveAttribute('placeholder',`${original.code} · ${original.name}`)
+  await page.screenshot({path:join(tmpdir(),'pdm-project-quick-search.png'),animations:'disabled'})
+  await suggestion.click()
+  await expect(input).toHaveAttribute('placeholder',`${destination.code} · ${destination.name}`)
+  await expect(input).toBeEnabled()
+  await expect(page.getByRole('dialog',{name:'浏览项目',exact:true})).toHaveCount(0)
+  await input.fill(original.code.toLowerCase())
+  await expect(page.locator('.pdm-project-quick-search').getByRole('option').filter({hasText:original.code})).toBeVisible()
+  await input.press('Enter')
+  await expect(input).toHaveAttribute('placeholder',`${original.code} · ${original.name}`)
+  await expect(input).toBeEnabled()
+  await input.fill('没有匹配的项目')
+  await input.press('Escape')
+  await expect(input).toHaveValue('')
+  await expect(input).toHaveAttribute('placeholder',`${original.code} · ${original.name}`)
+  await page.getByRole('button',{name:'浏览项目',exact:true}).click()
+  const drawer=page.getByRole('dialog',{name:'浏览项目',exact:true})
+  await expect(drawer).toBeVisible()
+  expect((await drawer.boundingBox())!.x).toBeGreaterThan(900)
+  await drawer.getByRole('searchbox',{name:'搜索项目',exact:true}).fill(destination.code)
+  await drawer.getByRole('option',{name:`选择浏览项目 ${destination.code}`,exact:true}).click()
+  await expect(drawer).toHaveCount(0)
+  await expect(input).toHaveAttribute('placeholder',`${destination.code} · ${destination.name}`)
+  await expect(input).toBeEnabled()
+  for(const width of [1959,1000]){
+    await page.setViewportSize({width,height:1080})
+    const field=await input.boundingBox(),icon=await page.getByRole('button',{name:'浏览项目',exact:true}).boundingBox()
+    expect(field!.width).toBeGreaterThan(40)
+    expect(field!.x+field!.width).toBeLessThanOrEqual(icon!.x)
+  }
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
+})
 
 test('document tree uses 50px two-line rows and highlights only stale drawing versions', async ({ page }) => {
   await mockPlanCompanionPanels(page)

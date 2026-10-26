@@ -354,6 +354,8 @@ public sealed partial class PdmAddin
         var verifiedScanner = new SolidWorksReferenceTreeScanner(application);
         stage("重新读取组件结构及原生文件范围");
         var verified = verifiedScanner.ScanDocument(document, false);
+        stage("定位旧目录中的实际引用文件");
+        var locationAliases = ResolveArchiveFileLocations(verified);
         stage("核对本地图档身份");
         RestorePersistedDocumentIdentities(verified);
         var previousNodes = EnumerateCadNodes(previous).Where(node => !string.IsNullOrWhiteSpace(node.FullPath))
@@ -426,10 +428,12 @@ public sealed partial class PdmAddin
             }
         // Every actual drawing view remains a dependency, including models outside
         // the selected assembly. Otherwise the drawing cannot reopen independently.
+        selected = RestoreRecoveredArchiveReferences(verified, selected);
         var aliases = ArchiveFileAliases.Normalize(verified);
         var all = BuildBatchOperationItems(verified);
         bool MatchesSelection(BatchOperationItem candidate, BatchOperationItem original) =>
             PathsEqual(candidate.Node.FullPath, original.Node.FullPath)
+            || locationAliases.TryGetValue(original.Node.FullPath, out var relocated) && PathsEqual(candidate.Node.FullPath, relocated)
             || aliases.TryGetValue(original.Node.FullPath, out var canonical) && PathsEqual(candidate.Node.FullPath, canonical)
             || original.Node.DocumentId.HasValue && candidate.Node.DocumentId == original.Node.DocumentId;
         var refreshed = all.Where(item => selected.Any(original => MatchesSelection(item, original))).ToArray();
@@ -453,6 +457,9 @@ public sealed partial class PdmAddin
             .Select(node => node.FullPath), StringComparer.OrdinalIgnoreCase);
         complete = complete.Concat(all.Where(item => requiredPaths.Contains(item.Node.FullPath)))
             .GroupBy(item => item.Node.FullPath, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
+        stage("提前核对原生引用的实际位置");
+        complete = await RecoverPdmReferencesAsync(complete, projectId, token);
+        ValidatePdmNativeDependencyPaths(complete, token);
         foreach (var item in complete) PdmApiClient.ValidateArchiveReferenceCompleteness(item.Node);
 
         var drawings = complete.Where(item => item.Node.Kind == CadDocumentKind.Drawing).Select(item => item.Node.FileName).ToArray();

@@ -90,6 +90,15 @@ public sealed class StandardStructureApiTests
             Assert.Equal(HttpStatusCode.OK, preview.StatusCode);
             Assert.Equal("application/pdf", preview.Content.Headers.ContentType!.MediaType);
             Assert.StartsWith("%PDF", await preview.Content.ReadAsStringAsync());
+            var originalFile = await client.GetAsync($"{path}/revisions/{revision.Id}/files/native");
+            Assert.Equal(HttpStatusCode.OK, originalFile.StatusCode);
+            Assert.Equal("application/octet-stream", originalFile.Content.Headers.ContentType!.MediaType);
+            Assert.Equal("native archive test bytes", await originalFile.Content.ReadAsStringAsync());
+            Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"{path}/revisions/{revision.Id}/files/missing")).StatusCode);
+            await repository.SetRolePermissionsAsync("Engineer", [FunctionPermissionCatalog.SchemaMarker, PermissionCodes.ProjectContentView], default);
+            Authenticate(client, "engineer", "Engineer");
+            Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"{path}/revisions/{revision.Id}/files/native")).StatusCode);
+            Authenticate(client, "std", "ProcessReviewer");
             var shared = (await client.GetFromJsonAsync<StandardStructureView>(path, Json))!;
             Assert.Equal(StandardStructureRules.GroupId, shared.Catalog.CompanyId);
             var movedResponse = await client.PostAsJsonAsync(path + "/classifications", new MoveStandardStructures([structure.Id], categoryId, shared.Catalog.RowVersion));
@@ -136,6 +145,8 @@ public sealed class StandardStructureApiTests
                 Assert.Equal(action == "Enable", saved.IsActive);
                 Assert.Equal(snapshots, JsonSerializer.Serialize(saved.Revisions, Json));
                 Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"{path}/revisions/{revision.Id}/preview/preview")).StatusCode);
+                Assert.Equal(action == "Enable" ? HttpStatusCode.OK : HttpStatusCode.BadRequest,
+                    (await client.GetAsync($"{path}/revisions/{revision.Id}/files/native")).StatusCode);
                 current = current with { Catalog = changed };
             }
         }

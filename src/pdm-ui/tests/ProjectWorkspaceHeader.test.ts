@@ -92,11 +92,11 @@ describe('ProjectWorkspaceHeader', () => {
     const context = sidebar.get('[aria-label="当前项目"]')
     expect(context.find('select[aria-label="切换项目"]').exists()).toBe(false)
     expect(context.find('input[aria-label="当前项目显示"]').exists()).toBe(false)
-    expect(context.get('button[aria-label="浏览项目"]').text()).toBe('P700002 · XXX设备')
+    expect(context.get('input[aria-label="快速搜索项目"]').attributes('placeholder')).toBe('P700002 · XXX设备')
     expect(context.get('button[aria-label="浏览项目"]').attributes('aria-haspopup')).toBe('dialog')
     expect(context.find('.pdm-project-switcher__search-icon').exists()).toBe(true)
     expect(context.find('.pdm-project-context__breadcrumb').exists()).toBe(false)
-    expect(context.text()).toBe('P700002 · XXX设备')
+    expect(context.get('input[aria-label="快速搜索项目"]').element).toHaveProperty('value', '')
     expect(wrapper.find('.pdm-project-context').exists()).toBe(false)
     expect(sidebar.text()).not.toContain('项目基本信息')
     expect(sidebar.get('.pdm-project-sidebar__summary').find('small').text()).toBe('子项目')
@@ -233,6 +233,30 @@ describe('ProjectWorkspaceHeader', () => {
     expect(wrapper.emitted('switch')).toEqual([[otherRootProject.id]])
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
   })
+  it('快速搜索可匹配项目资料，输入不切换，选择候选后直接切换且不打开抽屉', async () => {
+    const target = { ...otherRootProject, deviceModel: 'CHECK-200', serialNumbers: ['80000003'], projectAlias: '机器视觉' }
+    const wrapper = mount(ProjectWorkspaceHeader, { props: { project: childProject, projects: [rootProject, childProject, target], activeTab: 'documents' } })
+    const confirm = vi.spyOn(ElMessageBox, 'confirm')
+    try {
+      const autocomplete = wrapper.getComponent({ name: 'ElAutocomplete' })
+      const suggestions = autocomplete.props('fetchSuggestions') as (query: string, callback: (items: Array<{ id: string }>) => void) => void
+      for (const query of ['p700003', '检测', '深圳测试', 'check-200', '80000003', '机器视觉']) {
+        const result = vi.fn()
+        suggestions(query, result)
+        expect(result.mock.calls[0]?.[0].map((item: { id: string }) => item.id)).toEqual([target.id])
+      }
+      await wrapper.get('input[aria-label="快速搜索项目"]').setValue('检测')
+      expect(wrapper.emitted('switch')).toBeUndefined()
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+      autocomplete.vm.$emit('select', { id: target.id, value: `${target.code} · ${target.name}` })
+      await flushPromises()
+      expect(wrapper.emitted('switch')).toEqual([[target.id]])
+      expect(confirm).not.toHaveBeenCalled()
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+      await wrapper.setProps({ project: target })
+      expect(wrapper.get('input[aria-label="快速搜索项目"]').attributes('placeholder')).toBe('P700003 · 检测设备')
+    } finally { wrapper.unmount() }
+  })
 
   it('浏览项目默认每页20行，并支持切换50、100行', async () => {
     const projects = Array.from({ length: 52 }, (_, index) => ({
@@ -291,7 +315,7 @@ describe('ProjectWorkspaceHeader', () => {
 
     expect(wrapper.emitted('switch')).toEqual([[otherRootProject.id]])
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
-    expect(wrapper.get('button[aria-label="浏览项目"]').text()).toBe('P700002 · XXX设备')
+    expect(wrapper.get('input[aria-label="快速搜索项目"]').attributes('placeholder')).toBe('P700002 · XXX设备')
   })
 
   it('图档页左侧只显示项目摘要和全部项目号', () => {

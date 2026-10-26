@@ -212,16 +212,18 @@ public sealed partial class MySqlPdmRepository
         {
             commit = commit with { ReferenceSnapshot = commit.ReferenceSnapshot with
                 { Root = commit.ReferenceSnapshot.Root with { Revision = RevisionLabel.Parse(locked.RevisionLabel), CheckedOutBy = null } } };
-            var previousIndexRow = await connection.QueryFirstOrDefaultAsync<ReferenceSnapshotRow>(new CommandDefinition(
+            var previousIndexes = await connection.QueryAsync<NativeReferenceIndexRow>(new CommandDefinition(
                 """
-                SELECT id,captured_at,root_json FROM reference_snapshot WHERE id=(
-                    SELECT id FROM reference_snapshot WHERE project_id=@ProjectId AND root_document_id=@DocumentId
+                SELECT id,captured_at FROM reference_snapshot WHERE project_id=@ProjectId AND root_document_id=@DocumentId
                     AND JSON_EXTRACT(root_json,'$.usesNativeFileInventory')=TRUE
                     AND JSON_UNQUOTE(JSON_EXTRACT(root_json,'$.configuration'))=@Configuration
                     AND JSON_UNQUOTE(JSON_EXTRACT(root_json,'$.revision.display'))=@Revision
-                    ORDER BY captured_at DESC,id DESC LIMIT 1)
                 """, new { commit.ReferenceSnapshot.ProjectId, DocumentId = documentId,
                     commit.ReferenceSnapshot.Root.Configuration, Revision = previousReferences?.Revision?.Display }, transaction, cancellationToken: cancellationToken));
+            var previousIndexId = previousIndexes.OrderByDescending(index => index.CapturedAt).ThenByDescending(index => index.Id).FirstOrDefault()?.Id;
+            var previousIndexRow = previousIndexId is null ? null : await connection.QuerySingleAsync<ReferenceSnapshotRow>(new CommandDefinition(
+                "SELECT id,captured_at,root_json FROM reference_snapshot WHERE id=@Id", new { Id = previousIndexId }, transaction,
+                cancellationToken: cancellationToken));
             var previousIndex = previousIndexRow == null ? null : JsonSerializer.Deserialize<DocumentReferenceNode>(previousIndexRow.RootJson, jsonOptions);
             if (commit.ReferenceSnapshot.Root.NativeIsolation == null && previousIndex?.NativeIsolation is NativeFileIsolation existing
                 && existing.SourceVersionId == latestFile!.Id && existing.SourceSha256 == latestFile.Sha256

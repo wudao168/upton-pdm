@@ -3,7 +3,7 @@ import ElementPlus from 'element-plus'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import DingTalkSettings from '../src/components/DingTalkSettings.vue'
 import ProjectDingTalkBinding from '../src/components/ProjectDingTalkBinding.vue'
-const api = vi.hoisted(() => ({ readDingTalkSettings: vi.fn(), saveDingTalkSettings: vi.fn(), publishDingTalkEntry: vi.fn(), readDingTalkBinding: vi.fn(), saveDingTalkBinding: vi.fn() }))
+const api = vi.hoisted(() => ({ readDingTalkSettings: vi.fn(), saveDingTalkSettings: vi.fn(), publishDingTalkEntry: vi.fn(), readDingTalkBinding: vi.fn(), saveDingTalkBinding: vi.fn(), createDingTalkBindingCommand: vi.fn() }))
 vi.mock('../src/api', () => api)
 let wrapper: ReturnType<typeof mount>
 const group = { id: 'group-1', name: '项目共享群', projectCount: 2, registered: true, entryUrl: 'http://192.168.2.8:5173/?dingtalkOpl=1&groupId=group-1' }
@@ -38,12 +38,13 @@ it('keeps saved application secrets blank and sends a versioned update', async (
   expect(api.saveDingTalkSettings).toHaveBeenCalledWith(expect.objectContaining({ appSecret: '', expectedRowVersion: 4 }), 'token')
   expect(wrapper.text()).toContain('配置已保存')
 })
-it('reuses the same group without exposing or resubmitting its credentials', async () => {
-  api.saveDingTalkBinding.mockResolvedValue({ ...binding, rowVersion: 5 })
+it('generates a project command without exposing or resubmitting its credentials', async () => {
+  api.createDingTalkBindingCommand.mockResolvedValue({ command: '绑定项目 P700014 AABBCC1122334455', expiresAt: '2026-10-26T12:00:00+08:00' })
   wrapper = mount(ProjectDingTalkBinding, { props: { projectId: 'project-2', token: 'token' }, global: { plugins: [ElementPlus] } }); await flushPromises()
-  await click('保存群绑定')
-  expect(api.saveDingTalkBinding).toHaveBeenCalledWith('project-2', { groupId: 'group-1', expectedRowVersion: 4 }, 'token')
-  expect(wrapper.text()).toContain('项目群绑定已保存')
+  await click('生成并复制')
+  expect(api.createDingTalkBindingCommand).toHaveBeenCalledWith('project-2', 'token')
+  expect(api.saveDingTalkBinding).not.toHaveBeenCalled()
+  expect(wrapper.get('input[aria-label="项目绑定码"]').element).toHaveProperty('value', '绑定项目 P700014 AABBCC1122334455')
 })
 it('hides mutation actions when the actor cannot manage the project', async () => {
   api.readDingTalkBinding.mockResolvedValue({ ...binding, canManage: false })

@@ -6,13 +6,13 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class UserTodoServiceTests
 {
     private static readonly Guid Company = Guid.Parse("70000000-0000-0000-0000-000000000001");
-    private static void Actor(string actor, Guid? company = null) => TenantContext.Set(new(Guid.NewGuid(), company ?? Company, Company, actor, "Administrator", false, new HashSet<string>()));
+    private static void Actor(string actor, Guid? company = null) => TenantContext.Set(new(Guid.NewGuid(), company ?? Company, Company, actor, actor == "administrator" ? "Administrator" : "Engineer", false, new HashSet<string>()));
     [Fact]
     public async Task SharedInbox_OnlyCreatorAndRecipientsCanRead_EvenForAdministrators_AndOtherCompaniesCannotRead()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         foreach (var user in new[] { "creator", "recipient", "administrator" })
-            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), user, user, "unused", UserRole.Administrator, true, CompanyId: Company), default);
+            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), user, user, "unused", user == "administrator" ? UserRole.Administrator : UserRole.Engineer, true, CompanyId: Company), default);
         var service = new UserTodoService(repository, TimeProvider.System);
         var date = new DateOnly(2026, 10, 16);
         try

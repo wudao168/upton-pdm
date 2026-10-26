@@ -23,7 +23,7 @@ internal sealed class BatchProgressDialog : Form
         if (session != null) { session.CancelRequested += ForwardCancellation; return; }
         Text = "整套提交存档";
         DialogWindowSizing.CenterOnOwnerScreen(this);
-        TopMost = true;
+        TopMost = false;
         Shown += (_, _) => { BringToFront(); Activate(); };
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;

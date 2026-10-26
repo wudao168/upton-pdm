@@ -58,6 +58,8 @@ public sealed class BomDrawingRevisionTests
     [Theory]
     [InlineData("全局/版本")]
     [InlineData("配置:Default/版次")]
+    [InlineData("版本")]
+    [InlineData("版次")]
     public void ConflictingTitleRevisionStopsPublicationWithoutChangingTheApprovedSource(string property)
     {
         var version = Version(Guid.NewGuid(), "A-W1") with { PropertySnapshot = new Dictionary<string, string?> { [property] = "A" } };
@@ -65,6 +67,33 @@ public sealed class BomDrawingRevisionTests
         Assert.Contains("重新存档并审核", error.Message);
         Assert.Equal("A", version.PropertySnapshot[property]);
         BomDrawingRevision.ValidateDrawingProperties(version, "A", "PART.SLDDRW");
+    }
+
+    [Theory]
+    [InlineData("版本", "Global")]
+    [InlineData("版本", "Configuration")]
+    [InlineData("版本", "Both")]
+    [InlineData("版次", "Global")]
+    [InlineData("版次", "Configuration")]
+    [InlineData("版次", "Both")]
+    public void PropertyCardScopeIsNotATitleRevision(string name, string scope)
+    {
+        var properties = new Dictionary<string, string?>
+        {
+            [CadPropertyCardSnapshot.SchemaKey] = "1",
+            [CadPropertyCardSnapshot.ScopePrefix + name] = scope,
+            ["全局/" + name] = ""
+        };
+        var version = Version(Guid.NewGuid(), "W1") with { PropertySnapshot = properties };
+
+        BomDrawingRevision.ValidateDrawingProperties(version, "A", "700001.00-17.SLDDRW");
+        properties["全局/" + name] = "A";
+        BomDrawingRevision.ValidateDrawingProperties(version, "A", "700001.00-17.SLDDRW");
+        properties["全局/" + name] = "B";
+        var error = Assert.Throws<PdmConflictException>(() =>
+            BomDrawingRevision.ValidateDrawingProperties(version, "A", "700001.00-17.SLDDRW"));
+        Assert.Contains("属性为B", error.Message);
+        Assert.Equal(scope, properties[CadPropertyCardSnapshot.ScopePrefix + name]);
     }
 
     private static BomItem Item(Guid documentId, string raw) => new(Guid.NewGuid(), Guid.NewGuid(), BomKind.NonStandard,

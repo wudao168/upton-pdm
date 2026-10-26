@@ -47,7 +47,7 @@ internal static partial class Program
   {
    var driver=Task.Run(async()=>{
     await TreeWait(()=>ArchiveUi(session,()=>((Panel)Field(ArchiveWindow(session),"selection")).Controls.OfType<Form>().Any()),"存档图档区域没有显示");
-    ArchiveUi(session,()=>{var window=ArchiveWindow(session);window.TopMost=false;window.ClientSize=new Size(1480,860);OpenPicker();return true;});
+    ArchiveUi(session,()=>{var window=ArchiveWindow(session);window.TopMost=false;var frame=window.Height-window.ClientSize.Height;Check(window.ClientSize.Height==Math.Min(960,Screen.FromHandle(window.Handle).WorkingArea.Height-frame),"默认存档窗口加高100像素，并受所属显示器工作区约束");OpenPicker();return true;});
     await WaitPicker();
     ArchiveUi(session,()=>{
      var window=ArchiveWindow(session);var picker=Picker();var panel=(Panel)Field(window,"confirmation");var history=(TextBox)Field(window,"history");
@@ -57,12 +57,18 @@ internal static partial class Program
      {
       window.PerformLayout();picker.PerformLayout();
       Check(search.Visible&&Outer(panel).Contains(Outer(search))&&search.Height>=24,label+"：项目号搜索框完整可见且不会被列表滚动藏起");
-      Check(Outer(main).Left==Outer(history).Left&&Outer(children).Right==Outer(history).Right,label+"：项目选择列表左右边缘与下方过程记录对齐");
+      var records=(Panel)Field(window,"processRecords");
+      Check(Outer(main).Left==Outer(records).Left&&Outer(children).Right==Outer(records).Right,label+"：项目选择列表左右边缘与原过程记录区对齐");
       Check(Outer(cancel).Top-Math.Max(Outer(main).Bottom,Outer(children).Bottom)>=10&&Outer(panel).Contains(Outer(cancel))&&Outer(panel).Contains(Outer(confirm)),label+"：取消与确认按钮完整显示，并与列表保持间隙");
+      Check(!history.Visible&&Outer(picker)==Outer(records),label+"：项目选择完整覆盖过程记录区，不残留日志条带");
+      var columns=main.Parent.Parent;
+      Check(Outer(main.Parent).Top==Outer(columns).Top&&Outer(main.Parent).Bottom==Outer(columns).Bottom
+       &&Outer(children.Parent).Top==Outer(columns).Top&&Outer(children.Parent).Bottom==Outer(columns).Bottom,label+"：主项目和图档归属列表占满搜索栏与确认栏之间的全部高度");
      }
      Save(window,"project-picker-before-search");LayoutCheck("默认窗口");
-     Check(((Panel)Field(window,"selection")).Width>=800&&((Control)Field(window,"information")).Width>=600,"加宽右侧处理区，同时保留原图档区域宽度");
-     Check(children.Columns.Cast<ColumnHeader>().Sum(column=>column.Width)<=children.ClientSize.Width,"加宽后的项目选择可同时显示名称与三项状态列");
+     var information=(Control)Field(window,"information");
+     Check(((Panel)Field(window,"selection")).Width==820&&information.ClientSize.Width-information.Padding.Horizontal==804,"右侧从483加宽至804像素，左侧宽度保持820像素");
+     Check(children.Columns.Cast<ColumnHeader>().Sum(column=>column.Width)<=children.ClientSize.Width,"加宽后的项目选择仍可同时显示名称与三项状态列");
      var originalHandle=window.Handle;
      search.Text=(string)Get(target,"Code");
      Check(main.Items.Count==1&&children.Items.Count==1&&ReferenceEquals(children.Items[0].Tag,target)&&!confirm.Enabled,"按子项目号直接定位所属主项目和子项目，不自动确认");
@@ -73,18 +79,19 @@ internal static partial class Program
      search.Text=string.Empty;Check(main.Items.Count==48,"清除搜索恢复全部项目");
      main.SelectedIndex=35;LayoutCheck("滚动主项目列表后");
      window.Size=window.MinimumSize;LayoutCheck("最小窗口");Save(window,"project-picker-minimum");
-     window.ClientSize=new Size(1480,900);picker.Font=new Font("Microsoft YaHei UI",12F);LayoutCheck("放大字体");Save(window,"project-picker-large-font");
+     window.ClientSize=new Size(1640,900);picker.Font=new Font("Microsoft YaHei UI",12F);LayoutCheck("放大字体");Save(window,"project-picker-large-font");
      Check(window.Handle==originalHandle&&!((Panel)Field(window,"selection")).Enabled,"项目浏览保持同一存档窗口并锁定左侧范围");
      cancel.PerformClick();return true;
     });
     await TreeWait(()=>ArchiveUi(session,()=>!((Panel)Field(ArchiveWindow(session),"confirmationHost")).Visible),"取消项目选择后未恢复原存档页");
-    ArchiveUi(session,()=>{Check((Guid?)Get(Batch(),"SelectedProjectId")== (Guid)Get(initial,"Id")&&((Panel)Field(ArchiveWindow(session),"selection")).Enabled,"取消项目浏览保留原归属和图档范围");OpenPicker();return true;});
+    ArchiveUi(session,()=>{Check((Guid?)Get(Batch(),"SelectedProjectId")== (Guid)Get(initial,"Id")&&((Panel)Field(ArchiveWindow(session),"selection")).Enabled,"取消项目浏览保留原归属和图档范围");Check(((TextBox)Field(ArchiveWindow(session),"history")).Visible&&ArchiveHistory(session).Contains("等待确认：浏览选择项目"),"取消后恢复原过程记录，保留先前日志");OpenPicker();return true;});
     await WaitPicker();
     ArchiveUi(session,()=>{var picker=Picker();((TextBox)Field(picker,"search")).Text=(string)Get(target,"Code");var children=(ListView)Field(picker,"childProjects");children.Items[0].Selected=true;((Button)Field(picker,"confirm")).PerformClick();return true;});
     await TreeWait(()=>ArchiveUi(session,()=>!((Panel)Field(ArchiveWindow(session),"confirmationHost")).Visible),"确认项目选择后没有返回");
     ArchiveUi(session,()=>{
      Check((Guid?)Get(Batch(),"SelectedProjectId")==(Guid)Get(target,"Id"),"确认选择正确写回项目归属");
      Check(ArchiveHistory(session).Contains("确认结果：浏览选择项目"),"过程记录保留项目确认全过程");
+     Check(((TextBox)Field(ArchiveWindow(session),"history")).Visible,"确认后恢复完整过程记录区");
      ((Button)Field(Batch(),"operationCancel")).PerformClick();return true;
     });
    });

@@ -37,6 +37,7 @@ const QualityManager = defineAsyncComponent(() => import('./components/QualityMa
 const ProjectInformation = defineAsyncComponent(() => import('./components/ProjectInformation.vue'))
 const MaterialManagement = defineAsyncComponent(() => import('./components/MaterialManagement.vue'))
 const StandardLibrary = defineAsyncComponent(() => import('./components/StandardLibrary.vue'))
+const StockedMaterials = defineAsyncComponent(() => import('./components/StockedMaterials.vue'))
 const StandardStructureLibrary = defineAsyncComponent(() => import('./components/StandardStructureLibrary.vue'))
 const MyTasks = defineAsyncComponent(() => import('./components/MyTasks.vue'))
 const PreviewWorkspace = defineAsyncComponent(() => import('./components/PreviewWorkspace.vue'))
@@ -61,7 +62,7 @@ function refreshCurrentBom() {
 }
 const displayUserName = (username?: string | null, emptyText = '—') => resolveUserDisplayName(workspace.users.value, username, emptyText)
 provide(userDisplayNameKey, displayUserName)
-type NavKey = 'work-hours' | 'project-applications' | 'project-calendar' | 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
+type NavKey = 'work-hours' | 'project-applications' | 'project-calendar' | 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'stocked-materials' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
 type ActiveView = NavKey | 'workspace'
 const activeView = ref<ActiveView>('project-center')
 const projectNavigationTabs = [
@@ -73,6 +74,7 @@ const projectNavigationTabs = [
 const standardNavigationTabs = computed(() => [
   ...(workspace.hasPermission('standard-library.view') ? [
     { key: 'standard-library' as const, label: '标准物料' },
+    { key: 'stocked-materials' as const, label: '常备件' },
     { key: 'standard-structure' as const, label: '标准结构' },
   ] : []),
   { key: 'program-templates' as const, label: '程序模板' },
@@ -501,7 +503,7 @@ function readRememberedNavigation(): NavKey | null {
     const saved = ownPage
       ?? ([null, navigationContextKey.value].includes(owner)
         ? window.localStorage.getItem(activeNavigationMemoryKey) : null)
-    const pages: NavKey[] = ['project-center', 'project-workbench', 'project-calendar', 'projects', 'project-applications', 'production-drawings', 'work-hours', 'tasks', 'materials', 'standard-library', 'standard-structure', 'program-templates', 'admin']
+    const pages: NavKey[] = ['project-center', 'project-workbench', 'project-calendar', 'projects', 'project-applications', 'production-drawings', 'work-hours', 'tasks', 'materials', 'standard-library', 'stocked-materials', 'standard-structure', 'program-templates', 'admin']
     if (!pages.includes(saved as NavKey)) return null
     if (saved === 'admin' && !canManageSystem.value || saved === 'materials' && !workspace.hasPermission('material.view')) return null
     return saved as NavKey
@@ -581,7 +583,7 @@ function handleNavigationTabChange(name: string | number) {
 async function handleNavigation(key: NavKey) {
   if (key === 'admin' && !canManageSystem.value) return
   if (key === 'project-applications' && !workspace.hasPermission('project.application.submit') && !workspace.hasPermission('project.application.approve')) key = 'project-workbench'
-  if (['standard-library', 'standard-structure'].includes(key) && !workspace.hasPermission('standard-library.view')) key = 'program-templates'
+  if (['standard-library', 'stocked-materials', 'standard-structure'].includes(key) && !workspace.hasPermission('standard-library.view')) key = 'program-templates'
   initialPageRestored = true
   navigationRevision += 1
   if (key === 'project-center') return openProjectCenter()
@@ -600,6 +602,10 @@ async function handleNavigation(key: NavKey) {
   }
   if (key === 'standard-library') {
     activeView.value = 'standard-library'
+    rememberNavigation(key)
+  }
+  if (key === 'stocked-materials') {
+    activeView.value = key
     rememberNavigation(key)
   }
   if (key === 'standard-structure') {
@@ -686,6 +692,10 @@ async function openHierarchyBom(projectId: string, kind: Exclude<import('./types
 
 async function openNotification(notification: UserNotification) {
   await workspace.markNotificationRead(notification.id)
+  if (notification.category === 'stocked-material') {
+    await handleNavigation('stocked-materials')
+    return
+  }
   if (notification.category === 'work-hours' || notification.category === 'work-hours-correction') {
     await handleNavigation('work-hours')
     return
@@ -1276,6 +1286,9 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           :can-manage="workspace.hasPermission('standard-library.manage')"
           :can-edit="workspace.hasPermission('material.manage')"
         />
+        </div>
+        <div v-if="visitedViews.has('stocked-materials')" v-show="activeView === 'stocked-materials'" class="pdm-navigation-page" data-navigation-page="stocked-materials">
+          <StockedMaterials :key="workspace.activeCompanyId.value" :token="workspace.getAccessToken()" :active="activeView === 'stocked-materials'" :can-manage="workspace.hasPermission('standard-library.manage')" />
         </div>
         <div v-if="visitedViews.has('standard-structure')" v-show="activeView === 'standard-structure'" data-navigation-page="standard-structure" class="pdm-navigation-page">
           <StandardStructureLibrary :token="workspace.getAccessToken()" :projects="workspace.projects.value" :can-reference="workspace.hasPermission('bom.mechanical.edit')" :active="activeView === 'standard-structure'" />

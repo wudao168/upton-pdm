@@ -10,7 +10,7 @@
   },
   "generator": {
     "path": "src/pdm-ui/tools/generate-plm-icon-assets.cjs",
-    "sha256": "6602b66d6f6e36d8075a482db1fa733d3099e7955afb9ca85a141d2b75ac7075"
+    "sha256": "249150c80fb7e6a6f1fda0c13d1f7a91d5b944ff0af82b5342279a566e399f9b"
   },
   "bounds": {
     "left": 123,
@@ -25,8 +25,9 @@
   },
   "navigation": {
     "gapCssPixels": 7.251748251748252,
-    "wordmarkHeightCssPixels": 15.412587412587413,
-    "groupCentered": true
+    "wordmarkScale": 0.8,
+    "wordmarkHeightCssPixels": 12.330069930069932,
+    "groupCentered": false
   },
   "outputs": [
     {
@@ -63,11 +64,11 @@
     },
     {
       "path": "src/pdm-ui/src/assets/upton-nav-lockup.svg",
-      "sha256": "dbfac366bcbf470ad83db57c39476ce18ccb34a719efb40e7d7ac54f13036da0"
+      "sha256": "95b0ad1eca3edb09e8930fd2250ed266ab70c04beff7a679b451278cfff5f472"
     },
     {
       "path": "src/pdm-ui/src/assets/upton-nav-lockup.png",
-      "sha256": "67407a3ef06233cb9c2871510fd7065e5326b1160c822e31e0c8be2570ddf278"
+      "sha256": "a4164cc27383fe624a5afc2db34e36325017e26b90ba27ed46109a555b976b77"
     }
   ]
 }

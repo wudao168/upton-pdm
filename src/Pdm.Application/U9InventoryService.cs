@@ -9,7 +9,8 @@ public sealed class U9InventoryService(
     IU9SecretProtector secretProtector,
     IU9OpenApiClient authenticationClient,
     IU9InventoryClient inventoryClient,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    StockedMaterialQueryService? stockedMaterials = null)
 {
     public async Task<U9InventoryPage> ListAsync(
         U9InventoryFilters filters,
@@ -18,6 +19,8 @@ public sealed class U9InventoryService(
         CancellationToken cancellationToken)
     {
         await RequireViewAsync(actor, role, cancellationToken);
+        if (stockedMaterials is not null && await stockedMaterials.TryReadInventoryAsync(filters, cancellationToken) is { } stocked)
+            return stocked;
         return await inventory.ListAsync(filters with
         {
             Page = Math.Max(1, filters.Page),
@@ -33,6 +36,8 @@ public sealed class U9InventoryService(
     {
         await RequireViewAsync(actor, role, cancellationToken);
         var normalizedCode = Required(materialCode, "料号");
+        if (stockedMaterials is not null && await stockedMaterials.TryReadInventoryAsync(new(normalizedCode, null, null, null, null, null, null, false, 1, 200), cancellationToken) is { } stocked)
+            return stocked;
         var material = await materials.FindMaterialByCodeAsync(normalizedCode, cancellationToken)
             ?? throw new PdmNotFoundException($"料品主档中不存在料号 {normalizedCode}。");
         if (material.IsArchived) throw new PdmRuleException($"料品 {normalizedCode} 已停用，不能执行库存刷新。");

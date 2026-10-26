@@ -7,7 +7,9 @@ public sealed class StandardLibraryService(
     IMaterialRepository materials,
     IPdmRepository repository,
     TimeProvider timeProvider,
-    IEngineeringKitRepository? kits = null)
+    IEngineeringKitRepository? kits = null,
+    IStockedMaterialStore? stockedMaterials = null,
+    StockedMaterialGate? stockedGate = null)
 {
     public async Task<IReadOnlyList<StandardLibraryCategory>> ListCategoriesAsync(
         bool includeInactive, string actor, UserRole role, CancellationToken cancellationToken)
@@ -68,10 +70,19 @@ public sealed class StandardLibraryService(
     public async Task DeleteCategoryAsync(Guid categoryId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken);
-        var category = await standardLibrary.FindCategoryAsync(categoryId, cancellationToken);
-        if (category is not null && StandardLibraryDefaults.IsUncategorized(category)) throw new PdmRuleException("未分类是系统保留分类，不能删除。");
-        await standardLibrary.DeleteCategoryAsync(categoryId, expectedRowVersion, cancellationToken);
-        await AuditAsync(actor, "standard-library.category.delete", categoryId, "删除空标准分类", cancellationToken);
+        if (stockedGate is not null) await stockedGate.Semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            var category = await standardLibrary.FindCategoryAsync(categoryId, cancellationToken);
+            if (category is not null && StandardLibraryDefaults.IsUncategorized(category)) throw new PdmRuleException("未分类是系统保留分类，不能删除。");
+            if (stockedMaterials is not null)
+                foreach (var scope in await stockedMaterials.ListScopesAsync(cancellationToken))
+                    if ((await stockedMaterials.ReadAsync(scope, cancellationToken)).Memberships.Any(item => item.CategoryId == categoryId))
+                        throw new PdmRuleException("该分类已收录常备件，请先移除收录关系后再删除分类。");
+            await standardLibrary.DeleteCategoryAsync(categoryId, expectedRowVersion, cancellationToken);
+            await AuditAsync(actor, "standard-library.category.delete", categoryId, "删除空标准分类", cancellationToken);
+        }
+        finally { stockedGate?.Semaphore.Release(); }
     }
 
     public async Task<StandardLibraryMaterialPage> ListMaterialsAsync(
@@ -161,8 +172,20 @@ public sealed class StandardLibraryService(
     public async Task RemoveMaterialAsync(Guid categoryId, Guid materialId, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken);
-        await standardLibrary.RemoveMembershipAsync(categoryId, materialId, cancellationToken);
-        await AuditAsync(actor, "standard-library.membership.remove", materialId, $"从标准分类 {categoryId} 移出料品", cancellationToken);
+        if (stockedGate is not null) await stockedGate.Semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            if (stockedMaterials is not null && !(await standardLibrary.ListMembershipsAsync(cancellationToken))
+                    .Any(item => item.MaterialId == materialId && item.CategoryId != categoryId))
+                foreach (var scope in await stockedMaterials.ListScopesAsync(cancellationToken))
+                    if ((await stockedMaterials.ReadAsync(scope, cancellationToken)) is { } catalog
+                        && catalog.Memberships.Any(item => item.MaterialId == materialId)
+                        && catalog.Snapshots.Any(item => item.MaterialId == materialId && item.IsFormal))
+                        throw new PdmRuleException("该料品仍是常备件，必须保留至少一条标准库收录关系；请先从常备件移除后再操作。");
+            await standardLibrary.RemoveMembershipAsync(categoryId, materialId, cancellationToken);
+            await AuditAsync(actor, "standard-library.membership.remove", materialId, $"从标准分类 {categoryId} 移出料品", cancellationToken);
+        }
+        finally { stockedGate?.Semaphore.Release(); }
     }
 
     public async Task<PdmMaterial> SetRecommendedAsync(Guid materialId, bool isRecommended, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)

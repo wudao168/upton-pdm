@@ -48,7 +48,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         assemblyAncestry.Clear();
         assemblyPaths.Clear();
         drawingReferences.Clear();
-        importedStorage = new ImportedComponentStorage(application);
+        importedStorage = new ImportedComponentStorage(application) { AllowInventory = requireCompleteStructure };
         importedComponents.Clear();
         if (model == null)
         {
@@ -56,6 +56,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         }
 
         scannedDocumentPath = model.GetPathName();
+        PluginDiagnosticLog.Record("设计树读取", "开始读取；完整检查=" + strictStructure + "；图档=" + scannedDocumentPath);
         var path = ReadComponentFilePath(scannedDocumentPath, "读取根图档路径", null, null);
         if (requireCompleteStructure && string.IsNullOrWhiteSpace(path))
             throw new InvalidOperationException("当前图档尚未保存为有效文件，无法确认完整存档范围。请先保存后重试。");
@@ -86,7 +87,8 @@ internal sealed class SolidWorksReferenceTreeScanner
         if (configuration == null) throw new InvalidOperationException("当前装配体配置尚未就绪，请待加载完成后重新存档。");
         rootConfiguration = configuration.Name ?? string.Empty;
         Log(string.Concat("ActiveConfiguration=", configuration?.Name ?? "(null)"));
-        var rootComponent = configuration.GetRootComponent3(true);
+        // Idle refresh must not start another native load while the document is opening.
+        var rootComponent = configuration.GetRootComponent3(requireCompleteStructure);
         if (rootComponent == null)
         {
             if (!requireCompleteStructure) return PendingAssembly(model, path, "装配根组件尚未读取，结构待补全。");
@@ -95,11 +97,13 @@ internal sealed class SolidWorksReferenceTreeScanner
 
         Log(string.Concat("RootComponent name=", rootComponent.Name2, " path=", rootComponent.GetPathName()));
         var featureTreeRoot = GetFeatureTreeRoot(model);
+        PluginDiagnosticLog.Record("设计树读取", "根组件已就绪，读取当前实例；图档=" + path);
         var root = BuildComponent(rootComponent, rootComponent.Name2, new HashSet<string>(StringComparer.OrdinalIgnoreCase), true, featureTreeRoot, false);
+        PluginDiagnosticLog.Record("设计树读取", "当前实例读取完成，核对导入存储归属；图档=" + path);
         CompleteImportedStorage();
         // Root components do not reliably expose ReferencedConfiguration.
         root.Configuration = configuration.Name ?? string.Empty;
-        if (ExpandEmbeddedStructure)
+        if (ExpandEmbeddedStructure && strictStructure)
         {
             try { EmbeddedAssemblyStructure.Complete(application, model, root); }
             catch (Exception error) when (!strictStructure)
@@ -108,10 +112,21 @@ internal sealed class SolidWorksReferenceTreeScanner
                 PluginDiagnosticLog.Record("嵌入结构显示", root.FileName + "；" + error);
             }
         }
+        else if (ExpandEmbeddedStructure)
+        {
+            foreach (var node in ModelNodes(root).Where(node => node.Kind == CadDocumentKind.Assembly
+                && node.Status == CadReferenceStatus.Virtual
+                && !node.Children.Any(child => child.Kind != CadDocumentKind.Drawing)))
+            {
+                node.StructureIndexPending = true;
+                node.ArchiveReadError = "嵌入组件尚未加载完整，已保留当前层级；存档时将完整核对。";
+            }
+        }
         foreach (var directory in ModelNodes(root).Where(node => node.Status != CadReferenceStatus.Virtual && !string.IsNullOrWhiteSpace(node.FullPath))
             .Select(node => Path.GetDirectoryName(node.FullPath))
             .Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToArray())
             AddRelatedDrawings(root, directory, false);
+        PluginDiagnosticLog.Record("设计树读取", "读取完成；图档=" + path);
         return root;
     }
 
@@ -241,6 +256,11 @@ internal sealed class SolidWorksReferenceTreeScanner
                 try
                 {
                     node.ImportedStorageOwnerPath = importedStorage.FindOwner(entry.Item2, scannedModel) ?? string.Empty;
+                    if (!strictStructure && !node.IsStoredImport)
+                    {
+                        node.StructureIndexPending = true;
+                        node.ArchiveReadError = "导入组件存储归属待核对，已保留当前层级；存档时将完整核对。";
+                    }
                     if (!node.IsStoredImport) continue;
                     // PLM carries these members in their owner; SolidWorks IsVirtual is unchanged.
                     node.Status = CadReferenceStatus.Virtual;
@@ -296,6 +316,9 @@ internal sealed class SolidWorksReferenceTreeScanner
         }
 
         if (string.IsNullOrWhiteSpace(referencedPath)) return string.Empty;
+        // Native dependency search may load referenced documents and invalidate the
+        // FeatureManager objects still being traversed. Only explicit archive checks search.
+        if (!strictStructure) return referencedPath;
         // Ask SolidWorks to resolve the dependency in its actual owning assembly,
         // not in the top-level assembly or an unrelated same-named directory.
         var ownerPath = assemblyPaths.LastOrDefault() ?? scannedDocumentPath;

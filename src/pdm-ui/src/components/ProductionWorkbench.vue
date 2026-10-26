@@ -965,6 +965,8 @@ function printLotCard() {
 .production-workbench__tree-search>input{grid-column:1;width:100%}
 .production-workbench__tree-totals{grid-column:2/-1;max-width:none}
 .production-workbench__tree>.production-workbench__tree-project,.production-workbench__tree>.production-workbench__empty{grid-column:1/-1}
+.production-workbench__project{background:rgb(232,238,247);color:rgb(30,41,59)}
+.production-workbench__project.selected{box-shadow:inset 3px 0 0 var(--pdm-theme-accent)}
 .production-workbench__package.selected{border-left:0;padding-left:10px;border-radius:0;background:var(--pdm-surface-muted);box-shadow:inset 5px 0 0 var(--shell-brand)}
 .production-workbench__package.selected strong{color:var(--pdm-blue)}
 .production-workbench__bulk-tools{flex:0 0 auto;flex-wrap:nowrap;overflow-x:auto;min-width:0;white-space:nowrap}

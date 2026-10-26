@@ -97,6 +97,8 @@ internal sealed partial class BatchOperationDialog : Form
     private readonly Panel fileDetails = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
     internal Control FileListContainer => fileDetails;
     internal Control FileListContent => files;
+    internal Rectangle[] InformationRows(Control target) => new Control[] { projectSelector, changeNote, workflowSelectors }
+        .Select(control => target.RectangleToClient(control.Parent.RectangleToScreen(control.Bounds))).ToArray();
     private readonly ImageList selectionImages = BuildSelectionImages();
     private readonly ImageList structureImages = PdmTaskPaneControl.BuildStructureImages();
     private IReadOnlyList<BatchOperationItem> operationItems;
@@ -178,7 +180,7 @@ internal sealed partial class BatchOperationDialog : Form
 
         Text = startWithCheckIn ? "登记新增引用并提交最新整套存档" : "整套装配操作";
         DialogWindowSizing.CenterOnOwnerScreen(this);
-        TopMost = true;
+        TopMost = false;
         Shown += (_, _) => { BringToFront(); Activate(); };
         FormBorderStyle = FormBorderStyle.Sizable;
         MinimumSize = new Size(1050, 720);
@@ -514,9 +516,11 @@ internal sealed partial class BatchOperationDialog : Form
     {
         var selected = SelectedItems.Where(item => !IsEmbedded(item.Node))
             .GroupBy(item => SelectionKey(item.Node), StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
+        var total = operationItems.Where(item => !IsEmbedded(item.Node) && !string.IsNullOrWhiteSpace(SelectionKey(item.Node)))
+            .Select(item => SelectionKey(item.Node)).Distinct(StringComparer.OrdinalIgnoreCase).Count();
         var permissions = checkIn.Checked && !ArchiveToStandardLibrary ? selected.Count(item => SelectionStateFor(item.Node) == ArchiveSelectionState.Unchanged) : 0;
         var drawingUpdates = checkIn.Checked ? selected.Count(item => SelectionStateFor(item.Node) == ArchiveSelectionState.DrawingUpdate) : 0;
-        return string.Concat("已勾选 ", selected.Length, " 个图档",
+        return string.Concat("已勾选 ", selected.Length, " 个图档，未勾选 ", total - selected.Length, " 个图档",
             checkIn.Checked ? "（存档" + (selected.Length - permissions) + "个，仅处理权限" + permissions + "个"
                 + (drawingUpdates == 0 ? string.Empty : "，其中工程图待更新" + drawingUpdates + "个") + "）" : string.Empty);
     }

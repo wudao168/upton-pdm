@@ -47,7 +47,7 @@ public sealed class BudgetAssessmentServiceTests
     }
 
     [Fact]
-    public async Task OnlyDesignLeadCanWriteAndUnsupportedCategoriesAreRejected()
+    public async Task UnassignedUsersCannotWriteAndUnsupportedCategoriesAreRejected()
     {
         var (service, _, _, root) = await Setup();
         var groups = new[] { Group("Standard", null, 1, 100) };
@@ -55,6 +55,59 @@ public sealed class BudgetAssessmentServiceTests
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, new([groups[0] with { Category = "RiskReserve" }], 0), "engineer", UserRole.Engineer, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, new([groups[0] with { Category = "Labor", LaborCategory = null }], 0), "engineer", UserRole.Engineer, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, new([groups[0] with { Items = [new(Guid.NewGuid(), "错误", Quantity: -1, UnitPrice: 1)] }], 0), "engineer", UserRole.Engineer, default));
+    }
+
+    [Theory]
+    [InlineData("manager")]
+    [InlineData("MANAGER")]
+    [InlineData("collaborator")]
+    public async Task MainProjectManagersCanEditAndSaveTheirProjectAndChildAssessments(string actor)
+    {
+        var (service, repository, store, root) = await Setup();
+        var child = await repository.CreateSubprojectAsync(new(root.Id, "子项目", null, 1), default);
+        await repository.SetChildProjectManagerAsync(child.Id, "child-manager", "admin", default);
+
+        var directory = await service.GetAsync(root.Id, actor, UserRole.Engineer, default);
+        Assert.Equal(2, directory.Sheets.Count);
+        Assert.All(directory.Sheets, sheet => Assert.True(sheet.CanEdit));
+        Assert.False(directory.CanEditLaborRates);
+        foreach (var project in new[] { root, child })
+        {
+            var saved = await service.SaveAsync(project.Id, new([Group("Standard", null, 2, 125)], 0), actor, UserRole.Engineer, default);
+            var sheet = saved.Sheets.Single(item => item.ProjectId == project.Id);
+            Assert.True(sheet.CanEdit);
+            Assert.Equal(250, sheet.Total);
+            Assert.Equal(actor, (await store.FindAsync(project.Id, default))!.AssessmentUpdatedBy);
+        }
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveLaborRatesAsync(root.Id,
+            new(new Dictionary<string, decimal?> { ["MechanicalDesign"] = 100 }, 0), actor, UserRole.Engineer, default));
+    }
+
+    [Fact]
+    public async Task ChildProjectManagerCanOnlyEditTheirAssignedChild()
+    {
+        var (service, repository, store, root) = await Setup();
+        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView], default);
+        var child = await repository.CreateSubprojectAsync(new(root.Id, "负责的子项目", null, 1), default);
+        var sibling = await repository.CreateSubprojectAsync(new(root.Id, "其他子项目", null, 1), default);
+        await repository.SetChildProjectManagerAsync(child.Id, "child-manager", "admin", default);
+
+        var directory = await service.GetAsync(root.Id, "child-manager", UserRole.Engineer, default);
+        Assert.True(directory.Sheets.Single(sheet => sheet.ProjectId == child.Id).CanEdit);
+        Assert.False(directory.Sheets.Single(sheet => sheet.ProjectId == root.Id).CanEdit);
+        Assert.False(directory.Sheets.Single(sheet => sheet.ProjectId == sibling.Id).CanEdit);
+        var saved = await service.SaveAsync(child.Id, new([Group("Equipment", null, 3, 100)], 0), "child-manager", UserRole.Engineer, default);
+        Assert.Equal(300, Assert.Single(saved.Sheets).Total);
+        foreach (var project in new[] { root, sibling })
+        {
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(project.Id,
+                new([Group("Standard", null, 1, 100)], 0), "child-manager", UserRole.Engineer, default));
+            Assert.Null(await store.FindAsync(project.Id, default));
+        }
+        Assert.All((await service.GetAsync(root.Id, "unassigned-manager", UserRole.Engineer, default)).Sheets,
+            sheet => Assert.False(sheet.CanEdit));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(child.Id,
+            new([Group("Standard", null, 1, 100)], 1), "unassigned-manager", UserRole.Engineer, default));
     }
     [Fact]
     public void TotalsRoundPerLineAndMissingInputsAreNotInvented()
@@ -132,7 +185,7 @@ public sealed class BudgetAssessmentServiceTests
         var organization = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First();
         var customer = (await repository.ListCustomersAsync(false, default)).First();
         var root = await repository.CreateNumberedProjectAsync(new(organization.Id, "P", 1, customer.Id, "评估", null, new DateOnly(2026, 10, 1), 1, "engineer", @"D:\Vault", @"D:\Release"), default);
-        root = await repository.SetMainProjectStaffingAsync(root.Id, new("admin", [], ["engineer"]), "admin", default);
+        root = await repository.SetMainProjectStaffingAsync(root.Id, new("manager", ["collaborator"], ["engineer"]), "admin", default);
         var store = new InMemoryProjectBudgetRepository();
         var budget = new ProjectBudgetService(repository, store, new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
         return (new(repository, store, budget, TimeProvider.System), repository, store, root);

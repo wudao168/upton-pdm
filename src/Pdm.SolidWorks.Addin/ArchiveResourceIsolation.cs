@@ -11,11 +11,41 @@ namespace Upton.Pdm.SolidWorks;
 
 internal static class ArchiveResourceIsolation
 {
+    // Inventory only. Ordinary PDM check-in preserves native content; it must not
+    // silently turn linked data into static entities or change the drawing format.
+    internal static IReadOnlyList<string> ReadLinkedSources(IModelDoc2 model, Action<string, string> reportWarning)
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var option = (int)swOleObjectOptions_e.swOleObjectOptions_GetAll;
+        var objects = (model.Extension.GetOLEObjects(option) as Array)?.OfType<ISwOLEObject>().ToArray() ?? new ISwOLEObject[0];
+        if (model.Extension.GetOLEObjectCount(option) != objects.Length)
+            reportWarning("嵌入对象", "对象目录未完整读取，原文保留，内部依赖尚未核实");
+        foreach (var item in objects)
+        {
+            if (item.IsLinked && !string.IsNullOrWhiteSpace(item.FileName)) paths.Add(item.FileName);
+            else if (item.IsLinked || !ArchiveEmbeddedPackageInspection.IsSelfContained(item))
+                reportWarning(string.IsNullOrWhiteSpace(item.FileName) ? "嵌入对象" : item.FileName,
+                    "对象内容保持原样，内部外部链接尚未核实");
+        }
+        foreach (var material in (model.Extension.GetRenderMaterials() as Array)?.OfType<IRenderMaterial>()
+            ?? Enumerable.Empty<IRenderMaterial>())
+            foreach (var path in new[] { material.TextureFilename, material.BumpTextureFilename, material.ToonShaderTextureFilename })
+                if (!string.IsNullOrWhiteSpace(path)) paths.Add(path);
+        foreach (var feature in ArchiveSmartComponentLinks.Features(model))
+            if (feature.GetTypeName2() == "MacroFeature")
+                reportWarning("宏特征：" + feature.Name, "宏特征保持原样，其外部运行依赖尚未核实");
+        return paths.ToArray();
+    }
+
     // Work on the archive copy. Template files and the original model are untouched.
     internal static bool Detach(IModelDoc2 model)
+        => Prepare(model, null);
+
+    internal static bool PrepareManaged(IModelDoc2 model, IReadOnlyDictionary<string, string> controlled)
+        => Prepare(model, controlled);
+
+    internal static void ValidateEmbeddedObjects(IModelDoc2 model)
     {
-        var changed = false;
-        var originalDrawingLayout = DrawingLayout(model);
         var objectOption = (int)swOleObjectOptions_e.swOleObjectOptions_GetAll;
         var objects = (model.Extension.GetOLEObjects(objectOption) as Array)?.OfType<ISwOLEObject>().ToArray() ?? new ISwOLEObject[0];
         if (model.Extension.GetOLEObjectCount(objectOption) != objects.Length)
@@ -25,14 +55,27 @@ internal static class ArchiveResourceIsolation
         if (linkedObjects.Length > 0)
             throw new IOException("图档含有尚未安全内嵌的链接对象，已停止存档。请将链接对象转换为嵌入对象后重试："
                 + string.Join("、", linkedObjects.Select(item => Path.GetFileName(item.FileName))));
-        if (objects.Length > 0)
+        if (objects.Any(item => !ArchiveEmbeddedPackageInspection.IsSelfContained(item)))
             throw new IOException("图档含有嵌入对象，尚不能确认其内部没有 Excel、OLE 等外部链接，已在上传前停止。请先固化对象内容后重试。");
-        for (var feature = model.FirstFeature() as IFeature; feature != null; feature = feature.GetNextFeature() as IFeature)
+    }
+
+    private static bool Prepare(IModelDoc2 model, IReadOnlyDictionary<string, string> controlled)
+    {
+        ValidateEmbeddedObjects(model);
+        var changed = false;
+        var originalDrawingLayout = DrawingLayout(model);
+        foreach (var feature in ArchiveSmartComponentLinks.Features(model))
         {
             var type = feature.GetTypeName2();
             if (type == "MacroFeature")
                 throw new IOException("图档含有宏特征，尚不能确认宏内部的外部依赖已完整固化，已在上传前停止：" + feature.Name);
             if (type != "LibraryFeature" || !(feature.GetDefinition() is ILibraryFeatureData library) || !library.LinkToLibraryPart) continue;
+            if (controlled != null)
+            {
+                if (!controlled.Values.Contains(library.LibraryPart, StringComparer.OrdinalIgnoreCase))
+                    throw new IOException("库特征仍指向受控范围之外的来源，已停止存档：" + feature.Name);
+                continue;
+            }
             if (!library.AccessSelections((ModelDoc2)model, null)) throw new IOException("无法读取库特征引用：" + feature.Name);
             try
             {
@@ -48,6 +91,12 @@ internal static class ArchiveResourceIsolation
             ?? Enumerable.Empty<ISketchBlockDefinition>())
         {
             if (!block.LinkToFile) continue;
+            if (controlled != null)
+            {
+                if (!controlled.Values.Contains(block.FileName, StringComparer.OrdinalIgnoreCase))
+                    throw new IOException("外部草图块仍指向受控范围之外的来源，已停止存档：" + Path.GetFileName(block.FileName));
+                continue;
+            }
             var instances = block.GetInstanceCount();
             block.LinkToFile = false;
             if (block.LinkToFile || block.GetInstanceCount() != instances)
@@ -63,7 +112,10 @@ internal static class ArchiveResourceIsolation
             if (material.LinkToFile) throw new IOException("外观仍保持外部文件更新链接，已停止存档。");
             changed = true;
         }
-        if (model.GetType() != (int)swDocumentTypes_e.swDocDRAWING)
+        var hasImages = materials.Any(material => !string.IsNullOrWhiteSpace(material.TextureFilename)
+            || !string.IsNullOrWhiteSpace(material.BumpTextureFilename) || !string.IsNullOrWhiteSpace(material.ToonShaderTextureFilename))
+            || model.Extension.GetDecalsCount() > 0;
+        if (model.GetType() != (int)swDocumentTypes_e.swDocDRAWING && (controlled == null || hasImages))
         {
             var option = (int)swUserPreferenceOption_e.swDetailingNoOptionSpecified;
             var setting = (int)swUserPreferenceToggle_e.swStoreImagesWithModel;

@@ -100,6 +100,12 @@ public static class MaterialEndpointExtensions
             return Results.Ok(MapMaterial(await service.SetCoverAsync(materialId, request.AttachmentId, request.ExpectedRowVersion, actor, role, cancellationToken)));
         });
 
+        api.MapPut("/materials/{materialId:guid}/images", async (Guid materialId, ReplaceMaterialImagesRequest request, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(MapMaterial(await service.ReplaceImagesAsync(materialId, request.AttachmentIds, request.CoverAttachmentId, request.ExpectedRowVersion, actor, role, cancellationToken)));
+        });
+
         api.MapPost("/materials", async (SaveMaterialRequest request, HttpContext context, MaterialService service, MaterialSyncBatchService syncBatches, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -230,7 +236,14 @@ public static class MaterialEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             MaterialCodeApplicationStatus? parsedStatus = string.IsNullOrWhiteSpace(status) ? null : Parse<MaterialCodeApplicationStatus>(status, "申请状态");
-            return Results.Ok((await service.ListCodeApplicationsAsync(projectId, parsedStatus, actor, role, cancellationToken)).Select(MapApplication));
+            // 全局待审批查询用于消息中心；管理页和项目申请仍返回完整记录。
+            if (projectId is null && parsedStatus == MaterialCodeApplicationStatus.Pending
+                && NotificationRecipientPolicy.SystemOnly(TenantContext.Current?.EffectiveRoleCodes ?? [role.ToString()])) return Results.Ok(Array.Empty<object>());
+            var inbox = projectId is null && parsedStatus == MaterialCodeApplicationStatus.Pending;
+            var applications = await service.ListCodeApplicationsAsync(projectId, parsedStatus, actor, role, cancellationToken, businessInbox: inbox);
+            return Results.Ok(applications.Where(application => !inbox
+                || !NotificationRecipientPolicy.HasSystemAdministrator(TenantContext.Current?.EffectiveRoleCodes ?? [role.ToString()])
+                || application.CanDecide == true || application.CanEmergencyDecide).Select(MapApplication));
         });
 
         api.MapPost("/material-code/applications/{applicationId:guid}/withdraw", async (Guid applicationId, WithdrawMaterialCodeApplicationRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
@@ -467,7 +480,7 @@ public static class MaterialEndpointExtensions
             return Results.Ok(MapSyncBatch(await service.GetAsync(batchId, actor, role, cancellationToken)));
         });
 
-        api.MapGet("/material-stock-plans", async (HttpContext context, IMaterialRepository materials, IPdmRepository repository, CancellationToken cancellationToken) =>
+        api.MapGet("/material-stock-plans", async (HttpContext context, IMaterialRepository materials, IPdmRepository repository, StockedMaterialQueryService stockedMaterials, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var allowed = false;
@@ -475,7 +488,7 @@ public static class MaterialEndpointExtensions
                 if (await repository.HasUserPermissionAsync(actor, role, permission, cancellationToken)) { allowed = true; break; }
             if (!allowed) throw new UnauthorizedAccessException("当前角色无权查看料品常备属性。");
             var configuration = await materials.GetIntegrationConfigurationAsync(cancellationToken);
-            var items = await materials.ListStockedMaterialPlansAsync(configuration.EnterpriseCode, configuration.OrganizationCode, cancellationToken);
+            var items = await stockedMaterials.ListBusinessPlansAsync(TenantContext.CompanyId, cancellationToken);
             return Results.Ok(new { configuration.EnterpriseCode, configuration.OrganizationCode, Items = items });
         });
 

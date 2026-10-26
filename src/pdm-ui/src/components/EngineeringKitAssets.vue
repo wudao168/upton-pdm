@@ -6,6 +6,7 @@ import { userErrorMessage } from '../userErrorMessage'
 import { ElMessage } from '../statusMessage'
 import EngineeringKitActivityButton from './EngineeringKitActivityButton.vue'
 import MaterialEditorDialog from './MaterialEditorDialog.vue'
+import { materialImageLimit } from '../materialImages'
 
 const props = defineProps<{ kit: EngineeringKit; token: string; canEdit: boolean; canManage: boolean }>()
 const emit = defineEmits<{ close: []; changed: []; details: []; category: []; activityChanged: [kit: EngineeringKit] }>()
@@ -43,8 +44,8 @@ async function save() {
 async function upload(kind: MaterialAttachmentKind, event: Event) {
   const input = event.target as HTMLInputElement, files = [...(input.files ?? [])]; input.value = ''
   if (!editable.value || busy.value || !files.length) return
-  if (kind === 'CoverImage' && attachments.value.filter(file => file.kind === kind).length + files.length > 3) {
-    error.value = '每个套件最多上传3张图片，请减少本次选择的图片数量。'; return
+  if (kind === 'CoverImage' && attachments.value.filter(file => file.kind === kind).length + files.length > materialImageLimit) {
+    error.value = `每个套件最多上传${materialImageLimit}张图片，请减少本次选择的图片数量。`; return
   }
   uploading.value = kind; error.value = ''; let completed = false
   try {

@@ -52,22 +52,22 @@ internal static partial class Program
    Check(new[]{part,drawing,repeated}.All(model=>CheckedParents(Find(tree,model)).All(parent=>parent.IsExpanded)),"仅显示勾选后，四层图档及重复实例的路径完整展开");
    Check(new[]{root,first,second}.All(model=>Find(tree,model).StateImageIndex==0)&&Find(tree,root).ToolTipText.Contains("未勾选"),"定位父级保持未勾选状态，并明确说明仅显示层级");
    var summary=(Label)Field(dialog,"selectionSummary");
-   Check(summary.Text.Contains("已勾选 3 个图档")&&summary.Text.Contains("存档3个，仅处理权限0个"),"计数按独立文件去重，不包含定位父级和嵌入式组件");
+   Check(summary.Text.Contains("已勾选 3 个图档，未勾选 4 个图档")&&summary.Text.Contains("存档3个，仅处理权限0个"),"已选与未选按独立文件去重，包含隐藏的未选图档且不重复计算嵌入组件");
    Check(Find(tree,embedded).IsExpanded&&((Label)Field(dialog,"selectionHint")).Text.Contains("2个嵌入式组件实例随父装配保存"),"嵌入层级完整显示，随父装配保存的说明保留");
    Find(tree,first).Collapse();TreeCall(dialog,"RefreshFileTreePresentation");
    Check(CheckedParents(Find(tree,drawing)).All(parent=>parent.IsExpanded),"筛选中的重新刷新不会把已勾选图档藏入折叠层级");
    TreeCall(dialog,"ToggleShowCheckedOnly");
    Check(Find(tree,first).IsExpanded&&!Find(tree,second).IsExpanded&&!Find(tree,owner).IsExpanded,"显示全部恢复筛选前每个实例的展开状态");
    TreeCall(dialog,"ToggleNode",Find(tree,permission));TreeCall(dialog,"ToggleShowCheckedOnly");
-   Check(summary.Text.Contains("已勾选 4 个图档")&&summary.Text.Contains("存档3个，仅处理权限1个"),"手动勾选未变更图档后，独立更新权限处理数量");
+   Check(summary.Text.Contains("已勾选 4 个图档，未勾选 3 个图档")&&summary.Text.Contains("存档3个，仅处理权限1个"),"手动勾选后已选与未选同步变化，保留权限处理数量");
    archiveRuleDelay=40;var analysis=(Task)TreeCall(dialog,"AnalyzeArchiveSelectionAsync",false);
-   Check(summary.Text.Contains("已勾选 4 个图档")&&((Label)Field(dialog,"selectionHint")).Text.Contains("正在核对"),"分析进度独立显示，不覆盖固定勾选数量");
+   Check(summary.Text.Contains("已勾选 4 个图档，未勾选 3 个图档")&&((Label)Field(dialog,"selectionHint")).Text.Contains("正在核对"),"分析进度独立显示，不覆盖已选与未选数量");
    await analysis;archiveRuleDelay=0;
-   Check(summary.Text.Contains("已勾选 4 个图档")&&CheckedParents(Find(tree,drawing)).All(parent=>parent.IsExpanded),"重新检查完成后计数及筛选展开仍然正确");
+   Check(summary.Text.Contains("已勾选 4 个图档，未勾选 3 个图档")&&CheckedParents(Find(tree,drawing)).All(parent=>parent.IsExpanded),"重新检查完成后已选与未选计数及筛选展开仍然正确");
    TreeCall(dialog,"SetAllChecked",false);
-   Check(summary.Text.Contains("已勾选 0 个图档")&&tree.Nodes.Count==1&&tree.Nodes[0].Text=="尚未勾选图档","清除后同时显示零计数和明确的空状态");
+   Check(summary.Text.Contains("已勾选 0 个图档，未勾选 7 个图档")&&tree.Nodes.Count==1&&tree.Nodes[0].Text=="尚未勾选图档","清除后已选为零，隐藏清单中的未选总数仍完整显示");
    TreeCall(dialog,"ToggleShowCheckedOnly");TreeCall(dialog,"SetAllChecked",true);TreeCall(dialog,"ToggleShowCheckedOnly");
-   Check(summary.Text.Contains("已勾选 7 个图档")&&Nodes(tree).Where(node=>node.Nodes.Count>0).All(node=>node.IsExpanded),"全选后去重计数正确，全部筛选层级自动展开");
+   Check(summary.Text.Contains("已勾选 7 个图档，未勾选 0 个图档")&&Nodes(tree).Where(node=>node.Nodes.Count>0).All(node=>node.IsExpanded),"全选后已选去重计数正确，未选为零，全部筛选层级自动展开");
   }
   var session=Type("ArchiveSession").GetMethod("Start",Flags).Invoke(null,new object[]{host.Handle,CancellationToken.None});await (Task)Get(session,"Ready");
   try

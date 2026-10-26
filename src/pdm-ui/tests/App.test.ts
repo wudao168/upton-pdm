@@ -320,6 +320,30 @@ describe('PLM client workspace', () => {
     installApiMock()
   })
 
+  it.each([false, true])('人工待办排除自动处理的BOM表头申请并保留普通审批（普通审批：%s）', async ordinary => {
+    const originalFetch = globalThis.fetch
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/api/material-code/applications')) return Promise.resolve(json([
+        { id: 'automatic-header', projectId, projectCode: 'P700016-4', applicationName: '项目主BOM', applicationType: 'BomHeader', bomHeaderKind: 'Master', status: 'Pending', canDecide: false, canEmergencyDecide: false, requestedAt: '2026-10-22T02:26:25Z', requestedBy: 'engineer', rowVersion: 1 },
+        ...(ordinary ? [{ id: 'ordinary-approval', projectId, projectCode: 'P700016-4', applicationType: 'StandardBomItem', status: 'Pending', canDecide: true, requestedAt: '2026-10-26T00:00:00Z', requestedBy: 'engineer', rowVersion: 1 }] : []),
+      ]))
+      return originalFetch(input, init)
+    }))
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    try {
+      await login(wrapper, false, 'admin')
+      await buttonByText(wrapper, '我的待办').trigger('click')
+      await flushPromises()
+      const tasks = wrapper.findComponent({ name: 'MyTasks' })
+      expect(tasks.props('materialCodeTasks').map((application: { id: string }) => application.id)).toEqual(ordinary ? ['ordinary-approval'] : [])
+      expect(tasks.text()).toContain(`料号审批（${ordinary ? 1 : 0}）`)
+      expect(tasks.text()).not.toContain('BOM料号审批')
+      await tasks.findAll('button').find(button => button.text() === '刷新')!.trigger('click')
+      await flushPromises()
+      expect(tasks.props('materialCodeTasks').map((application: { id: string }) => application.id)).toEqual(ordinary ? ['ordinary-approval'] : [])
+    } finally { wrapper.unmount() }
+  })
+
   it.each([false, true])('料品角标排除BOM料号任务并在刷新后保持与页面一致（普通任务：%s）', async ordinary => {
     const originalFetch = globalThis.fetch
     const calls: string[] = []
@@ -1600,7 +1624,7 @@ describe('PLM client workspace', () => {
     const calendar = wrapper.get('[data-navigation-page="project-calendar"]')
     await calendar.findAll('button').find(button => button.text() === '周')!.trigger('click')
     await navigateTo(wrapper, '程序模板')
-    expect(tabs()).toEqual(['标准物料', '标准结构', '程序模板'])
+    expect(tabs()).toEqual(['标准物料', '常备件', '标准结构', '程序模板'])
     const templates = wrapper.get('[data-navigation-page="program-templates"]').element
     await buttonByText(wrapper, '项目总览').trigger('click'); await flushPromises()
     expect(calendar.isVisible()).toBe(true)
@@ -2132,7 +2156,7 @@ describe('PLM client workspace', () => {
     await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
     await flushPromises()
 
-    expect(wrapper.get('button[aria-label="浏览项目"]').text()).toContain('PRJ-REAL-001')
+    await vi.waitFor(() => expect(wrapper.get('input[aria-label="快速搜索项目"]').attributes('placeholder')).toContain('PRJ-REAL-001'))
     expect(wrapper.get('.pdm-project-tabs .is-active').text()).toContain('图档')
     expect(wrapper.find('[aria-label="项目设计树"]').exists()).toBe(true)
   })

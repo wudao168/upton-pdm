@@ -91,7 +91,7 @@ public sealed class DingTalkStreamService(IServiceScopeFactory scopes, IHttpClie
                 socket.Options.KeepAliveInterval=TimeSpan.FromSeconds(30); socket.Options.KeepAliveTimeout=TimeSpan.FromSeconds(30);
                 using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(30));
                 await socket.ConnectAsync(uri,timeout.Token);
-                status.Set(setting.CompanyId,"connected","已连接。将机器人加入项目群，@机器人发送“登记项目群”，即可在项目设置中选择该群。");
+                status.Set(setting.CompanyId,"connected","已连接。在PLM项目设置中生成专用绑定指令，在目标群内 @UPLM 发送后即可直接绑定。");
                 delay=5;
                 while(socket.State==WebSocketState.Open && !ct.IsCancellationRequested)
                 {
@@ -106,7 +106,14 @@ public sealed class DingTalkStreamService(IServiceScopeFactory scopes, IHttpClie
                     var ack=await HandleFrameAsync(message.ToArray(), async body => {
                         try {
                             using var scope=scopes.CreateScope();
-                            await scope.ServiceProvider.GetRequiredService<DingTalkConfigurationService>().RegisterGroupAsync(setting.CompanyId,setting.CorpId,setting.AppKey,setting.RobotCode,body,ct);
+                            var service = scope.ServiceProvider.GetRequiredService<DingTalkConfigurationService>();
+                            var groupId = await service.BindProjectGroupAsync(setting.CompanyId,setting.CorpId,setting.AppKey,setting.RobotCode,body,ct);
+                            if (groupId is Guid bound)
+                            {
+                                var integration = scope.ServiceProvider.GetRequiredService<DingTalkOplIntegration>();
+                                await integration.PublishEntryAsync(bound, ct, setting.CompanyId);
+                            }
+                            else await service.RegisterGroupAsync(setting.CompanyId,setting.CorpId,setting.AppKey,setting.RobotCode,body,ct);
                         } catch(Exception error) when(!ct.IsCancellationRequested) {
                             logger.LogWarning("钉钉群登记未完成，公司 {CompanyId}，原因类型 {ErrorType}",setting.CompanyId,error.GetType().Name);
                             throw;

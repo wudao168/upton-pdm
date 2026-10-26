@@ -797,17 +797,22 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         System.Data.Common.DbConnection connection, System.Data.Common.DbTransaction? transaction,
         Guid projectId, CancellationToken cancellationToken)
     {
-        var roots = await connection.QueryAsync<string>(new CommandDefinition(
+        // Rank only the small metadata in managed memory. A MySQL window filesort can
+        // retain the large JSON payload and exhaust sort_buffer_size during batch commit.
+        var indexes = await connection.QueryAsync<NativeReferenceIndexRow>(new CommandDefinition(
             """
-            SELECT rs.root_json FROM (
-                SELECT id, ROW_NUMBER() OVER (
-                    PARTITION BY root_document_id, JSON_UNQUOTE(JSON_EXTRACT(root_json,'$.configuration')),
-                        JSON_UNQUOTE(JSON_EXTRACT(root_json,'$.revision.display'))
-                    ORDER BY captured_at DESC, id DESC) AS index_rank
-                FROM reference_snapshot WHERE project_id=@ProjectId
-                    AND JSON_EXTRACT(root_json,'$.usesNativeFileInventory')=TRUE
-            ) native_indexes JOIN reference_snapshot rs ON rs.id=native_indexes.id WHERE index_rank=1
+            SELECT id, root_document_id, captured_at,
+                JSON_UNQUOTE(JSON_EXTRACT(root_json,'$.configuration')) AS configuration,
+                JSON_UNQUOTE(JSON_EXTRACT(root_json,'$.revision.display')) AS revision
+            FROM reference_snapshot WHERE project_id=@ProjectId
+                AND JSON_EXTRACT(root_json,'$.usesNativeFileInventory')=TRUE
             """, new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
+        var ids = indexes.GroupBy(index => (index.RootDocumentId, index.Configuration, index.Revision))
+            .Select(group => group.OrderByDescending(index => index.CapturedAt).ThenByDescending(index => index.Id).First().Id).ToArray();
+        if (ids.Length == 0) return [];
+        var roots = await connection.QueryAsync<string>(new CommandDefinition(
+            "SELECT root_json FROM reference_snapshot WHERE id IN @Ids",
+            new { Ids = ids }, transaction, cancellationToken: cancellationToken));
         return roots.Select(root => JsonSerializer.Deserialize<DocumentReferenceNode>(root, jsonOptions)
             ?? throw new InvalidDataException("原生引用索引损坏。")).ToArray();
     }
@@ -2287,6 +2292,15 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public int PreviewAttempts { get; init; }
         public DateTime? PreviewUpdatedAt { get; init; }
         public DateTime CreatedAt { get; init; }
+    }
+
+    private sealed class NativeReferenceIndexRow
+    {
+        public Guid Id { get; init; }
+        public Guid RootDocumentId { get; init; }
+        public DateTime CapturedAt { get; init; }
+        public string? Configuration { get; init; }
+        public string? Revision { get; init; }
     }
 
     private sealed class ReferenceSnapshotRow

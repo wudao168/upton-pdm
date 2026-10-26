@@ -7,6 +7,7 @@ import { h, computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch
 import { Boxes, Warehouse, Link2, Package, ListTree, ClipboardCheck, Hash, FolderTree } from '@lucide/vue'
 import SquareLoader from './SquareLoader.vue'
 import MaterialEditorDialog from './MaterialEditorDialog.vue'
+import { materialImageLimit } from '../materialImages'
 import MaterialInventory from './MaterialInventory.vue'
 import BomHeaderMaterialDirectory from './BomHeaderMaterialDirectory.vue'
 import MaterialRelationDirectory from './MaterialRelationDirectory.vue'
@@ -734,8 +735,8 @@ async function handleAttachmentFiles(kind: MaterialAttachmentKind, event: Event)
   const files = Array.from(input.files ?? [])
   input.value = ''
   if (!editingId.value || files.length === 0 || uploadingAttachmentKind.value || changingCover.value) return
-  if (kind === 'CoverImage' && editorAttachments.value.filter(item => item.kind === 'CoverImage').length + files.length > 3) {
-    ElMessage.warning('每个料品最多上传3张图片，请减少本次选择的图片数量。')
+  if (kind === 'CoverImage' && editorAttachments.value.filter(item => item.kind === 'CoverImage').length + files.length > materialImageLimit) {
+    ElMessage.warning(`每个料品最多上传${materialImageLimit}张图片，请减少本次选择的图片数量。`)
     return
   }
   const materialId = editingId.value

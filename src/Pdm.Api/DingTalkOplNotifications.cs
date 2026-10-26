@@ -50,10 +50,10 @@ public sealed partial class DingTalkOplIntegration
         using var result=JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
         if(!result.RootElement.TryGetProperty("processQueryKey",out var key) || string.IsNullOrWhiteSpace(key.GetString())) throw new PdmRuleException("钉钉未确认接收图文卡片。");
     }
-    public async Task<DingTalkNotificationResult> PublishEntryAsync(Guid groupId,CancellationToken ct)
+    public async Task<DingTalkNotificationResult> PublishEntryAsync(Guid groupId,CancellationToken ct,Guid? companyId = null)
     {
         try {
-            await LoadAsync(TenantContext.CompanyId,ct);
+            await LoadAsync(companyId ?? TenantContext.CompanyId,ct);
             if(!Settings.Groups.TryGetValue(groupId,out var group) || !ApplicationRobotEnabled(group)) return new(false,"绑定已保存；请先完成企业机器人配置并登记项目群。");
             var link=Settings.PublicUrl.TrimEnd('/')+"/?dingtalkOpl=1&companyId="+Settings.CompanyId+"&groupId="+groupId;
             var token=await ApplicationTokenAsync(ct);

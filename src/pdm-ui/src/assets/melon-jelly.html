@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f6f5f0">
+<title>西瓜软糖 · 3D 交互</title>
+<script>if(new URLSearchParams(location.search).get('embed')==='login')document.documentElement.classList.add('login-embed');</script>
+<style>
+:root{color-scheme:light;--paper:#f6f5f0;--ink:#2d3320;--muted:#787c6e;--line:#cecec2;--red:#b63040;--sans:"Microsoft YaHei","PingFang SC",Arial,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:13px var(--sans);-webkit-font-smoothing:antialiased}button,input,summary{touch-action:manipulation}button{font:inherit;color:inherit;cursor:pointer}button:focus-visible,input:focus-visible,canvas:focus-visible{outline:2px solid var(--red);outline-offset:5px}button:disabled,input:disabled{opacity:.4;cursor:not-allowed}
+.page{max-width:1560px;margin:auto;padding:28px 38px 24px}.masthead{display:flex;align-items:center;gap:25px;line-height:1.4}.masthead .title{font-size:18px;font-weight:500;letter-spacing:2px}.masthead .rule{height:1px;background:var(--line);flex:1}.status{display:flex;align-items:center;gap:9px;white-space:nowrap;font-size:11px;letter-spacing:1px}.dot{height:6px;width:6px;border-radius:50%;background:#999d8a}.status.live .dot{background:#587443}.status.failed .dot{background:#b63040}
+.experience{position:relative;min-height:560px;height:calc(100svh - 205px);max-height:900px;margin-top:24px;display:grid;grid-template-columns:minmax(0,1fr)230px;gap:25px}.stage{position:relative;min-width:0;min-height:0}.stage canvas{width:100%;height:100%;display:block;touch-action:none;cursor:grab}.stage canvas.grabbing{cursor:grabbing}.loader{position:absolute;inset:0;display:grid;place-content:center;text-align:center;padding:40px;font-size:13px;line-height:1.9;max-width:500px;margin:auto}.loader strong{font-size:22px;font-weight:500;margin-bottom:10px}.loader[hidden]{display:none}.grab-cursor{position:absolute;width:15px;height:15px;border:1px solid rgba(255,255,255,.85);border-radius:50%;box-shadow:0 0 0 1px #343b2544;pointer-events:none;transform:translate(-50%,-50%);display:none}
+.panel{align-self:center;border-left:1px solid var(--line);padding-left:25px;z-index:2}.panel h2{font-size:15px;font-weight:500;letter-spacing:2px;margin:0 0 26px;padding-bottom:18px;border-bottom:1px solid var(--line)}.label{font-size:11px;letter-spacing:1px}.presets{display:flex;gap:19px;margin:18px 0 15px}.swatch{width:44px;height:44px;border-radius:50%;border:0;position:relative;background:var(--c);box-shadow:inset 0 -6px 0 #3d5027,inset 0 -10px 0 #e3e6b4;transition:transform .18s}.swatch::before{content:' ';position:absolute;inset:-5px;border:1px solid transparent;border-radius:50%}.swatch[aria-pressed=true]::before{border-color:var(--ink)}.swatch:hover{transform:translateY(-2px)}.swatch span{position:absolute;background:#382825;border-radius:55% 45% 60% 40%;width:3px;height:6px;left:14px;top:11px;transform:rotate(-25deg)}.swatch span::after{content:'';position:absolute;background:inherit;border-radius:inherit;width:3px;height:6px;left:12px;top:4px;transform:rotate(40deg)}.preset-name{font-size:11px;color:var(--muted);margin:0 0 30px}.control{margin-bottom:28px}.control-label{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.control output{font-size:11px;font-variant-numeric:tabular-nums}input[type=range]{display:block;width:100%;margin:0;height:20px;cursor:pointer;appearance:none;background:transparent}input[type=range]::-webkit-slider-runnable-track{height:3px;background:var(--line);border-radius:2px}input[type=range]::-webkit-slider-thumb{appearance:none;width:17px;height:17px;background:var(--paper);border:1px solid #7c806e;border-radius:50%;margin-top:-7px;box-shadow:0 1px 2px #30382018}input[type=range]::-moz-range-track{height:3px;background:var(--line)}input[type=range]::-moz-range-thumb{width:15px;height:15px;background:var(--paper);border:1px solid #7c806e;border-radius:50%}.nudge,.pause{width:100%;min-height:44px;border:1px solid var(--ink);border-radius:3px}.nudge{background:var(--ink);color:var(--paper)}.nudge:hover{background:#444d32}.reset{display:block;background:none;border:0;padding:14px;margin:auto;font-size:12px}.toggles{display:flex;flex-direction:column;gap:16px;padding:20px 0 24px;margin-top:3px;border-top:1px solid var(--line)}.toggles label{display:flex;align-items:center;gap:10px;font-size:12px;cursor:pointer}input[type=checkbox]{appearance:none;width:15px;height:15px;border:1px solid #9b9e8e;border-radius:2px;margin:0;display:grid;place-content:center}input[type=checkbox]:checked{background:var(--ink);border-color:var(--ink)}input[type=checkbox]:checked::after{content:'✓';color:var(--paper);font-size:12px}.pause{background:transparent;border-color:#bfc1b3}.pause:hover{background:#eaeae2}.pause-icon{display:inline-block;width:22px;font-size:10px}
+.footer{display:grid;grid-template-columns:1fr 1fr;align-items:start;gap:30px;border-top:1px solid var(--line);padding-top:22px;margin-top:16px}.hint h2{font-size:14px;font-weight:500;margin:0 0 10px}.hint p{font-size:11px;line-height:1.9;color:var(--muted);margin:0}.stats{display:flex;justify-content:space-between;gap:18px;padding-left:25px;border-left:1px solid var(--line)}.stat .label{font-size:10px;white-space:nowrap}.stat-value{font:24px Georgia,serif;margin-top:10px;font-variant-numeric:tabular-nums}.stat-value small{font-size:12px;color:var(--muted)}.units{font-size:10px;color:var(--muted);margin:13px 0 0 25px}.reduced-note{font-size:11px;line-height:1.7;color:var(--muted);margin:10px 0 0}
+@media(max-width:1000px){.page{padding:24px}.experience{grid-template-columns:minmax(0,1fr)200px;gap:18px}.panel{padding-left:20px}.swatch{width:38px;height:38px}.presets{gap:17px}.footer{grid-template-columns:1fr 1.2fr}}
+@media(max-width:760px){.page{padding:20px}.masthead{gap:16px}.masthead .title{font-size:17px}.status{font-size:10px;gap:7px}.experience{height:auto;min-height:0;display:grid;grid-template-columns:1fr;margin-top:14px;gap:0}.stage{height:430px;margin:0 -12px 3px;min-height:0}.panel{border-left:0;border-top:1px solid var(--line);padding:21px 0 0;display:grid;grid-template-columns:1fr 1fr;column-gap:26px;align-items:start}.panel h2{grid-column:1/-1;margin-bottom:23px;padding:0;border:0;font-size:14px}.color-control{grid-column:1;grid-row:2/4}.presets{gap:14px}.swatch{width:37px;height:37px}.preset-name{margin-bottom:20px}.control{margin-bottom:24px}.control-label{margin-bottom:10px}.nudge{grid-column:1;grid-row:4}.reset{grid-column:2;grid-row:4;min-height:44px;padding:0;margin:0;border:1px solid var(--line);border-radius:3px}.toggles{grid-column:1/-1;grid-row:5;flex-direction:row;gap:27px;margin:18px 0 0;padding:18px 0;border-top:1px solid var(--line)}.pause{grid-column:1/-1;grid-row:6;min-height:42px}.reduced-note{grid-column:1/-1}.footer{display:flex;flex-direction:column;gap:22px;margin-top:24px;padding-top:22px}.stats-wrap{width:100%}.stats{border:0;padding:0;justify-content:space-between;gap:24px}.units{margin-left:0}.stat-value{font-size:23px}}
+@media(max-width:370px){.page{padding:18px}.stage{height:360px}.panel{column-gap:18px}.presets{gap:10px}.stats{gap:20px}}
+.login-embed,.login-embed body{height:100%;overflow:hidden}
+.login-embed .page{max-width:none;height:100vh;height:100dvh;padding:clamp(12px,2.5vh,28px) clamp(16px,2.5vw,38px);display:grid;grid-template-rows:auto minmax(0,1fr) auto}
+.login-embed .experience{height:auto;min-height:0;max-height:none;margin-top:clamp(8px,2vh,24px)}
+.login-embed .footer{margin-top:12px;padding-top:16px;gap:18px}
+@media(max-height:760px){
+ .login-embed .panel h2{margin-bottom:16px;padding-bottom:12px}
+ .login-embed .presets{margin:12px 0;gap:12px}.login-embed .preset-name{margin-bottom:18px}
+ .login-embed .control{margin-bottom:18px}.login-embed .control-label{margin-bottom:8px}
+ .login-embed .nudge,.login-embed .pause{min-height:36px}.login-embed .reset{padding:8px}
+ .login-embed .toggles{gap:10px;padding:12px 0}.login-embed .footer{padding-top:12px;margin-top:8px}
+ .login-embed .hint p,.login-embed .units{display:none}.login-embed .stat-value{font-size:20px;margin-top:6px}
+}
+@media(max-height:650px){
+ .login-embed .panel h2{margin-bottom:10px;padding-bottom:8px}.login-embed .presets{margin:8px 0}
+ .login-embed .swatch{width:32px;height:32px}.login-embed .preset-name{margin-bottom:10px}
+ .login-embed .control{margin-bottom:10px}.login-embed .control-label{margin-bottom:5px}
+ .login-embed .nudge,.login-embed .pause{min-height:30px}.login-embed .reset{padding:4px}
+ .login-embed .toggles{flex-direction:row;gap:12px;padding:8px 0}
+}
+@media(max-width:760px){
+ .login-embed .experience{grid-template-rows:minmax(0,1fr) auto;gap:8px}
+ .login-embed .stage{height:auto;min-height:0;margin:0}
+ .login-embed .panel{padding-top:12px;column-gap:20px}
+ .login-embed .panel h2{margin-bottom:10px}.login-embed .preset-name{margin-bottom:10px}
+ .login-embed .control{margin-bottom:12px}.login-embed .toggles{margin-top:8px;padding:10px 0}
+ .login-embed .nudge,.login-embed .reset,.login-embed .pause{min-height:32px}
+ .login-embed .footer{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:12px}
+ .login-embed .stats{gap:8px}.login-embed .stat-value{font-size:18px}
+ .login-embed .hint p,.login-embed .units{display:none}
+}
+@media(max-height:440px){
+ .login-embed .panel{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;align-items:center;padding-left:14px}
+ .login-embed .panel>*{grid-row:auto}.login-embed .panel h2{grid-column:1/-1;margin:0;padding-bottom:6px;font-size:13px}
+ .login-embed .color-control{grid-column:1/-1;display:flex;align-items:center;gap:8px}
+ .login-embed .presets{gap:6px;margin:0}.login-embed .swatch{width:28px;height:28px}.login-embed .preset-name{margin:0}
+ .login-embed .control{margin:0}.login-embed .control-label{margin-bottom:4px}
+ .login-embed .nudge,.login-embed .reset{width:100%;min-height:28px;padding:4px;margin:0}
+ .login-embed .toggles{grid-column:1/-1;padding:0;margin:0;border:0;gap:12px}
+ .login-embed .pause{grid-column:1/-1;min-height:28px}
+}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="page">
+ <header class="masthead"><span class="title">西瓜软糖</span><span class="rule"></span><span id="status" class="status" role="status"><i class="dot"></i><span id="status-text">WebGPU · 加载中</span></span></header>
+ <main class="experience">
+  <div class="stage" id="stage"><canvas id="canvas" tabindex="0" aria-label="可交互的三维西瓜软糖。拖动尖角、果肉或瓜皮进行拉伸，双指可扭转。方向键轻推，空格暂停，R 重置。"></canvas><div id="cursor" class="grab-cursor"></div><div class="loader" id="loader"><strong>正在准备软糖</strong><span>正在初始化 WebGPU…</span></div></div>
+  <aside class="panel" aria-label="模拟操作"><h2>操作</h2><div class="color-control"><div class="label">颜色</div><div class="presets" role="group" aria-label="西瓜配色"><button class="swatch" style="--c:#c23b4c" data-preset="0" aria-label="红瓤" aria-pressed="true"><span></span></button><button class="swatch" style="--c:#e7bc56" data-preset="1" aria-label="黄瓤" aria-pressed="false"><span></span></button><button class="swatch" style="--c:#e58f9b" data-preset="2" aria-label="粉瓤" aria-pressed="false"><span></span></button></div><p class="preset-name" id="preset-name">红瓤</p></div>
+   <div class="control"><div class="control-label"><label class="label" for="firmness">硬度</label><output id="firmness-value" for="firmness">45%</output></div><input id="firmness" type="range" min="0" max="100" value="45"></div>
+   <div class="control"><div class="control-label"><label class="label" for="damping">内部阻尼</label><output id="damping-value" for="damping">35%</output></div><input id="damping" type="range" min="0" max="100" value="35"></div>
+   <button class="nudge" id="nudge">轻推一下 <span aria-hidden="true">↗</span></button><button class="reset" id="reset">重置</button>
+   <div class="toggles"><label><input id="slow" type="checkbox">¼ 倍速</label><label><input id="mesh" type="checkbox">显示网格</label></div><button class="pause" id="pause"><span class="pause-icon" aria-hidden="true">Ⅱ</span><span id="pause-label">暂停</span></button><p class="reduced-note" id="reduced-note" hidden>已遵循减少动态效果偏好，点击“继续”可开始模拟。</p>
+  </aside>
+ </main>
+ <footer class="footer"><div class="hint"><h2>拖动拉伸，松手回弹</h2><p>可抓住尖角、果肉或瓜皮；双指拖动可扭转。<br>抓住后滚动鼠标滚轮，可调节前后位置。</p></div><div class="stats-wrap"><div class="stats"><div class="stat"><div class="label">质量（估算）</div><div class="stat-value"><span id="mass">—</span> <small>g</small></div></div><div class="stat"><div class="label">相对体积</div><div class="stat-value"><span id="volume">—</span><small> ×</small></div></div><div class="stat"><div class="label">动能（估算）</div><div class="stat-value"><span id="energy">—</span> <small>mJ</small></div></div></div><p class="units">实时模拟数据 · 质量与动能采用示意比例估算</p></div></footer>
+</div>
+<script>
+'use strict';
+// Melon Jelly. No libraries, network assets, WebGL or 2D drawing fallback.
+// CPU: volumetric XPBD. GPU: all drawing, thickness, refraction and shadows in WGSL.
+const $=id=>document.getElementById(id), clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const add=(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]], sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]], mul=(a,s)=>[a[0]*s,a[1]*s,a[2]*s];
+const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2], cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]], norm=a=>mul(a,1/(Math.hypot(...a)||1));
+function mm(a,b){const c=new Float32Array(16);for(let j=0;j<4;j++)for(let i=0;i<4;i++)for(let k=0;k<4;k++)c[j*4+i]+=a[k*4+i]*b[j*4+k];return c}
+function view(eye,target){const z=norm(sub(eye,target)),x=norm(cross([0,1,0],z)),y=cross(z,x);return new Float32Array([x[0],y[0],z[0],0,x[1],y[1],z[1],0,x[2],y[2],z[2],0,-dot(x,eye),-dot(y,eye),-dot(z,eye),1])}
+function ortho(l,r,b,t,n,f){return new Float32Array([2/(r-l),0,0,0,0,2/(t-b),0,0,0,0,1/(n-f),0,-(r+l)/(r-l),-(t+b)/(t-b),n/(n-f),1])}
+function transform(m,p){return [m[0]*p[0]+m[4]*p[1]+m[8]*p[2]+m[12],m[1]*p[0]+m[5]*p[1]+m[9]*p[2]+m[13],m[2]*p[0]+m[6]*p[1]+m[10]*p[2]+m[14]]}
+function signedVolume(p,a,b,c,d){const ax=p[b]-p[a],ay=p[b+1]-p[a+1],az=p[b+2]-p[a+2],bx=p[c]-p[a],by=p[c+1]-p[a+1],bz=p[c+2]-p[a+2],cx=p[d]-p[a],cy=p[d+1]-p[a+1],cz=p[d+2]-p[a+2];return (ax*(by*cz-bz*cy)+ay*(bz*cx-bx*cz)+az*(bx*cy-by*cx))/6}
+
+function halfDepth(x,y){const s=clamp((2.96-y+.52*(x/1.93)**2)/2.78,0,1),u=s>.001?x/(1.93*s):0;return .54+.17*Math.sin(Math.PI*s)*Math.max(0,1-u*u);}
+class SoftBody{
+ constructor(){
+  const N=12,L=4,points=[],tris=[],id=(j,i)=>j*(j+1)/2+i;
+  for(let j=0;j<=N;j++)for(let i=0;i<=j;i++){const s=j/N,u=j?2*i/j-1:0;points.push([1.93*u*s,2.96-2.78*s+.52*u*u*s*s,s]);}
+  for(let j=0;j<N;j++)for(let i=0;i<=j;i++){tris.push([id(j,i),id(j+1,i),id(j+1,i+1)]);if(i<j)tris.push([id(j,i),id(j+1,i+1),id(j,i+1)]);}
+  this.layerSize=points.length;this.count=points.length*(L+1);this.p=new Float64Array(this.count*3);this.s=new Float32Array(this.count);
+  for(let k=0;k<=L;k++)for(let i=0;i<points.length;i++){const q=(k*points.length+i)*3;this.p[q]=points[i][0];this.p[q+1]=points[i][1];this.p[q+2]=(k/L-.5)*2*halfDepth(points[i][0],points[i][1]);this.s[q/3]=points[i][2];}
+  this.rest=this.p.slice();this.prev=this.p.slice();this.vel=new Float64Array(this.p.length);this.mass=new Float64Array(this.count);this.inv=new Float64Array(this.count);
+  const ts=[];for(let k=0;k<L;k++)for(const tr of tris){const t=tr.slice().sort((a,b)=>a-b),a=t[0]+k*points.length,b=t[1]+k*points.length,c=t[2]+k*points.length,A=a+points.length,B=b+points.length,C=c+points.length;ts.push([a,b,c,C],[a,b,B,C],[a,A,B,C]);}
+  this.tets=new Uint32Array(ts.length*4);this.volumes=new Float64Array(ts.length);this.vlambda=new Float64Array(ts.length);const edges=new Map(),faces=new Map();
+  for(let k=0;k<ts.length;k++){const t=ts[k];if(signedVolume(this.p,...t.map(i=>i*3))<0)[t[1],t[2]]=[t[2],t[1]];this.tets.set(t,k*4);const v=signedVolume(this.p,...t.map(i=>i*3));this.volumes[k]=v;for(const i of t)this.mass[i]+=v/4;
+   for(let a=0;a<4;a++)for(let b=a+1;b<4;b++){const x=Math.min(t[a],t[b]),y=Math.max(t[a],t[b]);edges.set(x+','+y,[x,y]);}
+   for(const f of [[t[1],t[2],t[3]],[t[0],t[3],t[2]],[t[0],t[1],t[3]],[t[0],t[2],t[1]]]){const key=f.slice().sort((a,b)=>a-b).join(',');if(faces.has(key))faces.delete(key);else faces.set(key,f);}
+  }
+  this.surface=Array.from(faces.values());this.edges=new Uint32Array(Array.from(edges.values()).flat());this.lengths=new Float64Array(edges.size);this.elambda=new Float64Array(edges.size);this.edgeFirm=new Float64Array(edges.size);
+  for(let k=0;k<this.lengths.length;k++){const a=this.edges[k*2],b=this.edges[k*2+1];this.lengths[k]=Math.hypot(...sub(Array.from(this.p.slice(a*3,a*3+3)),Array.from(this.p.slice(b*3,b*3+3))));this.edgeFirm[k]=this.s[a]>.82&&this.s[b]>.82?.32:1;}
+  this.totalMass=this.mass.reduce((a,b)=>a+b,0);this.restVolume=this.volumes.reduce((a,b)=>a+b,0);for(let i=0;i<this.count;i++)this.inv[i]=1/this.mass[i];this.firmness=.45;this.damping=.35;this.grabs=new Map();this.steps=0;this.safeguards=0;
+ }
+ reset(){this.p.set(this.rest);this.prev.set(this.rest);this.vel.fill(0);this.grabs.clear();this.steps=0;this.safeguards=0;}
+ nudge(dx=1){for(let i=0;i<this.count;i++){const h=this.p[i*3+1]/3;this.vel[i*3]+=dx*(.25+h*.75);this.vel[i*3+1]+=.35*h;this.vel[i*3+2]+=.45*h*Math.sin(this.rest[i*3]*1.2);}}
+ step(dt){
+  const p=this.p,v=this.vel,prev=this.prev,w=this.inv;prev.set(p);this.elambda.fill(0);this.vlambda.fill(0);
+  for(let i=0;i<this.count;i++){const q=i*3;v[q+1]-=2.8*dt;const speed=Math.hypot(v[q],v[q+1],v[q+2]),cap=Math.min(1,7/(speed||1));for(let a=0;a<3;a++)p[q+a]+=v[q+a]*cap*dt;}
+  // Limit the target's speed before it enters the solver; pointer event rate cannot inject impulses.
+  for(const g of this.grabs.values()){const d=sub(g.desired,g.target),l=Math.hypot(...d),f=Math.min(1,5*dt/(l||1));for(let a=0;a<3;a++)g.target[a]+=d[a]*f;g.lambda.fill(0);}
+  const compliance=(.0012+Math.pow(1-this.firmness,2)*.022)/(dt*dt);
+  for(let it=0;it<7;it++){
+   for(let k=0;k<this.lengths.length;k++){const ia=this.edges[2*k],ib=this.edges[2*k+1],a=ia*3,b=ib*3;let x=p[a]-p[b],y=p[a+1]-p[b+1],z=p[a+2]-p[b+2];const len=Math.hypot(x,y,z);if(len<1e-8)continue;const alpha=compliance*this.edgeFirm[k],dl=(-(len-this.lengths[k])-alpha*this.elambda[k])/(w[ia]+w[ib]+alpha);this.elambda[k]+=dl;x*=dl/len;y*=dl/len;z*=dl/len;p[a]+=x*w[ia];p[a+1]+=y*w[ia];p[a+2]+=z*w[ia];p[b]-=x*w[ib];p[b+1]-=y*w[ib];p[b+2]-=z*w[ib];}
+   for(const g of this.grabs.values()){
+    const anchor=[0,0,0];let den=0;for(let k=0;k<g.ids.length;k++){const i=g.ids[k],b=g.weights[k];den+=w[i]*b*b;for(let a=0;a<3;a++)anchor[a]+=p[i*3+a]*b;}
+    const alpha=.000015/(dt*dt);for(let a=0;a<3;a++){const dl=(-(anchor[a]-g.target[a])-alpha*g.lambda[a])/(den+alpha);g.lambda[a]+=dl;for(let k=0;k<g.ids.length;k++)p[g.ids[k]*3+a]+=w[g.ids[k]]*g.weights[k]*dl;}
+   }
+   this.solveVolumes(dt);
+   for(let i=0;i<this.count;i++){const q=i*3;if(p[q+1]<.025){p[q+1]=.025;p[q]-=(p[q]-prev[q])*.32;p[q+2]-=(p[q+2]-prev[q+2])*.32;}p[q]=clamp(p[q],-4.7,4.7);p[q+1]=Math.min(p[q+1],6);p[q+2]=clamp(p[q+2],-3.2,3.2);}
+  }
+  // A signed-volume barrier plus a conservative line search prevents element inversion.
+  let safe=false;for(let attempt=0;attempt<12;attempt++){safe=true;for(let k=0;k<this.volumes.length;k++){const j=k*4,vol=signedVolume(p,this.tets[j]*3,this.tets[j+1]*3,this.tets[j+2]*3,this.tets[j+3]*3);if(!Number.isFinite(vol)||vol<this.volumes[k]*.12){safe=false;break;}}if(safe)break;this.safeguards++;for(let i=0;i<p.length;i++)p[i]=prev[i]+(p[i]-prev[i])*.5;}
+  if(!safe){p.set(prev);v.fill(0);}
+  const drag=Math.exp(-(.48+this.damping*.85)*dt);
+  for(let i=0;i<this.count;i++){const q=i*3,hit=p[q+1]<=.026;for(let a=0;a<3;a++)v[q+a]=(p[q+a]-prev[q+a])/dt*drag;if(hit){v[q]*=.91;v[q+2]*=.91;if(v[q+1]<0)v[q+1]=-v[q+1]*.12;}}
+  // Internal damping removes relative extension, preserving coherent motion.
+  const damp=.008+this.damping*.09;
+  for(let k=0;k<this.lengths.length;k++){const ia=this.edges[k*2],ib=this.edges[k*2+1],a=ia*3,b=ib*3,x=p[a]-p[b],y=p[a+1]-p[b+1],z=p[a+2]-p[b+2],l2=x*x+y*y+z*z;if(l2<1e-10)continue;const rel=((v[a]-v[b])*x+(v[a+1]-v[b+1])*y+(v[a+2]-v[b+2])*z)/l2*damp/(w[ia]+w[ib]);v[a]-=x*rel*w[ia];v[a+1]-=y*rel*w[ia];v[a+2]-=z*rel*w[ia];v[b]+=x*rel*w[ib];v[b+1]+=y*rel*w[ib];v[b+2]+=z*rel*w[ib];}
+  this.steps++;
+ }
+ solveVolumes(dt){
+  const p=this.p,w=this.inv;
+  for(let k=0;k<this.volumes.length;k++){const j=k*4,ia=this.tets[j],ib=this.tets[j+1],ic=this.tets[j+2],id=this.tets[j+3],a=ia*3,b=ib*3,c=ic*3,d=id*3;
+   const ax=p[b]-p[a],ay=p[b+1]-p[a+1],az=p[b+2]-p[a+2],bx=p[c]-p[a],by=p[c+1]-p[a+1],bz=p[c+2]-p[a+2],cx=p[d]-p[a],cy=p[d+1]-p[a+1],cz=p[d+2]-p[a+2];
+   const gx1=(by*cz-bz*cy)/6,gy1=(bz*cx-bx*cz)/6,gz1=(bx*cy-by*cx)/6,gx2=(cy*az-cz*ay)/6,gy2=(cz*ax-cx*az)/6,gz2=(cx*ay-cy*ax)/6,gx3=(ay*bz-az*by)/6,gy3=(az*bx-ax*bz)/6,gz3=(ax*by-ay*bx)/6,gx0=-gx1-gx2-gx3,gy0=-gy1-gy2-gy3,gz0=-gz1-gz2-gz3;
+   const vol=ax*gx1+ay*gy1+az*gz1,alpha=2e-10/(dt*dt),den=w[ia]*(gx0*gx0+gy0*gy0+gz0*gz0)+w[ib]*(gx1*gx1+gy1*gy1+gz1*gz1)+w[ic]*(gx2*gx2+gy2*gy2+gz2*gz2)+w[id]*(gx3*gx3+gy3*gy3+gz3*gz3)+alpha;
+   if(den<1e-14)continue;const dl=(-(vol-this.volumes[k])-alpha*this.vlambda[k])/den;this.vlambda[k]+=dl;
+   p[a]+=w[ia]*dl*gx0;p[a+1]+=w[ia]*dl*gy0;p[a+2]+=w[ia]*dl*gz0;p[b]+=w[ib]*dl*gx1;p[b+1]+=w[ib]*dl*gy1;p[b+2]+=w[ib]*dl*gz1;p[c]+=w[ic]*dl*gx2;p[c+1]+=w[ic]*dl*gy2;p[c+2]+=w[ic]*dl*gz2;p[d]+=w[id]*dl*gx3;p[d+1]+=w[id]*dl*gy3;p[d+2]+=w[id]*dl*gz3;
+  }
+ }
+ metrics(){let volume=0,minRatio=Infinity,maxRatio=0,ke=0,minY=Infinity;for(let k=0;k<this.volumes.length;k++){const j=k*4,v=signedVolume(this.p,this.tets[j]*3,this.tets[j+1]*3,this.tets[j+2]*3,this.tets[j+3]*3);volume+=v;minRatio=Math.min(minRatio,v/this.volumes[k]);maxRatio=Math.max(maxRatio,v/this.volumes[k]);}for(let i=0;i<this.count;i++){const q=i*3;ke+=.5*this.mass[i]*(this.vel[q]**2+this.vel[q+1]**2+this.vel[q+2]**2);minY=Math.min(minY,this.p[q+1]);}return {mass:this.totalMass*15.625,volume:volume/this.restVolume,energy:ke*.009765625,minRatio,maxRatio,minY,steps:this.steps,safeguards:this.safeguards,grabs:this.grabs.size};}
+}
+
+// Loop subdivision is applied once to sparse embedding weights. Runtime only updates buffers.
+function blendWeights(terms){const m=new Map();for(const [src,f] of terms)for(const [i,v] of src)m.set(i,(m.get(i)||0)+v*f);return Array.from(m).filter(x=>Math.abs(x[1])>1e-9);}
+function smoothSurface(body){let weights=Array.from({length:body.count},(_,i)=>[[i,1]]),faces=body.surface;
+ for(let pass=0;pass<2;pass++){const neighbors=Array.from({length:weights.length},()=>new Set()),edges=new Map();for(const [a,b,c] of faces)for(const [i,j,k] of [[a,b,c],[b,c,a],[c,a,b]]){neighbors[i].add(j);neighbors[j].add(i);const key=Math.min(i,j)+','+Math.max(i,j);if(!edges.has(key))edges.set(key,{a:i,b:j,opp:[]});edges.get(key).opp.push(k);}
+  const next=weights.map((src,i)=>{const n=neighbors[i].size;if(!n)return src;const beta=n===3?3/16:3/(8*n);return blendWeights([[src,1-n*beta],...Array.from(neighbors[i],j=>[weights[j],beta])]);});
+  for(const e of edges.values()){e.index=next.length;next.push(blendWeights([[weights[e.a],3/8],[weights[e.b],3/8],...e.opp.map(i=>[weights[i],1/8]) ]));}
+  const edge=(a,b)=>edges.get(Math.min(a,b)+','+Math.max(a,b)).index,nf=[];for(const [a,b,c] of faces){const d=edge(a,b),e=edge(b,c),f=edge(c,a);nf.push([a,d,f],[b,e,d],[c,f,e],[d,e,f]);}weights=next;faces=nf;
+ }
+ return {weights,faces};
+}
+function tetWeights(body,q,t){const p=body.rest,pt=i=>Array.from(p.slice(i*3,i*3+3)),a=pt(t[0]),u=sub(pt(t[1]),a),v=sub(pt(t[2]),a),w=sub(pt(t[3]),a),r=sub(q,a),den=dot(u,cross(v,w)),b=dot(r,cross(v,w))/den,c=dot(u,cross(r,w))/den,d=dot(u,cross(v,r))/den;return [1-b-c-d,b,c,d];}
+function findTet(body,q){let best=null,score=-Infinity;for(let k=0;k<body.tets.length;k+=4){const t=Array.from(body.tets.slice(k,k+4)),w=tetWeights(body,q,t),s=Math.min(...w);if(s>score){score=s;best=t;}if(s>-.0001)break;}return best;}
+function buildGeometry(body){const smooth=smoothSurface(body),weights=smooth.weights,faces=smooth.faces;const skinCount=faces.length*3,rest=[],tags=[],svals=[];
+ for(const ws of weights){const p=[0,0,0];let s=0;for(const [i,w] of ws){for(let a=0;a<3;a++)p[a]+=body.rest[i*3+a]*w;s+=body.s[i]*w;}rest.push(p);tags.push(0);svals.push(s);}
+ const seedAnchors=[];
+ function ellipsoid(center,scale,angle,kind){const t=findTet(body,center),base=weights.length,cs=Math.cos(angle),sn=Math.sin(angle),seg=12,rings=8;
+  for(let j=0;j<=rings;j++)for(let i=0;i<=seg;i++){const phi=j/rings*Math.PI,theta=i/seg*Math.PI*2,yy=Math.cos(phi),taper=kind===1?(.78-.23*yy):1;let x=Math.sin(phi)*Math.cos(theta)*scale[0]*taper,y=yy*scale[1],z=Math.sin(phi)*Math.sin(theta)*scale[2]*taper;const p=[center[0]+x*cs-y*sn,center[1]+x*sn+y*cs,center[2]+z],w=tetWeights(body,p,t);weights.push(t.map((id,k)=>[id,w[k]]));rest.push(p);tags.push(kind);svals.push(0);}
+  for(let j=0;j<rings;j++)for(let i=0;i<seg;i++){const a=base+j*(seg+1)+i,b=a+seg+1;faces.push([a,a+1,b],[a+1,b+1,b]);}if(kind===1)seedAnchors.push({center,t});
+ }
+ const seedPattern=[[-.13,2.46],[.31,2.05],[-.49,1.89],[.02,1.57],[.77,1.48],[-.94,1.21],[-.43,1.07],[.39,.91],[1.19,.94],[-1.28,.78],[-.08,.65],[.83,.61]];
+ for(const side of [-1,1])for(let i=0;i<seedPattern.length;i++){let [x,y]=seedPattern[i];if(side<0){x=-x;y+=.04;}ellipsoid([x,y,side*(halfDepth(x,y)-.028)],[.082,.139,.037],-x*.44+(i%3-1)*.14,1);}
+ let rng=137;const rand=()=>{rng=(rng*1664525+1013904223)>>>0;return rng/4294967296;};
+ for(let i=0;i<21;i++){const s=.24+rand()*.52,u=(rand()*2-1)*.78,x=1.93*s*u,y=2.96-2.78*s+.52*u*u*s*s,r=.013+rand()*.019;ellipsoid([x,y,(rand()-.5)*.96],[r,r*(.9+rand()*.45),r],0,2);}
+ const data=new Float32Array(weights.length*11),indices=new Uint32Array(faces.flat()),normals=new Float64Array(weights.length*3);
+ for(let i=0;i<weights.length;i++){data.set(rest[i],i*11+6);data[i*11+9]=tags[i];data[i*11+10]=svals[i];}
+ return {weights,faces,rest,tags,skinCount,data,indices,normals,seedAnchors};
+}
+function updateGeometry(body,geo){const d=geo.data,n=geo.normals;n.fill(0);for(let i=0;i<geo.weights.length;i++){const q=i*11;d[q]=d[q+1]=d[q+2]=0;for(const [j,w] of geo.weights[i]){d[q]+=body.p[j*3]*w;d[q+1]+=body.p[j*3+1]*w;d[q+2]+=body.p[j*3+2]*w;}}
+ for(const f of geo.faces){const a=f[0]*11,b=f[1]*11,c=f[2]*11,x1=d[b]-d[a],y1=d[b+1]-d[a+1],z1=d[b+2]-d[a+2],x2=d[c]-d[a],y2=d[c+1]-d[a+1],z2=d[c+2]-d[a+2],nx=y1*z2-z1*y2,ny=z1*x2-x1*z2,nz=x1*y2-y1*x2;for(const i of f){n[i*3]+=nx;n[i*3+1]+=ny;n[i*3+2]+=nz;}}
+ for(let i=0;i<geo.weights.length;i++){const len=Math.hypot(n[i*3],n[i*3+1],n[i*3+2])||1;d[i*11+3]=n[i*3]/len;d[i*11+4]=n[i*3+1]/len;d[i*11+5]=n[i*3+2]/len;}
+}
+
+const WGSL=/* wgsl */`
+struct Uniforms {
+ vp:mat4x4f, lightVP:mat4x4f, eye:vec4f, right:vec4f, up:vec4f, forward:vec4f,
+ viewport:vec4f, flesh:vec4f, absorption:vec4f, bounds:vec4f, contact:vec4f
+};
+@group(0) @binding(0) var<uniform> u:Uniforms;
+@group(0) @binding(1) var backTex:texture_2d<f32>;
+@group(0) @binding(2) var sceneTex:texture_2d<f32>;
+@group(0) @binding(3) var samp:sampler;
+@group(0) @binding(4) var shadowTex:texture_depth_2d;
+@group(0) @binding(5) var shadowSamp:sampler_comparison;
+struct Vin {@location(0) p:vec3f,@location(1) n:vec3f,@location(2) rest:vec3f,@location(3) kind:f32,@location(4) s:f32};
+struct Vout {@builtin(position) clip:vec4f,@location(0) p:vec3f,@location(1) n:vec3f,@location(2) rest:vec3f,@location(3) kind:f32,@location(4) s:f32};
+@vertex fn vertex(v:Vin)->Vout {var o:Vout;o.clip=u.vp*vec4f(v.p,1);o.p=v.p;o.n=v.n;o.rest=v.rest;o.kind=v.kind;o.s=v.s;return o;}
+@vertex fn shadowVertex(v:Vin)->@builtin(position) vec4f{return u.lightVP*vec4f(v.p,1);}
+@fragment fn backFragment(v:Vout)->@location(0) vec4f{return vec4f(v.p,1);}
+fn hash(p:vec3f)->f32{return fract(sin(dot(p,vec3f(127.1,311.7,74.7)))*43758.5453);}
+fn noise(p:vec3f)->f32{let i=floor(p);let f=fract(p);let w=f*f*(3.-2.*f);return mix(mix(mix(hash(i),hash(i+vec3f(1,0,0)),w.x),mix(hash(i+vec3f(0,1,0)),hash(i+vec3f(1,1,0)),w.x),w.y),mix(mix(hash(i+vec3f(0,0,1)),hash(i+vec3f(1,0,1)),w.x),mix(hash(i+vec3f(0,1,1)),hash(i+vec3f(1,1,1)),w.x),w.y),w.z);}
+fn studio(dir:vec3f,rough:f32)->vec3f {
+ let key=normalize(vec3f(-.7,.5,1.2));let side=normalize(vec3f(.8,.35,-.8));
+ let a=dot(dir,key);let b=dot(dir,side);
+ let rect=exp(-pow(abs(dot(dir,normalize(vec3f(.91,0,.42))))/(.12+rough*.3),4.))*exp(-pow(abs(dot(dir,normalize(cross(key,vec3f(.91,0,.42)))))/(.49+rough*.2),6.))*smoothstep(.5,.9,a);
+ let strip=pow(max(b,0.),90.-rough*60.);
+ let softbox=pow(max(dot(dir,normalize(vec3f(-.72,.18,1.))),0.),100.);
+ return vec3f(.18,.20,.16)+vec3f(6.8,6.6,6.2)*rect+vec3f(4.8,4.7,4.4)*softbox+vec3f(2.8,3.1,2.7)*strip;
+}
+fn visibility(p:vec3f,radius:f32)->f32{
+ let q=u.lightVP*vec4f(p,1);let uv=vec2f(q.x*.5+.5,.5-q.y*.5);var sum=0.;
+ if(any(uv<vec2f(0.))||any(uv>vec2f(1.))||q.z<0.||q.z>1.){return 1.;}
+ for(var y:i32=-2;y<=2;y++){for(var x:i32=-2;x<=2;x++){sum+=textureSampleCompareLevel(shadowTex,shadowSamp,uv+vec2f(f32(x),f32(y))*radius/1024.,q.z-.0025);}}
+ return sum/25.;
+}
+fn encode(c:vec3f)->vec3f{return pow(max(c,vec3f(0.))/(vec3f(1.)+c*.14),vec3f(1./2.2));}
+@fragment fn interiorFragment(v:Vout)->@location(0) vec4f{
+ let n=normalize(v.n);let viewDir=normalize(u.eye.xyz-v.p);let light=normalize(vec3f(-3,6,5));let nv=max(dot(n,viewDir),0.);
+ let env=studio(reflect(-viewDir,n),.22);let f=.035+.965*pow(1.-nv,5.);
+ var c=vec3f(.022,.011,.009)*(.5+.5*max(dot(n,light),0.))+env*f*.55;
+ if(v.kind>1.5){c=mix(u.flesh.rgb*.8,vec3f(.8,.77,.65),pow(1.-nv,2.)*.75)+env*.045;}
+ return vec4f(c,dot(v.p-u.eye.xyz,u.forward.xyz));
+}
+@fragment fn jellyFragment(v:Vout)->@location(0) vec4f{
+ let n=normalize(v.n);let viewDir=-u.forward.xyz;let nv=clamp(dot(n,viewDir),0.,1.);
+ let uv=v.clip.xy/u.viewport.xy;let back=textureLoad(backTex,vec2i(v.clip.xy),0);let thickness=clamp(distance(v.p,back.xyz),.035,3.5);
+ let detail=noise(v.rest*35.);let n2=normalize(n+vec3f(noise(v.rest*48.)-.5,noise(v.rest*48.+12.)-.5,noise(v.rest*48.+25.)-.5)*.013);
+ let light=normalize(vec3f(-3,6,5));let nl=max(dot(n2,light),0.);let fres=.042+.958*pow(1.-nv,5.);let env=studio(reflect(-viewDir,n2),.16);
+ let incoming=refract(-viewDir,n2,1./1.37);let path=thickness/max(abs(dot(incoming,-viewDir)),.5);
+ let raw=textureSampleLevel(sceneTex,samp,uv,0);let frontDepth=dot(v.p-u.eye.xyz,u.forward.xyz);var travel=path;
+ if(raw.a>0.){travel=clamp(raw.a-frontDepth,.018,path);}
+ let refractUV=clamp(uv+vec2f(dot(incoming,u.right.xyz),-dot(incoming,u.up.xyz))*travel/u.viewport.zw*.44,vec2f(.001),vec2f(.999));
+ let inner=textureSampleLevel(sceneTex,samp,refractUV,0);let innerPath=clamp(raw.a-frontDepth,.008,path);
+ let absorption=u.absorption.rgb*(.97+detail*.06);let beer=exp(-absorption*(path+.09));
+ // Refract the studio behind the slice; shade embedded inclusions at their measured depth.
+ let background=select(inner.rgb,vec3f(1.05,1.039,.986),inner.a>0.);
+ let transmission=background*beer;
+ let scatter=u.flesh.rgb*(.18+.2*nl)*(vec3f(1.)-exp(-vec3f(1.8)*thickness));
+ let thinGlow=u.flesh.rgb*pow(1.-nv,2.)*.15*exp(-thickness*.65);
+ var c=(transmission*.77+scatter+thinGlow)*(1.-fres)+env*fres*.85;
+ if(raw.a>0.){let inclusion=exp(-innerPath*6.);let embedded=raw.rgb*exp(-absorption*innerPath)+u.flesh.rgb*.035+env*fres*.14;c=mix(c,embedded,inclusion);}
+ let pith=smoothstep(.868,.894,v.s);let skin=smoothstep(.934,.956,v.s);
+ let pithC=vec3f(.74,.79,.5)*(.69+.29*nl)+env*.022+transmission*.06;
+ c=mix(c,pithC,pith);
+ let stripe=sin(v.rest.x*17.+sin(v.rest.y*7.+v.rest.z*9.)*1.9+noise(v.rest*6.)*4.5+v.rest.z*8.);
+ let stripeMix=smoothstep(-.18,.35,stripe);let green=mix(vec3f(.016,.065,.009),vec3f(.16,.28,.029),stripeMix)*( .82+noise(v.rest*30.)*.27);
+ let skinC=green*(.56+.64*nl)+studio(reflect(-viewDir,n2),.24)*fres*.55;
+ c=mix(c,skinC,skin);
+ let selfShadow=visibility(v.p,1.4);c*=.83+.17*selfShadow;
+ return vec4f(encode(c),1);
+}
+struct Quad {@builtin(position) clip:vec4f,@location(0) uv:vec2f};
+@vertex fn quad(@builtin(vertex_index) i:u32)->Quad{var pos=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:Quad;o.clip=vec4f(pos[i],0,1);o.uv=pos[i];return o;}
+fn floorColor(v:Quad)->vec3f{
+ let origin=u.eye.xyz+u.right.xyz*v.uv.x*u.viewport.z*.5+u.up.xyz*v.uv.y*u.viewport.w*.5;let ray=u.forward.xyz;
+ let t=(-.035-origin.y)/ray.y;let p=origin+ray*t;
+ let vis=visibility(p,4.7);let offset=(p.xz-u.bounds.xz)/u.contact.xz;let contact=exp(-dot(offset,offset)*1.7)*exp(-u.contact.y*2.5);
+ var c=vec3f(1.05,1.039,.986)*(1.-(1.-vis)*.13)*(1.-contact*.18);
+ // Restrained red light bleed at ground contact, not a UI gradient.
+ c+=u.flesh.rgb*contact*.018;
+ return c;
+}
+@fragment fn floorLinear(v:Quad)->@location(0) vec4f{return vec4f(floorColor(v),0);}
+@fragment fn floorFinal(v:Quad)->@location(0) vec4f{return vec4f(encode(floorColor(v)),1);}
+@vertex fn lineVertex(@location(0) p:vec3f)->@builtin(position) vec4f{return u.vp*vec4f(p,1);}
+@fragment fn lineFragment()->@location(0) vec4f{return vec4f(.16,.22,.12,.22);}
+`;
+
+class Renderer{
+ async init(canvas,body,geo){
+  if(!window.isSecureContext)throw Error('当前页面通过普通 HTTP 访问，浏览器禁止使用 WebGPU。请使用已受信任的 HTTPS 地址；在本机上可通过 localhost 打开。');
+  if(!navigator.gpu)throw Error('此浏览器未提供 WebGPU。请使用支持 WebGPU 的新版浏览器，并确认硬件加速已开启。');
+  this.adapter=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});if(!this.adapter)throw Error('无法获取 WebGPU 图形适配器。请检查硬件加速和显卡驱动，然后重新加载。');
+  const device=this.device=await this.adapter.requestDevice();this.errors=[];device.addEventListener('uncapturederror',e=>{this.errors.push(e.error.message);console.error(e.error);fail('图形渲染出现错误，请重新加载；若仍无法运行，请更新浏览器和显卡驱动。');});device.lost.then(info=>{if(info.reason!=='destroyed')fail('GPU 连接已中断，请重新加载以恢复模拟。');});
+  this.canvas=canvas;this.context=canvas.getContext('webgpu');this.format=navigator.gpu.getPreferredCanvasFormat();this.context.configure({device,format:this.format,alphaMode:'opaque'});
+  const module=device.createShaderModule({code:WGSL,label:'Melon Jelly WGSL'}),info=await module.getCompilationInfo();const errors=info.messages.filter(x=>x.type==='error');if(errors.length)throw Error(errors.map(x=>`WGSL ${x.lineNum}: ${x.message}`).join('\n'));
+  this.uniforms=new Float32Array(68);this.ub=device.createBuffer({size:272,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+  this.vb=device.createBuffer({size:geo.data.byteLength,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});this.ib=device.createBuffer({size:geo.indices.byteLength,usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.ib,0,geo.indices);
+  this.lineData=new Float32Array(body.edges.length*3);this.lb=device.createBuffer({size:this.lineData.byteLength,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});
+  this.sampler=device.createSampler({magFilter:'linear',minFilter:'linear'});this.shadowSampler=device.createSampler({compare:'less-equal',magFilter:'linear',minFilter:'linear'});
+  this.shadow=device.createTexture({size:[1024,1024],format:'depth32float',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
+  this.layout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}},{binding:1,visibility:GPUShaderStage.FRAGMENT,texture:{}},{binding:2,visibility:GPUShaderStage.FRAGMENT,texture:{}},{binding:3,visibility:GPUShaderStage.FRAGMENT,sampler:{}},{binding:4,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:'depth'}},{binding:5,visibility:GPUShaderStage.FRAGMENT,sampler:{type:'comparison'}}]});
+  const layout=device.createPipelineLayout({bindGroupLayouts:[this.layout]}),buffers=[{arrayStride:44,attributes:[{shaderLocation:0,offset:0,format:'float32x3'},{shaderLocation:1,offset:12,format:'float32x3'},{shaderLocation:2,offset:24,format:'float32x3'},{shaderLocation:3,offset:36,format:'float32'},{shaderLocation:4,offset:40,format:'float32'}]}];
+  const meshPipe=(entry,format,extra={})=>device.createRenderPipeline({layout,vertex:{module,entryPoint:'vertex',buffers},fragment:{module,entryPoint:entry,targets:[{format}]},primitive:{topology:'triangle-list',cullMode:'back'},depthStencil:{format:'depth32float',depthWriteEnabled:true,depthCompare:'less'},...extra});
+  device.pushErrorScope('validation');
+  this.backPipe=meshPipe('backFragment','rgba16float',{primitive:{topology:'triangle-list',cullMode:'front'},depthStencil:{format:'depth32float',depthWriteEnabled:true,depthCompare:'greater'}});
+  this.innerPipe=meshPipe('interiorFragment','rgba16float',{primitive:{topology:'triangle-list',cullMode:'none'}});
+  this.jellyPipe=meshPipe('jellyFragment',this.format,{multisample:{count:4}});
+  this.shadowPipe=device.createRenderPipeline({layout,vertex:{module,entryPoint:'shadowVertex',buffers},primitive:{topology:'triangle-list',cullMode:'none'},depthStencil:{format:'depth32float',depthWriteEnabled:true,depthCompare:'less',depthBias:2,depthBiasSlopeScale:2}});
+  const floorPipe=(entry,format,samples)=>device.createRenderPipeline({layout,vertex:{module,entryPoint:'quad'},fragment:{module,entryPoint:entry,targets:[{format}]},primitive:{topology:'triangle-list'},depthStencil:{format:'depth32float',depthWriteEnabled:false,depthCompare:'always'},multisample:{count:samples}});
+  this.floorLinear=floorPipe('floorLinear','rgba16float',1);this.floorFinal=floorPipe('floorFinal',this.format,4);
+  this.linePipe=device.createRenderPipeline({layout,vertex:{module,entryPoint:'lineVertex',buffers:[{arrayStride:12,attributes:[{shaderLocation:0,offset:0,format:'float32x3'}]}]},fragment:{module,entryPoint:'lineFragment',targets:[{format:this.format,blend:{color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha'},alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha'}}}]},primitive:{topology:'line-list'},depthStencil:{format:'depth32float',depthWriteEnabled:false,depthCompare:'always'},multisample:{count:4}});
+  const err=await device.popErrorScope();if(err)throw Error(err.message);
+  this.dummy=device.createTexture({size:[1,1],format:'rgba16float',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.RENDER_ATTACHMENT});this.dummyDepth=device.createTexture({size:[1,1],format:'depth32float',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.RENDER_ATTACHMENT});
+  this.eye=[4.1,3.15,7.7];this.target=[0,1.47,0];this.forward=norm(sub(this.target,this.eye));this.right=norm(cross(this.forward,[0,1,0]));this.up=cross(this.right,this.forward);this.lightVP=mm(ortho(-4,4,-4,4,.1,18),view([-3.5,7,5],[0,1.1,0]));this.resize();
+ }
+ group(back,scene,shadow){return this.device.createBindGroup({layout:this.layout,entries:[{binding:0,resource:{buffer:this.ub}},{binding:1,resource:back.createView()},{binding:2,resource:scene.createView()},{binding:3,resource:this.sampler},{binding:4,resource:shadow.createView()},{binding:5,resource:this.shadowSampler}]});}
+ resize(){const canvas=this.canvas,device=this.device,rect=canvas.getBoundingClientRect(),dpr=Math.min(window.devicePixelRatio||1,1.65),w=Math.max(2,Math.round(rect.width*dpr)),h=Math.max(2,Math.round(rect.height*dpr));if(w===canvas.width&&h===canvas.height&&this.color)return;canvas.width=w;canvas.height=h;this.width=w;this.height=h;const aspect=w/h;this.worldH=Math.max(3.95,4.9/aspect);this.worldW=this.worldH*aspect;this.vp=mm(ortho(-this.worldW/2,this.worldW/2,-this.worldH/2,this.worldH/2,.1,30),view(this.eye,this.target));
+  for(const key of ['color','depth','back','backDepth','scene','sceneDepth'])if(this[key])this[key].destroy();
+  const tex=(format,sampleCount=1)=>device.createTexture({size:[w,h],format,sampleCount,usage:GPUTextureUsage.RENDER_ATTACHMENT|(sampleCount===1?GPUTextureUsage.TEXTURE_BINDING:0)});
+  this.color=tex(this.format,4);this.depth=tex('depth32float',4);this.back=tex('rgba16float');this.backDepth=tex('depth32float');this.scene=tex('rgba16float');this.sceneDepth=tex('depth32float');
+  this.emptyGroup=this.group(this.dummy,this.dummy,this.dummyDepth);this.interiorGroup=this.group(this.dummy,this.dummy,this.shadow);this.mainGroup=this.group(this.back,this.scene,this.shadow);
+ }
+ render(body,geo,preset,mesh){this.resize();const device=this.device,u=this.uniforms;u.set(this.vp,0);u.set(this.lightVP,16);u.set([...this.eye,1],32);u.set([...this.right,0],36);u.set([...this.up,0],40);u.set([...this.forward,0],44);u.set([this.width,this.height,this.worldW,this.worldH],48);u.set([...preset.flesh,0],52);u.set([...preset.absorb,0],56);
+  let cx=0,cz=0,minY=Infinity,minX=Infinity,maxX=-Infinity,minZ=Infinity,maxZ=-Infinity;for(let i=0;i<body.count;i++){cx+=body.p[i*3]*body.mass[i];cz+=body.p[i*3+2]*body.mass[i];minY=Math.min(minY,body.p[i*3+1]);minX=Math.min(minX,body.p[i*3]);maxX=Math.max(maxX,body.p[i*3]);minZ=Math.min(minZ,body.p[i*3+2]);maxZ=Math.max(maxZ,body.p[i*3+2]);}u.set([cx/body.totalMass,0,cz/body.totalMass,0],60);u.set([Math.max(.4,(maxX-minX)*.52),minY,Math.max(.35,(maxZ-minZ)*.7),0],64);
+  device.queue.writeBuffer(this.ub,0,u);device.queue.writeBuffer(this.vb,0,geo.data);
+  const enc=device.createCommandEncoder(),meshSetup=(pass,pipe,group)=>{pass.setPipeline(pipe);pass.setBindGroup(0,group);pass.setVertexBuffer(0,this.vb);pass.setIndexBuffer(this.ib,'uint32');};
+  let pass=enc.beginRenderPass({colorAttachments:[],depthStencilAttachment:{view:this.shadow.createView(),depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store'}});meshSetup(pass,this.shadowPipe,this.emptyGroup);pass.drawIndexed(geo.skinCount);pass.end();
+  pass=enc.beginRenderPass({colorAttachments:[{view:this.back.createView(),clearValue:[0,0,0,0],loadOp:'clear',storeOp:'store'}],depthStencilAttachment:{view:this.backDepth.createView(),depthClearValue:0,depthLoadOp:'clear',depthStoreOp:'store'}});meshSetup(pass,this.backPipe,this.emptyGroup);pass.drawIndexed(geo.skinCount);pass.end();
+  pass=enc.beginRenderPass({colorAttachments:[{view:this.scene.createView(),clearValue:[0,0,0,0],loadOp:'clear',storeOp:'store'}],depthStencilAttachment:{view:this.sceneDepth.createView(),depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store'}});pass.setPipeline(this.floorLinear);pass.setBindGroup(0,this.interiorGroup);pass.draw(3);meshSetup(pass,this.innerPipe,this.interiorGroup);pass.drawIndexed(geo.indices.length-geo.skinCount,1,geo.skinCount);pass.end();
+  pass=enc.beginRenderPass({colorAttachments:[{view:this.color.createView(),resolveTarget:this.context.getCurrentTexture().createView(),clearValue:[.965,.96,.94,1],loadOp:'clear',storeOp:'discard'}],depthStencilAttachment:{view:this.depth.createView(),depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'discard'}});pass.setPipeline(this.floorFinal);pass.setBindGroup(0,this.mainGroup);pass.draw(3);meshSetup(pass,this.jellyPipe,this.mainGroup);pass.drawIndexed(geo.skinCount);
+  if(mesh){for(let i=0;i<body.edges.length;i++){const q=body.edges[i]*3;this.lineData[i*3]=body.p[q];this.lineData[i*3+1]=body.p[q+1];this.lineData[i*3+2]=body.p[q+2];}device.queue.writeBuffer(this.lb,0,this.lineData);pass.setPipeline(this.linePipe);pass.setVertexBuffer(0,this.lb);pass.draw(body.edges.length);}
+  pass.end();device.queue.submit([enc.finish()]);
+ }
+ ray(clientX,clientY){const rect=this.canvas.getBoundingClientRect(),x=((clientX-rect.left)/rect.width-.5)*this.worldW,y=(.5-(clientY-rect.top)/rect.height)*this.worldH;return {origin:add(this.eye,add(mul(this.right,x),mul(this.up,y))),dir:this.forward};}
+ project(p){const v=transform(this.vp,p),r=this.canvas.getBoundingClientRect();return {x:r.left+(v[0]*.5+.5)*r.width,y:r.top+(.5-v[1]*.5)*r.height};}
+}
+
+function pick(ray,geo){let nearest=Infinity,result=null;const d=geo.data;for(let i=0;i<geo.skinCount;i+=3){const ia=geo.indices[i],ib=geo.indices[i+1],ic=geo.indices[i+2],a=Array.from(d.slice(ia*11,ia*11+3)),b=Array.from(d.slice(ib*11,ib*11+3)),c=Array.from(d.slice(ic*11,ic*11+3)),e1=sub(b,a),e2=sub(c,a),h=cross(ray.dir,e2),det=dot(e1,h);if(Math.abs(det)<1e-8)continue;const inv=1/det,s=sub(ray.origin,a),u=inv*dot(s,h);if(u<0||u>1)continue;const q=cross(s,e1),v=inv*dot(ray.dir,q);if(v<0||u+v>1)continue;const t=inv*dot(e2,q);if(t>0&&t<nearest){nearest=t;result={t,ids:[ia,ib,ic],bary:[1-u-v,u,v],point:add(ray.origin,mul(ray.dir,t))};}}return result;}
+
+const presets=[{name:'红瓤',flesh:[.65,.012,.025],absorb:[.43,3.9,3.25]},{name:'黄瓤',flesh:[.8,.44,.038],absorb:[.13,.49,2.7]},{name:'粉瓤',flesh:[.8,.17,.23],absorb:[.13,1.65,1.2]}];
+let body,geo,renderer,ready=false,failed=false,paused=matchMedia('(prefers-reduced-motion: reduce)').matches,preset=0,accumulator=0,lastTime=0,lastStats=0;
+function status(){if(!ready||failed)return;$('status').className='status live';$('status-text').textContent=paused?'WebGPU · 已暂停':'WebGPU · 运行中';$('pause-label').textContent=paused?'继续':'暂停';$('pause').querySelector('.pause-icon').textContent=paused?'▷':'Ⅱ';$('nudge').disabled=paused;}
+function fail(message){failed=true;ready=false;$('status').className='status failed';$('status-text').textContent='WebGPU · 不可用';$('loader').hidden=false;$('loader').replaceChildren();const title=document.createElement('strong'),desc=document.createElement('span');title.textContent='当前环境无法使用 WebGPU';desc.textContent=message;$('loader').append(title,desc);document.querySelectorAll('.panel button,.panel input').forEach(el=>el.disabled=true);console.error(message);}
+function updateStats(){const m=body.metrics();$('mass').textContent=m.mass.toFixed(1);$('volume').textContent=m.volume.toFixed(3);$('energy').textContent=m.energy<.0005?'0.000':m.energy.toFixed(3);}
+function release(id){if(body)body.grabs.delete(id);if(!body?.grabs.size){$('canvas').classList.remove('grabbing');$('cursor').style.display='none';}}
+function wireControls(){
+ for(const name of ['firmness','damping'])$(name).addEventListener('input',e=>{body[name]=+e.target.value/100;$(name+'-value').textContent=e.target.value+'%';});
+ document.querySelectorAll('[data-preset]').forEach(el=>el.addEventListener('click',()=>{preset=+el.dataset.preset;document.querySelectorAll('[data-preset]').forEach(b=>b.setAttribute('aria-pressed',b===el?'true':'false'));$('preset-name').textContent=presets[preset].name;}));
+ $('nudge').addEventListener('click',()=>{if(!paused)body.nudge();});$('pause').addEventListener('click',()=>{paused=!paused;body.grabs.clear();release(-1);accumulator=0;status();});
+ const reset=()=>{body.reset();release(-1);accumulator=0;updateGeometry(body,geo);updateStats();};$('reset').addEventListener('click',reset);
+ const canvas=$('canvas');canvas.addEventListener('pointerdown',e=>{if(!ready||paused||e.button>0)return;const hit=pick(renderer.ray(e.clientX,e.clientY),geo);if(!hit)return;e.preventDefault();canvas.focus({preventScroll:true});canvas.setPointerCapture(e.pointerId);const weights=blendWeights(hit.ids.map((id,i)=>[geo.weights[id],hit.bary[i]]));body.grabs.set(e.pointerId,{ids:weights.map(x=>x[0]),weights:weights.map(x=>x[1]),target:hit.point.slice(),desired:hit.point.slice(),start:hit.point.slice(),planeDepth:dot(sub(hit.point,renderer.eye),renderer.forward),lambda:[0,0,0]});canvas.classList.add('grabbing');});
+ canvas.addEventListener('pointermove',e=>{const g=body.grabs.get(e.pointerId);if(!g)return;e.preventDefault();const ray=renderer.ray(e.clientX,e.clientY),target=add(ray.origin,mul(ray.dir,g.planeDepth)),delta=sub(target,g.start),len=Math.hypot(...delta);g.desired=add(g.start,mul(delta,Math.min(1,3.1/(len||1))));g.desired[1]=clamp(g.desired[1],.08,5.5);const rect=canvas.getBoundingClientRect();$('cursor').style.cssText=`display:block;left:${e.clientX-rect.left}px;top:${e.clientY-rect.top}px`;});
+ for(const event of ['pointerup','pointercancel','lostpointercapture'])canvas.addEventListener(event,e=>release(e.pointerId));
+ canvas.addEventListener('wheel',e=>{if(!body.grabs.size)return;e.preventDefault();for(const g of body.grabs.values()){const d=clamp(e.deltaY*.002,-.15,.15);g.planeDepth+=d;g.desired=add(g.desired,mul(renderer.forward,d));}},{passive:false});
+ canvas.addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();$('pause').click();}if(e.key.toLowerCase()==='r')reset();if(e.key.startsWith('Arrow')){e.preventDefault();if(!paused)body.nudge(e.key==='ArrowLeft'?-1:1);}});
+ window.addEventListener('blur',()=>{body.grabs.clear();release(-1);});document.addEventListener('visibilitychange',()=>{accumulator=0;lastTime=0;if(document.hidden){body.grabs.clear();release(-1);}});
+ matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change',e=>{if(e.matches){paused=true;body.grabs.clear();release(-1);status();$('reduced-note').hidden=false;}});
+}
+function frame(time){if(!ready)return;const elapsed=lastTime?Math.min((time-lastTime)/1000,.05):0;lastTime=time;if(!paused&&!document.hidden){accumulator+=elapsed*($('slow').checked?.25:1);let steps=0;while(accumulator>=1/120&&steps<6){body.step(1/120);accumulator-=1/120;steps++;}if(steps===6)accumulator=0;}updateGeometry(body,geo);renderer.render(body,geo,presets[preset],$('mesh').checked);if(time-lastStats>180){updateStats();lastStats=time;}requestAnimationFrame(frame);}
+(async()=>{try{body=new SoftBody();geo=buildGeometry(body);updateGeometry(body,geo);renderer=new Renderer();await renderer.init($('canvas'),body,geo);$('reduced-note').hidden=!paused;wireControls();ready=true;status();$('loader').hidden=true;updateStats();
+ // Read-only diagnostics make the delivered single file inspectable without a build tool.
+ window.melonJelly={get metrics(){return body.metrics()},get topology(){return {nodes:body.count,tetrahedra:body.volumes.length,surfaceTriangles:geo.skinCount/3,seedCount:geo.seedAnchors.length}},get state(){return {ready,paused,preset,slow:$('slow').checked,mesh:$('mesh').checked,errors:renderer.errors.slice()}},project:point=>renderer.project(point)};
+ requestAnimationFrame(frame);
+}catch(e){console.error(e);fail(/^(当前页面|此浏览器|无法获取)/.test(e.message)?e.message:'无法启动三维交互，请确认浏览器支持 WebGPU 并已开启硬件加速，然后重新加载。');}})();
+</script>
+</body>
+</html>

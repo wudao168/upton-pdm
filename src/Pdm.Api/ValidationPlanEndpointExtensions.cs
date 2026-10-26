@@ -163,8 +163,9 @@ public static class ValidationPlanEndpointExtensions
         {
             var service = qualityAcceptance ? services.GetRequiredKeyedService<ValidationPlanService>("quality") : services.GetRequiredService<ValidationPlanService>();
             var (actor, role) = CurrentUser(context.User);
+            if (NotificationRecipientPolicy.SystemOnly(TenantContext.Current?.EffectiveRoleCodes ?? [role.ToString()])) return Results.Ok(Array.Empty<ValidationPlanApprovalTaskResponse>());
             var projects = (await repository.ListProjectsForUserAsync(actor, role, cancellationToken)).ToDictionary(item => item.Id);
-            var tasks = await service.ListMyApprovalTasksAsync(actor, role, cancellationToken);
+            var tasks = await service.ListMyApprovalTasksAsync(actor, role, cancellationToken, businessInbox: true);
             return Results.Ok(tasks.Where(item => projects.ContainsKey(item.ProjectId)).Select(item => new ValidationPlanApprovalTaskResponse(
                 item.Id, item.PlanId, item.ProjectId, projects[item.ProjectId].Code, projects[item.ProjectId].Name, item.RevisionNumber, item.Stage, item.StepName, item.CreatedAt)));
         });

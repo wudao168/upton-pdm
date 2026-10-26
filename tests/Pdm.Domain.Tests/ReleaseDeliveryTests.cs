@@ -6,6 +6,22 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class ReleaseDeliveryTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SystemAdministratorDepartmentRecipientsDependOnBusinessRoles(bool mixed)
+    {
+        var f = await Fixture.CreateAsync();
+        await f.Repository.UpdateUserAsync("admin", "系统管理员", UserRole.Administrator, "Administrator", mixed ? ["Administrator", "Engineer"] : ["Administrator"], true, default);
+        var record = await f.Service.EnsureAsync(f.Package.Id, default);
+        Assert.All(record.State.Departments, receipt => Assert.Equal(mixed ? 1 : 0, receipt.Recipients.Count));
+        Assert.Equal(mixed ? 3 : 0, record.State.Deliveries.Count);
+        await f.Service.PublishedAsync(f.Package.Id, default);
+        await f.RunAsync();
+        Assert.Equal(mixed ? 2 : 0, f.Sender.Deliveries.Count);
+        Assert.Equal(mixed ? 1 : 0, (await f.Repository.ListUserNotificationsAsync("admin", 100, default)).Count);
+    }
+
     [Fact]
     public async Task AdministratorChosenDepartmentsAreFrozenAndOverlappingRecipientsAreDeduplicated()
     {
@@ -162,7 +178,7 @@ public sealed class ReleaseDeliveryTests
             TenantContext.Clear();
             var clock = new TestClock(); var repository = new InMemoryPdmRepository(clock);
             var company = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First(item => item.IsActive).Id;
-            await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "部门测试成员", "unused", UserRole.Administrator, true, CompanyId: company), default);
+            await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "部门测试成员", "unused", UserRole.Administrator, true, RoleCode: "developer", CompanyId: company), default);
             var customer = (await repository.ListCustomersAsync(false, default)).First();
             var equipment = (await repository.ListEquipmentTypesAsync(false, default)).First();
             var project = await repository.CreateNumberedProjectAsync(new(company, "P", equipment.Code, customer.Id, "发布通知隔离项目", null,

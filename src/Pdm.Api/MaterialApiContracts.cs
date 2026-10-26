@@ -1,6 +1,7 @@
 namespace Upton.Pdm.Api;
 
 public sealed record SetMaterialCoverRequest(Guid? AttachmentId, long ExpectedRowVersion);
+public sealed record ReplaceMaterialImagesRequest(IReadOnlyList<Guid> AttachmentIds, Guid? CoverAttachmentId, long ExpectedRowVersion);
 
 public sealed record ConfirmU9MaterialAttributesRequest(IReadOnlyList<string> Attributes);
 

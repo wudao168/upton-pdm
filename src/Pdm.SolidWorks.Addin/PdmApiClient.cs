@@ -1021,6 +1021,13 @@ internal sealed partial class PdmApiClient : IDisposable
         ToRequestNode(node, true, plannedPaths);
     }
 
+    internal async Task RequireReferenceWarningsSupportAsync(CancellationToken token)
+    {
+        var capabilities = await GetJsonAsync<Dictionary<string, bool>>("api/archive-capabilities", token);
+        if (capabilities == null || !capabilities.TryGetValue("referenceWarnings", out var supported) || !supported)
+            throw new InvalidOperationException("服务器尚不支持随版本保存引用提示，已保留本地图档。请更新服务器后重新存档。");
+    }
+
     internal static void ValidateArchiveReferenceCompleteness(CadTreeNode node)
     {
         if (node == null) return;
@@ -1151,6 +1158,7 @@ internal sealed partial class PdmApiClient : IDisposable
         return new
         {
             treeScopeOnly = false, includesDesignDependencies = isRoot, nodeId = node.NodeId,
+            referenceWarnings = node.ReferenceWarnings.Distinct().ToArray(),
             usesNativeFileInventory = isRoot && node.NativeFileScopeVerified,
             structureIndexPending = node.StructureIndexPending || node.HasUnverifiedDrawingIndex
                 || reusedArchive?.StructureIndexPending == true,
@@ -1181,6 +1189,7 @@ internal sealed partial class PdmApiClient : IDisposable
         {
             nodeId = Guid.NewGuid(), documentId = node.DocumentId,
             structureIndexPending = node.StructureIndexPending,
+            referenceWarnings = node.ReferenceWarnings,
             instancePath = (newRootPath ?? string.Empty).TrimEnd('/') + "/" + relative,
             fileName = node.FileName, displayName = node.DisplayName, kind = node.Kind,
             role = node.Role, isSuppressed = node.IsSuppressed,
@@ -1349,6 +1358,7 @@ internal sealed class RevisionDto
 
 internal sealed class DocumentReferenceNodeDto
 {
+    public List<string> ReferenceWarnings { get; set; }
     public bool StructureIndexPending { get; set; }
     public Guid? DocumentId { get; set; }
     public string InstancePath { get; set; }

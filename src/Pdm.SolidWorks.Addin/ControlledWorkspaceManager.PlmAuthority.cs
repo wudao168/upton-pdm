@@ -12,14 +12,15 @@ internal sealed partial class ControlledWorkspaceManager
     private bool machineFallbackEnabled;
     private readonly Dictionary<Guid, string> serverDerivedDirectories = new Dictionary<Guid, string>();
     private readonly Dictionary<Guid, string> serverWorkingDirectories = new Dictionary<Guid, string>();
+    private readonly Dictionary<Guid, string> verifiedSnapshotDirectories = new Dictionary<Guid, string>();
     private IEnumerable<string> ServerWorkspaceRoots => machineFallbackEnabled
         ? PdmDocumentIdentityStore.ManagedWorkspaceRoots(workspaceRoot) : new[] { workspaceRoot };
 
-    // Each explicit acquisition starts from the server manifest in a new directory.
-    // Existing working files, journals, sharing locks and permissions are not inputs.
+    // Checkout changes permissions on the verified cache. A new directory is only
+    // needed for a separate historical context, never for an unchanged checkout.
     internal async Task<string> PreparePlmWorkingCopyAsync(ControlledOpenManifestDto manifest,
         IReadOnlyCollection<Guid> editableIds, CancellationToken token)
-        => await PrepareServerWorkingCopyAsync(manifest, editableIds, false, token).ConfigureAwait(false);
+        => await PrepareWorkingCopyAsync(manifest, editableIds, token).ConfigureAwait(false);
 
     private async Task<string> PrepareServerWorkingCopyAsync(ControlledOpenManifestDto manifest,
         IReadOnlyCollection<Guid> editableIds, bool historical, CancellationToken token)
@@ -71,18 +72,54 @@ internal sealed partial class ControlledWorkspaceManager
 
     private async Task DownloadManifestFilesAsync(ControlledOpenManifestDto manifest, string target, CancellationToken token)
     {
+        var completed = 0;
+        var report = PreparationProgress;
         using (var pending = CancellationTokenSource.CreateLinkedTokenSource(token))
         using (var slots = new SemaphoreSlim(4))
         {
             var downloads = manifest.Files.Select(async file =>
             {
                 await slots.WaitAsync(pending.Token).ConfigureAwait(false);
-                try { await apiClient.DownloadControlledOpenFileAsync(file, target, pending.Token).ConfigureAwait(false); }
+                try
+                {
+                    if (!TryCopyCachedVersion(manifest, file, target))
+                        await apiClient.DownloadControlledOpenFileAsync(file, target, pending.Token).ConfigureAwait(false);
+                    var count = Interlocked.Increment(ref completed);
+                    if (count == 1 || count % 10 == 0 || count == manifest.Files.Count)
+                        report?.Invoke("正在准备本地文件：" + file.FileName, count, manifest.Files.Count);
+                }
                 catch { pending.Cancel(); throw; }
                 finally { slots.Release(); }
             }).ToArray();
             await Task.WhenAll(downloads).ConfigureAwait(false);
         }
+    }
+
+    private bool TryCopyCachedVersion(ControlledOpenManifestDto manifest, ControlledOpenFileDto file, string target)
+    {
+        var candidates = new List<string> { WorkingDirectory(manifest) };
+        if (verifiedSnapshotDirectories.TryGetValue(manifest.RootDocumentId, out var snapshot)) candidates.Add(snapshot);
+        foreach (var directory in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var source = ManifestPath(directory, file);
+            try
+            {
+                if (!File.Exists(source) || !ControlledReferenceMaterializer.Matches(source, file)) continue;
+            }
+            catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
+            {
+                PluginDiagnosticLog.Record("受控缓存", "本地缓存暂不可读，将从PLM取回该文件，原文件保留：" + source + "；" + error);
+                continue;
+            }
+            var destination = ManifestPath(target, file);
+            Directory.CreateDirectory(Path.GetDirectoryName(destination));
+            CopyFileAtomically(source, destination);
+            ControlledReferenceMaterializer.CopyResolvedBinding(source, destination);
+            if (!ControlledReferenceMaterializer.Matches(destination, file))
+                throw new IOException("缓存文件在复制期间发生变化，未打开图档：" + file.FileName);
+            return true;
+        }
+        return false;
     }
 
     internal async Task<string> DownloadFreshServerCopyAsync(ControlledOpenManifestDto manifest, bool historical, CancellationToken token)

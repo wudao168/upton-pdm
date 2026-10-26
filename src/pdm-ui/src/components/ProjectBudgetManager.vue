@@ -97,7 +97,8 @@ async function save() {
   } catch (cause) { ElMessage.error(cause instanceof Error ? cause.message : '预算保存失败') }
   finally { saving.value = false }
 }
-watch(() => [props.project.id, props.token], () => { subTab.value = 'summary'; assessmentDirty.value = false; noteCategory.value = null; load() }, { immediate: true })
+// 同一项目的后台更新和登录续期不能重置页签或未保存内容。
+watch([() => props.project.id, () => Boolean(props.token)], () => { subTab.value = 'summary'; assessmentDirty.value = false; noteCategory.value = null; load() }, { immediate: true })
 </script>
 
 <template>

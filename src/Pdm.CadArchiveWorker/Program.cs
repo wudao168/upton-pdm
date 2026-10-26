@@ -19,11 +19,13 @@ internal static class Program
     {
         if (args.Length == 2 && args[0] == "--watch") return Watch(Path.GetFullPath(args[1]));
         if (args.Length != 2) return 2;
+        System.Windows.Forms.Application.OleRequired();
         var result = Path.GetFullPath(args[1]); Process owned = null; SldWorks app = null;
         var previewsResult = Path.Combine(Path.GetDirectoryName(result), "native-previews.json");
         var attemptsPath = Path.Combine(Path.GetDirectoryName(result), "native-preview-attempts.json");
         var retryPath = Path.Combine(Path.GetDirectoryName(result), "native-preview-retry.json");
         var archiveReady = false;
+        var nativeFailed = false;
         var attempt = 0;
         try
         {
@@ -47,26 +49,41 @@ internal static class Program
                 PreviewState(result, previewsResult, null, true);
                 if (File.Exists(retryPath)) File.Delete(retryPath);
             }
-            var before = Process.GetProcessesByName("SLDWORKS").Select(p => p.Id).ToHashSet();
-            app = (SldWorks)Activator.CreateInstance(Type.GetTypeFromProgID("SldWorks.Application", true));
-            var processId = app.GetProcessID();
-            if (before.Contains(processId))
+            var independent = PdmAddin.StartNativeArchiveSession(Path.GetDirectoryName(result), (id, started) =>
             {
-                Marshal.FinalReleaseComObject(app); app = null;
-                throw new InvalidOperationException("未创建独立CAD解析进程，现有SolidWorks会话保持不变。");
+                var created = Process.GetProcessById(id);
+                if (created.StartTime.ToUniversalTime().Ticks != started)
+                { created.Dispose(); throw new InvalidOperationException("独立归档进程身份已变化，未接管该会话。"); }
+                owned?.Dispose(); owned = created;
+                using (var worker = Process.GetCurrentProcess())
+                    Atomic(Path.Combine(Path.GetDirectoryName(result), "native-owner.json"), Json.Serialize(new
+                    { Id = owned.Id, Started = started, WorkerId = worker.Id, WorkerStarted = worker.StartTime.ToUniversalTime().Ticks }));
+            });
+            if (independent != null) app = (SldWorks)independent;
+            else
+            {
+                var before = Process.GetProcessesByName("SLDWORKS").Select(p => p.Id).ToHashSet();
+                app = (SldWorks)Activator.CreateInstance(Type.GetTypeFromProgID("SldWorks.Application", true));
+                var processId = app.GetProcessID();
+                if (before.Contains(processId))
+                {
+                    Marshal.FinalReleaseComObject(app); app = null;
+                    throw new InvalidOperationException("未创建独立CAD解析进程，现有SolidWorks会话保持不变。");
+                }
+                owned = Process.GetProcessById(processId);
             }
-            owned = Process.GetProcessById(processId);
             using (var worker = Process.GetCurrentProcess())
                 Atomic(Path.Combine(Path.GetDirectoryName(result), "native-owner.json"), Json.Serialize(new
                 { Id = owned.Id, Started = owned.StartTime.ToUniversalTime().Ticks, WorkerId = worker.Id, WorkerStarted = worker.StartTime.ToUniversalTime().Ticks }));
             // Automation activation starts a private reader. Neither the registry nor
             // UnloadAddIn may change the user's global autoload preference.
             var loadedAddin = app.GetAddInObject(AddinId);
-            if (loadedAddin != null)
+            if (loadedAddin != null && !PdmAddin.IsNativeArchiveReaderAddin(Path.GetDirectoryName(result), owned.Id))
             {
                 if (Marshal.IsComObject(loadedAddin)) Marshal.ReleaseComObject(loadedAddin);
                 throw new InvalidOperationException("后台独立解析会话加载了交互插件，已停止解析；用户插件启动设置保持不变，请稍后重试。");
             }
+            if (loadedAddin != null && Marshal.IsComObject(loadedAddin)) Marshal.ReleaseComObject(loadedAddin);
             app.Visible = false; app.UserControl = false;
             Action<string> progress = stage =>
             {
@@ -84,22 +101,39 @@ internal static class Program
         }
         catch (Exception error)
         {
-            File.WriteAllText(result + ".diagnostic.txt", error.ToString());
+            for (var cause = error; cause != null; cause = cause.InnerException)
+                if (cause is COMException) nativeFailed = true;
+            var nativeExit = "";
+            try { if (owned != null && owned.HasExited) nativeExit = "\r\n独立SolidWorks已退出；进程=" + owned.Id + "；退出码=" + owned.ExitCode; }
+            catch (InvalidOperationException) { }
+            File.WriteAllText(result + ".diagnostic.txt", error + nativeExit);
             var message = error is InvalidOperationException && error.Message.Any(c => c >= '\u4e00' && c <= '\u9fff')
-                ? error.Message : "后台图档解析未完成，上传文件已保留，请核对设计树内文件后重试。";
+                ? error.Message : nativeFailed
+                    ? archiveReady ? "专用预览会话发生异常，原生存档已保留，可重试生成预览。"
+                        : "SolidWorks 专用处理会话发生异常，本次处理未完成，原图档和窗口已保留；具体图档及原因已记录。"
+                    : "后台图档解析未完成，上传文件已保留，请核对设计树内文件后重试。";
             if (archiveReady) PreviewState(result, previewsResult, message, attempt < 3);
             else Atomic(result, Json.Serialize(new { Success = false, Error = message }));
             return 1;
         }
         finally
         {
+            if (owned != null)
+                app = PdmAddin.CurrentNativeArchiveSession(Path.GetDirectoryName(result), owned.Id) as SldWorks ?? app;
+            // A failed native server can accept RPCs and then never return from
+            // cleanup. Its identity was captured at creation; do not call it again.
+            if (nativeFailed && owned != null)
+            {
+                if (!owned.HasExited) { owned.Kill(); owned.WaitForExit(5000); }
+                if (app != null) { Marshal.FinalReleaseComObject(app); app = null; }
+            }
             if (app != null && owned != null)
             {
                 var isolationPath = Path.Combine(Path.GetDirectoryName(result), "native-session-isolation.json");
                 try
                 {
                     var interactive = app.GetAddInObject(AddinId);
-                    var loaded = interactive != null;
+                    var loaded = interactive != null && !PdmAddin.IsNativeArchiveReaderAddin(Path.GetDirectoryName(result), owned.Id);
                     if (interactive != null && Marshal.IsComObject(interactive)) Marshal.ReleaseComObject(interactive);
                     Atomic(isolationPath, Json.Serialize(new { CheckSucceeded = true, InteractiveAddinLoaded = loaded, ProcessId = owned.Id }));
                 }
@@ -109,7 +143,26 @@ internal static class Program
                     catch (IOException) { } catch (UnauthorizedAccessException) { }
                 }
             }
-            if (app != null) { try { if (owned != null) { app.CloseAllDocuments(true); app.ExitApp(); } } catch { } finally { Marshal.FinalReleaseComObject(app); } }
+            if (app != null)
+            {
+                try
+                {
+                    if (owned != null)
+                    {
+                        var closing = ((app.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
+                            .Select(model => new { Path = model.GetPathName(), Title = model.GetTitle(), Kind = model.GetType() })
+                            .OrderByDescending(model => model.Kind).ToArray();
+                        foreach (var model in closing)
+                            if (string.IsNullOrWhiteSpace(model.Path) || app.GetOpenDocumentByName(model.Path) != null) app.CloseDoc(model.Title);
+                        app.ExitApp();
+                    }
+                }
+                catch
+                {
+                    if (owned != null && !owned.HasExited) { owned.Kill(); owned.WaitForExit(5000); }
+                }
+                finally { Marshal.FinalReleaseComObject(app); }
+            }
             if (owned != null) { if (!owned.HasExited && !owned.WaitForExit(15000)) owned.Kill(); owned.Dispose(); }
         }
     }

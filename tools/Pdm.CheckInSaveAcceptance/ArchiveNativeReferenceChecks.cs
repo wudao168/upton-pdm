@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.Remoting.Messaging;
 
@@ -18,6 +19,23 @@ internal static partial class Program
   }
   if((bool)Type("NativeArchiveManifest").GetMethod("IsInterconnectCachePath",Flags).Invoke(null,new object[]{@"C:\Users\engineer\project\IC~~\part.SLDPRT"}))throw new Exception("普通项目路径被误认为缓存");
   Console.WriteLine("PASS: ordinary project files are not classified by IC folder name alone");
+  var cacheFolder=Path.Combine(Path.GetTempPath(),"swx-preflight-"+Guid.NewGuid().ToString("N"),"IC~~");Directory.CreateDirectory(cacheFolder);
+  try
+  {
+   foreach(var mode in new[]{"missing-import","loaded-import","existing-cache","ordinary-component","suppressed-import","lightweight-import"})
+   {
+    var cache=Path.Combine(cacheFolder,"SOURCE.SLDASM");if(mode=="existing-cache")File.WriteAllText(cache,"saved cache");else if(File.Exists(cache))File.Delete(cache);
+    var interop=appType.Assembly;
+    var component=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),call=>call.MethodName=="GetSuppression2"?(mode=="suppressed-import"?0:mode=="lightweight-import"?1:2):call.MethodName=="GetPathName"?(mode=="ordinary-component"?dependencyPath():cache):call.MethodName=="GetModelDoc2"?(mode=="loaded-import"?new object():null):call.MethodName=="GetImportedPath"?@"Z:\original\SOURCE.STEP":call.MethodName=="get_Name2"?"SOURCE.STEP-1":throw new Exception(call.MethodName)).GetTransparentProxy();
+    string dependencyPath()=>Path.Combine(fixture,"ordinary-missing.SLDPRT");
+    var root=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetComponents"?new[]{component}:throw new Exception("预检不应写入模型："+call.MethodName)).GetTransparentProxy();
+    var readOnlyApp=new Proxy(appType,call=>call.MethodName=="GetOpenDocumentByName"?root:throw new Exception("预检不应改变窗口："+call.MethodName)).GetTransparentProxy();
+    Exception failure=null;try{Type("ArchiveNativeCopyWorkspace").GetMethod("ValidateLoadedImports",Flags).Invoke(null,new object[]{readOnlyApp,new[]{owner}});}catch(TargetInvocationException error){failure=error.InnerException;}
+    if((failure!=null)!=(mode=="missing-import")||failure!=null&&(!failure.Message.Contains("未上传任何文件")||failure.Message.Contains("被占用")))throw new Exception("导入模型预检范围不正确："+mode,failure);
+    Console.WriteLine("PASS: read-only early import preflight handles "+mode);
+   }
+  }
+  finally{Directory.Delete(Path.GetDirectoryName(cacheFolder),true);}
   foreach(var mode in new[]{"step","parameter","native-failure","native-restoration"})
   {
    var dependency=Path.Combine(fixture,mode=="step"?"SOURCE.STEP":mode=="parameter"?"SOURCE.txt":"SOURCE.SLDPRT");
@@ -53,5 +71,17 @@ internal static partial class Program
    if(File.ReadAllText(owner)!="saved native owner"||File.ReadAllText(dependency)!="saved source")throw new Exception("原文件被修改");
    Console.WriteLine("PASS: "+mode+" preserves original file bytes");
   }
+  var leaf=Path.Combine(fixture,"UNCHANGED-ALL-CONFIGURATIONS.SLDPRT");File.WriteAllText(leaf,"unchanged native configuration and body streams");
+  var expensiveReads=0;
+  var leafApp=ArchiveNativeMock(appType,call=>call.MethodName=="GetDocuments"?new object[0]:null,null,name=>{
+   if(name=="GetConfigurationNames"||name=="ForceRebuild3"||name=="Save3")expensiveReads++;
+  });
+  using(var workspace=(IDisposable)New("ArchiveNativeCopyWorkspace",leafApp,new[]{leaf},new Dictionary<string,string>{{leaf,leaf}},null,null))
+  {
+   var file=((System.Collections.IEnumerable)workspace.GetType().GetProperty("Files",Flags).GetValue(workspace)).Cast<object>().Single();
+   if(File.ReadAllText((string)file.GetType().GetField("Path",Flags).GetValue(file))!=File.ReadAllText(leaf)||expensiveReads!=0)
+    throw new Exception("原生字节未变化的叶子文件仍被逐配置重建或重存");
+  }
+  Console.WriteLine("PASS: byte-identical native leaves retain all configuration bytes without redundant rebuild or save");
  }
 }

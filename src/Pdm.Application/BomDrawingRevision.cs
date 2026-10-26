@@ -6,7 +6,9 @@ public static class BomDrawingRevision
 {
     public static void ValidateDrawingProperties(DocumentVersion version, string targetRevision, string fileName)
     {
-        foreach (var property in version.PropertySnapshot.Where(property => property.Key.Split('/').Last() is "版次" or "版本"))
+        foreach (var property in version.PropertySnapshot.Where(property =>
+                     !property.Key.StartsWith(CadPropertyCardSnapshot.ScopePrefix, StringComparison.Ordinal)
+                     && property.Key.Split('/').Last() is "版次" or "版本"))
             if (!string.IsNullOrWhiteSpace(property.Value)
                 && !string.Equals(property.Value.Trim(), targetRevision, StringComparison.OrdinalIgnoreCase))
                 throw new PdmConflictException($"工程图{fileName}的标题栏版次属性为{property.Value}，与本次发布版本{targetRevision}不一致。请核对历史发布记录，在SolidWorks中修正后重新存档并审核，再创建发布包。");

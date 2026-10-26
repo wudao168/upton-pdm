@@ -21,6 +21,7 @@ public sealed partial class PdmAddin
         Dictionary<string, string> originalHashes, Dictionary<string, string> inputPaths, bool previews, Action<string> progress,
         Action<string> archiveReady = null, Action<string> previewCheckpoint = null, bool retryMissingPreviews = false)
     {
+        if (ArchiveNativeProcessWorkspace.TryRun(app, directory, out var isolated)) return isolated;
         var prefix = Path.GetFullPath(directory).TrimEnd('\\') + "\\";
         string Relative(string path) => Path.GetFullPath(path).Substring(prefix.Length).Replace('\\', '/');
         Guid Key(string text) { using (var sha = SHA256.Create()) return new Guid(sha.ComputeHash(Encoding.UTF8.GetBytes(text.ToLowerInvariant())).Take(16).ToArray()); }

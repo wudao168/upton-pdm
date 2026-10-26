@@ -35,8 +35,8 @@ onMounted(load)
       <p class="pdm-counter-note">将生成的统一首页地址填写到钉钉应用首页及PC端首页。访客仅提交问题，自动记录钉钉姓名，无需PLM账号或账号绑定，也不校验群成员名单。</p>
       <p class="pdm-counter-note">项目群内使用现有机器人发送的“提交开口问题”卡片；卡片携带群绑定信息，自动选择本群项目。项目设置可重发入口，请勿用统一应用首页地址替换群内卡片地址。</p>
       <el-alert :title="settings.stream?.message || '保存应用配置后，点击刷新检查群登记连接。'" :type="settings.stream?.state === 'connected' ? 'success' : 'info'" :closable="false" />
-      <p class="pdm-counter-note">只使用当前企业应用内的一个机器人。在钉钉开发后台启用机器人并选择Stream模式；将同一个机器人加入各项目群，@机器人发送“登记项目群”。然后进入PLM项目设置选择已发现的群，无需填写群ID或Webhook。</p>
-      <p class="pdm-counter-note">负责人选项来自有项目访问权限的PLM在职用户，通知中显示负责人名称。登记并绑定项目群后，即可提交问题并由现有机器人发送群通知。</p>
+      <p class="pdm-counter-note">只使用当前企业应用内的一个机器人。在钉钉开发后台启用机器人并选择Stream模式；将同一个机器人加入目标项目群。在PLM项目设置中生成并复制本项目专用绑定指令，在目标群中 @UPLM 发送后直接绑定，无需从全部群中查找，也无需填写群ID或Webhook。</p>
+      <p class="pdm-counter-note">负责人选项来自有项目访问权限的PLM在职用户，通知中显示负责人名称。通过项目专用指令绑定群后，即可提交问题并由现有机器人发送群通知。</p>
       <section aria-label="群通知消息模板" class="ding-template">
         <div class="ding-toolbar"><h3>群通知消息模板</h3><el-button :disabled="pending" @click="settings.notificationTemplate = settings.defaultNotificationTemplate">恢复默认模板</el-button></div>
         <p class="pdm-counter-note">适用于新增、更新、完成和处理提醒。可修改分类名称、字段顺序、文字和换行；不需要的字段直接删除。留空使用默认模板，保存配置后生效。</p>

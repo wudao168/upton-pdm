@@ -92,6 +92,12 @@ public static class StandardStructureEndpoints
             var (content, name) = await service.PreviewAsync(revisionId, fileKey, actor, role, ct);
             return Results.Stream(content, Path.GetExtension(name).Equals(".pdf", StringComparison.OrdinalIgnoreCase) ? "application/pdf" : "application/step", enableRangeProcessing: true);
         });
+        api.MapGet("/revisions/{revisionId:guid}/files/{fileKey}", async (Guid revisionId, string fileKey, HttpContext context, StandardStructureService service, CancellationToken ct) =>
+        {
+            var (actor, role) = User(context);
+            var (content, name) = await service.ReadReferenceFileAsync(revisionId, fileKey, actor, role, ct);
+            return Results.Stream(content, "application/octet-stream", fileDownloadName: name, enableRangeProcessing: true);
+        });
         api.MapPost("/references", async (ReferenceStandardStructure input, HttpContext context, StandardStructureService service, PdmWorkflowService workflow, CancellationToken ct) =>
         {
             var (actor, role) = User(context);

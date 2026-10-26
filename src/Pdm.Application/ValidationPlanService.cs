@@ -311,13 +311,13 @@ public sealed class ValidationPlanService(
         return saved;
     }
 
-    public async Task<bool> CanEmergencyDecideAsync(Guid taskId, string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<bool> CanEmergencyDecideAsync(Guid taskId, string actor, UserRole role, CancellationToken cancellationToken, bool businessInbox = false)
     {
         var pending = (await validationPlans.ListPendingApprovalTasksAsync(actor, true, cancellationToken)).FirstOrDefault(task => task.Id == taskId);
         if (pending is null) return false;
         var plan = await validationPlans.FindPlanByIdAsync(pending.PlanId, cancellationToken);
         var node = plan?.ApprovalTasks.FirstOrDefault(task => task.Id == taskId);
-        return node?.EmergencyRoleCodes is not null && await ApprovalEmergencyPolicy.CanAsync(repository, pending.ProjectId, node.EmergencyRoleCodes, actor, role, cancellationToken);
+        return node?.EmergencyRoleCodes is not null && await ApprovalEmergencyPolicy.CanAsync(repository, pending.ProjectId, node.EmergencyRoleCodes, actor, role, cancellationToken, businessInbox);
     }
 
     public async Task<ProjectValidationPlan> EmergencyDecideAsync(Guid taskId, ApprovalDecision decision, string reason, string actor, UserRole role, CancellationToken cancellationToken)
@@ -383,11 +383,11 @@ public sealed class ValidationPlanService(
         await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalDecide, ct)
         || await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ValidationPlanEdit, ct);
 
-    public async Task<IReadOnlyList<PendingValidationPlanApprovalTask>> ListMyApprovalTasksAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<PendingValidationPlanApprovalTask>> ListMyApprovalTasksAsync(string actor, UserRole role, CancellationToken cancellationToken, bool businessInbox = false)
     {
         var result = new List<PendingValidationPlanApprovalTask>();
         foreach (var task in await validationPlans.ListPendingApprovalTasksAsync(actor, true, cancellationToken))
-            if (string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase) || await CanEmergencyDecideAsync(task.Id, actor, role, cancellationToken)) result.Add(task);
+            if (string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase) || await CanEmergencyDecideAsync(task.Id, actor, role, cancellationToken, businessInbox)) result.Add(task);
         return result;
     }
 

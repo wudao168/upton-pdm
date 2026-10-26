@@ -17,7 +17,7 @@ internal sealed class ChangeNoteDialog : Form
     {
         Text = "提交存档";
         DialogWindowSizing.CenterOnOwnerScreen(this);
-        TopMost = true;
+        TopMost = false;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;

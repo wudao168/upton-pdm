@@ -6,7 +6,7 @@ import * as api from '../src/api'
 import type { ProductionDrawingItem } from '../src/types'
 import type { ProductionLine, ProductionReleaseState } from '../src/productionTracking'
 
-vi.mock('../src/components/PdfDrawingViewer.vue', () => ({ default: { props: ['url'], template: '<div class="test-pdf">{{ url }}</div>' } }))
+vi.mock('../src/components/PdfDrawingViewer.vue', () => ({ default: { name: 'PdfDrawingViewer', props: { url: String, fillHeight: Boolean }, template: '<div class="test-pdf">{{ url }}<slot name="toolbar" /></div>' } }))
 vi.mock('../src/statusMessage', () => ({ ElMessage: { success: vi.fn() } }))
 const line: ProductionLine = { id: 'line', materialKey: 'M', drawingNumber: 'D001', name: '机架', revision: 'W1', unit: '001', requiredQuantity: 2, priority: 'Normal' }
 const state = { projectId: 'project', releasePackageId: 'opening', formalReleasePackageId: 'frozen-package', packageNumber: 'RP001' } as ProductionReleaseState
@@ -26,7 +26,8 @@ describe('批次列表正式图纸', () => {
     const wrapper = create()
     await flushPromises()
     expect(api.readProductionDrawingPreview).toHaveBeenCalledWith(frozen, 'token')
-    expect(wrapper.get('.test-pdf').text()).toBe('blob:test-pdf')
+    expect(wrapper.get('.test-pdf').text()).toContain('blob:test-pdf')
+    expect(wrapper.getComponent({ name: 'PdfDrawingViewer' }).props('fillHeight')).toBe(true)
     wrapper.unmount()
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:test-pdf')
   })

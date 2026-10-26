@@ -107,6 +107,7 @@ import type { DingTalkSettings, DingTalkBinding } from './dingtalk'
 export const readDingTalkSettings = (token: string) => requestJson<DingTalkSettings>('/api/settings/dingtalk', {}, token)
 export const saveDingTalkSettings = (input: { robotCode?: string; notificationTemplate?: string; enabled: boolean; corpId: string; appKey: string; appSecret: string; publicUrl: string; expectedRowVersion: number }, token: string) => requestJson<DingTalkSettings>('/api/settings/dingtalk', { method: 'PUT', body: JSON.stringify(input) }, token)
 export const readDingTalkBinding = (id: string, token: string) => requestJson<DingTalkBinding>(`/api/projects/${id}/dingtalk`, {}, token)
+export const createDingTalkBindingCommand = (id: string, token: string) => requestJson<{ command: string; expiresAt: string }>(`/api/projects/${id}/dingtalk/binding-command`, { method: 'POST' }, token)
 export const saveDingTalkBinding = (id: string, input: { groupId: string | null; expectedRowVersion: number }, token: string) => requestJson<DingTalkBinding>(`/api/projects/${id}/dingtalk`, { method: 'PUT', body: JSON.stringify(input) }, token)
 export const publishDingTalkEntry = (id: string, token: string) => requestJson<{ sent: boolean; message: string }>(`/api/projects/${id}/dingtalk/entry`, { method: 'POST' }, token)
 
@@ -1004,6 +1005,10 @@ export function setMaterialCover(materialId: string, attachmentId: string | null
   return requestJson<PdmMaterial>(`/api/materials/${materialId}/cover`, {
     method: 'PUT', body: JSON.stringify({ attachmentId, expectedRowVersion }),
   }, token)
+}
+
+export function replaceMaterialImages(materialId: string, attachmentIds: string[], coverAttachmentId: string | null, expectedRowVersion: number, token: string): Promise<PdmMaterial> {
+  return requestJson<PdmMaterial>(`/api/materials/${materialId}/images`, { method: 'PUT', body: JSON.stringify({ attachmentIds, coverAttachmentId, expectedRowVersion }) }, token)
 }
 
 export function listStandardLibraryCategories(token: string, includeInactive = false): Promise<StandardLibraryCategory[]> {
@@ -3260,3 +3265,17 @@ export async function readCalendarTodos(from: string, to: string, token: string)
 export async function createUserTodo(input: { content: string; dueDate?: string; recipientUsernames: string[] }, token: string): Promise<UserNotification> {
   return requestJson('/api/todos', { method: 'POST', body: JSON.stringify(input) }, token)
 }
+
+export const listStockedMaterials = (input: { categoryId?: string; query?: string; brand?: string; page: number; pageSize: number }, token: string) =>
+  requestJson<import('./stockedMaterials').StockedMaterialPage>(`/api/stocked-materials/?${new URLSearchParams(Object.entries(input).filter(([, value]) => value !== '' && value !== undefined).map(([key, value]) => [key, String(value)]))}`, {}, token)
+export const addStockedMaterials = (categoryIds: string[], materialIds: string[], token: string) =>
+  requestJson<void>('/api/stocked-materials/memberships', { method: 'POST', body: JSON.stringify({ categoryIds, materialIds }) }, token)
+export const removeStockedMaterial = (materialId: string, categoryId: string | undefined, token: string) =>
+  requestJson<void>(`/api/stocked-materials/${materialId}${categoryId ? `?categoryId=${encodeURIComponent(categoryId)}` : ''}`, { method: 'DELETE' }, token)
+export const maintainStockedMaterial = (materialId: string, input: { safetyStockQuantity: number; reorderQuantity: number; expectedSyncedAt: string | null }, token: string) =>
+  requestJson<import('./stockedMaterials').StockedMaterialSnapshot>(`/api/stocked-materials/${materialId}/plan`, { method: 'PUT', body: JSON.stringify(input) }, token)
+export const refreshStockedMaterials = (token: string) => requestJson('/api/stocked-materials/refresh', { method: 'POST' }, token)
+export const readStockedMaterialPlan = (materialId: string, token: string) => requestJson<import('./stockedMaterials').StockedMaterialSnapshot>(`/api/stocked-materials/${materialId}/read-plan`, { method: 'POST' }, token)
+export const readStockedMaterialSettings = (token: string) => requestJson<import('./stockedMaterials').StockedMaterialSettingsView>('/api/stocked-materials/settings', {}, token)
+export const saveStockedMaterialSettings = (settings: import('./stockedMaterials').StockedMaterialSettings, expectedRowVersion: number, token: string) =>
+  requestJson<import('./stockedMaterials').StockedMaterialSettingsView>('/api/stocked-materials/settings', { method: 'PUT', body: JSON.stringify({ settings, expectedRowVersion }) }, token)

@@ -31,7 +31,8 @@ public sealed partial class PdmAddin
             RootRelativePath = owner.RootRelativePath, ForEdit = true, Warnings = requested.Warnings,
             Files = files.Select(file => new ControlledOpenFileDto { DocumentId = file.DocumentId, VersionId = file.VersionId,
                 Revision = file.Revision, FileName = file.FileName, RelativePath = file.RelativePath, FileLength = file.FileLength,
-                Sha256 = file.Sha256, Configuration = file.Configuration, IsRoot = file.DocumentId == owner.RootDocumentId }).ToList() };
+                Sha256 = file.Sha256, Configuration = file.Configuration, IsRoot = file.DocumentId == owner.RootDocumentId,
+                NativeIsolation = file.NativeIsolation, IsNativeIsolated = file.IsNativeIsolated }).ToList() };
     }
 
     private void ValidateEditContextSwitch(ControlledOpenManifestDto manifest, string directory)

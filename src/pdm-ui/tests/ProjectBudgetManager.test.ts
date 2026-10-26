@@ -14,6 +14,50 @@ const response = (editable = true) => ({ projectId: 'p1', rows: budgetCategories
 beforeEach(() => { vi.clearAllMocks(); api.getBudgetAssessments.mockResolvedValue({ sheets: [], amounts: { Standard: 250, MechanicalDesign: 800 } }); api.getProjectBudget.mockResolvedValue(response()); api.saveProjectBudget.mockResolvedValue(response()) })
 
 describe('project budget', () => {
+  it('keeps summary edits when the same project refreshes and the login token renews', async () => {
+    const wrapper = mount(ProjectBudgetManager, { props: { project: { id: 'p1' }, token: 'token' }, global: { plugins: [ElementPlus] } })
+    try {
+      await flushPromises()
+      await wrapper.get('input[aria-label="预算金额"]').setValue('1500')
+      await wrapper.setProps({ project: { id: 'p1' } })
+      await flushPromises()
+      await wrapper.setProps({ token: 'renewed-token' })
+      await flushPromises()
+      expect(api.getProjectBudget).toHaveBeenCalledTimes(1)
+      expect(api.getBudgetAssessments).toHaveBeenCalledTimes(1)
+      expect(Number((wrapper.get('input[aria-label="预算金额"]').element as HTMLInputElement).value)).toBe(1500)
+      await wrapper.findAll('button').find(button => button.text() === '保存预算')!.trigger('click')
+      await flushPromises()
+      expect(api.saveProjectBudget).toHaveBeenCalledWith('p1', expect.objectContaining({ lines: expect.arrayContaining([expect.objectContaining({ budgetAmount: 1500 })]) }), 'renewed-token')
+    } finally { wrapper.unmount() }
+  })
+
+  it('keeps the assessment tab, selected sheet and edits during background project updates', async () => {
+    api.getBudgetAssessments.mockResolvedValue({ sheets: [{ projectId: 'p1', projectCode: 'P700016-2', projectName: '评估测试', designLead: 'engineer', canEdit: true, rowVersion: 1, total: 100,
+      updatedBy: 'engineer', updatedAt: null, groups: [{ id: 'g1', name: '原分组', category: 'Standard', laborCategory: null, items: [] }] }], amounts: {} })
+    const wrapper = mount(ProjectBudgetManager, { props: { project: { id: 'p1' }, token: 'token' }, global: { plugins: [ElementPlus] } })
+    try {
+      await flushPromises()
+      await wrapper.findAll('[role="tab"]').find(tab => tab.text() === '预算评估')!.trigger('click')
+      await wrapper.findAll('button').find(button => button.text() === '编辑评估')!.trigger('click')
+      await wrapper.get('input[aria-label="分组名称"]').setValue('尚未保存的评估分组')
+      await wrapper.setProps({ project: { id: 'p1' } })
+      await flushPromises()
+      await wrapper.setProps({ token: 'renewed-token' })
+      await flushPromises()
+      expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toBe('预算评估')
+      expect((wrapper.get('input[aria-label="分组名称"]').element as HTMLInputElement).value).toBe('尚未保存的评估分组')
+      expect(api.getProjectBudget).toHaveBeenCalledTimes(1)
+      expect(api.getBudgetAssessments).toHaveBeenCalledTimes(1)
+      expect(wrapper.findAll('button').find(button => button.text() === '保存评估')!.attributes('disabled')).toBeUndefined()
+      api.getProjectBudget.mockResolvedValue({ ...response(), projectId: 'p2' })
+      await wrapper.setProps({ project: { id: 'p2' } })
+      await flushPromises()
+      expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toBe('预算汇总')
+      expect(api.getProjectBudget).toHaveBeenLastCalledWith('p2', 'renewed-token')
+    } finally { wrapper.unmount() }
+  })
+
   it('lets a viewer add notes, shows newest content, and opens the full history', async () => {
     const oldNote = { id: 'n1', category: 'Standard', content: '原备注', createdBy: 'planner', createdAt: '2026-10-01T12:00:00Z' }
     const newNote = { id: 'n2', category: 'Standard', content: '新备注', createdBy: 'viewer', createdAt: '2026-10-02T01:00:00Z' }

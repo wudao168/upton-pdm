@@ -9,6 +9,8 @@ export interface MaterialStockPlan {
   isEffective: boolean
   unitName: string | null
   syncedAt: string
+  stockQuantity?: number | null
+  inventorySyncedAt?: string | null
 }
 export interface MaterialStockPlanSnapshot {
   enterpriseCode: string
@@ -44,7 +46,7 @@ export async function refreshMaterialStockPlans(load: () => Promise<MaterialStoc
 }
 export const materialStockPlan = (code: unknown) => plans.value.get(key(code))
 export function materialStockTooltip(plan: MaterialStockPlan) {
-  return `常备件\n安全库存：${plan.safetyStockQuantity}${plan.unitName || ''}\n再订货量：${plan.reorderQuantity ?? '未提供'}${plan.unitName || ''}\n同步时间：${new Date(plan.syncedAt).toLocaleString('zh-CN', { hour12: false })}`
+  return `常备件\n安全库存：${plan.safetyStockQuantity}${plan.unitName || ''}\n再订货量：${plan.reorderQuantity ?? '未提供'}${plan.unitName || ''}${plan.stockQuantity == null ? '' : `\n现存量：${plan.stockQuantity}${plan.unitName || ''}`}\n同步时间：${new Date(plan.syncedAt).toLocaleString('zh-CN', { hour12: false })}`
 }
 type StockElement = HTMLElement & { stockState?: { code: unknown; title: string; appliedTitle: string; stop: () => void; render: () => void } }
 export const stockedMaterial: Directive<StockElement, unknown> = {

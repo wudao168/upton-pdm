@@ -110,7 +110,7 @@ async function save() {
     <header class="production-scan-settings__header"><div><h2>自制生产流程</h2><p>按扫码节点配置办理人和工位</p></div><div><button type="button" class="pdm-secondary-action" :disabled="pending" @click="load">刷新配置</button><button type="submit" form="production-scan-settings-form" class="pdm-primary-action" :disabled="pending || !catalog">{{ pending ? '正在保存…' : '保存扫码配置' }}</button></div></header>
     <p v-if="error" role="alert" class="production-scan-settings__error">{{ error }}</p><p v-if="notice" role="status">{{ notice }}</p>
     <form v-if="catalog" id="production-scan-settings-form" novalidate @submit.prevent="save">
-      <nav class="production-scan-settings__tabs" aria-label="生产扫码配置分类"><button v-for="[key, label] in [['flow','流程配置'],['global','流程控制与标签']]" :key="key" type="button" :aria-pressed="tab === key" @click="tab = key!">{{ label }}</button></nav>
+      <nav class="production-scan-settings__tabs pdm-tabs" aria-label="生产扫码配置分类"><button v-for="[key, label] in [['flow','流程配置'],['global','流程控制与标签']]" :key="key" type="button" :aria-pressed="tab === key" @click="tab = key!">{{ label }}</button></nav>
       <fieldset :disabled="pending" class="production-scan-settings__body">
         <div v-show="tab === 'flow'" class="production-scan-settings__layout">
           <section class="production-scan-settings__canvas" aria-label="自制流程配置">

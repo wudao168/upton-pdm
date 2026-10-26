@@ -11,8 +11,8 @@ namespace Upton.Pdm.Api;
 public sealed record SaveDingTalkApplication(bool Enabled, string CorpId, string AppKey, string? AppSecret, string PublicUrl, long ExpectedRowVersion, string? RobotCode = null, string? NotificationTemplate = null);
 public sealed record SaveDingTalkBinding(Guid? GroupId, long ExpectedRowVersion);
 
-public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepository configs, IPdmRepository projects,
-    IDataProtectionProvider protection, IOptions<DingTalkOplOptions> legacy, TimeProvider clock, DingTalkStreamStatusCache streamStatus)
+public sealed partial class DingTalkConfigurationService(IDingTalkConfigurationRepository configs, IPdmRepository projects,
+    IDataProtectionProvider protection, IOptions<DingTalkOplOptions> legacy, TimeProvider clock, DingTalkStreamStatusCache streamStatus, DingTalkProjectBindingCodes bindingCodes)
 {
     private readonly IDataProtector protector = protection.CreateProtector("Upton.Pdm.DingTalk.Configuration.v1");
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
@@ -56,11 +56,18 @@ public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepositor
             .Concat(value.Projects.Where(project => !value.Bindings.ContainsKey(project.Key) && !string.IsNullOrWhiteSpace(conversation)
                 && project.Value.OpenConversationId == conversation).Select(project => project.Key)).Distinct().ToArray();
     }
-    private async Task<object[]> GroupsAsync(DingTalkOplOptions value, string actor, UserRole role, CancellationToken ct)
+    private async Task<HashSet<Guid>> ActiveRootIdsAsync(DingTalkOplOptions value, CancellationToken ct) =>
+        (await projects.ListProjectsAsync(ct)).Where(project => project.IsActive && project.ParentProjectId is null && (project.OrganizationId is null || project.OrganizationId == value.CompanyId)).Select(project => project.Id).ToHashSet();
+    private async Task<object[]> GroupsAsync(DingTalkOplOptions value, string actor, UserRole role, CancellationToken ct, Guid? preferredGroupId = null)
     {
         var known = (await projects.ListProjectsForUserAsync(actor, role, ct)).ToDictionary(project => project.Id);
-        return value.Groups.OrderBy(group => group.Value.Name).Select(group => {
-            var bound = BoundProjectIds(value, group.Key);
+        var active = await ActiveRootIdsAsync(value, ct);
+        return value.Groups.Where(group => !string.IsNullOrWhiteSpace(group.Value.OpenConversationId))
+            .Where(group => preferredGroupId is null || group.Value.OpenConversationId == value.Groups[preferredGroupId.Value].OpenConversationId)
+            .GroupBy(group => group.Value.OpenConversationId, StringComparer.Ordinal)
+            .Select(groups => groups.OrderByDescending(group => group.Key == preferredGroupId).ThenBy(group => group.Key).First())
+            .OrderBy(group => group.Value.Name).Select(group => {
+            var bound = BoundProjectIds(value, group.Key).Where(active.Contains).ToArray();
             return (object)new { id = group.Key, name = group.Value.Name, openConversationId = group.Value.OpenConversationId,
                 registered = !string.IsNullOrWhiteSpace(group.Value.OpenConversationId), projectCount = bound.Length,
                 boundProjects = bound.Select(id => new { id, code = known.GetValueOrDefault(id)?.Code ?? id.ToString(),
@@ -103,8 +110,11 @@ public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepositor
         if (TenantContext.CompanyId is null) throw new PdmRuleException("请先选择所属公司。");
         return (root.Id, manage);
     }
-    private async Task<object> BindingViewAsync(DingTalkOplOptions value, Guid rootId, bool canManage, string actor, UserRole role, CancellationToken ct) => new { rootProjectId = rootId, canManage, value.RowVersion,
-        groupId = value.Bindings.TryGetValue(rootId, out var groupId) ? (Guid?)groupId : null, groups = await GroupsAsync(value, actor, role, ct), entryUrl = value.Bindings.TryGetValue(rootId, out var boundGroup) ? Entry(value, boundGroup) : "", enabled = value.Enabled };
+    private async Task<object> BindingViewAsync(DingTalkOplOptions value, Guid rootId, bool canManage, string actor, UserRole role, CancellationToken ct)
+    {
+        var bound = value.Bindings.TryGetValue(rootId, out var id) && value.Groups.TryGetValue(id, out var group) && !string.IsNullOrWhiteSpace(group.OpenConversationId) ? (Guid?)id : null;
+        return new { rootProjectId = rootId, canManage, value.RowVersion, groupId = bound, groups = bound is null ? [] : await GroupsAsync(value, actor, role, ct, bound), entryUrl = bound is Guid groupId ? Entry(value, groupId) : "", enabled = value.Enabled, bindingMessage = bindingCodes.Message(value.CompanyId, rootId) };
+    }
     public async Task<object> GetBindingAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
     { var access = await ProjectAccessAsync(projectId, actor, role, ct); return await BindingViewAsync(await LoadAsync(TenantContext.CompanyId, ct), access.RootId, access.CanManage, actor, role, ct); }
     public async Task<Guid> EntryGroupAsync(Guid projectId,string actor,UserRole role,CancellationToken ct)
@@ -123,7 +133,8 @@ public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepositor
             throw new PdmRuleException("请选择已发现的群；请先在钉钉群内@企业机器人发送“登记项目群”，再刷新列表。");
         if (input.GroupId is Guid selected && value.Bindings.GetValueOrDefault(access.RootId) != selected)
         {
-            var occupied = BoundProjectIds(value, selected).Where(id => id != access.RootId).ToArray();
+            var active = await ActiveRootIdsAsync(value, ct);
+            var occupied = BoundProjectIds(value, selected).Where(id => id != access.RootId && active.Contains(id)).ToArray();
             if (occupied.Length > 0)
             {
                 var known = (await projects.ListProjectsForUserAsync(actor, role, ct)).ToDictionary(project => project.Id);
@@ -133,7 +144,9 @@ public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepositor
         }
         if (input.GroupId is Guid bound) value.Bindings[access.RootId] = bound; else value.Bindings.Remove(access.RootId);
         value.Projects.Remove(access.RootId);
-        return await BindingViewAsync(await PersistAsync(value, input.ExpectedRowVersion, actor, "project.dingtalk.bind", ct), access.RootId, true, actor, role, ct);
+        var saved = await PersistAsync(value, input.ExpectedRowVersion, actor, "project.dingtalk.bind", ct);
+        bindingCodes.Cancel(saved.CompanyId, access.RootId);
+        return await BindingViewAsync(saved, access.RootId, true, actor, role, ct);
     }
     public async Task<IReadOnlyList<DingTalkOplOptions>> ListStreamConfigurationsAsync(CancellationToken ct)
     {
@@ -145,7 +158,9 @@ public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepositor
     {
         static string Text(JsonElement json, string key) => json.TryGetProperty(key, out var item) && item.ValueKind == JsonValueKind.String ? item.GetString() ?? "" : "";
         if (Text(message,"conversationType") != "2" || Text(message,"chatbotCorpId") != expectedCorpId || Text(message,"robotCode") != expectedRobotCode
-            || !message.TryGetProperty("text",out var text) || Text(text,"content").Trim() != "登记项目群") return false;
+            || !message.TryGetProperty("text",out var text)) return false;
+        var content = Text(text,"content").Trim();
+        if (content != "登记项目群" && content != "@UPLM 登记项目群") return false;
         var conversationId = Text(message,"conversationId"); var name = Text(message,"conversationTitle").Trim();
         if (conversationId.Length is 0 or > 500 || name.Length is 0 or > 100) return false;
         for (var attempt=0; attempt<3; attempt++)
@@ -153,9 +168,10 @@ public sealed class DingTalkConfigurationService(IDingTalkConfigurationRepositor
             var value = await LoadAsync(companyId,ct);
             if (!value.Enabled || value.CorpId != expectedCorpId || value.AppKey != expectedAppKey || value.RobotCode != expectedRobotCode) return false;
             var found = value.Groups.FirstOrDefault(pair => pair.Value.OpenConversationId == conversationId);
-            if (found.Value is not null && found.Value.Name == name) return true;
+            if (found.Value is not null && value.Groups.Values.Where(group => group.OpenConversationId == conversationId).All(group => group.Name == name)) return true;
             var groupId = found.Value is null ? Guid.NewGuid() : found.Key;
             value.Groups[groupId] = new() { Name=name, OpenConversationId=conversationId };
+            foreach (var alias in value.Groups.Values.Where(group => group.OpenConversationId == conversationId)) alias.Name = name;
             try { await PersistAsync(value,value.RowVersion,"dingtalk-stream","settings.dingtalk.group.discover",ct); return true; }
             catch(PdmConflictException) when(attempt<2) { }
         }

@@ -106,8 +106,7 @@
   --pdm-danger-border: #fecaca;
   --pdm-change-highlight: #fff0a8;
   --pdm-change-highlight-hover: #ffe477;
-  /* 轨道和未选中页签透出所在容器底色，只有选中态加深。 */
-  --pdm-tabs-track: transparent;
+  --pdm-tabs-track: #eee;
   --shell-accent: var(--pdm-theme-accent);
   --shell-accent-hover: var(--pdm-theme-accent-hover);
   --shell-accent-soft: var(--pdm-theme-accent-soft);

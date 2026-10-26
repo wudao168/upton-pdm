@@ -38,14 +38,17 @@ describe('MaterialEditorDialog attachments', () => {
     expect(wrapper!.emitted('downloadAttachment')?.[0]?.[0]).toEqual(document)
   })
 
-  it('rejects the whole batch when existing pictures plus selected files exceed three', async () => {
-    open({ attachments: [picture('one'), picture('two')] }); await flushPromises()
+  it('rejects the whole batch when existing pictures plus selected files exceed five', async () => {
+    open({ attachments: ['one', 'two', 'three', 'four'].map(picture) }); await flushPromises()
     selectFiles(2); await flushPromises()
     expect(wrapper!.emitted('attachmentFiles')).toBeUndefined()
-    expect(documentBody().querySelector('[role="alert"]')?.textContent).toContain('当前已有2张，本次选择2张')
+    expect(documentBody().querySelector('[role="alert"]')?.textContent).toContain('当前已有4张，本次选择2张')
     selectFiles(1); await flushPromises()
     expect(wrapper!.emitted('attachmentFiles')).toHaveLength(1)
     expect(documentBody().querySelector('[role="alert"]')).toBeNull()
+    await wrapper!.setProps({ attachments: ['one', 'two', 'three', 'four', 'five'].map(picture) }); await flushPromises()
+    expect(documentBody().textContent).toContain('图片（5/5）')
+    expect(documentBody().querySelector('.material-image-add')).toBeNull()
   })
 
   it('marks the selected cover and requests a switch to another existing image', async () => {
@@ -60,10 +63,10 @@ describe('MaterialEditorDialog attachments', () => {
   })
 
   it('preserves historical pictures beyond the limit while preventing new uploads', async () => {
-    open({ attachments: ['one', 'two', 'three', 'four'].map(picture) }); await flushPromises()
-    expect(documentBody().querySelectorAll('.material-image-card')).toHaveLength(4)
+    open({ attachments: ['one', 'two', 'three', 'four', 'five', 'six'].map(picture) }); await flushPromises()
+    expect(documentBody().querySelectorAll('.material-image-card')).toHaveLength(6)
     expect(documentBody().querySelector('.material-image-add')).toBeNull()
-    expect(documentBody().textContent).toContain('已有4张历史图片，继续保留')
+    expect(documentBody().textContent).toContain('已有6张历史图片，继续保留')
     expect(wrapper!.emitted('setCover')).toBeUndefined()
     selectFiles(1); await flushPromises()
     expect(wrapper!.emitted('attachmentFiles')).toBeUndefined()

@@ -49,12 +49,12 @@ onMounted(async () => {
 </script>
 
 <template>
-  <el-dialog :model-value="true" title="正式图纸" width="min(1120px, calc(100vw - 32px))" @update:model-value="!$event && emit('close')">
+  <el-dialog :model-value="true" class="production-line-drawing-dialog" title="正式图纸" width="min(1440px, calc(100vw - 24px))" @update:model-value="!$event && emit('close')">
     <section class="production-line-drawings" aria-label="物料正式图纸">
-      <p>{{ state.packageNumber }} · {{ line.drawingNumber }} · {{ line.name }}</p>
+      <p class="production-line-drawings__context" :title="`${state.packageNumber} · ${line.drawingNumber} · ${line.name}`">{{ state.packageNumber }} · {{ line.drawingNumber }} · {{ line.name }}</p>
       <p v-if="loading" role="status">正在读取发布包图纸…</p><p v-if="error" role="alert">{{ error }}</p>
-      <div class="production-line-drawings__files"><div v-for="item in drawings" :key="item.versionId"><strong>{{ item.drawingNumber }} · {{ item.revision }}</strong><span v-if="!item.isCurrent">历史正式版</span><span v-if="!item.pdfReady">PDF 待转换</span><template v-else><el-button :disabled="pending" @click="preview(item)">预览</el-button><el-button :disabled="pending" @click="download(item)">下载 PDF</el-button></template></div></div>
-      <p v-if="pending" role="status">正在读取正式图纸，请稍候…</p><PdfDrawingViewer v-if="url" :key="url" :url="url" />
+      <p v-if="pending" role="status">正在读取正式图纸，请稍候…</p>
+      <PdfDrawingViewer :url="url" fill-height><template #toolbar><div class="production-line-drawings__files"><div v-for="item in drawings" :key="item.versionId"><strong>{{ item.drawingNumber }} · {{ item.revision }}</strong><span v-if="!item.isCurrent">历史正式版</span><span v-if="!item.pdfReady">PDF 待转换</span><template v-else><el-button :disabled="pending" @click="preview(item)">预览</el-button><el-button :disabled="pending" @click="download(item)">下载 PDF</el-button></template></div></div></template></PdfDrawingViewer>
       <small v-if="selected?.legacyUnverified">历史图面未校验，图面标记可能与系统记录不同。</small>
     </section>
     <template #footer><el-button @click="emit('close')">关闭</el-button></template>
@@ -62,5 +62,5 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.production-line-drawings{min-width:0;font-size:12px}.production-line-drawings>p{margin:0 0 12px;color:var(--pdm-muted)}.production-line-drawings [role=alert]{color:var(--pdm-danger)}.production-line-drawings__files{display:grid;gap:8px;margin-bottom:12px}.production-line-drawings__files>div{display:flex;flex-wrap:wrap;align-items:center;gap:10px}.production-line-drawings__files span,.production-line-drawings>small{color:var(--pdm-muted)}.production-line-drawings :deep(.pdf-drawing-viewer__pages){max-height:60vh;overflow:auto}
+:global(.el-overlay-dialog > .el-dialog.production-line-drawing-dialog){padding:0}:global(body .el-overlay-dialog > .production-line-drawing-dialog .el-dialog__body){display:flex;min-height:0;overflow:hidden;padding:8px 12px}.production-line-drawings{display:flex;flex:1;flex-direction:column;min-width:0;min-height:0;font-size:12px}.production-line-drawings>p{flex-shrink:0;margin:0 0 6px;color:var(--pdm-muted)}.production-line-drawings__context{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.production-line-drawings [role=alert]{color:var(--pdm-danger)}.production-line-drawings__files{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-right:auto}.production-line-drawings__files>div{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.production-line-drawings__files strong{white-space:nowrap}.production-line-drawings__files span,.production-line-drawings>small{color:var(--pdm-muted)}.production-line-drawings>small{flex-shrink:0;margin-top:4px}
 </style>

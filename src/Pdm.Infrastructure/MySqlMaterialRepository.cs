@@ -769,6 +769,25 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
         }
     }
 
+    public async Task<PdmMaterial> ReplaceMaterialImagesAsync(PdmMaterial material, IReadOnlyList<Guid> attachmentIds, long expectedRowVersion, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition("""
+            UPDATE material_master SET cover_image_attachment_id=@CoverImageAttachmentId,
+                updated_by=@UpdatedBy,updated_at=@UpdatedAt,row_version=row_version+1
+            WHERE id=@Id AND row_version=@ExpectedRowVersion AND is_archived=0
+            """, new { material.Id, material.CoverImageAttachmentId, material.UpdatedBy, UpdatedAt = material.UpdatedAt.UtcDateTime, ExpectedRowVersion = expectedRowVersion }, transaction, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("料品已停用或被其他用户修改，请刷新后重试。");
+        var images = (await connection.QueryAsync<Guid>(new CommandDefinition("SELECT id FROM material_attachment WHERE material_id=@Id AND attachment_kind='CoverImage' FOR UPDATE", new { material.Id }, transaction, cancellationToken: cancellationToken))).ToHashSet();
+        if (attachmentIds.Any(id => !images.Contains(id))) throw new PdmConflictException("替换图片已变化，请刷新后重试。");
+        foreach (var id in images.Except(attachmentIds))
+            await connection.ExecuteAsync(new CommandDefinition("DELETE FROM material_attachment WHERE id=@Id AND material_id=@MaterialId AND attachment_kind='CoverImage'", new { Id = id, MaterialId = material.Id }, transaction, cancellationToken: cancellationToken));
+        var saved = (await FindMaterialAsync(connection, transaction, material.Id, cancellationToken))!;
+        await transaction.CommitAsync(cancellationToken);
+        return saved;
+    }
+
     public async Task<PdmMaterial> UpdatePlmMetadataAsync(PdmMaterial material, long expectedRowVersion, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

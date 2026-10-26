@@ -6,7 +6,7 @@ import navBrandLogo from '../assets/upton-nav-lockup.svg'
 import navBrandIcon from '../assets/upton-nav-icon.png'
 import ConnectionLights from './ConnectionLights.vue'
 
-type NavKey = 'work-hours' | 'project-applications' | 'project-calendar' | 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
+type NavKey = 'work-hours' | 'project-applications' | 'project-calendar' | 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'stocked-materials' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
 
 type SystemReleaseHistoryEntry = {
   Version?: string
