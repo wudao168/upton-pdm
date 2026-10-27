@@ -34,6 +34,14 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Uninstall-UPLMClient.ps1') -Des
 Copy-Item -LiteralPath (Join-Path $source 'manifest.json') -Destination $payloadStage
 Copy-Item -LiteralPath (Join-Path $source 'payload') -Destination (Join-Path $payloadStage 'payload') -Recurse
 Copy-Item -LiteralPath (Join-Path $source 'prerequisites') -Destination (Join-Path $payloadStage 'prerequisites') -Recurse
+$installerText = Get-Content -LiteralPath (Join-Path $payloadStage 'Install-UPLMClient.ps1') -Raw -Encoding UTF8
+foreach ($reference in [regex]::Matches($installerText, "\(Join-Path \`$(desktopSource|addinSource) '([^']+)'\)")) {
+    $component = if ($reference.Groups[1].Value -eq 'desktopSource') { 'desktop' } else { 'solidworks-addin' }
+    $name = $reference.Groups[2].Value
+    if ($name -eq '*') { continue }
+    $requiredFile = Join-Path $payloadStage "payload/$component/$name"
+    if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) { throw "安装脚本引用的客户端文件未打包：$component/$name" }
+}
 $utf8Bom = New-Object Text.UTF8Encoding($true)
 $clientInstaller = Join-Path $payloadStage 'Install-UPLMClient.ps1'
 [IO.File]::WriteAllText($clientInstaller, (Get-Content -LiteralPath $clientInstaller -Raw -Encoding UTF8), $utf8Bom)

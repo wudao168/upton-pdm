@@ -61,7 +61,7 @@ internal static partial class Program
             var controls = ArchiveControls(dialog).ToArray();
             TreeCheck(!controls.Any(control => control.Text.Contains("二维码")) && !controls.OfType<NumericUpDown>().Any(), "设置页仍显示二维码选项");
             TreeCheck(controls.OfType<GroupBox>().Select(control => control.Text).OrderBy(text => text).SequenceEqual(
-                new[] { "服务器连接", "任务计划显示", "版本与更新" }.OrderBy(text => text)), "设置页丢失其他功能或仍有空白二维码分组");
+                new[] { "服务器连接", "任务计划显示", "版本与更新", "存档临时副本" }.OrderBy(text => text)), "设置页丢失其他功能或仍有空白二维码分组");
             dialog.Show(); dialog.Update();
             using (var bitmap = new Bitmap(dialog.Width, dialog.Height))
             {
@@ -70,6 +70,6 @@ internal static partial class Program
             }
             dialog.Close();
         }
-        Console.WriteLine("PASS: Rendered settings dialog contains only connection, planned-task display and updates with no QR controls");
+        Console.WriteLine("PASS: Rendered settings dialog preserves connection, planned-task display, updates and temporary-copy cleanup with no QR controls");
     }
 }

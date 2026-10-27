@@ -29,7 +29,7 @@ $desktopSource = Join-Path $packageRoot 'payload\desktop'
 $addinSource = Join-Path $packageRoot 'payload\solidworks-addin'
 $webViewInstaller = Join-Path $packageRoot 'prerequisites\MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
 $net48Installer = Join-Path $packageRoot 'prerequisites\NDP48-x86-x64-AllOS-ENU.exe'
-foreach ($required in @($manifestPath, $uninstallerSource, $uninstallerExeSource, (Join-Path $desktopSource 'Upton.Pdm.Desktop.exe'), (Join-Path $addinSource 'Upton.Pdm.SolidWorks.Addin.dll'), (Join-Path $addinSource 'SolidWorks.Interop.swpublished.dll'), (Join-Path $addinSource 'SolidWorks.Interop.sldworks.dll'), (Join-Path $addinSource 'SolidWorks.Interop.swconst.dll'), (Join-Path $addinSource 'QRCoder.dll'), $webViewInstaller, $net48Installer)) {
+foreach ($required in @($manifestPath, $uninstallerSource, $uninstallerExeSource, (Join-Path $desktopSource 'Upton.Pdm.Desktop.exe'), (Join-Path $addinSource 'Upton.Pdm.SolidWorks.Addin.dll'), (Join-Path $addinSource 'SolidWorks.Interop.swpublished.dll'), (Join-Path $addinSource 'SolidWorks.Interop.sldworks.dll'), (Join-Path $addinSource 'SolidWorks.Interop.swconst.dll'), $webViewInstaller, $net48Installer)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "客户端安装包不完整：$required" }
 }
 
