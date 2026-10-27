@@ -11,6 +11,26 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class ReleaseRecoveryTests
 {
     [Fact]
+    public async Task ReturningFailedPublicationPreservesItsFilesAndClearsTheOldOutputForReediting()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var failed = fixture.Package with { Id = Guid.NewGuid(), Number = "RP-FAILED-DRAFT", State = ReleasePackageState.PublishFailed,
+            PublishedAt = null, PublishedPath = null };
+        var output = Path.Combine(fixture.Project.ReleaseLocation, failed.Number);
+        var staging = Path.Combine(fixture.Project.VaultLocation, ".release-staging", failed.Number);
+        Directory.CreateDirectory(output);
+        Directory.CreateDirectory(staging);
+        await File.WriteAllTextAsync(Path.Combine(output, "original.txt"), "失败发布资料");
+        await File.WriteAllTextAsync(Path.Combine(staging, "draft.txt"), "旧草稿");
+        await new AtomicReleasePackagePublisher(TimeProvider.System).DiscardDraftAsync(failed, fixture.Project, default);
+        Assert.False(Directory.Exists(output));
+        Assert.False(Directory.Exists(staging));
+        var backup = Assert.Single(Directory.GetDirectories(Path.Combine(fixture.Project.ReleaseLocation, ".withdrawn-releases")));
+        Assert.Equal("失败发布资料", await File.ReadAllTextAsync(Path.Combine(backup, "original.txt")));
+        Assert.True(Directory.Exists(fixture.Package.PublishedPath));
+    }
+
+    [Fact]
     public async Task QuantityOnlyPublicationReusesFormalDrawingsAndUpdatesDeliveryWithoutNewVersions()
     {
         using var fixture = await Fixture.CreateAsync();

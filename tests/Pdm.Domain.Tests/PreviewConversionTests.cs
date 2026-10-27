@@ -14,6 +14,30 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class PreviewConversionTests
 {
     [Fact]
+    public async Task EnabledTitleBlockFailureNeverDeliversRawPdfAndRetryReusesRawConversion()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-pdf-title-block-failure", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var (repository, project, sources, package, staging) = await PrepareAsync(root,
+                new PreviewConversionSettings { Mode = PreviewConversionMode.Remote, AgentUrl = "http://agent:5199" });
+            package = package with { PdfTitleBlockSnapshot = new(["name"], new Dictionary<Guid, PdfDrawingTitleBlockSnapshot>(), true) };
+            var agent = new StubAgentHandler();
+            var stamp = new RecordingPdfStamp { Fail = true };
+            var converter = new SolidWorksServerPreviewConverter(Options.Create(new PdmPreviewWorkerOptions()), repository, new HttpClient(agent), stamp);
+            var failure = await Assert.ThrowsAsync<PartialPreviewConversionException>(() => converter.GenerateAsync(package, project, sources, staging, default));
+            var drawing = Assert.Single(sources, source => source.Kind == DocumentKind.Drawing);
+            Assert.False(failure.Artifacts.ContainsKey(drawing.DocumentId));
+            Assert.Single(failure.Artifacts);
+            stamp.Fail = false;
+            var completed = await converter.GenerateAsync(package, project, sources, staging, default);
+            Assert.True(completed.ContainsKey(drawing.DocumentId));
+            Assert.Equal(1, agent.RequestCount);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public async Task PdfStampRetryReusesRawCacheAndKeepsSuccessfulPdfAvailable()
     {
         var root = Path.Combine(Path.GetTempPath(), "pdm-pdf-stamp-cache", Guid.NewGuid().ToString("N"));

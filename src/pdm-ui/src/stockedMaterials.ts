@@ -10,6 +10,12 @@ export interface StockedMaterialSnapshot {
   lastError: string | null
   isFormal?: boolean
   state?: 'Draft' | 'Formal'
+  hasPendingRequisition?: boolean | null
+  purchaseQuantity?: number | null
+  arrivedQuantity?: number | null
+  procurementSyncedAt?: string | null
+  requisitionDate?: string | null
+  expectedArrivalDate?: string | null
 }
 export interface StockedMaterialRow {
   material: PdmMaterial

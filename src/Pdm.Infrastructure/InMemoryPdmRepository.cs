@@ -2322,8 +2322,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         lock (gate)
         {
             if (!packages.TryGetValue(releasePackageId, out var package)) throw new PdmNotFoundException("发布包不存在。");
-            if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval or ReleasePackageState.Rejected))
-                throw new PdmConflictException("只有审批中或已退回的发布包可以撤回。");
+            if (package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval or ReleasePackageState.Rejected or ReleasePackageState.PublishFailed))
+                throw new PdmConflictException("只有审批中、已退回或发布失败的发布包可以退回草稿。");
+            if (package.State == ReleasePackageState.PublishFailed && versions.Values.Any(version =>
+                    version.ReleasePackageId == package.Id && version.Status == DocumentVersionStatus.Released))
+                throw new PdmConflictException("此发布包已生成正式图档，请先核对发布结果，不能退回草稿。");
             var now = timeProvider.GetUtcNow();
             if (package.LocksDocuments)
             {
@@ -2338,7 +2341,9 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 DecisionBy = null, Decision = null, Comment = null, DecidedAt = null,
                 IsEmergencySubstitute = false, EmergencyReason = null
             }).ToArray();
-            var withdrawn = package with { State = ReleasePackageState.Draft, ApprovalTasks = tasks };
+            var withdrawn = package with { State = ReleasePackageState.Draft, ApprovalTasks = tasks,
+                PublishedAt = null, PublishedPath = null, PublishError = null, PreviewState = ReleasePreviewState.None,
+                PreviewError = null, PreviewAttempts = 0, PreviewUpdatedAt = null };
             packages[releasePackageId] = withdrawn;
             return Task.FromResult(withdrawn);
         }
@@ -2537,8 +2542,16 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                     && !string.Equals(preview.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase))
                     throw new PdmConflictException($"工程图{version.DocumentId}的PDF来源不是该正式源图。");
                 var saved = version with { Preview = preview };
-                versions[version.Id] = saved;
+                if (!(reusedIds.Contains(version.Id) && preview.Format == DocumentPreviewFormat.Pdf
+                    && packages[releasePackageId].PdfTitleBlockSnapshot is { Enabled: true })) versions[version.Id] = saved;
                 updated.Add(saved);
+            }
+            if (packages[releasePackageId].PdfTitleBlockSnapshot is { Enabled: true })
+            {
+                var package = packages[releasePackageId];
+                var artifacts = new Dictionary<Guid, DocumentPreviewArtifact>(package.PdfDeliveryArtifacts);
+                foreach (var version in updated.Where(v => v.Preview?.Format == DocumentPreviewFormat.Pdf)) artifacts[version.DocumentId] = version.Preview!;
+                packages[releasePackageId] = package with { PdfDeliveryArtifacts = artifacts };
             }
             return Task.FromResult<IReadOnlyList<DocumentVersion>>(updated);
         }
@@ -2598,7 +2611,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 throw new PdmNotFoundException("发布包不存在。 ");
             }
 
-            packages[releasePackageId] = package with { State = ReleasePackageState.PublishFailed };
+            packages[releasePackageId] = package with { State = ReleasePackageState.PublishFailed, PublishError = error };
             return Task.CompletedTask;
         }
     }

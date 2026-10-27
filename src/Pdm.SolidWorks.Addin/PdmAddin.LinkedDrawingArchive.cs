@@ -32,6 +32,8 @@ public sealed partial class PdmAddin
                         Kind = CadDocumentKind.Drawing, DrawingReviewLocked = document.DrawingReviewLocked, LifecycleState = LifecycleStateName(document.State) };
                     if (!File.Exists(path)) throw new IOException("工程图尚未取回，存档时将补齐并重试。");
                     await PrepareBatchCheckInPermissionAsync(new BatchOperationItem(node, 0), projectId, token);
+                    SetFileReadOnly(path, false);
+                    EnsureLoadedDocumentEditable(path);
                     LogOperation("随模型获取关联工程图权限：" + document.FileName);
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }

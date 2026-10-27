@@ -8,12 +8,17 @@ public sealed record StockedMaterialSettings(int SyncIntervalMinutes = 240, bool
 public sealed record StockedMaterialSnapshot(Guid MaterialId, MaterialStockPlan? Plan = null,
     decimal? StockQuantity = null, DateTimeOffset? InventorySyncedAt = null, Guid? LowStockEpisode = null,
     IReadOnlyList<string>? NotifiedRecipients = null, string? LastError = null,
-    IReadOnlyList<U9InventorySourceRow>? InventoryRows = null)
+    IReadOnlyList<U9InventorySourceRow>? InventoryRows = null,
+    bool? HasPendingRequisition = null, decimal? PurchaseQuantity = null, decimal? ArrivedQuantity = null,
+    DateTimeOffset? ProcurementSyncedAt = null, DateOnly? RequisitionDate = null, DateOnly? ExpectedArrivalDate = null)
 {
     public bool IsFormal => Plan?.IsStocked == true;
     public string State => IsFormal ? "Formal" : "Draft";
     public bool IsLowStock => IsFormal && StockQuantity.HasValue && StockQuantity < Plan!.SafetyStockQuantity;
 }
+public sealed record StockedPurchaseLine(string Id, string OrganizationCode, string MaterialCode, DateOnly BusinessDate,
+    decimal RequestedQuantity, decimal PurchaseQuantity, decimal ArrivedQuantity, string UnitCode, bool IsCanceled = false,
+    DateOnly? ExpectedArrivalDate = null);
 public sealed record StockedManagementMaterial(Guid Id, string MaterialCode, string Name, string? Specification,
     string? Brand, string UnitCode, string CategoryCode, string CategoryName, string? U9ItemId)
 {

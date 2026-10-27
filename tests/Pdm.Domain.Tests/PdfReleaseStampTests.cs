@@ -201,8 +201,75 @@ public sealed class PdfReleaseStampTests : IDisposable
         Assert.Equal(first, await File.ReadAllBytesAsync(path));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SelectedTitleBlockCellsReplaceSearchableOldTextOnEveryPageAndRemainIdempotent(bool all)
+    {
+        var (service, source, project, package, path) = Fixture(false, 2, titleBlock: true);
+        var keys = all ? PdfTitleBlockFields.All.Select(f => f.Key).ToArray() : new[] { "material", "weight", "quantity" };
+        var values = keys.ToDictionary(key => key, key => key == "quantity" ? "4" : key == "weight" ? "2.5 kg" : "新值" + PdfTitleBlockFields.Get(key).Name);
+        package = package with { PdfTitleBlockSnapshot = new(keys,
+            new Dictionary<Guid, PdfDrawingTitleBlockSnapshot> { [source.DocumentId] = new(source.SourceVersionId, source.Sha256, values, []) }, true) };
+        if (all)
+        {
+            using var pdf = PdfReader.Open(path, PdfDocumentOpenMode.Modify);
+            foreach (var page in pdf.Pages)
+            {
+                var content = page.Contents.CreateSingleContent().Stream.Value;
+                page.Contents.Elements.Clear();
+                for (var start = 0; start < content.Length;)
+                {
+                    var end = Array.IndexOf(content, (byte)'\n', Math.Min(start + 200, content.Length));
+                    if (end < 0) end = content.Length - 1;
+                    page.Contents.AppendContent().CreateStream(content[start..(end + 1)]);
+                    start = end + 1;
+                }
+            }
+            pdf.Save(path);
+        }
+        var before = await File.ReadAllBytesAsync(path);
+        await service.ApplyAsync(package, project, source, path, default);
+        lock (PdfReleasePageEditor.Gate)
+        {
+            for (var pageIndex = 0; pageIndex < 2; pageIndex++)
+            {
+                var texts = PdfReleasePageEditor.Texts(File.ReadAllBytes(path), pageIndex);
+                foreach (var key in keys)
+                {
+                    Assert.DoesNotContain(texts, text => text.Value.Trim() == "旧值" + key);
+                    Assert.Contains(texts, text => text.Value.Trim() == values[key]);
+                }
+                if (!all) Assert.Contains(texts, text => text.Value.Trim() == "旧值name");
+                Assert.Contains(texts, text => text.Value == "1.去毛刺、锐角倒钝；");
+            }
+        }
+        var hash = SHA256.HashData(await File.ReadAllBytesAsync(path));
+        await service.ApplyAsync(package, project, source, path, default);
+        Assert.Equal(hash, SHA256.HashData(await File.ReadAllBytesAsync(path)));
+        Assert.NotEqual(before, await File.ReadAllBytesAsync(path));
+        var evidence = Environment.GetEnvironmentVariable("UPLM_PDF_TEST_EVIDENCE");
+        if (all && !string.IsNullOrWhiteSpace(evidence)) File.Copy(path, evidence, true);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MissingCellOrOverlongValueLeavesEntireOriginalPdfUnchanged(bool longValue)
+    {
+        var (service, source, project, package, path) = Fixture(false, 1, titleBlock: longValue);
+        var values = new Dictionary<string, string> { ["material"] = longValue ? new string('材', 400) : "钢" };
+        package = package with { PdfTitleBlockSnapshot = new(["material"],
+            new Dictionary<Guid, PdfDrawingTitleBlockSnapshot> { [source.DocumentId] = new(source.SourceVersionId, source.Sha256, values, []) }, true) };
+        var original = await File.ReadAllBytesAsync(path);
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => service.ApplyAsync(package, project, source, path, default));
+        Assert.Contains("第1页", error.Message);
+        Assert.Contains("材质", error.Message);
+        Assert.Equal(original, await File.ReadAllBytesAsync(path));
+    }
+
     private (PdfReleaseStampProcessor Service, ReleasePreviewSource Source, Project Project, ReleasePackage Package, string Path)
-        Fixture(bool legacy, int pages, bool logo = true, bool cadOnly = false, string? legacyCode = null, string? frozenCode = null, bool legacyNote = true, bool offsetRequirements = false, bool crowdedRequirements = false)
+        Fixture(bool legacy, int pages, bool logo = true, bool cadOnly = false, string? legacyCode = null, string? frozenCode = null, bool legacyNote = true, bool offsetRequirements = false, bool crowdedRequirements = false, bool titleBlock = false)
     {
         Directory.CreateDirectory(root);
         var drawingId = Guid.NewGuid(); var modelId = Guid.NewGuid(); var sourceId = Guid.NewGuid();
@@ -249,6 +316,19 @@ public sealed class PdfReleaseStampTests : IDisposable
                     ("2.表面不允许有划痕、擦伤等缺陷；", 182d), ("3.所有尺寸除有特殊说明外，均为最终尺寸；", 167d) })
                     graphics.DrawString(text, font, XBrushes.Black, offsetRequirements ? 873 : 966, h - y);
                 if (crowdedRequirements) graphics.DrawString("保留的尺寸说明", font, XBrushes.Black, 873, h - 265);
+                if (titleBlock)
+                {
+                    for (var fieldIndex = 0; fieldIndex < PdfTitleBlockFields.All.Count; fieldIndex++)
+                    {
+                        var field = PdfTitleBlockFields.All[fieldIndex];
+                        var left = 600 + fieldIndex / 7 * 175;
+                        var bottom = 9 + (6 - fieldIndex % 7) * 14;
+                        graphics.DrawRectangle(XPens.Black, left, h - bottom - 14, 77, 14);
+                        graphics.DrawRectangle(XPens.Black, left + 77, h - bottom - 14, 95, 14);
+                        graphics.DrawString(field.Labels[0], new XFont("UPLM-YaHei", 6), XBrushes.Black, left + 3, h - bottom - 6);
+                        graphics.DrawString("旧值" + field.Key, new XFont("UPLM-YaHei", 5.5), XBrushes.Blue, left + 80, h - bottom - 6);
+                    }
+                }
                 if (legacy)
                 {
                     using var code = QRCodeGenerator.GenerateQrCode(legacyCode ?? "OLD-MODEL", QRCodeGenerator.ECCLevel.M);

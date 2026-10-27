@@ -22,6 +22,9 @@ internal sealed class PluginSettingsDialog : Form
     private readonly Button installUpdateButton = new Button();
     private readonly Button saveButton = new Button();
     private readonly Button cancelButton = new Button();
+    private readonly Button cleanupCopiesButton = new Button();
+    private readonly Label cleanupCopiesStatus = new Label();
+    private Func<Task<ArchiveTemporaryCopyCleanupResult>> cleanTemporaryCopies;
     private readonly Timer refreshTimer = new Timer();
     private readonly Func<PluginUpdateSnapshot> readSnapshot;
     private readonly Func<string, Task<PluginConnectionResult>> testConnection;
@@ -29,6 +32,12 @@ internal sealed class PluginSettingsDialog : Form
     private readonly Func<string, Task<PluginUpdateSnapshot>> installUpdate;
     private readonly Func<PluginSettings, Task<PluginConnectionResult>> saveSettings;
     private bool actionRunning;
+
+    public Func<Task<ArchiveTemporaryCopyCleanupResult>> CleanTemporaryCopies
+    {
+        get => cleanTemporaryCopies;
+        set { cleanTemporaryCopies = value; cleanupCopiesButton.Enabled = !actionRunning && value != null; }
+    }
 
     public PluginSettingsDialog(
         PluginSettings initialSettings,
@@ -53,7 +62,7 @@ internal sealed class PluginSettingsDialog : Form
         MaximizeBox = false;
         ShowInTaskbar = false;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(540, 600);
+        ClientSize = new Size(540, 720);
         Font = new Font("Microsoft YaHei UI", 9F);
 
         var root = new TableLayoutPanel
@@ -61,11 +70,12 @@ internal sealed class PluginSettingsDialog : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(16),
             ColumnCount = 1,
-            RowCount = 4
+            RowCount = 5
         };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 145F));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 120F));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
         Controls.Add(root);
 
@@ -191,6 +201,33 @@ internal sealed class PluginSettingsDialog : Form
         updateLayout.SetColumnSpan(updateActions, 3);
         root.Controls.Add(updateGroup, 0, 2);
 
+        var cleanupGroup = new GroupBox { Text = "存档临时副本", Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 0) };
+        var cleanupLayout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(10, 8, 10, 6), ColumnCount = 2, RowCount = 3 };
+        cleanupLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        cleanupLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96F));
+        cleanupLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
+        cleanupLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 22F));
+        cleanupLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        cleanupLayout.Controls.Add(new Label { Text = "清理未使用的存档上传副本", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        cleanupCopiesButton.Text = "立即清理";
+        cleanupCopiesButton.AccessibleName = "清理存档临时副本";
+        ConfigureDialogButton(cleanupCopiesButton);
+        cleanupCopiesButton.Margin = Padding.Empty;
+        cleanupCopiesButton.Enabled = false;
+        cleanupCopiesButton.Click += async (_, _) => await CleanTemporaryCopiesAsync();
+        cleanupLayout.Controls.Add(cleanupCopiesButton, 1, 0);
+        var cleanupPath = new Label { Text = ArchiveTemporaryCopyCleaner.DirectoryPath, AutoEllipsis = true, Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.FromArgb(95, 108, 124), AccessibleName = "存档临时副本目录" };
+        cleanupLayout.Controls.Add(cleanupPath, 0, 1);
+        cleanupLayout.SetColumnSpan(cleanupPath, 2);
+        cleanupCopiesStatus.Text = "清理完成后显示数量和释放空间。";
+        cleanupCopiesStatus.Dock = DockStyle.Fill;
+        cleanupCopiesStatus.ForeColor = Color.FromArgb(95, 108, 124);
+        cleanupLayout.Controls.Add(cleanupCopiesStatus, 0, 2);
+        cleanupLayout.SetColumnSpan(cleanupCopiesStatus, 2);
+        cleanupGroup.Controls.Add(cleanupLayout);
+        root.Controls.Add(cleanupGroup, 0, 3);
+
         var footer = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -211,7 +248,7 @@ internal sealed class PluginSettingsDialog : Form
         cancelButton.DialogResult = DialogResult.Cancel;
         footer.Controls.Add(saveButton);
         footer.Controls.Add(cancelButton);
-        root.Controls.Add(footer, 0, 3);
+        root.Controls.Add(footer, 0, 4);
 
         AcceptButton = saveButton;
         CancelButton = cancelButton;
@@ -261,6 +298,35 @@ internal sealed class PluginSettingsDialog : Form
         {
             SetActionRunning(false);
         }
+    }
+
+    private async Task CleanTemporaryCopiesAsync()
+    {
+        if (actionRunning || cleanTemporaryCopies == null) return;
+        SetActionRunning(true);
+        cleanupCopiesStatus.ForeColor = Color.FromArgb(95, 108, 124);
+        cleanupCopiesStatus.Text = "正在清理存档临时副本…";
+        try
+        {
+            var result = await cleanTemporaryCopies();
+            if (!IsDisposed)
+            {
+                cleanupCopiesStatus.Text = result.Message;
+                cleanupCopiesStatus.ForeColor = result.SkippedItems == 0 ? Color.FromArgb(0, 128, 96) : Color.FromArgb(170, 105, 20);
+            }
+        }
+        catch (Exception error)
+        {
+            PluginDiagnosticLog.Record("手动清理存档临时副本", error.ToString());
+            if (!IsDisposed)
+            {
+                cleanupCopiesStatus.ForeColor = Color.FromArgb(192, 48, 48);
+                cleanupCopiesStatus.Text = error is InvalidOperationException
+                    && (error.Message.StartsWith("当前有图档操作", StringComparison.Ordinal) || error.Message.StartsWith("临时", StringComparison.Ordinal)) ? error.Message
+                    : "无法完成清理，请检查临时目录权限或文件占用后重试；详细原因已记录在日志中。";
+            }
+        }
+        finally { if (!IsDisposed) SetActionRunning(false); }
     }
 
     private async Task RunUpdateActionAsync(bool install)
@@ -328,6 +394,7 @@ internal sealed class PluginSettingsDialog : Form
         checkUpdateButton.Enabled = !running;
         saveButton.Enabled = !running;
         cancelButton.Enabled = !running;
+        cleanupCopiesButton.Enabled = !running && cleanTemporaryCopies != null;
         var snapshot = readSnapshot();
         installUpdateButton.Text = snapshot.ReadyToInstall ? "安装更新" : "下载并安装";
         installUpdateButton.Enabled = !running && snapshot.UpdateAvailable && !snapshot.Busy;

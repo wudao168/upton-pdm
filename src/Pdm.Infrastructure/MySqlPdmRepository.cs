@@ -1161,7 +1161,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<ReleasePackageRow>(new CommandDefinition(
             """
-            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json, selected_bom_item_ids_json, confirmed_removed_bom_item_ids_json, related_opl_issue_ids_json, drawing_document_count, version_bindings_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier,
+            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json, selected_bom_item_ids_json, confirmed_removed_bom_item_ids_json, related_opl_issue_ids_json, drawing_document_count, version_bindings_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier, pdf_title_block_snapshot_json, pdf_delivery_artifacts_json,
                    reference_snapshot_id, (SELECT scope_snapshot.root_document_id FROM reference_snapshot scope_snapshot WHERE scope_snapshot.id=release_package.reference_snapshot_id AND JSON_TYPE(JSON_EXTRACT(scope_snapshot.root_json, '$.documentId'))='STRING') AS ScopeRootDocumentId, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
@@ -1454,7 +1454,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         var row = await connection.QuerySingleOrDefaultAsync<ReleasePackageRow>(new CommandDefinition(
             """
-            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json, selected_bom_item_ids_json, confirmed_removed_bom_item_ids_json, related_opl_issue_ids_json, drawing_document_count, version_bindings_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier,
+            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json, selected_bom_item_ids_json, confirmed_removed_bom_item_ids_json, related_opl_issue_ids_json, drawing_document_count, version_bindings_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier, pdf_title_block_snapshot_json, pdf_delivery_artifacts_json,
                    reference_snapshot_id, (SELECT scope_snapshot.root_document_id FROM reference_snapshot scope_snapshot WHERE scope_snapshot.id=release_package.reference_snapshot_id AND JSON_TYPE(JSON_EXTRACT(scope_snapshot.root_json, '$.documentId'))='STRING') AS ScopeRootDocumentId, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
@@ -2003,6 +2003,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             DrawingDocumentCount = row.DrawingDocumentCount,
             CreatesManufacturingBaseline = row.CreatesManufacturingBaseline,
             LocksDocuments = row.LocksDocuments,
+            PdfTitleBlockSnapshot = row.PdfTitleBlockSnapshotJson is null ? null : JsonSerializer.Deserialize<PdfTitleBlockSnapshot>(row.PdfTitleBlockSnapshotJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+            PdfDeliveryArtifacts = row.PdfDeliveryArtifactsJson is null ? new Dictionary<Guid, DocumentPreviewArtifact>() : JsonSerializer.Deserialize<Dictionary<Guid, DocumentPreviewArtifact>>(row.PdfDeliveryArtifactsJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? new(),
             WholeSetMultiplier = row.WholeSetMultiplier
         };
     }
@@ -2253,6 +2255,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public string? EmergencyRolesJson { get; init; }
         public string SelectedBomItemIdsJson { get; init; } = "[]";
         public string? ConfirmedRemovedBomItemIdsJson { get; init; }
+        public string? PdfTitleBlockSnapshotJson { get; init; }
+        public string? PdfDeliveryArtifactsJson { get; init; }
         public string? VersionBindingsJson { get; init; }
         public string? RelatedOplIssueIdsJson { get; init; }
         public int DrawingDocumentCount { get; init; }

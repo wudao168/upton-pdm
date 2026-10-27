@@ -3218,6 +3218,8 @@ test('project plan week header centers ISO week and places Monday day on the gri
 })
 
 test('hierarchy category links open the owning project BOM', async ({ page }, testInfo) => {
+  await mockPlanCompanionPanels(page)
+  await page.route('**/assets/melon-jelly*.html*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>登录背景占位</title>' }))
   await page.route('**/api/material-code/resolve', route => route.fulfill({ json: [] }))
   const childId = '22222222-2222-2222-2222-222222222222'
   const base = { owner: '真实工程师', vaultLocation: 'D:\\PDM\\TEST', releaseLocation: 'D:\\Release\\TEST', isActive: true, quantity: 1, serialNumbers: [], designers: [], rootProjectId: projectId }
@@ -3235,13 +3237,14 @@ test('hierarchy category links open the owning project BOM', async ({ page }, te
   page.on('pageerror', error => errors.push(error.message))
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') errors.push(message.text()) })
   await page.setViewportSize({ width: 1988, height: 1114 })
-  await page.goto('/')
+  await page.goto('/', { waitUntil: 'domcontentloaded' })
   const login = page.getByLabel('登录PLM')
   await login.getByRole('textbox', { name: '账号' }).fill('engineer')
   await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
   await login.getByRole('button', { name: '登录', exact: true }).click()
   await enterProject(page)
   await page.getByRole('button', { name: 'BOM', exact: true }).click()
+  await page.getByRole('button', { name: '选择项目号 PRJ-REAL-001', exact: true }).click()
   await page.getByRole('tab', { name: '多级总览' }).click()
   for (const category of ['标准件BOM', '非标件BOM', '电气件BOM']) {
     const expandChild = page.getByRole('button', { name: '展开PRJ-REAL-001-1的三类BOM', exact: true })
@@ -3256,12 +3259,13 @@ test('hierarchy category links open the owning project BOM', async ({ page }, te
           bottom: table.getBoundingClientRect().bottom,
           panelBottom: element.closest('.pdm-bom-manager-panel')!.getBoundingClientRect().bottom,
           rows: [...table.querySelectorAll('tbody tr')].map(row => row.getBoundingClientRect().height),
+          headerColor: getComputedStyle(table.querySelector('thead th')!).backgroundColor,
           types: [...table.querySelectorAll('tbody tr[data-bom-type]')].map(row => ({ type: row.getAttribute('data-bom-type'), color: getComputedStyle(row.querySelector('td')!).backgroundColor })),
           names: [...table.querySelectorAll('.bom-overview__project')].map(name => ({ width: name.clientWidth, content: name.scrollWidth, whiteSpace: getComputedStyle(name).whiteSpace })),
         }
       })
       expect(layout.panelBottom - layout.bottom).toBeLessThanOrEqual(16)
-      for (const height of layout.rows) expect(height).toBeCloseTo(40, 1)
+      for (const height of layout.rows) expect(height).toBeCloseTo(30, 1)
       const typeColors = new Map<string | null, string>()
       for (const row of layout.types) {
         if (typeColors.has(row.type)) expect(row.color).toBe(typeColors.get(row.type))
@@ -3273,7 +3277,7 @@ test('hierarchy category links open the owning project BOM', async ({ page }, te
       expect(typeColors.get('Electrical')).toBe(typeColors.get('Standard'))
       expect(typeColors.get('MainProject')).toBe(typeColors.get('ChildProject'))
       expect(typeColors.get('MainProject')).not.toBe(typeColors.get('Standard'))
-      expect(typeColors.get('MainProject')).toBe('rgb(209, 213, 219)')
+      expect(typeColors.get('MainProject')).toBe(layout.headerColor)
       for (const name of layout.names) {
         expect(name.whiteSpace).toBe('nowrap')
         expect(name.content).toBeLessThanOrEqual(name.width + 1)
@@ -3286,12 +3290,92 @@ test('hierarchy category links open the owning project BOM', async ({ page }, te
     await expect(page.getByLabel('BOM维护')).toBeVisible()
     if (category === '标准件BOM') await page.screenshot({ path: testInfo.outputPath('child-standard-bom.png') })
     await page.getByRole('tab', { name: '多级总览' }).click()
+    await expect(page.locator('.bom-overview .is-master-row')).toHaveCount(1)
+    await expect(page.locator('.bom-overview .is-master-row')).toContainText('PRJ-REAL-001-1')
+    await expect(page.getByRole('button', { name: '进入PRJ-REAL-001的标准件BOM', exact: true })).toHaveCount(0)
   }
+  await page.getByRole('button', { name: '选择项目号 PRJ-REAL-001', exact: true }).click()
+  await expect(page.locator('.bom-overview .is-master-row')).toHaveCount(2)
   await page.getByRole('button', { name: '进入PRJ-REAL-001的标准件BOM', exact: true }).click()
   await expect(page.getByRole('tab', { name: '标准件BOM' })).toHaveAttribute('aria-selected', 'true')
   await expect(page.locator('.pdm-project-detail')).toContainText('导航测试产线')
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
   expect(await page.title()).not.toBe('')
+  expect(errors).toEqual([])
+})
+
+test('three BOM categories compare inside the release picker and return to the previous BOM', async ({ page }, testInfo) => {
+  test.setTimeout(90_000)
+  await page.route('**/assets/melon-jelly*.html*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>登录背景占位</title>' }))
+  await mockPlanCompanionPanels(page)
+  await page.route('**/api/material-code/resolve', route => route.fulfill({ json: [] }))
+  await page.route('**/api/auth/heartbeat', route => route.fulfill({ json: {} }))
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+  const categories = [
+    { kind: 'Standard', prefix: 'S', label: '标准件BOM' },
+    { kind: 'NonStandard', prefix: 'N', label: '非标件BOM' },
+    { kind: 'Electrical', prefix: 'E', label: '电气件BOM' },
+  ]
+  const snapshots = categories.flatMap(({ kind, prefix }) => [1, 2].map(number => ({
+    id: `${kind}-version-${number}`, projectId, kind, versionNumber: number, label: `${prefix}-V0${number}`, state: 'Released',
+    items: [{ id: `${kind}-part`, sequence: 1, drawingNumber: 'PART', name: `${prefix}历史版本物料${number}`, quantity: number, unit: '001', revision: 'A', complete: true }],
+    createdBy: 'engineer', updatedBy: 'engineer', createdAt: `2026-10-0${number}T00:00:00Z`, updatedAt: `2026-10-0${number}T00:00:00Z`,
+  })))
+  await page.route('**/api/projects/*/bom-versions**', route => route.fulfill({ json: snapshots }))
+  await page.route('**/api/projects/*/release-packages', route => route.fulfill({ json: [] }))
+  await page.setViewportSize({ width: 1959, height: 1080 })
+  await page.goto('/', { waitUntil: 'domcontentloaded' })
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('engineer')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await enterProject(page)
+  await page.getByRole('button', { name: 'BOM', exact: true }).click()
+  for (const { kind, prefix, label } of categories) {
+    await page.getByRole('tab', { name: new RegExp('^' + label) }).click()
+    const picker = page.getByRole('dialog', { name: '选择发布包', exact: true })
+    const openPicker = async () => {
+      await page.getByRole('button', { name: '选择发布包', exact: true }).click()
+      await expect(picker).toBeVisible()
+      await expect(page.locator('.pdm-bom-release-picker-popover:visible')).toHaveCSS('opacity', '1')
+    }
+    await openPicker()
+    if (!await picker.getByLabel('选择BOM版本').isVisible()) await picker.locator('summary').click()
+    await picker.getByLabel('选择BOM版本').selectOption(`${kind}-version-1`)
+    await expect(picker).not.toBeVisible()
+    await expect(page.locator('.pdm-bom-table:visible')).toContainText(`${prefix}历史版本物料1`)
+    const startComparison = async () => {
+      await openPicker()
+      for (const number of [1, 2]) await picker.getByRole('checkbox', { name: `对比 ${prefix}-V0${number}`, exact: true }).check()
+      const compare = picker.locator('header').getByRole('button', { name: '对比', exact: true })
+      await expect(compare).toBeVisible()
+      const boxes = await compare.evaluate(button => ({ button: button.getBoundingClientRect().toJSON(), header: button.closest('header')!.getBoundingClientRect().toJSON() }))
+      expect(boxes.button.x).toBeGreaterThan(boxes.header.x + boxes.header.width / 2)
+      if (kind === 'Standard') await page.screenshot({ path: testInfo.outputPath('comparison-button-inside-picker.png') })
+      await compare.click()
+      await expect(picker).not.toBeVisible()
+      await expect(page.locator('.bom-release-comparison__panel')).toHaveCount(2)
+    }
+    await startComparison()
+    await page.getByRole('button', { name: '关闭对比', exact: true }).click()
+    await expect(page.locator('.bom-release-comparison__panel')).toHaveCount(0)
+    await expect(page.locator('.pdm-bom-table:visible')).toContainText(`${prefix}历史版本物料1`)
+    await startComparison()
+    await openPicker()
+    await picker.getByLabel('选择BOM版本').selectOption(`${kind}-version-2`)
+    await expect(picker).not.toBeVisible()
+    await expect(page.locator('.bom-release-comparison__panel')).toHaveCount(0)
+    await expect(page.locator('.pdm-bom-table:visible')).toContainText(`${prefix}历史版本物料2`)
+  }
+  await page.setViewportSize({ width: 1100, height: 800 })
+  await page.getByRole('button', { name: '选择发布包', exact: true }).click()
+  const picker = page.getByRole('dialog', { name: '选择发布包', exact: true })
+  await expect(picker.locator('header').getByRole('button', { name: '对比', exact: true })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('comparison-picker-narrow.png') })
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(await page.title()).toBe('UPTON-PLM')
   expect(errors).toEqual([])
 })
 
@@ -4096,6 +4180,58 @@ test('release overview displays failure details and published status', async ({ 
   await overview.getByRole('button', { name: /RP-FAILED/ }).click()
   await expect(page.locator('.pdm-bom-release-drawer')).toBeVisible()
   await expect(page.locator('.pdm-bom-release-drawer')).toContainText('数据库事务发生死锁，本次发布被中止')
+  expect(errors).toEqual([])
+})
+
+test('PDF title block fields are independent and persist in administrator settings', async ({ page }) => {
+  await mockPlanCompanionPanels(page)
+  await page.route('**/api/standard-structures/storage', route => route.fulfill({ json: { storageRoot: 'D:/Standard', rowVersion: 1 } }))
+  await page.route('**/api/browser-archives/capabilities', route => route.fulfill({ json: { enabled: false, canConfigure: false } }))
+  await page.route('**/@vite/client', route => route.request().frame().parentFrame()
+    ? route.fulfill({ contentType: 'application/javascript', headers: { 'Access-Control-Allow-Origin': '*' }, body: '' }) : route.fallback())
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => {
+    const loginGpuFallback = message.text().includes('WebGPU') && (message.location().url.includes('melon-jelly-') || message.text().includes('普通 HTTP'))
+    if (message.type() === 'error' && !loginGpuFallback) errors.push(message.text())
+  })
+  let settings: Record<string, unknown> = { vaultRoot: 'D:/PDM/Vault', releaseRoot: 'D:/PDM/Release',
+    checkoutHeartbeatSeconds: 180, checkoutLeaseMinutes: 15, checkoutOfflineGraceMinutes: 60,
+    checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48 }
+  await page.route('**/api/system-settings', async route => {
+    if (route.request().method() === 'PUT') settings = route.request().postDataJSON()
+    await route.fulfill({ json: settings })
+  })
+  await page.setViewportSize({ width: 1680, height: 1050 })
+  await page.goto(process.env.PDM_QA_LAN_URL || '/', { waitUntil: 'domcontentloaded' })
+  await expect(page).toHaveTitle('UPTON-PLM')
+  const login = page.getByLabel('登录PLM')
+  await login.getByRole('textbox', { name: '账号' }).fill('admin')
+  await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+  await login.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: '系统设置', exact: true }).click()
+  await page.getByRole('button', { name: '编号与存储', exact: true }).click()
+  await page.getByRole('tab', { name: 'PDF属性填写', exact: true }).click()
+  const panel = page.locator('.pdf-title-block-settings')
+  await expect(panel.getByRole('heading', { name: 'PDF 属性自动填写' })).toBeInViewport({ ratio: 1 })
+  await expect(panel.getByRole('button', { name: '保存 PDF 填写设置' })).toBeInViewport({ ratio: 1 })
+  for (const checkbox of await panel.getByRole('checkbox').all()) await expect(checkbox).toBeInViewport({ ratio: 1 })
+  await expect(panel.getByRole('checkbox')).toHaveCount(19)
+  await expect(panel.locator('input:checked')).toHaveCount(0)
+  for (const name of ['易损件', '物料编码', '重量', '设计日期', '本次下发数量']) await panel.getByLabel(`自动填写${name}`, { exact: true }).check()
+  await panel.getByRole('button', { name: '保存 PDF 填写设置' }).click()
+  await expect.poll(() => settings.pdfTitleBlockFill).toEqual({ enabledFields: ['wearPart', 'materialCode', 'weight', 'designedOn', 'quantity'] })
+  await expect(panel.getByLabel('自动填写设计人', { exact: true })).not.toBeChecked()
+  await page.getByRole('tab', { name: '图纸转换', exact: true }).click()
+  await expect(panel).not.toBeVisible()
+  await page.getByRole('tab', { name: 'PDF属性填写', exact: true }).click()
+  await expect(panel.getByLabel('自动填写重量', { exact: true })).toBeChecked()
+  await expect(panel.getByRole('heading', { name: 'PDF 属性自动填写' })).toBeVisible()
+  expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true)
+  const evidence = process.env.PDM_QA_SCREENSHOT
+  if (evidence) await page.screenshot({ path: evidence, fullPage: false })
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(new URL(page.url()).protocol).toBe('http:')
   expect(errors).toEqual([])
 })
 

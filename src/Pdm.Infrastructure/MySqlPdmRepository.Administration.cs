@@ -199,6 +199,8 @@ public sealed partial class MySqlPdmRepository
             FormalSupplementPolicies = ReadFormalSupplementPolicies(values),
             DrawingQrPolicy = ReadDrawingQrPolicy(values),
             PreviewConversion = ReadPreviewConversion(values),
+            PdfTitleBlockFill = values.TryGetValue("pdf_title_block_fill", out var pdfFill)
+                ? JsonSerializer.Deserialize<PdfTitleBlockFillSettings>(pdfFill, jsonOptions) ?? new() : new(),
             ProgramTemplateOptions = ReadProgramTemplateOptions(values),
             EngineeringKitOptions = ReadEngineeringKitOptions(values)
         };
@@ -276,6 +278,7 @@ public sealed partial class MySqlPdmRepository
             new { Key = "formal_supplement_policies", Value = JsonSerializer.Serialize(settings.FormalSupplementPolicies, jsonOptions) },
             new { Key = "drawing_qr_policy", Value = JsonSerializer.Serialize(settings.DrawingQrPolicy with { Enabled = false }, jsonOptions) },
             new { Key = "preview_conversion", Value = JsonSerializer.Serialize(settings.PreviewConversion, jsonOptions) },
+            new { Key = "pdf_title_block_fill", Value = JsonSerializer.Serialize(settings.PdfTitleBlockFill, jsonOptions) },
             new { Key = "program_template_options", Value = JsonSerializer.Serialize(settings.ProgramTemplateOptions, jsonOptions) },
             new { Key = "engineering_kit_options", Value = JsonSerializer.Serialize(settings.EngineeringKitOptions, jsonOptions) }
         })

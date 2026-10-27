@@ -475,6 +475,7 @@ public static class PdmEndpointExtensions
                 ReleaseChangeReasonLabels = request.ReleaseChangeReasonLabels ?? currentSettings.ReleaseChangeReasonLabels,
                 FormalSupplementPolicies = request.FormalSupplementPolicies ?? currentSettings.FormalSupplementPolicies,
                 DrawingQrPolicy = request.DrawingQrPolicy ?? currentSettings.DrawingQrPolicy,
+                PdfTitleBlockFill = request.PdfTitleBlockFill ?? currentSettings.PdfTitleBlockFill,
                 PreviewConversion = request.PreviewConversion ?? currentSettings.PreviewConversion
             };
             return Results.Ok(await workflow.UpdateSystemSettingsAsync(settings, actor, role, cancellationToken));
@@ -952,6 +953,8 @@ public static class PdmEndpointExtensions
             var item = (await drawings.ListAsync(actor, role, true, project.Id, cancellationToken))
                 .FirstOrDefault(value => value.VersionId == versionId);
             if (item is null) return Results.NotFound();
+            var deliveryPackage = await repository.FindReleasePackageAsync(item.ReleasePackageId, cancellationToken);
+            if (deliveryPackage is not null) version = PdfTitleBlockSnapshotBuilder.DeliveryVersion(deliveryPackage, version);
             var expectedFormat = DocumentPreviewFormat.Pdf;
             if (modelDocumentId.HasValue || modelVersionId.HasValue)
             {
@@ -1038,6 +1041,8 @@ public static class PdmEndpointExtensions
                         if (request.Format == "Pdf")
                         {
                             var version = await drawings.EnsureProductionUseAllowedAsync(item.DocumentId, item.VersionId, cancellationToken);
+                            var deliveryPackage = await repository.FindReleasePackageAsync(item.ReleasePackageId, cancellationToken);
+                            if (deliveryPackage is not null) version = PdfTitleBlockSnapshotBuilder.DeliveryVersion(deliveryPackage, version);
                             var preview = version.Preview;
                             if (preview?.Format != DocumentPreviewFormat.Pdf)
                                 throw new PdmRuleException("所选图纸中有 PDF 待转换，不能用旧版替代。");

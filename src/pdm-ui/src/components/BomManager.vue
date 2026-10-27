@@ -230,6 +230,14 @@ function applyComparisonChoices() {
   appliedComparisonIds.value = [...selectedComparisonIds.value]
   releasePickerOpen.value = false
 }
+function closeReleaseComparison() {
+  appliedComparisonIds.value = []
+  releasePickerOpen.value = false
+}
+function selectSingleVersion() {
+  versionSelectionTouched.value = true
+  closeReleaseComparison()
+}
 watch(() => publishedComparisonSnapshots.value.map(item => item.id), ids => {
   selectedComparisonIds.value = selectedComparisonIds.value.filter(id => ids.includes(id))
   appliedComparisonIds.value = appliedComparisonIds.value.filter(id => ids.includes(id))
@@ -4374,7 +4382,7 @@ async function submitBatchUpdate() {
         <ElPopover v-model:visible="releasePickerOpen" trigger="click" placement="bottom-end" :width="440" :persistent="true" popper-class="pdm-bom-release-picker-popover">
           <template #reference><button type="button" class="pdm-secondary-action pdm-bom-release-picker-trigger" aria-label="选择发布包" aria-haspopup="dialog" :aria-expanded="releasePickerOpen">选择发布包{{ selectedComparisonIds.length ? '（' + selectedComparisonIds.length + '/3）' : '' }} ▾</button></template>
           <div class="pdm-bom-release-picker-content" :role="releasePickerOpen ? 'dialog' : undefined" aria-label="选择发布包">
-            <header><strong>选择发布包</strong><span>已选 {{ selectedComparisonIds.length }} / 3</span></header>
+            <header><strong>选择发布包</strong><div class="pdm-bom-release-picker-actions"><button type="button" class="pdm-primary-action pdm-bom-start-release-comparison" :disabled="!selectedComparisonIds.length" @click="applyComparisonChoices">对比</button><span>已选 {{ selectedComparisonIds.length }} / 3</span></div></header>
             <div class="pdm-bom-release-picker-options">
               <label v-for="item in comparisonPickerOptions" :key="item.id"><input type="checkbox" :aria-label="'对比 ' + (item.packageNumber || item.label)" :checked="selectedComparisonIds.includes(item.id)" :disabled="selectedComparisonIds.length >= 3 && !selectedComparisonIds.includes(item.id)" @change="toggleComparisonChoice(item.id, $event)"><span><strong>{{ item.label }}</strong><small>{{ item.packageNumber || '历史正式版本' }} · {{ item.releasedAt ? item.releasedAt.slice(0, 10) : '日期未记录' }}</small></span></label>
               <span v-if="!comparisonPickerOptions.length">暂无已发布的BOM版本或发布包</span>
@@ -4382,7 +4390,7 @@ async function submitBatchUpdate() {
             <small>最多勾选3项，勾选后点击“对比”。</small>
         <details class="pdm-bom-single-version-in-picker"><summary>单版查看</summary>
         <label>
-          <select v-model="selectedVersionId" aria-label="选择BOM版本" @change="versionSelectionTouched = true">
+          <select v-model="selectedVersionId" aria-label="选择BOM版本" @change="selectSingleVersion">
             <option value="current">当前工作区{{ activeDraftVersion ? ` · ${displayVersionLabel(activeDraftVersion.label)} 工作中 · ${formatBomVersionDate(activeDraftVersion)}` : ' · 修改后创建下一工作版' }}</option>
             <option v-for="version in categoryVersions" :key="version.id" :value="version.id">{{ displayVersionLabel(version.label) }} · {{ versionStateLabel(version.state) }} · {{ formatBomVersionDate(version) }}</option>
           </select>
@@ -4390,10 +4398,9 @@ async function submitBatchUpdate() {
         </details>
           </div>
         </ElPopover>
-        <button type="button" class="pdm-primary-action pdm-bom-start-release-comparison" :disabled="!selectedComparisonIds.length" @click="applyComparisonChoices">对比</button>
         <span v-if="selectedVersion" class="pdm-bom-version-state" :class="`is-${selectedVersion.state.toLocaleLowerCase()}`">{{ versionStateLabel(selectedVersion.state) }} · 只读</span>
         <span v-if="selectedVersion?.state === 'Released'" class="pdm-muted">2D／3D按此BOM的发布版本取用</span>
-        <button type="button" class="pdm-secondary-action" :disabled="!comparisonBaseline && !releaseComparisonActive" @click="releaseComparisonActive ? appliedComparisonIds = [] : comparisonOpen = !comparisonOpen">{{ releaseComparisonActive || comparisonOpen ? '收起差异' : '对比发布' }}</button>
+        <button type="button" class="pdm-secondary-action" :disabled="!comparisonBaseline && !releaseComparisonActive" @click="releaseComparisonActive ? closeReleaseComparison() : comparisonOpen = !comparisonOpen">{{ releaseComparisonActive ? '关闭对比' : comparisonOpen ? '收起差异' : '对比发布' }}</button>
       </div>
     </div>
     <BomReleaseComparison v-if="releaseComparisonActive" :key="String(projectId) + ':' + kind" :snapshots="appliedComparisonSnapshots" />
@@ -4894,6 +4901,9 @@ async function submitBatchUpdate() {
 </template>
 
 <style scoped>
+.pdm-bom-release-picker-actions{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.pdm-bom-release-picker-actions .pdm-bom-start-release-comparison{box-sizing:border-box;width:60px;min-width:60px;height:var(--pdm-button-default);padding:0 2px;font-size:12px}
+@media(max-width:1200px){.pdm-bom-selection-toolbar:not(.is-release-comparison){grid-template-columns:minmax(0,1fr)}.pdm-bom-selection-actions,.pdm-bom-version-picker{flex-wrap:wrap}}
 .pdm-bom-release-picker-content>header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.pdm-bom-release-picker-content small{display:block;color:var(--pdm-muted);font-size:11px;margin-top:4px}.pdm-bom-release-picker-options{max-height:320px;overflow:auto;margin-bottom:10px}.pdm-bom-release-picker-options>label{display:flex;gap:8px;align-items:center;padding:9px 5px;border-bottom:1px solid var(--pdm-border)}.pdm-bom-release-picker-options>label>span{min-width:0}.pdm-bom-release-picker-options strong{font-size:12px}.pdm-bom-release-picker-options input{accent-color:var(--pdm-theme-accent)}.pdm-bom-single-version-in-picker{margin-top:12px;border-top:1px solid var(--pdm-border);padding-top:8px}.pdm-bom-single-version-in-picker select{width:100%;margin-top:8px}.pdm-bom-selection-toolbar.is-release-comparison{display:flex;justify-content:flex-end}.pdm-bom-selection-toolbar .pdm-bom-version-picker .pdm-bom-release-picker-trigger{width:180px!important;min-width:180px!important;max-width:180px!important;flex:0 0 180px!important;white-space:nowrap!important;overflow:hidden;text-overflow:ellipsis;line-height:18px!important}.pdm-bom-release-picker-content{max-width:calc(100vw - 48px)}
 
 

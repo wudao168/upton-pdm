@@ -160,13 +160,28 @@ public sealed class StockedMaterialService(IStockedMaterialStore store, StockedM
                     var codes = managed.Select(item => item.MaterialCode).ToHashSet(StringComparer.OrdinalIgnoreCase);
                     stockRows.AddRange(result.Rows.Where(row => row.OrganizationCode == scope.OrganizationCode && codes.Contains(row.MaterialCode)));
                 }
+                var through = DateOnly.FromDateTime(started.ToOffset(TimeSpan.FromHours(8)).Date);
+                var from = through.AddMonths(-3);
+                var purchases = await ExternalAsync(() => client.QueryStockedPurchasesAsync(config.BaseUrl, token, scope.OrganizationCode,
+                    plans.Where(plan => plan.IsStocked).Select(plan => plan.MaterialCode).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), from, through, ct))
+                    ?? throw new PdmRuleException("U9C请购采购信息查询不可用，已保留上次成功数据。");
+                var currentPurchases = purchases.Where(row => row.OrganizationCode == scope.OrganizationCode && !row.IsCanceled
+                    && row.BusinessDate >= from && row.BusinessDate <= through).DistinctBy(row => row.Id).ToArray();
                 var snapshots = managed.Select(material =>
                 {
                     var before = catalog.Snapshots.FirstOrDefault(item => item.MaterialId == material.Id) ?? new(material.Id);
                     var matching = plans.Where(plan => plan.MaterialCode.Equals(material.MaterialCode, StringComparison.OrdinalIgnoreCase)).ToArray();
+                    var requested = currentPurchases.Where(row => row.MaterialCode.Equals(material.MaterialCode, StringComparison.OrdinalIgnoreCase)).ToArray();
+                    if (matching.Length == 1 && requested.Any(row => row.UnitCode != (matching[0].UnitCode ?? material.UnitCode)))
+                        throw new PdmRuleException($"料号{material.MaterialCode}的请购单位与库存单位不一致，已保留上次汇总，请核对单位换算。");
+                    var outstanding = requested.Where(row => row.PurchaseQuantity > row.ArrivedQuantity).ToArray();
                     return matching.Length != 1 ? before with { LastError = "U9C未返回唯一的当前组织库存规划，请核对料号及组织。" }
                         : before with { Plan = matching[0], StockQuantity = stockRows.Where(row => row.MaterialCode.Equals(material.MaterialCode, StringComparison.OrdinalIgnoreCase)).Sum(row => row.StockQuantity),
                             InventorySyncedAt = started, LastError = null,
+                            HasPendingRequisition = matching[0].IsStocked && requested.Any(row => row.RequestedQuantity > row.ArrivedQuantity),
+                            PurchaseQuantity = outstanding.Sum(row => row.PurchaseQuantity), ArrivedQuantity = outstanding.Sum(row => row.ArrivedQuantity), ProcurementSyncedAt = started,
+                            RequisitionDate = requested.Where(row => row.RequestedQuantity > row.ArrivedQuantity).Select(row => (DateOnly?)row.BusinessDate).Max(),
+                            ExpectedArrivalDate = outstanding.Select(row => row.ExpectedArrivalDate).Max(),
                             InventoryRows = stockRows.Where(row => row.MaterialCode.Equals(material.MaterialCode, StringComparison.OrdinalIgnoreCase)).ToArray() };
                 }).ToArray();
                 await materials.SaveStockPlansAsync(snapshots.Where(item => item.LastError is null && item.Plan is not null).Select(item => item.Plan!).ToArray(), ct);

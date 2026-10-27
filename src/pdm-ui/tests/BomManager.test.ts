@@ -85,6 +85,7 @@ describe('BomManager', () => {
     await wrapper.get('tr.is-quick-entry input[aria-label="物料名称"]').setValue('尚未保存的新物料')
     await wrapper.get('button[aria-label="选择发布包"]').trigger('click')
     await flushPromises()
+    expect(wrapper.find('.pdm-bom-release-picker-content>header .pdm-bom-start-release-comparison').exists()).toBe(true)
     for (const label of ['S-V03', 'S-V01', 'S-V02']) await wrapper.get(`input[aria-label="对比 ${label}"]`).setValue(true)
     expect(wrapper.findAll('.bom-release-comparison__panel')).toHaveLength(0)
     expect(wrapper.get('.pdm-bom-table').element.parentElement?.getAttribute('style') || '').not.toContain('display: none')
@@ -102,7 +103,7 @@ describe('BomManager', () => {
     await wrapper.get('.pdm-bom-start-release-comparison').trigger('click')
     await flushPromises()
     expect(wrapper.findAll('.bom-release-comparison__panel')).toHaveLength(2)
-    await wrapper.findAll('.pdm-bom-version-picker button').find(button => button.text() === '收起差异')!.trigger('click')
+    await wrapper.findAll('.pdm-bom-version-picker button').find(button => button.text() === '关闭对比')!.trigger('click')
     expect(wrapper.get('.pdm-bom-table').element.parentElement?.getAttribute('style') || '').not.toContain('display: none')
     expect(wrapper.findAll('input[aria-label="物料名称"]').some(input => (input.element as HTMLInputElement).value === '尚未保存的新物料')).toBe(true)
     expect(wrapper.emitted('save')).toBeUndefined()
@@ -110,6 +111,40 @@ describe('BomManager', () => {
     await wrapper.findAll('button[role="tab"]')[3]!.trigger('click')
     await flushPromises()
     expect(wrapper.findAll('.bom-release-comparison__panel')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['Standard', 'S', 1], ['NonStandard', 'N', 2], ['Electrical', 'E', 3],
+  ] as const)('%s关闭对比恢复原版本，单版选择立即退出对比', async (kind, prefix, tabIndex) => {
+    const versions: BomVersion[] = [1, 2].map(number => ({ id: `version-${number}`, projectId: 'project', kind, versionNumber: number,
+      label: `${prefix}-V0${number}`, state: 'Released', items: [{ sequence: 1, drawingNumber: 'PART', name: `历史版本物料${number}`, quantity: number, unit: '001', revision: 'A', complete: true }],
+      createdBy: 'admin', updatedBy: 'admin', createdAt: `2026-10-0${number}`, updatedAt: `2026-10-0${number}` }))
+    const wrapper = mount(BomManager, { props: { standard: [], nonStandard: [], electrical: [], declarations: [], versions, pending: false, editable: true, token: 'token', projectId: 'project' }, global: { plugins: [ElementPlus] } })
+    await wrapper.findAll('button[role="tab"]')[tabIndex]!.trigger('click')
+    const versionPicker = wrapper.get('select[aria-label="选择BOM版本"]')
+    await versionPicker.setValue('version-1')
+    const startComparison = async () => {
+      for (const number of [1, 2]) await wrapper.get(`input[aria-label="对比 ${prefix}-V0${number}"]`).setValue(true)
+      await wrapper.get('.pdm-bom-release-picker-content>header .pdm-bom-start-release-comparison').trigger('click')
+      await flushPromises()
+      expect(wrapper.findAll('.bom-release-comparison__panel')).toHaveLength(2)
+    }
+    await startComparison()
+    await wrapper.findAll('.pdm-bom-version-picker button').find(button => button.text() === '关闭对比')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.bom-release-comparison__panel')).toHaveLength(0)
+    expect((versionPicker.element as HTMLSelectElement).value).toBe('version-1')
+    expect(wrapper.get('.pdm-bom-table').isVisible()).toBe(true)
+    expect(wrapper.get('.pdm-bom-table').text()).toContain('历史版本物料1')
+    await startComparison()
+    await versionPicker.setValue('version-2')
+    await flushPromises()
+    expect(wrapper.findAll('.bom-release-comparison__panel')).toHaveLength(0)
+    expect(wrapper.get('.pdm-bom-table').isVisible()).toBe(true)
+    expect(wrapper.get('.pdm-bom-table').text()).toContain('历史版本物料2')
+    expect(wrapper.find('.pdm-bom-release-picker-content[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.emitted('save')).toBeUndefined()
     wrapper.unmount()
   })
 

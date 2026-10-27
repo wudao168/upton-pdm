@@ -82,6 +82,7 @@ public sealed partial class PdmAddin
                 {
                     if (!progress.IsSessionProxy) progress.CancelRequested += (_, _) => cancellation.Cancel();
                     var ct = cancellation.Token;
+                    ArchiveSession.Current?.SetPhase(2, "正在准备标准结构的原生文件、嵌入层级和预览…");
                     var models = new Dictionary<CadTreeNode, IModelDoc2>();
                     foreach (var node in nodes.Reverse())
                     {
@@ -199,6 +200,7 @@ public sealed partial class PdmAddin
                             throw new InvalidOperationException("请先将明细图档的物料分类填写为标准件或非标件；本次尚未上传：" + node.FileName);
                         foreach (var child in children) Bom(child, quantity, false);
                     }
+                    ArchiveSession.Current?.SetPhase(3, "正在校验标准结构的物料明细及文件一致性…");
                     if (root.Kind != CadDocumentKind.Drawing) Bom(root, 1, true);
                     ct.ThrowIfCancellationRequested();
                     if (ArchiveSession.Current != null)
@@ -209,6 +211,7 @@ public sealed partial class PdmAddin
                             if (!string.Equals(ComputeFileHash(node.FullPath), ComputeFileHash(uploads[nativeKeys[node.FullPath]]), StringComparison.OrdinalIgnoreCase))
                                 throw new InvalidOperationException("标准图档在准备完成后发生变化，已停止上传，请保存后重新准备：" + node.FileName);
                     }
+                    ArchiveSession.Current?.SetPhase(4, "正在上传标准结构完整版本，请等待服务器确认…");
                     progress.SetStage("正在上传标准结构完整版本，请等待服务器确认");
                     var saved = await apiClient.ArchiveStandardStructureAsync(new { StructureId = libraryId, DrawingType = drawingType, Name = Name(root), Root = Map(root), Bom = bom,
                         RequestId = Guid.NewGuid(), ExpectedRevisionId = latest == null ? (Guid?)null : latest.Id, ChangeNote = changeNote }, uploads, ct);

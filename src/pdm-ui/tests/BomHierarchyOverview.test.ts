@@ -54,6 +54,58 @@ describe('BomHierarchyOverview', () => {
   })
   afterEach(() => vi.restoreAllMocks())
 
+  it('选中子项目只显示并读取该项目，切回主项目恢复完整总览', async () => {
+    const root = project({ id: 'root', code: 'ROOT', name: '主项目' })
+    const first = project({ id: 'first', code: 'CHILD-1', name: '子项目一', parentProjectId: 'root', rootProjectId: 'root' })
+    const second = project({ id: 'second', code: 'CHILD-2', name: '子项目二', parentProjectId: 'root', rootProjectId: 'root' })
+    const unrelated = project({ id: 'other', code: 'OTHER', name: '其他主项目' })
+    api.listBom.mockResolvedValue([])
+    api.listBomVersions.mockResolvedValue([])
+    api.listProjectBomHeaders.mockResolvedValue([])
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root, first, second, unrelated], token: 'token', editable: true } })
+    await flushPromises()
+    expect(wrapper.findAll('.is-master-row')).toHaveLength(3)
+    for (const selected of [first, second]) {
+      api.listBom.mockClear()
+      await wrapper.setProps({ project: selected })
+      await flushPromises()
+      expect(wrapper.findAll('tbody tr')).toHaveLength(4)
+      expect(wrapper.findAll('.is-master-row').map(row => row.text())).toEqual([expect.stringContaining(selected.code)])
+      expect(wrapper.text()).toContain('自动生成并同步 4 个BOM料号')
+      expect(api.listBom.mock.calls.map(call => call[0])).toEqual([selected.id, selected.id, selected.id])
+      for (const label of ['标准件BOM', '非标件BOM', '电气件BOM']) {
+        expect(wrapper.find(`button[aria-label="进入${selected.code}的${label}"]`).exists()).toBe(true)
+      }
+    }
+    await wrapper.setProps({ project: root })
+    await flushPromises()
+    expect(wrapper.findAll('.is-master-row')).toHaveLength(3)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(12)
+    expect(wrapper.text()).not.toContain('OTHER')
+    wrapper.unmount()
+  })
+
+  it('快速切换子项目时，较晚返回的旧请求不覆盖当前项目状态', async () => {
+    const root = project({ id: 'root', code: 'ROOT', name: '主项目' })
+    const first = project({ id: 'first', code: 'CHILD-1', name: '子项目一', parentProjectId: 'root', rootProjectId: 'root' })
+    const second = project({ id: 'second', code: 'CHILD-2', name: '子项目二', parentProjectId: 'root', rootProjectId: 'root' })
+    let failFirst!: (reason: Error) => void
+    api.listBom.mockResolvedValue([])
+    api.listBomVersions.mockImplementation((id: string) => id === first.id ? new Promise<[]>((_resolve, reject) => { failFirst = reject }) : Promise.resolve([]))
+    api.listProjectBomHeaders.mockResolvedValue([])
+    const wrapper = mount(BomHierarchyOverview, { props: { project: first, projects: [root, first, second], token: 'token' } })
+    await wrapper.setProps({ project: second })
+    await flushPromises()
+    expect(wrapper.get('[aria-label="刷新多级BOM"]').attributes('disabled')).toBeUndefined()
+    failFirst(new Error('旧子项目读取失败'))
+    await flushPromises()
+    expect(wrapper.findAll('.is-master-row')).toHaveLength(1)
+    expect(wrapper.get('.is-master-row').text()).toContain(second.code)
+    expect(wrapper.text()).not.toContain(first.code)
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('automatically refreshes failed applications and rechecks BOM after U9 recovers without browser writes', async () => {
     vi.useFakeTimers()
     const root = project({ id: 'root', code: 'P700013', name: '项目' })

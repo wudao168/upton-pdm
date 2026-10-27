@@ -1,0 +1,8 @@
+@layer pdm-control-spacing {
+  :root body [data-pdm-control-layout="flow"] { gap: var(--pdm-control-gap) !important; }
+  :root body [data-pdm-control-layout="flow"]:not(nav):not(.pdm-tabs):not([role="tablist"]):not(.el-tabs__nav) { flex-wrap: wrap !important; }
+  :root body [data-pdm-control-layout="flow"] > [data-pdm-control-item],
+  :root body [data-pdm-control-layout="stack"] > [data-pdm-control-item] { margin: 0 !important; }
+  :root body [data-pdm-control-layout="stack"] > [data-pdm-control-item] + [data-pdm-control-item] { margin-top: var(--pdm-control-gap) !important; }
+  :root body [data-pdm-control-layout="inline"] > [data-pdm-control-item] { margin: calc(var(--pdm-control-gap) / 2) !important; }
+}

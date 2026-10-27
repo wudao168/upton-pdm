@@ -27,6 +27,48 @@ internal static partial class Program
  {
   AppDomain.CurrentDomain.AssemblyResolve+=(_,e)=>{var path=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0])),new AssemblyName(e.Name).Name+".dll");return File.Exists(path)?Assembly.LoadFrom(path):null;};
   assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));
+  if(args.Length>1&&args[1]=="--archive-settings-cleanup-regression")
+  {
+   using(var cleanupHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+   cleanupHost.Shown+=async(_,__)=>{try{await ArchiveSettingsCleanupScenario(cleanupHost,args[2]);await ArchiveSourceRepeatScenario(cleanupHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{cleanupHost.Close();}};
+    Application.Run(cleanupHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-window-residency-regression")
+  {
+   using(var residencyHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    residencyHost.Shown+=async(_,__)=>{try{await ArchiveWindowResidencyScenario(residencyHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{residencyHost.Close();}};
+    Application.Run(residencyHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-read-alias-regression")
+  {
+   try{ArchiveReadAliasScenario(args[2]).GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&(args[1]=="--archive-phase-info-regression"||args[1]=="--archive-window-visibility-regression"))
+  {
+   using(var phaseHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    phaseHost.Shown+=async(_,__)=>{try{await ArchivePhaseInfoScenario(phaseHost,args[2],args[1]=="--archive-window-visibility-regression");}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{phaseHost.Close();}};
+    Application.Run(phaseHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-readonly-permission-regression")
+  {
+   try{ArchiveReadOnlyPermissionScenario(args[2]).GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
   if(args.Length>1&&args[1]=="--archive-file-locations-regression")
   {
    try{ArchiveFileLocationsScenario(args[2]);}
@@ -38,6 +80,11 @@ internal static partial class Program
    try{ReferenceNoticeContractsScenario().GetAwaiter().GetResult();}
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
+  }
+  if(args.Length>1&&args[1]=="--native-file-open-safety-regression")
+  {
+   try{NativeFileOpenSafetyScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
   }
   if(args.Length>1&&args[1]=="--background-tree-safety-regression")
   {
@@ -283,6 +330,17 @@ internal static partial class Program
     Application.Run(archiveHost);
    }
    return;
+  }
+  if(args.Length>1&&args[1]=="--archive-progress-refresh-regression")
+  {
+   Exception progressFailure=null;
+   using(var progressHost=new Form{Width=1200,Height=900,ShowInTaskbar=false,Opacity=0})
+   {
+    progressHost.Shown+=async(_,__)=>{try{await ArchiveProgressRefreshScenario(progressHost,args[2]);}
+     catch(Exception error){progressFailure=error;}finally{progressHost.Close();}};
+    Application.Run(progressHost);
+   }
+   if(progressFailure!=null){Console.WriteLine("FAIL: "+progressFailure);Environment.ExitCode=1;}return;
   }
   if(args.Length>1&&args[1]=="--archive-session-regression")
   {

@@ -11,6 +11,7 @@
   --pdm-font-size-heading: 12px;
   --pdm-radius-panel: 8px;
   --pdm-radius-control: 5px;
+  --pdm-control-gap: 5px;
   --pdm-button-compact: 24px;
   --pdm-button-default: 30px;
   --pdm-button-large: 32px;
@@ -21,7 +22,7 @@
   --pdm-tabs-padding: 4px;
   --pdm-tabs-radius: 8px;
   --pdm-tabs-shadow: 0 2px 8px rgba(0, 0, 0, .1);
-  --pdm-symbol-small: 20px;
+  --pdm-symbol-small: 24px;
   --pdm-symbol-compact: 24px;
   --pdm-symbol-toolbar: 28px;
   --el-border-radius-base: var(--pdm-radius-control);

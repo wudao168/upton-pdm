@@ -114,6 +114,18 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
 
     public Task DiscardDraftAsync(ReleasePackage package, Project project, CancellationToken cancellationToken)
     {
+        if (package.State == ReleasePackageState.PublishFailed)
+        {
+            var releaseRoot = StorageLocationPolicy.Normalize(project.ReleaseLocation);
+            var failedDirectory = StorageLocationPolicy.ResolveUnder(releaseRoot, package.Number);
+            if (Directory.Exists(failedDirectory))
+            {
+                var backup = StorageLocationPolicy.ResolveUnder(releaseRoot,
+                    Path.Combine(".withdrawn-releases", package.Number + "-" + Guid.NewGuid().ToString("N")));
+                Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
+                Directory.Move(failedDirectory, backup);
+            }
+        }
         var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
         var stagingDirectory = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-staging", package.Number));
         if (Directory.Exists(stagingDirectory)) Directory.Delete(stagingDirectory, true);
@@ -154,6 +166,14 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         // Refresh legacy in-review packages as well; the approved full BOM snapshot is unchanged.
         ReleasePublishingProgress.Set(package.Id, "生成BOM发布文件");
         await PrepareAsync(package with { State = ReleasePackageState.Publishing }, project, cancellationToken);
+        if (repository is not null && package.PdfTitleBlockSnapshot is { QuantitiesFrozen: false })
+        {
+            // 长交期发布须先全部完成，数量才能与本次发布BOM一同冻结。
+            package = await repository.SaveReleasePdfTitleBlockAsync(package.Id,
+                PdfTitleBlockSnapshotBuilder.FreezeQuantities(conversionPackage,
+                    await repository.ListReleasePackagesAsync(package.ProjectId, cancellationToken)), cancellationToken);
+            conversionPackage = package with { PublishedAt = publishedAt };
+        }
 
         // 核对审批冻结的工程图，原文件直接作为正式版本和PDF转换来源。
         Dictionary<Guid, FormalDrawingSource> formalDrawings;
@@ -176,7 +196,8 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         string? previewError = null;
         var previews = new Dictionary<Guid, DocumentPreviewArtifact>();
         if (repository is not null)
-        foreach (var source in conversionSources.Where(source => source.AlreadyReleased))
+        foreach (var source in conversionSources.Where(source => source.AlreadyReleased
+            && !(source.Kind == DocumentKind.Drawing && package.PdfTitleBlockSnapshot is { Enabled: true })))
         {
             var version = await repository.FindDocumentVersionAsync(source.DocumentId, source.SourceVersionId, cancellationToken);
             if (version?.Preview is not { } existing || existing.Format != (source.Kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step)
@@ -307,7 +328,11 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
             {
                 var released = (await repository.ListDocumentVersionsAsync(source.DocumentId, cancellationToken))
                     .FirstOrDefault(version => (version.ReleasePackageId == package.Id || source.AlreadyReleased && version.Id == source.SourceVersionId) && version.Preview is not null);
-                if (released?.Preview is not null) previews[source.DocumentId] = released.Preview;
+                if (released is not null)
+                {
+                    var delivery = PdfTitleBlockSnapshotBuilder.DeliveryVersion(package, released);
+                    if (delivery.Preview is not null) previews[source.DocumentId] = delivery.Preview;
+                }
             }
             if (source.Kind == DocumentKind.Drawing && !source.AlreadyReleased && !formal.ContainsKey(source.DocumentId))
             {

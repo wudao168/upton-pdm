@@ -42,6 +42,26 @@ describe('常备件', () => {
     expect(wrapper.find('[role="alert"]').text()).toContain('已保留上次成功数据')
     expect(wrapper.text()).toContain('键盘')
   })
+  it('shows requisition and outstanding purchase totals and keeps both low-stock colors pinned', async () => {
+    const rows = [
+      { material: { ...material, id: 'requested', name: '已请购料品' }, snapshot: { ...snapshot, hasPendingRequisition: true, purchaseQuantity: 400, arrivedQuantity: 20, requisitionDate: '2026-10-26', expectedArrivalDate: '2026-11-03' } },
+      { material: { ...material, id: 'request-only', name: '尚未采购料品' }, snapshot: { ...snapshot, hasPendingRequisition: true, purchaseQuantity: 0, arrivedQuantity: 0 } },
+      { material: { ...material, id: 'none', name: '未请购料品' }, snapshot: { ...snapshot, hasPendingRequisition: false, purchaseQuantity: 0, arrivedQuantity: 0 } },
+    ].map(row => ({ ...row, categories: [category], coverImage: null }))
+    api.listStockedMaterials.mockResolvedValue({ items: rows, total: 3, lowStockCount: 3, page: 1, pageSize: 50, scope: { organizationCode: '7' }, canSynchronize: true })
+    wrapper = mount(StockedMaterials, { props: { token: 'token', active: true, canManage: false }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(wrapper.findAll('tr.is-low-stock')).toHaveLength(3)
+    expect(wrapper.findAll('tr.is-requested')).toHaveLength(2)
+    const requested = wrapper.findAll('tr.is-requested').find(row => row.text().includes('已请购料品'))!
+    expect(requested.text()).toContain('400'); expect(requested.text()).toContain('20')
+    expect(requested.text()).toContain('是'); expect(requested.text()).toContain('低库存·已请购')
+    expect(requested.text()).toContain('2026-10-26'); expect(requested.text()).toContain('2026-11-03')
+    const requestOnly = wrapper.findAll('tr.is-requested').find(row => row.text().includes('尚未采购料品'))!
+    expect(requestOnly.text()).toContain('是'); expect(requestOnly.text()).toContain('低库存·已请购')
+    expect(wrapper.find('tr.is-low-stock:not(.is-requested)').text()).toContain('否')
+    expect(wrapper.text()).toContain('按近3个月的请购业务日期汇总')
+  })
   it('disables immediate sync without the assistant role and only reloads the list on refresh', async () => {
     api.listStockedMaterials.mockResolvedValue({ items: [{ material, snapshot, categories: [category], coverImage: null }], total: 1, lowStockCount: 1, page: 1, pageSize: 50, scope: { organizationCode: '7' }, lastSuccessAt: null, lastError: null, canSynchronize: false, canManageSettings: true })
     wrapper = mount(StockedMaterials, { props: { token: 'token', active: true, canManage: true }, global: { plugins: [ElementPlus] } })

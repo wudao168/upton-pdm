@@ -220,6 +220,8 @@ public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
     public DrawingQrPolicy DrawingQrPolicy { get; init; } = DrawingQrPolicy.Default;
 
     public PreviewConversionSettings PreviewConversion { get; init; } = PreviewConversionSettings.Default;
+
+    public PdfTitleBlockFillSettings PdfTitleBlockFill { get; init; } = new();
 }
 
 public sealed record DrawingQrPolicy(
@@ -831,6 +833,10 @@ public sealed record ReleasePackage(
     DateTimeOffset? PublishedAt,
     string? PublishedPath)
 {
+    public PdfTitleBlockSnapshot? PdfTitleBlockSnapshot { get; init; }
+
+    public IReadOnlyDictionary<Guid, DocumentPreviewArtifact> PdfDeliveryArtifacts { get; init; } = new Dictionary<Guid, DocumentPreviewArtifact>();
+
     public Guid? RootDocumentId { get; init; }
     public Guid? StandardBomVersionId { get; init; }
 

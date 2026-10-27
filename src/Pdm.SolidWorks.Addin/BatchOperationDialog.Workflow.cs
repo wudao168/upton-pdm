@@ -96,6 +96,26 @@ internal sealed partial class BatchOperationDialog
         if (matches.Length == 1) SetWorkflowFile(matches[0].Node, message);
     }
 
+    internal void SetWorkflowFiles(IEnumerable<ArchiveSession.ProgressUpdate> updates)
+    {
+        var byName = operationItems.Where(item => checkedPaths.Contains(SelectionKey(item.Node)))
+            .GroupBy(item => item.Node.FileName ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() == 1).ToDictionary(group => group.Key, group => group.Single().Node, StringComparer.OrdinalIgnoreCase);
+        var changed = false;
+        foreach (var update in updates)
+        {
+            var node = update.Node;
+            if (node == null && (string.IsNullOrWhiteSpace(update.FileName) || !byName.TryGetValue(update.FileName, out node))) continue;
+            if (string.IsNullOrWhiteSpace(node.FullPath)) continue;
+            workflowStates[node.FullPath] = update.Message;
+            workflowVersions[node.FullPath] = update.VersionText ?? node.BusinessVersionText;
+            changed = true;
+        }
+        // Progress changes only the owner-drawn status/version columns. Selection and
+        // hierarchy stay fixed, so do not recalculate checkboxes or rebuild a filtered tree.
+        if (changed) files.Invalidate();
+    }
+
     internal void FinishWorkflow()
     {
         workflowFinished = true;

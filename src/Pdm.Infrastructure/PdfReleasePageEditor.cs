@@ -8,7 +8,7 @@ using ZXing.Common;
 
 namespace Upton.Pdm.Infrastructure;
 
-internal static class PdfReleasePageEditor
+internal static partial class PdfReleasePageEditor
 {
     internal static readonly object Gate = new();
     private static bool initialized;
@@ -230,13 +230,13 @@ internal static class PdfReleasePageEditor
         return reader.Decode(bytes, width, height, pixelFormat)?.Text;
     }
 
-    internal static IReadOnlyList<Text> Texts(byte[] pdf)
+    internal static IReadOnlyList<Text> Texts(byte[] pdf, int pageIndex = 0)
     {
         Init();
         var pin = GCHandle.Alloc(pdf, GCHandleType.Pinned);
         var document = Native.FPDF_LoadMemDocument64(pin.AddrOfPinnedObject(), (nuint)pdf.Length, null);
         if (document == 0) { pin.Free(); throw new PdmRuleException("PDF标识内容无法读取，请检查字体后重试。"); }
-        var page = Native.FPDF_LoadPage(document, 0);
+        var page = Native.FPDF_LoadPage(document, pageIndex);
         try { return ReadItems(page).Where(item => item.Type == 1).Select(item => new Text(item.Value, item.Bounds)).ToArray(); }
         finally { Native.FPDF_ClosePage(page); Native.FPDF_CloseDocument(document); pin.Free(); }
     }

@@ -1,44 +1,53 @@
 import type { App } from 'vue'
+import { buttonContentSelector, buttonNavigationSelector } from './buttonStyles'
+import './styles/button-sizing.css'
+import { installControlSpacing } from './controlSpacing'
 
-/** 按实际规格统一普通按钮字体，包含后续挂载的弹窗。 */
+const inlineContext = 'table, .el-table, .pdm-tree, .project-information__staff-actions, .project-contacts__header-actions, .pc-details, .pdm-bom-reconciliation-actions, .material-image-card, .batch-material-image-cards'
+const blockButton = '.pdm-login-submit, .production-scan-page__login button, .production-scan-page__actions > button, .production-scan-page .production-operation form > button'
+const iconButton = '.el-dialog__headerbtn, .el-drawer__close-btn, .el-message-box__headerbtn, .pdm-icon-button, .pdm-icon-action, .pdm-tree-toggle, .material-category-nav__toggle'
+
+function updateButton(button: HTMLButtonElement) {
+  if (button.classList.contains('pdm-button-font-80x30')) button.classList.remove('pdm-button-font-80x30')
+  const text = button.textContent?.replace(/\s+/g, ' ').trim() ?? ''
+  const icon = button.matches(iconButton) || !text || /^[+＋×✕✓✔‹›←→↑↓▴▾▸▹◂◃−－]$/.test(text)
+  const inline = !!button.closest(inlineContext) || button.matches('.is-link, .el-button--text, .pdm-text-action, .pdm-link-button')
+  const excluded = !!button.closest(buttonNavigationSelector) || !!button.closest('.pdm-overview-alerts')
+    || !!button.querySelector('img, canvas') || (button.matches(buttonContentSelector) && !button.matches(iconButton))
+  if (excluded) {
+    delete button.dataset.pdmButtonSize
+    delete button.dataset.pdmButtonFit
+    return
+  }
+  const size = button.matches(blockButton) ? 'block' : icon ? (inline ? 'inline-icon' : 'icon') : inline ? 'inline' : 'default'
+  if (button.dataset.pdmButtonSize !== size) button.dataset.pdmButtonSize = size
+  const compact = !!button.dataset.pdmButtonLabel && button.dataset.pdmButtonLabel !== text
+  if (compact) {
+    if (button.dataset.pdmButtonFit !== 'compact') button.dataset.pdmButtonFit = 'compact'
+  } else delete button.dataset.pdmButtonFit
+}
+
+/** 按用途统一尺寸和字体；延迟挂载的弹窗共用同一套规则。 */
 export function installButtonTypography(app: App) {
-  const marker = 'pdm-button-font-80x30'
-  const observed = new WeakSet<HTMLButtonElement>()
-  const matched = new WeakMap<HTMLButtonElement, boolean>()
-  function update(button: HTMLButtonElement) {
-    if (!button.isConnected) return
-    button.classList.remove(marker)
-    const match = button.getAttribute('role') !== 'tab' && button.offsetWidth === 80 && button.offsetHeight === 30
-    matched.set(button, match)
-    button.classList.toggle(marker, match)
+  const disposeSpacing = installControlSpacing()
+  const update = (node: Node) => {
+    if (!(node instanceof Element)) return
+    if (node instanceof HTMLButtonElement) updateButton(node)
+    node.querySelectorAll<HTMLButtonElement>('button').forEach(updateButton)
   }
-  const resize = new ResizeObserver(entries => entries.forEach(entry => update(entry.target as HTMLButtonElement)))
-  function buttons(node: Node): HTMLButtonElement[] {
-    if (!(node instanceof Element)) return []
-    return [...(node instanceof HTMLButtonElement ? [node] : []), ...node.querySelectorAll<HTMLButtonElement>('button')]
-  }
-  function register(button: HTMLButtonElement) {
-    if (!observed.has(button)) { resize.observe(button); observed.add(button) }
-    update(button)
-  }
-  const strip = (value: string) => value.split(/\s+/).filter(token => token && token !== marker).join(' ')
-  const mutations = new MutationObserver(records => {
+  const observer = new MutationObserver(records => {
     for (const record of records) {
-      if (record.type === 'attributes' && record.target instanceof HTMLButtonElement) {
-        const button = record.target
-        if (record.attributeName === 'style' || strip(record.oldValue ?? '') !== strip(button.className)
-          || matched.get(button) !== button.classList.contains(marker)) update(button)
-      } else if (record.type === 'childList') {
-        record.addedNodes.forEach(node => buttons(node).forEach(register))
-        const parent = record.target instanceof Element ? record.target.closest('button') : null
-        if (parent) register(parent)
-        record.removedNodes.forEach(node => buttons(node).forEach(button => {
-          if (!button.isConnected) { resize.unobserve(button); observed.delete(button); matched.delete(button) }
-        }))
+      if (record.type === 'attributes') update(record.target)
+      else {
+        if (record.type === 'childList') record.addedNodes.forEach(update)
+        const element = record.target instanceof Element ? record.target : record.target.parentElement
+        const button = element?.closest('button')
+        if (button) updateButton(button)
       }
     }
   })
-  mutations.observe(document.body, { subtree: true, childList: true, attributes: true, attributeOldValue: true, attributeFilter: ['class', 'style'] })
-  document.querySelectorAll<HTMLButtonElement>('button').forEach(register)
-  app.onUnmount(() => { mutations.disconnect(); resize.disconnect() })
+  observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true,
+    attributeFilter: ['class', 'role', 'style', 'aria-label', 'title', 'data-pdm-button-label'] })
+  update(document.body)
+  app.onUnmount(() => { observer.disconnect(); disposeSpacing() })
 }

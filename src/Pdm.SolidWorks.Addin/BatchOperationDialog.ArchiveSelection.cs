@@ -70,6 +70,8 @@ internal sealed partial class BatchOperationDialog
         try
         {
             var token = cancellation.Token;
+            foreach (var item in operationItems) ArchiveSourceIdentity.RestoreForProject(item.Node, SelectedProjectId);
+            RefreshFileTreePresentation();
             var eligible = operationItems.Where(item => !existingReferenceOwners.ContainsKey(SelectionKey(item.Node)))
                 .GroupBy(item => SelectionKey(item.Node), StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
             KeyValuePair<string, ArchiveSelectionState>[] results;

@@ -2,8 +2,8 @@ import type { App } from 'vue'
 import './styles/buttons.css'
 
 // 导航、树节点、日历格和图片入口属于业务内容，不作为操作按钮装饰。
-const navigation = 'nav, .pdm-sidebar, .pdm-tabs, [role="tablist"], .el-tree, [role="tree"], .el-pagination, .el-picker-panel, .el-dropdown-menu, .pdm-tree-context-menu'
-const contentButton = [
+export const buttonNavigationSelector = 'nav, .pdm-sidebar, .pdm-tabs, [role="tablist"], .el-tree, [role="tree"], .el-pagination, .el-picker-panel, .el-dropdown-menu, .pdm-tree-context-menu'
+export const buttonContentSelector = [
   '[role="tab"]', '[role="treeitem"]', '[role="option"]', '[role="menuitem"]', '[role="checkbox"]', '[role="switch"]',
   '.pdm-global-status', '.pdm-company-switcher', '.pdm-project-code-link', '.pdm-project-switcher__display',
   '[aria-label^="选择项目号"]', '.pdm-project-switcher__option',
@@ -11,6 +11,7 @@ const contentButton = [
   '.bom-tree-node__select', '.bom-tree-node__toggle', '.bom-tree-node__category',
   '.pdm-project-classification__division', '.pdm-project-classification__unassigned',
   '.production-workbench__project', '.production-workbench__package', '.production-drawings__project', '.production-suppliers__category-filter',
+  '.production-workbench__all-categories', '.pdm-overview-timeline button', '.wh-department-options button',
   '.wr-project', '.wh-day', '.wh-bar-column', '.pc-day', '.all-category', '.all-categories', '.standard-library__all', '.material-category-all', '.material-category-nav__toggle',
   '.cover-button', '.cover-preview-button', '.material-image-add', '.material-image-card__preview',
   '.el-dialog__headerbtn', '.el-drawer__close-btn', '.el-message-box__headerbtn',
@@ -35,7 +36,7 @@ const generatedTitles = new WeakMap<HTMLButtonElement, string>()
 
 function updateButton(button: HTMLButtonElement) {
   const text = button.textContent?.replace(/\s+/g, ' ').trim() ?? ''
-  if (button.closest(navigation) || button.matches(contentButton) || button.closest('.pdm-overview-alerts') || button.querySelector('img, canvas')) {
+  if (button.closest(buttonNavigationSelector) || button.matches(buttonContentSelector) || button.closest('.pdm-overview-alerts') || button.querySelector('img, canvas')) {
     delete button.dataset.pdmButtonKind
     delete button.dataset.pdmButtonLabel
     delete button.dataset.pdmButtonIconOnly

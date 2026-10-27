@@ -12,6 +12,9 @@ export function releaseFailureMessage(error?: string | null): string {
   if (/Deadlock found when trying to get lock/i.test(message)) {
     return '数据库事务发生死锁，本次发布被中止。请稍后重试；如反复出现，请联系管理员排查。'
   }
+  if (/Out of sort memory/i.test(message)) {
+    return '数据库读取发布数据时排序内存不足，本次发布未完成。可退回草稿处理，或联系管理员核对数据库后重试。'
+  }
   return message ? userErrorMessage(message) : '服务端未返回失败原因，请打开发布单查看详情。'
 }
 

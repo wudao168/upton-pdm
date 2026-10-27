@@ -746,6 +746,8 @@ public sealed partial class MySqlPdmRepository
                     && !string.Equals(preview.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase))
                     throw new PdmConflictException($"工程图{version.DocumentId}的PDF来源不是该正式源图。");
             }
+            if (reusedIds.Contains(version.Id) && preview.Format == DocumentPreviewFormat.Pdf && package.PdfTitleBlockSnapshot is { Enabled: true })
+            { updated.Add(version with { Preview = preview }); continue; }
             await connection.ExecuteAsync(new CommandDefinition(
                 $"""
                 UPDATE document_version
@@ -765,6 +767,14 @@ public sealed partial class MySqlPdmRepository
                     SourceSha256 = preview.SourceSha256
                 }, cancellationToken: cancellationToken));
             updated.Add(version with { Preview = preview });
+        }
+        if (package.PdfTitleBlockSnapshot is { Enabled: true })
+        {
+            var artifacts = new Dictionary<Guid, DocumentPreviewArtifact>(package.PdfDeliveryArtifacts);
+            foreach (var version in updated.Where(v => v.Preview?.Format == DocumentPreviewFormat.Pdf)) artifacts[version.DocumentId] = version.Preview!;
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE release_package SET pdf_delivery_artifacts_json=@Artifacts WHERE id=@Id",
+                new { Id = package.Id, Artifacts = JsonSerializer.Serialize(artifacts, jsonOptions) }, cancellationToken: cancellationToken));
         }
         return updated;
     }

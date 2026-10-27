@@ -1,4 +1,4 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 
@@ -124,7 +124,8 @@ public sealed record UpdateSystemSettingsRequest(
     PreviewConversionSettings? PreviewConversion = null,
     bool? CheckoutAutoReleaseEnabled = null,
     int? CheckoutIdleReleaseMinutes = null,
-    int? CheckoutReleaseCountdownSeconds = null);
+    int? CheckoutReleaseCountdownSeconds = null,
+    PdfTitleBlockFillSettings? PdfTitleBlockFill = null);
 
 public sealed record SetBomEmptyDeclarationRequest(bool DeclaredEmpty);
 

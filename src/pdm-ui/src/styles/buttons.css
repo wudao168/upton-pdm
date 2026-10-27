@@ -1,5 +1,5 @@
 /* 经确认的 Uiverse 按钮：删除 cssbuttons-io，确认 Gaurang7717，添加 UtariD86。
-   保留每个业务按钮原来的宽、高、内边距及布局；表现层不改写 Vue 子节点。 */
+   尺寸和字体由 button-sizing.css 统一；表现层不改写 Vue 子节点。 */
 :root body button[data-pdm-button-kind] {
   --pdm-button-fill: #00a600;
   --pdm-button-hover: #00a600;
@@ -56,7 +56,7 @@
   /* 空的替代文本避免生成内容重复加入按钮的可访问名称。 */
   content: attr(data-pdm-button-label) / "";
   position: absolute;
-  inset: 0 var(--pdm-button-icon-width) 0 0;
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -74,10 +74,11 @@
   right: 0;
   bottom: 4px;
   width: var(--pdm-button-icon-width);
+  opacity: 0;
   border-left: 1px solid var(--pdm-button-divider);
   background: var(--pdm-button-icon) center / var(--pdm-button-icon-size) var(--pdm-button-icon-size) no-repeat;
   pointer-events: none;
-  transition: width 200ms ease, border-color 200ms ease, background-size 200ms ease;
+  transition: width 200ms ease, opacity 200ms ease, border-color 200ms ease, background-size 200ms ease;
 }
 
 :root body button[data-pdm-button-kind]:not([data-pdm-button-kind="outline"]):hover:not(:disabled):not(.is-disabled):not([aria-disabled="true"]) {
@@ -91,6 +92,7 @@
 :root body button[data-pdm-button-kind]:not([data-pdm-button-kind="outline"]):hover:not(:disabled):not(.is-disabled):not([aria-disabled="true"])::after,
 :root body button[data-pdm-button-kind][data-pdm-button-icon-only="true"]::after {
   width: 100%;
+  opacity: 1;
   border-color: transparent;
 }
 

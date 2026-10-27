@@ -618,21 +618,39 @@ function summarizeFrozenItems(items: BomItem[]) {
   }
   return [...groups.values()]
 }
-const frozenChanges = computed(() => supplementChanges(
-  summarizeFrozenItems(frozenItems.value), summarizeFrozenItems(props.previousVersionItems)))
+function frozenScopedChanges(rows: ReturnType<typeof changedRows>, items: BomItem[]) {
+  const selected = new Set(props.releasePackage?.selectedBomItemIds ?? [])
+  const removed = new Set(props.releasePackage?.confirmedRemovedBomItemIds ?? [])
+  const result = rows.filter(row => !row.item.releaseConfirmation && (!selected.size && !removed.size
+    || releaseInstanceIds(row.item).some(id => selected.has(id))
+    || releaseInstanceIds(row.previousItem ?? row.item).some(id => removed.has(id))))
+  if (props.releasePackage?.scope === 'NonStandardSupplement') {
+    for (const item of items) {
+      if (item.releaseConfirmation || !releaseInstanceIds(item).some(id => selected.has(id))
+        || result.some(row => row.item === item)) continue
+      result.push({ item, change: '修改', details: ['图纸纳入本次发布（以冻结版本为准）'] })
+    }
+  }
+  return result
+}
+const frozenChanges = computed(() => {
+  const items = summarizeFrozenItems(frozenItems.value)
+  return frozenScopedChanges(changedRows(items, summarizeFrozenItems(props.previousVersionItems)), items)
+})
 // 导出比较实际发布总量，分别使用两次发布的倍率，不读取当前工作区或分页行。
 const frozenExportChanges = computed(() => {
   const publishedItems = (items: BomItem[], multiplier: number) => summarizeFrozenItems(items)
     .map(item => ({ ...item, quantity: Number((Number(item.quantity) * multiplier).toFixed(8)) }))
   const previous = new Map(publishedItems(props.previousVersionItems, props.previousVersionMultiplier ?? 1)
     .map(item => [frozenSummaryKey(item), item]))
-  const rows = publishedItems(frozenItems.value, props.releasePackage?.wholeSetMultiplier ?? 1).flatMap(item => {
+  const items = publishedItems(frozenItems.value, props.releasePackage?.wholeSetMultiplier ?? 1)
+  const rows = items.flatMap(item => {
     const key = frozenSummaryKey(item)
     const old = previous.get(key)
     previous.delete(key)
     return changedRows([item], old ? [old] : [])
   })
-  return [...rows, ...changedRows([], [...previous.values()])].filter(row => !row.item.releaseConfirmation)
+  return frozenScopedChanges([...rows, ...changedRows([], [...previous.values()])], items)
 })
 const frozenExportRowCount = computed(() => isFrozenSupplement.value ? frozenExportChanges.value.length : frozenSummaryRows.value.length)
 async function exportFrozenBom() {
@@ -1214,10 +1232,10 @@ async function saveItemComment() {
             <button type="button" class="pdm-primary-action" :disabled="pending" @click="submitDecision('Approved')">通过</button>
           </div></PanelActions>
         </div>
-        <div v-else-if="canManage && ['审批中', '工艺审核', '待批准', '已退回'].includes(releasePackage.state)" class="pdm-decision-box pdm-withdraw-decision">
-          <small>{{ releasePackage.state === '已退回' ? '退回后撤回：发布包恢复为草稿，可编辑草稿重新绑定当前BOM，或删除后重新创建。' : releasePackage.locksDocuments ? '撤回后图档与非标件BOM恢复为工作中。' : '撤回后当前BOM版本恢复为草稿。' }}</small>
+        <div v-else-if="canManage && ['审批中', '工艺审核', '待批准', '已退回', '发布失败'].includes(releasePackage.state)" class="pdm-decision-box pdm-withdraw-decision">
+          <small>{{ releasePackage.state === '发布失败' ? '退回草稿后可修改发布范围并重新审批，原失败原因和审批记录保留在操作记录中。' : releasePackage.state === '已退回' ? '退回后撤回：发布包恢复为草稿，可编辑草稿重新绑定当前BOM，或删除后重新创建。' : releasePackage.locksDocuments ? '撤回后图档与非标件BOM恢复为工作中。' : '撤回后当前BOM版本恢复为草稿。' }}</small>
           <PanelActions><div class="pdm-manager-actions">
-            <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="emit('withdraw', releasePackage.id)">{{ releasePackage.state === '已退回' ? '撤回为草稿' : '撤回审批' }}</button>
+            <button type="button" class="pdm-secondary-action is-danger" :disabled="pending" @click="emit('withdraw', releasePackage.id)">{{ releasePackage.state === '发布失败' ? '退回草稿' : releasePackage.state === '已退回' ? '撤回为草稿' : '撤回审批' }}</button>
           </div></PanelActions>
         </div>
         <div v-if="canEmergencyCurrent && currentTask && !canHandleCurrentTask" class="pdm-decision-box emergency-decision">

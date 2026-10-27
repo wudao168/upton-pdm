@@ -9,6 +9,44 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class U9OpenApiClientTests
 {
     [Fact]
+    public async Task StockedPurchasesReadsRequisitionDatesAndLinksOrdersWithoutCountingCanceledOtherMaterialsOrOrganizations()
+    {
+        var handler = new SequenceHandler(
+            """
+            {"ResCode":0,"Data":[
+            {"ID":"1","PR":{"Org":{"Code":"7"},"BusinessDate":"2026-10-26 00:00:00"},"ItemInfo":{"ItemCode":"M1"},"ReqQtyReqUOM":"400","ReqUOM":{"Code":"001"},"Status":"自然关闭"},
+            {"ID":"2","PR":{"Org":{"Code":"7"},"BusinessDate":"2026-07-26 00:00:00"},"ItemInfo":{"ItemCode":"M2"},"ReqQtyReqUOM":"25","ReqUOM":{"Code":"001"},"Status":"已核准"},
+            {"ID":"3","PR":{"Org":{"Code":"7"},"BusinessDate":"2026-07-25 00:00:00"},"ItemInfo":{"ItemCode":"M1"},"ReqQtyReqUOM":"99","Status":"已核准"},
+            {"ID":"4","PR":{"Org":{"Code":"8"},"BusinessDate":"2026-10-26 00:00:00"},"ItemInfo":{"ItemCode":"M1"}},
+            {"ID":"5","PR":{"Org":{"Code":"7"},"BusinessDate":"2026-10-26 00:00:00"},"ItemInfo":{"ItemCode":"M1"},"Cancel":{"Canceled":"True"},"Status":"已核准"}] }
+            """,
+            """
+            {"ResCode":0,"Data":[
+            {"ID":"10","PurchaseOrder":{"Org":{"Code":"7"}},"ItemInfo":{"ItemCode":"M1"},"SrcDocInfo":{"SrcDocLine":{"EntityID":"1"}},"PurQtyTU":"100","TotalRecievedQtyTU":"100","TradeUOM":{"Code":"001"},"Status":"自然关闭"},
+            {"ID":"11","PurchaseOrder":{"Org":{"Code":"7"}},"ItemInfo":{"ItemCode":"M1"},"SrcDocInfo":{"SrcDocLine":{"EntityID":"1"}},"PurQtyTU":"300","TotalRecievedQtyTU":"20","TradeUOM":{"Code":"001"},"Status":"已核准"},
+            {"ID":"12","PurchaseOrder":{"Org":{"Code":"8"}},"ItemInfo":{"ItemCode":"M1"},"SrcDocInfo":{"SrcDocLine":{"EntityID":"1"}},"Status":"已核准"},
+            {"ID":"13","PurchaseOrder":{"Org":{"Code":"7"}},"ItemInfo":{"ItemCode":"M2"},"SrcDocInfo":{"SrcDocLine":{"EntityID":"1"}},"Status":"已核准"},
+            {"ID":"14","PurchaseOrder":{"Org":{"Code":"7"}},"ItemInfo":{"ItemCode":"M1"},"SrcDocInfo":{"SrcDocLine":{"EntityID":"1"}},"Cancel":{"Canceled":"True"},"Status":"已核准"}] }
+            """,
+            """
+            {"ResCode":0,"Data":[
+            {"ID":"100","POLine":{"ID":"11"},"PlanArriveDate":"2026-11-01 00:00:00","DeliveryDate":"2026-10-30 00:00:00"},
+            {"ID":"101","POLine":{"ID":"11"},"DeliveryDate":"2026-11-03 00:00:00"},
+            {"ID":"102","POLine":{"ID":"10"},"PlanArriveDate":"2030-12-01 00:00:00"}]}
+            """);
+        var rows = (await new U9OpenApiClient(new HttpClient(handler)).QueryStockedPurchasesAsync("http://u9.example.test/U9", "token", "7",
+            ["M1", "M2"], new(2026, 7, 26), new(2026, 10, 26), default))!;
+        Assert.Equal(2, rows.Count); Assert.Equal(400, rows[0].PurchaseQuantity); Assert.Equal(120, rows[0].ArrivedQuantity);
+        Assert.Equal(25, rows[1].RequestedQuantity); Assert.Equal(0, rows[1].PurchaseQuantity);
+        Assert.Equal(new DateOnly(2026, 11, 3), rows[0].ExpectedArrivalDate); Assert.Null(rows[1].ExpectedArrivalDate);
+        using var request = JsonDocument.Parse(handler.Requests[0].Body);
+        var dates = request.RootElement.GetProperty("Filters")[1]; Assert.Equal("in", dates.GetProperty("Operator").GetString());
+        Assert.StartsWith("2026-07-26 00:00:00,", dates.GetProperty("Value").GetString());
+        Assert.EndsWith("2026-10-26 00:00:00", dates.GetProperty("Value").GetString());
+        Assert.All(handler.Requests, item => Assert.DoesNotContain("SqlString", item.Body));
+    }
+
+    [Fact]
     public async Task StockPlans_ReadsAllPagesIncludingZeroAndInactive_ButRejectsOtherOrganizationsAndMissingFields()
     {
         var rows = new[] {

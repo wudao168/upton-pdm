@@ -30,6 +30,7 @@ const props = defineProps<{
   permissions: string[]
   currentUsername: string
   projectId?: string
+  administrator?: boolean
   platformAdministrator: boolean
   canManageClientLogs?: boolean
   auditEntries: AuditEntry[]
@@ -110,7 +111,7 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
     <ProjectPermissionSettings v-else-if="activeTab === 'project-permissions'" :token="token" :can-edit="hasPermission('system.project-permission.edit')" />
     <ProductionScanSettings v-else-if="activeTab === 'production-scan'" :key="activeOrganizationId" :token="token" />
     <FolderTemplateSettings v-else-if="activeTab === 'folders'" :nodes="folderTemplate" :users="organizationDirectory.users" :roles="rolePermissionDirectory.roles" :pending="pending" :on-save="onSaveFolderTemplate" />
-    <StorageSettings v-else-if="activeTab === 'settings'" :settings="settings" :token="token" :equipment-types="equipmentTypes" :numbering-options="numberingOptions" :pending="pending" :on-save-settings="onSaveSettings" :on-save-equipment-type="onSaveEquipmentType" :on-update-counters="onUpdateCounters" />
+    <StorageSettings :administrator="administrator || platformAdministrator" v-else-if="activeTab === 'settings'" :settings="settings" :token="token" :equipment-types="equipmentTypes" :numbering-options="numberingOptions" :pending="pending" :on-save-settings="onSaveSettings" :on-save-equipment-type="onSaveEquipmentType" :on-update-counters="onUpdateCounters" />
     <DocumentOperationRules v-else-if="activeTab === 'document-rules'" :key="activeOrganizationId" :token="token" :can-edit="hasPermission('settings.storage.manage')" />
     <DingTalkSettings v-else-if="activeTab === 'dingtalk'" :key="activeOrganizationId" :token="token" />
     <ReleaseNotificationSettings v-else-if="activeTab === 'release-notifications'" :key="activeOrganizationId" :token="token" />

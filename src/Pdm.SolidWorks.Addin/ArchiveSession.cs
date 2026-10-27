@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -18,7 +20,10 @@ internal sealed class ArchiveSession : IDisposable
     private readonly TaskCompletionSource<bool> ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<bool> closed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     private ArchiveSessionWindow window;
+    private readonly ConcurrentQueue<ProgressUpdate> progressUpdates = new ConcurrentQueue<ProgressUpdate>();
     private int finished;
+    private int phase = 1;
+    public int Phase => Volatile.Read(ref phase);
     private string resultTitle;
     private string resultMessage;
     private bool resultFailed = true;
@@ -29,6 +34,7 @@ internal sealed class ArchiveSession : IDisposable
     public bool IsClosed => closed.Task.IsCompleted;
     public bool IsFinished => Volatile.Read(ref finished) != 0;
     public bool WorkflowStarted { get; set; }
+    internal IntPtr OwnerHandle { get; private set; }
     public event EventHandler CancelRequested;
 
     private ArchiveSession(CancellationToken token) => cancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -43,6 +49,7 @@ internal sealed class ArchiveSession : IDisposable
             return existing;
         }
         var nativeOwner = new NativeOwner(owner);
+        session.OwnerHandle = nativeOwner.Handle;
         var thread = new Thread(() =>
         {
             try
@@ -103,7 +110,8 @@ internal sealed class ArchiveSession : IDisposable
     {
         Ready.GetAwaiter().GetResult();
         if (IsClosed) throw new OperationCanceledException(Token);
-        return window.InvokeRequired ? (T)window.Invoke(action) : action();
+        T Apply() { FlushProgress(); return action(); }
+        return window.InvokeRequired ? (T)window.Invoke((Func<T>)Apply) : Apply();
     }
 
     private void Post(Action action)
@@ -113,8 +121,9 @@ internal sealed class ArchiveSession : IDisposable
         if (!ready.Task.IsCompleted) { _ = Ready.ContinueWith(task => { if (task.Status == TaskStatus.RanToCompletion) Post(action); }, TaskScheduler.Default); return; }
         try
         {
-            if (window.InvokeRequired) window.BeginInvoke(action);
-            else action();
+            void Apply() { FlushProgress(); action(); }
+            if (window.InvokeRequired) window.BeginInvoke((Action)Apply);
+            else Apply();
         }
         catch (InvalidOperationException) { /* The user closed the finished session. */ }
     }
@@ -126,12 +135,46 @@ internal sealed class ArchiveSession : IDisposable
         return true;
     }
 
-    public void SetStage(string message) => Post(() => { if (!IsFinished) window.Report(message, null, 0, 0); });
+    internal sealed class ProgressUpdate
+    {
+        public string Message, FileName;
+        public int Completed, Total, Phase;
+        public DateTime RecordedAt;
+        public CadTreeNode Node;
+        public string VersionText;
+    }
+
+    public void SetPhase(int value, string message)
+    {
+        if (value < 1 || value > 4) throw new ArgumentOutOfRangeException(nameof(value));
+        Interlocked.Exchange(ref phase, value);
+        SetStage(message);
+    }
+
+    public void SetStage(string message) => ReportFile(0, 0, null, message);
     public void ReportFile(int completed, int total, string fileName, string message) =>
-        Post(() => { if (!IsFinished) window.Report(message, fileName, completed, total); });
+        QueueProgress(new ProgressUpdate { Message = message, FileName = fileName, Completed = completed, Total = total, RecordedAt = DateTime.Now });
+
+    private void QueueProgress(ProgressUpdate update)
+    {
+        update.Phase = Phase;
+        if (!IsClosed && !IsFinished) progressUpdates.Enqueue(update);
+    }
+
+    internal void FlushProgress()
+    {
+        // Progress producers never post one UI callback per upload chunk. The window's
+        // timer drains a snapshot, leaving its message loop available for paint and input.
+        var count = progressUpdates.Count;
+        if (count == 0) return;
+        var updates = new List<ProgressUpdate>(count);
+        while (count-- > 0 && progressUpdates.TryDequeue(out var update)) updates.Add(update);
+        if (!IsFinished && updates.Count > 0) window.ReportProgressBatch(updates);
+    }
 
     public void TrackFile(CadTreeNode node, string message, string versionText = null) =>
-        Post(() => window.TrackFile(node, message, versionText));
+        QueueProgress(new ProgressUpdate { Node = node, Message = message, FileName = node.FileName,
+            VersionText = versionText ?? node.BusinessVersionText, RecordedAt = DateTime.Now });
 
     public void ReportPreparedFiles(IReadOnlyList<BatchOperationItem> items) =>
         Invoke(() => { window.ReportPreparedFiles(items); return true; });
@@ -203,6 +246,8 @@ internal sealed class ArchiveSession : IDisposable
 internal sealed class ArchiveSessionWindow : Form
 {
     private readonly ArchiveSession session;
+    private readonly ToolTip stageTip = new ToolTip { AutoPopDelay = 20000 };
+    private int displayedPhase;
     private readonly Label stage = InformationField("处理信息", "正在准备存档窗口…");
     private readonly Label file = InformationField("当前图档", "—");
     private readonly Label elapsed = new Label { Dock = DockStyle.Right, Width = 132, TextAlign = ContentAlignment.MiddleRight,
@@ -225,6 +270,7 @@ internal sealed class ArchiveSessionWindow : Form
     private readonly Button stop = new Button { Text = "取消存档", Width = 80, Height = 28, Dock = DockStyle.Top };
     private readonly Panel confirmationHost = new Panel { Dock = DockStyle.Top, Height = 290, Visible = false };
     private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 250 };
+    private readonly System.Windows.Forms.Timer residencyTimer = new System.Windows.Forms.Timer { Interval = 100 };
     private readonly Stopwatch clock = Stopwatch.StartNew();
     private string lastEntry;
     private bool finished;
@@ -236,7 +282,7 @@ internal sealed class ArchiveSessionWindow : Form
         this.session = session;
         Text = "UPLM 存档"; Font = new Font("Microsoft YaHei UI", 9F);
         ClientSize = new Size(1640, 960); MinimumSize = new Size(1200, 860);
-        ShowInTaskbar = false; TopMost = false;
+        ShowInTaskbar = false; TopMost = false; MinimizeBox = false;
         DialogWindowSizing.CenterOnOwnerScreen(this);
         confirmationHost.Controls.Add(confirmation); confirmationHost.Controls.Add(confirmationActions); confirmationHost.Controls.Add(confirmationTitle);
         resultPanel.Controls.Add(resultState); resultPanel.Controls.Add(elapsed);
@@ -277,10 +323,13 @@ internal sealed class ArchiveSessionWindow : Form
         timer.Tick += (_, __) =>
         {
             RefreshTicks++;
+            session.FlushProgress();
             elapsed.Text = "总耗时 " + clock.Elapsed.ToString(@"hh\:mm\:ss");
             progress.Animate();
         };
         timer.Start();
+        residencyTimer.Tick += (_, __) => MaintainResidency(GetForegroundWindow());
+        residencyTimer.Start();
         FormClosing += (_, args) =>
         {
             if (finished || args.CloseReason != CloseReason.UserClosing) return;
@@ -334,12 +383,52 @@ internal sealed class ArchiveSessionWindow : Form
     public void Report(string message, string fileName, int completed, int total)
     {
         if (finished) return;
-        stage.Text = session.Token.IsCancellationRequested && (message == null || !message.Contains("取消"))
-            ? "正在取消，等待当前步骤安全结束：" + message : message ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(fileName)) file.Text = fileName;
+        AppendPhaseHint(session.Phase);
+        ApplyProgress(message, fileName, completed, total, session.Phase);
         (selectionForm as BatchOperationDialog)?.SetWorkflowFile(fileName, message);
+        Append(ArchivePhaseInfo.Format(session.Phase, message) + (string.IsNullOrWhiteSpace(fileName) ? "" : "　" + fileName));
+    }
+
+    public void ReportProgressBatch(IReadOnlyList<ArchiveSession.ProgressUpdate> updates)
+    {
+        if (finished) return;
+        var latest = updates.LastOrDefault(update => update.Node == null);
+        var currentFile = updates.LastOrDefault(update => update.Node == null && !string.IsNullOrWhiteSpace(update.FileName));
+        if (latest != null) ApplyProgress(latest.Message, currentFile?.FileName, latest.Completed, latest.Total, latest.Phase);
+        (selectionForm as BatchOperationDialog)?.SetWorkflowFiles(updates);
+        var text = new StringBuilder();
+        foreach (var update in updates)
+        {
+            if (displayedPhase != update.Phase)
+            {
+                displayedPhase = update.Phase;
+                text.Append(update.RecordedAt.ToString("HH:mm:ss")).Append("　").AppendLine(ArchivePhaseInfo.Hint(update.Phase));
+            }
+            var message = ArchivePhaseInfo.Format(update.Phase, update.Node != null ? update.FileName + "：" + update.Message
+                : update.Message + (string.IsNullOrWhiteSpace(update.FileName) ? "" : "　" + update.FileName));
+            if (string.IsNullOrWhiteSpace(message) || message == lastEntry) continue;
+            lastEntry = message;
+            text.Append(update.RecordedAt.ToString("HH:mm:ss")).Append("　").AppendLine(message);
+        }
+        if (text.Length > 0) history.AppendText(text.ToString());
+        elapsed.Text = "总耗时 " + clock.Elapsed.ToString(@"hh\:mm\:ss");
+    }
+
+    private void AppendPhaseHint(int phase)
+    {
+        if (displayedPhase == phase) return;
+        displayedPhase = phase;
+        Append(ArchivePhaseInfo.Hint(phase));
+    }
+
+    private void ApplyProgress(string message, string fileName, int completed, int total, int phase)
+    {
+        var action = session.Token.IsCancellationRequested && (message == null || !message.Contains("取消"))
+            ? "正在取消，等待当前步骤安全结束：" + message : message;
+        stage.Text = ArchivePhaseInfo.Format(phase, action);
+        stageTip.SetToolTip(stage, stage.Text + Environment.NewLine + ArchivePhaseInfo.Hint(phase));
+        if (!string.IsNullOrWhiteSpace(fileName)) file.Text = fileName;
         progress.Report(completed, total);
-        Append(message + (string.IsNullOrWhiteSpace(fileName) ? "" : "　" + fileName));
     }
 
     private void Append(string message)
@@ -395,7 +484,7 @@ internal sealed class ArchiveSessionWindow : Form
                 history.Hide();
                 confirmationTitle.Hide();
                 historyTitle.Text = inlineProject ? "选择项目" : "确认项目归属";
-                stage.Text = inlineProject ? "请选择图档归属项目，确认后继续存档。" : "请核对图档归属项目，确认后继续存档。";
+                ApplyProgress(inlineProject ? "请选择图档归属项目，确认后继续存档。" : "请核对图档归属项目，确认后继续存档。", null, 0, 0, session.Phase);
                 progress.Hint = inlineProject ? "等待选择项目" : "等待确认项目归属";
             }
             else { form.Dock = DockStyle.Top; form.Height = Math.Max(220, form.Height); }
@@ -467,7 +556,7 @@ internal sealed class ArchiveSessionWindow : Form
             if (inlineProjectPage)
             {
                 history.Show(); historyTitle.Text = "过程记录（完整保留）";
-                if (!finished) { stage.Text = previousStage; progress.Hint = null; }
+                if (!finished) { stage.Text = previousStage; stageTip.SetToolTip(stage, previousStage + Environment.NewLine + ArchivePhaseInfo.Hint(session.Phase)); progress.Hint = null; }
             }
             Append("确认结果：" + form.Text + "　" + ResultText(result));
         }
@@ -482,12 +571,6 @@ internal sealed class ArchiveSessionWindow : Form
             session.RequestCancellation(); stop.Enabled = false;
             if (selectionForm is BatchOperationDialog batch) batch.CancelOperationButton.Enabled = false;
         }
-    }
-
-    public void TrackFile(CadTreeNode node, string message, string versionText)
-    {
-        (selectionForm as BatchOperationDialog)?.SetWorkflowFile(node, message, versionText);
-        Append(node.FileName + "：" + message);
     }
 
     public void ReportPreparedFiles(IReadOnlyList<BatchOperationItem> items)
@@ -507,9 +590,82 @@ internal sealed class ArchiveSessionWindow : Form
             foreach (var child in EnumerateControls(control)) yield return child;
         }
     }
+    private bool OwnerIsVisible => session.OwnerHandle != IntPtr.Zero && IsWindow(session.OwnerHandle)
+        && IsWindowVisible(session.OwnerHandle) && !IsIconic(session.OwnerHandle);
+
+    protected override void WndProc(ref Message message)
+    {
+        // Stop native document activation from hiding the running archive window.
+        // The owner can enter its minimized state after this notification; the
+        // independent display timer then hides this window with its owner.
+        if (message.Msg == 0x46 && message.LParam != IntPtr.Zero && !finished && !Disposing && OwnerIsVisible)
+        {
+            var position = Marshal.PtrToStructure<WindowPosition>(message.LParam);
+            if ((position.Flags & 0x80) != 0)
+            {
+                position.Flags &= ~0x80u; // SWP_HIDEWINDOW
+                Marshal.StructureToPtr(position, message.LParam, false);
+            }
+        }
+        base.WndProc(ref message);
+    }
+
+    private void MaintainResidency(IntPtr foreground)
+    {
+        if (finished || Disposing || !IsHandleCreated || !IsWindow(session.OwnerHandle)) return;
+        const uint keepBoundsAndFocus = 0x0001 | 0x0002 | 0x0010 | 0x0200 | 0x4000;
+        if (!OwnerIsVisible)
+        {
+            if (IsWindowVisible(Handle))
+                SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, keepBoundsAndFocus | 0x0004 | 0x0080);
+            return;
+        }
+        // Some CAD document windows temporarily detach or reassign owned dialogs.
+        if (GetWindow(Handle, 4) != session.OwnerHandle)
+            SetWindowLongPtr(Handle, -8, session.OwnerHandle);
+        if ((GetWindowLongPtr(Handle, -20).ToInt64() & 8) != 0)
+            SetWindowPos(Handle, new IntPtr(-2), 0, 0, 0, 0, keepBoundsAndFocus);
+        var cadIsForeground = CadOwnsForeground(foreground);
+        if (!IsWindowVisible(Handle) || cadIsForeground)
+            SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0,
+                keepBoundsAndFocus | 0x0040u | (cadIsForeground ? 0u : 0x0004u));
+        if (cadIsForeground && GetForegroundWindow() == foreground) SetForegroundWindow(Handle);
+    }
+
+    private bool CadOwnsForeground(IntPtr foreground)
+    {
+        if (foreground == IntPtr.Zero || foreground == Handle) return false;
+        var windowClass = new StringBuilder(64);
+        GetClassName(foreground, windowClass, windowClass.Capacity);
+        if (windowClass.ToString() == "#32770") return false; // Keep native questions usable.
+        for (var window = GetAncestor(foreground, 2); window != IntPtr.Zero; window = GetWindow(window, 4))
+            if (window == session.OwnerHandle) return true;
+        return false;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowPosition
+    {
+        public IntPtr Window, InsertAfter;
+        public int X, Y, Width, Height;
+        public uint Flags;
+    }
+
+    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
+    [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
+    [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")] private static extern IntPtr SetWindowLongPtr(IntPtr window, int index, IntPtr value);
+    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { timer.Dispose(); selectionForm?.Dispose(); }
+        if (disposing) { residencyTimer.Dispose(); timer.Dispose(); stageTip.Dispose(); selectionForm?.Dispose(); }
         base.Dispose(disposing);
     }
 }

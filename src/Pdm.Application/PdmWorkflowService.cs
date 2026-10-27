@@ -161,6 +161,10 @@ public sealed partial class PdmWorkflowService(
         var current = await repository.GetSystemSettingsAsync(cancellationToken);
         if (input.BrowserCadArchiveEnabled != current.BrowserCadArchiveEnabled && !BrowserCadArchivePolicy.CanConfigure(role))
             throw new UnauthorizedAccessException("只有管理员可以启用或关闭网页存档入口。");
+        var pdfFields = PdfTitleBlockSnapshotBuilder.Normalize(input.PdfTitleBlockFill.EnabledFields);
+        if (!pdfFields.SequenceEqual(PdfTitleBlockSnapshotBuilder.Normalize(current.PdfTitleBlockFill.EnabledFields))
+            && !BrowserCadArchivePolicy.CanConfigure(role))
+            throw new UnauthorizedAccessException("只有管理员可以修改PDF属性自动填写设置。");
         var vaultRoot = StorageLocationPolicy.Normalize(input.VaultRoot);
         var releaseRoot = StorageLocationPolicy.Normalize(input.ReleaseRoot);
         var materialAttachmentRoot = StorageLocationPolicy.Normalize(input.MaterialAttachmentRoot);
@@ -180,6 +184,7 @@ public sealed partial class PdmWorkflowService(
             ReleaseChangeReasonTypes = NormalizeReleaseChangeReasonTypes(input.ReleaseChangeReasonTypes),
             ReleaseChangeReasonLabels = NormalizeReleaseChangeReasonLabels(input.ReleaseChangeReasonLabels, NormalizeReleaseChangeReasonTypes(input.ReleaseChangeReasonTypes)),
             FormalSupplementPolicies = NormalizeFormalSupplementPolicies(input.FormalSupplementPolicies),
+            PdfTitleBlockFill = new() { EnabledFields = pdfFields },
             DrawingQrPolicy = NormalizeDrawingQrPolicy(input.DrawingQrPolicy),
             PreviewConversion = NormalizePreviewConversion(input.PreviewConversion)
         });
@@ -196,6 +201,9 @@ public sealed partial class PdmWorkflowService(
         await AuditAsync(actor, "system.release-change-reasons.update", nameof(PdmSystemSettings), "release-change-reasons", string.Join('、', settings.ReleaseChangeReasonTypes), cancellationToken);
         await AuditAsync(actor, "system.formal-supplement-policies.update", nameof(PdmSystemSettings), "formal-supplement-policies", $"标准件：{FormalSupplementPolicySummary(settings.FormalSupplementPolicies.Standard)}；电气：{FormalSupplementPolicySummary(settings.FormalSupplementPolicies.Electrical)}", cancellationToken);
         await AuditAsync(actor, "system.drawing-qr-policy.update", nameof(PdmSystemSettings), "drawing-qr-policy", $"{(settings.DrawingQrPolicy.Enabled ? "启用" : "停用")}；来源属性{settings.DrawingQrPolicy.SourceProperty}；规则v{settings.DrawingQrPolicy.RuleVersion}；{settings.DrawingQrPolicy.SizeMillimeters}mm", cancellationToken);
+        if (!pdfFields.SequenceEqual(PdfTitleBlockSnapshotBuilder.Normalize(current.PdfTitleBlockFill.EnabledFields)))
+            await AuditAsync(actor, "system.pdf-title-block.update", nameof(PdmSystemSettings), "pdf-title-block",
+                "PDF自动填写：" + string.Join("、", pdfFields.Select(key => PdfTitleBlockFields.Get(key).Name)), cancellationToken);
         await AuditAsync(actor, "system.preview-conversion.update", nameof(PdmSystemSettings), "preview-conversion", $"{PreviewConversionSummary(settings.PreviewConversion)}", cancellationToken);
         return settings;
     }
@@ -5021,6 +5029,8 @@ public sealed partial class PdmWorkflowService(
         if (materialRelationReleaseGuard is not null)
             await materialRelationReleaseGuard.EnsureCompleteAsync(package.ProjectId, cancellationToken);
         await ValidateReleaseVersionsAsync(package, cancellationToken);
+        var pdfSnapshot = await PdfTitleBlockSnapshotBuilder.BuildAsync(repository, package, project, settings, cancellationToken);
+        package = await repository.SaveReleasePdfTitleBlockAsync(package.Id, pdfSnapshot, cancellationToken);
         await publisher.PrepareAsync(package, project, cancellationToken);
         await publisher.ValidateAsync(package, project, cancellationToken);
         var submitted = await repository.SubmitReleasePackageAsync(releasePackageId, actor, cancellationToken);
@@ -5042,7 +5052,16 @@ public sealed partial class PdmWorkflowService(
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var withdrawn = await repository.WithdrawReleasePackageAsync(releasePackageId, actor, cancellationToken);
         await repository.SetBomVersionStateAsync(await PackageBomVersionIdsInStateAsync(package, BomVersionState.InReview, cancellationToken), BomVersionState.Draft, actor, null, cancellationToken);
-        await AuditAsync(actor, "release-package.withdraw", nameof(ReleasePackage), package.Id.ToString(), $"{package.Number}；{comment}", cancellationToken);
+        var detail = $"{package.Number}；{comment}";
+        if (package.State == ReleasePackageState.PublishFailed)
+            detail += "；原失败及审批记录：" + JsonSerializer.Serialize(new { package.PublishError, package.ApprovalTasks });
+        await AuditAsync(actor, "release-package.withdraw", nameof(ReleasePackage), package.Id.ToString(), detail, cancellationToken);
+        if (package.State == ReleasePackageState.PublishFailed)
+        {
+            var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
+                ?? throw new PdmNotFoundException("发布包对应的项目不存在。");
+            await publisher.DiscardDraftAsync(package, project, cancellationToken);
+        }
         return withdrawn;
     }
 
@@ -5274,6 +5293,8 @@ public sealed partial class PdmWorkflowService(
             await AuditAsync(actor, "release-package.publish-failed", nameof(ReleasePackage), package.Id.ToString(), exception.Message, cancellationToken);
             throw;
         }
+        if (package.PdfTitleBlockSnapshot is { Enabled: true } && publication.Previews.Count > 0)
+            await repository.AttachReleasePreviewArtifactsAsync(package.Id, publication.Previews, cancellationToken);
         foreach (var version in releasedVersions)
         {
             await AuditAsync(actor, "document.version.publish", nameof(DocumentVersion), version.Id.ToString(), version.Revision.Display, cancellationToken);

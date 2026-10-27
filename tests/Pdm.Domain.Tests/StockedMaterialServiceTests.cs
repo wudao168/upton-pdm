@@ -351,6 +351,38 @@ public sealed class StockedMaterialServiceTests
         Assert.Empty(f.Client.Writes);
     }
 
+    [Fact]
+    public async Task PurchaseSummaryUsesOnlyRecentUnfinishedRequisitionsAndPreservesRequestedButNotOrderedState()
+    {
+        var f = await Fixture.CreateAsync(); var a = await f.AddAsync("01010009101", 0);
+        var b = await f.AddAsync("01010009102", 0); var c = await f.AddAsync("01010009103", 0);
+        var date = new DateOnly(2026, 10, 26);
+        var partial = new StockedPurchaseLine("partial", "7", a.MaterialCode, date, 400, 400, 20, "001", ExpectedArrivalDate: new(2026, 11, 1));
+        f.Client.Purchases.AddRange([partial, partial,
+            partial with { Id = "received", RequestedQuantity = 500, PurchaseQuantity = 500, ArrivedQuantity = 500, ExpectedArrivalDate = new(2030, 1, 1) },
+            partial with { Id = "old", BusinessDate = new(2026, 7, 25) },
+            partial with { Id = "boundary", BusinessDate = new(2026, 7, 26), RequestedQuantity = 100, PurchaseQuantity = 100, ArrivedQuantity = 10 },
+            partial with { Id = "future", BusinessDate = date.AddDays(1) },
+            partial with { Id = "canceled", IsCanceled = true }, partial with { Id = "foreign", OrganizationCode = "8" },
+            partial with { Id = "requested-only", MaterialCode = b.MaterialCode, RequestedQuantity = 50, PurchaseQuantity = 0, ArrivedQuantity = 0 },
+            partial with { Id = "completed", MaterialCode = c.MaterialCode, RequestedQuantity = 50, PurchaseQuantity = 50, ArrivedQuantity = 50 }]);
+        await f.Service.SynchronizeAsync(f.Scope, "admin", default);
+        var rows = (await f.Service.ListAsync(f.Scope, null, null, null, 1, 50, default)).Items;
+        var first = rows.Single(row => row.Material.Id == a.Id).Snapshot;
+        Assert.Equal(500, first.PurchaseQuantity); Assert.Equal(30, first.ArrivedQuantity); Assert.True(first.HasPendingRequisition);
+        Assert.Equal(date, first.RequisitionDate); Assert.Equal(new DateOnly(2026, 11, 1), first.ExpectedArrivalDate);
+        var requested = rows.Single(row => row.Material.Id == b.Id).Snapshot;
+        Assert.True(requested.HasPendingRequisition); Assert.Equal(0, requested.PurchaseQuantity); Assert.True(requested.IsLowStock);
+        var completed = rows.Single(row => row.Material.Id == c.Id).Snapshot;
+        Assert.False(completed.HasPendingRequisition); Assert.Equal(0, completed.PurchaseQuantity); Assert.Equal(0, completed.ArrivedQuantity);
+        Assert.Null(completed.RequisitionDate); Assert.Null(completed.ExpectedArrivalDate);
+        Assert.Equal(f.Clock.Now, first.ProcurementSyncedAt);
+        var before = JsonSerializer.Serialize((await f.Store.ReadAsync(f.Scope, default)).Snapshots);
+        f.Client.PurchasesFail = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => f.Service.SynchronizeAsync(f.Scope, "admin", default));
+        Assert.Equal(before, JsonSerializer.Serialize((await f.Store.ReadAsync(f.Scope, default)).Snapshots));
+    }
+
     private sealed class Fixture
     {
         public TestClock Clock { get; } = new();
@@ -410,6 +442,14 @@ public sealed class StockedMaterialServiceTests
         public Dictionary<string, U9ItemReference> Details { get; } = [];
         public List<U9InventorySourceRow> Rows { get; } = [];
         public List<string> Writes { get; } = [];
+        public List<StockedPurchaseLine> Purchases { get; } = [];
+        public bool PurchasesFail { get; set; }
+        public Task<IReadOnlyList<StockedPurchaseLine>?> QueryStockedPurchasesAsync(string baseUrl, string token, string organizationCode,
+            IReadOnlyList<string> codes, DateOnly from, DateOnly through, CancellationToken ct)
+        {
+            if (PurchasesFail) throw new PdmRuleException("请购采购回读失败，已保留上次成功数据。");
+            return Task.FromResult<IReadOnlyList<StockedPurchaseLine>?>(Purchases.ToArray());
+        }
         public bool InventoryFails { get; set; }
         public bool ApplyWrite { get; set; } = true;
         public int PlanReads { get; private set; }

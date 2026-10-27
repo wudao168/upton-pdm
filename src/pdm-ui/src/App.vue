@@ -960,15 +960,16 @@ async function restoreSelectedVersion() {
 }
 
 async function withdrawCurrentPackage(releasePackageId: string) {
+  const failed = workspace.releasePackages.value.find(item => item.id === releasePackageId)?.state === '发布失败'
   try {
-    const { value } = await ElMessageBox.prompt('请填写撤回原因。撤回后发布包回到草稿，相关图档恢复为工作中。', '撤回审批', {
+    const { value } = await ElMessageBox.prompt(failed ? '请填写退回原因。发布包将恢复为草稿，可重新编辑并审批；原失败原因和审批记录保留在操作记录中。' : '请填写撤回原因。撤回后发布包回到草稿，相关图档恢复为工作中。', failed ? '退回草稿' : '撤回审批', {
       confirmButtonText: '确认撤回', cancelButtonText: '取消', inputPattern: /\S+/, inputErrorMessage: '撤回原因不能为空', type: 'warning',
     })
     await workspace.withdrawPackage(releasePackageId, value)
-    ElMessage.success('审批已撤回，相关图档已恢复为工作中')
+    ElMessage.success(failed ? '发布包已退回草稿，可修改后重新审批' : '审批已撤回，相关图档已恢复为工作中')
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
-    ElMessage.error(error instanceof Error ? error.message : '撤回审批失败')
+    ElMessage.error(error instanceof Error ? error.message : failed ? '退回草稿失败' : '撤回审批失败')
   }
 }
 
@@ -1307,6 +1308,7 @@ async function openWhereUsedParent(projectId: string, parentDocumentId: string) 
           :permissions="workspace.currentPermissions.value"
           :current-username="workspace.currentUsername.value"
           :project-id="workspace.project.value.id"
+          :administrator="workspace.hasRole('Administrator')"
           :platform-administrator="workspace.hasRole('platform_admin') || workspace.hasRole('developer')"
           :can-manage-client-logs="workspace.hasRole('Administrator') || workspace.hasRole('platform_admin') || workspace.hasRole('developer')"
           :audit-entries="workspace.auditEntries.value"

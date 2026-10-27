@@ -173,8 +173,6 @@ table:has(> thead) :is(th, td) {
   border-left: 0 !important;
   border-right: 0 !important;
 }
-button.pdm-button-font-80x30,
-button.pdm-button-font-80x30 :is(span:not(.el-icon), strong, em) { font-size: 12px !important; }
 .drawing-review-decision-bar .drawing-review-decision-buttons button,
 .pdm-solidworks-actions > .pdm-preview-command,
 .pdm-preview-markup-row > .pdm-markup-save { box-sizing: border-box; width: 80px !important; min-width: 80px !important; max-width: 80px !important; height: 30px !important; min-height: 30px !important; flex: 0 0 80px; padding-inline: 4px; }

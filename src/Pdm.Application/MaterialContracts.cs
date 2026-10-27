@@ -275,6 +275,9 @@ public sealed record U9ConnectionTestResult(
 
 public interface IU9OpenApiClient
 {
+    Task<IReadOnlyList<StockedPurchaseLine>?> QueryStockedPurchasesAsync(string baseUrl, string token, string organizationCode,
+        IReadOnlyList<string> materialCodes, DateOnly from, DateOnly through, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<StockedPurchaseLine>?>(null);
     Task<IReadOnlyList<MaterialStockPlan>?> QueryStockPlansAsync(string baseUrl, string token, string enterpriseCode,
         string organizationCode, DateTimeOffset syncedAt, CancellationToken cancellationToken, IReadOnlyList<string>? materialCodes = null) =>
         Task.FromResult<IReadOnlyList<MaterialStockPlan>?>(null);

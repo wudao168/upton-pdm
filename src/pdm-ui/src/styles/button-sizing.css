@@ -1,0 +1,84 @@
+/* 重要声明放在公共层中，统一覆盖旧页面内的固定尺寸。 */
+@layer pdm-button-sizing {
+  :root body button[data-pdm-button-size] {
+    box-sizing: border-box !important;
+    width: max-content !important;
+    min-width: 80px !important;
+    max-width: 100% !important;
+    height: var(--pdm-button-default) !important;
+    min-height: var(--pdm-button-default) !important;
+    max-height: var(--pdm-button-default) !important;
+    flex: 0 0 auto !important;
+    padding: 0 8px !important;
+    border-radius: var(--pdm-radius-control) !important;
+    font-family: var(--pdm-font-ui) !important;
+    font-size: 12px !important;
+    font-weight: 500 !important;
+    line-height: 18px !important;
+    white-space: nowrap !important;
+    overflow-wrap: normal !important;
+    transition: background-color 200ms ease, color 200ms ease, border-color 200ms ease, box-shadow 200ms ease !important;
+    --pdm-button-icon-size: 16px !important;
+  }
+  :root body button[data-pdm-button-size] :where(span:not(.el-icon), strong, em, small) {
+    font-family: inherit !important;
+    font-size: inherit !important;
+    line-height: inherit !important;
+  }
+  :root body button[data-pdm-button-size="default"][data-pdm-button-fit="compact"] { width: 80px !important; }
+  :root body button[data-pdm-button-size="inline"] {
+    min-width: 60px !important;
+    height: var(--pdm-button-compact) !important;
+    min-height: var(--pdm-button-compact) !important;
+    max-height: var(--pdm-button-compact) !important;
+    padding-inline: 4px !important;
+    --pdm-button-icon-size: 14px !important;
+  }
+  :root body button[data-pdm-button-size="inline"][data-pdm-button-fit="compact"] { width: 60px !important; }
+  :root body button:is([data-pdm-button-size="icon"], [data-pdm-button-size="inline-icon"]) {
+    width: var(--pdm-symbol-toolbar) !important;
+    min-width: var(--pdm-symbol-toolbar) !important;
+    max-width: var(--pdm-symbol-toolbar) !important;
+    height: var(--pdm-symbol-toolbar) !important;
+    min-height: var(--pdm-symbol-toolbar) !important;
+    max-height: var(--pdm-symbol-toolbar) !important;
+    padding: 0 !important;
+    font-size: 16px !important;
+  }
+  :root body button[data-pdm-button-size="inline-icon"] {
+    width: var(--pdm-symbol-compact) !important;
+    min-width: var(--pdm-symbol-compact) !important;
+    max-width: var(--pdm-symbol-compact) !important;
+    height: var(--pdm-symbol-compact) !important;
+    min-height: var(--pdm-symbol-compact) !important;
+    max-height: var(--pdm-symbol-compact) !important;
+    font-size: 14px !important;
+    --pdm-button-icon-size: 14px !important;
+  }
+  :root body button[data-pdm-button-size] :is(svg, .el-icon) { width: 16px !important; height: 16px !important; }
+  :root body button:is([data-pdm-button-size="inline"], [data-pdm-button-size="inline-icon"]) :is(svg, .el-icon) { width: 14px !important; height: 14px !important; }
+  :root body button[data-pdm-button-size="block"] {
+    width: 100% !important;
+    min-width: 0 !important;
+    height: 40px !important;
+    min-height: 40px !important;
+    max-height: 40px !important;
+    font-size: 14px !important;
+    line-height: 20px !important;
+  }
+
+  :is(.pdm-manager-actions, .pdm-panel-header-actions, .pdm-plan-toolbar__actions, .pdm-bom-selection-actions,
+      .pdm-bom-release-strip-actions, .standard-library__toolbar, .stocked-toolbar, .material-toolbar__actions,
+      .validation-plan__actions, .production-drawings__toolbar-actions) {
+    min-width: 0 !important;
+    flex-wrap: wrap !important;
+  }
+  .pdm-bom-selection-toolbar:not(.is-release-comparison) { display: flex !important; flex-wrap: wrap !important; }
+  .pdm-bom-selection-actions { flex: 0 1 auto !important; }
+  .pdm-bom-filters { flex: 1 1 350px !important; }
+  .pdm-bom-version-picker { max-width: 100% !important; flex-wrap: wrap !important; margin-left: 0 !important; }
+  .pdm-bom-release-strip { flex: 0 0 auto !important; flex-wrap: wrap !important; gap: var(--pdm-control-gap) !important; }
+  .pdm-bom-release-strip > div:not(.pdm-bom-release-strip-actions) { flex: 1 1 150px !important; }
+  .pdm-project-code-cell { grid-template-columns: 24px minmax(0, auto) 24px !important; }
+  @media(max-width:1100px) { .pdm-project-code-cell { grid-template-columns: 24px minmax(0, auto) !important; } }
+}

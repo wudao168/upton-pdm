@@ -108,6 +108,7 @@ public sealed class ReleasePreviewService(
                 ? (new Dictionary<Guid, DocumentPreviewArtifact>(), (PartialPreviewConversionException?)null)
                 : await ConvertPreviewsAsync(package, project, sources, stagingDirectory, cancellationToken);
             if (previews.Count > 0) await repository.AttachReleasePreviewArtifactsAsync(package.Id, previews, cancellationToken);
+            package = await repository.FindReleasePackageAsync(package.Id, cancellationToken) ?? package;
             await CopyPreviewsIntoPublishedPathAsync(package, vaultRoot, await ReleasedVersionsAsync(package.Id, cancellationToken), cancellationToken);
             // 转图补齐后发布目录多了 STEP/PDF，这里顺带把新增成品登记到"机械发布/电气发布"目录。
             if (releaseDeliveryArchive is not null)
@@ -184,12 +185,13 @@ public sealed class ReleasePreviewService(
     private async Task<IReadOnlyList<DocumentVersion>> ReleasedVersionsAsync(Guid packageId, CancellationToken cancellationToken)
     {
         var result = new List<DocumentVersion>();
+        var package = await repository.FindReleasePackageAsync(packageId, cancellationToken) ?? throw new PdmNotFoundException("发布包不存在。");
         foreach (var source in await repository.ListReleasePreviewSourcesAsync(packageId, cancellationToken))
         {
             var version = (await repository.ListDocumentVersionsAsync(source.DocumentId, cancellationToken))
                 .Where(item => item.ReleasePackageId == packageId || source.AlreadyReleased && item.Id == source.SourceVersionId)
                 .OrderByDescending(item => item.ReleasePackageId == packageId).ThenByDescending(item => item.CreatedAt).FirstOrDefault();
-            if (version is not null) result.Add(version);
+            if (version is not null) result.Add(PdfTitleBlockSnapshotBuilder.DeliveryVersion(package, version));
         }
         return result;
     }

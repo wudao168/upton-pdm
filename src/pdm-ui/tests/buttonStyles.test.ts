@@ -18,6 +18,12 @@ it('recognizes operation types without styling navigation, content rows or unrel
   expect(buttons.map(button => button.dataset.pdmButtonKind)).toEqual(['add', 'confirm', 'delete', 'outline', undefined, undefined, undefined, undefined])
 })
 
+it('进度条与部门分类恢复原样式，不再套用普通按钮边框和颜色', () => {
+  install('<div class="pdm-overview-timeline"><button class="pdm-overview-timeline__segment">设计</button><button class="pdm-overview-timeline__milestone" aria-label="计划里程碑"></button></div><div class="wh-department-options"><button>生产部<span>参与填报</span></button></div><button class="production-workbench__all-categories">全部分类</button>')
+  for (const button of document.querySelectorAll('button')) expect(button.dataset.pdmButtonKind).toBeUndefined()
+  expect(document.body.textContent).toContain('参与填报')
+})
+
 it('updates asynchronous dialog labels and icon-only accessibility labels', async () => {
   install('')
   const dialog = document.createElement('div')

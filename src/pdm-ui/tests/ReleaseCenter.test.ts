@@ -173,6 +173,38 @@ describe('ReleaseCenter', () => {
     electricalBomSnapshot: scope === 'ElectricalSupplement' ? items : [],
   })
   const frozenProps = { username: 'reviewer', pending: false, progress: 0, error: '', canManage: true, canDecide: false }
+  it('冻结增补只展示本次选中图纸，不把其余二十张当前工作图的变化混入发布记录', async () => {
+    const items: BomItem[] = Array.from({ length: 21 }, (_, index) => ({ ...frozenItem(`part-${index}`),
+      kind: 'NonStandard', sourceDocumentId: `model-${index}`, specification: `MODEL-${index}` }))
+    const release = { ...frozenPackage(items, 'NonStandardSupplement'), state: '发布失败', selectedBomItemIds: ['part-4'] }
+    const candidates = items.map((item, index) => ({ candidateId: item.id!, bomItemId: item.id, modelDocumentId: item.sourceDocumentId,
+      drawingDocumentId: `drawing-${index}`, drawingNumber: item.specification!, name: item.name, modelRevision: 'A-W1',
+      bomKinds: ['NonStandard' as const], state: index === 4 ? 'ApprovedCurrent' as const : 'Ready' as const,
+      selectable: false, hasUnreleasedDrawingChanges: true }))
+    const wrapper = mount(ReleaseCenter, { props: { ...frozenProps, releasePackage: release, previousVersionItems: items, drawingReviewCandidates: candidates } })
+    const rows = () => wrapper.findAll('.pdm-release-frozen-table tbody tr')
+    expect(rows()).toHaveLength(1)
+    expect(rows()[0]!.text()).toContain('MODEL-4')
+    await wrapper.setProps({ drawingReviewCandidates: [] })
+    expect(rows()).toHaveLength(1)
+    expect(rows()[0]!.text()).toContain('MODEL-4')
+    await wrapper.findAll('button').find(button => button.text() === '查看完整BOM')!.trigger('click')
+    expect(rows()).toHaveLength(21)
+    wrapper.unmount()
+  })
+  it('发布失败可退回草稿，已发布和发布处理中不能使用该入口', async () => {
+    const release = { ...frozenPackage([frozenItem('failed')]), state: '发布失败' }
+    const wrapper = mount(ReleaseCenter, { props: { ...frozenProps, releasePackage: release } })
+    const back = wrapper.findAll('button').find(button => button.text() === '退回草稿')
+    expect(back).toBeDefined()
+    await back!.trigger('click')
+    expect(wrapper.emitted('withdraw')?.[0]).toEqual([release.id])
+    for (const state of ['已发布', '发布中']) {
+      await wrapper.setProps({ releasePackage: { ...release, state } })
+      expect(wrapper.findAll('button').some(button => button.text() === '退回草稿')).toBe(false)
+    }
+    wrapper.unmount()
+  })
   // 增补/变更仅在对应BOM完成首次正式发布后可选，需要该已发布正式单作为前置。
   const publishedFormal = (scope: ReleasePackageSummary['scope']): ReleasePackageSummary => ({
     id: `published-${scope}`, number: `RP-${scope}`, state: '已发布', scope, workflowVersion: 1, selectedBomItemIds: [],

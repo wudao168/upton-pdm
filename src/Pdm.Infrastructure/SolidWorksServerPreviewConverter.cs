@@ -185,7 +185,8 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
                     catch (Exception error) when (error is PdmRuleException or PdmConflictException)
                     {
                         // Keep the successfully converted PDF available. Only its supplemental stamp needs retrying.
-                        itemErrors[source.DocumentId] = "PDF已生成，发布标识待补：" + error.Message;
+                        itemErrors[source.DocumentId] = (package.PdfTitleBlockSnapshot is { Enabled: true } ? "PDF填写或发布标识待处理：" : "PDF已生成，发布标识待补：") + error.Message;
+                        if (package.PdfTitleBlockSnapshot is { Enabled: true }) continue;
                     }
                 }
                 var sha256 = await ComputeSha256Async(job.OutputPath, cancellationToken);

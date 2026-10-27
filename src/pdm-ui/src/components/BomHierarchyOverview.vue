@@ -109,7 +109,9 @@ onUnmounted(() => clearInterval(automaticPoll))
 
 const rootProjectId = computed(() => props.project.rootProjectId || props.project.id)
 const hierarchyProjects = computed(() => props.projects
-  .filter(project => (project.rootProjectId || project.id) === rootProjectId.value)
+  .filter(project => props.project.id === rootProjectId.value
+    ? (project.rootProjectId || project.id) === rootProjectId.value
+    : project.id === props.project.id)
   .sort((left, right) => (left.childSequence ?? 0) - (right.childSequence ?? 0) || left.code.localeCompare(right.code)))
 const hierarchySignature = computed(() => JSON.stringify(hierarchyProjects.value.map(project => ({
   id: project.id,
@@ -418,7 +420,9 @@ async function fetchProjectDetail(projectId: string): Promise<ProjectDetail> {
   return { current: { Standard: standard, NonStandard: nonStandard, Electrical: electrical }, versions, headers, releases }
 }
 
+let overviewLoadGeneration = 0
 async function loadOverview(force = false) {
+  const generation = ++overviewLoadGeneration
   if (!props.token) return
   const projectsToLoad = hierarchyProjects.value.filter(project => force || !detailCache.value[project.id])
   if (!projectsToLoad.length) return
@@ -426,6 +430,7 @@ async function loadOverview(force = false) {
   error.value = ''
   try {
     const loaded = await Promise.allSettled(projectsToLoad.map(project => fetchProjectDetail(project.id)))
+    if (generation !== overviewLoadGeneration) return
     const nextDetails = { ...detailCache.value }
     const nextErrors = { ...detailErrors.value }
     loaded.forEach((result, index) => {
@@ -444,7 +449,7 @@ async function loadOverview(force = false) {
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : 'BOM层级状态加载失败'
   } finally {
-    loading.value = false
+    if (generation === overviewLoadGeneration) loading.value = false
   }
 }
 

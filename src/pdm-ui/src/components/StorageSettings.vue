@@ -3,10 +3,12 @@ import { ElMessage } from '../statusMessage'
 import { reactive, ref, watch } from 'vue'
 import { testPreviewAgent } from '../api'
 import StandardStructureStorageSettings from './StandardStructureStorageSettings.vue'
+import PdfTitleBlockFillSettings from './PdfTitleBlockFillSettings.vue'
 import BrowserCadArchiveSettings from './BrowserCadArchiveSettings.vue'
 import type { BomPropertyMapping, BomValidationField, EquipmentTypeDefinition, PdmSystemSettings, ProjectNumberingOptions } from '../types'
 
 const props = defineProps<{
+  administrator?: boolean
   settings: PdmSystemSettings
   token?: string
   equipmentTypes: EquipmentTypeDefinition[]
@@ -289,6 +291,9 @@ async function saveCounters(row: { id: string; project: number; serial: number }
             <button type="button" class="pdm-primary-action" :disabled="pending" @click="savePreviewConversion">保存图纸转换设置</button>
           </div>
         </section>
+      </el-tab-pane>
+      <el-tab-pane label="PDF属性填写" name="pdf-title-block">
+        <PdfTitleBlockFillSettings :settings="settings" :administrator="administrator ?? false" :pending="pending" :on-save-settings="onSaveSettings" />
       </el-tab-pane>
       <el-tab-pane label="编辑权限" name="checkout-policy">
         <section class="pdm-panel pdm-manager-panel">

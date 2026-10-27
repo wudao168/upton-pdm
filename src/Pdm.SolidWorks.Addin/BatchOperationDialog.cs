@@ -496,6 +496,13 @@ internal sealed partial class BatchOperationDialog : Form
         standardLibrary.Checked = initialStandardLibrary && canArchiveStandardLibrary && checkIn.Checked;
         FormClosed += (_, _) => standardLibraryTip.Dispose();
         Shown += async (_, _) => { if (checkIn.Checked && !ArchiveToStandardLibrary) await AnalyzeArchiveSelectionAsync(false); };
+        projectSelector.SelectedProjectChanged += async (_, _) =>
+        {
+            CancelArchiveAnalysis();
+            archiveSelectionStates.Clear();
+            archiveSelectionTouched = false;
+            await AnalyzeArchiveSelectionAsync(false);
+        };
     }
 
     public BatchOperationKind Operation => checkIn.Checked

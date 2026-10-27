@@ -3674,6 +3674,51 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
             version => version.ReleasePackageId == package.Id);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FailedPublicationCanReturnToDraftOnlyBeforeFormalVersionsExist(bool hasFormalVersions)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(),
+            new RecordingPublisher { OmitFormalDrawings = true }, TimeProvider.System);
+        foreach (var document in await repository.ListCheckedOutDocumentsAsync(default))
+            await repository.ForceReleaseCheckoutAsync(document.Id, "admin", "测试准备", default);
+        await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var package = await workflow.CreateReleasePackageAsync(
+            ProjectId, null, $"RP-FAILED-RETURN-{Guid.NewGuid():N}", "admin", "admin", "admin", UserRole.Administrator, default);
+        await Assert.ThrowsAsync<PdmConflictException>(() => PublishAsync(workflow, package));
+        var failed = (await repository.FindReleasePackageAsync(package.Id, default))!;
+        Assert.Equal(ReleasePackageState.PublishFailed, failed.State);
+        if (hasFormalVersions)
+        {
+            var version = (await repository.ListProjectDocumentVersionsAsync(ProjectId, default)).First();
+            var versions = (IDictionary<Guid, DocumentVersion>)typeof(InMemoryPdmRepository)
+                .GetField("versions", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(repository)!;
+            var released = version with { Id = Guid.NewGuid(), Status = DocumentVersionStatus.Released, ReleasePackageId = package.Id };
+            versions.Add(released.Id, released);
+            await Assert.ThrowsAsync<PdmConflictException>(() => workflow.WithdrawReleasePackageAsync(
+                failed.Id, "admin", UserRole.Administrator, "退回核对", default));
+            Assert.Equal(ReleasePackageState.PublishFailed, (await repository.FindReleasePackageAsync(package.Id, default))!.State);
+            return;
+        }
+        await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Failed, "旧转换错误", 2, DateTimeOffset.UtcNow, default);
+        var draft = await workflow.WithdrawReleasePackageAsync(failed.Id, "admin", UserRole.Administrator, "退回修改发布范围", default);
+        Assert.Equal(ReleasePackageState.Draft, draft.State);
+        Assert.All(draft.ApprovalTasks, task => Assert.Null(task.Decision));
+        Assert.Null(draft.PublishError);
+        Assert.Equal(ReleasePreviewState.None, draft.PreviewState);
+        Assert.Null(draft.PreviewError);
+        Assert.Equal(0, draft.PreviewAttempts);
+        Assert.DoesNotContain(await repository.ListBomVersionsAsync(ProjectId, null, default), version => version.State == BomVersionState.InReview);
+        var audit = Assert.Single(await repository.ListProjectAuditAsync(ProjectId, 100, default),
+            item => item.Action == "release-package.withdraw" && item.EntityId == failed.Id.ToString());
+        Assert.Contains(System.Text.Json.JsonSerializer.Serialize(failed.PublishError), audit.Detail);
+        Assert.Contains(failed.ApprovalTasks.Last().Id.ToString(), audit.Detail);
+        Assert.Equal(ReleasePackageState.ProcessReview,
+            (await workflow.SubmitReleasePackageAsync(draft.Id, "admin", UserRole.Administrator, default)).State);
+    }
+
     /// <summary>模拟被服务重启打断的转图：转换过程中抛出取消异常。</summary>
     private sealed class CanceledPreviewConverter : IServerPreviewConverter
     {

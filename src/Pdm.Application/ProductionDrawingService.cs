@@ -110,6 +110,7 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                     var version = use.Version;
                     var document = documents[version.DocumentId];
                     var package = use.Package;
+                    version = PdfTitleBlockSnapshotBuilder.DeliveryVersion(package, version);
                     package.DrawingDeliveryOverrides.TryGetValue(document.Id, out var delivery);
                     var source = version.SourceVersionId.HasValue
                         && versionsById.TryGetValue(version.SourceVersionId.Value, out var foundSource)
@@ -192,7 +193,7 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
         if (package is null || package.ProjectId != document.ProjectId || package.State != ReleasePackageState.Published
             || package.Scope is not (ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement or ReleaseScope.LegacyCombined))
             throw new PdmConflictException("所选文件的发布包尚未生效或已失效，不能用于生产，请刷新图纸列表。");
-        return version;
+        return PdfTitleBlockSnapshotBuilder.DeliveryVersion(package, version);
     }
 
     public async Task<ReleasePackage> UpdateDeliveryAsync(Guid releasePackageId, Guid documentId,

@@ -419,6 +419,7 @@ public sealed partial class PdmAddin : ISwAddin
         {
             applicationEvents.ActiveDocChangeNotify += OnActiveDocumentChanged;
             applicationEvents.ActiveModelDocChangeNotify += OnActiveDocumentChanged;
+            applicationEvents.FileOpenPreNotify += OnFileOpening;
             applicationEvents.FileOpenPostNotify += OnFileOpened;
             applicationEvents.FileNewNotify2 += OnFileCreated;
             applicationEvents.FileCloseNotify += OnFileClosed;
@@ -442,6 +443,7 @@ public sealed partial class PdmAddin : ISwAddin
         {
             applicationEvents.ActiveDocChangeNotify -= OnActiveDocumentChanged;
             applicationEvents.ActiveModelDocChangeNotify -= OnActiveDocumentChanged;
+            applicationEvents.FileOpenPreNotify -= OnFileOpening;
             applicationEvents.FileOpenPostNotify -= OnFileOpened;
             applicationEvents.FileNewNotify2 -= OnFileCreated;
             applicationEvents.FileCloseNotify -= OnFileClosed;
@@ -625,6 +627,11 @@ public sealed partial class PdmAddin : ISwAddin
 
     private int OnActiveDocumentChanged()
     {
+        if (Volatile.Read(ref nativeFileOpenInProgress) != 0)
+        {
+            ScheduleTreeRefresh(forceScan: false);
+            return 0;
+        }
         if (ImportedComponentStorage.IsReadingInventory) return 0;
         if (Volatile.Read(ref draftSnapshotInProgress) != 0) return 0;
         if (Volatile.Read(ref checkInOperationInProgress) > 0)
@@ -650,8 +657,18 @@ public sealed partial class PdmAddin : ISwAddin
         return 0;
     }
 
+    private int nativeFileOpenInProgress;
+
+    private int OnFileOpening(string fileName)
+    {
+        Interlocked.Exchange(ref nativeFileOpenInProgress, 1);
+        ScheduleTreeRefresh(forceScan: false);
+        return 0;
+    }
+
     private int OnFileOpened(string fileName)
     {
+        Interlocked.Exchange(ref nativeFileOpenInProgress, 0);
         InvalidateTreeCacheForPath(fileName);
         ScheduleTreeRefresh(forceScan: false);
         return 0;
@@ -857,7 +874,9 @@ public sealed partial class PdmAddin : ISwAddin
 
     private bool IsSolidWorksCommandActive()
     {
-        if (application == null || disconnecting) return true;
+        // Native file opening pumps OnIdleNotify while configuration workers still
+        // load references. GetRunningCommandInfo can report inactive in that pump.
+        if (application == null || disconnecting || Volatile.Read(ref nativeFileOpenInProgress) != 0) return true;
         try
         {
             application.GetRunningCommandInfo(out var commandId, out var title, out var active);
@@ -1191,7 +1210,7 @@ public sealed partial class PdmAddin : ISwAddin
             TestPluginConnectionAsync,
             address => CheckClientUpdateAsync(address, false, lifetime.Token),
             address => CheckClientUpdateAsync(address, true, lifetime.Token, true),
-            SavePluginSettingsAsync))
+            SavePluginSettingsAsync) { CleanTemporaryCopies = CleanArchiveTemporaryCopiesAsync })
         {
             dialog.ShowDialog(taskPaneControl);
         }
@@ -8002,7 +8021,7 @@ public sealed partial class PdmAddin : ISwAddin
                             if (scopeReview.ShowDialog(progressDialog) != DialogResult.OK) return;
                         batchCancellation.Token.ThrowIfCancellationRequested();
                     }
-                    reportBatchStage("阶段2/4：正在准备全部文件权限…");
+                    reportBatchStage("正在准备全部文件权限…");
                     LogOperation(string.Concat("Batch check-in execution start items=", checkInPlan.Items.Count));
                     var result = await CheckInBatchAsync(
                         checkInPlan.Items,
@@ -9225,8 +9244,9 @@ public sealed partial class PdmAddin : ISwAddin
         }
     }
 
-    private void ProtectLoadedDocument(string path)
+    private void ProtectLoadedDocument(string path, bool controlledWorkspaceOnly = false)
     {
+        if (controlledWorkspaceOnly && !PdmDocumentIdentityStore.IsControlledWorkspacePath(path)) return;
         SetFileReadOnly(path, true);
         var document = FindLoadedDocument(path);
         if (document == null || document.IsOpenedReadOnly())
@@ -9772,13 +9792,8 @@ public sealed partial class PdmAddin : ISwAddin
             checkedOut = true;
             LogOperation(string.Concat("Batch check-in checkout end path=", node.FullPath));
 
-            if (node.Role != CadReferenceRole.ExternalFileDependency && node.HistoricalRepair == null && !node.NativeIsolationOnly)
-            {
-                SetFileReadOnly(node.FullPath, false);
-                LogOperation(string.Concat("Batch check-in editable-state start path=", node.FullPath));
-                EnsureLoadedDocumentEditable(node.FullPath);
-                LogOperation(string.Concat("Batch check-in editable-state end path=", node.FullPath));
-            }
+            // Check-in reads the saved native file, including shared read-only sources.
+            // Only the earlier save step needs to make a dirty document editable.
             return true;
         }
         catch
@@ -9800,6 +9815,8 @@ public sealed partial class PdmAddin : ISwAddin
     {
         var items = DistinctBatchItems(selectedItems);
         if (items.Count == 0) return new BatchCheckInResult();
+        archiveReadAliases.Clear();
+        ArchiveSession.Current?.SetPhase(2, "正在准备文件权限、引用及上传副本…");
         items = await CompletePdmCheckInDependenciesAsync(items, projectId, cancellationToken);
         if (items.Any(item => item.Node.ReferenceWarnings.Count > 0))
             await apiClient.RequireReferenceWarningsSupportAsync(cancellationToken);
@@ -9895,6 +9912,7 @@ public sealed partial class PdmAddin : ISwAddin
                 {
                     LogDiagnostic("Archive local preflight." + node.FileName, exception);
                     localFailures.Add(node.FileName + "：" + ArchivePreflightError(exception));
+                    if (exception is ArchiveReadAliasConflictException) break;
                 }
                 await Task.Yield();
             }
@@ -9965,6 +9983,7 @@ public sealed partial class PdmAddin : ISwAddin
                     LogDiagnostic("Archive copy preflight." + node.FileName, exception);
                     ThrowOnArchiveConnectionFailure(exception);
                     copyFailures.Add(node.FileName + "：" + ArchivePreflightError(exception));
+                    if (exception is ArchiveReadAliasConflictException) break;
                 }
             }
             ThrowArchivePreflightFailures(copyFailures);
@@ -10011,6 +10030,7 @@ public sealed partial class PdmAddin : ISwAddin
                 ThrowArchivePreflightFailures(result.Failures);
             }
             ValidateHistoricalRepairProofs(items, projectId, cancellationToken);
+            ArchiveSession.Current?.SetPhase(4, "校验已通过，正在上传本次图档并等待整批提交…");
             var staged = new List<StagedArchiveFile>();
             for (var index = 0; index < orderedItems.Length; index++)
             {
@@ -10080,7 +10100,7 @@ public sealed partial class PdmAddin : ISwAddin
             // E03: all uploads and reference snapshots are frozen. Later local edits
             // remain in the working file and must not invalidate this immutable batch.
             LogOperation("整批存档提交编号：" + batchId);
-            reportProgress?.Invoke(orderedItems.Length, orderedItems.Length, string.Empty, "全部文件暂存完成，正在一次性提交整批版本…");
+            reportProgress?.Invoke(0, 0, string.Empty, "阶段4/4：全部" + orderedItems.Length + "个文件暂存完成，正在提交整批版本，等待服务器确认…");
             commitAttempted = true;
             ArchiveBatchReceiptDto receipt;
             try { receipt = await apiClient.CommitArchiveBatchAsync(batchId, checkoutSessionId, staged.Select(file => file.Request).ToArray(), cancellationToken); }
@@ -10095,8 +10115,10 @@ public sealed partial class PdmAddin : ISwAddin
                 result.BomWarnings.Add("原生图档已存档，部分结构索引待补全；已有BOM保留，不按未读出的结构删除物料。");
             else if (receipt.FollowupPending)
                 result.BomWarnings.Add("图档版本已整批保存，BOM及通知正在服务器后台更新；无需重复存档，稍后刷新即可。");
+            var synchronizedFiles = 0;
             foreach (var file in staged)
             {
+                reportProgress?.Invoke(synchronizedFiles, staged.Count, file.Node.FileName, "阶段4/4：服务器已提交，正在同步本地图档状态…");
                 foreach (var notice in file.Node.ReferenceWarnings)
                     result.BomWarnings.Add("引用提示：" + file.Node.FileName + "；" + notice);
                 var saved = receipt.Results.Single(entry => entry.Document.Id == file.Node.DocumentId);
@@ -10120,7 +10142,7 @@ public sealed partial class PdmAddin : ISwAddin
                     {
                         if (file.Node.HistoricalRepair == null && !file.Node.NativeIsolationOnly && (file.Node.Role != CadReferenceRole.ExternalFileDependency
                             || PdmDocumentIdentityStore.IsControlledWorkspacePath(file.Node.FullPath)))
-                            ProtectLoadedDocument(file.Node.FullPath);
+                            ProtectLoadedDocument(file.Node.FullPath, controlledWorkspaceOnly: true);
                     }
                     else if (!string.IsNullOrWhiteSpace(warning)) result.BomWarnings.Add(file.Node.FileName + "：" + warning);
                     if (laterChanges)
@@ -10159,12 +10181,14 @@ public sealed partial class PdmAddin : ISwAddin
                 }
                 else { result.UnchangedFiles++; result.Successes.Add(file.Node.FileName + (file.NativeIsolation
                     ? "：独立固化副本已保存，原工程版本不升版" : keepEditing ? "：无变更，继续编辑" : !string.IsNullOrWhiteSpace(handoffTo) ? "：无变更，已交接编辑权限（不升版）" : "：无变更，已结束编辑（不升版）")); }
+                reportProgress?.Invoke(++synchronizedFiles, staged.Count, string.Empty, "阶段4/4：本地图档状态已同步：" + file.Node.FileName);
             }
         }
         finally
         {
             foreach (var file in preparedFiles.Values) file.Node.NativeIsolationOnly = false;
             foreach (var file in preparedFiles.Values) DeleteCheckInUploadCopy(file.UploadCopyPath);
+            archiveReadAliases.Clear();
             if (!committed)
                 foreach (var item in orderedItems)
                     ArchiveSession.Current?.TrackFile(item.Node, commitAttempted
@@ -10236,6 +10260,7 @@ public sealed partial class PdmAddin : ISwAddin
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> inspectedProperties = null,
         IReadOnlyDictionary<string, PreparedArchiveFile> preparedFiles = null, bool keepEditing = false, string handoffTo = null)
     {
+        ArchiveSession.Current?.SetPhase(3, "正在逐项校验本次存档的文件、引用和服务器条件…");
         var failures = new List<string>();
         for (var index = 0; index < orderedItems.Count; index++)
         {
@@ -10271,6 +10296,7 @@ public sealed partial class PdmAddin : ISwAddin
                     prepared?.ReferenceSnapshot, prepared?.NativeIsolationKeepEditing ?? (node.HistoricalRepair == null && keepEditing),
                     node.NativeIsolationOnly ? null : node.HistoricalRepair == null ? handoffTo : null);
                 LogOperation(string.Concat("Batch check-in preflight passed path=", node.FullPath));
+                reportProgress?.Invoke(index + 1, orderedItems.Count, node.FileName, "阶段3/4：存档前校验已通过");
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -10311,6 +10337,8 @@ public sealed partial class PdmAddin : ISwAddin
             return exception.Message;
         if (exception is IOException && (exception.Message.StartsWith("图档在存档期间", StringComparison.Ordinal)
             || exception.Message.StartsWith("缺少存档前的文件校验记录", StringComparison.Ordinal))) return exception.Message;
+        if (exception is IOException && exception.Message.Contains("已获取PLM编辑权限，但SolidWorks仍以只读方式打开。"))
+            return "需要保存本地修改，但SolidWorks文档仍处于只读状态，尚未提交。请先将修改另存到可写位置，或取得源文件写入权限并保存后重试；原窗口和修改均已保留。";
         if (exception is IOException || exception is UnauthorizedAccessException)
             return "本地文件无法读取或被占用，请检查文件路径和读写权限后重试。";
         return "图档信息读取或校验失败，请保存文件、刷新设计树后重试；技术详情已写入诊断日志。";
@@ -10336,17 +10364,17 @@ public sealed partial class PdmAddin : ISwAddin
         IReadOnlyDictionary<string, IReadOnlyList<string>> referenceConfigurations = null)
     {
         if (node.Role == CadReferenceRole.ExternalFileDependency || node.HistoricalRepair != null) return new Dictionary<string, string>();
-        var document = FindLoadedDocument(node.FullPath);
+        var document = FindArchiveReadDocument(node);
         var opened = false;
+        var readAlias = document != null && !PathsEqual(document.GetPathName(), node.FullPath);
         try
         {
             if (document == null)
             {
                 document = OpenDocumentInvisiblyForBatch(node.FullPath, ToSolidWorksDocumentType(node.Kind),
                     node.Kind == CadDocumentKind.Drawing ? string.Empty : node.Configuration, true);
-                if (!PathsEqual(document.GetPathName(), node.FullPath))
-                    throw new InvalidOperationException("SolidWorks返回了其他路径的同名文件，请关闭同名图档后重试。");
-                opened = true;
+                opened = PathsEqual(document?.GetPathName(), node.FullPath);
+                if (!opened) { ValidateArchiveReadAlias(node, document); readAlias = true; }
             }
             if (!opened && HasPendingArchiveSave(document, node) && !(node.Kind == CadDocumentKind.Drawing && preloadedOwnedDrawings.Contains(node.FullPath)))
                 throw new InvalidOperationException("图档尚未保存，请保存后重新检查。");
@@ -10354,7 +10382,13 @@ public sealed partial class PdmAddin : ISwAddin
             if (node.Kind != CadDocumentKind.Drawing && (string.IsNullOrWhiteSpace(node.Configuration)
                 || document.GetConfigurationByName(node.Configuration) == null))
                 throw new InvalidOperationException("找不到总装引用的配置：" + node.Configuration);
-            return ReadArchiveProperties(document, node, nativePropertyCards, referenceConfigurations);
+            var properties = ReadArchiveProperties(document, node, nativePropertyCards, referenceConfigurations);
+            if (readAlias)
+            {
+                ValidateArchiveReadAlias(node, document);
+                archiveReadAliases[node.FullPath] = document;
+            }
+            return properties;
         }
         finally
         {
@@ -10693,6 +10727,7 @@ public sealed partial class PdmAddin : ISwAddin
         var uploadCopyPath = string.Empty;
         IModelDoc2 document = null;
         var openedForBatch = false;
+        var readAlias = false;
         var prepared = false;
         var operationTimer = Stopwatch.StartNew();
         try
@@ -10717,7 +10752,8 @@ public sealed partial class PdmAddin : ISwAddin
                     : ReferenceSnapshotMatchesTree(latest?.ReferenceSnapshot, node));
             var indexCompleted = ArchiveIndexWasCompleted(latest?.ReferenceSnapshot, node);
             var referenceChanged = !referenceMatchesLatest;
-            document = FindLoadedDocument(node.FullPath);
+            document = FindArchiveReadDocument(node);
+            readAlias = document != null && !PathsEqual(document.GetPathName(), node.FullPath);
             var hasUnsavedChanges = HasPendingArchiveSave(document, node);
             var localSha256 = preflight != null && preflight.MatchesCurrentFile(node.FullPath)
                 ? preflight.LocalSha256
@@ -10771,16 +10807,16 @@ public sealed partial class PdmAddin : ISwAddin
                         readOnly: true);
                     if (!PathsEqual(document?.GetPathName(), node.FullPath))
                     {
-                        document = null; // A same-named user document is not ours to close.
-                        throw new InvalidOperationException("SolidWorks返回了其他路径的同名文件，原有窗口已保留：" + node.FileName);
+                        ValidateArchiveReadAlias(node, document);
+                        readAlias = true;
                     }
-                    openedForBatch = true;
+                    else openedForBatch = true;
                     LogOperation(string.Concat(
                         "Batch check-in SolidWorks open path=", node.FullPath,
                         " elapsedMs=", openTimer.ElapsedMilliseconds));
                 }
 
-                documentPath = document?.GetPathName() ?? string.Empty;
+                documentPath = readAlias ? node.FullPath : document?.GetPathName() ?? string.Empty;
                 if (document == null || !PathsEqual(documentPath, node.FullPath))
                 {
                     throw new IOException("未能安全加载待提交图档。");
@@ -10796,6 +10832,7 @@ public sealed partial class PdmAddin : ISwAddin
                 LogCheckInCheckpoint("properties-start", documentPath);
                 modelProperties = ReadArchiveProperties(document, node, nativePropertyCards);
                 LogCheckInCheckpoint("properties-end", documentPath);
+                if (readAlias) ValidateArchiveReadAlias(node, document);
                 if (node.Kind == CadDocumentKind.Drawing)
                 {
                     ValidateDrawingModelsSaved(node, initialSaveFlags);
@@ -11528,10 +11565,13 @@ public sealed partial class PdmAddin : ISwAddin
             configuration,
             ref openErrors,
             ref openWarnings);
-        LogOperation(string.Concat("Batch fallback OpenDoc6 end path=", fullPath, " errors=", openErrors, " warnings=", openWarnings, " null=", document == null));
+        LogOperation(string.Concat("Batch fallback OpenDoc6 end path=", fullPath, " actualPath=", document?.GetPathName(), " errors=", openErrors, " warnings=", openWarnings, " null=", document == null));
         if (readOnly) LogCheckInCheckpoint("open-end", fullPath);
         if (document == null)
         {
+            if (openErrors == (int)swFileLoadError_e.swFileWithSameTitleAlreadyOpen)
+                throw new ArchiveReadAliasConflictException("SolidWorks已有同名图档打开，当前无法安全读取预期文件：" + fullPath
+                    + "。原窗口已保留，请核对已打开的同名图档及其完整路径后重试。");
             throw new IOException(string.Concat(
                 Path.GetFileName(fullPath),
                 "未在当前装配中加载，SolidWorks静默读取失败。错误码：",

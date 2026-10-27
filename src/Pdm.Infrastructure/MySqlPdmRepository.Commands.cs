@@ -587,15 +587,19 @@ public sealed partial class MySqlPdmRepository
             """,
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken))
             ?? throw new PdmNotFoundException("发布包不存在。");
-        if (packageState.State is not ("ProcessReview" or "Approval" or "Rejected"))
-            throw new PdmConflictException("只有审批中或已退回的发布包可以撤回。");
+        if (packageState.State is not ("ProcessReview" or "Approval" or "Rejected" or "PublishFailed"))
+            throw new PdmConflictException("只有审批中、已退回或发布失败的发布包可以退回草稿。");
+        if (packageState.State == "PublishFailed" && await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
+                "SELECT EXISTS(SELECT 1 FROM document_version WHERE release_package_id=@PackageId AND version_status='Released')",
+                new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken)))
+            throw new PdmConflictException("此发布包已生成正式图档，请先核对发布结果，不能退回草稿。");
         var documentIds = string.IsNullOrWhiteSpace(packageState.RootJson) ? [] : DeserializeDocumentIds(packageState.RootJson);
         if (packageState.VersionBindingsJson is not null) documentIds = (JsonSerializer.Deserialize<ReleaseVersionBinding[]>(packageState.VersionBindingsJson, jsonOptions) ?? []).Where(item => item.Publish && item.RequiresPromotion).Select(item => item.DocumentId).ToArray();
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL,is_emergency_substitute=0,emergency_reason=NULL WHERE release_package_id=@PackageId",
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE release_package SET state='Draft',row_version=row_version+1 WHERE id=@PackageId",
+            "UPDATE release_package SET state='Draft',published_at=NULL,published_path=NULL,publish_error=NULL,preview_state='None',preview_error=NULL,preview_attempts=0,preview_updated_at=NULL,row_version=row_version+1 WHERE id=@PackageId",
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
         if (packageState.LocksDocuments && documentIds.Length > 0)
         {

@@ -415,6 +415,7 @@ export interface PdmSystemSettings {
   releaseChangeReasonLabels?: Record<string, string>
   formalSupplementPolicies?: FormalSupplementPolicies
   drawingQrPolicy?: DrawingQrPolicy
+  pdfTitleBlockFill?: { enabledFields: string[] }
   previewConversion?: PreviewConversionSettings
 }
 /** 图纸转换（2D转PDF、3D转STEP）的执行位置：Local=API服务器本机，Remote=独立转图电脑上的转图代理。 */
