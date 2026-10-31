@@ -1,4 +1,5 @@
 import { installGlobalScrollbars } from './globalScrollbars'
+import { installContainerBorders } from './containerBorders'
 import { installButtonTypography } from './buttonTypography'
 import { installButtonStyles } from './buttonStyles'
 import { installPanelHeaderActions } from './panelHeaderActions'
@@ -26,4 +27,5 @@ installDatePickers(app)
 installButtonTypography(app)
 installButtonStyles(app)
 installGlobalScrollbars(app)
+app.onUnmount(installContainerBorders())
 app.mount('#review-overlay-root')

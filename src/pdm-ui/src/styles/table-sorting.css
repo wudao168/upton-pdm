@@ -1,0 +1,55 @@
+/* 表头排序使用无外框小号实心上下三角，保留 Element Plus 的点击与键盘排序事件。 */
+:root body .el-table .caret-wrapper {
+  box-sizing: border-box;
+  display: inline-flex;
+  position: relative;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+  vertical-align: middle;
+}
+
+:root body .el-table .caret-wrapper:focus-visible::after {
+  content: '';
+  position: absolute;
+  left: 7px;
+  right: 7px;
+  bottom: 0;
+  height: 2px;
+  background: var(--pdm-theme-accent);
+  pointer-events: none;
+}
+
+:root body .el-table .caret-wrapper .sort-caret {
+  box-sizing: border-box;
+  left: 5px;
+  width: 14px;
+  height: 10px;
+  border: 0;
+  color: var(--pdm-muted);
+}
+
+:root body .el-table .sort-caret::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  width: 0;
+  height: 0;
+  box-sizing: border-box;
+  border: 4px solid transparent;
+  transform: scaleY(1.3);
+  pointer-events: none;
+}
+
+:root body .el-table .sort-caret.ascending { top: 1px; bottom: auto; }
+:root body .el-table .sort-caret.descending { top: auto; bottom: 1px; }
+:root body .el-table .sort-caret.ascending::before { top: 2px; border-bottom-color: currentColor; transform-origin: center bottom; }
+:root body .el-table .sort-caret.descending::before { top: -1px; border-top-color: currentColor; transform-origin: center top; }
+:root body .el-table .ascending .sort-caret.ascending,
+:root body .el-table .descending .sort-caret.descending { color: var(--pdm-theme-accent); }

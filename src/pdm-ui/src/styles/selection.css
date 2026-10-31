@@ -1,0 +1,77 @@
+/* 仅统一已有选择背景；不按通用状态属性给原本无背景的控件新增填充。
+   审批进度、库存预警、推荐项等业务状态色保留。主导航使用相反的白色选中底色。 */
+:root body :is(
+  .wr-project-list .wr-project.selected,
+  .pdm-project-family__list > button.is-active,
+  .pdm-project-table tr.is-current,
+  .pdm-project-classification [role="treeitem"].is-active,
+  .pdm-project-classification__company:has(> [role="treeitem"].is-active),
+  .pdm-tree-row.is-selected,
+  .el-tree--highlight-current .el-tree-node.is-current > .el-tree-node__content,
+  .pdm-document-filters button[aria-selected="true"],
+  .pdm-view-tabs button[aria-selected="true"],
+  .pdm-segmented button[aria-selected="true"],
+  .pdm-task-filters button[aria-selected="true"],
+  .pdm-force-release-reasons button[aria-pressed="true"],
+  .pdm-admin-tabs button.is-active,
+  .bom-tree-node__project.is-selected,
+  .bom-tree-node__category.is-selected,
+  .bom-inventory__existing-table tbody tr.is-selected td,
+  .bom-inventory__candidates .is-selected,
+  .pdm-export-options > label.is-selected,
+  .pdm-bom-display-control button.is-active,
+  .pdm-bom-release-history > button.is-active,
+  .pdm-material-relation-main-table tbody tr.is-selected td,
+  .pdm-material-relation-option-list tbody tr.is-selected:not(.is-preferred) td,
+  .pdm-reference-kind-switch .pdm-secondary-action.is-active,
+  .pdm-kit-reference-list tr.is-selected td,
+  .pdm-document-rules__categories button.is-active,
+  .drawing-review-candidate.is-selected,
+  .drawing-review-overview__row.is-active,
+  .pdm-login-scene-picker button[aria-pressed="true"],
+  .material-category-all.is-active,
+  .org-unassigned-button.is-active,
+  .production-drawings__project.is-selected,
+  .production-drawings__package.is-selected,
+  .production-drawings tbody tr.is-selected,
+  .production-scan-settings__node[aria-pressed="true"],
+  .production-suppliers__category-filter.is-active,
+  .production-workbench__project.selected,
+  .production-workbench__package.selected,
+  .production-workbench tbody tr.selected,
+  .production-workbench__lots button.selected,
+  .program-template-history button.is-active,
+  .pc-toolbar > .pc-controls > button[aria-pressed="true"],
+  .pc-grid .pc-day.selected,
+  .project-information__table .is-current,
+  .pdm-plan-zoom button.is-active,
+  .pdm-template-stage-parent.is-active,
+  .pdm-template-children > button.is-active,
+  .pdm-template-row.is-selected,
+  .pdm-approval-transfer-list > button.is-selected,
+  .pdm-permission-sidebar button.is-active,
+  .standard-library__all.is-active,
+  .all-category.active,
+  .standard-structure__all.is-active,
+  .standard-structure__file-filters button.is-active,
+  .all-categories.is-active,
+  .validation-selector aside > button.is-active,
+  .validation-catalog aside > button.is-active,
+  .wh-check-table .selected,
+  .wh-day.selected,
+  .wh-settings .wh-department-name.active,
+  .work-hours .wh-modes button.active
+) {
+  background: var(--pdm-selection-bg) !important;
+}
+
+/* Element Plus 原有的当前行高亮也使用同一底色，不启用新的行高亮。 */
+.el-table {
+  --el-table-current-row-bg-color: var(--pdm-selection-bg);
+}
+
+/* 原选中态使用白字的视图按钮，在浅色底下恢复原有的文字色。 */
+:root body .pc-toolbar > .pc-controls > button[aria-pressed="true"],
+:root body .work-hours .wh-modes button.active {
+  color: var(--pdm-text) !important;
+}

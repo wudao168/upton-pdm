@@ -46,6 +46,15 @@ const personalSettingsPending = ref(false)
 const profileForm = reactive({ nickname: '', gender: 'unspecified' as PdmUserProfile['gender'], landline: '', mobilePhone: '', email: '' })
 const passwordForm = reactive({ currentPassword: '', password: '', confirmPassword: '' })
 let headerClockTimer: number | undefined
+const titlebarElement = ref<HTMLElement>()
+let titlebarObserver: ResizeObserver | undefined
+function syncTitlebarHeight() {
+  const height = Math.ceil(titlebarElement.value?.getBoundingClientRect().height ?? 0)
+  const shell = titlebarElement.value?.closest<HTMLElement>('.pdm-app-shell')
+  if (height > 0 && shell?.style.getPropertyValue('--pdm-titlebar-measured-height') !== `${height}px`) {
+    shell?.style.setProperty('--pdm-titlebar-measured-height', `${height}px`)
+  }
+}
 
 const roleNames: Record<string, string> = {
   Engineer: '机械工程师',
@@ -145,16 +154,22 @@ async function submitPassword() {
 }
 
 onMounted(() => {
+  syncTitlebarHeight()
+  if (titlebarElement.value && typeof ResizeObserver !== 'undefined') {
+    titlebarObserver = new ResizeObserver(syncTitlebarHeight)
+    titlebarObserver.observe(titlebarElement.value)
+  }
   headerClockTimer = window.setInterval(() => { headerNow.value = new Date() }, 1_000)
 })
 
 onUnmounted(() => {
+  titlebarObserver?.disconnect()
   if (headerClockTimer !== undefined) window.clearInterval(headerClockTimer)
 })
 </script>
 
 <template>
-  <header class="pdm-titlebar" role="banner">
+  <header ref="titlebarElement" class="pdm-titlebar" role="banner">
     <div class="pdm-titlebar__left">
       <button
         v-if="props.userName"
@@ -165,8 +180,12 @@ onUnmounted(() => {
         :aria-expanded="!props.sidebarCollapsed"
         @click="emit('toggleSidebar')"
       >
-        <ChevronRight v-if="props.sidebarCollapsed" :size="16" aria-hidden="true" />
-        <ChevronLeft v-else :size="16" aria-hidden="true" />
+        <span class="pdm-titlebar__toggle-box" aria-hidden="true">
+          <span v-for="copy in 2" :key="copy" class="pdm-titlebar__toggle-arrow">
+            <ChevronRight v-if="props.sidebarCollapsed" :size="14" />
+            <ChevronLeft v-else :size="14" />
+          </span>
+        </span>
       </button>
       <el-dropdown v-if="props.accessibleCompanies.length > 1" trigger="click" @command="emit('company', String($event))">
         <button type="button" class="pdm-tenant-company pdm-company-switcher" :title="props.companyName" aria-label="切换当前公司">

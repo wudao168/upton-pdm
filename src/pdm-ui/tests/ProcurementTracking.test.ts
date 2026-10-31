@@ -13,6 +13,8 @@ const api = vi.hoisted(() => ({
   listBom: vi.fn(),
   refreshProjectProcurementTracking: vi.fn(),
   listMaterialInventory: vi.fn(),
+  readProcurementFiles: vi.fn(),
+  readProcurementFileBlob: vi.fn(),
 }))
 
 vi.mock('../src/api', () => api)
@@ -48,6 +50,7 @@ describe('ProcurementTracking', () => {
     window.localStorage.clear()
     api.listMaterialInventory.mockReset().mockResolvedValue({ items: [], total: 0, lastSuccessfulRefreshAt: '2026-09-08T01:00:00Z' })
     api.listBom.mockReset().mockResolvedValue([])
+    api.readProcurementFiles.mockReset().mockResolvedValue([])
     api.getProjectProcurementTracking.mockResolvedValue({
       projectId: 'project-1', projectCode: 'P701911', subprojectCode: 'P701911-1', hasPublishedBom: true,
       lastSuccessfulRefreshAt: '2026-09-07T01:02:03Z', lastRefreshError: null,
@@ -66,6 +69,37 @@ describe('ProcurementTracking', () => {
       }],
     })
     api.refreshProjectProcurementTracking.mockResolvedValue({ message: '只读刷新已启动' })
+  })
+
+  it('列设置可添加图纸附件，采购只读已发布文件并保留个人设置', async () => {
+    const base = await api.getProjectProcurementTracking()
+    const files = ['Drawing2D','Model3D','Document'].map((kind,index) => ({ id: `file-${index}`, materialId: 'material', kind, fileName: ['采购图纸.pdf','采购模型.step','技术协议.pdf'][index]!, versionNumber: kind === 'Document' ? 0 : 1, fileLength: 10, sha256: 'A'.repeat(64), uploadedBy: '标准化', uploadedAt: '', source: '标准物料', purpose: kind === 'Document' ? '技术协议' : '图纸' }))
+    api.getProjectProcurementTracking.mockResolvedValue({ ...base, items: [{ ...base.items[0], files }] })
+    api.readProcurementFiles.mockResolvedValue(files)
+    api.listBom.mockResolvedValue([{ drawingNumber: base.items[0].materialCode, files: [{ ...files[0], id: 'latest-only', fileName: '未发布新版.pdf', versionNumber: 2 }] }])
+    const options = { props: { projectId: 'project-1', token: 'token', username: 'buyer' }, global: { plugins: [ElementPlus], stubs: { teleport: true } } }
+    let wrapper = mount(ProcurementTracking, options)
+    await flushPromises()
+    expect(wrapper.findAll('.el-table__header-wrapper th').map(th => th.text())).not.toContain('图纸附件')
+    await wrapper.findAll('button').find(button => button.text() === '列设置')!.trigger('click'); await flushPromises()
+    const option = wrapper.findAll('.procurement-tracking__column-list .el-checkbox').find(label => label.text() === '图纸附件')!
+    await option.get('input').setValue(true)
+    await wrapper.findAll('button').find(button => button.text() === '保存')!.trigger('click'); await flushPromises()
+    expect(wrapper.findAll('.el-table__header-wrapper th').map(th => th.text())).toContain('图纸附件')
+    await wrapper.get('[aria-label="01020000089 · 图纸附件"]').trigger('click'); await flushPromises()
+    expect(api.readProcurementFiles).toHaveBeenCalledWith('project-1', '01020000089', 'token')
+    const dialog = wrapper.findComponent({ name: 'BomFilesDialog' })
+    expect(dialog.text()).toContain('采购图纸.pdf')
+    expect(dialog.text()).toContain('3D模型')
+    expect(dialog.text()).toContain('技术协议')
+    expect(dialog.text()).not.toContain('未发布新版.pdf')
+    expect(dialog.find('input[type=file]').exists()).toBe(false)
+    expect(dialog.findAll('button').some(button => ['移除','采用当前启用版本及资料'].includes(button.text()))).toBe(false)
+    expect(window.localStorage.getItem('upton-pdm:procurement-columns:buyer')).toContain('files')
+    wrapper.unmount()
+    wrapper = mount(ProcurementTracking, options); await flushPromises()
+    expect(wrapper.findAll('.el-table__header-wrapper th').map(th => th.text())).toContain('图纸附件')
+    wrapper.unmount()
   })
 
   it('非标件仅查询制造数据，批次可展开，导出合格领用口径且刷新不访问U9C',async()=>{

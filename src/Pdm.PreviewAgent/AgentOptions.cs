@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Security.Cryptography;
 using System.Web.Script.Serialization;
@@ -21,6 +22,7 @@ public sealed class AgentOptions
     public bool StartWithWindows { get; set; } = true;
     public bool ShowMainWindow { get; set; } = true;
     public bool CloseToTray { get; set; } = true;
+    public bool DedicatedConversionHost { get; set; }
     internal string DataDirectory { get; set; }
 
     public string BindAddress { get; set; } = "0.0.0.0";
@@ -38,6 +40,7 @@ public sealed class AgentOptions
 
     /// <summary>追加给转换程序的参数（预留，默认无）。</summary>
     public List<string> WorkerArguments { get; set; } = new List<string>();
+    internal IEnumerable<string> ConversionArguments => WorkerArguments.Concat(DedicatedConversionHost ? new[] { "--dedicated-host" } : Array.Empty<string>());
 
     public static AgentOptions Load(string[] args)
     {
@@ -67,6 +70,7 @@ public sealed class AgentOptions
                 options.StartWithWindows = json.StartWithWindows;
                 options.ShowMainWindow = json.ShowMainWindow;
                 options.CloseToTray = json.CloseToTray;
+                options.DedicatedConversionHost = json.DedicatedConversionHost;
             }
         }
         var preferences = Path.Combine(options.DataDirectory, "settings.json");

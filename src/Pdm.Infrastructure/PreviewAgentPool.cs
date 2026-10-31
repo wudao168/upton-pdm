@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using Upton.Pdm.Domain;
+using Upton.Pdm.Application;
 
 namespace Upton.Pdm.Infrastructure;
 
@@ -12,7 +13,7 @@ public static class PreviewAgentPool
     public static object Snapshot() => new { executing = Active.Select(pair => new { server = pair.Key, task = pair.Value }).ToArray(), queued = Waiting.Values.ToArray() };
 
     public static async Task<Lease> AcquireAsync(PreviewConversionSettings settings, string task,
-        HttpClient client, CancellationToken cancellationToken)
+        HttpClient client, CancellationToken cancellationToken, bool waitForServer = true)
     {
         var servers = settings.Servers.Count > 0 ? settings.Servers
             : [new PreviewAgentServer(settings.AgentUrl, settings.AgentUrl, settings.AgentToken, settings.TimeoutMinutes)];
@@ -43,6 +44,7 @@ public static class PreviewAgentPool
                     catch (Exception exception) when (exception is HttpRequestException || exception is OperationCanceledException || exception is JsonException) { }
                     Active.TryRemove(url, out _);
                 }
+                if (!waitForServer) throw new PreviewServerUnavailableException("转图服务器离线、忙碌或转换程序尚未就绪，等待恢复后自动重试。");
                 await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
             }
         }

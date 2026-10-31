@@ -17,6 +17,7 @@ internal sealed class PluginSettingsDialog : Form
     private readonly Label lastCheckedAt = new Label();
     private readonly ProgressBar updateProgress = new ProgressBar();
     private readonly CheckBox automaticUpdates = new CheckBox();
+    private readonly CheckBox blockMissingReferences = new CheckBox();
     private readonly ComboBox plannedTaskScrollInterval = new ComboBox();
     private readonly Button checkUpdateButton = new Button();
     private readonly Button installUpdateButton = new Button();
@@ -24,6 +25,11 @@ internal sealed class PluginSettingsDialog : Form
     private readonly Button cancelButton = new Button();
     private readonly Button cleanupCopiesButton = new Button();
     private readonly Label cleanupCopiesStatus = new Label();
+    private readonly Label cacheUsage = new Label();
+    private readonly NumericUpDown cacheLimit = new NumericUpDown();
+    private readonly Button cleanupCacheButton = new Button();
+    public Func<Task<ControlledCacheUsage>> ReadCacheUsage { get; set; }
+    public Func<Task<ControlledCacheUsage>> CleanControlledCache { get; set; }
     private Func<Task<ArchiveTemporaryCopyCleanupResult>> cleanTemporaryCopies;
     private readonly Timer refreshTimer = new Timer();
     private readonly Func<PluginUpdateSnapshot> readSnapshot;
@@ -62,7 +68,7 @@ internal sealed class PluginSettingsDialog : Form
         MaximizeBox = false;
         ShowInTaskbar = false;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(540, 720);
+        ClientSize = new Size(540, 820);
         Font = new Font("Microsoft YaHei UI", 9F);
 
         var root = new TableLayoutPanel
@@ -73,9 +79,9 @@ internal sealed class PluginSettingsDialog : Form
             RowCount = 5
         };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 145F));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 104F));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 120F));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 220F));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
         Controls.Add(root);
 
@@ -133,8 +139,10 @@ internal sealed class PluginSettingsDialog : Form
         connectionLayout.Controls.Add(addressHint, 0, 2);
         root.Controls.Add(connectionGroup, 0, 0);
 
-        var taskGroup = new GroupBox { Text = "任务计划显示", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 6) };
-        var taskLayout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(10, 5, 10, 5), ColumnCount = 3, RowCount = 1 };
+        var taskGroup = new GroupBox { Text = "任务计划与存档选项", Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 6) };
+        var taskLayout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(10, 5, 10, 5), ColumnCount = 3, RowCount = 2 };
+        taskLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
+        taskLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
         taskLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130F));
         taskLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100F));
         taskLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
@@ -147,6 +155,13 @@ internal sealed class PluginSettingsDialog : Form
         plannedTaskScrollInterval.Margin = Padding.Empty;
         plannedTaskScrollInterval.AccessibleName = "任务滚动间隔";
         taskLayout.Controls.Add(plannedTaskScrollInterval, 1, 0);
+        blockMissingReferences.Text = "存档警告由管理员在系统管理中统一配置";
+        blockMissingReferences.Enabled = false;
+        blockMissingReferences.AccessibleName = "引用缺失时阻止存档";
+        blockMissingReferences.Checked = ArchiveMissingReferencePolicy.BlockMissingReferences;
+        blockMissingReferences.Dock = DockStyle.Fill;
+        taskLayout.Controls.Add(blockMissingReferences, 0, 1);
+        taskLayout.SetColumnSpan(blockMissingReferences, 3);
         taskGroup.Controls.Add(taskLayout);
         root.Controls.Add(taskGroup, 0, 1);
 
@@ -201,10 +216,13 @@ internal sealed class PluginSettingsDialog : Form
         updateLayout.SetColumnSpan(updateActions, 3);
         root.Controls.Add(updateGroup, 0, 2);
 
-        var cleanupGroup = new GroupBox { Text = "存档临时副本", Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 0) };
-        var cleanupLayout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(10, 8, 10, 6), ColumnCount = 2, RowCount = 3 };
+        var cleanupGroup = new GroupBox { Text = "本地副本与缓存", Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 0) };
+        var cleanupLayout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(10, 8, 10, 6), ColumnCount = 2, RowCount = 6 };
         cleanupLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
         cleanupLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96F));
+        cleanupLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
+        cleanupLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 22F));
+        cleanupLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
         cleanupLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
         cleanupLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 22F));
         cleanupLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
@@ -225,6 +243,22 @@ internal sealed class PluginSettingsDialog : Form
         cleanupCopiesStatus.ForeColor = Color.FromArgb(95, 108, 124);
         cleanupLayout.Controls.Add(cleanupCopiesStatus, 0, 2);
         cleanupLayout.SetColumnSpan(cleanupCopiesStatus, 2);
+        var limitRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
+        limitRow.Controls.Add(new Label { Text = "缓存上限（GB）", AutoSize = true, Margin = new Padding(0, 5, 4, 0) });
+        cacheLimit.Minimum = 1; cacheLimit.Maximum = 1024; cacheLimit.Width = 70;
+        initialSettings.Normalize(); cacheLimit.Value = initialSettings.CacheLimitGigabytes;
+        cacheLimit.AccessibleName = "缓存容量上限（GB）"; limitRow.Controls.Add(cacheLimit);
+        cleanupLayout.Controls.Add(limitRow, 0, 3);
+        cleanupCacheButton.Text = "清理缓存"; cleanupCacheButton.AccessibleName = "安全清理受控缓存";
+        ConfigureDialogButton(cleanupCacheButton); cleanupCacheButton.Margin = Padding.Empty;
+        cleanupCacheButton.Click += async (_, _) => await RunCacheActionAsync(true);
+        cleanupLayout.Controls.Add(cleanupCacheButton, 1, 3);
+        cleanupLayout.Controls.Add(new Label { Text = "编辑中、含修改及其所需引用自动保留", Dock = DockStyle.Fill,
+            ForeColor = Color.FromArgb(95, 108, 124) }, 0, 4); cleanupLayout.SetColumnSpan(cleanupLayout.GetControlFromPosition(0, 4), 2);
+        cacheUsage.Text = "正在统计缓存占用…"; cacheUsage.Dock = DockStyle.Fill;
+        cacheUsage.ForeColor = Color.FromArgb(95, 108, 124);
+        cleanupLayout.Controls.Add(cacheUsage, 0, 5); cleanupLayout.SetColumnSpan(cacheUsage, 2);
+        Shown += async (_, _) => await RunCacheActionAsync(false);
         cleanupGroup.Controls.Add(cleanupLayout);
         root.Controls.Add(cleanupGroup, 0, 3);
 
@@ -329,6 +363,23 @@ internal sealed class PluginSettingsDialog : Form
         finally { if (!IsDisposed) SetActionRunning(false); }
     }
 
+    private async Task RunCacheActionAsync(bool clean)
+    {
+        var action = clean ? CleanControlledCache : ReadCacheUsage;
+        if (actionRunning || action == null) return;
+        if (clean) SetActionRunning(true);
+        cleanupCacheButton.Enabled = false;
+        cacheUsage.Text = clean ? "正在核对并清理可删除的缓存…" : "正在统计缓存占用…";
+        try { var result = await action(); if (!IsDisposed) cacheUsage.Text = result.Message; }
+        catch (Exception error)
+        {
+            PluginDiagnosticLog.Record("本地缓存管理", error.ToString());
+            if (!IsDisposed) cacheUsage.Text = error is InvalidOperationException && error.Message.StartsWith("当前有图档操作", StringComparison.Ordinal)
+                ? error.Message : "缓存未能完成核对，文件已保留，请稍后重试。";
+        }
+        finally { if (!IsDisposed) { if (clean) SetActionRunning(false); else cleanupCacheButton.Enabled = !actionRunning && CleanControlledCache != null; } }
+    }
+
     private async Task RunUpdateActionAsync(bool install)
     {
         if (actionRunning) return;
@@ -367,6 +418,8 @@ internal sealed class PluginSettingsDialog : Form
                     : plannedTaskScrollInterval.SelectedIndex == 2 ? 60 : 30,
                 ServerAddress = serverAddress.Text,
                 AutomaticUpdatesEnabled = automaticUpdates.Checked,
+                CacheLimitGigabytes = (int)cacheLimit.Value,
+                BlockArchiveOnMissingReferences = blockMissingReferences.Checked,
             });
             connectionStatus.ForeColor = Color.FromArgb(0, 128, 96);
             connectionStatus.Text = result?.Message ?? "设置已保存";
@@ -390,6 +443,8 @@ internal sealed class PluginSettingsDialog : Form
         serverAddress.Enabled = !running;
         automaticUpdates.Enabled = !running;
         plannedTaskScrollInterval.Enabled = !running;
+        cacheLimit.Enabled = !running;
+        cleanupCacheButton.Enabled = !running && CleanControlledCache != null;
         testConnectionButton.Enabled = !running;
         checkUpdateButton.Enabled = !running;
         saveButton.Enabled = !running;

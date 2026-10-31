@@ -71,7 +71,9 @@ describe('StandardLibrary', () => {
     const wrapper = assetPreviewWrapper = mount(StandardLibrary, { attachTo: document.body, props: { token: 'token', canManage: true, canEdit: true }, global: { plugins: [ElementPlus], stubs: { PdfDrawingViewer: { props: ['url'], template: '<div class="test-pdf-preview">{{ url }}</div>' } } } })
     await flushPromises()
     const icons = wrapper.findAll('.material-list-table button[aria-label]')
-    expect(icons.filter(icon => /份资料|个3D文件/.test(icon.attributes('aria-label') ?? ''))).toHaveLength(2)
+    expect(icons.filter(icon => /份资料/.test(icon.attributes('aria-label') ?? ''))).toHaveLength(1)
+    expect(wrapper.get(`button[aria-label="${material.materialCode} · 3D模型版本"]`).text()).toBe('未启用')
+    expect(wrapper.get(`button[aria-label="${material.materialCode} · 2D图纸版本"]`).text()).toBe('维护')
     const documentIcon = wrapper.get(`button[aria-label="${material.materialCode} · 1 份资料"]`)
     expect(documentIcon.text()).toBe('')
     expect(documentIcon.find('svg').exists()).toBe(true)
@@ -679,6 +681,30 @@ describe('StandardLibrary', () => {
     expect(api.importStandardLibraryMaterials).toHaveBeenCalledWith(['01020000001', 'missing'], 'token')
     expect(document.body.textContent).toContain('ERP轴承'); expect(document.body.textContent).toContain('ERP中未找到该料号')
     expect(document.body.textContent).toContain('已导入 1 个，已存在 0 个，失败 1 个')
+    wrapper.unmount()
+  })
+
+  it('标准化在料品明细的3D上方上传2D新版本，不自动启用或覆盖旧图', async () => {
+    const activeMaterial = { ...material, isArchived: false }
+    api.listStandardLibraryMaterials.mockResolvedValue({ items: [{ material: activeMaterial, categories: [], coverImage: null }], total: 1, page: 1, pageSize: 50 })
+    const old = { id: 'old-2d', materialId: material.id, kind: 'Drawing2D', originalFileName: '旧图.pdf', versionNumber: 1, isEnabled: true }
+    const uploaded = { ...old, id: 'new-2d', originalFileName: '新图.pdf', versionNumber: 2, isEnabled: false }
+    api.listMaterialAttachments.mockResolvedValueOnce([old])
+    api.uploadMaterialAttachment.mockResolvedValueOnce(uploaded)
+    const wrapper = assetPreviewWrapper = mount(StandardLibrary, { attachTo: document.body, props: { token: 'token', canManage: true, canEdit: true }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    wrapper.getComponent({ name: 'ElTable' }).vm.$emit('selection-change', [{ material: activeMaterial, categories: [], coverImage: null }]); await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === '维护')!.trigger('click'); await flushPromises()
+    const editor = wrapper.getComponent({ name: 'MaterialEditorDialog' })
+    expect(editor.props('canManageDrawings')).toBe(true)
+    expect(editor.findAll('.material-editor-file-list').map(section => section.attributes('aria-label'))).toEqual(['2D图纸附件', '3D附件', '资料附件'])
+    const input = editor.get('[aria-label="选择2D附件"]'), file = new File(['drawing'], '新图.pdf')
+    Object.defineProperty(input.element,'files',{value:[file],configurable:true})
+    await input.trigger('change'); await flushPromises()
+    expect(api.uploadMaterialAttachment).toHaveBeenCalledWith(material.id, 'Drawing2D', file, 'token', expect.any(Function))
+    expect(editor.props('attachments')).toEqual([uploaded, old])
+    expect(editor.get('[aria-label="2D图纸附件"]').text()).toContain('V01 · 已启用')
+    expect(editor.get('[aria-label="2D图纸附件"]').text()).toContain('V02')
     wrapper.unmount()
   })
 

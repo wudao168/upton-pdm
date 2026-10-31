@@ -50,6 +50,10 @@ export interface ProjectSummary {
   documentCount?: number
   modelDocumentCount?: number
   drawingDocumentCount?: number
+  hasUnreceivedNonStandardRelease?: boolean
+  latestPurchasedBomPublishedAt?: string
+  hasReleaseAttention?: boolean
+  latestPublishedAt?: string
   businessStatus?: string
   rootDocumentCheckedOutBy?: string
   canAssignExecutionUnit: boolean
@@ -420,7 +424,7 @@ export interface PdmSystemSettings {
 }
 /** 图纸转换（2D转PDF、3D转STEP）的执行位置：Local=API服务器本机，Remote=独立转图电脑上的转图代理。 */
 export type PreviewConversionMode = 'Local' | 'Remote'
-export interface PreviewConversionSettings { mode: PreviewConversionMode; agentUrl: string; agentToken: string; timeoutMinutes: number; servers?: { name: string; agentUrl: string; agentToken: string; timeoutMinutes: number }[] }
+export interface PreviewConversionSettings { mode: PreviewConversionMode; agentUrl: string; agentToken: string; timeoutMinutes: number; servers?: { name: string; agentUrl: string; agentToken: string; timeoutMinutes: number; companyId?: string | null }[] }
 export interface PreviewAgentProbeResult { ok: boolean; message: string; machine?: string | null; workerExists?: boolean | null; workerPath?: string | null }
 export interface MaterialCodeApprovalSettings { version: number; approverRoleCodes: string[] }
 export interface FormalSupplementPolicy { maximumCount?: number | null; validDays?: number | null }
@@ -465,7 +469,7 @@ export interface PermissionDefinition {
   module: string
   description?: string | null
   sensitive: boolean
-  action?: 'view' | 'create' | 'edit' | 'delete' | 'other'
+  action?: 'view' | 'create' | 'edit' | 'delete' | 'notify' | 'other'
   scope?: 'system' | 'project'
   projectAuthorization?: 'role' | 'position' | 'budget'
   dependencies?: string[]
@@ -715,6 +719,8 @@ export interface EditLockSummary {
 }
 
 export interface BomItem {
+  files?: import('./bomFiles').BomFileReference[] | null
+  nameplateContent?: import('./projectNameplate').NameplateContent | null
   displayRevision?: string
   maintainedItem?: BomItem
   summaryItemIds?: string[]
@@ -1037,7 +1043,7 @@ export interface ReleaseItemComment {
   createdAt: string
 }
 
-export type ReleaseScope = 'LegacyCombined' | 'StandardLongLead' | 'StandardFormal' | 'StandardSupplement' | 'ElectricalFormal' | 'ElectricalSupplement' | 'NonStandardWithDrawing' | 'NonStandardLongLead' | 'NonStandardSupplement' | 'ElectricalLongLead'
+export type ReleaseScope = 'LegacyCombined' | 'StandardLongLead' | 'StandardFormal' | 'StandardSupplement' | 'ElectricalFormal' | 'ElectricalSupplement' | 'NonStandardWithDrawing' | 'NonStandardLongLead' | 'NonStandardSupplement' | 'ElectricalLongLead' | 'Nameplate'
 export type DrawingPriority = 'Normal' | 'Priority' | 'Urgent'
 export interface DrawingDeliveryOverride { priority: DrawingPriority; requiredOn: string }
 export interface ProductionDrawingModelFile {
@@ -1364,9 +1370,13 @@ export type MaterialApprovalStatus = 'Draft' | 'Approved'
 export type MaterialSyncStatus = 'NotQueued' | 'PreviewReady' | 'Pending' | 'Succeeded' | 'Failed' | 'NeedsReview' | 'Superseded'
 export type MaterialDataSource = 'Pdm' | 'U9C'
 export type MaterialMasterOwner = 'Pdm' | 'U9C'
-export type MaterialAttachmentKind = 'Model3D' | 'Document' | 'CoverImage'
+export type MaterialAttachmentKind = 'Model3D' | 'Document' | 'CoverImage' | 'Drawing2D'
 
 export interface MaterialAttachment {
+  versionNumber?: number
+  isEnabled?: boolean
+  enabledBy?: string | null
+  enabledAt?: string | null
   id: string
   materialId: string
   kind: MaterialAttachmentKind
@@ -1378,6 +1388,9 @@ export interface MaterialAttachment {
 }
 
 export interface PdmMaterial {
+  drawing2DAttachmentCount?: number
+  enabledDrawing2DVersion?: number | null
+  enabledModel3DVersion?: number | null
   id: string
   materialCode: string
   name: string
@@ -1537,6 +1550,7 @@ export interface MaterialRelationRevision {
 }
 
 export interface MaterialRelationTemplate {
+  standardLibraryCategories?: StandardLibraryCategory[]
   id: string
   mainMaterialId: string
   mainMaterialCode: string
@@ -1613,6 +1627,7 @@ export interface MaterialRelationCompleteness {
 }
 
 export interface StandardLibraryMaterial {
+  relation?: MaterialRelationTemplate | null
   kit?: EngineeringKit | null
   material: PdmMaterial
   categories: StandardLibraryCategory[]
@@ -2258,6 +2273,7 @@ export interface WarehouseMovementDetail {
 }
 
 export interface ProjectProcurementTrackingItem {
+  files?: import('./bomFiles').BomFileReference[]
   sequence: number
   projectCode: string
   subprojectCode?: string | null

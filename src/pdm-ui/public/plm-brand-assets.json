@@ -5,12 +5,12 @@
     "sha256": "bc29d3f1bc53a0389ab8d92ef7fc953c40bf33a005c8da33ce171211605dd8b0"
   },
   "wordmark": {
-    "path": "src/pdm-ui/src/assets/upton-wordmark.png",
-    "sha256": "108c87a80e6611da314b3da0ffeaabe169ed20a51fccb41807fafc70a6294b43"
+    "path": "src/pdm-ui/src/assets/upton-full-brand.svg",
+    "sha256": "a0da08ea8ae38b7adb8377af259c4f40b2a86aaeb107d0d87770127b22f26328"
   },
   "generator": {
     "path": "src/pdm-ui/tools/generate-plm-icon-assets.cjs",
-    "sha256": "249150c80fb7e6a6f1fda0c13d1f7a91d5b944ff0af82b5342279a566e399f9b"
+    "sha256": "48e27f58386bb4619bf338fa81043cdd9a93f7b094f53ace339566cca58aca29"
   },
   "bounds": {
     "left": 123,
@@ -25,8 +25,9 @@
   },
   "navigation": {
     "gapCssPixels": 7.251748251748252,
-    "wordmarkScale": 0.8,
-    "wordmarkHeightCssPixels": 12.330069930069932,
+    "color": "#000000",
+    "fullBrand": true,
+    "wordmarkHeightCssPixels": 37.46853146853147,
     "groupCentered": false
   },
   "outputs": [
@@ -60,15 +61,15 @@
     },
     {
       "path": "src/pdm-ui/src/assets/upton-nav-icon.png",
-      "sha256": "affb204b493c807f01bcb7c76a3870d3ce611dafdb2d8fda70892acb0246a07f"
+      "sha256": "3f19d33915bf35262123100c9d0f33d1a31dd044d504466479ef8beeda5b08b7"
     },
     {
       "path": "src/pdm-ui/src/assets/upton-nav-lockup.svg",
-      "sha256": "95b0ad1eca3edb09e8930fd2250ed266ab70c04beff7a679b451278cfff5f472"
+      "sha256": "45bfc55761e7faa06fe751f59384452c2df5fdeadebf6df3d5369206baaddf1e"
     },
     {
       "path": "src/pdm-ui/src/assets/upton-nav-lockup.png",
-      "sha256": "a4164cc27383fe624a5afc2db34e36325017e26b90ba27ed46109a555b976b77"
+      "sha256": "d3fabc2947d05dbe83cf7fcb6b6e38819625c65da925dd560dc2dd7b0fc33c50"
     }
   ]
 }

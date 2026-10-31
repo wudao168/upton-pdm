@@ -214,7 +214,7 @@ describe('ProductionDrawingCenter', () => {  it('shows progress and blocks repea
     await wrapper.get('input[aria-label="全选本包图纸"]').setValue(true)
     await wrapper.findAll('.production-drawings__selection button')[0].trigger('click')
     await flushPromises()
-    expect(download).toHaveBeenCalledWith('project', ['current'], 'Step', 'token', 'RP-2', expect.any(Function))
+    expect(download).toHaveBeenCalledWith('project', ['current'], 'Step', 'token', 'RP-2', expect.any(Function), [expect.objectContaining({ versionId: 'current', releasePackageId: 'package' })])
     await wrapper.findAll('.production-drawings__selection button')[1].trigger('click')
     expect(download).toHaveBeenCalledTimes(1)
     expect(wrapper.get('[role="alert"]').text()).toContain('PDF 待转换')

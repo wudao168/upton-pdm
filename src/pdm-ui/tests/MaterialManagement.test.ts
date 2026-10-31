@@ -8,8 +8,12 @@ import type { PdmMaterial } from '../src/types'
 const api = vi.hoisted(() => ({
   listMaterials: vi.fn(),
   listMaterialPage: vi.fn(),
+  listMaterialBrands: vi.fn(),
   listPendingMasterMaterials: vi.fn(),
   listMaterialRelationTemplates: vi.fn(),
+  listMaterialRelationCategories: vi.fn(),
+  getMaterialRelationCategories: vi.fn(),
+  assignMaterialRelationCategory: vi.fn(),
   saveMaterialRelationTemplate: vi.fn(),
   publishMaterialRelationTemplate: vi.fn(),
   listEngineeringKits: vi.fn(),
@@ -62,6 +66,8 @@ vi.mock('../src/api', () => api)
 describe('MaterialManagement', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    api.listMaterialRelationCategories.mockResolvedValue([])
+    api.getMaterialRelationCategories.mockResolvedValue([])
     api.listMaterials.mockResolvedValue([{
       id: 'material-1', materialCode: 'EL-001', name: '光电传感器', kind: 'Electrical', supplyMode: 'Purchase',
       unitCode: '001', specification: 'M18', material: 'PBT', brand: '欧姆龙', surfaceTreatment: '无', purchaseLink: 'https://shop.example.test/item/EL-001', weight: 0.15, weightUnit: 'kg', remark: '测试备注',
@@ -69,6 +75,8 @@ describe('MaterialManagement', () => {
       createdAt: '2026-08-17T00:00:00Z', updatedBy: 'admin', updatedAt: '2026-08-17T00:00:00Z', rowVersion: 1,
       isArchived: false, u9SyncConfirmed: false, referenceCount: 3,
     }])
+    api.listMaterialBrands.mockImplementation(async (_token, query = '') => ['欧姆龙', 'SMC', '费斯托']
+      .filter(brand => brand.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())))
     api.listMaterialPage.mockImplementation(async (_token, input = {}) => {
       const source = await api.listMaterials() as PdmMaterial[]
       const normalizedQuery = input.query?.trim().toLocaleLowerCase() || ''
@@ -132,6 +140,69 @@ describe('MaterialManagement', () => {
       isPdmMaster: true, localDeletePreconditionsPassed: true, u9ReferenceCheckAvailable: false,
       synchronizedDeleteAvailable: false, decision: 'PLM未发现引用；U9C引用查询合同尚未验证，同步删除保持关闭。',
     }))
+  })
+
+  it('品牌筛选独立查询全部品牌，已选品牌不限制下一次候选', async () => {
+    const wrapper = mount(MaterialManagement, {
+      props: { token: 'token', canEdit: true, canApprove: false, canManageIntegration: false },
+      global: { plugins: [ElementPlus] },
+    })
+    try {
+      await flushPromises()
+      const select = wrapper.findAllComponents({ name: 'ElSelect' }).find(select => select.classes().includes('material-brand-filter'))!
+      expect(select.props('remote')).toBe(true)
+      const search = select.props('remoteMethod') as (query: string) => Promise<void>
+      await search('SMC');await flushPromises()
+      expect(api.listMaterialBrands).toHaveBeenLastCalledWith('token', 'SMC')
+      expect(select.findAllComponents({ name: 'ElOption' }).map(option => option.props('value'))).toEqual(['SMC'])
+      select.vm.$emit('update:modelValue', '欧姆龙')
+      await wrapper.get('.material-toolbar__search-button').trigger('click');await flushPromises()
+      select.vm.$emit('visible-change', true);await flushPromises()
+      expect(api.listMaterialBrands).toHaveBeenLastCalledWith('token', '')
+      expect(select.findAllComponents({ name: 'ElOption' }).map(option => option.props('value'))).toEqual(['欧姆龙', 'SMC', '费斯托'])
+      expect(select.props('modelValue')).toBe('欧姆龙')
+    } finally { wrapper.unmount() }
+  })
+
+  it('品牌筛选打字和选择时保留当前页，点击搜索后才按新品牌查询第一页', async () => {
+    const base = (await api.listMaterials())[0]
+    api.listMaterialPage.mockImplementation(async (_token, input = {}) => ({ items: [base], total: 150, page: input.page || 1, pageSize: 50 }))
+    const wrapper = mount(MaterialManagement, {
+      props: { token: 'token', canEdit: true, canApprove: false, canManageIntegration: false },
+      global: { plugins: [ElementPlus] },
+    })
+    try {
+      await flushPromises()
+      const pagination = wrapper.getComponent({ name: 'ElPagination' })
+      pagination.vm.$emit('update:currentPage', 3);await flushPromises()
+      const calls = api.listMaterialPage.mock.calls.length
+      const select = wrapper.findAllComponents({ name: 'ElSelect' }).find(select => select.classes().includes('material-brand-filter'))!
+      const search = select.props('remoteMethod') as (query: string) => Promise<void>
+      await search('SM');await flushPromises()
+      select.vm.$emit('update:modelValue', 'SMC');await flushPromises()
+      expect(pagination.props('currentPage')).toBe(3)
+      expect(api.listMaterialPage).toHaveBeenCalledTimes(calls)
+      await wrapper.get('.material-toolbar__search-button').trigger('click');await flushPromises()
+      expect(api.listMaterialPage).toHaveBeenLastCalledWith('token', expect.objectContaining({ brand: 'SMC', page: 1 }), expect.anything())
+    } finally { wrapper.unmount() }
+  })
+
+  it('品牌筛选忽略晚到的旧候选，快速输入后保留最新搜索结果', async () => {
+    const wrapper = mount(MaterialManagement, {
+      props: { token: 'token', canEdit: true, canApprove: false, canManageIntegration: false },
+      global: { plugins: [ElementPlus] },
+    })
+    try {
+      await flushPromises()
+      let finishOld!: (brands: string[]) => void
+      api.listMaterialBrands.mockReturnValueOnce(new Promise<string[]>(resolve => { finishOld = resolve })).mockResolvedValueOnce(['SMC'])
+      const select = wrapper.findAllComponents({ name: 'ElSelect' }).find(select => select.classes().includes('material-brand-filter'))!
+      const search = select.props('remoteMethod') as (query: string) => Promise<void>
+      const old = search('欧姆龙')
+      await search('SMC');finishOld(['欧姆龙']);await old;await flushPromises()
+      expect(select.findAllComponents({ name: 'ElOption' }).map(option => option.props('value'))).toEqual(['SMC'])
+      expect(select.props('loading')).toBe(false)
+    } finally { wrapper.unmount() }
   })
 
   it('loads only the material directory on entry and defers approval payloads until the tab opens', async () => {
@@ -277,6 +348,7 @@ describe('MaterialManagement', () => {
     api.listMaterials.mockResolvedValue([approvedMaterial])
     api.listMaterialRelationTemplates.mockResolvedValue([{
       id: 'relation-1', mainMaterialId: approvedMaterial.id, mainMaterialCode: approvedMaterial.materialCode, mainMaterialName: approvedMaterial.name,
+      standardLibraryCategories: [{ id: 'category-electrical', name: '电气标准件', isActive: true, sortOrder: 1 }],
       name: `${approvedMaterial.materialCode}关联物料`, isArchived: false, updatedBy: 'standard', updatedAt: '', rowVersion: 1, draftRevision: null,
       publishedRevision: { id: 'revision-1', version: 1, state: 'Published', changeNote: '', createdBy: 'standard', createdAt: '', publishedBy: 'standard', publishedAt: '', rowVersion: 1, groups: [] },
     }])
@@ -307,6 +379,7 @@ describe('MaterialManagement', () => {
     api.listMaterials.mockResolvedValue([approvedMaterial])
     api.listMaterialRelationTemplates.mockResolvedValue([{
       id: 'relation-1', mainMaterialId: approvedMaterial.id, mainMaterialCode: approvedMaterial.materialCode, mainMaterialName: approvedMaterial.name,
+      standardLibraryCategories: [{ id: 'category-electrical', name: '电气标准件', isActive: true, sortOrder: 1 }],
       name: `${approvedMaterial.materialCode}关联物料`, isArchived: false, updatedBy: 'standard', updatedAt: '2026-09-16T00:00:00Z', rowVersion: 1, draftRevision: null,
       publishedRevision: { id: 'revision-1', version: 1, state: 'Published', changeNote: '', createdBy: 'standard', createdAt: '', publishedBy: 'standard', publishedAt: '', rowVersion: 1, groups: [{ id: 'group-1', name: '安装件', isRequired: true, selectionMode: 'Single', minSelection: 1, maxSelection: 1, autoSelectUnique: false, sortOrder: 1, options: [{ id: 'option-1', materialId: 'material-2', materialCode: 'EL-002', materialName: '安装件', quantityMode: 'Fixed', quantityPerSet: 1, isDefault: true, sortOrder: 1 }] }] },
     }])
@@ -327,7 +400,7 @@ describe('MaterialManagement', () => {
     expect(directory.text()).toContain('已生效')
     expect(directory.text()).toContain('M18')
     expect(directory.text()).toContain('欧姆龙')
-    expect(directory.text()).toContain('0101')
+    expect(directory.text()).toContain('电气标准件')
     expect(directory.get('input[placeholder="搜索编码、名称、规格、品牌、分类或配置名称"]')).toBeTruthy()
     await directory.get('input[placeholder="搜索编码、名称、规格、品牌、分类或配置名称"]').setValue('M18')
     expect(directory.text()).toContain('共 1 个已配置物料')
@@ -452,7 +525,7 @@ describe('MaterialManagement', () => {
   })
 
   it('料号审批刷新同时加载最新待审批和同步内容，不执行审批或同步', async () => {
-    const wrapper = mount(MaterialManagement, { props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false }, global: { plugins: [ElementPlus] } })
+    const wrapper = mount(MaterialManagement, { props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false, canReceiveNotices: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     await wrapper.get('#tab-code-approvals').trigger('click')
     await flushPromises()
@@ -814,7 +887,7 @@ describe('MaterialManagement', () => {
       { id: 'application-2', materialId: 'material-3', status: 'Approved', workflowState: 'Completed' },
     ])
     const wrapper = mount(MaterialManagement, {
-      props: { token: 'token', canEdit: true, canApprove: true, canDecideMaterialCode: true, canManageIntegration: false },
+      props: { token: 'token', canEdit: true, canApprove: true, canDecideMaterialCode: true, canManageIntegration: false, canReceiveNotices: true },
       global: { plugins: [ElementPlus] },
     })
     await flushPromises()
@@ -825,6 +898,9 @@ describe('MaterialManagement', () => {
     expect(tabs).not.toContain(expect.stringContaining('同步任务'))
     expect(tabs).toContain('料号审批3')
     expect(wrapper.emitted('noticeCountsChange')?.at(-1)).toEqual([{ syncTasks: 2, codeApprovals: 1 }])
+    await wrapper.setProps({ canReceiveNotices: false }); await flushPromises()
+    expect(wrapper.emitted('noticeCountsChange')?.at(-1)).toEqual([{ syncTasks: 0, codeApprovals: 0 }])
+    expect(wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('料号审批'))!.text().trim()).toBe('料号审批')
   })
 
   it('U9C重量为零时按未填写显示且不拼接重量单位代码', async () => {
@@ -1107,7 +1183,7 @@ describe('MaterialManagement', () => {
     }])
     api.listMaterialCodeApplications.mockResolvedValue(applications)
     const wrapper = mount(MaterialManagement, {
-      props: { token: 'token', canEdit: true, canApprove: true, canDecideMaterialCode: true, canManageIntegration: false, requestedTab: 'code-approvals' },
+      props: { token: 'token', canEdit: true, canApprove: true, canDecideMaterialCode: true, canManageIntegration: false, canReceiveNotices: true, requestedTab: 'code-approvals' },
       global: { plugins: [ElementPlus] },
     })
     await flushPromises()
@@ -1259,7 +1335,7 @@ describe('MaterialManagement', () => {
       application: { ...applications.find(application => application.id === id)!, status: 'Approved' },
     }))
     const wrapper = mount(MaterialManagement, {
-      props: { token: 'token', canEdit: true, canApprove: true, canDecideMaterialCode: true, canManageIntegration: false, requestedTab: 'code-approvals' },
+      props: { token: 'token', canEdit: true, canApprove: true, canDecideMaterialCode: true, canManageIntegration: false, canReceiveNotices: true, requestedTab: 'code-approvals' },
       global: { plugins: [ElementPlus] },
     })
     await flushPromises()
@@ -1479,7 +1555,7 @@ describe('MaterialManagement', () => {
     expect(wrapper.text()).toContain('参考价格')
     expect(wrapper.text()).toContain('3D')
     expect(wrapper.text()).toContain('资料')
-    expect(wrapper.findAll('button').filter(button => button.text().includes('保存后上传'))).toHaveLength(3)
+    expect(wrapper.findAll('button').filter(button => button.text().includes('保存后上传'))).toHaveLength(4)
     const editorItems = wrapper.get('.material-editor-grid').findAll('.el-form-item')
     const remarkItem = editorItems.find(item => item.text().includes('备注'))!
     const selectionAdviceItem = editorItems.find(item => item.text().includes('选型建议'))!
@@ -1523,7 +1599,7 @@ describe('MaterialManagement', () => {
     await flushPromises()
 
     expect(api.listMaterialAttachments).toHaveBeenCalledWith('material-1', 'token')
-    expect(wrapper.findAll('button').filter(button => button.text() === '上传附件')).toHaveLength(2)
+    expect(wrapper.findAll('button').filter(button => button.text() === '上传附件')).toHaveLength(3)
     const downloadButton = wrapper.findAll('button').find(button => button.attributes('aria-label') === '下载 sensor.step')!
     await downloadButton.trigger('click')
     expect(api.downloadMaterialAttachment).toHaveBeenCalledWith('material-1', attachment, 'token')

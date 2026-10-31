@@ -25,6 +25,20 @@ public static class ProcurementEndpointExtensions
             return Results.Ok(await service.ListProjectAsync(projectId, actor, role, cancellationToken));
         });
 
+        api.MapGet("/projects/{projectId:guid}/procurement-files", async (Guid projectId, string materialCode, HttpContext context, U9ProcurementService service, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.ListPublishedFilesAsync(projectId, materialCode, actor, role, ct));
+        });
+
+        api.MapGet("/projects/{projectId:guid}/procurement-files/{fileId:guid}/file", async (Guid projectId, Guid fileId, string materialCode, HttpContext context, U9ProcurementService service, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var download = await service.DownloadPublishedFileAsync(projectId, materialCode, fileId, actor, role, ct);
+            var preview = context.Request.Query["preview"] == "true";
+            return Results.File(download.Content, preview ? ProjectCenterPermissionMiddleware.PreviewContentType(download.Attachment.OriginalFileName) : Path.GetExtension(download.Attachment.OriginalFileName).Equals(".pdf", StringComparison.OrdinalIgnoreCase) ? "application/pdf" : "application/octet-stream", preview ? null : download.Attachment.OriginalFileName, enableRangeProcessing: true);
+        });
+
         api.MapPost("/projects/{projectId:guid}/procurement-tracking/refresh", async (
             Guid projectId,
             HttpContext context,

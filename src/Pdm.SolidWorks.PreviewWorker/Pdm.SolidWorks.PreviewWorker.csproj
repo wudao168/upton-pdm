@@ -1,6 +1,6 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <Version>1.2.0</Version>
+    <Version>1.2.3</Version>
     <TargetFramework>net48</TargetFramework>
     <RootNamespace>Upton.Pdm.SolidWorks.PreviewWorker</RootNamespace>
     <AssemblyName>Upton.Pdm.SolidWorks.PreviewWorker</AssemblyName>

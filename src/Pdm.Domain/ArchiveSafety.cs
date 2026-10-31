@@ -67,6 +67,8 @@ public static class ArchiveSafety
             }
         }
         if (previous.DocumentId != current.DocumentId || previous.Kind != current.Kind || previous.Role != current.Role
+            || previous.IsContextReference != current.IsContextReference
+            || previous.ReferenceTypeUnverified != current.ReferenceTypeUnverified
             || !string.Equals(previous.FileName, current.FileName, StringComparison.OrdinalIgnoreCase)
             || !string.Equals(previous.Configuration, current.Configuration, StringComparison.Ordinal)
             || previous.Quantity != current.Quantity

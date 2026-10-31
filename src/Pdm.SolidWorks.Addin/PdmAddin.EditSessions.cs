@@ -120,6 +120,7 @@ public sealed partial class PdmAddin
 
     private IReadOnlyList<LocalEditDraft> PrepareClosedEdits()
     {
+        if (localEdits.Count == 0) return Array.Empty<LocalEditDraft>();
         if (IsSolidWorksCommandActive()) return Array.Empty<LocalEditDraft>();
         // Includes invisible component documents still used by an open assembly.
         var loaded = (application.GetDocuments() as Array)?.OfType<IModelDoc2>()

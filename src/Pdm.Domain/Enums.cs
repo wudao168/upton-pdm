@@ -236,7 +236,8 @@ public enum ReleaseScope
     NonStandardWithDrawing,
     NonStandardLongLead,
     NonStandardSupplement,
-    ElectricalLongLead
+    ElectricalLongLead,
+    Nameplate
 }
 
 public enum ApprovalDecision

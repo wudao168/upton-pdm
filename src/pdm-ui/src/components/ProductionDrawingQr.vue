@@ -5,6 +5,7 @@ import { drawingsForProductionLine } from '../productionDrawingSelection'
 import type { ProductionLine, ProductionReleaseState } from '../productionTracking'
 import type { ProductionDrawingItem } from '../types'
 import { userErrorMessage } from '../userErrorMessage'
+import NameplateQr from './NameplateQr.vue'
 
 const props = defineProps<{ token: string; state: ProductionReleaseState; line: ProductionLine }>()
 const drawings = ref<ProductionDrawingItem[]>([]), versionId = ref('')
@@ -29,6 +30,7 @@ function choose() {
 async function refresh() {
   const current = ++generation
   qr.value = undefined; drawings.value = []; versionId.value = ''; error.value = ''; loading.value = true
+  if (props.line.nameplateContent) { loading.value = false; return }
   try {
     const items = await listProductionDrawings(props.token, true, props.state.projectId)
     if (current !== generation) return
@@ -37,11 +39,12 @@ async function refresh() {
   } catch (cause) { if (current === generation) error.value = userErrorMessage(cause instanceof Error ? cause.message : '') }
   finally { if (current === generation) loading.value = false }
 }
-watch(() => [props.state.releasePackageId, props.state.formalReleasePackageId, props.line.id, props.token], refresh, { immediate: true })
+watch(() => [props.state.releasePackageId, props.state.formalReleasePackageId, props.line.id, props.line.nameplateContent?.serialNumber, props.token], refresh, { immediate: true })
 </script>
 
 <template>
-  <div class="production-drawing-qr" aria-label="正式图纸二维码">
+  <NameplateQr v-if="line.nameplateContent" :serial-number="line.nameplateContent.serialNumber" />
+  <div v-else class="production-drawing-qr" aria-label="正式图纸二维码">
     <select v-if="drawings.length > 1" v-model="versionId" aria-label="选择二维码对应的正式图纸" @change="choose"><option value="">请选择正式图纸</option><option v-for="item in drawings" :key="item.versionId" :value="item.versionId">{{ item.drawingNumber }} · {{ item.revision }}</option></select>
     <p v-if="loading" role="status">正在生成二维码…</p>
     <img v-else-if="qr" :src="qr.src" :title="qr.content" alt="与PDF内容一致的图纸二维码" width="96" height="96">

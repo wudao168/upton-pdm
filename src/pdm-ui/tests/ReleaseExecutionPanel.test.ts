@@ -13,6 +13,15 @@ const record = (): ReleaseExecutionView => ({ id: 'release', state: 'Published',
 beforeEach(() => { vi.clearAllMocks(); vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] }); vi.mocked(readReleaseExecution).mockResolvedValue(record()); vi.mocked(acknowledgeReleaseDepartment).mockResolvedValue({}); vi.mocked(retryReleaseNotification).mockResolvedValue({}) })
 afterEach(() => vi.useRealTimers())
 
+it('标准和电气发布隐藏整个生产图纸转图状态，不展示无需转图文字', async () => {
+  const wrapper = mount(ReleaseExecutionPanel, { props: { packageId: 'release', token: 'fixture', canManage: true, previewApplicable: false } })
+  await flushPromises()
+  expect(wrapper.text()).not.toContain('生产图纸')
+  expect(wrapper.text()).not.toContain('转图')
+  expect(wrapper.text()).toContain('U9同步')
+  wrapper.unmount()
+})
+
 it('显示审批通知队列的助理接收状态，不误报未配置通知', async () => {
   const view = { ...record(), workflowNotifications: [{ state: 'Attention', message: 'T2机械组／技术助理没有有效人员', enabled: true }] }
   view.progress!.notificationRules = []

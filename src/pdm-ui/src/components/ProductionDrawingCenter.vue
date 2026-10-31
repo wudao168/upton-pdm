@@ -201,7 +201,7 @@ async function downloadBatch(items: ProductionDrawingItem[], format: 'Pdf' | 'St
     return
   }
   if (items.some(item => !item.isCurrent) && !window.confirm('所选图纸包含已被替代的历史正式版，确定下载？')) return
-  await runDownload(() => downloadProductionDrawingArchive(project.value!.id, items.map(item => item.versionId), format, props.token, selectedPackage.value!.number, updateDownloadProgress))
+  await runDownload(() => downloadProductionDrawingArchive(project.value!.id, items.map(item => item.versionId), format, props.token, selectedPackage.value!.number, updateDownloadProgress, items))
 }
 async function downloadBom(items: ProductionDrawingItem[], selectedOnly: boolean) {
   if (!selectedPackage.value || !items.length || downloading.value) return
@@ -233,8 +233,8 @@ async function downloadPackage() {
   await runDownload(async () => {
     const file = await bomDownload(items, false)
     const results = await Promise.allSettled([
-      downloadProductionDrawingArchive(id, versions, 'Step', props.token, number, updateDownloadProgress),
-      downloadProductionDrawingArchive(id, versions, 'Pdf', props.token, number, updateDownloadProgress),
+      downloadProductionDrawingArchive(id, versions, 'Step', props.token, number, updateDownloadProgress, items),
+      downloadProductionDrawingArchive(id, versions, 'Pdf', props.token, number, updateDownloadProgress, items),
       downloadGeneratedFile(file.blob, file.fileName),
     ])
     const failed = results.find(result => result.status === 'rejected')
@@ -259,7 +259,7 @@ async function saveDelivery() {
   try {
     await updateProductionDrawingDelivery(item, { priority: editPriority.value, requiredOn: editRequiredOn.value }, props.token)
     await refresh()
-    const updated = rows.value.find(row => row.versionId === item.versionId)
+    const updated = rows.value.find(row => row.releasePackageId === item.releasePackageId && row.versionId === item.versionId)
     if (updated) choose(updated)
   } catch (cause) { error.value = cause instanceof Error ? cause.message : '发图信息保存失败。' }
   finally { saving.value = false }

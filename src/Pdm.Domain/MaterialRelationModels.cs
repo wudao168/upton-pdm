@@ -74,7 +74,10 @@ public sealed record MaterialRelationTemplate(
     MaterialRelationRevision? DraftRevision,
     string UpdatedBy,
     DateTimeOffset UpdatedAt,
-    long RowVersion);
+    long RowVersion)
+{
+    public IReadOnlyList<StandardLibraryCategory> StandardLibraryCategories { get; init; } = [];
+}
 
 public sealed record MaterialRelationSelection(
     Guid ProjectId,

@@ -24,7 +24,8 @@ public sealed partial class PdmAddin
                 LogDiagnostic("已核验的同名零件文档已失效，重新核对当前已加载文档", error);
             }
         }
-        var candidates = (application.GetDocuments() as Array)?.Cast<object>().OfType<IModelDoc2>()
+        var candidates = (archiveBatchReads != null ? archiveBatchReads.FindByName(node.FileName)
+            : (application.GetDocuments() as Array)?.Cast<object>().OfType<IModelDoc2>())?
             .Where(document => string.Equals(Path.GetFileName(document.GetPathName()), node.FileName, StringComparison.OrdinalIgnoreCase))
             .GroupBy(document => document.GetPathName(), StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray()
             ?? Array.Empty<IModelDoc2>();

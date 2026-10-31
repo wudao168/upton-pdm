@@ -1,8 +1,10 @@
 import { initializeTablePreferences, clearTablePreferencesSession } from '../tablePreferences'
 import { confirmBomRelease as confirmBomReleaseRequest } from '../api'
 import { listProjectFolders, listReleasePackages } from '../api'
+import { releasePreviewUnfinished } from '../releasePreviewState'
 import { emergencyReleaseEditLock as emergencyReleaseEditLockRequest } from '../api'
 import { heartbeatSession, logoutSession } from '../api'
+import { readMaterialNotificationPermission } from '../api'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, permanentlyDeleteManualBomItems as permanentlyDeleteManualBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest, setBomReleaseExclusion as setBomReleaseExclusionRequest } from '../api'
 import { getBomSourceData } from '../api'
@@ -308,6 +310,7 @@ export function usePdmWorkspace() {
   const notifications = ref<UserNotification[]>([])
   const materialCodeApprovalTasks = ref<MaterialCodeApplication[]>([])
   const materialSyncTasks = ref<MaterialSyncTask[]>([])
+  const canReceiveMaterialNotifications = ref(false)
   const programTemplateTasks = ref<ProgramTemplateTask[]>([])
   const editLocks = ref<EditLockSummary[]>([])
   const passwordResetTasks = ref<PasswordResetTask[]>([])
@@ -318,7 +321,10 @@ export function usePdmWorkspace() {
   let pendingVersionComparison: { documentId: string; leftVersionId?: string; rightVersionId?: string } | null = null
   let projectSummaryTimer: number | undefined
   let releaseStatusTimer: number | undefined
+  let approvalInboxTimer: number | undefined
+  let approvalInboxLoading = false
   let releaseStatusLoading = false
+  let releaseStatusLastCheckAt = 0
   let projectDocumentTimer: number | undefined
   let sessionRenewTimer: number | undefined
   let sessionHeartbeatTimer: number | undefined
@@ -1014,12 +1020,15 @@ export function usePdmWorkspace() {
   /** 转图与发布解耦：手动把该发布包的转图事项重新排队到后台，处理完会有站内消息反馈。 */
   async function refreshReleaseStatus() {
     const projectId = project.value?.id
-    if (!projectId || !accessToken || operationPending.value || releaseStatusLoading
-      || !releasePackages.value.some(item => item.state === '发布中' || item.previewState === 'Pending' || item.previewState === 'Running')) return
+    if (!projectId || !accessToken || operationPending.value || releaseStatusLoading) return
+    const active = releasePackages.value.some(item => item.state === '发布中' || ['Pending', 'WaitingForServer', 'Running'].includes(item.previewState ?? ''))
+    // 暂停任务低频静默核对，其他人员重试成功后也能停止闪烁；不刷新整页或重置表格。
+    if (!active && (!releasePackages.value.some(releasePreviewUnfinished) || Date.now() - releaseStatusLastCheckAt < 60000)) return
     releaseStatusLoading = true
+    releaseStatusLastCheckAt = Date.now()
     try {
       const packages = await listReleasePackages(projectId, accessToken)
-      if (project.value?.id === projectId) releasePackages.value = packages
+      if (project.value?.id === projectId && JSON.stringify(releasePackages.value) !== JSON.stringify(packages)) releasePackages.value = packages
     } catch {
       // 保留已有状态，下轮继续读取，避免临时网络失败挡住项目页面。
     } finally { releaseStatusLoading = false }
@@ -1145,6 +1154,26 @@ export function usePdmWorkspace() {
     ])
   }
 
+  async function refreshApprovalInbox() {
+    if (!authenticated.value || !accessToken || approvalInboxLoading) return
+    const token = accessToken
+    const company = activeCompanyId.value
+    approvalInboxLoading = true
+    try {
+      const [tasks, messages, materialCodes, materialSync] = await Promise.all([
+        requestMyApprovalTasks(), requestUserNotifications(), requestMaterialCodeApprovalTasks(), requestMaterialSyncTasks(),
+      ])
+      if (authenticated.value && accessToken === token && activeCompanyId.value === company) {
+        myApprovalTasks.value = tasks
+        notifications.value = messages
+        materialCodeApprovalTasks.value = canReceiveMaterialNotifications.value ? materialCodes : []
+        materialSyncTasks.value = canReceiveMaterialNotifications.value ? materialSync : []
+      }
+    } catch {
+      // 临时连接失败时保留已有消息，下一轮继续刷新。
+    } finally { approvalInboxLoading = false }
+  }
+
   async function requestProgramTemplateTasks() {
     try {
       return await listProgramTemplateTasks(accessToken)
@@ -1155,14 +1184,27 @@ export function usePdmWorkspace() {
   }
 
   async function requestMaterialCodeApprovalTasks() {
-    if (!hasPermission('project.view')) return []
+    if (!hasPermission('project.view') || !await requestMaterialNotificationEligibility()) return []
     const applications = await listMaterialCodeApplications(accessToken, undefined, 'Pending')
     return applications.filter(application => application.canDecide === true || application.canEmergencyDecide
       || application.canDecide == null && hasPermission('approval.decide'))
   }
 
   async function requestMaterialSyncTasks() {
-    return hasPermission('material.view') ? listMaterialSyncTasks(accessToken, true) : []
+    return await requestMaterialNotificationEligibility() ? listMaterialSyncTasks(accessToken, true) : []
+  }
+
+  async function requestMaterialNotificationEligibility() {
+    const token = accessToken, company = activeCompanyId.value
+    let enabled = false
+    if (hasPermission('material.view')) {
+      try { enabled = (await readMaterialNotificationPermission(token)).enabled }
+      catch (error) { if (!(error instanceof PdmApiError && [403, 404].includes(error.status))) throw error }
+    }
+    if (token !== accessToken || company !== activeCompanyId.value) return false
+    canReceiveMaterialNotifications.value = enabled
+    if (!enabled) { materialCodeApprovalTasks.value = []; materialSyncTasks.value = [] }
+    return enabled
   }
 
   async function requestPasswordResetTasks() {
@@ -1299,6 +1341,7 @@ export function usePdmWorkspace() {
     notifications.value = []
     materialCodeApprovalTasks.value = []
     materialSyncTasks.value = []
+    canReceiveMaterialNotifications.value = false
     programTemplateTasks.value = []
     editLocks.value = []
     passwordResetTasks.value = []
@@ -1323,8 +1366,9 @@ export function usePdmWorkspace() {
     sessionRenewal = (async () => {
       try {
         const session = await apiResumeSession(persistentSession!.resumeToken, persistentSession!.desktopHandoff)
+        const permissionsChanged = JSON.stringify(currentPermissions.value) !== JSON.stringify(session.permissions ?? [])
         await applySession(session)
-        if (!wasAuthenticated) await reload()
+        if (!wasAuthenticated || permissionsChanged) await reload()
         return true
       } catch (error) {
         if (error instanceof PdmApiError && (error.status === 401 || error.status === 400)) {
@@ -1439,7 +1483,7 @@ export function usePdmWorkspace() {
       }
 
       const keepSelection = selectedProject.id === project.value.id
-      const data = await loadProjectWorkspace(selectedProject.id, accessToken, sourceDataRequestedProjectId.value === selectedProject.id)
+      const data = await loadProjectWorkspace(selectedProject.id, accessToken, sourceDataRequestedProjectId.value === selectedProject.id, currentPermissions.value)
       if (requestSequence !== reloadRequestSequence) return
       const previousSelectedId = keepSelection ? selectedId.value : ''
       moduleErrors.value = data.moduleErrors
@@ -1492,11 +1536,15 @@ export function usePdmWorkspace() {
     if (!accessToken || loading.value) return
     try {
       const loadedProjects = await listProjects(accessToken)
-      projects.value = loadedProjects
+      if (JSON.stringify(projects.value) !== JSON.stringify(loadedProjects)) projects.value = loadedProjects
       const current = loadedProjects.find(candidate => candidate.id === project.value.id)
       if (current) {
         project.value = {
           ...project.value,
+          hasUnreceivedNonStandardRelease: current.hasUnreceivedNonStandardRelease,
+          latestPurchasedBomPublishedAt: current.latestPurchasedBomPublishedAt,
+          hasReleaseAttention: current.hasReleaseAttention,
+          latestPublishedAt: current.latestPublishedAt,
           documentCount: current.documentCount,
           businessStatus: current.businessStatus,
           rootDocumentCheckedOutBy: current.rootDocumentCheckedOutBy,
@@ -1813,6 +1861,7 @@ export function usePdmWorkspace() {
           .flatMap(item => item.permissions))]
         const stored = restoreSession()
         if (stored) await applySession({ ...stored, permissions: currentPermissions.value })
+        await refreshApprovalInbox()
       }
       return rolePermissionDirectory.value
     } finally { operationPending.value = false }
@@ -1926,7 +1975,9 @@ export function usePdmWorkspace() {
     window.addEventListener('pdm-session-expired', handleSessionExpired)
     window.addEventListener('focus', refreshOpenProjectOnFocus)
     releaseStatusTimer = window.setInterval(() => void refreshReleaseStatus(), 5000)
-    projectSummaryTimer = window.setInterval(() => void refreshProjectSummaries(), 300_000)
+    approvalInboxTimer = window.setInterval(() => void refreshApprovalInbox(), 15_000)
+    window.addEventListener('focus', refreshApprovalInbox)
+    projectSummaryTimer = window.setInterval(() => void refreshProjectSummaries(), 60_000)
     projectDocumentTimer = window.setInterval(() => void refreshOpenProjectDocuments(), 300_000)
     window.addEventListener('pdm-open-version-compare', async (event) => {
       const detail = (event as CustomEvent<{ documentId?: string; leftVersionId?: string; rightVersionId?: string }>).detail
@@ -1974,6 +2025,8 @@ export function usePdmWorkspace() {
     window.removeEventListener('pdm-session-expired', handleSessionExpired)
     window.removeEventListener('focus', refreshOpenProjectOnFocus)
     if (releaseStatusTimer !== undefined) window.clearInterval(releaseStatusTimer)
+    if (approvalInboxTimer !== undefined) window.clearInterval(approvalInboxTimer)
+    window.removeEventListener('focus', refreshApprovalInbox)
     if (projectSummaryTimer !== undefined) window.clearInterval(projectSummaryTimer)
     if (projectDocumentTimer !== undefined) window.clearInterval(projectDocumentTimer)
     if (sessionRenewTimer !== undefined) window.clearTimeout(sessionRenewTimer)
@@ -2065,6 +2118,7 @@ export function usePdmWorkspace() {
     notifications,
     materialCodeApprovalTasks,
     materialSyncTasks,
+    canReceiveMaterialNotifications,
     programTemplateTasks,
     editLocks,
     passwordResetTasks,

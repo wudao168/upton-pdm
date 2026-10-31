@@ -11,6 +11,150 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class ReleaseRecoveryTests
 {
     [Fact]
+    public async Task UnfinishedConversionNotifiesDivisionAssistantsAndAllWorkflowPeopleOnceThenReportsRecovery()
+    {
+        using var f = await Fixture.CreateAsync();
+        var company = (await f.Repository.GetOrganizationDirectoryAsync(default)).Organizations.First(item => item.IsActive).Id;
+        var division = await f.Repository.SaveOrganizationUnitAsync(new(null, company, null, "PREVIEW-T1", "本事业部", OrganizationUnitKind.BusinessDivision, true, 0), default);
+        var mechanical = await f.Repository.SaveOrganizationUnitAsync(new(null, company, division.Id, "PREVIEW-M", "机械组", OrganizationUnitKind.Department, true, 0), default);
+        var assistants = await f.Repository.SaveOrganizationUnitAsync(new(null, company, division.Id, "PREVIEW-A", "技术助理组", OrganizationUnitKind.Department, true, 1), default);
+        var other = await f.Repository.SaveOrganizationUnitAsync(new(null, company, null, "PREVIEW-T2", "其他事业部", OrganizationUnitKind.BusinessDivision, true, 1), default);
+        var names = new[] { "submitter", "assigned-reviewer", "actual-reviewer", "assistant", "mixed-admin", "other-assistant", "foreign-reviewer", "inactive-reviewer", "system-admin" };
+        foreach (var name in names)
+        {
+            var roles = name == "mixed-admin" ? new[] { "Administrator", "TechnicalAssistant" }
+                : name.Contains("assistant") ? new[] { "TechnicalAssistant" }
+                : name == "system-admin" ? new[] { "Administrator" } : new[] { "Engineer" };
+            await f.Repository.CreateUserAsync(new(Guid.NewGuid(), name, name, "unused", UserRole.Engineer, name != "inactive-reviewer",
+                RoleCode: roles[0], CompanyId: name == "foreign-reviewer" ? Guid.NewGuid() : company, RoleCodes: roles), default);
+        }
+        await f.Repository.SetOrganizationMembershipsAsync("submitter", [mechanical.Id], mechanical.Id, default);
+        foreach (var name in new[] { "assistant", "mixed-admin" })
+            await f.Repository.SetOrganizationMembershipsAsync(name, [assistants.Id], assistants.Id, default);
+        await f.Repository.SetOrganizationMembershipsAsync("other-assistant", [other.Id], other.Id, default);
+        var projects = (ConcurrentDictionary<Guid, Project>)typeof(InMemoryPdmRepository).GetField("projects", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(f.Repository)!;
+        f.Project = projects[f.Project.Id] = f.Project with { OrganizationId = company, PrimaryProjectManager = "submitter" };
+        ApprovalTask Task(string assigned, string? actual, int order) => new(Guid.NewGuid(), f.Package.Id, ApprovalStage.MechanicalEngineer,
+            assigned, actual, ApprovalDecision.Approved, null, DateTimeOffset.UtcNow) { StepOrder = order };
+        var package = f.Package with { PreviewState = ReleasePreviewState.Failed, PreviewAttempts = 5, PreviewError = "转换程序无法启动",
+            ApprovalTasks = [Task("submitter", "submitter", 1), Task("assigned-reviewer", "actual-reviewer", 2),
+                Task("foreign-reviewer", null, 3), Task("inactive-reviewer", null, 4), Task("system-admin", null, 5)] };
+        ((ConcurrentDictionary<Guid, ReleasePackage>)typeof(InMemoryPdmRepository).GetField("packages", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(f.Repository)!)[package.Id] = package;
+        await f.Service.ReconcileDeliveryAsync(package.Id, default);
+        foreach (var name in new[] { "submitter", "assigned-reviewer", "actual-reviewer", "assistant", "mixed-admin" })
+        {
+            var notice = Assert.Single(await f.Repository.ListUserNotificationsAsync(name, 100, default));
+            Assert.Equal(package.Id, notice.ReleasePackageId);
+            Assert.Contains(package.Number, notice.Content);
+            Assert.Contains("重试转图", notice.Content);
+            Assert.Contains("自动重试已暂停", notice.Title);
+            await f.Repository.MarkUserNotificationReadAsync(notice.Id, name, DateTimeOffset.UtcNow, default);
+        }
+        await f.Service.ReconcileDeliveryAsync(package.Id, default);
+        Assert.Single(await f.Repository.ListUserNotificationsAsync("assistant", 100, default));
+        foreach (var name in new[] { "other-assistant", "foreign-reviewer", "inactive-reviewer", "system-admin" })
+            Assert.Empty(await f.Repository.ListUserNotificationsAsync(name, 100, default));
+        Assert.Equal(0, f.Converter.Calls);
+        package = await f.Repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Pending, null, 0, DateTimeOffset.UtcNow, default);
+        Assert.True(await f.Service.ProcessAsync(package, default));
+        var recovered = await f.Repository.ListUserNotificationsAsync("assistant", 100, default);
+        Assert.Equal(2, recovered.Count);
+        Assert.Contains(recovered, notice => notice.Title == "图纸转换已完成");
+        await f.Service.ReconcileDeliveryAsync(package.Id, default);
+        Assert.Equal(2, (await f.Repository.ListUserNotificationsAsync("assistant", 100, default)).Count);
+    }
+
+    [Fact]
+    public async Task HistoricalBomOnlyConversionNotificationsAreHiddenWithoutLosingArchiveMessages()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var reader = new UserAccount(Guid.NewGuid(), "preview-reader", "发布处理人", "unused", UserRole.Administrator, true,
+            RoleCode: "developer", CompanyId: fixture.Project.OrganizationId);
+        await fixture.Repository.CreateUserAsync(reader, default);
+        var standard = fixture.Package with { Id = Guid.NewGuid(), Scope = ReleaseScope.StandardFormal };
+        await fixture.Repository.CreateReleasePackageAsync(standard, default);
+        UserNotification Notice(Guid id, string category, string key) => new(Guid.NewGuid(), reader.Username, category, "通知", "详情",
+            fixture.Project.Id, id, key, DateTimeOffset.UtcNow, null);
+        await fixture.Repository.CreateUserNotificationsAsync([
+            Notice(standard.Id, "ReleasePreviewResult", "wrong-standard-conversion"),
+            Notice(fixture.Package.Id, "ReleasePreviewResult", "nonstandard-conversion"),
+            Notice(standard.Id, "ReleaseDeliveryResult", "standard-archive")], default);
+        var messages = await fixture.Repository.ListUserNotificationsAsync(reader.Username, 100, default);
+        Assert.DoesNotContain(messages, message => message.SourceKey == "wrong-standard-conversion");
+        Assert.Contains(messages, message => message.SourceKey == "nonstandard-conversion");
+        Assert.Contains(messages, message => message.SourceKey == "standard-archive");
+    }
+
+    [Theory]
+    [InlineData(ReleaseScope.StandardFormal)]
+    [InlineData(ReleaseScope.StandardSupplement)]
+    [InlineData(ReleaseScope.StandardLongLead)]
+    [InlineData(ReleaseScope.ElectricalFormal)]
+    [InlineData(ReleaseScope.ElectricalSupplement)]
+    [InlineData(ReleaseScope.ElectricalLongLead)]
+    public async Task BomOnlyScopesNeverConvertEvenWithHistoricalSnapshotsAndPendingState(ReleaseScope scope)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var package = fixture.Package with { Id = Guid.NewGuid(), Scope = scope, PreviewAttempts = 5, PreviewError = "历史转图异常" };
+        await fixture.Repository.CreateReleasePackageAsync(package, default);
+        Assert.Empty(await fixture.Repository.ListReleasePreviewSourcesAsync(package.Id, default));
+        Assert.DoesNotContain(await fixture.Repository.ListReleasePackagesAwaitingPreviewAsync(5, 100, default), item => item.Id == package.Id);
+        await fixture.Service.ReconcileDeliveryAsync(package.Id, default);
+        var saved = (await fixture.Repository.FindReleasePackageAsync(package.Id, default))!;
+        Assert.Equal(ReleasePreviewState.None, saved.PreviewState);
+        Assert.Equal(0, saved.PreviewAttempts); Assert.Null(saved.PreviewError);
+        Assert.True(await fixture.Service.ProcessAsync(saved, default));
+        Assert.Equal(0, fixture.Converter.Calls);
+    }
+
+    [Fact]
+    public async Task InspectionPreservesPausedAttemptLimitAndDoesNotPromiseUnscheduledRetries()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        await fixture.Repository.MarkReleasePreviewStateAsync(fixture.Package.Id, ReleasePreviewState.Pending, "原始失败原因", 5, DateTimeOffset.UtcNow, default);
+        await fixture.Service.ReconcileDeliveryAsync(fixture.Package.Id, default);
+        var saved = (await fixture.Repository.FindReleasePackageAsync(fixture.Package.Id, default))!;
+        Assert.Equal(ReleasePreviewState.Failed, saved.PreviewState);
+        Assert.Equal("原始失败原因", saved.PreviewError);
+        Assert.Equal(0, await fixture.Service.ProcessPendingAsync(default));
+        Assert.False(await fixture.Service.ProcessAsync(saved, default));
+        Assert.Equal(0, fixture.Converter.Calls);
+    }
+
+    [Fact]
+    public async Task UnavailableServerWaitsWithoutSpendingAttemptsThenAutomaticallyCompletes()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        fixture.Converter.Failure = new PreviewServerUnavailableException("转图服务器离线，等待恢复。");
+        for (var index = 0; index < 3; index++)
+        {
+            await fixture.Service.ProcessPendingAsync(default);
+            var saved = (await fixture.Repository.FindReleasePackageAsync(fixture.Package.Id, default))!;
+            Assert.Equal(ReleasePreviewState.WaitingForServer, saved.PreviewState);
+            Assert.Equal(0, saved.PreviewAttempts);
+        }
+        fixture.Converter.Failure = null;
+        await fixture.Service.ProcessPendingAsync(default);
+        var completed = (await fixture.Repository.FindReleasePackageAsync(fixture.Package.Id, default))!;
+        Assert.Equal(ReleasePreviewState.Succeeded, completed.PreviewState);
+        Assert.Equal(1, completed.PreviewAttempts);
+    }
+
+    [Fact]
+    public async Task ActualConversionFailuresStopAtFiveAndInspectionCannotResetTheLimit()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        fixture.Converter.Failure = new PdmRuleException("图档转换失败，请核对源文件。");
+        for (var index = 0; index < 7; index++) await fixture.Service.ProcessPendingAsync(default);
+        Assert.Equal(5, fixture.Converter.Calls);
+        var failed = (await fixture.Repository.FindReleasePackageAsync(fixture.Package.Id, default))!;
+        Assert.Equal(ReleasePreviewState.Failed, failed.PreviewState);
+        await fixture.Service.ReconcileDeliveryAsync(failed.Id, default);
+        Assert.Equal(ReleasePreviewState.Failed, (await fixture.Repository.FindReleasePackageAsync(failed.Id, default))!.PreviewState);
+        Assert.Equal(0, await fixture.Service.ProcessPendingAsync(default));
+    }
+
+    [Fact]
     public async Task ReturningFailedPublicationPreservesItsFilesAndClearsTheOldOutputForReediting()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -28,6 +172,55 @@ public sealed class ReleaseRecoveryTests
         var backup = Assert.Single(Directory.GetDirectories(Path.Combine(fixture.Project.ReleaseLocation, ".withdrawn-releases")));
         Assert.Equal("失败发布资料", await File.ReadAllTextAsync(Path.Combine(backup, "original.txt")));
         Assert.True(Directory.Exists(fixture.Package.PublishedPath));
+    }
+
+    [Fact]
+    public async Task QuantityOnlyPdfFillingDoesNotCallConverterAndKeepsOriginalPublicationBytes()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        Assert.True(await fixture.Service.ProcessAsync(fixture.Package, default));
+        var originals = fixture.Versions.Values.Where(version => version.ReleasePackageId == fixture.Package.Id).ToArray();
+        var bytes = originals.ToDictionary(version => version.DocumentId, version => File.ReadAllBytes(Path.Combine(fixture.Project.VaultLocation, version.Preview!.StorageRelativePath)));
+        var count = fixture.Versions.Count;
+        var path = Path.Combine(fixture.Project.ReleaseLocation, "RP-QUANTITY-FILL"); Directory.CreateDirectory(path);
+        var package = fixture.Package with { Id = Guid.NewGuid(), Number = "RP-QUANTITY-FILL", Scope = ReleaseScope.NonStandardSupplement, PublishedPath = path,
+            VersionBindings = originals.Select(version => new ReleaseVersionBinding(version.DocumentId, version.Id, version.Revision.Display, version.Sha256, true, "正式图纸.SLDDRW", false)).ToArray(),
+            PdfTitleBlockSnapshot = new(["quantity"], originals.ToDictionary(version => version.DocumentId,
+                version => new PdfDrawingTitleBlockSnapshot(version.Id, version.Sha256, new Dictionary<string, string> { ["quantity"] = "2" }, [])), true) };
+        await fixture.Repository.CreateReleasePackageAsync(package, default);
+        var stamp = new CountingReuseStamp();
+        var service = new ReleasePreviewService(fixture.Repository, fixture.Converter, TimeProvider.System, pdfReleaseStamp: stamp);
+        Assert.True(await service.ProcessAsync(package, default));
+        Assert.Equal(1, fixture.Converter.Calls);
+        Assert.Equal(originals.Length, stamp.Reissues);
+        var publishing = package with { Id = Guid.NewGuid(), Number = "RP-PUBLISH-REUSE", State = ReleasePackageState.Publishing, PublishedPath = null };
+        await fixture.Repository.CreateReleasePackageAsync(publishing, default);
+        var publisher = new AtomicReleasePackagePublisher(TimeProvider.System, fixture.Converter, fixture.Repository, stamp);
+        await publisher.PrepareAsync(publishing, fixture.Project, default);
+        var publication = await publisher.PublishAsync(publishing, fixture.Project, await fixture.Repository.ListReleasePreviewSourcesAsync(publishing.Id, default), default);
+        Assert.Null(publication.PreviewError);
+        Assert.Equal(originals.Length, publication.Previews.Count);
+        Assert.Equal(1, fixture.Converter.Calls);
+        Assert.Equal(originals.Length * 2, stamp.Reissues);
+        Assert.Equal(count, fixture.Versions.Count);
+        foreach (var original in originals)
+            Assert.Equal(bytes[original.DocumentId], await File.ReadAllBytesAsync(Path.Combine(fixture.Project.VaultLocation, original.Preview!.StorageRelativePath)));
+        Assert.True(await service.ProcessAsync(package, default));
+        Assert.Equal(1, fixture.Converter.Calls);
+        Assert.Equal(originals.Length * 2, stamp.Reissues);
+    }
+
+    private sealed class CountingReuseStamp : IPdfReleaseStampProcessor
+    {
+        public int Reissues { get; private set; }
+        public bool IsStamped(string path, Guid packageId, Guid sourceVersionId) => true;
+        public Task ApplyAsync(ReleasePackage package, Project project, ReleasePreviewSource source, string pdfPath, CancellationToken ct)
+            => throw new InvalidOperationException("数量增补不得走原始转图路径。");
+        public async Task ReissueAsync(ReleasePackage package, Project project, ReleasePreviewSource source, string pdfPath, CancellationToken ct)
+        {
+            Reissues++;
+            await File.AppendAllTextAsync(pdfPath, "|本次下发2", ct);
+        }
     }
 
     [Fact]
@@ -233,7 +426,7 @@ public sealed class ReleaseRecoveryTests
     }
 
     [Fact]
-    public async Task ArchiveFailureCanRetryWithoutReconversion()
+    public async Task ArchiveFailureDoesNotChangeCompletedConversionAndCanRetryWithoutReconversion()
     {
         using var fixture = await Fixture.CreateAsync();
         var files = DispatchProxy.Create<IProjectFileRepository, FailingArchiveProxy>();
@@ -241,8 +434,8 @@ public sealed class ReleaseRecoveryTests
         proxy.Inner = new InMemoryProjectFileRepository(TimeProvider.System);
         var service = new ReleasePreviewService(fixture.Repository, fixture.Converter, TimeProvider.System,
             new ReleaseDeliveryArchiveService(fixture.Repository, files, TimeProvider.System));
-        Assert.False(await service.ProcessAsync(fixture.Package, default));
-        Assert.Equal(ReleasePreviewState.Pending, (await fixture.Repository.FindReleasePackageAsync(fixture.Package.Id, default))!.PreviewState);
+        Assert.True(await service.ProcessAsync(fixture.Package, default));
+        Assert.Equal(ReleasePreviewState.Succeeded, (await fixture.Repository.FindReleasePackageAsync(fixture.Package.Id, default))!.PreviewState);
         Assert.True(await service.ProcessAsync(fixture.Package, default));
         Assert.Equal(1, fixture.Converter.Calls);
         Assert.Equal(2, proxy.Calls);
@@ -344,12 +537,14 @@ public sealed class ReleaseRecoveryTests
         public int Calls { get; private set; }
         public IReadOnlyList<Guid> LastIds { get; private set; } = [];
         public bool Block { get; set; }
+        public Exception? Failure { get; set; }
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Proceed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateAsync(ReleasePackage package, Project project,
             IReadOnlyList<ReleasePreviewSource> sources, string stagingDirectory, CancellationToken cancellationToken)
         {
             Calls++;
+            if (Failure is not null) throw Failure;
             LastIds = sources.Select(source => source.DocumentId).ToArray();
             Entered.TrySetResult();
             if (Block) await Proceed.Task.WaitAsync(cancellationToken);

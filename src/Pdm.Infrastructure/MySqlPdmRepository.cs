@@ -1510,6 +1510,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             ModelDocumentCount = activity?.ModelDocumentCount,
             DrawingDocumentCount = activity?.DrawingDocumentCount,
             BusinessStatus = activity is null ? null : BuildBusinessStatus(activity),
+            HasReleaseAttention = activity?.HasReleaseAttention ?? false,
+            LatestPublishedAt = activity?.LatestPublishedAt is DateTime published ? new DateTimeOffset(DateTime.SpecifyKind(published, DateTimeKind.Utc)) : null,
+            LatestPurchasedBomPublishedAt = activity?.LatestPurchasedBomPublishedAt is DateTime purchased ? new DateTimeOffset(DateTime.SpecifyKind(purchased, DateTimeKind.Utc)) : null,
+            HasUnreceivedNonStandardRelease = activity?.HasUnreceivedNonStandardRelease ?? false,
             RootDocumentCheckedOutBy = activity?.RootDocumentCheckedOutBy
         };
 
@@ -1540,13 +1544,25 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                    MAX(CASE WHEN package.state IN ('ProcessReview','Approval') THEN 1 ELSE 0 END) has_pending_approval,
                    MAX(CASE WHEN package.state='Rejected' THEN 1 ELSE 0 END) has_rejected_approval,
                    MAX(CASE WHEN package.state='Publishing' THEN 1 ELSE 0 END) is_publishing,
-                   MAX(CASE WHEN package.state='PublishFailed' THEN 1 ELSE 0 END) has_publish_failure
+                   MAX(CASE WHEN package.state='PublishFailed' THEN 1 ELSE 0 END) has_publish_failure,
+                   MAX(CASE WHEN package.state='Published' THEN package.published_at END) latest_published_at,
+                   MAX(CASE WHEN package.state='Published' AND package.release_scope IN ('StandardFormal','StandardSupplement','StandardLongLead',
+                       'ElectricalFormal','ElectricalSupplement','ElectricalLongLead') THEN package.published_at END) latest_purchased_bom_published_at,
+                   MAX(CASE WHEN package.state='Published' AND package.release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','NonStandardLongLead','Nameplate')
+                       AND (supply.release_package_id IS NOT NULL OR package.published_at >= tracking_activation.activated_at)
+                       AND COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(supply.payload_json,'$.receivedAt')),'null'),'')=''
+                       THEN 1 ELSE 0 END) has_unreceived_non_standard_release,
+                   MAX(CASE WHEN package.state='PublishFailed' OR (package.state IN ('Published','Publishing') AND package.locks_documents=1
+                       AND package.release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')
+                       AND package.preview_state IN ('Pending','WaitingForServer','Running','Failed')) THEN 1 ELSE 0 END) has_release_attention
               FROM project p
               LEFT JOIN document d ON d.project_id=p.id
               LEFT JOIN project_reference_root current_root ON current_root.project_id=p.id
               LEFT JOIN reference_snapshot current_snapshot ON current_snapshot.id=current_root.reference_snapshot_id AND current_snapshot.project_id=p.id
               LEFT JOIN document current_root_document ON current_root_document.id=current_snapshot.root_document_id AND current_root_document.project_id=p.id
               LEFT JOIN release_package package ON package.project_id=p.id
+              LEFT JOIN production_tracking_state supply ON supply.release_package_id=package.id AND supply.project_id=p.id AND supply.company_id=p.organization_id
+              LEFT JOIN production_tracking_activation tracking_activation ON tracking_activation.id=1
              WHERE p.id IN @ProjectIds
              GROUP BY p.id
             """,
@@ -2054,6 +2070,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public bool HasRejectedApproval { get; init; }
         public bool IsPublishing { get; init; }
         public bool HasPublishFailure { get; init; }
+        public bool HasReleaseAttention { get; init; }
+        public DateTime? LatestPublishedAt { get; init; }
+        public DateTime? LatestPurchasedBomPublishedAt { get; init; }
+        public bool HasUnreceivedNonStandardRelease { get; init; }
     }
 
     private sealed class WhereUsedSnapshotRow

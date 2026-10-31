@@ -33,7 +33,7 @@ public static class PdmEndpointExtensions
     public static void MapPdmEndpoints(this WebApplication app)
     {
         app.MapGet("/health", HealthAsync).AllowAnonymous();
-        app.MapGet("/api/archive-capabilities", () => Results.Ok(new { referenceWarnings = true })).RequireAuthorization();
+        app.MapGet("/api/archive-capabilities", () => Results.Ok(new { referenceWarnings = true, contextReferences = true, unverifiedReferences = true })).RequireAuthorization();
 
         app.MapPost("/api/auth/login", async (
             LoginRequest request,
@@ -324,7 +324,7 @@ public static class PdmEndpointExtensions
         api.MapPut("/role-permissions/{targetRole}", async (string targetRole, UpdateRolePermissionsRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(MapRolePermissionDirectory(await workflow.UpdateRolePermissionsAsync(targetRole, request.SchemaVersion >= 2 ? request.Permissions.Concat([FunctionPermissionCatalog.SchemaMarker]).ToArray() : request.Permissions, actor, role, cancellationToken)));
+            return Results.Ok(MapRolePermissionDirectory(await workflow.UpdateRolePermissionsAsync(targetRole, request.SchemaVersion >= 3 ? request.Permissions.Concat([FunctionPermissionCatalog.SchemaMarker, ProjectCenterPermissions.SchemaMarker]).ToArray() : request.SchemaVersion >= 2 ? request.Permissions.Concat([FunctionPermissionCatalog.SchemaMarker]).ToArray() : request.Permissions, actor, role, cancellationToken)));
         });
 
         api.MapPost("/role-permissions", async (CreateRoleRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -931,15 +931,16 @@ public static class PdmEndpointExtensions
                 : await drawings.ListAsync(actor, role, includeHistory, projectId, cancellationToken));
         });
 
-        api.MapGet("/production-drawings/{versionId:guid}", async (Guid versionId, HttpContext context, ProductionDrawingService drawings, CancellationToken cancellationToken) =>
+        api.MapGet("/production-drawings/{versionId:guid}", async (Guid versionId, Guid? releasePackageId, HttpContext context, ProductionDrawingService drawings, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var item = (await drawings.ListAsync(actor, role, true, null, cancellationToken)).FirstOrDefault(value => value.VersionId == versionId);
+            var item = (await drawings.ListAsync(actor, role, true, null, cancellationToken))
+                .FirstOrDefault(value => value.VersionId == versionId && (!releasePackageId.HasValue || value.ReleasePackageId == releasePackageId));
             return item is null ? Results.NotFound() : Results.Ok(item);
         });
 
         api.MapGet("/production-drawings/{documentId:guid}/versions/{versionId:guid}/preview", async (
-            Guid documentId, Guid versionId, Guid? modelDocumentId, Guid? modelVersionId, HttpContext context,
+            Guid documentId, Guid versionId, Guid? releasePackageId, Guid? modelDocumentId, Guid? modelVersionId, HttpContext context,
             ProductionDrawingService drawings, IPdmRepository repository, IFileStorage storage,
             PdmWorkflowService workflow, CancellationToken cancellationToken) =>
         {
@@ -951,7 +952,8 @@ public static class PdmEndpointExtensions
             var project = await repository.FindProjectAsync(document.ProjectId, cancellationToken);
             if (project is null) return Results.NotFound();
             var item = (await drawings.ListAsync(actor, role, true, project.Id, cancellationToken))
-                .FirstOrDefault(value => value.VersionId == versionId);
+                .FirstOrDefault(value => value.DocumentId == documentId && value.VersionId == versionId
+                    && (!releasePackageId.HasValue || value.ReleasePackageId == releasePackageId));
             if (item is null) return Results.NotFound();
             var deliveryPackage = await repository.FindReleasePackageAsync(item.ReleasePackageId, cancellationToken);
             if (deliveryPackage is not null) version = PdfTitleBlockSnapshotBuilder.DeliveryVersion(deliveryPackage, version);
@@ -963,7 +965,7 @@ public static class PdmEndpointExtensions
                     return Results.BadRequest(new { detail = "所选三维模型不属于该图纸的同一发布包。" });
                 await workflow.AuditVersionReadAsync(modelDocumentId.Value, modelVersionId.Value, actor, role, "document.production.download", cancellationToken);
                 version = await drawings.EnsureProductionUseAllowedAsync(modelDocumentId.Value, modelVersionId.Value, cancellationToken);
-                if (version.ReleasePackageId != item.ReleasePackageId || !model.StepReady)
+                if (!model.StepReady)
                     throw new PdmConflictException("同包正式 STEP 尚未就绪或已经作废，下载已停止。");
                 expectedFormat = DocumentPreviewFormat.Step;
             }
@@ -991,12 +993,17 @@ public static class PdmEndpointExtensions
             if (project is null) return Results.NotFound();
             if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             var ids = (request.VersionIds ?? []).Where(id => id != Guid.Empty).Distinct().ToArray();
-            if (ids.Length == 0 || ids.Length > 200) return Results.BadRequest(new { detail = "请选择 1–200 张正式图纸。" });
+            var selections = (request.Items ?? []).Distinct().ToArray();
+            var count = selections.Length > 0 ? selections.Length : ids.Length;
+            if (count == 0 || count > 200) return Results.BadRequest(new { detail = "请选择 1–200 张正式图纸。" });
             if (request.Format is not ("Pdf" or "Step")) return Results.BadRequest(new { detail = "下载格式只能是 PDF 或正式 STEP。" });
-            var available = (await drawings.ListAsync(actor, role, true, projectId, cancellationToken))
-                .ToDictionary(item => item.VersionId);
-            if (ids.Any(id => !available.ContainsKey(id))) return Results.BadRequest(new { detail = "所选图纸已作废、已删除或无法访问，不能用于生产。" });
-            var items = ids.Select(id => available[id]).ToArray();
+            var available = await drawings.ListAsync(actor, role, true, projectId, cancellationToken);
+            var chosen = selections.Length > 0
+                ? selections.Select(selection => available.FirstOrDefault(item => item.ReleasePackageId == selection.ReleasePackageId
+                    && item.DocumentId == selection.DocumentId && item.VersionId == selection.VersionId)).ToArray()
+                : ids.Select(id => available.FirstOrDefault(item => item.VersionId == id)).ToArray();
+            if (chosen.Any(item => item is null)) return Results.BadRequest(new { detail = "所选发布包图纸已作废、已删除或无法访问，不能用于生产。" });
+            var items = chosen.Select(item => item!).ToArray();
             foreach (var item in items)
                 await drawings.EnsureProductionUseAllowedAsync(item.DocumentId, item.VersionId, cancellationToken);
             var archiveEntries = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
@@ -1073,7 +1080,6 @@ public static class PdmEndpointExtensions
                             var preview = modelVersion.Preview;
                             if (modelDocument.Kind is not (DocumentKind.Assembly or DocumentKind.Part)
                                 || modelVersion.Status != DocumentVersionStatus.Released
-                                || modelVersion.ReleasePackageId != item.ReleasePackageId
                                 || preview?.Format != DocumentPreviewFormat.Step
                                 || !string.Equals(preview.SourceSha256, modelVersion.Sha256, StringComparison.OrdinalIgnoreCase))
                                 throw new PdmConflictException($"三维模型 {model.DrawingNumber} 的正式 STEP 与发布包不匹配，下载已停止。");
@@ -1896,6 +1902,25 @@ public static class PdmEndpointExtensions
             if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             var items = await previewService.ListProjectItemsAsync(projectId, releasePackageId, cancellationToken);
             return Results.Ok(items.Select(MapReleasePreviewItem).ToArray());
+        });
+
+        api.MapGet("/projects/{projectId:guid}/release-preview-items/{releasePackageId:guid}/{documentId:guid}/file", async (
+            Guid projectId, Guid releasePackageId, Guid documentId, HttpContext context, IPdmRepository repository,
+            ReleasePreviewService previewService, IFileStorage storage, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
+            var project = await repository.FindProjectAsync(projectId, cancellationToken);
+            if (project is null) return Results.NotFound();
+            var item = (await previewService.ListProjectItemsAsync(projectId, releasePackageId, cancellationToken))
+                .FirstOrDefault(value => value.DocumentId == documentId);
+            if (item is null) return Results.NotFound();
+            if (!item.Succeeded) return Results.Conflict(new { detail = "该发布文件尚未转出完成，请刷新列表后重试。" });
+            await storage.VerifyPreviewFileAsync(project,
+                new DocumentPreviewArtifact(item.Format, item.PreviewRelativePath, item.FileLength, item.Sha256, item.Sha256), cancellationToken);
+            var path = StorageLocationPolicy.ResolveUnder(project.VaultLocation, item.PreviewRelativePath);
+            var stream = await storage.OpenReadAsync(path, cancellationToken);
+            return Results.File(stream, item.Format == DocumentPreviewFormat.Pdf ? "application/pdf" : "model/step", enableRangeProcessing: true);
         });
 
         api.MapPost("/release-packages/{releasePackageId:guid}/preview-items/{documentId:guid}/retry", async (Guid releasePackageId, Guid documentId, HttpContext context, IPdmRepository repository, ReleasePreviewService previewService, CancellationToken cancellationToken) =>

@@ -3,12 +3,16 @@ import RawDrawerPanel from './RawDrawerPanel.vue'
 import PanelActions from './PanelActions.vue'
 import { ElAutocomplete } from 'element-plus'
 
-import { Boxes, Calendar, ClipboardCheck, ClipboardList, FolderOpen, FolderTree, Info, LayoutDashboard, Rocket, Search, Settings, ShoppingCart, Wallet } from '@lucide/vue'
-import { computed, ref, watch } from 'vue'
-import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectSummary } from '../types'
+import { Search } from '@lucide/vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectSummary, ReleasePackageSummary } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 import { useProjectTabUpdates } from '../projectTabUpdates'
+import { projectReleaseAttention } from '../releasePreviewState'
+import ReleaseAttentionBorder from './ReleaseAttentionBorder.vue'
 import ProjectSettingsDrawer from './ProjectSettingsDrawer.vue'
+import { useProjectCenterAccess } from '../projectCenterAccess'
+const projectAccess = useProjectCenterAccess()
 
 export type ProjectTab = 'overview' | 'information' | 'budget' | 'project-plan' | 'opl' | 'files' | 'validation-plan' | 'documents' | 'bom' | 'release' | 'procurement' | 'records'
 
@@ -16,6 +20,8 @@ const props = defineProps<{
   project: ProjectSummary
   projects: ProjectSummary[]
   activeTab: ProjectTab
+  releasePackages?: ReleasePackageSummary[]
+  releasePreviewIssues?: Record<string, boolean>
   activeProjectDocumentStatus?: string
   activeDocumentCounts?: { all: number; model: number; drawing: number }
   currentUsername?: string
@@ -31,7 +37,19 @@ const props = defineProps<{
 const emit = defineEmits<{ back: []; switch: [projectId: string]; tab: [tab: ProjectTab, hasUpdates?: boolean] }>()
 const displayUserName = useUserDisplayName()
 const { pending: tabUpdates } = useProjectTabUpdates(props)
+const attentionNow = ref(Date.now())
+const attentionTimer = window.setInterval(() => { attentionNow.value = Date.now() }, 60000)
+onBeforeUnmount(() => window.clearInterval(attentionTimer))
+function releaseAttention(item: ProjectSummary) {
+  return projectReleaseAttention(item, item.id === props.project.id ? props.releasePackages : undefined, Boolean(props.releasePreviewIssues?.[item.id]), attentionNow.value)
+}
+const activeReleaseAttention = computed(() => releaseAttention(props.project))
+function releaseAttentionTitle(item: ProjectSummary) {
+  const tone = releaseAttention(item)
+  return tone === 'error' ? '发布或图纸转出存在未完成事项，请到发布页查看处理' : tone === 'new' ? item.hasUnreceivedNonStandardRelease ? '有非标件发布包待供应链接收，接收后停止绿色提示' : '有新的标准件或电气件发布，绿色呼吸边框自发布时间起提示24小时' : undefined
+}
 function updateTitle(key: ProjectTab, label: string) {
+  if (key === 'release' && activeReleaseAttention.value) return releaseAttentionTitle(props.project)
   const update = tabUpdates.value[key]
   if (!update) return undefined
   return `${label}有未查看更新，查看后清除提醒${update.updatedAt ? ` · ${new Date(update.updatedAt).toLocaleString('zh-CN')}` : ''}${update.actor ? ` · ${displayUserName(update.actor)}` : ''}`
@@ -42,19 +60,19 @@ function projectDesignLeads(project: ProjectSummary) {
 }
 
 const tabs = [
-  { key: 'overview', label: '概览', icon: LayoutDashboard },
-  { key: 'information', label: '信息', icon: Info },
-  { key: 'files', label: '文件', icon: FolderOpen },
-  { key: 'project-plan', label: '计划', icon: Calendar },
-  { key: 'opl', label: 'OPL', icon: ClipboardList },
-  { key: 'budget', label: '预算', icon: Wallet },
-  { key: 'validation-plan', label: '质量', icon: ClipboardCheck },
-  { key: 'documents', label: '图档', icon: FolderTree },
-  { key: 'bom', label: 'BOM', icon: Boxes },
-  { key: 'release', label: '发布', icon: Rocket },
-  { key: 'procurement', label: '备料', icon: ShoppingCart },
-  { key: 'records', label: '记录', icon: ClipboardList },
-] satisfies Array<{ key: ProjectTab; label: string; icon: typeof LayoutDashboard }>
+  { key: 'overview', label: '概览' },
+  { key: 'information', label: '信息' },
+  { key: 'files', label: '文件' },
+  { key: 'project-plan', label: '计划' },
+  { key: 'opl', label: 'OPL' },
+  { key: 'budget', label: '预算' },
+  { key: 'validation-plan', label: '质量' },
+  { key: 'documents', label: '图档' },
+  { key: 'bom', label: 'BOM' },
+  { key: 'release', label: '发布' },
+  { key: 'procurement', label: '备料' },
+  { key: 'records', label: '记录' },
+] satisfies Array<{ key: ProjectTab; label: string }>
 
 const rootProject = computed(() => {
   if (!props.project.parentProjectId) return props.project
@@ -88,7 +106,7 @@ const executionEngineers = computed(() => {
   })
 })
 const executionEngineerNames = computed(() => executionEngineers.value.map(item => displayUserName(item)).join('、') || '待分配')
-const visibleTabs = computed(() => tabs.filter(tab => props.project.canReadContent || tab.key === 'overview' || tab.key === 'records'))
+const visibleTabs = computed(() => tabs.filter(tab => projectAccess.canViewTab(tab.key) && (props.project.canReadContent || tab.key === 'overview' || tab.key === 'records')))
 const switchConfirmationPending = ref(false)
 const projectSettingsOpen = ref(false)
 const projectBrowserOpen = ref(false)
@@ -204,7 +222,7 @@ function drawingDocumentCount(project: ProjectSummary) {
               @select="item => selectQuickProject(item.id)" @blur="quickProjectQuery = ''">
               <template #default="{ item }"><strong :title="item.code">{{ item.code }}</strong><small :title="item.name">{{ item.name }}</small></template>
             </ElAutocomplete>
-            <button type="button" class="pdm-project-switcher__search-icon" aria-label="浏览项目" aria-haspopup="dialog" :aria-expanded="projectBrowserOpen" :disabled="switchConfirmationPending || Boolean(switchingProjectId)" title="浏览项目" @click="projectBrowserOpen = true"><Search :size="12" /></button>
+            <button type="button" class="pdm-project-switcher__search-icon" aria-label="浏览项目" aria-haspopup="dialog" :aria-expanded="projectBrowserOpen" :disabled="switchConfirmationPending || Boolean(switchingProjectId)" title="浏览项目" @click="projectBrowserOpen = true"><Search class="arrow" :size="16" /></button>
           </div>
         </div>
       </section>
@@ -237,13 +255,16 @@ function drawingDocumentCount(project: ProjectSummary) {
             v-for="item in familyProjects"
             :key="item.id"
             type="button"
-            :class="{ 'is-active': item.id === project.id }"
+            :class="{ 'is-active': item.id === project.id, 'is-release-attention': Boolean(releaseAttention(item)) }"
+            :data-release-attention="releaseAttention(item) || undefined"
+            :title="releaseAttentionTitle(item)"
             :aria-current="item.id === project.id ? 'page' : undefined"
             :aria-label="`选择项目号 ${item.code}`"
             :aria-busy="item.id === switchingProjectId"
             :disabled="switchConfirmationPending || Boolean(switchingProjectId)"
             @click="item.id !== project.id && emit('switch', item.id)"
           >
+            <ReleaseAttentionBorder v-if="releaseAttention(item)" :tone="releaseAttention(item) as 'error' | 'new'" />
             <span class="pdm-project-family__identity"><strong>{{ item.code }}</strong><small :title="item.name">{{ item.name }}</small></span>
             <span class="pdm-project-family__meta">
               <span class="pdm-project-family__state">{{ item.id === switchingProjectId ? '切换中…' : documentStatus(item, item.id === project.id) }}</span>
@@ -261,8 +282,8 @@ function drawingDocumentCount(project: ProjectSummary) {
     <section class="pdm-project-detail">
       <header class="pdm-project-detail__header">
         <nav class="pdm-project-tabs pdm-tabs" aria-label="项目功能">
-          <button v-for="tab in visibleTabs" :key="tab.key" type="button" :class="{ 'is-active': activeTab === tab.key }" :title="updateTitle(tab.key, tab.label)" @click="emit('tab', tab.key, Boolean(tabUpdates[tab.key]))"><component :is="tab.icon" :size="15" /><span>{{ tab.label }}</span><i v-if="tabUpdates[tab.key]" class="pdm-tab-update-dot" aria-hidden="true" /></button>
-          <button type="button" class="pdm-project-tabs__settings" aria-label="项目设置" @click="projectSettingsOpen = true"><Settings :size="15" /><span>设置</span></button>
+          <button v-for="tab in visibleTabs" :key="tab.key" type="button" :class="{ 'is-active': activeTab === tab.key, 'is-release-attention': tab.key === 'release' && Boolean(activeReleaseAttention) }" :data-release-attention="tab.key === 'release' ? activeReleaseAttention || undefined : undefined" :title="updateTitle(tab.key, tab.label)" @click="emit('tab', tab.key, Boolean(tabUpdates[tab.key]))"><ReleaseAttentionBorder v-if="tab.key === 'release' && activeReleaseAttention" :tone="activeReleaseAttention as 'error' | 'new'" /><span>{{ tab.label }}</span><i v-if="tabUpdates[tab.key]" class="pdm-tab-update-dot" aria-hidden="true" /></button>
+          <button type="button" v-if="projectAccess.write.value && projectAccess.canViewTab('information')" class="pdm-project-tabs__settings" aria-label="项目设置" @click="projectSettingsOpen = true"><span>设置</span></button>
         </nav>
       </header>
       <slot />
@@ -330,3 +351,34 @@ function drawingDocumentCount(project: ProjectSummary) {
     />
   </div>
 </template>
+
+<style scoped>
+.pdm-project-tabs button.is-release-attention, .pdm-project-family__list button.is-release-attention { position: relative; }
+/* From Uiverse.io by vinodjangid07，输入框宽度随项目侧栏收缩。 */
+.pdm-project-sidebar__context { height: calc(var(--pdm-tab-primary) + 2 * var(--pdm-tabs-padding)); flex-basis: calc(var(--pdm-tab-primary) + 2 * var(--pdm-tabs-padding)); padding: var(--pdm-tabs-padding) var(--pdm-content-inset); border-color: transparent; }
+.pdm-project-switcher__display { height: var(--pdm-tab-primary); gap: var(--pdm-control-gap); padding: 0; overflow: visible; border: 0; border-radius: 0; background: transparent; font-size: 16px; font-weight: 400; }
+.pdm-project-switcher__display:not(.is-disabled):hover,
+.pdm-project-switcher__display:not(.is-disabled):focus-within { transform: none; border-color: transparent; box-shadow: none; }
+.pdm-project-switcher__display > :deep(.pdm-project-switcher__input) { width: 170px; flex: 1 1 170px; }
+.pdm-project-switcher__display :deep(.pdm-project-switcher__input .el-input__wrapper) { height: var(--pdm-tab-primary); min-height: var(--pdm-tab-primary); padding: 0 0 0 15px; border: 1px solid #d0d7e1; border-radius: 6px; background: #fff; box-shadow: none !important; }
+.pdm-project-switcher__display :deep(.pdm-project-switcher__input .el-input__wrapper.is-focus) { border-color: #292524; }
+.pdm-project-switcher__display :deep(.pdm-project-switcher__input .el-input__inner) { height: calc(var(--pdm-tab-primary) - 2px); line-height: calc(var(--pdm-tab-primary) - 2px); font-size: .7em; color: #292524; }
+.pdm-project-switcher__search-icon { width: var(--pdm-tab-primary); min-width: var(--pdm-tab-primary); height: var(--pdm-tab-primary); flex: 0 0 var(--pdm-tab-primary); padding: 0; border: none; border-radius: 6px; color: #fff; background: #292524; box-shadow: none; transition: all .3s; font-size: .7em; gap: 4px; }
+.pdm-project-switcher__search-icon:hover:not(:disabled) { color: #fff; }
+.pdm-project-switcher__search-icon:hover:not(:disabled) .arrow { margin-right: 0; animation: jello-vertical .9s both; transform-origin: left; }
+.pdm-project-switcher__search-icon:active:not(:disabled) { transform: scale(.9); }
+.pdm-project-switcher__search-icon:focus-visible { outline: 2px solid #292524; outline-offset: 2px; }
+@keyframes jello-vertical {
+  0%, 100% { transform: scale3d(1, 1, 1); }
+  30% { transform: scale3d(.75, 1.25, 1); }
+  40% { transform: scale3d(1.25, .75, 1); }
+  50% { transform: scale3d(.85, 1.15, 1); }
+  65% { transform: scale3d(1.05, .95, 1); }
+  75% { transform: scale3d(.95, 1.05, 1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pdm-project-switcher__search-icon { transition: none; }
+  .pdm-project-switcher__search-icon:hover:not(:disabled) .arrow { animation: none; }
+  .pdm-project-switcher__search-icon:active:not(:disabled) { transform: none; }
+}
+</style>

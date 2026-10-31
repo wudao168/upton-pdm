@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useProjectCenterAccess } from '../projectCenterAccess'
+const { write: projectWritable } = useProjectCenterAccess()
 import { computed, ref, watch } from 'vue'
 import ValidationPlanManager from './ValidationPlanManager.vue'
 import QualityInspectionPanel from './QualityInspectionPanel.vue'
@@ -13,8 +15,8 @@ const activeDetail = ref('')
 const activeTab = ref('quality')
 const access = ref<Record<string, string[]>>({})
 let accessGeneration = 0
-function writableIds(kind: string) { return familyProjects.value.filter(x => access.value[x.id]?.includes(kind)).map(x => x.id) }
-const canEditQuality = computed(() => access.value[props.projectId]?.includes('quality') ?? false)
+function writableIds(kind: string) { if (!projectWritable.value) return []; return familyProjects.value.filter(x => access.value[x.id]?.includes(kind)).map(x => x.id) }
+const canEditQuality = computed(() => projectWritable.value && (access.value[props.projectId]?.includes('quality') ?? false))
 watch([() => props.requestedProjectId, () => props.requestedSection], ([id]) => { if (id) activeTab.value = props.requestedSection || 'quality' }, { immediate: true })
 function selectTab(tab: string) { activeTab.value = tab }
 

@@ -22,14 +22,26 @@ public sealed partial class PdmWorkflowService
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectContentView, cancellationToken);
         await RequirePermissionAsync(actor, role, "document.view", cancellationToken);
         var allowed = new List<DocumentVersionVerificationRequest>();
+        // A request has one actor/role and policy. Folder/file checks remain per
+        // document; do not repeat the identical project lookup for every component.
+        var projectAccess = new Dictionary<Guid, bool>();
         foreach (var request in requests)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!await repository.HasDocumentAccessAsync(request.DocumentId, actor, role, FolderAccess.View, cancellationToken)) continue;
             var document = await repository.FindDocumentAsync(request.DocumentId, cancellationToken);
             if (document is null) continue;
-            try { await ProjectPermissionPolicy.RequireAsync(repository, document.ProjectId, actor, role, "document.view", cancellationToken); }
-            catch (UnauthorizedAccessException) { continue; }
+            if (!projectAccess.TryGetValue(document.ProjectId, out var canViewProject))
+            {
+                try
+                {
+                    await ProjectPermissionPolicy.RequireAsync(repository, document.ProjectId, actor, role, "document.view", cancellationToken);
+                    canViewProject = true;
+                }
+                catch (UnauthorizedAccessException) { canViewProject = false; }
+                projectAccess[document.ProjectId] = canViewProject;
+            }
+            if (!canViewProject) continue;
             allowed.Add(request);
         }
         var verified = allowed.Count == 0 ? []

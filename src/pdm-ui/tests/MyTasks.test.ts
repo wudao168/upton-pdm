@@ -3,6 +3,98 @@ import { describe, expect, it, vi } from 'vitest'
 import MyTasks from '../src/components/MyTasks.vue'
 
 describe('MyTasks', () => {
+  it('图纸与审批通知进入审批任务，转图及普通业务消息仍在系统消息，计数和入口同步', async () => {
+    const categories = ['DrawingReviewAssigned', 'DrawingReviewSupervisorApproval', 'DrawingReviewChangesRequested',
+      'DrawingReviewWritebackTimedOut', 'ReleaseApprovalPending', 'ReleaseApprovalRejected', 'WorkflowValidationPlan',
+      'WorkflowMaterialCode', 'MaterialMasterRejected', 'MaterialCodeApplicationRejected', 'project-plan-approval', 'project-application',
+      'ReleasePreviewPending', 'ReleasePreviewResult', 'work-hours', 'project-plan']
+    const notifications = categories.map((category, index) => ({
+      id: category, recipient: 'engineer', category, title: category, content: category + '内容', projectId: 'project',
+      sourceKey: category, createdAt: '2026-10-28T02:00:00Z', ...(index === 2 ? { readAt: '2026-10-28T03:00:00Z' } : {}),
+    }))
+    const wrapper = mount(MyTasks, { props: {
+      tasks: [{ id: 'task', projectId: 'project', projectCode: 'P001', projectName: '测试项目', releasePackageId: 'release',
+        releasePackageNumber: 'RP-001', stage: 'Approval', packageState: 'Approval', createdAt: '2026-10-28T02:00:00Z' }],
+      notifications, locks: [], materialCodeTasks: [], passwordResetTasks: [], pending: false,
+      onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn(),
+    } })
+    const approval = wrapper.findAll('[role="tab"]').find(button => button.text().includes('审批任务'))!
+    const system = wrapper.findAll('[role="tab"]').find(button => button.text().includes('系统消息'))!
+    expect(approval.text()).toBe('审批任务（12）')
+    expect(system.text()).toBe('系统消息（4）')
+    await approval.trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(13)
+    expect(wrapper.get('tbody').text()).toContain('DrawingReviewAssigned')
+    expect(wrapper.get('tbody').text()).not.toContain('ReleasePreviewResult')
+    expect(wrapper.get('tbody').text()).toContain('已读')
+    const row = wrapper.findAll('tbody tr').find(item => item.text().includes('DrawingReviewAssigned'))!
+    await row.findAll('button').find(button => button.text() === '查看审核')!.trigger('click')
+    expect(wrapper.emitted('openNotification')).toEqual([[notifications[0]]])
+    await system.trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(4)
+    expect(wrapper.get('tbody').text()).toContain('ReleasePreviewResult')
+    expect(wrapper.get('tbody').text()).not.toContain('DrawingReviewAssigned')
+    wrapper.unmount()
+  })
+
+  it('页签只统计未读消息和未处理任务，已读与任务完成后动态归零并保留历史', async () => {
+    const notifications = ['ReleaseApprovalRejected', 'work-hours', 'ProjectTodo'].map(category => ({
+      id: category, recipient: 'engineer', category, title: category, content: '测试消息',
+      sourceKey: category, createdAt: '2026-10-28T02:00:00Z',
+    }))
+    const wrapper = mount(MyTasks, { props: {
+      tasks: [{ id: 'task', projectId: 'project', projectCode: 'P001', projectName: '测试项目', releasePackageId: 'release',
+        releasePackageNumber: 'RP-001', stage: 'Approval', packageState: 'Approval', createdAt: '2026-10-28T02:00:00Z' }],
+      notifications, locks: [], materialCodeTasks: [], passwordResetTasks: [], pending: false,
+      onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn(),
+    } })
+    const tab = (name: string) => wrapper.findAll('[role="tab"]').find(button => button.text().startsWith(name))!
+    expect(tab('全部待办').text()).toBe('全部待办（4）')
+    expect(tab('审批任务').text()).toBe('审批任务（2）')
+
+    await wrapper.setProps({ notifications: notifications.map(item => ({ ...item, readAt: '2026-10-28T03:00:00Z' })) })
+    expect(tab('全部待办').text()).toBe('全部待办（1）')
+    expect(tab('审批任务').text()).toBe('审批任务（1）')
+    expect(tab('系统消息').text()).toBe('系统消息（0）')
+    expect(tab('项目待办').text()).toBe('项目待办（0）')
+
+    await wrapper.setProps({ tasks: [] })
+    expect(tab('全部待办').text()).toBe('全部待办（0）')
+    expect(tab('审批任务').text()).toBe('审批任务（0）')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(3)
+    await tab('系统消息').trigger('click')
+    expect(wrapper.get('tbody').text()).toContain('已读')
+    expect(wrapper.get('tbody').text()).toContain('work-hours')
+
+    await wrapper.setProps({ notifications: [...(wrapper.props('notifications') ?? []), {
+      ...notifications[1], id: 'new-message', title: '新消息',
+    }] })
+    expect(tab('全部待办').text()).toBe('全部待办（1）')
+    expect(tab('系统消息').text()).toBe('系统消息（1）')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  it('未读计数覆盖全部分页而非当前页，历史条数不变', async () => {
+    const notifications = Array.from({ length: 38 }, (_, index) => ({
+      id: `message-${index}`, recipient: 'engineer', category: 'work-hours', title: `消息${index}`, content: '测试消息',
+      sourceKey: `message-${index}`, createdAt: '2026-10-28T02:00:00Z',
+      ...(index < 37 ? { readAt: '2026-10-28T03:00:00Z' } : {}),
+    }))
+    const wrapper = mount(MyTasks, { props: {
+      tasks: [], notifications, locks: [], materialCodeTasks: [], passwordResetTasks: [], pending: false,
+      onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn(),
+    } })
+    expect(wrapper.get('[role="tab"]').text()).toBe('全部待办（1）')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(20)
+    expect(wrapper.get('tbody').text()).not.toContain('未读')
+    expect(wrapper.get('.pdm-task-pagination').text()).toContain('共 38 条')
+    await wrapper.get('[aria-label="下一页"]').trigger('click')
+    expect(wrapper.get('tbody').text()).toContain('未读')
+    expect(wrapper.get('[role="tab"]').text()).toBe('全部待办（1）')
+    wrapper.unmount()
+  })
+
   it('shows persistent rejection notifications and deep-links to the release package', async () => {
     const onMarkAllNotificationsRead = vi.fn().mockResolvedValue(undefined)
     const notification = {

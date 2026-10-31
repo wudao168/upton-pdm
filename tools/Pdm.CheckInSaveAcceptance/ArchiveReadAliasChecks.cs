@@ -37,17 +37,24 @@ internal static partial class Program
    });
    var app=new Proxy(appType,call=>{
     switch(call.MethodName){case "get_ActiveDoc":return null;case "GetDocuments":return mode=="ordinary-open"||mode=="hidden-repeat-null"||mode=="unresolved-null"?new object[0]:new[]{model};
-     case "GetOpenDocumentByName":return null;case "GetDocumentVisible":return visibility;case "DocumentVisible":visibility=(bool)call.Args[0];return null;
+     case "GetOpenDocumentByName":return null;case "GetConfigurationNames":return mode=="missing-config"?new[]{"Other"}:new[]{"Default"};case "GetDocumentVisible":return visibility;case "DocumentVisible":visibility=(bool)call.Args[0];return null;
      case "OpenDoc6":opens++;if(mode=="cold-null"||mode=="unresolved-null"||opens>1&&(mode.EndsWith("null")||mode.EndsWith("between"))){var output=call.Args;output[4]=65536;output[5]=2;return new System.Runtime.Remoting.Messaging.ReturnMessage(null,output,output.Length,call.LogicalCallContext,call);}return model;case "CloseDoc":closes++;return null;
      default:throw new Exception("不得关闭现有窗口或切换模型："+call.MethodName);}
    }).GetTransparentProxy();
    var addin=New("PdmAddin");SetField(addin,"application",app);SetField(addin,"currentTree",node);
    var cards=Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(Type("CadDocumentKind"),typeof(IReadOnlyList<string>)));
    Exception failure=null;object properties=null;
-   try{properties=TreeCall(addin,"ReadArchivePreflightProperties",node,cards,null);}catch(System.Reflection.TargetInvocationException error){failure=error.InnerException;}
-   var allowed=mode!="unresolved-null"&&(mode=="same"||mode=="ordinary-open"||mode.EndsWith("null")||mode.EndsWith("between"));
+   var policyType=assembly.GetType("Upton.Pdm.Domain.ArchiveWarningPolicy",true);var policy=Activator.CreateInstance(policyType);Set(policy,"BlockAll",mode=="missing-config");Type("ArchiveWarningGate").GetMethod("Configure",Flags).Invoke(null,new[]{policy});
+   try{if(mode=="missing-config"){var nodes=(IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(Type("CadTreeNode")));nodes.Add(node);TreeCall(addin,"ValidateSavedModelConfigurations",nodes,CancellationToken.None);}properties=TreeCall(addin,"ReadArchivePreflightProperties",node,cards,null,null);}catch(System.Reflection.TargetInvocationException error){failure=error.InnerException;}
+   if(mode=="drawing"){
+    Check(failure==null&&reads==0&&opens==0&&closes==0,"drawing：按预期路径读取已保存源文件，不读取、打开或关闭另一条路径的同名工程图");
+    Check(!((IDictionary)properties).Contains("全局/Description")&&File.ReadAllText(expected)=="saved native fixture","drawing：另一工程图的属性不会污染预期图档，原文件内容保持完整");
+    continue;
+   }
+   var rawSaved=mode!="different"&&mode!="dirty"&&mode!="missing"&&mode!="missing-config";
+   var allowed=rawSaved;
    Check((failure==null)==allowed,mode+"：仅相同内容且无未保存修改的零件别名可读取");
-   Check(closes==(mode=="ordinary-open"?1:0)&&visibility,mode+"：不关闭同名用户窗口，恢复原可见设置");
+   Check(closes==0&&visibility,mode+"：不关闭同名用户窗口，恢复原可见设置");
    Check(File.ReadAllText(expected)=="saved native fixture"&&(string)Get(node,"FullPath")==expected&&Equals(Get(node,"DocumentId"),id),mode+"：原文件、文件名及PLM身份不被替换");
    if(!allowed){
     Check(reads==0||mode=="mutates",mode+"：冲突不能读取其他图档的属性");
@@ -58,8 +65,9 @@ internal static partial class Program
     }
     continue;
    }
-   Check((string)((IDictionary)properties)["全局/Description"]=="fixture description",mode+"：完整读取已验证的属性和值");
-   if(mode!="same"&&!mode.EndsWith("null")&&!mode.EndsWith("between"))continue;
+   if(rawSaved)Check(!((IDictionary)properties).Contains("全局/Description")&&reads==0&&opens==0,mode+"：3D源文件按原字节处理，不读取同名窗口的原生属性、不触发同名加载");
+   else Check((string)((IDictionary)properties)["全局/Description"]=="fixture description",mode+"：完整读取已验证的属性和值");
+   if(!rawSaved&&mode!="same"&&!mode.EndsWith("null")&&!mode.EndsWith("between"))continue;
    using(var handler=new ReferenceRecoveryHandler(request=>new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent("[]")}))
    using(var client=(IDisposable)New("PdmApiClient","http://fixture.invalid/"))
    {

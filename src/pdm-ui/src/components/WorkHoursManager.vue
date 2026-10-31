@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, Clock, Download, Plus, RefreshCw } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { ElMessage } from '../statusMessage'
@@ -7,15 +7,17 @@ import { userErrorMessage } from '../userErrorMessage'
 import { rememberedTab } from '../pagePreference'
 import WorkHoursSettings from './WorkHoursSettings.vue'
 import WorkHoursCompliance from './WorkHoursCompliance.vue'
-import { readWorkHours, readWorkHoursHistory, saveWorkHours } from '../api'
+import { moveWorkHoursDay, readWorkHours, readWorkHoursHistory, saveWorkHours } from '../api'
 import { chinaToday, monthDays, shiftMonth } from '../projectCalendar'
 import { addDays } from '../projectWorkbench'
 import { loadGlobalStatusContent } from '../globalStatusContent'
 import { downloadProcurementWorkbook } from '../procurementWorkbook'
-import { dateRange, departmentPeople, hoursOn, reportRows, validateHours, weekDates, workingDay, workHoursDepartmentTree } from '../workHours'
+import { appendWorkHoursDay, dateRange, departmentPeople, hoursOn, reportRows, validateHours, weekDates, workingDay, workHoursDepartmentTree } from '../workHours'
 import type { HolidayMap, WorkHourEntry, WorkHourInput, WorkHourRevision, WorkHoursProject, WorkHoursReportRow, WorkHoursView } from '../workHours'
 
 const props = defineProps<{ token: string; companyId: string; active: boolean }>()
+const workHoursRoot = ref<HTMLElement>(), calendarMenuElement = ref<HTMLElement>()
+const operationContext = () => JSON.stringify([props.companyId, props.token])
 const failure = (cause: unknown, fallback: string) => cause instanceof Error ? userErrorMessage(cause.message) : fallback
 const tab = rememberedTab('work-hours.tab', 'entry', ['entry','report','settings']), mode = rememberedTab('work-hours.mode', 'calendar', ['calendar','week'])
 const own = ref<WorkHoursView>(), report = ref<WorkHoursView>()
@@ -134,6 +136,91 @@ async function saveWeek() {
 }
 function cancelChanges() { resetForm(); resetWeek() }
 const copyOpen = ref(false), copyEntries = ref<WorkHourInput[]>([]), copyDate = ref('')
+type DaySnapshot = { context: string; companyId: string; date: string; rowVersion: number; entries: WorkHourInput[]; projects: WorkHoursProject[]; mode: 'copy' | 'cut' }
+const dayClipboard = ref<DaySnapshot>(), transferSource = ref<DaySnapshot>()
+const copyMode = ref<'copy' | 'cut'>('copy'), copyTarget = ref('')
+const dragSource = ref<DaySnapshot>(), dropTarget = ref('')
+const calendarMenu = ref<{ date: string; left: number; top: number }>()
+const copiedDayEntries = computed(() => appendWorkHoursDay(daily.value, copyEntries.value, selected.value))
+function daySnapshot(date: string, mode: DaySnapshot['mode']): DaySnapshot {
+  const values = entries.value.filter(entry => entry.date === date)
+  return { context: operationContext(), companyId: props.companyId, date, mode,
+    rowVersion: own.value?.sheets.find(sheet => sheet.month === date.slice(0, 7))?.rowVersion ?? 0,
+    entries: values.map(entry => ({ date, projectId: entry.projectId, location: entry.location, hours: entry.hours })),
+    projects: allProjects.value.filter(project => values.some(entry => entry.projectId === project.id)).map(project => ({ ...project })) }
+}
+function canCopyDate(date: string) { return !!own.value && !saving.value && !loading.value && !dirty.value && date <= today.value && hoursOn(entries.value, date) > 0 }
+function copyCalendarDay(date: string, mode: DaySnapshot['mode']) {
+  if (!mayLeave() || !canCopyDate(date)) return
+  dayClipboard.value = daySnapshot(date, mode)
+  ElMessage.success(mode === 'cut' ? '已标记剪切，请选择目标日期粘贴；确认前源记录仍保留。' : '已复制当日工时，请选择其他日期后粘贴。')
+}
+function copyDay() { copyCalendarDay(selected.value, 'copy') }
+async function prepareDayPaste(source: DaySnapshot, date: string) {
+  if (!mayLeave() || loading.value || !own.value || source.context !== operationContext()) return
+  if (date > today.value) return ElMessage.warning('实际工时不能填写未来日期。')
+  if (date === source.date) return ElMessage.warning('请选择其他日期粘贴工时。')
+  if (selected.value !== date) await selectDay(date)
+  if (source.context !== operationContext() || selected.value !== date || !own.value || loading.value) return
+  copyEntries.value = source.entries.map(entry => ({ ...entry, date }))
+  for (const project of source.projects) if (!own.value.projects.some(item => item.id === project.id)) own.value.projects.push({ ...project })
+  copyDate.value = source.date; copyTarget.value = date; copyMode.value = source.mode; transferSource.value = source; copyOpen.value = true
+}
+function pasteDay() { if (dayClipboard.value) void prepareDayPaste(dayClipboard.value, selected.value) }
+async function removeCalendarDay(date: string) {
+  if (!mayLeave() || !canCopyDate(date)) return
+  const source = daySnapshot(date, 'copy')
+  try { await ElMessageBox.confirm(`确认删除 ${date} 的全部 ${source.entries.length} 条工时（共 ${number(total(source.entries))} 小时）？修改历史仍保留。`, '删除当日工时', { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' }) }
+  catch { return }
+  if (source.context !== operationContext() || !mayLeave()) return
+  if (source.rowVersion !== own.value?.sheets.find(sheet => sheet.month === date.slice(0, 7))?.rowVersion) return ElMessage.warning('工时已更新，请重新选择日期操作。')
+  if (await persist(date, date, [])) { if (dayClipboard.value?.mode === 'cut' && dayClipboard.value.date === date) dayClipboard.value = undefined }
+}
+function clearDrag() { dragSource.value = undefined; dropTarget.value = '' }
+function startDayDrag(event: DragEvent, date: string) {
+  if (!mayLeave() || !canCopyDate(date) || copyOpen.value) { event.preventDefault(); return }
+  calendarMenu.value = undefined; dragSource.value = daySnapshot(date, 'copy')
+  event.dataTransfer?.setData('application/x-uplm-work-hours', 'copy')
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copy'
+}
+function canDropDate(date: string) { return !!dragSource.value && dragSource.value.context === operationContext() && !saving.value && !loading.value && !dirty.value && !copyOpen.value && date <= today.value && date !== dragSource.value.date }
+function overDay(event: DragEvent, date: string) {
+  if (!canDropDate(date)) return
+  event.preventDefault(); dropTarget.value = date
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+}
+function leaveDay(event: DragEvent, date: string) {
+  if (!(event.relatedTarget instanceof Node && (event.currentTarget as HTMLElement).contains(event.relatedTarget)) && dropTarget.value === date) dropTarget.value = ''
+}
+function dropDay(event: DragEvent, date: string) {
+  event.preventDefault(); const source = dragSource.value, allowed = canDropDate(date); clearDrag()
+  if (source && allowed) void prepareDayPaste(source, date)
+}
+async function showCalendarMenu(event: MouseEvent, date: string) {
+  event.preventDefault(); if (!mayLeave() || loading.value || !own.value || copyOpen.value) return
+  const context = operationContext(), bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  await selectDay(date)
+  if (context !== operationContext() || selected.value !== date || error.value) return
+  calendarMenu.value = { date, left: Math.max(0, Math.min(event.clientX || bounds.left, window.innerWidth - 164)), top: Math.max(0, Math.min(event.clientY || bounds.bottom, window.innerHeight - 182)) }
+  await nextTick(); calendarMenuElement.value?.focus({ preventScroll: true })
+}
+function dismissCalendarMenu(event: Event) {
+  if (!(event.target instanceof Node && calendarMenuElement.value?.contains(event.target))) calendarMenu.value = undefined
+}
+function menuKeys(event: KeyboardEvent) {
+  if (event.key === 'Escape') { event.preventDefault(); const date = calendarMenu.value?.date; calendarMenu.value = undefined; workHoursRoot.value?.querySelector<HTMLButtonElement>(`[data-work-hours-date="${date}"]`)?.focus({ preventScroll: true }); return }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault(); const items = [...(calendarMenuElement.value?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])], index = items.indexOf(document.activeElement as HTMLButtonElement)
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length
+  items[next]?.focus({ preventScroll: true })
+}
+function calendarAction(action: 'copy' | 'cut' | 'paste' | 'delete') {
+  const date = calendarMenu.value?.date; calendarMenu.value = undefined; if (!date) return
+  workHoursRoot.value?.querySelector<HTMLButtonElement>(`[data-work-hours-date="${date}"]`)?.focus({ preventScroll: true })
+  if (action === 'copy' || action === 'cut') copyCalendarDay(date, action)
+  else if (action === 'paste' && dayClipboard.value) void prepareDayPaste(dayClipboard.value, date)
+  else if (action === 'delete') void removeCalendarDay(date)
+}
 async function copyPreviousDay() {
   if (!mayLeave()) return
   const context = `${props.companyId}|${props.token}|${selected.value}`
@@ -146,10 +233,27 @@ async function copyPreviousDay() {
     if (!copyEntries.value.length) return ElMessage.warning('上一工作日没有可复制的工时记录。')
     // 被复制的历史项目也保留可读的名称。
     for (const item of source.projects) if (!own.value?.projects.some(x => x.id === item.id)) own.value?.projects.push(item)
-    copyDate.value = previous; copyOpen.value = true
+    copyDate.value = previous; copyTarget.value = selected.value; copyMode.value = 'copy'; transferSource.value = undefined; copyOpen.value = true
   } catch (cause) { ElMessage.error(failure(cause, '上一工作日工时读取失败，请稍后重试。')) }
 }
-async function saveCopied() { if (await persist(selected.value, selected.value, [...daily.value, ...copyEntries.value])) copyOpen.value = false }
+async function saveCopied() {
+  if (!copyOpen.value || saving.value || !copyEntries.value.length || copyTarget.value !== selected.value) return
+  const invalid = copyEntries.value.map(entry => validateHours([entry])).find(Boolean) || validateHours(copiedDayEntries.value)
+  if (invalid) return ElMessage.warning(invalid)
+  if (copyMode.value === 'copy') { if (await persist(selected.value, selected.value, copiedDayEntries.value)) copyOpen.value = false; return }
+  const source = transferSource.value, context = operationContext()
+  if (!source || source.context !== context) return
+  const target = copyTarget.value
+  saving.value = true
+  try {
+    await moveWorkHoursDay({ companyId: props.companyId, sourceDate: source.date, targetDate: target,
+      sourceRowVersion: source.rowVersion, targetRowVersion: own.value?.sheets.find(sheet => sheet.month === target.slice(0, 7))?.rowVersion ?? 0 }, props.token)
+    if (context !== operationContext()) return
+    copyOpen.value = false; dayClipboard.value = undefined; transferSource.value = undefined
+    await loadOwn(); ElMessage.success('工时已移动到目标日期，源日期记录已移除并保留修改历史。')
+  } catch (cause) { if (context === operationContext()) ElMessage.error(failure(cause, '剪切工时未完成，请刷新核对后重试。')) }
+  finally { saving.value = false }
+}
 function copyWeekProjects() {
   if (weekDirty.value) return ElMessage.warning('请先保存或取消本周修改。')
   const context = `${props.companyId}|${props.token}|${selected.value}`
@@ -263,31 +367,37 @@ function exportReport() {
 function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value) { event.preventDefault(); event.returnValue = '' } }
 window.addEventListener('beforeunload', beforeUnload)
 onBeforeUnmount(() => { ownGeneration++; reportGeneration++; window.removeEventListener('beforeunload', beforeUnload) })
-watch(() => [props.token, props.companyId], () => { ownGeneration++; reportGeneration++; copyOpen.value = false; detailOpen.value = false; historyOpen.value = false; history.value = []; detailRows.value = []; copyEntries.value = []; own.value = undefined; report.value = undefined; reportInitialized = false; rows.value = []; weekBaseline.value = '[]'; resetForm(); selected.value = chinaToday(); month.value = selected.value.slice(0, 7) + '-01'; Object.assign(filter, { from: month.value, to: selected.value === month.value ? selected.value : addDays(selected.value,-1), username: '', department: '', projectId: '', location: '' }); if (props.active) void loadOwn() }, { immediate: true })
-watch(() => props.active, active => { if (active && !own.value && !loading.value) void loadOwn() })
+onMounted(() => { document.addEventListener('pointerdown', dismissCalendarMenu); window.addEventListener('scroll', dismissCalendarMenu, true); window.addEventListener('resize', dismissCalendarMenu) })
+onBeforeUnmount(() => { document.removeEventListener('pointerdown', dismissCalendarMenu); window.removeEventListener('scroll', dismissCalendarMenu, true); window.removeEventListener('resize', dismissCalendarMenu) })
+watch(() => [props.token, props.companyId], () => { ownGeneration++; reportGeneration++; copyOpen.value = false; dayClipboard.value = undefined; transferSource.value = undefined; calendarMenu.value = undefined; clearDrag(); detailOpen.value = false; historyOpen.value = false; history.value = []; detailRows.value = []; copyEntries.value = []; own.value = undefined; report.value = undefined; reportInitialized = false; rows.value = []; weekBaseline.value = '[]'; resetForm(); selected.value = chinaToday(); month.value = selected.value.slice(0, 7) + '-01'; Object.assign(filter, { from: month.value, to: selected.value === month.value ? selected.value : addDays(selected.value,-1), username: '', department: '', projectId: '', location: '' }); if (props.active) void loadOwn() }, { immediate: true })
+watch(() => props.active, active => { if (!active) { calendarMenu.value = undefined; clearDrag(); copyOpen.value = false }; if (active && !own.value && !loading.value) void loadOwn() })
 void loadGlobalStatusContent().then(data => { holidays.value = new Map(data.holidayCalendars.flatMap(c => c.days.map(day => [day.date, day] as const))); calendarReady.value = true })
   .catch(() => { calendarError.value = '节假日标记暂时读取失败，仍可填写工时及查看服务端完整性检查，请刷新后重试。' })
 </script>
 
 <template>
-  <section class="work-hours" aria-label="工时管理" :aria-busy="loading || reporting || saving">
+  <section ref="workHoursRoot" class="work-hours" aria-label="工时管理" :aria-busy="loading || reporting || saving">
     <div class="wh-tabs pdm-tabs" role="group" aria-label="工时页签"><button :aria-pressed="tab === 'entry'" :class="{ active: tab === 'entry' }" @click="changeTab('entry')">填报工时</button><button :aria-pressed="tab === 'report'" :class="{ active: tab === 'report' }" @click="changeTab('report')">汇总工时</button><button v-if="own?.canManageSettings ?? own?.canManage" :aria-pressed="tab === 'settings'" :class="{ active: tab === 'settings' }" @click="changeTab('settings')">工时设置</button></div>
     <p v-if="error" class="wh-error" role="alert">{{ error }} <button @click="tab === 'entry' ? loadOwn() : loadReport()">重试</button></p>
     <p v-if="calendarError" class="wh-warning" role="status">{{ calendarError }}</p>
     <template v-if="tab === 'entry'">
       <header class="wh-toolbar">
         <div class="wh-title"><Clock :size="17" /><strong>我的工时</strong><span>{{ own?.displayName }}</span></div>
-        <div class="wh-controls"><button aria-label="上一期" @click="move(-1)"><ChevronLeft :size="15" /></button><strong>{{ mode === 'calendar' ? month.slice(0, 7) : `${week[0]} 至 ${week[6]}` }}</strong><button aria-label="下一期" @click="move(1)"><ChevronRight :size="15" /></button><button @click="selectDay(today)">回到今天</button><button :disabled="loading || saving || dirty" @click="loadOwn"><RefreshCw :size="14" />刷新</button></div>
-        <div class="wh-controls wh-modes"><button :class="{ active: mode === 'calendar' }" @click="changeMode('calendar')">月历</button><button :class="{ active: mode === 'week' }" @click="changeMode('week')">周表</button></div>
       </header>
-      <div class="wh-summary"><span>本月累计 <b>{{ number(monthHours) }}</b> 小时</span><span>已填 <b>{{ new Set(monthEntries.map(x => x.date)).size }}</b> 天</span><button :disabled="!missed.length" @click="selectDay(missed[0]!)">未填工作日 <b>{{ missed.length }}</b> 天</button><button :disabled="!incomplete.length" @click="selectDay(incomplete[0]!)">填写不足 <b>{{ incomplete.length }}</b> 天</button><span>按工时设置中的应填名单检查</span><button @click="showHistory">修改记录</button></div>
+      <div class="wh-summary"><span>本月累计 <b>{{ number(monthHours) }}</b> 小时</span><span>已填 <b>{{ new Set(monthEntries.map(x => x.date)).size }}</b> 天</span><button :disabled="!missed.length" @click="selectDay(missed[0]!)">未填工作日 <b>{{ missed.length }}</b> 天</button><button :disabled="!incomplete.length" @click="selectDay(incomplete[0]!)">填写不足 <b>{{ incomplete.length }}</b> 天</button><span>按工时设置中的应填名单检查</span><button @click="showHistory">修改记录</button>
+        <div class="wh-summary-controls">
+          <div class="wh-controls"><button aria-label="上一期" @click="move(-1)"><ChevronLeft :size="15" /></button><strong>{{ mode === 'calendar' ? month.slice(0, 7) : `${week[0]} 至 ${week[6]}` }}</strong><button aria-label="下一期" @click="move(1)"><ChevronRight :size="15" /></button><button @click="selectDay(today)">回到今天</button><button :disabled="loading || saving || dirty" @click="loadOwn"><RefreshCw :size="14" />刷新</button></div>
+          <div class="wh-controls wh-modes"><button :class="{ active: mode === 'calendar' }" @click="changeMode('calendar')">月历</button><button :class="{ active: mode === 'week' }" @click="changeMode('week')">周表</button></div>
+        </div>
+      </div>
       <div v-if="mode === 'calendar'" class="wh-calendar-layout">
         <div class="pdm-panel wh-calendar">
           <div class="wh-weekdays"><span v-for="(day,index) in ['周一','周二','周三','周四','周五','周六','周日']" :key="day" :class="{ 'wh-rest': index === 6 }">{{ day }}</span></div>
-          <div class="wh-day-grid"><button v-for="day in days" :key="day" class="wh-day" :class="{ outside: day.slice(0,7) !== month.slice(0,7), selected: day === selected, today: day === today, missed: visibleDayStatus(day) === '未填', rest: !workingDay(day, holidays) }" :aria-label="`${day} ${number(hoursOn(entries,day))}小时`" :aria-pressed="day === selected" @click="selectDay(day)"><span class="wh-date">{{ Number(day.slice(8)) }} <small v-if="day === today">今天</small><small v-else-if="holidays.get(day)">{{ holidays.get(day)?.isOffDay ? holidays.get(day)?.name : '补班' }}</small></span><b v-if="hoursOn(entries,day)">{{ number(hoursOn(entries,day)) }} 小时</b><span v-if="hoursOn(entries,day)" class="wh-day-records"><span v-for="entry in entries.filter(x => x.date === day)" :key="entry.id" class="wh-day-record" :title="`${entry.projectCode} · ${entry.projectName} · ${entry.location} · ${number(entry.hours)}小时`"><span class="wh-day-project"><span class="wh-day-project-code">{{ entry.projectCode }}</span><span class="wh-day-project-name">{{ entry.projectName }}</span></span><span class="wh-day-record-hours">{{ number(entry.hours) }}小时</span></span></span><span v-if="visibleDayStatus(day)" class="wh-day-status" :class="{ warning: visibleDayStatus(day) === '待核对' }">{{ visibleDayStatus(day) }}</span></button></div>
+          <div class="wh-day-grid"><button v-for="day in days" :key="day" class="wh-day" :class="{ outside: day.slice(0,7) !== month.slice(0,7), selected: day === selected, today: day === today, missed: visibleDayStatus(day) === '未填', rest: !workingDay(day, holidays), 'is-drag-source': dragSource?.date === day, 'is-drop-target': dropTarget === day, 'is-cut': dayClipboard?.mode === 'cut' && dayClipboard.date === day }" :aria-label="`${day} ${number(hoursOn(entries,day))}小时`" :aria-pressed="day === selected" @click="selectDay(day)" :data-work-hours-date="day" :draggable="canCopyDate(day) && !copyOpen" @dragstart="startDayDrag($event, day)" @dragover="overDay($event, day)" @dragleave="leaveDay($event, day)" @drop="dropDay($event, day)" @dragend="clearDrag" @contextmenu="showCalendarMenu($event, day)"><span class="wh-date">{{ Number(day.slice(8)) }} <small v-if="day === today">今天</small><small v-else-if="holidays.get(day)">{{ holidays.get(day)?.isOffDay ? holidays.get(day)?.name : '补班' }}</small></span><b v-if="hoursOn(entries,day)">{{ number(hoursOn(entries,day)) }} 小时</b><span v-if="hoursOn(entries,day)" class="wh-day-records"><span v-for="entry in entries.filter(x => x.date === day)" :key="entry.id" class="wh-day-record" :title="`${entry.projectCode} · ${entry.projectName} · ${entry.location} · ${number(entry.hours)}小时`"><span class="wh-day-project"><span class="wh-day-project-code">{{ entry.projectCode }}</span><span class="wh-day-project-name">{{ entry.projectName }}</span></span><span class="wh-day-record-hours">{{ number(entry.hours) }}小时</span></span></span><span v-if="visibleDayStatus(day)" class="wh-day-status" :class="{ warning: visibleDayStatus(day) === '待核对' }">{{ visibleDayStatus(day) }}</span></button></div>
           <p class="wh-note">仅已生效名单参与完整性检查，默认周日休息，节假日按日历安排。未填不代表缺勤。</p>
         </div>
         <aside class="pdm-panel wh-day-editor"><header><strong>{{ selected }} · 当日工时</strong><span>合计 {{ number(total(daily)) }} 小时</span></header>
+          <div class="wh-controls"><button type="button" :disabled="saving || loading || dirty || !daily.length" @click="copyDay">复制当日工时</button><button type="button" :disabled="saving || loading || dirty || !dayClipboard || selected === dayClipboard.date || selected > today" @click="pasteDay">粘贴工时到此日</button><span v-if="dayClipboard" class="wh-note">{{ dayClipboard.mode === 'cut' ? '待剪切' : '已复制' }} {{ dayClipboard.date }}</span></div>
           <form @submit.prevent="saveDay"><label>日期<input type="date" :value="selected" :max="today" :disabled="saving || loading" aria-label="填报日期" @change="selectDay(($event.target as HTMLInputElement).value)"></label><fieldset :disabled="saving || loading || !own || selected > today"><label>所在地<select v-model="form.location" aria-label="所在地"><option>厂内</option><option>厂外</option></select></label><label>项目号<el-select v-model="form.projectId" filterable placeholder="搜索主项目号、子项目号或名称" aria-label="填报项目" :disabled="saving || loading || selected > today"><el-option v-for="project in allProjects" :key="project.id" :value="project.id" :label="`${project.code} · ${project.name}`" /></el-select></label><label>项目名称<input :value="projectName" readonly aria-label="自动带出项目名称"></label><label>工时数<input v-model.number="form.hours" type="number" min="0.5" max="24" step="0.5" required aria-label="工时数"></label><div class="wh-controls"><button v-for="value in [1,2,3,4,6,8,10,12]" :key="value" type="button" @click="form.hours = value">{{ value }}小时</button></div><div class="wh-controls"><button type="submit" class="pdm-primary-action">{{ editing ? '保存修改' : '保存并继续' }}</button><button v-if="formDirty || editing" type="button" @click="resetForm()">取消修改</button><button type="button" :disabled="dirty || !calendarReady" @click="copyPreviousDay">复制上一工作日</button></div></fieldset></form>
           <p v-if="selected > today" class="wh-note">未来日期仅供查看，实际工时请在当天或之后填写。</p>
           <div v-if="recent.length" class="wh-recent"><span>最近项目</span><button v-for="p in recent" :key="p.id" :disabled="saving || selected > today" @click="form.projectId = p.id">{{ p.code }} · {{ p.name }}</button></div>
@@ -319,7 +429,19 @@ void loadGlobalStatusContent().then(data => { holidays.value = new Map(data.holi
       <table v-else-if="reportMode === 'projects'"><thead><tr><th>主项目号</th><th>项目名称</th><th>工时合计</th><th>厂内</th><th>厂外</th><th>人数</th><th>操作</th></tr></thead><tbody><tr v-for="p in projectSummary" :key="p.id"><td>{{ p.code }}</td><td>{{ p.name }}</td><td>{{ number(p.hours) }}小时</td><td>{{ number(p.inside) }}</td><td>{{ number(p.outside) }}</td><td>{{ p.people.size }}</td><td><button @click="showDetails(`${p.code} · ${p.name}`,filtered.filter(x => x.entry.rootProjectId === p.id))">展开项目明细</button></td></tr></tbody></table>
       <table v-else><thead><tr><th>日期</th><th>人员</th><th>所在地</th><th>工时数</th><th>项目号</th><th>项目名称</th><th>所属主项目</th></tr></thead><tbody><tr v-for="row in filtered" :key="row.entry.id"><td>{{ row.entry.date }}</td><td>{{ row.person.displayName }}</td><td>{{ row.entry.location }}</td><td>{{ number(row.entry.hours) }}</td><td>{{ row.entry.projectCode }}</td><td>{{ row.entry.projectName }}</td><td>{{ row.entry.rootProjectCode }}</td></tr></tbody></table><p v-if="!filtered.length" class="wh-empty">当前筛选范围没有填报记录</p></div><p class="wh-note">子项目工时上卷至主项目，不重复累计。整日未填按人员的全部项目记录核对，不受项目、所在地筛选影响；仅作提醒，不作为缺勤判断。</p></section></div>
     </template>
-    <el-dialog v-model="copyOpen" :title="`复制 ${copyDate} 的记录到 ${selected}`" width="660px" append-to-body :close-on-click-modal="!saving"><p>核对后保存，已有记录不会被覆盖；重复项目及所在地请先合并。</p><div v-for="(entry,index) in copyEntries" :key="index" class="wh-copy-row"><span>{{ allProjects.find(x => x.id === entry.projectId)?.code }} · {{ allProjects.find(x => x.id === entry.projectId)?.name }}</span><select v-model="entry.location" aria-label="复制记录所在地"><option>厂内</option><option>厂外</option></select><input v-model.number="entry.hours" type="number" min="0.5" max="24" step="0.5" aria-label="复制记录工时"><button @click="copyEntries.splice(index,1)">移除</button></div><template #footer><button :disabled="saving" @click="copyOpen=false">取消</button><button class="pdm-primary-action" :disabled="saving || !copyEntries.length" @click="saveCopied">保存复制工时</button></template></el-dialog>
+    <Teleport to="body"><div v-if="calendarMenu" ref="calendarMenuElement" class="wh-calendar-menu el-dropdown-menu" role="menu" tabindex="-1" :aria-label="`${calendarMenu.date}工时操作`" :style="{ left: `${calendarMenu.left}px`, top: `${calendarMenu.top}px` }" @keydown="menuKeys">
+      <strong>{{ calendarMenu.date }}</strong>
+      <button type="button" role="menuitem" :disabled="!canCopyDate(calendarMenu.date)" @click="calendarAction('copy')">复制</button>
+      <button type="button" role="menuitem" :disabled="!canCopyDate(calendarMenu.date)" @click="calendarAction('cut')">剪切</button>
+      <button type="button" role="menuitem" :disabled="!dayClipboard || dayClipboard.context !== operationContext() || calendarMenu.date === dayClipboard.date || calendarMenu.date > today || saving || loading || dirty" @click="calendarAction('paste')">粘贴</button>
+      <button type="button" role="menuitem" class="is-danger" :disabled="!canCopyDate(calendarMenu.date)" @click="calendarAction('delete')">删除</button>
+    </div></Teleport>
+    <el-dialog v-model="copyOpen" :title="`${copyMode === 'cut' ? '剪切' : '复制'} ${copyDate} 的记录到 ${copyTarget}`" width="660px" append-to-body :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving">
+      <p>{{ copyMode === 'cut' ? '确认后一次性移动源日期的全部工时，取消不会删除源日期记录；目标日期已有记录按项目、所在地合并。' : '核对后保存，保留目标日期原有记录；同一项目、同一所在地的工时合并累加。' }}</p>
+      <div v-for="(entry,index) in copyEntries" :key="index" class="wh-copy-row"><span>{{ allProjects.find(x => x.id === entry.projectId)?.code || entry.projectId }} · {{ allProjects.find(x => x.id === entry.projectId)?.name }} · {{ entry.location }}</span><input v-model.number="entry.hours" type="number" min="0.5" max="24" step="0.5" aria-label="复制记录工时" :readonly="copyMode === 'cut'" :disabled="saving"><button v-if="copyMode === 'copy'" :disabled="saving" @click="copyEntries.splice(index,1)">移除</button></div>
+      <p>保存后当日合计 {{ number(total(copiedDayEntries)) }} 小时</p><p v-if="validateHours(copiedDayEntries)" class="wh-error">{{ total(copiedDayEntries) > 24 ? '当日工时合计不能超过24小时' : validateHours(copiedDayEntries) }}</p>
+      <template #footer><button :disabled="saving" @click="copyOpen = false">取消</button><button class="pdm-primary-action" :disabled="saving || !copyEntries.length" @click="saveCopied">{{ copyMode === 'cut' ? '确认剪切' : '保存复制工时' }}</button></template>
+    </el-dialog>
     <el-drawer v-model="detailOpen" :title="detailTitle" size="min(900px, 95vw)" append-to-body><div class="wh-table-wrap"><table><thead><tr><th>日期</th><th>人员</th><th>项目号</th><th>项目名称</th><th>所在地</th><th>工时</th></tr></thead><tbody><tr v-for="row in detailRows" :key="row.entry.id"><td>{{ row.entry.date }}</td><td>{{ row.person.displayName }}</td><td>{{ row.entry.projectCode }}</td><td>{{ row.entry.projectName }}</td><td>{{ row.entry.location }}</td><td>{{ number(row.entry.hours) }}</td></tr></tbody></table><p v-if="!detailRows.length" class="wh-empty">暂无明细</p></div></el-drawer>
     <el-drawer v-model="historyOpen" :title="`${month.slice(0,7)} · 本人工时修改记录`" size="min(760px,95vw)" append-to-body><p v-if="historyLoading">正在读取…</p><p v-else-if="!history.length">本月暂无修改记录。</p><details v-for="item in history" :key="item.id" class="wh-history"><summary>{{ new Date(item.at).toLocaleString('zh-CN',{hour12:false}) }} · {{ item.actor }} · {{ item.dates.join('、') }}</summary><p v-if="item.reason">原因：{{ item.reason }}</p><div v-for="(list,index) in [item.before,item.after]" :key="index"><b>{{ index === 0 ? '修改前' : '修改后' }}</b><p v-if="!list.length">无记录</p><p v-for="entry in list" :key="entry.id">{{ entry.date }} · {{ entry.projectCode }} · {{ entry.projectName }} · {{ entry.location }} · {{ number(entry.hours) }}小时</p></div></details></el-drawer>
   </section>
@@ -331,7 +453,10 @@ void loadGlobalStatusContent().then(data => { holidays.value = new Map(data.holi
 .wh-report-bottom{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;flex:1;min-height:320px;align-items:stretch}.wh-report-list{min-width:0;min-height:0;display:flex;flex-direction:column;padding:8px 12px;overflow:hidden}.wh-report-list>header{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;min-height:56px;margin-bottom:10px;flex-shrink:0;box-sizing:border-box}.wh-report-list .wh-report-table{min-height:0}.wh-report-list table{min-width:650px}.wh-report-list>.wh-note{flex-shrink:0}
 @media(max-width:1100px){.wh-report-bottom{flex:none;grid-template-columns:minmax(0,1fr);grid-auto-rows:360px}}
 .wh-report-filters :deep(.el-select__wrapper),.wh-report-filters :deep(.el-date-editor),.work-hours .wh-report-filters>label>select,.work-hours .wh-report-filters>button{height:32px;min-height:32px;box-sizing:border-box}
+.wh-summary{column-gap:5px}.wh-summary>span:last-of-type{margin-left:0}.wh-summary-controls{display:flex;align-items:center;gap:5px;margin-left:auto;min-width:0;flex-wrap:wrap}.wh-summary-controls>.wh-controls{flex-wrap:nowrap!important}
 .wh-day-records{display:flex;flex-direction:column;gap:3px;align-self:stretch;min-height:0;overflow-y:auto;flex:1 1 0;font-size:11px}.wh-day-record{display:flex;align-items:baseline;justify-content:space-between;gap:2px 6px;flex-shrink:0;line-height:1.4;min-width:0}.wh-day-project{display:flex;gap:4px;min-width:0;flex:1}.wh-day-project-code{white-space:nowrap;flex-shrink:0}.wh-day-project-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.wh-day-record-hours{white-space:nowrap;font-variant-numeric:tabular-nums;flex-shrink:0}.wh-day .wh-date,.wh-day>b,.wh-day .wh-day-status{flex-shrink:0}
 @media(max-width:1100px){.wh-day-record{flex-wrap:wrap}.wh-day-project{flex-basis:100%}.wh-day-record-hours{margin-left:auto}.wh-calendar-layout{display:flex;flex-direction:column;flex:none;min-height:0}.wh-calendar{min-height:720px}.wh-day-editor{overflow:visible;flex-shrink:0}.wh-summary{gap:10px}.wh-summary>span:last-of-type{margin-left:0}.wh-charts{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:760px){.wh-calendar-layout{display:flex;flex-direction:column;min-height:0}.wh-calendar{min-height:720px}.wh-day-editor{overflow:visible}.wh-day-grid{grid-template-rows:repeat(6,minmax(60px,1fr))}.wh-toolbar{gap:8px}.wh-controls{gap:4px}.wh-day{padding:4px!important;gap:4px!important;font-size:11px}.wh-day .wh-muted{display:none}.wh-charts{display:block}.wh-charts section+section{margin-top:5px}.wh-report-table table{min-width:650px}.wh-summary b{font-size:15px}.wh-weekdays span{padding:6px 2px}.wh-copy-row{flex-wrap:wrap}.wh-copy-row>span{flex-basis:100%}}
+.wh-day[draggable="true"]{cursor:grab}.wh-day.is-drag-source,.wh-day.is-cut{opacity:.6}.wh-day.is-drop-target{box-shadow:inset 0 0 0 2px var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft)}.wh-day.is-cut .wh-date::after{content:'待剪切';font-size:10px;color:var(--pdm-muted)}
+.wh-calendar-menu{position:fixed;z-index:3000;width:156px;box-sizing:border-box;padding:5px;border:1px solid var(--pdm-container-border);border-radius:0;background:#fff;color:var(--pdm-text);box-shadow:0 4px 14px #0002;font:12px var(--pdm-font-ui)}.wh-calendar-menu>strong{display:block;padding:4px 8px;border-bottom:1px solid var(--pdm-container-border)}.wh-calendar-menu>button{display:block;width:100%;min-height:30px;padding:4px 8px;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}.wh-calendar-menu>button:is(:hover,:focus-visible){background:var(--pdm-tabs-selected);outline:0}.wh-calendar-menu>button:disabled{opacity:.4;cursor:default}.wh-calendar-menu>button.is-danger{color:var(--pdm-danger)}
 </style>

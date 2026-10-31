@@ -10,7 +10,7 @@ public static class ProcurementTrackingAggregation
         var result = new List<ProjectProcurementTrackingItem>();
         foreach (var material in items.GroupBy(row => (row.ProjectCode, row.SubprojectCode, Code(row.MaterialCode))))
         {
-            var first = material.First();
+            var first = material.First() with { Files = material.SelectMany(row => row.Files).DistinctBy(file => file.Id).ToArray() };
             var rows = source.Where(row => Code(row.MaterialCode) == material.Key.Item3)
                 .DistinctBy(row => (Code(row.OrganizationCode), row.RecordKind, Code(row.LineId))).ToArray();
             var prs = rows.Where(row => row.RecordKind == "PR").ToArray();

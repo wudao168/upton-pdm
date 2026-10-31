@@ -17,7 +17,7 @@
     line-height: 18px !important;
     white-space: nowrap !important;
     overflow-wrap: normal !important;
-    transition: background-color 200ms ease, color 200ms ease, border-color 200ms ease, box-shadow 200ms ease !important;
+    transition: background-color var(--pdm-transition-fast), color var(--pdm-transition-fast), border-color var(--pdm-transition-fast), box-shadow var(--pdm-transition-fast) !important;
     --pdm-button-icon-size: 16px !important;
   }
   :root body button[data-pdm-button-size] :where(span:not(.el-icon), strong, em, small) {
@@ -35,6 +35,44 @@
     --pdm-button-icon-size: 14px !important;
   }
   :root body button[data-pdm-button-size="inline"][data-pdm-button-fit="compact"] { width: 60px !important; }
+  :root body .pdm-drawing-actions {
+    display: flex;
+    flex-wrap: nowrap !important;
+    align-items: center;
+    justify-content: center;
+    gap: var(--pdm-control-gap) !important;
+  }
+  :root body .pdm-drawing-actions button[data-pdm-button-size] {
+    display: inline-flex !important;
+    width: 36px !important;
+    min-width: 36px !important;
+    max-width: 36px !important;
+    height: 24px !important;
+    min-height: 24px !important;
+    max-height: 24px !important;
+    flex: 0 0 36px !important;
+    margin: 0 !important;
+    padding: 0 4px !important;
+  }
+  :root body .pdm-bom-drawing-links {
+    flex-wrap: nowrap !important;
+    gap: var(--pdm-control-gap) !important;
+  }
+  :root body .pdm-bom-drawing-links .pdm-bom-drawing-link {
+    box-sizing: border-box !important;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 24px !important;
+    width: 24px !important;
+    min-width: 24px !important;
+    max-width: 24px !important;
+    height: 24px !important;
+    min-height: 24px !important;
+    max-height: 24px !important;
+    padding: 0 !important;
+    line-height: 22px !important;
+  }
   :root body button:is([data-pdm-button-size="icon"], [data-pdm-button-size="inline-icon"]) {
     width: var(--pdm-symbol-toolbar) !important;
     min-width: var(--pdm-symbol-toolbar) !important;
@@ -45,7 +83,8 @@
     padding: 0 !important;
     font-size: 16px !important;
   }
-  :root body button[data-pdm-button-size="inline-icon"] {
+  :root body :is(button[data-pdm-button-size="inline-icon"], .pdm-bom-row-drag-handle) {
+    flex: 0 0 auto !important;
     width: var(--pdm-symbol-compact) !important;
     min-width: var(--pdm-symbol-compact) !important;
     max-width: var(--pdm-symbol-compact) !important;
@@ -53,6 +92,9 @@
     min-height: var(--pdm-symbol-compact) !important;
     max-height: var(--pdm-symbol-compact) !important;
     font-size: 14px !important;
+    font-family: var(--pdm-font-ui) !important;
+    font-weight: 500 !important;
+    line-height: 18px !important;
     --pdm-button-icon-size: 14px !important;
   }
   :root body button[data-pdm-button-size] :is(svg, .el-icon) { width: 16px !important; height: 16px !important; }
@@ -79,6 +121,24 @@
   .pdm-bom-version-picker { max-width: 100% !important; flex-wrap: wrap !important; margin-left: 0 !important; }
   .pdm-bom-release-strip { flex: 0 0 auto !important; flex-wrap: wrap !important; gap: var(--pdm-control-gap) !important; }
   .pdm-bom-release-strip > div:not(.pdm-bom-release-strip-actions) { flex: 1 1 150px !important; }
+  .pdm-bom-selection-toolbar.is-category-bom:not(.is-release-comparison) {
+    justify-content: flex-start;
+    max-width: 100%;
+    gap: var(--pdm-control-gap) !important;
+    overflow: visible;
+  }
+  .pdm-bom-selection-toolbar.is-category-bom:not(.is-release-comparison) > :is(.pdm-bom-selection-actions, .pdm-bom-filters, .pdm-bom-version-picker) {
+    flex: 0 1 auto !important;
+    align-items: center;
+    max-width: 100% !important;
+    margin: 0 !important;
+    gap: var(--pdm-control-gap) !important;
+  }
+  :root body .pdm-bom-selection-toolbar.is-category-bom:not(.is-release-comparison) button[data-pdm-button-size] {
+    width: auto !important;
+    min-width: 60px !important;
+    flex: 0 1 auto !important;
+  }
   .pdm-project-code-cell { grid-template-columns: 24px minmax(0, auto) 24px !important; }
   @media(max-width:1100px) { .pdm-project-code-cell { grid-template-columns: 24px minmax(0, auto) !important; } }
 }

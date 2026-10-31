@@ -132,13 +132,24 @@ function stageLabel(stage: string | number) {
 }
 
 function notificationActionLabel(notification: UserNotification) {
+  if (notification.category.startsWith('DrawingReview')) return '查看审核'
+  if (notification.category === 'WorkflowValidationPlan') return '查看验证计划'
+  if (notification.category === 'WorkflowMaterialCode') return '查看BOM'
+  if (notification.category === 'MaterialCodeApplicationRejected') return '查看料号申请'
+  if (notification.category === 'project-plan-approval') return '查看计划'
   if (notification.category === 'stocked-material') return '查看常备件'
   if (notification.category === 'project-application') return '查看立项申请'
   if (notification.category.startsWith('EditLock')) return '查看图档'
   if (notification.category === 'ProjectTodo') return notification.projectId ? '查看项目' : '查看待办'
-  return notification.category === 'MaterialMasterRejected' || notification.category === 'MaterialCodeApplicationRejected'
+  return notification.category === 'MaterialMasterRejected'
     ? '查看料品'
     : '查看发布包'
+}
+
+function isApprovalNotification(notification: UserNotification) {
+  return notification.category.startsWith('DrawingReview') || notification.category.startsWith('ReleaseApproval')
+    || ['WorkflowValidationPlan', 'WorkflowMaterialCode', 'MaterialMasterRejected', 'MaterialCodeApplicationRejected',
+      'project-plan-approval', 'project-application'].includes(notification.category)
 }
 
 function attentionIndex(value: EditLockSummary['attentionLevel']) {
@@ -181,7 +192,7 @@ const rows = computed<TaskCenterRow[]>(() => [
   })),
   ...props.notifications.filter(notification => notification.category !== 'ProjectTodo').map(notification => ({
     key: `notification-${notification.id}`,
-    kind: 'notification' as const,
+    kind: isApprovalNotification(notification) ? 'approval' as const : 'notification' as const,
     status: notification.readAt ? '已读' : '未读',
     statusClass: notification.readAt ? 'is-ok' : 'is-alert',
     title: notification.title,
@@ -240,11 +251,12 @@ const rows = computed<TaskCenterRow[]>(() => [
   })),
 ].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()))
 
+const pendingRows = computed(() => rows.value.filter(row => !row.notification?.readAt))
 const filterCounts = computed(() => ({
-  all: rows.value.length,
-  todo: props.notifications.filter(item => item.category === 'ProjectTodo').length,
-  notification: props.notifications.filter(item => item.category !== 'ProjectTodo').length,
-  approval: props.tasks.length,
+  all: pendingRows.value.length,
+  todo: pendingRows.value.filter(item => item.kind === 'todo').length,
+  notification: pendingRows.value.filter(item => item.kind === 'notification').length,
+  approval: pendingRows.value.filter(item => item.kind === 'approval').length,
   material: materialTaskRows.value.length,
   program: props.programTemplateTasks.length,
   lock: lockGroups.value.length,
@@ -354,7 +366,7 @@ async function resetPassword(task: PasswordResetTask) {
   <section class="pdm-project-manager pdm-task-center" aria-label="我的待办">
     <nav class="pdm-task-filters pdm-tabs" role="tablist" aria-label="待办类型">
       <button type="button" role="tab" :aria-selected="taskFilter === 'all'" @click="setTaskFilter('all')">全部待办（{{ filterCounts.all }}）</button>
-      <button v-if="filterCounts.todo" type="button" role="tab" :aria-selected="taskFilter === 'todo'" @click="setTaskFilter('todo')">项目待办（{{ filterCounts.todo }}）</button>
+      <button v-if="notifications.some(item => item.category === 'ProjectTodo')" type="button" role="tab" :aria-selected="taskFilter === 'todo'" @click="setTaskFilter('todo')">项目待办（{{ filterCounts.todo }}）</button>
       <button type="button" role="tab" :aria-selected="taskFilter === 'approval'" @click="setTaskFilter('approval')">审批任务（{{ filterCounts.approval }}）</button>
       <button type="button" role="tab" :aria-selected="taskFilter === 'material'" @click="setTaskFilter('material')">料号审批（{{ filterCounts.material }}）</button>
       <button v-if="programTemplateTasks.length" type="button" role="tab" :aria-selected="taskFilter === 'program'" @click="setTaskFilter('program')">程序模板（{{ filterCounts.program }}）</button>

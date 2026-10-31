@@ -153,7 +153,7 @@ public sealed partial class PdmAddin
             ?? node.ReferencedModels.FirstOrDefault(reference => reference.DocumentId.HasValue)?.DocumentId
             ?? EnumerateCadNodes(currentTree).FirstOrDefault(parent => parent.Kind != CadDocumentKind.Drawing
                 && parent.Children.Any(child => PathsEqual(child.FullPath, node.FullPath)))?.DocumentId;
-        var model = OpenOrActivateDocumentOnSolidWorksThread(node.FullPath, (int)swDocumentTypes_e.swDocDRAWING, string.Empty);
+        var model = OpenControlledArchiveDrawing(node.FullPath, false);
         if (model == null) throw new InvalidOperationException("未能打开待存档工程图，原文件已保留。");
         if (IsNewDrawingInLatestPreview(node))
         {

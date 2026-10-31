@@ -15,7 +15,7 @@ export default defineConfig({
     name: 'plm-shared-icon-assets',
     async configResolved() { await generatePlmIconAssets() },
     async handleHotUpdate({ file }) {
-      if (file.replaceAll('\\', '/').endsWith('/src/assets/plm-app-icon.svg') || file.replaceAll('\\', '/').endsWith('/src/assets/upton-wordmark.png')) await generatePlmIconAssets()
+      if (file.replaceAll('\\', '/').endsWith('/src/assets/plm-app-icon.svg') || file.replaceAll('\\', '/').endsWith('/src/assets/upton-full-brand.svg')) await generatePlmIconAssets()
     },
   }, vue()],
   resolve: {

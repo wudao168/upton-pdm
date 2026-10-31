@@ -11,6 +11,18 @@ const create = (value = record()) => mount(ProductionOperationPanel, { props: { 
 beforeEach(() => { sessionStorage.clear(); vi.spyOn(api, 'readProductionTrackingRelease').mockResolvedValue(record()) })
 afterEach(() => vi.restoreAllMocks())
 describe('按岗位扫码办理', () => {
+  it('旧批次保留原数量，同时提示已发布增补需求并允许查看', async () => {
+    const value = record(); value.state.lots = [{ ...value.state.lots[0], quantity: 10 }]
+    const related = { releasePackageId: 'supplement', lineId: 'new-line', relatedToLineId: 'line', packageNumber: '增补包-002', drawingNumber: 'MODEL', name: '支架', revision: 'W1', status: '待接收', requiredQuantity: 2, unassignedQuantity: 2, unit: '001', isSupplement: true }
+    vi.spyOn(api, 'readProductionActions').mockResolvedValue({ actions: [action()], hint: '', relatedDemands: [related] })
+    const wrapper = create(value); await flushPromises()
+    const notice = wrapper.get('[aria-label="同版本已发布需求"]')
+    expect(notice.text()).toContain('增补需求 2 个；待分配 2；待接收')
+    expect(wrapper.props('record').state.lots[0].quantity).toBe(10)
+    await notice.get('button').trigger('click')
+    expect(wrapper.emitted('selectDemand')?.[0]).toEqual([related])
+    wrapper.unmount()
+  })
   it('无批次时也可取消未分配需求，响应丢失后沿用同一编号重试', async () => {
     const value = record(); value.state.lots = []
     vi.spyOn(api, 'readProductionActions').mockResolvedValue({ actions: [], hint: '尚未分配', canCancelUnassignedDemand: true })

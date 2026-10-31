@@ -33,7 +33,7 @@ async function generatePlmIconAssets(uiRoot = path.resolve(__dirname, '..')) {
   const repoRoot = path.resolve(uiRoot, '../..')
   const assets = path.join(uiRoot, 'src/assets')
   const sourceFile = path.join(assets, 'plm-app-icon.svg')
-  const wordmarkFile = path.join(assets, 'upton-wordmark.png')
+  const wordmarkFile = path.join(assets, 'upton-full-brand.svg')
   const source = fs.readFileSync(sourceFile)
   const wordmark = fs.readFileSync(wordmarkFile)
   const sourceHash = sha256(source)
@@ -81,16 +81,23 @@ async function generatePlmIconAssets(uiRoot = path.resolve(__dirname, '..')) {
   output('src/pdm-ui/src/assets/plm-desktop-icon.png', desktopPng)
   output('src/Pdm.Desktop/Assets/UPTON-PLM.ico', await ico(desktopPng))
 
-  output('src/pdm-ui/src/assets/upton-nav-icon.png', await sharp(icon).extract(bounds).png({ compressionLevel: 9 }).toBuffer())
-  const word = await sharp(wordmark).metadata()
+  const navigationStencil = artwork.replace(/fill="#[A-Fa-f0-9]{6}"/g, fill => fill.toUpperCase().includes('#FFFFFF') ? 'fill="#000000"' : 'fill="#FFFFFF"')
+  const navigationDefs = `<defs><mask id="nav-plm-shape" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024" style="mask-type:luminance">${navigationStencil}</mask></defs>`
+  const navigationArtwork = `${navigationDefs}<rect width="1024" height="1024" fill="#000000" mask="url(#nav-plm-shape)"/>`
+  const navigationIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">${navigationArtwork}</svg>`
+  output('src/pdm-ui/src/assets/upton-nav-icon.png', await sharp(Buffer.from(navigationIcon)).extract(bounds).png({ compressionLevel: 9 }).toBuffer())
+  const wordSvg = wordmark.toString('utf8')
+  const wordViewBox = wordSvg.match(/viewBox="([^"]+)"/)[1]
+  const [, , wordSourceWidth, wordSourceHeight] = wordViewBox.split(/\s+/).map(Number)
+  const wordArtwork = wordSvg.replace(/^<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '')
   const iconHeight = 141, iconWidth = iconHeight * bounds.width / bounds.height
   const gap = 16 + 3 * 143 / 38
-  const wordmarkScale = .8
-  const wordWidth = word.width * wordmarkScale, wordHeight = word.height * wordmarkScale
-  const originalGroupWidth = iconWidth + gap + word.width
+  const wordHeight = iconHeight, wordWidth = wordHeight * wordSourceWidth / wordSourceHeight
+  // Preserve the existing icon anchor and gap when replacing the previous 270px wordmark.
+  const originalGroupWidth = iconWidth + gap + 270
   const iconX = (481 - originalGroupWidth) / 2
   const wordX = iconX + iconWidth + gap
-  const navSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="481" height="143" viewBox="0 0 481 143" data-plm-source-sha256="${sourceHash}"><title>UPTON PLM</title><svg x="${iconX}" y="1" width="${iconWidth}" height="141" viewBox="${left} ${top} ${bounds.width} ${bounds.height}">${artwork}</svg><image x="${wordX}" y="${(143 - wordHeight) / 2}" width="${wordWidth}" height="${wordHeight}" href="data:image/png;base64,${wordmark.toString('base64')}"/></svg>`
+  const navSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="481" height="143" viewBox="0 0 481 143" data-plm-source-sha256="${sourceHash}"><title>UPTON PLM</title><svg x="${iconX}" y="1" width="${iconWidth}" height="141" viewBox="${left} ${top} ${bounds.width} ${bounds.height}">${navigationArtwork}</svg><svg x="${wordX}" y="1" width="${wordWidth}" height="${wordHeight}" viewBox="${wordViewBox}" fill="#000000">${wordArtwork}</svg></svg>`
   output('src/pdm-ui/src/assets/upton-nav-lockup.svg', Buffer.from(navSvg))
   output('src/pdm-ui/src/assets/upton-nav-lockup.png', await sharp(Buffer.from(navSvg)).png({ compressionLevel: 9 }).toBuffer())
 
@@ -101,10 +108,10 @@ async function generatePlmIconAssets(uiRoot = path.resolve(__dirname, '..')) {
   const manifest = {
     version: 1,
     source: { path: 'src/pdm-ui/src/assets/plm-app-icon.svg', sha256: sourceHash },
-    wordmark: { path: 'src/pdm-ui/src/assets/upton-wordmark.png', sha256: sha256(wordmark) },
+    wordmark: { path: 'src/pdm-ui/src/assets/upton-full-brand.svg', sha256: sha256(wordmark) },
     generator: { path: 'src/pdm-ui/tools/generate-plm-icon-assets.cjs', sha256: sha256(fs.readFileSync(__filename)) },
     bounds, desktop: { background: 'white-rounded', subjectHeightRatio: .86, cornerRadius: 218.24 },
-    navigation: { gapCssPixels: gap * 38 / 143, wordmarkScale, wordmarkHeightCssPixels: wordHeight * 38 / 143, groupCentered: false },
+    navigation: { gapCssPixels: gap * 38 / 143, color: '#000000', fullBrand: true, wordmarkHeightCssPixels: wordHeight * 38 / 143, groupCentered: false },
     outputs,
   }
   writeChanged(manifestPath(uiRoot), JSON.stringify(manifest, null, 2) + '\n')

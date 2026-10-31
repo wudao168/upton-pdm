@@ -106,6 +106,39 @@ public sealed class ClientLogTests : IDisposable
     }
 
     [Fact]
+    public async Task PreviewAgentUploadsUseRegisteredTokenAndCompanyAndCannotSpoofOtherComponents()
+    {
+        using var factory = new PdmApiFactory().WithWebHostBuilder(builder => builder.ConfigureServices(services => services.Configure<ClientLogOptions>(o => o.Root = root)));
+        using var client = factory.CreateClient();
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var settings = await repository.GetSystemSettingsAsync(default);
+        await repository.UpdateSystemSettingsAsync(settings with { PreviewConversion = new PreviewConversionSettings
+        {
+            Mode = PreviewConversionMode.Remote, AgentUrl = "http://pc-07:5199", AgentToken = "registered-agent-secret",
+            Servers = [new("PC-07", "http://pc-07:5199", "registered-agent-secret", 30, company)]
+        } }, default);
+        var batch = Batch("error") with { Component = "preview-agent" };
+        const string route = "/api/client-logs/preview-agent/batches";
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync(route, Content(batch))).StatusCode);
+        client.DefaultRequestHeaders.Add("X-Pdm-Agent-Token", "invalid");
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync(route, Content(batch))).StatusCode);
+        client.DefaultRequestHeaders.Remove("X-Pdm-Agent-Token");
+        client.DefaultRequestHeaders.Add("X-Pdm-Agent-Token", "registered-agent-secret");
+        client.DefaultRequestHeaders.Add("X-Company-Id", Guid.NewGuid().ToString());
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync(route, Content(batch with { Component = "desktop" }))).StatusCode);
+        var response = await client.PostAsync(route, Content(batch));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains(batch.BatchId, await response.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsync(route, Content(batch))).StatusCode);
+        var store = factory.Services.GetRequiredService<ClientLogStore>();
+        var row = Assert.Single((await store.ListAsync(company, All, 50, default)).Items);
+        Assert.Equal("preview-agent", row.Component); Assert.Equal("转图代理：PC-07", row.Username);
+        Assert.Empty((await store.ListAsync(Guid.NewGuid(), All, 50, default)).Items);
+        await repository.UpdateSystemSettingsAsync(settings, default);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync(route, Content(batch))).StatusCode);
+    }
+
+    [Fact]
     public async Task MalformedAndDecompressionBombRequestsReturnChineseErrors()
     {
         using var factory = new PdmApiFactory(); using var client = factory.CreateClient();

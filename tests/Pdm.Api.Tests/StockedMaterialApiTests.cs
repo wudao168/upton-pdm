@@ -14,6 +14,35 @@ namespace Upton.Pdm.Api.Tests;
 public sealed class StockedMaterialApiTests
 {
     [Fact]
+    public async Task RemovalDoesNotReturnSuccessOrDeleteMembershipWhenU9CannotBeReadBack()
+    {
+        using var factory = new PdmApiFactory(); using var client = factory.CreateClient();
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var company = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First(item => item.IsActive).Id;
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "cancel-admin", "取消常备管理员", "unused", UserRole.Administrator, true, CompanyId: company), default);
+        await repository.SetUserCompanyScopeAsync("cancel-admin", company, false, [], "admin", default);
+        var materials = factory.Services.GetRequiredService<IMaterialRepository>();
+        var config = await materials.GetIntegrationConfigurationAsync(default);
+        await materials.SaveIntegrationConfigurationAsync(config with { BaseUrl = "http://u9.test", ClientSecretCiphertext = "protected:test", WriteEnabled = true }, default);
+        var now = DateTimeOffset.UtcNow;
+        var material = await materials.CreateMaterialAsync(new(Guid.NewGuid(), "01020009211", "取消常备测试", MaterialKind.Standard, MaterialSupplyMode.Purchase,
+            "001", "M1", null, null, "品牌", null, null, null, null, MaterialApprovalStatus.Approved, "admin", now,
+            "0102", "u9-item", "01020009211", MaterialSyncStatus.Succeeded, "admin", now, "admin", now, 1, "0102", U9SyncConfirmed: true),
+            (await materials.FindCategoryAsync("0102", default))!, default);
+        var scope = new StockedMaterialScope(company, config.EnterpriseCode, config.OrganizationCode);
+        var store = factory.Services.GetRequiredService<IStockedMaterialStore>();
+        await store.SaveAsync(new(scope, 0, new(), [new(StandardLibraryDefaults.UncategorizedId, material.Id, "admin", now)],
+            [new(material.Id, new(config.EnterpriseCode, config.OrganizationCode, material.MaterialCode, 15, 50, true, "001", "个", now))]), 0, default);
+        client.DefaultRequestHeaders.Add("X-Company-Id", company.ToString()); Authenticate(client, "cancel-admin", "Administrator");
+        var response = await client.DeleteAsync($"/api/stocked-materials/{material.Id}");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("U9C未返回唯一", await response.Content.ReadAsStringAsync());
+        var retained = await store.ReadAsync(scope, default);
+        Assert.Single(retained.Memberships); Assert.Equal(15, Assert.Single(retained.Snapshots).Plan!.SafetyStockQuantity);
+        Assert.Equal(0, factory.Services.GetRequiredService<TestU9OpenApiClient>().PostCallCount);
+    }
+
+    [Fact]
     public async Task EndpointsEnforceAuthenticationAndManagementAndReturnDefaultSettings()
     {
         using var factory = new PdmApiFactory(); using var client = factory.CreateClient();

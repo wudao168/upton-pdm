@@ -239,7 +239,7 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<MaterialAttachmentRow>(new CommandDefinition(
-            MaterialAttachmentSelect + " WHERE material_id=@MaterialId AND (@Kind IS NULL OR attachment_kind=@Kind) ORDER BY uploaded_at DESC",
+            MaterialAttachmentSelect + " WHERE material_id=@MaterialId AND is_removed=0 AND (@Kind IS NULL OR attachment_kind=@Kind) ORDER BY version_number DESC,uploaded_at DESC",
             new { MaterialId = materialId, Kind = kind?.ToString() }, cancellationToken: cancellationToken));
         return rows.Select(MapMaterialAttachment).ToArray();
     }
@@ -255,13 +255,20 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
     public async Task<MaterialAttachment> CreateMaterialAttachmentAsync(MaterialAttachment attachment, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var materialActive = await connection.ExecuteScalarAsync<bool?>(new CommandDefinition("SELECT NOT is_archived FROM material_master WHERE id=@MaterialId FOR UPDATE", new { attachment.MaterialId }, transaction, cancellationToken: cancellationToken));
+        if (materialActive != true) throw new PdmRuleException("料品不存在或已停用，附件未入库。");
+        if (attachment.Kind is MaterialAttachmentKind.Drawing2D or MaterialAttachmentKind.Model3D)
+            attachment = attachment with { VersionNumber = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
+                "SELECT COALESCE(MAX(version_number),0)+1 FROM material_attachment WHERE material_id=@MaterialId AND attachment_kind=@Kind",
+                new { attachment.MaterialId, Kind = attachment.Kind.ToString() }, transaction, cancellationToken: cancellationToken)) };
         try
         {
             await connection.ExecuteAsync(new CommandDefinition(
                 """
                 INSERT INTO material_attachment(
-                    id,material_id,attachment_kind,original_file_name,storage_root,storage_relative_path,file_length,sha256,uploaded_by,uploaded_at)
-                VALUES(@Id,@MaterialId,@Kind,@OriginalFileName,@StorageRoot,@StorageRelativePath,@FileLength,@Sha256,@UploadedBy,@UploadedAt)
+                    id,material_id,attachment_kind,original_file_name,storage_root,storage_relative_path,file_length,sha256,uploaded_by,uploaded_at,version_number)
+                VALUES(@Id,@MaterialId,@Kind,@OriginalFileName,@StorageRoot,@StorageRelativePath,@FileLength,@Sha256,@UploadedBy,@UploadedAt,@VersionNumber)
                 """, new
                 {
                     attachment.Id,
@@ -273,8 +280,10 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
                     attachment.FileLength,
                     attachment.Sha256,
                     attachment.UploadedBy,
+                    attachment.VersionNumber,
                     UploadedAt = attachment.UploadedAt.UtcDateTime
-                }, cancellationToken: cancellationToken));
+                }, transaction, cancellationToken: cancellationToken));
+            await transaction.CommitAsync(cancellationToken);
             return attachment;
         }
         catch (MySqlException exception) when (exception.Number == 1062)
@@ -287,10 +296,11 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         return await connection.ExecuteAsync(new CommandDefinition("""
-            DELETE attachment FROM material_attachment AS attachment
+            UPDATE material_attachment AS attachment
             INNER JOIN material_master AS material ON material.id=attachment.material_id
+            SET attachment.is_removed=1
             WHERE attachment.id=@AttachmentId AND attachment.material_id=@MaterialId
-              AND material.is_archived=0 AND attachment.attachment_kind IN ('Model3D','Document')
+              AND material.is_archived=0 AND attachment.is_removed=0 AND attachment.attachment_kind='Document'
             """, new { MaterialId = materialId, AttachmentId = attachmentId }, cancellationToken: cancellationToken)) == 1;
     }
 
@@ -1982,12 +1992,16 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
         row.PurchaseLink, row.ReferenceCount, row.SelectionAdvice, row.ReferencePrice, row.Model3DLink, row.DocumentLink, row.IsRecommended, row.CoverImageAttachmentId)
         {
             Model3DAttachmentCount = row.Model3DAttachmentCount,
-            DocumentAttachmentCount = row.DocumentAttachmentCount
+            DocumentAttachmentCount = row.DocumentAttachmentCount,
+            Drawing2DAttachmentCount = row.Drawing2DAttachmentCount,
+            EnabledDrawing2DVersion = row.EnabledDrawing2DVersion,
+            EnabledModel3DVersion = row.EnabledModel3DVersion
         };
 
     private static MaterialAttachment MapMaterialAttachment(MaterialAttachmentRow row) => new(
         row.Id, row.MaterialId, Enum.Parse<MaterialAttachmentKind>(row.AttachmentKind), row.OriginalFileName,
-        row.StorageRoot, row.StorageRelativePath, row.FileLength, row.Sha256, row.UploadedBy, Utc(row.UploadedAt)!.Value);
+        row.StorageRoot, row.StorageRelativePath, row.FileLength, row.Sha256, row.UploadedBy, Utc(row.UploadedAt)!.Value)
+        { VersionNumber = row.VersionNumber, IsEnabled = row.IsEnabled, IsRemoved = row.IsRemoved, EnabledBy = row.EnabledBy, EnabledAt = Utc(row.EnabledAt) };
 
     private static MaterialCategory MapCategory(CategoryRow row) => new(
         row.CategoryCode,
@@ -2189,12 +2203,15 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
                 (SELECT COUNT(*) FROM bom_material_link AS material_link WHERE material_link.material_id=material_master.id)
                     + CASE WHEN source_bom_item_id IS NULL THEN 0 ELSE 1 END AS reference_count,
                 (SELECT COUNT(*) FROM material_attachment AS attachment WHERE attachment.material_id=material_master.id AND attachment.attachment_kind='Model3D') AS model3d_attachment_count,
-                (SELECT COUNT(*) FROM material_attachment AS attachment WHERE attachment.material_id=material_master.id AND attachment.attachment_kind='Document') AS document_attachment_count
+                (SELECT COUNT(*) FROM material_attachment AS attachment WHERE attachment.material_id=material_master.id AND attachment.attachment_kind='Document' AND attachment.is_removed=0) AS document_attachment_count,
+                (SELECT COUNT(*) FROM material_attachment AS attachment WHERE attachment.material_id=material_master.id AND attachment.attachment_kind='Drawing2D') AS drawing2d_attachment_count,
+                (SELECT MAX(version_number) FROM material_attachment WHERE material_id=material_master.id AND attachment_kind='Drawing2D' AND is_enabled=1) AS enabled_drawing2d_version,
+                (SELECT MAX(version_number) FROM material_attachment WHERE material_id=material_master.id AND attachment_kind='Model3D' AND is_enabled=1) AS enabled_model3d_version
         FROM material_master
         """;
 
     private const string MaterialAttachmentSelect = """
-        SELECT id,material_id,attachment_kind,original_file_name,storage_root,storage_relative_path,file_length,sha256,uploaded_by,uploaded_at
+        SELECT id,material_id,attachment_kind,original_file_name,storage_root,storage_relative_path,file_length,sha256,uploaded_by,uploaded_at,version_number,is_enabled,is_removed,enabled_by,enabled_at
         FROM material_attachment
         """;
 
@@ -2270,6 +2287,9 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
         public int ReferenceCount { get; init; }
         public int Model3DAttachmentCount { get; init; }
         public int DocumentAttachmentCount { get; init; }
+        public int Drawing2DAttachmentCount { get; init; }
+        public int? EnabledDrawing2DVersion { get; init; }
+        public int? EnabledModel3DVersion { get; init; }
         public decimal? Weight { get; init; }
         public string? WeightUnit { get; init; }
         public Guid? SourceBomItemId { get; init; }
@@ -2297,6 +2317,11 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
 
     private sealed class MaterialAttachmentRow
     {
+        public int VersionNumber { get; init; }
+        public bool IsEnabled { get; init; }
+        public bool IsRemoved { get; init; }
+        public string? EnabledBy { get; init; }
+        public DateTime? EnabledAt { get; init; }
         public Guid Id { get; init; }
         public Guid MaterialId { get; init; }
         public string AttachmentKind { get; init; } = string.Empty;

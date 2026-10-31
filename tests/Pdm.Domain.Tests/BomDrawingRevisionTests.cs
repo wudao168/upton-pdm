@@ -5,6 +5,18 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class BomDrawingRevisionTests
 {
+    [Fact]
+    public void StandardItemsWithoutIndependentRevisionUseTheirFrozenBomReleaseVersion()
+    {
+        var item = Item(Guid.NewGuid(), "W1") with { Kind = BomKind.Standard };
+        var package = Package(item) with { Scope = ReleaseScope.StandardSupplement, StandardBomRevision = "S-P700016-2-B03", NonStandardBomSnapshot = [], StandardBomSnapshot = [item], VersionBindings = [] };
+        Assert.Equal("S-P700016-2-V03", BomDrawingRevision.ForPackage(item, package));
+        Assert.Equal("A", BomDrawingRevision.ForPackage(item with { Revision = "A" }, package));
+        using var stream = new MemoryStream(BomWorkbook.Write(BomDrawingRevision.ForPackage([item], package)));
+        Assert.Equal("S-P700016-2-V03", Assert.Single(BomWorkbook.Read(stream)).Revision);
+        Assert.Equal("W1", item.Revision);
+        Assert.Null(item.DisplayRevision);
+    }
     [Theory]
     [InlineData("W1", "A-D")]
     [InlineData("W25", "A-D")]

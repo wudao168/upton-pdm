@@ -1,5 +1,6 @@
+import { canViewProjectTab } from './projectCenterAccess'
 import type { ProductionSupplierCatalog, ProductionSupplierChoices, SaveProductionSupplier } from './productionSuppliers'
-import type { WorkHoursView, SaveWorkHours, WorkHourRevision, WorkHoursManagement, WorkHoursSheet, WorkHoursProject, SaveWorkHoursGroupSettings } from './workHours'
+import type { WorkHoursView, SaveWorkHours, MoveWorkHoursDay, WorkHourRevision, WorkHoursManagement, WorkHoursSheet, WorkHoursProject, SaveWorkHoursGroupSettings } from './workHours'
 import type { BrowserCadCapability, BrowserCadTarget, BrowserCadTicket } from './browserCadArchive'
 export const readBrowserCadCapability = (projectId: string | undefined, token: string) => requestJson<BrowserCadCapability>(`/api/browser-archives/capabilities${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`, {}, token)
 export const setBrowserCadEnabled = (enabled: boolean, token: string) => requestJson<{ enabled: boolean }>('/api/browser-archives/settings', { method: 'PUT', body: JSON.stringify({ enabled }) }, token)
@@ -17,6 +18,7 @@ export async function stageBrowserCadArchive(id: string, target: BrowserCadTarge
 }
 export const readWorkHours = (from: string, to: string, report: boolean, token: string) => requestJson<WorkHoursView>(`/api/work-hours?${new URLSearchParams({ from, to, report: String(report) })}`, {}, token)
 export const saveWorkHours = (input: SaveWorkHours, token: string) => requestJson<WorkHoursView>('/api/work-hours', { method: 'PUT', body: JSON.stringify(input) }, token)
+export const moveWorkHoursDay = (input: MoveWorkHoursDay, token: string) => requestJson<WorkHoursView>('/api/work-hours/move-day', { method: 'POST', body: JSON.stringify(input) }, token)
 export const readWorkHoursHistory = (month: string, token: string) => requestJson<WorkHourRevision[]>(`/api/work-hours/history?month=${encodeURIComponent(month)}`, {}, token)
 export const readWorkHoursSettings = (token: string) => requestJson<WorkHoursManagement>('/api/work-hours/settings', {}, token)
 export const saveWorkHoursSettings = (input: SaveWorkHoursGroupSettings, token: string) => requestJson<WorkHoursManagement>('/api/work-hours/settings', { method: 'PUT', body: JSON.stringify(input) }, token)
@@ -37,7 +39,7 @@ export const readProductionTrackingSupplierChoices = (id: string, token: string)
 export const saveProductionSupplierCategory = (id: string, input: { name: string; isActive: boolean; expectedRowVersion: number }, token: string) => requestJson<ProductionSupplierCatalog>(`/api/production-suppliers/categories/${id}`, { method: 'PUT', body: JSON.stringify(input) }, token)
 export const saveProductionSupplier = (id: string, input: SaveProductionSupplier, token: string) => requestJson<ProductionSupplierCatalog>(`/api/production-suppliers/${id}`, { method: 'PUT', body: JSON.stringify(input) }, token)
 import type { ProjectExportMetadata } from './exportFormat'
-import type { ReleaseNotificationSettings, ReleaseExecutionView } from './releaseDelivery'
+import type { ReleaseExecutionView } from './releaseDelivery'
 import type { ProductionProject, ProductionReleaseRecord, ProductionReleaseState, ProductionCapacityView, ProductionScanResult, ProductionScheduleSlot, ProductionMovementKind, ProductionRoute, ProductionOpeningLot } from './productionTracking'
 import { productionRequestId } from './productionTracking'
 export const listProductionTrackingProjects = (token: string, selfOnly = false, externalOnly = false) => requestJson<ProductionProject[]>(`/api/production-tracking/projects${externalOnly ? '?externalOnly=true' : selfOnly ? '?selfOnly=true' : ''}`, {}, token)
@@ -67,8 +69,6 @@ export async function readProductionLotQr(releasePackageId: string, lotId: strin
   if (!response.ok) throw new PdmApiError('批次流转卡二维码读取失败，请刷新批次后重试。', response.status)
   return response.blob()
 }
-export const readReleaseNotificationSettings = (token: string) => requestJson<ReleaseNotificationSettings>('/api/settings/release-notifications', {}, token)
-export const saveReleaseNotificationSettings = (input: ReleaseNotificationSettings, token: string) => requestJson<ReleaseNotificationSettings>('/api/settings/release-notifications', { method: 'PUT', body: JSON.stringify({ ...input, expectedRowVersion: input.rowVersion }) }, token)
 export const readReleaseExecution = (id: string, token: string) => requestJson<ReleaseExecutionView>(`/api/release-packages/${id}/execution`, {}, token)
 export const acknowledgeReleaseDepartment = (id: string, receiptId: string, executed: boolean, note: string, token: string) => requestJson(`/api/release-packages/${id}/department-acknowledgements`, { method: 'POST', body: JSON.stringify({ receiptId, executed, note }) }, token)
 export const retryReleaseNotification = (id: string, deliveryId: string, confirmUnknownOutcome: boolean, token: string) => requestJson(`/api/release-packages/${id}/notification-retries`, { method: 'POST', body: JSON.stringify({ deliveryId, confirmUnknownOutcome }) }, token)
@@ -126,9 +126,9 @@ export function saveProjectOpl(projectId: string, id: string | null, input: OplI
   files.forEach(file => body.append('files', file))
   return requestJson<OplIssue>(`/api/projects/${projectId}/opl${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body }, token)
 }
-export async function readOplAttachment(projectId: string, issueId: string, attachmentId: string, token: string) {
+export async function readOplAttachment(projectId: string, issueId: string, attachmentId: string, token: string, preview = false) {
   let response: Response
-  try { response = await fetch(`${apiBase}/api/projects/${projectId}/opl/${issueId}/attachments/${attachmentId}`, { headers: authenticatedHeaders(token) }) }
+  try { response = await fetch(`${apiBase}/api/projects/${projectId}/opl/${issueId}/attachments/${attachmentId}${preview ? '?preview=true' : ''}`, { headers: authenticatedHeaders(token) }) }
   catch { throw new Error('无法读取附件，请检查网络后重试。') }
   if (!response.ok) throw new Error(response.status === 401 ? '登录已过期，请重新登录后查看附件。' : '附件读取失败，请刷新清单或联系管理员检查文件。')
   return response.blob()
@@ -170,8 +170,12 @@ export function saveProjectContactInformation(value: ProjectContactInformation, 
 export function readProjectNameplate(projectId: string, token: string) {
   return requestJson<ProjectNameplateView>(`/api/projects/${projectId}/nameplate`, {}, token)
 }
+export const readMaterialNotificationPermission = (token: string) => requestJson<{ enabled: boolean }>('/api/materials/notification-permission', {}, token)
 export function saveProjectNameplate(value: ProjectNameplate, token: string) {
   return requestJson<ProjectNameplateView>(`/api/projects/${value.projectId}/nameplate`, { method: 'PUT', body: JSON.stringify({ ...value, expectedRowVersion: value.rowVersion }) }, token)
+}
+export function confirmProjectNameplate(value: ProjectNameplate, token: string) {
+  return requestJson<ProjectNameplateView>(`/api/projects/${value.projectId}/nameplate/confirm`, { method: 'POST', body: JSON.stringify({ expectedRowVersion: value.rowVersion }) }, token)
 }
 export function saveNameplateTemplate(value: NameplateTemplate, token: string) {
   return requestJson<NameplateTemplate>('/api/nameplate-template', { method: 'PUT', body: JSON.stringify(value) }, token)
@@ -414,6 +418,10 @@ interface ApiProject {
   documentCount?: number | null
   modelDocumentCount?: number | null
   drawingDocumentCount?: number | null
+  hasUnreceivedNonStandardRelease?: boolean
+  latestPurchasedBomPublishedAt?: string | null
+  hasReleaseAttention?: boolean
+  latestPublishedAt?: string | null
   businessStatus?: string | null
   rootDocumentCheckedOutBy?: string | null
   canAssignExecutionUnit?: boolean
@@ -478,6 +486,8 @@ interface ApiReferenceNode {
 }
 
 interface ApiBomItem {
+  files?: import('./bomFiles').BomFileReference[] | null
+  nameplateContent?: import('./projectNameplate').NameplateContent | null
   displayRevision?: string | null
   maintainedItem?: ApiBomItem | null
   summaryItemIds?: string[] | null
@@ -952,6 +962,37 @@ export function deleteMaterialAttachment(materialId: string, attachmentId: strin
   return requestJson<void>(`/api/materials/${materialId}/attachments/${attachmentId}`, { method: 'DELETE' }, token)
 }
 
+export function enableMaterialDrawing(materialId: string, attachmentId: string, expectedEnabledId: string | null, token: string): Promise<MaterialAttachment> {
+  return requestJson(`/api/materials/${materialId}/attachments/${attachmentId}/enable`, { method: 'POST', body: JSON.stringify({ expectedEnabledId }) }, token)
+}
+
+export function readBomFiles(projectId: string, itemId: string, token: string, bomVersionId?: string): Promise<import('./bomFiles').BomFileView> {
+  return requestJson(`/api/projects/${projectId}/bom-files/${itemId}${bomVersionId ? `?bomVersionId=${encodeURIComponent(bomVersionId)}` : ''}`, {}, token)
+}
+export function adoptBomLibraryFiles(projectId: string, itemId: string, expectedVersion: number, token: string): Promise<import('./bomFiles').BomFileView> {
+  return requestJson(`/api/projects/${projectId}/bom-files/${itemId}/adopt-library`, { method: 'POST', body: JSON.stringify({ expectedVersion }) }, token)
+}
+export function removeBomFile(projectId: string, itemId: string, fileId: string, expectedVersion: number, token: string): Promise<void> {
+  return requestJson(`/api/projects/${projectId}/bom-files/${itemId}/${fileId}?expectedVersion=${expectedVersion}`, { method: 'DELETE' }, token)
+}
+export async function uploadBomFile(projectId: string, itemId: string, file: File, purpose: string, token: string, progress: (value: number) => void): Promise<import('./bomFiles').BomFileView> {
+  const base = `/api/projects/${projectId}/bom-files/${itemId}`
+  const sha256 = await sha256Hex(await file.arrayBuffer())
+  const session = await requestJson<{ id: string; chunkSize: number }>(`${base}/uploads`, { method: 'POST', body: JSON.stringify({ fileName: file.name, totalLength: file.size, sha256 }) }, token)
+  const chunks = Math.ceil(file.size / session.chunkSize)
+  for (let index = 0; index < chunks; index++) {
+    const response = await fetch(`${apiBase}${base}/uploads/${session.id}/chunks/${index}`, { method: 'PUT', headers: authenticatedHeaders(token), body: file.slice(index * session.chunkSize, (index + 1) * session.chunkSize) })
+    if (!response.ok) throw new PdmApiError(`附件分块上传失败（${response.status}），请重新上传。`, response.status)
+    progress(Math.round((index + 1) / chunks * 100))
+  }
+  return requestJson(`${base}/uploads/${session.id}/complete`, { method: 'POST', body: JSON.stringify({ purpose }) }, token)
+}
+export async function readBomFileBlob(projectId: string, itemId: string, fileId: string, token: string, bomVersionId?: string, preview = false): Promise<Blob> {
+  const response = await fetch(`${apiBase}/api/projects/${projectId}/bom-files/${itemId}/${fileId}/file?preview=${preview}${bomVersionId ? `&bomVersionId=${encodeURIComponent(bomVersionId)}` : ''}`, { headers: authenticatedHeaders(token) })
+  if (!response.ok) throw new PdmApiError(`文件读取失败（${response.status}），请刷新后重试。`, response.status)
+  return response.blob()
+}
+
 export async function uploadMaterialAttachment(materialId: string, kind: MaterialAttachmentKind, file: File, token: string, onProgress?: (percent: number) => void): Promise<MaterialAttachment> {
   onProgress?.(0)
   const sha256 = await sha256Hex(await file.arrayBuffer())
@@ -1150,6 +1191,9 @@ export function expandEngineeringKit(kitId: string, input: { revisionId?: string
 export function listMaterialRelationTemplates(token: string, includeDraft = false): Promise<MaterialRelationTemplate[]> {
   return requestJson<MaterialRelationTemplate[]>(`/api/material-relations/templates${includeDraft ? '?includeDraft=true' : ''}`, {}, token)
 }
+export const listMaterialRelationCategories = (token: string) => requestJson<StandardLibraryCategory[]>('/api/material-relations/categories', {}, token)
+export const getMaterialRelationCategories = (materialId: string, token: string) => requestJson<StandardLibraryCategory[]>(`/api/material-relations/materials/${materialId}/categories`, {}, token)
+export const assignMaterialRelationCategory = (materialId: string, categoryId: string, token: string) => requestJson<StandardLibraryCategory[]>(`/api/material-relations/materials/${materialId}/categories`, { method: 'PUT', body: JSON.stringify({ categoryId }) }, token)
 
 export function saveMaterialRelationTemplate(input: SaveMaterialRelationTemplateInput, token: string, templateId?: string): Promise<MaterialRelationTemplate> {
   return requestJson<MaterialRelationTemplate>(templateId ? `/api/material-relations/templates/${templateId}/draft` : '/api/material-relations/templates', {
@@ -1335,6 +1379,16 @@ export function getProjectProcurementTracking(projectId: string, token: string):
   return requestJson<ProjectProcurementTrackingResult>(`/api/projects/${projectId}/procurement-tracking`, {}, token)
 }
 
+export function readProcurementFiles(projectId: string, materialCode: string, token: string): Promise<import('./bomFiles').BomFileReference[]> {
+  return requestJson(`/api/projects/${projectId}/procurement-files?materialCode=${encodeURIComponent(materialCode)}`, {}, token)
+}
+
+export async function readProcurementFileBlob(projectId: string, materialCode: string, fileId: string, token: string, preview = false): Promise<Blob> {
+  const response = await fetch(`${apiBase}/api/projects/${projectId}/procurement-files/${fileId}/file?materialCode=${encodeURIComponent(materialCode)}&preview=${preview}`, { headers: authenticatedHeaders(token) })
+  if (!response.ok) throw new PdmApiError(`采购件图纸附件读取失败（${response.status}），请刷新后重试。`, response.status)
+  return response.blob()
+}
+
 export function refreshProjectProcurementTracking(projectId: string, token: string): Promise<{ message: string }> {
   return requestJson<{ message: string }>(`/api/projects/${projectId}/procurement-tracking/refresh`, { method: 'POST' }, token)
 }
@@ -1415,8 +1469,8 @@ export function listDocumentVersions(documentId: string, token: string): Promise
   return requestJson<DocumentVersionSummary[]>(`/api/documents/${documentId}/versions`, {}, token)
 }
 
-export async function readDocumentPreviewFile(documentId: string, versionId: string, token: string): Promise<Blob> {
-  const response = await fetch(`${apiBase}/api/documents/${documentId}/versions/${versionId}/preview`, {
+export async function readDocumentPreviewFile(documentId: string, versionId: string, token: string, download = false): Promise<Blob> {
+  const response = await fetch(`${apiBase}/api/documents/${documentId}/versions/${versionId}/preview${download ? '?download=true' : ''}`, {
     headers: authenticatedHeaders(token),
     cache: 'no-store',
   })
@@ -1464,12 +1518,12 @@ export async function downloadGeneratedFile(blob: Blob, fileName: string): Promi
 export async function downloadDocumentPreviewFile(documentId: string, versionId: string, fileName: string, token: string, progress?: DownloadProgress): Promise<void> {
   if (progress) {
     const handle = await chooseDownloadFile(fileName)
-    const response = await fetch(`${apiBase}/api/documents/${documentId}/versions/${versionId}/preview`, { headers: authenticatedHeaders(token), cache: 'no-store' })
+    const response = await fetch(`${apiBase}/api/documents/${documentId}/versions/${versionId}/preview?download=true`, { headers: authenticatedHeaders(token), cache: 'no-store' })
     if (!response.ok) throw new PdmApiError(`图纸下载失败（${response.status}），请稍后重试。`, response.status)
     await saveDownload(await receiveDownload(response, progress), fileName, handle)
     return
   }
-  const blob = await readDocumentPreviewFile(documentId, versionId, token)
+  const blob = await readDocumentPreviewFile(documentId, versionId, token, true)
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
@@ -1479,7 +1533,7 @@ export async function downloadDocumentPreviewFile(documentId: string, versionId:
 }
 
 export async function readProductionDrawingPreview(item: ProductionDrawingItem, token: string): Promise<Blob> {
-  const response = await fetch(`${apiBase}/api/production-drawings/${item.documentId}/versions/${item.versionId}/preview`, {
+  const response = await fetch(`${apiBase}/api/production-drawings/${item.documentId}/versions/${item.versionId}/preview?releasePackageId=${encodeURIComponent(item.releasePackageId)}`, {
     headers: authenticatedHeaders(token), cache: 'no-store',
   })
   if (!response.ok) {
@@ -1492,6 +1546,7 @@ export async function readProductionDrawingPreview(item: ProductionDrawingItem, 
 export async function downloadProductionDrawingFile(item: ProductionDrawingItem, format: 'Pdf' | 'Step', token: string,
   progress?: DownloadProgress, model?: { documentId: string; versionId?: string | null; drawingNumber: string }): Promise<void> {
   const query = new URLSearchParams()
+  query.set('releasePackageId', item.releasePackageId)
   if (format === 'Step') {
     if (!model?.versionId) throw new Error('该图纸没有可用的同包正式 STEP。')
     query.set('modelDocumentId', model.documentId)
@@ -1705,7 +1760,7 @@ export function updateProjectPermissionSettings(settings: import('./types').Proj
 
 export function updateRolePermissions(role: string, permissions: string[], token: string): Promise<RolePermissionDirectory> {
   return requestJson(`/api/role-permissions/${encodeURIComponent(role)}`, {
-    method: 'PUT', body: JSON.stringify({ permissions, schemaVersion: 2 }),
+    method: 'PUT', body: JSON.stringify({ permissions, schemaVersion: 3 }),
   }, token)
 }
 
@@ -2074,7 +2129,7 @@ export function listProductionDrawings(token: string, includeHistory = false, pr
   return requestJson(`/api/production-drawings?includeHistory=${includeHistory}&indexOnly=${indexOnly}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`, {}, token)
 }
 
-export async function downloadProductionDrawingArchive(projectId: string, versionIds: string[], format: 'Pdf' | 'Step', token: string, releasePackageNumber = '生产图纸', progress?: DownloadProgress): Promise<void> {
+export async function downloadProductionDrawingArchive(projectId: string, versionIds: string[], format: 'Pdf' | 'Step', token: string, releasePackageNumber = '生产图纸', progress?: DownloadProgress, drawings?: ProductionDrawingItem[]): Promise<void> {
   const packageName = releasePackageNumber.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
   const fileName = `${packageName}-${format === 'Pdf' ? 'PDF' : 'STEP'}.zip`
   const handle = await chooseDownloadFile(fileName)
@@ -2083,7 +2138,7 @@ export async function downloadProductionDrawingArchive(projectId: string, versio
   const response = await fetch(`${apiBase}/api/projects/${projectId}/production-drawings/archive`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ versionIds, format }),
+    body: JSON.stringify({ versionIds, format, items: drawings?.map(item => ({ releasePackageId: item.releasePackageId, documentId: item.documentId, versionId: item.versionId })) }),
   })
   if (!response.ok) {
     const body = await response.json().catch(() => null)
@@ -2158,6 +2213,14 @@ export function retryReleasePreview(releasePackageId: string, token: string): Pr
 export function listReleasePreviewItems(projectId: string, releasePackageId: string | undefined, token: string): Promise<ReleasePreviewItemResult[]> {
   const query = releasePackageId ? `?releasePackageId=${encodeURIComponent(releasePackageId)}` : ''
   return requestJson<ReleasePreviewItemResult[]>(`/api/projects/${projectId}/release-preview-items${query}`, {}, token)
+}
+
+export async function readReleasePreviewFile(projectId: string, item: ReleasePreviewItemResult, token: string): Promise<Blob> {
+  const response = await fetch(`${apiBase}/api/projects/${projectId}/release-preview-items/${item.releasePackageId}/${item.documentId}/file`, {
+    headers: authenticatedHeaders(token), cache: 'no-store',
+  })
+  if (!response.ok) throw new PdmApiError('此发布包的预览文件读取失败，请刷新列表后重试。', response.status)
+  return response.blob()
 }
 
 /** 单项转图重试：只重新转出指定图档，不影响同包其它已转好的文件。 */
@@ -2580,9 +2643,10 @@ export async function loadBomSourceData(projectId: string, token: string): Promi
   return (await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/bom-source-data`, {}, token)).map(mapBomItem)
 }
 
-export async function loadProjectWorkspace(projectId: string, token: string, includeSourceData = true): Promise<ProjectWorkspaceData> {
+export async function loadProjectWorkspace(projectId: string, token: string, includeSourceData = true, permissions: readonly string[] = []): Promise<ProjectWorkspaceData> {
   const project = await withApiContext('项目详情', requestJson<ApiProject>(`/api/projects/${projectId}`, {}, token))
   const mappedProject = mapProject(project)
+  const canView = (tab: string) => canViewProjectTab(permissions, tab)
   if (!mappedProject.canReadContent) {
     return { project: mappedProject, moduleErrors: [], root: emptyProjectRoot(project), hasDocuments: false, documents: [], documentRelations: [], folders: [], standardBom: [], nonStandardBom: [], unclassifiedBom: [], electricalBom: [], bomSourceData: [], bomEmptyDeclarations: [], bomVersions: [], bomBaselines: [], drawingReviews: [], materialCodeApplications: [], releasePackages: [], releasePackage: null }
   }
@@ -2598,19 +2662,19 @@ export async function loadProjectWorkspace(projectId: string, token: string, inc
     }
   }
   const [documentWorkspace, folders, standard, nonStandard, unclassified, electrical, sourceData, bomEmptyDeclarations, bomVersions, bomBaselines, drawingReviews, materialCodeApplications, releasePackages] = await Promise.all([
-    recover('图档工作区', 'documents', withApiContext('图档工作区', loadProjectDocumentWorkspace(project.id, token)), { root: emptyProjectRoot(project), hasDocuments: false, documents: [], documentRelations: [] } as ProjectDocumentWorkspaceData),
-    recover('项目文件夹', 'files', listProjectFolders(project.id, token), [] as ProjectFolder[]),
-    recover('标准件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Standard?summary=true`, {}, token), [] as ApiBomItem[]),
-    recover('非标件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/NonStandard?summary=true`, {}, token), [] as ApiBomItem[]),
-    recover('待分类BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Unclassified`, {}, token), [] as ApiBomItem[]),
-    recover('电气件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Electrical?summary=true`, {}, token), [] as ApiBomItem[]),
-    includeSourceData ? recover('BOM源数据', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/bom-source-data`, {}, token), [] as ApiBomItem[]) : Promise.resolve([] as ApiBomItem[]),
-    recover('空BOM声明', 'bom', requestJson<BomEmptyDeclaration[]>(`/api/projects/${project.id}/boms/empty-declarations`, {}, token), [] as BomEmptyDeclaration[]),
-    recover('BOM版本', 'bom', listBomVersions(project.id, token), [] as BomVersion[]),
-    recover('制造基线', 'release', listBomBaselines(project.id, token), [] as ManufacturingBomBaseline[]),
-    recover('图纸审核', 'documents', listDrawingReviews(project.id, token), [] as DrawingReviewPackage[]),
-    recover('料号申请', 'release', listMaterialCodeApplications(token, project.id), [] as MaterialCodeApplication[]),
-    recover('发布记录', 'release', requestJson<ApiReleasePackage[]>(`/api/projects/${project.id}/release-packages`, {}, token), [] as ApiReleasePackage[]),
+    canView('documents') ? recover('图档工作区', 'documents', withApiContext('图档工作区', loadProjectDocumentWorkspace(project.id, token)), { root: emptyProjectRoot(project), hasDocuments: false, documents: [], documentRelations: [] } as ProjectDocumentWorkspaceData) : Promise.resolve({ root: emptyProjectRoot(project), hasDocuments: false, documents: [], documentRelations: [] } as ProjectDocumentWorkspaceData),
+    canView('files') ? recover('项目文件夹', 'files', listProjectFolders(project.id, token), [] as ProjectFolder[]) : Promise.resolve([]),
+    canView('bom') ? recover('标准件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Standard?summary=true`, {}, token), [] as ApiBomItem[]) : Promise.resolve([]),
+    canView('bom') ? recover('非标件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/NonStandard?summary=true`, {}, token), [] as ApiBomItem[]) : Promise.resolve([]),
+    canView('bom') ? recover('待分类BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Unclassified`, {}, token), [] as ApiBomItem[]) : Promise.resolve([]),
+    canView('bom') ? recover('电气件BOM', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/boms/Electrical?summary=true`, {}, token), [] as ApiBomItem[]) : Promise.resolve([]),
+    includeSourceData && canView('bom') ? recover('BOM源数据', 'bom', requestJson<ApiBomItem[]>(`/api/projects/${project.id}/bom-source-data`, {}, token), [] as ApiBomItem[]) : Promise.resolve([] as ApiBomItem[]),
+    canView('bom') ? recover('空BOM声明', 'bom', requestJson<BomEmptyDeclaration[]>(`/api/projects/${project.id}/boms/empty-declarations`, {}, token), [] as BomEmptyDeclaration[]) : Promise.resolve([]),
+    canView('bom') ? recover('BOM版本', 'bom', listBomVersions(project.id, token), [] as BomVersion[]) : Promise.resolve([]),
+    canView('release') ? recover('制造基线', 'release', listBomBaselines(project.id, token), [] as ManufacturingBomBaseline[]) : Promise.resolve([]),
+    canView('documents') ? recover('图纸审核', 'documents', listDrawingReviews(project.id, token), [] as DrawingReviewPackage[]) : Promise.resolve([]),
+    canView('release') ? recover('料号申请', 'release', listMaterialCodeApplications(token, project.id), [] as MaterialCodeApplication[]) : Promise.resolve([]),
+    canView('release') ? recover('发布记录', 'release', requestJson<ApiReleasePackage[]>(`/api/projects/${project.id}/release-packages`, {}, token), [] as ApiReleasePackage[]) : Promise.resolve([]),
   ])
 
   return {
@@ -2750,6 +2814,10 @@ function mapProject(project: ApiProject): ProjectSummary {
     documentCount: project.documentCount ?? undefined,
     modelDocumentCount: project.modelDocumentCount ?? undefined,
     drawingDocumentCount: project.drawingDocumentCount ?? undefined,
+    hasUnreceivedNonStandardRelease: project.hasUnreceivedNonStandardRelease ?? false,
+    latestPurchasedBomPublishedAt: project.latestPurchasedBomPublishedAt ?? undefined,
+    hasReleaseAttention: project.hasReleaseAttention ?? false,
+    latestPublishedAt: project.latestPublishedAt ?? undefined,
     businessStatus: project.businessStatus ?? undefined,
     rootDocumentCheckedOutBy: project.rootDocumentCheckedOutBy ?? undefined,
     canAssignExecutionUnit: project.canAssignExecutionUnit ?? false,
@@ -2942,6 +3010,8 @@ function reconcileCurrentReferenceTree(
 
 function mapBomItem(item: ApiBomItem): BomItem {
   return {
+    files: item.files,
+    nameplateContent: item.nameplateContent ?? undefined,
     displayRevision: item.displayRevision ?? undefined,
     maintainedItem: item.maintainedItem ? mapBomItem(item.maintainedItem) : undefined,
     summaryItemIds: item.summaryItemIds ?? undefined,
@@ -3110,7 +3180,7 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
 
 function mapReleaseScope(value?: string | number): ReleaseScope {
   if (typeof value === 'string') return value as ReleaseScope
-  return ['LegacyCombined', 'StandardLongLead', 'StandardFormal', 'StandardSupplement', 'ElectricalFormal', 'ElectricalSupplement', 'NonStandardWithDrawing', 'NonStandardLongLead', 'NonStandardSupplement', 'ElectricalLongLead'][value ?? 0] as ReleaseScope
+  return ['LegacyCombined', 'StandardLongLead', 'StandardFormal', 'StandardSupplement', 'ElectricalFormal', 'ElectricalSupplement', 'NonStandardWithDrawing', 'NonStandardLongLead', 'NonStandardSupplement', 'ElectricalLongLead', 'Nameplate'][value ?? 0] as ReleaseScope
 }
 
 function mapBomVersionState(value: string | number): BomVersionState {
@@ -3223,8 +3293,8 @@ export async function uploadQualityInspection(projectId: string, kind: string, s
  }
  return requestJson<QualityInspectionRecord>(`/api/projects/${projectId}/quality-inspection-uploads/${session.id}/complete`, { method: 'POST', body: JSON.stringify({ kind, station, title, remark }) }, token)
 }
-export async function readQualityInspectionFile(id: string, token: string): Promise<Blob> {
- const response = await fetch(`${apiBase}/api/quality-inspections/${id}/download`, { headers: authenticatedHeaders(token) })
+export async function readQualityInspectionFile(id: string, token: string, preview = false): Promise<Blob> {
+ const response = await fetch(`${apiBase}/api/quality-inspections/${id}/download?preview=${preview}`, { headers: authenticatedHeaders(token) })
  if (!response.ok) throw new PdmApiError('检验文件读取失败', response.status)
  return response.blob()
 }
@@ -3279,3 +3349,9 @@ export const readStockedMaterialPlan = (materialId: string, token: string) => re
 export const readStockedMaterialSettings = (token: string) => requestJson<import('./stockedMaterials').StockedMaterialSettingsView>('/api/stocked-materials/settings', {}, token)
 export const saveStockedMaterialSettings = (settings: import('./stockedMaterials').StockedMaterialSettings, expectedRowVersion: number, token: string) =>
   requestJson<import('./stockedMaterials').StockedMaterialSettingsView>('/api/stocked-materials/settings', { method: 'PUT', body: JSON.stringify({ settings, expectedRowVersion }) }, token)
+
+export interface ArchiveWarningPolicy { revision: number; blockAll: boolean; blockingCodes: string[] }
+export interface ArchiveWarningDefinition { code: string; name: string; source: string; supported: boolean; alwaysBlocks: boolean }
+export const getArchiveWarningPolicy = (token: string) => requestJson<ArchiveWarningPolicy>('/api/archive-warning-policy', {}, token)
+export const getArchiveWarningCatalog = (token: string) => requestJson<ArchiveWarningDefinition[]>('/api/archive-warning-policy/catalog', {}, token)
+export const saveArchiveWarningPolicy = (policy: ArchiveWarningPolicy, token: string) => requestJson<ArchiveWarningPolicy>('/api/archive-warning-policy', { method: 'PUT', body: JSON.stringify(policy) }, token)

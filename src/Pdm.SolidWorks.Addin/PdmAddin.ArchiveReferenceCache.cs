@@ -18,6 +18,10 @@ public sealed partial class PdmAddin
         private readonly string username;
         private readonly Dictionary<Guid, IReadOnlyList<ArchivedReferenceVersion>> histories =
             new Dictionary<Guid, IReadOnlyList<ArchivedReferenceVersion>>();
+        private readonly Dictionary<Guid, IReadOnlyList<ArchivedReferenceVersion>> summaries =
+            new Dictionary<Guid, IReadOnlyList<ArchivedReferenceVersion>>();
+        private readonly HashSet<string> verifiedBindings = new HashSet<string>(StringComparer.Ordinal);
+        private bool legacyServer;
 
         public BatchReferenceVersionCache(Guid projectId, Guid sessionId, string scope, string username)
         {
@@ -49,6 +53,57 @@ public sealed partial class PdmAddin
             lock (histories) histories[documentId] = snapshot;
             return snapshot;
         }
+
+        public IReadOnlyList<ArchivedReferenceVersion> KnownVersions(Guid id) =>
+            histories.TryGetValue(id, out var full) ? full : summaries.TryGetValue(id, out var known) ? known : Array.Empty<ArchivedReferenceVersion>();
+
+        public async Task PrimeReferencesAsync(IReadOnlyList<CadTreeNode> nodes, PdmApiClient client,
+            CancellationToken token, Action<int, int, string, string> report)
+        {
+            var requests = nodes.GroupBy(node => node.DocumentId.Value).SelectMany(group => group
+                .Select(node => node.OpenedVersionId == Guid.Empty ? null : node.OpenedVersionId).Distinct()
+                .Select(bound => new DocumentVersionVerificationRequestDto { DocumentId = group.Key, BoundVersionId = bound }))
+                .Where(request => !histories.ContainsKey(request.DocumentId) && !verifiedBindings.Contains(Key(request))).ToList();
+            var total = requests.Count; var completed = 0;
+            while (requests.Count > 0)
+            {
+                token.ThrowIfCancellationRequested();
+                // Each server request has distinct document IDs. A second bound
+                // version of the same file is checked in a subsequent batch.
+                var batch = requests.GroupBy(request => request.DocumentId).Select(group => group.First()).Take(100).ToArray();
+                report?.Invoke(completed, total, string.Empty, "正在批量核对已存引用版本（不上传引用文件）…");
+                var result = legacyServer ? null : await client.VerifyReferenceVersionsAsync(batch, token);
+                if (result == null)
+                {
+                    legacyServer = true;
+                    foreach (var request in batch) await GetHistoryAsync(request.DocumentId, client, token);
+                }
+                else
+                {
+                    if (result.Count != batch.Length || result.Any(row => row == null) || result.Select(row => row.DocumentId).Distinct().Count() != batch.Length
+                        || result.Any(row => row == null || !batch.Any(request => request.DocumentId == row.DocumentId)
+                            || !row.Accessible || new[] { row.Latest, row.Bound }.Where(version => version != null)
+                                .Any(version => version.DocumentId != row.DocumentId || version.Id == Guid.Empty || string.IsNullOrWhiteSpace(version.Sha256)
+                                    || string.IsNullOrWhiteSpace(version.Revision))
+                            || row.Bound != null && row.Bound.Id != batch.First(request => request.DocumentId == row.DocumentId).BoundVersionId))
+                        throw new InvalidOperationException("装配引用的版本或查看权限未通过批量核对，尚未上传，请刷新项目后重试。");
+                    foreach (var row in result)
+                    {
+                        var known = KnownVersions(row.DocumentId);
+                        summaries[row.DocumentId] = Array.AsReadOnly(known.Concat(new[] { row.Latest, row.Bound }
+                            .Where(version => version != null).Select(version => new ArchivedReferenceVersion(version)))
+                            .GroupBy(version => version.Id).Select(group => group.First()).ToArray());
+                        foreach (var version in new[] { row.Latest, row.Bound }.Where(version => version != null))
+                            verifiedBindings.Add(row.DocumentId + "|" + version.Id);
+                    }
+                }
+                foreach (var request in batch) { verifiedBindings.Add(Key(request)); requests.Remove(request); }
+                completed += batch.Length;
+            }
+            if (total > 0) LogOperation("引用版本批量核对完成 bindings=" + total + " completeHistories=" + histories.Count + " legacy=" + legacyServer);
+        }
+
+        private static string Key(DocumentVersionVerificationRequestDto request) => request.DocumentId + "|" + request.BoundVersionId;
     }
 
     private sealed class ArchivedReferenceVersion
@@ -59,6 +114,11 @@ public sealed partial class PdmAddin
             Revision = version.Revision?.Display;
             sha256 = version.Sha256;
             sourceSha256 = VersionSourceSha256(version);
+        }
+
+        public ArchivedReferenceVersion(DocumentVersionVerificationDto version)
+        {
+            Id = version.Id; Revision = version.Revision; sha256 = version.Sha256; sourceSha256 = version.SourceFileSha256;
         }
 
         public Guid Id { get; }

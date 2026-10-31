@@ -6,6 +6,24 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class ProductionTrackingTests
 {
+    [Fact]
+    public async Task TreeSummaryIncludesSupplyReceiptAndConversionAttention()
+    {
+        var fixture = await FixtureAsync();
+        await fixture.Repository.MarkReleasePreviewStateAsync(fixture.Package.Id, ReleasePreviewState.Failed, "转换失败", 5, DateTimeOffset.UtcNow, Ct);
+        async Task<ProductionTrackingSummary> Summary() => (await fixture.Service.ListAsync("admin", UserRole.Administrator, Ct))
+            .Single(project => project.Id == fixture.Project.Id).Packages.Single(item => item.ReleasePackageId == fixture.Package.Id);
+        var before = await Summary();
+        Assert.Null(before.ReceivedAt);
+        Assert.True(before.HasReleaseAttention);
+        await fixture.Service.ReceiveAsync(fixture.Package.Id, Guid.NewGuid(), "admin", UserRole.Administrator, Ct);
+        var received = await Summary();
+        Assert.NotNull(received.ReceivedAt);
+        Assert.True(received.HasReleaseAttention);
+        await fixture.Repository.MarkReleasePreviewStateAsync(fixture.Package.Id, ReleasePreviewState.Succeeded, null, 1, DateTimeOffset.UtcNow, Ct);
+        Assert.False((await Summary()).HasReleaseAttention);
+    }
+
     private static readonly CancellationToken Ct = CancellationToken.None;
 
     [Fact]

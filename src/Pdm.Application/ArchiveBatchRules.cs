@@ -17,14 +17,29 @@ public static class ArchiveBatchRules
     public static IReadOnlyList<ArchiveBatchFile> Order(IReadOnlyList<ArchiveBatchFile> files)
     {
         var byId = files.ToDictionary(file => file.DocumentId);
+        var edges = files.SelectMany(file => References(file.Commit.ReferenceSnapshot.Root)
+            .Where(reference => !ArchiveDeferredReferences.IsDeferred(reference)
+                && reference.DocumentId.HasValue && byId.ContainsKey(reference.DocumentId.Value))
+            .Select(reference => new KeyValuePair<Guid, Guid>(file.DocumentId, reference.DocumentId!.Value)));
+        var groups = ReferenceCycleGroups.Find(edges, EqualityComparer<Guid>.Default);
+        if (groups.Count != 0)
+            throw new PdmRuleException("整批存档存在" + groups.Count + "组循环引用，尚未提交任何图档："
+                + string.Join("；", groups.Select(group => string.Join("、", group.Select(id => byId[id].Commit.ReferenceSnapshot.Root.FileName)))));
         var ordered = new List<ArchiveBatchFile>(); var visited = new HashSet<Guid>(); var visiting = new HashSet<Guid>();
+        var chain = new List<string>();
         void Visit(ArchiveBatchFile file)
         {
             if (visited.Contains(file.DocumentId)) return;
-            if (!visiting.Add(file.DocumentId)) throw new PdmRuleException("整批存档存在循环引用，尚未提交任何图档。");
+            if (!visiting.Add(file.DocumentId)) throw new PdmRuleException("整批存档存在循环引用，尚未提交任何图档："
+                + string.Join(" → ", chain.Append(file.Commit.ReferenceSnapshot.Root.FileName)));
+            chain.Add(file.Commit.ReferenceSnapshot.Root.FileName);
             foreach (var reference in References(file.Commit.ReferenceSnapshot.Root))
+            {
+                if (ArchiveDeferredReferences.IsDeferred(reference)) continue;
                 if (reference.DocumentId is Guid id && byId.TryGetValue(id, out var child)) Visit(child);
+            }
             visiting.Remove(file.DocumentId); visited.Add(file.DocumentId); ordered.Add(file);
+            chain.RemoveAt(chain.Count - 1);
         }
         foreach (var file in files) Visit(file);
         return ordered;
@@ -49,6 +64,16 @@ public static class ArchiveBatchRules
         };
         return commit with { ReferenceSnapshot = commit.ReferenceSnapshot with { Root = Bind(commit.ReferenceSnapshot.Root, true) } };
     }
+
+    // Context and unclassified links can commit after their owners. Bind those links
+    // to actual receipts before the transaction becomes visible; never guess a version.
+    public static DocumentReferenceNode BindContextReferences(DocumentReferenceNode root,
+        IReadOnlyDictionary<Guid, DocumentCheckInResult> results) => root with
+    {
+        Revision = ArchiveDeferredReferences.IsDeferred(root) && root.DocumentId is Guid id && results.TryGetValue(id, out var target)
+            ? target.Document.Revision : root.Revision,
+        Children = root.Children.Select(child => BindContextReferences(child, results)).ToArray()
+    };
 
     public static ArchiveBatchReceipt RequireMatchingReceipt(ArchiveBatchReceipt receipt, string actor, string requestHash)
     {

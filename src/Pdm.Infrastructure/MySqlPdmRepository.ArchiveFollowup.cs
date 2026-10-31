@@ -11,7 +11,7 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var rows = await connection.QueryAsync<string>(new CommandDefinition(
-            "SELECT followup_json FROM archive_batch_followup WHERE next_attempt_at<=@Now ORDER BY next_attempt_at LIMIT @Limit FOR UPDATE SKIP LOCKED",
+            "SELECT followup_json FROM archive_batch_followup FORCE INDEX(ix_archive_followup_due) WHERE next_attempt_at<=@Now ORDER BY next_attempt_at LIMIT @Limit FOR UPDATE SKIP LOCKED",
             new { Now = timeProvider.GetUtcNow().UtcDateTime, Limit = Math.Clamp(limit, 1, 20) }, transaction, cancellationToken: cancellationToken));
         var work = rows.Select(json => JsonSerializer.Deserialize<ArchiveBatchFollowup>(json, jsonOptions)!).ToArray();
         foreach (var item in work)

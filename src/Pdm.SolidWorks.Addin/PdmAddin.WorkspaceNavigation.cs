@@ -12,6 +12,7 @@ public sealed partial class PdmAddin
     private CancellationTokenSource projectNavigationCancellation;
     private readonly Dictionary<Guid, NavigationVersionRequest> navigationVersions = new Dictionary<Guid, NavigationVersionRequest>();
     private readonly Dictionary<Guid, string> navigationVersionStamps = new Dictionary<Guid, string>();
+    private readonly Dictionary<Guid, DateTime?> navigationMetadataTimes = new Dictionary<Guid, DateTime?>();
     private readonly Dictionary<Guid, NavigationRelationsRequest> navigationRelations = new Dictionary<Guid, NavigationRelationsRequest>();
 
     private void CancelProjectNavigation()
@@ -99,11 +100,40 @@ public sealed partial class PdmAddin
         lock (metadataCacheSync)
             foreach (var document in documents)
             {
-                var stamp = string.Join("|", document.ProjectId, document.Revision?.Display, document.StoredVersionCount, document.UpdatedAt?.Ticks);
-                if (!navigationVersionStamps.TryGetValue(document.Id, out var previous) || stamp != previous)
+                var stamp = NavigationVersionStamp(document);
+                if (!navigationVersionStamps.TryGetValue(document.Id, out var previous) || stamp != previous
+                    || !navigationMetadataTimes.TryGetValue(document.Id, out var metadataTime) || metadataTime != document.UpdatedAt)
                     navigationVersions.Remove(document.Id);
                 navigationVersionStamps[document.Id] = stamp;
+                navigationMetadataTimes[document.Id] = document.UpdatedAt;
             }
+    }
+
+    private static string NavigationVersionStamp(DocumentDto document) => string.Join("|", document.ProjectId,
+        document.Revision?.Display, document.StoredVersionCount, document.DrawingVersion, document.PublishedVersion);
+
+    private void RememberNavigationReceipt(DocumentDto document, DocumentVersionDto version = null)
+    {
+        if (document == null) return;
+        CancelMetadataRefresh();
+        lock (metadataCacheSync)
+        {
+            projectDocumentsCache.Remove(document.ProjectId);
+            // A confirmed checkout/release changes UpdatedAt without changing the
+            // immutable version. Other metadata changes still refresh the snapshot.
+            if (navigationVersionStamps.TryGetValue(document.Id, out var known) && known == NavigationVersionStamp(document))
+                navigationMetadataTimes[document.Id] = document.UpdatedAt;
+            if (version != null)
+            {
+                navigationVersionStamps[document.Id] = NavigationVersionStamp(document);
+                navigationMetadataTimes[document.Id] = document.UpdatedAt;
+                navigationVersions[document.Id] = new NavigationVersionRequest { Client = apiClient, Username = authenticatedUsername,
+                    ExpiresUtc = DateTime.UtcNow.AddMinutes(5), Task = Task.FromResult(new List<DocumentVersionDto> { version }) };
+                if (documentVersionsCache.TryGetValue(document.Id, out var history))
+                    documentVersionsCache[document.Id] = new DocumentVersionsCacheEntry(new[] { version }
+                        .Concat(history.Versions.Where(item => item.Id != version.Id)).ToList(), DateTime.UtcNow.AddMinutes(5));
+            }
+        }
     }
 
     private async Task<IReadOnlyList<DocumentModelDrawingRelationDto>> GetNavigationRelationsAsync(Guid projectId, CancellationToken token)

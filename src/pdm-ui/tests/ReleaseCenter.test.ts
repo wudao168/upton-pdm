@@ -5,6 +5,16 @@ import * as api from '../src/api'
 import type { BomItem, CreateReleasePackageInput, ReleasePackageSummary } from '../src/types'
 
 describe('ReleaseCenter', () => {
+  it('已发布标准件版本列显示本次冻结的BOM发布版本', () => {
+    const item: BomItem = { id: 'standard-version', kind: 'Standard', sequence: 1, drawingNumber: '01021000223', name: '折弯钣金', specification: '7000-001', brand: '国优', quantity: 1, unit: '001', revision: 'W1', sourceDocumentId: 'standard-model', displayRevision: '未发布', complete: true }
+    const release = { ...publishedFormal('StandardSupplement'), standardBomRevision: 'S-P700016-2-B04', standardBomSnapshot: [item], versionBindings: [] }
+    const wrapper = mount(ReleaseCenter, { props: { releasePackage: release, username: 'admin', pending: false, progress: 0, error: '', canManage: true, canDecide: false } })
+    const cell = wrapper.get('.pdm-release-frozen-table tbody tr').findAll('td')[4]!
+    expect(cell.text()).toBe('S-P700016-2-V04')
+    expect(cell.attributes('title')).toContain('标准件BOM发布版本')
+    expect(cell.text()).not.toContain('未发布')
+    wrapper.unmount()
+  })
   it('发布记录显示整包日期和汇总物料的逐项交付要求，旧记录显示未设置', async () => {
     const item: BomItem = { id: 'delivery-a', kind: 'Standard', sequence: 1, drawingNumber: 'STD-DATE', name: '接头', quantity: 1, unit: '个', revision: 'A', complete: true }
     const release = { ...publishedFormal('StandardFormal'), drawingRequiredOn: '2026-11-02', standardBomSnapshot: [item, { ...item, id: 'delivery-b' }],
@@ -379,12 +389,12 @@ describe('ReleaseCenter', () => {
 
   it('shows the completed approval state while publication waits for conversion and supports retry', async () => {
     const releasePackage: ReleasePackageSummary = {
-      id: 'release-publishing', number: 'RP-PUBLISHING-001', state: '发布中', previewState: 'Pending', previewError: '转图连接超时', scope: 'StandardFormal',
-      workflowVersion: 1, selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: false,
+      id: 'release-publishing', number: 'RP-PUBLISHING-001', state: '发布中', previewState: 'Pending', previewError: '转图连接超时', scope: 'NonStandardWithDrawing',
+      workflowVersion: 1, selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: true,
       standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], steps: [],
     }
     const wrapper = mount(ReleaseCenter, {
-      props: { releasePackage, username: 'designer', pending: false, progress: 0, error: '', canManage: false, canDecide: false },
+      props: { releasePackage, username: 'designer', pending: false, progress: 0, error: '', canManage: true, canDecide: false },
     })
 
     expect(wrapper.get('.pdm-release-completion-status').text()).toContain('审批已完成')

@@ -15,10 +15,8 @@ public static class ReleaseDeliveryEndpoints
     public static void MapReleaseDeliveryEndpoints(this WebApplication app)
     {
         var api = app.MapGroup("/api").RequireAuthorization();
-        api.MapGet("/settings/release-notifications", async (HttpContext context, ReleaseNotificationSettingsService service, CancellationToken ct) =>
-        { var (actor, role) = User(context); return Results.Ok(await service.GetAsync(actor, role, ct)); });
-        api.MapPut("/settings/release-notifications", async (SaveReleaseNotificationSettings input, HttpContext context, ReleaseNotificationSettingsService service, CancellationToken ct) =>
-        { var (actor, role) = User(context); return Results.Ok(await service.SaveAsync(input, actor, role, ct)); });
+        api.MapMethods("/settings/release-notifications", ["GET", "PUT"], () =>
+            Results.Problem("发布通知配置功能已移除，请通过审批流程配置维护业务通知。", statusCode: StatusCodes.Status410Gone));
         api.MapGet("/release-packages/{id:guid}/execution", async (Guid id, HttpContext context, IPdmRepository repository, ReleaseDeliveryService service, WorkflowNotificationService notifications, CancellationToken ct) =>
         {
             var (actor, role) = User(context);

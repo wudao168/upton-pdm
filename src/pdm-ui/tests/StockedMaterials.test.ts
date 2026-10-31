@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessageBox } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import StockedMaterials from '../src/components/StockedMaterials.vue'
 import StockedMaterialSettings from '../src/components/StockedMaterialSettings.vue'
@@ -18,12 +18,37 @@ describe('常备件', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     api.refreshStockedMaterials.mockReset()
+    api.removeStockedMaterial.mockReset().mockResolvedValue(undefined)
     api.listMaterialStockPlans.mockResolvedValue({ enterpriseCode: '001', organizationCode: '7', items: [] })
     api.listStandardLibraryCategories.mockResolvedValue([category])
     api.listStockedMaterials.mockResolvedValue({ items: [{ material, snapshot, categories: [category], coverImage: null }], total: 1, lowStockCount: 1, page: 1, pageSize: 50, scope: { organizationCode: '7' }, lastSuccessAt: null, lastError: null, canSynchronize: true, canManageSettings: false })
     api.readStockedMaterialSettings.mockReset().mockResolvedValue(settingsView())
   })
-  afterEach(() => { wrapper?.unmount(); wrapper = undefined; document.body.innerHTML = '' })
+  afterEach(() => { wrapper?.unmount(); wrapper = undefined; document.body.innerHTML = ''; vi.restoreAllMocks() })
+  it('cancels stock globally even from a selected category and refreshes the shared stock flags', async () => {
+    const confirmation = vi.spyOn(ElMessageBox, 'confirm').mockImplementation(vi.fn().mockResolvedValue('confirm'))
+    api.removeStockedMaterial.mockImplementation(async () => api.listStockedMaterials.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 50, scope: { organizationCode: '7' } }))
+    wrapper = mount(StockedMaterials, { attachTo: document.body, props: { token: 'token', active: true, canManage: true }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await wrapper.find('.el-tree-node__content').trigger('click'); await flushPromises()
+    await wrapper.find('.stocked-table .el-table__body tr label.el-checkbox').trigger('click'); await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === '移除')!.trigger('click'); await flushPromises()
+    expect(confirmation.mock.calls[0]![0]).toContain('U9C安全库存量设为0')
+    expect(api.removeStockedMaterial).toHaveBeenCalledWith('item', undefined, 'token')
+    expect(api.listMaterialStockPlans).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('.stocked-table .el-table__body').text()).not.toContain('键盘')
+  })
+  it('keeps the row and displays the cancellation failure when U9 readback does not confirm zero', async () => {
+    vi.spyOn(ElMessageBox, 'confirm').mockImplementation(vi.fn().mockResolvedValue('confirm'))
+    api.removeStockedMaterial.mockRejectedValue(new Error('U9C回查的安全库存量尚未清零，未移除PLM收录，请核对接口后重试。'))
+    wrapper = mount(StockedMaterials, { attachTo: document.body, props: { token: 'token', active: true, canManage: true }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await wrapper.find('.stocked-table .el-table__body tr label.el-checkbox').trigger('click'); await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === '移除')!.trigger('click'); await flushPromises()
+    expect(wrapper.find('[role="alert"]').text()).toContain('尚未清零')
+    expect(wrapper.find('.stocked-table .el-table__body').text()).toContain('键盘')
+    expect(api.listMaterialStockPlans).toHaveBeenCalledTimes(1)
+  })
   it('shows the low stock warning and keeps the name as plain text', async () => {
     wrapper = mount(StockedMaterials, { props: { token: 'token', active: true, canManage: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()

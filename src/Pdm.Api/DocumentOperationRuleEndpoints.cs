@@ -13,9 +13,7 @@ public static class DocumentOperationRuleEndpoints
         var routes = app.MapGroup("/api/document-operation-rules").RequireAuthorization();
         routes.MapGet("", async (IPdmRepository repository, CancellationToken ct) =>
             Results.Ok(await repository.GetDocumentOperationRulesAsync(ct)));
-        routes.MapPut("/{ruleId}", async (string ruleId, SetRuleRequest request, HttpContext context,
-            PdmWorkflowService workflow, CancellationToken ct) => Results.Ok(await workflow.SetDocumentOperationRuleAsync(ruleId,
-                request.Enabled, request.ExpectedRevision, context.User.Identity!.Name!,
-                Enum.Parse<UserRole>(context.User.FindFirstValue(ClaimTypes.Role)!), ct)));
+        // Read-only compatibility for older clients; new administration uses archive-warning-policy.
+        routes.MapPut("/{ruleId}", () => Results.Json(new { message = "旧图档操作规则已停用，请使用存档警告策略。" }, statusCode: 410));
     }
 }

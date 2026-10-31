@@ -23,6 +23,7 @@ internal sealed class SetupOptions
     public bool Silent { get; set; }
     public bool Uninstall { get; set; }
     public bool StartInTray { get; set; }
+    public bool DedicatedConversionHost { get; set; } = true;
 
     public static SetupOptions Parse(string[] args)
     {

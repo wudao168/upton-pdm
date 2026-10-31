@@ -30,7 +30,8 @@ internal static partial class Program
     string dependencyPath()=>Path.Combine(fixture,"ordinary-missing.SLDPRT");
     var root=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetComponents"?new[]{component}:throw new Exception("预检不应写入模型："+call.MethodName)).GetTransparentProxy();
     var readOnlyApp=new Proxy(appType,call=>call.MethodName=="GetOpenDocumentByName"?root:throw new Exception("预检不应改变窗口："+call.MethodName)).GetTransparentProxy();
-    Exception failure=null;try{Type("ArchiveNativeCopyWorkspace").GetMethod("ValidateLoadedImports",Flags).Invoke(null,new object[]{readOnlyApp,new[]{owner}});}catch(TargetInvocationException error){failure=error.InnerException;}
+    var importedOwner=New("CadTreeNode");Set(importedOwner,"FullPath",owner);Set(importedOwner,"Kind",Enum.Parse(Type("CadDocumentKind"),"Assembly"));Set(importedOwner,"RequiresModelUpdate",true);
+    Exception failure=null;try{Type("ArchiveNativeCopyWorkspace").GetMethod("ValidateLoadedImports",Flags).Invoke(null,new object[]{readOnlyApp,LinkedItems(importedOwner)});}catch(TargetInvocationException error){failure=error.InnerException;}
     if((failure!=null)!=(mode=="missing-import")||failure!=null&&(!failure.Message.Contains("未上传任何文件")||failure.Message.Contains("被占用")))throw new Exception("导入模型预检范围不正确："+mode,failure);
     Console.WriteLine("PASS: read-only early import preflight handles "+mode);
    }

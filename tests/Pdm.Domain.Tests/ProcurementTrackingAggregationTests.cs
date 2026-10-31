@@ -4,6 +4,18 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class ProcurementTrackingAggregationTests
 {
+    [Fact]
+    public void EveryPurchaseBatchKeepsAllDistinctPublishedFilesForTheMaterial()
+    {
+        var first = new BomFileReference(Guid.NewGuid(), Guid.NewGuid(), "Drawing2D", "图纸.pdf", 1, 10, new string('A',64), "标准化", DateTimeOffset.UtcNow, "标准物料", "图纸");
+        var agreement = first with { Id = Guid.NewGuid(), Kind = "Document", FileName = "技术协议.pdf", VersionNumber = 0 };
+        var rows = ProcurementTrackingAggregation.Group([Item(2) with { Files = [first] }, Item(3) with { Files = [first,agreement] }],
+            [Pr("1", "PR1", 5), Po("2", "PO1", "1", 2), Po("3", "PO2", "1", 3)]);
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, row => { Assert.Equal(2, row.Files.Count); Assert.Contains(agreement, row.Files); });
+        Assert.Equal(5, rows.Sum(row => row.Quantity));
+    }
+
     [Theory]
     [InlineData(4, false)]
     [InlineData(10, true)]

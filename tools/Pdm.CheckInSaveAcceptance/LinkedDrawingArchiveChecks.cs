@@ -87,8 +87,16 @@ internal static partial class Program
    using(var client=(IDisposable)New("PdmApiClient","http://linked-qa.invalid/"))
    {
     LinkedClient(plugin,client,handler);
-    var task=(Task)Type("PdmAddin").GetMethod("BuildBatchCheckInPlanAsync",Flags).Invoke(plugin,new object[]{LinkedItems(model,drawing),null,CancellationToken.None});await task;
+    var candidates=LinkedItems(model,drawing);
+    if(mode=="changed-model")
+    {
+     Set(drawing,"CheckedOutBy","tester");Set(drawing,"CheckoutSessionId",session);
+     candidates.SetValue(New("BatchOperationItem",drawing,5),1);
+    }
+    var task=(Task)Type("PdmAddin").GetMethod("BuildBatchCheckInPlanAsync",Flags).Invoke(plugin,new object[]{candidates,null,CancellationToken.None});await task;
     var plan=Get(task,"Result");var planned=((IEnumerable)Get(plan,"Items")).Cast<object>().Select(item=>Get(item,"Node")).ToArray();
+    if(planned.Select(node=>(string)Get(node,"FullPath")).Distinct(StringComparer.OrdinalIgnoreCase).Count()!=planned.Length)
+     throw new Exception("同一工程图被重复纳入提交计划："+mode);
     if(planned.Contains(drawing)==(mode=="unchanged"||mode=="published-same-content"||mode=="published-context-model"||mode=="published-context-unknown-config"||mode=="published-context-pending-config"||mode=="published-context-extra-dependency"))throw new Exception("Drawing dependency change was skipped or unchanged drawing was cascaded: "+mode);
     if(mode.StartsWith("published-")&&(string)Get(Get(((IList)Get(drawingSnapshot,"Children"))[0],"Revision"),"Display")!="W1")throw new Exception("Reference comparison rewrote the frozen drawing snapshot");
     if(mode=="published-context-unknown-config"&&((string)Get(model,"Configuration")!=""||(string)Get(((IList)Get(drawingSnapshot,"Children"))[0],"Configuration")!="Default"))throw new Exception("Unknown configuration was guessed or the archived view was rewritten");

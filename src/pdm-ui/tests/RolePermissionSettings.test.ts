@@ -21,6 +21,24 @@ const directory: RolePermissionDirectory = {
 describe('RolePermissionSettings', () => {
   afterEach(() => { document.body.innerHTML = '' })
 
+  it('在消息提示列独立配置料品提醒，保留必要的查看权限', async () => {
+    const roleDirectory: RolePermissionDirectory = { permissions: [
+      { code: 'material.view', name: '查看料品管理', module: '料品管理', sensitive: false, action: 'view' },
+      { code: 'material.notify', name: '接收料品管理消息提示', module: '料品管理', sensitive: false, action: 'notify', dependencies: ['material.view'] },
+    ], roles: [{ ...directory.roles[0]!, permissions: ['material.view'] }] }
+    const onSave = vi.fn().mockImplementation((_role, permissions) => Promise.resolve({ ...roleDirectory, roles: [{ ...roleDirectory.roles[0]!, permissions }] }))
+    const wrapper = mount(RolePermissionSettings, { attachTo: document.body, props: { directory: roleDirectory, canEdit: true, pending: false, onSave, onCreate: vi.fn(), onDelete: vi.fn() }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().trim() === '权限设置')!.trigger('click'); await flushPromises()
+    expect([...document.querySelectorAll('.pdm-permission-table-wrap th')].map(element => element.textContent)).toContain('消息提示')
+    const notice = [...document.querySelectorAll<HTMLElement>('.pdm-permission-cell')].find(element => element.textContent?.includes('material.notify'))!.querySelector<HTMLInputElement>('input')!
+    expect(notice.checked).toBe(false)
+    notice.click(); await flushPromises()
+    ;[...document.querySelectorAll<HTMLButtonElement>('.el-dialog button')].find(button => button.textContent?.trim() === '保存并立即生效')!.click(); await flushPromises()
+    expect(onSave).toHaveBeenCalledWith('Engineer', expect.arrayContaining(['material.view', 'material.notify']))
+    wrapper.unmount()
+  })
+
   it.each([
     ['drawing-review.decide', ['project.content.view', 'project.view']],
     ['quality.inspection.upload', ['project.content.view', 'project.view']],
@@ -120,14 +138,14 @@ describe('RolePermissionSettings', () => {
     expect(document.body.textContent).toContain('3 个模块、4 项权限')
     expect(document.body.textContent).toContain('查看项目')
     expect(document.body.querySelectorAll('.pdm-permission-sidebar button')).toHaveLength(3)
-    expect(Array.from(document.body.querySelectorAll('.pdm-permission-table-wrap thead th')).map(item => item.textContent)).toEqual(['分类', '查看', '新增', '编辑', '删除/停用', '其他操作'])
+    expect(Array.from(document.body.querySelectorAll('.pdm-permission-table-wrap thead th')).map(item => item.textContent)).toEqual(['分类', '查看', '新增', '编辑', '删除/停用', '消息提示', '其他操作'])
     expect(document.body.querySelector('.pdm-permission-category-cell')?.textContent).toBe('项目管理')
     expect(document.body.textContent).not.toContain('编辑图档')
     const newModuleButton = Array.from(document.body.querySelectorAll<HTMLButtonElement>('.pdm-permission-sidebar button')).find(button => button.textContent?.includes('新增模块'))!
     newModuleButton.click()
     await flushPromises()
     expect(document.body.textContent).toContain('查看新增模块')
-    expect(document.body.querySelectorAll('.pdm-permission-matrix td')[4]?.textContent).toContain('发布新增模块')
+    expect(document.body.querySelectorAll('.pdm-permission-matrix td')[5]?.textContent).toContain('发布新增模块')
     expect(document.body.querySelector('.pdm-permission-category-cell')?.textContent).toBe('新增模块')
     expect(document.body.textContent).not.toContain('查看项目')
   })

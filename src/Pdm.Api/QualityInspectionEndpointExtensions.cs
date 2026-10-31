@@ -25,7 +25,8 @@ public static class QualityInspectionEndpointExtensions
         api.MapGet("/quality-inspections/{id:guid}/download", async (Guid id, HttpContext context, QualityInspectionService service, CancellationToken cancellationToken) =>
         {
             var result = await service.DownloadAsync(id, Actor(context), Role(context), cancellationToken);
-            return Results.File(result.Content, "application/octet-stream", result.Record.FileName);
+            var preview = context.Request.Query["preview"] == "true";
+            return Results.File(result.Content, preview ? ProjectCenterPermissionMiddleware.PreviewContentType(result.Record.FileName) : "application/octet-stream", preview ? null : result.Record.FileName);
         });
     }
     private static string Actor(HttpContext context) => context.User.Identity?.Name ?? throw new UnauthorizedAccessException("登录信息无效。");

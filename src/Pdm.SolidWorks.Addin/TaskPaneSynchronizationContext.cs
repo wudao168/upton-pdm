@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -9,6 +10,7 @@ internal sealed class TaskPaneSynchronizationContext : SynchronizationContext
     private readonly Control control;
     private readonly WindowsFormsSynchronizationContext uiContext;
     private readonly int uiThreadId;
+    private static long lastTimingReport;
 
     public TaskPaneSynchronizationContext(Control control)
     {
@@ -31,7 +33,21 @@ internal sealed class TaskPaneSynchronizationContext : SynchronizationContext
             return;
         }
 
-        uiContext.Post(_ => Run(callback, state), null);
+        var posted = Stopwatch.GetTimestamp();
+        uiContext.Post(_ => {
+            var started = Stopwatch.GetTimestamp();
+            try { Run(callback, state); }
+            finally
+            {
+                var ended = Stopwatch.GetTimestamp();
+                var queuedMs = (started - posted) * 1000 / Stopwatch.Frequency;
+                var executionMs = (ended - started) * 1000 / Stopwatch.Frequency;
+                var previous = Interlocked.Read(ref lastTimingReport);
+                if (ArchiveSession.Current?.WorkflowStarted == true && (queuedMs >= 1000 || executionMs >= 1000)
+                    && ended - previous >= 5 * Stopwatch.Frequency && Interlocked.CompareExchange(ref lastTimingReport, ended, previous) == previous)
+                    PluginDiagnosticLog.Record("存档调度耗时", "主线程排队=" + queuedMs + "毫秒；回调执行=" + executionMs + "毫秒；线程=" + uiThreadId);
+            }
+        }, null);
     }
 
     public override void Send(SendOrPostCallback callback, object state)

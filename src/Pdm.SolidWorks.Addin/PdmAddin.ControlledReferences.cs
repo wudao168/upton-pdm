@@ -17,8 +17,13 @@ public sealed partial class PdmAddin
         => OpenControlledReadOnlyDocumentCore(path, documentType, configuration, manifest, false);
 
     private IModelDoc2 OpenControlledReadOnlyDocumentCore(string path, int documentType, string configuration,
-        ControlledOpenManifestDto manifest, bool preserveLoadedContext)
+        ControlledOpenManifestDto manifest, bool preserveLoadedContext, bool preserveWorkingEdits = false)
     {
+        using var retainedWorking = new ControlledWorkingCopyScope(path, manifest);
+        var resumedPaths = new HashSet<string>(manifest.Files.Where(file => manifest.ResumedDocumentIds.Contains(file.DocumentId))
+            .Select(file => ControlledReferenceMaterializer.LocalPath(Path.GetDirectoryName(path), file)), StringComparer.OrdinalIgnoreCase);
+        resumedPaths.UnionWith(manifest.RetainedLocalReferences.Values.Where(record => !record.Managed || record.Editable).SelectMany(record => record.Paths));
+        ControlledOpenBoundary.RequireLoadedSources(application, path, manifest);
         var beforeOpen = new HashSet<string>(((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
             .Select(model => model.GetPathName()).Where(value => !string.IsNullOrWhiteSpace(value)), StringComparer.OrdinalIgnoreCase);
         var preserved = new HashSet<string>(preserveLoadedContext
@@ -42,6 +47,9 @@ public sealed partial class PdmAddin
                             var file = manifest.Files.FirstOrDefault(candidate => string.Equals(candidate.FileName, Path.GetFileName(source), StringComparison.OrdinalIgnoreCase));
                             if (file != null && !PathsEqual(source, ControlledReferenceMaterializer.LocalPath(Path.GetDirectoryName(path), file)))
                                 nativeFirst = false;
+                            if (file == null && ControlledReferenceMaterializer.IsLinkedResource(source)
+                                && (File.Exists(source) || File.Exists(Path.Combine(Path.GetDirectoryName(path), Path.GetFileName(source)))))
+                                nativeFirst = false;
                         }
             }
             catch (Exception error)
@@ -55,16 +63,23 @@ public sealed partial class PdmAddin
             var prepareReferences = !nativeFirst || attempt > 0;
             if (prepareReferences)
             {
-                if (preserveLoadedContext) ControlledReferenceMaterializer.PrepareDrawingOnly(application, path, manifest);
+                if (preserveLoadedContext && preserveWorkingEdits) ControlledReferenceMaterializer.PrepareEditableDrawingOnly(application, path, manifest);
+                else if (preserveLoadedContext) ControlledReferenceMaterializer.PrepareDrawingOnly(application, path, manifest);
                 else ControlledReferenceMaterializer.Prepare(application, path, manifest);
             }
             var timer = System.Diagnostics.Stopwatch.StartNew();
             IModelDoc2 opened;
-            using (new ControlledReferenceSearchScope(application, path, manifest))
-                opened = OpenOrActivateDocumentOnSolidWorksThread(path, documentType, configuration, !preserved.Contains(path));
-            if (opened == null) return null;
+            Action verifyBoundary;
+            using (var search = new ControlledReferenceSearchScope(application, path, manifest))
+            {
+                opened = OpenOrActivateDocumentOnSolidWorksThread(path, documentType, configuration,
+                    !preserved.Contains(path) && !resumedPaths.Contains(path));
+                verifyBoundary = search.VerifyLoadedSources;
+            }
+            if (opened == null) { verifyBoundary(); return null; }
             try
             {
+                verifyBoundary();
                 if (nativeFirst && attempt == 0)
                 {
                     foreach (var file in manifest.Files)
@@ -75,17 +90,27 @@ public sealed partial class PdmAddin
                     ?? ValidateControlledLoadedSources(opened, path, manifest, application);
                 var expected = new HashSet<string>(manifest.Files.Select(file =>
                     Path.GetFullPath(Path.Combine(Path.GetDirectoryName(path), file.RelativePath ?? file.FileName))), StringComparer.OrdinalIgnoreCase);
+                expected.UnionWith(manifest.RetainedLocalReferences.Values.SelectMany(record => record.Paths));
                 foreach (var loaded in (application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
                 {
                     var actual = loaded.GetPathName();
                     if (!string.IsNullOrWhiteSpace(actual) && !beforeOpen.Contains(actual)
                         && !expected.Contains(Path.GetFullPath(actual)) && !embeddedSources.Contains(actual))
                         throw new InvalidOperationException("本次打开加载了受控范围之外的上下文文件，尚未认定打开成功：" + actual);
-                    if (!string.IsNullOrWhiteSpace(actual) && expected.Contains(Path.GetFullPath(actual)) && !preserved.Contains(actual))
+                    if (!string.IsNullOrWhiteSpace(actual) && expected.Contains(Path.GetFullPath(actual)) && !preserved.Contains(actual)
+                        && !resumedPaths.Contains(actual))
                         EnsureDocumentOpenedReadOnly(loaded, actual);
                 }
                 LogOperation("Controlled read-only open completed path=" + path + " referencePrepass=" + prepareReferences
                     + " exactSources=" + (nativeFirst && attempt == 0) + " elapsedMs=" + timer.ElapsedMilliseconds);
+                foreach (var file in manifest.Files.Where(file => manifest.ResumedDocumentIds.Contains(file.DocumentId)))
+                {
+                    var editablePath = ControlledReferenceMaterializer.LocalPath(Path.GetDirectoryName(path), file);
+                    SetFileReadOnly(editablePath, false);
+                    EnsureLoadedDocumentEditable(editablePath);
+                }
+                try { if (manifest.RetainedLocalReferences.Count == 0) ControlledReferenceMaterializer.RememberVerifiedOpen(path, manifest); }
+                catch (Exception cacheError) { LogDiagnostic("保存已核对的引用准备记录，本次打开已完成", cacheError); }
                 return opened;
             }
             catch (Exception error)
@@ -179,8 +204,7 @@ public sealed partial class PdmAddin
         ControlledOpenManifestDto manifest, ISldWorks app)
     {
         var directory = Path.GetDirectoryName(Path.GetFullPath(rootPath));
-        var expected = manifest.Files.ToDictionary(file => file.FileName,
-            file => ControlledReferenceMaterializer.LocalPath(directory, file), StringComparer.OrdinalIgnoreCase);
+        var expected = ControlledOpenBoundary.Paths(directory, manifest);
         var failures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var deferredAssemblies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -233,10 +257,13 @@ public sealed partial class PdmAddin
                 failures.Add(name + "：未加载组件缺少服务器受控文件；原引用：" + path);
                 return;
             }
-            var file = manifest.Files.First(candidate => string.Equals(candidate.FileName, fileName, StringComparison.OrdinalIgnoreCase));
-            if (!PathsEqual(ArchiveReferencePath.Resolve(path, directory, "核对未加载组件引用", rootPath), local))
+            var file = manifest.Files.FirstOrDefault(candidate => string.Equals(candidate.FileName, fileName, StringComparison.OrdinalIgnoreCase));
+            var actual = ArchiveReferencePath.Resolve(path, directory, "核对未加载组件引用", rootPath);
+            var isLocal = manifest.RetainedLocalReferences.TryGetValue(fileName, out var pending);
+            if (isLocal && pending.Matches(actual)) local = actual;
+            else if (!PathsEqual(actual, local))
                 failures.Add(name + "：未加载组件仍指向原目录，尚未完成受控引用定位");
-            if (verifiedCopies.Add(local) && !ControlledReferenceMaterializer.Matches(local, file))
+            if (verifiedCopies.Add(local) && (isLocal ? !pending.Matches(local) : !ControlledReferenceMaterializer.Matches(local, file)))
                 failures.Add(name + "：未加载组件的受控文件内容校验失败");
             if (!Path.GetExtension(local).Equals(".SLDASM", StringComparison.OrdinalIgnoreCase)
                 || !deferredAssemblies.Add(local)) return;
@@ -261,14 +288,15 @@ public sealed partial class PdmAddin
                 if (!expected.TryGetValue(Path.GetFileName(native), out var target))
                 {
                     if (NativeArchiveManifest.IsInterconnectCachePath(native)
-                        && ImportedComponentStorage.IsStableOwner(local) && SavedImportedOwner(local, file.Configuration)) continue;
+                        && ImportedComponentStorage.IsStableOwner(local) && SavedImportedOwner(local, file?.Configuration ?? string.Empty)) continue;
                     failures.Add(name + "：内部引用缺少服务器受控文件：" + Path.GetFileName(native));
                     PluginDiagnosticLog.Record("受控引用核对", "未确认的内部引用；所属=" + local + "；原始=" + string.Join("|", source));
                 }
                 else
                 {
-                    if (!PathsEqual(native, target)) failures.Add(name + "：内部引用尚未定位到受控工作区：" + Path.GetFileName(native));
-                    CheckDeferred(target, name + "/" + Path.GetFileName(native), false);
+                    var localChild = manifest.RetainedLocalReferences.TryGetValue(Path.GetFileName(native), out var child) && child.Matches(native);
+                    if (!localChild && !PathsEqual(native, target)) failures.Add(name + "：内部引用尚未定位到受控工作区：" + Path.GetFileName(native));
+                    CheckDeferred(localChild ? native : target, name + "/" + Path.GetFileName(native), false);
                 }
             }
         }
@@ -276,6 +304,7 @@ public sealed partial class PdmAddin
         {
             if (embedded || string.IsNullOrWhiteSpace(path)) return;
             var full = ArchiveReferencePath.Resolve(path, directory, "核对PLM实际加载来源", rootPath);
+            if (manifest.RetainedLocalReferences.TryGetValue(Path.GetFileName(full), out var pending) && pending.Matches(full)) return;
             if (!expected.TryGetValue(Path.GetFileName(full), out var local)
                 || !string.Equals(full, local, StringComparison.OrdinalIgnoreCase))
                 failures.Add(name + "；实际来源：" + full);

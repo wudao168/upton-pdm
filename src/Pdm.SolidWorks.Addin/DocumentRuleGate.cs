@@ -26,6 +26,8 @@ internal static class DocumentRuleGate
 
     internal static bool ShouldBlockMessage(string message)
     {
+        if (message.StartsWith("管理员存档警告策略", StringComparison.Ordinal)
+            || message.StartsWith("管理员已启用", StringComparison.Ordinal)) return true;
         var disabledMatches = DocumentOperationRuleCatalog.All.Where(rule => !IsEnabled(rule.Id)
             && rule.Messages.Any(candidate => candidate.Kind == "报错" && DocumentOperationRuleCatalog.MessageMatches(candidate.Text, message))).ToArray();
         if (disabledMatches.Length == 0) return true;
@@ -38,7 +40,7 @@ internal static class DocumentRuleGate
     internal static bool Validate(Action validation)
     {
         try { validation(); return true; }
-        catch (Exception error) when ((error is InvalidOperationException || error is IOException)
+        catch (Exception error) when (!(error is ArchiveWarningBlockedException) && (error is InvalidOperationException || error is IOException)
             && !ShouldBlockMessage(error.Message)) { return false; }
     }
 }

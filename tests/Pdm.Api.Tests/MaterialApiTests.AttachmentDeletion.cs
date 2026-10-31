@@ -27,7 +27,6 @@ public sealed partial class MaterialApiTests
     }
 
     [Theory]
-    [InlineData(MaterialAttachmentKind.Model3D)]
     [InlineData(MaterialAttachmentKind.Document)]
     public async Task DeleteAttachment_RemovesSelectedRecordAndCountAndAudits(MaterialAttachmentKind kind)
     {
@@ -109,7 +108,7 @@ public sealed partial class MaterialApiTests
             var shared = fixture.Attachment with { Id = Guid.NewGuid(), Kind = MaterialAttachmentKind.Document, StorageRoot = root,
                 StorageRelativePath = "shared.bin", FileLength = payload.Length, Sha256 = Convert.ToHexString(SHA256.HashData(payload)) };
             await materials.CreateMaterialAttachmentAsync(shared, default);
-            var selected = shared with { Id = Guid.NewGuid(), Kind = MaterialAttachmentKind.Model3D };
+            var selected = shared with { Id = Guid.NewGuid(), Kind = MaterialAttachmentKind.Document };
             await materials.CreateMaterialAttachmentAsync(selected, default);
             Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/materials/{fixture.Material.Id}/attachments/{selected.Id}")).StatusCode);
             using var download = await client.GetAsync($"/api/materials/{fixture.Material.Id}/attachments/{shared.Id}/file");

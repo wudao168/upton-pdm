@@ -27,10 +27,13 @@ public static class StockedMaterialEndpoints
             var (actor, role) = User(context); var scope = await service.RequireScopeAsync(actor, role, true, ct);
             await service.AddAsync(scope, new(request.CategoryIds, request.MaterialIds), actor, ct); return Results.NoContent();
         });
-        api.MapDelete("/{materialId:guid}", async (Guid materialId, Guid? categoryId, HttpContext context, StockedMaterialService service, CancellationToken ct) =>
+        api.MapDelete("/{materialId:guid}", async (Guid materialId, Guid? categoryId, HttpContext context, StockedMaterialService service,
+            ILogger<StockedMaterialService> logger, CancellationToken ct) =>
         {
             var (actor, role) = User(context); var scope = await service.RequireScopeAsync(actor, role, true, ct);
-            await service.RemoveAsync(scope, materialId, categoryId, actor, ct); return Results.NoContent();
+            try { await service.RemoveAsync(scope, materialId, categoryId, actor, ct); return Results.NoContent(); }
+            catch (Exception error) when (error is not (PdmRuleException or PdmConflictException or PdmNotFoundException or UnauthorizedAccessException or OperationCanceledException))
+            { logger.LogError(error, "Stock cancellation failed for {MaterialId}", materialId); throw new PdmRuleException("取消常备未完成，已保留PLM收录，请刷新回查U9C结果，并检查接口连接后重试。"); }
         });
         api.MapPut("/{materialId:guid}/plan", async (Guid materialId, SaveStockedPlan request, HttpContext context,
             StockedMaterialService service, ILogger<StockedMaterialService> logger, CancellationToken ct) =>

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useProjectCenterAccess } from '../projectCenterAccess'
+const { write: projectWritable, download: projectDownload } = useProjectCenterAccess()
 import { documentVersionSummary, documentDrawingVersion, documentPublishedVersion } from '../drawingRevision'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RotateCw, Search } from '@lucide/vue'
@@ -167,11 +169,11 @@ onBeforeUnmount(() => {
       @click.stop
     >
       <strong>{{ contextNode.drawingNumber }} · {{ documentVersionSummary(contextNode) }}</strong>
-      <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReadOnly')"><span>只读打开最新受控版</span><small v-if="contextRevision">当前 {{ contextRevision }}，不占用编辑权限</small></button>
-      <button type="button" role="menuitem" :disabled="!canEdit || !solidWorksAvailable || !contextNode.documentId" @click="open('LatestEdit')"><span>获取权限并编辑最新受控版</span><small v-if="contextRevision">将锁定当前 {{ contextRevision }}，提交后生成新工作版</small></button>
-      <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" @click="open('LatestReleased')"><span>只读打开最近正式发布版</span><small v-if="contextRevision">最近一次正式发布基线，永久不可变</small></button>
+      <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" v-if="projectDownload" @click="open('LatestReadOnly')"><span>只读打开最新受控版</span><small v-if="contextRevision">当前 {{ contextRevision }}，不占用编辑权限</small></button>
+      <button type="button" role="menuitem" :disabled="!canEdit || !solidWorksAvailable || !contextNode.documentId" v-if="projectWritable" @click="open('LatestEdit')"><span>获取权限并编辑最新受控版</span><small v-if="contextRevision">将锁定当前 {{ contextRevision }}，提交后生成新工作版</small></button>
+      <button type="button" role="menuitem" :disabled="!solidWorksAvailable || !contextNode.documentId" v-if="projectDownload" @click="open('LatestReleased')"><span>只读打开最近正式发布版</span><small v-if="contextRevision">最近一次正式发布基线，永久不可变</small></button>
       <button type="button" role="menuitem" :disabled="!contextNode.documentId" @click="emit('versions', contextNode); closeContext()">查看/对比历史版本…</button>
-      <button type="button" role="menuitem" @click="emit('openFolder', contextNode); closeContext()">打开所在文件夹</button>
+      <button type="button" role="menuitem" v-if="projectDownload" @click="emit('openFolder', contextNode); closeContext()">打开所在文件夹</button>
       <small v-if="contextNode.status === 'Virtual'">内容随父装配存档，请打开父装配查看或编辑，无需单独登记。</small>
       <small v-else-if="!contextNode.documentId">该引用尚未入库，请先在SolidWorks插件中提交整套存档</small>
       <small v-if="!solidWorksAvailable">当前电脑未安装SolidWorks或UPLM插件</small>

@@ -9,11 +9,11 @@ public sealed class ReleaseDeliveryService(IPdmRepository repository, IReleaseDe
     {
         ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement or ReleaseScope.StandardLongLead => "Standard",
         ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement or ReleaseScope.ElectricalLongLead => "Electrical",
-        ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement or ReleaseScope.NonStandardLongLead => "NonStandard",
+        ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement or ReleaseScope.NonStandardLongLead or ReleaseScope.Nameplate => "NonStandard",
         _ => "All"
     };
     private static bool IsChange(ReleaseScope scope) => scope is ReleaseScope.StandardSupplement or ReleaseScope.NonStandardSupplement or ReleaseScope.ElectricalSupplement;
-    public static bool Ready(ReleaseDeliveryState state) => state.U9.Count > 0 && state.U9.Values.All(value => value.State == "Succeeded")
+    public static bool Ready(ReleaseDeliveryState state) => (!state.RequiresU9 || state.U9.Count > 0 && state.U9.Values.All(value => value.State == "Succeeded"))
         && (!state.PreviewRequired || state.PreviewState == ReleasePreviewState.Succeeded);
 
     public async Task PublishedAsync(Guid releasePackageId, CancellationToken ct) => _ = await EnsureAsync(releasePackageId, ct);
@@ -21,7 +21,17 @@ public sealed class ReleaseDeliveryService(IPdmRepository repository, IReleaseDe
     public async Task<ReleaseDeliveryRecord> EnsureAsync(Guid releasePackageId, CancellationToken ct)
     {
         var existing = await store.FindAsync(releasePackageId, ct);
-        if (existing is not null) return existing;
+        if (existing is not null)
+        {
+            var existingPackage = await repository.FindReleasePackageAsync(releasePackageId, ct);
+            if (existingPackage is not null && existing.State.PreviewRequired != ReleasePreviewPolicy.RequiresConversion(existingPackage))
+                return await MutateAsync(releasePackageId, value => value with { State = value.State with {
+                    PreviewRequired = ReleasePreviewPolicy.RequiresConversion(existingPackage),
+                    PreviewState = ReleasePreviewPolicy.RequiresConversion(existingPackage) ? existingPackage.PreviewState : ReleasePreviewState.None,
+                    PreviewMessage = ReleasePreviewPolicy.RequiresConversion(existingPackage) ? existingPackage.PreviewError : null
+                } }, ct);
+            return existing;
+        }
         var package = await repository.FindReleasePackageAsync(releasePackageId, ct) ?? throw new PdmNotFoundException("发布包不存在。");
         if (package.State != ReleasePackageState.Published || package.PublishedAt is null) throw new PdmRuleException("该发布包尚未正式生效。");
         var project = await repository.FindProjectAsync(package.ProjectId, ct) ?? throw new PdmNotFoundException("项目不存在。");
@@ -42,9 +52,10 @@ public sealed class ReleaseDeliveryService(IPdmRepository repository, IReleaseDe
             ChangeReason = package.ChangeReason, EffectiveSerialFrom = package.EffectiveSerialFrom, EffectiveSerialTo = package.EffectiveSerialTo,
             SelectedBomItemIds = package.SelectedBomItemIds, ConfirmedRemovedBomItemIds = package.ConfirmedRemovedBomItemIds,
             VersionBindings = package.VersionBindings ?? [], BomVersionIds = bomIds,
-            U9 = (kind == "All" ? new[] { "Standard", "NonStandard", "Electrical" } : [kind])
+            RequiresU9 = package.Scope != ReleaseScope.Nameplate,
+            U9 = (package.Scope == ReleaseScope.Nameplate ? Array.Empty<string>() : kind == "All" ? new[] { "Standard", "NonStandard", "Electrical" } : [kind])
                 .ToDictionary(key => key, _ => new ReleaseIntegrationResult("Pending", "等待本发布版本的U9同步回查结果")),
-            PreviewRequired = package.LocksDocuments && kind is "NonStandard" or "All",
+            PreviewRequired = ReleasePreviewPolicy.RequiresConversion(package),
             PreviewState = package.PreviewState, PreviewMessage = package.PreviewError,
             NotificationConfigurationVersion = version, NotificationRules = rules, PublicUrl = settings.PublicUrl
         };
@@ -147,7 +158,10 @@ public sealed class ReleaseDeliveryService(IPdmRepository repository, IReleaseDe
             if (record is null || record.State.CompanyId != claim.CompanyId) return;
             var package = await repository.FindReleasePackageAsync(claim.ReleasePackageId, ct);
             if (package?.State != ReleasePackageState.Published) return;
-            record = await MutateAsync(package.Id, value => value with { State = value.State with { PreviewState = package.PreviewState, PreviewMessage = package.PreviewError } }, ct);
+            record = await MutateAsync(package.Id, value => value with { State = value.State with {
+                PreviewRequired = ReleasePreviewPolicy.RequiresConversion(package),
+                PreviewState = ReleasePreviewPolicy.RequiresConversion(package) ? package.PreviewState : ReleasePreviewState.None,
+                PreviewMessage = ReleasePreviewPolicy.RequiresConversion(package) ? package.PreviewError : null } }, ct);
             if (Ready(record.State) && !record.State.ReadyEventCreated)
             {
                 var routed = await AddEventAsync(record.State, "Ready", ct);
@@ -156,6 +170,9 @@ public sealed class ReleaseDeliveryService(IPdmRepository repository, IReleaseDe
                         Deliveries = value.State.Deliveries.Concat(routed.Deliveries.Where(item => item.Event == "Ready")).ToArray(), ReadyEventCreated = true } }, ct);
             }
             var (settings, _) = await configurations.LoadAsync(claim.CompanyId, ct);
+            if (!settings.Enabled && record.State.Deliveries.Any(item => item.State is "Pending" or "Failed" or "Sending"))
+                record = await MutateAsync(package.Id, value => value with { State = value.State with { Deliveries = value.State.Deliveries
+                    .Select(item => item.State is "Pending" or "Failed" or "Sending" ? item with { State = "Cancelled", Message = "发布通知功能已停用，已停止发送。", NextAttemptAt = null } : item).ToArray() } }, ct);
             if (settings.Enabled)
             foreach (var planned in record.State.Deliveries)
             {
@@ -199,7 +216,7 @@ public sealed class ReleaseDeliveryService(IPdmRepository repository, IReleaseDe
                     NextAttemptAt = result.State == "Failed" ? clock.GetUtcNow().AddMinutes(Math.Min(60, 1 << Math.Min(value.Attempts, 6))) : null }, ct);
             }
             await MutateAsync(package.Id, value => value with { NextCheckAt = Ready(value.State)
-                && value.State.Deliveries.All(item => item.State is "Succeeded" or "Unknown" || item.Attempts >= 5) ? null : clock.GetUtcNow().AddMinutes(1) }, ct);
+                && (!settings.Enabled || value.State.Deliveries.All(item => item.State is "Succeeded" or "Unknown" or "Cancelled" || item.Attempts >= 5)) ? null : clock.GetUtcNow().AddMinutes(1) }, ct);
         }
         finally { await store.ReleaseClaimAsync(claim, CancellationToken.None); }
     }
@@ -250,6 +267,8 @@ public sealed class ReleaseDeliveryService(IPdmRepository repository, IReleaseDe
         if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ReleaseManage, ct)
             || !await repository.HasProjectContentReadAccessAsync(record.State.ProjectId, actor, role, ct)) throw new UnauthorizedAccessException("无权重试该发布通知。");
         if (!record.State.Deliveries.Any(item => item.Id == deliveryId)) throw new PdmNotFoundException("通知记录不存在。");
+        if (!(await configurations.LoadAsync(record.State.CompanyId, ct)).Settings.Enabled)
+            throw new PdmRuleException("发布通知功能已停用，不能重新发送历史通知。");
         var saved = await UpdateDeliveryAsync(packageId, deliveryId, value =>
         {
             if (value.State is not ("Failed" or "Unknown")) throw new PdmRuleException("只能重试失败或结果待核对的通知。");

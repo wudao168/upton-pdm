@@ -38,6 +38,8 @@ public sealed partial class InMemoryPdmRepository
             return Task.FromResult<IReadOnlyList<UserNotification>>(userNotifications.Values
                 .Where(item => string.Equals(item.Recipient, recipient, StringComparison.OrdinalIgnoreCase))
                 .Where(item => !systemOnly || NotificationRecipientPolicy.IsSystemMessage(item))
+                .Where(item => item.Category is not ("ReleasePreviewPending" or "ReleasePreviewResult")
+                    || item.ReleasePackageId is Guid packageId && packages.TryGetValue(packageId, out var package) && ReleasePreviewPolicy.RequiresConversion(package))
                 .Where(item => !item.SourceKey.StartsWith("calendar-todo:", StringComparison.Ordinal) || TenantContext.CompanyId is Guid company && item.SourceKey.StartsWith($"calendar-todo:{company:N}:", StringComparison.Ordinal))
                 .Where(item => item.Category is not ("work-hours" or "work-hours-correction") || TenantContext.CompanyId is not Guid hoursCompany || item.SourceKey.StartsWith($"{item.Category}:{hoursCompany:N}:", StringComparison.Ordinal))
                 .Where(item => item.Category != "stocked-material" || TenantContext.CompanyId is not Guid stockedCompany || item.SourceKey.StartsWith($"stocked-low:{stockedCompany:N}:", StringComparison.Ordinal))

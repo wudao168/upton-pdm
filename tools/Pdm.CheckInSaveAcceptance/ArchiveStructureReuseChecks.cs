@@ -9,7 +9,7 @@ internal static partial class Program
 {
  static async Task ArchiveStructureReuseScenario()
  {
-  foreach(var mode in new[]{"unchanged","changed-file","changed-configuration","other-path","other-instance","target-dirty","source-dirty","rename","pending-index","changed-after-reuse"})
+  foreach(var mode in new[]{"unchanged","changed-file","changed-configuration","other-path","other-instance","target-dirty","source-dirty","rename","pending-index","changed-after-reuse","refresh-handoff","deferred-display"})
   {
    var folder=Path.Combine(Path.GetTempPath(),"pdm-archive-structure-reuse-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
    object AssemblyNode(string path,string instance="root/suppressed")
@@ -23,7 +23,15 @@ internal static partial class Program
    var read=Delegate.CreateDelegate(cacheType.GetMethod("ExpandAsync",Flags).GetParameters()[1].ParameterType,new StructureReuseReader(Structure),typeof(StructureReuseReader).GetMethod("Read").MakeGenericMethod(Type("CadTreeNode")));
    await (Task)cacheType.GetMethod("ExpandAsync",Flags).Invoke(null,new object[]{source,read,CancellationToken.None});if(calls!=1)throw new Exception("首次必须读取真实结构");
    switch(mode){case "changed-file":File.AppendAllText(path," later saved structural edit");break;case "changed-configuration":Set(target,"Configuration","Other");break;case "other-path":var copy=Path.Combine(folder,"different.SLDASM");File.Copy(path,copy);Set(target,"FullPath",copy);break;case "other-instance":Set(target,"InstancePath","other/suppressed");break;case "target-dirty":Set(target,"IsModifiedInSolidWorks",true);break;case "source-dirty":Set(source,"IsModifiedInSolidWorks",true);break;case "rename":Set(target,"IsRenamePendingSave",true);break;case "pending-index":Set(source,"StructureIndexPending",true);break;}
-   var method=cacheType.GetMethod("TryReuse",Flags);var reused=method!=null&&(bool)method.Invoke(null,new[]{source,target});var shouldReuse=new[]{"unchanged","pending-index","changed-after-reuse"}.Contains(mode);
+   var method=cacheType.GetMethod("TryReuse",Flags);bool reused;
+   if(mode=="refresh-handoff"||mode=="deferred-display")
+   {
+    if(mode=="deferred-display")Set(source,"LocalStructureDeferred",true);
+    Type("PdmAddin").GetMethod("ReuseVerifiedArchiveStructures",Flags).Invoke(null,new[]{source,target});
+    reused=((IList)Get(target,"Children")).Count>0;
+   }
+   else reused=method!=null&&(bool)method.Invoke(null,new[]{source,target});
+   var shouldReuse=new[]{"unchanged","pending-index","changed-after-reuse","refresh-handoff"}.Contains(mode);
    if(reused!=shouldReuse)throw new Exception("压缩结构重复读取或错误复用："+mode);
    if(mode=="changed-after-reuse")File.AppendAllText(path," concurrent save after reuse");
    ((IList)Get(root,"Children")).Add(target);var beforeCalls=calls;

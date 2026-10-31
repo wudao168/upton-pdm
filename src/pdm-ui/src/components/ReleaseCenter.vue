@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { drawingRevisionHint, packageRevisionLabel } from '../drawingRevision'
+import { useProjectCenterAccess } from '../projectCenterAccess'
+const { write: projectWritable, export: projectExport } = useProjectCenterAccess()
+import NameplateContentPanel from './NameplateContentPanel.vue'
+import { packageRevisionHint, packageRevisionLabel, standardBomVersionLabel } from '../drawingRevision'
 import { vQuantity } from '../quantityInput'
 import { getApprovalEmergencyCapability } from '../api'
 import RawDrawerPanel from './RawDrawerPanel.vue'
@@ -13,7 +16,7 @@ import { releaseFailureMessage, releasePublishingMessage } from '../releaseFailu
 import { computed, ref, useId, watch } from 'vue'
 import { addReleaseItemComment, downloadGeneratedFile, getProjectExportMetadata, listApprovalTransferCandidates, listReleaseItemComments, readProjectPlan } from '../api'
 import { createProductionBomWorkbook } from '../productionBomWorkbook'
-import { releasePreviewStateLabel } from '../releasePreviewState'
+import { requiresReleasePreview, releasePreviewNeedsAttention, releasePreviewStateLabel } from '../releasePreviewState'
 import type { ApprovalTransferCandidate, BomItem, CreateReleasePackageInput, DrawingDeliveryOverride, DrawingPriority, DrawingReviewCandidate, DrawingReviewPackage, FormalSupplementPolicies, ProjectPlan, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 import type { DocumentNode } from '../types'
@@ -82,7 +85,7 @@ const formalScopeForSupplement = (value: ReleaseScope): ReleaseScope =>
   : 'NonStandardWithDrawing'
 const hasPublishedFormalFor = (value: ReleaseScope) => props.releasePackages
   .some(previous => previous.scope === formalScopeForSupplement(value) && previous.state === '已发布')
-const scopeLabels = Object.fromEntries(releaseTypes.map(item => [item.value, item.label])) as Record<string, string>
+const scopeLabels = { ...Object.fromEntries(releaseTypes.map(item => [item.value, item.label])), Nameplate: '铭牌内容发布' } as Record<string, string>
 const workflowNames: Record<string, string> = {
   'mechanical-release': '机械发布审批',
   'standard-release': '标准件BOM审批',
@@ -189,16 +192,18 @@ const transferError = ref('')
 const currentTask = computed(() => props.releasePackage?.steps.find(step => step.id !== 'production-release' && step.status === 'current'))
 const releaseWorkflowLabel = computed(() => {
   const releasePackage = props.releasePackage
+  if (releasePackage?.scope === 'Nameplate') return '执行工程师填写设备信息，硬件填写电源并确认发布'
   if (!releasePackage?.workflowCode) return '旧版固定流程'
   const fallbackName = releasePackage.scope.startsWith('Electrical') ? '电气发布审批' : '机械发布审批'
   return `${workflowNames[releasePackage.workflowCode] ?? fallbackName} · 第${releasePackage.workflowVersion || 1}版`
 })
 const releaseStateLabel = computed(() => props.releasePackage?.state === '发布中'
-  ? props.releasePackage.previewState === 'Pending' ? '审批完成 · 等待转图' : '审批完成 · 后台发布中'
+  ? requiresReleasePreview(props.releasePackage) && ['Pending', 'WaitingForServer'].includes(props.releasePackage.previewState ?? '') ? '审批完成 · 等待转图' : '审批完成 · 后台发布中'
   : props.releasePackage?.state ?? '')
 const releaseBomRevisionLabel = computed(() => {
   const releasePackage = props.releasePackage
   if (!releasePackage) return ''
+  if (releasePackage.scope === 'Nameplate') return '铭牌内容 A 版 · 每个设备序列号 1 块'
   if (releasePackage.scope === 'StandardLongLead') {
     return `标准件：长交期批次 ${releasePackage.standardBomRevision || '未生成'} · 非标件：不适用 · 电气件：不适用`
   }
@@ -208,7 +213,7 @@ const releaseBomRevisionLabel = computed(() => {
   if (releasePackage.scope === 'ElectricalLongLead') {
     return `标准件：不适用 · 非标件：不适用 · 电气件：长交期批次 ${releasePackage.electricalBomRevision || '未生成'}`
   }
-  return `标准件：${releasePackage.standardBomRevision || '未发布'} · 非标件：${releasePackage.nonStandardBomRevision || '未发布'} · 电气件：${releasePackage.electricalBomRevision || '未发布'}`
+  return `标准件：${standardBomVersionLabel(releasePackage.standardBomRevision) || '未发布'} · 非标件：${releasePackage.nonStandardBomRevision || '未发布'} · 电气件：${releasePackage.electricalBomRevision || '未发布'}`
 })
 const canPrepare = computed(() => !props.releasePackage || ['草稿', '已退回', '发布失败'].includes(props.releasePackage.state))
 const isSupplement = computed(() => isSupplementScope(scope.value))
@@ -560,8 +565,8 @@ const createDisabled = computed(() => props.pending
 const requiresDrawingFiles = computed(() => props.releasePackage?.locksDocuments ?? (isNonStandardScope(scope.value) && !isLongLeadScope(scope.value)))
 const isCurrentTaskAssignee = computed(() => Boolean(currentTask.value
   && currentTask.value.assignee.toLowerCase() === props.username.toLowerCase()))
-const canHandleCurrentTask = computed(() => isCurrentTaskAssignee.value
-  || Boolean(props.canDecide && currentTask.value && props.username.toLowerCase() === 'admin'))
+const canHandleCurrentTask = computed(() => projectWritable.value && (isCurrentTaskAssignee.value
+  || Boolean(props.canDecide && currentTask.value && props.username.toLowerCase() === 'admin')))
 const filteredTransferCandidates = computed(() => {
   const query = transferQuery.value.trim().toLocaleLowerCase()
   if (!query) return transferCandidates.value
@@ -1095,7 +1100,13 @@ async function saveItemComment() {
 
 <template>
   <section class="pdm-panel pdm-manager-panel release-center" aria-label="审批与生产发包">
-    <ReleaseExecutionPanel v-if="releasePackage && token" :package-id="releasePackage.id" :token="token" :can-manage="canManage" />
+    <p v-if="releasePackage && requiresReleasePreview(releasePackage) && releasePackage.previewState && releasePackage.previewState !== 'None'" class="pdm-release-preview-state" :class="{ 'is-attention': releasePreviewNeedsAttention(releasePackage) }" :role="releasePreviewNeedsAttention(releasePackage) ? 'alert' : 'status'">
+      <strong>图纸转换（STEP/PDF）：{{ releasePreviewStateLabel(releasePackage) }}</strong>
+      <span v-if="releasePackage.previewError && releasePackage.previewState !== 'Running'">{{ releaseFailureMessage(releasePackage.previewError) }}</span>
+      <button v-if="canManage && !['Succeeded', 'Running'].includes(releasePackage.previewState)" type="button" class="pdm-secondary-action" :disabled="pending" @click="emit('retryPreview', releasePackage.id)">重试转图</button>
+      <small v-if="releasePreviewNeedsAttention(releasePackage) && !canManage">请联系项目经理处理。</small>
+    </p>
+    <ReleaseExecutionPanel v-if="releasePackage && token" :package-id="releasePackage.id" :token="token" :can-manage="canManage" :preview-applicable="requiresReleasePreview(releasePackage)" />
     <p v-if="error" class="pdm-inline-error" role="alert">{{ error }}</p>
     <form v-if="canManage && (!releasePackage || editingDraft)" :id="createFormId" class="pdm-form-grid pdm-release-create-form" @submit.prevent="create">
       <section class="pdm-release-create-header" :class="{ 'has-drawing-delivery': deliveryScope }" aria-label="发布参数">
@@ -1189,6 +1200,10 @@ async function saveItemComment() {
     </form>
 
     <template v-else-if="releasePackage">
+      <section v-if="releasePackage.scope === 'Nameplate'" aria-label="发布的铭牌内容">
+        <h3>铭牌机加件发布包 · {{ releasePackage.nonStandardBomSnapshot.length }} 块</h3>
+        <details v-for="item in releasePackage.nonStandardBomSnapshot" :key="item.id" open><summary>序列号：{{ item.nameplateContent?.serialNumber }}</summary><NameplateContentPanel v-if="item.nameplateContent" :content="item.nameplateContent" /></details>
+      </section>
       <ReleaseOplPicker v-if="releasePackage.relatedOplIssueIds?.length" :model-value="releasePackage.relatedOplIssueIds" :project-id="projectId" :token="token" readonly />
       <p v-if="releasePackage.state === '发布中'" class="pdm-release-completion-status" role="status">
         审批已完成。{{ releasePublishingMessage(releasePackage) }}<template v-if="releasePackage.previewUpdatedAt"> 最近转图状态更新：{{ new Date(releasePackage.previewUpdatedAt).toLocaleString('zh-CN', { hour12: false }) }}</template>
@@ -1253,7 +1268,7 @@ async function saveItemComment() {
         </div>
       </section>
 
-      <details :key="releasePackage.id" class="pdm-release-details" aria-label="发布包信息">
+      <details v-if="releasePackage.scope !== 'Nameplate'" :key="releasePackage.id" class="pdm-release-details" aria-label="发布包信息">
         <summary>发布包信息</summary>
         <div class="pdm-release-summary">
         <div><small>发布包</small><strong>{{ releasePackage.number }}</strong></div>
@@ -1270,12 +1285,12 @@ async function saveItemComment() {
       </details>
       <p v-if="releasePackage.changeReason" class="pdm-release-change-reason"><strong>{{ isSupplementScope(releasePackage.scope) ? '变更原因' : '备注' }}：</strong>{{ releasePackage.changeReason }}</p>
 
-      <section class="pdm-release-frozen-snapshot" aria-label="审批固化快照">
+      <section v-if="releasePackage.scope !== 'Nameplate'" class="pdm-release-frozen-snapshot" aria-label="审批固化快照">
         <header>
           <div><strong>{{ showFrozenChanges ? '本次变更明细' : '审批固化快照' }}</strong><small>显示发布后的最终数量（工作区数量 × 整套倍率 {{ releasePackage.wholeSetMultiplier ?? 1 }}）；批注独立保存，不修改BOM。</small><small v-if="showFrozenChanges">按物料编码和单位汇总新增、修改、删除项；使用发布包冻结数据与上一正式版同口径对比，删除项数量为0。</small></div>
           <div class="pdm-frozen-view-actions">
             <span>{{ frozenDisplayRows.length }} 项<span v-if="!showFrozenChanges && frozenItems.length !== frozenDisplayRows.length"> · {{ frozenItems.length }} 个实例</span></span>
-            <button v-if="supportsFrozenExport" type="button" class="pdm-secondary-action" :disabled="frozenExporting || !frozenExportRowCount || !projectId || !token" :title="isFrozenSupplement ? '导出全部变更；增加为正数，减少和删除为负数' : '导出本发布包的全部冻结BOM，不受分页和显示方式影响'" @click="exportFrozenBom">{{ frozenExporting ? '导出中…' : '导出BOM' }}</button>
+            <button v-if="projectExport && supportsFrozenExport" type="button" class="pdm-secondary-action" :disabled="frozenExporting || !frozenExportRowCount || !projectId || !token" :title="isFrozenSupplement ? '导出全部变更；增加为正数，减少和删除为负数' : '导出本发布包的全部冻结BOM，不受分页和显示方式影响'" @click="exportFrozenBom">{{ frozenExporting ? '导出中…' : '导出BOM' }}</button>
             <button v-if="isFrozenSupplement" type="button" class="pdm-secondary-action" @click="frozenShowFullBom = !frozenShowFullBom">{{ showFrozenChanges ? '查看完整BOM' : '仅看本次变更' }}</button>
           </div>
         </header>
@@ -1292,7 +1307,7 @@ async function saveItemComment() {
                 <td class="is-release-centered" v-stocked-material="row.item.drawingNumber">{{ row.item.drawingNumber || '—' }}</td>
                 <td class="pdm-frozen-item-name" v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}</td>
                 <td>{{ row.item.specification || '—' }}</td>
-                <td class="is-release-centered" :title="`${drawingRevisionHint(row.item.revision, packageRevisionLabel(row.item, releasePackage))}；存档版本：${row.item.revision}`">{{ packageRevisionLabel(row.item, releasePackage) }}</td>
+                <td class="is-release-centered" :title="packageRevisionHint(row.item, releasePackage)">{{ packageRevisionLabel(row.item, releasePackage) }}</td>
                 <td class="is-release-centered">{{ row.item.brand || '—' }}</td>
                 <td>{{ row.item.remark || '—' }}</td>
                 <td class="is-release-centered">{{ row.item.quantity }}</td>
@@ -1348,11 +1363,6 @@ async function saveItemComment() {
       </div>
       <p v-if="releasePackage.publishError" class="pdm-inline-error">发布失败：{{ releaseFailureMessage(releasePackage.publishError) }}</p>
       <!-- 转图与发布解耦：发布已完成时转图单独显示状态，失败由后台自动重试，也可手动重试。 -->
-      <p v-if="releasePackage.previewState && releasePackage.previewState !== 'None'" class="pdm-release-preview-state">
-        <span>图纸转换（STEP/PDF）：{{ releasePreviewStateLabel(releasePackage) }}</span>
-        <span v-if="releasePackage.previewError && releasePackage.previewState !== 'Running'" class="is-error">{{ releaseFailureMessage(releasePackage.previewError) }}</span>
-        <button v-if="releasePackage.previewState !== 'Succeeded'" type="button" class="pdm-secondary-action" :disabled="pending" @click="emit('retryPreview', releasePackage.id)">重试转图</button>
-      </p>
     </template>
   </section>
 </template>
@@ -1363,6 +1373,8 @@ async function saveItemComment() {
 .pdm-inline-info{margin:0 0 8px;padding:7px 10px;border:1px solid var(--pdm-green-border);border-radius:6px;background:var(--pdm-green-soft);color:var(--pdm-green);white-space:normal}
 .pdm-release-preview-state{margin:0 0 8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface-muted);color:var(--pdm-text-soft);font-size:12px;white-space:normal}
 .pdm-release-preview-state .is-error{color:var(--pdm-danger)}
+.pdm-release-preview-state{position:sticky;top:0;z-index:2;flex:0 0 auto}
+.pdm-release-preview-state.is-attention{border-color:var(--pdm-danger);background:var(--pdm-danger-soft);color:var(--pdm-danger)}
 .release-detail-picker .pdm-edit-table td.release-change-details{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .release-detail-picker .pdm-edit-table td.release-change-details>div{display:inline}
 .release-detail-picker .pdm-edit-table td.release-change-details>div+div::before{content:'；'}

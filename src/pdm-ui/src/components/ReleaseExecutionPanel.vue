@@ -1,12 +1,14 @@
 <script setup lang="ts">
+import { useProjectCenterAccess } from '../projectCenterAccess'
+const { write: projectWritable } = useProjectCenterAccess()
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { acknowledgeReleaseDepartment, readReleaseExecution, retryReleaseNotification } from '../api'
 import { notificationChannels, notificationEvents, type ReleaseExecutionView, type ReleaseChannelDelivery } from '../releaseDelivery'
 import { userErrorMessage } from '../userErrorMessage'
-const props = defineProps<{ packageId: string; token: string; canManage: boolean }>()
+const props = withDefaults(defineProps<{ packageId: string; token: string; canManage: boolean; previewApplicable?: boolean }>(), { previewApplicable: true })
 const view = ref<ReleaseExecutionView | null>(null), error = ref(''), pending = ref(false)
 const notes = ref<Record<string, string>>({}), retryConfirmation = ref<Record<string, boolean>>({})
-const labels: Record<string, string> = { Pending: '待处理', Sending: '发送中', Running: '处理中', Succeeded: '已完成', Failed: '未完成', Unknown: '结果待核对', Published: '已发布', Draft: '草稿', ProcessReview: '审核中', Approval: '审批中', Publishing: '发布处理中', PublishFailed: '发布失败', Rejected: '已退回', None: '待转换' }
+const labels: Record<string, string> = { Cancelled: '已停用', Pending: '待处理', WaitingForServer: '等待服务器', Sending: '发送中', Running: '处理中', Succeeded: '已完成', Failed: '未完成', Unknown: '结果待核对', Published: '已发布', Draft: '草稿', ProcessReview: '审核中', Approval: '审批中', Publishing: '发布处理中', PublishFailed: '发布失败', Rejected: '已退回', None: '待转换' }
 const progress = computed(() => view.value?.progress)
 const workflowNotices = computed(() => view.value?.workflowNotifications?.filter(item => item.enabled) ?? [])
 const notificationStatus = computed(() => {
@@ -15,6 +17,7 @@ const notificationStatus = computed(() => {
   if (workflowNotices.value.some(item => item.state === 'Sent') && !progress.value?.notificationRules.length) return '已发送部门助理站内消息'
   if (!progress.value) return '发布后生成'
   if (!progress.value.notificationRules.length) return '未配置通知'
+  if (progress.value.deliveries.length && progress.value.deliveries.every(item => item.state === 'Cancelled')) return '该通知功能已停用'
   if (progress.value.departments.some(item => !item.recipients.length)) return '部分部门无可接收人员'
   if (progress.value.deliveries.some(item => item.state === 'Unknown')) return '发送结果待核对'
   if (progress.value.deliveries.some(item => item.state === 'Failed')) return '部分发送失败'
@@ -52,15 +55,15 @@ const eventLabel = (event: string) => notificationEvents[event as keyof typeof n
     <p v-if="error" role="alert" class="execution-error">{{ error }} <button type="button" @click="load">重新读取</button></p>
     <template v-if="view">
       <div class="execution-statuses">
-        <div><span>发布</span><strong>{{ labels[view.state] ?? view.state }}</strong></div><div><span>U9同步</span><strong>{{ u9Status }}</strong></div>
-        <div><span>生产图纸</span><strong>{{ !progress ? '发布后处理' : !progress.previewRequired ? '本次不需转图' : labels[progress.previewState] ?? progress.previewState }}</strong></div>
+        <div><span>发布</span><strong>{{ labels[view.state] ?? view.state }}</strong></div><div v-if="progress?.requiresU9 !== false"><span>U9同步</span><strong>{{ u9Status }}</strong></div>
+        <div v-if="previewApplicable && (!progress || progress.previewRequired)"><span>生产图纸</span><strong>{{ !progress ? '发布后处理' : labels[progress.previewState] ?? progress.previewState }}</strong></div>
         <div><span>部门通知</span><strong>{{ notificationStatus }}</strong></div>
       </div>
       <details v-if="view.versionBindings?.length"><summary>本次固定的图纸版本（{{ view.versionBindings.filter(item => item.publish).length }} 项发布，其余仅用于完整打开）</summary><div class="execution-table"><table><thead><tr><th>图档</th><th>上一正式版</th><th>本次源版本 / 发布版</th><th>本次处理</th></tr></thead><tbody><tr v-for="item in view.versionBindings" :key="item.documentId"><td>{{ item.fileName || item.documentId }}</td><td>{{ item.previousReleasedRevision || '—' }}</td><td>{{ item.revision }}{{ item.targetRevision ? ` / ${item.targetRevision}` : '' }}</td><td>{{ item.publish ? item.requiresPromotion === false ? '复用已审核正式图纸' : '发布该版本' : '保留引用，不随本次升版' }}</td></tr></tbody></table></div></details>
       <p v-if="view.confirmedRemovedBomItemIds.length" class="execution-hint">本次已明确确认删除 {{ view.confirmedRemovedBomItemIds.length }} 项；未确认的删除项保留上一正式值。</p>
       <div v-if="progress?.departments.length" class="execution-table"><table><thead><tr><th>通知部门 / 事件</th><th>接收情况</th><th>执行情况</th><th>部门确认</th></tr></thead><tbody>
         <tr v-for="item in progress.departments" :key="item.id"><td>{{ item.departmentName }}<small>{{ eventLabel(item.event) }}</small></td><td>{{ !item.recipients.length ? '无具有项目权限的接收人员' : item.receivedAt ? `已接收 · ${item.receivedBy}` : '待部门确认接收' }}</td><td>{{ item.executedAt ? `已执行 · ${item.executedBy}` : item.requireExecution ? '待执行确认' : '不要求执行回执' }}<small v-if="item.executionNote">{{ item.executionNote }}</small></td><td>
-          <template v-if="view.acknowledgementIds.includes(item.id)"><button v-if="!item.receivedAt" type="button" :disabled="pending" @click="acknowledge(item.id, false)">确认接收</button><template v-if="item.requireExecution && !item.executedAt"><textarea v-model="notes[item.id]" :aria-label="`${item.departmentName}执行说明`" placeholder="说明变更执行情况及旧物料、旧图纸的处理结果" maxlength="1000" /><button type="button" :disabled="pending || !notes[item.id]?.trim()" @click="acknowledge(item.id, true)">确认执行</button></template></template><span v-else>由该部门成员确认</span>
+          <template v-if="projectWritable && view.acknowledgementIds.includes(item.id)"><button v-if="!item.receivedAt" type="button" :disabled="pending" @click="acknowledge(item.id, false)">确认接收</button><template v-if="item.requireExecution && !item.executedAt"><textarea v-model="notes[item.id]" :aria-label="`${item.departmentName}执行说明`" placeholder="说明变更执行情况及旧物料、旧图纸的处理结果" maxlength="1000" /><button type="button" :disabled="pending || !notes[item.id]?.trim()" @click="acknowledge(item.id, true)">确认执行</button></template></template><span v-else>由该部门成员确认</span>
         </td></tr>
       </tbody></table></div>
       <details v-if="progress?.deliveries.length"><summary>通知发送明细</summary><div class="execution-table"><table><thead><tr><th>事件 / 渠道</th><th>状态</th><th>处理说明</th><th>操作</th></tr></thead><tbody><tr v-for="item in progress.deliveries" :key="item.id"><td>{{ eventLabel(item.event) }}<small>{{ notificationChannels[item.channel as keyof typeof notificationChannels] ?? item.channel }}</small></td><td>{{ labels[item.state] ?? item.state }}</td><td>{{ item.message || '等待发送' }}</td><td><template v-if="canManage && ['Failed', 'Unknown'].includes(item.state)"><label v-if="item.state === 'Unknown'"><input v-model="retryConfirmation[item.id]" type="checkbox">已核对接收结果，确认需要重发</label><button type="button" :disabled="pending || item.state === 'Unknown' && !retryConfirmation[item.id]" @click="retry(item)">重试此通知</button></template></td></tr></tbody></table></div></details>

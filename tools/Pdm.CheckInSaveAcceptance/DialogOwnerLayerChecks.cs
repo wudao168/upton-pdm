@@ -32,10 +32,10 @@ internal static partial class Program
    var records=new List<object>();
    void Check(bool passed,string message){TreeCheck(passed,message);Console.WriteLine("PASS: "+message);}
    void Raise(IntPtr handle){if(!LayerRaise(handle,new IntPtr(-2),0,0,0,0,0x53))throw new Exception("无法设置隔离测试窗口顺序");LayerActivate(handle);}
-   async Task Inspect(IntPtr handle,bool topMost,string name)
+   async Task Inspect(IntPtr handle,bool topMost,string name,IntPtr expectedOwner=default)
    {
     Check(!topMost&&(LayerWindowStyle(handle,-20)&8)==0,name+"：没有系统级置顶样式");
-    Check(LayerWindow(handle,4)==host.Handle,name+"：归属所属主窗口，保持正确窗口链");
+    Check(LayerWindow(handle,4)==(expectedOwner==IntPtr.Zero?host.Handle:expectedOwner),name+"：原生所属窗口符合界面线程要求");
     Raise(foreign.Handle);
     await Task.Delay(100);
     Check(LayerDepth(foreign.Handle)<LayerDepth(handle),name+"：其他应用窗口能显示在弹窗前面");
@@ -50,15 +50,15 @@ internal static partial class Program
    {
     await Task.Delay(100);
     var archiveHandle=ArchiveUi(session,()=>ArchiveWindow(session).Handle);
-    await Inspect(archiveHandle,ArchiveUi(session,()=>ArchiveWindow(session).TopMost),"存档窗口（独立界面线程）");
-    Check(LayerWindow(archiveHandle,4)==host.Handle,"存档窗口以主窗口为所属窗口，未绑定到任务窗格子窗口");
+    await Inspect(archiveHandle,ArchiveUi(session,()=>ArchiveWindow(session).TopMost),"存档窗口（独立界面线程）",(IntPtr)Get(session,"PresentationOwnerHandle"));
+    Check((IntPtr)Get(session,"OwnerHandle")==host.Handle,"存档窗口逻辑归属主窗口，原生所属窗口留在独立界面线程");
     Raise(foreign.Handle);TreeCall(session,"SetStage","正在检查结构，后台保持完整过程");await Task.Delay(800);
     Check(LayerDepth(foreign.Handle)<LayerDepth(archiveHandle),"后台进度和计时更新不会把存档窗口抬到其他应用上方");
     TreeCall(session,"Complete","本次检查完成。",false,false);await Task.Delay(150);
     Check(LayerDepth(foreign.Handle)<LayerDepth(archiveHandle),"结果显示仍保持在其他应用之后");
-    LayerShow(host.Handle,6);await Task.Delay(100);
+    LayerShow(host.Handle,6);await Task.Delay(400);
     Check(!LayerVisible(archiveHandle),"所属主窗口最小化时存档窗口随之隐藏");
-    LayerShow(host.Handle,9);await Task.Delay(100);
+    LayerShow(host.Handle,9);await Task.Delay(400);
     Check(LayerVisible(archiveHandle),"恢复所属主窗口时存档窗口随之恢复");
    }
    finally{ArchiveClose(session);await (Task)Get(session,"Closed");((IDisposable)session).Dispose();}

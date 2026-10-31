@@ -1,8 +1,10 @@
+import { computed } from 'vue'
+import { projectCenterAccessKey, projectCenterSchema } from '../src/projectCenterAccess'
 import { flushPromises, mount } from '@vue/test-utils'
 import { ElMessageBox } from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ProjectWorkspaceHeader from '../src/components/ProjectWorkspaceHeader.vue'
-import type { ProjectSummary } from '../src/types'
+import type { ProjectSummary, ReleasePackageSummary } from '../src/types'
 import { userDisplayNameKey } from '../src/userDisplay'
 
 const rootProject: ProjectSummary = {
@@ -82,6 +84,65 @@ const otherRootProject: ProjectSummary = {
 
 describe('ProjectWorkspaceHeader', () => {
   beforeEach(() => vi.restoreAllMocks())
+
+  it('项目号和发布页签持续提示待供应链接收的非标包，接收完成后同时停止', async () => {
+    vi.useFakeTimers()
+    const current = { ...rootProject, hasUnreceivedNonStandardRelease: true }
+    const wrapper = mount(ProjectWorkspaceHeader, { props: { project: current, projects: [current], activeTab: 'release' } })
+    try {
+      const tab = wrapper.findAll('.pdm-project-tabs button').find(button => button.text() === '发布')!
+      const row = wrapper.get('[aria-label="选择项目号 P700002"]')
+      expect(tab.attributes('data-release-attention')).toBe('new')
+      expect(row.attributes('data-release-attention')).toBe('new')
+      expect(tab.attributes('title')).toContain('待供应链接收')
+      vi.setSystemTime(Date.now() + 2 * 86400000)
+      await vi.advanceTimersByTimeAsync(60000)
+      expect(tab.attributes('data-release-attention')).toBe('new')
+      const received = { ...current, hasUnreceivedNonStandardRelease: false }
+      await wrapper.setProps({ project: received, projects: [received] })
+      expect(tab.attributes('data-release-attention')).toBeUndefined()
+      expect(row.attributes('data-release-attention')).toBeUndefined()
+    } finally { wrapper.unmount(); vi.useRealTimers() }
+  })
+
+  it('非标转图未完成时发布页签持续闪烁，查看不清除，成功后停止', async () => {
+    const release = { scope: 'NonStandardSupplement', locksDocuments: true, state: '已发布', previewState: 'Failed', previewAttempts: 5 } as ReleasePackageSummary
+    const wrapper = mount(ProjectWorkspaceHeader, { props: { project: rootProject, projects: [rootProject], activeTab: 'overview', releasePackages: [release] } })
+    const tab = wrapper.findAll('.pdm-project-tabs button').find(button => button.text() === '发布')!
+    expect(tab.attributes('data-release-attention')).toBe('error')
+    expect(tab.attributes('title')).toContain('未完成事项')
+    await tab.trigger('click')
+    await wrapper.setProps({ activeTab: 'release' })
+    expect(tab.attributes('data-release-attention')).toBe('error')
+    expect(tab.classes()).toContain('is-active')
+    await wrapper.setProps({ releasePackages: [{ ...release, previewState: 'Succeeded' }] })
+    expect(tab.attributes('data-release-attention')).toBeUndefined()
+    await wrapper.setProps({ releasePackages: [{ ...release, scope: 'StandardFormal' }, { ...release, scope: 'ElectricalFormal' }] })
+    expect(tab.attributes('data-release-attention')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('未选中的异常项目仍有红色边框，新发布绿色提示24小时且异常优先', async () => {
+    const now = Date.now()
+    vi.useFakeTimers(); vi.setSystemTime(now)
+    const child = { ...childProject, hasReleaseAttention: true, latestPurchasedBomPublishedAt: new Date(now - 1000).toISOString() }
+    const root = { ...rootProject, latestPurchasedBomPublishedAt: new Date(now - 24 * 3600000 + 30000).toISOString() }
+    const wrapper = mount(ProjectWorkspaceHeader, { props: { project: root, projects: [root, child], activeTab: 'overview' } })
+    try {
+      const childButton = wrapper.get('[aria-label="选择项目号 P700002-1"]')
+      expect(childButton.attributes('data-release-attention')).toBe('error')
+      const tab = wrapper.findAll('.pdm-project-tabs button').find(button => button.text() === '发布')!
+      expect(tab.attributes('data-release-attention')).toBe('new')
+      expect(tab.find('.pdm-release-attention-border.is-new').exists()).toBe(true)
+      await vi.advanceTimersByTimeAsync(60000)
+      expect(tab.attributes('data-release-attention')).toBeUndefined()
+      expect(childButton.attributes('data-release-attention')).toBe('error')
+      await wrapper.setProps({ project: child, releasePreviewIssues: { [child.id]: true } })
+      expect(tab.attributes('data-release-attention')).toBe('error')
+      await wrapper.setProps({ project: root })
+      expect(childButton.attributes('data-release-attention')).toBe('error')
+    } finally { wrapper.unmount(); vi.useRealTimers() }
+  })
 
   it('选中子项目后左侧显示子项目型号和序列号，右侧不再重复显示项目摘要', () => {
     const wrapper = mount(ProjectWorkspaceHeader, {
@@ -361,6 +422,20 @@ describe('ProjectWorkspaceHeader', () => {
     expect(counts()).toBe('3D图档 41，2D图档 0')
     await wrapper.setProps({ project: rootProject, activeDocumentCounts: { all: 3, model: 2, drawing: 1 } })
     expect(counts()).toBe('3D图档 41，2D图档 0')
+    wrapper.unmount()
+  })
+})
+
+
+describe('项目中心逐页授权', () => {
+  it('装配现场账号只显示八个只读页签，授权变更后立即隐藏对应入口', async () => {
+    const tabs = ['overview', 'project-plan', 'opl', 'validation-plan', 'documents', 'bom', 'release', 'procurement']
+    const permissions = computed(() => [projectCenterSchema, ...tabs.map(tab => `project.tab.${tab}.view`)])
+    const wrapper = mount(ProjectWorkspaceHeader, {
+      props: { project: rootProject, projects: [rootProject], activeTab: 'overview' },
+      global: { provide: { [projectCenterAccessKey as symbol]: permissions } },
+    })
+    expect(wrapper.findAll('.pdm-project-tabs button').map(button => button.text())).toEqual(['概览', '计划', 'OPL', '质量', '图档', 'BOM', '发布', '备料'])
     wrapper.unmount()
   })
 })

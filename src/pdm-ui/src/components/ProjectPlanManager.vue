@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useProjectCenterAccess } from '../projectCenterAccess'
+const { write: projectWritable, export: projectExport } = useProjectCenterAccess()
 import SquareLoader from './SquareLoader.vue'
 import { getProjectExportMetadata } from '../api'
 import { createClientUuid } from '../clientId'
@@ -200,7 +202,7 @@ const deleteDisabledReason = computed(() => {
   if (!canDeleteDisplayedPlan.value) return '当前项目及其子项目没有可删除的未审批计划'
   return ''
 })
-const canEditSelectedPlan = computed(() => canEditSchedule(selectedOwnerPlan.value))
+const canEditSelectedPlan = computed(() => projectWritable.value && canEditSchedule(selectedOwnerPlan.value))
 const canDeleteSelectedTask = computed(() => Boolean(selectedTask.value && canEditSelectedPlan.value
   && selectedTask.value.status === 'NotStarted'
   && !selectedTask.value.actualStart && !selectedTask.value.actualFinish && selectedTask.value.completionPercent === 0
@@ -362,7 +364,7 @@ function rowDuration(row: TimelineRow) {
 }
 
 function canReportProgress(row: TimelineRow) {
-  return Boolean(!inheritedParentPlan.value && row.task && isEffective(row.plan) && (canManageProject(row.projectId)
+  return Boolean(projectWritable.value && !inheritedParentPlan.value && row.task && isEffective(row.plan) && (canManageProject(row.projectId)
     || row.task.assignee?.toLowerCase() === props.currentUsername.toLowerCase()))
 }
 
@@ -1057,6 +1059,7 @@ function openTask(row: TimelineRow) {
 }
 
 async function saveTask() {
+  if (!projectWritable.value) return
   const task = selectedTask.value
   const ownerPlan = timelineRows.value.find(row => row.task?.id === task?.id)?.plan
   if (!task || !ownerPlan) return
@@ -1576,7 +1579,7 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
             <button v-if="portfolioMode && (managedChildPlans.length || plan?.childSyncResults?.length || canEditSchedule(plan))" type="button" class="pdm-secondary-action" @click="manageDialogOpen = true">编辑子计划</button>
             <button v-if="canEdit || canManageSystemTemplates" type="button" class="pdm-secondary-action" @click="templatesDrawerOpen = true"><Settings :size="14" />计划模板</button>
             <button type="button" class="pdm-secondary-action" :disabled="loading" @click="load"><RefreshCw :size="14" />刷新</button>
-            <button type="button" class="pdm-secondary-action" :disabled="!rootExportPlan && !childExportOptions.length" @click="openExportDialog"><Download :size="14" />导出计划</button>
+            <button type="button" class="pdm-secondary-action" :disabled="!rootExportPlan && !childExportOptions.length" v-if="projectExport" @click="openExportDialog"><Download :size="14" />导出计划</button>
             <button v-if="!portfolioMode && isMasterWithChildren" type="button" class="pdm-secondary-action" @click="masterPlanMode = false">查看子项目汇总</button>
             <button v-if="!portfolioMode && canEdit && ((!plan && !project.parentProjectId) || (ownsDisplayedPlan && canEditSchedule(plan)))" type="button" class="pdm-primary-action" @click="openGenerate()"><Calendar :size="14" />{{ plan ? '重新生成' : '生成初始计划' }}</button>
             <label v-if="hasVisibleBaseline" class="pdm-plan-switch"><input v-model="showBaseline" type="checkbox">显示基线</label>
@@ -1771,12 +1774,12 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
         <div class="pdm-plan-form__grid"><label>阶段<el-input :model-value="stageLabel(taskForm.stage, selectedOwnerPlan)" aria-label="阶段" readonly /></label><label>责任人<el-select v-model="taskForm.assignee" :disabled="!canEditSelectedPlan" filterable clearable placeholder="选择责任人"><el-option v-for="username in assigneeOptions" :key="username" :label="displayUserName(username)" :value="username" /></el-select></label></div>
         <label>计划日期<el-date-picker v-model="taskDateRange" class="pdm-plan-date-range" aria-label="计划日期区间" value-format="YYYY-MM-DD" type="daterange" range-separator="-" start-placeholder="开始日期" end-placeholder="完成日期" :clearable="false" :disabled="!canEditSelectedPlan" /></label>
         <p v-if="!isEffective(selectedOwnerPlan)">当前为{{ approvalLabel(selectedOwnerPlan) }}，可修改安排并保存草稿；批准生效后才可填报实际进度。</p>
-        <label class="pdm-progress-ruler">实际完成比例 <strong>{{ taskForm.completionPercent }}%</strong><el-slider v-model="taskForm.completionPercent" aria-label="实际完成比例" :min="0" :max="100" :step="10" show-stops :marks="completionMarks" :format-tooltip="(value: number) => `${value}%`" :disabled="!isEffective(selectedOwnerPlan)" /></label>
-        <div class="pdm-plan-form__grid"><label>实际开始<el-date-picker v-model="taskForm.actualStart" aria-label="实际开始" :disabled-date="futureActualDate" value-format="YYYY-MM-DD" type="date" clearable :disabled="!isEffective(selectedOwnerPlan)" /></label><label>实际完成<el-date-picker v-model="taskForm.actualFinish" aria-label="实际完成" :disabled-date="futureActualDate" value-format="YYYY-MM-DD" type="date" clearable :disabled="!isEffective(selectedOwnerPlan)" /></label></div>
+        <label class="pdm-progress-ruler">实际完成比例 <strong>{{ taskForm.completionPercent }}%</strong><el-slider v-model="taskForm.completionPercent" aria-label="实际完成比例" :min="0" :max="100" :step="10" show-stops :marks="completionMarks" :format-tooltip="(value: number) => `${value}%`" :disabled="!projectWritable || !isEffective(selectedOwnerPlan)" /></label>
+        <div class="pdm-plan-form__grid"><label>实际开始<el-date-picker v-model="taskForm.actualStart" aria-label="实际开始" :disabled-date="futureActualDate" value-format="YYYY-MM-DD" type="date" clearable :disabled="!projectWritable || !isEffective(selectedOwnerPlan)" /></label><label>实际完成<el-date-picker v-model="taskForm.actualFinish" aria-label="实际完成" :disabled-date="futureActualDate" value-format="YYYY-MM-DD" type="date" clearable :disabled="!projectWritable || !isEffective(selectedOwnerPlan)" /></label></div>
         <div class="pdm-plan-form__grid"><label>进度权重<el-input :model-value="String(taskForm.weight)" aria-label="进度权重" readonly /></label><label v-if="canEditSelectedPlan" class="pdm-plan-checkbox"><el-checkbox v-model="taskForm.isRequired">作为阶段门必需任务</el-checkbox></label></div>
         <p>{{ selectedTask?.isCustom ? '自定义任务名称、责任人和日期可在计划编辑态调整；未开始时也可删除。' : '任务名称、阶段和权重沿用生成计划时的模板配置；编辑态可删除未开始任务，权重由系统自动换算占比。' }}</p>
       </div>
-      <template #footer><button v-if="canEditSelectedPlan" type="button" class="pdm-plan-delete-task" :disabled="saving || !canDeleteSelectedTask" :title="selectedTask?.status !== 'NotStarted' ? '已有进度的任务不能删除' : ''" @click="deleteSelectedTask">删除任务</button><span class="pdm-plan-dialog-spacer" /><button type="button" class="pdm-secondary-action" @click="taskDialogOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="saving || (!canEditSelectedPlan && !isEffective(selectedOwnerPlan))" @click="saveTask">保存</button></template>
+      <template #footer><button v-if="canEditSelectedPlan" type="button" class="pdm-plan-delete-task" :disabled="saving || !canDeleteSelectedTask" :title="selectedTask?.status !== 'NotStarted' ? '已有进度的任务不能删除' : ''" @click="deleteSelectedTask">删除任务</button><span class="pdm-plan-dialog-spacer" /><button type="button" class="pdm-secondary-action" @click="taskDialogOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="saving || (!canEditSelectedPlan && !isEffective(selectedOwnerPlan))" v-if="projectWritable" @click="saveTask">保存</button></template>
     </el-dialog>
 
     <el-drawer v-model="templatesDrawerOpen" title="项目计划模板" size="min(1520px, 96vw)" destroy-on-close @closed="load">

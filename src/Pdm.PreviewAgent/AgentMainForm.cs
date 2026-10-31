@@ -57,6 +57,7 @@ internal sealed class AgentMainForm : Form
     private readonly NumericUpDown retentionBox = Number(1, 365);
     private readonly CheckBox startup = new CheckBox { Text = "登录 Windows 后自动启动", AutoSize = true };
     private readonly CheckBox showWindow = new CheckBox { Text = "启动时显示主窗口", AutoSize = true };
+    private readonly CheckBox dedicatedHost = new CheckBox { Text = "专用转图电脑：自动关闭残留的 SolidWorks 进程", AutoSize = true };
     private readonly ComboBox closeBehavior = Choice("最小化到系统托盘", "完成已接收任务后退出代理");
     private readonly Label connection = TextLabel("尚未测试连接", 10, false, Muted);
     private readonly Label settingsMessage = TextLabel("连接及处理参数在已接收任务完成后生效。", 9, false, Muted);
@@ -266,7 +267,7 @@ internal sealed class AgentMainForm : Form
         AddField(windowFields, "关闭窗口时", closeBehavior, 0, 2); windowFields.SetColumnSpan(closeBehavior, 3);
         var trayHint = TextLabel("双击Windows右下角托盘图标可恢复主窗口，退出代理请使用托盘菜单。", 9, false, Muted); trayHint.Dock = DockStyle.Fill;
         windowFields.Controls.Add(trayHint, 0, 3); windowFields.SetColumnSpan(trayHint, 4);
-        var processing = SettingsGroup("处理参数", 164, out var processFields);
+        var processing = SettingsGroup("处理参数", 198, out var processFields);
         AddField(processFields, "转换超时（分钟）", timeoutBox, 0, 0);
         AddField(processFields, "记录保留（天）", retentionBox, 2, 0);
         var folder = new Panel { Dock = DockStyle.Fill, Height = 30 };
@@ -276,6 +277,7 @@ internal sealed class AgentMainForm : Form
         AddField(processFields, "工作目录", folder, 0, 1); processFields.SetColumnSpan(folder, 3);
         var retentionHint = TextLabel("按批次保留处理结果和诊断记录；修改端口或令牌后，还需同步PLM中的转图服务器设置。", 9, false, Muted); retentionHint.Dock = DockStyle.Fill;
         processFields.Controls.Add(retentionHint, 0, 2); processFields.SetColumnSpan(retentionHint, 4);
+        processFields.Controls.Add(dedicatedHost, 0, 3); processFields.SetColumnSpan(dedicatedHost, 4);
         var server = SettingsGroup("服务器连接", 216, out var serverFields);
         AddField(serverFields, "代理名称", nameBox, 0, 0); AddField(serverFields, "PLM 服务器地址", serverBox, 2, 0);
         AddField(serverFields, "本机代理端口", portBox, 0, 1);
@@ -429,6 +431,7 @@ internal sealed class AgentMainForm : Form
         timeoutBox.Value = Math.Max(timeoutBox.Minimum, Math.Min(timeoutBox.Maximum, options.TimeoutMinutes));
         retentionBox.Value = Math.Max(retentionBox.Minimum, Math.Min(retentionBox.Maximum, options.HistoryRetentionDays));
         startup.Checked = options.StartWithWindows; showWindow.Checked = options.ShowMainWindow; closeBehavior.SelectedIndex = options.CloseToTray ? 0 : 1;
+        dedicatedHost.Checked = options.DedicatedConversionHost;
         settingsMessage.Text = "连接及处理参数在已接收任务完成后保存并生效。";
     }
 
@@ -443,6 +446,7 @@ internal sealed class AgentMainForm : Form
         next.Name = nameBox.Text.Trim(); next.ServerUrl = serverBox.Text.Trim().TrimEnd('/'); next.Token = tokenBox.Text;
         next.WorkRoot = Path.GetFullPath(workBox.Text); next.Port = (int)portBox.Value; next.TimeoutMinutes = (int)timeoutBox.Value; next.HistoryRetentionDays = (int)retentionBox.Value;
         next.StartWithWindows = startup.Checked; next.ShowMainWindow = showWindow.Checked; next.CloseToTray = closeBehavior.SelectedIndex == 0;
+        next.DedicatedConversionHost = dedicatedHost.Checked;
         Program.QueueSettings(next); settingsMessage.Text = "设置等待生效：已接收任务完成后自动保存。";
     }
 

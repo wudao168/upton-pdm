@@ -1,5 +1,4 @@
-import navBrandLogo from '../src/assets/upton-nav-lockup.svg'
-import navBrandIcon from '../src/assets/upton-nav-icon.png'
+import navBrandLogo from '../src/assets/upton-horizontal-brand-white.png'
 import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -14,7 +13,7 @@ describe('SideNav', () => {
     const wrapper = mount(SideNav, { props: { active: 'project-center' } })
     const navigationLabels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
 
-    expect(navigationLabels).toEqual(['项目总览', '项目中心', '制造中心', '标准物料', '工时管理', '我的待办'])
+    expect(navigationLabels).toEqual(['项目总览', '项目中心', '工时管理', '我的待办', '制造中心', '标准物料', '标准程序'])
     await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[0]!.trigger('click')
     expect(wrapper.emitted('navigate')?.[0]).toEqual(['project-workbench', '项目总览'])
   })
@@ -36,9 +35,19 @@ describe('SideNav', () => {
     const wrapper = mount(SideNav, { props: { active: 'materials', canViewMaterials: true } })
     const labels = wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())
 
-    expect(labels).toEqual(['项目总览', '项目中心', '制造中心', '标准物料', '料品管理', '工时管理', '我的待办'])
-    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[3]!.trigger('click')
+    expect(labels).toEqual(['项目总览', '项目中心', '工时管理', '我的待办', '制造中心', '标准物料', '标准程序', '料品管理'])
+    expect(wrapper.findAll('.pdm-nav-group').map(group => ({
+      label: group.attributes('aria-label'),
+      entries: group.findAll('.pdm-nav-item').map(item => item.text().trim()),
+    }))).toEqual([
+      { label: '常用功能', entries: ['项目总览', '项目中心', '工时管理', '我的待办'] },
+      { label: '生产', entries: ['制造中心'] },
+      { label: '标准化', entries: ['标准物料', '标准程序', '料品管理'] },
+    ])
+    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[5]!.trigger('click')
     expect(wrapper.emitted('navigate')?.[0]).toEqual(['standard-library', '标准物料'])
+    await wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item')[6]!.trigger('click')
+    expect(wrapper.emitted('navigate')?.[1]).toEqual(['program-templates', '标准程序'])
   })
 
   it('shows the combined material task count on material management', () => {
@@ -53,9 +62,10 @@ describe('SideNav', () => {
     const wrapper = mount(SideNav, { props: { active: 'projects' } })
     const brand = wrapper.get('.pdm-sidebar__brand')
 
-    expect(brand.findAll('img')).toHaveLength(1)
-    expect(brand.get('img').attributes('src')).toBe(navBrandLogo)
-    expect(brand.get('img').attributes('alt')).toBe('UPTON PLM')
+    expect(brand.findAll('svg')).toHaveLength(1)
+    expect(brand.get('image').attributes('href')).toBe(navBrandLogo)
+    expect(brand.get('svg').attributes('viewBox')).toBe('0 0 1712 346')
+    expect(brand.get('svg').attributes('aria-label')).toBe('UPTON')
   })
 
   it('replaces the former separate icon and text with the new lockup', () => {
@@ -70,7 +80,8 @@ describe('SideNav', () => {
     const wrapper = mount(SideNav, { props: { active: 'materials', collapsed: true, canManageSystem: true, canViewMaterials: true } })
 
     expect(wrapper.get('.pdm-sidebar').classes()).toContain('is-collapsed')
-    expect(wrapper.get('.pdm-sidebar__brand-logo').attributes('src')).toBe(navBrandIcon)
+    expect(wrapper.get('.pdm-sidebar__brand-logo').attributes('viewBox')).toBe('0 0 527 346')
+    expect(wrapper.get('.pdm-sidebar__brand-logo image').attributes('href')).toBe(navBrandLogo)
     expect(wrapper.get('.pdm-nav-item[aria-label="料品管理"]').attributes('title')).toBe('料品管理')
     expect(wrapper.get('.pdm-sidebar__settings').attributes('title')).toBe('系统设置')
   })

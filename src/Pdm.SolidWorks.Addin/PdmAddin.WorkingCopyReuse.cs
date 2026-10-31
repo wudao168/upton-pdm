@@ -14,7 +14,7 @@ public sealed partial class PdmAddin
     private async Task<bool> TryAcquireReusableWorkingCopyAsync(IReadOnlyList<BatchOperationItem> selected,
         Guid projectId, Guid rootId)
     {
-        var rootPath = currentTree?.FullPath;
+        var rootPath = selected.FirstOrDefault(item => item.Node.DocumentId == rootId)?.Node.FullPath ?? currentTree?.FullPath;
         if (string.IsNullOrWhiteSpace(rootPath) || IsReadOnlyPreviewPath(rootPath)
             || IsHistoricalDerivedPath(rootPath) || !PdmDocumentIdentityStore.IsControlledWorkspacePath(rootPath)
             || rootPath.IndexOf(Path.DirectorySeparatorChar + "View" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) < 0) return false;
@@ -36,15 +36,21 @@ public sealed partial class PdmAddin
 
         await apiClient.RefreshDocumentRulesAsync(lifetime.Token);
         var latest = await apiClient.CreateControlledOpenManifestAsync(rootId, null, false, true, lifetime.Token);
-        var workingManifest = ReconcileCompletedWorkingArchives(context.Key, context.Value, latest);
+        var requestedIds = new HashSet<Guid>(selected.Where(item => item.Node.DocumentId.HasValue).Select(item => item.Node.DocumentId.Value));
+        var relations = await apiClient.GetDocumentRelationsAsync(projectId, lifetime.Token);
+        var requiredDrawings = new HashSet<Guid>(selected.Where(item => item.Node.Kind == CadDocumentKind.Drawing && item.Node.DocumentId.HasValue)
+            .Select(item => item.Node.DocumentId.Value).Concat(relations.Where(relation => requestedIds.Contains(relation.ModelDocumentId)).Select(relation => relation.DrawingDocumentId)));
+        var workingManifest = ReconcileRequestedWorkingArchives(context.Key, context.Value, latest, requiredDrawings);
+        workingManifest = await ReconcileStoredWorkingMembershipAsync(context.Key, workingManifest, latest, requiredDrawings);
         var documents = (await apiClient.GetDocumentsAsync(projectId, lifetime.Token)).ToDictionary(document => document.Id);
         var loadedDocuments = ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
             .Select(document => new { Document = document, Path = document.GetPathName() }).ToArray();
         var localChanges = false;
-        var hasUnsavedLoadedDocument = false;
+        var hasUnsavedLoadedDocument = loadedDocuments.Any(item => IsPathWithinDirectory(item.Path, context.Key) && item.Document.GetSaveFlag());
         var editableAssemblyIds = new HashSet<Guid>();
         foreach (var file in workingManifest.Files)
         {
+            if (DocumentKindFromPath(file.FileName) == CadDocumentKind.Drawing && !requiredDrawings.Contains(file.DocumentId)) continue;
             var path = ControlledReferenceMaterializer.LocalPath(context.Key, file);
             if (!WorkingReuseBindingMatches(path, context.Value.ProjectId, file))
                 throw new InvalidOperationException("当前工作副本的版本关联需要核对，已保留窗口和修改，未重新取回：" + file.FileName);
@@ -62,7 +68,8 @@ public sealed partial class PdmAddin
             var selectedAssemblyEdit = !changed && unsaved && loaded is IAssemblyDoc
                 && selected.Any(item => item.Node.DocumentId == file.DocumentId && item.Node.Kind == CadDocumentKind.Assembly)
                 && document != null && string.IsNullOrWhiteSpace(document.CheckedOutBy) && !document.CheckoutSessionId.HasValue;
-            if (selectedAssemblyEdit) editableAssemblyIds.Add(file.DocumentId);
+            if (selectedAssemblyEdit || verifiedDraft && loaded is IAssemblyDoc && unsaved
+                && selected.Any(item => item.Node.DocumentId == file.DocumentId)) editableAssemblyIds.Add(file.DocumentId);
             if (draft != null && !draft.Closed && !verifiedDraft)
                 throw new InvalidOperationException("当前工作副本的编辑恢复记录与路径或版本不一致，已保留原记录和窗口，请核对后再获取权限：" + file.FileName);
             if (!changed && !unsavedEdit) continue;
@@ -77,14 +84,16 @@ public sealed partial class PdmAddin
                 throw new InvalidOperationException("当前图档有未保存或未提交的修改，且" + reason + "。已保留当前窗口和修改，请核对后再获取权限。");
             return false;
         }
-        if (!await WorkingReuseStoredSourceManifestsMatchAsync(workingManifest, latest))
-            return CannotReuse("工作基准与服务器不一致：" + WorkingReuseManifestDifferences(workingManifest, latest));
+        var workingScope = WorkingAcquisitionScope(workingManifest, requiredDrawings);
+        var latestScope = WorkingAcquisitionScope(latest, requiredDrawings);
+        if (!await WorkingReuseStoredSourceManifestsMatchAsync(workingScope, latestScope))
+            return CannotReuse("工作基准与服务器不一致：" + await WorkingReuseVerifiedDifferencesAsync(workingScope, latestScope));
+        workingManifest = await IncludeVerifiedInsertedPartsAsync(context.Key, workingManifest, editableAssemblyIds, documents);
+        var inserted = workingManifest.Files.Where(file => !latest.Files.Any(existing => existing.DocumentId == file.DocumentId)).ToArray();
         var paths = latest.Files.ToDictionary(file => file.DocumentId,
             file => ControlledReferenceMaterializer.LocalPath(context.Key, file));
         if (selected.Any(item => !item.Node.DocumentId.HasValue || !paths.TryGetValue(item.Node.DocumentId.Value, out var path)
             || !PathsEqual(path, item.Node.FullPath))) return CannotReuse("所选图档不在当前受控工作副本中");
-        var requestedIds = new HashSet<Guid>(selected.Select(item => item.Node.DocumentId.Value));
-        var relations = await apiClient.GetDocumentRelationsAsync(projectId, lifetime.Token);
         if (relations.Any(relation => requestedIds.Contains(relation.ModelDocumentId) && !paths.ContainsKey(relation.DrawingDocumentId)))
             return CannotReuse("配套工程图尚未在当前工作副本中准备完整");
         var rootVersion = (await apiClient.GetVersionsAsync(rootId, lifetime.Token)).FirstOrDefault(version => version.Id == latest.RootVersionId);
@@ -154,9 +163,12 @@ public sealed partial class PdmAddin
         // Checkout serializes changes to each requested document. Recheck after it so
         // a version published during the first manifest request is never unlocked stale.
         var acquired = await apiClient.CreateControlledOpenManifestAsync(rootId, null, false, true, lifetime.Token);
-        if (!WorkingReuseManifestsMatch(latest, acquired))
+        if (!WorkingReuseManifestsMatch(latestScope, WorkingAcquisitionScope(acquired, requiredDrawings)))
             throw new InvalidOperationException("获取权限期间服务器版本发生变化：" + WorkingReuseManifestDifferences(latest, acquired)
                 + "。已保留当前窗口、文件和已获取权限，请核对后继续。");
+        foreach (var added in inserted)
+            if ((await apiClient.GetVersionsAsync(added.DocumentId, lifetime.Token, 1)).FirstOrDefault()?.Id != added.VersionId)
+                throw new InvalidOperationException("获取权限期间新增零件的服务器版本已变化，装配和已获取的权限均保留，尚未解锁总装：" + added.FileName);
         controlledOpenManifests[context.Key] = workingManifest;
         foreach (var item in selected.GroupBy(item => item.Node.DocumentId.Value).Select(group => group.First()))
         {
@@ -175,6 +187,10 @@ public sealed partial class PdmAddin
 
     private static bool WorkingReuseFileBytesMatch(ControlledOpenFileDto before, ControlledOpenFileDto current) =>
         before.FileLength == current.FileLength && string.Equals(before.Sha256, current.Sha256, StringComparison.OrdinalIgnoreCase);
+
+    private static bool WorkingConfigurationMatches(ControlledOpenFileDto before, ControlledOpenFileDto current) =>
+        DocumentKindFromPath(current.FileName) == CadDocumentKind.Drawing
+        || string.Equals(before.Configuration ?? string.Empty, current.Configuration ?? string.Empty, StringComparison.OrdinalIgnoreCase);
 
     private async Task<bool> WorkingReuseStoredSourceManifestsMatchAsync(ControlledOpenManifestDto previous, ControlledOpenManifestDto current)
     {
@@ -222,7 +238,7 @@ public sealed partial class PdmAddin
             && file.VersionId == before.VersionId && bytesMatch(before, file)
             && string.Equals(file.FileName, before.FileName, StringComparison.OrdinalIgnoreCase)
             && string.Equals(file.RelativePath ?? file.FileName, before.RelativePath ?? before.FileName, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(file.Configuration ?? string.Empty, before.Configuration ?? string.Empty, StringComparison.OrdinalIgnoreCase));
+            && WorkingConfigurationMatches(before, file));
     }
 
     private static bool WorkingReuseBindingMatches(string path, Guid projectId, ControlledOpenFileDto file) =>
@@ -299,7 +315,8 @@ public sealed partial class PdmAddin
                 Status = component.IsVirtual ? CadReferenceStatus.Virtual : CadReferenceStatus.Normal
             }).ToArray();
             if (!WorkingReuseChildrenMatch(expected, actual, out var pending)
-                && !(editableAssemblyIds?.Contains(file.DocumentId) == true && WorkingReuseChildrenAreSubset(expectedChildren, actual)))
+                && !(editableAssemblyIds?.Contains(file.DocumentId) == true && (WorkingReuseChildrenAreSubset(expectedChildren, actual)
+                    || WorkingReuseChildrenAreKnownParts(expectedChildren, actual, manifest.Files))))
             {
                 var before = expectedChildren.GroupBy(child => WorkingReuseReferenceKey(child.FileName, child.Configuration, child.Status == (int)CadReferenceStatus.Virtual))
                     .ToDictionary(group => group.Key, group => group.Count());
@@ -345,6 +362,12 @@ public sealed partial class PdmAddin
                         && string.Equals(own.Configuration ?? string.Empty, referencedConfiguration, StringComparison.OrdinalIgnoreCase)) child = own;
                     if (child == null) { complete = NeedSnapshot(childFile, referencedConfiguration) && complete; continue; }
                 }
+                else if (editableAssemblyIds?.Contains(file.DocumentId) == true && name.EndsWith(".SLDPRT", StringComparison.OrdinalIgnoreCase)
+                    && (string.Equals(childFile.Configuration, referencedConfiguration, StringComparison.OrdinalIgnoreCase)
+                        || snapshots[name].Any(item => item.DocumentId == childFile.DocumentId
+                            && string.Equals(item.Configuration, referencedConfiguration, StringComparison.OrdinalIgnoreCase))))
+                    child = new DocumentReferenceNodeDto { DocumentId = childFile.DocumentId, FileName = childFile.FileName,
+                        Kind = (int)CadDocumentKind.Part, Configuration = referencedConfiguration, Revision = new RevisionDto { Display = childFile.Revision } };
                 if (child == null || child.DocumentId.HasValue && child.DocumentId.Value != childFile.DocumentId)
                     return Reject("instance-identity", expectedPath, "configuration=" + referencedConfiguration);
                 if (!name.EndsWith(".SLDASM", StringComparison.OrdinalIgnoreCase)) continue;
@@ -426,7 +449,7 @@ public sealed partial class PdmAddin
             if (before != null && before.VersionId == file.VersionId
                 && string.Equals(before.FileName, file.FileName, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(before.RelativePath ?? before.FileName, file.RelativePath ?? file.FileName, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(before.Configuration ?? string.Empty, file.Configuration ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+                && WorkingConfigurationMatches(before, file))
             { files.Add(before); continue; }
             var path = ControlledReferenceMaterializer.LocalPath(directory, file);
             if (!completedWorkingArchives.TryGetValue(path, out var receipt) || receipt.ProjectId != latest.ProjectId
@@ -435,7 +458,7 @@ public sealed partial class PdmAddin
                 || !string.Equals(receipt.StoredSha256, file.Sha256, StringComparison.OrdinalIgnoreCase) || receipt.StoredLength != file.FileLength
                 || before != null && (!string.Equals(before.FileName, file.FileName, StringComparison.OrdinalIgnoreCase)
                     || !string.Equals(before.RelativePath ?? before.FileName, file.RelativePath ?? file.FileName, StringComparison.OrdinalIgnoreCase)
-                    || !string.Equals(before.Configuration ?? string.Empty, file.Configuration ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+                    || !WorkingConfigurationMatches(before, file))
                 || !PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var binding) || binding.ProjectId != receipt.ProjectId
                 || binding.DocumentId != receipt.DocumentId || binding.VersionId != receipt.VersionId
                 || binding.FileLength != receipt.SourceLength || !string.Equals(binding.Sha256, receipt.SourceSha256, StringComparison.OrdinalIgnoreCase)

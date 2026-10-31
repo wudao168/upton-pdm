@@ -27,6 +27,45 @@ public sealed class ProductionTrackingApiTests(PdmApiFactory factory) : IClassFi
     }
 
     [Fact]
+    public async Task BatchScanKeepsItsIdentityAndActionsExposePublishedSameRevisionIncrement()
+    {
+        using var client = factory.CreateClient();
+        Authorize(client, "admin", "Administrator");
+        var repository = (InMemoryPdmRepository)factory.Services.GetRequiredService<IPdmRepository>();
+        var company = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.First(item => item.IsActive).Id;
+        if (await repository.FindUserAsync("admin", default) is null)
+            await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "管理员", "unused", UserRole.Administrator, true), default);
+        await repository.SetUserCompanyScopeAsync("admin", company, false, [], "admin", default);
+        var project = await repository.CreateProjectAsync(new("SCAN-INCREMENT-" + Guid.NewGuid().ToString("N"), "扫码增量接口", "admin", "vault", "release"), "admin", default);
+        var item = new BomItem(Guid.NewGuid(), project.Id, BomKind.NonStandard, 1, "NS-INCREMENT", "接口模拟件", 10, "件", "钢", "MODEL-INCREMENT", "B", true);
+        var original = new ReleasePackage(Guid.NewGuid(), project.Id, "ORIGINAL-10", ReleasePackageState.Published, null, "B", "B", [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, "release")
+            { Scope = ReleaseScope.NonStandardWithDrawing, NonStandardBomSnapshot = [item], SelectedBomItemIds = [item.Id] };
+        await repository.CreateReleasePackageAsync(original, default);
+        var initial = (await (await client.PostAsJsonAsync($"/api/production-tracking/releases/{original.Id}/receive", new { requestId = Guid.NewGuid() })).Content.ReadFromJsonAsync<ProductionTrackingRecord>())!;
+        var allocation = await client.PostAsJsonAsync($"/api/production-tracking/releases/{original.Id}/lots",
+            new AssignProductionLot(initial.State.Lines[0].Id, "Self", 10, null, null, null, Guid.NewGuid()));
+        Assert.Equal(HttpStatusCode.OK, allocation.StatusCode);
+        var lot = (await allocation.Content.ReadFromJsonAsync<ProductionTrackingRecord>())!.State.Lots.Single();
+        var supplement = original with { Id = Guid.NewGuid(), Number = "ADD-2", Scope = ReleaseScope.NonStandardSupplement,
+            PublishedAt = original.PublishedAt!.Value.AddMinutes(1), NonStandardBomSnapshot = [item with { Quantity = 12 }] };
+        await repository.CreateReleasePackageAsync(supplement, default);
+        var code = Uri.EscapeDataString($"UPLM-PRODUCTION|{original.Id}|{lot.Id}");
+        var scan = Assert.Single((await client.GetFromJsonAsync<ProductionScanResult[]>($"/api/production-tracking/scan?code={code}"))!);
+        Assert.Equal(lot.Id, scan.LotId);
+        Assert.Equal(10, scan.LotQuantity);
+        var context = (await client.GetFromJsonAsync<ProductionScanContext>($"/api/production-tracking/releases/{original.Id}/actions"))!;
+        var extra = Assert.Single(context.RelatedDemands);
+        Assert.Equal(supplement.Id, extra.ReleasePackageId);
+        Assert.Equal(initial.State.Lines[0].Id, extra.RelatedToLineId);
+        Assert.True(extra.IsSupplement);
+        Assert.Equal(2, extra.RequiredQuantity);
+        Assert.Equal(2, extra.UnassignedQuantity);
+        var target = (await client.GetFromJsonAsync<ProductionTrackingRecord>($"/api/production-tracking/releases/{extra.ReleasePackageId}"))!;
+        Assert.Equal(extra.LineId, target.State.Lines.Single().Id);
+        Assert.Empty(target.State.Lots);
+    }
+
+    [Fact]
     public async Task PublishedReleaseCanBeReceivedAndAssignedButEngineerCannotAllocate()
     {
         using var client = factory.CreateClient();

@@ -234,6 +234,12 @@ internal static partial class Program
         {
             host.Controls.Add(pane); pane.CreateControl();
             var plugin = New("PdmAddin");
+            var appType = Type("PdmAddin").GetField("application", Flags).FieldType;
+            SetField(plugin, "application", new Proxy(appType, call =>
+            {
+                if (call.MethodName != "GetRunningCommandInfo") throw new Exception("入口读取权限前不应访问原生图档：" + call.MethodName);
+                call.Args[0] = 0; call.Args[1] = ""; call.Args[2] = false; return null;
+            }).GetTransparentProxy());
             var root = New("CadTreeNode"); Set(root, "FullPath", Path.Combine(Path.GetTempPath(), "archive-entry.SLDPRT"));
             Set(root, "FileName", "archive-entry.SLDPRT"); Set(root, "Kind", Enum.Parse(Type("CadDocumentKind"), "Part"));
             SetField(plugin, "taskPaneControl", pane); SetField(plugin, "currentTree", root); SetField(plugin, "lifetime", lifetime);
@@ -244,6 +250,7 @@ internal static partial class Program
             var project = New("ProjectDto"); Set(project, "Id", Guid.NewGuid()); Set(project, "Code", "TEST");
             var projects = (IList)Activator.CreateInstance(typeof(System.Collections.Generic.List<>).MakeGenericType(Type("ProjectDto")));
             projects.Add(project); SetField(plugin, "availableProjects", projects);
+            TreeCheck(!(bool)TreeCall(plugin, "IsSolidWorksCommandActive"), "入口测试应先模拟空闲的SolidWorks命令状态");
             var timer = Stopwatch.StartNew();
             var args = New("CadTreeNodeEventArgs", root);
             TreeCall(plugin, "OnCheckInRequested", null, args);
@@ -256,18 +263,21 @@ internal static partial class Program
             await (Task)Get(session, "Ready");
             TreeCheck(timer.ElapsedMilliseconds < 1500, "存档窗口首帧等待过长：" + timer.ElapsedMilliseconds);
             await TreeWait(() => handler.Started, "读取权限请求未进入慢网络边界");
-            TreeCheck(!IsWindowEnabled(host.Handle), "存档期间所属CAD窗口仍可更改当前设计");
+            var docked = Type("ArchiveSession").GetProperty("IsDocked", Flags)?.GetValue(session) as bool? == true;
+            TreeCheck(IsWindowEnabled(host.Handle) == docked, "存档视图所属窗口状态不符合当前展示方式");
+            var presentation = ArchiveWindow(session);
             var handle = ArchiveUi(session, () => ArchiveWindow(session).Handle);
             TreeCall(plugin, "OnCheckInRequested", null, args);
             TreeCheck(ReferenceEquals(session, ArchiveCurrent) && handler.Requests == 1, "重复点击创建了新的会话或重复检查");
             Console.WriteLine("PASS: Real archive entry shows its first frame before blocked network work; duplicate click reuses session; firstFrameMs=" + timer.ElapsedMilliseconds);
             TreeCall(session, "RequestCancellation");
             await TreeWait(() => (bool)Get(session, "IsFinished"), "慢网络取消后未在原窗口结束");
-            TreeCheck(handler.Canceled && handler.Requests == 1 && ArchiveUi(session, () => ArchiveWindow(session).Handle) == handle,
+            TreeCheck(handler.Canceled && handler.Requests == 1 && (docked ? presentation.Handle : ArchiveUi(session, () => ArchiveWindow(session).Handle)) == handle,
                 "取消没有中断初始检查或启动了后续请求");
-            TreeCheck(!(bool)Get(session, "IsClosed"), "取消结果没有保留在原窗口");
+            TreeCheck(docked ? !presentation.IsDisposed && presentation.Visible : !(bool)Get(session, "IsClosed"), "取消结果没有保留在原显示区域");
             Console.WriteLine("PASS: Cancel during initial permission wait interrupts the request before structure reads or uploads and preserves the result window");
-            ArchiveClose(session); await (Task)Get(session, "Closed");
+            if (!docked) ArchiveClose(session);
+            await (Task)Get(session, "Closed");
             await Task.Delay(30);
             SetField(plugin, "disconnecting", true);
         }
@@ -280,7 +290,7 @@ internal static partial class Program
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             Interlocked.Increment(ref Requests);
-            if (!request.RequestUri.AbsolutePath.EndsWith("/standard-structures/capabilities")) throw new Exception("Unexpected archive request: " + request.RequestUri.AbsolutePath);
+            if (!request.RequestUri.AbsolutePath.EndsWith("/projects")) throw new Exception("Unexpected archive request: " + request.RequestUri.AbsolutePath);
             Started = true;
             try { await Task.Delay(Timeout.Infinite, token); }
             catch (OperationCanceledException) { Canceled = true; throw; }

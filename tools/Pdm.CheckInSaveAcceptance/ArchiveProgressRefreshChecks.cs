@@ -82,10 +82,10 @@ internal static partial class Program
                 ArchiveUi(session, () =>
                 {
                     var window = ArchiveWindow(session); var history = ((TextBox)Field(window, "history")).Text;
-                    Check(Enumerable.Range(0, updates).All(index => history.Contains("阶段" + phase + "/4："
-                        + (phase == 3 ? "存档前校验" : "上传提交与收尾") + "｜进度回归记录 " + index + "　")),
+                    Check(Enumerable.Range(0, updates).All(index => history.Contains("步骤" + (phase == 3 ? 7 : 8) + "/10："
+                        + (phase == 3 ? "固定快照与最终校验" : "上传文件") + "｜进度回归记录 " + index + "　")),
                         "阶段" + phase + "/4：批量刷新保留每一条过程记录");
-                    Check(((Control)Field(window, "progress")).Text.Contains("100%")
+                    Check(((Control)Field(window, "progress")).Text.Contains(updates + "/" + updates)
                         && ((Label)Field(window, "stage")).Text.Contains("本阶段已完成"), "阶段" + phase + "/4：显示最新实际进度");
                     using (var bitmap = new Bitmap(window.Width, window.Height))
                     {
@@ -95,8 +95,8 @@ internal static partial class Program
                     return true;
                 });
             }
-            TreeCall(session, "SetStage", "阶段4/4：正在提交整批版本，等待服务器确认…");
-            ArchiveUi(session, () => { Check((bool)Get(Field(ArchiveWindow(session), "progress"), "IsIndeterminate"), "等待服务器提交时使用活动进度，不提前宣布存档完成"); return true; });
+            TreeCall(session, "SetStep", 9, "正在提交整批版本，等待服务器确认…", 1);
+            ArchiveUi(session, () => { Check(((Control)Field(ArchiveWindow(session), "progress")).Text.Contains("0/1"), "等待服务器提交时显示0/1批，不提前宣布存档完成"); return true; });
             TreeCall(session, "Complete", "服务器已确认整批存档。", false, false);
             ArchiveUi(session, () => { Check(((Label)Field(ArchiveWindow(session), "resultState")).Text.Contains("成功") && ((Control)Field(ArchiveWindow(session), "progress")).Text.Contains("100%"), "最终结果保持全部进度记录的顺序并在服务器确认后成功结束"); return true; });
         }

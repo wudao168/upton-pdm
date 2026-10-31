@@ -21,6 +21,7 @@ let renderGeneration = 0
 let resizeObserver: ResizeObserver | undefined
 let wheelDelta = 0, wheelZooming = false
 let wheelPoint: { x: number; y: number } | undefined
+let wheelPageAt = -Infinity
 
 async function renderPage() {
   if (!document || !canvas.value) return
@@ -53,6 +54,7 @@ async function renderPage() {
 watch(() => props.url, async url => {
   const current = ++generation
   wheelDelta = 0
+  wheelPageAt = -Infinity
   ++renderGeneration
   renderTask?.cancel()
   await loadingTask?.destroy()
@@ -79,11 +81,16 @@ watch(() => props.url, async url => {
   } finally { if (current === generation) busy.value = false }
 }, { immediate: true })
 
-async function turnPage(delta: number) {
-  if (busy.value) return
-  page.value += delta
+async function turnPage(delta: number, fromWheel = false) {
+  const next = Math.max(1, Math.min(pages.value, page.value + delta))
+  if (!document || busy.value || next === page.value) return
+  const current = generation
+  page.value = next
   await renderPage()
-  pageFrame.value?.scrollTo(0, 0)
+  await nextTick()
+  if (current !== generation) return
+  const frame = pageFrame.value
+  frame?.scrollTo(0, fromWheel && delta < 0 ? frame.scrollHeight : 0)
 }
 async function setZoom(value: number, anchor?: { x: number; y: number }) {
   if (busy.value || !document || !canvas.value || !pageFrame.value) return
@@ -104,7 +111,20 @@ async function setZoom(value: number, anchor?: { x: number; y: number }) {
   else if (canvas.value) frame.scrollTo(canvas.value.offsetLeft + canvas.value.clientWidth * x - offsetX, canvas.value.offsetTop + canvas.value.clientHeight * y - offsetY)
 }
 async function onWheel(event: WheelEvent) {
-  if (!event.ctrlKey) return
+  if (!event.ctrlKey) {
+    if (!document || !event.deltaY || error.value || event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return
+    const frame = pageFrame.value
+    if (!frame) return
+    const direction = Math.sign(event.deltaY)
+    const canScroll = direction > 0 ? frame.scrollTop + frame.clientHeight < frame.scrollHeight - 2 : frame.scrollTop > 2
+    event.stopPropagation()
+    if (canScroll) return
+    event.preventDefault()
+    if (busy.value || performance.now() - wheelPageAt < 300 || page.value + direction < 1 || page.value + direction > pages.value) return
+    wheelPageAt = performance.now()
+    await turnPage(direction, true)
+    return
+  }
   event.preventDefault()
   event.stopPropagation()
   if (!document || !event.deltaY || error.value) return
@@ -143,7 +163,7 @@ onBeforeUnmount(() => { generation++; renderGeneration++; wheelDelta = 0; resize
       <span v-if="busy" role="status">正在渲染图纸…</span>
     </div>
     <p v-if="error" role="alert">{{ error }}</p>
-    <div ref="pageFrame" class="pdf-drawing-viewer__pages" :class="{ 'is-zoomed': zoom !== 1 }" tabindex="0" aria-label="图纸查看区域" title="Ctrl + 滚轮缩放；普通滚轮滚动图纸" @wheel="onWheel"><canvas v-show="pages > 0 && !error" ref="canvas" :style="canvasSize" aria-label="图纸页面" /></div>
+    <div ref="pageFrame" class="pdf-drawing-viewer__pages" :class="{ 'is-zoomed': zoom !== 1 }" tabindex="0" aria-label="图纸查看区域" title="普通滚轮滚动图纸，到页边界翻页；Ctrl + 滚轮缩放" @wheel="onWheel"><canvas v-show="pages > 0 && !error" ref="canvas" :style="canvasSize" aria-label="图纸页面" /></div>
   </section>
 </template>
 

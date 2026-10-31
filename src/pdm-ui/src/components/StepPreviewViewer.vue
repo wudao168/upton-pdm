@@ -64,15 +64,12 @@ function showMeshes(meshes: PreviewMesh[]) {
   }
   scene.add(model)
   const bounds = new THREE.Box3().setFromObject(model)
-  const center = bounds.getCenter(new THREE.Vector3())
   const size = bounds.getSize(new THREE.Vector3())
   const radius = Math.max(size.length() / 2, 1)
   camera.near = Math.max(radius / 1000, 0.01)
   camera.far = Math.max(radius * 100, 1000)
-  camera.position.copy(center).add(new THREE.Vector3(radius * 1.55, radius * 1.15, radius * 1.55))
   camera.updateProjectionMatrix()
-  controls.target.copy(center)
-  controls.update()
+  setView('isometric')
   emit('ready')
 }
 
@@ -92,7 +89,10 @@ function setView(view: 'fit' | 'front' | 'top' | 'isometric') {
     : view === 'top' ? new THREE.Vector3(0, 1, 0)
       : view === 'fit' ? camera.position.clone().sub(controls.target) : new THREE.Vector3(1.55, 1.15, 1.55)
   camera.up.set(0, view === 'top' ? 0 : 1, view === 'top' ? -1 : 0)
-  camera.position.copy(center).add(direction.normalize().multiplyScalar(radius * 2.5))
+  const halfVerticalFov = THREE.MathUtils.degToRad(camera.fov) / 2
+  const halfHorizontalFov = Math.atan(Math.tan(halfVerticalFov) * camera.aspect)
+  const distance = radius / Math.sin(Math.min(halfVerticalFov, halfHorizontalFov)) * 1.05
+  camera.position.copy(center).add(direction.normalize().multiplyScalar(distance))
   controls.target.copy(center)
   controls.update()
 }

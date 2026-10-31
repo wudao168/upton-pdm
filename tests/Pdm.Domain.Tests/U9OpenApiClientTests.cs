@@ -9,6 +9,34 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class U9OpenApiClientTests
 {
     [Fact]
+    public async Task StockPlanningReadsChineseAndNumericOptionsAndDistinguishesBlankFromMissing()
+    {
+        var handler = new SequenceHandler("""
+            {"ResCode":0,"Data":[
+            {"ID":"1","Code":"stocked","Org":{"Code":"7"},"Effective":{"IsEffective":true},"InventoryInfo":{"SafetyStockQty":10,"InventoryPlanningMethod":"再订货点法","InventoryPlanTime":"即时规划","IsRequiredShipperSupply":"True","SupplyMethod":"按需求和上限/再订货量的较大量补货"}},
+            {"ID":"2","Code":"mrp","Org":{"Code":"7"},"Effective":{"IsEffective":true},"InventoryInfo":{"SafetyStockQty":0,"InventoryPlanningMethod":"MRP规划","InventoryPlanTime":"","IsRequiredShipperSupply":false,"SupplyMethod":""}},
+            {"ID":"3","Code":"numeric","Org":{"Code":"7"},"Effective":{"IsEffective":true},"InventoryInfo":{"SafetyStockQty":10,"InventoryPlanningMethod":1,"InventoryPlanTime":0,"IsRequiredShipperSupply":"1","SupplyMethod":2}},
+            {"ID":"4","Code":"missing","Org":{"Code":"7"},"Effective":{"IsEffective":true},"InventoryInfo":{"SafetyStockQty":0,"InventoryPlanningMethod":null,"InventoryPlanTime":null}}
+            ]}
+            """, "{\"ResCode\":0,\"Data\":[]}");
+        var rows = (await new U9OpenApiClient(new HttpClient(handler)).QueryStockPlansAsync("http://u9.test", "token", "01", "7", DateTimeOffset.UtcNow, default))!;
+        foreach (var code in new[] { "stocked", "numeric" })
+        {
+            var plan = rows.Single(item => item.MaterialCode == code);
+            Assert.Equal(1, plan.InventoryPlanningMethod); Assert.Equal(0, plan.InventoryPlanTime);
+            Assert.True(plan.IsRequiredShipperSupply); Assert.Equal(2, plan.SupplyMethod);
+        }
+        var mrp = rows.Single(item => item.MaterialCode == "mrp");
+        Assert.Equal(4, mrp.InventoryPlanningMethod); Assert.Equal(-1, mrp.InventoryPlanTime);
+        Assert.False(mrp.IsRequiredShipperSupply); Assert.Equal(-1, mrp.SupplyMethod);
+        var missing = rows.Single(item => item.MaterialCode == "missing");
+        Assert.Null(missing.InventoryPlanningMethod); Assert.Null(missing.InventoryPlanTime);
+        Assert.Null(missing.IsRequiredShipperSupply); Assert.Null(missing.SupplyMethod);
+        Assert.Contains("InventoryInfo.InventoryPlanTime", handler.Requests[0].Body);
+        Assert.Contains("InventoryInfo.IsRequiredShipperSupply", handler.Requests[0].Body);
+    }
+
+    [Fact]
     public async Task StockedPurchasesReadsRequisitionDatesAndLinksOrdersWithoutCountingCanceledOtherMaterialsOrOrganizations()
     {
         var handler = new SequenceHandler(

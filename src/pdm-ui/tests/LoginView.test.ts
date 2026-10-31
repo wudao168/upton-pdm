@@ -91,4 +91,34 @@ describe('LoginView', () => {
     wrapper.unmount()
   })
 
+  it('switches one sandboxed scene without losing login credentials or password visibility', async () => {
+    const wrapper = mount(LoginView, {
+      props: { pending: false, error: '', online: true },
+      global: { stubs: { ElButton: true, ElDialog: true, ElForm: true, ElFormItem: true, ElInput: true } },
+    })
+    const initialFrame = wrapper.get('iframe').element
+    await wrapper.get('input[name="username"]').setValue(' switch-user ')
+    await wrapper.get('input[name="password"]').setValue('test-only-password')
+    await wrapper.get('button[aria-label="显示密码"]').trigger('click')
+    const choices = wrapper.findAll('.pdm-login-scene-picker button')
+    expect(choices.map(choice => choice.text())).toEqual(['西瓜软糖', '海盗果冻'])
+    expect(choices[0].attributes('aria-pressed')).toBe('true')
+    await choices[1].trigger('click')
+    expect(wrapper.findAll('iframe')).toHaveLength(1)
+    expect(wrapper.get('iframe').element).not.toBe(initialFrame)
+    expect(wrapper.get('iframe').attributes('src')).toContain('pirate-jelly.html?embed=login')
+    expect(wrapper.get('iframe').attributes('sandbox')).toBe('allow-scripts')
+    expect(wrapper.get('iframe').attributes('title')).toContain('海盗果冻')
+    expect(choices[1].attributes('aria-pressed')).toBe('true')
+    expect((wrapper.get('input[name="username"]').element as HTMLInputElement).value).toBe(' switch-user ')
+    expect(wrapper.get('input[name="password"]').attributes('type')).toBe('text')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('submit')?.[0]).toEqual(['switch-user', 'test-only-password', false])
+    await choices[0].trigger('click')
+    expect(wrapper.findAll('iframe')).toHaveLength(1)
+    expect(wrapper.get('iframe').attributes('src')).toContain('melon-jelly.html?embed=login')
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
 })

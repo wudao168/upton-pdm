@@ -101,9 +101,9 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                 .Select(entry => (Package: packages[entry.Key.PackageId], Version: entry.Value)).GroupBy(entry => entry.Version.DocumentId);
             foreach (var group in versions)
             {
-                var ordered = group.GroupBy(entry => entry.Version.Id).Select(values => values.OrderByDescending(entry => entry.Package.PublishedAt).First())
-                    .OrderByDescending(entry => entry.Version.Revision.BaseRevision)
-                    .ThenByDescending(entry => entry.Version.CreatedAt).ThenByDescending(entry => entry.Version.Id).ToArray();
+                var ordered = group.OrderByDescending(entry => entry.Version.Revision.BaseRevision)
+                    .ThenByDescending(entry => entry.Version.CreatedAt).ThenByDescending(entry => entry.Version.Id)
+                    .ThenByDescending(entry => entry.Package.PublishedAt).ToArray();
                 var current = ordered[0];
                 foreach (var use in includeHistory ? ordered : [current])
                 {
@@ -151,11 +151,11 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                         package.PublishedAt ?? version.CreatedAt,
                         delivery?.Priority ?? package.DrawingPriority,
                         delivery?.RequiredOn ?? package.DrawingRequiredOn,
-                        version.Id == current.Version.Id,
+                        version.Id == current.Version.Id && package.Id == current.Package.Id,
                         version.Preview?.Format == DocumentPreviewFormat.Pdf
                             && (legacy || string.Equals(version.Preview.SourceSha256, version.Sha256, StringComparison.OrdinalIgnoreCase)),
                         legacy,
-                        version.Id == current.Version.Id ? null : current.Version.CreatedAt)
+                        version.Id == current.Version.Id && package.Id == current.Package.Id ? null : current.Package.PublishedAt ?? current.Version.CreatedAt)
                     {
                         QrContent = PdfReleaseIdentity.Display(ReleaseBoundSourceReader.DrawingModel(package, qrSource, qrModels, document.DrawingNumber), version.Revision.Display),
                         BomItems = bomItems,

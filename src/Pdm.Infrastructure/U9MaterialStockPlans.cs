@@ -31,7 +31,8 @@ public sealed partial class U9OpenApiClient
                 Content = new StringContent(JsonSerializer.Serialize(new
                 {
                     PageSize = 1000, PageIndex = page, EntityFullName = "UFIDA.U9.CBO.SCM.Item.ItemMaster",
-                    ReturnFields = new[] { "ID", "Code", "Org.Code", "Effective.IsEffective", "InventoryInfo.SafetyStockQty", "InventoryInfo.ReorderQty", "InventoryUOM.Code", "InventoryUOM.Name" },
+                    ReturnFields = new[] { "ID", "Code", "Org.Code", "Effective.IsEffective", "InventoryInfo.SafetyStockQty", "InventoryInfo.ReorderQty", "InventoryUOM.Code", "InventoryUOM.Name",
+                        "InventoryInfo.InventoryPlanningMethod", "InventoryInfo.InventoryPlanTime", "InventoryInfo.IsRequiredShipperSupply", "InventoryInfo.SupplyMethod" },
                     Filters = filters
                 }), Encoding.UTF8, "application/json")
             };
@@ -51,9 +52,37 @@ public sealed partial class U9OpenApiClient
                 if (string.IsNullOrWhiteSpace(code) || selectedCodes is not null && !selectedCodes.Contains(code)
                     || plan.OrganizationCode != organizationCode || plan.SafetyStockQuantity is null || plan.IsEffective is null) continue;
                 result[code.Trim()] = new(enterpriseCode, organizationCode, code.Trim(), plan.SafetyStockQuantity.Value,
-                    plan.ReorderQuantity, plan.IsEffective.Value, plan.UnitCode, plan.UnitName, syncedAt);
+                    plan.ReorderQuantity, plan.IsEffective.Value, plan.UnitCode, plan.UnitName, syncedAt)
+                {
+                    InventoryPlanningMethod = ReadPlanningOption(row, "InventoryPlanningMethod"),
+                    InventoryPlanTime = ReadPlanningOption(row, "InventoryPlanTime"),
+                    IsRequiredShipperSupply = bool.TryParse(ReadEntityString(row, "InventoryInfo", "IsRequiredShipperSupply"), out var replenish) ? replenish
+                        : ReadEntityString(row, "InventoryInfo", "IsRequiredShipperSupply") switch { "1" => true, "0" => false, _ => null },
+                    SupplyMethod = ReadPlanningOption(row, "SupplyMethod")
+                };
             }
         }
         throw new PdmRuleException("U9C库存规划分页超过处理范围，保留上次常备件资料，请检查接口分页设置。");
+    }
+
+    // 通用查询返回枚举中文名称；空选项为-1，缺失字段保留null，不能当作已清空。
+    private static int? ReadPlanningOption(JsonElement row, string field)
+    {
+        if (!TryGet(row, "InventoryInfo", out var inventory) || !TryGet(inventory, field, out var option)
+            || option.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return null;
+        var value = option.ToString().Trim();
+        if (int.TryParse(value, out var number)) return number;
+        return (field, value) switch
+        {
+            (_, "") => -1,
+            ("InventoryPlanningMethod", "再订货点法") => 1,
+            ("InventoryPlanningMethod", "MRP规划") => 4,
+            ("InventoryPlanTime", "即时规划") => 0,
+            ("InventoryPlanTime", "批次规划") => 1,
+            ("SupplyMethod", "按上限/再订货量补货") => 0,
+            ("SupplyMethod", "按需求补货") => 1,
+            ("SupplyMethod", "按需求和上限/再订货量的较大量补货") => 2,
+            _ => null
+        };
     }
 }

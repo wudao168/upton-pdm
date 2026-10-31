@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useProjectCenterAccess } from '../projectCenterAccess'
+const { write: projectWritable, canViewTab } = useProjectCenterAccess()
 import ProjectTodoFields from './ProjectTodoFields.vue'
 import { CheckCircle2, ChevronRight, FolderTree, ListTodo, RotateCw as RefreshCw, UsersRound } from '@lucide/vue'
 import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, listProjectAudit, listProjectPlanVersions, readProjectPlanPortfolio, readProjectValidationPlan } from '../api'
@@ -83,8 +85,8 @@ async function fetchOperationalSummary() {
   }
   const visibleProjects = recordProjects.value
   const [summaryResults, noteResults] = await Promise.all([
-    Promise.allSettled([readProjectPlanPortfolio(rootProject.value.id, token), readProjectValidationPlan(activeProject.value.id, token), getMaterialRelationCompleteness(activeProject.value.id, token)]),
-    Promise.allSettled(visibleProjects.map(item => listProjectAudit(item.id, token))),
+    Promise.allSettled([readProjectPlanPortfolio(rootProject.value.id, token), readProjectValidationPlan(activeProject.value.id, token), projectWritable.value ? getMaterialRelationCompleteness(activeProject.value.id, token) : Promise.resolve(null)]),
+    Promise.allSettled(visibleProjects.map(item => canViewTab('records') ? listProjectAudit(item.id, token) : Promise.resolve([]))),
   ])
   if (requestId !== overviewRequestId) return
   const [planResult, validationResult, relationResult] = summaryResults
@@ -461,7 +463,7 @@ const overviewAlerts = computed(() => [
 
       <div class="pdm-overview-summary" aria-label="项目核心业务概览">
         <article class="pdm-panel pdm-overview-team" aria-label="项目团队">
-          <header><span><UsersRound :size="18" /></span><h2>项目团队</h2><span class="pdm-overview-team__actions"><button v-if="rootProject.canManageMainStaffing || activeProject.canAssignDesigners" type="button" class="pdm-text-action" title="前往信息页分配项目人员" @click="emit('information')">分配人员</button></span></header>
+          <header><span><UsersRound :size="18" /></span><h2>项目团队</h2><span class="pdm-overview-team__actions"><button v-if="projectWritable && canViewTab('information') && (rootProject.canManageMainStaffing || activeProject.canAssignDesigners)" type="button" class="pdm-text-action" title="前往信息页分配项目人员" @click="emit('information')">分配人员</button></span></header>
           <div class="pdm-overview-team__table-wrap"><table class="pdm-overview-team__table"><thead><tr><th>职责</th><th>负责人</th><th>职责</th><th>负责人</th></tr></thead><tbody><tr v-for="pair in teamRowPairs" :key="pair[0]?.key"><template v-for="row in pair" :key="row.key"><td class="is-role">{{ row.role }}</td><td :class="{ 'is-pending': !row.people.length }">{{ row.people.map(person => person.name).join('、') || '待分配' }}</td></template></tr></tbody></table></div>
         </article>
         <article class="pdm-panel pdm-overview-reserved" aria-label="预留区域" />
@@ -473,7 +475,7 @@ const overviewAlerts = computed(() => [
           <div class="pdm-project-portfolio__table-wrap">
             <table><thead><tr><th>项目</th><th>执行</th><th>阶段</th><th>计划完成</th><th>剩余工期</th><th>进度</th><th>负责人</th><th>当前</th><th>状态</th><th>备注</th></tr></thead><tbody>
               <tr v-for="row in portfolioRows" :key="row.projectId" :class="{ 'is-root': row.isRoot }" tabindex="0" @click="emit('projectPlan')" @keydown.enter="emit('projectPlan')">
-                <td><strong>{{ row.projectCode }}</strong><small>{{ row.projectName }}</small></td><td :class="{ 'is-pending': row.engineers === '待分配' }">{{ row.engineers }}</td><td>{{ row.stageLabel }}</td><td :title="row.currentStageFinish ? `当前主任务“${row.stageLabel}”计划完成 ${displayDate(row.currentStageFinish)}` : '当前主任务未排期'">{{ displayDate(row.currentStageFinish) }}</td><td><span :class="`is-${row.remainingWorkPeriod.tone}`" :title="row.remainingWorkPeriod.basis">{{ row.remainingWorkPeriod.label }}</span></td><td><span class="pdm-project-portfolio__progress"><em>{{ row.hasPlan ? `${row.completionPercent}%` : '—' }}</em><i><em :style="{ width: `${row.completionPercent}%` }" /></i></span></td><td :class="{ 'is-pending': row.owner === '待分配' }">{{ row.owner }}</td><td class="pdm-project-portfolio__task" :title="row.currentTask?.name"><strong v-if="row.currentTask">{{ row.currentTask.name }}</strong><small v-if="row.currentTask">{{ personName(row.currentTask.assignee) }} · {{ displayDate(row.currentTask.plannedFinish) }}</small><span v-else>暂无待办</span></td><td><span class="pdm-project-portfolio__overdue" :class="`is-${row.overdueTaskSummary.tone}`" :title="row.overdueTaskSummary.basis"><i v-for="line in row.overdueTaskSummary.lines" :key="line">{{ line }}</i></span></td><td class="pdm-project-portfolio__notes" @click.stop><ol><li v-for="note in notesForProject(row.projectId)" :key="note.id"><span :title="note.detail">{{ note.detail }}</span></li><li v-if="!notesForProject(row.projectId).length" class="is-empty">暂无备注</li></ol><button type="button" class="pdm-text-action" :aria-label="`${canAddManagerNote ? '维护' : '查看'} ${row.projectCode} 的记录`" @click="openManagerNote(row.projectId, row.projectCode, row.projectName)">记录</button></td>
+                <td><strong>{{ row.projectCode }}</strong><small>{{ row.projectName }}</small></td><td :class="{ 'is-pending': row.engineers === '待分配' }">{{ row.engineers }}</td><td>{{ row.stageLabel }}</td><td :title="row.currentStageFinish ? `当前主任务“${row.stageLabel}”计划完成 ${displayDate(row.currentStageFinish)}` : '当前主任务未排期'">{{ displayDate(row.currentStageFinish) }}</td><td><span :class="`is-${row.remainingWorkPeriod.tone}`" :title="row.remainingWorkPeriod.basis">{{ row.remainingWorkPeriod.label }}</span></td><td><span class="pdm-project-portfolio__progress"><em>{{ row.hasPlan ? `${row.completionPercent}%` : '—' }}</em><i><em :style="{ width: `${row.completionPercent}%` }" /></i></span></td><td :class="{ 'is-pending': row.owner === '待分配' }">{{ row.owner }}</td><td class="pdm-project-portfolio__task" :title="row.currentTask?.name"><strong v-if="row.currentTask">{{ row.currentTask.name }}</strong><small v-if="row.currentTask">{{ personName(row.currentTask.assignee) }} · {{ displayDate(row.currentTask.plannedFinish) }}</small><span v-else>暂无待办</span></td><td><span class="pdm-project-portfolio__overdue" :class="`is-${row.overdueTaskSummary.tone}`" :title="row.overdueTaskSummary.basis"><i v-for="line in row.overdueTaskSummary.lines" :key="line">{{ line }}</i></span></td><td class="pdm-project-portfolio__notes" @click.stop><ol><li v-for="note in notesForProject(row.projectId)" :key="note.id"><span :title="note.detail">{{ note.detail }}</span></li><li v-if="!notesForProject(row.projectId).length" class="is-empty">暂无备注</li></ol><button type="button" class="pdm-text-action" :aria-label="`${canAddManagerNote ? '维护' : '查看'} ${row.projectCode} 的记录`" v-if="canViewTab('records')" @click="openManagerNote(row.projectId, row.projectCode, row.projectName)">记录</button></td>
               </tr>
               <tr v-if="!portfolioRows.length" class="is-empty"><td colspan="10">尚未加载项目计划总览</td></tr>
             </tbody></table>

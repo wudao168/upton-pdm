@@ -23,6 +23,7 @@ function release(id = 'one'): ProductionReleaseRecord {
     receivedAt: '2026-10-19T00:00:00Z', movements: ['self-a', 'self-b', 'self-c'].map((lotId, index) => ({ id: `received-${lotId}`, requestId: `received-${lotId}`, lotId, kind: 'ProductionReceived', quantity: index + 2, actor: 'admin', occurredAt: '2026-10-19T00:00:00Z' })) } }
 }
 let records: Record<string, ProductionReleaseRecord>
+const previewAttention = new Set<string>()
 function drawingForLine(index: number, overrides: Partial<ProductionDrawingItem> = {}): ProductionDrawingItem {
   return { projectId: 'project', projectCode: 'P001', projectName: '排程测试', releasePackageId: 'one', releasePackageNumber: 'RP-one',
     documentId: `drawing-${index}`, versionId: `version-${index}`, drawingNumber: `D-00${index + 1}`, name: '正式图纸', model: '', revision: 'W1',
@@ -31,13 +32,14 @@ function drawingForLine(index: number, overrides: Partial<ProductionDrawingItem>
     bomQuantities: [{ materialKey: `${index}`, sourceBomItemIds: [`bom-${index}`], singleSetQuantity: 2, wholeSetMultiplier: 3, totalQuantity: 6, priorReleasedQuantity: 1, netIssueQuantity: 5 }], modelFiles: [{ documentId: `model-${index}`, versionId: `model-version-${index}`, drawingNumber: 'MODEL', name: '模型', revision: 'W1', stepReady: true }], ...overrides }
 }
 beforeEach(() => {
+  previewAttention.clear()
   records = { one: release(), two: release('two') }
   records.two.state.lots = [records.two.state.lots[0]]
   vi.spyOn(api, 'listProductionTrackingProjects').mockImplementation(async (_token, selfOnly, externalOnly) => {
     const states = Object.values(records).map(({ state }) => externalOnly ? externalProductionState(state) : selfOnly ? selfProductionState(state) : state).filter(state => !!state)
     return states.length ? [{ id: 'project', code: 'P001', name: '排程测试', packages: states.map(state => ({
     releasePackageId: state.releasePackageId, projectId: 'project', projectCode: 'P001', projectName: '排程测试', packageNumber: state.packageNumber,
-    scope: state.scope, publishedAt: state.publishedAt, status: '待排产', totalLines: state.lines.length,
+    scope: state.scope, publishedAt: state.publishedAt, receivedAt: state.receivedAt, hasReleaseAttention: previewAttention.has(state.releasePackageId), status: '待排产', totalLines: state.lines.length,
     totalQuantity: state.lines.reduce((sum, line) => sum + line.requiredQuantity, 0), qualifiedLines: 0, issuedLines: 0, urgentLines: 0,
     priorityLines: 0, atRiskLines: 0, unplannedLines: 1 })) }] : []
   })
@@ -65,6 +67,116 @@ async function setDateRange(wrapper: VueWrapper, value: [string, string] | null)
 }
 
 describe('发布跟踪快捷筛选与全部分类', () => {
+  it('展开折叠总控只调整项目列表，保留当前发布包', async () => {
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: [] } })
+    await flushPromises()
+    expect(wrapper.get('.production-workbench__all-categories').text()).toBe('全部发布包')
+    const selected = wrapper.get('.production-workbench__package.selected').text()
+    const button = wrapper.get('.production-workbench__toggle-projects')
+    expect(button.text()).toBe('折叠')
+    await button.trigger('click')
+    expect(wrapper.findAll('.production-workbench__project').every(item => item.attributes('aria-expanded') === 'false')).toBe(true)
+    expect(button.text()).toBe('展开')
+    expect(wrapper.get('.production-workbench__package.selected').text()).toBe(selected)
+    await button.trigger('click')
+    expect(wrapper.findAll('.production-workbench__project').every(item => item.attributes('aria-expanded') === 'true')).toBe(true)
+    expect(wrapper.get('.production-workbench__package.selected').text()).toBe(selected)
+    wrapper.unmount()
+  })
+  it('未接收包和所属项目显示绿框，供应链接收后停止，其他包保持原状', async () => {
+    records.one.state.receivedAt = null
+    vi.spyOn(api, 'receiveProductionTrackingRelease').mockImplementation(async id => {
+      records[id] = { ...records[id]!, state: { ...records[id]!.state, receivedAt: new Date().toISOString() } }
+      return records[id]!
+    })
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['production.assign'] } })
+    await flushPromises()
+    const packages = () => wrapper.findAll('.production-workbench__package')
+    expect(wrapper.get('.production-workbench__project').attributes('data-release-attention')).toBe('new')
+    expect(packages()[0]!.attributes('data-release-attention')).toBe('new')
+    expect(packages()[1]!.attributes('data-release-attention')).toBeUndefined()
+    await wrapper.findAll('button').find(button => button.text() === '供应链接收')!.trigger('click')
+    await flushPromises()
+    expect(api.receiveProductionTrackingRelease).toHaveBeenCalledWith('one', 'token')
+    expect(packages()[0]!.attributes('data-release-attention')).toBeUndefined()
+    expect(wrapper.get('.production-workbench__project').attributes('data-release-attention')).toBeUndefined()
+    expect(wrapper.get('.production-workbench__package.selected').text()).toContain('RP-one')
+    wrapper.unmount()
+  })
+
+  it('红框优先于绿框，筛选隐藏异常包时仍保留项目提醒', async () => {
+    records.one.state.receivedAt = null; records.two.state.receivedAt = null
+    previewAttention.add('one')
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: [] } })
+    await flushPromises()
+    expect(wrapper.get('.production-workbench__project').attributes('data-release-attention')).toBe('error')
+    const packages = wrapper.findAll('.production-workbench__package')
+    expect(packages[0]!.attributes('data-release-attention')).toBe('error')
+    expect(packages[1]!.attributes('data-release-attention')).toBe('new')
+    await wrapper.get('[aria-label="搜索生产发布包"]').setValue('RP-two')
+    expect(wrapper.findAll('.production-workbench__package')).toHaveLength(1)
+    expect(wrapper.get('.production-workbench__project').attributes('data-release-attention')).toBe('error')
+    wrapper.unmount()
+  })
+
+  it('其他客户端接收后静默清除边框，保留选择且不重新加载明细', async () => {
+    vi.useFakeTimers();vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    records.one.state.receivedAt = null
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: [] } })
+    try {
+      await flushPromises()
+      expect(wrapper.get('.production-workbench__package.selected').attributes('data-release-attention')).toBe('new')
+      const reads = vi.mocked(api.readProductionTrackingRelease).mock.calls.length
+      records.one.state.receivedAt = new Date().toISOString()
+      await vi.advanceTimersByTimeAsync(60000);await flushPromises()
+      expect(wrapper.get('.production-workbench__package.selected').text()).toContain('RP-one')
+      expect(wrapper.get('.production-workbench__package.selected').attributes('data-release-attention')).toBeUndefined()
+      expect(api.readProductionTrackingRelease).toHaveBeenCalledTimes(reads)
+    } finally { wrapper.unmount();vi.useRealTimers() }
+  })
+
+  it.each(['发布跟踪', '外协追溯', '自制追溯'])('%s按项目折叠，展开不切换发布包，刷新和搜索保留选择', async tabName => {
+    const base = (await api.listProductionTrackingProjects('token'))[0]!
+    records.two.state.projectId = 'other'; records.two.state.projectCode = 'P002'; records.two.state.projectName = '第二项目'
+    vi.mocked(api.listProductionTrackingProjects).mockResolvedValue([
+      { ...base, packages: [base.packages[0]!] },
+      { id: 'other', code: 'P002', name: '第二项目', packages: [{ ...base.packages[1]!, projectId: 'other', projectCode: 'P002', status: '待接收' }] },
+    ])
+    const wrapper = mount(ProductionWorkbench, { attachTo: document.body, props: { token: 'token', username: 'admin', permissions: ['production.schedule'] } })
+    await flushPromises()
+    await wrapper.findAll('.production-workbench__tabs button').find(button => button.text() === tabName)!.trigger('click')
+    await flushPromises()
+    const headers = () => wrapper.findAll('.production-workbench__project')
+    const group = (code: string) => wrapper.get(`[aria-label="${code}的发布包"]`)
+    expect(headers()[0]!.attributes('aria-expanded')).toBe('true')
+    expect(headers()[1]!.attributes('aria-expanded')).toBe('false')
+    expect(headers()[1]!.text()).toContain('1 包')
+    expect(group('P002').isVisible()).toBe(false)
+    const reads = vi.mocked(api.readProductionTrackingRelease).mock.calls.length
+    await headers()[0]!.trigger('click')
+    await headers()[1]!.trigger('click')
+    expect(group('P001').isVisible()).toBe(false)
+    expect(group('P002').isVisible()).toBe(true)
+    expect(api.readProductionTrackingRelease).toHaveBeenCalledTimes(reads)
+    expect(wrapper.get('.production-workbench__package.selected').text()).toContain('RP-one')
+    await group('P002').get('button').trigger('click'); await flushPromises()
+    expect(wrapper.get('.production-workbench__package.selected').text()).toContain('RP-two')
+    await headers()[1]!.trigger('click')
+    await wrapper.get('.production-workbench__toolbar button').trigger('click'); await flushPromises()
+    expect(group('P002').isVisible()).toBe(false)
+    expect(wrapper.get('.production-workbench__package.selected').text()).toContain('RP-two')
+    await wrapper.get('[aria-label="搜索生产发布包"]').setValue('P002')
+    expect(group('P002').isVisible()).toBe(true)
+    expect(headers()).toHaveLength(1)
+    await headers()[0]!.trigger('click')
+    expect(group('P002').isVisible()).toBe(false)
+    await wrapper.get('[aria-label="搜索生产发布包"]').setValue('')
+    await wrapper.get('[aria-label="筛选生产状态"]').setValue('待接收')
+    expect(group('P002').isVisible()).toBe(true)
+    expect(wrapper.get('.production-workbench__package.selected').text()).toContain('RP-two')
+    wrapper.unmount()
+  })
+
   it('小数交付与分配不会因浮点求和误差残留在筛选结果中', async () => {
     const source = records.one.state
     source.lines = [{ ...source.lines[0], requiredQuantity: 0.9 }]
@@ -153,17 +265,14 @@ describe('发布跟踪快捷筛选与全部分类', () => {
 })
 
 describe('三栏自制排程', () => {
-  it('自制追溯显示发布包汇总，齐套与领用统计只包含自制物料', async () => {
+  it('自制追溯保留明细，不再显示右侧发布包汇总卡片', async () => {
     records.one.state.movements.push({ id: 'self-pass', requestId: 'self-pass', lotId: 'self-a', kind: 'Pass', quantity: 2, actor: 'quality', occurredAt: '' },
       { id: 'self-issue', requestId: 'self-issue', lotId: 'self-a', kind: 'Issue', quantity: 2, actor: 'material', occurredAt: '' },
       { id: 'external-pass', requestId: 'external-pass', lotId: 'external', kind: 'Pass', quantity: 10, actor: 'quality', occurredAt: '' })
     const wrapper = await openSchedule()
     await wrapper.get('.production-workbench__quick-filter input').setValue(false)
-    const summary = wrapper.get('.production-workbench__schedule-right .production-workbench__summary')
-    expect(summary.text()).toContain('本发布包汇总')
-    expect(summary.text()).toContain('质检齐套 1/2 项')
-    expect(summary.text()).toContain('领用交付 1/2 项')
-    expect(summary.text()).toContain('未领用 1 项')
+    expect(wrapper.find('.production-workbench__summary').exists()).toBe(false)
+    expect(wrapper.findAll('.production-workbench__lines tbody tr')).not.toHaveLength(0)
     wrapper.unmount()
   })
   it('右侧完整记录包含所选批次全部流转，不截断也不混入其他批次', async () => {
@@ -337,9 +446,9 @@ describe('三栏自制排程', () => {
     await wrapper.get('[aria-label="搜索本包物料"]').setValue('D-001')
     await wrapper.get('[aria-label="全选当前筛选物料（跨页）"]').setValue(true)
     await button('批量下载 PDF').trigger('click'); await flushPromises()
-    expect(api.downloadProductionDrawingArchive).toHaveBeenLastCalledWith('project', ['version-0'], 'Pdf', 'token', 'RP-one', expect.any(Function))
+    expect(api.downloadProductionDrawingArchive).toHaveBeenLastCalledWith('project', ['version-0'], 'Pdf', 'token', 'RP-one', expect.any(Function), [expect.objectContaining({ versionId: 'version-0', releasePackageId: 'formal' })])
     await button('批量下载 STEP').trigger('click'); await flushPromises()
-    expect(api.downloadProductionDrawingArchive).toHaveBeenLastCalledWith('project', ['version-0'], 'Step', 'token', 'RP-one', expect.any(Function))
+    expect(api.downloadProductionDrawingArchive).toHaveBeenLastCalledWith('project', ['version-0'], 'Step', 'token', 'RP-one', expect.any(Function), [expect.objectContaining({ versionId: 'version-0', releasePackageId: 'formal' })])
     await button('批量下载 BOM').trigger('click'); await flushPromises()
     expect(api.downloadGeneratedFile).toHaveBeenLastCalledWith(expect.any(Blob), 'RP-FORMAL-选中BOM.xlsx')
     const xml = async (blob: Blob) => {
@@ -351,8 +460,8 @@ describe('三栏自制排程', () => {
     expect(selectedSheet).toContain('MAT-0'); expect(selectedSheet).not.toContain('MAT-1')
     await button('清空选择').trigger('click')
     await button('下载本包').trigger('click'); await flushPromises()
-    expect(api.downloadProductionDrawingArchive).toHaveBeenCalledWith('project', ['version-0', 'version-1', 'version-2', 'version-3'], 'Step', 'token', 'RP-FORMAL')
-    expect(api.downloadProductionDrawingArchive).toHaveBeenCalledWith('project', ['version-0', 'version-1', 'version-2', 'version-3'], 'Pdf', 'token', 'RP-FORMAL')
+    expect(api.downloadProductionDrawingArchive).toHaveBeenCalledWith('project', ['version-0', 'version-1', 'version-2', 'version-3'], 'Step', 'token', 'RP-FORMAL', undefined, expect.arrayContaining([expect.objectContaining({ releasePackageId: 'formal' })]))
+    expect(api.downloadProductionDrawingArchive).toHaveBeenCalledWith('project', ['version-0', 'version-1', 'version-2', 'version-3'], 'Pdf', 'token', 'RP-FORMAL', undefined, expect.arrayContaining([expect.objectContaining({ releasePackageId: 'formal' })]))
     expect(api.getProjectExportMetadata).toHaveBeenLastCalledWith('project', 'token', 'formal')
     expect(api.downloadGeneratedFile).toHaveBeenLastCalledWith(expect.any(Blob), 'RP-FORMAL-本包BOM.xlsx')
     const fullSheet = await xml(vi.mocked(api.downloadGeneratedFile).mock.calls.at(-1)![0])
@@ -387,9 +496,9 @@ describe('三栏自制排程', () => {
     await wrapper.get('[aria-label="自制批次分页"]').findAll('button')[1].trigger('click')
     expect(wrapper.get('[aria-label="勾选排程批次 D-003 read-only-49"]').element).toHaveProperty('checked', true)
     await button('批量下载 PDF').trigger('click'); await flushPromises()
-    expect(api.downloadProductionDrawingArchive).toHaveBeenLastCalledWith('project', ['version-1', 'version-2'], 'Pdf', 'token', 'RP-one', expect.any(Function))
+    expect(api.downloadProductionDrawingArchive).toHaveBeenLastCalledWith('project', ['version-1', 'version-2'], 'Pdf', 'token', 'RP-one', expect.any(Function), [expect.objectContaining({ versionId: 'version-1', releasePackageId: 'one' }), expect.objectContaining({ versionId: 'version-2', releasePackageId: 'one' })])
     await button('批量下载 STEP').trigger('click'); await flushPromises()
-    expect(api.downloadProductionDrawingArchive).toHaveBeenLastCalledWith('project', ['version-1', 'version-2'], 'Step', 'token', 'RP-one', expect.any(Function))
+    expect(api.downloadProductionDrawingArchive).toHaveBeenLastCalledWith('project', ['version-1', 'version-2'], 'Step', 'token', 'RP-one', expect.any(Function), [expect.objectContaining({ versionId: 'version-1', releasePackageId: 'one' }), expect.objectContaining({ versionId: 'version-2', releasePackageId: 'one' })])
     expect(api.listProductionDrawings).toHaveBeenLastCalledWith('token', true, 'project')
     await button('清空选择').trigger('click'); expect(tools.text()).toContain('已选 0 个批次'); wrapper.unmount()
   })
@@ -409,7 +518,7 @@ describe('三栏自制排程', () => {
     await wrapper.get('[aria-label="选择物料 D-001 W1"]').setValue(true)
     vi.mocked(api.listProductionDrawings).mockResolvedValue([drawingForLine(0), drawingForLine(1)])
     await button('批量下载 STEP').trigger('click'); await flushPromises()
-    expect(api.downloadProductionDrawingArchive).toHaveBeenLastCalledWith('project', ['version-0'], 'Step', 'token', 'RP-one', expect.any(Function))
+    expect(api.downloadProductionDrawingArchive).toHaveBeenLastCalledWith('project', ['version-0'], 'Step', 'token', 'RP-one', expect.any(Function), [expect.objectContaining({ versionId: 'version-0', releasePackageId: 'one' })])
     vi.mocked(api.downloadProductionDrawingArchive).mockClear()
     await wrapper.get('[aria-label="全选当前筛选物料（跨页）"]').setValue(true)
     for (const [items, format, message] of [
@@ -421,7 +530,7 @@ describe('三栏自制排程', () => {
       expect(ElMessage.error).toHaveBeenLastCalledWith(expect.stringContaining(message)); expect(api.downloadProductionDrawingArchive).not.toHaveBeenCalled()
     }
     vi.mocked(api.listProductionDrawings).mockResolvedValue([drawingForLine(0), drawingForLine(1)])
-    await button('批量下载 PDF').trigger('click'); await flushPromises(); expect(api.downloadProductionDrawingArchive).toHaveBeenLastCalledWith('project', ['version-0', 'version-1'], 'Pdf', 'token', 'RP-one', expect.any(Function))
+    await button('批量下载 PDF').trigger('click'); await flushPromises(); expect(api.downloadProductionDrawingArchive).toHaveBeenLastCalledWith('project', ['version-0', 'version-1'], 'Pdf', 'token', 'RP-one', expect.any(Function), [expect.objectContaining({ versionId: 'version-0', releasePackageId: 'one' }), expect.objectContaining({ versionId: 'version-1', releasePackageId: 'one' })])
     wrapper.unmount()
   })
   it('准备下载期间防止重复提交，网络失败显示中文并恢复下载按钮', async () => {
@@ -492,22 +601,20 @@ describe('三栏自制排程', () => {
     expect(wrapper.get('[aria-label="排程安排"] h3').text()).toBe('第二包自制件')
     wrapper.unmount()
   })
-  it('离开排程进入扫码执行后恢复完整授权发布包，仍可定位外协任务', async () => {
-    vi.spyOn(api, 'resolveProductionScan').mockResolvedValue([{ releasePackageId: 'two', lineId: 'line-0', lotId: 'external',
-      packageNumber: 'RP-two', drawingNumber: 'D-001', name: '外协板', revision: 'W1', status: '外协待交货' }])
+  it('生产执行在PDA屏幕中加载真实移动扫码页，可独立刷新并随账号切换重置', async () => {
     const wrapper = await openSchedule()
     await wrapper.findAll('.production-workbench__tabs button').find(button => button.text() === '生产执行')!.trigger('click')
     await flushPromises()
-    expect(api.listProductionTrackingProjects).toHaveBeenLastCalledWith('token', false)
-    expect(wrapper.find('.production-workbench__execution').exists()).toBe(false)
-    expect(wrapper.text()).toContain('请扫描图纸或批次流转卡，定位生产任务。')
-    await wrapper.get('[aria-label="扫描正式图纸或批次流转卡"]').setValue('扫码内容')
-    await wrapper.get('.production-workbench__execution-actions form').trigger('submit')
-    await flushPromises()
-    expect(wrapper.get('.production-workbench__execution h3').text()).toContain('RP-two · 外协板')
-    await wrapper.findAll('.production-workbench__tabs button').find(button => button.text() === '自制追溯')!.trigger('click'); await flushPromises()
-    await wrapper.findAll('.production-workbench__tabs button').find(button => button.text() === '生产执行')!.trigger('click'); await flushPromises()
-    expect(wrapper.find('.production-workbench__execution').exists()).toBe(false)
+    const frame = wrapper.get('iframe[title="PDA移动扫码页面"]')
+    expect(frame.attributes('src')).toContain('?productionScan=1')
+    expect(frame.attributes('allow')).toBe('camera')
+    expect(wrapper.get('.production-workbench__execution-actions a').attributes('href')).toBe(frame.attributes('src'))
+    expect(wrapper.find('.production-workbench__execution-actions form').exists()).toBe(false)
+    await wrapper.get('[aria-label="刷新PDA页面"]').trigger('click')
+    expect(wrapper.get('iframe').element).not.toBe(frame.element)
+    const refreshed = wrapper.get('iframe').element
+    await wrapper.setProps({ token: 'different-account-token' })
+    expect(wrapper.get('iframe').element).not.toBe(refreshed)
     wrapper.unmount()
   })
   it('外协追溯位于自制追溯左侧，混合物料仅统计外协数量、交期和质量记录', async () => {

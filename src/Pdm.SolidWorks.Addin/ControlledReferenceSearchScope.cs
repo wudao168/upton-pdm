@@ -12,6 +12,7 @@ internal sealed class ControlledReferenceSearchScope : IDisposable
     private readonly string previousDirectory;
     private readonly string previousFolders;
     private readonly bool previousSearchRules;
+    private readonly ControlledOpenBoundary boundary;
 
     public ControlledReferenceSearchScope(ISldWorks application, string rootPath, ControlledOpenManifestDto manifest)
     {
@@ -19,9 +20,12 @@ internal sealed class ControlledReferenceSearchScope : IDisposable
         previousDirectory = application.GetCurrentWorkingDirectory() ?? string.Empty;
         previousFolders = application.GetSearchFolders((int)swSearchFolderTypes_e.swDocumentType) ?? string.Empty;
         previousSearchRules = application.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules);
+        boundary = new ControlledOpenBoundary(Path.GetDirectoryName(rootPath), manifest);
         var directory = Path.GetDirectoryName(rootPath);
         var folders = manifest.Files.Select(file => Path.GetDirectoryName(Path.GetFullPath(
-            Path.Combine(directory, file.RelativePath ?? file.FileName)))).Distinct(StringComparer.OrdinalIgnoreCase);
+            Path.Combine(directory, file.RelativePath ?? file.FileName))))
+            .Concat(manifest.RetainedLocalReferences.Values.SelectMany(record => record.Paths).Select(Path.GetDirectoryName))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
         try
         {
             application.SetCurrentWorkingDirectory(directory);
@@ -37,8 +41,11 @@ internal sealed class ControlledReferenceSearchScope : IDisposable
         }
     }
 
+    internal void VerifyLoadedSources() => boundary.Verify();
+
     public void Dispose()
     {
+        boundary.Dispose();
         try { application.SetSearchFolders((int)swSearchFolderTypes_e.swDocumentType, previousFolders); }
         catch (Exception error) { PluginDiagnosticLog.Record("受控搜索目录", "恢复原搜索目录失败：" + error); }
         try { application.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUseFolderSearchRules, previousSearchRules); }

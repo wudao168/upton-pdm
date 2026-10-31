@@ -68,6 +68,8 @@ internal static class PdmDocumentIdentityStore
             Revision = binding.Revision ?? string.Empty,
             Sha256 = binding.Sha256 ?? string.Empty,
             ResolvedReferenceSha256 = binding.ResolvedReferenceSha256 ?? string.Empty,
+            PreparedReferenceKey = binding.PreparedReferenceKey,
+            PreparedReferenceSha256 = binding.PreparedReferenceSha256,
             NativeIsolationSnapshotId = binding.NativeIsolationSnapshotId,
             ServerMaterializedAtUtc = binding.ServerMaterializedAtUtc,
             FileLength = binding.FileLength
@@ -193,6 +195,11 @@ internal static class PdmDocumentIdentityStore
         && TryWriteBinding(path, expected.DocumentId, expected.ProjectId, expected.VersionId, expected.Revision,
             expected.Sha256, expected.FileLength, expected, actualHash);
 
+    internal static bool TryRecordReferencePreparation(string path, PdmControlledFileMetadata expected, string key, string actualHash) =>
+        expected?.VersionId != null && TryWriteBinding(path, expected.DocumentId, expected.ProjectId, expected.VersionId,
+            expected.Revision, expected.Sha256, expected.FileLength, expected,
+            preparedReferenceKey: key, preparedReferenceSha256: actualHash);
+
     internal static bool TryRecordNativeIsolation(string path, PdmControlledFileMetadata expected, Guid snapshotId, string actualHash) =>
         snapshotId != Guid.Empty && expected?.VersionId != null && !string.IsNullOrWhiteSpace(actualHash)
         && TryWriteBinding(path, expected.DocumentId, expected.ProjectId, expected.VersionId, expected.Revision,
@@ -228,7 +235,7 @@ internal static class PdmDocumentIdentityStore
         string sha256,
         long? fileLength,
         PdmControlledFileMetadata expected = null, string resolvedReferenceSha256 = null, DateTime? serverMaterializedAtUtc = null,
-        Guid? nativeIsolationSnapshotId = null)
+        Guid? nativeIsolationSnapshotId = null, string preparedReferenceKey = null, string preparedReferenceSha256 = null)
     {
         if (documentId == Guid.Empty || string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return false;
         lock (bindingSync)
@@ -263,6 +270,11 @@ internal static class PdmDocumentIdentityStore
                 var isolationId = nativeIsolationSnapshotId == Guid.Empty ? null : nativeIsolationSnapshotId
                     ?? (previous?.DocumentId == documentId && previous.VersionId == retainedVersionId
                         && string.Equals(previous.Sha256, retainedSha256, StringComparison.OrdinalIgnoreCase) ? previous.NativeIsolationSnapshotId : null);
+                var sameBase = previous?.DocumentId == documentId && previous.ProjectId == retainedProjectId
+                    && previous.VersionId == retainedVersionId && previous.NativeIsolationSnapshotId == isolationId
+                    && string.Equals(previous.Sha256, retainedSha256, StringComparison.OrdinalIgnoreCase);
+                var preparedKey = preparedReferenceKey ?? (sameBase ? previous.PreparedReferenceKey : null);
+                var preparedHash = preparedReferenceSha256 ?? (sameBase ? previous.PreparedReferenceSha256 : null);
                 if (previous?.DocumentId == documentId
                     && previous.ProjectId == retainedProjectId
                     && previous.VersionId == retainedVersionId
@@ -271,7 +283,8 @@ internal static class PdmDocumentIdentityStore
                     && previous.FileLength == retainedFileLength
                     && string.Equals(previous.ResolvedReferenceSha256, retainedResolvedHash, StringComparison.OrdinalIgnoreCase)
                     && previous.NativeIsolationSnapshotId == isolationId
-                    && previous.ServerMaterializedAtUtc == materializedAt)
+                    && previous.ServerMaterializedAtUtc == materializedAt
+                    && previous.PreparedReferenceKey == preparedKey && previous.PreparedReferenceSha256 == preparedHash)
                     return true;
                 var binding = new DocumentBinding
                 {
@@ -284,6 +297,8 @@ internal static class PdmDocumentIdentityStore
                     Revision = retainedRevision,
                     Sha256 = retainedSha256,
                     ResolvedReferenceSha256 = retainedResolvedHash,
+                    PreparedReferenceKey = preparedKey,
+                    PreparedReferenceSha256 = preparedHash,
                     NativeIsolationSnapshotId = isolationId,
                     ServerMaterializedAtUtc = materializedAt,
                     FileLength = retainedFileLength
@@ -352,6 +367,8 @@ internal static class PdmDocumentIdentityStore
         public string Revision { get; set; }
         public string Sha256 { get; set; }
         public string ResolvedReferenceSha256 { get; set; }
+        public string PreparedReferenceKey { get; set; }
+        public string PreparedReferenceSha256 { get; set; }
         public Guid? NativeIsolationSnapshotId { get; set; }
         public DateTime? ServerMaterializedAtUtc { get; set; }
         public long? FileLength { get; set; }
@@ -441,6 +458,8 @@ internal sealed class PdmControlledFileMetadata
     public string Revision { get; set; } = string.Empty;
     public string Sha256 { get; set; } = string.Empty;
     public string ResolvedReferenceSha256 { get; set; } = string.Empty;
+    public string PreparedReferenceKey { get; set; }
+    public string PreparedReferenceSha256 { get; set; }
     public Guid? NativeIsolationSnapshotId { get; set; }
     public DateTime? ServerMaterializedAtUtc { get; set; }
     public long? FileLength { get; set; }

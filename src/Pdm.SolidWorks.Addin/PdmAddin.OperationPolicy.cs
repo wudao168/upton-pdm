@@ -20,6 +20,7 @@ public sealed partial class PdmAddin
             var document = assemblyEventDocument;
             var selection = document?.SelectionManager as ISelectionMgr;
             if (selection == null) return 0;
+            var blockedOwners = new List<string>();
             for (var index = 1; index <= selection.GetSelectedObjectCount2(-1); index++)
             {
                 if (selection.GetSelectedObjectType3(index, -1) != (int)swSelectType_e.swSelCOMPONENTS) continue;
@@ -35,10 +36,10 @@ public sealed partial class PdmAddin
                     break;
                 }
                 if (CanDeleteAssemblyComponent(ownerPath)) continue;
-                taskPaneControl?.SetCheckoutReminder("已取消删除：请先获取所属装配体“" + Path.GetFileName(ownerPath) + "”的编辑权限，再删除组件。", true);
+                blockedOwners.Add(ownerPath);
                 LogOperation("未获取所属装配体权限，删除前已拦截 path=" + ownerPath);
-                return 1; // S_FALSE cancels DeleteSelectionPreNotify before any deletion.
             }
+            if (blockedOwners.Count > 0) { QueueAssemblyPermission(document, blockedOwners, 16, "删除组件"); return 1; }
             return 0;
         }
         catch (Exception error)

@@ -9,12 +9,64 @@ public sealed class MaterialRelationService(
     IMaterialRelationRepository relations,
     IMaterialRepository materials,
     IPdmRepository repository,
-    TimeProvider timeProvider) : IMaterialRelationReleaseGuard
+    TimeProvider timeProvider, IStandardLibraryRepository? standardLibrary = null) : IMaterialRelationReleaseGuard
 {
     public async Task<IReadOnlyList<MaterialRelationTemplate>> ListTemplatesAsync(bool includeDraft, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireAsync(actor, role, PermissionCodes.MaterialRelationView, cancellationToken);
-        return await relations.ListTemplatesAsync(includeDraft, cancellationToken);
+        var manage = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.MaterialRelationManage, cancellationToken)
+            || await repository.HasUserPermissionAsync(actor, role, PermissionCodes.MaterialRelationPublish, cancellationToken);
+        return await WithCategoriesAsync(await relations.ListTemplatesAsync(includeDraft && manage, cancellationToken), cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<StandardLibraryCategory>> ListCategoryCatalogAsync(string actor, UserRole role, CancellationToken ct)
+    {
+        await RequireAsync(actor, role, PermissionCodes.MaterialRelationView, ct);
+        return standardLibrary is null ? [] : await standardLibrary.ListCategoriesAsync(false, ct);
+    }
+
+    public async Task<IReadOnlyList<StandardLibraryCategory>> GetMainCategoriesAsync(Guid materialId, string actor, UserRole role, CancellationToken ct)
+    {
+        await RequireAsync(actor, role, PermissionCodes.MaterialRelationView, ct);
+        return await MainCategoriesAsync(materialId, ct);
+    }
+
+    public async Task<IReadOnlyList<StandardLibraryCategory>> AssignMainCategoryAsync(Guid materialId, Guid categoryId, string actor, UserRole role, CancellationToken ct)
+    {
+        await RequireAsync(actor, role, PermissionCodes.MaterialRelationManage, ct);
+        var material = await RequireApprovedMaterialAsync(materialId, "主物料", ct);
+        if (!material.U9SyncConfirmed) throw new PdmRuleException("主料尚未完成U9C同步，请先完成同步后补选标准物料分类。");
+        if (standardLibrary is null) throw new PdmRuleException("标准物料分类服务尚未就绪，请联系管理员。");
+        var current = await MainCategoriesAsync(materialId, ct);
+        if (current.Count > 0)
+        {
+            if (current.Any(item => item.Id == categoryId)) return current;
+            throw new PdmConflictException("主料已有标准物料分类，请在标准物料中维护归属，关联配置会自动继承。");
+        }
+        var category = await standardLibrary.FindCategoryAsync(categoryId, ct);
+        if (category is null || !category.IsActive || StandardLibraryDefaults.IsUncategorized(category))
+            throw new PdmRuleException("请选择有效的标准物料分类，不能选择未分类或已停用分类。");
+        await standardLibrary.AddMembershipsAsync([new(category.Id, materialId, actor, timeProvider.GetUtcNow())], ct);
+        foreach (var value in (await standardLibrary.ListCategoriesAsync(true, ct)).Where(StandardLibraryDefaults.IsUncategorized))
+            await standardLibrary.RemoveMembershipAsync(value.Id, materialId, ct);
+        await AuditAsync(actor, "material-relation.category.assign", materialId, $"主料收录标准物料分类：{category.Name}；关联配置继承主料归属", ct);
+        return await MainCategoriesAsync(materialId, ct);
+    }
+
+    private async Task<IReadOnlyList<StandardLibraryCategory>> MainCategoriesAsync(Guid materialId, CancellationToken ct)
+    {
+        if (standardLibrary is null) return [];
+        var ids = (await standardLibrary.ListMembershipsAsync(ct)).Where(item => item.MaterialId == materialId).Select(item => item.CategoryId).ToHashSet();
+        return (await standardLibrary.ListCategoriesAsync(false, ct)).Where(item => ids.Contains(item.Id) && !StandardLibraryDefaults.IsUncategorized(item)).ToArray();
+    }
+
+    private async Task<IReadOnlyList<MaterialRelationTemplate>> WithCategoriesAsync(IReadOnlyList<MaterialRelationTemplate> values, CancellationToken ct)
+    {
+        if (standardLibrary is null || values.Count == 0) return values;
+        var categories = (await standardLibrary.ListCategoriesAsync(false, ct)).Where(item => !StandardLibraryDefaults.IsUncategorized(item)).ToDictionary(item => item.Id);
+        var memberships = (await standardLibrary.ListMembershipsAsync(ct)).ToLookup(item => item.MaterialId);
+        return values.Select(item => item with { StandardLibraryCategories = memberships[item.MainMaterialId].Select(link => categories.GetValueOrDefault(link.CategoryId))
+            .OfType<StandardLibraryCategory>().OrderBy(category => category.SortOrder).ThenBy(category => category.Name).ToArray() }).ToArray();
     }
 
     public async Task<MaterialRelationTemplate> SaveDraftAsync(Guid? templateId, SaveMaterialRelationTemplateCommand command, string actor, UserRole role, CancellationToken cancellationToken)
@@ -67,6 +119,13 @@ public sealed class MaterialRelationService(
         foreach (var option in draft.Groups.SelectMany(group => group.Options))
             _ = await RequireApprovedMaterialAsync(option.MaterialId, $"配件“{option.MaterialCode}”", cancellationToken);
         _ = await RequireApprovedMaterialAsync(template.MainMaterialId, "主物料", cancellationToken);
+        if (standardLibrary is not null)
+        {
+            if ((await MainCategoriesAsync(template.MainMaterialId, cancellationToken)).Count == 0)
+                throw new PdmRuleException("主料尚未归入标准物料分类，请由标准化人员补选分类后再发布关联配置。");
+            var main = await materials.FindMaterialAsync(template.MainMaterialId, cancellationToken);
+            if (main?.U9SyncConfirmed != true) throw new PdmRuleException("主料尚未完成U9C同步，请完成同步后再发布关联配置。");
+        }
         var published = await relations.PublishAsync(templateId, revisionId, expectedRowVersion, actor, timeProvider.GetUtcNow(), cancellationToken);
         await AuditAsync(actor, "material-relation.publish", templateId, $"{template.MainMaterialCode} · V{published.PublishedRevision?.Version}", cancellationToken);
         return published;

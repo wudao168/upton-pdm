@@ -31,6 +31,9 @@ public static class PdfReleaseIdentity
 public interface IPdfReleaseStampProcessor
 {
     bool IsStamped(string path, Guid packageId, Guid sourceVersionId);
+    bool IsCurrent(string path, ReleasePackage package, Guid sourceVersionId) => IsStamped(path, package.Id, sourceVersionId);
     Task ApplyAsync(ReleasePackage package, Project project, ReleasePreviewSource source,
         string pdfPath, CancellationToken cancellationToken);
+    Task ReissueAsync(ReleasePackage package, Project project, ReleasePreviewSource source,
+        string pdfPath, CancellationToken cancellationToken) => ApplyAsync(package, project, source, pdfPath, cancellationToken);
 }

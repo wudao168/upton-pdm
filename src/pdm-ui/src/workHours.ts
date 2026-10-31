@@ -27,6 +27,7 @@ export function complianceSummary(days: WorkHoursDayCheck[]) {
     pending: days.filter(x => x.actual < x.expected && !x.muted).length, muted: days.filter(x => x.actual < x.expected && x.muted).length }
 }
 export interface SaveWorkHours { from: string; to: string; entries: WorkHourInput[]; versions: Array<{ month: string; rowVersion: number }> }
+export interface MoveWorkHoursDay { companyId: string; sourceDate: string; targetDate: string; sourceRowVersion: number; targetRowVersion: number }
 export type HolidayMap = Map<string, { name: string; isOffDay: boolean }>
 export function weekDates(date: string) {
   const offset = (new Date(date + 'T00:00:00Z').getUTCDay() + 6) % 7
@@ -58,6 +59,15 @@ export function validateHours(entries: WorkHourInput[]) {
   if (new Set(keys).size !== keys.length) return '同一天、同一项目、同一所在地存在重复记录，请合并工时。'
   if ([...new Set(entries.map(x => x.date))].some(day => hoursOn(entries, day) > 24)) return '同一天所有项目的工时合计不能超过24小时。'
   return ''
+}
+
+export function appendWorkHoursDay(existing: WorkHourInput[], copied: WorkHourInput[], date: string): WorkHourInput[] {
+  const result = new Map<string, WorkHourInput>()
+  for (const entry of [...existing, ...copied]) {
+    const key = JSON.stringify([entry.projectId, entry.location])
+    result.set(key, { date, projectId: entry.projectId, location: entry.location, hours: (result.get(key)?.hours ?? 0) + Number(entry.hours) })
+  }
+  return [...result.values()]
 }
 export interface WorkHoursReportRow { entry: WorkHourEntry; person: WorkHoursPerson }
 export const unassignedWorkHoursDepartment = 'work-hours-unassigned'

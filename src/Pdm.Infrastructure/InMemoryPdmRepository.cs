@@ -33,6 +33,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     private readonly Dictionary<Guid, SortedSet<int>> releasedProjectNumbers = new();
     private readonly TimeProvider timeProvider;
     private readonly IProjectContactInformationRepository? projectContacts;
+    private readonly IProductionTrackingStore? productionTracking;
     private readonly Dictionary<Guid, int> serialCounters = new();
     private readonly Dictionary<Guid, SortedSet<int>> releasedSerialNumbers = new();
     private readonly Dictionary<(Guid OrganizationId, string CustomerCode), int> customerCounters = new();
@@ -55,10 +56,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     public int BomBatchApplyCount { get; private set; }
 
-    public InMemoryPdmRepository(TimeProvider timeProvider, IProjectContactInformationRepository? projectContacts = null)
+    public InMemoryPdmRepository(TimeProvider timeProvider, IProjectContactInformationRepository? projectContacts = null, IProductionTrackingStore? productionTracking = null)
     {
         this.timeProvider = timeProvider;
         this.projectContacts = projectContacts;
+        this.productionTracking = productionTracking;
         foreach (var definition in RolePermissionCatalog.Roles)
         {
             roleDefinitions[definition.RoleCode] = definition;
@@ -113,9 +115,22 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     {
         if (!HasUserPermission(actor, role, PermissionCodes.ProjectView)) return [];
         var result = new List<Project>();
+        var activation = productionTracking is null ? DateTimeOffset.MaxValue : await productionTracking.ActivationAtAsync(cancellationToken);
         foreach (var project in projects.Values.Where(IsInActiveCompany).OrderBy(project => project.Code))
             if (await HasCommercialProjectAccessAsync(project, actor, role, cancellationToken))
-                result.Add(ApplyCapabilities(project, actor, role));
+            {
+                var summary = ApplyCapabilities(project, actor, role);
+                if (productionTracking is not null)
+                {
+                    var tracked = (await productionTracking.ListProjectAsync(project.Id, cancellationToken)).ToDictionary(item => item.State.ReleasePackageId);
+                    summary = summary with { HasUnreceivedNonStandardRelease = packages.Values.Any(item => item.ProjectId == project.Id
+                        && item.State == ReleasePackageState.Published
+                        && item.Scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement or ReleaseScope.NonStandardLongLead
+                        && (tracked.ContainsKey(item.Id) || item.PublishedAt >= activation)
+                        && tracked.GetValueOrDefault(item.Id)?.State.ReceivedAt is null) };
+                }
+                result.Add(summary);
+            }
         return result;
     }
 
@@ -2051,6 +2066,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             if (!packages.TryGetValue(releasePackageId, out var package)
                 || package.State is not (ReleasePackageState.Publishing or ReleasePackageState.Published))
                 throw new PdmConflictException("发布包尚未进入服务器转换状态。");
+            if (!ReleasePreviewPolicy.RequiresConversion(package)) return Task.FromResult<IReadOnlyList<ReleasePreviewSource>>([]);
             if (package.VersionBindings is not null) return ReleaseBoundSourceReader.ReadAsync(this, package, true, cancellationToken);
             // 转图范围：只转非标件BOM中的物料（零件出STEP、其关联2D工程图出PDF），装配体不作为转换目标。
             var nonStandardModels = NonStandardModels(package);
@@ -2460,7 +2476,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     /// <summary>列出需要继续转图的已发布包（待处理，或失败但未超过重试上限）。</summary>
     public Task<IReadOnlyList<Guid>> ListPublishingReleasePackageIdsAsync(int limit, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<Guid>>(packages.Values
-            .Where(package => package.State == ReleasePackageState.Publishing && package.PreviewState != ReleasePreviewState.Failed)
+            .Where(package => package.State == ReleasePackageState.Publishing && (!ReleasePreviewPolicy.RequiresConversion(package) || package.PreviewState != ReleasePreviewState.Failed))
             .OrderBy(package => package.CreatedAt)
             .Take(limit)
             .Select(package => package.Id)
@@ -2505,7 +2521,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     public Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAwaitingPreviewAsync(int maxAttempts, int limit, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<ReleasePackage>>(packages.Values
             .Where(package => package.State == ReleasePackageState.Published
-                && package.PreviewState is ReleasePreviewState.Pending or ReleasePreviewState.Failed
+                && ReleasePreviewPolicy.RequiresConversion(package)
+                && package.PreviewState is ReleasePreviewState.Pending or ReleasePreviewState.WaitingForServer or ReleasePreviewState.Failed
                 && package.PreviewAttempts < maxAttempts)
             .OrderBy(package => package.PreviewUpdatedAt ?? DateTimeOffset.MinValue)
             .ThenBy(package => package.CreatedAt)
@@ -2870,6 +2887,16 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             .Select(item => new ProjectReferenceDocumentCounts.Document(item.Id, item.ProjectId, item.FileName, item.Kind)).ToArray();
         var (documentCount, modelDocumentCount, drawingDocumentCount) = ProjectReferenceDocumentCounts.Count(
             referenceSnapshots.GetValueOrDefault(project.Id)?.Root, project.Id, liveDocuments, documentRelations.Values.ToArray());
+        var releasePackages = packages.Values.Where(item => item.ProjectId == project.Id).ToArray();
+        project = project with {
+            HasReleaseAttention = releasePackages.Any(item => item.State == ReleasePackageState.PublishFailed
+                || (item.State is ReleasePackageState.Published or ReleasePackageState.Publishing) && ReleasePreviewPolicy.RequiresConversion(item)
+                && (item.PreviewState is ReleasePreviewState.Pending or ReleasePreviewState.WaitingForServer or ReleasePreviewState.Running or ReleasePreviewState.Failed)),
+            LatestPublishedAt = releasePackages.Where(item => item.State == ReleasePackageState.Published).Select(item => item.PublishedAt).Max(),
+            LatestPurchasedBomPublishedAt = releasePackages.Where(item => item.State == ReleasePackageState.Published
+                && item.Scope is ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement or ReleaseScope.StandardLongLead
+                    or ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement or ReleaseScope.ElectricalLongLead).Select(item => item.PublishedAt).Max()
+        };
         var businessStatus = BuildBusinessStatus(project.Id);
         var rootDocumentCheckedOutBy = RootDocumentCheckedOutBy(project.Id);
         var managesExecutionUnit = project.ExecutionUnitId is Guid executionUnitId

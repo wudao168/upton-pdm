@@ -3,10 +3,11 @@ using Dapper;
 using Microsoft.Extensions.Options;
 using MySqlConnector;
 using Upton.Pdm.Application;
+using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Infrastructure;
 
-public sealed class InMemoryProjectNameplateRepository : IProjectNameplateRepository
+public sealed class InMemoryProjectNameplateRepository(IPdmRepository repository) : IProjectNameplateRepository
 {
     private readonly Dictionary<Guid, ProjectNameplate> records = [];
     private NameplateTemplate? template;
@@ -27,9 +28,20 @@ public sealed class InMemoryProjectNameplateRepository : IProjectNameplateReposi
             template = value with { RowVersion = expectedRowVersion + 1 }; return Task.FromResult(template);
         }
     }
+    public Task<ProjectNameplate> PublishAsync(ProjectNameplate value, ReleasePackage package, long expectedRowVersion, CancellationToken ct)
+    {
+        lock (gate) {
+            if ((records.GetValueOrDefault(value.ProjectId)?.RowVersion ?? 0) != expectedRowVersion) throw new PdmConflictException("铭牌已被修改，请重新打开并核对后确认。");
+            // 内存仓库的创建操作同步完成，在同一临界区固定发布包与铭牌状态。
+            repository.CreateReleasePackageAsync(package, ct).GetAwaiter().GetResult();
+            var saved = value with { RowVersion = expectedRowVersion + 1 };
+            records[value.ProjectId] = saved;
+            return Task.FromResult(saved);
+        }
+    }
 }
 
-public sealed class MySqlProjectNameplateRepository(IOptions<PdmDatabaseOptions> options) : IProjectNameplateRepository
+public sealed class MySqlProjectNameplateRepository(IOptions<PdmDatabaseOptions> options, IPdmRepository repository) : IProjectNameplateRepository
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private const string TemplateKey = "project_nameplate_template";
@@ -57,6 +69,20 @@ public sealed class MySqlProjectNameplateRepository(IOptions<PdmDatabaseOptions>
         await using var connection = new MySqlConnection(options.Value.ConnectionString);
         var payload = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition("SELECT setting_value FROM pdm_system_setting WHERE setting_key=@Key", new { Key = TemplateKey }, cancellationToken: ct));
         return payload is null ? null : JsonSerializer.Deserialize<NameplateTemplate>(payload, JsonOptions);
+    }
+    public async Task<ProjectNameplate> PublishAsync(ProjectNameplate value, ReleasePackage package, long expectedRowVersion, CancellationToken ct)
+    {
+        await using var connection = new MySqlConnection(options.Value.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await connection.ExecuteScalarAsync<long>(new CommandDefinition("SELECT row_version FROM project WHERE id=@ProjectId FOR UPDATE", new { value.ProjectId }, transaction, cancellationToken: ct));
+        var version = await connection.ExecuteScalarAsync<long?>(new CommandDefinition("SELECT row_version FROM project_nameplate WHERE project_id=@ProjectId FOR UPDATE", new { value.ProjectId }, transaction, cancellationToken: ct));
+        if ((version ?? 0) != expectedRowVersion) throw new PdmConflictException("铭牌已被修改，请重新打开并核对后确认。");
+        await ((MySqlPdmRepository)repository).InsertReleasePackageAsync(connection, transaction, package, ct);
+        var saved = value with { RowVersion = expectedRowVersion + 1 };
+        await connection.ExecuteAsync(new CommandDefinition("INSERT INTO project_nameplate(project_id,row_version,payload_json) VALUES(@ProjectId,@RowVersion,@Payload) ON DUPLICATE KEY UPDATE row_version=@RowVersion,payload_json=@Payload", new { saved.ProjectId, saved.RowVersion, Payload = JsonSerializer.Serialize(saved, JsonOptions) }, transaction, cancellationToken: ct));
+        await transaction.CommitAsync(ct);
+        return saved;
     }
     public async Task<NameplateTemplate> SaveTemplateAsync(NameplateTemplate value, long expectedRowVersion, CancellationToken ct)
     {

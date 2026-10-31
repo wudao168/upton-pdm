@@ -91,6 +91,14 @@ public sealed record Project(
 
     public string? BusinessStatus { get; init; }
 
+    public bool HasReleaseAttention { get; init; }
+
+    public DateTimeOffset? LatestPublishedAt { get; init; }
+
+    public DateTimeOffset? LatestPurchasedBomPublishedAt { get; init; }
+
+    public bool HasUnreceivedNonStandardRelease { get; init; }
+
     public string? RootDocumentCheckedOutBy { get; init; }
 }
 
@@ -146,7 +154,7 @@ public sealed record PreviewConversionSettings
     public string NormalizedAgentUrl => AgentUrl.Trim().TrimEnd('/');
 }
 
-public sealed record PreviewAgentServer(string Name, string AgentUrl, string AgentToken, int TimeoutMinutes = 30);
+public sealed record PreviewAgentServer(string Name, string AgentUrl, string AgentToken, int TimeoutMinutes = 30, Guid? CompanyId = null);
 
 public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
 {
@@ -616,6 +624,10 @@ public sealed record BomItem(
     string Revision,
     bool IsComplete)
 {
+    public IReadOnlyList<BomFileReference>? Files { get; init; }
+
+    public NameplateContent? NameplateContent { get; init; }
+
     public string? DisplayRevision { get; init; }
 
     public BomItem? MaintainedItem { get; init; }
@@ -815,6 +827,7 @@ public static class ReleasePreviewState
 {
     public const string None = "None";
     public const string Pending = "Pending";
+    public const string WaitingForServer = "WaitingForServer";
     public const string Running = "Running";
     public const string Succeeded = "Succeeded";
     public const string Failed = "Failed";

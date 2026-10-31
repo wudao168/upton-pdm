@@ -1,10 +1,13 @@
 <script setup lang="ts">
+import { useProjectCenterAccess } from '../projectCenterAccess'
+const { export: projectExport, write: projectWritable } = useProjectCenterAccess()
 import { ElMessage } from '../statusMessage'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { getProjectExportMetadata, getProjectProcurementTracking, listBom, listMaterialInventory, refreshProjectProcurementTracking } from '../api'
 import type { BomItem, ProjectProcurementTrackingItem, ProjectProcurementTrackingResult, U9InventoryRow } from '../types'
 import { inventoryScopes, isDefaultInventoryWarehouse, sumProcurementInventory } from '../procurementInventory'
 import SquareLoader from './SquareLoader.vue'
+import BomFilesDialog from './BomFilesDialog.vue'
 import { downloadProcurementWorkbook } from '../procurementWorkbook'
 import { isManufacturing, manufacturingValue, manufacturingStats } from '../procurementManufacturing'
 import { productionMovementLabels } from '../productionTracking'
@@ -18,7 +21,7 @@ type ColumnKey = keyof Pick<ProjectProcurementTrackingItem,
   'quantity' | 'purchaseRequisitionNumbers' | 'purchaseRequisitionStatus' | 'purchaseRequisitionCreatedAt' | 'purchaseRequisitionDeliveryDate' |
   'purchaseOrderNumbers' | 'purchaseOrderStatus' | 'buyerName' | 'purchaseQuantity' | 'arrivedQuantity' | 'purchaseRemark' |
   'purchaseDeliveryDate' | 'latestDeliveryDate' | 'bomKind' | 'releasePackageNumber' | 'requestedQuantity' | 'approvedQuantity' |
-  'assemblyStartDate' | 'commissioningStartDate'> | 'inventoryQuantity' | MovementColumn | 'dataSource' | 'revision' | 'supplier' | 'productionReceivedAt'
+  'assemblyStartDate' | 'commissioningStartDate'> | 'inventoryQuantity' | MovementColumn | 'dataSource' | 'revision' | 'supplier' | 'productionReceivedAt' | 'files'
 
 type MovementColumn = 'receiptDate' | 'receiptQuantity' | 'issueDate' | 'issueQuantity'
 const movementColumns: MovementColumn[] = ['receiptDate', 'receiptQuantity', 'issueDate', 'issueQuantity']
@@ -36,6 +39,7 @@ const columnDefinitions: ColumnDefinition[] = [
   { key: 'specification', label: '型号', width: 260, defaultVisible: true },
   { key: 'remark', label: '备注', width: 150, defaultVisible: true },
   { key: 'brand', label: '品牌', width: 110, defaultVisible: true },
+  { key: 'files', label: '图纸附件', width: 100, fixedWidth: 90, defaultVisible: false, align: 'center' },
   { key: 'quantity', label: '数量', width: 88, fixedWidth: 40, defaultVisible: true, align: 'right' },
   { key: 'inventoryQuantity', label: '库存', width: 100, fixedWidth: 40, defaultVisible: true, align: 'right' },
   { key: 'assemblyStartDate', label: '装配日期', width: 132, fixedWidth: 70, defaultVisible: true },
@@ -91,6 +95,7 @@ const exporting = ref(false)
 const refreshStarting = ref(false)
 const refreshCoolingDown = ref(false)
 const result = ref<ProjectProcurementTrackingResult | null>(null)
+const selectedFiles = ref<ProjectProcurementTrackingItem | null>(null)
 const inventory = ref<Record<string, { rows?: U9InventoryRow[]; hint: string }>>({})
 const selectedInventoryWarehouses = ref<string[] | null>(null)
 const draftInventoryWarehouses = ref<string[]>([])
@@ -333,6 +338,7 @@ function resetColumns() {
 
 async function load(showError = true) {
   const version = ++loadVersion
+  selectedFiles.value = null
   inventoryRequests = new Map()
   inventory.value = {}
   inventorySettingsVisible.value = false
@@ -374,6 +380,7 @@ async function load(showError = true) {
 }
 
 async function refreshFromU9() {
+  if (!projectWritable.value) { await load(); return }
   if (manufacturingOnly.value) { await load(); if(result.value) ElMessage.success('制造进度已刷新'); return }
   if (refreshStarting.value || refreshCoolingDown.value) return
   refreshStarting.value = true
@@ -548,6 +555,7 @@ const statsCards = computed(() => {
 })
 
 function cellText(row: ProjectProcurementTrackingItem, key: ColumnKey) {
+  if (key === 'files') return row.files?.map(file => file.fileName).join('、') || '—'
   if (['purchaseRequisitionStatus', 'purchaseOrderStatus'].includes(key) && materialStockPlan(row.materialCode)) return '常备件'
   if (isMovementColumn(key)) return movementText(row, key)
   if (key === 'impactStage') return row.impactStage === 'Assembly' ? '装配' : row.impactStage === 'Commissioning' ? '调试' : '—'
@@ -697,8 +705,8 @@ onBeforeUnmount(() => {
       <div class="procurement-tracking__actions">
         <el-button @click="settingsVisible = true">列设置</el-button>
         <el-button type="primary" :loading="refreshStarting" :disabled="refreshCoolingDown" @click="refreshFromU9">立即刷新</el-button>
-        <el-button v-if="!manufacturingOnly" @click="openInventorySettings">库存设置</el-button>
-        <el-button :loading="exporting" :disabled="loading || !filteredItems.length || !columns.length" @click="exportExcel">导出 Excel</el-button>
+        <el-button v-if="projectWritable && !manufacturingOnly" @click="openInventorySettings">库存设置</el-button>
+        <el-button v-if="projectExport" :loading="exporting" :disabled="loading || !filteredItems.length || !columns.length" @click="exportExcel">导出 Excel</el-button>
       </div>
       <span class="procurement-tracking__updated" :title="hasManufacturing ? `制造数据读取：${formatDate(result?.manufacturingReadAt,true)}` : ''">{{ manufacturingOnly ? '制造读取' : '刷新' }}：{{ formatDate(manufacturingOnly ? result?.manufacturingReadAt : result?.lastSuccessfulRefreshAt, true) }}</span>
     </header>
@@ -745,7 +753,8 @@ onBeforeUnmount(() => {
       >
         <template #header><span :title="hasManufacturing ? manufacturingColumnHints[column.key] : undefined">{{ column.label }}</span></template>
         <template #default="{ row }">
-          <span v-if="isMovementColumn(column.key)" class="procurement-tracking__movement" :class="movementTone(row, column.key)" :title="movementHint(row, column.key)">{{ movementText(row, column.key) }}</span>
+          <template v-if="column.key === 'files'"><button v-if="row.files?.length" type="button" class="pdm-bom-files-link procurement-tracking__files-link" :aria-label="`${row.materialCode} · 图纸附件`" @click="selectedFiles = row">查看（{{ row.files.length }}）</button><span v-else>—</span></template>
+          <span v-else-if="isMovementColumn(column.key)" class="procurement-tracking__movement" :class="movementTone(row, column.key)" :title="movementHint(row, column.key)">{{ movementText(row, column.key) }}</span>
           <span v-else-if="(column.key === 'purchaseRequisitionStatus' || column.key === 'purchaseOrderStatus') && materialStockPlan(row.materialCode)" v-stocked-material="row.materialCode">常备件</span>
           <el-tag v-else-if="(column.key === 'purchaseRequisitionStatus' || column.key === 'purchaseOrderStatus') && !row.isWarehouseMovementRow" :type="statusType(String(manufacturingValue(row,column.key)))" size="small">{{ cellText(row,column.key) }}</el-tag>
           <el-button v-else-if="isManufacturing(row) && column.key === 'purchaseOrderNumbers'" link :aria-label="`查看${row.materialName}制造明细`" @click="showManufacturing(row)">{{ row.manufacturing?.batches.length ? cellText(row,column.key) : '查看制造明细' }}</el-button>
@@ -779,6 +788,7 @@ onBeforeUnmount(() => {
       </template>
     </el-dialog>
 
+    <BomFilesDialog v-if="selectedFiles" :project-id="projectId" :row="{ drawingNumber: selectedFiles.materialCode, files: selectedFiles.files }" :token="token" :can-edit="false" procurement @close="selectedFiles = null" />
     <el-dialog class="procurement-tracking-dialog" v-model="settingsVisible" title="采购跟踪列设置" width="520px" append-to-body>
       <div class="procurement-tracking__settings-body">
       <p class="procurement-tracking__settings-note">可按当前账号选择显示列，保存后在不同客户端自动恢复；价格、税额、币种及其他财务信息不提供。</p>
@@ -837,6 +847,8 @@ onBeforeUnmount(() => {
 
 .procurement-tracking :deep(.el-button:not(.is-link):not(.is-circle):not(.el-button--text):not([aria-label])),:global(.procurement-tracking-dialog .el-button:not(.is-link):not(.is-circle):not(.el-button--text):not([aria-label])){box-sizing:border-box;width:60px;min-width:60px!important;flex:0 0 60px;padding-inline:3px!important;font-size:11px}
 .procurement-tracking__multi-options>button{width:60px;min-width:60px}
+.procurement-tracking__files-link { padding:0; border:0; background:transparent; box-shadow:none; color:var(--pdm-theme-accent); font:inherit; cursor:pointer; }
+.procurement-tracking__files-link:hover,.procurement-tracking__files-link:focus-visible { outline:none; text-decoration:underline; }
 </style>
 
 <style scoped>

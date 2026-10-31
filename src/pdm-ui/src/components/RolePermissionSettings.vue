@@ -51,6 +51,7 @@ const permissionCategories = [
   { key: 'create', label: '新增' },
   { key: 'edit', label: '编辑' },
   { key: 'delete', label: '删除/停用' },
+  { key: 'notify', label: '消息提示' },
   { key: 'other', label: '其他操作' },
 ] as const
 type PermissionCategory = typeof permissionCategories[number]['key']
@@ -122,7 +123,7 @@ function setGroup(permissions: PermissionDefinition[], checked: boolean) {
 }
 
 function permissionCategory(permission: PermissionDefinition): PermissionCategory {
-  return permission.action ?? 'other'
+  return permissionCategories.some(category => category.key === permission.action) ? permission.action as PermissionCategory : 'other'
 }
 
 function categoryPermissions(category: PermissionCategory) {

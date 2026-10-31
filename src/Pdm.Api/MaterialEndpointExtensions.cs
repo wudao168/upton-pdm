@@ -10,6 +10,11 @@ public static class MaterialEndpointExtensions
     public static void MapPdmMaterialEndpoints(this WebApplication app)
     {
         var api = app.MapGroup("/api").RequireAuthorization();
+        api.MapGet("/materials/notification-permission", async (HttpContext context, IPdmRepository repository, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(new { enabled = await MaterialNotificationPolicy.CanReceiveAsync(repository, actor, role, ct) });
+        });
 
         api.MapGet("/materials", async (string? query, string? categoryCode, bool? includeArchived, int? limit, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
         {
@@ -92,6 +97,12 @@ public static class MaterialEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             await service.DeleteAsync(materialId, attachmentId, actor, role, cancellationToken);
             return Results.NoContent();
+        });
+
+        api.MapPost("/materials/{materialId:guid}/attachments/{attachmentId:guid}/enable", async (Guid materialId, Guid attachmentId, EnableDrawingRequest request, HttpContext context, MaterialAttachmentService service, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(MapAttachment(await service.EnableAsync(materialId, attachmentId, request.ExpectedEnabledId, actor, role, ct)));
         });
 
         api.MapPut("/materials/{materialId:guid}/cover", async (Guid materialId, SetMaterialCoverRequest request, HttpContext context, MaterialAttachmentService service, CancellationToken cancellationToken) =>
@@ -715,6 +726,9 @@ public static class MaterialEndpointExtensions
         material.ReferenceCount,
         material.Model3DAttachmentCount,
         material.DocumentAttachmentCount,
+        material.Drawing2DAttachmentCount,
+        material.EnabledDrawing2DVersion,
+        material.EnabledModel3DVersion,
         material.CoverImageAttachmentId
     };
 
@@ -727,7 +741,11 @@ public static class MaterialEndpointExtensions
         attachment.FileLength,
         attachment.Sha256,
         attachment.UploadedBy,
-        attachment.UploadedAt
+        attachment.UploadedAt,
+        attachment.VersionNumber,
+        attachment.IsEnabled,
+        attachment.EnabledBy,
+        attachment.EnabledAt
     };
 
     private static object MapAttachmentUploadSession(MaterialAttachmentUploadSession session) => new

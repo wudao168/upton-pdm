@@ -10,6 +10,21 @@ public static class MaterialRelationEndpointExtensions
     public static void MapMaterialRelationEndpoints(this WebApplication app)
     {
         var api = app.MapGroup("/api/material-relations").RequireAuthorization();
+        api.MapGet("/categories", async (HttpContext context, MaterialRelationService service, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.ListCategoryCatalogAsync(actor, role, ct));
+        });
+        api.MapGet("/materials/{materialId:guid}/categories", async (Guid materialId, HttpContext context, MaterialRelationService service, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.GetMainCategoriesAsync(materialId, actor, role, ct));
+        });
+        api.MapPut("/materials/{materialId:guid}/categories", async (Guid materialId, AssignMaterialRelationCategory request, HttpContext context, MaterialRelationService service, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.AssignMainCategoryAsync(materialId, request.CategoryId, actor, role, ct));
+        });
 
         api.MapGet("/templates", async (bool? includeDraft, HttpContext context, MaterialRelationService service, CancellationToken cancellationToken) =>
         {
@@ -55,6 +70,8 @@ public static class MaterialRelationEndpointExtensions
         return (actor, Enum.Parse<UserRole>(roleValue));
     }
 }
+
+public sealed record AssignMaterialRelationCategory(Guid CategoryId);
 
 public sealed record SaveMaterialRelationOptionRequest(
     Guid MaterialId,

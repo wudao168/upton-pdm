@@ -50,6 +50,7 @@ internal sealed partial class BatchOperationDialog
         workflowDisplayOnly = true;
         workflowHeader.Enabled = false;
         foreach (var button in workflowSelectors.Controls.OfType<Button>()) button.Enabled = false;
+        showCheckedOnly.Enabled = showUncheckedOnly.Enabled = true;
         operationCancel.DialogResult = recheck.DialogResult = execute.DialogResult = DialogResult.None;
         operationCancel.Show(); recheck.Show(); execute.Show();
         UpdateWorkflowButtons();
@@ -72,7 +73,7 @@ internal sealed partial class BatchOperationDialog
         checkedPaths.Clear();
         foreach (var item in prepared) checkedPaths.Add(SelectionKey(item.Node));
         showCheckedOnly.Enabled = true;
-        foreach (var button in workflowSelectors.Controls.OfType<Button>().Where(button => button.Text == "待补全引用")) button.Enabled = existingReferenceOwners.Count > 0;
+        showUncheckedOnly.Enabled = true;
         RebuildFileTree();
         foreach (var treeNode in files.Nodes.Cast<TreeNode>().SelectMany(EnumerateNodes)
             .Where(node => node.Tag is BatchTreeOccurrence occurrence && checkedPaths.Contains(SelectionKey(occurrence.Model))).ToArray())
@@ -125,7 +126,7 @@ internal sealed partial class BatchOperationDialog
                 workflowStates[item.Node.FullPath] = "未确认存档结果，请查看过程记录";
         operationCancel.Text = "关闭"; operationCancel.Enabled = true;
         showCheckedOnly.Enabled = true;
-        foreach (var button in workflowSelectors.Controls.OfType<Button>().Where(button => button.Text == "待补全引用")) button.Enabled = existingReferenceOwners.Count > 0;
+        showUncheckedOnly.Enabled = true;
         UpdateWorkflowButtons(); RefreshFileTreePresentation(); files.Invalidate();
     }
 }

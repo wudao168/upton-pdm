@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import PdfDrawingViewer from './PdfDrawingViewer.vue'
+import NameplateContentPanel from './NameplateContentPanel.vue'
 import { downloadProductionDrawingFile, listProductionDrawings, readProductionDrawingPreview } from '../api'
 import type { ProductionDrawingItem } from '../types'
 import type { ProductionLine, ProductionReleaseState } from '../productionTracking'
@@ -34,6 +35,7 @@ async function download(item: ProductionDrawingItem, closeAfter = false) {
   finally { if (!disposed) pending.value = false }
 }
 onMounted(async () => {
+  if (props.line.nameplateContent) { loading.value = false; return }
   try {
     const items = await listProductionDrawings(props.token, true, props.state.projectId)
     if (disposed) return
@@ -49,12 +51,13 @@ onMounted(async () => {
 </script>
 
 <template>
-  <el-dialog :model-value="true" class="production-line-drawing-dialog" title="正式图纸" width="min(1440px, calc(100vw - 24px))" @update:model-value="!$event && emit('close')">
-    <section class="production-line-drawings" aria-label="物料正式图纸">
+  <el-dialog :model-value="true" class="production-line-drawing-dialog" :title="line.nameplateContent ? '铭牌内容' : '正式图纸'" :width="line.nameplateContent ? 'min(620px, calc(100vw - 24px))' : 'min(1440px, calc(100vw - 24px))'" @update:model-value="!$event && emit('close')">
+    <NameplateContentPanel v-if="line.nameplateContent" :content="line.nameplateContent" />
+    <section v-else class="production-line-drawings" aria-label="物料正式图纸">
       <p class="production-line-drawings__context" :title="`${state.packageNumber} · ${line.drawingNumber} · ${line.name}`">{{ state.packageNumber }} · {{ line.drawingNumber }} · {{ line.name }}</p>
       <p v-if="loading" role="status">正在读取发布包图纸…</p><p v-if="error" role="alert">{{ error }}</p>
       <p v-if="pending" role="status">正在读取正式图纸，请稍候…</p>
-      <PdfDrawingViewer :url="url" fill-height><template #toolbar><div class="production-line-drawings__files"><div v-for="item in drawings" :key="item.versionId"><strong>{{ item.drawingNumber }} · {{ item.revision }}</strong><span v-if="!item.isCurrent">历史正式版</span><span v-if="!item.pdfReady">PDF 待转换</span><template v-else><el-button :disabled="pending" @click="preview(item)">预览</el-button><el-button :disabled="pending" @click="download(item)">下载 PDF</el-button></template></div></div></template></PdfDrawingViewer>
+      <PdfDrawingViewer :url="url" fill-height><template #toolbar><div class="production-line-drawings__files"><div v-for="item in drawings" :key="`${item.releasePackageId}-${item.versionId}`"><strong>{{ item.drawingNumber }} · {{ item.revision }}</strong><span v-if="!item.isCurrent">历史正式版</span><span v-if="!item.pdfReady">PDF 待转换</span><template v-else><el-button :disabled="pending" @click="preview(item)">预览</el-button><el-button :disabled="pending" @click="download(item)">下载 PDF</el-button></template></div></div></template></PdfDrawingViewer>
       <small v-if="selected?.legacyUnverified">历史图面未校验，图面标记可能与系统记录不同。</small>
     </section>
     <template #footer><el-button @click="emit('close')">关闭</el-button></template>

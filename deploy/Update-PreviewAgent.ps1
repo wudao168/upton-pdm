@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([string]$InstallRoot = 'C:\Program Files\UPLM Preview Agent', [int]$PreserveProcessId = 0)
+param([string]$InstallRoot = 'C:\Program Files\UPLM Preview Agent', [int]$PreserveProcessId = 0, [switch]$EnableDedicatedRecovery, [switch]$RecoverBlockedStartup)
 
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $ErrorActionPreference = 'Stop'
@@ -55,7 +55,17 @@ catch {
 }
 if ($null -ne $health) {
     $processing = if ($null -ne $health.processing) { [bool]$health.processing } else { [bool]$health.busy }
-    if ($processing -or $health.queued -gt 0) { throw '转图任务仍在执行或排队，请完成后再升级。' }
+    if ($processing -or $health.queued -gt 0) {
+        $lastProgress = [DateTime]::MinValue
+        $blocked = ($RecoverBlockedStartup -and $EnableDedicatedRecovery -and [version]$manifest.Version -ge [version]'1.2.3.0' -and
+            $health.agentVersion -eq '1.2.2.0' -and $null -ne $health.solidWorksPid -and [int]$health.solidWorksPid -eq 0 -and
+            $health.total -gt 0 -and $health.completed -lt $health.total -and
+            [string]$health.conversionStage -match '^(启动或连接SolidWorks|已处理文件：)' -and
+            [DateTime]::TryParse([string]$health.progressUpdatedAt, [ref]$lastProgress) -and
+            ([DateTime]::Now - $lastProgress).TotalSeconds -ge 60)
+        if (-not $blocked) { throw '转图任务仍在执行或排队，请完成后再升级。' }
+        Write-Host '检测到旧版SolidWorks启动卡住，自动结束当前预览请求后升级；源图档保持不变，更新后请重试原任务。' -ForegroundColor Yellow
+    }
     if ([IO.Path]::GetFullPath($health.workerPath) -ne $workerPath) { throw '当前工作进程位于自定义目录，请确认部署路径后再升级。' }
 }
 $taskXml = $null
@@ -72,6 +82,9 @@ if ($foreground) {
 $backup = Join-Path $InstallRoot ('backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Path $backup -Force | Out-Null
 Copy-Item -LiteralPath $configPath -Destination (Join-Path $backup 'PdmPreviewAgent.json')
+if ($EnableDedicatedRecovery -and $preferences -and (Test-Path -LiteralPath $preferences)) {
+    Copy-Item -LiteralPath $preferences -Destination (Join-Path $backup 'agent-settings.json')
+}
 if ($taskXml) { $taskXml | Set-Content -LiteralPath (Join-Path $backup 'agent-task.xml') -Encoding Unicode }
 if ($managerTaskXml) { $managerTaskXml | Set-Content -LiteralPath (Join-Path $backup 'manager-task.xml') -Encoding Unicode }
 foreach ($copy in $copies) {
@@ -103,6 +116,15 @@ try {
         if ((Get-FileHash -LiteralPath $copy.Target).Hash -ne $copy.Hash) { throw "安装文件校验失败：$($copy.Relative)" }
     }
     if ((Get-FileHash -LiteralPath $configPath).Hash -ne $configHash) { throw '原有连接配置发生变化，已停止升级。' }
+    if ($EnableDedicatedRecovery) {
+        $config | Add-Member -NotePropertyName DedicatedConversionHost -NotePropertyValue $true -Force
+        [IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
+        if ($preferences -and (Test-Path -LiteralPath $preferences)) {
+            $savedPreferences = Get-Content -LiteralPath $preferences -Raw -Encoding UTF8 | ConvertFrom-Json
+            $savedPreferences | Add-Member -NotePropertyName DedicatedConversionHost -NotePropertyValue $true -Force
+            [IO.File]::WriteAllText($preferences, ($savedPreferences | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
+        }
+    }
     if ($foreground) {
         $taskMigrationApplied = $true
         $action = New-ScheduledTaskAction -Execute (Join-Path $InstallRoot 'Upton.Pdm.PreviewAgent.exe') -Argument '--startup' -WorkingDirectory $InstallRoot
@@ -124,7 +146,7 @@ try {
         } catch { }
     }
     if (-not $verified) { throw '新版代理未通过健康或版本检查。' }
-    [pscustomobject]@{ Result='升级成功'; Version=$manifest.Version; Backup=$backup; ConfigurationPreserved=$true } |
+    [pscustomobject]@{ Result='升级成功'; Version=$manifest.Version; Backup=$backup; ConfigurationPreserved=$true; DedicatedRecoveryEnabled=[bool]$EnableDedicatedRecovery } |
         ConvertTo-Json | Tee-Object -FilePath (Join-Path $backup 'upgrade-result.json')
     Write-Host '升级完成，请重新加载装配预览或重试原转图任务，并返回聊天告知结果。' -ForegroundColor Green
 } catch {
@@ -133,6 +155,12 @@ try {
     foreach ($copy in $copies) {
         $saved = Join-Path $backup $copy.Relative
         if (Test-Path -LiteralPath $saved) { Copy-Item -LiteralPath $saved -Destination $copy.Target -Force }
+    }
+    if ($EnableDedicatedRecovery) {
+        Copy-Item -LiteralPath (Join-Path $backup 'PdmPreviewAgent.json') -Destination $configPath -Force
+        if (Test-Path -LiteralPath (Join-Path $backup 'agent-settings.json')) {
+            Copy-Item -LiteralPath (Join-Path $backup 'agent-settings.json') -Destination $preferences -Force
+        }
     }
     if ($taskMigrationApplied) {
         Register-ScheduledTask -TaskName $taskName -Xml $taskXml -Force | Out-Null

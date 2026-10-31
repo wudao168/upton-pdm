@@ -2,11 +2,13 @@
 import { vQuantity } from '../quantityInput'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { PdmApiError, cancelUnassignedProductionDemand, readProductionActions, readProductionTrackingRelease, recordProductionMovement } from '../api'
-import { lotStage, unassignedQuantity, productionMovementLabels, productionPosts, productionRequestId, type ProductionMovementKind, type ProductionReleaseRecord, type ProductionScanContext } from '../productionTracking'
+import { effectiveDemand, lotStage, unassignedQuantity, productionMovementLabels, productionPosts, productionRequestId, productionScanQuantityLabel, type ProductionMovementKind, type ProductionReleaseRecord, type ProductionScanContext, type ProductionScanResult } from '../productionTracking'
+import { u9UnitName } from '../u9Units'
 import { userErrorMessage } from '../userErrorMessage'
 import { openProductionLabel } from '../productionLabel'
+import NameplateContentPanel from './NameplateContentPanel.vue'
 const props = defineProps<{ token: string; username: string; record: ProductionReleaseRecord; lineId: string; preferredLotId?: string; compact?: boolean }>()
-const emit = defineEmits<{ updated: [record: ProductionReleaseRecord] }>()
+const emit = defineEmits<{ updated: [record: ProductionReleaseRecord]; selectDemand: [demand: ProductionScanResult] }>()
 const context = ref<ProductionScanContext>({ actions: [], hint: '' }), lotId = ref(''), kind = ref<ProductionMovementKind>(), workstationId = ref('')
 const quantity = ref(1), recipient = ref(''), note = ref(''), loading = ref(false), pending = ref(false), error = ref(''), notice = ref('')
 const controlReason = ref(''), printing = ref(false)
@@ -16,11 +18,12 @@ const demandAttempt = ref<Parameters<typeof cancelUnassignedProductionDemand>[1]
 type Input = Parameters<typeof recordProductionMovement>[1]
 const attempt = ref<Input>()
 const storageKey = computed(() => `pdm-production-pending-${props.username}-${props.record.state.releasePackageId}`)
+const line = computed(() => props.record.state.lines.find(item => item.id === props.lineId))
 const unassigned = computed(() => {
-  const line = props.record.state.lines.find(item => item.id === props.lineId)
-  return line ? unassignedQuantity(props.record.state, line) : 0
+  return line.value ? unassignedQuantity(props.record.state, line.value) : 0
 })
 const demandHistory = computed(() => (props.record.state.demandCancellations || []).filter(item => item.lineId === props.lineId))
+const relatedDemands = computed(() => (context.value.relatedDemands || []).filter(item => item.relatedToLineId === props.lineId))
 const lots = computed(() => props.record.state.lots.filter(lot => lot.lineId === props.lineId))
 const lot = computed(() => lots.value.find(item => item.id === lotId.value))
 const options = computed(() => context.value.actions.filter(item => item.lotId === lotId.value && item.post !== 'Control'))
@@ -144,10 +147,18 @@ async function printLabel() {
 <template>
   <section class="production-operation" aria-label="当前可办理步骤">
     <header><strong>本岗扫码办理</strong><button type="button" :disabled="loading || pending" @click="refresh">刷新步骤</button></header>
+    <details v-if="line?.nameplateContent"><summary>查看铭牌内容</summary><NameplateContentPanel :content="line.nameplateContent" /></details>
     <p v-if="error" role="alert" class="production-operation__error">{{ error }}</p><p v-if="notice" role="status">{{ notice }}</p>
     <p v-if="loading" role="status">正在核对岗位、工位和当前可办理数量…</p>
     <label v-if="lots.length > 1">本次生产批次<select v-model="lotId" :disabled="pending || Boolean(attempt)"><option value="">请选择批次，不默认第一批</option><option v-for="item in lots" :key="item.id" :value="item.id">{{ item.route === 'Self' ? '自制' : '外协' }} · {{ item.quantity }} · {{ lotStage(record.state, item) }} · {{ item.id.slice(0, 8) }}</option></select></label>
     <p v-if="lot">当前环节：{{ lotStage(record.state, lot) }}</p>
+    <p v-if="line">本发布包{{ record.state.scope === 'NonStandardSupplement' ? '增补需求' : '需求' }}：{{ effectiveDemand(record.state, line) }} {{ u9UnitName(line.unit) }}<template v-if="lot">；当前批次：{{ lot.quantity }}</template>；待分配：{{ unassigned }}</p>
+    <p v-if="!lots.length && unassigned > 0">该需求尚未分配生产批次，请在制造中心接收发布包并分配自制或外协。</p>
+    <div v-if="relatedDemands.length" class="production-operation__related" aria-label="同版本已发布需求">
+      <strong>另有同版本已发布需求</strong>
+      <p v-for="item in relatedDemands" :key="`${item.releasePackageId}-${item.lineId}`">{{ item.packageNumber }} · {{ productionScanQuantityLabel(item) }} <button type="button" :disabled="pending || Boolean(attempt) || Boolean(demandAttempt)" @click="emit('selectDemand', item)">查看需求</button></p>
+      <p>各发布包分别办理；待分配的增补数量需在制造中心接收并分配生产批次。</p>
+    </div>
     <p v-if="kind === 'Trace'">资源组扫码仅保留追溯记录，不推进阶段，也不作为后续交接的前置条件。</p>
     <p v-if="!loading && !options.length">{{ !context.actions.length ? context.hint : lotId ? '该批次暂无本岗位可办理的步骤，请核对前序交接及本岗权限。' : '请选择本次实际办理的生产批次。' }}</p>
     <form v-if="options.length || attempt" @submit.prevent="save">

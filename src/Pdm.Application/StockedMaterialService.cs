@@ -76,10 +76,42 @@ public sealed class StockedMaterialService(IStockedMaterialStore store, StockedM
         try
         {
             var catalog = await store.ReadAsync(scope, ct);
+            if (!catalog.Memberships.Any(item => item.MaterialId == materialId)) return;
             var members = catalog.Memberships.Where(item => item.MaterialId != materialId || categoryId.HasValue && item.CategoryId != categoryId).ToArray();
+            if (!members.Any(item => item.MaterialId == materialId))
+            {
+                var material = await ResolveManagedMaterialAsync(catalog, materialId, ct);
+                var observed = catalog.Snapshots.FirstOrDefault(item => item.MaterialId == materialId) ?? new(materialId);
+                try
+                {
+                    var config = await ConfigurationAsync(scope, false, ct);
+                    var token = await TokenAsync(config, ct);
+                    var live = await ReadPlanAsync(scope, config, token, material.MaterialCode, ct);
+                    observed = observed with { Plan = live, LastError = null };
+                    if (live.SafetyStockQuantity > 0 || !PlanningMatches(live, false))
+                    {
+                        config = await ConfigurationAsync(scope, true, ct);
+                        observed = observed with { Plan = await ModifyAndReadPlanAsync(scope, config, token, material.MaterialCode,
+                            new(0, live.ReorderQuantity ?? 0, live.SyncedAt), ct, safetyOnly: true) };
+                    }
+                    if (observed.Plan!.SafetyStockQuantity != 0)
+                        throw new PdmRuleException("U9C回查的安全库存量尚未清零，未移除PLM收录，请核对接口后重试。");
+                    if (!PlanningMatches(observed.Plan, false))
+                        throw new PdmRuleException("U9C回查的四项规划设置尚未恢复为非常备件设置，未移除PLM收录，请核对后重试。");
+                    await materials.SaveStockPlansAsync([observed.Plan!], ct);
+                    await AuditAsync(actor, "stocked-material.cancel", scope,
+                        $"取消料号{material.MaterialCode}常备：U9C安全库存量{live.SafetyStockQuantity}→0，四项规划设置恢复为MRP规划、空、不勾选、空，回查确认；再订货量和料品主档保留。", ct);
+                }
+                catch
+                {
+                    await SaveAsync(catalog with { Snapshots = catalog.Snapshots.Where(item => item.MaterialId != materialId)
+                        .Append(observed with { LastError = "取消常备未完成，已保留PLM收录，请刷新回查U9C结果后重试。" }).ToArray() }, CancellationToken.None);
+                    throw;
+                }
+            }
             await SaveAsync(catalog with { Memberships = members, Snapshots = catalog.Snapshots.Where(item => members.Any(member => member.MaterialId == item.MaterialId)).ToArray(),
                 ManagementMaterials = catalog.ManagementMaterials?.Where(item => members.Any(member => member.MaterialId == item.Id)).ToArray() }, ct);
-            await AuditAsync(actor, "stocked-material.remove", scope, $"移除常备件{materialId}的分类成员；未修改U9C库存参数。", ct);
+            await AuditAsync(actor, "stocked-material.remove", scope, $"移除常备件{materialId}的分类成员；{(members.Any(item => item.MaterialId == materialId) ? "仍保留其他常备目录收录" : "已确认U9C安全库存量为0，保留标准库收录和料品主档")}。", ct);
         }
         finally { gate.Semaphore.Release(); }
     }
@@ -328,20 +360,16 @@ public sealed class StockedMaterialService(IStockedMaterialStore store, StockedM
             if (!live.IsEffective) throw new PdmRuleException("U9C料品已失效，不能维护库存规划。");
             try
             {
-                var result = await ExternalAsync(() => client.PostBatchAsync(config.BaseUrl, config.ItemModifyPath, token,
-                    ModifyPayload(material.MaterialCode, input), ct));
-                if (result.ResponseCode != 0 || result.Rows.Count != 1 || !result.Rows[0].IsSuccess
-                    || !string.IsNullOrWhiteSpace(result.Rows[0].U9ItemCode) && !result.Rows[0].U9ItemCode!.Equals(material.MaterialCode, StringComparison.OrdinalIgnoreCase))
-                    throw new PdmRuleException("U9C未确认库存规划修改成功，请检查接口日志，并刷新核对后重试。");
-                var verified = await ReadPlanAsync(scope, config, token, material.MaterialCode, ct);
+                var verified = await ModifyAndReadPlanAsync(scope, config, token, material.MaterialCode, input, ct);
                 await materials.SaveStockPlansAsync([verified], ct);
-                var matches = verified.SafetyStockQuantity == input.SafetyStockQuantity && verified.ReorderQuantity == input.ReorderQuantity && verified.IsEffective;
-                var after = before with { Plan = verified, LastError = matches ? null : "U9C回查值与本次维护值不一致，请核对后重试。" };
+                var matches = verified.SafetyStockQuantity == input.SafetyStockQuantity && verified.ReorderQuantity == input.ReorderQuantity && verified.IsEffective
+                    && PlanningMatches(verified, input.SafetyStockQuantity > 0);
+                var after = before with { Plan = verified, LastError = matches ? null : "U9C回查的库存数量或四项规划设置与本次维护值不一致，请核对后重试。" };
                 catalog = catalog with { Snapshots = catalog.Snapshots.Where(item => item.MaterialId != materialId).Append(after).ToArray() };
                 await EnsureFormalStandardMembershipsAsync(catalog, actor, ct);
                 await SaveAsync(catalog, ct);
                 await AuditAsync(actor, "stocked-material.maintain", scope,
-                    $"料号{material.MaterialCode}：安全库存量{live.SafetyStockQuantity}→{verified.SafetyStockQuantity}；再订货量{live.ReorderQuantity}→{verified.ReorderQuantity}；回查{(matches ? "一致" : "不一致")}。", ct);
+                    $"料号{material.MaterialCode}：安全库存量{live.SafetyStockQuantity}→{verified.SafetyStockQuantity}；再订货量{live.ReorderQuantity}→{verified.ReorderQuantity}；联动四项{(input.SafetyStockQuantity > 0 ? "常备件" : "非常备件")}规划设置，回查{(matches ? "一致" : "不一致")}。", ct);
                 if (!matches) throw new PdmRuleException(after.LastError!);
                 return after;
             }
@@ -357,14 +385,36 @@ public sealed class StockedMaterialService(IStockedMaterialStore store, StockedM
         finally { gate.Semaphore.Release(); }
     }
 
-    public static string ModifyPayload(string code, SaveStockedPlan input) => JsonSerializer.Serialize(new[] { new
+    private async Task<MaterialStockPlan> ModifyAndReadPlanAsync(StockedMaterialScope scope, U9MaterialIntegrationConfiguration config,
+        string token, string code, SaveStockedPlan input, CancellationToken ct, bool safetyOnly = false)
     {
-        Code = code, OtherID = $"stock-plan-{Guid.NewGuid():N}", Attributes = new[]
+        var result = await ExternalAsync(() => client.PostBatchAsync(config.BaseUrl, config.ItemModifyPath, token, ModifyPayload(code, input, safetyOnly), ct));
+        if (result.ResponseCode != 0 || result.Rows.Count != 1 || !result.Rows[0].IsSuccess
+            || !string.IsNullOrWhiteSpace(result.Rows[0].U9ItemCode) && !result.Rows[0].U9ItemCode!.Equals(code, StringComparison.OrdinalIgnoreCase))
+            throw new PdmRuleException("U9C未确认库存规划修改成功，请检查接口日志，并刷新核对后重试。");
+        var verified = await ReadPlanAsync(scope, config, token, code, ct);
+        return verified;
+    }
+
+    private static bool PlanningMatches(MaterialStockPlan plan, bool stocked) =>
+        plan.InventoryPlanningMethod == (stocked ? 1 : 4) && plan.InventoryPlanTime == (stocked ? 0 : -1)
+        && plan.IsRequiredShipperSupply == stocked && plan.SupplyMethod == (stocked ? 2 : -1);
+
+    public static string ModifyPayload(string code, SaveStockedPlan input, bool safetyOnly = false)
+    {
+        // U9C实查：1=再订货点法，4=MRP；时机0=即时；补货2=取较大量；空枚举=-1。
+        var stocked = input.SafetyStockQuantity > 0;
+        var attributes = new List<object>
         {
             new { AttributeName = "InventoryInfo.SafetyStockQty", AttributeValue = input.SafetyStockQuantity.ToString(CultureInfo.InvariantCulture) },
-            new { AttributeName = "InventoryInfo.ReorderQty", AttributeValue = input.ReorderQuantity.ToString(CultureInfo.InvariantCulture) }
-        }
-    } });
+            new { AttributeName = "InventoryInfo.InventoryPlanningMethod", AttributeValue = stocked ? "1" : "4" },
+            new { AttributeName = "InventoryInfo.InventoryPlanTime", AttributeValue = stocked ? "0" : "-1" },
+            new { AttributeName = "InventoryInfo.IsRequiredShipperSupply", AttributeValue = stocked ? "true" : "false" },
+            new { AttributeName = "InventoryInfo.SupplyMethod", AttributeValue = stocked ? "2" : "-1" }
+        };
+        if (!safetyOnly) attributes.Add(new { AttributeName = "InventoryInfo.ReorderQty", AttributeValue = input.ReorderQuantity.ToString(CultureInfo.InvariantCulture) });
+        return JsonSerializer.Serialize(new[] { new { Code = code, OtherID = $"stock-plan-{Guid.NewGuid():N}", Attributes = attributes } });
+    }
 
     private async Task<MaterialStockPlan> ReadPlanAsync(StockedMaterialScope scope, U9MaterialIntegrationConfiguration config, string token, string code, CancellationToken ct)
     {

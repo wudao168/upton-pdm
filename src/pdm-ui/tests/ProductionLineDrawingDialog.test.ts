@@ -20,6 +20,24 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('批次列表正式图纸', () => {
+  it('铭牌直接显示定版内容，不请求图纸、PDF或STEP', async () => {
+    vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([])
+    const content = { name: '设备一', model: 'AK001', serialNumber: '70000001', powerSupply: '380V 50Hz / 5A', ratedPower: 1.9, dimensions: '1500mm x 1800mm x 2200mm', airPressure: '0.5~0.7 MPa', weight: '12000 kg', factoryDate: '2026-10-01', confirmedBy: 'hardware', confirmedAt: '2026-10-29T01:00:00Z' }
+    const wrapper = mount(ProductionLineDrawingDialog, { props: { token: 'token', state, line: { ...line, nameplateContent: content }, action: 'preview' }, global: { plugins: [ElementPlus], stubs: { teleport: true, NameplateQr: true } } })
+    await flushPromises()
+    expect(wrapper.get('[aria-label="定版铭牌内容"]').text()).toContain('70000001')
+    expect(wrapper.text()).toContain('设备外形尺寸')
+    expect(wrapper.text()).toContain('公司统一铭牌标准')
+    const preview = wrapper.get('[aria-label="铭牌效果图"]')
+    expect(preview.get('img').attributes('alt')).toBe('UPTON')
+    expect(preview.text()).toContain('UPTON AUTOMATION SYSTEMS Co., Ltd.')
+    for (const value of ['AK001', '70000001', '380V 50Hz / 5A', '1.9 kW', content.dimensions, '2026-10', 'MADE IN CHINA']) expect(preview.text()).toContain(value)
+    expect(preview.findAll('input')).toHaveLength(0)
+    expect(api.listProductionDrawings).not.toHaveBeenCalled()
+    expect(api.readProductionDrawingPreview).not.toHaveBeenCalled()
+    expect(api.downloadProductionDrawingFile).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
   it('只预览所属正式发布包冻结的图纸，关闭时释放预览地址', async () => {
     const frozen = drawing()
     vi.spyOn(api, 'listProductionDrawings').mockResolvedValue([drawing({ releasePackageId: 'new-package', versionId: 'latest', isCurrent: true }), frozen])

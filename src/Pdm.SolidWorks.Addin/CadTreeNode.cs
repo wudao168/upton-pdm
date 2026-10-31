@@ -40,6 +40,11 @@ internal enum CadWorkState
 
 internal sealed class CadTreeNode
 {
+    internal ISet<string> ConfirmedArchivePaths { get; set; }
+    // Display/cache state only. Never use a deferred tree as native archive evidence.
+    public bool LocalStructureDeferred { get; set; }
+    public bool DisplayStructurePending { get; set; }
+    public bool VersionStatusPending { get; set; }
     public string SuppressedLocalStructureSha256 { get; set; }
     public HistoricalReferenceRepair HistoricalRepair { get; set; }
     public bool NativeIsolationOnly { get; set; }
@@ -80,6 +85,13 @@ internal sealed class CadTreeNode
     public bool IsImportedSourceFile => Kind == CadDocumentKind.Other && Role == CadReferenceRole.ExternalFileDependency;
 
     public CadReferenceRole Role { get; set; }
+    public bool IsContextReference { get; set; }
+    public bool ReferenceTypeUnverified { get; set; }
+    // False is absence of native type evidence, not proof of an ordinary source.
+    internal bool ReferenceTypeVerified { get; set; }
+    internal HashSet<string> DesignContextPaths { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    internal IReadOnlyDictionary<string, string> ArchiveInspectedProperties { get; set; }
+    internal string ArchiveInspectedPropertiesSha256 { get; set; }
 
     public List<string> UnmanagedReferences { get; } = new List<string>();
     public List<string> EmbeddedDesignDependencies { get; } = new List<string>();

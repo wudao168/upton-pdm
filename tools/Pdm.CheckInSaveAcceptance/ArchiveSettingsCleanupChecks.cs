@@ -84,6 +84,20 @@ internal static partial class Program
    Check(button.Size==((Button)Field(dialog,"saveButton")).Size&&dialog.Font.Size==9F,"沿用现有按钮尺寸及插件字体");
    var bounds=dialog.RectangleToClient(button.RectangleToScreen(button.ClientRectangle));
    Check(dialog.ClientRectangle.Contains(bounds),"清理按钮完整显示在设置页内");
+   var cacheProperty=dialog.GetType().GetProperty("ReadCacheUsage",Flags);var cacheType=cacheProperty.PropertyType.GetMethod("Invoke").ReturnType.GetGenericArguments()[0];
+   var cacheCompletion=Activator.CreateInstance(typeof(TaskCompletionSource<>).MakeGenericType(cacheType));var cacheTask=Get(cacheCompletion,"Task");
+   cacheProperty.SetValue(dialog,Expression.Lambda(cacheProperty.PropertyType,Expression.Constant(cacheTask,cacheProperty.PropertyType.GetMethod("Invoke").ReturnType)).Compile());
+   var reading=(Task)TreeCall(dialog,"RunCacheActionAsync",false);
+   Check(((Button)Field(dialog,"cancelButton")).Enabled&&((Button)Field(dialog,"saveButton")).Enabled,"统计缓存占用时仍可保存设置或取消，不阻塞整个设置页");
+   var cacheResult=Activator.CreateInstance(cacheType);Set(cacheResult,"UsedBytes",5L*1073741824L);Set(cacheResult,"ReclaimableBytes",2L*1073741824L);
+   cacheCompletion.GetType().GetMethod("SetResult").Invoke(cacheCompletion,new[]{cacheResult});await reading;
+   Check(((Label)Field(dialog,"cacheUsage")).Text.Contains("5.00 GB")&&((Label)Field(dialog,"cacheUsage")).Text.Contains("2.00 GB"),"设置页展示当前占用和预计可释放空间");
+   var cleanCache=dialog.GetType().GetProperty("CleanControlledCache",Flags);var cleanTask=typeof(Task).GetMethod("FromResult").MakeGenericMethod(cacheType).Invoke(null,new[]{cacheResult});
+   cleanCache.SetValue(dialog,Expression.Lambda(cleanCache.PropertyType,Expression.Constant(cleanTask,cleanCache.PropertyType.GetMethod("Invoke").ReturnType)).Compile());
+   await (Task)TreeCall(dialog,"RunCacheActionAsync",true);
+   var cacheButton=(Button)Field(dialog,"cleanupCacheButton");var numeric=(NumericUpDown)Field(dialog,"cacheLimit");
+   Check(cacheButton.Enabled&&cacheButton.Size==button.Size&&numeric.Value==20,"安全清理按钮沿用统一尺寸，缓存上限默认20GB");
+   numeric.Value=40;Check(numeric.Minimum==1&&numeric.Maximum==1024,"缓存容量上限允许设置，输入限定在有效范围");
    using(var bitmap=new Bitmap(dialog.Width,dialog.Height)){dialog.DrawToBitmap(bitmap,new Rectangle(Point.Empty,bitmap.Size));bitmap.Save(Path.Combine(output,"settings-cleanup.png"));}
    dialog.Close();
   }

@@ -232,6 +232,9 @@ internal sealed class PdmTaskPaneControl : UserControl
         });
     }
     public event EventHandler RefreshRequested;
+    public event EventHandler StructureViewRequested;
+    public event EventHandler<CadTreeNodeEventArgs> StructureNodeRequested;
+    public bool IsStructureTabVisible => tabs.SelectedTab == structureTab;
     public event EventHandler<CadTreeNodeEventArgs> NodeSelected;
     public event EventHandler<CadTreeNodeEventArgs> OpenRequested;
 
@@ -576,7 +579,12 @@ internal sealed class PdmTaskPaneControl : UserControl
                 rootNode = root;
                 displayedTreeViewKey = key;
                 suppressNodeSelectedNotification = true;
-                try { structureTree.SelectedNode = null; }
+                try
+                {
+                    CancelActiveTreeBuild();
+                    structureTree.Nodes.Clear();
+                    structureTree.SelectedNode = null;
+                }
                 finally { suppressNodeSelectedNotification = false; }
                 UpdateSelected(null);
                 restoringTreeViewState = true;
@@ -870,6 +878,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         PluginDiagnosticLog.Record("启动", "插件已加载，版本：" + installedPluginVersion);
         tabs.SelectedIndexChanged += (_, _) =>
         {
+            if (tabs.SelectedTab == structureTab) StructureViewRequested?.Invoke(this, EventArgs.Empty);
             if (!suppressVersionTabRequest && tabs.SelectedTab == versionsTab)
             {
                 RaiseVersionsRequested();
@@ -1020,7 +1029,12 @@ internal sealed class PdmTaskPaneControl : UserControl
         structureTree.DrawMode = TreeViewDrawMode.OwnerDrawAll;
         structureTree.DrawNode += DrawStructureNode;
         structureTree.ClientSizeChanged += (_, _) => structureTreeSurface.Invalidate();
-        structureTree.BeforeExpand += (_, eventArgs) => MaterializeChildren(eventArgs.Node, activeTreeBuildPlan);
+        structureTree.BeforeExpand += (_, eventArgs) =>
+        {
+            MaterializeChildren(eventArgs.Node, activeTreeBuildPlan);
+            if (eventArgs.Node.Tag is CadTreeNode node && node.DisplayStructurePending)
+                StructureNodeRequested?.Invoke(this, new CadTreeNodeEventArgs(node));
+        };
         structureTree.BeforeCollapse += (_, eventArgs) => eventArgs.Cancel = !allowStructureCollapse;
         structureTree.KeyDown += (_, eventArgs) =>
         {
@@ -1399,6 +1413,8 @@ internal sealed class PdmTaskPaneControl : UserControl
 
     private sealed class StructureTreeView : TreeView
     {
+        public StructureTreeView() => TreeControlDiagnostics.Attach(this, "插件设计树");
+
         protected override CreateParams CreateParams
         {
             get
@@ -2174,7 +2190,7 @@ internal sealed class PdmTaskPaneControl : UserControl
                 node.Kind, node.Status, node.WorkState, node.CurrentRevision, node.LatestRevision, node.OpenedRevision,
                 node.CheckedOutBy, node.CheckoutSessionId, node.CheckoutSessionLost, node.IsRenamePendingSave,
                 node.IsInterconnectImport, node.IsHistoricalPreview, node.IsLatestReadOnlyPreview, node.LatestStructureIndexPending,
-                node.DrawingReviewLocked, node.DrawingUpdatePendingReason, node.DocumentId, node.Revision
+                node.DrawingReviewLocked, node.DrawingUpdatePendingReason, node.DocumentId, node.Revision, node.DisplayStructurePending
             }));
         return stamp.ToString();
     }
@@ -2207,6 +2223,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
         UpdateTreeHealth();
 
+        var displayImmediately = changedTreeView;
         var restoredView = changedTreeView ? pendingTreeViewState : null;
         var selectedInstancePath = changedTreeView ? restoredView?.SelectedIdentity : TreeViewIdentity(SelectedNode);
         var expandedInstancePaths = changedTreeView ? restoredView?.ExpandedPaths ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -2220,31 +2237,48 @@ internal sealed class PdmTaskPaneControl : UserControl
         treeBuildPending = true;
         var generation = Interlocked.Increment(ref treeBuildGeneration);
         CancelActiveTreeBuild();
-        Task.Run(() =>
+        TreeBuildPlan BuildPlan()
         {
             var root = BuildTreeNode(modelRoot, normalizedFilter, checkedPaths, healthFilter);
             return PrepareTreeBuildPlan(root, !string.IsNullOrWhiteSpace(normalizedFilter) || healthFilter != StructureHealthFilter.None);
-        }).ContinueWith(task => RunOnUiThread(() =>
+        }
+        void ApplyPlan(TreeBuildPlan plan)
         {
-            if (task.IsFaulted || task.IsCanceled || generation != treeBuildGeneration || !ReferenceEquals(modelRoot, rootNode))
-            {
-                if (generation == treeBuildGeneration) treeBuildPending = false;
-                return;
-            }
-
+            if (generation != treeBuildGeneration || !ReferenceEquals(modelRoot, rootNode)) return;
             structureTree.BeginUpdate();
-            var plan = task.Result;
             plan.PresentationStamp = presentationStamp;
             plan.RestoredView = restoredView;
             plan.UpdateOpen = true;
             activeTreeBuildPlan = plan;
             structureTree.Nodes.Clear();
-            if (plan.Root != null)
-            {
-                structureTree.Nodes.Add(plan.Root);
-            }
-
+            if (plan.Root != null) structureTree.Nodes.Add(plan.Root);
             AppendTreeBatch(plan, generation, selectedInstancePath, expandedInstancePaths);
+        }
+        void ReportFailure(Exception error)
+        {
+            if (generation != treeBuildGeneration || !ReferenceEquals(modelRoot, rootNode)) return;
+            CancelActiveTreeBuild();
+            treeBuildPending = false;
+            renderedTreeStamp = null;
+            SetTreeLoadingStatus("设计树暂未显示完整，请右键刷新重试。");
+            Upton.Pdm.ClientShared.ClientDiagnostics.Record("error", "设计树显示失败", error.ToString());
+        }
+        // A native document switch can immediately occupy the CAD message loop.
+        // Bind the new document's visual tree before returning to it. This builds
+        // managed display nodes only; it does not scan, resolve or reopen CAD files.
+        if (displayImmediately)
+        {
+            try { ApplyPlan(BuildPlan()); }
+            catch (Exception error) { ReportFailure(error); }
+            return;
+        }
+        Task.Run(BuildPlan).ContinueWith(task => RunOnUiThread(() =>
+        {
+            if (generation != treeBuildGeneration || !ReferenceEquals(modelRoot, rootNode)) return;
+            if (task.IsFaulted) { ReportFailure(task.Exception.GetBaseException()); return; }
+            if (task.IsCanceled) { treeBuildPending = false; return; }
+            try { ApplyPlan(task.Result); }
+            catch (Exception error) { ReportFailure(error); }
         }), TaskScheduler.Default);
     }
 
@@ -2666,6 +2700,8 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
 
         node.Nodes.AddRange(childNodes);
+        if (childNodes.Length == 0 && model.DisplayStructurePending)
+            node.Nodes.Add(new TreeNode("展开后读取PLM结构…") { Tag = LazyTreePlaceholder.Instance });
         if (!string.IsNullOrWhiteSpace(filter))
         {
             node.Expand();
@@ -2880,7 +2916,9 @@ internal sealed class PdmTaskPaneControl : UserControl
         string editState;
         switch (node.WorkState)
         {
-            case CadWorkState.ModifiedUnsaved: editState = "修改未保存"; break;
+            case CadWorkState.ModifiedUnsaved: editState = node.DocumentId.HasValue && string.IsNullOrWhiteSpace(node.CheckedOutBy)
+                    ? "未获取权限 · 内存状态待核对" : node.CheckoutSessionLost ? "权限已失效 · 修改已保留"
+                    : !node.DocumentId.HasValue ? "库外文件 · 需保存" : "修改未保存"; break;
             case CadWorkState.PendingCheckIn: editState = string.IsNullOrWhiteSpace(historicalSourceRevision) ? "待提交" : string.Concat("基于", historicalSourceRevision, "待提交"); break;
             case CadWorkState.Editable: editState = string.IsNullOrWhiteSpace(historicalSourceRevision) ? "可编辑" : string.Concat("基于", historicalSourceRevision, "编辑"); break;
             case CadWorkState.EditingByOther: editState = node.CheckoutSessionLost ? "编辑权限已失效" : string.IsNullOrWhiteSpace(node.CheckedOutBy) ? "他人编辑中" : string.Concat(DisplayUserName(node.CheckedOutBy), "编辑中"); break;
@@ -2893,6 +2931,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         var result = string.Equals(lifecycle, "工作中", StringComparison.Ordinal) || !node.DocumentId.HasValue
             ? editState
             : string.Concat(lifecycle, " · ", editState);
+        if (node.VersionStatusPending) result += " · 版本待核对";
         return node.IsExternalProvenance ? string.Concat("外部路径 · ", result) : result;
     }
 
@@ -3652,7 +3691,8 @@ internal sealed class PdmTaskPaneControl : UserControl
             workspaceOperationPanel.Invalidate(true);
             workspaceOperationProgress.Invalidate();
             serviceStatus.Invalidate();
-            System.Windows.Forms.Application.DoEvents();
+            // Paint these controls only. A global message pump here re-enters
+            // archive/accessibility callbacks on the two UI threads.
             workspaceOperationPanel.Update();
             workspaceOperationProgress.Update();
             serviceStatus.Update();

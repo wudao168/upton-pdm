@@ -64,12 +64,7 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
             .ThenByDescending(item => (item.SourceBomItemId is null ? 0 : 1) + bomLinks.Values.Count(value => value == item.Id))
             .ThenBy(item => item.MaterialCode, StringComparer.OrdinalIgnoreCase)
             .Take(Math.Clamp(limit, 1, 500))
-            .Select(item => item with
-            {
-                ReferenceCount = (item.SourceBomItemId is null ? 0 : 1) + bomLinks.Values.Count(value => value == item.Id),
-                Model3DAttachmentCount = attachments.Values.Count(value => value.MaterialId == item.Id && value.Kind == MaterialAttachmentKind.Model3D),
-                DocumentAttachmentCount = attachments.Values.Count(value => value.MaterialId == item.Id && value.Kind == MaterialAttachmentKind.Document)
-            })
+            .Select(WithCounts)
             .ToArray();
         return Task.FromResult<IReadOnlyList<PdmMaterial>>(result);
     }
@@ -205,7 +200,7 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
 
     public Task<IReadOnlyList<MaterialAttachment>> ListMaterialAttachmentsAsync(Guid materialId, MaterialAttachmentKind? kind, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<MaterialAttachment>>(attachments.Values
-            .Where(item => item.MaterialId == materialId && (kind is null || item.Kind == kind))
+            .Where(item => item.MaterialId == materialId && !item.IsRemoved && (kind is null || item.Kind == kind))
             .OrderByDescending(item => item.UploadedAt)
             .ToArray());
 
@@ -214,18 +209,42 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
 
     public Task<MaterialAttachment> CreateMaterialAttachmentAsync(MaterialAttachment attachment, CancellationToken cancellationToken)
     {
+        lock (gate)
+        {
         if (!materials.ContainsKey(attachment.MaterialId)) throw new PdmNotFoundException("料品主档不存在。");
+        if (attachment.Kind is MaterialAttachmentKind.Drawing2D or MaterialAttachmentKind.Model3D)
+            attachment = attachment with { VersionNumber = attachments.Values.Where(item => item.MaterialId == attachment.MaterialId && item.Kind == attachment.Kind).Select(item => item.VersionNumber).DefaultIfEmpty().Max() + 1 };
         if (!attachments.TryAdd(attachment.Id, attachment)) throw new PdmConflictException("料品附件已经存在。");
         return Task.FromResult(attachment);
+        }
     }
 
     public Task<bool> DeleteMaterialAttachmentAsync(Guid materialId, Guid attachmentId, CancellationToken cancellationToken)
     {
+        lock (gate)
+        {
         if (!materials.TryGetValue(materialId, out var material) || material.IsArchived
             || !attachments.TryGetValue(attachmentId, out var attachment) || attachment.MaterialId != materialId
-            || attachment.Kind is not (MaterialAttachmentKind.Model3D or MaterialAttachmentKind.Document))
+            || attachment.IsRemoved || attachment.Kind != MaterialAttachmentKind.Document)
             return Task.FromResult(false);
-        return Task.FromResult(attachments.TryRemove(attachmentId, out _));
+        attachments[attachmentId] = attachment with { IsRemoved = true };
+        return Task.FromResult(true);
+        }
+    }
+
+    public Task<MaterialAttachment> EnableMaterialAttachmentAsync(Guid materialId, Guid attachmentId, Guid? expectedEnabledId, string actor, DateTimeOffset at, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!materials.TryGetValue(materialId, out var material) || material.IsArchived) throw new PdmRuleException("料品不存在或已停用。");
+            if (!attachments.TryGetValue(attachmentId, out var file) || file.MaterialId != materialId || file.IsRemoved
+                || file.Kind is not (MaterialAttachmentKind.Drawing2D or MaterialAttachmentKind.Model3D)) throw new PdmRuleException("只能启用当前料品的2D或3D版本。");
+            var current = attachments.Values.SingleOrDefault(item => item.MaterialId == materialId && item.Kind == file.Kind && item.IsEnabled);
+            if (current?.Id != expectedEnabledId) throw new PdmConflictException("启用版本已被其他人员修改，请刷新核对后重新选择。");
+            if (current is not null) attachments[current.Id] = current with { IsEnabled = false };
+            attachments[attachmentId] = file with { IsEnabled = true, EnabledBy = actor, EnabledAt = at };
+            return Task.FromResult(attachments[attachmentId]);
+        }
     }
 
     public Task<PdmMaterial> ReplaceMaterialImagesAsync(PdmMaterial material, IReadOnlyList<Guid> attachmentIds, long expectedRowVersion, CancellationToken cancellationToken)
@@ -1154,7 +1173,10 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
     {
         ReferenceCount = (material.SourceBomItemId is null ? 0 : 1) + bomLinks.Values.Count(value => value == material.Id),
         Model3DAttachmentCount = attachments.Values.Count(value => value.MaterialId == material.Id && value.Kind == MaterialAttachmentKind.Model3D),
-        DocumentAttachmentCount = attachments.Values.Count(value => value.MaterialId == material.Id && value.Kind == MaterialAttachmentKind.Document)
+        DocumentAttachmentCount = attachments.Values.Count(value => value.MaterialId == material.Id && value.Kind == MaterialAttachmentKind.Document && !value.IsRemoved),
+        Drawing2DAttachmentCount = attachments.Values.Count(value => value.MaterialId == material.Id && value.Kind == MaterialAttachmentKind.Drawing2D),
+        EnabledDrawing2DVersion = attachments.Values.FirstOrDefault(value => value.MaterialId == material.Id && value.Kind == MaterialAttachmentKind.Drawing2D && value.IsEnabled)?.VersionNumber,
+        EnabledModel3DVersion = attachments.Values.FirstOrDefault(value => value.MaterialId == material.Id && value.Kind == MaterialAttachmentKind.Model3D && value.IsEnabled)?.VersionNumber
     };
 
     private static MaterialCategory Category(string code, string name, string? parentCode, MaterialKind? kind, bool allowCreate, DateTimeOffset now, int sortOrder) =>

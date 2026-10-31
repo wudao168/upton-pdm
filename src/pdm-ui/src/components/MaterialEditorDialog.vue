@@ -2,12 +2,14 @@
 import type { MaterialAttachment, MaterialAttachmentKind, MaterialCategory, PdmMaterial, SaveMaterialInput } from '../types'
 import { u9UnitOptions } from '../u9Units'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { deleteMaterialAttachment, materialAttachmentObjectUrl } from '../api'
+import { deleteMaterialAttachment, listMaterialAttachments, materialAttachmentObjectUrl } from '../api'
 import { ElMessageBox } from 'element-plus'
 import { ElMessage } from '../statusMessage'
 import MaterialRelationEditor from './MaterialRelationEditor.vue'
 import MaterialImagePreview from './MaterialImagePreview.vue'
 import MaterialImageAdd from './MaterialImageAdd.vue'
+import StandardMaterialDrawings from './StandardMaterialDrawings.vue'
+import { fileVersion } from '../bomFiles'
 import { materialImageAccept, materialImageLimit } from '../materialImages'
 
 const props = withDefaults(defineProps<{
@@ -32,6 +34,7 @@ const props = withDefaults(defineProps<{
   u9ReviewRequired?: boolean
   canEdit?: boolean
   canDeleteAttachments?: boolean
+  canManageDrawings?: boolean
   mainMaterial?: PdmMaterial | null
   initialTab?: 'material' | 'relations'
   canViewRelations?: boolean
@@ -44,6 +47,7 @@ const props = withDefaults(defineProps<{
   canViewRelations: false,
   canManageRelations: false,
   canPublishRelations: false,
+  canManageDrawings: false,
 })
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
@@ -51,6 +55,7 @@ const emit = defineEmits<{
   attachmentFiles: [kind: MaterialAttachmentKind, event: Event]
   downloadAttachment: [attachment: MaterialAttachment]
   attachmentDeleted: [attachment: MaterialAttachment]
+  attachmentsChanged: [attachments: MaterialAttachment[]]
   clearCover: []
   setCover: [attachment: MaterialAttachment]
   save: []
@@ -69,6 +74,7 @@ watch([() => props.modelValue, () => props.editingId, () => props.initialTab], (
 watch(activePane, value => { if (value === 'relations') relationPaneOpened.value = true })
 
 const model3DAccept = '.sldprt,.sldasm,.step,.stp,.igs,.iges,.x_t,.x_b,.sat'
+const drawing2DAccept = '.pdf,.dwg,.dxf,.slddrw'
 const documentAccept = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.jpg,.jpeg,.png,.zip,.rar,.7z'
 const attachmentItems = (kind: MaterialAttachmentKind) => props.attachments.filter(item => item.kind === kind)
 const images = computed(() => attachmentItems('CoverImage'))
@@ -111,16 +117,20 @@ function selectImages(event: Event) {
   imageError.value = ''
   emit('attachmentFiles', 'CoverImage', event)
 }
-const fileKinds = ['Model3D', 'Document'] as const
+const fileKinds = computed(() => props.kitMode ? ['Model3D', 'Document'] as const : ['Drawing2D', 'Model3D', 'Document'] as const)
+const attachmentLabel = (kind: MaterialAttachmentKind) => kind === 'Drawing2D' ? '2D图纸' : kind === 'Model3D' ? '3D' : '资料'
+const canUploadKind = (kind: MaterialAttachmentKind) => kind === 'Drawing2D' ? props.canManageDrawings : props.canEdit
+const drawingVersionsOpen = ref(false)
 const coverInput = ref<HTMLInputElement | null>(null)
 const imagePreviewOpen = ref(false)
 const previewImageId = ref<string>()
-watch(() => props.modelValue, visible => { if (!visible) imagePreviewOpen.value = false })
+watch(() => props.modelValue, visible => { if (!visible) { imagePreviewOpen.value = false; drawingVersionsOpen.value = false } })
 function previewImage(id?: string) {
   previewImageId.value = id
   imagePreviewOpen.value = true
 }
 const model3DInput = ref<HTMLInputElement | null>(null)
+const drawing2DInput = ref<HTMLInputElement | null>(null)
 const documentInput = ref<HTMLInputElement | null>(null)
 async function removeAttachment(attachment: MaterialAttachment) {
   if (!props.canEdit || !props.canDeleteAttachments || !props.editingId || attachmentBusy.value) return
@@ -139,8 +149,17 @@ async function removeAttachment(attachment: MaterialAttachment) {
 }
 
 function chooseAttachment(kind: MaterialAttachmentKind) {
-  const input = kind === 'CoverImage' ? coverInput.value : kind === 'Model3D' ? model3DInput.value : documentInput.value
+  const input = kind === 'CoverImage' ? coverInput.value : kind === 'Drawing2D' ? drawing2DInput.value : kind === 'Model3D' ? model3DInput.value : documentInput.value
   input?.click()
+}
+
+async function refreshDrawingVersions() {
+  const materialId = props.editingId
+  if (!materialId) return
+  try {
+    const files = await listMaterialAttachments(materialId, props.token)
+    if (props.modelValue && props.editingId === materialId) emit('attachmentsChanged', files)
+  } catch { if (props.modelValue && props.editingId === materialId) ElMessage.error('图纸版本已更新，详情列表读取失败，请重新打开料品详情核对。') }
 }
 </script>
 
@@ -194,11 +213,13 @@ function chooseAttachment(kind: MaterialAttachmentKind) {
     </el-form>
     </fieldset>
     <slot name="assets"><section class="material-editor-assets" aria-label="料品附件">
+      <input v-if="!kitMode" ref="drawing2DInput" class="material-attachment-input" type="file" :disabled="!canManageDrawings || !editingId || attachmentBusy" :accept="drawing2DAccept" aria-label="选择2D附件" @change="emit('attachmentFiles', 'Drawing2D', $event)" />
       <input ref="model3DInput" class="material-attachment-input" type="file" multiple :disabled="!canEdit || !editingId || attachmentBusy" :accept="model3DAccept" :aria-label="kitMode ? '上传套件3D附件' : '选择3D附件'" @change="emit('attachmentFiles', 'Model3D', $event)" />
       <input ref="documentInput" class="material-attachment-input" type="file" multiple :disabled="!canEdit || !editingId || attachmentBusy" :accept="documentAccept" :aria-label="kitMode ? '上传套件资料附件' : '选择资料附件'" @change="emit('attachmentFiles', 'Document', $event)" />
-      <section v-for="kind in fileKinds" :key="kind" class="material-editor-file-list" :aria-label="`${kind === 'Model3D' ? '3D' : '资料'}附件`">
-        <header><strong>{{ kind === 'Model3D' ? '3D' : '资料' }}（{{ attachmentItems(kind).length }}）</strong><span v-if="uploadingKind === kind">上传中 {{ uploadProgress }}%</span><el-button :disabled="!canEdit || !editingId || attachmentBusy" :loading="uploadingKind === kind" @click="chooseAttachment(kind)">{{ editingId ? '上传附件' : '保存后上传' }}</el-button></header>
-        <table><thead><tr><th>文件名</th><th>操作</th></tr></thead><tbody><tr v-for="attachment in attachmentItems(kind)" :key="attachment.id"><td :title="attachment.originalFileName">{{ attachment.originalFileName }}</td><td><el-button link type="primary" :aria-label="`下载 ${attachment.originalFileName}`" @click="emit('downloadAttachment', attachment)">下载</el-button><el-button v-if="canEdit && canDeleteAttachments" link type="danger" :disabled="attachmentBusy" :loading="deletingAttachmentId === attachment.id" :aria-label="`删除 ${attachment.originalFileName}`" @click="removeAttachment(attachment)">删除</el-button></td></tr><tr v-if="!attachmentItems(kind).length"><td colspan="2" class="material-attachment-empty">暂无{{ kind === 'Model3D' ? '3D' : '资料' }}附件</td></tr></tbody></table>
+      <section v-for="kind in fileKinds" :key="kind" class="material-editor-file-list" :aria-label="`${attachmentLabel(kind)}附件`">
+        <header><strong>{{ attachmentLabel(kind) }}（{{ attachmentItems(kind).length }}）</strong><span v-if="uploadingKind === kind">上传中 {{ uploadProgress }}%</span><el-button v-if="kind === 'Drawing2D' && editingId" link :disabled="attachmentBusy" @click="drawingVersionsOpen = true">{{ canManageDrawings ? '版本管理' : '版本记录' }}</el-button><el-button :disabled="!canUploadKind(kind) || !editingId || attachmentBusy" :loading="uploadingKind === kind" @click="chooseAttachment(kind)">{{ editingId ? '上传附件' : '保存后上传' }}</el-button></header>
+        <p v-if="kind === 'Drawing2D'" class="material-attachment-help">上传自动升版，由标准化在“版本管理”中选择启用版本；历史图纸保留。</p>
+        <table><thead><tr><th>文件名</th><th v-if="kind === 'Drawing2D'" class="material-editor-drawing-version">版本</th><th>操作</th></tr></thead><tbody><tr v-for="attachment in attachmentItems(kind)" :key="attachment.id"><td :title="attachment.originalFileName">{{ attachment.originalFileName }}</td><td v-if="kind === 'Drawing2D'" class="material-editor-drawing-version">{{ attachment.versionNumber ? fileVersion(attachment.versionNumber) : '—' }}{{ attachment.isEnabled ? ' · 已启用' : '' }}</td><td><el-button link type="primary" :aria-label="`下载 ${attachment.originalFileName}`" @click="emit('downloadAttachment', attachment)">下载</el-button><el-button v-if="canEdit && canDeleteAttachments && (kitMode || attachment.kind === 'Document')" link type="danger" :disabled="attachmentBusy" :loading="deletingAttachmentId === attachment.id" :aria-label="`删除 ${attachment.originalFileName}`" @click="removeAttachment(attachment)">删除</el-button></td></tr><tr v-if="!attachmentItems(kind).length"><td :colspan="kind === 'Drawing2D' ? 3 : 2" class="material-attachment-empty">暂无{{ attachmentLabel(kind) }}附件</td></tr></tbody></table>
       </section>
 
     </section></slot>
@@ -213,9 +234,11 @@ function chooseAttachment(kind: MaterialAttachmentKind) {
     </template>
   </el-dialog>
   <MaterialImagePreview v-model="imagePreviewOpen" :material-id="editingId ?? ''" :token="token" :initial-id="previewImageId" :attachments="attachments" />
+  <StandardMaterialDrawings v-if="drawingVersionsOpen && editingId" :material-id="editingId" :material-code="form.materialCode || ''" kind="Drawing2D" :token="token" :can-manage="canManageDrawings" @close="drawingVersionsOpen = false" @changed="refreshDrawingVersions" />
 </template>
 
 <style scoped>
+.material-editor-file-list .material-editor-drawing-version{width:100px}
 .material-editor-images{margin-bottom:12px}.material-editor-assets{display:flex;flex-direction:column;gap:12px;margin-top:12px}.material-editor-assets section{min-width:0}.material-editor-images header,.material-editor-assets header{display:flex;align-items:center;gap:8px;margin-bottom:8px}.material-editor-images header strong,.material-editor-assets header strong{flex:1}.material-editor-images header>span,.material-editor-assets header>span,.material-attachment-help{font-size:12px;color:var(--pdm-muted)}.material-image-cards{display:flex;flex-wrap:wrap;gap:8px}.material-image-card{box-sizing:border-box;display:flex;width:112px;align-items:center;flex-direction:column;border:1px solid var(--pdm-border);border-radius:4px;padding:4px;gap:3px;overflow:hidden}.material-image-card.is-cover{border-color:var(--pdm-theme-accent)}.material-image-card__preview{display:flex;align-items:center;justify-content:center;width:102px;height:82px;padding:0;border:0;background:var(--pdm-surface-muted);color:var(--pdm-muted);cursor:zoom-in}.material-image-card__preview img{width:100%;height:100%;object-fit:contain}.material-image-card__name{width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px;text-align:center}.material-image-card__cover{display:flex;align-items:center;justify-content:center;height:24px;color:var(--pdm-theme-accent);font-size:12px}.material-image-card :deep(.el-button){height:24px;min-height:0}.material-attachment-help{margin:6px 0 0}.material-image-validation{color:var(--pdm-danger);font-size:12px}.material-editor-file-list table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:12px}.material-editor-file-list th,.material-editor-file-list td{height:30px;padding:0 8px;border-bottom:1px solid var(--pdm-border-soft);text-align:left;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.material-editor-file-list th{background:var(--pdm-table-header)}.material-editor-file-list th:last-child,.material-editor-file-list td:last-child{width:128px;text-align:center}.material-attachment-empty{color:var(--pdm-muted)}
 .material-editor-error{margin-bottom:10px;text-align:left;overflow-wrap:anywhere;white-space:normal}
 .material-editor-tabs{margin-top:-10px}.material-editor-fieldset{min-width:0;margin:0;padding:0;border:0}.material-editor-grid{display:grid;grid-template-columns:repeat(3,minmax(0,200px));gap:0 12px}.material-editor-grid :deep(.el-form-item){margin-bottom:10px}.material-editor-grid__wide{grid-column:span 2}.material-recommend-button{width:100%}.material-attachment-input{position:absolute;width:1px;height:1px;opacity:0}@media(max-width:760px){.material-editor-grid{grid-template-columns:1fr}.material-editor-grid__wide{grid-column:auto}}

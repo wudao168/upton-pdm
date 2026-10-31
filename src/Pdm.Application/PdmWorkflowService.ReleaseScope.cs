@@ -20,6 +20,13 @@ public sealed partial class PdmWorkflowService
 
     private async Task<ReleasePackage> CaptureReleaseVersionsAsync(ReleasePackage package, CancellationToken ct)
     {
+        // 仅首次冻结本次标准件长交期范围；其他BOM的历史发布快照不可按当前标准库补写。
+        if (bomFiles is not null && package.Scope == ReleaseScope.StandardLongLead)
+            package = package with
+            {
+                StandardBomSnapshot = await bomFiles.CaptureAsync(package.StandardBomSnapshot, ct),
+                MechanicalBomSnapshot = await bomFiles.CaptureAsync(package.MechanicalBomSnapshot, ct)
+            };
         if (package.Scope == ReleaseScope.LegacyCombined) return package;
         var selected = package.SelectedBomItemIds.ToHashSet();
         var models = IsNonStandardScope(package.Scope)

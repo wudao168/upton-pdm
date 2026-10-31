@@ -29,8 +29,8 @@ internal static class NativeArchiveManifest
                     && !SuppressedAssemblyLocalStructure.CanUse(node);
             // A saved path outside the package is not another mandatory upload.
             // Keep the visible node for diagnosis, but never manufacture its identity.
-            node.IsOutsideNativeFileScope = node != root && node.Status != CadReferenceStatus.Virtual
-                && !File.Exists(node.FullPath) && !listed.Contains(node.FullPath);
+            node.IsOutsideNativeFileScope = node.ConfirmedArchivePaths != null && !node.ConfirmedArchivePaths.Contains(node.FullPath) && node.IsOutsideNativeFileScope
+                || node != root && node.Status != CadReferenceStatus.Virtual && !File.Exists(node.FullPath) && !listed.Contains(node.FullPath);
             foreach (var child in node.Children) Confirm(child);
             foreach (var model in node.ReferencedModels) Confirm(model);
             if (node.Children.Any(child => child.IsOutsideNativeFileScope)
@@ -149,8 +149,11 @@ internal static class NativeArchiveManifest
             .ToDictionary(group => group.Key, group => group.Distinct(StringComparer.OrdinalIgnoreCase).Count(), StringComparer.OrdinalIgnoreCase);
         foreach (var node in nodes)
         {
+            if (node.ConfirmedArchivePaths != null && !node.ConfirmedArchivePaths.Contains(node.FullPath)
+                && node.IsOutsideNativeFileScope) continue;
             if (IsInterconnectCachePath(node.FullPath) && (!node.IsStoredImport || !ImportedComponentStorage.IsStableOwner(node.ImportedStorageOwnerPath)))
-                AddFailure("B11", "树内导入组件尚未形成可确认的原生存档内容，请将其保存为稳定原生文件或确认随父装配嵌入保存：" + node.FileName + "；实例：" + node.InstancePath);
+                AddFailure("B11", "树内导入组件尚未形成可确认的原生存档内容，请将其保存为稳定原生文件或确认随父装配嵌入保存：" + node.FileName
+                    + "；实例：" + (string.IsNullOrWhiteSpace(node.ComponentSelectionName) ? node.InstancePath : node.ComponentSelectionName));
             else if (node.Status != CadReferenceStatus.Virtual && !embeddedNodes.Contains(node)
                 && PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(node.FullPath))
                 AddFailure("B11", "树内临时组件的嵌入归属尚未确认：" + node.FileName);
@@ -163,7 +166,7 @@ internal static class NativeArchiveManifest
             else if (new FileInfo(node.FullPath).Length == 0)
                 failures.Add("实际引用文件为空，不能完整存档：" + node.FileName);
         }
-        var ordinary = nodes.Where(node => node.Status != CadReferenceStatus.Virtual && !embeddedNodes.Contains(node)
+        var ordinary = nodes.Where(node => !node.IsOutsideNativeFileScope && node.Status != CadReferenceStatus.Virtual && !embeddedNodes.Contains(node)
             && !string.IsNullOrWhiteSpace(node.FullPath)).ToArray();
         var paths = new HashSet<string>(ordinary.Select(node => Path.GetFullPath(node.FullPath)), StringComparer.OrdinalIgnoreCase);
         foreach (var original in nativeFiles.Distinct(StringComparer.OrdinalIgnoreCase))

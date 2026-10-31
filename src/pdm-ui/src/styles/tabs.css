@@ -19,12 +19,12 @@
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  margin: 0 0 var(--pdm-tabs-spacing) !important;
+  margin: 0 0 var(--pdm-container-gap, 0px) !important;
   padding: 0 !important;
   border: 0 !important;
-  border-radius: var(--pdm-tabs-radius) !important;
+  border-radius: 0 !important;
   background: var(--pdm-tabs-track) !important;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, .06);
+  box-shadow: none;
 }
 
 :root body .el-tabs > .el-tabs__header .el-tabs__nav-wrap::after,
@@ -38,7 +38,7 @@
   gap: 2px !important;
   padding: var(--pdm-tabs-padding) !important;
   border: 0 !important;
-  border-radius: var(--pdm-tabs-radius) !important;
+  border-radius: 0 !important;
   background: var(--pdm-tabs-track) !important;
   box-shadow: none !important;
 }
@@ -51,7 +51,7 @@
   min-width: 0;
   max-width: 100%;
   min-height: calc(var(--pdm-tabs-height) + 2 * var(--pdm-tabs-padding));
-  margin-block: 0 var(--pdm-tabs-spacing) !important;
+  margin-block: 0 var(--pdm-container-gap, 0px) !important;
   overflow-x: auto;
   overflow-y: hidden;
 }
@@ -89,6 +89,10 @@
   padding-inline: 2px !important;
 }
 :root body .pdm-tree-panel .pdm-document-filters > button small { padding-inline: 2px; }
+:root body .pdm-tree-panel .pdm-document-filters > button,
+:root body .pdm-tree-panel .pdm-document-filters > button * {
+  font-size: 11px !important;
+}
 @container pdm-document-tree (max-width: 210px) {
   :root body .pdm-tree-panel .pdm-document-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   :root body .pdm-tree-panel .pdm-document-filters > button { min-width: 0; }
@@ -112,19 +116,19 @@
   box-shadow: none !important;
   color: rgb(30, 41, 59) !important;
   font-family: var(--pdm-font-ui) !important;
-  font-size: 14px !important;
+  font-size: var(--pdm-font-size-navigation) !important;
   font-weight: 400 !important;
   line-height: 1.4;
   text-decoration: none;
   white-space: nowrap;
-  transition: background-color 150ms ease-in-out, box-shadow 150ms ease-in-out, color 150ms ease-in-out;
+  transition: background-color var(--pdm-transition-fast), color var(--pdm-transition-fast);
 }
 
 :root body [role="tab"],
 :root body :is(.production-scan-settings__tabs, .wh-report-modes) > button {
   color: rgb(30, 41, 59) !important;
   font-family: var(--pdm-font-ui) !important;
-  font-size: 14px !important;
+  font-size: var(--pdm-font-size-navigation) !important;
 }
 
 :root body [role="tab"] *,
@@ -149,53 +153,19 @@
   box-shadow: var(--pdm-tabs-shadow) !important;
   color: var(--pdm-theme-accent) !important;
   font-weight: 600 !important;
-  animation: pdm-tab-select 300ms ease;
 }
 
 :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):is(.is-active, [aria-selected="true"], [aria-pressed="true"], [aria-current="page"])::before,
 :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):is(.is-active, [aria-selected="true"], [aria-pressed="true"], [aria-current="page"])::after,
 :root body .pdm-tabs .el-radio-button.is-active .el-radio-button__inner::before,
 :root body .pdm-tabs .el-radio-button.is-active .el-radio-button__inner::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--pdm-theme-accent);
-  opacity: 0;
-  pointer-events: none;
-  animation: pdm-tab-particles 500ms ease forwards;
-}
-
-:root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item)::before,
-:root body .pdm-tabs .el-radio-button__inner::before {
-  top: 2px;
-  --pdm-tab-particle-direction: -10px;
-}
-
-:root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item)::after,
-:root body .pdm-tabs .el-radio-button__inner::after {
-  bottom: 2px;
-  --pdm-tab-particle-direction: 10px;
-}
-
-@keyframes pdm-tab-select {
-  0% { transform: scale(.95); }
-  50% { transform: scale(1.05); }
-  100% { transform: scale(1); }
-}
-
-@keyframes pdm-tab-particles {
-  0% { opacity: 0; transform: translateX(-50%) translateY(0); }
-  50% { opacity: 1; }
-  100% { opacity: 0; transform: translateX(-50%) translateY(var(--pdm-tab-particle-direction)); }
+  content: none;
 }
 
 :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):focus-visible,
 :root body .pdm-tabs .el-radio-button:focus-within .el-radio-button__inner {
-  outline: 2px solid var(--pdm-theme-accent) !important;
-  outline-offset: -2px;
+  outline: 0 !important;
+  text-decoration: underline;
 }
 
 :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):is(:disabled, .is-disabled, [aria-disabled="true"]),
@@ -209,9 +179,9 @@
   margin-left: 8px !important;
 }
 
-/* 页签与相邻内容统一留 5px；父容器已有纵向 gap 时不再叠加外边距。 */
+/* 页签容器与相邻内容紧贴，不叠加外边距。 */
 :root body :is(.pdm-project-settings, .pdm-budget, .production-workbench) {
-  row-gap: var(--pdm-tabs-spacing) !important;
+  row-gap: var(--pdm-container-gap, 0px) !important;
 }
 
 :root body :is(.pdm-project-settings, .pdm-budget, .production-workbench,
@@ -226,16 +196,16 @@
 }
 
 :root body .pdm-project-detail__header {
-  margin-bottom: var(--pdm-tabs-spacing);
+  margin-bottom: var(--pdm-container-gap, 0px);
 }
 
 /* 选项维护提示与其后页签的距离也使用同一规范。 */
 :root body :is(.engineering-kit-option-hint, .program-template-option-hint) {
-  margin-bottom: var(--pdm-tabs-spacing) !important;
+  margin-bottom: var(--pdm-container-gap, 0px) !important;
 }
 
 :root body .pdm-tree-search-row {
-  margin-bottom: var(--pdm-tabs-spacing) !important;
+  margin-bottom: var(--pdm-container-gap, 0px) !important;
 }
 
 :root body .pdm-document-filters + .pdm-tree-columns {
@@ -248,14 +218,14 @@
 }
 
 :root body .material-tabs > .el-tabs__content {
-  border: 1px solid var(--pdm-border) !important;
-  border-radius: 7px !important;
+  border: 0 !important;
+  border-radius: 0 !important;
   background: var(--pdm-surface) !important;
 }
 
 :root body :is(.pdm-tabs:not(.pdm-project-tabs), [role="tablist"]:not(.el-tabs__nav, .pdm-project-tabs)) {
   min-height: calc(var(--pdm-tabs-height) + 2 * var(--pdm-tabs-padding));
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, .06) !important;
+  box-shadow: none !important;
 }
 
 :root body :is(.production-workbench__tabs, .pdm-admin-tabs, .user-settings-tabs,
@@ -276,7 +246,7 @@
 }
 
 :root body .material-tabs > .el-tabs__content {
-  padding: var(--pdm-tabs-spacing);
+  padding: 0 !important;
 }
 
 @media (prefers-reduced-motion: reduce) {

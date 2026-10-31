@@ -2,13 +2,6 @@ export interface ReleaseNotificationRule {
   id: string; projectId: string | null; bomKind: string; event: string; departmentIds: string[]
   includeChildren: boolean; channels: string[]; dingTalkGroupId: string | null; requireExecution: boolean
 }
-export interface ReleaseMailSettings { host: string; port: number; from: string; username: string; password: string }
-export interface ReleaseNotificationSettings {
-  enabled: boolean; enabledAt?: string | null; publicUrl: string; rowVersion: number
-  rules: ReleaseNotificationRule[]; mail: ReleaseMailSettings; hasMailPassword: boolean
-  departments: Array<{ id: string; name: string; parentUnitId?: string | null }>
-  projects: Array<{ id: string; code: string; name: string }>; groups: Array<{ id: string; name: string }>
-}
 export interface ReleaseVersionBinding { documentId: string; versionId: string; fileName: string; revision: string; sha256: string; publish: boolean; requiresPromotion?: boolean; previousReleasedRevision?: string; targetRevision?: string }
 export interface ReleaseDepartmentReceipt {
   id: string; departmentId: string; departmentName: string; event: string; requireExecution: boolean
@@ -25,6 +18,7 @@ export interface ReleaseExecutionView {
   selectedBomItemIds: string[]; confirmedRemovedBomItemIds: string[]; versionBindings?: ReleaseVersionBinding[] | null
   progress: null | {
     u9: Record<string, { state: string; message: string; confirmedAt?: string | null }>
+    requiresU9?: boolean
     previewRequired: boolean; previewState: string; previewMessage?: string | null
     departments: ReleaseDepartmentReceipt[]; deliveries: ReleaseChannelDelivery[]; notificationRules: ReleaseNotificationRule[]
   }

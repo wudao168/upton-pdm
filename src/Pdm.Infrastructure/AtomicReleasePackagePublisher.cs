@@ -12,12 +12,16 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
     private readonly TimeProvider timeProvider;
     private readonly IServerPreviewConverter previewConverter;
     private readonly IPdmRepository? repository;
+    private readonly IPdfReleaseStampProcessor? pdfReleaseStamp;
+    private readonly BomFileService? bomFiles;
 
-    public AtomicReleasePackagePublisher(TimeProvider timeProvider, IServerPreviewConverter previewConverter, IPdmRepository? repository = null)
+    public AtomicReleasePackagePublisher(TimeProvider timeProvider, IServerPreviewConverter previewConverter, IPdmRepository? repository = null, IPdfReleaseStampProcessor? pdfReleaseStamp = null, BomFileService? bomFiles = null)
     {
         this.timeProvider = timeProvider;
         this.previewConverter = previewConverter;
         this.repository = repository;
+        this.pdfReleaseStamp = pdfReleaseStamp;
+        this.bomFiles = bomFiles;
     }
 
     public AtomicReleasePackagePublisher(TimeProvider timeProvider)
@@ -30,6 +34,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         var vaultRoot = StorageLocationPolicy.Normalize(project.VaultLocation);
         var stagingDirectory = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-staging", package.Number));
         Directory.CreateDirectory(stagingDirectory);
+        if (bomFiles is not null) await bomFiles.PrepareReleaseFilesAsync(package, stagingDirectory, cancellationToken);
         var standard = package.StandardBomVersionId.HasValue
             ? package.StandardBomSnapshot.ToArray()
             : package.MechanicalBomSnapshot.Where(item => item.Kind == BomKind.Standard).ToArray();
@@ -196,23 +201,27 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         string? previewError = null;
         var previews = new Dictionary<Guid, DocumentPreviewArtifact>();
         if (repository is not null)
-        foreach (var source in conversionSources.Where(source => source.AlreadyReleased
-            && !(source.Kind == DocumentKind.Drawing && package.PdfTitleBlockSnapshot is { Enabled: true })))
+        foreach (var source in conversionSources.Where(source => source.AlreadyReleased))
         {
-            var version = await repository.FindDocumentVersionAsync(source.DocumentId, source.SourceVersionId, cancellationToken);
-            if (version?.Preview is not { } existing || existing.Format != (source.Kind == DocumentKind.Drawing ? DocumentPreviewFormat.Pdf : DocumentPreviewFormat.Step)
-                || !string.Equals(existing.SourceSha256, source.Sha256, StringComparison.OrdinalIgnoreCase)) continue;
-            var sourcePath = StorageLocationPolicy.ResolveUnder(vaultRoot, existing.StorageRelativePath);
-            if (!await ReleaseDeliveryFiles.MatchesAsync(sourcePath, existing.FileLength, existing.Sha256, cancellationToken)) continue;
-            var targetPath = ReleaseDeliveryFiles.PreviewPath(stagingDirectory, existing);
-            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-            File.Copy(sourcePath, targetPath, true);
-            if (!await ReleaseDeliveryFiles.MatchesAsync(targetPath, existing.FileLength, existing.Sha256, cancellationToken)) throw new PdmConflictException("已发布图纸的复制校验失败，未生成新版本。");
-            previews[source.DocumentId] = existing;
+            try
+            {
+                var existing = await new ReleasePreviewService(repository, previewConverter, timeProvider, pdfReleaseStamp: pdfReleaseStamp)
+                    .ReusePublishedPreviewAsync(conversionPackage, project, source, stagingDirectory, cancellationToken);
+                var sourcePath = StorageLocationPolicy.ResolveUnder(vaultRoot, existing.StorageRelativePath);
+                var targetPath = ReleaseDeliveryFiles.PreviewPath(stagingDirectory, existing);
+                Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+                File.Copy(sourcePath, targetPath, true);
+                if (!await ReleaseDeliveryFiles.MatchesAsync(targetPath, existing.FileLength, existing.Sha256, cancellationToken)) throw new PdmConflictException("已发布图纸的复制校验失败，未生成新版本。");
+                previews[source.DocumentId] = existing;
+            }
+            catch (Exception exception) when (exception is PdmRuleException or PdmConflictException or IOException)
+            {
+                previewError = string.Join("\n", new[] { previewError, exception is IOException ? "已发布预览文件无法读取，未调用转图，请检查存储。" : exception.Message }.Where(value => !string.IsNullOrEmpty(value)));
+            }
         }
         try
         {
-            var pendingSources = conversionSources.Where(source => !previews.ContainsKey(source.DocumentId)).ToArray();
+            var pendingSources = conversionSources.Where(source => !source.AlreadyReleased && !previews.ContainsKey(source.DocumentId)).ToArray();
             if (pendingSources.Length > 0)
                 foreach (var preview in await previewConverter.GenerateAsync(conversionPackage, project, pendingSources, stagingDirectory, cancellationToken)) previews[preview.Key] = preview.Value;
         }

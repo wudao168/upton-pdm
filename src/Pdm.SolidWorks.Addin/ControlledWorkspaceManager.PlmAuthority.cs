@@ -70,23 +70,27 @@ internal sealed partial class ControlledWorkspaceManager
         throw new IOException("无法在本机创建新的PLM工作副本，请检查可用磁盘空间和受控目录写入权限。", failure);
     }
 
-    private async Task DownloadManifestFilesAsync(ControlledOpenManifestDto manifest, string target, CancellationToken token)
+    private async Task DownloadManifestFilesAsync(ControlledOpenManifestDto manifest, string target, CancellationToken token,
+        IEnumerable<ControlledOpenFileDto> requested = null)
     {
+        var files = (requested ?? manifest.Files).ToArray();
+        var cachedDirectories = ControlledCacheMaintenance.FindDirectories(workspaceRoot, manifest.ProjectId, Guid.Empty);
         var completed = 0;
         var report = PreparationProgress;
         using (var pending = CancellationTokenSource.CreateLinkedTokenSource(token))
         using (var slots = new SemaphoreSlim(4))
         {
-            var downloads = manifest.Files.Select(async file =>
+            var downloads = files.Select(async file =>
             {
                 await slots.WaitAsync(pending.Token).ConfigureAwait(false);
                 try
                 {
-                    if (!TryCopyCachedVersion(manifest, file, target))
+                    if (!TryCopyCachedVersion(manifest, file, target, cachedDirectories))
                         await apiClient.DownloadControlledOpenFileAsync(file, target, pending.Token).ConfigureAwait(false);
+                    BindWorkspaceFile(target, target, manifest, file);
                     var count = Interlocked.Increment(ref completed);
-                    if (count == 1 || count % 10 == 0 || count == manifest.Files.Count)
-                        report?.Invoke("正在准备本地文件：" + file.FileName, count, manifest.Files.Count);
+                    if (count == 1 || count % 10 == 0 || count == files.Length)
+                        report?.Invoke("正在更新本地文件：" + file.FileName, count, files.Length);
                 }
                 catch { pending.Cancel(); throw; }
                 finally { slots.Release(); }
@@ -95,10 +99,12 @@ internal sealed partial class ControlledWorkspaceManager
         }
     }
 
-    private bool TryCopyCachedVersion(ControlledOpenManifestDto manifest, ControlledOpenFileDto file, string target)
+    private bool TryCopyCachedVersion(ControlledOpenManifestDto manifest, ControlledOpenFileDto file, string target,
+        IReadOnlyCollection<string> cachedDirectories)
     {
         var candidates = new List<string> { WorkingDirectory(manifest) };
         if (verifiedSnapshotDirectories.TryGetValue(manifest.RootDocumentId, out var snapshot)) candidates.Add(snapshot);
+        candidates.AddRange(cachedDirectories);
         foreach (var directory in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             var source = ManifestPath(directory, file);

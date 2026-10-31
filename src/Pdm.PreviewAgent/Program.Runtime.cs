@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Upton.Pdm.ClientShared;
 
 namespace Upton.Pdm.PreviewAgent;
 
@@ -38,6 +39,8 @@ internal static partial class Program
         {
             Options = AgentOptions.Load(args);
             if (Array.IndexOf(args, "--startup") >= 0 && !Options.StartWithWindows) return 0;
+            ClientDiagnostics.Initialize("preview-agent", typeof(Program).Assembly.GetName().Version.ToString());
+            ClientDiagnostics.BindPreviewAgent(Options.ServerUrl, Options.Token);
             string instanceName;
             using (var hash = System.Security.Cryptography.SHA256.Create())
                 instanceName = "Local\\UPLM.PreviewAgent." + BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(Options.DataDirectory.ToLowerInvariant()))).Replace("-", "").Substring(0, 16);
@@ -52,6 +55,7 @@ internal static partial class Program
                 using (var signal = new EventWaitHandle(false, EventResetMode.AutoReset, instanceName + ".Show"))
                 {
                     Journal = new AgentJournal(Path.Combine(Options.DataDirectory, "history"), Options.HistoryRetentionDays);
+                    Journal.ImportDiagnosticHistory();
                     Console.SetOut(new DiagnosticWriter());
                     Console.SetError(new DiagnosticWriter());
                     using (var window = new AgentMainForm())
@@ -165,7 +169,9 @@ internal static partial class Program
                 }
                 if (previous.StartWithWindows != next.StartWithWindows) AgentStartup.SetEnabled(next.StartWithWindows);
                 next.Save();
+                if (previous.DedicatedConversionHost != next.DedicatedConversionHost) Worker.Close();
                 Options = next;
+                ClientDiagnostics.BindPreviewAgent(next.ServerUrl, next.Token);
                 Journal.Prune(next.HistoryRetentionDays);
                 Journal.Log("成功", "代理设置已保存并生效。");
             }

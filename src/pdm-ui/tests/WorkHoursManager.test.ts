@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus, { ElDatePicker, ElSelect } from 'element-plus'
+import ElementPlus, { ElDatePicker, ElMessageBox, ElSelect } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import WorkHoursManager from '../src/components/WorkHoursManager.vue'
@@ -25,6 +25,142 @@ beforeEach(() => { vi.spyOn(calendar,'chinaToday').mockReturnValue('2026-10-20')
 afterEach(() => vi.restoreAllMocks())
 
 describe('工时填报与汇总', () => {
+  async function calendarMenu(w: Wrapper, date: string, action: string) {
+    await w.get(`[data-work-hours-date="${date}"]`).trigger('contextmenu',{clientX:300,clientY:300});await flushPromises()
+    await w.get('.wh-calendar-menu').findAll('button').find(x=>x.text()===action)!.trigger('click');await flushPromises()
+  }
+  const transfer = () => ({ setData: vi.fn(), effectAllowed: '', dropEffect: '' })
+
+  it('拖拽整日工时先核对再复制，源日期保留', async()=>{
+    const w=mountManager();await flushPromises();const data=transfer()
+    await w.get('[data-work-hours-date="2026-10-19"]').trigger('dragstart',{dataTransfer:data})
+    expect(data.setData).toHaveBeenCalledWith('application/x-uplm-work-hours','copy')
+    await w.get('[data-work-hours-date="2026-10-20"]').trigger('dragover',{dataTransfer:data})
+    await w.get('[data-work-hours-date="2026-10-20"]').trigger('drop',{dataTransfer:data});await flushPromises()
+    expect(w.get('.wh-copy-row').text()).toContain('P700012-1');expect(api.saveWorkHours).not.toHaveBeenCalled()
+    await button(w,'保存复制工时').trigger('click');await flushPromises()
+    expect(api.saveWorkHours).toHaveBeenCalledWith(expect.objectContaining({from:'2026-10-20',to:'2026-10-20',entries:[{date:'2026-10-20',projectId:'child',location:'厂内',hours:8}]}),'token')
+    expect(w.get('[data-work-hours-date="2026-10-19"]').text()).toContain('8 小时');w.unmount()
+  })
+
+  it('空白日、未来日期、同日及外来拖入不产生复制或保存', async()=>{
+    const w=mountManager();await flushPromises();const data=transfer()
+    expect(w.get('[data-work-hours-date="2026-10-18"]').attributes('draggable')).toBe('false')
+    await w.get('[data-work-hours-date="2026-10-20"]').trigger('drop',{dataTransfer:data});await flushPromises();expect(w.find('.wh-copy-row').exists()).toBe(false)
+    await w.get('[data-work-hours-date="2026-10-19"]').trigger('dragstart',{dataTransfer:data})
+    await w.get('[data-work-hours-date="2026-10-21"]').trigger('drop',{dataTransfer:data});await flushPromises();expect(w.find('.wh-copy-row').exists()).toBe(false)
+    await w.get('[data-work-hours-date="2026-10-19"]').trigger('dragstart',{dataTransfer:data})
+    await w.get('[data-work-hours-date="2026-10-19"]').trigger('drop',{dataTransfer:data});await flushPromises();expect(w.find('.wh-copy-row').exists()).toBe(false)
+    expect(api.saveWorkHours).not.toHaveBeenCalled();w.unmount()
+  })
+
+  it('右键复制和粘贴沿用整日核对及合并规则', async()=>{
+    const w=mountManager();await flushPromises()
+    await calendarMenu(w,'2026-10-19','复制');expect(w.find('.wh-calendar-menu').exists()).toBe(false)
+    await calendarMenu(w,'2026-10-20','粘贴');expect(w.get('.wh-copy-row').text()).toContain('P700012-1')
+    expect(api.saveWorkHours).not.toHaveBeenCalled();await button(w,'保存复制工时').trigger('click');await flushPromises()
+    expect(api.saveWorkHours).toHaveBeenCalledTimes(1);w.unmount()
+  })
+
+  it('剪切取消不删除，确认后通过一次移动请求完成并清空剪贴内容', async()=>{
+    const data=view();vi.mocked(api.readWorkHours).mockImplementation(async()=>structuredClone(data))
+    const move=vi.spyOn(api,'moveWorkHoursDay').mockImplementation(async input=>{const sheet=data.sheets.find(x=>x.month==='2026-10')!;sheet.entries=sheet.entries.map(x=>x.date===input.sourceDate?{...x,date:input.targetDate}:x);sheet.rowVersion++;return structuredClone(data)})
+    const w=mountManager();await flushPromises();await calendarMenu(w,'2026-10-19','剪切')
+    expect(w.get('[data-work-hours-date="2026-10-19"]').classes()).toContain('is-cut');expect(move).not.toHaveBeenCalled()
+    await calendarMenu(w,'2026-10-20','粘贴');expect(w.get('[aria-label="复制记录工时"]').attributes('readonly')).toBeDefined()
+    await w.get('.el-dialog__footer').findAll('button').find(x=>x.text()==='取消')!.trigger('click');await flushPromises();expect(move).not.toHaveBeenCalled()
+    await calendarMenu(w,'2026-10-20','粘贴');await button(w,'确认剪切').trigger('click');await flushPromises()
+    expect(move).toHaveBeenCalledWith({companyId:'c',sourceDate:'2026-10-19',targetDate:'2026-10-20',sourceRowVersion:2,targetRowVersion:2},'token')
+    expect(api.saveWorkHours).not.toHaveBeenCalled();expect(w.get('[data-work-hours-date="2026-10-19"]').text()).not.toContain('8 小时');expect(w.get('[data-work-hours-date="2026-10-20"]').text()).toContain('8 小时');w.unmount()
+  })
+
+  it('跨月剪切携带源和目标各自版本，失败时保留核对和源记录', async()=>{
+    const move=vi.spyOn(api,'moveWorkHoursDay').mockRejectedValue(new Error('源日期或目标日期的工时已更新，请刷新后重新剪切。'))
+    const w=mountManager();await flushPromises();await calendarMenu(w,'2026-10-19','剪切')
+    await w.get('[aria-label="填报日期"]').setValue('2026-09-30');await flushPromises();await calendarMenu(w,'2026-09-30','粘贴')
+    await button(w,'确认剪切').trigger('click');await flushPromises()
+    expect(move).toHaveBeenCalledWith(expect.objectContaining({sourceDate:'2026-10-19',targetDate:'2026-09-30',sourceRowVersion:2,targetRowVersion:0}),'token')
+    expect(w.find('.wh-copy-row').exists()).toBe(true);expect(api.saveWorkHours).not.toHaveBeenCalled();w.unmount()
+  })
+
+  it('右键删除整日工时须确认且只保存该日期的空记录', async()=>{
+    const confirm=vi.spyOn(ElMessageBox,'confirm').mockRejectedValueOnce('cancel').mockResolvedValueOnce('confirm' as never)
+    const w=mountManager();await flushPromises();await calendarMenu(w,'2026-10-19','删除');expect(api.saveWorkHours).not.toHaveBeenCalled()
+    await calendarMenu(w,'2026-10-19','删除')
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('2026-10-19'), '删除当日工时',expect.any(Object))
+    expect(api.saveWorkHours).toHaveBeenCalledWith({from:'2026-10-19',to:'2026-10-19',entries:[],versions:[{month:'2026-10',rowVersion:2}]},'token');w.unmount()
+  })
+
+  it('未保存编辑阻止拖拽和右键，切换公司清空剪切及拖拽状态', async()=>{
+    const w=mountManager();await flushPromises();await w.get('[aria-label="填报项目"]').setValue('child')
+    await w.get('[data-work-hours-date="2026-10-19"]').trigger('contextmenu',{clientX:300,clientY:300});await flushPromises();expect(w.find('.wh-calendar-menu').exists()).toBe(false)
+    await button(w,'取消修改').trigger('click');await calendarMenu(w,'2026-10-19','剪切')
+    await w.get('[data-work-hours-date="2026-10-19"]').trigger('dragstart',{dataTransfer:transfer()});await w.setProps({companyId:'other'});await flushPromises()
+    expect(w.find('.is-cut').exists()).toBe(false);expect(w.find('.is-drag-source').exists()).toBe(false)
+    await w.get('[data-work-hours-date="2026-10-20"]').trigger('contextmenu',{clientX:300,clientY:300});await flushPromises()
+    expect(w.get('.wh-calendar-menu').findAll('button').find(x=>x.text()==='粘贴')!.attributes('disabled')).toBeDefined();w.unmount()
+  })
+
+  it('右键菜单支持Escape和外部点击关闭', async()=>{
+    const w=mountManager();await flushPromises();await w.get('[data-work-hours-date="2026-10-19"]').trigger('contextmenu',{clientX:300,clientY:300});await flushPromises()
+    await w.get('.wh-calendar-menu').trigger('keydown',{key:'Escape'});expect(w.find('.wh-calendar-menu').exists()).toBe(false)
+    await w.get('[data-work-hours-date="2026-10-19"]').trigger('contextmenu',{clientX:300,clientY:300});await flushPromises();document.dispatchEvent(new Event('pointerdown'));await flushPromises()
+    expect(w.find('.wh-calendar-menu').exists()).toBe(false);w.unmount()
+  })
+  it('复制选中日期后粘贴到另一日，核对后追加并合并相同项目地点', async () => {
+    const data = view(), sheet = data.sheets.find(item => item.month === '2026-10')!
+    sheet.entries.push({ ...sheet.entries[0]!, id: 'target-child', date: '2026-10-20', hours: 2 },
+      { ...sheet.entries[0]!, id: 'target-root', date: '2026-10-20', projectId: 'root', projectCode: 'P700012', projectName: '设备', hours: 3 })
+    vi.mocked(api.readWorkHours).mockImplementation(async () => structuredClone(data))
+    const w = mountManager();await flushPromises()
+    await w.get('[aria-label="2026-10-19 8小时"]').trigger('click')
+    await button(w, '复制当日工时').trigger('click')
+    expect(button(w, '粘贴工时到此日').attributes('disabled')).toBeDefined()
+    await w.get('[aria-label="2026-10-20 5小时"]').trigger('click')
+    await button(w, '粘贴工时到此日').trigger('click');await flushPromises()
+    expect(w.get('.wh-copy-row').text()).toContain('P700012-1')
+    expect(w.text()).toContain('保存后当日合计 13 小时')
+    expect(api.saveWorkHours).not.toHaveBeenCalled()
+    await button(w, '保存复制工时').trigger('click');await flushPromises()
+    expect(api.saveWorkHours).toHaveBeenCalledWith({
+      from: '2026-10-20', to: '2026-10-20', versions: [{ month: '2026-10', rowVersion: 2 }],
+      entries: [{ date: '2026-10-20', projectId: 'child', location: '厂内', hours: 10 }, { date: '2026-10-20', projectId: 'root', location: '厂内', hours: 3 }],
+    }, 'token')
+    expect(data.sheets.find(item => item.month === '2026-10')?.entries[0]?.hours).toBe(8)
+    w.unmount()
+  })
+
+  it('剪贴内容支持跨月，未来日期不能粘贴，切换公司后清空', async () => {
+    const w = mountManager();await flushPromises()
+    await w.get('[aria-label="2026-10-19 8小时"]').trigger('click')
+    await button(w, '复制当日工时').trigger('click')
+    await w.get('[aria-label="填报日期"]').setValue('2026-10-21');await flushPromises()
+    expect(button(w, '粘贴工时到此日').attributes('disabled')).toBeDefined()
+    await w.get('[aria-label="填报日期"]').setValue('2026-09-30');await flushPromises()
+    await button(w, '粘贴工时到此日').trigger('click');await flushPromises()
+    await button(w, '保存复制工时').trigger('click');await flushPromises()
+    expect(api.saveWorkHours).toHaveBeenCalledWith({
+      from: '2026-09-30', to: '2026-09-30', entries: [{ date: '2026-09-30', projectId: 'child', location: '厂内', hours: 8 }],
+      versions: [{ month: '2026-09', rowVersion: 0 }],
+    }, 'token')
+    await w.setProps({ companyId: 'other' });await flushPromises()
+    expect(button(w, '粘贴工时到此日').attributes('disabled')).toBeDefined()
+    w.unmount()
+  })
+
+  it('追加超过24小时或复制行工时无效时不提交，并保留核对窗口', async () => {
+    const data=view(),sheet=data.sheets.find(item=>item.month==='2026-10')!
+    sheet.entries.push({...sheet.entries[0]!,id:'target',date:'2026-10-20',projectId:'root',hours:20})
+    vi.mocked(api.readWorkHours).mockImplementation(async()=>structuredClone(data))
+    const w=mountManager();await flushPromises()
+    await w.get('[aria-label="2026-10-19 8小时"]').trigger('click');await button(w,'复制当日工时').trigger('click')
+    await w.get('[aria-label="2026-10-20 20小时"]').trigger('click');await button(w,'粘贴工时到此日').trigger('click');await flushPromises()
+    expect(w.text()).toContain('当日工时合计不能超过24小时')
+    await button(w,'保存复制工时').trigger('click');await flushPromises();expect(api.saveWorkHours).not.toHaveBeenCalled()
+    await w.get('[aria-label="复制记录工时"]').setValue('0');await button(w,'保存复制工时').trigger('click');await flushPromises()
+    expect(api.saveWorkHours).not.toHaveBeenCalled();expect(w.find('.wh-copy-row').exists()).toBe(true);w.unmount()
+  })
+
   it('单框选择跨月区间后清除旧汇总，查询使用完整起止日期', async () => {
     const w = mountManager(); await flushPromises(); await button(w, '汇总工时').trigger('click'); await flushPromises()
     const range = w.findComponent(ElDatePicker)

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -16,6 +17,9 @@ internal sealed class ImportedComponentStorage
     internal static bool IsReadingInventory => inventoryReadDepth > 0;
     private readonly ISldWorks application;
     private readonly Dictionary<string, string[]> inventories = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+    // One storage reader belongs to one scan. Repeated descendants of the same
+    // imported instance need the same native feature proof, not another feature lookup.
+    private readonly Dictionary<string, bool> nativeFeatureProofs = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
 
     internal ImportedComponentStorage(ISldWorks application) => this.application = application ?? throw new ArgumentNullException(nameof(application));
 
@@ -28,23 +32,34 @@ internal sealed class ImportedComponentStorage
         var imported = component.GetImportedPath();
         if (string.IsNullOrWhiteSpace(imported)) return null;
         IModelDoc2 owner = null;
+        string ownerPath = null;
         var importedRoot = component;
         for (var parent = component.GetParent(); parent != null; parent = parent.GetParent())
         {
             var model = parent.GetModelDoc2() as IModelDoc2;
-            var path = model?.GetPathName();
+            var path = model?.GetPathName() ?? parent.GetPathName();
             if (NativeArchiveManifest.IsInterconnectCachePath(path)) { importedRoot = parent; continue; }
             if (parent.IsVirtual || string.IsNullOrWhiteSpace(path) || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(path)) continue;
             owner = model;
+            ownerPath = path;
             break;
         }
-        if (owner == null) owner = root;
-        var ownerPath = owner?.GetPathName();
-        if (owner == null || owner.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY || !IsStableOwner(ownerPath)) return null;
+        // A lightweight native parent can have a persistent path without exposing
+        // its ModelDoc2. Do not walk past that storage boundary to another assembly.
+        if (ownerPath == null) { owner = root; ownerPath = owner?.GetPathName(); }
+        if (!IsStableOwner(ownerPath) || owner != null && owner.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY) return null;
         // Native imported features carry their generated documents in the saved parent.
         // Pack and Go may still list those IC caches as associative references after a
         // reopen; their presence is not evidence that the native parent lacks the data.
-        if (IsNativeImportedComponent(importedRoot, root)) return ownerPath;
+        var featureKey = ownerPath + "\0" + importedRoot.Name2;
+        if (!nativeFeatureProofs.TryGetValue(featureKey, out var nativeFeature))
+        {
+            nativeFeature = IsNativeImportedComponent(importedRoot, root);
+            // Inventory reads can activate another document, making a previously
+            // unavailable feature readable. Do not cache that negative strict result.
+            if (nativeFeature || !AllowInventory) nativeFeatureProofs[featureKey] = nativeFeature;
+        }
+        if (nativeFeature) return ownerPath;
         if (!AllowInventory) return null;
         var rootPath = root?.GetPathName();
         if (!IsStableOwner(rootPath)) return null;
@@ -66,10 +81,11 @@ internal sealed class ImportedComponentStorage
     internal static bool IsNativeImportedComponent(IComponent2 component, IModelDoc2 root)
     {
         var parent = component.GetParent();
-        var host = (parent?.GetModelDoc2() as IModelDoc2) ?? root;
-        if (!(host is IAssemblyDoc assembly)) return false;
+        var host = parent?.GetModelDoc2() as IModelDoc2;
         var name = (component.Name2 ?? string.Empty).Split('/').Last();
-        var feature = assembly.FeatureByName(name) as IFeature;
+        var feature = parent != null && host == null
+            ? parent.FeatureByName(name) as IFeature
+            : ((host ?? root) as IAssemblyDoc)?.FeatureByName(name) as IFeature;
         // This is the native instance identifier within its actual parent model, not
         // a filename search. GetSpecificFeature2 can be null for inactive parent models.
         return feature?.Is3DInterconnectFeature == true && string.Equals(feature.Name, name, StringComparison.OrdinalIgnoreCase);
@@ -92,14 +108,18 @@ internal sealed class ImportedComponentStorage
             {
                 try
                 {
-                    Activate(owner);
-                    pack = owner.Extension.GetPackAndGo() as IPackAndGo;
+                    ReadInventoryStep(ownerPath, "激活需要核对的图档", () => { Activate(owner); return true; });
+                    pack = ReadInventoryStep(ownerPath, "获取SolidWorks原生打包清单", () => owner.Extension.GetPackAndGo() as IPackAndGo);
                     if (pack == null) throw new InvalidOperationException("无法读取所属装配的原生打包清单：" + ownerPath);
-                    pack.IncludeDrawings = includeDrawings;
-                    pack.IncludeSuppressed = true;
-                    if (!pack.GetDocumentNames(out var values) || !(values is Array names))
-                        throw new InvalidOperationException("所属装配未返回可核对的原生打包清单：" + ownerPath);
-                    var files = names.Cast<object>().Select(Convert.ToString).ToArray();
+                    ReadInventoryStep(ownerPath, includeDrawings ? "检索关联工程图（等待SolidWorks返回）" : "设置原生模型清单范围",
+                        () => { pack.IncludeDrawings = includeDrawings; return true; });
+                    ReadInventoryStep(ownerPath, "核对原生清单中的压缩组件", () => { pack.IncludeSuppressed = true; return true; });
+                    var files = ReadInventoryStep(ownerPath, "枚举原生清单中的实际文件", () =>
+                    {
+                        if (!pack.GetDocumentNames(out var values) || !(values is Array names))
+                            throw new InvalidOperationException("所属装配未返回可核对的原生打包清单：" + ownerPath);
+                        return names.Cast<object>().Select(Convert.ToString).ToArray();
+                    });
                     if (files.Length == 0 || !string.Equals(files[0], ownerPath, StringComparison.OrdinalIgnoreCase))
                         throw new InvalidOperationException("原生打包清单与所属装配不一致，已保留本地文件。所属装配：" + ownerPath
                             + "；清单根图档：" + files.FirstOrDefault());
@@ -125,6 +145,28 @@ internal sealed class ImportedComponentStorage
                     catch (Exception error) { PluginDiagnosticLog.Record("图档恢复", "原生清单读取后恢复原活动文档失败，清单仍有效：" + error); }
             }
             finally { inventoryReadDepth--; }
+        }
+    }
+
+    private static T ReadInventoryStep<T>(string ownerPath, string message, Func<T> read)
+    {
+        var session = ArchiveSession.Current;
+        session?.Token.ThrowIfCancellationRequested();
+        session?.ReportFile(0, 0, Path.GetFileName(ownerPath), "原生清单读取：" + message);
+        PluginDiagnosticLog.Record("原生清单步骤", "开始：" + message + "；图档=" + ownerPath);
+        var timer = Stopwatch.StartNew();
+        var returned = false;
+        try
+        {
+            var result = read();
+            returned = true;
+            session?.Token.ThrowIfCancellationRequested();
+            return result;
+        }
+        finally
+        {
+            PluginDiagnosticLog.Record("原生清单步骤", (returned ? "接口已返回：" : "读取中断：") + message
+                + "；耗时=" + timer.ElapsedMilliseconds + "毫秒；图档=" + ownerPath);
         }
     }
 

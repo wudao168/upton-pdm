@@ -40,7 +40,8 @@ public sealed class IndependentBusinessPermissionTests
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         var contacts = new ProjectContactInformationService(repository, new InMemoryProjectContactInformationRepository(), TimeProvider.System);
-        var nameplates = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(), TimeProvider.System);
+        var nameplates = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(repository), TimeProvider.System);
+        await repository.SetChildProjectDesignersAsync(project.Id, ["engineer"], "admin", default);
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectContactEdit], default);
         Assert.True((await contacts.GetAsync(project.Id, "engineer", UserRole.Engineer, default)).CanEdit);
         Assert.False((await nameplates.GetAsync(project.Id, "engineer", UserRole.Engineer, default)).CanEdit);

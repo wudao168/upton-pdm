@@ -366,7 +366,11 @@ public sealed record UpdateReleasePackageDraftRequest(
 
 public sealed record UpdateDrawingDeliveryRequest(string Priority, DateOnly RequiredOn);
 
-public sealed record ProductionDrawingArchiveRequest(IReadOnlyList<Guid> VersionIds, string Format);
+public sealed record ProductionDrawingArchiveSelection(Guid ReleasePackageId, Guid DocumentId, Guid VersionId);
+public sealed record ProductionDrawingArchiveRequest(IReadOnlyList<Guid> VersionIds, string Format)
+{
+    public IReadOnlyList<ProductionDrawingArchiveSelection> Items { get; init; } = [];
+}
 
 public sealed record EmergencyApprovalRequest(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] ApprovalDecision Decision,

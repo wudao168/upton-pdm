@@ -19,6 +19,42 @@ namespace Upton.Pdm.Api.Tests;
 
 public sealed class ProductionDrawingAccessTests(PdmApiFactory factory) : IClassFixture<PdmApiFactory>
 {
+    [Fact]
+    public async Task ReusedDrawingVersionKeepsBothPublicationPdfsAndArchiveSelectionsSeparate()
+    {
+        using var fixture = await CreateFixtureAsync();
+        var item = fixture.Package.NonStandardBomSnapshot.Single() with { Quantity = 1 };
+        PdfTitleBlockSnapshot Snapshot(string quantity) => new(["quantity"], new Dictionary<Guid, PdfDrawingTitleBlockSnapshot>
+            { [fixture.Drawing.Id] = new(fixture.DrawingVersion.Id, fixture.DrawingVersion.Sha256, new Dictionary<string, string> { ["quantity"] = quantity }, [item.Id]) }, true);
+        var first = fixture.Package with { WholeSetMultiplier = 1, NonStandardBomSnapshot = [item], PdfTitleBlockSnapshot = Snapshot("1"),
+            PdfDeliveryArtifacts = new Dictionary<Guid, DocumentPreviewArtifact> { [fixture.Drawing.Id] = fixture.DrawingVersion.Preview! } };
+        Store<ReleasePackage>(fixture.Repository, "packages")[first.Id] = first;
+        var secondArtifact = (await ReleasedVersionAsync(fixture.Drawing, Guid.NewGuid(), fixture.Root, DocumentPreviewFormat.Pdf, "增补PDF2")).Preview!;
+        var second = first with { Id = Guid.NewGuid(), Number = "RP-SECOND", Scope = ReleaseScope.NonStandardSupplement,
+            PublishedAt = first.PublishedAt!.Value.AddMinutes(1), NonStandardBomSnapshot = [item with { Quantity = 3 }],
+            VersionBindings = [new(fixture.Drawing.Id, fixture.DrawingVersion.Id, "B", fixture.DrawingVersion.Sha256, true, "复用.SLDDRW", false)],
+            PdfTitleBlockSnapshot = Snapshot("2"), PdfDeliveryArtifacts = new Dictionary<Guid, DocumentPreviewArtifact> { [fixture.Drawing.Id] = secondArtifact } };
+        await fixture.Repository.CreateReleasePackageAsync(second, default);
+        var list = (await fixture.Client.GetFromJsonAsync<ProductionDrawingItem[]>($"/api/production-drawings?includeHistory=true&projectId={fixture.Project.Id}"))!;
+        Assert.Equal(2, list.Length);
+        Assert.Single(list, drawing => drawing.ReleasePackageId == first.Id && !drawing.IsCurrent);
+        Assert.Single(list, drawing => drawing.ReleasePackageId == second.Id && drawing.IsCurrent);
+        using var original = await fixture.Client.GetAsync(fixture.PreviewUrl(false) + $"?releasePackageId={first.Id}");
+        using var increment = await fixture.Client.GetAsync(fixture.PreviewUrl(false) + $"?releasePackageId={second.Id}");
+        Assert.Equal("正式PDF", await original.Content.ReadAsStringAsync());
+        Assert.Equal("增补PDF2", await increment.Content.ReadAsStringAsync());
+        using var archiveResponse = await fixture.Client.PostAsJsonAsync($"/api/projects/{fixture.Project.Id}/production-drawings/archive", new {
+            versionIds = new[] { fixture.DrawingVersion.Id }, format = "Pdf", items = new[] {
+                new { releasePackageId = first.Id, documentId = fixture.Drawing.Id, versionId = fixture.DrawingVersion.Id },
+                new { releasePackageId = second.Id, documentId = fixture.Drawing.Id, versionId = fixture.DrawingVersion.Id } } });
+        Assert.True(archiveResponse.IsSuccessStatusCode, await archiveResponse.Content.ReadAsStringAsync());
+        using var archive = new ZipArchive(await archiveResponse.Content.ReadAsStreamAsync());
+        Assert.Equal(2, archive.Entries.Count(entry => entry.FullName.EndsWith(".pdf", StringComparison.Ordinal)));
+        using var oldReader = new StreamReader(archive.Entries.Single(entry => entry.FullName.StartsWith(first.Number + "/", StringComparison.Ordinal) && entry.FullName.EndsWith(".pdf", StringComparison.Ordinal)).Open());
+        using var newReader = new StreamReader(archive.Entries.Single(entry => entry.FullName.StartsWith(second.Number + "/", StringComparison.Ordinal) && entry.FullName.EndsWith(".pdf", StringComparison.Ordinal)).Open());
+        Assert.Equal("正式PDF", await oldReader.ReadToEndAsync());
+        Assert.Equal("增补PDF2", await newReader.ReadToEndAsync());
+    }
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -162,6 +198,41 @@ public sealed class ProductionDrawingAccessTests(PdmApiFactory factory) : IClass
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         Assert.Contains("已作废", await response.Content.ReadAsStringAsync());
         Assert.NotEqual("application/zip", response.Content.Headers.ContentType!.MediaType);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReleaseListPreviewReadsOnlyTheSelectedPackageAndRequiresDeliveredFile(bool step)
+    {
+        using var fixture = await CreateFixtureAsync();
+        Store<ReleasePackage>(fixture.Repository, "packages")[fixture.Package.Id] = fixture.Package with {
+            LocksDocuments = true,
+            VersionBindings = [new(fixture.Drawing.Id, fixture.DrawingVersion.Id, "B", fixture.DrawingVersion.Sha256, true, fixture.Drawing.FileName, false),
+                new(fixture.Model.Id, fixture.ModelVersion.Id, "B", fixture.ModelVersion.Sha256, true, fixture.Model.FileName, false)]
+        };
+        var version = step ? fixture.ModelVersion : fixture.DrawingVersion;
+        var document = step ? fixture.Model : fixture.Drawing;
+        var delivered = ReleaseDeliveryFiles.PreviewPath(fixture.Root, version.Preview!);
+        Directory.CreateDirectory(Path.GetDirectoryName(delivered)!);
+        File.Copy(Path.Combine(fixture.Root, version.Preview!.StorageRelativePath), delivered);
+        var newer = await ReleasedVersionAsync(document, Guid.NewGuid(), fixture.Root, version.Preview.Format, "其他发布包的文件");
+        Store<DocumentVersion>(fixture.Repository, "versions")[newer.Id] = newer;
+        var url = $"/api/projects/{fixture.Project.Id}/release-preview-items/{fixture.Package.Id}/{document.Id}/file";
+        using var response = await fixture.Client.GetAsync(url);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(step ? "model/step" : "application/pdf", response.Content.Headers.ContentType!.MediaType);
+        Assert.Equal(step ? "正式STEP" : "正式PDF", await response.Content.ReadAsStringAsync());
+        using var wrongPackage = await fixture.Client.GetAsync(url.Replace(fixture.Package.Id.ToString(), Guid.NewGuid().ToString()));
+        Assert.Equal(HttpStatusCode.NotFound, wrongPackage.StatusCode);
+        File.Delete(delivered);
+        using var missing = await fixture.Client.GetAsync(url);
+        Assert.Equal(HttpStatusCode.Conflict, missing.StatusCode);
+        using var forbidden = await fixture.Client.GetAsync(url.Replace(fixture.Project.Id.ToString(), Guid.NewGuid().ToString()));
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+        fixture.Client.DefaultRequestHeaders.Authorization = null;
+        using var unauthenticated = await fixture.Client.GetAsync(url);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticated.StatusCode);
     }
 
     private async Task<Fixture> CreateFixtureAsync()

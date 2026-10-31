@@ -1,8 +1,12 @@
+import { u9UnitName } from './u9Units'
+import { projectReleaseAttention } from './releasePreviewState'
+
 export type ProductionRoute = 'Self' | 'External'
 export type ProductionMovementKind = 'ProductionReceived' | 'MachiningReceived' | 'Trace' | 'Pause' | 'Resume' | 'Cancelled' | 'TaskCancelled' | 'StageScrap' | 'Start' | 'MachiningCompleted' | 'PackingStarted' | 'Packed' | 'OutsideSent' | 'OutsideReturned'
   | 'ExternalDelivered' | 'QualityReceived' | 'Pass' | 'Rework' | 'Scrap' | 'ReworkCompleted' | 'Issue' | `Step:${string}`
 
 export interface ProductionLine {
+  nameplateContent?: import('./projectNameplate').NameplateContent | null
   displayRevision?: string | null
   id: string
   materialKey: string
@@ -87,7 +91,7 @@ export interface ProductionPostBinding { id: string; subjectType: 'User' | 'Role
 export interface ProductionFlowNode { id: string; name: string; stage: string; post: string; kind: string; required: boolean; afterNodeId?: string | null }
 export interface ProductionScanCatalog { companyId: string; workstations: ProductionWorkstation[]; bindings: ProductionPostBinding[]; rowVersion: number; flowMode?: 'ResourceOperations' | 'DepartmentHandover'; flowNodes?: ProductionFlowNode[] | null; controlRoleCodes?: string[]; labelWidthMm?: number; labelHeightMm?: number }
 export interface ProductionScanAction { lotId: string; kind: ProductionMovementKind; label: string; remainingQuantity: number; bindingId: string; post: string; workstationId: string; workstationName: string; resourceGroup: string; sourceKind?: string | null; sourceName?: string | null }
-export interface ProductionScanContext { actions: ProductionScanAction[]; hint: string; canCancelUnassignedDemand?: boolean; canPrintLabels?: boolean; labelWidthMm?: number; labelHeightMm?: number }
+export interface ProductionScanContext { actions: ProductionScanAction[]; hint: string; relatedDemands?: ProductionScanResult[]; canCancelUnassignedDemand?: boolean; canPrintLabels?: boolean; labelWidthMm?: number; labelHeightMm?: number }
 export const productionPosts: Record<string, string> = { Reception: '生产签收', Machining: '机加', Packing: '包装', QualityReceiving: '质检收料', Inspection: '质量检验', Issue: '领用', SupplyChain: '供应链流转', MachiningReception: '机加主管接图', Trace: '资源组追溯（非必经）', Control: '流程管理' }
 export const productionMovementLabels: Record<string, string> = { MachiningReceived: '机加主管接图', Trace: '资源组扫码追溯', Pause: '暂停流程', Resume: '恢复流程', ProductionReceived: '生产签收', Start: '机加开工', MachiningCompleted: '机加完工', PackingStarted: '包装接收', Packed: '包装完成／交检', QualityReceived: '质检收料', Pass: '检验合格', Rework: '检验返工', Scrap: '检验报废', ReworkCompleted: '返工完成', Issue: '确认领用', OutsideSent: '中间委外送出', OutsideReturned: '中间委外返回', ExternalDelivered: '外协交货', Assigned: '分配批次', Scheduled: '确认排程', AllocationChanged: '修改分配', PromiseChanged: '调整承诺日期', Cancelled: '取消业务需求', TaskCancelled: '取消加工任务', StageScrap: '环节报废', Transferred: '转新版' }
 export function selfProductionState(state: ProductionReleaseState, matches: (lot: ProductionLot) => boolean = () => true): ProductionReleaseState | undefined {
@@ -137,6 +141,8 @@ export interface ProductionReleaseSummary {
   packageNumber: string
   scope: string
   publishedAt: string
+  receivedAt?: string | null
+  hasReleaseAttention?: boolean
   status: string
   totalLines: number
   totalQuantity: number
@@ -150,6 +156,10 @@ export interface ProductionReleaseSummary {
   unplannedLines: number
 }
 export interface ProductionProject { id: string; code: string; name: string; packages: ProductionReleaseSummary[] }
+
+export function productionReleaseAttention(item: Pick<ProductionReleaseSummary, 'receivedAt' | 'hasReleaseAttention'>) {
+  return projectReleaseAttention({ hasReleaseAttention: item.hasReleaseAttention, hasUnreceivedNonStandardRelease: !item.receivedAt }, undefined, false, Date.now())
+}
 export interface ProductionCapacityDay { resourceGroupId: string; date: string; availableHours: number }
 export interface ProductionCapacityUsage extends ProductionCapacityDay { committedHours: number }
 export interface ProductionCapacityView {
@@ -165,6 +175,18 @@ export interface ProductionScanResult {
   name: string
   revision: string
   status: string
+  requiredQuantity?: number | null
+  unassignedQuantity?: number | null
+  lotQuantity?: number | null
+  unit?: string | null
+  isSupplement?: boolean
+  relatedToLineId?: string | null
+}
+
+export function productionScanQuantityLabel(item: ProductionScanResult) {
+  if (item.requiredQuantity == null) return ''
+  const quantity = item.lotQuantity != null ? `批次数量 ${item.lotQuantity}` : `${item.isSupplement ? '增补需求' : '原需求'} ${item.requiredQuantity}`
+  return `${quantity}${item.unit ? ` ${u9UnitName(item.unit)}` : ''}${item.unassignedQuantity ? `；待分配 ${item.unassignedQuantity}` : ''}；${item.status}`
 }
 
 /** 可在内网 HTTP 页面使用；此处不能依赖仅安全上下文可用的 randomUUID。 */

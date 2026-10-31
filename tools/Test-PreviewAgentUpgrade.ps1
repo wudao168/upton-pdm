@@ -15,14 +15,16 @@ $code = $code.Replace($guard, '# 隔离测试不操作真实服务，无需管�
 $testRoot = Join-Path $repository ('tmp\preview-upgrade-tests-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 $passed = 0
-foreach ($scenario in @('stopped', 'active-unreachable', 'running-task', 'busy', 'custom-bind', 'startup-failure', 'tampered', 'foreground', 'foreground-rollback', 'paused-idle', 'preserve-installer')) {
-    $version = if ($scenario -like 'foreground*' -or $scenario -in @('paused-idle','preserve-installer')) { '1.2.0.0' } else { '1.1.4.0' }
+foreach ($scenario in @('stopped', 'active-unreachable', 'running-task', 'busy', 'custom-bind', 'startup-failure', 'tampered', 'foreground', 'foreground-rollback', 'paused-idle', 'preserve-installer', 'dedicated', 'dedicated-preferences', 'dedicated-rollback', 'blocked-startup', 'active-conversion', 'fresh-startup')) {
+    $startupRecovery = $scenario -in @('blocked-startup','active-conversion','fresh-startup')
+    $version = if ($startupRecovery) { '1.2.3.0' } elseif ($scenario -like 'foreground*' -or $scenario -like 'dedicated*' -or $scenario -in @('paused-idle','preserve-installer')) { '1.2.0.0' } else { '1.1.4.0' }
     $directory = Join-Path $testRoot $scenario
     $package = Join-Path $directory 'package'
     $install = Join-Path $directory 'install'
     New-Item -ItemType Directory -Path (Join-Path $package 'payload\preview-worker'), (Join-Path $install 'preview-worker') -Force | Out-Null
     $scriptFile = Join-Path $package 'Update-PreviewAgent.ps1'
-    [IO.File]::WriteAllText($scriptFile, $code, [Text.UTF8Encoding]::new($true))
+    $isolatedCode = $code.Replace("[Environment]::GetFolderPath('LocalApplicationData')", "'" + $directory.Replace("'", "''") + "'")
+    [IO.File]::WriteAllText($scriptFile, $isolatedCode, [Text.UTF8Encoding]::new($true))
     $files = foreach ($relative in @('Upton.Pdm.PreviewAgent.exe', 'preview-worker\Upton.Pdm.SolidWorks.PreviewWorker.exe')) {
         [IO.File]::WriteAllText((Join-Path $install $relative), 'old-program')
         $payload = Join-Path (Join-Path $package 'payload') $relative
@@ -34,6 +36,15 @@ foreach ($scenario in @('stopped', 'active-unreachable', 'running-task', 'busy',
     $configuration = Join-Path $install 'PdmPreviewAgent.json'
     @{ Port = 5199; BindAddress = $bind; Token = 'preserve-test-configuration' } | ConvertTo-Json | Set-Content -LiteralPath $configuration -Encoding UTF8
     $configurationHash = (Get-FileHash -LiteralPath $configuration).Hash
+    $preferencesPath = $null
+    if ($scenario -in @('dedicated-preferences','dedicated-rollback')) {
+        $hasher = [Security.Cryptography.SHA256]::Create()
+        try { $identity = [BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes(($install + '\').ToLowerInvariant()))).Replace('-','').Substring(0,16) }
+        finally { $hasher.Dispose() }
+        $preferencesPath = Join-Path $directory "UPLM\preview-agent\$identity\settings.json"
+        New-Item -ItemType Directory -Path (Split-Path $preferencesPath) -Force | Out-Null
+        @{ Port=5199; Token='dpapi:preserve-encrypted-token'; Name='保留代理名称'; DedicatedConversionHost=$false } | ConvertTo-Json | Set-Content -LiteralPath $preferencesPath -Encoding UTF8
+    }
     if ($scenario -eq 'tampered') { [IO.File]::WriteAllText((Join-Path $package 'payload\Upton.Pdm.PreviewAgent.exe'), 'corrupt') }
     $state = [pscustomobject]@{ Started = $false; Starts = 0; Stops = 0; Migrated = $false; ManagerDisabled = $false; Restored = 0; Calls = [Collections.Generic.List[string]]::new() }
     function Get-ScheduledTask {
@@ -48,9 +59,12 @@ foreach ($scenario in @('stopped', 'active-unreachable', 'running-task', 'busy',
     function Invoke-RestMethod {
         param($Uri, $TimeoutSec)
         $state.Calls.Add([string]$Uri)
-        if (-not $state.Started -and $scenario -notin @('busy','custom-bind','paused-idle','preserve-installer')) { throw '模拟代理已停止' }
-        [pscustomobject]@{ busy = ($scenario -in @('busy','paused-idle')); processing = ($scenario -eq 'busy'); queued = 0; workerPath = (Join-Path $install 'preview-worker\Upton.Pdm.SolidWorks.PreviewWorker.exe');
-            agentVersion = $(if ($scenario -in @('startup-failure','foreground-rollback')) { '1.1.3.0' } else { $version }); workerVersion = $version }
+        if (-not $state.Started -and $scenario -notin @('busy','custom-bind','paused-idle','preserve-installer','blocked-startup','active-conversion','fresh-startup')) { throw '模拟代理已停止' }
+        [pscustomobject]@{ busy = ($scenario -in @('busy','paused-idle') -or $startupRecovery -and -not $state.Started); processing = ($scenario -eq 'busy' -or $startupRecovery -and -not $state.Started); queued = 0; workerPath = (Join-Path $install 'preview-worker\Upton.Pdm.SolidWorks.PreviewWorker.exe');
+            solidWorksPid = $(if ($scenario -eq 'active-conversion') {123} else {0});total=32;completed=0;
+            conversionStage = $(if ($scenario -eq 'active-conversion') {'转换文件：drawing.SLDDRW'} else {'启动或连接SolidWorks'});
+            progressUpdatedAt = $(if ($scenario -eq 'fresh-startup') {[DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss')} else {[DateTime]::Now.AddMinutes(-3).ToString('yyyy-MM-dd HH:mm:ss')});
+            agentVersion = $(if ($scenario -in @('startup-failure','foreground-rollback','dedicated-rollback')) { '1.1.3.0' } elseif($startupRecovery -and -not $state.Started){'1.2.2.0'} else { $version }); workerVersion = $version }
     }
     function Get-CimInstance {
         param($ClassName)
@@ -74,16 +88,23 @@ foreach ($scenario in @('stopped', 'active-unreachable', 'running-task', 'busy',
         $state.Migrated = $true
     }
     $failure = $null
-    try { & $scriptFile -InstallRoot $install -PreserveProcessId 321 | Out-Null } catch { $failure = $_.Exception.Message }
-    $success = $scenario -in @('stopped','custom-bind','foreground','paused-idle','preserve-installer')
+    try { & $scriptFile -InstallRoot $install -PreserveProcessId 321 -EnableDedicatedRecovery:($scenario -like 'dedicated*' -or $startupRecovery) -RecoverBlockedStartup:$startupRecovery | Out-Null } catch { $failure = $_.Exception.Message }
+    $success = $scenario -in @('stopped','custom-bind','foreground','paused-idle','preserve-installer','dedicated','dedicated-preferences','blocked-startup')
     if ($success -and $failure) { throw "$scenario 升级不应失败：$failure" }
     if (-not $success -and -not $failure) { throw "$scenario 未阻止预期的失败" }
-    if ((Get-FileHash -LiteralPath $configuration).Hash -ne $configurationHash) { throw "$scenario 改写了配置" }
+    if (($scenario -like 'dedicated*' -or $startupRecovery) -and $success) {
+        $afterConfiguration=Get-Content -LiteralPath $configuration -Raw -Encoding UTF8|ConvertFrom-Json
+        if (!$afterConfiguration.DedicatedConversionHost -or $afterConfiguration.Token -ne 'preserve-test-configuration') { throw '专用转图回收未启用或原令牌被改变' }
+    } elseif ((Get-FileHash -LiteralPath $configuration).Hash -ne $configurationHash) { throw "$scenario 改写了配置" }
+    if ($preferencesPath) {
+        $afterPreferences=Get-Content -LiteralPath $preferencesPath -Raw -Encoding UTF8|ConvertFrom-Json
+        if ($afterPreferences.Token -ne 'dpapi:preserve-encrypted-token' -or $afterPreferences.Name -ne '保留代理名称' -or $afterPreferences.DedicatedConversionHost -ne $success) { throw "$scenario 未正确保存或回退原用户设置" }
+    }
     foreach ($relative in $files.Path) {
         $expected = if ($success) { 'new-program' } else { 'old-program' }
         if ([IO.File]::ReadAllText((Join-Path $install $relative)) -ne $expected) { throw "$scenario 程序文件状态不正确" }
     }
-    if ($success -or $scenario -in @('startup-failure','foreground-rollback')) {
+    if ($success -or $scenario -in @('startup-failure','foreground-rollback','dedicated-rollback')) {
         $backups = @(Get-ChildItem -LiteralPath $install -Directory -Filter 'backup-*')
         if ($backups.Count -ne 1 -or [IO.File]::ReadAllText((Join-Path $backups[0].FullName $files[0].Path)) -ne 'old-program') { throw "$scenario 未备份原程序" }
     } elseif ($state.Stops -ne 0 -or $state.Starts -ne 0) { throw "$scenario 在校验失败时操作了任务" }

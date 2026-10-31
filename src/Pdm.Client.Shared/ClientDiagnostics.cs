@@ -34,6 +34,7 @@ public static class ClientDiagnostics
     private static string lastRecord = "";
     private static DateTime lastRecordAt;
     private static string owner;
+    private static bool previewAgent;
     private static readonly Dictionary<string, DateTime> RecentErrors = new Dictionary<string, DateTime>();
 
     public static void Initialize(string source, string build)
@@ -105,6 +106,7 @@ public static class ClientDiagnostics
                     server = normalized;
                     token = accessToken;
                     company = companyId;
+                    previewAgent = false;
                     nextUpload = retryAfter = DateTime.MinValue;
                     failures = 0;
                 }
@@ -112,6 +114,36 @@ public static class ClientDiagnostics
             Record("runtime", "登录", "日志上传身份已就绪");
         }
         catch { }
+    }
+
+    public static void BindPreviewAgent(string apiBase, string agentToken)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(agentToken)) { Pause(); return; }
+            var normalized = new Uri(apiBase.TrimEnd('/') + "/").AbsoluteUri;
+            using (var sha = SHA256.Create())
+            {
+                var key = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(normalized.ToLowerInvariant() + "|preview-agent|" + agentToken))).Replace("-", "");
+                lock (Sync)
+                {
+                    SealOpenFiles();
+                    var destination = Path.Combine(Root, key, component);
+                    Directory.CreateDirectory(destination);
+                    var unbound = Path.Combine(Root, "unbound", component);
+                    RecoverAbandonedFiles(unbound);
+                    if (scope == unbound && Directory.Exists(unbound))
+                        foreach (var file in Directory.GetFiles(unbound, "*.jsonl"))
+                            try { File.Move(file, Path.Combine(destination, Path.GetFileName(file))); } catch (IOException) { }
+                    scope = destination;
+                    RecoverAbandonedFiles(scope);
+                    server = normalized; token = agentToken; company = ""; previewAgent = true;
+                    nextUpload = retryAfter = DateTime.MinValue; failures = 0;
+                }
+            }
+            Record("runtime", "转图日志上传", "已使用登记的代理身份连接服务器");
+        }
+        catch { Pause(); }
     }
 
     public static void Pause(string expectedToken = null)
@@ -168,11 +200,13 @@ public static class ClientDiagnostics
         try
         {
             string directory, target, credential, tenant;
+            bool agent;
             lock (Sync)
             {
                 Cleanup();
                 if (string.IsNullOrEmpty(token) || DateTime.UtcNow < nextUpload || DateTime.UtcNow < retryAfter) return;
                 directory = scope; target = server; credential = token; tenant = company;
+                agent = previewAgent;
                 SealOpenFiles(); // Only sealed immutable files may be read by another process.
                 RecoverAbandonedFiles(directory);
                 nextUpload = DateTime.UtcNow.AddMinutes(5);
@@ -217,10 +251,14 @@ public static class ClientDiagnostics
                 using (var compressed = new MemoryStream())
                 {
                     using (var gzip = new GZipStream(compressed, CompressionMode.Compress, true)) gzip.Write(payload, 0, payload.Length);
-                    using (var request = new HttpRequestMessage(HttpMethod.Post, new Uri(new Uri(target), "api/client-logs/batches")))
+                    using (var request = new HttpRequestMessage(HttpMethod.Post, new Uri(new Uri(target), agent ? "api/client-logs/preview-agent/batches" : "api/client-logs/batches")))
                     {
-                        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential);
-                        ClientDeviceIdentity.Apply(request);
+                        if (agent) request.Headers.Add("X-Pdm-Agent-Token", credential);
+                        else
+                        {
+                            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential);
+                            ClientDeviceIdentity.Apply(request);
+                        }
                         if (!string.IsNullOrEmpty(tenant)) request.Headers.Add("X-Company-Id", tenant);
                         request.Content = new ByteArrayContent(compressed.ToArray());
                         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/gzip");

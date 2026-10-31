@@ -28,6 +28,7 @@ describe('生产图纸专用下载', () => {
     await downloadProductionDrawingFile(drawing, 'Pdf', 'token')
     expect(request).toHaveBeenCalledWith(expect.stringContaining('/production-drawings/drawing/versions/released-drawing/preview'),
       expect.objectContaining({ cache: 'no-store' }))
+    expect(request.mock.calls[0]![0]).toContain('releasePackageId=')
     expect(saved.write).toHaveBeenCalledOnce()
     expect(saved.close).toHaveBeenCalledOnce()
   })

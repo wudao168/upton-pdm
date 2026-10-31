@@ -1,3 +1,5 @@
+import { computed } from 'vue'
+import { projectCenterAccessKey, projectCenterSchema } from '../src/projectCenterAccess'
 import { mount, flushPromises } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -205,7 +207,7 @@ describe('OPL drawer', () => {
     await flushPromises()
     expect(document.body.querySelector('.pdf-preview-stub')?.getAttribute('data-url')).toBe('blob:opl-pdf')
     expect(wrapper.findComponent({ name: 'ElDrawer' }).props('modelValue')).toBe(false)
-    expect(api.readOplAttachment).toHaveBeenCalledWith('p1','i1','pdf','token')
+    expect(api.readOplAttachment).toHaveBeenCalledWith('p1','i1','pdf','token',true)
     wrapper.unmount()
     expect(revoke).toHaveBeenCalledWith('blob:opl-pdf')
   })
@@ -262,4 +264,20 @@ describe('OPL drawer', () => {
     expect(document.body.textContent).toContain('填写内容已保留')
     expect(document.body.textContent).not.toContain('network failure')
   })
+})
+
+
+it('装配只读账号即使是问题负责人也不能新增、完成、编辑或导出', async () => {
+  const permissions = computed(() => [projectCenterSchema, 'project.tab.opl.view'])
+  wrapper = mount(ProjectOplManager, { attachTo: document.body, props: { project: { id: 'p1', code: 'P1', name: '装配指导' } as ProjectSummary, token: 'token' }, global: { plugins: [ElementPlus], provide: { [projectCenterAccessKey as symbol]: permissions } } })
+  await flushPromises()
+  const buttons = wrapper.findAll('button').map(button => button.text().trim())
+  expect(buttons).not.toContain('新增问题')
+  expect(buttons).not.toContain('编辑')
+  expect(buttons).not.toContain('完成')
+  expect(buttons).not.toContain('导出Excel')
+  await click('查看', wrapper.element)
+  expect(document.body.textContent).toContain('查看开口问题')
+  expect(Array.from(document.body.querySelectorAll('.opl-form input, .opl-form textarea')).every(control => (control as HTMLInputElement).disabled)).toBe(true)
+  expect(api.saveProjectOpl).not.toHaveBeenCalled()
 })

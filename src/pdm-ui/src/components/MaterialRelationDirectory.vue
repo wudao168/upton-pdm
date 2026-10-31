@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { ElMessage } from '../statusMessage'
 import { computed, ref, watch } from 'vue'
-import { listMaterials } from '../api'
-import type { MaterialRelationTemplate, PdmMaterial } from '../types'
+import { listMaterials, listMaterialRelationCategories } from '../api'
+import type { MaterialRelationTemplate, PdmMaterial, StandardLibraryCategory } from '../types'
 import MaterialRelationEditor from './MaterialRelationEditor.vue'
+import MaterialRelationDetails from './MaterialRelationDetails.vue'
+import StandardCategoryFilter from './StandardCategoryFilter.vue'
+import { matchesStandardCategory } from '../standardLibraryCategories'
 
 const props = defineProps<{
   token: string
@@ -14,6 +17,9 @@ const props = defineProps<{
 const emit = defineEmits<{ refresh: [] }>()
 
 const query = ref('')
+const categories = ref<StandardLibraryCategory[]>([])
+const categoryFilter = ref('')
+const expandedIds = ref<string[]>([])
 const brandFilter = ref('')
 const editorOpen = ref(false)
 const selectedRelation = ref<MaterialRelationTemplate | null>(null)
@@ -33,6 +39,7 @@ const configuredMaterialIds = computed(() => new Set(props.relations.map(item =>
 const filteredRelations = computed(() => {
   const value = query.value.trim().toLocaleLowerCase()
   return props.relations.filter(item => {
+    if (!matchesStandardCategory(categories.value, categoryFilter.value, (item.standardLibraryCategories ?? []).map(category => category.id))) return false
     const material = materialById.value.get(item.mainMaterialId)
     if (brandFilter.value && material?.brand !== brandFilter.value) return false
     if (!value) return true
@@ -40,6 +47,7 @@ const filteredRelations = computed(() => {
       item.mainMaterialCode,
       item.mainMaterialName,
       item.name,
+      ...(item.standardLibraryCategories ?? []).map(category => category.name),
       material?.specification,
       material?.brand,
       material?.categoryCode,
@@ -52,13 +60,10 @@ watch(() => props.relations.map(item => `${item.id}:${item.updatedAt}`).join('|'
 
 async function loadDirectoryMaterials() {
   const relations = [...props.relations]
-  if (!relations.length) {
-    directoryMaterials.value = []
-    return
-  }
   directoryLoading.value = true
   try {
-    const batches = await Promise.all(relations.map(item => listMaterials(props.token, item.mainMaterialCode, true, 20)))
+    const [catalog, batches] = await Promise.all([listMaterialRelationCategories(props.token), Promise.all(relations.map(item => listMaterials(props.token, item.mainMaterialCode, true, 20)))])
+    categories.value = catalog
     directoryMaterials.value = [...new Map(batches.flat().filter(item => relations.some(relation => relation.mainMaterialId === item.id)).map(item => [item.id, item])).values()]
     if (brandFilter.value && !brandOptions.value.includes(brandFilter.value)) brandFilter.value = ''
   } catch (error) {
@@ -73,7 +78,11 @@ function directoryMaterial(relation: MaterialRelationTemplate) {
 }
 
 function visibleRevision(relation: MaterialRelationTemplate) {
-  return relation.draftRevision ?? relation.publishedRevision
+  return ((props.canManage || props.canPublish) ? relation.draftRevision : null) ?? relation.publishedRevision
+}
+
+function toggleExpansion(relation: MaterialRelationTemplate) {
+  expandedIds.value = expandedIds.value.includes(relation.id) ? expandedIds.value.filter(id => id !== relation.id) : [...expandedIds.value, relation.id]
 }
 
 function relationStatus(relation: MaterialRelationTemplate) {
@@ -144,7 +153,9 @@ function refresh() {
 </script>
 
 <template>
-  <section class="material-relation-directory" aria-label="关联配置汇总">
+  <section class="material-relation-directory pdm-project-list-layout" aria-label="关联配置汇总">
+    <StandardCategoryFilter v-model="categoryFilter" :categories="categories" />
+    <div class="material-relation-directory__main pdm-panel pdm-project-table-panel">
     <div class="material-relation-directory__toolbar">
       <el-button :loading="directoryLoading" @click="refresh">刷新</el-button>
       <el-select v-model="brandFilter" class="material-relation-directory__brand" clearable filterable placeholder="筛选品牌">
@@ -154,12 +165,13 @@ function refresh() {
       <el-button v-if="canManage" type="primary" @click="openCreate">新增配置</el-button>
       <span>共 {{ filteredRelations.length }} 个已配置物料</span>
     </div>
-    <el-table v-loading="directoryLoading" :data="filteredRelations" row-key="id" height="100%" stripe empty-text="暂无已配置关联物料">
-      <el-table-column prop="mainMaterialCode" label="物料编码" min-width="150" show-overflow-tooltip><template #default="{ row }"><span v-stocked-material="row.mainMaterialCode">{{ row.mainMaterialCode }}</span></template></el-table-column>
+    <el-table v-loading="directoryLoading" :data="filteredRelations" row-key="id" :expand-row-keys="expandedIds" @expand-change="(_row: MaterialRelationTemplate, expanded: MaterialRelationTemplate[]) => expandedIds = expanded.map(item => item.id)" height="100%" stripe empty-text="暂无已配置关联物料">
+      <el-table-column type="expand" width="32"><template #default="{ row }"><div :id="`relation-contents-${row.id}`"><MaterialRelationDetails :relation="row" :show-draft="canManage || canPublish" /></div></template></el-table-column>
+      <el-table-column prop="mainMaterialCode" label="物料编码" min-width="150" show-overflow-tooltip><template #default="{ row }"><button type="button" class="pdm-text-action" v-stocked-material="row.mainMaterialCode" :aria-expanded="expandedIds.includes(row.id)" :aria-controls="`relation-contents-${row.id}`" :aria-label="`${expandedIds.includes(row.id) ? '收起' : '展开'}关联配置 ${row.mainMaterialCode} 的配件明细`" @click.stop="toggleExpansion(row)">{{ row.mainMaterialCode }}</button></template></el-table-column>
       <el-table-column prop="mainMaterialName" label="物料名称" min-width="180" show-overflow-tooltip><template #default="{ row }"><span v-stocked-material="row.mainMaterialCode">{{ row.mainMaterialName }}</span></template></el-table-column>
       <el-table-column label="规格" min-width="190" show-overflow-tooltip><template #default="{ row }">{{ directoryMaterial(row)?.specification || '—' }}</template></el-table-column>
       <el-table-column label="品牌" min-width="100" show-overflow-tooltip><template #default="{ row }">{{ directoryMaterial(row)?.brand || '—' }}</template></el-table-column>
-      <el-table-column label="分类" min-width="95" show-overflow-tooltip><template #default="{ row }">{{ directoryMaterial(row)?.categoryCode || directoryMaterial(row)?.u9CategoryCode || '—' }}</template></el-table-column>
+      <el-table-column label="标准物料分类" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ row.standardLibraryCategories?.map((category: StandardLibraryCategory) => category.name).join('、') || '未分类（待补选）' }}</template></el-table-column>
       <el-table-column prop="name" label="配置名称" min-width="200" show-overflow-tooltip />
       <el-table-column label="状态" width="130">
         <template #default="{ row }"><el-tag :type="relationStatus(row).type">{{ relationStatus(row).label }}</el-tag></template>
@@ -170,6 +182,7 @@ function refresh() {
       <el-table-column label="更新时间" width="170"><template #default="{ row }">{{ formatDate(row.updatedAt) }}</template></el-table-column>
       <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button link type="primary" :loading="openingMaterialId === row.mainMaterialId" :aria-label="`维护 ${row.mainMaterialCode} 的关联配置`" @click="openEditor(row)">维护</el-button></template></el-table-column>
     </el-table>
+    </div>
 
     <el-dialog v-model="editorOpen" :title="`${selectedRelation?.mainMaterialCode ?? ''} 关联配置`" width="min(1180px, calc(100vw - 32px))" destroy-on-close>
       <MaterialRelationEditor
@@ -189,5 +202,6 @@ function refresh() {
 </template>
 
 <style scoped>
-.material-relation-directory{display:flex;height:100%;min-height:0;flex-direction:column}.material-relation-directory__toolbar{display:flex;flex:0 0 auto;align-items:center;gap:10px;margin-bottom:10px}.material-relation-directory__brand{width:150px}.material-relation-directory__toolbar .el-input{width:min(430px,42vw)}.material-relation-directory__toolbar span{color:var(--pdm-muted);font-size:12px}.material-relation-directory>:deep(.el-table){min-height:0;flex:1}
+.material-relation-directory{display:grid;height:100%;min-height:0}.material-relation-directory__main{display:flex;min-width:0;min-height:0;flex-direction:column}.material-relation-directory__main>:deep(.el-table){flex:1;min-height:0}.material-relation-directory :deep(.el-table__expanded-cell){padding:0!important}
+.material-relation-directory__toolbar{display:flex;flex:0 0 auto;align-items:center;gap:10px;margin-bottom:10px}.material-relation-directory__brand{width:150px}.material-relation-directory__toolbar .el-input{width:min(430px,42vw)}.material-relation-directory__toolbar span{color:var(--pdm-muted);font-size:12px}
 </style>

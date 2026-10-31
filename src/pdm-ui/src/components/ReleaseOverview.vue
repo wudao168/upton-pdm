@@ -1,12 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { useProjectCenterAccess } from '../projectCenterAccess'
+const { write: projectWritable, download: projectDownload } = useProjectCenterAccess()
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
-import { downloadReleasePreviewArchive, listReleasePreviewItems, PdmApiError, retryReleasePreviewItem, retryReleasePreviewItems } from '../api'
-import { releasePreviewStateTag } from '../releasePreviewState'
+import { downloadReleasePreviewArchive, listReleasePreviewItems, PdmApiError, readReleasePreviewFile, retryReleasePreviewItem, retryReleasePreviewItems } from '../api'
+import { userErrorMessage } from '../userErrorMessage'
+import { requiresReleasePreview, releasePreviewNeedsAttention, releasePreviewStateLabel, releasePreviewStateTag } from '../releasePreviewState'
 import { releaseFailureMessage, releasePublishingMessage } from '../releaseFailureMessage'
 import type { BomVersion, ManufacturingBomBaseline, ReleasePackageSummary, ReleasePreviewItemResult, ReleaseScope } from '../types'
 
 const PREVIEW_PAGE_SIZE = 50
+const PdfDrawingViewer = defineAsyncComponent(() => import('./PdfDrawingViewer.vue'))
+const StepPreviewViewer = defineAsyncComponent(() => import('./StepPreviewViewer.vue'))
 
 const props = defineProps<{
   releasePackages: ReleasePackageSummary[]
@@ -17,7 +22,7 @@ const props = defineProps<{
   token?: string
   canManageRelease?: boolean
 }>()
-const emit = defineEmits<{ open: [releasePackageId: string]; retryPreview: [releasePackageId: string] }>()
+const emit = defineEmits<{ open: [releasePackageId: string]; retryPreview: [releasePackageId: string]; previewAttention: [projectId: string, hasIssue: boolean] }>()
 
 const previewItems = ref<ReleasePreviewItemResult[]>([])
 const previewLoading = ref(false)
@@ -27,6 +32,41 @@ const previewLatestBomFilter = ref('')
 const previewPage = ref(1)
 const selectedPreviewKeys = ref<string[]>([])
 const retryRequestedId = ref('')
+let previewRequestId = 0
+const openedPreview = ref<ReleasePreviewItemResult>()
+const filePreviewUrl = ref(''), filePreviewBuffer = ref<ArrayBuffer>(), filePreviewError = ref(''), filePreviewLoading = ref(false)
+let filePreviewRequest = 0
+function closeFilePreview() {
+  filePreviewRequest++
+  if (filePreviewUrl.value) URL.revokeObjectURL(filePreviewUrl.value)
+  filePreviewUrl.value = ''
+  filePreviewBuffer.value = undefined
+  openedPreview.value = undefined
+  filePreviewError.value = ''
+  filePreviewLoading.value = false
+}
+async function openFilePreview(item: ReleasePreviewItemResult) {
+  if (!props.projectId || !props.token || !item.succeeded) return
+  closeFilePreview()
+  const request = filePreviewRequest
+  openedPreview.value = item
+  filePreviewLoading.value = true
+  try {
+    const blob = await readReleasePreviewFile(props.projectId, item, props.token)
+    if (request !== filePreviewRequest) return
+    if (item.format === 'Pdf') filePreviewUrl.value = URL.createObjectURL(blob)
+    else {
+      const buffer = await blob.arrayBuffer()
+      if (request === filePreviewRequest) filePreviewBuffer.value = buffer
+    }
+  } catch (error) {
+    if (request === filePreviewRequest) filePreviewError.value = userErrorMessage(error instanceof Error ? error.message : '预览读取失败，请重试。')
+  } finally {
+    if (request === filePreviewRequest) filePreviewLoading.value = item.format === 'Step' && !!filePreviewBuffer.value && !filePreviewError.value
+  }
+}
+watch(() => props.projectId, closeFilePreview)
+onBeforeUnmount(() => { previewRequestId++; closeFilePreview() })
 
 function requestConversionRetry(releasePackageId: string) {
   retryRequestedId.value = releasePackageId
@@ -45,6 +85,7 @@ const streams = [
     ...stream,
     packages,
     active: packages.filter(item => item.state !== '已发布'),
+    published: packages.filter(item => item.state === '已发布').filter((item, index) => index < 5 || releasePreviewNeedsAttention(item)),
     latest: packages.find(item => item.state === '已发布'),
     version: versions.find(item => item.state === 'Released'),
   }
@@ -52,8 +93,9 @@ const streams = [
 
 // 图纸转出（转图）明细：与发布解耦的独立列表，支持按发布包筛选、单项重试、多选打包下载。
 const previewPackages = computed(() => props.releasePackages
-  .filter(item => item.state === '已发布' && item.previewState && item.previewState !== 'None')
+  .filter(item => item.state === '已发布' && requiresReleasePreview(item) && item.previewState && item.previewState !== 'None')
   .sort((left, right) => (right.publishedAt ?? right.createdAt ?? '').localeCompare(left.publishedAt ?? left.createdAt ?? '')))
+const previewAttentionCount = computed(() => props.releasePackages.filter(release => release.state === '已发布' && releasePreviewNeedsAttention(release)).length)
 const latestReleasedBomVersions = computed(() => (['Standard', 'NonStandard', 'Electrical'] as const)
   .map(kind => props.versions
     .filter(version => version.kind === kind && version.state === 'Released')
@@ -113,9 +155,11 @@ const previewSummary = computed(() => {
 function previewItemState(item: ReleasePreviewItemResult) {
   if (item.succeeded) return '成功'
   if (item.error?.includes('没有随本次发布转为正式版本')) return '失败'
-  const state = props.releasePackages.find(release => release.id === item.releasePackageId)?.previewState
+  const release = props.releasePackages.find(release => release.id === item.releasePackageId)
+  if (release && releasePreviewNeedsAttention(release)) return '失败'
+  const state = release?.previewState
   if (state === 'Running') return '转换中'
-  if (state === 'Pending') return '排队中'
+  if (state === 'Pending' || state === 'WaitingForServer') return '排队中'
   if (state === 'Failed') return '失败'
   if (item.error === '正在转换…') return '转换中'
   if (!item.error || item.error === '尚未生成预览。') return '排队中'
@@ -148,18 +192,24 @@ function formatSize(bytes = 0) {
 }
 
 async function loadPreviewItems() {
-  if (!props.projectId || !props.token) { previewItems.value = []; return }
+  const requestId = ++previewRequestId
+  const projectId = props.projectId
+  const token = props.token
+  if (!projectId || !token) { previewItems.value = []; previewLoading.value = false; return }
   previewLoading.value = true
   try {
-    previewItems.value = await listReleasePreviewItems(props.projectId, undefined, props.token)
+    const items = await listReleasePreviewItems(projectId, undefined, token)
+    if (requestId !== previewRequestId) return
+    previewItems.value = items
+    emit('previewAttention', projectId, items.some(item => !item.succeeded))
     selectedPreviewKeys.value = selectedPreviewKeys.value.filter(key => previewItems.value.some(item => previewItemKey(item) === key))
     if (previewPage.value > previewPageCount.value) previewPage.value = previewPageCount.value
   }
   catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '图纸转出明细加载失败')
+    if (requestId === previewRequestId) ElMessage.error(error instanceof Error ? error.message : '图纸转出明细加载失败')
   }
   finally {
-    previewLoading.value = false
+    if (requestId === previewRequestId) previewLoading.value = false
   }
 }
 
@@ -247,14 +297,25 @@ function toggleSelectFailedItems() {
     : [...new Set([...selectedPreviewKeys.value, ...failedKeys])]
 }
 
-watch(() => [props.projectId, props.token, props.releasePackages.map(item => `${item.id}:${item.previewState}:${item.previewUpdatedAt}`).join('|')], () => { void loadPreviewItems() }, { immediate: true })
+// 父级每5秒读取发布状态；相同状态的新数组不应重复读取明细或重建表格。
+watch([() => props.projectId, () => props.token, () => props.releasePackages.map(item => `${item.id}:${item.state}:${item.previewState}:${item.previewUpdatedAt}`).sort().join('|')],
+  ([projectId, token], [previousProjectId, previousToken]) => {
+    if (projectId !== previousProjectId || token !== previousToken) {
+      previewItems.value = []
+      selectedPreviewKeys.value = []
+      previewPage.value = 1
+      previewPackageFilter.value = ''
+      previewLatestBomFilter.value = ''
+    }
+    void loadPreviewItems()
+  }, { immediate: true })
 watch(previewPackageFilter, () => { previewPage.value = 1; selectedPreviewKeys.value = [] })
 watch(previewLatestBomFilter, () => { previewPage.value = 1; selectedPreviewKeys.value = [] })
-onMounted(() => { void loadPreviewItems() })
 
 function scopeLabel(scope: ReleaseScope) {
   return ({
     StandardLongLead: '长交期BOM', StandardFormal: '正式', StandardSupplement: '增补/变更',
+    Nameplate: '铭牌内容',
     ElectricalLongLead: '长交期BOM', ElectricalFormal: '正式', ElectricalSupplement: '增补/变更', NonStandardLongLead: '长交期BOM', NonStandardWithDrawing: 'BOM+图纸', NonStandardSupplement: '增补/变更', LegacyCombined: '历史组合',
   } as Record<ReleaseScope, string>)[scope]
 }
@@ -264,33 +325,44 @@ function visibleChangeNumber(release: ReleasePackageSummary) {
   return release.changeNumber && release.changeNumber !== release.number ? release.changeNumber : ''
 }
 
-function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
-  const releasePackage = props.releasePackages.find(item => item.id === baseline.releasePackageId)
-  return baseline.changeNumber && baseline.changeNumber !== releasePackage?.number ? baseline.changeNumber : '—'
-}
 </script>
 
 <template>
   <section class="pdm-release-overview" aria-label="发布总览">
+    <p v-if="previewAttentionCount" class="pdm-release-preview-attention" role="alert">有 {{ previewAttentionCount }} 个非标件发布包的图纸转换未完成，请在对应发布包旁处理或重试。</p>
     <div class="pdm-release-overview-grid">
       <article v-for="streamRef in streams" :key="streamRef.value.kind" class="pdm-panel pdm-release-stream-card">
         <header><div><h3>{{ streamRef.value.label }}</h3><small>当前正式版 {{ streamRef.value.version?.label || '—' }}</small></div><span :class="streamRef.value.active.length ? 'is-active' : 'is-clear'">{{ streamRef.value.active.length ? `在途 ${streamRef.value.active.length}` : '无在途' }}</span></header>
         <div v-if="streamRef.value.active.length" class="pdm-release-overview-active">
           <strong>待处理</strong>
           <div v-for="release in streamRef.value.active" :key="release.id">
-          <button type="button" @click="emit('open', release.id)">
-            <span class="pdm-release-active-description"><span>{{ release.number }} · {{ scopeLabel(release.scope) }}</span><small v-if="release.state === '发布失败'" class="pdm-release-failure-reason">失败原因：{{ releaseFailureMessage(release.publishError) }}</small><small v-if="release.state === '发布中'" class="pdm-release-publishing-reason">{{ releasePublishingMessage(release) }}<template v-if="release.previewUpdatedAt"> 最近转图状态更新：{{ new Date(release.previewUpdatedAt).toLocaleString('zh-CN', { hour12: false }) }}</template></small></span>
-            <em :class="{ 'is-error': release.state === '发布失败' || release.previewState === 'Failed' }">{{ release.state === '发布中' && release.previewState === 'Failed' ? '转图失败' : release.state }}</em>
+          <button type="button" class="pdm-release-package-row" @click="emit('open', release.id)">
+            <span class="pdm-release-package-description"><span :title="release.number">{{ release.number }}</span><small :title="visibleChangeNumber(release)">{{ scopeLabel(release.scope) }}<template v-if="visibleChangeNumber(release)"> · {{ visibleChangeNumber(release) }}</template></small></span>
+            <em class="pdm-release-package-status" :class="{ 'is-error': release.state === '发布失败' || release.previewState === 'Failed' }">{{ release.state === '发布中' && release.previewState === 'Failed' ? '转图失败' : release.state }}</em>
           </button>
-          <button v-if="canManageRelease && release.state === '发布中' && (release.previewState === 'Pending' || release.previewState === 'Failed')" type="button" class="pdm-secondary-action pdm-release-retry-conversion" :disabled="pending" @click="requestConversionRetry(release.id)">{{ pending && retryRequestedId === release.id ? '正在提交…' : '重试转图' }}</button>
+          <small v-if="release.state === '发布失败'" class="pdm-release-failure-reason">失败原因：{{ releaseFailureMessage(release.publishError) }}</small>
+          <small v-if="release.state === '发布中'" class="pdm-release-publishing-reason">{{ releasePublishingMessage(release) }}<template v-if="release.previewUpdatedAt"> 最近转图状态更新：{{ new Date(release.previewUpdatedAt).toLocaleString('zh-CN', { hour12: false }) }}</template></small>
+          <button v-if="canManageRelease && requiresReleasePreview(release) && release.state === '发布中' && ['Pending', 'WaitingForServer', 'Failed'].includes(release.previewState ?? '')" type="button" class="pdm-secondary-action pdm-release-retry-conversion" :disabled="pending" @click="requestConversionRetry(release.id)">{{ pending && retryRequestedId === release.id ? '正在提交…' : '重试转图' }}</button>
           <small v-if="retryRequestedId === release.id" class="pdm-release-retry-feedback" role="status">{{ pending ? '正在提交重试请求…' : '已请求重试。当前状态每5秒自动读取；提交失败时请查看顶部提示。' }}</small>
           </div>
         </div>
         <div class="pdm-release-overview-history">
           <strong>最近发布</strong>
-          <button v-for="release in streamRef.value.packages.filter(item => item.state === '已发布').slice(0, 5)" :key="release.id" type="button" @click="emit('open', release.id)"><span>{{ release.number }} · {{ scopeLabel(release.scope) }}</span><span class="pdm-release-row-tail"><small v-if="visibleChangeNumber(release)">{{ visibleChangeNumber(release) }}</small><span class="pdm-release-published-state">已发布</span><em v-if="releasePreviewStateTag(release)" :class="{ 'is-error': release.previewState === 'Failed' }">{{ releasePreviewStateTag(release) }}</em></span></button>
+          <div v-for="release in streamRef.value.published" :key="release.id" class="pdm-release-published-package" :data-release-package-id="release.id">
+            <button type="button" class="pdm-release-package-row" @click="emit('open', release.id)"><span class="pdm-release-package-description"><span :title="release.number">{{ release.number }}</span><small :title="visibleChangeNumber(release)">{{ scopeLabel(release.scope) }}<template v-if="visibleChangeNumber(release)"> · {{ visibleChangeNumber(release) }}</template></small></span><span class="pdm-release-row-tail pdm-release-package-status"><span class="pdm-release-published-state">已发布</span><em v-if="releasePreviewStateTag(release)" :class="{ 'is-error': releasePreviewNeedsAttention(release) }" :title="releasePreviewStateTag(release)">{{ releasePreviewStateTag(release) }}</em></span></button>
+            <div v-if="releasePreviewNeedsAttention(release)" class="pdm-release-package-retry">
+              <span>{{ releasePreviewStateLabel(release) }}</span>
+              <small v-if="release.previewError">{{ releaseFailureMessage(release.previewError) }}</small>
+              <button v-if="canManageRelease" type="button" class="pdm-secondary-action pdm-release-retry-conversion" :disabled="pending" @click.stop="requestConversionRetry(release.id)">{{ pending && retryRequestedId === release.id ? '正在提交…' : '重试转图' }}</button>
+              <small v-if="retryRequestedId === release.id" role="status">{{ pending ? '正在提交重试请求…' : '已发起重试请求，请以最新状态及顶部处理提示为准。' }}</small>
+            </div>
+          </div>
           <p v-if="!streamRef.value.latest">尚无已发布记录。</p>
         </div>
+      </article>
+      <article v-if="releasePackages.some(item => item.scope === 'Nameplate')" class="pdm-panel pdm-release-stream-card" aria-label="铭牌发布记录">
+        <header><div><h3>铭牌机加件发布包</h3><small>硬件确认的铭牌内容与数量</small></div></header>
+        <div class="pdm-release-overview-history"><button v-for="release in releasePackages.filter(item => item.scope === 'Nameplate')" :key="release.id" type="button" class="pdm-release-package-row" @click="emit('open', release.id)"><span class="pdm-release-package-description">{{ release.number }}</span><span class="pdm-release-published-state">{{ release.state }}</span></button></div>
       </article>
     </div>
     <div class="pdm-release-overview-bottom">
@@ -301,6 +373,7 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
             <small>共 {{ previewSummary.total }} 项：成功 {{ previewSummary.succeeded }}、转换中 {{ previewSummary.running }}、排队中 {{ previewSummary.queued }}、失败 {{ previewSummary.failed }}；勾选后可重试或打包下载。</small>
           </div>
           <div class="pdm-release-preview-actions">
+            <button type="button" :disabled="previewLoading || previewBusy" @click="loadPreviewItems">刷新</button>
             <label class="pdm-release-preview-filter">发布包
               <select v-model="previewPackageFilter" aria-label="按发布包筛选">
                 <option value="">全部（{{ previewPackages.length }}）</option>
@@ -314,13 +387,13 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
               </select>
             </label>
             <button type="button" :disabled="previewBusy || !failedPreviewItems.length" :title="allFailedSelected ? '取消选中当前筛选下的全部失败项' : '选中当前筛选下的全部失败项'" @click="toggleSelectFailedItems">选中失败（{{ failedPreviewItems.length }}）</button>
-            <button type="button" :disabled="previewBusy || !selectedDownloadableItems.length" :title="selectedPreviewItems.length > selectedDownloadableItems.length ? '只打包下载勾选中已转出的 STEP/PDF' : ''" @click="downloadPreviewItems(selectedDownloadableItems)">下载选中（{{ selectedDownloadableItems.length }}）</button>
-            <button type="button" :disabled="previewBusy || pending || !selectedFailedItems.length || canManageRelease === false" :title="retryPermissionHint" @click="retrySelectedPreviewItems">重试选中（{{ selectedFailedItems.length }}）</button>
-            <button type="button" :disabled="previewBusy || !downloadablePreviewItems.length" @click="downloadPreviewItems(downloadablePreviewItems)">全部下载</button>
-            <button type="button" :disabled="!previewPackageFilter || pending || previewBusy || canManageRelease === false || releasePackages.some(release => release.id === previewPackageFilter && release.previewState === 'Running')" :title="retryPackageHint" @click="emit('retryPreview', previewPackageFilter)">重试整包</button>
+            <button type="button" :disabled="previewBusy || !selectedDownloadableItems.length" :title="selectedPreviewItems.length > selectedDownloadableItems.length ? '只打包下载勾选中已转出的 STEP/PDF' : ''" v-if="projectDownload" @click="downloadPreviewItems(selectedDownloadableItems)">下载选中（{{ selectedDownloadableItems.length }}）</button>
+            <button type="button" :disabled="previewBusy || pending || !selectedFailedItems.length || canManageRelease === false" :title="retryPermissionHint" v-if="projectWritable" @click="retrySelectedPreviewItems">重试选中（{{ selectedFailedItems.length }}）</button>
+            <button type="button" :disabled="previewBusy || !downloadablePreviewItems.length" v-if="projectDownload" @click="downloadPreviewItems(downloadablePreviewItems)">全部下载</button>
+            <button type="button" :disabled="!previewPackageFilter || pending || previewBusy || canManageRelease === false || releasePackages.some(release => release.id === previewPackageFilter && release.previewState === 'Running')" :title="retryPackageHint" v-if="projectWritable" @click="emit('retryPreview', previewPackageFilter)">重试整包</button>
           </div>
         </header>
-        <p v-if="previewLoading" class="pdm-release-preview-empty">正在读取图纸转出明细…</p>
+        <p v-if="previewLoading && !previewItems.length" class="pdm-release-preview-empty">正在读取图纸转出明细…</p>
         <template v-else-if="filteredPreviewItems.length">
           <div class="pdm-release-preview-table-wrap">
             <table class="pdm-edit-table pdm-release-preview-table">
@@ -338,9 +411,12 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
                   <td><span :class="item.succeeded ? 'pdm-release-preview-ok' : previewItemState(item) === '失败' ? 'pdm-release-preview-failed' : 'pdm-release-preview-pending'">{{ previewItemState(item) }}</span></td>
                   <td>{{ item.succeeded ? formatSize(item.fileLength) : '—' }}</td>
                   <td class="pdm-release-preview-reason" :style="{ color: previewItemState(item) === '失败' ? 'var(--pdm-danger)' : 'var(--pdm-text-soft)' }" :title="item.error || ''">{{ item.error || '' }}</td>
-                  <td><div class="pdm-row-actions">
-                    <button v-if="!item.succeeded" type="button" :disabled="previewBusy || pending || canManageRelease === false || previewItemState(item) === '转换中' || previewItemState(item) === '排队中'" :title="retryPermissionHint" @click="retryPreviewItem(item)">重试</button>
-                    <button v-else type="button" class="pdm-secondary-action pdm-release-preview-download" :disabled="previewBusy" @click="downloadPreviewItems([item])">下载</button>
+                  <td><div class="pdm-row-actions pdm-drawing-actions">
+                    <button v-if="projectWritable && !item.succeeded" type="button" :disabled="previewBusy || pending || canManageRelease === false || previewItemState(item) === '转换中' || previewItemState(item) === '排队中'" :title="retryPermissionHint" @click="retryPreviewItem(item)">重试</button>
+                    <template v-else>
+                      <button type="button" class="pdm-secondary-action" :aria-label="`预览${previewFormatLabel(item)} ${item.drawingNumber}`" @click="openFilePreview(item)">预览</button>
+                      <button type="button" class="pdm-secondary-action pdm-release-preview-download" :disabled="previewBusy" v-if="projectDownload" @click="downloadPreviewItems([item])">下载</button>
+                    </template>
                   </div></td>
                 </tr>
               </tbody>
@@ -356,22 +432,45 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
         </template>
         <p v-else class="pdm-release-preview-empty">{{ selectedLatestBomVersion ? '当前最新BOM版本没有关联的图纸转出记录。' : '暂无图纸转出记录：非标件BOM+图纸发布后会自动转出 STEP/PDF。' }}</p>
       </section>
-      <section class="pdm-panel pdm-release-baseline-list">
-        <header><h3>制造BOM基线</h3><small>仅当三条正式流都有有效版本时生成；长交期输出不改变基线。</small></header>
-        <div class="pdm-release-baseline-table-wrap">
-          <table class="pdm-edit-table"><thead><tr><th>基线</th><th>变更单号</th><th>生成时间</th></tr></thead><tbody><tr v-for="baseline in baselines" :key="baseline.id"><td>{{ baseline.label }}</td><td>{{ baselineChangeNumber(baseline) }}</td><td>{{ new Date(baseline.createdAt).toLocaleString() }}</td></tr><tr v-if="!baselines.length"><td colspan="3" class="pdm-empty-info">暂无制造BOM基线。</td></tr></tbody></table>
-        </div>
-      </section>
     </div>
+    <el-dialog :model-value="!!openedPreview" class="pdm-release-file-preview" title="发布文件预览" width="min(1440px, calc(100vw - 24px))" append-to-body destroy-on-close @update:model-value="!$event && closeFilePreview()">
+      <p v-if="openedPreview" class="pdm-release-file-preview__context">{{ openedPreview.releasePackageNumber }} · {{ openedPreview.drawingNumber }} · {{ previewFormatLabel(openedPreview) }}</p>
+      <p v-if="filePreviewLoading" role="status">正在读取发布文件，请稍候…</p>
+      <p v-if="filePreviewError" role="alert">{{ filePreviewError }}</p>
+      <div class="pdm-release-file-preview__canvas">
+        <PdfDrawingViewer v-if="filePreviewUrl" :url="filePreviewUrl" fill-height />
+        <StepPreviewViewer v-else-if="filePreviewBuffer && !filePreviewError" :buffer="filePreviewBuffer" @ready="filePreviewLoading = false" @error="filePreviewError = userErrorMessage($event); filePreviewLoading = false" />
+      </div>
+      <template #footer><button type="button" @click="closeFilePreview">关闭</button></template>
+    </el-dialog>
   </section>
 </template>
 
 <style scoped>
+.pdm-release-preview-table :is(th,td):last-child{min-width:100px;width:100px}
+:global(body .pdm-release-file-preview .el-dialog__body){display:flex;flex:1;min-height:0;flex-direction:column;overflow:hidden}
+.pdm-release-file-preview__context{flex-shrink:0;margin:0 0 6px;color:var(--pdm-muted);font-size:12px}
+.pdm-release-file-preview__canvas{position:relative;display:flex;flex:1;flex-direction:column;min-width:0;min-height:0}
+:global(.pdm-release-file-preview [role="alert"]){color:var(--pdm-danger)}
+.pdm-release-preview-attention{flex:0 0 auto;margin:0;padding:10px 12px;border:1px solid var(--pdm-danger);border-radius:6px;background:var(--pdm-danger-soft);color:var(--pdm-danger)}
+.pdm-release-published-package{display:grid;gap:4px;min-width:0}
+.pdm-release-package-retry{display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:6px 8px;border-radius:5px;background:var(--pdm-danger-soft);color:var(--pdm-danger);font-size:12px}
+.pdm-release-package-retry small{flex:1 1 100%;color:inherit;overflow-wrap:anywhere;white-space:normal}
 .pdm-release-preview-download { box-sizing: border-box; width: auto; min-width: 60px; height: var(--pdm-button-compact); min-height: var(--pdm-button-compact); padding: 0 2px; font-size: 12px; line-height: 23px; }
 .pdm-release-overview-active>div>button{width:100%}.pdm-release-overview-active button.pdm-release-retry-conversion{width:auto;margin-top:6px;border:1px solid var(--pdm-blue);color:var(--pdm-blue)}.pdm-release-active-description{display:grid;gap:5px;min-width:0;overflow-wrap:anywhere}.pdm-release-publishing-reason{white-space:normal;font-size:12px;color:var(--pdm-text-soft)}.pdm-release-failure-reason{color:var(--pdm-danger);white-space:pre-wrap;font-size:12px}.pdm-release-overview-active em{flex-shrink:0}.pdm-release-overview-active em.is-error{color:var(--pdm-danger)}.pdm-release-published-state{padding:1px 6px;border-radius:999px;background:var(--pdm-green-soft);color:var(--pdm-green);font-size:11px}
 .pdm-release-overview{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;gap:var(--pdm-container-gap);overflow:auto}.pdm-release-overview-grid{flex:0 0 auto;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:400px;gap:var(--pdm-container-gap)}.pdm-release-stream-card{padding:0;min-height:0;overflow:auto}.pdm-release-stream-card>header{display:flex;align-items:center;justify-content:space-between;padding:12px;border-bottom:1px solid var(--pdm-border)}.pdm-release-stream-card h3{margin:0}.pdm-release-stream-card header small{color:var(--pdm-muted)}.pdm-release-stream-card header>span{padding:4px 8px;border-radius:999px}.pdm-release-stream-card .is-active{background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent)}.pdm-release-stream-card .is-clear{background:var(--pdm-green-soft);color:var(--pdm-green)}.pdm-release-overview-active,.pdm-release-overview-history{display:grid;gap:6px;padding:10px 12px}.pdm-release-overview-active{background:var(--pdm-theme-accent-soft);border-bottom:1px solid var(--pdm-border)}.pdm-release-overview-active button,.pdm-release-overview-history button{padding:7px;border:0;border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);text-align:left}.pdm-release-overview-active button{display:flex;justify-content:space-between;gap:8px}.pdm-release-overview-history button{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px}.pdm-release-overview-history button>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-release-overview-active em{font-style:normal;color:var(--pdm-theme-accent)}.pdm-release-overview-history small,.pdm-release-overview-history p{color:var(--pdm-muted)}.pdm-release-baseline-list{overflow:hidden}.pdm-release-baseline-list>header{padding:12px}.pdm-release-baseline-list h3{margin:0}.pdm-release-baseline-list small{color:var(--pdm-muted)}@media(max-width:1000px){.pdm-release-overview-grid{grid-template-columns:1fr}}
 .pdm-release-overview-history .pdm-release-row-tail{display:inline-flex;align-items:center;justify-content:flex-end;gap:6px;white-space:nowrap}.pdm-release-overview-history .pdm-release-row-tail small{white-space:nowrap}.pdm-release-overview-history .pdm-release-row-tail em{font-style:normal;padding:1px 6px;border-radius:999px;background:var(--pdm-surface-soft);color:var(--pdm-muted);font-size:11px;white-space:nowrap}.pdm-release-overview-history .pdm-release-row-tail em.is-error{background:var(--pdm-danger-soft);color:var(--pdm-danger)}
-.pdm-release-overview-bottom{flex:1 1 auto;min-height:240px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--pdm-container-gap);align-items:stretch}.pdm-release-preview-list{grid-column:1 / span 3}.pdm-release-baseline-list{grid-column:4 / span 1;display:flex;flex-direction:column;min-height:0}
+.pdm-release-stream-card .pdm-release-package-row{box-sizing:border-box;display:grid;grid-template-columns:minmax(0,6fr) minmax(0,1fr);align-items:center;gap:5px;width:100%;min-width:0;min-height:46px;padding:5px;border:0;border-radius:0;background:transparent;box-shadow:none;text-align:left;font-size:12px;line-height:18px;cursor:pointer}
+.pdm-release-package-row .pdm-release-package-description{display:grid;grid-template-rows:18px 18px;min-width:0;gap:0}
+.pdm-release-package-description>span,.pdm-release-package-description>small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:18px}
+.pdm-release-package-row .pdm-release-package-status{display:grid;justify-items:center;align-content:center;gap:0;min-width:0;margin:0;font-size:11px;font-style:normal;text-align:center;white-space:nowrap}
+.pdm-release-package-status>*{box-sizing:border-box;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.pdm-release-package-row .pdm-release-row-tail :is(span,em){padding:0 2px;font-size:11px;line-height:18px}
+.pdm-release-stream-card .pdm-release-package-row:hover,.pdm-release-stream-card .pdm-release-package-row:focus-visible{background:var(--pdm-theme-accent-soft);outline:0}
+.pdm-release-package-row:focus-visible .pdm-release-package-description>span{text-decoration:underline}
+.pdm-release-failure-reason,.pdm-release-publishing-reason{display:block;padding:0 5px;overflow-wrap:anywhere}
+@media(max-width:1200px){.pdm-release-overview-grid{grid-template-columns:1fr}}
+.pdm-release-overview-bottom{flex:1 1 auto;min-height:240px;display:grid;grid-template-columns:minmax(0,1fr);gap:var(--pdm-container-gap);align-items:stretch}.pdm-release-preview-list{grid-column:auto}.pdm-release-baseline-list{grid-column:4 / span 1;display:flex;flex-direction:column;min-height:0}
 .pdm-release-preview-list{display:flex;flex-direction:column;min-height:0;overflow:hidden}
 .pdm-release-preview-list>header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:10px;padding:12px}
 .pdm-release-preview-list h3{margin:0}
@@ -392,7 +491,7 @@ function baselineChangeNumber(baseline: ManufacturingBomBaseline) {
 .pdm-release-preview-pager{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;border-top:1px solid var(--pdm-border);background:var(--pdm-surface-soft);color:var(--pdm-muted)}
 .pdm-release-preview-pager button{padding:4px 9px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text)}
 .pdm-release-preview-pager button:disabled{opacity:.55}
-@media(max-width:1200px){.pdm-release-overview-bottom{grid-template-columns:minmax(0,1fr);grid-template-rows:repeat(2,minmax(0,1fr));min-height:480px}.pdm-release-preview-list,.pdm-release-baseline-list{grid-column:auto}}
+@media(max-width:1200px){.pdm-release-overview-bottom{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr);min-height:240px}.pdm-release-preview-list,.pdm-release-baseline-list{grid-column:auto}}
 .pdm-release-overview :is(.pdm-release-preview-table,.pdm-release-baseline-table-wrap .pdm-edit-table) :is(th,td){text-align:center;vertical-align:middle}
 .pdm-release-preview-table .pdm-row-actions{justify-content:center}
 </style>

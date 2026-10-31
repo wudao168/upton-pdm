@@ -125,7 +125,7 @@ public sealed class MaterialAttachmentService(
             if (attachment is not null && attachment.MaterialId == materialId)
                 await RequireReleasedKitAsync(materialId, actor, role, false, cancellationToken);
         }
-        if (attachment is null || attachment.MaterialId != materialId) throw new PdmNotFoundException("料品附件不存在。");
+        if (attachment is null || attachment.MaterialId != materialId || attachment.IsRemoved) throw new PdmNotFoundException("料品附件不存在。");
         await storage.VerifyAsync(attachment, cancellationToken);
         var content = await storage.OpenReadAsync(attachment, cancellationToken);
         await repository.AppendAuditAsync(new AuditEntry(
@@ -152,8 +152,10 @@ public sealed class MaterialAttachmentService(
             attachment = await materials.FindMaterialAttachmentAsync(attachmentId, cancellationToken);
         }
         if (attachment is null || attachment.MaterialId != materialId) throw new PdmNotFoundException("料品附件不存在。");
+        if (material is not null && attachment.Kind is MaterialAttachmentKind.Model3D or MaterialAttachmentKind.Drawing2D)
+            throw new PdmRuleException("2D和3D历史版本不能删除，请由标准化人员选择启用版本。");
         if (attachment.Kind is not (MaterialAttachmentKind.Model3D or MaterialAttachmentKind.Document))
-            throw new PdmRuleException("此处只能删除3D或资料附件。");
+            throw new PdmRuleException("此处只能移除资料附件。");
         var deleted = material is null
             ? await kits!.DeleteLibraryAttachmentAsync(materialId, attachmentId, cancellationToken)
             : await materials.DeleteMaterialAttachmentAsync(materialId, attachmentId, cancellationToken);
@@ -240,9 +242,23 @@ public sealed class MaterialAttachmentService(
     }
 
     private Task RequireAttachmentWritePermissionAsync(string actor, UserRole role, MaterialAttachmentKind kind, CancellationToken cancellationToken) =>
-        kind == MaterialAttachmentKind.CoverImage
+        kind is MaterialAttachmentKind.Drawing2D or MaterialAttachmentKind.Model3D
+            ? RequirePermissionAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken)
+            : kind == MaterialAttachmentKind.CoverImage
             ? RequireAnyAttachmentWritePermissionAsync(actor, role, cancellationToken)
             : RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
+
+    public async Task<MaterialAttachment> EnableAsync(Guid materialId, Guid attachmentId, Guid? expectedEnabledId, string actor, UserRole role, CancellationToken ct)
+    {
+        await RequirePermissionAsync(actor, role, PermissionCodes.StandardLibraryManage, ct);
+        var file = await materials.FindMaterialAttachmentAsync(attachmentId, ct);
+        if (file is null || file.MaterialId != materialId) throw new PdmNotFoundException("所选图纸版本不存在。");
+        await storage.VerifyAsync(file, ct);
+        var result = await materials.EnableMaterialAttachmentAsync(materialId, attachmentId, expectedEnabledId, actor, timeProvider.GetUtcNow(), ct);
+        await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "material.drawing.enable", nameof(MaterialAttachment), attachmentId.ToString(),
+            $"{result.Kind}启用V{result.VersionNumber:00}；原启用版本{expectedEnabledId}；历史图纸和已发布BOM保持不变。"), ct);
+        return result;
+    }
 
     private async Task RequireAnyAttachmentWritePermissionAsync(string actor, UserRole role, CancellationToken cancellationToken)
     {

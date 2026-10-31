@@ -13,6 +13,8 @@ public static class WorkHoursEndpoints
             Results.Ok(await service.ReadAsync(from, to, report == true, Actor(context), Role(context), ct)));
         api.MapPut("", async (SaveWorkHours input, HttpContext context, WorkHoursService service, CancellationToken ct) =>
             Results.Ok(await service.SaveAsync(input, Actor(context), Role(context), ct)));
+        api.MapPost("/move-day", async (MoveWorkHoursDay input, HttpContext context, WorkHoursService service, CancellationToken ct) =>
+            Results.Ok(await service.MoveDayAsync(input, Actor(context), Role(context), ct)));
         api.MapGet("/history", async (string month, HttpContext context, WorkHoursService service, CancellationToken ct) =>
             Results.Ok(await service.HistoryAsync(month, Actor(context), ct)));
         api.MapGet("/settings", async (HttpContext context, WorkHoursService service, CancellationToken ct) => Results.Ok(await service.ReadManagementAsync(Actor(context), ct)));

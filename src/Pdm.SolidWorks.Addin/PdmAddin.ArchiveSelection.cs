@@ -4,7 +4,7 @@ using System.Linq;
 
 namespace Upton.Pdm.SolidWorks;
 
-internal enum ArchiveSelectionState { Pending, New, Changed, Unchanged, DrawingUpdate }
+internal enum ArchiveSelectionState { Pending, New, Changed, Unchanged, DrawingUpdate, PendingSave }
 
 public sealed partial class PdmAddin
 {
@@ -15,7 +15,7 @@ public sealed partial class PdmAddin
     {
         var dialog = new BatchOperationDialog(root, items, projects, projectId, username, operation,
             selectedPaths, inheritedProjects, displayNames, canUseStandardLibrary, standardLibrary, drawingType);
-        dialog.LoadArchiveVersionsAsync = async (node, token) => await apiClient.GetVersionsAsync(node.DocumentId.Value, token, 1);
+        dialog.LoadArchiveVersionsAsync = async (node, token) => await GetNavigationLatestVersionsAsync(node.DocumentId.Value, token);
         return dialog;
     }
 

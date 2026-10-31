@@ -44,6 +44,70 @@ describe('EngineeringKitLibrary', () => {
     api.publishEngineeringKit.mockReset().mockResolvedValue({ ...kit, rowVersion: 4 })
   })
 
+  it('点击套件料号在行下展开当前版本的物料、单位和每套数量，再点收起', async () => {
+    const wrapper = mount(EngineeringKitLibrary, { props: { token: 'token', canManage: true }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const code = wrapper.get('button.kit-code')
+    expect(code.attributes('aria-expanded')).toBe('false')
+    await code.trigger('click'); await flushPromises()
+    expect(code.attributes('aria-expanded')).toBe('true')
+    const contents = wrapper.get('#kit-contents-kit-1')
+    expect(contents.text()).toContain('V02 草稿')
+    expect(contents.text()).toContain('0102000001')
+    expect(contents.text()).toContain('螺栓')
+    expect(contents.text()).toContain('0102000002')
+    expect(contents.text()).toContain('垫圈')
+    expect(contents.find('.el-table__body').findAll(':scope > tbody > tr').map(row => row.findAll('td')[5]!.text())).toEqual(['5', '2'])
+    expect(contents.find('.el-table__body').findAll(':scope > tbody > tr')[0]!.findAll('td')[4]!.text()).toBe('个')
+    expect(wrapper.find('.engineering-kit-editor').exists()).toBe(false)
+    expect(api.saveEngineeringKit).not.toHaveBeenCalled()
+    await code.trigger('click'); await flushPromises()
+    expect(code.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.findAll('.engineering-kit-library__contents').some(item => item.isVisible())).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('只读账号展开已发布版本，不显示草稿物料或维护入口', async () => {
+    const wrapper = mount(EngineeringKitLibrary, { props: { token: 'token', canManage: false }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await wrapper.get('button.kit-code').trigger('click'); await flushPromises()
+    const contents = wrapper.get('#kit-contents-kit-1')
+    expect(contents.text()).toContain('V01 已发布')
+    expect(contents.text()).toContain('螺栓')
+    expect(contents.text()).not.toContain('垫圈')
+    expect(contents.text()).not.toContain('V02')
+    expect(contents.find('.el-table__body').findAll(':scope > tbody > tr')).toHaveLength(1)
+    expect(wrapper.findAll('button').some(button => button.text() === '维护')).toBe(false)
+    expect(api.listEngineeringKits).toHaveBeenCalledWith('token', true)
+    wrapper.unmount()
+  })
+
+  it('多个套件可分别展开，箭头与料号的展开状态保持一致', async () => {
+    api.listEngineeringKits.mockResolvedValue([kit, { ...kit, id: 'kit-2', code: 'UKIT-000002' }])
+    const wrapper = mount(EngineeringKitLibrary, { props: { token: 'token', canManage: true }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const codes = wrapper.findAll('button.kit-code')
+    await codes[0]!.trigger('click'); await codes[1]!.trigger('click'); await flushPromises()
+    expect(wrapper.findAll('.engineering-kit-library__contents')).toHaveLength(2)
+    await wrapper.get('.el-table__expand-icon').trigger('click'); await flushPromises()
+    expect(codes[0]!.attributes('aria-expanded')).toBe('false')
+    expect(codes[1]!.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.find('#kit-contents-kit-2').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('刷新后展开行展示新明细，撤销维护权限后切回已发布版本', async () => {
+    const wrapper = mount(EngineeringKitLibrary, { props: { token: 'token', canManage: true }, global: { plugins: [ElementPlus] } })
+    await flushPromises(); await wrapper.get('button.kit-code').trigger('click'); await flushPromises()
+    api.listEngineeringKits.mockResolvedValue([{ ...kit, revisions: [kit.revisions[0], { ...kit.revisions[1], components: [...kit.revisions[1]!.components, { ...kit.revisions[1]!.components[0], id: 'component-new', materialName: '新增组件' }] }] }])
+    await wrapper.get('.engineering-kit-library__toolbar button').trigger('click'); await flushPromises()
+    expect(wrapper.get('#kit-contents-kit-1').text()).toContain('新增组件')
+    await wrapper.setProps({ canManage: false }); await flushPromises()
+    expect(wrapper.get('#kit-contents-kit-1').text()).toContain('V01 已发布')
+    expect(wrapper.get('#kit-contents-kit-1').text()).not.toContain('新增组件')
+    wrapper.unmount()
+  })
+
   it('手输小数按数值保存草稿，重新打开保留小数且不补零', async () => {
     api.saveEngineeringKit.mockImplementation(async input => ({ ...kit, standardLibraryCategoryId: 'category-child', rowVersion: 4,
       revisions: [kit.revisions[0], { ...kit.revisions[1], standardLibraryCategoryId: 'category-child', components: kit.revisions[1].components.map((item, index) => ({ ...item, quantity: input.components[index].quantity })) }],
@@ -63,7 +127,19 @@ describe('EngineeringKitLibrary', () => {
     wrapper.unmount()
   })
 
-  it('shows the virtual kit fields, remark and component count without a category column', async () => {
+  it('分类筛选沿用套件已调整的归属而非发布版本中的旧分类', async () => {
+    api.listEngineeringKits.mockResolvedValue([{ ...kit, standardLibraryCategoryId: 'category-child', revisions: kit.revisions.map(item => ({ ...item, standardLibraryCategoryId: 'category-old' })) }])
+    const wrapper = mount(EngineeringKitLibrary, { props: { token: 'token', canManage: false }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    wrapper.findComponent({ name: 'ElTree' }).vm.$emit('node-click', { id: 'category-1' }); await flushPromises()
+    expect(wrapper.findAllComponents({ name: 'ElTable' })[0]!.props('data')).toHaveLength(1)
+    expect(wrapper.text()).toContain('定位件')
+    wrapper.findComponent({ name: 'ElTree' }).vm.$emit('node-click', { id: '__unclassified__' }); await flushPromises()
+    expect(wrapper.findAllComponents({ name: 'ElTable' })[0]!.props('data')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('shows the virtual kit fields and synchronized standard material classification', async () => {
     const wrapper = mount(EngineeringKitLibrary, { props: { token: 'token', canManage: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()
 
@@ -74,7 +150,8 @@ describe('EngineeringKitLibrary', () => {
     expect(wrapper.text()).toContain('UPTON')
     expect(wrapper.text()).toContain('用于现场安装')
     expect(wrapper.text()).toContain('V02 草稿')
-    expect(wrapper.text()).not.toContain('分类')
+    expect(wrapper.text()).toContain('标准物料分类')
+    expect(wrapper.find('.pdm-category-sidebar').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('可选')
   })
 

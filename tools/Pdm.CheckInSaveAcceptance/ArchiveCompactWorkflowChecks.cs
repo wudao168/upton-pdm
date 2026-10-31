@@ -40,9 +40,9 @@ internal static partial class Program
     await TreeWait(()=>ArchiveUi(session,()=>((Panel)Field(ArchiveWindow(session),"selection")).Controls.OfType<Form>().Any(f=>((Button)Field(f,"recheck")).Enabled)),"初始检查未完成");
     ArchiveUi(session,()=>{
      var window=ArchiveWindow(session);var form=((Panel)Field(window,"selection")).Controls.OfType<Form>().Single();
-     var tree=(TreeView)Field(form,"files");var buttons=ArchiveControls(form).OfType<Button>().Where(b=>new[]{"全选","清除","勾选变更项","补充工程图","待补全引用","仅显示勾选","取消存档","重新检查","确认存档"}.Contains(b.Text)).ToArray();
-     TreeCheck(buttons.Length==9&&buttons.All(b=>b.Size==new Size(80,28)),"九个按钮尺寸或功能入口不完整");
-     Console.WriteLine("PASS: all nine operation buttons use 80x28, original commands and two independent groups remain");
+     var tree=(TreeView)Field(form,"files");var buttons=ArchiveControls(form).OfType<Button>().Where(b=>new[]{"全选","清除","勾选变更项","补充工程图","仅显示勾选","仅显示未勾选","取消存档","重新检查","确认存档"}.Contains(b.Text)).ToArray();
+     TreeCheck(buttons.Length==9&&buttons.All(b=>b.Size==new Size(b.Text=="仅显示未勾选"?92:80,28)),"九个按钮尺寸或功能入口不完整");
+     Console.WriteLine("PASS: nine operation buttons retain 28px height and two groups; unchecked filter is wide enough for its full label");
      TreeCheck(form.Font.Name=="Microsoft YaHei UI"&&form.Font.SizeInPoints==9&&tree.ItemHeight==20,"字体或原行高被改变");
      var visible=tree.ClientSize.Height/tree.ItemHeight;TreeCheck(visible>=30,"同页图档不足30条："+visible);
      Console.WriteLine("PASS: native dialog retains 9pt font and 20px rows with "+visible+" rows visible at the unchanged window width");

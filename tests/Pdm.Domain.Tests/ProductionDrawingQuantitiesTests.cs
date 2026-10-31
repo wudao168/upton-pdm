@@ -9,6 +9,24 @@ namespace Pdm.Domain.Tests;
 public sealed class ProductionDrawingQuantitiesTests
 {
     [Fact]
+    public void SupplementDrawingUsesIncrementInsteadOfCumulativeBomAndKeepsEveryPublication()
+    {
+        var item = Item("M-1", 1);
+        var first = Package([item]);
+        var second = first with { Id = Guid.NewGuid(), Number = "SECOND", Scope = ReleaseScope.NonStandardSupplement,
+            PublishedAt = first.PublishedAt!.Value.AddMinutes(1), NonStandardBomSnapshot = [item with { Quantity = 3 }] };
+        var third = second with { Id = Guid.NewGuid(), Number = "THIRD", PublishedAt = second.PublishedAt!.Value.AddMinutes(1),
+            NonStandardBomSnapshot = [item with { Quantity = 7 }] };
+        var history = new[] { first, second, third };
+        Assert.Equal(1, Assert.Single(ProductionDrawingQuantities.Build(first, history)).NetIssueQuantity);
+        var increment = Assert.Single(ProductionDrawingQuantities.Build(second, history));
+        Assert.Equal(3, increment.TotalQuantity);
+        Assert.Equal(1, increment.PriorReleasedQuantity);
+        Assert.Equal(2, increment.NetIssueQuantity);
+        Assert.Equal(4, Assert.Single(ProductionDrawingQuantities.Build(third, history)).NetIssueQuantity);
+        Assert.Equal(3, second.NonStandardBomSnapshot[0].Quantity);
+    }
+    [Fact]
     public void Quantities_ApplyMultiplierDeductEarlyReleaseAndKeepFrozenSingleSetUnchanged()
     {
         var item = Item("M-1", 2);

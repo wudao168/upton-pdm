@@ -13,10 +13,13 @@ internal sealed class PluginSettings
     public string ServerAddress { get; set; } = string.Empty;
     public bool AutomaticUpdatesEnabled { get; set; } = true;
     public int PlannedTaskScrollIntervalSeconds { get; set; } = 30;
+    public int CacheLimitGigabytes { get; set; } = 20;
+    public bool BlockArchiveOnMissingReferences { get; set; }
 
     public void Normalize()
     {
         SchemaVersion = 3;
+        if (CacheLimitGigabytes < 1 || CacheLimitGigabytes > 1024) CacheLimitGigabytes = 20;
         if (PlannedTaskScrollIntervalSeconds != 15 && PlannedTaskScrollIntervalSeconds != 30 && PlannedTaskScrollIntervalSeconds != 60)
             PlannedTaskScrollIntervalSeconds = 30;
     }
@@ -30,6 +33,7 @@ internal static class PluginSettingsStore
     {
         var settings = LoadSavedSettings();
         settings.ServerAddress = ClientBootstrapLoader.GetServerAddress();
+        // Archive warnings follow server policy, never local preferences.
         return settings;
     }
 
@@ -59,6 +63,7 @@ internal static class PluginSettingsStore
         var path = GetPath();
         Directory.CreateDirectory(Path.GetDirectoryName(path));
         File.WriteAllText(path, Serializer.Serialize(settings), new UTF8Encoding(false));
+        // Archive warnings follow server policy, never local preferences.
     }
 
     public static Uri BuildBootstrapUrl(string serverAddress)

@@ -2,11 +2,24 @@ using System.Net;
 using System.Text;
 using Upton.Pdm.Domain;
 using Upton.Pdm.Infrastructure;
+using Upton.Pdm.Application;
 
 namespace Upton.Pdm.Domain.Tests;
 
 public sealed class PreviewAgentPoolTests
 {
+    [Theory]
+    [InlineData("busy")]
+    [InlineData("offline")]
+    public async Task ReleaseTasksReturnWaitingInsteadOfOccupyingTheBatchWhenNoServerIsAvailable(string state)
+    {
+        var url = $"http://{Guid.NewGuid():N}-{state}";
+        using var client = new HttpClient(new HealthHandler());
+        var settings = new PreviewConversionSettings { Servers = [new("转图服务器", url, "")] };
+        await Assert.ThrowsAsync<PreviewServerUnavailableException>(() =>
+            PreviewAgentPool.AcquireAsync(settings, "发布转图", client, default, waitForServer: false).WaitAsync(TimeSpan.FromSeconds(2)));
+    }
+
     [Fact]
     public async Task SkipsBusyServerAndDoesNotAssignTheSameServerTwice()
     {

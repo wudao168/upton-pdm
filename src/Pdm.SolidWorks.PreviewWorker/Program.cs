@@ -11,7 +11,7 @@ using SolidWorks.Interop.swconst;
 
 namespace Upton.Pdm.SolidWorks.PreviewWorker;
 
-internal static class Program
+internal static partial class Program
 {
     private const int OpenOptionsCommon = (int)swOpenDocOptions_e.swOpenDocOptions_Silent | (int)swOpenDocOptions_e.swOpenDocOptions_ReadOnly;
     // 装配体按轻化方式打开：引用件不立即全部载入内存，总装打开时间可大幅下降；需要几何导出时 SolidWorks 会自行载入。
@@ -27,7 +27,8 @@ internal static class Program
             .ToArray();
         var paths = args.Where(argument => !argument.StartsWith("--", StringComparison.Ordinal)).ToArray();
         var useLightweight = !flags.Contains("--no-lightweight");
-        if (flags.Contains("--serve")) return Serve(useLightweight);
+        var dedicatedHost = flags.Contains("--dedicated-host");
+        if (flags.Contains("--serve")) return Serve(useLightweight, dedicatedHost);
         if (paths.Length != 2)
         {
             Console.Error.WriteLine("Usage: Upton.Pdm.SolidWorks.PreviewWorker <manifest.json> <result.json> [--no-lightweight] | --serve [--no-lightweight]");
@@ -40,7 +41,7 @@ internal static class Program
             var manifest = serializer.Deserialize<PreviewWorkerManifest>(File.ReadAllText(paths[0], Encoding.UTF8));
             if (manifest?.Jobs == null || manifest.Jobs.Count == 0)
                 throw new InvalidDataException("发布转换清单为空。");
-            using (var session = new ConversionSession(useLightweight))
+            using (var session = new ConversionSession(useLightweight, dedicatedHost))
             {
                 var result = session.Convert(manifest.Jobs);
                 File.WriteAllText(paths[1], serializer.Serialize(result), new UTF8Encoding(false));
@@ -65,10 +66,10 @@ internal static class Program
     /// <summary>
     /// 常驻模式：SolidWorks 只启动一次并跨请求复用（启动一次约十几秒），代理通过标准输入输出逐次下发转换请求。
     /// </summary>
-    private static int Serve(bool lightweightAssemblies = true)
+    private static int Serve(bool lightweightAssemblies = true, bool dedicatedHost = false)
     {
         var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-        var session = new ConversionSession(lightweightAssemblies);
+        var session = new ConversionSession(lightweightAssemblies, dedicatedHost);
         try
         {
             Console.Out.WriteLine("{\"ready\":true}");
@@ -114,20 +115,25 @@ internal static class Program
     }
 
     /// <summary>一次转换会话：持有一个 SolidWorks 实例，串行转换清单里所有需要转出的任务。</summary>
-    private sealed class ConversionSession : IDisposable
+    private sealed partial class ConversionSession : IDisposable
     {
         private readonly bool lightweightAssemblies;
-        private SldWorks application;
+        private readonly bool dedicatedHost;
+        private ISldWorks application;
         private Process ownedProcess;
         private long ownedStartTicksUtc;
+        private OwnedSolidWorksJob ownedJob;
 
-        public ConversionSession(bool lightweightAssemblies) => this.lightweightAssemblies = lightweightAssemblies;
+        public ConversionSession(bool lightweightAssemblies) : this(lightweightAssemblies, false) { }
+        public ConversionSession(bool lightweightAssemblies, bool dedicatedHost)
+        { this.lightweightAssemblies = lightweightAssemblies; this.dedicatedHost = dedicatedHost; }
 
         public PreviewWorkerResult Convert(IReadOnlyList<PreviewWorkerJob> jobs, Action<string, int, int, int, PreviewWorkerItem> progress = null)
         {
             var total = jobs.Count(job => job.Convert); var completed = 0;
             progress?.Invoke("启动或连接SolidWorks", completed, total, 0, null);
             var items = new List<PreviewWorkerItem>();
+            Exception startupFailure = null;
             foreach (var job in jobs)
             {
                 // Convert=false 的任务只作为引用文件下发（SolidWorks 解析装配体引用时需要），不需要转出。
@@ -136,7 +142,11 @@ internal static class Program
                 // 工程图/装配体会留下已加载的引用模型；下一任务必须使用本次清单中的源文件，避免同名文档冲突。
                 try
                 {
-                    var current = EnsureApplication();
+                    if (startupFailure != null)
+                        throw new InvalidOperationException("本批次SolidWorks启动失败，已停止重复启动。请检查转图电脑的启动日志，修复后重新发起。", startupFailure);
+                    ISldWorks current;
+                    try { current = EnsureApplication(); }
+                    catch (Exception exception) { startupFailure = exception; throw; }
                     solidWorksPid = current.GetProcessID();
                     progress?.Invoke("转换文件：" + Path.GetFileName(job.SourcePath), completed, total, solidWorksPid, null);
                     CloseSessionDocuments();
@@ -161,32 +171,11 @@ internal static class Program
                 Error = failed == 0 ? null : $"{failed}项图档转换失败，其余{items.Count - failed}项已完成，可单独重试失败项。" };
         }
 
-        private SldWorks EnsureApplication()
+        private ISldWorks EnsureApplication()
         {
             if (application == null)
             {
-                // COM activation may attach to a user's existing session. Refuse
-                // before activation, and verify the returned process before any mutation.
-                var existing = Process.GetProcessesByName("SLDWORKS");
-                try
-                {
-                    if (existing.Length > 0)
-                        throw new InvalidOperationException("本机已有SolidWorks会话，后台转图未接管或关闭任何窗口。请在独立转图电脑处理，或待该会话正常结束后重试。");
-                }
-                finally { foreach (var process in existing) process.Dispose(); }
-                var createdAfter = DateTime.UtcNow;
-                application = new SldWorks();
-                var candidate = Process.GetProcessById(application.GetProcessID());
-                try
-                {
-                    if (!string.Equals(candidate.ProcessName, "SLDWORKS", StringComparison.OrdinalIgnoreCase)
-                        || candidate.StartTime.ToUniversalTime() < createdAfter || application.UserControl || application.Visible)
-                        throw new InvalidOperationException("未能确认独立的后台SolidWorks进程，已停止转图；现有窗口及文件保持不变。");
-                    ownedStartTicksUtc = candidate.StartTime.ToUniversalTime().Ticks;
-                    ownedProcess = candidate;
-                    candidate = null;
-                }
-                finally { candidate?.Dispose(); }
+                StartPrivateApplication();
                 AssertPrivateApplication();
                 application.CommandInProgress = true;
             }
@@ -199,7 +188,11 @@ internal static class Program
             if (application == null || ownedProcess == null || ownedProcess.HasExited
                 || ownedProcess.StartTime.ToUniversalTime().Ticks != ownedStartTicksUtc
                 || application.GetProcessID() != ownedProcess.Id || application.UserControl || application.Visible)
+            {
+                // A user may take control of the new instance. Do not terminate it on worker exit.
+                ownedJob?.PreserveProcess();
                 throw new InvalidOperationException("后台转图的进程归属已变化，已停止操作并保留当前SolidWorks窗口及文件。");
+            }
         }
 
         private void CloseSessionDocuments()
@@ -219,10 +212,12 @@ internal static class Program
                     AssertPrivateApplication();
                     application.ExitApp();
                 }
-                catch (Exception error) { Console.Error.WriteLine("未关闭未经核对的SolidWorks会话：" + error); }
+                catch (Exception error) { ownedJob?.PreserveProcess(); Console.Error.WriteLine("未关闭未经核对的SolidWorks会话：" + error); }
                 try { if (Marshal.IsComObject(application)) Marshal.FinalReleaseComObject(application); } catch { }
             }
             application = null;
+            ownedJob?.Dispose();
+            ownedJob = null;
             ownedProcess?.Dispose();
             ownedProcess = null;
             ownedStartTicksUtc = 0;

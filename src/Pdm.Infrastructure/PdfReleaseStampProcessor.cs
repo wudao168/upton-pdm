@@ -39,12 +39,35 @@ public sealed class PdfReleaseStampProcessor(IPdmRepository repository, ILogger<
         }
     }
 
-    public async Task ApplyAsync(ReleasePackage package, Project project, ReleasePreviewSource source, string pdfPath, CancellationToken cancellationToken)
+    public Task ApplyAsync(ReleasePackage package, Project project, ReleasePreviewSource source, string pdfPath, CancellationToken cancellationToken)
+        => ApplyCoreAsync(package, project, source, pdfPath, false, cancellationToken);
+
+    public Task ReissueAsync(ReleasePackage package, Project project, ReleasePreviewSource source, string pdfPath, CancellationToken cancellationToken)
+    {
+        if (!source.AlreadyReleased) throw new PdmRuleException("只有固定的正式图纸可以复用PDF交付件。");
+        return ApplyCoreAsync(package, project, source, pdfPath, true, cancellationToken);
+    }
+
+    public bool IsCurrent(string path, ReleasePackage package, Guid sourceVersionId)
+    {
+        lock (PdfReleasePageEditor.Gate)
+        {
+            if (!IsStamped(path, package.Id, sourceVersionId)) return false;
+            using var document = PdfReader.Open(path, PdfDocumentOpenMode.Import);
+            var values = package.PdfTitleBlockSnapshot is { Enabled: true } snapshot
+                ? snapshot.Drawings.FirstOrDefault(pair => pair.Value.SourceVersionId == sourceVersionId).Value?.Values : null;
+            return document.Info.Elements.GetString("/UPLMTitleBlockFingerprint") == Fingerprint(values ?? new Dictionary<string, string>());
+        }
+    }
+
+    private async Task ApplyCoreAsync(ReleasePackage package, Project project, ReleasePreviewSource source, string pdfPath, bool reissue, CancellationToken cancellationToken)
     {
         try
         {
             var version = await repository.FindDocumentVersionAsync(source.DocumentId, source.SourceVersionId, cancellationToken)
                 ?? throw new PdmConflictException("PDF发布标识找不到本次批准的图档来源，请核对发布记录。");
+            if (reissue && version.Status != DocumentVersionStatus.Released)
+                throw new PdmConflictException("PDF复用来源不是固定正式版本，已停止处理。");
             var binding = package.VersionBindings?.SingleOrDefault(item => item.DocumentId == source.DocumentId);
             var sourceId = binding?.VersionId ?? version.SourceVersionId ?? version.Id;
             if (!string.Equals(version.Sha256, source.Sha256, StringComparison.OrdinalIgnoreCase)
@@ -80,7 +103,8 @@ public sealed class PdfReleaseStampProcessor(IPdmRepository repository, ILogger<
                     throw new PdmConflictException("PDF属性填写快照不完整或与本次冻结来源不一致，请核对发布记录。");
                 foreach (var key in snapshot.EnabledFields) values[key] = frozen.Values[key];
             }
-            lock (PdfReleasePageEditor.Gate) Apply(stamp, source.DocumentId, pdfPath, cadCodes, values);
+            lock (PdfReleasePageEditor.Gate) Apply(stamp, source.DocumentId, pdfPath, cadCodes, values,
+                reissue ? new HashSet<Guid>(new[] { version.Id, version.SourceVersionId ?? version.Id }) : null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) when (error is not PdmRuleException and not PdmConflictException)
@@ -90,28 +114,49 @@ public sealed class PdfReleaseStampProcessor(IPdmRepository repository, ILogger<
         }
     }
 
-    private static void Apply(Stamp stamp, Guid drawingId, string path, IReadOnlySet<string> cadCodes, IReadOnlyDictionary<string, string> values)
+    private static string Fingerprint(IReadOnlyDictionary<string, string> values) => values.Count == 0 ? "" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+        JsonSerializer.Serialize(values.OrderBy(pair => pair.Key, StringComparer.Ordinal)))));
+
+    private static void Apply(Stamp stamp, Guid drawingId, string path, IReadOnlySet<string> cadCodes, IReadOnlyDictionary<string, string> values,
+        IReadOnlySet<Guid>? reuseSources)
     {
-        var fingerprint = values.Count == 0 ? "" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-            JsonSerializer.Serialize(values.OrderBy(pair => pair.Key, StringComparer.Ordinal)))));
+        var fingerprint = Fingerprint(values);
+        var reuse = false;
         using (var existing = PdfReader.Open(path, PdfDocumentOpenMode.Import))
         {
             var identity = existing.Info.Elements.GetString("/UPLMReleaseIdentity");
             if (!string.IsNullOrEmpty(identity))
             {
-                if (identity != stamp.Identity || existing.Info.Elements.GetString("/UPLMSourceSha256") != stamp.SourceSha)
-                    throw new PdmConflictException("PDF已属于其他发布来源，已停止重复叠加，请从原始转换结果重试。");
-                if (existing.Info.Elements.GetString("/UPLMStampVersion") == Schema
+                if (identity == stamp.Identity && existing.Info.Elements.GetString("/UPLMSourceSha256") == stamp.SourceSha && existing.Info.Elements.GetString("/UPLMStampVersion") == Schema
                     && existing.Info.Elements.GetString("/UPLMTitleBlockFingerprint") == fingerprint) return;
-                throw new PdmRuleException("PDF发布标识格式已更新，请从原始转换结果重试。");
+                if (reuseSources is not null && PdfReleaseIdentity.TryDecode(identity, out _, out var oldSource)
+                    && reuseSources.Contains(oldSource) && existing.Info.Elements.GetString("/UPLMSourceSha256") == stamp.SourceSha
+                    && existing.Info.Elements.GetString("/UPLMReleaseRevision") == stamp.Revision
+                    && existing.Info.Elements.GetString("/UPLMStampVersion") == Schema)
+                    reuse = true;
+                else if (identity != stamp.Identity || existing.Info.Elements.GetString("/UPLMSourceSha256") != stamp.SourceSha)
+                    throw new PdmConflictException("PDF已属于其他发布来源，已停止重复叠加，请从原始转换结果重试。");
+                else throw new PdmRuleException("PDF发布标识格式已更新，请从原始转换结果重试。");
             }
         }
         var prepared = path + $".{Guid.NewGuid():N}.prepared.pdf";
         var result = path + $".{Guid.NewGuid():N}.stamped.pdf";
         var filled = path + $".{Guid.NewGuid():N}.filled.pdf";
+        var basePdf = path + $".{Guid.NewGuid():N}.base.pdf";
         try
         {
-            var layouts = PdfReleasePageEditor.Prepare(path, prepared, drawingId, cadCodes);
+            if (reuse)
+            {
+                using var original = PdfReader.Open(path, PdfDocumentOpenMode.Modify);
+                foreach (var page in original.Pages)
+                {
+                    if (page.Contents.Elements.Count < 2) throw new PdmRuleException("正式PDF的系统标识层无法单独核对，已停止复用，未调用转图。");
+                    page.Contents.Elements.RemoveAt(page.Contents.Elements.Count - 1);
+                }
+                foreach (var key in original.Info.Elements.Keys.Where(key => key.StartsWith("/UPLM", StringComparison.Ordinal)).ToArray()) original.Info.Elements.Remove(key);
+                original.Save(basePdf);
+            }
+            var layouts = PdfReleasePageEditor.Prepare(reuse ? basePdf : path, prepared, drawingId, cadCodes);
             GlobalFontSettings.FontResolver ??= new PdfReleaseFontResolver();
             var regular = new XFont("UPLM-YaHei", FontSize, XFontStyleEx.Regular);
             var bold = new XFont("UPLM-YaHei", FontSize, XFontStyleEx.Bold);
@@ -148,6 +193,7 @@ public sealed class PdfReleaseStampProcessor(IPdmRepository repository, ILogger<
             if (File.Exists(prepared)) File.Delete(prepared);
             if (File.Exists(result)) File.Delete(result);
             if (File.Exists(filled)) File.Delete(filled);
+            if (File.Exists(basePdf)) File.Delete(basePdf);
         }
     }
 

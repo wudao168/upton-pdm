@@ -76,6 +76,7 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
     if (url.includes('/api/engineering-kits')) return json([])
     if (url.includes('/api/material-code/applications')) return json([])
     if (url.endsWith('/api/material-category-rules')) return json([])
+    if (url.endsWith('/api/materials/notification-permission')) return json({ enabled: loginRoleCodes?.some(role => ['Approver', 'ProcessReviewer', 'StandardizationAssistant'].includes(role)) || loginPermissions?.includes('material.notify') || false })
     if (url.includes('/api/material-sync-tasks')) return json([])
     if (url.endsWith('/api/role-permissions')) return json(roleDirectory)
     if (url.includes('/api/role-permissions/') && init?.method === 'PUT') {
@@ -168,6 +169,7 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
       { id: 'version-w1', documentId: 'doc-root', drawingNumber: 'REAL-ASM-001', documentName: '真实总装配', fileName: 'REAL-ASM-001.SLDASM', revision: { display: 'W1' }, status: 'Work', createdBy: 'engineer', createdAt: '2026-08-10T02:00:00Z', changeNote: '首次存档' },
     ])
     if (url.endsWith(`/api/projects/${projectId}/audit?take=200`)) return json([{ id: 'audit-1', occurredAt: '2026-08-11T02:00:00Z', actor: 'engineer', action: 'document.checkin', entityType: 'DocumentVersion', entityId: 'version-w2', detail: 'W2' }])
+    if (url.split('?')[0].endsWith(`/api/projects/${projectId}/files`)) return json([])
     if (url.endsWith(`/api/projects/${projectId}/folders`)) return json([])
     if (url.endsWith(`/api/projects/${projectId}/drawing-reviews`) && (!init?.method || init.method === 'GET')) return json(drawingReviewsResponse)
     if (url.endsWith(`/api/projects/${projectId}/drawing-review-candidates`)) return json([
@@ -264,7 +266,7 @@ function buttonByText(wrapper: ReturnType<typeof mount>, label: string) {
 
 async function navigateTo(wrapper: ReturnType<typeof mount>, label: string) {
   const projectPages = ['项目总览', '项目日历', '项目列表']
-  const standardPages = ['标准物料', '标准结构', '程序模板']
+  const standardPages = ['标准物料', '标准结构', '常备件']
   const group = projectPages.includes(label) ? '项目总览' : standardPages.includes(label) ? '标准物料' : label
   const button = wrapper.get('.pdm-sidebar').findAll('button').find(button => button.text().trim() === group)!
   await button.trigger('click')
@@ -320,7 +322,30 @@ describe('PLM client workspace', () => {
     installApiMock()
   })
 
+  it('有料品查看权限但没有消息权限时，打开管理页也不产生角标或待办提醒', async () => {
+    installApiMock([], ['ProjectManager'])
+    const originalFetch = globalThis.fetch
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/api/material-sync-tasks')) return Promise.resolve(json([{ id: 'ordinary', materialId: 'ordinary-material', status: 'Failed' }]))
+      return originalFetch(input, init)
+    }))
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    try {
+      await login(wrapper, false, 'admin')
+      const badge = () => wrapper.get('.pdm-sidebar').findAll('.pdm-sidebar__nav button').find(button => button.text().includes('料品管理'))!.find('em')
+      expect(badge().exists()).toBe(false)
+      await buttonByText(wrapper, '料品管理').trigger('click'); await flushPromises()
+      const materials = wrapper.findComponent({ name: 'MaterialManagement' })
+      expect(materials.props('canReceiveNotices')).toBe(false)
+      materials.vm.$emit('noticeCountsChange', { syncTasks: 99, codeApprovals: 99 }); await flushPromises()
+      expect(badge().exists()).toBe(false)
+      await buttonByText(wrapper, '我的待办').trigger('click'); await flushPromises()
+      expect(wrapper.findComponent({ name: 'MyTasks' }).props('materialCodeTasks')).toEqual([])
+    } finally { wrapper.unmount() }
+  })
+
   it.each([false, true])('人工待办排除自动处理的BOM表头申请并保留普通审批（普通审批：%s）', async ordinary => {
+    installApiMock([], ['Administrator', 'Approver'])
     const originalFetch = globalThis.fetch
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input).includes('/api/material-code/applications')) return Promise.resolve(json([
@@ -345,6 +370,7 @@ describe('PLM client workspace', () => {
   })
 
   it.each([false, true])('料品角标排除BOM料号任务并在刷新后保持与页面一致（普通任务：%s）', async ordinary => {
+    installApiMock([], ['Administrator', 'Approver'])
     const originalFetch = globalThis.fetch
     const calls: string[] = []
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -804,7 +830,7 @@ describe('PLM client workspace', () => {
     await flushPromises()
 
     expect(wrapper.find('.pdm-project-workspace').exists()).toBe(true)
-    expect(wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())).toEqual(['项目总览', '项目中心', '制造中心', '标准物料', '料品管理', '工时管理', '我的待办'])
+    expect(wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().trim())).toEqual(['项目总览', '项目中心', '工时管理', '我的待办', '制造中心', '标准物料', '标准程序', '料品管理'])
     expect(wrapper.get('.pdm-sidebar__nav .pdm-nav-item.is-active').text()).toContain('项目中心')
     await projectTabByText(wrapper, 'BOM').trigger('click')
     await flushPromises()
@@ -1262,7 +1288,7 @@ describe('PLM client workspace', () => {
     expect(projectTabByText(wrapper, 'BOM').exists()).toBe(true)
     await projectTabByText(wrapper, '文件').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('项目文件夹')
+    expect(wrapper.text()).toContain('项目文件')
     expect(wrapper.get('.pdm-project-workspace').classes()).not.toContain('is-document-view')
     await projectTabByText(wrapper, '图档').trigger('click')
     await flushPromises()
@@ -1623,16 +1649,22 @@ describe('PLM client workspace', () => {
     expect(tabs()).toEqual(['项目总览', '项目日历', '项目列表'])
     const calendar = wrapper.get('[data-navigation-page="project-calendar"]')
     await calendar.findAll('button').find(button => button.text() === '周')!.trigger('click')
-    await navigateTo(wrapper, '程序模板')
-    expect(tabs()).toEqual(['标准物料', '常备件', '标准结构', '程序模板'])
+    await navigateTo(wrapper, '标准程序')
+    expect(wrapper.find('.pdm-navigation-tabs').exists()).toBe(false)
+    expect(wrapper.get('.pdm-sidebar__nav .is-active').text()).toBe('标准程序')
     const templates = wrapper.get('[data-navigation-page="program-templates"]').element
     await buttonByText(wrapper, '项目总览').trigger('click'); await flushPromises()
     expect(calendar.isVisible()).toBe(true)
     expect(calendar.get('.pc-week-view').isVisible()).toBe(true)
     expect(wrapper.get('.pdm-navigation-tabs [aria-selected="true"]').text()).toBe('项目日历')
     await buttonByText(wrapper, '标准物料').trigger('click'); await flushPromises()
+    expect(tabs()).toEqual(['标准物料', '标准结构', '常备件'])
+    await navigateTo(wrapper, '常备件')
+    expect(wrapper.get('[data-navigation-page="stocked-materials"]').isVisible()).toBe(true)
+    await navigateTo(wrapper, '标准程序')
     expect(wrapper.get('[data-navigation-page="program-templates"]').element).toBe(templates)
-    expect(wrapper.get('.pdm-navigation-tabs [aria-selected="true"]').text()).toBe('程序模板')
+    await buttonByText(wrapper, '标准物料').trigger('click'); await flushPromises()
+    expect(wrapper.get('.pdm-navigation-tabs [aria-selected="true"]').text()).toBe('常备件')
     wrapper.unmount()
   })
 
@@ -1646,8 +1678,9 @@ describe('PLM client workspace', () => {
     })
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper)
-    await buttonByText(wrapper, '标准物料').trigger('click'); await flushPromises()
-    expect(wrapper.get('.pdm-navigation-tabs').findAll('[role="tab"]').map(tab => tab.text())).toEqual(['程序模板'])
+    await buttonByText(wrapper, '标准程序').trigger('click'); await flushPromises()
+    expect(wrapper.find('.pdm-navigation-tabs').exists()).toBe(false)
+    expect(wrapper.get('.pdm-sidebar__nav .is-active').text()).toBe('标准程序')
     expect(wrapper.get('[data-navigation-page="program-templates"]').isVisible()).toBe(true)
     expect(wrapper.find('[data-navigation-page="standard-library"]').exists()).toBe(false)
     expect(wrapper.find('[data-navigation-page="standard-structure"]').exists()).toBe(false)
@@ -1661,7 +1694,7 @@ describe('PLM client workspace', () => {
     const pages = [
       ['项目日历', 'project-calendar'], ['项目总览', 'project-workbench'], ['项目列表', 'projects'],
       ['标准物料', 'standard-library'], ['标准结构', 'standard-structure'], ['料品管理', 'materials'],
-      ['程序模板', 'program-templates'], ['我的待办', 'tasks'], ['制造中心', 'production-drawings'], ['系统设置', 'admin'],
+      ['标准程序', 'program-templates'], ['我的待办', 'tasks'], ['制造中心', 'production-drawings'], ['系统设置', 'admin'],
     ] as const
     for (const [label, key] of pages) {
       await navigate(label)

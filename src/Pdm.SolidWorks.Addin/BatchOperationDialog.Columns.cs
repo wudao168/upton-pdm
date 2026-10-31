@@ -129,6 +129,8 @@ internal sealed partial class BatchOperationDialog
 
     private sealed class FileSelectionTreeView : TreeView
     {
+        public FileSelectionTreeView() => TreeControlDiagnostics.Attach(this, "存档选择树");
+
         protected override CreateParams CreateParams
         {
             get { var parameters = base.CreateParams; parameters.Style |= 0x8000; return parameters; }

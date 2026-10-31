@@ -75,7 +75,7 @@ public sealed class NotificationRecipientApiTests
                 RoleCode: actor == "system-recipient" ? "Administrator" : "developer"), default);
             await repository.CreateUserNotificationsAsync([
                 new(Guid.NewGuid(), actor, "System", "系统维护通知", "系统连接恢复", null, null, "system-status", DateTimeOffset.UtcNow, null),
-                new(Guid.NewGuid(), actor, "ReleasePreviewResult", "业务发布结果", "发布已完成", project.Id, null, "business-result", DateTimeOffset.UtcNow, null)
+                new(Guid.NewGuid(), actor, "ProjectUpdate", "业务发布结果", "发布已完成", project.Id, null, "business-result", DateTimeOffset.UtcNow, null)
             ], default);
         }
         var application = await materials.CreateMaterialCodeApplicationAsync(new(Guid.NewGuid(), project.Id, Guid.NewGuid(),

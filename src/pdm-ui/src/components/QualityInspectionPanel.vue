@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useProjectCenterAccess } from '../projectCenterAccess'
+const { write: projectWritable, download: projectDownload } = useProjectCenterAccess()
 import PanelActions from './PanelActions.vue'
 import { useId as usePanelFormId } from 'vue'
 const panelFormId = usePanelFormId()
@@ -30,7 +32,7 @@ const uploadFailed = ref(false)
 const stationFilter = ref('')
 const stations = computed(() => [...new Set(records.value.map(x => x.station).filter(Boolean))])
 const visibleRecords = computed(() => records.value.filter(x => !stationFilter.value || x.station === stationFilter.value))
-const writableProjects = computed(() => props.projects.filter(x => x.canReadContent && (props.writableProjectIds ? props.writableProjectIds.includes(x.id) : props.canEdit)))
+const writableProjects = computed(() => props.projects.filter(x => projectWritable.value && x.canReadContent && (props.writableProjectIds ? props.writableProjectIds.includes(x.id) : props.canEdit)))
 const projectLabel = (id: string) => props.projects.find(x => x.id === id)?.code ?? id
 let loadGeneration = 0
 async function load() {
@@ -89,7 +91,7 @@ async function preview(record: QualityInspectionRecord) {
   const generation = previewGeneration
   previewLoading.value = true
   try {
-    const blob = await readQualityInspectionFile(record.id, props.token)
+    const blob = await readQualityInspectionFile(record.id, props.token, true)
     if (generation !== previewGeneration) return
     previewRecord.value = record
     const type = /\.pdf$/i.test(record.fileName) ? 'application/pdf' : /\.png$/i.test(record.fileName) ? 'image/png' : /\.jpe?g$/i.test(record.fileName) ? 'image/jpeg' : blob.type
@@ -115,10 +117,10 @@ watch(() => [props.projects.map(x => x.id).join(','), props.token, props.refresh
     </div>
     <footer class="quality-inspection__footer"><span>共 {{ visibleRecords.length }} 条记录</span><span>范围：主项目及子项目</span></footer>
     <el-dialog v-model="previewOpen" :title="`检验文件预览 · ${previewRecord?.fileName ?? ''}`" width="90vw" top="5vh" append-to-body destroy-on-close @closed="clearPreview">
-      <div class="quality-inspection__preview-actions"><a v-if="previewUrl" :href="previewUrl" :download="previewRecord?.fileName" class="el-button el-button--primary">下载文件</a></div>
+      <div class="quality-inspection__preview-actions"><a v-if="previewUrl && projectDownload" :href="previewUrl" :download="previewRecord?.fileName" class="el-button el-button--primary">下载文件</a></div>
       <PdfDrawingViewer v-if="previewOpen && previewUrl && previewKind === 'pdf'" :url="previewUrl" />
       <img v-else-if="previewOpen && previewUrl && previewKind === 'image'" :src="previewUrl" :alt="previewRecord?.title" class="quality-inspection__preview-image">
-      <p v-else>此文件暂不支持在线预览，可下载查看。</p>
+      <p v-else>此文件暂不支持在线预览，请联系资料负责人提供PDF或图片。</p>
     </el-dialog>
     <el-dialog v-model="dialogOpen" :title="`上传${title}记录`" width="540px" append-to-body :close-on-click-modal="!saving" :show-close="!saving" :close-on-press-escape="!saving">
       <form :id="panelFormId + '-form-1'" class="quality-inspection__form" @submit.prevent="save">

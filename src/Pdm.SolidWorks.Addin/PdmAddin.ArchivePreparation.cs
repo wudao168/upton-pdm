@@ -37,7 +37,7 @@ public sealed partial class PdmAddin
         try
         {
             return MergeReferencedConfigurationProperties(document, node,
-                ReadCheckInProperties(document, node, useCached: true, nativePropertyCards: cards, requireComplete: true), configurations);
+                ReadCheckInProperties(document, node, useCached: true, nativePropertyCards: cards, requireComplete: false), configurations);
         }
         catch (Exception error)
         {
@@ -58,10 +58,15 @@ public sealed partial class PdmAddin
         }
     }
 
-    private async Task PrepareArchiveSnapshotsAsync(IEnumerable<PreparedArchiveFile> files,
+    private Task PrepareArchiveSnapshotsAsync(IEnumerable<PreparedArchiveFile> files,
         ICollection<string> plannedPaths, CancellationToken token)
+        => PrepareArchiveSnapshotsCoreAsync(files, plannedPaths, token, null);
+
+    private async Task PrepareArchiveSnapshotsCoreAsync(IEnumerable<PreparedArchiveFile> files,
+        ICollection<string> plannedPaths, CancellationToken token, Dictionary<Guid, IReadOnlyList<DocumentVersionDto>> histories)
     {
         var batch = files.ToArray();
+        ArchiveSession.Current?.SetStep(7, "正在固定本次引用快照与版本基准…", batch.Length);
         var failures = new List<string>();
         // Freeze the whole confirmed batch without yielding. Freezing one file and then
         // awaiting its base version lets a metadata refresh invalidate the next file.
@@ -81,13 +86,21 @@ public sealed partial class PdmAddin
             }
         }
         ThrowArchivePreflightFailures(failures);
+        ArchiveSession.Current?.ReportFile(0, 0, "—", "正在按服务器规则核对最终整批引用关系…");
+        var frozenBatch = batch.ToDictionary(file => file.Node.DocumentId.Value, file => file.ReferenceSnapshot);
+        await Task.Run(() => FrozenArchiveSubmissionGraph.Validate(frozenBatch), token);
+        if (histories != null) await apiClient.RefreshArchiveHistoriesAsync(histories, token);
+        var fixedSnapshots = 0;
         foreach (var file in batch)
         {
             token.ThrowIfCancellationRequested();
             try
             {
-                file.ReferenceSnapshot = await apiClient.PrepareArchiveSnapshotAsync(file.Node, plannedPaths,
-                    HistoricalArchiveBase(file.Node), token, file.ReferenceSnapshot);
+                file.ReferenceSnapshot = histories == null
+                    ? await apiClient.PrepareArchiveSnapshotAsync(file.Node, plannedPaths, HistoricalArchiveBase(file.Node), token, file.ReferenceSnapshot)
+                    : await apiClient.PrepareArchiveSnapshotWithHistoryAsync(file.Node, HistoricalArchiveBase(file.Node),
+                        file.ReferenceSnapshot, histories[file.Node.DocumentId.Value], token);
+                ArchiveSession.Current?.ReportFile(0, batch.Length, file.Node.FileName, "已固定引用快照 " + (++fixedSnapshots) + "/" + batch.Length + "，准备最终校验");
                 LogOperation("Archive frozen reference snapshot prepared file=" + file.Node.FileName
                     + " base=" + file.ReferenceSnapshot.ExpectedVersionId
                     + " planned=" + file.ReferenceSnapshot.PlannedDocumentIds.Count);
@@ -136,7 +149,7 @@ public sealed partial class PdmAddin
     {
         var items = DistinctBatchItems(selected);
         var nodes = items.SelectMany(item => EnumerateArchiveNodes(item.Node)).Distinct().ToArray();
-        bool Clean(CadTreeNode node) => node.DocumentId.HasValue && node.StoredVersionStateKnown && node.HasStoredVersion
+        bool Clean(CadTreeNode node) => !node.LocalStructureDeferred && node.DocumentId.HasValue && node.StoredVersionStateKnown && node.HasStoredVersion
             && string.IsNullOrWhiteSpace(node.CheckedOutBy) && !node.CheckoutSessionId.HasValue && !node.CheckoutSessionLost
             && !node.IsRenamePendingSave && !node.IsModifiedInSolidWorks && node.WorkState == CadWorkState.None
             && !node.DrawingReviewLocked && !node.IsReadOnlyPreview && !node.HasBlockingIssue
@@ -162,9 +175,12 @@ public sealed partial class PdmAddin
 
         var groups = nodes.GroupBy(node => node.FullPath, StringComparer.OrdinalIgnoreCase).ToArray();
         var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var analyzed = 0;
         foreach (var group in groups)
         {
             token.ThrowIfCancellationRequested();
+            ArchiveSession.Current?.ReportAnalysisProgress(analyzed++, groups.Length, group.First().FileName,
+                "正在分析本地图档与缓存版本…", false);
             var hash = await Task.Run(() => ArchiveFileFingerprint.Read(group.Key, token), token);
             if (group.Any(node => !Clean(node) || !NodeMatchesLatestFile(node, hash) || !VersionMatchesFile(snapshots[node], hash))) return null;
             hashes[group.Key] = hash;
@@ -321,10 +337,35 @@ public sealed partial class PdmAddin
         }
     }
 
+    private static void ReuseVerifiedArchiveStructures(CadTreeNode previous, CadTreeNode current)
+    {
+        var sources = EnumerateCadNodes(previous).Where(node => node.Kind == CadDocumentKind.Assembly && !string.IsNullOrWhiteSpace(node.FullPath))
+            .GroupBy(node => node.FullPath, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.OrdinalIgnoreCase);
+        foreach (var node in EnumerateCadNodes(current).Where(SuppressedAssemblyArchive.IsUnexpanded).ToArray())
+        {
+            if (!sources.TryGetValue(node.FullPath, out var candidates)) continue;
+            var source = candidates.FirstOrDefault(old => old.Configuration == node.Configuration && old.InstancePath == node.InstancePath
+                && old.DocumentId == node.DocumentId && !old.LocalStructureDeferred);
+            if (source == null || source.IsModifiedInSolidWorks || source.IsRenamePendingSave || node.IsModifiedInSolidWorks || node.IsRenamePendingSave) continue;
+            // Reuse the native structure only after TryReuse's fresh content hash.
+            SuppressedAssemblyLocalStructure.TryReuse(source, node);
+            if (string.IsNullOrWhiteSpace(node.CurrentRevision) || node.CurrentRevision == source.CurrentRevision)
+            {
+                node.CurrentRevision = source.CurrentRevision;
+                node.SuppressedArchiveVersion = source.SuppressedArchiveVersion;
+                node.SuppressedArchiveSha256 = source.SuppressedArchiveSha256;
+            }
+        }
+    }
+
     // B02-B08: files come from the native inventory; structure is a separate index.
     private async Task<IReadOnlyList<BatchOperationItem>> PrepareArchiveScopeAsync(
         IReadOnlyList<BatchOperationItem> selected, Guid projectId, CancellationToken token)
     {
+        ArchiveSession.Current?.SetStep(3, "正在核对本次选择的引用与配置…", selected.Count);
+        await apiClient.RefreshArchiveWarningPolicyAsync(token);
+        ArchiveMissingReferencePolicy.Prepare(currentTree, selected.Select(item => item.Node).ToArray());
         await apiClient.RefreshDocumentRulesAsync(token);
         // Catch known historical ownership/content conflicts before the expensive native scan.
         await IncludeHistoricalReferenceRepairsAsync(currentTree, selected, projectId, token, validateOnly: true);
@@ -351,7 +392,8 @@ public sealed partial class PdmAddin
         if (document == null)
             throw new InvalidOperationException("当前存档根图档已关闭或切换，请重新打开并确认存档范围。");
         var paths = new HashSet<string>(selected.Select(item => item.Node.FullPath), StringComparer.OrdinalIgnoreCase);
-        var verifiedScanner = new SolidWorksReferenceTreeScanner(application);
+        var wholeRoot = paths.Contains(previous.FullPath);
+        var verifiedScanner = new SolidWorksReferenceTreeScanner(application) { DiscoverRelatedDrawings = wholeRoot };
         stage("重新读取组件结构及原生文件范围");
         var verified = verifiedScanner.ScanDocument(document, false);
         stage("定位旧目录中的实际引用文件");
@@ -374,56 +416,82 @@ public sealed partial class PdmAddin
                 CopyPdmIdentity(old, node);
                 node.OpenedVersionId = old.OpenedVersionId;
                 node.OpenedRevision = old.OpenedRevision;
+                if (PathsEqual(old.FullPath, node.FullPath) && old.DocumentId == node.DocumentId
+                    && old.Configuration == node.Configuration && old.CurrentRevision == node.CurrentRevision
+                    && !old.IsModifiedInSolidWorks && !old.IsRenamePendingSave)
+                {
+                    node.SuppressedArchiveVersion = old.SuppressedArchiveVersion;
+                    node.SuppressedArchiveSha256 = old.SuppressedArchiveSha256;
+                }
+                if (!wholeRoot)
+                    foreach (var drawing in old.Children.Where(child => child.Kind == CadDocumentKind.Drawing))
+                        if (!node.Children.Any(child => PathsEqual(child.FullPath, drawing.FullPath))) node.Children.Add(drawing);
                 if (SuppressedAssemblyLocalStructure.TryReuse(old, node))
                     LogOperation("存档结构复用，未重复打开压缩子装配体：" + node.FullPath);
             }
         }
+        var inspectionItems = BuildBatchOperationItems(verified);
+        var selectedForInspection = inspectionItems.Where(item => selected.Any(original =>
+            PathsEqual(item.Node.FullPath, original.Node.FullPath)
+            || locationAliases.TryGetValue(original.Node.FullPath, out var actual) && PathsEqual(item.Node.FullPath, actual)
+            || original.Node.DocumentId.HasValue && item.Node.DocumentId == original.Node.DocumentId)).ToArray();
+        var inspectedOwners = selectedForInspection;
+        stage("轻量核对本次选取图档的引用配置");
+        var selectedModelPaths = new HashSet<string>(selectedForInspection.Select(item => item.Node.FullPath), StringComparer.OrdinalIgnoreCase);
+        ValidateSavedModelConfigurations(EnumerateCadNodes(verified).Where(node => selectedModelPaths.Contains(node.FullPath)), token);
+        ArchiveMissingReferencePolicy.Prepare(verified, selectedForInspection.Select(item => item.Node).ToArray());
+        var inspectionRoots = ArchiveInspectionRoots(verified, inspectedOwners);
         stage("核对压缩组件及引用完整性");
-        await RestoreMissingControlledArchiveFilesAsync(verified, projectId, token);
-        await ResolveSuppressedAssemblyReferencesAsync(verified, token);
-        try { await ReadMissingSuppressedStructuresAsync(verified, token); }
-        catch (Exception error) when (error is InvalidOperationException || error is IOException)
+        foreach (var scope in inspectionRoots)
         {
-            verified.StructureIndexPending = true;
-            PluginDiagnosticLog.Record("结构待补全", "压缩结构读取未完成，继续核对原生文件：" + error);
-        }
-        {
-            // Include both the native dependency list and explicitly selected drawing folders.
-            stage("读取原生文件和工程图清单");
-            var nativeFiles = verifiedScanner.AddNativeAssociatedDrawings(document, verified);
-            NativeArchiveManifest.ConfirmFileScope(verified, nativeFiles);
-            foreach (var dependency in EnumerateArchiveNodes(verified).Where(node => node.Role == CadReferenceRole.ExternalFileDependency))
+            await RestoreMissingControlledArchiveFilesAsync(scope, projectId, token);
+            await ResolveSuppressedAssemblyReferencesAsync(scope, token);
+            // File check-in does not require loading a suppressed assembly merely
+            // to build its occurrence index. Keep any unknown index explicitly pending.
+            if (EnumerateCadNodes(scope).Any(node => !node.IsOutsideNativeFileScope
+                && SuppressedAssemblyArchive.IsUnexpanded(node) && node.SuppressedArchiveVersion == null))
+                scope.StructureIndexPending = true;
             {
-                RestorePersistedDocumentIdentities(dependency);
-                if (PdmDocumentIdentityStore.TryReadLocalMetadata(dependency.FullPath, out var metadata)
-                    && metadata.DocumentId == dependency.DocumentId && metadata.ProjectId == projectId)
+                // Include both the native dependency list and explicitly selected drawing folders.
+                stage("读取原生文件和工程图清单");
+                var nativeFiles = ReadSelectedNativeInventory(verifiedScanner, scope);
+                ArchiveMissingReferencePolicy.Prepare(verified, selectedForInspection.Select(item => item.Node).ToArray());
+                NativeArchiveManifest.ConfirmFileScope(scope, nativeFiles);
+                foreach (var dependency in EnumerateArchiveNodes(scope).Where(node => node.Role == CadReferenceRole.ExternalFileDependency))
                 {
-                    dependency.OpenedVersionId = metadata.VersionId;
-                    dependency.OpenedRevision = dependency.CurrentRevision = dependency.Revision = metadata.Revision;
+                    RestorePersistedDocumentIdentities(dependency);
+                    if (PdmDocumentIdentityStore.TryReadLocalMetadata(dependency.FullPath, out var metadata)
+                        && metadata.DocumentId == dependency.DocumentId && metadata.ProjectId == projectId)
+                    {
+                        dependency.OpenedVersionId = metadata.VersionId;
+                        dependency.OpenedRevision = dependency.CurrentRevision = dependency.Revision = metadata.Revision;
+                    }
                 }
-            }
-            await RestoreMissingControlledArchiveFilesAsync(verified, projectId, token);
-            verifiedScanner.AddRelatedDrawingPaths(verified, previousNodes.Values
-                .Where(node => node.Kind == CadDocumentKind.Drawing && File.Exists(node.FullPath))
-                .Select(node => node.FullPath), true);
-            if (paths.Contains(verified.FullPath))
-            {
-                stage("比对原生文件清单与实例引用");
-                verified.UnmanagedReferences.AddRange(NativeArchiveManifest.Validate(verified, nativeFiles));
+                await RestoreMissingControlledArchiveFilesAsync(scope, projectId, token);
+                verifiedScanner.AddRelatedDrawingPaths(scope, previousNodes.Values
+                    .Where(node => node.Kind == CadDocumentKind.Drawing && File.Exists(node.FullPath))
+                    .Where(node => paths.Contains(node.FullPath))
+                    .Select(node => node.FullPath), true);
+                ArchiveMissingReferencePolicy.Prepare(verified, selectedForInspection.Select(item => item.Node).ToArray());
+                if (scope.Kind == CadDocumentKind.Assembly)
+                {
+                    stage("比对原生文件清单与实例引用");
+                    scope.UnmanagedReferences.AddRange(NativeArchiveManifest.Validate(scope, nativeFiles));
+                }
             }
         }
         currentTree = verified;
         stage("补齐关联工程图并核对提交范围");
-        await CompleteRelatedDrawingFilesAsync(verified, projectId, token);
-        foreach (var drawing in EnumerateCadNodes(verified).Where(node => node.Kind == CadDocumentKind.Drawing).ToArray())
+        foreach (var scope in inspectionRoots) await CompleteRelatedDrawingFilesAsync(scope, projectId, token);
+        ArchiveMissingReferencePolicy.Prepare(verified, selectedForInspection.Select(item => item.Node).ToArray());
+        foreach (var drawing in inspectionRoots.SelectMany(EnumerateCadNodes).Where(node => node.Kind == CadDocumentKind.Drawing).Distinct().ToArray())
             for (var index = 0; index < drawing.ReferencedModels.Count; index++)
             {
                 var model = drawing.ReferencedModels[index];
                 if (!model.IsOutsideNativeFileScope && !model.DocumentId.HasValue && model.Kind == CadDocumentKind.Assembly && model.Children.Count == 0)
                 {
-                    try { drawing.ReferencedModels[index] = ReadSuppressedAssemblyStructure(model); }
-                    catch (Exception error) when (error is InvalidOperationException || error is IOException)
-                    { model.StructureIndexPending = true; PluginDiagnosticLog.Record("结构待补全", model.FileName + "；" + error); }
+                    model.StructureIndexPending = drawing.StructureIndexPending = true;
+                    PluginDiagnosticLog.Record("结构待补全", model.FileName + "：保留已保存的模型和工程图，不为补索引额外打开装配体。");
                 }
             }
         // Every actual drawing view remains a dependency, including models outside
@@ -442,31 +510,57 @@ public sealed partial class PdmAddin
         if (absent.Length > 0)
             throw new InvalidOperationException("存档范围在检查时发生变化，以下图档未出现在完整结构中，请核对后重试："
                 + string.Join("、", absent.Select(item => item.Node.FileName)));
-        var owners = await IncludeChangedAssemblyOwnersAsync(refreshed, all, token);
-        var complete = IncludeSelectedModelDrawings(owners, all);
-        var dependencyPaths = new HashSet<string>(complete.SelectMany(item => EnumerateArchiveNodes(item.Node))
-            .Where(node => node.Role == CadReferenceRole.ExternalFileDependency).Select(node => node.FullPath),
-            StringComparer.OrdinalIgnoreCase);
-        complete = complete.Concat(all.Where(item => dependencyPaths.Contains(item.Node.FullPath)))
-            .GroupBy(item => item.Node.FullPath, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
+        var complete = (IReadOnlyList<BatchOperationItem>)refreshed;
         complete = await IncludeHistoricalReferenceRepairsAsync(verified, complete, projectId, token);
-        var requiredPaths = new HashSet<string>(complete.SelectMany(item => EnumerateArchiveNodes(item.Node))
-            .Where(node => !node.DocumentId.HasValue && node.Status != CadReferenceStatus.Virtual
-                && !IsSolidWorksTemporaryVirtualComponentPath(node.FullPath)
-                && node.NativeFileScopePaths?.Contains(node.FullPath) == true)
-            .Select(node => node.FullPath), StringComparer.OrdinalIgnoreCase);
-        complete = complete.Concat(all.Where(item => requiredPaths.Contains(item.Node.FullPath)))
+        complete = complete.Where(item => selected.Any(original => MatchesSelection(item, original)))
             .GroupBy(item => item.Node.FullPath, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
         stage("提前核对原生引用的实际位置");
         complete = await RecoverPdmReferencesAsync(complete, projectId, token);
         ValidatePdmNativeDependencyPaths(complete, token);
-        foreach (var item in complete) PdmApiClient.ValidateArchiveReferenceCompleteness(item.Node);
+        await CompleteCycleEvidenceAsync(complete, token);
+        ArchiveSession.Current?.ReportFile(0, 0, "—", "引用读取已完成，正在核对提交依赖和文件完整性…");
+        ArchiveReadContext.Read<object>(null, "核对提交依赖和文件完整性", () =>
+        {
+            ArchiveReferenceCycles.Validate(complete);
+            foreach (var item in complete) PdmApiClient.ValidateArchiveReferenceCompleteness(item.Node);
+            return null;
+        });
 
         var drawings = complete.Where(item => item.Node.Kind == CadDocumentKind.Drawing).Select(item => item.Node.FileName).ToArray();
         PluginDiagnosticLog.Record("存档范围", "已核对提交清单：" + complete.Count + "个文件，关联工程图" + drawings.Length
             + "张；工程图清单：" + string.Join("、", drawings));
-        taskPaneControl.SetTree(verified);
+        ArchiveSession.Current?.ReportFile(0, 0, "—", "引用核对已完成，正在显示存档选择范围…");
+        ArchiveReadContext.Read<object>(null, "请求显示存档选择范围", () => { taskPaneControl.SetTree(verified); return null; });
         return complete;
+    }
+
+    internal static IReadOnlyList<CadTreeNode> ArchiveInspectionRoots(CadTreeNode root, IReadOnlyList<BatchOperationItem> selected)
+    {
+        var items = DistinctBatchItems(selected);
+        if (items.Any(item => PathsEqual(item.Node.FullPath, root.FullPath))) return new[] { root };
+        return items.Where(item => !item.Ancestors.Any(ancestor => items.Any(parent =>
+                parent.Node.Kind == CadDocumentKind.Assembly && PathsEqual(parent.Node.FullPath, ancestor.FullPath))))
+            .Select(item => item.Node).ToArray();
+    }
+
+    private IReadOnlyList<string> ReadSelectedNativeInventory(SolidWorksReferenceTreeScanner reader, CadTreeNode node)
+    {
+        if (node.ConfirmedArchivePaths != null) return ConfirmedArchiveInventory.Read(node);
+        var loaded = FindLoadedDocument(node.FullPath);
+        var opened = loaded == null;
+        try
+        {
+            if (opened) loaded = OpenDocumentInvisiblyForBatch(node.FullPath, ToSolidWorksDocumentType(node.Kind),
+                node.Kind == CadDocumentKind.Drawing ? string.Empty : node.Configuration, true);
+            if (loaded == null || !PathsEqual(loaded.GetPathName(), node.FullPath))
+            { opened = false; throw new IOException("待提交图档未能从确认路径读取，原窗口已保留：" + node.FileName); }
+            return reader.AddNativeAssociatedDrawings(loaded, node);
+        }
+        finally
+        {
+            if (opened && loaded != null && !CloseArchiveReadDocument(loaded))
+                throw new IOException("本次临时读取窗口未能关闭，原文件及用户窗口已保留：" + node.FileName);
+        }
     }
 
     private void InvalidateChangedVersionHistories(IReadOnlyList<DocumentDto> documents)

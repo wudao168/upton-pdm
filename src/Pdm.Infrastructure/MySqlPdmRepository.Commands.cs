@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Text.Json;
 using Dapper;
 using Upton.Pdm.Application;
@@ -323,6 +324,13 @@ public sealed partial class MySqlPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await InsertReleasePackageAsync(connection, transaction, package, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return package;
+    }
+
+    internal async Task InsertReleasePackageAsync(DbConnection connection, DbTransaction transaction, ReleasePackage package, CancellationToken cancellationToken)
+    {
         await connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO release_package(
@@ -346,7 +354,7 @@ public sealed partial class MySqlPdmRepository
                 @ChangeNumber, @ChangeReason, @ChangeReasonSelections,
                 @FormalSupplementPolicySnapshotted, @FormalSupplementMaximumCount, @FormalSupplementValidDays,
                 @EffectiveSerialFrom, @EffectiveSerialTo, @DrawingPriority, @DrawingRequiredOn, @DrawingDeliveryOverrides, @BomItemDeliveryOverrides,
-                NULL, NULL, NULL, 1, @CreatedAt)
+                @PublishedAt, @PublishedPath, @PublishError, 1, @CreatedAt)
             """,
             new
             {
@@ -390,6 +398,9 @@ public sealed partial class MySqlPdmRepository
                 DrawingRequiredOn = package.DrawingRequiredOn?.ToString("yyyy-MM-dd"),
                 DrawingDeliveryOverrides = JsonSerializer.Serialize(package.DrawingDeliveryOverrides, jsonOptions),
                 BomItemDeliveryOverrides = JsonSerializer.Serialize(package.BomItemDeliveryOverrides, jsonOptions),
+                PublishedAt = package.PublishedAt?.UtcDateTime,
+                package.PublishedPath,
+                package.PublishError,
                 CreatedAt = package.CreatedAt.UtcDateTime
             },
             transaction,
@@ -400,15 +411,15 @@ public sealed partial class MySqlPdmRepository
             await connection.ExecuteAsync(new CommandDefinition(
                 """
                 INSERT INTO approval_task(id, release_package_id, stage, step_order, step_name, assignee, decision_by, decision_value, decision_comment, decided_at, is_emergency_substitute, emergency_reason)
-                VALUES (@Id, @ReleasePackageId, @Stage, @StepOrder, @StepName, @Assignee, NULL, NULL, NULL, NULL, 0, NULL)
+                VALUES (@Id, @ReleasePackageId, @Stage, @StepOrder, @StepName, @Assignee, @DecisionBy, @DecisionValue, @DecisionComment, @DecidedAt, @IsEmergencySubstitute, @EmergencyReason)
                 """,
-                new { task.Id, task.ReleasePackageId, Stage = task.Stage.ToString(), task.StepOrder, task.StepName, task.Assignee },
+                new { task.Id, task.ReleasePackageId, Stage = task.Stage.ToString(), task.StepOrder, task.StepName, task.Assignee,
+                    task.DecisionBy, DecisionValue = task.Decision?.ToString(), DecisionComment = task.Comment, DecidedAt = task.DecidedAt?.UtcDateTime,
+                    task.IsEmergencySubstitute, task.EmergencyReason },
                 transaction,
                 cancellationToken: cancellationToken));
         }
 
-        await transaction.CommitAsync(cancellationToken);
-        return package;
     }
 
     public async Task<ReleasePackage> UpdateDraftReleasePackageAsync(ReleasePackage package, CancellationToken cancellationToken)

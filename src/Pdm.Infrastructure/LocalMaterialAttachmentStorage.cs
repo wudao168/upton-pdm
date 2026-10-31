@@ -97,6 +97,7 @@ public sealed class LocalMaterialAttachmentStorage(IOptions<PdmStorageOptions> o
         var folder = session.Kind switch
         {
             MaterialAttachmentKind.Model3D => "3D",
+            MaterialAttachmentKind.Drawing2D => "2D",
             MaterialAttachmentKind.CoverImage => "Covers",
             _ => "Documents"
         };
@@ -220,6 +221,7 @@ public sealed class LocalMaterialAttachmentStorage(IOptions<PdmStorageOptions> o
         var allowed = kind switch
         {
             MaterialAttachmentKind.Model3D => Model3DExtensions,
+            MaterialAttachmentKind.Drawing2D => new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".pdf", ".dwg", ".dxf", ".slddrw" },
             MaterialAttachmentKind.CoverImage => CoverImageExtensions,
             _ => DocumentExtensions
         };
@@ -227,6 +229,7 @@ public sealed class LocalMaterialAttachmentStorage(IOptions<PdmStorageOptions> o
             throw new PdmRuleException(kind switch
             {
                 MaterialAttachmentKind.Model3D => "3D附件仅支持SLDPRT、SLDASM、STEP、STP、IGS、IGES、X_T、X_B和SAT格式。",
+                MaterialAttachmentKind.Drawing2D => "2D图纸仅支持PDF、DWG、DXF和SLDDRW格式。",
                 MaterialAttachmentKind.CoverImage => "封面图片仅支持JPG、PNG和WebP格式。",
                 _ => "资料附件仅支持常用文档、图片和ZIP/RAR/7Z压缩包格式。"
             });

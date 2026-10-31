@@ -69,6 +69,7 @@ public sealed record ReleaseDeliveryState
     public IReadOnlyList<Guid> ConfirmedRemovedBomItemIds { get; init; } = [];
     public Dictionary<string, Guid> BomVersionIds { get; init; } = [];
     public Dictionary<string, ReleaseIntegrationResult> U9 { get; init; } = [];
+    public bool RequiresU9 { get; init; } = true;
     public string PreviewState { get; init; } = ReleasePreviewState.None;
     public bool PreviewRequired { get; init; }
     public string? PreviewMessage { get; init; }

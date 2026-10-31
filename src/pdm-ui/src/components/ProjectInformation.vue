@@ -7,6 +7,7 @@ import { useUserDisplayName } from '../userDisplay'
 import ProjectNameplateDialog from './ProjectNameplateDialog.vue'
 import ProjectContactInformation from './ProjectContactInformation.vue'
 import ProjectPersonnelAssignment from './ProjectPersonnelAssignment.vue'
+import { nameplateStatus, type ProjectNameplateView } from '../projectNameplate'
 
 const props = defineProps<{ project: ProjectSummary; projects: ProjectSummary[]; token: string; users: PdmUser[]; currentUsername: string; directory: OrganizationDirectory; onUpdateMainStaffing: (id: string, input: MainProjectStaffingInput) => Promise<ProjectSummary>; onUpdateDesigners: (id: string, users: string[]) => Promise<ProjectSummary>; onUpdatePhaseOwners: (id: string, owners: ProjectPhaseOwners) => Promise<ProjectSummary>; canEditApplicationOrderDate?: boolean; canViewApplications?: boolean }>()
 const emit = defineEmits<{ openApplication: [id: string] }>()
@@ -71,7 +72,11 @@ function applyPhaseOwners(saved: ProjectSummary) {
   if (props.project.id === saved.id) props.project.phaseOwners = saved.phaseOwners
 }
 function openNameplate(project: ProjectSummary) { nameplateProject.value = project; nameplateOpen.value = true }
-const nameplateAccess = ref<Record<string, { enabled: boolean; canEdit: boolean }>>({})
+const nameplateAccess = ref<Record<string, ProjectNameplateView>>({})
+function nameplateHint(view: ProjectNameplateView) {
+  const state = nameplateStatus(view.nameplate)
+  return `执行工程师：${state.executionComplete ? '已填写' : '待填写完整'}；硬件工程师：${state.hardwareComplete ? '已填写' : '待填写完整'}；${state.published ? '已发布，内容只读' : view.canEdit ? '可继续编辑' : '仅可查看'}`
+}
 let nameplateRequest = 0
 async function loadNameplateAccess() {
   const request = ++nameplateRequest
@@ -79,7 +84,7 @@ async function loadNameplateAccess() {
   nameplateAccess.value = {}
   const results = await Promise.allSettled(familyProjects.value.filter(item => item.canReadContent).map(async item => {
     const result = await readProjectNameplate(item.id, token)
-    return [item.id, { enabled: result.nameplate.enabled, canEdit: result.canEdit }] as const
+    return [item.id, result] as const
   }))
   if (request === nameplateRequest) nameplateAccess.value = Object.fromEntries(results.flatMap(result => result.status === 'fulfilled' ? [result.value] : []))
 }
@@ -118,7 +123,7 @@ watch(nameplateOpen, open => { if (!open) void loadNameplateAccess() })
         <table class="project-information__table">
           <colgroup><col style="width:8%"><col style="width:16%"><col><col style="width:16%"><col span="11"></colgroup>
           <thead><tr><th>项目号</th><th>项目名称</th><th>别名</th><th>型号</th><th>序列号</th><th>事业部</th><th>执行工程师</th><th class="project-information__assignment">电气工程师</th><th class="project-information__assignment">硬件工程师</th><th class="project-information__assignment">机械装配</th><th class="project-information__assignment">电气装配</th><th>数量</th><th>状态</th><th>订单日期</th><th>铭牌</th></tr></thead>
-          <tbody><tr v-for="item in familyProjects" :key="item.id" :class="{ 'is-current': item.id === project.id }"><td>{{ item.code }}</td><td>{{ item.name }}</td><td>{{ item.projectAlias || '—' }}</td><td>{{ item.deviceModel || '—' }}</td><td>{{ item.serialNumbers.join('、') || '—' }}</td><td>{{ item.executionUnitName || '—' }}</td><td><button v-if="item.canAssignDesigners" type="button" class="pdm-text-action" :aria-label="`分配执行工程师 ${item.code}`" @click="assignment?.configure(item)">{{ people(item.designers) }}</button><span v-else>{{ people(item.designers) }}</span></td><td v-for="column in assignmentColumns" :key="column.key" class="project-information__assignment"><button v-if="item.canAssignDesigners && canMaintainOwners" type="button" class="pdm-text-action" :aria-label="`分配${column.label} ${item.code}`" @click="assignment?.configure(item, column.key)">{{ people(phasePeople(item, column.key)) }}</button><span v-else>{{ people(phasePeople(item, column.key)) }}</span></td><td>{{ item.quantity }}</td><td>{{ item.businessStatus || item.stage }}</td><td>{{ item.signedDate || '—' }}</td><td><span v-if="nameplateAccess[item.id] && !nameplateAccess[item.id].enabled && !nameplateAccess[item.id].canEdit">未启用</span><button v-else-if="nameplateAccess[item.id]" type="button" class="pdm-text-action" :aria-label="`${nameplateAccess[item.id]?.enabled ? '查看铭牌' : '创建铭牌'} ${item.code}`" @click="openNameplate(item)">{{ nameplateAccess[item.id]?.enabled ? '查看铭牌' : '创建' }}</button><span v-else>—</span></td></tr></tbody>
+          <tbody><tr v-for="item in familyProjects" :key="item.id" :class="{ 'is-current': item.id === project.id }"><td>{{ item.code }}</td><td>{{ item.name }}</td><td>{{ item.projectAlias || '—' }}</td><td>{{ item.deviceModel || '—' }}</td><td>{{ item.serialNumbers.join('、') || '—' }}</td><td>{{ item.executionUnitName || '—' }}</td><td><button v-if="item.canAssignDesigners" type="button" class="pdm-text-action" :aria-label="`分配执行工程师 ${item.code}`" @click="assignment?.configure(item)">{{ people(item.designers) }}</button><span v-else>{{ people(item.designers) }}</span></td><td v-for="column in assignmentColumns" :key="column.key" class="project-information__assignment"><button v-if="item.canAssignDesigners && canMaintainOwners" type="button" class="pdm-text-action" :aria-label="`分配${column.label} ${item.code}`" @click="assignment?.configure(item, column.key)">{{ people(phasePeople(item, column.key)) }}</button><span v-else>{{ people(phasePeople(item, column.key)) }}</span></td><td>{{ item.quantity }}</td><td>{{ item.businessStatus || item.stage }}</td><td>{{ item.signedDate || '—' }}</td><td><span v-if="nameplateAccess[item.id] && !nameplateAccess[item.id].nameplate.enabled && !nameplateAccess[item.id].canEdit">未启用</span><button v-else-if="nameplateAccess[item.id]" type="button" class="pdm-text-action" :class="{ 'is-nameplate-published': !!nameplateAccess[item.id].nameplate.releasePackageId }" :title="nameplateHint(nameplateAccess[item.id])" :aria-label="`${nameplateAccess[item.id].nameplate.enabled ? '查看铭牌' : '创建铭牌'} ${item.code}`" @click="openNameplate(item)">{{ nameplateAccess[item.id].nameplate.enabled ? nameplateStatus(nameplateAccess[item.id].nameplate).label : '创建' }}</button><span v-else>—</span></td></tr></tbody>
         </table>
       </div>
     </section>
@@ -146,5 +151,6 @@ watch(nameplateOpen, open => { if (!open) void loadNameplateAccess() })
 .project-information__staff-actions{display:flex;gap:5px;margin-left:auto}
 .project-information__staff-actions :deep(.el-button){width:auto;min-width:60px;height:var(--pdm-button-compact);margin:0;padding:0 6px;font-size:11px}.project-information__staff .project-information__table-wrap{max-height:240px}
 
+.project-information__table .is-nameplate-published{color:var(--pdm-success,#16803c);font-weight:600}
 .project-information__panel{flex:1 0 180px}
 </style>

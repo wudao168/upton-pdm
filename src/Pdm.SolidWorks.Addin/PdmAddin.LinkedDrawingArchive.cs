@@ -158,7 +158,7 @@ public sealed partial class PdmAddin
                 .Any(model => model.IsModifiedInSolidWorks || model.WorkState == CadWorkState.PendingCheckIn || model.WorkState == CadWorkState.ModifiedUnsaved)))
                 throw new InvalidOperationException("配套工程图关联的模型仍有未存档修改，请将对应模型一并勾选存档；本次尚未上传或升版：" + drawing.FileName);
             drawing.RequiresModelUpdate = drawing.RequiresModelUpdate || modelChanged || !referencesMatch;
-            if (drawing.RequiresModelUpdate && !planned.Contains(item)) planned.Add(item);
+            if (drawing.RequiresModelUpdate && !planned.Any(existing => PathsEqual(existing.Node.FullPath, drawing.FullPath))) planned.Add(item);
         }
     }
 

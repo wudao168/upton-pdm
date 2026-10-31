@@ -61,7 +61,7 @@ public sealed class NotificationRecipientPolicyTests
             new(Guid.NewGuid(), "recipient", category, "通知", "测试内容", project, null, source, now.AddMinutes(minute), null, DateOnly.FromDateTime(now.Date));
         var system = Notice("System", "system-maintenance", 0);
         var business = Notice("ProjectTodo", "calendar-todo:old", 1);
-        var project = Notice("ReleasePreviewResult", "release:old", 2, Guid.NewGuid());
+        var project = Notice("ProjectUpdate", "project:old", 2, Guid.NewGuid());
         await repository.CreateUserNotificationsAsync([system, business, project], default);
         await repository.UpdateUserAsync("recipient", "接收人", UserRole.Administrator, "Administrator", ["Administrator"], true, default);
 

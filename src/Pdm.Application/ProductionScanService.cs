@@ -37,6 +37,7 @@ public sealed record ProductionScanAction(Guid LotId, string Kind, string Label,
 }
 public sealed record ProductionScanContext(IReadOnlyList<ProductionScanAction> Actions, string Hint)
 {
+    public IReadOnlyList<ProductionScanResult> RelatedDemands { get; init; } = [];
     public bool CanCancelUnassignedDemand { get; init; }
     public bool CanPrintLabels { get; init; }
     public int LabelWidthMm { get; init; } = 60;

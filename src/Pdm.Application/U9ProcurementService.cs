@@ -11,7 +11,8 @@ public sealed class U9ProcurementService(
     IU9OpenApiClient authenticationClient,
     IU9ProcurementClient procurementClient,
     TimeProvider timeProvider,
-    ProductionTrackingService? production = null)
+    ProductionTrackingService? production = null,
+    BomFileService? bomFiles = null)
 {
     public async Task<ProjectProcurementTrackingResult> ListProjectAsync(
         Guid projectId,
@@ -91,6 +92,7 @@ public sealed class U9ProcurementService(
                 activeRequisitions.Sum(row => row.ApprovedQuantity),
                 details)
             {
+                Files = line.Files,
                 ImpactStage = line.Item.ImpactStage,
                 AssemblyStartDate = assemblyStartDate,
                 CommissioningStartDate = commissioningStartDate
@@ -197,6 +199,29 @@ public sealed class U9ProcurementService(
             throw new UnauthorizedAccessException("当前用户没有项目查看权限。");
     }
 
+    public async Task<IReadOnlyList<BomFileReference>> ListPublishedFilesAsync(Guid projectId, string materialCode, string actor, UserRole role, CancellationToken ct)
+    {
+        await DemandProjectViewAsync(projectId, actor, role, ct);
+        var code = Clean(materialCode) ?? throw new PdmRuleException("请指定要查看图纸附件的物料编码。");
+        var lines = await ListPublishedBomAsync(projectId, await repository.ListReleasePackagesAsync(projectId, ct), ct);
+        var files = new List<BomFileReference>();
+        foreach (var line in lines.Where(line => line.BomKind != "非标件"))
+        {
+            var material = await materials.FindMaterialBySourceBomItemAsync(line.Item.Id, ct);
+            var purchaseCode = Clean(material?.U9ItemCode) ?? Clean(material?.MaterialCode) ?? line.Item.DrawingNumber.Trim();
+            if (string.Equals(code, purchaseCode, StringComparison.OrdinalIgnoreCase)) files.AddRange(line.Files);
+        }
+        return files.DistinctBy(file => file.Id).ToArray();
+    }
+
+    public async Task<MaterialAttachmentDownload> DownloadPublishedFileAsync(Guid projectId, string materialCode, Guid fileId, string actor, UserRole role, CancellationToken ct)
+    {
+        var reference = (await ListPublishedFilesAsync(projectId, materialCode, actor, role, ct)).FirstOrDefault(file => file.Id == fileId)
+            ?? throw new PdmNotFoundException("该采购件的已发布BOM未引用此文件。");
+        if (bomFiles is null) throw new PdmRuleException("图纸附件服务暂不可用，请联系管理员。");
+        return await bomFiles.OpenReferenceAsync(projectId, reference, actor, ct);
+    }
+
     public async Task<U9ProcurementSyncRun> SynchronizeAsync(
         string actor,
         string triggerKind,
@@ -276,7 +301,8 @@ public sealed class U9ProcurementService(
                 group.Last().Item,
                 group.Key.BomKind,
                 string.Join("、", group.Select(item => item.PackageNumbers).Distinct(StringComparer.OrdinalIgnoreCase)),
-                group.Sum(item => item.Quantity)))
+                group.Sum(item => item.Quantity))
+                { Files = group.SelectMany(line => line.Files).DistinctBy(file => file.Id).ToArray() })
             .ToArray();
         var currentImpactStages = new Dictionary<Guid, string?>();
         foreach (var kind in new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Electrical })
@@ -305,14 +331,14 @@ public sealed class U9ProcurementService(
         if (baseline is not null)
         {
             foreach (var item in EffectiveItems(items(baseline)))
-                target.Add(new(item, label, baseline.Number, item.Quantity * Math.Max(1, baseline.WholeSetMultiplier)));
+                target.Add(new(item, label, baseline.Number, item.Quantity * Math.Max(1, baseline.WholeSetMultiplier)) { Files = item.Files ?? [] });
         }
         if (!longLeadScope.HasValue) return;
         var baselineAt = baseline?.PublishedAt;
         foreach (var package in packages.Where(package => package.Scope == longLeadScope.Value
                      && (!baselineAt.HasValue || package.PublishedAt > baselineAt)))
             foreach (var item in EffectiveItems(items(package)))
-                target.Add(new(item, label, package.Number, item.Quantity * Math.Max(1, package.WholeSetMultiplier)));
+                target.Add(new(item, label, package.Number, item.Quantity * Math.Max(1, package.WholeSetMultiplier)) { Files = item.Files ?? [] });
     }
 
     private async Task<U9ProcurementQueryResult> QueryAsync(
@@ -424,5 +450,8 @@ public sealed class U9ProcurementService(
 
     private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
-    private sealed record PublishedBomLine(BomItem Item, string BomKind, string PackageNumbers, decimal Quantity);
+    private sealed record PublishedBomLine(BomItem Item, string BomKind, string PackageNumbers, decimal Quantity)
+    {
+        public IReadOnlyList<BomFileReference> Files { get; init; } = [];
+    }
 }

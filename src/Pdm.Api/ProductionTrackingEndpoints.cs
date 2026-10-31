@@ -32,11 +32,10 @@ public static class ProductionTrackingEndpoints
             var (actor, role) = User(context);
             return Results.Ok(await service.OptionsAsync(actor, role, ct));
         });
-        api.MapGet("/releases/{id:guid}/actions", async (Guid id, HttpContext context, ProductionTrackingService tracking, ProductionScanService scan, CancellationToken ct) =>
+        api.MapGet("/releases/{id:guid}/actions", async (Guid id, HttpContext context, ProductionTrackingService tracking, CancellationToken ct) =>
         {
             var (actor, role) = User(context);
-            var record = await tracking.FindAsync(id, actor, role, ct);
-            return Results.Ok(await scan.ActionsAsync(record.State, actor, role, ct));
+            return Results.Ok(await tracking.ActionsAsync(id, actor, role, ct));
         });
         api.MapGet("/projects", async (HttpContext context, ProductionTrackingService service, CancellationToken ct, bool selfOnly = false, bool externalOnly = false) =>
         {

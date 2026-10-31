@@ -277,7 +277,8 @@ public sealed partial class PdmAddin
 
     private void RetireLocalRecoveryForPlmOpenCore(ControlledOpenManifestDto manifest, string preservedDirectory)
     {
-        bool Preserve(LocalEditDraft entry) => entry != null && (entry.DiscardPending
+        bool Preserve(LocalEditDraft entry) => entry != null && (entry.DiscardPending || !entry.Closed
+            || entry.RecoveryRequired || entry.RestoreOnOpen || entry.UnsavedChanges
             || preservedDirectory != null && IsPathWithinDirectory(entry.SourcePath, preservedDirectory));
         var ids = new HashSet<Guid>(manifest.Files.Select(file => file.DocumentId));
         foreach (var id in ids)

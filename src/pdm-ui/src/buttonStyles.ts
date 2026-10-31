@@ -1,17 +1,25 @@
 import type { App } from 'vue'
 import './styles/buttons.css'
+import './styles/refresh-buttons.css'
+import './styles/table-sorting.css'
 
 // 导航、树节点、日历格和图片入口属于业务内容，不作为操作按钮装饰。
 export const buttonNavigationSelector = 'nav, .pdm-sidebar, .pdm-tabs, [role="tablist"], .el-tree, [role="tree"], .el-pagination, .el-picker-panel, .el-dropdown-menu, .pdm-tree-context-menu'
 export const buttonContentSelector = [
   '[role="tab"]', '[role="treeitem"]', '[role="option"]', '[role="menuitem"]', '[role="checkbox"]', '[role="switch"]',
-  '.pdm-global-status', '.pdm-company-switcher', '.pdm-project-code-link', '.pdm-project-switcher__display',
+  '.pdm-global-status', '.pdm-company-switcher', '.pdm-project-code-link', '.pdm-project-switcher__display', '.pdm-project-switcher__search-icon',
+  '.pdm-release-package-row', '.pdm-titlebar__sidebar-toggle',
+  '.wr-next', '.pdm-plan-summary-action', '.bom-overview__link',
   '[aria-label^="选择项目号"]', '.pdm-project-switcher__option',
   '.pdm-tree-row', '.pdm-tree-toggle', '.pdm-bom-cell-edit', '.pdm-gantt-cell-edit', '.pdm-gantt-resize-handle',
+  '.pdm-bom-issue-button', '.pdm-bom-files-link',
+  '.el-table .caret-wrapper',
   '.bom-tree-node__select', '.bom-tree-node__toggle', '.bom-tree-node__category',
   '.pdm-project-classification__division', '.pdm-project-classification__unassigned',
   '.production-workbench__project', '.production-workbench__package', '.production-drawings__project', '.production-suppliers__category-filter',
+  '.pdm-bom-release-history > button',
   '.production-workbench__all-categories', '.pdm-overview-timeline button', '.wh-department-options button',
+  '.production-scan-settings__node', '.el-tag__close',
   '.wr-project', '.wh-day', '.wh-bar-column', '.pc-day', '.all-category', '.all-categories', '.standard-library__all', '.material-category-all', '.material-category-nav__toggle',
   '.cover-button', '.cover-preview-button', '.material-image-add', '.material-image-card__preview',
   '.el-dialog__headerbtn', '.el-drawer__close-btn', '.el-message-box__headerbtn',
@@ -40,16 +48,19 @@ function updateButton(button: HTMLButtonElement) {
     delete button.dataset.pdmButtonKind
     delete button.dataset.pdmButtonLabel
     delete button.dataset.pdmButtonIconOnly
+    delete button.dataset.pdmButtonRefresh
     return
   }
   const label = text || button.getAttribute('aria-label') || button.title
   const action = label.replace(/^(?:批量|一键)/, '')
+  if (/^(?:(?:立即|全量|正在|手动))*刷新/.test(action)) button.dataset.pdmButtonRefresh = 'true'
+  else delete button.dataset.pdmButtonRefresh
   let kind = 'outline'
   if (/^(?:确认|永久|彻底)?(?:删除|移除|清空)/.test(action)) kind = 'delete'
   else if (/^(?:新增|新建|添加|增加|创建|加入)/.test(action)) kind = 'add'
   else if (/^(?:确认|确定|保存|提交|同意|通过|批准)/.test(action)) kind = 'confirm'
   else if (button.disabled && /^(?:正在|处理中|请稍候)|中[.…]*$/.test(label)) kind = button.dataset.pdmButtonKind ?? kind
-  if (kind === 'outline' && button.matches('.is-link, .el-button--text, .pdm-link-button, .pdm-project-assignment-button')) {
+  if (kind === 'outline' && button.matches('.pdm-text-action, .is-link, .el-button--text, .pdm-link-button, .pdm-project-assignment-button')) {
     delete button.dataset.pdmButtonKind
     delete button.dataset.pdmButtonLabel
     delete button.dataset.pdmButtonIconOnly

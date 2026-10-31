@@ -183,6 +183,24 @@ internal static partial class Program
    dialogType.GetMethod("SetAllChecked",Flags).Invoke(dialog,new object[]{false});await Analyze(dialog,false);
    Check(Selected(dialog).Length==0,"paired drawing analysis still respects a user's clear selection");
   }
+  var previousRoot=root;var previousItems=items;
+  root=drawing;items=Array.CreateInstance(itemType,2);items.SetValue(New("BatchOperationItem",drawing,0),0);items.SetValue(New("BatchOperationItem",nodes[1],1),1);
+  Set(drawing,"RequiresModelUpdate",false);Set(drawing,"DrawingUpdatePendingReason",null);Set(drawing,"IsModifiedInSolidWorks",true);Set(drawing,"CheckedOutBy","tester");Set(drawing,"CheckoutSessionId",Guid.NewGuid());
+  Set(nodes[1],"IsModifiedInSolidWorks",true);Set(nodes[1],"CheckedOutBy","tester");Set(nodes[1],"CheckoutSessionId",Guid.NewGuid());
+  using(var dialog=Dialog())
+  {
+   await Analyze(dialog);
+   Check(Selected(dialog).Length==2&&Selected(dialog).Contains(drawing)&&Selected(dialog).Contains(nodes[1]),"从工程图提交时，已获取权限的3D修改和工程图可一并勾选，确认后统一保存核对");
+   Check(State(dialog,drawing).Contains("存档时更新"),"工程图自身显示明确的更新状态，不再灰色待核对");
+   File.WriteAllText((string)Get(nodes[1],"FullPath"),"archived:PART-1.SLDPRT");Set(nodes[1],"IsModifiedInSolidWorks",false);
+   await Analyze(dialog);
+   Check(Selected(dialog).Length==1&&Selected(dialog).Contains(drawing)&&!Selected(dialog).Contains(nodes[1]),"仅修改2D标注时，未修改3D不自动勾选或提交");
+   Check(State(dialog,drawing).Contains("存档时保存")&&!(bool)Get(drawing,"RequiresModelUpdate"),"重新检查撤销先前的配套更新状态，保留2D待保存状态");
+   var drawingHistory=archiveRuleVersions[(Guid)Get(drawing,"DocumentId")];archiveRuleVersions[(Guid)Get(drawing,"DocumentId")]=null;await Analyze(dialog);
+   Check(!Allowed(dialog,drawing)&&Selected(dialog).Length==0,"服务器版本未确认时不能凭修改标记跳过核对");archiveRuleVersions[(Guid)Get(drawing,"DocumentId")]=drawingHistory;
+   Set(drawing,"CheckedOutBy","another-user");await Analyze(dialog);Check(!Allowed(dialog,drawing),"其他人的工程图权限仍禁止提交");
+  }
+  root=previousRoot;items=previousItems;
   var closing=Dialog();archiveRuleDelay=50;
   var closingTask=(Task)dialogType.GetMethod("AnalyzeArchiveSelectionAsync",Flags).Invoke(closing,new object[]{true});closing.Dispose();await closingTask;
   Check(!((Button)Field(closing,"execute")).Enabled,"closing an analyzing dialog cancels safely without restoring selections or enabling execution");

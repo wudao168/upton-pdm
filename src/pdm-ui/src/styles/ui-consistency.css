@@ -168,6 +168,83 @@ button[role="tab"] {
 }
 
 /* 全局列表沿用BOM的横向分隔风格；不改变日期和时间轴网格。 */
+.workflow-layout,
+.production-scan-settings__layout,
+.wh-settings-layout,
+.wr-content,
+.wh-layout,
+.wh-calendar-layout,
+.review-workbench,
+.pdm-workspace-explorer,
+.pdm-workspace-usage,
+.pdm-bom-release-workspace,
+.pdm-reconciliation-workspace,
+.pdm-material-relation-workspace,
+.production-drawings__layout,
+.org-workspace,
+.category-layout,
+.material-inventory__layout,
+.pdm-template-workspace,
+.stocked-add-layout,
+.stocked-category-layout,
+.add-material-layout {
+  gap: var(--pdm-container-gap) !important;
+}
+.pdm-project-detail__header {
+  margin-bottom: var(--pdm-container-gap) !important;
+}
+
+:root body :is(section, article, aside, main, header, footer, form, fieldset, .pdm-panel, .pdm-sidebar__brand, .pdm-project-sidebar, .pdm-project-sidebar__context, .pdm-project-context, .pdm-table-scroll, .pdm-tabs, [role="tablist"], .el-tabs__header, .el-tabs__nav, .el-dialog, .el-drawer, .pdm-custom-drawer, .production-workbench__project, .production-workbench__package),
+:root body div:is([class*="-panel"], [class*="__panel"], [class*="-card"], [class*="__card"], [class*="-toolbar"], [class*="__toolbar"], [class*="-table-wrap"], [class*="__table-wrap"]) {
+  border-radius: 0 !important;
+  border-color: var(--pdm-container-border) !important;
+  box-shadow: none !important;
+}
+
+:root body :is(.pdm-sidebar, .pdm-sidebar__brand, .pdm-titlebar, .pdm-project-detail__header, .pdm-tabs, [role="tablist"], .el-tabs__header, .el-tabs__nav) {
+  border: 0 !important;
+}
+
+:root body .material-master-layout {
+  border: 1px solid var(--pdm-container-border) !important;
+}
+
+:root body .pdm-project-sidebar-stack,
+:root body .production-workbench__tree.pdm-panel {
+  border: 0 !important;
+}
+
+:root body :is(.project-information, .pdm-plan-page, .production-workbench__secondary, .production-workbench__detail,
+    .production-drawings__projects, .production-drawings__main,
+    .production-suppliers__categories, .production-suppliers__main, .material-relation-directory,
+    .production-workbench__tree.pdm-panel, .engineering-kit-library, .bom-header-directory,
+    .material-code-approval-workflow, .material-numbering-settings-scroll, .work-hours) {
+  padding-inline: var(--pdm-content-inset) !important;
+}
+
+:root body .pdm-project-sidebar-stack > :is(.pdm-project-sidebar__context, .pdm-project-sidebar),
+:root body .material-master-content {
+  border: 0 !important;
+}
+
+:root body .material-master-content {
+  padding: 0 !important;
+}
+
+:root body .material-category-nav {
+  border: 0 !important;
+  border-right: 1px solid var(--pdm-container-border) !important;
+}
+
+:root body [data-pdm-shared-border][data-pdm-shared-border~="left"] { border-left-color: transparent !important; }
+:root body [data-pdm-shared-border][data-pdm-shared-border~="top"] { border-top-color: transparent !important; }
+:root body [data-pdm-shared-border][data-pdm-shared-border~="right"] { border-right-color: transparent !important; }
+:root body [data-pdm-shared-border][data-pdm-shared-border~="bottom"] { border-bottom-color: transparent !important; }
+
+.pdm-plan-page :is(.pdm-gantt-shell, .pdm-gantt-table, .pdm-gantt-info-head, .pdm-gantt-timeline-head, .pdm-gantt-info-row, .pdm-gantt-timeline-row) {
+  background-color: #fff !important;
+}
+
 .el-table .el-table__cell,
 table:has(> thead) :is(th, td) {
   border-left: 0 !important;
@@ -176,3 +253,24 @@ table:has(> thead) :is(th, td) {
 .drawing-review-decision-bar .drawing-review-decision-buttons button,
 .pdm-solidworks-actions > .pdm-preview-command,
 .pdm-preview-markup-row > .pdm-markup-save { box-sizing: border-box; width: 80px !important; min-width: 80px !important; max-width: 80px !important; height: 30px !important; min-height: 30px !important; flex: 0 0 80px; padding-inline: 4px; }
+
+:root body :is(.project-contacts > header, .project-information__staff > header,
+    .project-information__panel > header, .pdm-budget__tabs, .quality-manager__tabs, .production-suppliers__filters,
+    .pdm-bom-detail-toolbar) {
+  box-sizing: border-box;
+  height: 42px !important;
+  min-height: 42px !important;
+  max-height: 42px !important;
+  flex-shrink: 0;
+  align-items: center;
+}
+:root body .pdm-bom-detail-toolbar { flex-wrap: nowrap; }
+:root body .wr-identity .wr-controls button { justify-content: center; text-align: center; }
+:root body .production-suppliers__filters > input[type="search"] { width: 150px !important; }
+:root body .production-workbench__lots > button,
+:root body .production-workbench__lots > button:is(:hover, :focus-visible) {
+  border-color: transparent !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+:root body .wr-project-list > .wr-project.selected { box-shadow: inset 5px 0 0 var(--shell-brand, var(--pdm-theme-accent)) !important; }

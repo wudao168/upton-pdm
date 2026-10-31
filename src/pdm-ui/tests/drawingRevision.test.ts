@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { documentVersionSummary, bomRevisionLabel, drawingRevisionHint, drawingRevisionLabel, packageRevisionLabel } from '../src/drawingRevision'
+import { documentVersionSummary, bomRevisionLabel, drawingRevisionHint, drawingRevisionLabel, packageRevisionLabel, packageRevisionHint } from '../src/drawingRevision'
 import type { BomItem, ReleasePackageSummary } from '../src/types'
 
 const item: BomItem = { sequence: 1, drawingNumber: 'PART', name: '底板', quantity: 1, unit: '个', revision: 'W1', complete: true, sourceDocumentId: 'model' }
@@ -9,6 +9,18 @@ const release = (raw = 'W1', target = 'A'): ReleasePackageSummary => ({ id: 'rp'
   steps: [], workflowVersion: 1, selectedBomItemIds: [], createsManufacturingBaseline: true, locksDocuments: true })
 
 describe('统一图纸版次', () => {
+  it('标准件没有独立版本时采用该发布包冻结的BOM版本，保留已有物料版本', () => {
+    const standard = { ...item, kind: 'Standard' as const }
+    const packageA = { ...release(), scope: 'StandardSupplement' as const, standardBomRevision: 'S-P700016-2-B03', versionBindings: [] }
+    expect(packageRevisionLabel(standard, packageA)).toBe('S-P700016-2-V03')
+    expect(packageRevisionLabel(standard, { ...packageA, standardBomRevision: 'S-P700016-2-V04' })).toBe('S-P700016-2-V04')
+    expect(packageRevisionLabel({ ...standard, revision: 'A' }, packageA)).toBe('A')
+    expect(packageRevisionHint(standard, packageA)).toBe('标准件BOM发布版本：S-P700016-2-V03；取自本次发布包冻结记录')
+    expect(standard.revision).toBe('W1')
+  })
+  it('旧标准件记录缺少BOM版本时提示核对，不臆造版本', () => {
+    expect(packageRevisionLabel({ ...item, kind: 'Standard' }, { ...release(), scope: 'StandardFormal', versionBindings: [] })).toBe('BOM发布版本待核对')
+  })
   it('图纸序号不受发布字母影响，缺失映射时不猜测', () => {
     expect(documentVersionSummary({ drawingVersionNumber: 4, publishedVersion: 'A', version: 'A-W1' })).toBe('图纸版本 V4 · 发布版本 A')
     expect(documentVersionSummary({ version: 'A-W1' })).toBe('图纸版本 待核对 · 发布版本 未发布')

@@ -201,7 +201,7 @@ public sealed class PreviewConversionTests
     /// 不能报成"调用转图服务器超过60分钟"（线上就出现过"才过 1 分钟就提示超过 60 分钟"）。
     /// </summary>
     [Fact]
-    public async Task RemotePreviewConversion_ReportsHttpClientTimeoutWithRealElapsedTime()
+    public async Task RemotePreviewConversion_WaitsWhenAgentHealthTimesOutWithoutMisreportingConversionTimeout()
     {
         var root = Path.Combine(Path.GetTempPath(), "pdm-preview-agent-timeout-test", Guid.NewGuid().ToString("N"));
         try
@@ -211,9 +211,9 @@ public sealed class PreviewConversionTests
             using var agent = new HttpClient(new HangingAgentHandler()) { Timeout = TimeSpan.FromMilliseconds(150) };
             var converter = new SolidWorksServerPreviewConverter(Options.Create(new PdmPreviewWorkerOptions()), repository, agent);
 
-            var exception = await Assert.ThrowsAsync<PdmRuleException>(() => converter.GenerateAsync(package, project, sources, staging, default));
+            var exception = await Assert.ThrowsAsync<PreviewServerUnavailableException>(() => converter.GenerateAsync(package, project, sources, staging, default));
 
-            Assert.Contains("被中断", exception.Message);
+            Assert.Contains("等待恢复后自动重试", exception.Message);
             Assert.DoesNotContain("超过60分钟", exception.Message);
         }
         finally
@@ -224,7 +224,7 @@ public sealed class PreviewConversionTests
 
     /// <summary>转图电脑不可达时要报真实原因和等待时长，不能笼统报成"超过N分钟"。</summary>
     [Fact]
-    public async Task RemotePreviewConversion_ReportsUnreachableAgentWithElapsedTime()
+    public async Task RemotePreviewConversion_WaitsWhenAgentIsUnreachableWithoutSpendingAnAttempt()
     {
         var root = Path.Combine(Path.GetTempPath(), "pdm-preview-agent-unreachable-test", Guid.NewGuid().ToString("N"));
         try
@@ -234,10 +234,9 @@ public sealed class PreviewConversionTests
             var agent = new HttpClient(new UnreachableAgentHandler());
             var converter = new SolidWorksServerPreviewConverter(Options.Create(new PdmPreviewWorkerOptions()), repository, agent);
 
-            var exception = await Assert.ThrowsAsync<PdmRuleException>(() => converter.GenerateAsync(package, project, sources, staging, default));
+            var exception = await Assert.ThrowsAsync<PreviewServerUnavailableException>(() => converter.GenerateAsync(package, project, sources, staging, default));
 
-            Assert.Contains("无法连接转图服务器", exception.Message);
-            Assert.Contains("由于目标计算机积极拒绝", exception.Message);
+            Assert.Contains("等待恢复后自动重试", exception.Message);
             Assert.DoesNotContain("超过60分钟", exception.Message);
         }
         finally
@@ -404,6 +403,8 @@ public sealed class PreviewConversionTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath == "/health")
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"workerExists\":true,\"busy\":false}", Encoding.UTF8, "application/json") };
             RequestCount++;
             RequestUri = request.RequestUri;
             UploadedSources.Clear();

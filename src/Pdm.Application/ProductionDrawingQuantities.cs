@@ -27,7 +27,17 @@ public static class ProductionDrawingQuantities
     {
         var items = FrozenItems(package);
         var multiplier = Math.Max(1, package.WholeSetMultiplier);
-        var prior = BomReleaseAggregation.PriorQuantities(BomReleaseAggregation.PriorLongLeadItems(package, history), items);
+        var historyItems = history.ToArray();
+        var previous = package.Scope == ReleaseScope.NonStandardSupplement
+            ? historyItems.Where(previous => previous.ProjectId == package.ProjectId && previous.Id != package.Id
+                    && previous.State == ReleasePackageState.Published && previous.PublishedAt.HasValue
+                    && (!package.PublishedAt.HasValue || previous.PublishedAt < package.PublishedAt)
+                    && previous.Scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement)
+                .OrderByDescending(previous => previous.PublishedAt).FirstOrDefault()
+            : null;
+        var priorItems = previous is null ? BomReleaseAggregation.PriorLongLeadItems(package, historyItems)
+            : FrozenItems(previous).Select(item => item with { Quantity = item.Quantity * Math.Max(1, previous.WholeSetMultiplier) });
+        var prior = BomReleaseAggregation.PriorQuantities(priorItems, items);
         return items.GroupBy(BomReleaseAggregation.MaterialKey)
             .Select(group =>
             {

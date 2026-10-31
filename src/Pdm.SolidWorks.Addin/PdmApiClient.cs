@@ -422,18 +422,21 @@ internal sealed partial class PdmApiClient : IDisposable
         }
     }
 
-    private async Task<Guid?> BaseVersionAsync(CadTreeNode node, Guid documentId, CancellationToken cancellationToken)
+    private Task<Guid?> BaseVersionAsync(CadTreeNode node, Guid documentId, CancellationToken cancellationToken)
+        => BaseVersionFromHistoryAsync(node, documentId, cancellationToken, null);
+
+    private async Task<Guid?> BaseVersionFromHistoryAsync(CadTreeNode node, Guid documentId, CancellationToken cancellationToken, IReadOnlyList<DocumentVersionDto> knownVersions)
     {
         Guid? recordedBase = node.OpenedVersionId;
         if (PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out var metadata)
             && metadata.DocumentId == documentId && metadata.VersionId.HasValue) recordedBase = metadata.VersionId;
-        var versions = await GetVersionsAsync(documentId, cancellationToken, 1).ConfigureAwait(false);
+        var versions = knownVersions ?? await GetVersionsAsync(documentId, cancellationToken, 1).ConfigureAwait(false);
         if (recordedBase.HasValue)
         {
             var current = versions.FirstOrDefault();
             if (current != null && current.Id != recordedBase.Value && current.Status == 1)
             {
-                var history = await GetVersionsAsync(documentId, cancellationToken).ConfigureAwait(false);
+                var history = knownVersions ?? await GetVersionsAsync(documentId, cancellationToken).ConfigureAwait(false);
                 var source = history.FirstOrDefault(version => version.Id == recordedBase.Value);
                 if (ReleasedArchiveBaseMatches(source, current)) return current.Id;
             }
@@ -484,8 +487,12 @@ internal sealed partial class PdmApiClient : IDisposable
             {
                 var node = pendingNodes.Pop();
                 if (!visitedNodes.Add(node)) continue;
+                // A model's associated drawings are consumers, not its native-file
+                // dependencies. Following their model links invents reverse/sibling
+                // assembly dependencies in multi-model drawings.
+                if (node != root && node.Kind == CadDocumentKind.Drawing) continue;
                 foreach (var child in node.Children.Concat(node.ReferencedModels)) pendingNodes.Push(child);
-                if (node == root || node.Kind == CadDocumentKind.Drawing || node.Status == CadReferenceStatus.Virtual
+                if (node.IsOutsideNativeFileScope || node == root || node.Kind == CadDocumentKind.Drawing || node.Status == CadReferenceStatus.Virtual
                     || !node.DocumentId.HasValue || node.DocumentId == root.DocumentId
                     || !root.NativeFileScopePaths.Contains(node.FullPath) || !inventoryIds.Add(node.DocumentId.Value)) continue;
                 // Drawing model associations already identify these files. A second
@@ -622,6 +629,8 @@ internal sealed partial class PdmApiClient : IDisposable
         if (left.DocumentId != right.DocumentId || left.InstancePath != right.InstancePath
             || left.FileName != right.FileName || left.DisplayName != right.DisplayName
             || left.Kind != right.Kind || left.Configuration != right.Configuration
+            || left.IsContextReference != right.IsContextReference
+            || left.ReferenceTypeUnverified != right.ReferenceTypeUnverified
             || left.Quantity != right.Quantity || left.Status != right.Status
             || left.Revision?.Display != right.Revision?.Display) return false;
         var before = left.Children ?? new List<DocumentReferenceNodeDto>();
@@ -1028,6 +1037,13 @@ internal sealed partial class PdmApiClient : IDisposable
             throw new InvalidOperationException("服务器尚不支持随版本保存引用提示，已保留本地图档。请更新服务器后重新存档。");
     }
 
+    internal async Task RequireContextReferencesSupportAsync(CancellationToken token)
+    {
+        var capabilities = await GetJsonAsync<Dictionary<string, bool>>("api/archive-capabilities", token);
+        if (capabilities == null || !capabilities.TryGetValue("contextReferences", out var supported) || !supported)
+            throw new InvalidOperationException("PLM服务尚不支持上下文设计关联，请先同步更新服务端后重试；原图档和关联均已保留。");
+    }
+
     internal static void ValidateArchiveReferenceCompleteness(CadTreeNode node)
     {
         if (node == null) return;
@@ -1168,6 +1184,7 @@ internal sealed partial class PdmApiClient : IDisposable
             displayName = node.DisplayName,
             kind = (int)node.Kind,
             role = (int)node.Role,
+            isContextReference = node.IsContextReference, referenceTypeUnverified = node.ReferenceTypeUnverified,
             configuration = node.Configuration,
             quantity = node.Quantity,
             status = (int)node.Status,
@@ -1192,7 +1209,7 @@ internal sealed partial class PdmApiClient : IDisposable
             referenceWarnings = node.ReferenceWarnings,
             instancePath = (newRootPath ?? string.Empty).TrimEnd('/') + "/" + relative,
             fileName = node.FileName, displayName = node.DisplayName, kind = node.Kind,
-            role = node.Role, isSuppressed = node.IsSuppressed,
+            role = node.Role, isContextReference = node.IsContextReference, referenceTypeUnverified = node.ReferenceTypeUnverified, isSuppressed = node.IsSuppressed,
             configuration = node.Configuration, quantity = node.Quantity, status = node.Status,
             revision = ToRevisionRequest(node.Revision?.Display), checkedOutBy = (string)null,
             children = (node.Children ?? new List<DocumentReferenceNodeDto>())
@@ -1366,6 +1383,8 @@ internal sealed class DocumentReferenceNodeDto
     public string DisplayName { get; set; }
     public int Kind { get; set; }
     public int Role { get; set; }
+    public bool IsContextReference { get; set; }
+    public bool ReferenceTypeUnverified { get; set; }
     public string Configuration { get; set; }
     public int Quantity { get; set; }
     public int Status { get; set; }
@@ -1562,6 +1581,12 @@ internal sealed class ArchiveBatchReceiptDto
 
 internal sealed class ControlledOpenManifestDto
 {
+    // Local proof for resuming an existing checkout, never supplied by the server
+    // or serialized into immutable version/cache manifests.
+    internal Dictionary<Guid, string> RetainedWorkingHashes { get; } = new Dictionary<Guid, string>();
+    internal HashSet<string> CompletedReferencePrepasses { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    internal HashSet<Guid> ResumedDocumentIds { get; } = new HashSet<Guid>();
+    internal Dictionary<string, RetainedLocalReference> RetainedLocalReferences { get; } = new Dictionary<string, RetainedLocalReference>(StringComparer.OrdinalIgnoreCase);
     public Guid Id { get; set; }
     public Guid ProjectId { get; set; }
     public string ProjectCode { get; set; }

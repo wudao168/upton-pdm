@@ -4,6 +4,7 @@ import { ElMessageBox } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
 import { listMaterialRelationTemplates, listMaterials, publishMaterialRelationTemplate, saveMaterialRelationTemplate } from '../api'
 import type { MaterialRelationQuantityMode, MaterialRelationSelectionMode, MaterialRelationTemplate, PdmMaterial, SaveMaterialRelationTemplateInput } from '../types'
+import MaterialRelationCategories from './MaterialRelationCategories.vue'
 
 type DraftOption = { materialId: string; quantityMode: MaterialRelationQuantityMode; quantityPerSet: number; isDefault: boolean; sortOrder: number; selectionAdvice: string }
 type DraftGroup = { name: string; isRequired: boolean; selectionMode: MaterialRelationSelectionMode; minSelection: number; maxSelection: number | null; autoSelectUnique: boolean; sortOrder: number; options: DraftOption[] }
@@ -11,6 +12,7 @@ type DraftGroup = { name: string; isRequired: boolean; selectionMode: MaterialRe
 const props = defineProps<{ token: string; mainMaterial: PdmMaterial; canManage: boolean; canPublish: boolean }>()
 const emit = defineEmits<{ changed: [] }>()
 const loading = ref(false)
+const hasCategory = ref(false)
 const saving = ref(false)
 const configuring = ref(false)
 const materialSearchLoading = ref(false)
@@ -190,6 +192,7 @@ async function publish() {
       <div class="material-relation-summary__status"><span>关联配置</span><el-tag :type="statusType">{{ relationStatus }}</el-tag></div>
     </div>
 
+    <MaterialRelationCategories :token="token" :material-id="mainMaterial.id" :can-manage="canManage" @loaded="hasCategory = $event" @changed="emit('changed')" />
     <el-empty v-if="!configuring" :description="mainMaterial.approvalStatus === 'Approved' ? '该物料尚未配置关联物料' : '料品批准后方可配置关联物料'">
       <el-button v-if="canConfigure" type="primary" @click="startConfiguration">开始配置关联物料</el-button>
     </el-empty>
@@ -232,7 +235,7 @@ async function publish() {
         <el-button v-if="canManage" @click="addGroup">添加配件组</el-button>
         <span />
         <el-button v-if="canManage" type="primary" :loading="saving" @click="save">保存修改</el-button>
-        <el-button v-if="canPublish && relation?.draftRevision" type="success" @click="publish">发布生效</el-button>
+        <el-button v-if="canPublish && relation?.draftRevision" type="success" :disabled="!hasCategory" :title="hasCategory ? '' : '请先由标准化人员补选主料的标准物料分类'" @click="publish">发布生效</el-button>
       </div>
     </template>
   </section>

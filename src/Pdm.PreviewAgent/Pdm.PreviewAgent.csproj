@@ -1,6 +1,6 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <Version>1.2.0</Version>
+    <Version>1.2.3</Version>
     <TargetFramework>net48</TargetFramework>
     <RootNamespace>Upton.Pdm.PreviewAgent</RootNamespace>
     <AssemblyName>Upton.Pdm.PreviewAgent</AssemblyName>
@@ -24,6 +24,10 @@
     <Reference Include="System.Security" />
   </ItemGroup>
   <ItemGroup><Compile Include="..\Pdm.Client.Shared\ClientLogRedaction.cs" Link="ClientLogRedaction.cs" /></ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Pdm.Client.Shared\ClientDiagnostics.cs" Link="ClientDiagnostics.cs" />
+    <Compile Include="..\Pdm.Client.Shared\ClientDeviceIdentity.cs" Link="ClientDeviceIdentity.cs" />
+  </ItemGroup>
   <ItemGroup><InternalsVisibleTo Include="Pdm.PreviewAgentAcceptance" /></ItemGroup>
   <Import Project="..\Pdm.Client.Shared\PlmBrandAssets.targets" />
 </Project>

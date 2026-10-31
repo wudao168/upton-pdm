@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -27,6 +27,191 @@ internal static partial class Program
  {
   AppDomain.CurrentDomain.AssemblyResolve+=(_,e)=>{var path=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0])),new AssemblyName(e.Name).Name+".dll");return File.Exists(path)?Assembly.LoadFrom(path):null;};
   assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));
+  if(args.Length>1&&args[1]=="--lightweight-import-owner-regression")
+  {try{Directory.CreateDirectory(args[2]);LightweightImportOwnerScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&(args[1]=="--archive-submission-graph-regression"||args[1]=="--archive-submission-graph-audit"))
+  {try{ArchiveSubmissionGraphScenario(args[2],args.Length>3?args[3]:null,args[1].EndsWith("audit"));}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--project-state-mirror-regression")
+  { using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ProjectStateRefreshScenario();MirrorAuxiliaryReferenceScenario();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--archive-disk-benchmark")
+  { try{ArchiveDiskBenchmark(args[2],args[3]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--archive-reservation-recovery-regression")
+  { using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ArchiveReservationRecoveryScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--archive-performance-regression")
+  { using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ArchivePerformanceScenario(host,args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--archive-upload-boundary-regression")
+  { using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ArchiveUploadGateScenario(host,args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--import-update-boundary-regression")
+  { try{ImportUpdateBoundaryScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return; }
+  if(args.Length>1&&args[1]=="--unverified-reference-regression")
+  { try{UnverifiedReferenceScenario();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return; }
+  if(args.Length>1&&args[1]=="--archive-config-catalog-regression")
+  {
+   try{ArchiveConfigCatalogScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--saved-model-bytes-regression")
+  {
+   using(var host=new Form{Opacity=0,ShowInTaskbar=false})
+   {host.Shown+=async(_,__)=>{try{await SavedModelBytesScenario(Path.Combine(args[2],"part"),"Part");await SavedModelBytesScenario(Path.Combine(args[2],"assembly"),"Assembly");}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--whole-cycle-evidence-regression")
+  {
+   try{WholeCycleEvidenceScenario(args[2],args[3]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--owned-reference-resolution-regression")
+  {
+   try{OwnedReferenceResolutionScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--context-component-sources-regression")
+  {
+   try{ContextComponentSourcesScenario(args[2],args[3]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--tree-lifecycle-diagnostics-regression")
+  {
+   try{TreeLifecycleDiagnosticsScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--locked-context-regression")
+  {
+   try{LockedContextScenario(args[2],args[3]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--saved-drawing-bytes-regression")
+  {
+   using(var savedDrawingHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    savedDrawingHost.Shown+=async(_,__)=>{try{await SavedDrawingBytesScenario(args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{savedDrawingHost.Close();}};
+    Application.Run(savedDrawingHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-ui-reentrancy-regression")
+  {
+   try{ArchiveUiReentrancyScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-context-reference-regression")
+  {
+   try{ArchiveContextReferenceScenario(args[2],args[3]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-read-performance-regression")
+  {
+   try{ArchiveReadPerformanceScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-missing-policy-regression")
+  {
+   using(var warningHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    warningHost.Shown+=async(_,__)=>{try{await MissingReferencePolicyScenario(warningHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{warningHost.Close();}};
+    Application.Run(warningHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--passive-tree-regression")
+  {
+   using(var passiveHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    passiveHost.Shown+=async(_,__)=>{try{await PassiveTreeScenario(passiveHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{passiveHost.Close();}};
+    Application.Run(passiveHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--selected-root-reference-regression")
+  {
+   try{SelectedRootReferenceScenario(args[2]).GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-project-inheritance-regression")
+  {
+   try{ArchiveProjectInheritanceScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-analysis-progress-regression")
+  {
+   using(var analysisHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    analysisHost.Shown+=async(_,__)=>{try{await ArchiveAnalysisProgressScenario(analysisHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{analysisHost.Close();}};
+    Application.Run(analysisHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--retained-local-reference-regression")
+  {
+   try{RetainedLocalReferenceScenario(args[2]).GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--assembly-permission-prompt-regression")
+  {
+   using(var host=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    host.Shown+=(_,__)=>{try{AssemblyPermissionPromptScenario(host,args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};
+    Application.Run(host);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--assembly-insert-acquire-regression")
+  {
+   try{AcquireAssemblyEditScenario(args.Length>3?args[3]:"reinsert-").GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--selected-scope-regression")
+  {
+   try{SelectedScopeScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--retained-edit-reopen-regression")
+  {
+   try{RetainedEditReopenScenario(args[2],args.Length>3?args[3]:null).GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--controlled-cache-regression")
+  {
+   try{ControlledCacheScenario(args[2]).GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--controlled-open-boundary-regression")
+  {
+   try{ControlledOpenBoundaryScenario(args[2]).GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--controlled-reference-lock-regression")
+  {
+   try{ControlledReferenceLockScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--controlled-reference-core-regression")
+  {
+   try{OperationRuleScenario();ControlledReferenceScenario();ControlledParameterIntegrityScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
   if(args.Length>1&&args[1]=="--archive-settings-cleanup-regression")
   {
    using(var cleanupHost=new Form{Opacity=0,ShowInTaskbar=false})
@@ -34,6 +219,62 @@ internal static partial class Program
    cleanupHost.Shown+=async(_,__)=>{try{await ArchiveSettingsCleanupScenario(cleanupHost,args[2]);await ArchiveSourceRepeatScenario(cleanupHost,args[2]);}
      catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{cleanupHost.Close();}};
     Application.Run(cleanupHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--native-inventory-progress-regression")
+  {
+   using(var inventoryHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    inventoryHost.Shown+=async(_,__)=>{try{await NativeInventoryProgressScenario(inventoryHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{inventoryHost.Close();}};
+    Application.Run(inventoryHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-unchecked-filter-regression")
+  {
+   using(var uncheckedHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    uncheckedHost.Shown+=async(_,__)=>{try{await ArchiveUncheckedFilterScenario(uncheckedHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{uncheckedHost.Close();}};
+    Application.Run(uncheckedHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--drawing-model-lookup-regression")
+  {
+   try{DrawingModelLookupScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-relative-order-regression")
+  {
+   using(var relativeHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    relativeHost.Shown+=async(_,__)=>{try{await ArchiveRelativeOrderScenario(relativeHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{relativeHost.Close();}};
+    Application.Run(relativeHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-import-scan-regression")
+  {
+   using(var importScanHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    importScanHost.Shown+=async(_,__)=>{try{await ArchiveImportScanScenario(importScanHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{importScanHost.Close();}};
+    Application.Run(importScanHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--archive-busy-owner-regression")
+  {
+   Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);
+   using(var busyOwnerHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    busyOwnerHost.Shown+=async(_,__)=>{try{await ArchiveBusyOwnerScenario(busyOwnerHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{busyOwnerHost.Close();}};
+    Application.Run(busyOwnerHost);
    }
    return;
   }
@@ -84,6 +325,11 @@ internal static partial class Program
   if(args.Length>1&&args[1]=="--native-file-open-safety-regression")
   {
    try{NativeFileOpenSafetyScenario(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
+  }
+  if(args.Length>1&&args[1]=="--saved-insertion-completion-regression")
+  {
+   try{SavedInsertionCompletionScenario(args[2]);}
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;
   }
   if(args.Length>1&&args[1]=="--background-tree-safety-regression")
@@ -385,6 +631,16 @@ internal static partial class Program
   if(args.Length>1&&args[1]=="--window-preview-drawing-regression")
   {
    try{DrawingEditingScenario();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--document-switch-tree-regression")
+  {
+   using(var switchHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    switchHost.Shown+=async(_,__)=>{try{await DocumentSwitchTreeScenario(switchHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{switchHost.Close();}};
+    Application.Run(switchHost);
+   }
    return;
   }
   if(args.Length>1&&args[1]=="--window-tree-speed-regression")

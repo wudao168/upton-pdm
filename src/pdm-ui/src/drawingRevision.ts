@@ -33,22 +33,35 @@ export function documentVersionSummary(value: DrawingVersionInfo): string {
   return `图纸版本 ${documentDrawingVersion(value)} · 发布版本 ${documentPublishedVersion(value)}`
 }
 
-type RevisionItem = Pick<BomItem, 'revision' | 'sourceDocumentId' | 'displayRevision'>
+type RevisionItem = Pick<BomItem, 'kind' | 'revision' | 'sourceDocumentId' | 'displayRevision'>
 const isWork = (revision: string) => /^(?:[A-Z]-)?W[1-9]\d*$/i.test(revision)
 const releasedLabel = (revision: string) => isWork(revision) ? '未发布' : revision || '未发布'
+export const standardBomVersionLabel = (value?: string | null) => value?.trim().replace(/-B(?=\d+$)/, '-V') || ''
 export function packageRevisionLabel(item: RevisionItem, release: ReleasePackageSummary): string {
   const binding = item.sourceDocumentId ? release.versionBindings?.find(row => row.documentId === item.sourceDocumentId) : undefined
   const published = release.state === '已发布' || release.state === 'Published'
+  const standard = item.kind === 'Standard' || release.scope.startsWith('Standard')
+  const unavailable = standard
+    ? standardBomVersionLabel(release.standardBomRevision) || (published ? 'BOM发布版本待核对' : '待发布')
+    : '未发布'
   if (binding) {
     if (published && binding.publish) {
       const previous = /^(?:([A-Z])-)?W[1-9]\d*$/i.exec(binding.revision)
       return binding.targetRevision || (previous ? previous[1] ? String.fromCharCode(previous[1].toUpperCase().charCodeAt(0) + 1) : 'A' : binding.revision)
     }
-    return isWork(binding.revision) ? binding.previousReleasedRevision || '未发布' : releasedLabel(binding.revision)
+    return isWork(binding.revision) ? binding.previousReleasedRevision || unavailable : releasedLabel(binding.revision)
   }
-  if (published && item.sourceDocumentId && isWork(item.revision)
+  if (!standard && published && item.sourceDocumentId && isWork(item.revision)
     && ['NonStandardWithDrawing', 'NonStandardSupplement', 'LegacyCombined'].includes(release.scope)) return '历史版次待核对'
-  return releasedLabel(item.revision)
+  return standard && (isWork(item.revision) || !item.revision?.trim()) ? unavailable : releasedLabel(item.revision)
+}
+
+export function packageRevisionHint(item: RevisionItem, release: ReleasePackageSummary): string {
+  const label = packageRevisionLabel(item, release)
+  if ((item.kind === 'Standard' || release.scope.startsWith('Standard'))
+    && label === standardBomVersionLabel(release.standardBomRevision))
+    return `标准件BOM${['已发布', 'Published'].includes(release.state) ? '发布版本' : '拟发布版本'}：${label}；取自本次发布包冻结记录`
+  return `${drawingRevisionHint(item.revision, label)}；存档版本：${item.revision}`
 }
 
 export function bomRevisionLabel(item: RevisionItem, packages: ReleasePackageSummary[] = []): string {

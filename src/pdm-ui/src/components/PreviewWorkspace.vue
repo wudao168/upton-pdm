@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useProjectCenterAccess } from '../projectCenterAccess'
+const { write: projectWritable, download: projectDownload, print: projectPrint } = useProjectCenterAccess()
 import { documentVersionSummary, documentDrawingVersion, documentPublishedVersion } from '../drawingRevision'
 import { Cloud, FileSearch, PencilLine, Rotate3D, RotateCcw, Square } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
@@ -7,6 +9,7 @@ import { listDocumentVersions, postDesktopMessage, readDocumentPreviewFile } fro
 import type { BomItem, DocumentNode, DocumentVersionSummary, PreviewMode, SolidWorksOpenMode } from '../types'
 import SquareLoader from './SquareLoader.vue'
 
+const PdfDrawingViewer = defineAsyncComponent(() => import('./PdfDrawingViewer.vue'))
 const StepPreviewViewer = defineAsyncComponent(() => import('./StepPreviewViewer.vue'))
 
 const props = withDefaults(defineProps<{
@@ -507,7 +510,7 @@ onBeforeUnmount(() => {
             </div>
           </dl>
         </section>
-        <div class="pdm-solidworks-actions">
+        <div v-if="projectDownload" class="pdm-solidworks-actions">
           <button
             type="button"
             :class="['pdm-preview-command', reviewVersionId && canWritebackReviewProperties ? 'pdm-solidworks-edit' : 'pdm-solidworks-primary']"
@@ -529,7 +532,7 @@ onBeforeUnmount(() => {
       <div class="pdm-preview-toolbar pdm-preview-markup-row">
         <div class="pdm-preview-actions">
           <!-- 批注工具在左、审核结论栏紧随其后；网页端由审核栏 Teleport 注入结论栏，客户端直接把结论栏放进同一容器。 -->
-          <div class="pdm-markup-toolbar" aria-label="图形批注工具">
+          <div v-if="projectWritable" class="pdm-markup-toolbar" aria-label="图形批注工具">
             <span>批注</span>
             <button type="button" aria-label="引线批注" title="带引线文字" :disabled="!selected.documentId" @click="activateMarkup('markup-text-leader')"><PencilLine :size="14" /></button>
             <button type="button" aria-label="云线批注" title="修订云线" :disabled="!selected.documentId" @click="activateMarkup('markup-cloud')"><Cloud :size="14" /></button>
@@ -539,7 +542,7 @@ onBeforeUnmount(() => {
         </div>
         <button
           type="button"
-          class="pdm-solidworks-edit pdm-preview-command pdm-markup-save"
+          v-if="projectWritable" class="pdm-solidworks-edit pdm-preview-command pdm-markup-save"
           :class="{ 'is-markup-dirty': markupDirty }"
           aria-label="保存批注"
           title="保存当前版本批注"
@@ -561,8 +564,9 @@ onBeforeUnmount(() => {
         :aria-label="desktopAvailable ? '客户端内嵌eDrawings预览区' : '网页端图档预览状态'"
       >
         <p v-if="!desktopAvailable && webPreviewNotice" class="pdm-preview-notice">{{ webPreviewNotice }}</p>
+        <PdfDrawingViewer v-if="!projectPrint && !desktopAvailable && previewState === 'ready' && webPreviewFormat === 'Pdf' && webPreviewUrl" :url="webPreviewUrl" fill-height />
         <iframe
-          v-if="!desktopAvailable && previewState === 'ready' && webPreviewFormat === 'Pdf' && webPreviewUrl"
+          v-else-if="!desktopAvailable && previewState === 'ready' && webPreviewFormat === 'Pdf' && webPreviewUrl"
           class="pdm-web-preview-frame"
           :src="webPreviewUrl"
           title="PDF工程图预览"
@@ -584,7 +588,7 @@ onBeforeUnmount(() => {
             <h3>{{ previewError || '该版本尚无网页预览文件' }}</h3>
             <p :title="`存档版本：${displayedRevision}`">{{ selected.fileName }} · {{ documentVersionSummary(activeVersionMetadata) }}</p>
             <small>工作版本签入时不生成预览；最终审批通过后由服务器生成并绑定正式版本：三维使用STP/STEP，工程图使用PDF。历史DWG不会自动删除，但不再作为预览或发布必需文件。</small>
-            <button type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="emit('more')">查看并下载版本</button>
+            <button type="button" class="pdm-primary-action" :disabled="!selected.documentId" @click="emit('more')">{{ projectDownload ? '查看并下载版本' : '查看版本' }}</button>
           </div>
         </template>
         <template v-else-if="desktopAvailable && previewState === 'idle'">

@@ -29,7 +29,7 @@ internal static class SuppressedAssemblyLocalStructure
     private static async Task Visit(CadTreeNode node, Func<CadTreeNode, Task<CadTreeNode>> read, HashSet<string> ancestors, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (node == null || node.Kind == CadDocumentKind.Drawing) return;
+        if (node == null || node.IsOutsideNativeFileScope || node.Kind == CadDocumentKind.Drawing) return;
         var key = node.Kind == CadDocumentKind.Assembly && !string.IsNullOrWhiteSpace(node.FullPath)
             ? Path.GetFullPath(node.FullPath) + "|" + node.Configuration : null;
         if (key != null && !ancestors.Add(key))

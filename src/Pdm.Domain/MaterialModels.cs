@@ -189,7 +189,8 @@ public enum MaterialAttachmentKind
 {
     Model3D = 0,
     Document = 1,
-    CoverImage = 2
+    CoverImage = 2,
+    Drawing2D = 3
 }
 
 public sealed record MaterialAttachment(
@@ -202,7 +203,14 @@ public sealed record MaterialAttachment(
     long FileLength,
     string Sha256,
     string UploadedBy,
-    DateTimeOffset UploadedAt);
+    DateTimeOffset UploadedAt)
+{
+    public int VersionNumber { get; init; }
+    public bool IsEnabled { get; init; }
+    public bool IsRemoved { get; init; }
+    public string? EnabledBy { get; init; }
+    public DateTimeOffset? EnabledAt { get; init; }
+}
 
 public sealed record MaterialCategory(
     string Code,
@@ -279,6 +287,9 @@ public sealed record PdmMaterial(
     public int Model3DAttachmentCount { get; init; }
 
     public int DocumentAttachmentCount { get; init; }
+    public int Drawing2DAttachmentCount { get; init; }
+    public int? EnabledDrawing2DVersion { get; init; }
+    public int? EnabledModel3DVersion { get; init; }
 }
 
 public sealed record StandardLibraryCategory(
@@ -304,7 +315,8 @@ public sealed record StandardLibraryMaterial(
     PdmMaterial Material,
     IReadOnlyList<StandardLibraryCategory> Categories,
     MaterialAttachment? CoverImage,
-    EngineeringKit? Kit = null);
+    EngineeringKit? Kit = null,
+    MaterialRelationTemplate? Relation = null);
 
 public sealed record StandardLibraryMaterialPage(
     IReadOnlyList<StandardLibraryMaterial> Items,

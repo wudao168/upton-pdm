@@ -41,7 +41,8 @@ internal static partial class Program
             Check(LayerVisible(handle), "绕过隐藏通知的原生操作仍由独立显示检查恢复");
             ArchiveUi(session, () => { ResidencyOwner(handle, -8, IntPtr.Zero); LayerRaise(handle, new IntPtr(1), 0, 0, 0, 0, 0x497); return true; });
             await Task.Delay(400);
-            Check(LayerWindow(handle, 4) == host.Handle && LayerVisible(handle), "工程图切换临时改变所属窗口后修复原所属关系并恢复显示");
+            Check(LayerWindow(handle, 4) == (IntPtr)Get(session, "PresentationOwnerHandle") && LayerVisible(handle),
+                "工程图切换后恢复同一界面线程的所属窗口，不重新绑定忙碌的CAD线程");
             Check((LayerWindowStyle(handle, -20) & 8) == 0 && !ArchiveUi(session, () => ArchiveWindow(session).TopMost),
                 "保持前端显示不使用系统级置顶");
             Check(!ArchiveUi(session, () => ArchiveWindow(session).MinimizeBox), "存档窗口不能单独最小化而使操作者误判，仍可最小化SolidWorks");

@@ -8,6 +8,7 @@ public sealed record ProductionLine(
     DateOnly? RequiredOn, string? Material, string? SurfaceTreatment, string? HeatTreatment,
     Guid? SourceDocumentId)
 {
+    public NameplateContent? NameplateContent { get; init; }
     public string? DisplayRevision { get; init; }
     public string MaterialCode { get; init; } = string.Empty;
     public IReadOnlyList<Guid> SourceTrackingIds { get; init; } = [];
@@ -83,7 +84,15 @@ public sealed record ProductionCapacityUsage(string ResourceGroupId, DateOnly Da
     decimal CommittedHours);
 public sealed record ProductionScanResult(Guid ReleasePackageId, Guid LineId, Guid? LotId,
     string PackageNumber, string DrawingNumber, string Name, string Revision,
-    string Status);
+    string Status)
+{
+    public decimal? RequiredQuantity { get; init; }
+    public decimal? UnassignedQuantity { get; init; }
+    public decimal? LotQuantity { get; init; }
+    public string? Unit { get; init; }
+    public bool IsSupplement { get; init; }
+    public Guid? RelatedToLineId { get; init; }
+}
 public sealed record UpdateProductionLineDelivery(Guid LineId, string Priority,
     DateOnly? RequiredOn, string Reason, Guid RequestId);
 public sealed record UpdateProductionLotPromise(Guid LotId, DateOnly PromisedOn,
@@ -104,6 +113,7 @@ public interface IProductionTrackingStore
     Task<DateTimeOffset> ActivationAtAsync(CancellationToken ct);
     Task<IReadOnlyList<ProductionTrackingRecord>> ListProjectAsync(Guid projectId, CancellationToken ct);
     Task<IReadOnlyList<ProductionTrackingRecord>> ListCompanyAsync(Guid companyId, CancellationToken ct);
+    Task<IReadOnlyList<ProductionTrackingRecord>> FindNameplateSerialAsync(string serialNumber, Guid? companyId, CancellationToken ct);
     Task<ProductionTrackingRecord?> FindAsync(Guid releasePackageId, CancellationToken ct);
     Task<ProductionTrackingRecord> CreateAsync(ProductionTrackingState state, CancellationToken ct);
     Task<bool> SaveAsync(ProductionTrackingRecord record, long expectedVersion, CancellationToken ct);
@@ -126,7 +136,11 @@ public sealed record ProductionTrackingSummary(Guid ReleasePackageId, Guid Proje
     string ProjectName, string PackageNumber, ReleaseScope Scope, DateTimeOffset PublishedAt,
     string Status, int TotalLines, int QualifiedLines, int IssuedLines, int UrgentLines,
     int PriorityLines, DateOnly? FirstRequiredOn, DateOnly? ForecastOn,
-    int AtRiskLines, int UnplannedLines, decimal TotalQuantity = 0);
+    int AtRiskLines, int UnplannedLines, decimal TotalQuantity = 0)
+{
+    public DateTimeOffset? ReceivedAt { get; init; }
+    public bool HasReleaseAttention { get; init; }
+}
 
 public sealed record AssignProductionLot(Guid LineId, string Route, decimal Quantity, string? Supplier,
     string? Assignee, DateOnly? PromisedOn, Guid RequestId, Guid? SupplierId = null);
@@ -247,7 +261,7 @@ public static class ProductionTrackingRules
             remaining.Count(line => line.Priority == "Urgent"),
             remaining.Count(line => line.Priority == "Priority"),
             remaining.Where(line => line.RequiredOn.HasValue).Select(line => line.RequiredOn).Min(),
-            forecast, atRisk, unplanned, state.Lines.Sum(line => line.RequiredQuantity));
+            forecast, atRisk, unplanned, state.Lines.Sum(line => line.RequiredQuantity)) { ReceivedAt = state.ReceivedAt };
     }
 }
 
@@ -257,7 +271,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
 {
     private readonly ProductionScanService scanService = scan ?? new(repository, store, clock);
     private static bool TrackedScope(ReleaseScope scope) => scope is ReleaseScope.NonStandardLongLead
-        or ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement;
+        or ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement or ReleaseScope.Nameplate;
 
     public async Task<ProductionTrackingRecord> CancelUnassignedDemandAsync(Guid id, CancelUnassignedProductionDemand input,
         string actor, UserRole role, CancellationToken ct)
@@ -323,11 +337,17 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
             {
                 if (!await repository.HasProjectContentReadAccessAsync(project.Id, actor, role, ct))
                     return (ProductionTrackingProject?)null;
-                var packages = await EnsureProjectAsync(project, ct);
+                var releases = await repository.ListReleasePackagesAsync(project.Id, ct);
+                var releasesById = releases.ToDictionary(item => item.Id);
+                var packages = await EnsureProjectAsync(project, ct, releases);
                 var states = packages.Select(item => item.State);
                 if (selfOnly) states = states.Select(ProductionTrackingRules.SelfProduction).OfType<ProductionTrackingState>();
                 if (externalOnly) states = states.Select(ProductionTrackingRules.ExternalProduction).OfType<ProductionTrackingState>();
-                var summaries = states.Select(ProductionTrackingRules.Summary).ToArray();
+                var summaries = states.Select(state => ProductionTrackingRules.Summary(state) with {
+                    HasReleaseAttention = releasesById.TryGetValue(state.ReleasePackageId, out var release)
+                        && ReleasePreviewPolicy.RequiresConversion(release)
+                        && (release.PreviewState is ReleasePreviewState.Pending or ReleasePreviewState.WaitingForServer or ReleasePreviewState.Running or ReleasePreviewState.Failed)
+                }).ToArray();
                 return summaries.Length == 0 ? null : new ProductionTrackingProject(project.Id,
                     project.Code, project.Name,
                     summaries);
@@ -444,9 +464,9 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
         return await store.CreateAsync(state, ct);
     }
 
-    private async Task<IReadOnlyList<ProductionTrackingRecord>> EnsureProjectAsync(Project project, CancellationToken ct)
+    private async Task<IReadOnlyList<ProductionTrackingRecord>> EnsureProjectAsync(Project project, CancellationToken ct, IReadOnlyList<ReleasePackage>? releasePackages = null)
     {
-        var packages = (await repository.ListReleasePackagesAsync(project.Id, ct))
+        var packages = (releasePackages ?? await repository.ListReleasePackagesAsync(project.Id, ct))
             .Where(item => item.State == ReleasePackageState.Published && TrackedScope(item.Scope))
             .OrderBy(item => item.PublishedAt).ThenBy(item => item.Id).ToArray();
         var records = (await store.ListProjectAsync(project.Id, ct)).ToDictionary(item => item.State.ReleasePackageId);
@@ -470,7 +490,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
                     return item is null ? line : line with
                     {
                         DrawingNumber = item.Specification?.Trim() ?? string.Empty,
-                        MaterialCode = item.DrawingNumber, Name = item.Name
+                        MaterialCode = item.DrawingNumber, Name = item.Name, NameplateContent = item.NameplateContent
                     };
                 }).ToArray();
                 if (lines.SequenceEqual(current.State.Lines)) { records[package.Id] = current; break; }
@@ -599,6 +619,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
             {
                 DisplayRevision = BomDrawingRevision.ForPackage(first, package),
                 MaterialCode = first.DrawingNumber,
+                NameplateContent = first.NameplateContent,
                 SourceTrackingIds = group.Select(item => item.ReleaseTrackingId).Distinct().ToArray(),
                 SourceVersionId = package.VersionBindings?.FirstOrDefault(binding =>
                     binding.DocumentId == first.SourceDocumentId)?.VersionId
@@ -1095,6 +1116,66 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
     public async Task<IReadOnlyList<ProductionScanResult>> ResolveScanAsync(string code,
         string actor, UserRole role, CancellationToken ct)
     {
+        var seeds = await ResolveScanCoreAsync(code, actor, role, ct);
+        var results = new List<ProductionScanResult>();
+        var projects = new Dictionary<Guid, IReadOnlyList<ProductionTrackingState>>();
+        foreach (var group in seeds.GroupBy(item => item.ReleasePackageId))
+        {
+            var package = await repository.FindReleasePackageAsync(group.Key, ct)
+                ?? throw new PdmNotFoundException("扫码对应的发布记录不存在。");
+            if (!projects.TryGetValue(package.ProjectId, out var records))
+                projects[package.ProjectId] = records = await ScanRecordsAsync(package.ProjectId, ct);
+            var state = records.FirstOrDefault(item => item.ReleasePackageId == group.Key);
+            if (state is null) continue;
+            foreach (var seed in group)
+            {
+                var line = state.Lines.Single(item => item.Id == seed.LineId);
+                if (seed.LotId.HasValue)
+                    results.Add(ScanResult(state, line, state.Lots.Single(item => item.Id == seed.LotId)));
+                else
+                    results.AddRange(records.SelectMany(record => record.Lines.Where(item => SameScanDemand(line, item))
+                        .Select(item => ScanResult(record, item))));
+            }
+        }
+        return results.DistinctBy(item => (item.ReleasePackageId, item.LineId, item.LotId)).ToArray();
+    }
+
+    public async Task<ProductionScanContext> ActionsAsync(Guid id, string actor, UserRole role, CancellationToken ct)
+    {
+        var record = await FindAsync(id, actor, role, ct);
+        var context = await scanService.ActionsAsync(record.State, actor, role, ct);
+        var others = (await ScanRecordsAsync(record.State.ProjectId, ct)).Where(state => state.ReleasePackageId != id).ToArray();
+        return context with { RelatedDemands = record.State.Lines.SelectMany(line => others.SelectMany(state =>
+            state.Lines.Where(other => SameScanDemand(line, other) && ProductionTrackingRules.EffectiveDemand(state, other) > 0)
+                .Select(other => ScanResult(state, other) with { RelatedToLineId = line.Id }))).ToArray() };
+    }
+
+    private async Task<IReadOnlyList<ProductionTrackingState>> ScanRecordsAsync(Guid projectId, CancellationToken ct)
+    {
+        var published = (await repository.ListReleasePackagesAsync(projectId, ct))
+            .Where(package => package.State == ReleasePackageState.Published && TrackedScope(package.Scope)).Select(package => package.Id).ToHashSet();
+        var records = (await store.ListProjectAsync(projectId, ct)).Where(record => published.Contains(record.State.ReleasePackageId)).ToArray();
+        if (records.Length == 0) return [];
+        var catalog = await store.ScanCatalogAsync(records[0].State.CompanyId, ct);
+        return records.Select(record => ProductionDepartmentFlow.ApplyCatalog(record.State, catalog)).OrderBy(state => state.PublishedAt).ToArray();
+    }
+
+    private static bool SameScanDemand(ProductionLine left, ProductionLine right) => left.Revision == right.Revision
+        && (left.SourceTrackingIds.Intersect(right.SourceTrackingIds).Any()
+            || string.Equals(left.MaterialKey, right.MaterialKey, StringComparison.OrdinalIgnoreCase));
+
+    private static ProductionScanResult ScanResult(ProductionTrackingState state, ProductionLine line, ProductionLot? lot = null) =>
+        new(state.ReleasePackageId, line.Id, lot?.Id, state.PackageNumber, line.DrawingNumber, line.Name, line.Revision,
+            ProductionTrackingRules.Status(state))
+        {
+            RequiredQuantity = ProductionTrackingRules.EffectiveDemand(state, line), UnassignedQuantity = ProductionTrackingRules.Unassigned(state, line),
+            LotQuantity = lot?.Quantity, Unit = line.Unit, IsSupplement = state.Scope == ReleaseScope.NonStandardSupplement
+        };
+
+    private async Task<IReadOnlyList<ProductionScanResult>> ResolveScanCoreAsync(string code,
+        string actor, UserRole role, CancellationToken ct)
+    {
+        code = code.Trim();
         if (PdfReleaseIdentity.TryDecodeDisplay(code, out var model, out var revision))
             return await ResolveDisplayScanAsync(model, revision, actor, role, ct);
         if (code.Trim().StartsWith("UPLM-PDF|", StringComparison.Ordinal))
@@ -1110,8 +1191,10 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
             return [new(packageId, line.Id, lot.Id, record.State.PackageNumber,
                 line.DrawingNumber, line.Name, line.Revision, ProductionTrackingRules.Status(record.State))];
         }
+        if (parts.Length == 1 && code.Trim().Length is > 0 and <= 100 && !code.Contains('\n') && !code.Contains('\r'))
+            return await ResolveNameplateScanAsync(code.Trim(), actor, role, ct);
         if (parts.Length != 4 || parts[0] != "UPLM-DRAWING" || !Guid.TryParse(parts[3], out var drawingId))
-            throw new PdmRuleException("二维码格式不正确，请扫描正式图纸或生产批次流转卡。");
+            throw new PdmRuleException("二维码格式不正确，请扫描正式图纸、铭牌序列号二维码或生产批次流转卡。");
         var drawing = await repository.FindDocumentAsync(drawingId, ct)
             ?? throw new PdmNotFoundException("图纸不存在，请重新扫码。");
         await RequireProjectAsync(drawing.ProjectId, actor, role, ct);
@@ -1130,6 +1213,22 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
             .Select(entry => new ProductionScanResult(entry.record.State.ReleasePackageId, entry.line.Id, null,
                 entry.record.State.PackageNumber, entry.line.DrawingNumber, entry.line.Name,
                 entry.line.Revision, ProductionTrackingRules.Status(entry.record.State))).ToArray();
+    }
+
+    private async Task<IReadOnlyList<ProductionScanResult>> ResolveNameplateScanAsync(string serialNumber,
+        string actor, UserRole role, CancellationToken ct)
+    {
+        var results = new List<ProductionScanResult>();
+        foreach (var candidate in await store.FindNameplateSerialAsync(serialNumber, TenantContext.CompanyId, ct))
+        {
+            var package = await repository.FindReleasePackageAsync(candidate.State.ReleasePackageId, ct);
+            if (package?.State != ReleasePackageState.Published || package.Scope != ReleaseScope.Nameplate
+                || !package.NonStandardBomSnapshot.Any(item => item.NameplateContent?.SerialNumber == serialNumber)) continue;
+            var record = await FindAsync(package.Id, actor, role, ct);
+            results.AddRange(record.State.Lines.Where(line => line.NameplateContent?.SerialNumber == serialNumber)
+                .Select(line => ScanResult(record.State, line)));
+        }
+        return results;
     }
 
     private async Task<IReadOnlyList<ProductionScanResult>> ResolveDisplayScanAsync(string model, string revision,
@@ -1205,10 +1304,10 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
         var bom = ProductionDrawingQuantities.FrozenItems(package)
             .Where(item => item.SourceDocumentId.HasValue && models.Contains(item.SourceDocumentId.Value)).ToArray();
         var records = await EnsureProjectAsync((await repository.FindProjectAsync(package.ProjectId, ct))!, ct);
-        return records.Where(record => record.State.ReleasePackageId == packageId || record.State.FormalReleasePackageId == packageId)
-            .SelectMany(record => record.State.Lines.Select(line => (record, line)))
-            .Where(entry => bom.Any(item => entry.line.SourceBomItemIds.Contains(item.Id)
-                || entry.line.MaterialKey == BomReleaseAggregation.MaterialKey(item)))
+        return records.SelectMany(record => record.State.Lines.Select(line => (record, line)))
+            .Where(entry => bom.Any(item => entry.line.Revision == item.Revision
+                && (entry.line.SourceTrackingIds.Contains(item.ReleaseTrackingId) || entry.line.SourceBomItemIds.Contains(item.Id)
+                    || entry.line.MaterialKey == BomReleaseAggregation.MaterialKey(item))))
             .Select(entry => new ProductionScanResult(entry.record.State.ReleasePackageId, entry.line.Id, null,
                 entry.record.State.PackageNumber, entry.line.DrawingNumber, entry.line.Name, entry.line.Revision,
                 ProductionTrackingRules.Status(entry.record.State))).ToArray();

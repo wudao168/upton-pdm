@@ -16,7 +16,48 @@ internal static class NativeDesignDependencies
     internal static IReadOnlyList<string> ReadManaged(IModelDoc2 model)
         => ReadSources(model, true);
 
-    private static IReadOnlyList<string> ReadSources(IModelDoc2 model, bool includeLocked)
+    internal static CheckInReferences ReadCheckIn(IModelDoc2 model)
+    {
+        var contexts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var ordinary = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unverified = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var owners = new List<ContextOwner>();
+        var paths = ReadSources(model, true, contexts, ordinary, owners, unverified);
+        contexts.ExceptWith(ordinary);
+        unverified.ExceptWith(ordinary);
+        unverified.ExceptWith(contexts);
+        return new CheckInReferences(paths, contexts, owners, unverified);
+    }
+
+    internal sealed class CheckInReferences
+    {
+        internal CheckInReferences(IReadOnlyList<string> sources, ISet<string> contexts, IReadOnlyList<ContextOwner> owners)
+            : this(sources, contexts, owners, new HashSet<string>(StringComparer.OrdinalIgnoreCase)) { }
+        internal CheckInReferences(IReadOnlyList<string> sources, ISet<string> contexts, IReadOnlyList<ContextOwner> owners, ISet<string> unverified)
+        { Sources = sources; Contexts = contexts; Owners = owners; UnverifiedSources = unverified; }
+        internal IReadOnlyList<string> Sources { get; }
+        internal ISet<string> Contexts { get; }
+        internal IReadOnlyList<ContextOwner> Owners { get; }
+        internal ISet<string> UnverifiedSources { get; }
+    }
+
+    internal sealed class ContextOwner
+    {
+        internal string Context, Component, Owner, Feature, Configuration;
+        internal int Status, ConfigurationOption;
+    }
+
+    internal static bool IsAssemblyContext(string modelPath, string featureOwner, string feature, int status) =>
+        (status == (int)swExternalReferenceStatus_e.swExternalReferenceInContext
+            || status == (int)swExternalReferenceStatus_e.swExternalReferenceLocked
+            || status == (int)swExternalReferenceStatus_e.swExternalReferenceOutOfContext
+            || status == (int)swExternalReferenceStatus_e.swExternalReferenceDangling)
+        && string.Equals(Path.GetExtension(modelPath), ".SLDASM", StringComparison.OrdinalIgnoreCase)
+        && !string.IsNullOrWhiteSpace(featureOwner) && !string.IsNullOrWhiteSpace(feature);
+
+    private static IReadOnlyList<string> ReadSources(IModelDoc2 model, bool includeLocked,
+        ISet<string> contexts = null, ISet<string> ordinary = null,
+        ICollection<ContextOwner> contextOwners = null, ISet<string> unverified = null)
     {
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (model == null || model.GetType() == (int)swDocumentTypes_e.swDocDRAWING) return paths.ToArray();
@@ -37,6 +78,19 @@ internal static class NativeDesignDependencies
                 }
                 var path = Convert.ToString(references.GetValue(i));
                 if (!string.IsNullOrWhiteSpace(path)) paths.Add(path);
+                if (contexts != null && IsAssemblyContext(path,
+                    ExternalValue(owners, i), ExternalValue(features, i),
+                    states != null && i < states.Length ? Convert.ToInt32(states.GetValue(i)) : -1))
+                {
+                    contexts.Add(path);
+                    // ComponentPathName describes geometry used inside ModelPathName's
+                    // assembly environment. It is not an additional document-source edge.
+                    contextOwners?.Add(new ContextOwner { Context = path, Component = ExternalValue(components, i), Owner = ExternalValue(owners, i),
+                        Feature = ExternalValue(features, i), Status = Convert.ToInt32(states.GetValue(i)),
+                        Configuration = ExternalValue(configurations, i),
+                        ConfigurationOption = int.TryParse(ExternalValue(options, i), out var option) ? option : -1 });
+                }
+                else if (!string.IsNullOrWhiteSpace(path)) ordinary?.Add(path);
             }
         var equations = model.GetEquationMgr();
         if (equations != null && equations.LinkToFile && !string.IsNullOrWhiteSpace(equations.FilePath))
@@ -46,10 +100,40 @@ internal static class NativeDesignDependencies
             paths.Add(table.FileName);
         if (includeLocked)
         {
-            paths.UnionWith(ImportSources(model));
-            foreach (var feature in ArchiveSmartComponentLinks.Features(model))
-                if (feature.GetTypeName2() == "LibraryFeature" && feature.GetDefinition() is ILibraryFeatureData library
+            var featureInventory = ArchiveSmartComponentLinks.Features(model).ToArray();
+            var importedSources = ImportSources(featureInventory).ToArray();
+            paths.UnionWith(importedSources);
+            var mirroredPartSources = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var feature in featureInventory)
+            {
+                var type = feature.GetTypeName2();
+                if (type == "LibraryFeature" && feature.GetDefinition() is ILibraryFeatureData library
                     && library.LinkToLibraryPart && !string.IsNullOrWhiteSpace(library.LibraryPart)) paths.Add(library.LibraryPart);
+                if (unverified != null && type == "MirrorStock" && feature.GetDefinition() is IMirrorPartFeatureData mirror
+                    && string.Equals(Path.GetExtension(mirror.PathName), ".SLDPRT", StringComparison.OrdinalIgnoreCase))
+                    mirroredPartSources.Add(feature.Name);
+            }
+            if (unverified != null && references != null && mirroredPartSources.Count != 0)
+            {
+                // MirrorStock reports its source part and auxiliary assembly plane
+                // under one feature, often with no feature-owner information. The
+                // plane row alone is not proof of an ordinary assembly-file source.
+                var possible = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var explicitOrdinary = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (var i = 0; i < references.Length; i++)
+                {
+                    var path = Convert.ToString(references.GetValue(i));
+                    if (!string.Equals(Path.GetExtension(path), ".SLDASM", StringComparison.OrdinalIgnoreCase)) continue;
+                    var status = states != null && i < states.Length ? Convert.ToInt32(states.GetValue(i)) : -1;
+                    if (status == (int)swExternalReferenceStatus_e.swExternalReferenceBroken
+                        || IsAssemblyContext(path, ExternalValue(owners, i), ExternalValue(features, i), status)) continue;
+                    if (string.IsNullOrWhiteSpace(ExternalValue(owners, i)) && mirroredPartSources.Contains(ExternalValue(features, i))) possible.Add(path);
+                    else explicitOrdinary.Add(path);
+                }
+                possible.ExceptWith(explicitOrdinary);
+                possible.ExceptWith(importedSources);
+                foreach (var path in possible) { ordinary?.Remove(path); unverified.Add(path); }
+            }
             foreach (var block in (model.SketchManager.GetSketchBlockDefinitions() as Array)?.OfType<ISketchBlockDefinition>()
                 ?? Enumerable.Empty<ISketchBlockDefinition>())
                 if (block.LinkToFile && !string.IsNullOrWhiteSpace(block.FileName)) paths.Add(block.FileName);
@@ -57,9 +141,14 @@ internal static class NativeDesignDependencies
         return paths.ToArray();
     }
 
-    private static IEnumerable<string> ImportSources(IModelDoc2 model)
+    private static string ExternalValue(object values, int index) => values is Array array && index < array.Length
+        ? Convert.ToString(array.GetValue(index)) : null;
+
+    private static IEnumerable<string> ImportSources(IModelDoc2 model) => ImportSources(ArchiveSmartComponentLinks.Features(model));
+
+    private static IEnumerable<string> ImportSources(IEnumerable<IFeature> features)
     {
-        foreach (var feature in ArchiveSmartComponentLinks.Features(model).Where(feature => feature.Is3DInterconnectFeature))
+        foreach (var feature in features.Where(feature => feature.Is3DInterconnectFeature))
         {
             if (feature.GetImportedFeatureParameters(out var parameters) != 0 || !(parameters is IImport3DInterconnectData imported))
                 throw new IOException("导入特征的实际来源未完整读取，已停止核对：" + feature.Name);

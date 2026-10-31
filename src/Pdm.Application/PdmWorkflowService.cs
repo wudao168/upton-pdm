@@ -26,7 +26,8 @@ public sealed partial class PdmWorkflowService(
     IReleaseDeliveryObserver? releaseDeliveryObserver = null,
     IProductionTrackingObserver? productionTrackingObserver = null,
     ProjectOplService? projectOplService = null,
-    WorkflowNotificationService? workflowNotifications = null)
+    WorkflowNotificationService? workflowNotifications = null,
+    BomFileService? bomFiles = null)
 {
     private static readonly SemaphoreSlim PreviewAgentRegistrationGate = new(1, 1);
     private const string ReconcileAutoAdded = "AutoAdded";
@@ -272,7 +273,7 @@ public sealed partial class PdmWorkflowService(
             servers.Add(new(current.PreviewConversion.AgentUrl, current.PreviewConversion.AgentUrl, current.PreviewConversion.AgentToken, current.PreviewConversion.TimeoutMinutes));
         var normalizedUrl = agentUrl.Trim().TrimEnd('/');
         servers.RemoveAll(server => string.Equals(server.AgentUrl.Trim().TrimEnd('/'), normalizedUrl, StringComparison.OrdinalIgnoreCase));
-        servers.Add(new(string.IsNullOrWhiteSpace(name) ? normalizedUrl : name.Trim(), normalizedUrl, agentToken, timeoutMinutes));
+        servers.Add(new(string.IsNullOrWhiteSpace(name) ? normalizedUrl : name.Trim(), normalizedUrl, agentToken, timeoutMinutes, TenantContext.CompanyId));
         var saved = await UpdateSystemSettingsAsync(current with
         {
             PreviewConversion = new PreviewConversionSettings
@@ -1628,15 +1629,22 @@ public sealed partial class PdmWorkflowService(
             ?? throw new PdmNotFoundException("待存档图档不存在。");
         var visited = new HashSet<(Guid, string)>();
         var planned = (plannedDocumentIds ?? Array.Empty<Guid>()).ToHashSet();
+        var chain = new List<string>();
+        var ancestors = new HashSet<Guid>();
         async Task VisitAsync(DocumentReferenceNode node, bool isRoot)
         {
             if (!isRoot && node.Kind == DocumentKind.Drawing) return;
+            var isContext = ArchiveDeferredReferences.IsDeferred(node);
+            if (isRoot && isContext) throw new PdmRuleException("根图档不能标记为上下文关联。");
+            chain.Add(node.FileName);
+            var addedAncestor = !isContext && node.Status != ReferenceNodeStatus.Virtual && node.DocumentId.HasValue;
+            if (addedAncestor && !ancestors.Add(node.DocumentId!.Value))
+                throw new PdmRuleException("存档结构存在循环引用，未提交父装配体：" + string.Join(" → ", chain)
+                    + "。实例：" + node.InstancePath);
             if (!isRoot && node.Status != ReferenceNodeStatus.Virtual)
             {
                 if (!node.DocumentId.HasValue || node.Revision is null && !planned.Contains(node.DocumentId.Value))
                     throw new PdmRuleException($"引用图档“{node.FileName}”缺少{(!node.DocumentId.HasValue ? "存档身份" : "引用版本")}，可能为实例身份未同步或引用结构未完整读取。请刷新设计树并重新整体存档；本次父装配体未更新。实例：{node.InstancePath}；配置：{node.Configuration}。");
-                if (node.DocumentId == rootDocumentId)
-                    throw new PdmRuleException($"图档“{node.FileName}”存在循环引用，未提交父装配体。");
                 var key = (node.DocumentId.Value, node.Revision?.Display ?? string.Empty);
                 if (visited.Add(key))
                 {
@@ -1664,6 +1672,8 @@ public sealed partial class PdmWorkflowService(
                 }
             }
             foreach (var child in node.Children) await VisitAsync(child, false);
+            if (addedAncestor) ancestors.Remove(node.DocumentId!.Value);
+            chain.RemoveAt(chain.Count - 1);
         }
         await VisitAsync(root, true);
     }
@@ -1731,6 +1741,7 @@ public sealed partial class PdmWorkflowService(
         if (!string.Equals(document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase) || document.CheckoutSessionId != checkoutSessionId)
             throw new PdmConflictException("编辑会话已经失效，不能提交存档。请另存本地修改或重新获取权限。 ");
         await EnsureDrawingReviewEditAllowedAsync(documentId, drawingReviewWritebackId, "提交存档", cancellationToken);
+        await ValidateArchiveReferenceWarningsAsync(snapshot.Root, cancellationToken);
 
         var normalizedDrawingNumber = drawingNumber?.Trim();
         var normalizedName = name?.Trim();
@@ -2130,12 +2141,15 @@ public sealed partial class PdmWorkflowService(
             }).ToArray();
             scopedRoot = WorkingReferenceTree.Resolve(scopedRoot, currentDesigns, effectiveIndexes);
         }
-        var nodes = FlattenOpenNodes(scopedRoot).ToList();
+        var nodes = FlattenOpenNodes(scopedRoot).OrderBy(node => node.IsContextReference || node.ReferenceTypeUnverified ? 1 : 0).ToList();
+        var contextExpansionIndexes = new HashSet<int>();
+        var expandedContextVersions = new HashSet<Guid>();
         var expandedDrawingModelVersions = new HashSet<Guid>();
         for (var index = 0; index < nodes.Count; index++)
         {
             var node = nodes[index];
             var isRoot = index == 0;
+            var isContext = ArchiveDeferredReferences.IsDeferred(node);
             var optionalCurrentDrawing = allowCurrentVersionFallback
                 && !isRoot
                 && node.Kind == DocumentKind.Drawing;
@@ -2201,7 +2215,14 @@ public sealed partial class PdmWorkflowService(
             }
 
             DocumentVersion? version;
-            if (isRoot)
+            if (contextExpansionIndexes.Contains(index) && filesByDocument.ContainsKey(referencedDocumentId)) continue;
+            if (isContext && filesByDocument.TryGetValue(referencedDocumentId, out var contextFile))
+            {
+                // The explicitly opened file and its pinned drivers take precedence
+                // over the environment's older view of that same file.
+                version = (await ListOpenVersionsAsync(referencedDocumentId)).Single(item => item.Id == contextFile.VersionId);
+            }
+            else if (isRoot)
             {
                 if (referencedDocumentId != documentId)
                 {
@@ -2251,6 +2272,15 @@ public sealed partial class PdmWorkflowService(
                 }
             }
 
+            if (isContext && expandedContextVersions.Add(version.Id))
+            {
+                foreach (var reference in FlattenOpenNodes(version.ReferenceSnapshot).Skip(1)
+                    .Where(reference => reference.Kind != DocumentKind.Drawing).OrderBy(reference => reference.IsContextReference || reference.ReferenceTypeUnverified ? 1 : 0))
+                {
+                    contextExpansionIndexes.Add(nodes.Count);
+                    nodes.Add(reference);
+                }
+            }
             // Drawing snapshots pin models without copying their whole assembly tree.
             // Resolve dependencies from that exact model version when opening the drawing itself.
             if (rootDocument.Kind == DocumentKind.Drawing && !isRoot
@@ -2614,6 +2644,8 @@ public sealed partial class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         if (scope == ReleaseScope.LegacyCombined)
             throw new PdmRuleException("新发布流程必须指定标准件、电气或非标件发布类型。");
+        if (scope == ReleaseScope.Nameplate)
+            throw new PdmRuleException("铭牌发布包由项目硬件工程师在铭牌中确认后自动生成。");
         if (confirmedRemovedBomItemIds?.Count > 0 && !IsSupplementScope(scope))
             throw new PdmRuleException("只有增补/变更发布可以确认删除正式物料。");
         RequireMechanicalReleaseRole(scope, role);
@@ -2975,6 +3007,7 @@ public sealed partial class PdmWorkflowService(
             throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
         var items = await BomDrawingRevision.CurrentAsync(repository,
             await repository.GetBomAsync(projectId, kind, cancellationToken), cancellationToken);
+        if (kind == BomKind.Standard && bomFiles is not null) items = await bomFiles.CaptureAsync(items, cancellationToken);
         if (kind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical))
             return items.Select(item => item with { IsComplete = false }).ToArray();
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
@@ -5037,6 +5070,7 @@ public sealed partial class PdmWorkflowService(
         var drafts = versionsForReview.Where(version => version.State == BomVersionState.Draft).Select(version => version.Id).Distinct().ToArray();
         await repository.SetBomVersionStateAsync(drafts, BomVersionState.InReview, actor, null, cancellationToken);
         await AuditAsync(actor, package.State == ReleasePackageState.Rejected ? "release-package.resubmit" : "release-package.submit", nameof(ReleasePackage), package.Id.ToString(), $"{package.Number}；{package.Scope}", cancellationToken);
+        await NotifyPendingReleaseApprovalAsync(submitted, package.State == ReleasePackageState.Rejected, cancellationToken);
         if (workflowNotifications is not null) await workflowNotifications.CaptureReleaseAsync(submitted, cancellationToken, restart: true);
         return submitted;
     }
@@ -5196,6 +5230,7 @@ public sealed partial class PdmWorkflowService(
 
         if (package.State != ReleasePackageState.Publishing)
         {
+            await NotifyPendingReleaseApprovalAsync(package, false, cancellationToken);
             if (package.State == ReleasePackageState.Rejected)
             {
                 await repository.SetBomVersionStateAsync(await PackageBomVersionIdsInStateAsync(package, BomVersionState.InReview, cancellationToken), BomVersionState.Draft, actor, null, cancellationToken);
@@ -5216,7 +5251,7 @@ public sealed partial class PdmWorkflowService(
         ReleasePublishingProgress.Set(package.Id, "读取项目配置");
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包对应的项目不存在。 ");
-        if (package.PreviewAttempts >= ReleasePreviewService.MaxAttempts)
+        if (ReleasePreviewPolicy.RequiresConversion(package) && package.PreviewAttempts >= ReleasePreviewService.MaxAttempts)
             return await RecordReleaseConversionFailureAsync(package, project, actor,
                 package.PreviewError ?? "转图多次未完成，请检查转图服务器后重试。", package.PreviewAttempts, cancellationToken);
         ReleasePublication publication;
@@ -5251,7 +5286,7 @@ public sealed partial class PdmWorkflowService(
                 }
             }
             ReleasePublishingProgress.Set(package.Id, "读取转图源文件清单");
-            previewSources = package.LocksDocuments
+            previewSources = ReleasePreviewPolicy.RequiresConversion(package)
                 ? await repository.ListReleasePreviewSourcesAsync(package.Id, cancellationToken)
                 : [];
             ReleasePublishingProgress.Set(package.Id, "读取转图来源已完成，开始生成发布资料");
@@ -5331,7 +5366,7 @@ public sealed partial class PdmWorkflowService(
         }
         ReleasePublishingProgress.Set(package.Id, "发布已生效，处理计划、BOM料号和U9C后续同步");
         // 转图与发布解耦：转图未完成时发布照常生效，转图转为后台单独事项，结果单独反馈。
-        if (package.LocksDocuments && previewSources.Count > 0)
+        if (ReleasePreviewPolicy.RequiresConversion(package) && previewSources.Count > 0)
         {
             var previewFailed = publication.PreviewError is not null;
             await repository.MarkReleasePreviewStateAsync(package.Id,
@@ -5412,16 +5447,17 @@ public sealed partial class PdmWorkflowService(
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Pending,
-                    "发布成品归档被中断，已重新排队补登记。", 0, timeProvider.GetUtcNow(), CancellationToken.None);
+                if (ReleasePreviewPolicy.RequiresConversion(package))
+                    await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Pending,
+                        "发布成品归档被中断，已重新排队补登记。", 0, timeProvider.GetUtcNow(), CancellationToken.None);
                 throw;
             }
             catch (Exception exception)
             {
-                await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Pending,
-                    "发布成品归档失败，已重新排队补登记。", 0, timeProvider.GetUtcNow(), CancellationToken.None);
                 await AuditAsync(actor, "release-package.delivery-archive-failed", nameof(ReleasePackage), package.Id.ToString(),
-                    $"{package.Number}；发布成品归档失败，已排队补登记：{exception.Message}", CancellationToken.None);
+                    $"{package.Number}；发布成品归档失败：{exception.Message}", CancellationToken.None);
+                await CreateReleasePreviewNotificationsAsync(package, project, actor, "发布资料归档未完成",
+                    "BOM及发布资料归档异常，请联系管理员检查归档目录与读写权限。", CancellationToken.None, "archive");
             }
         }
         return (await repository.FindReleasePackageAsync(package.Id, cancellationToken))!;
@@ -5432,7 +5468,7 @@ public sealed partial class PdmWorkflowService(
     {
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
-        if (package.State != ReleasePackageState.Publishing || package.PreviewState == ReleasePreviewState.Failed) return package;
+        if (package.State != ReleasePackageState.Publishing || ReleasePreviewPolicy.RequiresConversion(package) && package.PreviewState == ReleasePreviewState.Failed) return package;
         var approver = package.ApprovalTasks.OrderBy(task => task.StepOrder).LastOrDefault(task => task.Decision == ApprovalDecision.Approved)?.DecisionBy ?? "system";
         return await PublishApprovedPackageAsync(package, approver, cancellationToken);
     }
@@ -6353,6 +6389,7 @@ public sealed partial class PdmWorkflowService(
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         if (package.State != ReleasePackageState.Published && package.State != ReleasePackageState.Publishing)
             throw new PdmRuleException("只有审批完成等待转图或已发布的发布包可以重试转图。");
+        if (!ReleasePreviewPolicy.RequiresConversion(package)) throw new PdmRuleException("该发布类型不支持转图。");
         var saved = await repository.MarkReleasePreviewStateAsync(releasePackageId, ReleasePreviewState.Pending, null, 0, timeProvider.GetUtcNow(), cancellationToken);
         await AuditAsync(actor, "release-package.preview.retry", nameof(ReleasePackage), releasePackageId.ToString(),
             $"{package.Number}；重新排队转图", cancellationToken);
@@ -6378,12 +6415,13 @@ public sealed partial class PdmWorkflowService(
             .Select(username => username!.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        if (kind != "archive") recipients = (await ReleasePreviewNotifications.RecipientsAsync(repository, package, project, cancellationToken, actor)).ToArray();
         var createdAt = timeProvider.GetUtcNow();
         var sourceKey = $"release-package:{package.Id:N}:preview:{kind}";
         await repository.CreateUserNotificationsAsync(recipients.Select(recipient => new UserNotification(
             Guid.NewGuid(),
             recipient,
-            kind == "pending" ? "ReleasePreviewPending" : "ReleasePreviewResult",
+            kind == "archive" ? "ReleaseDeliveryResult" : kind == "pending" ? "ReleasePreviewPending" : "ReleasePreviewResult",
             title,
             $"{project.Code} · {package.Number} {detail}",
             project.Id,
@@ -7229,6 +7267,8 @@ public sealed partial class PdmWorkflowService(
         // 发布快照必须带当前口径的资料完整性：仓库里存的 is_complete 是旧值，
         // 直接落快照会让U9C同步把已补齐的子件仍然判成"未完成分类或料号确认"。
         var releaseItems = WithCurrentCompleteness(currentItems, kind, validationRules);
+        if (kind == BomKind.Standard && bomFiles is not null)
+            releaseItems = (await bomFiles.CaptureAsync(releaseItems, cancellationToken)).ToArray();
         BomVersion selected;
         if (draft is not null)
         {
@@ -7312,6 +7352,7 @@ public sealed partial class PdmWorkflowService(
 
     private static BomItem ForReleaseComparison(BomItem item) => item with
     {
+        Files = null,
         ReleaseReviewToken = null,
         ReleaseReviewTokens = null,
         ReleaseConfirmation = null,

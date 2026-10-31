@@ -1,5 +1,6 @@
 import type { ReleasePackageSummary } from './types'
 import { userErrorMessage } from './userErrorMessage'
+import { requiresReleasePreview } from './releasePreviewState'
 
 export function releaseFailureMessage(error?: string | null): string {
   const message = error?.trim() ?? ''
@@ -20,7 +21,9 @@ export function releaseFailureMessage(error?: string | null): string {
 
 export function releasePublishingMessage(release: ReleasePackageSummary): string {
   if (release.state !== '发布中') return ''
+  if (!requiresReleasePreview(release)) return '当前状态：后台正在生成BOM发布资料。'
   const phase = release.previewState === 'Failed' ? '图纸转换失败，自动重试已暂停。恢复转图服务器后请重试转图，无需重新审批。'
+    : release.previewState === 'WaitingForServer' ? '当前环节：等待转图服务器恢复或空闲，不消耗失败次数。'
     : release.previewState === 'Pending' ? '当前环节：等待图纸转换。'
     : release.previewState === 'Running' ? '当前环节：图纸转换中，正在生成正式图纸及发布资料。'
       : '当前状态：后台发布处理中，服务端尚未返回具体环节。'

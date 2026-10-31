@@ -43,6 +43,7 @@ public static class PermissionCodes
     public const string ValidationPlanEdit = "validation-plan.edit";
     public const string ValidationCatalogManage = "validation-catalog.manage";
     public const string MaterialView = "material.view";
+    public const string MaterialNotify = "material.notify";
     public const string MaterialApply = "material.apply";
     public const string MaterialManage = "material.manage";
     public const string DrawingReviewSubmit = "drawing-review.submit";
@@ -127,6 +128,7 @@ public static class RolePermissionCatalog
         new(PermissionCodes.ValidationPlanEdit, "维护项目验证计划", "项目内容"),
         new(PermissionCodes.ValidationCatalogManage, "管理验证检查项库", "标准库", "维护全局验证分类和检查项；已被项目引用的内容只能停用，不能删除。", Sensitive: true),
         new(PermissionCodes.MaterialView, "查看料品管理", "料品管理", "查看料品主档、审批状态和U9C同步结果。"),
+        new(PermissionCodes.MaterialNotify, "接收料品管理消息提示", "料品管理", "接收料品管理和料号审批的待处理角标、审批及同步待办提示；系统管理角色按兼任业务角色的消息权限接收。"),
         new(PermissionCodes.MaterialApply, "申请新增料品", "料品管理", "新建或批量导入待标准化审批的料品草稿；不包含批准、停用、删除或U9C同步。"),
         new(PermissionCodes.MaterialManage, "维护料品主档", "料品管理", "新增、修改、批准、停用或删除料品，并执行U9C料品同步。", Sensitive: true),
         new(PermissionCodes.DrawingReviewSubmit, "发起图纸审核", "图纸审核", "按当前非标件BOM冻结唯一关联的2D工程图版本。", Sensitive: true),
@@ -292,10 +294,12 @@ public static class RolePermissionCatalog
 
     public static IReadOnlySet<string> InitialPermissions(string roleCode, UserRole baseRole)
     {
+        if (ProjectCenterPermissions.AssemblyRoles.Contains(roleCode, StringComparer.OrdinalIgnoreCase)) return ProjectCenterPermissions.AssemblyReadOnly();
         var permissions = InitialRoleDefaults.GetValueOrDefault(roleCode, Defaults[baseRole])
             .Concat(BudgetViewerRoles.Contains(roleCode, StringComparer.OrdinalIgnoreCase) ? [PermissionCodes.ProjectBudgetView] : [])
             .ToHashSet(StringComparer.Ordinal);
         if (roleCode is "Engineer" or "ElectricalEngineer" or "CommissioningEngineer" or "HardwareEngineer" or "MechanicalManager" or "TechnicalAssistant" or "ProjectManager" or "developer") permissions.Add(PermissionCodes.ProjectPlanEdit);
+        if (roleCode is "ProcessReviewer" or "Approver" or "StandardizationAssistant") permissions.Add(PermissionCodes.MaterialNotify);
         if (roleCode is "ProjectManager" or "developer") permissions.Add(PermissionCodes.ProjectContactEdit);
         if (roleCode is "Administrator" or "developer" or "platform_admin") permissions.Add(PermissionCodes.ProjectPlanTemplateManage);
         if (roleCode is "Administrator" or "developer") permissions.Add(PermissionCodes.NameplateTemplateManage);
@@ -332,7 +336,9 @@ public static class RolePermissionCatalog
             foreach (var dependency in Permissions.Single(item => item.Code == code).Dependencies)
                 if (normalized.Add(dependency)) pending.Enqueue(dependency);
         if (!source.Contains(FunctionPermissionCatalog.SchemaMarker)) normalized.UnionWith(FunctionPermissionCatalog.Expand(normalized).Where(code => !Permissions.Single(item => item.Code == code).Hidden));
+        if (!source.Contains(ProjectCenterPermissions.SchemaMarker)) ProjectCenterPermissions.ExpandLegacy(normalized);
         normalized.Add(FunctionPermissionCatalog.SchemaMarker);
+        normalized.Add(ProjectCenterPermissions.SchemaMarker);
         return normalized;
     }
 

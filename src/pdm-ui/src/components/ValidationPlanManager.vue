@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useProjectCenterAccess } from '../projectCenterAccess'
+const { write: projectWritable, download: projectDownload, export: projectExport } = useProjectCenterAccess()
 import SquareLoader from './SquareLoader.vue'
 import { getValidationEmergencyCapability, emergencyDecideValidationPlan } from '../api'
 import { ArrowLeft, CalendarDays, CheckCircle2, Download, FileUp, LibraryBig, ListChecks, Paperclip, Plus, RotateCcw, Save, Send, Trash2, XCircle } from '@lucide/vue'
@@ -93,9 +95,9 @@ const normalizedState = computed(() => {
   const value = plan.value?.state
   return typeof value === 'number' ? ['Draft', 'PendingApproval', 'Effective', 'Rejected', 'Superseded'][value] : value
 })
-const editable = computed(() => props.canEdit && (!plan.value || normalizedState.value === 'Draft' || normalizedState.value === 'Rejected'))
-const canAppend = computed(() => props.canEdit && normalizedState.value === 'Effective')
-const canMaintainStandards = computed(() => props.canEdit && normalizedState.value === 'Effective')
+const editable = computed(() => projectWritable.value && props.canEdit && (!plan.value || normalizedState.value === 'Draft' || normalizedState.value === 'Rejected'))
+const canAppend = computed(() => projectWritable.value && props.canEdit && normalizedState.value === 'Effective')
+const canMaintainStandards = computed(() => projectWritable.value && props.canEdit && normalizedState.value === 'Effective')
 const canAdd = computed(() => editable.value || canAppend.value)
 const appendedRows = computed(() => rows.value.filter(item => !persistedItemIds.value.has(item.id)))
 const standardChanges = computed(() => canMaintainStandards.value
@@ -104,14 +106,14 @@ const standardChanges = computed(() => canMaintainStandards.value
 const currentApprovalTask = computed(() => normalizedState.value === 'PendingApproval'
   ? plan.value?.approvalTasks?.slice().sort((a, b) => a.stepOrder - b.stepOrder).find(item => item.decision == null) ?? null
   : null)
-const canDecideCurrent = computed(() => Boolean(props.canDecideApproval && currentApprovalTask.value
+const canDecideCurrent = computed(() => Boolean(projectWritable.value && props.canDecideApproval && currentApprovalTask.value
   && currentApprovalTask.value.assignee.toLocaleLowerCase() === props.currentUsername.toLocaleLowerCase()))
 const canEmergencyCurrent = ref(false)
 let emergencyCheck = 0
 watch(() => currentApprovalTask.value?.id, async taskId => {
   const check = ++emergencyCheck
   canEmergencyCurrent.value = false
-  if (!taskId || !props.token) return
+  if (!projectWritable.value || !taskId || !props.token) return
   try {
     const result = await getValidationEmergencyCapability(taskId, props.token, ...planScope())
     if (check === emergencyCheck) canEmergencyCurrent.value = result.canDecide
@@ -132,9 +134,9 @@ async function emergencyDecideCurrent(decision: 'Approved' | 'Rejected') {
     if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '紧急代批失败，请刷新后重试')
   } finally { submitting.value = false }
 }
-const canTransferCurrent = computed(() => Boolean(props.canDecideApproval && currentApprovalTask.value
+const canTransferCurrent = computed(() => Boolean(projectWritable.value && props.canDecideApproval && currentApprovalTask.value
   && currentApprovalTask.value.assignee.toLowerCase() === props.currentUsername.toLowerCase()))
-const canWithdraw = computed(() => normalizedState.value === 'PendingApproval'
+const canWithdraw = computed(() => projectWritable.value && normalizedState.value === 'PendingApproval'
   && plan.value?.submittedBy?.toLowerCase() === props.currentUsername.toLowerCase())
 const attachmentDialogFiles = computed(() => {
   const projectId = attachmentDialogProject.value?.id
@@ -877,7 +879,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
       <div class="validation-plan-attachment-list">
         <table v-if="attachmentDialogFiles.length">
           <thead><tr><th>原文件名</th><th>版本</th><th>上传人</th><th>上传时间</th><th>大小</th><th>SHA-256</th><th>操作</th></tr></thead>
-          <tbody><tr v-for="file in attachmentDialogFiles" :key="file.id"><td :title="file.originalFileName">{{ file.originalFileName }}</td><td>V{{ file.fileVersion }}</td><td>{{ displayUserName(file.uploadedBy, file.uploadedBy) }}</td><td>{{ formatDateTime(file.uploadedAt) }}</td><td>{{ fileSize(file.fileLength) }}</td><td class="is-sha" :title="file.sha256">{{ file.sha256 }}</td><td><button type="button" class="pdm-text-action" @click="downloadAttachment(file.id, file.originalFileName)">下载</button></td></tr></tbody>
+          <tbody><tr v-for="file in attachmentDialogFiles" :key="file.id"><td :title="file.originalFileName">{{ file.originalFileName }}</td><td>V{{ file.fileVersion }}</td><td>{{ displayUserName(file.uploadedBy, file.uploadedBy) }}</td><td>{{ formatDateTime(file.uploadedAt) }}</td><td>{{ fileSize(file.fileLength) }}</td><td class="is-sha" :title="file.sha256">{{ file.sha256 }}</td><td><button type="button" class="pdm-text-action" v-if="projectDownload" @click="downloadAttachment(file.id, file.originalFileName)">下载</button></td></tr></tbody>
         </table>
         <div v-else class="validation-plan-attachment-list__empty">暂无{{ attachmentDialogKind === 'PlanDocument' ? '验证计划文件' : '附件' }}</div>
       </div>
@@ -898,7 +900,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
         <button type="button" class="pdm-secondary-action validation-plan__upload-action" :disabled="!plan || normalizedState !== 'Effective' || uploading" title="验证计划审批完成并生效后可上传" @click="evidenceFileInput?.click()"><Paperclip :size="14" />上传附件</button>
         <button type="button" class="pdm-secondary-action" :disabled="!canAdd" @click="openSelection"><Plus :size="14" />选取内容</button>
         <button type="button" class="pdm-secondary-action" :disabled="!canAdd" aria-label="添加自定义项" @click="addCustomRow"><Plus :size="14" />添加自定义</button>
-        <button type="button" class="pdm-secondary-action" :disabled="!plan || dirty || exporting" @click="exportPlan"><Download :size="14" />{{ exporting ? '导出中…' : '导出Excel' }}</button>
+        <button type="button" class="pdm-secondary-action" :disabled="!plan || dirty || exporting" v-if="projectExport" @click="exportPlan"><Download :size="14" />{{ exporting ? '导出中…' : '导出Excel' }}</button>
         <button v-if="normalizedState === 'Effective'" type="button" class="pdm-secondary-action" :disabled="!canEdit" @click="createRevision"><RotateCcw :size="14" />创建新版本</button>
         <button v-if="editable || canAppend" type="button" class="pdm-primary-action" :disabled="saving || loading || (canAppend && !appendedRows.length)" @click="savePlan"><Save :size="14" />{{ saving ? '保存中…' : canAppend ? '保存新增' : '保存' }}</button>
         <button v-if="canMaintainStandards" type="button" class="pdm-primary-action" :disabled="saving || loading || !standardChanges.length || Boolean(appendedRows.length)" :title="appendedRows.length ? '请先保存新增验证内容，再保存验证标准' : '保存已生效验证计划的验证标准'" @click="saveValidationStandards"><Save :size="14" />{{ saving ? '保存中…' : '保存标准' }}</button>
@@ -946,7 +948,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
     <div v-else class="validation-plan__empty"><ListChecks :size="42" /><h3>当前项目还没有{{ qualityAcceptance ? '质量验收' : '验证' }}检查项</h3><p>按分类从全局检查项库选取，或直接添加自定义项。</p><div v-if="canAdd" class="validation-plan__actions"><button type="button" class="pdm-primary-action" @click="openSelection">选取内容</button><button type="button" class="pdm-secondary-action" aria-label="添加自定义项" @click="addCustomRow"><Plus :size="14" />添加自定义</button></div></div>
     <section v-if="plan?.approvalTasks?.length || plan?.attachments?.length || executionRecords.length" class="validation-plan__records">
       <div v-if="plan?.approvalTasks?.length"><strong>审批记录</strong><span v-for="task in plan.approvalTasks" :key="task.id">{{ task.stepOrder }}. {{ task.stepName }} · {{ displayUserName(task.assignee, task.assignee) }} · {{ approvalTaskStatus(task) }}</span></div>
-      <div v-if="plan?.attachments?.length"><strong>归档文件（验收资料 / 验证计划）</strong><div v-for="file in plan.attachments" :key="file.id" class="validation-plan__attachment-row"><button type="button" class="validation-plan__attachment" :title="`SHA-256 ${file.sha256}`" @click="downloadAttachment(file.id, file.originalFileName)">{{ file.kind === 'PlanDocument' || file.kind === 0 ? '验证计划' : '佐证附件' }} · {{ file.originalFileName }} · V{{ file.fileVersion }} · {{ fileSize(file.fileLength) }} · {{ displayUserName(file.uploadedBy, file.uploadedBy) }}</button><button v-if="normalizedState === 'Effective' && isRecognizableAttachment(file)" type="button" class="pdm-text-action" :disabled="recognizing" @click="recognizeAttachment(file)">{{ recognizing ? '识别中…' : '识别结果' }}</button></div></div>
+      <div v-if="plan?.attachments?.length"><strong>归档文件（验收资料 / 验证计划）</strong><div v-for="file in plan.attachments" :key="file.id" class="validation-plan__attachment-row"><button type="button" class="validation-plan__attachment" :title="`SHA-256 ${file.sha256}`" v-if="projectDownload" @click="downloadAttachment(file.id, file.originalFileName)">{{ file.kind === 'PlanDocument' || file.kind === 0 ? '验证计划' : '佐证附件' }} · {{ file.originalFileName }} · V{{ file.fileVersion }} · {{ fileSize(file.fileLength) }} · {{ displayUserName(file.uploadedBy, file.uploadedBy) }}</button><button v-if="normalizedState === 'Effective' && isRecognizableAttachment(file)" type="button" class="pdm-text-action" :disabled="recognizing" @click="recognizeAttachment(file)">{{ recognizing ? '识别中…' : '识别结果' }}</button></div></div>
       <div v-if="executionRecords.length"><strong>验证执行记录</strong><article v-for="record in executionRecords" :key="record.id" class="validation-plan__execution-record"><span>{{ record.sourceFileName }} · {{ displayUserName(record.confirmedBy, record.confirmedBy) }} · {{ formatDateTime(record.confirmedAt) }}</span><small v-for="item in record.items" :key="item.id" :title="item.sourceText">{{ planItemLabel(item.planItemId) }}：{{ item.result || '未填写结果' }}<template v-if="item.responsiblePerson"> · {{ item.responsiblePerson }}</template><template v-if="item.validationDate"> · {{ item.validationDate }}</template></small></article></div>
     </section>
     <footer class="validation-plan__footer"><span>共 {{ rows.length }} 项</span><span v-if="plan">最近保存：{{ displayUserName(plan.updatedBy) }} · {{ new Date(plan.updatedAt).toLocaleString() }}</span><span v-else>尚未保存</span></footer>

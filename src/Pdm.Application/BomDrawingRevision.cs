@@ -16,6 +16,12 @@ public static class BomDrawingRevision
 
     public static string ForPackage(BomItem item, ReleasePackage package, bool preparingPublication = false)
     {
+        var standard = item.Kind == BomKind.Standard || package.Scope is ReleaseScope.StandardLongLead or ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement;
+        var unavailable = standard
+            ? !string.IsNullOrWhiteSpace(package.StandardBomRevision)
+                ? System.Text.RegularExpressions.Regex.Replace(package.StandardBomRevision.Trim(), @"-B(?=\d+$)", "-V")
+                : package.State == ReleasePackageState.Published || preparingPublication ? "BOM发布版本待核对" : "待发布"
+            : "未发布";
         var binding = item.SourceDocumentId.HasValue
             ? package.VersionBindings?.SingleOrDefault(value => value.DocumentId == item.SourceDocumentId)
             : null;
@@ -26,14 +32,15 @@ public static class BomDrawingRevision
                 return DrawingRevision.Display(string.IsNullOrWhiteSpace(binding.TargetRevision)
                     ? DrawingRevision.Letter(binding.Revision) : binding.TargetRevision);
             return DrawingRevision.IsWork(binding.Revision)
-                ? string.IsNullOrWhiteSpace(binding.PreviousReleasedRevision) ? "未发布" : binding.PreviousReleasedRevision
+                ? string.IsNullOrWhiteSpace(binding.PreviousReleasedRevision) ? unavailable : binding.PreviousReleasedRevision
                 : binding.Revision;
         }
-        if (item.SourceDocumentId.HasValue && DrawingRevision.IsWork(item.Revision)
+        if (!standard && item.SourceDocumentId.HasValue && DrawingRevision.IsWork(item.Revision)
             && package.State == ReleasePackageState.Published
             && package.Scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement or ReleaseScope.LegacyCombined)
             return "历史版次待核对";
-        return DrawingRevision.IsWork(item.Revision) ? "未发布" : DrawingRevision.Display(item.Revision);
+        return DrawingRevision.IsWork(item.Revision) || standard && string.IsNullOrWhiteSpace(item.Revision)
+            ? unavailable : DrawingRevision.Display(item.Revision);
     }
 
     public static IReadOnlyList<BomItem> ForPackage(IEnumerable<BomItem> items, ReleasePackage package, bool preparingPublication = false) =>

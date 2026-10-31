@@ -151,3 +151,7 @@ watch([() => props.project.id, () => Boolean(props.token)], () => { subTab.value
     </template>
   </section>
 </template>
+
+<style scoped>
+.pdm-budget__costs .pdm-budget__note-preview { margin-inline: auto; }
+</style>

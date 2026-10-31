@@ -114,9 +114,23 @@ internal static class Program
                 var reviewView = ((Window)overlay).FindName("ReviewView");
                 await Task.Delay(1000);
                 var reviewCore = reviewView.GetType().GetProperty("CoreWebView2").GetValue(reviewView);
-                var reviewPage = await Execute(reviewCore, "JSON.stringify({url:location.href,scripts:[...document.querySelectorAll('script[src]')].map(node=>node.src)})");
-                var reviewResult = Json.DeserializeObject(Json.Deserialize<string>(reviewPage)) as System.Collections.Generic.Dictionary<string, object>;
-                if (!((string)reviewResult["url"]).Contains(configurationVersion) || !((string)reviewResult["url"]).StartsWith("http://192.168.2.8:5173/")) throw new Exception("审核浮层未使用服务器同版界面。");
+                System.Collections.Generic.Dictionary<string, object> reviewResult = null;
+                for (var attempt = 0; attempt < 40; attempt++)
+                {
+                    var reviewPage = await Execute(reviewCore, "JSON.stringify({url:location.href,ready:document.readyState,scripts:[...document.querySelectorAll('script[src]')].map(node=>node.src)})");
+                    reviewResult = Json.DeserializeObject(Json.Deserialize<string>(reviewPage)) as System.Collections.Generic.Dictionary<string, object>;
+                    if (attempt == 0) Console.WriteLine("Native review initial page: " + reviewResult["url"]);
+                    if (((string)reviewResult["url"]).Contains(configurationVersion)
+                        && (string)reviewResult["ready"] == "complete"
+                        && ((System.Collections.ICollection)reviewResult["scripts"]).Count > 0) break;
+                    await Task.Delay(250);
+                }
+                Console.WriteLine("Native review loaded page: " + reviewResult["url"]);
+                if (!((string)reviewResult["url"]).Contains(configurationVersion)
+                    || (string)reviewResult["ready"] != "complete"
+                    || ((System.Collections.ICollection)reviewResult["scripts"]).Count == 0
+                    || new Uri((string)reviewResult["url"]).GetLeftPart(UriPartial.Authority) != new Uri((string)result["url"]).GetLeftPart(UriPartial.Authority))
+                    throw new Exception("审核浮层未使用服务器同版界面。");
                 var nativeTheme = window.GetType().GetField("currentTheme", Flags);
                 var originalTheme = (string)nativeTheme.GetValue(window);
                 var themeChecks = new System.Collections.Generic.List<string>();
@@ -133,10 +147,15 @@ internal static class Program
                         throw new Exception("原生预览按钮与网页主色不一致：" + themeId);
                     var payload = Json.Serialize(new { type = "review-overlay-state", payload = new { theme = themeId, visible = false } });
                     await (Task)overlay.GetType().GetMethod("PublishStateAsync", Flags).Invoke(overlay, new object[] { payload });
-                    await Task.Delay(150);
-                    var colors = Json.DeserializeObject(Json.Deserialize<string>(await Execute(reviewCore, "JSON.stringify({theme:document.documentElement.dataset.pdmTheme,accent:getComputedStyle(document.documentElement).getPropertyValue('--pdm-theme-accent').trim()})"))) as System.Collections.Generic.Dictionary<string, object>;
+                    System.Collections.Generic.Dictionary<string, object> colors = null;
+                    for (var attempt = 0; attempt < 20; attempt++)
+                    {
+                        await Task.Delay(250);
+                        colors = Json.DeserializeObject(Json.Deserialize<string>(await Execute(reviewCore, "JSON.stringify({theme:document.documentElement.dataset.pdmTheme,accent:getComputedStyle(document.documentElement).getPropertyValue('--pdm-theme-accent').trim()})"))) as System.Collections.Generic.Dictionary<string, object>;
+                        if ((string)colors["theme"] == themeId && string.Equals((string)colors["accent"], "#" + palette[1], StringComparison.OrdinalIgnoreCase)) break;
+                    }
                     if ((string)colors["theme"] != themeId || !string.Equals((string)colors["accent"], "#" + palette[1], StringComparison.OrdinalIgnoreCase))
-                        throw new Exception("审核浮层主题未与主界面同步：" + themeId);
+                        throw new Exception("审核浮层主题未与主界面同步：" + themeId + "（实际主题=" + colors["theme"] + "，主色=" + colors["accent"] + "）");
                     themeChecks.Add(themeId);
                 }
                 await Execute(core, "window.chrome.webview.postMessage({type:'theme-change',payload:{theme:'" + originalTheme + "'}})");

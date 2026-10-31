@@ -2,12 +2,12 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ProductionDrawingQr from '../src/components/ProductionDrawingQr.vue'
 import { listProductionDrawings } from '../src/api'
-import { createProductionDrawingQr } from '../src/productionDrawingQr'
+import { createProductionDrawingQr, createNameplateQr } from '../src/productionDrawingQr'
 import type { ProductionDrawingItem } from '../src/types'
 import type { ProductionLine, ProductionReleaseState } from '../src/productionTracking'
 
 vi.mock('../src/api', () => ({ listProductionDrawings: vi.fn() }))
-vi.mock('../src/productionDrawingQr', () => ({ createProductionDrawingQr: vi.fn() }))
+vi.mock('../src/productionDrawingQr', () => ({ createProductionDrawingQr: vi.fn(), createNameplateQr: vi.fn() }))
 const state = { projectId: 'project', releasePackageId: 'tracking', formalReleasePackageId: 'frozen-package' } as ProductionReleaseState
 const line = { id: 'line', materialKey: 'material', drawingNumber: 'DRAWING', revision: 'W1' } as ProductionLine
 function drawing(versionId: string, releasePackageId = 'frozen-package'): ProductionDrawingItem {
@@ -17,8 +17,20 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(listProductionDrawings).mockResolvedValue([drawing('formal-A'), drawing('newest-B', 'other-package')])
   vi.mocked(createProductionDrawingQr).mockResolvedValue({ content: 'DRAWING\nA', src: 'data:image/svg+xml,qr' })
+  vi.mocked(createNameplateQr).mockImplementation(async serial => ({ content: serial, src: 'data:image/svg+xml,nameplate' }))
 })
 describe('右侧正式图纸二维码', () => {
+  it('铭牌使用设备序列号直接画码，无需正式图纸', async () => {
+    const nameplate = { serialNumber: '70000046', name: '设备', model: 'AK001', powerSupply: '380V 50Hz / 5A', ratedPower: 1.9, dimensions: '1500mm x 1800mm x 2200mm', airPressure: '0.6 MPa', weight: '12000 kg', factoryDate: '2026-10-01', confirmedBy: 'hardware', confirmedAt: '2026-10-30T01:00:00Z' }
+    const wrapper = mount(ProductionDrawingQr, { props: { token: 'token', state, line: { ...line, nameplateContent: nameplate } } })
+    await flushPromises()
+    expect(createNameplateQr).toHaveBeenCalledWith('70000046')
+    expect(wrapper.get('img').attributes('title')).toBe('70000046')
+    expect(listProductionDrawings).not.toHaveBeenCalled()
+    expect(createProductionDrawingQr).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('暂无对应的正式图纸')
+    wrapper.unmount()
+  })
   it('只用当前发布包的正式版次，PDF尚未生成时也能画码', async () => {
     const wrapper = mount(ProductionDrawingQr, { props: { token: 'token', state, line } })
     await flushPromises()

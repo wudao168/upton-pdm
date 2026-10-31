@@ -13,6 +13,31 @@ namespace Upton.Pdm.Api.Tests;
 public sealed class WorkHoursApiTests
 {
     [Fact]
+    public async Task CalendarMoveRequiresAuthenticationMergesAtomicallyAndRejectsStaleReplay()
+    {
+        using var factory=new PdmApiFactory();using var client=factory.CreateClient();
+        using var serviceScope=factory.Services.CreateScope();
+        var repo=serviceScope.ServiceProvider.GetRequiredService<IPdmRepository>();var service=serviceScope.ServiceProvider.GetRequiredService<WorkHoursService>();
+        var company=(await repo.GetProjectNumberingOptionsAsync(default)).Organizations.First().Id;
+        var day=DateOnly.FromDateTime(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(8)).DateTime);var source=day.AddDays(-2);
+        await repo.CreateUserAsync(new(Guid.NewGuid(),"calendar-worker","工时操作测试","unused",UserRole.Engineer,true,CompanyId:company),default);
+        var root=await repo.CreateNumberedProjectAsync(new(company,"P",2,Guid.Parse("c0046500-0000-0000-0000-000000000001"),"日历剪切测试",null,source,1,"calendar-worker","D:/test","D:/release"),default);
+        await repo.SetMainProjectStaffingAsync(root.Id,new("calendar-worker",[],["calendar-worker"]),"admin",default);
+        var read=await service.ReadAsync(source,day,false,"calendar-worker",UserRole.Engineer,default);
+        await service.SaveAsync(new(source,source,[new(source,"厂内",8,root.Id)],read.Sheets.Where(x=>x.Month==source.ToString("yyyy-MM")).Select(x=>new WorkHoursVersion(x.Month,x.RowVersion)).ToArray()),"calendar-worker",UserRole.Engineer,default);
+        read=await service.ReadAsync(source,day,false,"calendar-worker",UserRole.Engineer,default);
+        var move=new MoveWorkHoursDay(company,source,day,read.Sheets.Single(x=>x.Month==source.ToString("yyyy-MM")).RowVersion,read.Sheets.Single(x=>x.Month==day.ToString("yyyy-MM")).RowVersion);
+        Assert.Equal(HttpStatusCode.Unauthorized,(await client.PostAsJsonAsync("/api/work-hours/move-day",move)).StatusCode);
+        client.DefaultRequestHeaders.Add("X-Company-Id",company.ToString());Authenticate(client,"calendar-worker",UserRole.Engineer);
+        var response=await client.PostAsJsonAsync("/api/work-hours/move-day",move);Assert.Equal(HttpStatusCode.OK,response.StatusCode);
+        var result=(await response.Content.ReadFromJsonAsync<WorkHoursView>())!;
+        Assert.Equal(8,result.Sheets.SelectMany(x=>x.Entries).Where(x=>x.Date==day).Sum(x=>x.Hours));
+        Assert.DoesNotContain(result.Sheets.SelectMany(x=>x.Entries),x=>x.Date==source);
+        Assert.Equal(HttpStatusCode.Conflict,(await client.PostAsJsonAsync("/api/work-hours/move-day",move)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest,(await client.PostAsJsonAsync("/api/work-hours/move-day",move with{CompanyId=Guid.NewGuid()})).StatusCode);
+    }
+
+    [Fact]
     public async Task ManualReminderHttpRepeatsAfterAutomaticReminderAndReturnsRecipientResults()
     {
         using var factory=new PdmApiFactory();using var client=factory.CreateClient();

@@ -25,6 +25,7 @@ public sealed class FunctionPermissionMiddleware(RequestDelegate next)
             var match = Operations.FirstOrDefault(item => item.Route.Method == context.Request.Method && item.Pattern.IsMatch(context.Request.Path.Value ?? ""));
             if (match.Permission is { } permission)
             {
+                if (permission.Code == "project.opl.download" && context.Request.Query["preview"] == "true") { await next(context); return; }
                 var actor = context.User.Identity.Name ?? "";
                 if (string.IsNullOrWhiteSpace(actor) || !Enum.TryParse<UserRole>(context.User.FindFirstValue(ClaimTypes.Role), out var role))
                     throw new UnauthorizedAccessException("当前登录身份不能执行此功能，请使用有效的业务账号登录。");

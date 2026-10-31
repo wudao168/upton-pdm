@@ -179,6 +179,7 @@ public sealed record ProjectProcurementTrackingItem(
     IReadOnlyList<ProcurementDocumentDetail> Details)
 {
     public bool HasDeliveryDelay { get; init; }
+    public IReadOnlyList<BomFileReference> Files { get; init; } = [];
     public DateTimeOffset? PurchaseRequisitionCreatedAt { get; init; }
     public string? BuyerName { get; init; }
     public IReadOnlyList<WarehouseMovementDetail> WarehouseMovements { get; init; } = [];

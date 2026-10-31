@@ -423,7 +423,6 @@ async function savePermissions() { if (!selectedFolder.value) return; try { awai
 <template>
   <section class="pdm-file-library">
     <aside class="pdm-panel pdm-folder-pane">
-      <header class="pdm-panel-heading"><div><h2>项目文件夹</h2><p>业务资料与受控图档分区管理</p></div></header>
       <el-tree :data="treeData" node-key="id" :default-expanded-keys="visibleFolders.filter(item => ['Root', 'MechanicalRoot', 'ElectricalRoot'].includes(item.purpose)).map(item => item.id)" highlight-current @node-click="selectFolder">
         <template #default="{ data }"><span class="pdm-folder-node"><span class="pdm-folder-node__icon" :class="{ 'is-populated': folderCount(data.id) > 0 }"><Folder :size="15" /></span><span>{{ data.name }}</span><small v-if="folderCount(data.id)">{{ folderCount(data.id) }}</small></span></template>
       </el-tree>

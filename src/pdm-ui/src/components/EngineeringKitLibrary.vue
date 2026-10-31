@@ -5,7 +5,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { listStandardLibraryCategories, listEngineeringKits, listMaterials, publishEngineeringKit, saveEngineeringKit } from '../api'
 import EngineeringKitDetails from './EngineeringKitDetails.vue'
 import EngineeringKitActivityButton from './EngineeringKitActivityButton.vue'
-import { standardCategoryCode } from '../standardLibraryCategories'
+import { standardCategoryCode, matchesStandardCategory, isUncategorized } from '../standardLibraryCategories'
+import StandardCategoryFilter from './StandardCategoryFilter.vue'
+import { u9UnitName } from '../u9Units'
 import type { EngineeringKit, StandardLibraryCategory, PdmMaterial } from '../types'
 
 const props = defineProps<{ token: string; canManage: boolean; active?: boolean }>()
@@ -13,6 +15,7 @@ const loading = ref(false)
 const saving = ref(false)
 const publishing = ref(false)
 const query = ref('')
+const categoryFilter = ref('')
 const brandFilter = ref('')
 const kits = ref<EngineeringKit[]>([])
 const materials = ref<PdmMaterial[]>([])
@@ -23,6 +26,7 @@ const editorOpen = ref(false)
 const editing = ref<EngineeringKit | null>(null)
 const standardCategories = ref<StandardLibraryCategory[]>([])
 const detailKit = ref<EngineeringKit | null>(null)
+const expandedKitIds = ref<string[]>([])
 const form = ref({
   name: '', brand: '', description: '', changeNote: '',
   modelMode: 'Auto' as 'Auto' | 'Manual', model: '', standardLibraryCategoryId: '',
@@ -38,11 +42,12 @@ const brandOptions = computed(() => [...new Set(kits.value.map(item => item.bran
 const filteredKits = computed(() => {
   const keyword = query.value.trim().toLowerCase()
   return kits.value.filter(item => (!brandFilter.value || item.brand === brandFilter.value)
+    && matchesStandardCategory(standardCategories.value, categoryFilter.value, kitCategories(item).map(category => category.id))
     && (!keyword || [item.code, item.model, item.name, item.brand].some(value => value?.toLowerCase().includes(keyword))))
 })
 const categoryTree = computed(() => {
   type Node = { id: string; label: string; parentId?: string | null; children: Node[] }
-  const nodes = standardCategories.value.map(item => {
+  const nodes = standardCategories.value.filter(item => !isUncategorized(item)).map(item => {
     const code = standardCategoryCode(standardCategories.value, item.id)
     return { id: item.id, label: code ? item.name + '（' + code + '）' : item.name, parentId: item.parentId, children: [] as Node[] }
   })
@@ -59,7 +64,18 @@ function releasedRevision(kit?: EngineeringKit | null) {
   return kit?.revisions.find(item => item.id === kit.currentReleasedRevisionId)
 }
 function displayRevision(kit: EngineeringKit) {
-  return draftRevision(kit) ?? releasedRevision(kit)
+  return (props.canManage ? draftRevision(kit) : undefined) ?? releasedRevision(kit)
+}
+function kitCategories(kit: EngineeringKit) {
+  const id = (props.canManage ? draftRevision(kit)?.standardLibraryCategoryId : null) ?? kit.standardLibraryCategoryId ?? releasedRevision(kit)?.standardLibraryCategoryId
+  return standardCategories.value.filter(item => item.id === id && !isUncategorized(item))
+}
+function toggleKitExpansion(kit: EngineeringKit) {
+  expandedKitIds.value = expandedKitIds.value.includes(kit.id)
+    ? expandedKitIds.value.filter(id => id !== kit.id) : [...expandedKitIds.value, kit.id]
+}
+function syncExpandedKits(_kit: EngineeringKit, expanded: EngineeringKit[]) {
+  expandedKitIds.value = expanded.map(kit => kit.id)
 }
 function selectedMaterial(materialId: string) {
   return eligibleMaterials.value.find(item => item.id === materialId)
@@ -79,7 +95,7 @@ async function load() {
     kits.value = loadedKits
     materials.value = loadedMaterials
     materialSearchResults.value = loadedMaterials
-    standardCategories.value = loadedCategories.filter(item => item.isActive && !(item.name === '未分类' && !item.parentId))
+    standardCategories.value = loadedCategories.filter(item => item.isActive)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '套件加载失败')
   } finally {
@@ -217,7 +233,10 @@ onMounted(load)
 <template>
   <section class="engineering-kit-library" aria-label="料品套件">
     <template v-if="!editorOpen">
-      <div class="engineering-kit-library__toolbar">
+      <div class="engineering-kit-library__layout pdm-project-list-layout">
+      <StandardCategoryFilter v-model="categoryFilter" :categories="standardCategories" />
+      <div class="engineering-kit-library__main pdm-panel pdm-project-table-panel">
+      <div class="engineering-kit-library__toolbar pdm-toolbar">
         <el-button @click="load">刷新</el-button>
         <el-select v-model="brandFilter" clearable filterable placeholder="筛选品牌"><el-option v-for="brand in brandOptions" :key="brand" :label="brand" :value="brand" /></el-select>
         <el-input v-model="query" clearable placeholder="搜索套件料号、名称、型号或品牌" />
@@ -226,16 +245,35 @@ onMounted(load)
         </div>
         <span>共 {{ filteredKits.length }} 个套件</span>
       </div>
-      <el-table v-loading="loading" :data="filteredKits" row-key="id" height="100%" empty-text="暂无套件">
-        <el-table-column label="套件料号" min-width="145"><template #default="{ row }"><strong class="kit-code">{{ row.code || '发布时生成' }}</strong></template></el-table-column>
+      <el-table v-loading="loading" data-pdm-column-layout="scroll" :data="filteredKits" row-key="id" :expand-row-keys="expandedKitIds" @expand-change="syncExpandedKits" height="100%" empty-text="暂无套件">
+        <el-table-column type="expand" width="32" class-name="pdm-column-fixed-width">
+          <template #default="{ row }">
+            <section :id="`kit-contents-${row.id}`" class="engineering-kit-library__contents" :aria-label="`套件 ${row.code || row.name} 的物料明细`">
+              <header><strong>套件明细</strong><span v-if="displayRevision(row)">V{{ String(displayRevision(row)!.versionNumber).padStart(2, '0') }} {{ displayRevision(row)!.state === 'Draft' ? '草稿' : '已发布' }} · 共 {{ displayRevision(row)!.components.length }} 种物料</span></header>
+              <el-table data-pdm-column-layout="scroll" :data="displayRevision(row)?.components ?? []" max-height="320" empty-text="该套件暂无物料明细">
+                <el-table-column label="料号" min-width="135"><template #default="{ row: component }"><span v-stocked-material="component.materialCode">{{ component.materialCode }}</span></template></el-table-column>
+                <el-table-column label="名称" min-width="150"><template #default="{ row: component }"><span v-stocked-material="component.materialCode">{{ component.materialName }}</span></template></el-table-column>
+                <el-table-column prop="specification" label="型号" min-width="160" />
+                <el-table-column prop="brand" label="品牌" min-width="95" />
+                <el-table-column label="单位" width="70"><template #default="{ row: component }">{{ u9UnitName(component.unit) }}</template></el-table-column>
+                <el-table-column prop="quantity" label="每套数量" width="100" />
+                <el-table-column prop="remark" label="备注" min-width="140" />
+              </el-table>
+            </section>
+          </template>
+        </el-table-column>
+        <el-table-column label="套件料号" min-width="145"><template #default="{ row }"><button type="button" class="kit-code pdm-text-action" :aria-expanded="expandedKitIds.includes(row.id)" :aria-controls="`kit-contents-${row.id}`" :aria-label="`${expandedKitIds.includes(row.id) ? '收起' : '展开'}套件 ${row.code || row.name} 的物料明细`" @click.stop="toggleKitExpansion(row)">{{ row.code || '发布时生成' }}</button></template></el-table-column>
         <el-table-column prop="name" label="套件名称" min-width="180" />
         <el-table-column label="型号" min-width="145"><template #default="{ row }">{{ row.model || '发布时生成' }}</template></el-table-column>
         <el-table-column prop="brand" label="品牌" min-width="130" />
+        <el-table-column label="标准物料分类" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ kitCategories(row).map(category => category.name).join('、') || '未分类（待补选）' }}</template></el-table-column>
         <el-table-column prop="description" label="备注" min-width="180" show-overflow-tooltip />
         <el-table-column label="套件内物料数量" width="150"><template #default="{ row }"><el-button link type="primary" @click="detailKit = row">{{ displayRevision(row)?.components.length ?? 0 }}</el-button></template></el-table-column>
-        <el-table-column label="状态" width="145"><template #default="{ row }"><el-tag v-if="row.isActive === false" type="info" size="small">已停用</el-tag><el-tag v-else-if="draftRevision(row)" type="warning" size="small">V{{ String(draftRevision(row)?.versionNumber).padStart(2, '0') }} 草稿</el-tag><el-tag v-else-if="releasedRevision(row)" type="success" size="small">V{{ String(releasedRevision(row)?.versionNumber).padStart(2, '0') }} 已发布</el-tag></template></el-table-column>
+        <el-table-column label="状态" width="145"><template #default="{ row }"><el-tag v-if="row.isActive === false" type="info" size="small">已停用</el-tag><el-tag v-else-if="canManage && draftRevision(row)" type="warning" size="small">V{{ String(draftRevision(row)?.versionNumber).padStart(2, '0') }} 草稿</el-tag><el-tag v-else-if="releasedRevision(row)" type="success" size="small">V{{ String(releasedRevision(row)?.versionNumber).padStart(2, '0') }} 已发布</el-tag></template></el-table-column>
         <el-table-column v-if="canManage" label="操作" width="160" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="openEditor(row)">维护</el-button><EngineeringKitActivityButton :kit="row" :token="token" :can-manage="canManage" link @changed="applyKitActivity" /></template></el-table-column>
       </el-table>
+      </div>
+      </div>
     </template>
 
     <template v-else>
@@ -295,8 +333,16 @@ onMounted(load)
 </template>
 
 <style scoped>
+.engineering-kit-library__layout{display:grid;flex:1;min-height:0}.engineering-kit-library__main{display:flex;min-height:0;min-width:0;flex-direction:column}.engineering-kit-library__main>:deep(.el-table){min-height:0;flex:1}
 .engineering-kit-library{display:flex;height:100%;min-height:0;flex-direction:column;overflow:hidden}.engineering-kit-editor__title{display:flex;padding:10px 16px;border-bottom:1px solid var(--pdm-border);align-items:center;justify-content:space-between}.engineering-kit-editor__title h1{margin:0;font-size:18px}.engineering-kit-editor__title>span{margin:4px 0 0;color:var(--pdm-muted);font-size:12px}.engineering-kit-library__toolbar{display:flex;flex:0 0 auto;align-items:center;gap:10px;margin-bottom:10px}.engineering-kit-library__toolbar>.el-select{width:150px}.engineering-kit-library__toolbar .el-input{width:min(430px,42vw)}.engineering-kit-library__toolbar span{color:var(--pdm-muted);font-size:12px}.engineering-kit-library>:deep(.el-table){min-height:0;flex:1}.kit-code{color:var(--pdm-theme-accent)}.engineering-kit-editor__title>div{display:flex;align-items:center;gap:12px}.engineering-kit-editor{padding:12px 16px;overflow:auto}.engineering-kit-summary{display:grid;overflow:hidden;border:1px solid var(--pdm-border);border-radius:8px;grid-template-columns:1.05fr 1.25fr 1.5fr 1.1fr 1.2fr .85fr .9fr}.engineering-kit-library__actions{display:flex;gap:8px}.engineering-kit-summary .is-model{gap:6px}.engineering-kit-model-head{display:flex;align-items:center;gap:8px}.engineering-kit-model-head label{white-space:nowrap}.engineering-kit-model-head :deep(.el-radio-group){flex:0 0 auto}.engineering-kit-summary>div{display:flex;min-height:68px;padding:9px 12px;border-right:1px solid var(--pdm-border);flex-direction:column;justify-content:center;gap:8px}.engineering-kit-summary>div:last-child{border-right:0}.engineering-kit-summary label,.engineering-kit-change-note>span,.engineering-kit-group__header label>span{color:var(--pdm-text-soft);font-size:12px;font-weight:600}.engineering-kit-summary strong{display:flex;min-height:32px;align-items:center}.engineering-kit-change-note{display:grid;margin:12px 0;align-items:center;grid-template-columns:82px 1fr}.engineering-kit-group{padding:12px;border:1px solid var(--pdm-border);border-radius:8px;background:var(--pdm-bg)}.engineering-kit-group :deep(.el-table__header .cell),.engineering-kit-group :deep(.el-table__body .cell){text-align:center;justify-content:center}.engineering-kit-group__header{display:flex;margin-bottom:10px;align-items:center;gap:12px}.engineering-kit-group__header label{display:flex;align-items:center;gap:10px}.engineering-kit-group-name{width:200px}.engineering-kit-group__count{color:var(--pdm-muted);font-size:12px}.engineering-kit-group__header>.el-button{margin-left:auto}.engineering-kit-editor__footer{display:flex;margin-top:14px;justify-content:flex-end;gap:8px}@media(max-width:1000px){.engineering-kit-library__toolbar{flex-wrap:wrap}.engineering-kit-summary{grid-template-columns:repeat(2,1fr)}.engineering-kit-summary>div{border-bottom:1px solid var(--pdm-border)}.engineering-kit-editor__title{align-items:flex-start;flex-direction:column;gap:6px}}
 .engineering-kit-group{--pdm-detail-row-height:40px}
 .engineering-kit-group :deep(.el-table__header th.el-table__cell){height:40px;padding-block:0;box-sizing:border-box}
 .engineering-kit-group :deep(.el-table__body .cell){white-space:nowrap}
+.engineering-kit-library :deep(.el-table__expanded-cell) { padding: 0 !important; }
+.engineering-kit-library__contents { padding: 3px; }
+.engineering-kit-library__contents > header { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 12px; }
+.engineering-kit-library__contents > header > span { color: var(--pdm-text-soft); }
+.kit-code { border: 0; padding: 0; background: transparent; font: inherit; font-weight: 600; text-align: left; cursor: pointer; }
+.engineering-kit-library :deep(button.el-table__expand-icon),
+.engineering-kit-library :deep(button.el-table__expand-icon:is(:hover, :focus-visible)) { border-color: transparent !important; outline: none !important; box-shadow: none !important; background: transparent !important; }
 </style>

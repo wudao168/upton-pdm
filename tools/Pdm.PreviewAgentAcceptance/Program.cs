@@ -102,7 +102,7 @@ internal static class Program
             AgentProgram.TogglePause();
             var refused = await client.PostAsync("/convert", Request("不应接收.SLDPRT"));
             Check(refused.StatusCode == HttpStatusCode.ServiceUnavailable && AgentProgram.Journal.TotalRequests == 2, "pause rejects new work without discarding accepted work");
-            var next = options.Copy(); next.Name = "PC-07-已保存";
+            var next = options.Copy(); next.Name = "PC-07-已保存"; next.DedicatedConversionHost = true;
             AgentProgram.QueueSettings(next); await AgentProgram.ApplyPendingSettingsAsync();
             Check(AgentProgram.Options.Name == "PC-07", "settings do not change a running or queued batch");
             foreach (var task in new[] { first, second }) { using (var response = await task) Check(response.IsSuccessStatusCode, "accepted request returns its conversion response"); }
@@ -114,6 +114,8 @@ internal static class Program
             var restoredOptions = AgentOptions.Load(new[] { "--dataroot", options.DataDirectory, "--tray" });
             Check(restoredOptions.Token == options.Token && restoredOptions.Name == next.Name && !restoredOptions.ShowMainWindow,
                 "saved settings decrypt correctly and an explicit tray launch is honored");
+            Check(restoredOptions.DedicatedConversionHost && restoredOptions.ConversionArguments.Contains("--dedicated-host"),
+                "dedicated host recovery setting persists and reaches both worker launch modes");
             var records = AgentProgram.Journal.Snapshot();
             Check(records.Count == 2 && records.Single(item => item.Files.Count == 2).Status == "部分成功", "partial success and per-file results are recorded");
             Check(records.All(item => item.Context.Initiator == "李工" && item.Context.ProjectCode == "P700014-1"), "request context survives HTTP transport");

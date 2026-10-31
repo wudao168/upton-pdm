@@ -75,6 +75,7 @@ public static class StandardLibraryEndpointExtensions
                     Material = MaterialEndpointExtensions.MapMaterial(item.Material),
                     item.Categories,
                     item.Kit,
+                    item.Relation,
                     CoverImage = item.CoverImage is null ? null : MaterialEndpointExtensions.MapAttachment(item.CoverImage)
                 }),
                 result.Total,

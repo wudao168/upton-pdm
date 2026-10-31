@@ -11,6 +11,30 @@ var root = Path.GetFullPath(args[0]);
 using var settings = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, ".local/api/appsettings.json")));
 using var secrets = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, ".local/secrets/pdm-secrets.json")).TrimStart('\uFEFF'));
 var builder = new MySqlConnectionStringBuilder(settings.RootElement.GetProperty("ConnectionStrings").GetProperty("Pdm").GetString() ?? throw new Exception("数据库测试配置缺失"));
+if (args.Length == 3 && args[1] == "--inspect-project")
+{
+    builder.UserID = "root"; builder.Password = secrets.RootElement.GetProperty("mysqlRootPassword").GetString();
+    builder.GuidFormat = MySqlGuidFormat.Binary16;
+    await using var read = new MySqlConnection(builder.ConnectionString); await read.OpenAsync();
+    var id = await read.QuerySingleAsync<Guid>("SELECT id FROM project WHERE code=@Code", new { Code = args[2] });
+    var repo = new MySqlPdmRepository(Options.Create(new PdmDatabaseOptions { ConnectionString = builder.ConnectionString }), TimeProvider.System);
+    var project = (await repo.ListProjectsAsync(default)).Single(project => project.Id == id);
+    var archivedDocuments = await read.ExecuteScalarAsync<int>("SELECT COUNT(DISTINCT d.id) FROM document d JOIN document_version v ON v.document_id=d.id WHERE d.project_id=@id AND d.deleted_at IS NULL AND d.purged_at IS NULL", new { id });
+    Console.WriteLine(JsonSerializer.Serialize(new { id, project!.Code, project.DocumentCount, project.ModelDocumentCount, project.DrawingDocumentCount, archivedDocuments }));
+    return;
+}
+if (args.Length == 3 && args[1] == "--inspect-receipt")
+{
+    builder.UserID = "root"; builder.Password = secrets.RootElement.GetProperty("mysqlRootPassword").GetString();
+    builder.GuidFormat = MySqlGuidFormat.Binary16;
+    var batchId = Guid.Parse(args[2]);
+    await using var read = new MySqlConnection(builder.ConnectionString); await read.OpenAsync();
+    var receiptCount = await read.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM archive_batch_receipt WHERE batch_id=@batchId AND committed_at IS NOT NULL", new { batchId });
+    var versionCount = await read.ExecuteScalarAsync<int>("SELECT COUNT(DISTINCT v.id) FROM document_version v JOIN archive_upload u ON u.document_id=v.document_id AND u.relative_path=v.storage_relative_path WHERE u.batch_id=@batchId", new { batchId });
+    var uploads = await read.QueryAsync("SELECT state,COUNT(*) count FROM archive_upload WHERE batch_id=@batchId GROUP BY state", new { batchId });
+    Console.WriteLine(JsonSerializer.Serialize(new { batchId, receiptCount, versionCount, uploads }));
+    return;
+}
 builder.UserID = "root"; builder.Password = secrets.RootElement.GetProperty("mysqlRootPassword").GetString();
 builder.GuidFormat = MySqlGuidFormat.Binary16;
 var reuseIndex = Array.IndexOf(args, "--reuse");
@@ -62,6 +86,8 @@ try
         Console.WriteLine("Prepared isolated archive performance fixture " + database);
         return;
     }
+    await DeferredReferenceImmutableChecks.RunAsync(repo, builder.ConnectionString);
+    if (args.Contains("--deferred-references-only")) { passed = true; return; }
     await LargeReferenceSnapshotChecks.RunAsync(repo, builder.ConnectionString);
     if (args.Contains("--reference-sort-only")) { passed = true; return; }
     foreach (var failure in new[] { "missing-reference", "base-version", "drawing-failure", "omitted-file", "foreign-session", "cancel", "success" })

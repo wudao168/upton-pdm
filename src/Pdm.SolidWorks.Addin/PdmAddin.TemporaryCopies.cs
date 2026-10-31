@@ -15,6 +15,7 @@ public sealed partial class PdmAddin
         if (Volatile.Read(ref checkInOperationInProgress) != 0 || Volatile.Read(ref workspaceOperationInProgress) != 0
             || Volatile.Read(ref openOperationInProgress) != 0 || Volatile.Read(ref controlledOpenInProgress) != 0
             || Volatile.Read(ref automaticDrawingOperationInProgress) != 0
+            || Volatile.Read(ref nativeFileOpenInProgress) != 0
             || ArchiveSession.Current != null && !ArchiveSession.Current.IsFinished) return true;
         int currentId;
         using (var current = Process.GetCurrentProcess()) currentId = current.Id;

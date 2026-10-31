@@ -11,6 +11,13 @@ public static class FunctionPermissionCatalog
     public static IReadOnlyList<PermissionDefinition> Build(IReadOnlyList<PermissionDefinition> existing)
     {
         var result = existing.Select(Describe).ToList();
+        foreach (var tab in ProjectCenterPermissions.Tabs)
+            result.Add(new(ProjectCenterPermissions.Tab(tab.Key), $"查看{tab.Name}页签", "项目中心页签", "单独控制项目中心页签入口及对应内容的查看。")
+            { Scope = "project", Action = "view", ProjectAuthorization = "role", Dependencies = tab.Key is "overview" or "records" ? [PermissionCodes.ProjectView] : [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView] });
+        foreach (var operation in new[] { (ProjectCenterPermissions.Write, "允许项目业务操作", "edit"), (ProjectCenterPermissions.Download, "下载项目文件", "download"), (ProjectCenterPermissions.Export, "导出项目数据", "export"), (ProjectCenterPermissions.Print, "打印项目资料", "print") })
+            result.Add(new(operation.Item1, operation.Item2, "项目中心操作", "仍须同时具备对应功能、项目分工和流程权限。")
+            { Scope = "project", Action = operation.Item3, ProjectAuthorization = "role", Dependencies = [PermissionCodes.ProjectContentView] });
+        result.Add(new(ProjectCenterPermissions.SchemaMarker, "项目中心权限配置格式", "系统内部") { Hidden = true });
         // 新功能在这里声明一次（legacy 传 null），两类设置和接口校验自动接入，默认不授权。
         void Add(string code, string name, string module, string? legacy, bool allPositions, params FunctionRoute[] routes) => result.Add(new(code, name, module)
         {
@@ -68,13 +75,15 @@ public static class FunctionPermissionCatalog
         if (item.Code is PermissionCodes.MaterialRelationManage or PermissionCodes.MaterialRelationPublish) dependencies.Add(PermissionCodes.MaterialRelationView);
         if (item.Code == PermissionCodes.MaterialManage) dependencies.Add(PermissionCodes.MaterialApply);
         if (item.Code == PermissionCodes.MaterialApply) dependencies.Add(PermissionCodes.MaterialView);
+        if (item.Code == PermissionCodes.MaterialNotify) dependencies.Add(PermissionCodes.MaterialView);
         if (item.Code == PermissionCodes.RoleSettingsEdit) dependencies.Add(PermissionCodes.RoleSettingsView);
         if (item.Code == PermissionCodes.ProjectPermissionSettingsEdit) dependencies.Add(PermissionCodes.ProjectPermissionSettingsView);
         var position = item.Code is PermissionCodes.ProjectPlanEdit or PermissionCodes.ProjectEdit or PermissionCodes.ProjectDelete or PermissionCodes.ProjectChildCreate or PermissionCodes.ProjectDesignerAssign or PermissionCodes.BomEdit or PermissionCodes.BomMechanicalEdit or PermissionCodes.BomElectricalEdit or PermissionCodes.ValidationPlanEdit or PermissionCodes.ReleaseManage;
         return item with { Scope = project ? "project" : "system", Action = Action(item.Code, item.Name), Dependencies = dependencies, ProjectAuthorization = item.Code == PermissionCodes.ProjectBudgetView ? "budget" : position ? "position" : "role" };
     }
 
-    public static string Action(string code, string name) => Regex.IsMatch(code, @"\.(view|download)$") || Regex.IsMatch(name, "查看|浏览|下载|查询") ? "view"
+    public static string Action(string code, string name) => code.EndsWith(".notify", StringComparison.Ordinal) ? "notify"
+        : Regex.IsMatch(code, @"\.(view|download)$") || Regex.IsMatch(name, "查看|浏览|下载|查询") ? "view"
         : Regex.IsMatch(code, @"\.(delete|recycle)$") || Regex.IsMatch(name, "删除|回收|作废") ? "delete"
         : Regex.IsMatch(code, @"\.(create|register|upload)$") || Regex.IsMatch(name, "新建|创建|登记|上传") ? "create"
         : Regex.IsMatch(code, @"\.(edit|update|rename|description)$") || Regex.IsMatch(name, "编辑|维护|配置") ? "edit" : "other";
@@ -84,6 +93,7 @@ public static class FunctionPermissionCatalog
         var values = source.ToHashSet(StringComparer.Ordinal);
         foreach (var operation in RolePermissionCatalog.Permissions.Where(item => item.LegacyPermission is not null))
             if (values.Contains(operation.LegacyPermission!) && (operation.LegacyPermission != PermissionCodes.ProjectContentView || !values.Contains(SchemaMarker))) values.Add(operation.Code);
+        ProjectCenterPermissions.ExpandLegacy(values);
         return values;
     }
 
@@ -96,6 +106,7 @@ public static class FunctionPermissionCatalog
         foreach (var item in RolePermissionCatalog.Permissions.Where(item => item.LegacyPermission is not null))
             if (values.Contains(item.Code)) values.Add(item.LegacyPermission!);
         values.Remove(SchemaMarker);
+        values.Remove(ProjectCenterPermissions.SchemaMarker);
         return values;
     }
 }

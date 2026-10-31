@@ -55,7 +55,7 @@ internal static partial class Program
    var attributes=oldParts.ToDictionary(node=>(string)Get(node,"FullPath"),node=>File.GetAttributes((string)Get(node,"FullPath")));
    var nativeCalls=0;var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
    SetField(plugin,"application",ArchiveNativeMock(appType,call=>{
-    if(call.MethodName=="GetDocuments")return Array.Empty<object>();if(call.MethodName=="get_ActiveDoc")return null;if(call.MethodName=="GetUserPreferenceStringValue")return "";
+    if(call.MethodName=="GetDocuments")return Array.Empty<object>();if(call.MethodName=="get_ActiveDoc"||call.MethodName=="GetOpenDocumentByName")return null;if(call.MethodName=="GetUserPreferenceStringValue")return "";
     if(call.MethodName=="GetConfigurationNames")return new[]{"Default","默认"};
     nativeCalls++;throw new Exception("不应打开、重建、关闭或修改原生文档："+call.MethodName);
    }));
@@ -153,6 +153,18 @@ internal static partial class Program
    if(route.EndsWith("/documents")&&request.Method==HttpMethod.Get)value=nodes.Where(node=>Get(node,"DocumentId")!=null).Select(node=>Document(node)).Concat(extraDocuments).ToArray();
    else if(route.EndsWith("/reference-tree")){status=HttpStatusCode.NotFound;value=new{message="隔离样本未设置项目根"};}
    else if(route.EndsWith("/versions")){var id=versions.Keys.FirstOrDefault(key=>route.Contains(key.ToString()));value=id==Guid.Empty||mode=="wrong-owner-version"&&id==(Guid)Get(owner,"DocumentId")?Array.Empty<object>():versions[id];}
+   else if(route.EndsWith("/documents/version-verifications")&&request.Method==HttpMethod.Post)
+   {
+    var payload=json.Deserialize<Dictionary<string,object>>(await request.Content.ReadAsStringAsync());
+    value=((IEnumerable)payload["Documents"]).Cast<Dictionary<string,object>>().Select(row=>
+    {
+     var id=Guid.Parse((string)row["DocumentId"]);var history=versions.TryGetValue(id,out var stored)?stored:Array.Empty<object>();
+     var bound=row["BoundVersionId"]==null?(Guid?)null:Guid.Parse((string)row["BoundVersionId"]);
+     object Summary(object version)=>version==null?null:new{DocumentId=id,Id=Get(version,"Id"),Revision=Get(Get(version,"Revision"),"Display"),FileLength=Get(version,"FileLength"),Sha256=Get(version,"Sha256")};
+     var latest=history.FirstOrDefault();
+     return new{DocumentId=id,Latest=Summary(latest),Bound=Summary(bound.HasValue?history.FirstOrDefault(version=>(Guid)Get(version,"Id")==bound.Value&&!ReferenceEquals(version,latest)):null),Accessible=true};
+    }).ToArray();
+   }
    else if(route.EndsWith("/registrations")&&request.Method==HttpMethod.Post)
    {
     Registers++;var payload=json.Deserialize<Dictionary<string,object>>(await request.Content.ReadAsStringAsync());var name=(string)((Dictionary<string,object>)payload["document"])["fileName"];var node=nodes.Single(n=>(string)Get(n,"FileName")==name);var id=Guid.NewGuid();Set(node,"DocumentId",id);reserved.Add(id);versions[id]=Array.Empty<object>();value=Document(node);

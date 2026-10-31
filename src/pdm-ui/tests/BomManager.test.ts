@@ -41,6 +41,8 @@ const materialApi = vi.hoisted(() => ({
   listCadPropertyWritebackVersions: vi.fn(),
   downloadDocumentPreviewFile: vi.fn(),
   readDocumentPreviewFile: vi.fn().mockResolvedValue(new Blob(['pdf'], { type: 'application/pdf' })),
+  listProductionDrawings: vi.fn().mockResolvedValue([]),
+  readProductionDrawingPreview: vi.fn().mockResolvedValue(new Blob(['pdf'], { type: 'application/pdf' })),
 }))
 
 vi.mock('../src/api', () => materialApi)
@@ -76,6 +78,26 @@ async function confirmTypedKit(wrapper: ReturnType<typeof mount>) {
 }
 
 describe('BomManager', () => {
+  it.each(['Standard', 'NonStandard', 'Electrical'] as const)('keeps %s actions beside the difference filters and available when filters close', async kind => {
+    const item: BomItem = { id: 'part', sequence: 1, drawingNumber: 'PART', name: '已发布物料', quantity: 1, unit: '个', revision: 'A', complete: true }
+    const wrapper = mount(BomManager, { props: {
+      standard: [item], nonStandard: [item], electrical: [item], declarations: [], pending: false, editable: true,
+      versions: [{ id: 'released', projectId: 'project', kind, versionNumber: 1, label: 'V01', state: 'Released', items: [item], createdBy: 'admin', updatedBy: 'admin', createdAt: '2026-10-27', updatedAt: '2026-10-27' }],
+    } })
+    const index = { Standard: 1, NonStandard: 2, Electrical: 3 }[kind]
+    await wrapper.findAll('button[role="tab"]')[index]!.trigger('click')
+    const toolbar = wrapper.get('.pdm-bom-summary-actions')
+    expect(toolbar.find('.pdm-bom-comparison-filters').exists()).toBe(true)
+    expect(toolbar.get('.pdm-bom-release-strip-actions').text()).toContain('刷新BOM')
+    expect(wrapper.get('.pdm-bom-release-strip').find('button').exists()).toBe(false)
+    expect(toolbar.text()).not.toContain('对比已发布基线')
+    await wrapper.findAll('.pdm-bom-version-picker button').find(button => button.text() === '收起差异')!.trigger('click')
+    expect(toolbar.find('.pdm-bom-comparison-filters').exists()).toBe(false)
+    expect(toolbar.get('.pdm-bom-release-strip-actions').text()).toContain('保存BOM')
+    await wrapper.setProps({ versions: [] })
+    expect(toolbar.get('.pdm-bom-release-strip-actions').text()).toContain('刷新BOM')
+  })
+
   it('发布包多选对比只读，退出后保留工作区草稿，切换分类清空对比', async () => {
     const versions = [1, 2, 3, 4].map(version => ({ id: `compare-v${version}`, projectId: 'project', kind: 'Standard' as const, versionNumber: version,
       label: `S-V0${version}`, state: 'Released' as const, items: [{ sequence: 1, drawingNumber: 'PART', name: '已发布零件', quantity: version, unit: '001', revision: 'A', complete: true }],
@@ -699,7 +721,7 @@ describe('BomManager', () => {
     wrapper.unmount()
   })
 
-  it('标准件与电气件BOM不显示图纸列，也不出现2D/3D链接；首次发布前的非标件显示图纸审批列', async () => {
+  it('标准件合并显示图纸附件；电气件保持原列；非标件显示图纸审批列', async () => {
     const row = (id: string, kind: string, drawingNumber: string, name: string) => ({
       id, kind, sequence: 1, drawingNumber, name, quantity: 1, unit: '个', revision: 'W1', complete: true, source: 'Auto',
       sourceDocumentId: 'document-1', sourceInstancePath: 'root/1',
@@ -717,7 +739,9 @@ describe('BomManager', () => {
     const headers = () => wrapper.findAll('.pdm-bom-table thead th').map(th => th.text())
     expect(headers()).not.toContain('图纸')
     expect(wrapper.find('.pdm-bom-drawing-audit-cell').exists()).toBe(false)
-    expect(wrapper.find('.pdm-bom-drawing-link').exists()).toBe(false)
+    expect(headers()).toContain('图纸附件')
+    for (const label of ['2D图纸', '3D模型', '附件']) expect(headers()).not.toContain(label)
+    expect(wrapper.findAll('.pdm-bom-standard-files-cell')).toHaveLength(1)
 
     await wrapper.setProps({ requestedBomKind: 'Electrical' })
     await flushPromises()
@@ -1466,21 +1490,22 @@ describe('BomManager', () => {
     expect(wrapper.find('.pdm-bom-release-strip').exists()).toBe(false)
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
     const releaseStrip = wrapper.get('.pdm-bom-release-strip')
+    const actions = wrapper.get('.pdm-bom-summary-actions .pdm-bom-release-strip-actions')
     expect(releaseStrip.text()).toContain('在途发布包1 个')
-    expect(releaseStrip.text()).toContain('处理审批 1')
-    expect(releaseStrip.text()).toContain('发起发布')
+    expect(actions.text()).toContain('处理审批 1')
+    expect(actions.text()).toContain('发起发布')
     expect(releaseStrip.text()).toContain('当前工作版S-V01')
     expect(releaseStrip.text()).not.toContain('S-B01')
     expect(wrapper.get('.pdm-bom-save-action').text()).toBe('保存BOM')
-    expect(releaseStrip.findAll('.pdm-bom-release-strip-actions')).toHaveLength(1)
+    expect(releaseStrip.findAll('.pdm-bom-release-strip-actions')).toHaveLength(0)
     expect(releaseStrip.find('.pdm-bom-release-maintenance-actions').exists()).toBe(false)
-    expect(releaseStrip.findAll('.pdm-bom-release-strip-actions button').map(button => button.text())).toEqual(['刷新BOM', '导入', '导出', '源数据', '库存推荐', '按U9校正', '处理审批 1', '保存BOM', '发起发布'])
+    expect(actions.findAll('button').map(button => button.text())).toEqual(['刷新BOM', '导入', '导出', '源数据', '库存推荐', '按U9校正', '处理审批 1', '保存BOM', '发起发布'])
     expect(releaseStrip.findAll('button').some(button => button.text() === '新增物料')).toBe(false)
 
-    await releaseStrip.findAll('button').find(button => button.text() === '处理审批 1')!.trigger('click')
-    expect(wrapper.get('.pdm-bom-release-history header .pdm-release-new-button').text()).toBe('新建发布包')
+    await actions.findAll('button').find(button => button.text() === '处理审批 1')!.trigger('click')
+    expect(wrapper.find('.pdm-release-new-button').exists()).toBe(false)
     expect(wrapper.find('.pdm-release-summary').exists()).toBe(true)
-    await wrapper.get('.pdm-release-new-button').trigger('click')
+    await actions.findAll('button').find(button => button.text() === '发起发布')!.trigger('click')
     expect(wrapper.find('.pdm-release-create-form').exists()).toBe(true)
     expect(wrapper.find('.pdm-release-summary').exists()).toBe(false)
     await wrapper.get('.pdm-bom-release-history > button').trigger('click')
@@ -1565,8 +1590,25 @@ describe('BomManager', () => {
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
 
     expect(wrapper.findAll('thead th').map(header => header.text())).toEqual([
-      '', '', '序号', '物料分类', '易损件', '关键', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '发布版本', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '信息', '资料状态',
+      '', '', '序号', '物料分类', '易损件', '关键', '单位', '物料编码', '物料名称', '上级物料编码', '型号', '发布版本', '备注信息', '品牌', '材质', '表面处理', '重量', '数量', '发布  总/源', '图纸附件', '信息', '资料状态',
     ])
+  })
+
+  it.each([
+    ['standard2d', 'standard3d', 'attachments'],
+    ['standard2d'],
+  ])('merges saved legacy file columns into one entry: %j', async (...legacyKeys) => {
+    window.localStorage.setItem('upton-pdm:bom-columns:anonymous:Standard', JSON.stringify({ visible: ['drawingNumber', ...legacyKeys], standardFiles: true }))
+    const wrapper = mount(BomManager, {
+      props: { standard: [], nonStandard: [], electrical: [], declarations: [], pending: false, requestedBomKind: 'Standard' },
+      global: { stubs: { BomHierarchyOverview: true } },
+    })
+    await flushPromises()
+    const headers = wrapper.findAll('.pdm-bom-table thead th').map(header => header.text())
+    expect(headers.filter(label => label === '图纸附件')).toHaveLength(1)
+    expect(headers).not.toContain('2D图纸')
+    expect(headers).not.toContain('3D模型')
+    wrapper.unmount()
   })
 
   it('defaults heat treatment by BOM type and saves personal column visibility', async () => {
@@ -2151,15 +2193,17 @@ describe('BomManager', () => {
       id: 'drawing-version-1', documentId: 'drawing-1', revision: { display: 'W2' }, status: 'Released', fileLength: 12, sha256: 'drawing', createdBy: 'developer', createdAt: '2026-09-16T00:00:00Z', changeNote: '',
       preview: { format: 'Pdf', storageRelativePath: 'previews/N-001.pdf', fileLength: 10, sha256: 'pdf', sourceSha256: 'drawing' },
     }])
+    const delivery = { documentId: 'drawing-1', versionId: 'drawing-version-1', releasePackageId: 'release-1', releasePackageNumber: 'RP-1', drawingNumber: 'N-001', revision: 'A', isCurrent: true, pdfReady: true }
+    materialApi.listProductionDrawings.mockResolvedValueOnce([delivery])
     const createUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:preview-test')
     await wrapper.get('button[aria-label="预览2D图纸 N-001"]').trigger('click')
     await flushPromises()
-    expect(materialApi.listDocumentVersions).toHaveBeenCalledWith('drawing-1', 'token-1')
-    expect(materialApi.readDocumentPreviewFile).toHaveBeenCalledWith('drawing-1', 'drawing-version-1', 'token-1')
+    expect(materialApi.listProductionDrawings).toHaveBeenCalledWith('token-1', true, 'project-1')
+    expect(materialApi.readProductionDrawingPreview).toHaveBeenCalledWith(delivery, 'token-1')
     expect(materialApi.downloadDocumentPreviewFile).not.toHaveBeenCalled()
     expect(createUrl).toHaveBeenCalled()
-    expect(wrapper.get('a[download="N-001.pdf"]').attributes('href')).toBe('blob:preview-test')
-    expect(wrapper.get('a[download="N-001.pdf"]').text()).toBe('下载 PDF')
+    expect(wrapper.get('a[download="RP-1-N-001.pdf"]').attributes('href')).toBe('blob:preview-test')
+    expect(wrapper.get('a[download="RP-1-N-001.pdf"]').text()).toBe('下载 PDF')
     createUrl.mockRestore()
     expect(wrapper.findAll('.pdm-bom-quantity-audit').map(item => item.text())).toEqual(['2', '1', '1'])
     expect(wrapper.findAll('.pdm-bom-quantity-reference').map(item => item.text())).toEqual(['02/2', '01/1', '01/—'])
@@ -2172,14 +2216,36 @@ describe('BomManager', () => {
       const releases = [1, 2, 3].map(number => ({ id: `release-${number}`, number: `RP-${number}`, state: '已发布', scope: number === 1 ? 'NonStandardWithDrawing' : 'NonStandardSupplement', nonStandardBomVersionId: `bom-${number}`, nonStandardBomSnapshot: [row], publishedAt: `2026-10-${number + 10}`, versionBindings: number === 3 ? [] : ['model', 'drawing'].map(id => ({ documentId: id, versionId: `${id}-work-${number}`, revision: number === 1 ? 'W1' : 'A-W1', sha256: id, publish: true, requiresPromotion: true, targetRevision: number === 1 ? 'A' : 'B' })) })) as unknown as ReleasePackageSummary[]
       const history = (id: string): DocumentVersionSummary[] => [2, 1].map(number => ({ id: `${id}-formal-${number}`, documentId: id, revision: { display: number === 1 ? 'A' : 'B' }, status: 'Released', sourceVersionId: `${id}-work-${number}`, releasePackageId: `release-${number}`, fileLength: 10, sha256: id, createdBy: 'engineer', createdAt: `2026-10-${number + 10}`, changeNote: '发布', preview: { format: id === 'model' ? 'Step' : 'Pdf', storageRelativePath: id, fileLength: 10, sha256: id, sourceSha256: id } }))
       materialApi.listDocumentVersions.mockImplementation(async id => history(id))
+      const drawings = history('drawing').map(version => ({ projectId: 'project', projectCode: 'P1', projectName: '测试项目', documentId: 'drawing', versionId: version.id,
+        releasePackageId: version.releasePackageId, releasePackageNumber: version.releasePackageId === 'release-1' ? 'RP-1' : 'RP-2', drawingNumber: 'N-001', model: 'N-001', name: '工程图', revision: version.revision.display,
+        isCurrent: version.id === 'drawing-formal-2', pdfReady: true, publishedAt: version.createdAt, priority: 'Normal', legacyUnverified: false,
+        bomQuantities: [{ materialKey: 'N-001|001', sourceBomItemIds: ['item'], singleSetQuantity: 3, wholeSetMultiplier: 1, totalQuantity: 3, priorReleasedQuantity: 1, netIssueQuantity: 2 }] }))
+      materialApi.listProductionDrawings.mockResolvedValue(drawings)
       const wrapper = mount(BomManager, { props: { standard: [], nonStandard: [row], electrical: [], declarations: [], pending: false, editable: false, token: 'token', projectId: 'project', versions, releasePackages: releases, documents: [
         { id: 'model', projectId: 'project', drawingNumber: 'N-001', name: '非标件', fileName: 'N-001.SLDPRT', kind: 'Part', state: 'Working', revision: 'B-W1' },
         { id: 'drawing', projectId: 'project', drawingNumber: 'N-001', name: '工程图', fileName: 'N-001.SLDDRW', kind: 'Drawing', state: 'Working', revision: 'B-W1' },
       ], documentRelations: [{ modelDocumentId: 'model', drawingDocumentId: 'drawing' }] }, global: { plugins: [ElementPlus], stubs: {
         ElDialog: { props: ['modelValue', 'title'], template: '<section v-if="modelValue" role="dialog" :aria-label="title"><h2>{{ title }}</h2><slot /></section>' }, PdfDrawingViewer: true,
       } } })
-      return { wrapper, history, releases }
+      return { wrapper, history, releases, drawings }
     }
+
+    it('同一A版的当前BOM显示累计3，预览最新发布2件；历史BOM仍取首批1件', async () => {
+      const { wrapper, drawings } = historicalFixture()
+      for (const item of drawings) { item.versionId = 'same-formal-A'; item.revision = 'A'; item.bomQuantities[0].netIssueQuantity = item.releasePackageId === 'release-1' ? 1 : 2 }
+      const createUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:publication')
+      try {
+        await wrapper.setProps({ nonStandard: wrapper.props('nonStandard').map(item => ({ ...item, quantity: 3 })), documents: wrapper.props('documents')!.map(item => ({ ...item, state: 'Released' as const })) })
+        await wrapper.findAll('button[role="tab"]')[2].trigger('click')
+        await wrapper.get('button[aria-label="预览2D图纸 N-001"]').trigger('click'); await flushPromises()
+        expect(materialApi.readProductionDrawingPreview).toHaveBeenLastCalledWith(expect.objectContaining({ versionId: 'same-formal-A', releasePackageId: 'release-2' }), 'token')
+        expect(wrapper.text()).toContain('本次下发2 · 当前BOM数量3')
+        await wrapper.get('select[aria-label="选择BOM版本"]').setValue('bom-1')
+        await wrapper.get('button[aria-label="预览2D图纸 N-001"]').trigger('click'); await flushPromises()
+        expect(materialApi.readProductionDrawingPreview).toHaveBeenLastCalledWith(expect.objectContaining({ versionId: 'same-formal-A', releasePackageId: 'release-1' }), 'token')
+        expect(wrapper.text()).toContain('本次下发1 · 所选BOM数量1')
+      } finally { createUrl.mockRestore(); wrapper.unmount() }
+    })
 
     it.each([[1, 1, 'A'], [2, 2, 'B'], [3, 2, 'B']])('B0%s取用对应PDF与STEP，增补未变化项沿用此前绑定', async (bom, formal, revision) => {
       const { wrapper } = historicalFixture()
@@ -2189,9 +2255,9 @@ describe('BomManager', () => {
         await wrapper.get('select[aria-label="选择BOM版本"]').setValue(`bom-${bom}`)
         await wrapper.get('button[aria-label="预览2D图纸 N-001"]').trigger('click')
         await flushPromises()
-        expect(materialApi.readDocumentPreviewFile).toHaveBeenLastCalledWith('drawing', `drawing-formal-${formal}`, 'token')
+        expect(materialApi.readProductionDrawingPreview).toHaveBeenLastCalledWith(expect.objectContaining({ documentId: 'drawing', versionId: `drawing-formal-${formal}`, releasePackageId: `release-${formal}` }), 'token')
         expect(wrapper.text()).toContain(`2D图纸预览 · N-001 · ${revision}`)
-        expect(wrapper.get(`a[download="N-001-${revision}.pdf"]`).attributes('href')).toBe('blob:history')
+        expect(wrapper.get(`a[download="RP-${formal}-N-001.pdf"]`).attributes('href')).toBe('blob:history')
         await wrapper.get('button[aria-label="下载3D图纸 N-001"]').trigger('click')
         await flushPromises()
         expect(materialApi.downloadDocumentPreviewFile).toHaveBeenLastCalledWith('model', `model-formal-${formal}`, `N-001-${revision}.step`, 'token')
@@ -2199,17 +2265,17 @@ describe('BomManager', () => {
     })
 
     it('旧版预览缺失时明确提示该版，不取新版或更旧版替代', async () => {
-      const { wrapper, history } = historicalFixture()
+      const { wrapper, drawings } = historicalFixture()
       const warning = vi.spyOn(ElMessage, 'warning')
-      materialApi.listDocumentVersions.mockResolvedValue(history('drawing').map(version => version.id === 'drawing-formal-1' ? { ...version, preview: null } : version))
-      materialApi.readDocumentPreviewFile.mockClear()
+      drawings.find(item => item.versionId === 'drawing-formal-1')!.pdfReady = false
+      materialApi.readProductionDrawingPreview.mockClear()
       try {
         await wrapper.findAll('button[role="tab"]')[2].trigger('click')
         await wrapper.get('select[aria-label="选择BOM版本"]').setValue('bom-1')
         await wrapper.get('button[aria-label="预览2D图纸 N-001"]').trigger('click')
         await flushPromises()
-        expect(materialApi.readDocumentPreviewFile).not.toHaveBeenCalled()
-        expect(warning).toHaveBeenCalledWith(expect.stringContaining('N-B01对应的2D图纸A版预览尚未生成'))
+        expect(materialApi.readProductionDrawingPreview).not.toHaveBeenCalled()
+        expect(warning).toHaveBeenCalledWith(expect.stringContaining('对应发布包的PDF尚未就绪'))
       } finally { warning.mockRestore(); wrapper.unmount() }
     })
 
@@ -2689,6 +2755,7 @@ describe('BomManager', () => {
       ['pdm-bom-wear-part-cell'],
       ['pdm-bom-impact-cell'],
       ['pdm-bom-model-cell'],
+      ['pdm-bom-standard-files-cell'],
       ['pdm-bom-reconciliation-cell'],
       ['pdm-bom-data-status-cell', 'is-complete'],
     ])
@@ -4148,7 +4215,7 @@ describe('BomManager', () => {
     expect(wrapper.get('.pdm-bom-quantity-reference').attributes('title')).toBe('已发布总数量：8；当前BOM总数量：8；源总数量：12')
     await wrapper.findAll('.pdm-bom-version-picker button').at(-1)!.trigger('click')
     expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('修改 1')
-    expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('S-V01')
+    expect(wrapper.get('tr.is-release-modified').attributes('title')).toContain('数量 12 → 8')
     await wrapper.get('select[aria-label="选择BOM版本"]').setValue('v1')
     expect(wrapper.get('.pdm-bom-quantity-reference').attributes('title')).toBe('已发布总数量：12；当前BOM总数量：12；源总数量：12')
   })
@@ -4190,6 +4257,52 @@ describe('BomManager', () => {
     expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('修改 1')
   })
 
+  it.each(['Standard', 'NonStandard', 'Electrical'] as const)('已发布%s套件子料与同料号普通行保持独立对比，新增和修改为空', async kind => {
+    const kit: BomItem = { id: 'kit-child', kind, sequence: 1, drawingNumber: '01021000071', name: 'CQ-90-ISO63', quantity: 2, unit: '001', revision: 'W1', complete: true,
+      source: 'EngineeringKit', engineeringKitReferenceId: 'kit-ref', engineeringKitCode: 'UKIT-000003' }
+    const manual: BomItem = { ...kit, id: 'manual-child', sequence: 2, quantity: 1, source: 'Manual', engineeringKitReferenceId: undefined, engineeringKitCode: undefined }
+    const otherKit: BomItem = { ...kit, id: 'other-kit-child', sequence: 3, quantity: 4, engineeringKitReferenceId: 'other-kit-ref', engineeringKitCode: 'UKIT-000004' }
+    const items = [kit, manual, otherKit]
+    // 工作区返回服务端汇总行，发布版本保留原始实例；行顺序不影响来源匹配。
+    const current = [...items].reverse().map(item => ({ ...item, summaryItemIds: [item.id!], summaryFingerprint: item.id }))
+    const wrapper = mount(BomManager, { props: {
+      standard: kind === 'Standard' ? current : [], nonStandard: kind === 'NonStandard' ? current : [], electrical: kind === 'Electrical' ? current : [],
+      declarations: [], pending: false, editable: true,
+      versions: [{ id: 'released', projectId: 'project', kind, versionNumber: 2, label: 'V02', state: 'Released', items,
+        createdBy: 'admin', createdAt: '2026-10-28', updatedBy: 'admin', updatedAt: '2026-10-28', releasedAt: '2026-10-28' }],
+    } })
+    await wrapper.findAll('button[role="tab"]')[kind === 'Standard' ? 1 : kind === 'NonStandard' ? 2 : 3]!.trigger('click')
+    expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('已发布 3')
+    expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('新增 0')
+    expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('修改 0')
+    expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('已移除 0')
+    expect(wrapper.findAll('tr.is-release-unchanged')).toHaveLength(3)
+    for (const filter of ['新增 0', '修改 0']) {
+      await wrapper.findAll('.pdm-bom-comparison-filters button').find(button => button.text() === filter)!.trigger('click')
+      expect(wrapper.findAll('.pdm-bom-table tbody tr').filter(row => row.find('.pdm-bom-quantity-audit').exists())).toHaveLength(0)
+    }
+    wrapper.unmount()
+  })
+
+  it('同料号套件来源变化仍识别真实新增、移除及数量修改', async () => {
+    const kit: BomItem = { id: 'kit-child', kind: 'Standard', sequence: 1, drawingNumber: '01021000071', name: 'CQ-90-ISO63', quantity: 2, unit: '001', revision: 'W1', complete: true,
+      source: 'EngineeringKit', engineeringKitReferenceId: 'kit-ref' }
+    const manual: BomItem = { ...kit, id: 'manual-child', sequence: 2, quantity: 1, source: 'Manual', engineeringKitReferenceId: undefined }
+    const added: BomItem = { ...kit, id: 'added-kit-child', sequence: 3, engineeringKitReferenceId: 'new-kit-ref' }
+    const wrapper = mount(BomManager, { props: {
+      standard: [added, { ...kit, quantity: 3 }].map(item => ({ ...item, summaryItemIds: [item.id!] })), nonStandard: [], electrical: [], declarations: [], pending: false, editable: true,
+      versions: [{ id: 'released', projectId: 'project', kind: 'Standard', versionNumber: 1, label: 'S-V01', state: 'Released', items: [kit, manual],
+        createdBy: 'admin', createdAt: '2026-10-28', updatedBy: 'admin', updatedAt: '2026-10-28', releasedAt: '2026-10-28' }],
+    } })
+    await wrapper.findAll('button[role="tab"]')[1]!.trigger('click')
+    const summary = wrapper.get('.pdm-bom-comparison-summary').text()
+    expect(summary).toContain('新增 1')
+    expect(summary).toContain('修改 1')
+    expect(summary).toContain('已移除 1')
+    expect(wrapper.get('tr.is-release-modified').attributes('title')).toContain('数量 2 → 3')
+    wrapper.unmount()
+  })
+
   it('defaults the workspace to the latest released comparison and identifies quantity changes', async () => {
     const releasedRows: BomItem[] = [
       { id: 'part-a', sequence: 1, drawingNumber: 'STD-A', name: '数量变化件', quantity: 4, unit: '个', revision: 'W1', complete: true, source: 'Manual' },
@@ -4214,7 +4327,7 @@ describe('BomManager', () => {
 
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
     expect((wrapper.get('select[aria-label="选择BOM版本"]').element as HTMLSelectElement).value).toBe('current')
-    expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('当前工作区 对比已发布基线 S-V01')
+    expect(wrapper.get('.pdm-bom-summary-actions').text()).not.toContain('对比已发布基线')
     expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('已发布 1')
     expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('新增 1')
     expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('修改 1')
@@ -4359,7 +4472,7 @@ describe('BomManager', () => {
     })
 
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
-    expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('当前工作区 对比已发布基线 RP-LONG-001')
+    expect(wrapper.get('.pdm-bom-comparison-summary').find('strong').exists()).toBe(false)
     expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('已发布 1')
     expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('新增 1')
     expect(wrapper.findAll('tr.is-release-unchanged')).toHaveLength(1)
@@ -4389,7 +4502,7 @@ describe('BomManager', () => {
 
     await wrapper.findAll('button[role="tab"]')[1].trigger('click')
 
-    expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('当前工作区 对比已发布基线 累计长交期发布（2次）')
+    expect(wrapper.get('.pdm-bom-comparison-summary').find('strong').exists()).toBe(false)
     expect(wrapper.get('.pdm-bom-comparison-summary').text()).toContain('已发布 1')
     expect(wrapper.findAll('tr.is-release-unchanged')).toHaveLength(1)
     expect(wrapper.find('tr.is-release-modified').exists()).toBe(false)

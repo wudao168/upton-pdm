@@ -155,6 +155,7 @@ internal sealed class AgentJournal
         lock (gate)
         {
             var entry = new AgentLog { Level = level, Message = ClientLogRedaction.Clean(message), BatchId = batchId };
+            ClientDiagnostics.Record(level == "失败" || level == "提醒" ? "error" : "runtime", "转图代理：" + level, entry.Message, batchId?.ToString("N"));
             logs.Add(entry);
             if (logs.Count > 1000) logs.RemoveAt(0);
             if (batchId.HasValue)
@@ -183,8 +184,31 @@ internal sealed class AgentJournal
 
     public List<AgentLog> RecentLogs() { lock (gate) return logs.ToList(); }
 
+    public void ImportDiagnosticHistory()
+    {
+        lock (gate)
+        {
+            var marker = Path.Combine(directory, "diagnostics-imported.txt");
+            long imported = 0;
+            try { long.TryParse(File.Exists(marker) ? File.ReadAllText(marker) : "0", out imported); }
+            catch (Exception error) when (error is IOException || error is UnauthorizedAccessException) { Diagnostic(error.ToString()); }
+            foreach (var batch in batches.Where(item => item.Number > imported && item.ReceivedUtc >= DateTime.UtcNow.AddDays(-7)).OrderBy(item => item.Number))
+            {
+                ClientDiagnostics.Record(batch.Status == "成功" ? "runtime" : "error", "转图历史补传",
+                    "原始时间=" + batch.ReceivedUtc.ToString("O") + "；批次=" + batch.Number + "；状态=" + batch.Status
+                    + "；项目=" + batch.Context.ProjectCode + "；请求=" + batch.Context.RequestId + "；图档="
+                    + string.Join("；", batch.Files.Select(file => file.FileName + "：" + file.Status + " " + file.Message)), batch.Id.ToString("N"));
+                foreach (var entry in batch.Logs)
+                    ClientDiagnostics.Record(entry.Level == "失败" ? "error" : "runtime", "转图历史：" + entry.Level,
+                        "原始时间=" + entry.TimeUtc.ToString("O") + "；" + entry.Message, batch.Id.ToString("N"));
+            }
+            Write(marker, TotalRequests.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+    }
+
     public void Diagnostic(string message)
     {
+        ClientDiagnostics.Record(message?.Contains("Exception") == true || message?.Contains("失败") == true ? "error" : "runtime", "转图诊断", message, Program.CurrentBatchId?.ToString("N"));
         lock (gate)
         {
             try { File.AppendAllText(Path.Combine(directory, "diagnostics-" + DateTime.UtcNow.ToString("yyyy-MM-dd") + ".log"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + ClientLogRedaction.Clean(message) + Environment.NewLine, Encoding.UTF8); }

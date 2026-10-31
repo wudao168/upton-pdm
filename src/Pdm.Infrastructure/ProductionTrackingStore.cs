@@ -39,6 +39,12 @@ public sealed class InMemoryProductionTrackingStore(DateTimeOffset? activatedAt 
         lock (gate) return Task.FromResult<IReadOnlyList<ProductionTrackingRecord>>(
             records.Values.Where(item => item.State.CompanyId == companyId).Select(Copy).ToArray());
     }
+    public Task<IReadOnlyList<ProductionTrackingRecord>> FindNameplateSerialAsync(string serialNumber, Guid? companyId, CancellationToken ct)
+    {
+        lock (gate) return Task.FromResult<IReadOnlyList<ProductionTrackingRecord>>(records.Values
+            .Where(record => (!companyId.HasValue || record.State.CompanyId == companyId)
+                && record.State.Lines.Any(line => line.NameplateContent?.SerialNumber == serialNumber)).Select(Copy).ToArray());
+    }
     public Task<ProductionTrackingRecord?> FindAsync(Guid releasePackageId, CancellationToken ct)
     {
         lock (gate) return Task.FromResult(records.TryGetValue(releasePackageId, out var found) ? Copy(found) : null);
@@ -177,6 +183,17 @@ public sealed class MySqlProductionTrackingStore(IOptions<PdmDatabaseOptions> op
         var rows = await db.QueryAsync<TrackingRow>(new CommandDefinition(
             "SELECT payload_json PayloadJson,row_version RowVersion FROM production_tracking_state WHERE company_id=@companyId",
             new { companyId }, cancellationToken: ct));
+        return rows.Select(item => item.ToRecord()).ToArray();
+    }
+    public async Task<IReadOnlyList<ProductionTrackingRecord>> FindNameplateSerialAsync(string serialNumber, Guid? companyId, CancellationToken ct)
+    {
+        await using var db = Connection();
+        var rows = await db.QueryAsync<TrackingRow>(new CommandDefinition(
+            """
+            SELECT payload_json PayloadJson,row_version RowVersion FROM production_tracking_state
+            WHERE (@companyId IS NULL OR company_id=@companyId)
+                AND JSON_CONTAINS(JSON_EXTRACT(payload_json,'$.lines[*].nameplateContent.serialNumber'),JSON_QUOTE(@serialNumber))
+            """, new { serialNumber, companyId }, cancellationToken: ct));
         return rows.Select(item => item.ToRecord()).ToArray();
     }
     public async Task<ProductionTrackingRecord?> FindAsync(Guid releasePackageId, CancellationToken ct)

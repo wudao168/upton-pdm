@@ -32,7 +32,8 @@ internal static class SetupPreferences
         var saved = new SetupOptions {
             Name = options.Name, ServerUrl = options.ServerUrl, Username = options.Username, Password = Encrypt(options.Password),
             Token = Encrypt(options.Token), Port = options.Port, TimeoutMinutes = options.TimeoutMinutes,
-            InstallDirectory = options.InstallDirectory, WorkerPath = options.WorkerPath, WorkRoot = options.WorkRoot
+            InstallDirectory = options.InstallDirectory, WorkerPath = options.WorkerPath, WorkRoot = options.WorkRoot,
+            DedicatedConversionHost = options.DedicatedConversionHost
         };
         Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
         var temporary = FilePath + ".tmp";

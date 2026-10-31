@@ -5,4 +5,18 @@
   :root body [data-pdm-control-layout="stack"] > [data-pdm-control-item] { margin: 0 !important; }
   :root body [data-pdm-control-layout="stack"] > [data-pdm-control-item] + [data-pdm-control-item] { margin-top: var(--pdm-control-gap) !important; }
   :root body [data-pdm-control-layout="inline"] > [data-pdm-control-item] { margin: calc(var(--pdm-control-gap) / 2) !important; }
+  :root body :is(.pdm-plan-toolbar__actions, .pdm-panel-header-actions, .pdm-page-actions, .pdm-manager-actions, .pdm-release-preview-actions, .production-suppliers__actions) {
+    min-width: 0 !important;
+    max-width: 100% !important;
+    flex: 0 1 auto !important;
+    justify-content: flex-end !important;
+    margin-inline-start: auto !important;
+  }
+  :root body [data-pdm-control-layout] > :is(.pdm-plan-toolbar__actions, .pdm-panel-header-actions, .pdm-page-actions, .pdm-manager-actions, .pdm-release-preview-actions, .production-suppliers__actions) {
+    margin-inline-start: auto !important;
+  }
+  :root body :is(.pdm-plan-toolbar, .pdm-release-preview-list > header, .production-suppliers__filters),
+  :root body header:has(> :is(.pdm-panel-header-actions, .pdm-page-actions, .pdm-manager-actions)) {
+    padding-inline: var(--pdm-control-gap) !important;
+  }
 }

@@ -92,12 +92,27 @@ public sealed partial class MySqlPdmRepository
               AND d.deleted_at IS NULL AND d.purged_at IS NULL AND d.lifecycle_state<>'Obsolete'
               AND v.version_status='Released' AND p.state='Published'
               AND p.release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')
+            UNION
+            SELECT d.project_id,d.id AS DocumentId,v.id AS VersionId,p.id AS release_package_id,
+                   p.package_number AS ReleasePackageNumber,d.drawing_number,d.name,v.revision_label,
+                   v.property_snapshot_json,COALESCE(p.published_at,v.created_at) AS PublishedAt,
+                   v.created_at,v.created_by AS PublishedBy,p.drawing_priority AS Priority,p.drawing_required_on AS RequiredOn
+            FROM release_package p
+            JOIN JSON_TABLE(COALESCE(p.version_bindings_json,JSON_ARRAY()), '$[*]' COLUMNS(
+                document_id CHAR(36) PATH '$.documentId', version_id CHAR(36) PATH '$.versionId',
+                sha256 VARCHAR(64) PATH '$.sha256', publish BOOLEAN PATH '$.publish')) binding ON binding.publish=TRUE
+            JOIN document d ON d.id=binding.document_id AND d.project_id=p.project_id
+            JOIN document_version v ON v.id=binding.version_id AND v.document_id=d.id AND v.sha256=binding.sha256
+            WHERE d.project_id IN @ProjectIds AND d.kind='Drawing'
+              AND d.deleted_at IS NULL AND d.purged_at IS NULL AND d.lifecycle_state<>'Obsolete'
+              AND v.version_status='Released' AND p.state='Published'
+              AND p.release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')
             """, new { ProjectIds = projects.Keys.ToArray() }, cancellationToken: cancellationToken));
         var results = new List<ProductionDrawingItem>();
         foreach (var group in rows.GroupBy(row => row.DocumentId))
         {
             var ordered = group.OrderByDescending(row => RevisionLabel.Parse(row.RevisionLabel).BaseRevision)
-                .ThenByDescending(row => row.CreatedAt).ThenByDescending(row => row.VersionId).ToArray();
+                .ThenByDescending(row => row.CreatedAt).ThenByDescending(row => row.VersionId).ThenByDescending(row => row.PublishedAt).ToArray();
             var current = ordered[0];
             foreach (var row in includeHistory ? ordered : [current])
             {
@@ -108,7 +123,8 @@ public sealed partial class MySqlPdmRepository
                     row.ReleasePackageId, row.ReleasePackageNumber, row.DrawingNumber,
                     string.IsNullOrWhiteSpace(model) ? row.DrawingNumber : model.Trim(), row.Name, row.RevisionLabel,
                     AsUtc(row.PublishedAt), row.Priority, row.RequiredOn.HasValue ? DateOnly.FromDateTime(row.RequiredOn.Value) : null,
-                    row.VersionId == current.VersionId, false, false, row.VersionId == current.VersionId ? null : AsUtc(current.CreatedAt))
+                    row.VersionId == current.VersionId && row.ReleasePackageId == current.ReleasePackageId, false, false,
+                    row.VersionId == current.VersionId && row.ReleasePackageId == current.ReleasePackageId ? null : AsUtc(current.PublishedAt))
                 { PublishedBy = row.PublishedBy, Division = project.Division, ProjectManager = project.ProjectManager });
             }
         }
@@ -282,7 +298,10 @@ public sealed partial class MySqlPdmRepository
             new { DocumentId = documentId }, transaction, cancellationToken: cancellationToken));
         var version = CreateVersion(documentId, nextRevision, actor, commit with { ChangeKind = changeKind }, timeProvider.GetUtcNow(), DocumentVersionStatus.Work)
             with { DrawingVersionNumber = drawingNumber };
-        await InsertVersionAsync(connection, transaction, version, cancellationToken);
+        // A batch may contain context links to versions determined later in this
+        // transaction. Insert its immutable versions only after all links are bound.
+        if (!archiveBatchId.HasValue)
+            await InsertVersionAsync(connection, transaction, version, cancellationToken);
         await InsertReferenceSnapshotAsync(connection, transaction, commit.ReferenceSnapshot, cancellationToken);
         if (commit.IsProjectRoot)
         {
@@ -344,6 +363,7 @@ public sealed partial class MySqlPdmRepository
     public async Task<IReadOnlyList<ReleasePreviewSource>> ListReleasePreviewSourcesAsync(Guid releasePackageId, CancellationToken cancellationToken)
     {
         var bound = await FindReleasePackageAsync(releasePackageId, cancellationToken);
+        if (bound is not null && !ReleasePreviewPolicy.RequiresConversion(bound)) return [];
         if (bound?.VersionBindings is not null) return await ReleaseBoundSourceReader.ReadAsync(this, bound, true, cancellationToken);
         await using var connection = await OpenAsync(cancellationToken);
         var package = await connection.QuerySingleOrDefaultAsync<PackagePublishRow>(new CommandDefinition(
@@ -658,7 +678,9 @@ public sealed partial class MySqlPdmRepository
             """
             SELECT id FROM release_package
             WHERE state='Published'
-              AND preview_state IN ('Pending','Failed')
+              AND locks_documents=1
+              AND release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')
+              AND preview_state IN ('Pending','WaitingForServer','Failed')
               AND preview_attempts < @MaxAttempts
             ORDER BY preview_updated_at IS NULL DESC, preview_updated_at, created_at
             LIMIT @Limit
@@ -711,7 +733,7 @@ public sealed partial class MySqlPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         return (await connection.QueryAsync<Guid>(new CommandDefinition(
-            "SELECT id FROM release_package WHERE state='Publishing' AND preview_state<>'Failed' ORDER BY created_at LIMIT @Limit",
+            "SELECT id FROM release_package WHERE state='Publishing' AND (preview_state<>'Failed' OR locks_documents=0 OR release_scope NOT IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')) ORDER BY created_at LIMIT @Limit",
             new { Limit = limit }, cancellationToken: cancellationToken))).ToArray();
     }
 

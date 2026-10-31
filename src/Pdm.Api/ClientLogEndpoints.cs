@@ -1,4 +1,6 @@
 using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
@@ -44,6 +46,30 @@ public static class ClientLogEndpoints
                 return Results.Json(new { message = "日志服务暂时不可用，请稍后重试或联系管理员检查存储空间。" }, statusCode: 503);
             }
         });
+        group.MapPost("/preview-agent/batches", async (HttpContext context, ClientLogStore store, IPdmRepository repository, CancellationToken ct) =>
+        {
+            var credential = context.Request.Headers["X-Pdm-Agent-Token"].ToString();
+            if (string.IsNullOrWhiteSpace(credential) || credential.Length > 512) return Results.Unauthorized();
+            var settings = (await repository.GetSystemSettingsAsync(ct)).PreviewConversion;
+            var servers = settings.Servers.Count > 0 ? settings.Servers
+                : settings.Mode == PreviewConversionMode.Remote ? [new PreviewAgentServer(settings.AgentUrl, settings.AgentUrl, settings.AgentToken, settings.TimeoutMinutes)] : [];
+            var digest = SHA256.HashData(Encoding.UTF8.GetBytes(credential));
+            var matched = servers.Where(server => !string.IsNullOrWhiteSpace(server.AgentToken)
+                && CryptographicOperations.FixedTimeEquals(digest, SHA256.HashData(Encoding.UTF8.GetBytes(server.AgentToken)))).ToArray();
+            if (matched.Length != 1) return Results.Unauthorized();
+            var agent = matched[0];
+            // Older registrations predate company binding; resolve the system's default organization on the server.
+            var companyId = agent.CompanyId ?? (await repository.GetProjectNumberingOptionsAsync(ct)).Organizations.FirstOrDefault(item => item.IsActive)?.Id;
+            if (companyId is null || companyId == Guid.Empty) throw new PdmRuleException("转图代理尚未关联公司，请管理员重新登记该代理。");
+            if (context.Request.ContentLength > 5 * 1024 * 1024) return Results.Json(new { message = "日志压缩包不能超过5MB。" }, statusCode: 413);
+            using var compressed = await ReadBoundedAsync(context.Request.Body, 5 * 1024 * 1024, ct);
+            using var gzip = new GZipStream(compressed, CompressionMode.Decompress);
+            using var expanded = await ReadBoundedAsync(gzip, 10 * 1024 * 1024, ct);
+            var batch = await JsonSerializer.DeserializeAsync<ClientLogBatch>(expanded, new JsonSerializerOptions(JsonSerializerDefaults.Web), ct);
+            if (batch is null || batch.Component != "preview-agent") throw new PdmRuleException("转图代理日志格式不正确，请升级代理后重试。");
+            await store.SaveAsync(batch, companyId.Value, "转图代理：" + agent.Name, ct);
+            return Results.Ok(new { batchId = batch.BatchId, accepted = true });
+        }).AllowAnonymous().WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(5 * 1024 * 1024));
         group.MapPost("/batches", async (HttpContext context, ClientLogStore store, CancellationToken ct) =>
         {
             var tenant = TenantContext.Current;

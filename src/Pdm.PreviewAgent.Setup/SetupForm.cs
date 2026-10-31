@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -17,6 +17,7 @@ internal sealed class SetupForm : Form
     private readonly TextBox timeoutBox = new TextBox();
     private readonly TextBox logBox = new TextBox();
     private readonly TextBox folderBox = new TextBox();
+    private readonly CheckBox dedicatedHost = new CheckBox { Text = "专用转图机：自动关闭残留 SolidWorks（此电脑不用于人工设计）", Dock = DockStyle.Top, Height = 34, Padding = new Padding(12, 0, 0, 0) };
     private readonly Button installButton = new Button();
     private readonly Button upgradeButton = new Button();
     private readonly Button uninstallButton = new Button();
@@ -27,7 +28,7 @@ internal sealed class SetupForm : Form
     public SetupForm(SetupOptions options)
     {
         this.options = options;
-        Text = "UPLM 转图代理 1.2.0 · 安装与升级";
+        Text = "UPLM 转图代理 1.2.3 · 安装与升级";
         Width = 820;
         Height = 760;
         StartPosition = FormStartPosition.CenterScreen;
@@ -93,6 +94,8 @@ internal sealed class SetupForm : Form
 
         Controls.Add(logBox);
         Controls.Add(actions);
+        dedicatedHost.Checked = options.DedicatedConversionHost;
+        Controls.Add(dedicatedHost);
         Controls.Add(table);
         Controls.Add(info);
         saveTimer.Tick += (_, _) => { saveTimer.Stop(); SaveFields(); };
@@ -110,6 +113,7 @@ internal sealed class SetupForm : Form
         options.Password = passwordBox.Text;
         options.Token = tokenBox.Text.Trim();
         options.InstallDirectory = folderBox.Text.Trim();
+        options.DedicatedConversionHost = dedicatedHost.Checked;
         upgradeButton.Enabled = !runningOperation && options.InstallDirectory.IndexOfAny(System.IO.Path.GetInvalidPathChars()) < 0
             && System.IO.File.Exists(System.IO.Path.Combine(options.InstallDirectory, "PdmPreviewAgent.json"));
         options.TimeoutMinutes = int.TryParse(timeoutBox.Text.Trim(), out var timeout) && timeout > 0 ? timeout : 30;

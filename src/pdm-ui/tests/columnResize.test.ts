@@ -2,9 +2,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
 import { ElTable, ElTableColumn } from 'element-plus'
-import { installColumnResize, resizeToFit } from '../src/columnResize'
+import { installColumnResize, readableColumnWidths, resizeToFit } from '../src/columnResize'
+import * as tablePreferences from '../src/tablePreferences'
 
 let dispose: () => void
+
+it('宽字段目录恢复旧列宽时保留可读下限和固定选择列', () => {
+  expect(readableColumnWidths([12, 40, 60], [38, 140, 180], 240, [true, false, false])).toEqual([38, 140, 180])
+  const wide = readableColumnWidths([38, 140, 180], [38, 140, 180], 800, [true, false, false])
+  expect(wide[0]).toBe(38)
+  expect(wide[1]).toBeCloseTo(762 * 140 / 320)
+  expect(wide.reduce((sum, width) => sum + width, 0)).toBeCloseTo(800)
+})
+
+it('宽字段目录保留用户放大的列，不挤压其他列来适应窄窗口', () => {
+  expect(readableColumnWidths([38, 240, 220], [38, 140, 180], 300, [true, false, false])).toEqual([38, 240, 220])
+})
 function setup(html: string, width: number) {
   document.body.innerHTML = html
   Object.defineProperty(document.body.firstElementChild!, 'clientWidth', { configurable: true, value: width })
@@ -21,6 +34,25 @@ function pointer(element: Element | Document, type: string, x: number) {
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; window.localStorage.clear(); vi.restoreAllMocks() })
 
 describe('global column resizing', () => {
+  it('keeps native fixed columns at 50px while resizing and restoring other columns', () => {
+    const html = '<div data-pdm-preference-scope=\'["alice","company"]\'><table><colgroup><col data-pdm-fixed-width="50" style="width:50px"><col><col data-pdm-fixed-width="50" style="width:50px"><col></colgroup><thead><tr><th>选择</th><th>图号</th><th>等级</th><th>材质</th></tr></thead></table></div>'
+    setup(html, 400)
+    const headers = document.querySelectorAll('th')
+    ;[[0,50],[50,150],[200,50],[250,150]].forEach(([left,width],index) => rect(headers[index]!,left!,width!))
+    pointer(headers[0]!, 'pointerdown', 48)
+    expect(document.body.classList.contains('pdm-column-resizing')).toBe(false)
+    pointer(headers[1]!, 'pointerdown', 198); pointer(document, 'pointermove', 238); pointer(document, 'pointerup', 238)
+    const columns = document.querySelectorAll('col')
+    expect(columns[0]!.style.width).toBe('50px')
+    expect(columns[2]!.style.width).toBe('50px')
+    expect(columns[1]!.style.width).toContain('calc(')
+    const flexibleWidth = columns[1]!.style.width
+    dispose(); setup(html, 800)
+    const restored = document.querySelectorAll('col')
+    expect(restored[0]!.style.width).toBe('50px')
+    expect(restored[2]!.style.width).toBe('50px')
+    expect(restored[1]!.style.width).toBe(flexibleWidth)
+  })
   it('restores native column proportions after remount and isolates accounts and changed schemas', () => {
     const html = '<div data-pdm-preference-scope=\'["alice","company"]\' data-navigation-page="projects"><table><thead><tr><th>名称</th><th>操作</th></tr></thead></table></div>'
     setup(html,400)
@@ -101,6 +133,42 @@ describe('global column resizing', () => {
     expect(resizeToFit([100, 100, 100], 0, 500)).toEqual([236, 32, 32])
     expect(resizeToFit([100], 0, 40)).toEqual([100])
   })
+  it('恢复账号列宽和窗口缩放时保留固定状态列，其余列按保存比例适配且不反复重排', async () => {
+    const Original = globalThis.ResizeObserver
+    const observers: Array<{ callback: ResizeObserverCallback; root?: Element }> = []
+    globalThis.ResizeObserver = class {
+      entry: { callback: ResizeObserverCallback; root?: Element }
+      constructor(callback: ResizeObserverCallback) { this.entry = { callback }; observers.push(this.entry) }
+      observe(root: Element) { this.entry.root = root }
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver
+    vi.spyOn(tablePreferences, 'readTablePreference').mockReturnValue('[56,150,300]')
+    const host = document.createElement('div')
+    host.dataset.pdmPreferenceScope = '["alice","company"]'
+    document.body.append(host)
+    const wrapper = mount(defineComponent({ components: { ElTable, ElTableColumn }, template: '<el-table :data="[]"><el-table-column label="状态" width="56" class-name="pdm-column-fixed-width"/><el-table-column label="说明" width="200"/><el-table-column label="操作" width="100"/></el-table>' }), { attachTo: host, global: { plugins: [{ install: installColumnResize }] } })
+    try {
+      await nextTick()
+      const root = wrapper.element
+      const table = wrapper.findComponent({ name: 'ElTable' }).vm.$.exposed!
+      const observer = observers.find(item => item.root === root && item.callback.toString().includes('const space'))!
+      for (const space of [1200, 540, 240]) {
+        Object.defineProperty(root, 'clientWidth', { configurable: true, value: space })
+        observer.callback([], {} as ResizeObserver)
+        await nextTick()
+        const columns = table.store.states.columns.value
+        expect(columns[0]!.realWidth).toBe(56)
+        expect(columns[2]!.realWidth).toBeCloseTo(columns[1]!.realWidth * 2)
+        expect(columns.reduce((sum: number, column: { realWidth: number }) => sum + column.realWidth, 0)).toBeCloseTo(space)
+        const settled = columns.map((column: { realWidth: number }) => column.realWidth)
+        observer.callback([], {} as ResizeObserver)
+        await nextTick()
+        expect(columns.map((column: { realWidth: number }) => column.realWidth)).toEqual(settled)
+      }
+      expect(table.store.states.columns.value.map((column: { resizable: boolean }) => column.resizable)).toEqual([false, true, true])
+    } finally { wrapper.unmount(); globalThis.ResizeObserver = Original }
+  })
   it('enables real Element Plus selection and index columns after mount', async () => {
     const wrapper = mount(defineComponent({
       components: { ElTable, ElTableColumn },
@@ -126,6 +194,15 @@ describe('global column resizing', () => {
     expect(widths.reduce((sum, width) => sum + width, 0)).toBeCloseTo(100)
     expect(document.querySelector('table')!.style.width).toBe('100%')
     expect(document.querySelector('tbody button')!.textContent).toBe('打开')
+  })
+  it('窄屏内部滚动的原生表格按实际表宽调整，不放大拖动位移', () => {
+    setup('<div><table><thead><tr><th>料号</th><th>名称</th></tr></thead></table></div>', 180)
+    Object.defineProperty(document.querySelector('table')!, 'clientWidth', { configurable: true, value: 300 })
+    const headers = document.querySelectorAll('th')
+    rect(headers[0]!, 0, 100); rect(headers[1]!, 100, 200)
+    pointer(headers[0]!, 'pointerdown', 98); pointer(document, 'pointermove', 138)
+    expect(parseFloat(document.querySelector('col')!.style.width)).toBeCloseTo(140 / 300 * 100)
+    pointer(document, 'pointerup', 138)
   })
   it('leaves ordinary clicks and initial layout unchanged and cancels dragging cleanly', () => {
     setup('<div><table><thead><tr><th>名称</th><th>操作</th></tr></thead></table></div>', 180)

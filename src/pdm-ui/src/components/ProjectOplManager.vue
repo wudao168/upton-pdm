@@ -1,7 +1,8 @@
 <script setup lang="ts">
+import { useProjectCenterAccess } from '../projectCenterAccess'
+const { write: projectWritable, download: projectDownload, export: projectExport } = useProjectCenterAccess()
 import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { TableInstance } from 'element-plus'
 import { Download, Plus, RotateCw as RefreshCw } from '@lucide/vue'
 import { completeProjectOpl, getProjectExportMetadata, markProjectOplViewed, PdmApiError, readOplAttachment, readProjectOpl, saveProjectOpl } from '../api'
 import type { ProjectSummary } from '../types'
@@ -17,20 +18,6 @@ const view = ref<OplView>({ rows: [], people: [] })
 const loading = ref(false), saving = ref(false), error = ref(''), drawer = ref(false), readonly = ref(false)
 const completing = ref<string | null>(null), exporting = ref(false)
 const notifyUpdates = ref(false)
-const oplTable = ref<TableInstance>()
-// 全局列宽适配会按比例压缩；为状态胶囊保留可完整显示的空间。
-watch(() => oplTable.value?.store.states.columns.value.map(column => column.realWidth), () => {
-  const table = oplTable.value, columns = table?.store.states.columns.value
-  if (!table || !columns?.length) return
-  const widths = columns.map(column => column.realWidth ?? Number(column.width ?? column.minWidth ?? 80))
-  const statusIndex = columns.findIndex(column => column.className === 'opl-status-column')
-  if (statusIndex < 0 || Math.abs(widths[statusIndex]! - 56) < .1) return
-  const available = widths.reduce((sum, width) => sum + width, 0)
-  const rest = available - widths[statusIndex]!, scale = (available - 56) / rest
-  if (rest <= 0 || scale <= 0) return
-  columns.forEach((column, index) => { column.width = column.realWidth = index === statusIndex ? 56 : widths[index]! * scale })
-  table.doLayout()
-}, { flush: 'post' })
 const query = ref(''), status = ref('未完成'), owner = ref(''), priority = ref<string[]>([]), page = ref(1)
 const states = ['待处理', '处理中', '待确认', '已完成', '已作废']
 const priorities = ['紧急', '高', '普通', '低']
@@ -66,12 +53,12 @@ function releaseUrls() { closePreview(); Object.values(thumbnails.value).forEach
 async function load() {
   const current = ++generation
   loading.value = true; error.value = ''
-  try { const data = await readProjectOpl(props.project.id, props.token); if (current === generation) { releaseUrls(); view.value = data } }
+  try { const data = await readProjectOpl(props.project.id, props.token); if (current === generation) { releaseUrls(); view.value = projectWritable.value ? data : { ...data, rows: data.rows.map(row => ({ ...row, canEdit: false, canComplete: false })) } } }
   catch (cause) { if (current === generation) error.value = message(cause, '开口问题加载失败，请检查网络后重试。') }
   finally { if (current === generation) loading.value = false }
 }
 async function exportExcel() {
-  if (loading.value || exporting.value || error.value || !scopedRows.value.length) return
+  if (!projectExport.value || loading.value || exporting.value || error.value || !scopedRows.value.length) return
   const current = generation, projectId = props.project.id, projectCode = props.project.code, token = props.token
   const rows = scopedRows.value.map(({ issue }) => [issue.number, relatedProject(issue.relatedProjectId), issue.priority, issue.status,
     issue.description, issue.attachments.map(file => file.name).join('\n'), issue.solution, issue.dueDate || '—', name(issue.owner),
@@ -92,14 +79,14 @@ async function thumbnail(row: OplRow, file: OplAttachment) {
   if (!imageType(file) || thumbnails.value[file.id]) return
   const current = generation
   try {
-    const blob = await readOplAttachment(props.project.id, row.issue.id, file.id, props.token)
+    const blob = await readOplAttachment(props.project.id, row.issue.id, file.id, props.token, true)
     if (current === generation) thumbnails.value[file.id] = URL.createObjectURL(new Blob([blob], { type: imageType(file) }))
   } catch { /* 文件名仍可点击并显示明确错误，不阻塞清单。 */ }
 }
 watch(visible, rows => { rows.forEach(row => row.issue.attachments.slice(0, 2).forEach(file => { void thumbnail(row, file) })) })
 watch([query, status, owner, priority], () => { page.value = 1 })
 function open(row: OplRow | null = null, read = false) {
-  editing.value = row; readonly.value = read; files.value = []; formError.value = ''
+  editing.value = row; readonly.value = read || !projectWritable.value; files.value = []; formError.value = ''
   retained.value = row ? [...row.issue.attachments] : []
   draft.value = row ? { description: row.issue.description, priority: row.issue.priority, status: row.issue.status, owner: row.issue.owner, dueDate: row.issue.dueDate, solution: row.issue.solution, expectedRowVersion: row.issue.rowVersion, attachmentIds: row.issue.attachments.map(x => x.id), relatedProjectId: row.issue.relatedProjectId ?? null } : empty()
   baseline.value = snapshot(); drawer.value = true
@@ -138,7 +125,7 @@ function selectFiles(event: Event) {
   files.value = selected
 }
 async function save() {
-  if (saving.value) return
+  if (!projectWritable.value || saving.value) return
   formError.value = ''
   if (!draft.value.description.trim()) { formError.value = '请填写问题描述。'; return }
   if (draft.value.status === '待确认' && !draft.value.solution.trim()) { formError.value = '请填写解决措施后再提交确认。'; return }
@@ -167,8 +154,10 @@ async function attachment(row: OplRow, file: OplAttachment) {
   try {
     closePreview(); previewName.value = file.name
     if (imageType(file)) { await thumbnail(row, file); if (thumbnails.value[file.id]) { previewKind.value = 'image'; previewUrl.value = thumbnails.value[file.id]!; return } }
-    const blob = await readOplAttachment(props.project.id, row.issue.id, file.id, props.token)
+    if (!projectDownload.value && !/\.pdf$/i.test(file.name)) { ElMessage.warning('此附件暂不支持在线预览，当前角色未开放下载。'); return }
+    const blob = await readOplAttachment(props.project.id, row.issue.id, file.id, props.token, /\.pdf$/i.test(file.name))
     if (/\.pdf$/i.test(file.name)) { previewKind.value = 'pdf'; previewUrl.value = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' })); return }
+    if (!projectDownload.value) { ElMessage.warning('此附件暂不支持在线预览，当前角色未开放下载。'); return }
     const url = URL.createObjectURL(blob), link = document.createElement('a')
     link.href = url; link.download = file.name; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
   } catch (cause) { ElMessage.error(message(cause, '附件读取失败，请检查网络或联系管理员。')) }
@@ -183,11 +172,11 @@ void load()
 
 <template>
   <section class="pdm-panel pdm-manager-panel opl-manager" aria-label="开口问题清单">
-    <header class="pdm-panel-header"><div><span v-if="project.parentProjectId" class="opl-scope">当前子项目：{{ project.code }} · {{ project.name }}</span><span class="opl-counts">全部 {{ scopedRows.length }} · 未完成 {{ activeCount }} · <span :class="{ 'opl-overdue': overdueCount > 0 }">已逾期 {{ overdueCount }}</span> · 已完成 {{ scopedRows.filter(row => row.issue.status === '已完成').length }}</span></div><div class="opl-actions"><el-button :disabled="loading || !!error || !scopedRows.length" :loading="exporting" title="导出当前项目范围的全部开口问题（不受筛选影响）" @click="exportExcel"><Download v-if="!exporting" :size="14" />导出Excel</el-button><el-button :disabled="loading" @click="load"><RefreshCw :size="14" />刷新</el-button><el-button type="primary" :disabled="loading || !!error" @click="open()"><Plus :size="14" />新增问题</el-button></div></header>
-    <div class="opl-filters"><el-input v-model="query" aria-label="搜索开口问题" placeholder="搜索问题描述 / 编号" clearable /><el-select v-model="status" aria-label="筛选实施状态"><el-option label="全部状态" value="" /><el-option label="未完成" value="未完成" /><el-option v-for="item in states" :key="item" :label="item" :value="item" /></el-select><el-select v-model="owner" aria-label="筛选负责人" placeholder="全部负责人" clearable filterable><el-option v-for="person in view.people" :key="person.username" :label="person.displayName" :value="person.username" /></el-select><el-select v-model="priority" aria-label="筛选优先级" placeholder="全部优先级" multiple collapse-tags collapse-tags-tooltip clearable><el-option v-for="item in priorities" :key="item" :label="item" :value="item" /></el-select><el-checkbox v-model="notifyUpdates" class="opl-notify-toggle" :disabled="saving || !!completing">更新或完成后通知钉钉群</el-checkbox></div>
+    <header class="pdm-panel-header"><div><span v-if="project.parentProjectId" class="opl-scope">当前子项目：{{ project.code }} · {{ project.name }}</span><span class="opl-counts">全部 {{ scopedRows.length }} · 未完成 {{ activeCount }} · <span :class="{ 'opl-overdue': overdueCount > 0 }">已逾期 {{ overdueCount }}</span> · 已完成 {{ scopedRows.filter(row => row.issue.status === '已完成').length }}</span></div><div class="opl-actions"><el-button :disabled="loading || !!error || !scopedRows.length" :loading="exporting" title="导出当前项目范围的全部开口问题（不受筛选影响）" v-if="projectExport" @click="exportExcel"><Download v-if="!exporting" :size="14" />导出Excel</el-button><el-button :disabled="loading" @click="load"><RefreshCw :size="14" />刷新</el-button><el-button type="primary" :disabled="loading || !!error" v-if="projectWritable" @click="open()"><Plus :size="14" />新增问题</el-button></div></header>
+    <div class="opl-filters"><el-input v-model="query" aria-label="搜索开口问题" placeholder="搜索问题描述 / 编号" clearable /><el-select v-model="status" aria-label="筛选实施状态"><el-option label="全部状态" value="" /><el-option label="未完成" value="未完成" /><el-option v-for="item in states" :key="item" :label="item" :value="item" /></el-select><el-select v-model="owner" aria-label="筛选负责人" placeholder="全部负责人" clearable filterable><el-option v-for="person in view.people" :key="person.username" :label="person.displayName" :value="person.username" /></el-select><el-select v-model="priority" aria-label="筛选优先级" placeholder="全部优先级" multiple collapse-tags collapse-tags-tooltip clearable><el-option v-for="item in priorities" :key="item" :label="item" :value="item" /></el-select><el-checkbox v-if="projectWritable" v-model="notifyUpdates" class="opl-notify-toggle" :disabled="saving || !!completing">更新或完成后通知钉钉群</el-checkbox></div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
-    <div class="opl-table-wrap" v-loading="loading"><el-table ref="oplTable" :data="visible" height="100%" stripe border row-key="issue.id" empty-text="暂无符合条件的开口问题" class="opl-table" @row-click="(row: OplRow) => open(row, !row.canEdit)">
-      <el-table-column label="状态" width="56" fixed class-name="opl-status-column"><template #default="{ row }"><div class="opl-status-markers"><span v-if="row.isNew" class="opl-capsule" aria-label="新增未查看">NEW</span><span v-if="overdue(row)" class="opl-capsule opl-capsule--overdue" aria-label="已逾期">逾期</span></div></template></el-table-column>
+    <div class="opl-table-wrap" v-loading="loading"><el-table :data="visible" height="100%" stripe border row-key="issue.id" empty-text="暂无符合条件的开口问题" class="opl-table" @row-click="(row: OplRow) => open(row, !row.canEdit)">
+      <el-table-column label="状态" width="56" fixed class-name="opl-status-column pdm-column-fixed-width"><template #default="{ row }"><div class="opl-status-markers"><span v-if="row.isNew" class="opl-capsule" aria-label="新增未查看">NEW</span><span v-if="overdue(row)" class="opl-capsule opl-capsule--overdue" aria-label="已逾期">逾期</span></div></template></el-table-column>
       <el-table-column label="序号" width="100" fixed><template #default="{ row }">{{ row.issue.number }}</template></el-table-column>
       <el-table-column label="子项目" width="200" show-overflow-tooltip><template #default="{ row }">{{ relatedProject(row.issue.relatedProjectId) }}</template></el-table-column>
       <el-table-column label="优先级" width="100"><template #default="{ row }"><el-tag :type="['紧急', '高'].includes(row.issue.priority) ? 'danger' : 'info'" size="small">{{ row.issue.priority }}</el-tag></template></el-table-column>
@@ -223,7 +212,7 @@ void load()
       <el-alert v-if="formError" :title="formError" type="error" :closable="false" />
       <template #footer><el-checkbox v-if="editing && !readonly" v-model="notifyUpdates" :disabled="saving">保存后通知钉钉群</el-checkbox><el-button :disabled="saving" @click="close()">{{ readonly ? '关闭' : '取消' }}</el-button><el-button v-if="!readonly" type="primary" :loading="saving" @click="save">保存问题</el-button></template>
     </el-drawer>
-    <el-dialog :model-value="!!previewUrl" :title="previewName" width="min(1000px, 95vw)" append-to-body @close="closePreview"><PdfDrawingViewer v-if="previewUrl && previewKind === 'pdf'" :url="previewUrl" /><img v-else-if="previewUrl" :src="previewUrl" alt="问题附件预览" style="display:block;max-width:100%;max-height:75vh;margin:auto"><template #footer><a :href="previewUrl" :download="previewName">下载附件</a></template></el-dialog>
+    <el-dialog :model-value="!!previewUrl" :title="previewName" width="min(1000px, 95vw)" append-to-body @close="closePreview"><PdfDrawingViewer v-if="previewUrl && previewKind === 'pdf'" :url="previewUrl" /><img v-else-if="previewUrl" :src="previewUrl" alt="问题附件预览" style="display:block;max-width:100%;max-height:75vh;margin:auto"><template #footer><a v-if="projectDownload" :href="previewUrl" :download="previewName">下载附件</a></template></el-dialog>
   </section>
 </template>
 

@@ -24,8 +24,10 @@ internal sealed class ArchiveNativeCopyWorkspace : IDisposable
     private readonly List<FileCopy> files = new List<FileCopy>();
     internal IReadOnlyList<FileCopy> Files => files;
 
-    internal static void ValidateLoadedImports(ISldWorks app, IEnumerable<string> assemblies)
+    internal static void ValidateLoadedImports(ISldWorks app, IEnumerable<BatchOperationItem> items)
     {
+        var assemblies = items.Where(item => item.Node.Kind == CadDocumentKind.Assembly && item.Node.RequiresModelUpdate)
+            .Select(item => item.Node.FullPath);
         foreach (var path in assemblies.Distinct(StringComparer.OrdinalIgnoreCase))
         {
             if (!(app.GetOpenDocumentByName(path) is IAssemblyDoc assembly)) continue;

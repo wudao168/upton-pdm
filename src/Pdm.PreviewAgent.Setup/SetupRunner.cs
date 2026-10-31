@@ -174,7 +174,7 @@ internal sealed class SetupRunner
         ValidateInstallDirectory(true);
         var configuration = Path.Combine(options.InstallDirectory, "PdmPreviewAgent.json");
         if (!File.Exists(configuration)) throw new InvalidOperationException("目标目录未安装转图代理，请先使用“一键安装并登记”，或选择正确的安装目录。");
-        var hash = FileHash(configuration);
+        var hash = ConnectionConfigurationHash(configuration);
         var extractionRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "UPLM-PreviewAgent-Setup"));
         var temporary = Path.Combine(extractionRoot, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temporary);
@@ -193,10 +193,11 @@ internal sealed class SetupRunner
             log("2/3 更新代理和转换程序，切换为交互式前台启动；失败自动恢复原文件和任务…");
             var script = Path.Combine(temporary, "Update-PreviewAgent.ps1");
             var result = await Task.Run(() => RunTool("powershell.exe", "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + script
-                + "\" -InstallRoot \"" + options.InstallDirectory + "\" -PreserveProcessId " + Process.GetCurrentProcess().Id, Encoding.UTF8));
+                + "\" -InstallRoot \"" + options.InstallDirectory + "\" -PreserveProcessId " + Process.GetCurrentProcess().Id
+                + (options.DedicatedConversionHost ? " -EnableDedicatedRecovery -RecoverBlockedStartup" : ""), Encoding.UTF8));
             File.WriteAllText(Path.Combine(options.InstallDirectory, "upgrade-installer.log"), Upton.Pdm.ClientShared.ClientLogRedaction.Clean(result.Output), new UTF8Encoding(false));
             if (result.ExitCode != 0) throw new InvalidOperationException("升级未完成，请根据上方中文提示检查代理状态；原文件和回退结果保留在安装目录的备份文件夹中。");
-            if (FileHash(configuration) != hash) throw new InvalidOperationException("升级后的原连接配置校验不一致，请检查备份配置后重试。");
+            if (ConnectionConfigurationHash(configuration) != hash) throw new InvalidOperationException("升级后的原连接配置校验不一致，请检查备份配置后重试。");
             var manager = Path.Combine(options.InstallDirectory, "UplmPreviewAgentSetup.exe");
             var current = assembly.Location;
             if (!string.Equals(Path.GetFullPath(current), Path.GetFullPath(manager), StringComparison.OrdinalIgnoreCase)) File.Copy(current, manager, true);
@@ -210,9 +211,11 @@ internal sealed class SetupRunner
         }
     }
 
-    private static string FileHash(string path)
+    private static string ConnectionConfigurationHash(string path)
     {
-        using (var input = File.OpenRead(path))
+        var values = Serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+        values.Remove("DedicatedConversionHost");
+        using (var input = new MemoryStream(Encoding.UTF8.GetBytes(Serializer.Serialize(new SortedDictionary<string, object>(values, StringComparer.Ordinal)))))
         using (var algorithm = System.Security.Cryptography.SHA256.Create())
             return BitConverter.ToString(algorithm.ComputeHash(input));
     }
@@ -339,6 +342,7 @@ internal sealed class SetupRunner
             ["ShowMainWindow"] = true,
             ["CloseToTray"] = true,
             ["StartWithWindows"] = true,
+            ["DedicatedConversionHost"] = options.DedicatedConversionHost,
             ["Name"] = options.Name,
             ["BindAddress"] = "0.0.0.0",
             ["Token"] = options.Token,

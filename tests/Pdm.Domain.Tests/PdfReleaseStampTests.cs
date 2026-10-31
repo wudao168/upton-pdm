@@ -268,8 +268,40 @@ public sealed class PdfReleaseStampTests : IDisposable
         Assert.Equal(original, await File.ReadAllBytesAsync(path));
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task ReissuePublishedPdfChangesOnlyDeliveryFieldsWithoutCadConversionAndPreservesOriginal(int pages)
+    {
+        var (service, source, project, package, path) = Fixture(false, pages, titleBlock: true, alreadyReleased: true);
+        PdfTitleBlockSnapshot Snapshot(string quantity) => new(["quantity"], new Dictionary<Guid, PdfDrawingTitleBlockSnapshot>
+            { [source.DocumentId] = new(source.SourceVersionId, source.Sha256, new Dictionary<string, string> { ["quantity"] = quantity }, []) }, true);
+        package = package with { PdfTitleBlockSnapshot = Snapshot("1") };
+        await service.ApplyAsync(package, project, source, path, default);
+        var original = await File.ReadAllBytesAsync(path);
+        var secondPath = Path.Combine(root, "second.pdf");
+        File.Copy(path, secondPath);
+        var second = package with { Id = Guid.NewGuid(), PublishedAt = package.PublishedAt!.Value.AddMinutes(1), PdfTitleBlockSnapshot = Snapshot("2") };
+        await service.ReissueAsync(second, project, source, secondPath, default);
+        Assert.Equal(original, await File.ReadAllBytesAsync(path));
+        Assert.True(service.IsCurrent(secondPath, second, source.SourceVersionId));
+        lock (PdfReleasePageEditor.Gate)
+            for (var page = 0; page < pages; page++)
+            {
+                var before = PdfReleasePageEditor.Texts(original, page).Where(text => text.Value.StartsWith("1.") || text.Value.StartsWith("2.") || text.Value.StartsWith("3.")).ToArray();
+                var after = PdfReleasePageEditor.Texts(File.ReadAllBytes(secondPath), page);
+                Assert.Contains(after, text => text.Value.Trim() == "2");
+                foreach (var note in before) Assert.Contains(after, text => text.Value == note.Value && Math.Abs(text.Bounds.Bottom - note.Bounds.Bottom) < .1);
+                Assert.Equal("NEW-MODEL-123\nB", PdfReleasePageEditor.DecodePage(secondPath, page));
+            }
+        var bytes = await File.ReadAllBytesAsync(secondPath);
+        await service.ReissueAsync(second, project, source, secondPath, default);
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(secondPath));
+        Assert.False(service.IsCurrent(secondPath, second with { PdfTitleBlockSnapshot = Snapshot("4") }, source.SourceVersionId));
+    }
+
     private (PdfReleaseStampProcessor Service, ReleasePreviewSource Source, Project Project, ReleasePackage Package, string Path)
-        Fixture(bool legacy, int pages, bool logo = true, bool cadOnly = false, string? legacyCode = null, string? frozenCode = null, bool legacyNote = true, bool offsetRequirements = false, bool crowdedRequirements = false, bool titleBlock = false)
+        Fixture(bool legacy, int pages, bool logo = true, bool cadOnly = false, string? legacyCode = null, string? frozenCode = null, bool legacyNote = true, bool offsetRequirements = false, bool crowdedRequirements = false, bool titleBlock = false, bool alreadyReleased = false)
     {
         Directory.CreateDirectory(root);
         var drawingId = Guid.NewGuid(); var modelId = Guid.NewGuid(); var sourceId = Guid.NewGuid();
@@ -282,10 +314,11 @@ public sealed class PdfReleaseStampTests : IDisposable
         if (frozenCode is not null) properties["全局/UPLM_QR_CONTENT"] = frozenCode;
         var version = new DocumentVersion(sourceId, drawingId, new('A', 1, false), DocumentVersionStatus.Work, "frozen.SLDDRW", 10, sha,
             "admin", DateTimeOffset.UtcNow, "", properties, drawing, [], [], null, null, null, null);
+        if (alreadyReleased) version = version with { Status = DocumentVersionStatus.Released, Revision = RevisionLabel.Released('B') };
         var repository = DispatchProxy.Create<IPdmRepository, FrozenRepository>();
         ((FrozenRepository)(object)repository).Version = version;
         var source = new ReleasePreviewSource(drawingId, sourceId, "OLD-MODEL", "frozen.SLDDRW", DocumentKind.Drawing,
-            version.StorageRelativePath, 10, sha, sha, "B");
+            version.StorageRelativePath, 10, sha, sha, "B", alreadyReleased);
         var project = new Project(Guid.NewGuid(), "P700016-1", "测试", "admin", root, root, true);
         var bom = new BomItem(Guid.NewGuid(), project.Id, BomKind.NonStandard, 1, "0204-001", "零件", 1, "个", "钢",
             "NEW-MODEL-123", "B", true) { SourceDocumentId = modelId };

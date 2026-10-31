@@ -9,7 +9,7 @@ public sealed class StandardLibraryService(
     TimeProvider timeProvider,
     IEngineeringKitRepository? kits = null,
     IStockedMaterialStore? stockedMaterials = null,
-    StockedMaterialGate? stockedGate = null)
+    StockedMaterialGate? stockedGate = null, IMaterialRelationRepository? relations = null)
 {
     public async Task<IReadOnlyList<StandardLibraryCategory>> ListCategoriesAsync(
         bool includeInactive, string actor, UserRole role, CancellationToken cancellationToken)
@@ -99,6 +99,9 @@ public sealed class StandardLibraryService(
         var categoryById = categories.ToDictionary(item => item.Id);
         var normalized = query.Query?.Trim();
         var rows = new List<StandardLibraryMaterial>();
+        var publishedRelations = relations is null ? new Dictionary<Guid, MaterialRelationTemplate>()
+            : (await relations.ListTemplatesAsync(false, cancellationToken)).Where(item => !item.IsArchived && item.PublishedRevision is not null)
+                .GroupBy(item => item.MainMaterialId).ToDictionary(group => group.Key, group => group.First() with { DraftRevision = null });
         foreach (var group in scoped.GroupBy(item => item.MaterialId))
         {
             var material = await materials.FindMaterialAsync(group.Key, cancellationToken);
@@ -112,7 +115,7 @@ public sealed class StandardLibraryService(
             var cover = material.CoverImageAttachmentId is null
                 ? null
                 : await materials.FindMaterialAttachmentAsync(material.CoverImageAttachmentId.Value, cancellationToken);
-            rows.Add(new(material, rowCategories, cover));
+            rows.Add(new(material, rowCategories, cover, Relation: publishedRelations.GetValueOrDefault(material.Id)));
         }
 
         if (kits is not null)

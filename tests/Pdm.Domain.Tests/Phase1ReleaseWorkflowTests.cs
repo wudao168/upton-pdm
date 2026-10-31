@@ -9,6 +9,66 @@ namespace Upton.Pdm.Domain.Tests;
 [Collection("BomHeader automatic queue")]
 public sealed class Phase1ReleaseWorkflowTests : IDisposable
 {
+    [Theory]
+    [InlineData(ReleaseScope.StandardFormal)]
+    [InlineData(ReleaseScope.NonStandardWithDrawing)]
+    public async Task ResubmittedReleaseNotifiesReviewerAgainEvenWhenOriginalMessageIsRead(ReleaseScope scope)
+    {
+        var clock = new ReleaseNumberClock();
+        var repository = new InMemoryPdmRepository(clock);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        await repository.UpdateUserAsync("admin", "兼任工程师", UserRole.Administrator, "Administrator", ["Administrator", "Engineer"], true, default);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), clock);
+        if (scope == ReleaseScope.NonStandardWithDrawing)
+            await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var kind = scope == ReleaseScope.StandardFormal ? BomKind.Standard : BomKind.NonStandard;
+        var package = await workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", "", "未指定", null,
+            scope, CurrentIds(repository, kind), "admin", UserRole.Administrator, default);
+        package = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+        var task = package.ApprovalTasks.OrderBy(item => item.StepOrder).First(item => item.Decision is null);
+        var first = Assert.Single(await repository.ListUserNotificationsAsync(task.Assignee, 200, default),
+            item => item.Category == "ReleaseApprovalPending");
+        Assert.Null(first.ReadAt);
+        Assert.Equal(package.Id, first.ReleasePackageId);
+        await repository.MarkUserNotificationReadAsync(first.Id, task.Assignee, clock.GetUtcNow(), default);
+        await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Rejected, "修改后重提", default);
+
+        var resubmitted = await workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default);
+        Assert.Equal(task.Id, resubmitted.ApprovalTasks.OrderBy(item => item.StepOrder).First(item => item.Decision is null).Id);
+        var notices = (await repository.ListUserNotificationsAsync(task.Assignee, 200, default))
+            .Where(item => item.Category == "ReleaseApprovalPending").ToArray();
+        Assert.Equal(2, notices.Length);
+        Assert.NotNull(notices.Single(item => item.Id == first.Id).ReadAt);
+        var latest = Assert.Single(notices, item => item.ReadAt is null);
+        Assert.Equal("BOM发布已重新提交审批", latest.Title);
+        Assert.NotEqual(first.SourceKey, latest.SourceKey);
+        await Assert.ThrowsAsync<PdmConflictException>(() => workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default));
+        Assert.Equal(2, (await repository.ListUserNotificationsAsync(task.Assignee, 200, default)).Count(item => item.Category == "ReleaseApprovalPending"));
+    }
+
+    [Fact]
+    public async Task ApprovalReminderGoesOnlyToCurrentNodeAndStopsWhenAllNodesAreApproved()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var packageId = Guid.NewGuid();
+        var firstTask = new ApprovalTask(Guid.NewGuid(), packageId, ApprovalStage.ProcessReview, "mechanical-supervisor", null, null, null, null) { StepOrder = 1 };
+        var nextTask = firstTask with { Id = Guid.NewGuid(), Assignee = "standardization-supervisor", Stage = ApprovalStage.Approval, StepOrder = 2 };
+        await repository.CreateReleasePackageAsync(new(packageId, ProjectId, "RP-NOTICE-NODES", ReleasePackageState.ProcessReview,
+            null, "N-V01", "E-V01", [firstTask, nextTask], DateTimeOffset.UtcNow, null, null)
+            { Scope = ReleaseScope.StandardFormal, LocksDocuments = false }, default);
+        await workflow.DecideAsync(firstTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "通过", default, publishImmediately: false);
+        Assert.DoesNotContain(await repository.ListUserNotificationsAsync(firstTask.Assignee, 200, default), item => item.Category == "ReleaseApprovalPending");
+        var notice = Assert.Single(await repository.ListUserNotificationsAsync(nextTask.Assignee, 200, default),
+            item => item.Category == "ReleaseApprovalPending");
+        Assert.Equal(packageId, notice.ReleasePackageId);
+        await Assert.ThrowsAsync<PdmConflictException>(() => workflow.DecideAsync(firstTask.Id, "admin", UserRole.Administrator,
+            ApprovalDecision.Approved, "重复请求", default, publishImmediately: false));
+        await workflow.DecideAsync(nextTask.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "通过", default, publishImmediately: false);
+        Assert.Single(await repository.ListUserNotificationsAsync(nextTask.Assignee, 200, default), item => item.Category == "ReleaseApprovalPending");
+    }
+
     private sealed class ReleaseNumberClock : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => new(2026, 10, 19, 12, 0, 0, TimeSpan.Zero);
@@ -484,7 +544,7 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
             "admin", UserRole.Administrator, ApprovalDecision.Approved, "批准发布", default);
         var sources = await repository.ListReleasePreviewSourcesAsync(package.Id, default);
         Assert.True(sources.Count > 1);
-        var failed = sources[0];
+        var failed = sources.First(source => !source.AlreadyReleased);
         var converter = new RecordingPreviewConverter(TimeProvider.System) { FailDocumentId = failed.DocumentId };
         var service = new ReleasePreviewService(repository, converter, TimeProvider.System);
         Assert.False(await service.ProcessAsync(package, default));

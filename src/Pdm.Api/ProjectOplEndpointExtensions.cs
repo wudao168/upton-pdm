@@ -44,7 +44,8 @@ public static class ProjectOplEndpointExtensions
         api.MapGet("/{id:guid}/attachments/{attachmentId:guid}", async (Guid projectId, Guid id, Guid attachmentId, HttpContext context, ProjectOplService service, CancellationToken ct) =>
         {
             var (file, content) = await service.OpenAsync(projectId, id, attachmentId, Actor(context), Role(context), ct);
-            return Results.File(content, "application/octet-stream", file.Name, enableRangeProcessing: true);
+            var preview = context.Request.Query["preview"] == "true";
+            return Results.File(content, preview ? ProjectCenterPermissionMiddleware.PreviewContentType(file.Name) : "application/octet-stream", preview ? null : file.Name, enableRangeProcessing: true);
         });
         api.MapGet("/integrations/dingtalk", async (Guid projectId, HttpContext context, ProjectOplService service, DingTalkOplIntegration integration, CancellationToken ct) =>
         {

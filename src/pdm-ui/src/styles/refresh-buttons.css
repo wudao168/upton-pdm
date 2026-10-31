@@ -1,0 +1,42 @@
+/* 刷新图标采用用户提供的 SVG；仅替换表现，保留 Vue 子节点及按钮行为。 */
+:root body button[data-pdm-button-refresh] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+:root body button[data-pdm-button-refresh]::before {
+  content: '';
+  position: static;
+  inset: auto;
+  display: block;
+  flex: 0 0 var(--pdm-button-icon-size, 16px);
+  width: var(--pdm-button-icon-size, 16px);
+  height: var(--pdm-button-icon-size, 16px);
+  background: var(--pdm-action-refresh);
+  border-radius: 0;
+  -webkit-mask: url('../assets/refresh.svg') center / contain no-repeat;
+  mask: url('../assets/refresh.svg') center / contain no-repeat;
+  pointer-events: none;
+}
+
+:root body button[data-pdm-button-refresh] :is(svg, .el-icon) {
+  display: none !important;
+}
+
+:root body button[data-pdm-button-refresh] > span {
+  margin-left: 0;
+}
+
+:root body button[data-pdm-button-refresh]:is(.is-loading, [aria-busy="true"], :has(.is-spinning))::before {
+  animation: pdm-refresh-spin .8s linear infinite;
+}
+
+@keyframes pdm-refresh-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root body button[data-pdm-button-refresh]::before { animation: none !important; }
+}

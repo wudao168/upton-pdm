@@ -8,6 +8,9 @@ const api = vi.hoisted(() => ({
   listMaterials: vi.fn(),
   saveMaterialRelationTemplate: vi.fn(),
   publishMaterialRelationTemplate: vi.fn(),
+  listMaterialRelationCategories: vi.fn(),
+  getMaterialRelationCategories: vi.fn(),
+  assignMaterialRelationCategory: vi.fn(),
 }))
 vi.mock('../src/api', () => api)
 
@@ -37,6 +40,8 @@ describe('MaterialRelationEditor', () => {
     vi.clearAllMocks()
     api.listMaterialRelationTemplates.mockResolvedValue([relation])
     api.listMaterials.mockResolvedValue([mainMaterial, accessory])
+    api.listMaterialRelationCategories.mockResolvedValue([])
+    api.getMaterialRelationCategories.mockResolvedValue([])
     api.saveMaterialRelationTemplate.mockResolvedValue(relation)
   })
 

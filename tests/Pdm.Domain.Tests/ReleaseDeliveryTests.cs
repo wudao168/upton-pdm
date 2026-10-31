@@ -54,6 +54,20 @@ public sealed class ReleaseDeliveryTests
     }
 
     [Fact]
+    public async Task RetiredNotificationsCancelPendingDeliveriesAndCannotBeRetried()
+    {
+        var f = await Fixture.CreateAsync();
+        var record = await f.Service.EnsureAsync(f.Package.Id, default);
+        Assert.NotEmpty(record.State.Deliveries);
+        f.Configuration.Settings = new();
+        await f.RunAsync();
+        var retired = (await f.Store.FindAsync(f.Package.Id, default))!;
+        Assert.All(retired.State.Deliveries, item => Assert.Equal("Cancelled", item.State));
+        Assert.Empty(f.Sender.Deliveries);
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.RetryAsync(f.Package.Id, record.State.Deliveries[0].Id, true, "admin", UserRole.Administrator, default));
+    }
+
+    [Fact]
     public async Task UncertainExternalDeliveryDoesNotAutoRepeatAndRetryRequiresExplicitConfirmation()
     {
         var f = await Fixture.CreateAsync();

@@ -9,6 +9,71 @@ public sealed class ProjectFolderTreeTests
     private static readonly Guid CustomerId = Guid.Parse("c0046500-0000-0000-0000-000000000001");
 
     [Fact]
+    public async Task NonStandardReminderTracksActualSupplyReceiptsAcrossAllEligiblePackages()
+    {
+        var store = new InMemoryProductionTrackingStore(DateTimeOffset.UtcNow.AddDays(-7));
+        var repository = new InMemoryPdmRepository(TimeProvider.System, productionTracking: store);
+        var project = Assert.Single(await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, default));
+        ReleasePackage Package(string number, DateTimeOffset published) => new(Guid.NewGuid(), project.Id, number,
+            ReleasePackageState.Published, null, "", "", [], published, published, "release")
+            { Scope = ReleaseScope.NonStandardSupplement, PreviewState = ReleasePreviewState.Succeeded };
+        var first = Package("RP-SUPPLY-1", DateTimeOffset.UtcNow.AddDays(-3));
+        var second = Package("RP-SUPPLY-2", DateTimeOffset.UtcNow.AddDays(-2));
+        await repository.CreateReleasePackageAsync(first, default);
+        await repository.CreateReleasePackageAsync(second, default);
+        var service = new ProductionTrackingService(repository, store, TimeProvider.System, new ProductionDrawingService(repository));
+        async Task<Project> Summary() => (await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, default)).Single();
+        Assert.True((await Summary()).HasUnreceivedNonStandardRelease);
+        Assert.Null((await Summary()).LatestPurchasedBomPublishedAt);
+        await service.ReceiveAsync(first.Id, Guid.NewGuid(), "admin", UserRole.Administrator, default);
+        Assert.True((await Summary()).HasUnreceivedNonStandardRelease);
+        await service.ReceiveAsync(second.Id, Guid.NewGuid(), "admin", UserRole.Administrator, default);
+        Assert.False((await Summary()).HasUnreceivedNonStandardRelease);
+        var historical = Package("RP-SUPPLY-LEGACY", DateTimeOffset.UtcNow.AddDays(-10));
+        await repository.CreateReleasePackageAsync(historical, default);
+        Assert.False((await Summary()).HasUnreceivedNonStandardRelease);
+        await store.CreateAsync(new(historical.Id, project.Id, project.OrganizationId ?? Guid.Empty, project.Code, project.Name,
+            historical.Number, historical.Scope, historical.PublishedAt!.Value, [], [], []), default);
+        Assert.True((await Summary()).HasUnreceivedNonStandardRelease);
+        await service.ReceiveAsync(historical.Id, Guid.NewGuid(), "admin", UserRole.Administrator, default);
+        Assert.False((await Summary()).HasUnreceivedNonStandardRelease);
+        var standard = Package("RP-SUPPLY-STANDARD", DateTimeOffset.UtcNow) with { Scope = ReleaseScope.StandardFormal };
+        await repository.CreateReleasePackageAsync(standard, default);
+        Assert.False((await Summary()).HasUnreceivedNonStandardRelease);
+        Assert.Equal(standard.PublishedAt, (await Summary()).LatestPurchasedBomPublishedAt);
+    }
+
+    [Theory]
+    [InlineData(ReleaseScope.NonStandardWithDrawing, ReleasePackageState.Published, ReleasePreviewState.Pending, true)]
+    [InlineData(ReleaseScope.NonStandardSupplement, ReleasePackageState.Published, ReleasePreviewState.WaitingForServer, true)]
+    [InlineData(ReleaseScope.NonStandardSupplement, ReleasePackageState.Published, ReleasePreviewState.Running, true)]
+    [InlineData(ReleaseScope.NonStandardSupplement, ReleasePackageState.Published, ReleasePreviewState.Failed, true)]
+    [InlineData(ReleaseScope.NonStandardSupplement, ReleasePackageState.Published, ReleasePreviewState.Succeeded, false)]
+    [InlineData(ReleaseScope.StandardFormal, ReleasePackageState.Published, ReleasePreviewState.Failed, false)]
+    [InlineData(ReleaseScope.ElectricalSupplement, ReleasePackageState.Published, ReleasePreviewState.Pending, false)]
+    [InlineData(ReleaseScope.StandardFormal, ReleasePackageState.PublishFailed, ReleasePreviewState.None, true)]
+    [InlineData(ReleaseScope.NonStandardSupplement, ReleasePackageState.Draft, ReleasePreviewState.None, false)]
+    public async Task ProjectListContainsReleaseAttentionAndFormalPublicationTime(ReleaseScope scope, ReleasePackageState state, string previewState, bool attention)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var project = Assert.Single(await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, default));
+        var published = DateTimeOffset.Parse("2026-10-27T12:00:00Z");
+        var package = new ReleasePackage(Guid.NewGuid(), project.Id, "RP-ATTENTION", state, null, "", "", [], published.AddDays(-1),
+            state == ReleasePackageState.Published ? published : null, null) { Scope = scope, LocksDocuments = true, PreviewState = previewState };
+        await repository.CreateReleasePackageAsync(package, default);
+        var summary = Assert.Single(await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, default));
+        Assert.Equal(attention, summary.HasReleaseAttention);
+        Assert.Equal(package.PublishedAt, summary.LatestPublishedAt);
+        if (state == ReleasePackageState.Published)
+        {
+            await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Succeeded, null, 3, published.AddHours(3), default);
+            summary = Assert.Single(await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, default));
+            Assert.False(summary.HasReleaseAttention);
+            Assert.Equal(published, summary.LatestPublishedAt);
+        }
+    }
+
+    [Fact]
     public async Task MainAndChildProjectsHaveMatchingMechanicalAndElectricalContainers()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);

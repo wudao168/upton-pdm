@@ -24,6 +24,8 @@ public static class ArchiveReferenceVersions
                 && node.DocumentId is Guid id && !planned.Contains(id))
             {
                 var candidates = archived[id].Where(old => old.Kind == node.Kind && old.Role == node.Role
+                    && old.IsContextReference == node.IsContextReference
+                    && old.ReferenceTypeUnverified == node.ReferenceTypeUnverified
                     && string.Equals(old.Configuration, node.Configuration, StringComparison.Ordinal)).ToArray();
                 var exact = candidates.Where(old => string.Equals(old.InstancePath, node.InstancePath, StringComparison.OrdinalIgnoreCase)).ToArray();
                 var revisions = (exact.Length > 0 ? exact : candidates).Select(old => old.Revision!.Value).Distinct().Take(2).ToArray();

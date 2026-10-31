@@ -497,6 +497,8 @@ public interface IPdmRepository
     Task<IReadOnlyList<EquipmentTypeDefinition>> ListEquipmentTypesAsync(bool includeInactive, CancellationToken cancellationToken);
     Task<EquipmentTypeDefinition> SaveEquipmentTypeAsync(int code, string name, bool isActive, CancellationToken cancellationToken);
     Task<PdmSystemSettings> GetSystemSettingsAsync(CancellationToken cancellationToken);
+    Task<ArchiveWarningPolicy> GetArchiveWarningPolicyAsync(CancellationToken cancellationToken) => Task.FromResult(new ArchiveWarningPolicy());
+    Task<ArchiveWarningPolicy> SaveArchiveWarningPolicyAsync(ArchiveWarningPolicy policy, CancellationToken cancellationToken) => throw new NotSupportedException();
     Task<DocumentOperationRuleSettings> GetDocumentOperationRulesAsync(CancellationToken cancellationToken) =>
         Task.FromResult(DocumentOperationRuleSettings.Default);
     Task<DocumentOperationRuleSettings> SetDocumentOperationRuleAsync(string ruleId, bool enabled, long expectedRevision, CancellationToken cancellationToken) =>

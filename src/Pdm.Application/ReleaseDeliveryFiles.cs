@@ -87,7 +87,8 @@ public static class ReleaseDeliveryFiles
         return Directory.GetFiles(root, "*", SearchOption.AllDirectories);
     }
 
-    public static bool IsPreview(string path) => new[] { ".pdf", ".step", ".stp" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
+    public static bool IsPreview(string path) => !path.Replace('\\', '/').Split('/').Contains("standard-files", StringComparer.OrdinalIgnoreCase)
+        && new[] { ".pdf", ".step", ".stp" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
 
     public static async Task VerifyChecksumsAsync(string root, CancellationToken cancellationToken, bool updatingPreviews = false)
     {
@@ -99,7 +100,7 @@ public static class ReleaseDeliveryFiles
             if (string.IsNullOrWhiteSpace(line)) continue;
             if (line.Length < 67 || line.Substring(64, 2) != "  ") throw new PdmConflictException("发布包文件校验清单格式不正确。");
             listed.Add(line[66..].Replace('\\', '/'));
-            if (updatingPreviews && (line[66..] == "manifest.json" || new[] { ".pdf", ".step", ".stp" }.Contains(Path.GetExtension(line[66..]), StringComparer.OrdinalIgnoreCase))) continue;
+            if (updatingPreviews && (line[66..] == "manifest.json" || IsPreview(line[66..]))) continue;
             var path = StorageLocationPolicy.ResolveUnder(root, line[66..]);
             if (!File.Exists(path) || !await MatchesAsync(path, new FileInfo(path).Length, line[..64], cancellationToken))
                 throw new PdmConflictException($"发布成品{Path.GetFileName(path)}缺失或内容发生变化，已停止恢复发布。");

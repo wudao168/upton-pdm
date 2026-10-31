@@ -123,8 +123,11 @@ internal sealed partial class BatchOperationDialog : Form
     private readonly Button operationCancel = new Button { Text = "取消存档", DialogResult = DialogResult.Cancel };
     private readonly Button selectChanged = new Button { Text = "勾选变更项" };
     private readonly Button showCheckedOnly = new Button { Text = "仅显示勾选" };
+    private readonly Button showUncheckedOnly = new Button { Text = "仅显示未勾选" };
     public string AdditionalDrawingFolder { get; private set; }
     private bool showCheckedOnlyActive;
+    private bool showUncheckedOnlyActive;
+    private bool SelectionFilterActive => showCheckedOnlyActive || showUncheckedOnlyActive;
     private HashSet<Guid> expandedAllFileNodes;
     private readonly Label selectionSummary = new Label
     {
@@ -354,9 +357,6 @@ internal sealed partial class BatchOperationDialog : Form
         var selectAll = new Button { Text = "全选", AutoSize = false, Size = standardButtonSize };
         var clear = new Button { Text = "清除", AutoSize = false, Size = standardButtonSize };
         var supplement = new Button { Text = "补充工程图", AutoSize = false, Size = standardButtonSize };
-        var pendingReferences = new Button { Text = "待补全引用", AutoSize = false, Size = standardButtonSize,
-            Enabled = existingReferenceOwners.Count > 0 };
-        pendingReferences.Click += (_, _) => ShowExistingReferences();
         supplement.Click += (_, _) =>
         {
             using (var picker = new FolderBrowserDialog { Description = "选择工程图目录，系统将按实际模型引用补充关联工程图。" })
@@ -378,11 +378,13 @@ internal sealed partial class BatchOperationDialog : Form
         showCheckedOnly.AutoSize = false;
         showCheckedOnly.Size = standardButtonSize;
         showCheckedOnly.Anchor = AnchorStyles.Right;
+        showUncheckedOnly.AutoSize = false;
+        showUncheckedOnly.Size = new Size(92, standardButtonSize.Height);
         selectAll.Margin = new Padding(0, 0, 6, 0);
         clear.Margin = new Padding(0, 0, 6, 0);
         selectChanged.Margin = new Padding(0, 0, 6, 0);
         supplement.Margin = Padding.Empty;
-        showCheckedOnly.Margin = Padding.Empty;
+        showUncheckedOnly.Margin = Padding.Empty;
         cancel.Margin = new Padding(0, 0, 6, 0);
         execute.Margin = Padding.Empty;
         selectAll.Click += (_, _) => SetAllChecked(true);
@@ -390,16 +392,18 @@ internal sealed partial class BatchOperationDialog : Form
         selectChanged.Click += async (_, _) => await SelectChangedItemsAsync(username);
         recheck.Click += async (_, _) => await AnalyzeArchiveSelectionAsync(false);
         showCheckedOnly.Click += (_, _) => ToggleShowCheckedOnly();
-        foreach (var button in new[] { selectAll, clear, selectChanged, supplement, pendingReferences, showCheckedOnly, cancel, recheck, execute })
+        showUncheckedOnly.Click += (_, _) => ToggleShowUncheckedOnly();
+        standardLibraryTip.SetToolTip(showUncheckedOnly, "显示未勾选图档并展开定位路径；筛选不改变勾选数量或存档范围。");
+        foreach (var button in new[] { selectAll, clear, selectChanged, supplement, showCheckedOnly, showUncheckedOnly, cancel, recheck, execute })
             ArchiveCommandAppearance.Apply(button, button == execute ? Color.FromArgb(21, 126, 77)
                 : button == cancel ? Color.FromArgb(230, 126, 34) : (Color?)null);
-        foreach (var button in new[] { selectAll, clear, selectChanged, supplement, pendingReferences, cancel, recheck }) button.Margin = new Padding(0, 0, 6, 0);
+        foreach (var button in new[] { selectAll, clear, selectChanged, supplement, showCheckedOnly, cancel, recheck }) button.Margin = new Padding(0, 0, 6, 0);
         selectionButtons.Controls.Add(selectAll);
         selectionButtons.Controls.Add(clear);
         selectionButtons.Controls.Add(selectChanged);
         selectionButtons.Controls.Add(supplement);
-        selectionButtons.Controls.Add(pendingReferences);
         selectionButtons.Controls.Add(showCheckedOnly);
+        selectionButtons.Controls.Add(showUncheckedOnly);
         standardLibrary.CheckedChanged += (_, _) =>
         {
             if (standardLibrary.Checked && (!canArchiveStandardLibrary || !checkIn.Checked)) { standardLibrary.Checked = false; return; }
@@ -431,7 +435,7 @@ internal sealed partial class BatchOperationDialog : Form
             RowCount = 1,
             Margin = new Padding(0, 0, 0, 6)
         };
-        selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 510));
+        selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 522));
         selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         selectionBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 252));
         selectionBar.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -544,16 +548,6 @@ internal sealed partial class BatchOperationDialog : Form
 
     private string ExistingReferenceSummary() => existingReferenceOwners.Count == 0 ? string.Empty
         : "；另有 " + existingReferenceOwners.Count + " 项历史引用，提交相关装配时自动核对补齐（不计本次修改）";
-
-    private void ShowExistingReferences()
-    {
-        var details = existingReferenceOwners.Select(pair =>
-            Path.GetFileName(pair.Key) + "\r\n所属存档装配：" + pair.Value.FileName + "\r\n实际引用路径：" + pair.Key);
-        TopMostMessageBox.Show(this,
-            "以下文件属于原存档装配的历史遗漏引用，不计入本次工程变更。提交相关装配时将自动核对并补齐实际文件，保留原装配版本。\r\n"
-            + "仅复用当前项目内内容相符的版本；不会按名称绑定其他项目。原文件缺失、内容变化或身份冲突会在上传前说明原因。\r\n\r\n" + string.Join("\r\n\r\n", details),
-            "历史已有引用待补全", MessageBoxButtons.OK, MessageBoxIcon.Information);
-    }
 
     private static int CountEmbedded(CadTreeNode node) => node == null ? 0
         : (IsEmbedded(node) && (!node.IsInterconnectImport || node.IsStoredImport) ? 1 : 0) + node.Children.Sum(CountEmbedded);
@@ -707,9 +701,10 @@ internal sealed partial class BatchOperationDialog : Form
             .Select(child => CreateOccurrenceNode(child, ownerSelected))
             .Where(child => child != null)
             .ToArray();
-        var includeItem = item != null
-            && (!showCheckedOnlyActive || checkedPaths.Contains(SelectionKey(item.Node)));
-        if (!includeItem && children.Length == 0 && !(embedded && (!showCheckedOnlyActive || owningFileSelected)))
+        var includeEmbedded = embedded && (!SelectionFilterActive
+            || (showCheckedOnlyActive ? owningFileSelected : !owningFileSelected));
+        var includeItem = item != null && MatchesSelectionFilter(item.Node) && (!embedded || includeEmbedded);
+        if (!includeItem && children.Length == 0 && !includeEmbedded)
         {
             return null;
         }
@@ -724,7 +719,8 @@ internal sealed partial class BatchOperationDialog : Form
                 "\r\n配置：", string.IsNullOrWhiteSpace(model.Configuration) ? "默认" : model.Configuration,
                 "\r\n路径：", string.IsNullOrWhiteSpace(model.FullPath) ? "—" : model.FullPath)
         };
-        if (showCheckedOnlyActive && !includeItem && !embedded) node.ToolTipText += "\r\n仅显示层级，未勾选";
+        if (SelectionFilterActive && !includeItem && !embedded)
+            node.ToolTipText += checkedPaths.Contains(SelectionKey(model)) ? "\r\n仅显示层级，已勾选" : "\r\n仅显示层级，未勾选";
         node.Nodes.AddRange(children);
         return node;
     }
@@ -741,19 +737,28 @@ internal sealed partial class BatchOperationDialog : Form
         return node;
     }
 
-    private void ToggleShowCheckedOnly()
+    private bool MatchesSelectionFilter(CadTreeNode node) => showCheckedOnlyActive
+        ? checkedPaths.Contains(SelectionKey(node)) : !showUncheckedOnlyActive || !checkedPaths.Contains(SelectionKey(node));
+
+    private void ToggleShowCheckedOnly() => SetSelectionFilter(!showCheckedOnlyActive, false);
+    private void ToggleShowUncheckedOnly() => SetSelectionFilter(false, !showUncheckedOnlyActive);
+
+    private void SetSelectionFilter(bool checkedOnly, bool uncheckedOnly)
     {
-        if (!showCheckedOnlyActive) expandedAllFileNodes = ExpandedFileNodes();
-        showCheckedOnlyActive = !showCheckedOnlyActive;
+        if (!SelectionFilterActive) expandedAllFileNodes = ExpandedFileNodes();
+        showCheckedOnlyActive = checkedOnly;
+        showUncheckedOnlyActive = uncheckedOnly;
         showCheckedOnly.Text = showCheckedOnlyActive ? "显示全部" : "仅显示勾选";
+        showUncheckedOnly.Text = showUncheckedOnlyActive ? "显示全部" : "仅显示未勾选";
         showCheckedOnly.BackColor = showCheckedOnlyActive ? Color.FromArgb(220, 245, 240) : SystemColors.Control;
+        showUncheckedOnly.BackColor = showUncheckedOnlyActive ? Color.FromArgb(220, 245, 240) : SystemColors.Control;
         RebuildFileTree();
     }
 
     private void RefreshFileTreePresentation()
     {
         selectionSummary.Text = SelectionCountText();
-        if (showCheckedOnlyActive)
+        if (SelectionFilterActive)
         {
             RebuildFileTree();
             return;
@@ -765,7 +770,7 @@ internal sealed partial class BatchOperationDialog : Form
 
     private void RebuildFileTree()
     {
-        var expanded = showCheckedOnlyActive ? null : expandedAllFileNodes
+        var expanded = SelectionFilterActive ? null : expandedAllFileNodes
             ?? (files.Nodes.Count == 0 ? null : ExpandedFileNodes());
         files.BeginUpdate();
         try
@@ -778,7 +783,7 @@ internal sealed partial class BatchOperationDialog : Form
             }
             else
             {
-                foreach (var item in operationItems.Where(item => !showCheckedOnlyActive || checkedPaths.Contains(SelectionKey(item.Node))))
+                foreach (var item in operationItems.Where(item => (!SelectionFilterActive || !IsEmbedded(item.Node)) && MatchesSelectionFilter(item.Node)))
                 {
                     files.Nodes.Add(CreateFlatNode(item));
                 }
@@ -788,15 +793,15 @@ internal sealed partial class BatchOperationDialog : Form
                 .Select(node => (node.Tag as BatchTreeOccurrence)?.Item).Where(item => item != null)
                 .Select(item => SelectionKey(item.Node)), StringComparer.OrdinalIgnoreCase);
             foreach (var item in operationItems.Where(item => !displayed.Contains(SelectionKey(item.Node))
-                && (!showCheckedOnlyActive || checkedPaths.Contains(SelectionKey(item.Node))))) files.Nodes.Add(CreateFlatNode(item));
+                && (!SelectionFilterActive || !IsEmbedded(item.Node)) && MatchesSelectionFilter(item.Node))) files.Nodes.Add(CreateFlatNode(item));
             foreach (TreeNode treeNode in files.Nodes)
             {
                 UpdateTreeNode(treeNode);
             }
-            if (showCheckedOnlyActive)
+            if (SelectionFilterActive)
             {
                 files.ExpandAll();
-                if (files.Nodes.Count == 0) files.Nodes.Add(new TreeNode("尚未勾选图档") { ForeColor = Color.FromArgb(90, 107, 128) });
+                if (files.Nodes.Count == 0) files.Nodes.Add(new TreeNode(showUncheckedOnlyActive ? "没有未勾选图档" : "尚未勾选图档") { ForeColor = Color.FromArgb(90, 107, 128) });
             }
             else
             {
@@ -827,7 +832,7 @@ internal sealed partial class BatchOperationDialog : Form
         }
         if (ArchiveToStandardLibrary) return;
         if (node?.Tag is BatchTreeOccurrence embedded && IsEmbedded(embedded.Model)) return;
-        if (showCheckedOnlyActive && node?.Tag is BatchTreeOccurrence context && context.Item == null) return;
+        if (SelectionFilterActive && node?.Tag is BatchTreeOccurrence context && context.Item == null) return;
         var paths = checkIn.Checked
             ? node?.Tag is BatchTreeOccurrence occurrence && occurrence.Item != null && CanSelectNode(occurrence.Item.Node)
                 ? new[] { SelectionKey(occurrence.Item.Node) } : Array.Empty<string>()
@@ -964,7 +969,7 @@ internal sealed partial class BatchOperationDialog : Form
             selectable.Add(SelectionKey(occurrence.Item.Node));
         }
 
-        if (checkIn.Checked || showCheckedOnlyActive && occurrence?.Item == null)
+        if (checkIn.Checked || SelectionFilterActive && occurrence?.Item == null)
         {
             selectable.Clear();
             if (occurrence?.Item != null && CanSelectNode(occurrence.Item.Node)) selectable.Add(SelectionKey(occurrence.Item.Node));
@@ -973,7 +978,8 @@ internal sealed partial class BatchOperationDialog : Form
         var state = selectable.Count == 0 || checkedCount == 0
             ? SelectionState.Unchecked
             : checkedCount == selectable.Count ? SelectionState.Checked : SelectionState.Mixed;
-        node.StateImageIndex = (int)state;
+        node.StateImageIndex = SelectionFilterActive && occurrence != null && occurrence.Item == null && !IsEmbedded(model)
+            && checkedPaths.Contains(SelectionKey(model)) ? (int)SelectionState.Checked : (int)state;
         node.ForeColor = selectable.Count == 0 ? Color.FromArgb(145, 155, 168) : Color.FromArgb(31, 49, 72);
         return selectable;
     }

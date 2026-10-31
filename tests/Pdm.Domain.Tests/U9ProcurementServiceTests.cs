@@ -27,10 +27,12 @@ public sealed class U9ProcurementServiceTests
         var repository = new InMemoryPdmRepository(time);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         var itemId = Guid.NewGuid();
+        var publishedFile = new BomFileReference(Guid.NewGuid(), Guid.NewGuid(), "Drawing2D", "采购V01.pdf", 1, 10, new string('A',64), "标准化", time.GetUtcNow(), "标准物料", "图纸");
         var publishedItem = new BomItem(
             itemId, project.Id, BomKind.Standard, 1, "STD-001", "已发布名称", 2, "001", null, "M6", "A", true)
         {
-            ImpactStage = ProjectPlanStage.Commissioning
+            ImpactStage = ProjectPlanStage.Commissioning,
+            Files = [publishedFile]
         };
         await repository.ReplaceBomAsync(project.Id, BomKind.Standard,
         [
@@ -38,6 +40,7 @@ public sealed class U9ProcurementServiceTests
             {
                 Name = "当前名称",
                 Quantity = 99,
+                Files = [publishedFile with { Id = Guid.NewGuid(), FileName = "当前V02.pdf", VersionNumber = 2 }],
                 ImpactStage = ProjectPlanStage.Assembly
             }
         ], default);
@@ -65,6 +68,9 @@ public sealed class U9ProcurementServiceTests
         Assert.Equal(ProjectPlanStage.Assembly, row.ImpactStage);
         Assert.Equal(2, row.Quantity);
         Assert.Equal("已发布名称", row.MaterialName);
+        Assert.Equal(publishedFile, Assert.Single(row.Files));
+        Assert.Equal(publishedFile, Assert.Single(await service.ListPublishedFilesAsync(project.Id, "STD-001", "admin", UserRole.Administrator, default)));
+        Assert.Empty(await service.ListPublishedFilesAsync(project.Id, "其他料号", "admin", UserRole.Administrator, default));
     }
 
     [Fact]

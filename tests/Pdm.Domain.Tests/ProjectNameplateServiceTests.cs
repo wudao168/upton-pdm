@@ -10,13 +10,14 @@ public sealed class ProjectNameplateServiceTests
     [InlineData("HardwareEngineer", UserRole.Engineer)]
     [InlineData("ProcessReviewer", UserRole.ProcessReviewer)]
     [InlineData("Approver", UserRole.Approver)]
-    public async Task HardwareAndStandardizationCanMaintainWithoutProjectEdit(string roleCode, UserRole role)
+    public async Task AssignedHardwareCanMaintainWithoutProjectEdit(string roleCode, UserRole role)
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         await repository.CreateUserAsync(new(Guid.NewGuid(), "nameplate-editor", "铭牌维护", "unused", role, true, RoleCode: roleCode), default);
         await repository.SetRolePermissionsAsync(roleCode, [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit], default);
-        var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(), TimeProvider.System);
+        await repository.SetProjectPhaseOwnersAsync(project.Id, new Dictionary<string, string> { ["ElectricalHardware"] = "nameplate-editor" }, "admin", default);
+        var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(repository), TimeProvider.System);
         Assert.True((await service.GetAsync(project.Id, "nameplate-editor", role, default)).CanEdit);
         Assert.True((await service.SaveAsync(project.Id, new(true, "380V 50Hz / 5A", "", "", "", null, 0), "nameplate-editor", role, default)).Nameplate.Enabled);
         await repository.SetRolePermissionsAsync(roleCode, [], default);
@@ -24,7 +25,7 @@ public sealed class ProjectNameplateServiceTests
     }
 
     [Fact]
-    public async Task NameplatePermissionIsIndependentOfDesignerAssignment()
+    public async Task NameplatePermissionRequiresTheAssignedProjectPosition()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var root = await repository.CreateNumberedProjectAsync(new(Guid.Parse("70000000-0000-0000-0000-000000000001"), "C", 2,
@@ -37,19 +38,17 @@ public sealed class ProjectNameplateServiceTests
         await repository.CreateUserAsync(new(Guid.NewGuid(), "electrical", "电气工程师", "unused", UserRole.Engineer, true, RoleCode: "ElectricalEngineer"), default);
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit], default);
         await repository.SetRolePermissionsAsync("ElectricalEngineer", [PermissionCodes.ProjectContentView], default);
-        var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(), TimeProvider.System);
+        var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(repository), TimeProvider.System);
         Assert.True((await service.GetAsync(first.Id, "engineer", UserRole.Engineer, default)).CanEdit);
         await service.SaveAsync(first.Id, new(true, "", "", "", "", null, 0), "engineer", UserRole.Engineer, default);
         foreach (var id in new[] { root.Id, second.Id, other.Id })
-            Assert.True((await service.GetAsync(id, "engineer", UserRole.Engineer, default)).CanEdit);
+            Assert.False((await service.GetAsync(id, "engineer", UserRole.Engineer, default)).CanEdit);
         Assert.False((await service.GetAsync(first.Id, "electrical", UserRole.Engineer, default)).CanEdit);
         foreach (var id in new[] { root.Id, first.Id, second.Id })
         {
-            Assert.True((await service.GetAsync(id, "lead", UserRole.Engineer, default)).CanEdit);
-            var version = (await service.GetAsync(id, "lead", UserRole.Engineer, default)).Nameplate.RowVersion;
-            await service.SaveAsync(id, new(true, "", "", "", "", null, version), "lead", UserRole.Engineer, default);
+            Assert.False((await service.GetAsync(id, "lead", UserRole.Engineer, default)).CanEdit);
         }
-        Assert.True((await service.GetAsync(other.Id, "lead", UserRole.Engineer, default)).CanEdit);
+        Assert.False((await service.GetAsync(other.Id, "lead", UserRole.Engineer, default)).CanEdit);
     }
 
     [Fact]
@@ -58,7 +57,7 @@ public sealed class ProjectNameplateServiceTests
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var root = Assert.Single(await repository.ListProjectsAsync(default));
         var other = await repository.CreateProjectAsync(new("NAMEPLATE-2", "第二台设备", "admin", "D:/test", "D:/release"), "admin", default);
-        var store = new InMemoryProjectNameplateRepository();
+        var store = new InMemoryProjectNameplateRepository(repository);
         var service = new ProjectNameplateService(repository, store, TimeProvider.System);
         var saved = await service.SaveAsync(root.Id, new(true, " AC 380V ", "1000×500×800 mm", "0.6 MPa", "500 kg", new(2026, 10, 2), 0), "admin", UserRole.Administrator, default);
         Assert.True(saved.Nameplate.Enabled);
@@ -77,7 +76,7 @@ public sealed class ProjectNameplateServiceTests
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
-        var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(), TimeProvider.System);
+        var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(repository), TimeProvider.System);
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView], default);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.GetAsync(project.Id, "unknown", UserRole.Engineer, default));
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView], default);
@@ -89,7 +88,7 @@ public sealed class ProjectNameplateServiceTests
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
-        var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(), TimeProvider.System);
+        var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(repository), TimeProvider.System);
         var template = NameplateTemplate.Default with { Title = "UPTON 设备铭牌" };
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveTemplateAsync(template, "engineer", UserRole.Engineer, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveTemplateAsync(template with { Labels = new Dictionary<string, string>() }, "admin", UserRole.Administrator, default));
@@ -103,7 +102,7 @@ public sealed class ProjectNameplateServiceTests
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
-        var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(), TimeProvider.System);
+        var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(repository), TimeProvider.System);
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(project.Id, new(true, new string('x', 101), "", "", "", null, 0), "admin", UserRole.Administrator, default));
     }
 }

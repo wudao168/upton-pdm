@@ -56,8 +56,9 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
     public async Task<OplView> GetAsync(Guid projectId, string actor, UserRole role, CancellationToken ct, bool includePeople = true)
     {
         var (root, manager) = await AccessAsync(projectId, actor, role, ct);
+        var writable = await projects.HasUserPermissionAsync(actor, role, ProjectCenterPermissions.Write, ct);
         var rows = (await issues.ListAsync(root.Id, ct)).OrderByDescending(x => x.Number)
-            .Select(x => new OplRow(x, manager || Same(x.CreatedBy, actor) || Same(x.Owner, actor), manager || Same(x.CreatedBy, actor))).ToArray();
+            .Select(x => new OplRow(x, writable && (manager || Same(x.CreatedBy, actor) || Same(x.Owner, actor)), writable && (manager || Same(x.CreatedBy, actor)))).ToArray();
         var people = new List<OplPerson>();
         if (includePeople) foreach (var user in await projects.ListUsersAsync(ct))
             if (user.IsActive && await projects.HasProjectContentReadAccessAsync(root.Id, user.Username, user.Role, ct)) people.Add(new(user.Username, user.DisplayName));

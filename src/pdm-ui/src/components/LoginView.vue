@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { Eye, EyeOff, LockKeyhole, UserRound } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
-import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { postDesktopMessage, requestPasswordReset } from '../api'
 import companyLogo from '../assets/company-logo-white.png'
 import melonJellyUrl from '../assets/melon-jelly.html?url'
+import pirateJellyUrl from '../assets/pirate-jelly.html?url'
 
 const props = withDefaults(defineProps<{ pending: boolean; error: string; online: boolean; compact?: boolean }>(), { compact: false })
 const emit = defineEmits<{ submit: [username: string, password: string, rememberCredentials: boolean] }>()
@@ -13,6 +14,9 @@ const desktopCredentialStorageAvailable = Boolean(window.chrome?.webview)
 const username = ref('')
 const password = ref('')
 const rememberCredentials = ref(desktopCredentialStorageAvailable)
+const scene = ref<'melon' | 'pirate'>('melon')
+const sceneUrl = computed(() => scene.value === 'melon' ? melonJellyUrl : pirateJellyUrl)
+const sceneTitle = computed(() => scene.value === 'melon' ? '西瓜软糖：拖动拉伸，松手回弹' : '海盗果冻：拖动海水造浪，点击船只开炮')
 const showPassword = ref(false)
 const passwordHelpVisible = ref(false)
 const passwordResetPending = ref(false)
@@ -62,12 +66,17 @@ async function submitPasswordReset() {
 <template>
   <main class="pdm-login-shell has-melon" :class="{ 'is-compact': props.compact }">
     <section class="pdm-login-layout">
-      <aside class="pdm-login-melon" aria-label="西瓜软糖交互区">
+      <aside class="pdm-login-melon" :aria-label="scene === 'melon' ? '西瓜软糖交互区' : '海盗果冻交互区'">
+        <div class="pdm-login-scene-picker" role="group" aria-label="切换互动场景">
+          <button type="button" :aria-pressed="scene === 'melon'" @click="scene = 'melon'">西瓜软糖</button>
+          <button type="button" :aria-pressed="scene === 'pirate'" @click="scene = 'pirate'">海盗果冻</button>
+        </div>
         <iframe
+          :key="scene"
           class="pdm-login-melon-frame"
-          :src="`${melonJellyUrl}?embed=login`"
+          :src="`${sceneUrl}?embed=login`"
           sandbox="allow-scripts"
-          title="西瓜软糖：拖动拉伸，松手回弹"
+          :title="sceneTitle"
         />
       </aside>
 
@@ -164,7 +173,12 @@ async function submitPasswordReset() {
 <style scoped>
 .pdm-login-shell.has-melon { height: 100vh; height: 100dvh; min-height: 0; display: block; padding: 0; overflow: hidden; background: #f6f5f0; }
 .pdm-login-shell.has-melon .pdm-login-layout { position: relative; width: 100%; max-width: 1920px; height: 100%; min-height: 0; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) 380px; }
-.pdm-login-melon { min-width: 0; min-height: 0; height: 100%; overflow: hidden; }
+.pdm-login-melon { min-width: 0; min-height: 0; height: 100%; overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.pdm-login-scene-picker { position: relative; z-index: 2; display: flex; gap: 4px; padding: 16px 24px 8px; }
+.pdm-login-scene-picker button { min-height: 32px; padding: 6px 15px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #687064; font: inherit; font-size: 13px; cursor: pointer; }
+.pdm-login-scene-picker button[aria-pressed="true"] { border-color: #d8ddce; background: #fffef9; color: #294332; }
+.pdm-login-scene-picker button:hover { background: #e8eddf; }
+.pdm-login-scene-picker button:focus-visible { outline: 2px solid #42684d; outline-offset: 2px; }
 .pdm-login-melon-frame { display: block; width: 100%; height: 100%; border: 0; background: #f6f5f0; }
 .pdm-login-shell.has-melon .pdm-login-content { min-width: 0; min-height: 0; height: 100%; display: grid; grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr); justify-items: center; padding: 24px 28px; background: transparent; }
 .pdm-login-shell.has-melon .pdm-login-compact-brand { grid-row: 1; align-self: end; display: flex; margin-bottom: 28px; }

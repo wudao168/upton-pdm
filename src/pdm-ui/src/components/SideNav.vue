@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Boxes, ClipboardCheck, Clock, FileText, FolderKanban, LayoutDashboard, Library, Settings } from '@lucide/vue'
+import { Boxes, ClipboardCheck, Clock, FileCode, FileText, FolderKanban, LayoutDashboard, Library, Settings } from '@lucide/vue'
 import { repairMojibake } from '../mojibake'
-import navBrandLogo from '../assets/upton-nav-lockup.svg'
-import navBrandIcon from '../assets/upton-nav-icon.png'
-import ConnectionLights from './ConnectionLights.vue'
+import navBrandLogo from '../assets/upton-horizontal-brand-white.png'
 
 type NavKey = 'work-hours' | 'project-applications' | 'project-calendar' | 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'stocked-materials' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
 
@@ -124,46 +122,57 @@ async function openVersionInfo() {
   }
 }
 
-const items = [
-  { key: 'project-workbench', label: '项目总览', icon: LayoutDashboard },
-  { key: 'project-center', label: '项目中心', icon: FolderKanban },
-  { key: 'production-drawings', label: '制造中心', icon: FileText },
-  { key: 'standard-library', label: '标准物料', icon: Library },
-  { key: 'materials', label: '料品管理', icon: Boxes },
-  { key: 'work-hours', label: '工时管理', icon: Clock },
-  { key: 'tasks', label: '我的待办', icon: ClipboardCheck },
-] satisfies Array<{ key: NavKey; label: string; icon: typeof FolderKanban }>
+const groups = [
+  { key: 'primary', label: '', items: [
+    { key: 'project-workbench', label: '项目总览', icon: LayoutDashboard, iconColor: '#4f6fb5' },
+    { key: 'project-center', label: '项目中心', icon: FolderKanban, iconColor: '#2f7e78' },
+    { key: 'work-hours', label: '工时管理', icon: Clock, iconColor: '#a47a32' },
+    { key: 'tasks', label: '我的待办', icon: ClipboardCheck, iconColor: '#8063aa' },
+  ] },
+  { key: 'production', label: '生产', items: [
+    { key: 'production-drawings', label: '制造中心', icon: FileText, iconColor: '#b96643' },
+  ] },
+  { key: 'standardization', label: '标准化', items: [
+    { key: 'standard-library', label: '标准物料', icon: Library, iconColor: '#5d8045' },
+    { key: 'program-templates', label: '标准程序', icon: FileCode, iconColor: '#367f9f' },
+    { key: 'materials', label: '料品管理', icon: Boxes, iconColor: '#ac5873' },
+  ] },
+] satisfies Array<{ key: string; label: string; items: Array<{ key: NavKey; label: string; icon: typeof FolderKanban; iconColor: string }> }>
 </script>
 
 <template>
   <aside class="pdm-sidebar" :class="{ 'is-collapsed': props.collapsed }" aria-label="主导航">
     <div class="pdm-sidebar__brand">
-      <img class="pdm-sidebar__brand-logo" :src="props.collapsed ? navBrandIcon : navBrandLogo" alt="UPTON PLM" draggable="false">
+      <svg class="pdm-sidebar__brand-logo" :viewBox="props.collapsed ? '0 0 527 346' : '0 0 1712 346'" role="img" aria-label="UPTON" overflow="hidden">
+        <image :href="navBrandLogo" width="1712" height="346" />
+      </svg>
     </div>
     <nav class="pdm-sidebar__nav">
-      <button
-        v-for="item in items.filter(entry => entry.key !== 'materials' || props.canViewMaterials)"
-        :key="item.label"
-        type="button"
-        class="pdm-nav-item"
-        :class="{ 'is-active': props.active === item.key }"
-        :aria-current="props.active === item.key ? 'page' : undefined"
-        :aria-label="props.collapsed ? item.label : undefined"
-        :title="props.collapsed ? item.label : undefined"
-        @click="emit('navigate', item.key, item.label)"
-      >
-        <component :is="item.icon" :size="18" aria-hidden="true" />
-        <span>{{ item.label }}</span>
-        <em v-if="item.key === 'materials' && props.materialCount">{{ props.materialCount }}</em>
-        <em v-else-if="item.key === 'tasks' && props.approvalCount">{{ props.approvalCount }}</em>
-      </button>
+      <div v-for="group in groups" :key="group.key" class="pdm-nav-group" role="group" :aria-label="group.label || '常用功能'">
+        <p v-if="group.label" class="pdm-nav-group__label" aria-hidden="true">{{ group.label }}</p>
+        <button
+          v-for="item in group.items.filter(entry => entry.key !== 'materials' || props.canViewMaterials)"
+          :key="item.label"
+          type="button"
+          class="pdm-nav-item"
+          :class="{ 'is-active': props.active === item.key }"
+          :aria-current="props.active === item.key ? 'page' : undefined"
+          :aria-label="props.collapsed ? item.label : undefined"
+          :title="props.collapsed ? item.label : undefined"
+          @click="emit('navigate', item.key, item.label)"
+        >
+          <component :is="item.icon" :size="14" :style="{ color: item.iconColor }" aria-hidden="true" />
+          <span>{{ item.label }}</span>
+          <em v-if="item.key === 'materials' && props.materialCount">{{ props.materialCount }}</em>
+          <em v-else-if="item.key === 'tasks' && props.approvalCount">{{ props.approvalCount }}</em>
+        </button>
+      </div>
     </nav>
     <div class="pdm-sidebar__footer">
       <button type="button" class="pdm-sidebar__version" :title="`${versionTitle}，点击查看详情`" :aria-label="`${versionTitle}，点击查看详情`" @click="openVersionInfo">
         <span class="pdm-sidebar__version-icon" aria-hidden="true" />
         <span class="pdm-sidebar__version-copy">{{ displayVersion }}</span>
       </button>
-      <ConnectionLights :token="props.token" />
       <button
         v-if="props.canManageSystem"
         type="button"
@@ -174,7 +183,7 @@ const items = [
         :title="props.collapsed ? '系统设置' : undefined"
         @click="emit('navigate', 'admin', '系统设置')"
       >
-        <Settings :size="18" aria-hidden="true" /><span>系统设置</span>
+        <Settings :size="14" style="color: #65768a" aria-hidden="true" /><span>系统设置</span>
       </button>
     </div>
     <el-drawer v-model="versionDialogOpen" title="系统版本信息" size="420px" append-to-body>

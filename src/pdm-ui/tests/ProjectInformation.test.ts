@@ -4,6 +4,8 @@ import { defineComponent } from 'vue'
 import ProjectInformation from '../src/components/ProjectInformation.vue'
 import { resolveUserDisplayName, userDisplayNameKey } from '../src/userDisplay'
 import type { OrganizationDirectory, PdmUser, ProjectSummary } from '../src/types'
+import type { ProjectNameplateView } from '../src/projectNameplate'
+import * as api from '../src/api'
 vi.mock('../src/api', async importOriginal => ({ ...await importOriginal<typeof import('../src/api')>(), readProjectNameplate: vi.fn(async () => ({ nameplate: { enabled: false }, canEdit: false })), getProjectPositionMembers: vi.fn(async () => ({ positions: [], members: {} })) }))
 const users = [
   { username: 'mechanical', displayName: '机械员', role: 'Engineer', roles: [] },
@@ -16,7 +18,7 @@ const Select = defineComponent({ props: ['modelValue', 'multiple'], emits: ['upd
 const Dialog = defineComponent({ props: ['modelValue'], template: '<div v-if="modelValue" role="dialog"><slot /><slot name="footer" /></div>' })
 let wrapper: ReturnType<typeof mount>
 function setup(allow = true) {
-  const root = { id: 'root', code: 'P1', name: '主项目', organizationId: 'org', executionUnitId: 'unit', primaryProjectManager: 'pm', quantity: 1, serialNumbers: [], designers: ['mechanical'], collaborativeProjectManagers: [], canAssignDesigners: allow, phaseOwners: { ElectricalEngineer: 'electrical', ElectricalHardware: 'hardware', MechanicalAssembly: 'fitter', ElectricalAssembly: 'electrician', Acceptance: 'mechanical' } } as unknown as ProjectSummary
+  const root = { id: 'root', code: 'P1', name: '主项目', organizationId: 'org', executionUnitId: 'unit', primaryProjectManager: 'pm', quantity: 1, serialNumbers: [], designers: ['mechanical'], collaborativeProjectManagers: [], canReadContent: true, canAssignDesigners: allow, phaseOwners: { ElectricalEngineer: 'electrical', ElectricalHardware: 'hardware', MechanicalAssembly: 'fitter', ElectricalAssembly: 'electrician', Acceptance: 'mechanical' } } as unknown as ProjectSummary
   const child = { ...root, id: 'child', code: 'P1-1', parentProjectId: root.id, designers: [], phaseOwners: {} } as ProjectSummary
   const projects = [root, child]
   const save = vi.fn(async (id, owners) => ({ ...projects.find(item => item.id === id)!, phaseOwners: Object.fromEntries(Object.entries(owners).filter(([, value]) => value)) }))
@@ -71,4 +73,19 @@ it('cancels without saving and hides assignment buttons without permission', asy
   await wrapper.get('button[aria-label="取消人员分配"]').trigger('click'); expect(save).not.toHaveBeenCalled()
   wrapper.unmount(); setup(false)
   expect(wrapper.find('button[aria-label="分配电气工程师 P1"]').exists()).toBe(false)
+})
+
+it.each([
+  ['执行已填写', true, false, false], ['硬件已填写', false, true, false],
+  ['待硬件确认', true, true, false], ['已发布', true, true, true],
+] as const)('铭牌入口根据实际填写与发布记录显示%s', async (label, execution, hardware, published) => {
+  vi.mocked(api.readProjectNameplate).mockResolvedValue({
+    nameplate: { projectId: 'root', enabled: true, dimensions: execution ? '1500mm x 1800mm x 2200mm' : '', weight: execution ? '12000 kg' : '', airPressure: execution ? '0.6 MPa' : '', factoryDate: execution ? '2026-10-01' : null, powerSupply: hardware ? '380V 50Hz / 5A' : '', rowVersion: 1, executionSavedAt: execution ? '2026-10-30T01:00:00Z' : null, hardwareSavedAt: hardware ? '2026-10-30T01:01:00Z' : null, releasePackageId: published ? 'release' : null },
+    name: '设备', model: 'AK-001', serialNumbers: ['70000001'], template: { title: '设备铭牌', labels: {}, rowVersion: 0 }, canEdit: !published, canEditExecution: true, canEditHardware: true, canConfirm: !published, canManageTemplate: false,
+  } satisfies ProjectNameplateView)
+  setup(); await flushPromises()
+  const entry = wrapper.get('button[aria-label="查看铭牌 P1"]')
+  expect(entry.text()).toBe(label)
+  expect(entry.classes('is-nameplate-published')).toBe(published)
+  expect(entry.attributes('title')).toContain(published ? '内容只读' : '可继续编辑')
 })

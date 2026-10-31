@@ -43,6 +43,25 @@ internal static class Program
         var start = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, "\"" + root + "\" seed") { UseShellExecute = false, CreateNoWindow = true };
         using (var child = Process.Start(start)) { child.WaitForExit(); Check(child.ExitCode == 0, "独立进程产生待传日志并退出"); }
         var handler = new Receiver(); Set("Http", new HttpClient(handler));
+        // Keep acceptance signing isolated from the current user's real device credential.
+        typeof(ClientDeviceIdentity).GetField("key", BindingFlags.Static | BindingFlags.NonPublic).SetValue(null,
+            new System.Security.Cryptography.RSACryptoServiceProvider(2048) { PersistKeyInCsp = false });
+        if (args.Length > 1 && args[1] == "agent")
+        {
+            ClientDiagnostics.Initialize("preview-agent", "1.2.2");
+            ((Timer)typeof(ClientDiagnostics).GetField("timer", BindingFlags.Static | BindingFlags.NonPublic).GetValue(null)).Change(Timeout.Infinite, Timeout.Infinite);
+            ClientDiagnostics.BindPreviewAgent("http://client-log-test/", "agent-secret");
+            ClientDiagnostics.Record("error", "转图失败", "batch=pc07 password=hidden-value");
+            handler.Offline = true; await ClientDiagnostics.UploadAsync();
+            Check(!Directory.GetFiles(root, "*.sent", SearchOption.AllDirectories).Any(), "代理断网保留待传日志");
+            handler.Offline = false; handler.WrongReceipt = true; Retry(); await ClientDiagnostics.UploadAsync();
+            Check(!Directory.GetFiles(root, "*.sent", SearchOption.AllDirectories).Any(), "代理无效回执不删除待传日志");
+            handler.WrongReceipt = false; Retry(); await ClientDiagnostics.UploadAsync();
+            Check(handler.Messages.Any(message => message.Contains("pc07") && message.Contains("preview-agent")), "代理错误和上下文补传");
+            Check(handler.Messages.All(message => !message.Contains("hidden-value")), "代理日志自动脱敏");
+            Check(handler.AgentRequests > 0, "代理使用专用上传接口和登记令牌，不使用管理员登录凭证");
+            return;
+        }
         ClientDiagnostics.Initialize("desktop", "acceptance");
         ((Timer)typeof(ClientDiagnostics).GetField("timer", BindingFlags.Static | BindingFlags.NonPublic).GetValue(null)).Change(Timeout.Infinite, Timeout.Infinite);
         ClientDiagnostics.Bind("http://client-log-test/", Token("user-a"), "company-a");
@@ -126,8 +145,14 @@ internal static class Program
         public bool Offline, WrongReceipt;
         public HttpStatusCode Status = HttpStatusCode.OK;
         public readonly List<string> Messages = new List<string>();
+        public int AgentRequests;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            if (request.RequestUri.AbsolutePath.Contains("preview-agent"))
+            {
+                Check(request.Headers.Authorization == null && request.Headers.GetValues("X-Pdm-Agent-Token").Single() == "agent-secret", "代理上传身份有效");
+                AgentRequests++;
+            }
             if (Offline) throw new HttpRequestException("模拟离线");
             using (var input = new MemoryStream(await request.Content.ReadAsByteArrayAsync()))
             using (var gzip = new GZipStream(input, CompressionMode.Decompress))

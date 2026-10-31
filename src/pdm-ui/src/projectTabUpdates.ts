@@ -1,5 +1,6 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { ProjectSummary } from './types'
+import { useProjectCenterAccess } from './projectCenterAccess'
 
 type Context = { project: ProjectSummary; currentUsername?: string; token?: string; activeTab: string }
 type Row = Record<string, any>
@@ -68,6 +69,7 @@ export function hasProjectTabUpdate(previous: Snapshot, next: Snapshot) {
   return previous.fingerprint !== next.fingerprint
 }
 export function useProjectTabUpdates(context: Context) {
+  const projectAccess = useProjectCenterAccess()
   const latest = ref<Record<string, Update>>({})
   let generation = 0, running = false, serial = 0
   const controllers = new Set<AbortController>(), readOrder: Record<string, number> = {}
@@ -89,7 +91,7 @@ export function useProjectTabUpdates(context: Context) {
   }
   async function refreshTab(tab: string, acknowledge = false) {
     const urls = routes(context.project)[tab]
-    if (!urls || !context.token || !context.currentUsername) return
+    if (!projectAccess.canViewTab(tab) || !urls || !context.token || !context.currentUsername) return
     const current = generation, project = context.project, order = ++serial
     const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 20000)
     controllers.add(controller)

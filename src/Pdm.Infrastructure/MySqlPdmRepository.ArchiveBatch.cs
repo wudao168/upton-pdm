@@ -19,6 +19,7 @@ public sealed partial class MySqlPdmRepository
         IReadOnlyList<ArchiveBatchFile> files, CancellationToken cancellationToken)
     {
         var ordered = ArchiveBatchRules.Order(files);
+        var planned = ordered.Select(file => file.DocumentId).ToHashSet();
         var projectId = ordered[0].Commit.ReferenceSnapshot.ProjectId;
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -69,12 +70,15 @@ public sealed partial class MySqlPdmRepository
             }
             foreach (var node in ArchiveBatchRules.References(commit.ReferenceSnapshot.Root).Where(node => node.Status != ReferenceNodeStatus.Virtual))
             {
-                if (node.DocumentId is not Guid id || node.Revision is null) throw new PdmRuleException("引用图档未完整存档，整批提交已取消：" + node.FileName);
+                if (node.DocumentId is not Guid id) throw new PdmRuleException("引用图档未完整存档，整批提交已取消：" + node.FileName);
+                var deferredContext = ArchiveDeferredReferences.IsDeferred(node) && planned.Contains(id);
+                if (node.Revision is null && !deferredContext) throw new PdmRuleException("引用图档未完整存档，整批提交已取消：" + node.FileName);
                 var document = lockedDocuments[id];
                 if (document.DeletedAt.HasValue || document.PurgedAt.HasValue
                     || document.Kind != node.Kind || !string.Equals(document.FileName, node.FileName, StringComparison.OrdinalIgnoreCase))
                     throw new PdmRuleException("引用图档的项目或存档版本无效，整批提交已取消：" + node.FileName);
-                var reference = (DocumentId: id, Revision: node.Revision.Value.Display);
+                if (deferredContext) continue;
+                var reference = (DocumentId: id, Revision: node.Revision!.Value.Display);
                 if (!verifiedReferences.Contains(reference))
                 {
                     var exists = await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
@@ -87,6 +91,8 @@ public sealed partial class MySqlPdmRepository
             results[file.DocumentId] = await CheckInVersionCoreAsync(connection, transaction, file.DocumentId, actor, sessionId,
                 commit, file.DrawingReviewWritebackId, cancellationToken, batchId);
             lockedDocuments[file.DocumentId] = results[file.DocumentId].Document;
+            if (results[file.DocumentId].Version is { } preparedVersion)
+                verifiedReferences.Add((file.DocumentId, preparedVersion.Revision.Display));
             if (commit.ReferenceSnapshot.Root.Kind == DocumentKind.Drawing)
             {
                 var models = commit.ReferenceSnapshot.Root.Children.Where(node => node.Kind is DocumentKind.Assembly or DocumentKind.Part)
@@ -103,6 +109,22 @@ public sealed partial class MySqlPdmRepository
                         """, new { DrawingId = file.DocumentId, ModelId = modelId, ProjectId = projectId, Now = timeProvider.GetUtcNow().UtcDateTime },
                         transaction, cancellationToken: cancellationToken));
             }
+        }
+        foreach (var file in ordered)
+        {
+            var result = results[file.DocumentId];
+            if (!result.VersionCreated || result.Version is null) continue;
+            var root = ArchiveBatchRules.BindContextReferences(result.Version.ReferenceSnapshot, results);
+            var version = result.Version with { ReferenceSnapshot = root };
+            var snapshot = ArchiveSafety.Rehash(file.Commit.ReferenceSnapshot with { Root = root });
+            var rootJson = JsonSerializer.Serialize(root, jsonOptions);
+            // Never UPDATE a document_version, even one created in this transaction:
+            // the immutable trigger deliberately protects every stored version.
+            await InsertVersionAsync(connection, transaction, version, cancellationToken);
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE reference_snapshot SET root_json=@RootJson,sha256=@Sha256 WHERE id=@Id AND root_document_id=@DocumentId",
+                new { RootJson = rootJson, snapshot.Sha256, Id = snapshot.SnapshotId, DocumentId = version.DocumentId }, transaction, cancellationToken: cancellationToken));
+            results[file.DocumentId] = result with { Version = version };
         }
         await RefreshWorkingReferenceRootsAsync(connection, transaction, projectId, actor, timeProvider.GetUtcNow(), cancellationToken);
         var receipt = new ArchiveBatchReceipt(batchId, projectId, actor, requestHash, ordered.Select(file => results[file.DocumentId]).ToArray()) { FollowupPending = true };

@@ -66,7 +66,7 @@ public sealed class ClientLogStore
     public async Task SaveAsync(ClientLogBatch batch, Guid companyId, string username, CancellationToken ct)
     {
         if (!Guid.TryParse(batch.BatchId, out var batchId) || !Guid.TryParse(batch.DeviceId, out var deviceId)
-            || batch.Component is not ("desktop" or "solidworks") || string.IsNullOrWhiteSpace(batch.Machine) || batch.Machine.Length > 160
+            || batch.Component is not ("desktop" or "solidworks" or "preview-agent") || string.IsNullOrWhiteSpace(batch.Machine) || batch.Machine.Length > 160
             || batch.Entries is not { Length: > 0 and <= 2000 }) throw new PdmRuleException("日志格式不正确，请升级客户端后重试。");
         var now = clock.GetUtcNow();
         var kind = batch.Entries[0]?.Kind;

@@ -15,6 +15,8 @@ public sealed partial class PdmAddin
         internal string OwnerHash, Path, Hash, Scope;
         internal string Owner, Source;
         internal CadTreeNode Node;
+        internal bool IsContext;
+        internal string OwnerConfiguration;
     }
     private readonly Dictionary<string, RecoveredArchiveReference> recoveredArchiveReferences =
         new Dictionary<string, RecoveredArchiveReference>(StringComparer.OrdinalIgnoreCase);
@@ -38,6 +40,9 @@ public sealed partial class PdmAddin
             .Where(node => !string.IsNullOrWhiteSpace(node.FullPath)).GroupBy(node => node.FullPath, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
         var pending = new Queue<CadTreeNode>(selected.Select(item => item.Node));
+        var reads = new ArchiveReadContext(this);
+        var contextOwnersRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var directContextOwnersRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var problems = new List<string>();
         var local = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
@@ -60,28 +65,40 @@ public sealed partial class PdmAddin
         }
         void Bind(CadTreeNode owner, string source, CadTreeNode target, bool recovered = false)
         {
+            var unchangedControlled = target.DocumentId.HasValue && PdmDocumentIdentityStore.TryReadLocalMetadata(target.FullPath, out var baseline)
+                && baseline.DocumentId == target.DocumentId && baseline.VersionId.HasValue
+                && (string.Equals(ArchiveFileFingerprint.Read(target.FullPath), baseline.Sha256, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(ArchiveFileFingerprint.Read(target.FullPath), baseline.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase));
+            if (owner.ConfirmedArchivePaths != null && !owner.ConfirmedArchivePaths.Contains(target.FullPath) && !unchangedControlled)
+            {
+                ArchiveMissingReferencePolicy.OmitUnselected(owner, target);
+                return;
+            }
             if (!owner.Children.Concat(owner.ReferencedModels).Any(node => PathsEqual(node.FullPath, target.FullPath)))
             {
                 var link = new CadTreeNode { FullPath = target.FullPath, SourceReferencePath = source, FileName = target.FileName,
                     DisplayName = target.DisplayName, DrawingNumber = target.DrawingNumber, Kind = target.Kind,
                     Role = CadReferenceRole.ExternalFileDependency, Configuration = target.Configuration,
                     InstancePath = owner.InstancePath + "/受控引用/" + target.FileName };
+                link.IsContextReference = target.Kind == CadDocumentKind.Assembly
+                    && (owner.DesignContextPaths.Contains(source) || owner.DesignContextPaths.Contains(target.FullPath));
                 CopyPdmIdentity(target, link); link.OpenedVersionId = target.OpenedVersionId;
                 owner.Children.Add(link);
             }
+            foreach (var link in owner.Children.Where(node => node.Role == CadReferenceRole.ExternalFileDependency
+                && node.Kind == CadDocumentKind.Assembly && PathsEqual(node.FullPath, target.FullPath)))
+                if (contextOwnersRead.Contains(owner.FullPath)) link.IsContextReference = owner.DesignContextPaths.Contains(source) || owner.DesignContextPaths.Contains(target.FullPath);
             if (recovered)
                 recoveredArchiveReferences[owner.FullPath + "|" + source] = new RecoveredArchiveReference {
                     Owner = owner.FullPath, Source = source, Node = target,
                     OwnerHash = ArchiveFileFingerprint.Read(owner.FullPath), Path = target.FullPath,
+                    IsContext = owner.DesignContextPaths.Contains(source) || owner.DesignContextPaths.Contains(target.FullPath),
+                    OwnerConfiguration = owner.Configuration,
                     Hash = ArchiveFileFingerprint.Read(target.FullPath), Scope = apiClient?.EditJournalScope };
             nodes[target.FullPath] = target;
             if (owner.NativeFileScopePaths != null) owner.NativeFileScopePaths.Add(target.FullPath);
             if (!target.DocumentId.HasValue && !items.Any(item => PathsEqual(item.Node.FullPath, target.FullPath)))
                 items.Add(new BatchOperationItem(target, 1));
-            var unchangedControlled = target.DocumentId.HasValue && PdmDocumentIdentityStore.TryReadLocalMetadata(target.FullPath, out var baseline)
-                && baseline.DocumentId == target.DocumentId && baseline.VersionId.HasValue
-                && (string.Equals(ArchiveFileFingerprint.Read(target.FullPath), baseline.Sha256, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(ArchiveFileFingerprint.Read(target.FullPath), baseline.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase));
             if (recovered || !unchangedControlled || items.Any(item => PathsEqual(item.Node.FullPath, target.FullPath))) pending.Enqueue(target);
             if (recovered)
                 LogOperation("引用自动补齐：" + owner.FileName + " → " + target.FileName + "；来源=" + source + "；受控副本=" + target.FullPath);
@@ -91,17 +108,35 @@ public sealed partial class PdmAddin
             token.ThrowIfCancellationRequested();
             var owner = pending.Dequeue();
             if (!visited.Add(owner.FullPath) || !IsPdmNativeFile(owner.FullPath)) continue;
-            owner.ReferenceWarnings.Clear();
+            owner.ReferenceWarnings.RemoveAll(message => !message.StartsWith(ArchiveMissingReferencePolicy.WarningPrefix, StringComparison.Ordinal));
             // Unsaved structures are checked again after the normal save step.
-            if (FindLoadedDocument(owner.FullPath)?.GetSaveFlag() == true) continue;
+            var loaded = reads.FindLoaded(owner.FullPath);
+            if (loaded?.GetSaveFlag() == true) continue;
             ArchiveSession.Current?.ReportFile(0, 0, owner.FileName, "正在批量查找并核对图档引用…");
-            var saved = application.GetDocumentDependencies2(owner.FullPath, false, false, false) as Array;
+            var saved = ArchiveReadContext.Read(owner, "读取已保存引用", () => application.GetDocumentDependencies2(owner.FullPath, false, false, false)) as Array;
             var aliases = ReadPdmResolvedDependencyAliases(owner, saved, nodes.Keys);
             var sources = PdmDependencyEntries(saved, owner.FullPath).SelectMany(entry => entry.Value).ToList();
-            var loaded = FindLoadedDocument(owner.FullPath);
-            var designSources = loaded == null ? Array.Empty<string>() : NativeDesignDependencies.ReadManaged(loaded).ToArray();
+            var design = loaded == null ? null : ArchiveReadContext.Read(owner, "读取设计来源与特征", () => NativeDesignDependencies.ReadCheckIn(loaded));
+            var designSources = design?.Sources ?? Array.Empty<string>();
+            if (design != null)
+            {
+                contextOwnersRead.Add(owner.FullPath);
+                directContextOwnersRead.Add(owner.FullPath);
+                owner.DesignContextPaths.Clear();
+                owner.DesignContextPaths.UnionWith(design.Contexts);
+                ArchiveContextOwnership.Apply(owner, design, contextOwnersRead, directContextOwnersRead);
+            }
+            PluginDiagnosticLog.Record("上下文分类结果", "文件=" + owner.FullPath + "；原生零件已加载=" + (loaded != null)
+                + "；读取来源=" + (design != null ? "本文件原生特征" : contextOwnersRead.Contains(owner.FullPath) ? "父装配原生特征归属" : "尚无原生归属证据")
+                + "；上下文数=" + owner.DesignContextPaths.Count
+                + "；原生文档来源数=" + (design == null ? "未读取" : design.Sources.Count.ToString())
+                + "；原生文档来源=" + (design == null ? "未读取" : string.Join("|", design.Sources.Take(8)))
+                + "；文件清单来源=" + string.Join("|", sources.Take(8))
+                + "；上下文组件=" + (design == null ? "未读取" : string.Join("|", design.Owners.Select(value => value.Component)
+                    .Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase).Take(12))));
             sources.AddRange(designSources);
             sources.AddRange(owner.EmbeddedDesignDependencies);
+            var verifiedEmbedded = ArchiveReadContext.Read(owner, "建立嵌入引用索引", () => NativeArchiveManifest.VerifiedEmbeddedReferences(owner, sources));
             foreach (var source in sources.Distinct(StringComparer.OrdinalIgnoreCase))
             {
                 token.ThrowIfCancellationRequested();
@@ -112,15 +147,21 @@ public sealed partial class PdmAddin
                 { Bind(owner, source, fixedReference, true); continue; }
                 if (aliases.TryGetValue(path, out var native)) path = native;
                 if (PathsEqual(path, owner.FullPath)) continue;
-                if (NativeArchiveManifest.VerifiedEmbeddedReferences(owner, new[] { path }).Contains(path)
+                if (verifiedEmbedded.Contains(path)
                     || nodes.TryGetValue(path, out var embedded) && (embedded.Status == CadReferenceStatus.Virtual || embedded.IsStoredImport)) continue;
                 if (nodes.TryGetValue(path, out var known) && File.Exists(path))
                 { Bind(owner, source, known); continue; }
-                if (NativeArchiveManifest.VerifiedEmbeddedReferences(owner, new[] { path }).Contains(path)
-                    || NativeArchiveManifest.IsInterconnectCachePath(path) && nodes.Values.Any(node => node.IsStoredImport && PathsEqual(node.FullPath, path))
+                if (NativeArchiveManifest.IsInterconnectCachePath(path) && nodes.Values.Any(node => node.IsStoredImport && PathsEqual(node.FullPath, path))
                     || new SolidWorksReferenceTreeScanner(application).IsVerifiedBrokenContextReference(owner.FullPath, path)) continue;
                 var existingAlias = nodes.Values.FirstOrDefault(node => PathsEqual(node.SourceReferencePath, path) && File.Exists(node.FullPath));
                 if (existingAlias != null) { Bind(owner, source, existingAlias); continue; }
+                if (ArchiveMissingReferencePolicy.TryOmitMissing(owner, path)) continue;
+                if (owner.ConfirmedArchivePaths != null && !owner.ConfirmedArchivePaths.Contains(path)
+                    && (!nodes.TryGetValue(path, out var uncheckedReference) || !uncheckedReference.DocumentId.HasValue))
+                {
+                    ArchiveMissingReferencePolicy.OmitUnselected(owner, uncheckedReference ?? new CadTreeNode { FullPath = path });
+                    continue;
+                }
                 var recoveryKey = owner.FullPath + "|" + source;
                 if (recoveredArchiveReferences.TryGetValue(recoveryKey, out var cached))
                 {
@@ -219,6 +260,7 @@ public sealed partial class PdmAddin
                 imported[path] = target;
                 Bind(owner, source, target, true);
             }
+            if (design != null) ClassifyReferenceLinks(owner, design);
         }
         if (problems.Count > 0)
         {
@@ -246,12 +288,16 @@ public sealed partial class PdmAddin
             {
                 if (!File.Exists(record.Path) || record.Hash != ArchiveFileFingerprint.Read(record.Path))
                     throw new InvalidOperationException("已补齐的引用副本发生变化，原图档已保留，请重新检查：" + Path.GetFileName(record.Path));
-                record.OwnerHash = ArchiveFileFingerprint.Read(owner.FullPath);
+                var sameOwner = record.OwnerHash == ArchiveFileFingerprint.Read(owner.FullPath)
+                    && string.Equals(record.OwnerConfiguration, owner.Configuration, StringComparison.OrdinalIgnoreCase);
                 if (!owner.Children.Concat(owner.ReferencedModels).Any(node => PathsEqual(node.FullPath, record.Path)))
                 {
                     var link = NewRecoveredReferenceNode(record.Path, record.Source, owner);
                     CopyPdmIdentity(record.Node, link); link.OpenedVersionId = record.Node.OpenedVersionId;
-                    link.Children.AddRange(record.Node.Children); owner.Children.Add(link);
+                    link.IsContextReference = sameOwner && record.IsContext;
+                    link.ReferenceTypeVerified = link.IsContextReference;
+                    if (!link.IsContextReference) link.Children.AddRange(record.Node.Children);
+                    owner.Children.Add(link);
                 }
                 if (root.NativeFileScopePaths != null) root.NativeFileScopePaths.Add(record.Path);
                 pending.Enqueue(record.Node);

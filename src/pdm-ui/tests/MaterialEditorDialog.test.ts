@@ -27,7 +27,7 @@ describe('MaterialEditorDialog attachments', () => {
     expect(documentBody().textContent).not.toContain('保存时从PLM分类当前基线')
     expect(documentBody().querySelector('.material-editor-grid .material-attachment-input')).toBeNull()
     const assets = documentBody().querySelector('.material-editor-assets')!
-    expect([...assets.querySelectorAll('section')].map(section => section.getAttribute('aria-label'))).toEqual(['3D附件', '资料附件'])
+    expect([...assets.querySelectorAll('section')].map(section => section.getAttribute('aria-label'))).toEqual(['2D图纸附件', '3D附件', '资料附件'])
     const images = documentBody().querySelector('.material-editor-images')!
     const form = documentBody().querySelector('.material-editor-grid')!
     expect(images.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
@@ -36,6 +36,23 @@ describe('MaterialEditorDialog attachments', () => {
     expect(assets.textContent).toContain('产品说明.pdf')
     ;(documentBody().querySelector('button[aria-label="下载 产品说明.pdf"]') as HTMLButtonElement).click()
     expect(wrapper!.emitted('downloadAttachment')?.[0]?.[0]).toEqual(document)
+  })
+
+  it('标准化可在详情中单独上传2D，普通维护权限不开放2D上传且旧图不可删除', async () => {
+    const drawing = { ...picture('drawing'), kind: 'Drawing2D', originalFileName: '图纸V01.pdf', versionNumber: 1, isEnabled: true }
+    open({ canEdit: false, canManageDrawings: true, attachments: [drawing] }); await flushPromises()
+    const input = wrapper!.get('[aria-label="选择2D附件"]')
+    expect(input.attributes('disabled')).toBeUndefined()
+    expect((input.element as HTMLInputElement).multiple).toBe(false)
+    const file = new File(['drawing'], '图纸V02.pdf')
+    Object.defineProperty(input.element,'files',{value:[file],configurable:true})
+    await input.trigger('change'); await flushPromises()
+    expect(wrapper!.emitted('attachmentFiles')?.[0]).toEqual(['Drawing2D', expect.any(Event)])
+    const section = wrapper!.get('[aria-label="2D图纸附件"]')
+    expect(section.text()).toContain('V01 · 已启用')
+    expect(section.find('button[aria-label="删除 图纸V01.pdf"]').exists()).toBe(false)
+    await wrapper!.setProps({ canEdit: true, canManageDrawings: false }); await flushPromises()
+    expect(input.attributes('disabled')).toBeDefined()
   })
 
   it('rejects the whole batch when existing pictures plus selected files exceed five', async () => {
@@ -94,11 +111,12 @@ describe('MaterialEditorDialog attachments', () => {
     let complete!: () => void
     api.deleteMaterialAttachment.mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve }))
     const file = { ...picture('file'), kind: 'Document' }
-    open({ attachments: [file, { ...picture('model'), kind: 'Model3D' }] }); await flushPromises()
+    open({ attachments: [file, { ...picture('model'), kind: 'Model3D' }, { ...picture('other-document'), kind: 'Document' }] }); await flushPromises()
     ;(documentBody().querySelector('button[aria-label="删除 file.png"]') as HTMLButtonElement).click(); await flushPromises()
     expect(ElMessageBox.confirm).toHaveBeenCalledWith(expect.stringContaining('file.png'), '删除附件', expect.any(Object))
     expect(api.deleteMaterialAttachment).toHaveBeenCalledWith('material', 'file', 'token')
-    expect((documentBody().querySelector('button[aria-label="删除 model.png"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(documentBody().querySelector('button[aria-label="删除 model.png"]')).toBeNull()
+    expect((documentBody().querySelector('button[aria-label="删除 other-document.png"]') as HTMLButtonElement).disabled).toBe(true)
     expect(wrapper!.emitted('attachmentDeleted')).toBeUndefined()
     complete(); await flushPromises()
     expect(wrapper!.emitted('attachmentDeleted')?.[0]?.[0]).toEqual(file)

@@ -25,8 +25,8 @@ it('识别纵向表单和表格行内操作，不改写它们的显示布局', a
   expect(getComputedStyle(document.querySelector('td')!).display).toBe('table-cell')
 })
 
-it('异步控件会加入规则，进度条、分类及侧栏不受影响', async () => {
-  document.body.innerHTML = '<div class="toolbar" style="display:grid"><button>刷新</button></div><div class="pdm-overview-timeline"><button>设计</button><button>装配</button></div><div class="wh-department-options"><button>生产部</button><button>质量部</button></div>'
+it('异步控件会加入规则，进度条、分类、侧栏及日期网格不受影响', async () => {
+  document.body.innerHTML = '<div class="toolbar" style="display:grid"><button>刷新</button></div><div class="pdm-overview-timeline"><button>设计</button><button>装配</button></div><div class="wh-department-options"><button>生产部</button><button>质量部</button></div><div class="pc-grid" style="display:grid"><button>1</button><button>2</button></div><div class="wh-day-grid" style="display:grid"><button>1</button><button>2</button></div>'
   dispose = installControlSpacing()
   await settle()
   const toolbar = document.querySelector('.toolbar')!
@@ -37,4 +37,9 @@ it('异步控件会加入规则，进度条、分类及侧栏不受影响', asyn
   expect(toolbar.getAttribute('data-pdm-control-layout')).toBe('flow')
   expect(document.querySelector('.pdm-overview-timeline')!.hasAttribute('data-pdm-control-layout')).toBe(false)
   expect(document.querySelector('.wh-department-options')!.hasAttribute('data-pdm-control-layout')).toBe(false)
+  for (const calendar of document.querySelectorAll('.pc-grid, .wh-day-grid')) {
+    expect(calendar.hasAttribute('data-pdm-control-layout')).toBe(false)
+    expect(calendar.querySelector('[data-pdm-control-item]')).toBeNull()
+    expect(calendar.textContent).toBe('12')
+  }
 })

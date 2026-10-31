@@ -46,6 +46,8 @@
     <Compile Include="..\Pdm.Client.Shared\ClientLogRedaction.cs" Link="ClientLogRedaction.cs" />
     <Compile Include="..\Pdm.Client.Shared\DesktopAuthHandoffStore.cs" Link="DesktopAuthHandoffStore.cs" />
     <Compile Include="..\Pdm.Domain\CadPropertyCardSnapshot.cs" Link="CadPropertyCardSnapshot.cs" />
+    <Compile Include="..\Pdm.Domain\ArchiveWarningPolicy.cs" Link="ArchiveWarningPolicy.cs" />
+    <Compile Include="..\Pdm.Domain\ReferenceCycleGroups.cs" Link="ReferenceCycleGroups.cs" />
     <Compile Include="..\Pdm.Domain\DrawingRevision.cs" Link="DrawingRevision.cs" />
     <Compile Include="..\Pdm.Domain\StandardStructureRules.cs" Link="StandardStructureRules.cs" />
     <Compile Include="..\Pdm.Domain\DocumentOperationRuleCatalog.cs" Link="DocumentOperationRuleCatalog.cs" />

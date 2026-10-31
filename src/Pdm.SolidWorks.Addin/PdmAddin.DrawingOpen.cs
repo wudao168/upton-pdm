@@ -43,6 +43,7 @@ public sealed partial class PdmAddin
             throw new InvalidOperationException("工程图引用尚不完整，已保留原窗口，未开始打开：" + string.Join("；", requested.Warnings.Take(3)));
 
         var files = new List<ControlledOpenFileDto>();
+        var retainedHashes = new Dictionary<Guid, string>();
         ControlledOpenFileDto missingDrawing = null;
         IReadOnlyDictionary<Guid, DocumentDto> documents = null;
         foreach (var file in requested.Files)
@@ -55,7 +56,7 @@ public sealed partial class PdmAddin
                     && PathsEqual(path, Path.Combine(context.Key, candidate.RelativePath ?? candidate.FileName)))
                 || existing != null && (existing.VersionId != file.VersionId
                     || !string.Equals(existing.FileName, file.FileName, StringComparison.OrdinalIgnoreCase)
-                    || !string.Equals(existing.Configuration ?? string.Empty, file.Configuration ?? string.Empty, StringComparison.OrdinalIgnoreCase)))
+                    || !WorkingConfigurationMatches(existing, file)))
                 throw DrawingContextMismatch(file.FileName);
             if (!File.Exists(path))
             {
@@ -71,22 +72,26 @@ public sealed partial class PdmAddin
                     if (!WorkingReuseStoredSourceVersionMatches(source, file, exact)) throw DrawingContextMismatch(file.FileName);
                 }
                 var model = FindLoadedDocument(path);
-                if (!ControlledReferenceMaterializer.Matches(path, source) || model?.GetSaveFlag() == true && !model.IsOpenedReadOnly())
+                var verified = ControlledReferenceMaterializer.TryReadVerifiedCopyHash(path, source, out var workingHash);
+                if (!verified || model?.GetSaveFlag() == true && !model.IsOpenedReadOnly())
                 {
                     if (documents == null) documents = (await apiClient.GetDocumentsAsync(requested.ProjectId, lifetime.Token)).ToDictionary(item => item.Id);
                     documents.TryGetValue(file.DocumentId, out var document);
                     localEdits.TryGetValue(file.DocumentId, out var draft);
                     if (!WorkingReuseDraftMatches(path, source, document, draft, checkoutSessionId, authenticatedUsername))
                         throw DrawingContextMismatch(file.FileName);
+                    if (!verified && workingHash != null) retainedHashes[file.DocumentId] = workingHash;
                 }
             }
             files.Add(new ControlledOpenFileDto { DocumentId = file.DocumentId, VersionId = file.VersionId,
                 FileName = file.FileName, RelativePath = source.RelativePath ?? source.FileName, Configuration = file.Configuration,
-                Revision = file.Revision, Sha256 = source.Sha256, FileLength = source.FileLength, IsRoot = file.DocumentId == requested.RootDocumentId });
+                Revision = file.Revision, Sha256 = source.Sha256, FileLength = source.FileLength,
+                NativeIsolation = source.NativeIsolation, IsNativeIsolated = source.IsNativeIsolated, IsRoot = file.DocumentId == requested.RootDocumentId });
         }
         var root = files.Single(file => file.IsRoot);
         var rootPath = Path.GetFullPath(Path.Combine(context.Key, root.RelativePath));
-        if (!PathsEqual(Path.GetDirectoryName(rootPath), context.Key)) throw DrawingContextMismatch(root.FileName);
+        if (!string.Equals(NormalizeDirectory(Path.GetDirectoryName(rootPath)), NormalizeDirectory(context.Key),
+            StringComparison.OrdinalIgnoreCase)) throw DrawingContextMismatch(root.FileName);
         if (missingDrawing != null)
         {
             await apiClient.DownloadControlledOpenFileAsync(root, context.Key, lifetime.Token);
@@ -98,7 +103,12 @@ public sealed partial class PdmAddin
         var manifest = new ControlledOpenManifestDto { Id = requested.Id, ProjectId = requested.ProjectId, ProjectCode = requested.ProjectCode,
             RootDocumentId = requested.RootDocumentId, RootVersionId = requested.RootVersionId, RootRevision = requested.RootRevision,
             RootRelativePath = root.RelativePath, Files = files, Warnings = requested.Warnings, ForEdit = false };
-        var opened = OpenControlledReadOnlyDocumentCore(rootPath, (int)swDocumentTypes_e.swDocDRAWING, root.Configuration, manifest, true);
+        foreach (var pair in retainedHashes)
+        {
+            manifest.RetainedWorkingHashes.Add(pair.Key, pair.Value);
+            manifest.ResumedDocumentIds.Add(pair.Key);
+        }
+        var opened = OpenControlledReadOnlyDocumentCore(rootPath, (int)swDocumentTypes_e.swDocDRAWING, string.Empty, manifest, true);
         if (opened == null) throw new IOException("工程图尚未打开，已保留原零件、总装窗口及修改，请查看本次操作日志。");
         foreach (var file in files.Where(file => context.Value.Files.All(existing => existing.DocumentId != file.DocumentId)))
         {

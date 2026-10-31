@@ -57,6 +57,8 @@ internal static partial class Program
                     workerExists = File.Exists(options.WorkerPath),
                     workerVersion = File.Exists(options.WorkerPath) ? FileVersionInfo.GetVersionInfo(options.WorkerPath).FileVersion : null,
                     timeoutMinutes = options.TimeoutMinutes,
+                    dedicatedConversionHost = options.DedicatedConversionHost,
+                    automaticLogUploadConfigured = !string.IsNullOrWhiteSpace(options.ServerUrl) && !string.IsNullOrWhiteSpace(options.Token),
                     workRoot = options.WorkRoot,
                     solidWorksPid = Worker.SolidWorksPid, solidWorksRunning = Worker.SolidWorksRunning,
                     conversionStage = Worker.Stage, completed = Worker.Completed, total = Worker.Total, progressUpdatedAt = Worker.UpdatedAt,
@@ -123,6 +125,8 @@ internal static partial class Program
                     item.Files = convertJobs.Select(job => new AgentFileRecord { DocumentId = job.DocumentId, FileName = job.FileName }).ToList();
                 });
                 Journal.Log("信息", "源文件校验完成：处理 " + convertJobs.Count + " 个图档，引用文件 " + (manifest.Jobs.Count - convertJobs.Count) + " 个。", batch.Id);
+                Journal.Log("信息", "任务来源：项目=" + manifest.Context?.ProjectCode + "；发起人=" + manifest.Context?.Initiator
+                    + "；请求=" + manifest.Context?.RequestId + "；根图档=" + manifest.Context?.RootFileName, batch.Id);
                 currentTask = $"{convertJobs.Count} 项：{string.Join("、", convertJobs.Take(3).Select(job => job.FileName))}";
                 Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] 收到转换任务 {convertJobs.Count} 项（含只作引用的文件共 {manifest.Jobs.Count} 个），来源 {client.Client?.RemoteEndPoint}");
                 RunWorker(options, jobRoot, sourceRoot, outputRoot, manifest);
@@ -278,7 +282,7 @@ internal static partial class Program
             RedirectStandardError = true
         };
         startInfo.Arguments = string.Join(" ", new[] { manifestPath, resultPath }
-            .Concat(options.WorkerArguments)
+            .Concat(options.ConversionArguments)
             .Select(argument => "\"" + (argument ?? string.Empty).Replace("\"", "\\\"") + "\""));
         using (var process = Process.Start(startInfo) ?? throw new InvalidOperationException("无法启动SolidWorks转换程序。"))
         {
@@ -410,7 +414,7 @@ internal static partial class Program
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 Arguments = string.Join(" ", new[] { "--serve" }
-                    .Concat(options.WorkerArguments)
+                    .Concat(options.ConversionArguments)
                     .Select(argument => "\"" + (argument ?? string.Empty).Replace("\"", "\\\"") + "\""))
             };
             var started = Process.Start(startInfo);
@@ -442,6 +446,7 @@ internal static partial class Program
             input = null;
             output = null;
             process = null;
+            SolidWorksPid = 0;
         }
 
         internal void Close()

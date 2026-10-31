@@ -1,0 +1,112 @@
+/* DESIGN.md 的业务界面公共规则。布局使用显式类，不再新增 DOM 扫描器。 */
+  :root body .pdm-toolbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap !important;
+    min-width: 0;
+    max-width: 100%;
+    gap: var(--pdm-control-gap);
+    padding-inline: var(--pdm-content-inset);
+    font-size: var(--pdm-font-size-body);
+  }
+  :root body .pdm-toolbar__group {
+    display: flex;
+    align-items: center;
+    flex: 0 1 auto;
+    flex-wrap: wrap !important;
+    min-width: 0;
+    max-width: 100%;
+    gap: var(--pdm-control-gap);
+  }
+@layer pdm-business {
+  :root body :is(.pdm-toolbar, .standard-library__toolbar, .stocked-toolbar,
+      .material-relation-directory__toolbar, .engineering-kit-library__toolbar,
+      .production-suppliers__filters, .production-workbench__trace-filters,
+      .production-drawings__toolbar, .pc-toolbar, .wh-controls) {
+    --el-component-size: var(--pdm-control-height);
+    align-items: center;
+    gap: var(--pdm-control-gap) !important;
+  }
+  :root body :is(.pdm-toolbar, .standard-library__toolbar, .stocked-toolbar,
+      .material-relation-directory__toolbar, .engineering-kit-library__toolbar,
+      .production-suppliers__filters, .production-workbench__trace-filters,
+      .production-drawings__toolbar, .pc-toolbar, .wh-controls)
+      :is(input:not([type="checkbox"]):not([type="radio"]), select, .el-input, .el-select, .el-date-editor) {
+    box-sizing: border-box;
+    height: var(--pdm-control-height) !important;
+    min-height: var(--pdm-control-height) !important;
+    font-size: var(--pdm-font-size-body) !important;
+  }
+  :root body :is(.pdm-toolbar, .standard-library__toolbar, .stocked-toolbar,
+      .material-relation-directory__toolbar, .engineering-kit-library__toolbar,
+      .production-suppliers__filters, .production-workbench__trace-filters,
+      .production-drawings__toolbar, .pc-toolbar, .wh-controls)
+      :is(.el-input__wrapper, .el-select__wrapper) {
+    box-sizing: border-box;
+    height: var(--pdm-control-height) !important;
+    min-height: var(--pdm-control-height) !important;
+    padding-block: 0 !important;
+  }
+  :root body .pdm-toolbar :is(.el-input__inner, .el-select__placeholder, .el-select__selected-item, .el-checkbox__label) {
+    font-size: var(--pdm-font-size-body) !important;
+  }
+  :root body :is(.pdm-toolbar, .standard-library__toolbar, .stocked-toolbar,
+      .material-relation-directory__toolbar, .engineering-kit-library__toolbar,
+      .production-suppliers__filters, .production-workbench__trace-filters,
+      .production-drawings__toolbar)
+      :is(input[type="search"], .el-input:not(.el-date-editor)) {
+    width: var(--pdm-search-width) !important;
+    min-width: 0 !important;
+    max-width: 100%;
+    flex: 0 0 var(--pdm-search-width) !important;
+  }
+  :root body :is(.pdm-toolbar, .standard-library__toolbar, .stocked-toolbar,
+      .material-relation-directory__toolbar, .engineering-kit-library__toolbar,
+      .production-suppliers__filters, .production-workbench__trace-filters,
+      .production-drawings__toolbar) :is(select, .el-select) {
+    width: var(--pdm-filter-width) !important;
+    min-width: 0 !important;
+    max-width: 100%;
+    flex: 0 0 var(--pdm-filter-width) !important;
+  }
+  :root body :is(.pdm-toolbar, .standard-library__toolbar, .stocked-toolbar,
+      .material-relation-directory__toolbar, .engineering-kit-library__toolbar,
+      .production-suppliers__filters, .production-workbench__trace-filters,
+      .production-drawings__toolbar) .el-date-editor--daterange {
+    width: 260px;
+    max-width: 100%;
+    flex: 0 0 260px;
+  }
+  :root body :is(.material-table, .material-list-table, .stocked-table,
+      .engineering-kit-library .el-table, .material-relation-directory .el-table,
+      .bom-header-directory .el-table) :is(.cell, .cell > span, .el-tag, .el-button) {
+    font-size: var(--pdm-font-size-body) !important;
+  }
+  :root body .material-table .el-table__body td.el-table__cell {
+    height: var(--pdm-detail-row-height);
+    padding-block: 0;
+  }
+  :root body .material-table .el-table__body .cell { line-height: 24px; }
+  :root body .pdm-bom-table { min-width: 1200px !important; }
+  :root body .production-workbench__lines .production-workbench__table-wrap > table { min-width: 1000px !important; }
+  :root body :is(.project-information, .pdm-plan-page, .production-workbench__secondary,
+      .production-workbench__detail, .production-drawings__projects, .production-drawings__main,
+      .production-suppliers__categories, .production-suppliers__main, .material-relation-directory,
+      .production-workbench__tree, .engineering-kit-library, .bom-header-directory,
+      .material-code-approval-workflow, .material-numbering-settings-scroll,
+      .material-master-content, .standard-library__main, .stocked-main,
+      .pdm-manager-panel, .wr-projects, .wr-identity, .wr-status,
+      .pdm-project-context, .pdm-project-sidebar, .wh-day-editor) {
+    padding-inline: var(--pdm-content-inset) !important;
+  }
+  /* 页面外壳不重复加边距，日历和时间轴保留连续网格。 */
+  :root body :is(.project-calendar, .work-hours, .pc-months, .pc-month, .pc-grid,
+      .wh-calendar-layout, .wh-calendar, .wh-day-grid, .pdm-gantt-shell) {
+    padding-inline: 0 !important;
+  }
+  :root body :is(.pc-toolbar, .pc-details > header, .wh-toolbar, .wh-summary,
+      .wr-panel > header, .pdm-tree-search-row, .pdm-preview-markup-row) {
+    padding-inline: var(--pdm-content-inset) !important;
+  }
+  :root body :is(.pdm-panel-topbar, .pdm-panel-header-actions) { gap: var(--pdm-control-gap); }
+}

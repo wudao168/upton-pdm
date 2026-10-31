@@ -7,6 +7,50 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class StockedMaterialServiceTests
 {
+    private static void AssertNonStockPlanning(MaterialStockPlan plan)
+    {
+        Assert.Equal(4, plan.InventoryPlanningMethod); Assert.Equal(-1, plan.InventoryPlanTime);
+        Assert.False(plan.IsRequiredShipperSupply); Assert.Equal(-1, plan.SupplyMethod);
+    }
+
+    [Fact]
+    public async Task EnablingAndCancelingStockUpdatesAllFourPlanningSettingsAndPreservesReorderOnRemoval()
+    {
+        var f = await Fixture.CreateAsync(); var material = await f.AddAsync("01010009204");
+        f.Client.Plans[material.MaterialCode] = f.Client.Plans[material.MaterialCode] with
+            { SafetyStockQuantity = 0, InventoryPlanningMethod = 4, InventoryPlanTime = -1, IsRequiredShipperSupply = false, SupplyMethod = -1 };
+        var before = await f.Service.ReadPlanForMaintenanceAsync(f.Scope, material.Id, "admin", default);
+        var after = await f.Service.MaintainAsync(f.Scope, material.Id, new(12, 60, before.Plan!.SyncedAt), "admin", default);
+        Assert.True(after.IsFormal); Assert.Equal(1, after.Plan!.InventoryPlanningMethod); Assert.Equal(0, after.Plan.InventoryPlanTime);
+        Assert.True(after.Plan.IsRequiredShipperSupply); Assert.Equal(2, after.Plan.SupplyMethod);
+        await f.Service.RemoveAsync(f.Scope, material.Id, null, "admin", default);
+        AssertNonStockPlanning(f.Client.Plans[material.MaterialCode]);
+        Assert.Equal(0, f.Client.Plans[material.MaterialCode].SafetyStockQuantity);
+        Assert.Equal(60, f.Client.Plans[material.MaterialCode].ReorderQuantity);
+    }
+
+    [Theory]
+    [InlineData("InventoryInfo.InventoryPlanningMethod")]
+    [InlineData("InventoryInfo.InventoryPlanTime")]
+    [InlineData("InventoryInfo.IsRequiredShipperSupply")]
+    [InlineData("InventoryInfo.SupplyMethod")]
+    public async Task MatchingQuantitiesCannotHidePlanningReadbackMismatch(string ignored)
+    {
+        var f = await Fixture.CreateAsync(); var material = await f.AddAsync("01010009205");
+        f.Client.IgnorePlanningField = ignored;
+        var before = Assert.Single((await f.Store.ReadAsync(f.Scope, default)).Snapshots);
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.MaintainAsync(f.Scope, material.Id, new(0, 50, before.Plan!.SyncedAt), "admin", default));
+        Assert.Contains("四项规划设置", error.Message);
+        Assert.Equal(0, f.Client.Plans[material.MaterialCode].SafetyStockQuantity);
+        Assert.NotNull(Assert.Single((await f.Store.ReadAsync(f.Scope, default)).Snapshots).LastError);
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.RemoveAsync(f.Scope, material.Id, null, "admin", default));
+        Assert.Single((await f.Store.ReadAsync(f.Scope, default)).Memberships);
+        f.Client.IgnorePlanningField = null;
+        await f.Service.RemoveAsync(f.Scope, material.Id, null, "admin", default);
+        AssertNonStockPlanning(f.Client.Plans[material.MaterialCode]);
+        Assert.Empty((await f.Store.ReadAsync(f.Scope, default)).Memberships);
+    }
+
     [Fact]
     public async Task StockedMembershipsRequireStandardLibraryButStandardMaterialsNeedNotBeStocked()
     {
@@ -21,8 +65,62 @@ public sealed class StockedMaterialServiceTests
         Assert.Empty((await f.Store.ReadAsync(f.Scope, default)).Memberships);
         Assert.Single(await f.Categories.ListMembershipsAsync(default));
         Assert.NotNull(await f.Materials.FindMaterialAsync(material.Id, default));
-        Assert.Empty(f.Client.Writes);
-        Assert.Single(await f.Materials.ListStockedMaterialPlansAsync("01", "7", default));
+        using var write = JsonDocument.Parse(Assert.Single(f.Client.Writes));
+        Assert.Equal(5, write.RootElement[0].GetProperty("Attributes").GetArrayLength());
+        Assert.DoesNotContain(write.RootElement[0].GetProperty("Attributes").EnumerateArray(), field => field.GetProperty("AttributeName").GetString() == "InventoryInfo.ReorderQty");
+        AssertNonStockPlanning(f.Client.Plans[material.MaterialCode]);
+        Assert.Equal(0, f.Client.Plans[material.MaterialCode].SafetyStockQuantity);
+        Assert.Equal(50, f.Client.Plans[material.MaterialCode].ReorderQuantity);
+        Assert.Empty(await f.Materials.ListStockedMaterialPlansAsync("01", "7", default));
+        await f.Service.SynchronizeAsync(f.Scope, "scheduled", default);
+        Assert.Empty((await f.Store.ReadAsync(f.Scope, default)).Memberships);
+    }
+
+    [Fact]
+    public async Task RemovalKeepsMembershipWhenU9AcknowledgesButReadbackStillHasSafetyStockAndCanBeRetried()
+    {
+        var f = await Fixture.CreateAsync(); var material = await f.AddAsync("01010009201");
+        f.Client.ApplyWrite = false;
+        var error = await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.RemoveAsync(f.Scope, material.Id, null, "admin", default));
+        Assert.Contains("尚未清零", error.Message);
+        var failed = await f.Store.ReadAsync(f.Scope, default);
+        Assert.Single(failed.Memberships); Assert.Equal(15, Assert.Single(failed.Snapshots).Plan!.SafetyStockQuantity);
+        Assert.Contains("取消常备未完成", failed.Snapshots[0].LastError);
+        Assert.Single(await f.Categories.ListMembershipsAsync(default));
+        f.Client.ApplyWrite = true;
+        await f.Service.RemoveAsync(f.Scope, material.Id, null, "admin", default);
+        Assert.Empty((await f.Store.ReadAsync(f.Scope, default)).Memberships);
+        Assert.Equal(0, f.Client.Plans[material.MaterialCode].SafetyStockQuantity);
+        Assert.Equal(50, f.Client.Plans[material.MaterialCode].ReorderQuantity);
+    }
+
+    [Fact]
+    public async Task RemovingOneOfSeveralCategoriesKeepsStockPlanningUntilTheFinalMembershipIsRemoved()
+    {
+        var f = await Fixture.CreateAsync(); var material = await f.AddAsync("01010009202");
+        var other = await f.Categories.CreateCategoryAsync(f.Category with { Id = Guid.NewGuid(), Name = "另一常备目录" }, default);
+        await f.Service.AddAsync(f.Scope, new([other.Id], [material.Id]), "admin", default);
+        await f.Service.RemoveAsync(f.Scope, material.Id, f.Category.Id, "admin", default);
+        Assert.Equal(other.Id, Assert.Single((await f.Store.ReadAsync(f.Scope, default)).Memberships).CategoryId);
+        Assert.Empty(f.Client.Writes); Assert.Equal(15, f.Client.Plans[material.MaterialCode].SafetyStockQuantity);
+        await f.Service.RemoveAsync(f.Scope, material.Id, other.Id, "admin", default);
+        Assert.Equal(0, f.Client.Plans[material.MaterialCode].SafetyStockQuantity);
+    }
+
+    [Fact]
+    public async Task AlreadyZeroDraftCanBeRemovedWithoutWritingU9AndMissingReadbackCannotRemoveMembership()
+    {
+        var f = await Fixture.CreateAsync(); var material = await f.AddAsync("01010009203", initialize: false);
+        f.Client.Plans.Clear();
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.RemoveAsync(f.Scope, material.Id, null, "admin", default));
+        Assert.Single((await f.Store.ReadAsync(f.Scope, default)).Memberships);
+        f.Client.Plans[material.MaterialCode] = new("01", "7", material.MaterialCode, 0, 50, true, "001", "个", f.Clock.Now)
+            { InventoryPlanningMethod = 4, InventoryPlanTime = -1, IsRequiredShipperSupply = false, SupplyMethod = -1 };
+        var config = await f.Materials.GetIntegrationConfigurationAsync(default);
+        await f.Materials.SaveIntegrationConfigurationAsync(config with { WriteEnabled = false }, default);
+        await f.Service.RemoveAsync(f.Scope, material.Id, null, "admin", default);
+        Assert.Empty(f.Client.Writes); Assert.Empty((await f.Store.ReadAsync(f.Scope, default)).Memberships);
+        Assert.NotNull(await f.Materials.FindMaterialAsync(material.Id, default));
     }
 
     [Fact]
@@ -101,7 +199,7 @@ public sealed class StockedMaterialServiceTests
     }
 
     [Fact]
-    public async Task MaintainWritesExactlyTwoFieldsVerifiesReadbackAndPreservesMaster()
+    public async Task MaintainWritesQuantitiesAndFourPlanningSettingsVerifiesReadbackAndPreservesMaster()
     {
         var f = await Fixture.CreateAsync();
         var material = await f.AddAsync("01010000001", 20);
@@ -111,10 +209,11 @@ public sealed class StockedMaterialServiceTests
         var after = await f.Service.MaintainAsync(f.Scope, material.Id, new(0, 50, prior.Plan!.SyncedAt), "admin", default);
         Assert.Equal(0, after.Plan!.SafetyStockQuantity);
         Assert.Equal(50, after.Plan.ReorderQuantity);
+        AssertNonStockPlanning(after.Plan);
         Assert.Equal(master, await f.Materials.FindMaterialAsync(material.Id, default));
         using var payload = JsonDocument.Parse(Assert.Single(f.Client.Writes));
         var attributes = payload.RootElement[0].GetProperty("Attributes").EnumerateArray().ToArray();
-        Assert.Equal(new[] { "InventoryInfo.SafetyStockQty", "InventoryInfo.ReorderQty" }, attributes.Select(row => row.GetProperty("AttributeName").GetString()));
+        Assert.Equal(new[] { "InventoryInfo.SafetyStockQty", "InventoryInfo.InventoryPlanningMethod", "InventoryInfo.InventoryPlanTime", "InventoryInfo.IsRequiredShipperSupply", "InventoryInfo.SupplyMethod", "InventoryInfo.ReorderQty" }, attributes.Select(row => row.GetProperty("AttributeName").GetString()));
         Assert.Empty(await f.Materials.ListStockedMaterialPlansAsync("01", "7", default));
     }
 
@@ -163,6 +262,9 @@ public sealed class StockedMaterialServiceTests
         var f = await Fixture.CreateAsync();
         var existing = await f.AddAsync("01010000001", 20);
         await f.Service.RemoveAsync(f.Scope, existing.Id, null, "admin", default);
+        // U9C重新设置为常备时，仍按源系统的有效规划重新收录。
+        f.Client.Plans[existing.MaterialCode] = f.Client.Plans[existing.MaterialCode] with { SafetyStockQuantity = 15 };
+        f.Client.Writes.Clear();
         const string code = "01010009001";
         f.Client.Plans[code] = new("01", "7", code, 15, 50, true, "001", "个", f.Clock.Now);
         f.Client.Details[code] = new("u9-new", code, "U9新增常备件", "S-1", "0101", "电气外购件", "001", 9, "品牌")
@@ -421,7 +523,8 @@ public sealed class StockedMaterialServiceTests
                 MaterialSupplyMode.Purchase, "001", "M18", null, null, "SICK", null, null, null, null,
                 MaterialApprovalStatus.Approved, "admin", Clock.Now, "0101", $"u9-{code}", code, MaterialSyncStatus.Succeeded,
                 "admin", Clock.Now, "admin", Clock.Now, 1, "0101", U9SyncConfirmed: true), (await Materials.FindCategoryAsync("0101", default))!, default);
-            Client.Plans[code] = new("01", "7", code, 15, 50, true, "001", "个", Clock.Now);
+            Client.Plans[code] = new("01", "7", code, 15, 50, true, "001", "个", Clock.Now)
+                { InventoryPlanningMethod = 1, InventoryPlanTime = 0, IsRequiredShipperSupply = true, SupplyMethod = 2 };
             Client.Details[code] = new($"u9-{code}", code, material.Name, material.Specification, "0101", "电气外购件", "001", 9, material.Brand);
             Client.Rows.Add(FakeClient.Stock(code, stock));
             await Service.AddAsync(Scope, new([Category.Id], [material.Id]), "admin", default);
@@ -452,6 +555,7 @@ public sealed class StockedMaterialServiceTests
         }
         public bool InventoryFails { get; set; }
         public bool ApplyWrite { get; set; } = true;
+        public string? IgnorePlanningField { get; set; }
         public int PlanReads { get; private set; }
         public int InventoryReads { get; private set; }
         public static U9InventorySourceRow Stock(string code, decimal quantity) => new("7", code, "料品", null, "W01", "原料仓", null, null, null, null, null, null, quantity, quantity, 0, 0);
@@ -464,7 +568,23 @@ public sealed class StockedMaterialServiceTests
         {
             Writes.Add(payloadJson); using var json = JsonDocument.Parse(payloadJson); var code = json.RootElement[0].GetProperty("Code").GetString()!;
             var fields = json.RootElement[0].GetProperty("Attributes").EnumerateArray().ToArray();
-            if (ApplyWrite) Plans[code] = Plans[code] with { SafetyStockQuantity = decimal.Parse(fields[0].GetProperty("AttributeValue").GetString()!, System.Globalization.CultureInfo.InvariantCulture), ReorderQuantity = decimal.Parse(fields[1].GetProperty("AttributeValue").GetString()!, System.Globalization.CultureInfo.InvariantCulture) };
+            if (ApplyWrite)
+                foreach (var field in fields)
+                {
+                    var value = field.GetProperty("AttributeValue").GetString()!;
+                    var name = field.GetProperty("AttributeName").GetString();
+                    if (name == IgnorePlanningField) continue;
+                    Plans[code] = field.GetProperty("AttributeName").GetString() switch
+                    {
+                        "InventoryInfo.SafetyStockQty" => Plans[code] with { SafetyStockQuantity = decimal.Parse(value, System.Globalization.CultureInfo.InvariantCulture) },
+                        "InventoryInfo.ReorderQty" => Plans[code] with { ReorderQuantity = decimal.Parse(value, System.Globalization.CultureInfo.InvariantCulture) },
+                        "InventoryInfo.InventoryPlanningMethod" => Plans[code] with { InventoryPlanningMethod = int.Parse(value) },
+                        "InventoryInfo.InventoryPlanTime" => Plans[code] with { InventoryPlanTime = int.Parse(value) },
+                        "InventoryInfo.IsRequiredShipperSupply" => Plans[code] with { IsRequiredShipperSupply = bool.Parse(value) },
+                        "InventoryInfo.SupplyMethod" => Plans[code] with { SupplyMethod = int.Parse(value) },
+                        _ => throw new Exception("库存规划不应修改其他属性")
+                    };
+                }
             return Task.FromResult(new U9BusinessBatchResult(0, null, [new(true, null, "u9-id", code)]));
         }
         public Task<U9ItemQueryResult> QueryItemsAsync(string baseUrl, string path, string token, string payloadJson, CancellationToken ct)

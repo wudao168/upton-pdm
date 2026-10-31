@@ -50,7 +50,7 @@ watch(() => props.token, () => load(true))
     <form class="log-filters" @submit.prevent="load(true)">
       <label>计算机或设备编号<input v-model="device" placeholder="计算机名或完整设备编号" /></label>
       <label>用户<input v-model="user" placeholder="登录账号" /></label>
-      <label>组件<select v-model="component" aria-label="组件"><option value="">全部组件</option><option value="desktop">桌面客户端</option><option value="solidworks">SolidWorks 插件</option></select></label>
+      <label>组件<select v-model="component" aria-label="组件"><option value="">全部组件</option><option value="desktop">桌面客户端</option><option value="solidworks">SolidWorks 插件</option><option value="preview-agent">转图代理</option></select></label>
       <label>日志类型<select v-model="kind" aria-label="日志类型"><option value="">全部日志</option><option value="runtime">运行日志</option><option value="error">错误日志</option></select></label>
       <label>组件或界面版本<input v-model="version" placeholder="版本号或界面构建标识" /></label>
       <label class="log-date-range">日期时间区间<el-date-picker v-model="dateRange" type="datetimerange" aria-label="日志日期时间区间" format="YYYY-MM-DD HH:mm" range-separator="-" start-placeholder="开始时间" end-placeholder="结束时间" /></label>
@@ -69,7 +69,7 @@ watch(() => props.token, () => load(true))
       <tbody>
         <tr v-for="row in data.items" :key="row.id">
           <td><strong>{{ row.machine }}</strong><br />{{ row.username }}<small>设备：{{ row.deviceId }}</small></td>
-          <td>{{ row.component === 'desktop' ? '桌面客户端' : 'SolidWorks 插件' }}<br />{{ row.version || '版本未记录' }}<small>界面：{{ row.uiVersion || '尚未加载网页界面' }}</small></td>
+          <td>{{ row.component === 'desktop' ? '桌面客户端' : row.component === 'preview-agent' ? '转图代理' : 'SolidWorks 插件' }}<br />{{ row.version || '版本未记录' }}<small>界面：{{ row.component === 'preview-agent' ? '代理前台界面' : row.uiVersion || '尚未加载网页界面' }}</small></td>
           <td :class="{ 'log-error': row.kind === 'error' }">{{ row.kind === 'error' ? '错误日志' : '运行日志' }}</td><td>{{ row.entryCount }}</td>
           <td>{{ time(row.startedAt) }}<br />至 {{ time(row.endedAt) }}</td><td>{{ time(row.receivedAt) }}</td>
         </tr>

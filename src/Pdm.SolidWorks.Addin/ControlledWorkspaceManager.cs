@@ -11,6 +11,8 @@ namespace Upton.Pdm.SolidWorks;
 internal sealed partial class ControlledWorkspaceManager
 {
     internal Action<string, int, int> PreparationProgress { get; set; }
+    internal IReadOnlyCollection<string> ProtectedPaths { get; set; } = Array.Empty<string>();
+    internal string LocalCacheNotice { get; private set; }
     private readonly PdmApiClient apiClient;
     private readonly string workspaceRoot;
     internal string WorkspaceRoot => workspaceRoot;
@@ -52,6 +54,7 @@ internal sealed partial class ControlledWorkspaceManager
         if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
         {
             SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
+            ControlledCacheMaintenance.Record(workspaceRoot, target, manifest, "snapshot");
             verifiedSnapshotDirectories[manifest.RootDocumentId] = target;
             return ResolveRootPath(target, manifest);
         }
@@ -70,8 +73,20 @@ internal sealed partial class ControlledWorkspaceManager
                 throw new InvalidDataException("受控工作区整体校验失败，未打开图档。");
             }
 
+            var bindings = manifest.Files.ToDictionary(file => file, file =>
+            {
+                PdmDocumentIdentityStore.TryReadLocalMetadata(ManifestPath(staging, file), out var metadata);
+                return metadata;
+            });
             ReplaceDirectory(staging, target);
+            foreach (var file in manifest.Files)
+            {
+                if (bindings[file] != null) PdmDocumentIdentityStore.RestoreLocalMetadata(ManifestPath(target, file), bindings[file]);
+                BindWorkspaceFile(target, target, manifest, file);
+            }
+            if (!ValidateWorkspace(target, manifest.Files)) throw new InvalidDataException("只读缓存的版本记录校验失败，未打开图档。");
             SetWorkspaceAttributes(target, manifest, Array.Empty<Guid>());
+            ControlledCacheMaintenance.Record(workspaceRoot, target, manifest, "snapshot");
             verifiedSnapshotDirectories[manifest.RootDocumentId] = target;
             return ResolveRootPath(target, manifest);
         }
@@ -86,15 +101,17 @@ internal sealed partial class ControlledWorkspaceManager
         IReadOnlyCollection<Guid> editableDocumentIds,
         CancellationToken cancellationToken)
     {
+        LocalCacheNotice = null;
         var target = WorkingDirectory(manifest);
         if (Directory.Exists(target) && ValidateWorkspace(target, manifest.Files))
         {
+            foreach (var file in manifest.Files) BindWorkspaceFile(target, target, manifest, file);
             SetWorkspaceAttributes(target, manifest, editableDocumentIds ?? Array.Empty<Guid>());
+            RegisterLegacySnapshotsOnce(manifest);
+            ControlledCacheMaintenance.Record(workspaceRoot, target, manifest, "working");
             return ResolveRootPath(target, manifest);
         }
-        var readOnlyRootPath = await PrepareReadOnlyAsync(manifest, false, cancellationToken).ConfigureAwait(false);
-        var source = Path.GetDirectoryName(readOnlyRootPath) ?? throw new InvalidDataException("只读工作区路径无效。");
-        return CopyWorkingContext(manifest, source, editableDocumentIds);
+        return await UpdateWorkingCacheAsync(manifest, target, editableDocumentIds, cancellationToken).ConfigureAwait(false);
     }
 
     internal string TryPrepareWorkingContext(ControlledOpenManifestDto manifest, string source,
@@ -187,7 +204,7 @@ internal sealed partial class ControlledWorkspaceManager
         var target = WorkingDirectory(manifest);
         var valid = preserveLocalChanges
             ? Directory.Exists(target) && HasAllManifestFiles(target, manifest.Files)
-            : Directory.Exists(target) && ValidateWorkspace(target, manifest.Files);
+            : Directory.Exists(target) && ValidateWorkingWorkspace(target, manifest);
         if (!valid)
         {
             throw new InvalidDataException("编辑工作区校验失败，未更改文件权限。");
@@ -276,6 +293,8 @@ internal sealed partial class ControlledWorkspaceManager
     {
         if (serverWorkingDirectories.TryGetValue(manifest.RootDocumentId, out var prepared)) return prepared;
         var project = ProjectViewDirectory(workspaceRoot, manifest.ProjectCode);
+        var server = Path.Combine(project, "装配工作区", "plm-" + manifest.RootDocumentId.ToString("N"));
+        if (Directory.Exists(server)) return server;
         var legacyRoot = Path.Combine(project, manifest.RootRelativePath ?? "");
         if (PdmDocumentIdentityStore.TryReadLocalMetadata(legacyRoot, out var metadata)
             && metadata.DocumentId == manifest.RootDocumentId) return project;
@@ -343,16 +362,16 @@ internal sealed partial class ControlledWorkspaceManager
         {
             var path = ManifestPath(directory, file);
             if (!File.Exists(path)) continue;
-            var matches = ControlledReferenceMaterializer.Matches(path, file);
+            if (ControlledReferenceMaterializer.Matches(path, file)) continue;
             var hasMetadata = PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var metadata);
+            var actual = ComputeSha256(path);
             var matchesBase = hasMetadata && metadata.DocumentId == file.DocumentId
                 && !string.IsNullOrWhiteSpace(metadata.Sha256)
-                && (string.Equals(ComputeSha256(path), metadata.Sha256, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(ComputeSha256(path), metadata.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase));
-            if (!matches
-                && (!matchesBase
+                && (string.Equals(actual, metadata.Sha256, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(actual, metadata.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase));
+            if (!matchesBase
                     || editableIds.Contains(file.DocumentId)
-                    || (File.GetAttributes(path) & FileAttributes.ReadOnly) == 0))
+                    || (File.GetAttributes(path) & FileAttributes.ReadOnly) == 0)
             {
                 return true;
             }
@@ -499,7 +518,8 @@ internal sealed partial class ControlledWorkspaceManager
                 previousBindings[targetPath] = previousBinding;
                 Directory.CreateDirectory(Path.GetDirectoryName(targetPath));
                 CopyFileAtomically(sourcePath, targetPath);
-                ControlledReferenceMaterializer.CopyResolvedBinding(sourcePath, targetPath);
+                // Version bindings are machine/path records and do not travel with File.Copy.
+                BindWorkspaceFile(source, target, null, file);
             }
         }
         catch (Exception updateException)

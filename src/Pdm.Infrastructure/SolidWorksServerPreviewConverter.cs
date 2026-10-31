@@ -159,7 +159,7 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
                 var runJobs = pendingJobs.Concat(referenceJobs).ToArray();
                 errors = remote
                     ? await RunRemoteAgentAsync(conversionSettings, runJobs, workRoot, outputRoot, cancellationToken, package.State == ReleasePackageState.Publishing ? package.Id : null,
-                        new PreviewAgentContext(null, project.Code, "PLM发布转图", runJobs.FirstOrDefault(job => job.DocumentId == package.RootDocumentId)?.FileName, package.Number))
+                        new PreviewAgentContext(null, project.Code, "PLM发布转图", runJobs.FirstOrDefault(job => job.DocumentId == package.RootDocumentId)?.FileName, package.Number), waitForServer: false)
                     : await RunLocalWorkerAsync(conversionSettings, runJobs, sourceRoot, workRoot, outputRoot, cancellationToken);
                 foreach (var job in pendingJobs.Where(job => !errors.ContainsKey(job.DocumentId))) await StoreToCacheAsync(cacheRoot, cacheFingerprint, job, cancellationToken);
                 PrunePreviewCache(cacheRoot);
@@ -263,12 +263,12 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         IReadOnlyList<PreviewJob> jobs,
         string workRoot,
         string outputRoot,
-        CancellationToken cancellationToken, Guid? publishingPackageId = null, PreviewAgentContext? context = null)
+        CancellationToken cancellationToken, Guid? publishingPackageId = null, PreviewAgentContext? context = null, bool waitForServer = true)
     {
         if (publishingPackageId is Guid waitingId) ReleasePublishingProgress.Set(waitingId, "等待空闲转图服务器");
-        using var lease = conversion.Servers.Count == 0 ? null : await PreviewAgentPool.AcquireAsync(conversion,
+        using var lease = conversion.Servers.Count == 0 && waitForServer ? null : await PreviewAgentPool.AcquireAsync(conversion,
             $"{jobs.Count(job => job.Convert)} 项：{string.Join("、", jobs.Where(job => job.Convert).Take(3).Select(job => job.FileName))}",
-            httpClient, cancellationToken);
+            httpClient, cancellationToken, waitForServer);
         conversion = lease?.Settings ?? conversion;
         var serverName = conversion.Servers.FirstOrDefault(server => string.Equals(server.AgentUrl.TrimEnd('/'), conversion.NormalizedAgentUrl, StringComparison.OrdinalIgnoreCase))?.Name ?? conversion.NormalizedAgentUrl;
         if (publishingPackageId is Guid assignedId) ReleasePublishingProgress.Set(assignedId, $"已分配 {serverName}，准备发送转图文件");
@@ -322,7 +322,8 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         }
         catch (HttpRequestException exception)
         {
-            throw new PdmRuleException($"无法连接转图服务器{conversion.NormalizedAgentUrl}（等待{DescribeElapsed(stopwatch.Elapsed)}）：{DescribeReason(exception)}");
+            if (waitForServer) throw new PdmRuleException($"无法连接转图服务器{conversion.NormalizedAgentUrl}（等待{DescribeElapsed(stopwatch.Elapsed)}）：{DescribeReason(exception)}");
+            throw new PreviewServerUnavailableException($"无法连接转图服务器{conversion.NormalizedAgentUrl}，等待恢复后自动重试。", exception);
         }
 
         using (response)
@@ -332,6 +333,8 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
                 if (!response.IsSuccessStatusCode)
                 {
                     var detail = await response.Content.ReadAsStringAsync(timeout.Token);
+                    if (!waitForServer && response.StatusCode is System.Net.HttpStatusCode.ServiceUnavailable or System.Net.HttpStatusCode.TooManyRequests)
+                        throw new PreviewServerUnavailableException("转图服务器暂时无法接收任务，等待恢复后自动重试。");
                     throw new PdmRuleException($"转图服务器返回错误({(int)response.StatusCode})：{PreviewAgentProtocol.DescribeError(detail)}");
                 }
                 var responsePath = Path.Combine(workRoot, "response.zip");

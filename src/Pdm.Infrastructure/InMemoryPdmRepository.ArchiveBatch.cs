@@ -26,6 +26,7 @@ public sealed partial class InMemoryPdmRepository
             try
             {
                 var ordered = ArchiveBatchRules.Order(files);
+        var planned = ordered.Select(file => file.DocumentId).ToHashSet();
                 var projectId = ordered[0].Commit.ReferenceSnapshot.ProjectId;
                 if (!projects.TryGetValue(projectId, out var project) || !project.IsActive)
                     throw new PdmConflictException("项目不存在或已停用，不能提交存档。");
@@ -50,10 +51,11 @@ public sealed partial class InMemoryPdmRepository
                     }
                     foreach (var node in ArchiveBatchRules.References(commit.ReferenceSnapshot.Root).Where(node => node.Status != ReferenceNodeStatus.Virtual))
                     {
-                        if (node.DocumentId is not Guid id || node.Revision is null || !documents.TryGetValue(id, out var document)
+                        if (node.DocumentId is not Guid id || !documents.TryGetValue(id, out var document)
                             || document.ProjectId != projectId || document.DeletedAt.HasValue || document.PurgedAt.HasValue
                             || document.Kind != node.Kind || !string.Equals(document.FileName, node.FileName, StringComparison.OrdinalIgnoreCase)
-                            || !versions.Values.Any(version => version.DocumentId == id && version.Revision == node.Revision))
+                            || (!(ArchiveDeferredReferences.IsDeferred(node) && planned.Contains(id))
+                                && (node.Revision is null || !versions.Values.Any(version => version.DocumentId == id && version.Revision == node.Revision))))
                             throw new PdmRuleException("引用图档未完整存档，整批提交已取消：" + node.FileName);
                     }
                     results[file.DocumentId] = CheckInVersionCore(file.DocumentId, actor, sessionId, commit, file.DrawingReviewWritebackId, cancellationToken, batchId).GetAwaiter().GetResult();
@@ -66,6 +68,19 @@ public sealed partial class InMemoryPdmRepository
                             foreach (var key in documentRelations.Keys.Where(key => key.DrawingId == file.DocumentId).ToArray()) documentRelations.TryRemove(key, out _);
                         foreach (var modelId in models) documentRelations[(file.DocumentId, modelId)] = new(modelId, file.DocumentId);
                     }
+                }
+                foreach (var file in ordered)
+                {
+                    var result = results[file.DocumentId];
+                    if (!result.VersionCreated || result.Version is null
+                        || !ArchiveBatchRules.References(result.Version.ReferenceSnapshot).Any(node => node.IsContextReference || node.ReferenceTypeUnverified)) continue;
+                    var root = ArchiveBatchRules.BindContextReferences(result.Version.ReferenceSnapshot, results);
+                    var version = result.Version with { ReferenceSnapshot = root };
+                    versions[version.Id] = version;
+                    results[file.DocumentId] = result with { Version = version };
+                    var snapshot = ArchiveSafety.Rehash(file.Commit.ReferenceSnapshot with { Root = root });
+                    referenceSnapshotHistory[snapshot.SnapshotId] = snapshot;
+                    if (file.Commit.IsProjectRoot) referenceRoots[(projectId, file.DocumentId)] = snapshot;
                 }
                 RefreshWorkingReferenceRoots(projectId, actor, timeProvider.GetUtcNow());
                 var receipt = new ArchiveBatchReceipt(batchId, projectId, actor, requestHash, ordered.Select(file => results[file.DocumentId]).ToArray()) { FollowupPending = true };

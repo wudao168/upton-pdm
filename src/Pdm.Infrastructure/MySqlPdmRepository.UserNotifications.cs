@@ -45,6 +45,10 @@ public sealed partial class MySqlPdmRepository
             FROM user_notification n
             WHERE recipient_username=@Recipient
               AND (@SystemOnly=0 OR (n.category='System' AND n.project_id IS NULL AND n.release_package_id IS NULL))
+              AND (n.category NOT IN ('ReleasePreviewPending','ReleasePreviewResult') OR EXISTS (
+                  SELECT 1 FROM release_package conversion_package WHERE conversion_package.id=n.release_package_id
+                    AND conversion_package.locks_documents=1
+                    AND conversion_package.release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')))
               AND (n.source_key NOT LIKE 'calendar-todo:%' OR n.source_key LIKE @CalendarPrefix)
               AND (n.category NOT IN ('work-hours','work-hours-correction') OR n.source_key LIKE @HoursPrefix OR n.source_key LIKE @CorrectionPrefix)
               AND (n.category<>'stocked-material' OR n.source_key LIKE @StockedPrefix)

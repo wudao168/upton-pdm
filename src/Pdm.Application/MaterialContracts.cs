@@ -309,6 +309,7 @@ public interface IU9OpenApiClient
 
 public interface IMaterialRepository
 {
+    Task<MaterialAttachment> EnableMaterialAttachmentAsync(Guid materialId, Guid attachmentId, Guid? expectedEnabledId, string actor, DateTimeOffset at, CancellationToken cancellationToken);
     Task SaveStockPlansAsync(IReadOnlyList<MaterialStockPlan> plans, CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialStockPlan>> ListStockedMaterialPlansAsync(string enterpriseCode, string organizationCode, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomHeaderMaterialLink>> ListBomHeaderMaterialLinksAsync(CancellationToken cancellationToken);

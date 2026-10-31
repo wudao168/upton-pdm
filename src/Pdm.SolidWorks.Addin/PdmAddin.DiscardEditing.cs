@@ -295,12 +295,13 @@ public sealed partial class PdmAddin
             try
             {
                 var context = controlledOpenManifests.FirstOrDefault(pair => IsPathWithinDirectory(window.Path, pair.Key));
-                using (context.Value == null ? null : new ControlledReferenceSearchScope(application, window.Path, context.Value))
+                using (var search = context.Value == null ? null : new ControlledReferenceSearchScope(application, window.Path, context.Value))
                 {
                     var opened = OpenOrActivateDocumentOnSolidWorksThread(window.Path, window.DocumentType, window.Configuration,
                         window.ReadOnly || discardedPaths.Contains(window.Path));
                     if (opened == null) throw new IOException("原工作窗口尚未恢复：" + window.Path);
                     if (context.Value != null) ValidateControlledLoadedPathsCore(opened, window.Path, context.Value, application, true);
+                    search?.VerifyLoadedSources();
                 }
             }
             catch (Exception error) { LogDiagnostic("恢复放弃编辑前窗口：" + window.Path, error); failures.Add(window.Path); }

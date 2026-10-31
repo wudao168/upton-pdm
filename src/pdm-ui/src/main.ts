@@ -1,4 +1,5 @@
 import { installGlobalScrollbars } from './globalScrollbars'
+import { installContainerBorders } from './containerBorders'
 import { installButtonTypography } from './buttonTypography'
 import { installButtonStyles } from './buttonStyles'
 import { installPanelHeaderActions } from './panelHeaderActions'
@@ -14,6 +15,7 @@ import './styles/themes.css'
 import './styles/app.css'
 import './styles/ui-consistency.css'
 import './styles/tabs.css'
+import './styles/business.css'
 import './styles/material-stock-plans.css'
 import { stockedMaterial } from './materialStockPlans'
 import App from './App.vue'
@@ -36,4 +38,5 @@ installDatePickers(app)
 installButtonTypography(app)
 installButtonStyles(app)
 installGlobalScrollbars(app)
+app.onUnmount(installContainerBorders())
 app.mount('#app')

@@ -17,6 +17,20 @@ beforeEach(() => vi.spyOn(api, 'readProductionSuppliers').mockResolvedValue(init
 afterEach(() => vi.restoreAllMocks())
 
 describe('供应商分类维护', () => {
+  it('移除顶部说明行，新建与刷新在列表筛选栏中保留原操作', async () => {
+    const wrapper = createWrapper(); await flushPromises()
+    expect(wrapper.find('.production-suppliers > header').exists()).toBe(false)
+    const actions = wrapper.get('.production-suppliers__filters .production-suppliers__actions')
+    expect(actions.text()).toContain('共 1 家')
+    await actions.findAll('button')[1]!.trigger('click'); await flushPromises()
+    expect(api.readProductionSuppliers).toHaveBeenCalledTimes(2)
+    await actions.findAll('button')[0]!.trigger('click')
+    expect(wrapper.find('[aria-label="维护供应商"]').exists()).toBe(true)
+    await wrapper.get('[aria-label="关闭供应商表单"]').trigger('click')
+    expect(wrapper.find('[aria-label="维护供应商"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('只读权限可查看台账但没有新增、编辑、停用和分类维护入口，撤销维护权限会关闭表单', async () => {
     const wrapper=createWrapper(false);await flushPromises();expect(wrapper.text()).toContain('综合加工有限公司')
     expect(wrapper.find('.production-suppliers__category-actions').exists()).toBe(false);expect(wrapper.findAll('tbody button')).toHaveLength(0);expect(wrapper.findAll('button').some(button=>button.text()==='新建供应商')).toBe(false)

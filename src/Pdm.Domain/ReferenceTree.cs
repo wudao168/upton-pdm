@@ -15,6 +15,10 @@ public sealed record DocumentReferenceNode(
     IReadOnlyList<DocumentReferenceNode> Children)
 {
     public ReferenceRole Role { get; init; } = ReferenceRole.Component;
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool IsContextReference { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool ReferenceTypeUnverified { get; init; }
 
     public bool TreeScopeOnly { get; init; }
     public bool IsSuppressed { get; init; }
@@ -25,7 +29,7 @@ public sealed record DocumentReferenceNode(
     public IReadOnlyList<string>? ReferenceWarnings { get; init; }
     public NativeFileIsolation? NativeIsolation { get; init; }
     public bool NativeIsolationVerified { get; init; }
-    public bool HasPendingStructureIndex => StructureIndexPending || Children.Any(child => child.HasPendingStructureIndex);
+    public bool HasPendingStructureIndex => StructureIndexPending || ReferenceTypeUnverified || Children.Any(child => child.HasPendingStructureIndex);
 
     public bool HasBlockingIssue => Status == ReferenceNodeStatus.Missing || Children.Any(child => child.HasBlockingIssue);
 }
