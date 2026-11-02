@@ -19,6 +19,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline test')))
 })
 afterEach(() => {
+  clearGlobalStatus()
   wrappers.splice(0).forEach(wrapper => wrapper.unmount())
   vi.useRealTimers()
   vi.restoreAllMocks()
@@ -148,5 +149,29 @@ describe('global operation status', () => {
     expect(globalStatus.value).toBeUndefined()
     result.close()
     expect(dialog.querySelector('.pdm-dialog-status')).toBeNull()
+  })
+
+  it.each(['hide', 'aria', 'leave', 'remove'])('clears dialog feedback when its editing session ends: %s', async method => {
+    header()
+    const overlay = document.createElement('div')
+    overlay.className = 'el-overlay'
+    overlay.innerHTML = '<section class="el-dialog"><header>人员分配</header><div class="el-dialog__body">表单</div></section>'
+    document.body.append(overlay)
+    const dialog = overlay.querySelector<HTMLElement>('.el-dialog')!
+    ElMessage.success('上一次人员分配已保存')
+    expect(dialog.querySelector('.pdm-dialog-status')).not.toBeNull()
+    if (method === 'hide') overlay.style.display = 'none'
+    else if (method === 'aria') overlay.setAttribute('aria-hidden', 'true')
+    else if (method === 'leave') overlay.classList.add('dialog-fade-leave-active')
+    else overlay.remove()
+    await flushPromises()
+    expect(dialog.querySelector('.pdm-dialog-status')).toBeNull()
+    overlay.style.display = ''
+    overlay.removeAttribute('aria-hidden')
+    overlay.classList.remove('dialog-fade-leave-active')
+    document.body.append(overlay)
+    expect(dialog.textContent).not.toContain('上一次人员分配已保存')
+    ElMessage.warning('本次请选择人员')
+    expect(dialog.querySelector('.pdm-dialog-status')?.textContent).toContain('本次请选择人员')
   })
 })

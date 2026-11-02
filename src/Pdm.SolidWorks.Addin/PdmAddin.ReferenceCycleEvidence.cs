@@ -69,7 +69,8 @@ public sealed partial class PdmAddin
         var groups = ArchiveReferenceCycles.Analyze(items);
         if (groups.Count == 0) return;
         var owners = groups.SelectMany(group => group.Edges).Where(edge => !edge.Verified)
-            .Select(edge => edge.Owner).Distinct().ToArray();
+            .Select(edge => edge.Owner).Distinct()
+            .GroupBy(node => node.FullPath + "|" + node.Configuration, StringComparer.OrdinalIgnoreCase).ToArray();
         var session = ArchiveSession.Current;
         session?.SetStep(session.DisplayStep, "正在补充核对引用归属…", owners.Length);
         var checkedOwners = 0;
@@ -92,8 +93,9 @@ public sealed partial class PdmAddin
             }
             return current;
         }
-        foreach (var owner in owners)
+        foreach (var instances in owners)
         {
+            var owner = instances.First();
             session?.ReportFile(checkedOwners++, owners.Length, owner.FileName, "正在核对候选引用归属…");
             token.ThrowIfCancellationRequested();
             var model = application.GetOpenDocumentByName(owner.FullPath) as IModelDoc2;
@@ -111,7 +113,7 @@ public sealed partial class PdmAddin
                     continue;
                 }
                 var evidence = NativeDesignDependencies.ReadCheckIn(model);
-                ClassifyReferenceLinks(owner, evidence);
+                foreach (var instance in instances) ClassifyReferenceLinks(instance, evidence);
             }
             await Task.Yield();
         }

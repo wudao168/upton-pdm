@@ -3,6 +3,63 @@ import { describe, expect, it, vi } from 'vitest'
 import MyTasks from '../src/components/MyTasks.vue'
 
 describe('MyTasks', () => {
+  it('发送回执保留在历史中并显示已发送，自己被指派的事项继续计入待办', async () => {
+    const wrapper = mount(MyTasks, { props: { tasks: [], notifications: [
+      { id: 'sent', recipient: 'sender', category: 'ProjectTodo', title: '日历待办 · sender', content: '已发送他人的任务', sourceKey: 'sent', createdAt: '2026-11-01T01:00:00Z', readAt: '2026-11-01T01:00:00Z', isSenderReceipt: true },
+      { id: 'own', recipient: 'sender', category: 'ProjectTodo', title: '自己也要办理', content: '本人任务', sourceKey: 'own', createdAt: '2026-11-01T01:00:00Z' },
+    ], locks: [], materialCodeTasks: [], passwordResetTasks: [], pending: false, onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn() } })
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('已发送他人的任务')
+    expect(wrapper.get('[role="tab"]').text()).toBe('全部待办（1）')
+    await wrapper.get('.pdm-history-toggle input').setValue(true)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(2)
+    expect(wrapper.text()).toContain('已发送')
+    wrapper.unmount()
+  })
+  it('解除的生产资料风险移出未读待办，并在历史中显示已解除', async () => {
+    const wrapper = mount(MyTasks, { props: { tasks: [], notifications: [
+      { id: 'risk', recipient: 'manager', category: 'ReleaseManagementRisk', title: '生产资料未齐，需协调', content: 'P700016 · RP-01', sourceKey: 'risk', createdAt: '2026-11-01T01:00:00Z' },
+      { id: 'closed', recipient: 'manager', category: 'ReleaseManagementRisk', title: '生产资料未齐，需协调', content: 'P700016 · RP-02', sourceKey: 'closed', createdAt: '2026-11-01T00:00:00Z', readAt: '2026-11-01T01:00:00Z', resolvedAt: '2026-11-01T01:00:00Z' },
+      { id: 'old', recipient: 'manager', category: 'ReleasePreviewResult', title: '图纸转换已完成', content: '历史记录', sourceKey: 'old', createdAt: '2026-10-31T00:00:00Z', readAt: '2026-11-01T01:00:00Z' },
+    ], locks: [], materialCodeTasks: [], passwordResetTasks: [], pending: false, onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn() } })
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    expect(wrapper.get('[role="tab"]').text()).toBe('全部待办（1）')
+    await wrapper.get('.pdm-history-toggle input').setValue(true)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(3)
+    expect(wrapper.text()).toContain('已解除')
+    expect(wrapper.text()).toContain('图纸转换已完成')
+    wrapper.unmount()
+  })
+  it('工时催填的已读与未读记录均不进入列表、计数和分页，其余业务消息保留', async () => {
+    const notifications = ['work-hours', 'work-hours', 'ReleaseApprovalRejected', 'ProjectTodo', 'work-hours-correction'].map((category, index) => ({
+      id: `filter-${index}`, recipient: 'engineer', category, title: category === 'work-hours' ? '隐藏的工时催填' : `保留消息${index}`, content: '工时相关业务资料',
+      sourceKey: `filter-${index}`, createdAt: '2026-10-31T02:00:00Z', ...(index === 0 || index === 4 ? { readAt: '2026-10-31T03:00:00Z' } : {}),
+    }))
+    const wrapper = mount(MyTasks, { props: { tasks: [], notifications, locks: [], materialCodeTasks: [], passwordResetTasks: [], pending: false,
+      onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn() } })
+    expect(wrapper.text()).not.toContain('隐藏的工时催填')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(2)
+    await wrapper.get('.pdm-history-toggle input').setValue(true)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(3)
+    expect(wrapper.get('[role="tab"]').text()).toBe('全部待办（2）')
+    expect(wrapper.get('.pdm-task-pagination').text()).toContain('共 3 条')
+    expect(wrapper.props('notifications')).toHaveLength(5)
+    await wrapper.findAll('[role="tab"]').find(button => button.text().startsWith('系统消息'))!.trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    expect(wrapper.text()).toContain('保留消息4')
+    wrapper.unmount()
+  })
+
+  it('只有工时催填时显示零待办，不显示全部已读操作', () => {
+    const wrapper = mount(MyTasks, { props: { tasks: [], notifications: [{ id: 'hours-only', recipient: 'engineer', category: 'work-hours', title: '请核对并补全工时', content: '历史欠填', sourceKey: 'hours-only', createdAt: '2026-10-31T02:00:00Z' }],
+      locks: [], materialCodeTasks: [], passwordResetTasks: [], pending: false, onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn() } })
+    expect(wrapper.get('[role="tab"]').text()).toBe('全部待办（0）')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(0)
+    expect(wrapper.text()).toContain('当前没有待办或消息')
+    expect(wrapper.findAll('button').some(button => button.text() === '全部已读')).toBe(false)
+    wrapper.unmount()
+  })
+
   it('图纸与审批通知进入审批任务，转图及普通业务消息仍在系统消息，计数和入口同步', async () => {
     const categories = ['DrawingReviewAssigned', 'DrawingReviewSupervisorApproval', 'DrawingReviewChangesRequested',
       'DrawingReviewWritebackTimedOut', 'ReleaseApprovalPending', 'ReleaseApprovalRejected', 'WorkflowValidationPlan',
@@ -21,8 +78,10 @@ describe('MyTasks', () => {
     const approval = wrapper.findAll('[role="tab"]').find(button => button.text().includes('审批任务'))!
     const system = wrapper.findAll('[role="tab"]').find(button => button.text().includes('系统消息'))!
     expect(approval.text()).toBe('审批任务（12）')
-    expect(system.text()).toBe('系统消息（4）')
+    expect(system.text()).toBe('系统消息（3）')
     await approval.trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(12)
+    await wrapper.get('.pdm-history-toggle input').setValue(true)
     expect(wrapper.findAll('tbody tr')).toHaveLength(13)
     expect(wrapper.get('tbody').text()).toContain('DrawingReviewAssigned')
     expect(wrapper.get('tbody').text()).not.toContain('ReleasePreviewResult')
@@ -31,14 +90,15 @@ describe('MyTasks', () => {
     await row.findAll('button').find(button => button.text() === '查看审核')!.trigger('click')
     expect(wrapper.emitted('openNotification')).toEqual([[notifications[0]]])
     await system.trigger('click')
-    expect(wrapper.findAll('tbody tr')).toHaveLength(4)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(3)
     expect(wrapper.get('tbody').text()).toContain('ReleasePreviewResult')
     expect(wrapper.get('tbody').text()).not.toContain('DrawingReviewAssigned')
+    expect(wrapper.get('tbody').text()).not.toContain('work-hours')
     wrapper.unmount()
   })
 
   it('页签只统计未读消息和未处理任务，已读与任务完成后动态归零并保留历史', async () => {
-    const notifications = ['ReleaseApprovalRejected', 'work-hours', 'ProjectTodo'].map(category => ({
+    const notifications = ['ReleaseApprovalRejected', 'project-plan', 'ProjectTodo'].map(category => ({
       id: category, recipient: 'engineer', category, title: category, content: '测试消息',
       sourceKey: category, createdAt: '2026-10-28T02:00:00Z',
     }))
@@ -61,10 +121,12 @@ describe('MyTasks', () => {
     await wrapper.setProps({ tasks: [] })
     expect(tab('全部待办').text()).toBe('全部待办（0）')
     expect(tab('审批任务').text()).toBe('审批任务（0）')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(0)
+    await wrapper.get('.pdm-history-toggle input').setValue(true)
     expect(wrapper.findAll('tbody tr')).toHaveLength(3)
     await tab('系统消息').trigger('click')
     expect(wrapper.get('tbody').text()).toContain('已读')
-    expect(wrapper.get('tbody').text()).toContain('work-hours')
+    expect(wrapper.get('tbody').text()).toContain('project-plan')
 
     await wrapper.setProps({ notifications: [...(wrapper.props('notifications') ?? []), {
       ...notifications[1], id: 'new-message', title: '新消息',
@@ -77,7 +139,7 @@ describe('MyTasks', () => {
 
   it('未读计数覆盖全部分页而非当前页，历史条数不变', async () => {
     const notifications = Array.from({ length: 38 }, (_, index) => ({
-      id: `message-${index}`, recipient: 'engineer', category: 'work-hours', title: `消息${index}`, content: '测试消息',
+      id: `message-${index}`, recipient: 'engineer', category: 'project-plan', title: `消息${index}`, content: '测试消息',
       sourceKey: `message-${index}`, createdAt: '2026-10-28T02:00:00Z',
       ...(index < 37 ? { readAt: '2026-10-28T03:00:00Z' } : {}),
     }))
@@ -86,6 +148,8 @@ describe('MyTasks', () => {
       onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn(),
     } })
     expect(wrapper.get('[role="tab"]').text()).toBe('全部待办（1）')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    await wrapper.get('.pdm-history-toggle input').setValue(true)
     expect(wrapper.findAll('tbody tr')).toHaveLength(20)
     expect(wrapper.get('tbody').text()).not.toContain('未读')
     expect(wrapper.get('.pdm-task-pagination').text()).toContain('共 38 条')

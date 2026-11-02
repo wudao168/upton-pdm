@@ -6,6 +6,59 @@ namespace Upton.Pdm.Infrastructure;
 
 public sealed partial class MySqlPdmRepository
 {
+    public async Task<IReadOnlyList<UserNotification>> ListUnreadUserNotificationsAsync(string? recipient, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<UserNotificationRow>(new CommandDefinition("""
+            SELECT id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date,resolved_at,is_sender_receipt
+            FROM user_notification WHERE read_at IS NULL AND (@Recipient IS NULL OR recipient_username=@Recipient)
+            """, new { Recipient = recipient }, cancellationToken: cancellationToken));
+        return rows.Select(MapUserNotification).ToArray();
+    }
+
+    public async Task ResolveUserNotificationAsync(Guid notificationId, string recipient, DateTimeOffset resolvedAt, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await connection.ExecuteAsync(new CommandDefinition("UPDATE user_notification SET resolved_at=COALESCE(resolved_at,@ResolvedAt),read_at=COALESCE(read_at,@ResolvedAt) WHERE id=@Id AND recipient_username=@Recipient",
+            new { Id = notificationId, Recipient = recipient, ResolvedAt = resolvedAt.UtcDateTime }, cancellationToken: cancellationToken));
+    }
+    public async Task<IReadOnlyList<UserNotification>> ListUnreadReleaseNotificationsAsync(string? recipient, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<UserNotificationRow>(new CommandDefinition("""
+            SELECT id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date,resolved_at,is_sender_receipt
+            FROM user_notification WHERE read_at IS NULL AND release_package_id IS NOT NULL
+              AND (@Recipient IS NULL OR recipient_username=@Recipient)
+              AND category IN ('ReleasePreviewPending','ReleasePreviewResult','ReleaseDeliveryResult','ReleaseApprovalRejected','ReleaseApprovalPending','ReleaseManagementRisk')
+            """, new { Recipient = recipient }, cancellationToken: cancellationToken));
+        return rows.Select(MapUserNotification).ToArray();
+    }
+
+    public async Task UpsertUserNotificationsAsync(IReadOnlyList<UserNotification> notifications, CancellationToken cancellationToken)
+    {
+        notifications = await NotificationRecipientPolicy.FilterAsync(this, notifications, cancellationToken);
+        if (notifications.Count == 0) return;
+        await using var connection = await OpenAsync(cancellationToken);
+        await connection.ExecuteAsync(new CommandDefinition("""
+            INSERT INTO user_notification(id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date,resolved_at,is_sender_receipt)
+            VALUES(@Id,@Recipient,@Category,@Title,@Content,@ProjectId,@ReleasePackageId,@SourceKey,@CreatedAt,@ReadAt,@DueDate,@ResolvedAt,@IsSenderReceipt)
+            ON DUPLICATE KEY UPDATE read_at=IF(resolved_at IS NOT NULL AND VALUES(resolved_at) IS NULL,NULL,read_at),
+              created_at=IF(resolved_at IS NOT NULL AND VALUES(resolved_at) IS NULL,VALUES(created_at),created_at),
+              category=VALUES(category),title=VALUES(title),content=VALUES(content),resolved_at=VALUES(resolved_at),is_sender_receipt=VALUES(is_sender_receipt)
+            """, notifications.Select(item => new
+        {
+            item.Id, item.Recipient, item.Category, item.Title, item.Content, item.ProjectId, item.ReleasePackageId, item.SourceKey,
+            CreatedAt = item.CreatedAt.UtcDateTime, ReadAt = item.ReadAt?.UtcDateTime, DueDate = item.DueDate?.ToDateTime(TimeOnly.MinValue), ResolvedAt = item.ResolvedAt?.UtcDateTime, item.IsSenderReceipt,
+        }), cancellationToken: cancellationToken));
+    }
+
+    public async Task ResolveUserNotificationsAsync(IReadOnlyList<string> sourceKeys, DateTimeOffset resolvedAt, CancellationToken cancellationToken)
+    {
+        if (sourceKeys.Count == 0) return;
+        await using var connection = await OpenAsync(cancellationToken);
+        await connection.ExecuteAsync(new CommandDefinition("UPDATE user_notification SET resolved_at=@ResolvedAt,read_at=COALESCE(read_at,@ResolvedAt) WHERE source_key IN @SourceKeys AND resolved_at IS NULL",
+            new { SourceKeys = sourceKeys, ResolvedAt = resolvedAt.UtcDateTime }, cancellationToken: cancellationToken));
+    }
     public async Task ResolveWorkHoursNotificationsAsync(string recipient, Guid companyId, DateTimeOffset readAt, CancellationToken ct)
     {
         await using var connection = await OpenAsync(ct);
@@ -22,16 +75,17 @@ public sealed partial class MySqlPdmRepository
 
     public async Task<IReadOnlyList<UserNotification>> ListDatedUserTodosAsync(string recipient, Guid companyId, DateOnly from, DateOnly to, CancellationToken ct)
     {
-        if (NotificationRecipientPolicy.SystemOnly(await FindUserAsync(recipient, ct))) return [];
+        var systemOnly = NotificationRecipientPolicy.SystemOnly(await FindUserAsync(recipient, ct));
         await using var connection = await OpenAsync(ct);
         var rows = await connection.QueryAsync<UserNotificationRow>(new CommandDefinition(
             """
-            SELECT n.id,n.recipient_username,n.category,n.title,n.content,n.project_id,n.release_package_id,n.source_key,n.created_at,n.read_at,n.due_date
+            SELECT n.id,n.recipient_username,n.category,n.title,n.content,n.project_id,n.release_package_id,n.source_key,n.created_at,n.read_at,n.due_date,n.resolved_at,n.is_sender_receipt
             FROM user_notification n LEFT JOIN project p ON p.id=n.project_id
             WHERE n.recipient_username=@Recipient AND n.category='ProjectTodo' AND n.due_date BETWEEN @From AND @To
+              AND (@SystemOnly=0 OR n.is_sender_receipt=1)
               AND (n.source_key LIKE @Prefix OR p.organization_id=@CompanyId)
             ORDER BY n.due_date,n.created_at,n.id
-            """, new { Recipient = recipient, CompanyId = companyId, Prefix = $"calendar-todo:{companyId:N}:%", From = from.ToDateTime(TimeOnly.MinValue), To = to.ToDateTime(TimeOnly.MinValue) }, cancellationToken: ct));
+            """, new { Recipient = recipient, SystemOnly = systemOnly, CompanyId = companyId, Prefix = $"calendar-todo:{companyId:N}:%", From = from.ToDateTime(TimeOnly.MinValue), To = to.ToDateTime(TimeOnly.MinValue) }, cancellationToken: ct));
         return rows.Select(MapUserNotification).ToArray();
     }
 
@@ -41,10 +95,10 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<UserNotificationRow>(new CommandDefinition(
             """
-            SELECT id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date
+            SELECT id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date,resolved_at,is_sender_receipt
             FROM user_notification n
             WHERE recipient_username=@Recipient
-              AND (@SystemOnly=0 OR (n.category='System' AND n.project_id IS NULL AND n.release_package_id IS NULL))
+              AND (@SystemOnly=0 OR (n.category='System' AND n.project_id IS NULL AND n.release_package_id IS NULL) OR (n.is_sender_receipt=1 AND n.read_at IS NOT NULL))
               AND (n.category NOT IN ('ReleasePreviewPending','ReleasePreviewResult') OR EXISTS (
                   SELECT 1 FROM release_package conversion_package WHERE conversion_package.id=n.release_package_id
                     AND conversion_package.locks_documents=1
@@ -60,7 +114,7 @@ public sealed partial class MySqlPdmRepository
                     AND SUBSTRING_INDEX(newer.source_key,':',2)=SUBSTRING_INDEX(n.source_key,':',2)
                     AND (newer.created_at>n.created_at OR (newer.created_at=n.created_at AND newer.id>n.id))
               ))
-            ORDER BY created_at DESC,id DESC
+            ORDER BY (read_at IS NULL) DESC,created_at DESC,id DESC
             LIMIT @Take
             """,
             new { Recipient = recipient, SystemOnly = systemOnly, Take = Math.Clamp(take, 1, 200), CalendarPrefix = $"calendar-todo:{TenantContext.CompanyId:N}:%",
@@ -80,9 +134,9 @@ public sealed partial class MySqlPdmRepository
         await connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT IGNORE INTO user_notification(
-                id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date)
+                id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date,is_sender_receipt)
             VALUES(
-                @Id,@Recipient,@Category,@Title,@Content,@ProjectId,@ReleasePackageId,@SourceKey,@CreatedAt,NULL,@DueDate)
+                @Id,@Recipient,@Category,@Title,@Content,@ProjectId,@ReleasePackageId,@SourceKey,@CreatedAt,@ReadAt,@DueDate,@IsSenderReceipt)
             """,
             notifications.Select(item => new
             {
@@ -95,6 +149,8 @@ public sealed partial class MySqlPdmRepository
                 item.ReleasePackageId,
                 item.SourceKey,
                 CreatedAt = item.CreatedAt.UtcDateTime,
+                ReadAt = item.ReadAt?.UtcDateTime,
+                item.IsSenderReceipt,
                 DueDate = item.DueDate?.ToDateTime(TimeOnly.MinValue)
             }),
             cancellationToken: cancellationToken));
@@ -130,7 +186,9 @@ public sealed partial class MySqlPdmRepository
         row.SourceKey,
         AsUtc(row.CreatedAt),
         row.ReadAt.HasValue ? AsUtc(row.ReadAt.Value) : null,
-        row.DueDate.HasValue ? DateOnly.FromDateTime(row.DueDate.Value) : null);
+        row.DueDate.HasValue ? DateOnly.FromDateTime(row.DueDate.Value) : null,
+        row.ResolvedAt.HasValue ? AsUtc(row.ResolvedAt.Value) : null,
+        row.IsSenderReceipt);
 
     private sealed class UserNotificationRow
     {
@@ -145,5 +203,7 @@ public sealed partial class MySqlPdmRepository
         public DateTime CreatedAt { get; init; }
         public DateTime? ReadAt { get; init; }
         public DateTime? DueDate { get; init; }
+        public DateTime? ResolvedAt { get; init; }
+        public bool IsSenderReceipt { get; init; }
     }
 }

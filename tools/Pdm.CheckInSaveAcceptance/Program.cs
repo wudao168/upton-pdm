@@ -25,8 +25,45 @@ internal static partial class Program
  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window,out uint processId);
  [STAThread] static void Main(string[] args)
  {
+  if(args.Length>0&&args[0]=="--archive-status-proxy-host") { RunArchiveStatusProxyHost(args); return; }
   AppDomain.CurrentDomain.AssemblyResolve+=(_,e)=>{var path=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0])),new AssemblyName(e.Name).Name+".dll");return File.Exists(path)?Assembly.LoadFrom(path):null;};
   assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));
+  if(args.Length>1&&args[1]=="--context-state-transition-regression")
+  {try{ContextStateTransitionScenario(args[2],args[3],args[4]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--virtual-cycle-graph-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await VirtualCycleGraphScenario(args[2],args[3]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--virtual-ancestor-reference-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await VirtualAncestorReferenceScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--version-timeout-progress-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await VersionTimeoutProgressScenario(host);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--archive-payload-size-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ArchivePayloadSizeScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--archive-network-recovery-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ArchiveNetworkRecoveryScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--missing-cache-policy-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await MissingCachePolicyScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--memory-copy-load-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await MemoryCopyLoadScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--archive-instance-index-regression")
+  {try{ArchiveInstanceIndexScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--relocated-import-member-regression")
+  {try{RelocatedImportMemberScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--unloaded-import-descendant-regression")
+  {try{UnloadedImportDescendantScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--archive-final-sync-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{TargetedEditJournalScenario(Path.Combine(args[2],"journal"));CommittedCopyCacheScenario(Path.Combine(args[2],"cache"));await BackgroundArchiveSyncScenario(Path.Combine(args[2],"async"));}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--archive-loaded-save-lookup-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ArchiveLoadedSaveLookupScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--archive-status-proxy-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ArchiveStatusProxyScenario(host,args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--native-save-scope-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await NativeSaveScopeScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--archive-memory-batch-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ArchiveUploadGateScenario(host,args[2],true);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--archive-save-state-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await Scenario(false,false);await Scenario(true,false);await Scenario(true,true);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&(args[1]=="--reference-pass-performance-regression"||args[1]=="--reference-pass-performance-baseline"))
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await ReferencePassPerformanceScenario(args[2],args[1].EndsWith("baseline"));}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
   if(args.Length>1&&args[1]=="--lightweight-import-owner-regression")
   {try{Directory.CreateDirectory(args[2]);LightweightImportOwnerScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&(args[1]=="--archive-submission-graph-regression"||args[1]=="--archive-submission-graph-audit"))
@@ -1437,7 +1474,7 @@ internal static partial class Program
    models.Add(new Model(modelType,path,dirty,events,!denied));nodes.Add(node);
   }
   ((IList)Get(nodes[0],"Children")).Add(nodes[1]);SetField(plugin,"currentTree",nodes[0]);
-  SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?models.Select(m=>m.GetTransparentProxy()).ToArray():throw new Exception("Unexpected SW call "+call.MethodName)).GetTransparentProxy());
+  SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?models.Select(m=>m.GetTransparentProxy()).ToArray():call.MethodName=="GetCurrentWorkingDirectory"?directory:throw new Exception("Unexpected SW call "+call.MethodName)).GetTransparentProxy());
   var items=Array.CreateInstance(Type("BatchOperationItem"),2);for(int i=0;i<2;i++)items.SetValue(New("BatchOperationItem",nodes[i],i),i);
   using(var pane=(Control)New("PdmTaskPaneControl",""))
   using(var handler=new Handler(nodes,project,session,events,denied))
@@ -1448,20 +1485,15 @@ internal static partial class Program
    try
    {
     await (Task)plugin.GetType().GetMethod("EnsureBatchCheckInSavedStateAsync",Flags).Invoke(plugin,new object[]{items,project,CancellationToken.None});
-    if(denied)throw new Exception("Permission failure ignored");
     if(dirty)
     {
-     if(events.Count!=0||models.Any(m=>!m.Dirty)||nodes.Any(n=>Get(n,"CheckedOutBy")!=null))throw new Exception("Read-only parent state triggered an unrequested save or checkout");
+     if(!events.SequenceEqual(new[]{"copy:assembly1.SLDASM","copy:assembly0.SLDASM"})||models.Any(m=>!m.Dirty))throw new Exception("Dirty source was saved, made writable, or not snapshotted child-first");
     }
-    else if(events.Count!=0)throw new Exception("Clean no-change edit unexpectedly saved or checked out");
-    foreach(var model in models)if(File.ReadAllText(model.Path)!="unchanged CAD fixture")throw new Exception("Changed file content");
-    Console.WriteLine(dirty?"PASS: Read-only parent save flags remain preserved without acquiring permissions or saving parent files":"PASS: Clean no-change files do not save, acquire permission or create versions");
+    else if(events.Count!=0)throw new Exception("Clean no-change file unexpectedly copied or checked out");
+    foreach(var model in models)if(File.ReadAllText(model.Path)!="unchanged CAD fixture"||(File.GetAttributes(model.Path)&FileAttributes.ReadOnly)==0)throw new Exception("Source bytes or readonly attribute changed");
+    Console.WriteLine(dirty?"PASS: Dirty current content uses local copies; source bytes, readonly flags and permissions remain unchanged; denied="+denied:"PASS: Clean no-change files do not save, acquire permission or create versions");
    }
-   catch(InvalidOperationException) when(denied)
-   {
-    if(events.Any(e=>e.StartsWith("save:"))||models.Any(m=>!m.Dirty))throw new Exception("Denied checkout saved or discarded dirty content");
-    Console.WriteLine("PASS: Denied permission stops before save and retains dirty content");
-   }
+   finally { TreeCall(plugin,"PruneArchiveMemoryCopies",true); }
   }
   foreach(var model in models){File.SetAttributes(model.Path,FileAttributes.Normal);File.Delete(model.Path);}Directory.Delete(directory);
   if(!dirty&&!denied)await SavePropagationScenario();
@@ -1504,11 +1536,12 @@ internal static partial class Program
     var node=New("CadTreeNode");Set(node,"FullPath",path);Set(node,"FileName","OWNED.SLDPRT");Set(node,"Kind",Enum.ToObject(Type("CadDocumentKind"),1));
     var items=Array.CreateInstance(Type("BatchOperationItem"),1);items.SetValue(New("BatchOperationItem",node,0),0);var rejected=false;
     Set(node,"DocumentId",Guid.NewGuid());File.WriteAllText(path,"saved owned source");
+    Set(node,"RequiresModelUpdate",true); // Exercise the native-open path, not the saved-file fast path.
     using(var client=(IDisposable)New("PdmApiClient","http://fixture.invalid/"))
     {
      ((HttpClient)Field(client,"httpClient")).Dispose();SetField(client,"httpClient",new HttpClient(new PreparationHandler()){BaseAddress=new Uri("http://fixture.invalid/")});SetField(plugin,"apiClient",client);
      try{await (Task)Type("PdmAddin").GetMethod("PrepareBatchCheckInFileAsync",Flags).Invoke(plugin,new object[]{node,CancellationToken.None,null,null,null,null});}
-     catch(InvalidOperationException e)when(e.Message.Contains("其他路径")){rejected=true;}
+     catch(Exception e)when(e.GetType().Name=="ArchiveReadAliasConflictException" && e.Message.Contains(path) && e.Message.Contains(other)){rejected=true;}
     }
     if(!rejected)throw new Exception("Foreign document accepted during streamed preparation");
    }
@@ -1575,15 +1608,16 @@ internal static partial class Program
    ((IList)Get(nodes[2],"Children")).Add(nodes[3]);
    var repeated=New("CadTreeNode");Set(repeated,"FullPath",Get(nodes[1],"FullPath"));Set(repeated,"FileName",names[1]);Set(repeated,"Kind",Enum.ToObject(Type("CadDocumentKind"),0));((IList)Get(nodes[3],"Children")).Add(repeated);
    models[1].OnSave=()=>{models[3].Dirty=true;models[2].Dirty=true;models[0].Dirty=true;};models[3].OnSave=()=>{models[2].Dirty=true;models[0].Dirty=true;};models[2].OnSave=()=>models[0].Dirty=true;
-   SetField(plugin,"currentTree",nodes[0]);SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?models.Select(model=>model.GetTransparentProxy()).ToArray():throw new Exception(call.MethodName)).GetTransparentProxy());
+   SetField(plugin,"currentTree",nodes[0]);SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?models.Select(model=>model.GetTransparentProxy()).ToArray():call.MethodName=="GetCurrentWorkingDirectory"?folder:throw new Exception(call.MethodName)).GetTransparentProxy());
    var items=Type("PdmAddin").GetMethod("BuildBatchOperationItems",Flags).Invoke(null,new[]{nodes[0]});
    using(var pane=(Control)New("PdmTaskPaneControl","重复子装配保存测试"))
    {
     pane.CreateControl();SetField(plugin,"taskPaneControl",pane);
     await (Task)Type("PdmAddin").GetMethod("EnsureBatchCheckInSavedStateAsync",Flags).Invoke(plugin,new object[]{items,Guid.NewGuid(),CancellationToken.None});
-    if(models.Any(model=>model.Dirty)||!events.SequenceEqual(new[]{"save:SHARED.SLDASM","save:INNER.SLDASM","save:OUTER.SLDASM","save:ROOT.SLDASM"}))throw new Exception("Shared assemblies were saved by display depth instead of file dependencies");
+    if(models.Any(model=>!model.Dirty)||!events.SequenceEqual(new[]{"copy:SHARED.SLDASM","copy:INNER.SLDASM","copy:OUTER.SLDASM","copy:ROOT.SLDASM"}))throw new Exception("Shared assembly snapshots lost source state or dependency order");
+    TreeCall(plugin,"PruneArchiveMemoryCopies",true);
    }
-   Console.WriteLine("PASS: a shared assembly at shallow and deep occurrences saves once before every parent");
+   Console.WriteLine("PASS: a shared assembly at shallow and deep occurrences is copied once before every parent, source dirty flags preserved");
   }
   finally{Directory.Delete(folder,true);}
  }
@@ -1598,19 +1632,20 @@ internal static partial class Program
     var modelType=appType.Assembly.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true);var events=new List<string>();
     var names=new[]{"ROOT.SLDASM","PART.SLDPRT","PART.SLDDRW"};var models=new List<Model>();var nodes=new List<object>();
     for(var i=0;i<3;i++){var path=Path.Combine(folder,names[i]);File.WriteAllText(path,"saved source");var node=New("CadTreeNode");Set(node,"FullPath",path);Set(node,"FileName",names[i]);Set(node,"Kind",Enum.ToObject(Type("CadDocumentKind"),i));nodes.Add(node);models.Add(new Model(modelType,path,i==1,events));}
-    models[1].OnSave=()=>{models[0].Dirty=true;models[2].Dirty=true;};models[0].OnSave=()=>{models[0].Dirty=remainsDirty;models[2].Dirty=true;};
+    models[1].OnSave=()=>{models[0].Dirty=true;models[2].Dirty=true;};models[0].CopyError=remainsDirty?1:0;models[0].OnSave=()=>{models[2].Dirty=true;};
     ((IList)Get(nodes[0],"Children")).Add(nodes[1]);((IList)Get(nodes[1],"Children")).Add(nodes[2]);SetField(plugin,"currentTree",nodes[0]);
-    SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?models.Select(model=>model.GetTransparentProxy()).ToArray():throw new Exception(call.MethodName)).GetTransparentProxy());
+    SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?models.Select(model=>model.GetTransparentProxy()).ToArray():call.MethodName=="GetCurrentWorkingDirectory"?folder:throw new Exception(call.MethodName)).GetTransparentProxy());
     var items=Array.CreateInstance(Type("BatchOperationItem"),3);for(var i=0;i<3;i++)items.SetValue(New("BatchOperationItem",nodes[i],i),i);
     using(var pane=(Control)New("PdmTaskPaneControl","保存传播测试"))
     {
      pane.CreateControl();SetField(plugin,"taskPaneControl",pane);var rejected=false;
      try{await (Task)Type("PdmAddin").GetMethod("EnsureBatchCheckInSavedStateAsync",Flags).Invoke(plugin,new object[]{items,Guid.NewGuid(),CancellationToken.None});}
-     catch(IOException)when(remainsDirty){rejected=true;}
-     if(rejected!=remainsDirty||models[0].Dirty!=remainsDirty||models[1].Dirty||models[2].Dirty||!events.SequenceEqual(new[]{"save:PART.SLDPRT","save:ROOT.SLDASM","save:PART.SLDDRW"}))throw new Exception("Save ordering lost propagated changes or ignored a persistent dirty flag");
+     catch(InvalidOperationException)when(remainsDirty){rejected=true;}
+     if(rejected!=remainsDirty||models.Any(model=>!model.Dirty)||!events.SequenceEqual(remainsDirty?new[]{"copy:PART.SLDPRT","copy:ROOT.SLDASM"}:new[]{"copy:PART.SLDPRT","copy:ROOT.SLDASM","copy:PART.SLDDRW"}))throw new Exception("Snapshot ordering lost propagated changes or ignored a failed copy");
+     TreeCall(plugin,"PruneArchiveMemoryCopies",true);
      if(names.Any(name=>File.ReadAllText(Path.Combine(folder,name))!="saved source"))throw new Exception("Save-order fixture modified source bytes");
     }
-    Console.WriteLine("PASS: child-save dirties a clean parent; models save child-first, drawings last; persistent-dirty="+remainsDirty);
+    Console.WriteLine("PASS: child preparation dirties a clean parent; snapshots remain child-first, drawings last; copy-failed="+remainsDirty);
    }
    finally{Directory.Delete(folder,true);}
   }
@@ -2079,17 +2114,57 @@ internal static partial class Program
   public Proxy(System.Type type,Func<IMethodCallMessage,object> callback):base(type){this.callback=callback;}
   public override IMessage Invoke(IMessage message){var call=(IMethodCallMessage)message;try{var result=callback(call);return result as IMessage??new ReturnMessage(result,call.Args,call.ArgCount,call.LogicalCallContext,call);}catch(Exception e){return new ReturnMessage(e,call);}}
  }
- sealed class Model:RealProxy
+ sealed class Model:RealProxy,IRemotingTypeInfo
  {
   public string Path;public bool Dirty;public Action OnSave;bool readOnly=true;readonly List<string> events;
-  public Model(System.Type type,string path,bool dirty,List<string> events,bool readOnly=true):base(type){Path=path;Dirty=dirty;this.events=events;this.readOnly=readOnly;}
+  readonly System.Type nativeType;readonly List<Delegate> modifyHandlers=new List<Delegate>();readonly List<Delegate> destroyHandlers=new List<Delegate>();readonly List<Delegate> reloadHandlers=new List<Delegate>();
+  public int UpdateStamp=1,CopyError,SelectionCount=2;int heldSelection;public string MemoryPayload="current memory";
+  public string TypeName{get=>nativeType.FullName;set{}}
+  public bool CanCastTo(System.Type type,object obj)=>type.IsAssignableFrom(nativeType)||type.Name=="IModelDoc2"||type.Name=="ModelDoc2"
+   ||type.Name==(Path.EndsWith(".SLDASM",StringComparison.OrdinalIgnoreCase)?"DAssemblyDocEvents_Event":Path.EndsWith(".SLDDRW",StringComparison.OrdinalIgnoreCase)?"DDrawingDocEvents_Event":"DPartDocEvents_Event");
+  public void Modify(bool geometry=true){if(geometry)UpdateStamp++;Dirty=true;foreach(var handler in modifyHandlers.ToArray())handler.DynamicInvoke();}
+  public void Hide(){foreach(var handler in destroyHandlers.ToArray())handler.DynamicInvoke(1);}
+  public void Destroy(){foreach(var handler in destroyHandlers.ToArray())handler.DynamicInvoke(0);}
+  public void Reload(){foreach(var handler in reloadHandlers.ToArray())handler.DynamicInvoke();}
+  object Selection()=>new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.SelectionMgr",true),call=>{
+   if(call.MethodName=="GetSelectedObjectCount2")return SelectionCount;
+   if(call.MethodName=="SuspendSelectionList"){heldSelection=SelectionCount;SelectionCount=0;return heldSelection==0?0:1;}
+   if(call.MethodName=="ResumeSelectionList"){SelectionCount=heldSelection;return null;}
+   throw new Exception(call.MethodName);
+  }).GetTransparentProxy();
+  object Extension()=>new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>{
+   if(call.MethodName=="ListExternalFileReferences2"){for(var i=0;i<call.Args.Length;i++)call.Args[i]=Array.Empty<object>();return null;}
+   if(call.MethodName=="GetOLEObjects"||call.MethodName=="GetRenderMaterials")return Array.Empty<object>();
+   if(call.MethodName=="GetOLEObjectCount")return 0;
+   if(call.MethodName!="SaveAs3")throw new Exception("Unexpected snapshot API "+call.MethodName);
+   if(SelectionCount!=0)throw new Exception("Snapshot could export selected bodies instead of the entire model");
+   var options=(int)call.Args[2];if((options&2)==0||(options&(4|1024))!=0)throw new Exception("Snapshot attempted recursive source save");
+   events.Add("copy:"+System.IO.Path.GetFileName(Path));call.Args[5]=CopyError;call.Args[6]=0;if(CopyError!=0)return false;
+   File.WriteAllText((string)call.Args[0],MemoryPayload);Dirty=false;OnSave?.Invoke();return true;
+  }).GetTransparentProxy();
+  public Model(System.Type type,string path,bool dirty,List<string> events,bool readOnly=true):base(type){Path=path;Dirty=dirty;this.events=events;this.readOnly=readOnly;nativeType=type;}
   public override IMessage Invoke(IMessage message)
   {
    var call=(IMethodCallMessage)message;object value;
    switch(call.MethodName)
    {
     case "GetPathName":value=Path;break;
+    case "GetType":value=call.MethodBase is MethodInfo info&&info.ReturnType==typeof(System.Type)?(object)nativeType:Path.EndsWith(".SLDASM",StringComparison.OrdinalIgnoreCase)?2:Path.EndsWith(".SLDDRW",StringComparison.OrdinalIgnoreCase)?3:1;break;
     case "GetSaveFlag":value=Dirty;break;
+    case "GetUpdateStamp":value=UpdateStamp;break;
+    case "GetConfigurationNames":value=new[]{"Default"};break;
+    case "GetEquationMgr":case "GetDesignTable":case "FirstFeature":value=null;break;
+    case "SetSaveFlag":Dirty=true;value=null;break;
+    case "get_Extension":value=Extension();break;
+    case "get_SelectionManager":value=Selection();break;
+    case "get_FeatureManager":value=new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.FeatureManager",true),m=>m.MethodName=="GetFeatures"?Array.Empty<object>():m.MethodName=="GetFeatureCount"?(object)0:throw new Exception(m.MethodName)).GetTransparentProxy();break;
+    case "get_SketchManager":value=new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.SketchManager",true),m=>m.MethodName=="GetSketchBlockDefinitions"?Array.Empty<object>():throw new Exception(m.MethodName)).GetTransparentProxy();break;
+    case "add_ModifyNotify":modifyHandlers.Add((Delegate)call.Args[0]);value=null;break;
+    case "remove_ModifyNotify":modifyHandlers.Remove((Delegate)call.Args[0]);value=null;break;
+    case "add_DestroyNotify2":destroyHandlers.Add((Delegate)call.Args[0]);value=null;break;
+    case "remove_DestroyNotify2":destroyHandlers.Remove((Delegate)call.Args[0]);value=null;break;
+    case "add_FileReloadNotify":reloadHandlers.Add((Delegate)call.Args[0]);value=null;break;
+    case "remove_FileReloadNotify":reloadHandlers.Remove((Delegate)call.Args[0]);value=null;break;
     case "IsOpenedReadOnly":value=readOnly;break;
     case "SetReadOnlyState":readOnly=(bool)call.Args[0];value=true;break;
     case "Save3":

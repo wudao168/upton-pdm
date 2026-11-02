@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UserSelect from './UserSelect'
 import { computed, reactive, ref, watch } from 'vue'
 import { ElTabs, ElTabPane } from 'element-plus'
 import WorkflowNotificationSettings from './WorkflowNotificationSettings.vue'
@@ -262,11 +263,11 @@ function toggleUnlimited(kind: keyof FormalSupplementPolicies, field: 'maximumCo
               </select>
             </label>
             <label v-if="step.assigneeSource === 'FixedUser'" class="workflow-target">指定人员
-              <select v-model="step.fixedAssignee" aria-label="指定人员" :disabled="pending || saving">
+              <UserSelect v-model="step.fixedAssignee" aria-label="指定人员" :disabled="pending || saving">
                 <option :value="null" disabled>请选择人员</option>
                 <option v-if="step.fixedAssignee && !activeUsers.some(user => user.username === step.fixedAssignee)" :value="step.fixedAssignee" disabled>原指定人员已停用或不存在，请重新选择</option>
                 <option v-for="user in activeUsers" :key="user.username" :value="user.username">{{ user.displayName }}（{{ user.username }}）</option>
-              </select>
+              </UserSelect>
             </label>
             <label v-if="step.assigneeSource === 'FixedUnitManager'" class="workflow-target">指定部门
               <select v-model="step.fixedUnitId" aria-label="指定部门" :disabled="pending || saving">

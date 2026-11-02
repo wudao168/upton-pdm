@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { listBomHeaderMaterialDirectory } from '../api'
 import type { BomHeaderMaterialDirectoryItem } from '../types'
@@ -39,7 +40,7 @@ onMounted(load)
   <section class="bom-header-directory" aria-label="BOM表头料号目录">
     <div class="bom-header-directory__toolbar">
       <p title="仅显示当前有权查看项目的BOM表头料号，与普通料品分开管理。系统自动批准及同步；历史记录不会因打开或刷新本页而自动重试。">仅显示当前有权查看项目的BOM表头料号，与普通料品分开管理。系统自动批准及同步；历史记录不会因打开或刷新本页而自动重试。</p>
-      <el-input v-model="query" clearable placeholder="搜索项目、料号或BOM类型" aria-label="搜索BOM表头料号" />
+      <SearchField><el-input v-model="query" clearable placeholder="搜索项目、料号或BOM类型" aria-label="搜索BOM表头料号" /></SearchField>
       <el-button :loading="loading" @click="load">刷新</el-button>
     </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />

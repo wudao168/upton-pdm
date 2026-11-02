@@ -66,7 +66,10 @@ function decide(packageId: string, itemId: string, target: DrawingReviewTarget, 
   send('decide', { packageId, itemId, target, decision, comment })
 }
 
-onMounted(() => window.chrome?.webview?.addEventListener('message', updateState))
+onMounted(() => {
+  window.chrome?.webview?.addEventListener('message', updateState)
+  send('state-ready')
+})
 onBeforeUnmount(() => window.chrome?.webview?.removeEventListener?.('message', updateState))
 </script>
 

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
 import { computed, ref, watch } from 'vue'
 import { readProjectOpl } from '../api'
 import type { OplView } from '../projectOpl'
@@ -40,7 +41,7 @@ function toggle(id: string, checked: boolean) {
     <summary>关联 OPL 问题<span>已选 {{ modelValue.length }} 项{{ readonly ? '' : ' · 选填，可多选' }}</span></summary>
     <p class="release-opl-note">每条关联问题均记录本发布包的图纸总数；发布成功后保留历史，问题仍需人工确认完成。</p>
     <div v-if="!readonly" class="release-opl-filters">
-      <input v-model="query" aria-label="搜索关联OPL问题" placeholder="搜索编号、问题描述、负责人或子项目">
+      <SearchField><input v-model="query" aria-label="搜索关联OPL问题" placeholder="搜索编号、问题描述、负责人或子项目"></SearchField>
       <select v-model="state" aria-label="关联OPL问题状态"><option value="未完成">未完成</option><option value="">全部有效状态</option><option value="已完成">已完成</option></select>
     </div>
     <p v-if="loading" role="status">正在加载OPL问题…</p>

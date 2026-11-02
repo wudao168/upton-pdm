@@ -18,6 +18,7 @@ public sealed class DingTalkOplOptions
     public string PublicUrl { get; set; } = "";
     public string NotificationTemplate { get; set; } = DingTalkOplMessageTemplate.Default;
     public Dictionary<string, string> Users { get; set; } = [];
+    public List<DingTalkEmployeeBinding> EmployeeBindings { get; set; } = [];
     public Dictionary<Guid, DingTalkOplGroup> Projects { get; set; } = [];
     public Dictionary<Guid, DingTalkOplGroup> Groups { get; set; } = [];
     public Dictionary<Guid, Guid> Bindings { get; set; } = [];

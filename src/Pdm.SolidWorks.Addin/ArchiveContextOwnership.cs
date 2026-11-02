@@ -45,7 +45,11 @@ internal static class ArchiveContextOwnership
                     && link.Kind == CadDocumentKind.Assembly
                     && (string.Equals(link.FullPath, evidence.Context, StringComparison.OrdinalIgnoreCase)
                         || string.Equals(link.SourceReferencePath, evidence.Context, StringComparison.OrdinalIgnoreCase))))
+                {
                     link.IsContextReference = true;
+                    link.ReferenceTypeVerified = true;
+                    link.ReferenceTypeUnverified = false;
+                }
             }
             PluginDiagnosticLog.Record("上下文归属证据", "父装配=" + assembly.FullPath + "；文件=" + paths[0]
                 + "；实例=" + evidence.Owner + "；目标=" + evidence.Context + "；特征=" + evidence.Feature + "；状态=" + evidence.Status);

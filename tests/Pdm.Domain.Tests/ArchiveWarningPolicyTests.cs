@@ -7,6 +7,34 @@ namespace Pdm.Domain.Tests;
 public sealed class ArchiveWarningPolicyTests
 {
     [Fact]
+    public async Task BatchSizeSettingUsesExistingAdministratorPermission()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.SaveArchiveWarningPolicyAsync(
+            new() { MaxBatchRequestMiB = 128 }, "engineer", UserRole.Engineer, default));
+        Assert.Equal(0, (await repository.GetArchiveWarningPolicyAsync(default)).Revision);
+        var saved = await workflow.SaveArchiveWarningPolicyAsync(new() { MaxBatchRequestMiB = 128 }, "admin", UserRole.Administrator, default);
+        Assert.Equal(128, saved.MaxBatchRequestMiB);
+    }
+
+    [Fact]
+    public async Task BatchSizeSettingPreservesLegacySavesAndChecksBounds()
+    {
+        Assert.Equal(256L * 1024 * 1024, new ArchiveWarningPolicy().GetMaxBatchRequestBytes());
+        Assert.Throws<ArgumentException>(() => ArchiveWarningPolicy.Validate(new() { MaxBatchRequestMiB = 15 }));
+        Assert.Throws<ArgumentException>(() => ArchiveWarningPolicy.Validate(new() { MaxBatchRequestMiB = 513 }));
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var saved = await repository.SaveArchiveWarningPolicyAsync(new() { MaxBatchRequestMiB = 128 }, default);
+        Assert.Equal(128L * 1024 * 1024, saved.GetMaxBatchRequestBytes());
+        var legacy = await repository.SaveArchiveWarningPolicyAsync(new() { Revision = saved.Revision, BlockingCodes = ["MissingFile"] }, default);
+        Assert.Equal(128, legacy.MaxBatchRequestMiB);
+        legacy.MaxBatchRequestMiB = 512;
+        Assert.Equal(128, (await repository.GetArchiveWarningPolicyAsync(default)).MaxBatchRequestMiB);
+        await Assert.ThrowsAsync<PdmConflictException>(() => repository.SaveArchiveWarningPolicyAsync(new() { MaxBatchRequestMiB = 256 }, default));
+    }
+
+    [Fact]
     public void CompleteCatalogSeparatesOfficialAndExtensionAndUnsupportedRules()
     {
         Assert.Equal(19, ArchiveWarningPolicy.Catalog.Count(item => item.Source == "PDM官方"));

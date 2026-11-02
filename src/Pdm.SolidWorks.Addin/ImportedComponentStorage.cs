@@ -20,6 +20,11 @@ internal sealed class ImportedComponentStorage
     // One storage reader belongs to one scan. Repeated descendants of the same
     // imported instance need the same native feature proof, not another feature lookup.
     private readonly Dictionary<string, bool> nativeFeatureProofs = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> relocatedSourceWarnings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    internal bool HasRelocatedSourceWarnings => relocatedSourceWarnings.Count > 0;
+
+    internal string RelocatedSourceWarning(IComponent2 component)
+        => relocatedSourceWarnings.TryGetValue(component.Name2, out var warning) ? warning : null;
 
     internal ImportedComponentStorage(ISldWorks application) => this.application = application ?? throw new ArgumentNullException(nameof(application));
 
@@ -27,18 +32,38 @@ internal sealed class ImportedComponentStorage
 
     internal string FindOwner(IComponent2 component, IModelDoc2 root)
     {
-        var cache = (component.GetModelDoc2() as IModelDoc2)?.GetPathName() ?? component.GetPathName();
-        if (!NativeArchiveManifest.IsInterconnectCachePath(cache) || component.GetModelDoc2() == null) return null;
+        var componentModel = component.GetModelDoc2() as IModelDoc2;
+        var cache = componentModel?.GetPathName() ?? component.GetPathName();
+        if (!NativeArchiveManifest.IsInterconnectCachePath(cache)) return null;
         var imported = component.GetImportedPath();
         if (string.IsNullOrWhiteSpace(imported)) return null;
         IModelDoc2 owner = null;
         string ownerPath = null;
         var importedRoot = component;
+        var hasImportAncestor = false;
+        var branch = component;
+        var branchSource = imported;
+        string relocatedSource = null;
         for (var parent = component.GetParent(); parent != null; parent = parent.GetParent())
         {
             var model = parent.GetModelDoc2() as IModelDoc2;
             var path = model?.GetPathName() ?? parent.GetPathName();
-            if (NativeArchiveManifest.IsInterconnectCachePath(path)) { importedRoot = parent; continue; }
+            if (NativeArchiveManifest.IsInterconnectCachePath(path))
+            {
+                // Suppressed internal members can retain the pre-move source path.
+                // Only their clean parent model's exact component record can bridge it.
+                var parentSource = parent.GetImportedPath();
+                if (componentModel == null && !SameImportedSource(branchSource, parentSource))
+                {
+                    if (!IsRelocatedStoredMember(branch, parent, model, branchSource, parentSource)) return null;
+                    relocatedSource = parentSource;
+                }
+                branch = parent;
+                branchSource = parentSource;
+                hasImportAncestor = true;
+                importedRoot = parent;
+                continue;
+            }
             if (parent.IsVirtual || string.IsNullOrWhiteSpace(path) || PdmAddin.IsSolidWorksTemporaryVirtualComponentPath(path)) continue;
             owner = model;
             ownerPath = path;
@@ -48,6 +73,7 @@ internal sealed class ImportedComponentStorage
         // its ModelDoc2. Do not walk past that storage boundary to another assembly.
         if (ownerPath == null) { owner = root; ownerPath = owner?.GetPathName(); }
         if (!IsStableOwner(ownerPath) || owner != null && owner.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY) return null;
+        if (componentModel == null && !hasImportAncestor) return null;
         // Native imported features carry their generated documents in the saved parent.
         // Pack and Go may still list those IC caches as associative references after a
         // reopen; their presence is not evidence that the native parent lacks the data.
@@ -59,7 +85,16 @@ internal sealed class ImportedComponentStorage
             // unavailable feature readable. Do not cache that negative strict result.
             if (nativeFeature || !AllowInventory) nativeFeatureProofs[featureKey] = nativeFeature;
         }
-        if (nativeFeature) return ownerPath;
+        if (nativeFeature)
+        {
+            if (relocatedSource != null)
+                relocatedSourceWarnings[component.Name2] = ArchiveMissingReferencePolicy.WarningPrefix
+                    + "压缩导入子件保留旧来源位置：" + imported + "；已按父模型组件记录及原生导入特征确认随父装配保存；当前父级来源："
+                    + relocatedSource + "；原有关联未改写。";
+            return ownerPath;
+        }
+        // Inventory membership alone cannot prove storage for an unloaded child.
+        if (componentModel == null) return null;
         if (!AllowInventory) return null;
         var rootPath = root?.GetPathName();
         if (!IsStableOwner(rootPath)) return null;
@@ -76,6 +111,49 @@ internal sealed class ImportedComponentStorage
             + "；打包根图档=" + files.FirstOrDefault() + "；清单项数=" + files.Length
             + "；缓存仍在清单内=" + files.Any(entry => (entry ?? string.Empty).Split('|').Contains(cache, StringComparer.OrdinalIgnoreCase)));
         return owns ? ownerPath : null;
+    }
+
+    private static bool IsRelocatedStoredMember(IComponent2 child, IComponent2 parent, IModelDoc2 host, string oldSource, string currentSource)
+    {
+        try
+        {
+            if (host == null || !Path.IsPathRooted(oldSource) || !Path.IsPathRooted(currentSource)
+                || !string.Equals(Path.GetFileName(oldSource), Path.GetFileName(currentSource), StringComparison.OrdinalIgnoreCase)
+                || !new[] { ".stp", ".step" }.Contains(Path.GetExtension(currentSource), StringComparer.OrdinalIgnoreCase)
+                || !File.Exists(currentSource) || new FileInfo(currentSource).Length == 0) return false;
+            if (host.GetSaveFlag() || child.GetSuppression() != (int)swComponentSuppressionState_e.swComponentSuppressed) return false;
+            // File.Exists also returns false for access errors. Such errors are not
+            // evidence of an obsolete source; accept only a confirmed missing path.
+            try { File.GetAttributes(oldSource); return false; }
+            catch (FileNotFoundException) { }
+            catch (DirectoryNotFoundException) { }
+            if (!SameImportedSource(host.GetPathName(), parent.GetPathName())
+                || !SameImportedSource(Path.GetDirectoryName(child.GetPathName()), Path.GetDirectoryName(parent.GetPathName()))) return false;
+            var name = (child.Name2 ?? string.Empty).Split('/').Last();
+            var assembly = host as IAssemblyDoc;
+            var feature = assembly?.FeatureByName(name) as IFeature;
+            if (feature == null || feature.Is3DInterconnectFeature || feature.GetTypeName2() != "Reference"
+                || !string.Equals(feature.Name, name, StringComparison.OrdinalIgnoreCase)) return false;
+            var member = assembly.GetComponentByName(name) as IComponent2;
+            return member != null && member.GetID() == child.GetID()
+                && string.Equals((member.Name2 ?? string.Empty).Split('/').Last(), name, StringComparison.OrdinalIgnoreCase)
+                && SameImportedSource(member.GetPathName(), child.GetPathName())
+                && SameImportedSource(member.GetImportedPath(), oldSource);
+        }
+        catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is ArgumentException
+            || error is NotSupportedException || error is COMException) { return false; }
+    }
+
+    private static bool SameImportedSource(string left, string right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right)) return false;
+        try
+        {
+            if (!Path.IsPathRooted(left) || !Path.IsPathRooted(right)) return false;
+            return string.Equals(left, right, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception error) when (error is ArgumentException || error is NotSupportedException || error is PathTooLongException) { return false; }
     }
 
     internal static bool IsNativeImportedComponent(IComponent2 component, IModelDoc2 root)

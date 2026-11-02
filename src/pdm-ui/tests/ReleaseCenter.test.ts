@@ -521,7 +521,7 @@ describe('ReleaseCenter', () => {
     expect(wrapper.text()).toContain('EL-001')
     expect(wrapper.text()).toContain('修改 1')
     expect(wrapper.findAll('.pdm-release-frozen-table th').map(cell => cell.text())).toEqual(['序号', '物料编码', '物料名称', '型号', '版本', '品牌', '备注', 'BOM总量', '前期已发布', '本次新增下发', '批注', '紧急程度 / 需求日期'])
-    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td').map(cell => cell.text())).toEqual(['1', 'EL-001', '电气元件', 'M18', '未发布', 'SMC', '安装备注', '2', '0', '2', '批注', '普通 · 未设置'])
+    expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td').map(cell => cell.text())).toEqual(['1', 'EL-001', '电气元件', 'M18', 'E-V02', 'SMC', '安装备注', '2', '0', '2', '批注', '普通 · 未设置'])
     expect(wrapper.findAll('.pdm-release-frozen-table tbody tr').at(0)!.findAll('td.is-release-centered')).toHaveLength(9)
     expect(wrapper.findAll('.pdm-release-frozen-table col')).toHaveLength(12)
     const topWorkflow = wrapper.get('.pdm-release-top-workflow')

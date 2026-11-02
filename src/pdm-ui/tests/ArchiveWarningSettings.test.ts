@@ -23,7 +23,7 @@ describe('存档警告管理员策略', () => {
     await wrapper.get('select').setValue('block')
     await wrapper.findAll('button').find(button => button.text() === '保存策略')!.trigger('click')
     await flushPromises()
-    expect(saveArchiveWarningPolicy).toHaveBeenCalledWith({ revision: 3, blockAll: false, blockingCodes: ['MissingConfiguration'] }, 'test')
+    expect(saveArchiveWarningPolicy).toHaveBeenCalledWith({ revision: 3, blockAll: false, blockingCodes: ['MissingConfiguration'], maxBatchRequestMiB: 256 }, 'test')
     expect(wrapper.text()).toContain('策略版本 4')
   })
   it('普通用户不能保存或改变策略', async () => {
@@ -34,10 +34,10 @@ describe('存档警告管理员策略', () => {
   })
   it('严格模式显示有效阻止状态但保留单项配置', async () => {
     const wrapper = mount(ArchiveWarningSettings, { props: { token: 'test', canEdit: true } })
-    await flushPromises(); await wrapper.get('input').setValue(true)
+    await flushPromises(); await wrapper.get('input[type="checkbox"]').setValue(true)
     expect(wrapper.get('select').attributes('disabled')).toBeDefined()
     expect((wrapper.get('select').element as HTMLSelectElement).value).toBe('block')
-    await wrapper.get('input').setValue(false)
+    await wrapper.get('input[type="checkbox"]').setValue(false)
     expect((wrapper.get('select').element as HTMLSelectElement).value).toBe('warn')
   })
   it('无法加载时禁止保存，不显示假成功', async () => {

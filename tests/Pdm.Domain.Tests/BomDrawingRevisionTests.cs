@@ -5,6 +5,54 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class BomDrawingRevisionTests
 {
+    [Theory]
+    [InlineData(BomKind.Standard, ReleaseScope.StandardFormal, "S")]
+    [InlineData(BomKind.Electrical, ReleaseScope.ElectricalFormal, "E")]
+    public async Task CurrentMaterialRowsUseLatestMatchingPublishedSnapshot(BomKind kind, ReleaseScope scope, string prefix)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var item = Item(Guid.NewGuid(), "W1") with { Kind = kind, Unit = "001" };
+        ReleasePackage Release(string revision, DateTimeOffset time, ReleasePackageState state = ReleasePackageState.Published) => Package(item) with
+        {
+            Scope = scope, State = state, PublishedAt = time,
+            StandardBomRevision = kind == BomKind.Standard ? revision : null,
+            ElectricalBomRevision = kind == BomKind.Electrical ? revision : "",
+            StandardBomSnapshot = kind == BomKind.Standard ? [item with { Id = Guid.NewGuid(), Unit = "个" }] : [],
+            ElectricalBomSnapshot = kind == BomKind.Electrical ? [item with { Id = Guid.NewGuid(), Unit = "个" }] : [], NonStandardBomSnapshot = [], VersionBindings = []
+        };
+        await repository.CreateReleasePackageAsync(Release($"{prefix}-P700016-2-B03", DateTimeOffset.UtcNow.AddDays(-2)), default);
+        var latest = Release($"{prefix}-P700016-2-B06", DateTimeOffset.UtcNow.AddDays(-1));
+        await repository.CreateReleasePackageAsync(latest, default);
+        await repository.CreateReleasePackageAsync(Release($"{prefix}-P700016-2-B09", DateTimeOffset.UtcNow, ReleasePackageState.Approval), default);
+        await repository.CreateReleasePackageAsync(latest with { Id = Guid.NewGuid(), ProjectId = Guid.NewGuid(), StandardBomRevision = "S-OTHER-V99", ElectricalBomRevision = "E-OTHER-V99", PublishedAt = DateTimeOffset.UtcNow }, default);
+        var rows = await BomDrawingRevision.CurrentAsync(repository, [item, item with { DrawingNumber = "NEW" }, item with { SourceDocumentId = null, Revision = "A" }], default);
+        Assert.Equal($"{prefix}-P700016-2-V06", rows[0].DisplayRevision);
+        Assert.Equal("未发布", rows[1].DisplayRevision);
+        Assert.Equal("A", rows[2].DisplayRevision);
+        Assert.Equal(rows[0].DisplayRevision, BomDrawingRevision.ForPackage(item, latest));
+        Assert.Equal("W1", item.Revision);
+    }
+
+    [Theory]
+    [InlineData(BomKind.Standard)]
+    [InlineData(BomKind.Electrical)]
+    public async Task HistoricalBomMetadataSuppliesVersionWhenPackageRevisionIsMissing(BomKind kind)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var project = await repository.CreateProjectAsync(new("VERSION-TEST", "版本验证", "admin", "vault", "release"), "admin", default);
+        var item = Item(Guid.NewGuid(), "W1") with { ProjectId = project.Id, Kind = kind, SourceDocumentId = null };
+        var version = await repository.SaveBomDraftAsync(project.Id, kind, [item], "admin", default);
+        await repository.SetBomVersionStateAsync([version.Id], BomVersionState.Released, "admin", DateTimeOffset.UtcNow, default);
+        var expected = version.Label.Replace("-B", "-V");
+        Assert.Equal(expected, Assert.Single(await BomDrawingRevision.CurrentAsync(repository, [item], default)).DisplayRevision);
+        var package = Package(item) with { Scope = kind == BomKind.Standard ? ReleaseScope.StandardFormal : ReleaseScope.ElectricalFormal,
+            StandardBomRevision = null, ElectricalBomRevision = "", NonStandardBomSnapshot = [],
+            StandardBomSnapshot = kind == BomKind.Standard ? [item] : [], ElectricalBomSnapshot = kind == BomKind.Electrical ? [item] : [],
+            StandardBomVersionId = kind == BomKind.Standard ? version.Id : null, ElectricalBomVersionId = kind == BomKind.Electrical ? version.Id : null };
+        await repository.CreateReleasePackageAsync(package, default);
+        Assert.Equal(expected, Assert.Single(await BomDrawingRevision.CurrentAsync(repository, [item], default)).DisplayRevision);
+    }
+
     [Fact]
     public void StandardItemsWithoutIndependentRevisionUseTheirFrozenBomReleaseVersion()
     {

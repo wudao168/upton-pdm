@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
+import UserSelect from './UserSelect'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { ChevronDown, ChevronRight, FolderKanban, FolderPlus, Search } from '@lucide/vue'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import ProjectNameplateDialog from './ProjectNameplateDialog.vue'
 import type { CreateProjectInput, CreateSubprojectInput, MainProjectStaffingInput, OrganizationDirectory, PdmCustomer, PdmUser, ProjectNumberingOptions, ProjectSummary, UpdateProjectInput } from '../types'
 
@@ -169,6 +171,12 @@ const visibleRootProjects = computed(() => rootProjects.value.filter(parent => {
   const hasMatchingChild = filteredChildrenByParent.value.has(parent.id)
   return matchesProject(parent) || hasMatchingChild
 }))
+const projectPage = ref(1), projectPageSize = ref(50)
+const projectTableScroll = ref<HTMLElement>()
+const pagedRootProjects = computed(() => visibleRootProjects.value.slice((projectPage.value - 1) * projectPageSize.value, projectPage.value * projectPageSize.value))
+watch(projectPageSize, () => { projectPage.value = 1 })
+watch(() => Math.max(1, Math.ceil(visibleRootProjects.value.length / projectPageSize.value)), count => { if (projectPage.value > count) projectPage.value = count })
+watch([projectPage, projectPageSize], () => { void nextTick(() => { if (projectTableScroll.value) projectTableScroll.value.scrollTop = 0 }) })
 const expandableProjectIds = computed(() => {
   const result: string[] = []
   const append = (project: ProjectSummary) => {
@@ -180,7 +188,7 @@ const expandableProjectIds = computed(() => {
   visibleRootProjects.value.forEach(append)
   return result
 })
-watch([projectTypeFilter, organizationFilter, selectedDivisionId, projectQuery, responsibleFilter, executionUnitFilter, projectManagerFilter, designOwnerFilter], () => { expanded.value = new Set() })
+watch([projectTypeFilter, organizationFilter, selectedDivisionId, projectQuery, responsibleFilter, executionUnitFilter, projectManagerFilter, designOwnerFilter], () => { expanded.value = new Set(); projectPage.value = 1 })
 function visibleChildren(parentId: string) {
   const children = filteredChildrenByParent.value.get(parentId) ?? []
   return expanded.value.has(parentId) ? children : []
@@ -197,7 +205,7 @@ const visibleProjectRows = computed(() => {
     if (!expanded.value.has(project.id)) return
     children.forEach(child => append(child, depth + 1))
   }
-  visibleRootProjects.value.forEach(project => append(project, 0))
+  pagedRootProjects.value.forEach(project => append(project, 0))
   return result
 })
 watch(() => props.projects.map(item => item.id).join(','), () => {
@@ -351,15 +359,15 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
           <button v-if="canCreate" type="button" class="pdm-primary-action pdm-project-create-action" @click="openCreateDialog"><FolderPlus :size="16" />创建主项目</button>
           <button type="button" class="pdm-secondary-action pdm-project-collapse-action" :aria-label="`${allProjectDetailsExpanded ? '折叠' : '展开'}全部项目明细`" :disabled="expandableProjectIds.length === 0" @click="toggleAllProjectDetails"><ChevronDown v-if="allProjectDetailsExpanded" :size="15" /><ChevronRight v-else :size="15" />{{ allProjectDetailsExpanded ? '折叠明细' : '展开明细' }}</button>
           <div class="pdm-project-filters">
-            <label class="pdm-inline-search"><Search :size="15" /><input v-model="projectSearchDraft" @keyup.enter="projectQuery = projectSearchDraft" type="search" aria-label="搜索项目" placeholder="搜索项目号、名称、客户或项目人员"></label>
-            <button type="button" class="pdm-secondary-action" @click="projectQuery = projectSearchDraft">搜索</button>
-            <select v-model="responsibleFilter" aria-label="项目人员筛选"><option value="">全部项目人员</option><option v-for="username in responsibleOptions" :key="username" :value="username">{{ userDisplayName(username) }}</option></select>
+            <label class="pdm-inline-search"><SearchField><input v-model="projectSearchDraft" @keyup.enter="projectQuery = projectSearchDraft" type="search" aria-label="搜索项目" placeholder="搜索项目号、名称、客户或项目人员"><template #action><button type="button" class="pdm-secondary-action" @click="projectQuery = projectSearchDraft">搜索</button></template></SearchField></label>
+
+            <UserSelect v-model="responsibleFilter" aria-label="项目人员筛选"><option value="">全部项目人员</option><option v-for="username in responsibleOptions" :key="username" :value="username">{{ userDisplayName(username) }}</option></UserSelect>
             <select v-model="executionUnitFilter" aria-label="事业部筛选"><option value="">全部事业部</option><option v-for="unit in executionUnitOptions" :key="unit" :value="unit">{{ unit }}</option></select>
-            <select v-model="projectManagerFilter" aria-label="项目经理筛选"><option value="">全部项目经理</option><option v-for="username in projectManagerOptions" :key="username" :value="username">{{ userDisplayName(username) }}</option></select>
-            <select v-model="designOwnerFilter" aria-label="主设工程师筛选"><option value="">全部主设／工程师</option><option v-for="username in designOwnerOptions" :key="username" :value="username">{{ userDisplayName(username) }}</option></select>
+            <UserSelect v-model="projectManagerFilter" aria-label="项目经理筛选"><option value="">全部项目经理</option><option v-for="username in projectManagerOptions" :key="username" :value="username">{{ userDisplayName(username) }}</option></UserSelect>
+            <UserSelect v-model="designOwnerFilter" aria-label="主设工程师筛选"><option value="">全部主设／工程师</option><option v-for="username in designOwnerOptions" :key="username" :value="username">{{ userDisplayName(username) }}</option></UserSelect>
           </div>
         </div>
-        <div v-if="visibleRootProjects.length" class="pdm-table-scroll pdm-project-number-scroll">
+        <div v-if="visibleRootProjects.length" ref="projectTableScroll" class="pdm-table-scroll pdm-project-number-scroll">
         <table class="pdm-project-table pdm-project-number-table">
           <colgroup><col v-for="(weight, index) in [2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1]" :key="index" :style="{ width: `${weight / 19 * 100}%` }"></colgroup>
           <thead><tr><th>项目号</th><th>项目名称</th><th>别名</th><th>型号</th><th>序列号</th><th>客户</th><th>事业部</th><th>项目经理</th><th>主设</th><th>状态</th><th>订单日期</th><th>铭牌</th><th>操作</th></tr></thead>
@@ -384,6 +392,7 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
       </div>
         <div v-else-if="projects.length" class="pdm-project-empty"><Search :size="42" /><h2>未找到匹配项目</h2><p>请切换项目类型或调整搜索、筛选条件。</p><button type="button" class="pdm-secondary-action" @click="projectTypeFilter=''; projectQuery=''; projectSearchDraft=''; responsibleFilter=''; selectProjectOrganization()">清除筛选</button></div>
         <div v-else class="pdm-project-empty"><FolderKanban :size="42" /><h2>当前公司还没有项目</h2><p v-if="canCreate">创建主项目后，可继续分配事业部和配置项目岗位。</p><p v-else>请联系有创建权限的人员新建项目。</p></div>
+        <el-pagination v-model:current-page="projectPage" v-model:page-size="projectPageSize" class="pdm-project-pagination" aria-label="项目列表分页" :page-sizes="[50, 100, 200]" :total="visibleRootProjects.length" layout="total, sizes, prev, pager, next" />
       </section>
     </section>
 
@@ -428,5 +437,42 @@ function handleProjectAction(project: ProjectSummary, action: ProjectAction) {
 </template>
 
 <style scoped>
+.pdm-project-pagination{flex:0 0 auto;justify-content:flex-end;padding-top:8px}
+</style>
+
+<style scoped>
 .pdm-project-type-tabs{flex:none;min-width:0;margin-bottom:8px}
+</style>
+
+<style scoped>
+/* Keep native and searchable selects in the same compact filter row. */
+@layer pdm-control-spacing {
+  :root body .pdm-project-table-panel .pdm-project-list-toolbar {
+    flex-wrap: wrap !important;
+    gap: var(--pdm-control-gap) !important;
+  }
+  :root body .pdm-project-table-panel .pdm-project-list-toolbar > .pdm-project-filters {
+    display: grid !important;
+    grid-template-columns: minmax(180px, 335px) repeat(4, minmax(100px, 120px)) !important;
+    align-items: center;
+    flex: 0 1 835px !important;
+    width: 835px !important;
+    min-width: 600px !important;
+    max-width: 100% !important;
+    gap: var(--pdm-control-gap) !important;
+  }
+  :root body .pdm-project-table-panel .pdm-project-list-toolbar > .pdm-project-filters > :is(.pdm-inline-search, .el-select, select) {
+    grid-column: auto !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: var(--pdm-control-height) !important;
+    min-height: var(--pdm-control-height) !important;
+    margin: 0 !important;
+  }
+  :root body .pdm-project-filters :deep(.el-select__wrapper) {
+    min-height: var(--pdm-control-height) !important;
+    height: var(--pdm-control-height) !important;
+  }
+}
 </style>

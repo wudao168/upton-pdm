@@ -17,9 +17,11 @@ public static class BomDrawingRevision
     public static string ForPackage(BomItem item, ReleasePackage package, bool preparingPublication = false)
     {
         var standard = item.Kind == BomKind.Standard || package.Scope is ReleaseScope.StandardLongLead or ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement;
-        var unavailable = standard
-            ? !string.IsNullOrWhiteSpace(package.StandardBomRevision)
-                ? System.Text.RegularExpressions.Regex.Replace(package.StandardBomRevision.Trim(), @"-B(?=\d+$)", "-V")
+        var material = standard || item.Kind == BomKind.Electrical || package.Scope is ReleaseScope.ElectricalLongLead or ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement;
+        var bomRevision = standard ? package.StandardBomRevision : package.ElectricalBomRevision;
+        var unavailable = material
+            ? !string.IsNullOrWhiteSpace(bomRevision)
+                ? System.Text.RegularExpressions.Regex.Replace(bomRevision.Trim(), @"-B(?=\d+$)", "-V")
                 : package.State == ReleasePackageState.Published || preparingPublication ? "BOM发布版本待核对" : "待发布"
             : "未发布";
         var binding = item.SourceDocumentId.HasValue
@@ -35,11 +37,11 @@ public static class BomDrawingRevision
                 ? string.IsNullOrWhiteSpace(binding.PreviousReleasedRevision) ? unavailable : binding.PreviousReleasedRevision
                 : binding.Revision;
         }
-        if (!standard && item.SourceDocumentId.HasValue && DrawingRevision.IsWork(item.Revision)
+        if (!material && item.SourceDocumentId.HasValue && DrawingRevision.IsWork(item.Revision)
             && package.State == ReleasePackageState.Published
             && package.Scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement or ReleaseScope.LegacyCombined)
             return "历史版次待核对";
-        return DrawingRevision.IsWork(item.Revision) || standard && string.IsNullOrWhiteSpace(item.Revision)
+        return DrawingRevision.IsWork(item.Revision) || material && string.IsNullOrWhiteSpace(item.Revision)
             ? unavailable : DrawingRevision.Display(item.Revision);
     }
 
@@ -50,17 +52,54 @@ public static class BomDrawingRevision
         IReadOnlyList<BomItem> items, CancellationToken ct)
     {
         var publishedIds = new HashSet<Guid>();
-        foreach (var projectId in items.Where(item => item.SourceDocumentId.HasValue).Select(item => item.ProjectId).Distinct())
-            foreach (var package in await repository.ListReleasePackagesAsync(projectId, ct))
-                if (package.State == ReleasePackageState.Published) publishedIds.Add(package.Id);
+        var packages = new Dictionary<Guid, ReleasePackage[]>();
+        var versions = new Dictionary<Guid, BomVersion[]>();
+        foreach (var projectId in items.Select(item => item.ProjectId).Distinct())
+        {
+            packages[projectId] = (await repository.ListReleasePackagesAsync(projectId, ct))
+                .Where(package => package.State == ReleasePackageState.Published)
+                .OrderByDescending(package => package.PublishedAt ?? package.CreatedAt).ToArray();
+            foreach (var package in packages[projectId]) publishedIds.Add(package.Id);
+            if (items.Any(item => item.ProjectId == projectId && item.Kind is BomKind.Standard or BomKind.Electrical))
+                versions[projectId] = (await repository.ListBomVersionsAsync(projectId, null, ct))
+                    .Where(version => version.State == BomVersionState.Released).OrderByDescending(version => version.VersionNumber).ToArray();
+        }
         var histories = new Dictionary<Guid, IReadOnlyList<DocumentVersion>>();
         foreach (var id in items.Where(item => item.SourceDocumentId.HasValue)
                      .Select(item => item.SourceDocumentId!.Value).Distinct())
             histories[id] = (await repository.ListDocumentVersionsAsync(id, ct))
                 .Where(version => version.Status == DocumentVersionStatus.Work
                     || version.ReleasePackageId.HasValue && publishedIds.Contains(version.ReleasePackageId.Value)).ToArray();
-        return items.Select(item => item with { DisplayRevision = ForHistory(item,
-            item.SourceDocumentId is Guid id && histories.TryGetValue(id, out var history) ? history : []) }).ToArray();
+        return items.Select(item =>
+        {
+            var label = ForHistory(item, item.SourceDocumentId is Guid id && histories.TryGetValue(id, out var history) ? history : []);
+            if (item.Kind is not (BomKind.Standard or BomKind.Electrical) || !string.IsNullOrWhiteSpace(label) && label is not ("未发布" or "—"))
+                return item with { DisplayRevision = label };
+            bool Matches(BomItem frozen) => !frozen.IsManuallyExcluded && !frozen.IsReleaseExcluded && !frozen.IsPendingClassification
+                && (!string.IsNullOrWhiteSpace(item.DrawingNumber)
+                    ? BomReleaseAggregation.MaterialKey(item) == BomReleaseAggregation.MaterialKey(frozen)
+                    : item.Id == frozen.Id);
+            var releasedVersions = versions.GetValueOrDefault(item.ProjectId) ?? [];
+            foreach (var package in packages[item.ProjectId])
+            {
+                var snapshot = item.Kind == BomKind.Standard ? package.StandardBomSnapshot : package.ElectricalBomSnapshot;
+                var frozen = snapshot.FirstOrDefault(Matches);
+                if (frozen is null) continue;
+                var versionId = item.Kind == BomKind.Standard ? package.StandardBomVersionId : package.ElectricalBomVersionId;
+                var versionLabel = releasedVersions.FirstOrDefault(version => version.Id == versionId)?.Label;
+                var resolved = package with { StandardBomRevision = !string.IsNullOrWhiteSpace(package.StandardBomRevision) ? package.StandardBomRevision : item.Kind == BomKind.Standard ? versionLabel : null,
+                    ElectricalBomRevision = !string.IsNullOrWhiteSpace(package.ElectricalBomRevision) ? package.ElectricalBomRevision : item.Kind == BomKind.Electrical ? versionLabel ?? "" : "" };
+                return item with { DisplayRevision = ForPackage(frozen with { Kind = item.Kind }, resolved) };
+            }
+            var version = releasedVersions.FirstOrDefault(version => version.Kind == item.Kind && version.Items.Any(Matches));
+            if (version is not null)
+            {
+                var frozen = version.Items.First(Matches);
+                label = DrawingRevision.IsWork(frozen.Revision) || string.IsNullOrWhiteSpace(frozen.Revision)
+                    ? System.Text.RegularExpressions.Regex.Replace(version.Label, @"-B(?=\d+$)", "-V") : DrawingRevision.Display(frozen.Revision);
+            }
+            return item with { DisplayRevision = label };
+        }).ToArray();
     }
 
     public static string ForHistory(BomItem item, IReadOnlyList<DocumentVersion> history)

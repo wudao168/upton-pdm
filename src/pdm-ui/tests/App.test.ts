@@ -1,6 +1,6 @@
 import approvedAppIcon from '../src/assets/plm-app-icon.svg'
 import { flushPromises as flushVuePromises, mount } from '@vue/test-utils'
-import ElementPlus, { ElMessageBox } from 'element-plus'
+import ElementPlus, { ElMessageBox, ElSelect } from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App.vue'
 import { ElMessage, globalStatus } from '../src/statusMessage'
@@ -29,7 +29,7 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
   let u9Settings = { baseUrl: 'http://10.7.7.188/U9', enterpriseCode: '01', organizationCode: '7', userCode: 'pdm', clientId: 'PDM', clientSecretConfigured: true, itemCreatePath: '/webapi/ItemMaster/Create', itemQueryPath: '/webapi/ItemMaster/Query', itemModifyPath: '/webapi/ItemMaster/Modify', itemDeletePath: '/webapi/ItemMaster/Delete', unitCodeMappings: {}, writeEnabled: false }
   const validationRules = { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'] }
   const editLocks = [{ documentId: 'doc-lock', projectId, projectCode: 'PRJ-REAL-001', projectName: '真实装配项目', drawingNumber: 'LOCK-001', documentName: '长期编辑图档', fileName: 'LOCK-001.SLDPRT', checkedOutBy: 'designer', checkedOutAt: '2026-08-14T00:00:00Z', checkoutMachine: 'DESIGN-WS', lastHeartbeatAt: '2026-08-14T00:03:00Z', leaseExpiresAt: '2026-08-14T00:18:00Z', connectionState: 'Active', attentionLevel: 'Reminder', releaseRequestedBy: null, releaseRequestedAt: null, releaseRequestReason: null, ownedByCurrentUser: false, canRequestRelease: true, canForceRelease: false }]
-  const engineerPermissions = ['project.view', 'project.create', 'project.child.create', 'project.plan.edit', 'project.staffing.manage', 'project.designer.assign', 'project.content.view', 'document.edit', 'bom.edit', 'bom.mechanical.edit', 'bom.electrical.edit', 'material.view', 'material.apply', 'release.manage', 'standard-library.view']
+  const engineerPermissions = ['project.view', 'project.create', 'project.child.create', 'project.plan.edit', 'project.staffing.manage', 'project.designer.assign', 'project.content.view', 'document.edit', 'bom.edit', 'bom.mechanical.edit', 'bom.electrical.edit', 'material.view', 'material.apply', 'release.manage', 'standard-library.view', 'program-template.view']
   const adminPermissions = [...engineerPermissions, 'material.manage', 'project.delete', 'project.execution.assign', 'approval.decide', 'settings.customer.manage', 'settings.organization.manage', 'settings.folder.manage', 'settings.storage.manage', 'system.role.view', 'system.role.edit', 'audit.view']
   const roleDirectory = {
     permissions: [
@@ -342,6 +342,27 @@ describe('PLM client workspace', () => {
       await buttonByText(wrapper, '我的待办').trigger('click'); await flushPromises()
       expect(wrapper.findComponent({ name: 'MyTasks' }).props('materialCodeTasks')).toEqual([])
     } finally { wrapper.unmount() }
+  })
+
+  it('无查看权限的导航和记忆页面不会显示，保留本人功能及已授权只读入口', async () => {
+    installApiMock([], ['Engineer'], ['material.view'])
+    window.localStorage.setItem('upton-pdm-active-navigation', 'program-templates')
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await openLogin(wrapper)
+    await wrapper.get('input[name="username"]').setValue('engineer')
+    await wrapper.get('input[name="password"]').setValue('correct-password')
+    await wrapper.get('form[aria-label="登录PLM"]').trigger('submit')
+    await flushPromises()
+    expect(wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text().replace(/\d+/g, '').trim())).toEqual(['工时管理', '我的待办', '料品管理'])
+    expect(wrapper.find('[data-navigation-page="program-templates"]').exists()).toBe(false)
+    expect(wrapper.get('[data-navigation-page="tasks"]').isVisible()).toBe(true)
+    await buttonByText(wrapper, '料品管理').trigger('click')
+    await flushPromises()
+    const labels = wrapper.findAll('.material-tabs > .el-tabs__header [role="tab"]').map(item => item.text())
+    expect(labels).not.toContain('料品套件')
+    expect(labels).not.toContain('BOM料号')
+    expect(labels).not.toContain('取号设置')
+    wrapper.unmount()
   })
 
   it.each([false, true])('人工待办排除自动处理的BOM表头申请并保留普通审批（普通审批：%s）', async ordinary => {
@@ -1269,6 +1290,47 @@ describe('PLM client workspace', () => {
     wrapper.unmount()
   })
 
+  it('keeps the latest theme while older profile saves finish', async () => {
+    const originalFetch = vi.mocked(fetch).getMockImplementation()!
+    const saves: Array<{ theme: string; finish: () => void }> = []
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      if (String(input).endsWith('/api/auth/profile') && init?.method === 'PUT') {
+        const body = JSON.parse(String(init.body))
+        return await new Promise<Response>(resolve => saves.push({ theme: body.theme, finish: () => resolve(json({ username: 'engineer', displayName: '真实工程师', ...body })) }))
+      }
+      return originalFetch(input, init)
+    })
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    try {
+      await login(wrapper, false)
+      const header = wrapper.findComponent({ name: 'AppHeader' })
+      header.vm.$emit('theme', 'o'); await flushPromises()
+      header.vm.$emit('theme', 'p'); await flushPromises()
+      expect(document.documentElement.dataset.pdmTheme).toBe('p')
+      expect(saves.map(item => item.theme)).toEqual(['o'])
+      saves[0]!.finish(); await flushPromises()
+      expect(document.documentElement.dataset.pdmTheme).toBe('p')
+      expect(saves.map(item => item.theme)).toEqual(['o', 'p'])
+      saves[1]!.finish(); await flushPromises()
+      expect(document.documentElement.dataset.pdmTheme).toBe('p')
+    } finally { wrapper.unmount() }
+  })
+
+  it('replays the current review state when the overlay becomes ready', async () => {
+    const postMessage = vi.fn()
+    let receive: (event: MessageEvent) => void = () => {}
+    Object.defineProperty(window, 'chrome', { configurable: true, value: { webview: { postMessage, addEventListener: vi.fn((_event, handler) => { receive = handler }), removeEventListener: vi.fn() } } })
+    window.localStorage.setItem('pdm_theme', 'o')
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    try {
+      await flushPromises()
+      postMessage.mockClear()
+      receive(new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'state-ready' } } }))
+      await flushPromises()
+      expect(postMessage).toHaveBeenCalledWith({ type: 'review-overlay-state', payload: expect.objectContaining({ theme: 'o' }) })
+    } finally { wrapper.unmount(); delete window.chrome }
+  })
+
   it('logs in and renders project, tree, BOM and release data returned by the API', async () => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await flushPromises()
@@ -1332,6 +1394,26 @@ describe('PLM client workspace', () => {
     wrapper.unmount()
   })
 
+  it('工时催填不增加页眉消息和我的待办角标', async () => {
+    const originalFetch = vi.mocked(fetch).getMockImplementation()!
+    let includeHours = false
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      if (String(input).includes('/api/notifications/mine')) return json(includeHours ? [{ id: 'hidden-hours', recipient: 'designer', category: 'work-hours', title: '隐藏的工时催填', content: '请补全工时', sourceKey: 'hidden-hours', createdAt: '2026-10-31T02:00:00Z' }] : [])
+      return originalFetch(input, init)
+    })
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper, false)
+    const before = wrapper.getComponent({ name: 'AppHeader' }).props('notificationCount')
+    includeHours = true
+    await navigateTo(wrapper, '我的待办')
+    const page = wrapper.get('[data-navigation-page="tasks"]')
+    await page.findAll('button').find(button => button.text() === '刷新')!.trigger('click'); await flushPromises()
+    expect(wrapper.getComponent({ name: 'AppHeader' }).props('notificationCount')).toBe(before)
+    expect(page.text()).not.toContain('隐藏的工时催填')
+    expect(wrapper.getComponent({ name: 'MyTasks' }).props('notifications').some((item: { category: string }) => item.category === 'work-hours')).toBe(true)
+    wrapper.unmount()
+  })
+
   it('keeps project navigation usable while the new workspace feeds are rolling out', async () => {
     const existingFetch = vi.mocked(fetch)
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -1362,7 +1444,7 @@ describe('PLM client workspace', () => {
     await wrapper.get('select[name="projectTypeCode"]').setValue('P')
     await wrapper.get('select[name="equipmentTypeCode"]').setValue('2')
     await flushPromises()
-    wrapper.getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'customer-1')
+    wrapper.get('form[aria-label="创建PLM项目"]').getComponent(ElSelect).vm.$emit('update:modelValue', 'customer-1')
     await wrapper.vm.$nextTick()
     await wrapper.get('input[name="projectName"]').setValue('新建装配项目')
     await wrapper.get('input[name="projectAlias"]').setValue('测试别名')
@@ -2095,6 +2177,8 @@ describe('PLM client workspace', () => {
     await new Promise(resolve => window.setTimeout(resolve, 20))
     await flushPromises()
     const properties = wrapper.get('[aria-label="图档属性"]')
+    expect(properties.findAll('dt').map(item => item.text())).toEqual(['物料编码', '名称', '图纸版本', '发布版本'])
+    await buttonByText(wrapper, '更多属性').trigger('click')
     expect(properties.text()).toContain('型号10mm')
     expect(properties.text()).toContain('材质Q235B')
     expect(properties.text()).toContain('最近存档')

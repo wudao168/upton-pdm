@@ -14,7 +14,7 @@ public sealed partial class PdmWorkflowService
         catch (ArgumentException error) { throw new PdmRuleException(error.Message); }
         var result = await repository.SaveArchiveWarningPolicyAsync(input, ct);
         await AuditAsync(actor, "system.archive-warning-policy.update", nameof(ArchiveWarningPolicy), "global",
-            $"策略版本{result.Revision}；全部警告阻止={result.BlockAll}；阻止项目={string.Join("、", result.BlockingCodes)}", ct);
+            $"策略版本{result.Revision}；全部警告阻止={result.BlockAll}；阻止项目={string.Join("、", result.BlockingCodes)}；整批提交数据上限={result.MaxBatchRequestMiB ?? ArchiveWarningPolicy.DefaultMaxBatchRequestMiB} MiB", ct);
         return result;
     }
 

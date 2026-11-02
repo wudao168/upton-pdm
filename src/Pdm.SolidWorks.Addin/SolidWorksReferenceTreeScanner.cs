@@ -110,6 +110,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         var root = BuildComponent(rootComponent, rootComponent.Name2, new HashSet<string>(StringComparer.OrdinalIgnoreCase), true, featureTreeRoot, false);
         PluginDiagnosticLog.Record("设计树读取", "当前实例读取完成，核对导入存储归属；图档=" + path);
         CompleteImportedStorage();
+        if (importedStorage.HasRelocatedSourceWarnings) CopyImportedSourceWarnings(root);
         ReportScanProgress(path, "正在核对嵌入层级与配套工程图…", 0, 0, true);
         // Root components do not reliably expose ReferencedConfiguration.
         root.Configuration = configuration.Name ?? string.Empty;
@@ -271,6 +272,18 @@ internal sealed class SolidWorksReferenceTreeScanner
         }
     }
 
+    private static void CopyImportedSourceWarnings(CadTreeNode root)
+    {
+        var nodes = ModelNodes(root).ToArray();
+        var importOwners = nodes.Where(node => !string.IsNullOrWhiteSpace(node.FullPath))
+            .GroupBy(node => node.FullPath, StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.OrdinalIgnoreCase);
+        foreach (var member in nodes.Where(node => node.IsStoredImport && node.ReferenceWarnings.Count > 0))
+            if (importOwners.TryGetValue(member.ImportedStorageOwnerPath, out var owners))
+                foreach (var owner in owners)
+                    foreach (var warning in member.ReferenceWarnings)
+                        if (!owner.ReferenceWarnings.Contains(warning)) owner.ReferenceWarnings.Add(warning);
+    }
+
     private void CompleteImportedStorage()
     {
         var total = importedComponents.Count;
@@ -291,6 +304,12 @@ internal sealed class SolidWorksReferenceTreeScanner
                         node.ArchiveReadError = "导入组件存储归属待核对，已保留当前层级；存档时将完整核对。";
                     }
                     if (!node.IsStoredImport) continue;
+                    var relocatedWarning = importedStorage.RelocatedSourceWarning(entry.Item2);
+                    if (!string.IsNullOrWhiteSpace(relocatedWarning))
+                    {
+                        node.ReferenceWarnings.Add(relocatedWarning);
+                        if (strictStructure) PluginDiagnosticLog.Record("导入组件归属", relocatedWarning);
+                    }
                     // PLM carries these members in their owner; SolidWorks IsVirtual is unchanged.
                     node.Status = CadReferenceStatus.Virtual;
                     if (strictStructure) PluginDiagnosticLog.Record("导入组件归属", "实例=" + node.InstancePath + "；配置=" + node.Configuration
@@ -779,34 +798,44 @@ internal sealed class SolidWorksReferenceTreeScanner
     }
 
     internal bool IsVerifiedBrokenContextReference(string owner, string target)
+        => ReadVerifiedBrokenContextReferences(owner).Contains(target);
+
+    // Snapshot all native statuses once for one owner's reference pass. Do not keep
+    // this evidence across saves or subsequent archive attempts.
+    internal HashSet<string> ReadVerifiedBrokenContextReferences(string owner)
     {
+        var verified = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         // A missing as-saved path can remain after the user has explicitly broken a
         // feature link. Require native feature evidence, not a missing file or name match.
         var document = application.GetOpenDocumentByName(owner) as IModelDoc2;
         if (document == null || !string.Equals(document.GetPathName(), owner, StringComparison.OrdinalIgnoreCase)
             || document.GetSaveFlag() || !(document.GetConfigurationNames() is Array configurations) || configurations.Length != 1)
-            return false;
+            return verified;
         var count = document.Extension.ListExternalFileReferencesCount();
-        if (count == 0) return false;
+        if (count == 0) return verified;
         document.Extension.ListExternalFileReferences(out var models, out var components, out var features,
             out var types, out var statuses, out var entities, out var featureOwners, out var option, out var configuration);
         if (!(models is Array paths) || !(statuses is Array states) || paths.Length != count || states.Length != count)
-            return false;
-        var matching = new List<int>();
+            return verified;
+        var matching = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
         for (var index = 0; index < count; index++)
         {
             var path = Convert.ToString(paths.GetValue(index));
-            if (!string.IsNullOrWhiteSpace(path) && string.Equals(
-                ArchiveReferencePath.Resolve(path, Path.GetDirectoryName(owner), "核对已断开的上下文引用", owner), target, StringComparison.OrdinalIgnoreCase))
-                matching.Add(index);
+            if (string.IsNullOrWhiteSpace(path)) continue;
+            var target = ArchiveReferencePath.Resolve(path, Path.GetDirectoryName(owner), "核对已断开的上下文引用", owner);
+            if (!matching.TryGetValue(target, out var indexes)) matching[target] = indexes = new List<int>();
+            indexes.Add(index);
         }
-        if (matching.Count == 0 || matching.Any(index => Convert.ToInt32(states.GetValue(index)) != (int)swExternalReferenceStatus_e.swExternalReferenceBroken))
-            return false;
-        var names = features as Array;
-        PluginDiagnosticLog.Record("上下文引用分类", "已核对为历史断开引用：零件=" + owner + "；配置=" + configurations.GetValue(0)
-            + "；旧路径=" + target + "；特征=" + string.Join("、", matching.Select(index => names != null && index < names.Length ? Convert.ToString(names.GetValue(index)) : "未提供名称").Distinct())
-            + "；原生打包未列入必需文件；未删除文件、未断开任何现有引用。");
-        return true;
+        foreach (var entry in matching)
+        {
+            if (entry.Value.Any(index => Convert.ToInt32(states.GetValue(index)) != (int)swExternalReferenceStatus_e.swExternalReferenceBroken)) continue;
+            verified.Add(entry.Key);
+        }
+        if (verified.Count > 0)
+            PluginDiagnosticLog.Record("上下文引用分类", "批量核对历史断开引用：文件=" + owner + "；配置=" + configurations.GetValue(0)
+                + "；已确认路径数=" + verified.Count + "；路径示例=" + string.Join("、", verified.Take(8))
+                + "；未删除文件、未断开任何现有引用。");
+        return verified;
     }
 
     private void RecordContextFeatureReferences(string owner)

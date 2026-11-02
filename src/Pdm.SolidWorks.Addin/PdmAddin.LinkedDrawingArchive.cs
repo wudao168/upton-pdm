@@ -53,7 +53,10 @@ public sealed partial class PdmAddin
         if (warnings.Count > 0) taskPaneControl?.SetCheckoutReminder("模型可继续编辑；关联工程图权限待处理：" + string.Join("；", warnings), true);
     }
 
-    private async Task<HashSet<string>> ChangedReadOnlyAssembliesAsync(IEnumerable<BatchOperationItem> items, CancellationToken token)
+    private Task<HashSet<string>> ChangedReadOnlyAssembliesAsync(IEnumerable<BatchOperationItem> items, CancellationToken token)
+        => ChangedReadOnlyAssembliesCoreAsync(items, token, new ArchiveReadContext(this));
+
+    private async Task<HashSet<string>> ChangedReadOnlyAssembliesCoreAsync(IEnumerable<BatchOperationItem> items, CancellationToken token, ArchiveReadContext reads)
     {
         var changed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var item in DistinctBatchItems(items))
@@ -61,7 +64,7 @@ public sealed partial class PdmAddin
             var node = item.Node;
             if (node.Kind != CadDocumentKind.Assembly || !node.DocumentId.HasValue
                 || node.Role == CadReferenceRole.ExternalFileDependency || IsCheckedOutByCurrentUser(node)) continue;
-            var loaded = FindLoadedDocument(node.FullPath);
+            var loaded = reads.FindLoaded(node.FullPath);
             if (loaded?.GetSaveFlag() != true || !loaded.IsOpenedReadOnly()) continue;
             var latest = (await apiClient.GetVersionsAsync(node.DocumentId.Value, token)).FirstOrDefault();
             // A rebuild/save flag alone is not an assembly edit. Insertion/removal/replacement is.
@@ -180,7 +183,6 @@ public sealed partial class PdmAddin
                 if (drawing == null) { drawing = OpenDrawingForArchive(node.FullPath); opened = true; }
                 if (!PathsEqual(drawing?.GetPathName(), node.FullPath))
                     throw new IOException("未能加载对应的工程图，原文件已保留。");
-                EnsureDocumentEditable(drawing, node.FullPath);
                 var expected = node.ReferencedModels.Where(model => model.DocumentId.HasValue).Select(model => model.DocumentId.Value).Distinct().ToArray();
                 scanner.UpdateDrawingReferences(drawing, node);
                 var activateErrors = 0;
@@ -205,14 +207,11 @@ public sealed partial class PdmAddin
                 // the drawing against that settled model state. Unselected references stay untouched.
                 await EnsureBatchCheckInSavedStateAsync(plan.Items.Where(candidate => candidate.Node.Kind != CadDocumentKind.Drawing
                     && candidate.Node.Role != CadReferenceRole.ExternalFileDependency).ToArray(), projectId, token);
-                var errors = 0;
-                var warnings = 0;
-                if (!drawing.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, ref errors, ref warnings) || errors != 0 || drawing.GetSaveFlag())
-                    throw new IOException("工程图更新后未能保存，当前修改和权限已保留。错误码：" + errors);
-                node.IsModifiedInSolidWorks = false;
+                await PrepareCurrentMemoryCopiesAsync(new[] { item }, token);
+                ValidateCurrentMemoryCopy(node);
                 node.WorkState = CadWorkState.PendingCheckIn;
                 node.DrawingUpdatePendingReason = null;
-                LogOperation("关联工程图已按本次模型更新并保存：" + node.FileName);
+                LogOperation("关联工程图已按本次模型更新并生成提交副本，原文件未改写：" + node.FileName);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
             catch (Exception error)

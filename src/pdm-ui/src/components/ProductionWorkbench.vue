@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { isInactiveDom } from '../activeDom'
+import SearchField from './SearchField.vue'
+import { canViewProductionTab } from '../navigationAccess'
 import { vQuantity } from '../quantityInput'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ElDatePicker } from 'element-plus'
@@ -40,7 +43,7 @@ if (configuration) scanPageUrl.searchParams.set('configuration', configuration)
 const scanPageHref = scanPageUrl.pathname + scanPageUrl.search
 const scanPreviewKey = ref(0)
 const showAllocationEdit = ref(false)
-const tab = rememberedTab('production.tab', 'tracking', ['tracking','external','schedule','capacity','execution','drawings','suppliers'])
+const tab = rememberedTab<string>('production.tab', 'tracking', ['tracking','external','schedule','capacity','execution','drawings','suppliers'])
 const projects = ref<ProductionProject[]>([])
 const record = ref<ProductionReleaseRecord | null>(null)
 const allCategories = ref(false), allRecords = ref<ProductionReleaseRecord[]>([])
@@ -51,6 +54,7 @@ const currentOnlyOpen = computed({
   set: (value: boolean) => { if (tab.value === 'external') externalOnlyOpen.value = value; else if (tab.value === 'schedule') selfOnlyOpen.value = value; else trackingOnlyOpen.value = value },
 })
 const capacity = ref<ProductionCapacityView | null>(null)
+const rememberedLines = new Map<string, string>()
 const selectedProjectId = ref(''), selectedReleaseId = ref(''), selectedLineId = ref(''), selectedLotId = ref('')
 const expandedProjectIds = ref<string[]>([])
 const projectSearch = ref(''), lineSearch = ref(''), lineFilter = ref<'all' | 'open' | 'urgent'>('all')
@@ -216,8 +220,7 @@ const canReadDrawings = computed(() => can('project.content.view'))
 const canAssign = computed(() => can('production.assign'))
 const canManageSuppliers = computed(() => can('production.supplier.manage'))
 const canReadSuppliers = computed(() => can('production.supplier.view') || canManageSuppliers.value)
-const supplierOnly = computed(() => canReadSuppliers.value && !canReadDrawings.value && !['production.assign','production.schedule','production.execute','production.inspect','production.issue','production.capacity.manage','production.drawing.manage'].some(can))
-watch([canReadSuppliers, supplierOnly], ([allowed, only]) => { if (!allowed && tab.value === 'suppliers') tab.value = 'tracking'; else if (only) tab.value = 'suppliers' }, { immediate: true })
+const availableTabs = computed(() => ['tracking', 'external', 'schedule', 'capacity', 'execution', 'drawings', 'suppliers'].filter(value => canViewProductionTab(value, can)))
 const canAdjustDelivery = computed(() => canAssign.value || can('production.drawing.manage'))
 
 
@@ -238,9 +241,6 @@ function projectAttention(project: ProductionProject): 'error' | 'new' | '' {
 function attentionTitle(tone: string) {
   return tone === 'error' ? '存在图纸转出未完成事项，请处理或重试' : tone === 'new' ? '有发布包待供应链接收，接收后停止绿色提示' : undefined
 }
-const visiblePackageTotals = computed(() => visibleProjects.value.flatMap(project => project.packages)
-  .reduce((total, item) => ({ packages: total.packages + 1, lines: total.lines + item.totalLines,
-    quantity: total.quantity + (item.totalQuantity ?? 0) }), { packages: 0, lines: 0, quantity: 0 }))
 watch(visibleProjects, values => {
   if (projectSearch.value.trim() || statusFilter.value) {
     expandedProjectIds.value = [...new Set([...expandedProjectIds.value, ...values.map(project => project.id)])]
@@ -301,6 +301,13 @@ const checkedDrawingLines = computed(() => tab.value === 'external' || tab.value
 const allScheduleChecked = computed(() => selectableScheduleLots.value.length > 0 && selectableScheduleLots.value.every(lot => checkedScheduleIds.value.includes(lot.id)))
 const someScheduleChecked = computed(() => !allScheduleChecked.value && selectableScheduleLots.value.some(lot => checkedScheduleIds.value.includes(lot.id)))
 let generation = 0, refreshGeneration = 0
+watch(availableTabs, tabs => {
+  if (tabs.includes(tab.value)) return
+  generation++; refreshGeneration++
+  projects.value = []; record.value = null; allRecords.value = []
+  selectedLineId.value = ''; selectedLotId.value = ''; pending.value = false
+  tab.value = tabs[0] ?? ''
+}, { immediate: true, flush: 'sync' })
 onBeforeUnmount(() => { generation++; refreshGeneration++; window.clearInterval(attentionTimer); if (cardUrl.value) URL.revokeObjectURL(cardUrl.value) })
 const dateLabel = (value?: string | null) => value?.slice(0, 10) || '待确认'
 const isLateDate = (promisedOn?: string | null, requiredOn?: string | null) =>
@@ -433,7 +440,7 @@ async function loadRelease(id: string) {
   } catch (cause) { if (current === generation) reportError(cause instanceof Error ? cause.message : '') }
 }
 async function refresh() {
-  if (!props.token) return
+  if (!props.token || !availableTabs.value.includes(tab.value)) return
   const current = ++refreshGeneration, activeTab = tab.value
   pending.value = true
   error.value = ''
@@ -487,8 +494,8 @@ async function refreshAttention() {
   } catch { /* 保留当前树和选择，下轮静默核对接收状态。 */ }
   finally { attentionLoading = false }
 }
-const attentionTimer = window.setInterval(() => void refreshAttention(), 60000)
-watch(() => props.token, () => { scanPreviewKey.value++; if (tab.value === 'execution') { selectedLineId.value = ''; selectedLotId.value = '' }; void refresh() }, { immediate: true })
+const attentionTimer = window.setInterval(() => { if (!document.hidden && !isInactiveDom(document.querySelector('.production-workbench') ?? document.body)) void refreshAttention() }, 60000)
+watch(() => props.token, () => { rememberedLines.clear(); scanPreviewKey.value++; if (tab.value === 'execution') { selectedLineId.value = ''; selectedLotId.value = '' }; void refresh() }, { immediate: true })
 watch([lineSearch, lineFilter, selectedReleaseId, externalSupplier, externalCategory, externalStage, externalDateType, externalStart, externalEnd, trackingSupplier, trackingCategory, trackingStage, trackingDateType, trackingStart, trackingEnd, trackingOnlyUnassigned, trackingOnlyOpen, externalOnlyOpen], () => { linePage.value = 1 })
 watch([trackingOnlyUnassigned, currentOnlyOpen], () => { checkedLineIds.value = checkedLineIds.value.filter(id => visibleLines.value.some(line => line.id === id)) })
 watch(externalCategory, () => { if (!externalSupplierOptions.value.some(item => item.value === externalSupplier.value)) externalSupplier.value = '' })
@@ -498,7 +505,7 @@ watch([trackingSupplier, trackingCategory, trackingStage, trackingDateType, trac
 })
 watch(visibleLines, lines => {
   if (!record.value || tab.value !== 'external' && tab.value !== 'tracking') return
-  if (!lines.some(line => line.id === selectedLineId.value)) { selectedLineId.value = ''; selectedLotId.value = '' }
+  if (!lines.some(line => line.id === selectedLineId.value)) { const remembered = rememberedLines.get(selectedReleaseId.value); selectedLineId.value = lines.find(line => line.id === remembered)?.id ?? lines[0]?.id ?? ''; selectedLotId.value = '' }
   else if (!lineLots.value.some(lot => lot.id === selectedLotId.value)) selectedLotId.value = lineLots.value[0]?.id ?? ''
 })
 watch([lineSearch, scheduleFilter, selectedReleaseId, selfResource, selfAssignee, selfStage, selfDateType, selfStart, selfEnd, selfOnlyOpen], () => { schedulePage.value = 1 })
@@ -514,13 +521,13 @@ watch(tab, value => {
   allCategories.value = false; allRecords.value = []
   checkedLineIds.value = []; checkedScheduleIds.value = []
   if (!downloading.value) downloadStatus.value = ''
-  if (value === 'suppliers' && !canReadSuppliers.value) { tab.value = 'tracking'; return }
-  if (supplierOnly.value && value !== 'suppliers') { tab.value = 'suppliers'; return }
+  if (!availableTabs.value.includes(value)) { tab.value = availableTabs.value[0] ?? ''; return }
   if (value === 'execution' || value === 'external') { selectedLineId.value = ''; selectedLotId.value = '' }
   if (value === 'capacity') void loadCapacity()
   else if (value === 'schedule' || value === 'external' || value === 'tracking' || value === 'execution') { projects.value = []; statusFilter.value = ''; void refresh() }
 })
 watch(selectedLineId, id => {
+  if (id && record.value?.state.releasePackageId === selectedReleaseId.value) rememberedLines.set(selectedReleaseId.value, id)
   if (!state.value?.lots.some(item => item.id === selectedLotId.value && item.lineId === id))
     selectedLotId.value = state.value?.lots.find(item => item.lineId === id)?.id ?? ''
 })
@@ -639,6 +646,7 @@ function resolveRevision(input: Parameters<typeof resolveProductionRevision>[1])
   void run(() => resolveProductionRevision(selectedReleaseId.value, input, props.token), success)
 }
 async function loadCapacity() {
+  if (!canViewProductionTab('capacity', can)) { capacity.value = null; return }
   try { capacity.value = await readProductionCapacity(props.token) }
   catch (cause) { reportError(cause instanceof Error ? cause.message : '') }
 }
@@ -705,14 +713,15 @@ function printLotCard() {
 
 <template>
   <section ref="workbenchRoot" class="production-workbench" aria-label="制造中心">
-    <nav class="production-workbench__tabs pdm-tabs" aria-label="制造中心页签">
-      <button v-if="!supplierOnly" type="button" :aria-current="tab === 'tracking' ? 'page' : undefined" @click="tab = 'tracking'">发布跟踪</button>
-      <button v-if="!supplierOnly" type="button" :aria-current="tab === 'external' ? 'page' : undefined" @click="tab = 'external'">外协追溯</button>
-      <button v-if="!supplierOnly" type="button" :aria-current="tab === 'schedule' ? 'page' : undefined" @click="tab = 'schedule'">自制追溯</button>
-      <button v-if="!supplierOnly" type="button" :aria-current="tab === 'capacity' ? 'page' : undefined" @click="tab = 'capacity'">产能分析</button>
-      <button v-if="!supplierOnly" type="button" :aria-current="tab === 'execution' ? 'page' : undefined" @click="tab = 'execution'">生产执行</button>
-      <button v-if="!supplierOnly" type="button" :aria-current="tab === 'drawings' ? 'page' : undefined" @click="tab = 'drawings'">图纸资料</button>
-      <button v-if="canReadSuppliers" type="button" :aria-current="tab === 'suppliers' ? 'page' : undefined" @click="tab = 'suppliers'">供应商库</button>
+    <p v-if="!availableTabs.length" class="pdm-empty-info">当前账号没有可查看的制造功能。</p>
+    <nav v-else class="production-workbench__tabs pdm-tabs" aria-label="制造中心页签">
+      <button v-if="availableTabs.includes('tracking')" type="button" :aria-current="tab === 'tracking' ? 'page' : undefined" @click="tab = 'tracking'">发布跟踪</button>
+      <button v-if="availableTabs.includes('external')" type="button" :aria-current="tab === 'external' ? 'page' : undefined" @click="tab = 'external'">外协追溯</button>
+      <button v-if="availableTabs.includes('schedule')" type="button" :aria-current="tab === 'schedule' ? 'page' : undefined" @click="tab = 'schedule'">自制追溯</button>
+      <button v-if="availableTabs.includes('capacity')" type="button" :aria-current="tab === 'capacity' ? 'page' : undefined" @click="tab = 'capacity'">产能分析</button>
+      <button v-if="availableTabs.includes('execution')" type="button" :aria-current="tab === 'execution' ? 'page' : undefined" @click="tab = 'execution'">生产执行</button>
+      <button v-if="availableTabs.includes('drawings')" type="button" :aria-current="tab === 'drawings' ? 'page' : undefined" @click="tab = 'drawings'">图纸资料</button>
+      <button v-if="availableTabs.includes('suppliers')" type="button" :aria-current="tab === 'suppliers' ? 'page' : undefined" @click="tab = 'suppliers'">供应商库</button>
     </nav>
     <template v-if="tab === 'tracking' || tab === 'external' || tab === 'schedule'">
       <div class="production-workbench__grid" :class="{ 'production-workbench__grid--schedule': tab === 'schedule' }">
@@ -723,8 +732,7 @@ function printLotCard() {
             <button type="button" class="pdm-secondary-action" :disabled="pending" @click="refresh">刷新</button>
           </div>
           <div class="production-workbench__tree-search">
-            <input v-model="projectSearch" type="search" placeholder="项目号、名称或发布包" aria-label="搜索生产发布包">
-            <span class="production-workbench__tree-totals" role="status" aria-label="筛选发布包统计" title="当前搜索和状态筛选结果：发布包数、物料条目数、需求总数量"><span>{{ visiblePackageTotals.packages }}包</span><span>{{ visiblePackageTotals.lines }}项</span><span>{{ visiblePackageTotals.quantity.toLocaleString('zh-CN', { maximumFractionDigits: 6 }) }}个</span></span>
+            <SearchField><input v-model="projectSearch" type="search" placeholder="项目号、名称或发布包" aria-label="搜索生产发布包"></SearchField>
           </div>
           <div class="production-workbench__tree-actions">
             <button type="button" class="production-workbench__all-categories" :class="{ selected: allCategories }" :aria-pressed="allCategories" @click="openAllCategories">全部发布包</button>
@@ -759,7 +767,7 @@ function printLotCard() {
             <header v-else><div><h2>{{ state.packageNumber }} <span class="production-workbench__state">{{ selectedSummary?.status }}</span></h2><p>{{ state.projectCode }} · {{ state.projectName }} · 发布 {{ dateLabel(state.publishedAt) }}</p></div><button v-if="tab === 'tracking' && canAssign && !state.receivedAt" type="button" class="pdm-primary-action" :disabled="pending" @click="receive">供应链接收</button></header>
 
             <div v-if="tab === 'tracking'" class="production-workbench__trace-filters pdm-toolbar" aria-label="发布跟踪筛选" title="筛选当前发布包的自制或外协物料，日期包含起止当天">
-              <label><input v-model="lineSearch" type="search" :placeholder="allCategories ? '搜索项目、发布包、图号或名称' : '搜索图号、名称或材质'" aria-label="搜索本包物料"></label>
+              <label><SearchField><input v-model="lineSearch" type="search" :placeholder="allCategories ? '搜索项目、发布包、图号或名称' : '搜索图号、名称或材质'" aria-label="搜索本包物料"></SearchField></label>
               <label><select v-model="trackingSupplier" aria-label="筛选供应商"><option value="">全部供应商</option><option v-for="item in trackingSupplierOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label>
               <label><select v-model="trackingCategory" aria-label="筛选供应商类型"><option value="">全部类型</option><option value="self">自制</option><option v-for="item in externalSuppliers.categories" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
               <label><select v-model="trackingStage" aria-label="筛选当前环节"><option value="">全部环节</option><option v-for="item in trackingStageOptions" :key="item" :value="item">{{ item }}</option></select></label>
@@ -768,7 +776,7 @@ function printLotCard() {
             </div>
             <p v-if="tab === 'tracking' && invalidTrackingDates" class="production-workbench__filter-error" role="alert">开始日期不能晚于结束日期。</p>
             <div v-if="tab === 'external'" class="production-workbench__external-filters production-workbench__trace-filters pdm-toolbar" aria-label="外协追溯筛选" title="筛选当前发布包的外协批次，日期包含起止当天">
-              <label><input v-model="lineSearch" type="search" placeholder="搜索图号、名称或材质" aria-label="搜索本包物料"></label>
+              <label><SearchField><input v-model="lineSearch" type="search" placeholder="搜索图号、名称或材质" aria-label="搜索本包物料"></SearchField></label>
               <label><select v-model="externalSupplier" aria-label="筛选供应商"><option value="">全部供应商</option><option v-for="item in externalSupplierOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label>
               <label><select v-model="externalCategory" aria-label="筛选供应商类型"><option value="">全部类型</option><option v-for="item in externalSuppliers.categories" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
               <label><select v-model="externalStage" aria-label="筛选当前环节"><option value="">全部环节</option><option v-for="item in externalStageOptions" :key="item" :value="item">{{ item }}</option></select></label>
@@ -833,7 +841,7 @@ function printLotCard() {
               <header v-else><div><h2>{{ state.packageNumber }} <span class="production-workbench__state">自制追溯</span></h2><p>{{ state.projectCode }} · {{ state.projectName }} · 发布 {{ dateLabel(state.publishedAt) }}</p></div></header>
 
               <div class="production-workbench__trace-filters pdm-toolbar" aria-label="自制追溯筛选" title="筛选当前发布包的自制批次，日期包含起止当天">
-                <label><input v-model="lineSearch" type="search" :placeholder="allCategories ? '搜索项目、发布包、图号或名称' : '搜索图号、名称或材质'" aria-label="搜索自制批次"></label>
+                <label><SearchField><input v-model="lineSearch" type="search" :placeholder="allCategories ? '搜索项目、发布包、图号或名称' : '搜索图号、名称或材质'" aria-label="搜索自制批次"></SearchField></label>
                 <label><select v-model="selfResource" aria-label="筛选资源组"><option value="">全部资源组</option><option value="unassigned">未分配资源组</option><option v-for="item in selfResourceOptions" :key="item" :value="item">{{ item }}</option></select></label>
                 <label><select v-model="selfAssignee" aria-label="筛选负责人"><option value="">全部负责人</option><option value="unassigned">未指定负责人</option><option v-for="item in selfAssigneeOptions" :key="item" :value="item">{{ item }}</option></select></label>
                 <label><select v-model="selfStage" aria-label="筛选当前环节"><option value="">全部环节</option><option v-for="item in selfStageOptions" :key="item" :value="item">{{ item }}</option></select></label>
@@ -930,7 +938,7 @@ function printLotCard() {
 .production-workbench__execution-actions,.production-workbench__tabs,.production-workbench__toolbar,.production-workbench__line-tools,.production-workbench__lines header{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .production-workbench__tabs{justify-content:flex-start;border-bottom:1px solid var(--pdm-border);gap:18px}.production-workbench__tabs button{border:0;background:none;min-height:36px;padding:6px 9px;color:var(--pdm-text-soft)}.production-workbench__tabs button[aria-current=page]{color:var(--pdm-blue);font-weight:700;border-bottom:2px solid var(--pdm-blue)}
 .production-workbench__toolbar{flex-wrap:wrap;justify-content:flex-start;font-size:12px}.production-workbench__toolbar label{display:flex;align-items:center;gap:7px}.production-workbench__toolbar label input{height:auto}
-.production-workbench__grid{flex:1;min-height:0;display:grid;grid-template-columns:250px minmax(0,1fr) 320px;gap:var(--pdm-container-gap)}.production-workbench__tree,.production-workbench__lines,.production-workbench__detail,.production-workbench__summary{padding:10px;min-width:0;box-sizing:border-box}.production-workbench__tree{overflow:auto}.production-workbench__tree-search{display:flex;align-items:center;gap:8px;margin:8px 0}.production-workbench__tree-search>input{flex:1;min-width:0;width:0}.production-workbench__tree-totals{display:flex;flex:0 1 auto;flex-wrap:wrap;justify-content:flex-end;gap:2px 6px;max-width:65%;font-size:12px;color:var(--pdm-muted);font-variant-numeric:tabular-nums}.production-workbench__tree-totals>span{white-space:nowrap}.production-workbench__project,.production-workbench__package{display:block;width:100%;border:0;text-align:left;background:transparent;padding:8px;border-radius:5px}.production-workbench__project{display:flex;align-items:center;gap:5px;border-top:1px solid var(--pdm-border);white-space:nowrap}.production-workbench__project span{overflow:hidden;text-overflow:ellipsis}.production-workbench__project small{margin-left:auto;flex:none}.production-workbench__package{margin:2px 0 2px 8px;width:calc(100% - 8px);border-left:2px solid transparent}.production-workbench__package.selected{background:var(--pdm-blue-soft);border-color:var(--pdm-blue)}.production-workbench__package span{display:flex;align-items:center;justify-content:space-between;gap:4px}.production-workbench__package em{font-style:normal;color:var(--pdm-blue);white-space:nowrap}.production-workbench__package small{display:block;color:var(--pdm-text-soft);margin-top:3px}.production-workbench__package b{color:var(--pdm-danger)}
+.production-workbench__grid{flex:1;min-height:0;display:grid;grid-template-columns:250px minmax(0,1fr) 320px;gap:var(--pdm-container-gap)}.production-workbench__tree,.production-workbench__lines,.production-workbench__detail,.production-workbench__summary{padding:10px;min-width:0;box-sizing:border-box}.production-workbench__tree{overflow:auto}.production-workbench__tree-search{display:flex;align-items:center;gap:8px;margin:8px 0}.production-workbench__tree-search>input{flex:1;min-width:0;width:0}.production-workbench__project,.production-workbench__package{display:block;width:100%;border:0;text-align:left;background:transparent;padding:8px;border-radius:5px}.production-workbench__project{display:flex;align-items:center;gap:5px;border-top:1px solid var(--pdm-border);white-space:nowrap}.production-workbench__project span{overflow:hidden;text-overflow:ellipsis}.production-workbench__project small{margin-left:auto;flex:none}.production-workbench__package{margin:2px 0 2px 8px;width:calc(100% - 8px);border-left:2px solid transparent}.production-workbench__package.selected{background:var(--pdm-blue-soft);border-color:var(--pdm-blue)}.production-workbench__package span{display:flex;align-items:center;justify-content:space-between;gap:4px}.production-workbench__package em{font-style:normal;color:var(--pdm-blue);white-space:nowrap}.production-workbench__package small{display:block;color:var(--pdm-text-soft);margin-top:3px}.production-workbench__package b{color:var(--pdm-danger)}
 .production-workbench__lines{display:flex;flex-direction:column;overflow:hidden}.production-workbench__lines header{flex:0 0 auto;min-height:56px}.production-workbench__lines header p{font-size:11px}.production-workbench__state{font-size:12px;color:var(--pdm-blue);margin-left:7px}.production-workbench__line-tools{flex:0 0 auto;padding:8px 0;border-top:1px solid var(--pdm-border)}.production-workbench__line-tools nav{display:flex;gap:3px}.production-workbench__line-tools button{border:0;background:none;padding:5px 7px}.production-workbench__line-tools button[aria-pressed=true]{color:var(--pdm-blue);font-weight:700;border-bottom:2px solid var(--pdm-blue)}.production-workbench__line-tools input{width:190px}
 .production-workbench__bulk-tools{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:0 0 8px;font-size:12px}.production-workbench__bulk-tools>span{margin-right:auto;color:var(--pdm-muted)}.production-workbench__lines input[type=checkbox]{width:16px;height:16px;margin:0;padding:0;vertical-align:middle}
 .production-workbench__table-wrap{flex:1;min-height:0;overflow:auto}.production-workbench__lines table th,.production-workbench__lines table td{text-align:center;vertical-align:middle}.production-workbench__lines td small{overflow:hidden;text-overflow:ellipsis}.production-workbench table{border-collapse:collapse;width:100%;font-size:12px}.production-workbench th{position:sticky;top:0;background:var(--pdm-table-header);text-align:left;z-index:1;white-space:nowrap}.production-workbench td,.production-workbench th{border-bottom:1px solid var(--pdm-border);padding:7px 6px}.production-workbench td{white-space:nowrap}.production-workbench td small{display:block;color:var(--pdm-muted)}.production-workbench tbody tr{cursor:pointer}.production-workbench tbody tr:hover,.production-workbench tbody tr.selected{background:var(--pdm-blue-soft)}.production-workbench__lines footer{padding-top:8px;color:var(--pdm-muted);font-size:11px}
@@ -1008,7 +1016,7 @@ function printLotCard() {
 .production-workbench__tree>.production-workbench__toolbar>select{grid-column:1}
 .production-workbench__tree>.production-workbench__tree-search{display:grid}
 .production-workbench__tree-search>input{grid-column:1;width:100%}
-.production-workbench__tree-totals{grid-column:2/-1;max-width:none}
+
 .production-workbench__tree>.production-workbench__tree-project,.production-workbench__tree>.production-workbench__empty{grid-column:1/-1}
 .production-workbench__project{background:rgb(232,238,247);color:rgb(30,41,59)}
 .production-workbench__project.selected{box-shadow:inset 3px 0 0 var(--pdm-theme-accent)}
@@ -1044,7 +1052,7 @@ function printLotCard() {
 .production-workbench__tree>.production-workbench__toolbar>select,.production-workbench__tree-search>input{grid-column:1/-1}
 .production-workbench__tree>.production-workbench__toolbar>label{grid-column:1/3}
 .production-workbench__tree>.production-workbench__toolbar>button{grid-column:3}
-.production-workbench__tree-totals{grid-column:1/-1;justify-content:flex-end}
+
 }
 .production-workbench__tree-actions{display:grid;grid-column:1/-1;grid-template-columns:minmax(0,1fr) 80px;gap:5px;min-width:0;margin-bottom:5px}.production-workbench__tree-actions>.production-workbench__all-categories{grid-column:auto;height:30px;min-height:30px;padding:0 6px}
 .production-workbench__pda { display: flex; flex-direction: column; min-height: 0; }

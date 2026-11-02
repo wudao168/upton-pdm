@@ -16,6 +16,8 @@ import './styles/app.css'
 import './styles/ui-consistency.css'
 import './styles/tabs.css'
 import './styles/business.css'
+import './styles/interaction.css'
+import './styles/stat-cards.css'
 import './styles/material-stock-plans.css'
 import { stockedMaterial } from './materialStockPlans'
 import App from './App.vue'
@@ -25,18 +27,22 @@ import { isPdmTheme } from './themes'
 const query = new URLSearchParams(window.location.search)
 const savedTheme = window.localStorage.getItem('pdm_theme')
 document.documentElement.dataset.pdmTheme = isPdmTheme(savedTheme) ? savedTheme : 'a'
-const root = query.has('dingtalkOpl')
+const root = query.has('dingtalkOffice')
+  ? defineAsyncComponent(() => import('./components/MobileOfficeApp.vue'))
+  : query.has('dingtalkOpl')
   ? defineAsyncComponent(() => import('./components/DingTalkOplPage.vue'))
   : query.has('productionScan')
     ? defineAsyncComponent(() => import('./components/ProductionScanPage.vue')) : App
 const app = createApp(root).use(ElementPlus, { locale: zhCn })
 app.directive('stocked-material', stockedMaterial)
 installClientDiagnostics(app)
-installPanelHeaderActions(app)
-installColumnResize(app)
-installDatePickers(app)
-installButtonTypography(app)
-installButtonStyles(app)
-installGlobalScrollbars(app)
-app.onUnmount(installContainerBorders())
+if (!query.has('dingtalkOffice')) {
+  installPanelHeaderActions(app)
+  installColumnResize(app)
+  installDatePickers(app)
+  installButtonTypography(app)
+  installButtonStyles(app)
+  installGlobalScrollbars(app)
+  app.onUnmount(installContainerBorders())
+}
 app.mount('#app')

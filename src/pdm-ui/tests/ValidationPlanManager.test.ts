@@ -257,7 +257,7 @@ describe('ValidationPlanManager', () => {
     const selectAllLabel = filter.querySelector<HTMLLabelElement>('.validation-selector__select-all')!
     expect(selectAllLabel.textContent?.trim()).toBe('全选')
     expect(filter.firstElementChild).toBe(selectAllLabel)
-    expect(filter.lastElementChild?.getAttribute('aria-label')).toBe('搜索验证检查项')
+    expect(filter.querySelector('input[aria-label="搜索验证检查项"]')).not.toBeNull()
     const selectAll = document.querySelector<HTMLInputElement>('.validation-selector__select-all input')!
     selectAll.click()
     await flushPromises()

@@ -5,7 +5,7 @@ import { releasePreviewUnfinished } from '../releasePreviewState'
 import { emergencyReleaseEditLock as emergencyReleaseEditLockRequest } from '../api'
 import { heartbeatSession, logoutSession } from '../api'
 import { readMaterialNotificationPermission } from '../api'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, permanentlyDeleteManualBomItems as permanentlyDeleteManualBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest, setBomReleaseExclusion as setBomReleaseExclusionRequest } from '../api'
 import { getBomSourceData } from '../api'
 import { copyProjectContent as copyProjectContentRequest, previewProjectCopy as previewProjectCopyRequest } from '../api'
@@ -283,6 +283,9 @@ export function usePdmWorkspace() {
   const crossCompanyView = ref(false)
   const accessibleCompanies = ref<AuthSession['accessibleCompanies']>([])
   const currentProfile = ref<PdmUserProfile | null>(null)
+  let profileSaveRevision = 0
+  let profileSavesPending = 0
+  let profileSaveQueue: Promise<void> = Promise.resolve()
   const loginPending = ref(false)
   const loginError = ref('')
   const loading = ref(false)
@@ -332,6 +335,12 @@ export function usePdmWorkspace() {
   let sessionRenewal: Promise<boolean> | null = null
   let projectDocumentRefreshPending = false
   let reloadRequestSequence = 0
+  const loadedProjectTabs = reactive(new Set<string>())
+  const projectTabLoadedAt = new Map<string, number>()
+  const pendingProjectTabs = new Map<string, Promise<void>>()
+  const projectTabReadVersions = new Map<string, number>()
+  let activeProjectTab = 'overview'
+  let projectPageActive = true
   let globalLoadErrors: string[] = []
 
   const managedDocumentNodes = computed(() => managedDocuments.value.map(managedDocumentNode))
@@ -1019,6 +1028,7 @@ export function usePdmWorkspace() {
 
   /** 转图与发布解耦：手动把该发布包的转图事项重新排队到后台，处理完会有站内消息反馈。 */
   async function refreshReleaseStatus() {
+    if (!projectPageActive || document.hidden) return
     const projectId = project.value?.id
     if (!projectId || !accessToken || operationPending.value || releaseStatusLoading) return
     const active = releasePackages.value.some(item => item.state === '发布中' || ['Pending', 'WaitingForServer', 'Running'].includes(item.previewState ?? ''))
@@ -1400,10 +1410,15 @@ export function usePdmWorkspace() {
     window.location.reload()
   }
 
-  async function reload(projectId?: string, refreshGlobal = true) {
+  async function reload(projectId?: string, refreshGlobal = true, tabs?: readonly string[]) {
     if (!accessToken) return
     const wasReady = ready.value
     const requestSequence = ++reloadRequestSequence
+    loadedProjectTabs.clear()
+    projectTabLoadedAt.clear()
+    pendingProjectTabs.clear()
+    const profileRevision = profileSaveRevision
+    const profileWasSaving = profileSavesPending > 0
     loading.value = true
     loadError.value = ''
     try {
@@ -1453,7 +1468,7 @@ export function usePdmWorkspace() {
         editLocks.value = loadedEditLocks
         organizationDirectory.value = loadedDirectory
         users.value = loadedDirectory.users
-        currentProfile.value = loadedProfile
+        if (!profileWasSaving && profileSavesPending === 0 && profileRevision === profileSaveRevision) currentProfile.value = loadedProfile
         passwordResetTasks.value = loadedPasswordResetTasks
         systemSettings.value = { ...systemSettings.value, validationRules: loadedValidationRules }
         if (hasPermission('settings.storage.manage')) {
@@ -1483,10 +1498,11 @@ export function usePdmWorkspace() {
       }
 
       const keepSelection = selectedProject.id === project.value.id
-      const data = await loadProjectWorkspace(selectedProject.id, accessToken, sourceDataRequestedProjectId.value === selectedProject.id, currentPermissions.value)
+      const data = await loadProjectWorkspace(selectedProject.id, accessToken, sourceDataRequestedProjectId.value === selectedProject.id, currentPermissions.value, tabs)
       if (requestSequence !== reloadRequestSequence) return
       const previousSelectedId = keepSelection ? selectedId.value : ''
       moduleErrors.value = data.moduleErrors
+      for (const tab of tabs ?? ['documents', 'files', 'bom', 'release']) if (!data.moduleErrors.some(error => error.tab === tab)) { loadedProjectTabs.add(tab); projectTabLoadedAt.set(tab, Date.now()) }
       project.value = data.project
       if (!refreshGlobal) projects.value = projects.value.map(candidate => candidate.id === data.project.id ? { ...candidate, ...data.project } : candidate)
       projectFolders.value = data.folders
@@ -1556,6 +1572,7 @@ export function usePdmWorkspace() {
   }
 
   async function refreshOpenProjectDocuments() {
+    if (!projectPageActive || activeProjectTab !== 'documents' || document.hidden) return
     if (!accessToken || !ready.value || !project.value.id || loading.value || operationPending.value || projectDocumentRefreshPending) return
     const projectId = project.value.id
     projectDocumentRefreshPending = true
@@ -1563,6 +1580,7 @@ export function usePdmWorkspace() {
       const data = await loadProjectDocumentWorkspace(projectId, accessToken)
       if (project.value.id !== projectId) return
       const previousSelectedId = selectedId.value
+      projectTabLoadedAt.set('documents', Date.now())
       managedDocuments.value = data.documents
       documentRelations.value = data.documentRelations
       root.value = data.root
@@ -1580,7 +1598,8 @@ export function usePdmWorkspace() {
 
   function refreshOpenProjectOnFocus() {
     if (!authenticated.value || !project.value.id || loading.value) return
-    void reload(project.value.id)
+    void refreshProjectSummaries()
+    if (projectPageActive && activeProjectTab === 'documents') { void refreshOpenProjectDocuments(); void refreshDrawingReviews() }
   }
 
   async function createProject(input: CreateProjectInput) {
@@ -1775,7 +1794,8 @@ export function usePdmWorkspace() {
     operationPending.value = true
     try {
       const saved = await updateChildProjectDesignersRequest(projectId, designers, accessToken)
-      await reload(project.value.id)
+      projects.value = projects.value.map(item => item.id === saved.id ? { ...item, ...saved } : item)
+      if (project.value.id === saved.id) project.value = { ...project.value, ...saved }
       return saved
     } finally { operationPending.value = false }
   }
@@ -1883,8 +1903,45 @@ export function usePdmWorkspace() {
     } finally { operationPending.value = false }
   }
 
-  async function selectProject(projectId: string) {
-    await reload(projectId, !ready.value || !projects.value.some(candidate => candidate.id === projectId))
+  async function selectProject(projectId: string, tab = 'overview') {
+    activeProjectTab = tab
+    if (ready.value && project.value.id === projectId) { await ensureProjectTab(tab); return }
+    await reload(projectId, !ready.value || !projects.value.some(candidate => candidate.id === projectId), projectTabModules(tab))
+  }
+
+  function projectTabModules(tab: string) {
+    if (tab === 'overview' || tab === 'release') return ['bom', 'documents', 'release']
+    if (tab === 'bom' || tab === 'files') return [tab, 'documents']
+    return [tab]
+  }
+
+  async function ensureProjectTab(tab: string, refresh = false) {
+    activeProjectTab = tab
+    const modules = projectTabModules(tab).filter(item => ['documents', 'files', 'bom', 'release'].includes(item) && (refresh || !loadedProjectTabs.has(item) || Date.now() - (projectTabLoadedAt.get(item) ?? 0) > 30000))
+    if (!project.value.id || (!modules.length && !refresh)) return
+    const id = project.value.id, generation = reloadRequestSequence
+    const key = `${id}:${tab}`
+    const existing = pendingProjectTabs.get(key)
+    if (existing && !refresh) return await existing
+    const version = (projectTabReadVersions.get(key) ?? 0) + 1
+    projectTabReadVersions.set(key, version)
+    const pending = (async () => {
+      const data = await loadProjectWorkspace(id, accessToken, sourceDataRequestedProjectId.value === id, currentPermissions.value, modules, refresh ? undefined : project.value)
+      if (generation !== reloadRequestSequence || project.value.id !== id || projectTabReadVersions.get(key) !== version) return
+      if (refresh) { project.value = data.project; projects.value = projects.value.map(item => item.id === id ? { ...item, ...data.project } : item) }
+      if (!data.project.canReadContent) { loadedProjectTabs.clear(); modules.splice(0, modules.length, 'documents', 'files', 'bom', 'release') }
+      moduleErrors.value = [...moduleErrors.value.filter(error => !modules.includes(error.tab)), ...data.moduleErrors]
+      if (modules.includes('documents')) { managedDocuments.value = data.documents; documentRelations.value = data.documentRelations; root.value = data.root; hasDocuments.value = data.hasDocuments; drawingReviews.value = data.drawingReviews; if (!findNode(data.root, selectedId.value) && !data.documents.some(document => `document-${document.id}` === selectedId.value)) selectedId.value = documentFilter.value === 'drawing' ? '' : data.root.id }
+      if (modules.includes('files')) projectFolders.value = data.folders
+      if (modules.includes('bom')) { standardBom.value = data.standardBom; nonStandardBom.value = data.nonStandardBom; unclassifiedBom.value = data.unclassifiedBom; electricalBom.value = data.electricalBom; bomEmptyDeclarations.value = data.bomEmptyDeclarations; bomVersions.value = data.bomVersions; bomSourceData.value = data.bomSourceData }
+      if (modules.includes('release')) { bomBaselines.value = data.bomBaselines; materialCodeApplications.value = data.materialCodeApplications; releasePackages.value = data.releasePackages }
+      for (const item of modules) {
+        if (data.moduleErrors.some(error => error.tab === item)) { loadedProjectTabs.delete(item); projectTabLoadedAt.delete(item) }
+        else { loadedProjectTabs.add(item); projectTabLoadedAt.set(item, Date.now()) }
+      }
+    })()
+    pendingProjectTabs.set(key, pending)
+    try { await pending } finally { if (pendingProjectTabs.get(key) === pending) pendingProjectTabs.delete(key) }
   }
 
   function closeProject() {
@@ -1914,8 +1971,18 @@ export function usePdmWorkspace() {
   }
 
   async function saveMyProfile(profile: Pick<PdmUserProfile, 'landline' | 'mobilePhone' | 'email' | 'gender' | 'nickname'> & { theme?: string }) {
-    currentProfile.value = await updateMyProfileRequest(profile, accessToken)
-    return currentProfile.value
+    const revision = ++profileSaveRevision
+    const username = currentUsername.value
+    const token = accessToken
+    profileSavesPending++
+    const save = profileSaveQueue.then(async () => {
+      if (!authenticated.value || currentUsername.value !== username || accessToken !== token) throw new Error('登录状态已变化，请重新保存个人设置。')
+      const saved = await updateMyProfileRequest(profile, token)
+      if (revision === profileSaveRevision && currentUsername.value === username && accessToken === token) currentProfile.value = saved
+      return saved
+    }).finally(() => { profileSavesPending-- })
+    profileSaveQueue = save.then(() => undefined, () => undefined)
+    return await save
   }
 
   async function changeMyPassword(currentPassword: string, password: string) {
@@ -2033,6 +2100,9 @@ export function usePdmWorkspace() {
   })
 
   return {
+    ensureProjectTab,
+    isProjectTabLoaded: (tab: string) => loadedProjectTabs.has(tab),
+    setProjectPageActive: (active: boolean) => { projectPageActive = active },
     getAccessToken: () => accessToken,
     projects,
     projectNumberingOptions,

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
+import UserSelect from './UserSelect'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, export: projectExport } = useProjectCenterAccess()
 import SquareLoader from './SquareLoader.vue'
@@ -1598,8 +1600,8 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
 
         <div v-if="displayedPlans.length" class="pdm-plan-filters" aria-label="甘特图任务筛选">
           <label>阶段<el-select v-model="timelineStageFilter" aria-label="筛选阶段" placeholder="全部阶段" multiple filterable clearable collapse-tags collapse-tags-tooltip><el-option v-for="name in timelineStageOptions" :key="name" :label="name" :value="name" /></el-select></label>
-          <label>任务<el-input v-model="timelineTaskFilter" aria-label="筛选任务" placeholder="搜索任务名称" clearable /></label>
-          <label>责任人<el-select v-model="timelineAssigneeFilter" aria-label="筛选责任人" placeholder="全部责任人" multiple filterable clearable collapse-tags collapse-tags-tooltip><el-option v-for="person in timelineAssigneeOptions" :key="person.value" :label="person.label" :value="person.value" /></el-select></label>
+          <label>任务<SearchField><el-input v-model="timelineTaskFilter" aria-label="筛选任务" placeholder="搜索任务名称" clearable /></SearchField></label>
+          <label>责任人<UserSelect v-model="timelineAssigneeFilter" aria-label="筛选责任人" placeholder="全部责任人" multiple filterable clearable collapse-tags collapse-tags-tooltip><el-option v-for="person in timelineAssigneeOptions" :key="person.value" :label="person.label" :value="person.value" /></UserSelect></label>
           <button type="button" class="pdm-secondary-action" :disabled="!hasTimelineFilters" @click="clearTimelineFilters">清空筛选</button>
           <small role="status">匹配 {{ matchingPlanTasks.length }} / {{ planTaskEntries.length }} 项任务</small>
         </div>
@@ -1639,7 +1641,7 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
                   <button v-if="row.task && canEditSchedule(row.plan)" type="button" class="pdm-gantt-cell-edit" :aria-label="`编辑${row.name}责任人`" :disabled="saving" @click="beginInlineEdit(row, 'assignee')">{{ displayUserName(row.task.assignee, '待分配') }}</button>
                   <span v-else>{{ row.task ? displayUserName(row.task.assignee, '待分配') : '—' }}</span>
                   <div v-if="inlineEdit?.row.key === row.key && inlineEdit.field === 'assignee'" class="pdm-gantt-inline-editor" @keydown.stop>
-                    <el-select v-model="inlineEdit.assignee" aria-label="行内责任人" filterable clearable><el-option v-for="username in assigneeOptions" :key="username" :label="displayUserName(username)" :value="username" /></el-select>
+                    <UserSelect v-model="inlineEdit.assignee" aria-label="行内责任人" filterable clearable><el-option v-for="username in assigneeOptions" :key="username" :label="displayUserName(username)" :value="username" /></UserSelect>
                     <div><button type="button" :disabled="saving" @click="inlineEdit = null">取消</button><button type="button" :disabled="saving" @click="saveInlineEdit">保存责任人</button></div>
                   </div>
                 </span>
@@ -1771,7 +1773,7 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
       <div class="pdm-plan-form">
         <label>任务名称<el-input v-model="taskForm.name" aria-label="任务名称" :readonly="!selectedTask?.isCustom || !canEditSelectedPlan" /></label>
         <p v-if="selectedTask?.workflowKey" class="pdm-plan-workflow-lock">流程必需任务沿用模板配置；在计划编辑态删除后，系统会自动重算前置关系和排期。</p>
-        <div class="pdm-plan-form__grid"><label>阶段<el-input :model-value="stageLabel(taskForm.stage, selectedOwnerPlan)" aria-label="阶段" readonly /></label><label>责任人<el-select v-model="taskForm.assignee" :disabled="!canEditSelectedPlan" filterable clearable placeholder="选择责任人"><el-option v-for="username in assigneeOptions" :key="username" :label="displayUserName(username)" :value="username" /></el-select></label></div>
+        <div class="pdm-plan-form__grid"><label>阶段<el-input :model-value="stageLabel(taskForm.stage, selectedOwnerPlan)" aria-label="阶段" readonly /></label><label>责任人<UserSelect v-model="taskForm.assignee" :disabled="!canEditSelectedPlan" filterable clearable placeholder="选择责任人"><el-option v-for="username in assigneeOptions" :key="username" :label="displayUserName(username)" :value="username" /></UserSelect></label></div>
         <label>计划日期<el-date-picker v-model="taskDateRange" class="pdm-plan-date-range" aria-label="计划日期区间" value-format="YYYY-MM-DD" type="daterange" range-separator="-" start-placeholder="开始日期" end-placeholder="完成日期" :clearable="false" :disabled="!canEditSelectedPlan" /></label>
         <p v-if="!isEffective(selectedOwnerPlan)">当前为{{ approvalLabel(selectedOwnerPlan) }}，可修改安排并保存草稿；批准生效后才可填报实际进度。</p>
         <label class="pdm-progress-ruler">实际完成比例 <strong>{{ taskForm.completionPercent }}%</strong><el-slider v-model="taskForm.completionPercent" aria-label="实际完成比例" :min="0" :max="100" :step="10" show-stops :marks="completionMarks" :format-tooltip="(value: number) => `${value}%`" :disabled="!projectWritable || !isEffective(selectedOwnerPlan)" /></label>

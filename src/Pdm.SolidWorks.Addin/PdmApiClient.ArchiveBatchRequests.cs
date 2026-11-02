@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -15,12 +15,12 @@ internal sealed partial class PdmApiClient
     internal sealed class ArchiveRequest
     {
         internal string Key, FileName, Path, Json;
-        internal bool SafeRead;
+        internal bool SafeRead, RetrySafe;
     }
 
     internal ArchiveRequest CreateArchiveRegistration(Guid projectId, Guid batchId, Guid sessionId,
         string machineName, CadTreeNode node, string hash, bool allowDuplicate, string reason) => new ArchiveRequest {
-        Key = node.FullPath, FileName = node.FileName,
+        Key = node.FullPath, FileName = node.FileName, RetrySafe = true,
         Path = "api/archive-batches/" + batchId + "/projects/" + projectId + "/registrations",
         Json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(
             RegistrationPayload(node, hash, allowDuplicate, reason, batchId, sessionId, machineName)) };
@@ -60,7 +60,7 @@ internal sealed partial class PdmApiClient
                     catch (Exception error)
                     {
                         if (rejected != null && IsAuthenticated && scope == EditJournalScope && !(error is OperationCanceledException)
-                            && !(error is HttpRequestException) && !(error is ServiceUnavailableException))
+                            && !(error is HttpRequestException) && !(error is ServiceUnavailableException) && !(error is ArchiveConnectionTimeoutException))
                         {
                             lock (sync) rejected(requests[index], error);
                             progress?.Invoke(Interlocked.Increment(ref completed), requests.Count, requests[index].FileName);
@@ -90,10 +90,14 @@ internal sealed partial class PdmApiClient
 
     private async Task<T> ReadArchiveResponseAsync<T>(ArchiveRequest request, CancellationToken token)
     {
-        for (var attempt = 0; ; attempt++)
-        {
-            try
-            {
+        if (request.Json == null || request.SafeRead || request.RetrySafe)
+            return await RecoverArchiveConnectionAsync("存档信息：" + request.FileName,
+                (retryToken, retry) => ReadArchiveResponseOnceAsync<T>(request, retryToken), token).ConfigureAwait(false);
+        return await ReadArchiveResponseOnceAsync<T>(request, token).ConfigureAwait(false);
+    }
+
+    private async Task<T> ReadArchiveResponseOnceAsync<T>(ArchiveRequest request, CancellationToken token)
+    {
                 using (var content = request.Json == null ? null : new StringContent(request.Json, Encoding.UTF8, "application/json"))
                 using (var response = content == null
                     ? await httpClient.GetAsync(request.Path, token).ConfigureAwait(false)
@@ -108,14 +112,6 @@ internal sealed partial class PdmApiClient
                     }
                     return new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<T>(body);
                 }
-            }
-            catch (Exception error) when ((error is HttpRequestException || error is ServiceUnavailableException)
-                && (request.Json == null || request.SafeRead) && attempt < 2 && !token.IsCancellationRequested)
-            {
-                ArchiveSession.Current?.SetStage("连接暂未恢复，正在重试只读校验（" + (attempt + 1) + "/2）…");
-                await Task.Delay(attempt == 0 ? 1000 : 3000, token).ConfigureAwait(false);
-            }
-        }
     }
 
     internal async Task<Dictionary<Guid, IReadOnlyList<DocumentVersionDto>>> ReadArchiveHistoriesAsync(
@@ -134,15 +130,19 @@ internal sealed partial class PdmApiClient
     {
         var ids = histories.Keys.ToArray();
         var changed = new List<Guid>();
+        var session = ArchiveSession.Current;
+        session?.SetStep(session.DisplayStep, "正在核对引用版本…", ids.Length);
         for (var offset = 0; offset < ids.Length; offset += 100)
         {
             var chunk = ids.Skip(offset).Take(100).ToArray();
+            session?.ReportFile(offset, ids.Length, null, "正在核对引用版本，第" + (offset / 100 + 1) + "/" + ((ids.Length + 99) / 100) + "批…");
             var result = await VerifyReferenceVersionsAsync(chunk.Select(id => new DocumentVersionVerificationRequestDto { DocumentId = id }).ToArray(), token).ConfigureAwait(false);
-            if (result == null) { changed.AddRange(chunk); continue; }
+            if (result == null) { changed.AddRange(chunk); session?.ReportFile(offset + chunk.Length, ids.Length, null, "版本摘要接口不可用，将读取完整版本核对…"); continue; }
             if (result.Count != chunk.Length || result.Select(value => value.DocumentId).Distinct().Count() != chunk.Length
                 || result.Any(value => !chunk.Contains(value.DocumentId) || !value.Accessible))
                 throw new InvalidOperationException("版本基准批量核对未返回完整的可访问结果，尚未上传。");
             changed.AddRange(result.Where(value => value.Latest?.Id != histories[value.DocumentId].FirstOrDefault()?.Id).Select(value => value.DocumentId));
+            session?.ReportFile(offset + chunk.Length, ids.Length, null, "引用版本已核对 " + (offset + chunk.Length) + "/" + ids.Length + "份");
         }
         if (changed.Count == 0) return;
         var refreshed = await ReadArchiveHistoriesAsync(changed, null, token).ConfigureAwait(false);

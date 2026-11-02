@@ -76,7 +76,7 @@ public sealed partial class DingTalkConfigurationService(IDingTalkConfigurationR
     }
     private async Task<object> ApplicationViewAsync(DingTalkOplOptions value, string actor, UserRole role, CancellationToken ct) => new { value.Enabled, value.CorpId, value.AppKey, value.RobotCode, value.PublicUrl, value.CompanyId, value.RowVersion,
         notificationTemplate = DingTalkOplMessageTemplate.Normalize(value.NotificationTemplate), defaultNotificationTemplate = DingTalkOplMessageTemplate.Default, notificationFields = DingTalkOplMessageTemplate.Fields,
-        hasAppSecret = !string.IsNullOrWhiteSpace(value.AppSecret), entryUrl = Entry(value), stream = streamStatus.Read(value.CompanyId), groups = await GroupsAsync(value, actor, role, ct) };
+        hasAppSecret = !string.IsNullOrWhiteSpace(value.AppSecret), entryUrl = Entry(value), officeEntryUrl = OfficeEntry(value), stream = streamStatus.Read(value.CompanyId), groups = await GroupsAsync(value, actor, role, ct) };
     public async Task<object> GetApplicationAsync(string actor, UserRole role, CancellationToken ct)
     { await RequireSystemAsync(actor, role, ct); return await ApplicationViewAsync(await LoadAsync(TenantContext.CompanyId, ct), actor, role, ct); }
     private async Task<DingTalkOplOptions> PersistAsync(DingTalkOplOptions value, long expectedVersion, string actor, string action, CancellationToken ct)

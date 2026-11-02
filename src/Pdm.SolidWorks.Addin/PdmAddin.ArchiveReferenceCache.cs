@@ -99,6 +99,7 @@ public sealed partial class PdmAddin
                 }
                 foreach (var request in batch) { verifiedBindings.Add(Key(request)); requests.Remove(request); }
                 completed += batch.Length;
+                report?.Invoke(completed, total, string.Empty, "已核对引用版本 " + completed + "/" + total + "项（不上传引用文件）");
             }
             if (total > 0) LogOperation("引用版本批量核对完成 bindings=" + total + " completeHistories=" + histories.Count + " legacy=" + legacyServer);
         }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, h, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import U9BomSyncPreview from './U9BomSyncPreview.vue'
@@ -8,24 +8,27 @@ import { executeProjectBomU9Sync, listBom, listBomVersions, listProjectBomHeader
 import type { U9SyncBlocker } from '../api'
 import type { BomHeaderKind, BomItem, BomKind, BomVersion, ProjectBomHeader, ProjectSummary, ReleasePackageSummary, ReleaseScope } from '../types'
 import { useUserDisplayName } from '../userDisplay'
+import { PdmApiError, readBomHierarchyOverview, type BomHierarchyMetric } from '../api'
 
 const displayUserName = useUserDisplayName()
 const emit = defineEmits<{ openBom: [projectId: string, kind: Exclude<BomKind, 'Unclassified'>] }>()
 
 type VisibleBomKind = Exclude<BomKind, 'Unclassified'>
 type ProjectDetail = {
+  categories?: BomHierarchyMetric[]
   current: Record<VisibleBomKind, BomItem[]>
   versions: BomVersion[]
   releases: ReleasePackageSummary[]
   headers: ProjectBomHeader[]
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   project: ProjectSummary
   projects: ProjectSummary[]
   token: string
   editable?: boolean
-}>()
+  active?: boolean
+}>(), { active: true })
 
 function canEditRow(project: ProjectSummary) {
   return !!props.editable && (project.effectiveProjectPermissions?.includes('bom.edit') ?? false)
@@ -46,6 +49,12 @@ const detailCache = ref<Record<string, ProjectDetail>>({})
 const detailErrors = ref<Record<string, string>>({})
 const expandedProjects = ref<Record<string, boolean>>({})
 const loading = ref(false)
+const overviewRoot = ref<HTMLElement>()
+const checkedU9Rows = new Map<string, { at: number; fingerprint: string }>()
+let checkingU9 = false
+let rescanU9 = false
+let disposed = false
+let visibleU9Timer: ReturnType<typeof setTimeout> | undefined
 const error = ref('')
 const syncingRowKey = ref('')
 const deniedU9Rows = new Set<string>()
@@ -87,25 +96,19 @@ let pollingAutomatic = false
 let automaticPollCount = 0
 onMounted(() => {
   automaticPoll = setInterval(async () => {
-    if (pollingAutomatic || loading.value) return
+    if (props.active === false || document.hidden || pollingAutomatic || loading.value) return
     const checkBoms = ++automaticPollCount % 6 === 0
     const targets = Object.entries(detailCache.value).filter(([, detail]) => checkBoms ||
       detail.headers.some(header => ['ApprovalQueued', 'Running', 'Queued', 'Failed', 'WaitingRetry'].includes(header.automaticStatus ?? '')))
     if (!targets.length) return
     pollingAutomatic = true
     try {
-      for (const [projectId, detail] of targets) {
-        try {
-          const headers = await listProjectBomHeaders(projectId, props.token)
-          if (detailCache.value[projectId] === detail) detail.headers = headers
-        } catch { /* 单个项目读取失败不阻止其余项目更新。 */ }
-      }
-      if (checkBoms) await refreshU9BomStates()
+      await loadOverview(true)
     } catch { /* 网络恢复后继续获取后台状态，不触发业务重试。 */ }
     finally { pollingAutomatic = false }
   }, 5000)
 })
-onUnmounted(() => clearInterval(automaticPoll))
+onUnmounted(() => { disposed = true; clearInterval(automaticPoll); clearTimeout(visibleU9Timer) })
 
 const rootProjectId = computed(() => props.project.rootProjectId || props.project.id)
 const hierarchyProjects = computed(() => props.projects
@@ -193,6 +196,7 @@ const overviewRows = computed(() => orderedProjects.value.flatMap(({ project, de
   const detail = detailCache.value[project.id]
   const masterHeader = detail?.headers.find(header => header.kind === 'Master')
   const categoryRows = categoryOrder.map(kind => {
+    const summary = detail?.categories?.find(item => item.kind === kind)
     const released = latestReleased(detail, kind)
     const longLeadPublished = publishedLongLeadPackages(detail, kind).length > 0
     const currentItems = includedRows(detail?.current[kind] ?? [])
@@ -206,11 +210,11 @@ const overviewRows = computed(() => orderedProjects.value.flatMap(({ project, de
       headerKind: kind as BomHeaderKind,
       label: categoryLabels[kind],
       isMaster: false,
-      itemCount: currentItems.length,
-      unresolvedCount,
-      version: released?.label || '工作区',
-      releaseStatus: releaseStatusLabel(released, longLeadPublished),
-      releasedAt: [released?.releasedAt, ...publishedLongLeadPackages(detail, kind).map(pack => pack.publishedAt)]
+      itemCount: summary?.itemCount ?? currentItems.length,
+      unresolvedCount: summary?.unresolvedCount ?? unresolvedCount,
+      version: summary?.version || released?.label || '工作区',
+      releaseStatus: summary ? summary.version ? '正式发布' : summary.longLeadPublished ? '长交期发布' : '未发布' : releaseStatusLabel(released, longLeadPublished),
+      releasedAt: [summary?.releasedAt, summary?.longLeadPublishedAt, released?.releasedAt, ...publishedLongLeadPackages(detail, kind).map(pack => pack.publishedAt)]
         .filter((value): value is string => !!value && Number.isFinite(Date.parse(value)))
         .sort((left, right) => Date.parse(right) - Date.parse(left))[0],
       header,
@@ -218,7 +222,7 @@ const overviewRows = computed(() => orderedProjects.value.flatMap(({ project, de
     }
   })
   const releasedDates = categoryRows.map(row => row.releasedAt).filter((value): value is string => !!value)
-  const activeCategoryRows = categoryRows.filter(row => effectiveRows(detail?.current[row.kind] ?? []).length > 0)
+  const activeCategoryRows = categoryRows.filter(row => (detail?.categories?.find(item => item.kind === row.kind)?.effectiveCount ?? effectiveRows(detail?.current[row.kind] ?? []).length) > 0)
   const directChildren = props.projects.filter(item => item.parentProjectId === project.id)
   const masterItemCount = activeCategoryRows.length + directChildren.length
   const masterUnresolvedCount = activeCategoryRows.filter(row => !row.header?.materialCode).length
@@ -290,10 +294,32 @@ function viewStateFromPreview(preview: Awaited<ReturnType<typeof previewProjectB
   return 'modify-pending'
 }
 
-async function refreshU9BomStates() {
-  const rows = eligibleHeaderRows.value.filter(row => row.header?.materialCode && canEditRow(row.project) && !deniedU9Rows.has(row.key))
+function scheduleVisibleU9Check() {
+  if (disposed || props.active === false) return
+  clearTimeout(visibleU9Timer)
+  visibleU9Timer = setTimeout(() => { void refreshU9BomStates(true) }, 150)
+}
+
+async function refreshU9BomStates(viewportOnly = false) {
+  if (disposed || props.active === false || document.hidden) return
+  if (checkingU9) { rescanU9 ||= viewportOnly; return }
+  const viewport = overviewRoot.value?.querySelector('.bom-overview__table-wrap')?.getBoundingClientRect()
+  const visibleKeys = new Set(viewportOnly && viewport && viewport.width > 0 ? [...overviewRoot.value!.querySelectorAll<HTMLElement>('[data-overview-key]')].filter(element => {
+    const rect = element.getBoundingClientRect()
+    return rect.height > 0 && rect.bottom > Math.max(0, viewport.top) && rect.top < Math.min(window.innerHeight, viewport.bottom)
+  }).map(element => element.dataset.overviewKey) : [])
+  const fingerprint = (row: (typeof overviewRows.value)[number]) => JSON.stringify([row.header?.materialCode, row.header?.rowVersion, row.version, row.releasedAt, row.itemCount, row.unresolvedCount])
+  const rows = visibleOverviewRows.value.filter(row => isHeaderEligible(row) && row.header?.materialCode && canEditRow(row.project) && !deniedU9Rows.has(row.key)
+    && (!viewportOnly || visibleKeys.has(row.key) && (!checkedU9Rows.has(row.key) || Date.now() - checkedU9Rows.get(row.key)!.at > 30000 || checkedU9Rows.get(row.key)!.fingerprint !== fingerprint(row))))
   if (!rows.length) return
-  const updates = await Promise.all(rows.map(async row => {
+  checkingU9 = true
+  try {
+  const updates: Array<readonly [string, U9BomViewState]> = []
+  let cursor = 0
+  const check = async () => {
+    while (cursor < rows.length && props.active !== false && !document.hidden) {
+      const row = rows[cursor++]!
+      const update = await (async () => {
     try {
       const preview = await previewProjectBomU9Sync(row.project.id, row.headerKind, props.token)
       u9Blockers.value = { ...u9Blockers.value, [row.key]: [] }
@@ -310,8 +336,14 @@ async function refreshU9BomStates() {
       }
       return [row.key, 'failed'] as const
     }
-  }))
+      })()
+      updates.push(update)
+      checkedU9Rows.set(row.key, { at: Date.now(), fingerprint: fingerprint(row) })
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(3, rows.length) }, check))
   u9BomStates.value = { ...u9BomStates.value, ...Object.fromEntries(updates) }
+  } finally { checkingU9 = false; if (rescanU9) { rescanU9 = false; scheduleVisibleU9Check() } }
 }
 
 async function syncU9Bom(row: (typeof overviewRows.value)[number]) {
@@ -421,15 +453,29 @@ async function fetchProjectDetail(projectId: string): Promise<ProjectDetail> {
 }
 
 let overviewLoadGeneration = 0
+let overviewLoadedAt = 0
 async function loadOverview(force = false) {
   const generation = ++overviewLoadGeneration
-  if (!props.token) return
+  if (!props.token || props.active === false) return
   const projectsToLoad = hierarchyProjects.value.filter(project => force || !detailCache.value[project.id])
   if (!projectsToLoad.length) return
   loading.value = true
   error.value = ''
   try {
-    const loaded = await Promise.allSettled(projectsToLoad.map(project => fetchProjectDetail(project.id)))
+    let loaded: PromiseSettledResult<ProjectDetail>[]
+    let legacy = false
+    try {
+      const summaries = await readBomHierarchyOverview(props.project.id, props.token)
+      loaded = projectsToLoad.map(project => {
+        const summary = summaries.find(item => item.projectId === project.id)
+        return summary && !summary.error ? { status: 'fulfilled', value: { categories: summary.categories, headers: summary.headers, current: { Standard: [], NonStandard: [], Electrical: [] }, versions: [], releases: [] } }
+          : { status: 'rejected', reason: new Error(summary?.error || '当前项目没有BOM内容查看权限。') }
+      })
+    } catch (cause) {
+      if (!(cause instanceof PdmApiError && cause.status === 404)) throw cause
+      legacy = true
+      loaded = await Promise.allSettled(projectsToLoad.map(project => fetchProjectDetail(project.id)))
+    }
     if (generation !== overviewLoadGeneration) return
     const nextDetails = { ...detailCache.value }
     const nextErrors = { ...detailErrors.value }
@@ -445,7 +491,9 @@ async function loadOverview(force = false) {
     })
     detailCache.value = nextDetails
     detailErrors.value = nextErrors
-    await refreshU9BomStates()
+    overviewLoadedAt = Date.now()
+    if (legacy) await refreshU9BomStates()
+    else void nextTick().then(scheduleVisibleU9Check)
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : 'BOM层级状态加载失败'
   } finally {
@@ -455,7 +503,7 @@ async function loadOverview(force = false) {
 
 function refreshOverview() {
   if (loading.value || syncingRowKey.value) return
-  void loadOverview(true)
+  void loadOverview(true).then(() => refreshU9BomStates())
 }
 
 function formatDate(value?: string) {
@@ -467,6 +515,7 @@ function formatDate(value?: string) {
 watch([rootProjectId, () => props.token, () => props.projects.map(project => `${project.id}:${project.effectiveProjectPermissions?.join(',')}`).join('|')], () => {
   expandedProjects.value = {}
   deniedU9Rows.clear()
+  checkedU9Rows.clear()
 })
 
 watch([rootProjectId, hierarchySignature, () => props.token], () => {
@@ -474,10 +523,15 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
   detailErrors.value = {}
   void loadOverview(true)
 }, { immediate: true })
+watch(() => props.active, (active, previous) => {
+  if (!active) { clearTimeout(visibleU9Timer); rescanU9 = false }
+  if (active && previous === false && (!Object.keys(detailCache.value).length || Date.now() - overviewLoadedAt > 30000)) void loadOverview(true)
+  else if (active) scheduleVisibleU9Check()
+})
 </script>
 
 <template>
-  <section class="bom-overview" aria-label="BOM多级总览">
+  <section ref="overviewRoot" class="bom-overview" aria-label="BOM多级总览">
     <div v-if="error" class="bom-overview__error" role="alert">{{ error }}</div>
     <div v-if="Object.keys(detailErrors).length" class="bom-overview__error" role="alert">部分项目BOM读取失败：{{ hierarchyProjects.filter(project => detailErrors[project.id]).map(project => project.code).join('、') }}。其他项目仍可查看，请刷新重试。</div>
     <div class="bom-overview__generation">
@@ -485,13 +539,13 @@ watch([rootProjectId, hierarchySignature, () => props.token], () => {
       <button type="button" class="pdm-secondary-action" aria-label="刷新多级BOM" :disabled="loading || !!syncingRowKey || !token" @click="refreshOverview">{{ loading ? '刷新中…' : '刷新' }}</button>
     </div>
 
-    <div class="bom-overview__table-wrap">
+    <div class="bom-overview__table-wrap" @scroll.passive="scheduleVisibleU9Check">
       <table>
         <thead>
           <tr><th>层级 / BOM</th><th>料号分类</th><th>本级BOM料号</th><th>上级BOM料号</th><th>物料数</th><th>PLM版本</th><th>发布状态</th><th>待处理</th><th>最近发布</th><th>自动流程</th><th>U9C料品</th><th>U9C BOM</th></tr>
         </thead>
         <tbody>
-          <tr v-for="row in visibleOverviewRows" :key="row.key" :class="{ 'is-master-row': row.isMaster }" :data-bom-type="row.isMaster ? (row.project.parentProjectId ? 'ChildProject' : 'MainProject') : row.kind">
+          <tr v-for="row in visibleOverviewRows" :key="row.key" :data-overview-key="row.key" :class="{ 'is-master-row': row.isMaster }" :data-bom-type="row.isMaster ? (row.project.parentProjectId ? 'ChildProject' : 'MainProject') : row.kind">
             <td v-if="detailErrors[row.project.id]" colspan="12" class="bom-overview__project-error" :style="{ paddingLeft: `${row.depth * 18 + 8}px` }">{{ row.project.code }} · {{ row.project.name }}：{{ detailErrors[row.project.id] }}</td>
             <template v-else>
             <td :title="`${row.project.code} · ${row.project.name}`">

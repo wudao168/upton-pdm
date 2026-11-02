@@ -47,6 +47,45 @@ describe('MaterialRelationEditor', () => {
 
   afterEach(() => { document.body.innerHTML = '' })
 
+  it('新增配置直接维护多主料，统一保存同一份配件规则', async () => {
+    const second = { ...mainMaterial, id: 'main-2', materialCode: 'M-002', name: '同系列电机' }
+    api.listMaterialRelationTemplates.mockResolvedValue([])
+    api.listMaterials.mockResolvedValue([mainMaterial, second, accessory])
+    const category = { id: 'category', name: '机电标准件', isActive: true, sortOrder: 1 }
+    api.listMaterialRelationCategories.mockResolvedValue([category])
+    api.getMaterialRelationCategories.mockResolvedValue([category])
+    const wrapper = mount(MaterialRelationEditor, { props: { token: 'token', canManage: true, canPublish: true }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('主物料 0 个')
+    expect(wrapper.findAll('button').some(button => button.text() === '开始配置关联物料')).toBe(false)
+    const mainSelect = wrapper.get('.material-relation-main-toolbar').findComponent({ name: 'ElSelect' })
+    mainSelect.vm.$emit('update:modelValue', [mainMaterial.id, second.id]); await flushPromises()
+    expect(wrapper.findAll('.material-relation-main-table tbody tr')).toHaveLength(2)
+    await wrapper.get('[aria-label="关联配置名称"]').setValue('同系列电机共享配套')
+    await wrapper.findAll('button').find(button => button.text() === '添加配件组')!.trigger('click')
+    await wrapper.get('[aria-label="分类名称（必填）"]').setValue('控制器')
+    await wrapper.findAll('button').find(button => button.text() === '添加候选配件')!.trigger('click')
+    wrapper.get('.material-relation-option-row').findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', accessory.id); await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === '保存修改')!.trigger('click'); await flushPromises()
+    expect(api.saveMaterialRelationTemplate).toHaveBeenCalledWith(expect.objectContaining({ mainMaterialIds: ['main-1', 'main-2'], name: '同系列电机共享配套', groups: [expect.objectContaining({ options: [expect.objectContaining({ materialId: accessory.id })] })] }), 'token', undefined)
+    wrapper.unmount()
+  })
+
+  it('主料已归属其他配置时不可直接覆盖，未保存的范围修改不可发布', async () => {
+    const second = { ...mainMaterial, id: 'main-2', materialCode: 'M-002', name: '同系列电机' }
+    api.listMaterials.mockResolvedValue([mainMaterial, second, accessory])
+    api.getMaterialRelationCategories.mockResolvedValue([{ id: 'category', name: '机电件', isActive: true }])
+    api.listMaterialRelationTemplates.mockResolvedValue([relation, { ...relation, id: 'other', mainMaterialId: second.id, mainMaterialCode: second.materialCode, name: '其他配置' }])
+    const wrapper = mount(MaterialRelationEditor, { props: { token: 'token', templateId: relation.id, canManage: true, canPublish: true }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await wrapper.get('.material-relation-main-toolbar .el-select__wrapper').trigger('click'); await flushPromises()
+    const blocked = [...document.querySelectorAll('.el-select-dropdown__item')].find(option => option.textContent?.includes(second.materialCode) && option.textContent.includes('已归属'))!
+    expect(blocked.classList.contains('is-disabled')).toBe(true)
+    await wrapper.get('[aria-label="关联配置名称"]').setValue('修改共享名称')
+    expect(wrapper.findAll('button').find(button => button.text() === '发布生效')!.attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
   it('maintains association data directly for the selected material without template wording', async () => {
     const wrapper = mount(MaterialRelationEditor, {
       props: { token: 'token', mainMaterial, canManage: true, canPublish: true },
@@ -56,7 +95,7 @@ describe('MaterialRelationEditor', () => {
 
     expect(wrapper.text()).toContain('M-001')
     expect(wrapper.text()).toContain('伺服电机')
-    expect(wrapper.get('.material-relation-summary').text()).toContain('品牌MITSUBISHI')
+    expect(wrapper.get('.material-relation-main-table tbody').text()).toContain('MITSUBISHI')
     expect(wrapper.text()).toContain('待发布生效 · V1')
     expect(wrapper.text()).toContain('只能选 1 项')
     expect(wrapper.text()).not.toContain('模板名称')

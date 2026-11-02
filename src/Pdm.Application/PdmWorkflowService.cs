@@ -915,11 +915,11 @@ public sealed partial class PdmWorkflowService(
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         if (project.ParentProjectId is not null || project.ExecutionUnitId is null) throw new PdmRuleException("请先为主项目分配执行事业部。");
         var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
-        if (!string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase) && !directory.Managers.Any(item => item.UnitId == project.ExecutionUnitId
+        if (role != UserRole.Administrator && !string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase) && !directory.Managers.Any(item => item.UnitId == project.ExecutionUnitId
                 && (string.Equals(item.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || item.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase))))
             throw new UnauthorizedAccessException("只有项目经理和执行事业部经理可以配置项目经理和设计负责人。");
         var primary = command.PrimaryProjectManager?.Trim() ?? string.Empty;
-        if (string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
+        if (role != UserRole.Administrator && string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
             && !string.Equals(primary, project.PrimaryProjectManager, StringComparison.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("项目经理不能修改自己的项目经理分配。");
         var designLeads = NormalizeUsers(command.DesignLeads);
@@ -975,7 +975,7 @@ public sealed partial class PdmWorkflowService(
         var managesExecutionUnit = directory.Managers.Any(item => item.UnitId == root.ExecutionUnitId
             && (string.Equals(item.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || item.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)));
         var isProjectManager = string.Equals(root.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase);
-        if (!managesExecutionUnit && !isProjectManager)
+        if (role != UserRole.Administrator && !managesExecutionUnit && !isProjectManager)
             throw new UnauthorizedAccessException("只有项目经理和执行事业部经理可以配置团队负责人。");
 
         var allowedKeys = new HashSet<string>(["ElectricalEngineer", "ElectricalHardware", "StandardProcurement", "NonStandardProcurement", "NonStandardProduction", "MechanicalAssembly", "ElectricalAssembly", "ElectricalCommissioning", "Acceptance"], StringComparer.OrdinalIgnoreCase);
@@ -1882,7 +1882,7 @@ public sealed partial class PdmWorkflowService(
         current = await repository.RequestCheckoutReleaseAsync(documentId, actor, reason, cancellationToken);
         var sourceKey = EditHandoff.WaitingKey(current);
         await repository.CreateUserNotificationsAsync([
-            new(Guid.NewGuid(), actor, "EditLockWaiting", "已申请编辑图档", $"{current.FileName}：系统将在本次编辑结束后通知您。", current.ProjectId, null, sourceKey, timeProvider.GetUtcNow(), null),
+            new(Guid.NewGuid(), actor, "EditLockWaiting", "已申请编辑图档", $"{current.FileName}：系统将在本次编辑结束后通知您。", current.ProjectId, null, sourceKey, timeProvider.GetUtcNow(), timeProvider.GetUtcNow(), IsSenderReceipt: true),
             new(Guid.NewGuid(), current.CheckedOutBy!, "EditLockRequested", "有人需要编辑图档", $"{actor}需要编辑{current.FileName}。请存档交接或说明继续编辑原因。申请说明：{reason}", current.ProjectId, null, $"edit-request:{sourceKey}:{actor}", timeProvider.GetUtcNow(), null)
         ], cancellationToken);
         await AuditAsync(actor, "document.checkout.release-request", nameof(PdmDocument), documentId.ToString(), $"当前编辑人：{current.CheckedOutBy}；原因：{reason}", cancellationToken);
@@ -4264,6 +4264,16 @@ public sealed partial class PdmWorkflowService(
         return candidates;
     }
 
+    private async Task<IReadOnlyList<string>> ListDrawingReviewPoolNotificationRecipientsAsync(Guid projectId, string actor, CancellationToken ct)
+    {
+        var project = await repository.FindProjectAsync(projectId, ct) ?? throw new PdmNotFoundException("项目不存在。");
+        var result = new List<string>();
+        foreach (var user in await ListDrawingReviewCandidateUsersAsync(projectId, actor, ct))
+            if ((IsProjectDesignLead(project, user.Username) || await NotificationRecipientPolicy.HasBusinessPermissionAsync(repository, user.EffectiveRoleCodes, PermissionCodes.DrawingReviewDecide, ct))
+                && await NotificationRecipientPolicy.InBusinessCompanyAsync(repository, user, project.OrganizationId, ct)) result.Add(user.Username);
+        return result;
+    }
+
     public Task<DrawingReviewPackage> CreateDrawingReviewPackageAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
         CreateDrawingReviewPackageAsync(projectId, null, null, actor, role, cancellationToken);
 
@@ -4382,7 +4392,7 @@ public sealed partial class PdmWorkflowService(
             $"{package.Number}；选择2D工程图 {package.Items.Count}张；{(reviewers.Count == 0 ? "未指定审核人，由具备审图权限的人员并行处理" : $"指定审核人 {string.Join("、", reviewers.Select(reviewer => reviewer.DisplayName))}")}；机械主管 {supervisor.DisplayName}", cancellationToken);
         var reviewerRecipients = reviewers.Count > 0
             ? reviewers.Select(reviewer => reviewer.Username)
-            : (await ListDrawingReviewCandidateUsersAsync(projectId, actor, cancellationToken)).Select(user => user.Username);
+            : await ListDrawingReviewPoolNotificationRecipientsAsync(projectId, actor, cancellationToken);
         await CreateDrawingReviewNotificationsAsync(projectId, $"drawing-review:{package.Id:N}:reviewer", "DrawingReviewAssigned", "待审图纸",
             project => $"{project.Code} · {package.Number} 有 {package.Items.Count} 张2D工程图待审核，发起人 {actor}",
             reviewerRecipients, cancellationToken);
@@ -4830,7 +4840,7 @@ public sealed partial class PdmWorkflowService(
             $"{item.DrawingNumber}；重新提交审核版本{latest.Revision.Display}", cancellationToken);
         var reviewers = updated.AssignedReviewers.Count > 0
             ? updated.AssignedReviewers
-            : (await ListDrawingReviewCandidateUsersAsync(package.ProjectId, actor, cancellationToken)).Select(user => user.Username).ToArray();
+            : (await ListDrawingReviewPoolNotificationRecipientsAsync(package.ProjectId, actor, cancellationToken)).ToArray();
         await CreateDrawingReviewNotificationsAsync(updated.ProjectId, $"drawing-review:{updated.Id:N}:resubmit:{itemId:N}:{latest.Id:N}", "DrawingReviewResubmitted", "图纸已修改重新提交审核",
             project => $"{project.Code} · {item.DrawingNumber} 已按修改后的版本 {latest.Revision.Display} 重新提交审核，请重新审图。",
             reviewers, cancellationToken);
@@ -5352,6 +5362,9 @@ public sealed partial class PdmWorkflowService(
                 await AuditAsync(actor, "release-package.long-lead-output", nameof(ReleasePackage), package.Id.ToString(), $"{package.Number}；标准件{package.StandardBomSnapshot.Count}项；待U9C接口消费", cancellationToken);
         }
         await AuditAsync(actor, "release-package.publish", nameof(ReleasePackage), package.Id.ToString(), publishedPath, cancellationToken);
+        try { await ReleaseManagementNotifications.NotifyPublishedAsync(repository, package, project, publishedAt, cancellationToken); }
+        catch (Exception error) when (error is not OperationCanceledException)
+        { await AuditAsync(actor, "release.management-notification.pending", nameof(ReleasePackage), package.Id.ToString(), "发布已生效，项目经理的结果摘要将在流程通知处理中补齐。", cancellationToken); }
         if (productionTrackingObserver is not null)
         {
             try { await productionTrackingObserver.PublishedAsync(package.Id, cancellationToken); }
@@ -5376,7 +5389,7 @@ public sealed partial class PdmWorkflowService(
             {
                 await AuditAsync(actor, "release-package.preview-pending", nameof(ReleasePackage), package.Id.ToString(),
                     $"{package.Number}；发布已完成，转图转为后台单独重试：{publication.PreviewError}", cancellationToken);
-                await CreateReleasePreviewNotificationsAsync(package, project, actor,
+                await CreateReleasePreviewNotificationsAsync(package, project,
                     "发布已完成，图纸转换转为后台重试",
                     $"发布不受影响；STEP/PDF 生成失败已转为后台单独事项，成功或最终失败后会再通知。原因：{publication.PreviewError}",
                     cancellationToken);
@@ -5444,6 +5457,8 @@ public sealed partial class PdmWorkflowService(
                 if (archived > 0)
                     await AuditAsync(actor, "release-package.delivery-archive", nameof(ReleasePackage), package.Id.ToString(),
                         $"{package.Number}；发布成品归档{archived}个文件", cancellationToken);
+                await repository.ResolveUserNotificationsAsync([ReleasePreviewNotifications.Source(package.Id, "archive"), $"release-package:{package.Id:N}:archive"], timeProvider.GetUtcNow(), cancellationToken);
+                await ReleaseManagementNotifications.ReconcileRiskAsync(repository, package.Id, timeProvider.GetUtcNow(), cancellationToken, archiveVerified: true);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -5456,10 +5471,11 @@ public sealed partial class PdmWorkflowService(
             {
                 await AuditAsync(actor, "release-package.delivery-archive-failed", nameof(ReleasePackage), package.Id.ToString(),
                     $"{package.Number}；发布成品归档失败：{exception.Message}", CancellationToken.None);
-                await CreateReleasePreviewNotificationsAsync(package, project, actor, "发布资料归档未完成",
+                await CreateReleasePreviewNotificationsAsync(package, project, "发布资料归档未完成",
                     "BOM及发布资料归档异常，请联系管理员检查归档目录与读写权限。", CancellationToken.None, "archive");
             }
         }
+        await ReleaseManagementNotifications.ReconcileRiskAsync(repository, package.Id, timeProvider.GetUtcNow(), cancellationToken, archiveVerified: releaseDeliveryArchive is null);
         return (await repository.FindReleasePackageAsync(package.Id, cancellationToken))!;
     }
 
@@ -5482,8 +5498,8 @@ public sealed partial class PdmWorkflowService(
         await AuditAsync(actor, exhausted ? "release-package.conversion.failed" : "release-package.conversion.pending",
             nameof(ReleasePackage), package.Id.ToString(), error, cancellationToken);
         if (exhausted)
-            await CreateReleasePreviewNotificationsAsync(package, project, actor, "图纸转换失败，自动重试已暂停",
-                $"已连续{attempts}次未能生成正式源图。请检查转图服务器及SolidWorks启动状态，恢复后在发布面板重试转图，无需重新审批。", cancellationToken, "result");
+            await CreateReleasePreviewNotificationsAsync(package, project, "图纸转换失败，自动重试已暂停",
+                $"已连续{attempts}次未能生成正式源图。请检查转图服务器及SolidWorks启动状态，恢复后在发布面板重试转图，无需重新审批。", cancellationToken, "failed");
         ReleasePublishingProgress.Set(package.Id, exhausted ? "图纸转换失败，等待修复后手动重试" : "等待下一轮转图重试");
         return saved;
     }
@@ -6377,7 +6393,6 @@ public sealed partial class PdmWorkflowService(
             null)).ToArray(), cancellationToken);
     }
 
-    /// <summary>转图结果反馈：发给发布包提交人、审批人和项目经理（转图是发布后的独立事项）。</summary>
     /// <summary>手动重试转图：把发布包的转图事项重新排队（不影响已完成的发布）。</summary>
     public async Task<ReleasePackage> DemandReleasePreviewRetryAsync(Guid releasePackageId, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -6399,36 +6414,12 @@ public sealed partial class PdmWorkflowService(
     private async Task CreateReleasePreviewNotificationsAsync(
         ReleasePackage package,
         Project project,
-        string actor,
         string title,
         string detail,
         CancellationToken cancellationToken,
         string kind = "pending")
     {
-        var recipients = package.ApprovalTasks
-            .Where(task => task.DecisionBy is not null)
-            .Select(task => task.DecisionBy!)
-            .Append(package.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault()?.Assignee)
-            .Append(project.PrimaryProjectManager)
-            .Append(actor)
-            .Where(username => !string.IsNullOrWhiteSpace(username))
-            .Select(username => username!.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        if (kind != "archive") recipients = (await ReleasePreviewNotifications.RecipientsAsync(repository, package, project, cancellationToken, actor)).ToArray();
-        var createdAt = timeProvider.GetUtcNow();
-        var sourceKey = $"release-package:{package.Id:N}:preview:{kind}";
-        await repository.CreateUserNotificationsAsync(recipients.Select(recipient => new UserNotification(
-            Guid.NewGuid(),
-            recipient,
-            kind == "archive" ? "ReleaseDeliveryResult" : kind == "pending" ? "ReleasePreviewPending" : "ReleasePreviewResult",
-            title,
-            $"{project.Code} · {package.Number} {detail}",
-            project.Id,
-            package.Id,
-            sourceKey,
-            createdAt,
-            null)).ToArray(), cancellationToken);
+        await ReleasePreviewNotifications.NotifyAsync(repository, package, project, title, detail, kind, timeProvider.GetUtcNow(), cancellationToken);
     }
 
     private async Task CreateReleaseRejectedNotificationsAsync(
@@ -6440,16 +6431,7 @@ public sealed partial class PdmWorkflowService(
     {
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包对应的项目不存在。");
-        var recipients = package.ApprovalTasks
-            .Where(task => task.DecisionBy is not null)
-            .Select(task => task.DecisionBy!)
-            .Append(package.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault()?.Assignee)
-            .Append(project.PrimaryProjectManager)
-            .Append(actor)
-            .Where(username => !string.IsNullOrWhiteSpace(username))
-            .Select(username => username!.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        var recipients = ReleasePreviewNotifications.Submitters(package);
         var createdAt = timeProvider.GetUtcNow();
         var sourceKey = $"release-package:{package.Id:N}:rejected:{rejectedTaskId:N}";
         var notifications = recipients.Select(recipient => new UserNotification(

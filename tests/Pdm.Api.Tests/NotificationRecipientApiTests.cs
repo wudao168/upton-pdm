@@ -11,7 +11,7 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Api.Tests;
 
-public sealed class NotificationRecipientApiTests
+public sealed partial class NotificationRecipientApiTests
 {
     private static string Token(string actor) => new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken("upton-pdm", "upton-pdm-clients",
         [new(ClaimTypes.Name, actor), new(ClaimTypes.Role, "Administrator")], expires: DateTime.UtcNow.AddMinutes(10),

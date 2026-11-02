@@ -13,7 +13,7 @@ internal static class ArchiveReferenceCycles
  {
   var edges=new List<Edge>();var seen=new HashSet<CadTreeNode>();var pending=new Stack<CadTreeNode>(items.Select(item=>item.Node));
   while(pending.Count!=0){var owner=pending.Pop();if(!seen.Add(owner)||owner.IsOutsideNativeFileScope||string.IsNullOrWhiteSpace(owner.FullPath))continue;
-   foreach(var child in owner.Children.Concat(owner.ReferencedModels)){
+   foreach(var child in NativeChildren(owner)){
     if(child.IsOutsideNativeFileScope||child.Kind==CadDocumentKind.Drawing)continue;
     if(child.IsContextReference){if(child.Role!=CadReferenceRole.ExternalFileDependency||child.Kind!=CadDocumentKind.Assembly||child.Children.Count!=0||child.ReferencedModels.Count!=0)throw new InvalidOperationException("上下文关联记录不完整，未开始上传："+owner.FileName+" → "+child.FileName);continue;}
     if(child.Status!=CadReferenceStatus.Virtual&&!string.IsNullOrWhiteSpace(child.FullPath)){var edge=new Edge{Owner=owner,Target=child};if(!confirmedOnly||edge.Verified)edges.Add(edge);}pending.Push(child);
@@ -21,6 +21,16 @@ internal static class ArchiveReferenceCycles
   }
   return ReferenceCycleGroups.Find(edges.Select(edge=>new KeyValuePair<string,string>(edge.Owner.FullPath,edge.Target.FullPath)),StringComparer.OrdinalIgnoreCase)
    .Select(files=>{var set=new HashSet<string>(files,StringComparer.OrdinalIgnoreCase);return new Group{Files=files,Edges=edges.Where(edge=>set.Contains(edge.Owner.FullPath)&&set.Contains(edge.Target.FullPath)).ToArray()};}).ToArray();
+ }
+ private static IEnumerable<CadTreeNode> NativeChildren(CadTreeNode owner)
+ {
+  // Virtual components are stored by the native parent. Their external children
+  // still contribute dependencies, just as they do in the final native inventory.
+  var pending=new Stack<CadTreeNode>(owner.Children.Concat(owner.ReferencedModels));var seen=new HashSet<CadTreeNode>();
+  while(pending.Count!=0){var child=pending.Pop();if(!seen.Add(child)||child.IsOutsideNativeFileScope||child.Kind==CadDocumentKind.Drawing)continue;
+   if(child.Status!=CadReferenceStatus.Virtual){yield return child;continue;}
+   foreach(var nested in child.Children.Concat(child.ReferencedModels))pending.Push(nested);
+  }
  }
  internal static void Validate(IReadOnlyList<BatchOperationItem> items)
  {

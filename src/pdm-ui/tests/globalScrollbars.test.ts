@@ -50,6 +50,7 @@ describe('global content scrollbars', () => {
     expect(OverlayScrollbars).toHaveBeenCalledWith({ target: section, elements: { viewport: section } }, {
       overflow: { x: 'hidden', y: 'scroll' },
       scrollbars: { theme: 'os-theme-pdm', autoHide: 'never', visibility: 'auto', clickScroll: true },
+      update: { ignoreMutation: expect.any(Function) },
     })
     expect(section.firstElementChild).toBe(header)
     expect(header?.parentElement).toBe(section)

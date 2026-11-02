@@ -4,7 +4,7 @@ using Upton.Pdm.Infrastructure;
 
 namespace Pdm.Domain.Tests;
 
-public sealed class MaterialRelationServiceTests
+public sealed partial class MaterialRelationServiceTests
 {
     [Fact]
     public async Task MechanicalGrantCannotAddElectricalAccessoriesWithoutElectricalProjectPermission()

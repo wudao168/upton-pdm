@@ -4,14 +4,16 @@ import ElementPlus, { ElMessageBox } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import BomHierarchyOverview from '../src/components/BomHierarchyOverview.vue'
 import type { BomItem, ProjectSummary } from '../src/types'
+import { PdmApiError } from '../src/api'
 
 const api = vi.hoisted(() => ({
   listBom: vi.fn(), listBomVersions: vi.fn(), listProjectBomHeaders: vi.fn(), listReleasePackages: vi.fn(),
   previewProjectBomU9Sync: vi.fn(), executeProjectBomU9Sync: vi.fn(),
   retryProjectBomHeaderAutomatic: vi.fn(), listU9SyncBlockers: vi.fn(),
+  readBomHierarchyOverview: vi.fn(),
 }))
 
-vi.mock('../src/api', () => api)
+vi.mock('../src/api', async importOriginal => ({ ...await importOriginal<typeof import('../src/api')>(), ...api }))
 
 function project(input: Partial<ProjectSummary> & Pick<ProjectSummary, 'id' | 'code' | 'name'>): ProjectSummary {
   return {
@@ -27,6 +29,41 @@ function item(drawingNumber: string, name: string): BomItem {
 }
 
 describe('BomHierarchyOverview', () => {
+  it('批量摘要保持各类数量和版本，隐藏时不加载，不预检查未显示的行', async () => {
+    vi.useFakeTimers()
+    const root = project({ id: 'batch', code: 'BATCH', name: '批量汇总' })
+    api.readBomHierarchyOverview.mockResolvedValue([{ projectId: root.id, categories: [{ projectId: root.id, kind: 'Standard', itemCount: 42, effectiveCount: 41, unresolvedCount: 2, version: 'S-BATCH-V03', longLeadPublished: false }], headers: [{ projectId: root.id, kind: 'Standard', materialCode: '02010001', materialId: 'm', rowVersion: 1 }] }])
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root], token: 'token', editable: true, active: false }, global: { stubs: { U9SyncBlockerDrawer: true } } })
+    try {
+      await flushPromises()
+      expect(api.readBomHierarchyOverview).not.toHaveBeenCalled()
+      await wrapper.setProps({ active: true }); await flushPromises()
+      expect(wrapper.text()).toContain('S-BATCH-V03')
+      expect(wrapper.findAll('tbody tr').find(row => row.text().includes('标准件BOM'))?.text()).toContain('42')
+      expect(api.listBom).not.toHaveBeenCalled()
+      expect(api.previewProjectBomU9Sync).not.toHaveBeenCalled()
+      await wrapper.setProps({ active: false }); await vi.advanceTimersByTimeAsync(60000)
+      expect(api.readBomHierarchyOverview).toHaveBeenCalledTimes(1)
+    } finally { wrapper.unmount(); vi.useRealTimers() }
+  })
+  it('可见U9预检查最多并行3项，隐藏后停止继续排队', async () => {
+    vi.useFakeTimers()
+    const root = project({ id: 'limited', code: 'LIMIT', name: '并发检查' })
+    const children = [1, 2].map(index => project({ id: `limited-${index}`, code: `LIMIT-${index}`, name: '子项目', parentProjectId: root.id, rootProjectId: root.id }))
+    api.readBomHierarchyOverview.mockResolvedValue([root, ...children].map(item => ({ projectId: item.id, categories: [], headers: ['Master', 'Standard', 'NonStandard', 'Electrical'].map(kind => ({ projectId: item.id, kind, materialCode: `${item.id}-${kind}`, materialId: kind, rowVersion: 1 })) })))
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 800, bottom: 200, width: 800, height: 200, toJSON: () => ({}) })
+    const finish: Array<(value: unknown) => void> = []
+    api.previewProjectBomU9Sync.mockImplementation(() => new Promise(resolve => { finish.push(resolve) }))
+    const wrapper = mount(BomHierarchyOverview, { props: { project: root, projects: [root, ...children], token: 'token', editable: true, active: true }, global: { stubs: { U9SyncBlockerDrawer: true } } })
+    try {
+      await flushPromises(); await vi.advanceTimersByTimeAsync(150); await flushPromises()
+      expect(api.previewProjectBomU9Sync).toHaveBeenCalledTimes(3)
+      await wrapper.setProps({ active: false })
+      finish.forEach(resolve => resolve({ state: 'UpToDate', componentCount: 1 }))
+      await flushPromises(); await vi.advanceTimersByTimeAsync(60000)
+      expect(api.previewProjectBomU9Sync).toHaveBeenCalledTimes(3)
+    } finally { wrapper.unmount(); vi.useRealTimers() }
+  })
   it.each([false, true])('停止无权限项目自动预览，403不继续请求阻塞项（editable=%s）', async editable => {
     vi.useFakeTimers()
     const root = project({ id: 'denied', code: 'P-DENIED', name: '只读项目' })
@@ -46,6 +83,7 @@ describe('BomHierarchyOverview', () => {
   })
   beforeEach(() => {
     Object.values(api).forEach(mock => mock.mockReset())
+    api.readBomHierarchyOverview.mockRejectedValue(new PdmApiError('旧版接口', 404))
     api.listReleasePackages.mockResolvedValue([])
     api.listU9SyncBlockers.mockResolvedValue([])
     api.previewProjectBomU9Sync.mockImplementation(async (projectId: string, kind: string) => ({

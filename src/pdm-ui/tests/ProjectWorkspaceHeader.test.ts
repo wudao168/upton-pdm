@@ -1,7 +1,7 @@
 import { computed } from 'vue'
 import { projectCenterAccessKey, projectCenterSchema } from '../src/projectCenterAccess'
 import { flushPromises, mount } from '@vue/test-utils'
-import { ElMessageBox } from 'element-plus'
+import { ElMessageBox, ElSelect } from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ProjectWorkspaceHeader from '../src/components/ProjectWorkspaceHeader.vue'
 import type { ProjectSummary, ReleasePackageSummary } from '../src/types'
@@ -352,7 +352,8 @@ describe('ProjectWorkspaceHeader', () => {
     })
 
     await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
-    await wrapper.get(`select[aria-label="${filterLabel}"]`).setValue(filterValue)
+    if (filterLabel === '人员筛选') { wrapper.findComponent(ElSelect).vm.$emit('update:modelValue', filterValue); await flushPromises() }
+    else await wrapper.get(`select[aria-label="${filterLabel}"]`).setValue(filterValue)
 
     expect(wrapper.findAll('[role="option"]')).toHaveLength(1)
     expect(wrapper.get('button[aria-label="选择浏览项目 P700003"]').text()).toContain('检测设备')

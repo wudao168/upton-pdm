@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UserSelect from './UserSelect'
 import { computed, nextTick, onMounted, ref } from 'vue'
 
 type DingSdk = { env?: { platform?: string }; ready: (callback: () => void) => void; runtime: { permission: { requestAuthCode: (input: { corpId: string; onSuccess: (result: { code: string }) => void; onFail: () => void }) => void } } }
@@ -99,7 +100,7 @@ onMounted(login)
         <div class="ding-fields">
           <label>优先级<select v-model="priority"><option v-for="value in ['紧急','高','普通','低']" :key="value">{{ value }}</option></select></label>
           <label>实施状态<select v-model="status"><option v-for="value in ['待处理','处理中','待确认','已完成','已作废']" :key="value">{{ value }}</option></select></label>
-          <label>负责人<select v-model="owner"><option value="">待分派</option><option v-for="person in people" :key="person.username" :value="person.username">{{ person.displayName }}</option></select></label>
+          <label>负责人<UserSelect v-model="owner"><option value="">待分派</option><option v-for="person in people" :key="person.username" :value="person.username">{{ person.displayName }}</option></UserSelect></label>
           <label>需求完成日期<input v-model="dueDate" type="date"></label>
         </div>
         <label>解决措施<textarea v-model="solution" maxlength="4000" :required="status === '待确认'" placeholder="请填写处理过程和解决结果" /></label>

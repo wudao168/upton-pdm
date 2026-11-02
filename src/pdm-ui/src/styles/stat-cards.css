@@ -1,0 +1,151 @@
+/* Statistics cards: adapted from Uiverse.io by Yaya12085.
+   Content panels and table rows intentionally keep the compact business layout. */
+:root {
+  --pdm-stat-card-radius: 20px;
+  --pdm-stat-card-shadow: 0 10px 15px -3px rgb(0 0 0 / 10%), 0 4px 6px -2px rgb(0 0 0 / 5%);
+}
+
+:root body :is(.pdm-overview-alerts > article, .pdm-overview-alerts > button,
+    .pdm-plan-summary > article, .pdm-budget__cards > article,
+    .procurement-tracking__stats > article, .pdm-workspace-usage > article, .mobile-metrics > button) {
+  --pdm-stat-accent: #10b981;
+  --pdm-stat-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M5 19V9m7 10V5m7 14v-7'/%3E%3C/svg%3E");
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  min-width: 0;
+  min-height: 156px;
+  height: auto;
+  padding: 16px !important;
+  gap: 8px;
+  border: 0 !important;
+  border-radius: var(--pdm-stat-card-radius) !important;
+  background: #fff !important;
+  box-shadow: var(--pdm-stat-card-shadow) !important;
+  color: #1f2937;
+  text-align: left;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+
+:root body :is(.pdm-overview-alerts > .is-danger, .procurement-tracking__stats > .is-danger,
+    .pdm-budget__cards > .is-overrun, .pdm-workspace-usage > .has-recovery) { --pdm-stat-accent: var(--pdm-danger); }
+:root body :is(.pdm-overview-alerts > .is-warning, .procurement-tracking__stats > .is-warning) { --pdm-stat-accent: var(--pdm-orange); }
+
+:root body :is(.pdm-overview-alerts > article > span, .pdm-overview-alerts > button > span,
+    .pdm-plan-summary > article > span, .pdm-plan-shipping-card__date > span,
+    .pdm-plan-active-stage-card__detail > span, .pdm-plan-summary-action > span,
+    .pdm-budget__card-heading, .procurement-stats-card__label, .pdm-workspace-usage > article > small,
+    .mobile-metrics > button > span) {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  text-align: left;
+  gap: 8px;
+  margin: 0;
+  min-width: 0;
+  color: #374151;
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 24px;
+  white-space: normal;
+  transform: none;
+  order: 0;
+}
+:root body :is(.pdm-overview-alerts > article > span, .pdm-overview-alerts > button > span,
+    .pdm-plan-summary > article > span, .pdm-plan-shipping-card__date > span,
+    .pdm-plan-active-stage-card__detail > span, .pdm-plan-summary-action > span,
+    .pdm-budget__card-heading, .procurement-stats-card__label, .pdm-workspace-usage > article > small,
+    .mobile-metrics > button > span)::before {
+  content: '';
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--pdm-stat-accent) var(--pdm-stat-icon) center / 16px 16px no-repeat;
+}
+:root body .pdm-overview-alerts > .pdm-overview-shipping {
+  --pdm-stat-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 6h11v11H3zM14 10h4l3 4v3h-7'/%3E%3Ccircle cx='7' cy='18' r='2'/%3E%3Ccircle cx='18' cy='18' r='2'/%3E%3C/svg%3E");
+}
+
+:root body :is(.pdm-overview-alerts > article > strong, .pdm-overview-alerts > button > strong,
+    .pdm-plan-summary > article > strong, .pdm-plan-summary-action > strong,
+    .procurement-stats-card__value, .mobile-metrics > button > strong) {
+  margin: 8px 0;
+  color: #1f2937;
+  font-size: 36px;
+  line-height: 40px;
+  font-weight: 700;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  order: 1;
+}
+:root body :is(.pdm-overview-alerts > .is-danger > strong, .procurement-stats-card.is-danger > strong) { color: var(--pdm-danger); }
+:root body :is(.pdm-overview-alerts > .is-warning > strong, .procurement-stats-card.is-warning > strong) { color: var(--pdm-orange); }
+:root body .procurement-stats-card.is-success > strong { color: #02972f; }
+:root body :is(.pdm-overview-alerts > article > em, .pdm-overview-alerts > button > em) {
+  margin-top: auto;
+  color: var(--pdm-muted);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: normal;
+  transform: none;
+  order: 2;
+  text-align: left;
+}
+:root body .pdm-overview-alerts > button > em { color: var(--pdm-theme-accent); }
+:root body .pdm-overview-alerts > .pdm-overview-shipping > em { text-align: left; }
+:root body .pdm-overview-shipping > strong > small { font-size: 12px; margin-left: 4px; }
+
+/* Keep the cards readable in side panes as well as full-width summary strips. */
+:root body :is(.pdm-overview-risk .pdm-overview-alerts, .pdm-plan-summary, .pdm-budget__cards,
+    .procurement-tracking__stats, .pdm-workspace-usage, .mobile-metrics) {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
+  align-items: stretch;
+  gap: 12px;
+  padding: 12px var(--pdm-content-inset) 18px !important;
+  flex-shrink: 0;
+  overflow: visible;
+}
+:root body .pdm-overview-risk .pdm-overview-alerts { flex: 0 0 auto; grid-template-columns: repeat(auto-fit, minmax(min(100%, 144px), 1fr)); }
+:root body .pdm-overview-risk { overflow: visible; }
+:root body .pdm-plan-summary { grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); }
+:root body .pdm-budget__cards { grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }
+:root body .procurement-tracking__stats { grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); }
+:root body .pdm-plan-summary-action { justify-content: flex-start; gap: 8px; }
+:root body :is(.pdm-plan-shipping-card__date > strong, .pdm-plan-active-stage-card__detail > strong,
+    .pdm-plan-summary-action > strong, .pdm-plan-summary > article:not(:has(.pdm-plan-progress)) > strong,
+    .pdm-workspace-usage > article > strong) {
+  margin: 12px 0 4px;
+  font-size: 22px;
+  line-height: 30px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+:root body .pdm-plan-summary .pdm-plan-shipping-countdown { align-items: flex-start; padding: 0; border: 0; }
+:root body .pdm-plan-summary .pdm-plan-shipping-countdown > strong { font-size: 36px; line-height: 40px; }
+:root body .pdm-budget__card-value { flex-wrap: wrap; gap: 8px; margin-block: 8px; }
+:root body .pdm-budget__card-heading > span { font-size: inherit; white-space: normal; }
+:root body .pdm-budget__card-value > strong { font-size: 26px; line-height: 34px; overflow-wrap: anywhere; }
+:root body .pdm-budget__card-value > .pdm-budget__ratio { font-size: 16px; line-height: 24px; }
+:root body .procurement-stats-card__value.is-compact { font-size: 22px; line-height: 30px; }
+:root body .procurement-stats-card__sub { margin-top: 8px; white-space: normal; line-height: 18px; }
+/* Procurement summaries leave more vertical space for the material table. */
+:root body .procurement-tracking__stats > .procurement-stats-card {
+  height: 100px;
+  min-height: 100px;
+  padding: 8px 16px !important;
+  gap: 4px;
+}
+:root body .procurement-stats-card > .procurement-stats-card__text { gap: 0; }
+:root body .procurement-stats-card .procurement-stats-card__sub { margin-top: 0; line-height: 16px; }
+:root body .procurement-stats-card > .procurement-stats-card__value { margin: 0; line-height: 36px; }
+:root body .pdm-plan-progress { height: 8px; margin-top: auto; border-radius: 4px; background: #e5e7eb; overflow: hidden; }
+:root body .pdm-plan-progress > i { height: 100%; border-radius: 4px; background: #10b981; }
+:root body :is(.pdm-overview-alerts > button, .pdm-budget__editable-card):focus-visible { outline: 2px solid var(--pdm-theme-accent); outline-offset: 2px; }
+@media (max-width: 480px) {
+  :root body .mobile-metrics > button > span { min-height: 48px; font-size: 16px; line-height: 22px; }
+}

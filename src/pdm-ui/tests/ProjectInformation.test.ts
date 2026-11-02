@@ -14,7 +14,7 @@ const users = [
   { username: 'fitter', displayName: '装配员', role: 'AssemblyFitter', roles: [] },
   { username: 'electrician', displayName: '接线员', role: 'AssemblyElectrician', roles: [] },
 ].map(user => ({ ...user, isActive: true })) as PdmUser[]
-const Select = defineComponent({ props: ['modelValue', 'multiple'], emits: ['update:modelValue'], template: '<select :value="modelValue" :multiple="multiple" @change="$emit(\'update:modelValue\', Array.from($event.target.selectedOptions).map(option => option.value))"><slot /></select>' })
+const Select = defineComponent({ props: { modelValue: {}, multiple: Boolean }, emits: ['update:modelValue'], template: '<select :value="modelValue" :multiple="multiple" @change="$emit(\'update:modelValue\', multiple ? Array.from($event.target.selectedOptions).map(option => option.value) : $event.target.value)"><slot /></select>' })
 const Dialog = defineComponent({ props: ['modelValue'], template: '<div v-if="modelValue" role="dialog"><slot /><slot name="footer" /></div>' })
 let wrapper: ReturnType<typeof mount>
 function setup(allow = true) {
@@ -22,15 +22,16 @@ function setup(allow = true) {
   const child = { ...root, id: 'child', code: 'P1-1', parentProjectId: root.id, designers: [], phaseOwners: {} } as ProjectSummary
   const projects = [root, child]
   const save = vi.fn(async (id, owners) => ({ ...projects.find(item => item.id === id)!, phaseOwners: Object.fromEntries(Object.entries(owners).filter(([, value]) => value)) }))
-  wrapper = mount(ProjectInformation, { props: { project: root, projects, users, directory: { users, units: [{ id: 'unit', organizationId: 'org', isActive: true }], memberships: users.map(user => ({ unitId: 'unit', username: user.username })), managers: [] } as unknown as OrganizationDirectory, token: 'test', currentUsername: 'pm', onUpdateMainStaffing: vi.fn(), onUpdateDesigners: vi.fn(), onUpdatePhaseOwners: save }, global: { provide: { [userDisplayNameKey as symbol]: (username: string) => resolveUserDisplayName(users, username) }, stubs: { ProjectNameplateDialog: true, ProjectContactInformation: { template: '<div><slot :staff="{salesPeople: \'\',presalesPeople: \'\'}" :can-edit="false" :save="async () => true" /></div>' }, 'el-dialog': Dialog, 'el-select': Select, 'el-option': { props: ['value', 'label'], template: '<option :value="value">{{ label }}</option>' }, 'el-button': { template: '<button><slot /></button>' } } } })
+  const saveDesigners = vi.fn(async (id, designers) => ({ ...projects.find(item => item.id === id)!, designers }))
+  wrapper = mount(ProjectInformation, { props: { project: root, projects, users, directory: { users, units: [{ id: 'unit', organizationId: 'org', isActive: true }], memberships: users.map(user => ({ unitId: 'unit', username: user.username })), managers: [] } as unknown as OrganizationDirectory, token: 'test', currentUsername: 'pm', onUpdateMainStaffing: vi.fn(), onUpdateDesigners: saveDesigners, onUpdatePhaseOwners: save }, global: { provide: { [userDisplayNameKey as symbol]: (username: string) => resolveUserDisplayName(users, username) }, stubs: { ProjectNameplateDialog: true, ProjectContactInformation: { template: '<div><slot :staff="{salesPeople: \'\',presalesPeople: \'\'}" :can-edit="false" :save="async () => true" /></div>' }, 'el-dialog': Dialog, 'el-select': Select, 'el-option': { props: ['value', 'label'], template: '<option :value="value">{{ label }}</option>' }, 'el-button': { template: '<button><slot /></button>' } } } })
   const table = wrapper.find('[aria-label="项目基本信息列表"] table')
-  const rows = () => table.findAll('tbody tr').map(row => row.findAll('td').map(cell => cell.text()))
-  return { table, rows, save }
+  const rows = () => table.findAll('tbody tr').map(row => row.findAll('td').slice(1).map(cell => cell.text()))
+  return { table, rows, save, saveDesigners, root, child, projects }
 }
 afterEach(() => wrapper?.unmount())
 it('shows the four clickable columns in order with independent child assignments', () => {
   const { table, rows } = setup()
-  expect(table.findAll('th').map(cell => cell.text()).slice(6, 12)).toEqual(['执行工程师', '电气工程师', '硬件工程师', '机械装配', '电气装配', '数量'])
+  expect(table.findAll('th').map(cell => cell.text()).slice(7, 13)).toEqual(['执行工程师', '电气工程师', '硬件工程师', '机械装配', '电气装配', '数量'])
   expect(rows()[0]!.slice(7, 11)).toEqual(['电气员', '硬件员', '装配员', '接线员'])
   expect(rows()[1]!.slice(7, 11)).toEqual(['待分配', '待分配', '待分配', '待分配'])
   expect(table.findAll('tbody tr')[1]!.findAll('button')).toHaveLength(5)
@@ -73,6 +74,103 @@ it('cancels without saving and hides assignment buttons without permission', asy
   await wrapper.get('button[aria-label="取消人员分配"]').trigger('click'); expect(save).not.toHaveBeenCalled()
   wrapper.unmount(); setup(false)
   expect(wrapper.find('button[aria-label="分配电气工程师 P1"]').exists()).toBe(false)
+})
+
+it('selects individual projects, shows mixed selection, and selects only eligible rows', async () => {
+  const { root, child } = setup()
+  const all = wrapper.get<HTMLInputElement>('input[aria-label="全选可分配项目"]')
+  const action = wrapper.get('button[aria-label="批量分配人员"]')
+  expect(action.attributes('disabled')).toBeDefined()
+  await wrapper.get('input[aria-label="选择项目 P1-1"]').setValue(true)
+  expect(all.element.indeterminate).toBe(true)
+  expect(wrapper.text()).toContain('已选 1 项')
+  await all.setValue(true)
+  expect(wrapper.text()).toContain('已选 2 项')
+  expect(all.element.indeterminate).toBe(false)
+  await wrapper.setProps({ project: { ...root }, projects: [{ ...root }, { ...child }] })
+  expect(wrapper.text()).toContain('已选 2 项')
+  await wrapper.setProps({ projects: [root, { ...child, canAssignDesigners: false }] })
+  expect(wrapper.get('input[aria-label="选择项目 P1-1"]').attributes('disabled')).toBeDefined()
+  expect(wrapper.text()).toContain('已选 1 项')
+  expect(all.element.checked).toBe(true)
+  await all.setValue(false)
+  expect(action.attributes('disabled')).toBeDefined()
+})
+
+it('assigns multiple engineers only to checked projects and leaves other positions intact', async () => {
+  const { saveDesigners, save, rows } = setup()
+  await wrapper.get('input[aria-label="选择项目 P1-1"]').setValue(true)
+  await wrapper.get('button[aria-label="批量分配人员"]').trigger('click')
+  await wrapper.get('button[aria-label="保存人员分配"]').trigger('click')
+  expect(wrapper.get('[role="alert"]').text()).toBe('请选择至少一名人员。')
+  expect(saveDesigners).not.toHaveBeenCalled()
+  await wrapper.get('select[aria-label="执行工程师"]').setValue(['mechanical', 'electrical'])
+  await wrapper.get('button[aria-label="保存人员分配"]').trigger('click'); await flushPromises()
+  expect(saveDesigners.mock.calls).toEqual([['child', ['mechanical', 'electrical']]])
+  expect(save).not.toHaveBeenCalled()
+  expect(rows()[1]![6]).toBe('机械员、电气员')
+  expect(rows()[0]!.slice(7, 11)).toEqual(['电气员', '硬件员', '装配员', '接线员'])
+  expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+})
+
+it.each([
+  ['ElectricalEngineer', 'electrical'], ['ElectricalHardware', 'hardware'],
+  ['MechanicalAssembly', 'fitter'], ['ElectricalAssembly', 'electrician'],
+] as const)('assigns %s to all selected projects while preserving each project’s other positions', async (key, username) => {
+  const { save, root, child } = setup()
+  const before = { ...root.phaseOwners }
+  await wrapper.get('input[aria-label="全选可分配项目"]').setValue(true)
+  await wrapper.get('button[aria-label="批量分配人员"]').trigger('click')
+  await wrapper.get('select[aria-label="批量分配岗位"]').setValue(key)
+  await wrapper.get('select[multiple]').setValue([username])
+  await wrapper.get('button[aria-label="保存人员分配"]').trigger('click'); await flushPromises()
+  expect(save.mock.calls).toEqual([['root', { ...before, [key]: username }], ['child', { [key]: username }]])
+  expect(child.phaseOwners?.[key]).toBe(username)
+  expect(root.designers).toEqual(['mechanical'])
+})
+
+it('reports partial completion and retries only the unsaved projects', async () => {
+  const { save, root, child } = setup()
+  save.mockResolvedValueOnce({ ...root, phaseOwners: { ...root.phaseOwners, MechanicalAssembly: 'electrician' } }).mockRejectedValueOnce(new Error('private failure'))
+  await wrapper.get('input[aria-label="全选可分配项目"]').setValue(true)
+  await wrapper.get('button[aria-label="批量分配人员"]').trigger('click')
+  await wrapper.get('select[aria-label="批量分配岗位"]').setValue('MechanicalAssembly')
+  await wrapper.get('select[aria-label="机械装配"]').setValue(['electrician'])
+  await wrapper.get('button[aria-label="保存人员分配"]').trigger('click'); await flushPromises()
+  expect(wrapper.get('[role="alert"]').text()).toContain('已保存 1 个项目，剩余 1 个未保存（从 P1-1 开始）')
+  expect(wrapper.text()).not.toContain('private failure')
+  expect(root.phaseOwners?.MechanicalAssembly).toBe('electrician')
+  expect(child.phaseOwners).toEqual({})
+  await wrapper.get('button[aria-label="保存人员分配"]').trigger('click'); await flushPromises()
+  expect(save.mock.calls.map(call => call[0])).toEqual(['root', 'child', 'child'])
+  expect(child.phaseOwners?.MechanicalAssembly).toBe('electrician')
+  expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+})
+
+it('clears selection when changing project family and limits batch positions to existing permissions', async () => {
+  const { root, child, save, saveDesigners } = setup()
+  await wrapper.setProps({ currentUsername: 'mechanical' })
+  await wrapper.get('input[aria-label="全选可分配项目"]').setValue(true)
+  await wrapper.get('button[aria-label="批量分配人员"]').trigger('click')
+  expect(wrapper.get('select[aria-label="批量分配岗位"]').findAll('option').map(option => option.text())).toEqual(['执行工程师'])
+  await wrapper.get('button[aria-label="取消人员分配"]').trigger('click')
+  expect(save).not.toHaveBeenCalled(); expect(saveDesigners).not.toHaveBeenCalled()
+  const other = { ...root, id: 'other', code: 'P2' }
+  await wrapper.setProps({ project: other, projects: [root, child, other] })
+  expect(wrapper.text()).toContain('已选 0 项')
+  expect(wrapper.get('button[aria-label="批量分配人员"]').attributes('disabled')).toBeDefined()
+})
+
+it('系统管理员不必是项目经理即可单项和批量分配岗位人员', async () => {
+  const { save } = setup()
+  await wrapper.setProps({ currentUsername: 'admin', administrator: true })
+  expect(wrapper.find('button[aria-label="分配电气工程师 P1-1"]').exists()).toBe(true)
+  await wrapper.get('input[aria-label="全选可分配项目"]').setValue(true)
+  await wrapper.get('button[aria-label="批量分配人员"]').trigger('click')
+  await wrapper.get('select[aria-label="批量分配岗位"]').setValue('ElectricalEngineer')
+  await wrapper.get('select[aria-label="电气工程师"]').setValue(['electrical'])
+  await wrapper.get('button[aria-label="保存人员分配"]').trigger('click'); await flushPromises()
+  expect(save.mock.calls.map(call => call[0])).toEqual(['root', 'child'])
 })
 
 it.each([

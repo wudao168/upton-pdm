@@ -58,9 +58,15 @@ public sealed partial class BomHeaderService(
         if (!await repository.HasProjectReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有项目查看权限。");
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
+        var canRetry = await ProjectPermissionPolicy.CanAsync(repository, projectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
+        return await ListForProjectAsync(project, canRetry, actor, cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<ProjectBomHeader>> ListForProjectAsync(Project project, bool canRetry, string actor, CancellationToken cancellationToken)
+    {
+        var projectId = project.Id;
         var bindings = (await repository.ListProjectBomHeaderBindingsAsync(projectId, cancellationToken)).ToDictionary(item => item.Kind);
         var applications = (await materials.ListMaterialCodeApplicationsAsync(projectId, null, cancellationToken)).ToList();
-        var canRetry = await ProjectPermissionPolicy.CanAsync(repository, projectId, actor, role, PermissionCodes.BomEdit, cancellationToken);
         // 兼容旧版本仅在发布包审计中记录失败、申请仍为 Pending 的历史数据。
         var legacyAudits = applications.Any(application => application.Status == MaterialCodeApplicationStatus.Pending
             && string.IsNullOrWhiteSpace(application.WorkflowMessage))

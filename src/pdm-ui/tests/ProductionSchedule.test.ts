@@ -68,7 +68,7 @@ async function setDateRange(wrapper: VueWrapper, value: [string, string] | null)
 
 describe('发布跟踪快捷筛选与全部分类', () => {
   it('展开折叠总控只调整项目列表，保留当前发布包', async () => {
-    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: [] } })
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } })
     await flushPromises()
     expect(wrapper.get('.production-workbench__all-categories').text()).toBe('全部发布包')
     const selected = wrapper.get('.production-workbench__package.selected').text()
@@ -107,7 +107,7 @@ describe('发布跟踪快捷筛选与全部分类', () => {
   it('红框优先于绿框，筛选隐藏异常包时仍保留项目提醒', async () => {
     records.one.state.receivedAt = null; records.two.state.receivedAt = null
     previewAttention.add('one')
-    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: [] } })
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } })
     await flushPromises()
     expect(wrapper.get('.production-workbench__project').attributes('data-release-attention')).toBe('error')
     const packages = wrapper.findAll('.production-workbench__package')
@@ -122,7 +122,7 @@ describe('发布跟踪快捷筛选与全部分类', () => {
   it('其他客户端接收后静默清除边框，保留选择且不重新加载明细', async () => {
     vi.useFakeTimers();vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
     records.one.state.receivedAt = null
-    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: [] } })
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } })
     try {
       await flushPromises()
       expect(wrapper.get('.production-workbench__package.selected').attributes('data-release-attention')).toBe('new')
@@ -182,7 +182,7 @@ describe('发布跟踪快捷筛选与全部分类', () => {
     source.lines = [{ ...source.lines[0], requiredQuantity: 0.9 }]
     source.lots = [{ ...source.lots[0], quantity: 0.9 }]
     source.movements = ['Issue', 'Cancelled'].map((kind, index) => ({ id: kind, requestId: kind, kind, quantity: index ? 0.6 : 0.3, lotId: 'external', actor: 'admin', occurredAt: '' }))
-    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: [] } }); await flushPromises()
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } }); await flushPromises()
     expect(wrapper.findAll('[aria-label="发布包物料明细"] tbody tr')).toHaveLength(0)
     await wrapper.findAll('.production-workbench__quick-filter input')[1].setValue(false)
     expect(wrapper.findAll('[aria-label="发布包物料明细"] tbody tr')).toHaveLength(1)
@@ -252,7 +252,7 @@ describe('发布跟踪快捷筛选与全部分类', () => {
     let complete!: (record: ProductionReleaseRecord) => void
     vi.mocked(api.readProductionTrackingRelease).mockImplementation(async id => id === 'two'
       ? new Promise(resolve => { complete = resolve }) : records[id])
-    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: [] } })
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } })
     await flushPromises()
     await wrapper.get('.production-workbench__all-categories').trigger('click'); await flushPromises()
     await wrapper.findAll('.production-workbench__package').find(button => button.text().includes('RP-one'))!.trigger('click'); await flushPromises()
@@ -265,6 +265,15 @@ describe('发布跟踪快捷筛选与全部分类', () => {
 })
 
 describe('三栏自制排程', () => {
+  it('没有制造查看权限时隐藏全部页签并且不读取生产数据', async () => {
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'viewer', permissions: [] } })
+    await flushPromises()
+    expect(wrapper.findAll('.production-workbench__tabs button')).toHaveLength(0)
+    expect(wrapper.text()).toContain('当前账号没有可查看的制造功能')
+    expect(api.listProductionTrackingProjects).not.toHaveBeenCalled()
+    expect(api.readProductionCapacity).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
   it('自制追溯保留明细，不再显示右侧发布包汇总卡片', async () => {
     records.one.state.movements.push({ id: 'self-pass', requestId: 'self-pass', lotId: 'self-a', kind: 'Pass', quantity: 2, actor: 'quality', occurredAt: '' },
       { id: 'self-issue', requestId: 'self-issue', lotId: 'self-a', kind: 'Issue', quantity: 2, actor: 'material', occurredAt: '' },
@@ -584,7 +593,7 @@ describe('三栏自制排程', () => {
   it('部门流程领料或取消结束后按已完结筛选，不继续显示为待执行', async () => {
     const implementation = vi.mocked(api.listProductionTrackingProjects).getMockImplementation()!
     vi.mocked(api.listProductionTrackingProjects).mockImplementation(async (token, selfOnly) => (await implementation(token, selfOnly)).map(project => ({ ...project, packages: project.packages.map((item, index) => ({ ...item, status: index === 0 ? '领料完成' : '已取消' })) })))
-    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: [] } }); await flushPromises()
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } }); await flushPromises()
     expect(wrapper.findAll('.production-workbench__package')).toHaveLength(0)
     await wrapper.findAll('.production-workbench__toolbar label').find(label => label.text() === '已完结')!.get('input').setValue(true); await flushPromises()
     expect(wrapper.findAll('.production-workbench__package')).toHaveLength(2)
@@ -643,7 +652,7 @@ describe('三栏自制排程', () => {
     let deliver: ((value: Awaited<ReturnType<typeof api.listProductionTrackingProjects>>) => void) | undefined
     list.mockImplementation((token, selfOnly) => selfOnly
       ? new Promise(resolve => { deliver = resolve }) : implementation(token, selfOnly))
-    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: [] } })
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } })
     await flushPromises()
     await wrapper.findAll('.production-workbench__tabs button').find(button => button.text() === '自制追溯')!.trigger('click')
     await wrapper.findAll('.production-workbench__tabs button').find(button => button.text() === '发布跟踪')!.trigger('click')
@@ -666,7 +675,7 @@ describe('三栏自制排程', () => {
     await flushPromises()
     expect(api.listProductionTrackingProjects).toHaveBeenLastCalledWith('token', true)
     expect(wrapper.findAll('.production-workbench__package')).toHaveLength(1)
-    expect(wrapper.get('[aria-label="筛选发布包统计"]').text()).toBe('1包2项9个')
+    expect(wrapper.find('[aria-label="筛选发布包统计"]').exists()).toBe(false)
     const middle = wrapper.get('[aria-label="自制批次明细"]')
     expect(middle.findAll('tbody tr')).toHaveLength(3)
     const cells = middle.findAll('tbody tr')[0].findAll('td')
@@ -713,36 +722,36 @@ describe('三栏自制排程', () => {
     expect(wrapper.get('tbody tr td:nth-child(3)').text()).toBe('7002541.00-02垫片')
     wrapper.unmount()
   })
-  it('发布包跟踪不默认选择物料，刷新保留主动选择，切包后清空详情', async () => {
-    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: [] } })
+  it('发布包跟踪默认选择首项，刷新和切包恢复选择，失效选择回到首个可见物料', async () => {
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } })
     await flushPromises()
     const detail = () => wrapper.get('.production-workbench__detail')
     const refresh = async () => {
       await wrapper.findAll('button').find(button => button.text() === '刷新')!.trigger('click')
       await flushPromises()
     }
-    expect(detail().text()).toBe('点击物料查看详细状态')
-    expect(wrapper.find('tbody tr.selected').exists()).toBe(false)
+    expect(detail().get('h3').text()).toBe('外协板')
+    expect(wrapper.find('tbody tr.selected').exists()).toBe(true)
     await refresh()
-    expect(detail().text()).toBe('点击物料查看详细状态')
+    expect(detail().get('h3').text()).toBe('外协板')
     await wrapper.get('input[aria-label="全选当前筛选物料（跨页）"]').setValue(true)
-    expect(detail().text()).toBe('点击物料查看详细状态')
+    expect(detail().get('h3').text()).toBe('外协板')
     await wrapper.findAll('tbody tr')[1].trigger('click')
     expect(detail().get('h3').text()).toBe('支架')
     await refresh()
     expect(detail().get('h3').text()).toBe('支架')
     await wrapper.findAll('.production-workbench__package').find(button => button.text().includes('RP-two'))!.trigger('click')
     await flushPromises()
-    expect(detail().text()).toBe('点击物料查看详细状态')
-    expect(wrapper.find('tbody tr.selected').exists()).toBe(false)
+    expect(detail().get('h3').text()).toBe('外协板')
+    expect(wrapper.find('tbody tr.selected').exists()).toBe(true)
     await wrapper.findAll('.production-workbench__package').find(button => button.text().includes('RP-one'))!.trigger('click')
     await flushPromises()
-    expect(detail().text()).toBe('点击物料查看详细状态')
+    expect(detail().get('h3').text()).toBe('支架')
     await wrapper.findAll('tbody tr')[0].trigger('click')
     expect(detail().get('h3').text()).toBe('外协板')
     records.one.state.lines = records.one.state.lines.filter(line => line.id !== 'line-0')
     await refresh()
-    expect(detail().text()).toBe('点击物料查看详细状态')
+    expect(detail().get('h3').text()).toBe('支架')
     wrapper.unmount()
   })
   it('没有当前物料也可从列表批量分配，主动选择后右侧入口同样可用，数量不可编辑', async () => {
@@ -760,7 +769,7 @@ describe('三栏自制排程', () => {
     expect(wrapper.get('[role=dialog]').findAll('input[type=number]')).toHaveLength(0)
     wrapper.unmount()
   })
-  it('按搜索、状态和完结筛选同步汇总发布包、物料项及需求数量', async () => {
+  it('搜索旁不显示统计文字，搜索、状态和完结筛选仍正常过滤发布包', async () => {
     const base = (await api.listProductionTrackingProjects('token'))[0]!
     vi.mocked(api.listProductionTrackingProjects).mockResolvedValue([
       { ...base, packages: [{ ...base.packages[0]!, totalQuantity: 30 },
@@ -770,21 +779,22 @@ describe('三栏自制排程', () => {
         { ...base.packages[0]!, releasePackageId: 'closed', packageNumber: 'RP-closed', status: '已完结', totalLines: 4, totalQuantity: 12 },
       ] },
     ])
-    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: [] } })
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } })
     await flushPromises()
-    const totals = () => wrapper.get('[aria-label="筛选发布包统计"]').text()
-    expect(totals()).toBe('3包6项36个')
+    const packages = () => wrapper.findAll('.production-workbench__package')
+    expect(wrapper.find('[aria-label="筛选发布包统计"]').exists()).toBe(false)
+    expect(packages()).toHaveLength(3)
     const search = wrapper.get('[aria-label="搜索生产发布包"]')
     await search.setValue('RP-two')
-    expect(totals()).toBe('1包2项5.25个')
+    expect(packages()).toHaveLength(1)
     await search.setValue('第二组')
-    expect(totals()).toBe('1包1项0.75个')
+    expect(packages()).toHaveLength(1)
     await wrapper.get('.production-workbench__toolbar input[type=checkbox]').setValue(true)
-    expect(totals()).toBe('2包5项12.75个')
+    expect(packages()).toHaveLength(2)
     await wrapper.get('.production-workbench__toolbar select').setValue('待排产')
-    expect(totals()).toBe('1包1项0.75个')
+    expect(packages()).toHaveLength(1)
     await search.setValue('无匹配结果')
-    expect(totals()).toBe('0包0项0个')
+    expect(packages()).toHaveLength(0)
     expect(api.readProductionTrackingRelease).toHaveBeenCalledTimes(1)
     wrapper.unmount()
   })
@@ -887,7 +897,7 @@ describe('三栏自制排程', () => {
 
   it('冻结批次和无排程权限的账号均不能提交排程', async () => {
     const save = vi.spyOn(api, 'scheduleProductionLot')
-    const wrapper = await openSchedule([])
+    const wrapper = await openSchedule(['project.content.view'])
     expect(wrapper.get('.production-workbench__schedule-form fieldset').attributes()).toHaveProperty('disabled')
     await wrapper.get('.production-workbench__schedule-form').trigger('submit')
     expect(save).not.toHaveBeenCalled()
@@ -961,7 +971,7 @@ describe('外协与自制的未完工筛选及全部分类', () => {
     wrapper.unmount()
   })
   it('三页的未完工勾选状态独立，外协和自制不显示仅未分配', async () => {
-    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'reader', permissions: [] } }); await flushPromises()
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'reader', permissions: ['project.content.view'] } }); await flushPromises()
     await wrapper.findAll('.production-workbench__quick-filter input')[1].setValue(false)
     for (const name of ['外协追溯', '自制追溯']) {
       await wrapper.findAll('.production-workbench__tabs button').find(button => button.text() === name)!.trigger('click'); await flushPromises()

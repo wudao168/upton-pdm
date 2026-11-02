@@ -21,7 +21,7 @@ public sealed class BudgetAssessmentService(IPdmRepository repository, IProjectB
         var ratesProjectId = project.Id;
         var ratesSettings = await budgets.FindLaborRatesAsync(ct);
         var rates = ratesSettings?.Rates ?? new Dictionary<string, decimal?>();
-        var projects = await repository.ListProjectsAsync(ct);
+        var projects = await repository.ListProjectHeadersAsync(ct);
         var selected = projects.Where(item => item.Id == projectId || project.ParentProjectId is null && (item.RootProjectId == projectId || item.ParentProjectId == projectId))
             .OrderBy(item => item.Id == projectId ? 0 : 1).ThenBy(item => item.Code).ToArray();
         var sheets = new List<BudgetAssessmentSheet>();

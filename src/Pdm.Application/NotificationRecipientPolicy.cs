@@ -26,6 +26,13 @@ public static class NotificationRecipientPolicy
 
     public static bool SystemOnly(UserAccount? user) => user is not null && SystemOnly(user.EffectiveRoleCodes);
 
+    public static async Task<bool> InBusinessCompanyAsync(IPdmRepository repository, UserAccount user, Guid? companyId, CancellationToken ct)
+    {
+        if (companyId is null) return true;
+        var scope = await repository.GetUserCompanyScopeAsync(user.Username, ct);
+        return scope?.PrimaryCompanyId == companyId || user.CrossCompanyView && scope?.AccessibleCompanyIds.Contains(companyId.Value) == true;
+    }
+
     public static bool IsSystemMessage(UserNotification notification) =>
         notification.Category.Equals("System", StringComparison.OrdinalIgnoreCase)
         && notification.ProjectId is null && notification.ReleasePackageId is null;
@@ -34,8 +41,13 @@ public static class NotificationRecipientPolicy
         IPdmRepository repository, IReadOnlyList<UserNotification> notifications, CancellationToken ct)
     {
         var systemOnly = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var inactive = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var recipient in notifications.Select(item => item.Recipient).Distinct(StringComparer.OrdinalIgnoreCase))
-            if (SystemOnly(await repository.FindUserAsync(recipient, ct))) systemOnly.Add(recipient);
-        return notifications.Where(item => !systemOnly.Contains(item.Recipient) || IsSystemMessage(item)).ToArray();
+        {
+            var user = await repository.FindUserAsync(recipient, ct);
+            if (SystemOnly(user)) systemOnly.Add(recipient);
+            if (user?.IsActive == false) inactive.Add(recipient);
+        }
+        return notifications.Where(item => !inactive.Contains(item.Recipient) && (!systemOnly.Contains(item.Recipient) || IsSystemMessage(item) || item.IsSenderReceipt && item.ReadAt is not null)).ToArray();
     }
 }

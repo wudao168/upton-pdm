@@ -163,6 +163,9 @@ internal static class PdmDocumentIdentityStore
         return TryWriteBinding(filePath, documentId, projectId, null, null, null, null);
     }
 
+    internal static bool TryWriteAssociationOnly(string filePath, Guid documentId, Guid? projectId)
+        => TryWriteBinding(filePath, documentId, projectId, null, null, null, null, writeIdentityStream: false);
+
     public static bool TryWriteControlledVersion(
         string filePath,
         Guid documentId,
@@ -235,7 +238,8 @@ internal static class PdmDocumentIdentityStore
         string sha256,
         long? fileLength,
         PdmControlledFileMetadata expected = null, string resolvedReferenceSha256 = null, DateTime? serverMaterializedAtUtc = null,
-        Guid? nativeIsolationSnapshotId = null, string preparedReferenceKey = null, string preparedReferenceSha256 = null)
+        Guid? nativeIsolationSnapshotId = null, string preparedReferenceKey = null, string preparedReferenceSha256 = null,
+        bool writeIdentityStream = true)
     {
         if (documentId == Guid.Empty || string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return false;
         lock (bindingSync)
@@ -309,7 +313,7 @@ internal static class PdmDocumentIdentityStore
                 File.WriteAllText(temporaryPath, new JavaScriptSerializer().Serialize(binding), Encoding.UTF8);
                 if (File.Exists(path)) File.Replace(temporaryPath, path, null);
                 else File.Move(temporaryPath, path);
-                if (IsControlledWorkspacePath(filePath)) TryWriteIdentityStream(filePath, documentId);
+                if (writeIdentityStream && IsControlledWorkspacePath(filePath)) TryWriteIdentityStream(filePath, documentId);
                 return true;
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException || e is NotSupportedException)

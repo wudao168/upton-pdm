@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UserSelect from './UserSelect'
 import { computed, ref, watch } from 'vue'
 import { readProjectNameplate, saveApplicationProjectOrderDate, PdmApiError } from '../api'
 import { ElMessage } from '../statusMessage'
@@ -9,7 +10,7 @@ import ProjectContactInformation from './ProjectContactInformation.vue'
 import ProjectPersonnelAssignment from './ProjectPersonnelAssignment.vue'
 import { nameplateStatus, type ProjectNameplateView } from '../projectNameplate'
 
-const props = defineProps<{ project: ProjectSummary; projects: ProjectSummary[]; token: string; users: PdmUser[]; currentUsername: string; directory: OrganizationDirectory; onUpdateMainStaffing: (id: string, input: MainProjectStaffingInput) => Promise<ProjectSummary>; onUpdateDesigners: (id: string, users: string[]) => Promise<ProjectSummary>; onUpdatePhaseOwners: (id: string, owners: ProjectPhaseOwners) => Promise<ProjectSummary>; canEditApplicationOrderDate?: boolean; canViewApplications?: boolean }>()
+const props = defineProps<{ project: ProjectSummary; projects: ProjectSummary[]; token: string; users: PdmUser[]; currentUsername: string; directory: OrganizationDirectory; onUpdateMainStaffing: (id: string, input: MainProjectStaffingInput) => Promise<ProjectSummary>; onUpdateDesigners: (id: string, users: string[]) => Promise<ProjectSummary>; onUpdatePhaseOwners: (id: string, owners: ProjectPhaseOwners) => Promise<ProjectSummary>; canEditApplicationOrderDate?: boolean; canViewApplications?: boolean; administrator?: boolean }>()
 const emit = defineEmits<{ openApplication: [id: string] }>()
 const staffAssignment = ref<'salesPeople' | 'presalesPeople' | null>(null)
 watch(() => [props.project.id, props.token], () => { staffAssignment.value = null })
@@ -29,6 +30,15 @@ const familyProjects = computed(() => {
   return [root, ...props.projects.filter(project => project.id !== root.id && ids.has(project.id)).sort((a, b) => (a.childSequence ?? 0) - (b.childSequence ?? 0))]
 })
 const rootProject = computed(() => familyProjects.value[0]!)
+const selectedProjectIds = ref<string[]>([])
+const selectableProjects = computed(() => familyProjects.value.filter(item => item.canAssignDesigners))
+const selectedProjects = computed(() => selectableProjects.value.filter(item => selectedProjectIds.value.includes(item.id)))
+const allProjectsSelected = computed(() => selectableProjects.value.length > 0 && selectedProjects.value.length === selectableProjects.value.length)
+watch([() => rootProject.value.id, () => props.token], () => { selectedProjectIds.value = [] })
+watch(() => selectableProjects.value.map(item => item.id), ids => { selectedProjectIds.value = selectedProjectIds.value.filter(id => ids.includes(id)) })
+function selectProject(id: string, checked: boolean) {
+  selectedProjectIds.value = checked ? [...new Set([...selectedProjectIds.value, id])] : selectedProjectIds.value.filter(item => item !== id)
+}
 const orderDateOpen = ref(false), orderDatePending = ref(false), orderDate = ref('')
 async function saveOrderDate() {
   if (orderDatePending.value) return
@@ -44,6 +54,7 @@ async function saveOrderDate() {
   finally { orderDatePending.value = false }
 }
 const canMaintainTeam = computed(() => {
+  if (props.administrator) return true
   if (rootProject.value.canAssignDesigners) return true
   const actor = props.currentUsername.toLowerCase()
   return rootProject.value.primaryProjectManager?.toLowerCase() === actor || props.directory.managers.some(item => item.unitId === rootProject.value.executionUnitId && [item.primaryManager, ...item.collaborativeManagers].some(user => user.toLowerCase() === actor))
@@ -62,6 +73,7 @@ const assignmentColumns = [
   { key: 'MechanicalAssembly', label: '机械装配' }, { key: 'ElectricalAssembly', label: '电气装配' },
 ] as const
 const canMaintainOwners = computed(() => {
+  if (props.administrator) return true
   const actor = props.currentUsername.toLowerCase()
   return rootProject.value.primaryProjectManager?.toLowerCase() === actor || props.directory.managers.some(item => item.unitId === rootProject.value.executionUnitId && [item.primaryManager, ...item.collaborativeManagers].some(user => user.toLowerCase() === actor))
 })
@@ -73,6 +85,8 @@ function applyPhaseOwners(saved: ProjectSummary) {
 }
 function openNameplate(project: ProjectSummary) { nameplateProject.value = project; nameplateOpen.value = true }
 const nameplateAccess = ref<Record<string, ProjectNameplateView>>({})
+let nameplateLoadedAt = 0
+let nameplateLoading = false
 function nameplateHint(view: ProjectNameplateView) {
   const state = nameplateStatus(view.nameplate)
   return `执行工程师：${state.executionComplete ? '已填写' : '待填写完整'}；硬件工程师：${state.hardwareComplete ? '已填写' : '待填写完整'}；${state.published ? '已发布，内容只读' : view.canEdit ? '可继续编辑' : '仅可查看'}`
@@ -80,16 +94,18 @@ function nameplateHint(view: ProjectNameplateView) {
 let nameplateRequest = 0
 async function loadNameplateAccess() {
   const request = ++nameplateRequest
+  nameplateLoading = true
   const token = props.token
   nameplateAccess.value = {}
   const results = await Promise.allSettled(familyProjects.value.filter(item => item.canReadContent).map(async item => {
     const result = await readProjectNameplate(item.id, token)
     return [item.id, result] as const
   }))
-  if (request === nameplateRequest) nameplateAccess.value = Object.fromEntries(results.flatMap(result => result.status === 'fulfilled' ? [result.value] : []))
+  if (request === nameplateRequest) { nameplateAccess.value = Object.fromEntries(results.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])); nameplateLoadedAt = Date.now(); nameplateLoading = false }
 }
-watch(() => [props.token, ...familyProjects.value.map(item => `${item.id}:${item.canReadContent}`)], () => { void loadNameplateAccess() }, { immediate: true })
+watch(() => JSON.stringify([props.token, props.currentUsername, ...familyProjects.value.map(item => `${item.id}:${item.canReadContent}:${item.designers.includes(props.currentUsername)}:${phasePeople(item, 'ElectricalHardware').includes(props.currentUsername)}`)]), () => { void loadNameplateAccess() }, { immediate: true })
 watch(nameplateOpen, open => { if (!open) void loadNameplateAccess() })
+defineExpose({ refresh: loadNameplateAccess, refreshIfStale: () => !nameplateLoading && Date.now() - nameplateLoadedAt > 30000 ? loadNameplateAccess() : Promise.resolve() })
 </script>
 
 <template>
@@ -112,18 +128,18 @@ watch(nameplateOpen, open => { if (!open) void loadNameplateAccess() })
         </div>
       </section>
       <el-dialog :model-value="Boolean(staffAssignment)" @update:model-value="staffAssignment = null" :title="staffAssignment === 'salesPeople' ? '分配销售人员' : '分配售前人员'" width="480px" append-to-body>
-        <el-select v-if="staffAssignment" :model-value="selectedPeople(staff[staffAssignment])" @update:model-value="staff[staffAssignment!] = $event.join('、')" aria-label="选择销售售前人员" multiple filterable placeholder="选择人员" style="width:100%"><el-option v-for="user in staffCandidates" :key="user.username" :label="user.displayName" :value="user.username" /></el-select>
+        <UserSelect v-if="staffAssignment" :model-value="selectedPeople(staff[staffAssignment])" @update:model-value="staff[staffAssignment!] = $event.join('、')" aria-label="选择销售售前人员" multiple filterable placeholder="选择人员" style="width:100%"><el-option v-for="user in staffCandidates" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect>
         <template #footer><el-button aria-label="完成人员选择" @click="staffAssignment = null">完成选择</el-button></template>
       </el-dialog>
-    <ProjectPersonnelAssignment ref="assignment" :token="token" @phase-owners-updated="applyPhaseOwners" @positions-updated="saved => Object.assign(projects.find(item => item.id === saved.id) ?? project, saved)" :current-username="currentUsername" :commercial-staff="staff" :can-edit-commercial="canEdit" :on-save-commercial="async value => { Object.assign(staff, value); return await save() }" :root="rootProject" :directory="directory" :can-maintain-team="canMaintainTeam" :on-update-main-staffing="onUpdateMainStaffing" :on-update-designers="onUpdateDesigners" :on-update-phase-owners="onUpdatePhaseOwners" />
+    <ProjectPersonnelAssignment :administrator="administrator" ref="assignment" :token="token" @phase-owners-updated="applyPhaseOwners" @positions-updated="saved => Object.assign(projects.find(item => item.id === saved.id) ?? project, saved)" :current-username="currentUsername" :commercial-staff="staff" :can-edit-commercial="canEdit" :on-save-commercial="async value => { Object.assign(staff, value); return await save() }" :root="rootProject" :directory="directory" :can-maintain-team="canMaintainTeam" :on-update-main-staffing="onUpdateMainStaffing" :on-update-designers="onUpdateDesigners" :on-update-phase-owners="onUpdatePhaseOwners" />
     </ProjectContactInformation>
     <section class="pdm-panel project-information__panel" aria-label="项目基本信息列表">
-      <header><h2>基本信息</h2><span>共 {{ familyProjects.length }} 个主、子项目</span></header>
+      <header><h2>基本信息</h2><span>共 {{ familyProjects.length }} 个主、子项目</span><div v-if="selectableProjects.length" class="project-information__batch-actions"><span>已选 {{ selectedProjects.length }} 项</span><el-button aria-label="批量分配人员" :disabled="!selectedProjects.length" @click="assignment?.configureMany(selectedProjects, canMaintainOwners)">批量分配人员</el-button></div></header>
       <div class="project-information__table-wrap">
         <table class="project-information__table">
-          <colgroup><col style="width:8%"><col style="width:16%"><col><col style="width:16%"><col span="11"></colgroup>
-          <thead><tr><th>项目号</th><th>项目名称</th><th>别名</th><th>型号</th><th>序列号</th><th>事业部</th><th>执行工程师</th><th class="project-information__assignment">电气工程师</th><th class="project-information__assignment">硬件工程师</th><th class="project-information__assignment">机械装配</th><th class="project-information__assignment">电气装配</th><th>数量</th><th>状态</th><th>订单日期</th><th>铭牌</th></tr></thead>
-          <tbody><tr v-for="item in familyProjects" :key="item.id" :class="{ 'is-current': item.id === project.id }"><td>{{ item.code }}</td><td>{{ item.name }}</td><td>{{ item.projectAlias || '—' }}</td><td>{{ item.deviceModel || '—' }}</td><td>{{ item.serialNumbers.join('、') || '—' }}</td><td>{{ item.executionUnitName || '—' }}</td><td><button v-if="item.canAssignDesigners" type="button" class="pdm-text-action" :aria-label="`分配执行工程师 ${item.code}`" @click="assignment?.configure(item)">{{ people(item.designers) }}</button><span v-else>{{ people(item.designers) }}</span></td><td v-for="column in assignmentColumns" :key="column.key" class="project-information__assignment"><button v-if="item.canAssignDesigners && canMaintainOwners" type="button" class="pdm-text-action" :aria-label="`分配${column.label} ${item.code}`" @click="assignment?.configure(item, column.key)">{{ people(phasePeople(item, column.key)) }}</button><span v-else>{{ people(phasePeople(item, column.key)) }}</span></td><td>{{ item.quantity }}</td><td>{{ item.businessStatus || item.stage }}</td><td>{{ item.signedDate || '—' }}</td><td><span v-if="nameplateAccess[item.id] && !nameplateAccess[item.id].nameplate.enabled && !nameplateAccess[item.id].canEdit">未启用</span><button v-else-if="nameplateAccess[item.id]" type="button" class="pdm-text-action" :class="{ 'is-nameplate-published': !!nameplateAccess[item.id].nameplate.releasePackageId }" :title="nameplateHint(nameplateAccess[item.id])" :aria-label="`${nameplateAccess[item.id].nameplate.enabled ? '查看铭牌' : '创建铭牌'} ${item.code}`" @click="openNameplate(item)">{{ nameplateAccess[item.id].nameplate.enabled ? nameplateStatus(nameplateAccess[item.id].nameplate).label : '创建' }}</button><span v-else>—</span></td></tr></tbody>
+          <colgroup><col style="width:36px"><col style="width:8%"><col style="width:16%"><col><col style="width:16%"><col span="11"></colgroup>
+          <thead><tr><th><input type="checkbox" aria-label="全选可分配项目" :checked="allProjectsSelected" :indeterminate.prop="selectedProjects.length > 0 && !allProjectsSelected" :disabled="!selectableProjects.length" @change="selectedProjectIds = ($event.target as HTMLInputElement).checked ? selectableProjects.map(item => item.id) : []"></th><th>项目号</th><th>项目名称</th><th>别名</th><th>型号</th><th>序列号</th><th>事业部</th><th>执行工程师</th><th class="project-information__assignment">电气工程师</th><th class="project-information__assignment">硬件工程师</th><th class="project-information__assignment">机械装配</th><th class="project-information__assignment">电气装配</th><th>数量</th><th>状态</th><th>订单日期</th><th>铭牌</th></tr></thead>
+          <tbody><tr v-for="item in familyProjects" :key="item.id" :class="{ 'is-current': item.id === project.id }"><td><input type="checkbox" :aria-label="`选择项目 ${item.code}`" :checked="selectedProjectIds.includes(item.id)" :disabled="!item.canAssignDesigners" @change="selectProject(item.id, ($event.target as HTMLInputElement).checked)"></td><td>{{ item.code }}</td><td>{{ item.name }}</td><td>{{ item.projectAlias || '—' }}</td><td>{{ item.deviceModel || '—' }}</td><td>{{ item.serialNumbers.join('、') || '—' }}</td><td>{{ item.executionUnitName || '—' }}</td><td><button v-if="item.canAssignDesigners" type="button" class="pdm-text-action" :aria-label="`分配执行工程师 ${item.code}`" @click="assignment?.configure(item)">{{ people(item.designers) }}</button><span v-else>{{ people(item.designers) }}</span></td><td v-for="column in assignmentColumns" :key="column.key" class="project-information__assignment"><button v-if="item.canAssignDesigners && canMaintainOwners" type="button" class="pdm-text-action" :aria-label="`分配${column.label} ${item.code}`" @click="assignment?.configure(item, column.key)">{{ people(phasePeople(item, column.key)) }}</button><span v-else>{{ people(phasePeople(item, column.key)) }}</span></td><td>{{ item.quantity }}</td><td>{{ item.businessStatus || item.stage }}</td><td>{{ item.signedDate || '—' }}</td><td><span v-if="nameplateAccess[item.id] && !nameplateAccess[item.id].nameplate.enabled && !nameplateAccess[item.id].canEdit">未启用</span><button v-else-if="nameplateAccess[item.id]" type="button" class="pdm-text-action" :class="{ 'is-nameplate-published': !!nameplateAccess[item.id].nameplate.releasePackageId }" :title="nameplateHint(nameplateAccess[item.id])" :aria-label="`${nameplateAccess[item.id].nameplate.enabled ? '查看铭牌' : '创建铭牌'} ${item.code}`" @click="openNameplate(item)">{{ nameplateAccess[item.id].nameplate.enabled ? nameplateStatus(nameplateAccess[item.id].nameplate).label : '创建' }}</button><span v-else>—</span></td></tr></tbody>
         </table>
       </div>
     </section>
@@ -150,6 +166,7 @@ watch(nameplateOpen, open => { if (!open) void loadNameplateAccess() })
 .project-information__staff{flex:none;overflow:hidden}.project-information__staff>header{display:flex;align-items:center;gap:12px;min-height:32px;padding:0 12px;border-bottom:1px solid var(--pdm-border)}
 .project-information__staff-actions{display:flex;gap:5px;margin-left:auto}
 .project-information__staff-actions :deep(.el-button){width:auto;min-width:60px;height:var(--pdm-button-compact);margin:0;padding:0 6px;font-size:11px}.project-information__staff .project-information__table-wrap{max-height:240px}
+.project-information__batch-actions{display:flex;align-items:center;gap:12px;margin-left:auto;font-size:11px;color:var(--pdm-muted)}
 
 .project-information__table .is-nameplate-published{color:var(--pdm-success,#16803c);font-weight:600}
 .project-information__panel{flex:1 0 180px}

@@ -3,13 +3,14 @@ import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, canViewTab } = useProjectCenterAccess()
 import ProjectTodoFields from './ProjectTodoFields.vue'
 import { CheckCircle2, ChevronRight, FolderTree, ListTodo, RotateCw as RefreshCw, UsersRound } from '@lucide/vue'
-import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, listProjectAudit, listProjectPlanVersions, readProjectPlanPortfolio, readProjectValidationPlan } from '../api'
+import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, readProjectOverviewRecords, listProjectPlanVersions, readProjectPlanPortfolio, readProjectValidationPlan } from '../api'
 import OverviewTimeline from './OverviewTimeline.vue'
 import { ElMessage } from '../statusMessage'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { AuditEntry, DocumentNode, DrawingReviewPackage, DrawingReviewTarget, MaterialCodeApplication, MaterialRelationCompleteness, PdmUser, ProjectPhaseOwnerKey, ProjectPlan, ProjectPlanPortfolio, ProjectSummary, ProjectValidationPlan, ReleasePackageSummary, ReleaseScope } from '../types'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
+  active?: boolean
   project: ProjectSummary
   projects: ProjectSummary[]
   users: PdmUser[]
@@ -32,7 +33,7 @@ const props = defineProps<{
   pending: boolean
   token: string
   canAddManagerNote: boolean
-}>()
+}>(), { active: true })
 
 const emit = defineEmits<{ documents: []; information: []; bom: []; projectPlan: [taskId?: string]; validationPlan: []; procurement: []; release: [] }>()
 
@@ -84,39 +85,44 @@ async function fetchOperationalSummary() {
     return
   }
   const visibleProjects = recordProjects.value
-  const [summaryResults, noteResults] = await Promise.all([
-    Promise.allSettled([readProjectPlanPortfolio(rootProject.value.id, token), readProjectValidationPlan(activeProject.value.id, token), projectWritable.value ? getMaterialRelationCompleteness(activeProject.value.id, token) : Promise.resolve(null)]),
-    Promise.allSettled(visibleProjects.map(item => canViewTab('records') ? listProjectAudit(item.id, token) : Promise.resolve([]))),
-  ])
-  if (requestId !== overviewRequestId) return
-  const [planResult, validationResult, relationResult] = summaryResults
-  planPortfolio.value = planResult.status === 'fulfilled' ? planResult.value : null
-  validationPlan.value = validationResult.status === 'fulfilled' ? validationResult.value : null
-  relationCompleteness.value = relationResult.status === 'fulfilled' ? relationResult.value : null
-  const visibleIds = new Set(visibleProjects.map(item => item.id.toLowerCase()))
-  const projectAudits = [...new Map(noteResults.flatMap(result => result.status === 'fulfilled' ? result.value : [])
-    .filter(entry => visibleIds.has(entry.entityId.toLowerCase())).map(entry => [entry.id, entry])).values()]
-    .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
-  managerNotes.value = projectAudits.filter(entry => entry.action === 'project.manager-note').slice(0, 30)
-  projectRecordHistory.value = projectAudits.filter(isProjectRecordHistoryEntry).slice(0, 50)
-  projectRecordError.value = noteResults.some(result => result.status === 'rejected') ? '部分项目记录读取失败，请关闭后刷新项目概览重试。' : ''
-  if (planResult.status === 'fulfilled') {
-    const current = activePlan.value
-    if (current?.baselineVersion) {
-      try {
-        const versions = await listProjectPlanVersions(current.projectId, token)
-        if (requestId !== overviewRequestId) return
-        baselineUnavailable.value = false
-        initialBaseline.value = [...versions.map(item => item.snapshot), current]
-          .filter(item => item.baselineVersion > 0)
-          .sort((a, b) => a.baselineVersion - b.baselineVersion || a.updatedAt.localeCompare(b.updatedAt))[0] ?? null
-        if (initialBaseline.value?.baselineVersion !== 1) { initialBaseline.value = null; baselineUnavailable.value = true }
-      } catch {
-        if (requestId !== overviewRequestId) return
-        baselineUnavailable.value = true
-      }
+  const planRead = (async () => {
+    const [planResult] = await Promise.allSettled([readProjectPlanPortfolio(rootProject.value.id, token)])
+    if (requestId !== overviewRequestId) return
+    planPortfolio.value = planResult.status === 'fulfilled' ? planResult.value : null
+    if (planResult.status === 'fulfilled') {
+      const current = activePlan.value
+      if (current?.baselineVersion) {
+        try {
+          const versions = await listProjectPlanVersions(current.projectId, token)
+          if (requestId !== overviewRequestId) return
+          baselineUnavailable.value = false
+          initialBaseline.value = [...versions.map(item => item.snapshot), current]
+            .filter(item => item.baselineVersion > 0)
+            .sort((a, b) => a.baselineVersion - b.baselineVersion || a.updatedAt.localeCompare(b.updatedAt))[0] ?? null
+          if (initialBaseline.value?.baselineVersion !== 1) { initialBaseline.value = null; baselineUnavailable.value = true }
+        } catch {
+          if (requestId !== overviewRequestId) return
+          baselineUnavailable.value = true
+        }
+      } else { initialBaseline.value = null; baselineUnavailable.value = false }
     } else { initialBaseline.value = null; baselineUnavailable.value = false }
-  } else { initialBaseline.value = null; baselineUnavailable.value = false }
+  })()
+  const validationRead = readProjectValidationPlan(activeProject.value.id, token).then(value => {
+    if (requestId === overviewRequestId) validationPlan.value = value
+  }, () => { if (requestId === overviewRequestId) validationPlan.value = null })
+  const relationRead = (projectWritable.value ? getMaterialRelationCompleteness(activeProject.value.id, token) : Promise.resolve(null)).then(value => {
+    if (requestId === overviewRequestId) relationCompleteness.value = value
+  }, () => { if (requestId === overviewRequestId) relationCompleteness.value = null })
+  const recordsRead = (canViewTab('records') ? readProjectOverviewRecords(activeProject.value.id, token) : Promise.resolve([])).then(records => {
+    if (requestId !== overviewRequestId) return
+    const visibleIds = new Set(visibleProjects.map(item => item.id.toLowerCase()))
+    const projectAudits = [...new Map(records.filter(entry => visibleIds.has(entry.entityId.toLowerCase())).map(entry => [entry.id, entry])).values()]
+      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+    managerNotes.value = projectAudits.filter(entry => entry.action === 'project.manager-note').slice(0, 30)
+    projectRecordHistory.value = projectAudits.filter(isProjectRecordHistoryEntry).slice(0, 50)
+    projectRecordError.value = ''
+  }, () => { if (requestId === overviewRequestId) projectRecordError.value = '项目记录读取失败，请刷新项目概览重试。' })
+  await Promise.all([planRead, validationRead, relationRead, recordsRead])
 }
 
 const refreshingOverview = ref(false)
@@ -134,7 +140,7 @@ watch([() => props.project.id, () => props.token, () => recordProjects.value.map
   baselineUnavailable.value = false
   return loadOperationalSummary()
 }, { immediate: true })
-onMounted(() => { overviewTimer = window.setInterval(() => { if (!refreshingOverview.value) void loadOperationalSummary() }, 300_000) })
+onMounted(() => { overviewTimer = window.setInterval(() => { if (props.active !== false && !document.hidden && !refreshingOverview.value) void loadOperationalSummary() }, 300_000) })
 onBeforeUnmount(() => { window.clearInterval(overviewTimer); ++overviewRequestId })
 
 function assignedPeople(usernames: Array<string | undefined>) {

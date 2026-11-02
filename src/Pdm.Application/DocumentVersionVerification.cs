@@ -22,24 +22,24 @@ public sealed partial class PdmWorkflowService
         await RequirePermissionAsync(actor, role, PermissionCodes.ProjectContentView, cancellationToken);
         await RequirePermissionAsync(actor, role, "document.view", cancellationToken);
         var allowed = new List<DocumentVersionVerificationRequest>();
+        var readableProjects = await repository.GetReadableDocumentProjectsAsync(requests.Select(item => item.DocumentId).ToArray(),
+            actor, role, cancellationToken);
         // A request has one actor/role and policy. Folder/file checks remain per
         // document; do not repeat the identical project lookup for every component.
         var projectAccess = new Dictionary<Guid, bool>();
         foreach (var request in requests)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!await repository.HasDocumentAccessAsync(request.DocumentId, actor, role, FolderAccess.View, cancellationToken)) continue;
-            var document = await repository.FindDocumentAsync(request.DocumentId, cancellationToken);
-            if (document is null) continue;
-            if (!projectAccess.TryGetValue(document.ProjectId, out var canViewProject))
+            if (!readableProjects.TryGetValue(request.DocumentId, out var projectId)) continue;
+            if (!projectAccess.TryGetValue(projectId, out var canViewProject))
             {
                 try
                 {
-                    await ProjectPermissionPolicy.RequireAsync(repository, document.ProjectId, actor, role, "document.view", cancellationToken);
+                    await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, "document.view", cancellationToken);
                     canViewProject = true;
                 }
                 catch (UnauthorizedAccessException) { canViewProject = false; }
-                projectAccess[document.ProjectId] = canViewProject;
+                projectAccess[projectId] = canViewProject;
             }
             if (!canViewProject) continue;
             allowed.Add(request);

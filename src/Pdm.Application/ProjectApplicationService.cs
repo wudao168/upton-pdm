@@ -170,8 +170,12 @@ public sealed class ProjectApplicationService(IPdmRepository repository, IProjec
     private async Task NotifyApprovers(ProjectApplication value, CancellationToken ct)
     {
         foreach (var user in (await repository.GetOrganizationDirectoryAsync(ct)).Users.Where(x => x.IsActive && (x.CompanyId == value.CompanyId || x.CompanyId is null)))
-            if (await repository.HasUserPermissionAsync(user.Username, user.Role, PermissionCodes.ProjectApplicationApprove, ct))
-                await Notify(value, user.Username, "立项申请待审批", "请进入立项申请审阅并批准或退回。", ct);
+            if (await NotificationRecipientPolicy.HasBusinessPermissionAsync(repository, user.EffectiveRoleCodes, PermissionCodes.ProjectApplicationApprove, ct))
+            {
+                var account = await repository.FindUserAsync(user.Username, ct);
+                if (account is not null && await NotificationRecipientPolicy.InBusinessCompanyAsync(repository, account, value.CompanyId, ct))
+                    await Notify(value, user.Username, "立项申请待审批", "请进入立项申请审阅并批准或退回。", ct);
+            }
     }
     private Task Notify(ProjectApplication value, string recipient, string title, string content, CancellationToken ct) =>
         repository.CreateUserNotificationsAsync([new(Guid.NewGuid(), recipient, "project-application", title,

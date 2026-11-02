@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { MaterialRelationTemplate } from '../types'
 import { u9UnitName } from '../u9Units'
+import { relationMains } from '../materialRelationMains'
 const props = defineProps<{ relation: MaterialRelationTemplate; showDraft?: boolean }>()
 const revision = computed(() => (props.showDraft ? props.relation.draftRevision : null) ?? props.relation.publishedRevision)
 const single = (mode: unknown) => mode === 'Single' || mode === 0
@@ -9,8 +10,9 @@ const perMain = (mode: unknown) => mode === 'PerMainQuantity' || mode === 0
 </script>
 
 <template>
-  <section class="material-relation-details" :aria-label="`关联配置 ${relation.mainMaterialCode} 的配件明细`">
+  <section class="material-relation-details" :aria-label="`关联配置 ${relationMains(relation, showDraft)[0]?.materialCode || relation.mainMaterialCode} 的配件明细`">
     <header><strong>{{ relation.name }}</strong><span v-if="revision">V{{ revision.version }} · {{ showDraft && relation.draftRevision ? '草稿' : '已生效' }}</span></header>
+    <section class="material-relation-details__group"><header><strong>适用主物料 {{ relationMains(relation, showDraft).length }} 个</strong></header><el-table :data="relationMains(relation, showDraft)" max-height="220"><el-table-column prop="materialCode" label="料号" min-width="135" /><el-table-column prop="materialName" label="名称" min-width="150" /><el-table-column prop="specification" label="型号" min-width="150" /><el-table-column prop="brand" label="品牌" width="100" /><el-table-column label="标准物料分类" min-width="150"><template #default="{ row }">{{ row.standardLibraryCategories?.map((category: { name: string }) => category.name).join('、') || '未分类（待补选）' }}</template></el-table-column></el-table></section>
     <section v-for="group in revision?.groups ?? []" :key="group.id" class="material-relation-details__group">
       <header><strong>{{ group.name }}</strong><span>{{ group.isRequired ? '必选' : '可选' }} · {{ single(group.selectionMode) ? '单选' : '多选' }} · 最少 {{ group.minSelection }} 项<span v-if="group.maxSelection != null">，最多 {{ group.maxSelection }} 项</span></span></header>
       <el-table :data="group.options" max-height="300" stripe>

@@ -325,9 +325,18 @@ public sealed class ProgramTemplateService(
     public async Task<IReadOnlyList<ProgramTemplateApprovalTask>> ListMyTasksAsync(string actor, UserRole role, CancellationToken cancellationToken)
     {
         var tasks = new Dictionary<Guid, ProgramTemplateApprovalTask>();
-        var canApprove = await HasPermissionAsync(actor, role, PermissionCodes.ProgramTemplateApprove, cancellationToken);
-        foreach (var roleCode in CurrentRoleCodes(role))
+        var user = await pdmRepository.FindUserAsync(actor, cancellationToken);
+        var roles = NotificationRecipientPolicy.BusinessRoles(user?.EffectiveRoleCodes ?? CurrentRoleCodes(role));
+        var canApprove = await NotificationRecipientPolicy.HasBusinessPermissionAsync(pdmRepository, roles, PermissionCodes.ProgramTemplateApprove, cancellationToken);
+        foreach (var roleCode in roles.DefaultIfEmpty(""))
             foreach (var task in await templates.ListTasksAsync(actor, roleCode, canApprove, cancellationToken)) tasks[task.Id] = task;
+        // 管理权限不扩展为别人的受理职责；本人发起且有批准权限的事项仍可在管理流程中办理。
+        if (!canApprove && await HasPermissionAsync(actor, role, PermissionCodes.ProgramTemplateApprove, cancellationToken))
+            foreach (var task in await templates.ListTasksAsync(actor, "", true, cancellationToken))
+            {
+                var revision = await templates.FindRevisionAsync(task.RevisionId, cancellationToken);
+                if (revision?.CreatedBy.Equals(actor, StringComparison.OrdinalIgnoreCase) == true) tasks[task.Id] = task;
+            }
         return tasks.Values.OrderBy(task => task.CreatedAt).ToArray();
     }
 

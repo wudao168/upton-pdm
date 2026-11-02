@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { export: projectExport, write: projectWritable } = useProjectCenterAccess()
 import { ElMessage } from '../statusMessage'
@@ -664,7 +665,7 @@ onBeforeUnmount(() => {
     <SquareLoader v-if="loading" overlay label="正在加载采购跟踪" />
     <header class="procurement-tracking__heading">
       <div class="procurement-tracking__filters" role="group" aria-label="采购跟踪筛选">
-      <input v-model="filters.keyword" type="search" aria-label="搜索料号、名称、型号" placeholder="搜索料号、名称、型号" class="procurement-tracking__search">
+      <SearchField><input v-model="filters.keyword" type="search" aria-label="搜索料号、名称、型号" placeholder="搜索料号、名称、型号" class="procurement-tracking__search"></SearchField>
       <input v-model="filters.brand" type="search" :list="`procurement-brands-${projectId}`" placeholder="全部品牌" aria-label="筛选品牌" class="procurement-tracking__brand-filter">
       <datalist :id="`procurement-brands-${projectId}`"><option v-for="brand in brandOptions" :key="brand" :value="brand" /></datalist>
       <label class="procurement-tracking__kind-filter">

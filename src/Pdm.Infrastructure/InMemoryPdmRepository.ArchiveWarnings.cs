@@ -8,7 +8,7 @@ public sealed partial class InMemoryPdmRepository
     private readonly object archivePolicySync = new();
     private ArchiveWarningPolicy archivePolicy = new();
     private static ArchiveWarningPolicy CopyArchivePolicy(ArchiveWarningPolicy policy) => new() {
-        Revision = policy.Revision, BlockAll = policy.BlockAll, BlockingCodes = policy.BlockingCodes.ToArray() };
+        Revision = policy.Revision, BlockAll = policy.BlockAll, BlockingCodes = policy.BlockingCodes.ToArray(), MaxBatchRequestMiB = policy.MaxBatchRequestMiB };
     public Task<ArchiveWarningPolicy> GetArchiveWarningPolicyAsync(CancellationToken ct)
     {
         lock (archivePolicySync) return Task.FromResult(CopyArchivePolicy(archivePolicy));
@@ -19,7 +19,9 @@ public sealed partial class InMemoryPdmRepository
         lock (archivePolicySync)
         {
             if (archivePolicy.Revision != input.Revision) throw new PdmConflictException("存档警告策略已被修改，请刷新后重试。");
+            var previousLimit = archivePolicy.MaxBatchRequestMiB;
             archivePolicy = CopyArchivePolicy(input);
+            archivePolicy.MaxBatchRequestMiB ??= previousLimit;
             archivePolicy.Revision++;
             return Task.FromResult(CopyArchivePolicy(archivePolicy));
         }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UserSelect from './UserSelect'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, Clock, Download, Plus, RefreshCw } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
@@ -15,14 +16,17 @@ import { downloadProcurementWorkbook } from '../procurementWorkbook'
 import { appendWorkHoursDay, dateRange, departmentPeople, hoursOn, reportRows, validateHours, weekDates, workingDay, workHoursDepartmentTree } from '../workHours'
 import type { HolidayMap, WorkHourEntry, WorkHourInput, WorkHourRevision, WorkHoursProject, WorkHoursReportRow, WorkHoursView } from '../workHours'
 
-const props = defineProps<{ token: string; companyId: string; active: boolean }>()
+const props = defineProps<{ token: string; companyId: string; active: boolean; mobile?: boolean; initialProjectId?: string }>()
+const emit = defineEmits<{ changed: [] }>()
 const workHoursRoot = ref<HTMLElement>(), calendarMenuElement = ref<HTMLElement>()
 const operationContext = () => JSON.stringify([props.companyId, props.token])
 const failure = (cause: unknown, fallback: string) => cause instanceof Error ? userErrorMessage(cause.message) : fallback
-const tab = rememberedTab('work-hours.tab', 'entry', ['entry','report','settings']), mode = rememberedTab('work-hours.mode', 'calendar', ['calendar','week'])
+const tab = props.mobile ? ref('entry') : rememberedTab('work-hours.tab', 'entry', ['entry','report','settings'])
+const mode = props.mobile ? ref('calendar') : rememberedTab('work-hours.mode', 'calendar', ['calendar','week'])
 const own = ref<WorkHoursView>(), report = ref<WorkHoursView>()
 const selected = ref(chinaToday()), month = ref(selected.value.slice(0, 7) + '-01')
 const loading = ref(false), reporting = ref(false), saving = ref(false), error = ref('')
+const mobileCalendarOpen = ref(false)
 const holidays = ref<HolidayMap>(new Map()), calendarReady = ref(false), calendarError = ref('')
 const today = computed(() => own.value?.today ?? chinaToday())
 const entries = computed(() => own.value?.sheets.flatMap(x => x.entries) ?? [])
@@ -50,6 +54,17 @@ const allProjects = computed(() => {
 })
 const recent = computed(() => [...new Set([...entries.value].sort((a, b) => b.date.localeCompare(a.date)).map(x => x.projectId))].slice(0, 5).map(id => allProjects.value.find(x => x.id === id)!).filter(Boolean))
 const projectName = computed(() => allProjects.value.find(x => x.id === form.projectId)?.name ?? '选择项目后自动带出')
+let prefilledProjectId = ''
+function prefillProject() {
+  const id = props.initialProjectId
+  if (!props.mobile || !id || id === prefilledProjectId || !own.value || dirty.value || !allProjects.value.some(project => project.id === id)) return
+  form.projectId = id; prefilledProjectId = id
+}
+watch(() => props.initialProjectId, prefillProject)
+defineExpose({
+  canLeave: () => !dirty.value && !saving.value,
+  prefill: (projectId: string) => { if (!dirty.value && allProjects.value.some(project => project.id === projectId)) form.projectId = projectId },
+})
 const number = (value: number) => value.toLocaleString('zh-CN', { maximumFractionDigits: 1 })
 const total = (items: WorkHourInput[]) => items.reduce((n, x) => n + x.hours, 0)
 function visibleDayStatus(day: string) {
@@ -85,7 +100,7 @@ async function loadOwn() {
   try {
     const result = await readWorkHours(days.value[0]!, days.value.at(-1)!, false, props.token)
     if (generation !== ownGeneration) return
-    own.value = result; resetForm(); resetWeek()
+    own.value = result; resetForm(); resetWeek(); prefillProject(); emit('changed')
     if (tab.value === 'settings' && !(result.canManageSettings ?? result.canManage)) tab.value = 'entry'
     if (tab.value === 'report' && !report.value) await loadReport()
   } catch (cause) { if (generation === ownGeneration) error.value = failure(cause, '工时读取失败，请检查网络后刷新重试。') }
@@ -391,7 +406,8 @@ void loadGlobalStatusContent().then(data => { holidays.value = new Map(data.holi
         </div>
       </div>
       <div v-if="mode === 'calendar'" class="wh-calendar-layout">
-        <div class="pdm-panel wh-calendar">
+        <button v-if="mobile" type="button" @click="mobileCalendarOpen = !mobileCalendarOpen">{{ mobileCalendarOpen ? '收起月历' : '展开月历补填' }}</button>
+        <div v-show="!mobile || mobileCalendarOpen" class="pdm-panel wh-calendar">
           <div class="wh-weekdays"><span v-for="(day,index) in ['周一','周二','周三','周四','周五','周六','周日']" :key="day" :class="{ 'wh-rest': index === 6 }">{{ day }}</span></div>
           <div class="wh-day-grid"><button v-for="day in days" :key="day" class="wh-day" :class="{ outside: day.slice(0,7) !== month.slice(0,7), selected: day === selected, today: day === today, missed: visibleDayStatus(day) === '未填', rest: !workingDay(day, holidays), 'is-drag-source': dragSource?.date === day, 'is-drop-target': dropTarget === day, 'is-cut': dayClipboard?.mode === 'cut' && dayClipboard.date === day }" :aria-label="`${day} ${number(hoursOn(entries,day))}小时`" :aria-pressed="day === selected" @click="selectDay(day)" :data-work-hours-date="day" :draggable="canCopyDate(day) && !copyOpen" @dragstart="startDayDrag($event, day)" @dragover="overDay($event, day)" @dragleave="leaveDay($event, day)" @drop="dropDay($event, day)" @dragend="clearDrag" @contextmenu="showCalendarMenu($event, day)"><span class="wh-date">{{ Number(day.slice(8)) }} <small v-if="day === today">今天</small><small v-else-if="holidays.get(day)">{{ holidays.get(day)?.isOffDay ? holidays.get(day)?.name : '补班' }}</small></span><b v-if="hoursOn(entries,day)">{{ number(hoursOn(entries,day)) }} 小时</b><span v-if="hoursOn(entries,day)" class="wh-day-records"><span v-for="entry in entries.filter(x => x.date === day)" :key="entry.id" class="wh-day-record" :title="`${entry.projectCode} · ${entry.projectName} · ${entry.location} · ${number(entry.hours)}小时`"><span class="wh-day-project"><span class="wh-day-project-code">{{ entry.projectCode }}</span><span class="wh-day-project-name">{{ entry.projectName }}</span></span><span class="wh-day-record-hours">{{ number(entry.hours) }}小时</span></span></span><span v-if="visibleDayStatus(day)" class="wh-day-status" :class="{ warning: visibleDayStatus(day) === '待核对' }">{{ visibleDayStatus(day) }}</span></button></div>
           <p class="wh-note">仅已生效名单参与完整性检查，默认周日休息，节假日按日历安排。未填不代表缺勤。</p>
@@ -410,7 +426,7 @@ void loadGlobalStatusContent().then(data => { holidays.value = new Map(data.holi
     <WorkHoursSettings v-else-if="tab === 'settings' && (own?.canManageSettings ?? own?.canManage)" :token="token" :company-id="companyId" @dirty-change="settingsDirty = $event" @changed="managementChanged" />
     <template v-else-if="tab === 'report'">
       <section class="pdm-panel wh-report-overview" aria-label="工时汇总统计">
-      <form class="wh-report-filters" @submit.prevent="loadReport"><label class="wh-date-range"><el-date-picker v-model="reportDateRange" type="daterange" value-format="YYYY-MM-DD" format="YYYY-MM-DD" aria-label="汇总日期区间" range-separator="-" start-placeholder="开始日期" end-placeholder="结束日期" unlink-panels :clearable="false" /></label><label title="仅显示参与工时的部门；选择事业部或部门时包含其下级部门"><el-tree-select :model-value="filter.department" @update:model-value="filter.department = $event || ''" :data="departmentTree" node-key="id" :props="{label: 'name', children: 'children'}" check-strictly clearable filterable :render-after-expand="false" placeholder="全部部门／事业部" aria-label="汇总部门" /></label><label><select v-model="filter.username" aria-label="汇总人员"><option value="">全部</option><option v-for="p in personnelOptions" :key="p.username" :value="p.username">{{ p.displayName }}</option></select></label><label><el-select v-model="filter.projectId" filterable clearable placeholder="全部主／子项目" aria-label="汇总项目"><el-option v-for="p in reportProjects" :key="p.id" :value="p.id" :label="`${p.code} · ${p.name}`" /></el-select></label><label><select v-model="filter.location" aria-label="汇总所在地"><option value="">全部</option><option>厂内</option><option>厂外</option></select></label><button type="submit" class="pdm-primary-action" :disabled="reporting">查询</button></form>
+      <form class="wh-report-filters" @submit.prevent="loadReport"><label class="wh-date-range"><el-date-picker v-model="reportDateRange" type="daterange" value-format="YYYY-MM-DD" format="YYYY-MM-DD" aria-label="汇总日期区间" range-separator="-" start-placeholder="开始日期" end-placeholder="结束日期" unlink-panels :clearable="false" /></label><label title="仅显示参与工时的部门；选择事业部或部门时包含其下级部门"><el-tree-select :model-value="filter.department" @update:model-value="filter.department = $event || ''" :data="departmentTree" node-key="id" :props="{label: 'name', children: 'children'}" check-strictly clearable filterable :render-after-expand="false" placeholder="全部部门／事业部" aria-label="汇总部门" /></label><label><UserSelect v-model="filter.username" aria-label="汇总人员"><option value="">全部</option><option v-for="p in personnelOptions" :key="p.username" :value="p.username">{{ p.displayName }}</option></UserSelect></label><label><el-select v-model="filter.projectId" filterable clearable placeholder="全部主／子项目" aria-label="汇总项目"><el-option v-for="p in reportProjects" :key="p.id" :value="p.id" :label="`${p.code} · ${p.name}`" /></el-select></label><label><select v-model="filter.location" aria-label="汇总所在地"><option value="">全部</option><option>厂内</option><option>厂外</option></select></label><button type="submit" class="pdm-primary-action" :disabled="reporting">查询</button></form>
       <div v-if="report" class="wh-summary wh-report-summary"><span>工时总计 <b>{{ number(total(filtered.map(x => x.entry))) }}</b> 小时</span><span>厂内 <b>{{ number(total(filtered.filter(x => x.entry.location === '厂内').map(x => x.entry))) }}</b> 小时</span><span>厂外 <b>{{ number(total(filtered.filter(x => x.entry.location === '厂外').map(x => x.entry))) }}</b> 小时</span><span>填报人数 <b>{{ new Set(filtered.map(x => x.person.username)).size }}</b> 人</span><span>整日未填 <b>{{ peopleSummary.reduce((n,x) => n+x.missed.length,0) }}</b> 人天</span></div>
       </section>
       <div v-if="report" class="wh-charts">

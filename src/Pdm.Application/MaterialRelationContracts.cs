@@ -25,7 +25,8 @@ public sealed record SaveMaterialRelationTemplateCommand(
     string Name,
     string? ChangeNote,
     long? ExpectedRevisionRowVersion,
-    IReadOnlyList<SaveMaterialRelationGroupCommand> Groups);
+    IReadOnlyList<SaveMaterialRelationGroupCommand> Groups,
+    IReadOnlyList<Guid>? MainMaterialIds = null);
 
 public sealed record MaterialRelationChoice(
     Guid GroupId,
@@ -73,7 +74,7 @@ public sealed record MaterialRelationCompleteness(
 public interface IMaterialRelationRepository
 {
     Task<IReadOnlyList<MaterialRelationTemplate>> ListTemplatesAsync(bool includeDraft, CancellationToken cancellationToken);
-    Task<MaterialRelationTemplate> SaveDraftAsync(Guid? templateId, SaveMaterialRelationTemplateCommand command, string mainMaterialCode, string mainMaterialName, IReadOnlyList<MaterialRelationGroup> groups, string actor, DateTimeOffset now, CancellationToken cancellationToken);
+    Task<MaterialRelationTemplate> SaveDraftAsync(Guid? templateId, SaveMaterialRelationTemplateCommand command, string mainMaterialCode, string mainMaterialName, IReadOnlyList<MaterialRelationGroup> groups, string actor, DateTimeOffset now, CancellationToken cancellationToken, IReadOnlyList<MaterialRelationMainMaterial>? mainMaterials = null);
     Task<MaterialRelationTemplate> PublishAsync(Guid templateId, Guid revisionId, long expectedRowVersion, string actor, DateTimeOffset now, CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialRelationSelection>> ListSelectionsAsync(Guid projectId, CancellationToken cancellationToken);
     Task ReplaceSelectionsAsync(Guid projectId, Guid mainBomItemId, IReadOnlyList<MaterialRelationSelection> selections, CancellationToken cancellationToken);

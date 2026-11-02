@@ -1,0 +1,15 @@
+/* 折叠控件保留原点击区域及旋转状态，只显示图标，不套用业务操作按钮外框。 */
+:root body button[data-pdm-fold-control],
+:root body button[data-pdm-fold-control]:is(:hover, :focus, :focus-visible, :active) {
+  border: 0 !important;
+  outline: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+:root body button[data-pdm-fold-control]:focus-visible {
+  color: var(--pdm-theme-accent-hover) !important;
+}
+:root body .pdm-titlebar__sidebar-toggle[data-pdm-fold-control]::before,
+:root body .pdm-titlebar__sidebar-toggle[data-pdm-fold-control]::after {
+  display: none;
+}

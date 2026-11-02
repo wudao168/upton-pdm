@@ -96,6 +96,9 @@ const formatArchiveDate = (value?: string | null) => {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false })
 }
+const propertiesExpanded = ref(false)
+watch(() => props.selected.documentId, () => { propertiesExpanded.value = false })
+const corePropertyLabels = new Set(['物料编码', '名称', '图纸版本', '发布版本'])
 const previewProperties = computed(() => [
   { label: '物料编码', value: previewPropertyValue(props.bomItem?.drawingNumber || props.selected.drawingNumber) },
   { label: '名称', value: previewPropertyValue(props.bomItem?.name || meaningfulSelectedName.value) },
@@ -504,11 +507,12 @@ onBeforeUnmount(() => {
           <span class="pdm-preview-properties-bar__title">图档属性</span>
           <span v-if="selected.kind === 'Drawing' && /(?:^|-)W\d+$/i.test(displayedRevision)" class="pdm-preview-work-badge">设计工作版 · 不供生产</span>
           <dl class="pdm-preview-properties" aria-label="图档属性">
-            <div v-for="property in previewProperties" :key="property.label">
+            <div v-for="property in previewProperties.filter(item => propertiesExpanded || corePropertyLabels.has(item.label))" :key="property.label">
               <dt>{{ property.label }}</dt>
               <dd :title="property.value">{{ property.value }}</dd>
             </div>
           </dl>
+          <button type="button" class="pdm-inspect-link pdm-text-action" :aria-expanded="propertiesExpanded" @click="propertiesExpanded = !propertiesExpanded">{{ propertiesExpanded ? '收起属性' : '更多属性' }}</button>
         </section>
         <div v-if="projectDownload" class="pdm-solidworks-actions">
           <button

@@ -75,6 +75,7 @@ export async function refreshTablePreferences(): Promise<void> {
     try {
       const result = await readUserTablePreferences(context.token, context.company)
       if (session !== context || context.changes !== changes) return
+      if (!Object.entries(result.preferences ?? {}).some(([key, value]) => context.values[key] !== value)) return
       context.values = { ...context.values, ...result.preferences }
       persistCache(context)
       tablePreferenceVersion.value++

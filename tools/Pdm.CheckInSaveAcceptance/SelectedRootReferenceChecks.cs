@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -49,7 +49,7 @@ internal static partial class Program
    var network=new ReferenceMetadataHandler(descriptors,mode);
    using(var client=(IDisposable)New("PdmApiClient","http://reference-metadata.invalid/"))using(var http=new HttpClient(network){BaseAddress=new Uri("http://reference-metadata.invalid/")})using(var lifetime=new CancellationTokenSource())
    {
-    SetField(client,"httpClient",http);var plugin=New("PdmAddin");SetField(plugin,"apiClient",client);SetField(plugin,"lifetime",lifetime);SetField(plugin,"authenticatedUsername","tester");SetField(plugin,"currentTree",root);
+    SetField(client,"httpClient",http);SetField(client,"controlledOpenHttpClient",http);var plugin=New("PdmAddin");SetField(plugin,"apiClient",client);SetField(plugin,"lifetime",lifetime);SetField(plugin,"authenticatedUsername","tester");SetField(plugin,"currentTree",root);
     var project=Guid.NewGuid();var session=(Guid)Field(plugin,"checkoutSessionId");var cache=New("PdmAddin+BatchReferenceVersionCache",project,session,Get(client,"EditJournalScope"),"tester");
     var method=Type("PdmAddin").GetMethod("ResolveBatchReferenceVersionsCachedAsync",Flags);var items=LinkedItems(root,part);Exception failure=null;
     var timer=System.Diagnostics.Stopwatch.StartNew();

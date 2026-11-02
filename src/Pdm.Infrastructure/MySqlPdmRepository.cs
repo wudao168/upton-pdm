@@ -29,6 +29,22 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     }
 
     public async Task<IReadOnlyList<Project>> ListProjectsAsync(CancellationToken cancellationToken)
+        => await ReadProjectsAsync(null, cancellationToken);
+
+    public Task<IReadOnlyList<Project>> ListProjectHeadersAsync(CancellationToken ct) => ReadProjectsAsync(null, ct, includeStatistics: false);
+
+    public async Task<IReadOnlyList<Project>> ListProjectHeadersForUserAsync(string actor, UserRole role, CancellationToken ct)
+    {
+        if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, ct)) return [];
+        var headers = await ListProjectHeadersAsync(ct);
+        var user = await FindUserAsync(actor, ct);
+        var result = new List<Project>();
+        foreach (var project in headers)
+            if (await CommercialProjectAccess.CanReadAsync(project, user, actor, role, projectContacts, ct)) result.Add(project);
+        return result;
+    }
+
+    private async Task<IReadOnlyList<Project>> ReadProjectsAsync(Guid? projectId, CancellationToken cancellationToken, bool includeStatistics = true)
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<ProjectRow>(new CommandDefinition(
@@ -42,12 +58,12 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
              LEFT JOIN project_organization o ON o.id=p.organization_id
              LEFT JOIN project root ON root.id=COALESCE(p.root_project_id,p.id)
              LEFT JOIN organization_unit execution_unit ON execution_unit.id=COALESCE(p.execution_unit_id,root.execution_unit_id)
-            WHERE @ActiveCompanyId IS NULL OR p.organization_id=@ActiveCompanyId
+            WHERE (@ActiveCompanyId IS NULL OR p.organization_id=@ActiveCompanyId) AND (@ProjectId IS NULL OR p.id=@ProjectId)
             ORDER BY root.code,p.code
             """,
-            new { ActiveCompanyId = TenantContext.CompanyId },
+            new { ActiveCompanyId = TenantContext.CompanyId, ProjectId = projectId },
             cancellationToken: cancellationToken));
-        return await MapProjectsAsync(connection, null, rows, cancellationToken);
+        return await MapProjectsAsync(connection, null, rows, cancellationToken, includeStatistics);
     }
 
     public async Task<IReadOnlyList<Project>> ListProjectsForUserAsync(string actor, UserRole role, CancellationToken cancellationToken)
@@ -67,8 +83,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         {
             return projects.Zip(capabilities, (project, capability) => ApplyAdministratorCapabilities(project) with
             {
-                CanManageMainStaffing = capability.CanManageMainStaffing,
-                CanAssignDesigners = capability.CanAssignDesigners
+                CanManageMainStaffing = role == UserRole.Administrator ? project.ParentProjectId is null && project.ExecutionUnitId is not null : capability.CanManageMainStaffing,
+                CanAssignDesigners = role == UserRole.Administrator ? project.ExecutionUnitId is not null : capability.CanAssignDesigners
             }).ToArray();
         }
 
@@ -80,6 +96,27 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         var project = await FindProjectAsync(connection, null, projectId, cancellationToken);
         return project is not null && TenantContext.CompanyId is Guid companyId && project.OrganizationId != companyId ? null : project;
+    }
+
+    public async Task<Project?> FindProjectForUserAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
+    {
+        if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, ct)) return null;
+        var project = (await ReadProjectsAsync(projectId, ct)).SingleOrDefault();
+        var user = await FindUserAsync(actor, ct);
+        if (project is null || !await CommercialProjectAccess.CanReadAsync(project, user, actor, role, projectContacts, ct)) return null;
+        var scope = new List<Project> { project };
+        if ((project.RootProjectId ?? project.ParentProjectId) is Guid rootId && rootId != project.Id)
+        {
+            var root = (await ReadProjectsAsync(rootId, ct)).SingleOrDefault();
+            if (root is not null && await CommercialProjectAccess.CanReadAsync(root, user, actor, role, projectContacts, ct)) scope.Add(root);
+        }
+        var permissions = await GetUserPermissionsAsync(actor, role, ct);
+        var settings = await GetProjectPermissionSettingsAsync(ct);
+        await using var connection = await OpenAsync(ct);
+        var capability = (await ApplyCapabilitiesAsync(connection, scope, actor, permissions, settings, ct)).First(item => item.Id == projectId);
+        return role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true
+            ? ApplyAdministratorCapabilities(project) with { CanManageMainStaffing = role == UserRole.Administrator ? project.ParentProjectId is null && project.ExecutionUnitId is not null : capability.CanManageMainStaffing, CanAssignDesigners = role == UserRole.Administrator ? project.ExecutionUnitId is not null : capability.CanAssignDesigners }
+            : capability;
     }
 
     public async Task<bool> HasProjectReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
@@ -1354,22 +1391,50 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         var limit = Math.Clamp(take, 1, 500);
         var projectIdText = projectId.ToString();
-        var rows = await connection.QueryAsync<AuditRow>(new CommandDefinition(
-            """
+        var rows = await connection.QueryAsync<AuditRow>(new CommandDefinition(ProjectAuditReadSql(),
+            new { ProjectId = projectId, ProjectIdText = projectIdText, Limit = limit }, cancellationToken: cancellationToken));
+        return rows.Select(MapAudit).ToArray();
+    }
+
+    public async Task<IReadOnlyList<AuditEntry>> ListProjectOverviewRecordsAsync(IReadOnlyList<Guid> projectIds, int take, CancellationToken ct)
+    {
+        var ids = projectIds.Distinct().ToArray();
+        if (ids.Length == 0) return [];
+        var texts = ids.Select(id => id.ToString()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var parameters = new DynamicParameters(new { Limit = Math.Clamp(take, 1, 500) });
+        var sql = ids.Select((id, index) => {
+            var prefix = $"p{index}";
+            parameters.Add($"{prefix}ProjectId", id);
+            parameters.Add($"{prefix}ProjectIdText", id.ToString());
+            return ProjectAuditReadSql(prefix);
+        });
+        await using var connection = await OpenAsync(ct);
+        using var results = await connection.QueryMultipleAsync(new CommandDefinition(string.Join(";\n", sql), parameters, cancellationToken: ct));
+        var records = new List<AuditEntry>();
+        foreach (var id in ids)
+            records.AddRange((await results.ReadAsync<AuditRow>()).Where(row => texts.Contains(row.EntityId)
+                && row.ActionName is "project.manager-note" or "project.todo.create").Select(MapAudit));
+        return records.DistinctBy(entry => entry.Id).OrderByDescending(entry => entry.OccurredAt).ToArray();
+    }
+
+    private static AuditEntry MapAudit(AuditRow row) => new(row.Id, DateTime.SpecifyKind(row.OccurredAt, DateTimeKind.Utc), row.Actor, row.ActionName, row.EntityType, row.EntityId, ReadAuditDetail(row.DetailJson));
+
+    // Keep the same per-project recent window before selecting overview records.
+    private static string ProjectAuditReadSql(string prefix = "") => $$"""
             SELECT audit.id,audit.occurred_at,audit.actor,audit.action_name,audit.entity_type,audit.entity_id,audit.detail_json
             FROM audit_entry audit
             INNER JOIN (
                 SELECT candidate.id,candidate.occurred_at
                 FROM (
-                    SELECT 'Project' entity_type,@ProjectIdText entity_id
-                    UNION SELECT 'BomItem',@ProjectIdText
-                    UNION SELECT 'PdmDocument',BIN_TO_UUID(id) FROM document WHERE project_id=@ProjectId
-                    UNION SELECT 'DocumentVersion',BIN_TO_UUID(id) FROM document WHERE project_id=@ProjectId
+                    SELECT 'Project' entity_type,@{{prefix}}ProjectIdText entity_id
+                    UNION SELECT 'BomItem',@{{prefix}}ProjectIdText
+                    UNION SELECT 'PdmDocument',BIN_TO_UUID(id) FROM document WHERE project_id=@{{prefix}}ProjectId
+                    UNION SELECT 'DocumentVersion',BIN_TO_UUID(id) FROM document WHERE project_id=@{{prefix}}ProjectId
                     UNION SELECT 'DocumentVersion',BIN_TO_UUID(version.id) FROM document_version version
-                        JOIN document ON document.id=version.document_id WHERE document.project_id=@ProjectId
-                    UNION SELECT 'ReleasePackage',BIN_TO_UUID(id) FROM release_package WHERE project_id=@ProjectId
+                        JOIN document ON document.id=version.document_id WHERE document.project_id=@{{prefix}}ProjectId
+                    UNION SELECT 'ReleasePackage',BIN_TO_UUID(id) FROM release_package WHERE project_id=@{{prefix}}ProjectId
                     UNION SELECT 'ApprovalTask',BIN_TO_UUID(task.id) FROM approval_task task
-                        JOIN release_package package ON package.id=task.release_package_id WHERE package.project_id=@ProjectId
+                        JOIN release_package package ON package.id=task.release_package_id WHERE package.project_id=@{{prefix}}ProjectId
                 ) target JOIN LATERAL (
                     SELECT entry.id,entry.occurred_at FROM audit_entry entry FORCE INDEX (ix_audit_entity_recent)
                     WHERE entry.entity_type=target.entity_type AND entry.entity_id=target.entity_id
@@ -1379,10 +1444,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 LIMIT @Limit
             ) recent ON recent.id=audit.id
             ORDER BY audit.occurred_at DESC,audit.id DESC
-            """,
-            new { ProjectId = projectId, ProjectIdText = projectIdText, Limit = limit }, cancellationToken: cancellationToken));
-        return rows.Select(row => new AuditEntry(row.Id, DateTime.SpecifyKind(row.OccurredAt, DateTimeKind.Utc), row.Actor, row.ActionName, row.EntityType, row.EntityId, ReadAuditDetail(row.DetailJson))).ToArray();
-    }
+            """;
 
     private static string ReadAuditDetail(string json)
     {
@@ -1517,7 +1579,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             RootDocumentCheckedOutBy = activity?.RootDocumentCheckedOutBy
         };
 
-    private static async Task<IReadOnlyList<Project>> MapProjectsAsync(DbConnection connection, DbTransaction? transaction, IEnumerable<ProjectRow> rows, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<Project>> MapProjectsAsync(DbConnection connection, DbTransaction? transaction, IEnumerable<ProjectRow> rows, CancellationToken cancellationToken, bool includeStatistics = true)
     {
         var rowArray = rows.ToArray();
         if (rowArray.Length == 0) return [];
@@ -1533,12 +1595,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         var assignments = (await connection.QueryAsync<ProjectAssignmentRow>(new CommandDefinition(
             "SELECT project_id,username,assignment_type FROM project_assignment WHERE project_id IN @ProjectIds ORDER BY username",
             new { ProjectIds = rootIds }, transaction, cancellationToken: cancellationToken))).ToArray();
+        if (!includeStatistics) return rowArray.Select(row => MapProject(row, serials.GetValueOrDefault(row.Id, []), responsibles.GetValueOrDefault(row.Id), assignments)).ToArray();
         var activityRows = (await connection.QueryAsync<ProjectActivityRow>(new CommandDefinition(
             """
             SELECT p.id project_id,
-                   COUNT(DISTINCT d.id) document_count,
-                   COUNT(DISTINCT CASE WHEN d.kind IN ('Assembly','Part') THEN d.id END) model_document_count,
-                   COUNT(DISTINCT CASE WHEN d.kind='Drawing' THEN d.id END) drawing_document_count,
+                   0 document_count, 0 model_document_count, 0 drawing_document_count,
                    MAX(current_root_document.checked_out_by) root_document_checked_out_by,
                    MAX(CASE WHEN package.state='Draft' THEN 1 ELSE 0 END) has_draft,
                    MAX(CASE WHEN package.state IN ('ProcessReview','Approval') THEN 1 ELSE 0 END) has_pending_approval,
@@ -1556,7 +1617,6 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                        AND package.release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')
                        AND package.preview_state IN ('Pending','WaitingForServer','Running','Failed')) THEN 1 ELSE 0 END) has_release_attention
               FROM project p
-              LEFT JOIN document d ON d.project_id=p.id
               LEFT JOIN project_reference_root current_root ON current_root.project_id=p.id
               LEFT JOIN reference_snapshot current_snapshot ON current_snapshot.id=current_root.reference_snapshot_id AND current_snapshot.project_id=p.id
               LEFT JOIN document current_root_document ON current_root_document.id=current_snapshot.root_document_id AND current_root_document.project_id=p.id

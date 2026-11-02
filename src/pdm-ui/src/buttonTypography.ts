@@ -1,5 +1,5 @@
 import type { App } from 'vue'
-import { buttonContentSelector, buttonNavigationSelector } from './buttonStyles'
+import { buttonContentSelector, buttonNavigationSelector, isFoldButton } from './buttonStyles'
 import './styles/button-sizing.css'
 import { installControlSpacing } from './controlSpacing'
 
@@ -12,7 +12,7 @@ function updateButton(button: HTMLButtonElement) {
   const text = button.textContent?.replace(/\s+/g, ' ').trim() ?? ''
   const icon = button.matches(iconButton) || !text || /^[+＋×✕✓✔‹›←→↑↓▴▾▸▹◂◃−－]$/.test(text)
   const inline = !!button.closest(inlineContext) || button.matches('.is-link, .el-button--text, .pdm-text-action, .pdm-link-button')
-  const excluded = !!button.closest(buttonNavigationSelector) || !!button.closest('.pdm-overview-alerts')
+  const excluded = isFoldButton(button) || !!button.closest(buttonNavigationSelector) || !!button.closest('.pdm-overview-alerts')
     || !!button.querySelector('img, canvas') || (button.matches(buttonContentSelector) && !button.matches(iconButton))
   if (excluded) {
     delete button.dataset.pdmButtonSize
@@ -47,7 +47,7 @@ export function installButtonTypography(app: App) {
     }
   })
   observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true,
-    attributeFilter: ['class', 'role', 'style', 'aria-label', 'title', 'data-pdm-button-label'] })
+    attributeFilter: ['class', 'role', 'style', 'aria-expanded', 'aria-haspopup', 'aria-label', 'title', 'data-pdm-button-label'] })
   update(document.body)
   app.onUnmount(() => { observer.disconnect(); disposeSpacing() })
 }

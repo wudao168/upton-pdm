@@ -35,6 +35,7 @@ public sealed class BatchVersionPolicyChecks
         var requests = own.Select(doc => new DocumentVersionVerificationRequest(doc.Id, null)).Append(new(denied.Id, null)).ToArray();
         var rows = await service.VerifyDocumentVersionsAsync(requests, "admin", UserRole.Administrator, default);
         Assert.Equal(91, counter.FileChecks);
+        Assert.Equal(1, counter.BatchReads);
         Assert.Equal(2, counter.ProjectChecks);
         Assert.Equal(89, counter.Verified.Count);
         Assert.False(rows.Single(row => row.DocumentId == own.Last().Id).Accessible);
@@ -44,6 +45,7 @@ public sealed class BatchVersionPolicyChecks
         counter.DeniedProject = project.Id; counter.DeniedFile = Guid.Empty;
         rows = await service.VerifyDocumentVersionsAsync(requests, "admin", UserRole.Administrator, default);
         Assert.Equal(182, counter.FileChecks);
+        Assert.Equal(2, counter.BatchReads);
         Assert.Equal(4, counter.ProjectChecks);
         Assert.All(rows.Where(row => own.Any(doc => doc.Id == row.DocumentId)), row => Assert.False(row.Accessible));
         Assert.True(rows.Single(row => row.DocumentId == denied.Id).Accessible);
@@ -55,10 +57,15 @@ public sealed class BatchVersionPolicyChecks
     {
         public IPdmRepository Target = null!;
         public Guid DeniedProject, DeniedFile;
-        public int ProjectChecks, FileChecks;
+        public int ProjectChecks, FileChecks, BatchReads;
         public IReadOnlyList<DocumentVersionVerificationRequest> Verified = [];
         protected override object? Invoke(MethodInfo? method, object?[]? args)
         {
+            if (method!.Name == nameof(IPdmRepository.GetReadableDocumentProjectsAsync))
+            {
+                BatchReads++;
+                return ReadBatchAsync((IReadOnlyCollection<Guid>)args![0]!, (string)args[1]!, (UserRole)args[2]!, (CancellationToken)args[3]!);
+            }
             if (method!.Name == nameof(IPdmRepository.HasDocumentAccessAsync))
             {
                 FileChecks++;
@@ -76,6 +83,18 @@ public sealed class BatchVersionPolicyChecks
             }
             try { return method.Invoke(Target, args); }
             catch (TargetInvocationException error) when (error.InnerException != null) { throw error.InnerException; }
+        }
+        private async Task<IReadOnlyDictionary<Guid, Guid>> ReadBatchAsync(IReadOnlyCollection<Guid> ids, string actor, UserRole role, CancellationToken token)
+        {
+            var result = new Dictionary<Guid, Guid>();
+            foreach (var id in ids)
+            {
+                token.ThrowIfCancellationRequested(); FileChecks++;
+                if (id == DeniedFile || !await Target.HasDocumentReadAccessAsync(id, actor, role, token)) continue;
+                var document = await Target.FindDocumentAsync(id, token);
+                if (document is not null) result[id] = document.ProjectId;
+            }
+            return result;
         }
     }
 }

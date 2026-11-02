@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
+import { matchesUserSearch } from '../userSearch'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, export: projectExport } = useProjectCenterAccess()
 import NameplateContentPanel from './NameplateContentPanel.vue'
-import { packageRevisionHint, packageRevisionLabel, standardBomVersionLabel } from '../drawingRevision'
+import { packageRevisionHint, packageRevisionLabel, bomVersionLabel } from '../drawingRevision'
 import { vQuantity } from '../quantityInput'
 import { getApprovalEmergencyCapability } from '../api'
 import RawDrawerPanel from './RawDrawerPanel.vue'
@@ -213,7 +215,7 @@ const releaseBomRevisionLabel = computed(() => {
   if (releasePackage.scope === 'ElectricalLongLead') {
     return `标准件：不适用 · 非标件：不适用 · 电气件：长交期批次 ${releasePackage.electricalBomRevision || '未生成'}`
   }
-  return `标准件：${standardBomVersionLabel(releasePackage.standardBomRevision) || '未发布'} · 非标件：${releasePackage.nonStandardBomRevision || '未发布'} · 电气件：${releasePackage.electricalBomRevision || '未发布'}`
+  return `标准件：${bomVersionLabel(releasePackage.standardBomRevision) || '未发布'} · 非标件：${releasePackage.nonStandardBomRevision || '未发布'} · 电气件：${bomVersionLabel(releasePackage.electricalBomRevision) || '未发布'}`
 })
 const canPrepare = computed(() => !props.releasePackage || ['草稿', '已退回', '发布失败'].includes(props.releasePackage.state))
 const isSupplement = computed(() => isSupplementScope(scope.value))
@@ -570,7 +572,7 @@ const canHandleCurrentTask = computed(() => projectWritable.value && (isCurrentT
 const filteredTransferCandidates = computed(() => {
   const query = transferQuery.value.trim().toLocaleLowerCase()
   if (!query) return transferCandidates.value
-  return transferCandidates.value.filter(item => `${item.displayName} ${item.username}`.toLocaleLowerCase().includes(query))
+  return transferCandidates.value.filter(item => matchesUserSearch(item.displayName, query, item.username))
 })
 const frozenItems = computed(() => {
   if (!props.releasePackage) return []
@@ -1350,7 +1352,7 @@ async function saveItemComment() {
       <div v-if="transferOpen" class="pdm-dialog-backdrop pdm-approval-transfer-backdrop" role="presentation" @click.self="transferOpen = false">
         <RawDrawerPanel class="pdm-approval-transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-approval-transfer-title">
           <template #header="{ setActionTarget }"><header><div class="pdm-panel-topbar"><div class="pdm-panel-topbar-title"><strong id="pdm-approval-transfer-title">转交审批</strong></div><div class="pdm-panel-header-actions" :ref="setActionTarget"></div></div><button type="button" class="pdm-icon-button" aria-label="关闭转交审批" @click="transferOpen = false">×</button></header></template>
-          <label>选择人员<input v-model.trim="transferQuery" type="search" placeholder="输入姓名或账号筛选" aria-label="筛选审批转交人员"></label>
+          <label>选择人员<SearchField><input v-model.trim="transferQuery" type="search" placeholder="输入姓名或账号筛选" aria-label="筛选审批转交人员"></SearchField></label>
           <div class="pdm-approval-transfer-list" role="listbox" aria-label="审批转交人员">
             <button v-for="candidate in filteredTransferCandidates" :key="candidate.username" type="button" :class="{ 'is-selected': transferTarget === candidate.username }" role="option" :aria-selected="transferTarget === candidate.username" @click="transferTarget = candidate.username"><strong>{{ candidate.displayName }}</strong></button>
             <p v-if="transferCandidatesLoading">正在加载可转交人员…</p>

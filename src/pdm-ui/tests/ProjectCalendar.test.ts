@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import * as api from '../src/api'
 import ProjectCalendar from '../src/components/ProjectCalendar.vue'
 import { loadGlobalStatusContent } from '../src/globalStatusContent'
@@ -25,6 +25,8 @@ function data(projects: WorkbenchProject[], view: WorkbenchView = 'manager'): Wo
 }
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-10-05T12:00:00+08:00'))
   vi.clearAllMocks()
   vi.mocked(api.readCalendarTodos).mockResolvedValue([])
   vi.mocked(loadGlobalStatusContent).mockResolvedValue({ holidayCalendars: [{ year: 2026, papers: [], days: [
@@ -33,6 +35,7 @@ beforeEach(() => {
     { date: '2026-10-10', name: '国庆节', isOffDay: false },
   ] }] } as unknown as GlobalStatusContentLibrary)
 })
+afterEach(() => vi.useRealTimers())
 describe('项目日历', () => {
   it('uses the shared todo fields, defaults the clicked date and creates a normal task-center todo', async () => {
     const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-15T04:00:00Z'))

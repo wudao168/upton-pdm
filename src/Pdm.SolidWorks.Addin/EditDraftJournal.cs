@@ -62,6 +62,23 @@ internal sealed class EditDraftJournal
         }).ToArray();
     }
 
+    public IReadOnlyList<LocalEditDraft> ReadDocument(Guid documentId)
+    {
+        if (!Directory.Exists(directory)) return Array.Empty<LocalEditDraft>();
+        // Include every session for this document, just like ReadAll().Where(...),
+        // but do not open or deserialize records belonging to other documents.
+        return Directory.GetFiles(directory, "*-" + documentId.ToString("N") + ".xml").Select(path =>
+        {
+            using (var stream = File.OpenRead(path))
+            {
+                var entry = (LocalEditDraft)Serializer.Deserialize(stream);
+                if (entry.DocumentId != documentId)
+                    throw new InvalidOperationException("本地编辑记录与图档身份不一致，已保留记录，请检查诊断日志。");
+                return entry;
+            }
+        }).ToArray();
+    }
+
     public void Save(LocalEditDraft entry)
     {
         Directory.CreateDirectory(directory);

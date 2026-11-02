@@ -64,6 +64,23 @@ const api = vi.hoisted(() => ({
 vi.mock('../src/api', () => api)
 
 describe('MaterialManagement', () => {
+  it('隐藏无查看权限页签，并阻止记忆或外部请求打开它们', async () => {
+    const wrapper = mount(MaterialManagement, { props: { token: 'token', canEdit: false, canApprove: false, canManageIntegration: false, requestedTab: 'kits' }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const tabs = () => wrapper.findAll('.material-tabs > .el-tabs__header [role="tab"]').map(tab => tab.text().trim())
+    expect(tabs()).not.toContain('料品套件')
+    expect(tabs()).not.toContain('BOM料号')
+    expect(wrapper.findComponent({ name: 'ElTabs' }).props('modelValue')).toBe('materials')
+    await wrapper.setProps({ canViewKits: true, requestedTab: 'materials' })
+    await wrapper.setProps({ requestedTab: 'kits' })
+    await flushPromises()
+    expect(tabs()).toContain('料品套件')
+    expect(wrapper.findComponent({ name: 'ElTabs' }).props('modelValue')).toBe('kits')
+    await wrapper.setProps({ canViewKits: false })
+    expect(tabs()).not.toContain('料品套件')
+    expect(wrapper.findComponent({ name: 'ElTabs' }).props('modelValue')).toBe('materials')
+    wrapper.unmount()
+  })
   beforeEach(() => {
     vi.clearAllMocks()
     api.listMaterialRelationCategories.mockResolvedValue([])
@@ -384,7 +401,7 @@ describe('MaterialManagement', () => {
       publishedRevision: { id: 'revision-1', version: 1, state: 'Published', changeNote: '', createdBy: 'standard', createdAt: '', publishedBy: 'standard', publishedAt: '', rowVersion: 1, groups: [{ id: 'group-1', name: '安装件', isRequired: true, selectionMode: 'Single', minSelection: 1, maxSelection: 1, autoSelectUnique: false, sortOrder: 1, options: [{ id: 'option-1', materialId: 'material-2', materialCode: 'EL-002', materialName: '安装件', quantityMode: 'Fixed', quantityPerSet: 1, isDefault: true, sortOrder: 1 }] }] },
     }])
     const wrapper = mount(MaterialManagement, {
-      props: { token: 'token', canEdit: false, canApprove: false, canManageIntegration: true, canViewRelations: true, canManageRelations: true, canPublishRelations: true, canManageKits: true },
+      props: { token: 'token', canEdit: false, canApprove: false, canManageIntegration: true, canViewRelations: true, canManageRelations: true, canPublishRelations: true, canManageKits: true, canViewBomHeaders: true },
       global: { plugins: [ElementPlus] },
     })
     await flushPromises()
@@ -827,7 +844,7 @@ describe('MaterialManagement', () => {
 
     expect(wrapper.find('.el-alert').exists()).toBe(false)
     expect(wrapper.find('.material-header').exists()).toBe(false)
-    expect(wrapper.findAll('.material-tabs > .el-tabs__header [role="tab"]').map(tab => tab.text().trim())).toEqual(['料品主档', '料品库存', '料品套件', 'BOM料号', '料号审批', '分类维护'])
+    expect(wrapper.findAll('.material-tabs > .el-tabs__header [role="tab"]').map(tab => tab.text().trim())).toEqual(['料品主档', '料品库存', '料号审批', '分类维护'])
     expect(api.listMaterialPage).toHaveBeenCalledWith('token', expect.objectContaining({ ordinaryOnly: true }), expect.anything())
     const toolbar = wrapper.get('.material-toolbar')
     expect(toolbar.findAll('button').some(button => button.text() === '刷新')).toBe(true)

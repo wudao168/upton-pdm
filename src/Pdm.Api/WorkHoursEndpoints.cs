@@ -9,8 +9,8 @@ public static class WorkHoursEndpoints
     public static void MapWorkHoursEndpoints(this WebApplication app)
     {
         var api = app.MapGroup("/api/work-hours").RequireAuthorization();
-        api.MapGet("", async (DateOnly from, DateOnly to, bool? report, HttpContext context, WorkHoursService service, CancellationToken ct) =>
-            Results.Ok(await service.ReadAsync(from, to, report == true, Actor(context), Role(context), ct)));
+        api.MapGet("", async (DateOnly from, DateOnly to, bool? report, bool? summaryOnly, HttpContext context, WorkHoursService service, CancellationToken ct) =>
+            Results.Ok(await service.ReadAsync(from, to, report == true, Actor(context), Role(context), ct, includeProjects: summaryOnly != true)));
         api.MapPut("", async (SaveWorkHours input, HttpContext context, WorkHoursService service, CancellationToken ct) =>
             Results.Ok(await service.SaveAsync(input, Actor(context), Role(context), ct)));
         api.MapPost("/move-day", async (MoveWorkHoursDay input, HttpContext context, WorkHoursService service, CancellationToken ct) =>

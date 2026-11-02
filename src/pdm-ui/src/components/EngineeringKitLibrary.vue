@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
 import QuantityInputNumber from './QuantityInputNumber.vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -239,7 +240,7 @@ onMounted(load)
       <div class="engineering-kit-library__toolbar pdm-toolbar">
         <el-button @click="load">刷新</el-button>
         <el-select v-model="brandFilter" clearable filterable placeholder="筛选品牌"><el-option v-for="brand in brandOptions" :key="brand" :label="brand" :value="brand" /></el-select>
-        <el-input v-model="query" clearable placeholder="搜索套件料号、名称、型号或品牌" />
+        <SearchField><el-input v-model="query" clearable placeholder="搜索套件料号、名称、型号或品牌" /></SearchField>
         <div class="engineering-kit-library__actions">
           <el-button v-if="canManage" type="primary" @click="openEditor()">新建套件</el-button>
         </div>

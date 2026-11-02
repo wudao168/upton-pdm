@@ -1,45 +1,78 @@
 <script setup lang="ts">
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
-import { computed, reactive, ref, watch } from 'vue'
-import { listMaterialRelationTemplates, listMaterials, publishMaterialRelationTemplate, saveMaterialRelationTemplate } from '../api'
-import type { MaterialRelationQuantityMode, MaterialRelationSelectionMode, MaterialRelationTemplate, PdmMaterial, SaveMaterialRelationTemplateInput } from '../types'
+import { computed, reactive, ref, watch, onBeforeUnmount } from 'vue'
+import { listMaterialRelationTemplates, listMaterials, listMaterialRelationCategories, publishMaterialRelationTemplate, saveMaterialRelationTemplate } from '../api'
+import type { MaterialRelationMainMaterial, MaterialRelationQuantityMode, MaterialRelationSelectionMode, MaterialRelationTemplate, PdmMaterial, SaveMaterialRelationTemplateInput, StandardLibraryCategory } from '../types'
 import MaterialRelationCategories from './MaterialRelationCategories.vue'
+import { relationMains, relationHasMain } from '../materialRelationMains'
 
 type DraftOption = { materialId: string; quantityMode: MaterialRelationQuantityMode; quantityPerSet: number; isDefault: boolean; sortOrder: number; selectionAdvice: string }
 type DraftGroup = { name: string; isRequired: boolean; selectionMode: MaterialRelationSelectionMode; minSelection: number; maxSelection: number | null; autoSelectUnique: boolean; sortOrder: number; options: DraftOption[] }
 
-const props = defineProps<{ token: string; mainMaterial: PdmMaterial; canManage: boolean; canPublish: boolean }>()
+const props = defineProps<{ token: string; mainMaterial?: PdmMaterial | null; templateId?: string; canManage: boolean; canPublish: boolean }>()
 const emit = defineEmits<{ changed: [] }>()
 const loading = ref(false)
-const hasCategory = ref(false)
+const categoryStatus = ref<Record<string, boolean>>({})
+const categoryCatalog = ref<StandardLibraryCategory[]>([])
+const mainIds = ref<string[]>([])
+const mainCache = ref<MaterialRelationMainMaterial[]>([])
+const mainSearchRows = ref<PdmMaterial[]>([])
+const mainSearchLoading = ref(false)
+const activeTemplateId = ref(props.templateId || '')
+const savedSignature = ref('')
+let mainSearchRequest = 0, loadRequest = 0
 const saving = ref(false)
 const configuring = ref(false)
 const materialSearchLoading = ref(false)
 const relations = ref<MaterialRelationTemplate[]>([])
 const materials = ref<PdmMaterial[]>([])
 const materialSearchResults = ref<PdmMaterial[]>([])
-const draft = reactive<{ changeNote: string; expectedRevisionRowVersion: number | null; groups: DraftGroup[] }>({ changeNote: '', expectedRevisionRowVersion: null, groups: [] })
+const draft = reactive<{ name: string; changeNote: string; expectedRevisionRowVersion: number | null; groups: DraftGroup[] }>({ name: '', changeNote: '', expectedRevisionRowVersion: null, groups: [] })
 let materialSearchRequest = 0
 
-const relation = computed(() => relations.value.find(item => item.mainMaterialId === props.mainMaterial.id))
+const relation = computed(() => relations.value.find(item => activeTemplateId.value ? item.id === activeTemplateId.value : props.mainMaterial && relationHasMain(item, props.mainMaterial.id)))
+const mainRows = computed(() => mainIds.value.map(id => mainCache.value.find(item => item.materialId === id)).filter((item): item is MaterialRelationMainMaterial => !!item))
+const hasCategory = computed(() => mainIds.value.length > 0 && mainIds.value.every(id => categoryStatus.value[id] === true))
+const mainOptions = computed(() => [...new Map([...mainRows.value, ...mainSearchRows.value.map(asMain)].map(item => [item.materialId, item])).values()])
+const signature = () => JSON.stringify([mainIds.value.slice().sort(), draft.name, draft.changeNote, draft.groups])
+const dirty = computed(() => savedSignature.value !== signature())
+const publishedMains = computed(() => relation.value ? relationMains(relation.value, false) : [])
+const removedMains = computed(() => publishedMains.value.filter(main => !mainIds.value.includes(main.materialId)))
+const addedMainCount = computed(() => mainIds.value.filter(id => !publishedMains.value.some(main => main.materialId === id)).length)
+function asMain(material: PdmMaterial): MaterialRelationMainMaterial { return { materialId: material.id, materialCode: material.materialCode, materialName: material.name, specification: material.specification, brand: material.brand, remark: material.remark } }
+function categoryLoaded(id: string, ready: boolean) { categoryStatus.value = { ...categoryStatus.value, [id]: ready } }
+async function searchMainOptions(query = '') {
+  const run = ++mainSearchRequest
+  mainSearchLoading.value = true
+  try {
+    const values = await listMaterials(props.token, query, false, 100)
+    if (run !== mainSearchRequest) return
+    mainSearchRows.value = values.filter(material => material.approvalStatus === 'Approved' && !material.isArchived)
+    mainCache.value = [...new Map([...mainCache.value, ...mainSearchRows.value.map(asMain)].map(item => [item.materialId, item])).values()]
+  } catch (cause) { if (run === mainSearchRequest) ElMessage.error(cause instanceof Error ? cause.message : '主物料搜索失败') }
+  finally { if (run === mainSearchRequest) mainSearchLoading.value = false }
+}
+function mainOwner(id: string) { return relations.value.find(item => item.id !== relation.value?.id && relationHasMain(item, id)) }
 const selectedMaterialIds = computed(() => new Set(draft.groups.flatMap(group => group.options.map(option => option.materialId).filter(Boolean))))
 const approvedMaterials = computed(() => {
   const visibleIds = new Set([...materialSearchResults.value.map(item => item.id), ...selectedMaterialIds.value])
-  return materials.value.filter(item => visibleIds.has(item.id) && item.approvalStatus === 'Approved' && !item.isArchived && item.id !== props.mainMaterial.id)
+  return materials.value.filter(item => visibleIds.has(item.id) && item.approvalStatus === 'Approved' && !item.isArchived && !mainIds.value.includes(item.id))
 })
 const materialById = computed(() => new Map(materials.value.map(item => [item.id, item])))
-const canConfigure = computed(() => props.canManage && props.mainMaterial.approvalStatus === 'Approved' && !props.mainMaterial.isArchived)
+const canConfigure = computed(() => props.canManage && (!props.mainMaterial || props.mainMaterial.approvalStatus === 'Approved' && !props.mainMaterial.isArchived))
 const visibleRevision = computed(() => relation.value?.draftRevision ?? relation.value?.publishedRevision)
 const relationStatus = computed(() => {
+  if (dirty.value && !loading.value) return relation.value?.publishedRevision ? `未保存修改 · 当前生效V${relation.value.publishedRevision.version}` : '未保存修改'
   if (relation.value?.draftRevision && relation.value.publishedRevision) return `有待生效修改 · V${relation.value.draftRevision.version}`
   if (relation.value?.draftRevision) return `待发布生效 · V${relation.value.draftRevision.version}`
   if (relation.value?.publishedRevision) return `已生效 · V${relation.value.publishedRevision.version}`
-  return props.mainMaterial.approvalStatus === 'Approved' ? '未配置' : '料品批准后可配置'
+  return !props.mainMaterial || props.mainMaterial.approvalStatus === 'Approved' ? '未配置' : '料品批准后可配置'
 })
-const statusType = computed(() => relation.value?.draftRevision ? 'warning' : relation.value?.publishedRevision ? 'success' : 'info')
+const statusType = computed(() => dirty.value && !loading.value || relation.value?.draftRevision ? 'warning' : relation.value?.publishedRevision ? 'success' : 'info')
 
-watch(() => props.mainMaterial.id, () => { void load() }, { immediate: true })
+watch(() => [props.mainMaterial?.id, props.templateId, props.token], () => { activeTemplateId.value = props.templateId || ''; void load() }, { immediate: true })
+onBeforeUnmount(() => { loadRequest++; mainSearchRequest++; materialSearchRequest++ })
 
 function normalizeSelectionMode(value: unknown): MaterialRelationSelectionMode {
   return value === 'Single' || value === 0 ? 'Single' : 'Multiple'
@@ -52,6 +85,7 @@ function normalizeQuantityMode(value: unknown): MaterialRelationQuantityMode {
 function loadDraft(item?: MaterialRelationTemplate) {
   const revision = item?.draftRevision ?? item?.publishedRevision
   Object.assign(draft, {
+    name: item?.name ?? '',
     changeNote: item?.draftRevision?.changeNote ?? '',
     expectedRevisionRowVersion: item?.draftRevision?.rowVersion ?? null,
     groups: (revision?.groups ?? []).map(group => ({
@@ -72,29 +106,37 @@ function loadDraft(item?: MaterialRelationTemplate) {
       })),
     })),
   })
-  configuring.value = Boolean(revision)
+  configuring.value = Boolean(revision) || !props.mainMaterial
 }
 
 async function load() {
+  const run = ++loadRequest
   loading.value = true
   try {
-    const relationRows = await listMaterialRelationTemplates(props.token, props.canManage || props.canPublish)
-    const currentRelation = relationRows.find(item => item.mainMaterialId === props.mainMaterial.id)
+    const [relationRows, categories] = await Promise.all([listMaterialRelationTemplates(props.token, props.canManage || props.canPublish), listMaterialRelationCategories(props.token)])
+    const currentRelation = relationRows.find(item => activeTemplateId.value ? item.id === activeTemplateId.value : props.mainMaterial && relationHasMain(item, props.mainMaterial.id))
     const revision = currentRelation?.draftRevision ?? currentRelation?.publishedRevision
     const selectedCodes = [...new Set((revision?.groups ?? []).flatMap(group => group.options.map(option => option.materialCode)).filter(Boolean))]
     const materialBatches = await Promise.all([
       listMaterials(props.token, '', false, 100),
       ...selectedCodes.map(code => listMaterials(props.token, code, false, 20)),
     ])
+    if (run !== loadRequest) return
     const materialRows = [...new Map(materialBatches.flat().map(item => [item.id, item])).values()]
     relations.value = relationRows
+    categoryCatalog.value = categories
+    activeTemplateId.value = currentRelation?.id || ''
+    mainCache.value = currentRelation ? relationMains(currentRelation) : props.mainMaterial ? [asMain(props.mainMaterial)] : []
+    mainIds.value = mainCache.value.map(item => item.materialId)
     materials.value = materialRows
     materialSearchResults.value = materialBatches[0]
     loadDraft(currentRelation)
+    savedSignature.value = signature()
+    if (props.canManage) void searchMainOptions()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '关联物料加载失败')
   } finally {
-    loading.value = false
+    if (run === loadRequest) loading.value = false
   }
 }
 
@@ -137,6 +179,7 @@ function normalizeGroup(group: DraftGroup) {
 }
 
 async function save() {
+  if (!mainIds.value.length) return ElMessage.warning('请至少选择一个已批准的主物料')
   if (!draft.groups.length || draft.groups.some(group => !group.name.trim() || !group.options.length || group.options.some(option => !option.materialId))) {
     ElMessage.warning('每个配件组都需要名称和至少一个物料选项')
     return
@@ -144,8 +187,9 @@ async function save() {
   saving.value = true
   try {
     const input: SaveMaterialRelationTemplateInput = {
-      mainMaterialId: props.mainMaterial.id,
-      name: `${props.mainMaterial.materialCode}关联物料`,
+      mainMaterialId: mainIds.value[0]!,
+      mainMaterialIds: [...mainIds.value],
+      name: draft.name.trim() || `${mainRows.value[0]?.materialCode}关联物料`,
       changeNote: draft.changeNote.trim(),
       expectedRevisionRowVersion: draft.expectedRevisionRowVersion,
       groups: draft.groups.map((group, groupIndex) => ({
@@ -155,7 +199,8 @@ async function save() {
         options: group.options.map((option, optionIndex) => ({ ...option, sortOrder: optionIndex + 1 })),
       })),
     }
-    await saveMaterialRelationTemplate(input, props.token, relation.value?.id)
+    const saved = await saveMaterialRelationTemplate(input, props.token, relation.value?.id)
+    activeTemplateId.value = saved.id
     await load()
     emit('changed')
     ElMessage.success('关联物料修改已保存，发布后对工程师生效')
@@ -170,7 +215,8 @@ async function publish() {
   const current = relation.value
   if (!current?.draftRevision) return
   try {
-    await ElMessageBox.confirm(`发布 ${props.mainMaterial.materialCode} 的关联配置 V${current.draftRevision.version}？发布后工程师将按此版本选配。`, '发布关联配置', { type: 'warning', confirmButtonText: '确认发布' })
+    if (dirty.value) return ElMessage.warning('请先保存主料范围和配件规则的修改，再发布生效')
+    await ElMessageBox.confirm(`发布共享配置 V${current.draftRevision.version}？发布后对本组 ${mainIds.value.length} 个主料统一生效，工程师将按此版本选配。`, '发布关联配置', { type: 'warning', confirmButtonText: '确认发布' })
     await publishMaterialRelationTemplate(current.id, current.draftRevision.id, current.draftRevision.rowVersion, props.token)
     await load()
     emit('changed')
@@ -184,16 +230,14 @@ async function publish() {
 <template>
   <section v-loading="loading" class="material-relation-editor" aria-label="关联物料">
     <div class="material-relation-summary">
-      <div><span>物料料号</span><strong v-stocked-material="mainMaterial.materialCode">{{ mainMaterial.materialCode }}</strong></div>
-      <div><span>名称</span><strong v-stocked-material="mainMaterial.materialCode">{{ mainMaterial.name || '—' }}</strong></div>
-      <div><span>型号</span><strong>{{ mainMaterial.specification || '—' }}</strong></div>
-      <div><span>品牌</span><strong>{{ mainMaterial.brand || '—' }}</strong></div>
-      <div><span>备注</span><strong>{{ mainMaterial.remark || '—' }}</strong></div>
+      <label><span>配置名称</span><el-input v-model="draft.name" :maxlength="160" :disabled="!canManage || saving" placeholder="如：M6螺钉配套配置" aria-label="关联配置名称" /></label>
       <div class="material-relation-summary__status"><span>关联配置</span><el-tag :type="statusType">{{ relationStatus }}</el-tag></div>
     </div>
-
-    <MaterialRelationCategories :token="token" :material-id="mainMaterial.id" :can-manage="canManage" @loaded="hasCategory = $event" @changed="emit('changed')" />
-    <el-empty v-if="!configuring" :description="mainMaterial.approvalStatus === 'Approved' ? '该物料尚未配置关联物料' : '料品批准后方可配置关联物料'">
+    <div class="material-relation-main-toolbar"><strong>主物料 {{ mainIds.length }} 个</strong><el-select v-if="canManage" v-model="mainIds" multiple filterable remote reserve-keyword collapse-tags collapse-tags-tooltip :max-collapse-tags="2" :remote-method="searchMainOptions" :loading="mainSearchLoading" :disabled="saving" placeholder="搜索料号、名称或型号，多选主物料" aria-label="选择共享主物料"><el-option v-for="material in mainOptions" :key="material.materialId" :value="material.materialId" :disabled="!!mainOwner(material.materialId)" :label="`${material.materialCode} · ${material.materialName}${material.specification ? ` · ${material.specification}` : ''}`"><span v-stocked-material="material.materialCode">{{ material.materialCode }} · {{ material.materialName }} · {{ material.specification || '—' }}<small v-if="mainOwner(material.materialId)">（已归属：{{ mainOwner(material.materialId)?.name }}）</small></span></el-option></el-select></div>
+    <div class="material-relation-main-scroll"><table class="material-relation-main-table" aria-label="共享配置主物料"><thead><tr><th>物料料号</th><th>名称</th><th>型号</th><th>品牌</th><th>备注</th><th>标准物料分类</th><th v-if="canManage">操作</th></tr></thead><tbody><tr v-for="main in mainRows" :key="main.materialId"><td v-stocked-material="main.materialCode">{{ main.materialCode }}</td><td>{{ main.materialName }}</td><td>{{ main.specification || '—' }}</td><td>{{ main.brand || '—' }}</td><td>{{ main.remark || '—' }}</td><td><MaterialRelationCategories :token="token" :material-id="main.materialId" :can-manage="canManage" :catalog="categoryCatalog" compact @loaded="categoryLoaded(main.materialId, $event)" @changed="emit('changed')" /></td><td v-if="canManage"><el-button link type="danger" :disabled="saving" :aria-label="`移除主料 ${main.materialCode}`" @click="mainIds = mainIds.filter(id => id !== main.materialId)">移除</el-button></td></tr><tr v-if="!mainRows.length"><td :colspan="canManage ? 7 : 6">请选择至少一个已批准的主物料。</td></tr></tbody></table></div>
+    <p class="material-relation-main-hint">同组主料共享配件规则和版本；主料范围与规则保存草稿后统一发布生效。分类由各主料继承，缺分类请由标准化人员补选。</p>
+    <p v-if="publishedMains.length && (addedMainCount || removedMains.length)" class="material-relation-main-hint">当前生效 {{ publishedMains.length }} 个主料；本次拟新增 {{ addedMainCount }} 个<span v-if="removedMains.length">，移除 {{ removedMains.map(main => main.materialCode).join('、') }}</span>，统一发布后生效。</p>
+    <el-empty v-if="!configuring" :description="!mainMaterial || mainMaterial.approvalStatus === 'Approved' ? '该物料尚未配置关联物料' : '料品批准后方可配置关联物料'">
       <el-button v-if="canConfigure" type="primary" @click="startConfiguration">开始配置关联物料</el-button>
     </el-empty>
 
@@ -235,13 +279,14 @@ async function publish() {
         <el-button v-if="canManage" @click="addGroup">添加配件组</el-button>
         <span />
         <el-button v-if="canManage" type="primary" :loading="saving" @click="save">保存修改</el-button>
-        <el-button v-if="canPublish && relation?.draftRevision" type="success" :disabled="!hasCategory" :title="hasCategory ? '' : '请先由标准化人员补选主料的标准物料分类'" @click="publish">发布生效</el-button>
+        <el-button v-if="canPublish && relation?.draftRevision" type="success" :disabled="!hasCategory || dirty || saving" :title="hasCategory ? '' : '请先由标准化人员补选主料的标准物料分类'" @click="publish">发布生效</el-button>
       </div>
     </template>
   </section>
 </template>
 
 <style scoped>
+.material-relation-summary{grid-template-columns:minmax(0,1fr) 200px!important}.material-relation-summary>label{display:grid;grid-template-columns:80px minmax(0,1fr);align-items:center;gap:8px;padding:8px}.material-relation-main-toolbar{display:flex;align-items:center;gap:12px;margin:12px 0;font-size:12px}.material-relation-main-toolbar :deep(.el-select){flex:1;min-width:0}.material-relation-main-scroll{max-height:280px;overflow:auto;border:1px solid var(--pdm-border)}.material-relation-main-table{width:100%;border-collapse:collapse;font-size:12px}.material-relation-main-table th,.material-relation-main-table td{padding:8px;border-bottom:1px solid var(--pdm-border);text-align:left;vertical-align:top}.material-relation-main-table th{background:var(--pdm-surface-muted);white-space:nowrap}.material-relation-main-table :deep(.material-relation-categories){padding:0}.material-relation-main-hint{margin:8px 0;color:var(--pdm-muted);font-size:12px}
 .material-relation-editor{min-height:420px;max-height:72vh;overflow:auto;padding:1px 3px 2px}.material-relation-summary{display:grid;grid-template-columns:150px minmax(120px,1fr) minmax(120px,1fr) minmax(100px,.8fr) minmax(140px,1.1fr) 150px;overflow:hidden;border:1px solid var(--pdm-border);border-radius:7px}.material-relation-summary>div{display:grid;min-width:0;border-right:1px solid var(--pdm-border)}.material-relation-summary>div:last-child{border-right:0}.material-relation-summary span{padding:6px 9px;background:var(--pdm-surface-muted);color:var(--pdm-text-soft);font-size:11px;font-weight:600}.material-relation-summary strong{min-width:0;padding:8px 9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.material-relation-summary__status .el-tag{justify-self:start;margin:6px 9px}.material-relation-change-note{display:grid;margin-top:12px;grid-template-columns:80px minmax(0,1fr);align-items:center;gap:8px;color:var(--pdm-text-soft)}.material-relation-group{margin-top:12px;padding:12px;border:1px solid var(--pdm-border);border-radius:8px;background:var(--pdm-bg)}.material-relation-group>header{display:grid;grid-template-columns:minmax(260px,1fr) auto 150px auto;align-items:center;gap:10px}.material-relation-group-name{display:grid;min-width:0;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;color:var(--pdm-text-soft);font-size:11px;font-weight:600}.material-relation-group-name em{color:var(--pdm-danger);font-style:normal}.material-relation-option-table{margin:10px 0;overflow:hidden;border:1px solid var(--pdm-border);border-radius:6px}.material-relation-option-head,.material-relation-option-row{display:grid;width:100%;grid-template-columns:minmax(105px,1.1fr) minmax(0,.9fr) minmax(0,.9fr) minmax(0,.75fr) minmax(0,.85fr) minmax(105px,1.2fr) minmax(112px,1fr) 88px 64px 48px;align-items:center}.material-relation-option-head{background:var(--pdm-surface-muted);color:var(--pdm-text-soft);font-size:11px;font-weight:600}.material-relation-option-head span{min-width:0;padding:8px 6px;overflow:hidden;border-right:1px solid var(--pdm-border);text-overflow:ellipsis;white-space:nowrap}.material-relation-option-row{min-height:43px;border-top:1px solid var(--pdm-border-soft)}.material-relation-option-row>span{min-width:0;padding:7px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.material-relation-option-row>.el-select,.material-relation-option-row>.el-input,.material-relation-option-row>.el-input-number{min-width:0;margin:5px 4px;width:calc(100% - 8px)}.material-relation-option-row>.el-checkbox,.material-relation-option-row>.el-button{justify-self:center}.material-relation-option-empty{padding:20px;color:var(--pdm-muted);text-align:center}.material-relation-actions{display:flex;align-items:center;gap:8px;margin-top:12px}.material-relation-actions>span{flex:1}@media(max-width:1000px){.material-relation-summary{grid-template-columns:1fr 1fr}.material-relation-summary>div{border-bottom:1px solid var(--pdm-border)}.material-relation-group>header{grid-template-columns:1fr}.material-relation-group-name{grid-template-columns:80px minmax(0,1fr)}}
 </style>
 

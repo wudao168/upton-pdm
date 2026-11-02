@@ -360,13 +360,20 @@ public sealed partial class PdmAddin
     }
 
     // B02-B08: files come from the native inventory; structure is a separate index.
-    private async Task<IReadOnlyList<BatchOperationItem>> PrepareArchiveScopeAsync(
+    private Task<IReadOnlyList<BatchOperationItem>> PrepareArchiveScopeAsync(
         IReadOnlyList<BatchOperationItem> selected, Guid projectId, CancellationToken token)
+        => PrepareArchiveScopeCoreAsync(selected, projectId, token, false);
+
+    private async Task<IReadOnlyList<BatchOperationItem>> PrepareArchiveScopeCoreAsync(
+        IReadOnlyList<BatchOperationItem> selected, Guid projectId, CancellationToken token, bool saveBeforeReferenceCheck)
     {
+        using var scopeTiming = ArchiveReadContext.Measure(currentTree, "完整核对本次存档范围");
         ArchiveSession.Current?.SetStep(3, "正在核对本次选择的引用与配置…", selected.Count);
         await apiClient.RefreshArchiveWarningPolicyAsync(token);
         ArchiveMissingReferencePolicy.Prepare(currentTree, selected.Select(item => item.Node).ToArray());
         await apiClient.RefreshDocumentRulesAsync(token);
+        if (saveBeforeReferenceCheck)
+            await PrepareCurrentMemoryCopiesAsync(selected, token);
         // Catch known historical ownership/content conflicts before the expensive native scan.
         await IncludeHistoricalReferenceRepairsAsync(currentTree, selected, projectId, token, validateOnly: true);
         if (IsSolidWorksCommandActive())
@@ -514,6 +521,22 @@ public sealed partial class PdmAddin
         complete = await IncludeHistoricalReferenceRepairsAsync(verified, complete, projectId, token);
         complete = complete.Where(item => selected.Any(original => MatchesSelection(item, original)))
             .GroupBy(item => item.Node.FullPath, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
+        if (saveBeforeReferenceCheck)
+        {
+            // Structural identity and ownership are now known. Save before reading
+            // per-file reference evidence, which would immediately become stale.
+            await ValidateArchiveInputsBeforePreparationAsync(complete, projectId, token);
+            await ValidateBatchProjectAsync(complete, projectId);
+            bool saved;
+            using (ArchiveReadContext.Measure(verified, "完整引用核对前保存已选图档"))
+                saved = await EnsureBatchCheckInSavedStateAsync(complete, projectId, token);
+            token.ThrowIfCancellationRequested();
+            if (saved)
+            {
+                stage("已固定当前状态副本，重新核对结构后读取最终引用");
+                return await PrepareArchiveScopeAsync(complete, projectId, token);
+            }
+        }
         stage("提前核对原生引用的实际位置");
         complete = await RecoverPdmReferencesAsync(complete, projectId, token);
         ValidatePdmNativeDependencyPaths(complete, token);

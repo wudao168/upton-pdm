@@ -2,6 +2,7 @@ import { watch, type App, type ComponentPublicInstance, type Ref } from 'vue'
 import type { TableInstance } from 'element-plus'
 import { readTablePreference, tablePreferenceVersion, writeTablePreference } from './tablePreferences'
 import { ElMessage } from './statusMessage'
+import { isInactiveDom } from './activeDom'
 
 const minimumWidth = 32
 const hasFixedWidth = (column: { className?: string }) => column.className?.split(/\s+/).includes('pdm-column-fixed-width') === true
@@ -110,6 +111,7 @@ export function installColumnResize(app: App, owner: Document = document) {
   }
   function restoreTables() {
     for (const root of owner.querySelectorAll<HTMLElement>('table, .pdm-gantt-table, .pdm-project-browser-list')) {
+      if (isInactiveDom(root)) continue
       if (drag?.root === root || root.closest('.el-table')) continue
       if (root instanceof HTMLTableElement) {
         const structure = htmlHeaders(root)
@@ -145,6 +147,7 @@ export function installColumnResize(app: App, owner: Document = document) {
     elementTables.set(root, table)
     fittedTables.add(root)
     const fit = () => {
+      if (isInactiveDom(root)) return
       if (drag?.root === root) return
       const space = root.clientWidth - (table.layout.scrollY.value ? table.layout.gutterWidth : 0)
       const columns = table.store.states.columns.value

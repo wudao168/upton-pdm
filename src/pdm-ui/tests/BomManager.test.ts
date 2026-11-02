@@ -78,6 +78,28 @@ async function confirmTypedKit(wrapper: ReturnType<typeof mount>) {
 }
 
 describe('BomManager', () => {
+  it.each(['Standard', 'Electrical'] as const)('%s物料行发布版本同步发布记录，并在新记录返回后更新', async kind => {
+    showDetailedColumns()
+    const prefix = kind === 'Standard' ? 'S' : 'E'
+    const item: BomItem = { id: 'released-row', kind, sequence: 1, drawingNumber: 'PART-RELEASED', name: '已发布物料', quantity: 1, unit: '001', revision: 'W1', displayRevision: '未发布', complete: true }
+    const added = { ...item, id: 'new-row', sequence: 2, drawingNumber: 'PART-NEW', name: '新物料' }
+    const independent = { ...item, id: 'independent', sequence: 3, drawingNumber: 'PART-A', name: '独立版本物料', revision: 'A', displayRevision: 'A' }
+    const release = (number: number) => ({ id: `rp-${number}`, number: `RP-${number}`, state: '已发布', scope: kind === 'Standard' ? 'StandardFormal' : 'ElectricalFormal', publishedAt: `2026-10-${10 + number}`,
+      standardBomRevision: kind === 'Standard' ? `${prefix}-P700016-2-B0${number}` : undefined, electricalBomRevision: kind === 'Electrical' ? `${prefix}-P700016-2-B0${number}` : undefined,
+      standardBomSnapshot: kind === 'Standard' ? [item, independent] : [], electricalBomSnapshot: kind === 'Electrical' ? [item, independent] : [], nonStandardBomSnapshot: [], versionBindings: [],
+      steps: [], workflowVersion: 1, selectedBomItemIds: [item.id!], createsManufacturingBaseline: true, locksDocuments: false }) as ReleasePackageSummary
+    const wrapper = mount(BomManager, { props: { standard: kind === 'Standard' ? [item, added, independent] : [], electrical: kind === 'Electrical' ? [item, added, independent] : [], nonStandard: [], declarations: [], pending: false, editable: false, releasePackages: [release(6)] } })
+    await wrapper.findAll('button[role="tab"]')[kind === 'Standard' ? 1 : 3]!.trigger('click')
+    const index = wrapper.findAll('thead th').findIndex(header => header.text() === '发布版本')
+    const cell = (code: string) => wrapper.findAll('tr[data-row-index]').find(row => row.text().includes(code))!.findAll('td')[index]!.text()
+    expect(cell('PART-RELEASED')).toBe(`${prefix}-P700016-2-V06`)
+    expect(cell('PART-NEW')).toBe('未发布')
+    expect(cell('PART-A')).toBe('A')
+    await wrapper.setProps({ releasePackages: [release(6), release(7)] })
+    expect(cell('PART-RELEASED')).toBe(`${prefix}-P700016-2-V07`)
+    expect(cell('PART-NEW')).toBe('未发布')
+    wrapper.unmount()
+  })
   it.each(['Standard', 'NonStandard', 'Electrical'] as const)('keeps %s actions beside the difference filters and available when filters close', async kind => {
     const item: BomItem = { id: 'part', sequence: 1, drawingNumber: 'PART', name: '已发布物料', quantity: 1, unit: '个', revision: 'A', complete: true }
     const wrapper = mount(BomManager, { props: {
@@ -1499,7 +1521,7 @@ describe('BomManager', () => {
     expect(wrapper.get('.pdm-bom-save-action').text()).toBe('保存BOM')
     expect(releaseStrip.findAll('.pdm-bom-release-strip-actions')).toHaveLength(0)
     expect(releaseStrip.find('.pdm-bom-release-maintenance-actions').exists()).toBe(false)
-    expect(actions.findAll('button').map(button => button.text())).toEqual(['刷新BOM', '导入', '导出', '源数据', '库存推荐', '按U9校正', '处理审批 1', '保存BOM', '发起发布'])
+    expect(actions.findAll('button').map(button => button.text())).toEqual(['刷新BOM', '导入', '源数据', '处理审批 1', '导出', '库存推荐', '按U9校正', '保存BOM', '发起发布'])
     expect(releaseStrip.findAll('button').some(button => button.text() === '新增物料')).toBe(false)
 
     await actions.findAll('button').find(button => button.text() === '处理审批 1')!.trigger('click')
@@ -1513,7 +1535,7 @@ describe('BomManager', () => {
     expect(wrapper.find('.pdm-release-create-form').exists()).toBe(false)
 
     await wrapper.setProps({ releasePackages: [] })
-    expect(wrapper.findAll('.pdm-bom-release-strip-actions button').map(button => button.text())).toEqual(['刷新BOM', '导入', '导出', '源数据', '库存推荐', '按U9校正', '发布记录', '保存BOM', '发起发布'])
+    expect(wrapper.findAll('.pdm-bom-release-strip-actions button').map(button => button.text())).toEqual(['刷新BOM', '导入', '源数据', '发布记录', '导出', '库存推荐', '按U9校正', '保存BOM', '发起发布'])
   })
 
   it('limits standard and non-standard BOM publishing without restricting electrical publishing', async () => {

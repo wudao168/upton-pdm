@@ -1,4 +1,5 @@
-import type { BomItem, ReleasePackageSummary } from './types'
+import type { BomItem, BomVersion, ReleasePackageSummary } from './types'
+import { u9UnitOptions } from './u9Units'
 
 export function drawingRevisionLabel(revision?: string | null): string {
   const original = revision?.trim() || ''
@@ -33,16 +34,17 @@ export function documentVersionSummary(value: DrawingVersionInfo): string {
   return `图纸版本 ${documentDrawingVersion(value)} · 发布版本 ${documentPublishedVersion(value)}`
 }
 
-type RevisionItem = Pick<BomItem, 'kind' | 'revision' | 'sourceDocumentId' | 'displayRevision'>
+type RevisionItem = Pick<BomItem, 'kind' | 'revision' | 'sourceDocumentId' | 'displayRevision'> & Partial<Pick<BomItem, 'id' | 'drawingNumber' | 'unit'>>
 const isWork = (revision: string) => /^(?:[A-Z]-)?W[1-9]\d*$/i.test(revision)
 const releasedLabel = (revision: string) => isWork(revision) ? '未发布' : revision || '未发布'
-export const standardBomVersionLabel = (value?: string | null) => value?.trim().replace(/-B(?=\d+$)/, '-V') || ''
+export const bomVersionLabel = (value?: string | null) => value?.trim().replace(/-B(?=\d+$)/, '-V') || ''
 export function packageRevisionLabel(item: RevisionItem, release: ReleasePackageSummary): string {
   const binding = item.sourceDocumentId ? release.versionBindings?.find(row => row.documentId === item.sourceDocumentId) : undefined
   const published = release.state === '已发布' || release.state === 'Published'
   const standard = item.kind === 'Standard' || release.scope.startsWith('Standard')
-  const unavailable = standard
-    ? standardBomVersionLabel(release.standardBomRevision) || (published ? 'BOM发布版本待核对' : '待发布')
+  const material = standard || item.kind === 'Electrical' || release.scope.startsWith('Electrical')
+  const unavailable = material
+    ? bomVersionLabel(standard ? release.standardBomRevision : release.electricalBomRevision) || (published ? 'BOM发布版本待核对' : '待发布')
     : '未发布'
   if (binding) {
     if (published && binding.publish) {
@@ -51,20 +53,48 @@ export function packageRevisionLabel(item: RevisionItem, release: ReleasePackage
     }
     return isWork(binding.revision) ? binding.previousReleasedRevision || unavailable : releasedLabel(binding.revision)
   }
-  if (!standard && published && item.sourceDocumentId && isWork(item.revision)
+  if (!material && published && item.sourceDocumentId && isWork(item.revision)
     && ['NonStandardWithDrawing', 'NonStandardSupplement', 'LegacyCombined'].includes(release.scope)) return '历史版次待核对'
-  return standard && (isWork(item.revision) || !item.revision?.trim()) ? unavailable : releasedLabel(item.revision)
+  return material && (isWork(item.revision) || !item.revision?.trim()) ? unavailable : releasedLabel(item.revision)
 }
 
 export function packageRevisionHint(item: RevisionItem, release: ReleasePackageSummary): string {
   const label = packageRevisionLabel(item, release)
-  if ((item.kind === 'Standard' || release.scope.startsWith('Standard'))
-    && label === standardBomVersionLabel(release.standardBomRevision))
-    return `标准件BOM${['已发布', 'Published'].includes(release.state) ? '发布版本' : '拟发布版本'}：${label}；取自本次发布包冻结记录`
+  const standard = item.kind === 'Standard' || release.scope.startsWith('Standard')
+  if ((standard || item.kind === 'Electrical' || release.scope.startsWith('Electrical'))
+    && label === bomVersionLabel(standard ? release.standardBomRevision : release.electricalBomRevision))
+    return `${standard ? '标准件' : '电气件'}BOM${['已发布', 'Published'].includes(release.state) ? '发布版本' : '拟发布版本'}：${label}；取自本次发布包冻结记录`
   return `${drawingRevisionHint(item.revision, label)}；存档版本：${item.revision}`
 }
 
-export function bomRevisionLabel(item: RevisionItem, packages: ReleasePackageSummary[] = []): string {
+export function bomRevisionLabel(item: RevisionItem, packages: ReleasePackageSummary[] = [], versions: BomVersion[] = []): string {
+  const bomDisplay = !!item.displayRevision && /^(?:S|E)-/i.test(item.displayRevision)
+    && (packages.some(row => ['已发布', 'Published'].includes(row.state)) || versions.some(row => row.state === 'Released'))
+  if ((item.kind === 'Standard' || item.kind === 'Electrical') && (!item.displayRevision || ['未发布', '—'].includes(item.displayRevision) || bomDisplay)) {
+    if (!item.sourceDocumentId && item.revision.trim() && !isWork(item.revision)) return releasedLabel(item.revision)
+    const unitKey = (unit = '') => /^\d+$/.test(unit.trim()) ? unit.trim().padStart(3, '0')
+      : unit.trim() === '件' ? '001' : u9UnitOptions.find(row => row.name === unit.trim())?.code || unit.trim()
+    const matches = (row: BomItem) => !row.manuallyExcluded && !row.releaseExcluded && !row.pendingClassification
+      && (item.drawingNumber?.trim() ? row.drawingNumber.trim().toUpperCase() === item.drawingNumber.trim().toUpperCase() && unitKey(row.unit) === unitKey(item.unit) : !!item.id && row.id === item.id)
+    const released = packages.filter(row => row.state === '已发布' || row.state === 'Published')
+      .sort((a, b) => (Date.parse(b.publishedAt || b.createdAt || '') || 0) - (Date.parse(a.publishedAt || a.createdAt || '') || 0))
+    for (const release of released) {
+      const snapshot = item.kind === 'Standard' ? release.standardBomSnapshot : release.electricalBomSnapshot
+      const frozen = snapshot.find(matches)
+      if (!frozen) continue
+      const versionId = item.kind === 'Standard' ? release.standardBomVersionId : release.electricalBomVersionId
+      const versionLabel = versions.find(version => version.id === versionId && version.state === 'Released')?.label
+      return packageRevisionLabel({ ...frozen, kind: item.kind }, { ...release,
+        standardBomRevision: release.standardBomRevision || (item.kind === 'Standard' ? versionLabel : undefined),
+        electricalBomRevision: release.electricalBomRevision || (item.kind === 'Electrical' ? versionLabel : undefined) })
+    }
+    const version = versions.filter(row => row.kind === item.kind && row.state === 'Released').sort((a, b) => b.versionNumber - a.versionNumber).find(row => row.items.some(matches))
+    if (version) {
+      const frozen = version.items.find(matches)!
+      return isWork(frozen.revision) || !frozen.revision.trim() ? bomVersionLabel(version.label) : releasedLabel(frozen.revision)
+    }
+    if (bomDisplay) return releasedLabel(item.revision)
+  }
   if (item.displayRevision) return item.displayRevision
   if (item.sourceDocumentId) {
     const release = packages.filter(row => row.state === '已发布' || row.state === 'Published')

@@ -6,9 +6,22 @@ import DrawingReviewOverlayApp from '../src/components/DrawingReviewOverlayApp.v
 describe('审核浮层全局主题', () => {
   afterEach(() => { delete document.documentElement.dataset.pdmTheme })
 
+  it('requests the current state after mounting so navigation does not lose the initial theme', () => {
+    const postMessage = vi.fn()
+    const addEventListener = vi.fn()
+    Object.defineProperty(window, 'chrome', { configurable: true, value: { webview: { postMessage, addEventListener, removeEventListener: vi.fn() } } })
+    const wrapper = mount(DrawingReviewOverlayApp, { global: { stubs: { DrawingReviewPanel: true } } })
+    expect(addEventListener).toHaveBeenCalledWith('message', expect.any(Function))
+    expect(postMessage).toHaveBeenCalledWith({ type: 'review-overlay-action', payload: { action: 'state-ready' } })
+    expect(addEventListener.mock.invocationCallOrder[0]).toBeLessThan(postMessage.mock.invocationCallOrder[0]!)
+    wrapper.unmount()
+    delete window.chrome
+  })
+
   it.each(['a', 'c', 'p', 'o', 'g'])('接收到%s主题时同步全局变量，覆盖浮层及传送弹窗', async theme => {
     let receive: (event: MessageEvent) => void = () => {}
     Object.defineProperty(window, 'chrome', { configurable: true, value: { webview: {
+      postMessage: vi.fn(),
       addEventListener: vi.fn((_name, handler) => { receive = handler }),
       removeEventListener: vi.fn(),
     } } })

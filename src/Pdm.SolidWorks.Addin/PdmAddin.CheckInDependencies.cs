@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -22,7 +22,7 @@ public sealed partial class PdmAddin
         {
             // SearchFlag resolves relocated files; it can also change the native
             // current directory. Never leave that change in the user's session.
-            var resolved = ArchiveReadContext.Read(owner, "搜索解析尚未匹配的引用", () => application.GetDocumentDependencies2(owner.FullPath, false, true, false)) as Array;
+            var resolved = ArchiveReadContext.Read(owner, "搜索解析尚未匹配的引用", () => application.GetDocumentDependencies2(ArchiveFileReadPath(owner), false, true, false)) as Array;
             return BuildPdmDependencyAliases(saved, resolved, owner.FullPath, scope);
         }
         finally
@@ -81,6 +81,7 @@ public sealed partial class PdmAddin
         var sourcePaths = new HashSet<string>(nodes.Select(node => node.SourceReferencePath).Where(path => !string.IsNullOrWhiteSpace(path)), StringComparer.OrdinalIgnoreCase);
         var reads = new ArchiveReadContext(this);
         var session = ArchiveSession.Current;
+        var virtualOwners = NativeArchiveManifest.SelectedVirtualStorageOwners(currentTree, selected.Select(item => item.Node));
         session?.SetStep(session.DisplayStep, "正在核对本次文件引用…", selected.Count);
         var checkedFiles = 0;
         foreach (var owner in selected.Select(item => item.Node))
@@ -89,18 +90,20 @@ public sealed partial class PdmAddin
             token.ThrowIfCancellationRequested();
             if (!new[] { ".SLDPRT", ".SLDASM", ".SLDDRW" }.Contains(Path.GetExtension(owner.FullPath), StringComparer.OrdinalIgnoreCase)) continue;
             var loaded = reads.FindLoaded(owner.FullPath);
-            if (loaded?.GetSaveFlag() == true) continue;
-            var saved = ArchiveReadContext.Read(owner, "提前核对已保存引用", () => application.GetDocumentDependencies2(owner.FullPath, false, false, false)) as Array;
+            if (loaded?.GetSaveFlag() == true && MemoryCopy(owner) == null) continue;
+            var saved = ArchiveReadContext.Read(owner, "提前核对已保存引用", () => application.GetDocumentDependencies2(ArchiveFileReadPath(owner), false, false, false)) as Array;
             var aliases = ReadPdmResolvedDependencyAliases(owner, saved, scope);
             var sources = PdmDependencyEntries(saved, owner.FullPath).SelectMany(entry => entry.Value).ToArray();
             var verifiedEmbedded = NativeArchiveManifest.VerifiedEmbeddedReferences(owner, sources);
+            var brokenReference = BrokenReferencePredicate(owner, token);
             foreach (var source in sources)
             {
                 if (scope.Contains(source) || aliases.ContainsKey(source) || File.Exists(source)
                     || TryGetRecoveredArchiveReference(owner.FullPath, source, out _)
                     || verifiedEmbedded.Contains(source)
+                    || NativeArchiveManifest.TryGetSelectedVirtualStorageOwner(virtualOwners, source, out _)
                     || sourcePaths.Contains(source)
-                    || new SolidWorksReferenceTreeScanner(application).IsVerifiedBrokenContextReference(owner.FullPath, source)) continue;
+                    || brokenReference(source)) continue;
                 if (ArchiveMissingReferencePolicy.TryOmitMissing(owner, source) || RecordMissingSourceWarning(owner, source)) continue;
                 if (loaded != null && RecordMissingSourceWarning(owner, source, designSources: NativeDesignDependencies.ReadManaged(loaded))) continue;
                 throw new InvalidOperationException("存档前引用检查未通过：" + owner.FileName + " → " + Path.GetFileName(source)
@@ -115,6 +118,7 @@ public sealed partial class PdmAddin
         IReadOnlyList<BatchOperationItem> selected, Guid projectId, CancellationToken token)
     {
         var items = selected.ToList();
+        var virtualOwners = NativeArchiveManifest.SelectedVirtualStorageOwners(currentTree, selected.Select(item => item.Node));
         var nodes = selected.SelectMany(item => EnumerateArchiveNodes(item.Node))
             .Concat(EnumerateArchiveNodes(currentTree))
             .Where(node => node.Status != CadReferenceStatus.Virtual && !node.IsStoredImport
@@ -127,7 +131,6 @@ public sealed partial class PdmAddin
         var inspected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var directContextOwnersRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         IReadOnlyList<DocumentDto> projectDocuments = null;
-        var scanner = new SolidWorksReferenceTreeScanner(application);
         while (pending.Count > 0)
         {
             token.ThrowIfCancellationRequested();
@@ -138,7 +141,7 @@ public sealed partial class PdmAddin
             owner.ReferenceWarnings.RemoveAll(message => !message.StartsWith(ArchiveMissingReferencePolicy.WarningPrefix, StringComparison.Ordinal));
             ArchiveSession.Current?.ReportFile(0, 0, owner.FileName, "检入前正在核对受控引用；保留原文件和设计关联…");
             var before = ArchiveFileFingerprint.Read(owner.FullPath);
-            var values = ArchiveReadContext.Read(owner, "读取检入文件引用", () => application.GetDocumentDependencies2(owner.FullPath, false, false, false)) as Array;
+            var values = ArchiveReadContext.Read(owner, "读取检入文件引用", () => application.GetDocumentDependencies2(ArchiveFileReadPath(owner), false, false, false)) as Array;
             var nativeAliases = ReadPdmResolvedDependencyAliases(owner, values, nodes.Keys);
             if (values != null && values.Length % 2 != 0)
                 throw new InvalidOperationException("无法完整读取检入文件的引用清单，尚未上传：" + owner.FileName);
@@ -162,6 +165,7 @@ public sealed partial class PdmAddin
             }
             references.AddRange(owner.EmbeddedDesignDependencies);
             var verifiedEmbedded = NativeArchiveManifest.VerifiedEmbeddedReferences(owner, references);
+            var brokenReference = BrokenReferencePredicate(owner, token);
             foreach (var source in references.Distinct(StringComparer.OrdinalIgnoreCase))
             {
                 var path = ArchiveReferencePath.Resolve(source, Path.GetDirectoryName(owner.FullPath), "检入引用核对", owner.FullPath);
@@ -171,6 +175,11 @@ public sealed partial class PdmAddin
                     PluginDiagnosticLog.Record("检入引用解析", owner.FullPath + "；保存地址=" + path + "；原生解析目标=" + actual);
                     path = actual;
                 }
+                if (NativeArchiveManifest.TryGetSelectedVirtualStorageOwner(virtualOwners, path, out var virtualOwner))
+                {
+                    PluginDiagnosticLog.Record("虚拟引用保存归属", owner.FullPath + " → " + path + "；随本次已选父装配保存：" + virtualOwner);
+                    continue;
+                }
                 if (NativeArchiveManifest.IsInterconnectCachePath(path) || IsSolidWorksTemporaryVirtualComponentPath(path))
                 {
                     // Embedded content belongs to its native parent, not a separate
@@ -178,7 +187,13 @@ public sealed partial class PdmAddin
                     if (!verifiedEmbedded.Contains(path)
                         && !EnumerateArchiveNodes(owner).Any(node => PathsEqual(node.FullPath, path)
                         && (node.Status == CadReferenceStatus.Virtual || node.IsStoredImport)))
+                    {
+                        // The earlier scope check may already have recorded this
+                        // missing, unselected cache as a warning. Keep that policy;
+                        // a warning is not proof that its content is embedded.
+                        if (ArchiveMissingReferencePolicy.TryOmitMissing(owner, path)) continue;
                         throw new InvalidOperationException("引用临时组件的保存归属尚未确认，未开始上传：" + owner.FileName + " → " + Path.GetFileName(path));
+                    }
                     continue;
                 }
                 if (PathsEqual(owner.FullPath, path)) continue;
@@ -202,7 +217,7 @@ public sealed partial class PdmAddin
                 }
                 if (dependency == null && !File.Exists(path))
                 {
-                    if (scanner.IsVerifiedBrokenContextReference(owner.FullPath, path)) continue;
+                    if (brokenReference(path)) continue;
                     if (RecordMissingSourceWarning(owner, path, designSources: designSources)) continue;
                     PluginDiagnosticLog.Record("检入缺失依赖", owner.FullPath + " → " + path);
                     throw new InvalidOperationException("检入文件仍引用未收集的文件，尚未上传：" + owner.FileName

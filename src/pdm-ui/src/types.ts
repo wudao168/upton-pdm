@@ -1022,6 +1022,8 @@ export interface UserNotification {
   createdAt: string
   readAt?: string
   dueDate?: string
+  resolvedAt?: string | null
+  isSenderReceipt?: boolean
 }
 
 export interface ApprovalTransferCandidate {
@@ -1536,7 +1538,18 @@ export interface MaterialRelationGroup {
   options: MaterialRelationOption[]
 }
 
+export interface MaterialRelationMainMaterial {
+  materialId: string
+  materialCode: string
+  materialName: string
+  specification?: string | null
+  brand?: string | null
+  remark?: string | null
+  standardLibraryCategories?: StandardLibraryCategory[]
+}
+
 export interface MaterialRelationRevision {
+  mainMaterials?: MaterialRelationMainMaterial[]
   id: string
   version: number
   state: MaterialRelationRevisionState
@@ -1550,6 +1563,8 @@ export interface MaterialRelationRevision {
 }
 
 export interface MaterialRelationTemplate {
+  mainMaterials?: MaterialRelationMainMaterial[]
+  publishedMainMaterials?: MaterialRelationMainMaterial[]
   standardLibraryCategories?: StandardLibraryCategory[]
   id: string
   mainMaterialId: string
@@ -1566,6 +1581,7 @@ export interface MaterialRelationTemplate {
 
 export interface SaveMaterialRelationTemplateInput {
   mainMaterialId: string
+  mainMaterialIds?: string[]
   name: string
   changeNote?: string | null
   expectedRevisionRowVersion?: number | null

@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
+import ObjectInspector from './ObjectInspector.vue'
+import MoreActions from './MoreActions.vue'
 import { rememberedTab } from '../pagePreference'
 import { projectHeaderHtml, projectHeaderCss } from '../exportFormat'
 import { clearGlobalStatus, ElMessage } from '../statusMessage'
@@ -11,6 +14,7 @@ import { materialImageLimit } from '../materialImages'
 import MaterialInventory from './MaterialInventory.vue'
 import BomHeaderMaterialDirectory from './BomHeaderMaterialDirectory.vue'
 import MaterialRelationDirectory from './MaterialRelationDirectory.vue'
+import { relationMains } from '../materialRelationMains'
 import CategoryNavigation from './CategoryNavigation.vue'
 import EngineeringKitLibrary from './EngineeringKitLibrary.vue'
 import {
@@ -91,12 +95,22 @@ const props = withDefaults(defineProps<{
   canManageRelations?: boolean
   canPublishRelations?: boolean
   canManageKits?: boolean
+  canViewKits?: boolean
+  canViewBomHeaders?: boolean
   active?: boolean
 }>(), { canCreate: false, canDecideMaterialCode: false, canReceiveNotices: false, requestedTab: 'materials', canViewRelations: false, canManageRelations: false, canPublishRelations: false, canManageKits: false })
 const emit = defineEmits<{ noticeCountsChange: [counts: { syncTasks: number; codeApprovals: number }] }>()
 const canCreateMaterial = computed(() => props.canCreate || props.canEdit)
 
 const activeTab = rememberedTab<string>('materials.tab', 'materials', ['materials','inventory','relations','kits','bom-headers','code-approvals','numbering-settings','rules'])
+const canViewMaterialTab = (tab: string) => tab === 'relations' ? props.canViewRelations
+  : tab === 'kits' ? props.canViewKits || props.canManageKits
+  : tab === 'bom-headers' ? props.canViewBomHeaders
+  : tab === 'numbering-settings' ? props.canManageIntegration
+  : ['materials', 'inventory', 'code-approvals', 'rules'].includes(tab)
+watch(() => [props.canViewRelations, props.canViewKits, props.canManageKits, props.canViewBomHeaders, props.canManageIntegration], () => {
+  if (!canViewMaterialTab(activeTab.value)) activeTab.value = 'materials'
+}, { flush: 'sync' })
 const inventoryRequestedMaterialCode = ref('')
 const inventoryRequestKey = ref(0)
 const rowInventoryLoading = reactive<Record<string, boolean>>({})
@@ -346,7 +360,7 @@ function selectPageDrafts() {
   materialTable.value?.clearSelection()
   for (const item of pageDrafts.value) materialTable.value?.toggleRowSelection(item, true)
 }
-const materialRowClass = ({ row }: { row: PdmMaterial }) => isPendingMaterial(row) ? 'is-pending-material' : ''
+const materialRowClass = ({ row }: { row: PdmMaterial }) => [isPendingMaterial(row) ? 'is-pending-material' : '', inspectionOpen.value && inspection.value?.id === row.id ? 'is-inspected' : ''].filter(Boolean).join(' ')
 function compareMaterials(left: PdmMaterial, right: PdmMaterial) {
   const sortBy = materialSortBy.value
   if (sortBy && createdAtOrder.value) {
@@ -577,7 +591,7 @@ const materialCodePlaceholder = computed(() => {
 })
 const selectedMaterial = computed(() => selectedMaterials.value.length === 1 ? selectedMaterials.value[0] : null)
 const editingMaterial = computed(() => materials.value.find(item => item.id === editingId.value) ?? null)
-const relationByMaterialId = computed(() => new Map(materialRelations.value.map(item => [item.mainMaterialId, item])))
+const relationByMaterialId = computed(() => new Map(materialRelations.value.flatMap(item => [...relationMains(item), ...relationMains(item, false)].map(main => [main.materialId, item] as const))))
 const canEditSelected = computed(() => Boolean(selectedMaterial.value
   && !selectedMaterial.value.isArchived))
 const canBatchEditSelected = computed(() => selectedMaterials.value.length > 1
@@ -908,6 +922,7 @@ function openBatchEdit() {
 let materialLoadVersion = 0
 let locatingNewMaterial = false
 async function loadTabData(tab: string) {
+  if (!canViewMaterialTab(tab)) { activeTab.value = 'materials'; return }
   if (tab === 'code-approvals') { await loadCodeApplications(); return }
   if (tab === 'relations') { await loadMaterialRelations(); return }
   if ((tab !== 'numbering-settings' && tab !== 'categories') || !props.canManageIntegration) return
@@ -1726,16 +1741,21 @@ function showPreview(task: MaterialSyncTask) {
 }
 
 const normalizeRequestedTab = (value: string) => value === 'tasks' ? 'code-approvals' : value
-watch(() => props.requestedTab, value => { if (value) activeTab.value = normalizeRequestedTab(value) })
+watch(() => props.requestedTab, value => { if (value) activeTab.value = canViewMaterialTab(normalizeRequestedTab(value)) ? normalizeRequestedTab(value) : 'materials' })
 onMounted(() => {
   if (props.requestedTab !== 'materials') activeTab.value = normalizeRequestedTab(props.requestedTab)
-  if (activeTab.value === 'relations' && !props.canViewRelations || activeTab.value === 'numbering-settings' && !props.canManageIntegration) activeTab.value = 'materials'
+  if (!canViewMaterialTab(activeTab.value)) activeTab.value = 'materials'
   void loadMainDirectory()
   void resumeMaterialSyncBatch()
 })
+const inspection = ref<PdmMaterial>(), inspectionOpen = ref(false)
+const inspectionFields = computed(() => inspection.value ? ['materialCode','name','specification','brand','material','remark'].map((key,index) => ({ label: ['料号','名称','型号','品牌','材质','备注'][index]!, value: String(inspection.value![key as keyof PdmMaterial] ?? '—') })) : [])
+function inspectMaterial(row: PdmMaterial) { inspection.value = row; inspectionOpen.value = true }
+watch(() => props.token, () => { inspectionOpen.value = false; inspection.value = undefined })
 </script>
 
 <template>
+  <ObjectInspector v-model="inspectionOpen" :title="inspection?.name || '料品详情'" :fields="inspectionFields" />
   <section class="material-page pdm-panel pdm-loading-host">
     <SquareLoader v-if="loading" overlay label="正在加载料品数据" />
     <el-tabs v-model="activeTab" class="material-tabs">
@@ -1745,20 +1765,20 @@ onMounted(() => {
           <CategoryNavigation class="material-category-nav" :nodes="materialCategoryNodes" :model-value="selectedMaterialCategoryCode" aria-label="料品分类" all-label="全部料品" :collapsed="categoryNavCollapsed" collapsible default-expand-all @toggle="categoryNavCollapsed = !categoryNavCollapsed" @update:model-value="selectMaterialCategory" />
           <section class="material-master-content" aria-label="料品列表">
             <div class="material-toolbar pdm-toolbar">
-              <div class="material-toolbar__actions pdm-toolbar__group"><el-button @click="load">刷新</el-button><el-button class="material-select-drafts" aria-label="勾选本页草稿" :disabled="!pageDrafts.length || loading || materialPageLoading || queryingInventory" @click="selectPageDrafts">勾选本页草稿</el-button><el-button v-if="canCreateMaterial" type="primary" @click="openCreate">新增料品</el-button><el-button v-if="canCreateMaterial" @click="openMaterialImport">批量导入</el-button><el-button v-if="canEdit" :disabled="selectedMaterials.length > 1 ? !canBatchEditSelected : !canEditSelected" @click="selectedMaterials.length > 1 ? openBatchEdit() : openSelectedEdit()">{{ selectedMaterials.length > 1 ? '批量编辑' : '编辑' }}</el-button><el-button v-if="canApprove" :disabled="!canApproveSelected" @click="approveSelected">批准</el-button><el-button :disabled="selectedMaterials.length === 0" :loading="queryingU9" @click="querySelected">查询U9C</el-button><el-button :loading="queryingInventory" :disabled="Object.values(rowInventoryLoading).some(Boolean)" @click="querySelectedInventory">库存查询</el-button><el-button v-if="canEdit" :disabled="!canArchiveSelected" @click="archiveSelected">停用</el-button><el-button v-if="canEdit" :disabled="!canReactivateSelected" @click="reactivateSelected">启用</el-button><el-button v-if="canEdit" type="danger" :disabled="!canDeleteSelected" @click="deleteSelected">删除</el-button></div>
+              <div class="material-toolbar__actions pdm-toolbar__group"><el-button @click="load">刷新</el-button><el-button class="material-select-drafts" aria-label="勾选本页草稿" :disabled="!pageDrafts.length || loading || materialPageLoading || queryingInventory" @click="selectPageDrafts">勾选本页草稿</el-button><el-button v-if="canCreateMaterial" type="primary" @click="openCreate">新增料品</el-button><el-button v-if="canEdit" :disabled="selectedMaterials.length > 1 ? !canBatchEditSelected : !canEditSelected" @click="selectedMaterials.length > 1 ? openBatchEdit() : openSelectedEdit()">{{ selectedMaterials.length > 1 ? '批量编辑' : '编辑' }}</el-button><el-button v-if="canApprove" :disabled="!canApproveSelected" @click="approveSelected">批准</el-button><MoreActions><el-button v-if="canCreateMaterial" @click="openMaterialImport">批量导入</el-button><el-button :disabled="selectedMaterials.length === 0" :loading="queryingU9" @click="querySelected">查询U9C</el-button><el-button :loading="queryingInventory" :disabled="Object.values(rowInventoryLoading).some(Boolean)" @click="querySelectedInventory">库存查询</el-button><el-button v-if="canEdit" :disabled="!canArchiveSelected" @click="archiveSelected">停用</el-button><el-button v-if="canEdit" :disabled="!canReactivateSelected" @click="reactivateSelected">启用</el-button><el-button v-if="canEdit" type="danger" :disabled="!canDeleteSelected" @click="deleteSelected">删除</el-button></MoreActions></div>
               <div class="material-toolbar__filters pdm-toolbar__group"><el-checkbox v-model="showArchived" @change="searchMaterials">显示已停用</el-checkbox><el-select v-model="brandFilter" class="material-brand-filter" clearable filterable remote remote-show-suffix aria-label="筛选品牌" placeholder="筛选品牌" :remote-method="loadBrandFilterOptions" :loading="brandFilterLoading" @visible-change="openBrandFilter"><el-option v-for="brand in brandFilterOptions" :key="brand" :label="brand" :value="brand" /></el-select>
-              <el-input v-model="query" class="material-toolbar__search" clearable placeholder="搜索编码、名称、规格或分类" @keyup.enter="searchMaterials" />
-              <el-button type="primary" class="material-toolbar__search-button" @click="searchMaterials">搜索</el-button>
+              <SearchField><el-input v-model="query" class="material-toolbar__search" clearable placeholder="搜索编码、名称、规格或分类" @keyup.enter="searchMaterials" /><template #action><el-button type="primary" class="material-toolbar__search-button" @click="searchMaterials">搜索</el-button></template></SearchField>
+
               </div>
             </div>
             <div class="material-table-shell pdm-loading-host">
               <SquareLoader v-if="materialPageLoading" overlay label="正在查询料品主档" />
               <el-table ref="materialTable" class="material-table" data-pdm-column-layout="scroll" :data="pagedMaterials" :row-class-name="materialRowClass" height="100%" stripe row-key="id" table-layout="fixed" :fit="true" :empty-text="query.trim() || brandFilter || selectedMaterialCategoryCode ? '没有符合筛选条件的料品' : '尚未创建PLM料品'" :default-sort="{ prop: 'createdAt', order: 'descending' }" @sort-change="sortMaterials" @selection-change="selectedMaterials = $event">
           <el-table-column type="selection" width="38" fixed="left" class-name="pdm-column-fixed-width" />
-          <el-table-column prop="materialCode" label="物料编码" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="140" fixed="left" show-overflow-tooltip ><template #default="{ row }"><span v-stocked-material="row.materialCode">{{ row.materialCode }}</span></template></el-table-column>
+          <el-table-column prop="materialCode" label="物料编码" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="140" fixed="left" show-overflow-tooltip ><template #default="{ row }"><button type="button" class="pdm-inspect-link pdm-text-action" v-stocked-material="row.materialCode" :aria-label="`查看料品 ${row.materialCode} 详情`" @click.stop="inspectMaterial(row)">{{ row.materialCode }}</button></template></el-table-column>
           <el-table-column prop="name" label="名称" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="180" fixed="left" show-overflow-tooltip><template #default="{ row }"><el-tag v-if="row.isRecommended" size="small" type="warning">推荐</el-tag> <span v-stocked-material="row.materialCode">{{ row.name }}</span></template></el-table-column>
           <el-table-column v-if="canViewRelations" label="关联配置" min-width="88"><template #default="{ row }"><el-button link :type="relationStatus(row).type" :aria-label="`查看 ${row.materialCode} 的关联物料`" @click.stop="openRelationDetail(row)">{{ relationStatus(row).label }}</el-button></template></el-table-column>
-          <el-table-column label="引用" min-width="48"><template #default="{ row }">{{ row.referenceCount ?? 0 }}</template></el-table-column>
+          <el-table-column label="引用" align="right" min-width="48"><template #default="{ row }">{{ row.referenceCount ?? 0 }}</template></el-table-column>
           <el-table-column label="库存" min-width="72"><template #default="{ row }"><el-tooltip :content="rowInventoryTooltip(row)" placement="top"><el-button link :type="rowInventoryErrors[row.id] ? 'danger' : 'primary'" :disabled="!row.materialCode || queryingInventory" :loading="rowInventoryLoading[row.id]" :aria-label="`查询 ${row.materialCode} 的库存`" @click.stop="queryRowInventory(row)">{{ rowInventoryErrors[row.id] ? '查询失败' : rowInventoryResults[row.id] ? formatInventoryQuantity(rowInventoryResults[row.id].quantity) : '查询' }}</el-button></el-tooltip></template></el-table-column>
           <el-table-column prop="specification" label="规格" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
           <el-table-column prop="brand" label="品牌" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="56" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
@@ -1767,7 +1787,7 @@ onMounted(() => {
           <el-table-column label="重量" min-width="54" show-overflow-tooltip><template #default="{ row }">{{ weightLabel(row) }}</template></el-table-column>
           <el-table-column label="备注" min-width="180" show-overflow-tooltip><template #default="{ row }">{{ row.remark || '—' }}</template></el-table-column>
           <el-table-column label="选型建议" min-width="100" show-overflow-tooltip><template #default="{ row }">{{ row.selectionAdvice || '—' }}</template></el-table-column>
-          <el-table-column label="参考价格" min-width="72" show-overflow-tooltip><template #default="{ row }">{{ referencePriceLabel(row) }}</template></el-table-column>
+          <el-table-column label="参考价格" align="right" min-width="72" show-overflow-tooltip><template #default="{ row }">{{ referencePriceLabel(row) }}</template></el-table-column>
           <el-table-column label="3D" min-width="48"><template #default="{ row }"><el-button link type="primary" :disabled="attachmentCount(row, 'Model3D') === 0" @click.stop="openAttachmentViewer(row, 'Model3D')">{{ attachmentCount(row, 'Model3D') || '—' }}</el-button></template></el-table-column>
           <el-table-column label="资料" min-width="48"><template #default="{ row }"><el-button link type="primary" :disabled="attachmentCount(row, 'Document') === 0" @click.stop="openAttachmentViewer(row, 'Document')">{{ attachmentCount(row, 'Document') || '—' }}</el-button></template></el-table-column>
           <el-table-column prop="createdBy" label="创建人" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.createdBy) }}</template></el-table-column>
@@ -1801,12 +1821,12 @@ onMounted(() => {
         />
       </el-tab-pane>
 
-      <el-tab-pane label="料品套件" name="kits">
+      <el-tab-pane v-if="canViewKits || canManageKits" label="料品套件" name="kits">
         <template #label><span class="material-tab-label"><Package :size="16" />料品套件</span></template>
         <EngineeringKitLibrary v-if="activeTab === 'kits'" :token="token" :can-manage="canManageKits" :active="active !== false" />
       </el-tab-pane>
 
-      <el-tab-pane label="BOM料号" name="bom-headers">
+      <el-tab-pane v-if="canViewBomHeaders" label="BOM料号" name="bom-headers">
         <template #label><span class="material-tab-label"><ListTree :size="16" />BOM料号</span></template>
         <BomHeaderMaterialDirectory v-if="activeTab === 'bom-headers'" :token="token" />
       </el-tab-pane>

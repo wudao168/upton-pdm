@@ -16,7 +16,7 @@ export async function stageBrowserCadArchive(id: string, target: BrowserCadTarge
   if (!response.ok) { const detail = await response.json().catch(() => ({})); throw new Error(detail.message || '文件接收失败，请检查权限及文件大小后重试。') }
   return await response.json() as BrowserCadTicket
 }
-export const readWorkHours = (from: string, to: string, report: boolean, token: string) => requestJson<WorkHoursView>(`/api/work-hours?${new URLSearchParams({ from, to, report: String(report) })}`, {}, token)
+export const readWorkHours = (from: string, to: string, report: boolean, token: string, summaryOnly = false) => requestJson<WorkHoursView>(`/api/work-hours?${new URLSearchParams({ from, to, report: String(report), ...(summaryOnly ? { summaryOnly: 'true' } : {}) })}`, {}, token)
 export const saveWorkHours = (input: SaveWorkHours, token: string) => requestJson<WorkHoursView>('/api/work-hours', { method: 'PUT', body: JSON.stringify(input) }, token)
 export const moveWorkHoursDay = (input: MoveWorkHoursDay, token: string) => requestJson<WorkHoursView>('/api/work-hours/move-day', { method: 'POST', body: JSON.stringify(input) }, token)
 export const readWorkHoursHistory = (month: string, token: string) => requestJson<WorkHourRevision[]>(`/api/work-hours/history?month=${encodeURIComponent(month)}`, {}, token)
@@ -1600,6 +1600,13 @@ export function login(username: string, password: string): Promise<AuthSession> 
   })
 }
 
+export const readDingTalkOfficeBootstrap = (companyId?: string) => requestJson<{ enabled: boolean; companyId: string; corpId: string; appKey: string }>(`/api/integrations/dingtalk/office/bootstrap${companyId ? `?companyId=${encodeURIComponent(companyId)}` : ''}`)
+export const loginDingTalkOffice = (companyId: string, code: string) => requestJson<AuthSession>('/api/integrations/dingtalk/office/login', {
+  method: 'POST', body: JSON.stringify({ companyId, code, clientInstanceId: browserLoginInstance() }),
+})
+export const readDingTalkEmployees = (token: string) => requestJson<import('./dingtalk').DingTalkEmployees>('/api/settings/dingtalk/employees', {}, token)
+export const saveDingTalkEmployees = (bindings: import('./dingtalk').DingTalkEmployeeBinding[], expectedRowVersion: number, token: string) => requestJson<import('./dingtalk').DingTalkEmployees>('/api/settings/dingtalk/employees', { method: 'PUT', body: JSON.stringify({ bindings, expectedRowVersion }) }, token)
+
 export function resumeSession(resumeToken: string, desktopHandoff = false): Promise<AuthSession> {
   return requestJson<AuthSession>('/api/auth/resume', {
     method: 'POST',
@@ -2478,6 +2485,10 @@ export function listProjectAudit(projectId: string, token: string): Promise<Audi
   return requestJson(`/api/projects/${projectId}/audit?take=200`, {}, token)
 }
 
+export function readProjectOverviewRecords(projectId: string, token: string): Promise<AuditEntry[]> {
+  return requestJson(`/api/projects/${projectId}/overview-records`, {}, token)
+}
+
 export function addProjectManagerNote(projectId: string, content: string, token: string): Promise<AuditEntry> {
   return requestJson(`/api/projects/${projectId}/manager-notes`, { method: 'POST', body: JSON.stringify({ content }) }, token)
 }
@@ -2643,10 +2654,15 @@ export async function loadBomSourceData(projectId: string, token: string): Promi
   return (await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/bom-source-data`, {}, token)).map(mapBomItem)
 }
 
-export async function loadProjectWorkspace(projectId: string, token: string, includeSourceData = true, permissions: readonly string[] = []): Promise<ProjectWorkspaceData> {
-  const project = await withApiContext('项目详情', requestJson<ApiProject>(`/api/projects/${projectId}`, {}, token))
-  const mappedProject = mapProject(project)
-  const canView = (tab: string) => canViewProjectTab(permissions, tab)
+export type BomHierarchyMetric = { projectId: string; kind: 'Standard' | 'NonStandard' | 'Electrical'; itemCount: number; effectiveCount: number; unresolvedCount: number; version?: string; releasedAt?: string; longLeadPublishedAt?: string; longLeadPublished?: boolean }
+export function readBomHierarchyOverview(projectId: string, token: string) {
+  return requestJson<Array<{ projectId: string; categories: BomHierarchyMetric[]; headers: import('./types').ProjectBomHeader[]; error?: string }>>(`/api/projects/${projectId}/bom-headers/overview`, {}, token)
+}
+
+export async function loadProjectWorkspace(projectId: string, token: string, includeSourceData = true, permissions: readonly string[] = [], tabs?: readonly string[], knownProject?: ProjectSummary): Promise<ProjectWorkspaceData> {
+  const mappedProject = knownProject ?? mapProject(await withApiContext('项目详情', requestJson<ApiProject>(`/api/projects/${projectId}`, {}, token)))
+  const project = { id: projectId }
+  const canView = (tab: string) => (!tabs || tabs.includes(tab)) && canViewProjectTab(permissions, tab)
   if (!mappedProject.canReadContent) {
     return { project: mappedProject, moduleErrors: [], root: emptyProjectRoot(project), hasDocuments: false, documents: [], documentRelations: [], folders: [], standardBom: [], nonStandardBom: [], unclassifiedBom: [], electricalBom: [], bomSourceData: [], bomEmptyDeclarations: [], bomVersions: [], bomBaselines: [], drawingReviews: [], materialCodeApplications: [], releasePackages: [], releasePackage: null }
   }
@@ -3350,7 +3366,7 @@ export const readStockedMaterialSettings = (token: string) => requestJson<import
 export const saveStockedMaterialSettings = (settings: import('./stockedMaterials').StockedMaterialSettings, expectedRowVersion: number, token: string) =>
   requestJson<import('./stockedMaterials').StockedMaterialSettingsView>('/api/stocked-materials/settings', { method: 'PUT', body: JSON.stringify({ settings, expectedRowVersion }) }, token)
 
-export interface ArchiveWarningPolicy { revision: number; blockAll: boolean; blockingCodes: string[] }
+export interface ArchiveWarningPolicy { revision: number; blockAll: boolean; blockingCodes: string[]; maxBatchRequestMiB?: number | null }
 export interface ArchiveWarningDefinition { code: string; name: string; source: string; supported: boolean; alwaysBlocks: boolean }
 export const getArchiveWarningPolicy = (token: string) => requestJson<ArchiveWarningPolicy>('/api/archive-warning-policy', {}, token)
 export const getArchiveWarningCatalog = (token: string) => requestJson<ArchiveWarningDefinition[]>('/api/archive-warning-policy/catalog', {}, token)

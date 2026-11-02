@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
@@ -677,8 +678,8 @@ onMounted(async () => {
         <el-select v-model="categoryFilter" clearable filterable placeholder="全部分类" aria-label="模板分类"><el-option v-for="item in categories" :key="item" :label="item" :value="item" /></el-select>
         <el-select v-model="platformFilter" clearable filterable placeholder="全部平台" aria-label="模板平台"><el-option v-for="item in platforms" :key="item" :label="item" :value="item" /></el-select>
         <el-select v-model="vendorFilter" clearable filterable placeholder="全部厂商" aria-label="模板厂商"><el-option v-for="vendor in vendors" :key="vendor" :label="vendor" :value="vendor" /></el-select>
-        <el-input v-model="search" clearable placeholder="搜索编号、名称、平台或标签" aria-label="搜索程序模板" class="program-template-search" @keyup.enter="appliedSearch = search" />
-        <el-button class="program-template-search-action" type="primary" @click="appliedSearch = search">搜索</el-button>
+        <SearchField><el-input v-model="search" clearable placeholder="搜索编号、名称、平台或标签" aria-label="搜索程序模板" class="program-template-search" @keyup.enter="appliedSearch = search" /><template #action><el-button class="program-template-search-action" type="primary" @click="appliedSearch = search">搜索</el-button></template></SearchField>
+
         <el-button class="program-template-refresh" :icon="RefreshCw" :loading="loading" @click="load">刷新</el-button>
         <el-button v-if="canSubmit" class="program-template-upload" type="primary" :icon="Plus" @click="openCreate">上传模板</el-button>
         <el-button v-if="canManageOptions" @click="openOptionMaintenance">选项维护</el-button>

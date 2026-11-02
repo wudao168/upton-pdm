@@ -1,3 +1,4 @@
+import { isInactiveDom } from './activeDom'
 type Side = 'top' | 'right' | 'bottom' | 'left'
 export type ContainerBorderBox = {
   element: HTMLElement
@@ -63,6 +64,7 @@ export function installContainerBorders(owner: Document = document) {
     frame = 0
     const boxes: ContainerBorderBox[] = []
     for (const element of owner.querySelectorAll<HTMLElement>(candidates)) {
+      if (isInactiveDom(element)) continue
       const rect = element.getBoundingClientRect()
       if (!rect.width || !rect.height || rect.right < 0 || rect.bottom < 0 || rect.left > view!.innerWidth || rect.top > view!.innerHeight) continue
       const style = view!.getComputedStyle(element)

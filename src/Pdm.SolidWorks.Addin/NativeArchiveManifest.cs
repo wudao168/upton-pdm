@@ -249,6 +249,47 @@ internal static class NativeArchiveManifest
             || ImportCacheKey(path) is string importKey && imports.TryGetValue(importKey, out var matches) && matches == 1), StringComparer.OrdinalIgnoreCase);
     }
 
+    internal static IReadOnlyDictionary<string, string> SelectedVirtualStorageOwners(CadTreeNode context, IEnumerable<CadTreeNode> selected)
+    {
+        var selectedNodes = selected.ToArray();
+        var selectedPaths = new HashSet<string>(selectedNodes.Select(node => node.FullPath), StringComparer.OrdinalIgnoreCase);
+        var owners = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        var visited = new HashSet<Tuple<CadTreeNode, string, bool>>();
+        void Collect(CadTreeNode node, string storageOwner, bool parentVirtual)
+        {
+            if (node == null || !visited.Add(Tuple.Create(node, storageOwner, parentVirtual))) return;
+            var embedded = node.Status == CadReferenceStatus.Virtual
+                || parentVirtual && VirtualComponentKey(node.FullPath) != null;
+            if (!embedded) storageOwner = node.FullPath;
+            else
+                foreach (var path in new[] { node.FullPath, node.SourceReferencePath })
+                {
+                    var key = VirtualComponentKey(path);
+                    if (key == null) continue;
+                    if (!owners.TryGetValue(key, out var matches)) owners[key] = matches = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    matches.Add(storageOwner ?? string.Empty);
+                }
+            foreach (var child in node.Children.Where(child => child.Role == CadReferenceRole.Component))
+                Collect(child, storageOwner, embedded);
+        }
+        Collect(context, null, false);
+        foreach (var node in selectedNodes) Collect(node, null, false);
+        // A cache's existence or leaf name is not storage evidence. Require the
+        // complete VC identity, an unambiguous native owner and explicit selection.
+        var stableOwners = new HashSet<string>(owners.Values.Where(matches => matches.Count == 1).Select(matches => matches.Single())
+            .Where(selectedPaths.Contains).Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(path => VirtualComponentKey(path) == null && ImportedComponentStorage.IsStableOwner(path)), StringComparer.OrdinalIgnoreCase);
+        return owners.Where(pair => pair.Value.Count == 1 && stableOwners.Contains(pair.Value.Single()))
+            .ToDictionary(pair => pair.Key, pair => pair.Value.Single(), StringComparer.OrdinalIgnoreCase);
+    }
+
+    internal static bool TryGetSelectedVirtualStorageOwner(IReadOnlyDictionary<string, string> owners, string path, out string owner)
+    {
+        owner = null;
+        var key = VirtualComponentKey(path);
+        return key != null && owners.TryGetValue(key, out owner);
+    }
+
     private static string ImportCacheKey(string path)
     {
         if (!IsInterconnectCachePath(path)) return null;

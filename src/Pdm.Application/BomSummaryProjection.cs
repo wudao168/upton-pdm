@@ -17,7 +17,7 @@ public static class BomSummaryProjection
         Unit = Normalize(item.Unit), Surface = Normalize(item.SurfaceTreatment), Weight = Normalize(item.Weight), Remark = Normalize(item.Remark), Revision = Normalize(item.Revision)
     }) : string.Empty;
 
-    public static IReadOnlyList<BomItem> Group(IReadOnlyList<BomItem> items)
+    public static IReadOnlyList<BomItem> Group(IReadOnlyList<BomItem> items, bool includeFingerprint = true)
     {
         var codesByAttributes = items.Where(item => !string.IsNullOrWhiteSpace(item.DrawingNumber) && item.SourceDocumentId.HasValue)
             .GroupBy(AttributeKey).Where(group => group.Select(item => Normalize(item.DrawingNumber)).Distinct().Count() == 1)
@@ -43,7 +43,7 @@ public static class BomSummaryProjection
                 SummaryItemIds = members.Select(item => item.Id).ToArray(),
                 ReleaseReviewTokens = members.SelectMany(item => item.ReleaseReviewTokens ?? new Dictionary<Guid, string>()).ToDictionary(pair => pair.Key, pair => pair.Value),
                 ReleaseConfirmation = members.All(item => item.ReleaseConfirmation is not null) ? members[0].ReleaseConfirmation : null,
-                SummaryFingerprint = Fingerprint(members)
+                SummaryFingerprint = includeFingerprint ? Fingerprint(members) : null
             };
         }).ToArray();
     }

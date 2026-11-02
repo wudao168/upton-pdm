@@ -8,10 +8,10 @@ using Upton.Pdm.Infrastructure;
 
 namespace Upton.Pdm.Domain.Tests;
 
-public sealed class ReleaseRecoveryTests
+public sealed partial class ReleaseRecoveryTests
 {
     [Fact]
-    public async Task UnfinishedConversionNotifiesDivisionAssistantsAndAllWorkflowPeopleOnceThenReportsRecovery()
+    public async Task UnfinishedConversionNotifiesSubmitterAndDivisionAssistantsOnceThenReportsRecovery()
     {
         using var f = await Fixture.CreateAsync();
         var company = (await f.Repository.GetOrganizationDirectoryAsync(default)).Organizations.First(item => item.IsActive).Id;
@@ -41,7 +41,7 @@ public sealed class ReleaseRecoveryTests
                 Task("foreign-reviewer", null, 3), Task("inactive-reviewer", null, 4), Task("system-admin", null, 5)] };
         ((ConcurrentDictionary<Guid, ReleasePackage>)typeof(InMemoryPdmRepository).GetField("packages", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(f.Repository)!)[package.Id] = package;
         await f.Service.ReconcileDeliveryAsync(package.Id, default);
-        foreach (var name in new[] { "submitter", "assigned-reviewer", "actual-reviewer", "assistant", "mixed-admin" })
+        foreach (var name in new[] { "submitter", "assistant", "mixed-admin" })
         {
             var notice = Assert.Single(await f.Repository.ListUserNotificationsAsync(name, 100, default));
             Assert.Equal(package.Id, notice.ReleasePackageId);
@@ -52,7 +52,7 @@ public sealed class ReleaseRecoveryTests
         }
         await f.Service.ReconcileDeliveryAsync(package.Id, default);
         Assert.Single(await f.Repository.ListUserNotificationsAsync("assistant", 100, default));
-        foreach (var name in new[] { "other-assistant", "foreign-reviewer", "inactive-reviewer", "system-admin" })
+        foreach (var name in new[] { "assigned-reviewer", "actual-reviewer", "other-assistant", "foreign-reviewer", "inactive-reviewer", "system-admin" })
             Assert.Empty(await f.Repository.ListUserNotificationsAsync(name, 100, default));
         Assert.Equal(0, f.Converter.Calls);
         package = await f.Repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Pending, null, 0, DateTimeOffset.UtcNow, default);

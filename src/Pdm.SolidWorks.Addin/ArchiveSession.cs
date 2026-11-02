@@ -332,6 +332,7 @@ internal sealed class ArchiveSessionWindow : Form
     private string lastEntry;
     private bool finished;
     private bool hiddenWithOwner;
+    private readonly CadStatusWindow cadStatusWindow = new CadStatusWindow();
     private Form selectionForm;
     public int RefreshTicks { get; private set; }
 
@@ -723,7 +724,7 @@ internal sealed class ArchiveSessionWindow : Form
         {
             if (candidate == Handle) return;
             if (!IsWindowVisible(candidate)) continue;
-            if (candidate == session.OwnerHandle || CadOwnsForeground(candidate))
+            if (candidate == session.OwnerHandle || CadOwnsForeground(candidate) || cadStatusWindow.Matches(candidate, session.OwnerHandle))
             {
                 if (previous != IntPtr.Zero && (GetWindowLongPtr(previous, -20).ToInt64() & 8) != 0) previous = IntPtr.Zero;
                 SetWindowPos(Handle, previous, 0, 0, 0, 0, flags | 0x0040u);

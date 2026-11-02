@@ -10,6 +10,31 @@ namespace Upton.Pdm.Domain.Tests;
 [Collection("BomHeader automatic queue")]
 public sealed class BomHeaderServiceTests
 {
+    [Fact]
+    public async Task HierarchySummaryMatchesCurrentCountsAndRejectsInvisibleProjects()
+    {
+        var time = TimeProvider.System;
+        var repository = new InMemoryPdmRepository(time);
+        var materials = new InMemoryMaterialRepository(time, repository);
+        var service = new BomHeaderService(repository, materials, new MaterialService(materials, repository, new TestProtector(), new AvailableCodeClient(), time), null!, time);
+        var visible = await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, default);
+        var root = visible.First(project => project.ParentProjectId is null && project.CanReadContent);
+        var rows = await service.ReadHierarchyAsync(root.Id, "admin", UserRole.Administrator, default);
+        Assert.Contains(rows, row => row.ProjectId == root.Id);
+        foreach (var row in rows)
+        {
+            Assert.Null(row.Error);
+            Assert.Equal(3, row.Categories.Count);
+            foreach (var category in row.Categories)
+            {
+                var rules = (await repository.GetSystemSettingsAsync(default)).ValidationRules;
+                var items = BomSummaryProjection.Group((await repository.GetBomAsync(row.ProjectId, category.Kind, default)).Select(item => item with { IsComplete = BomValidationFieldCatalog.IsComplete(item, category.Kind, rules) }).ToArray());
+                Assert.Equal(items.Count(item => !item.IsManuallyExcluded && !item.IsPendingClassification), category.ItemCount);
+                Assert.Equal(items.Count(item => !item.IsManuallyExcluded && (item.IsPendingRemoval || item.IsPendingClassification || item.IsManualUnmatched || !item.IsComplete)), category.UnresolvedCount);
+            }
+        }
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.ReadHierarchyAsync(Guid.NewGuid(), "admin", UserRole.Administrator, default));
+    }
     private sealed class ReceiptObserver : IReleaseDeliveryObserver
     {
         public List<U9ReleaseScope> Scopes { get; } = [];

@@ -52,6 +52,10 @@ const child: ProjectSummary = {
 
 const emptyDirectory: OrganizationDirectory = { organizations: [], units: [], memberships: [], managers: [], users: [] }
 
+function userFilter(wrapper: ReturnType<typeof mount>, label: string) {
+  return wrapper.findAllComponents({ name: 'ElSelect' }).find(select => select.props('ariaLabel') === label)!
+}
+
 function mountProjectManager(directory = emptyDirectory, sourceProjects = [parent, child], administrator = false, canEdit = true, canDelete = false, canCreate = false, canCreateSubproject = false) {
   return mount(ProjectManager, {
     props: {
@@ -85,6 +89,31 @@ function mountProjectManager(directory = emptyDirectory, sourceProjects = [paren
 }
 
 describe('ProjectManager', () => {
+  it('默认每页50个主项目，可切页和调整条数，筛选后返回首页且子项目随父项目展示', async () => {
+    const projects = Array.from({ length: 75 }, (_, index) => ({ ...parent, id: `page-${index}`, rootProjectId: `page-${index}`, code: `P${700000 + index}`, name: `分页项目${index}` }))
+    const nested = { ...child, id: 'nested-24', parentProjectId: 'page-24', rootProjectId: 'page-24', code: 'P700024-1', name: '分页子项目' }
+    const wrapper = mountProjectManager(emptyDirectory, [...projects, nested])
+    await flushPromises()
+    const pager = wrapper.findComponent({ name: 'ElPagination' })
+    expect(pager.props('pageSize')).toBe(50)
+    expect(pager.props('pageSizes')).toEqual([50, 100, 200])
+    expect(pager.props('total')).toBe(75)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(50)
+    pager.vm.$emit('update:current-page', 2); await flushPromises()
+    expect(wrapper.findAll('tbody tr')).toHaveLength(25)
+    expect(wrapper.get('tbody').text()).toContain('P700024')
+    await wrapper.get('[aria-label="展开P700024的子项目"]').trigger('click')
+    expect(wrapper.get('tbody').text()).toContain('P700024-1')
+    pager.vm.$emit('update:page-size', 100); await flushPromises()
+    expect(pager.props('currentPage')).toBe(1)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(76)
+    await wrapper.get('[aria-label="搜索项目"]').setValue('分页项目74')
+    await wrapper.get('[aria-label="搜索项目"]').trigger('keyup.enter'); await flushPromises()
+    expect(pager.props('currentPage')).toBe(1)
+    expect(pager.props('total')).toBe(1)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    wrapper.unmount()
+  }, 15000)
   it('按项目类型切换主项目，子项目随主项目显示并保留搜索筛选', async () => {
     const research = { ...parent, id: 'research', code: 'R700001', projectTypeCode: 'R', name: '研发主项目' }
     const researchChild = { ...child, id: 'research-child', code: 'R700001-1', parentProjectId: research.id, rootProjectId: research.id, projectTypeCode: undefined, name: '研发下级设备' }
@@ -252,8 +281,8 @@ describe('ProjectManager', () => {
     const parentCells = wrapper.get('tbody tr').findAll('td')
     expect(parentCells[7].text()).toBe('项目经理甲、项目经理乙')
     expect(parentCells[8].text()).toBe('主设甲')
-    expect(wrapper.get('[aria-label="项目经理筛选"]').text()).toContain('项目经理甲')
-    expect(wrapper.get('[aria-label="主设工程师筛选"]').text()).toContain('主设甲')
+    expect(userFilter(wrapper, '项目经理筛选').findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))).toContain('项目经理甲')
+    expect(userFilter(wrapper, '主设工程师筛选').findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))).toContain('主设甲')
     expect(wrapper.text()).not.toContain('project-manager')
     expect(wrapper.text()).not.toContain('design-lead')
 
@@ -283,7 +312,7 @@ describe('ProjectManager', () => {
     expect(toolbar.element.children[2].classList.contains('pdm-project-filters')).toBe(true)
     expect(createButton.text()).toContain('创建主项目')
     expect(toolbar.find('[aria-label="搜索项目"]').exists()).toBe(true)
-    expect(toolbar.findAll('.pdm-project-filters > *')).toHaveLength(6)
+    expect(toolbar.findAll('.pdm-project-filters > *')).toHaveLength(5)
     expect(list.find('.pdm-project-number-scroll').exists()).toBe(true)
   })
 
@@ -305,7 +334,7 @@ describe('ProjectManager', () => {
     })
     await wrapper.get('.pdm-project-create-action').trigger('click')
 
-    const customerSelect = wrapper.getComponent({ name: 'ElSelect' })
+    const customerSelect = wrapper.findAllComponents({ name: 'ElSelect' }).find(select => select.classes().includes('pdm-project-customer-select'))!
     expect(customerSelect.props('filterable')).toBe(true)
     expect(customerSelect.props('placeholder')).toBe('输入客户名称或编码筛选')
     expect(customerSelect.findAllComponents({ name: 'ElOption' }).map(item => item.props('label'))).toEqual([
@@ -440,7 +469,7 @@ describe('ProjectManager', () => {
     const wrapper = mountProjectManager(directory, [{ ...parent, canAssignExecutionUnit: true }])
 
     await wrapper.get('[aria-label="分配事业部 P700001"]').trigger('click')
-    const options = wrapper.findAllComponents({ name: 'ElOption' })
+    const options = wrapper.findAllComponents({ name: 'ElDialog' }).find(dialog => dialog.props('modelValue') === true)!.findAllComponents({ name: 'ElOption' })
 
     expect(options.map(item => item.props('label'))).toEqual(['T2事业部', 'T10事业部', '标准化', '普通部门'])
     expect(options.map(item => item.props('disabled'))).toEqual([false, false, false, true])
@@ -497,12 +526,14 @@ describe('ProjectManager', () => {
     expect(wrapper.text()).not.toContain('P700002')
 
     await wrapper.get('[aria-label="事业部筛选"]').setValue('')
-    await wrapper.get('[aria-label="项目经理筛选"]').setValue('project-manager-2')
+    userFilter(wrapper, '项目经理筛选').vm.$emit('update:modelValue', 'project-manager-2')
+    await flushPromises()
     expect(wrapper.text()).toContain('P700001')
     expect(wrapper.text()).not.toContain('P700002')
 
-    await wrapper.get('[aria-label="项目经理筛选"]').setValue('')
-    await wrapper.get('[aria-label="主设工程师筛选"]').setValue('child-designer')
+    userFilter(wrapper, '项目经理筛选').vm.$emit('update:modelValue', '')
+    userFilter(wrapper, '主设工程师筛选').vm.$emit('update:modelValue', 'child-designer')
+    await flushPromises()
     expect(wrapper.findAll('tr.is-child')).toHaveLength(0)
     expect(wrapper.get('[aria-label="展开全部项目明细"]').attributes('disabled')).toBeUndefined()
     await wrapper.get('[aria-label="展开全部项目明细"]').trigger('click')

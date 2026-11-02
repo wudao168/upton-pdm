@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
+import UserSelect from './UserSelect'
 import { computed, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, Search } from '@lucide/vue'
+import { Plus, RefreshCw } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import ProjectApplicationSnapshot from './ProjectApplicationSnapshot.vue'
 import { PdmApiError, readProjectApplications, readProjectApplication, saveProjectApplication, actProjectApplication, approveProjectApplication } from '../api'
@@ -93,7 +95,7 @@ watch(() => [props.active, props.requestedId] as const, ([active, id]) => { if (
   <section class="pdm-panel project-applications" aria-label="立项申请" :aria-busy="loading">
     <div class="application-toolbar">
       <button v-if="view?.canApply" class="pdm-primary-action" :disabled="pending" @click="edit()"><Plus :size="15" />新建申请</button>
-      <label class="application-search"><Search :size="14" /><input v-model="query" aria-label="搜索立项申请" placeholder="申请单号、客户、项目或人员"></label>
+      <label class="application-search"><SearchField><input v-model="query" aria-label="搜索立项申请" placeholder="申请单号、客户、项目或人员"></SearchField></label>
       <select v-model="status" aria-label="筛选申请状态"><option value="">全部状态</option><option v-for="item in ['草稿','待审批','已退回','已撤回','已批准']" :key="item">{{ item }}</option></select>
       <select v-model="kind" aria-label="筛选立项方式"><option value="">全部立项方式</option><option value="正常">正常立项</option><option value="特殊">特殊立项</option></select>
       <button class="pdm-secondary-action" :disabled="loading" @click="load"><RefreshCw :size="14" />刷新</button>
@@ -117,8 +119,8 @@ watch(() => [props.active, props.requestedId] as const, ([active, id]) => { if (
         <label class="application-wide">项目名称 <em>*</em><input v-model="form.projectName" aria-label="项目名称" maxlength="200"></label>
         <label>订单日期（选填）<input v-model="form.orderDate" aria-label="订单日期" type="date"></label>
         <label>交货日期 <em>*</em><input v-model="form.deliveryDate" aria-label="交货日期" type="date"></label>
-        <label>销售人员 <em>*</em><el-select v-model="form.salesUsername" aria-label="销售人员" filterable placeholder="请选择销售人员"><el-option v-for="person in view?.people" :key="person.username" :value="person.username" :label="person.displayName" /></el-select></label>
-        <label>售前工程师 <em>*</em><el-select v-model="form.presalesUsernames" aria-label="售前工程师" multiple filterable placeholder="可选择多位工程师"><el-option v-for="person in view?.people" :key="person.username" :value="person.username" :label="person.displayName" /></el-select></label>
+        <label>销售人员 <em>*</em><UserSelect v-model="form.salesUsername" aria-label="销售人员" filterable placeholder="请选择销售人员"><el-option v-for="person in view?.people" :key="person.username" :value="person.username" :label="person.displayName" /></UserSelect></label>
+        <label>售前工程师 <em>*</em><UserSelect v-model="form.presalesUsernames" aria-label="售前工程师" multiple filterable placeholder="可选择多位工程师"><el-option v-for="person in view?.people" :key="person.username" :value="person.username" :label="person.displayName" /></UserSelect></label>
         <label class="application-wide">备注<textarea v-model="form.remarks" aria-label="备注" maxlength="2000" rows="3" placeholder="特殊立项可在此说明提前启动原因"></textarea></label>
       </form>
       <template #footer><button class="pdm-secondary-action" :disabled="pending" @click="formOpen = false">取消</button><button v-if="editing?.status !== '待审批'" class="pdm-secondary-action" :disabled="pending" @click="save(false)">保存草稿</button><button class="pdm-primary-action" :disabled="pending" @click="save(true)">{{ pending ? '正在保存…' : editing?.status === '待审批' ? '保存修改并重新提交' : '提交申请' }}</button></template>
@@ -140,8 +142,8 @@ watch(() => [props.active, props.requestedId] as const, ([active, id]) => { if (
               <label class="application-wide">项目名称 <em>*</em><input v-model="approvalData.projectName" aria-label="审批项目名称" maxlength="200"></label>
               <label>订单日期（选填）<input v-model="approvalData.orderDate" aria-label="审批订单日期" type="date"></label>
               <label>交货日期 <em>*</em><input v-model="approvalData.deliveryDate" aria-label="审批交货日期" type="date"></label>
-              <label>销售人员 <em>*</em><el-select v-model="approvalData.salesUsername" aria-label="审批销售人员" filterable placeholder="请选择销售人员"><el-option v-for="person in view?.people" :key="person.username" :value="person.username" :label="person.displayName" /></el-select></label>
-              <label>售前工程师 <em>*</em><el-select v-model="approvalData.presalesUsernames" aria-label="审批售前工程师" multiple filterable placeholder="可选择多位工程师"><el-option v-for="person in view?.people" :key="person.username" :value="person.username" :label="person.displayName" /></el-select></label>
+              <label>销售人员 <em>*</em><UserSelect v-model="approvalData.salesUsername" aria-label="审批销售人员" filterable placeholder="请选择销售人员"><el-option v-for="person in view?.people" :key="person.username" :value="person.username" :label="person.displayName" /></UserSelect></label>
+              <label>售前工程师 <em>*</em><UserSelect v-model="approvalData.presalesUsernames" aria-label="审批售前工程师" multiple filterable placeholder="可选择多位工程师"><el-option v-for="person in view?.people" :key="person.username" :value="person.username" :label="person.displayName" /></UserSelect></label>
               <label class="application-wide">备注<textarea v-model="approvalData.remarks" aria-label="审批备注" maxlength="2000" rows="2"></textarea></label>
               <label>项目类型<select v-model="approval.projectTypeCode" aria-label="项目类型"><option v-for="item in view?.numberingOptions.projectTypes.filter(x => x.isActive)" :key="item.code" :value="item.code">{{ item.code }} · {{ item.name }}</option></select></label>
               <label>设备类型<select v-model.number="approval.equipmentTypeCode" aria-label="设备类型"><option v-for="item in view?.numberingOptions.equipmentTypes.filter(x => x.isActive)" :key="item.code" :value="item.code">{{ item.code }} · {{ item.name }}</option></select></label>

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
+import UserSelect from './UserSelect'
 import RawDrawerPanel from './RawDrawerPanel.vue'
 import PanelActions from './PanelActions.vue'
 import { ElAutocomplete } from 'element-plus'
@@ -16,7 +18,8 @@ const projectAccess = useProjectCenterAccess()
 
 export type ProjectTab = 'overview' | 'information' | 'budget' | 'project-plan' | 'opl' | 'files' | 'validation-plan' | 'documents' | 'bom' | 'release' | 'procurement' | 'records'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
+  active?: boolean
   project: ProjectSummary
   projects: ProjectSummary[]
   activeTab: ProjectTab
@@ -33,7 +36,7 @@ const props = defineProps<{
   onPreviewProjectCopy?: (projectId: string, input: ProjectCopyOptionsInput) => Promise<ProjectCopyPreview>
   onCopyProjectContent?: (projectId: string, input: ProjectCopyOptionsInput) => Promise<ProjectCopyResult>
   onContentResetComplete?: () => Promise<unknown>
-}>()
+}>(), { active: true })
 const emit = defineEmits<{ back: []; switch: [projectId: string]; tab: [tab: ProjectTab, hasUpdates?: boolean] }>()
 const displayUserName = useUserDisplayName()
 const { pending: tabUpdates } = useProjectTabUpdates(props)
@@ -216,14 +219,14 @@ function drawingDocumentCount(project: ProjectSummary) {
     <aside class="pdm-project-sidebar-stack" aria-label="项目基本信息与全部项目号">
       <section class="pdm-project-sidebar__context" aria-label="当前项目">
         <div class="pdm-project-switcher">
-          <div class="pdm-project-switcher__display" :class="{ 'is-disabled': switchConfirmationPending || Boolean(switchingProjectId) }" @keydown.esc.capture="quickProjectQuery = ''">
+          <SearchField class="pdm-project-switcher__display" :class="{ 'is-disabled': switchConfirmationPending || Boolean(switchingProjectId) }" @keydown.esc.capture="quickProjectQuery = ''">
             <ElAutocomplete v-model="quickProjectQuery" class="pdm-project-switcher__input" aria-label="快速搜索项目" :placeholder="`${rootProject.code} · ${rootProject.name}`" :title="`${rootProject.code} · ${rootProject.name}`"
               :fetch-suggestions="quickProjectSuggestions" :debounce="100" :highlight-first-item="true" popper-class="pdm-project-quick-search" :disabled="switchConfirmationPending || Boolean(switchingProjectId)"
               @select="item => selectQuickProject(item.id)" @blur="quickProjectQuery = ''">
               <template #default="{ item }"><strong :title="item.code">{{ item.code }}</strong><small :title="item.name">{{ item.name }}</small></template>
             </ElAutocomplete>
-            <button type="button" class="pdm-project-switcher__search-icon" aria-label="浏览项目" aria-haspopup="dialog" :aria-expanded="projectBrowserOpen" :disabled="switchConfirmationPending || Boolean(switchingProjectId)" title="浏览项目" @click="projectBrowserOpen = true"><Search class="arrow" :size="16" /></button>
-          </div>
+            <template #action><button type="button" class="pdm-project-switcher__search-icon" aria-label="浏览项目" aria-haspopup="dialog" :aria-expanded="projectBrowserOpen" :disabled="switchConfirmationPending || Boolean(switchingProjectId)" title="浏览项目" @click="projectBrowserOpen = true">搜索</button></template>
+          </SearchField>
         </div>
       </section>
 
@@ -296,13 +299,13 @@ function drawingDocumentCount(project: ProjectSummary) {
 
         </div><div class="pdm-panel-header-actions" :ref="setActionTarget"></div></div><button type="button" class="pdm-icon-button" aria-label="关闭项目浏览" :disabled="switchConfirmationPending" @click="closeProjectBrowser">×</button></header></template>
         <div class="pdm-project-browser-search">
-          <input v-model="projectSearchQuery" type="search" aria-label="搜索项目" placeholder="搜索项目号、名称、客户、型号或序列号" autofocus>
+          <SearchField><input v-model="projectSearchQuery" type="search" aria-label="搜索项目" placeholder="搜索项目号、名称、客户、型号或序列号" autofocus></SearchField>
           <span>找到 {{ filteredRootProjects.length }} 个项目</span>
         </div>
         <div class="pdm-project-browser-filters" aria-label="项目筛选">
           <select v-model="projectCustomerFilter" aria-label="客户筛选"><option value="">全部客户</option><option v-for="customer in projectCustomerOptions" :key="customer" :value="customer">{{ customer }}</option></select>
           <select v-model="projectExecutionUnitFilter" aria-label="事业部筛选"><option value="">全部事业部</option><option v-for="unit in projectExecutionUnitOptions" :key="unit" :value="unit">{{ unit }}</option></select>
-          <select v-model="projectPersonFilter" aria-label="人员筛选"><option value="">全部人员</option><option v-for="person in projectPersonOptions" :key="person" :value="person">{{ displayUserName(person) }}</option></select>
+          <UserSelect v-model="projectPersonFilter" aria-label="人员筛选"><option value="">全部人员</option><option v-for="person in projectPersonOptions" :key="person" :value="person">{{ displayUserName(person) }}</option></UserSelect>
         </div>
         <div class="pdm-project-browser-list" role="listbox" aria-label="项目搜索结果">
           <div class="pdm-project-browser-table-head" aria-hidden="true"><span>项目号</span><span>名称</span><span>客户名称</span><span>型号</span><span>序列号</span><span>操作</span></div>

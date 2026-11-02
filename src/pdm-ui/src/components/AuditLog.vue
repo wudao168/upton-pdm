@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
+import { matchesUserSearch } from '../userSearch'
 import ProjectTodoFields from './ProjectTodoFields.vue'
 import { computed, ref, watch } from 'vue'
 import { addProjectManagerNote, createProjectTodo } from '../api'
@@ -34,7 +36,8 @@ const displayedEntries = computed(() => {
     .filter(entry => {
       if (!normalizedQuery) return true
       const project = projectById.value.get(entry.projectId ?? '')
-      return [entry.detail, entry.actor, project?.code, project?.name]
+      return matchesUserSearch(props.users?.find(user => user.username === entry.actor)?.displayName ?? entry.actor, normalizedQuery, entry.actor)
+        || [entry.detail, entry.actor, project?.code, project?.name]
         .some(value => value?.toLocaleLowerCase().includes(normalizedQuery))
     })
 })
@@ -101,7 +104,7 @@ async function saveProjectRecord() {
       <button v-if="projectId && token && canAddManagerNote" type="button" class="pdm-primary-action" @click="openProjectRecordDrawer">新增记录</button>
       <el-select v-model="projectFilter" clearable placeholder="全部项目" aria-label="筛选项目"><el-option v-for="project in noteProjects" :key="project.id" :label="`${project.code} · ${project.name}`" :value="project.id" /></el-select>
       <el-select v-model="recordTypeFilter" clearable placeholder="全部记录类型" aria-label="筛选记录类型"><el-option label="项目经理备注" value="项目经理备注" /><el-option label="待办推送" value="待办推送" /><el-option label="BOM发布" value="BOM发布" /><el-option label="任务完成" value="任务完成" /></el-select>
-      <input v-model="query" type="search" placeholder="搜索内容、人员或项目" aria-label="搜索项目记录" />
+      <SearchField><input v-model="query" type="search" placeholder="搜索内容、人员或项目" aria-label="搜索项目记录" /></SearchField>
     </div>
     <div class="pdm-table-scroll"><table class="pdm-edit-table"><thead><tr v-if="projectRecordsOnly"><th>时间</th><th>项目</th><th>人员</th><th>记录类型</th><th>内容</th></tr><tr v-else><th>时间</th><th>人员</th><th>操作</th><th>对象</th><th>详情</th></tr></thead><tbody><tr v-for="entry in displayedEntries" :key="entry.id"><template v-if="projectRecordsOnly"><td>{{ new Date(entry.occurredAt).toLocaleString() }}</td><td>{{ projectById.get(entry.projectId ?? '')?.code ?? '—' }}<small v-if="projectById.get(entry.projectId ?? '')">{{ projectById.get(entry.projectId ?? '')?.name }}</small></td><td>{{ displayUserName(entry.actor) }}</td><td>{{ projectRecordLabel(entry) }}</td><td v-if="entry.action === 'project.todo.create'">待办人：{{ todoRecordDetail(entry).recipients }} · 截止日期：{{ todoRecordDetail(entry).dueDate }}<small>{{ todoRecordDetail(entry).content }}</small></td><td v-else>{{ entry.detail }}</td></template><template v-else><td>{{ new Date(entry.occurredAt).toLocaleString() }}</td><td>{{ displayUserName(entry.actor) }}</td><td>{{ entry.action }}</td><td>{{ entry.entityType }} · {{ entry.entityId }}</td><td>{{ entry.detail }}</td></template></tr><tr v-if="displayedEntries.length === 0"><td :colspan="projectRecordsOnly ? 5 : 5" class="pdm-empty-info">暂无项目记录。</td></tr></tbody></table></div>
     <el-drawer v-model="projectRecordDrawerOpen" class="pdm-project-record-drawer" title="新增项目记录" size="520px" append-to-body>

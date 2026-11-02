@@ -5,11 +5,20 @@ namespace Upton.Pdm.Application;
 internal static class ReleasePreviewNotifications
 {
     public static async Task<IReadOnlyList<string>> RecipientsAsync(
-        IPdmRepository repository, ReleasePackage package, Project project, CancellationToken ct, string? actor = null)
+        IPdmRepository repository, ReleasePackage package, Project project, CancellationToken ct)
     {
         var directory = await repository.GetOrganizationDirectoryAsync(ct);
-        var recipients = package.ApprovalTasks.SelectMany(task => new[] { task.Assignee, task.DecisionBy })
-            .Append(project.PrimaryProjectManager).Append(actor)
+        return Recipients(directory, package, project);
+    }
+
+    internal static IReadOnlyList<string> Submitters(ReleasePackage package) => new[]
+        { package.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault()?.Assignee,
+          package.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault()?.DecisionBy }
+        .Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => name!.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+    internal static IReadOnlyList<string> Recipients(OrganizationDirectory directory, ReleasePackage package, Project project)
+    {
+        var recipients = Submitters(package)
             .Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => name!.Trim())
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var units = new HashSet<Guid>();
@@ -54,16 +63,26 @@ internal static class ReleasePreviewNotifications
     {
         if (!ReleasePreviewPolicy.RequiresConversion(package) || package.State != ReleasePackageState.Published
             || package.PreviewState is ReleasePreviewState.None or ReleasePreviewState.Succeeded) return;
-        var sourceKey = $"release-package:{package.Id:N}:preview:pending";
-        var alreadyNotified = (await repository.ListNotificationRecipientsAsync(sourceKey, ct)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var recipients = (await RecipientsAsync(repository, package, project, ct)).Where(name => !alreadyNotified.Contains(name));
         var paused = package.PreviewAttempts >= ReleasePreviewService.MaxAttempts;
         var status = paused ? "自动重试已暂停" : package.PreviewState == ReleasePreviewState.WaitingForServer
             ? "等待转图服务器恢复或空闲，不消耗失败次数" : "后台正在处理，失败后每3分钟自动重试，最多5次";
         var reason = string.IsNullOrWhiteSpace(package.PreviewError) ? "" : $"；原因：{package.PreviewError}";
-        await repository.CreateUserNotificationsAsync(recipients.Select(recipient => new UserNotification(Guid.NewGuid(), recipient,
-            "ReleasePreviewPending", paused ? "图纸转换失败，自动重试已暂停" : "图纸转换未完成",
-            $"{project.Code} · {package.Number} STEP/PDF 尚未全部生成；{status}{reason}。请到项目发布页查看对应发布包，处理异常后可点击“重试转图”。",
-            project.Id, package.Id, sourceKey, createdAt, null)).ToArray(), ct);
+        await NotifyAsync(repository, package, project, paused ? "图纸转换失败，自动重试已暂停" : "图纸转换未完成",
+            $"STEP/PDF 尚未全部生成；{status}{reason}。请到项目发布页查看对应发布包，处理异常后可点击“重试转图”。",
+            paused ? "failed" : "pending", createdAt, ct);
+    }
+
+    internal static string Source(Guid packageId, string phase) => $"release-package:{packageId:N}:preview:{phase}";
+
+    internal static async Task NotifyAsync(IPdmRepository repository, ReleasePackage package, Project project,
+        string title, string detail, string phase, DateTimeOffset now, CancellationToken ct, bool archiveVerified = false)
+    {
+        var recipients = await RecipientsAsync(repository, package, project, ct);
+        if (phase is "failed" or "completed")
+            await repository.ResolveUserNotificationsAsync(phase == "completed" ? [Source(package.Id, "pending"), Source(package.Id, "failed")] : [Source(package.Id, "pending")], now, ct);
+        await repository.UpsertUserNotificationsAsync(recipients.Select(recipient => new UserNotification(Guid.NewGuid(), recipient,
+            phase == "archive" ? "ReleaseDeliveryResult" : phase == "pending" ? "ReleasePreviewPending" : "ReleasePreviewResult",
+            title, $"{project.Code} · {package.Number} {detail}", project.Id, package.Id, Source(package.Id, phase), now, null)).ToArray(), ct);
+        await ReleaseManagementNotifications.ReconcileRiskAsync(repository, package.Id, now, ct, phase == "archive", archiveVerified);
     }
 }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -46,7 +46,7 @@ internal static partial class Program
         using (var cancel = new CancellationTokenSource())
         {
             http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "fixture");
-            SetField(client,"httpClient",http); Set(client,"EditJournalScope","perf-fixture");
+            SetField(client,"httpClient",http);SetField(client,"controlledOpenHttpClient",http); Set(client,"EditJournalScope","perf-fixture");
             var ids = Enumerable.Range(0, mode == "batch" ? 20 : 1).Select(_ => Guid.NewGuid()).ToArray();
             var progress = new List<int>();var wrongThread=false;
             Action<int,int,string> report = (done,total,name) => { lock(progress){progress.Add(done);wrongThread |= Thread.CurrentThread.ManagedThreadId == originalThread;} };
@@ -148,7 +148,7 @@ internal static partial class Program
         }))
         using(var http=new HttpClient(handler){BaseAddress=new Uri("http://history.invalid/")})
         {
-            http.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer","fixture");SetField(client,"httpClient",http);Set(client,"EditJournalScope","history-fixture");
+            http.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer","fixture");SetField(client,"httpClient",http);SetField(client,"controlledOpenHttpClient",http);Set(client,"EditJournalScope","history-fixture");
             await (Task)TreeCall(client,"RefreshArchiveHistoriesAsync",histories,CancellationToken.None);
             if(batchReads!=1||detailReads!=1||(Guid)Get(((IEnumerable)histories[ids[1]]).Cast<object>().Single(),"Id")!=changed)throw new Exception("批量版本复核未保留变化检查");
             Console.WriteLine("PASS: 一次批量复核保留版本并发保护，仅重读发生变化的版本历史");
@@ -170,7 +170,7 @@ internal static partial class Program
         }))
         using(var http=new HttpClient(handler){BaseAddress=new Uri("http://chunks.invalid/")})
         {
-            http.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer","fixture");SetField(client,"httpClient",http);
+            http.DefaultRequestHeaders.Authorization=new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer","fixture");SetField(client,"httpClient",http);SetField(client,"controlledOpenHttpClient",http);
             await (Task)TreeCall(client,"RefreshArchiveHistoriesAsync",histories,CancellationToken.None);
             if(calls!=3)throw new Exception("批量版本核对分组数量错误");Console.WriteLine("PASS: 205个无历史图档按100项限制复核，仅3次请求且不重复拉取空历史");
         }

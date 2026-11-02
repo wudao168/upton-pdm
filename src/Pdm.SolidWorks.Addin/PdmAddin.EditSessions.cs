@@ -356,19 +356,24 @@ public sealed partial class PdmAddin
         try
         {
             if (!EnsureEditJournal()) return;
-            foreach (var entry in editJournal.ReadAll().Where(entry => entry.DocumentId == documentId))
-            {
-                entry.Closed = true;
-                entry.PendingClose = false;
-                entry.RestoreOnOpen = false;
-                entry.DiscardPending = false;
-                EditDraftJournal.ClearMaintenanceFailure(entry);
-                editJournal.Save(entry);
-            }
+            FinishLocalEditRecords(editJournal, documentId);
             localEdits.Remove(documentId);
             lock (checkoutDocumentSync) pendingCloseDocumentIds.Remove(documentId);
         }
         catch (Exception exception) { ReportEditMaintenanceError(exception); }
+    }
+
+    private static void FinishLocalEditRecords(EditDraftJournal journal, Guid documentId)
+    {
+        foreach (var entry in journal.ReadDocument(documentId))
+        {
+            entry.Closed = true;
+            entry.PendingClose = false;
+            entry.RestoreOnOpen = false;
+            entry.DiscardPending = false;
+            EditDraftJournal.ClearMaintenanceFailure(entry);
+            journal.Save(entry);
+        }
     }
 
     private async Task FinishPendingCloseBeforeCheckoutAsync(Guid documentId, CancellationToken token)

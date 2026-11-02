@@ -26,6 +26,19 @@ public sealed class WorkHoursTests
         view.Sheets.Select(x => new WorkHoursVersion(x.Month, x.RowVersion)).ToArray());
 
     [Fact]
+    public async Task ReminderSummaryPreservesComplianceWithoutProjectCatalogue()
+    {
+        var (_, _, service, _, _) = await Setup();
+        var full = await service.ReadAsync(From, To, false, "worker", UserRole.Engineer, default);
+        var summary = await service.ReadAsync(From, To, false, "worker", UserRole.Engineer, default, includeProjects: false);
+        Assert.NotEmpty(full.Projects);
+        Assert.Empty(summary.Projects);
+        Assert.Equal(System.Text.Json.JsonSerializer.Serialize(full.Compliance), System.Text.Json.JsonSerializer.Serialize(summary.Compliance));
+        Assert.Equal(full.StartDate, summary.StartDate);
+        Assert.Equal(full.Today, summary.Today);
+    }
+
+    [Fact]
     public async Task CalendarMoveWithinMonthMergesAndKeepsOtherDatesAndHistory()
     {
         var (_, _, service, root, child) = await Setup();

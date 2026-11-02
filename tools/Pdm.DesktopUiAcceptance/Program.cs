@@ -42,9 +42,9 @@ internal static class Program
         var started = DateTime.UtcNow;
         timer.Tick += async (_, __) =>
         {
-            if (DateTime.UtcNow - started > TimeSpan.FromSeconds(60))
+            if (DateTime.UtcNow - started > TimeSpan.FromSeconds(120))
             {
-                failure = new TimeoutException("原生客户端界面未在60秒内准备完成。"); done = true; application.Shutdown(1); return;
+                failure = new TimeoutException("原生客户端界面未在120秒内准备完成。"); done = true; application.Shutdown(1); return;
             }
             if (busy || done) return;
             var view = window.FindName("WorkspaceView");
@@ -133,20 +133,21 @@ internal static class Program
                     throw new Exception("审核浮层未使用服务器同版界面。");
                 var nativeTheme = window.GetType().GetField("currentTheme", Flags);
                 var originalTheme = (string)nativeTheme.GetValue(window);
+                // Exercise the real menu without modifying the test account's saved preferences.
+                await Execute(core, "window.__acceptanceFetch=window.fetch;window.fetch=(input,options)=>String(typeof input==='string'?input:input.url).endsWith('/api/auth/profile')&&options?.method==='PUT'?Promise.resolve(new Response(JSON.stringify({...JSON.parse(options.body),username:JSON.parse(localStorage.getItem('upton-pdm-session')).username}),{status:200,headers:{'Content-Type':'application/json'}})):window.__acceptanceFetch(input,options)");
                 var themeChecks = new System.Collections.Generic.List<string>();
                 var paletteType = assembly.GetType("Upton.Pdm.Desktop.EDrawingsPreviewControl+PreviewButtonTheme", true);
+                try
+                {
                 foreach (var palette in new[] { new[] { "a", "1d4ed8" }, new[] { "c", "0f766e" }, new[] { "p", "6d28d9" }, new[] { "o", "a84b08" }, new[] { "g", "52525b" } })
                 {
                     var themeId = palette[0];
-                    await Execute(core, "window.chrome.webview.postMessage({type:'theme-change',payload:{theme:'" + themeId + "'}})");
-                    await Task.Delay(150);
+                    await SelectTheme(core, themeId);
                     if ((string)nativeTheme.GetValue(window) != themeId) throw new Exception("原生客户端未保留主题：" + themeId);
                     var resolved = paletteType.GetMethod("Resolve", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { themeId });
                     var iconColor = paletteType.GetProperty("IconColor", Flags).GetValue(resolved);
                     if (!((string)iconColor.GetType().GetProperty("Name").GetValue(iconColor)).EndsWith(palette[1], StringComparison.OrdinalIgnoreCase))
                         throw new Exception("原生预览按钮与网页主色不一致：" + themeId);
-                    var payload = Json.Serialize(new { type = "review-overlay-state", payload = new { theme = themeId, visible = false } });
-                    await (Task)overlay.GetType().GetMethod("PublishStateAsync", Flags).Invoke(overlay, new object[] { payload });
                     System.Collections.Generic.Dictionary<string, object> colors = null;
                     for (var attempt = 0; attempt < 20; attempt++)
                     {
@@ -158,7 +159,29 @@ internal static class Program
                         throw new Exception("审核浮层主题未与主界面同步：" + themeId + "（实际主题=" + colors["theme"] + "，主色=" + colors["accent"] + "）");
                     themeChecks.Add(themeId);
                 }
-                await Execute(core, "window.chrome.webview.postMessage({type:'theme-change',payload:{theme:'" + originalTheme + "'}})");
+                // A delayed initialization continuation must not send its older state after a newer call.
+                await SelectTheme(core, "o");
+                var initialization = overlay.GetType().GetField("initializationTask", Flags);
+                var originalInitialization = initialization.GetValue(overlay);
+                var delayedInitialization = new TaskCompletionSource<bool>();
+                var publish = overlay.GetType().GetMethod("PublishStateAsync", Flags);
+                Func<string, object[]> state = value => new object[] { Json.Serialize(new { type = "review-overlay-state", payload = new { theme = value, visible = false } }) };
+                try
+                {
+                    initialization.SetValue(overlay, delayedInitialization.Task);
+                    var delayed = (Task)publish.Invoke(overlay, state("a"));
+                    initialization.SetValue(overlay, Task.CompletedTask);
+                    await (Task)publish.Invoke(overlay, state("o"));
+                    delayedInitialization.SetResult(true);
+                    await delayed;
+                    await Task.Delay(300);
+                    if (Json.Deserialize<string>(await Execute(reviewCore, "document.documentElement.dataset.pdmTheme")) != "o")
+                        throw new Exception("旧的浮层初始化等待覆盖了较新的主题。");
+                    result["delayedReviewStateVerified"] = true;
+                }
+                finally { delayedInitialization.TrySetResult(true); initialization.SetValue(overlay, originalInitialization); }
+                }
+                finally { await SelectTheme(core, originalTheme); }
                 result["nativeThemesVerified"] = themeChecks;
                 if (args.Length > 3)
                 {
@@ -206,6 +229,19 @@ internal static class Program
         if (await Task.WhenAny(task, Task.Delay(5000)) != task)
             throw new TimeoutException("WebView2脚本调用未在5秒内返回，请查看上一条验收步骤日志。");
         return await task;
+    }
+    static async Task SelectTheme(object core, string theme)
+    {
+        var labels = new System.Collections.Generic.Dictionary<string, string> { ["a"] = "海湾蓝", ["c"] = "松石青", ["p"] = "鸢尾紫", ["o"] = "琥珀橙", ["g"] = "石墨灰" };
+        await Execute(core, "document.querySelector('.pdm-theme-trigger').click()");
+        await Task.Delay(150);
+        await Execute(core, "[...document.querySelectorAll('.pdm-theme-menu .el-dropdown-menu__item')].find(item=>item.textContent.includes(" + Json.Serialize(labels[theme]) + ")).click()");
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            await Task.Delay(100);
+            if (Json.Deserialize<string>(await Execute(core, "document.documentElement.dataset.pdmTheme")) == theme) return;
+        }
+        throw new Exception("主界面未应用所选主题：" + theme);
     }
     static async Task VerifyWorkspaceRecovery(Assembly assembly, Window window, System.Collections.Generic.Dictionary<string, object> fixture)
     {

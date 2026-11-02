@@ -2,7 +2,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { ProjectSummary } from './types'
 import { useProjectCenterAccess } from './projectCenterAccess'
 
-type Context = { project: ProjectSummary; currentUsername?: string; token?: string; activeTab: string }
+type Context = { project: ProjectSummary; currentUsername?: string; token?: string; activeTab: string; active?: boolean }
 type Row = Record<string, any>
 type Snapshot = { fingerprint: string; tokens?: string[]; revisions?: Record<string, string>; updatedAt?: string; actor?: string }
 type Update = Snapshot & { unread: boolean }
@@ -72,6 +72,8 @@ export function useProjectTabUpdates(context: Context) {
   const projectAccess = useProjectCenterAccess()
   const latest = ref<Record<string, Update>>({})
   let generation = 0, running = false, serial = 0
+  let lastRefreshAt = 0
+  const isActive = () => context.active !== false
   const controllers = new Set<AbortController>(), readOrder: Record<string, number> = {}
   const acknowledgements = new Map<string, Promise<void>>()
   const apiBase = (import.meta.env.VITE_PDM_API_BASE ?? '').replace(/\/$/, '')
@@ -83,7 +85,7 @@ export function useProjectTabUpdates(context: Context) {
     const base = `/api/projects/${project.id}`
     return {
       information: [base, `${base}/contact-information`, `${base}/nameplate`],
-      files: [`${base}/files?includeDeleted=true`], 'project-plan': [`${base}/plan`], opl: [`${base}/opl`],
+      files: [`${base}/files?includeDeleted=true`], 'project-plan': [`${base}/plan`], opl: [`${base}/opl?includePeople=false`],
       budget: [`${base}/budget`, `${base}/budget/assessments`], 'validation-plan': [`${base}/validation-plan`],
       documents: [`${base}/documents`], bom: ['Standard', 'NonStandard', 'Electrical', 'Unclassified'].map(kind => `${base}/boms/${kind}`),
       release: [`${base}/release-packages`],
@@ -91,7 +93,7 @@ export function useProjectTabUpdates(context: Context) {
   }
   async function refreshTab(tab: string, acknowledge = false) {
     const urls = routes(context.project)[tab]
-    if (!projectAccess.canViewTab(tab) || !urls || !context.token || !context.currentUsername) return
+    if (!isActive() || !projectAccess.canViewTab(tab) || !urls || !context.token || !context.currentUsername) return
     const current = generation, project = context.project, order = ++serial
     const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 20000)
     controllers.add(controller)
@@ -136,15 +138,16 @@ export function useProjectTabUpdates(context: Context) {
     return promise
   }
   async function refresh() {
-    if (running || document.visibilityState === 'hidden') return
+    if (running || !isActive() || document.visibilityState === 'hidden') return
     const current = generation
     running = true
     try {
       const tabs = Object.keys(routes(context.project))
       for (let start = 0; start < tabs.length && current === generation; start += 3) await Promise.all(tabs.slice(start, start + 3).map(tab => refreshTab(tab)))
-    } finally { if (current === generation) running = false }
+    } finally { if (current === generation) { running = false; if (isActive()) lastRefreshAt = Date.now() } }
   }
-  watch(() => [context.project.id, context.token, context.currentUsername], () => {
+  watch([() => context.project.id, () => context.token, () => context.currentUsername], () => {
+    lastRefreshAt = 0
     generation++; controllers.forEach(controller => controller.abort()); running = false; latest.value = {}; acknowledgements.clear()
     for (const tab of Object.keys(readOrder)) delete readOrder[tab]
     try {
@@ -153,6 +156,7 @@ export function useProjectTabUpdates(context: Context) {
     } catch { /* 首次使用建立基线，旧版待办红点不沿用。 */ }
     void refresh()
   }, { immediate: true })
+  watch(() => context.active, active => { if (active && (!lastRefreshAt || Date.now() - lastRefreshAt > 60000)) void refresh() })
   function viewed(event: Event) {
     const detail = (event as CustomEvent<{ projectId: string; tab: string }>).detail
     if (detail?.projectId === context.project.id && detail.tab === context.activeTab) void markSeen(detail.tab)

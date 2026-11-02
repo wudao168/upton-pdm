@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
 import { vQuantity } from '../quantityInput'
 import { computed, onMounted, ref, watch } from 'vue'
 import { includeExistingProductionRelease, listProjects, listReleasePackages,
@@ -108,7 +109,7 @@ onMounted(async () => {
     <div class="production-opening pdm-panel">
       <header><div><h2>核对并纳入旧发布包</h2><p>仅用于功能启用前已发布的非标件；请按当前实物和流转记录填写期初状态。</p></div><button type="button" @click="emit('close')">关闭</button></header>
       <p v-if="error" role="alert" class="production-opening__error">{{ error }}</p>
-      <div class="production-opening__picker"><label>搜索项目<input v-model="projectQuery" type="search" placeholder="项目号或名称"></label><label>项目<select v-model="projectId"><option value="">请选择项目</option><option v-for="item in visibleProjects" :key="item.id" :value="item.id">{{ item.code }} · {{ item.name }}</option></select></label><label>已发布非标包<select v-model="packageId"><option value="">请选择发布包</option><option v-for="item in availablePackages" :key="item.id" :value="item.id">{{ item.number }} · {{ item.publishedAt?.slice(0, 10) }}</option></select></label></div>
+      <div class="production-opening__picker"><label>搜索项目<SearchField><input v-model="projectQuery" type="search" placeholder="项目号或名称"></SearchField></label><label>项目<select v-model="projectId"><option value="">请选择项目</option><option v-for="item in visibleProjects" :key="item.id" :value="item.id">{{ item.code }} · {{ item.name }}</option></select></label><label>已发布非标包<select v-model="packageId"><option value="">请选择发布包</option><option v-for="item in availablePackages" :key="item.id" :value="item.id">{{ item.number }} · {{ item.publishedAt?.slice(0, 10) }}</option></select></label></div>
       <div v-if="preview" class="production-opening__body">
         <p><strong>{{ preview.packageNumber }}</strong> · {{ preview.lines.length }} 项需求。对已部分完成的物料，请拆成多个批次分别填当前环节；未分配数量保留空白。</p>
         <label class="production-opening__check"><input v-model="received" type="checkbox">供应链已接收该发布包</label>

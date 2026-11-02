@@ -99,9 +99,17 @@ public sealed class StandardLibraryService(
         var categoryById = categories.ToDictionary(item => item.Id);
         var normalized = query.Query?.Trim();
         var rows = new List<StandardLibraryMaterial>();
+        MaterialRelationTemplate PublishedRelation(MaterialRelationTemplate template)
+        {
+            var mains = template.PublishedMainMaterials.Select(main => main with { StandardLibraryCategories = memberships.Where(link => link.MaterialId == main.MaterialId)
+                .Select(link => categoryById.GetValueOrDefault(link.CategoryId)).OfType<StandardLibraryCategory>()
+                .Where(category => category.IsActive && !StandardLibraryDefaults.IsUncategorized(category)).ToArray() }).ToArray();
+            return template with { DraftRevision = null, PublishedRevision = template.PublishedRevision! with { MainMaterials = mains },
+                StandardLibraryCategories = mains.SelectMany(main => main.StandardLibraryCategories).DistinctBy(category => category.Id).ToArray() };
+        }
         var publishedRelations = relations is null ? new Dictionary<Guid, MaterialRelationTemplate>()
             : (await relations.ListTemplatesAsync(false, cancellationToken)).Where(item => !item.IsArchived && item.PublishedRevision is not null)
-                .GroupBy(item => item.MainMaterialId).ToDictionary(group => group.Key, group => group.First() with { DraftRevision = null });
+                .Select(PublishedRelation).SelectMany(item => item.PublishedMainMaterials.Select(main => (main.MaterialId, Template: item))).ToDictionary(item => item.MaterialId, item => item.Template);
         foreach (var group in scoped.GroupBy(item => item.MaterialId))
         {
             var material = await materials.FindMaterialAsync(group.Key, cancellationToken);

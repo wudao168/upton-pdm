@@ -109,6 +109,11 @@ internal sealed partial class PdmApiClient : IDisposable
         GetJsonAsync<DocumentReferenceNodeDto>(string.Concat("api/projects/", projectId, "/reference-tree"), cancellationToken);
 
     public async Task<DocumentReferenceNodeDto> GetReferenceTreeOrNullAsync(Guid projectId, CancellationToken cancellationToken)
+        => ArchiveConnectionRecoveryActive
+            ? await RecoverArchiveConnectionAsync("项目图档结构", (token, retry) => GetReferenceTreeOnceAsync(projectId, token), cancellationToken).ConfigureAwait(false)
+            : await GetReferenceTreeOnceAsync(projectId, cancellationToken).ConfigureAwait(false);
+
+    private async Task<DocumentReferenceNodeDto> GetReferenceTreeOnceAsync(Guid projectId, CancellationToken cancellationToken)
     {
         using (var response = await httpClient.GetAsync(
             string.Concat("api/projects/", projectId, "/reference-tree"),
@@ -327,7 +332,7 @@ internal sealed partial class PdmApiClient : IDisposable
         var snapshot = referenceSnapshot ?? CaptureArchiveSnapshot(root, plannedPaths);
         var expectedVersionId = referenceSnapshot != null ? snapshot.ExpectedVersionId
             : expectedVersionOverride ?? await BaseVersionAsync(root, documentId, cancellationToken).ConfigureAwait(false);
-        _ = await PostJsonAsync<object>(
+        _ = await RecoverArchiveConnectionAsync("存档预检查", (retryToken, retry) => PostJsonAsync<object>(
             string.Concat("api/documents/", documentId, "/checkin/preflight"),
             new
             {
@@ -343,7 +348,7 @@ internal sealed partial class PdmApiClient : IDisposable
                 expectedVersionId,
                 plannedDocumentIds = snapshot.PlannedDocumentIds, keepEditing, handoffTo
             },
-            cancellationToken).ConfigureAwait(false);
+            retryToken), cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<object> PrepareArchiveBatchFileAsync(Guid documentId, Guid projectId, CadTreeNode root, string comment,
@@ -369,15 +374,20 @@ internal sealed partial class PdmApiClient : IDisposable
         var commitToken = deadline.Token;
         var payload = new { batchId, checkoutSessionId = sessionId, files };
         var expectedIds = files.Select(file => Guid.Parse(Convert.ToString(file.GetType().GetProperty("documentId").GetValue(file)))).ToArray();
+        var json = serializer.Serialize(payload);
+        await ValidateArchivePayloadSizeAsync(Encoding.UTF8.GetByteCount(json), files.Count, false, commitToken).ConfigureAwait(false);
         try
         {
-            for (var attempt = 0; ; attempt++)
+            return await RecoverArchiveConnectionAsync("整批提交结果", async (retryToken, retry) =>
             {
-                try { return RequireCompleteArchiveReceipt(await PostJsonAsync<ArchiveBatchReceiptDto>(controlledOpenHttpClient, "api/archive-batches", payload, commitToken).ConfigureAwait(false), batchId, expectedIds); }
-                catch (Exception exception) when (attempt < 2 && !commitToken.IsCancellationRequested
-                    && (exception is HttpRequestException || exception is TaskCanceledException))
-                { await Task.Delay(TimeSpan.FromSeconds(attempt + 1), commitToken).ConfigureAwait(false); }
-            }
+                if (retry)
+                {
+                    var existing = await GetArchiveBatchReceiptOrNullAsync(batchId, retryToken).ConfigureAwait(false);
+                    if (existing != null) return RequireCompleteArchiveReceipt(existing, batchId, expectedIds);
+                }
+                return RequireCompleteArchiveReceipt(await PostJsonTextAsync<ArchiveBatchReceiptDto>(controlledOpenHttpClient,
+                    "api/archive-batches", json, retryToken).ConfigureAwait(false), batchId, expectedIds);
+            }, commitToken).ConfigureAwait(false);
         }
         catch (Exception original) when (original is HttpRequestException || original is TaskCanceledException || original is InvalidOperationException)
         {
@@ -387,13 +397,17 @@ internal sealed partial class PdmApiClient : IDisposable
                 {
                     var receipt = await GetArchiveBatchReceiptOrNullAsync(batchId, verify.Token).ConfigureAwait(false);
                     if (receipt != null) return RequireCompleteArchiveReceipt(receipt, batchId, expectedIds);
-                    if (original is InvalidOperationException && !original.Data.Contains("ArchiveReceiptIncomplete")) original.Data["ArchiveBatchNotCommitted"] = true;
+                    if (original is InvalidOperationException && !(original is ArchiveConnectionTimeoutException)
+                        && !(original is ServiceUnavailableException) && !original.Data.Contains("ArchiveReceiptIncomplete")) original.Data["ArchiveBatchNotCommitted"] = true;
                 }
                 catch (Exception verification) { PluginDiagnosticLog.Record("批次", "暂未取得整批存档回执：" + batchId + "，" + verification.GetType().Name); }
             }
             if (token.IsCancellationRequested) throw new OperationCanceledException(token);
-            if (original is InvalidOperationException) throw;
-            throw new InvalidOperationException("整批提交结果暂未确认。本地文件已保留；连接恢复后插件会核对原批次，在结果明确前请勿重新提交。服务器按整批提交，不会产生部分存档。", original);
+            if (original is InvalidOperationException && !(original is ArchiveConnectionTimeoutException)
+                && !(original is ServiceUnavailableException)) throw;
+            var uncertain = new InvalidOperationException("整批提交结果暂未确认。本地文件已保留；连接恢复后插件会核对原批次，在结果明确前请勿重新提交。服务器按整批提交，不会产生部分存档。", original);
+            uncertain.Data["ArchiveResultUncertain"] = true;
+            throw uncertain;
         }
     }
 
@@ -417,7 +431,7 @@ internal sealed partial class PdmApiClient : IDisposable
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
             var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
-            { ThrowAuthenticationExpiredIfNeeded(response); throw new InvalidOperationException(GetErrorMessage(response.StatusCode.ToString(), body)); }
+            { ThrowAuthenticationExpiredIfNeeded(response); ThrowServiceUnavailableIfNeeded(response); throw new InvalidOperationException(GetErrorMessage(response.StatusCode.ToString(), body)); }
             return serializer.Deserialize<ArchiveBatchReceiptDto>(body);
         }
     }
@@ -677,35 +691,36 @@ internal sealed partial class PdmApiClient : IDisposable
         UploadSessionDto session = null;
         if (transfer != null)
         {
-            using (var response = await httpClient.GetAsync("api/uploads/sessions/" + transfer.SessionId, cancellationToken).ConfigureAwait(false))
+            session = await RecoverArchiveConnectionAsync("上次上传位置", (retryToken, retry) =>
+                ReadUploadSessionOnceAsync(transfer.SessionId, retryToken), cancellationToken).ConfigureAwait(false);
+            if (session != null)
             {
-                if (response.IsSuccessStatusCode)
-                {
-                    session = serializer.Deserialize<UploadSessionDto>(await response.Content.ReadAsStringAsync().ConfigureAwait(false));
                     if (session.ProjectId != projectId || session.TotalLength != file.Length
+                        || session.Id != transfer.SessionId
                         || !string.Equals(session.ExpectedSha256, sha256, StringComparison.OrdinalIgnoreCase)
                         || session.ReceivedLength < transfer.AcknowledgedLength || session.ExpiresAt <= DateTime.UtcNow)
                         session = null;
-                }
-                else
-                {
-                    ThrowAuthenticationExpiredIfNeeded(response);
-                    if ((int)response.StatusCode >= 500)
-                        throw new InvalidOperationException("暂时无法核对上次上传结果，已保留续传记录，请稍后重试。");
-                }
             }
         }
         if (session == null)
         {
-            session = await PostJsonAsync<UploadSessionDto>("api/uploads/sessions", new { projectId, fileName = file.Name, totalLength = file.Length, sha256,
+            // This allocates temporary storage only; no file bytes or versions are
+            // submitted until its session ID has been received and journaled.
+            session = await RecoverArchiveConnectionAsync("建立上传会话", (retryToken, retry) =>
+                PostJsonAsync<UploadSessionDto>("api/uploads/sessions", new { projectId, fileName = file.Name, totalLength = file.Length, sha256,
                 batchId = archiveBatchId, documentId = archiveBatchId.HasValue ? (Guid?)documentId : null,
-                checkoutSessionId = archiveBatchId.HasValue ? checkoutSessionId : null }, cancellationToken).ConfigureAwait(false);
+                checkoutSessionId = archiveBatchId.HasValue ? checkoutSessionId : null }, retryToken), cancellationToken).ConfigureAwait(false);
             transfer = new ArchiveUploadState { SessionId = session.Id,
                 RelativePath = string.IsNullOrWhiteSpace(session.TargetRelativePath)
                     ? Path.Combine(".versions", documentId.ToString("N"), Guid.NewGuid().ToString("N"), file.Name)
                     : session.TargetRelativePath };
             ArchiveUploadJournal.Save(journalPath, transfer);
         }
+        if (session.ReceivedLength < 0 || session.ReceivedLength > file.Length
+            || session.ChunkSize <= 0 || session.ReceivedLength != file.Length && session.ReceivedLength % session.ChunkSize != 0)
+            throw new InvalidOperationException("服务器上传位置无效，已保留本地文件和续传记录，未继续上传。");
+        transfer.AcknowledgedLength = session.ReceivedLength;
+        ArchiveUploadJournal.Save(journalPath, transfer);
         if (session.ChunkSize <= 0 || session.ChunkSize > 16 * 1024 * 1024 || transfer.AcknowledgedLength > file.Length
             || transfer.AcknowledgedLength < 0
             || (transfer.AcknowledgedLength != file.Length && transfer.AcknowledgedLength % session.ChunkSize != 0))
@@ -720,15 +735,7 @@ internal sealed partial class PdmApiClient : IDisposable
             int read;
             while ((read = await ReadUploadChunkAsync(input, buffer, cancellationToken).ConfigureAwait(false)) > 0)
             {
-                using (var content = new ByteArrayContent(buffer, 0, read))
-                using (var response = await httpClient.PutAsync(string.Concat("api/uploads/sessions/", session.Id, "/chunks/", chunkIndex), content, cancellationToken).ConfigureAwait(false))
-                {
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        ThrowAuthenticationExpiredIfNeeded(response);
-                        throw new InvalidOperationException(string.Concat("版本文件第", chunkIndex + 1, "块上传失败。"));
-                    }
-                }
+                await UploadArchiveChunkAsync(session, uploaded, chunkIndex, buffer, read, cancellationToken).ConfigureAwait(false);
                 uploaded += read;
                 transfer.AcknowledgedLength = uploaded;
                 ArchiveUploadJournal.Save(journalPath, transfer);
@@ -737,7 +744,9 @@ internal sealed partial class PdmApiClient : IDisposable
             }
         }
         var relative = transfer.RelativePath;
-        var stored = await PostJsonAsync<StoredFileDto>(string.Concat("api/uploads/sessions/", session.Id, "/complete"), new { relativeTargetPath = relative }, cancellationToken).ConfigureAwait(false);
+        var stored = await RecoverArchiveConnectionAsync("文件上传结果", (retryToken, retry) =>
+            PostJsonAsync<StoredFileDto>(string.Concat("api/uploads/sessions/", session.Id, "/complete"),
+                new { relativeTargetPath = relative }, retryToken), cancellationToken).ConfigureAwait(false);
         if (frozenUploadSha256 == null) CheckInUploadHashes.VerifySource(originalFilePath, sourceFileSha256, cancellationToken);
         else CheckInUploadHashes.ReadFrozen(filePath, frozenUploadSha256, sourceFileSha256, cancellationToken);
         return new StoredVersionFile(stored.RelativePath, stored.Length, stored.Sha256, new Dictionary<string, string> { ["FileName"] = originalFile.Name, ["Extension"] = originalFile.Extension, ["LastWriteTimeUtc"] = originalFile.LastWriteTimeUtc.ToString("O"), ["SourceFileSha256"] = sourceFileSha256 });
@@ -963,6 +972,11 @@ internal sealed partial class PdmApiClient : IDisposable
     }
 
     private async Task<T> GetJsonAsync<T>(string path, CancellationToken cancellationToken)
+        => ArchiveConnectionRecoveryActive
+            ? await RecoverArchiveConnectionAsync("读取存档信息", (token, retry) => GetJsonOnceAsync<T>(path, token), cancellationToken).ConfigureAwait(false)
+            : await GetJsonOnceAsync<T>(path, cancellationToken).ConfigureAwait(false);
+
+    private async Task<T> GetJsonOnceAsync<T>(string path, CancellationToken cancellationToken)
     {
         using (var response = await httpClient.GetAsync(path, cancellationToken).ConfigureAwait(false))
         {
@@ -982,8 +996,10 @@ internal sealed partial class PdmApiClient : IDisposable
         => await PostJsonAsync<T>(httpClient, path, payload, cancellationToken).ConfigureAwait(false);
 
     private async Task<T> PostJsonAsync<T>(HttpClient client, string path, object payload, CancellationToken cancellationToken)
+        => await PostJsonTextAsync<T>(client, path, serializer.Serialize(payload), cancellationToken).ConfigureAwait(false);
+
+    private async Task<T> PostJsonTextAsync<T>(HttpClient client, string path, string json, CancellationToken cancellationToken)
     {
-        var json = serializer.Serialize(payload);
         using (var content = new StringContent(json, Encoding.UTF8, "application/json"))
         using (var response = await client.PostAsync(path, content, cancellationToken).ConfigureAwait(false))
         {
@@ -1271,6 +1287,8 @@ internal sealed partial class PdmApiClient : IDisposable
 
     private static string GetErrorMessage(string status, string body)
     {
+        if (status == "RequestEntityTooLarge" || status == "413")
+            return "整批提交数据超过服务器或代理允许的大小，本批尚未提交。请联系管理员核对“整批提交数据上限”和代理限制后重试。";
         if (string.IsNullOrWhiteSpace(body))
         {
             return string.Concat("PLM服务返回", status, "。 ");

@@ -6,6 +6,23 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class BomSummaryProjectionTests
 {
     [Fact]
+    public void HierarchyCountsCombineDuplicateMaterialsAndUseCurrentValidationRules()
+    {
+        var projectId = Guid.NewGuid();
+        var first = new BomItem(Guid.NewGuid(), projectId, BomKind.Standard, 1, "SAME", "物料", 1, "001", null, "MODEL", "A", true);
+        var second = first with { Id = Guid.NewGuid(), Sequence = 2, IsComplete = false };
+        var excluded = first with { Id = Guid.NewGuid(), DrawingNumber = "DELETED", IsManuallyExcluded = true };
+        var rules = new BomValidationRules(["brand"], [], []);
+        var missing = BomHierarchyMetric.Count(projectId, BomKind.Standard, [first, second, excluded], rules);
+        Assert.Equal(1, missing.ItemCount);
+        Assert.Equal(1, missing.EffectiveCount);
+        Assert.Equal(1, missing.UnresolvedCount);
+        var complete = BomHierarchyMetric.Count(projectId, BomKind.Standard, [first with { Brand = "UPTON" }, second with { Brand = "UPTON" }], rules);
+        Assert.Equal(1, complete.ItemCount);
+        Assert.Equal(0, complete.UnresolvedCount);
+        Assert.NotNull(Assert.Single(BomSummaryProjection.Group([first, second])).SummaryFingerprint);
+    }
+    [Fact]
     public void InventoryReplacement_MarkerIsSavedPerInstanceAndExposedOnTheSummary()
     {
         var projectId = Guid.NewGuid();

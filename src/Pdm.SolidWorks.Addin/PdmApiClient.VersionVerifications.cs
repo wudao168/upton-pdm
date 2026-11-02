@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Http;
@@ -10,15 +10,20 @@ namespace Upton.Pdm.SolidWorks;
 
 internal sealed partial class PdmApiClient
 {
+    private TimeSpan versionVerificationTimeout = TimeSpan.FromSeconds(120);
     internal async Task<List<DocumentVersionVerificationResultDto>> VerifyReferenceVersionsAsync(
         IReadOnlyList<DocumentVersionVerificationRequestDto> requests, CancellationToken token)
     {
-        for (var attempt = 0; ; attempt++)
-        {
-        try
-        {
+        return await RecoverArchiveConnectionAsync("引用版本", (retryToken, retry) => VerifyReferenceVersionsOnceAsync(requests, retryToken), token).ConfigureAwait(false);
+    }
+
+    private async Task<List<DocumentVersionVerificationResultDto>> VerifyReferenceVersionsOnceAsync(
+        IReadOnlyList<DocumentVersionVerificationRequestDto> requests, CancellationToken token)
+    {
+        using var requestDeadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        requestDeadline.CancelAfter(versionVerificationTimeout);
         using (var content = new StringContent(serializer.Serialize(new { Documents = requests }), Encoding.UTF8, "application/json"))
-        using (var response = await httpClient.PostAsync("api/documents/version-verifications", content, token).ConfigureAwait(false))
+        using (var response = await controlledOpenHttpClient.PostAsync("api/documents/version-verifications", content, requestDeadline.Token).ConfigureAwait(false))
         {
             if (response.StatusCode == HttpStatusCode.NotFound || response.StatusCode == HttpStatusCode.MethodNotAllowed) return null;
             var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -31,15 +36,8 @@ internal sealed partial class PdmApiClient
             return serializer.Deserialize<List<DocumentVersionVerificationResultDto>>(body)
                 ?? throw new InvalidOperationException("批量引用版本核对未返回有效结果，尚未上传，请稍后重试。");
         }
-        }
-        catch (Exception error) when ((error is HttpRequestException || error is ServiceUnavailableException)
-            && attempt < 2 && !token.IsCancellationRequested)
-        {
-            ArchiveSession.Current?.SetStage("连接暂未恢复，正在重试只读版本核对（" + (attempt + 1) + "/2）…");
-            await Task.Delay(attempt == 0 ? 1000 : 3000, token).ConfigureAwait(false);
-        }
-        }
     }
+
 }
 
 internal sealed class DocumentVersionVerificationRequestDto

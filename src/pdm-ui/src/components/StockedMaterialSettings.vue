@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UserSelect from './UserSelect'
 import { computed, ref, watch } from 'vue'
 import { listMaterialStockPlans, readStockedMaterialSettings, refreshStockedMaterials, saveStockedMaterialSettings } from '../api'
 import { refreshMaterialStockPlans } from '../materialStockPlans'
@@ -61,7 +62,7 @@ watch(() => props.token, () => void load(), { immediate: true })
       <el-form-item label="提醒接收人">
         <el-radio-group v-model="value.settings.useStandardAssistant"><el-radio :value="true">标准化助理（跟随角色人员）</el-radio><el-radio :value="false">指定人员（可多选）</el-radio></el-radio-group>
         <p v-if="value.settings.useStandardAssistant" class="field-help">{{ defaultNames }}</p>
-        <el-select v-else v-model="value.settings.recipients" multiple filterable clearable placeholder="选择接收人员" aria-label="低库存提醒接收人"><el-option v-for="user in value.users" :key="user.username" :value="user.username" :label="`${user.displayName}（${user.username}）`" /></el-select>
+        <UserSelect v-else v-model="value.settings.recipients" multiple filterable clearable placeholder="选择接收人员" aria-label="低库存提醒接收人"><el-option v-for="user in value.users" :key="user.username" :value="user.username" :label="`${user.displayName}（${user.username}）`" /></UserSelect>
       </el-form-item>
       <p class="field-help">草稿不计入正式常备件，不参与BOM、备料、导出标识和低库存提醒。其他业务模块只读取本地正式常备快照。现存量按当前U9C组织的全部仓库汇总，低于安全库存量时置顶高亮：未请购为红色，已请购未到货为橙色（含尚未采购）；已请购列只统计近3个月未完成的请购，采购、到货数量仅汇总到货少于采购的请购行。每次跌破发一条消息；持续低库存不重复发送，恢复后再次跌破重新提醒。新增接收人会在下次回读时收到仍未恢复的提醒。</p>
       <p class="field-help">上次完整回读：{{ stockTime(value.lastSuccessAt) }}<span v-if="value.lastError">；{{ value.lastError }}</span></p>

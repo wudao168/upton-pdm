@@ -1,4 +1,5 @@
 import type { App } from 'vue'
+import { isInactiveDom } from './activeDom'
 import { ClickScrollPlugin, OverlayScrollbars, type OverlayScrollbars as ScrollbarInstance } from 'overlayscrollbars'
 import 'overlayscrollbars/overlayscrollbars.css'
 import './styles/scrollbars.css'
@@ -61,10 +62,11 @@ export function installGlobalScrollbars(app: App, owner: Document = document) {
   let frame = 0
 
   function scan(root: Element) {
+    if (isInactiveDom(root)) return
     const elements = [root, ...root.querySelectorAll(candidates)]
     for (const element of elements) {
       if (!(element instanceof HTMLElement) || !element.matches(candidates)
-        || element.closest(ignored) || instances.has(element)) continue
+        || element.closest(ignored) || instances.has(element) || isInactiveDom(element)) continue
       const style = getComputedStyle(element)
       const x = /^(auto|scroll)$/.test(style.overflowX)
       const y = /^(auto|scroll)$/.test(style.overflowY)
@@ -75,6 +77,7 @@ export function installGlobalScrollbars(app: App, owner: Document = document) {
       }, {
         overflow: { x: x ? 'scroll' : 'hidden', y: y ? 'scroll' : 'hidden' },
         scrollbars: { theme: 'os-theme-pdm', autoHide: 'never', visibility: 'auto', clickScroll: true },
+        update: { ignoreMutation: () => isInactiveDom(element) },
       })
       instances.set(element, instance)
     }
@@ -115,7 +118,7 @@ export function installGlobalScrollbars(app: App, owner: Document = document) {
     }
   })
   observer.observe(owner.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style'] })
-  const rescan = () => schedule(owner.body)
+  const rescan = (event: Event) => schedule(event.type === 'load' && event.target instanceof Element ? event.target.parentElement ?? event.target : owner.body)
   window.addEventListener('resize', rescan)
   owner.addEventListener('load', rescan, true)
   schedule(owner.body)

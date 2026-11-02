@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -108,12 +108,13 @@ public sealed partial class PdmAddin
             token.ThrowIfCancellationRequested();
             var owner = pending.Dequeue();
             if (!visited.Add(owner.FullPath) || !IsPdmNativeFile(owner.FullPath)) continue;
+            using var referenceTiming = ArchiveReadContext.Measure(owner, "核对引用位置、历史断开状态和保存归属");
             owner.ReferenceWarnings.RemoveAll(message => !message.StartsWith(ArchiveMissingReferencePolicy.WarningPrefix, StringComparison.Ordinal));
             // Unsaved structures are checked again after the normal save step.
             var loaded = reads.FindLoaded(owner.FullPath);
-            if (loaded?.GetSaveFlag() == true) continue;
+            if (loaded?.GetSaveFlag() == true && MemoryCopy(owner) == null) continue;
             ArchiveSession.Current?.ReportFile(0, 0, owner.FileName, "正在批量查找并核对图档引用…");
-            var saved = ArchiveReadContext.Read(owner, "读取已保存引用", () => application.GetDocumentDependencies2(owner.FullPath, false, false, false)) as Array;
+            var saved = ArchiveReadContext.Read(owner, "读取已保存引用", () => application.GetDocumentDependencies2(ArchiveFileReadPath(owner), false, false, false)) as Array;
             var aliases = ReadPdmResolvedDependencyAliases(owner, saved, nodes.Keys);
             var sources = PdmDependencyEntries(saved, owner.FullPath).SelectMany(entry => entry.Value).ToList();
             var design = loaded == null ? null : ArchiveReadContext.Read(owner, "读取设计来源与特征", () => NativeDesignDependencies.ReadCheckIn(loaded));
@@ -137,6 +138,7 @@ public sealed partial class PdmAddin
             sources.AddRange(designSources);
             sources.AddRange(owner.EmbeddedDesignDependencies);
             var verifiedEmbedded = ArchiveReadContext.Read(owner, "建立嵌入引用索引", () => NativeArchiveManifest.VerifiedEmbeddedReferences(owner, sources));
+            var brokenReference = BrokenReferencePredicate(owner, token);
             foreach (var source in sources.Distinct(StringComparer.OrdinalIgnoreCase))
             {
                 token.ThrowIfCancellationRequested();
@@ -152,7 +154,7 @@ public sealed partial class PdmAddin
                 if (nodes.TryGetValue(path, out var known) && File.Exists(path))
                 { Bind(owner, source, known); continue; }
                 if (NativeArchiveManifest.IsInterconnectCachePath(path) && nodes.Values.Any(node => node.IsStoredImport && PathsEqual(node.FullPath, path))
-                    || new SolidWorksReferenceTreeScanner(application).IsVerifiedBrokenContextReference(owner.FullPath, path)) continue;
+                    || brokenReference(path)) continue;
                 var existingAlias = nodes.Values.FirstOrDefault(node => PathsEqual(node.SourceReferencePath, path) && File.Exists(node.FullPath));
                 if (existingAlias != null) { Bind(owner, source, existingAlias); continue; }
                 if (ArchiveMissingReferencePolicy.TryOmitMissing(owner, path)) continue;
@@ -282,7 +284,7 @@ public sealed partial class PdmAddin
             var records = recoveredArchiveReferences.Values.Where(record => record.Scope == apiClient?.EditJournalScope
                 && PathsEqual(record.Owner, owner.FullPath)).ToArray();
             if (records.Length == 0) continue;
-            var saved = application.GetDocumentDependencies2(owner.FullPath, false, false, false) as Array;
+            var saved = application.GetDocumentDependencies2(ArchiveFileReadPath(owner), false, false, false) as Array;
             var sources = new HashSet<string>(PdmDependencyEntries(saved, owner.FullPath).SelectMany(entry => entry.Value), StringComparer.OrdinalIgnoreCase);
             foreach (var record in records.Where(record => sources.Contains(record.Source)))
             {

@@ -21,19 +21,25 @@ public sealed class InMemoryMaterialRelationRepository : IMaterialRelationReposi
         }
     }
 
-    public Task<MaterialRelationTemplate> SaveDraftAsync(Guid? templateId, SaveMaterialRelationTemplateCommand command, string mainMaterialCode, string mainMaterialName, IReadOnlyList<MaterialRelationGroup> groups, string actor, DateTimeOffset now, CancellationToken cancellationToken)
+    public Task<MaterialRelationTemplate> SaveDraftAsync(Guid? templateId, SaveMaterialRelationTemplateCommand command, string mainMaterialCode, string mainMaterialName, IReadOnlyList<MaterialRelationGroup> groups, string actor, DateTimeOffset now, CancellationToken cancellationToken, IReadOnlyList<MaterialRelationMainMaterial>? mainMaterials = null)
     {
         lock (gate)
         {
-            var existing = templateId.HasValue ? templates.GetValueOrDefault(templateId.Value) : templates.Values.FirstOrDefault(item => item.MainMaterialId == command.MainMaterialId);
+            var existing = templateId.HasValue ? templates.GetValueOrDefault(templateId.Value) : mainMaterials is null
+                ? templates.Values.FirstOrDefault(item => item.MainMaterials.Concat(item.PublishedMainMaterials).Any(main => main.MaterialId == command.MainMaterialId)) : null;
             if (templateId.HasValue && existing is null) throw new PdmNotFoundException("配套模板不存在。");
-            if (existing is not null && existing.MainMaterialId != command.MainMaterialId) throw new PdmRuleException("已建模板不能更换主物料。");
+            mainMaterials ??= [new(command.MainMaterialId, mainMaterialCode, mainMaterialName)];
+            foreach (var main in mainMaterials)
+                if (templates.Values.FirstOrDefault(item => item.Id != existing?.Id && !item.IsArchived && item.MainMaterials.Concat(item.PublishedMainMaterials).Any(value => value.MaterialId == main.MaterialId)) is { } conflict)
+                    throw new PdmConflictException($"主料{main.MaterialCode}已归属配置“{conflict.Name}”，请先调整原配置的主料范围并发布。");
             if (existing?.DraftRevision is { } draft && command.ExpectedRevisionRowVersion.HasValue && draft.RowVersion != command.ExpectedRevisionRowVersion.Value)
                 throw new PdmConflictException("配套模板草稿已被其他用户修改，请刷新后重试。");
+            if (existing?.DraftRevision is null && command.ExpectedRevisionRowVersion.HasValue)
+                throw new PdmConflictException("草稿已发布或已发生变化，请刷新后重新维护。");
             var revision = new MaterialRelationRevision(existing?.DraftRevision?.Id ?? Guid.NewGuid(), existing?.DraftRevision?.Version ?? ((existing?.PublishedRevision?.Version ?? 0) + 1),
                 MaterialRelationRevisionState.Draft, command.ChangeNote?.Trim(), actor, existing?.DraftRevision?.CreatedAt ?? now, null, null,
-                (existing?.DraftRevision?.RowVersion ?? 0) + 1, groups);
-            var saved = new MaterialRelationTemplate(existing?.Id ?? Guid.NewGuid(), command.MainMaterialId,
+                (existing?.DraftRevision?.RowVersion ?? 0) + 1, groups) { MainMaterials = mainMaterials.ToArray() };
+            var saved = new MaterialRelationTemplate(existing?.Id ?? Guid.NewGuid(), existing?.MainMaterialId ?? command.MainMaterialId,
                 existing?.MainMaterialCode ?? mainMaterialCode, existing?.MainMaterialName ?? mainMaterialName, command.Name.Trim(), false,
                 existing?.PublishedRevision, revision, actor, now, (existing?.RowVersion ?? 0) + 1);
             templates[saved.Id] = saved;

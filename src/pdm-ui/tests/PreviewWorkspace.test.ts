@@ -63,19 +63,24 @@ describe('PreviewWorkspace', () => {
     wrapper.unmount()
   })
 
-  it('图档属性以预览区顶部一行横向常驻显示，且不提供折叠', () => {
+  it('图档核心属性常驻，展开其他属性并在换图时收起', async () => {
     const wrapper = mount(PreviewWorkspace, {
       props: { selected, related: [], bomItem },
     })
 
     const bar = wrapper.get('.pdm-preview-properties-bar')
     expect(bar.find('.pdm-preview-properties').exists()).toBe(true)
+    expect(bar.findAll('.pdm-preview-properties > div')).toHaveLength(4)
+    await bar.get('button[aria-expanded]').trigger('click')
     expect(bar.findAll('.pdm-preview-properties > div')).toHaveLength(10)
     expect(wrapper.find('.pdm-preview-properties-toggle').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="折叠图档属性"]').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="折叠图档信息卡"]').exists()).toBe(false)
     expect(wrapper.get('.pdm-preview-properties-bar__title').text()).toBe('图档属性')
     expect(wrapper.get('.pdm-preview-properties').attributes('style') ?? '').not.toContain('display: none')
+    await wrapper.setProps({ selected: { ...selected, documentId: 'other' } })
+    expect(bar.findAll('.pdm-preview-properties > div')).toHaveLength(4)
+    wrapper.unmount()
   })
 
   it('shows the matched BOM material code instead of the document drawing name', () => {

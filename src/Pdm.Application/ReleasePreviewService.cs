@@ -39,6 +39,7 @@ public sealed class ReleasePreviewService(
         var package = await repository.FindReleasePackageAsync(packageId, cancellationToken);
         if (package is null || package.State != ReleasePackageState.Published) return 0;
         var archived = await ArchiveDeliveryAsync(package, "system", cancellationToken);
+        await ReleaseManagementNotifications.ReconcileRiskAsync(repository, package.Id, timeProvider.GetUtcNow(), cancellationToken, archiveVerified: archived.Verified);
         if (!ReleasePreviewPolicy.RequiresConversion(package))
         {
             if (package.PreviewState != ReleasePreviewState.None || package.PreviewAttempts != 0 || package.PreviewError is not null)
@@ -47,7 +48,7 @@ public sealed class ReleasePreviewService(
                 await repository.AppendAuditAsync(new(Guid.NewGuid(), timeProvider.GetUtcNow(), "system", "release-package.preview-state-corrected",
                     nameof(ReleasePackage), packageId.ToString(), $"{package.Number}；{package.Scope}不产生转图任务，已撤销历史{package.PreviewState}状态，原尝试次数{package.PreviewAttempts}。"), cancellationToken);
             }
-            return archived;
+            return archived.Count;
         }
         // 巡检不能把已耗尽次数的任务改回 Pending，造成“自动重试”假象。
         if (package.PreviewAttempts >= MaxAttempts)
@@ -60,7 +61,7 @@ public sealed class ReleasePreviewService(
                     nameof(ReleasePackage), packageId.ToString(), $"{package.Number}；已尝试{package.PreviewAttempts}次，恢复为暂停状态，保留原失败原因。"), cancellationToken);
             }
             await NotifyIncompleteAsync(packageId, cancellationToken);
-            return archived;
+            return archived.Count;
         }
         string? error = null;
         try
@@ -77,7 +78,7 @@ public sealed class ReleasePreviewService(
                 package.PreviewState is ReleasePreviewState.Succeeded or ReleasePreviewState.None ? 0 : package.PreviewAttempts,
                 timeProvider.GetUtcNow(), cancellationToken);
         await NotifyIncompleteAsync(packageId, cancellationToken);
-        return archived;
+        return archived.Count;
     }
 
     public async Task<int> ProcessPendingAsync(CancellationToken cancellationToken)
@@ -148,6 +149,7 @@ public sealed class ReleasePreviewService(
             package = await repository.FindReleasePackageAsync(package.Id, cancellationToken) ?? package;
             await CopyPreviewsIntoPublishedPathAsync(package, vaultRoot, await ReleasedVersionsAsync(package.Id, cancellationToken), cancellationToken);
             // 转图补齐后发布目录多了 STEP/PDF，这里顺带把新增成品登记到"机械发布/电气发布"目录。
+            var archiveVerified = true;
             if (releaseDeliveryArchive is not null)
             {
                 var archiveActor = package.ApprovalTasks
@@ -156,13 +158,13 @@ public sealed class ReleasePreviewService(
                     .LastOrDefault()?.DecisionBy
                     ?? project.PrimaryProjectManager
                     ?? "system";
-                await ArchiveDeliveryAsync(package, archiveActor, cancellationToken);
+                archiveVerified = (await ArchiveDeliveryAsync(package, archiveActor, cancellationToken)).Verified;
             }
             if (failures is not null) throw failures;
             if ((await ListItemsAsync(package.Id, cancellationToken)).Any(item => !item.Succeeded))
                 throw new PdmRuleException("发布资料尚未齐套，请检查失败图档并重试转图。");
             await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.Succeeded, null, attempts, timeProvider.GetUtcNow(), cancellationToken);
-            await NotifyAsync(package, project, "图纸转换已完成", $"STEP/PDF 已生成并绑定正式版本（第{attempts}次处理）", "result", cancellationToken);
+            await NotifyAsync(package, project, "图纸转换已完成", $"STEP/PDF 已生成并绑定正式版本（第{attempts}次处理）", "completed", cancellationToken, archiveVerified);
             return true;
         }
         catch (PreviewServerUnavailableException exception)
@@ -183,7 +185,7 @@ public sealed class ReleasePreviewService(
             if (!exhausted) await NotifyIncompleteAsync(package.Id, cancellationToken);
             if (exhausted)
                 await NotifyAsync(package, project, "图纸转换多次失败",
-                    $"已重试{attempts}次，生产资料仍未全部投放：{error}；可在发布面板手动重试转图", "result", cancellationToken);
+                    $"已重试{attempts}次，生产资料仍未全部投放：{error}；可在发布面板手动重试转图", "failed", cancellationToken);
             return false;
         }
         catch (OperationCanceledException)
@@ -506,18 +508,21 @@ public sealed class ReleasePreviewService(
         await ReleaseDeliveryFiles.RefreshManifestAsync(package, delivered, cancellationToken);
     }
 
-    private async Task<int> ArchiveDeliveryAsync(ReleasePackage package, string actor, CancellationToken cancellationToken)
+    private async Task<(int Count, bool Verified)> ArchiveDeliveryAsync(ReleasePackage package, string actor, CancellationToken cancellationToken)
     {
-        if (releaseDeliveryArchive is null) return 0;
-        try { return await releaseDeliveryArchive.ArchiveAsync(package.Id, actor, cancellationToken); }
+        if (releaseDeliveryArchive is null) return (0, true);
+        int count;
+        try { count = await releaseDeliveryArchive.ArchiveAsync(package.Id, actor, cancellationToken); }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             var error = await RecordFailureAsync(package.Id, exception, "release-package.delivery-archive-diagnostic");
             var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken);
             if (project is not null)
                 await NotifyAsync(package, project, "发布资料归档未完成", $"BOM及发布资料归档异常：{error}", "archive", cancellationToken);
-            return 0;
+            return (0, false);
         }
+        await repository.ResolveUserNotificationsAsync([ReleasePreviewNotifications.Source(package.Id, "archive"), $"release-package:{package.Id:N}:archive"], timeProvider.GetUtcNow(), cancellationToken);
+        return (count, true);
     }
 
     private async Task NotifyIncompleteAsync(Guid packageId, CancellationToken ct)
@@ -529,30 +534,8 @@ public sealed class ReleasePreviewService(
     }
 
     private async Task NotifyAsync(
-        ReleasePackage package, Project project, string title, string detail, string kind, CancellationToken cancellationToken)
+        ReleasePackage package, Project project, string title, string detail, string kind, CancellationToken cancellationToken, bool archiveVerified = false)
     {
-        var recipients = package.ApprovalTasks
-            .Where(task => task.DecisionBy is not null)
-            .Select(task => task.DecisionBy!)
-            .Append(package.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault()?.Assignee)
-            .Append(project.PrimaryProjectManager)
-            .Where(username => !string.IsNullOrWhiteSpace(username))
-            .Select(username => username!.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        if (kind != "archive") recipients = (await ReleasePreviewNotifications.RecipientsAsync(repository, package, project, cancellationToken)).ToArray();
-        if (recipients.Length == 0) return;
-        var createdAt = timeProvider.GetUtcNow();
-        await repository.CreateUserNotificationsAsync(recipients.Select(recipient => new UserNotification(
-            Guid.NewGuid(),
-            recipient,
-            kind == "archive" ? "ReleaseDeliveryResult" : "ReleasePreviewResult",
-            title,
-            $"{project.Code} · {package.Number} {detail}",
-            project.Id,
-            package.Id,
-            kind == "archive" ? $"release-package:{package.Id:N}:archive" : $"release-package:{package.Id:N}:preview:{kind}:{(package.PreviewUpdatedAt ?? package.CreatedAt).UtcTicks}",
-            createdAt,
-            null)).ToArray(), cancellationToken);
+        await ReleasePreviewNotifications.NotifyAsync(repository, package, project, title, detail, kind, timeProvider.GetUtcNow(), cancellationToken, archiveVerified);
     }
 }

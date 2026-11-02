@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UserSelect from './UserSelect'
 import { ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import { ArrowDown, ArrowUp } from '@lucide/vue'
@@ -53,7 +54,7 @@ function moveNode(node: ProjectFolderTemplateNode, offset: -1 | 1) {
   </section>
   <el-dialog v-model="permissionOpen" title="模板默认权限" width="760px">
     <p class="pdm-dialog-help">保存模板后，新旧项目中未单独配置权限的目录同步生效；已配置的独立权限保持不变。</p>
-    <div class="pdm-permission-list"><div v-for="(rule,index) in permissionRows" :key="rule.id || index" class="pdm-permission-row"><el-select v-model="rule.principalType" style="width:100px"><el-option label="角色" value="Role" /><el-option label="用户" value="User" /></el-select><el-select v-if="rule.principalType === 'Role'" v-model="rule.principalKey" filterable style="width:165px"><el-option v-for="role in roles" :key="role.role" :label="role.name" :value="role.role" /></el-select><el-select v-else v-model="rule.principalKey" filterable style="width:165px"><el-option v-for="user in users" :key="user.username" :label="user.displayName" :value="user.username" /></el-select><el-checkbox-group :model-value="accessValues(rule)" @update:model-value="setAccess(rule, $event as number[])"><el-checkbox v-for="item in accessOptions" :key="item.value" :value="item.value">{{ item.label }}</el-checkbox></el-checkbox-group><button type="button" class="pdm-text-danger" @click="permissionRows.splice(index,1)">移除</button></div></div>
+    <div class="pdm-permission-list"><div v-for="(rule,index) in permissionRows" :key="rule.id || index" class="pdm-permission-row"><el-select v-model="rule.principalType" style="width:100px"><el-option label="角色" value="Role" /><el-option label="用户" value="User" /></el-select><el-select v-if="rule.principalType === 'Role'" v-model="rule.principalKey" filterable style="width:165px"><el-option v-for="role in roles" :key="role.role" :label="role.name" :value="role.role" /></el-select><UserSelect v-else v-model="rule.principalKey" filterable style="width:165px"><el-option v-for="user in users" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect><el-checkbox-group :model-value="accessValues(rule)" @update:model-value="setAccess(rule, $event as number[])"><el-checkbox v-for="item in accessOptions" :key="item.value" :value="item.value">{{ item.label }}</el-checkbox></el-checkbox-group><button type="button" class="pdm-text-danger" @click="permissionRows.splice(index,1)">移除</button></div></div>
     <button type="button" class="pdm-secondary-action" @click="addPermission">添加权限主体</button>
     <template #footer><button type="button" class="pdm-secondary-action" @click="permissionOpen=false">取消</button><button type="button" class="pdm-primary-action" @click="applyPermissions">应用到模板草稿</button></template>
   </el-dialog>

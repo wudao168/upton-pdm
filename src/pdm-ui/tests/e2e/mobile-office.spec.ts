@@ -1,0 +1,177 @@
+import { expect, test, type Page } from '@playwright/test'
+import { join } from 'node:path'
+const company = '11111111-1111-1111-1111-111111111111', project = '22222222-2222-2222-2222-222222222222'
+const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date())
+const permissions = ['project.view', 'system.project-center-permissions.v1', 'project.tab.overview.view', 'project.tab.opl.view', 'project.tab.project-plan.view', 'project.content.write', 'project.content.download', 'approval.decide']
+const task = { id: 'approval-1', projectId: project, projectCode: 'P700014', projectName: '移动办公验证项目', releasePackageId: 'release-1', releasePackageNumber: 'REL-001', stage: '工程审核', packageState: 'PendingApproval', createdAt: today + 'T08:00:00Z' }
+const projectData = { id: project, code: 'P700014', name: '移动办公验证项目', stage: '设计中', owner: 'employee', primaryProjectManager: 'employee', collaborativeProjectManagers: [], designers: ['employee'], quantity: 1, serialNumbers: [], responsibleUsers: ['employee'], canReadContent: true, isActive: true, organizationId: company, customerName: '测试客户', documentCount: 0, vaultName: '图档库', vaultLocation: '', releaseLocation: '' }
+async function fixture(page: Page, settings: { unbound?: boolean; browser?: boolean; readonly?: boolean; noProjectView?: boolean } = {}) {
+  const state = { entries: [] as Array<{ id: string; date: string; projectId: string; location: string; hours: number; projectCode: string; projectName: string; rootProjectId: string; rootProjectCode: string; rootProjectName: string }>, rows: [] as unknown[], decisions: [] as unknown[], saves: [] as unknown[], conflict: false, rowVersion: 0, projectRequests: 0 }
+  await page.addInitScript(({ browser }) => {
+    Object.assign(window, { dd: { env: { platform: browser ? 'notInDingTalk' : 'ios' }, ready: (callback: () => void) => callback(), requestAuthCode: (input: { success: (value: { code: string }) => void }) => input.success({ code: 'verified-code' }) } })
+  }, { browser: settings.browser })
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname
+    const method = route.request().method()
+    let json: unknown = []
+    if (path.endsWith('/office/bootstrap')) json = { enabled: true, corpId: 'corp', appKey: 'key', companyId: company }
+    else if (path.endsWith('/office/login')) {
+      expect(route.request().postDataJSON()).toMatchObject({ companyId: company, code: 'verified-code' })
+      if (settings.unbound) return route.fulfill({ status: 403, json: { message: '当前钉钉账号尚未绑定UPLM账号，请联系管理员。钉钉用户ID：employee-id' } })
+      json = { accessToken: 'office-token', resumeToken: 'resume', expiresAt: today + 'T23:59:59Z', username: 'employee', displayName: '员工张工', role: 'Engineer', permissions: settings.noProjectView ? [] : settings.readonly ? permissions.filter(value => value !== 'project.content.write') : permissions, activeCompanyId: company, primaryCompanyId: company, activeCompanyName: '测试公司', accessibleCompanies: [] }
+    } else if (path === '/api/projects') { state.projectRequests++; json = [projectData] }
+    else if (path === '/api/approval-tasks/mine') json = state.decisions.length ? [] : [task]
+    else if (path === '/api/notifications/mine') json = [{ id: 'notification-1', category: 'ProjectTodo', title: '项目交付核对', content: '请检查项目计划。', projectId: project, recipient: 'employee', sourceKey: 'todo:1', createdAt: today + 'T08:00:00Z' }, { id: 'hours-reminder', category: 'work-hours', title: '不应混入待办的工时提醒', content: '工时缺填', createdAt: today + 'T08:00:00Z' }]
+    else if (path === '/api/work-hours') {
+      if (method === 'PUT') {
+        const input = route.request().postDataJSON(); state.saves.push(input)
+        if (state.conflict) return route.fulfill({ status: 409, json: { message: '工时已在其他页面修改，请刷新后重新填写；本次没有覆盖任何记录。' } })
+        state.entries = input.entries.map((entry: object, index: number) => ({ ...entry, id: `hours-${index}`, projectCode: projectData.code, projectName: projectData.name, rootProjectId: project, rootProjectCode: projectData.code, rootProjectName: projectData.name })); state.rowVersion++
+      }
+      json = { today, startDate: today, username: 'employee', displayName: '员工张工', scope: '本人', people: [{ username: 'employee', displayName: '员工张工', department: '设计部', isActive: true }], projects: [{ ...projectData, rootProjectId: project, rootProjectCode: projectData.code, rootProjectName: projectData.name }], sheets: [{ companyId: company, username: 'employee', month: today.slice(0, 7), rowVersion: state.rowVersion, entries: state.entries, history: [] }], compliance: [{ username: 'employee', days: [], reminderEnabled: true }], canManage: false, canManageSettings: false }
+    } else if (path === `/api/projects/${project}/project-plan`) json = null
+    else if (path.endsWith('/plan')) json = null
+    else if (path === `/api/projects/${project}/release-packages`) json = [{ id: 'release-1', number: 'REL-001', projectId: project, state: 'ProcessReview', scope: 'Standard', approvalTasks: [{ id: task.id, assignee: 'employee', stage: 0, stepName: '工程审核', stepOrder: 1, decision: null }], versionBindings: [{ documentId: 'drawing-1', versionId: 'bound-version', revision: 'A.2', sha256: 'abc', publish: true, fileName: '测试工程图.SLDDRW' }], standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [] }]
+    else if (path === `/api/approval-tasks/${task.id}/decision`) { state.decisions.push(route.request().postDataJSON()); json = {} }
+    else if (path === `/api/projects/${project}/opl`) {
+      if (method === 'POST') {
+        const raw = route.request().postDataBuffer()!.toString()
+        expect(raw).toContain('手机新增问题')
+        state.rows.push({ issue: { id: 'opl-1', number: 1, description: '手机新增问题', solution: '', status: '待处理', priority: '普通', owner: 'employee', dueDate: null, createdBy: 'employee', createdAt: today, completedAt: null, attachments: [], rowVersion: 1, relatedProjectId: null }, canEdit: true, canComplete: true, isNew: false })
+        json = (state.rows[0] as { issue: unknown }).issue
+      } else json = { rootProject: projectData, subprojects: [], people: [{ username: 'employee', displayName: '员工张工' }], rows: state.rows }
+    } else if (path.endsWith('/complete')) {
+      const row = state.rows[0] as { issue: { status: string; completedAt: string; rowVersion: number } }; row.issue.status = '已完成'; row.issue.completedAt = today; row.issue.rowVersion++; json = row.issue
+    } else if (path.includes('/auth/')) json = true
+    return route.fulfill({ json })
+  })
+  return state
+}
+test('LAN HTTP mobile home, projects, OPL save and work-hours conflict preserve input', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
+  const state = await fixture(page)
+  await page.goto(`/?dingtalkOffice=1&companyId=${company}`)
+  await expect(page).toHaveTitle(/UPLM|PDM|PLM/)
+  await expect(page.getByRole('region', { name: '移动办公首页' })).toBeVisible()
+  await expect(page.getByRole('navigation', { name: '移动办公导航' }).getByRole('button')).toHaveCount(5)
+  await expect(page.getByText('不应混入待办的工时提醒')).toHaveCount(0)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: join(process.env.TEMP!, 'uplm-mobile-home-390.png'), fullPage: true })
+  await page.getByRole('navigation').getByRole('button', { name: '项目', exact: true }).click()
+  await page.getByRole('button', { name: /P700014.*移动办公验证项目/ }).click()
+  await page.getByRole('button', { name: 'OPL开口问题', exact: true }).click()
+  await page.getByRole('button', { name: '新增问题', exact: true }).click()
+  await page.getByRole('textbox', { name: '问题描述', exact: true }).fill('手机新增问题')
+  await page.getByRole('button', { name: '保存问题', exact: true }).click()
+  await expect(page.locator('.mobile-opl-card')).toContainText('手机新增问题')
+  await expect(page.getByRole('dialog', { name: '新增开口问题' })).not.toBeVisible()
+  await page.screenshot({ path: join(process.env.TEMP!, 'uplm-mobile-opl-390.png'), fullPage: true })
+  await page.getByRole('navigation').getByRole('button', { name: '工时', exact: true }).click()
+  await expect(page.getByLabel('填报日期')).toHaveValue(today)
+  await page.getByRole('combobox', { name: '填报项目', exact: true }).click()
+  await page.getByRole('option', { name: /P700014/ }).click()
+  await page.getByLabel('工时数', { exact: true }).fill('4.5')
+  state.conflict = true
+  await page.getByRole('button', { name: '保存并继续', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '没有覆盖任何记录' })).toBeVisible()
+  await expect(page.getByLabel('工时数', { exact: true })).toHaveValue('4.5')
+  await page.getByRole('navigation').getByRole('button', { name: '首页', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '当前有未保存内容' })).toBeVisible()
+  state.conflict = false
+  await page.getByRole('button', { name: '保存并继续', exact: true }).click()
+  await expect(page.getByText('4.5 小时', { exact: false }).first()).toBeVisible()
+  expect(state.saves).toEqual(expect.arrayContaining([expect.objectContaining({ from: today, to: today, entries: [expect.objectContaining({ projectId: project, hours: 4.5, location: '厂内' })] })]))
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await expect(page.locator('.el-message')).toHaveCount(0, { timeout: 10_000 })
+  await page.evaluate(() => window.scrollTo(0, 0))
+  await page.screenshot({ path: join(process.env.TEMP!, 'uplm-mobile-hours-390.png'), fullPage: true })
+  await page.getByRole('navigation').getByRole('button', { name: '首页', exact: true }).click()
+  await expect(page.getByRole('region', { name: '移动办公首页' })).toBeVisible()
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+  expect(errors).toEqual([])
+})
+test('approval detail binds the selected release and saves decisions through the existing endpoint', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  const state = await fixture(page)
+  await page.goto(`/?dingtalkOffice=1&companyId=${company}&view=tasks&taskId=${task.id}`)
+  await expect(page.getByRole('region', { name: '审批详情' })).toBeVisible()
+  await expect(page.getByText('版本 A.2')).toBeVisible()
+  let previewVersion = ''
+  await page.route('**/api/documents/drawing-1/versions/*/preview', route => { previewVersion = new URL(route.request().url()).pathname; return route.fulfill({ status: 404, json: { message: '本次审批版本尚未生成预览。' } }) })
+  await page.getByRole('button', { name: '查看此版本图纸', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('预览')
+  expect(previewVersion).toBe('/api/documents/drawing-1/versions/bound-version/preview')
+  await page.getByRole('button', { name: '退回修改', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('退回时请填写处理意见')
+  expect(state.decisions).toHaveLength(0)
+  await page.getByLabel('审批处理意见').fill('需要补充说明')
+  await page.getByRole('button', { name: '退回修改', exact: true }).click()
+  await expect(page.getByRole('status')).toContainText('审批操作已保存')
+  expect(state.decisions).toEqual([{ decision: 1, comment: '需要补充说明' }])
+  await expect(page.getByRole('heading', { name: '待审批（0）' })).toBeVisible()
+})
+test('unbound identities and ordinary browsers never load employee business data', async ({ page }) => {
+  const state = await fixture(page, { unbound: true })
+  await page.goto(`/?dingtalkOffice=1&companyId=${company}`)
+  await expect(page.getByRole('alert')).toContainText('employee-id')
+  expect(state.projectRequests).toBe(0)
+  await expect(page.getByRole('navigation')).toHaveCount(0)
+})
+test('read-only roles cannot start approvals or add OPL', async ({ page }) => {
+  await fixture(page, { readonly: true })
+  await page.goto(`/?dingtalkOffice=1&companyId=${company}&projectId=${project}&tab=opl`)
+  await expect(page.getByRole('region', { name: '开口问题清单' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '新增问题', exact: true })).toHaveCount(0)
+  await page.getByRole('navigation').getByRole('button', { name: /^待办/ }).click()
+  await page.getByRole('button', { name: /P700014.*移动办公验证项目/ }).click()
+  await expect(page.getByRole('button', { name: '通过审批', exact: true })).toHaveCount(0)
+})
+test('ordinary browser is stopped before employee login', async ({ page }) => {
+  const state = await fixture(page, { browser: true })
+  await page.goto(`/?dingtalkOffice=1&companyId=${company}`)
+  await expect(page.getByRole('alert')).toContainText('请在钉钉工作台中打开')
+  expect(state.projectRequests).toBe(0)
+})
+
+test('without project view permission mobile navigation and project shortcuts stay hidden', async ({ page }) => {
+  const state = await fixture(page, { noProjectView: true })
+  await page.goto(`/?dingtalkOffice=1&companyId=${company}&view=projects&projectId=${project}`)
+  await expect(page.getByRole('region', { name: '移动办公首页' })).toBeVisible()
+  await expect(page.getByRole('navigation').getByRole('button', { name: '项目', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '查看项目 / 提交OPL', exact: true })).toHaveCount(0)
+  expect(state.projectRequests).toBe(0)
+})
+test('project shortcut preselects the project and landscape layout stays within the viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 844, height: 390 })
+  await fixture(page)
+  await page.goto(`/?dingtalkOffice=1&companyId=${company}&projectId=${project}`)
+  await page.getByRole('button', { name: '填写项目工时', exact: true }).click()
+  await expect(page.getByLabel('自动带出项目名称')).toHaveValue(projectData.name)
+  await expect(page.getByLabel('填报日期')).toHaveValue(today)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.getByRole('button', { name: '取消修改', exact: true }).click()
+  await page.getByRole('navigation').getByRole('button', { name: '首页', exact: true }).click()
+  await expect(page.getByRole('region', { name: '移动办公首页' })).toBeVisible()
+  await page.getByRole('navigation').getByRole('button', { name: '项目', exact: true }).click()
+  await page.getByRole('button', { name: '填写项目工时', exact: true }).click()
+  await expect(page.getByLabel('自动带出项目名称')).toHaveValue(projectData.name)
+})
+test('logout during a background refresh does not block the next verified login', async ({ page }) => {
+  await fixture(page)
+  await page.goto(`/?dingtalkOffice=1&companyId=${company}`)
+  await expect(page.getByRole('region', { name: '移动办公首页' })).toBeVisible()
+  let release!: () => void, requested!: () => void
+  const blocked = new Promise<void>(resolve => { release = resolve })
+  const requestStarted = new Promise<void>(resolve => { requested = resolve })
+  await page.route('**/api/projects', async route => { requested(); await blocked; await route.fulfill({ json: [projectData] }) }, { times: 1 })
+  await page.getByRole('banner').getByRole('button', { name: '刷新', exact: true }).click()
+  await requestStarted
+  await page.getByRole('navigation').getByRole('button', { name: '我的', exact: true }).click()
+  await page.getByRole('button', { name: '退出当前登录', exact: true }).click()
+  await expect(page.getByRole('button', { name: '重新进入', exact: true })).toBeVisible()
+  release()
+  await page.getByRole('button', { name: '重新进入', exact: true }).click()
+  await expect(page.getByRole('region', { name: '移动办公首页' })).toBeVisible()
+  await expect(page.getByRole('button', { name: /P700014.*移动办公验证项目/ }).first()).toBeVisible()
+})

@@ -610,7 +610,7 @@ public sealed class ProjectPlanningService(
         var selected = await RequireReadProjectAsync(projectId, actor, role, cancellationToken);
         var rootId = selected.ParentProjectId is null ? selected.Id : selected.RootProjectId ?? selected.ParentProjectId.Value;
         await RequireReadAsync(rootId, actor, role, cancellationToken);
-        var projects = (await repository.ListProjectsAsync(cancellationToken))
+        var projects = (await repository.ListProjectHeadersAsync(cancellationToken))
             .Where(item => item.Id == rootId || item.ParentProjectId == rootId)
             .OrderBy(item => item.ParentProjectId is null ? 0 : 1)
             .ThenBy(item => item.ChildSequence ?? 0)

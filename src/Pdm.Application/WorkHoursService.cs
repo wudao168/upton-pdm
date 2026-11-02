@@ -67,7 +67,7 @@ public sealed partial class WorkHoursService(IPdmRepository repository, IWorkHou
         var root = projects.FirstOrDefault(x => x.Id == rootId) ?? project;
         return new(project.Id, project.Code, project.Name, rootId, root.Code, root.Name);
     }
-    public async Task<WorkHoursView> ReadAsync(DateOnly from, DateOnly to, bool report, string actor, UserRole role, CancellationToken ct)
+    public async Task<WorkHoursView> ReadAsync(DateOnly from, DateOnly to, bool report, string actor, UserRole role, CancellationToken ct, bool includeProjects = true)
     {
         Range(from, to, 366);
         var (company, directory, user) = await Context(actor, ct);
@@ -112,7 +112,7 @@ public sealed partial class WorkHoursService(IPdmRepository repository, IWorkHou
         if (!report)
             for (var date = new DateOnly(from.Year, from.Month, 1); date <= to; date = date.AddMonths(1))
                 if (!sheets.Any(x => x.Month == Month(date))) sheets.Add(new(company, actor, Month(date), 0, [], []));
-        var projects = (await repository.ListProjectsForUserAsync(actor, role, ct)).Where(x => x.IsActive && x.OrganizationId == company).ToArray();
+        var projects = includeProjects ? (await repository.ListProjectHeadersForUserAsync(actor, role, ct)).Where(x => x.IsActive && x.OrganizationId == company).ToArray() : [];
         var start = await store.StartDateAsync(company, Today, ct);
         return new(Today, start, actor, user.DisplayName,
             allCompany ? "当前公司" : report && managed.Count > 0 ? "本人及管理部门" : "仅本人",

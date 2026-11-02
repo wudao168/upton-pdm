@@ -57,7 +57,7 @@ public sealed class ProjectCenterPermissionMiddleware(RequestDelegate next)
             "boms" or "bom-files" or "bom-source-data" or "bom-versions" or "bom-headers" => "bom",
             "release-packages" or "release-preview-items" or "manufacturing-bom-baselines" => "release",
             "procurement-tracking" or "procurement-files" => "procurement",
-            "audit" => "records",
+            "audit" or "overview-records" => "records",
             _ => null
         };
     }

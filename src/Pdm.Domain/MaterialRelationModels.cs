@@ -51,6 +51,12 @@ public sealed record MaterialRelationGroup(
     int SortOrder,
     IReadOnlyList<MaterialRelationOption> Options);
 
+public sealed record MaterialRelationMainMaterial(Guid MaterialId, string MaterialCode, string MaterialName,
+    string? Specification = null, string? Brand = null, string? Remark = null)
+{
+    public IReadOnlyList<StandardLibraryCategory> StandardLibraryCategories { get; init; } = [];
+}
+
 public sealed record MaterialRelationRevision(
     Guid Id,
     int Version,
@@ -61,7 +67,10 @@ public sealed record MaterialRelationRevision(
     string? PublishedBy,
     DateTimeOffset? PublishedAt,
     long RowVersion,
-    IReadOnlyList<MaterialRelationGroup> Groups);
+    IReadOnlyList<MaterialRelationGroup> Groups)
+{
+    public IReadOnlyList<MaterialRelationMainMaterial> MainMaterials { get; init; } = [];
+}
 
 public sealed record MaterialRelationTemplate(
     Guid Id,
@@ -77,6 +86,10 @@ public sealed record MaterialRelationTemplate(
     long RowVersion)
 {
     public IReadOnlyList<StandardLibraryCategory> StandardLibraryCategories { get; init; } = [];
+    public IReadOnlyList<MaterialRelationMainMaterial> MainMaterials => Members(DraftRevision ?? PublishedRevision);
+    public IReadOnlyList<MaterialRelationMainMaterial> PublishedMainMaterials => PublishedRevision is null ? [] : Members(PublishedRevision);
+    private IReadOnlyList<MaterialRelationMainMaterial> Members(MaterialRelationRevision? revision) => revision?.MainMaterials is { Count: > 0 } members
+        ? members : [new(MainMaterialId, MainMaterialCode, MainMaterialName) { StandardLibraryCategories = StandardLibraryCategories }];
 }
 
 public sealed record MaterialRelationSelection(

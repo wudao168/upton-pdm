@@ -71,7 +71,7 @@ public partial class ReviewOverlayWindow : Window
         pendingStateJson = stateJson;
         await InitializeAsync();
         if (!navigationReady || ReviewView.CoreWebView2 == null) return;
-        ReviewView.CoreWebView2.PostWebMessageAsJson(stateJson);
+        ReviewView.CoreWebView2.PostWebMessageAsJson(pendingStateJson);
     }
 
     public void ShowAt(double left, double top, double width, double height)

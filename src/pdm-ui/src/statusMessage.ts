@@ -8,25 +8,31 @@ export const globalStatus = readonly(currentStatus)
 let hostCount = 0
 let sequence = 0
 let dialogStatus: HTMLElement | undefined
+let dialogObserver: MutationObserver | undefined
 
 const labels: Record<StatusType, string> = { success: '成功', warning: '提醒', error: '失败', info: '提示' }
 
 function clearDialogStatus() {
+  dialogObserver?.disconnect()
+  dialogObserver = undefined
   dialogStatus?.remove()
   dialogStatus = undefined
+}
+
+function dialogIsOpen(dialog: HTMLElement) {
+  if (!dialog.isConnected) return false
+  for (let node: HTMLElement | null = dialog; node; node = node.parentElement) {
+    if (node.hidden || node.style.display === 'none' || node.getAttribute('aria-hidden') === 'true'
+      || node.classList.contains('dialog-fade-leave-active')
+      || node.classList.contains('el-drawer-fade-leave-active')) return false
+  }
+  return true
 }
 
 function activeDialog() {
   if (typeof document === 'undefined') return undefined
   const dialogs = [...document.querySelectorAll<HTMLElement>('.el-overlay .el-dialog, .el-overlay .el-drawer, .pdm-dialog-backdrop [role="dialog"]')]
-  return dialogs.reverse().find(dialog => {
-    const overlay = dialog.closest<HTMLElement>('.el-overlay, .pdm-dialog-backdrop')
-    return overlay
-      && overlay.style.display !== 'none'
-      && overlay.getAttribute('aria-hidden') !== 'true'
-      && !overlay.classList.contains('dialog-fade-leave-active')
-      && !overlay.classList.contains('el-drawer-fade-leave-active')
-  })
+  return dialogs.reverse().find(dialogIsOpen)
 }
 
 function showInDialog(dialog: HTMLElement, type: StatusType, message: string) {
@@ -51,6 +57,12 @@ function showInDialog(dialog: HTMLElement, type: StatusType, message: string) {
   const header = [...dialog.children].find(child => child.matches('header, .el-dialog__header, .el-drawer__header'))
   dialog.insertBefore(status, body ?? header?.nextSibling ?? dialog.firstChild)
   dialogStatus = status
+  dialogObserver = new MutationObserver(() => {
+    if (!dialogIsOpen(dialog)) clearDialogStatus()
+  })
+  for (let node: HTMLElement | null = dialog; node; node = node.parentElement) {
+    dialogObserver.observe(node, { attributes: true, attributeFilter: ['style', 'class', 'aria-hidden', 'hidden'], childList: true })
+  }
   close.addEventListener('click', clearDialogStatus, { once: true })
   return { close: () => { if (dialogStatus === status) clearDialogStatus(); else status.remove() } }
 }

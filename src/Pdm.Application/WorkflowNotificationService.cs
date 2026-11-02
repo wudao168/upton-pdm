@@ -209,6 +209,7 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
         var roleRecipients = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var warnings = new List<string>();
         var units = ActiveUnits(directory, job.CompanyId);
+        var managers = (await ReleaseManagementNotifications.ManagersAsync(repository, project, directory, ct)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (job.Rule.Enabled) foreach (var recipient in job.Rule.Recipients)
         {
             var unitId = recipient.DepartmentSource == "SubmitterDepartment" ? job.SubmitterDepartmentId : recipient.DepartmentId;
@@ -236,7 +237,8 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
                 }
                 var members = directory.Memberships.Where(item => recipientUnits.Contains(item.UnitId)).Select(item => item.Username).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var matching = directory.Users.Where(user => CompanyUser(directory, user.Username, job.CompanyId) && user.EffectiveRoleCodes.Contains(selectedRole.Role, StringComparer.OrdinalIgnoreCase)
-                    && (recipient.DepartmentSource == "CompanyRole" || members.Contains(user.Username))).Select(user => user.Username).ToArray();
+                    && (recipient.DepartmentSource == "CompanyRole" || members.Contains(user.Username))
+                    && (!selectedRole.Role.Equals("ProjectManager", StringComparison.OrdinalIgnoreCase) || managers.Contains(user.Username))).Select(user => user.Username).ToArray();
                 if (matching.Length == 0) warnings.Add($"{(recipient.DepartmentSource == "CompanyRole" ? "当前公司" : directory.Units.First(item => item.Id == unitId).Name)}／{selectedRole.Name}没有有效人员");
                 recipients.UnionWith(matching);
                 roleRecipients.UnionWith(matching);
@@ -252,6 +254,7 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
             if (eligible.Length == 0) warnings.Add($"{directory.Units.First(item => item.Id == unit).Name}／{position.Name}未配置有效接收人员");
             recipients.UnionWith(eligible);
         }
+        if (job.BusinessKind == "Release") recipients.UnionWith(managers);
         if (job.BusinessKind == "MaterialCode") recipients.Add(job.Submitter);
         var responsibleItems = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         if (plan is not null) foreach (var item in plan.Items)

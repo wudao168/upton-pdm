@@ -16,6 +16,8 @@ import './styles/app.css'
 import './styles/ui-consistency.css'
 import './styles/tabs.css'
 import './styles/review-overlay.css'
+import './styles/interaction.css'
+import './styles/stat-cards.css'
 import DrawingReviewOverlayApp from './components/DrawingReviewOverlayApp.vue'
 import { installClientDiagnostics } from './clientDiagnostics'
 

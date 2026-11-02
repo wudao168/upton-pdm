@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus'
 import { getArchiveWarningPolicy, getArchiveWarningCatalog, saveArchiveWarningPolicy, type ArchiveWarningPolicy, type ArchiveWarningDefinition } from '../api'
 
 const props = defineProps<{ token: string; canEdit: boolean }>()
-const policy = ref<ArchiveWarningPolicy>({ revision: 0, blockAll: false, blockingCodes: [] })
+const policy = ref<ArchiveWarningPolicy>({ revision: 0, blockAll: false, blockingCodes: [], maxBatchRequestMiB: 256 })
 const catalog = ref<ArchiveWarningDefinition[]>([])
 const loaded = ref(false)
 const pending = ref(false)
@@ -13,7 +13,7 @@ async function load() {
   loaded.value = false; pending.value = true; error.value = ''
   try {
     const [settings, definitions] = await Promise.all([getArchiveWarningPolicy(props.token), getArchiveWarningCatalog(props.token)])
-    policy.value = settings; catalog.value = definitions; loaded.value = true
+    policy.value = { ...settings, maxBatchRequestMiB: settings.maxBatchRequestMiB ?? 256 }; catalog.value = definitions; loaded.value = true
   } catch { error.value = '无法读取存档警告策略，请检查连接后刷新。' }
   finally { pending.value = false }
 }
@@ -22,6 +22,10 @@ function setBlocked(code: string, blocked: boolean) {
 }
 async function save() {
   if (!loaded.value || !props.canEdit || pending.value) return
+  if (!Number.isInteger(policy.value.maxBatchRequestMiB) || Number(policy.value.maxBatchRequestMiB) < 16 || Number(policy.value.maxBatchRequestMiB) > 512) {
+    error.value = '整批提交数据上限须为16至512 MiB之间的整数。'
+    return
+  }
   pending.value = true; error.value = ''
   try {
     policy.value = await saveArchiveWarningPolicy(policy.value, props.token)
@@ -35,8 +39,12 @@ onMounted(load)
 <template>
   <section class="pdm-panel pdm-manager-panel archive-warnings" aria-label="存档警告策略">
     <header class="pdm-manager-heading"><h2>存档警告策略</h2><span>策略版本 {{ policy.revision }}</span></header>
-    <p>仅控制存档警告，不改变获取、放弃、审核或发布规则。一般警告默认仅提示；原文件、全部配置和原引用保留。</p>
+    <p>配置存档警告及整批提交数据上限，不改变获取、放弃、审核或发布规则。一般警告默认仅提示；原文件、全部配置和原引用保留。</p>
     <p>权限、实际文件读写、上传失败和版本冲突不允许忽略。确认的循环引用始终阻止；上下文关联须先正确分类。</p>
+    <label>整批提交数据上限（MiB）
+      <input v-model.number="policy.maxBatchRequestMiB" type="number" min="16" max="512" step="1" aria-label="整批提交数据上限（MiB）" :disabled="!loaded || !canEdit || pending" />
+    </label>
+    <p>默认256 MiB，可设置16至512 MiB。限制的是整批提交清单、引用结构和属性数据，不是图纸文件总容量。插件在上传前读取并核对；服务器按提交时的设置校验。</p>
     <div class="archive-warning-actions">
       <label><input v-model="policy.blockAll" type="checkbox" :disabled="!loaded || !canEdit || pending" />全部已支持的警告阻止存档</label>
       <button type="button" :disabled="pending" @click="load">刷新</button>

@@ -21,6 +21,7 @@
     "occt-import-js": "^0.0.23",
     "overlayscrollbars": "^2.16.0",
     "pdfjs-dist": "^6.3.289",
+    "pinyin-pro": "3.29.5",
     "three": "^0.185.1",
     "vue": "3.5.41",
     "vue-router": "4.6.4",

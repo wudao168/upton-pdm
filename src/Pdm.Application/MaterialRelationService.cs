@@ -65,15 +65,37 @@ public sealed class MaterialRelationService(
         if (standardLibrary is null || values.Count == 0) return values;
         var categories = (await standardLibrary.ListCategoriesAsync(false, ct)).Where(item => !StandardLibraryDefaults.IsUncategorized(item)).ToDictionary(item => item.Id);
         var memberships = (await standardLibrary.ListMembershipsAsync(ct)).ToLookup(item => item.MaterialId);
-        return values.Select(item => item with { StandardLibraryCategories = memberships[item.MainMaterialId].Select(link => categories.GetValueOrDefault(link.CategoryId))
-            .OfType<StandardLibraryCategory>().OrderBy(category => category.SortOrder).ThenBy(category => category.Name).ToArray() }).ToArray();
+        MaterialRelationMainMaterial Enrich(MaterialRelationMainMaterial main) => main with { StandardLibraryCategories = memberships[main.MaterialId]
+            .Select(link => categories.GetValueOrDefault(link.CategoryId)).OfType<StandardLibraryCategory>().OrderBy(category => category.SortOrder).ThenBy(category => category.Name).ToArray() };
+        return values.Select(item =>
+        {
+            var enriched = item with {
+                DraftRevision = item.DraftRevision is { } draft ? draft with { MainMaterials = item.MainMaterials.Select(Enrich).ToArray() } : null,
+                PublishedRevision = item.PublishedRevision is { } published ? published with { MainMaterials = item.PublishedMainMaterials.Select(Enrich).ToArray() } : null };
+            return enriched with { StandardLibraryCategories = enriched.MainMaterials.SelectMany(main => main.StandardLibraryCategories).DistinctBy(category => category.Id).ToArray() };
+        }).ToArray();
     }
 
     public async Task<MaterialRelationTemplate> SaveDraftAsync(Guid? templateId, SaveMaterialRelationTemplateCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireAsync(actor, role, PermissionCodes.MaterialRelationManage, cancellationToken);
-        var main = await RequireApprovedMaterialAsync(command.MainMaterialId, "主物料", cancellationToken);
+        var templates = await relations.ListTemplatesAsync(true, cancellationToken);
+        var existing = templateId.HasValue ? templates.FirstOrDefault(item => item.Id == templateId) : command.MainMaterialIds is null
+            ? templates.FirstOrDefault(item => item.MainMaterials.Concat(item.PublishedMainMaterials).Any(main => main.MaterialId == command.MainMaterialId)) : null;
+        if (existing is not null) templateId = existing.Id;
+        var mainIds = (command.MainMaterialIds ?? existing?.MainMaterials.Select(item => item.MaterialId).ToArray() ?? [command.MainMaterialId]).Distinct().ToArray();
+        if (mainIds.Length == 0 || mainIds.Contains(Guid.Empty)) throw new PdmRuleException("请至少选择一个已批准的主物料。");
+        var mainRows = new List<MaterialRelationMainMaterial>();
+        foreach (var id in mainIds)
+        {
+            var material = await RequireApprovedMaterialAsync(id, "主物料", cancellationToken);
+            if (templates.FirstOrDefault(item => item.Id != templateId && !item.IsArchived && item.MainMaterials.Concat(item.PublishedMainMaterials).Any(main => main.MaterialId == id)) is { } conflict)
+                throw new PdmConflictException($"主料{material.MaterialCode}已归属配置“{conflict.Name}”，请先调整原配置的主料范围并发布。");
+            mainRows.Add(new(material.Id, material.MaterialCode, material.Name, material.Specification, material.Brand, material.Remark));
+        }
+        var main = mainRows[0];
         var name = Required(command.Name, "关联配置名称");
+        if (name.Length > 160) throw new PdmRuleException("关联配置名称不能超过160个字符。");
         if (command.Groups.Count == 0) throw new PdmRuleException("关联配置至少需要一个配件组。");
 
         var groups = new List<MaterialRelationGroup>();
@@ -94,7 +116,7 @@ public sealed class MaterialRelationService(
             foreach (var (option, optionIndex) in input.Options.OrderBy(item => item.SortOrder).Select((item, index) => (item, index)))
             {
                 var material = await RequireApprovedMaterialAsync(option.MaterialId, $"配件组“{groupName}”中的物料", cancellationToken);
-                if (material.Id == main.Id) throw new PdmRuleException("主物料不能同时作为自己的关联配件。");
+                if (mainIds.Contains(material.Id)) throw new PdmRuleException($"主物料{material.MaterialCode}不能同时作为本组的关联配件。");
                 if (material.Kind == MaterialKind.Product) throw new PdmRuleException($"成品“{material.MaterialCode}”不能作为BOM配件。");
                 if (option.QuantityPerSet <= 0) throw new PdmRuleException($"配件“{material.MaterialCode}”的每套数量必须大于0。");
                 options.Add(new MaterialRelationOption(Guid.NewGuid(), material.Id, material.MaterialCode, material.Name, material.Kind, material.UnitCode,
@@ -105,9 +127,9 @@ public sealed class MaterialRelationService(
                 input.AutoSelectUnique, input.SortOrder == 0 ? groupIndex + 1 : input.SortOrder, options));
         }
 
-        var saved = await relations.SaveDraftAsync(templateId, command with { Name = name }, main.MaterialCode, main.Name, groups, actor, timeProvider.GetUtcNow(), cancellationToken);
+        var saved = await relations.SaveDraftAsync(templateId, command with { MainMaterialId = main.MaterialId, MainMaterialIds = mainIds, Name = name }, main.MaterialCode, main.MaterialName, groups, actor, timeProvider.GetUtcNow(), cancellationToken, mainRows);
         await AuditAsync(actor, "material-relation.draft.save", saved.Id, $"{main.MaterialCode} · {saved.Name} · 草稿V{saved.DraftRevision?.Version}", cancellationToken);
-        return saved;
+        return (await WithCategoriesAsync([saved], cancellationToken)).Single();
     }
 
     public async Task<MaterialRelationTemplate> PublishAsync(Guid templateId, Guid revisionId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
@@ -118,17 +140,17 @@ public sealed class MaterialRelationService(
         var draft = template.DraftRevision is { } current && current.Id == revisionId ? current : throw new PdmConflictException("待发布草稿不存在或已变化，请刷新后重试。");
         foreach (var option in draft.Groups.SelectMany(group => group.Options))
             _ = await RequireApprovedMaterialAsync(option.MaterialId, $"配件“{option.MaterialCode}”", cancellationToken);
-        _ = await RequireApprovedMaterialAsync(template.MainMaterialId, "主物料", cancellationToken);
-        if (standardLibrary is not null)
+        foreach (var value in template.MainMaterials)
         {
-            if ((await MainCategoriesAsync(template.MainMaterialId, cancellationToken)).Count == 0)
-                throw new PdmRuleException("主料尚未归入标准物料分类，请由标准化人员补选分类后再发布关联配置。");
-            var main = await materials.FindMaterialAsync(template.MainMaterialId, cancellationToken);
-            if (main?.U9SyncConfirmed != true) throw new PdmRuleException("主料尚未完成U9C同步，请完成同步后再发布关联配置。");
+            var material = await RequireApprovedMaterialAsync(value.MaterialId, $"主物料{value.MaterialCode}", cancellationToken);
+            if (standardLibrary is null) continue;
+            if ((await MainCategoriesAsync(value.MaterialId, cancellationToken)).Count == 0)
+                throw new PdmRuleException($"主料{value.MaterialCode}尚未归入标准物料分类，请由标准化人员补选分类后再发布关联配置。");
+            if (!material.U9SyncConfirmed) throw new PdmRuleException($"主料{value.MaterialCode}尚未完成U9C同步，请完成同步后再发布关联配置。");
         }
         var published = await relations.PublishAsync(templateId, revisionId, expectedRowVersion, actor, timeProvider.GetUtcNow(), cancellationToken);
         await AuditAsync(actor, "material-relation.publish", templateId, $"{template.MainMaterialCode} · V{published.PublishedRevision?.Version}", cancellationToken);
-        return published;
+        return (await WithCategoriesAsync([published], cancellationToken)).Single();
     }
 
     public async Task<MaterialRelationCompleteness> GetCompletenessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
@@ -156,7 +178,7 @@ public sealed class MaterialRelationService(
         var allItems = byKind.Values.SelectMany(item => item).Where(IsActive).ToDictionary(item => item.Id);
         var templates = (await relations.ListTemplatesAsync(false, cancellationToken))
             .Where(item => item.PublishedRevision is not null && !item.IsArchived)
-            .ToDictionary(item => item.MainMaterialCode, StringComparer.OrdinalIgnoreCase);
+            .SelectMany(item => item.PublishedMainMaterials.Select(main => (main.MaterialCode, Template: item))).ToDictionary(item => item.MaterialCode, item => item.Template, StringComparer.OrdinalIgnoreCase);
         var existingSelections = (await relations.ListSelectionsAsync(projectId, cancellationToken)).ToArray();
         var selectionsToSave = new Dictionary<Guid, IReadOnlyList<MaterialRelationSelection>>();
         var reviewsToSave = new Dictionary<Guid, IReadOnlyList<MaterialRelationReview>>();
@@ -267,7 +289,7 @@ public sealed class MaterialRelationService(
         var itemById = all.ToDictionary(item => item.Id);
         var templates = (await relations.ListTemplatesAsync(false, cancellationToken))
             .Where(item => item.PublishedRevision is not null && !item.IsArchived)
-            .ToDictionary(item => item.MainMaterialCode, StringComparer.OrdinalIgnoreCase);
+            .SelectMany(item => item.PublishedMainMaterials.Select(main => (main.MaterialCode, Template: item))).ToDictionary(item => item.MaterialCode, item => item.Template, StringComparer.OrdinalIgnoreCase);
         var selections = (await relations.ListSelectionsAsync(projectId, cancellationToken)).ToArray();
         var reviews = (await relations.ListReviewsAsync(projectId, cancellationToken)).ToArray();
         var checks = new List<MaterialRelationMainCheck>();

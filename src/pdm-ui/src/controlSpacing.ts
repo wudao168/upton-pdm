@@ -1,4 +1,5 @@
 import './styles/control-spacing.css'
+import { isInactiveDom } from './activeDom'
 
 const control = 'button, input:not([type="hidden"]), select, textarea, [role="tab"], .el-input, .el-select, .el-date-editor, .el-cascader, .el-input-number, .el-dropdown, .el-checkbox, .el-radio-group, .el-switch'
 const wrapper = 'label, fieldset, .el-form-item, .pdm-inline-search, .pdm-titlebar__left, .pdm-titlebar__actions, .pdm-project-filters, .pdm-bom-selection-actions, .pdm-bom-filters, .pdm-bom-version-picker'
@@ -7,12 +8,15 @@ const excluded = '.pdm-sidebar, .pdm-tree, .el-tree, [role="tree"], .wh-departme
 /** 只调整控件所在行的间距，不改变表格、树和内容卡片的排布。 */
 export function installControlSpacing() {
   const pending = new Set<Element>()
+  const subtrees = new Set<Element>()
   let frame = 0
   const isControl = (element: Element) => element.matches(control)
     || (element.matches(wrapper) && !!element.querySelector(control))
   const flush = () => {
     frame = 0
-    const updates = [...pending].filter(element => element.isConnected).map(element => {
+    for (const node of subtrees) if (node.isConnected && !isInactiveDom(node)) node.querySelectorAll(`${control}, ${wrapper}`).forEach(element => { if (element.parentElement) pending.add(element.parentElement) })
+    subtrees.clear()
+    const updates = [...pending].filter(element => element.isConnected && !isInactiveDom(element)).map(element => {
       const children = [...element.children]
       const controls = children.filter(isControl)
       let layout = ''
@@ -35,24 +39,26 @@ export function installControlSpacing() {
       }
     }
   }
-  const collect = (node: Node) => {
+  const collect = (node: Node, deep = true) => {
     if (!(node instanceof Element)) return
     pending.add(node)
     if (node.parentElement) pending.add(node.parentElement)
-    node.querySelectorAll(`${control}, ${wrapper}`).forEach(element => {
-      if (element.parentElement) pending.add(element.parentElement)
-    })
+    if (deep) {
+      let covered = false
+      for (const queued of subtrees) { if (queued.contains(node)) { covered = true; break }; if (node.contains(queued)) subtrees.delete(queued) }
+      if (!covered) subtrees.add(node)
+    }
     if (!frame) frame = requestAnimationFrame(flush)
   }
   const observer = new MutationObserver(records => {
     for (const record of records) {
-      collect(record.target)
-      if (record.type === 'childList') record.addedNodes.forEach(collect)
+      collect(record.target, record.type === 'attributes' && record.attributeName === 'style' && record.target instanceof Element && (record.oldValue?.includes('display') === true || (record.target as HTMLElement).style.display === 'none'))
+      if (record.type === 'childList') record.addedNodes.forEach(node => collect(node))
     }
   })
   const resized = () => collect(document.body)
-  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'role'] })
+  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeOldValue: true, attributeFilter: ['class', 'style', 'role'] })
   window.addEventListener('resize', resized)
   collect(document.body)
-  return () => { observer.disconnect(); window.removeEventListener('resize', resized); cancelAnimationFrame(frame); pending.clear() }
+  return () => { observer.disconnect(); window.removeEventListener('resize', resized); cancelAnimationFrame(frame); pending.clear(); subtrees.clear() }
 }

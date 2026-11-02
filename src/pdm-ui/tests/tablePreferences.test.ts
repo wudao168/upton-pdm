@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
-import { clearTablePreferencesSession, initializeTablePreferences, readTablePreference, refreshTablePreferences, writeTablePreference } from '../src/tablePreferences'
+import { clearTablePreferencesSession, initializeTablePreferences, readTablePreference, refreshTablePreferences, tablePreferenceVersion, writeTablePreference } from '../src/tablePreferences'
 import { PdmApiError } from '../src/api'
 
 const api = vi.hoisted(() => ({ readUserTablePreferences: vi.fn(), saveUserTablePreference: vi.fn() }))
@@ -17,6 +17,16 @@ beforeEach(() => {
 })
 
 describe('账号列设置', () => {
+  it('远端列设置未变化时不触发布局更新，变化后仍立即恢复', async () => {
+    await initializeTablePreferences('alice', 'company', 'alice-token')
+    const version = tablePreferenceVersion.value
+    await refreshTablePreferences()
+    expect(tablePreferenceVersion.value).toBe(version)
+    remote.set('alice-token:company', { [key('alice')]: 'changed' })
+    await refreshTablePreferences()
+    expect(readTablePreference(key('alice'))).toBe('changed')
+    expect(tablePreferenceVersion.value).toBe(version + 1)
+  })
   it('清空浏览器缓存后从服务端恢复所有列设置和列宽，账号与公司互相隔离', async () => {
     await initializeTablePreferences('alice', 'company', 'alice-token')
     const entries = [

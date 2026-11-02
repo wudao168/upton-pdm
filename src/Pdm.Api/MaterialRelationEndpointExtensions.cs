@@ -102,9 +102,10 @@ public sealed record SaveMaterialRelationTemplateRequest(
     string Name,
     string? ChangeNote,
     long? ExpectedRevisionRowVersion,
-    IReadOnlyList<SaveMaterialRelationGroupRequest> Groups)
+    IReadOnlyList<SaveMaterialRelationGroupRequest> Groups,
+    IReadOnlyList<Guid>? MainMaterialIds = null)
 {
-    public SaveMaterialRelationTemplateCommand ToCommand() => new(MainMaterialId, Name, ChangeNote, ExpectedRevisionRowVersion, Groups.Select(item => item.ToCommand()).ToArray());
+    public SaveMaterialRelationTemplateCommand ToCommand() => new(MainMaterialId, Name, ChangeNote, ExpectedRevisionRowVersion, Groups.Select(item => item.ToCommand()).ToArray(), MainMaterialIds);
 }
 
 public sealed record PublishMaterialRelationTemplateRequest(Guid RevisionId, long ExpectedRowVersion);

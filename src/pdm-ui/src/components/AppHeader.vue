@@ -201,6 +201,7 @@ onUnmounted(() => {
       <template v-if="props.userName">
         <GlobalStatusBar :key="props.username || props.userName" />
         <time class="pdm-header-clock" :datetime="headerNow.toISOString()">{{ headerDateTime }}</time>
+        <slot name="quick-actions" />
         <button type="button" class="pdm-header-control pdm-message-button" @click="emit('notifications')">
           <Bell :size="17" aria-hidden="true" />
           <span>消息</span>

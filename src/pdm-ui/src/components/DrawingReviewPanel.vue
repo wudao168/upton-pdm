@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { ArrowLeft, ChevronLeft, ChevronRight, History, MessageSquareText, RotateCw as RefreshCw, Search, Send, X } from '@lucide/vue'
+import SearchField from './SearchField.vue'
+import UserSelect from './UserSelect'
+import { ArrowLeft, ChevronLeft, ChevronRight, History, MessageSquareText, RotateCw as RefreshCw, Send, X } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
@@ -397,10 +399,10 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
     <template v-if="!collapsed">
     <template v-if="scopeOpen">
       <section class="drawing-review-scope">
-        <label class="drawing-review-scope__search"><Search :size="14" /><input v-model="scopeSearch" placeholder="搜索图号或名称" /></label>
+        <label class="drawing-review-scope__search"><SearchField><input v-model="scopeSearch" aria-label="搜索审核图档" placeholder="搜索图号或名称" /></SearchField></label>
         <div class="drawing-review-scope__reviewer">
           <span>指定审核人</span>
-          <el-select
+          <UserSelect
             v-model="assignedReviewers"
             multiple
             collapse-tags
@@ -411,7 +413,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
             aria-label="指定图纸审核人"
           >
             <el-option v-for="reviewer in reviewerOptions" :key="reviewer.username" :label="reviewer.label" :value="reviewer.username" />
-          </el-select>
+          </UserSelect>
         </div>
         <p v-if="!reviewerOptions.length" class="drawing-review-scope__empty-hint">当前没有可选的审核人员，请先在角色权限中配置“审核2D图纸”。</p>
       </section>

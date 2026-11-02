@@ -1,13 +1,64 @@
 import navBrandLogo from '../src/assets/upton-horizontal-brand-white.png'
 import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import SideNav from '../src/components/SideNav.vue'
 
 describe('SideNav', () => {
+  beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} unobserve() {} })
+  })
+  it('只显示可访问入口并移除空导航分组', async () => {
+    const wrapper = mount(SideNav, { props: { active: 'tasks', visibleKeys: ['tasks', 'work-hours'], canViewMaterials: true, canManageSystem: true } })
+    expect(wrapper.findAll('.pdm-sidebar__nav .pdm-nav-item').map(item => item.text())).toEqual(['工时管理', '我的待办'])
+    expect(wrapper.findAll('.pdm-nav-group')).toHaveLength(1)
+    expect(wrapper.find('.pdm-sidebar__settings').exists()).toBe(false)
+    await wrapper.setProps({ visibleKeys: ['tasks', 'production-drawings'] })
+    expect(wrapper.findAll('.pdm-nav-group').map(item => item.attributes('aria-label'))).toEqual(['常用功能', '生产'])
+    wrapper.unmount()
+  })
   afterEach(() => {
+    vi.restoreAllMocks()
     vi.unstubAllGlobals()
     document.body.innerHTML = ''
+  })
+  it('共用高亮从旧菜单移动并缩放到新菜单，减少动态效果时直接定位', async () => {
+    let frame: FrameRequestCallback | undefined
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frame = callback; return 1 })
+    vi.stubGlobal('cancelAnimationFrame', () => { frame = undefined })
+    const preference = { matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }
+    vi.stubGlobal('matchMedia', () => preference)
+    const animate = vi.fn((_frames: Keyframe[], _options: KeyframeAnimationOptions) => ({ cancel: vi.fn() }))
+    vi.stubGlobal('Animation', class {})
+    const originalAnimate = HTMLElement.prototype.animate
+    HTMLElement.prototype.animate = animate as unknown as typeof HTMLElement.prototype.animate
+    const rect = (x: number, y: number, width: number, height: number) => ({ x, y, left: x, top: y, width, height, right: x + width, bottom: y + height, toJSON: () => ({}) })
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains('pdm-sidebar')) return rect(0, 0, 140, 800)
+      if (this.tagName === 'NAV') return rect(0, 50, 140, 650)
+      if (this.classList.contains('pdm-nav-item') && this.textContent?.includes('制造中心')) return rect(8, 250, 110, 50)
+      return rect(8, 100, 124, 44)
+    })
+    const wrapper = mount(SideNav, { props: { active: 'project-center' } })
+    try {
+      frame?.(0)
+      expect(animate).not.toHaveBeenCalled()
+      await wrapper.setProps({ active: 'production-drawings' })
+      frame?.(16)
+      expect(wrapper.findAll('.pdm-sidebar__highlight')).toHaveLength(1)
+      expect(animate.mock.calls[0]?.[0]).toEqual([
+        { transform: `translate(8px, 100px) scale(${124 / 110}, ${44 / 50})` },
+        { transform: 'translate(8px, 250px)' },
+      ])
+      expect((wrapper.get('.pdm-sidebar__highlight').element as HTMLElement).style.width).toBe('110px')
+      preference.matches = true
+      await wrapper.setProps({ active: 'project-center' })
+      frame?.(32)
+      expect(animate).toHaveBeenCalledTimes(1)
+    } finally {
+      wrapper.unmount()
+      HTMLElement.prototype.animate = originalAnimate
+    }
   })
   it('combines the project pages into one sidebar entry', async () => {
     const wrapper = mount(SideNav, { props: { active: 'project-center' } })
@@ -22,6 +73,21 @@ describe('SideNav', () => {
     const wrapper = mount(SideNav, { props: { active: 'projects' } })
 
     expect(wrapper.text()).not.toContain('料品管理')
+  })
+
+  it('在工时管理显示未填工作日计数，归零后隐藏', async () => {
+    const wrapper = mount(SideNav, { props: { active: 'work-hours', workHoursCount: 3 } })
+    const item = wrapper.findAll('.pdm-nav-item').find(button => button.text().includes('工时管理'))!
+    expect(item.get('em').text()).toBe('3')
+    expect(item.attributes('title')).toBe('工时管理，3个工作日未填写工时')
+    await wrapper.setProps({ workHoursCount: 0 })
+    expect(item.find('em').exists()).toBe(false)
+  })
+
+  it('折叠后工时图标仍显示计数并提供完整提示', () => {
+    const wrapper = mount(SideNav, { props: { active: 'work-hours', workHoursCount: 2, collapsed: true } })
+    const item = wrapper.get('[aria-label="工时管理，2个工作日未填写工时"]')
+    expect(item.get('em').text()).toBe('2')
   })
 
   it('uses the concise material management label when permitted', () => {

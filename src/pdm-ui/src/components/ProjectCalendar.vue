@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, RotateCw as RefreshCw, Maximize2, Minimize2 } from '@lucide/vue'
 import { readProjectCalendar, readCalendarTodos, createUserTodo } from '../api'
@@ -141,7 +142,7 @@ function open(event: CalendarEvent) { if (event.kind === 'todo') { const todo = 
     <div class="pc-toolbar"><div class="pc-controls"><button aria-label="上一期" @click="move(-1)"><ChevronLeft :size="17" /></button><strong>{{ display === 'week' ? `${weekDays[0]} — ${weekDays[6]}` : `${label(month)}${display === 'month' ? '' : ' — ' + label(shiftMonth(month, 1))}` }}</strong><button aria-label="下一期" @click="move(1)"><ChevronRight :size="17" /></button><button @click="reset">回到本月</button><button :disabled="loading" aria-label="刷新日历" @click="refresh"><RefreshCw :size="14" /></button><button :aria-pressed="maximized" @click="maximized = !maximized"><component :is="maximized ? Minimize2 : Maximize2" :size="14" />{{ maximized ? '退出看板' : '最大化看板' }}</button><div class="pdm-tabs" role="group" aria-label="日历视图"><button v-for="(text, key) in { double: '双月', month: '月', week: '周', list: '清单' }" :key="key" :aria-pressed="display === key" @click="display = key">{{ text }}</button></div></div><div class="pc-filters">
       <select v-model="unit" aria-label="事业部"><option value="">全部事业部</option><option v-for="entry in units" :key="entry">{{ entry }}</option></select>
       <select v-model="manager" aria-label="项目经理"><option value="">全部项目经理</option><option v-for="entry in managers" :key="entry" :value="entry">{{ name(entry) }}</option></select>
-      <input v-model="query" aria-label="搜索项目" placeholder="搜索项目号、名称、客户">
+      <SearchField><input v-model="query" aria-label="搜索项目" placeholder="搜索项目号、名称、客户"></SearchField>
       <select v-model="kind" aria-label="事项类型"><option value="">全部事项</option><option v-for="(text, key) in kindLabel" :key="key" :value="key">{{ text }}</option></select>
       <div class="pdm-tabs" role="group" aria-label="日历范围"><button :aria-pressed="!mine" @click="mine = false">权限范围内全部</button><button :aria-pressed="mine" @click="mine = true">我负责的</button></div>
     </div></div>

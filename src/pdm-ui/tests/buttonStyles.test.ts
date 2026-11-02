@@ -24,6 +24,11 @@ it('信息展示与BOM内容链接不套用操作按钮外框', () => {
   expect(document.querySelector('.wr-next span')!.textContent).toBe('下一节点')
 })
 
+it('快捷查找结果作为内容行展示，不因物料名称触发操作按钮样式', () => {
+  install('<ul class="pdm-command-results"><li><button>新增项目零件<small>资料说明</small></button></li></ul>')
+  expect(document.querySelector('button')!.dataset.pdmButtonKind).toBeUndefined()
+})
+
 it('进度条与部门分类恢复原样式，不再套用普通按钮边框和颜色', () => {
   install('<div class="pdm-overview-timeline"><button class="pdm-overview-timeline__segment">设计</button><button class="pdm-overview-timeline__milestone" aria-label="计划里程碑"></button></div><div class="wh-department-options"><button>生产部<span>参与填报</span></button></div><button class="production-workbench__all-categories">全部分类</button>')
   for (const button of document.querySelectorAll('button')) expect(button.dataset.pdmButtonKind).toBeUndefined()
@@ -33,6 +38,15 @@ it('进度条与部门分类恢复原样式，不再套用普通按钮边框和�
 it('扫码流程图节点和标签关闭按钮不显示操作按钮的方框', () => {
   install('<button class="production-scan-settings__node">包装接收</button><button class="el-tag__close" aria-label="关闭此标签">×</button>')
   for (const button of document.querySelectorAll('button')) expect(button.dataset.pdmButtonKind).toBeUndefined()
+})
+
+it('全局表格、树、侧栏和分组折叠控件去掉操作外框，菜单触发按钮保持业务样式', async () => {
+  install('<button class="el-table__expand-icon" aria-expanded="false"></button><button class="pdm-tree-toggle">›</button><button class="pdm-category-sidebar__toggle">‹</button><button aria-expanded="true">分组标题</button><button>展开全部</button><button class="pdm-theme-trigger" aria-expanded="false">主题</button><button aria-haspopup="menu" aria-expanded="false">操作</button>')
+  const buttons = [...document.querySelectorAll('button')]
+  for (const button of buttons.slice(0, 5)) { expect(button.dataset.pdmFoldControl).toBe('true'); expect(button.dataset.pdmButtonKind).toBeUndefined() }
+  for (const button of buttons.slice(5)) { expect(button.dataset.pdmFoldControl).toBeUndefined() }
+  buttons[3]!.removeAttribute('aria-expanded'); await settle()
+  expect(buttons[3]!.dataset.pdmFoldControl).toBeUndefined()
 })
 
 it('updates asynchronous dialog labels and icon-only accessibility labels', async () => {

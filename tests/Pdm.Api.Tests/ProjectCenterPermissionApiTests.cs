@@ -12,6 +12,43 @@ namespace Upton.Pdm.Api.Tests;
 
 public sealed class ProjectCenterPermissionApiTests
 {
+    [Fact]
+    public async Task OverviewRecordsMatchTheExistingRecentAuditWindow()
+    {
+        await using var factory = new PdmApiFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new("Bearer", Token("admin", "Administrator"));
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var projects = await repository.ListProjectsAsync(default);
+        var root = projects.First(project => project.ParentProjectId is null);
+        var family = projects.Where(project => project.Id == root.Id || project.ParentProjectId == root.Id || project.RootProjectId == root.Id).ToArray();
+        var now = DateTimeOffset.UtcNow;
+        // An old note outside the recent 200 entries must remain outside the overview.
+        await repository.AppendAuditAsync(new(Guid.NewGuid(), now.AddDays(-1), "admin", "project.manager-note", "Project", root.Id.ToString(), "旧记录"), default);
+        for (var index = 0; index < 200; index++)
+            await repository.AppendAuditAsync(new(Guid.NewGuid(), now.AddSeconds(index), "admin", index == 199 ? "project.manager-note" : "project.update", "Project", root.Id.ToString(), "近期记录"), default);
+        var expected = await repository.ListProjectOverviewRecordsAsync(family.Select(project => project.Id).ToArray(), 200, default);
+        var actual = await client.GetFromJsonAsync<AuditEntry[]>($"/api/projects/{root.Id}/overview-records");
+        Assert.Equal(expected, actual);
+        Assert.DoesNotContain(actual!, entry => entry.Detail == "旧记录");
+        Assert.Contains(actual!, entry => entry.Detail == "近期记录");
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"/api/projects/{Guid.NewGuid()}/overview-records")).StatusCode);
+    }
+
+    [Fact]
+    public async Task ProjectDetailUsesTheSameVisibilityAndCapabilitiesAsProjectList()
+    {
+        await using var factory = new PdmApiFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new("Bearer", Token("admin", "Administrator"));
+        using var projects = System.Text.Json.JsonDocument.Parse(await client.GetStringAsync("/api/projects"));
+        foreach (var item in projects.RootElement.EnumerateArray().Take(3))
+        {
+            var id = item.GetProperty("id").GetGuid();
+            var detail = await client.GetStringAsync($"/api/projects/{id}");
+            Assert.Equal(item.GetRawText(), detail);
+        }
+    }
     [Theory]
     [InlineData("AssemblySupervisor")]
     [InlineData("AssemblyFitter")]
@@ -32,12 +69,12 @@ public sealed class ProjectCenterPermissionApiTests
         Assert.Equal(8, permissions.Count(code => code.StartsWith("project.tab.")));
         Assert.DoesNotContain(ProjectCenterPermissions.Write, permissions);
         Assert.DoesNotContain(PermissionCodes.ProductionIssue, permissions);
-        foreach (var suffix in new[] { "documents", "plan", "opl", "boms/Standard", "release-packages", "quality-upload-access" })
+        foreach (var suffix in new[] { "documents", "plan", "opl", "boms/Standard", "bom-headers/overview", "release-packages", "quality-upload-access" })
         {
             var response = await client.GetAsync($"/api/projects/{project.Id}/{suffix}");
             Assert.True(response.IsSuccessStatusCode, suffix + ": " + await response.Content.ReadAsStringAsync());
         }
-        foreach (var suffix in new[] { "contact-information", "nameplate", "files", "budget", "audit", "boms/Standard/export", "export-metadata" })
+        foreach (var suffix in new[] { "contact-information", "nameplate", "files", "budget", "audit", "overview-records", "boms/Standard/export", "export-metadata" })
             Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"/api/projects/{project.Id}/{suffix}")).StatusCode);
         foreach (var suffix in new[] { "opl", "manager-notes", "todos", "plan/submit", "procurement-tracking/refresh", "release-preview-items/archive" })
             Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync($"/api/projects/{project.Id}/{suffix}", new { })).StatusCode);

@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
+import { matchesUserSearch } from '../userSearch'
 import { ElMessageBox } from 'element-plus'
 import OrganizationSettings from './OrganizationSettings.vue'
 import RolePermissionSettings from './RolePermissionSettings.vue'
@@ -58,7 +60,8 @@ const availableSections = computed<Section[]>(() => [
 const filteredUsers = computed(() => {
   const normalized = query.value.trim().toLocaleLowerCase('zh-CN')
   if (!normalized) return scopedUsers.value
-  return scopedUsers.value.filter(user => `${user.username} ${user.displayName} ${roleNames(user)} ${primaryUnitName(user.username)}`.toLocaleLowerCase('zh-CN').includes(normalized))
+  return scopedUsers.value.filter(user => matchesUserSearch(user.displayName, normalized, user.username)
+    || `${user.username} ${user.displayName} ${roleNames(user)} ${primaryUnitName(user.username)}`.toLocaleLowerCase('zh-CN').includes(normalized))
 })
 const activeUnits = computed(() => activeCompanyUnits.value.filter(unit => unit.isActive))
 
@@ -157,7 +160,7 @@ async function resetPassword(user: PdmUser) {
     <section v-if="activeSection === 'users'" class="pdm-panel user-directory" aria-label="用户列表">
       <header class="user-directory-heading">
         <div><h2>用户</h2><p>仅显示主公司为当前公司的账号；平台级账号可授权用户访问其他公司。</p></div>
-        <div class="user-directory-actions"><input v-model="query" type="search" placeholder="搜索账号、姓名、角色或部门" aria-label="搜索用户"><button v-if="canManageUsers" type="button" class="pdm-primary-action" @click="openUser()">新建用户</button></div>
+        <div class="user-directory-actions"><SearchField><input v-model="query" type="search" placeholder="搜索账号、姓名、角色或部门" aria-label="搜索用户"></SearchField><button v-if="canManageUsers" type="button" class="pdm-primary-action" @click="openUser()">新建用户</button></div>
       </header>
       <div class="user-table-scroll">
         <table class="pdm-project-table">

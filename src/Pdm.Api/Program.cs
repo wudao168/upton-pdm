@@ -273,6 +273,7 @@ builder.Services.AddScoped<IProductionTrackingObserver>(provider => provider.Get
 builder.Services.AddScoped<ReleaseDeliveryArchiveService>();
 builder.Services.AddScoped<ReleaseNotificationSettingsService>();
 builder.Services.AddScoped<WorkflowNotificationService>();
+builder.Services.AddScoped<NotificationInboxService>();
 builder.Services.AddHostedService<WorkflowNotificationHostedService>();
 builder.Services.AddScoped<IReleaseNotificationConfigurationProvider>(provider => provider.GetRequiredService<ReleaseNotificationSettingsService>());
 builder.Services.AddScoped<IReleaseNotificationSender, ReleaseNotificationSender>();
@@ -484,6 +485,7 @@ app.MapProjectApplicationEndpoints();
 app.MapWorkHoursEndpoints();
 app.MapProjectOplEndpoints();
 app.MapDingTalkOplEndpoints();
+app.MapDingTalkOfficeEndpoints();
 if (Directory.Exists(deployedWebRoot))
 {
     app.MapGet("/{**path}", async context =>

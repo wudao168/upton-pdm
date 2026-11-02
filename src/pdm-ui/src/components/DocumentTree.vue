@@ -1,9 +1,10 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, download: projectDownload } = useProjectCenterAccess()
 import { documentVersionSummary, documentDrawingVersion, documentPublishedVersion } from '../drawingRevision'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { RotateCw, Search } from '@lucide/vue'
+import { RotateCw } from '@lucide/vue'
 import { postDesktopMessage } from '../api'
 import type { DocumentFilter, DocumentNode, DrawingReviewBadge, SolidWorksOpenMode, WorkspaceLocalFileState } from '../types'
 import CadDocumentIcon from './CadDocumentIcon.vue'
@@ -94,9 +95,9 @@ onBeforeUnmount(() => {
   <section class="pdm-panel pdm-tree-panel" aria-label="项目设计树">
     <div class="pdm-tree-search-row">
       <label class="pdm-tree-search">
-        <Search :size="15" aria-hidden="true" />
+
         <span class="pdm-sr-only">搜索图号或名称</span>
-        <input v-model="query" type="search" placeholder="搜索图号或名称">
+        <SearchField><input v-model="query" type="search" aria-label="搜索图号或名称" placeholder="搜索图号或名称"></SearchField>
       </label>
       <div class="pdm-tree-refresh">
         <button

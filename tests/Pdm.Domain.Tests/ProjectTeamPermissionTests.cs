@@ -17,7 +17,7 @@ public sealed class ProjectTeamPermissionTests
     }
 
     [Fact]
-    public async Task OnlyProjectAndExecutionDivisionManagersCanMaintainTeamOwners()
+    public async Task AdministratorsAndProjectOrExecutionDivisionManagersCanMaintainTeamOwners()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var root = await repository.CreateNumberedProjectAsync(new(Guid.Parse("70000000-0000-0000-0000-000000000001"), "C", 2, Guid.Parse("c0046500-0000-0000-0000-000000000001"), "团队权限验证", null, new(2026, 10, 3), 1, "admin", "D:/test", "D:/release"), default);
@@ -62,7 +62,15 @@ public sealed class ProjectTeamPermissionTests
             await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.SetProjectPhaseOwnersAsync(root.Id, new(new Dictionary<string, string>()), actor, UserRole.Engineer, default));
             await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.SetMainProjectStaffingAsync(root.Id, new("pm", [], ["lead"]), actor, UserRole.Engineer, default));
         }
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.SetProjectPhaseOwnersAsync(root.Id, new(new Dictionary<string, string>()), "admin", UserRole.Administrator, default));
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.SetMainProjectStaffingAsync(root.Id, new("pm", [], ["lead"]), "admin", UserRole.Administrator, default));
+        var adminOwners = await workflow.SetProjectPhaseOwnersAsync(child.Id, new(new Dictionary<string, string> { ["Acceptance"] = "lead" }), "admin", UserRole.Administrator, default);
+        Assert.Equal("lead", adminOwners.PhaseOwners["Acceptance"]);
+        await workflow.SetChildProjectDesignersAsync(child.Id, ["lead"], "admin", UserRole.Administrator, default);
+        await repository.SetMainProjectStaffingAsync(root.Id, new("admin", [], ["lead"]), "admin", default);
+        var reassigned = await workflow.SetMainProjectStaffingAsync(root.Id, new("pm", [], ["lead"]), "admin", UserRole.Administrator, default);
+        Assert.Equal("pm", reassigned.PrimaryProjectManager);
+        var adminView = await repository.ListProjectsForUserAsync("admin", UserRole.Administrator, default);
+        Assert.True(adminView.Single(project => project.Id == root.Id).CanManageMainStaffing);
+        Assert.True(adminView.Single(project => project.Id == child.Id).CanAssignDesigners);
+        await Assert.ThrowsAsync<PdmRuleException>(() => workflow.SetProjectPhaseOwnersAsync(root.Id, new(new Dictionary<string, string> { ["Acceptance"] = "missing-user" }), "admin", UserRole.Administrator, default));
     }
 }

@@ -34,6 +34,11 @@ public static class PdmEndpointExtensions
     {
         app.MapGet("/health", HealthAsync).AllowAnonymous();
         app.MapGet("/api/archive-capabilities", () => Results.Ok(new { referenceWarnings = true, contextReferences = true, unverifiedReferences = true })).RequireAuthorization();
+        app.MapGet("/api/archive-batch-limits", async (IPdmRepository repository, CancellationToken ct) =>
+        {
+            var policy = await repository.GetArchiveWarningPolicyAsync(ct);
+            return Results.Ok(new { maxRequestBytes = policy.GetMaxBatchRequestBytes(), revision = policy.Revision });
+        }).RequireAuthorization();
 
         app.MapPost("/api/auth/login", async (
             LoginRequest request,
@@ -674,7 +679,7 @@ public static class PdmEndpointExtensions
         {
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)) return Results.Forbid();
-            var project = (await repository.ListProjectsForUserAsync(actor, role, cancellationToken)).FirstOrDefault(item => item.Id == projectId);
+            var project = await repository.FindProjectForUserAsync(projectId, actor, role, cancellationToken);
             return project is null ? Results.NotFound() : Results.Ok(project);
         });
 
@@ -693,10 +698,11 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.SetMainProjectStaffingAsync(projectId, new(request.PrimaryProjectManager, request.CollaborativeProjectManagers, designLeads), actor, role, cancellationToken));
         });
 
-        api.MapPut("/projects/{projectId:guid}/designers", async (Guid projectId, UpdateChildProjectDesignersRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPut("/projects/{projectId:guid}/designers", async (Guid projectId, UpdateChildProjectDesignersRequest request, HttpContext context, PdmWorkflowService workflow, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await workflow.SetChildProjectDesignersAsync(projectId, request.Designers, actor, role, cancellationToken));
+            var saved = await workflow.SetChildProjectDesignersAsync(projectId, request.Designers, actor, role, cancellationToken);
+            return Results.Ok(await repository.FindProjectForUserAsync(projectId, actor, role, cancellationToken) ?? saved);
         });
 
         api.MapPut("/projects/{projectId:guid}/phase-owners", async (Guid projectId, UpdateProjectPhaseOwnersRequest request, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
@@ -1230,7 +1236,7 @@ public static class PdmEndpointExtensions
             return tree is null ? Results.NoContent() : Results.Ok(tree);
         });
 
-        api.MapGet("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, bool? summary, HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, bool? summary, HttpContext context, PdmWorkflowService workflow, IPdmRepository repository, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             if (!Enum.TryParse<BomKind>(kind, true, out var bomKind))
@@ -1239,6 +1245,8 @@ public static class PdmEndpointExtensions
             }
 
             var items = await workflow.GetBomAsync(projectId, bomKind, actor, role, cancellationToken);
+            if (bomKind is BomKind.Standard or BomKind.Electrical)
+                items = await BomDrawingRevision.CurrentAsync(repository, items, cancellationToken);
             return Results.Ok(summary == true && bomKind is (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical) ? BomSummaryProjection.Group(items) : items);
         });
 
@@ -1702,9 +1710,17 @@ public static class PdmEndpointExtensions
             return Results.Ok(await workflow.ObsoleteDocumentAsync(documentId, actor, role, request.Comment, cancellationToken));
         });
 
-        api.MapPost("/archive-batches", async (ArchiveBatchRequest request, HttpContext context, PdmWorkflowService workflow, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+        api.MapPost("/archive-batches", async (HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, TimeProvider timeProvider, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
+            var maximumBytes = (await repository.GetArchiveWarningPolicyAsync(cancellationToken)).GetMaxBatchRequestBytes();
+            ArchiveBatchRequest request;
+            try { request = await ArchiveBatchPayloadLimit.ReadAsync(context, maximumBytes, cancellationToken); }
+            catch (BadHttpRequestException error) when (error.StatusCode == StatusCodes.Status413PayloadTooLarge)
+            { return Results.Json(new { message = $"整批提交数据超过管理员设置的{maximumBytes / (1024 * 1024)} MiB上限，本批尚未提交。请联系管理员调整上限后重试。" }, statusCode: StatusCodes.Status413PayloadTooLarge); }
+            catch (JsonException)
+            { return Results.BadRequest(new { message = "整批提交数据格式无效，本批尚未提交，请更新插件后重试。" }); }
+            if (request.Files is null) return Results.BadRequest(new { message = "整批提交缺少图档清单，本批尚未提交。" });
             var requestHash = ComputeArchiveRequestHash(request);
             var inputs = request.Files.Select(file => new ArchiveBatchInput(file.DocumentId,
                 new StoredFile(file.Request.StorageRelativePath, file.Request.FileLength, file.Request.Sha256, timeProvider.GetUtcNow()),
@@ -2074,9 +2090,10 @@ public static class PdmEndpointExtensions
             return Results.Ok(results.OrderBy(item => item.CreatedAt));
         });
 
-        api.MapGet("/notifications/mine", async (int? take, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
+        api.MapGet("/notifications/mine", async (int? take, HttpContext context, IPdmRepository repository, NotificationInboxService inbox, CancellationToken cancellationToken) =>
         {
             var (actor, _) = CurrentUser(context.User);
+            await inbox.ReconcileAsync(actor, cancellationToken);
             return Results.Ok(await repository.ListUserNotificationsAsync(actor, take ?? 100, cancellationToken));
         });
 
@@ -2111,6 +2128,18 @@ public static class PdmEndpointExtensions
                     version.Revision, version.Status, version.CreatedBy, version.CreatedAt, version.ChangeNote)));
             }
             return Results.Ok(versions.OrderByDescending(item => item.CreatedAt));
+        });
+
+        api.MapGet("/projects/{projectId:guid}/overview-records", async (Guid projectId, HttpContext context, IPdmRepository repository, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var projects = await repository.ListProjectHeadersForUserAsync(actor, role, ct);
+            var selected = projects.FirstOrDefault(project => project.Id == projectId);
+            if (selected is null) return Results.Forbid();
+            var rootId = selected.RootProjectId ?? selected.ParentProjectId ?? selected.Id;
+            var ids = projects.Where(project => project.Id == rootId || project.ParentProjectId == rootId || project.RootProjectId == rootId)
+                .Select(project => project.Id).ToArray();
+            return Results.Ok(await repository.ListProjectOverviewRecordsAsync(ids, 200, ct));
         });
 
         api.MapGet("/projects/{projectId:guid}/audit", async (Guid projectId, int? take, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>

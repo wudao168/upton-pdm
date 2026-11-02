@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
+import { matchesUserSearch } from '../userSearch'
 import { computed, onMounted, ref } from 'vue'
 import { approveLoginDevice, getLoginSecurity, PdmApiError, revokeLoginSession, saveLoginSecurityPolicy, type LoginSecurityDirectory, type LoginSecuritySession } from '../api'
 
@@ -6,7 +8,7 @@ const props = defineProps<{ token: string }>()
 const data = ref<LoginSecurityDirectory>()
 const singleSessionEnabled = ref(false), deviceBindingEnabled = ref(false)
 const pending = ref(false), error = ref(''), notice = ref(''), query = ref('')
-const users = computed(() => data.value?.users.filter(user => !query.value.trim() || user.username.includes(query.value.trim()) || user.devices.some(device => device.machine.includes(query.value.trim()))) ?? [])
+const users = computed(() => data.value?.users.filter(user => matchesUserSearch(user.username, query.value) || user.devices.some(device => device.machine.includes(query.value.trim()))) ?? [])
 const devices = computed(() => users.value.flatMap(user => user.devices.map(device => ({ ...device, username: user.username }))))
 const sessions = computed(() => users.value.flatMap(user => user.sessions.map(session => ({ ...session, username: user.username }))).sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt)))
 const dirty = computed(() => data.value && (singleSessionEnabled.value !== data.value.policy.singleSessionEnabled || deviceBindingEnabled.value !== data.value.policy.deviceBindingEnabled))
@@ -58,7 +60,7 @@ onMounted(() => void run(load))
       <p class="hint">开启任一限制后，所有旧登录均需重新登录。关闭开关保留绑定资料；异常退出约5分钟后释放登录名额，业务编辑锁不自动解除。</p>
       <div class="actions"><button type="submit" :disabled="pending || !dirty || !data.canEditPolicy">保存设置</button><span v-if="!data.canEditPolicy">全系统开关仅平台管理员可修改；公司管理员可管理本公司电脑和登录。</span></div>
     </form>
-    <div class="actions search"><label>搜索账号或电脑 <input v-model="query" type="search" /></label><button type="button" :disabled="pending" @click="run(load)">刷新记录</button></div>
+    <div class="actions search"><label>搜索账号或电脑 <SearchField @search="run(load)"><input v-model="query" type="search" aria-label="搜索账号或电脑" /></SearchField></label><button type="button" :disabled="pending" @click="run(load)">刷新记录</button></div>
     <h3>电脑绑定与待确认申请</h3>
     <p class="hint">目标电脑登录一次后会出现在此处。更换电脑需先解绑；重装系统或更换Windows用户后可能需要重新确认电脑凭证。</p>
     <div class="table-wrap"><table><thead><tr><th>账号</th><th>电脑名称 / MAC</th><th>状态</th><th>登记 / 批准时间</th><th>最近使用</th><th>操作</th></tr></thead><tbody>

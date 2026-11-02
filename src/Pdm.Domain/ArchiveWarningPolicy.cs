@@ -20,6 +20,12 @@ public sealed class ArchiveWarningPolicy
     public long Revision { get; set; }
     public bool BlockAll { get; set; }
     public string[] BlockingCodes { get; set; } = Array.Empty<string>();
+    // Null preserves compatibility with existing settings and older admin clients.
+    public int? MaxBatchRequestMiB { get; set; }
+    public const int DefaultMaxBatchRequestMiB = 256;
+    public const int MinimumBatchRequestMiB = 16;
+    public const int MaximumBatchRequestMiB = 512;
+    public long GetMaxBatchRequestBytes() => (long)(MaxBatchRequestMiB ?? DefaultMaxBatchRequestMiB) * 1024 * 1024;
 
     public bool Blocks(string code)
     {
@@ -43,6 +49,8 @@ public sealed class ArchiveWarningPolicy
 
     public static void Validate(ArchiveWarningPolicy policy)
     {
+        if (policy?.MaxBatchRequestMiB is int size && (size < MinimumBatchRequestMiB || size > MaximumBatchRequestMiB))
+            throw new ArgumentException("整批提交数据上限须为16至512 MiB之间的整数。");
         if (policy == null || policy.BlockingCodes == null || policy.Revision < 0
             || policy.BlockingCodes.Length > Catalog.Length
             || policy.BlockingCodes.Distinct(StringComparer.Ordinal).Count() != policy.BlockingCodes.Length

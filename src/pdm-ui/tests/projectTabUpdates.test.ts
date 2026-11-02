@@ -9,14 +9,14 @@ const snapshot = (tab: string, ...data: any[]) => projectTabSnapshot(tab, data, 
 const changed = (tab: string, before: any[], after: any[]) => hasProjectTabUpdate(snapshot(tab, ...before), snapshot(tab, ...after))
 let wrapper: ReturnType<typeof mount>
 let state: ReturnType<typeof useProjectTabUpdates>
-const context = reactive({ project, currentUsername: 'user1', token: 'token', activeTab: 'information' })
+const context = reactive({ project, currentUsername: 'user1', token: 'token', activeTab: 'information', active: true })
 let issues: any[] = [{ issue: { id: '1', status: '待处理', description: '原问题' } }], fail = false
 function setup(clear = true) {
   if (clear) localStorage.clear()
   vi.useFakeTimers()
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-    if (url.endsWith('/opl')) {
+    if (url.endsWith('/opl?includePeople=false')) {
       if (fail) throw Error('offline')
       return new Response(JSON.stringify({ rows: structuredClone(issues) }))
     }
@@ -26,7 +26,21 @@ function setup(clear = true) {
 }
 async function refresh() { await vi.advanceTimersByTimeAsync(60000); await flushPromises() }
 function viewed(tab = 'opl') { window.dispatchEvent(new CustomEvent('pdm-tab-content-viewed', { detail: { projectId: context.project.id, tab } })) }
-afterEach(() => { wrapper?.unmount(); vi.useRealTimers(); vi.unstubAllGlobals(); issues = [{ issue: { id: '1', status: '待处理', description: '原问题' } }]; fail = false; context.currentUsername = 'user1'; context.activeTab = 'information'; context.project = project })
+afterEach(() => { wrapper?.unmount(); vi.useRealTimers(); vi.unstubAllGlobals(); issues = [{ issue: { id: '1', status: '待处理', description: '原问题' } }]; fail = false; context.currentUsername = 'user1'; context.activeTab = 'information'; context.project = project; context.active = true })
+
+it('相同上下文对象更新不重启全量核对，隐藏期间暂停并在恢复后更新', async () => {
+  setup(); await flushPromises()
+  vi.mocked(fetch).mockClear()
+  context.project = { ...project }
+  await flushPromises()
+  expect(fetch).not.toHaveBeenCalled()
+  context.active = false
+  await vi.advanceTimersByTimeAsync(60001); await flushPromises()
+  expect(fetch).not.toHaveBeenCalled()
+  context.active = true
+  await flushPromises()
+  expect(fetch).toHaveBeenCalled()
+})
 
 it('only monitors the nine requested tabs, never overview, procurement or records', () => {
   expect(projectUpdateTabs).toEqual(['information', 'files', 'project-plan', 'opl', 'budget', 'validation-plan', 'documents', 'bom', 'release'])

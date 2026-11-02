@@ -9,6 +9,13 @@ public static class BomHeaderEndpointExtensions
     public static void MapPdmBomHeaderEndpoints(this WebApplication app)
     {
         var api = app.MapGroup("/api/projects/{projectId:guid}/bom-headers").RequireAuthorization();
+        api.MapGet("/overview", async (Guid projectId, HttpContext context, BomHeaderService service, ILogger<BomHeaderService> logger, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            var rows = await service.ReadHierarchyAsync(projectId, actor, role, ct);
+            foreach (var row in rows.Where(row => row.DiagnosticError is not null)) logger.LogError(row.DiagnosticError, "BOM层级摘要读取失败，项目 {ProjectId}", row.ProjectId);
+            return Results.Ok(rows);
+        });
         api.MapGet("", async (Guid projectId, HttpContext context, BomHeaderService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);

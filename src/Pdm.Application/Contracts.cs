@@ -478,7 +478,11 @@ public interface ICrmCredentialProtector
 public interface IPdmRepository
 {
     Task<IReadOnlyList<Project>> ListProjectsAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<Project>> ListProjectHeadersAsync(CancellationToken ct) => ListProjectsAsync(ct);
+    Task<IReadOnlyList<Project>> ListProjectHeadersForUserAsync(string actor, UserRole role, CancellationToken ct) => ListProjectsForUserAsync(actor, role, ct);
     Task<IReadOnlyList<Project>> ListProjectsForUserAsync(string actor, UserRole role, CancellationToken cancellationToken);
+    async Task<Project?> FindProjectForUserAsync(Guid projectId, string actor, UserRole role, CancellationToken ct) =>
+        (await ListProjectsForUserAsync(actor, role, ct)).FirstOrDefault(project => project.Id == projectId);
     Task<Project?> FindProjectAsync(Guid projectId, CancellationToken cancellationToken);
     Task<bool> HasProjectReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken);
     Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken);
@@ -559,6 +563,18 @@ public interface IPdmRepository
     Task CancelArchiveRegistrationAsync(Guid batchId, string actor, Guid sessionId, CancellationToken cancellationToken);
     Task<bool> HasDocumentReadAccessAsync(Guid documentId, string actor, UserRole role, CancellationToken cancellationToken);
     Task<bool> HasDocumentAccessAsync(Guid documentId, string actor, UserRole role, FolderAccess requiredAccess, CancellationToken cancellationToken);
+    async Task<IReadOnlyDictionary<Guid, Guid>> GetReadableDocumentProjectsAsync(IReadOnlyCollection<Guid> documentIds,
+        string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<Guid, Guid>();
+        foreach (var id in documentIds.Distinct())
+        {
+            if (!await HasDocumentAccessAsync(id, actor, role, FolderAccess.View, cancellationToken)) continue;
+            var document = await FindDocumentAsync(id, cancellationToken);
+            if (document is not null) result[id] = document.ProjectId;
+        }
+        return result;
+    }
     Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken, int? limit = null);
     Task<IReadOnlyList<DocumentVersionVerificationResult>> ListDocumentVersionVerificationsAsync(IReadOnlyList<DocumentVersionVerificationRequest> requests, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken);
@@ -578,6 +594,26 @@ public interface IPdmRepository
     Task<CadReferenceSnapshot?> GetProjectReferenceRootAsync(Guid projectId, Guid rootDocumentId, CancellationToken cancellationToken);
     Task<CadReferenceSnapshot?> FindReferenceSnapshotAsync(Guid snapshotId, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomItem>> GetBomAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken);
+    async Task<IReadOnlyList<BomHierarchyMetric>> ReadBomHierarchyMetricsAsync(IReadOnlyList<Guid> projectIds, CancellationToken ct)
+    {
+        var result = new List<BomHierarchyMetric>();
+        var rules = (await GetSystemSettingsAsync(ct)).ValidationRules;
+        foreach (var id in projectIds)
+        {
+            var versions = await ListBomVersionsAsync(id, null, ct);
+            var releases = await ListReleasePackagesAsync(id, ct);
+            foreach (var kind in new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Electrical })
+            {
+                var items = await GetBomAsync(id, kind, ct);
+                var released = versions.Where(version => version.Kind == kind && version.State == BomVersionState.Released).OrderByDescending(version => version.VersionNumber).FirstOrDefault();
+                var scope = kind == BomKind.Standard ? ReleaseScope.StandardLongLead : kind == BomKind.NonStandard ? ReleaseScope.NonStandardLongLead : ReleaseScope.ElectricalLongLead;
+                result.Add(BomHierarchyMetric.Count(id, kind, items, rules) with { Version = released?.Label, ReleasedAt = released?.ReleasedAt,
+                    LongLeadPublishedAt = releases.Where(package => package.Scope == scope && package.State == ReleasePackageState.Published).Select(package => package.PublishedAt).Max(),
+                    LongLeadPublished = releases.Any(package => package.Scope == scope && package.State == ReleasePackageState.Published) });
+            }
+        }
+        return result;
+    }
     Task SaveBomReleaseConfirmationsAsync(Guid projectId, IReadOnlyDictionary<Guid, BomReleaseConfirmation?> confirmations, CancellationToken cancellationToken)
         => throw new NotSupportedException();
     Task<IReadOnlyList<BomItem>> ReplaceBomAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, CancellationToken cancellationToken);
@@ -712,6 +748,11 @@ public interface IPdmRepository
     Task<IReadOnlyList<UserNotification>> ListDatedUserTodosAsync(string recipient, Guid companyId, DateOnly from, DateOnly to, CancellationToken ct);
     Task<IReadOnlyList<UserNotification>> ListUserNotificationsAsync(string recipient, int take, CancellationToken cancellationToken);
     Task CreateUserNotificationsAsync(IReadOnlyList<UserNotification> notifications, CancellationToken cancellationToken);
+    Task UpsertUserNotificationsAsync(IReadOnlyList<UserNotification> notifications, CancellationToken cancellationToken);
+    Task<IReadOnlyList<UserNotification>> ListUnreadReleaseNotificationsAsync(string? recipient, CancellationToken cancellationToken);
+    Task<IReadOnlyList<UserNotification>> ListUnreadUserNotificationsAsync(string? recipient, CancellationToken cancellationToken);
+    Task ResolveUserNotificationAsync(Guid notificationId, string recipient, DateTimeOffset resolvedAt, CancellationToken cancellationToken);
+    Task ResolveUserNotificationsAsync(IReadOnlyList<string> sourceKeys, DateTimeOffset resolvedAt, CancellationToken cancellationToken);
     Task MarkUserNotificationReadAsync(Guid notificationId, string recipient, DateTimeOffset readAt, CancellationToken cancellationToken);
     Task MarkAllUserNotificationsReadAsync(string recipient, DateTimeOffset readAt, CancellationToken cancellationToken);
     Task ResolveWorkHoursNotificationsAsync(string recipient, Guid companyId, DateTimeOffset readAt, CancellationToken ct);
@@ -733,6 +774,14 @@ public interface IPdmRepository
     Task<IReadOnlyList<AuditEntry>> ListAuditAsync(string actor, UserRole role, int take, CancellationToken cancellationToken);
     Task<IReadOnlyList<AuditEntry>> ListStandardStructureReferenceAuditsAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<AuditEntry>> ListProjectAuditAsync(Guid projectId, int take, CancellationToken cancellationToken);
+    async Task<IReadOnlyList<AuditEntry>> ListProjectOverviewRecordsAsync(IReadOnlyList<Guid> projectIds, int take, CancellationToken ct)
+    {
+        var ids = projectIds.Select(id => id.ToString()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var records = new List<AuditEntry>();
+        foreach (var id in projectIds.Distinct()) records.AddRange(await ListProjectAuditAsync(id, take, ct));
+        return records.Where(entry => ids.Contains(entry.EntityId) && entry.Action is "project.manager-note" or "project.todo.create")
+            .DistinctBy(entry => entry.Id).OrderByDescending(entry => entry.OccurredAt).ToArray();
+    }
 }
 
 public interface IFileStorage

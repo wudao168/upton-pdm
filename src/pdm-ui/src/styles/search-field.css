@@ -1,0 +1,124 @@
+/* From Uiverse.io by mahiatlinux; sized for compact PLM toolbars. */
+:root body .pdm-search-field {
+  box-sizing: border-box;
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  width: var(--pdm-search-width, 150px);
+  max-width: 100%;
+  min-width: 0;
+  flex: 0 0 auto;
+  height: var(--pdm-search-height, 30px);
+  min-height: var(--pdm-search-height, 30px);
+  max-height: var(--pdm-search-height, 30px);
+  padding: 4px;
+  border: 0;
+  border-radius: 16px;
+  background: #f3f4f6;
+  box-shadow: 0 2px 5px rgb(0 0 0 / 10%);
+  vertical-align: middle;
+  transition: box-shadow 150ms ease-in-out;
+}
+:root body .pdm-search-field.has-query-action { width: calc(var(--pdm-search-width, 150px) + 85px); }
+:root body .pdm-search-field.is-input-only { grid-template-columns: 18px minmax(0, 1fr); }
+:root body button.pdm-search-submit { background: var(--pdm-theme-accent) !important; color: var(--pdm-on-accent) !important; border: 0 !important; border-radius: 12px !important; box-shadow: none !important; }
+:root body button.pdm-search-submit:hover:not(:disabled) { background: var(--pdm-theme-accent-hover) !important; }
+:root body button.pdm-search-submit:focus-visible { outline: 2px solid var(--pdm-theme-accent); outline-offset: 2px; }
+:root body .pdm-search-field:hover:not(.is-disabled) { box-shadow: 0 4px 8px rgb(0 0 0 / 14%); }
+:root body .pdm-search-field:focus-within { box-shadow: 0 0 0 2px var(--pdm-theme-accent-focus), 0 4px 8px rgb(0 0 0 / 10%); }
+.pdm-search-field__icon { width: 18px; height: 18px; color: #9ca3af; pointer-events: none; }
+.pdm-search-field__input { display: flex; min-width: 0; height: 100%; align-items: center; }
+.pdm-search-field__action { display: flex; align-items: stretch; height: 100%; min-width: 0; }
+
+/* Use the same control layer as the legacy toolbar rules, preserving input behavior and clear controls. */
+@layer pdm-business {
+  :root body .pdm-search-field.pdm-search-field.pdm-search-field :is(input, .el-input, .el-autocomplete, .el-input__wrapper) {
+    box-sizing: border-box;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    height: 100% !important;
+    min-height: 0 !important;
+    flex: 1 1 auto !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: 0 !important;
+    border-radius: 8px !important;
+    outline: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    color: #374151 !important;
+    font-size: var(--pdm-search-font-size, var(--pdm-font-size-body, 12px)) !important;
+    line-height: 20px !important;
+    text-align: left !important;
+  }
+  :root body .pdm-search-field .pdm-search-field__action > button {
+    position: static !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: auto !important;
+    min-width: 54px !important;
+    max-width: none !important;
+    height: 100% !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 8px !important;
+    border: 0 !important;
+    border-radius: 12px !important;
+    outline: none;
+    background: var(--pdm-theme-accent) !important;
+    color: var(--pdm-on-accent) !important;
+    box-shadow: none !important;
+    font: inherit;
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+}
+@layer pdm-business {
+  :root body .pdm-search-field .pdm-search-field__action > button:hover:not(:disabled) { background: var(--pdm-theme-accent-hover) !important; }
+}
+:root body .pdm-search-field .pdm-search-field__action > button:focus-visible { outline: 2px solid var(--pdm-theme-accent); outline-offset: 2px; }
+:root body .pdm-search-field .pdm-search-field__action > button:disabled { opacity: .45; cursor: not-allowed; }
+:root body .pdm-search-field .pdm-search-field__action > button::before,
+:root body .pdm-search-field .pdm-search-field__action > button::after { display: none !important; }
+:root body .pdm-search-field .pdm-search-field__action > button > * { opacity: 1 !important; }
+:root body :is(.pdm-inline-search, .pdm-tree-search, .drawing-review-scope__search):has(> .pdm-search-field) { min-width: 0; padding: 0; border: 0; background: transparent; box-shadow: none; }
+:root body :is(.wr-projects, .pdm-tree-panel, .pdm-project-browser-search, .mobile-field) .pdm-search-field { width: 100%; flex: 0 0 auto; }
+:root body .wr-projects > .pdm-search-field { --pdm-search-height: 28px; }
+:root body .production-workbench__tree-search .pdm-search-field { width: var(--pdm-search-width, 150px); flex: 0 0 var(--pdm-search-width, 150px); }
+:root body .engineering-kit-library__toolbar > .pdm-search-field { width: min(430px, 42vw); flex: 0 1 min(430px, 42vw); }
+:root body .material-relation-directory__toolbar > .pdm-search-field { width: min(430px, 42vw); flex: 0 1 min(430px, 42vw); }
+:root body .bom-header-directory__toolbar > .pdm-search-field { width: 260px; flex: 0 1 260px; }
+:root body .opl-filters > .pdm-search-field { width: auto; flex: 1 1 210px; }
+:root body .standard-structure__files > .pdm-search-field { width: 100%; }
+:root body .user-directory-actions .pdm-search-field { width: 280px; --pdm-search-height: 36px; }
+:root body :is(.release-opl-filters, .validation-selector__filter) > .pdm-search-field { width: auto; flex: 1 1 auto; }
+:root body :is(.pdm-approval-transfer-dialog, .validation-catalog) .pdm-search-field { width: 100%; }
+:root body :is(.validation-selector__filter, .validation-catalog) .pdm-search-field { --pdm-search-height: 34px; }
+:root body .drawing-review-scope__search > .pdm-search-field { width: 100%; }
+:root body .pdm-plan-filters label > .pdm-search-field { width: 220px; flex: 1 1 auto; }
+:root body .pdm-audit-record-filters > .pdm-search-field { width: 240px; --pdm-search-height: 32px; }
+:root body .application-search:has(.pdm-search-field) { padding: 0; border: 0; }
+:root body .application-search > .pdm-search-field { width: 100%; }
+:root body .pc-toolbar .pc-filters > .pdm-search-field { min-width: 90px; width: 140px; flex: 0 1 180px; }
+@container (max-width: 1250px) { :root body .pc-toolbar .pc-filters > .pdm-search-field { flex: 1; } }
+:root body .program-template-toolbar .pdm-search-field { width: 335px; }
+:root body .procurement-tracking__filters > .pdm-search-field { width: 168px; }
+:root body .pdm-project-list-toolbar .pdm-project-filters > .pdm-inline-search:has(.pdm-search-field) { width: 335px; min-width: 335px !important; max-width: 335px; flex: 0 0 335px; }
+:root body .pdm-inline-search > .pdm-search-field { width: 100%; }
+:root body .pdm-material-reference-search > .pdm-search-field { width: 100%; --pdm-search-height: 32px; }
+:root body .pdm-material-reference-search > .pdm-search-field.has-query-action { grid-column: 2 / -1; }
+:root body .pdm-project-switcher__display.pdm-search-field { --pdm-search-height: var(--pdm-tab-primary, 34px); width: 100%; margin: 0; padding: 4px; border: 0; background: #f3f4f6; }
+:root body .pdm-project-switcher__display.pdm-search-field::before,
+:root body .pdm-project-switcher__display.pdm-search-field::after { display: none; }
+:root body .pdm-command-dialog .pdm-search-field { width: 100%; --pdm-search-height: 38px; }
+.mobile-office .pdm-search-field { --pdm-search-height: 44px; --pdm-search-font-size: 16px; }
+@media (max-width: 900px) { :root body .user-directory-actions .pdm-search-field { width: 100%; } }
+@media (prefers-reduced-motion: reduce) {
+  :root body .pdm-search-field { transition: none; }
+  :root body .pdm-search-field:hover:not(.is-disabled) { transform: none; }
+}

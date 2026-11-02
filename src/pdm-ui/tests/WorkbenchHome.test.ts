@@ -10,7 +10,7 @@ const apiMocks = vi.hoisted(() => ({
   readProjectValidationPlan: vi.fn(),
   getMaterialRelationCompleteness: vi.fn(),
   getProjectProcurementTracking: vi.fn(),
-  listProjectAudit: vi.fn(),
+  readProjectOverviewRecords: vi.fn(),
   addProjectManagerNote: vi.fn(),
   createProjectTodo: vi.fn(),
 }))
@@ -73,6 +73,7 @@ const selected = {
 describe('WorkbenchHome', () => {
   beforeEach(() => {
     vi.useFakeTimers()
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
     vi.setSystemTime(new Date('2026-09-25T08:00:00+08:00'))
     apiMocks.readProjectPlanPortfolio.mockResolvedValue({
       rootProjectId: 'project-root', currentStage: 'Design', completionPercent: 62, laggingProjectCount: 0, riskProjectCount: 0, plannedFinish: '2026-10-18',
@@ -88,7 +89,7 @@ describe('WorkbenchHome', () => {
       { impactStage: 'Assembly', purchaseOrderNumbers: [], purchaseOrderStatus: '未采购' },
       { impactStage: null, purchaseOrderNumbers: [], purchaseOrderStatus: '未采购' },
     ] })
-    apiMocks.listProjectAudit.mockResolvedValue([
+    apiMocks.readProjectOverviewRecords.mockResolvedValue([
       { id: 'note-2', actor: 'manager', action: 'project.manager-note', entityType: 'Project', entityId: 'project-root', detail: '最新采购风险已同步', occurredAt: '2026-09-25T08:31:00Z' },
       { id: 'note-1', actor: 'manager', action: 'project.manager-note', entityType: 'Project', entityId: 'project-root', detail: '旧备注', occurredAt: '2026-09-25T08:30:00Z' },
       { id: 'child-note', actor: 'engineer', action: 'project.manager-note', entityType: 'Project', entityId: 'project-child', detail: '子项目装配准备完成', occurredAt: '2026-09-25T08:29:00Z' },
@@ -99,30 +100,46 @@ describe('WorkbenchHome', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+    vi.restoreAllMocks()
   })
 
   it('仅可见项目的普通人员可查看记录，计划不可读也不影响，维护和待办表单保持关闭', async () => {
     vi.clearAllMocks()
     apiMocks.readProjectPlanPortfolio.mockRejectedValue(new Error('计划无查看权限'))
     const note={id:'readable',actor:'another-user',action:'project.manager-note',entityType:'Project',entityId:project.id,detail:'其他人员记录的项目情况',occurredAt:'2026-09-25T08:30:00Z'}
-    apiMocks.listProjectAudit.mockResolvedValue([note,{...note,id:'child-record',entityId:childProject.id,detail:'可见子项目的历史记录'},{...note,id:'unrelated-record',entityId:'another-root',detail:'其他项目不应显示'}])
+    apiMocks.readProjectOverviewRecords.mockResolvedValue([note,{...note,id:'child-record',entityId:childProject.id,detail:'可见子项目的历史记录'},{...note,id:'unrelated-record',entityId:'another-root',detail:'其他项目不应显示'}])
     const wrapper=mount(WorkbenchHome,{props:{project:{...project,canReadContent:false},projects:[project,childProject,{...project,id:'another-root',code:'OTHER'}],users:[],selected,hasDocuments:false,modelCount:0,drawingCount:0,bomPendingCount:0,standardCount:0,nonStandardCount:0,electricalCount:0,standardItemIds:[],nonStandardItemIds:[],electricalItemIds:[],drawingReviews:[],materialApplications:[],releasePackages:[],releasePackage:null,pending:false,token:'token',canAddManagerNote:false},global:{plugins:[ElementPlus]}})
     await flushPromises();await wrapper.findAll('button').find(b=>b.text()==='查看记录')!.trigger('click');await flushPromises()
     const history=document.body.querySelector('[aria-label="当前项目及子项目历史记录"]')!
     expect(history.textContent).toContain('其他人员记录的项目情况');expect(history.textContent).toContain('可见子项目的历史记录');expect(history.textContent).not.toContain('其他项目不应显示');expect(history.querySelectorAll('article')).toHaveLength(2)
     expect(document.body.querySelector('[aria-label="项目备注内容"]')).toBeNull();expect(document.body.querySelector('[aria-label="待办接收人"]')).toBeNull();expect([...document.body.querySelectorAll('button')].some(b=>b.textContent==='保存记录')).toBe(false)
-    expect(apiMocks.listProjectAudit).toHaveBeenCalledWith(project.id,'token');expect(apiMocks.listProjectAudit).toHaveBeenCalledWith(childProject.id,'token');expect(apiMocks.listProjectAudit).not.toHaveBeenCalledWith('another-root','token');expect(apiMocks.addProjectManagerNote).not.toHaveBeenCalled();expect(apiMocks.createProjectTodo).not.toHaveBeenCalled();wrapper.unmount()
+    expect(apiMocks.readProjectOverviewRecords).toHaveBeenCalledWith(project.id,'token');expect(apiMocks.readProjectOverviewRecords).toHaveBeenCalledTimes(1);expect(apiMocks.readProjectOverviewRecords).not.toHaveBeenCalledWith('another-root','token');expect(apiMocks.addProjectManagerNote).not.toHaveBeenCalled();expect(apiMocks.createProjectTodo).not.toHaveBeenCalled();wrapper.unmount()
   })
 
   it('切换项目会关闭原记录并清空内容，旧请求迟到不会覆盖新项目记录', async () => {
     apiMocks.readProjectPlanPortfolio.mockRejectedValue(new Error('计划不可见'))
     let finishOld!: (value:any[])=>void;const old=new Promise<any[]>(resolve=>{finishOld=resolve})
-    apiMocks.listProjectAudit.mockImplementation((id:string)=>id===project.id?old:Promise.resolve(id==='new-project'?[{id:'new-record',actor:'manager',action:'project.manager-note',entityType:'Project',entityId:id,detail:'新项目可见记录',occurredAt:'2026-09-25T08:31:00Z'}]:[]))
+    apiMocks.readProjectOverviewRecords.mockImplementation((id:string)=>id===project.id?old:Promise.resolve(id==='new-project'?[{id:'new-record',actor:'manager',action:'project.manager-note',entityType:'Project',entityId:id,detail:'新项目可见记录',occurredAt:'2026-09-25T08:31:00Z'}]:[]))
     const wrapper=mount(WorkbenchHome,{props:{project,projects:[project,childProject],users:[],selected,hasDocuments:false,modelCount:0,drawingCount:0,bomPendingCount:0,standardCount:0,nonStandardCount:0,electricalCount:0,standardItemIds:[],nonStandardItemIds:[],electricalItemIds:[],drawingReviews:[],materialApplications:[],releasePackages:[],releasePackage:null,pending:false,token:'token',canAddManagerNote:false},global:{plugins:[ElementPlus]}})
     await flushPromises();const next={...project,id:'new-project',code:'NEW'};await wrapper.setProps({project:next,projects:[next]});await flushPromises();await wrapper.findAll('button').find(b=>b.text()==='查看记录')!.trigger('click');await flushPromises()
     finishOld([{id:'old-record',actor:'manager',action:'project.manager-note',entityType:'Project',entityId:project.id,detail:'旧项目迟到内容',occurredAt:'2026-09-25T08:31:00Z'}]);await flushPromises()
     const history=document.body.querySelector('[aria-label="当前项目及子项目历史记录"]')!;expect(history.textContent).toContain('新项目可见记录');expect(history.textContent).not.toContain('旧项目迟到内容')
     await wrapper.setProps({token:''});await flushPromises();expect(history.textContent).not.toContain('新项目可见记录');wrapper.unmount()
+  })
+
+  it('记录未返回时先展示计划，记录失败不覆盖计划，隐藏页不轮询', async () => {
+    vi.clearAllMocks()
+    let rejectRecords!: (reason: Error) => void
+    apiMocks.readProjectOverviewRecords.mockImplementation(() => new Promise((_, reject) => { rejectRecords = reject }))
+    const wrapper = mount(WorkbenchHome, { props: { project, projects: [project, childProject], users: [], selected, hasDocuments: false, modelCount: 0, drawingCount: 0, bomPendingCount: 0, standardCount: 0, nonStandardCount: 0, electricalCount: 0, standardItemIds: [], nonStandardItemIds: [], electricalItemIds: [], drawingReviews: [], materialApplications: [], releasePackages: [], releasePackage: null, pending: false, token: 'token', canAddManagerNote: false }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(wrapper.get('[aria-label="项目状态与下一步"]').text()).toContain('项目进度 62%')
+    expect(apiMocks.readProjectOverviewRecords).toHaveBeenCalledTimes(1)
+    rejectRecords(new Error('读取失败')); await flushPromises()
+    expect(wrapper.get('[aria-label="项目状态与下一步"]').text()).toContain('项目进度 62%')
+    await wrapper.setProps({ active: false }); await vi.advanceTimersByTimeAsync(300001)
+    expect(apiMocks.readProjectOverviewRecords).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
   })
 
   it('以项目状态和下一步为核心，并进入对应业务页面', async () => {
@@ -190,6 +207,8 @@ describe('WorkbenchHome', () => {
     await flushPromises()
 
     const initialRefreshCount = apiMocks.readProjectPlanPortfolio.mock.calls.length
+    expect(document.hidden).toBe(false)
+    expect(wrapper.get('[aria-label="刷新项目概览"]').attributes('disabled')).toBeUndefined()
     await vi.advanceTimersByTimeAsync(299_999)
     expect(apiMocks.readProjectPlanPortfolio).toHaveBeenCalledTimes(initialRefreshCount)
     await vi.advanceTimersByTimeAsync(1)

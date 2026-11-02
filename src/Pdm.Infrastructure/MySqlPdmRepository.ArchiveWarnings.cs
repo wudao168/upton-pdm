@@ -28,6 +28,7 @@ public sealed partial class MySqlPdmRepository
         var previous = JsonSerializer.Deserialize<ArchiveWarningPolicy>(json!, jsonOptions)!;
         if (previous.Revision != input.Revision) throw new PdmConflictException("存档警告策略已被修改，请刷新后重试。");
         var result = new ArchiveWarningPolicy { Revision = previous.Revision + 1, BlockAll = input.BlockAll,
+            MaxBatchRequestMiB = input.MaxBatchRequestMiB ?? previous.MaxBatchRequestMiB,
             BlockingCodes = input.BlockingCodes.OrderBy(code => code, StringComparer.Ordinal).ToArray() };
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE pdm_system_setting SET setting_value=@Value,updated_at=@Now WHERE setting_key='archive_warning_policy'",

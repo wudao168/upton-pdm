@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { documentVersionSummary, bomRevisionLabel, drawingRevisionHint, drawingRevisionLabel, packageRevisionLabel, packageRevisionHint } from '../src/drawingRevision'
-import type { BomItem, ReleasePackageSummary } from '../src/types'
+import type { BomItem, BomVersion, ReleasePackageSummary } from '../src/types'
 
 const item: BomItem = { sequence: 1, drawingNumber: 'PART', name: '底板', quantity: 1, unit: '个', revision: 'W1', complete: true, sourceDocumentId: 'model' }
 const release = (raw = 'W1', target = 'A'): ReleasePackageSummary => ({ id: 'rp', number: 'RP-1', state: '已发布', scope: 'NonStandardWithDrawing',
@@ -9,6 +9,34 @@ const release = (raw = 'W1', target = 'A'): ReleasePackageSummary => ({ id: 'rp'
   steps: [], workflowVersion: 1, selectedBomItemIds: [], createsManufacturingBaseline: true, locksDocuments: true })
 
 describe('统一图纸版次', () => {
+  it.each(['Standard', 'Electrical'] as const)('%s当前BOM与对应发布记录一致，刷新后采用新发布版本而不影响新增行', kind => {
+    const prefix = kind === 'Standard' ? 'S' : 'E'
+    const row = { ...item, id: 'row', kind, unit: '001', displayRevision: '未发布' }
+    const published = (number: number, state = '已发布'): ReleasePackageSummary => ({ ...release(), id: `release-${number}`, state, scope: kind === 'Standard' ? 'StandardFormal' : 'ElectricalFormal',
+      publishedAt: `2026-10-${number + 10}`, versionBindings: [], nonStandardBomSnapshot: [],
+      standardBomSnapshot: kind === 'Standard' ? [row] : [], electricalBomSnapshot: kind === 'Electrical' ? [row] : [],
+      standardBomRevision: kind === 'Standard' ? `${prefix}-P700016-2-B0${number}` : undefined,
+      electricalBomRevision: kind === 'Electrical' ? `${prefix}-P700016-2-B0${number}` : undefined })
+    const history = [published(3), published(6), published(9, '审批中')]
+    expect(bomRevisionLabel(row, history)).toBe(`${prefix}-P700016-2-V06`)
+    expect(bomRevisionLabel({ ...row, displayRevision: `${prefix}-P700016-2-V03` }, history)).toBe(`${prefix}-P700016-2-V06`)
+    expect(bomRevisionLabel({ ...row, displayRevision: `${prefix}-P700016-2-V03` }, [published(9, '审批中')])).toBe(`${prefix}-P700016-2-V03`)
+    expect(bomRevisionLabel({ ...row, drawingNumber: 'NEW' }, history)).toBe('未发布')
+    expect(bomRevisionLabel({ ...row, unit: '002' }, history)).toBe('未发布')
+    expect(bomRevisionLabel({ ...row, displayRevision: 'A' }, history)).toBe('A')
+    expect(bomRevisionLabel({ ...row, sourceDocumentId: undefined, revision: 'A' }, history)).toBe('A')
+    expect(packageRevisionLabel(row, history[1]!)).toBe(`${prefix}-P700016-2-V06`)
+    expect(packageRevisionHint(row, history[1]!)).toContain(`${kind === 'Standard' ? '标准件' : '电气件'}BOM发布版本`)
+    expect(row.revision).toBe('W1')
+  })
+  it('缺失包内版本号时使用冻结版本编号，历史版本不取最新工作区版本', () => {
+    const row = { ...item, kind: 'Electrical' as const, displayRevision: '未发布' }
+    const version = { id: 'version-3', kind: 'Electrical', versionNumber: 3, state: 'Released', label: 'E-P700016-2-B03', items: [row] } as BomVersion
+    const value = { ...release(), scope: 'ElectricalFormal' as const, electricalBomVersionId: version.id, versionBindings: [], electricalBomSnapshot: [row] }
+    expect(bomRevisionLabel(row, [value], [version])).toBe('E-P700016-2-V03')
+    expect(bomRevisionLabel(row, [], [version])).toBe('E-P700016-2-V03')
+    expect(bomRevisionLabel(row, [], [{ ...version, state: 'Draft' }])).toBe('未发布')
+  })
   it('标准件没有独立版本时采用该发布包冻结的BOM版本，保留已有物料版本', () => {
     const standard = { ...item, kind: 'Standard' as const }
     const packageA = { ...release(), scope: 'StandardSupplement' as const, standardBomRevision: 'S-P700016-2-B03', versionBindings: [] }

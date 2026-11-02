@@ -8,6 +8,25 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class WorkflowNotificationTests
 {
     [Fact]
+    public async Task CompanyWideManagerRuleOnlyNotifiesAssignedManagersAndSharesThePublishedSummaryKey()
+    {
+        using var f = await Fixture.Create(); f.SetCompany(f.Company);
+        foreach (var name in new[] { "assigned-manager", "unrelated-manager" })
+            await f.Repository.CreateUserAsync(new(Guid.NewGuid(), name, name, "unused", UserRole.Engineer, true, RoleCode: "ProjectManager", CompanyId: f.Company), default);
+        f.Project = f.Project with { PrimaryProjectManager = "assigned-manager" };
+        ((System.Collections.Concurrent.ConcurrentDictionary<Guid, Project>)typeof(InMemoryPdmRepository).GetField("projects", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(f.Repository)!)[f.Project.Id] = f.Project;
+        await f.Rule("standard-release", true, [new("CompanyRole", null, RoleCode: "ProjectManager")]);
+        var package = await f.Release(ReleaseScope.StandardFormal, "standard-release");
+        await ReleaseManagementNotifications.NotifyPublishedAsync(f.Repository, package, f.Project, DateTimeOffset.UtcNow, default);
+        Assert.Equal(0, await f.Notices("assigned-manager"));
+        await f.Service.CaptureReleaseAsync(package, default);
+        await f.Repository.MarkPublishedAsync(package.Id, "unused", DateTimeOffset.UtcNow, default);
+        await f.Service.ProcessAsync((await f.Job("standard-release")).Id, default);
+        await ReleaseManagementNotifications.NotifyPublishedAsync(f.Repository, package, f.Project, DateTimeOffset.UtcNow, default);
+        Assert.Equal(1, await f.Notices("assigned-manager"));
+        Assert.Equal(0, await f.Notices("unrelated-manager"));
+    }
+    [Fact]
     public async Task ReleaseAssistantInSiblingGroupReceivesQueuedNoticeWithinTheSubmitterDivisionOnly()
     {
         using var f = await Fixture.Create(); f.SetCompany(f.Company);

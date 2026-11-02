@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -28,19 +28,18 @@ internal static partial class Program
    SetField(plugin,"currentTree",root);var events=new List<string>();var appType=Type("PdmAddin").GetField("application",Flags).FieldType;
    var model=new Model(appType.Assembly.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),(string)Get(root,"FullPath"),true,events);
    File.SetAttributes(model.Path,FileAttributes.ReadOnly);
-   SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?new[]{model.GetTransparentProxy()}:throw new Exception(call.MethodName)).GetTransparentProxy());
+   SetField(plugin,"application",new Proxy(appType,call=>call.MethodName=="GetDocuments"?new[]{model.GetTransparentProxy()}:call.MethodName=="GetCurrentWorkingDirectory"?directory:throw new Exception(call.MethodName)).GetTransparentProxy());
    using(var pane=(Control)New("PdmTaskPaneControl",""))
    using(var handler=new LinkedArchiveHandler(new[]{root},new Dictionary<Guid,object>{{(Guid)Get(root,"DocumentId"),LinkedVersion(root,snapshot)}},project,session,events,change=="denied"))
    using(var client=(IDisposable)New("PdmApiClient","http://linked-qa.invalid/"))
    {
     pane.CreateControl();SetField(plugin,"taskPaneControl",pane);LinkedClient(plugin,client,handler);
-    var denied=false;
-    try{await (Task)Type("PdmAddin").GetMethod("EnsureBatchCheckInSavedStateAsync",Flags).Invoke(plugin,new object[]{LinkedItems(root),project,CancellationToken.None});}
-    catch(InvalidOperationException){if(change!="denied")throw;denied=true;}
-    if(change=="denied") {if(!denied||!model.Dirty||events.Any(e=>e.StartsWith("save:")))throw new Exception("Denied parent permission lost edits or saved");}
-    else if(change=="child-version-only") {if(events.Count!=0||!model.Dirty)throw new Exception("Child-only change acquired or saved an unchanged parent");}
-    else if(model.Dirty||!events.SequenceEqual(new[]{"checkout:ROOT.SLDASM","save:ROOT.SLDASM"}))throw new Exception("Readonly changed parent was not checked out before Save3: "+change);
-    Console.WriteLine("PASS: parent permission/save "+change);
+    var original=File.ReadAllBytes(model.Path);
+    await (Task)Type("PdmAddin").GetMethod("EnsureBatchCheckInSavedStateAsync",Flags).Invoke(plugin,new object[]{LinkedItems(root),project,CancellationToken.None});
+    if(!model.Dirty||!events.SequenceEqual(new[]{"copy:ROOT.SLDASM"})||!original.SequenceEqual(File.ReadAllBytes(model.Path))||(File.GetAttributes(model.Path)&FileAttributes.ReadOnly)==0)
+        throw new Exception("Snapshot preparation wrote a readonly parent or acquired source permissions: "+change);
+    TreeCall(plugin,"PruneArchiveMemoryCopies",true);
+    Console.WriteLine("PASS: readonly parent snapshot preserves current memory and source permissions; change="+change);
    }
    File.SetAttributes(model.Path,FileAttributes.Normal);Directory.Delete(directory,true);
   }

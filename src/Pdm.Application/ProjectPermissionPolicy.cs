@@ -24,8 +24,7 @@ public static class ProjectPermissionPolicy
         if (definition.ProjectAuthorization == "role") return roleAllows;
 
         if (operation == PermissionCodes.ProjectDesignerAssign
-            && (await repository.ListProjectsForUserAsync(actor, role, cancellationToken))
-                .Any(project => project.Id == projectId && project.CanAssignDesigners))
+            && (await repository.FindProjectForUserAsync(projectId, actor, role, cancellationToken))?.CanAssignDesigners == true)
             return true;
 
         var settings = await repository.GetProjectPermissionSettingsAsync(cancellationToken);

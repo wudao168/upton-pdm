@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
 import SquareLoader from './SquareLoader.vue'
 import QuantityInputNumber from './QuantityInputNumber.vue'
 import { Box, FileSearch, FileText, Folder, RotateCw } from '@lucide/vue'
@@ -319,7 +320,7 @@ async function referenceBom() {
       <template v-else>
         <div v-if="activeTab === 'drawings'" class="standard-structure__drawings">
           <aside class="standard-structure__files pdm-panel">
-            <el-input v-model="search" clearable placeholder="搜索图号或名称" aria-label="搜索标准结构图档" />
+            <SearchField><el-input v-model="search" clearable placeholder="搜索图号或名称" aria-label="搜索标准结构图档" /></SearchField>
             <div class="standard-structure__file-filters"><button v-for="filter in [{ key: 'all', label: '全部' }, { key: '3d', label: '3D' }, { key: '2d', label: '2D' }]" :key="filter.key" type="button" :class="{ 'is-active': fileFilter === filter.key }" @click="fileFilter = filter.key">{{ filter.label }} {{ drawingCount(filter.key) }}</button></div>
             <div class="standard-structure__file-heading"><span>图档名称</span><span>版本</span></div>
             <el-tree v-if="filteredDrawingTree.length" class="standard-structure__drawing-tree" :data="filteredDrawingTree" node-key="id" :props="{ children: 'children' }" default-expand-all highlight-current :current-node-key="selectedNodeId" @node-click="selectNode">

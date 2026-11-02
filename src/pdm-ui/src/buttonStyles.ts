@@ -2,10 +2,22 @@ import type { App } from 'vue'
 import './styles/buttons.css'
 import './styles/refresh-buttons.css'
 import './styles/table-sorting.css'
+import './styles/fold-buttons.css'
+
+export function isFoldButton(button: HTMLButtonElement) {
+  if (button.matches('.el-table__expand-icon, .el-table-v2__expand-icon, .pdm-tree-toggle, .bom-tree-node__toggle, .pdm-category-sidebar__toggle, .material-category-nav__toggle, .pdm-titlebar__sidebar-toggle, .pdm-project-collapse-action')) return true
+  if (button.matches('[aria-haspopup], [role="combobox"], [role="treeitem"], [role="option"], .pdm-theme-trigger, .pdm-user-profile-trigger, .pdm-company-switcher, .pdm-project-switcher__display, .el-dropdown-selfdefine')) return false
+  if (button.hasAttribute('aria-expanded') && !button.hasAttribute('aria-haspopup') && !button.matches('[role="combobox"], [role="treeitem"], [role="option"]')) return true
+  const label = button.getAttribute('aria-label') || button.title || ''
+  if (/^(?:展开|收起|折叠)/.test(label) && (button.textContent?.trim().length ?? 0) <= 2) return true
+  return /^(?:(?:展开|收起|折叠)(?:全部|所有|当前|子项|子级|详情|明细|侧栏|导航|差异|目录|分类|筛选|分组|面板|列表|内容|更多)?|(?:全部|所有)(?:展开|收起|折叠))$/.test(button.textContent?.trim() || '')
+}
 
 // 导航、树节点、日历格和图片入口属于业务内容，不作为操作按钮装饰。
 export const buttonNavigationSelector = 'nav, .pdm-sidebar, .pdm-tabs, [role="tablist"], .el-tree, [role="tree"], .el-pagination, .el-picker-panel, .el-dropdown-menu, .pdm-tree-context-menu'
 export const buttonContentSelector = [
+  '.pdm-search-field__action > button', '.pdm-search-submit',
+  '.pdm-command-results button',
   '[role="tab"]', '[role="treeitem"]', '[role="option"]', '[role="menuitem"]', '[role="checkbox"]', '[role="switch"]',
   '.pdm-global-status', '.pdm-company-switcher', '.pdm-project-code-link', '.pdm-project-switcher__display', '.pdm-project-switcher__search-icon',
   '.pdm-release-package-row', '.pdm-titlebar__sidebar-toggle',
@@ -43,8 +55,11 @@ const compactLabels: Record<string, string> = {
 const generatedTitles = new WeakMap<HTMLButtonElement, string>()
 
 function updateButton(button: HTMLButtonElement) {
+  const fold = isFoldButton(button)
+  if (fold) button.dataset.pdmFoldControl = 'true'
+  else delete button.dataset.pdmFoldControl
   const text = button.textContent?.replace(/\s+/g, ' ').trim() ?? ''
-  if (button.closest(buttonNavigationSelector) || button.matches(buttonContentSelector) || button.closest('.pdm-overview-alerts') || button.querySelector('img, canvas')) {
+  if (fold || button.closest(buttonNavigationSelector) || button.matches(buttonContentSelector) || button.closest('.pdm-overview-alerts') || button.querySelector('img, canvas')) {
     delete button.dataset.pdmButtonKind
     delete button.dataset.pdmButtonLabel
     delete button.dataset.pdmButtonIconOnly
@@ -103,7 +118,7 @@ export function installButtonStyles(app: App) {
       }
     }
   })
-  observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class', 'role', 'aria-label', 'title', 'disabled'] })
+  observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class', 'role', 'aria-expanded', 'aria-haspopup', 'aria-label', 'title', 'disabled'] })
   document.querySelectorAll<HTMLButtonElement>('button').forEach(updateButton)
   app.onUnmount(() => observer.disconnect())
 }

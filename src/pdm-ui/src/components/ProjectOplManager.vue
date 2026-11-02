@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
+import UserSelect from './UserSelect'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, download: projectDownload, export: projectExport } = useProjectCenterAccess()
 import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
@@ -11,7 +13,7 @@ import { useUserDisplayName } from '../userDisplay'
 import { downloadOplWorkbook } from '../oplWorkbook'
 
 const PdfDrawingViewer = defineAsyncComponent(() => import('./PdfDrawingViewer.vue'))
-const props = defineProps<{ project: ProjectSummary; token: string }>()
+const props = defineProps<{ project: ProjectSummary; token: string; mobile?: boolean }>()
 const emit = defineEmits<{ openRelease: [projectId: string, releasePackageId: string] }>()
 const displayUserName = useUserDisplayName()
 const view = ref<OplView>({ rows: [], people: [] })
@@ -163,6 +165,7 @@ async function attachment(row: OplRow, file: OplAttachment) {
   } catch (cause) { ElMessage.error(message(cause, '附件读取失败，请检查网络或联系管理员。')) }
 }
 function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value || saving.value) { event.preventDefault(); event.returnValue = '' } }
+defineExpose({ canLeave: () => !dirty.value && !saving.value && !completing.value })
 function refreshOnFocus() { if (!loading.value && !drawer.value && !saving.value && !completing.value && !exporting.value && !previewUrl.value) void load() }
 window.addEventListener('beforeunload', beforeUnload)
 window.addEventListener('focus', refreshOnFocus)
@@ -173,9 +176,18 @@ void load()
 <template>
   <section class="pdm-panel pdm-manager-panel opl-manager" aria-label="开口问题清单">
     <header class="pdm-panel-header"><div><span v-if="project.parentProjectId" class="opl-scope">当前子项目：{{ project.code }} · {{ project.name }}</span><span class="opl-counts">全部 {{ scopedRows.length }} · 未完成 {{ activeCount }} · <span :class="{ 'opl-overdue': overdueCount > 0 }">已逾期 {{ overdueCount }}</span> · 已完成 {{ scopedRows.filter(row => row.issue.status === '已完成').length }}</span></div><div class="opl-actions"><el-button :disabled="loading || !!error || !scopedRows.length" :loading="exporting" title="导出当前项目范围的全部开口问题（不受筛选影响）" v-if="projectExport" @click="exportExcel"><Download v-if="!exporting" :size="14" />导出Excel</el-button><el-button :disabled="loading" @click="load"><RefreshCw :size="14" />刷新</el-button><el-button type="primary" :disabled="loading || !!error" v-if="projectWritable" @click="open()"><Plus :size="14" />新增问题</el-button></div></header>
-    <div class="opl-filters"><el-input v-model="query" aria-label="搜索开口问题" placeholder="搜索问题描述 / 编号" clearable /><el-select v-model="status" aria-label="筛选实施状态"><el-option label="全部状态" value="" /><el-option label="未完成" value="未完成" /><el-option v-for="item in states" :key="item" :label="item" :value="item" /></el-select><el-select v-model="owner" aria-label="筛选负责人" placeholder="全部负责人" clearable filterable><el-option v-for="person in view.people" :key="person.username" :label="person.displayName" :value="person.username" /></el-select><el-select v-model="priority" aria-label="筛选优先级" placeholder="全部优先级" multiple collapse-tags collapse-tags-tooltip clearable><el-option v-for="item in priorities" :key="item" :label="item" :value="item" /></el-select><el-checkbox v-if="projectWritable" v-model="notifyUpdates" class="opl-notify-toggle" :disabled="saving || !!completing">更新或完成后通知钉钉群</el-checkbox></div>
+    <div class="opl-filters"><SearchField><el-input v-model="query" aria-label="搜索开口问题" placeholder="搜索问题描述 / 编号" clearable /></SearchField><el-select v-model="status" aria-label="筛选实施状态"><el-option label="全部状态" value="" /><el-option label="未完成" value="未完成" /><el-option v-for="item in states" :key="item" :label="item" :value="item" /></el-select><UserSelect v-model="owner" aria-label="筛选负责人" placeholder="全部负责人" clearable filterable><el-option v-for="person in view.people" :key="person.username" :label="person.displayName" :value="person.username" /></UserSelect><el-select v-model="priority" aria-label="筛选优先级" placeholder="全部优先级" multiple collapse-tags collapse-tags-tooltip clearable><el-option v-for="item in priorities" :key="item" :label="item" :value="item" /></el-select><el-checkbox v-if="projectWritable" v-model="notifyUpdates" class="opl-notify-toggle" :disabled="saving || !!completing">更新或完成后通知钉钉群</el-checkbox></div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
-    <div class="opl-table-wrap" v-loading="loading"><el-table :data="visible" height="100%" stripe border row-key="issue.id" empty-text="暂无符合条件的开口问题" class="opl-table" @row-click="(row: OplRow) => open(row, !row.canEdit)">
+    <div v-if="mobile" class="mobile-opl-list" v-loading="loading">
+      <article v-for="row in visible" :key="row.issue.id" class="mobile-opl-card">
+        <header><strong>#{{ row.issue.number }}</strong><span>{{ row.issue.status }} · {{ row.issue.priority }}</span><span v-if="overdue(row)" class="opl-overdue">已逾期</span></header>
+        <p>{{ row.issue.description }}</p><p v-if="row.issue.solution">解决措施：{{ row.issue.solution }}</p>
+        <small>{{ relatedProject(row.issue.relatedProjectId) }} · 负责人 {{ name(row.issue.owner) }} · 需求日期 {{ row.issue.dueDate || '未设置' }}</small>
+        <footer><el-button @click="open(row, !row.canEdit)">{{ row.canEdit ? '查看 / 编辑' : '查看详情' }}</el-button><el-button v-if="!closed(row.issue.status) && row.canComplete" :disabled="loading || saving || !!completing" @click="complete(row)">确认完成</el-button><el-button v-for="file in row.issue.attachments" :key="file.id" @click="attachment(row, file)">{{ file.name }}</el-button></footer>
+      </article>
+      <p v-if="!loading && !visible.length">暂无符合条件的开口问题。</p>
+    </div>
+    <div v-else class="opl-table-wrap" v-loading="loading"><el-table :data="visible" height="100%" stripe border row-key="issue.id" empty-text="暂无符合条件的开口问题" class="opl-table" @row-click="(row: OplRow) => open(row, !row.canEdit)">
       <el-table-column label="状态" width="56" fixed class-name="opl-status-column pdm-column-fixed-width"><template #default="{ row }"><div class="opl-status-markers"><span v-if="row.isNew" class="opl-capsule" aria-label="新增未查看">NEW</span><span v-if="overdue(row)" class="opl-capsule opl-capsule--overdue" aria-label="已逾期">逾期</span></div></template></el-table-column>
       <el-table-column label="序号" width="100" fixed><template #default="{ row }">{{ row.issue.number }}</template></el-table-column>
       <el-table-column label="子项目" width="200" show-overflow-tooltip><template #default="{ row }">{{ relatedProject(row.issue.relatedProjectId) }}</template></el-table-column>
@@ -199,7 +211,7 @@ void load()
         <div class="opl-project-fields"><el-form-item label="所属项目"><el-input :model-value="`${rootProject.code} · ${rootProject.name}`" disabled /></el-form-item>
         <el-form-item label="子项目"><el-select v-model="draft.relatedProjectId" aria-label="关联子项目" clearable filterable placeholder="不选择，表示项目整体问题"><el-option v-for="item in subprojects" :key="item.id" :label="`${item.code} · ${item.name}`" :value="item.id" /></el-select></el-form-item></div>
         <el-form-item label="问题描述" required><el-input v-model="draft.description" aria-label="问题描述" type="textarea" :rows="4" maxlength="2000" show-word-limit placeholder="请描述现场问题" /></el-form-item>
-        <div class="opl-form-grid"><el-form-item label="优先级"><el-select v-model="draft.priority" aria-label="优先级"><el-option v-for="item in priorities" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="实施状态"><el-select v-model="draft.status" aria-label="实施状态"><el-option v-for="item in states" :key="item" :label="item" :value="item" :disabled="item === '已完成' && editing !== null && !editing.canComplete && editing.issue.status !== '已完成'" /></el-select></el-form-item><el-form-item label="负责人"><el-select v-model="draft.owner" aria-label="负责人" clearable filterable placeholder="待分派"><el-option v-for="person in view.people" :key="person.username" :label="person.displayName" :value="person.username" /></el-select></el-form-item><el-form-item label="需求完成日期"><el-date-picker v-model="draft.dueDate" aria-label="需求完成日期" type="date" value-format="YYYY-MM-DD" placeholder="请选择日期" style="width:100%" /></el-form-item></div>
+        <div class="opl-form-grid"><el-form-item label="优先级"><el-select v-model="draft.priority" aria-label="优先级"><el-option v-for="item in priorities" :key="item" :label="item" :value="item" /></el-select></el-form-item><el-form-item label="实施状态"><el-select v-model="draft.status" aria-label="实施状态"><el-option v-for="item in states" :key="item" :label="item" :value="item" :disabled="item === '已完成' && editing !== null && !editing.canComplete && editing.issue.status !== '已完成'" /></el-select></el-form-item><el-form-item label="负责人"><UserSelect v-model="draft.owner" aria-label="负责人" clearable filterable placeholder="待分派"><el-option v-for="person in view.people" :key="person.username" :label="person.displayName" :value="person.username" /></UserSelect></el-form-item><el-form-item label="需求完成日期"><el-date-picker v-model="draft.dueDate" aria-label="需求完成日期" type="date" value-format="YYYY-MM-DD" placeholder="请选择日期" style="width:100%" /></el-form-item></div>
         <el-form-item label="解决措施"><el-input v-model="draft.solution" aria-label="解决措施" type="textarea" :rows="4" maxlength="4000" show-word-limit placeholder="请填写处理过程和解决结果" /></el-form-item>
       </el-form>
       <section v-if="editing" class="opl-release-history" aria-label="关联发布记录">
@@ -208,6 +220,7 @@ void load()
         <div class="opl-release-scroll"><table v-if="releases(editing).length"><thead><tr><th>发布单号</th><th>BOM类型</th><th>图纸数量</th><th>发布日期</th></tr></thead><tbody><tr v-for="record in releases(editing)" :key="record.releasePackageId"><td><button type="button" class="pdm-text-action" @click="openRelease(record)">{{ record.packageNumber }}</button></td><td>{{ record.bomType }}</td><td>{{ record.drawingCount }}</td><td>{{ date(record.publishedAt) }}</td></tr></tbody></table><p v-else>暂无成功关联的发布记录。</p></div>
       </section>
       <section class="opl-upload"><strong>图片和附件</strong><label v-if="!readonly" class="opl-file-picker">上传图片 / 附件<input type="file" multiple :disabled="saving" aria-label="上传图片和附件" @change="selectFiles"></label><small v-if="!readonly">最多10个附件，单个不超过10MB，单次总大小不超过30MB。</small><div v-for="file in retained" :key="file.id" class="opl-file"><button class="pdm-text-action" @click="editing && attachment(editing, file)">{{ file.name }}</button><button v-if="!readonly" class="pdm-text-action" :disabled="saving" @click="retained = retained.filter(item => item.id !== file.id)">移除</button></div><div v-for="(file, index) in files" :key="index" class="opl-file"><span>{{ file.name }}</span><button class="pdm-text-action" :disabled="saving" @click="files.splice(index, 1)">移除</button></div><span v-if="readonly && !retained.length">暂无附件</span></section>
+      <label v-if="mobile && !readonly" class="opl-file-picker">拍照添加图片<input type="file" accept="image/*" capture="environment" :disabled="saving" aria-label="拍照添加问题图片" @change="selectFiles"></label>
       <p v-if="editing" class="opl-meta">提交人：{{ editing.issue.createdByDisplayName || name(editing.issue.createdBy) }} · 提交日期：{{ date(editing.issue.createdAt) }} · 最近更新：{{ editing.issue.updatedBy === editing.issue.createdBy ? (editing.issue.createdByDisplayName || name(editing.issue.updatedBy)) : name(editing.issue.updatedBy) }}</p>
       <el-alert v-if="formError" :title="formError" type="error" :closable="false" />
       <template #footer><el-checkbox v-if="editing && !readonly" v-model="notifyUpdates" :disabled="saving">保存后通知钉钉群</el-checkbox><el-button :disabled="saving" @click="close()">{{ readonly ? '关闭' : '取消' }}</el-button><el-button v-if="!readonly" type="primary" :loading="saving" @click="save">保存问题</el-button></template>

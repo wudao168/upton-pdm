@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SearchField from './SearchField.vue'
 import { ElMessage } from '../statusMessage'
 import { Box, Folder } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
@@ -778,7 +779,7 @@ onBeforeUnmount(() => {
           <el-button class="import-material-button" :disabled="!canManage" :title="canManage ? undefined : '需要标准物料管理权限'" @click="openImport">导入</el-button>
           <el-button class="maintain-material-button" :disabled="!canMaintainSelected" @click="openSelectedMaintenance">维护</el-button>
           <el-button class="remove-material-button" type="danger" plain :disabled="!!removeDisabledReason || loading || removing" :title="removeDisabledReason || '移除标准库收录关系，保留料品主档及BOM引用'" :loading="removing" @click="removeSelectedMaterials">移除</el-button>
-          <div class="filters"><el-checkbox v-model="recommendedOnly">仅看推荐</el-checkbox><el-checkbox v-model="showInactive" title="勾选后包含已停用的物料和套件" @change="searchMaterials">已停用</el-checkbox><el-input v-model="query" clearable placeholder="名称/料号/型号/品牌" @keyup.enter="searchMaterials" /><el-select v-model="brand" clearable filterable placeholder="品牌"><el-option v-for="item in brands" :key="item" :label="item" :value="item" /></el-select><el-button :loading="loading" @click="load(true)">刷新</el-button><el-button type="primary" @click="searchMaterials">搜索</el-button></div>
+          <div class="filters"><el-checkbox v-model="recommendedOnly">仅看推荐</el-checkbox><el-checkbox v-model="showInactive" title="勾选后包含已停用的物料和套件" @change="searchMaterials">已停用</el-checkbox><SearchField :show-action="false"><el-input v-model="query" clearable placeholder="名称/料号/型号/品牌" @keyup.enter="searchMaterials" /></SearchField><el-select v-model="brand" clearable filterable placeholder="品牌"><el-option v-for="item in brands" :key="item" :label="item" :value="item" /></el-select><el-button :loading="loading" @click="load(true)">刷新</el-button><el-button class="pdm-search-submit" type="primary" @click="searchMaterials">搜索</el-button></div>
         </div>
         <el-table ref="materialTable" v-loading="loading" class="material-list-table" data-pdm-column-layout="scroll" :data="rows" row-key="material.id" height="100%" stripe @selection-change="selectedRows = $event">
           <el-table-column type="selection" width="38" align="center" />
@@ -868,7 +869,7 @@ onBeforeUnmount(() => {
           <header class="add-material-pane__header searchable-material-header">
             <div><strong>可选料品</strong><span>{{ eligibleMaterials.length }} 项</span></div>
             <p>满4个字符后搜索，每次最多100项；可细化搜索。</p>
-            <div class="eligible-material-filters"><el-input v-model="eligibleQuery" clearable placeholder="搜索料号/名称/型号/品牌" @keyup.enter="queueEligibleSearch" /><el-select v-model="eligibleBrand" clearable filterable :disabled="!eligibleMaterials.length" placeholder="筛选品牌"><el-option v-for="item in eligibleBrands" :key="item" :label="item" :value="item" /></el-select></div>
+            <div class="eligible-material-filters"><SearchField @search="queueEligibleSearch"><el-input v-model="eligibleQuery" clearable placeholder="搜索料号/名称/型号/品牌" @keyup.enter="queueEligibleSearch" /></SearchField><el-select v-model="eligibleBrand" clearable filterable :disabled="!eligibleMaterials.length" placeholder="筛选品牌"><el-option v-for="item in eligibleBrands" :key="item" :label="item" :value="item" /></el-select></div>
           </header>
           <el-table ref="eligibleSelectionTable" v-loading="eligibleLoading" :data="filteredEligibleMaterials" :empty-text="eligibleEmptyText" row-key="id" height="100%" stripe @selection-change="updateEligibleSelection">
             <el-table-column type="selection" width="38" reserve-selection />

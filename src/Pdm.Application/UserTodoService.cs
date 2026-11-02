@@ -29,7 +29,9 @@ public sealed class UserTodoService(IPdmRepository repository, TimeProvider time
         var now = timeProvider.GetUtcNow();
         var source = $"calendar-todo:{company:N}:{Guid.NewGuid():N}";
         var notifications = recipients.Append(actor).Distinct(StringComparer.OrdinalIgnoreCase).Select(recipient => new UserNotification(
-            Guid.NewGuid(), recipient, "ProjectTodo", $"日历待办 · {actor}", content, null, null, source, now, null, command.DueDate)).ToArray();
+            Guid.NewGuid(), recipient, "ProjectTodo", $"日历待办 · {actor}", content, null, null, source, now,
+            recipient.Equals(actor, StringComparison.OrdinalIgnoreCase) && !recipients.Contains(actor, StringComparer.OrdinalIgnoreCase) ? now : null,
+            command.DueDate, IsSenderReceipt: recipient.Equals(actor, StringComparison.OrdinalIgnoreCase) && !recipients.Contains(actor, StringComparer.OrdinalIgnoreCase))).ToArray();
         await repository.CreateUserNotificationsAsync(notifications, ct);
         return notifications.Single(todo => todo.Recipient.Equals(actor, StringComparison.OrdinalIgnoreCase));
     }
