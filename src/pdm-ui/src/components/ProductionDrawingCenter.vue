@@ -5,7 +5,7 @@ import { readTablePreference, tablePreferenceVersion, writeTablePreference } fro
 import { ElMessage } from '../statusMessage'
 import { computed, onMounted, ref, watch } from 'vue'
 import { downloadProductionDrawingFile, downloadGeneratedFile, downloadProductionDrawingArchive, listProductionDrawings, updateProductionDrawingDelivery, PdmApiError } from '../api'
-import { columnDefinitions, columnValue, priorityLabel, createProductionDrawingBomDownload, type ColumnKey } from '../productionDrawingBomDownload'
+import { columnDefinitions, columnValue, createProductionDrawingBomDownload, type ColumnKey } from '../productionDrawingBomDownload'
 import type { DrawingPriority, ProductionDrawingItem } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 

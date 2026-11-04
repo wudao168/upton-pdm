@@ -11,6 +11,8 @@ internal static partial class Program
     [STAThread] static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--assembly") return CheckAssemblyPreview(args);
+        if (args.Length > 0 && args[0] == "--performance") return CheckPreviewPerformance(args);
+        if (args.Length > 0 && args[0] == "--display-cache") return CheckDisplayCache(args);
         var dll = Path.GetFullPath(args[0]);
         AppDomain.CurrentDomain.AssemblyResolve += (_, e) =>
         {

@@ -5,10 +5,13 @@ using Upton.Pdm.Domain;
 namespace Upton.Pdm.Application;
 
 public sealed class BomFileService(IPdmRepository repository, IMaterialRepository materials,
-    IMaterialAttachmentStorage storage, IBomFileStore store, TimeProvider clock)
+    IMaterialAttachmentStorage storage, IBomFileStore store, TimeProvider clock, IStandardLibraryRepository standardLibrary)
 {
-    public static Guid Scope(Guid projectId, string materialCode) => new(SHA256.HashData(
-        Encoding.UTF8.GetBytes($"standard-bom-files:{projectId:N}:{materialCode.Trim().ToUpperInvariant()}"))[..16]);
+    public static Guid Scope(Guid projectId, string materialCode)
+    {
+        if (string.IsNullOrWhiteSpace(materialCode)) throw new PdmRuleException("物料料号尚未确定，请先完成料号核对后再维护图纸附件。");
+        return new(SHA256.HashData(Encoding.UTF8.GetBytes($"standard-bom-files:{projectId:N}:{materialCode.Trim().ToUpperInvariant()}"))[..16]);
+    }
 
     private async Task<BomItem> Item(Guid projectId, Guid itemId, string actor, UserRole role, bool write, CancellationToken ct, Guid? versionId = null)
     {
@@ -18,8 +21,18 @@ public sealed class BomFileService(IPdmRepository repository, IMaterialRepositor
         var items = versionId.HasValue
             ? (await repository.FindBomVersionAsync(projectId, versionId.Value, ct))?.Items ?? []
             : await repository.GetBomAsync(projectId, BomKind.Standard, ct);
-        return items.FirstOrDefault(item => item.Id == itemId && item.Kind == BomKind.Standard)
+        var item = items.FirstOrDefault(item => item.Id == itemId && item.Kind == BomKind.Standard)
             ?? throw new PdmNotFoundException("标准件BOM物料不存在，请刷新后重试。");
+        if (write && await IsStandardLibraryMaterial(item, ct)
+            && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StandardLibraryManage, ct))
+            throw new UnauthorizedAccessException("该物料已纳入标准库，图纸附件仅限具有标准库维护权限的人员修改。");
+        return item;
+    }
+
+    private async Task<bool> IsStandardLibraryMaterial(BomItem item, CancellationToken ct)
+    {
+        var material = (await materials.FindMaterialsByCodesAsync([item.DrawingNumber], ct)).FirstOrDefault();
+        return material is not null && (await standardLibrary.ListMembershipsAsync(ct)).Any(link => link.MaterialId == material.Id);
     }
 
     private async Task<IReadOnlyList<BomFileReference>> Library(string code, CancellationToken ct)
@@ -36,8 +49,11 @@ public sealed class BomFileService(IPdmRepository repository, IMaterialRepositor
     {
         var scope = Scope(item.ProjectId, item.DrawingNumber);
         var catalog = await store.ReadAsync(scope, ct);
-        if (catalog.HasLibrarySelection) return catalog;
-        var selected = catalog with { HasLibrarySelection = true, LibraryFiles = await Library(item.DrawingNumber, ct) };
+        var initialEmpty = catalog.RowVersion <= 1 && catalog.LibraryFiles.Count == 0 && catalog.ProjectFiles.Count == 0;
+        if (catalog.HasLibrarySelection && !initialEmpty) return catalog;
+        var libraryFiles = await Library(item.DrawingNumber, ct);
+        if (catalog.HasLibrarySelection && libraryFiles.Count == 0) return catalog;
+        var selected = catalog with { HasLibrarySelection = true, LibraryFiles = libraryFiles };
         if (await store.SaveAsync(selected, catalog.RowVersion, ct)) return selected with { RowVersion = catalog.RowVersion + 1 };
         return await store.ReadAsync(scope, ct);
     }
@@ -49,19 +65,24 @@ public sealed class BomFileService(IPdmRepository repository, IMaterialRepositor
     public async Task<BomFileView> ReadAsync(Guid projectId, Guid itemId, string actor, UserRole role, CancellationToken ct, Guid? versionId = null)
     {
         var item = await Item(projectId, itemId, actor, role, false, ct, versionId);
-        if (versionId.HasValue) return new(item.Files ?? [], false, 0);
+        var inLibrary = await IsStandardLibraryMaterial(item, ct);
+        if (versionId.HasValue) return new(item.Files ?? [], false, 0) { IsStandardLibraryMaterial = inLibrary };
         var catalog = await Current(item, ct);
         var latest = await Library(item.DrawingNumber, ct);
-        return new(Files(catalog), !latest.Select(file => file.Id).SequenceEqual(catalog.LibraryFiles.OrderBy(file => file.Id).Select(file => file.Id)), catalog.RowVersion);
+        var canEdit = await ProjectPermissionPolicy.CanAsync(repository, projectId, actor, role, PermissionCodes.BomMechanicalEdit, ct)
+            && (!inLibrary || await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StandardLibraryManage, ct));
+        return new(Files(catalog), !latest.Select(file => file.Id).SequenceEqual(catalog.LibraryFiles.OrderBy(file => file.Id).Select(file => file.Id)), catalog.RowVersion)
+            { CanEditFiles = canEdit, IsStandardLibraryMaterial = inLibrary };
     }
 
-    public async Task<IReadOnlyList<BomItem>> CaptureAsync(IReadOnlyList<BomItem> items, CancellationToken ct)
+    public async Task<IReadOnlyList<BomItem>> CaptureAsync(IReadOnlyList<BomItem> items, CancellationToken ct, bool refreshCurrent = false)
     {
         var result = new List<BomItem>(items.Count);
         var cache = new Dictionary<Guid, IReadOnlyList<BomFileReference>>();
         foreach (var item in items)
         {
-            if (item.Kind != BomKind.Standard || item.Files is not null) { result.Add(item); continue; }
+            if (item.Kind != BomKind.Standard || !refreshCurrent && item.Files is not null) { result.Add(item); continue; }
+            if (string.IsNullOrWhiteSpace(item.DrawingNumber)) { result.Add(item with { Files = [] }); continue; }
             var scope = Scope(item.ProjectId, item.DrawingNumber);
             if (!cache.TryGetValue(scope, out var files)) cache[scope] = files = Files(await Current(item, ct));
             result.Add(item with { Files = files });

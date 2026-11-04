@@ -15,6 +15,7 @@ namespace Upton.Pdm.Api;
 public sealed class ClientLogOptions
 {
     public string Root { get; set; } = Path.Combine(AppContext.BaseDirectory, "data", "client-logs");
+    public string[] HistoricalRoots { get; set; } = [];
     public int RuntimeDays { get; set; } = 30;
     public int ErrorDays { get; set; } = 90;
     public long MaxBytes { get; set; } = 10L * 1024 * 1024 * 1024;
@@ -203,13 +204,14 @@ public sealed class ClientLogStore
         }
         if (expired.Length > 0) logger.LogInformation("按保留策略清理客户端日志 {Count} 个分片", expired.Length);
         // Recover files left between durable write and index insertion, without touching recent uploads.
-        if (Directory.Exists(options.Root))
-            foreach (var file in new DirectoryInfo(options.Root).EnumerateFiles().Where(f => f.LastWriteTimeUtc < clock.GetUtcNow().AddDays(-1).UtcDateTime))
+        foreach (var root in new[] { options.Root }.Concat(options.HistoricalRoots).Distinct(StringComparer.OrdinalIgnoreCase).Where(Directory.Exists))
+            foreach (var file in new DirectoryInfo(root).EnumerateFiles().Where(f => f.LastWriteTimeUtc < clock.GetUtcNow().AddDays(-1).UtcDateTime))
                 if (file.Name.EndsWith(".tmp", StringComparison.Ordinal) || (file.Extension == ".gz" && await FindAsync(Path.GetFileNameWithoutExtension(file.Name), ct) is null)) file.Delete();
     }
 
     private bool UseMySql => database.Provider.Equals("MySql", StringComparison.OrdinalIgnoreCase);
-    private string FilePath(string id) => Path.Combine(options.Root, id + ".gz");
+    private string FilePath(string id) => new[] { options.Root }.Concat(options.HistoricalRoots)
+        .Select(root => Path.Combine(root, id + ".gz")).FirstOrDefault(File.Exists) ?? Path.Combine(options.Root, id + ".gz");
     private static string Clean(string? text, int length)
     {
         var safe = ClientLogRedaction.Clean(text ?? "");

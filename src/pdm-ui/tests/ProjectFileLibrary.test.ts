@@ -8,7 +8,9 @@ const api = vi.hoisted(() => ({
   listProjectFiles: vi.fn(), uploadProjectFile: vi.fn(), createProjectFolder: vi.fn(), deleteProjectFolder: vi.fn(),
   renameProjectFolder: vi.fn(), moveProjectFolder: vi.fn(), renameProjectFile: vi.fn(), updateProjectFileDescription: vi.fn(), moveProjectFile: vi.fn(),
   deleteProjectFile: vi.fn(), restoreProjectFile: vi.fn(), listProjectFileVersions: vi.fn(), downloadProjectFile: vi.fn(), readProjectFileContent: vi.fn(),
+  readFolderDocumentIndex: vi.fn(), readFolderDocuments: vi.fn(),
   listControlledDocumentRecycleBin: vi.fn(), getControlledDocumentRecycleReadiness: vi.fn(), recycleControlledDocument: vi.fn(), recycleControlledDocumentsBatch: vi.fn(), restoreControlledDocument: vi.fn(),
+  listRecycleArchiveBatches: vi.fn(), listArchiveRecycleSets: vi.fn(), previewRecycleArchive: vi.fn(), recycleArchiveSet: vi.fn(), restoreArchiveSet: vi.fn(),
 }))
 vi.mock('../src/api', () => api)
 
@@ -17,11 +19,48 @@ const controlledFolder = { ...businessFolder, id: 'folder-2', name: 'P700001-0',
 const file = { id: 'file-1', rootProjectId: 'project-1', folderId: 'folder-1', fileName: '会议纪要.pdf', createdBy: 'engineer', createdAt: '2026-08-26T00:00:00Z', updatedBy: 'engineer', updatedAt: '2026-08-26T00:00:00Z', currentVersion: { id: 'version-1', projectFileId: 'file-1', versionNumber: 1, fileName: '会议纪要.pdf', fileLength: 1024, sha256: 'A'.repeat(64), uploadedBy: 'engineer', uploadedAt: '2026-08-26T00:00:00Z' } }
 
 function mountLibrary(folders: ProjectFolder[] = [businessFolder], documents: any[] = [], canRecycleDocuments = false) {
+  api.readFolderDocuments.mockResolvedValue(documents)
+  api.readFolderDocumentIndex.mockResolvedValue({ documentCounts: Object.fromEntries(folders.map(folder => [folder.id, documents.filter(item => item.folderId === folder.id).length])) })
   return mount(ProjectFileLibrary, { props: { projectId: 'project-1', token: 'token', folders, documents, users: [{ username: 'engineer', displayName: '工程师甲', role: 'Engineer', isActive: true }], roles: [], administrator: false, canRecycleDocuments, pending: false, onUpdatePermissions: vi.fn(), onReload: vi.fn() }, global: { plugins: [ElementPlus], stubs: { teleport: true } } })
 }
 
 describe('ProjectFileLibrary', () => {
+  it('有回收权限时可从受控目录打开批次回收入口', async () => {
+    api.listRecycleArchiveBatches.mockResolvedValue([]); api.listArchiveRecycleSets.mockResolvedValue([])
+    const wrapper = mountLibrary([controlledFolder], [], true); await flushPromises()
+    const button = wrapper.findAll('button').find(item => item.text() === '按存档批次回收 / 恢复')!
+    expect(button.exists()).toBe(true); await button.trigger('click'); await flushPromises()
+    expect(api.listRecycleArchiveBatches).toHaveBeenCalledWith('project-1', 'token'); wrapper.unmount()
+  })
   beforeEach(() => { vi.clearAllMocks(); api.listProjectFiles.mockResolvedValue([file]); api.listControlledDocumentRecycleBin.mockResolvedValue([]); api.readProjectFileContent.mockResolvedValue(new Blob(['media'])) })
+
+  it('仅读取当前目录图档，切换目录时复用计数而不加载完整项目树', async () => {
+    const wrapper = mountLibrary([businessFolder, controlledFolder])
+    await flushPromises()
+    expect(api.readFolderDocumentIndex).toHaveBeenCalledTimes(1)
+    expect(api.readFolderDocuments).toHaveBeenLastCalledWith('project-1', 'folder-1', 'token')
+    await wrapper.findAll('.pdm-folder-node').find(node => node.text().includes('P700001-0'))!.trigger('click')
+    await flushPromises()
+    expect(api.readFolderDocuments).toHaveBeenLastCalledWith('project-1', 'folder-2', 'token')
+    expect(api.readFolderDocumentIndex).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('切换项目后丢弃原目录迟到的图档响应', async () => {
+    const wrapper = mountLibrary([controlledFolder])
+    await flushPromises()
+    let finish!: (documents: any[]) => void
+    api.readFolderDocuments.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    await wrapper.setProps({ documents: [] })
+    await flushPromises()
+    api.readFolderDocuments.mockResolvedValue([])
+    await wrapper.setProps({ projectId: 'project-2' })
+    await flushPromises()
+    finish([{ id: 'old', projectId: 'project-1', folderId: 'folder-2', name: '过期图档', fileName: 'OLD.SLDPRT', kind: 'Part', revision: 'W1' }])
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('过期图档')
+    wrapper.unmount()
+  })
 
   it('在普通业务目录按目录权限显示文件操作并使用人名', async () => {
     const wrapper = mountLibrary()

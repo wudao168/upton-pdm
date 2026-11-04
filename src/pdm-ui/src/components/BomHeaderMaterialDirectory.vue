@@ -39,7 +39,6 @@ onMounted(load)
 <template>
   <section class="bom-header-directory" aria-label="BOM表头料号目录">
     <div class="bom-header-directory__toolbar">
-      <p title="仅显示当前有权查看项目的BOM表头料号，与普通料品分开管理。系统自动批准及同步；历史记录不会因打开或刷新本页而自动重试。">仅显示当前有权查看项目的BOM表头料号，与普通料品分开管理。系统自动批准及同步；历史记录不会因打开或刷新本页而自动重试。</p>
       <SearchField><el-input v-model="query" clearable placeholder="搜索项目、料号或BOM类型" aria-label="搜索BOM表头料号" /></SearchField>
       <el-button :loading="loading" @click="load">刷新</el-button>
     </div>

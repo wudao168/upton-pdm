@@ -2,7 +2,7 @@
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, download: projectDownload, print: projectPrint } = useProjectCenterAccess()
 import { documentVersionSummary, documentDrawingVersion, documentPublishedVersion } from '../drawingRevision'
-import { Cloud, FileSearch, PencilLine, Rotate3D, RotateCcw, Square } from '@lucide/vue'
+import { Cloud, FileSearch, Maximize2, Minimize2, PencilLine, Rotate3D, RotateCcw, Square } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listDocumentVersions, postDesktopMessage, readDocumentPreviewFile } from '../api'
@@ -55,6 +55,23 @@ const emit = defineEmits<{
   obsolete: []
 }>()
 const previewSlot = ref<HTMLElement>()
+const previewMaximized = ref(false)
+let maximizeButton: HTMLButtonElement | undefined
+async function setPreviewMaximized(value: boolean) {
+  previewMaximized.value = value
+  await nextTick()
+  schedulePreviewBounds()
+  maximizeButton?.focus({ preventScroll: true })
+}
+function togglePreviewMaximized(event: MouseEvent) {
+  maximizeButton = event.currentTarget as HTMLButtonElement
+  void setPreviewMaximized(!previewMaximized.value)
+}
+function onPreviewKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || !previewMaximized.value) return
+  event.preventDefault()
+  void setPreviewMaximized(false)
+}
 const previewState = ref<'idle' | 'loading' | 'ready' | 'error' | 'unavailable'>('idle')
 const previewError = ref('')
 const webPreviewFormat = ref<'Step' | 'Pdf'>()
@@ -437,6 +454,7 @@ watch([() => props.selected.id, () => props.reviewVersionId], ([selectedId, revi
 })
 
 watch(() => props.active, active => {
+  if (!active) previewMaximized.value = false
   solidWorksPending.value = false
   solidWorksMessage.value = ''
   solidWorksError.value = false
@@ -454,6 +472,7 @@ watch(() => props.active, active => {
 
 watch(() => props.projectId, (projectId, previousProjectId) => {
   if (!previousProjectId || projectId === previousProjectId) return
+  previewMaximized.value = false
   previewSessionActivated.value = false
   hidePreview()
   clearWebPreview()
@@ -462,6 +481,7 @@ watch(() => props.projectId, (projectId, previousProjectId) => {
 })
 
 onMounted(() => {
+  window.addEventListener('keydown', onPreviewKeydown, true)
   window.addEventListener('resize', schedulePreviewBounds)
   window.addEventListener('scroll', schedulePreviewBounds, true)
   document.addEventListener('visibilitychange', schedulePreviewBounds)
@@ -483,6 +503,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onPreviewKeydown, true)
   hidePreview()
   if (previewSyncFrame) window.cancelAnimationFrame(previewSyncFrame)
   resizeObserver?.disconnect()
@@ -500,7 +521,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="pdm-preview-panel" aria-label="图档预览">
+  <section class="pdm-preview-panel" :class="{ 'is-maximized': previewMaximized }" aria-label="图档预览">
     <section class="pdm-panel pdm-preview-control-panel" aria-label="图档查看与操作">
       <header class="pdm-preview-toolbar">
         <section class="pdm-preview-properties-bar" aria-label="图档信息">
@@ -514,8 +535,10 @@ onBeforeUnmount(() => {
           </dl>
           <button type="button" class="pdm-inspect-link pdm-text-action" :aria-expanded="propertiesExpanded" @click="propertiesExpanded = !propertiesExpanded">{{ propertiesExpanded ? '收起属性' : '更多属性' }}</button>
         </section>
-        <div v-if="projectDownload" class="pdm-solidworks-actions">
+        <div class="pdm-solidworks-actions">
+          <button type="button" class="pdm-preview-command pdm-preview-maximize" :aria-label="previewMaximized ? '还原预览' : '全屏预览'" :aria-pressed="previewMaximized" :title="previewMaximized ? '还原预览（Esc）' : '全屏显示预览区'" @click="togglePreviewMaximized"><Minimize2 v-if="previewMaximized" :size="15" /><Maximize2 v-else :size="15" />{{ previewMaximized ? '还原' : '全屏' }}</button>
           <button
+            v-if="projectDownload"
             type="button"
             :class="['pdm-preview-command', reviewVersionId && canWritebackReviewProperties ? 'pdm-solidworks-edit' : 'pdm-solidworks-primary']"
             :aria-label="reviewVersionId ? '打开审核版' : '打开最新'"
@@ -524,7 +547,7 @@ onBeforeUnmount(() => {
             @click="openInSolidWorks(reviewVersionId ? 'SpecificReadOnly' : 'LatestReadOnly', reviewVersionId || undefined)"
           ><Rotate3D :size="15" />{{ reviewVersionId ? '打开审核版' : '打开最新' }}</button>
           <button
-            v-if="canWritebackReviewProperties"
+            v-if="projectDownload && canWritebackReviewProperties"
             type="button"
             class="pdm-solidworks-primary"
             :disabled="!selected.documentId || !solidWorksAvailable || solidWorksPending"
@@ -635,5 +658,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+:global(:root body .pdm-preview-panel.is-maximized){position:fixed;inset:0;z-index:1500;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);width:100%;height:100%;min-width:0;min-height:0;margin:0;padding:0;background:var(--pdm-surface);overflow:hidden}
+.pdm-preview-maximize{white-space:nowrap}
 .pdm-preview-work-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:4px;background:var(--pdm-orange-soft);color:var(--pdm-orange);font-size:12px;font-weight:600;white-space:nowrap}
 </style>

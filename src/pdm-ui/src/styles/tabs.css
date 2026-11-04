@@ -5,13 +5,29 @@
   --pdm-tabs-height: var(--pdm-tab-secondary);
 }
 
-:root body :is(.el-tabs, .pdm-project-tabs, .user-settings-tabs, .production-workbench__tabs) {
+:root body :is(.pdm-navigation-tabs, .material-tabs, .pdm-project-tabs, .user-settings-tabs, .production-workbench__tabs, .wh-tabs, .pdm-task-filters, .pdm-admin-tabs) {
   --pdm-tabs-height: var(--pdm-tab-primary);
 }
 
 :root body :is(.el-dialog, .el-drawer, .pdm-custom-drawer) .el-tabs,
 :root body .material-code-approval-subtabs {
   --pdm-tabs-height: var(--pdm-tab-secondary);
+}
+
+/* Fixed-width exceptions requested for project navigation and BOM kinds. */
+:root body .pdm-project-tabs > button {
+  box-sizing: border-box;
+  width: 60px !important;
+  min-width: 60px !important;
+  max-width: 60px !important;
+  flex: 0 0 60px !important;
+}
+:root body .pdm-bom-detail-toolbar > .pdm-segmented > button {
+  box-sizing: border-box;
+  width: 120px !important;
+  min-width: 120px !important;
+  max-width: 120px !important;
+  flex: 0 0 120px !important;
 }
 
 :root body .el-tabs > .el-tabs__header {
@@ -89,6 +105,15 @@
   padding-inline: 2px !important;
 }
 :root body .pdm-tree-panel .pdm-document-filters > button small { padding-inline: 2px; }
+:root body .pdm-document-filters > button > small {
+  min-width: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: inherit !important;
+}
 :root body .pdm-tree-panel .pdm-document-filters > button,
 :root body .pdm-tree-panel .pdm-document-filters > button * {
   font-size: 11px !important;

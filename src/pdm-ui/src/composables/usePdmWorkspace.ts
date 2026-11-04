@@ -1,5 +1,6 @@
 import { initializeTablePreferences, clearTablePreferencesSession } from '../tablePreferences'
 import { confirmBomRelease as confirmBomReleaseRequest } from '../api'
+import { saveBomMultiplier as saveBomMultiplierApi } from '../api'
 import { listProjectFolders, listReleasePackages } from '../api'
 import { releasePreviewUnfinished } from '../releasePreviewState'
 import { emergencyReleaseEditLock as emergencyReleaseEditLockRequest } from '../api'
@@ -7,14 +8,14 @@ import { heartbeatSession, logoutSession } from '../api'
 import { readMaterialNotificationPermission } from '../api'
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { batchDeleteBomItems as batchDeleteBomItemsRequest, batchRestoreBomItems as batchRestoreBomItemsRequest, permanentlyDeleteManualBomItems as permanentlyDeleteManualBomItemsRequest, restoreBomItemsFromSource as restoreBomItemsFromSourceRequest, setBomReleaseExclusion as setBomReleaseExclusionRequest } from '../api'
-import { getBomSourceData } from '../api'
+import { loadBomSummary } from '../api'
 import { copyProjectContent as copyProjectContentRequest, previewProjectCopy as previewProjectCopyRequest } from '../api'
 import { transferApproval } from '../api'
 import { listUserNotifications, markAllUserNotificationsRead as markAllUserNotificationsReadRequest, markUserNotificationRead as markUserNotificationReadRequest } from '../api'
 import { abandonDrawingReviewWritebacks as abandonDrawingReviewWritebacksRequest, addDrawingReviewMarkup as addDrawingReviewMarkupRequest, createDrawingReview as createDrawingReviewRequest, decideDrawingReviewSupervisor as decideDrawingReviewSupervisorRequest, decideDrawingReviewTarget as decideDrawingReviewTargetRequest, listDrawingReviewCandidates, listDrawingReviewers, listDrawingReviews, resolveDrawingReviewMarkup as resolveDrawingReviewMarkupRequest, resubmitDrawingReviewItem as resubmitDrawingReviewItemRequest, withdrawDrawingReview as withdrawDrawingReviewRequest } from '../api'
 import { batchUpdateBomItems as batchUpdateBomItemsRequest, changeMyPassword as changeMyPasswordRequest, checkHealth, compareDocumentVersions, createProject as createProjectRequest, createRole as createRoleRequest, createSubproject as createSubprojectRequest, createReleasePackage, createUser as createUserRequest, decideApproval, deleteProject as deleteProjectRequest, deleteReleasePackageDraft as deleteReleasePackageDraftRequest, deleteRole as deleteRoleRequest, emergencyDecideApproval, exportBom, exportWearPartBom, forceReleaseEditLock as forceReleaseEditLockRequest, generateMechanicalBom, getBomValidationRules, getCrmIntegrationSettings, getMyProfile, getOrganizationDirectory, getProjectNumberingOptions, getRolePermissionDirectory, getStorageStatus, getSystemSettings, importBom, listAudit, listBomBaselines, listBomVersions, listCustomers, listDocumentVersions, listDocumentWhereUsed, listEditLocks, listEquipmentTypes, listFolderTemplate, listMaterialCodeApplications, listMaterialSyncTasks, listMyApprovalTasks, listPasswordResetTasks, listProgramTemplateTasks, listProjectAudit, listProjects, loadProjectDocumentWorkspace, loadProjectWorkspace, loadBomSourceData, login as apiLogin, obsoleteDocument as obsoleteDocumentRequest, PdmApiError, postDesktopMessage, readDocumentVersionFile, requestEditLockRelease as requestEditLockReleaseRequest, resetRequestedPassword as resetRequestedPasswordRequest, resetUserPassword as resetUserPasswordRequest, resolveBomItem as resolveBomItemRequest, restoreDocumentVersion, resumeSession as apiResumeSession, retryLongLeadU9 as retryLongLeadU9Request, listU9SyncBlockers as listU9SyncBlockersRequest, retryReleasePreview as retryReleasePreviewRequest, saveBom, saveEquipmentType as saveEquipmentTypeRequest, saveFolderTemplate as saveFolderTemplateRequest, saveOrganizationUnit as saveOrganizationUnitRequest, saveProjectOrganization as saveProjectOrganizationRequest, setBomEmptyDeclaration as setBomEmptyDeclarationRequest, submitReleasePackage, syncCrmCustomers as syncCrmCustomersRequest, testCrmIntegration as testCrmIntegrationRequest, updateChildProjectDesigners as updateChildProjectDesignersRequest, updateChildProjectManager as updateChildProjectManagerRequest, updateCrmIntegrationSettings as updateCrmIntegrationSettingsRequest, updateMainProjectStaffing as updateMainProjectStaffingRequest, updateMyProfile as updateMyProfileRequest, updateOrganizationCounters as updateOrganizationCountersRequest, updateOrganizationMemberships as updateOrganizationMembershipsRequest, updateOrganizationUnitManagers as updateOrganizationUnitManagersRequest, updateProject as updateProjectRequest, updateProjectExecutionUnit as updateProjectExecutionUnitRequest, updateProjectFolderPermissions as updateProjectFolderPermissionsRequest, updateProjectPhaseOwners as updateProjectPhaseOwnersRequest, updateReleasePackageDraft as updateReleasePackageDraftRequest, updateRolePermissions as updateRolePermissionsRequest, updateSystemSettings as updateSystemSettingsRequest, updateUser as updateUserRequest, uploadReleaseFile, withdrawReleasePackage } from '../api'
 import type { AuthSession, ProjectWorkspaceData } from '../api'
-import type { AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomVersion, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCodeApplication, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, PasswordResetTask, PdmCustomer, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplateTask, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectPhaseOwners, ProjectSummary, ProjectVersionItem, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput } from '../types'
+import type { AuditEntry, BatchUpdateBomItemsInput, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomItem, BomKind, BomVersion, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentFilter, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, EditLockSummary, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialCodeApplication, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, PasswordResetTask, PdmCustomer, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplateTask, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectPhaseOwners, ProjectSummary, ReleasePackageSummary, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, SolidWorksOpenMode, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput } from '../types'
 import type { AddDrawingReviewMarkupInput, ApprovalTransferCandidate, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 import type { UserNotification } from '../types'
 import type { ProjectCopyOptionsInput } from '../types'
@@ -594,6 +595,20 @@ export function usePdmWorkspace() {
     }
   }
 
+  async function updateBomMultiplier(kind: BomKind, multiplier: number, expectedMultiplier: number) {
+    operationPending.value = true
+    operationError.value = ''
+    try {
+      const draft = await saveBomMultiplierApi(project.value.id, kind, multiplier, expectedMultiplier, accessToken)
+      bomVersions.value = [draft, ...bomVersions.value.filter(version => version.id !== draft.id)]
+    } catch (error) {
+      operationError.value = messageFrom(error)
+      throw error
+    } finally {
+      operationPending.value = false
+    }
+  }
+
   async function saveBomItems(kind: BomKind, items: BomItem[]) {
     operationPending.value = true
     operationError.value = ''
@@ -608,6 +623,11 @@ export function usePdmWorkspace() {
       else if (result.draftVersion) {
         const draft = result.draftVersion
         bomVersions.value = [draft, ...bomVersions.value.filter(version => version.id !== draft.id)]
+      }
+      if (result.relatedQuantitiesChanged) {
+        const all = await Promise.all((['Standard','NonStandard','Electrical'] as const).map(category => loadBomSummary(project.value.id, category, accessToken)))
+        ;[standardBom.value, nonStandardBom.value, electricalBom.value] = all
+        await refreshBomVersionData()
       }
     } catch (error) {
       operationError.value = messageFrom(error)
@@ -1910,8 +1930,9 @@ export function usePdmWorkspace() {
   }
 
   function projectTabModules(tab: string) {
-    if (tab === 'overview' || tab === 'release') return ['bom', 'documents', 'release']
-    if (tab === 'bom' || tab === 'files') return [tab, 'documents']
+    // BOM内可直接发起发布，必须同时读取历史，才能判断发布阶段与本次增补范围。
+    if (tab === 'overview' || tab === 'release' || tab === 'bom') return ['bom', 'documents', 'release']
+    if (tab === 'files') return [tab, 'documents']
     return [tab]
   }
 
@@ -2238,6 +2259,7 @@ export function usePdmWorkspace() {
     restoreVersion,
     submitApproval,
     saveBomItems,
+    updateBomMultiplier,
     ensureBomSourceData,
     bomSourceDataLoaded: computed(() => sourceDataRequestedProjectId.value === project.value.id),
     importBomFile,

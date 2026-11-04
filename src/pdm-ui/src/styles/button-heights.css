@@ -1,0 +1,44 @@
+/* Desktop actions: primary tabs 32px, secondary tabs/actions 28px, table actions 24px. */
+:root { --pdm-tab-primary: 32px; --pdm-tab-secondary: 28px; --pdm-button-default: 28px; --pdm-button-large: 28px; --pdm-button-compact: 24px; --pdm-control-height: 28px; --el-component-size: 28px; }
+@layer pdm-button-sizing {
+  :root body button[data-pdm-button-size][data-pdm-button-size]:not(:where(.mobile-office button, .production-scan-page button)) {
+    height: 28px !important; min-height: 28px !important; max-height: 28px !important;
+    border-radius: 999px !important;
+  }
+  :root body .pdm-search-field.pdm-search-field .pdm-search-field__action > button {
+    height: 28px !important; min-height: 28px !important; max-height: 28px !important;
+  }
+  :root body :is(table, .el-table, .pdm-row-actions) button:not(.caret-wrapper) {
+    height: 24px !important; min-height: 24px !important; max-height: 24px !important;
+    border-radius: 999px !important;
+  }
+  :root body :is(.pdm-bom-row-drag-handle, .el-pagination button) { border-radius: 999px !important; }
+  :root body :is(select, input:not([type="checkbox"], [type="radio"], [type="hidden"], [type="range"], [type="file"], [type="color"], .el-input__inner, .el-select__input, .el-range-input), .el-input, .el-input__wrapper, .el-select, .el-select__wrapper, .el-date-editor, .el-cascader, .el-input-number):not(:where(.pdm-search-field *, .mobile-office *, .production-scan-page *)) {
+    box-sizing: border-box !important;
+    height: 28px !important; min-height: 28px !important; max-height: 28px !important;
+  }
+  :root body :is(table, .el-table) :is(select, input:not([type="checkbox"], [type="radio"], [type="hidden"], [type="range"], [type="file"], [type="color"], .el-input__inner, .el-select__input, .el-range-input), .el-input, .el-input__wrapper, .el-select, .el-select__wrapper, .el-date-editor, .el-input-number, .pdm-search-field) {
+    height: 24px !important; min-height: 24px !important; max-height: 24px !important;
+  }
+  :root body :is(table, .el-table) .pdm-search-field .pdm-search-field__action > button {
+    height: 24px !important; min-height: 24px !important; max-height: 24px !important;
+  }
+  :root body .pdm-project-sidebar__context .pdm-project-switcher > .pdm-search-field .pdm-search-field__action > button {
+    height: 32px !important; min-height: 32px !important; max-height: 32px !important;
+  }
+  :root body .pdm-bom-multiplier-control > input.pdm-bom-multiplier {
+    height: 26px !important; min-height: 26px !important; max-height: 26px !important;
+    border: 0 !important; padding: 0 !important; font-size: 11px !important;
+  }
+}
+:root body .pdm-search-field__action { align-items: center; }
+:root body .pdm-project-detail__header > .pdm-project-tabs { --pdm-tabs-padding: 6px; }
+:root body .pdm-search-field.pdm-search-field:not(.mobile-office .pdm-search-field) {
+  height: 28px !important; min-height: 28px !important; max-height: 28px !important;
+  padding-block: 0 !important;
+}
+:root body .pdm-project-sidebar__context .pdm-project-switcher > .pdm-search-field.pdm-search-field {
+  height: 32px !important; min-height: 32px !important; max-height: 32px !important;
+  padding-block: 0 !important;
+}
+:root body .pdm-project-sidebar-stack > .pdm-project-sidebar__context { padding-block: 6px !important; }

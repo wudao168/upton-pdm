@@ -1,5 +1,6 @@
 import { installGlobalScrollbars } from './globalScrollbars'
 import { installContainerBorders } from './containerBorders'
+import { installCapsuleTabs } from './capsuleTabs'
 import { installButtonTypography } from './buttonTypography'
 import { installButtonStyles } from './buttonStyles'
 import { installPanelHeaderActions } from './panelHeaderActions'
@@ -18,6 +19,7 @@ import './styles/tabs.css'
 import './styles/review-overlay.css'
 import './styles/interaction.css'
 import './styles/stat-cards.css'
+import './styles/capsule-tabs.css'
 import DrawingReviewOverlayApp from './components/DrawingReviewOverlayApp.vue'
 import { installClientDiagnostics } from './clientDiagnostics'
 
@@ -30,4 +32,5 @@ installButtonTypography(app)
 installButtonStyles(app)
 installGlobalScrollbars(app)
 app.onUnmount(installContainerBorders())
+app.onUnmount(installCapsuleTabs())
 app.mount('#review-overlay-root')

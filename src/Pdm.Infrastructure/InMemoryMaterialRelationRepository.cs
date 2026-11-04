@@ -8,6 +8,7 @@ public sealed class InMemoryMaterialRelationRepository : IMaterialRelationReposi
     private readonly object gate = new();
     private readonly Dictionary<Guid, MaterialRelationTemplate> templates = [];
     private readonly List<MaterialRelationSelection> selections = [];
+    private readonly HashSet<(Guid ProjectId, Guid AccessoryId, Guid MainId)> itemSources = [];
     private readonly List<MaterialRelationReview> reviews = [];
 
     public Task<IReadOnlyList<MaterialRelationTemplate>> ListTemplatesAsync(bool includeDraft, CancellationToken cancellationToken)
@@ -70,10 +71,18 @@ public sealed class InMemoryMaterialRelationRepository : IMaterialRelationReposi
     {
         lock (gate)
         {
+            foreach (var item in selections.Where(item => item.ProjectId == projectId && item.MainBomItemId == mainBomItemId).Concat(items))
+                itemSources.Add((item.ProjectId, item.AccessoryBomItemId, item.MainBomItemId));
             selections.RemoveAll(item => item.ProjectId == projectId && item.MainBomItemId == mainBomItemId);
             selections.AddRange(items);
             return Task.CompletedTask;
         }
+    }
+
+    public Task<IReadOnlyList<Guid>> ListRelatedMainBomItemIdsAsync(Guid projectId, IReadOnlyCollection<Guid> accessoryIds, CancellationToken ct)
+    {
+        lock (gate) return Task.FromResult<IReadOnlyList<Guid>>(itemSources.Where(item => item.ProjectId == projectId && accessoryIds.Contains(item.AccessoryId))
+            .Select(item => item.MainId).Distinct().ToArray());
     }
 
     public Task<IReadOnlyList<MaterialRelationReview>> ListReviewsAsync(Guid projectId, CancellationToken cancellationToken)

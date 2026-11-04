@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><title>UPLM 数量步进验证</title>
+<style>body{padding:24px}main{max-width:640px}section{display:grid;grid-template-columns:180px 180px 100px;align-items:center;gap:16px;margin:16px 0}input[type=number]{box-sizing:border-box;width:180px;height:32px}input::-webkit-inner-spin-button{opacity:1}output{font-variant-numeric:tabular-nums}</style>
+</head><body><div id="app"></div><script type="module">
+import { createApp, h, ref, withDirectives } from 'vue'
+import 'element-plus/dist/index.css'
+import QuantityInputNumber from '../../../src/components/QuantityInputNumber.vue'
+import { vQuantity } from '../../../src/quantityInput'
+const quantity = ref(1.25), native = ref(1.25), hours = ref(1.25)
+createApp({setup:()=>()=>h('main',[
+  h('h1','数量统一按1增减'),
+  h('section',{id:'shared'},[h('label','共用数量控件'),h(QuantityInputNumber,{modelValue:quantity.value,'onUpdate:modelValue':value=>quantity.value=value,min:.0001,max:5,step:.25,stepStrictly:true,precision:4,'aria-label':'共用数量'}),h('output',{id:'shared-value'},quantity.value)]),
+  h('section',{id:'native'},[h('label','原生数量控件'),withDirectives(h('input',{type:'number',min:.0001,max:5,step:.25,required:true,value:native.value,'aria-label':'原生数量',onInput:event=>native.value=event.target.value===''?null:Number(event.target.value)}),[[vQuantity]]),h('output',{id:'native-value'},native.value)]),
+  h('section',{id:'hours'},[h('label','工时保留0.5'),h(QuantityInputNumber,{isQuantity:false,modelValue:hours.value,'onUpdate:modelValue':value=>hours.value=value,min:0,max:24,step:.5,precision:2,'aria-label':'特殊工时'}),h('output',{id:'hours-value'},hours.value)])
+])}).mount('#app')
+</script></body></html>

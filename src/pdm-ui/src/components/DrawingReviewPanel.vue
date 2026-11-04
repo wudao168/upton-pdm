@@ -5,7 +5,7 @@ import { ArrowLeft, ChevronLeft, ChevronRight, History, MessageSquareText, Rotat
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
-import { drawingReviewAssignedReviewerLabel, drawingReviewAssignedReviewerPool, drawingReviewCandidateBadge, drawingReviewCandidateStateTone, drawingReviewPackageStateLabel, drawingReviewPackageStateTone, drawingReviewTargetStateLabel, drawingReviewTargetStateTone } from '../drawingReviewLabels'
+import { drawingReviewAssignedReviewerLabel, drawingReviewAssignedReviewerPool, drawingReviewCandidateBadge, drawingReviewCandidateStateTone, drawingReviewPackageStateLabel, drawingReviewPackageStateTone } from '../drawingReviewLabels'
 import type { AddDrawingReviewMarkupInput, DrawingReviewBatchEntry, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 

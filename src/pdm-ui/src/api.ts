@@ -133,7 +133,7 @@ export async function readOplAttachment(projectId: string, issueId: string, atta
   if (!response.ok) throw new Error(response.status === 401 ? '登录已过期，请重新登录后查看附件。' : '附件读取失败，请刷新清单或联系管理员检查文件。')
   return response.blob()
 }
-import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EngineeringKit, EngineeringKitExpansion, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialApprovalRule, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialImportPreview, MaterialImportResult, MaterialKind, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectProcurementTrackingResult, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, U9ProcurementSyncSettings, U9ProcurementSyncStatusResponse, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
+import type { AddDrawingReviewMarkupInput, ApprovalStep, ApprovalU9AutomationResult, AuditEntry, BatchUpdateBomItemsInput, BomClassification, BomEmptyDeclaration, BomExportMode, BomGenerationResult, BomHeaderKind, BomItem, BomKind, BomValidationRules, BomVersion, BomVersionState, CreateProjectInput, CreateReleasePackageInput, CreateRoleInput, CreateSubprojectInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, DocumentKind, DocumentModelDrawingRelation, DocumentNode, DocumentVersionComparison, DocumentVersionSummary, DocumentWhereUsed, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget, EditLockSummary, EngineeringKit, EngineeringKitExpansion, EquipmentTypeDefinition, FolderPermissionRule, MainProjectStaffingInput, ManagedDocument, ManufacturingBomBaseline, MaterialApprovalRule, MaterialAttachment, MaterialAttachmentKind, MaterialCategory, MaterialCategoryRule, MaterialCodeApplication, MaterialCodeApplicationStatus, MaterialCodeDecisionResult, MaterialCodeResolution, MaterialDuplicateRule, MaterialImportPreview, MaterialImportResult, MaterialNumberingSettings, MaterialPage, MaterialRemovalReadiness, MaterialRemovalResult, MaterialSyncExecutionResult, MaterialSyncTask, MyApprovalTask, OrganizationDirectory, OrganizationUnit, PasswordResetTask, PdmCustomer, PdmMaterial, PdmSystemSettings, PdmUser, PdmUserProfile, ProgramTemplate, ProgramTemplateApprovalDecision, ProgramTemplateAttachmentKind, ProgramTemplateDraftInput, ProgramTemplateRevision, ProgramTemplateTask, ProgramTemplateVersionBump, ProjectBomHeader, ProjectBomU9SyncExecution, ProjectBomU9SyncPreview, ProjectFile, ProjectFileVersion, ProjectFolder, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, ProjectProcurementTrackingResult, ProjectSummary, ProjectVersionItem, ReferenceStatus, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, RolePermissionDirectory, SaveMaterialInput, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, StandardLibraryCategory, StandardLibraryMaterialPage, U9BomQueryExecution, U9BomQueryInput, U9BomWriteExecution, U9BomWriteInput, U9BomWritePreview, U9ConnectionTestResult, U9InventoryFilters, U9InventoryPage, U9InventorySyncSettings, U9InventorySyncStatusResponse, U9ItemQueryResult, U9MaterialFullSyncStatusResponse, U9MaterialIntegrationSettings, U9MaterialSampleImportResult, U9MaterialSamplePreview, U9ProcurementSyncSettings, U9ProcurementSyncStatusResponse, UpdateCrmIntegrationInput, UpdateProjectInput, UpdateReleasePackageDraftInput, UpdateU9MaterialIntegrationInput } from './types'
 import type { CadPropertyWritebackVersion } from './types'
 import type { DrawingDeliveryOverride, ProductionDrawingItem } from './types'
 import type { MaterialSyncBatch } from './types'
@@ -167,8 +167,11 @@ export function saveProjectContactInformation(value: ProjectContactInformation, 
   return requestJson<ProjectContactInformationView>(`/api/projects/${value.projectId}/contact-information`, { method: 'PUT', body: JSON.stringify({ ...value, expectedRowVersion: value.rowVersion }) }, token)
 }
 
-export function readProjectNameplate(projectId: string, token: string) {
-  return requestJson<ProjectNameplateView>(`/api/projects/${projectId}/nameplate`, {}, token)
+export type ProjectNameplateAccessSummary = Pick<ProjectNameplateView, 'nameplate' | 'canEdit'> & { projectId: string }
+export function readProjectNameplate(projectId: string, token: string): Promise<ProjectNameplateView>
+export function readProjectNameplate(projectId: string, token: string, familyAccess: true): Promise<ProjectNameplateView | ProjectNameplateAccessSummary[]>
+export function readProjectNameplate(projectId: string, token: string, familyAccess = false) {
+  return requestJson<ProjectNameplateView | ProjectNameplateAccessSummary[]>(`/api/projects/${projectId}/nameplate`, familyAccess ? { headers: { 'X-PDM-Nameplate-View': 'family-access' } } : {}, token)
 }
 export const readMaterialNotificationPermission = (token: string) => requestJson<{ enabled: boolean }>('/api/materials/notification-permission', {}, token)
 export function saveProjectNameplate(value: ProjectNameplate, token: string) {
@@ -470,6 +473,7 @@ interface ApiDocument {
 }
 
 interface ApiReferenceNode {
+  role?: number | string
   structureIndexPending?: boolean
   nodeId: string
   documentId?: string | null
@@ -486,12 +490,17 @@ interface ApiReferenceNode {
 }
 
 interface ApiBomItem {
+  isSummaryQuantity?: boolean
+  isPublishedInBom?: boolean | null
+  bomPublishedVersion?: string | null
+  relationOptionId?: string | null
   files?: import('./bomFiles').BomFileReference[] | null
   nameplateContent?: import('./projectNameplate').NameplateContent | null
   displayRevision?: string | null
   maintainedItem?: ApiBomItem | null
   summaryItemIds?: string[] | null
   summaryFingerprint?: string | null
+  releaseTrackingId?: string | null
   id?: string
   kind?: string | number
   sequence: number
@@ -533,6 +542,9 @@ interface ApiBomItem {
   deletedBy?: string | null
   deleteReason?: string | null
   propertyWritebackStatus?: string | number | null
+  relationMainBomItemId?: string | null
+  relationAllocations?: BomItem['relationAllocations']
+  engineeringKitRelationAllocations?: BomItem['engineeringKitRelationAllocations']
   engineeringKitReferenceId?: string | null
   engineeringKitId?: string | null
   engineeringKitRevisionId?: string | null
@@ -650,8 +662,8 @@ async function requestJson<T>(path: string, init: RequestInit = {}, token?: stri
     }
   }
   if (init.method && init.method.toUpperCase() !== 'GET') pendingJsonReads.clear()
-  if (Object.keys(init).length === 0) {
-    const key = JSON.stringify([path, token, window.localStorage.getItem('pdm_active_organization')])
+  if ((!init.method || init.method.toUpperCase() === 'GET') && Object.keys(init).every(key => key === 'headers' || key === 'method')) {
+    const key = JSON.stringify([path, token, window.localStorage.getItem('pdm_active_organization'), [...new Headers(init.headers)].sort(([left], [right]) => left.localeCompare(right))])
     const pending = pendingJsonReads.get(key) ?? performJsonRequest<T>(path, init, token)
     pendingJsonReads.set(key, pending)
     try { return structuredClone(await pending) as T }
@@ -946,6 +958,10 @@ export function reactivateMaterial(materialId: string, expectedRowVersion: numbe
   return requestJson<PdmMaterial>(`/api/materials/${materialId}/reactivate?expectedRowVersion=${expectedRowVersion}`, { method: 'POST' }, token)
 }
 
+export function reconcileMaterialMaster(materialId: string, expectedRowVersion: number, synchronize: boolean, token: string): Promise<{ material: PdmMaterial; task: MaterialSyncTask | null }> {
+  return requestJson(`/api/materials/${materialId}/reconcile-u9?expectedRowVersion=${expectedRowVersion}&synchronize=${synchronize}`, { method: 'POST' }, token)
+}
+
 export function saveEngineeringKitLibraryMetadata(kitId: string, input: { remark?: string | null; selectionAdvice?: string | null; referencePrice?: number | null; isRecommended: boolean; coverImageAttachmentId?: string | null; expectedRowVersion: number }, token: string): Promise<EngineeringKit> {
   return requestJson<ApiEngineeringKit>(`/api/engineering-kits/${kitId}/library-metadata`, { method: 'PUT', body: JSON.stringify(input) }, token).then(mapApiEngineeringKit)
 }
@@ -1191,6 +1207,7 @@ export function expandEngineeringKit(kitId: string, input: { revisionId?: string
 export function listMaterialRelationTemplates(token: string, includeDraft = false): Promise<MaterialRelationTemplate[]> {
   return requestJson<MaterialRelationTemplate[]>(`/api/material-relations/templates${includeDraft ? '?includeDraft=true' : ''}`, {}, token)
 }
+export const listMaterialRelationMainOptions = (token: string, query = '') => requestJson<import('./types').MaterialRelationMainMaterial[]>(`/api/material-relations/main-options?${new URLSearchParams({ query })}`, {}, token)
 export const listMaterialRelationCategories = (token: string) => requestJson<StandardLibraryCategory[]>('/api/material-relations/categories', {}, token)
 export const getMaterialRelationCategories = (materialId: string, token: string) => requestJson<StandardLibraryCategory[]>(`/api/material-relations/materials/${materialId}/categories`, {}, token)
 export const assignMaterialRelationCategory = (materialId: string, categoryId: string, token: string) => requestJson<StandardLibraryCategory[]>(`/api/material-relations/materials/${materialId}/categories`, { method: 'PUT', body: JSON.stringify({ categoryId }) }, token)
@@ -1207,14 +1224,28 @@ export function publishMaterialRelationTemplate(templateId: string, revisionId: 
   }, token)
 }
 
-export function getMaterialRelationCompleteness(projectId: string, token: string): Promise<MaterialRelationCompleteness> {
-  return requestJson<MaterialRelationCompleteness>(`/api/material-relations/projects/${projectId}/completeness`, {}, token)
+function normalizedRelationAllocations(values?: import('./types').MaterialRelationAllocation[] | null) {
+  return values?.map(allocation=>({...allocation,groups:allocation.groups.map(group=>({...group,options:group.options?.map(option=>({...option,
+    quantityMode:option.quantityMode===1||option.quantityMode==='Fixed'?'Fixed' as const:'PerMainQuantity' as const}))}))}))
+}
+function normalizedRelationCompleteness(value:MaterialRelationCompleteness):MaterialRelationCompleteness {
+  return {...value,mainMaterials:value.mainMaterials.map(main=>({...main,allocations:normalizedRelationAllocations(main.allocations),groups:main.groups.map(group=>({...group,
+    selectionMode:(group.selectionMode as unknown)===1||group.selectionMode==='Multiple'?'Multiple':'Single',
+    reviewDecision:group.reviewDecision==null?null:(group.reviewDecision as unknown)===1||group.reviewDecision==='NoAccessory'?'NoAccessory':'Selected',
+    options:group.options.map(option=>({...option,
+      materialKind:typeof option.materialKind==='number'?(['Electrical','Standard','NonStandard','Product'] as const)[option.materialKind]??'Standard':option.materialKind,
+      quantityMode:(option.quantityMode as unknown)===1||option.quantityMode==='Fixed'?'Fixed':'PerMainQuantity'}))
+  }))}))}
+}
+export function getMaterialRelationCompleteness(projectId: string, token: string, releasePackageId?: string): Promise<MaterialRelationCompleteness> {
+  const query = releasePackageId ? `?releasePackageId=${encodeURIComponent(releasePackageId)}` : ''
+  return requestJson<MaterialRelationCompleteness>(`/api/material-relations/projects/${projectId}/completeness${query}`, {}, token).then(normalizedRelationCompleteness)
 }
 
-export function applyMaterialRelations(projectId: string, mainMaterials: Array<{ mainBomItemId: string; choices: Array<{ groupId: string; optionIds: string[]; confirmNoAccessory?: boolean; noAccessoryReason?: string | null }> }>, token: string): Promise<MaterialRelationCompleteness> {
+export function applyMaterialRelations(projectId: string, mainMaterials: Array<{ mainBomItemId: string; choices: Array<{ groupId: string; optionIds: string[]; confirmNoAccessory?: boolean; noAccessoryReason?: string | null }>; allocations?: Array<{ id: string; name: string; quantity: number; choices: Array<{ groupId: string; optionIds: string[]; confirmNoAccessory?: boolean; noAccessoryReason?: string | null }> }> }>, token: string): Promise<MaterialRelationCompleteness> {
   return requestJson<MaterialRelationCompleteness>(`/api/material-relations/projects/${projectId}/apply`, {
     method: 'POST', body: JSON.stringify({ mainMaterials }),
-  }, token)
+  }, token).then(normalizedRelationCompleteness)
 }
 
 export function linkBomMaterials(projectId: string, bomItemIds: string[], materialId: string, token: string): Promise<PdmMaterial> {
@@ -1837,6 +1868,11 @@ export function getSystemSettings(token: string): Promise<PdmSystemSettings> {
   return requestJson('/api/system-settings', {}, token)
 }
 
+export const readServerStorage = (token: string) => requestJson<import('./serverStorage').ServerStorageView>('/api/system-settings/storage', {}, token)
+export const saveServerStorage = (settings: import('./serverStorage').ServerStorageSettings, token: string) =>
+  requestJson<import('./serverStorage').ServerStorageView>('/api/system-settings/storage', { method: 'PUT', body: JSON.stringify(settings) }, token)
+export const readStorageBackupPlan = (token: string) => requestJson<import('./serverStorage').StorageBackupPlan>('/api/system-settings/storage/backup-plan', {}, token)
+
 export function getBomValidationRules(token: string): Promise<BomValidationRules> {
   return requestJson('/api/bom-validation-rules', {}, token)
 }
@@ -1898,26 +1934,47 @@ export function copyProjectContent(targetProjectId: string, input: ProjectCopyOp
   return requestJson(`/api/projects/${targetProjectId}/copy`, { method: 'POST', body: JSON.stringify(input) }, token)
 }
 
-export async function saveBom(projectId: string, kind: BomKind, items: BomItem[], token: string): Promise<{ items: BomItem[]; draftVersion?: BomVersion | null }> {
+export async function getBomInstances(projectId: string, kind: BomKind, token: string): Promise<BomItem[]> {
+  return (await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/${kind}`, {}, token)).map(mapBomItem)
+}
+
+export async function saveBomMultiplier(projectId: string, kind: BomKind, multiplier: number, expectedMultiplier: number, token: string): Promise<BomVersion> {
+  return mapBomVersion(await requestJson<ApiBomVersion>(`/api/projects/${projectId}/boms/${kind}/multiplier`, {
+    method: 'PUT', body: JSON.stringify({ multiplier, expectedMultiplier }),
+  }, token))
+}
+
+export async function previewBomConfigurationQuantity(projectId: string, changes: import('./types').BomConfigurationQuantityChange[], token: string) {
+  const result = await requestJson<{changes: import('./types').BomQuantityDifference[]; items: ApiBomItem[];confirmationToken?:string}>(`/api/material-relations/projects/${projectId}/quantity-preview`, {method:'POST',body:JSON.stringify(changes)}, token)
+  return {changes:result.changes,items:result.items.map(mapBomItem),confirmationToken:result.confirmationToken}
+}
+export async function loadBomSummary(projectId: string, kind: BomKind, token: string) {
+  return (await requestJson<ApiBomItem[]>(`/api/projects/${projectId}/boms/${kind}?summary=true`, {}, token)).map(mapBomItem)
+}
+export async function saveBom(projectId: string, kind: BomKind, items: BomItem[], token: string): Promise<{ items: BomItem[]; draftVersion?: BomVersion | null; relatedQuantitiesChanged?: boolean }> {
+  const configurationQuantities = items.flatMap(item => item.configurationQuantities ?? [])
   if (!items.length || items.some(item => item.summaryItemIds)) {
     const saved = await requestJson<{ items: ApiBomItem[]; draft: ApiBomVersion | null }>(
       `/api/projects/${projectId}/boms/${kind}?summary=true`, {
         method: 'PUT', body: JSON.stringify({
+          ...(configurationQuantities.length ? {configurationQuantities} : {}),
           items: items.filter(item => !item.id).map(item => ({ ...item, isComplete: item.complete })),
           summaryOrder: items.filter(item => item.id && !item.editedFields?.includes('removeEngineeringKit')).map(item => item.id),
           summaryRows: items.filter(item => item.summaryItemIds && item.editedFields?.length).map(item => ({
             itemIds: item.summaryItemIds, fingerprint: item.summaryFingerprint, fields: item.editedFields,
+            quantityAllocations: item.quantityAllocations,
             values: { ...item, isComplete: item.complete },
           })),
         }),
       }, token, 60_000)
-    return { items: saved.items.map(mapBomItem), draftVersion: saved.draft ? mapBomVersion(saved.draft) : null }
+    return { items: saved.items.map(mapBomItem), draftVersion: saved.draft ? mapBomVersion(saved.draft) : null,
+      ...(configurationQuantities.length ? {relatedQuantitiesChanged:true} : {}) }
   }
   const saved = await requestJson<ApiBomItem[] | {
     items: ApiBomItem[]; draft: ApiBomVersion | null; draftItemIds: string[]; draftItemOverrides: ApiBomItem[]
   }>(`/api/projects/${projectId}/boms/${kind}?includeDraft=true`, {
     method: 'PUT',
-    body: JSON.stringify({ items: items.map(item => ({ ...item, isComplete: item.complete })) }),
+    body: JSON.stringify({ items: items.map(item => ({ ...item, isComplete: item.complete })), ...(configurationQuantities.length ? {configurationQuantities} : {}) }),
   }, token, 60_000)
   // Older servers still return the item array; the workspace then refreshes versions normally.
   if (Array.isArray(saved)) return { items: saved.map(mapBomItem) }
@@ -2539,6 +2596,16 @@ export function restoreControlledDocument(projectId: string, documentId: string,
   return requestJson(`/api/projects/${projectId}/documents/${documentId}/restore`, { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token)
 }
 
+export interface ArchiveRecycleBatch { batchId: string; committedAt: string; actor: string; fileCount: number; projectCode: string }
+export interface ArchiveRecycleMember { document: { id: string; fileName: string; drawingNumber: string }; versionId: string }
+export interface ArchiveRecyclePreview { batchId: string; members: ArchiveRecycleMember[]; retainedFiles: string[]; blockers: string[]; scopeHash: string; canRecycle: boolean }
+export interface ArchiveRecycleSet { id: string; batchId: string; reason: string; actor: string; createdAt: string; expiresAt: string; restoredAt?: string | null; members: ArchiveRecycleMember[] }
+export const listRecycleArchiveBatches = (projectId: string, token: string) => requestJson<ArchiveRecycleBatch[]>(`/api/projects/${projectId}/documents/archive-batches`, {}, token)
+export const previewRecycleArchive = (projectId: string, batchId: string, token: string) => requestJson<ArchiveRecyclePreview>(`/api/projects/${projectId}/documents/archive-batches/${batchId}/recycle-preview`, {}, token)
+export const recycleArchiveSet = (projectId: string, batchId: string, scopeHash: string, reason: string, token: string) => requestJson<ArchiveRecycleSet>(`/api/projects/${projectId}/documents/archive-batches/${batchId}/recycle`, { method: 'POST', body: JSON.stringify({ scopeHash, reason }) }, token)
+export const listArchiveRecycleSets = (projectId: string, token: string) => requestJson<ArchiveRecycleSet[]>(`/api/projects/${projectId}/documents/recycle-sets`, {}, token)
+export const restoreArchiveSet = (projectId: string, id: string, token: string) => requestJson<ArchiveRecycleSet>(`/api/projects/${projectId}/documents/recycle-sets/${id}/restore`, { method: 'POST' }, token)
+
 export function getProjectContentResetReadiness(projectId: string, includeChildren: boolean, token: string): Promise<import('./types').ProjectContentResetReadiness> {
   return requestJson(`/api/projects/${projectId}/content-reset/readiness?includeChildren=${includeChildren}`, {}, token)
 }
@@ -2714,9 +2781,15 @@ export async function loadProjectWorkspace(projectId: string, token: string, inc
 }
 
 export async function loadProjectDocumentWorkspace(projectId: string, token: string): Promise<ProjectDocumentWorkspaceData> {
-  const [documents, libraryDocuments, documentRelations, referenceRoot] = await Promise.all([
+  const index = await withApiContext('图档工作区', requestJson<ApiDocument[] | {
+    currentDocuments: ApiDocument[]; libraryDocuments: ApiDocument[]; documentRelations: DocumentModelDrawingRelation[]; referenceRoot: ApiReferenceNode | null
+  }>(`/api/projects/${projectId}/folder-documents`, { headers: { 'X-PDM-Document-View': 'workspace' } }, token))
+  // 兼容尚未更新的服务端；新服务端一次返回当前工作区索引，不传整族目录。
+  const [documents, libraryDocuments, documentRelations, referenceRoot] = !Array.isArray(index)
+    ? [index.currentDocuments, index.libraryDocuments, index.documentRelations, index.referenceRoot] as const
+    : await Promise.all([
     withApiContext('项目图档', requestJson<ApiDocument[]>(`/api/projects/${projectId}/documents`, {}, token)),
-    withApiContext('文件夹图档', requestJson<ApiDocument[]>(`/api/projects/${projectId}/folder-documents`, {}, token)),
+    Promise.resolve(index),
     withApiContext('图档关系', requestJson<DocumentModelDrawingRelation[]>(`/api/projects/${projectId}/document-relations`, {}, token)),
     withApiContext('引用结构', requestJson<ApiReferenceNode | null>(`/api/projects/${projectId}/reference-tree`, {}, token).catch(error => {
       if (error instanceof PdmApiError && error.status === 404) return null
@@ -2735,6 +2808,18 @@ export async function loadProjectDocumentWorkspace(projectId: string, token: str
     documents: libraryDocuments.map(mapManagedDocument),
     documentRelations,
   }
+}
+
+export async function readFolderDocumentIndex(projectId: string, token: string): Promise<{ documentCounts: Record<string, number>; legacyDocuments?: ManagedDocument[] }> {
+  const value = await requestJson<ApiDocument[] | { documentCounts: Record<string, number> }>(`/api/projects/${projectId}/folder-documents`, { headers: { 'X-PDM-Document-View': 'counts' } }, token)
+  if (!Array.isArray(value)) return value
+  const documentCounts: Record<string, number> = {}
+  value.forEach(item => { if (item.folderId) documentCounts[item.folderId] = (documentCounts[item.folderId] ?? 0) + 1 })
+  return { documentCounts, legacyDocuments: value.map(mapManagedDocument) }
+}
+
+export async function readFolderDocuments(projectId: string, folderId: string, token: string): Promise<ManagedDocument[]> {
+  return (await requestJson<ApiDocument[]>(`/api/projects/${projectId}/folder-documents`, { headers: { 'X-PDM-Folder-ID': folderId } }, token)).map(mapManagedDocument)
 }
 
 function mapManagedDocument(document: ApiDocument): ManagedDocument {
@@ -2865,8 +2950,14 @@ function mapReferenceNode(
       ? snapshotVersionsByFileName.get(normalizedFileName(node.fileName)) ?? '—'
       : capturedVersion
   const seenInstancePaths = new Set<string>()
+  const auxiliaryIds = new Set<string>()
+  const physicalIds = new Set((node.children ?? []).filter(child => child.role !== 1 && child.role !== 'ExternalFileDependency').map(child => child.documentId).filter(Boolean))
   const children = (node.children ?? [])
     .filter((child) => {
+      if ((child.role === 1 || child.role === 'ExternalFileDependency') && child.documentId) {
+        if (physicalIds.has(child.documentId) || auxiliaryIds.has(child.documentId)) return false
+        auxiliaryIds.add(child.documentId)
+      }
       const instancePath = child.instancePath.trim().toLocaleLowerCase('zh-CN')
       if (!instancePath) return true
       if (seenInstancePaths.has(instancePath)) return false
@@ -2961,7 +3052,13 @@ function reconcileCurrentReferenceTree(
   }
 
   const visit = (node: DocumentNode): DocumentNode => {
-    let children = node.children.map(visit)
+    const drawingIds = new Set<string>()
+    let children = node.children.map(visit).filter(child => {
+      if (child.kind !== 'Drawing' || !child.documentId) return true
+      if (drawingIds.has(child.documentId)) return false
+      drawingIds.add(child.documentId)
+      return true
+    })
     if (node.documentId && node.kind !== 'Drawing') {
       const relatedDrawings = drawingsByModelId.get(node.documentId) ?? []
       const relatedDrawingsById = new Map(relatedDrawings.map(drawing => [drawing.id, drawing]))
@@ -3026,12 +3123,17 @@ function reconcileCurrentReferenceTree(
 
 function mapBomItem(item: ApiBomItem): BomItem {
   return {
-    files: item.files,
+    isSummaryQuantity:item.isSummaryQuantity ?? false,
+    isPublishedInBom: item.isPublishedInBom ?? undefined,
+    bomPublishedVersion: item.bomPublishedVersion ?? undefined,
+    relationOptionId: item.relationOptionId ?? undefined,
+    files: item.files ?? undefined,
     nameplateContent: item.nameplateContent ?? undefined,
     displayRevision: item.displayRevision ?? undefined,
     maintainedItem: item.maintainedItem ? mapBomItem(item.maintainedItem) : undefined,
     summaryItemIds: item.summaryItemIds ?? undefined,
     summaryFingerprint: item.summaryFingerprint ?? undefined,
+    releaseTrackingId: item.releaseTrackingId ?? undefined,
     id: item.id,
     kind: typeof item.kind === 'number'
       ? ([undefined, 'Electrical', 'Standard', 'NonStandard', 'Unclassified', 'Virtual', 'ComponentDrawing'] as const)[item.kind]
@@ -3056,7 +3158,10 @@ function mapBomItem(item: ApiBomItem): BomItem {
     sourceDocumentId: item.sourceDocumentId ?? undefined,
     sourceConfiguration: item.sourceConfiguration ?? undefined,
     sourceInstancePath: item.sourceInstancePath ?? undefined,
-    source: ['Auto', 'MaterialRelation', 'EngineeringKit'].includes(item.source ?? '') ? item.source as BomItem['source'] : 'Manual',
+    source: ['Auto', 'MaterialRelation', 'EngineeringKit', 'Summary'].includes(item.source ?? '') ? item.source as BomItem['source'] : 'Manual',
+    relationMainBomItemId: item.relationMainBomItemId ?? undefined,
+    relationAllocations: normalizedRelationAllocations(item.relationAllocations),
+    engineeringKitRelationAllocations: normalizedRelationAllocations(item.engineeringKitRelationAllocations),
     engineeringKitReferenceId: item.engineeringKitReferenceId ?? undefined,
     engineeringKitId: item.engineeringKitId ?? undefined,
     engineeringKitRevisionId: item.engineeringKitRevisionId ?? undefined,
@@ -3371,3 +3476,7 @@ export interface ArchiveWarningDefinition { code: string; name: string; source: 
 export const getArchiveWarningPolicy = (token: string) => requestJson<ArchiveWarningPolicy>('/api/archive-warning-policy', {}, token)
 export const getArchiveWarningCatalog = (token: string) => requestJson<ArchiveWarningDefinition[]>('/api/archive-warning-policy/catalog', {}, token)
 export const saveArchiveWarningPolicy = (policy: ArchiveWarningPolicy, token: string) => requestJson<ArchiveWarningPolicy>('/api/archive-warning-policy', { method: 'PUT', body: JSON.stringify(policy) }, token)
+
+export interface MaterialBrand { id: string; name: string; isActive: boolean; rowVersion: number; previousNames: string[] }
+export const listMaterialBrandCatalog = (token: string) => requestJson<MaterialBrand[]>('/api/material-brands', {}, token)
+export const saveMaterialBrand = (id: string | undefined, input: { name: string; isActive: boolean; rowVersion?: number }, token: string) => requestJson<MaterialBrand>(id ? '/api/material-brands/' + id : '/api/material-brands', { method: id ? 'PUT' : 'POST', body: JSON.stringify(input) }, token)

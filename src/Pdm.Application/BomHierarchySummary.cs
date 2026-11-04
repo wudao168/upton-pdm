@@ -24,7 +24,7 @@ public sealed partial class BomHeaderService
 {
     public async Task<IReadOnlyList<BomHierarchyProject>> ReadHierarchyAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
     {
-        var visible = await repository.ListProjectsForUserAsync(actor, role, ct);
+        var visible = await repository.ListProjectNavigationForUserAsync(actor, role, ct);
         var selected = visible.FirstOrDefault(project => project.Id == projectId && project.CanReadContent)
             ?? throw new UnauthorizedAccessException("当前用户没有项目内容查看权限。");
         var projects = visible.Where(project => project.CanReadContent && (selected.ParentProjectId is not null

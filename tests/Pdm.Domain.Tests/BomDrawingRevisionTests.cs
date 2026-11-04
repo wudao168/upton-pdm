@@ -5,6 +5,43 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class BomDrawingRevisionTests
 {
+    [Fact]
+    public async Task SameMaterialRevisionStillKeepsDifferentBomPublicationVersionsSeparate()
+    {
+        var repository=new InMemoryPdmRepository(TimeProvider.System);
+        var first=Item(Guid.NewGuid(),"A") with {Kind=BomKind.Standard,SourceDocumentId=null};
+        var next=Guid.NewGuid();var second=first with {Id=next,ReleaseTrackingId=next};
+        await repository.CreateReleasePackageAsync(Package(first) with {Scope=ReleaseScope.StandardFormal,StandardBomRevision="S-P-B01",StandardBomSnapshot=[first],NonStandardBomSnapshot=[],PublishedAt=DateTimeOffset.UtcNow.AddDays(-1)},default);
+        await repository.CreateReleasePackageAsync(Package(second) with {Scope=ReleaseScope.StandardFormal,StandardBomRevision="S-P-B02",StandardBomSnapshot=[second],NonStandardBomSnapshot=[]},default);
+        var current=await BomDrawingRevision.CurrentAsync(repository,[first,second],default);
+        Assert.All(current,row=>Assert.Equal("A",row.DisplayRevision));
+        Assert.Equal(new[]{"S-P-V01","S-P-V02"},current.Select(row=>row.BomPublishedVersion));
+        Assert.Equal(2,BomSummaryProjection.Group(current).Count);
+    }
+    [Theory]
+    [InlineData(BomKind.Standard)]
+    [InlineData(BomKind.Electrical)]
+    public async Task NewSameCodeSourcesDoNotInheritAnotherRowsPublishedBomVersion(BomKind kind)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var old = Item(Guid.NewGuid(), "W1") with { Kind = kind, SourceDocumentId = null };
+        var package = Package(old) with { Scope = kind == BomKind.Standard ? ReleaseScope.StandardFormal : ReleaseScope.ElectricalFormal,
+            StandardBomRevision = "S-P-B07", ElectricalBomRevision = "E-P-B07", NonStandardBomSnapshot = [],
+            StandardBomSnapshot = kind == BomKind.Standard ? [old] : [], ElectricalBomSnapshot = kind == BomKind.Electrical ? [old] : [] };
+        await repository.CreateReleasePackageAsync(package, default);
+        var added = new[] { "Manual", "EngineeringKit", "MaterialRelation" }.Select(source =>
+        {
+            var id = Guid.NewGuid();
+            return old with { Id = id, ReleaseTrackingId = id, Source = source };
+        }).ToArray();
+        var rows = await BomDrawingRevision.CurrentAsync(repository, [old, .. added, old with { Id = Guid.NewGuid() }], default);
+        var expected = kind == BomKind.Standard ? "S-P-V07" : "E-P-V07";
+        Assert.Equal(expected, rows[0].DisplayRevision);
+        Assert.All(rows.Skip(1).Take(3), row => Assert.Equal("未发布", row.DisplayRevision));
+        Assert.Equal(expected, rows[^1].DisplayRevision);
+        Assert.Equal(old, Assert.Single((await repository.FindReleasePackageAsync(package.Id, default))!.StandardBomSnapshot
+            .Concat((await repository.FindReleasePackageAsync(package.Id, default))!.ElectricalBomSnapshot)));
+    }
     [Theory]
     [InlineData(BomKind.Standard, ReleaseScope.StandardFormal, "S")]
     [InlineData(BomKind.Electrical, ReleaseScope.ElectricalFormal, "E")]

@@ -30,15 +30,41 @@ public sealed record ProjectNameplateView(ProjectNameplate Nameplate, string Nam
 public interface IProjectNameplateRepository
 {
     Task<ProjectNameplate?> FindAsync(Guid projectId, CancellationToken ct);
+    async Task<IReadOnlyList<ProjectNameplate>> ListAsync(IReadOnlyCollection<Guid> projectIds, CancellationToken ct)
+    {
+        var result = new List<ProjectNameplate>();
+        foreach (var id in projectIds) if (await FindAsync(id, ct) is { } value) result.Add(value);
+        return result;
+    }
     Task<ProjectNameplate> SaveAsync(ProjectNameplate value, long expectedRowVersion, CancellationToken ct);
     Task<ProjectNameplate> PublishAsync(ProjectNameplate value, ReleasePackage package, long expectedRowVersion, CancellationToken ct);
     Task<NameplateTemplate?> ReadTemplateAsync(CancellationToken ct);
     Task<NameplateTemplate> SaveTemplateAsync(NameplateTemplate value, long expectedRowVersion, CancellationToken ct);
 }
 
+public sealed record ProjectNameplateAccessSummary(Guid ProjectId, ProjectNameplate Nameplate, bool CanEdit);
+
 public sealed class ProjectNameplateService(IPdmRepository repository, IProjectNameplateRepository nameplates, TimeProvider timeProvider,
     IProductionTrackingObserver? tracking = null, IReleaseDeliveryObserver? delivery = null)
 {
+    public async Task<IReadOnlyList<ProjectNameplateAccessSummary>> ListAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
+    {
+        var projects = await repository.ListProjectNavigationForUserAsync(actor, role, ct);
+        var selected = projects.FirstOrDefault(item => item.Id == projectId && item.CanReadContent)
+            ?? throw new UnauthorizedAccessException("无权查看该项目铭牌。");
+        var rootId = selected.RootProjectId ?? selected.ParentProjectId ?? selected.Id;
+        var family = projects.Where(item => item.CanReadContent && (item.RootProjectId ?? item.ParentProjectId ?? item.Id) == rootId).ToArray();
+        var values = (await nameplates.ListAsync(family.Select(item => item.Id).ToArray(), ct)).ToDictionary(item => item.ProjectId);
+        var permission = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectNameplateEdit, ct);
+        return family.Select(project =>
+        {
+            var plate = values.GetValueOrDefault(project.Id) ?? new(project.Id);
+            var assigned = role == UserRole.Administrator || project.Designers.Contains(actor, StringComparer.OrdinalIgnoreCase)
+                || project.PhaseOwners.GetValueOrDefault("ElectricalHardware", "").Split('、', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Contains(actor, StringComparer.OrdinalIgnoreCase);
+            return new ProjectNameplateAccessSummary(project.Id, plate, permission && assigned && plate.ReleasePackageId is null);
+        }).ToArray();
+    }
+
     public async Task<ProjectNameplateView> GetAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
     {
         var project = await repository.FindProjectAsync(projectId, ct) ?? throw new PdmNotFoundException("项目不存在。");

@@ -18,6 +18,40 @@ function quantity(value: number | null = 1, props: Record<string, unknown> = {})
 }
 
 describe('数量输入按1增减且保留手输小数', () => {
+  it('计件原生输入保持真实数值并阻止小数校验，切换可拆分单位后恢复小数边界', async () => {
+    const whole=ref(true), model=ref(1.5)
+    const fixture=defineComponent({directives:{quantity:vQuantity},setup:()=>({whole,model}),template:'<input v-quantity="whole" v-model.number="model" type="number" min="0.0001" step="any">'})
+    const wrapper=mount(fixture,{attachTo:document.body});wrappers.push(wrapper)
+    const input=wrapper.get('input').element as HTMLInputElement
+    expect(input.value).toBe('1.5');expect(input.step).toBe('1');expect(input.min).toBe('1');expect(input.validity.stepMismatch).toBe(true)
+    whole.value=false;await nextTick()
+    expect(input.min).toBe('0.0001');expect(input.step).toBe('any');expect(input.value).toBe('1.5');expect(input.checkValidity()).toBe(true)
+  })
+  it('数量模式不能被局部小步进或整数倍对齐覆盖', async () => {
+    const { input, model, wrapper } = quantity(1.25, { step: .25, stepStrictly: true })
+    expect(wrapper.attributes('data-pdm-quantity-step')).toBe('1')
+    await input.trigger('keydown', { key: 'ArrowUp', code: 'ArrowUp' }); await flushPromises()
+    expect(model.value).toBe(2.25)
+    await input.trigger('keydown', { key: 'ArrowDown', code: 'ArrowDown' }); await flushPromises()
+    expect(model.value).toBe(1.25)
+  })
+  it('明确标记为非数量的工时字段保留半小时步进', async () => {
+    const { input, model, wrapper } = quantity(1.25, { isQuantity: false, step: .5, precision: 2 })
+    expect(wrapper.attributes('data-pdm-quantity-step')).toBeUndefined()
+    await input.trigger('keydown', { key: 'ArrowUp', code: 'ArrowUp' }); await flushPromises()
+    expect(model.value).toBe(1.75)
+  })
+  it('原生数量指令统一增减策略，保留手输小数及原有边界', async () => {
+    const model = ref(1.25), step = ref(.25)
+    const fixture = defineComponent({ directives: { quantity: vQuantity }, setup: () => ({ model, step }), template: '<input v-quantity v-model.number="model" type="number" min="0.0001" max="10" :step="step" required>' })
+    const wrapper = mount(fixture, { attachTo: document.body }); wrappers.push(wrapper)
+    const input = wrapper.get('input').element as HTMLInputElement
+    expect(input.dataset.pdmQuantityStep).toBe('1')
+    expect(input.step).toBe('any'); expect(input.checkValidity()).toBe(true)
+    step.value = .5; await nextTick()
+    expect(input.step).toBe('any'); expect(input.value).toBe('1.25')
+    expect([input.min, input.max, input.required]).toEqual(['0.0001', '10', true])
+  })
   it('初始整数不补零，外部重新读取小数时保留原精度和数值', async () => {
     const { wrapper, input, model } = quantity()
     expect((input.element as HTMLInputElement).value).toBe('1')

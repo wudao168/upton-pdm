@@ -28,6 +28,24 @@ internal static partial class Program
   if(args.Length>0&&args[0]=="--archive-status-proxy-host") { RunArchiveStatusProxyHost(args); return; }
   AppDomain.CurrentDomain.AssemblyResolve+=(_,e)=>{var path=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0])),new AssemblyName(e.Name).Name+".dll");return File.Exists(path)?Assembly.LoadFrom(path):null;};
   assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));
+  if(args.Length>1&&args[1]=="--committed-child-checkout-regression")
+  {try{CommittedChildCheckoutScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--open-context-metadata-replay")
+  {try{OpenContextMetadataReplay(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--registration-wording-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await RegistrationWordingScenario(host,args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--linked-drawing-scope-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await LinkedDrawingScopeScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--checkout-targeted-journal-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await CheckoutTargetedJournalScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--independent-import-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await IndependentImportScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--session-renewal-regression")
+  {using(var host=new Form{Opacity=0,ShowInTaskbar=false}){host.Shown+=async(_,__)=>{try{await SessionRenewalScenario();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{host.Close();}};Application.Run(host);}return;}
+  if(args.Length>1&&args[1]=="--available-property-index-regression")
+  {try{AvailablePropertyIndexScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
+  if(args.Length>1&&args[1]=="--archive-project-confirm-ui-regression")
+  {try{ArchiveProjectConfirmUiScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--context-state-transition-regression")
   {try{ContextStateTransitionScenario(args[2],args[3],args[4]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--virtual-cycle-graph-regression")
@@ -171,6 +189,12 @@ internal static partial class Program
    }
    return;
   }
+  if(args.Length>1&&args[1]=="--passive-drawing-data-replay")
+  {
+   try{PassiveDrawingDataReplay(args[2]);}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
   if(args.Length>1&&args[1]=="--selected-root-reference-regression")
   {
    try{SelectedRootReferenceScenario(args[2]).GetAwaiter().GetResult();}
@@ -237,6 +261,12 @@ internal static partial class Program
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }
+  if(args.Length>1&&args[1]=="--committed-memory-open-regression")
+  {
+   try{CommittedMemoryOpenScenario(args[2]).GetAwaiter().GetResult();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
   if(args.Length>1&&args[1]=="--controlled-reference-lock-regression")
   {
    try{ControlledReferenceLockScenario(args[2]);}
@@ -246,6 +276,12 @@ internal static partial class Program
   if(args.Length>1&&args[1]=="--controlled-reference-core-regression")
   {
    try{OperationRuleScenario();ControlledReferenceScenario();ControlledParameterIntegrityScenario();}
+   catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
+   return;
+  }
+  if(args.Length>1&&args[1]=="--controlled-source-search-regression")
+  {
+   try{ControlledSourceSearchScenario(args[2]);}
    catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}
    return;
   }
@@ -407,6 +443,16 @@ internal static partial class Program
    }
    return;
   }
+  if(args.Length>1&&(args[1]=="--workspace-inline-project-regression"||args[1]=="--workspace-project-selection-regression"||args[1]=="--workspace-cache-recovery-regression"||args[1]=="--workspace-cache-real-replay"))
+  {
+   using(var workspaceHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    workspaceHost.Shown+=async(_,__)=>{try{if(args[1]=="--workspace-cache-real-replay")await WorkspaceRealCacheReplayScenario(args[2],args[3]);else if(args[1]=="--workspace-cache-recovery-regression")await WorkspaceCacheRecoveryScenario(workspaceHost,args[2]);else if(args[1]=="--workspace-project-selection-regression")await WorkspaceProjectSelectionScenario(workspaceHost,args[2]);else await WorkspaceInlineProjectScenario(workspaceHost,args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{workspaceHost.Close();}};
+    Application.Run(workspaceHost);
+   }
+   return;
+  }
   if(args.Length>1&&(args[1]=="--embedded-design-table-file"||args[1]=="--embedded-design-table-clean"||args[1]=="--embedded-static-picture-file"))
   {
    try
@@ -550,6 +596,16 @@ internal static partial class Program
     scopeHost.Shown+=async(_,__)=>{try{await ArchiveAutoScopeScenario(scopeHost,args[2]);}
      catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{scopeHost.Close();}};
     Application.Run(scopeHost);
+   }
+   return;
+  }
+  if(args.Length>1&&args[1]=="--drawing-checkout-latest-regression")
+  {
+   using(var drawingGetHost=new Form{Opacity=0,ShowInTaskbar=false})
+   {
+    drawingGetHost.Shown+=async(_,__)=>{try{await DrawingCheckoutLatestScenario(args[2]);}
+     catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}finally{drawingGetHost.Close();}};
+    Application.Run(drawingGetHost);
    }
    return;
   }
@@ -1368,7 +1424,7 @@ internal static partial class Program
   public AssemblyProxy(System.Type type,Func<IMethodCallMessage,object> callback):base(type){this.callback=callback;}
   public string TypeName{get;set;}
   public bool CanCastTo(System.Type type,object value)=>type.Namespace=="SolidWorks.Interop.sldworks";
-  public override IMessage Invoke(IMessage message){var call=(IMethodCallMessage)message;try{return new ReturnMessage(callback(call),call.Args,call.ArgCount,call.LogicalCallContext,call);}catch(Exception e){return new ReturnMessage(e,call);}}
+  public override IMessage Invoke(IMessage message){var call=(IMethodCallMessage)message;try{var result=callback(call);return result as IMessage??new ReturnMessage(result,call.Args,call.ArgCount,call.LogicalCallContext,call);}catch(Exception e){return new ReturnMessage(e,call);}}
  }
  static void DiagnosticTabScenario(Form host)
  {
@@ -2149,6 +2205,8 @@ internal static partial class Program
    switch(call.MethodName)
    {
     case "GetPathName":value=Path;break;
+    case "GetTitle":value=System.IO.Path.GetFileName(Path);break;
+    case "get_ConfigurationManager":value=new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.ConfigurationManager",true),m=>m.MethodName=="get_ActiveConfiguration"?new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.Configuration",true),c=>c.MethodName=="get_Name"?"Default":throw new Exception(c.MethodName)).GetTransparentProxy():throw new Exception(m.MethodName)).GetTransparentProxy();break;
     case "GetType":value=call.MethodBase is MethodInfo info&&info.ReturnType==typeof(System.Type)?(object)nativeType:Path.EndsWith(".SLDASM",StringComparison.OrdinalIgnoreCase)?2:Path.EndsWith(".SLDDRW",StringComparison.OrdinalIgnoreCase)?3:1;break;
     case "GetSaveFlag":value=Dirty;break;
     case "GetUpdateStamp":value=UpdateStamp;break;

@@ -48,27 +48,39 @@ public sealed partial class MySqlPdmRepository
         {
             versionId = existing.Id;
             await connection.ExecuteAsync(new CommandDefinition(
-                "UPDATE bom_version SET mother_material_id=@MotherMaterialId,snapshot_json=@Snapshot,updated_by=@Actor,updated_at=@Now,row_version=row_version+1 WHERE id=@Id",
-                new { Id = versionId, MotherMaterialId = motherMaterialId, Snapshot = snapshot, Actor = actor, Now = now.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+                "UPDATE bom_version SET mother_material_id=@MotherMaterialId,snapshot_json=@Snapshot,whole_set_multiplier=CASE WHEN is_multiplier_overridden=1 THEN whole_set_multiplier ELSE @ProjectQuantity END,updated_by=@Actor,updated_at=@Now,row_version=row_version+1 WHERE id=@Id",
+                new { Id = versionId, MotherMaterialId = motherMaterialId, Snapshot = snapshot, Actor = actor, Now = now.UtcDateTime, ProjectQuantity = project.Quantity }, transaction, cancellationToken: cancellationToken));
         }
         else
         {
             var latest = await connection.QuerySingleOrDefaultAsync<BomVersionSequenceRow>(new CommandDefinition(
-                "SELECT id,version_number FROM bom_version WHERE project_id=@ProjectId AND bom_kind=@Kind ORDER BY version_number DESC LIMIT 1 FOR UPDATE",
+                "SELECT id,version_number,whole_set_multiplier,is_multiplier_overridden FROM bom_version WHERE project_id=@ProjectId AND bom_kind=@Kind ORDER BY version_number DESC LIMIT 1 FOR UPDATE",
                 new { ProjectId = projectId, Kind = kind.ToString() }, transaction, cancellationToken: cancellationToken));
             var versionNumber = (latest?.VersionNumber ?? 0) + 1;
             versionId = Guid.NewGuid();
             await connection.ExecuteAsync(new CommandDefinition(
                 """
-                INSERT INTO bom_version(id,project_id,bom_kind,mother_material_id,version_number,version_label,state,base_version_id,change_number,change_reason,effective_serial_from,effective_serial_to,snapshot_json,created_by,created_at,updated_by,updated_at,released_at,row_version)
-                VALUES(@Id,@ProjectId,@Kind,@MotherMaterialId,@VersionNumber,@Label,'Draft',@BaseVersionId,NULL,NULL,NULL,NULL,@Snapshot,@Actor,@Now,@Actor,@Now,NULL,1)
+                INSERT INTO bom_version(id,project_id,bom_kind,mother_material_id,version_number,version_label,state,base_version_id,change_number,change_reason,effective_serial_from,effective_serial_to,snapshot_json,created_by,created_at,updated_by,updated_at,released_at,row_version,whole_set_multiplier,is_multiplier_overridden)
+                VALUES(@Id,@ProjectId,@Kind,@MotherMaterialId,@VersionNumber,@Label,'Draft',@BaseVersionId,NULL,NULL,NULL,NULL,@Snapshot,@Actor,@Now,@Actor,@Now,NULL,1,@WholeSetMultiplier,@IsMultiplierOverridden)
                 """,
-                new { Id = versionId, ProjectId = projectId, Kind = kind.ToString(), MotherMaterialId = motherMaterialId, VersionNumber = versionNumber, Label = BomVersionLabel(ProjectNumberPolicy.BusinessCode(project), kind, versionNumber), BaseVersionId = latest?.Id, Snapshot = snapshot, Actor = actor, Now = now.UtcDateTime },
+                new { Id = versionId, ProjectId = projectId, Kind = kind.ToString(), MotherMaterialId = motherMaterialId, VersionNumber = versionNumber, Label = BomVersionLabel(ProjectNumberPolicy.BusinessCode(project), kind, versionNumber), BaseVersionId = latest?.Id, Snapshot = snapshot, Actor = actor, Now = now.UtcDateTime,
+                    WholeSetMultiplier = latest?.IsMultiplierOverridden == true ? latest.WholeSetMultiplier : project.Quantity, IsMultiplierOverridden = latest?.IsMultiplierOverridden ?? false },
                 transaction, cancellationToken: cancellationToken));
         }
         await transaction.CommitAsync(cancellationToken);
         return await FindBomVersionAsync(projectId, versionId, cancellationToken)
             ?? throw new PdmNotFoundException("BOM工作版本不存在。");
+    }
+
+    public async Task<BomVersion> UpdateBomVersionMultiplierAsync(Guid versionId, int multiplier, int expectedMultiplier, string actor, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE bom_version SET whole_set_multiplier=@Multiplier,is_multiplier_overridden=1,updated_by=@Actor,updated_at=@Now,row_version=row_version+1 WHERE id=@VersionId AND state='Draft' AND whole_set_multiplier=@ExpectedMultiplier",
+            new { VersionId = versionId, Multiplier = multiplier, ExpectedMultiplier = expectedMultiplier, Actor = actor, Now = timeProvider.GetUtcNow().UtcDateTime }, cancellationToken: cancellationToken));
+        if (affected != 1) throw new PdmConflictException("BOM版本或整套倍率已变化，请刷新后重试。");
+        return MapBomVersion(await connection.QuerySingleAsync<BomVersionRow>(new CommandDefinition(
+            $"{BomVersionSelect} WHERE id=@VersionId", new { VersionId = versionId }, cancellationToken: cancellationToken)));
     }
 
     public async Task<BomVersion> UpdateBomVersionReleaseInfoAsync(Guid versionId, string changeNumber, string changeReason, string effectiveSerialFrom, string? effectiveSerialTo, IReadOnlyList<string> validationRequiredFields, CancellationToken cancellationToken)
@@ -239,7 +251,9 @@ public sealed partial class MySqlPdmRepository
         ValidationRequiredFields = string.IsNullOrWhiteSpace(row.ValidationRuleSnapshotJson)
             ? []
             : JsonSerializer.Deserialize<List<string>>(row.ValidationRuleSnapshotJson, jsonOptions) ?? [],
-        MotherMaterialId = row.MotherMaterialId
+        MotherMaterialId = row.MotherMaterialId,
+        WholeSetMultiplier = row.WholeSetMultiplier,
+        IsMultiplierOverridden = row.IsMultiplierOverridden
     };
 
     private static ManufacturingBomBaseline MapManufacturingBomBaseline(ManufacturingBomBaselineRow row) => new(
@@ -271,10 +285,12 @@ public sealed partial class MySqlPdmRepository
         return [package.StandardBomVersionId.Value, package.NonStandardBomVersionId.Value, package.ElectricalBomVersionId.Value];
     }
 
-    private const string BomVersionSelect = "SELECT id,project_id,bom_kind,mother_material_id,version_number,version_label,state,base_version_id,change_number,change_reason,effective_serial_from,effective_serial_to,snapshot_json,validation_rule_snapshot_json,created_by,created_at,updated_by,updated_at,released_at FROM bom_version";
+    private const string BomVersionSelect = "SELECT id,project_id,bom_kind,mother_material_id,version_number,version_label,state,base_version_id,change_number,change_reason,effective_serial_from,effective_serial_to,snapshot_json,validation_rule_snapshot_json,created_by,created_at,updated_by,updated_at,released_at,whole_set_multiplier,is_multiplier_overridden FROM bom_version";
 
     private sealed class BomVersionRow
     {
+        public bool IsMultiplierOverridden { get; init; }
+        public int WholeSetMultiplier { get; init; } = 1;
         public Guid Id { get; init; }
         public Guid ProjectId { get; init; }
         public string BomKind { get; init; } = string.Empty;
@@ -298,6 +314,8 @@ public sealed partial class MySqlPdmRepository
 
     private sealed class BomVersionSequenceRow
     {
+        public bool IsMultiplierOverridden { get; init; }
+        public int WholeSetMultiplier { get; init; } = 1;
         public Guid Id { get; init; }
         public int VersionNumber { get; init; }
     }

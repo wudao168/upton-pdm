@@ -66,10 +66,16 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return await MapProjectsAsync(connection, null, rows, cancellationToken, includeStatistics);
     }
 
-    public async Task<IReadOnlyList<Project>> ListProjectsForUserAsync(string actor, UserRole role, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<Project>> ListProjectsForUserAsync(string actor, UserRole role, CancellationToken cancellationToken) =>
+        ReadProjectsForUserAsync(actor, role, true, cancellationToken);
+
+    public Task<IReadOnlyList<Project>> ListProjectNavigationForUserAsync(string actor, UserRole role, CancellationToken ct) =>
+        ReadProjectsForUserAsync(actor, role, false, ct);
+
+    private async Task<IReadOnlyList<Project>> ReadProjectsForUserAsync(string actor, UserRole role, bool includeStatistics, CancellationToken cancellationToken)
     {
         if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)) return [];
-        var projects = await ListProjectsAsync(cancellationToken);
+        var projects = await ReadProjectsAsync(null, cancellationToken, includeStatistics);
         var user = await FindUserAsync(actor, cancellationToken);
         var visibleProjects = new List<Project>();
         foreach (var project in projects)
@@ -482,7 +488,19 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return rows.Select(row => MapDocument(row, ResolveDocumentDisplayName(row, nameProperty))).ToArray();
     }
 
-    public async Task<IReadOnlyList<PdmDocument>> ListProjectTreeDocumentsAsync(Guid projectId, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<PdmDocument>> ListProjectTreeDocumentsAsync(Guid projectId, CancellationToken cancellationToken) =>
+        ReadProjectTreeDocumentsAsync(projectId, null, null, null, cancellationToken);
+
+    public Task<IReadOnlyList<PdmDocument>> ListWorkspaceDocumentsAsync(Guid projectId, IReadOnlyCollection<Guid> documentIds,
+        IReadOnlyCollection<string> fileNames, CancellationToken ct) => documentIds.Count == 0 && fileNames.Count == 0
+            ? Task.FromResult<IReadOnlyList<PdmDocument>>([])
+            : ReadProjectTreeDocumentsAsync(projectId, null, documentIds, fileNames, ct);
+
+    public Task<IReadOnlyList<PdmDocument>> ListFolderDocumentsAsync(Guid projectId, Guid folderId, CancellationToken ct) =>
+        ReadProjectTreeDocumentsAsync(projectId, folderId, null, null, ct);
+
+    private async Task<IReadOnlyList<PdmDocument>> ReadProjectTreeDocumentsAsync(Guid projectId, Guid? folderId,
+        IReadOnlyCollection<Guid>? documentIds, IReadOnlyCollection<string>? fileNames, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<DocumentRow>(new CommandDefinition(
@@ -503,9 +521,12 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             WHERE (owner_project.id=COALESCE(requested.parent_project_id,requested.id)
                OR owner_project.parent_project_id=COALESCE(requested.parent_project_id,requested.id))
               AND d.deleted_at IS NULL AND d.purged_at IS NULL
+              AND (@FolderId IS NULL OR d.folder_id=@FolderId)
+              AND (@AllDocuments=1 OR d.id IN @DocumentIds OR TRIM(SUBSTRING_INDEX(REPLACE(d.file_name,CHAR(92),'/'),'/',-1)) IN @FileNames)
             ORDER BY owner_project.parent_project_id,owner_project.child_sequence,d.drawing_number,d.kind
             """,
-            new { ProjectId = projectId }, cancellationToken: cancellationToken));
+            new { ProjectId = projectId, FolderId = folderId, AllDocuments = documentIds is null && fileNames is null,
+                DocumentIds = documentIds?.Count > 0 ? documentIds : new[] { Guid.Empty }, FileNames = fileNames?.Count > 0 ? fileNames : new[] { "" } }, cancellationToken: cancellationToken));
         var nameProperty = await GetBomNamePropertyAsync(connection, cancellationToken);
         return rows.Select(row => MapDocument(row, ResolveDocumentDisplayName(row, nameProperty))).ToArray();
     }
@@ -532,7 +553,16 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return rows.Select(row => new DocumentContentFingerprint(MapDocument(row), row.SourceFingerprintSha256 ?? string.Empty)).ToArray();
     }
 
-    public async Task<IReadOnlyList<DocumentModelDrawingRelation>> ListDocumentRelationsAsync(Guid projectId, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<DocumentModelDrawingRelation>> ListDocumentRelationsAsync(Guid projectId, CancellationToken cancellationToken) =>
+        ReadDocumentRelationsAsync(projectId, null, cancellationToken);
+
+    public Task<IReadOnlyList<DocumentModelDrawingRelation>> ListWorkspaceDocumentRelationsAsync(Guid projectId,
+        IReadOnlyCollection<Guid> documentIds, CancellationToken ct) => documentIds.Count == 0
+            ? Task.FromResult<IReadOnlyList<DocumentModelDrawingRelation>>([])
+            : ReadDocumentRelationsAsync(projectId, documentIds, ct);
+
+    private async Task<IReadOnlyList<DocumentModelDrawingRelation>> ReadDocumentRelationsAsync(Guid projectId,
+        IReadOnlyCollection<Guid>? documentIds, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<DocumentModelDrawingRelation>(new CommandDefinition(
@@ -541,11 +571,12 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             FROM document_model_drawing_relation relation
             INNER JOIN project requested ON requested.id=@ProjectId
             INNER JOIN project owner_project ON owner_project.id=relation.project_id
-            WHERE owner_project.id=COALESCE(requested.parent_project_id,requested.id)
-               OR owner_project.parent_project_id=COALESCE(requested.parent_project_id,requested.id)
+            WHERE (owner_project.id=COALESCE(requested.parent_project_id,requested.id)
+               OR owner_project.parent_project_id=COALESCE(requested.parent_project_id,requested.id))
+              AND (@AllDocuments=1 OR relation.model_document_id IN @DocumentIds OR relation.drawing_document_id IN @DocumentIds)
             ORDER BY relation.model_document_id,relation.drawing_document_id
             """,
-            new { ProjectId = projectId },
+            new { ProjectId = projectId, AllDocuments = documentIds is null, DocumentIds = documentIds?.Count > 0 ? documentIds : new[] { Guid.Empty } },
             cancellationToken: cancellationToken));
         var pendingRows = await connection.QueryAsync<PendingDrawingRelationRow>(new CommandDefinition(
             """
@@ -561,8 +592,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
               AND d.kind='Drawing' AND d.deleted_at IS NULL AND d.purged_at IS NULL
               AND JSON_EXTRACT(v.reference_snapshot_json,'$.structureIndexPending')=TRUE
             """, new { ProjectId = projectId }, cancellationToken: cancellationToken));
+        var scope = documentIds?.ToHashSet();
         var sources = pendingRows.Select(row => new PendingDrawingRelationSource(row.DocumentId, row.ProjectId, row.FileName,
-            JsonSerializer.Deserialize<DocumentReferenceNode>(row.ReferenceSnapshotJson, jsonOptions)!)).ToArray();
+            JsonSerializer.Deserialize<DocumentReferenceNode>(row.ReferenceSnapshotJson, jsonOptions)!))
+            .Where(source => scope is null || scope.Contains(source.DocumentId) || source.Root.Children.Any(node => node.DocumentId.HasValue && scope.Contains(node.DocumentId.Value))).ToArray();
         if (sources.Length == 0) return rows.ToArray();
         var modelIds = sources.SelectMany(source => source.Root.Children).Where(node => node.DocumentId.HasValue)
             .Select(node => node.DocumentId!.Value).Distinct().ToArray();
@@ -784,7 +817,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         var document = await FindDocumentAsync(documentId, cancellationToken);
         if (document is null || !await HasProjectContentReadAccessAsync(document.ProjectId, actor, role, cancellationToken)) return false;
-        var folders = await ListProjectFoldersAsync(document.ProjectId, actor, role, cancellationToken);
+        var folders = await ReadProjectFoldersAsync(document.ProjectId, actor, role, cancellationToken, document.FolderId, document.FolderId is null);
         var folder = document.FolderId is null
             ? folders.FirstOrDefault(item => item.TargetProjectId == document.ProjectId && item.TemplateKey == "mechanical.project")
             : folders.FirstOrDefault(item => item.Id == document.FolderId.Value);
@@ -882,7 +915,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """
             SELECT id, project_id, bom_kind, sequence_no, drawing_number, name, quantity, unit, material, specification, remark, brand, surface_treatment, heat_treatment, weight, is_wear_part, impact_stage, inventory_replacement_material_code, revision_label, is_complete,
                    source_document_id, source_configuration, source_instance_path, parent_drawing_number,
-                   engineering_kit_reference_id,engineering_kit_id,engineering_kit_revision_id,engineering_kit_code,engineering_kit_version_no,engineering_kit_component_id,engineering_kit_component_optional,
+                   engineering_kit_reference_id,engineering_kit_id,engineering_kit_revision_id,engineering_kit_code,engineering_kit_version_no,engineering_kit_component_id,engineering_kit_component_optional,relation_allocations_json,engineering_kit_relation_allocations_json,is_summary_quantity,
+                   (SELECT s.main_bom_item_id FROM material_relation_selection s WHERE s.project_id=bom_item.project_id AND s.accessory_bom_item_id=bom_item.id) AS relation_main_bom_item_id,
                    item_source, is_manually_overridden, is_pending_removal,
                    is_pending_classification, is_manual_unmatched, is_manually_retained, is_manually_excluded, is_release_excluded, release_exclusion_reason,
                    reconciliation_status, reconciliation_note, reconciliation_updated_by, reconciliation_updated_at,
@@ -968,6 +1002,9 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 parameters.Add($"EngineeringKitVersionNumber{index}", item.EngineeringKitVersionNumber);
                 parameters.Add($"EngineeringKitComponentId{index}", item.EngineeringKitComponentId);
                 parameters.Add($"EngineeringKitComponentOptional{index}", item.EngineeringKitComponentOptional);
+                parameters.Add($"RelationAllocationsJson{index}", JsonSerializer.Serialize(item.RelationAllocations, jsonOptions));
+                parameters.Add($"EngineeringKitRelationAllocationsJson{index}", JsonSerializer.Serialize(item.EngineeringKitRelationAllocations, jsonOptions));
+                parameters.Add($"IsSummaryQuantity{index}", item.IsSummaryQuantity);
                 parameters.Add($"Source{index}", item.Source);
                 parameters.Add($"IsManuallyOverridden{index}", item.IsManuallyOverridden);
                 parameters.Add($"IsPendingRemoval{index}", item.IsPendingRemoval);
@@ -986,11 +1023,11 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                 parameters.Add($"DeleteReason{index}", item.DeleteReason);
                 parameters.Add($"PropertyWritebackStatus{index}", item.PropertyWritebackStatus?.ToString());
                 parameters.Add($"Now{index}", now);
-                valueRows.Add($"(@Id{index},@ProjectId{index},@Kind{index},@Sequence{index},@DrawingNumber{index},@Name{index},@Quantity{index},@Unit{index},@Material{index},@Specification{index},@Remark{index},@Brand{index},@SurfaceTreatment{index},@HeatTreatment{index},@Weight{index},@IsWearPart{index},@ImpactStage{index},@InventoryReplacementMaterialCode{index},@Revision{index},@IsComplete{index},@SourceDocumentId{index},@SourceConfiguration{index},@SourceInstancePath{index},@ParentDrawingNumber{index},@EngineeringKitReferenceId{index},@EngineeringKitId{index},@EngineeringKitRevisionId{index},@EngineeringKitCode{index},@EngineeringKitVersionNumber{index},@EngineeringKitComponentId{index},@EngineeringKitComponentOptional{index},@Source{index},@IsManuallyOverridden{index},@IsPendingRemoval{index},@IsPendingClassification{index},@IsManualUnmatched{index},@IsManuallyRetained{index},@IsManuallyExcluded{index},@IsReleaseExcluded{index},@ReleaseExclusionReason{index},@ReconciliationStatus{index},@ReconciliationNote{index},@ReconciliationUpdatedBy{index},@ReconciliationUpdatedAt{index},@DeletedAt{index},@DeletedBy{index},@DeleteReason{index},@PropertyWritebackStatus{index},1,@Now{index})");
+                valueRows.Add($"(@Id{index},@ProjectId{index},@Kind{index},@Sequence{index},@DrawingNumber{index},@Name{index},@Quantity{index},@Unit{index},@Material{index},@Specification{index},@Remark{index},@Brand{index},@SurfaceTreatment{index},@HeatTreatment{index},@Weight{index},@IsWearPart{index},@ImpactStage{index},@InventoryReplacementMaterialCode{index},@Revision{index},@IsComplete{index},@SourceDocumentId{index},@SourceConfiguration{index},@SourceInstancePath{index},@ParentDrawingNumber{index},@EngineeringKitReferenceId{index},@EngineeringKitId{index},@EngineeringKitRevisionId{index},@EngineeringKitCode{index},@EngineeringKitVersionNumber{index},@EngineeringKitComponentId{index},@EngineeringKitComponentOptional{index},@RelationAllocationsJson{index},@EngineeringKitRelationAllocationsJson{index},@IsSummaryQuantity{index},@Source{index},@IsManuallyOverridden{index},@IsPendingRemoval{index},@IsPendingClassification{index},@IsManualUnmatched{index},@IsManuallyRetained{index},@IsManuallyExcluded{index},@IsReleaseExcluded{index},@ReleaseExclusionReason{index},@ReconciliationStatus{index},@ReconciliationNote{index},@ReconciliationUpdatedBy{index},@ReconciliationUpdatedAt{index},@DeletedAt{index},@DeletedBy{index},@DeleteReason{index},@PropertyWritebackStatus{index},1,@Now{index})");
             }
             await connection.ExecuteAsync(new CommandDefinition(
-                "INSERT INTO bom_item(id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,heat_treatment,weight,is_wear_part,impact_stage,inventory_replacement_material_code,revision_label,is_complete,source_document_id,source_configuration,source_instance_path,parent_drawing_number,engineering_kit_reference_id,engineering_kit_id,engineering_kit_revision_id,engineering_kit_code,engineering_kit_version_no,engineering_kit_component_id,engineering_kit_component_optional,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,is_release_excluded,release_exclusion_reason,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status,row_version,updated_at) VALUES" + string.Join(",", valueRows)
-                    + " ON DUPLICATE KEY UPDATE project_id=VALUES(project_id),bom_kind=VALUES(bom_kind),sequence_no=VALUES(sequence_no),drawing_number=VALUES(drawing_number),name=VALUES(name),quantity=VALUES(quantity),unit=VALUES(unit),material=VALUES(material),specification=VALUES(specification),remark=VALUES(remark),brand=VALUES(brand),surface_treatment=VALUES(surface_treatment),heat_treatment=VALUES(heat_treatment),weight=VALUES(weight),is_wear_part=VALUES(is_wear_part),impact_stage=VALUES(impact_stage),inventory_replacement_material_code=VALUES(inventory_replacement_material_code),revision_label=VALUES(revision_label),is_complete=VALUES(is_complete),source_document_id=VALUES(source_document_id),source_configuration=VALUES(source_configuration),source_instance_path=VALUES(source_instance_path),parent_drawing_number=VALUES(parent_drawing_number),engineering_kit_reference_id=VALUES(engineering_kit_reference_id),engineering_kit_id=VALUES(engineering_kit_id),engineering_kit_revision_id=VALUES(engineering_kit_revision_id),engineering_kit_code=VALUES(engineering_kit_code),engineering_kit_version_no=VALUES(engineering_kit_version_no),engineering_kit_component_id=VALUES(engineering_kit_component_id),engineering_kit_component_optional=VALUES(engineering_kit_component_optional),item_source=VALUES(item_source),is_manually_overridden=VALUES(is_manually_overridden),is_pending_removal=VALUES(is_pending_removal),is_pending_classification=VALUES(is_pending_classification),is_manual_unmatched=VALUES(is_manual_unmatched),is_manually_retained=VALUES(is_manually_retained),is_manually_excluded=VALUES(is_manually_excluded),is_release_excluded=VALUES(is_release_excluded),release_exclusion_reason=VALUES(release_exclusion_reason),reconciliation_status=VALUES(reconciliation_status),reconciliation_note=VALUES(reconciliation_note),reconciliation_updated_by=VALUES(reconciliation_updated_by),reconciliation_updated_at=VALUES(reconciliation_updated_at),deleted_at=VALUES(deleted_at),deleted_by=VALUES(deleted_by),delete_reason=VALUES(delete_reason),property_writeback_status=VALUES(property_writeback_status),row_version=row_version+1,updated_at=VALUES(updated_at)",
+                "INSERT INTO bom_item(id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,heat_treatment,weight,is_wear_part,impact_stage,inventory_replacement_material_code,revision_label,is_complete,source_document_id,source_configuration,source_instance_path,parent_drawing_number,engineering_kit_reference_id,engineering_kit_id,engineering_kit_revision_id,engineering_kit_code,engineering_kit_version_no,engineering_kit_component_id,engineering_kit_component_optional,relation_allocations_json,engineering_kit_relation_allocations_json,is_summary_quantity,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,is_release_excluded,release_exclusion_reason,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status,row_version,updated_at) VALUES" + string.Join(",", valueRows)
+                    + " ON DUPLICATE KEY UPDATE project_id=VALUES(project_id),bom_kind=VALUES(bom_kind),sequence_no=VALUES(sequence_no),drawing_number=VALUES(drawing_number),name=VALUES(name),quantity=VALUES(quantity),unit=VALUES(unit),material=VALUES(material),specification=VALUES(specification),remark=VALUES(remark),brand=VALUES(brand),surface_treatment=VALUES(surface_treatment),heat_treatment=VALUES(heat_treatment),weight=VALUES(weight),is_wear_part=VALUES(is_wear_part),impact_stage=VALUES(impact_stage),inventory_replacement_material_code=VALUES(inventory_replacement_material_code),revision_label=VALUES(revision_label),is_complete=VALUES(is_complete),source_document_id=VALUES(source_document_id),source_configuration=VALUES(source_configuration),source_instance_path=VALUES(source_instance_path),parent_drawing_number=VALUES(parent_drawing_number),engineering_kit_reference_id=VALUES(engineering_kit_reference_id),engineering_kit_id=VALUES(engineering_kit_id),engineering_kit_revision_id=VALUES(engineering_kit_revision_id),engineering_kit_code=VALUES(engineering_kit_code),engineering_kit_version_no=VALUES(engineering_kit_version_no),engineering_kit_component_id=VALUES(engineering_kit_component_id),engineering_kit_component_optional=VALUES(engineering_kit_component_optional),relation_allocations_json=VALUES(relation_allocations_json),engineering_kit_relation_allocations_json=VALUES(engineering_kit_relation_allocations_json),is_summary_quantity=VALUES(is_summary_quantity),item_source=VALUES(item_source),is_manually_overridden=VALUES(is_manually_overridden),is_pending_removal=VALUES(is_pending_removal),is_pending_classification=VALUES(is_pending_classification),is_manual_unmatched=VALUES(is_manual_unmatched),is_manually_retained=VALUES(is_manually_retained),is_manually_excluded=VALUES(is_manually_excluded),is_release_excluded=VALUES(is_release_excluded),release_exclusion_reason=VALUES(release_exclusion_reason),reconciliation_status=VALUES(reconciliation_status),reconciliation_note=VALUES(reconciliation_note),reconciliation_updated_by=VALUES(reconciliation_updated_by),reconciliation_updated_at=VALUES(reconciliation_updated_at),deleted_at=VALUES(deleted_at),deleted_by=VALUES(deleted_by),delete_reason=VALUES(delete_reason),property_writeback_status=VALUES(property_writeback_status),row_version=row_version+1,updated_at=VALUES(updated_at)",
                 parameters, transaction, cancellationToken: cancellationToken));
         }
         await transaction.CommitAsync(cancellationToken);
@@ -1016,8 +1053,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         foreach (var item in allItems)
         {
             await connection.ExecuteAsync(new CommandDefinition(
-                "INSERT INTO bom_item(id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,heat_treatment,weight,is_wear_part,impact_stage,inventory_replacement_material_code,revision_label,is_complete,source_document_id,source_configuration,source_instance_path,parent_drawing_number,engineering_kit_reference_id,engineering_kit_id,engineering_kit_revision_id,engineering_kit_code,engineering_kit_version_no,engineering_kit_component_id,engineering_kit_component_optional,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,is_release_excluded,release_exclusion_reason,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status,row_version,updated_at) VALUES(@Id,@ProjectId,@Kind,@Sequence,@DrawingNumber,@Name,@Quantity,@Unit,@Material,@Specification,@Remark,@Brand,@SurfaceTreatment,@HeatTreatment,@Weight,@IsWearPart,@ImpactStage,@InventoryReplacementMaterialCode,@Revision,@IsComplete,@SourceDocumentId,@SourceConfiguration,@SourceInstancePath,@ParentDrawingNumber,@EngineeringKitReferenceId,@EngineeringKitId,@EngineeringKitRevisionId,@EngineeringKitCode,@EngineeringKitVersionNumber,@EngineeringKitComponentId,@EngineeringKitComponentOptional,@Source,@IsManuallyOverridden,@IsPendingRemoval,@IsPendingClassification,@IsManualUnmatched,@IsManuallyRetained,@IsManuallyExcluded,@IsReleaseExcluded,@ReleaseExclusionReason,@ReconciliationStatus,@ReconciliationNote,@ReconciliationUpdatedBy,@ReconciliationUpdatedAt,@DeletedAt,@DeletedBy,@DeleteReason,@PropertyWritebackStatus,1,@Now) ON DUPLICATE KEY UPDATE project_id=@ProjectId,bom_kind=@Kind,sequence_no=@Sequence,drawing_number=@DrawingNumber,name=@Name,quantity=@Quantity,unit=@Unit,material=@Material,specification=@Specification,remark=@Remark,brand=@Brand,surface_treatment=@SurfaceTreatment,heat_treatment=@HeatTreatment,weight=@Weight,is_wear_part=@IsWearPart,impact_stage=@ImpactStage,inventory_replacement_material_code=@InventoryReplacementMaterialCode,revision_label=@Revision,is_complete=@IsComplete,source_document_id=@SourceDocumentId,source_configuration=@SourceConfiguration,source_instance_path=@SourceInstancePath,parent_drawing_number=@ParentDrawingNumber,engineering_kit_reference_id=@EngineeringKitReferenceId,engineering_kit_id=@EngineeringKitId,engineering_kit_revision_id=@EngineeringKitRevisionId,engineering_kit_code=@EngineeringKitCode,engineering_kit_version_no=@EngineeringKitVersionNumber,engineering_kit_component_id=@EngineeringKitComponentId,engineering_kit_component_optional=@EngineeringKitComponentOptional,item_source=@Source,is_manually_overridden=@IsManuallyOverridden,is_pending_removal=@IsPendingRemoval,is_pending_classification=@IsPendingClassification,is_manual_unmatched=@IsManualUnmatched,is_manually_retained=@IsManuallyRetained,is_manually_excluded=@IsManuallyExcluded,is_release_excluded=@IsReleaseExcluded,release_exclusion_reason=@ReleaseExclusionReason,reconciliation_status=@ReconciliationStatus,reconciliation_note=@ReconciliationNote,reconciliation_updated_by=@ReconciliationUpdatedBy,reconciliation_updated_at=@ReconciliationUpdatedAt,deleted_at=@DeletedAt,deleted_by=@DeletedBy,delete_reason=@DeleteReason,property_writeback_status=@PropertyWritebackStatus,row_version=row_version+1,updated_at=@Now",
-                new { item.Id, ProjectId = projectId, Kind = item.Kind.ToString(), item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material, item.Specification, item.Remark, item.Brand, item.SurfaceTreatment, item.HeatTreatment, item.Weight, item.IsWearPart, item.ImpactStage, item.InventoryReplacementMaterialCode, Revision = item.Revision, item.IsComplete, item.SourceDocumentId, item.SourceConfiguration, item.SourceInstancePath, item.ParentDrawingNumber, item.EngineeringKitReferenceId, item.EngineeringKitId, item.EngineeringKitRevisionId, item.EngineeringKitCode, item.EngineeringKitVersionNumber, item.EngineeringKitComponentId, item.EngineeringKitComponentOptional, item.Source, item.IsManuallyOverridden, item.IsPendingRemoval, item.IsPendingClassification, item.IsManualUnmatched, item.IsManuallyRetained, item.IsManuallyExcluded, item.IsReleaseExcluded, item.ReleaseExclusionReason, item.ReconciliationStatus, item.ReconciliationNote, item.ReconciliationUpdatedBy, ReconciliationUpdatedAt = item.ReconciliationUpdatedAt?.UtcDateTime, DeletedAt = item.DeletedAt?.UtcDateTime, item.DeletedBy, item.DeleteReason, PropertyWritebackStatus = item.PropertyWritebackStatus?.ToString(), Now = now },
+                "INSERT INTO bom_item(id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,heat_treatment,weight,is_wear_part,impact_stage,inventory_replacement_material_code,revision_label,is_complete,source_document_id,source_configuration,source_instance_path,parent_drawing_number,engineering_kit_reference_id,engineering_kit_id,engineering_kit_revision_id,engineering_kit_code,engineering_kit_version_no,engineering_kit_component_id,engineering_kit_component_optional,relation_allocations_json,engineering_kit_relation_allocations_json,is_summary_quantity,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,is_release_excluded,release_exclusion_reason,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status,row_version,updated_at) VALUES(@Id,@ProjectId,@Kind,@Sequence,@DrawingNumber,@Name,@Quantity,@Unit,@Material,@Specification,@Remark,@Brand,@SurfaceTreatment,@HeatTreatment,@Weight,@IsWearPart,@ImpactStage,@InventoryReplacementMaterialCode,@Revision,@IsComplete,@SourceDocumentId,@SourceConfiguration,@SourceInstancePath,@ParentDrawingNumber,@EngineeringKitReferenceId,@EngineeringKitId,@EngineeringKitRevisionId,@EngineeringKitCode,@EngineeringKitVersionNumber,@EngineeringKitComponentId,@EngineeringKitComponentOptional,@RelationAllocationsJson,@EngineeringKitRelationAllocationsJson,@IsSummaryQuantity,@Source,@IsManuallyOverridden,@IsPendingRemoval,@IsPendingClassification,@IsManualUnmatched,@IsManuallyRetained,@IsManuallyExcluded,@IsReleaseExcluded,@ReleaseExclusionReason,@ReconciliationStatus,@ReconciliationNote,@ReconciliationUpdatedBy,@ReconciliationUpdatedAt,@DeletedAt,@DeletedBy,@DeleteReason,@PropertyWritebackStatus,1,@Now) ON DUPLICATE KEY UPDATE project_id=@ProjectId,bom_kind=@Kind,sequence_no=@Sequence,drawing_number=@DrawingNumber,name=@Name,quantity=@Quantity,unit=@Unit,material=@Material,specification=@Specification,remark=@Remark,brand=@Brand,surface_treatment=@SurfaceTreatment,heat_treatment=@HeatTreatment,weight=@Weight,is_wear_part=@IsWearPart,impact_stage=@ImpactStage,inventory_replacement_material_code=@InventoryReplacementMaterialCode,revision_label=@Revision,is_complete=@IsComplete,source_document_id=@SourceDocumentId,source_configuration=@SourceConfiguration,source_instance_path=@SourceInstancePath,parent_drawing_number=@ParentDrawingNumber,engineering_kit_reference_id=@EngineeringKitReferenceId,engineering_kit_id=@EngineeringKitId,engineering_kit_revision_id=@EngineeringKitRevisionId,engineering_kit_code=@EngineeringKitCode,engineering_kit_version_no=@EngineeringKitVersionNumber,engineering_kit_component_id=@EngineeringKitComponentId,engineering_kit_component_optional=@EngineeringKitComponentOptional,relation_allocations_json=@RelationAllocationsJson,engineering_kit_relation_allocations_json=@EngineeringKitRelationAllocationsJson,is_summary_quantity=@IsSummaryQuantity,item_source=@Source,is_manually_overridden=@IsManuallyOverridden,is_pending_removal=@IsPendingRemoval,is_pending_classification=@IsPendingClassification,is_manual_unmatched=@IsManualUnmatched,is_manually_retained=@IsManuallyRetained,is_manually_excluded=@IsManuallyExcluded,is_release_excluded=@IsReleaseExcluded,release_exclusion_reason=@ReleaseExclusionReason,reconciliation_status=@ReconciliationStatus,reconciliation_note=@ReconciliationNote,reconciliation_updated_by=@ReconciliationUpdatedBy,reconciliation_updated_at=@ReconciliationUpdatedAt,deleted_at=@DeletedAt,deleted_by=@DeletedBy,delete_reason=@DeleteReason,property_writeback_status=@PropertyWritebackStatus,row_version=row_version+1,updated_at=@Now",
+                new { item.Id, ProjectId = projectId, Kind = item.Kind.ToString(), item.Sequence, item.DrawingNumber, item.Name, item.Quantity, item.Unit, item.Material, item.Specification, item.Remark, item.Brand, item.SurfaceTreatment, item.HeatTreatment, item.Weight, item.IsWearPart, item.ImpactStage, item.InventoryReplacementMaterialCode, Revision = item.Revision, item.IsComplete, item.SourceDocumentId, item.SourceConfiguration, item.SourceInstancePath, item.ParentDrawingNumber, item.EngineeringKitReferenceId, item.EngineeringKitId, item.EngineeringKitRevisionId, item.EngineeringKitCode, item.EngineeringKitVersionNumber, item.EngineeringKitComponentId, item.EngineeringKitComponentOptional, RelationAllocationsJson = JsonSerializer.Serialize(item.RelationAllocations, jsonOptions), EngineeringKitRelationAllocationsJson = JsonSerializer.Serialize(item.EngineeringKitRelationAllocations, jsonOptions), item.IsSummaryQuantity, item.Source, item.IsManuallyOverridden, item.IsPendingRemoval, item.IsPendingClassification, item.IsManualUnmatched, item.IsManuallyRetained, item.IsManuallyExcluded, item.IsReleaseExcluded, item.ReleaseExclusionReason, item.ReconciliationStatus, item.ReconciliationNote, item.ReconciliationUpdatedBy, ReconciliationUpdatedAt = item.ReconciliationUpdatedAt?.UtcDateTime, DeletedAt = item.DeletedAt?.UtcDateTime, item.DeletedBy, item.DeleteReason, PropertyWritebackStatus = item.PropertyWritebackStatus?.ToString(), Now = now },
                 transaction, cancellationToken: cancellationToken));
         }
 
@@ -1054,7 +1091,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<BomRow>(new CommandDefinition(
-            "SELECT id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,heat_treatment,weight,is_wear_part,impact_stage,inventory_replacement_material_code,revision_label,is_complete,source_document_id,source_configuration,source_instance_path,parent_drawing_number,engineering_kit_reference_id,engineering_kit_id,engineering_kit_revision_id,engineering_kit_code,engineering_kit_version_no,engineering_kit_component_id,engineering_kit_component_optional,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,is_release_excluded,release_exclusion_reason,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status FROM bom_item WHERE project_id=@ProjectId AND id=@ItemId",
+            "SELECT id,project_id,bom_kind,sequence_no,drawing_number,name,quantity,unit,material,specification,remark,brand,surface_treatment,heat_treatment,weight,is_wear_part,impact_stage,inventory_replacement_material_code,revision_label,is_complete,source_document_id,source_configuration,source_instance_path,parent_drawing_number,engineering_kit_reference_id,engineering_kit_id,engineering_kit_revision_id,engineering_kit_code,engineering_kit_version_no,engineering_kit_component_id,engineering_kit_component_optional,relation_allocations_json,engineering_kit_relation_allocations_json,is_summary_quantity,item_source,is_manually_overridden,is_pending_removal,is_pending_classification,is_manual_unmatched,is_manually_retained,is_manually_excluded,is_release_excluded,release_exclusion_reason,reconciliation_status,reconciliation_note,reconciliation_updated_by,reconciliation_updated_at,deleted_at,deleted_by,delete_reason,property_writeback_status FROM bom_item WHERE project_id=@ProjectId AND id=@ItemId",
             new { ProjectId = projectId, ItemId = itemId }, cancellationToken: cancellationToken));
         return row is null ? null : MapBomItem(row);
     }
@@ -1579,7 +1616,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             RootDocumentCheckedOutBy = activity?.RootDocumentCheckedOutBy
         };
 
-    private static async Task<IReadOnlyList<Project>> MapProjectsAsync(DbConnection connection, DbTransaction? transaction, IEnumerable<ProjectRow> rows, CancellationToken cancellationToken, bool includeStatistics = true)
+    private async Task<IReadOnlyList<Project>> MapProjectsAsync(DbConnection connection, DbTransaction? transaction, IEnumerable<ProjectRow> rows, CancellationToken cancellationToken, bool includeStatistics = true)
     {
         var rowArray = rows.ToArray();
         if (rowArray.Length == 0) return [];
@@ -1628,7 +1665,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """,
             new { ProjectIds = rowArray.Select(row => row.Id).ToArray() }, transaction, cancellationToken: cancellationToken))).ToArray();
         var activity = activityRows.ToDictionary(item => item.ProjectId);
-        var documentCounts = await LoadReferenceDocumentCountsAsync(connection, transaction, rowArray, cancellationToken);
+        var documentCounts = await LoadReferenceDocumentCountsAsync(connection, transaction, rowArray, cancellationToken, connectionString);
         return rowArray.Select(row => MapProject(row, serials.GetValueOrDefault(row.Id, []), responsibles.GetValueOrDefault(row.Id),
             assignments, activity.GetValueOrDefault(row.Id)) with
         {
@@ -1962,6 +1999,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             SourceConfiguration = row.SourceConfiguration,
             SourceInstancePath = row.SourceInstancePath,
             ParentDrawingNumber = row.ParentDrawingNumber,
+            RelationMainBomItemId = row.RelationMainBomItemId,
+            IsSummaryQuantity = row.IsSummaryQuantity,
+            EngineeringKitRelationAllocations = string.IsNullOrWhiteSpace(row.EngineeringKitRelationAllocationsJson) ? [] : JsonSerializer.Deserialize<MaterialRelationAllocation[]>(row.EngineeringKitRelationAllocationsJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? [],
+            RelationAllocations = string.IsNullOrWhiteSpace(row.RelationAllocationsJson) ? [] : JsonSerializer.Deserialize<MaterialRelationAllocation[]>(row.RelationAllocationsJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? [],
             EngineeringKitReferenceId = row.EngineeringKitReferenceId,
             EngineeringKitId = row.EngineeringKitId,
             EngineeringKitRevisionId = row.EngineeringKitRevisionId,
@@ -2270,6 +2311,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public string? SourceConfiguration { get; init; }
         public string? SourceInstancePath { get; init; }
         public string? ParentDrawingNumber { get; init; }
+        public Guid? RelationMainBomItemId { get; init; }
+        public string? RelationAllocationsJson { get; init; }
+        public string? EngineeringKitRelationAllocationsJson { get; init; }
+        public bool IsSummaryQuantity { get; init; }
         public Guid? EngineeringKitReferenceId { get; init; }
         public Guid? EngineeringKitId { get; init; }
         public Guid? EngineeringKitRevisionId { get; init; }

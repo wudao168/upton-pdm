@@ -139,7 +139,7 @@ public static class U9MaterialPayloadFactory
             }
         }, JsonOptions);
 
-    public static string ModifyPayload(PdmMaterial material, string correlationId, string? u9UnitCode = null, PdmMaterial? previous = null)
+    public static string ModifyPayload(PdmMaterial material, string correlationId, string? u9UnitCode = null, PdmMaterial? previous = null, bool synchronizeAvailability = false)
     {
         var attributes = new List<Dictionary<string, object?>>
         {
@@ -163,6 +163,7 @@ public static class U9MaterialPayloadFactory
             attributes.RemoveAll(item => oldAttributes.TryGetValue((string)item["AttributeName"]!, out var oldValue)
                 && JsonElement.DeepEquals(oldValue, JsonSerializer.SerializeToElement(item, JsonOptions)));
         }
+        if (synchronizeAvailability) attributes.Add(Attribute("Effective.IsEffective", material.IsArchived ? "false" : "true"));
         return JsonSerializer.Serialize(new[]
         {
             new Dictionary<string, object?>
@@ -173,6 +174,15 @@ public static class U9MaterialPayloadFactory
             }
         }, JsonOptions);
     }
+
+    public static string AvailabilityPayload(string materialCode, bool enabled, string correlationId) => JsonSerializer.Serialize(new[]
+    {
+        new Dictionary<string,object?>
+        {
+            ["Code"]=materialCode,["OtherID"]=correlationId,
+            ["Attributes"]=new[]{Attribute("Effective.IsEffective", enabled ? "true" : "false")}
+        }
+    },JsonOptions);
 
     public static string ResolveUnitCode(string pdmUnitCode) => U9UnitCatalog.Normalize(pdmUnitCode);
 

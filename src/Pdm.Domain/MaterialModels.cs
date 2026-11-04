@@ -111,7 +111,8 @@ public enum MaterialSyncStatus
 public enum MaterialSyncOperation
 {
     Create = 0,
-    Update = 1
+    Update = 1,
+    SetAvailability = 2
 }
 
 public enum MaterialSyncBatchStatus
@@ -290,6 +291,9 @@ public sealed record PdmMaterial(
     public int Drawing2DAttachmentCount { get; init; }
     public int? EnabledDrawing2DVersion { get; init; }
     public int? EnabledModel3DVersion { get; init; }
+    public string? U9ReconciliationMessage { get; init; }
+    public DateTimeOffset? U9ReconciledAt { get; init; }
+    public bool? U9IsEffective { get; init; }
 }
 
 public sealed record StandardLibraryCategory(

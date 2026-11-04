@@ -8,6 +8,28 @@ namespace Pdm.Domain.Tests;
 public sealed class U9MaterialFullSyncServiceTests
 {
     [Fact]
+    public async Task SynchronizeAsync_RechecksMissingCodesAndNeverChangesPlmAvailability()
+    {
+        var now=DateTimeOffset.UtcNow;var materials=new InMemoryMaterialRepository(TimeProvider.System);var repository=new InMemoryPdmRepository(TimeProvider.System);
+        await materials.SaveIntegrationConfigurationAsync(new("http://u9.example.test/U9","01","7","pdm","PDM","protected:secret",U9MaterialContract.CreatePath,U9MaterialContract.QueryPath,false,"admin",now),default);
+        foreach(var category in await materials.ListCategoriesAsync(true,default))await materials.SaveCategoryAsync(category with{AllowCreate=category.Code=="0102"},category.RowVersion,default);
+        var rule=(await materials.FindCategoryAsync("0102",default))!;
+        foreach(var code in new[]{"01020000148","01020000149"})
+            await materials.UpsertU9MaterialAsync(new(Guid.NewGuid(),code,"同步漏料回查",MaterialKind.Standard,MaterialSupplyMode.Purchase,"001","MODEL-"+code,null,null,"U9品牌",null,null,null,null,
+                MaterialApprovalStatus.Approved,"admin",now,"0102","u9-"+code,code,MaterialSyncStatus.Succeeded,"admin",now,"admin",now,1,"0102",
+                U9SyncConfirmed:true,SourceSystem:MaterialDataSource.U9C,MasterOwner:MaterialMasterOwner.U9C,LastU9SyncedAt:now.AddDays(-2)),default);
+        var client=new RecordingClient();
+        foreach(var pair in new[]{("01020000148",false),("01020000149",true)})client.ExtraItems[pair.Item1]=new("u9-"+pair.Item1,pair.Item1,"同步漏料回查","MODEL-"+pair.Item1,"0102","机械外购件","001",9,"U9品牌")
+            {CreationAttributes=new Dictionary<string,string?>{["Effective.IsEffective"]=pair.Item2?"true":"false"}};
+        var run=await new U9MaterialFullSyncService(materials,repository,new TestProtector(),client,TimeProvider.System).SynchronizeAsync("admin","Test",default);
+        Assert.Equal(U9MaterialFullSyncStatus.Succeeded,run.Status);Assert.Equal(0,client.PostCallCount);
+        Assert.False((await materials.FindMaterialByCodeAsync("01020000149",default))!.IsArchived);
+        Assert.False((await materials.FindMaterialByCodeAsync("01020000148",default))!.IsArchived);
+        Assert.False((await materials.FindMaterialByCodeAsync("01020000148",default))!.U9IsEffective);
+        Assert.Contains("启停", (await materials.FindMaterialByCodeAsync("01020000148",default))!.U9ReconciliationMessage);
+        Assert.Equal(0,run.CategoryResults.Single(result=>result.CategoryCode=="0102").InactivatedCount);
+    }
+    [Fact]
     public async Task StockPlanning_StillRefreshesWhenAllMaterialCreationCategoriesAreClosed()
     {
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
@@ -86,13 +108,14 @@ public sealed class U9MaterialFullSyncServiceTests
         Assert.Contains("Code > '01020000151'", client.QueriedFilters["0102"][1]);
         Assert.Equal(2, run.DiscoveredCount);
         Assert.Equal(1, run.CreatedCount);
-        Assert.Equal(1, run.SkippedCount);
-        Assert.Equal(1, run.CategoryResults.Single(result => result.CategoryCode == "0102").ConflictCount);
-        Assert.Equal(1, run.CategoryResults.Single(result => result.CategoryCode == "0102").InactivatedCount);
+        Assert.Equal(0, run.SkippedCount);
+        Assert.Equal(2, run.CategoryResults.Single(result => result.CategoryCode == "0102").ConflictCount);
+        Assert.Equal(0, run.CategoryResults.Single(result => result.CategoryCode == "0102").InactivatedCount);
         Assert.Equal(0, client.PostCallCount);
-        Assert.Equal(MaterialMasterOwner.U9C, (await materials.FindMaterialByCodeAsync("01020000150", default))?.MasterOwner);
+        Assert.Equal(MaterialMasterOwner.Pdm, (await materials.FindMaterialByCodeAsync("01020000150", default))?.MasterOwner);
         Assert.Equal(MaterialMasterOwner.Pdm, (await materials.FindMaterialByCodeAsync("01020000151", default))?.MasterOwner);
-        Assert.True((await materials.FindMaterialByCodeAsync("01020000149", default))?.IsArchived);
+        Assert.False((await materials.FindMaterialByCodeAsync("01020000149", default))?.IsArchived);
+        Assert.Contains("未找到同号", (await materials.FindMaterialByCodeAsync("01020000149", default))?.U9ReconciliationMessage);
         var imported = await materials.FindMaterialByCodeAsync("01020000150", default);
         Assert.Equal("SPEC-01020000150", imported?.Specification);
         Assert.Equal("U9品牌", imported?.Brand);
@@ -233,6 +256,7 @@ public sealed class U9MaterialFullSyncServiceTests
         public int ExpiredDetailResponseCount { get; private set; }
         public IReadOnlyList<MaterialStockPlan>? NonZeroStockPlans { get; init; }
         public Dictionary<string, MaterialStockPlan> RecheckedStockPlans { get; } = new();
+        public Dictionary<string,U9ItemReference> ExtraItems { get; } = new(StringComparer.OrdinalIgnoreCase);
         public List<string[]> StockPlanQueries { get; } = [];
         public Task<IReadOnlyList<MaterialStockPlan>?> QueryStockPlansAsync(string baseUrl, string token, string enterpriseCode,
             string organizationCode, DateTimeOffset syncedAt, CancellationToken cancellationToken, IReadOnlyList<string>? materialCodes = null)
@@ -267,8 +291,9 @@ public sealed class U9MaterialFullSyncServiceTests
             var items = document.RootElement.EnumerateArray()
                 .Select(element => element.GetProperty("ItemMaster").GetProperty("Code").GetString())
                 .Where(code => !string.IsNullOrWhiteSpace(code)
-                    && !string.Equals(code, missingDetailCode, StringComparison.OrdinalIgnoreCase))
-                .Select(code => new U9ItemReference(
+                    && !string.Equals(code, missingDetailCode, StringComparison.OrdinalIgnoreCase)
+                    && (code is "01020000150" or "01020000151" || ExtraItems.ContainsKey(code)))
+                .Select(code => ExtraItems.GetValueOrDefault(code!) ?? new U9ItemReference(
                     $"u9-{code}", code, $"U9-{code}", $"SPEC-{code}", "0102", "机械外购件", "001",
                     9, "U9品牌", null, null, null, null, null, null)
                     { StockPlan = new("7", true, 10, 30, "001", "个") })

@@ -1,5 +1,6 @@
 import { installGlobalScrollbars } from './globalScrollbars'
 import { installContainerBorders } from './containerBorders'
+import { installCapsuleTabs } from './capsuleTabs'
 import { installButtonTypography } from './buttonTypography'
 import { installButtonStyles } from './buttonStyles'
 import { installPanelHeaderActions } from './panelHeaderActions'
@@ -19,6 +20,7 @@ import './styles/business.css'
 import './styles/interaction.css'
 import './styles/stat-cards.css'
 import './styles/material-stock-plans.css'
+import './styles/capsule-tabs.css'
 import { stockedMaterial } from './materialStockPlans'
 import App from './App.vue'
 import { installClientDiagnostics } from './clientDiagnostics'
@@ -44,5 +46,6 @@ if (!query.has('dingtalkOffice')) {
   installButtonStyles(app)
   installGlobalScrollbars(app)
   app.onUnmount(installContainerBorders())
+  app.onUnmount(installCapsuleTabs())
 }
 app.mount('#app')

@@ -148,25 +148,30 @@ internal static partial class Program
    var nativeParent=new Proxy(modelType,call=>call.MethodName=="GetPathName"?Get(parent,"FullPath"):throw new Exception("Unselected parent access: "+call.MethodName)).GetTransparentProxy();
    var view=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.View",true),call=>call.MethodName=="get_ReferencedDocument"?nativePart:call.MethodName=="get_ReferencedConfiguration"?"Default":throw new Exception("Unexpected view mutation "+call.MethodName)).GetTransparentProxy();
    var sheet=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Sheet",true),call=>call.MethodName=="GetName"?"SHEET1":throw new Exception(call.MethodName)).GetTransparentProxy();
-   var saves=0;var sheets=new List<string>();var dirty=false;
+   var saves=0;var sheets=new List<string>();var dirty=false;var drawingSha=WorkingReuseHash((string)Get(drawing,"FullPath"));
+   var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>{
+    if(call.MethodName!="SaveAs3")throw new Exception("Unexpected drawing extension call "+call.MethodName);
+    saves++;call.Args[5]=0;call.Args[6]=0;if(mode=="drawing-save-failed")return false;
+    File.WriteAllText((string)call.Args[0],"updated views for current model");dirty=false;return true;
+   }).GetTransparentProxy();
    var nativeDrawing=new SheetReferenceModelProxy(modelType,true,call=>{
     switch(call.MethodName)
     {
      case "GetType":return 3;case "GetPathName":return Get(drawing,"FullPath");case "GetTitle":return "PART.SLDDRW";case "GetSaveFlag":return dirty;case "IsOpenedReadOnly":return false;
+     case "GetUpdateStamp":return 1;case "get_Extension":return extension;case "get_SelectionManager":return null;case "SetSaveFlag":dirty=true;return null;
+     case "add_ModifyNotify":case "remove_ModifyNotify":case "add_DestroyNotify2":case "remove_DestroyNotify2":case "add_FileReloadNotify":case "remove_FileReloadNotify":return null;
      case "GetViews":return new object[]{new object[]{null,view}};case "GetCurrentSheet":return sheet;case "GetSheetNames":return new[]{"SHEET1","SHEET2"};
      case "ActivateSheet":sheets.Add((string)call.Args[0]);return true;
      case "ForceRebuild3":dirty=true;return mode!="view-rebuild-failed";
-     case "Save3":
-      saves++;if(mode=="drawing-save-failed")return false;
-      File.AppendAllText((string)Get(drawing,"FullPath"),"updated views for current model");dirty=false;return true;
      default:throw new Exception("Unexpected native drawing mutation "+call.MethodName);
     }
-   }).GetTransparentProxy();
+   },true).GetTransparentProxy();
    var app=new Proxy(appType,call=>{
     switch(call.MethodName)
     {
      case "GetType":return appType;
      case "GetDocuments":return new[]{nativeParent,nativePart,nativeDrawing};case "get_ActiveDoc":return nativeParent;
+     case "GetCurrentWorkingDirectory":return folder;case "SetCurrentWorkingDirectory":return true;
      case "ActivateDoc3":call.Args[3]=0;return (string)call.Args[0]=="PART.SLDDRW"?nativeDrawing:nativeParent;
      default:throw new Exception("Unexpected native window operation "+call.MethodName);
     }
@@ -180,10 +185,11 @@ internal static partial class Program
     if(mode=="success")
     {
      if(failure!=null)throw failure;
-     if(saves!=1||dirty||!sheets.Contains("SHEET2")||Get(drawing,"DrawingUpdatePendingReason")!=null||Convert.ToString(Get(drawing,"WorkState"))!="PendingCheckIn")throw new Exception("Paired drawing did not rebuild all sheets and save exactly once into a submittable state");
+     if(saves!=1||!dirty||TreeCall(plugin,"MemoryCopy",drawing)==null||!sheets.Contains("SHEET2")||Get(drawing,"DrawingUpdatePendingReason")!=null||Convert.ToString(Get(drawing,"WorkState"))!="PendingCheckIn")throw new Exception("Paired drawing did not rebuild all sheets and create exactly one current-state copy while retaining source state");
     }
     else if(failure==null||!failure.Message.Contains("尚未上传或升版")||string.IsNullOrWhiteSpace((string)Get(drawing,"DrawingUpdatePendingReason")))throw new Exception("Failed paired drawing update did not stop batch or retain diagnosis");
-    if(WorkingReuseHash((string)Get(model,"FullPath"))!=modelSha||WorkingReuseHash((string)Get(parent,"FullPath"))!=parentSha)throw new Exception("Paired drawing update changed an unselected file");
+    if(WorkingReuseHash((string)Get(model,"FullPath"))!=modelSha||WorkingReuseHash((string)Get(parent,"FullPath"))!=parentSha||WorkingReuseHash((string)Get(drawing,"FullPath"))!=drawingSha)throw new Exception("Paired drawing update changed a source file");
+    TreeCall(plugin,"PruneArchiveMemoryCopies",true);
     Console.WriteLine("PASS: paired drawing native API proxy update "+mode+"; all sheets rebuilt before archive, model/parent bytes retained; no upload before successful update");
    }
   }

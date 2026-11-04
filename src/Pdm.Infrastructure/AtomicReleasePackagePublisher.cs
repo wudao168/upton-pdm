@@ -51,6 +51,11 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
         standard = BomDrawingRevision.ForPackage(standard, package, preparingPublication: true).ToArray();
         nonStandard = BomDrawingRevision.ForPackage(nonStandard, package, preparingPublication: true).ToArray();
         electrical = BomDrawingRevision.ForPackage(electrical, package, preparingPublication: true).ToArray();
+        var supplementKind=package.Scope switch{ReleaseScope.StandardSupplement=>BomKind.Standard,
+            ReleaseScope.NonStandardSupplement=>BomKind.NonStandard,ReleaseScope.ElectricalSupplement=>BomKind.Electrical,_=>(BomKind?)null};
+        var supplementHistory=supplementKind.HasValue && repository is not null
+            ?await repository.ListReleasePackagesAsync(package.ProjectId,cancellationToken):[];
+        var supplementQuantities=supplementKind.HasValue?ReleaseQuantityComparison.Build(package,supplementKind.Value,supplementHistory):[];
         switch (package.Scope)
         {
             case ReleaseScope.StandardLongLead:
@@ -65,7 +70,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "standard-parts-bom.xlsx"), BomWorkbook.WriteStandardRelease(standard, prior), cancellationToken);
                 break;
             case ReleaseScope.StandardSupplement:
-                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "standard-parts-bom.xlsx"), BomWorkbook.Write(standard), cancellationToken);
+                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "standard-parts-bom.xlsx"), BomWorkbook.WriteSupplementRelease(standard,supplementQuantities), cancellationToken);
                 break;
             case ReleaseScope.NonStandardLongLead:
                 await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "long-lead-nonstandard-parts-bom.xlsx"), BomWorkbook.Write(nonStandard), cancellationToken);
@@ -74,10 +79,10 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "long-lead-electrical-bom.xlsx"), BomWorkbook.Write(electrical), cancellationToken);
                 break;
             case ReleaseScope.NonStandardSupplement:
-                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "nonstandard-parts-bom.xlsx"), BomWorkbook.Write(nonStandard), cancellationToken);
+                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "nonstandard-parts-bom.xlsx"), BomWorkbook.WriteSupplementRelease(nonStandard,supplementQuantities), cancellationToken);
                 break;
             case ReleaseScope.ElectricalSupplement:
-                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "electrical-bom.xlsx"), BomWorkbook.Write(electrical), cancellationToken);
+                await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, "electrical-bom.xlsx"), BomWorkbook.WriteSupplementRelease(electrical,supplementQuantities), cancellationToken);
                 break;
             case ReleaseScope.ElectricalFormal:
                 var electricalHistory = repository is null ? [] : await repository.ListReleasePackagesAsync(package.ProjectId, cancellationToken);
@@ -112,6 +117,7 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 timeProvider.GetUtcNow().ToOffset(TimeSpan.FromHours(8)), "—", "发布冻结BOM");
             metadata = metadata with { Fields = metadata.Fields.Select(field => field.Key == "整套数量"
                 ? new KeyValuePair<string, string>(field.Key, $"{Math.Max(1, package.WholeSetMultiplier)}套") : field).ToArray() };
+            if(supplementKind.HasValue) metadata=metadata with{Notes="完整目标基线（含未变更项）；需求净变更＝目标总量－前次基线－首次提前抵扣。负数表示减少需求，不代表已退料。"};
             var content = await File.ReadAllBytesAsync(path, cancellationToken);
             await File.WriteAllBytesAsync(path, ProjectWorkbookHeader.Apply(content, metadata), cancellationToken);
         }

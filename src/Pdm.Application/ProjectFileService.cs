@@ -6,7 +6,8 @@ public sealed class ProjectFileService(
     IPdmRepository repository,
     IProjectFileRepository files,
     IProjectFileStorage storage,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    IServerStoragePaths? paths = null)
 {
     public async Task<IReadOnlyList<ProjectFile>> ListAsync(Guid projectId, Guid? folderId, bool includeDeleted, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -64,7 +65,8 @@ public sealed class ProjectFileService(
         var folders = await VisibleFoldersAsync(projectId, actor, role, cancellationToken);
         RequireBusinessFolder(folders, folderId, FolderAccess.Upload);
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
-        return await storage.StartAsync(projectId, folderId, NormalizeName(fileName, "文件名"), totalLength, sha256, settings.VaultRoot, actor, cancellationToken);
+        var root = string.IsNullOrWhiteSpace(paths?.ProjectFileRoot) ? settings.VaultRoot : paths.ProjectFileRoot;
+        return await storage.StartAsync(projectId, folderId, NormalizeName(fileName, "文件名"), totalLength, sha256, root, actor, cancellationToken);
     }
 
     public Task<ProjectFileUploadSession> WriteChunkAsync(Guid sessionId, int chunkIndex, Stream content, string actor, CancellationToken cancellationToken) =>

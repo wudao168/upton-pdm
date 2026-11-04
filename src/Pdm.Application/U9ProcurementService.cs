@@ -43,7 +43,7 @@ public sealed class U9ProcurementService(
         var output = new List<ProjectProcurementTrackingItem>(published.Count);
         foreach (var line in published.Where(line => line.BomKind != "非标件").OrderBy(item => item.BomKind).ThenBy(item => item.Item.Sequence).ThenBy(item => item.Item.Id))
         {
-            var material = await materials.FindMaterialBySourceBomItemAsync(line.Item.Id, cancellationToken);
+            var material = line.IsDemandCanceled ? null : await materials.FindMaterialBySourceBomItemAsync(line.Item.Id, cancellationToken);
             var materialCode = Clean(material?.U9ItemCode) ?? Clean(material?.MaterialCode) ?? line.Item.DrawingNumber.Trim();
             var matching = sourceRows
                 .Where(row => string.Equals(row.MaterialCode, materialCode, StringComparison.OrdinalIgnoreCase))
@@ -79,7 +79,7 @@ public sealed class U9ProcurementService(
                 line.BomKind,
                 line.PackageNumbers,
                 DistinctDocuments(requisitions),
-                AggregateStatus(requisitions, "未请购"),
+                line.IsDemandCanceled ? "已取消" : AggregateStatus(requisitions, "未请购"),
                 Latest(requisitions.Select(row => row.DeliveryDate)),
                 DistinctDocuments(orders),
                 AggregateStatus(orders, "未采购"),
@@ -92,7 +92,9 @@ public sealed class U9ProcurementService(
                 activeRequisitions.Sum(row => row.ApprovedQuantity),
                 details)
             {
+                IsDemandCanceled = line.IsDemandCanceled,
                 Files = line.Files,
+                FilesFromCurrentBom = line.FilesFromCurrentBom,
                 ImpactStage = line.Item.ImpactStage,
                 AssemblyStartDate = assemblyStartDate,
                 CommissioningStartDate = commissioningStartDate
@@ -207,7 +209,7 @@ public sealed class U9ProcurementService(
         var files = new List<BomFileReference>();
         foreach (var line in lines.Where(line => line.BomKind != "非标件"))
         {
-            var material = await materials.FindMaterialBySourceBomItemAsync(line.Item.Id, ct);
+            var material = line.IsDemandCanceled ? null : await materials.FindMaterialBySourceBomItemAsync(line.Item.Id, ct);
             var purchaseCode = Clean(material?.U9ItemCode) ?? Clean(material?.MaterialCode) ?? line.Item.DrawingNumber.Trim();
             if (string.Equals(code, purchaseCode, StringComparison.OrdinalIgnoreCase)) files.AddRange(line.Files);
         }
@@ -290,30 +292,45 @@ public sealed class U9ProcurementService(
             .ToArray();
         var lines = new List<PublishedBomLine>();
         AddCategory(lines, packages, "标准件", package => package.Scope is ReleaseScope.StandardFormal or ReleaseScope.StandardSupplement or ReleaseScope.LegacyCombined,
-            package => package.StandardBomSnapshot, ReleaseScope.StandardLongLead);
+            package => package.StandardBomSnapshot, ReleaseScope.StandardLongLead, retainCanceled: true);
         AddCategory(lines, packages, "非标件", package => package.Scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement or ReleaseScope.LegacyCombined,
             package => package.NonStandardBomSnapshot, ReleaseScope.NonStandardLongLead);
         AddCategory(lines, packages, "电气件", package => package.Scope is ReleaseScope.ElectricalFormal or ReleaseScope.ElectricalSupplement or ReleaseScope.LegacyCombined,
-            package => package.ElectricalBomSnapshot, ReleaseScope.ElectricalLongLead);
+            package => package.ElectricalBomSnapshot, ReleaseScope.ElectricalLongLead, retainCanceled: true);
         var published = lines
-            .GroupBy(line => (line.Item.Id, line.BomKind))
+            .GroupBy(line => (line.Item.Id, line.BomKind, Material: BomReleaseAggregation.MaterialKey(line.Item)))
             .Select(group => new PublishedBomLine(
                 group.Last().Item,
                 group.Key.BomKind,
                 string.Join("、", group.Select(item => item.PackageNumbers).Distinct(StringComparer.OrdinalIgnoreCase)),
                 group.Sum(item => item.Quantity))
-                { Files = group.SelectMany(line => line.Files).DistinctBy(file => file.Id).ToArray() })
+                { IsDemandCanceled = group.All(line => line.IsDemandCanceled), Files = group.SelectMany(line => line.Files).DistinctBy(file => file.Id).ToArray() })
             .ToArray();
         var currentImpactStages = new Dictionary<Guid, string?>();
+        var currentStandardItems = new List<BomItem>();
         foreach (var kind in new[] { BomKind.Standard, BomKind.NonStandard, BomKind.Electrical })
         {
             foreach (var item in await repository.GetBomAsync(projectId, kind, cancellationToken))
             {
                 if (item.DeletedAt is null) currentImpactStages[item.Id] = item.ImpactStage;
+                if (kind == BomKind.Standard && item.DeletedAt is null) currentStandardItems.Add(item);
             }
         }
+        // 原发布记录为空时，备料补显当前项目BOM附件；已有发布引用和取消需求保持原快照。
+        var missingFileCodes = published.Where(line => !line.IsDemandCanceled && line.BomKind == "标准件" && line.Files.Count == 0)
+            .Select(line => line.Item.DrawingNumber.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (bomFiles is not null && missingFileCodes.Count > 0)
+        {
+            var currentFiles = await bomFiles.CaptureAsync(EffectiveItems(currentStandardItems)
+                .Where(item => missingFileCodes.Contains(item.DrawingNumber.Trim())).ToArray(), cancellationToken, refreshCurrent: true);
+            var filesByCode = currentFiles.GroupBy(item => item.DrawingNumber.Trim(), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.SelectMany(item => item.Files ?? []).DistinctBy(file => file.Id).ToArray(), StringComparer.OrdinalIgnoreCase);
+            published = published.Select(line => !line.IsDemandCanceled && line.BomKind == "标准件" && line.Files.Count == 0
+                && filesByCode.TryGetValue(line.Item.DrawingNumber.Trim(), out var files) && files.Length > 0
+                    ? line with { Files = files, FilesFromCurrentBom = true } : line).ToArray();
+        }
         return published
-            .Select(line => currentImpactStages.TryGetValue(line.Item.Id, out var impactStage)
+            .Select(line => !line.IsDemandCanceled && currentImpactStages.TryGetValue(line.Item.Id, out var impactStage)
                 ? line with { Item = line.Item with { ImpactStage = impactStage } }
                 : line)
             .ToArray();
@@ -325,20 +342,41 @@ public sealed class U9ProcurementService(
         string label,
         Func<ReleasePackage, bool> isBaseline,
         Func<ReleasePackage, IReadOnlyList<BomItem>> items,
-        ReleaseScope? longLeadScope)
+        ReleaseScope? longLeadScope,
+        bool retainCanceled = false)
     {
-        var baseline = packages.LastOrDefault(package => isBaseline(package) && items(package).Count > 0);
+        var history = retainCanceled ? packages.Where(package => isBaseline(package) || package.Scope == longLeadScope)
+            .SelectMany(package => EffectiveItems(items(package)).Where(item => item.Quantity > 0)
+                .Select(item => (Package: package, Item: item))).ToArray() : [];
+        var historicalIds = history.Select(value => value.Item.Id).ToHashSet();
+        var baseline = packages.LastOrDefault(package => isBaseline(package) && (items(package).Count > 0
+            || retainCanceled && (package.Scope != ReleaseScope.LegacyCombined
+                || package.ConfirmedRemovedBomItemIds.Any(historicalIds.Contains))));
+        var current = new List<PublishedBomLine>();
         if (baseline is not null)
         {
-            foreach (var item in EffectiveItems(items(baseline)))
-                target.Add(new(item, label, baseline.Number, item.Quantity * Math.Max(1, baseline.WholeSetMultiplier)) { Files = item.Files ?? [] });
+            foreach (var item in EffectiveItems(items(baseline)).Where(item => !retainCanceled || item.Quantity > 0))
+                current.Add(new(item, label, baseline.Number, item.Quantity * Math.Max(1, baseline.WholeSetMultiplier)) { Files = item.Files ?? [] });
         }
-        if (!longLeadScope.HasValue) return;
         var baselineAt = baseline?.PublishedAt;
-        foreach (var package in packages.Where(package => package.Scope == longLeadScope.Value
+        foreach (var package in packages.Where(package => longLeadScope.HasValue && package.Scope == longLeadScope.Value
                      && (!baselineAt.HasValue || package.PublishedAt > baselineAt)))
-            foreach (var item in EffectiveItems(items(package)))
-                target.Add(new(item, label, package.Number, item.Quantity * Math.Max(1, package.WholeSetMultiplier)) { Files = item.Files ?? [] });
+            foreach (var item in EffectiveItems(items(package)).Where(item => !retainCanceled || item.Quantity > 0))
+                current.Add(new(item, label, package.Number, item.Quantity * Math.Max(1, package.WholeSetMultiplier)) { Files = item.Files ?? [] });
+        foreach (var line in current) target.Add(line);
+        if (!retainCanceled || baseline is null) return;
+        var active = current.Select(line => BomReleaseAggregation.MaterialKey(line.Item)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var removed in history.GroupBy(value => BomReleaseAggregation.MaterialKey(value.Item), StringComparer.OrdinalIgnoreCase)
+                     .Where(group => !active.Contains(group.Key)))
+        {
+            var previous = removed.Last();
+            target.Add(new(previous.Item, label, baseline.Number, 0)
+            {
+                IsDemandCanceled = true,
+                Files = removed.Where(value => value.Package.Id == previous.Package.Id)
+                    .SelectMany(value => value.Item.Files ?? []).DistinctBy(file => file.Id).ToArray()
+            });
+        }
     }
 
     private async Task<U9ProcurementQueryResult> QueryAsync(
@@ -452,6 +490,8 @@ public sealed class U9ProcurementService(
 
     private sealed record PublishedBomLine(BomItem Item, string BomKind, string PackageNumbers, decimal Quantity)
     {
+        public bool IsDemandCanceled { get; init; }
         public IReadOnlyList<BomFileReference> Files { get; init; } = [];
+        public bool FilesFromCurrentBom { get; init; }
     }
 }

@@ -62,7 +62,12 @@ public sealed partial class MaterialRelationServiceTests
         var incomplete = await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default);
         Assert.False(incomplete.IsComplete);
         Assert.All(incomplete.MainMaterials.SelectMany(item => item.Groups), group => Assert.Equal("待核对", group.Status));
-        await service.EnsureCompleteAsync(project.Id, default);
+        var blocked = await Assert.ThrowsAsync<PdmRuleException>(() => service.EnsureCompleteAsync(project.Id, default));
+        Assert.Contains(motorA.MaterialCode, blocked.Message);
+        Assert.Contains(motorB.MaterialCode, blocked.Message);
+        Assert.Contains("第1行", blocked.Message);
+        Assert.Contains("第2行", blocked.Message);
+        Assert.Contains("控制器", blocked.Message);
 
         var unchanged = await service.ApplyAsync(project.Id,
         [
@@ -87,6 +92,8 @@ public sealed partial class MaterialRelationServiceTests
             .OrderBy(item => item.Quantity)
             .ToArray();
         Assert.Equal(2, accessoryRows.Length);
+        Assert.Equal(new[] { mainA.Id, mainB.Id }.Order(), accessoryRows.Select(item => item.RelationMainBomItemId!.Value).Order());
+        Assert.Equal(2, BomSummaryProjection.Group(accessoryRows).Count);
         Assert.Equal([2m, 3m], accessoryRows.Select(item => item.Quantity).ToArray());
         Assert.Equal(2, accessoryRows.Select(item => item.Id).Distinct().Count());
         Assert.Equal(2, (await relations.ListSelectionsAsync(project.Id, default)).Count);
@@ -99,7 +106,7 @@ public sealed partial class MaterialRelationServiceTests
         Assert.False(stale.MainMaterials.Single(item => item.MainBomItemId == mainA.Id).IsComplete);
         Assert.Contains("重新核对", stale.MainMaterials.Single(item => item.MainBomItemId == mainA.Id).Groups.Single().Status);
         Assert.True(stale.MainMaterials.Single(item => item.MainBomItemId == mainB.Id).IsComplete);
-        await service.EnsureCompleteAsync(project.Id, default);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.EnsureCompleteAsync(project.Id, default));
         var rechecked = await service.ApplyAsync(project.Id,
         [
             new ApplyMaterialRelationsCommand(mainA.Id, [new MaterialRelationChoice(groupA.Id, [groupA.Options.Single().Id])]),
@@ -183,13 +190,14 @@ public sealed partial class MaterialRelationServiceTests
         Assert.Equal(MaterialRelationReviewDecision.NoAccessory, groupCheck.ReviewDecision);
         Assert.Equal("仅补充主物料", groupCheck.ReviewReason);
         Assert.Empty(await relations.ListSelectionsAsync(project.Id, default));
+        await service.EnsureCompleteAsync(project.Id, default);
 
         await pdm.ReplaceBomAsync(project.Id, BomKind.Standard, [main with { Quantity = 3 }], default);
         var changed = await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default);
         var changedGroup = Assert.Single(Assert.Single(changed.MainMaterials).Groups);
         Assert.False(changedGroup.IsComplete);
         Assert.Equal("待核对", changedGroup.Status);
-        await service.EnsureCompleteAsync(project.Id, default);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.EnsureCompleteAsync(project.Id, default));
     }
 
     private static async Task<MaterialRelationTemplate> SaveAndPublishAsync(MaterialRelationService service, PdmMaterial main, PdmMaterial accessory)

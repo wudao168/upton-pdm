@@ -69,7 +69,8 @@ public sealed partial class PdmAddin
                 if (!history.Any(version => version.Id == owner.SuppressedArchiveVersion.Id && VersionMatchesFile(version, hash)))
                     throw new InvalidOperationException("历史引用所属装配的原存档版本未核对通过，尚未上传：" + owner.FileName);
             }
-            if (PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out var metadata)
+            if (PdmDocumentIdentityStore.IsControlledWorkspacePath(node.FullPath)
+                && PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out var metadata)
                 && metadata.ProjectId.HasValue && metadata.ProjectId != projectId)
                 throw new InvalidOperationException("历史引用仍绑定其他项目，不能自动改归属，尚未上传：" + node.FileName);
             if (node.IsModifiedInSolidWorks || node.IsRenamePendingSave || FindLoadedDocument(node.FullPath)?.GetSaveFlag() == true)

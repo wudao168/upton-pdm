@@ -408,11 +408,12 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
         }
     }
 
-    private string GetSessionDirectory(Guid sessionId) => Path.Combine(StorageLocationPolicy.Normalize(settings.UploadTempRoot), sessionId.ToString("N"));
+    private string GetSessionDirectory(Guid sessionId) => settings.UploadPath(sessionId.ToString("N"));
 
     private FileStream LockUpload(Guid sessionId)
     {
-        var directory = Path.Combine(StorageLocationPolicy.Normalize(settings.UploadTempRoot), "locks");
+        var root = Path.GetDirectoryName(GetSessionDirectory(sessionId))!;
+        var directory = Path.Combine(root, "locks");
         Directory.CreateDirectory(directory);
         return new FileStream(Path.Combine(directory, sessionId.ToString("N") + ".lock"), FileMode.OpenOrCreate,
             FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
@@ -444,14 +445,14 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
                     File.Delete(path);
                 }
                 var sessionDirectory = GetSessionDirectory(item.SessionId);
-                RequireOrdinaryPath(settings.UploadTempRoot, Path.Combine(sessionDirectory, "session.json"));
+                RequireOrdinaryPath(Path.GetDirectoryName(sessionDirectory)!, Path.Combine(sessionDirectory, "session.json"));
                 if (Directory.Exists(sessionDirectory))
                 {
                     // A session contains only its own metadata/chunks. Never recursively traverse links or unknown subdirectories.
                     if (Directory.EnumerateDirectories(sessionDirectory).Any()) throw new PdmRuleException("暂存目录含有未知子目录，已停止自动回收。");
                     foreach (var file in Directory.EnumerateFiles(sessionDirectory))
                     {
-                        RequireOrdinaryPath(settings.UploadTempRoot, file);
+                        RequireOrdinaryPath(Path.GetDirectoryName(sessionDirectory)!, file);
                         File.Delete(file);
                     }
                     Directory.Delete(sessionDirectory);
@@ -506,8 +507,7 @@ public sealed class LocalFileStorage(IOptions<PdmStorageOptions> options, IPdmRe
 
     private sealed record UploadCompletion(UploadSession Session, StoredFile File);
 
-    private string CompletionPath(Guid sessionId) => Path.Combine(StorageLocationPolicy.Normalize(settings.UploadTempRoot),
-        "completed", sessionId.ToString("N") + ".json");
+    private string CompletionPath(Guid sessionId) => settings.UploadPath(Path.Combine("completed", sessionId.ToString("N") + ".json"));
 
     private async Task<UploadCompletion?> ReadCompletionAsync(Guid sessionId, CancellationToken cancellationToken)
     {

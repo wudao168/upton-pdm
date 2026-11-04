@@ -42,11 +42,12 @@ public sealed class MaterialU9PendingSyncSeederHostedService(
         var candidates = new List<Guid>();
         foreach (var task in await materials.ListSyncTasksAsync(cancellationToken))
         {
-            if (task.Operation != MaterialSyncOperation.Create
-                || task.Status != MaterialSyncStatus.PreviewReady || task.AttemptCount != 0) continue;
+            if (task.Status != MaterialSyncStatus.PreviewReady || task.AttemptCount != 0) continue;
             var material = await materials.FindMaterialAsync(task.MaterialId, cancellationToken);
-            if (material is null || material.IsArchived || material.U9SyncConfirmed) continue;
-            if (material.ApprovalStatus != MaterialApprovalStatus.Approved) continue;
+            if (material is null) continue;
+            if (task.Operation == MaterialSyncOperation.Create && (material.IsArchived || material.U9SyncConfirmed)) continue;
+            if (task.Operation != MaterialSyncOperation.SetAvailability && (material.IsArchived || material.ApprovalStatus != MaterialApprovalStatus.Approved)) continue;
+            if (task.Operation != MaterialSyncOperation.Create && material.MasterOwner != MaterialMasterOwner.Pdm) continue;
             if ((await materials.ListSyncBatchItemsForTaskAsync(task.Id, cancellationToken)).Count > 0) continue;
             candidates.Add(task.Id);
         }

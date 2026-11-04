@@ -89,15 +89,20 @@ public sealed partial class PdmAddin
         // or ApplyWorkingStatesAsync (which can read every loaded CAD document).
         try
         {
-            var documents = await GetProjectDocumentsForNavigationAsync(projectId, token);
+            var documentsTask = GetProjectDocumentsForNavigationAsync(projectId, token);
+            var relationsTask = GetNavigationRelationsAsync(projectId, token);
+            await Task.WhenAll(documentsTask, relationsTask);
+            var documents = await documentsTask;
             token.ThrowIfCancellationRequested();
             if (!ReferenceEquals(tree, currentTree) || DeferBackgroundTreeRefresh()) return;
             var byId = documents.ToDictionary(item => item.Id);
             foreach (var node in EnumerateCadNodes(tree))
                 if (node.DocumentId.HasValue && byId.TryGetValue(node.DocumentId.Value, out var document))
                     ApplyCheckoutDocument(node, document);
+            ReconcilePassiveDrawings(tree, byId, await relationsTask);
             taskPaneControl.SetTree(tree);
-            if (tree.LocalStructureDeferred && tree.Children.Count == 0 && taskPaneControl.IsStructureTabVisible)
+            if (tree.LocalStructureDeferred && !tree.Children.Any(child => child.Kind != CadDocumentKind.Drawing
+                    && CadDesignTreeDisplay.IsStructureNode(child)) && taskPaneControl.IsStructureTabVisible)
                 await LoadPassiveStructureAsync(tree, projectId, byId, token);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
@@ -124,6 +129,11 @@ public sealed partial class PdmAddin
     private async Task LoadPassiveStructureAsync(CadTreeNode tree, Guid projectId,
         IReadOnlyDictionary<Guid, DocumentDto> documents, CancellationToken token)
     {
+        if (!CanExpandPassiveStructure(currentTree, tree))
+        {
+            tree.DisplayStructurePending = false;
+            return;
+        }
         if (!tree.DocumentId.HasValue || !passiveIndexLoads.Add(tree)) return;
         try
         {
@@ -135,10 +145,12 @@ public sealed partial class PdmAddin
                 boundVersion = binding.VersionId;
             if (boundVersion.HasValue && boundVersion != version?.Id)
                 version = (await apiClient.GetVersionsAsync(tree.DocumentId.Value, token)).FirstOrDefault(item => item.Id == boundVersion);
+            var relations = await GetNavigationRelationsAsync(projectId, token);
             token.ThrowIfCancellationRequested();
-            if (!EnumerateCadNodes(currentTree).Contains(tree) || currentProjectId != projectId || DeferBackgroundTreeRefresh()
+            if (!CanExpandPassiveStructure(currentTree, tree) || currentProjectId != projectId || DeferBackgroundTreeRefresh()
                 || version?.ReferenceSnapshot?.DocumentId != tree.DocumentId) return;
             var indexed = MapProjectTree(version.ReferenceSnapshot, documents, true);
+            ReconcileProjectDrawings(indexed, documents, relations);
             if (!ReferenceEquals(tree, currentTree) && !string.IsNullOrWhiteSpace(tree.Configuration)
                 && !string.Equals(tree.Configuration, indexed.Configuration, StringComparison.OrdinalIgnoreCase)) return;
             var context = controlledOpenManifests.FirstOrDefault(pair => IsPathWithinDirectory(currentTree.FullPath, pair.Key));
@@ -154,7 +166,9 @@ public sealed partial class PdmAddin
                     node.OpenedVersionId = matches[0].VersionId;
                 }
                 node.LocalStructureDeferred = true;
-                node.DisplayStructurePending = node.Kind == CadDocumentKind.Assembly && node.DocumentId.HasValue && node.Children.Count == 0;
+                node.DisplayStructurePending = CadDesignTreeDisplay.IsStructureNode(node)
+                    && node.Kind == CadDocumentKind.Assembly && node.DocumentId.HasValue
+                    && !node.Children.Any(child => child.Kind != CadDocumentKind.Drawing && CadDesignTreeDisplay.IsStructureNode(child));
                 if (!ReferenceEquals(tree, currentTree) && !string.IsNullOrWhiteSpace(indexed.InstancePath)
                     && node.InstancePath.StartsWith(indexed.InstancePath + "/", StringComparison.OrdinalIgnoreCase))
                     node.InstancePath = tree.InstancePath + node.InstancePath.Substring(indexed.InstancePath.Length);
@@ -165,10 +179,59 @@ public sealed partial class PdmAddin
             tree.OpenedVersionId = version.Id;
             tree.CurrentRevision = version.Revision?.Display ?? tree.CurrentRevision;
             tree.DisplayStructurePending = false;
+            ReconcilePassiveDrawings(tree, documents, relations);
             taskPaneControl.SetTree(currentTree);
             taskPaneControl.SetTreeLoadingStatus("已显示PLM结构索引；存档时核对本地实际结构。");
         }
         finally { passiveIndexLoads.Remove(tree); }
+    }
+
+    private void ReconcilePassiveDrawings(CadTreeNode tree, IReadOnlyDictionary<Guid, DocumentDto> documents,
+        IReadOnlyList<DocumentModelDrawingRelationDto> relations)
+    {
+        ReconcileProjectDrawings(tree, documents, relations);
+        var context = controlledOpenManifests.FirstOrDefault(pair => IsPathWithinDirectory(currentTree.FullPath, pair.Key));
+        foreach (var model in EnumerateCadNodes(tree).Where(node => node.Kind != CadDocumentKind.Drawing))
+            foreach (var drawing in model.Children.Where(node => node.Kind == CadDocumentKind.Drawing))
+            {
+                if (string.IsNullOrWhiteSpace(drawing.FullPath) && context.Value != null)
+                {
+                    var matches = context.Value.Files.Where(file => file.DocumentId == drawing.DocumentId).Take(2).ToArray();
+                    if (matches.Length == 1)
+                    {
+                        var path = Path.GetFullPath(Path.Combine(context.Key, matches[0].RelativePath ?? matches[0].FileName));
+                        if (IsPathWithinDirectory(path, context.Key))
+                        {
+                            drawing.FullPath = path;
+                            drawing.OpenedVersionId = matches[0].VersionId;
+                        }
+                    }
+                }
+                if (!drawing.ReferencedModels.Any(reference => reference.DocumentId == model.DocumentId))
+                    drawing.ReferencedModels.Add(model);
+            }
+    }
+
+    private static bool CanExpandPassiveStructure(CadTreeNode root, CadTreeNode target)
+    {
+        if (root == null || !CadDesignTreeDisplay.IsStructureNode(target)) return false;
+        var parents = new Dictionary<CadTreeNode, CadTreeNode> { [root] = null };
+        var pending = new Stack<CadTreeNode>();
+        pending.Push(root);
+        while (pending.Count > 0)
+        {
+            var node = pending.Pop();
+            if (ReferenceEquals(node, target))
+            {
+                var identity = CadDesignTreeDisplay.Identity(target);
+                for (var parent = parents[node]; parent != null; parent = parents[parent])
+                    if (string.Equals(CadDesignTreeDisplay.Identity(parent), identity, StringComparison.OrdinalIgnoreCase)) return false;
+                return true;
+            }
+            foreach (var child in node.Children.Where(CadDesignTreeDisplay.IsStructureNode))
+                if (!parents.ContainsKey(child)) { parents[child] = node; pending.Push(child); }
+        }
+        return false;
     }
 
     private CadTreeNodeEventArgs EnsureNativeTreeForOperation(CadTreeNodeEventArgs selection)

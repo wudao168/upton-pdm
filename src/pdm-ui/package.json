@@ -24,7 +24,6 @@
     "pinyin-pro": "3.29.5",
     "three": "^0.185.1",
     "vue": "3.5.41",
-    "vue-router": "4.6.4",
     "zxing-wasm": "3.1.6"
   },
   "devDependencies": {

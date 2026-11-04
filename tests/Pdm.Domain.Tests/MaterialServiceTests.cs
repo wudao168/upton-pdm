@@ -6,7 +6,7 @@ using Upton.Pdm.Infrastructure;
 
 namespace Upton.Pdm.Domain.Tests;
 
-public sealed class MaterialServiceTests
+public sealed partial class MaterialServiceTests
 {
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
@@ -797,33 +797,19 @@ public sealed class MaterialServiceTests
     }
 
     [Fact]
-    public async Task Reactivate_U9ControlledMaterialRequiresExactLiveU9Match()
+    public async Task Reactivate_U9SourceQueuesExactCodeWithoutCallingU9DuringSave()
     {
-        var service = CreateService(out var materials, out var u9Client);
-        var material = await service.CreateAsync(new(
-            null, "U9C停用料品", MaterialKind.Electrical, MaterialSupplyMode.Purchase, "001",
-            "E3Z", null, null, "OMRON", null, null, null, CategoryCode: "0101"),
-            "admin", UserRole.Administrator, default);
-        var u9Owned = await materials.UpdateMaterialAsync(material with
-        {
-            SourceSystem = MaterialDataSource.U9C,
-            MasterOwner = MaterialMasterOwner.U9C
-        }, material.RowVersion, default);
-        var archived = await materials.ArchiveMaterialAsync(
-            u9Owned.Id, u9Owned.RowVersion, "admin", DateTimeOffset.UtcNow, default);
-
-        var missing = await Assert.ThrowsAsync<PdmRuleException>(() => service.ReactivateAsync(
-            archived.Id, archived.RowVersion, "admin", UserRole.Administrator, default));
-        Assert.Contains("U9C未找到料品", missing.Message);
-        Assert.True((await materials.FindMaterialAsync(archived.Id, default))!.IsArchived);
-
-        u9Client.ItemsByCode[archived.MaterialCode] = new U9ItemReference("u9-item", archived.MaterialCode);
-        var reactivated = await service.ReactivateAsync(
-            archived.Id, archived.RowVersion, "admin", UserRole.Administrator, default);
-
-        Assert.False(reactivated.IsArchived);
-        Assert.Equal(2, u9Client.AuthenticationCount);
-        Assert.Equal([archived.MaterialCode, archived.MaterialCode], u9Client.QueriedCodes.ToArray());
+        var service = CreateService(out var materials, out var client);
+        var archived = await ArchivedU9Material(materials, service);
+        var result = await service.ReactivateAsync(archived.Id, archived.RowVersion, "admin", UserRole.Administrator, default);
+        Assert.False(result.IsArchived);
+        Assert.Equal(MaterialMasterOwner.Pdm, result.MasterOwner);
+        Assert.Equal(MaterialSyncStatus.PreviewReady, result.SyncStatus);
+        var task = Assert.Single(await materials.ListSyncTasksAsync(default));
+        Assert.Equal(MaterialSyncOperation.SetAvailability, task.Operation);
+        using var payload = JsonDocument.Parse(task.PayloadJson);
+        Assert.Equal(archived.MaterialCode, payload.RootElement[0].GetProperty("Code").GetString());
+        Assert.Equal(0, client.AuthenticationCount);
     }
 
     [Fact]
@@ -984,7 +970,8 @@ public sealed class MaterialServiceTests
 
         Assert.False(readiness.IsPdmMaster);
         Assert.False(readiness.LocalDeletePreconditionsPassed);
-        Assert.Contains("PLM来源且PLM主控", exception.Message);
+        Assert.Contains("仅PLM建档来源", exception.Message);
+        Assert.Contains("U9C历史来源料品请使用停用", exception.Message);
         Assert.NotNull(await materials.FindMaterialAsync(u9Owned.Id, default));
     }
 
@@ -2252,18 +2239,23 @@ public sealed class MaterialServiceTests
         public ConcurrentQueue<string> ReferencePayloads { get; } = new();
         public ConcurrentQueue<string> ReferenceTokens { get; } = new();
         public int AuthenticationCount { get; private set; }
+        public Exception? AuthenticationError { get; set; }
         public int UomQueryCount { get; private set; }
         public bool ExpireNextReferenceQuery { get; set; }
         public bool UseReferenceCursor { get; set; }
         public bool IgnoreReferenceCursor { get; set; }
         public U9BusinessBatchResult DeleteResult { get; set; } = new(0, null, [new(true, null, null, null)]);
         public bool DeleteRemovesItem { get; set; } = true;
+        public U9BusinessBatchResult ModifyResult { get; set; } = new(0,null,[new(true,null,null,null)]);
+        public bool ModifyEnablesItem { get; set; } = true;
+        public int ModifyCount { get; private set; }
         public string LastPostPath { get; private set; } = string.Empty;
         public string LastPostPayload { get; private set; } = string.Empty;
 
         public Task<U9AuthenticationResult> AuthenticateAsync(U9AuthenticationRequest request, CancellationToken cancellationToken)
         {
             AuthenticationCount++;
+            if (AuthenticationError is not null) throw AuthenticationError;
             return Task.FromResult(new U9AuthenticationResult($"token-{AuthenticationCount}"));
         }
 
@@ -2281,6 +2273,14 @@ public sealed class MaterialServiceTests
         public Task<U9BusinessBatchResult> PostBatchAsync(
             string baseUrl, string path, string token, string payloadJson, CancellationToken cancellationToken)
         {
+            if(string.Equals(path,U9MaterialContract.ModifyPath,StringComparison.OrdinalIgnoreCase))
+            {
+                ModifyCount++;LastPostPath=path;LastPostPayload=payloadJson;
+                using var update=JsonDocument.Parse(payloadJson);var itemCode=update.RootElement[0].GetProperty("Code").GetString()!;
+                if(ModifyEnablesItem&&ModifyResult.ResponseCode==0&&ModifyResult.Rows.All(row=>row.IsSuccess)&&ItemsByCode.TryGetValue(itemCode,out var current))
+                    ItemsByCode[itemCode]=current with{CreationAttributes=new Dictionary<string,string?>(current.CreationAttributes){["Effective.IsEffective"]=update.RootElement[0].GetProperty("Attributes")[0].GetProperty("AttributeValue").GetString()}};
+                return Task.FromResult(ModifyResult);
+            }
             if (!string.Equals(path, U9MaterialContract.DeletePath, StringComparison.OrdinalIgnoreCase))
                 throw new NotSupportedException();
             LastPostPath = path;

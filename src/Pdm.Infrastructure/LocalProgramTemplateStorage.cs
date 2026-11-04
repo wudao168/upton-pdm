@@ -126,7 +126,7 @@ public sealed class LocalProgramTemplateStorage(IOptions<PdmStorageOptions> opti
 
     public async Task VerifyAsync(string relativePath, long length, string sha256, CancellationToken cancellationToken)
     {
-        var path = StorageLocationPolicy.ResolveUnder(StorageLocationPolicy.Normalize(settings.ProgramTemplateRoot), relativePath);
+        var path = settings.ProgramFilePath(relativePath);
         if (!File.Exists(path)) throw new PdmNotFoundException("程序模板文件不存在。");
         if (new FileInfo(path).Length != length) throw new PdmConflictException("程序模板文件长度校验失败。");
         await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
@@ -137,7 +137,7 @@ public sealed class LocalProgramTemplateStorage(IOptions<PdmStorageOptions> opti
 
     public Task<Stream> OpenReadAsync(string relativePath, CancellationToken cancellationToken)
     {
-        var path = StorageLocationPolicy.ResolveUnder(StorageLocationPolicy.Normalize(settings.ProgramTemplateRoot), relativePath);
+        var path = settings.ProgramFilePath(relativePath);
         Stream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         return Task.FromResult(stream);
     }
@@ -153,7 +153,7 @@ public sealed class LocalProgramTemplateStorage(IOptions<PdmStorageOptions> opti
         return Task.CompletedTask;
     }
 
-    private string GetSessionDirectory(Guid sessionId) => Path.Combine(StorageLocationPolicy.Normalize(settings.UploadTempRoot), $"program-template-{sessionId:N}");
+    private string GetSessionDirectory(Guid sessionId) => settings.UploadPath($"program-template-{sessionId:N}");
 
     private async Task<ProgramTemplateUploadSession> ReadMetadataAsync(Guid sessionId, CancellationToken cancellationToken)
     {

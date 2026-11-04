@@ -35,12 +35,33 @@ const bomItem: BomItem = {
 }
 
 describe('PreviewWorkspace', () => {
+  it('全屏与还原保留同一个预览节点，Esc和离开页面可退出', async () => {
+    const wrapper = mount(PreviewWorkspace, { props: { selected, related: [], desktopAvailable: true, active: true } })
+    const slot = wrapper.get('.pdm-embedded-preview-slot').element
+    await wrapper.get('button[aria-label="全屏预览"]').trigger('click')
+    expect(wrapper.classes()).toContain('is-maximized')
+    expect(wrapper.get('.pdm-embedded-preview-slot').element).toBe(slot)
+    expect(wrapper.get('button[aria-label="还原预览"]').attributes('aria-pressed')).toBe('true')
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await nextTick()
+    expect(wrapper.classes()).not.toContain('is-maximized')
+    await wrapper.get('button[aria-label="全屏预览"]').trigger('click')
+    await wrapper.get('button[aria-label="还原预览"]').trigger('click')
+    expect(wrapper.classes()).not.toContain('is-maximized')
+    await wrapper.get('button[aria-label="全屏预览"]').trigger('click')
+    await wrapper.setProps({ active: false })
+    expect(wrapper.classes()).not.toContain('is-maximized')
+    expect(wrapper.get('.pdm-embedded-preview-slot').element).toBe(slot)
+    expect(wrapper.emitted('open')).toBeUndefined()
+    expect(wrapper.emitted('preview')).toBeUndefined()
+    wrapper.unmount()
+  })
   it('总装只有打开最新入口且始终发送只读请求', async () => {
     const assembly = { ...selected, kind: 'Assembly' as const, fileName: 'ROOT.SLDASM' }
     const wrapper = mount(PreviewWorkspace, { props: { selected: assembly, related: [], desktopAvailable: true, canEditDocuments: true } })
     window.dispatchEvent(new CustomEvent('pdm-solidworks-capability', { detail: { available: true } }))
     await nextTick()
-    expect(wrapper.find('.pdm-solidworks-actions').findAll('button')).toHaveLength(1)
+    expect(wrapper.find('.pdm-solidworks-actions').findAll('button:not(.pdm-preview-maximize)')).toHaveLength(1)
     await wrapper.get('button[aria-label="打开最新"]').trigger('click')
     expect(wrapper.emitted('open')?.[0]).toEqual([assembly, 'LatestReadOnly', undefined])
     wrapper.unmount()
@@ -142,7 +163,7 @@ describe('PreviewWorkspace', () => {
       '引线批注', '云线批注', '框选批注', '手绘批注',
     ])
     expect(wrapper.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual([
-      '打开最新', '保存批注',
+      '全屏预览', '打开最新', '保存批注',
     ])
     expect(wrapper.find('button[aria-label="使用位置"]').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="作废图档"]').exists()).toBe(false)
@@ -164,11 +185,11 @@ describe('PreviewWorkspace', () => {
     window.dispatchEvent(new CustomEvent('pdm-solidworks-capability', { detail: { available: true } }))
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual(['打开审核版', '保存批注'])
+    expect(wrapper.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual(['全屏预览', '打开审核版', '保存批注'])
 
     await wrapper.setProps({ reviewEditable: true })
 
-    expect(wrapper.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual(['打开审核版', '保存批注'])
+    expect(wrapper.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual(['全屏预览', '打开审核版', '保存批注'])
     expect(wrapper.find('button[aria-label="编辑打开"]').exists()).toBe(false)
   })
 

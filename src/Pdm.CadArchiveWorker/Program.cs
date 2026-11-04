@@ -18,6 +18,8 @@ internal static class Program
     [STAThread] private static int Main(string[] args)
     {
         if (args.Length == 2 && args[0] == "--watch") return Watch(Path.GetFullPath(args[1]));
+        if (args.Length == 2 && args[0] == "--watch-config") return Watch(Path.GetFullPath(args[1]), true);
+        if (args.Length == 2 && args[0] == "--watch-roots") { Console.WriteLine(Json.Serialize(WatchRoots(args[1], true))); return 0; }
         if (args.Length != 2) return 2;
         System.Windows.Forms.Application.OleRequired();
         var result = Path.GetFullPath(args[1]); Process owned = null; SldWorks app = null;
@@ -166,19 +168,44 @@ internal static class Program
             if (owned != null) { if (!owned.HasExited && !owned.WaitForExit(15000)) owned.Kill(); owned.Dispose(); }
         }
     }
-    private static int Watch(string directory)
+    private static string[] WatchRoots(string location, bool configuration)
     {
-        Directory.CreateDirectory(directory);
+        string[] values;
+        if (configuration)
+        {
+            using (var input = new FileStream(location, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var reader = new StreamReader(input, Encoding.UTF8))
+                values = reader.ReadToEnd().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        }
+        else values = new[] { location };
+        if (values.Length == 0 || values.Any(path => !Path.IsPathRooted(path))) throw new InvalidDataException("网页存档监视目录配置无效，请在系统设置中重新保存。");
+        return values.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+    private static int Watch(string location, bool configuration = false)
+    {
         using (var mutex = new Mutex(false, "Local\\UPLM-CadArchiveWorker"))
         {
             if (!mutex.WaitOne(0)) return 0;
-            File.WriteAllText(Path.Combine(directory, "worker-ready.json"), Json.Serialize(new { ProcessId = Process.GetCurrentProcess().Id, StartedAt = DateTime.UtcNow }));
             while (true)
             {
-                File.WriteAllText(Path.Combine(directory, "worker-heartbeat.txt"), DateTime.UtcNow.ToString("O"));
-                foreach (var request in Directory.GetDirectories(directory).Where(path => Guid.TryParseExact(Path.GetFileName(path), "N", out _))
+                if (configuration && File.Exists(location + ".pause"))
+                {
+                    Atomic(location + ".paused", Json.Serialize(new { ProcessId = Process.GetCurrentProcess().Id, PausedAt = DateTime.UtcNow }));
+                    Thread.Sleep(250);
+                    continue;
+                }
+                if (configuration && File.Exists(location + ".paused")) File.Delete(location + ".paused");
+                var roots = WatchRoots(location, configuration);
+                foreach (var directory in roots)
+                {
+                    Directory.CreateDirectory(directory);
+                    File.WriteAllText(Path.Combine(directory, "worker-ready.json"), Json.Serialize(new { ProcessId = Process.GetCurrentProcess().Id, StartedAt = DateTime.UtcNow }));
+                    File.WriteAllText(Path.Combine(directory, "worker-heartbeat.txt"), DateTime.UtcNow.ToString("O"));
+                }
+                foreach (var request in roots.SelectMany(Directory.GetDirectories).Where(path => Guid.TryParseExact(Path.GetFileName(path), "N", out _))
                     .Select(path => Path.Combine(path, "native-request.json")).Where(File.Exists))
                 {
+                    if (configuration && File.Exists(location + ".pause")) break;
                     var result = Path.Combine(Path.GetDirectoryName(request), "native-result.json");
                     var previewsResult = Path.Combine(Path.GetDirectoryName(result), "native-previews.json");
                     var attemptsPath = Path.Combine(Path.GetDirectoryName(result), "native-preview-attempts.json");

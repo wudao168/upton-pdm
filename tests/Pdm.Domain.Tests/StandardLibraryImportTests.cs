@@ -17,7 +17,7 @@ public sealed class StandardLibraryImportTests
         Assert.Contains(result.Rows, row => row.MaterialCode == "missing" && row.Message.Contains("未找到"));
         var saved = (await f.Materials.FindMaterialByCodeAsync("01020000001", default))!;
         Assert.Equal("ERP名称", saved.Name); Assert.Equal("ERP型号", saved.Specification); Assert.Equal("ERP品牌", saved.Brand); Assert.Equal("001", saved.UnitCode);
-        Assert.Equal(MaterialMasterOwner.U9C, saved.MasterOwner); Assert.True(saved.U9SyncConfirmed);
+        Assert.Equal(MaterialMasterOwner.Pdm, saved.MasterOwner); Assert.True(saved.U9SyncConfirmed);
         var page = await f.Library.ListMaterialsAsync(new(StandardLibraryDefaults.UncategorizedId, null, null, false, 1, 50), "admin", UserRole.Administrator, default);
         Assert.Single(page.Items); Assert.Equal(saved.Id, page.Items[0].Material.Id);
         var again = await f.Import.ImportAsync(["01020000001"], "admin", UserRole.Administrator, default);
@@ -37,7 +37,8 @@ public sealed class StandardLibraryImportTests
         f.Client.Items = [Item(saved.MaterialCode) with { U9ItemName = "ERP新名称" }];
         await f.Import.ImportAsync([saved.MaterialCode], "admin", UserRole.Administrator, default);
         var refreshed = (await f.Materials.FindMaterialByCodeAsync(saved.MaterialCode, default))!;
-        Assert.Equal("ERP新名称", refreshed.Name); Assert.Equal(saved.SelectionAdvice, refreshed.SelectionAdvice); Assert.True(refreshed.IsRecommended); Assert.Equal(25m, refreshed.ReferencePrice);
+        Assert.Equal("ERP名称", refreshed.Name); Assert.Contains("ERP新名称", refreshed.U9ReconciliationMessage);
+        Assert.Equal(saved.SelectionAdvice, refreshed.SelectionAdvice); Assert.True(refreshed.IsRecommended); Assert.Equal(25m, refreshed.ReferencePrice);
         var memberships = await f.Store.ListMembershipsAsync(default);
         Assert.Equal(category.Id, Assert.Single(memberships).CategoryId);
         await Assert.ThrowsAsync<PdmRuleException>(() => f.Library.DeleteCategoryAsync(StandardLibraryDefaults.UncategorizedId, 1, "admin", UserRole.Administrator, default));

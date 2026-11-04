@@ -86,7 +86,7 @@ internal static partial class Program
     await TreeWait(()=>ArchiveUi(session,()=>!((Panel)Field(ArchiveWindow(session),"confirmationHost")).Visible),"取消项目选择后未恢复原存档页");
     ArchiveUi(session,()=>{Check((Guid?)Get(Batch(),"SelectedProjectId")== (Guid)Get(initial,"Id")&&((Panel)Field(ArchiveWindow(session),"selection")).Enabled,"取消项目浏览保留原归属和图档范围");Check(((TextBox)Field(ArchiveWindow(session),"history")).Visible&&ArchiveHistory(session).Contains("等待确认：浏览选择项目"),"取消后恢复原过程记录，保留先前日志");OpenPicker();return true;});
     await WaitPicker();
-    ArchiveUi(session,()=>{var picker=Picker();((TextBox)Field(picker,"search")).Text=(string)Get(target,"Code");var children=(ListView)Field(picker,"childProjects");children.Items[0].Selected=true;((Button)Field(picker,"confirm")).PerformClick();return true;});
+    ArchiveUi(session,()=>{var picker=Picker();((TextBox)Field(picker,"search")).Text=(string)Get(target,"Code");var children=(ListView)Field(picker,"childProjects");children.Items[0].Selected=true;var acknowledgement=(CheckBox)Field(picker,"existingProjectConfirmation");if(acknowledgement.Visible)acknowledgement.Checked=true;((Button)Field(picker,"confirm")).PerformClick();return true;});
     await TreeWait(()=>ArchiveUi(session,()=>!((Panel)Field(ArchiveWindow(session),"confirmationHost")).Visible),"确认项目选择后没有返回");
     ArchiveUi(session,()=>{
      Check((Guid?)Get(Batch(),"SelectedProjectId")==(Guid)Get(target,"Id"),"确认选择正确写回项目归属");

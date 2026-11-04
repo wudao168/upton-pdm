@@ -32,8 +32,24 @@ public sealed class MaterialCodeSynchronizationService(
             && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken))
             throw new UnauthorizedAccessException("当前角色无权执行料号同步。");
 
-        var session = executionSession ??= await integration.CreateExecutionSessionAsync(cancellationToken);
-        return await SynchronizeTaskCoreAsync(taskId, actor, role, session, cancellationToken);
+        try
+        {
+            var session = executionSession ??= await integration.CreateExecutionSessionAsync(cancellationToken);
+            return await SynchronizeTaskCoreAsync(taskId, actor, role, session, cancellationToken);
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            var task = await materials.FindSyncTaskAsync(taskId, CancellationToken.None);
+            if (task?.Status == MaterialSyncStatus.PreviewReady)
+            {
+                var message = error is PdmRuleException ? error.Message : "U9C连接或认证失败，PLM决定已保留，请核对连接后重试同步。";
+                await materials.FailSyncTaskAsync(taskId, MaterialSyncStatus.Failed, message, null,
+                    new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "u9.material.sync.preflight-failed",
+                        nameof(MaterialSyncTask), taskId.ToString(), error.ToString()), CancellationToken.None);
+                throw new PdmRuleException(message);
+            }
+            throw;
+        }
     }
 
     private async Task<MaterialCodeSynchronizationResult> SynchronizeTaskCoreAsync(
@@ -85,6 +101,9 @@ public sealed class MaterialCodeSynchronizationService(
                 if (!material.U9SyncConfirmed || task.Status != MaterialSyncStatus.Succeeded)
                     throw new PdmRuleException("U9C料品同步未完成，请刷新后重试。");
             }
+
+            if (task.Operation != MaterialSyncOperation.Create)
+                return new(material, task, itemSync, null, [], true, "PLM料品变更已同步U9C，并已回查确认。");
 
             applications = (await materials.ListMaterialCodeApplicationsAsync(null, MaterialCodeApplicationStatus.Approved, cancellationToken))
                 .Where(application => application.MaterialId == material.Id)
@@ -160,7 +179,7 @@ public sealed class MaterialCodeSynchronizationService(
             var state = current?.U9SyncConfirmed == true
                 ? MaterialCodeWorkflowState.BomSyncFailed
                 : MaterialCodeWorkflowState.MaterialSyncFailed;
-            foreach (var application in applications)
+            foreach (var application in applications.Where(_ => task.Operation == MaterialSyncOperation.Create))
                 await materials.RecordMaterialCodeApplicationWorkflowAsync(
                     application.Id, state, actor, timeProvider.GetUtcNow(), exception.Message, CancellationToken.None);
             throw;

@@ -5,7 +5,6 @@ import RawDrawerPanel from './RawDrawerPanel.vue'
 import PanelActions from './PanelActions.vue'
 import { ElAutocomplete } from 'element-plus'
 
-import { Search } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectSummary, ReleasePackageSummary } from '../types'
 import { useUserDisplayName } from '../userDisplay'

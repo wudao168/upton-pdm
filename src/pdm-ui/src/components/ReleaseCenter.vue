@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import SearchField from './SearchField.vue'
+import { releaseEarlyCredits, releaseMaterialKey, releaseUnitCode } from '../releaseEarlyCredits'
+import { u9UnitName } from '../u9Units'
 import { matchesUserSearch } from '../userSearch'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, export: projectExport } = useProjectCenterAccess()
@@ -16,7 +18,7 @@ const panelFormId = usePanelFormId()
 import PanelActions from './PanelActions.vue'
 import { releaseFailureMessage, releasePublishingMessage } from '../releaseFailureMessage'
 import { computed, ref, useId, watch } from 'vue'
-import { addReleaseItemComment, downloadGeneratedFile, getProjectExportMetadata, listApprovalTransferCandidates, listReleaseItemComments, readProjectPlan } from '../api'
+import { addReleaseItemComment, downloadGeneratedFile, getBomInstances, getProjectExportMetadata, listApprovalTransferCandidates, listReleaseItemComments, readProjectPlan } from '../api'
 import { createProductionBomWorkbook } from '../productionBomWorkbook'
 import { requiresReleasePreview, releasePreviewNeedsAttention, releasePreviewStateLabel } from '../releasePreviewState'
 import type { ApprovalTransferCandidate, BomItem, CreateReleasePackageInput, DrawingDeliveryOverride, DrawingPriority, DrawingReviewCandidate, DrawingReviewPackage, FormalSupplementPolicies, ProjectPlan, ReleaseItemComment, ReleasePackageSummary, ReleaseScope, UpdateReleasePackageDraftInput } from '../types'
@@ -49,6 +51,7 @@ const props = withDefaults(defineProps<{
   longLeadPublishedItems?: BomItem[]
   previousVersionItems?: BomItem[]
   previousVersionMultiplier?: number
+  bomMultiplier?: number
   previousSummaryItems?: BomItem[]
   drawingReviewCandidates?: DrawingReviewCandidate[]
   drawingReviews?: DrawingReviewPackage[]
@@ -173,7 +176,8 @@ const selectedDrawingDeliveryOverrides = computed(() => Object.fromEntries(selec
     ? [candidate.drawingDocumentId, itemDeliveryOverride(candidate.bomItemId)] : null)
   .filter((item): item is [string, DrawingDeliveryOverride] => item !== null)))
 const deliveryItemLabel = (item: BomItem) => item.drawingNumber || item.name || '当前物料'
-const wholeSetMultiplier = ref(1)
+const wholeSetMultiplier = computed(() => isLongLeadScope(scope.value) ? 1
+  : editingDraft.value || !props.releasePackage ? props.bomMultiplier ?? props.releasePackage?.wholeSetMultiplier ?? 1 : props.releasePackage.wholeSetMultiplier ?? 1)
 const effectiveRootDocumentId = computed(() => editingDraft.value ? props.releasePackage?.rootDocumentId ?? '' : '')
 const selectedLongLeadKeys = ref<string[]>([])
 const selectedFormalKeys = ref<string[]>([])
@@ -256,7 +260,7 @@ const changeReasonSummary = computed(() => selectedChangeReasons.value.map(reaso
   reason === '其他' ? `其他 / ${otherChangeReason.value.trim() || '请填写具体原因'}` : props.changeReasonLabels?.[reason] ? (reason.includes(' / ') ? reason.split(' / ')[0] + ' / ' : '') + props.changeReasonLabels[reason] : reason).join('；'))
 const availableReleaseItems = computed(() => (props.releaseItems.length ? props.releaseItems
   : scope.value.startsWith('Standard') ? props.standardItems : [])
-  .filter(row => !row.manuallyExcluded && !row.releaseExcluded && !row.releaseConfirmation
+  .filter(row => !row.manuallyExcluded && !row.releaseExcluded && !row.pendingRemoval && !row.releaseConfirmation
     && (!effectiveRootDocumentId.value || row.sourceInstancePath?.startsWith(`roots/${effectiveRootDocumentId.value.replaceAll('-', '').toLowerCase()}/`))
     && (!row.kind || row.kind === (scope.value.startsWith('Electrical') ? 'Electrical' : isNonStandardScope(scope.value) ? 'NonStandard' : 'Standard'))))
 const releasePageSize = 50
@@ -274,11 +278,27 @@ const itemCommentOpen = ref(false)
 const itemCommentTarget = ref<FrozenDisplayRow | null>(null)
 const itemCommentText = ref('')
 const itemCommentSaving = ref(false)
-type FrozenDisplayRow = { key: string; materialKey: string; item: BomItem; sourceItems: BomItem[]; change?: string; details?: string[] }
+type FrozenDisplayRow = { key: string; materialKey: string; item: BomItem; sourceItems: BomItem[]; change?: string; details?: string[]; previousQuantity?: number; earlyCredit?: number; quantityDelta?: number }
+const releaseQuantity = (value: number) => Number(value.toFixed(8))
+const releaseInstances = ref<BomItem[]>([])
+const releaseInstancesLoading = ref(false)
+const releaseInstancesError = ref('')
+const needsReleaseInstances = computed(() => (!props.releasePackage || editingDraft.value) && (isLongLeadScope(scope.value)
+  || ['StandardFormal','NonStandardWithDrawing','ElectricalFormal'].includes(scope.value) && props.longLeadPublishedItems.length > 0)
+  && availableReleaseItems.value.some(item => (item.summaryItemIds?.length ?? 0) > 1))
+const instanceReleaseItems = computed(() => availableReleaseItems.value.flatMap(item => {
+  if ((item.summaryItemIds?.length ?? 0) <= 1) return [item]
+  const ids = new Set(item.summaryItemIds)
+  const members = releaseInstances.value.filter(member => member.id && ids.has(member.id))
+  return members.length === ids.size ? members : [item]
+}))
+const issueMaterialKey = releaseMaterialKey
+const normalizeCommentMaterialKey = (key: string) => key.replace(/\|([^|]+)$/, (_, unit: string) => '|' + releaseUnitCode(unit)).toLocaleLowerCase()
+const releaseUnitLabel = (item: BomItem) => u9UnitName(releaseUnitCode(item.unit))
 const releaseItemGroupKey = (item: BomItem, index: number) => {
   const materialCode = item.drawingNumber?.trim().toLocaleLowerCase()
   return materialCode
-    ? `material:${materialCode}|${item.unit?.trim().toLocaleLowerCase() ?? ''}`
+    ? `material:${issueMaterialKey(item).toLocaleLowerCase()}`
     : [
         'item', item.sourceDocumentId, item.sourceConfiguration, item.kind, item.unit, item.name,
         item.specification, item.brand, item.material, item.surfaceTreatment, item.heatTreatment,
@@ -302,23 +322,26 @@ const releaseRowDrawingReviewStatus = (row: { sourceItems: BomItem[] }) => {
   return [...new Set(row.sourceItems.map(drawingReviewStatusForItem))].join('；') || '图纸待发起审核'
 }
 const currentReleaseKeysByTrackingId = computed(() => new Map(
-  availableReleaseItems.value
-    .filter(item => item.releaseTrackingId)
-    .map((item, index) => [item.releaseTrackingId!, releaseItemGroupKey(item, index)]),
+  instanceReleaseItems.value
+    .flatMap((item, index) => [...new Set([item.releaseTrackingId, item.id, ...(item.summaryItemIds ?? [])].filter((id): id is string => Boolean(id)))]
+      .map(id => [id, releaseItemGroupKey(item, index)] as const)),
 ))
 const longLeadPublishedQuantities = computed(() => {
   const quantities = new Map<string, number>()
   props.longLeadPublishedItems.forEach((item, index) => {
-    const key = item.releaseTrackingId
+    const mappedKey = item.releaseTrackingId
       ? currentReleaseKeysByTrackingId.value.get(item.releaseTrackingId) ?? releaseItemGroupKey(item, index)
       : releaseItemGroupKey(item, index)
+    const oldKey = releaseItemGroupKey(item, index)
+    const key = mappedKey.startsWith('material:') && mappedKey.endsWith(`|${issueMaterialKey(item).split('|').at(-1)?.toLocaleLowerCase()}`) ? mappedKey : oldKey
     quantities.set(key, (quantities.get(key) ?? 0) + Number(item.quantity))
   })
   return quantities
 })
 const longLeadReleaseRows = computed(() => {
   const grouped = new Map<string, { key: string; item: BomItem; sourceItems: BomItem[] }>()
-  availableReleaseItems.value.forEach((item, index) => {
+  instanceReleaseItems.value.forEach((source, index) => {
+    const item = { ...source, quantity: releaseQuantity(Number(source.quantity) * (props.bomMultiplier ?? 1)) }
     const key = releaseItemGroupKey(item, index)
     const existing = grouped.get(key)
     if (!existing) {
@@ -332,7 +355,7 @@ const longLeadReleaseRows = computed(() => {
     ...row,
     item: {
       ...row.item,
-      quantity: Math.max(0, Number(row.item.quantity) - (longLeadPublishedQuantities.value.get(row.key) ?? 0)),
+      quantity: Math.max(0, releaseQuantity(Number(row.item.quantity) - (longLeadPublishedQuantities.value.get(row.key) ?? 0))),
     },
   })).filter(row => row.sourceItems.length > 0 && row.item.quantity > 0)
 })
@@ -342,9 +365,9 @@ const selectedBomItemQuantities = computed(() => {
     let remaining = Number(longLeadRequestedQuantities.value[row.key])
     row.sourceItems.forEach(item => {
       if (!item.id || remaining <= 0) return
-      const quantity = Math.min(Number(item.quantity), remaining)
+      const quantity = releaseQuantity(Math.min(Number(item.quantity), remaining))
       if (quantity > 0) quantities[item.id] = quantity
-      remaining -= quantity
+      remaining = releaseQuantity(remaining - quantity)
     })
   })
   return quantities
@@ -357,7 +380,7 @@ const pagedLongLeadItems = computed(() => {
 })
 const formalReleaseRows = computed(() => {
   const grouped = new Map<string, { key: string; item: BomItem; sourceItems: BomItem[]; longLeadPublishedQuantity: number }>()
-  availableReleaseItems.value.forEach((item, index) => {
+  instanceReleaseItems.value.forEach((item, index) => {
     const key = releaseItemGroupKey(item, index)
     const existing = grouped.get(key)
     if (!existing) {
@@ -374,19 +397,45 @@ const formalReleaseRows = computed(() => {
   })
   return [...grouped.values()].map(row => ({
     ...row,
-    remainingQuantity: Math.max(0, Number(row.item.quantity) - row.longLeadPublishedQuantity),
+    remainingQuantity: Math.max(0, releaseQuantity(Number(row.item.quantity) * Number(wholeSetMultiplier.value) - row.longLeadPublishedQuantity)),
   }))
 })
 const isFormalRowFullyPublished = (row: { remainingQuantity: number }) => row.remainingQuantity <= 0
 const fullyPublishedFormalRowCount = computed(() => formalReleaseRows.value.filter(isFormalRowFullyPublished).length)
 const formalRowPublishQuantity = (row: { item: BomItem; longLeadPublishedQuantity: number }) =>
-  Math.max(0, Number(row.item.quantity) * Number(wholeSetMultiplier.value) - row.longLeadPublishedQuantity)
+  Math.max(0, releaseQuantity(Number(row.item.quantity) * Number(wholeSetMultiplier.value) - row.longLeadPublishedQuantity))
 const formalRowPublishTitle = (row: { item: BomItem; longLeadPublishedQuantity: number; remainingQuantity: number }) =>
   isFormalRowFullyPublished(row)
-    ? `该物料已发布${row.longLeadPublishedQuantity}/${row.item.quantity}，已发布数量不允许重复发布，本次不再下发数量。`
-    : `该物料已发布${row.longLeadPublishedQuantity}/${row.item.quantity}，本次正式发布只下发剩余数量${row.remainingQuantity}。`
+    ? `该物料已发布${row.longLeadPublishedQuantity}/${Number(row.item.quantity) * Number(wholeSetMultiplier.value)}，本次不再新增下发。`
+    : `该物料已发布${row.longLeadPublishedQuantity}/${Number(row.item.quantity) * Number(wholeSetMultiplier.value)}，本次正式发布只新增下发${row.remainingQuantity}。`
 const releaseInstanceIds = (item: BomItem): string[] => item.summaryItemIds?.length
   ? item.summaryItemIds : item.id ? [item.id] : []
+let releaseInstanceRequest = 0
+watch([scope, needsReleaseInstances, () => props.projectId, () => props.token, () => availableReleaseItems.value.map(item => `${releaseInstanceIds(item).join(',')}:${item.quantity}:${item.summaryFingerprint ?? ''}`).join(';')], async () => {
+  const request = ++releaseInstanceRequest
+  releaseInstancesError.value = ''
+  releaseInstances.value = []
+  releaseInstancesLoading.value = false
+  if (!needsReleaseInstances.value) return
+  if (!props.projectId || !props.token) { releaseInstancesError.value = '无法读取BOM结构实例，请重新打开发布页面。'; return }
+  releaseInstancesLoading.value = true
+  try {
+    const kind = scope.value.startsWith('Electrical') ? 'Electrical' : isNonStandardScope(scope.value) ? 'NonStandard' : 'Standard'
+    const items = await getBomInstances(props.projectId, kind, props.token)
+    if (request !== releaseInstanceRequest) return
+    const ids = new Set(items.map(item => item.id))
+    if (availableReleaseItems.value.some(item => releaseInstanceIds(item).some(id => !ids.has(id))))
+      throw new Error('BOM结构实例已变化，请刷新BOM后重试。')
+    releaseInstances.value = items
+  } catch (error) {
+    if (request === releaseInstanceRequest) {
+      console.error('BOM结构实例读取失败', error)
+      releaseInstancesError.value = 'BOM结构实例读取未完成，请刷新BOM后重试。'
+    }
+  } finally {
+    if (request === releaseInstanceRequest) releaseInstancesLoading.value = false
+  }
+}, {immediate:true})
 const selectedFormalBomItemIds = computed(() => [...new Set(formalReleaseRows.value
   .filter(row => selectedFormalKeys.value.includes(row.key))
   .flatMap(row => row.sourceItems.flatMap(releaseInstanceIds)))])
@@ -408,18 +457,22 @@ function isFormalRevisionPromotion(previous: string, current: string) {
   const work = /^(?:([A-Z]+)-)?W1$/i.exec(previous)
   return Boolean(work && current.toUpperCase() === (work[1]?.toUpperCase() ?? 'A'))
 }
-function changedRows(current: BomItem[], previous: BomItem[]) {
+function changedRows(current: BomItem[], previous: BomItem[], multiplier = 1, previousMultiplier = 1) {
   const remaining = new Set(previous)
   const matches = new Map<BomItem, BomItem>()
+  const sameContext = (item: BomItem, old: BomItem) => (item.engineeringKitReferenceId ?? '') === (old.engineeringKitReferenceId ?? '')
   // Reserve stable identities first, so repeated material codes cannot consume another instance's baseline.
   for (const item of current) {
     const match = [...remaining].find(old => Boolean(item.id) && old.id === item.id)
-      ?? [...remaining].find(old => Boolean(item.releaseTrackingId) && old.releaseTrackingId === item.releaseTrackingId)
+    if (match) { matches.set(item, match); remaining.delete(match) }
+  }
+  for (const item of current.filter(row => !matches.has(row))) {
+    const match = [...remaining].find(old => Boolean(item.releaseTrackingId) && old.releaseTrackingId === item.releaseTrackingId)
     if (match) { matches.set(item, match); remaining.delete(match) }
   }
   // 汇总代表实例或料号可能在重新提取后改变，来源模型和配置仍能识别同一零件。
   for (const item of current.filter(row => !matches.has(row) && row.summaryItemIds?.length)) {
-    const candidates = [...remaining].filter(old => Boolean(item.sourceDocumentId) && old.sourceDocumentId === item.sourceDocumentId
+    const candidates = [...remaining].filter(old => sameContext(item, old) && Boolean(item.sourceDocumentId) && old.sourceDocumentId === item.sourceDocumentId
       && old.sourceConfiguration === item.sourceConfiguration && old.unit === item.unit)
     if (candidates.length === 1 && current.filter(row => !matches.has(row) && row.sourceDocumentId === item.sourceDocumentId
       && row.sourceConfiguration === item.sourceConfiguration && row.unit === item.unit).length === 1) {
@@ -427,15 +480,15 @@ function changedRows(current: BomItem[], previous: BomItem[]) {
     }
   }
   for (const item of current.filter(row => !matches.has(row))) {
-    const match = [...remaining].find(old => Boolean(item.sourceDocumentId && item.sourceInstancePath)
+    const match = [...remaining].find(old => sameContext(item, old) && Boolean(item.sourceDocumentId && item.sourceInstancePath)
       && old.sourceDocumentId === item.sourceDocumentId && old.sourceInstancePath === item.sourceInstancePath
       && old.sourceConfiguration === item.sourceConfiguration)
-      ?? [...remaining].find(old => itemSignature(old) === itemSignature(item))
+      ?? [...remaining].find(old => sameContext(item, old) && itemSignature(old) === itemSignature(item))
     if (match) { matches.set(item, match); remaining.delete(match) }
   }
   for (const item of current.filter(row => !matches.has(row))) {
-    const candidates = [...remaining].filter(old => itemKey(old) === itemKey(item))
-    if (candidates.length === 1 && current.filter(row => !matches.has(row) && itemKey(row) === itemKey(item)).length === 1) {
+    const candidates = [...remaining].filter(old => sameContext(item, old) && itemKey(old) === itemKey(item))
+    if (candidates.length === 1 && current.filter(row => !matches.has(row) && sameContext(item, row) && itemKey(row) === itemKey(item)).length === 1) {
       matches.set(item, candidates[0]!); remaining.delete(candidates[0]!)
     }
   }
@@ -443,28 +496,33 @@ function changedRows(current: BomItem[], previous: BomItem[]) {
   for (const item of current) {
     const old = matches.get(item)
     if (!old) { rows.push({ item, change: '新增', details: ['上一发布版不存在此项'] }); continue }
-    const details = comparedFields.filter(field => fieldValue(old, field.key) !== fieldValue(item, field.key)
+    const value = (row: BomItem, key: keyof BomItem, factor: number) => key === 'quantity' ? String(releaseQuantity(Number(row.quantity) * factor)) : fieldValue(row, key)
+    const details = comparedFields.filter(field => value(old, field.key, previousMultiplier) !== value(item, field.key, multiplier)
       && !(field.key === 'revision' && isFormalRevisionPromotion(fieldValue(old, field.key), fieldValue(item, field.key))))
-      .map(field => `${field.label}：${fieldValue(old, field.key) || '—'} → ${fieldValue(item, field.key) || '—'}`)
+      .map(field => `${field.label}：${value(old, field.key, previousMultiplier) || '—'} → ${value(item, field.key, multiplier) || '—'}`)
+    if (multiplier !== previousMultiplier) details.unshift(`整套倍率：×${previousMultiplier} → ×${multiplier}`)
     if (details.length) rows.push({ item, previousItem: old, change: '修改', details })
   }
   rows.push(...[...remaining].map(item => ({ item, previousItem: item, change: '删除', details: ['当前发布范围已移除此项'] })))
   return rows
 }
-function supplementChanges(items: BomItem[], previous: BomItem[], confirmed: BomItem[] = []) {
-  const rows = changedRows([...items, ...confirmed], previous).filter(row => !row.item.releaseConfirmation)
+const retainedSupplementItems = computed(() => (props.releaseItems.length ? props.releaseItems : props.standardItems)
+  .filter(item => !item.manuallyExcluded && !item.pendingRemoval && (item.releaseConfirmation || item.releaseExcluded)))
+const previousSupplementItems = computed(() => (props.releaseItems.length ? props.releaseItems : props.standardItems).some(item => item.summaryItemIds?.length)
+  ? props.previousSummaryItems ?? props.previousVersionItems : props.previousVersionItems)
+const comparedSupplementRows = computed(() => changedRows([...availableReleaseItems.value, ...retainedSupplementItems.value],
+  previousSupplementItems.value, Number(wholeSetMultiplier.value), props.previousVersionMultiplier ?? 1))
+const supplementRows = computed(() => {
+  const rows = comparedSupplementRows.value.filter(row => !row.item.releaseConfirmation && !row.item.releaseExcluded)
   if (scope.value !== 'NonStandardSupplement') return rows
-  for (const item of items) {
+  for (const item of availableReleaseItems.value) {
     if (rows.some(row => row.item === item)) continue
     if (drawingReviewCandidateFor(item)?.hasUnreleasedDrawingChanges) {
       rows.push({ item, change: '修改', details: ['2D图纸较正式版有新存档，纳入本次变更发布'] })
     }
   }
   return rows
-}
-const supplementRows = computed(() => supplementChanges(availableReleaseItems.value,
-  (props.releaseItems.length ? props.releaseItems : props.standardItems).some(item => item.summaryItemIds?.length) ? props.previousSummaryItems ?? props.previousVersionItems : props.previousVersionItems,
-  (props.releaseItems.length ? props.releaseItems : props.standardItems).filter(item => !!item.releaseConfirmation)))
+})
 const supplementPageCount = computed(() => Math.max(1, Math.ceil(supplementRows.value.length / releasePageSize)))
 const pagedSupplementRows = computed(() => {
   const start = (supplementPage.value - 1) * releasePageSize
@@ -484,6 +542,11 @@ function toggleAllSupplement(checked: boolean) {
 // 本次不纳入的新增/修改项（顺延到下一次变更）不参与发布范围校验。
 const isDeferredSupplementRow = (row: { change: string; item: BomItem }) =>
   supplementRowSelectable(row) && !selectedSupplementKeys.value.includes(supplementRowKey(row))
+const supplementMultiplierChanged = computed(() => isSupplement.value && Number(wholeSetMultiplier.value) !== (props.previousVersionMultiplier ?? 1))
+const blockedMultiplierRows = computed(() => supplementMultiplierChanged.value ? comparedSupplementRows.value
+  .filter(row => row.change !== '删除' && row.previousItem && (row.item.releaseConfirmation || row.item.releaseExcluded)) : [])
+const hasUnconfirmedMultiplierChanges = computed(() => supplementMultiplierChanged.value
+  && (supplementRows.value.some(isDeferredSupplementRow) || blockedMultiplierRows.value.length > 0))
 const selectedSupplementBomItemIds = computed<string[] | undefined>(() => {
   const ids = [...new Set(supplementRows.value.filter(row => row.change !== '删除' && supplementRowSelectable(row)
     && selectedSupplementKeys.value.includes(supplementRowKey(row))).flatMap(row => releaseInstanceIds(row.item)))]
@@ -560,6 +623,8 @@ const createDisabled = computed(() => props.pending
   || isSupplement.value && (selectedScopedBomItemIds.value?.length ?? 0) === 0 && confirmedRemovedBomItemIds.value.length === 0
   || isSupplement.value && supplementRows.value.length > 0 && !supplementRows.value.some(row => !isDeferredSupplementRow(row))
   || hasInvalidWholeSetMultiplier.value
+  || hasUnconfirmedMultiplierChanges.value
+  || needsReleaseInstances.value && (releaseInstancesLoading.value || Boolean(releaseInstancesError.value))
   || isSupplement.value && selectedChangeReasons.value.length === 0
   || isSupplement.value && selectedChangeReasons.value.includes('其他') && !otherChangeReason.value.trim()
   || isSupplement.value && selectedChangeReasons.value.includes('正式补充') && !formalSupplementAvailability.value.allowed
@@ -582,7 +647,7 @@ const frozenItems = computed(() => {
 })
 const frozenMaterialKey = (item: BomItem) => {
   const materialCode = item.drawingNumber?.trim().toLocaleLowerCase()
-  return materialCode ? `material:${materialCode}|${item.unit?.trim().toLocaleLowerCase() ?? ''}` : `item:${item.id?.toLocaleLowerCase() ?? ''}`
+  return materialCode ? `material:${issueMaterialKey(item).toLocaleLowerCase()}` : `item:${item.id?.toLocaleLowerCase() ?? ''}`
 }
 const frozenSummaryKey = (item: BomItem) => {
   if (item.drawingNumber?.trim() || !item.sourceDocumentId) return frozenMaterialKey(item)
@@ -623,9 +688,9 @@ function summarizeFrozenItems(items: BomItem[]) {
       existing.summaryItemIds!.push(...releaseInstanceIds(item))
     } else groups.set(key, { ...item, summaryItemIds: [...releaseInstanceIds(item)] })
   }
-  return [...groups.values()]
+  return [...groups.values()].map(item => ({ ...item, engineeringKitReferenceId: undefined }))
 }
-function frozenScopedChanges(rows: ReturnType<typeof changedRows>, items: BomItem[]) {
+function frozenScopedChanges(rows: ReturnType<typeof changedRows>, items: BomItem[], previous: BomItem[]) {
   const selected = new Set(props.releasePackage?.selectedBomItemIds ?? [])
   const removed = new Set(props.releasePackage?.confirmedRemovedBomItemIds ?? [])
   const result = rows.filter(row => !row.item.releaseConfirmation && (!selected.size && !removed.size
@@ -635,30 +700,34 @@ function frozenScopedChanges(rows: ReturnType<typeof changedRows>, items: BomIte
     for (const item of items) {
       if (item.releaseConfirmation || !releaseInstanceIds(item).some(id => selected.has(id))
         || result.some(row => row.item === item)) continue
-      result.push({ item, change: '修改', details: ['图纸纳入本次发布（以冻结版本为准）'] })
+      result.push({ item, previousItem: previous.find(old => frozenSummaryKey(old) === frozenSummaryKey(item)),
+        change: '修改', details: ['图纸纳入本次发布（以冻结版本为准）'] })
     }
   }
   return result
 }
-const frozenChanges = computed(() => {
-  const items = summarizeFrozenItems(frozenItems.value)
-  return frozenScopedChanges(changedRows(items, summarizeFrozenItems(props.previousVersionItems)), items)
-})
 // 导出比较实际发布总量，分别使用两次发布的倍率，不读取当前工作区或分页行。
 const frozenExportChanges = computed(() => {
-  const publishedItems = (items: BomItem[], multiplier: number) => summarizeFrozenItems(items)
-    .map(item => ({ ...item, quantity: Number((Number(item.quantity) * multiplier).toFixed(8)) }))
-  const previous = new Map(publishedItems(props.previousVersionItems, props.previousVersionMultiplier ?? 1)
+  const multiplier = props.releasePackage?.wholeSetMultiplier ?? 1
+  const previousMultiplier = props.previousVersionMultiplier ?? 1
+  const previousItems = summarizeFrozenItems(props.previousVersionItems)
+  const previous = new Map(previousItems
     .map(item => [frozenSummaryKey(item), item]))
-  const items = publishedItems(frozenItems.value, props.releasePackage?.wholeSetMultiplier ?? 1)
+  const items = summarizeFrozenItems(frozenItems.value)
   const rows = items.flatMap(item => {
     const key = frozenSummaryKey(item)
     const old = previous.get(key)
     previous.delete(key)
-    return changedRows([item], old ? [old] : [])
+    return changedRows([item], old ? [old] : [], multiplier, previousMultiplier)
   })
-  return frozenScopedChanges([...rows, ...changedRows([], [...previous.values()])], items)
+  return frozenScopedChanges([...rows, ...changedRows([], [...previous.values()], multiplier, previousMultiplier)], items, previousItems)
+    .map(row => ({...row,
+      item: {...row.item,quantity:releaseQuantity(Number(row.item.quantity) * (row.change === '删除' ? previousMultiplier : multiplier))},
+      previousItem: row.previousItem ? {...row.previousItem,quantity:releaseQuantity(Number(row.previousItem.quantity) * previousMultiplier)} : undefined,
+    }))
 })
+const frozenEarlyCredits = computed(() => props.releasePackage ? releaseEarlyCredits(props.releasePackage, props.releasePackages) : new Map<string, number>())
+const earlyCreditFor = (item: BomItem, removed = false) => removed ? 0 : frozenEarlyCredits.value.get(issueMaterialKey(item)) ?? 0
 const frozenExportRowCount = computed(() => isFrozenSupplement.value ? frozenExportChanges.value.length : frozenSummaryRows.value.length)
 async function exportFrozenBom() {
   const release = props.releasePackage
@@ -666,15 +735,16 @@ async function exportFrozenBom() {
   if (frozenExporting.value || !release || !supportsFrozenExport.value || !frozenExportRowCount.value || !projectId || !props.token) return
   const materialHeaders = ['序号', '物料编码', '物料名称', '型号', '版本', '品牌', '材质', '表面处理', '热处理', '单位']
   const materialValues = (item: BomItem, index: number) => [index + 1, item.drawingNumber || '', item.name || '', item.specification || '',
-    packageRevisionLabel(item, release), item.brand || '', item.material || '', item.surfaceTreatment || '', item.heatTreatment || '', item.unit || '']
+    packageRevisionLabel(item, release), item.brand || '', item.material || '', item.surfaceTreatment || '', item.heatTreatment || '', u9UnitName(item.unit || '')]
   const supplement = isFrozenSupplement.value
   const formal = isFrozenFormal.value
-  const headers = [...materialHeaders, ...(supplement ? ['数量（净变更）', '变更前数量', '变更后数量', '备注', '变更', '变更明细']
+  const headers = [...materialHeaders, ...(supplement ? ['需求净变更', '变更前总量', '首次提前抵扣', '变更后总量', '备注', '变更', '变更明细']
     : formal ? ['BOM总量', '前期已发布', '本次新增下发', '备注'] : ['数量', '备注'])]
   const rows = supplement ? frozenExportChanges.value.map((row, index) => {
     const before = Number(row.previousItem?.quantity ?? 0)
     const after = row.change === '删除' ? 0 : Number(row.item.quantity)
-    return [...materialValues(row.item, index), Number((after - before).toFixed(8)), before, after, row.item.remark || '', row.change, row.details.join('；')]
+    const credit = earlyCreditFor(row.item, row.change === '删除')
+    return [...materialValues(row.item, index), releaseQuantity(after - before - credit), before, credit, after, row.item.remark || '', row.change, row.details.join('；')]
   }) : frozenSummaryRows.value.map((row, index) => [...materialValues(row.item, index),
     ...(formal ? [Number(row.item.quantity), priorQuantityForRow(row), newIssueQuantityForRow(row)] : [Number(row.item.quantity)]), row.item.remark || ''])
   frozenExporting.value = true
@@ -685,7 +755,7 @@ async function exportFrozenBom() {
     const workbook = createProductionBomWorkbook(
       headers, rows,
       { ...metadata, title: supplement ? '发布BOM变更清单' : '发布BOM清单', versionLabel: '发布包', version: release.number,
-        notes: supplement ? '数量按实际发布总量计算：新增为本次发布数量，增加为正差额，减少及删除为负差额，仅属性变更为0。'
+        notes: supplement ? '需求净变更＝变更后总量－变更前总量－首次提前抵扣；提前量仅在首次纳入正式基线时抵扣。负数表示减少需求，不代表已退料。'
           : formal ? '使用本发布包冻结BOM，数量包含整套倍率；本次新增下发为BOM总量减去前期长交期已发布数量，不足0时按0计算。'
             : '使用本长交期发布包冻结BOM，数量为本包实际发布数量。' },
     )
@@ -696,11 +766,14 @@ async function exportFrozenBom() {
     if (props.releasePackage?.id === release.id && props.projectId === projectId) frozenExportError.value = '导出BOM失败，请检查网络后重试；若仍失败，请联系管理员。'
   } finally { frozenExporting.value = false }
 }
-const frozenChangeRows = computed<FrozenDisplayRow[]>(() => frozenChanges.value.map((row, index) => ({
+const frozenChangeRows = computed<FrozenDisplayRow[]>(() => frozenExportChanges.value.map((row, index) => ({
   ...row,
   key: `change:${row.item.id || index}:${row.change}`,
   materialKey: frozenMaterialKey(row.item),
-  item: { ...row.item, quantity: row.change === '删除' ? 0 : Number(row.item.quantity) * (props.releasePackage?.wholeSetMultiplier ?? 1) },
+  item: { ...row.item, quantity: row.change === '删除' ? 0 : Number(row.item.quantity) },
+  previousQuantity: Number(row.previousItem?.quantity ?? 0),
+  earlyCredit: earlyCreditFor(row.item, row.change === '删除'),
+  quantityDelta: releaseQuantity((row.change === '删除' ? 0 : Number(row.item.quantity)) - Number(row.previousItem?.quantity ?? 0) - earlyCreditFor(row.item, row.change === '删除')),
   sourceItems: (row.change === '删除' ? props.previousVersionItems : frozenItems.value)
     .filter(item => row.item.summaryItemIds?.some(id => releaseInstanceIds(item).includes(id))),
 })))
@@ -722,31 +795,23 @@ function frozenDeliveryLabel(row: FrozenDisplayRow) {
 }
 const frozenPageCount = computed(() => Math.max(1, Math.ceil(frozenDisplayRows.value.length / releasePageSize)))
 const showFormalIssueQuantities = isFrozenFormal
-const issueUnitAliases: Record<string, string> = { EA: '001', 件: '001', 个: '001', 台: '002', 盒: '004', 卷: '005', 捆: '006', 双: '007', 片: '008', 桶: '009', 支: '010', 组: '011', 套: '011', 箱: '012', 包: '013' }
-const issueMaterialKey = (item: BomItem) => {
-  const unit = item.unit?.trim().toUpperCase() ?? ''
-  return `${item.drawingNumber?.trim().toUpperCase()}|${issueUnitAliases[unit] ?? unit}`
-}
-const formalPriorQuantities = computed(() => {
-  const quantities = new Map<string, number>()
-  const longLeadScope: ReleaseScope = props.releasePackage?.scope === 'NonStandardWithDrawing'
-    ? 'NonStandardLongLead'
-    : props.releasePackage?.scope === 'ElectricalFormal' ? 'ElectricalLongLead' : 'StandardLongLead'
-  const currentKeysByTrackingId = new Map(frozenItems.value.filter(item => item.releaseTrackingId)
-    .map(item => [item.releaseTrackingId!, issueMaterialKey(item)]))
-  props.releasePackages.filter(previous => previous.scope === longLeadScope && previous.state === '已发布'
-    && previous.publishedAt && (!props.releasePackage?.publishedAt || previous.publishedAt <= props.releasePackage.publishedAt))
-    .forEach(previous => (longLeadScope === 'NonStandardLongLead' ? previous.nonStandardBomSnapshot
-      : longLeadScope === 'ElectricalLongLead' ? previous.electricalBomSnapshot : previous.standardBomSnapshot)
-      .filter(item => !item.manuallyExcluded && !item.releaseExcluded && !item.releaseConfirmation && !item.pendingRemoval)
-      .forEach(item => {
-        const key = item.releaseTrackingId ? currentKeysByTrackingId.get(item.releaseTrackingId) ?? issueMaterialKey(item) : issueMaterialKey(item)
-        quantities.set(key, (quantities.get(key) ?? 0) + Number(item.quantity) * (previous.wholeSetMultiplier ?? 1))
-      }))
-  return quantities
-})
+const formalPriorQuantities = frozenEarlyCredits
 const priorQuantityForRow = (row: FrozenDisplayRow) => formalPriorQuantities.value.get(issueMaterialKey(row.item)) ?? 0
 const newIssueQuantityForRow = (row: FrozenDisplayRow) => Math.max(0, Number(row.item.quantity) - priorQuantityForRow(row))
+const frozenUnitTotals = computed(() => {
+  const units = new Map<string, { target: number; added: number; reduced: number }>()
+  const add = (unit: string, target: number, delta: number) => {
+    const code = releaseUnitCode(unit), total = units.get(code) ?? { target: 0, added: 0, reduced: 0 }
+    total.target = releaseQuantity(total.target + target)
+    total.added = releaseQuantity(total.added + Math.max(0, delta))
+    total.reduced = releaseQuantity(total.reduced + Math.max(0, -delta))
+    units.set(code, total)
+  }
+  frozenSummaryRows.value.forEach(row => add(row.item.unit, Number(row.item.quantity), isFrozenSupplement.value ? 0
+    : isFrozenFormal.value ? newIssueQuantityForRow(row) : Number(row.item.quantity)))
+  if (isFrozenSupplement.value) frozenChangeRows.value.forEach(row => add(row.item.unit, 0, row.quantityDelta ?? 0))
+  return [...units].map(([code, totals]) => ({ code, name: u9UnitName(code), ...totals }))
+})
 const pagedFrozenRows = computed(() => {
   const start = (frozenPage.value - 1) * releasePageSize
   return frozenDisplayRows.value.slice(start, start + releasePageSize)
@@ -764,10 +829,10 @@ watch([() => currentTask.value?.id, () => props.token, () => props.canEmergencyD
 }, { immediate: true })
 const canAddItemComment = computed(() => Boolean(currentTask.value && (canHandleCurrentTask.value || props.canEmergencyDecide)))
 const selectedItemComments = computed(() => itemCommentTarget.value
-  ? releaseItemComments.value.filter(item => item.materialKey.toLocaleLowerCase() === itemCommentTarget.value!.materialKey)
+  ? releaseItemComments.value.filter(item => normalizeCommentMaterialKey(item.materialKey) === itemCommentTarget.value!.materialKey)
   : [])
 const frozenDiff = computed(() => {
-  const rows = frozenChanges.value
+  const rows = frozenExportChanges.value
   return {
     added: rows.filter(row => row.change === '新增').length,
     modified: rows.filter(row => row.change === '修改').length,
@@ -806,7 +871,6 @@ watch(showFrozenChanges, () => { frozenPage.value = 1 })
 watch([() => props.releasePackage?.id, () => props.token], () => { void loadReleaseItemComments() }, { immediate: true })
 watch(scope, () => {
   if (!editingDraft.value) relatedOplIssueIds.value = []
-  if (isLongLeadRelease.value) wholeSetMultiplier.value = 1
   longLeadPage.value = 1
   formalPage.value = 1
   supplementPage.value = 1
@@ -957,7 +1021,6 @@ function startDraftEdit() {
       })
     }
   }
-  wholeSetMultiplier.value = isLongLeadScope(releasePackage.scope) ? 1 : releasePackage.wholeSetMultiplier ?? 1
   selectedLongLeadKeys.value = []
   longLeadRequestedQuantities.value = {}
   if (isLongLeadScope(releasePackage.scope)) {
@@ -1043,7 +1106,7 @@ function confirmTransfer() {
 }
 
 function commentsForRow(row: FrozenDisplayRow) {
-  return releaseItemComments.value.filter(item => item.materialKey.toLocaleLowerCase() === row.materialKey)
+  return releaseItemComments.value.filter(item => normalizeCommentMaterialKey(item.materialKey) === row.materialKey)
 }
 
 function formatCommentTime(value: string) {
@@ -1067,7 +1130,8 @@ async function loadReleaseItemComments() {
   } catch (error) {
     if (props.releasePackage?.id === packageId) {
       releaseItemComments.value = []
-      itemCommentsError.value = error instanceof Error ? error.message : '加载物料批注失败。'
+      console.error('加载物料批注失败', error)
+      itemCommentsError.value = '暂时无法读取物料批注，请刷新发布记录后重试。'
     }
   } finally {
     if (props.releasePackage?.id === packageId) itemCommentsLoading.value = false
@@ -1093,7 +1157,8 @@ async function saveItemComment() {
     releaseItemComments.value = [...releaseItemComments.value, saved]
     itemCommentText.value = ''
   } catch (error) {
-    itemCommentsError.value = error instanceof Error ? error.message : '保存物料批注失败。'
+    console.error('保存物料批注失败', error)
+    itemCommentsError.value = '物料批注保存未完成，请检查网络后重试。'
   } finally {
     itemCommentSaving.value = false
   }
@@ -1118,8 +1183,8 @@ async function saveItemComment() {
               <option v-for="item in visibleReleaseTypes" :key="item.value" :value="item.value">{{ item.label }}</option>
             </select>
           </label>
-          <label v-if="!isLongLeadRelease" title="仅影响本发布包的输出数量，与项目及子项目数量无关">整套倍率
-            <input v-model.number="wholeSetMultiplier" type="number" min="1" max="1000" step="1" aria-label="整套倍率">
+          <label v-if="!isLongLeadRelease" title="在BOM页面维护；发布包冻结创建时的BOM倍率。">整套倍率
+            <output aria-label="发布采用的BOM整套倍率">×{{ wholeSetMultiplier }}</output>
           </label>
           <label v-if="deliveryScope">整包紧急程度
             <select v-model="drawingPriority" aria-label="整包紧急程度"><option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option></select>
@@ -1134,6 +1199,10 @@ async function saveItemComment() {
           <label v-if="isSupplement">变更单号<input value="创建草稿后自动生成" readonly aria-label="变更单号由系统自动生成"></label>
         </div>
         <div class="pdm-release-parameter-slot">
+          <p v-if="releaseInstancesLoading" class="pdm-inline-info" role="status">正在核对BOM结构实例及可发布数量…</p>
+          <p v-if="releaseInstancesError" class="pdm-inline-warning" role="status">{{ releaseInstancesError }}</p>
+          <p v-if="supplementMultiplierChanged" class="pdm-inline-warning" role="status">BOM整套倍率由 ×{{ previousVersionMultiplier ?? 1 }} 调整为 ×{{ wholeSetMultiplier }}，必须确认全部受影响的变更和删除项，不能将部分变更顺延。</p>
+          <p v-if="blockedMultiplierRows.length" class="pdm-inline-warning" role="alert">{{ blockedMultiplierRows.length }} 项已发布物料当前设为不发布或本次无需发布。请先在BOM中恢复发布或撤销确认，再确认倍率变化涉及的全部物料。</p>
           <p v-if="isLongLeadRelease" class="pdm-inline-info">长交期BOM发布允许在尚无引用树时使用，仅冻结本次BOM清单，不发布图纸或制造结构；正式发布将自动扣除已经发布的数量。</p>
           <p v-if="drawingReviewBlockMessage" class="pdm-inline-warning" role="status">{{ drawingReviewBlockMessage }}</p>
           <label v-if="!isSupplement" class="pdm-release-reason">备注<textarea v-model.trim="releaseNote" rows="3" maxlength="500" placeholder="可填写本次发布备注（选填）"></textarea></label>
@@ -1159,30 +1228,31 @@ async function saveItemComment() {
       </section>
       <fieldset class="release-detail-picker">
         <legend>{{ releaseDetailLegend }}</legend>
+        <p v-if="isSupplement" class="pdm-inline-info">下表为所选变更行，未选变更顺延，已发布未变更项沿用原基线。创建草稿后核对完整目标与需求净变更。</p>
         <div class="pdm-table-scroll">
           <table class="pdm-edit-table" :class="{ 'is-supplement': isSupplement, 'has-delivery': deliveryScope }">
             <colgroup><col v-for="(width, index) in releaseColumnWidths" :key="index" :style="width"></colgroup>
-            <thead><tr><th><input v-if="isSupplement" type="checkbox" aria-label="全选可发布变更" :checked="allSupplementSelected" :indeterminate="!allSupplementSelected && readySupplementKeys.some(key => selectedSupplementKeys.includes(key))" :disabled="pending || !readySupplementKeys.length" @change="toggleAllSupplement(($event.target as HTMLInputElement).checked)">标记</th><th>序号</th><th>物料编码</th><th>名称</th><th>型号</th><th>品牌</th><th title="可发布数量">可发布</th><th title="发布总数量">总发布</th><th>备注</th><th>状态</th><th v-if="isSupplement" title="原值 → 新值">变更明细</th><th v-if="deliveryScope">紧急</th><th v-if="deliveryScope">需求时间</th></tr></thead>
+            <thead><tr><th><input v-if="isSupplement" type="checkbox" aria-label="全选可发布变更" :checked="allSupplementSelected" :indeterminate="!allSupplementSelected && readySupplementKeys.some(key => selectedSupplementKeys.includes(key))" :disabled="pending || !readySupplementKeys.length" @change="toggleAllSupplement(($event.target as HTMLInputElement).checked)">标记</th><th>序号</th><th>物料编码</th><th>名称</th><th>型号</th><th>品牌</th><th :title="isFormalRelease ? 'BOM单套数量乘以整套倍率' : isSupplement ? 'BOM单套数量' : '剩余可发布数量'">{{ isFormalRelease ? 'BOM总量' : isSupplement ? '单套数量' : '可发布' }}</th><th :title="isSupplement ? '本行变更后的目标总量；创建草稿后核对完整基线与需求净变更' : '本次新增下发数量'">{{ isSupplement ? '变更行总量' : '本次下发' }}</th><th>备注</th><th>状态</th><th v-if="isSupplement" title="原值 → 新值">变更明细</th><th v-if="deliveryScope">紧急</th><th v-if="deliveryScope">需求时间</th></tr></thead>
             <tbody>
               <template v-if="isLongLeadRelease">
                 <tr v-for="(row, index) in pagedLongLeadItems" :key="row.key">
                   <td class="is-release-centered"><input :checked="selectedLongLeadKeys.includes(row.key)" type="checkbox" :aria-label="`选择长交期物料 ${row.item.drawingNumber}`" :disabled="scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row)" :title="scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row) ? releaseRowDrawingReviewStatus(row) : undefined" @change="toggleLongLeadSelection(row.key, ($event.target as HTMLInputElement).checked, Number(row.item.quantity))"></td>
-                  <td class="is-release-centered">{{ (longLeadPage - 1) * releasePageSize + index + 1 }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.drawingNumber || '—' }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered"><input v-quantity v-if="selectedLongLeadKeys.includes(row.key)" v-model.number="longLeadRequestedQuantities[row.key]" class="long-lead-quantity-input" type="number" min="0.000001" :max="row.item.quantity" step="any" :aria-label="`本次发布数量 ${row.item.drawingNumber}`"><span v-else>—</span></td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row) }">{{ scope === 'NonStandardLongLead' ? releaseRowDrawingReviewStatus(row) : '剩余可发布' }}</span></td>
+                  <td class="is-release-centered">{{ (longLeadPage - 1) * releasePageSize + index + 1 }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.drawingNumber || '—' }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}<small class="pdm-release-unit">{{ releaseUnitLabel(row.item) }}</small></td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered"><input v-quantity v-if="selectedLongLeadKeys.includes(row.key)" v-model.number="longLeadRequestedQuantities[row.key]" class="long-lead-quantity-input" type="number" min="0.000001" :max="row.item.quantity" step="any" :aria-label="`本次发布数量 ${row.item.drawingNumber}`"><span v-else>—</span></td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardLongLead' && !releaseRowDrawingReviewReady(row) }">{{ scope === 'NonStandardLongLead' ? releaseRowDrawingReviewStatus(row) : '剩余可发布' }}</span></td>
                   <td><select :value="itemDeliveryOverride(row.item.id!).priority" :aria-label="`${deliveryItemLabel(row.item)}紧急程度`" @change="setBomItemDeliveryOverride(row.item.id!, ($event.target as HTMLSelectElement).value as DrawingPriority, itemDeliveryOverride(row.item.id!).requiredOn)"><option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option></select></td>
                   <td><input type="date" :value="itemDeliveryOverride(row.item.id!).requiredOn" :aria-label="`${deliveryItemLabel(row.item)}需求时间`" @change="setBomItemDeliveryOverride(row.item.id!, itemDeliveryOverride(row.item.id!).priority, ($event.target as HTMLInputElement).value)"></td>
                 </tr>
               </template>
               <template v-else-if="isFormalRelease">
                 <tr v-for="(row, index) in pagedFormalReleaseRows" :key="row.key" :class="{ 'is-release-unselected': !selectedFormalKeys.includes(row.key) }">
-                  <td class="is-release-centered"><input :checked="selectedFormalKeys.includes(row.key)" type="checkbox" :disabled="isFormalRowFullyPublished(row)" :title="isFormalRowFullyPublished(row) ? formalRowPublishTitle(row) : undefined" :aria-label="`本次发布物料 ${row.item.drawingNumber}`" @change="toggleFormalSelection(row.key, ($event.target as HTMLInputElement).checked)"></td><td class="is-release-centered">{{ (formalPage - 1) * releasePageSize + index + 1 }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.drawingNumber || '—' }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.remainingQuantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': Number(wholeSetMultiplier) !== 1 && selectedFormalKeys.includes(row.key) }">{{ selectedFormalKeys.includes(row.key) ? formalRowPublishQuantity(row) : '—' }}</td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td>
-                  <td class="is-release-centered"><span v-if="!selectedFormalKeys.includes(row.key)" class="release-status-tag">本次不发布</span><span v-else-if="scope === 'NonStandardWithDrawing'" class="release-status-tag" :class="{ 'is-blocked': !releaseRowDrawingReviewReady(row) }">{{ releaseRowDrawingReviewStatus(row) }}</span><span v-else-if="row.longLeadPublishedQuantity > 0" class="long-lead-tag" :title="formalRowPublishTitle(row)">已发布 {{ row.longLeadPublishedQuantity }}/{{ row.item.quantity }}</span><span v-else class="release-status-tag">本次发布</span></td>
+                  <td class="is-release-centered"><input :checked="selectedFormalKeys.includes(row.key)" type="checkbox" :disabled="isFormalRowFullyPublished(row)" :title="isFormalRowFullyPublished(row) ? formalRowPublishTitle(row) : undefined" :aria-label="`本次发布物料 ${row.item.drawingNumber}`" @change="toggleFormalSelection(row.key, ($event.target as HTMLInputElement).checked)"></td><td class="is-release-centered">{{ (formalPage - 1) * releasePageSize + index + 1 }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.drawingNumber || '—' }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}<small class="pdm-release-unit">{{ releaseUnitLabel(row.item) }}</small></td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ releaseQuantity(Number(row.item.quantity) * Number(wholeSetMultiplier)) }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': Number(wholeSetMultiplier) !== 1 && selectedFormalKeys.includes(row.key) }">{{ selectedFormalKeys.includes(row.key) ? formalRowPublishQuantity(row) : '—' }}</td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td>
+                  <td class="is-release-centered"><span v-if="!selectedFormalKeys.includes(row.key)" class="release-status-tag">本次不发布</span><span v-else-if="scope === 'NonStandardWithDrawing'" class="release-status-tag" :class="{ 'is-blocked': !releaseRowDrawingReviewReady(row) }">{{ releaseRowDrawingReviewStatus(row) }}</span><span v-else-if="row.longLeadPublishedQuantity > 0" class="long-lead-tag" :title="formalRowPublishTitle(row)">已发布 {{ row.longLeadPublishedQuantity }}/{{ releaseQuantity(Number(row.item.quantity) * Number(wholeSetMultiplier)) }}</span><span v-else class="release-status-tag">本次发布</span></td>
                   <td><select :value="itemDeliveryOverride(row.item.id!).priority" :aria-label="`${deliveryItemLabel(row.item)}紧急程度`" @change="setBomItemDeliveryOverride(row.item.id!, ($event.target as HTMLSelectElement).value as DrawingPriority, itemDeliveryOverride(row.item.id!).requiredOn)"><option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option></select></td>
                   <td><input type="date" :value="itemDeliveryOverride(row.item.id!).requiredOn" :aria-label="`${deliveryItemLabel(row.item)}需求时间`" @change="setBomItemDeliveryOverride(row.item.id!, itemDeliveryOverride(row.item.id!).priority, ($event.target as HTMLInputElement).value)"></td>
                 </tr>
               </template>
               <template v-else>
                 <tr v-for="(row, index) in pagedSupplementRows" :key="`${row.change}-${row.item.id}-${index}`" :class="{ 'is-release-unselected': supplementRowSelectable(row) && !selectedSupplementKeys.includes(supplementRowKey(row)) }">
-                  <td class="is-release-centered"><input v-if="supplementRowSelectable(row)" :disabled="pending || !supplementRowReady(row)" :checked="selectedSupplementKeys.includes(supplementRowKey(row))" type="checkbox" :aria-label="`本次纳入 ${row.item.drawingNumber || row.item.name}`" :title="row.change === '删除' ? '明确确认本次删除；未勾选时保留上一正式值' : '取消勾选后顺延到下一次增补/变更'" @change="toggleSupplementSelection(row, ($event.target as HTMLInputElement).checked)"><input v-else type="checkbox" checked disabled :title="row.change === '修改' ? '已发布物料的修改随本次变更单一起发布，不能单独顺延' : '删除项必须明确确认后才生效'"><span :class="`release-change-tag is-${row.change}`">{{ row.change }}</span></td><td class="is-release-centered">{{ (supplementPage - 1) * releasePageSize + index + 1 }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.drawingNumber || '—' }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}</td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': row.change !== '删除' && Number(wholeSetMultiplier) !== 1 }">{{ row.change === '删除' || isDeferredSupplementRow(row) ? '—' : Number(row.item.quantity) * Number(wholeSetMultiplier) }}</td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span v-if="supplementRowReady(row) && !selectedSupplementKeys.includes(supplementRowKey(row))" class="release-status-tag">本次不发布</span><span v-else class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardSupplement' && row.change !== '删除' && !itemDrawingReviewReady(row.item) }">{{ scope === 'NonStandardSupplement' && row.change !== '删除' ? drawingReviewStatusForItem(row.item) : '待纳入变更' }}</span></td>
+                  <td class="is-release-centered"><input v-if="supplementRowSelectable(row)" :disabled="pending || !supplementRowReady(row)" :checked="selectedSupplementKeys.includes(supplementRowKey(row))" type="checkbox" :aria-label="`本次纳入 ${row.item.drawingNumber || row.item.name}`" :title="row.change === '删除' ? '明确确认本次删除；未勾选时保留上一正式值' : '取消勾选后顺延到下一次增补/变更'" @change="toggleSupplementSelection(row, ($event.target as HTMLInputElement).checked)"><input v-else type="checkbox" checked disabled :title="row.change === '修改' ? '已发布物料的修改随本次变更单一起发布，不能单独顺延' : '删除项必须明确确认后才生效'"><span :class="`release-change-tag is-${row.change}`">{{ row.change }}</span></td><td class="is-release-centered">{{ (supplementPage - 1) * releasePageSize + index + 1 }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.drawingNumber || '—' }}</td><td v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}<small class="pdm-release-unit">{{ releaseUnitLabel(row.item) }}</small></td><td>{{ row.item.specification || '—' }}</td><td class="is-release-centered">{{ row.item.brand || '—' }}</td><td class="is-release-centered">{{ row.item.quantity }}</td><td class="is-release-centered" :class="{ 'is-release-multiplied': row.change !== '删除' && Number(wholeSetMultiplier) !== 1 }">{{ row.change === '删除' || isDeferredSupplementRow(row) ? '—' : releaseQuantity(Number(row.item.quantity) * Number(wholeSetMultiplier)) }}</td><td :title="row.item.remark || undefined">{{ row.item.remark || '—' }}</td><td class="is-release-centered"><span v-if="supplementRowReady(row) && !selectedSupplementKeys.includes(supplementRowKey(row))" class="release-status-tag">本次不发布</span><span v-else class="release-status-tag" :class="{ 'is-blocked': scope === 'NonStandardSupplement' && row.change !== '删除' && !itemDrawingReviewReady(row.item) }">{{ scope === 'NonStandardSupplement' && row.change !== '删除' ? drawingReviewStatusForItem(row.item) : '待纳入变更' }}</span></td>
                   <td class="release-change-details" :title="row.details.join('；')"><div v-for="detail in row.details" :key="detail">{{ detail }}</div></td>
                   <td><select :value="itemDeliveryOverride(row.item.id!).priority" :aria-label="`${deliveryItemLabel(row.item)}紧急程度`" @change="setBomItemDeliveryOverride(row.item.id!, ($event.target as HTMLSelectElement).value as DrawingPriority, itemDeliveryOverride(row.item.id!).requiredOn)"><option value="Normal">普通</option><option value="Priority">优先</option><option value="Urgent">紧急</option></select></td>
                   <td><input type="date" :value="itemDeliveryOverride(row.item.id!).requiredOn" :aria-label="`${deliveryItemLabel(row.item)}需求时间`" @change="setBomItemDeliveryOverride(row.item.id!, itemDeliveryOverride(row.item.id!).priority, ($event.target as HTMLInputElement).value)"></td>
@@ -1277,7 +1347,7 @@ async function saveItemComment() {
         <div><small>发布范围</small><strong>{{ scopeLabels[releasePackage.scope] || '旧版组合发布' }}</strong></div>
         <div><small>当前状态</small><strong>{{ releaseStateLabel }}</strong></div>
         <div><small>审批模板</small><strong>{{ releaseWorkflowLabel }}</strong></div>
-        <div><small>整套倍率</small><strong>× {{ releasePackage.wholeSetMultiplier ?? 1 }}</strong></div>
+        <div><small>{{ isLongLeadScope(releasePackage.scope) ? '数量口径' : '冻结整套倍率' }}</small><strong>{{ isLongLeadScope(releasePackage.scope) ? '按确认总量冻结，不再乘倍率' : '× ' + (releasePackage.wholeSetMultiplier ?? 1) }}</strong></div>
         <div><small>整包需求日期</small><strong>{{ releasePackage.drawingRequiredOn || '未设置' }}</strong></div>
         <div v-if="releasePackage.changeNumber && releasePackage.changeNumber !== releasePackage.number"><small>变更单号</small><strong>{{ releasePackage.changeNumber }}</strong></div>
         <div><small>BOM 发布版本</small><strong>{{ releaseBomRevisionLabel }}</strong></div>
@@ -1289,7 +1359,7 @@ async function saveItemComment() {
 
       <section v-if="releasePackage.scope !== 'Nameplate'" class="pdm-release-frozen-snapshot" aria-label="审批固化快照">
         <header>
-          <div><strong>{{ showFrozenChanges ? '本次变更明细' : '审批固化快照' }}</strong><small>显示发布后的最终数量（工作区数量 × 整套倍率 {{ releasePackage.wholeSetMultiplier ?? 1 }}）；批注独立保存，不修改BOM。</small><small v-if="showFrozenChanges">按物料编码和单位汇总新增、修改、删除项；使用发布包冻结数据与上一正式版同口径对比，删除项数量为0。</small></div>
+          <div><strong>{{ showFrozenChanges ? '本次变更明细' : '审批固化快照' }}</strong><small>数量来自本发布包冻结BOM，已含倍率，不回读当前工作区；批注独立保存。</small><small v-if="showFrozenChanges">需求净变更＝变更后总量－变更前总量－首次提前抵扣；负数表示减少需求，不代表已退料。删除项目标为0。</small></div>
           <div class="pdm-frozen-view-actions">
             <span>{{ frozenDisplayRows.length }} 项<span v-if="!showFrozenChanges && frozenItems.length !== frozenDisplayRows.length"> · {{ frozenItems.length }} 个实例</span></span>
             <button v-if="projectExport && supportsFrozenExport" type="button" class="pdm-secondary-action" :disabled="frozenExporting || !frozenExportRowCount || !projectId || !token" :title="isFrozenSupplement ? '导出全部变更；增加为正数，减少和删除为负数' : '导出本发布包的全部冻结BOM，不受分页和显示方式影响'" @click="exportFrozenBom">{{ frozenExporting ? '导出中…' : '导出BOM' }}</button>
@@ -1297,28 +1367,30 @@ async function saveItemComment() {
           </div>
         </header>
         <p v-if="frozenExportError" class="pdm-inline-error" role="alert">{{ frozenExportError }}</p>
+        <p class="pdm-inline-info" aria-label="发布数量核对"><span v-for="total in frozenUnitTotals" :key="total.code">单位 {{ total.name }}：完整目标 {{ total.target }}；新增需求 {{ total.added }}；减少需求 {{ total.reduced }}。 </span></p>
         <div class="pdm-release-diff-summary"><span class="is-added">新增 {{ frozenDiff.added }}</span><span class="is-modified">修改 {{ frozenDiff.modified }}</span><span class="is-removed">减少 {{ frozenDiff.removed }}</span><small>对比上一正式发布版</small></div>
         <p v-if="itemCommentsError && !itemCommentOpen" class="pdm-inline-error pdm-item-comments-load-error">批注加载失败：{{ itemCommentsError }}</p>
         <div class="pdm-table-scroll">
           <table class="pdm-edit-table pdm-release-frozen-table" :class="{ 'is-formal-issue-view': showFormalIssueQuantities, 'is-change-view': showFrozenChanges }">
-            <colgroup><col><col><col><col><col><col><col><template v-if="showFormalIssueQuantities"><col><col></template><col><col><template v-if="showFrozenChanges"><col><col></template><col class="pdm-release-delivery-column"></colgroup>
-            <thead><tr><th>序号</th><th>物料编码</th><th>物料名称</th><th>型号</th><th>版本</th><th>品牌</th><th>备注</th><th>{{ showFormalIssueQuantities ? 'BOM总量' : '数量' }}</th><template v-if="showFormalIssueQuantities"><th>前期已发布</th><th>本次新增下发</th></template><th>批注</th><template v-if="showFrozenChanges"><th>变更</th><th title="原值 → 新值">变更明细</th></template><th>紧急程度 / 需求日期</th></tr></thead>
+            <colgroup><col><col><col><col><col><col><col><template v-if="showFrozenChanges"><col><col><col></template><template v-if="showFormalIssueQuantities"><col><col></template><col><col><template v-if="showFrozenChanges"><col><col></template><col class="pdm-release-delivery-column"></colgroup>
+            <thead><tr><th>序号</th><th>物料编码</th><th>物料名称</th><th>型号</th><th>版本</th><th>品牌</th><th>备注</th><template v-if="showFrozenChanges"><th>变更前总量</th><th title="物料首次纳入正式基线时抵扣，后续不重复抵扣">首次提前抵扣</th><th title="变更后总量－变更前总量－首次提前抵扣；负数表示减少需求">需求净变更</th></template><th>{{ showFrozenChanges ? '变更后总量' : isLongLeadScope(releasePackage.scope) ? '本次下发' : 'BOM总量' }}</th><template v-if="showFormalIssueQuantities"><th>前期已发布</th><th>本次新增下发</th></template><th>批注</th><template v-if="showFrozenChanges"><th>变更</th><th title="原值 → 新值">变更明细</th></template><th>紧急程度 / 需求日期</th></tr></thead>
             <tbody>
               <tr v-for="(row, index) in pagedFrozenRows" :key="row.key">
                 <td class="is-release-centered">{{ (frozenPage - 1) * releasePageSize + index + 1 }}</td>
                 <td class="is-release-centered" v-stocked-material="row.item.drawingNumber">{{ row.item.drawingNumber || '—' }}</td>
-                <td class="pdm-frozen-item-name" v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}</td>
+                <td class="pdm-frozen-item-name" v-stocked-material="row.item.drawingNumber">{{ row.item.name || '—' }}<small class="pdm-release-unit">{{ releaseUnitLabel(row.item) }}</small></td>
                 <td>{{ row.item.specification || '—' }}</td>
                 <td class="is-release-centered" :title="packageRevisionHint(row.item, releasePackage)">{{ packageRevisionLabel(row.item, releasePackage) }}</td>
                 <td class="is-release-centered">{{ row.item.brand || '—' }}</td>
                 <td>{{ row.item.remark || '—' }}</td>
+                <template v-if="showFrozenChanges"><td class="is-release-centered">{{ row.previousQuantity }}</td><td class="is-release-centered">{{ row.earlyCredit }}</td><td class="is-release-centered">{{ (row.quantityDelta ?? 0) > 0 ? '+' : '' }}{{ row.quantityDelta }}</td></template>
                 <td class="is-release-centered">{{ row.item.quantity }}</td>
                 <template v-if="showFormalIssueQuantities"><td class="is-release-centered">{{ priorQuantityForRow(row) }}</td><td class="is-release-centered is-new-issue-quantity">{{ newIssueQuantityForRow(row) }}</td></template>
                 <td class="is-release-centered"><span v-if="row.change === '删除'">—</span><button v-else type="button" class="pdm-item-comment-action" :class="{ 'has-comments': commentsForRow(row).length > 0 }" :aria-label="`查看或添加物料批注 ${row.item.drawingNumber || row.item.name}`" @click="openItemComment(row)">批注<span v-if="commentsForRow(row).length">（{{ commentsForRow(row).length }}）</span></button></td>
                 <template v-if="showFrozenChanges"><td class="is-release-centered"><span class="release-change-tag" :class="`is-${row.change}`">{{ row.change }}</span></td><td class="pdm-frozen-change-details"><div v-for="detail in row.details" :key="detail">{{ detail }}</div></td></template>
                 <td class="is-release-centered pdm-release-delivery">{{ frozenDeliveryLabel(row) }}</td>
               </tr>
-              <tr v-if="!frozenDisplayRows.length"><td :colspan="showFormalIssueQuantities || showFrozenChanges ? 12 : 10" class="pdm-empty-info">{{ showFrozenChanges ? '与上一发布版相比，本次没有增补或变更内容。' : '该发布包没有BOM快照数据。' }}</td></tr>
+              <tr v-if="!frozenDisplayRows.length"><td :colspan="showFrozenChanges ? 15 : showFormalIssueQuantities ? 12 : 10" class="pdm-empty-info">{{ showFrozenChanges ? '与上一发布版相比，本次没有增补或变更内容。' : '该发布包没有BOM快照数据。' }}</td></tr>
             </tbody>
           </table>
         </div>
@@ -1370,6 +1442,7 @@ async function saveItemComment() {
 </template>
 
 <style scoped>
+.pdm-release-unit { display: block; color: var(--pdm-muted); font-size: 11px; }
 .pdm-release-details{margin-bottom:8px}.pdm-release-details>summary{padding:5px 0;color:var(--pdm-text-soft);font-weight:600;cursor:pointer}.pdm-release-details[open]>summary{margin-bottom:6px}
 .pdm-release-frozen-table col.pdm-release-delivery-column{width:130px}.pdm-release-frozen-table .pdm-release-delivery{font-variant-numeric:tabular-nums}
 .pdm-inline-info{margin:0 0 8px;padding:7px 10px;border:1px solid var(--pdm-green-border);border-radius:6px;background:var(--pdm-green-soft);color:var(--pdm-green);white-space:normal}
@@ -1418,15 +1491,15 @@ async function saveItemComment() {
 .pdm-release-frozen-table.is-formal-issue-view col:nth-child(10){width:5%}
 .pdm-release-frozen-table.is-formal-issue-view col:nth-child(11){width:7%}
 .pdm-release-frozen-table .is-new-issue-quantity{background:var(--pdm-orange-soft)}
-.pdm-release-frozen-table.is-change-view col:nth-child(1){width:4%}
-.pdm-release-frozen-table.is-change-view col:nth-child(2){width:12%}
-.pdm-release-frozen-table.is-change-view col:nth-child(3){width:11%}
-.pdm-release-frozen-table.is-change-view col:nth-child(4){width:11%}
-.pdm-release-frozen-table.is-change-view col:nth-child(5){width:7%}
-.pdm-release-frozen-table.is-change-view col:nth-child(6){width:9%}
-.pdm-release-frozen-table.is-change-view col:nth-child(7),.pdm-release-frozen-table.is-change-view col:nth-child(8){width:5%}
-.pdm-release-frozen-table.is-change-view col:nth-child(9),.pdm-release-frozen-table.is-change-view col:nth-child(10){width:6%}
-.pdm-release-frozen-table.is-change-view col:nth-child(11){width:24%}
+.pdm-release-frozen-table.is-change-view{min-width:1250px}
+.pdm-release-frozen-table.is-change-view col:nth-child(1){width:3%}
+.pdm-release-frozen-table.is-change-view col:nth-child(2),.pdm-release-frozen-table.is-change-view col:nth-child(3){width:9%}
+.pdm-release-frozen-table.is-change-view col:nth-child(4){width:8%}
+.pdm-release-frozen-table.is-change-view col:nth-child(5),.pdm-release-frozen-table.is-change-view col:nth-child(6),.pdm-release-frozen-table.is-change-view col:nth-child(n+8):nth-child(-n+11){width:5%}
+.pdm-release-frozen-table.is-change-view col:nth-child(7){width:7%}
+.pdm-release-frozen-table.is-change-view col:nth-child(12),.pdm-release-frozen-table.is-change-view col:nth-child(13){width:4%}
+.pdm-release-frozen-table.is-change-view col:nth-child(14){width:14%}
+.pdm-release-frozen-table.is-change-view col:nth-child(15){width:12%}
 .pdm-frozen-view-actions{flex-wrap:wrap}
 @media(max-width:900px){.release-center .pdm-release-frozen-snapshot{min-height:320px}}
 .pdm-frozen-change-details>div+div{margin-top:3px}

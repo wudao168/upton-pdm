@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import MaterialEditorDialog from '../src/components/MaterialEditorDialog.vue'
 import type { MaterialAttachment, SaveMaterialInput } from '../src/types'
 
-const api = vi.hoisted(() => ({ materialAttachmentObjectUrl: vi.fn(), listMaterialAttachments: vi.fn(), deleteMaterialAttachment: vi.fn() }))
+const api = vi.hoisted(() => ({
+  listMaterialBrandCatalog: vi.fn().mockResolvedValue([{ id: 'upton', name: 'UPTON', isActive: true, rowVersion: 1, previousNames: [] }]), materialAttachmentObjectUrl: vi.fn(), listMaterialAttachments: vi.fn(), deleteMaterialAttachment: vi.fn() }))
 vi.mock('../src/api', () => api)
 const picture = (id: string) => ({ id, materialId: 'material', kind: 'CoverImage', originalFileName: `${id}.png` } as MaterialAttachment)
 let wrapper: ReturnType<typeof mount> | undefined
@@ -19,6 +20,18 @@ function selectFiles(count: number) {
 describe('MaterialEditorDialog attachments', () => {
   beforeEach(() => { vi.clearAllMocks(); api.materialAttachmentObjectUrl.mockImplementation(async (_id: string, id: string) => `blob:${id}`); vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never); api.deleteMaterialAttachment.mockReset().mockResolvedValue(undefined) })
   afterEach(() => { wrapper?.unmount(); document.body.innerHTML = '' })
+
+  it('计量单位选项仅显示名称，选择时仍保存U9编码', async () => {
+    const form = { name: '测试料品', unitCode: '001' } as SaveMaterialInput
+    open({ form }); await flushPromises()
+    const select = wrapper!.findAllComponents({ name: 'ElSelect' }).find(item => item.props('placeholder') === '请选择U9C计量单位')!
+    const options = select.findAllComponents({ name: 'ElOption' })
+    expect(options.find(item => item.props('value') === '001')?.props('label')).toBe('个')
+    expect(options.find(item => item.props('value') === '002')?.props('label')).toBe('台')
+    expect(options.every(item => !/\d/.test(item.props('label')))).toBe(true)
+    select.vm.$emit('update:modelValue', '002'); await flushPromises()
+    expect(form.unitCode).toBe('002')
+  })
 
   it('removes the numbering explanation and places pictures above the form and file lists below it', async () => {
     const model = { ...picture('model'), kind: 'Model3D', originalFileName: '模型.SLDPRT' }

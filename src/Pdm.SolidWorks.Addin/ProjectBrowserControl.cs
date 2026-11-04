@@ -29,6 +29,7 @@ internal sealed class ProjectBrowserControl : UserControl
     private IReadOnlyList<ProjectDto> projects = Array.Empty<ProjectDto>();
     private ProjectDto selection;
     private readonly bool requireSubmissionAccess;
+    private bool useSearchBox;
 
     public ProjectBrowserControl(bool matchTaskPaneProjectLayout = false, bool requireSubmissionAccess = false)
     {
@@ -44,6 +45,7 @@ internal sealed class ProjectBrowserControl : UserControl
         selectedProject.AutoSize = false;
         selectedProject.Margin = Padding.Empty;
         selectedProject.ShortcutsEnabled = false;
+        selectedProject.TextChanged += (_, _) => { if (useSearchBox) SearchTextChanged?.Invoke(this, EventArgs.Empty); };
         browse.Margin = Padding.Empty;
         browse.AutoSize = false;
         browse.AutoEllipsis = false;
@@ -78,10 +80,25 @@ internal sealed class ProjectBrowserControl : UserControl
     }
 
     public event EventHandler SelectedProjectChanged;
+    internal event EventHandler BrowseRequested;
+    internal event EventHandler SearchTextChanged;
+    internal string SearchText => selectedProject.Text;
+
+    internal void UseProjectSearchBox()
+    {
+        useSearchBox = true;
+        selectedProject.ReadOnly = false;
+        selectedProject.TabStop = true;
+        selectedProject.ShortcutsEnabled = true;
+        selectedProject.AccessibleName = "搜索主项目或图档归属";
+        selectedProject.Text = string.Empty;
+    }
 
     public Guid? SelectedProjectId => selection?.Id;
 
     public ProjectDto SelectedProject => selection;
+
+    public bool ConfirmExistingArchiveTarget { get; set; }
 
     public string SelectedProjectDisplay => ProjectSelectionText(selection);
 
@@ -138,31 +155,43 @@ internal sealed class ProjectBrowserControl : UserControl
 
     private void BrowseForProject()
     {
+        if (BrowseRequested != null)
+        {
+            BrowseRequested(this, EventArgs.Empty);
+            return;
+        }
         if (projects.Count == 0)
         {
             TopMostMessageBox.Show(this, "当前账号没有可选择的项目。", "选择项目", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
-        using (var dialog = new ProjectBrowserDialog(projects, SelectedProjectId, requireSubmissionAccess))
+        using (var dialog = CreateBrowserDialog())
         {
             if ((ArchiveSession.Current?.ShowInline(dialog) ?? dialog.ShowDialog(FindForm())) != DialogResult.OK || dialog.SelectedProject == null)
             {
                 return;
             }
 
-            var changed = selection == null || selection.Id != dialog.SelectedProject.Id;
-            selection = dialog.SelectedProject;
-            UpdateDisplay();
-            if (changed)
-            {
-                SelectedProjectChanged?.Invoke(this, EventArgs.Empty);
-            }
+            AcceptProjectSelection(dialog.SelectedProject);
         }
+    }
+
+    internal ProjectBrowserDialog CreateBrowserDialog() =>
+        new ProjectBrowserDialog(projects, SelectedProjectId, requireSubmissionAccess, ConfirmExistingArchiveTarget);
+
+    internal void AcceptProjectSelection(ProjectDto project)
+    {
+        if (project == null || requireSubmissionAccess && !project.CanSubmitArchive) return;
+        var changed = selection == null || selection.Id != project.Id;
+        selection = project;
+        UpdateDisplay();
+        if (changed) SelectedProjectChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private void UpdateDisplay()
     {
+        if (useSearchBox) return;
         selectedProject.Text = SelectedProjectDisplay;
         selectedProject.AccessibleName = string.IsNullOrWhiteSpace(selectedProject.Text)
             ? "尚未选择项目"
@@ -178,7 +207,12 @@ internal sealed class ProjectBrowserControl : UserControl
 
 internal sealed class ProjectBrowserDialog : Form
 {
-    private readonly IReadOnlyList<ProjectDto> projects;
+    private TableLayoutPanel columns;
+    private Control mainGroup;
+    private Control childGroup;
+    private Button cancel;
+    private Action<ProjectDto> taskPaneSelection;
+    private IReadOnlyList<ProjectDto> projects;
     private readonly TextBox search = new TextBox { Dock = DockStyle.Fill, AutoSize = false, Margin = Padding.Empty };
     private readonly ListBox mainProjects = new ListBox { Dock = DockStyle.Fill, IntegralHeight = false };
     private readonly ListView childProjects = new ListView
@@ -212,12 +246,23 @@ internal sealed class ProjectBrowserDialog : Form
     private readonly TableLayoutPanel layout;
     private readonly Guid? initialProjectId;
     private readonly bool requireSubmissionAccess;
+    private readonly bool confirmExistingArchiveTarget;
+    private Guid? acknowledgedProjectId;
+    private readonly CheckBox existingProjectConfirmation = new CheckBox
+    {
+        Text = "确认存入已有图档项目", AutoSize = true, Anchor = AnchorStyles.None,
+        Margin = new Padding(0, 0, 8, 0), Visible = false
+    };
 
     public ProjectBrowserDialog(IReadOnlyList<ProjectDto> projects, Guid? initialProjectId, bool requireSubmissionAccess = false)
+        : this(projects, initialProjectId, requireSubmissionAccess, false) { }
+
+    public ProjectBrowserDialog(IReadOnlyList<ProjectDto> projects, Guid? initialProjectId, bool requireSubmissionAccess, bool confirmExistingArchiveTarget)
     {
         this.projects = projects ?? Array.Empty<ProjectDto>();
         this.initialProjectId = initialProjectId;
         this.requireSubmissionAccess = requireSubmissionAccess;
+        this.confirmExistingArchiveTarget = confirmExistingArchiveTarget;
 
         Text = "浏览选择项目";
         DialogWindowSizing.CenterOnOwnerScreen(this);
@@ -232,6 +277,7 @@ internal sealed class ProjectBrowserDialog : Form
         search.TextChanged += (_, _) => ApplySearch();
         mainProjects.SelectedIndexChanged += (_, _) => RefreshChildren();
         childProjects.SelectedIndexChanged += (_, _) => UpdateSelectionState();
+        existingProjectConfirmation.CheckedChanged += (_, _) => UpdateSelectionState();
         childProjects.DoubleClick += (_, _) => ConfirmProjectSelection();
         confirm.Click += (_, _) => ConfirmProjectSelection();
         childProjects.Resize += (_, _) => ResizeChildColumns();
@@ -253,16 +299,17 @@ internal sealed class ProjectBrowserDialog : Form
         }, 0, 0);
         searchPanel.Controls.Add(search, 1, 0);
 
-        var columns = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        columns = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
         columns.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35));
         columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 65));
-        var mainGroup = BuildProjectGroup("1. 主项目", mainProjects, null);
+        mainGroup = BuildProjectGroup("1. 主项目", mainProjects, null);
         mainGroup.Margin = new Padding(0, 0, 8, 0);
         columns.Controls.Add(mainGroup, 0, 0);
-        columns.Controls.Add(BuildProjectGroup("2. 图档归属（必选）", childProjects, childHint), 1, 0);
+        childGroup = BuildProjectGroup("2. 图档归属（必选）", childProjects, childHint);
+        columns.Controls.Add(childGroup, 1, 0);
 
-        var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = false, Size = new Size(96, 30), Margin = new Padding(0, 0, 6, 0) };
+        cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = false, Size = new Size(96, 30), Margin = new Padding(0, 0, 6, 0) };
         ApplyDialogButtonAppearance(confirm, Color.FromArgb(21, 126, 77), true);
         ApplyDialogButtonAppearance(cancel, Color.FromArgb(230, 126, 34), true);
         var buttons = new FlowLayoutPanel
@@ -274,12 +321,15 @@ internal sealed class ProjectBrowserDialog : Form
         buttons.Controls.Add(cancel);
         buttons.Controls.Add(confirm);
 
-        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0, 10, 0, 0) };
+        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = new Padding(0, 10, 0, 0) };
+        footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 198));
         selection.Margin = new Padding(0, 0, 6, 0);
         footer.Controls.Add(selection, 0, 0);
-        footer.Controls.Add(buttons, 1, 0);
+        footer.Controls.Add(existingProjectConfirmation, 1, 0);
+        footer.Controls.Add(buttons, 2, 0);
 
         layout = new TableLayoutPanel
         {
@@ -322,6 +372,46 @@ internal sealed class ProjectBrowserDialog : Form
 
     internal void ConfigureInlineLayout() => layout.Padding = Padding.Empty;
 
+    internal Control CreateTaskPaneContent(Action<ProjectDto> selected, Action canceled)
+    {
+        taskPaneSelection = selected;
+        cancel.DialogResult = DialogResult.None;
+        cancel.Click += (_, _) => canceled();
+        columns.SuspendLayout();
+        columns.Controls.Remove(mainGroup);
+        columns.Controls.Remove(childGroup);
+        columns.ColumnCount = 1;
+        columns.RowCount = 2;
+        columns.ColumnStyles.Clear();
+        columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        columns.RowStyles.Clear();
+        columns.RowStyles.Add(new RowStyle(SizeType.Percent, 33));
+        columns.RowStyles.Add(new RowStyle(SizeType.Percent, 67));
+        mainGroup.Margin = new Padding(0, 0, 0, 8);
+        columns.Controls.Add(mainGroup, 0, 0);
+        columns.Controls.Add(childGroup, 0, 1);
+        columns.ResumeLayout();
+        layout.Padding = Padding.Empty;
+        layout.GetControlFromPosition(0, 0).Visible = false;
+        layout.RowStyles[0].Height = 0;
+        layout.GetControlFromPosition(0, 1).Visible = false;
+        layout.RowStyles[1].Height = 0;
+        Controls.Remove(layout);
+        ApplySearch();
+        return layout;
+    }
+
+    internal void SetProjects(IReadOnlyList<ProjectDto> value)
+    {
+        var selectedId = SelectedProject?.Id;
+        projects = value ?? Array.Empty<ProjectDto>();
+        ApplySearch();
+        SelectProjectItem(childProjects, selectedId);
+        UpdateSelectionState();
+    }
+
+    internal void SetSearchText(string value) => search.Text = value ?? string.Empty;
+
     private static Control BuildProjectGroup(string title, Control list, Control footer)
     {
         var group = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
@@ -339,10 +429,11 @@ internal sealed class ProjectBrowserDialog : Form
     {
         var selectedMainId = (mainProjects.SelectedItem as ProjectDto)?.Id;
         var query = search.Text.Trim();
+        var matchChildText = taskPaneSelection == null || query.Length == 0 || !query.All(char.IsDigit);
         var roots = projects
             .Where(project => !project.ParentProjectId.HasValue)
             .Where(project => Matches(project, query) || MatchesMainDocuments(project, query)
-                || projects.Any(child => child.ParentProjectId == project.Id && Matches(child, query)))
+                || matchChildText && projects.Any(child => child.ParentProjectId == project.Id && Matches(child, query)))
             .OrderBy(project => project.Code, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
@@ -383,7 +474,8 @@ internal sealed class ProjectBrowserDialog : Form
         }
         childProjects.EndUpdate();
         childProjects.Enabled = parent != null;
-        childHint.Text = parent == null
+        childHint.Text = projects.Count == 0 ? "项目清单暂未就绪，请稍候或确认账号权限"
+            : parent == null
             ? "请先选择主项目"
             : children.Length == 0 ? "请选择主项目图档（项目号-0）" : string.Concat("可选主项目图档或 ", children.Length, " 个子项目");
 
@@ -412,8 +504,15 @@ internal sealed class ProjectBrowserDialog : Form
     private void UpdateSelectionState()
     {
         var selected = SelectedProject;
+        if (acknowledgedProjectId != selected?.Id)
+        {
+            acknowledgedProjectId = selected?.Id;
+            existingProjectConfirmation.Checked = false;
+        }
+        var needsConfirmation = confirmExistingArchiveTarget && selected != null && selected.DocumentCount != 0;
+        existingProjectConfirmation.Visible = needsConfirmation;
         var canConfirm = selected != null && (!requireSubmissionAccess || selected.CanSubmitArchive);
-        confirm.Enabled = canConfirm;
+        confirm.Enabled = canConfirm && (!needsConfirmation || existingProjectConfirmation.Checked);
         ApplyDialogButtonAppearance(confirm, Color.FromArgb(21, 126, 77), confirm.Enabled);
         selection.Text = selected != null && requireSubmissionAccess && !selected.CanSubmitArchive
             ? "无存档权限：只能浏览，不能获取编辑权限或提交存档"
@@ -424,8 +523,13 @@ internal sealed class ProjectBrowserDialog : Form
 
     private void ConfirmProjectSelection()
     {
-        if (SelectedProject is { } selected && (!requireSubmissionAccess || selected.CanSubmitArchive))
+        if (confirm.Enabled && SelectedProject is { } selected && (!requireSubmissionAccess || selected.CanSubmitArchive))
         {
+            if (taskPaneSelection != null)
+            {
+                taskPaneSelection(selected);
+                return;
+            }
             DialogResult = DialogResult.OK;
             Close();
         }
@@ -556,6 +660,14 @@ internal sealed class ProjectBrowserDialog : Form
         }
 
         var available = Math.Max(0, childProjects.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4);
+        if (taskPaneSelection != null)
+        {
+            childProjects.Columns[0].Width = Math.Max(96, available - 88);
+            childProjects.Columns[1].Width = 88;
+            childProjects.Columns[2].Width = 0;
+            childProjects.Columns[3].Width = 0;
+            return;
+        }
         var documentStatusWidth = Math.Max(60, Math.Min(96, available * 17 / 100));
         var businessStatusWidth = Math.Max(60, Math.Min(96, available * 17 / 100));
         var submissionStatusWidth = Math.Max(68, Math.Min(104, available * 20 / 100));

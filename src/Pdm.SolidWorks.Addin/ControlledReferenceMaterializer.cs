@@ -173,15 +173,35 @@ internal static class ControlledReferenceMaterializer
             catch (Exception error)
             {
                 // F14-F16: restore every partial rewrite before the native-open fallback.
-                try { File.Copy(backup, owner, true); }
+                try
+                {
+                    // Native reference replacement can reapply read-only before
+                    // returning false. Unchanged bytes need no write; a partial
+                    // rewrite must be restored and verified before opening.
+                    if (!string.Equals(before, ArchiveFileFingerprint.Read(owner), StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!string.Equals(before, ArchiveFileFingerprint.Read(backup), StringComparison.OrdinalIgnoreCase))
+                            throw new IOException("引用恢复副本校验失败，未覆盖当前文件。");
+                        File.SetAttributes(owner, File.GetAttributes(owner) & ~FileAttributes.ReadOnly);
+                        File.Copy(backup, owner, true);
+                        if (!string.Equals(before, ArchiveFileFingerprint.Read(owner), StringComparison.OrdinalIgnoreCase))
+                            throw new IOException("引用恢复后的内容校验失败，未继续打开。");
+                    }
+                }
                 catch (Exception recoveryError) when (recoveryError is IOException || recoveryError is UnauthorizedAccessException)
                 {
                     keepBackup = true;
+                    PluginDiagnosticLog.Record("引用恢复失败", file.FileName + "；原生定位：" + error + "；恢复：" + recoveryError);
                     throw new IOException("引用定位未完成，当前工作副本仍被占用或无法恢复，未继续打开：" + file.FileName
                         + "。完整恢复副本已保留：" + backup, new AggregateException(error, recoveryError));
                 }
-                if (replacements.Keys.Any(IsLinkedResource))
+                if (replacements.Keys.Any(IsLinkedResource) && !ResolvesControlledSources(app, owner, replacements, files, directory))
                     throw new IOException("外部来源引用未能安全定位到PLM工作区，已恢复原副本，未加载原目录来源：" + file.FileName, error);
+                if (replacements.Keys.Any(IsLinkedResource))
+                {
+                    PluginDiagnosticLog.Record("受控来源定位", file.FileName + "：引用替换接口未支持此来源，已恢复原副本并核对受控搜索结果；原有关联保留。");
+                    continue;
+                }
                 PluginDiagnosticLog.Record("引用重定位", file.FileName + "：已恢复原始副本，将尝试原生打开并核对实际来源：" + error);
             }
             finally
@@ -192,6 +212,36 @@ internal static class ControlledReferenceMaterializer
         }
         // F25/F26: no speculative OpenDoc/Save3, BreakLink or virtual externalization.
         // The actual user-requested open performs the loaded-source verification.
+    }
+
+    private static bool ResolvesControlledSources(ISldWorks app, string owner, IReadOnlyDictionary<string, string> replacements,
+        IReadOnlyDictionary<string, ControlledOpenFileDto> files, string directory)
+    {
+        // Only the bounded native-open scope may use search resolution. A failed
+        // ReplaceReferencedDocument is never sufficient evidence to load a source.
+        if (!ControlledOpenBoundary.IsActive) return false;
+        try
+        {
+            var values = app.GetDocumentDependencies2(owner, false, true, false) as Array;
+            if (values == null || values.Length % 2 != 0) return false;
+            var paths = Enumerable.Range(0, values.Length / 2)
+                .SelectMany(index => (Convert.ToString(values.GetValue(index * 2 + 1)) ?? string.Empty).Split('|')).ToArray();
+            foreach (var pair in replacements.Where(pair => IsLinkedResource(pair.Key)))
+            {
+                if (!files.TryGetValue(Path.GetFileName(pair.Value), out var file)
+                    || !string.Equals(pair.Value, LocalPath(directory, file), StringComparison.OrdinalIgnoreCase)
+                    || !Matches(pair.Value, file)
+                    || !paths.Contains(pair.Value, StringComparer.OrdinalIgnoreCase)
+                    || paths.Any(path => string.Equals(Path.GetFileName(path), file.FileName, StringComparison.OrdinalIgnoreCase)
+                        && !string.Equals(path, pair.Value, StringComparison.OrdinalIgnoreCase))) return false;
+            }
+            return true;
+        }
+        catch (Exception error)
+        {
+            PluginDiagnosticLog.Record("受控来源定位", owner + "：搜索结果未能确认，保留原拦截：" + error);
+            return false;
+        }
     }
 
     internal static bool IsLinkedResource(string path) => new[] { ".txt", ".xls", ".xlsx", ".xlsm", ".step", ".stp", ".iges", ".igs",

@@ -170,7 +170,7 @@ public sealed class LocalProjectFileStorage(IOptions<PdmStorageOptions> options,
             if (File.Exists(temporary)) File.Delete(temporary);
         }
     }
-    private string SessionDirectory(Guid id) => Path.Combine(StorageLocationPolicy.Normalize(settings.UploadTempRoot), "project-files", id.ToString("N"));
+    private string SessionDirectory(Guid id) => settings.UploadPath(Path.Combine("project-files", id.ToString("N")));
     private async Task<ProjectFileUploadSession> ReadMetadataAsync(Guid id, CancellationToken cancellationToken)
     {
         var path = Path.Combine(SessionDirectory(id), "session.json");

@@ -1,0 +1,18 @@
+/* Center actions without changing navigation rows, tree nodes or calendar cells. */
+@layer pdm-button-sizing {
+  :root body :is(button[data-pdm-button-size], .pdm-tabs > button, [role="tablist"] > button,
+      .pdm-search-field__action > button, button.pdm-search-submit,
+      .production-workbench__all-categories, .production-workbench__toggle-projects,
+      a.pdm-primary-action, a.pdm-secondary-action, .pdm-more-actions > summary) {
+    display:inline-flex !important;
+    align-items:center !important;
+    justify-content:center !important;
+    text-align:center !important;
+    text-indent:0 !important;
+  }
+  :root body button[data-pdm-button-size] > :is(span:not(.el-icon),strong,small,em) {
+    align-items:center !important; justify-content:center !important; text-align:center !important;
+    margin-inline:0 !important;
+  }
+  :root body button[data-pdm-button-kind]:not([data-pdm-button-kind="outline"])::before { align-items:center !important; justify-content:center !important; font-weight:inherit !important; }
+}

@@ -6,7 +6,7 @@ import { ElMessageBox } from 'element-plus'
 import { ClipboardCheck, KeyRound, RotateCw as RefreshCw } from '@lucide/vue'
 import type { EditLockSummary, MaterialCodeApplication, MyApprovalTask, PasswordResetTask, ProgramTemplateTask, UserNotification } from '../types'
 import { useUserDisplayName } from '../userDisplay'
-import { isTaskCenterNotification } from '../taskNotifications'
+import { isTaskCenterNotification, releaseApprovalTaskForNotification } from '../taskNotifications'
 
 const displayUserName = useUserDisplayName()
 
@@ -30,6 +30,18 @@ const props = withDefaults(defineProps<{
 })
 defineEmits<{ open: [projectId: string, releasePackageId: string]; openValidationPlan: [projectId: string, qualityAcceptance?: boolean]; openNotification: [notification: UserNotification]; openMaterialApprovals: []; openProgramTemplate: [templateId: string]; refresh: [] }>()
 const visibleNotifications = computed(() => props.notifications.filter(isTaskCenterNotification))
+const approvalNotifications = computed(() => {
+  const notifications = new Map<string, UserNotification>()
+  for (const notification of visibleNotifications.value) {
+    const task = releaseApprovalTaskForNotification(notification, props.tasks)
+    if (!task) continue
+    const previous = notifications.get(task.id)
+    if (!previous || (!!previous.readAt === !!notification.readAt
+      ? new Date(notification.createdAt).getTime() > new Date(previous.createdAt).getTime()
+      : !!previous.readAt)) notifications.set(task.id, notification)
+  }
+  return notifications
+})
 
 type TaskFilter = 'all' | 'todo' | 'notification' | 'approval' | 'material' | 'program' | 'lock' | 'password'
 type TaskCenterRow = {
@@ -193,7 +205,7 @@ const rows = computed<TaskCenterRow[]>(() => [
     createdAt: notification.createdAt,
     notification,
   })),
-  ...visibleNotifications.value.filter(notification => notification.category !== 'ProjectTodo').map(notification => ({
+  ...visibleNotifications.value.filter(notification => notification.category !== 'ProjectTodo' && !releaseApprovalTaskForNotification(notification, props.tasks)).map(notification => ({
     key: `notification-${notification.id}`,
     kind: isApprovalNotification(notification) ? 'approval' as const : 'notification' as const,
     status: notification.isSenderReceipt ? '已发送' : notification.resolvedAt ? notification.category === 'ReleaseManagementRisk' ? '已解除' : '已结束' : notification.readAt ? '已读' : '未读',
@@ -210,8 +222,9 @@ const rows = computed<TaskCenterRow[]>(() => [
     statusClass: 'is-remind',
     title: task.kind === 'validationPlan' ? `${task.projectCode} ${task.qualityAcceptance ? '质量验收' : '验证计划'}审批` : `${task.projectCode} BOM发布审批`,
     content: task.kind === 'validationPlan' ? `${task.projectName} · R${task.validationPlanRevision} · ${task.stepName || stageLabel(task.stage)}` : `${task.projectName} · ${task.releasePackageNumber} · ${stageLabel(task.stage)}`,
-    createdAt: task.createdAt,
+    createdAt: approvalNotifications.value.get(task.id)?.createdAt ?? task.createdAt,
     approval: task,
+    notification: approvalNotifications.value.get(task.id),
   })),
   ...materialTaskRows.value,
   ...props.programTemplateTasks.map(task => ({
@@ -254,7 +267,7 @@ const rows = computed<TaskCenterRow[]>(() => [
   })),
 ].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()))
 
-const pendingRows = computed(() => rows.value.filter(row => !row.notification?.readAt))
+const pendingRows = computed(() => rows.value.filter(row => row.approval || !row.notification?.readAt))
 const filterCounts = computed(() => ({
   all: pendingRows.value.length,
   todo: pendingRows.value.filter(item => item.kind === 'todo').length,
@@ -265,7 +278,7 @@ const filterCounts = computed(() => ({
   lock: lockGroups.value.length,
   password: props.passwordResetTasks.length,
 }))
-const filteredRows = computed(() => rows.value.filter(row => (showHistory.value || !row.notification?.readAt) && (taskFilter.value === 'all' || row.kind === taskFilter.value)))
+const filteredRows = computed(() => rows.value.filter(row => (showHistory.value || row.approval || !row.notification?.readAt) && (taskFilter.value === 'all' || row.kind === taskFilter.value)))
 const pagedRows = computed(() => filteredRows.value.slice((currentPage.value - 1) * pageSize.value, currentPage.value * pageSize.value))
 const totalPages = computed(() => Math.max(1, Math.ceil(filteredRows.value.length / pageSize.value)))
 

@@ -25,6 +25,25 @@ it('识别纵向表单和表格行内操作，不改写它们的显示布局', a
   expect(getComputedStyle(document.querySelector('td')!).display).toBe('table-cell')
 })
 
+it('保留关联配置表格分类控件的单行布局，不套用工具栏换行', async () => {
+  document.body.innerHTML = '<table><tbody><tr><td><section class="material-relation-categories is-compact" style="display:flex;flex-wrap:nowrap"><span>未分类</span><div class="el-select"><input></div><button>保存分类</button></section></td></tr></tbody></table>'
+  dispose = installControlSpacing()
+  await settle()
+  const row = document.querySelector('.material-relation-categories')!
+  expect(row.hasAttribute('data-pdm-control-layout')).toBe(false)
+  expect(getComputedStyle(row).flexWrap).toBe('nowrap')
+})
+
+it('BOM行操作保持紧凑单行，不套用工具栏换行和间距', async () => {
+  document.body.innerHTML = '<div class="pdm-bom-row-actions" style="display:flex;flex-wrap:nowrap;gap:2px"><span>⠿</span><button>+</button><button>×</button></div>'
+  dispose = installControlSpacing()
+  await settle()
+  const row = document.querySelector('.pdm-bom-row-actions')!
+  expect(row.hasAttribute('data-pdm-control-layout')).toBe(false)
+  expect(row.querySelector('[data-pdm-control-item]')).toBeNull()
+  expect(getComputedStyle(row).flexWrap).toBe('nowrap')
+})
+
 it('异步控件会加入规则，进度条、分类、侧栏及日期网格不受影响', async () => {
   document.body.innerHTML = '<div class="toolbar" style="display:grid"><button>刷新</button></div><div class="pdm-overview-timeline"><button>设计</button><button>装配</button></div><div class="wh-department-options"><button>生产部</button><button>质量部</button></div><div class="pc-grid" style="display:grid"><button>1</button><button>2</button></div><div class="wh-day-grid" style="display:grid"><button>1</button><button>2</button></div>'
   dispose = installControlSpacing()

@@ -1,42 +1,53 @@
-/* 刷新图标采用用户提供的 SVG；仅替换表现，保留 Vue 子节点及按钮行为。 */
-:root body button[data-pdm-button-refresh] {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
+/* From Uiverse.io by Creatlydev; retain compact button tiers and Vue-owned content. */
+@layer pdm-button-sizing {
+  :root body button[data-pdm-button-refresh] {
+    --pdm-refresh-zone:24px;
+    --pdm-refresh-icon:14px;
+    --pdm-refresh-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1024 1024'%3E%3Cpath d='M576 1024l64-256h156.48A379.328 379.328 0 0 0 896 512c0-174.72-116.992-326.72-276.736-374.016C593.152 130.304 576 105.344 576 78.08c0-41.408 39.488-73.28 79.232-61.632C868.224 79.168 1024 278.976 1024 512c0 258.368-199.296 476.992-448 512zM0 512C0 253.696 199.296 35.008 448 0L384 256H227.52A379.328 379.328 0 0 0 128 512c0 174.72 116.992 326.72 276.736 373.952A62.08 62.08 0 0 1 448 945.92c0 41.408-39.488 73.28-79.232 61.632C155.776 944.832 0 745.024 0 512z'/%3E%3C/svg%3E");
+  }
+  :root body button[data-pdm-button-refresh][data-pdm-button-refresh][data-pdm-button-refresh] {
+    position:relative !important; display:inline-flex !important;
+    align-items:center !important; justify-content:center !important;
+    isolation:isolate; overflow:hidden !important;
+    border:1px solid var(--pdm-border) !important; outline:0 !important; border-radius:999px !important;
+    padding-inline:var(--pdm-refresh-zone) 0 !important; gap:0 !important;
+    background:linear-gradient(to right,var(--pdm-theme-accent) 0 var(--pdm-refresh-zone),#fff var(--pdm-refresh-zone) 100%) !important;
+    color:var(--pdm-text,#121212) !important;
+    box-shadow:0 2px 6px rgb(0 0 0 / 8%) !important;
+    text-align:center !important; text-decoration:none !important;
+    transition:color .2s,box-shadow .3s !important;
+  }
+  :root body button[data-pdm-button-refresh][data-pdm-button-refresh]::before {
+    content:''; position:absolute !important; inset:auto !important;
+    top:50% !important; left:calc((var(--pdm-refresh-zone) - var(--pdm-refresh-icon)) / 2) !important;
+    display:block !important; width:var(--pdm-refresh-icon) !important; height:var(--pdm-refresh-icon) !important;
+    border:0 !important; border-radius:0 !important; background:#fff !important; opacity:1 !important;
+    transform:translateY(-50%);
+    -webkit-mask:var(--pdm-refresh-mask) center / contain no-repeat;
+    mask:var(--pdm-refresh-mask) center / contain no-repeat;
+    pointer-events:none; z-index:1;
+  }
+  :root body button[data-pdm-button-refresh][data-pdm-button-refresh]::after {
+    content:''; display:block !important; position:absolute !important; inset:0 !important;
+    width:100% !important; border:0 !important; border-radius:inherit !important;
+    background:var(--pdm-theme-accent) !important; opacity:1 !important;
+    transform:translateX(-100%); transition:transform .3s ease !important;
+    pointer-events:none; z-index:-1;
+  }
+  :root body button[data-pdm-button-refresh][data-pdm-button-refresh]:is(:hover,:focus-visible):not(:disabled):not(.is-disabled):not([aria-disabled="true"]) { color:#fff !important; }
+  :root body button[data-pdm-button-refresh][data-pdm-button-refresh]:is(:hover,:focus-visible):not(:disabled):not(.is-disabled):not([aria-disabled="true"])::after { transform:translateX(0); }
+  :root body button[data-pdm-button-refresh][data-pdm-button-refresh]:focus-visible { outline:2px solid var(--pdm-theme-accent-focus) !important; outline-offset:2px !important; }
+  :root body button[data-pdm-button-refresh] :is(svg,.el-icon) { display:none !important; }
+  :root body button[data-pdm-button-refresh] > span { margin:0 !important; position:relative; color:inherit !important; }
+  :root body :is(table,.el-table) button[data-pdm-button-refresh] { --pdm-refresh-zone:20px; --pdm-refresh-icon:12px; }
+  :root body button[data-pdm-button-refresh][data-pdm-button-refresh][data-pdm-button-refresh]:is([data-pdm-button-size="icon"],[data-pdm-button-size="inline-icon"]) { --pdm-refresh-zone:100%; padding:0 !important; background:var(--pdm-theme-accent) !important; }
 }
-
-:root body button[data-pdm-button-refresh]::before {
-  content: '';
-  position: static;
-  inset: auto;
-  display: block;
-  flex: 0 0 var(--pdm-button-icon-size, 16px);
-  width: var(--pdm-button-icon-size, 16px);
-  height: var(--pdm-button-icon-size, 16px);
-  background: var(--pdm-action-refresh);
-  border-radius: 0;
-  -webkit-mask: url('../assets/refresh.svg') center / contain no-repeat;
-  mask: url('../assets/refresh.svg') center / contain no-repeat;
-  pointer-events: none;
-}
-
-:root body button[data-pdm-button-refresh] :is(svg, .el-icon) {
-  display: none !important;
-}
-
-:root body button[data-pdm-button-refresh] > span {
-  margin-left: 0;
-}
-
-:root body button[data-pdm-button-refresh]:is(.is-loading, [aria-busy="true"], :has(.is-spinning))::before {
-  animation: pdm-refresh-spin .8s linear infinite;
-}
-
-@keyframes pdm-refresh-spin {
-  to { transform: rotate(360deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  :root body button[data-pdm-button-refresh]::before { animation: none !important; }
+:root body button[data-pdm-button-refresh]:is(.is-loading,[aria-busy="true"],:has(.is-spinning))::before { animation:pdm-refresh-spin .8s linear infinite; }
+@keyframes pdm-refresh-spin { to { transform:translateY(-50%) rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) {
+  @layer pdm-button-sizing {
+    :root body button[data-pdm-button-refresh][data-pdm-button-refresh][data-pdm-button-refresh],
+    :root body button[data-pdm-button-refresh][data-pdm-button-refresh]::after { transition:none !important; }
+    :root body button[data-pdm-button-refresh]::before { animation:none !important; }
+  }
 }

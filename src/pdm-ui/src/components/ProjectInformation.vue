@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import UserSelect from './UserSelect'
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { readProjectNameplate, saveApplicationProjectOrderDate, PdmApiError } from '../api'
 import { ElMessage } from '../statusMessage'
 import type { MainProjectStaffingInput, OrganizationDirectory, PdmUser, ProjectPhaseOwners, ProjectSummary } from '../types'
@@ -84,10 +84,11 @@ function applyPhaseOwners(saved: ProjectSummary) {
   if (props.project.id === saved.id) props.project.phaseOwners = saved.phaseOwners
 }
 function openNameplate(project: ProjectSummary) { nameplateProject.value = project; nameplateOpen.value = true }
-const nameplateAccess = ref<Record<string, ProjectNameplateView>>({})
+type NameplateAccess = Pick<ProjectNameplateView, 'nameplate' | 'canEdit'>
+const nameplateAccess = ref<Record<string, NameplateAccess>>({})
 let nameplateLoadedAt = 0
 let nameplateLoading = false
-function nameplateHint(view: ProjectNameplateView) {
+function nameplateHint(view: NameplateAccess) {
   const state = nameplateStatus(view.nameplate)
   return `执行工程师：${state.executionComplete ? '已填写' : '待填写完整'}；硬件工程师：${state.hardwareComplete ? '已填写' : '待填写完整'}；${state.published ? '已发布，内容只读' : view.canEdit ? '可继续编辑' : '仅可查看'}`
 }
@@ -97,12 +98,19 @@ async function loadNameplateAccess() {
   nameplateLoading = true
   const token = props.token
   nameplateAccess.value = {}
-  const results = await Promise.allSettled(familyProjects.value.filter(item => item.canReadContent).map(async item => {
-    const result = await readProjectNameplate(item.id, token)
-    return [item.id, result] as const
-  }))
-  if (request === nameplateRequest) { nameplateAccess.value = Object.fromEntries(results.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])); nameplateLoadedAt = Date.now(); nameplateLoading = false }
+  const projectId = props.project.id
+  const family = familyProjects.value.filter(item => item.canReadContent)
+  try {
+    const index = await readProjectNameplate(projectId, token, true)
+    const results = Array.isArray(index)
+      ? index.filter(item => family.some(project => project.id === item.projectId)).map(item => [item.projectId, item] as const)
+      : (await Promise.allSettled(family.map(async item => [item.id, item.id === projectId ? index : await readProjectNameplate(item.id, token)] as const)))
+        .flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
+    if (request === nameplateRequest) { nameplateAccess.value = Object.fromEntries(results); nameplateLoadedAt = Date.now() }
+  } catch { if (request === nameplateRequest) ElMessage.error('铭牌状态读取失败，请刷新后重试。') }
+  finally { if (request === nameplateRequest) nameplateLoading = false }
 }
+onBeforeUnmount(() => { nameplateRequest++ })
 watch(() => JSON.stringify([props.token, props.currentUsername, ...familyProjects.value.map(item => `${item.id}:${item.canReadContent}:${item.designers.includes(props.currentUsername)}:${phasePeople(item, 'ElectricalHardware').includes(props.currentUsername)}`)]), () => { void loadNameplateAccess() }, { immediate: true })
 watch(nameplateOpen, open => { if (!open) void loadNameplateAccess() })
 defineExpose({ refresh: loadNameplateAccess, refreshIfStale: () => !nameplateLoading && Date.now() - nameplateLoadedAt > 30000 ? loadNameplateAccess() : Promise.resolve() })

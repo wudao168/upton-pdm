@@ -34,7 +34,7 @@ export function documentVersionSummary(value: DrawingVersionInfo): string {
   return `图纸版本 ${documentDrawingVersion(value)} · 发布版本 ${documentPublishedVersion(value)}`
 }
 
-type RevisionItem = Pick<BomItem, 'kind' | 'revision' | 'sourceDocumentId' | 'displayRevision'> & Partial<Pick<BomItem, 'id' | 'drawingNumber' | 'unit'>>
+type RevisionItem = Pick<BomItem, 'kind' | 'revision' | 'sourceDocumentId' | 'displayRevision'> & Partial<Pick<BomItem, 'id' | 'drawingNumber' | 'unit' | 'summaryItemIds' | 'releaseTrackingId'>>
 const isWork = (revision: string) => /^(?:[A-Z]-)?W[1-9]\d*$/i.test(revision)
 const releasedLabel = (revision: string) => isWork(revision) ? '未发布' : revision || '未发布'
 export const bomVersionLabel = (value?: string | null) => value?.trim().replace(/-B(?=\d+$)/, '-V') || ''
@@ -75,7 +75,9 @@ export function bomRevisionLabel(item: RevisionItem, packages: ReleasePackageSum
     const unitKey = (unit = '') => /^\d+$/.test(unit.trim()) ? unit.trim().padStart(3, '0')
       : unit.trim() === '件' ? '001' : u9UnitOptions.find(row => row.name === unit.trim())?.code || unit.trim()
     const matches = (row: BomItem) => !row.manuallyExcluded && !row.releaseExcluded && !row.pendingClassification
-      && (item.drawingNumber?.trim() ? row.drawingNumber.trim().toUpperCase() === item.drawingNumber.trim().toUpperCase() && unitKey(row.unit) === unitKey(item.unit) : !!item.id && row.id === item.id)
+      && row.drawingNumber.trim().toUpperCase() === item.drawingNumber?.trim().toUpperCase() && unitKey(row.unit) === unitKey(item.unit)
+      && [item.id, item.releaseTrackingId, ...item.summaryItemIds ?? []].some(id => !!id
+        && [row.id, row.releaseTrackingId, ...row.summaryItemIds ?? []].includes(id))
     const released = packages.filter(row => row.state === '已发布' || row.state === 'Published')
       .sort((a, b) => (Date.parse(b.publishedAt || b.createdAt || '') || 0) - (Date.parse(a.publishedAt || a.createdAt || '') || 0))
     for (const release of released) {

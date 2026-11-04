@@ -10,7 +10,7 @@ public static class ProcurementTrackingAggregation
         var result = new List<ProjectProcurementTrackingItem>();
         foreach (var material in items.GroupBy(row => (row.ProjectCode, row.SubprojectCode, Code(row.MaterialCode))))
         {
-            var first = material.First() with { Files = material.SelectMany(row => row.Files).DistinctBy(file => file.Id).ToArray() };
+            var first = material.First() with { IsDemandCanceled = material.All(row => row.IsDemandCanceled), Files = material.SelectMany(row => row.Files).DistinctBy(file => file.Id).ToArray(), FilesFromCurrentBom = material.Any(row => row.FilesFromCurrentBom) };
             var rows = source.Where(row => Code(row.MaterialCode) == material.Key.Item3)
                 .DistinctBy(row => (Code(row.OrganizationCode), row.RecordKind, Code(row.LineId))).ToArray();
             var prs = rows.Where(row => row.RecordKind == "PR").ToArray();
@@ -98,7 +98,7 @@ public static class ProcurementTrackingAggregation
                         : material.Any(row => row.ImpactStage == "Commissioning") ? "Commissioning" : null,
                     ReleasePackageNumber = Join(material.SelectMany(row => (row.ReleasePackageNumber ?? "").Split('、'))),
                     PurchaseRequisitionNumbers = batchPr.Select(pr => pr.DocumentNumber).Distinct().ToArray(),
-                    PurchaseRequisitionStatus = batch.Key.PrStatus,
+                    PurchaseRequisitionStatus = first.IsDemandCanceled ? "已取消" : batch.Key.PrStatus,
                     PurchaseRequisitionCreatedAt = batchPr.Select(pr => pr.SourceCreatedAt).Min(),
                     PurchaseRequisitionDeliveryDate = Latest(batchPr.Select(pr => pr.DeliveryDate)),
                     PurchaseOrderNumbers = batchPo.Select(po => po.DocumentNumber).Distinct().ToArray(),
@@ -113,7 +113,7 @@ public static class ProcurementTrackingAggregation
                     ApprovedQuantity = newPr.Length == 0 && batchPr.Length > 0 ? null : activePr.Sum(pr => pr.ApprovedQuantity),
                     Details = batchPr.Select(pr => U9ProcurementService.Detail(pr, "请购", "项目+子项目+料号"))
                         .Concat(batchPo.Select(po => U9ProcurementService.Detail(po, "采购", batchPr.Length > 0 ? "源请购行" : "未关联请购"))).ToArray(),
-                    HasDeliveryDelay = batch.Any(pair => pair.Po is { IsCanceled: false }
+                    HasDeliveryDelay = !first.IsDemandCanceled && batch.Any(pair => pair.Po is { IsCanceled: false }
                         && pair.Pr is { IsCanceled: false }
                         && pair.Po.DeliveryDate?.Date > pair.Pr.DeliveryDate?.Date),
                     IsFullyReceived = activePo.Length > 0 && activePo.Sum(po => po.PurchaseQuantity) > 0

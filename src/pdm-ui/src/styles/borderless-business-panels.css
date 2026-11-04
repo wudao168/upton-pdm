@@ -1,0 +1,26 @@
+/* 指定业务内容面不显示外框，控件和表格内部的样式保持独立。 */
+@layer pdm-business {
+  :root body :is(.project-applications, .pdm-project-classification, .pdm-project-table-panel,
+      .wr-projects, .pdm-project-tab-content .pdm-manager-panel, .pdm-budget__section,
+      .procurement-tracking, .wh-summary, .wh-report-overview, .wh-charts > .pdm-panel,
+      .wh-compliance, .wh-report-list, .wh-department-list, .wh-department-group,
+      .wh-department-body, .wh-department-group > header, .pdm-task-message-panel,
+      .production-suppliers .pdm-category-sidebar, .production-suppliers__main,
+      .production-drawings__projects, .production-drawings__main, .production-workbench__secondary,
+      .production-workbench__lines, .production-workbench__detail,
+      .standard-structure__categories, .stocked-tree, .stocked-content,
+      .standard-library .pdm-category-sidebar, .standard-library__content, .program-template-panel,
+      .material-relation-directory > .pdm-category-sidebar,
+      .material-master-layout, .material-master-layout > .pdm-category-sidebar,
+      .material-master-content, .material-inventory__search, .material-relation-directory__main,
+      .engineering-kit-library .pdm-category-sidebar, .engineering-kit-library__main,
+      .material-code-workflow-stage, .material-duplicate-settings, .category-tree-panel, .category-editor) {
+    border:0 !important;
+    box-shadow:none !important;
+  }
+}
+
+:root body .material-rules-header-actions { display:flex; flex:0 0 auto; align-items:center; gap:5px; flex-wrap:wrap; }
+:root body .material-duplicate-settings > header { flex-wrap:wrap; }
+:root body .material-duplicate-settings > header > div:first-child { flex:1 1 320px; min-width:0; }
+:root body .material-rules-header-actions .material-numbering-settings__input { width:284px; flex:0 0 284px; }

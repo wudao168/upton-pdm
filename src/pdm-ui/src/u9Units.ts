@@ -22,3 +22,7 @@ export function u9UnitLabel(code: string) {
 export function u9UnitName(code: string) {
   return u9UnitOptions.find(item => item.code === code)?.name ?? code
 }
+
+export function requiresWholeQuantity(unit?: string) {
+  return ['001','002','003','007','008','010','011','EA','PCS','PC','个','件','只','台','双','片','支','组','套'].includes(unit?.trim().toUpperCase() ?? '')
+}

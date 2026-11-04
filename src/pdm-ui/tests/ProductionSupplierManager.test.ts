@@ -33,7 +33,7 @@ describe('供应商分类维护', () => {
 
   it('只读权限可查看台账但没有新增、编辑、停用和分类维护入口，撤销维护权限会关闭表单', async () => {
     const wrapper=createWrapper(false);await flushPromises();expect(wrapper.text()).toContain('综合加工有限公司')
-    expect(wrapper.find('.production-suppliers__category-actions').exists()).toBe(false);expect(wrapper.findAll('tbody button')).toHaveLength(0);expect(wrapper.findAll('button').some(button=>button.text()==='新建供应商')).toBe(false)
+    expect(wrapper.find('.standard-library__category-actions button').exists()).toBe(false);expect(wrapper.findAll('tbody button')).toHaveLength(0);expect(wrapper.findAll('button').some(button=>button.text()==='新建供应商')).toBe(false)
     await wrapper.setProps({canManage:true});await wrapper.findAll('tbody button').find(button=>button.text()==='编辑')!.trigger('click');expect(wrapper.find('[aria-label="维护供应商"]').exists()).toBe(true)
     await wrapper.setProps({canManage:false});expect(wrapper.find('[aria-label="维护供应商"]').exists()).toBe(false);wrapper.unmount()
   })
@@ -47,7 +47,7 @@ describe('供应商分类维护', () => {
     const wrapper = createWrapper()
     await flushPromises()
     expect(wrapper.find('.production-suppliers__categories form').exists()).toBe(false)
-    await wrapper.find('.production-suppliers__category-actions button').trigger('click')
+    await wrapper.find('.standard-library__category-actions button').trigger('click')
     await flushPromises()
     expect(wrapper.get('.supplier-category-manager__placeholder').text()).toContain('分类编辑')
     await wrapper.get('.supplier-category-manager__header button').trigger('click')
@@ -71,7 +71,7 @@ describe('供应商分类维护', () => {
     const saveCategory = vi.spyOn(api, 'saveProductionSupplierCategory').mockRejectedValueOnce(new Error('台账已被修改，请刷新。')).mockResolvedValue(initialCatalog())
     const wrapper = createWrapper()
     await flushPromises()
-    await wrapper.get('.production-suppliers__category-actions button').trigger('click')
+    await wrapper.get('.standard-library__category-actions button').trigger('click')
     await flushPromises()
     await wrapper.get('.production-suppliers__category button').trigger('click')
     await wrapper.get('input[aria-label="分类名称"]').setValue('不应保存')
@@ -109,7 +109,7 @@ describe('供应商分类维护', () => {
     await flushPromises()
     expect(saveSupplier).toHaveBeenCalledWith('supplier', expect.objectContaining({ categoryIds: ['machining', 'surface'] }), 'token')
     for (const name of ['机加工', '表面处理']) {
-      const category = wrapper.findAll('.production-suppliers__category-filter').find(item => item.text() === name)!
+      const category = wrapper.findAll('.el-tree-node__content').find(item => item.text() === name)!
       await category.trigger('click')
       expect(wrapper.findAll('tbody tr')).toHaveLength(1)
       expect(wrapper.get('tbody').text()).toContain('机加工、表面处理')

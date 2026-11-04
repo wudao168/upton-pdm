@@ -1,0 +1,14 @@
+/* 业务内容外侧留白，不在日历日期格之间增加间隔。 */
+@layer pdm-business {
+  :root body .program-template-library > .program-template-panel,
+  :root body #pane-bom-headers > .bom-header-directory,
+  :root body #pane-code-approvals > .material-code-approval-workflow,
+  :root body #pane-numbering-settings > .material-numbering-settings-scroll,
+  :root body .production-workbench > .production-workbench__secondary.pdm-panel,
+  :root body .work-hours > .wh-summary,
+  :root body .work-hours > .wh-calendar-layout,
+  :root body main.pdm-main .project-calendar {
+    box-sizing:border-box;
+    padding-inline:5px !important;
+  }
+}

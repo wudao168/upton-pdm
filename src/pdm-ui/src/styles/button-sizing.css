@@ -1,3 +1,6 @@
+@import './button-heights.css';
+@import './capsule-typography.css';
+@import './button-alignment.css';
 /* 重要声明放在公共层中，统一覆盖旧页面内的固定尺寸。 */
 @layer pdm-button-sizing {
   :root body button[data-pdm-button-size] {

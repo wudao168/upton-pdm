@@ -49,14 +49,13 @@ public sealed class MaterialU9PendingSyncSeederTests
     }
 
     [Theory]
-    [InlineData(MaterialSyncOperation.Update, MaterialSyncStatus.PreviewReady, 0, MaterialApprovalStatus.Approved, false, false)]
     [InlineData(MaterialSyncOperation.Create, MaterialSyncStatus.Failed, 1, MaterialApprovalStatus.Approved, false, false)]
     [InlineData(MaterialSyncOperation.Create, MaterialSyncStatus.NeedsReview, 1, MaterialApprovalStatus.Approved, false, false)]
     [InlineData(MaterialSyncOperation.Create, MaterialSyncStatus.PreviewReady, 1, MaterialApprovalStatus.Approved, false, false)]
     [InlineData(MaterialSyncOperation.Create, MaterialSyncStatus.PreviewReady, 0, MaterialApprovalStatus.Draft, false, false)]
     [InlineData(MaterialSyncOperation.Create, MaterialSyncStatus.PreviewReady, 0, MaterialApprovalStatus.Approved, true, false)]
     [InlineData(MaterialSyncOperation.Create, MaterialSyncStatus.PreviewReady, 0, MaterialApprovalStatus.Approved, false, true)]
-    public async Task OnlyUnexecutedApprovedCreationsAreRecovered(MaterialSyncOperation operation,
+    public async Task FailedReviewedDraftAndAlreadyExecutedCreationsAreNotRecovered(MaterialSyncOperation operation,
         MaterialSyncStatus status, int attempts, MaterialApprovalStatus approval, bool archived, bool confirmed)
     {
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
@@ -74,6 +73,21 @@ public sealed class MaterialU9PendingSyncSeederTests
 
         Assert.Empty(await materials.ListSyncBatchItemsForTaskAsync(excluded.Id, default));
         Assert.Single(await materials.ListSyncBatchItemsForTaskAsync(eligible.Id, default));
+    }
+
+    [Fact]
+    public async Task PlmUpdatesAndArchivedAvailabilityTasksAreRecoveredAfterInterruptedQueueing()
+    {
+        var materials = new InMemoryMaterialRepository(TimeProvider.System);
+        await using var provider = Provider(materials);
+        var update = await AddTaskAsync(materials, MaterialSyncOperation.Update);
+        var availability = await AddTaskAsync(materials, MaterialSyncOperation.SetAvailability);
+        var material = (await materials.FindMaterialAsync(availability.MaterialId, default))!;
+        await materials.UpdateMaterialAsync(material with { IsArchived = true, U9SyncConfirmed = true }, material.RowVersion, default);
+        using var worker = Worker(provider, TimeProvider.System);
+        await ScanAsync(worker);
+        Assert.Single(await materials.ListSyncBatchItemsForTaskAsync(update.Id, default));
+        Assert.Single(await materials.ListSyncBatchItemsForTaskAsync(availability.Id, default));
     }
 
     [Fact]

@@ -273,7 +273,7 @@ public sealed class StockedMaterialServiceTests
         await f.Service.SynchronizeAsync(f.Scope, "system:stocked-material-sync", default);
         var imported = (await f.Materials.FindMaterialByCodeAsync(code, default))!;
         Assert.Equal(MaterialDataSource.U9C, imported.SourceSystem);
-        Assert.Equal(MaterialMasterOwner.U9C, imported.MasterOwner);
+        Assert.Equal(MaterialMasterOwner.Pdm, imported.MasterOwner);
         var catalog = await f.Store.ReadAsync(f.Scope, default);
         Assert.Equal(2, catalog.Memberships.Select(item => item.MaterialId).Distinct().Count());
         Assert.Equal(f.Category.Id, Assert.Single(catalog.Memberships, item => item.MaterialId == existing.Id).CategoryId);
@@ -286,7 +286,8 @@ public sealed class StockedMaterialServiceTests
         await f.Service.SynchronizeAsync(f.Scope, "system:stocked-material-sync", default);
         var refreshed = (await f.Materials.FindMaterialByCodeAsync(code, default))!;
         Assert.Equal(imported.Id, refreshed.Id);
-        Assert.Equal("U9更新名称", refreshed.Name);
+        Assert.Equal("U9新增常备件", refreshed.Name);
+        Assert.Contains("U9更新名称", refreshed.U9ReconciliationMessage);
         Assert.Equal("保留PLM建议", refreshed.SelectionAdvice);
         Assert.Equal(12, refreshed.ReferencePrice);
         Assert.Equal(2, (await f.Store.ReadAsync(f.Scope, default)).Memberships.Count);
@@ -432,10 +433,10 @@ public sealed class StockedMaterialServiceTests
     }
 
     [Theory]
-    [InlineData("system:u9-material-full-sync", true, true)]
+    [InlineData("system:u9-material-full-sync", true, false)]
     [InlineData("admin", true, false)]
     [InlineData("system:u9-material-full-sync", false, false)]
-    public async Task DiscoveryRestoresOnlyU9OwnedMaterialsAutomaticallyArchivedByPriorFullSync(string archivedBy, bool u9Owned, bool restored)
+    public async Task DiscoveryNeverOverridesPlmArchivedState(string archivedBy, bool u9Owned, bool restored)
     {
         var f = await Fixture.CreateAsync(); var template = await f.AddAsync("01010009009"); const string code = "01010009010";
         var material = await f.Materials.CreateMaterialAsync(template with { Id = Guid.NewGuid(), MaterialCode = code,

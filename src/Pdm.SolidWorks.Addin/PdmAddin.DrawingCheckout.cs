@@ -25,8 +25,14 @@ public sealed partial class PdmAddin
                 || !string.Equals(document.FileName, node.FileName, StringComparison.OrdinalIgnoreCase)
                 || latest == null || !File.Exists(node.FullPath)
                 || !PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out var binding)
-                || binding.DocumentId != id || binding.ProjectId != projectId || binding.VersionId != latest.Id)
+                || binding.DocumentId != id || binding.ProjectId != projectId || !binding.VersionId.HasValue)
                 throw new InvalidOperationException("当前工程图副本的图档、项目或版本需要核对，已保留全部窗口和文件；未切换或保存上层装配体：" + node.FileName);
+            if (binding.VersionId != latest.Id)
+            {
+                await RefreshDrawingForCheckoutAsync(node, projectId, latest, binding);
+                if (!PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out binding) || binding.VersionId != latest.Id)
+                    throw new InvalidOperationException("工程图最新版的本地校验记录尚未完成，未获取编辑权限：" + node.FileName);
+            }
             var file = new ControlledOpenFileDto { DocumentId = id, VersionId = latest.Id, FileName = node.FileName,
                 RelativePath = node.FileName, Sha256 = binding.Sha256, FileLength = binding.FileLength ?? latest.FileLength, Revision = binding.Revision };
             localEdits.TryGetValue(id, out var draft);

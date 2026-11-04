@@ -292,6 +292,29 @@ internal sealed class PdmTaskPaneControl : UserControl
         if (projectDocuments.SelectedProjectId == projectId) projectDocuments.SetLoadingStatus(message);
     });
 
+    internal async Task<WorkspaceConflictAction> ResolveWorkspaceCacheConflictAsync(WorkspaceCacheConflictException conflict,
+        bool canRestore, bool canBackup, string reason, CancellationToken token)
+    {
+        var result = new TaskCompletionSource<WorkspaceConflictAction>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = 0;
+        RunOnUiThread(async () =>
+        {
+            Interlocked.Exchange(ref started, 1);
+            if (result.Task.IsCompleted) return;
+            var page = projectDocuments.Parent as TabPage;
+            try
+            {
+                if (page != null) { page.Enabled = true; tabs.SelectedTab = page; }
+                UseWaitCursor = false;
+                result.TrySetResult(await projectDocuments.ResolveCacheConflictAsync(conflict, canRestore, canBackup, reason, token));
+            }
+            catch (OperationCanceledException) { result.TrySetCanceled(); }
+            catch (Exception error) { result.TrySetException(error); }
+            finally { if (!IsDisposed) { if (page != null) page.Enabled = !workspaceOperationActive; UseWaitCursor = workspaceOperationActive; } }
+        });
+        using (token.Register(() => { if (Volatile.Read(ref started) == 0) result.TrySetCanceled(); })) return await result.Task;
+    }
+
     public void SetTreeLoadingStatus(string message) => RunOnUiThread(() =>
     {
         if (workspaceOperationActive) return;
@@ -853,8 +876,8 @@ internal sealed class PdmTaskPaneControl : UserControl
         var projectTab = new TabPage("工作区") { BackColor = Color.FromArgb(244, 247, 251), Padding = new Padding(8) };
         projectDocuments.OpenRequested += (_, args) =>
         {
-            ControlledOpenRequested?.Invoke(this, args);
             tabs.SelectedTab = structureTab;
+            ControlledOpenRequested?.Invoke(this, args);
         };
         projectDocuments.ProjectSelected += (_, args) => ProjectBrowseRequested?.Invoke(this, args);
         projectTab.Controls.Add(projectDocuments);
@@ -2187,7 +2210,8 @@ internal sealed class PdmTaskPaneControl : UserControl
             {
                 System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(node), node.Children.Count, node.InstancePath,
                 node.FullPath, node.FileName, node.DisplayName, node.Configuration, node.ComponentSelectionName,
-                node.Kind, node.Status, node.WorkState, node.CurrentRevision, node.LatestRevision, node.OpenedRevision,
+                node.Kind, node.Role, node.IsContextReference, node.ReferenceTypeUnverified,
+                node.Status, node.WorkState, node.CurrentRevision, node.LatestRevision, node.OpenedRevision,
                 node.CheckedOutBy, node.CheckoutSessionId, node.CheckoutSessionLost, node.IsRenamePendingSave,
                 node.IsInterconnectImport, node.IsHistoricalPreview, node.IsLatestReadOnlyPreview, node.LatestStructureIndexPending,
                 node.DrawingReviewLocked, node.DrawingUpdatePendingReason, node.DocumentId, node.Revision, node.DisplayStructurePending
@@ -2643,9 +2667,15 @@ internal sealed class PdmTaskPaneControl : UserControl
     }
 
     private TreeNode BuildTreeNode(CadTreeNode model, string filter, ISet<string> checkedPaths, StructureHealthFilter healthFilter)
+        => BuildTreeNodeCore(model, filter, checkedPaths, healthFilter, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+
+    private TreeNode BuildTreeNodeCore(CadTreeNode model, string filter, ISet<string> checkedPaths,
+        StructureHealthFilter healthFilter, ISet<string> ancestors)
     {
-        var childNodes = model.Children
-            .Select(child => BuildTreeNode(child, filter, checkedPaths, healthFilter))
+        var branch = new HashSet<string>(ancestors, StringComparer.OrdinalIgnoreCase);
+        var repeatedAncestor = !branch.Add(CadDesignTreeDisplay.Identity(model));
+        var childNodes = (repeatedAncestor ? Enumerable.Empty<CadTreeNode>() : model.Children.Where(CadDesignTreeDisplay.IsStructureNode))
+            .Select(child => BuildTreeNodeCore(child, filter, checkedPaths, healthFilter, branch))
             .Where(node => node != null)
             .ToArray();
         var selfMatches = MatchesFilter(model, filter) && MatchesHealthFilter(model, healthFilter);
@@ -2657,6 +2687,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         var isMissing = model.Status == CadReferenceStatus.Missing && !model.IsRenamePendingSave;
         var status = model.IsInterconnectImport ? " · 导入组件"
             : model.Status == CadReferenceStatus.Normal || isMissing ? string.Empty : string.Concat(" · ", StatusText(model.Status));
+        if (repeatedAncestor) status += " · 循环引用（已停止展开）";
         var editTip = isMissing
             ? "\r\n状态：文件缺失"
             : string.Concat("\r\n状态：", WorkStateText(model), string.IsNullOrWhiteSpace(model.CheckedOutBy) ? string.Empty : string.Concat("\r\n编辑人员：", DisplayUserName(model.CheckedOutBy)));
@@ -2700,7 +2731,7 @@ internal sealed class PdmTaskPaneControl : UserControl
         }
 
         node.Nodes.AddRange(childNodes);
-        if (childNodes.Length == 0 && model.DisplayStructurePending)
+        if (childNodes.Length == 0 && model.DisplayStructurePending && !repeatedAncestor)
             node.Nodes.Add(new TreeNode("展开后读取PLM结构…") { Tag = LazyTreePlaceholder.Instance });
         if (!string.IsNullOrWhiteSpace(filter))
         {

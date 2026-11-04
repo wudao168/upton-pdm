@@ -38,7 +38,7 @@ public partial class MainWindow : Window
     private const uint MenuSeparator = 0x0800;
     private readonly string[] startupArgs = Environment.GetCommandLineArgs().Skip(1).ToArray();
     private readonly bool startedWithWindows = Environment.GetCommandLineArgs().Any(argument => string.Equals(argument, "--startup", StringComparison.OrdinalIgnoreCase));
-    private readonly HttpClient apiClient = new(new ClientDiagnosticHandler()) { Timeout = TimeSpan.FromMinutes(5) };
+    private readonly HttpClient apiClient = new(new ClientDiagnosticHandler(new HttpClientHandler { MaxConnectionsPerServer = 8 })) { Timeout = TimeSpan.FromMinutes(5) };
     private readonly CancellationTokenSource bootstrapLifetime = new();
     private readonly SolidWorksOpenBridge solidWorksBridge = new();
     private readonly LightweightPreviewProvider lightweightPreviewProvider = new(20);
@@ -47,10 +47,12 @@ public partial class MainWindow : Window
     private readonly LightweightPreviewProvider treeThumbnailProvider = new(512);
     private readonly SemaphoreSlim treeThumbnailGate = new(2, 2);
     private readonly SemaphoreSlim previewOpenGate = new(1, 1);
+    private CancellationTokenSource? previewRequestCancellation;
+    private string previewMarkupFingerprint = string.Empty;
     private string accessToken = string.Empty;
     private string activeCompanyId = string.Empty;
     private string currentTheme = "a";
-    private EDrawingsPreviewControl? embeddedPreview;
+    private ThreadedEDrawingsPreview? embeddedPreview;
     private PreviewHostBounds? previewBounds;
     private PreviewHostBounds? reviewOverlayBounds;
     private ReviewOverlayWindow? reviewOverlay;
@@ -1541,20 +1543,36 @@ public partial class MainWindow : Window
     private async Task PreviewDocumentAsync(IReadOnlyDictionary<string, object> payload)
     {
         var requestGeneration = Interlocked.Increment(ref previewRequestGeneration);
-        assemblyPreviewCancellation?.Cancel();
-        await previewOpenGate.WaitAsync();
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(bootstrapLifetime.Token);
+        Interlocked.Exchange(ref previewRequestCancellation, cancellation)?.Cancel();
         try
         {
-            if (requestGeneration == previewRequestGeneration)
-                await PreviewDocumentCoreAsync(payload, requestGeneration);
+            await previewOpenGate.WaitAsync(cancellation.Token);
+            try
+            {
+                if (requestGeneration == previewRequestGeneration)
+                    await PreviewDocumentCoreAsync(payload, requestGeneration, cancellation.Token);
+            }
+            finally { previewOpenGate.Release(); }
         }
-        finally { previewOpenGate.Release(); }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        finally
+        {
+            Interlocked.CompareExchange(ref previewRequestCancellation, null, cancellation);
+            cancellation.Dispose();
+        }
     }
 
-    private async Task PreviewDocumentCoreAsync(IReadOnlyDictionary<string, object> payload, int requestGeneration)
+    private async Task PreviewDocumentCoreAsync(IReadOnlyDictionary<string, object> payload, int requestGeneration, CancellationToken cancellationToken)
     {
         var previewStep = "读取预览版本";
+        var elapsed = Stopwatch.StartNew();
+        long metadataMs = 0, fileMs = 0, markupMs = 0, nativeMs = 0;
+        var cacheHit = false;
         var nativeOpenStarted = false;
+        using var markupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task<bool>? markupDownload = null;
+        Task? enginePreparation = null;
         previewDocumentReady = false;
         previewDocumentId = null;
         previewVersionId = null;
@@ -1590,7 +1608,7 @@ public partial class MainWindow : Window
                 previewSourcePath += $"?versionId={requestedVersionId.Value:D}";
             }
             using var versionRequest = CreateApiRequest(HttpMethod.Get, previewSourcePath);
-            using var versionResponse = await apiClient.SendAsync(versionRequest);
+            using var versionResponse = await apiClient.SendAsync(versionRequest, cancellationToken);
             var versionJson = await versionResponse.Content.ReadAsStringAsync();
             if (!versionResponse.IsSuccessStatusCode)
             {
@@ -1599,67 +1617,78 @@ public partial class MainWindow : Window
 
             var version = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<VersionResponse>(versionJson)
                 ?? throw new InvalidOperationException("预览版本读取失败。");
+            metadataMs = elapsed.ElapsedMilliseconds;
+            var stageStarted = elapsed.ElapsedMilliseconds;
             if (string.IsNullOrWhiteSpace(fileName)) fileName = "document.bin";
             var cacheDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPTON", "PDM", "Preview", documentId.ToString("N"), version.Id.ToString("N"));
             Directory.CreateDirectory(cacheDirectory);
             var cachedFile = Path.Combine(cacheDirectory, fileName);
-            if (!requestedVersionId.HasValue && string.Equals(Path.GetExtension(fileName), ".sldasm", StringComparison.OrdinalIgnoreCase))
+            var markupPath = Path.Combine(cacheDirectory, "review.markup");
+            markupDownload = DownloadMarkupAsync(documentId, version.Id, markupPath, markupCancellation.Token);
+            if (embeddedPreview == null && previewBounds is { Visible: true, Width: >= 80, Height: >= 80 })
             {
-                previewStep = "生成最新装配预览";
-                var assembly = await DownloadLatestAssemblyPreviewAsync(documentId);
-                version = assembly.Version;
-                cachedFile = assembly.Path;
-                cacheDirectory = Path.GetDirectoryName(cachedFile)!;
+                EnsureEmbeddedPreview();
+                previewNativeOpening = true;
+                try
+                {
+                    ApplyPreviewBounds();
+                    EmbeddedPreviewHost.UpdateLayout();
+                    enginePreparation = embeddedPreview!.PrepareAsync();
+                    _ = enginePreparation.ContinueWith(task => ClientDiagnostics.Record("error", "预览引擎准备", task.Exception!.ToString()),
+                        CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+                }
+                finally { previewNativeOpening = false; PreviewFrame.Visibility = Visibility.Collapsed; }
             }
-            else if (!await IsValidCacheAsync(cachedFile, version.FileLength, version.Sha256))
+            cacheHit = await IsValidCacheAsync(cachedFile, version.FileLength, version.Sha256, cancellationToken);
+            if (!cacheHit)
             {
                 previewStep = "下载预览源文件";
-                var temporaryFile = cachedFile + ".download";
-                if (File.Exists(temporaryFile)) File.Delete(temporaryFile);
-                using var fileRequest = CreateApiRequest(HttpMethod.Get, $"/api/documents/{documentId}/versions/{version.Id}/file?download=false");
-                using var fileResponse = await apiClient.SendAsync(fileRequest, HttpCompletionOption.ResponseHeadersRead);
-                if (!fileResponse.IsSuccessStatusCode)
+                var temporaryFile = cachedFile + "." + Guid.NewGuid().ToString("N") + ".download";
+                try
                 {
-                    throw new InvalidOperationException(ReadApiError(await fileResponse.Content.ReadAsStringAsync(), "版本文件下载失败。"));
+                    using var fileRequest = CreateApiRequest(HttpMethod.Get, $"/api/documents/{documentId}/versions/{version.Id}/file?download=false");
+                    using var fileResponse = await apiClient.SendAsync(fileRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                    if (!fileResponse.IsSuccessStatusCode)
+                        throw new InvalidOperationException(ReadApiError(await fileResponse.Content.ReadAsStringAsync(), "版本文件下载失败。"));
+                    await CopyVerifiedPreviewAsync(fileResponse.Content, temporaryFile, version.FileLength, version.Sha256, cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (File.Exists(cachedFile))
+                    {
+                        if (embeddedPreview != null) await embeddedPreview.CloseDocumentAsync();
+                        cancellationToken.ThrowIfCancellationRequested();
+                        // 只读缓存需要先解除只读属性，否则更换版本时会因访问被拒绝而无法重新加载。
+                        File.SetAttributes(cachedFile, File.GetAttributes(cachedFile) & ~FileAttributes.ReadOnly);
+                        File.Delete(cachedFile);
+                    }
+                    File.Move(temporaryFile, cachedFile);
+                    File.SetAttributes(cachedFile, File.GetAttributes(cachedFile) | FileAttributes.ReadOnly);
                 }
-                using (var input = await fileResponse.Content.ReadAsStreamAsync())
-                using (var output = new FileStream(temporaryFile, FileMode.CreateNew, FileAccess.Write, FileShare.None, 256 * 1024, true))
-                {
-                    await input.CopyToAsync(output);
-                }
-                if (!await IsValidCacheAsync(temporaryFile, version.FileLength, version.Sha256))
-                {
-                    File.Delete(temporaryFile);
-                    throw new InvalidDataException("预览文件SHA-256校验失败。");
-                }
-                if (File.Exists(cachedFile))
-                {
-                    // 只读缓存需要先解除只读属性，否则更换版本时会因访问被拒绝而无法重新加载。
-                    File.SetAttributes(cachedFile, File.GetAttributes(cachedFile) & ~FileAttributes.ReadOnly);
-                    File.Delete(cachedFile);
-                }
-                File.Move(temporaryFile, cachedFile);
-                File.SetAttributes(cachedFile, File.GetAttributes(cachedFile) | FileAttributes.ReadOnly);
+                finally { if (File.Exists(temporaryFile)) File.Delete(temporaryFile); }
             }
+            fileMs = elapsed.ElapsedMilliseconds - stageStarted;
 
             if (requestGeneration != previewRequestGeneration)
             {
                 return;
             }
 
-            var markupPath = Path.Combine(cacheDirectory, "review.markup");
+            stageStarted = elapsed.ElapsedMilliseconds;
             try
             {
-                if (!await DownloadMarkupAsync(documentId, version.Id, markupPath))
+                if (!await markupDownload)
                 {
                     markupPath = string.Empty;
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception exception)
             {
                 markupPath = string.Empty;
-                await PublishMarkupStatusAsync("warning", $"历史批注暂未加载：{exception.Message}");
+                AppendClientDiagnostic($"历史批注下载失败：document={documentId} version={version.Id} error={exception}");
+                await PublishMarkupStatusAsync("warning", "历史批注暂未加载，请检查网络后重新加载预览。");
             }
+            markupMs = elapsed.ElapsedMilliseconds - stageStarted;
+            var markupFingerprint = await ComputePreviewFingerprintAsync(markupPath, cancellationToken);
 
             if (requestGeneration != previewRequestGeneration)
             {
@@ -1667,17 +1696,23 @@ public partial class MainWindow : Window
             }
 
             previewStep = "打开 eDrawings 预览";
-            nativeOpenStarted = true;
-            previewNativeOpening = true;
-            try
+            stageStarted = elapsed.ElapsedMilliseconds;
+            var nativeReused = cacheHit && embeddedPreview?.IsShowingDocument(cachedFile) == true
+                && string.Equals(previewMarkupFingerprint, markupFingerprint, StringComparison.OrdinalIgnoreCase);
+            if (!nativeReused)
             {
-                EnsureEmbeddedPreview();
-                ApplyPreviewBounds();
-                await embeddedPreview!.OpenDocumentAsync(cachedFile, markupPath);
-            }
-            finally
-            {
-                previewNativeOpening = false;
+                nativeOpenStarted = true;
+                previewNativeOpening = true;
+                try
+                {
+                    if (enginePreparation != null) await enginePreparation;
+                    EnsureEmbeddedPreview();
+                    ApplyPreviewBounds();
+                    EmbeddedPreviewHost.UpdateLayout();
+                    await embeddedPreview!.OpenDocumentAsync(cachedFile, markupPath);
+                    nativeMs = elapsed.ElapsedMilliseconds - stageStarted;
+                }
+                finally { previewNativeOpening = false; }
             }
             if (previewClosePending || requestGeneration != previewRequestGeneration)
             {
@@ -1690,8 +1725,10 @@ public partial class MainWindow : Window
             previewDocumentId = documentId;
             previewVersionId = version.Id;
             previewMarkupDirectory = cacheDirectory;
+            previewMarkupFingerprint = markupFingerprint;
             ApplyPreviewBounds();
             await PublishPreviewStatusAsync("ready", Path.GetFileName(cachedFile), string.Empty);
+            AppendClientDiagnostic($"原图预览完成：document={documentId} version={version.Id} cache={(cacheHit ? "hit" : "miss")} nativeReused={nativeReused} metadataMs={metadataMs} fileMs={fileMs} markupWaitMs={markupMs} nativeMs={nativeMs} totalMs={elapsed.ElapsedMilliseconds}");
         }
         catch (Exception exception)
         {
@@ -1714,12 +1751,26 @@ public partial class MainWindow : Window
             previewMarkupDirectory = string.Empty;
             PreviewFrame.Visibility = Visibility.Collapsed;
             embeddedPreview?.CloseDocument();
+            previewMarkupFingerprint = string.Empty;
             var server = new Uri(bootstrapConfiguration.ApiBaseUrl).GetLeftPart(UriPartial.Authority);
             AppendClientDiagnostic($"预览失败：step={previewStep} server={server} document={failedDocumentId} error={exception}");
-            var message = exception is HttpRequestException or TaskCanceledException
-                ? $"{previewStep}失败：无法连接 PLM 服务器（{server}）。{exception.GetBaseException().Message}"
-                : exception.Message;
+            var message = exception is OperationCanceledException
+                ? "预览请求已超时或取消，请检查网络后重新加载预览。"
+                : exception is HttpRequestException
+                    ? "无法连接预览服务，请检查网络后重新加载预览。"
+                    : exception is IOException or UnauthorizedAccessException
+                        ? "预览缓存读写失败，请检查本机缓存目录权限后重试。"
+                        : exception.Message;
             await PublishPreviewStatusAsync("error", string.Empty, message);
+        }
+        finally
+        {
+            markupCancellation.Cancel();
+            if (markupDownload != null)
+            {
+                try { await markupDownload; }
+                catch { /* The request error was reported above, or its parent preview was cancelled. */ }
+            }
         }
     }
 
@@ -1743,7 +1794,7 @@ public partial class MainWindow : Window
             await PublishMarkupStatusAsync("saving", "正在保存批注…");
             Directory.CreateDirectory(previewMarkupDirectory);
             var requestedPath = Path.Combine(previewMarkupDirectory, $"review-{Guid.NewGuid():N}.markup");
-            embeddedPreview.SaveMarkup(requestedPath);
+            await embeddedPreview.SaveMarkupAsync(requestedPath);
             var generatedMarkupPath = await WaitForMarkupFileAsync(requestedPath, TimeSpan.FromSeconds(15));
 
             using var request = CreateApiRequest(HttpMethod.Put, $"/api/documents/{documentId}/versions/{versionId}/markup");
@@ -1758,6 +1809,8 @@ public partial class MainWindow : Window
             }
 
             await PublishMarkupStatusAsync("saved", "批注已保存。切换图档时不会保存或修改源图纸。");
+            var fingerprint = await ComputePreviewFingerprintAsync(generatedMarkupPath);
+            if (previewDocumentId == documentId && previewVersionId == versionId) previewMarkupFingerprint = fingerprint;
         }
         catch (Exception exception)
         {
@@ -1769,10 +1822,10 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task<bool> DownloadMarkupAsync(Guid documentId, Guid versionId, string targetPath)
+    private async Task<bool> DownloadMarkupAsync(Guid documentId, Guid versionId, string targetPath, CancellationToken cancellationToken = default)
     {
         using var request = CreateApiRequest(HttpMethod.Get, $"/api/documents/{documentId}/versions/{versionId}/markup");
-        using var response = await apiClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        using var response = await apiClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         if (response.StatusCode == HttpStatusCode.NotFound)
         {
             if (File.Exists(targetPath)) File.Delete(targetPath);
@@ -1789,12 +1842,13 @@ public partial class MainWindow : Window
             using (var input = await response.Content.ReadAsStreamAsync())
             using (var output = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 128 * 1024, true))
             {
-                await input.CopyToAsync(output);
+                await input.CopyToAsync(output, 128 * 1024, cancellationToken);
             }
             if (new FileInfo(temporaryPath).Length == 0)
             {
                 throw new InvalidDataException("服务器返回的批注文件为空。");
             }
+            cancellationToken.ThrowIfCancellationRequested();
             if (File.Exists(targetPath)) File.Delete(targetPath);
             File.Move(temporaryPath, targetPath);
             return true;
@@ -1840,13 +1894,13 @@ public partial class MainWindow : Window
             return;
         }
 
-        embeddedPreview = new EDrawingsPreviewControl();
-        embeddedPreview.ApplyTheme(currentTheme);
+        embeddedPreview = new ThreadedEDrawingsPreview();
         embeddedPreview.UserMessageRequested += message => Dispatcher.BeginInvoke(new Action(() =>
             WpfMessageBox.Show(this, message, "UPLM", MessageBoxButton.OK, MessageBoxImage.Information)));
         embeddedPreview.MarkupModifiedChanged += modified => Dispatcher.BeginInvoke(new Action(() =>
             _ = PublishMarkupStatusAsync(modified ? "dirty" : "clean", modified ? "批注尚未保存。" : string.Empty)));
-        EmbeddedPreviewHost.Child = embeddedPreview;
+        EmbeddedPreviewHost.Child = embeddedPreview.HostControl;
+        embeddedPreview.ApplyTheme(currentTheme);
     }
 
     private void DisposeEmbeddedPreview()
@@ -2043,13 +2097,14 @@ public partial class MainWindow : Window
     private void HideEmbeddedPreview(bool closeDocument)
     {
         Interlocked.Increment(ref previewRequestGeneration);
-        assemblyPreviewCancellation?.Cancel();
+        previewRequestCancellation?.Cancel();
         previewHostSuspended = false;
         previewDocumentReady = false;
         previewRequestedDocumentId = null;
         PreviewFrame.Visibility = Visibility.Collapsed;
         if (closeDocument)
         {
+            previewMarkupFingerprint = string.Empty;
             if (previewNativeOpening) previewClosePending = true;
             else embeddedPreview?.CloseDocument();
             previewDocumentId = null;
@@ -2238,16 +2293,60 @@ public partial class MainWindow : Window
         return request;
     }
 
-    private static Task<bool> IsValidCacheAsync(string path, long expectedLength, string expectedSha256)
+    private static Task CopyVerifiedPreviewAsync(HttpContent content, string path, long expectedLength, string expectedSha256, CancellationToken cancellationToken) => Task.Run(async () =>
     {
-        if (!File.Exists(path) || new FileInfo(path).Length != expectedLength) return Task.FromResult(false);
-        using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using var input = await content.ReadAsStreamAsync().ConfigureAwait(false);
+        using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        using var hash = SHA256.Create();
+        var buffer = new byte[256 * 1024];
+        var elapsed = Stopwatch.StartNew();
+        long length = 0;
+        var reads = 0;
+        var writes = 0;
+        while (true)
+        {
+            var count = 0;
+            while (count < buffer.Length)
+            {
+                var received = await input.ReadAsync(buffer, count, buffer.Length - count, cancellationToken).ConfigureAwait(false);
+                reads++;
+                if (received == 0) break;
+                count += received;
+            }
+            if (count == 0) break;
+            cancellationToken.ThrowIfCancellationRequested();
+            length += count;
+            if (length > expectedLength) throw new InvalidDataException("预览文件大小与版本记录不一致。");
+            hash.TransformBlock(buffer, 0, count, buffer, 0);
+            await output.WriteAsync(buffer, 0, count, cancellationToken).ConfigureAwait(false);
+            writes++;
+        }
+        hash.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (length != expectedLength || !string.Equals(BitConverter.ToString(hash.Hash!).Replace("-", string.Empty), expectedSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("预览文件完整性校验失败，请重新下载预览。");
+        ClientDiagnostics.Record("runtime", "预览下载校验", $"字节={length}；网络读取={reads}次；磁盘写入={writes}次；耗时={elapsed.ElapsedMilliseconds}毫秒");
+    }, cancellationToken);
+
+    private static async Task<bool> IsValidCacheAsync(string path, long expectedLength, string expectedSha256, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!File.Exists(path) || new FileInfo(path).Length != expectedLength) return false;
+        return string.Equals(await ComputePreviewFingerprintAsync(path, cancellationToken), expectedSha256, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Task<string> ComputePreviewFingerprintAsync(string path, CancellationToken cancellationToken = default) => Task.Run(() =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!File.Exists(path)) return string.Empty;
+        using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 256 * 1024, FileOptions.SequentialScan))
         using (var hash = SHA256.Create())
         {
             var actual = BitConverter.ToString(hash.ComputeHash(input)).Replace("-", string.Empty);
-            return Task.FromResult(string.Equals(actual, expectedSha256, StringComparison.OrdinalIgnoreCase));
+            cancellationToken.ThrowIfCancellationRequested();
+            return actual;
         }
-    }
+    }, cancellationToken);
 
     private static string ReadApiError(string json, string fallback)
     {

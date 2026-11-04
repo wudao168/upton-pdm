@@ -73,6 +73,9 @@ internal static class ArchiveMissingReferencePolicy
     internal static void OmitUnselected(CadTreeNode owner, CadTreeNode reference)
     {
         if (owner?.ConfirmedArchivePaths == null || owner.ConfirmedArchivePaths.Contains(reference.FullPath)) return;
+        // Available auxiliary sources are copied with their selected native owner.
+        // This does not select unrelated native models or their design changes.
+        if (reference.IsImportedSourceFile && File.Exists(reference.FullPath)) return;
         ArchiveWarningGate.Check("OutsideVault", owner.FileName + " → " + reference.FileName + "：引用未纳入本次勾选；请调整提交范围或联系管理员。");
         reference.IsOutsideNativeFileScope = true;
         foreach (var node in Walk(owner).Where(node => node != owner && string.Equals(node.FullPath, reference.FullPath, StringComparison.OrdinalIgnoreCase)))

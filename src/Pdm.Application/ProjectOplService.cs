@@ -2,7 +2,7 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
 
-public sealed record OplAttachment(Guid Id, string Name, long Length, Guid? StorageProjectId = null);
+public sealed record OplAttachment(Guid Id, string Name, long Length, Guid? StorageProjectId = null, string? StorageRoot = null);
 public sealed record OplIssue(Guid Id, Guid ProjectId, int Number, string Description, string Priority, string Status,
     string Owner, DateOnly? DueDate, string Solution, string CreatedBy, DateTimeOffset CreatedAt,
     DateTimeOffset? CompletedAt, string UpdatedBy, DateTimeOffset UpdatedAt, long RowVersion,
@@ -35,7 +35,7 @@ public interface IProjectOplStorage
     void Delete(string vaultRoot, Guid projectId, Guid attachmentId);
 }
 
-public sealed class ProjectOplService(IPdmRepository projects, IProjectOplRepository issues, IProjectOplStorage storage, TimeProvider clock)
+public sealed class ProjectOplService(IPdmRepository projects, IProjectOplRepository issues, IProjectOplStorage storage, TimeProvider clock, IServerStoragePaths? paths = null)
 {
     public const int MaxFileLength = 10 * 1024 * 1024;
     private static readonly string[] Priorities = ["紧急", "高", "普通", "低"];
@@ -140,13 +140,13 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
         if (retained.Length + uploads.Count > 10 || uploads.Any(x => x.Content.Length == 0 || x.Content.Length > MaxFileLength || string.IsNullOrWhiteSpace(x.Name) || x.Name.Length > 200)) throw new PdmRuleException("最多10个附件，单个附件应为1字节至10MB，文件名最多200个字符。");
         if (uploads.Sum(x => (long)x.Content.Length) > 30 * 1024 * 1024) throw new PdmRuleException("单次上传附件总大小不能超过30MB。");
         var now = clock.GetUtcNow();
-        var added = uploads.Select(x => new OplAttachment(Guid.NewGuid(), Path.GetFileName(x.Name.Replace('\\', '/')), x.Content.Length, root.Id)).ToArray();
+        var vault = string.IsNullOrWhiteSpace(paths?.OplAttachmentRoot) ? (await projects.GetSystemSettingsAsync(ct)).VaultRoot : paths.OplAttachmentRoot;
+        var added = uploads.Select(x => new OplAttachment(Guid.NewGuid(), Path.GetFileName(x.Name.Replace('\\', '/')), x.Content.Length, root.Id, vault)).ToArray();
         var value = new OplIssue(existing?.Id ?? Guid.NewGuid(), root.Id, existing?.Number ?? 0, input.Description.Trim(), input.Priority, input.Status,
             owner, input.DueDate, input.Solution.Trim(), existing?.CreatedBy ?? actor, existing?.CreatedAt ?? now,
             input.Status == "已完成" ? existing?.CompletedAt ?? now : null, actor, now, existing?.RowVersion ?? 0,
             (existing?.Attachments.Where(x => retained.Contains(x.Id)) ?? []).Concat(added).ToArray(), existing?.Source ?? source, existing?.ExternalId,
             input.RelatedProjectId, existing?.AttachmentProjectId, existing?.CreatedByDisplayName);
-        var vault = (await projects.GetSystemSettingsAsync(ct)).VaultRoot;
         try
         {
             for (var i = 0; i < added.Length; i++) await storage.WriteAsync(vault, root.Id, added[i].Id, uploads[i].Content, ct);
@@ -182,10 +182,10 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
         if (uploads.Count > 10 || uploads.Any(x => x.Content.Length == 0 || x.Content.Length > MaxFileLength || string.IsNullOrWhiteSpace(x.Name) || x.Name.Length > 200)) throw new PdmRuleException("最多10个附件，单个附件应为1字节至10MB，文件名最多200个字符。");
         if (uploads.Sum(x => (long)x.Content.Length) > 30 * 1024 * 1024) throw new PdmRuleException("单次上传附件总大小不能超过30MB。");
         var now = clock.GetUtcNow();
-        var attachments = uploads.Select(x => new OplAttachment(Guid.NewGuid(), Path.GetFileName(x.Name.Replace('\\', '/')), x.Content.Length, root.Id)).ToArray();
+        var vault = string.IsNullOrWhiteSpace(paths?.OplAttachmentRoot) ? (await projects.GetSystemSettingsAsync(ct)).VaultRoot : paths.OplAttachmentRoot;
+        var attachments = uploads.Select(x => new OplAttachment(Guid.NewGuid(), Path.GetFileName(x.Name.Replace('\\', '/')), x.Content.Length, root.Id, vault)).ToArray();
         var value = new OplIssue(Guid.NewGuid(), root.Id, 0, input.Description.Trim(), input.Priority, input.Status, owner, input.DueDate, input.Solution.Trim(), actor, now, input.Status == "已完成" ? now : null, actor, now, 0, attachments,
             "DingTalk", null, input.RelatedProjectId, null, displayName);
-        var vault = (await projects.GetSystemSettingsAsync(ct)).VaultRoot;
         try
         {
             for (var i = 0; i < attachments.Length; i++) await storage.WriteAsync(vault, root.Id, attachments[i].Id, uploads[i].Content, ct);
@@ -215,6 +215,8 @@ public sealed class ProjectOplService(IPdmRepository projects, IProjectOplReposi
         var issue = (await issues.ListAsync(root.Id, ct)).SingleOrDefault(x => x.Id == id);
         var file = issue?.Attachments.SingleOrDefault(x => x.Id == attachmentId)
             ?? throw new PdmNotFoundException("附件不存在或已被移除。");
-        return (file, await storage.OpenAsync((await projects.GetSystemSettingsAsync(ct)).VaultRoot, file.StorageProjectId ?? issue!.AttachmentProjectId ?? root.Id, attachmentId, ct));
+        var vault = file.StorageRoot ?? (string.IsNullOrWhiteSpace(paths?.LegacyOplAttachmentRoot)
+            ? (await projects.GetSystemSettingsAsync(ct)).VaultRoot : paths.LegacyOplAttachmentRoot);
+        return (file, await storage.OpenAsync(vault, file.StorageProjectId ?? issue!.AttachmentProjectId ?? root.Id, attachmentId, ct));
     }
 }

@@ -189,10 +189,6 @@ const expandableProjectIds = computed(() => {
   return result
 })
 watch([projectTypeFilter, organizationFilter, selectedDivisionId, projectQuery, responsibleFilter, executionUnitFilter, projectManagerFilter, designOwnerFilter], () => { expanded.value = new Set(); projectPage.value = 1 })
-function visibleChildren(parentId: string) {
-  const children = filteredChildrenByParent.value.get(parentId) ?? []
-  return expanded.value.has(parentId) ? children : []
-}
 function isEffectivelyExpanded(parentId: string) {
   return filteredChildrenByParent.value.has(parentId)
     && expanded.value.has(parentId)

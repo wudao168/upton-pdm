@@ -80,7 +80,8 @@ internal static partial class Program
      Check((int)TreeCall(plugin,"OnFileOpening",Path.Combine(original,"PART.SLDPRT"))==0,"嵌套受控读取按自身清单核对，不受旧活动树误拦截");
     Check((int)TreeCall(plugin,"OnFileOpening",Path.Combine(directory,"PART.SLDPRT"))==0,"嵌套范围结束后恢复外层边界");TreeCall(plugin,"OnFileOpened",Path.Combine(directory,"PART.SLDPRT"));
    }
-   foreach(var mode in new[]{"original-present","original-missing","original-open","different-project","stale-version","stale-config","actual-config","occurrence-config","unknown-edit","owned-edit","source-copy","acquire-inplace"})
+   foreach(var mode in new[]{"original-present","original-missing","original-open","different-project","stale-version","stale-config","actual-config","occurrence-config","unknown-edit","owned-edit","source-copy","acquire-inplace",
+    "context-environment","context-older-environment","context-ordinary-driver","context-unverified","context-wrong-name","context-duplicate-driver","context-nested-driver","context-virtual","context-tampered","context-root-race"})
    {
     var folder=Path.Combine(output,"View",mode);Directory.CreateDirectory(folder);var partPath=Path.Combine(folder,"PART.SLDPRT");File.WriteAllText(partPath,"saved model bytes");
     var oldPath=Path.Combine(output,"source-"+mode,"PART.SLDPRT");Directory.CreateDirectory(Path.GetDirectoryName(oldPath));if(mode!="original-missing")File.WriteAllText(oldPath,"other original geometry");
@@ -94,16 +95,28 @@ internal static partial class Program
     if(mode=="stale-version")Set(requestedFile,"VersionId",Guid.NewGuid());if(mode=="stale-config")Set(requestedFile,"Configuration","Other");if(mode=="source-copy"){Set(requestedFile,"Sha256",new string('A',64));Set(requestedFile,"FileLength",1000L);}
     if(mode=="occurrence-config")Set(source,"Configuration","AssemblyOccurrence");
     var requestedFiles=(IList)Activator.CreateInstance(Property(requested,"Files").PropertyType);requestedFiles.Add(requestedFile);Set(requested,"Files",requestedFiles);
+    object parent=null;object parentReference=null;string parentPath=null;
+    if(mode.StartsWith("context-"))
+    {
+     parentPath=Path.Combine(folder,"CONTEXT.SLDASM");File.WriteAllText(parentPath,"saved parent assembly");
+     parent=New("ControlledOpenFileDto");Set(parent,"DocumentId",Guid.NewGuid());Set(parent,"VersionId",Guid.NewGuid());Set(parent,"FileName","CONTEXT.SLDASM");Set(parent,"RelativePath","CONTEXT.SLDASM");Set(parent,"Configuration","Default");Set(parent,"Sha256",WorkingReuseHash(parentPath));Set(parent,"FileLength",new FileInfo(parentPath).Length);Set(parent,"Revision","W2");ownerFiles.Add(parent);
+     identity.GetMethod("TryWriteControlledVersion",Flags).Invoke(null,new[]{(object)parentPath,Get(parent,"DocumentId"),project,Get(parent,"VersionId"),"W2",Get(parent,"Sha256"),Get(parent,"FileLength")});
+     var requestedParent=json.Deserialize(json.Serialize(parent),parent.GetType());Set(requestedParent,"Configuration","");
+     if(mode=="context-older-environment"){Set(requestedParent,"VersionId",Guid.NewGuid());Set(requestedParent,"Sha256",new string('B',64));Set(requestedParent,"Revision","W1");}
+     requestedFiles.Add(requestedParent);
+     parentReference=new{documentId=Get(parent,"DocumentId"),fileName=mode=="context-wrong-name"?"OTHER.SLDASM":"CONTEXT.SLDASM",kind=0,role=1,isContextReference=mode!="context-ordinary-driver",referenceTypeUnverified=mode=="context-unverified",status=mode=="context-virtual"?4:0,children=new object[0]};
+     if(mode=="context-tampered")File.AppendAllText(parentPath," unknown edits");
+    }
     var addin=New("PdmAddin");var session=(Guid)Field(addin,"checkoutSessionId");SetField(addin,"authenticatedUsername","tester");((IDictionary)Field(addin,"controlledOpenManifests")).Add(folder,owner);
     var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var interop=appType.Assembly;var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>call.MethodName=="ListExternalFileReferences2"?null:throw new Exception(call.MethodName)).GetTransparentProxy();
     var configuration=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Configuration",true),call=>call.MethodName=="get_Name"?(mode=="actual-config"?"Other":"Default"):throw new Exception(call.MethodName)).GetTransparentProxy();
     var configurationManager=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ConfigurationManager",true),call=>call.MethodName=="get_ActiveConfiguration"?configuration:throw new Exception(call.MethodName)).GetTransparentProxy();var readOnly=mode!="owned-edit";var unlocks=0;
     object Model(string path)=>new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>{
-     switch(call.MethodName){case "GetPathName":return path;case "GetTitle":return "PART.SLDPRT";case "GetType":return 1;case "GetSaveFlag":return mode=="owned-edit";case "IsOpenedReadOnly":return readOnly;case "SetReadOnlyState":if(mode!="acquire-inplace"||path!=partPath)throw new Exception("越界解锁");readOnly=(bool)call.Args[0];unlocks++;return true;case "get_ConfigurationManager":return configurationManager;case "get_Extension":return extension;case "GetEquationMgr":case "GetDesignTable":return null;default:throw new Exception("模型窗口和几何不得修改："+call.MethodName);}
+     switch(call.MethodName){case "GetPathName":return path;case "GetTitle":return Path.GetFileName(path);case "GetType":return path==parentPath?2:1;case "GetSaveFlag":return mode=="owned-edit";case "IsOpenedReadOnly":return readOnly;case "SetReadOnlyState":if(mode!="acquire-inplace"||path!=partPath)throw new Exception("越界解锁");readOnly=(bool)call.Args[0];unlocks++;return true;case "get_ConfigurationManager":return configurationManager;case "get_Extension":return extension;case "GetEquationMgr":case "GetDesignTable":return null;default:throw new Exception("模型窗口和几何不得修改："+call.MethodName);}
     }).GetTransparentProxy();
     var local=Model(partPath);var originalModel=Model(oldPath);var active=(object)null;var nativeMutations=0;var search=false;
     SetField(addin,"application",new Proxy(appType,call=>{
-     switch(call.MethodName){case "GetDocuments":return new[]{local}.Concat(mode=="original-open"?new[]{originalModel}:new object[0]).ToArray();case "get_ActiveDoc":return active;
+      switch(call.MethodName){case "GetDocuments":return new[]{local}.Concat(mode=="original-open"?new[]{originalModel}:new object[0]).Concat(parent==null?new object[0]:new[]{Model(parentPath)}).ToArray();case "get_ActiveDoc":return active;
       case "ActivateDoc3":active=local;return local;case "GetCurrentWorkingDirectory":case "GetSearchFolders":return "";case "SetCurrentWorkingDirectory":case "SetSearchFolders":return true;case "GetUserPreferenceToggle":return search;case "SetUserPreferenceToggle":search=(bool)call.Args[1];return true;
       default:nativeMutations++;throw new Exception("禁止新开、关闭、保存或重写模型："+call.MethodName);}
     }).GetTransparentProxy());
@@ -114,7 +127,14 @@ internal static partial class Program
     using(var client=(IDisposable)New("PdmApiClient","http://controlled-reuse.invalid/"))
     using(var handler=new ReferenceRecoveryHandler(request=>{
      object data;
-     if(request.RequestUri.AbsolutePath.EndsWith("/versions"))data=new[]{new{id=Get(requestedFile,"VersionId"),sha256=Get(requestedFile,"Sha256"),fileLength=Get(requestedFile,"FileLength"),propertySnapshot=new Dictionary<string,string>{{"SourceFileSha256",(string)Get(source,"Sha256")}},referenceSnapshot=new{documentId=Get(source,"DocumentId"),fileName="PART.SLDPRT",configuration="Default",kind=1,children=new object[0]}}};
+     if(request.RequestUri.AbsolutePath.EndsWith("/versions"))
+     {
+      var refs=parentReference==null?new List<object>():new List<object>{parentReference};
+      var driver=parent==null?null:new{documentId=Get(parent,"DocumentId"),fileName="CONTEXT.SLDASM",kind=0,role=1,isContextReference=false,referenceTypeUnverified=false,children=new object[0]};
+      if(mode=="context-duplicate-driver")refs.Add(driver);
+      if(mode=="context-nested-driver")refs.Add(new{documentId=Guid.NewGuid(),fileName="DRIVER.SLDPRT",kind=1,children=new[]{driver}});
+      data=new[]{new{id=mode=="context-root-race"?Guid.NewGuid():Get(requestedFile,"VersionId"),sha256=Get(requestedFile,"Sha256"),fileLength=Get(requestedFile,"FileLength"),propertySnapshot=new Dictionary<string,string>{{"SourceFileSha256",(string)Get(source,"Sha256")}},referenceSnapshot=new{documentId=Get(source,"DocumentId"),fileName="PART.SLDPRT",configuration="Default",kind=1,children=refs.ToArray()}}};
+     }
      else if(request.RequestUri.AbsolutePath.EndsWith("/documents"))data=mode=="owned-edit"||mode=="acquire-inplace"?new[]{checkoutDocument}:new object[0];
      else if(request.RequestUri.AbsolutePath.EndsWith("/document-operation-rules"))data=new{disabledRuleIds=new string[0]};
      else if(request.RequestUri.AbsolutePath.EndsWith("/document-relations"))data=new object[0];
@@ -134,12 +154,13 @@ internal static partial class Program
       var document=New("DocumentDto");Set(document,"Id",Get(source,"DocumentId"));Set(document,"ProjectId",project);Set(document,"CheckedOutBy","tester");Set(document,"CheckoutSessionId",session);Set(document,"CheckedOutAt",new DateTime(2026,10,27,6,0,0,DateTimeKind.Utc));TreeCall(addin,"RememberLocalEdit",editNode,document);
      }
      if(mode=="owned-edit"||mode=="unknown-edit")File.AppendAllText(partPath,"|local geometry edit");
-     var bytes=File.ReadAllBytes(partPath);Exception failure=null;bool reused=false;
+     var bytes=File.ReadAllBytes(partPath);var parentBytes=parent==null?null:File.ReadAllBytes(parentPath);var parentAttributes=parent==null?FileAttributes.Normal:File.GetAttributes(parentPath);Exception failure=null;bool reused=false;
      try{var task=(Task)TreeCall(addin,"TryOpenModelInLoadedContextAsync",requested,mode=="acquire-inplace");await task;reused=(bool)Get(task,"Result");}catch(InvalidOperationException error){failure=error;}
-     var shouldPass=new[]{"original-present","original-missing","occurrence-config","owned-edit","source-copy","acquire-inplace"}.Contains(mode);
+     var shouldPass=new[]{"original-present","original-missing","occurrence-config","owned-edit","source-copy","acquire-inplace","context-environment","context-older-environment"}.Contains(mode);
      if(shouldPass&&failure!=null)Console.WriteLine("DIAGNOSTIC: "+failure);
      Check(reused==shouldPass&&(failure==null)==shouldPass,"模型工作副本复用及真实冲突判定："+mode);
      Check(nativeMutations==0&&File.ReadAllBytes(partPath).SequenceEqual(bytes),"保留当前模型窗口和本地内容，不生成第二套副本："+mode);
+     if(parent!=null)Check(File.ReadAllBytes(parentPath).SequenceEqual(parentBytes)&&File.GetAttributes(parentPath)==parentAttributes&&(string)Get(parent,"Configuration")=="Default", "装配上下文保持原字节、属性和原配置："+mode);
      Check(!File.Exists(oldPath)||File.ReadAllText(oldPath)=="other original geometry","原目录文件不被读取为模型或修改："+mode);
      if(mode=="acquire-inplace")Check(checkouts==1&&unlocks==1&&!readOnly,"获取编辑权限复用同一窗口，仅解锁选中的模型，不重新打开或下载");
     }

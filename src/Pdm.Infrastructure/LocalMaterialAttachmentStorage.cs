@@ -184,7 +184,7 @@ public sealed class LocalMaterialAttachmentStorage(IOptions<PdmStorageOptions> o
         return Task.CompletedTask;
     }
 
-    private string GetSessionDirectory(Guid sessionId) => Path.Combine(StorageLocationPolicy.Normalize(settings.UploadTempRoot), sessionId.ToString("N"));
+    private string GetSessionDirectory(Guid sessionId) => settings.UploadPath(sessionId.ToString("N"));
 
     private async Task<MaterialAttachmentUploadSession> ReadMetadataAsync(Guid sessionId, CancellationToken cancellationToken)
     {

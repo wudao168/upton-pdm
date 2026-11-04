@@ -11,6 +11,7 @@ public sealed partial class MySqlPdmRepository
 {
     public async Task EnsureProjectFolderTreeAsync(Guid projectId, CancellationToken cancellationToken)
     {
+        if (await ProjectFolderTreeIsCurrentAsync(projectId, cancellationToken)) return;
         for (var attempt = 0; ; attempt++)
         {
             try
@@ -99,7 +100,11 @@ public sealed partial class MySqlPdmRepository
         await transaction.CommitAsync(cancellationToken);
     }
 
-    public async Task<IReadOnlyList<ProjectFolder>> ListProjectFoldersAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<ProjectFolder>> ListProjectFoldersAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
+        ReadProjectFoldersAsync(projectId, actor, role, cancellationToken);
+
+    private async Task<IReadOnlyList<ProjectFolder>> ReadProjectFoldersAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken,
+        Guid? documentFolderId = null, bool defaultDocumentFolderOnly = false)
     {
         await EnsureProjectFolderTreeAsync(projectId, cancellationToken);
         await using var connection = await OpenAsync(cancellationToken);
@@ -127,16 +132,25 @@ public sealed partial class MySqlPdmRepository
         // Permission checks below open their own connections; release this read connection first.
         await connection.CloseAsync();
         var result = new List<ProjectFolder>(rows.Length);
-        foreach (var row in rows)
+        var targetAccess = new Dictionary<Guid, bool>();
+        foreach (var row in rows.Where(row => documentFolderId.HasValue ? row.Id == documentFolderId.Value
+            : !defaultDocumentFolderOnly || row.TargetProjectId == projectId && row.TemplateKey == "mechanical.project"))
         {
             var explicitRules = permissionRows.Where(item => item.FolderId == row.Id).Select(MapRule).ToArray();
-            var canSeeTarget = row.TargetProjectId is null || await HasProjectReadAccessAsync(row.TargetProjectId.Value, actor, role, cancellationToken);
+            var canSeeTarget = row.TargetProjectId is null || await CanReadTargetAsync(row.TargetProjectId.Value);
             var access = canSeeTarget
                 ? ResolveAccess(row, byId, permissionRows, templatePermissionRows, actor, roleCodes, role)
                 : FolderAccess.None;
             result.Add(MapFolder(row) with { EffectiveAccess = access, Permissions = explicitRules });
         }
         return result;
+
+        async Task<bool> CanReadTargetAsync(Guid targetId)
+        {
+            if (!targetAccess.TryGetValue(targetId, out var allowed))
+                targetAccess[targetId] = allowed = await HasProjectReadAccessAsync(targetId, actor, role, cancellationToken);
+            return allowed;
+        }
     }
 
     public async Task<IReadOnlyList<ProjectFolderTemplateNode>> ListFolderTemplateAsync(CancellationToken cancellationToken)

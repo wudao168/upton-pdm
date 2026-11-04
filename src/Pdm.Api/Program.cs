@@ -10,7 +10,7 @@ using Upton.Pdm.Api;
 using Upton.Pdm.Application;
 using Upton.Pdm.Infrastructure;
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateBuilder(args.Where(argument => argument is not "--storage-backup-plan" and not "--storage-backup-table-counts").ToArray());
 var httpUrlOverride = Environment.GetEnvironmentVariable("PDM_HTTP_URL");
 if (!string.IsNullOrWhiteSpace(httpUrlOverride))
 {
@@ -88,6 +88,10 @@ if (authenticationOptions.SigningKey.Length < 32)
 
 builder.Services.AddSingleton<IOptions<PdmDatabaseOptions>>(Options.Create(databaseOptions));
 builder.Services.AddSingleton<IOptions<PdmStorageOptions>>(Options.Create(storageOptions));
+builder.Services.AddSingleton<IServerStoragePaths>(storageOptions);
+builder.Services.AddSingleton<ServerStorageSettingsStore>();
+builder.Services.AddScoped<ServerStorageAdministration>();
+builder.Services.AddScoped<StorageBackupPlanner>();
 builder.Services.AddSingleton<IOptions<PdmPreviewWorkerOptions>>(Options.Create(previewWorkerOptions));
 builder.Services.AddSingleton<IOptions<AuthenticationOptions>>(Options.Create(authenticationOptions));
 
@@ -114,6 +118,7 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IWorkflowNotificationStore, MySqlWorkflowNotificationStore>();
     builder.Services.AddScoped<IWorkHoursStore, MySqlWorkHoursStore>();
     builder.Services.AddScoped<IEngineeringKitRepository, MySqlEngineeringKitRepository>();
+    builder.Services.AddScoped<IMaterialBrandRepository, MySqlMaterialBrandRepository>();
     builder.Services.AddScoped<IMaterialRelationRepository, MySqlMaterialRelationRepository>();
     builder.Services.AddScoped<IProgramTemplateRepository, MySqlProgramTemplateRepository>();
     builder.Services.AddScoped<IValidationPlanRepository, MySqlValidationPlanRepository>();
@@ -145,6 +150,7 @@ else
     builder.Services.AddSingleton<IWorkflowNotificationStore, InMemoryWorkflowNotificationStore>();
     builder.Services.AddSingleton<IWorkHoursStore, InMemoryWorkHoursStore>();
     builder.Services.AddSingleton<IEngineeringKitRepository, InMemoryEngineeringKitRepository>();
+    builder.Services.AddSingleton<IMaterialBrandRepository, InMemoryMaterialBrandRepository>();
     builder.Services.AddSingleton<IMaterialRelationRepository, InMemoryMaterialRelationRepository>();
     builder.Services.AddSingleton<IProgramTemplateRepository, InMemoryProgramTemplateRepository>();
     builder.Services.AddSingleton<IValidationPlanRepository, InMemoryValidationPlanRepository>();
@@ -180,9 +186,9 @@ builder.Services.AddSingleton<IValidationPlanTextRecognitionService, WindowsVali
 builder.Services.AddScoped<IPdfReleaseStampProcessor, PdfReleaseStampProcessor>();
 builder.Services.AddScoped<IServerPreviewConverter>(provider => new SolidWorksServerPreviewConverter(
     provider.GetRequiredService<IOptions<PdmPreviewWorkerOptions>>(),
-    provider.GetRequiredService<IPdmRepository>(), pdfReleaseStamp: provider.GetRequiredService<IPdfReleaseStampProcessor>()));
+    provider.GetRequiredService<IPdmRepository>(), pdfReleaseStamp: provider.GetRequiredService<IPdfReleaseStampProcessor>(), storageOptions: provider.GetRequiredService<IOptions<PdmStorageOptions>>()));
 builder.Services.AddScoped<IAssemblyPreviewConverter>(provider => new SolidWorksServerPreviewConverter(
-    provider.GetRequiredService<IOptions<PdmPreviewWorkerOptions>>(), provider.GetRequiredService<IPdmRepository>()));
+    provider.GetRequiredService<IOptions<PdmPreviewWorkerOptions>>(), provider.GetRequiredService<IPdmRepository>(), storageOptions: provider.GetRequiredService<IOptions<PdmStorageOptions>>()));
 builder.Services.AddScoped<IReleasePackagePublisher, AtomicReleasePackagePublisher>();
 builder.Services.AddSingleton<ICrmCredentialProtector, DataProtectionCrmCredentialProtector>();
 builder.Services.AddSingleton<IU9SecretProtector, DataProtectionU9SecretProtector>();
@@ -200,6 +206,7 @@ builder.Services.AddScoped<ProjectCopyService>();
 builder.Services.AddScoped<ReleaseItemCommentService>();
 builder.Services.AddScoped<CrmCustomerIntegrationService>();
 builder.Services.AddScoped<MaterialService>();
+builder.Services.AddScoped<MaterialBrandService>();
 builder.Services.AddScoped<MaterialAttachmentService>();
 builder.Services.AddScoped<BomFileService>();
 builder.Services.AddScoped<StandardLibraryService>();
@@ -221,6 +228,8 @@ builder.Services.AddScoped<ProgramTemplateService>();
 builder.Services.AddScoped<ProjectFileService>();
 builder.Services.AddScoped<IValidationPlanFileArchive, ValidationPlanFileArchive>();
 builder.Services.AddScoped<ControlledDocumentRecycleService>();
+builder.Services.AddScoped<IArchiveRecycleStore>(provider => (IArchiveRecycleStore)provider.GetRequiredService<IPdmRepository>());
+builder.Services.AddScoped<ArchiveRecycleService>();
 builder.Services.AddScoped<ProjectContentResetService>();
 builder.Services.AddScoped<BomHeaderService>();
 builder.Services.AddScoped<ValidationPlanService>();
@@ -298,7 +307,7 @@ builder.Services.AddHostedService<MaterialU9SyncBatchHostedService>();
 builder.Services.AddHostedService<MaterialU9PendingSyncSeederHostedService>();
 builder.Services.AddHostedService<BomHeaderAutomaticHostedService>();
 builder.Services.AddHostedService<BomU9AutomationRetryHostedService>();
-builder.Services.AddHostedService<ProjectFileRecycleCleanupService>();
+// 按全量保留历史文件的约定，不再自动清除项目文件回收站的版本记录及实体。
 builder.Services.AddHostedService<ControlledDocumentRecycleCleanupService>();
 builder.Services.AddHostedService<ReleasePreviewRetryHostedService>();
 builder.Services.AddHostedService<ReleasePublishingRetryHostedService>();
@@ -374,6 +383,16 @@ builder.Services.AddResponseCompression(options =>
 });
 
 var app = builder.Build();
+if (args.Contains("--storage-backup-plan", StringComparer.OrdinalIgnoreCase))
+{
+    await using var scope = app.Services.CreateAsyncScope();
+    var administration = scope.ServiceProvider.GetRequiredService<ServerStorageAdministration>();
+    var plan = await scope.ServiceProvider.GetRequiredService<StorageBackupPlanner>().BuildAsync(await administration.ReadAsync(CancellationToken.None), CancellationToken.None,
+        includeTableCounts: args.Contains("--storage-backup-table-counts", StringComparer.OrdinalIgnoreCase), verifyReferences: true);
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
+    return;
+}
+app.MapServerStorageEndpoints();
 app.UseResponseCompression();
 // 固定内存模式的启用时点；不能等首次打开生产工作台才开始计算新发布范围。
 if (!string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgnoreCase))
@@ -463,6 +482,7 @@ app.MapStandardStructureEndpoints();
 app.MapBrowserCadArchives();
 app.MapEngineeringKitEndpoints();
 app.MapMaterialRelationEndpoints();
+app.MapMaterialBrandEndpoints();
 app.MapPdmBomHeaderEndpoints();
 app.MapProgramTemplateEndpoints();
 app.MapProjectFileEndpoints();

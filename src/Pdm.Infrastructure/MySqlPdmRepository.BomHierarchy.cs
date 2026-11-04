@@ -14,7 +14,7 @@ public sealed partial class MySqlPdmRepository
         var items = (await connection.QueryAsync<BomRow>(new CommandDefinition("""
             SELECT id, project_id, bom_kind, sequence_no, drawing_number, name, quantity, unit, material, specification, remark, brand, surface_treatment, heat_treatment, weight, is_wear_part, impact_stage, inventory_replacement_material_code, revision_label, is_complete,
                    source_document_id, source_configuration, source_instance_path, parent_drawing_number,
-                   engineering_kit_reference_id,engineering_kit_id,engineering_kit_revision_id,engineering_kit_code,engineering_kit_version_no,engineering_kit_component_id,engineering_kit_component_optional,
+                   engineering_kit_reference_id,engineering_kit_id,engineering_kit_revision_id,engineering_kit_code,engineering_kit_version_no,engineering_kit_component_id,engineering_kit_component_optional,relation_allocations_json,engineering_kit_relation_allocations_json,is_summary_quantity,
                    item_source, is_manually_overridden, is_pending_removal, is_pending_classification, is_manual_unmatched, is_manually_retained, is_manually_excluded, is_release_excluded, release_exclusion_reason,
                    reconciliation_status, reconciliation_note, reconciliation_updated_by, reconciliation_updated_at, deleted_at, deleted_by, delete_reason, property_writeback_status
             FROM bom_item WHERE project_id IN @ProjectIds AND bom_kind IN ('Standard','NonStandard','Electrical') ORDER BY sequence_no

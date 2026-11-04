@@ -14,6 +14,7 @@ public sealed class PdmBootstrapHostedService(
         await using var scope = serviceProvider.CreateAsyncScope();
         var migrationRunner = scope.ServiceProvider.GetRequiredService<MySqlMigrationRunner>();
         await migrationRunner.RunAsync(cancellationToken);
+        await scope.ServiceProvider.GetRequiredService<ServerStorageAdministration>().InitializeAsync(cancellationToken);
 
         var repository = scope.ServiceProvider.GetRequiredService<IPdmRepository>();
         foreach (var project in (await repository.ListProjectsAsync(cancellationToken)).Where(item => item.ParentProjectId is null))

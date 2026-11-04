@@ -70,6 +70,13 @@ try {
     }
 
     Copy-Item -Path (Join-Path $apiSource '*') -Destination $apiTarget -Recurse -Force
+    # Keep installed bindings, certificates and database options; published defaults are not runtime configuration.
+    foreach ($configurationName in @('appsettings.json', 'appsettings.Production.json')) {
+        $installedConfiguration = Join-Path (Join-Path $backupRoot 'api') $configurationName
+        if (Test-Path -LiteralPath $installedConfiguration) {
+            Copy-Item -LiteralPath $installedConfiguration -Destination (Join-Path $apiTarget $configurationName) -Force
+        }
+    }
     if (-not $DeferDesktopClient) {
         Copy-Item -Path (Join-Path $clientSource '*') -Destination $clientTarget -Recurse -Force
     }

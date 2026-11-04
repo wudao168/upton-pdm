@@ -43,6 +43,8 @@ public sealed partial class PdmAddin
         var workingManifest = ReconcileRequestedWorkingArchives(context.Key, context.Value, latest, requiredDrawings);
         workingManifest = await ReconcileStoredWorkingMembershipAsync(context.Key, workingManifest, latest, requiredDrawings);
         var documents = (await apiClient.GetDocumentsAsync(projectId, lifetime.Token)).ToDictionary(document => document.Id);
+        var latestById = latest.Files.ToDictionary(file => file.DocumentId);
+        var committedChildren = new Dictionary<Guid, ControlledOpenFileDto>();
         var loadedDocuments = ((application.GetDocuments() as Array)?.OfType<IModelDoc2>() ?? Enumerable.Empty<IModelDoc2>())
             .Select(document => new { Document = document, Path = document.GetPathName() }).ToArray();
         var localChanges = false;
@@ -72,6 +74,15 @@ public sealed partial class PdmAddin
                 && selected.Any(item => item.Node.DocumentId == file.DocumentId)) editableAssemblyIds.Add(file.DocumentId);
             if (draft != null && !draft.Closed && !verifiedDraft)
                 throw new InvalidOperationException("当前工作副本的编辑恢复记录与路径或版本不一致，已保留原记录和窗口，请核对后再获取权限：" + file.FileName);
+            if (!requestedIds.Contains(file.DocumentId) && latestById.TryGetValue(file.DocumentId, out var stored)
+                && string.Equals(file.FileName, stored.FileName, StringComparison.OrdinalIgnoreCase)
+                && PathsEqual(path, ControlledReferenceMaterializer.LocalPath(context.Key, stored))
+                && WorkingConfigurationMatches(file, stored) && WorkingReuseCommittedMemoryMatches(path, stored))
+            {
+                committedChildren.Add(file.DocumentId, stored);
+                LogOperation("获取总装权限复用已确认的子件存档内存状态，保留原磁盘基准：" + file.FileName);
+                continue;
+            }
             if (!changed && !unsavedEdit) continue;
             localChanges = true;
             if (!verifiedDraft && !selectedAssemblyEdit)
@@ -86,8 +97,22 @@ public sealed partial class PdmAddin
         }
         var workingScope = WorkingAcquisitionScope(workingManifest, requiredDrawings);
         var latestScope = WorkingAcquisitionScope(latest, requiredDrawings);
-        if (!await WorkingReuseStoredSourceManifestsMatchAsync(workingScope, latestScope))
+        // This projection is only for comparing the already-committed in-session
+        // content. Disk bindings and the physical working manifest stay unchanged.
+        var comparisonScope = WithWorkingFiles(workingScope, workingScope.Files.Select(file =>
+            committedChildren.TryGetValue(file.DocumentId, out var committed) ? committed : file).ToArray());
+        if (!await WorkingReuseStoredSourceManifestsMatchAsync(comparisonScope, latestScope))
             return CannotReuse("工作基准与服务器不一致：" + await WorkingReuseVerifiedDifferencesAsync(workingScope, latestScope));
+        void VerifyCommittedChildren()
+        {
+            foreach (var committed in committedChildren.Values)
+            {
+                var source = workingManifest.Files.Single(file => file.DocumentId == committed.DocumentId);
+                var path = ControlledReferenceMaterializer.LocalPath(context.Key, source);
+                if (!WorkingReuseBindingMatches(path, projectId, source) || !WorkingReuseCommittedMemoryMatches(path, committed))
+                    throw new InvalidOperationException("已存档的子件状态在获取期间发生变化，已保留窗口、文件及现有权限，尚未解锁总装：" + committed.FileName);
+            }
+        }
         workingManifest = await IncludeVerifiedInsertedPartsAsync(context.Key, workingManifest, editableAssemblyIds, documents);
         var inserted = workingManifest.Files.Where(file => !latest.Files.Any(existing => existing.DocumentId == file.DocumentId)).ToArray();
         var paths = latest.Files.ToDictionary(file => file.DocumentId,
@@ -128,6 +153,7 @@ public sealed partial class PdmAddin
 
         // Only requested documents gain permissions. Existing drafts, unrelated file
         // attributes and the loaded root remain untouched; never retire this context.
+        VerifyCommittedChildren();
         foreach (var item in selected.GroupBy(item => item.Node.DocumentId.Value).Select(group => group.First()))
         {
             var id = item.Node.DocumentId.Value;
@@ -169,6 +195,7 @@ public sealed partial class PdmAddin
         foreach (var added in inserted)
             if ((await apiClient.GetVersionsAsync(added.DocumentId, lifetime.Token, 1)).FirstOrDefault()?.Id != added.VersionId)
                 throw new InvalidOperationException("获取权限期间新增零件的服务器版本已变化，装配和已获取的权限均保留，尚未解锁总装：" + added.FileName);
+        VerifyCommittedChildren();
         controlledOpenManifests[context.Key] = workingManifest;
         foreach (var item in selected.GroupBy(item => item.Node.DocumentId.Value).Select(group => group.First()))
         {

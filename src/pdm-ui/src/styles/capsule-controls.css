@@ -1,0 +1,52 @@
+/* Non-button action triggers use the same capsule tiers as ordinary buttons. */
+@layer pdm-button-sizing {
+  :root body .pdm-more-actions.pdm-more-actions > summary,
+  :root body :is(a.pdm-primary-action,a.pdm-secondary-action,a.el-button) {
+    box-sizing:border-box !important; display:inline-flex !important;
+    height:28px !important; min-height:28px !important; max-height:28px !important;
+    align-items:center !important; justify-content:center !important;
+    border-radius:999px !important; padding:0 8px !important;
+    font-family:var(--pdm-font-ui) !important; font-size:13px !important; font-weight:400 !important; line-height:18px !important;
+    text-align:center !important; white-space:nowrap;
+  }
+  :root body :is(table,.el-table,.pdm-row-actions) .pdm-more-actions.pdm-more-actions > summary,
+  :root body :is(table,.el-table,.pdm-row-actions) :is(a.pdm-primary-action,a.pdm-secondary-action,a.el-button),
+  :root body nav[aria-label*="分页"] > button {
+    height:24px !important; min-height:24px !important; max-height:24px !important; font-size:12px !important;
+    border-radius:999px !important;
+  }
+  :root body .pdm-bom-summary-actions > label.pdm-bom-multiplier-control {
+    display:inline-flex !important; width:auto !important; flex:0 0 auto !important; gap:5px !important;
+    padding:0 !important; border:0 !important; border-radius:0 !important;
+    background:transparent !important; box-shadow:none !important; color:var(--pdm-text) !important;
+  }
+  :root body label.pdm-bom-multiplier-control > input.pdm-bom-multiplier {
+    box-sizing:border-box !important; width:50px !important; min-width:50px !important; max-width:50px !important;
+    height:28px !important; min-height:28px !important; max-height:28px !important;
+    flex:0 0 50px !important; padding:0 5px !important;
+    border:1px solid var(--pdm-border) !important; border-radius:999px !important;
+    background:var(--pdm-surface) !important; color:var(--pdm-text) !important;
+    text-align:center !important; font-size:13px !important; font-weight:400 !important;
+  }
+  :root body label.pdm-bom-multiplier-control > input.pdm-bom-multiplier:focus-visible { outline:2px solid var(--pdm-theme-accent); outline-offset:1px; }
+  :root body label.pdm-bom-multiplier-control > input.pdm-bom-multiplier[readonly]:not(:disabled) { cursor:pointer; }
+  :root body button.pdm-material-relation-none-button {
+    background:var(--pdm-action-delete) !important; color:#fff !important;
+    border-color:var(--pdm-action-delete) !important; outline:0 !important;
+  }
+  :root body button.pdm-material-relation-clear-button,
+  :root body button.pdm-bom-relation-action {
+    background:var(--pdm-theme-accent) !important; color:var(--pdm-on-accent) !important;
+    border-color:var(--pdm-theme-accent) !important; outline:0 !important;
+  }
+  :root body button:is(.pdm-material-relation-clear-button,.pdm-bom-relation-action):hover:not(:disabled) { background:var(--pdm-theme-accent-hover) !important; }
+  :root body button:is(.pdm-material-relation-none-button,.pdm-material-relation-clear-button):focus-visible { outline:2px solid var(--pdm-theme-accent) !important; outline-offset:1px; }
+  :root body .production-workbench__lines .production-workbench__table-wrap button.production-workbench__schedule-select {
+    display:inline-block !important; width:auto !important; min-width:0 !important; max-width:100% !important;
+    height:auto !important; min-height:0 !important; max-height:none !important;
+    margin:0 !important; padding:0 !important; border:0 !important; border-radius:0 !important; outline:0 !important;
+    background:transparent !important; box-shadow:none !important; color:inherit !important;
+    font-family:inherit !important; font-size:inherit !important; font-weight:700 !important; line-height:inherit !important; text-align:inherit !important;
+  }
+  :root body .production-workbench__lines .production-workbench__schedule-select:focus-visible { outline:2px solid var(--pdm-theme-accent) !important; outline-offset:1px; }
+}

@@ -45,6 +45,13 @@ public sealed class MySqlProjectNameplateRepository(IOptions<PdmDatabaseOptions>
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private const string TemplateKey = "project_nameplate_template";
+    public async Task<IReadOnlyList<ProjectNameplate>> ListAsync(IReadOnlyCollection<Guid> projectIds, CancellationToken ct)
+    {
+        if (projectIds.Count == 0) return [];
+        await using var connection = new MySqlConnection(options.Value.ConnectionString);
+        var payloads = await connection.QueryAsync<string>(new CommandDefinition("SELECT payload_json FROM project_nameplate WHERE project_id IN @ProjectIds", new { ProjectIds = projectIds }, cancellationToken: ct));
+        return payloads.Select(payload => JsonSerializer.Deserialize<ProjectNameplate>(payload, JsonOptions)!).ToArray();
+    }
     public async Task<ProjectNameplate?> FindAsync(Guid projectId, CancellationToken ct)
     {
         await using var connection = new MySqlConnection(options.Value.ConnectionString);

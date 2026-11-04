@@ -5,12 +5,25 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
 
-public sealed class MaterialRelationService(
+public sealed partial class MaterialRelationService(
     IMaterialRelationRepository relations,
     IMaterialRepository materials,
     IPdmRepository repository,
-    TimeProvider timeProvider, IStandardLibraryRepository? standardLibrary = null) : IMaterialRelationReleaseGuard
+    TimeProvider timeProvider, IStandardLibraryRepository? standardLibrary = null, IEngineeringKitRepository? kits = null) : IMaterialRelationReleaseGuard
 {
+    public async Task<IReadOnlyList<MaterialRelationMainMaterial>> SearchMainOptionsAsync(string? query, string actor, UserRole role, CancellationToken ct)
+    {
+        await RequireAsync(actor, role, PermissionCodes.MaterialRelationManage, ct);
+        var result = (await materials.ListMaterialsAsync(query, null, false, 100, ct))
+            .Where(material => !material.IsArchived && material.ApprovalStatus == MaterialApprovalStatus.Approved)
+            .Select(material => new MaterialRelationMainMaterial(material.Id, material.MaterialCode, material.Name, material.Specification, material.Brand, material.Remark)).ToList();
+        if (kits is not null)
+            result.AddRange((await kits.ListAsync(true, ct)).Where(kit => kit.IsActive && kit.CurrentReleasedRevision is not null
+                && (string.IsNullOrWhiteSpace(query) || new[] { kit.Code, kit.Name, kit.Model, kit.Brand }.Any(value => value?.Contains(query.Trim(), StringComparison.OrdinalIgnoreCase) == true)))
+                .Select(KitMain));
+        return result.OrderBy(main => main.MaterialCode).Take(100).ToArray();
+    }
+
     public async Task<IReadOnlyList<MaterialRelationTemplate>> ListTemplatesAsync(bool includeDraft, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequireAsync(actor, role, PermissionCodes.MaterialRelationView, cancellationToken);
@@ -34,8 +47,8 @@ public sealed class MaterialRelationService(
     public async Task<IReadOnlyList<StandardLibraryCategory>> AssignMainCategoryAsync(Guid materialId, Guid categoryId, string actor, UserRole role, CancellationToken ct)
     {
         await RequireAsync(actor, role, PermissionCodes.MaterialRelationManage, ct);
-        var material = await RequireApprovedMaterialAsync(materialId, "主物料", ct);
-        if (!material.U9SyncConfirmed) throw new PdmRuleException("主料尚未完成U9C同步，请先完成同步后补选标准物料分类。");
+        var (main, syncReady) = await RequireMainAsync(materialId, ct);
+        if (!syncReady) throw new PdmRuleException("主料尚未完成U9C同步，请先完成同步后补选标准物料分类。");
         if (standardLibrary is null) throw new PdmRuleException("标准物料分类服务尚未就绪，请联系管理员。");
         var current = await MainCategoriesAsync(materialId, ct);
         if (current.Count > 0)
@@ -46,6 +59,13 @@ public sealed class MaterialRelationService(
         var category = await standardLibrary.FindCategoryAsync(categoryId, ct);
         if (category is null || !category.IsActive || StandardLibraryDefaults.IsUncategorized(category))
             throw new PdmRuleException("请选择有效的标准物料分类，不能选择未分类或已停用分类。");
+        if (main.IsEngineeringKit)
+        {
+            var kit = (await kits!.FindAsync(materialId, ct))!;
+            await kits.MoveCategoryAsync(kit.Id, category.Id, kit.RowVersion, actor, timeProvider.GetUtcNow(), ct);
+            await AuditAsync(actor, "material-relation.category.assign", materialId, $"套件收录标准物料分类：{category.Name}", ct);
+            return await MainCategoriesAsync(materialId, ct);
+        }
         await standardLibrary.AddMembershipsAsync([new(category.Id, materialId, actor, timeProvider.GetUtcNow())], ct);
         foreach (var value in (await standardLibrary.ListCategoriesAsync(true, ct)).Where(StandardLibraryDefaults.IsUncategorized))
             await standardLibrary.RemoveMembershipAsync(value.Id, materialId, ct);
@@ -56,6 +76,8 @@ public sealed class MaterialRelationService(
     private async Task<IReadOnlyList<StandardLibraryCategory>> MainCategoriesAsync(Guid materialId, CancellationToken ct)
     {
         if (standardLibrary is null) return [];
+        if (kits is not null && await kits.FindAsync(materialId, ct) is { } kit)
+            return (await standardLibrary.ListCategoriesAsync(false, ct)).Where(category => category.Id == kit.StandardLibraryCategoryId && !StandardLibraryDefaults.IsUncategorized(category)).ToArray();
         var ids = (await standardLibrary.ListMembershipsAsync(ct)).Where(item => item.MaterialId == materialId).Select(item => item.CategoryId).ToHashSet();
         return (await standardLibrary.ListCategoriesAsync(false, ct)).Where(item => ids.Contains(item.Id) && !StandardLibraryDefaults.IsUncategorized(item)).ToArray();
     }
@@ -65,8 +87,10 @@ public sealed class MaterialRelationService(
         if (standardLibrary is null || values.Count == 0) return values;
         var categories = (await standardLibrary.ListCategoriesAsync(false, ct)).Where(item => !StandardLibraryDefaults.IsUncategorized(item)).ToDictionary(item => item.Id);
         var memberships = (await standardLibrary.ListMembershipsAsync(ct)).ToLookup(item => item.MaterialId);
-        MaterialRelationMainMaterial Enrich(MaterialRelationMainMaterial main) => main with { StandardLibraryCategories = memberships[main.MaterialId]
-            .Select(link => categories.GetValueOrDefault(link.CategoryId)).OfType<StandardLibraryCategory>().OrderBy(category => category.SortOrder).ThenBy(category => category.Name).ToArray() };
+        var kitById = kits is null ? new Dictionary<Guid, EngineeringKit>() : (await kits.ListAsync(false, ct)).ToDictionary(kit => kit.Id);
+        MaterialRelationMainMaterial Enrich(MaterialRelationMainMaterial main) => kitById.TryGetValue(main.MaterialId, out var kit)
+            ? main with { IsEngineeringKit = true, StandardLibraryCategories = kit.StandardLibraryCategoryId is Guid categoryId && categories.TryGetValue(categoryId, out var category) ? [category] : [] }
+            : main with { StandardLibraryCategories = memberships[main.MaterialId].Select(link => categories.GetValueOrDefault(link.CategoryId)).OfType<StandardLibraryCategory>().OrderBy(category => category.SortOrder).ThenBy(category => category.Name).ToArray() };
         return values.Select(item =>
         {
             var enriched = item with {
@@ -88,10 +112,10 @@ public sealed class MaterialRelationService(
         var mainRows = new List<MaterialRelationMainMaterial>();
         foreach (var id in mainIds)
         {
-            var material = await RequireApprovedMaterialAsync(id, "主物料", cancellationToken);
+            var (material, _) = await RequireMainAsync(id, cancellationToken);
             if (templates.FirstOrDefault(item => item.Id != templateId && !item.IsArchived && item.MainMaterials.Concat(item.PublishedMainMaterials).Any(main => main.MaterialId == id)) is { } conflict)
                 throw new PdmConflictException($"主料{material.MaterialCode}已归属配置“{conflict.Name}”，请先调整原配置的主料范围并发布。");
-            mainRows.Add(new(material.Id, material.MaterialCode, material.Name, material.Specification, material.Brand, material.Remark));
+            mainRows.Add(material);
         }
         var main = mainRows[0];
         var name = Required(command.Name, "关联配置名称");
@@ -119,6 +143,7 @@ public sealed class MaterialRelationService(
                 if (mainIds.Contains(material.Id)) throw new PdmRuleException($"主物料{material.MaterialCode}不能同时作为本组的关联配件。");
                 if (material.Kind == MaterialKind.Product) throw new PdmRuleException($"成品“{material.MaterialCode}”不能作为BOM配件。");
                 if (option.QuantityPerSet <= 0) throw new PdmRuleException($"配件“{material.MaterialCode}”的每套数量必须大于0。");
+                U9UnitCatalog.RequireWholeQuantity(option.QuantityPerSet, material.UnitCode, $"配件“{material.MaterialCode}”的每套数量");
                 options.Add(new MaterialRelationOption(Guid.NewGuid(), material.Id, material.MaterialCode, material.Name, material.Kind, material.UnitCode,
                     option.QuantityMode, option.QuantityPerSet, option.IsDefault, option.SortOrder == 0 ? optionIndex + 1 : option.SortOrder,
                     string.IsNullOrWhiteSpace(option.SelectionAdvice) ? null : option.SelectionAdvice.Trim(), material.Specification, material.Brand));
@@ -142,24 +167,32 @@ public sealed class MaterialRelationService(
             _ = await RequireApprovedMaterialAsync(option.MaterialId, $"配件“{option.MaterialCode}”", cancellationToken);
         foreach (var value in template.MainMaterials)
         {
-            var material = await RequireApprovedMaterialAsync(value.MaterialId, $"主物料{value.MaterialCode}", cancellationToken);
+            var (_, syncReady) = await RequireMainAsync(value.MaterialId, cancellationToken);
             if (standardLibrary is null) continue;
             if ((await MainCategoriesAsync(value.MaterialId, cancellationToken)).Count == 0)
                 throw new PdmRuleException($"主料{value.MaterialCode}尚未归入标准物料分类，请由标准化人员补选分类后再发布关联配置。");
-            if (!material.U9SyncConfirmed) throw new PdmRuleException($"主料{value.MaterialCode}尚未完成U9C同步，请完成同步后再发布关联配置。");
+            if (!syncReady) throw new PdmRuleException($"主料{value.MaterialCode}尚未完成U9C同步，请完成同步后再发布关联配置。");
         }
         var published = await relations.PublishAsync(templateId, revisionId, expectedRowVersion, actor, timeProvider.GetUtcNow(), cancellationToken);
         await AuditAsync(actor, "material-relation.publish", templateId, $"{template.MainMaterialCode} · V{published.PublishedRevision?.Version}", cancellationToken);
         return (await WithCategoriesAsync([published], cancellationToken)).Single();
     }
 
-    public async Task<MaterialRelationCompleteness> GetCompletenessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<MaterialRelationCompleteness> GetCompletenessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken, Guid? releasePackageId = null)
     {
-        await RequireAsync(actor, role, PermissionCodes.MaterialRelationView, cancellationToken);
+        await RequireAsync(actor, role, releasePackageId.HasValue ? PermissionCodes.ReleaseManage : PermissionCodes.MaterialRelationView, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的查看权限。");
-        return await CalculateCompletenessAsync(projectId, cancellationToken);
+        if (!releasePackageId.HasValue) return await CalculateCompletenessAsync(projectId, cancellationToken);
+        var package = await repository.FindReleasePackageAsync(releasePackageId.Value, cancellationToken) ?? throw new PdmNotFoundException("发布包不存在。");
+        if (package.ProjectId != projectId) throw new UnauthorizedAccessException("无权查看该发布包的关联核对结果。");
+        return await CalculateCompletenessAsync(projectId, cancellationToken, ReleaseItemIds(package));
     }
+
+    internal static IReadOnlyCollection<Guid> ReleaseItemIds(ReleasePackage package) => package.SelectedBomItemIds.Count > 0 || package.ConfirmedRemovedBomItemIds.Count > 0
+        ? package.SelectedBomItemIds.Concat(package.ConfirmedRemovedBomItemIds).Distinct().ToArray()
+        : package.StandardBomSnapshot.Concat(package.NonStandardBomSnapshot).Concat(package.ElectricalBomSnapshot).Concat(package.MechanicalBomSnapshot)
+            .Select(item => item.Id).Distinct().ToArray();
 
     public async Task<MaterialRelationCompleteness> ApplyAsync(Guid projectId, IReadOnlyList<ApplyMaterialRelationsCommand> commands, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -175,11 +208,12 @@ public sealed class MaterialRelationService(
             throw new PdmRuleException("同一主物料行不能重复提交。");
 
         var byKind = await LoadBomByKindAsync(projectId, cancellationToken);
-        var allItems = byKind.Values.SelectMany(item => item).Where(IsActive).ToDictionary(item => item.Id);
+        var activeItems = byKind.Values.SelectMany(item => item).Where(IsActive).ToArray();
         var templates = (await relations.ListTemplatesAsync(false, cancellationToken))
             .Where(item => item.PublishedRevision is not null && !item.IsArchived)
             .SelectMany(item => item.PublishedMainMaterials.Select(main => (main.MaterialCode, Template: item))).ToDictionary(item => item.MaterialCode, item => item.Template, StringComparer.OrdinalIgnoreCase);
         var existingSelections = (await relations.ListSelectionsAsync(projectId, cancellationToken)).ToArray();
+        var allItems = (await RelationMainsAsync(activeItems, templates.Keys, cancellationToken)).ToDictionary(item => item.Id);
         var selectionsToSave = new Dictionary<Guid, IReadOnlyList<MaterialRelationSelection>>();
         var reviewsToSave = new Dictionary<Guid, IReadOnlyList<MaterialRelationReview>>();
         var affectedKinds = new HashSet<BomKind>();
@@ -190,7 +224,18 @@ public sealed class MaterialRelationService(
             affectedKinds.Add(main.Kind);
             if (!templates.TryGetValue(main.DrawingNumber.Trim(), out var template) || template.PublishedRevision is not { } revision)
                 throw new PdmRuleException($"主物料“{main.DrawingNumber}”尚未发布生效的关联配置。");
-            var choiceByGroup = command.Choices.GroupBy(item => item.GroupId).ToDictionary(group => group.Key, group => group.Last());
+            var allocations = BuildAllocations(main, revision, command);
+            main = main with { RelationAllocations = allocations };
+            allItems[main.Id] = main;
+            foreach (var entry in byKind)
+                for (var index = 0; index < entry.Value.Count; index++)
+                    if (entry.Value[index].Id == main.Id || entry.Value[index].EngineeringKitReferenceId == main.Id)
+                    {
+                        entry.Value[index] = entry.Value[index].Id == main.Id
+                            ? entry.Value[index] with { RelationAllocations = allocations }
+                            : entry.Value[index] with { EngineeringKitRelationAllocations = allocations };
+                        affectedKinds.Add(entry.Key);
+                    }
             var oldForMain = existingSelections.Where(item => item.MainBomItemId == main.Id).ToArray();
             foreach (var old in oldForMain)
                 foreach (var entry in byKind)
@@ -200,23 +245,24 @@ public sealed class MaterialRelationService(
             var savedReviews = new List<MaterialRelationReview>();
             foreach (var group in revision.Groups)
             {
-                var choice = choiceByGroup.GetValueOrDefault(group.Id);
-                var selectedIds = choice?.OptionIds.Distinct().ToArray() ?? [];
-                ValidateChoice(group, selectedIds);
-                if (selectedIds.Length > 0)
+                var choices = allocations.Select(allocation => allocation.Groups.Single(item => item.GroupId == group.Id)).ToArray();
+                var selectedIds = choices.SelectMany(choice => choice.OptionIds).Distinct().ToArray();
+                var reviewed = choices.All(choice => choice.OptionIds.Count > 0 || choice.ConfirmNoAccessory);
+                if (selectedIds.Length > 0 && reviewed)
                     savedReviews.Add(new MaterialRelationReview(projectId, main.Id, revision.Id, group.Id,
                         MaterialRelationReviewDecision.Selected, main.Quantity, null, actor, timeProvider.GetUtcNow()));
-                else if (choice?.ConfirmNoAccessory == true || !group.IsRequired)
+                else if (reviewed)
                     savedReviews.Add(new MaterialRelationReview(projectId, main.Id, revision.Id, group.Id,
                         MaterialRelationReviewDecision.NoAccessory, main.Quantity,
-                        string.IsNullOrWhiteSpace(choice?.NoAccessoryReason) ? "工程师确认本次无需配套" : choice.NoAccessoryReason.Trim(), actor, timeProvider.GetUtcNow()));
+                        string.Join("；", choices.Select(choice => string.IsNullOrWhiteSpace(choice.NoAccessoryReason)
+                            ? "工程师确认本次无需配套" : choice.NoAccessoryReason.Trim()).Distinct()), actor, timeProvider.GetUtcNow()));
                 foreach (var optionId in selectedIds)
                 {
                     var option = group.Options.FirstOrDefault(item => item.Id == optionId)
                         ?? throw new PdmRuleException($"配件组“{group.Name}”包含无效选项。");
                     var material = await RequireApprovedMaterialAsync(option.MaterialId, $"配件“{option.MaterialCode}”", cancellationToken);
-                    var expected = option.QuantityMode == MaterialRelationQuantityMode.PerMainQuantity
-                        ? main.Quantity * option.QuantityPerSet : option.QuantityPerSet;
+                    var expected = AllocationQuantity(allocations, group.Id, option);
+                    U9UnitCatalog.RequireWholeQuantity(expected, material.UnitCode, $"配件“{material.MaterialCode}”的数量");
                     var old = oldForMain.FirstOrDefault(item => item.GroupId == group.Id && item.OptionId == option.Id);
                     var accessoryId = old?.AccessoryBomItemId ?? Guid.NewGuid();
                     var kind = ToBomKind(material.Kind);
@@ -230,9 +276,12 @@ public sealed class MaterialRelationService(
                         SurfaceTreatment = material.SurfaceTreatment,
                         Weight = material.Weight.HasValue ? material.Weight.Value.ToString("0.####") : null,
                         Source = "MaterialRelation",
+                        RelationMainBomItemId = main.Id,
                         IsManuallyRetained = true,
                         ReconciliationStatus = "RelationGenerated",
-                        ReconciliationNote = $"由工程师按关联配置V{revision.Version}选配加入，来源主物料行{main.Sequence}。",
+                        ReconciliationNote = $"由工程师按关联配置V{revision.Version}选配加入，来源主物料行{main.Sequence}。"
+                            + string.Join("；", allocations.Where(allocation => allocation.Groups.Any(choice => choice.GroupId == group.Id && choice.OptionIds.Contains(option.Id)))
+                                .Select(allocation => $"{allocation.Name}：{allocation.Quantity:0.####}")),
                         ReconciliationUpdatedBy = actor,
                         ReconciliationUpdatedAt = timeProvider.GetUtcNow()
                     });
@@ -259,7 +308,7 @@ public sealed class MaterialRelationService(
                 .Where(item => item is not null)
                 .Select(item => item!)
                 .ToArray();
-            var fingerprint = CalculateRelationFingerprint(finalItems[entry.Key], accessories, entry.Value[0].RevisionId);
+            var fingerprint = CalculateRelationFingerprint(finalItems.GetValueOrDefault(entry.Key) ?? allItems[entry.Key], accessories, entry.Value[0].RevisionId);
             reviewsToSave[entry.Key] = entry.Value.Select(review => review with { BomFingerprint = fingerprint }).ToArray();
         }
         var audit = new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "material-relation.apply", nameof(BomItem), projectId.ToString(), $"主物料{commands.Count}项");
@@ -277,26 +326,49 @@ public sealed class MaterialRelationService(
         return await CalculateCompletenessAsync(projectId, cancellationToken);
     }
 
-    public async Task EnsureCompleteAsync(Guid projectId, CancellationToken cancellationToken)
+    public Task EnsureCompleteAsync(Guid projectId, CancellationToken cancellationToken) =>
+        EnsureCompleteAsync(projectId, null, cancellationToken);
+
+    public async Task EnsureCompleteAsync(Guid projectId, IReadOnlyCollection<Guid>? selectedBomItemIds, CancellationToken cancellationToken)
     {
-        _ = await CalculateCompletenessAsync(projectId, cancellationToken);
+        if (selectedBomItemIds is { Count: 0 }) return;
+        var result = await CalculateCompletenessAsync(projectId, cancellationToken, selectedBomItemIds);
+        var mains = result.MainMaterials.Where(main => !main.IsComplete).ToArray();
+        if (mains.Length == 0) return;
+        var pending = mains
+            .SelectMany(main => main.Groups.Where(group => !group.IsComplete)
+                .Select(group => $"第{main.BomSequence}行 {main.MainMaterialCode} {main.MainMaterialName} / {group.GroupName}：{group.Status}"));
+        throw new PdmRuleException("关联物料未处理，不能发布。请在BOM“关联物料”中选择配件或确认“无需配套”，保存核对结果后重试。未处理项："
+            + string.Join("；", pending));
     }
 
-    private async Task<MaterialRelationCompleteness> CalculateCompletenessAsync(Guid projectId, CancellationToken cancellationToken)
+    private async Task<MaterialRelationCompleteness> CalculateCompletenessAsync(Guid projectId, CancellationToken cancellationToken,
+        IReadOnlyCollection<Guid>? selectedBomItemIds = null)
     {
         var byKind = await LoadBomByKindAsync(projectId, cancellationToken);
         var all = byKind.Values.SelectMany(item => item).Where(IsActive).ToArray();
         var itemById = all.ToDictionary(item => item.Id);
+        var selections = (await relations.ListSelectionsAsync(projectId, cancellationToken)).ToArray();
+        var scope = selectedBomItemIds?.ToHashSet();
+        if (scope is not null)
+        {
+            scope.UnionWith(await relations.ListRelatedMainBomItemIdsAsync(projectId, scope, cancellationToken));
+            scope.UnionWith(all.Where(item => scope.Contains(item.Id) && item.EngineeringKitReferenceId.HasValue)
+                .Select(item => item.EngineeringKitReferenceId!.Value).ToArray());
+        }
+        var candidates = scope is null ? all : all.Where(item => scope.Contains(item.Id)
+            || item.EngineeringKitReferenceId is Guid reference && scope.Contains(reference)).ToArray();
         var templates = (await relations.ListTemplatesAsync(false, cancellationToken))
             .Where(item => item.PublishedRevision is not null && !item.IsArchived)
             .SelectMany(item => item.PublishedMainMaterials.Select(main => (main.MaterialCode, Template: item))).ToDictionary(item => item.MaterialCode, item => item.Template, StringComparer.OrdinalIgnoreCase);
-        var selections = (await relations.ListSelectionsAsync(projectId, cancellationToken)).ToArray();
         var reviews = (await relations.ListReviewsAsync(projectId, cancellationToken)).ToArray();
         var checks = new List<MaterialRelationMainCheck>();
-        foreach (var main in all.Where(item => templates.ContainsKey(item.DrawingNumber.Trim())))
+        foreach (var main in (await RelationMainsAsync(candidates, templates.Keys, cancellationToken))
+            .Where(item => templates.ContainsKey(item.DrawingNumber.Trim()) && (scope is null || scope.Contains(item.Id))))
         {
             var template = templates[main.DrawingNumber.Trim()];
             var revision = template.PublishedRevision!;
+            var allocations = main.RelationAllocations.Where(allocation => allocation.RevisionId == revision.Id).ToArray();
             var linkedSelections = selections.Where(item => item.MainBomItemId == main.Id && item.RevisionId == revision.Id).ToArray();
             var relationFingerprint = CalculateRelationFingerprint(main,
                 linkedSelections.Select(item => itemById.GetValueOrDefault(item.AccessoryBomItemId))
@@ -314,18 +386,34 @@ public sealed class MaterialRelationService(
                 var status = selected.Length == 0 && review?.Decision == MaterialRelationReviewDecision.NoAccessory
                     ? "已确认无需"
                     : ChoiceStatus(group, selected);
+                if (allocations.Length > 0)
+                {
+                    var pending = allocations.FirstOrDefault(allocation => allocation.Quantity <= 0
+                        || !allocation.Groups.Any(choice => choice.GroupId == group.Id && (choice.ConfirmNoAccessory && choice.OptionIds.Count == 0
+                            || choice.OptionIds.Count > 0 && ChoiceStatus(group, choice.OptionIds) == "已选配")));
+                    status = allocations.Sum(allocation => allocation.Quantity) != main.Quantity ? "组合分配数量与主料数量不一致"
+                        : pending is not null ? $"{pending.Name}待核对"
+                        : selected.Length > 0 ? "已选配" : "已确认无需";
+                    var frozenOptions = allocations.SelectMany(allocation => allocation.Groups.Where(choice => choice.GroupId == group.Id))
+                        .SelectMany(choice => choice.OptionIds).Distinct().ToHashSet();
+                    if (!frozenOptions.SetEquals(selected)) status = "组合配件与保存的选配不一致";
+                }
                 if (status == "已选配")
                 {
                     foreach (var selection in linked)
                     {
                         var option = group.Options.FirstOrDefault(item => item.Id == selection.OptionId);
                         if (option is null || !itemById.TryGetValue(selection.AccessoryBomItemId, out var accessory)) { status = "关联配件行不存在"; break; }
-                        var expectedForOption = option.QuantityMode == MaterialRelationQuantityMode.PerMainQuantity ? main.Quantity * option.QuantityPerSet : option.QuantityPerSet;
+                        var expectedForOption = allocations.Length > 0 ? AllocationQuantity(allocations, group.Id, option)
+                            : option.QuantityMode == MaterialRelationQuantityMode.PerMainQuantity ? main.Quantity * option.QuantityPerSet : option.QuantityPerSet;
                         if (!string.Equals(accessory.DrawingNumber.Trim(), option.MaterialCode, StringComparison.OrdinalIgnoreCase)) { status = "关联配件与当前配置不一致"; break; }
                         if (accessory.Quantity != expectedForOption || selection.ExpectedQuantity != expectedForOption) { status = $"数量不匹配，应为{expectedForOption:0.####}"; break; }
                     }
                 }
-                var isComplete = status is "已选配" or "已确认无需" or "可选未选择";
+                if ((U9UnitCatalog.RequiresWholeQuantity(main.Unit) || main.EngineeringKitReferenceId == main.Id)
+                    && (main.Quantity != decimal.Truncate(main.Quantity) || allocations.Any(allocation => allocation.Quantity != decimal.Truncate(allocation.Quantity))))
+                    status = "计件数量必须为整数，请先修正BOM及组合分配";
+                var isComplete = status is "已选配" or "已确认无需";
                 if (isComplete && IsRelationFingerprintStale(review?.BomFingerprint, relationFingerprint))
                 {
                     isComplete = false;
@@ -338,10 +426,10 @@ public sealed class MaterialRelationService(
                     selected.Length > 0 ? null : review?.Reason,
                     selected.Length > 0 ? selectedAudit?.UpdatedBy : review?.UpdatedBy,
                     selected.Length > 0 ? selectedAudit?.UpdatedAt : review?.UpdatedAt,
-                    group.Options));
+                    group.Options) {AccessoryBomItemIds=linked.GroupBy(selection=>selection.OptionId).ToDictionary(group=>group.Key,group=>group.First().AccessoryBomItemId)});
             }
             checks.Add(new MaterialRelationMainCheck(main.Id, main.DrawingNumber, main.Name, main.Quantity, template.Id, revision.Id, revision.Version,
-                groupChecks.All(group => group.IsComplete), groupChecks));
+                groupChecks.All(group => group.IsComplete), groupChecks) { BomSequence = main.Sequence, Allocations = allocations });
         }
         return new MaterialRelationCompleteness(projectId, checks.All(item => item.IsComplete), checks.Count,
             checks.Sum(item => item.Groups.Count(group => !group.IsComplete)), checks);
@@ -358,6 +446,7 @@ public sealed class MaterialRelationService(
         // Only the main row, its accessory rows and the published revision participate; remark, sequence and
         // reconciliation timestamps do not invalidate a review.
         var content = new List<object> { revisionId, RelationContent(main) };
+        if (main.RelationAllocations.Count > 1) content.Add(main.RelationAllocations);
         content.AddRange(accessories.OrderBy(item => item.Id).Select(item => (object)RelationContent(item)));
         var hash = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(content))).ToLowerInvariant();
         return RelationFingerprintPrefix + hash[..40];
@@ -370,8 +459,48 @@ public sealed class MaterialRelationService(
         Material = item.Material ?? "", Specification = item.Specification ?? "", item.Revision,
         Brand = item.Brand ?? "", SurfaceTreatment = item.SurfaceTreatment ?? "",
         HeatTreatment = item.HeatTreatment ?? "", Weight = item.Weight ?? "",
-        item.IsManuallyExcluded, item.IsReleaseExcluded
+        item.IsManuallyExcluded, item.IsReleaseExcluded, item.EngineeringKitReferenceId, item.EngineeringKitRevisionId
     };
+
+    private static IReadOnlyList<MaterialRelationAllocation> BuildAllocations(BomItem main, MaterialRelationRevision revision, ApplyMaterialRelationsCommand command)
+    {
+        var unit = main.EngineeringKitReferenceId == main.Id ? "011" : main.Unit;
+        U9UnitCatalog.RequireWholeQuantity(main.Quantity, unit, $"主料“{main.DrawingNumber}”的数量");
+        var inputs = command.Allocations ?? [new(main.Id, "统一配置", main.Quantity, command.Choices)];
+        foreach (var allocation in inputs) U9UnitCatalog.RequireWholeQuantity(allocation.Quantity, unit, $"主料“{main.DrawingNumber}”的组合数量");
+        if (inputs.Count == 0 || inputs.Any(item => item.Id == Guid.Empty || item.Quantity <= 0 || decimal.Round(item.Quantity, 4) != item.Quantity)
+            || inputs.Select(item => item.Id).Distinct().Count() != inputs.Count)
+            throw new PdmRuleException("组合分配无效：每个组合须有独立标识，数量须大于0并最多保留四位小数。");
+        if (inputs.Sum(item => item.Quantity) != main.Quantity)
+            throw new PdmRuleException($"主料“{main.DrawingNumber}”的组合分配数量合计必须等于{main.Quantity:0.####}。");
+        return inputs.Select((input, index) =>
+        {
+            if (input.Choices.Any(choice => revision.Groups.All(group => group.Id != choice.GroupId)))
+                throw new PdmConflictException("关联配置已发生变化，请重新加载后选择组合。");
+            var groups = revision.Groups.Select(group =>
+            {
+                var choice = input.Choices.LastOrDefault(choice => choice.GroupId == group.Id);
+                var options = choice?.OptionIds.Distinct().ToArray() ?? [];
+                ValidateChoice(group, options);
+                if (options.Length > 0 && choice?.ConfirmNoAccessory == true)
+                    throw new PdmRuleException("同一组合的配件组不能同时选择配件和确认无需配套。");
+                return new MaterialRelationAllocationGroup(group.Id, group.Name, options, choice?.ConfirmNoAccessory == true, choice?.NoAccessoryReason?.Trim())
+                {
+                    Options = group.Options.Where(option => options.Contains(option.Id)).Select(option => new MaterialRelationAllocatedOption(
+                        option.Id, option.MaterialCode, option.MaterialName, option.Specification, option.Brand, option.UnitCode,
+                        option.QuantityMode, option.QuantityPerSet, option.QuantityMode == MaterialRelationQuantityMode.PerMainQuantity
+                            ? input.Quantity * option.QuantityPerSet : option.QuantityPerSet)).ToArray()
+                };
+            }).ToArray();
+            var name = string.IsNullOrWhiteSpace(input.Name) ? $"组合{index + 1}" : input.Name.Trim();
+            if (name.Length > 80) throw new PdmRuleException("组合名称不能超过80个字。");
+            return new MaterialRelationAllocation(input.Id, name, input.Quantity, revision.Id, revision.Version, groups);
+        }).ToArray();
+    }
+
+    private static decimal AllocationQuantity(IReadOnlyList<MaterialRelationAllocation> allocations, Guid groupId, MaterialRelationOption option) =>
+        allocations.Where(allocation => allocation.Groups.Any(choice => choice.GroupId == groupId && choice.OptionIds.Contains(option.Id)))
+            .Sum(allocation => option.QuantityMode == MaterialRelationQuantityMode.PerMainQuantity ? allocation.Quantity * option.QuantityPerSet : option.QuantityPerSet);
 
     private static bool IsRelationFingerprintStale(string? stored, string current) =>
         !string.IsNullOrEmpty(stored)
@@ -386,6 +515,46 @@ public sealed class MaterialRelationService(
         return result;
     }
 
+    private async Task<IReadOnlyList<BomItem>> RelationMainsAsync(IReadOnlyList<BomItem> items, IEnumerable<string> configuredCodes, CancellationToken ct)
+    {
+        var result = items.ToList();
+        if (kits is null) return result;
+        var codes = configuredCodes.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var reference in items.Where(item => item.EngineeringKitReferenceId.HasValue && codes.Contains(item.EngineeringKitCode ?? ""))
+            .GroupBy(item => item.EngineeringKitReferenceId!.Value))
+        {
+            var first = reference.First();
+            var kit = first.EngineeringKitId is Guid kitId ? await kits.FindAsync(kitId, ct) : null;
+            var revision = kit?.Revisions.FirstOrDefault(revision => revision.Id == first.EngineeringKitRevisionId);
+            if (kit is null || revision is null) throw new PdmRuleException($"套件“{first.EngineeringKitCode}”的引用版本不存在，请刷新并核对套件引用。");
+            var quantities = reference.Select(row => {
+                var component = revision.Components.FirstOrDefault(component => component.Id == row.EngineeringKitComponentId);
+                if (component is null || component.Quantity <= 0) throw new PdmRuleException($"套件“{kit.Code}”的子料信息不完整，请通过套件维护重新引用。");
+                return row.Quantity / component.Quantity;
+            }).Distinct().ToArray();
+            if (quantities.Length != 1 || quantities[0] <= 0) throw new PdmRuleException($"套件“{kit.Code}”的子料数量不一致，请通过套件维护调整数量后再核对关联配置。");
+            result.Add(first with { Id = reference.Key, DrawingNumber = kit.Code!, Name = kit.Name, Specification = kit.Model,
+                Quantity = quantities[0], EngineeringKitComponentId = null, Files = null,
+                RelationAllocations = first.EngineeringKitRelationAllocations });
+        }
+        return result;
+    }
+
+    private static MaterialRelationMainMaterial KitMain(EngineeringKit kit) => new(kit.Id, kit.Code!, kit.Name, kit.Model, kit.Brand, kit.Description) { IsEngineeringKit = true };
+
+    private async Task<(MaterialRelationMainMaterial Main, bool SyncReady)> RequireMainAsync(Guid id, CancellationToken ct)
+    {
+        if (await materials.FindMaterialAsync(id, ct) is { } material)
+        {
+            _ = await RequireApprovedMaterialAsync(id, "主物料", ct);
+            return (new(material.Id, material.MaterialCode, material.Name, material.Specification, material.Brand, material.Remark), material.U9SyncConfirmed);
+        }
+        var kit = kits is null ? null : await kits.FindAsync(id, ct);
+        if (kit is null) throw new PdmNotFoundException("主物料或料品套件不存在。");
+        if (!kit.IsActive || kit.CurrentReleasedRevision is null) throw new PdmRuleException($"料品套件“{kit.Code ?? kit.Name}”尚未发布或已停用，不能作为主物料。");
+        return (KitMain(kit), true);
+    }
+
     private async Task<PdmMaterial> RequireApprovedMaterialAsync(Guid materialId, string label, CancellationToken cancellationToken)
     {
         var material = await materials.FindMaterialAsync(materialId, cancellationToken) ?? throw new PdmNotFoundException($"{label}不存在。");
@@ -396,7 +565,7 @@ public sealed class MaterialRelationService(
 
     private static string ChoiceStatus(MaterialRelationGroup group, IReadOnlyCollection<Guid> selected)
     {
-        if (selected.Count == 0) return group.IsRequired ? "待核对" : "可选未选择";
+        if (selected.Count == 0) return "待核对";
         if (group.MaxSelection.HasValue && selected.Count > group.MaxSelection.Value) return "选择数量超过上限";
         if (selected.Any(id => group.Options.All(option => option.Id != id))) return "存在失效选项";
         return "已选配";

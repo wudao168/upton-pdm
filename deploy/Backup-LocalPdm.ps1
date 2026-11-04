@@ -1,102 +1,96 @@
 [CmdletBinding()]
-param(
-    [string]$DestinationRoot
-)
+param([string]$DestinationRoot, [switch]$PlanOnly)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $localRoot = Join-Path $projectRoot '.local'
-$receiptPath = Join-Path $localRoot 'deployment-receipt.json'
-$rootClientPath = Join-Path $localRoot 'secrets\mysql-root-client.ini'
-if (-not (Test-Path -LiteralPath $receiptPath) -or -not (Test-Path -LiteralPath $rootClientPath)) {
-    throw 'PLM deployment receipt or protected MySQL client file is missing.'
+. (Join-Path $PSScriptRoot 'StorageBackup.Common.ps1')
+$plan = Get-PdmStorageBackupPlan $projectRoot
+if ($PlanOnly) {
+    [pscustomobject]@{ status = 'planned'; backupRoot = $plan.backupRoot; database = $plan.database; sources = $plan.sources; references = @($plan.references).Count; issues = $plan.issues; warnings = $plan.warnings; executed = $false } | ConvertTo-Json -Depth 8
+    return
 }
-
-if ([string]::IsNullOrWhiteSpace($DestinationRoot)) {
-    $DestinationRoot = Join-Path $localRoot (Join-Path 'backup' ('full-' + [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss')))
+if ([string]::IsNullOrWhiteSpace($plan.backupRoot)) { throw '备份目标位置尚未确认，请先在系统设置中配置；未开始备份。' }
+$configuredRoot = [IO.Path]::GetFullPath($plan.backupRoot).TrimEnd('\', '/')
+if ($DestinationRoot -and -not [IO.Path]::GetFullPath($DestinationRoot).TrimEnd('\', '/').Equals($configuredRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw '备份目标必须与系统设置一致，请先在系统设置中确认目标地址。'
 }
-$backupRoot = [IO.Path]::GetFullPath($DestinationRoot)
-$allowedRoot = [IO.Path]::GetFullPath((Join-Path $localRoot 'backup')) + [IO.Path]::DirectorySeparatorChar
-if (-not ($backupRoot + [IO.Path]::DirectorySeparatorChar).StartsWith($allowedRoot, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'The backup directory must be under .local\backup.'
+Assert-PdmOrdinaryBackupPath $configuredRoot
+$backupRoot = Join-Path $configuredRoot ('full-' + [DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmssfff'))
+foreach ($source in $plan.sources) {
+    $sourceRoot = [IO.Path]::GetFullPath($source.path).TrimEnd('\', '/')
+    if (($configuredRoot + '\').StartsWith($sourceRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or ($sourceRoot + '\').StartsWith($configuredRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw '备份目录与源文件目录存在包含关系，已停止，防止递归复制。'
+    }
 }
-if (Test-Path -LiteralPath $backupRoot) { throw "The backup directory already exists: $backupRoot" }
-
-$receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$receipt = Get-Content -LiteralPath (Join-Path $localRoot 'deployment-receipt.json') -Raw | ConvertFrom-Json
 $mysqlDump = Join-Path $receipt.mysqlHome 'bin\mysqldump.exe'
-if (-not (Test-Path -LiteralPath $mysqlDump)) {
-    throw 'PLM MySQL client binaries are missing.'
-}
-
-New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+$rootClientPath = Join-Path $localRoot 'secrets\mysql-root-client.ini'
+if (-not (Test-Path -LiteralPath $mysqlDump) -or -not (Test-Path -LiteralPath $rootClientPath)) { throw '缺少数据库备份程序或受保护的连接配置。' }
+if (Test-Path -LiteralPath $backupRoot) { throw '本次备份目录已存在，请重新执行以创建独立批次。' }
+$serviceWasRunning = (Get-Service -Name 'UptonPdmApi').Status -eq 'Running'
+$serviceStopped = $false
+$workerPause = Join-Path $localRoot 'cad-archive-worker\storage-roots.txt.pause'
+$workerPaused = $workerPause + 'd'
+$pauseRequested = $false
 try {
-$secretPath = Join-Path $localRoot 'secrets\pdm-secrets.json'
-$dotnet = Join-Path $projectRoot '.dotnet\dotnet.exe'
-$acceptanceDll = Join-Path $projectRoot 'tools\Pdm.Acceptance\bin\Debug\net10.0\Pdm.Acceptance.dll'
-$secrets = Get-Content -LiteralPath $secretPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$env:PDM_DB_PASSWORD = $secrets.databasePassword
-$env:PDM_ACCEPTANCE_CONNECTION = 'Server=127.0.0.1;Port=3308;Database=pdm;UserID=pdm_app;GuidFormat=Binary16;SslMode=None;AllowUserVariables=true;ConnectionTimeout=5;DefaultCommandTimeout=30'
-Remove-Item Env:PDM_ACCEPTANCE_SEED -ErrorAction SilentlyContinue
-$preDumpVerificationJson = (& $dotnet $acceptanceDll | Out-String)
-if ($LASTEXITCODE -ne 0) { throw 'PLM pre-backup database verification failed.' }
-$preDumpVerification = $preDumpVerificationJson | ConvertFrom-Json
-
-$databasePath = Join-Path $backupRoot 'pdm.sql'
-& $mysqlDump "--defaults-extra-file=$rootClientPath" --single-transaction --routines --triggers --hex-blob "--result-file=$databasePath" pdm
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $databasePath)) { throw 'PLM database backup failed.' }
-$dumpText = [IO.File]::ReadAllText($databasePath, [Text.Encoding]::UTF8)
-$signalTriggerPattern = '(?m)(/\*!\d+ TRIGGER [^\r\n]*SIGNAL SQLSTATE [^\r\n]*); (\*/;;)$'
-$dumpText = [Text.RegularExpressions.Regex]::Replace($dumpText, $signalTriggerPattern, '$1 $2')
-[IO.File]::WriteAllText($databasePath, $dumpText, (New-Object Text.UTF8Encoding($false)))
-
-$dataRoot = Join-Path $backupRoot 'data'
-foreach ($name in @('vault', 'release', 'program-templates')) {
-    $source = Join-Path $localRoot $name
-    if (Test-Path -LiteralPath $source) {
-        Copy-Item -LiteralPath $source -Destination (Join-Path $dataRoot $name) -Recurse -Force
+    if ($serviceWasRunning) {
+        Stop-Service -Name 'UptonPdmApi' -Force
+        (Get-Service -Name 'UptonPdmApi').WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+        $serviceStopped = $true
     }
-}
-
-$verificationJson = (& $dotnet $acceptanceDll | Out-String)
-if ($LASTEXITCODE -ne 0) { throw 'PLM database verification failed.' }
-$verification = $verificationJson | ConvertFrom-Json
-if (-not $verification.expectedMigrationApplied -or $verification.releaseColumns -ne 3) { throw 'PLM database schema verification failed.' }
-$databaseCounts = $verification.tableCounts
-
-$files = @()
-foreach ($file in @(Get-ChildItem -LiteralPath $dataRoot -Recurse -File -ErrorAction SilentlyContinue)) {
-    $files += [ordered]@{
-        relativePath = $file.FullName.Substring($backupRoot.Length + 1).Replace('\', '/')
-        length = $file.Length
-        sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+    if (Get-Process -Name 'Upton.Pdm.CadArchiveWorker' -ErrorAction SilentlyContinue) {
+        Remove-Item -LiteralPath $workerPaused -Force -ErrorAction SilentlyContinue
+        [IO.File]::WriteAllText($workerPause, [DateTimeOffset]::Now.ToString('O'))
+        $pauseRequested = $true
+        $deadline = [DateTimeOffset]::Now.AddSeconds(60)
+        while (-not (Test-Path -LiteralPath $workerPaused) -and [DateTimeOffset]::Now -lt $deadline) { Start-Sleep -Milliseconds 500 }
+        if (-not (Test-Path -LiteralPath $workerPaused)) { throw '网页存档后台仍在处理任务，未能进入备份暂停状态；请任务完成后重试，本次未备份。' }
     }
-}
-$manifest = [ordered]@{
-    format = 'upton-pdm-backup-v1'
-    createdAt = [DateTimeOffset]::Now.ToString('O')
-    sourceDatabase = 'pdm'
-    databaseDump = [ordered]@{ relativePath = 'pdm.sql'; length = (Get-Item -LiteralPath $databasePath).Length; sha256 = (Get-FileHash -LiteralPath $databasePath -Algorithm SHA256).Hash }
-    databaseCounts = $databaseCounts
-    databaseCountBounds = [ordered]@{
-        audit_entry = [ordered]@{
-            before = [long]$preDumpVerification.tableCounts.audit_entry
-            after = [long]$databaseCounts.audit_entry
-        }
+    $plan = Get-PdmStorageBackupPlan $projectRoot -IncludeTableCounts
+    if ($plan.backupRoot -ne $configuredRoot) { throw '备份配置已变化，尚未复制文件，请重新生成清单。' }
+    New-Item -ItemType Directory -Path (Join-Path $backupRoot 'database') -Force | Out-Null
+    $incomplete = Join-Path $backupRoot 'backup.incomplete.json'
+    @{ status = 'incomplete'; startedAt = [DateTimeOffset]::Now.ToString('O') } | ConvertTo-Json | Set-Content -LiteralPath $incomplete -Encoding UTF8
+    $databasePath = Join-Path $backupRoot 'database\pdm.sql'
+    & $mysqlDump "--defaults-extra-file=$rootClientPath" --single-transaction --routines --triggers --events --hex-blob "--result-file=$databasePath" $plan.database
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $databasePath)) { throw '数据库导出失败，本批次不算完整备份。' }
+    # Keep compatibility with the delimiter emitted for SIGNAL triggers by the bundled MySQL client.
+    $dumpText = [IO.File]::ReadAllText($databasePath, [Text.Encoding]::UTF8)
+    $dumpText = [Text.RegularExpressions.Regex]::Replace($dumpText, '(?m)(/\*!\d+ TRIGGER [^\r\n]*SIGNAL SQLSTATE [^\r\n]*); (\*/;;)$', '$1 $2')
+    [IO.File]::WriteAllText($databasePath, $dumpText, [Text.UTF8Encoding]::new($false))
+    $copied = Copy-PdmStorageSources $plan $backupRoot
+    $configuration = Join-Path $backupRoot 'configuration'
+    New-Item -ItemType Directory -Path $configuration -Force | Out-Null
+    $service = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\UptonPdmApi'
+    @{ imagePath = $service.ImagePath; account = $service.ObjectName; environment = @($service.Environment) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $configuration 'api-service.json') -Encoding UTF8
+    Copy-Item -LiteralPath (Join-Path $localRoot 'mysql\my.ini') -Destination (Join-Path $configuration 'mysql.ini')
+    Copy-Item -LiteralPath (Join-Path $localRoot 'deployment-receipt.json') -Destination (Join-Path $configuration 'deployment-receipt.json')
+    if (Get-ScheduledTask -TaskName 'UPLM-BrowserCadArchive' -ErrorAction SilentlyContinue) {
+        Export-ScheduledTask -TaskName 'UPLM-BrowserCadArchive' | Set-Content -LiteralPath (Join-Path $configuration 'browser-cad-task.xml') -Encoding UTF8
     }
-    files = $files
-}
-$manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $backupRoot 'manifest.json') -Encoding UTF8
-
-[pscustomobject]@{
-    status = 'passed'
-    backupPath = $backupRoot
-    databaseBytes = $manifest.databaseDump.length
-    dataFiles = $files.Count
-    dataBytes = (@($files | ForEach-Object { $_.length }) | Measure-Object -Sum).Sum
-    databaseCounts = $databaseCounts
-} | ConvertTo-Json -Depth 5
-}
-catch {
-    if (Test-Path -LiteralPath $backupRoot) { Remove-Item -LiteralPath $backupRoot -Recurse -Force }
+    $configurationFiles = @(Get-ChildItem -LiteralPath $configuration -File | ForEach-Object {
+        [pscustomobject]@{ relativePath = 'configuration/' + $_.Name; length = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+    })
+    $manifest = [ordered]@{
+        format = 'upton-pdm-backup-v2'; createdAt = [DateTimeOffset]::Now.ToString('O'); sourceDatabase = $plan.database
+        consistency = 'API服务停止期间导出数据库并复制文件'; sourceMachine = $env:COMPUTERNAME
+        databaseDump = @{ relativePath = 'database/pdm.sql'; length = (Get-Item -LiteralPath $databasePath).Length; sha256 = (Get-FileHash -LiteralPath $databasePath -Algorithm SHA256).Hash }
+        sources = $copied.sources; files = @($copied.files) + $configurationFiles; references = $copied.references; databaseCounts = $plan.tableCounts
+        warnings = $plan.warnings; historicalFilesPreserved = $true
+    }
+    Test-PdmStorageBackupFiles $manifest $backupRoot
+    $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $backupRoot 'manifest.json') -Encoding UTF8
+    Remove-Item -LiteralPath $incomplete -Force
+    [pscustomobject]@{ status = 'passed'; backupPath = $backupRoot; files = @($manifest.files).Count; references = @($manifest.references).Count; databaseBytes = $manifest.databaseDump.length; warnings = $plan.warnings } | ConvertTo-Json -Depth 5
+} catch {
+    # Keep partial files for diagnosis. Never publish a complete manifest or remove historical backups on failure.
+    if (Test-Path -LiteralPath $backupRoot) {
+        @{ status = 'incomplete'; failedAt = [DateTimeOffset]::Now.ToString('O'); reason = $_.Exception.Message; sourceMap = 'source-map.json'; copiedFileIndex = 'files-index.json' } |
+            ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $backupRoot 'backup.incomplete.json') -Encoding UTF8
+    }
     throw
+} finally {
+    try { if ($serviceStopped) { Start-Service -Name 'UptonPdmApi' } }
+    finally { if ($pauseRequested) { Remove-Item -LiteralPath $workerPause -Force -ErrorAction SilentlyContinue } }
 }

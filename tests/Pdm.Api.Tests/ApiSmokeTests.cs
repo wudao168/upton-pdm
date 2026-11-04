@@ -2022,6 +2022,12 @@ public sealed class PdmApiFactory : WebApplicationFactory<Program>
                 || service.ImplementationType == typeof(Upton.Pdm.Api.ReleaseDeliveryHostedService)).ToArray())
                 services.Remove(registration);
             services.AddDataProtection().UseEphemeralDataProtectionProvider();
+            // Existing endpoint fixtures use these registered brands, as historical data does after migration.
+            services.RemoveAll<IMaterialBrandRepository>();
+            var brandCatalog = new Upton.Pdm.Infrastructure.InMemoryMaterialBrandRepository();
+            foreach (var name in new[] { "UPTON", "FESTO", "SMC", "OMRON", "CKD", "TEST", "TEST-BRAND", "API-CREATE", "API-READINESS", "API-CHANGE", "API-LOCAL-DELETE", "API-U9-DELETE", "API-SYNC", "API-GLOVE" })
+                brandCatalog.SaveAsync(new(Guid.NewGuid(), name, true, 0, []), null, default).GetAwaiter().GetResult();
+            services.AddSingleton<IMaterialBrandRepository>(brandCatalog);
             services.RemoveAll<ICrmCustomerClient>();
             services.RemoveAll<ICrmCredentialProtector>();
             services.RemoveAll<IU9OpenApiClient>();

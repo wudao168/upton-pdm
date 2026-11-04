@@ -56,9 +56,17 @@ internal static class PdmDocumentIdentityStore
     // A machine/path binding also records the base of a previous source-directory import.
     // Copied identity streams never provide a trusted base version.
     public static bool TryReadLocalMetadata(string filePath, out PdmControlledFileMetadata metadata)
+        => TryReadMetadata(ReadBinding(filePath), out metadata);
+
+    // Source-directory receipts are scoped to the selected project. They are not
+    // ownership of the original file and must not replace another import's receipt.
+    internal static bool TryReadArchiveMetadata(string filePath, Guid projectId, out PdmControlledFileMetadata metadata)
+        => TryReadMetadata((IsControlledWorkspacePath(filePath) ? null : ReadProjectBinding(filePath, projectId))
+            ?? ReadBinding(filePath), out metadata);
+
+    private static bool TryReadMetadata(DocumentBinding binding, out PdmControlledFileMetadata metadata)
     {
         metadata = null;
-        var binding = ReadBinding(filePath);
         if (binding == null || binding.DocumentId == Guid.Empty) return false;
         metadata = new PdmControlledFileMetadata
         {
@@ -160,11 +168,13 @@ internal static class PdmDocumentIdentityStore
 
     public static bool TryWrite(string filePath, Guid documentId, Guid? projectId = null)
     {
-        return TryWriteBinding(filePath, documentId, projectId, null, null, null, null);
+        return TryWriteBinding(filePath, documentId, projectId, null, null, null, null,
+            receiptProjectId: IsControlledWorkspacePath(filePath) ? null : projectId);
     }
 
     internal static bool TryWriteAssociationOnly(string filePath, Guid documentId, Guid? projectId)
-        => TryWriteBinding(filePath, documentId, projectId, null, null, null, null, writeIdentityStream: false);
+        => TryWriteBinding(filePath, documentId, projectId, null, null, null, null, writeIdentityStream: false,
+            receiptProjectId: IsControlledWorkspacePath(filePath) ? null : projectId);
 
     public static bool TryWriteControlledVersion(
         string filePath,
@@ -175,7 +185,8 @@ internal static class PdmDocumentIdentityStore
         string sha256,
         long fileLength)
     {
-        return TryWriteBinding(filePath, documentId, projectId, versionId, revision, sha256, fileLength);
+        return TryWriteBinding(filePath, documentId, projectId, versionId, revision, sha256, fileLength,
+            receiptProjectId: IsControlledWorkspacePath(filePath) ? null : projectId);
     }
 
     internal static bool TryRecoverControlledVersion(string filePath, PdmControlledFileMetadata expected,
@@ -239,7 +250,7 @@ internal static class PdmDocumentIdentityStore
         long? fileLength,
         PdmControlledFileMetadata expected = null, string resolvedReferenceSha256 = null, DateTime? serverMaterializedAtUtc = null,
         Guid? nativeIsolationSnapshotId = null, string preparedReferenceKey = null, string preparedReferenceSha256 = null,
-        bool writeIdentityStream = true)
+        bool writeIdentityStream = true, Guid? receiptProjectId = null)
     {
         if (documentId == Guid.Empty || string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return false;
         lock (bindingSync)
@@ -254,7 +265,7 @@ internal static class PdmDocumentIdentityStore
                 try { ownsMutex = bindingMutex.WaitOne(TimeSpan.FromSeconds(5)); }
                 catch (AbandonedMutexException) { ownsMutex = true; }
                 if (!ownsMutex) return false;
-                var previous = ReadBinding(filePath);
+                var previous = ReadProjectBinding(filePath, receiptProjectId);
                 if (expected != null && (previous == null || previous.DocumentId != expected.DocumentId
                     || previous.ProjectId != expected.ProjectId || previous.VersionId != expected.VersionId
                     || !string.Equals(previous.Revision ?? string.Empty, expected.Revision ?? string.Empty, StringComparison.Ordinal) || previous.FileLength != expected.FileLength
@@ -308,7 +319,7 @@ internal static class PdmDocumentIdentityStore
                     FileLength = retainedFileLength
                 };
                 Directory.CreateDirectory(bindingDirectory);
-                var path = BindingPath(filePath);
+                var path = ProjectBindingPath(filePath, receiptProjectId);
                 temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
                 File.WriteAllText(temporaryPath, new JavaScriptSerializer().Serialize(binding), Encoding.UTF8);
                 if (File.Exists(path)) File.Replace(temporaryPath, path, null);
@@ -332,16 +343,19 @@ internal static class PdmDocumentIdentityStore
         }
     }
 
-    private static DocumentBinding ReadBinding(string filePath)
+    private static DocumentBinding ReadBinding(string filePath) => ReadProjectBinding(filePath, null);
+
+    private static DocumentBinding ReadProjectBinding(string filePath, Guid? receiptProjectId)
     {
         if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return null;
         try
         {
-            var path = BindingPath(filePath);
+            var path = ProjectBindingPath(filePath, receiptProjectId);
             if (!File.Exists(path)) return null;
             var binding = new JavaScriptSerializer().Deserialize<DocumentBinding>(File.ReadAllText(path, Encoding.UTF8));
             return binding != null && binding.SchemaVersion == 1 && binding.DocumentId != Guid.Empty
                 && string.Equals(binding.FullPath, Path.GetFullPath(filePath), StringComparison.OrdinalIgnoreCase)
+                && (!receiptProjectId.HasValue || binding.ProjectId == receiptProjectId)
                 && string.Equals(binding.MachineName, Environment.MachineName, StringComparison.OrdinalIgnoreCase)
                     ? binding : null;
         }
@@ -351,11 +365,15 @@ internal static class PdmDocumentIdentityStore
         }
     }
 
-    private static string BindingPath(string filePath)
+    private static string BindingPath(string filePath) => ProjectBindingPath(filePath, null);
+
+    private static string ProjectBindingPath(string filePath, Guid? receiptProjectId)
     {
         using (var hash = SHA256.Create())
         {
-            var key = BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(Path.GetFullPath(filePath).ToUpperInvariant()))).Replace("-", string.Empty);
+            var identity = Path.GetFullPath(filePath).ToUpperInvariant()
+                + (receiptProjectId.HasValue ? "|" + receiptProjectId.Value.ToString("N") : "");
+            var key = BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(identity))).Replace("-", string.Empty);
             return Path.Combine(bindingDirectory, key + ".json");
         }
     }

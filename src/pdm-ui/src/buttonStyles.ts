@@ -28,7 +28,7 @@ export const buttonContentSelector = [
   '.el-table .caret-wrapper',
   '.bom-tree-node__select', '.bom-tree-node__toggle', '.bom-tree-node__category',
   '.pdm-project-classification__division', '.pdm-project-classification__unassigned',
-  '.production-workbench__project', '.production-workbench__package', '.production-drawings__project', '.production-suppliers__category-filter',
+  '.production-workbench__project', '.production-workbench__package', '.production-workbench__schedule-select', '.production-drawings__project', '.production-suppliers__category-filter',
   '.pdm-bom-release-history > button',
   '.production-workbench__all-categories', '.pdm-overview-timeline button', '.wh-department-options button',
   '.production-scan-settings__node', '.el-tag__close',
@@ -54,7 +54,25 @@ const compactLabels: Record<string, string> = {
 }
 const generatedTitles = new WeakMap<HTMLButtonElement, string>()
 
+function updateLeadingIcons(control: HTMLElement) {
+  const preserved = !!control.closest('.pdm-sidebar, .pdm-tree, .el-tree, [role="tree"], .el-picker-panel, .el-time-panel, .el-select, .el-cascader')
+    || control.matches('.pdm-global-status') || (control instanceof HTMLButtonElement && isFoldButton(control))
+  const texts = document.createTreeWalker(control, NodeFilter.SHOW_TEXT, { acceptNode: node =>
+    /[\p{L}\p{N}]/u.test(node.textContent ?? '') && !node.parentElement?.closest('svg, .el-icon, [aria-hidden="true"], em')
+      ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT })
+  const label = preserved ? null : texts.nextNode()
+  if (label) control.dataset.pdmTextOnly = 'true'
+  else delete control.dataset.pdmTextOnly
+  control.querySelectorAll<HTMLElement>('svg, .el-icon').forEach(icon => {
+    const leading = label && !!(icon.compareDocumentPosition(label) & Node.DOCUMENT_POSITION_FOLLOWING)
+      && !icon.closest('.is-loading, .is-spinning, [role="status"]')
+    if (leading) icon.dataset.pdmLeadingIcon = 'true'
+    else delete icon.dataset.pdmLeadingIcon
+  })
+}
+
 function updateButton(button: HTMLButtonElement) {
+  updateLeadingIcons(button)
   const fold = isFoldButton(button)
   if (fold) button.dataset.pdmFoldControl = 'true'
   else delete button.dataset.pdmFoldControl
@@ -105,20 +123,28 @@ export function installButtonStyles(app: App) {
   const update = (node: Node) => {
     if (!(node instanceof Element)) return
     if (node instanceof HTMLButtonElement) updateButton(node)
-    node.querySelectorAll<HTMLButtonElement>('button').forEach(updateButton)
+    else if (node instanceof HTMLElement && node.matches('[role="tab"]')) updateLeadingIcons(node)
+    node.querySelectorAll<HTMLElement>('button, [role="tab"]').forEach(control => {
+      if (control instanceof HTMLButtonElement) updateButton(control); else updateLeadingIcons(control)
+    })
   }
   const observer = new MutationObserver(records => {
     for (const record of records) {
-      if (record.type === 'attributes') update(record.target)
+      if (record.type === 'attributes') {
+        update(record.target)
+        const control = (record.target as Element).closest<HTMLElement>('button, [role="tab"]')
+        if (control && control !== record.target) updateLeadingIcons(control)
+      }
       else {
         if (record.type === 'childList') record.addedNodes.forEach(update)
         const element = record.target instanceof Element ? record.target : record.target.parentElement
-        const button = element?.closest('button')
-        if (button) updateButton(button)
+        const control = element?.closest<HTMLElement>('button, [role="tab"]')
+        if (control instanceof HTMLButtonElement) updateButton(control)
+        else if (control) updateLeadingIcons(control)
       }
     }
   })
   observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class', 'role', 'aria-expanded', 'aria-haspopup', 'aria-label', 'title', 'disabled'] })
-  document.querySelectorAll<HTMLButtonElement>('button').forEach(updateButton)
+  update(document.body)
   app.onUnmount(() => observer.disconnect())
 }

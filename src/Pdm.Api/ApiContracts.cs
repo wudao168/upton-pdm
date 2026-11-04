@@ -376,7 +376,9 @@ public sealed record EmergencyApprovalRequest(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] ApprovalDecision Decision,
     string Reason);
 
-public sealed record ReplaceBomRequest(IReadOnlyList<BomItemInput> Items, IReadOnlyList<BomSummaryEdit>? SummaryRows = null, IReadOnlyList<Guid>? SummaryOrder = null);
+public sealed record ReplaceBomRequest(IReadOnlyList<BomItemInput> Items, IReadOnlyList<BomSummaryEdit>? SummaryRows = null, IReadOnlyList<Guid>? SummaryOrder = null,
+    IReadOnlyList<BomConfigurationQuantityChange>? ConfigurationQuantities = null);
+public sealed record UpdateBomMultiplierRequest(int Multiplier, int ExpectedMultiplier);
 public sealed record ConfirmBomReleaseRequest(IReadOnlyDictionary<Guid, string> Tokens, bool Confirmed, string? Reason);
 
 public sealed record ResolveBomItemRequest(

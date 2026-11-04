@@ -87,9 +87,6 @@ public sealed class StandardLibraryImportService(IStandardLibraryRepository libr
                 var category = categories.FirstOrDefault(value => value.Code.Equals(item.U9CategoryCode, StringComparison.OrdinalIgnoreCase) && value.IsActive && value.PdmKind.HasValue);
                 if (category is null) throw new PdmRuleException("ERP分类尚未配置对应的物料类型，请先维护料品分类。");
                 var existing = await materials.FindMaterialByCodeAsync(row.Code, ct);
-                var restoreObservedU9 = !addToLibrary && existing is { MasterOwner: MaterialMasterOwner.U9C,
-                    ArchivedBy: "system:u9-material-full-sync", ApprovalStatus: MaterialApprovalStatus.Approved, U9SyncConfirmed: true };
-                if (existing?.IsArchived == true && !restoreObservedU9) throw new PdmRuleException("料品主档已停用，请先核对并启用料品。");
                 if (existing is not null && (existing.ApprovalStatus != MaterialApprovalStatus.Approved || !existing.U9SyncConfirmed))
                     throw new PdmRuleException("同号料品主档尚未批准或确认ERP同步，请先处理原料品。");
                 var now = clock.GetUtcNow();
@@ -98,14 +95,11 @@ public sealed class StandardLibraryImportService(IStandardLibraryRepository libr
                     U9UnitCatalog.NormalizeInbound(item.U9UnitCode!), item.U9Specification, item.U9Material, item.U9Description, item.U9Brand, item.U9SurfaceTreatment,
                     item.U9Weight, item.U9WeightUnitCode, null, MaterialApprovalStatus.Approved, actor, now, category.Code,
                     item.U9ItemId, row.Code, MaterialSyncStatus.Succeeded, actor, now, actor, now, 1, category.Code,
-                    U9SyncConfirmed: true, SourceSystem: MaterialDataSource.U9C, MasterOwner: MaterialMasterOwner.U9C, LastU9SyncedAt: now, PurchaseLink: item.U9PurchaseLink);
-                if (existing?.MasterOwner == MaterialMasterOwner.U9C) candidate = candidate with
-                {
-                    SelectionAdvice = existing.SelectionAdvice, ReferencePrice = existing.ReferencePrice, IsRecommended = existing.IsRecommended,
-                    CoverImageAttachmentId = existing.CoverImageAttachmentId, Model3DLink = existing.Model3DLink, DocumentLink = existing.DocumentLink,
-                    ReferenceCount = existing.ReferenceCount, Model3DAttachmentCount = existing.Model3DAttachmentCount, DocumentAttachmentCount = existing.DocumentAttachmentCount
-                };
-                var saved = existing?.MasterOwner == MaterialMasterOwner.Pdm ? existing : await materials.UpsertU9MaterialAsync(candidate, ct);
+                    IsArchived: U9MaterialContract.EffectiveState(item) == false,
+                    U9SyncConfirmed: true, SourceSystem: MaterialDataSource.U9C, MasterOwner: MaterialMasterOwner.Pdm, LastU9SyncedAt: now, PurchaseLink: item.U9PurchaseLink)
+                { U9IsEffective = U9MaterialContract.EffectiveState(item) };
+                var saved = await materials.UpsertU9MaterialAsync(candidate, ct);
+                if (saved.IsArchived) throw new PdmRuleException("PLM料品已停用，已记录U9C对账结果；请在料品管理中确认启用后再使用。");
                 var alreadyMember = !members.Add(saved.Id);
                 if (addToLibrary && !alreadyMember) await library.AddMembershipsAsync([new(uncategorized.Id, saved.Id, actor, now)], ct);
                 rows.Add(new(row.Code, alreadyMember ? "Existing" : "Imported", alreadyMember ? "已在标准库，保留原分类。" : "ERP料品已导入。", saved.Name, saved.Specification, saved.Brand));

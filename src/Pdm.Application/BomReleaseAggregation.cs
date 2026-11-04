@@ -21,10 +21,30 @@ public sealed record U9PurchaseDemandSummaryLine(
 public sealed record U9ReleaseBomSummary(
     IReadOnlyList<U9ProductionBomSummaryLine> ProductionStructure,
     IReadOnlyList<U9PurchaseDemandSummaryLine> PurchaseDemand,
-    string Sha256);
+    string Sha256)
+{
+    public IReadOnlyList<ReleaseQuantityLine> DemandChanges { get; init; } = [];
+}
 
 public static class BomReleaseAggregation
 {
+    public static U9ReleaseBomSummary BuildForHistory(ReleasePackage package, IEnumerable<ReleasePackage> history)
+    {
+        var packages=history.ToArray();
+        var summary=Build(package,PriorLongLeadItems(package,packages));
+        if(package.Scope is not (ReleaseScope.StandardSupplement or ReleaseScope.NonStandardSupplement or ReleaseScope.ElectricalSupplement))
+            return summary;
+        var kind=package.Scope==ReleaseScope.StandardSupplement?BomKind.Standard
+            :package.Scope==ReleaseScope.NonStandardSupplement?BomKind.NonStandard:BomKind.Electrical;
+        var changes=ReleaseQuantityComparison.Build(package,kind,packages);
+        var demand=changes.Where(line=>line.NewDemand>0).Select(line=>new U9PurchaseDemandSummaryLine(
+            line.MaterialCode.Trim().ToUpperInvariant(),line.UnitCode,line.NewDemand,line.SourceBomItemIds.Order().ToArray())).ToArray();
+        var canonical=summary.Sha256+"\n"+string.Join('\n',changes.Select(line=>
+            $"{line.MaterialKey}|{line.PreviousBaselineQuantity.ToString(CultureInfo.InvariantCulture)}|{line.EarlyReleasedCredit.ToString(CultureInfo.InvariantCulture)}|{line.TargetQuantity.ToString(CultureInfo.InvariantCulture)}"));
+        return summary with{PurchaseDemand=demand,DemandChanges=changes,
+            Sha256=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant()};
+    }
+
     public static string MaterialKey(BomItem item) =>
         $"{item.DrawingNumber.Trim().ToUpperInvariant()}|{U9UnitCatalog.NormalizeBomUnit(item.Unit)}";
 
@@ -56,11 +76,13 @@ public static class BomReleaseAggregation
         IEnumerable<BomItem> priorItems,
         IEnumerable<BomItem> currentItems)
     {
-        var currentKeys = currentItems
+        var currentByTrackingId = currentItems
             .GroupBy(item => item.ReleaseTrackingId)
-            .ToDictionary(group => group.Key, group => MaterialKey(group.First()));
+            .ToDictionary(group => group.Key, group => group.First());
         return priorItems
-            .GroupBy(item => currentKeys.GetValueOrDefault(item.ReleaseTrackingId) ?? MaterialKey(item), StringComparer.OrdinalIgnoreCase)
+            .GroupBy(item => currentByTrackingId.TryGetValue(item.ReleaseTrackingId, out var current)
+                && U9UnitCatalog.NormalizeBomUnit(current.Unit) == U9UnitCatalog.NormalizeBomUnit(item.Unit)
+                    ? MaterialKey(current) : MaterialKey(item), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.Sum(item => item.Quantity), StringComparer.OrdinalIgnoreCase);
     }
 

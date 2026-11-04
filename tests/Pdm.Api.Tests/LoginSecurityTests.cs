@@ -34,6 +34,31 @@ public sealed class LoginSecurityTests
         Assert.Null((await service.OpenAsync(account, Peer(), null, false, ct)).Error);
     }
 
+    [Fact]
+    public async Task RecentHeartbeatReadPathStillRejectsRevocationImmediatelyForConcurrentRequests()
+    {
+        var login = await service.OpenAsync(account, Peer(), null, false, ct);
+        clock.Now = clock.Now.AddSeconds(5);
+        var before = (await service.ListAsync(ct)).Single().Sessions.Single().LastSeenAt;
+        Assert.All(await Task.WhenAll(Enumerable.Range(0, 50).Select(_ => service.ValidateAsync(account.Username, login.SessionId, new DefaultHttpContext().Request, ct))), error => Assert.Null(error));
+        Assert.Equal(before, (await service.ListAsync(ct)).Single().Sessions.Single().LastSeenAt);
+        await service.RevokeAsync(account.Username, login.SessionId!, ct);
+        Assert.All(await Task.WhenAll(Enumerable.Range(0, 20).Select(_ => service.ValidateAsync(account.Username, login.SessionId, new DefaultHttpContext().Request, ct))), error => Assert.Contains("退出", error));
+    }
+
+    [Fact]
+    public async Task ExpiredHeartbeatUpdatesOnlyAValidSession()
+    {
+        var login = await service.OpenAsync(account, Peer(), null, false, ct);
+        clock.Now = clock.Now.AddSeconds(31);
+        Assert.Null(await service.ValidateAsync(account.Username, login.SessionId, new DefaultHttpContext().Request, ct));
+        Assert.Equal(clock.Now, (await service.ListAsync(ct)).Single().Sessions.Single().LastSeenAt);
+        await service.RevokeAsync(account.Username, login.SessionId!, ct);
+        clock.Now = clock.Now.AddSeconds(31);
+        Assert.NotNull(await service.ValidateAsync(account.Username, login.SessionId, new DefaultHttpContext().Request, ct));
+        Assert.True((await service.ListAsync(ct)).Single().Sessions.Single().Revoked);
+    }
+
     [Theory]
     [InlineData("malformed")]
     [InlineData("expired")]

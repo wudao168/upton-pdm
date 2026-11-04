@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
-import { materialStockPlan, refreshMaterialStockPlans, setMaterialStockContext, stockedMaterial, type MaterialStockPlanSnapshot } from '../src/materialStockPlans'
+import { materialStockPlan, materialStockTooltip, refreshMaterialStockPlans, setMaterialStockContext, stockedMaterial, type MaterialStockPlanSnapshot } from '../src/materialStockPlans'
 
 const snapshot = (): MaterialStockPlanSnapshot => ({ enterpriseCode: '01', organizationCode: '7', items: [{ enterpriseCode: '01', organizationCode: '7', materialCode: '01020014079', safetyStockQuantity: 15, reorderQuantity: 50, unitName: '个', isEffective: true, syncedAt: '2026-10-23T08:00:00Z' }] })
 afterEach(() => setMaterialStockContext(''))
 describe('常备件显示', () => {
+  it('库存提示中的单位编码显示名称，原快照保持不变', () => {
+    const plan = { ...snapshot().items[0]!, unitName: '001' }
+    expect(materialStockTooltip(plan)).toContain('安全库存：15个')
+    expect(materialStockTooltip(plan)).toContain('再订货量：50个')
+    expect(plan.unitName).toBe('001')
+  })
   it('keeps the current cell title when a table reuses the element for another material', async () => {
     setMaterialStockContext('reused-row')
     await refreshMaterialStockPlans(async () => snapshot())

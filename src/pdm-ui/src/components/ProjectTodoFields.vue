@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import UserSelect from './UserSelect'
-import { ElDatePicker, ElOption, ElSelect } from 'element-plus'
+import { ElDatePicker, ElOption } from 'element-plus'
 import type { PdmUser } from '../types'
 withDefaults(defineProps<{ users: PdmUser[]; pending?: boolean; description?: string }>(), { description: '保存时将上述内容推送给指定人员' })
 const dueDate = defineModel<string | undefined>('dueDate')

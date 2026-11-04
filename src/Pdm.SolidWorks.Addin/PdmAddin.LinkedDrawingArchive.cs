@@ -109,6 +109,14 @@ public sealed partial class PdmAddin
             .Concat(visibleDrawings)))
         {
             var drawing = item.Node;
+            // Candidate associations can predate a drawing's current views. Only
+            // auto-added drawings may be excluded, and only after a complete read.
+            if (!candidates.Any(selected => PathsEqual(selected.Node.FullPath, drawing.FullPath))
+                && IsUnrelatedAutomaticDrawing(drawing, changedModels))
+            {
+                LogOperation("工程图实际引用不包含本次修改的模型，未自动纳入存档：" + drawing.FileName);
+                continue;
+            }
             if (!preflights.TryGetValue(drawing.FullPath, out var preflight))
             {
                 var versions = await apiClient.GetVersionsAsync(drawing.DocumentId.Value, token);
@@ -165,26 +173,49 @@ public sealed partial class PdmAddin
         }
     }
 
+    private bool IsUnrelatedAutomaticDrawing(CadTreeNode drawing, IReadOnlyList<CadTreeNode> changedModels)
+    {
+        if (scanner == null || changedModels.Count == 0) return false;
+        var references = scanner.ReadDrawingReferences(drawing.FullPath, out var readError, true);
+        if (readError != null) return false;
+        var models = references.Where(path => string.Equals(Path.GetExtension(path), ".SLDPRT", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(Path.GetExtension(path), ".SLDASM", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (models.Length == 0 || models.Any(path => !File.Exists(path))) return false;
+        return !models.Any(path => changedModels.Any(model => PathsEqual(path, model.FullPath)
+            || PathsEqual(path, model.SourceReferencePath)
+            // A same-named copy without proven identity is ambiguous, not proof
+            // that this drawing is unrelated. Keep the existing update checks.
+            || string.Equals(Path.GetFileName(path), model.FileName, StringComparison.OrdinalIgnoreCase)
+            || model.DocumentId.HasValue && PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var metadata)
+                && metadata.DocumentId == model.DocumentId));
+    }
+
     private async Task<BatchCheckInPlan> UpdateLinkedDrawingsAsync(BatchCheckInPlan plan, Guid projectId, CancellationToken token)
     {
         if (!plan.Items.Any(item => item.Node.RequiresModelUpdate)) return plan;
+        var drawings = plan.Items.Where(item => item.Node.Kind == CadDocumentKind.Drawing && item.Node.RequiresModelUpdate).ToArray();
+        ArchiveSession.Current?.SetStep(3, "正在准备配套工程图更新…", drawings.Length);
         var pending = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var active = (application.ActiveDoc as IModelDoc2)?.GetPathName();
-        foreach (var item in plan.Items.Where(item => item.Node.Kind == CadDocumentKind.Drawing && item.Node.RequiresModelUpdate))
+        for (var index = 0; index < drawings.Length; index++)
         {
+            var item = drawings[index];
             var node = item.Node;
             IModelDoc2 drawing = null;
             var opened = false;
             try
             {
                 token.ThrowIfCancellationRequested();
+                ArchiveSession.Current?.ReportFile(index, drawings.Length, node.FileName, "正在准备配套工程图编辑权限…");
                 await PrepareBatchCheckInPermissionAsync(item, projectId, token);
+                ArchiveSession.Current?.ReportFile(index, drawings.Length, node.FileName, "正在读取配套工程图视图…");
                 drawing = FindLoadedDocument(node.FullPath);
                 if (drawing == null) { drawing = OpenDrawingForArchive(node.FullPath); opened = true; }
                 if (!PathsEqual(drawing?.GetPathName(), node.FullPath))
                     throw new IOException("未能加载对应的工程图，原文件已保留。");
                 var expected = node.ReferencedModels.Where(model => model.DocumentId.HasValue).Select(model => model.DocumentId.Value).Distinct().ToArray();
                 scanner.UpdateDrawingReferences(drawing, node);
+                ArchiveSession.Current?.ReportFile(index, drawings.Length, node.FileName, "正在按本次模型更新配套工程图…");
                 var activateErrors = 0;
                 application.ActivateDoc3(drawing.GetTitle(), false, (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref activateErrors);
                 if (activateErrors != 0) throw new IOException("未能激活工程图，当前图档已保留。");
@@ -201,7 +232,7 @@ public sealed partial class PdmAddin
                 finally { if (!string.IsNullOrWhiteSpace(originalSheet)) drawingDocument.ActivateSheet(originalSheet); }
                 scanner.UpdateDrawingReferences(drawing, node);
                 if (node.StructureIndexPending || expected.Any(id => !node.ReferencedModels.Any(model => model.DocumentId == id)))
-                    throw new IOException("尚未确认工程图视图使用本次模型，已保留工程图待更新状态。");
+                    throw new InvalidOperationException("工程图实际视图与本次模型关联不一致，或视图尚未完整读取。请核对该工程图引用的模型；已保留文件和待更新状态。");
                 // Loading/rebuilding drawing views can dirty a model configuration. Keep
                 // the drawing open, persist only models already in this batch, then save
                 // the drawing against that settled model state. Unselected references stay untouched.
@@ -211,6 +242,7 @@ public sealed partial class PdmAddin
                 ValidateCurrentMemoryCopy(node);
                 node.WorkState = CadWorkState.PendingCheckIn;
                 node.DrawingUpdatePendingReason = null;
+                ArchiveSession.Current?.ReportFile(index + 1, drawings.Length, node.FileName, "配套工程图已更新并生成提交副本，原文件未改写。");
                 LogOperation("关联工程图已按本次模型更新并生成提交副本，原文件未改写：" + node.FileName);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }

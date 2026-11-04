@@ -1,0 +1,43 @@
+/* The selected navigation surface joins the main white workspace. */
+:root body .pdm-sidebar { background:rgb(229,231,235) !important; }
+:root body .pdm-sidebar .pdm-sidebar__nav .pdm-nav-item.is-active {
+  width:calc(100% - 8px) !important;
+  margin-inline-end:0 !important;
+  border:0 !important;
+  border-radius:999px 0 0 999px !important;
+  background:#fff !important;
+  box-shadow:none !important;
+}
+:root body .pdm-sidebar.has-moving-highlight .pdm-sidebar__highlight {
+  border:0 !important;
+  border-radius:999px 0 0 999px !important;
+  background:#fff !important;
+  box-shadow:none !important;
+  overflow:visible;
+}
+:root body .pdm-sidebar.has-moving-highlight .pdm-sidebar__highlight::before,
+:root body .pdm-sidebar.has-moving-highlight .pdm-sidebar__highlight::after,
+:root body .pdm-sidebar:not(.has-moving-highlight) .pdm-nav-item.is-active::before,
+:root body .pdm-sidebar:not(.has-moving-highlight) .pdm-nav-item.is-active::after {
+  content:'';position:absolute;right:0;width:24px;height:24px;pointer-events:none;
+}
+:root body .pdm-sidebar.has-moving-highlight .pdm-sidebar__highlight::before,
+:root body .pdm-sidebar:not(.has-moving-highlight) .pdm-nav-item.is-active::before {
+  top:-24px;background:radial-gradient(circle at top left,transparent 24px,#fff 24px);
+}
+:root body .pdm-sidebar.has-moving-highlight .pdm-sidebar__highlight::after,
+:root body .pdm-sidebar:not(.has-moving-highlight) .pdm-nav-item.is-active::after {
+  bottom:-24px;background:radial-gradient(circle at bottom left,transparent 24px,#fff 24px);
+}
+:root body .production-workbench .production-workbench__tree-actions > button.production-workbench__toggle-projects {
+  border:1px solid var(--pdm-border) !important;
+  background:var(--pdm-surface) !important;
+  color:var(--pdm-theme-accent);
+}
+:root body .production-workbench .production-workbench__tree-actions > button.production-workbench__toggle-projects:hover:not(:disabled) {
+  border-color:var(--pdm-theme-accent) !important;
+  background:var(--pdm-theme-accent-soft) !important;
+}
+:root body .production-workbench .production-workbench__tree-actions > button.production-workbench__toggle-projects:focus-visible {
+  outline:2px solid var(--pdm-theme-accent-focus) !important;outline-offset:1px;
+}

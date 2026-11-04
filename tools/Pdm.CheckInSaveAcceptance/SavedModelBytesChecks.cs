@@ -25,11 +25,23 @@ internal static partial class Program
             Set(node,"DocumentId",(Guid?)Guid.NewGuid());Set(node,"Revision","W1");Set(node,"CurrentRevision","W1");
             Set(node,"RequiresModelUpdate",mode=="needs-model-update");Set(node,"IsModifiedInSolidWorks",mode=="dirty");
             var plugin=New("PdmAddin");var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var interop=appType.Assembly;
-            var forbidden=0;var propertyReads=0;var dirtiedByProperties=false;var loaded=mode=="loaded-clean"||mode=="loaded-uncached"||mode=="dirty";
-            object FailPropertyRead(){propertyReads++;dirtiedByProperties=true;throw new Exception("模拟属性读取改变父装配待保存状态");}
+            var forbidden=0;var propertyReads=0;var loaded=mode=="loaded-clean"||mode=="loaded-uncached"||mode=="dirty";
+            Set(node,"Configuration","Default");
+            var manager=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.CustomPropertyManager",true),call=>{
+                if(call.MethodName=="GetNames")return new[]{"名称"};
+                if(call.MethodName=="get_Count")return 1;
+                if(call.MethodName=="Get6"){
+                    if(!(bool)call.Args[1])throw new Exception("禁止解析属性或激活配置");
+                    propertyReads++;
+                    return new System.Runtime.Remoting.Messaging.ReturnMessage(2,new object[]{"名称",true,"已核对的3D图档名称","已核对的3D图档名称",true,false},6,call.LogicalCallContext,call);
+                }
+                throw new Exception("禁止写入属性："+call.MethodName);
+            }).GetTransparentProxy();
+            var extension=new Proxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>
+                call.MethodName=="get_CustomPropertyManager"?manager:throw new Exception("禁止保存或改图："+call.MethodName)).GetTransparentProxy();
             var model=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>
-                call.MethodName=="GetPathName"?path:call.MethodName=="GetSaveFlag"?(object)(mode=="dirty"||dirtiedByProperties)
-                :call.MethodName=="IsOpenedReadOnly"?(object)false:FailPropertyRead()).GetTransparentProxy();
+                call.MethodName=="GetPathName"?path:call.MethodName=="GetSaveFlag"?(object)(mode=="dirty")
+                :call.MethodName=="IsOpenedReadOnly"?(object)false:call.MethodName=="get_Extension"?extension:throw new Exception("禁止打开、激活、重建或保存："+call.MethodName)).GetTransparentProxy();
             var app=new Proxy(appType,call=>{
                 if(call.MethodName=="GetDocuments")return loaded?new[]{model}:new object[0];
                 if(call.MethodName=="GetOpenDocumentByName")return loaded?model:null;
@@ -49,7 +61,7 @@ internal static partial class Program
             if(mode=="loaded-clean"||mode=="loaded-uncached")
             {
                 var props=(IDictionary)TreeCall(plugin,"ReadArchivePreflightProperties",node,cards,null,null);
-                Check(propertyReads==0&&!dirtiedByProperties,mode+"：已打开且干净的3D预检不读取原生属性、不制造待保存状态");
+                Check(propertyReads>0,mode+"：已打开且干净的3D预检仅读取缓存属性，不打开、激活配置或制造待保存状态");
                 Check(mode!="loaded-clean"||(string)props["全局/名称"]=="已核对的3D图档名称",mode+"：有效索引可直接复用，未知索引不强行补齐");
             }
             if(!loaded)

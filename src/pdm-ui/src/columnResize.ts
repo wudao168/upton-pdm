@@ -25,17 +25,30 @@ function htmlHeaders(table: HTMLTableElement) {
   return { positions, count }
 }
 
-export function resizeToFit(widths: number[], index: number, delta: number) {
+export function resizeColumn(widths: number[], index: number, delta: number) {
   const result = [...widths]
   const peers = index < widths.length - 1 ? widths.map((_, i) => i).slice(index + 1) : [index - 1]
-  if (!peers.length || peers[0]! < 0) return result
-  const minimum = Math.min(minimumWidth, ...widths)
-  const peerTotal = peers.reduce((sum, i) => sum + widths[i]!, 0)
-  const capacity = peerTotal - minimum * peers.length
-  result[index] = Math.min(widths[index]! + capacity, Math.max(minimum, widths[index]! + delta))
-  const remaining = peerTotal - (result[index]! - widths[index]!) - minimum * peers.length
-  peers.forEach(i => { result[i] = minimum + (capacity ? (widths[i]! - minimum) / capacity : 1 / peers.length) * remaining })
+  if (peers[0] === undefined || peers[0] < 0) return result
+  if (delta < 0) {
+    const change = Math.max(delta, Math.min(minimumWidth, widths[index]!) - widths[index]!)
+    result[index]! += change
+    result[peers[0]]! -= change
+  } else {
+    let remaining = delta
+    for (const peer of peers) {
+      const change = Math.min(remaining, widths[peer]! - Math.min(minimumWidth, widths[peer]!))
+      result[index]! += change
+      result[peer]! -= change
+      remaining -= change
+      if (remaining <= 0) break
+    }
+  }
   return result
+}
+
+export function fitColumnWidths(widths: number[], space: number) {
+  const total = widths.reduce((sum, width) => sum + width, 0)
+  return total > 0 && space > 0 ? widths.map(width => width * space / total) : widths
 }
 
 /** 宽字段目录保留最小列宽；剩余空间按比例分配，空间不足时由表格内部滚动。 */
@@ -49,11 +62,11 @@ export function readableColumnWidths(widths: number[], minimums: number[], space
 /** Delegated events also cover tables inside lazily mounted dialogs. */
 export function installColumnResize(app: App, owner: Document = document) {
   const elementTables = new WeakMap<HTMLElement, TableInstance>()
-  const fittedTables = new WeakSet<HTMLElement>()
   const observers = new WeakMap<ComponentPublicInstance, ResizeObserver>()
   const fitters = new WeakMap<ComponentPublicInstance, () => void>()
   const readableMinimums = new WeakMap<object, number>()
-  let drag: { root: HTMLElement; key: string | null; startX: number; widths: number[]; minimums?: number[]; current?: number[]; index: number; apply: (widths: number[]) => void } | null = null
+  const manualWidths = new WeakMap<HTMLElement, { key: string | null; schema: string; widths: number[] }>()
+  let drag: { root: HTMLElement; key: string | null; startX: number; widths: number[]; current?: number[]; index: number; apply: (widths: number[]) => void } | null = null
   let disposed = false, restoreQueued = false
   const label = (text: string) => text.replace(/\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}/g, '').replace(/\s+/g, ' ').trim()
   function preferenceKey(root: HTMLElement, columns: string[]) {
@@ -62,7 +75,7 @@ export function installColumnResize(app: App, owner: Document = document) {
       if (!scope[0] || !columns.length) return null
       const path = []
       for (let node: HTMLElement | null = root; node && node !== owner.body; node = node.parentElement) {
-        const classes = [...node.classList].filter(value => !/^(el-|is-|has-|theme-)|^pdm-(fit-columns|columns-resized|resized-grid-list|column-resize-edge)$/.test(value)).sort()
+        const classes = [...node.classList].filter(value => !/^(el-|is-|has-|theme-)|^pdm-(fit-columns|columns-resized|resized-grid-list|column-resize-edge|column-scroll)$/.test(value)).sort()
         path.push([node.tagName, classes, node.getAttribute('data-navigation-page'), label(node.getAttribute('aria-label') ?? '')])
         if (node.hasAttribute('data-pdm-preference-scope')) break
       }
@@ -86,7 +99,7 @@ export function installColumnResize(app: App, owner: Document = document) {
   }
   function applyGrid(root: HTMLElement, widths: number[], gantt: boolean) {
     const property = gantt ? '--pdm-resized-gantt-columns' : '--pdm-resized-list-columns'
-    const value = widths.map(width => `${width}${gantt ? 'px' : 'fr'}`).join(' ')
+    const value = widths.map(width => gantt ? `${width}px` : `minmax(0, ${width}fr)`).join(' ')
     if (root.style.getPropertyValue(property) !== value) root.style.setProperty(property, value)
     if (gantt) root.style.setProperty('--pdm-resized-gantt-width', `${widths.reduce((sum, width) => sum + width, 0)}px`)
     root.classList.add(gantt ? 'pdm-columns-resized' : 'pdm-resized-grid-list')
@@ -95,19 +108,15 @@ export function installColumnResize(app: App, owner: Document = document) {
     let group = table.querySelector(':scope > colgroup')
     if (!group) { group = owner.createElement('colgroup'); table.prepend(group) }
     if (group.children.length !== structure.count) group.replaceChildren(...values.map(() => owner.createElement('col')))
-    const fixed = Array.from(group.children).map(column => Number((column as HTMLElement).dataset.pdmFixedWidth) || 0)
-    const fixedSpace = fixed.reduce((sum, width) => sum + width, 0)
-    const total = values.reduce((sum, width, index) => sum + (fixed[index] ? 0 : width), 0)
-    const width = (start: number, span: number) => {
-      const fixedWidth = fixed.slice(start, start + span).reduce((sum, value) => sum + value, 0)
-      const ratio = values.slice(start, start + span).reduce((sum, value, offset) => sum + (fixed[start + offset] ? 0 : value), 0) / total
-      if (!ratio) return `${fixedWidth}px`
-      return fixedSpace ? `calc(${ratio * 100}% + ${fixedWidth - ratio * fixedSpace}px)` : `${ratio * 100}%`
-    }
+    const total = values.reduce((sum, value) => sum + value, 0)
+    const width = (start: number, span: number) => `${values.slice(start, start + span).reduce((sum, value) => sum + value, 0) / total * 100}%`
     Array.from(group.children).forEach((column, index) => { (column as HTMLElement).style.width = width(index, 1) })
     for (const [cell, position] of structure.positions) cell.style.width = width(position.start, position.span)
-    table.style.width = '100%'; table.style.minWidth = '0'; table.style.maxWidth = '100%'
-    table.classList.add('pdm-fit-columns'); table.style.tableLayout = 'fixed'
+    table.style.setProperty('width', '100%', 'important')
+    table.style.setProperty('min-width', '0', 'important')
+    table.style.setProperty('max-width', '100%', 'important')
+    table.classList.add('pdm-fit-columns', 'pdm-columns-resized'); table.style.tableLayout = 'fixed'
+    table.parentElement?.classList.add('pdm-column-scroll')
   }
   function restoreTables() {
     for (const root of owner.querySelectorAll<HTMLElement>('table, .pdm-gantt-table, .pdm-project-browser-list')) {
@@ -145,24 +154,33 @@ export function installColumnResize(app: App, owner: Document = document) {
     const root = this.$el as HTMLElement
     const table = this.$.exposed as TableInstance
     elementTables.set(root, table)
-    fittedTables.add(root)
     const fit = () => {
       if (isInactiveDom(root)) return
       if (drag?.root === root) return
       const space = root.clientWidth - (table.layout.scrollY.value ? table.layout.gutterWidth : 0)
       const columns = table.store.states.columns.value
       const current = columns.map(column => column.realWidth ?? Number(column.width ?? column.minWidth ?? 80))
+      const schema = JSON.stringify(elementSchema(table))
+      const key = preferenceKey(root, elementSchema(table))
+      const manual = manualWidths.get(root)
+      const saved = savedWidths(key, columns.length)
+        ?? (manual?.schema === schema && manual.key === key ? manual.widths : null)
+      if (saved) {
+        root.classList.add('pdm-fit-columns')
+        const fitted = fitColumnWidths(saved, space)
+        if (fitted.some((width, index) => Math.abs(width - current[index]!) > 0.1)) fitElement(table, fitted)
+        return
+      }
       if (root.dataset.pdmColumnLayout === 'scroll') {
         const minimums = columns.map(column => {
           if (!readableMinimums.has(column)) readableMinimums.set(column, Number(column.width ?? column.minWidth ?? 80))
           return readableMinimums.get(column)!
         })
-        const widths = savedWidths(preferenceKey(root, elementSchema(table)), columns.length) ?? minimums
-        const fitted = readableColumnWidths(widths, minimums, space, columns.map(hasFixedWidth))
+        const fitted = fitColumnWidths(readableColumnWidths(minimums, minimums, space, columns.map(hasFixedWidth)), space)
         if (fitted.some((width, index) => Math.abs(width - current[index]!) > 1)) fitElement(table, fitted)
         return
       }
-      const widths = savedWidths(preferenceKey(root, elementSchema(table)), current.length) ?? current
+      const widths = current
       // 固定宽度列与其余列在此统一分配，避免页面再次改写列宽而触发布局循环。
       const fixed = columns.map(hasFixedWidth)
       const fixedSpace = current.reduce((sum, width, index) => sum + (fixed[index] ? width : 0), 0)
@@ -184,7 +202,7 @@ export function installColumnResize(app: App, owner: Document = document) {
   function enableElementColumns(this: ComponentPublicInstance) {
     if (this.$options.name !== 'ElTableColumn') return
     const instance = this.$ as typeof this.$ & { columnConfig: Ref<{ resizable: boolean; className?: string }> }
-    instance.columnConfig.value.resizable = !hasFixedWidth(instance.columnConfig.value)
+    instance.columnConfig.value.resizable = true
   }
   app.mixin({ mounted() { enableElementColumns.call(this); enableElementTable.call(this); scheduleRestore() }, updated() { enableElementColumns.call(this); fitters.get(this)?.(); scheduleRestore() }, unmounted() { observers.get(this)?.disconnect(); fitters.delete(this) } })
   restoreTables()
@@ -197,8 +215,6 @@ export function installColumnResize(app: App, owner: Document = document) {
     if (!(event.target instanceof Element)) return null
     const header = event.target.closest<HTMLElement>('thead th, .pdm-gantt-info-head > span, .pdm-project-browser-table-head > span')
     if (!header) return null
-    const column = header.closest('table')?.querySelector('colgroup')?.children[(header as HTMLTableCellElement).cellIndex] as HTMLElement | undefined
-    if (column?.dataset.pdmFixedWidth) return null
     const rect = header.getBoundingClientRect()
     return rect.width > 0 && rect.right - event.clientX >= 0 && rect.right - event.clientX <= 7 ? header : null
   }
@@ -226,11 +242,11 @@ export function installColumnResize(app: App, owner: Document = document) {
       root = elementRoot; schema = elementSchema(table)
       index = columns.findIndex(column => header.classList.contains(column.id))
       if (index < 0) return
-      if (hasFixedWidth(columns[index]!)) return
-      const space = elementRoot.clientWidth - (table.layout.scrollY.value ? table.layout.gutterWidth : 0)
-      const total = columns.reduce((sum, column) => sum + (column.realWidth ?? Number(column.width ?? column.minWidth ?? 80)), 0)
-      widths = columns.map(column => (column.realWidth ?? Number(column.width ?? column.minWidth ?? 80)) * (elementRoot.dataset.pdmColumnLayout === 'scroll' ? 1 : space / total))
-      apply = values => { fittedTables.add(elementRoot); elementRoot.classList.add('pdm-fit-columns'); fitElement(table, values) }
+      widths = columns.map(column => column.realWidth ?? Number(column.width ?? column.minWidth ?? 80))
+      apply = values => {
+        manualWidths.set(elementRoot, { key: preferenceKey(root, schema), schema: JSON.stringify(schema), widths: values })
+        elementRoot.classList.add('pdm-fit-columns'); fitElement(table, values)
+      }
     } else if (browserList) {
       const head = header.parentElement!
       root = browserList; schema = [...head.children].map(cell => label(cell.textContent ?? ''))
@@ -254,9 +270,7 @@ export function installColumnResize(app: App, owner: Document = document) {
         if (position.span === 1) widths[position.start] = cell.getBoundingClientRect().width
       }
       if (widths.some(width => width <= 0)) return
-      const total = widths.reduce((sum, width) => sum + width, 0)
-      const space = Math.max(availableWidth(table.parentElement!), table.clientWidth)
-      widths = widths.map(width => width * space / total)
+      widths = fitColumnWidths(widths, availableWidth(table.parentElement!))
       const position = positions.get(header as HTMLTableCellElement)!
       index = position.start + position.span - 1
       apply = values => applyHtml(table, structure, values)
@@ -264,19 +278,14 @@ export function installColumnResize(app: App, owner: Document = document) {
     event.preventDefault()
     event.stopImmediatePropagation()
     suppressClick = true
-    const minimums = elementRoot?.dataset.pdmColumnLayout === 'scroll'
-      ? elementTables.get(elementRoot)!.store.states.columns.value.map(column => readableMinimums.get(column) ?? minimumWidth) : undefined
-    drag = { root, key: preferenceKey(root, schema), startX: event.clientX, widths, minimums, index, apply }
+    drag = { root, key: preferenceKey(root, schema), startX: event.clientX, widths, index, apply }
     owner.documentElement.classList.add('pdm-column-resizing')
   }
 
   function move(event: PointerEvent) {
     if (drag) {
       event.preventDefault()
-      if (drag.minimums) {
-        drag.current = [...drag.widths]
-        drag.current[drag.index] = Math.max(drag.minimums[drag.index]!, drag.widths[drag.index]! + event.clientX - drag.startX)
-      } else drag.current = resizeToFit(drag.widths, drag.index, event.clientX - drag.startX)
+      drag.current = resizeColumn(drag.widths, drag.index, event.clientX - drag.startX)
       drag.apply(drag.current)
       return
     }

@@ -4,6 +4,28 @@ namespace Upton.Pdm.Application;
 
 public static class BomDrawingRevision
 {
+    public static bool SamePublishedSource(BomItem item, BomItem frozen) => !frozen.IsManuallyExcluded && !frozen.IsReleaseExcluded && !frozen.IsPendingClassification
+        && BomReleaseAggregation.MaterialKey(item) == BomReleaseAggregation.MaterialKey(frozen)
+        && (item.Id==frozen.Id || item.ReleaseTrackingId!=Guid.Empty && (item.ReleaseTrackingId==frozen.Id || item.ReleaseTrackingId==frozen.ReleaseTrackingId)
+            || frozen.ReleaseTrackingId!=Guid.Empty && item.Id==frozen.ReleaseTrackingId
+            || (item.SummaryItemIds ?? []).Append(item.Id).Intersect((frozen.SummaryItemIds ?? []).Append(frozen.Id)).Any());
+
+    public static string? PublishedBomVersion(BomItem item, IReadOnlyList<ReleasePackage> packages, IReadOnlyList<BomVersion> versions)
+    {
+        if(item.Kind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical))return null;
+        static string Label(string value)=>System.Text.RegularExpressions.Regex.Replace(value.Trim(),@"-B(?=\d+$)","-V");
+        foreach(var package in packages.Where(package=>package.State==ReleasePackageState.Published).OrderByDescending(package=>package.PublishedAt??package.CreatedAt))
+        {
+            var snapshot=item.Kind==BomKind.Standard?package.StandardBomSnapshot:item.Kind==BomKind.Electrical?package.ElectricalBomSnapshot:package.NonStandardBomSnapshot;
+            if(!snapshot.Any(frozen=>SamePublishedSource(item,frozen)))continue;
+            var id=item.Kind==BomKind.Standard?package.StandardBomVersionId:item.Kind==BomKind.Electrical?package.ElectricalBomVersionId:package.NonStandardBomVersionId;
+            var revision=item.Kind==BomKind.Standard?package.StandardBomRevision:item.Kind==BomKind.Electrical?package.ElectricalBomRevision:package.NonStandardBomRevision;
+            return !string.IsNullOrWhiteSpace(revision)?Label(revision):versions.FirstOrDefault(version=>version.Id==id) is {} version?Label(version.Label):"待核对:"+package.Id;
+        }
+        var released=versions.Where(version=>version.State==BomVersionState.Released && version.Kind==item.Kind).OrderByDescending(version=>version.VersionNumber)
+            .FirstOrDefault(version=>version.Items.Any(frozen=>SamePublishedSource(item,frozen)));
+        return released is null?null:Label(released.Label);
+    }
     public static void ValidateDrawingProperties(DocumentVersion version, string targetRevision, string fileName)
     {
         foreach (var property in version.PropertySnapshot.Where(property =>
@@ -60,8 +82,7 @@ public static class BomDrawingRevision
                 .Where(package => package.State == ReleasePackageState.Published)
                 .OrderByDescending(package => package.PublishedAt ?? package.CreatedAt).ToArray();
             foreach (var package in packages[projectId]) publishedIds.Add(package.Id);
-            if (items.Any(item => item.ProjectId == projectId && item.Kind is BomKind.Standard or BomKind.Electrical))
-                versions[projectId] = (await repository.ListBomVersionsAsync(projectId, null, ct))
+            versions[projectId] = (await repository.ListBomVersionsAsync(projectId, null, ct))
                     .Where(version => version.State == BomVersionState.Released).OrderByDescending(version => version.VersionNumber).ToArray();
         }
         var histories = new Dictionary<Guid, IReadOnlyList<DocumentVersion>>();
@@ -72,13 +93,12 @@ public static class BomDrawingRevision
                     || version.ReleasePackageId.HasValue && publishedIds.Contains(version.ReleasePackageId.Value)).ToArray();
         return items.Select(item =>
         {
+            var publication=PublishedBomVersion(item,packages[item.ProjectId],versions[item.ProjectId]);
+            item = item with { IsPublishedInBom = publication is not null, BomPublishedVersion=publication };
             var label = ForHistory(item, item.SourceDocumentId is Guid id && histories.TryGetValue(id, out var history) ? history : []);
             if (item.Kind is not (BomKind.Standard or BomKind.Electrical) || !string.IsNullOrWhiteSpace(label) && label is not ("未发布" or "—"))
                 return item with { DisplayRevision = label };
-            bool Matches(BomItem frozen) => !frozen.IsManuallyExcluded && !frozen.IsReleaseExcluded && !frozen.IsPendingClassification
-                && (!string.IsNullOrWhiteSpace(item.DrawingNumber)
-                    ? BomReleaseAggregation.MaterialKey(item) == BomReleaseAggregation.MaterialKey(frozen)
-                    : item.Id == frozen.Id);
+            bool Matches(BomItem frozen) => SamePublishedSource(item, frozen);
             var releasedVersions = versions.GetValueOrDefault(item.ProjectId) ?? [];
             foreach (var package in packages[item.ProjectId])
             {

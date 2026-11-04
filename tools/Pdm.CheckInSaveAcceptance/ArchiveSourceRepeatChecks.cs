@@ -28,7 +28,7 @@ internal static partial class Program
    object Node(string file){var node=New("CadTreeNode");Set(node,"FullPath",file);Set(node,"FileName",Path.GetFileName(file));Set(node,"Kind",Enum.Parse(Type("CadDocumentKind"),"Assembly"));Set(node,"Configuration","Default");Set(node,"DrawingVersion","V1");return node;}
    var node=Node(path);Set(node,"DocumentId",document);Set(node,"ProvenanceDocumentId",document);Set(node,"ProvenanceProjectId",project);Set(node,"StoredVersionStateKnown",true);Set(node,"HasStoredVersion",true);
    Type("PdmAddin").GetMethod("RestorePersistedDocumentIdentities",Flags).Invoke(null,new[]{node});
-   Check(Get(node,"DocumentId")==null&&(string)Get(node,"DrawingVersion")=="V1","复现再次进入存档时仍显示V1、共享源身份恢复为外部来源的旧行为");
+   Check(Equals(Get(node,"DocumentId"),document)&&(string)Get(node,"DrawingVersion")=="V1","项目回执不再写入通用源文件登记，已有内存编号保留待目标项目核对");
    var restore=Type("ArchiveSourceIdentity").GetMethod("RestoreForProject",Flags);
    restore.Invoke(null,new object[]{node,project});
    Check(Equals(Get(node,"DocumentId"),document)&&Equals(Get(node,"OpenedVersionId"),versionId),"同项目原路径按成功回执恢复已有图档及版本身份");

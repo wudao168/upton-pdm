@@ -34,7 +34,10 @@ public sealed record MaterialRelationChoice(
     bool ConfirmNoAccessory = false,
     string? NoAccessoryReason = null);
 
-public sealed record ApplyMaterialRelationsCommand(Guid MainBomItemId, IReadOnlyList<MaterialRelationChoice> Choices);
+public sealed record MaterialRelationAllocationCommand(Guid Id, string Name, decimal Quantity, IReadOnlyList<MaterialRelationChoice> Choices);
+
+public sealed record ApplyMaterialRelationsCommand(Guid MainBomItemId, IReadOnlyList<MaterialRelationChoice> Choices,
+    IReadOnlyList<MaterialRelationAllocationCommand>? Allocations = null);
 
 public sealed record MaterialRelationGroupCheck(
     Guid GroupId,
@@ -51,7 +54,10 @@ public sealed record MaterialRelationGroupCheck(
     string? ReviewReason,
     string? ReviewedBy,
     DateTimeOffset? ReviewedAt,
-    IReadOnlyList<MaterialRelationOption> Options);
+    IReadOnlyList<MaterialRelationOption> Options)
+{
+    public IReadOnlyDictionary<Guid,Guid> AccessoryBomItemIds { get; init; } = new Dictionary<Guid,Guid>();
+}
 
 public sealed record MaterialRelationMainCheck(
     Guid MainBomItemId,
@@ -62,7 +68,11 @@ public sealed record MaterialRelationMainCheck(
     Guid RevisionId,
     int RevisionVersion,
     bool IsComplete,
-    IReadOnlyList<MaterialRelationGroupCheck> Groups);
+    IReadOnlyList<MaterialRelationGroupCheck> Groups)
+{
+    public int BomSequence { get; init; }
+    public IReadOnlyList<MaterialRelationAllocation> Allocations { get; init; } = [];
+}
 
 public sealed record MaterialRelationCompleteness(
     Guid ProjectId,
@@ -77,6 +87,8 @@ public interface IMaterialRelationRepository
     Task<MaterialRelationTemplate> SaveDraftAsync(Guid? templateId, SaveMaterialRelationTemplateCommand command, string mainMaterialCode, string mainMaterialName, IReadOnlyList<MaterialRelationGroup> groups, string actor, DateTimeOffset now, CancellationToken cancellationToken, IReadOnlyList<MaterialRelationMainMaterial>? mainMaterials = null);
     Task<MaterialRelationTemplate> PublishAsync(Guid templateId, Guid revisionId, long expectedRowVersion, string actor, DateTimeOffset now, CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialRelationSelection>> ListSelectionsAsync(Guid projectId, CancellationToken cancellationToken);
+    async Task<IReadOnlyList<Guid>> ListRelatedMainBomItemIdsAsync(Guid projectId, IReadOnlyCollection<Guid> accessoryIds, CancellationToken ct) =>
+        (await ListSelectionsAsync(projectId, ct)).Where(item => accessoryIds.Contains(item.AccessoryBomItemId)).Select(item => item.MainBomItemId).Distinct().ToArray();
     Task ReplaceSelectionsAsync(Guid projectId, Guid mainBomItemId, IReadOnlyList<MaterialRelationSelection> selections, CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialRelationReview>> ListReviewsAsync(Guid projectId, CancellationToken cancellationToken);
     Task ReplaceReviewsAsync(Guid projectId, Guid mainBomItemId, IReadOnlyList<MaterialRelationReview> reviews, CancellationToken cancellationToken);
@@ -85,4 +97,6 @@ public interface IMaterialRelationRepository
 public interface IMaterialRelationReleaseGuard
 {
     Task EnsureCompleteAsync(Guid projectId, CancellationToken cancellationToken);
+    Task EnsureCompleteAsync(Guid projectId, IReadOnlyCollection<Guid> selectedBomItemIds, CancellationToken cancellationToken) =>
+        EnsureCompleteAsync(projectId, cancellationToken);
 }

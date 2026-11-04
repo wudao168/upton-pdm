@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import UserSelect from './UserSelect'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ChevronLeft, ChevronRight, Clock, Download, Plus, RefreshCw } from '@lucide/vue'
+import { ChevronLeft, ChevronRight, Download, Plus, RefreshCw } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { ElMessage } from '../statusMessage'
 import { userErrorMessage } from '../userErrorMessage'
@@ -396,9 +396,6 @@ void loadGlobalStatusContent().then(data => { holidays.value = new Map(data.holi
     <p v-if="error" class="wh-error" role="alert">{{ error }} <button @click="tab === 'entry' ? loadOwn() : loadReport()">重试</button></p>
     <p v-if="calendarError" class="wh-warning" role="status">{{ calendarError }}</p>
     <template v-if="tab === 'entry'">
-      <header class="wh-toolbar">
-        <div class="wh-title"><Clock :size="17" /><strong>我的工时</strong><span>{{ own?.displayName }}</span></div>
-      </header>
       <div class="wh-summary"><span>本月累计 <b>{{ number(monthHours) }}</b> 小时</span><span>已填 <b>{{ new Set(monthEntries.map(x => x.date)).size }}</b> 天</span><button :disabled="!missed.length" @click="selectDay(missed[0]!)">未填工作日 <b>{{ missed.length }}</b> 天</button><button :disabled="!incomplete.length" @click="selectDay(incomplete[0]!)">填写不足 <b>{{ incomplete.length }}</b> 天</button><span>按工时设置中的应填名单检查</span><button @click="showHistory">修改记录</button>
         <div class="wh-summary-controls">
           <div class="wh-controls"><button aria-label="上一期" @click="move(-1)"><ChevronLeft :size="15" /></button><strong>{{ mode === 'calendar' ? month.slice(0, 7) : `${week[0]} 至 ${week[6]}` }}</strong><button aria-label="下一期" @click="move(1)"><ChevronRight :size="15" /></button><button @click="selectDay(today)">回到今天</button><button :disabled="loading || saving || dirty" @click="loadOwn"><RefreshCw :size="14" />刷新</button></div>

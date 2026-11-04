@@ -1,8 +1,62 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import MyTasks from '../src/components/MyTasks.vue'
+import type { MyApprovalTask, UserNotification } from '../src/types'
 
 describe('MyTasks', () => {
+  it('同一发布审批通知与待办合为一条，已读及全部已读后仍保留待审批，完成后可查看历史', async () => {
+    const task: MyApprovalTask = { id: 'approval-1', projectId: 'project-1', projectCode: 'P700016-4', projectName: '1111',
+      releasePackageId: 'release-1', releasePackageNumber: 'RP-P700016-4-001', stage: 'MainDesigner', packageState: 'Approval', createdAt: '2026-11-04T08:06:09Z' }
+    const notification: UserNotification = { id: 'notice-1', recipient: 'engineer', category: 'ReleaseApprovalPending', title: 'BOM发布待审批',
+      content: 'P700016-4 · RP-P700016-4-001 待您审批', projectId: task.projectId, releasePackageId: task.releasePackageId,
+      sourceKey: 'approval-round-1', createdAt: '2026-11-04T08:06:28Z' }
+    const wrapper = mount(MyTasks, { props: { tasks: [task], notifications: [notification], locks: [], materialCodeTasks: [], passwordResetTasks: [], pending: false,
+      onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn() } })
+    const tab = (name: string) => wrapper.findAll('[role="tab"]').find(button => button.text().startsWith(name))!
+    expect(tab('全部待办').text()).toBe('全部待办（1）')
+    expect(tab('审批任务').text()).toBe('审批任务（1）')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    expect(wrapper.get('tbody tr').text()).toContain('待审批')
+    expect(wrapper.get('tbody tr').text()).toContain('RP-P700016-4-001')
+    await wrapper.get('tbody .pdm-text-action').trigger('click')
+    expect(wrapper.emitted('openNotification')).toEqual([[notification]])
+    await wrapper.setProps({ notifications: [{ ...notification, readAt: '2026-11-04T08:07:00Z' }] })
+    expect(tab('审批任务').text()).toBe('审批任务（1）')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    await wrapper.get('.pdm-history-toggle input').setValue(true)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+    await wrapper.setProps({ tasks: [] })
+    expect(tab('全部待办').text()).toBe('全部待办（0）')
+    expect(wrapper.get('tbody tr').text()).toContain('已读')
+    await wrapper.get('.pdm-history-toggle input').setValue(false)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('重复及重提提醒只与对应发布包合并，其他发布包和退回通知继续独立显示', async () => {
+    const task: MyApprovalTask = { id: 'approval-1', projectId: 'project-1', projectCode: 'P001', projectName: '项目一',
+      releasePackageId: 'release-1', releasePackageNumber: 'RP-001', stage: 'Approval', packageState: 'Approval', createdAt: '2026-11-03T08:00:00Z' }
+    const notice: UserNotification = { id: 'old', recipient: 'engineer', category: 'ReleaseApprovalPending', title: 'BOM发布待审批', content: '待您审批',
+      projectId: task.projectId, releasePackageId: task.releasePackageId, sourceKey: 'old', createdAt: '2026-11-04T08:00:00Z', readAt: '2026-11-04T08:01:00Z' }
+    const retry = { ...notice, id: 'retry', sourceKey: 'retry', title: 'BOM发布已重新提交审批', createdAt: '2026-11-04T09:00:00Z', readAt: undefined }
+    const wrapper = mount(MyTasks, { props: { tasks: [task, { ...task, id: 'approval-2', releasePackageId: 'release-2', releasePackageNumber: 'RP-002' }],
+      notifications: [retry, { ...notice, id: 'duplicate', readAt: undefined }, notice,
+        { ...notice, id: 'other', releasePackageId: 'release-3', title: '其他发布包', readAt: undefined },
+        { ...notice, id: 'rejected', category: 'ReleaseApprovalRejected', title: '发布审批已退回', readAt: undefined }],
+      locks: [], materialCodeTasks: [], passwordResetTasks: [], pending: false, onRequestRelease: vi.fn(), onForceRelease: vi.fn(), onResetPassword: vi.fn() } })
+    expect(wrapper.get('[role="tab"]').text()).toBe('全部待办（4）')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(4)
+    const merged = wrapper.findAll('tbody tr').find(row => row.text().includes('RP-001'))!
+    expect(merged.text()).toContain('待审批')
+    await merged.trigger('click')
+    expect(wrapper.emitted('openNotification')).toEqual([[retry]])
+    await wrapper.get('.pdm-history-toggle input').setValue(true)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(4)
+    expect(wrapper.get('tbody').text()).toContain('其他发布包')
+    expect(wrapper.get('tbody').text()).toContain('发布审批已退回')
+    wrapper.unmount()
+  })
+
   it('发送回执保留在历史中并显示已发送，自己被指派的事项继续计入待办', async () => {
     const wrapper = mount(MyTasks, { props: { tasks: [], notifications: [
       { id: 'sent', recipient: 'sender', category: 'ProjectTodo', title: '日历待办 · sender', content: '已发送他人的任务', sourceKey: 'sent', createdAt: '2026-11-01T01:00:00Z', readAt: '2026-11-01T01:00:00Z', isSenderReceipt: true },

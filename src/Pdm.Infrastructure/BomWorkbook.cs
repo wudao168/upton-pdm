@@ -63,8 +63,17 @@ public static class BomWorkbook
         return WriteCore(released, totals.ToDictionary(entry => entry.Key, entry => entry.Value.PriorReleasedQuantity), totals);
     }
 
+    public static byte[] WriteSupplementRelease(IReadOnlyList<BomItem> items, IReadOnlyList<ReleaseQuantityLine> quantities)
+    {
+        var groups=items.GroupBy(BomReleaseAggregation.MaterialKey).ToDictionary(group=>group.Key,group=>group.First() with{Quantity=group.Sum(item=>item.Quantity),ParentDrawingNumber=null});
+        var rows=quantities.Select((line,index)=>groups.GetValueOrDefault(line.MaterialKey)
+            ??new BomItem(Guid.Empty,Guid.Empty,line.Kind,index+1,line.MaterialCode,line.Name,0,line.UnitCode,null,null,"",true)).ToArray();
+        return WriteCore(rows,null,releaseQuantities:quantities.ToDictionary(line=>line.MaterialKey));
+    }
+
     private static byte[] WriteCore(IReadOnlyList<BomItem> items, IReadOnlyDictionary<string, decimal>? priorQuantities,
-        IReadOnlyDictionary<string, ProductionDrawingBomQuantity>? productionQuantities = null)
+        IReadOnlyDictionary<string, ProductionDrawingBomQuantity>? productionQuantities = null,
+        IReadOnlyDictionary<string, ReleaseQuantityLine>? releaseQuantities = null)
     {
         using var output = new MemoryStream();
         using (var archive = new ZipArchive(output, ZipArchiveMode.Create, true))
@@ -105,7 +114,8 @@ public static class BomWorkbook
             writer.WriteStartElement("sheetData");
             var headers = priorQuantities is null ? Headers
                 : Headers.Select(header => header == "数量" ? "BOM总量" : header).Concat(["已提前发布", "本次新增下发"]).ToArray();
-            if (productionQuantities is not null) headers = [.. headers, "单套数量", "整套数量"];
+            if (productionQuantities is not null) headers = [.. headers.Select(header=>header=="已提前发布"?"前期已发布":header), "单套数量", "整套数量"];
+            if (releaseQuantities is not null) headers = [.. Headers.Select(header=>header=="数量"?"BOM目标总量":header),"前次基线总量","首次提前抵扣","需求净变更","新增需求","减少需求"];
             WriteRow(writer, 1, headers.Select(header => header == "版本" ? "发布版本" : header).Cast<object?>().ToArray());
             var rowNumber = 2;
             foreach (var item in items.OrderBy(item => item.Sequence))
@@ -120,6 +130,11 @@ public static class BomWorkbook
                 {
                     var quantity = productionQuantities[BomReleaseAggregation.MaterialKey(item)];
                     values = [.. values, quantity.SingleSetQuantity, quantity.WholeSetMultiplier];
+                }
+                if(releaseQuantities is not null)
+                {
+                    var quantity=releaseQuantities[BomReleaseAggregation.MaterialKey(item)];
+                    values=[..values,quantity.PreviousBaselineQuantity,quantity.EarlyReleasedCredit,quantity.DemandChange,quantity.NewDemand,quantity.ReducedDemand];
                 }
                 WriteRow(writer, rowNumber++, values);
             }

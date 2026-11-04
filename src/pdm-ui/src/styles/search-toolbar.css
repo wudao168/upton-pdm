@@ -1,0 +1,99 @@
+/* Search rows: 34px controls, 5px top/bottom and control gaps. Widths remain page-owned. */
+:root body .pdm-search-field:not(.mobile-office .pdm-search-field) {
+  --pdm-search-height: 34px !important;
+  height: 34px !important;
+  min-height: 34px !important;
+  max-height: 34px !important;
+  padding-block: 0 !important;
+}
+
+:root body :is(
+  .opl-filters, .release-opl-filters, .pdm-bom-selection-toolbar,
+  .material-toolbar, .standard-library__toolbar, .stocked-toolbar,
+  .production-workbench__tree-search, .production-workbench__trace-filters,
+  .production-drawings__filters, .production-suppliers__filters,
+  .procurement-tracking__heading, .pdm-project-list-toolbar,
+  .pdm-plan-filters, .pc-toolbar, .application-toolbar, .pdm-file-filters,
+    .pdm-crm-customer-list > .pdm-panel-heading, .production-opening__picker,
+  .engineering-kit-library__toolbar, .material-relation-directory__toolbar,
+  .bom-header-directory__toolbar, .program-template-toolbar,
+  .pdm-audit-record-filters, .user-directory-actions, .pdm-project-browser-search,
+  .pdm-tree-search-row, .drawing-review-scope__search, .pdm-material-reference-search,
+  .validation-selector__filter, .eligible-filters, .eligible-material-filters,
+  .login-security .actions.search,
+  .pdm-toolbar:has(> .pdm-search-field)
+) {
+  --pdm-control-height: 34px;
+  --pdm-button-default: 34px;
+  --pdm-symbol-toolbar: 34px;
+  --el-component-size: 34px;
+  box-sizing: border-box;
+  min-height: 44px !important;
+  height: auto !important;
+  max-height: none !important;
+  padding-block: 5px !important;
+  margin-block: 0 !important;
+  align-items: center !important;
+  gap: 5px !important;
+}
+
+@layer pdm-business {
+  :root body :is(
+    .opl-filters, .release-opl-filters, .pdm-bom-selection-toolbar,
+    .material-toolbar, .standard-library__toolbar, .stocked-toolbar,
+    .production-workbench__tree-search, .production-workbench__trace-filters,
+    .production-drawings__filters, .production-suppliers__filters,
+    .procurement-tracking__heading, .pdm-project-list-toolbar,
+    .pdm-plan-filters, .pc-toolbar, .application-toolbar, .pdm-file-filters,
+    .pdm-crm-customer-list > .pdm-panel-heading, .production-opening__picker,
+    .engineering-kit-library__toolbar, .material-relation-directory__toolbar,
+    .bom-header-directory__toolbar, .program-template-toolbar,
+    .pdm-audit-record-filters, .user-directory-actions, .pdm-project-browser-search,
+    .pdm-tree-search-row, .drawing-review-scope__search, .pdm-material-reference-search,
+    .validation-selector__filter, .eligible-filters, .eligible-material-filters,
+    .login-security .actions.search,
+    .pdm-toolbar:has(> .pdm-search-field)
+  ) :is(
+    select, input:not([type="checkbox"], [type="radio"], [type="hidden"], .el-input__inner, .el-select__input, .el-range-input),
+    .el-input, .el-input__wrapper, .el-select, .el-select__wrapper, .el-date-editor,
+    .el-checkbox, button:not(.pdm-tabs button, [role="tablist"] button, .el-input__clear),
+    .pdm-more-actions > summary
+  ):not(.pdm-search-field *) {
+    box-sizing: border-box !important;
+    height: 34px !important;
+    min-height: 34px !important;
+    max-height: 34px !important;
+  }
+  :root body .pdm-search-field:not(.mobile-office .pdm-search-field) .pdm-search-field__action > button {
+    height: 34px !important;
+    min-height: 34px !important;
+    max-height: 34px !important;
+    border-radius: 999px !important;
+  }
+}
+
+/* The project search and its adjacent primary tabs remain on the same baseline. */
+:root body :is(.pdm-project-sidebar__context, .pdm-project-tabs) { --pdm-tabs-padding: 5px; }
+:root body .pdm-project-sidebar__context {
+  height: 44px !important;
+  flex-basis: 44px !important;
+  padding-block: 0 !important;
+}
+:root body .pdm-project-sidebar__context .pdm-project-switcher > .pdm-search-field {
+  height: 44px !important;
+  min-height: 44px !important;
+  max-height: 44px !important;
+  padding-block: 5px !important;
+}
+
+/* Search-only sidebar rows have no separate toolbar wrapper. */
+:root body :is(.wr-projects, .standard-structure__files, .validation-catalog, .pdm-approval-transfer-dialog, .el-dialog__body) > .pdm-search-field {
+  margin-block: 5px !important;
+  flex-shrink: 0;
+}
+
+/* Nested groups share the row's inset rather than adding a second one. */
+:root body :is(.pdm-project-filters, .stocked-filters, .standard-library__toolbar > .filters, .pdm-bom-filters, .pc-filters) {
+  align-items: center !important;
+  gap: 5px !important;
+}

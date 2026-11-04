@@ -31,7 +31,7 @@ internal sealed class ProjectAdmissionConfirmationDialog : Form
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
         layout.Controls.Add(new Label
         {
             Text = "请核对本次新增图档的目标项目，确认后才会开始执行。",
@@ -40,8 +40,8 @@ internal sealed class ProjectAdmissionConfirmationDialog : Form
             Margin = new Padding(0, 0, 0, 14)
         }, 0, 0);
 
-        var execute = new AdmissionButton { Text = "确认归属", DialogResult = DialogResult.OK, Width = 150, Height = 60, Enabled = false };
-        var confirmProject = new AdmissionButton { Text = "确认", Width = 150, Height = 60, Anchor = AnchorStyles.None, Margin = new Padding(4, 2, 4, 2) };
+        var execute = new AdmissionButton { Text = "确认归属", DialogResult = DialogResult.OK, Width = 105, Height = 42, Enabled = false };
+        var confirmProject = new AdmissionButton { Text = "确认", Width = 105, Height = 42, Anchor = AnchorStyles.None, Margin = new Padding(4, 2, 4, 2) };
         ApplyCommandButtonAppearance(confirmProject, Color.FromArgb(230, 126, 34), Color.Black);
         confirmProject.Click += (_, _) =>
         {
@@ -56,13 +56,13 @@ internal sealed class ProjectAdmissionConfirmationDialog : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 3,
-            RowCount = 9,
+            RowCount = 10,
             CellBorderStyle = TableLayoutPanelCellBorderStyle.Single,
             Margin = Padding.Empty
         };
         details.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
         details.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        details.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
+        details.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 115));
         var mainProject = project.ParentProjectId.HasValue ? parentProject : project;
         AddDetail(details, 0, "主项目号", mainProject?.Code);
         AddDetail(details, 1, "主项目名称", mainProject?.Name);
@@ -72,18 +72,19 @@ internal sealed class ProjectAdmissionConfirmationDialog : Form
         AddDetail(details, 5, "项目状态", FirstConfigured(project.BusinessStatus, mainProject?.BusinessStatus));
         AddDetail(details, 6, "主设", ProjectDesignLeads(project, userDisplayNames));
         AddDetail(details, 7, "工程师", JoinConfigured(project.Designers, userDisplayNames));
-        AddDetail(details, 8, "本次新增图档", string.Concat(documentCount, " 个"));
+        AddCountDetail(details, 8, "现有图档", project.DocumentCount);
+        AddCountDetail(details, 9, "本次新增图档", documentCount);
         layout.Controls.Add(details, 0, 1);
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Margin = Padding.Empty, Padding = new Padding(0, 8, 0, 0) };
-        var cancel = new AdmissionButton { Text = "返回修改", DialogResult = DialogResult.Cancel, Width = 150, Height = 60 };
+        var cancel = new AdmissionButton { Text = "返回修改", DialogResult = DialogResult.Cancel, Width = 105, Height = 42 };
         ApplyCommandButtonAppearance(execute, Color.FromArgb(21, 126, 77), Color.White);
         ApplyCommandButtonAppearance(cancel, Color.FromArgb(224, 224, 224), Color.Black);
         buttons.Controls.Add(execute);
         buttons.Controls.Add(cancel);
         buttons.SizeChanged += (_, _) =>
         {
-            var height = buttons.ClientSize.Width < execute.Width + cancel.Width + execute.Margin.Horizontal + cancel.Margin.Horizontal ? 148 : 84;
+            var height = buttons.ClientSize.Width < execute.Width + cancel.Width + execute.Margin.Horizontal + cancel.Margin.Horizontal ? 116 : 66;
             if (layout.RowStyles[2].Height != height) layout.RowStyles[2].Height = height;
         };
         layout.Controls.Add(buttons, 0, 2);
@@ -93,9 +94,16 @@ internal sealed class ProjectAdmissionConfirmationDialog : Form
         CancelButton = cancel;
     }
 
-    private static void AddDetail(TableLayoutPanel details, int row, string name, string value, Control action = null)
+    private static void AddCountDetail(TableLayoutPanel details, int row, string name, int? count)
     {
-        details.RowStyles.Add(action == null ? new RowStyle(SizeType.Percent, 100F / 8F) : new RowStyle(SizeType.Absolute, 68));
+        var label = AddDetail(details, row, name, count.HasValue ? string.Concat(count.Value, " 个") : "待核对");
+        label.ForeColor = Color.FromArgb(230, 126, 34);
+        label.Font = new Font("Microsoft YaHei UI", 10.8F, FontStyle.Bold);
+    }
+
+    private static Label AddDetail(TableLayoutPanel details, int row, string name, string value, Control action = null)
+    {
+        details.RowStyles.Add(action == null ? new RowStyle(SizeType.Percent, 100F / 9F) : new RowStyle(SizeType.Absolute, 50));
         details.Controls.Add(new Label
         {
             Text = name,
@@ -123,6 +131,7 @@ internal sealed class ProjectAdmissionConfirmationDialog : Form
         {
             details.Controls.Add(action, 2, row);
         }
+        return valueLabel;
     }
 
     private static string ProjectDesignLeads(ProjectDto project, IReadOnlyDictionary<string, string> userDisplayNames)
@@ -169,7 +178,7 @@ internal sealed class ProjectAdmissionConfirmationDialog : Form
 
     private sealed class AdmissionButton : Button
     {
-        internal AdmissionButton() => Font = new Font("Microsoft YaHei UI", 18F);
+        internal AdmissionButton() => Font = new Font("Microsoft YaHei UI", 12.6F);
 
         protected override void OnPaint(PaintEventArgs e)
         {

@@ -22,6 +22,7 @@ internal sealed class ArchiveSession : IDisposable
     private ArchiveSessionWindow window;
     private readonly ConcurrentQueue<ProgressUpdate> progressUpdates = new ConcurrentQueue<ProgressUpdate>();
     private int finished;
+    private int cancelledBeforeSubmission;
     private int phase = 1;
     public int Phase => Volatile.Read(ref phase);
     private readonly object progressSync = new object();
@@ -248,11 +249,15 @@ internal sealed class ArchiveSession : IDisposable
         });
     }
     public void Fail(string message) => Complete(message, true);
+    public void CancelBeforeSubmission() => Interlocked.Exchange(ref cancelledBeforeSubmission, 1);
     public void FinishIfRunning() => Post(() =>
     {
         if (Interlocked.Exchange(ref finished, 1) == 0)
+        {
+            if (Volatile.Read(ref cancelledBeforeSubmission) != 0) { window.CancelBeforeSubmission(); return; }
             window.Finish(resultTitle ?? "本次存档操作已停止。", resultMessage
                 ?? "本地文件已保留。请查看本次过程记录；如已开始服务器提交，请刷新项目核对最终结果。", resultFailed);
+        }
     });
 
     public void RequestCancellation()
@@ -374,7 +379,7 @@ internal sealed class ArchiveSessionWindow : Form
         var initialActions = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40,
             FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 4, 8, 4) };
         stop.Dock = DockStyle.None; initialActions.Controls.Add(stop); selection.Controls.Add(initialActions);
-        ArchiveCommandAppearance.Apply(stop, Color.FromArgb(230, 126, 34));
+        ArchiveCommandAppearance.Apply(stop, Color.FromArgb(230, 126, 34), Color.FromArgb(224, 224, 224));
         stop.Click += (_, __) => CancelOrClose();
         Controls.Add(body);
         LayoutInformationRows();
@@ -521,6 +526,15 @@ internal sealed class ArchiveSessionWindow : Form
         stop.Text = "关闭"; stop.Enabled = true;
         (selectionForm as BatchOperationDialog)?.FinishWorkflow();
         confirmationTitle.Text = "确认区：本次操作已结束";
+    }
+
+    public void CancelBeforeSubmission()
+    {
+        Finish("本次存档已取消。", "尚未上传或升版，本地文件和修改已保留。", true);
+        resultState.Text = "已取消";
+        resultPanel.BackColor = Color.FromArgb(238, 238, 238);
+        resultState.ForeColor = Color.FromArgb(60, 60, 60);
+        progress.Text = "已取消（尚未上传）";
     }
 
     public DialogResult ShowInline(Form form, bool isSelection = false)

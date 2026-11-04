@@ -41,6 +41,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
     private bool? lastMarkupModified;
     private bool documentOpen;
     private bool documentReady;
+    private bool documentLoadFailed;
     private bool documentTransitioning;
     private bool measureResultReadFailureLogged;
     private bool disposed;
@@ -139,6 +140,11 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         LayoutOverlays();
     }
 
+    internal bool IsShowingDocument(string path) => CanUseDocument
+        && string.Equals(currentDocumentPath, Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase);
+
+    internal void PrepareViewer() => viewer.PrepareViewer();
+
     internal Task OpenDocumentAsync(string path, string? markupPath = null)
     {
         ThrowIfDisposed();
@@ -149,15 +155,16 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         documentTransitioning = true;
         documentOpen = true;
         documentReady = false;
+        documentLoadFailed = false;
         currentDocumentName = documentName;
         currentDocumentPath = Path.GetFullPath(path);
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         documentLoadCompletion = completion;
-        documentLoadTimer.Start();
         try
         {
             viewer.OpenDocument(path);
             WriteDiagnostic("open-accepted", currentDocumentPath);
+            if (!documentReady && documentLoadCompletion == completion) documentLoadTimer.Start();
         }
         catch (Exception exception)
         {
@@ -212,7 +219,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             return;
         }
 
-        if (!documentOpen
+        if (!documentOpen || documentLoadFailed
             || !MatchesCurrentDocument(fileName))
         {
             return;
@@ -466,7 +473,8 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             BeginInvoke(new Action<string, int, string>(OnDocumentFailed), fileName, errorCode, error);
             return;
         }
-        if (!documentOpen || !MatchesCurrentDocument(fileName)) return;
+        if (!documentOpen || documentLoadFailed || !MatchesCurrentDocument(fileName)) return;
+        documentLoadFailed = true;
         documentLoadTimer.Stop();
         documentReady = false;
         viewer.SetLoadingSilent(false);
@@ -1250,6 +1258,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         private object? eventSource;
         private Action<string>? documentLoadedHandler;
         private Action<string, int, string>? documentFailedHandler;
+        private bool interfacePrepared;
 
         internal EDrawingsAxHost() : base("{C59EEF21-0223-4C39-A708-A3BE9008C67E}")
         {
@@ -1269,11 +1278,21 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
         internal void OpenDocument(string path)
         {
+            PrepareViewer();
+            dynamic control = ActiveControl;
+            ApplyDocumentSafety(control);
+            SetLoadingSilent(true);
+            control.OpenDoc(path, false, false, true, string.Empty);
+        }
+
+        internal void PrepareViewer()
+        {
+            if (interfacePrepared) return;
             dynamic control = ActiveControl;
             ShowCompleteUi(control);
             ApplyDocumentSafety(control);
             SetLoadingSilent(true);
-            control.OpenDoc(path, false, false, true, string.Empty);
+            interfacePrepared = true;
         }
 
         internal void SetLoadingSilent(bool enabled)

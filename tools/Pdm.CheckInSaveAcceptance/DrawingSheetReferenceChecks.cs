@@ -121,11 +121,11 @@ internal static partial class Program
  }
  sealed class SheetReferenceModelProxy:RealProxy,IRemotingTypeInfo
  {
-  readonly System.Type modelType;readonly bool drawing;readonly Func<IMethodCallMessage,object> callback;
-  public SheetReferenceModelProxy(System.Type modelType,bool drawing,Func<IMethodCallMessage,object> callback):base(modelType){this.modelType=modelType;this.drawing=drawing;this.callback=callback;}
+  readonly System.Type modelType;readonly bool drawing,events;readonly Func<IMethodCallMessage,object> callback;
+  public SheetReferenceModelProxy(System.Type modelType,bool drawing,Func<IMethodCallMessage,object> callback,bool events=false):base(modelType){this.modelType=modelType;this.drawing=drawing;this.callback=callback;this.events=events;}
   public string TypeName{get;set;}
   public bool CanCastTo(System.Type type,object value)=>type==typeof(object)||type.Namespace=="SolidWorks.Interop.sldworks"
-   &&(type.Name=="ModelDoc2"||type.Name=="IModelDoc2"||drawing&&(type.Name=="DrawingDoc"||type.Name=="IDrawingDoc"));
+   &&(type.Name=="ModelDoc2"||type.Name=="IModelDoc2"||drawing&&(type.Name=="DrawingDoc"||type.Name=="IDrawingDoc"||events&&type.Name=="DDrawingDocEvents_Event"));
   public override IMessage Invoke(IMessage message)
   {
    var call=(IMethodCallMessage)message;

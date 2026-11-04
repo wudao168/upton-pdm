@@ -4,7 +4,7 @@ using Upton.Pdm.Infrastructure;
 
 namespace Upton.Pdm.Tests;
 
-public sealed class U9ProcurementServiceTests
+public sealed partial class U9ProcurementServiceTests
 {
     [Fact]
     public async Task SettingsUpgradeRetiredSqlPathWithoutChangingSyncSchedule()

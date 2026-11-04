@@ -17,6 +17,7 @@ public sealed partial class PdmAddin
         internal DocumentVersionDto Version;
         internal bool SyncIdentity;
         internal bool MemorySnapshot;
+        internal string[] ProtectedCachePaths;
         internal EditDraftJournal Journal;
     }
 
@@ -51,8 +52,20 @@ public sealed partial class PdmAddin
         EditDraftJournal journal = null)
         => new ArchiveLocalSyncJob { Path = path, DocumentId = documentId, ProjectId = projectId, Version = version,
             UploadCopyPath = uploadCopyPath, SourceHash = sourceHash, SyncIdentity = syncIdentity, Journal = journal,
-            ProjectCode = availableProjects.FirstOrDefault(project => project.Id == projectId)?.Code,
+            ProjectCode = availableProjects.FirstOrDefault(project => project.Id == projectId)?.Code, ProtectedCachePaths = CaptureArchiveCacheProtection(path),
             WorkspaceRoot = WorkspaceSettingsStore.GetWorkspaceRoot(), User = authenticatedUsername, Scope = apiClient?.EditJournalScope };
+
+    private string[] CaptureArchiveCacheProtection(string source)
+    {
+        try
+        {
+            var paths = CaptureLoadedCachePaths().ToList();
+            if (editJournal != null) paths.AddRange(editJournal.ReadAll().Where(entry => !entry.Closed && !PathsEqual(entry.SourcePath, source))
+                .Select(entry => entry.SourcePath));
+            return paths.ToArray();
+        }
+        catch (Exception error) { LogDiagnostic("存档后缓存占用状态未读取，保留原缓存", error); return null; }
+    }
 
     private async Task<ArchiveLocalSyncResult> RememberControlledVersionIdentityAndManifestAsync(
         string path, Guid documentId, Guid projectId, DocumentVersionDto version, string uploadCopyPath)
@@ -78,6 +91,7 @@ public sealed partial class PdmAddin
     {
         var result = new ArchiveLocalSyncResult();
         var cacheStarted = false;
+        var confirmedSource = false;
         if (job.Journal != null)
         {
             var timer = Stopwatch.StartNew();
@@ -96,23 +110,35 @@ public sealed partial class PdmAddin
                     if (!job.MemorySnapshot)
                     {
                         RememberControlledVersionIdentity(job.Path, job.DocumentId, job.ProjectId, job.Version);
-                        if (!PdmDocumentIdentityStore.TryReadLocalMetadata(job.Path, out var metadata))
+                        if (!PdmDocumentIdentityStore.TryReadArchiveMetadata(job.Path, job.ProjectId, out var metadata))
                             throw new IOException("无法读取刚写入的本地校验记录。");
                         result.Recorded = metadata;
                     }
                     else if (!PdmDocumentIdentityStore.TryWriteAssociationOnly(job.Path, job.DocumentId, job.ProjectId))
                         throw new IOException("无法记录已存档图档的本机身份关联，源文件未改写。");
+                    if (job.MemorySnapshot)
+                        confirmedSource = ConfirmedArchiveSource.Record(job.WorkspaceRoot, ConfirmedArchiveSource.UserScope(job.Scope, job.User), job.Path,
+                            job.DocumentId, job.ProjectId, job.Version, job.SourceHash);
                 }
                 finally { LogOperation("存档结果同步分段：核对源文件并写入版本记录；文件=" + job.Path + "；耗时毫秒=" + timer.ElapsedMilliseconds); }
                 if (!string.IsNullOrWhiteSpace(job.ProjectCode))
                 {
                     cacheStarted = true;
                     timer.Restart();
+                    var synchronized = ControlledWorkspaceManager.SynchronizeConfirmedCache(job.WorkspaceRoot, job.ProjectCode, job.Path,
+                        job.DocumentId, job.ProjectId, job.Version, job.UploadCopyPath, job.SourceHash, job.ProtectedCachePaths);
+                    if (synchronized && job.MemorySnapshot && PdmDocumentIdentityStore.TryReadLocalMetadata(job.Path, out var current)
+                        && current.DocumentId == job.DocumentId && current.ProjectId == job.ProjectId && current.VersionId == job.Version.Id
+                        && string.Equals(current.Sha256, job.Version.Sha256, StringComparison.OrdinalIgnoreCase)) result.Recorded = current;
                     var cached = CacheCheckedInVersionInProjectViewCore(job.WorkspaceRoot, job.ProjectCode, job.Path,
                         job.DocumentId, job.ProjectId, job.Version, job.UploadCopyPath);
                     LogOperation("存档结果同步分段：核对并同步本地缓存；文件=" + job.Path + "；复用上传副本="
                         + !string.IsNullOrWhiteSpace(job.UploadCopyPath) + "；耗时毫秒=" + timer.ElapsedMilliseconds);
-                    if (string.IsNullOrWhiteSpace(cached)) throw new IOException("工作区缓存未同步，已有副本可能包含尚未保存到服务器的内容。");
+                    if (string.IsNullOrWhiteSpace(cached))
+                    {
+                        if (!confirmedSource) throw new IOException("工作区缓存未同步，已有副本可能包含尚未保存到服务器的内容。");
+                        result.Warning = Path.GetFileName(job.Path) + "：已存档，当前窗口和原文件已保留；下次从工作区打开时自动核对并同步缓存。";
+                    }
                     if (!PathsEqual(cached, job.Path)) LogOperation("Checked-in file cached in project workspace source=" + job.Path + " target=" + cached);
                 }
             }

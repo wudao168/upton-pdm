@@ -61,17 +61,17 @@ public sealed partial class PdmAddin
         for (var attempt = 0; attempt < (nativeFirst ? 2 : 1); attempt++)
         {
             var prepareReferences = !nativeFirst || attempt > 0;
-            if (prepareReferences)
-            {
-                if (preserveLoadedContext && preserveWorkingEdits) ControlledReferenceMaterializer.PrepareEditableDrawingOnly(application, path, manifest);
-                else if (preserveLoadedContext) ControlledReferenceMaterializer.PrepareDrawingOnly(application, path, manifest);
-                else ControlledReferenceMaterializer.Prepare(application, path, manifest);
-            }
             var timer = System.Diagnostics.Stopwatch.StartNew();
             IModelDoc2 opened;
             Action verifyBoundary;
             using (var search = new ControlledReferenceSearchScope(application, path, manifest))
             {
+                if (prepareReferences)
+                {
+                    if (preserveLoadedContext && preserveWorkingEdits) ControlledReferenceMaterializer.PrepareEditableDrawingOnly(application, path, manifest);
+                    else if (preserveLoadedContext) ControlledReferenceMaterializer.PrepareDrawingOnly(application, path, manifest);
+                    else ControlledReferenceMaterializer.Prepare(application, path, manifest);
+                }
                 opened = OpenOrActivateDocumentOnSolidWorksThread(path, documentType, configuration,
                     !preserved.Contains(path) && !resumedPaths.Contains(path));
                 verifyBoundary = search.VerifyLoadedSources;

@@ -9,7 +9,10 @@ public static class ProjectNameplateEndpointExtensions
     public static void MapProjectNameplateEndpoints(this WebApplication app)
     {
         var api = app.MapGroup("/api").RequireAuthorization();
-        api.MapGet("/projects/{projectId:guid}/nameplate", async (Guid projectId, HttpContext context, ProjectNameplateService service, CancellationToken ct) => Results.Ok(await service.GetAsync(projectId, Actor(context), Role(context), ct)));
+        api.MapGet("/projects/{projectId:guid}/nameplate", async (Guid projectId, HttpContext context, ProjectNameplateService service, CancellationToken ct) =>
+            context.Request.Headers["X-PDM-Nameplate-View"] == "family-access"
+                ? Results.Ok((object)await service.ListAccessAsync(projectId, Actor(context), Role(context), ct))
+                : Results.Ok(await service.GetAsync(projectId, Actor(context), Role(context), ct)));
         api.MapPut("/projects/{projectId:guid}/nameplate", async (Guid projectId, SaveProjectNameplateCommand command, HttpContext context, ProjectNameplateService service, CancellationToken ct) => Results.Ok(await service.SaveAsync(projectId, command, Actor(context), Role(context), ct)));
         api.MapPost("/projects/{projectId:guid}/nameplate/confirm", async (Guid projectId, ConfirmProjectNameplateCommand command, HttpContext context, ProjectNameplateService service, CancellationToken ct) => Results.Ok(await service.ConfirmAsync(projectId, command, Actor(context), Role(context), ct)));
         api.MapPut("/nameplate-template", async (NameplateTemplate command, HttpContext context, ProjectNameplateService service, CancellationToken ct) => Results.Ok(await service.SaveTemplateAsync(command, Actor(context), Role(context), ct)));

@@ -1394,6 +1394,40 @@ describe('PLM client workspace', () => {
     wrapper.unmount()
   })
 
+  it('同一发布审批通知不重复增加页眉和侧栏角标，全部已读后待审批仍保留', async () => {
+    const originalFetch = vi.mocked(fetch).getMockImplementation()!
+    const task = { id: 'merged-approval', projectId, projectCode: 'PRJ-REAL-001', projectName: '真实装配项目',
+      releasePackageId: 'merged-package', releasePackageNumber: 'RP-MERGED', stage: 'Approval', packageState: 'Approval', createdAt: '2026-11-04T08:06:09Z' }
+    let messages: object[] = []
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      if (String(input).includes('/api/approval-tasks/mine')) return json([task])
+      if (String(input).includes('/validation-plan-approval-tasks/mine')) return json([])
+      if (String(input).includes('/api/notifications/mine')) return json(messages)
+      return originalFetch(input, init)
+    })
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
+    await login(wrapper, false)
+    await wrapper.get('.pdm-sidebar').findAll('button').find(button => button.text().startsWith('我的待办'))!.trigger('click')
+    await flushPromises()
+    const page = wrapper.get('[data-navigation-page="tasks"]')
+    await page.findAll('button').find(button => button.text() === '刷新')!.trigger('click')
+    await flushPromises()
+    const before = wrapper.getComponent({ name: 'AppHeader' }).props('notificationCount')
+    messages = [{ id: 'merged-notice', category: 'ReleaseApprovalPending', title: 'BOM发布待审批', content: '待您审批',
+      projectId, releasePackageId: task.releasePackageId, sourceKey: 'merged-notice', createdAt: task.createdAt }]
+    await page.findAll('button').find(button => button.text() === '刷新')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.getComponent({ name: 'AppHeader' }).props('notificationCount')).toBe(before)
+    expect(wrapper.getComponent({ name: 'SideNav' }).props('approvalCount')).toBe(before)
+    expect(page.findAll('tbody tr').filter(row => row.text().includes('RP-MERGED'))).toHaveLength(1)
+    messages = messages.map(message => ({ ...message, readAt: '2026-11-04T08:07:00Z' }))
+    await page.findAll('button').find(button => button.text() === '刷新')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.getComponent({ name: 'AppHeader' }).props('notificationCount')).toBe(before)
+    expect(page.findAll('tbody tr').filter(row => row.text().includes('RP-MERGED'))).toHaveLength(1)
+    wrapper.unmount()
+  })
+
   it('工时催填不增加页眉消息和我的待办角标', async () => {
     const originalFetch = vi.mocked(fetch).getMockImplementation()!
     let includeHours = false

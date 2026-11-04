@@ -40,7 +40,7 @@ public sealed partial class SolidWorksServerPreviewConverter
             }
             var conversion = (await repository.GetSystemSettingsAsync(cancellationToken)).PreviewConversion ?? PreviewConversionSettings.Default;
             if (conversion.TimeoutMinutes is < 1 or > 120) throw new PdmRuleException("转图超时必须设置为1到120分钟。");
-            var work = Path.Combine(Path.GetTempPath(), "UPTON-PLM", "assembly-preview", Guid.NewGuid().ToString("N"));
+            var work = Path.Combine(storage.ConversionWorkRoot, "assembly-preview", Guid.NewGuid().ToString("N"));
             var sourceRoot = Path.Combine(work, "sources");
             var outputRoot = Path.Combine(work, "outputs");
             Directory.CreateDirectory(sourceRoot);

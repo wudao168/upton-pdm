@@ -5,8 +5,8 @@
 .pdm-gantt-table.pdm-columns-resized .pdm-gantt-info-row { grid-template-columns: var(--pdm-resized-gantt-columns) !important; }
 .pdm-fit-columns :is(th, td) { overflow: hidden; text-overflow: ellipsis; }
 
-.pdm-resized-grid-list > :is(.pdm-project-browser-table-head, [role=option]) { grid-template-columns: var(--pdm-resized-list-columns) !important; }
-/* 所有数据表始终适应容器；图表坐标和无表头的铭牌矩阵不受影响。 */
+.pdm-resized-grid-list > :is(.pdm-project-browser-table-head, [role=option]) { grid-template-columns: var(--pdm-resized-list-columns) !important; width: 100% !important; box-sizing: border-box; }
+/* 默认保留现有比例；拖动改变相邻列的分配，表格总宽始终贴齐容器。 */
 .el-table { min-width: 0 !important; max-width: 100% !important; }
 table:has(> thead):not(.el-table__header):not(.el-table__body):not(.el-table__footer) { width: 100% !important; min-width: 0 !important; max-width: 100% !important; table-layout: fixed !important; }
 table:has(> thead):not(.pdm-fit-columns):not(.el-table__header) > :is(thead, tbody) > tr > :is(th, td) { width: auto !important; }
@@ -14,3 +14,4 @@ table:has(> thead):not(.pdm-fit-columns):not(.el-table__header):not(.pdm-project
 table:has(> thead):not(.el-table__header) > :is(thead, tbody) > tr > :is(th, td) { min-width: 0 !important; overflow: hidden !important; text-overflow: ellipsis; }
 table:has(> thead):not(.el-table__header) :is(input, select, textarea) { box-sizing: border-box; min-width: 0; max-width: 100%; }
 .pdm-project-browser-list:not(.pdm-resized-grid-list) > :is(.pdm-project-browser-table-head, [role=option]) { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.pdm-column-scroll { min-width: 0; max-width: 100%; overflow-x: auto; }

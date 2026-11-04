@@ -111,7 +111,7 @@ async function runFullSyncNow() {
   if (!props.canManageBase || fullSyncStarting.value) return
   try {
     await ElMessageBox.confirm(
-      '立即从U9C只读获取当前分类范围内的全部料品并写入PLM料品主档？该操作不会修改U9C。',
+      '立即按原料号读取U9C并对账？PLM已存在的研发资料及启停状态会保留，差异单独记录；新料品导入初始资料后由PLM主控。本操作不修改U9C。',
       '确认全量同步',
       { confirmButtonText: '开始同步', cancelButtonText: '取消' },
     )
@@ -488,10 +488,10 @@ onMounted(() => {
         <section class="pdm-panel u9-settings-card pdm-loading-host" aria-label="U9C料品自动全量同步">
           <SquareLoader v-if="fullSyncLoading" overlay label="正在加载自动同步状态" />
           <header class="u9-card-heading">
-            <div><h2>U9C料品自动全量同步</h2><p>每天只读获取完整料品资料写入PLM料品主档，供快速查询和BOM引用；PLM取号独立使用本地全局基线。</p></div>
+            <div><h2>U9C料品自动全量对账</h2><p>PLM主控研发资料及启停；每天按原料号核对U9C，保留PLM当前值并记录差异。PLM已生效的变更自动同步到U9C。</p></div>
             <div class="u9-actions"><el-tag :type="fullSyncTagType">{{ fullSyncStatusText }}</el-tag><el-button type="primary" :loading="fullSyncStarting" @click="runFullSyncNow">立即全量同步</el-button><el-button :loading="fullSyncLoading" @click="loadFullSyncStatus">刷新状态</el-button></div>
           </header>
-          <el-alert title="同步范围动态取自“分类维护”中允许创建、启用且可见的分类；U9C不再返回的料品会在PLM标记停用并禁止新BOM引用，历史BOM保留；同编码PLM自有主档不覆盖并计入冲突。" type="info" :closable="false" show-icon />
+          <el-alert title="范围取自允许创建、启用且可见的分类。U9C未返回、停用或字段不一致时只记录对账差异，不覆盖PLM、不自动改变启停。库存、采购和财务数据继续由U9C主控。历史U9C来源物料经同号核对后由PLM接管。" type="info" :closable="false" show-icon />
           <dl class="full-sync-summary">
             <div><dt>执行计划</dt><dd>每日 {{ fullSyncStatus?.scheduleTime ?? '02:00' }}，每 {{ fullSyncStatus?.checkIntervalMinutes ?? 30 }} 分钟检查</dd></div>
             <div><dt>最近开始</dt><dd>{{ formatSyncTime(fullSyncStatus?.latestRun?.startedAt) }}</dd></div>

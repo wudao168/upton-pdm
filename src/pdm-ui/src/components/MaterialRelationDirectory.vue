@@ -9,6 +9,7 @@ import MaterialRelationDetails from './MaterialRelationDetails.vue'
 import StandardCategoryFilter from './StandardCategoryFilter.vue'
 import { matchesStandardCategory, isUncategorized } from '../standardLibraryCategories'
 import { relationMains } from '../materialRelationMains'
+import { copyText } from '../copyText'
 
 const props = defineProps<{
   token: string
@@ -76,6 +77,10 @@ function visibleRevision(relation: MaterialRelationTemplate) {
 function toggleExpansion(relation: MaterialRelationTemplate) {
   expandedIds.value = expandedIds.value.includes(relation.id) ? expandedIds.value.filter(id => id !== relation.id) : [...expandedIds.value, relation.id]
 }
+function onRowClick(relation: MaterialRelationTemplate, _column: unknown, event: MouseEvent) {
+  if (event.target instanceof Element && event.target.closest('button, a, input, select, textarea, [role="button"], .el-table__expand-icon, .el-dropdown, .el-checkbox, .material-relation-details')) return
+  toggleExpansion(relation)
+}
 
 function relationStatus(relation: MaterialRelationTemplate) {
   if (relation.draftRevision && relation.publishedRevision) return { label: '待生效修改', type: 'warning' as const, version: relation.draftRevision.version }
@@ -122,11 +127,11 @@ function refresh() {
       <el-button v-if="canManage" type="primary" @click="openCreate">新增配置</el-button>
       <span>共 {{ filteredRelations.length }} 个已配置物料</span>
     </div>
-    <el-table v-loading="directoryLoading" :data="filteredRelations" row-key="id" :expand-row-keys="expandedIds" @expand-change="(_row: MaterialRelationTemplate, expanded: MaterialRelationTemplate[]) => expandedIds = expanded.map(item => item.id)" height="100%" stripe empty-text="暂无已配置关联物料">
+    <el-table v-loading="directoryLoading" :data="filteredRelations" row-key="id" :expand-row-keys="expandedIds" @row-click="onRowClick" @expand-change="(_row: MaterialRelationTemplate, expanded: MaterialRelationTemplate[]) => expandedIds = expanded.map(item => item.id)" height="100%" stripe empty-text="暂无已配置关联物料">
       <el-table-column type="expand" width="32"><template #default="{ row }"><div :id="`relation-contents-${row.id}`"><MaterialRelationDetails :relation="row" :show-draft="canManage || canPublish" /></div></template></el-table-column>
-      <el-table-column prop="mainMaterialCode" label="物料编码" min-width="150" show-overflow-tooltip><template #default="{ row }"><button type="button" class="pdm-text-action" v-stocked-material="displayMains(row)[0]?.materialCode || row.mainMaterialCode" :aria-expanded="expandedIds.includes(row.id)" :aria-controls="`relation-contents-${row.id}`" :aria-label="`${expandedIds.includes(row.id) ? '收起' : '展开'}关联配置 ${displayMains(row)[0]?.materialCode || row.mainMaterialCode} 的配件明细`" @click.stop="toggleExpansion(row)">{{ displayMains(row)[0]?.materialCode || row.mainMaterialCode }}<el-tag v-if="displayMains(row).length > 1" size="small">等 {{ displayMains(row).length }} 个</el-tag></button></template></el-table-column>
+      <el-table-column prop="mainMaterialCode" label="物料编码" min-width="150" show-overflow-tooltip><template #default="{ row }"><button type="button" class="pdm-text-action" v-stocked-material="displayMains(row)[0]?.materialCode || row.mainMaterialCode" :aria-label="`复制料号 ${displayMains(row)[0]?.materialCode || row.mainMaterialCode}`" title="点击复制料号" @click.stop="copyText(displayMains(row)[0]?.materialCode || row.mainMaterialCode, '料号')">{{ displayMains(row)[0]?.materialCode || row.mainMaterialCode }}<el-tag v-if="displayMains(row).length > 1" size="small">等 {{ displayMains(row).length }} 个</el-tag></button></template></el-table-column>
       <el-table-column prop="mainMaterialName" label="物料名称" min-width="180" show-overflow-tooltip><template #default="{ row }"><span v-stocked-material="displayMains(row)[0]?.materialCode || row.mainMaterialCode">{{ displayMains(row)[0]?.materialName || row.mainMaterialName }}</span></template></el-table-column>
-      <el-table-column label="规格" min-width="190" show-overflow-tooltip><template #default="{ row }">{{ directoryMaterial(row)?.specification || '—' }}</template></el-table-column>
+      <el-table-column label="规格" min-width="190" show-overflow-tooltip><template #default="{ row }"><button v-if="directoryMaterial(row)?.specification" type="button" class="pdm-text-action" :aria-label="`复制型号 ${directoryMaterial(row)?.specification}`" title="点击复制型号" @click.stop="copyText(directoryMaterial(row)?.specification, '型号')">{{ directoryMaterial(row)?.specification }}</button><span v-else>—</span></template></el-table-column>
       <el-table-column label="品牌" min-width="100" show-overflow-tooltip><template #default="{ row }">{{ directoryMaterial(row)?.brand || '—' }}</template></el-table-column>
       <el-table-column label="标准物料分类" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ row.standardLibraryCategories?.map((category: StandardLibraryCategory) => category.name).join('、') || '未分类（待补选）' }}</template></el-table-column>
       <el-table-column label="主料数量" width="85"><template #default="{ row }">{{ displayMains(row).length }}</template></el-table-column>

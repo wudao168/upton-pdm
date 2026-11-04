@@ -130,7 +130,15 @@ powershell.exe -ExecutionPolicy Bypass -File .\deploy\Register-SolidWorksAddin.p
 
 ## 全量备份与恢复演练
 
-备份包含 `pdm` 数据库、vault、release、表数量和逐文件 SHA-256 清单，只允许写入 `.local\backup`：
+备份位置统一在“系统管理 → 编号与存储 → 存档位置”配置。备份目标留空时不执行备份，也不会默认写入开发仓库。先只读核对覆盖范围：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy\Backup-LocalPdm.ps1 -PlanOnly
+```
+
+完整备份按数据库中的实际路径收集项目图档及全部版本、PDF/STEP、生产发包、项目资料、料品/套件/BOM附件、OPL、标准结构、程序模板、批注、验收资料以及配置密钥；同时包含SQL导出、所有业务表数量、源路径映射和逐文件SHA256。历史目录继续纳入，不搬迁或清除历史档案。
+
+确认备份目标和停写时间后执行下列命令。过程暂停API写入并等待网页存档后台确认暂停，完成或失败后恢复运行。缺失文件、版本长度或哈希不符会使批次保持未完成状态，不会标记完整备份。跨机器恢复还需验证Windows本机加密密钥的解密能力。
 
 ```powershell
 Set-Location 'D:\codex file\pdm'

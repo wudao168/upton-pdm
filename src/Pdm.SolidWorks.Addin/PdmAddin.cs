@@ -5153,10 +5153,16 @@ public sealed partial class PdmAddin : ISwAddin
                 taskPaneControl.UseWaitCursor = false;
                 if (TopMostMessageBox.Show(taskPaneControl,
                     exception.Message + "\r\n\r\n是否明确采用最新受控子件打开？确认后请核对结构，并通过整体存档记录本次引用更新。",
-                    "确认更新旧装配引用", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
-                    MessageBoxDefaultButton.Button2) != DialogResult.Yes) throw;
+                    "确认打开引用版本", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                    MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                {
+                    LogOperation("已取消打开引用版本，未更改现有窗口、文件或编辑权限。");
+                    taskPaneControl.SetCheckoutReminder("已取消打开，现有窗口和文件已保留。", false);
+                    return false;
+                }
                 manifest = await apiClient.CreateControlledOpenManifestAsync(documentId, null, false,
                     requestsLatestEdit, lifetime.Token, true);
+                manifest.LatestReferenceVersionsConfirmed = true;
             }
             LogOperation(string.Concat(
                 "ControlledOpen manifest ready document=",
@@ -5211,7 +5217,8 @@ public sealed partial class PdmAddin : ISwAddin
                     if (additional.ProjectId != manifest.ProjectId) throw new InvalidOperationException("所选图档属于不同项目，请分别获取。");
                     manifest = MergeEditContext(manifest, additional);
                 }
-                var resumed = await ResumeRetainedWorkingCopyAsync(manifest);
+                var resumed = await ResumeWorkspaceEditsForOpenAsync(manifest);
+                if (manifest.WorkspaceOpenCanceled) return false;
                 if (resumed.Count > 0) documents = documents.Where(document => resumed.All(item => item.Id != document.Id)).Concat(resumed).ToArray();
                 var manifestDocumentIds = new HashSet<Guid>(manifest.Files.Select(file => file.DocumentId));
                 editableDocumentIds = new HashSet<Guid>(documents
@@ -5221,7 +5228,8 @@ public sealed partial class PdmAddin : ISwAddin
                     .Select(item => item.Id));
                 foreach (var document in documents) TrackCheckoutDocument(document);
                 controlledWorkspace.ProtectedPaths = CaptureLoadedCachePaths();
-                rootPath = await controlledWorkspace.PreparePlmWorkingCopyAsync(manifest, editableDocumentIds, lifetime.Token);
+                rootPath = await PrepareWorkspaceWithRecoveryAsync(manifest, editableDocumentIds, newEditCheckouts);
+                if (rootPath == null) return false;
                 if (!string.IsNullOrEmpty(controlledWorkspace.LocalCacheNotice)) openWarning = controlledWorkspace.LocalCacheNotice;
                 if (requestsLatestEdit)
                 {
@@ -7861,6 +7869,8 @@ public sealed partial class PdmAddin : ISwAddin
         // only inside the confirmed archive scope, never before the user selects files.
 
         var initialProjectId = preferredProjectId ?? GetExplicitProjectId(currentTree.FullPath);
+        if (initialOperation == BatchOperationKind.CheckIn && initialProjectId.HasValue)
+            foreach (var item in items) RestoreCommittedSourceIdentity(item.Node, initialProjectId.Value);
         ArchiveSession.Current?.SetStage("正在核对图档归属，准备项目和文件选择…");
         var inheritedDrawingProjects = await ResolveInheritedDrawingProjectsAsync(items, initialProjectId);
         LogCheckInCheckpoint("batch-dialog-create", currentTree.FullPath);
@@ -7895,6 +7905,7 @@ public sealed partial class PdmAddin : ISwAddin
             }
             if (dialogResult != DialogResult.OK)
             {
+                ArchiveSession.Current?.CancelBeforeSubmission();
                 return;
             }
             break;
@@ -8413,7 +8424,7 @@ public sealed partial class PdmAddin : ISwAddin
         foreach (var node in DistinctBatchItems(selectedItems).SelectMany(item => new[] { item.Node }.Concat(item.Node.ReferencedModels)))
         {
             if (node.DocumentId.HasValue
-                || !PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out var metadata)
+                || !PdmDocumentIdentityStore.TryReadArchiveMetadata(node.FullPath, projectId, out var metadata)
                 || metadata.ProjectId != projectId) continue;
             var registered = projectDocuments.FirstOrDefault(candidate => candidate.Id == metadata.DocumentId);
             if (registered == null) continue;
@@ -8424,6 +8435,7 @@ public sealed partial class PdmAddin : ISwAddin
         // Older add-ins stored a copyable ID only. Never silently adopt it at a new path.
         var legacyMatches = DistinctBatchItems(selectedItems)
             .Where(item => !item.Node.DocumentId.HasValue
+                && PdmDocumentIdentityStore.IsControlledWorkspacePath(item.Node.FullPath)
                 && PdmDocumentIdentityStore.TryReadProvenance(item.Node.FullPath, out var legacyId, out _)
                 && projectDocuments.Any(document => document.Id == legacyId))
             .ToArray();
@@ -8602,6 +8614,14 @@ public sealed partial class PdmAddin : ISwAddin
         IReadOnlyList<BatchOperationItem> selectedItems,
         Guid projectId)
     {
+        // Native reference rescans may replace nodes after the selection page.
+        // Recover this exact source path's successful project receipt again before
+        // deciding whether registration is needed; changed content keeps its ID.
+        foreach (var item in DistinctBatchItems(selectedItems))
+        {
+            ArchiveSourceIdentity.RestoreForProject(item.Node, projectId);
+            RestoreCommittedSourceIdentity(item.Node, projectId);
+        }
         var nodes = DistinctBatchItems(selectedItems)
             .Select(item => item.Node)
             .Where(node => !node.DocumentId.HasValue)
@@ -8640,22 +8660,7 @@ public sealed partial class PdmAddin : ISwAddin
 
         var reusedCount = matches.Count(match => (RegistrationMatchKind)match.MatchKind == RegistrationMatchKind.SameNameSameContent);
         var pendingCount = matches.Count(match => (RegistrationMatchKind)match.MatchKind == RegistrationMatchKind.PendingFirstArchive);
-        var project = availableProjects.FirstOrDefault(item => item.Id == projectId);
-        if (matches.Any(match => nodesByKey[match.CandidateKey].HistoricalRepair == null
-            && ((RegistrationMatchKind)match.MatchKind == RegistrationMatchKind.SameNameSameContent
-                || (RegistrationMatchKind)match.MatchKind == RegistrationMatchKind.PendingFirstArchive)))
-        {
-            var choice = TopMostMessageBox.Show(taskPaneControl,
-                $"目标项目：{project?.ToString() ?? projectId.ToString()}\r\n"
-                + $"独立新建图档：{nodes.Length - reusedCount - pendingCount}个\r\n"
-                + $"继续目标项目中同名且内容相同的图档：{reusedCount}个\r\n\r\n"
-                + $"继续本人尚未完成的首次存档：{pendingCount}个（沿用原编号，不覆盖已存档版本）\r\n\r\n"
-                + "复制或打包的副本将取得独立图档编号，不修改原项目及其历史版本。\r\n"
-                + "仅校验当前目标项目内的同名文件；不会查询或比较其他项目中的图档。\r\n"
-                + "当前目标项目内同名且内容相同的文件将继续已有登记，避免重复提交。\r\n\r\n确认按以上规则继续？",
-                "确认图档登记方式", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
-            if (choice != DialogResult.OK) return null;
-        }
+        LogOperation($"图档身份核对：新建{nodes.Length - reusedCount - pendingCount}个，沿用目标项目已有同名同内容图档{reusedCount}个，继续本人未完成首次存档{pendingCount}个。");
         var projectDocuments = reusedCount + pendingCount > 0 ? await apiClient.GetDocumentsAsync(projectId, ArchiveOperationToken) : null;
         var decisions = new Dictionary<string, RegistrationDecision>(StringComparer.OrdinalIgnoreCase);
         foreach (var match in matches)
@@ -8715,6 +8720,9 @@ public sealed partial class PdmAddin : ISwAddin
             && !string.IsNullOrWhiteSpace(node?.FullPath)
             && decisions.TryGetValue(node.FullPath, out var decision))
             return decision;
+        if (node?.IndependentImportDependency == true)
+            return new RegistrationDecision(ComputeRegistrationFileHash(node), true,
+                "按已确认的独立导入规则收集辅助来源；不改变原项目图档或源文件。");
         return new RegistrationDecision(ComputeRegistrationFileHash(node), false, null);
     }
 
@@ -10735,7 +10743,8 @@ public sealed partial class PdmAddin : ISwAddin
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var first = group.First();
-                if (PdmDocumentIdentityStore.TryReadLocalMetadata(group.Key, out var localMetadata)
+                if (PdmDocumentIdentityStore.IsControlledWorkspacePath(group.Key)
+                    && PdmDocumentIdentityStore.TryReadLocalMetadata(group.Key, out var localMetadata)
                     && localMetadata.ProjectId.HasValue && localMetadata.ProjectId != projectId)
                     throw new InvalidOperationException($"引用文件{first.FileName}仍绑定其他项目，不能直接改归属。请先复制为当前项目副本，或从当前项目工作区获取。");
                 var candidates = projectDocuments.Where(document =>
@@ -11471,7 +11480,7 @@ public sealed partial class PdmAddin : ISwAddin
         {
             RememberControlledVersionIdentity(path, documentId, projectId, version);
             var revision = version.Revision?.Display ?? string.Empty;
-            if (!PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var recorded))
+            if (!PdmDocumentIdentityStore.TryReadArchiveMetadata(path, projectId, out var recorded))
                 throw new IOException("无法读取刚写入的本地校验记录。");
             var fullPath = Path.GetFullPath(path);
             completedWorkingArchives[fullPath] = new CompletedWorkingArchive { ProjectId = projectId, DocumentId = documentId,
@@ -13319,7 +13328,7 @@ public sealed partial class PdmAddin : ISwAddin
         {
             // A registration-only binding has no archived version to preserve. A removed
             // failed registration may be prepared again; foreign/historical bindings stay intact.
-            if (!PdmDocumentIdentityStore.TryReadLocalMetadata(node.FullPath, out var binding)
+            if (!PdmDocumentIdentityStore.TryReadArchiveMetadata(node.FullPath, projectId, out var binding)
                 || binding.ProjectId != projectId || binding.DocumentId != node.DocumentId || binding.VersionId.HasValue) continue;
             node.DocumentId = null; node.ProvenanceDocumentId = null; node.ProvenanceProjectId = null;
             node.Revision = node.CurrentRevision = node.LatestRevision = string.Empty;

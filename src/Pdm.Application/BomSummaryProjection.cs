@@ -5,7 +5,8 @@ using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
 
-public sealed record BomSummaryEdit(IReadOnlyList<Guid> ItemIds, string Fingerprint, IReadOnlyList<string> Fields, BomItemInput Values);
+public sealed record BomSummaryEdit(IReadOnlyList<Guid> ItemIds, string Fingerprint, IReadOnlyList<string> Fields, BomItemInput Values,
+    IReadOnlyDictionary<Guid, decimal>? QuantityAllocations = null);
 
 public static class BomSummaryProjection
 {
@@ -26,9 +27,13 @@ public static class BomSummaryProjection
             : codesByAttributes.GetValueOrDefault(AttributeKey(item), string.Empty);
         return items
         .GroupBy(item => JsonSerializer.Serialize(new {
-            item.Kind, item.IsManuallyExcluded, item.IsPendingRemoval, item.EngineeringKitReferenceId,
+            item.Kind, item.IsManuallyExcluded, item.IsPendingRemoval, item.EngineeringKitReferenceId, item.RelationMainBomItemId,
+            ConfiguredMain = item.RelationAllocations.Count > 0 && !item.EngineeringKitReferenceId.HasValue ? item.Id : (Guid?)null,
             DeletedSource = item.IsManuallyExcluded && item.SourceDocumentId.HasValue,
             Code = Code(item), Unit = Normalize(item.Unit), Revision = Normalize(item.Revision),
+            Publication = Normalize(item.DisplayRevision ?? "未发布"),
+            item.IsPublishedInBom,
+            item.BomPublishedVersion,
             Identity = string.IsNullOrWhiteSpace(Code(item))
                 ? item.SourceDocumentId.HasValue ? AttributeKey(item) : item.Id.ToString()
                 : string.Empty
@@ -50,12 +55,13 @@ public static class BomSummaryProjection
 
     private static string Fingerprint(IEnumerable<BomItem> items) => Convert.ToHexString(SHA256.HashData(
         Encoding.UTF8.GetBytes(JsonSerializer.Serialize(items.OrderBy(item => item.Id).Select(item => new {
-            Values = Input(item), item.Source, item.IsManuallyOverridden, item.IsPendingRemoval,
+            Values = Input(item), item.RelationAllocations, item.Source, item.IsManuallyOverridden, item.IsPendingRemoval,
             item.IsReleaseExcluded, item.ReleaseExclusionReason, item.IsManuallyExcluded
         })))));
 
     public static IReadOnlyList<BomItemInput> Expand(IReadOnlyList<BomItem> existing,
-        IReadOnlyList<BomSummaryEdit> edits, IReadOnlyList<BomItemInput> additions, IReadOnlyList<Guid>? order = null)
+        IReadOnlyList<BomSummaryEdit> edits, IReadOnlyList<BomItemInput> additions, IReadOnlyList<Guid>? order = null,
+        IReadOnlySet<Guid>? configurationSources = null)
     {
         var groups = Group(existing).ToDictionary(item => item.Id);
         var updated = existing.Where(item => !item.IsManuallyExcluded).ToDictionary(item => item.Id, Input);
@@ -75,19 +81,25 @@ public static class BomSummaryProjection
                 }
                 continue;
             }
-            if (edit.Fields.Any(field => field is not ("drawingNumber" or "name" or "unit" or "material" or "specification" or "remark" or "brand" or "surfaceTreatment" or "heatTreatment" or "weight" or "isWearPart" or "impactStage" or "inventoryReplacementMaterialCode" or "revision" or "quantity" or "kind")))
+            var fields = edit.Fields.Where(field => field != "engineeringKitReference").ToArray();
+            if (edit.Fields.Contains("engineeringKitReference") && (edit.Values.EngineeringKitReferenceId != group.EngineeringKitReferenceId
+                || edit.Values.EngineeringKitRevisionId != group.EngineeringKitRevisionId || edit.Values.EngineeringKitComponentId != group.EngineeringKitComponentId))
+                throw new PdmRuleException("已有套件的来源不能改写，请移除整个引用后重新添加。");
+            if (fields.Any(field => field is not ("drawingNumber" or "name" or "unit" or "material" or "specification" or "remark" or "brand" or "surfaceTreatment" or "heatTreatment" or "weight" or "isWearPart" or "impactStage" or "inventoryReplacementMaterialCode" or "revision" or "quantity" or "kind")))
                 throw new PdmRuleException("汇总BOM包含不支持的修改字段。");
-            var positiveCount = edit.ItemIds.Count(id => updated[id].Quantity > 0);
-            var minimum = edit.Values.Quantity > 0 ? positiveCount * 0.0001m : 0;
-            if (edit.Fields.Contains("quantity") && edit.Values.Quantity > 0 && edit.Values.Quantity < minimum)
-                throw new PdmRuleException("汇总数量过小，无法保留所有实例；请先在源数据核对结构。");
-            var assigned = 0m;
+            if (edit.Fields.Contains("quantity"))
+            {
+                U9UnitCatalog.RequireWholeQuantity(edit.Values.Quantity, edit.Values.Unit, $"物料“{group.DrawingNumber}”的汇总数量");
+                if (edit.Values.Quantity < 0 || decimal.Round(edit.Values.Quantity, 4) != edit.Values.Quantity)
+                    throw new PdmRuleException("数量不能小于0，且最多支持4位小数。");
+
+            }
             for (var index = 0; index < edit.ItemIds.Count; index++)
             {
                 var id = edit.ItemIds[index];
                 if (!seen.Add(id)) throw new PdmRuleException("同一汇总物料不能重复提交。");
                 var value = updated[id];
-                foreach (var field in edit.Fields)
+                foreach (var field in fields)
                     value = field switch {
                         "drawingNumber" => value with { DrawingNumber = edit.Values.DrawingNumber },
                         "name" => value with { Name = edit.Values.Name },
@@ -107,15 +119,26 @@ public static class BomSummaryProjection
                     };
                 if (edit.Fields.Contains("quantity"))
                 {
-                    if (decimal.Round(edit.Values.Quantity, 4) != edit.Values.Quantity) throw new PdmRuleException("数量最多支持4位小数。" );
-                    if (edit.Values.Quantity < 0) throw new PdmRuleException("数量不能小于0。");
-                    var quantity = index == edit.ItemIds.Count - 1 ? edit.Values.Quantity - assigned
-                        : group.Quantity == 0 ? 0 : (edit.Values.Quantity == 0 || value.Quantity == 0 ? 0 : 0.0001m + decimal.Floor((edit.Values.Quantity - minimum) * value.Quantity / group.Quantity * 10_000m) / 10_000m);
-                    assigned += quantity;
+                    var quantity = index == 0 ? edit.Values.Quantity : 0;
                     value = value with { Quantity = quantity };
                 }
                 updated[id] = value;
             }
+        }
+        // Working BOM quantities are maintained once per material, independently of CAD occurrences.
+        // Archive/reference snapshots remain the source of the original structure and quantities.
+        var relationOwners = existing.Where(item => item.RelationMainBomItemId.HasValue).Select(item => item.RelationMainBomItemId!.Value).ToHashSet();
+        foreach (var group in groups.Values.Where(group => !group.EngineeringKitReferenceId.HasValue
+                     && !group.RelationMainBomItemId.HasValue && group.RelationAllocations.Count == 0
+                     && !group.SummaryItemIds!.Any(id => relationOwners.Contains(id) || configurationSources?.Contains(id) == true)))
+        {
+            var members = group.SummaryItemIds!.Where(updated.ContainsKey).ToArray();
+            var changed = edits.Any(edit => edit.ItemIds.Contains(group.Id) && edit.Fields.Contains("quantity"));
+            if (members.Length == 0 || !changed) continue;
+            var total = members.Sum(id => updated[id].Quantity);
+            U9UnitCatalog.RequireWholeQuantity(total, updated[members[0]].Unit, $"物料“{group.DrawingNumber}”的汇总数量");
+            updated[members[0]] = updated[members[0]] with { Quantity = total, IsSummaryQuantity = true, ConsolidatedSourceIds = members };
+            foreach (var id in members.Skip(1)) updated.Remove(id);
         }
         if (additions.Any(item => item.Id.HasValue)) throw new PdmRuleException("新增汇总行不能指定已有实例ID。");
         var ranks = new Dictionary<Guid, int>();
@@ -138,5 +161,6 @@ public static class BomSummaryProjection
         item.IsManualUnmatched, item.IsManuallyRetained, item.Id, item.SourceInstancePath, item.ParentDrawingNumber,
         item.HeatTreatment, item.EngineeringKitReferenceId, item.EngineeringKitId, item.EngineeringKitRevisionId,
         item.EngineeringKitCode, item.EngineeringKitVersionNumber, item.EngineeringKitComponentId,
-        item.EngineeringKitComponentOptional, item.IsWearPart, item.ImpactStage, item.InventoryReplacementMaterialCode);
+        item.EngineeringKitComponentOptional, item.IsWearPart, item.ImpactStage, item.InventoryReplacementMaterialCode,
+        item.IsSummaryQuantity || item.Source == "Summary");
 }

@@ -29,6 +29,17 @@ function setup(allow = true) {
   return { table, rows, save, saveDesigners, root, child, projects }
 }
 afterEach(() => wrapper?.unmount())
+it('项目族铭牌状态只请求一次，并按各项目保留编辑状态', async () => {
+  vi.mocked(api.readProjectNameplate).mockClear()
+  vi.mocked(api.readProjectNameplate).mockResolvedValueOnce([
+    { projectId: 'root', nameplate: { projectId: 'root', enabled: false }, canEdit: false },
+    { projectId: 'child', nameplate: { projectId: 'child', enabled: true }, canEdit: true },
+  ] as any)
+  setup(); await flushPromises()
+  expect(api.readProjectNameplate).toHaveBeenCalledTimes(1)
+  expect(api.readProjectNameplate).toHaveBeenCalledWith('root', 'test', true)
+  expect(wrapper.find('button[aria-label="查看铭牌 P1-1"]').exists()).toBe(true)
+})
 it('shows the four clickable columns in order with independent child assignments', () => {
   const { table, rows } = setup()
   expect(table.findAll('th').map(cell => cell.text()).slice(7, 13)).toEqual(['执行工程师', '电气工程师', '硬件工程师', '机械装配', '电气装配', '数量'])

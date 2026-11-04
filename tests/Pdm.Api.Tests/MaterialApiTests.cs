@@ -33,6 +33,9 @@ public sealed partial class MaterialApiTests : IClassFixture<PdmApiFactory>
         for (var index = 0; index < 4; index++)
         {
             var brand = index == 3 ? $"{marker}-停用" : index == 2 ? $"{marker}-施耐德" : $"{marker}-SMC";
+            var catalog = scope.ServiceProvider.GetRequiredService<MaterialBrandService>();
+            if (!(await catalog.ListAsync("admin", Upton.Pdm.Domain.UserRole.Administrator, default)).Any(item => item.Name == brand))
+                await catalog.SaveAsync(null, brand, true, null, "admin", Upton.Pdm.Domain.UserRole.Administrator, default);
             var material = await service.CreateAsync(new(null, $"{marker}-{index}", Upton.Pdm.Domain.MaterialKind.Electrical,
                 Upton.Pdm.Domain.MaterialSupplyMode.Purchase, "001", $"MODEL-{index}", null, null, brand, null, null, null,
                 CategoryCode: "0101"), "admin", Upton.Pdm.Domain.UserRole.Administrator, default);

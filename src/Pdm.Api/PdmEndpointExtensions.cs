@@ -743,9 +743,37 @@ public static class PdmEndpointExtensions
             if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             var folders = await repository.ListProjectFoldersAsync(projectId, actor, role, cancellationToken);
             var visibleFolderIds = folders.Where(folder => (folder.EffectiveAccess & FolderAccess.View) != 0).Select(folder => folder.Id).ToHashSet();
-            var documents = await repository.ListProjectTreeDocumentsAsync(projectId, cancellationToken);
+            var view = context.Request.Headers["X-PDM-Document-View"].FirstOrDefault();
+            var readableProjects = folders.Where(folder => folder.TargetProjectId.HasValue && visibleFolderIds.Contains(folder.Id))
+                .Select(folder => folder.TargetProjectId!.Value).ToHashSet();
+            if (view == "workspace")
+                return Results.Ok(await WorkspaceDocumentRead.ReadAsync(projectId, visibleFolderIds, readableProjects, actor, role, repository, cancellationToken));
+            if (view == "counts")
+            {
+                var counts = new Dictionary<Guid, long>();
+                var readable = readableProjects.ToDictionary(id => id, _ => true);
+                foreach (var item in await repository.ListFolderDocumentCountsAsync(projectId, cancellationToken))
+                {
+                    if (!visibleFolderIds.Contains(item.FolderId)) continue;
+                    if (!readable.TryGetValue(item.ProjectId, out var allowed))
+                        readable[item.ProjectId] = allowed = await repository.HasProjectReadAccessAsync(item.ProjectId, actor, role, cancellationToken);
+                    if (allowed) counts[item.FolderId] = counts.GetValueOrDefault(item.FolderId) + item.Count;
+                }
+                return Results.Ok(new { documentCounts = counts });
+            }
+            var folderHeader = context.Request.Headers["X-PDM-Folder-ID"].FirstOrDefault();
+            Guid? selectedFolder = null;
+            if (!string.IsNullOrWhiteSpace(folderHeader))
+            {
+                if (!Guid.TryParse(folderHeader, out var value)) return Results.BadRequest(new { message = "文件夹标识无效，请刷新页面后重试。" });
+                if (!visibleFolderIds.Contains(value)) return Results.Forbid();
+                selectedFolder = value;
+            }
+            var documents = selectedFolder.HasValue
+                ? await repository.ListFolderDocumentsAsync(projectId, selectedFolder.Value, cancellationToken)
+                : await repository.ListProjectTreeDocumentsAsync(projectId, cancellationToken);
             var visible = new List<PdmDocument>();
-            var projectAccess = new Dictionary<Guid, bool>();
+            var projectAccess = readableProjects.ToDictionary(id => id, _ => true);
             foreach (var document in documents)
             {
                 if (document.FolderId is not Guid folderId || !visibleFolderIds.Contains(folderId)) continue;
@@ -1257,21 +1285,41 @@ public static class PdmEndpointExtensions
             return Results.Ok(await BomDrawingRevision.CurrentAsync(repository, items, cancellationToken));
         });
 
-        api.MapPut("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, bool? includeDraft, bool? summary, ReplaceBomRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        api.MapPut("/projects/{projectId:guid}/boms/{kind}", async (Guid projectId, string kind, bool? includeDraft, bool? summary, ReplaceBomRequest request, HttpContext context, IPdmRepository repository, PdmWorkflowService workflow, MaterialRelationService relations, CancellationToken cancellationToken) =>
         {
             if (!Enum.TryParse<BomKind>(kind, true, out var bomKind) || bomKind is not (BomKind.Standard or BomKind.NonStandard or BomKind.Electrical)) return Results.BadRequest(new { message = "BOM类型必须是Standard、NonStandard或Electrical。" });
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
+            BomConfigurationQuantityPreview? confirmedQuantityPreview=null;
+            if (request.ConfigurationQuantities is { Count: > 0 })
+            {
+                if (request.ConfigurationQuantities.Any(change => !change.Confirmed)) throw new PdmRuleException("请先确认配件数量同步变化。");
+                var quantitySources=request.ConfigurationQuantities.SelectMany(change=>change.Members.Select(member=>member.MainBomItemId)).ToHashSet();
+                if(request.SummaryRows?.Any(edit=>edit.Fields.Any(field=>field is "drawingNumber" or "unit" or "kind" or "quantity")
+                        && (edit.ItemIds.Any(quantitySources.Contains) || edit.Values.EngineeringKitReferenceId is Guid reference && quantitySources.Contains(reference)))==true)
+                    throw new PdmConflictException("请先保存料号、分类或单位变更，再重新确认配件数量联动。");
+                confirmedQuantityPreview=await relations.ChangeQuantitiesAsync(projectId, request.ConfigurationQuantities, actor, role, cancellationToken, previewOnly: true,validateConfirmation:true);
+            }
             var inputs = request.SummaryRows is null ? request.Items : BomSummaryProjection.Expand(
-                await workflow.GetBomAsync(projectId, bomKind, actor, role, cancellationToken), request.SummaryRows, request.Items, request.SummaryOrder);
-            var saved = await workflow.ReplaceBomAsync(projectId, bomKind, inputs, actor, role, cancellationToken);
+                await workflow.GetBomAsync(projectId, bomKind, actor, role, cancellationToken), request.SummaryRows, request.Items, request.SummaryOrder,
+                request.ConfigurationQuantities?.SelectMany(change => change.Members.Select(member => member.MainBomItemId)).ToHashSet());
+            var saved = await workflow.ReplaceBomAsync(projectId, bomKind, inputs, actor, role, cancellationToken,
+                pendingQuantitySources:confirmedQuantityPreview?.Changes.Where(change=>change.BomItemId.HasValue).Select(change=>change.BomItemId!.Value).ToHashSet());
+            if (request.ConfigurationQuantities is { Count: > 0 })
+            {
+                await relations.ChangeQuantitiesAsync(projectId, request.ConfigurationQuantities, actor, role, cancellationToken,validateConfirmation:true);
+                saved = await workflow.GetBomAsync(projectId, bomKind, actor, role, cancellationToken);
+            }
             if (summary == true)
             {
+                saved = await BomDrawingRevision.CurrentAsync(repository, saved, cancellationToken);
                 var summaryDraft = (await repository.ListBomVersionsAsync(projectId, bomKind, cancellationToken))
                     .Where(version => version.State == BomVersionState.Draft).MaxBy(version => version.VersionNumber);
+                var displayById = saved.ToDictionary(item => item.Id, item => item.DisplayRevision);
                 return Results.Ok(new {
                     items = BomSummaryProjection.Group(saved),
-                    draft = summaryDraft is null ? null : summaryDraft with { Items = BomSummaryProjection.Group(summaryDraft.Items) }
+                    draft = summaryDraft is null ? null : summaryDraft with { Items = BomSummaryProjection.Group(summaryDraft.Items
+                        .Select(item => item with { DisplayRevision = displayById.GetValueOrDefault(item.Id) }).ToArray()) }
                 });
             }
             if (includeDraft != true) return Results.Ok(saved);
@@ -1299,6 +1347,7 @@ public static class PdmEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)) return Results.Forbid();
             var saved = await workflow.ReplaceBomAsync(projectId, bomKind, items, actor, role, cancellationToken);
+            if (summary == true) saved = await BomDrawingRevision.CurrentAsync(repository, saved, cancellationToken);
             return Results.Ok(summary == true ? BomSummaryProjection.Group(saved) : saved);
         }).DisableAntiforgery();
 
@@ -1599,6 +1648,14 @@ public static class PdmEndpointExtensions
             return !await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken)
                 ? Results.Forbid()
                 : Results.Ok(await repository.ListReleasePackagesAsync(projectId, cancellationToken));
+        });
+
+        api.MapPut("/projects/{projectId:guid}/boms/{kind}/multiplier", async (Guid projectId, string kind, UpdateBomMultiplierRequest request,
+            HttpContext context, PdmWorkflowService workflow, CancellationToken cancellationToken) =>
+        {
+            if (!Enum.TryParse<BomKind>(kind, true, out var bomKind)) return Results.BadRequest(new { message = "BOM类型无效。" });
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await workflow.UpdateBomMultiplierAsync(projectId, bomKind, request.Multiplier, request.ExpectedMultiplier, actor, role, cancellationToken));
         });
 
         api.MapGet("/projects/{projectId:guid}/bom-versions", async (Guid projectId, string? kind, bool? summary, HttpContext context, IPdmRepository repository, CancellationToken cancellationToken) =>
@@ -2291,7 +2348,7 @@ public static class PdmEndpointExtensions
         }
     }
 
-    private static (string Actor, UserRole Role) CurrentUser(ClaimsPrincipal principal)
+    internal static (string Actor, UserRole Role) CurrentUser(ClaimsPrincipal principal)
     {
         var actor = principal.Identity?.Name ?? throw new UnauthorizedAccessException("登录信息无效。 ");
         var roleValue = principal.FindFirstValue(ClaimTypes.Role) ?? throw new UnauthorizedAccessException("角色信息无效。 ");

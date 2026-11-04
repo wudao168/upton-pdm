@@ -14,6 +14,40 @@ namespace Upton.Pdm.Api.Tests;
 
 public sealed class BomSummaryApiTests : IClassFixture<PdmApiFactory>
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SavingStandardBomReturnsTheSameAttachmentIndicatorsAsReload(bool summary)
+    {
+        using var scope = factory.Services.CreateScope();
+        var services = scope.ServiceProvider;
+        var repository = services.GetRequiredService<IPdmRepository>();
+        var materials = services.GetRequiredService<IMaterialRepository>();
+        var brand = "附件回填" + Guid.NewGuid().ToString("N")[..8];
+        await services.GetRequiredService<IMaterialBrandRepository>().SaveAsync(new(Guid.NewGuid(), brand, true, 0, []), null, default);
+        var material = await services.GetRequiredService<MaterialService>().CreateAsync(new(null, "保存附件回填", MaterialKind.Standard,
+            MaterialSupplyMode.Purchase, "001", "FILE-" + Guid.NewGuid(), null, null, brand, null, null, null, CategoryCode: "0102"), "admin", UserRole.Administrator, default);
+        var file = await materials.CreateMaterialAttachmentAsync(new(Guid.NewGuid(), material.Id, MaterialAttachmentKind.Document,
+            "安装说明.pdf", Path.GetTempPath(), "attachment-display.pdf", 1, new string('A',64), "admin", DateTimeOffset.UtcNow), default);
+        var project = await repository.CreateProjectAsync(new("FILES-" + Guid.NewGuid().ToString("N"), "附件标记验收", "admin", "vault", "release"), "admin", default);
+        var item = new BomItem(Guid.NewGuid(),project.Id,BomKind.Standard,1,material.MaterialCode,material.Name,1,"001",null,material.Specification,"W1",true)
+            {Brand=brand,Source="Manual",Files=[]};
+        await repository.ReplaceBomAsync(project.Id,BomKind.Standard,[item],default);
+        var url=$"/api/projects/{project.Id}/boms/Standard"+(summary?"?summary=true":"?includeDraft=true");
+        var initial=await client.GetFromJsonAsync<JsonElement>($"/api/projects/{project.Id}/boms/Standard?summary={summary.ToString().ToLowerInvariant()}");
+        Assert.Equal(file.Id,Assert.Single(initial[0].GetProperty("files").EnumerateArray()).GetProperty("id").GetGuid());
+        var values=new BomItemInput(1,material.MaterialCode,material.Name,2,"001",null,material.Specification,"W1",true,Brand:brand,Id:item.Id);
+        var edits=summary?new[]{new BomSummaryEdit([item.Id],initial[0].GetProperty("summaryFingerprint").GetString()!,["quantity"],values)}:null;
+        var response=await client.PutAsJsonAsync(url,new{items=summary?Array.Empty<BomItemInput>():new[]{values},summaryRows=edits});
+        Assert.True(response.IsSuccessStatusCode,await response.Content.ReadAsStringAsync());
+        var saved=await response.Content.ReadFromJsonAsync<JsonElement>();
+        var returned=saved.GetProperty("items")[0];
+        Assert.Equal(file.Id,Assert.Single(returned.GetProperty("files").EnumerateArray()).GetProperty("id").GetGuid());
+        Assert.Equal(2,returned.GetProperty("quantity").GetDecimal());
+        var reloaded=await client.GetFromJsonAsync<JsonElement>($"/api/projects/{project.Id}/boms/Standard?summary={summary.ToString().ToLowerInvariant()}");
+        Assert.Equal(returned.GetProperty("files").GetRawText(),reloaded[0].GetProperty("files").GetRawText());
+    }
+
     private readonly PdmApiFactory factory;
     private readonly HttpClient client;
     public BomSummaryApiTests(PdmApiFactory factory)
@@ -25,6 +59,49 @@ public sealed class BomSummaryApiTests : IClassFixture<PdmApiFactory>
             expires: DateTime.UtcNow.AddMinutes(10), signingCredentials: new SigningCredentials(
                 new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")), SecurityAlgorithms.HmacSha256));
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", new JwtSecurityTokenHandler().WriteToken(token));
+    }
+
+    [Theory]
+    [InlineData(BomKind.Standard)]
+    [InlineData(BomKind.Electrical)]
+    public async Task NewSameMaterialStaysUnpublishedAndSeparateThroughSummarySave(BomKind kind)
+    {
+        using var scope = factory.Services.CreateScope();
+        var services = scope.ServiceProvider;
+        var repository = services.GetRequiredService<IPdmRepository>();
+        var brand = "发布来源测试" + Guid.NewGuid().ToString("N")[..8];
+        await services.GetRequiredService<IMaterialBrandRepository>().SaveAsync(new(Guid.NewGuid(), brand, true, 0, []), null, default);
+        var material = await services.GetRequiredService<MaterialService>().CreateAsync(new(null, "同料号发布来源", kind == BomKind.Standard ? MaterialKind.Standard : MaterialKind.Electrical,
+            MaterialSupplyMode.Purchase, "001", "MODEL-" + Guid.NewGuid(), null, null, brand, null, null, null,
+            CategoryCode: kind == BomKind.Standard ? "0102" : "0101"), "admin", UserRole.Administrator, default);
+        var project = await repository.CreateProjectAsync(new("SOURCE-" + Guid.NewGuid().ToString("N"), "新增来源验收", "admin", "vault", "release"), "admin", default);
+        var old = new BomItem(Guid.NewGuid(), project.Id, kind, 1, material.MaterialCode, material.Name, 1, "001", null, material.Specification, "W1", true) { Brand = brand, Source = "Manual" };
+        var addedId = Guid.NewGuid();
+        var added = old with { Id = addedId, ReleaseTrackingId = addedId, Sequence = 2, Quantity = 2 };
+        await repository.ReplaceBomAsync(project.Id, kind, [old, added], default);
+        var prefix = kind == BomKind.Standard ? "S" : "E";
+        await repository.CreateReleasePackageAsync(new(Guid.NewGuid(), project.Id, "RP-SOURCE", ReleasePackageState.Published, null, "", "", [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, "")
+            { Scope = kind == BomKind.Standard ? ReleaseScope.StandardFormal : ReleaseScope.ElectricalFormal,
+                StandardBomRevision = "S-SOURCE-B07", ElectricalBomRevision = "E-SOURCE-B07",
+                StandardBomSnapshot = kind == BomKind.Standard ? [old] : [], ElectricalBomSnapshot = kind == BomKind.Electrical ? [old] : [] }, default);
+        var url = $"/api/projects/{project.Id}/boms/{kind}?summary=true";
+        var initial = await client.GetFromJsonAsync<JsonElement>(url);
+        Assert.Equal(2, initial.GetArrayLength());
+        Assert.Equal($"{prefix}-SOURCE-V07", initial[0].GetProperty("displayRevision").GetString());
+        Assert.Equal("未发布", initial[1].GetProperty("displayRevision").GetString());
+        var group = initial[1];
+        var edit = new BomSummaryEdit(group.GetProperty("summaryItemIds").EnumerateArray().Select(value => value.GetGuid()).ToArray(),
+            group.GetProperty("summaryFingerprint").GetString()!, ["quantity"],
+            new(2, material.MaterialCode, material.Name, 3, "001", null, material.Specification, "W1", true, Brand: brand));
+        var response = await client.PutAsJsonAsync(url, new { items = Array.Empty<BomItemInput>(), summaryRows = new[] { edit } });
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        var returned = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(2, returned.GetProperty("items").GetArrayLength());
+        Assert.Equal("未发布", returned.GetProperty("items")[1].GetProperty("displayRevision").GetString());
+        var reloaded = await client.GetFromJsonAsync<JsonElement>(url);
+        Assert.Equal(1, reloaded[0].GetProperty("quantity").GetDecimal());
+        Assert.Equal(3, reloaded[1].GetProperty("quantity").GetDecimal());
+        Assert.Equal("未发布", reloaded[1].GetProperty("displayRevision").GetString());
     }
 
     [Theory]

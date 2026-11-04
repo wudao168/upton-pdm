@@ -629,6 +629,10 @@ public sealed record BomItem(
     public NameplateContent? NameplateContent { get; init; }
 
     public string? DisplayRevision { get; init; }
+    public bool IsSummaryQuantity { get; init; }
+    public bool? IsPublishedInBom { get; init; }
+    public string? BomPublishedVersion { get; init; }
+    public Guid? RelationOptionId { get; init; }
 
     public BomItem? MaintainedItem { get; init; }
 
@@ -660,6 +664,11 @@ public sealed record BomItem(
     public string? SourceInstancePath { get; init; }
 
     public string? ParentDrawingNumber { get; init; }
+
+    public Guid? RelationMainBomItemId { get; init; }
+
+    public IReadOnlyList<MaterialRelationAllocation> RelationAllocations { get; init; } = [];
+    public IReadOnlyList<MaterialRelationAllocation> EngineeringKitRelationAllocations { get; init; } = [];
 
     public Guid? EngineeringKitReferenceId { get; init; }
 
@@ -746,6 +755,9 @@ public sealed record BomVersion(
     DateTimeOffset? ReleasedAt)
 {
     public IReadOnlyList<string> ValidationRequiredFields { get; init; } = [];
+
+    public int WholeSetMultiplier { get; init; } = 1;
+    public bool IsMultiplierOverridden { get; init; }
 
     public Guid? MotherMaterialId { get; init; }
 }

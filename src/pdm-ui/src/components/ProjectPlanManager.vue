@@ -158,7 +158,6 @@ const rootProject = computed(() => props.project.parentProjectId
 const childProjects = computed(() => props.projects.filter(item => item.parentProjectId === rootProject.value.id))
 const isMasterWithChildren = computed(() => props.project.id === rootProject.value.id && childProjects.value.length > 0)
 const portfolioMode = computed(() => isMasterWithChildren.value && !masterPlanMode.value)
-const currentPlan = computed(() => plan.value)
 const assigneeOptions = computed(() => {
   const values = [rootProject.value, ...childProjects.value].flatMap(item => [
     item.owner, item.primaryProjectManager, ...item.collaborativeProjectManagers,
@@ -806,12 +805,6 @@ const activeStageCountdown = computed(() => {
   if (activeStageCountdownDays.value === 0) return '当前节点到期'
   return `当前节点已超期 ${Math.abs(activeStageCountdownDays.value)} 天`
 })
-const displayedDateRange = computed(() => {
-  const start = portfolioMode.value ? portfolio.value?.plannedStart : plan.value?.plannedStart
-  const finish = portfolioMode.value ? portfolio.value?.plannedFinish : plan.value?.plannedFinish
-  return start && finish ? `${start} — ${finish}` : '尚未生成计划'
-})
-
 function taskRow(task: ProjectPlanTask, taskPlan: ProjectPlan, projectId: string, level: number): TimelineRow {
   return {
     key: `task-${projectId}-${task.id}`, name: task.name, level, stage: task.stage, start: task.plannedStart, finish: task.plannedFinish,

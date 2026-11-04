@@ -1,0 +1,36 @@
+/* Project-center new releases: right strip in the project list, dot on the release tab. */
+:root body .pdm-project-family__list > button[data-release-attention="new"] {
+  position: relative;
+  padding-right: 15px !important;
+}
+:root body .pdm-project-family__list > button[data-release-attention="new"] > .pdm-release-attention-border.is-new {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 5px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  mask: none;
+  background: #16a34a;
+  pointer-events: none;
+  animation: pdm-release-new-strip-breathe 2.4s ease-in-out infinite;
+}
+:root body .pdm-project-tabs > button[data-release-attention="new"] > .pdm-release-attention-border.is-new {
+  position: absolute;
+  inset: 4px 4px auto auto;
+  width: 6px;
+  height: 6px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  mask: none;
+  background: #16a34a;
+  pointer-events: none;
+  animation: none;
+  opacity: 1;
+}
+:root body .pdm-project-tabs > button[data-release-attention="new"] > .pdm-tab-update-dot { display: none !important; }
+@keyframes pdm-release-new-strip-breathe { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  :root body .pdm-project-family__list > button[data-release-attention="new"] > .pdm-release-attention-border.is-new { animation: none; opacity: 1; }
+}

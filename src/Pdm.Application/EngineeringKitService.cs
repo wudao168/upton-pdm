@@ -7,7 +7,7 @@ public sealed class EngineeringKitService(
     IMaterialRepository materials,
     IPdmRepository repository,
     TimeProvider timeProvider,
-    IStandardLibraryRepository standardLibrary)
+    IStandardLibraryRepository standardLibrary, MaterialBrandService? brandCatalog = null)
 {
     public async Task<IReadOnlyList<EngineeringKit>> ListAsync(bool releasedOnly, string actor, UserRole role, CancellationToken cancellationToken)
     {
@@ -158,6 +158,7 @@ public sealed class EngineeringKitService(
         var description = Optional(command.Description, 500, "套件说明");
         var changeNote = Optional(command.ChangeNote, 500, "变更说明");
         var existing = kitId is null ? null : await kits.FindAsync(kitId.Value, cancellationToken) ?? throw new PdmNotFoundException("套件不存在。");
+        if (brandCatalog is not null) brand = (await brandCatalog.NormalizeAsync(brand, existing?.Brand, cancellationToken))!;
         var category = await RequireCategoryAsync(command.StandardLibraryCategoryId, cancellationToken);
         var manualModel = existing?.CurrentReleasedRevisionId is not null ? existing.Model : command.ModelMode == EngineeringKitModelMode.Manual
             ? Required(command.Model ?? string.Empty, 160, "套件型号")
@@ -180,6 +181,7 @@ public sealed class EngineeringKitService(
         {
             var material = await materials.FindMaterialAsync(component.MaterialId, cancellationToken)
                 ?? throw new PdmRuleException("套件子料必须来自料品主档，不能引用另一个套件。");
+            U9UnitCatalog.RequireWholeQuantity(component.Quantity, material.UnitCode, $"套件子料“{material.MaterialCode}”的每套数量");
             if (material.IsArchived || material.ApprovalStatus != MaterialApprovalStatus.Approved || string.IsNullOrWhiteSpace(material.MaterialCode))
                 throw new PdmRuleException($"物料“{material.Name}”不是有效的已批准真实料品。");
             materialRows.Add(material);
@@ -248,6 +250,7 @@ public sealed class EngineeringKitService(
     {
         await RequireAsync(actor, role, PermissionCodes.StandardLibraryView, cancellationToken);
         if (command.Quantity <= 0) throw new PdmRuleException("套件数量必须大于0。");
+        U9UnitCatalog.RequireWholeQuantity(command.Quantity, "011", "套件数量");
         var kit = await kits.FindAsync(kitId, cancellationToken) ?? throw new PdmNotFoundException("套件不存在。");
         if (!kit.IsActive) throw new PdmRuleException("套件已停用，请恢复启用后再引用。");
         var revision = command.RevisionId is null

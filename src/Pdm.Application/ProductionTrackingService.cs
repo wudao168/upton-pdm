@@ -588,10 +588,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
         IReadOnlyList<ReleasePackage> history, IReadOnlyList<ProductionTrackingState> tracked)
     {
         var items = ProductionDrawingQuantities.FrozenItems(package);
-        var previous = history.Where(item => item.Id != package.Id && item.State == ReleasePackageState.Published
-                && item.PublishedAt <= package.PublishedAt && item.Scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement)
-            .OrderByDescending(item => item.PublishedAt).FirstOrDefault();
-        var previousItems = previous is null ? [] : ProductionDrawingQuantities.FrozenItems(previous);
+        var comparison = ReleaseQuantityComparison.Build(package,BomKind.NonStandard,history).ToDictionary(item=>item.MaterialKey);
         var lines = new List<ProductionLine>();
         foreach (var group in items.GroupBy(BomReleaseAggregation.MaterialKey))
         {
@@ -599,13 +596,12 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
             var total = group.Sum(item => item.Quantity) * Math.Max(1, package.WholeSetMultiplier);
             var trackingIds = group.Select(item => item.ReleaseTrackingId).ToHashSet();
             var prior = package.Scope == ReleaseScope.NonStandardSupplement
-                ? previousItems.Where(item => trackingIds.Contains(item.ReleaseTrackingId)
-                        || BomReleaseAggregation.MaterialKey(item) == group.Key)
-                    .DistinctBy(item => item.Id).Sum(item => item.Quantity) * Math.Max(1, previous?.WholeSetMultiplier ?? 1)
+                ? comparison[group.Key].PreviousBaselineQuantity+comparison[group.Key].EarlyReleasedCredit
                 : package.Scope == ReleaseScope.NonStandardWithDrawing
                     ? tracked.Where(item => item.Scope == ReleaseScope.NonStandardLongLead)
                         .SelectMany(item => item.Lines).Where(item => item.MaterialKey == group.Key
-                            || item.SourceTrackingIds.Any(trackingIds.Contains))
+                            || item.SourceTrackingIds.Any(trackingIds.Contains)
+                                && U9UnitCatalog.NormalizeBomUnit(item.Unit) == U9UnitCatalog.NormalizeBomUnit(first.Unit))
                         .Sum(item => item.RequiredQuantity) : 0;
             var quantity = Math.Max(0, total - prior);
             if (quantity == 0) continue;

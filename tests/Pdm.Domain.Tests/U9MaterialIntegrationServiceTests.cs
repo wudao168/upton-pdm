@@ -134,7 +134,8 @@ public sealed class U9MaterialIntegrationServiceTests
 
         var result = await fixture.Service.ImportSampleAsync(["0101"], 10, "admin", UserRole.Administrator, default);
 
-        Assert.Equal(1, result.SkippedCount);
+        Assert.Equal(0, result.SkippedCount);
+        Assert.Equal(1, result.RefreshedCount);
         var saved = await fixture.Materials.FindMaterialByCodeAsync("01010000001", default);
         Assert.Equal("PLM自建名称", saved?.Name);
         Assert.Equal(MaterialMasterOwner.Pdm, saved?.MasterOwner);
@@ -415,7 +416,7 @@ public sealed class U9MaterialIntegrationServiceTests
     }
 
     [Fact]
-    public async Task ExecuteTask_UpdateRequiresManualPathAndOnlyWritesSelectedAttributes()
+    public async Task ExecuteTask_PlmApprovedUpdateAutomaticallyWritesItsSavedFieldScope()
     {
         var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
         await fixture.Materials.BeginSyncTaskAsync(fixture.Task.Id, fixture.TimeProvider.GetUtcNow(), default);
@@ -432,18 +433,41 @@ public sealed class U9MaterialIntegrationServiceTests
         fixture.Client.QueryResultSequence.Enqueue(MatchingQuery(synced.Material with { Name = "改名后的传感器", PurchaseLink = "https://shop.example.test/item/sensor-v2" }, "u9-1001"));
         fixture.Client.BatchResult = new U9BusinessBatchResult(0, null, []);
 
-        await Assert.ThrowsAsync<PdmRuleException>(() => fixture.Service.ExecuteApprovedTaskAsync(change.Task!.Id, "system", default));
-        Assert.Equal(0, fixture.Client.PostCallCount);
-        var result = await fixture.Service.ExecuteTaskAsync(Assert.IsType<MaterialSyncTask>(change.Task).Id, "admin", UserRole.Administrator, default, ["Name"]);
+        var result = await fixture.Service.ExecuteApprovedTaskAsync(change.Task!.Id, "system", default);
 
         Assert.True(result.Updated);
         Assert.Equal(U9MaterialContract.ModifyPath, fixture.Client.LastPostPath);
         using var modifyPayload = System.Text.Json.JsonDocument.Parse(fixture.Client.LastCreatePayload);
         var attributes = modifyPayload.RootElement[0].GetProperty("Attributes").EnumerateArray()
             .ToDictionary(attribute => attribute.GetProperty("AttributeName").GetString()!);
-        Assert.DoesNotContain($"DescFlexField.{U9MaterialContract.PurchaseLinkPublicSegment}", attributes.Keys);
-        Assert.Single(attributes);
+        Assert.Contains($"DescFlexField.{U9MaterialContract.PurchaseLinkPublicSegment}", attributes.Keys);
+        Assert.Equal(2, attributes.Count);
         Assert.Contains("Name", attributes.Keys);
+    }
+
+    [Fact]
+    public async Task ReconciliationUpdatesPlmFieldDifferencesAndAvailabilityAndVerifiesBoth()
+    {
+        var fixture = await CreateApprovedTaskAsync(writeEnabled: true);
+        await fixture.Materials.BeginSyncTaskAsync(fixture.Task.Id, fixture.TimeProvider.GetUtcNow(), default);
+        var saved = await fixture.Materials.CompleteSyncTaskAsync(fixture.Task.Id, "u9-1001", fixture.Material.MaterialCode, "{}",
+            new AuditEntry(Guid.NewGuid(), fixture.TimeProvider.GetUtcNow(), "admin", "test", nameof(PdmMaterial), fixture.Material.Id.ToString(), "test"), default);
+        var actual = MatchingQuery(saved.Material, "u9-1001").Items[0] with { U9ItemName = "ERP旧名称",
+            CreationAttributes = new Dictionary<string, string?> { ["Effective.IsEffective"] = "false" } };
+        var materialService = new MaterialService(fixture.Materials, fixture.Repository, new TestProtector(), fixture.Client, fixture.TimeProvider);
+        var change = await materialService.ReconcileMasterAsync(saved.Material.Id, saved.Material.RowVersion, actual, true, "admin", UserRole.Administrator, default);
+        fixture.Client.QueryResultSequence.Enqueue(new(0, null, [actual]));
+        fixture.Client.QueryResultSequence.Enqueue(MatchingQuery(saved.Material, "u9-1001"));
+        var result = await fixture.Service.ExecuteApprovedTaskAsync(change.Task!.Id, "system", default);
+        Assert.Equal(MaterialSyncStatus.Succeeded, result.Task.Status);
+        Assert.True(result.Material.U9IsEffective);
+        Assert.Null(result.Material.U9ReconciliationMessage);
+        Assert.Equal(saved.Material.Name, result.Material.Name);
+        using var payload = System.Text.Json.JsonDocument.Parse(fixture.Client.LastCreatePayload);
+        var attributes = payload.RootElement[0].GetProperty("Attributes").EnumerateArray().ToArray();
+        Assert.Equal(2, attributes.Length);
+        Assert.Contains(attributes, value => value.GetProperty("AttributeName").GetString() == "Name");
+        Assert.Contains(attributes, value => value.GetProperty("AttributeName").GetString() == "Effective.IsEffective");
     }
 
     private static async Task<ExecutionFixture> CreateApprovedTaskAsync(bool writeEnabled)

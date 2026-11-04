@@ -6,6 +6,35 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class BomSummaryProjectionTests
 {
     [Fact]
+    public void GroupKeepsPublishedSourcesSeparateFromNewSameCodeSources()
+    {
+        var old = new BomItem(Guid.NewGuid(), Guid.NewGuid(), BomKind.Standard, 1, "SAME", "同料号", 1, "001", null, "MODEL", "W1", true)
+            { DisplayRevision = "S-P-V07" };
+        var first = old with { Id = Guid.NewGuid(), DisplayRevision = "未发布", Quantity = 2 };
+        var second = first with { Id = Guid.NewGuid(), Quantity = 3 };
+        var groups = BomSummaryProjection.Group([old, first, second]);
+        Assert.Equal(2, groups.Count);
+        Assert.Equal(1, groups[0].Quantity);
+        Assert.Equal(5, groups[1].Quantity);
+        var edit = new BomSummaryEdit(groups[1].SummaryItemIds!, groups[1].SummaryFingerprint!, ["remark"],
+            new(1, "SAME", "同料号", 5, "001", null, "MODEL", "W1", true, Remark: "新增部分"));
+        var saved = BomSummaryProjection.Expand([old, first, second], [edit], []);
+        Assert.Null(saved.Single(row => row.Id == old.Id).Remark);
+        Assert.All(saved.Where(row => row.Id != old.Id), row => Assert.Equal("新增部分", row.Remark));
+    }
+    [Fact]
+    public void FlatSummaryRetainsFractionalPrecisionForDivisibleUnits()
+    {
+        var project=Guid.NewGuid();
+        var first=new BomItem(Guid.NewGuid(),project,BomKind.Standard,1,"ROLL","可拆分卷料",1,"005",null,null,"W1",true);
+        var second=first with {Id=Guid.NewGuid(),Sequence=2};var group=BomSummaryProjection.Group([first,second]).Single();
+        var input=new BomItemInput(1,first.DrawingNumber,first.Name,2.5m,"005",null,null,"W1",true);
+        var result=BomSummaryProjection.Expand([first,second],[new(group.SummaryItemIds!,group.SummaryFingerprint!,["quantity"],input,
+            new Dictionary<Guid,decimal>{{first.Id,1},{second.Id,1.5m}})],[]);
+        Assert.Equal(2.5m, Assert.Single(result).Quantity);
+        Assert.True(result[0].IsSummaryQuantity);
+    }
+    [Fact]
     public void HierarchyCountsCombineDuplicateMaterialsAndUseCurrentValidationRules()
     {
         var projectId = Guid.NewGuid();
@@ -73,17 +102,33 @@ public sealed class BomSummaryProjectionTests
     }
 
     [Fact]
-    public void TotalQuantity_UsesDatabasePrecisionAndExactRemainder()
+    public void TotalQuantityIsSavedOnceWithoutAllocatingBackToOccurrences()
     {
         var projectId = Guid.NewGuid();
-        var items = Enumerable.Range(0, 3).Select(index => new BomItem(Guid.NewGuid(), projectId, BomKind.NonStandard,
+        var items = Enumerable.Range(0, 2).Select(index => new BomItem(Guid.NewGuid(), projectId, BomKind.NonStandard,
             index + 1, "SAME", "物料", 1, "001", "钢", "MODEL", "W1", true)).ToArray();
         var group = Assert.Single(BomSummaryProjection.Group(items));
-        var input = new BomItemInput(1, "SAME", "物料", 1, "001", "钢", "MODEL", "W1", true);
-        var expanded = BomSummaryProjection.Expand(items,
-            [new(group.SummaryItemIds!, group.SummaryFingerprint!, ["quantity"], input)], []);
-        Assert.Equal(new[] { 0.3333m, 0.3333m, 0.3334m }, expanded.Select(item => item.Quantity));
-        Assert.Equal(1, expanded.Sum(item => item.Quantity));
+        var input = new BomItemInput(1, "SAME", "物料", 3, "001", "钢", "MODEL", "W1", true);
+        var edit = new BomSummaryEdit(group.SummaryItemIds!, group.SummaryFingerprint!, ["quantity"], input);
+        var expanded = BomSummaryProjection.Expand(items, [edit], []);
+        Assert.Equal(3, Assert.Single(expanded).Quantity);
+        Assert.True(expanded[0].IsSummaryQuantity);
+        Assert.Equal(items[0].Id, expanded[0].Id);
+        Assert.All(items, item => Assert.Equal(1, item.Quantity));
+        Assert.Throws<PdmRuleException>(()=>BomSummaryProjection.Expand(items,[edit with {Values=input with {Quantity=1.5m}}],[]));
+    }
+
+    [Fact]
+    public void FourLegacyHalfOccurrencesCanBeChangedFromTwoToFourWithoutRoundingOrDistribution()
+    {
+        var project=Guid.NewGuid();
+        var source=Enumerable.Range(0,4).Select(index=>new BomItem(Guid.NewGuid(),project,BomKind.Standard,index+1,"01021000173","DLVC-L150",0.5m,"001",null,"DLVC-L150","W1",true)
+            {Source="Auto",SourceDocumentId=Guid.NewGuid(),SourceInstancePath=$"ASM/PART-{index}"}).ToArray();
+        var group=Assert.Single(BomSummaryProjection.Group(source));Assert.Equal(2,group.Quantity);
+        var saved=BomSummaryProjection.Expand(source,[new(group.SummaryItemIds!,group.SummaryFingerprint!,["quantity"],new(1,group.DrawingNumber,group.Name,4,"001",null,group.Specification,"W1",true))],[]);
+        Assert.Equal(4,Assert.Single(saved).Quantity);Assert.True(saved[0].IsSummaryQuantity);
+        Assert.Equal(source[0].SourceDocumentId,saved[0].SourceDocumentId);
+        Assert.All(source,row=>Assert.Equal(0.5m,row.Quantity));
     }
 
     [Fact]
@@ -121,4 +166,31 @@ public sealed class BomSummaryProjectionTests
             item with { Id = Guid.NewGuid(), IsManuallyExcluded = true },
             item with { Id = Guid.NewGuid(), IsManuallyExcluded = true, SourceDocumentId = Guid.NewGuid() }]).Count);
     }
+    [Fact]
+    public void Group_KeepsSameAccessoryCodeWithItsOwnMainAndPreservesManualQuantity()
+    {
+        var item = new BomItem(Guid.NewGuid(), Guid.NewGuid(), BomKind.Standard, 1, "SHARED", "共用配件", 2, "001", null, "M", "W1", true);
+        var mainA = Guid.NewGuid(); var mainB = Guid.NewGuid();
+        var rows = new[] { item with { RelationMainBomItemId = mainA, Source = "MaterialRelation" },
+            item with { Id = Guid.NewGuid(), Quantity = 3, RelationMainBomItemId = mainB, Source = "MaterialRelation" },
+            item with { Id = Guid.NewGuid(), Quantity = 5 } };
+        var grouped = BomSummaryProjection.Group(rows);
+        Assert.Equal(3, grouped.Count);
+        Assert.Equal(10, grouped.Sum(row => row.Quantity));
+        Assert.Equal(rows.Select(row => row.RelationMainBomItemId), grouped.Select(row => row.RelationMainBomItemId));
+        Assert.Equal(3, BomSummaryProjection.Expand(rows, [], []).Count);
+    }
+
+    [Fact]
+    public void Save_CompatibilityKitMarkerDoesNotOverwriteSourceAndRejectsRealSourceChanges()
+    {
+        var item = new BomItem(Guid.NewGuid(), Guid.NewGuid(), BomKind.Standard, 1, "SAME", "已有物料", 1, "001", null, "M", "W1", true);
+        var group = BomSummaryProjection.Group([item]).Single();
+        var input = new BomItemInput(1, "SAME", "已有物料", 2, "001", null, "M", "W1", true);
+        var edit = new BomSummaryEdit(group.SummaryItemIds!, group.SummaryFingerprint!, ["quantity", "engineeringKitReference"], input);
+        Assert.Equal(2, BomSummaryProjection.Expand([item], [edit], []).Single().Quantity);
+        Assert.Throws<PdmRuleException>(() => BomSummaryProjection.Expand([item], [edit with { Values = input with { EngineeringKitReferenceId = Guid.NewGuid() } }], []));
+        Assert.Throws<PdmRuleException>(() => BomSummaryProjection.Expand([item], [edit with { Fields = ["unknownField"] }], []));
+    }
+
 }

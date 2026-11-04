@@ -1598,7 +1598,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var draft = bomVersions.Values.FirstOrDefault(version => version.ProjectId == projectId && version.Kind == kind && version.State == BomVersionState.Draft);
             if (draft is not null)
             {
-                draft = draft with { Items = items.OrderBy(item => item.Sequence).ToArray(), UpdatedBy = actor, UpdatedAt = now, MotherMaterialId = header?.MaterialId };
+                draft = draft with { Items = items.OrderBy(item => item.Sequence).ToArray(), UpdatedBy = actor, UpdatedAt = now, MotherMaterialId = header?.MaterialId,
+                    WholeSetMultiplier = draft.IsMultiplierOverridden ? draft.WholeSetMultiplier : projects[projectId].Quantity };
                 bomVersions[draft.Id] = draft;
                 return Task.FromResult(draft);
             }
@@ -1610,10 +1611,25 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             draft = new BomVersion(Guid.NewGuid(), projectId, kind, number, $"{prefix}-{ProjectNumberPolicy.BusinessCode(project)}-B{number:D2}", BomVersionState.Draft,
                 latest?.Id, null, null, null, null, items.OrderBy(item => item.Sequence).ToArray(), actor, now, actor, now, null)
             {
-                MotherMaterialId = header?.MaterialId
+                MotherMaterialId = header?.MaterialId,
+                WholeSetMultiplier = latest?.IsMultiplierOverridden == true ? latest.WholeSetMultiplier : project.Quantity,
+                IsMultiplierOverridden = latest?.IsMultiplierOverridden ?? false
             };
             bomVersions[draft.Id] = draft;
             return Task.FromResult(draft);
+        }
+    }
+
+    public Task<BomVersion> UpdateBomVersionMultiplierAsync(Guid versionId, int multiplier, int expectedMultiplier, string actor, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            if (!bomVersions.TryGetValue(versionId, out var version)) throw new PdmNotFoundException("BOM工作版本不存在。");
+            if (version.State != BomVersionState.Draft || version.WholeSetMultiplier != expectedMultiplier)
+                throw new PdmConflictException("BOM版本或整套倍率已变化，请刷新后重试。");
+            var updated = version with { WholeSetMultiplier = multiplier, IsMultiplierOverridden = true, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() };
+            bomVersions[versionId] = updated;
+            return Task.FromResult(updated);
         }
     }
 

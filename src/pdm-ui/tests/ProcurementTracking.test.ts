@@ -21,6 +21,25 @@ vi.mock('../src/api', () => api)
 
 describe('ProcurementTracking', () => {
   afterEach(() => setMaterialStockContext(''))
+  it('已取消物料保留在备料中，请购状态优先于常备件并与筛选导出一致',async()=>{
+    const base=await api.getProjectProcurementTracking()
+    const canceled={...base.items[0],materialName:'已取消接头',quantity:0,isDemandCanceled:true,purchaseRequisitionStatus:'已核准',hasDeliveryDelay:false}
+    api.getProjectProcurementTracking.mockResolvedValue({...base,items:[canceled,{...base.items[0],sequence:2,materialCode:'ACTIVE',materialName:'继续购买接头'}]})
+    setMaterialStockContext('procurement-cancel-test')
+    await refreshMaterialStockPlans(async()=>({enterpriseCode:'01',organizationCode:'7',items:[{enterpriseCode:'01',organizationCode:'7',materialCode:canceled.materialCode,isEffective:true,safetyStockQuantity:15,reorderQuantity:50,unitName:'个',syncedAt:'2026-11-04T08:00:00Z'}]}))
+    const wrapper=mount(ProcurementTracking,{props:{projectId:'project-1',token:'token',username:'engineer'},global:{plugins:[ElementPlus]}})
+    await flushPromises()
+    const table=wrapper.get('.el-table__body-wrapper');expect(table.text()).toContain('已取消接头');expect(table.text()).toContain('已取消');expect(table.text()).toContain('继续购买接头')
+    expect(table.find('[title*="需求已在BOM正式发布中取消"]').exists()).toBe(true)
+    await wrapper.get('[aria-label="筛选请购状态"]').trigger('click');await flushPromises()
+    const options=document.body.querySelector('[aria-label="请购状态多选项"]')??wrapper.element.querySelector('[aria-label="请购状态多选项"]')
+    expect(options?.textContent).toContain('已取消')
+    await wrapper.findAll('button').find(button=>button.text()==='导出 Excel')!.trigger('click');await flushPromises()
+    const args=vi.mocked(downloadProcurementWorkbook).mock.calls[0]!,headers=args[1],row=args[2][0]!
+    expect(row[headers.indexOf('请购状态')]).toBe('已取消');expect(row[headers.indexOf('数量')]).toBe(0)
+    expect(row[headers.indexOf('购买数')]).toBe(4);expect(row[headers.indexOf('到货数')]).toBe(2)
+    wrapper.unmount()
+  })
   it('常备件替换两列采购状态，筛选和导出一致且不修改采购数量', async () => {
     const base = await api.getProjectProcurementTracking()
     api.getProjectProcurementTracking.mockResolvedValue({ ...base, items: [{ ...base.items[0], purchaseRequisitionNumbers: [], purchaseOrderNumbers: [], purchaseRequisitionStatus: '未请购', purchaseOrderStatus: '未采购' }] })
@@ -99,6 +118,25 @@ describe('ProcurementTracking', () => {
     wrapper.unmount()
     wrapper = mount(ProcurementTracking, options); await flushPromises()
     expect(wrapper.findAll('.el-table__header-wrapper th').map(th => th.text())).toContain('图纸附件')
+    wrapper.unmount()
+  })
+
+  it('备料补显当前BOM附件时明确说明来源且保持只读', async () => {
+    const base = await api.getProjectProcurementTracking()
+    const file = { id: 'supplement', materialId: 'material', kind: 'Drawing2D', fileName: '补充图纸.pdf', versionNumber: 1, fileLength: 10, sha256: 'A'.repeat(64), uploadedBy: '标准化', uploadedAt: '', source: '标准物料', purpose: '图纸' }
+    api.getProjectProcurementTracking.mockResolvedValue({ ...base, items: [{ ...base.items[0], files: [file], filesFromCurrentBom: true }] })
+    api.readProcurementFiles.mockResolvedValue([file])
+    localStorage.setItem('upton-pdm:procurement-columns:buyer', JSON.stringify({ version: 4, visible: ['materialCode', 'files'] }))
+    const wrapper = mount(ProcurementTracking, { props: { projectId: 'project-1', token: 'token', username: 'buyer' }, global: { plugins: [ElementPlus], stubs: { teleport: true } } })
+    await flushPromises()
+    await wrapper.get('[aria-label="01020000089 · 图纸附件"]').trigger('click'); await flushPromises()
+    const dialog = wrapper.findComponent({ name: 'BomFilesDialog' })
+    expect(dialog.text()).toContain('当前BOM补充附件')
+    expect(dialog.text()).toContain('原发布快照保持不变')
+    expect(dialog.text()).toContain('补充图纸.pdf')
+    expect(dialog.text()).toContain('V01')
+    expect(dialog.find('input[type=file]').exists()).toBe(false)
+    expect(dialog.findAll('button').some(button => ['移除', '采用当前启用版本及资料'].includes(button.text()))).toBe(false)
     wrapper.unmount()
   })
 
@@ -542,8 +580,9 @@ describe('ProcurementTracking', () => {
     expect(wrapper.text()).toContain('孟丹')
     expect(wrapper.get('.procurement-tracking__heading').element.firstElementChild?.classList.contains('procurement-tracking__filters')).toBe(true)
     expect(wrapper.findAll('.procurement-tracking__actions button').map(button => button.text())).toEqual(['列设置', '立即刷新', '库存设置', '导出 Excel'])
-    expect(wrapper.get('.procurement-tracking__heading').element.lastElementChild?.classList.contains('procurement-tracking__updated')).toBe(true)
-    expect(wrapper.get('[aria-label="采购跟踪筛选"]').element.nextElementSibling).toBe(wrapper.get('.procurement-tracking__actions').element)
+    expect(wrapper.get('.procurement-tracking__heading').element.lastElementChild?.classList.contains('procurement-tracking__actions')).toBe(true)
+    expect(wrapper.get('[aria-label="采购跟踪筛选"]').element.nextElementSibling).toBe(wrapper.get('.procurement-tracking__updated').element)
+    expect(wrapper.get('.procurement-tracking__updated').element.nextElementSibling).toBe(wrapper.get('.procurement-tracking__actions').element)
     expect(wrapper.findAll('.procurement-tracking__delay-filter').map(label => label.text())).toEqual(['延期'])
     expect(wrapper.get('[aria-label="筛选品牌"]').attributes('list')).toBe('procurement-brands-project-1')
     expect(wrapper.get('[aria-label="筛选物料分类"]').findAll('option').map(option => option.text())).toEqual(['全部分类', '标准件', '非标件', '电气件'])

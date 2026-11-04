@@ -5,6 +5,19 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class ProcurementTrackingAggregationTests
 {
     [Fact]
+    public void CanceledDemandKeepsPurchaseBatchesAndWarehouseHistoryWithoutChangingU9Cancellation()
+    {
+        var receipt=Pr("3","RCV1",0) with {RecordKind="RCV",SourcePoLineId="2",MovementDate=DateTimeOffset.UtcNow,MovementQuantity=1};
+        var source=new[]{Pr("1","PR1",2),Po("2","PO1","1",2),receipt};
+        var row=Assert.Single(ProcurementTrackingAggregation.Group([Item(0) with {IsDemandCanceled=true}],source));
+        Assert.True(row.IsDemandCanceled);Assert.Equal("已取消",row.PurchaseRequisitionStatus);Assert.Equal(0,row.Quantity);
+        Assert.Equal(2,row.RequestedQuantity);Assert.Equal(2,row.PurchaseQuantity);Assert.Equal(1,row.ArrivedQuantity);
+        Assert.Equal(1,Assert.Single(row.WarehouseMovements).Quantity);Assert.False(row.HasDeliveryDelay);
+        Assert.All(row.Details,detail=>Assert.False(detail.IsCanceled));Assert.All(source,item=>Assert.False(item.IsCanceled));
+        var mixed=Assert.Single(ProcurementTrackingAggregation.Group([Item(0) with {IsDemandCanceled=true},Item(1)],source));
+        Assert.False(mixed.IsDemandCanceled);Assert.Equal(1,mixed.Quantity);Assert.Equal("已核准",mixed.PurchaseRequisitionStatus);
+    }
+    [Fact]
     public void EveryPurchaseBatchKeepsAllDistinctPublishedFilesForTheMaterial()
     {
         var first = new BomFileReference(Guid.NewGuid(), Guid.NewGuid(), "Drawing2D", "图纸.pdf", 1, 10, new string('A',64), "标准化", DateTimeOffset.UtcNow, "标准物料", "图纸");

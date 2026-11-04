@@ -232,21 +232,62 @@ public sealed partial class PdmAddin
                         DisplayName = Path.GetFileNameWithoutExtension(path), DrawingNumber = Path.GetFileNameWithoutExtension(path),
                         Kind = DocumentKindFromPath(path), Role = CadReferenceRole.ExternalFileDependency,
                         InstancePath = owner.InstancePath + "/受控引用/" + Path.GetFileName(path) };
-                    if (PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var binding))
+                    nodes.Add(path, dependency);
+                }
+                ArchiveSourceIdentity.RestoreForProject(dependency, projectId);
+                if (PdmDocumentIdentityStore.TryReadArchiveMetadata(dependency.FullPath, projectId, out var binding))
+                {
+                    if (binding.ProjectId != projectId)
                     {
-                        if (binding.ProjectId != projectId)
+                        if (PdmDocumentIdentityStore.IsControlledWorkspacePath(dependency.FullPath))
                             throw new InvalidOperationException("依赖文件属于其他PLM项目，不能自动改归属：" + dependency.FileName);
+                        dependency.DocumentId = null;
+                        dependency.ProvenanceDocumentId = binding.DocumentId;
+                        dependency.ProvenanceProjectId = binding.ProjectId;
+                        dependency.IsExternalProvenance = true;
+                        dependency.OpenedVersionId = null;
+                    }
+                    else
+                    {
                         projectDocuments = projectDocuments ?? await apiClient.GetDocumentsAsync(projectId, token);
                         var registered = projectDocuments.FirstOrDefault(document => document.Id == binding.DocumentId);
-                        if (registered == null) throw new InvalidOperationException("依赖文件的受控身份已失效，请从项目工作区重新获取：" + dependency.FileName);
-                        ApplyRegisteredDocumentToMatchingInstances(dependency, registered);
-                        dependency.OpenedVersionId = binding.VersionId;
-                        dependency.OpenedRevision = dependency.CurrentRevision = dependency.Revision = binding.Revision;
+                        if (registered == null && PdmDocumentIdentityStore.IsControlledWorkspacePath(dependency.FullPath))
+                            throw new InvalidOperationException("依赖文件的受控身份已失效，请从项目工作区重新获取：" + dependency.FileName);
+                        if (registered != null)
+                        {
+                            ApplyPreparedDocumentToMatchingInstances(dependency, registered, false);
+                            dependency.OpenedVersionId = binding.VersionId;
+                            dependency.OpenedRevision = dependency.CurrentRevision = dependency.Revision = binding.Revision;
+                        }
                     }
-                    nodes.Add(path, dependency);
                 }
                 if (!File.Exists(dependency.FullPath) || new FileInfo(dependency.FullPath).Length == 0)
                     throw new InvalidOperationException("检入所需的依赖文件缺失或为空，尚未上传：" + dependency.FileName);
+                if (dependency.IsImportedSourceFile && !dependency.DocumentId.HasValue)
+                {
+                    projectDocuments = projectDocuments ?? await apiClient.GetDocumentsAsync(projectId, token);
+                    var matches = projectDocuments.Where(document => document.Kind == (int)dependency.Kind
+                        && string.Equals(document.FileName, dependency.FileName, StringComparison.OrdinalIgnoreCase)).ToArray();
+                    if (matches.Length > 1) throw new InvalidOperationException("目标项目存在多个同名辅助来源，请核对后重试：" + dependency.FileName);
+                    if (matches.Length == 1)
+                    {
+                        var hash = ArchiveFileFingerprint.Read(dependency.FullPath);
+                        var version = (await apiClient.GetVersionsAsync(matches[0].Id, token)).FirstOrDefault(candidate => VersionMatchesFile(candidate, hash));
+                        if (version == null) throw new InvalidOperationException("目标项目的同名辅助来源与本次内容不同，未自动覆盖：" + dependency.FileName);
+                        ApplyPreparedDocumentToMatchingInstances(dependency, matches[0], false);
+                        dependency.OpenedVersionId = version.Id;
+                        dependency.OpenedRevision = dependency.CurrentRevision = dependency.Revision = version.Revision?.Display;
+                    }
+                    else dependency.IndependentImportDependency = true;
+                }
+                if (dependency.IsImportedSourceFile)
+                {
+                    dependency.IsOutsideNativeFileScope = false;
+                    owner.ConfirmedArchivePaths?.Add(dependency.FullPath);
+                    foreach (var instance in ArchiveMissingReferencePolicy.Walk(owner).Where(node => PathsEqual(node.FullPath, dependency.FullPath)))
+                    { instance.IsOutsideNativeFileScope = false; CopyPdmIdentity(dependency, instance); }
+                    owner.ReferenceWarnings.RemoveAll(message => message.StartsWith(ArchiveMissingReferencePolicy.WarningPrefix + source + "；", StringComparison.OrdinalIgnoreCase));
+                }
                 if (!owner.Children.Concat(owner.ReferencedModels).Any(node => PathsEqual(node.FullPath, dependency.FullPath)))
                 {
                     var reference = new CadTreeNode { FullPath = dependency.FullPath, SourceReferencePath = source,
@@ -271,7 +312,7 @@ public sealed partial class PdmAddin
                     ArchiveMissingReferencePolicy.OmitUnselected(owner, dependency);
                     continue;
                 }
-                var locallyChanged = dependency.DocumentId.HasValue && PdmDocumentIdentityStore.TryReadLocalMetadata(dependency.FullPath, out var baseline)
+                var locallyChanged = dependency.DocumentId.HasValue && PdmDocumentIdentityStore.TryReadArchiveMetadata(dependency.FullPath, projectId, out var baseline)
                     && baseline.DocumentId == dependency.DocumentId && baseline.VersionId.HasValue
                     && !string.Equals(ArchiveFileFingerprint.Read(dependency.FullPath), baseline.Sha256, StringComparison.OrdinalIgnoreCase)
                     && !string.Equals(ArchiveFileFingerprint.Read(dependency.FullPath), baseline.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase);

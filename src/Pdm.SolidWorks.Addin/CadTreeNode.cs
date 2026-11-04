@@ -83,6 +83,7 @@ internal sealed class CadTreeNode
     public bool IsStoredImport => !string.IsNullOrWhiteSpace(ImportedStorageOwnerPath);
 
     public bool IsImportedSourceFile => Kind == CadDocumentKind.Other && Role == CadReferenceRole.ExternalFileDependency;
+    internal bool IndependentImportDependency { get; set; }
 
     public CadReferenceRole Role { get; set; }
     public bool IsContextReference { get; set; }

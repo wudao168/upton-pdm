@@ -27,12 +27,12 @@ internal sealed partial class PdmApiClient : IDisposable
 
     public PdmApiClient(string baseAddress)
     {
-        httpClient = new HttpClient(new ClientDiagnosticHandler())
+        httpClient = new HttpClient(new SessionRenewalHandler(this, new ClientDiagnosticHandler()))
         {
             BaseAddress = new Uri(baseAddress.TrimEnd('/') + "/", UriKind.Absolute),
             Timeout = TimeSpan.FromSeconds(30)
         };
-        controlledOpenHttpClient = new HttpClient(new ClientDiagnosticHandler())
+        controlledOpenHttpClient = new HttpClient(new SessionRenewalHandler(this, new ClientDiagnosticHandler()))
         {
             BaseAddress = httpClient.BaseAddress,
             Timeout = TimeSpan.FromMinutes(15)
@@ -41,6 +41,7 @@ internal sealed partial class PdmApiClient : IDisposable
 
     public bool IsAuthenticated => httpClient.DefaultRequestHeaders.Authorization != null;
     public string EditJournalScope { get; private set; }
+    internal string SourceReceiptScope => ConfirmedArchiveSource.UserScope(EditJournalScope, Volatile.Read(ref renewableSession)?.Username);
 
     public async Task<LoginResponseDto> LoginAsync(string username, string password, CancellationToken cancellationToken)
     {
@@ -49,6 +50,7 @@ internal sealed partial class PdmApiClient : IDisposable
         httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", response.AccessToken);
         controlledOpenHttpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", response.AccessToken);
         SetActiveCompany(response.ActiveCompanyId);
+        StartRenewableSession(response);
         loginHeartbeat?.Dispose();
         loginHeartbeat = new System.Threading.Timer(_ => { _ = HeartbeatAsync(); }, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
         return response;
@@ -73,7 +75,7 @@ internal sealed partial class PdmApiClient : IDisposable
         if (companyId != Guid.Empty) httpClient.DefaultRequestHeaders.Add("X-Company-Id", companyId.ToString());
         if (companyId != Guid.Empty) controlledOpenHttpClient.DefaultRequestHeaders.Add("X-Company-Id", companyId.ToString());
         if (httpClient.DefaultRequestHeaders.Authorization != null)
-            ClientDiagnostics.Bind(httpClient.BaseAddress.AbsoluteUri, httpClient.DefaultRequestHeaders.Authorization.Parameter, companyId.ToString());
+            ClientDiagnostics.Bind(httpClient.BaseAddress.AbsoluteUri, CurrentSessionAccessToken, companyId.ToString());
     }
 
     public Task<List<ProjectDto>> GetProjectsAsync(CancellationToken cancellationToken) =>
@@ -464,8 +466,9 @@ internal sealed partial class PdmApiClient : IDisposable
         if (!string.Equals(hash, latest.Sha256, StringComparison.OrdinalIgnoreCase)
             && !string.Equals(hash, sourceHash, StringComparison.OrdinalIgnoreCase)) return null;
         if (!PdmAddin.ReferenceSnapshotMatchesTree(latest.ReferenceSnapshot, node)) return null;
-        PdmDocumentIdentityStore.TryWriteControlledVersion(node.FullPath, documentId, null, latest.Id,
-            latest.Revision?.Display, hash, new FileInfo(node.FullPath).Length);
+        if (PdmDocumentIdentityStore.IsControlledWorkspacePath(node.FullPath))
+            PdmDocumentIdentityStore.TryWriteControlledVersion(node.FullPath, documentId, null, latest.Id,
+                latest.Revision?.Display, hash, new FileInfo(node.FullPath).Length);
         return latest.Id;
     }
 
@@ -959,6 +962,7 @@ internal sealed partial class PdmApiClient : IDisposable
 
     public void Dispose()
     {
+        Interlocked.Exchange(ref sessionClosing, 1);
         loginHeartbeat?.Dispose();
         if (IsAuthenticated)
         {
@@ -966,7 +970,10 @@ internal sealed partial class PdmApiClient : IDisposable
                 try { PostJsonAsync<bool>("api/auth/logout", new { }, timeout.Token).GetAwaiter().GetResult(); }
                 catch (Exception error) { ClientDiagnostics.Record("runtime", "退出登录", error.Message); }
         }
-        if (httpClient.DefaultRequestHeaders.Authorization != null) ClientDiagnostics.Pause(httpClient.DefaultRequestHeaders.Authorization.Parameter);
+        if (httpClient.DefaultRequestHeaders.Authorization != null) ClientDiagnostics.Pause(CurrentSessionAccessToken);
+        ClearRenewableSession();
+        httpClient.DefaultRequestHeaders.Authorization = null;
+        controlledOpenHttpClient.DefaultRequestHeaders.Authorization = null;
         controlledOpenHttpClient.Dispose();
         httpClient.Dispose();
     }
@@ -1242,6 +1249,7 @@ internal sealed partial class PdmApiClient : IDisposable
         }
 
         httpClient.DefaultRequestHeaders.Authorization = null;
+        ClearRenewableSession();
         ClientDiagnostics.Pause();
         controlledOpenHttpClient.DefaultRequestHeaders.Authorization = null;
         if (Interlocked.Exchange(ref authenticationExpiredRaised, 1) == 0)
@@ -1599,9 +1607,12 @@ internal sealed class ArchiveBatchReceiptDto
 
 internal sealed class ControlledOpenManifestDto
 {
+    internal bool LatestReferenceVersionsConfirmed { get; set; }
     // Local proof for resuming an existing checkout, never supplied by the server
     // or serialized into immutable version/cache manifests.
     internal Dictionary<Guid, string> RetainedWorkingHashes { get; } = new Dictionary<Guid, string>();
+    internal WorkspaceCacheBackup CacheBackup { get; set; }
+    internal bool WorkspaceOpenCanceled { get; set; }
     internal HashSet<string> CompletedReferencePrepasses { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     internal HashSet<Guid> ResumedDocumentIds { get; } = new HashSet<Guid>();
     internal Dictionary<string, RetainedLocalReference> RetainedLocalReferences { get; } = new Dictionary<string, RetainedLocalReference>(StringComparer.OrdinalIgnoreCase);

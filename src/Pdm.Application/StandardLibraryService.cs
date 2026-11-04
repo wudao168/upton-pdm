@@ -146,7 +146,7 @@ public sealed class StandardLibraryService(
                 var kitCategories = kit.StandardLibraryCategoryId is Guid id && categoryById.TryGetValue(id, out var category)
                     ? new[] { category } : Array.Empty<StandardLibraryCategory>();
                 var cover = kit.CoverImageAttachmentId is Guid coverId ? await kits.FindLibraryAttachmentAsync(coverId, cancellationToken) : null;
-                rows.Add(new(material, kitCategories, cover, kit with { Revisions = kit.Revisions.Where(item => item.State == EngineeringKitRevisionState.Released).ToArray() }));
+                rows.Add(new(material, kitCategories, cover, kit with { Revisions = kit.Revisions.Where(item => item.State == EngineeringKitRevisionState.Released).ToArray() }, Relation: publishedRelations.GetValueOrDefault(kit.Id)));
             }
         }
 

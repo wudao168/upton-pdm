@@ -31,7 +31,7 @@ internal static partial class Program
    void Save(string name){using(var bitmap=new Bitmap(dialog.Width,dialog.Height)){dialog.DrawToBitmap(bitmap,new Rectangle(Point.Empty,bitmap.Size));bitmap.Save(Path.Combine(output,name+".png"));}}
    TreeCall(dialog,"SetAllChecked",false);
    Check(Count()==0&&!execute.Enabled,"215文件清空勾选后确认存档立即禁用");
-   Check(execute.BackColor==Color.FromArgb(242,244,247)&&execute.ForeColor==Color.FromArgb(145,155,168),"零勾选使用统一禁用灰色");
+   Check(execute.BackColor==Color.FromArgb(224,224,224)&&execute.ForeColor==Color.FromArgb(145,155,168),"零勾选使用清晰的禁用灰色");
    execute.PerformClick();Check(clicks==0&&dialog.DialogResult!=DialogResult.OK,"禁用按钮不能触发点击或提交结果");
    var size=dialog.Size;TreeCall(dialog,"ToggleShowCheckedOnly");
    Check(!execute.Enabled&&tree.Nodes.Count==1&&tree.Nodes[0].Text=="尚未勾选图档"&&dialog.Size==size,"仅显示勾选的空列表保持禁用及原窗口大小");Save("empty-selection-disabled");

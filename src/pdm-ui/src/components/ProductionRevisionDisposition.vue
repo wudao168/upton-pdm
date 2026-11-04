@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { u9UnitName } from '../u9Units'
 import { vQuantity } from '../quantityInput'
 import { computed, nextTick, ref, watch } from 'vue'
 import type { resolveProductionRevision } from '../api'
@@ -30,7 +31,7 @@ defineExpose({ focus: async () => { await nextTick(); heading.value?.focus(); he
     <h4 ref="heading" tabindex="-1">图纸／BOM变更待处理</h4>
     <p>{{ lot.freezeReason || '后续变更发布涉及该物料的升版、减量或移除，旧批次已冻结。' }}</p>
     <p>冻结期间不能排程或登记生产流转。请先核对变更内容，在此选择处置方式并填写原因，确认后解除本次变更冻结。</p>
-    <p>待处置数量：<strong>{{ remaining }} {{ unit }}</strong>（扣除已领用、已取消、已转版数量）</p>
+    <p>待处置数量：<strong>{{ remaining }} {{ u9UnitName(unit) }}</strong>（扣除已领用、已取消、已转版数量）</p>
     <p v-if="!lot.frozenByReleasePackageId" role="status">缺少关联的变更发布包，暂不能处置。请先刷新；仍未恢复时请联系系统管理员核对变更记录。</p>
     <p v-else-if="!canResolve" role="status">当前账号没有变更处置权限。请联系拥有“分配非标件自制与外协”{{ lot.route === 'Self' ? '或“安排自制生产”' : '' }}权限的人员，在本页选中该批次办理；权限可由管理员在设置页面调整。</p>
     <form v-else @submit.prevent="submit">

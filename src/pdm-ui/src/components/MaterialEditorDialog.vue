@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import MaterialBrandSelect from './MaterialBrandSelect.vue'
 import type { MaterialAttachment, MaterialAttachmentKind, MaterialCategory, PdmMaterial, SaveMaterialInput } from '../types'
 import { u9UnitOptions } from '../u9Units'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
@@ -197,10 +198,10 @@ async function refreshDrawingVersions() {
         <el-form-item :label="kitMode ? '名称' : '物料名称'" :required="!kitMode"><el-input v-model="form.name" :disabled="kitMode || u9FieldsLocked" /></el-form-item>
         <el-form-item v-if="!kitMode" label="U9C对应分类" required><el-select v-model="form.categoryCode" :disabled="u9FieldsLocked" filterable placeholder="请选择U9C对应分类" @change="emit('categoryChange', String($event))"><el-option v-for="category in categories" :key="category.code" :label="`${category.code} ${category.name}`" :value="category.code" /></el-select></el-form-item>
         <el-form-item v-if="!kitMode" label="PLM业务类型"><el-select v-model="form.kind" disabled><el-option label="电气件" value="Electrical" /><el-option label="机械外购件" value="Standard" /><el-option label="非标机加件" value="NonStandard" /><el-option label="产品/组件" value="Product" /></el-select></el-form-item>
-        <el-form-item v-if="!kitMode" label="计量单位" required><el-select v-model="form.unitCode" :disabled="u9FieldsLocked" filterable placeholder="请选择U9C计量单位"><el-option v-for="unit in u9UnitOptions" :key="unit.code" :label="`${unit.code} ${unit.name}`" :value="unit.code" /></el-select></el-form-item>
+        <el-form-item v-if="!kitMode" label="计量单位" required><el-select v-model="form.unitCode" :disabled="u9FieldsLocked" filterable placeholder="请选择U9C计量单位"><el-option v-for="unit in u9UnitOptions" :key="unit.code" :label="unit.name" :value="unit.code" /></el-select></el-form-item>
         <el-form-item :label="kitMode ? '型号' : '规格/型号'"><el-input v-model="form.specification" :disabled="kitMode || u9FieldsLocked" /></el-form-item>
         <el-form-item v-if="!kitMode" label="材质"><el-input v-model="form.material" :disabled="u9FieldsLocked" /></el-form-item>
-        <el-form-item label="品牌"><el-input v-if="kitMode" v-model="form.brand" disabled /><el-select v-else v-model="form.brand" :disabled="u9FieldsLocked" filterable allow-create default-first-option clearable placeholder="可输入或选择品牌"><el-option v-for="brand in brands" :key="brand" :label="brand" :value="brand" /></el-select></el-form-item>
+        <el-form-item label="品牌"><el-input v-if="kitMode" v-model="form.brand" disabled /><MaterialBrandSelect v-else v-model="form.brand" :token="token" :disabled="u9FieldsLocked" /></el-form-item>
         <el-form-item v-if="!kitMode" label="表面处理"><el-input v-model="form.surfaceTreatment" :disabled="u9FieldsLocked" /></el-form-item>
         <el-form-item v-if="!kitMode" label="重量"><el-input-number v-model="form.weight" :disabled="u9FieldsLocked" :min="0" :precision="6" /></el-form-item>
         <el-form-item label="参考价格"><el-input-number v-model="form.referencePrice" :min="0" :precision="2" :step="10" controls-position="right" /></el-form-item>

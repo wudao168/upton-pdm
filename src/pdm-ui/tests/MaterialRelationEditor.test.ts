@@ -6,6 +6,7 @@ import MaterialRelationEditor from '../src/components/MaterialRelationEditor.vue
 const api = vi.hoisted(() => ({
   listMaterialRelationTemplates: vi.fn(),
   listMaterials: vi.fn(),
+  listMaterialRelationMainOptions: vi.fn(),
   saveMaterialRelationTemplate: vi.fn(),
   publishMaterialRelationTemplate: vi.fn(),
   listMaterialRelationCategories: vi.fn(),
@@ -35,9 +36,24 @@ const relation = {
   },
 }
 
+async function selectMain(wrapper: ReturnType<typeof mount>, id: string) {
+  const select = wrapper.get('.material-relation-main-add-row').findComponent({ name: 'ElSelect' })
+  select.vm.$emit('update:modelValue', id)
+  select.vm.$emit('change', id)
+  await flushPromises()
+}
+
+async function selectAccessory(wrapper: ReturnType<typeof mount>, id: string) {
+  const select = wrapper.get('.material-relation-option-row.is-quick-entry').findComponent({ name: 'ElSelect' })
+  select.vm.$emit('update:modelValue', id)
+  select.vm.$emit('change', id)
+  await flushPromises()
+}
+
 describe('MaterialRelationEditor', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    api.listMaterialRelationMainOptions.mockImplementation(async (token, query) => (await api.listMaterials(token, query ?? '', false, 100)).filter((item: any) => item.approvalStatus === 'Approved' && !item.isArchived).map((item: any) => ({ materialId: item.id, materialCode: item.materialCode, materialName: item.name, specification: item.specification, brand: item.brand })))
     api.listMaterialRelationTemplates.mockResolvedValue([relation])
     api.listMaterials.mockResolvedValue([mainMaterial, accessory])
     api.listMaterialRelationCategories.mockResolvedValue([])
@@ -46,6 +62,57 @@ describe('MaterialRelationEditor', () => {
   })
 
   afterEach(() => { document.body.innerHTML = '' })
+
+  it('精确料号搜索只显示命中项，已选料号仍保留正确显示', async () => {
+    api.listMaterials.mockImplementation(async (_token, query) => query === modelMatch.materialCode ? [accessory, modelMatch] : [mainMaterial, accessory])
+    const wrapper=mount(MaterialRelationEditor,{props:{token:'token',mainMaterial,canManage:true,canPublish:false},global:{plugins:[ElementPlus]}})
+    await flushPromises()
+    const selected=wrapper.get('.material-relation-option-row:not(.is-quick-entry)').findComponent({name:'ElSelect'})
+    const quick=wrapper.get('.material-relation-option-row.is-quick-entry').findComponent({name:'ElSelect'})
+    await quick.props('remoteMethod')(modelMatch.materialCode);await flushPromises()
+    expect(quick.findAllComponents({name:'ElOption'}).map(option=>option.props('value'))).toEqual([modelMatch.id])
+    expect(selected.props('modelValue')).toBe(accessory.id)
+    expect(selected.text()).toContain(accessory.materialCode)
+    expect(wrapper.get('.material-relation-option-row:not(.is-quick-entry)').text()).toContain(accessory.name)
+    expect(api.saveMaterialRelationTemplate).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('无匹配结果时不显示历史已选项，并丢弃迟到的旧查询', async () => {
+    const wrapper=mount(MaterialRelationEditor,{props:{token:'token',mainMaterial,canManage:true,canPublish:false},global:{plugins:[ElementPlus]}})
+    await flushPromises()
+    let finishOld!:(rows:typeof accessory[])=>void
+    api.listMaterials.mockImplementation(async (_token, query) => query === 'OLD' ? new Promise(resolve=>{finishOld=resolve}) : [])
+    const quick=wrapper.get('.material-relation-option-row.is-quick-entry').findComponent({name:'ElSelect'})
+    const old=quick.props('remoteMethod')('OLD')
+    await flushPromises()
+    expect(quick.findAllComponents({name:'ElOption'})).toHaveLength(0)
+    await quick.props('remoteMethod')('NO-MATCH');await flushPromises()
+    finishOld([accessory]);await old;await flushPromises()
+    expect(quick.findAllComponents({name:'ElOption'})).toHaveLength(0)
+    expect(wrapper.get('.material-relation-option-row:not(.is-quick-entry)').text()).toContain(accessory.materialCode)
+    wrapper.unmount()
+  })
+
+  it('料品套件可按型号搜索并作为共享主料保存', async () => {
+    api.listMaterialRelationTemplates.mockResolvedValue([])
+    api.listMaterialRelationMainOptions.mockResolvedValue([{ materialId: 'kit-id', materialCode: 'UKIT-000004', materialName: 'HMI组件', specification: 'UTJ-12-0001', brand: 'UPTON', isEngineeringKit: true }])
+    const wrapper = mount(MaterialRelationEditor, { props: { token: 'token', canManage: true, canPublish: true }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const select = wrapper.get('.material-relation-main-add-row').findComponent({ name: 'ElSelect' })
+    await select.props('remoteMethod')('UTJ-12-0001'); await flushPromises()
+    expect(api.listMaterialRelationMainOptions).toHaveBeenCalledWith('token', 'UTJ-12-0001')
+    await selectMain(wrapper, 'kit-id')
+    expect(wrapper.get('[aria-label="共享配置主物料"]').text()).toContain('UKIT-000004')
+    expect(wrapper.get('[aria-label="共享配置主物料"]').text()).toContain('UTJ-12-0001')
+    await wrapper.get('[aria-label="关联配置名称"]').setValue('套件配套')
+    await wrapper.findAll('button').find(button => button.text() === '添加配件组')!.trigger('click')
+    await wrapper.get('[aria-label="分类名称（必填）"]').setValue('配件')
+    await selectAccessory(wrapper, accessory.id)
+    await wrapper.findAll('button').find(button => button.text() === '保存修改')!.trigger('click'); await flushPromises()
+    expect(api.saveMaterialRelationTemplate.mock.calls.at(-1)?.[0].mainMaterialIds).toEqual(['kit-id'])
+    wrapper.unmount()
+  })
 
   it('新增配置直接维护多主料，统一保存同一份配件规则', async () => {
     const second = { ...mainMaterial, id: 'main-2', materialCode: 'M-002', name: '同系列电机' }
@@ -58,14 +125,17 @@ describe('MaterialRelationEditor', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('主物料 0 个')
     expect(wrapper.findAll('button').some(button => button.text() === '开始配置关联物料')).toBe(false)
-    const mainSelect = wrapper.get('.material-relation-main-toolbar').findComponent({ name: 'ElSelect' })
-    mainSelect.vm.$emit('update:modelValue', [mainMaterial.id, second.id]); await flushPromises()
-    expect(wrapper.findAll('.material-relation-main-table tbody tr')).toHaveLength(2)
+    expect(wrapper.find('.material-relation-main-toolbar .el-select').exists()).toBe(false)
+    await selectMain(wrapper, mainMaterial.id)
+    await selectMain(wrapper, second.id)
+    expect(wrapper.findAll('.material-relation-main-table tbody tr:not(.is-quick-entry)')).toHaveLength(2)
+    expect(wrapper.findAll('.material-relation-main-add-row')).toHaveLength(1)
     await wrapper.get('[aria-label="关联配置名称"]').setValue('同系列电机共享配套')
     await wrapper.findAll('button').find(button => button.text() === '添加配件组')!.trigger('click')
     await wrapper.get('[aria-label="分类名称（必填）"]').setValue('控制器')
-    await wrapper.findAll('button').find(button => button.text() === '添加候选配件')!.trigger('click')
-    wrapper.get('.material-relation-option-row').findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', accessory.id); await flushPromises()
+    await selectAccessory(wrapper, accessory.id)
+    expect(wrapper.findAll('.material-relation-option-row.is-quick-entry')).toHaveLength(1)
+    expect(wrapper.get('.material-relation-option-row:not(.is-quick-entry)').get('input[role="spinbutton"]').attributes('aria-disabled')).not.toBe('true')
     await wrapper.findAll('button').find(button => button.text() === '保存修改')!.trigger('click'); await flushPromises()
     expect(api.saveMaterialRelationTemplate).toHaveBeenCalledWith(expect.objectContaining({ mainMaterialIds: ['main-1', 'main-2'], name: '同系列电机共享配套', groups: [expect.objectContaining({ options: [expect.objectContaining({ materialId: accessory.id })] })] }), 'token', undefined)
     wrapper.unmount()
@@ -78,7 +148,7 @@ describe('MaterialRelationEditor', () => {
     api.listMaterialRelationTemplates.mockResolvedValue([relation, { ...relation, id: 'other', mainMaterialId: second.id, mainMaterialCode: second.materialCode, name: '其他配置' }])
     const wrapper = mount(MaterialRelationEditor, { props: { token: 'token', templateId: relation.id, canManage: true, canPublish: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()
-    await wrapper.get('.material-relation-main-toolbar .el-select__wrapper').trigger('click'); await flushPromises()
+    await wrapper.get('.material-relation-main-add-row .el-select__wrapper').trigger('click'); await flushPromises()
     const blocked = [...document.querySelectorAll('.el-select-dropdown__item')].find(option => option.textContent?.includes(second.materialCode) && option.textContent.includes('已归属'))!
     expect(blocked.classList.contains('is-disabled')).toBe(true)
     await wrapper.get('[aria-label="关联配置名称"]').setValue('修改共享名称')

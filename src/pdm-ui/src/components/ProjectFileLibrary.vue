@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import SearchField from './SearchField.vue'
 import UserSelect from './UserSelect'
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { Download, Eye, File, Folder, FolderCog, FolderPlus, History, Pencil, RotateCcw, ShieldCheck, Trash2, Upload, X } from '@lucide/vue'
 import type { ControlledDocumentRecycleReadiness, FolderPermissionRule, ManagedDocument, PdmUser, ProjectFile, ProjectFileVersion, ProjectFolder, RolePermissionSettings } from '../types'
 import { createProjectFolder, deleteProjectFile, deleteProjectFolder, downloadProjectFile, getControlledDocumentRecycleReadiness, listControlledDocumentRecycleBin, listProjectFiles, listProjectFileVersions, moveProjectFile, moveProjectFolder, readProjectFileContent, recycleControlledDocument, recycleControlledDocumentsBatch, renameProjectFile, renameProjectFolder, restoreControlledDocument, restoreProjectFile, updateProjectFileDescription, uploadProjectFile } from '../api'
+import ArchiveRecycleDialog from './ArchiveRecycleDialog.vue'
 import { resolveUserDisplayName } from '../userDisplay'
+import { readFolderDocumentIndex, readFolderDocuments } from '../api'
+import { useProjectCenterAccess } from '../projectCenterAccess'
 
 const props = defineProps<{
   projectId: string; token: string; folders: ProjectFolder[]; documents: ManagedDocument[]; users: PdmUser[]; roles: RolePermissionSettings[]
@@ -16,6 +19,7 @@ const props = defineProps<{
   onReload: () => Promise<unknown>
 }>()
 const displayUserName = (username?: string | null, emptyText = '—') => resolveUserDisplayName(props.users, username, emptyText)
+const projectAccess = useProjectCenterAccess()
 interface FolderTreeNode extends ProjectFolder { children: FolderTreeNode[] }
 interface MoveFolderTreeNode extends FolderTreeNode { disabled: boolean; children: MoveFolderTreeNode[] }
 
@@ -25,6 +29,12 @@ const query = ref('')
 const includeDeleted = ref(false)
 const projectFiles = ref<ProjectFile[]>([])
 const recycledDocuments = ref<ManagedDocument[]>([])
+const catalogDocuments = shallowRef<ManagedDocument[]>([])
+const documentCounts = shallowRef<Record<string, number> | null>(null)
+let legacyCatalog: ManagedDocument[] | undefined
+let countsRead: Promise<void> | undefined
+let countsRequest = 0
+let filesRequest = 0
 const loadingFiles = ref(false)
 const uploadProgress = ref(0)
 const uploadingName = ref('')
@@ -43,6 +53,7 @@ const versionOpen = ref(false)
 const versionFile = ref<ProjectFile | null>(null)
 const versions = ref<ProjectFileVersion[]>([])
 const recycleOpen = ref(false)
+const archiveRecycleOpen = ref(false)
 const recycleLoading = ref(false)
 const recycleReadiness = ref<ControlledDocumentRecycleReadiness | null>(null)
 const recycleReason = ref('')
@@ -84,7 +95,7 @@ const fileFolder = computed(() => businessFolder.value || releaseFolder.value)
 function newestFirst(left: { id: string; updatedAt?: string }, right: { id: string; updatedAt?: string }) {
   return (Date.parse(right.updatedAt ?? '') || 0) - (Date.parse(left.updatedAt ?? '') || 0) || left.id.localeCompare(right.id)
 }
-const folderDocuments = computed(() => [...props.documents, ...(includeDeleted.value ? recycledDocuments.value : [])].filter(document => document.folderId === selectedFolderId.value))
+const folderDocuments = computed(() => [...catalogDocuments.value, ...(includeDeleted.value ? recycledDocuments.value : [])].filter(document => document.folderId === selectedFolderId.value))
 const modelDocumentCount = computed(() => folderDocuments.value.filter(document => document.kind !== 'Drawing').length)
 const drawingDocumentCount = computed(() => folderDocuments.value.filter(document => document.kind === 'Drawing').length)
 const displayedDocuments = computed(() => {
@@ -127,11 +138,19 @@ watch(() => props.folders, () => {
 }, { immediate: true, deep: true })
 watch([selectedFolderId, includeDeleted], loadFiles, { immediate: true })
 watch([selectedFolderId, includeDeleted, kindFilter, query], () => { selectedDocumentIds.value = []; selectedFileIds.value = [] })
-onBeforeUnmount(() => { uploadController?.abort(); rejectMoveTarget?.('cancel'); clearMediaPreview() })
+watch(() => [props.projectId, props.token, props.documents], () => {
+  countsRequest++; documentCounts.value = null; legacyCatalog = undefined; countsRead = undefined; void loadFiles()
+})
+onBeforeUnmount(() => { filesRequest++; countsRequest++; uploadController?.abort(); rejectMoveTarget?.('cancel'); clearMediaPreview() })
 
 function hasAccess(folder: ProjectFolder | undefined, mask: number) { return Boolean(folder && (folder.effectiveAccess & mask) === mask) }
 function selectFolder(folder: ProjectFolder) { selectedFolderId.value = folder.id; query.value = '' }
-function folderCount(folderId: string) { return props.documents.filter(document => document.folderId === folderId).length + projectFiles.value.filter(file => file.folderId === folderId && !file.deletedAt).length }
+const fileCounts = computed(() => {
+  const result: Record<string, number> = {}
+  projectFiles.value.forEach(file => { if (!file.deletedAt) result[file.folderId] = (result[file.folderId] ?? 0) + 1 })
+  return result
+})
+function folderCount(folderId: string) { return (documentCounts.value?.[folderId] ?? 0) + (fileCounts.value[folderId] ?? 0) }
 function kindLabel(kind: ManagedDocument['kind']) { return ({ Assembly: '装配体', Part: '零件', Drawing: '工程图' })[kind] }
 function stateLabel(state: string | number) { return state === 'Released' || state === 2 ? '已发布' : state === 'InReview' || state === 1 ? '审批中' : state === 'Obsolete' || state === 3 ? '已作废' : '工作版' }
 function formatSize(bytes = 0) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`; if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`; return `${(bytes / 1024 ** 3).toFixed(2)} GB` }
@@ -155,16 +174,35 @@ async function openMediaPreview(file: ProjectFile) {
 }
 
 async function loadFiles() {
-  if (!props.projectId) { projectFiles.value = []; recycledDocuments.value = []; return }
+  const run = ++filesRequest, projectId = props.projectId, token = props.token, folderId = selectedFolderId.value
+  if (!projectId || !folderId) { projectFiles.value = []; catalogDocuments.value = []; recycledDocuments.value = []; return }
   loadingFiles.value = true
   try {
-    projectFiles.value = await listProjectFiles(props.projectId, undefined, includeDeleted.value, props.token)
-    recycledDocuments.value = props.canRecycleDocuments && includeDeleted.value
-      ? await listControlledDocumentRecycleBin(props.projectId, props.token)
-      : []
+    const [files, documents, recycled] = await Promise.all([
+      listProjectFiles(projectId, undefined, includeDeleted.value, token),
+      loadFolderDocuments(projectId, folderId, token),
+      props.canRecycleDocuments && includeDeleted.value ? listControlledDocumentRecycleBin(projectId, token) : Promise.resolve([]),
+    ])
+    if (run !== filesRequest || projectId !== props.projectId || token !== props.token) return
+    projectFiles.value = files; catalogDocuments.value = documents; recycledDocuments.value = recycled
   }
-  catch (error) { ElMessage.error(error instanceof Error ? error.message : '项目文件加载失败') }
-  finally { loadingFiles.value = false }
+  catch (error) { if (run === filesRequest) ElMessage.error(error instanceof Error ? error.message : '项目文件加载失败') }
+  finally { if (run === filesRequest) loadingFiles.value = false }
+}
+
+async function loadFolderDocuments(projectId: string, folderId: string, token: string) {
+  if (!projectAccess.canViewTab('documents')) return []
+  const generation = countsRequest
+  if (documentCounts.value === null) {
+    const pending = countsRead ?? readFolderDocumentIndex(projectId, token).then(index => {
+      if (generation !== countsRequest || projectId !== props.projectId || token !== props.token) return
+      documentCounts.value = index.documentCounts; legacyCatalog = index.legacyDocuments
+    })
+    countsRead = pending
+    try { await pending } finally { if (countsRead === pending) countsRead = undefined }
+  }
+  if (generation !== countsRequest || projectId !== props.projectId || token !== props.token || folderId !== selectedFolderId.value) return []
+  return legacyCatalog ?? readFolderDocuments(projectId, folderId, token)
 }
 
 function chooseFiles() { uploadInput.value?.click() }
@@ -394,7 +432,7 @@ function openBatchRecycle() {
   batchRecycleOpen.value = true
 }
 async function confirmBatchRecycle() {
-  const selected = props.documents.filter(document => selectedDocumentIds.value.includes(document.id) && !document.deletedAt)
+  const selected = catalogDocuments.value.filter(document => selectedDocumentIds.value.includes(document.id) && !document.deletedAt)
   if (!selected.length || !batchRecycleReason.value.trim()) return
   recycleLoading.value = true
   try {
@@ -433,6 +471,7 @@ async function savePermissions() { if (!selectedFolder.value) return; try { awai
       <header class="pdm-folder-toolbar">
         <div><div class="pdm-breadcrumb">项目文件 <span>/</span> {{ selectedFolder?.name || '请选择目录' }}</div><h2>{{ selectedFolder?.name || '项目文件库' }}</h2><p v-if="releaseFolder">按发布范围自动汇总的发布成品（受控BOM、STEP/PDF等），网页只读。</p><p v-else-if="!businessFolder && selectedFolder">该目录由图档或发布流程受控，网页不维护普通文件。</p></div>
         <div class="pdm-file-actions" v-if="selectedFolder">
+          <button v-if="documentFolder && canRecycleDocuments" type="button" class="pdm-secondary-action" :disabled="pending || recycleLoading" @click="archiveRecycleOpen = true">按存档批次回收 / 恢复</button>
           <button v-if="documentFolder && canRecycleDocuments" type="button" class="pdm-danger-action" :disabled="recycleLoading || selectedDocumentIds.length === 0" @click="openBatchRecycle"><Trash2 :size="15" />批量移入回收站（{{ selectedDocumentIds.length }}）</button>
           <button v-if="businessFolder && hasAccess(selectedFolder, 4)" type="button" class="pdm-primary-action" :disabled="Boolean(uploadingName)" @click="chooseFiles"><Upload :size="15" />上传文件</button>
           <button v-if="businessFolder && hasAccess(selectedFolder, 8)" type="button" class="pdm-secondary-action" @click="newFolder"><FolderPlus :size="15" />新建文件夹</button>
@@ -473,6 +512,7 @@ async function savePermissions() { if (!selectedFolder.value) return; try { awai
     <template #footer><button type="button" class="pdm-secondary-action" @click="moveTargetOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="!moveTargetId" @click="confirmMoveTarget">确定</button></template>
   </el-dialog>
   <el-dialog v-model="versionOpen" :title="`版本历史 · ${versionFile?.fileName ?? ''}`" width="720px"><el-table :data="versions"><el-table-column prop="versionNumber" label="版本" width="80"><template #default="scope">V{{ scope.row.versionNumber }}</template></el-table-column><el-table-column prop="fileName" label="原始文件名" /><el-table-column label="大小" width="100"><template #default="scope">{{ formatSize(scope.row.fileLength) }}</template></el-table-column><el-table-column label="上传人" width="100"><template #default="scope">{{ displayUserName(scope.row.uploadedBy) }}</template></el-table-column><el-table-column label="上传时间" width="170"><template #default="scope">{{ new Date(scope.row.uploadedAt).toLocaleString() }}</template></el-table-column><el-table-column label="操作" width="70"><template #default="scope"><button class="pdm-icon-action" type="button" title="下载该版本" @click="versionFile && download(versionFile, scope.row.id)"><Download :size="14" /></button></template></el-table-column></el-table></el-dialog>
+  <ArchiveRecycleDialog v-if="canRecycleDocuments" v-model:open="archiveRecycleOpen" :project-id="projectId" :token="token" :on-reload="async () => { await onReload(); await loadFiles() }" />
   <el-dialog v-model="recycleOpen" title="删除受控图档" width="620px" class="pdm-document-recycle-dialog">
     <template v-if="recycleReadiness">
       <div class="pdm-recycle-summary"><strong>{{ recycleReadiness.document.drawingNumber }} · {{ recycleReadiness.document.name }}</strong><span>{{ recycleReadiness.storedVersionCount }} 个历史版本 · 进入回收站后30天内可恢复</span></div>

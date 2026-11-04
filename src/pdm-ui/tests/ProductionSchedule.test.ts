@@ -1,5 +1,5 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import { ElDatePicker } from 'element-plus'
+import { ElDatePicker, ElTree } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProductionWorkbench from '../src/components/ProductionWorkbench.vue'
 import ProductionLineDrawingDialog from '../src/components/ProductionLineDrawingDialog.vue'
@@ -67,6 +67,44 @@ async function setDateRange(wrapper: VueWrapper, value: [string, string] | null)
 }
 
 describe('发布跟踪快捷筛选与全部分类', () => {
+  it('三个追溯列表使用相同列宽与表头，生产资料列固定90px', async () => {
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['production.schedule'] } })
+    await flushPromises()
+    const columns = () => wrapper.findAll('.production-workbench__lines table col').map(col => [col.attributes('data-pdm-fixed-width'), col.attributes('style')])
+    const headers = () => wrapper.findAll('.production-workbench__lines table th').map(th => th.text())
+    const baseline = columns(), labels = headers()
+    expect(baseline).toHaveLength(13)
+    expect(baseline[12]![0]).toBe('90')
+    for (const tab of ['外协追溯', '自制追溯']) {
+      await wrapper.findAll('.production-workbench__tabs button').find(button => button.text() === tab)!.trigger('click')
+      await flushPromises()
+      expect(columns()).toEqual(baseline)
+      expect(headers()).toEqual(labels)
+    }
+    wrapper.unmount()
+  })
+  it('阶段筛选合并具体状态，保留状态文字与父子选中联动', async () => {
+    const base = (await api.listProductionTrackingProjects('token'))[0]!
+    vi.mocked(api.listProductionTrackingProjects).mockResolvedValue([{ ...base, packages: [
+      { ...base.packages[0]!, status: '外协待交货' }, { ...base.packages[1]!, status: '质检中' },
+    ] }])
+    const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['production.schedule'] } })
+    await flushPromises()
+    const filter = wrapper.get('[aria-label="筛选生产状态"]')
+    expect(filter.findAll('option')).toHaveLength(9)
+    expect(wrapper.find('.production-workbench__project-chevron').exists()).toBe(false)
+    await filter.setValue('进行中'); await flushPromises()
+    expect(wrapper.findAll('.production-workbench__package')).toHaveLength(1)
+    expect(wrapper.get('.production-workbench__package').text()).toContain('外协待交货')
+    await filter.setValue('待质检'); await flushPromises()
+    const item = wrapper.get('.production-workbench__package')
+    expect(item.text()).toContain('质检中')
+    await item.trigger('click'); await flushPromises()
+    expect(wrapper.get('.production-workbench__project.selected').text()).toContain('P001')
+    expect(wrapper.get('.production-workbench__package.selected .pdm-solid-menu-icon').attributes('fill')).toBe('currentColor')
+    expect(wrapper.get('.production-workbench__project.selected .pdm-solid-menu-icon').attributes('fill')).toBe('currentColor')
+    wrapper.unmount()
+  })
   it('展开折叠总控只调整项目列表，保留当前发布包', async () => {
     const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } })
     await flushPromises()
@@ -320,7 +358,7 @@ describe('三栏自制排程', () => {
     const wrapper = await openSchedule()
     await wrapper.get('[aria-label="处理图纸变更 D-003 self-c"]').trigger('click'); await flushPromises()
     const panel = wrapper.get('[aria-label="排程安排"] [aria-label="图纸变更处置"]')
-    expect(panel.text()).toContain('RP-new'); expect(panel.text()).toContain('4 001')
+    expect(panel.text()).toContain('RP-new'); expect(panel.text()).toContain('4 个')
     expect(wrapper.get('.production-workbench__schedule-form fieldset').attributes()).toHaveProperty('disabled')
     await panel.get('select').setValue('ContinueOld'); await panel.get('input').setValue('技术确认继续旧版')
     await panel.get('form').trigger('submit'); await flushPromises()
@@ -610,20 +648,16 @@ describe('三栏自制排程', () => {
     expect(wrapper.get('[aria-label="排程安排"] h3').text()).toBe('第二包自制件')
     wrapper.unmount()
   })
-  it('生产执行在PDA屏幕中加载真实移动扫码页，可独立刷新并随账号切换重置', async () => {
+  it('生产执行仅显示真实PDA扫码页并随账号切换重置', async () => {
     const wrapper = await openSchedule()
     await wrapper.findAll('.production-workbench__tabs button').find(button => button.text() === '生产执行')!.trigger('click')
     await flushPromises()
     const frame = wrapper.get('iframe[title="PDA移动扫码页面"]')
     expect(frame.attributes('src')).toContain('?productionScan=1')
     expect(frame.attributes('allow')).toBe('camera')
-    expect(wrapper.get('.production-workbench__execution-actions a').attributes('href')).toBe(frame.attributes('src'))
-    expect(wrapper.find('.production-workbench__execution-actions form').exists()).toBe(false)
-    await wrapper.get('[aria-label="刷新PDA页面"]').trigger('click')
-    expect(wrapper.get('iframe').element).not.toBe(frame.element)
-    const refreshed = wrapper.get('iframe').element
+    expect(wrapper.find('.production-workbench__pda > header').exists()).toBe(false)
     await wrapper.setProps({ token: 'different-account-token' })
-    expect(wrapper.get('iframe').element).not.toBe(refreshed)
+    expect(wrapper.get('iframe').element).not.toBe(frame.element)
     wrapper.unmount()
   })
   it('外协追溯位于自制追溯左侧，混合物料仅统计外协数量、交期和质量记录', async () => {
@@ -640,7 +674,7 @@ describe('三栏自制排程', () => {
   })
   it('仅供应商查看权限可进入只读供应商库，不读取项目或暴露维护按钮', async () => {
     const read=vi.spyOn(api,'readProductionSuppliers').mockResolvedValue({companyId:'company',rowVersion:1,categories:[],suppliers:[]})
-    const wrapper=mount(ProductionWorkbench,{props:{token:'token',username:'admin',permissions:['production.supplier.view']}});await flushPromises()
+    const wrapper=mount(ProductionWorkbench,{props:{token:'token',username:'admin',permissions:['production.supplier.view']},global:{components:{ElTree}}});await flushPromises()
     expect(wrapper.findAll('.production-workbench__tabs button').map(button=>button.text())).toEqual(['供应商库']);expect(read).toHaveBeenCalled();expect(api.listProductionTrackingProjects).not.toHaveBeenCalled()
     expect(wrapper.findAll('button').some(button=>button.text()==='新建供应商')).toBe(false)
     await wrapper.setProps({permissions:['production.supplier.view','production.supplier.manage']});await flushPromises();expect(wrapper.findAll('button').some(button=>button.text()==='新建供应商')).toBe(true)

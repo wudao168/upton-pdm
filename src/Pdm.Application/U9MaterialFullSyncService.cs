@@ -212,28 +212,9 @@ public sealed class U9MaterialFullSyncService(
                         skipped++;
                         continue;
                     }
-                    if (existingByCode.TryGetValue(code, out var existing)
-                        && existing.MasterOwner != MaterialMasterOwner.U9C)
-                    {
-                        skipped++;
-                        conflicts++;
-                        continue;
-                    }
-
-                    var importedAt = timeProvider.GetUtcNow();
-                    var weight = item.U9Weight is > 0 ? item.U9Weight : null;
-                    var candidate = new PdmMaterial(
-                        Guid.NewGuid(), code, (item.U9ItemName ?? code).Trim(), category.PdmKind!.Value,
-                        ResolveSupplyMode(item.U9ItemFormAttribute, category.DefaultSupplyMode),
-                        U9UnitCatalog.NormalizeInbound(item.U9UnitCode), Clean(item.U9Specification), Clean(item.U9Material),
-                        Clean(item.U9Description), Clean(item.U9Brand), Clean(item.U9SurfaceTreatment),
-                        weight, weight is null ? null : Clean(item.U9WeightUnitCode), null,
-                        MaterialApprovalStatus.Approved, actor, importedAt, category.Code,
-                        item.U9ItemId, code, MaterialSyncStatus.Succeeded,
-                        actor, importedAt, actor, importedAt, 1, category.Code,
-                        U9SyncConfirmed: true, SourceSystem: MaterialDataSource.U9C, MasterOwner: MaterialMasterOwner.U9C,
-                        LastU9SyncedAt: importedAt, PurchaseLink: Clean(item.U9PurchaseLink));
-                    await materials.UpsertU9MaterialAsync(candidate, cancellationToken);
+                    existingByCode.TryGetValue(code, out var existing);
+                    var saved = await materials.UpsertU9MaterialAsync(Incoming(item, category, actor), cancellationToken);
+                    if (saved.U9ReconciliationMessage is not null) conflicts++;
                     if (existing is null) created++;
                     else refreshed++;
                 }
@@ -246,12 +227,43 @@ public sealed class U9MaterialFullSyncService(
 
         if (maximumSequence > category.CurrentSequence)
             await materials.AdvanceCategoryCounterAsync(category, maximumSequence, cancellationToken);
+        // 参照列表可能漏料；逐号补充对账，不反向修改PLM研发资料或启停状态。
+        var unobserved = (await materials.ListUnobservedU9MaterialsAsync(category.Code, categorySyncStartedAt, cancellationToken))
+            .Where(item => !seenCodes.Contains(item.MaterialCode)).Select(item => item.MaterialCode).ToArray();
+        foreach (var batch in unobserved.Chunk(DetailBatchSize))
+        {
+            var verification = await QueryDetailsAsync(configuration, token, clientSecret, category.Code, batch, cancellationToken);
+            token = verification.Token;
+            foreach (var item in verification.Items.Where(item => !string.IsNullOrWhiteSpace(item.U9ItemCode)))
+            {
+                if (!string.Equals(item.U9CategoryCode, category.Code, StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(item.U9UnitCode)) continue;
+                var saved = await materials.UpsertU9MaterialAsync(Incoming(item, category, actor), cancellationToken);
+                seenCodes.Add(item.U9ItemCode!.Trim());
+                refreshed++;
+                if (saved.U9ReconciliationMessage is not null) conflicts++;
+            }
+        }
         await materials.MarkU9MaterialsObservedAsync(
             category.Code, seenCodes, categorySyncStartedAt, cancellationToken);
-        var inactivated = await materials.ArchiveMissingU9MaterialsAsync(
+        var missing = await materials.RecordMissingU9MaterialsAsync(
             category.Code, categorySyncStartedAt, actor, timeProvider.GetUtcNow(), cancellationToken);
         return new(category.Code, category.Name, discovered, created, refreshed, skipped, maximumSequence, true, null,
-            inactivated, conflicts);
+            0, conflicts + missing);
+    }
+
+    private PdmMaterial Incoming(U9ItemReference item, MaterialCategory category, string actor)
+    {
+        var at = timeProvider.GetUtcNow();
+        var code = item.U9ItemCode!.Trim();
+        var weight = item.U9Weight is > 0 ? item.U9Weight : null;
+        return new PdmMaterial(Guid.NewGuid(), code, (item.U9ItemName ?? code).Trim(), category.PdmKind!.Value,
+            ResolveSupplyMode(item.U9ItemFormAttribute, category.DefaultSupplyMode), U9UnitCatalog.NormalizeInbound(item.U9UnitCode!),
+            Clean(item.U9Specification), Clean(item.U9Material), Clean(item.U9Description), Clean(item.U9Brand), Clean(item.U9SurfaceTreatment),
+            weight, weight is null ? null : Clean(item.U9WeightUnitCode), null, MaterialApprovalStatus.Approved, actor, at,
+            category.Code, item.U9ItemId, code, MaterialSyncStatus.Succeeded, actor, at, actor, at, 1, category.Code,
+            IsArchived: U9MaterialContract.EffectiveState(item) == false, U9SyncConfirmed: true, SourceSystem: MaterialDataSource.U9C,
+            MasterOwner: MaterialMasterOwner.Pdm, LastU9SyncedAt: at, PurchaseLink: Clean(item.U9PurchaseLink))
+        { U9IsEffective = U9MaterialContract.EffectiveState(item) };
     }
 
     private async Task<(IReadOnlyList<U9ItemReference> Items, string Token)> QueryDetailsAsync(

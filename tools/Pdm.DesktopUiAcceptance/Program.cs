@@ -8,13 +8,17 @@ using System.Windows;
 using System.Windows.Media;
 using System.Windows.Threading;
 
-internal static class Program
+internal static partial class Program
 {
     const BindingFlags Flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
     static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
     [STAThread] static int Main(string[] args)
     {
-        try { return Run(args); }
+        try {
+            if (args.Length > 0 && args[0] == "--preview-transfer") return RunPreviewTransferChecks(args);
+            if (args.Length > 0 && args[0] == "--preview-download-benchmark") return RunPreviewDownloadBenchmark(args).GetAwaiter().GetResult();
+            return args.Length > 0 && args[0].StartsWith("--original-preview", StringComparison.Ordinal) ? RunOriginalPreviewChecks(args) : Run(args);
+        }
         catch (Exception error) { while (error.InnerException != null) error = error.InnerException; Console.WriteLine("FAIL startup " + error.GetType().Name + ": " + error.Message); return 1; }
     }
     static int Run(string[] args)
@@ -26,6 +30,13 @@ internal static class Program
             configurationVersion = args[configurationIndex + 1];
             var values = new System.Collections.Generic.List<string>(args);
             values.RemoveRange(configurationIndex, 2); args = values.ToArray();
+        }
+        var quantityStepIndex = Array.IndexOf(args, "--quantity-step");
+        var quantityStepEnabled = quantityStepIndex >= 0;
+        if (quantityStepEnabled)
+        {
+            var values = new System.Collections.Generic.List<string>(args);
+            values.RemoveAt(quantityStepIndex); args = values.ToArray();
         }
         var directory = AppDomain.CurrentDomain.BaseDirectory;
         AppDomain.CurrentDomain.AssemblyResolve += (_, e) => { var path = Path.Combine(directory, new AssemblyName(e.Name).Name + ".dll"); return File.Exists(path) ? Assembly.LoadFrom(path) : null; };
@@ -102,6 +113,8 @@ internal static class Program
                     Console.WriteLine("Native page state: " + await Execute(core, "JSON.stringify({title:document.title,text:document.body.innerText.slice(0,1200)})"));
                     throw new Exception("原生客户端可见版本号不一致。");
                 }
+                if (quantityStepEnabled)
+                    result["quantityStep"] = await CheckNativeQuantityStep(core);
                 await Execute(core, "window.chrome.webview.postMessage({type:'review-overlay-state',payload:{visible:false}})");
                 await Task.Delay(1000);
                 var overlay = window.GetType().GetField("reviewOverlay", Flags).GetValue(window);
@@ -115,7 +128,7 @@ internal static class Program
                 await Task.Delay(1000);
                 var reviewCore = reviewView.GetType().GetProperty("CoreWebView2").GetValue(reviewView);
                 System.Collections.Generic.Dictionary<string, object> reviewResult = null;
-                for (var attempt = 0; attempt < 40; attempt++)
+                for (var attempt = 0; attempt < 120; attempt++)
                 {
                     var reviewPage = await Execute(reviewCore, "JSON.stringify({url:location.href,ready:document.readyState,scripts:[...document.querySelectorAll('script[src]')].map(node=>node.src)})");
                     reviewResult = Json.DeserializeObject(Json.Deserialize<string>(reviewPage)) as System.Collections.Generic.Dictionary<string, object>;
@@ -126,6 +139,7 @@ internal static class Program
                     await Task.Delay(250);
                 }
                 Console.WriteLine("Native review loaded page: " + reviewResult["url"]);
+                Console.WriteLine("Native review page state: " + Json.Serialize(reviewResult));
                 if (!((string)reviewResult["url"]).Contains(configurationVersion)
                     || (string)reviewResult["ready"] != "complete"
                     || ((System.Collections.ICollection)reviewResult["scripts"]).Count == 0

@@ -20,7 +20,7 @@ internal sealed partial class ControlledWorkspaceManager
     // needed for a separate historical context, never for an unchanged checkout.
     internal async Task<string> PreparePlmWorkingCopyAsync(ControlledOpenManifestDto manifest,
         IReadOnlyCollection<Guid> editableIds, CancellationToken token)
-        => await PrepareWorkingCopyAsync(manifest, editableIds, token).ConfigureAwait(false);
+        => await Task.Run(() => PrepareWorkingCopyAsync(manifest, editableIds, token), token).ConfigureAwait(false);
 
     private async Task<string> PrepareServerWorkingCopyAsync(ControlledOpenManifestDto manifest,
         IReadOnlyCollection<Guid> editableIds, bool historical, CancellationToken token)

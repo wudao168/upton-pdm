@@ -91,7 +91,7 @@ public sealed class U9MaterialIntegrationService(
             configuration.ItemQueryPath,
             authentication.Token,
             U9MaterialPayloadFactory.QueryPayload(code, $"pdm-query-{Guid.NewGuid():N}"),
-            cancellationToken);
+                        cancellationToken);
         await repository.AppendAuditAsync(new AuditEntry(
             Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "u9.material.query", nameof(PdmMaterial), code,
             $"按编码只读查询U9C料品：{code}；结果：{result.Items.Count}条"), cancellationToken);
@@ -167,7 +167,7 @@ public sealed class U9MaterialIntegrationService(
                     throw new PdmRuleException($"U9C料品 {reference.Code} 未返回库存计量单位；为避免错误单位未导入任何料品。");
 
                 var existing = await materials.FindMaterialByCodeAsync(reference.Code, cancellationToken);
-                var canImport = existing is null || existing.MasterOwner == MaterialMasterOwner.U9C;
+                var canImport = true;
                 var weight = item.U9Weight is > 0 ? item.U9Weight : null;
                 items.Add(new U9MaterialSampleItem(
                     item.U9ItemId ?? string.Empty,
@@ -188,7 +188,7 @@ public sealed class U9MaterialIntegrationService(
                     Clean(item.U9PurchaseLink),
                     existing is not null,
                     canImport,
-                    existing is null ? "新建" : canImport ? "刷新U9C来源料品" : "同号料品由PLM主控，跳过"));
+                    existing is null ? "导入初始资料后由PLM主控" : "对账并保留PLM资料及启停状态") { IsEffective = U9MaterialContract.EffectiveState(item) });
             }
         }
 
@@ -222,14 +222,9 @@ public sealed class U9MaterialIntegrationService(
                 MaterialApprovalStatus.Approved, actor, importedAt, item.CategoryCode,
                 item.U9ItemId, item.MaterialCode, MaterialSyncStatus.Succeeded,
                 actor, importedAt, actor, importedAt, 1, item.CategoryCode,
-                U9SyncConfirmed: true, SourceSystem: MaterialDataSource.U9C, MasterOwner: MaterialMasterOwner.U9C,
-                LastU9SyncedAt: importedAt, PurchaseLink: item.PurchaseLink);
+                IsArchived: item.IsEffective == false, U9SyncConfirmed: true, SourceSystem: MaterialDataSource.U9C, MasterOwner: MaterialMasterOwner.Pdm,
+                LastU9SyncedAt: importedAt, PurchaseLink: item.PurchaseLink) { U9IsEffective = item.IsEffective };
             var saved = await materials.UpsertU9MaterialAsync(candidate, cancellationToken);
-            if (saved.MasterOwner != MaterialMasterOwner.U9C)
-            {
-                skippedCount++;
-                continue;
-            }
             if (saved.Id == candidate.Id) createdCount++;
             else refreshedCount++;
             savedMaterials.Add(saved);
@@ -280,8 +275,21 @@ public sealed class U9MaterialIntegrationService(
         string actor,
         CancellationToken cancellationToken)
     {
-        var session = await CreateExecutionSessionAsync(cancellationToken);
-        return await ExecuteApprovedTaskCoreAsync(taskId, actor, session, cancellationToken);
+        try
+        {
+            var session = await CreateExecutionSessionAsync(cancellationToken);
+            return await ExecuteApprovedTaskCoreAsync(taskId, actor, session, cancellationToken);
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            var task = await materials.FindSyncTaskAsync(taskId, CancellationToken.None);
+            if (task?.Status != MaterialSyncStatus.PreviewReady) throw;
+            var message = error is PdmRuleException ? error.Message : "U9C连接或认证失败，PLM决定已保留，请核对连接后重试同步。";
+            await materials.FailSyncTaskAsync(taskId, MaterialSyncStatus.Failed, message, null,
+                new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "u9.material.sync.preflight-failed",
+                    nameof(MaterialSyncTask), taskId.ToString(), error.ToString()), CancellationToken.None);
+            throw new PdmRuleException(message);
+        }
     }
 
     internal async Task<U9MaterialExecutionSession> CreateExecutionSessionAsync(CancellationToken cancellationToken)
@@ -316,21 +324,24 @@ public sealed class U9MaterialIntegrationService(
 
         var existingTask = await materials.FindSyncTaskAsync(taskId, cancellationToken)
             ?? throw new PdmNotFoundException("U9C同步任务不存在。");
-        if (existingTask.Operation is not (MaterialSyncOperation.Create or MaterialSyncOperation.Update))
+        if (existingTask.Operation is not (MaterialSyncOperation.Create or MaterialSyncOperation.Update or MaterialSyncOperation.SetAvailability))
             throw new PdmRuleException("当前同步任务类型不受支持。");
-        if (existingTask.Operation == MaterialSyncOperation.Update && !allowUpdate)
-            throw new PdmRuleException("U9C属性只能由标准化人员在料品管理中确认修改；BOM及后台流程不能覆盖U9C。");
         var sourceMaterial = await materials.FindMaterialAsync(existingTask.MaterialId, cancellationToken)
             ?? throw new PdmNotFoundException("同步任务对应的物料主档不存在。");
-        if (sourceMaterial.IsArchived)
+        var availability = existingTask.Operation == MaterialSyncOperation.SetAvailability;
+        if (existingTask.Operation != MaterialSyncOperation.Create && !allowUpdate && sourceMaterial.MasterOwner != MaterialMasterOwner.Pdm)
+            throw new PdmRuleException("该料品尚未由PLM主控，请先对账或在料品管理中确认变更。");
+        if (sourceMaterial.IsArchived && existingTask.Operation == MaterialSyncOperation.Create)
             throw new PdmRuleException("已归档料品不能同步到U9C。");
-        if (sourceMaterial.ApprovalStatus != MaterialApprovalStatus.Approved)
+        if (sourceMaterial.ApprovalStatus != MaterialApprovalStatus.Approved && !availability)
             throw new PdmRuleException("只有已批准物料才能同步到U9C。");
-        if (existingTask.Operation == MaterialSyncOperation.Update && !sourceMaterial.U9SyncConfirmed)
+        if (existingTask.Operation != MaterialSyncOperation.Create && !sourceMaterial.U9SyncConfirmed && sourceMaterial.SourceSystem != MaterialDataSource.U9C)
             throw new PdmRuleException("料品没有本系统实际写入U9C的确认凭据，不能执行修改。");
+        if (availability && AvailabilityState(existingTask) == sourceMaterial.IsArchived)
+            throw new PdmRuleException("启停任务与PLM当前决定不一致，请刷新并重试最新任务。");
 
         var u9UnitCode = U9MaterialPayloadFactory.ResolveUnitCode(sourceMaterial.UnitCode);
-        if (!PayloadUsesUnitCode(existingTask, u9UnitCode))
+        if (!availability && !PayloadUsesUnitCode(existingTask, u9UnitCode))
             throw new PdmRuleException($"料品计量单位编码已变更为 {u9UnitCode}。请先点击“重试”重新生成请求预览和SHA-256，再执行同步。");
 
         if (existingTask.Operation == MaterialSyncOperation.Create && existingTask.Status != MaterialSyncStatus.NeedsReview)
@@ -354,7 +365,7 @@ public sealed class U9MaterialIntegrationService(
         var existingCodeFound = false;
         try
         {
-            if (!session.ValidatedUnitCodes.Contains(u9UnitCode))
+            if (!availability && !session.ValidatedUnitCodes.Contains(u9UnitCode))
             {
                 var uomQuery = await QueryUomsWithTokenRefreshAsync(
                     session, U9MaterialPayloadFactory.UomQueryPayload(u9UnitCode, task.CorrelationId), cancellationToken);
@@ -374,6 +385,9 @@ public sealed class U9MaterialIntegrationService(
                 string.Equals(item.U9ItemCode, sourceMaterial.MaterialCode, StringComparison.OrdinalIgnoreCase)).ToArray();
             if (matchingItems.Length > 1) throw new PdmRuleException("U9C返回多个同料号，无法确认唯一关联，未执行写入。");
             var existingItem = matchingItems.SingleOrDefault();
+            if (existingTask.Operation != MaterialSyncOperation.Create && !string.IsNullOrWhiteSpace(sourceMaterial.U9ItemId)
+                && !string.IsNullOrWhiteSpace(existingItem?.U9ItemId) && sourceMaterial.U9ItemId != existingItem.U9ItemId)
+                throw new PdmRuleException("U9C内部标识与已有映射不一致，未执行写入；请先核对原料号和单据关联。");
             if (task.Operation == MaterialSyncOperation.Create
                 && existingTask.Status == MaterialSyncStatus.NeedsReview
                 && existingItem is null)
@@ -398,11 +412,20 @@ public sealed class U9MaterialIntegrationService(
                     alreadyExisted: true,
                     updated: false,
                     actor,
-                    cancellationToken);
+                    cancellationToken, existingItem);
             }
 
-            if (task.Operation == MaterialSyncOperation.Update && existingItem is null)
+            if (task.Operation != MaterialSyncOperation.Create && existingItem is null)
                 throw new PdmRuleException("U9C不存在同料号，不能执行修改；请先核对创建任务和料号映射。");
+
+            if (availability)
+            {
+                var state = U9MaterialContract.EffectiveState(existingItem!);
+                if (state is null) throw new PdmRuleException("U9C未返回可确认的启停状态；PLM决定已保留，请核对接口后重试。");
+                if (state == AvailabilityState(task))
+                    return await CompleteAsync(task, sourceMaterial, existingItem!.U9ItemId, sourceMaterial.MaterialCode,
+                        false, true, false, actor, cancellationToken, existingItem);
+            }
 
             if (task.Operation == MaterialSyncOperation.Update)
                 await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor,
@@ -415,11 +438,13 @@ public sealed class U9MaterialIntegrationService(
                 task.PayloadJson,
                 cancellationToken);
             writeResponseReceived = true;
-            var operationName = task.Operation == MaterialSyncOperation.Create ? "创建" : "修改";
-            if (write.ResponseCode != 0)
-                throw new PdmRuleException($"U9C料品{operationName}失败（ResCode={write.ResponseCode}）：{write.ResponseMessage ?? "未返回错误说明"}。");
-            if (write.Rows.Count > 0 && write.Rows.Any(row => !row.IsSuccess))
-                throw new PdmRuleException($"U9C料品{operationName}失败：{write.Rows.First(row => !row.IsSuccess).ErrorMessage ?? "未返回错误说明"}。");
+            var operationName = availability ? AvailabilityState(task) ? "启用" : "停用" : task.Operation == MaterialSyncOperation.Create ? "创建" : "修改";
+            if (write.ResponseCode != 0 || write.Rows.Any(row => !row.IsSuccess))
+            {
+                await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, "u9.material.sync.response",
+                    nameof(MaterialSyncTask), task.Id.ToString(), JsonSerializer.Serialize(write)), CancellationToken.None);
+                throw new PdmRuleException($"U9C拒绝料品{operationName}，PLM资料及启停决定已保留；请联系管理员核对U9C业务校验后重试。");
+            }
             var resultRow = write.Rows.FirstOrDefault();
             postWriteVerificationStarted = true;
             var verifiedItem = await VerifyWrittenMaterialAsync(
@@ -435,9 +460,9 @@ public sealed class U9MaterialIntegrationService(
                 verifiedItem.U9ItemCode ?? resultRow?.U9ItemCode ?? existingItem?.U9ItemCode ?? sourceMaterial.MaterialCode,
                 created: task.Operation == MaterialSyncOperation.Create,
                 alreadyExisted: false,
-                updated: task.Operation == MaterialSyncOperation.Update,
+                updated: task.Operation != MaterialSyncOperation.Create,
                 actor,
-                cancellationToken);
+                cancellationToken, verifiedItem);
         }
         catch (PdmRuleException exception)
         {
@@ -466,8 +491,10 @@ public sealed class U9MaterialIntegrationService(
             var audit = new AuditEntry(
                 Guid.NewGuid(), now, actor, "u9.material.sync.failed", nameof(PdmMaterial), sourceMaterial.Id.ToString(),
                 $"U9C料品同步{(status == MaterialSyncStatus.NeedsReview ? "结果不确定，需先回查" : "失败")}：{sourceMaterial.MaterialCode}；{exception.Message}");
-            await materials.FailSyncTaskAsync(task.Id, status, exception.Message, null, audit, CancellationToken.None);
-            throw;
+            const string message = "U9C连接或处理结果未能确认，PLM资料已保留；请核对同步状态后重试。";
+            await materials.FailSyncTaskAsync(task.Id, status, message, null, audit, CancellationToken.None);
+            if (exception is OperationCanceledException) throw;
+            throw new PdmRuleException(message);
         }
     }
 
@@ -506,13 +533,36 @@ public sealed class U9MaterialIntegrationService(
                 lastDifferences = [$"U9C写后查询未找到料号 {expected.MaterialCode}。"];
                 continue;
             }
+            if (task.Operation == MaterialSyncOperation.SetAvailability)
+            {
+                if (U9MaterialContract.EffectiveState(actual) == AvailabilityState(task)) return actual;
+                lastDifferences = ["U9C启停状态尚未与PLM决定一致。"];
+                continue;
+            }
             var differences = CompareMappedFields(expected, actual).Where(difference => task.Operation != MaterialSyncOperation.Update
                 || IsSelectedUpdateDifference(task.PayloadJson, difference)).Concat(task.Operation == MaterialSyncOperation.Create
                 ? U9MaterialCreationRules.Compare(task.PayloadJson, actual.CreationAttributes) : []).ToArray();
+            if (task.Operation == MaterialSyncOperation.Update)
+            {
+                using var payload = JsonDocument.Parse(task.PayloadJson);
+                if (payload.RootElement[0].GetProperty("Attributes").EnumerateArray().Any(attribute => attribute.GetProperty("AttributeName").GetString() == "Effective.IsEffective")
+                    && U9MaterialContract.EffectiveState(actual) != !expected.IsArchived)
+                    differences = [.. differences, "U9C启停状态尚未与PLM决定一致。"];
+            }
             if (differences.Length == 0) return actual;
             lastDifferences = differences;
         }
         throw new PdmRuleException($"U9C写入已返回，但写后回查未确认字段一致，任务进入待复核：{string.Join("；", lastDifferences)}");
+    }
+
+    public static bool AvailabilityState(MaterialSyncTask task)
+    {
+        using var json = JsonDocument.Parse(task.PayloadJson);
+        var attributes = json.RootElement[0].GetProperty("Attributes");
+        if (attributes.GetArrayLength() != 1 || attributes[0].GetProperty("AttributeName").GetString() != "Effective.IsEffective"
+            || !bool.TryParse(attributes[0].GetProperty("AttributeValue").GetString(), out var enabled))
+            throw new PdmRuleException("启停请求内容无效，请重新发起启用或停用。");
+        return enabled;
     }
 
     private async Task<U9UomQueryResult> QueryUomsWithTokenRefreshAsync(
@@ -655,7 +705,8 @@ public sealed class U9MaterialIntegrationService(
         bool alreadyExisted,
         bool updated,
         string actor,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        U9ItemReference? verifiedItem = null)
     {
         var now = timeProvider.GetUtcNow();
         var preview = JsonSerializer.Serialize(new
@@ -686,7 +737,9 @@ public sealed class U9MaterialIntegrationService(
             preview,
             audit,
             cancellationToken);
-        return new MaterialSyncExecutionResult(completed.Material, completed.Task, created, alreadyExisted, updated);
+        var reconciled = verifiedItem is null ? completed.Material : await materials.UpsertU9MaterialAsync(
+            MaterialMasterReconciliation.Snapshot(completed.Material, verifiedItem, now), cancellationToken);
+        return new MaterialSyncExecutionResult(reconciled, completed.Task, created, alreadyExisted, updated);
     }
 
     private static IReadOnlyList<string> NormalizeSampleCategories(IReadOnlyList<string>? categoryCodes)

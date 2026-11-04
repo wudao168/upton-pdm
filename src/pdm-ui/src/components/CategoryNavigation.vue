@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Folder } from '@lucide/vue'
+import { Tag } from '../solidMenuIcons'
 type CategoryNode = { id: string; label: string; isActive?: boolean; children: CategoryNode[] }
 withDefaults(defineProps<{ nodes: CategoryNode[]; modelValue: string; ariaLabel?: string; allLabel?: string; collapsed?: boolean; collapsible?: boolean; defaultExpandAll?: boolean }>(), { ariaLabel: '分类筛选', allLabel: '全部分类' })
 const emit = defineEmits<{ 'update:modelValue': [id: string]; toggle: [] }>()
@@ -12,7 +12,7 @@ const emit = defineEmits<{ 'update:modelValue': [id: string]; toggle: [] }>()
       <button v-if="collapsible" type="button" class="pdm-category-sidebar__toggle" :aria-label="`${collapsed ? '展开' : '收起'}${ariaLabel}`" :aria-expanded="!collapsed" @click="emit('toggle')">{{ collapsed ? '›' : '‹' }}</button>
     </div>
     <el-tree v-if="!collapsed" :data="nodes" node-key="id" :props="{ label: 'label', children: 'children' }" :current-node-key="modelValue || undefined" :default-expand-all="defaultExpandAll" highlight-current @node-click="emit('update:modelValue', $event.id)">
-      <template #default="{ data }"><span class="standard-library__category-label" :class="{ 'is-inactive': data.isActive === false, 'is-selected': data.id === modelValue }"><Folder :size="15" /><span>{{ data.label }}</span><small v-if="data.isActive === false">停用</small></span></template>
+      <template #default="{ data, node }"><span class="standard-library__category-label" :class="{ 'is-inactive': data.isActive === false, 'is-selected': data.id === modelValue }"><Tag :filled="data.id === modelValue" v-if="node.level === 1" :size="15" aria-hidden="true" /><span>{{ data.label }}</span><small v-if="data.isActive === false">停用</small></span></template>
     </el-tree>
     <div v-if="!collapsed && $slots.actions" class="standard-library__category-actions"><slot name="actions" /></div>
   </aside>
@@ -26,4 +26,6 @@ const emit = defineEmits<{ 'update:modelValue': [id: string]; toggle: [] }>()
 .standard-library__category-actions{margin-top:auto;padding:14px 8px 5px}.standard-library__category-actions :deep(.el-button){font-size:12px}.pdm-category-sidebar__toggle{width:24px;height:24px;flex:0 0 24px;padding:0;border:1px solid var(--shell-accent-border);border-radius:5px;background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent);font-size:16px;cursor:pointer}.pdm-category-sidebar.is-collapsed{padding:5px}.is-collapsed .pdm-category-sidebar__top{justify-content:center}
 :global(:root body .pdm-category-sidebar.material-category-nav){border:1px solid var(--pdm-container-border)!important}
 @media(max-width:700px){.pdm-category-sidebar{max-height:190px}}
+.standard-library__category-label>svg{color:var(--pdm-muted);fill:none}.standard-library__category-label.is-selected>svg{color:var(--pdm-theme-accent);fill:none}
+.pdm-category-sidebar :deep(.el-tree--highlight-current .el-tree-node.is-current > .el-tree-node__content){background:var(--pdm-selection-bg);box-shadow:inset 3px 0 var(--pdm-theme-accent)}
 </style>

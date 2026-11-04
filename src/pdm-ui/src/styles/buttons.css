@@ -141,3 +141,8 @@
     transition: none !important;
   }
 }
+
+/* Text actions and business tabs keep their labels; navigation and icon-only actions retain their icons. */
+:root body [data-pdm-leading-icon] { display:none !important; }
+:root body button[data-pdm-text-only][data-pdm-button-kind]::after { display:none !important; }
+:root body button[data-pdm-text-only][data-pdm-button-kind]:not([data-pdm-button-kind="outline"])::before { opacity:1 !important; }

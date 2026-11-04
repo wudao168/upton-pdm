@@ -360,6 +360,7 @@ public static class ClientDiagnostics
 public sealed class ClientDiagnosticHandler : DelegatingHandler
 {
     public ClientDiagnosticHandler() : base(new HttpClientHandler()) { }
+    public ClientDiagnosticHandler(HttpMessageHandler handler) : base(handler) { }
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         ClientDeviceIdentity.Apply(request);

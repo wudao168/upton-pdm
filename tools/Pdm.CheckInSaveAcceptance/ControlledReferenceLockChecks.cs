@@ -17,7 +17,7 @@ internal static partial class Program
   void Check(bool ok,string text){if(!ok)throw new Exception(text);Console.WriteLine("PASS: "+text);}
   try
   {
-   foreach(var mode in new[]{"shared-read","shared-writer","identity-lock-on-replace","locked-identity-stream","exclusive","partial-failure","rollback-lock","changed-during-discovery","loaded"})
+   foreach(var mode in new[]{"shared-read","shared-writer","identity-lock-on-replace","locked-identity-stream","exclusive","partial-failure","readonly-on-failure","unchanged-readonly-on-failure","rollback-lock","changed-during-discovery","loaded"})
    {
     var folder=Path.Combine(directory,mode);Directory.CreateDirectory(folder);
     var manifest=New("ControlledOpenManifestDto");Set(manifest,"ProjectId",Guid.NewGuid());
@@ -57,6 +57,11 @@ internal static partial class Program
        return new[]{"PART-2.SLDPRT",Path.Combine(directory,"external","PART-2.SLDPRT"),"SUB.SLDASM",Path.Combine(directory,"external","SUB.SLDASM")};
       case "ReplaceReferencedDocument":
        calls++;var target=(string)call.Args[0];
+       if(mode=="readonly-on-failure"||mode=="unchanged-readonly-on-failure")
+       {
+        if(mode=="readonly-on-failure")File.AppendAllText(target,"|partial");
+        File.SetAttributes(target,File.GetAttributes(target)|FileAttributes.ReadOnly);return false;
+       }
        if(mode=="identity-lock-on-replace")
        {
         File.AppendAllText(target,"|partial");
@@ -87,7 +92,11 @@ internal static partial class Program
       Check((File.GetAttributes(path)&FileAttributes.ReadOnly)!=0,mode+"：恢复只读状态："+Path.GetFileName(path));
      }
     }
-    else if(mode=="partial-failure"||mode=="identity-lock-on-replace")Check(failure==null&&File.ReadAllBytes(root).SequenceEqual(original),mode+"：原生替换失败时完整回滚后再允许原生打开验证");
+    else if(mode=="partial-failure"||mode=="identity-lock-on-replace"||mode=="readonly-on-failure"||mode=="unchanged-readonly-on-failure")
+    {
+     Check(failure==null&&File.ReadAllBytes(root).SequenceEqual(original),mode+"：原生替换失败时完整回滚后再允许原生打开验证");
+     Check((File.GetAttributes(root)&FileAttributes.ReadOnly)!=0,mode+"：恢复原只读属性，不扩大编辑权限");
+    }
     else if(mode=="rollback-lock")
     {
      var backups=Directory.GetFiles(folder,".ref-*.bak");

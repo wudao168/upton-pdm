@@ -30,12 +30,27 @@ describe('统一图纸版次', () => {
     expect(row.revision).toBe('W1')
   })
   it('缺失包内版本号时使用冻结版本编号，历史版本不取最新工作区版本', () => {
-    const row = { ...item, kind: 'Electrical' as const, displayRevision: '未发布' }
+    const row = { ...item, id: 'historical-row', kind: 'Electrical' as const, displayRevision: '未发布' }
     const version = { id: 'version-3', kind: 'Electrical', versionNumber: 3, state: 'Released', label: 'E-P700016-2-B03', items: [row] } as BomVersion
     const value = { ...release(), scope: 'ElectricalFormal' as const, electricalBomVersionId: version.id, versionBindings: [], electricalBomSnapshot: [row] }
     expect(bomRevisionLabel(row, [value], [version])).toBe('E-P700016-2-V03')
     expect(bomRevisionLabel(row, [], [version])).toBe('E-P700016-2-V03')
     expect(bomRevisionLabel(row, [], [{ ...version, state: 'Draft' }])).toBe('未发布')
+  })
+  it.each(['Standard', 'Electrical'] as const)('%s同料号新增行、套件和配件不能继承旧行的BOM发布版本', kind => {
+    const old = { ...item, id: 'old', releaseTrackingId: 'lineage-old', kind, sourceDocumentId: undefined, unit: '001' }
+    const published = { ...release(), scope: kind === 'Standard' ? 'StandardFormal' as const : 'ElectricalFormal' as const,
+      versionBindings: [], nonStandardBomSnapshot: [], standardBomRevision: 'S-P-V07', electricalBomRevision: 'E-P-V07',
+      standardBomSnapshot: kind === 'Standard' ? [old] : [], electricalBomSnapshot: kind === 'Electrical' ? [old] : [] }
+    const expected = kind === 'Standard' ? 'S-P-V07' : 'E-P-V07'
+    expect(bomRevisionLabel(old, [published])).toBe(expected)
+    expect(bomRevisionLabel({ ...old, id: 'regenerated', releaseTrackingId: 'lineage-old' }, [published])).toBe(expected)
+    for (const source of ['Manual', 'EngineeringKit', 'MaterialRelation'] as const) {
+      const added: BomItem = { ...old, id: `new-${source}`, releaseTrackingId: `new-${source}`, source, displayRevision: expected }
+      expect(bomRevisionLabel(added, [published])).toBe('未发布')
+    }
+    expect(bomRevisionLabel({ ...old, id: undefined, releaseTrackingId: undefined }, [published])).toBe('未发布')
+    expect(bomRevisionLabel({ ...old, id: 'summary', releaseTrackingId: undefined, summaryItemIds: ['old'] }, [published])).toBe(expected)
   })
   it('标准件没有独立版本时采用该发布包冻结的BOM版本，保留已有物料版本', () => {
     const standard = { ...item, kind: 'Standard' as const }

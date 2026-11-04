@@ -10,6 +10,16 @@ public static class MaterialRelationEndpointExtensions
     public static void MapMaterialRelationEndpoints(this WebApplication app)
     {
         var api = app.MapGroup("/api/material-relations").RequireAuthorization();
+        api.MapPost("/projects/{projectId:guid}/quantity-preview", async (Guid projectId, IReadOnlyList<BomConfigurationQuantityChange> request, HttpContext context, MaterialRelationService service, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.ChangeQuantitiesAsync(projectId, request, actor, role, ct, previewOnly: true));
+        });
+        api.MapGet("/main-options", async (string? query, HttpContext context, MaterialRelationService service, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.SearchMainOptionsAsync(query, actor, role, ct));
+        });
         api.MapGet("/categories", async (HttpContext context, MaterialRelationService service, CancellationToken ct) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -50,10 +60,10 @@ public static class MaterialRelationEndpointExtensions
             return Results.Ok(await service.PublishAsync(templateId, request.RevisionId, request.ExpectedRowVersion, actor, role, cancellationToken));
         });
 
-        api.MapGet("/projects/{projectId:guid}/completeness", async (Guid projectId, HttpContext context, MaterialRelationService service, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{projectId:guid}/completeness", async (Guid projectId, Guid? releasePackageId, HttpContext context, MaterialRelationService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await service.GetCompletenessAsync(projectId, actor, role, cancellationToken));
+            return Results.Ok(await service.GetCompletenessAsync(projectId, actor, role, cancellationToken, releasePackageId));
         });
 
         api.MapPost("/projects/{projectId:guid}/apply", async (Guid projectId, ApplyMaterialRelationsRequest request, HttpContext context, MaterialRelationService service, CancellationToken cancellationToken) =>
@@ -117,8 +127,13 @@ public sealed record MaterialRelationChoiceRequest(
 {
     public MaterialRelationChoice ToCommand() => new(GroupId, OptionIds, ConfirmNoAccessory, NoAccessoryReason);
 }
-public sealed record ApplyMaterialRelationRequest(Guid MainBomItemId, IReadOnlyList<MaterialRelationChoiceRequest> Choices)
+public sealed record MaterialRelationAllocationRequest(Guid Id, string Name, decimal Quantity, IReadOnlyList<MaterialRelationChoiceRequest> Choices);
+
+public sealed record ApplyMaterialRelationRequest(Guid MainBomItemId, IReadOnlyList<MaterialRelationChoiceRequest> Choices,
+    IReadOnlyList<MaterialRelationAllocationRequest>? Allocations = null)
 {
-    public ApplyMaterialRelationsCommand ToCommand() => new(MainBomItemId, Choices.Select(item => item.ToCommand()).ToArray());
+    public ApplyMaterialRelationsCommand ToCommand() => new(MainBomItemId, Choices.Select(item => item.ToCommand()).ToArray(),
+        Allocations?.Select(item => new MaterialRelationAllocationCommand(item.Id, item.Name, item.Quantity,
+            item.Choices.Select(choice => choice.ToCommand()).ToArray())).ToArray());
 }
 public sealed record ApplyMaterialRelationsRequest(IReadOnlyList<ApplyMaterialRelationRequest> MainMaterials);

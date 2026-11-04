@@ -95,8 +95,21 @@ internal static partial class Program
                     http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "isolated-fixture");
                     SetField(client, "httpClient", http); SetField(plugin, "apiClient", client); SetField(plugin, "lifetime", lifetime);
                     SetField(plugin, "currentTree", root); SetField(plugin, "currentProjectId", project);
+                    var manifest = New("ControlledOpenManifestDto"); Set(manifest, "ProjectId", project);
+                    var files = (IList)Activator.CreateInstance(Property(manifest, "Files").PropertyType);
+                    foreach(var drawingId in new[]{network.RootDrawing, network.SubDrawing})
+                    {
+                        var file=New("ControlledOpenFileDto");Set(file,"DocumentId",drawingId);Set(file,"VersionId",Guid.NewGuid());
+                        Set(file,"FileName",drawingId.ToString("N")+".SLDDRW");Set(file,"RelativePath",drawingId.ToString("N")+".SLDDRW");files.Add(file);
+                    }
+                    Set(manifest,"Files",files);((IDictionary)Field(plugin,"controlledOpenManifests"))[output]=manifest;
                     await (Task)TreeCall(plugin, "RefreshPassiveMetadataAsync", root, project, CancellationToken.None);
                     var branch = ((IList)Get(root, "Children"))[0];
+                    var root2d=((IList)Get(root,"Children")).Cast<object>().SingleOrDefault(node=>Equals(Get(node,"DocumentId"),network.RootDrawing));
+                    Check(root2d!=null,"工作区打开后的轻量设计树补入总装关联工程图");
+                    Check((string)Get(root2d,"FullPath")==Path.Combine(output,network.RootDrawing.ToString("N")+".SLDDRW")
+                        && ReferenceEquals(((IList)Get(root2d,"ReferencedModels"))[0],root),"总装工程图绑定受控清单路径及实际模型节点");
+                    Check(!File.Exists((string)Get(root2d,"FullPath")),"已入库但尚未加载的2D按关联显示，不要求先打开或搜索磁盘");
                     Check((bool)Get(root, "LocalStructureDeferred"), "PLM索引始终标记为展示数据，不能冒充存档实际结构");
                     Check((bool)Get(branch, "DisplayStructurePending") && network.Versions == 1, "首屏只取根版本，未展开子装配不提前请求");
                     var args = New("CadTreeNodeEventArgs", branch);
@@ -105,16 +118,66 @@ internal static partial class Program
                     Check(!(bool)Get(branch, "DisplayStructurePending") && network.Versions == 2, "展开后只读取所选分支的服务器结构");
                     var embedded = ((IList)Get(branch, "Children"))[0];
                     Check(((IList)Get(embedded, "Children")).Count == 1 && Get(embedded, "DocumentId") == null, "虚拟组件及内部层级保留嵌入归属，不独立登记");
+                    var sub2d=((IList)Get(branch,"Children")).Cast<object>().Single(node=>Equals(Get(node,"DocumentId"),network.SubDrawing));
+                    Check((string)Get(sub2d,"FullPath")==Path.Combine(output,network.SubDrawing.ToString("N")+".SLDDRW")
+                        && ReferenceEquals(((IList)Get(sub2d,"ReferencedModels"))[0],branch),"按需展开的子装配保留配套2D及受控路径");
+                    await (Task)TreeCall(plugin,"RefreshPassiveMetadataAsync",root,project,CancellationToken.None);
+                    Check(((IList)Get(root,"Children")).Cast<object>().Count(node=>Equals(Get(node,"DocumentId"),network.RootDrawing))==1
+                        && ((IList)Get(branch,"Children")).Cast<object>().Count(node=>Equals(Get(node,"DocumentId"),network.SubDrawing))==1,
+                        "重复轻量刷新不重复添加2D图档");
+                    Check(network.Relations==1,"根与子装配复用同一关联清单，不逐组件重复读取关联");
                     Check(reads == 0 && network.Writes == 0, "索引展示和展开零原生结构操作、零服务器写入");
                     Check(network.FullHistories == 0, "当前绑定版本无需逐文件读取历史版本");
                 }
             }
+            await PassiveCycleChecks(pane, output);
         }
+    }
+
+    static void PassiveDrawingDataReplay(string jsonPath)
+    {
+        var data=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(File.ReadAllText(jsonPath));
+        var documentRows=((IEnumerable)data["Documents"]).Cast<Dictionary<string,object>>().ToArray();
+        var relationRows=((IEnumerable)data["Relations"]).Cast<Dictionary<string,object>>().ToArray();
+        var documents=(IDictionary)Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(typeof(Guid),Type("DocumentDto")));
+        foreach(var row in documentRows)
+        {
+            var doc=New("DocumentDto");var id=Guid.Parse((string)row["Id"]);
+            Set(doc,"Id",id);Set(doc,"FileName",(string)row["FileName"]);Set(doc,"Name",(string)row["FileName"]);Set(doc,"Kind",2);
+            documents.Add(id,doc);
+        }
+        var models=new Dictionary<Guid,object>();
+        var relations=(IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(Type("DocumentModelDrawingRelationDto")));
+        foreach(var row in relationRows)
+        {
+            var modelId=Guid.Parse((string)row["ModelId"]);var drawingId=Guid.Parse((string)row["DrawingId"]);
+            if(!models.ContainsKey(modelId))
+            {
+                var model=New("CadTreeNode");Set(model,"DocumentId",modelId);Set(model,"FileName",(string)row["ModelFile"]);
+                Set(model,"Kind",Enum.Parse(Type("CadDocumentKind"),((string)row["ModelFile"]).EndsWith(".SLDASM",StringComparison.OrdinalIgnoreCase)?"Assembly":"Part"));
+                models.Add(modelId,model);
+            }
+            var relation=New("DocumentModelDrawingRelationDto");Set(relation,"ModelDocumentId",modelId);Set(relation,"DrawingDocumentId",drawingId);relations.Add(relation);
+        }
+        var root=models.Values.First(model=>(string)Get(model,"FileName")=="CW004-3.SLDASM");
+        foreach(var model in models.Values.Where(model=>!ReferenceEquals(root,model)))((IList)Get(root,"Children")).Add(model);
+        var plugin=New("PdmAddin");SetField(plugin,"currentTree",root);
+        for(var refresh=0;refresh<3;refresh++)TreeCall(plugin,"ReconcilePassiveDrawings",root,documents,relations);
+        foreach(var model in models)
+        {
+            var expected=relationRows.Where(row=>Guid.Parse((string)row["ModelId"])==model.Key).Select(row=>Guid.Parse((string)row["DrawingId"])).Distinct().OrderBy(id=>id).ToArray();
+            var actual=((IList)Get(model.Value,"Children")).Cast<object>().Where(child=>Get(child,"Kind").ToString()=="Drawing").ToArray();
+            if(!expected.SequenceEqual(actual.Select(child=>(Guid)Get(child,"DocumentId")).OrderBy(id=>id))
+                || actual.Any(child=>!((IList)Get(child,"ReferencedModels")).Cast<object>().Contains(model.Value)))
+                throw new Exception("真实项目关联显示不符："+Get(model.Value,"FileName"));
+        }
+        Console.WriteLine("PASS: 真实只读数据回放："+documentRows.Length+"份2D、"+relationRows.Length+"条关联均显示；重复刷新不重复，未连接CAD或写入服务器");
     }
 
     sealed class PassiveIndexHandler : HttpMessageHandler
     {
-        readonly Guid project, root, sub; internal int Versions, FullHistories, Writes;
+        readonly Guid project, root, sub; internal int Versions, FullHistories, Writes, Relations;
+        internal readonly Guid RootDrawing=Guid.NewGuid(), SubDrawing=Guid.NewGuid();
         internal PassiveIndexHandler(Guid project, Guid root, Guid sub) { this.project = project; this.root = root; this.sub = sub; }
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
@@ -122,7 +185,13 @@ internal static partial class Program
             object response;
             if (request.RequestUri.AbsolutePath.EndsWith("/documents"))
                 response = new[] { new { Id = root, ProjectId = project, FileName = "受控总装.SLDASM", Kind = 0, Name = "总装", StoredVersionCount = 1 },
-                    new { Id = sub, ProjectId = project, FileName = "子装配.SLDASM", Kind = 0, Name = "子装配", StoredVersionCount = 1 } };
+                    new { Id = sub, ProjectId = project, FileName = "子装配.SLDASM", Kind = 0, Name = "子装配", StoredVersionCount = 1 },
+                    new { Id = RootDrawing, ProjectId = project, FileName = RootDrawing.ToString("N")+".SLDDRW", Kind = 2, Name = "总装工程图", StoredVersionCount = 1 },
+                    new { Id = SubDrawing, ProjectId = project, FileName = SubDrawing.ToString("N")+".SLDDRW", Kind = 2, Name = "子装配工程图", StoredVersionCount = 1 } };
+            else if(request.RequestUri.AbsolutePath.EndsWith("/document-relations"))
+            {
+                Relations++; response=new[]{new{ModelDocumentId=root,DrawingDocumentId=RootDrawing},new{ModelDocumentId=sub,DrawingDocumentId=SubDrawing}};
+            }
             else if (request.RequestUri.AbsolutePath.Contains("/versions"))
             {
                 Versions++; if (!request.RequestUri.Query.Contains("take=1")) FullHistories++;

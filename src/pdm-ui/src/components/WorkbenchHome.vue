@@ -7,7 +7,7 @@ import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompletene
 import OverviewTimeline from './OverviewTimeline.vue'
 import { ElMessage } from '../statusMessage'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { AuditEntry, DocumentNode, DrawingReviewPackage, DrawingReviewTarget, MaterialCodeApplication, MaterialRelationCompleteness, PdmUser, ProjectPhaseOwnerKey, ProjectPlan, ProjectPlanPortfolio, ProjectSummary, ProjectValidationPlan, ReleasePackageSummary, ReleaseScope } from '../types'
+import type { AuditEntry, DocumentNode, DrawingReviewPackage, MaterialCodeApplication, MaterialRelationCompleteness, PdmUser, ProjectPhaseOwnerKey, ProjectPlan, ProjectPlanPortfolio, ProjectSummary, ProjectValidationPlan, ReleasePackageSummary } from '../types'
 
 const props = withDefaults(defineProps<{
   active?: boolean
@@ -158,62 +158,6 @@ const staffingRows = computed(() => [
   { key: 'engineers', stage: '设计执行', role: '执行工程师', people: assignedPeople(activeProject.value.designers) },
   { key: 'downstream', stage: '后续阶段', role: '各部门负责人', people: [] },
 ])
-
-function drawingTargetSummary(target: DrawingReviewTarget) {
-  const count = target === 'Model3D' ? props.modelCount : props.drawingCount
-  if (count === 0) return '无图档'
-  const review = [...props.drawingReviews].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
-  if (!review) return '待发起审核'
-  if (review.state === 'Stale') return '版本冲突'
-  const states = review.items.map(item => target === 'Model3D' ? item.modelState : item.drawingState)
-  const completed = states.filter(state => state === 'Approved' || state === 'Marked').length
-  const changesRequested = states.filter(state => state === 'ChangesRequested').length
-  if (states.length > 0 && completed === states.length) return '已批准'
-  if (changesRequested > 0) return `已退回 ${changesRequested}`
-  if (review.state === 'WritingProperties') return `已批准 ${completed}/${states.length}`
-  return `待审核 ${completed}/${states.length}`
-}
-
-function latestReleaseFor(scopes: ReleaseScope[]) {
-  return [...props.releasePackages]
-    .filter(item => scopes.includes(item.scope))
-    .sort((left, right) => (right.createdAt ?? '').localeCompare(left.createdAt ?? ''))[0]
-}
-
-function bomApprovalStatus(scopes: ReleaseScope[]) {
-  const release = latestReleaseFor(scopes)
-  if (!release) return '未发起'
-  const currentStep = release.steps.find(step => step.status === 'current')
-  return `${release.state}${currentStep ? ` · ${currentStep.stage}` : ''}`
-}
-
-function materialApplicationStatus(itemIds: string[]) {
-  const ids = new Set(itemIds)
-  const applications = props.materialApplications.filter(item => item.bomItemId && ids.has(item.bomItemId))
-  if (!applications.length) return '暂无'
-  const pending = applications.filter(item => item.status === 'Pending').length
-  const approved = applications.filter(item => item.status === 'Approved').length
-  const rejected = applications.filter(item => item.status === 'Rejected').length
-  const withdrawn = applications.filter(item => item.status === 'Withdrawn').length
-  return [`待审${pending}`, `已批${approved}`, `退回${rejected}`, `撤回${withdrawn}`].filter((_, index) => [pending, approved, rejected, withdrawn][index] > 0).join(' · ')
-}
-
-const documentRows = computed(() => [
-  { key: 'model', label: '3D图档', count: props.modelCount, approval: drawingTargetSummary('Model3D') },
-  { key: 'drawing', label: '2D图纸', count: props.drawingCount, approval: drawingTargetSummary('Drawing2D') },
-])
-
-const bomRows = computed(() => [
-  { key: 'standard', label: '标准件', count: props.standardCount, approval: bomApprovalStatus(['StandardLongLead', 'StandardFormal', 'StandardSupplement']), application: materialApplicationStatus(props.standardItemIds) },
-  { key: 'non-standard', label: '非标件', count: props.nonStandardCount, approval: bomApprovalStatus(['NonStandardLongLead', 'NonStandardWithDrawing', 'NonStandardSupplement']), application: materialApplicationStatus(props.nonStandardItemIds) },
-  { key: 'electrical', label: '电气件', count: props.electricalCount, approval: bomApprovalStatus(['ElectricalFormal', 'ElectricalSupplement']), application: materialApplicationStatus(props.electricalItemIds) },
-])
-
-const bomApprovalSummary = computed(() => {
-  if (!props.releasePackage) return 'BOM审批：未发起'
-  const currentStep = props.releasePackage.steps.find(step => step.status === 'current')
-  return `BOM审批：${props.releasePackage.state}${currentStep ? ` · ${currentStep.stage}` : ''}`
-})
 
 const stageNames: Record<string, string> = {
   Design: '设计', MaterialPreparation: '备料', Assembly: '装配', Commissioning: '调试',

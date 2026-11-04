@@ -73,7 +73,12 @@ internal static partial class Program
     if(mode=="same-project-reuse")foreach(var node in oldParts)handler.AddExisting(node,false);
     if(mode=="other-project-same-name")foreach(var node in oldParts)handler.AddExisting(node,true);
     if(mode=="same-name-conflict")handler.AddExisting(oldParts[0],false,true);
-    if(mode=="foreign-binding")identity.GetMethod("TryWrite",Flags).Invoke(null,new object[]{Get(oldParts[0],"FullPath"),Guid.NewGuid(),Guid.NewGuid()});
+    if(mode=="foreign-binding"){
+     // This guard applies to an actual managed working copy. Library sources are
+     // now independently copied, with their former project retained as provenance.
+     resolver.SetValue(null,new Func<string>(()=>folder));
+     identity.GetMethod("TryWrite",Flags).Invoke(null,new object[]{Get(oldParts[0],"FullPath"),Guid.NewGuid(),Guid.NewGuid()});
+    }
     if(mode=="missing"){File.SetAttributes((string)Get(oldParts[0],"FullPath"),FileAttributes.Normal);File.Delete((string)Get(oldParts[0],"FullPath"));}
     if(mode=="changed-owner")File.AppendAllText((string)Get(owner,"FullPath")," saved actual edit");
     if(mode=="wrong-owner-version")Set(oldVersion,"Id",Guid.NewGuid());

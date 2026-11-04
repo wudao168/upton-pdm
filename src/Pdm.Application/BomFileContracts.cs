@@ -8,4 +8,8 @@ public interface IBomFileStore
     Task<bool> SaveAsync(BomFileCatalog catalog, long expectedVersion, CancellationToken ct);
 }
 
-public sealed record BomFileView(IReadOnlyList<BomFileReference> Files, bool LibraryUpdateAvailable, long RowVersion);
+public sealed record BomFileView(IReadOnlyList<BomFileReference> Files, bool LibraryUpdateAvailable, long RowVersion)
+{
+    public bool CanEditFiles { get; init; }
+    public bool IsStandardLibraryMaterial { get; init; }
+}

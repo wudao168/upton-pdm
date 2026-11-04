@@ -228,7 +228,10 @@ public sealed record U9MaterialSampleItem(
     string? PurchaseLink,
     bool ExistsInPdm,
     bool CanImport,
-    string Decision);
+    string Decision)
+{
+    public bool? IsEffective { get; init; }
+}
 
 public sealed record U9MaterialSamplePreview(
     IReadOnlyList<string> CategoryCodes,
@@ -253,6 +256,11 @@ public sealed record MaterialSyncExecutionResult(
 
 public static class U9MaterialContract
 {
+    public static bool? EffectiveState(U9ItemReference item)
+    {
+        var value = item.CreationAttributes.GetValueOrDefault("Effective.IsEffective")?.Trim();
+        return bool.TryParse(value, out var state) ? state : value == "1" ? true : value == "0" ? false : item.StockPlan?.IsEffective;
+    }
     public const string CreatePath = "/webapi/ItemMaster/Create";
     public const string QueryPath = "/webapi/ItemMaster/Query";
     public const string ModifyPath = "/webapi/ItemMaster/Modify";
@@ -354,7 +362,7 @@ public interface IMaterialRepository
         IReadOnlyCollection<string> materialCodes,
         DateTimeOffset observedAt,
         CancellationToken cancellationToken);
-    Task<int> ArchiveMissingU9MaterialsAsync(
+    Task<int> RecordMissingU9MaterialsAsync(
         string categoryCode,
         DateTimeOffset synchronizedSince,
         string actor,
@@ -369,7 +377,8 @@ public interface IMaterialRepository
         AuditEntry audit,
         CancellationToken cancellationToken);
     Task<PdmMaterial> ArchiveMaterialAsync(Guid materialId, long expectedRowVersion, string actor, DateTimeOffset archivedAt, CancellationToken cancellationToken);
-    Task<PdmMaterial> ReactivateMaterialAsync(Guid materialId, long expectedRowVersion, string actor, DateTimeOffset reactivatedAt, CancellationToken cancellationToken);
+    Task<PdmMaterial> ReactivateMaterialAsync(Guid materialId, long expectedRowVersion, string actor, DateTimeOffset reactivatedAt, CancellationToken cancellationToken, bool u9StateConfirmed = false);
+    Task<IReadOnlyList<PdmMaterial>> ListUnobservedU9MaterialsAsync(string categoryCode, DateTimeOffset synchronizedSince, CancellationToken cancellationToken);
     Task<PdmMaterial> DeleteLocalMaterialAsync(Guid materialId, long expectedRowVersion, bool u9AbsenceConfirmed, CancellationToken cancellationToken);
     Task LinkBomItemsAsync(IReadOnlyList<Guid> bomItemIds, Guid materialId, string actor, DateTimeOffset linkedAt, CancellationToken cancellationToken);
     Task LinkBomItemAsync(Guid bomItemId, Guid materialId, string actor, DateTimeOffset linkedAt, CancellationToken cancellationToken);

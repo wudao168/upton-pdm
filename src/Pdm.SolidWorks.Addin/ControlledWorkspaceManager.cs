@@ -12,6 +12,8 @@ internal sealed partial class ControlledWorkspaceManager
 {
     internal Action<string, int, int> PreparationProgress { get; set; }
     internal IReadOnlyCollection<string> ProtectedPaths { get; set; } = Array.Empty<string>();
+    internal IReadOnlyCollection<Guid> PendingLocalEdits { get; set; } = Array.Empty<Guid>();
+    internal Func<Task<IReadOnlyCollection<string>>> RefreshProtectedPaths { get; set; }
     internal string LocalCacheNotice { get; private set; }
     private readonly PdmApiClient apiClient;
     private readonly string workspaceRoot;
@@ -352,11 +354,17 @@ internal sealed partial class ControlledWorkspaceManager
     private static bool HasAllManifestFiles(string directory, IEnumerable<ControlledOpenFileDto> files) =>
         files.All(file => File.Exists(ManifestPath(directory, file)));
 
-    private static bool HasPotentialLocalChanges(
+    private bool HasPotentialLocalChanges(
         string directory,
         IReadOnlyCollection<ControlledOpenFileDto> files,
         IReadOnlyCollection<Guid> editableDocumentIds)
+        => DescribeCacheConflicts(directory, files, editableDocumentIds, null).Count > 0;
+
+    private IReadOnlyList<WorkspaceCacheConflict> DescribeCacheConflicts(string directory,
+        IEnumerable<ControlledOpenFileDto> files, IReadOnlyCollection<Guid> editableDocumentIds, Guid? projectId,
+        WorkspaceCacheBackup backup = null)
     {
+        var conflicts = new List<WorkspaceCacheConflict>();
         var editableIds = new HashSet<Guid>(editableDocumentIds ?? Array.Empty<Guid>());
         foreach (var file in files)
         {
@@ -366,18 +374,25 @@ internal sealed partial class ControlledWorkspaceManager
             var hasMetadata = PdmDocumentIdentityStore.TryReadLocalMetadata(path, out var metadata);
             var actual = ComputeSha256(path);
             var matchesBase = hasMetadata && metadata.DocumentId == file.DocumentId
+                && (!projectId.HasValue || metadata.ProjectId == projectId)
                 && !string.IsNullOrWhiteSpace(metadata.Sha256)
                 && (string.Equals(actual, metadata.Sha256, StringComparison.OrdinalIgnoreCase)
                     || string.Equals(actual, metadata.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase));
-            if (!matchesBase
-                    || editableIds.Contains(file.DocumentId)
-                    || (File.GetAttributes(path) & FileAttributes.ReadOnly) == 0)
-            {
-                return true;
-            }
+            if (matchesBase && !editableIds.Contains(file.DocumentId)) continue;
+            if (!editableIds.Contains(file.DocumentId) && !PendingLocalEdits.Contains(file.DocumentId)
+                && hasMetadata && metadata.DocumentId == file.DocumentId && metadata.ProjectId.HasValue
+                && (!projectId.HasValue || metadata.ProjectId == projectId)
+                && ConfirmedArchiveSource.Matches(workspaceRoot, apiClient.SourceReceiptScope, path,
+                    metadata.ProjectId.Value, file, actual)) continue;
+            if (backup != null && backup.Files.Any(item => string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase)
+                && item.ActualSha256 == actual && item.DocumentId == file.DocumentId && item.RequiredVersionId == file.VersionId
+                && string.Equals(item.RequiredSha256, file.Sha256, StringComparison.OrdinalIgnoreCase))) continue;
+            conflicts.Add(new WorkspaceCacheConflict { Path = path, FileName = file.FileName, DocumentId = file.DocumentId,
+                LocalRevision = metadata?.Revision ?? "未核对", RequiredRevision = file.Revision, RequiredVersionId = file.VersionId,
+                RequiredSha256 = file.Sha256, ActualSha256 = actual, Binding = metadata, Attributes = File.GetAttributes(path),
+                Reason = editableIds.Contains(file.DocumentId) ? "仍有编辑权限或编辑记录，需要保留修改" : "本地内容与原基准不一致" });
         }
-
-        return false;
+        return conflicts;
     }
 
     private static void SetWorkspaceAttributes(
@@ -483,7 +498,8 @@ internal sealed partial class ControlledWorkspaceManager
     private void MergeManifestFiles(
         string source,
         string target,
-        IReadOnlyCollection<ControlledOpenFileDto> files)
+        IReadOnlyCollection<ControlledOpenFileDto> files,
+        IReadOnlyDictionary<Guid, string> expectedHashes = null)
     {
         var backup = RecoveryDirectory("working");
         var changed = new List<Tuple<string, string, FileAttributes?>>();
@@ -495,6 +511,13 @@ internal sealed partial class ControlledWorkspaceManager
             {
                 var sourcePath = ManifestPath(source, file);
                 var targetPath = ManifestPath(target, file);
+                // Keep existing bytes stable through backup and atomic replacement.
+                // Native CAD windows or writers which hold incompatible locks stop
+                // this update instead of forcing their file handles closed.
+                using var original = expectedHashes != null && File.Exists(targetPath)
+                    ? new FileStream(targetPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete) : null;
+                if (expectedHashes != null && (File.Exists(targetPath) ? ComputeSha256(targetPath) : null) != expectedHashes[file.DocumentId])
+                    throw new IOException("更新前图档内容再次变化，原文件已保留：" + file.FileName);
                 if (File.Exists(targetPath)
                     && new FileInfo(sourcePath).Length == new FileInfo(targetPath).Length
                     && string.Equals(ComputeSha256(sourcePath), ComputeSha256(targetPath), StringComparison.OrdinalIgnoreCase))

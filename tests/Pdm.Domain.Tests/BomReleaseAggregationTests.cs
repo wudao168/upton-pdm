@@ -5,6 +5,18 @@ namespace Pdm.Domain.Tests;
 
 public sealed class BomReleaseAggregationTests
 {
+    [Fact]
+    public void PurchaseDemandStillSummarizesSameCodeAcrossAccessoryOwnersAndKitReferences()
+    {
+        var first = Item("SHARED", 2, "MAIN-A") with { RelationMainBomItemId = Guid.NewGuid(), Source = "MaterialRelation" };
+        var second = Item("SHARED", 3, "MAIN-B") with { RelationMainBomItemId = Guid.NewGuid(), Source = "MaterialRelation" };
+        var kit = Item("SHARED", 4, "KIT") with { EngineeringKitReferenceId = Guid.NewGuid(), Source = "EngineeringKit" };
+        var package = Package([first, second, kit]);
+        var demand = Assert.Single(BomReleaseAggregation.Build(package).PurchaseDemand);
+        Assert.Equal(9, demand.Quantity);
+        Assert.Equal(3, demand.SourceBomItemIds.Count);
+    }
+
     [Theory]
     [InlineData(0, 1, 4)]
     [InlineData(1, 1, 3)]
@@ -74,6 +86,16 @@ public sealed class BomReleaseAggregationTests
         var demand = Assert.Single(summary.PurchaseDemand);
         Assert.Equal("01021000999", demand.MaterialCode);
         Assert.Equal(3, demand.Quantity);
+    }
+
+    [Fact]
+    public void TrackingIdentityDoesNotConvertQuantitiesAcrossDifferentUnits()
+    {
+        var tracking = Guid.NewGuid();
+        var current = Item("1001", 5, null) with { ReleaseTrackingId = tracking, Unit = "004" };
+        var previous = Item("1001", 10, null) with { ReleaseTrackingId = tracking, Unit = "001" };
+        Assert.Equal(5, Assert.Single(BomReleaseAggregation.Build(Package([current]), [previous]).PurchaseDemand).Quantity);
+        Assert.Equal(0, BomReleaseAggregation.PriorQuantities([previous], [current]).GetValueOrDefault("1001|004"));
     }
 
     [Fact]

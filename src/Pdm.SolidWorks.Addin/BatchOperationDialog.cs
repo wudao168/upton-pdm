@@ -179,6 +179,7 @@ internal sealed partial class BatchOperationDialog : Form
         initialArchivePaths = selectedPaths;
         acquire.Checked = !startWithCheckIn;
         checkIn.Checked = startWithCheckIn;
+        projectSelector.ConfirmExistingArchiveTarget = startWithCheckIn;
         changeNote.Enabled = startWithCheckIn;
 
         Text = startWithCheckIn ? "登记新增引用并提交最新整套存档" : "整套装配操作";
@@ -396,7 +397,8 @@ internal sealed partial class BatchOperationDialog : Form
         standardLibraryTip.SetToolTip(showUncheckedOnly, "显示未勾选图档并展开定位路径；筛选不改变勾选数量或存档范围。");
         foreach (var button in new[] { selectAll, clear, selectChanged, supplement, showCheckedOnly, showUncheckedOnly, cancel, recheck, execute })
             ArchiveCommandAppearance.Apply(button, button == execute ? Color.FromArgb(21, 126, 77)
-                : button == cancel ? Color.FromArgb(230, 126, 34) : (Color?)null);
+                : button == cancel ? Color.FromArgb(230, 126, 34) : (Color?)null,
+                button == execute || button == cancel ? Color.FromArgb(224, 224, 224) : (Color?)null);
         foreach (var button in new[] { selectAll, clear, selectChanged, supplement, showCheckedOnly, cancel, recheck }) button.Margin = new Padding(0, 0, 6, 0);
         selectionButtons.Controls.Add(selectAll);
         selectionButtons.Controls.Add(clear);
@@ -557,6 +559,7 @@ internal sealed partial class BatchOperationDialog : Form
 
     private void RefreshOperationState(string username)
     {
+        projectSelector.ConfirmExistingArchiveTarget = checkIn.Checked && !ArchiveToStandardLibrary;
         if (ArchiveToStandardLibrary) return;
         if (!checkIn.Checked)
         {

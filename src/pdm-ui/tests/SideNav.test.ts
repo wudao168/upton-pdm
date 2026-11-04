@@ -5,6 +5,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import SideNav from '../src/components/SideNav.vue'
 
 describe('SideNav', () => {
+  it('未选中使用线框，选中时切换实心，菜单切换后同时更新两处图标', async () => {
+    const wrapper = mount(SideNav, { props: { active: 'project-center', visibleKeys: ['project-center', 'production-drawings'] } })
+    const items = wrapper.findAll('.pdm-nav-item')
+    expect(items[0]!.get('svg').attributes('data-pdm-icon-weight')).toBe('fill')
+    expect(items[1]!.get('svg').attributes('data-pdm-icon-weight')).toBe('regular')
+    expect(items[1]!.get('svg').attributes('fill')).toBe('none')
+    await wrapper.setProps({ active: 'production-drawings' })
+    expect(items[0]!.get('svg').attributes('data-pdm-icon-weight')).toBe('regular')
+    expect(items[0]!.get('svg').attributes('fill')).toBe('none')
+    expect(items[1]!.get('svg').attributes('data-pdm-icon-weight')).toBe('fill')
+    wrapper.unmount()
+  })
   beforeEach(() => {
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} unobserve() {} })
   })
@@ -43,14 +55,15 @@ describe('SideNav', () => {
     try {
       frame?.(0)
       expect(animate).not.toHaveBeenCalled()
+      expect((wrapper.get('.pdm-sidebar__highlight-layer').element as HTMLElement).style.clipPath).toBe('inset(26px 0 76px 0)')
       await wrapper.setProps({ active: 'production-drawings' })
       frame?.(16)
       expect(wrapper.findAll('.pdm-sidebar__highlight')).toHaveLength(1)
       expect(animate.mock.calls[0]?.[0]).toEqual([
-        { transform: `translate(8px, 100px) scale(${124 / 110}, ${44 / 50})` },
+        { transform: `translate(8px, 100px) scale(${124 / 132}, ${44 / 50})` },
         { transform: 'translate(8px, 250px)' },
       ])
-      expect((wrapper.get('.pdm-sidebar__highlight').element as HTMLElement).style.width).toBe('110px')
+      expect((wrapper.get('.pdm-sidebar__highlight').element as HTMLElement).style.width).toBe('132px')
       preference.matches = true
       await wrapper.setProps({ active: 'project-center' })
       frame?.(32)

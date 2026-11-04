@@ -1,0 +1,841 @@
+{
+  "status": "通过",
+  "checkedAt": "2026-11-02T13:05:23.441Z",
+  "fixUiDeploymentVersion": "2026.11.02.205154",
+  "finalOnlineUiVersion": "2026.11.02.210038",
+  "businessRules": [
+    "倍率在BOM页面维护，默认采用当前项目数量，手动设置后保留；发布时冻结倍率",
+    "倍率变化必须确认全部受影响项；普通增补允许未选变更顺延",
+    "未变更或未确认删除的已发布实例保留前次冻结值",
+    "提前量仅在物料首次纳入正式基线时抵扣；后续按上一基线净变化计算",
+    "按物料编码与单位代码统计，不混加不同单位；同名单位001与003仍独立",
+    "目标总量、首次提前抵扣、需求净变更分开显示；减少需求不代表已退料"
+  ],
+  "tests": {
+    "domainReleaseProductionIntegration": 643,
+    "api": 30,
+    "bomAndReleaseComponents": 300,
+    "browserScenarios": 2,
+    "finalDeletionMetadataRegression": 33,
+    "continuousPublishStages": 26,
+    "stageCountsByKind": {
+      "Standard": 10,
+      "Electrical": 10,
+      "NonStandard": 6
+    },
+    "multiplierMigrationIsolatedDatabase": "通过，临时库已清理"
+  },
+  "keyResults": [
+    {
+      "case": "同料号原实例1加新增实例5，仅选择新增实例",
+      "previous": 1,
+      "target": 6,
+      "newDemand": 5
+    },
+    {
+      "case": "删除2并新增另一物料2，总数不变",
+      "newDemand": 2,
+      "reducedDemand": 2
+    },
+    {
+      "case": "单套2，倍率5，前期提前发布4",
+      "target": 10,
+      "newDemand": 6
+    },
+    {
+      "case": "提前发布4，首次正式未纳入，后续目标6",
+      "previous": 0,
+      "earlyCredit": 4,
+      "target": 6,
+      "newDemand": 2
+    },
+    {
+      "case": "后续由6增至7",
+      "previous": 6,
+      "earlyCredit": 0,
+      "target": 7,
+      "newDemand": 1
+    },
+    {
+      "case": "再删除7并恢复5",
+      "deletionNet": -7,
+      "restoredTarget": 5,
+      "earlyCredit": 0,
+      "newDemand": 5
+    }
+  ],
+  "realProjectReadOnlyAudit": {
+    "projectCode": "P700016-2",
+    "publishedRecordsCompared": 10,
+    "changedFrozenRecords": 0,
+    "currentVersion": "S-P700016-2-B08",
+    "currentMultiplier": 1,
+    "earlyReleaseRecords": 0
+  },
+  "deployment": {
+    "apiFilesVerified": 30,
+    "uiCopiesMatched": 4,
+    "entryAndResourceFilesVerifiedPerCopy": 57,
+    "apiHealth": "ok",
+    "onlineFeatureMarkers": [
+      {
+        "text": "首次提前抵扣",
+        "present": true
+      },
+      {
+        "text": "需求净变更",
+        "present": true
+      },
+      {
+        "text": "完整目标",
+        "present": true
+      },
+      {
+        "text": "当前BOM单套合计",
+        "present": true
+      }
+    ],
+    "apiApplicationSha256": "6221c8e3127c883c8d9c82c83f43d8f08f4100ddc2a9c99056d43e0b8a888c3f",
+    "apiInfrastructureSha256": "a1e0b3a5d989b10e4afb7e0cdacf57ee9a680141e98b3edd58422e56295fd4d4",
+    "nativeMainUrl": "https://192.168.2.8:5443/?configuration=2026.11.02.210038",
+    "nativeReviewUrl": "https://192.168.2.8:5443/review-overlay.html?configuration=2026.11.02.210038",
+    "nativeVisibleVersion": "V2026.11.02.210038"
+  },
+  "validationScope": [
+    "自动发布模拟使用隔离仓库与模拟发布器，不写入真实业务项目",
+    "真实报错项目采用只读回查，原历史快照与倍率保持不变",
+    "U9验证到需求汇总及集成事件数据，未触发真实采购、发料或退料；既有发布文件及U9事件不自动改写或重发"
+  ],
+  "simulationStages": [
+    {
+      "kind": "Electrical",
+      "stage": "初次正式发布",
+      "selected": 3,
+      "removed": 0,
+      "multiplier": 1,
+      "beforeByMaterial": {},
+      "afterByMaterial": {
+        "SIM-A|001": 1,
+        "SIM-B|001": 4,
+        "SIM-C|001": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": 1,
+        "SIM-B|001": 4,
+        "SIM-C|001": 2
+      },
+      "targetsByUnit": {
+        "001": 7
+      },
+      "addedDemandByUnit": {
+        "001": 7
+      },
+      "reducedDemandByUnit": {
+        "001": 0
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Electrical",
+      "stage": "新增同料号实例，仅选择新增5",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 1,
+        "SIM-B|001": 4,
+        "SIM-C|001": 2
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 6,
+        "SIM-B|001": 4,
+        "SIM-C|001": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 0,
+        "SIM-C|001": 0
+      },
+      "targetsByUnit": {
+        "001": 12
+      },
+      "addedDemandByUnit": {
+        "001": 5
+      },
+      "reducedDemandByUnit": {
+        "001": 0
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Electrical",
+      "stage": "增加已有物料4到7",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 6,
+        "SIM-B|001": 4,
+        "SIM-C|001": 2
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 6,
+        "SIM-B|001": 7,
+        "SIM-C|001": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": 0,
+        "SIM-B|001": 3,
+        "SIM-C|001": 0
+      },
+      "targetsByUnit": {
+        "001": 15
+      },
+      "addedDemandByUnit": {
+        "001": 3
+      },
+      "reducedDemandByUnit": {
+        "001": 0
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Electrical",
+      "stage": "减少已有物料7到3",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 6,
+        "SIM-B|001": 7,
+        "SIM-C|001": 2
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 6,
+        "SIM-B|001": 3,
+        "SIM-C|001": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": 0,
+        "SIM-B|001": -4,
+        "SIM-C|001": 0
+      },
+      "targetsByUnit": {
+        "001": 11
+      },
+      "addedDemandByUnit": {
+        "001": 0
+      },
+      "reducedDemandByUnit": {
+        "001": 4
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Electrical",
+      "stage": "仅删除旧实例1，保留同料号新实例5",
+      "selected": 0,
+      "removed": 1,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 6,
+        "SIM-B|001": 3,
+        "SIM-C|001": 2
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 3,
+        "SIM-C|001": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": -1,
+        "SIM-B|001": 0,
+        "SIM-C|001": 0
+      },
+      "targetsByUnit": {
+        "001": 10
+      },
+      "addedDemandByUnit": {
+        "001": 0
+      },
+      "reducedDemandByUnit": {
+        "001": 1
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Electrical",
+      "stage": "删除2并新增另一物料2，合计不变仍有增减",
+      "selected": 1,
+      "removed": 1,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 3,
+        "SIM-C|001": 2
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 3,
+        "SIM-D|001": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": 0,
+        "SIM-B|001": 0,
+        "SIM-C|001": -2,
+        "SIM-D|001": 2
+      },
+      "targetsByUnit": {
+        "001": 10
+      },
+      "addedDemandByUnit": {
+        "001": 2
+      },
+      "reducedDemandByUnit": {
+        "001": 2
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Electrical",
+      "stage": "顺延已有物料3到9，仅发布新物料4",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 3,
+        "SIM-D|001": 2
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 3,
+        "SIM-D|001": 2,
+        "SIM-E|001": 4
+      },
+      "netByMaterial": {
+        "SIM-A|001": 0,
+        "SIM-B|001": 0,
+        "SIM-D|001": 0,
+        "SIM-E|001": 4
+      },
+      "targetsByUnit": {
+        "001": 14
+      },
+      "addedDemandByUnit": {
+        "001": 4
+      },
+      "reducedDemandByUnit": {
+        "001": 0
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Electrical",
+      "stage": "下一次补发顺延变更3到9",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 3,
+        "SIM-D|001": 2,
+        "SIM-E|001": 4
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 9,
+        "SIM-D|001": 2,
+        "SIM-E|001": 4
+      },
+      "netByMaterial": {
+        "SIM-A|001": 0,
+        "SIM-B|001": 6,
+        "SIM-D|001": 0,
+        "SIM-E|001": 0
+      },
+      "targetsByUnit": {
+        "001": 20
+      },
+      "addedDemandByUnit": {
+        "001": 6
+      },
+      "reducedDemandByUnit": {
+        "001": 0
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Electrical",
+      "stage": "倍率变化确认全部影响项",
+      "selected": 4,
+      "removed": 0,
+      "multiplier": 2,
+      "beforeByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 9,
+        "SIM-D|001": 2,
+        "SIM-E|001": 4
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 10,
+        "SIM-B|001": 18,
+        "SIM-D|001": 4,
+        "SIM-E|001": 8
+      },
+      "netByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 9,
+        "SIM-D|001": 2,
+        "SIM-E|001": 4
+      },
+      "targetsByUnit": {
+        "001": 40
+      },
+      "addedDemandByUnit": {
+        "001": 20
+      },
+      "reducedDemandByUnit": {
+        "001": 0
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Electrical",
+      "stage": "新增盒单位，按单位合计而不混加件数",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 2,
+      "beforeByMaterial": {
+        "SIM-A|001": 10,
+        "SIM-B|001": 18,
+        "SIM-D|001": 4,
+        "SIM-E|001": 8
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 10,
+        "SIM-B|001": 18,
+        "SIM-D|001": 4,
+        "SIM-E|001": 8,
+        "SIM-BOX|004": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": 0,
+        "SIM-B|001": 0,
+        "SIM-D|001": 0,
+        "SIM-E|001": 0,
+        "SIM-BOX|004": 2
+      },
+      "targetsByUnit": {
+        "001": 40,
+        "004": 2
+      },
+      "addedDemandByUnit": {
+        "001": 0,
+        "004": 2
+      },
+      "reducedDemandByUnit": {
+        "001": 0,
+        "004": 0
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "NonStandard",
+      "stage": "已审图非标初次正式4",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "targetsByUnit": {
+        "001": 4
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "NonStandard",
+      "stage": "已审非标增加4到6",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "targetsByUnit": {
+        "001": 6
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "NonStandard",
+      "stage": "已审非标减少6到2",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "targetsByUnit": {
+        "001": 2
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "NonStandard",
+      "stage": "删除最后一个非标项形成空基线",
+      "selected": 0,
+      "removed": 1,
+      "multiplier": 1,
+      "targetsByUnit": {},
+      "historyUnchanged": true
+    },
+    {
+      "kind": "NonStandard",
+      "stage": "恢复旧物料后发布3，删除记录不被改写",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "targetsByUnit": {
+        "001": 3
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "NonStandard",
+      "stage": "非标倍率2形成目标6，源单套仍为3",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 2,
+      "targetsByUnit": {
+        "001": 6
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Standard",
+      "stage": "初次正式发布",
+      "selected": 3,
+      "removed": 0,
+      "multiplier": 1,
+      "beforeByMaterial": {},
+      "afterByMaterial": {
+        "SIM-A|001": 1,
+        "SIM-B|001": 4,
+        "SIM-C|001": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": 1,
+        "SIM-B|001": 4,
+        "SIM-C|001": 2
+      },
+      "targetsByUnit": {
+        "001": 7
+      },
+      "addedDemandByUnit": {
+        "001": 7
+      },
+      "reducedDemandByUnit": {
+        "001": 0
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Standard",
+      "stage": "新增同料号实例，仅选择新增5",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 1,
+        "SIM-B|001": 4,
+        "SIM-C|001": 2
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 6,
+        "SIM-B|001": 4,
+        "SIM-C|001": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 0,
+        "SIM-C|001": 0
+      },
+      "targetsByUnit": {
+        "001": 12
+      },
+      "addedDemandByUnit": {
+        "001": 5
+      },
+      "reducedDemandByUnit": {
+        "001": 0
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Standard",
+      "stage": "增加已有物料4到7",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 6,
+        "SIM-B|001": 4,
+        "SIM-C|001": 2
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 6,
+        "SIM-B|001": 7,
+        "SIM-C|001": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": 0,
+        "SIM-B|001": 3,
+        "SIM-C|001": 0
+      },
+      "targetsByUnit": {
+        "001": 15
+      },
+      "addedDemandByUnit": {
+        "001": 3
+      },
+      "reducedDemandByUnit": {
+        "001": 0
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Standard",
+      "stage": "减少已有物料7到3",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 6,
+        "SIM-B|001": 7,
+        "SIM-C|001": 2
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 6,
+        "SIM-B|001": 3,
+        "SIM-C|001": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": 0,
+        "SIM-B|001": -4,
+        "SIM-C|001": 0
+      },
+      "targetsByUnit": {
+        "001": 11
+      },
+      "addedDemandByUnit": {
+        "001": 0
+      },
+      "reducedDemandByUnit": {
+        "001": 4
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Standard",
+      "stage": "仅删除旧实例1，保留同料号新实例5",
+      "selected": 0,
+      "removed": 1,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 6,
+        "SIM-B|001": 3,
+        "SIM-C|001": 2
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 3,
+        "SIM-C|001": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": -1,
+        "SIM-B|001": 0,
+        "SIM-C|001": 0
+      },
+      "targetsByUnit": {
+        "001": 10
+      },
+      "addedDemandByUnit": {
+        "001": 0
+      },
+      "reducedDemandByUnit": {
+        "001": 1
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Standard",
+      "stage": "删除2并新增另一物料2，合计不变仍有增减",
+      "selected": 1,
+      "removed": 1,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 3,
+        "SIM-C|001": 2
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 3,
+        "SIM-D|001": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": 0,
+        "SIM-B|001": 0,
+        "SIM-C|001": -2,
+        "SIM-D|001": 2
+      },
+      "targetsByUnit": {
+        "001": 10
+      },
+      "addedDemandByUnit": {
+        "001": 2
+      },
+      "reducedDemandByUnit": {
+        "001": 2
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Standard",
+      "stage": "顺延已有物料3到9，仅发布新物料4",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 3,
+        "SIM-D|001": 2
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 3,
+        "SIM-D|001": 2,
+        "SIM-E|001": 4
+      },
+      "netByMaterial": {
+        "SIM-A|001": 0,
+        "SIM-B|001": 0,
+        "SIM-D|001": 0,
+        "SIM-E|001": 4
+      },
+      "targetsByUnit": {
+        "001": 14
+      },
+      "addedDemandByUnit": {
+        "001": 4
+      },
+      "reducedDemandByUnit": {
+        "001": 0
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Standard",
+      "stage": "下一次补发顺延变更3到9",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 1,
+      "beforeByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 3,
+        "SIM-D|001": 2,
+        "SIM-E|001": 4
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 9,
+        "SIM-D|001": 2,
+        "SIM-E|001": 4
+      },
+      "netByMaterial": {
+        "SIM-A|001": 0,
+        "SIM-B|001": 6,
+        "SIM-D|001": 0,
+        "SIM-E|001": 0
+      },
+      "targetsByUnit": {
+        "001": 20
+      },
+      "addedDemandByUnit": {
+        "001": 6
+      },
+      "reducedDemandByUnit": {
+        "001": 0
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Standard",
+      "stage": "倍率变化确认全部影响项",
+      "selected": 4,
+      "removed": 0,
+      "multiplier": 2,
+      "beforeByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 9,
+        "SIM-D|001": 2,
+        "SIM-E|001": 4
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 10,
+        "SIM-B|001": 18,
+        "SIM-D|001": 4,
+        "SIM-E|001": 8
+      },
+      "netByMaterial": {
+        "SIM-A|001": 5,
+        "SIM-B|001": 9,
+        "SIM-D|001": 2,
+        "SIM-E|001": 4
+      },
+      "targetsByUnit": {
+        "001": 40
+      },
+      "addedDemandByUnit": {
+        "001": 20
+      },
+      "reducedDemandByUnit": {
+        "001": 0
+      },
+      "historyUnchanged": true
+    },
+    {
+      "kind": "Standard",
+      "stage": "新增盒单位，按单位合计而不混加件数",
+      "selected": 1,
+      "removed": 0,
+      "multiplier": 2,
+      "beforeByMaterial": {
+        "SIM-A|001": 10,
+        "SIM-B|001": 18,
+        "SIM-D|001": 4,
+        "SIM-E|001": 8
+      },
+      "afterByMaterial": {
+        "SIM-A|001": 10,
+        "SIM-B|001": 18,
+        "SIM-D|001": 4,
+        "SIM-E|001": 8,
+        "SIM-BOX|004": 2
+      },
+      "netByMaterial": {
+        "SIM-A|001": 0,
+        "SIM-B|001": 0,
+        "SIM-D|001": 0,
+        "SIM-E|001": 0,
+        "SIM-BOX|004": 2
+      },
+      "targetsByUnit": {
+        "001": 40,
+        "004": 2
+      },
+      "addedDemandByUnit": {
+        "001": 0,
+        "004": 2
+      },
+      "reducedDemandByUnit": {
+        "001": 0,
+        "004": 0
+      },
+      "historyUnchanged": true
+    }
+  ]
+}

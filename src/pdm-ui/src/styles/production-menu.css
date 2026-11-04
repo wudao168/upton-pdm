@@ -1,0 +1,63 @@
+/* Project/package menus share the reviewed 40px/60px hierarchy in all trace views. */
+@layer pdm-button-sizing {
+  :root body .production-workbench .production-workbench__tree button:is(.production-workbench__project,.production-workbench__package) {
+    box-sizing:border-box !important; position:relative !important; display:flex !important; align-items:center !important; justify-content:flex-start !important;
+    width:100% !important; min-width:0 !important; max-width:100% !important;
+    height:40px !important; min-height:40px !important; max-height:40px !important;
+    margin:0 !important; padding:6px 10px !important; gap:8px !important;
+    border:0 !important; border-radius:12px !important; background:#fff !important;
+    box-shadow:none !important; color:var(--pdm-text) !important; text-align:left !important;
+    font-size:13px !important; font-weight:400 !important; line-height:18px !important;
+  }
+  :root body .production-workbench .production-workbench__tree button.production-workbench__package {
+    width:calc(100% - 10px) !important; margin-inline:5px !important;
+    height:60px !important; min-height:60px !important; max-height:60px !important;
+  }
+  :root body .production-workbench .production-workbench__tree button:is(.production-workbench__project,.production-workbench__package).selected { background:#e5e7eb !important; }
+  :root body .production-workbench .production-workbench__tree button:is(.production-workbench__project,.production-workbench__package).selected::before {
+    content:''; position:absolute; left:0; top:8px; bottom:8px; width:4px;
+    border-radius:999px; background:var(--pdm-theme-accent); pointer-events:none;
+  }
+  :root body .production-workbench .production-workbench__tree button:is(.production-workbench__project,.production-workbench__package) :is(strong,em,small,span) { font-weight:400 !important; }
+  :root body .production-workbench .production-workbench__tree .production-workbench__project-identity {
+    display:flex; min-width:0; flex:1; align-items:center; gap:5px; color:var(--pdm-text) !important;
+  }
+  :root body .production-workbench .production-workbench__tree .production-workbench__project-identity > :is(strong,span) { color:inherit !important; }
+  :root body .production-workbench .production-workbench__tree .production-workbench__project > small { margin-left:auto !important; font-size:11px !important; flex:none; }
+  :root body .production-workbench .production-workbench__tree .production-workbench__package-content { display:grid !important; grid-template-columns:minmax(0,1fr); flex:1; min-width:0; gap:2px !important; align-items:stretch !important; justify-content:normal !important; }
+  :root body .production-workbench .production-workbench__tree .production-workbench__package-number { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px !important; line-height:16px !important; }
+  :root body .production-workbench .production-workbench__tree .production-workbench__package-status { display:flex; min-width:0; align-items:center; gap:4px; line-height:14px !important; }
+  :root body .production-workbench .production-workbench__tree .production-workbench__package-status > em { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-style:normal; font-size:11px !important; line-height:14px !important; color:var(--pdm-muted) !important; }
+  :root body .production-workbench .production-workbench__tree .production-workbench__package-alerts { display:flex !important; flex:none; margin:0 !important; gap:3px; font-size:11px !important; line-height:14px !important; color:var(--pdm-danger); }
+  :root body .production-workbench .production-workbench__tree .production-workbench__package-meta { display:flex; justify-content:space-between; gap:4px; min-width:0; margin:0 !important; }
+  :root body .production-workbench .production-workbench__tree .production-workbench__package-meta :is(small,span) { font-size:11px !important; line-height:12px !important; white-space:nowrap; }
+  :root body .production-workbench .production-workbench__tree .production-workbench__package-counts { display:flex; gap:5px; }
+  :root body .production-workbench .production-workbench__tree button.production-workbench__package small { margin:0 !important; }
+  :root body .production-workbench .production-workbench__tree button:is(.production-workbench__project,.production-workbench__package) > .pdm-menu-icon { flex:none; width:16px !important; height:16px !important; color:var(--pdm-muted) !important; }
+  :root body .production-workbench .production-workbench__tree button:is(.production-workbench__project,.production-workbench__package).selected > .pdm-menu-icon { color:var(--pdm-theme-accent) !important; }
+}
+@layer pdm-control-spacing {
+  :root body .production-workbench .production-workbench__tree > .production-workbench__toolbar {
+    display:grid !important; grid-template-columns:minmax(0,1fr) max-content max-content;
+    width:100%; min-width:0; align-items:center; gap:5px !important; padding-inline:0 !important;
+  }
+  :root body .production-workbench .production-workbench__tree > .production-workbench__toolbar > :is(select,label,button) { grid-column:auto !important; grid-row:auto !important; }
+  :root body .production-workbench .production-workbench__tree > .production-workbench__toolbar > select { width:100% !important; min-width:0 !important; max-width:none !important; }
+  :root body .production-workbench .production-workbench__tree > .production-workbench__toolbar > label { display:inline-flex; width:max-content !important; min-width:0 !important; padding:0 !important; align-items:center; gap:3px; white-space:nowrap; }
+  :root body .production-workbench .production-workbench__toolbar > label > input[type=checkbox] { margin:0 !important; }
+  :root body .production-workbench .production-workbench__tree > .production-workbench__toolbar > button:last-child { justify-self:end; margin:0 !important; }
+  :root body .production-workbench .production-workbench__tree-project { margin:3px 0 0 !important; padding:0 !important; }
+  :root body .production-workbench__project-packages { display:grid; gap:3px !important; margin:3px 0 0 !important; padding:0 !important; border:0 !important; }
+  :root body .production-workbench .production-workbench__trace-filters > label:has(> .pdm-search-field),
+  :root body .production-workbench .production-workbench__trace-filters .pdm-search-field {
+    width:300px !important; min-width:300px !important; max-width:300px !important; flex:0 0 300px !important;
+  }
+  :root body .production-workbench .production-workbench__trace-filters > label:has(> .el-date-editor--daterange),
+  :root body .production-workbench .production-workbench__trace-filters .el-date-editor--daterange {
+    width:260px !important; min-width:260px !important; max-width:260px !important; flex:0 0 260px !important;
+  }
+}
+.production-packages-enter-active { transition:transform 360ms cubic-bezier(.22,1.16,.36,1),opacity 240ms cubic-bezier(.22,1,.36,1); transform-origin:top center; }
+.production-packages-leave-active { transition:transform 200ms cubic-bezier(.22,1,.36,1),opacity 200ms cubic-bezier(.22,1,.36,1); transform-origin:top center; }
+.production-packages-enter-from,.production-packages-leave-to { opacity:0; transform:translateY(-4px) scale(.98); }
+@media(prefers-reduced-motion:reduce) { .production-packages-enter-active,.production-packages-leave-active { transition:none; } }

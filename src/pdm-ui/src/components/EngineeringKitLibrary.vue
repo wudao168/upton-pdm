@@ -1,5 +1,8 @@
 <script setup lang="ts">
+import MaterialBrandSelect from './MaterialBrandSelect.vue'
 import SearchField from './SearchField.vue'
+import { copyText } from '../copyText'
+import AlignedDetailTable from './AlignedDetailTable.vue'
 import QuantityInputNumber from './QuantityInputNumber.vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -77,6 +80,22 @@ function toggleKitExpansion(kit: EngineeringKit) {
 }
 function syncExpandedKits(_kit: EngineeringKit, expanded: EngineeringKit[]) {
   expandedKitIds.value = expanded.map(kit => kit.id)
+}
+const detailColumns = [
+  { key: 'code', label: '物料编码', parentIndex: 1, width: 145 },
+  { key: 'name', label: '物料名称', parentIndex: 2, width: 180 },
+  { key: 'model', label: '规格', parentIndex: 3, width: 145 },
+  { key: 'brand', label: '品牌', parentIndex: 4, width: 130 },
+  { key: 'unit', label: '单位', parentIndex: 5, width: 150 },
+  { key: 'remark', label: '备注', parentIndex: 6, width: 180 },
+  { key: 'quantity', label: '每套数量', parentIndex: 7, width: 150 },
+]
+function detailRows(kit: EngineeringKit) {
+  return (displayRevision(kit)?.components ?? []).map(component => ({ code: component.materialCode, name: component.materialName, model: component.specification ?? undefined, brand: component.brand ?? undefined, unit: u9UnitName(component.unit), remark: component.remark ?? undefined, quantity: component.quantity }))
+}
+function onRowClick(kit: EngineeringKit, _column: unknown, event: MouseEvent) {
+  if (event.target instanceof Element && event.target.closest('button, a, input, select, textarea, [role="button"], .el-table__expand-icon, .el-dropdown, .el-checkbox, .engineering-kit-library__contents')) return
+  toggleKitExpansion(kit)
 }
 function selectedMaterial(materialId: string) {
   return eligibleMaterials.value.find(item => item.id === materialId)
@@ -246,26 +265,17 @@ onMounted(load)
         </div>
         <span>共 {{ filteredKits.length }} 个套件</span>
       </div>
-      <el-table v-loading="loading" data-pdm-column-layout="scroll" :data="filteredKits" row-key="id" :expand-row-keys="expandedKitIds" @expand-change="syncExpandedKits" height="100%" empty-text="暂无套件">
+      <el-table v-loading="loading" data-pdm-column-layout="scroll" :data="filteredKits" row-key="id" :expand-row-keys="expandedKitIds" @row-click="onRowClick" @expand-change="syncExpandedKits" height="100%" empty-text="暂无套件">
         <el-table-column type="expand" width="32" class-name="pdm-column-fixed-width">
           <template #default="{ row }">
             <section :id="`kit-contents-${row.id}`" class="engineering-kit-library__contents" :aria-label="`套件 ${row.code || row.name} 的物料明细`">
-              <header><strong>套件明细</strong><span v-if="displayRevision(row)">V{{ String(displayRevision(row)!.versionNumber).padStart(2, '0') }} {{ displayRevision(row)!.state === 'Draft' ? '草稿' : '已发布' }} · 共 {{ displayRevision(row)!.components.length }} 种物料</span></header>
-              <el-table data-pdm-column-layout="scroll" :data="displayRevision(row)?.components ?? []" max-height="320" empty-text="该套件暂无物料明细">
-                <el-table-column label="料号" min-width="135"><template #default="{ row: component }"><span v-stocked-material="component.materialCode">{{ component.materialCode }}</span></template></el-table-column>
-                <el-table-column label="名称" min-width="150"><template #default="{ row: component }"><span v-stocked-material="component.materialCode">{{ component.materialName }}</span></template></el-table-column>
-                <el-table-column prop="specification" label="型号" min-width="160" />
-                <el-table-column prop="brand" label="品牌" min-width="95" />
-                <el-table-column label="单位" width="70"><template #default="{ row: component }">{{ u9UnitName(component.unit) }}</template></el-table-column>
-                <el-table-column prop="quantity" label="每套数量" width="100" />
-                <el-table-column prop="remark" label="备注" min-width="140" />
-              </el-table>
+              <AlignedDetailTable :columns="detailColumns" :rows="detailRows(row)" :label="`套件 ${row.code || row.name} 的物料明细`" empty-text="该套件暂无物料明细" />
             </section>
           </template>
         </el-table-column>
-        <el-table-column label="套件料号" min-width="145"><template #default="{ row }"><button type="button" class="kit-code pdm-text-action" :aria-expanded="expandedKitIds.includes(row.id)" :aria-controls="`kit-contents-${row.id}`" :aria-label="`${expandedKitIds.includes(row.id) ? '收起' : '展开'}套件 ${row.code || row.name} 的物料明细`" @click.stop="toggleKitExpansion(row)">{{ row.code || '发布时生成' }}</button></template></el-table-column>
-        <el-table-column prop="name" label="套件名称" min-width="180" />
-        <el-table-column label="型号" min-width="145"><template #default="{ row }">{{ row.model || '发布时生成' }}</template></el-table-column>
+        <el-table-column label="物料编码" min-width="145"><template #default="{ row }"><button type="button" class="kit-code pdm-text-action" :disabled="!row.code" :aria-label="`复制料号 ${row.code || ''}`" title="点击复制料号" @click.stop="copyText(row.code, '料号')">{{ row.code || '发布时生成' }}</button></template></el-table-column>
+        <el-table-column prop="name" label="物料名称" min-width="180" />
+        <el-table-column label="规格" min-width="145"><template #default="{ row }"><button v-if="row.model" type="button" class="pdm-text-action" :aria-label="`复制型号 ${row.model}`" title="点击复制规格" @click.stop="copyText(row.model, '型号')">{{ row.model }}</button><span v-else>发布时生成</span></template></el-table-column>
         <el-table-column prop="brand" label="品牌" min-width="130" />
         <el-table-column label="标准物料分类" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ kitCategories(row).map(category => category.name).join('、') || '未分类（待补选）' }}</template></el-table-column>
         <el-table-column prop="description" label="备注" min-width="180" show-overflow-tooltip />
@@ -298,7 +308,7 @@ onMounted(load)
             <el-input v-else-if="editing?.currentReleasedRevisionId" :model-value="editing.model" disabled />
             <el-tree-select v-model="form.standardLibraryCategoryId" :data="categoryTree" node-key="id" :props="{ label: 'label', children: 'children' }" check-strictly filterable placeholder="选择标准物料分类" />
           </div>
-          <div><label>品牌</label><el-input v-model="form.brand" maxlength="160" placeholder="请输入品牌" /></div>
+          <div><label>品牌</label><MaterialBrandSelect v-model="form.brand" :token="token" /></div>
           <div><label>备注信息</label><el-input v-model="form.description" maxlength="500" placeholder="备注信息（可选）" /></div>
           <div><label>套件内物料数量</label><strong>{{ form.components.length }}</strong></div>
           <div><label>状态</label><strong>{{ editing?.isActive === false ? '已停用' : draftRevision(editing) ? `待发布 · V${draftRevision(editing)?.versionNumber}` : releasedRevision(editing) ? '已发布' : '新建草稿' }}</strong></div>
@@ -340,9 +350,7 @@ onMounted(load)
 .engineering-kit-group :deep(.el-table__header th.el-table__cell){height:40px;padding-block:0;box-sizing:border-box}
 .engineering-kit-group :deep(.el-table__body .cell){white-space:nowrap}
 .engineering-kit-library :deep(.el-table__expanded-cell) { padding: 0 !important; }
-.engineering-kit-library__contents { padding: 3px; }
-.engineering-kit-library__contents > header { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 12px; }
-.engineering-kit-library__contents > header > span { color: var(--pdm-text-soft); }
+.engineering-kit-library__contents { padding: 0; }
 .kit-code { border: 0; padding: 0; background: transparent; font: inherit; font-weight: 600; text-align: left; cursor: pointer; }
 .engineering-kit-library :deep(button.el-table__expand-icon),
 .engineering-kit-library :deep(button.el-table__expand-icon:is(:hover, :focus-visible)) { border-color: transparent !important; outline: none !important; box-shadow: none !important; background: transparent !important; }

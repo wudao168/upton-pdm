@@ -471,31 +471,16 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
     {
         lock (gate)
         {
-            if (material.SourceSystem != MaterialDataSource.U9C || material.MasterOwner != MaterialMasterOwner.U9C)
-                throw new PdmRuleException("U9C导入料品必须标记为U9C来源和U9C主控。");
+            if (material.SourceSystem != MaterialDataSource.U9C)
+                throw new PdmRuleException("U9C对账资料必须标记原始来源。");
             var existing = materials.Values.FirstOrDefault(item => item.MaterialCode.Equals(material.MaterialCode, StringComparison.OrdinalIgnoreCase));
-            if (existing is null)
-            {
-                materials[material.Id] = material;
-                return Task.FromResult(material);
-            }
-            if (existing.MasterOwner != MaterialMasterOwner.U9C) return Task.FromResult(existing);
-            var refreshed = material with
-            {
-                Id = existing.Id,
-                CreatedBy = existing.CreatedBy,
-                CreatedAt = existing.CreatedAt,
-                RowVersion = existing.RowVersion + 1,
-                IsArchived = false,
-                ArchivedBy = null,
-                ArchivedAt = null
-            };
-            materials[existing.Id] = refreshed;
+            var refreshed = MaterialMasterReconciliation.Merge(existing, material);
+            materials[refreshed.Id] = refreshed;
             return Task.FromResult(refreshed);
         }
     }
 
-    public Task<int> ArchiveMissingU9MaterialsAsync(
+    public Task<int> RecordMissingU9MaterialsAsync(
         string categoryCode,
         DateTimeOffset synchronizedSince,
         string actor,
@@ -506,19 +491,15 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
         {
             var affected = 0;
             foreach (var material in materials.Values.Where(item =>
-                         item.MasterOwner == MaterialMasterOwner.U9C
+                         (item.U9SyncConfirmed || item.SourceSystem == MaterialDataSource.U9C)
                          && string.Equals(item.CategoryCode, categoryCode, StringComparison.OrdinalIgnoreCase)
-                         && !item.IsArchived
                          && (item.LastU9SyncedAt is null || item.LastU9SyncedAt < synchronizedSince)).ToArray())
             {
                 materials[material.Id] = material with
                 {
-                    IsArchived = true,
-                    ArchivedBy = actor,
-                    ArchivedAt = archivedAt,
-                    UpdatedBy = actor,
-                    UpdatedAt = archivedAt,
-                    RowVersion = material.RowVersion + 1
+                    U9ReconciliationMessage = "U9C对账未找到同号料品；PLM资料及启停状态已保留。",
+                    U9ReconciledAt = archivedAt,
+                    U9IsEffective = null
                 };
                 affected++;
             }
@@ -537,11 +518,11 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
         lock (gate)
         {
             foreach (var material in materials.Values.Where(item =>
-                         item.MasterOwner == MaterialMasterOwner.U9C
+                         (item.U9SyncConfirmed || item.SourceSystem == MaterialDataSource.U9C)
                          && string.Equals(item.CategoryCode, categoryCode, StringComparison.OrdinalIgnoreCase)
                          && observedCodes.Contains(item.MaterialCode)).ToArray())
             {
-                materials[material.Id] = material with { LastU9SyncedAt = observedAt };
+                materials[material.Id] = material with { LastU9SyncedAt = material.LastU9SyncedAt > observedAt ? material.LastU9SyncedAt : observedAt };
             }
         }
         return Task.CompletedTask;
@@ -683,9 +664,9 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
         {
             if (!materials.TryGetValue(material.Id, out var existing)) throw new PdmNotFoundException("物料主档不存在。");
             if (existing.RowVersion != expectedRowVersion) throw new PdmConflictException("物料主档已被其他用户修改，请刷新后重试。");
-            if (existing.ApprovalStatus != MaterialApprovalStatus.Approved
+            if (existing.ApprovalStatus != MaterialApprovalStatus.Approved && task.Operation != MaterialSyncOperation.SetAvailability
                 || existing.SyncStatus == MaterialSyncStatus.Pending
-                || existing.IsArchived
+                || existing.IsArchived && task.Operation != MaterialSyncOperation.SetAvailability && !(task.Operation == MaterialSyncOperation.Update && material.U9ReconciledAt.HasValue)
                 || tasks.Values.Any(item => item.MaterialId == material.Id && item.Status == MaterialSyncStatus.Pending))
                 throw new PdmRuleException("料品不是可变更状态，请刷新后重试。");
             if (tasks.Values.Any(item => item.MaterialId == task.MaterialId && item.Operation == task.Operation && item.PayloadSha256 == task.PayloadSha256))
@@ -739,7 +720,7 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
         }
     }
 
-    public Task<PdmMaterial> ReactivateMaterialAsync(Guid materialId, long expectedRowVersion, string actor, DateTimeOffset reactivatedAt, CancellationToken cancellationToken)
+    public Task<PdmMaterial> ReactivateMaterialAsync(Guid materialId, long expectedRowVersion, string actor, DateTimeOffset reactivatedAt, CancellationToken cancellationToken, bool u9StateConfirmed = false)
     {
         lock (gate)
         {
@@ -751,6 +732,7 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
                 IsArchived = false,
                 ArchivedBy = null,
                 ArchivedAt = null,
+                LastU9SyncedAt = u9StateConfirmed ? reactivatedAt : existing.LastU9SyncedAt,
                 UpdatedBy = actor,
                 UpdatedAt = reactivatedAt,
                 RowVersion = existing.RowVersion + 1
@@ -759,6 +741,10 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
             return Task.FromResult(reactivated);
         }
     }
+
+    public Task<IReadOnlyList<PdmMaterial>> ListUnobservedU9MaterialsAsync(string categoryCode, DateTimeOffset synchronizedSince, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PdmMaterial>>(materials.Values.Where(item => (item.U9SyncConfirmed || item.SourceSystem == MaterialDataSource.U9C)
+            && item.CategoryCode == categoryCode && (item.LastU9SyncedAt is null || item.LastU9SyncedAt < synchronizedSince)).ToArray());
 
     public Task<PdmMaterial> DeleteLocalMaterialAsync(Guid materialId, long expectedRowVersion, bool u9AbsenceConfirmed, CancellationToken cancellationToken)
     {
@@ -1102,6 +1088,8 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
                 U9ItemCode = u9ItemCode,
                 SyncStatus = MaterialSyncStatus.Succeeded,
                 U9SyncConfirmed = true,
+                LastU9SyncedAt = audit.OccurredAt,
+                U9IsEffective = task.Operation == MaterialSyncOperation.SetAvailability ? U9MaterialIntegrationService.AvailabilityState(task) : material.U9IsEffective,
                 UpdatedBy = audit.Actor,
                 UpdatedAt = audit.OccurredAt,
                 RowVersion = material.RowVersion + 1

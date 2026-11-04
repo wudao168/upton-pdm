@@ -1,0 +1,52 @@
+/* One content inset owns the action edge; nested headings do not add another inset. */
+@layer pdm-business {
+  :root body :is(.pdm-main,.el-dialog,.el-drawer,.pdm-custom-drawer) .pdm-panel:has(>
+      :is(header,.pdm-panel-heading,.pdm-panel-header,.pdm-panel-topbar) >
+      :is(button,[class$="-actions"],[class$="__actions"],.actions)) {
+    padding-inline-end:var(--pdm-content-inset,5px) !important;
+  }
+  :root body .material-numbering-settings-scroll > .material-duplicate-settings { padding-inline-end:0 !important; }
+  :root body .wh-department-list { padding-inline-end:var(--pdm-content-inset,5px) !important; }
+  :root body .pdm-budget__section:has(.pdm-budget__actions) { padding-inline-end:var(--pdm-content-inset,5px) !important; }
+  :root body .procurement-tracking { padding-inline:var(--pdm-content-inset,5px) !important; }
+  :root body .pdm-preview-control-panel { padding-inline-end:var(--pdm-content-inset,5px) !important; }
+  :root body .pdm-bom-summary-actions,
+  :root body .pdm-bom-release-strip:has(> .pdm-bom-release-strip-actions) { padding-inline-end:0 !important; }
+  :root body :is(.pdm-main,.el-dialog,.el-drawer,.pdm-custom-drawer) .pdm-panel >
+      :is(header,.pdm-panel-heading,.pdm-panel-header,.pdm-panel-topbar):has(>
+      :is(button,[class$="-actions"],[class$="__actions"],.actions)),
+  :root body .pdm-preview-control-panel > .pdm-preview-toolbar {
+    padding-inline-end:0 !important;
+  }
+}
+@layer pdm-control-spacing {
+  :root body .pdm-titlebar__actions { justify-content:flex-end !important; gap:5px !important; }
+  :root body :is(.pdm-titlebar__actions,.pdm-panel-header-actions,.pdm-page-actions,.pdm-manager-actions,.pdm-plan-toolbar__actions) > .el-dropdown {
+    display:inline-flex !important; width:max-content !important; min-width:0 !important; max-width:none !important;
+    flex:0 0 auto !important; margin:0 !important; padding:0 !important;
+  }
+  :root body .pdm-titlebar__actions > .el-dropdown > .pdm-theme-trigger { flex:0 0 auto !important; margin:0 !important; }
+  :root body .pdm-titlebar__actions > :is(.pdm-message-button,.pdm-user-profile-trigger,.pdm-logout-button) { margin:0 !important; flex-shrink:0 !important; }
+  /* Entrypoints can declare layers in different orders; override legacy heading padding in both layers. */
+  :root body :is(.pdm-main,.el-dialog,.el-drawer,.pdm-custom-drawer) .pdm-panel >
+      :is(header,.pdm-panel-heading,.pdm-panel-header,.pdm-panel-topbar):has(>
+      :is(button,[class$="-actions"],[class$="__actions"],.actions)) {
+    padding-inline-end:0 !important;
+  }
+  :root body :is(.pdm-main,.el-dialog,.el-drawer,.pdm-custom-drawer)
+      :is(header,footer,.pdm-panel-heading,.pdm-panel-header,.pdm-panel-topbar) >
+      :is([class$="-actions"],[class$="__actions"],.actions):not(:empty),
+  :root body .pdm-bom-summary-actions > .pdm-bom-release-strip-actions,
+  :root body .pdm-bom-release-strip > .pdm-bom-release-strip-actions,
+  :root body .wh-department-list > .wh-settings-actions {
+    display:flex; align-items:center; justify-content:flex-end !important;
+    margin-inline-start:auto !important; margin-inline-end:0 !important;
+    padding-inline-end:0 !important; gap:var(--pdm-control-gap,5px) !important;
+    min-width:0; max-width:100%;
+  }
+  :root body :is(.pdm-main,.el-dialog,.el-drawer,.pdm-custom-drawer) .pdm-panel > header > button:last-child { margin-inline-start:auto !important; margin-inline-end:0 !important; }
+  :root body :is(.el-dialog__footer,.el-drawer__footer,.pdm-custom-drawer > footer) { display:flex !important; align-items:center !important; justify-content:flex-end !important; gap:var(--pdm-control-gap,5px) !important; }
+  :root body .procurement-tracking__heading > .procurement-tracking__actions { margin-inline-start:var(--pdm-control-gap,5px) !important; }
+  :root body .procurement-tracking__heading > .procurement-tracking__updated { margin-inline-start:auto !important; }
+  :root body .pdm-preview-control-panel > .pdm-preview-toolbar { padding-inline-end:0 !important; }
+}

@@ -30,13 +30,15 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
     private readonly IPdmRepository? repository;
     private readonly HttpClient httpClient;
     private readonly IPdfReleaseStampProcessor? pdfReleaseStamp;
+    private readonly PdmStorageOptions storage;
 
     public SolidWorksServerPreviewConverter(IOptions<PdmPreviewWorkerOptions> options, IPdmRepository? repository = null, HttpClient? httpClient = null,
-        IPdfReleaseStampProcessor? pdfReleaseStamp = null)
+        IPdfReleaseStampProcessor? pdfReleaseStamp = null, IOptions<PdmStorageOptions>? storageOptions = null)
     {
         settings = options.Value;
         this.repository = repository;
         this.pdfReleaseStamp = pdfReleaseStamp;
+        storage = storageOptions?.Value ?? new PdmStorageOptions();
         this.httpClient = httpClient ?? new HttpClient(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(15) })
         {
             Timeout = Timeout.InfiniteTimeSpan
@@ -103,7 +105,7 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         var previewRelativeRoot = Path.Combine(".release-previews", package.Id.ToString("N"));
         var previewRoot = StorageLocationPolicy.ResolveUnder(vaultRoot, previewRelativeRoot);
         var stagingPreviewRoot = StorageLocationPolicy.ResolveUnder(stagingDirectory, "previews");
-        var workRoot = Path.Combine(Path.GetTempPath(), "UPTON-PLM", "release-preview", package.Id.ToString("N"), Guid.NewGuid().ToString("N"));
+        var workRoot = Path.Combine(storage.ConversionWorkRoot, "release-preview", package.Id.ToString("N"), Guid.NewGuid().ToString("N"));
         var sourceRoot = Path.Combine(workRoot, "sources");
         var outputRoot = Path.Combine(workRoot, "outputs");
         Directory.CreateDirectory(sourceRoot);

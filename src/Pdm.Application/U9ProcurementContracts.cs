@@ -178,8 +178,10 @@ public sealed record ProjectProcurementTrackingItem(
     decimal? ApprovedQuantity,
     IReadOnlyList<ProcurementDocumentDetail> Details)
 {
+    public bool IsDemandCanceled { get; init; }
     public bool HasDeliveryDelay { get; init; }
     public IReadOnlyList<BomFileReference> Files { get; init; } = [];
+    public bool FilesFromCurrentBom { get; init; }
     public DateTimeOffset? PurchaseRequisitionCreatedAt { get; init; }
     public string? BuyerName { get; init; }
     public IReadOnlyList<WarehouseMovementDetail> WarehouseMovements { get; init; } = [];

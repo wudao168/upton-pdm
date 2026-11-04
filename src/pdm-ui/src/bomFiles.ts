@@ -13,7 +13,7 @@ export interface BomFileReference {
   source: string
   purpose: string
 }
-export interface BomFileView { files: BomFileReference[]; libraryUpdateAvailable: boolean; rowVersion: number }
+export interface BomFileView { files: BomFileReference[]; libraryUpdateAvailable: boolean; rowVersion: number; canEditFiles: boolean; isStandardLibraryMaterial: boolean }
 export const fileVersion = (version?: number | null) => version ? `V${String(version).padStart(2, '0')}` : '未启用'
 export function bomFilesLabel(row: BomItem) {
   const files = row.files ?? []

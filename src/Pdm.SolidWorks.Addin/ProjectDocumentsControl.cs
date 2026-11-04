@@ -50,9 +50,13 @@ internal sealed class ProjectDocumentsControl : UserControl
     private static readonly Color InputBorderColor = Color.FromArgb(122, 122, 122);
     private readonly ProjectBrowserControl projectSelector = new ProjectBrowserControl();
     private readonly Button openLatest = CreateButton("打开最新");
-    private readonly Button openEdit = CreateButton("获取编辑");
     private readonly TreeView tree = new TreeView();
     private readonly Panel treeSurface = new Panel();
+    private readonly Panel workspaceBody = new Panel { Dock = DockStyle.Fill };
+    private Panel documentTreeHost;
+    private readonly Panel projectPickerHost = new Panel { Dock = DockStyle.Fill, Visible = false, Padding = new Padding(3) };
+    private ProjectBrowserDialog inlineProjectBrowser;
+    private Control inlineProjectContent;
     private readonly ImageList structureImages = PdmTaskPaneControl.BuildStructureImages();
     private readonly Label empty = new Label();
     private readonly Label selectedFile = new Label();
@@ -80,29 +84,18 @@ internal sealed class ProjectDocumentsControl : UserControl
         Dock = DockStyle.Fill;
         BackColor = Color.FromArgb(244, 247, 251);
 
-        var projectPanel = new Panel { Dock = DockStyle.Top, Height = 126, BackColor = BackColor, Padding = new Padding(3, 6, 3, 6) };
-        var projectLabel = new Label
-        {
-            Text = "项目工作区",
-            Dock = DockStyle.Fill,
-            ForeColor = Color.FromArgb(31, 49, 72),
-            Font = new Font(Font, FontStyle.Bold),
-            TextAlign = ContentAlignment.MiddleLeft,
-            Padding = new Padding(1, 0, 0, 0)
-        };
-        var workflow = new Label
-        {
-            Text = "选择项目和图档；编辑保存后到“设计树”存档。",
-            Dock = DockStyle.Fill,
-            ForeColor = Color.FromArgb(90, 107, 128),
-            AutoEllipsis = true,
-            TextAlign = ContentAlignment.MiddleLeft,
-            Padding = new Padding(1, 0, 0, 0)
-        };
-        toolTip.SetToolTip(workflow, workflow.Text);
+        var projectPanel = new Panel { Dock = DockStyle.Top, Height = 42, BackColor = BackColor, Padding = new Padding(3, 6, 3, 6) };
         projectSelector.BrowseButtonText = "选择项目";
         projectSelector.Dock = DockStyle.Fill;
         projectSelector.Margin = Padding.Empty;
+        projectSelector.BrowseRequested += (_, _) => ShowProjectBrowser();
+        projectSelector.UseProjectSearchBox();
+        projectSelector.SearchTextChanged += (_, _) =>
+        {
+            if (inlineProjectBrowser == null && string.IsNullOrWhiteSpace(projectSelector.SearchText)) return;
+            ShowProjectBrowser();
+            inlineProjectBrowser?.SetSearchText(projectSelector.SearchText);
+        };
         projectSelector.SelectedProjectChanged += (_, _) =>
         {
             ConfigureStructureLoading(null, null);
@@ -120,60 +113,20 @@ internal sealed class ProjectDocumentsControl : UserControl
         openLatest.Click += (_, _) => Raise(ControlledOpenMode.LatestReadOnly);
         toolTip.SetToolTip(openLatest, "打开所选图档的最新版本，保持只读状态");
         openLatest.AccessibleName = "打开最新版本（只读）";
-        openEdit.Dock = DockStyle.Fill;
-        openEdit.Margin = Padding.Empty;
-        openEdit.Click += (_, _) => Raise(ControlledOpenMode.LatestEdit);
-        toolTip.SetToolTip(openEdit, "获取所选图档的编辑权限并打开最新版本");
-        var projectActions = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 7,
-            RowCount = 1,
-            Margin = new Padding(0, 6, 0, 0),
-            Padding = Padding.Empty
-        };
-        for (var column = 0; column < 7; column++)
-        {
-            projectActions.ColumnStyles.Add(column % 2 == 0
-                ? new ColumnStyle(SizeType.Percent, 25)
-                : new ColumnStyle(SizeType.Absolute, 6));
-        }
-        projectActions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        projectActions.Controls.Add(openLatest, 0, 0);
-        projectActions.Controls.Add(openEdit, 2, 0);
-
         var projectLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 4,
+            ColumnCount = 3,
+            RowCount = 1,
             Margin = Padding.Empty,
             Padding = Padding.Empty
         };
         projectLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        projectLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
-        projectLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-        projectLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        projectLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        projectLayout.Controls.Add(projectLabel, 0, 0);
-        projectLayout.Controls.Add(workflow, 0, 1);
-        projectLayout.Controls.Add(projectSelector, 0, 2);
-        projectLayout.Controls.Add(projectActions, 0, 3);
-        projectActions.Layout += (_, _) =>
-        {
-            var minimumWidth = Math.Max(TextRenderer.MeasureText(openLatest.Text, openLatest.Font).Width, TextRenderer.MeasureText(openEdit.Text, openEdit.Font).Width) + 4;
-            var gap = (int)Math.Round(projectActions.ColumnStyles[1].Width);
-            var span = (projectActions.ClientSize.Width - 3 * gap) / 4 < minimumWidth ? 3 : 1;
-            if (projectActions.GetColumnSpan(openLatest) != span)
-            {
-                projectActions.SuspendLayout();
-                projectActions.SetColumnSpan(openLatest, span);
-                projectActions.SetColumn(openEdit, span == 3 ? 4 : 2);
-                projectActions.SetColumnSpan(openEdit, span);
-                projectActions.ResumeLayout();
-            }
-            projectSelector.BrowseButtonWidth = Math.Max(minimumWidth, (projectActions.ClientSize.Width - 3 * gap) / 4);
-        };
+        projectLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
+        projectLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+        projectLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        projectLayout.Controls.Add(projectSelector, 0, 0);
+        projectLayout.Controls.Add(openLatest, 2, 0);
         projectPanel.Controls.Add(projectLayout);
 
         tree.Dock = DockStyle.Fill;
@@ -267,7 +220,8 @@ internal sealed class ProjectDocumentsControl : UserControl
             Dock = DockStyle.Top,
             Height = 87,
             BackColor = Color.White,
-            Padding = new Padding(7, 3, 7, 3)
+            Padding = new Padding(7, 3, 7, 3),
+            Visible = false
         };
         selectedFile.Dock = DockStyle.Top;
         selectedFile.Height = 21;
@@ -291,14 +245,85 @@ internal sealed class ProjectDocumentsControl : UserControl
         selectionPanel.Controls.Add(selectedFile);
 
         var treeHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(3, 0, 3, 3), BackColor = BackColor };
+        documentTreeHost = treeHost;
         treeHost.Controls.Add(treeSurface);
         treeHost.Controls.Add(empty);
         treeHost.Controls.Add(loadingStatus);
 
-        Controls.Add(treeHost);
+        workspaceBody.Controls.Add(treeHost);
+        workspaceBody.Controls.Add(projectPickerHost);
+        Controls.Add(workspaceBody);
         Controls.Add(selectionPanel);
         Controls.Add(projectPanel);
         SetTree(null);
+    }
+
+    private void ShowProjectBrowser()
+    {
+        if (inlineProjectBrowser != null) return;
+        inlineProjectBrowser = projectSelector.CreateBrowserDialog();
+        inlineProjectBrowser.SetSearchText(projectSelector.SearchText);
+        inlineProjectContent = inlineProjectBrowser.CreateTaskPaneContent(project =>
+        {
+            if (!projectPickerHost.Enabled) return;
+            var browser = inlineProjectBrowser;
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            Upton.Pdm.ClientShared.ClientDiagnostics.Record("runtime", "工作区项目选择", "已选择归属，等待列表事件结束；project=" + project.Id);
+            projectPickerHost.Enabled = false;
+            // Leave the native ListView double-click notification before disposing its controls.
+            BeginInvoke(new Action(() =>
+            {
+                if (IsDisposed || inlineProjectBrowser != browser) return;
+                CloseProjectBrowser();
+                Upton.Pdm.ClientShared.ClientDiagnostics.Record("runtime", "工作区项目选择", "选择区已收起，开始读取清单；project=" + project.Id + "；等待毫秒=" + elapsed.ElapsedMilliseconds);
+                projectSelector.AcceptProjectSelection(project);
+            }));
+        }, CloseProjectBrowser);
+        projectPickerHost.Controls.Add(inlineProjectContent);
+        documentTreeHost.Visible = false;
+        projectPickerHost.Enabled = true;
+        projectPickerHost.Visible = true;
+        projectPickerHost.BringToFront();
+        UpdateSelectionState();
+    }
+
+    private void CloseProjectBrowser()
+    {
+        projectPickerHost.Visible = false;
+        documentTreeHost.Visible = true;
+        if (inlineProjectContent != null)
+        {
+            projectPickerHost.Controls.Remove(inlineProjectContent);
+            inlineProjectContent.Dispose();
+            inlineProjectContent = null;
+        }
+        inlineProjectBrowser?.Dispose();
+        inlineProjectBrowser = null;
+        UpdateSelectionState();
+    }
+
+    internal async Task<WorkspaceConflictAction> ResolveCacheConflictAsync(WorkspaceCacheConflictException conflict,
+        bool canRestore, bool canBackup, string restoreReason, CancellationToken token)
+    {
+        CloseProjectBrowser();
+        var result = new TaskCompletionSource<WorkspaceConflictAction>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var content = new WorkspaceCacheConflictControl(conflict, canRestore, canBackup, restoreReason, action =>
+        { result.TrySetResult(action); });
+        content.Disposed += (_, _) => result.TrySetResult(WorkspaceConflictAction.Cancel);
+        projectSelector.Enabled = false; openLatest.Enabled = false; documentTreeHost.Visible = false;
+        workspaceBody.Controls.Add(content); content.BringToFront();
+        using (token.Register(() => result.TrySetCanceled()))
+        {
+            try { return await result.Task; }
+            finally
+            {
+                if (!IsDisposed)
+                {
+                    workspaceBody.Controls.Remove(content); documentTreeHost.Visible = true;
+                    projectSelector.Enabled = true; UpdateSelectionState();
+                }
+            }
+        }
     }
 
     public void SetUserDisplayNames(IReadOnlyDictionary<string, string> displayNames)
@@ -338,6 +363,7 @@ internal sealed class ProjectDocumentsControl : UserControl
     public void SetProjects(IReadOnlyList<ProjectDto> projects)
     {
         projectSelector.SetProjects(projects);
+        inlineProjectBrowser?.SetProjects(projects);
         projectSelector.SelectProject(null);
         UpdateWorkspaceLocation();
         SetTree(null);
@@ -428,6 +454,11 @@ internal sealed class ProjectDocumentsControl : UserControl
 
     private void UpdateSelectionState()
     {
+        if (inlineProjectBrowser != null)
+        {
+            openLatest.Enabled = false;
+            return;
+        }
         var node = tree.SelectedNode?.Tag as CadTreeNode;
         var canOpen = node != null && node.DocumentId.HasValue;
         var checkedOutByMe = canOpen
@@ -436,10 +467,6 @@ internal sealed class ProjectDocumentsControl : UserControl
         var checkedOutByOther = canOpen
             && !string.IsNullOrWhiteSpace(node.CheckedOutBy)
             && !checkedOutByMe;
-        var canEdit = canOpen
-            && !string.IsNullOrWhiteSpace(authenticatedUsername)
-            && !checkedOutByOther
-            && !node.DrawingReviewLocked;
 
         openLatest.Enabled = canOpen;
         openLatest.Text = "打开最新";
@@ -448,15 +475,6 @@ internal sealed class ProjectDocumentsControl : UserControl
         openLatest.ForeColor = canOpen ? Color.White : Color.FromArgb(145, 151, 159);
         openLatest.FlatAppearance.BorderColor = Color.FromArgb(31, 49, 72);
         openLatest.FlatAppearance.BorderSize = 1;
-        openEdit.Text = checkedOutByMe ? "继续编辑" : node?.CheckoutSessionLost == true ? "恢复编辑" : "获取编辑";
-        openEdit.AccessibleName = openEdit.Text;
-        toolTip.SetToolTip(openEdit, checkedOutByMe ? "继续编辑当前已获取权限的图档" : node?.CheckoutSessionLost == true ? "重新获取所选图档的编辑权限" : "获取所选图档的编辑权限并打开最新版本");
-        openEdit.Enabled = canEdit;
-        openEdit.UseVisualStyleBackColor = false;
-        openEdit.BackColor = canEdit ? Color.FromArgb(31, 49, 72) : Color.FromArgb(224, 228, 233);
-        openEdit.ForeColor = canEdit ? Color.White : Color.FromArgb(145, 151, 159);
-        openEdit.FlatAppearance.BorderColor = Color.FromArgb(31, 49, 72);
-        openEdit.FlatAppearance.BorderSize = 1;
 
         UpdateSelectionSummary(node, checkedOutByMe, checkedOutByOther);
         tree.Invalidate();
@@ -610,7 +628,7 @@ internal sealed class ProjectDocumentsControl : UserControl
             }
             pathsByDocument[documentId] = path;
         }
-        foreach (var documentId in ambiguousDocuments) pathsByDocument.Remove(documentId);
+        foreach (var documentId in ambiguousDocuments) pathsByDocument[documentId] = null;
         return pathsByDocument;
     }
 
@@ -684,6 +702,7 @@ internal sealed class ProjectDocumentsControl : UserControl
     {
         if (disposing)
         {
+            inlineProjectBrowser?.Dispose();
             localPathsCancellation?.Cancel();
             structureImages?.Dispose();
             toolTip?.Dispose();
@@ -826,6 +845,8 @@ internal sealed class ProjectDocumentsControl : UserControl
         if (IsWorkspaceGroup(node)) return string.Empty;
         if (node.IsExternalProvenance) return "外部副本";
         if (node.Status == CadReferenceStatus.Missing) return "文件缺失";
+        if (node.DocumentId.HasValue && localPaths != null && localPaths.TryGetValue(node.DocumentId.Value, out var cached)
+            && cached == null) return "多个本地副本";
         if (string.IsNullOrWhiteSpace(node.FullPath) || !File.Exists(node.FullPath))
             return localPathsCancellation != null ? "正在核对" : "未下载";
         if (node.WorkState == CadWorkState.ModifiedUnsaved) return "修改未保存";

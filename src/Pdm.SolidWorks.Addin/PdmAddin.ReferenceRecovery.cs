@@ -65,11 +65,12 @@ public sealed partial class PdmAddin
         }
         void Bind(CadTreeNode owner, string source, CadTreeNode target, bool recovered = false)
         {
-            var unchangedControlled = target.DocumentId.HasValue && PdmDocumentIdentityStore.TryReadLocalMetadata(target.FullPath, out var baseline)
+            var unchangedControlled = target.DocumentId.HasValue && PdmDocumentIdentityStore.TryReadArchiveMetadata(target.FullPath, projectId, out var baseline)
                 && baseline.DocumentId == target.DocumentId && baseline.VersionId.HasValue
                 && (string.Equals(ArchiveFileFingerprint.Read(target.FullPath), baseline.Sha256, StringComparison.OrdinalIgnoreCase)
                     || string.Equals(ArchiveFileFingerprint.Read(target.FullPath), baseline.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase));
-            if (owner.ConfirmedArchivePaths != null && !owner.ConfirmedArchivePaths.Contains(target.FullPath) && !unchangedControlled)
+            if (owner.ConfirmedArchivePaths != null && !owner.ConfirmedArchivePaths.Contains(target.FullPath)
+                && !unchangedControlled && !target.IsImportedSourceFile)
             {
                 ArchiveMissingReferencePolicy.OmitUnselected(owner, target);
                 return;
@@ -161,8 +162,12 @@ public sealed partial class PdmAddin
                 if (owner.ConfirmedArchivePaths != null && !owner.ConfirmedArchivePaths.Contains(path)
                     && (!nodes.TryGetValue(path, out var uncheckedReference) || !uncheckedReference.DocumentId.HasValue))
                 {
-                    ArchiveMissingReferencePolicy.OmitUnselected(owner, uncheckedReference ?? new CadTreeNode { FullPath = path });
-                    continue;
+                    var reference = uncheckedReference ?? NewRecoveredReferenceNode(path, source, owner);
+                    if (!reference.IsImportedSourceFile)
+                    {
+                        ArchiveMissingReferencePolicy.OmitUnselected(owner, reference);
+                        continue;
+                    }
                 }
                 var recoveryKey = owner.FullPath + "|" + source;
                 if (recoveredArchiveReferences.TryGetValue(recoveryKey, out var cached))
@@ -227,7 +232,7 @@ public sealed partial class PdmAddin
                     var destination = Path.Combine(folder, Path.GetFileName(path));
                     CopyArchiveReferenceBytes(chosen.Item1, destination, chosen.Item2);
                     target = NewRecoveredReferenceNode(destination, chosen.Item1, owner);
-                    if (PdmDocumentIdentityStore.TryReadLocalMetadata(chosen.Item1, out var localBinding) && localBinding.ProjectId == projectId)
+                    if (PdmDocumentIdentityStore.TryReadArchiveMetadata(chosen.Item1, projectId, out var localBinding) && localBinding.ProjectId == projectId)
                     {
                         if (!localBinding.VersionId.HasValue || !string.Equals(chosen.Item2, localBinding.Sha256, StringComparison.OrdinalIgnoreCase)
                             && !string.Equals(chosen.Item2, localBinding.ResolvedReferenceSha256, StringComparison.OrdinalIgnoreCase))
@@ -238,7 +243,8 @@ public sealed partial class PdmAddin
                         if (!PdmDocumentIdentityStore.TryWriteControlledVersion(destination, localBinding.DocumentId, projectId,
                             localBinding.VersionId.Value, localBinding.Revision, localBinding.Sha256, localBinding.FileLength ?? new FileInfo(destination).Length))
                             throw new IOException("补齐引用的原项目版本记录未能保存：" + target.FileName);
-                        ControlledReferenceMaterializer.CopyResolvedBinding(chosen.Item1, destination);
+                        if (PdmDocumentIdentityStore.IsControlledWorkspacePath(chosen.Item1))
+                            ControlledReferenceMaterializer.CopyResolvedBinding(chosen.Item1, destination);
                         File.SetAttributes(destination, File.GetAttributes(destination) | FileAttributes.ReadOnly);
                     }
                 }

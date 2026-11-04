@@ -266,4 +266,22 @@ public sealed partial class PdmAddin
         }
         return effectiveHashes;
     }
+
+    private void RestoreCommittedSourceIdentity(CadTreeNode node, Guid projectId)
+    {
+        if (node.IsReadOnlyPreview || node.IsHistoricalPreview || node.IsStoredImport
+            || PdmDocumentIdentityStore.IsControlledWorkspacePath(node.FullPath)) return;
+        var copy = MemoryCopy(node);
+        if (copy?.CommittedVersion == null || copy.CommittedUser != authenticatedUsername
+            || copy.CommittedScope != apiClient?.EditJournalScope || !copy.CanUseCommittedBase()
+            || !PdmDocumentIdentityStore.TryReadArchiveMetadata(node.FullPath, projectId, out var metadata)
+            || metadata.ProjectId != projectId || metadata.DocumentId != copy.CommittedDocumentId) return;
+        var hash = ComputeFileHash(node.FullPath);
+        if (!string.Equals(hash, copy.SourceHash, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(hash, copy.CopyHash, StringComparison.OrdinalIgnoreCase)) return;
+        node.DocumentId = node.ProvenanceDocumentId = copy.CommittedDocumentId;
+        node.ProvenanceProjectId = projectId; node.IsExternalProvenance = false;
+        node.OpenedVersionId = copy.CommittedVersion.Id;
+        node.OpenedRevision = copy.CommittedVersion.Revision?.Display ?? string.Empty;
+    }
 }

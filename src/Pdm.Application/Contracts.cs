@@ -346,7 +346,9 @@ public sealed record BomItemInput(
     bool EngineeringKitComponentOptional = false,
     bool IsWearPart = false,
     string? ImpactStage = null,
-    string? InventoryReplacementMaterialCode = null);
+    string? InventoryReplacementMaterialCode = null,
+    bool IsSummaryQuantity = false,
+    IReadOnlyList<Guid>? ConsolidatedSourceIds = null);
 
 public sealed record BomGenerationResult(
     IReadOnlyList<BomItem> StandardItems,
@@ -481,6 +483,7 @@ public interface IPdmRepository
     Task<IReadOnlyList<Project>> ListProjectHeadersAsync(CancellationToken ct) => ListProjectsAsync(ct);
     Task<IReadOnlyList<Project>> ListProjectHeadersForUserAsync(string actor, UserRole role, CancellationToken ct) => ListProjectsForUserAsync(actor, role, ct);
     Task<IReadOnlyList<Project>> ListProjectsForUserAsync(string actor, UserRole role, CancellationToken cancellationToken);
+    Task<IReadOnlyList<Project>> ListProjectNavigationForUserAsync(string actor, UserRole role, CancellationToken ct) => ListProjectsForUserAsync(actor, role, ct);
     async Task<Project?> FindProjectForUserAsync(Guid projectId, string actor, UserRole role, CancellationToken ct) =>
         (await ListProjectsForUserAsync(actor, role, ct)).FirstOrDefault(project => project.Id == projectId);
     Task<Project?> FindProjectAsync(Guid projectId, CancellationToken cancellationToken);
@@ -550,8 +553,27 @@ public interface IPdmRepository
     Task DeleteProjectFolderAsync(Guid projectId, Guid folderId, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmDocument>> ListDocumentsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmDocument>> ListProjectTreeDocumentsAsync(Guid projectId, CancellationToken cancellationToken);
+    async Task<IReadOnlyList<PdmDocument>> ListWorkspaceDocumentsAsync(Guid projectId, IReadOnlyCollection<Guid> documentIds,
+        IReadOnlyCollection<string> fileNames, CancellationToken ct)
+    {
+        var ids = documentIds.ToHashSet();
+        var names = fileNames.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return (await ListProjectTreeDocumentsAsync(projectId, ct)).Where(item => ids.Contains(item.Id)
+            || names.Contains(item.FileName.Trim().Replace('\\', '/').Split('/')[^1])).ToArray();
+    }
+    async Task<IReadOnlyList<PdmDocument>> ListFolderDocumentsAsync(Guid projectId, Guid folderId, CancellationToken ct) =>
+        (await ListProjectTreeDocumentsAsync(projectId, ct)).Where(item => item.FolderId == folderId).ToArray();
+    async Task<IReadOnlyList<ProjectFolderDocumentCount>> ListFolderDocumentCountsAsync(Guid projectId, CancellationToken ct) =>
+        (await ListProjectTreeDocumentsAsync(projectId, ct)).Where(item => item.FolderId.HasValue)
+            .GroupBy(item => (FolderId: item.FolderId!.Value, item.ProjectId))
+            .Select(group => new ProjectFolderDocumentCount(group.Key.FolderId, group.Key.ProjectId, group.Count())).ToArray();
     Task<IReadOnlyList<PdmDocument>> ListDeletedDocumentsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentModelDrawingRelation>> ListDocumentRelationsAsync(Guid projectId, CancellationToken cancellationToken);
+    async Task<IReadOnlyList<DocumentModelDrawingRelation>> ListWorkspaceDocumentRelationsAsync(Guid projectId, IReadOnlyCollection<Guid> documentIds, CancellationToken ct)
+    {
+        var ids = documentIds.ToHashSet();
+        return (await ListDocumentRelationsAsync(projectId, ct)).Where(item => ids.Contains(item.ModelDocumentId) || ids.Contains(item.DrawingDocumentId)).ToArray();
+    }
     Task<IReadOnlyList<DocumentWhereUsed>> ListWhereUsedAsync(Guid documentId, CancellationToken cancellationToken);
     Task<PdmDocument?> FindDocumentAsync(Guid documentId, CancellationToken cancellationToken);
     Task<PdmDocument?> FindDocumentIncludingDeletedAsync(Guid documentId, CancellationToken cancellationToken);
@@ -662,6 +684,7 @@ public interface IPdmRepository
     Task<IReadOnlyList<BomVersion>> ListBomVersionsAsync(Guid projectId, BomKind? kind, CancellationToken cancellationToken);
     Task<BomVersion?> FindBomVersionAsync(Guid projectId, Guid versionId, CancellationToken cancellationToken);
     Task<BomVersion> SaveBomDraftAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, string actor, CancellationToken cancellationToken);
+    Task<BomVersion> UpdateBomVersionMultiplierAsync(Guid versionId, int multiplier, int expectedMultiplier, string actor, CancellationToken cancellationToken);
     Task<BomVersion> UpdateBomVersionReleaseInfoAsync(Guid versionId, string changeNumber, string changeReason, string effectiveSerialFrom, string? effectiveSerialTo, IReadOnlyList<string> validationRequiredFields, CancellationToken cancellationToken);
     Task SetBomVersionStateAsync(IReadOnlyList<Guid> versionIds, BomVersionState state, string actor, DateTimeOffset? releasedAt, CancellationToken cancellationToken);
     Task<IReadOnlyList<ManufacturingBomBaseline>> ListManufacturingBomBaselinesAsync(Guid projectId, CancellationToken cancellationToken);

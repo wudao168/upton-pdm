@@ -13,6 +13,17 @@ function props() {
   return { state, lot, unit: '件', canResolve: true, pending: false }
 }
 describe('变更处置指引', () => {
+  it('将冻结批次单位编码显示为名称，同时保留原数量和业务数据', async () => {
+    const input = { ...props(), unit: '001' }
+    const wrapper = mount(ProductionRevisionDisposition, { props: input })
+    expect(wrapper.text()).toContain('7 个')
+    expect(wrapper.text()).not.toContain('7 001')
+    await wrapper.setProps({ unit: '004' })
+    expect(wrapper.text()).toContain('7 盒')
+    expect(input.unit).toBe('001')
+    expect(input.lot.quantity).toBe(10)
+    wrapper.unmount()
+  })
   it('展示冻结原因和待处置数量，必须明确选择方式及填写原因', async () => {
     const wrapper = mount(ProductionRevisionDisposition, { props: props() })
     expect(wrapper.text()).toContain('RP-new'); expect(wrapper.text()).toContain('7 件')

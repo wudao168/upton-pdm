@@ -2,8 +2,11 @@ import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus, { ElMessageBox } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import EngineeringKitLibrary from '../src/components/EngineeringKitLibrary.vue'
+import { copyText } from '../src/copyText'
+vi.mock('../src/copyText', () => ({ copyText: vi.fn() }))
 
 const api = vi.hoisted(() => ({
+  listMaterialBrandCatalog: vi.fn().mockResolvedValue([{ id: 'upton', name: 'UPTON', isActive: true, rowVersion: 1, previousNames: [] }]),
   listEngineeringKits: vi.fn(),
   listMaterials: vi.fn(),
   saveEngineeringKit: vi.fn(),
@@ -44,25 +47,35 @@ describe('EngineeringKitLibrary', () => {
     api.publishEngineeringKit.mockReset().mockResolvedValue({ ...kit, rowVersion: 4 })
   })
 
-  it('点击套件料号在行下展开当前版本的物料、单位和每套数量，再点收起', async () => {
+  it('料号和型号复制原文，不触发套件展开', async () => {
+    const wrapper = mount(EngineeringKitLibrary, { props: { token: 'token', canManage: false }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await wrapper.get('button[aria-label="复制料号 UKIT-000001"]').trigger('click')
+    expect(copyText).toHaveBeenCalledWith('UKIT-000001', '料号')
+    await wrapper.get('button[aria-label="复制型号 UKIT-000001"]').trigger('click')
+    expect(copyText).toHaveBeenCalledWith('UKIT-000001', '型号')
+    expect(wrapper.findComponent({ name: 'ElTable' }).props('expandRowKeys')).toEqual([])
+    wrapper.unmount()
+  })
+  it('点击套件整行在行下展开当前版本的物料、单位和每套数量，再点收起', async () => {
     const wrapper = mount(EngineeringKitLibrary, { props: { token: 'token', canManage: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const code = wrapper.get('button.kit-code')
-    expect(code.attributes('aria-expanded')).toBe('false')
-    await code.trigger('click'); await flushPromises()
-    expect(code.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.findAllComponents({ name: 'ElTable' })[0]!.props('expandRowKeys')).not.toContain('kit-1')
+    code.element.closest('tr')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); await flushPromises()
+    expect(wrapper.findAllComponents({ name: 'ElTable' })[0]!.props('expandRowKeys')).toContain('kit-1')
     const contents = wrapper.get('#kit-contents-kit-1')
-    expect(contents.text()).toContain('V02 草稿')
+    expect(contents.find('header').exists()).toBe(false)
     expect(contents.text()).toContain('0102000001')
     expect(contents.text()).toContain('螺栓')
     expect(contents.text()).toContain('0102000002')
     expect(contents.text()).toContain('垫圈')
-    expect(contents.find('.el-table__body').findAll(':scope > tbody > tr').map(row => row.findAll('td')[5]!.text())).toEqual(['5', '2'])
-    expect(contents.find('.el-table__body').findAll(':scope > tbody > tr')[0]!.findAll('td')[4]!.text()).toBe('个')
+    expect(contents.find('table').findAll(':scope > tbody > tr').map(row => row.get('td[data-field=quantity]').text())).toEqual(['5', '2'])
+    expect(contents.find('table').findAll(':scope > tbody > tr')[0]!.get('td[data-field=unit]').text()).toBe('个')
     expect(wrapper.find('.engineering-kit-editor').exists()).toBe(false)
     expect(api.saveEngineeringKit).not.toHaveBeenCalled()
-    await code.trigger('click'); await flushPromises()
-    expect(code.attributes('aria-expanded')).toBe('false')
+    code.element.closest('tr')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); await flushPromises()
+    expect(wrapper.findAllComponents({ name: 'ElTable' })[0]!.props('expandRowKeys')).not.toContain('kit-1')
     expect(wrapper.findAll('.engineering-kit-library__contents').some(item => item.isVisible())).toBe(false)
     wrapper.unmount()
   })
@@ -70,13 +83,13 @@ describe('EngineeringKitLibrary', () => {
   it('只读账号展开已发布版本，不显示草稿物料或维护入口', async () => {
     const wrapper = mount(EngineeringKitLibrary, { props: { token: 'token', canManage: false }, global: { plugins: [ElementPlus] } })
     await flushPromises()
-    await wrapper.get('button.kit-code').trigger('click'); await flushPromises()
+    wrapper.get('button.kit-code').element.closest('tr')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); await flushPromises()
     const contents = wrapper.get('#kit-contents-kit-1')
-    expect(contents.text()).toContain('V01 已发布')
+    expect(contents.find('header').exists()).toBe(false)
     expect(contents.text()).toContain('螺栓')
     expect(contents.text()).not.toContain('垫圈')
     expect(contents.text()).not.toContain('V02')
-    expect(contents.find('.el-table__body').findAll(':scope > tbody > tr')).toHaveLength(1)
+    expect(contents.find('table').findAll(':scope > tbody > tr')).toHaveLength(1)
     expect(wrapper.findAll('button').some(button => button.text() === '维护')).toBe(false)
     expect(api.listEngineeringKits).toHaveBeenCalledWith('token', true)
     wrapper.unmount()
@@ -87,23 +100,23 @@ describe('EngineeringKitLibrary', () => {
     const wrapper = mount(EngineeringKitLibrary, { props: { token: 'token', canManage: true }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const codes = wrapper.findAll('button.kit-code')
-    await codes[0]!.trigger('click'); await codes[1]!.trigger('click'); await flushPromises()
+    codes[0]!.element.closest('tr')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); codes[1]!.element.closest('tr')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); await flushPromises()
     expect(wrapper.findAll('.engineering-kit-library__contents')).toHaveLength(2)
     await wrapper.get('.el-table__expand-icon').trigger('click'); await flushPromises()
-    expect(codes[0]!.attributes('aria-expanded')).toBe('false')
-    expect(codes[1]!.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.findAllComponents({ name: 'ElTable' })[0]!.props('expandRowKeys')).not.toContain('kit-1')
+    expect(wrapper.findAllComponents({ name: 'ElTable' })[0]!.props('expandRowKeys')).toContain('kit-2')
     expect(wrapper.find('#kit-contents-kit-2').exists()).toBe(true)
     wrapper.unmount()
   })
 
   it('刷新后展开行展示新明细，撤销维护权限后切回已发布版本', async () => {
     const wrapper = mount(EngineeringKitLibrary, { props: { token: 'token', canManage: true }, global: { plugins: [ElementPlus] } })
-    await flushPromises(); await wrapper.get('button.kit-code').trigger('click'); await flushPromises()
+    await flushPromises(); wrapper.get('button.kit-code').element.closest('tr')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); await flushPromises()
     api.listEngineeringKits.mockResolvedValue([{ ...kit, revisions: [kit.revisions[0], { ...kit.revisions[1], components: [...kit.revisions[1]!.components, { ...kit.revisions[1]!.components[0], id: 'component-new', materialName: '新增组件' }] }] }])
     await wrapper.get('.engineering-kit-library__toolbar button').trigger('click'); await flushPromises()
     expect(wrapper.get('#kit-contents-kit-1').text()).toContain('新增组件')
     await wrapper.setProps({ canManage: false }); await flushPromises()
-    expect(wrapper.get('#kit-contents-kit-1').text()).toContain('V01 已发布')
+    expect(wrapper.get('#kit-contents-kit-1').text()).not.toContain('新增组件')
     expect(wrapper.get('#kit-contents-kit-1').text()).not.toContain('新增组件')
     wrapper.unmount()
   })

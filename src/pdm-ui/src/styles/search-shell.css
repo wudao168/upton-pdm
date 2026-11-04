@@ -1,0 +1,31 @@
+/* The eligible-material picker fills its search column and keeps the brand filter readable. */
+:root body .eligible-material-filters > .pdm-search-field { width:100%; }
+:root body .eligible-material-filters > .el-select { display:inline-block; width:100%; min-width:0; }
+
+/* Search shells wrap the tier-sized action with 2px vertical and right insets. */
+@layer pdm-button-sizing {
+  :root body .pdm-search-field.pdm-search-field {
+    border:1px solid var(--pdm-border) !important;
+    padding-left:3px !important; padding-right:1px !important;
+    background:#fff !important;
+  }
+  :root body .pdm-search-field.pdm-search-field > .pdm-search-field__action {
+    position:static !important; align-self:center !important; justify-self:end !important;
+    height:auto !important; margin:0 !important; padding:0 !important; transform:none !important;
+  }
+  :root body .pdm-search-field.pdm-search-field:hover:not(.is-disabled) { border-color:var(--pdm-theme-accent-border) !important; }
+  :root body .pdm-search-field.pdm-search-field:focus-within { border-color:var(--pdm-theme-accent) !important; }
+  :root body .pdm-search-field.pdm-search-field:not(:where(.mobile-office .pdm-search-field)) {
+    box-sizing:border-box !important;
+    height:32px !important; min-height:32px !important; max-height:32px !important;
+    padding-block:1px !important;
+    border-radius:999px !important;
+  }
+  :root body .pdm-project-sidebar__context .pdm-project-switcher > .pdm-search-field.pdm-search-field {
+    height:36px !important; min-height:36px !important; max-height:36px !important;
+  }
+  :root body :is(table, .el-table) .pdm-search-field.pdm-search-field {
+    height:28px !important; min-height:28px !important; max-height:28px !important;
+  }
+  :root body .pdm-project-sidebar-stack > .pdm-project-sidebar__context { padding-block:4px !important; }
+}

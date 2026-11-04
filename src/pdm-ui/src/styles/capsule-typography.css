@@ -1,0 +1,58 @@
+@import './connected-navigation.css';
+/* Capsule typography follows the established 32/28/24px control tiers. */
+:root body :where(.el-tabs, .pdm-tabs, [role="tablist"]:not(.el-tabs__nav), .pdm-search-field) { --pdm-capsule-font-size: 13px; }
+:root body :is(.pdm-navigation-tabs, .material-tabs, .pdm-project-tabs, .user-settings-tabs, .production-workbench__tabs, .wh-tabs, .pdm-task-filters, .pdm-admin-tabs),
+:root body .pdm-project-switcher > .pdm-search-field { --pdm-capsule-font-size: 14px; }
+:root body :is(.el-dialog, .el-drawer, .pdm-custom-drawer) .el-tabs,
+:root body .material-code-approval-subtabs { --pdm-capsule-font-size: 13px; }
+@layer pdm-button-sizing {
+  :root body button[data-pdm-button-size][data-pdm-button-size] {
+    font-family: var(--pdm-font-ui) !important;
+    font-size: 13px !important;
+    font-weight: 400 !important;
+  }
+  :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item),
+  :root body .pdm-tabs .el-radio-button__inner,
+  :root body .pdm-search-field,
+  :root body .pdm-search-field :is(input, .el-input, .el-input__wrapper, .el-input__inner, .pdm-search-field__input, .pdm-search-field__action, button) {
+    font-family: var(--pdm-font-ui) !important;
+    font-size: var(--pdm-capsule-font-size, 13px) !important;
+    font-weight: 400 !important;
+  }
+  :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item) :is(span, small, strong, em),
+  :root body .pdm-tabs .el-radio-button__inner :is(span, small, strong, em),
+  :root body button[data-pdm-button-size] :is(span:not(.el-icon), small, strong, em) {
+    font-size: inherit !important;
+    font-weight: 400 !important;
+  }
+  :root body :is(table, .el-table, .pdm-row-actions) button:not(.caret-wrapper),
+  :root body :is(table, .el-table) .pdm-search-field,
+  :root body .pdm-bom-row-drag-handle { font-size: 12px !important; --pdm-capsule-font-size: 12px; font-weight: 400 !important; }
+  :root body .pdm-bom-multiplier-control,
+  :root body .pdm-bom-multiplier-control > :is(span, input.pdm-bom-multiplier) { font-family:var(--pdm-font-ui) !important; font-size:13px !important; font-weight:400 !important; }
+  :root body .pdm-sidebar .pdm-nav-item,
+  :root body .pdm-sidebar .pdm-nav-item :is(span, strong) { font-weight:400 !important; }
+}
+
+/* Manufacturing tree actions share the row equally. */
+:root body .production-workbench__tree-actions { grid-template-columns:repeat(2,minmax(0,1fr)) !important; align-items:center; }
+@layer pdm-button-sizing {
+  :root body .production-workbench__tree-actions > :is(.production-workbench__all-categories, .production-workbench__toggle-projects) {
+    box-sizing:border-box !important; grid-column:auto !important;
+    width:100% !important; min-width:0 !important; max-width:none !important;
+    height:28px !important; min-height:28px !important; max-height:28px !important;
+    border-radius:999px !important; font-family:var(--pdm-font-ui) !important;
+    font-size:13px !important; font-weight:400 !important;
+  }
+}
+:root body .pdm-bom-multiplier-control { padding-inline:0; gap:0; }
+:root body .pdm-bom-multiplier-control > input.pdm-bom-multiplier { width:32px !important; max-width:32px !important; }
+
+/* Main and expanded directories share centered cells and the navigation's light-gray header. */
+@layer pdm-business {
+  :root body :is(.material-relation-directory__main, .engineering-kit-library__main) > .el-table :is(th, td) .cell,
+  :root body :is(.material-relation-directory__main, .engineering-kit-library__main) .pdm-aligned-detail-table :is(th, td) { text-align:center !important; }
+  :root body :is(.material-relation-directory__main, .engineering-kit-library__main) > .el-table th,
+  :root body :is(.material-relation-directory__main, .engineering-kit-library__main) .pdm-aligned-detail-table th { background:#f5f5f7 !important; font-weight:400 !important; }
+  :root body :is(.material-relation-directory__main, .engineering-kit-library__main) > .el-table th .cell { font-weight:400 !important; }
+}

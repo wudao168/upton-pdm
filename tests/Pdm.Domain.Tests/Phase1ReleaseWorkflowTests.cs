@@ -7,8 +7,11 @@ using Upton.Pdm.Infrastructure;
 namespace Upton.Pdm.Domain.Tests;
 
 [Collection("BomHeader automatic queue")]
-public sealed class Phase1ReleaseWorkflowTests : IDisposable
+public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
 {
+    private readonly Xunit.Abstractions.ITestOutputHelper simulationOutput;
+    public Phase1ReleaseWorkflowTests(Xunit.Abstractions.ITestOutputHelper simulationOutput) => this.simulationOutput = simulationOutput;
+
     [Theory]
     [InlineData(ReleaseScope.StandardFormal)]
     [InlineData(ReleaseScope.NonStandardWithDrawing)]
@@ -2401,6 +2404,118 @@ public sealed class Phase1ReleaseWorkflowTests : IDisposable
             ReleaseScope.StandardSupplement, CurrentIds(repository, BomKind.Standard), "admin", UserRole.Administrator, default);
         Assert.Equal(3, supplement.StandardBomSnapshot.Count);
         Assert.Contains(supplement.StandardBomSnapshot, item => item.DrawingNumber == "STD-FORMAL-A");
+    }
+
+    [Theory]
+    [InlineData(BomKind.Standard, ReleaseScope.StandardFormal, ReleaseScope.StandardSupplement)]
+    [InlineData(BomKind.Electrical, ReleaseScope.ElectricalFormal, ReleaseScope.ElectricalSupplement)]
+    public async Task SupplementSelectsOnlyChangedInstancesAndRetainsQuantitiesAcrossLaterReleases(BomKind kind, ReleaseScope formalScope, ReleaseScope changeScope)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var old = (await repository.GetBomAsync(ProjectId, kind, default)).First() with { Quantity = 1, EngineeringKitReferenceId = Guid.NewGuid() };
+        await repository.ReplaceBomAsync(ProjectId, kind, [old], default);
+        var formal = await PublishThroughAllStepsAsync(workflow, await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, "", "", "", "未指定", null, formalScope, [old.Id], "admin", UserRole.Administrator, default));
+        var addedId = Guid.NewGuid();
+        var added = old with { Id = addedId, ReleaseTrackingId = addedId, Quantity = 5, EngineeringKitReferenceId = Guid.NewGuid() };
+        await repository.ReplaceBomAsync(ProjectId, kind, [added, old], default);
+        var draft = await workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", "设计问题 / 设计变更", "未指定", null,
+            changeScope, [added.Id], "admin", UserRole.Administrator, default);
+        draft = await workflow.UpdateReleasePackageDraftAsync(draft.Id, "设计问题 / 设计变更", [added.Id], null, "admin", UserRole.Administrator, default);
+        var change = await PublishThroughAllStepsAsync(workflow, draft);
+        IReadOnlyList<BomItem> Snapshot(ReleasePackage package) => kind == BomKind.Standard ? package.StandardBomSnapshot : package.ElectricalBomSnapshot;
+        Assert.Equal(1, Snapshot(formal).Sum(item => item.Quantity));
+        Assert.Equal(6, Snapshot(change).Sum(item => item.Quantity));
+        Assert.Equal([added.Id], change.SelectedBomItemIds);
+        var nextId = Guid.NewGuid();
+        var next = added with { Id = nextId, ReleaseTrackingId = nextId, Quantity = 2, EngineeringKitReferenceId = Guid.NewGuid() };
+        await repository.ReplaceBomAsync(ProjectId, kind, [next, added, old], default);
+        var subsequent = await PublishThroughAllStepsAsync(workflow, await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, "", "", "设计问题 / 设计变更", "未指定", null, changeScope, [next.Id], "admin", UserRole.Administrator, default));
+        Assert.Equal(8, Snapshot(subsequent).Sum(item => item.Quantity));
+        Assert.Equal(6, Snapshot(change).Sum(item => item.Quantity));
+    }
+
+    [Fact]
+    public async Task BomMultiplierIsVersionedAndRequiresAllChangesBeforeCreatingOrSubmittingSupplement()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var first = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).First() with { Quantity = 1 };
+        var second = first with { Id = Guid.NewGuid(), DrawingNumber = "MULTIPLIER-SECOND", Quantity = 2 };
+        await repository.ReplaceBomAsync(ProjectId, BomKind.Standard, [first, second], default);
+        var ids = new[] { first.Id, second.Id };
+        var formal = await PublishThroughAllStepsAsync(workflow, await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, "", "", "", "未指定", null, ReleaseScope.StandardFormal, ids, "admin", UserRole.Administrator, default));
+        var updated = await workflow.UpdateBomMultiplierAsync(ProjectId, BomKind.Standard, 2, 1, "admin", UserRole.Administrator, default);
+        Assert.Equal(2, updated.WholeSetMultiplier);
+        Assert.Equal(1, formal.WholeSetMultiplier);
+        await Assert.ThrowsAsync<PdmConflictException>(() => workflow.UpdateBomMultiplierAsync(ProjectId, BomKind.Standard, 3, 1, "admin", UserRole.Administrator, default));
+        var incomplete = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, "", "", "设计问题 / 设计变更", "未指定", null, ReleaseScope.StandardSupplement, [first.Id], "admin", UserRole.Administrator, default, wholeSetMultiplier: 2));
+        Assert.Contains("全部受影响", incomplete.Message);
+        var draft = await workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", "设计问题 / 设计变更", "未指定", null,
+            ReleaseScope.StandardSupplement, ids, "admin", UserRole.Administrator, default, wholeSetMultiplier: 2);
+        Assert.Equal(3, draft.StandardBomSnapshot.Sum(item => item.Quantity));
+        await workflow.UpdateBomMultiplierAsync(ProjectId, BomKind.Standard, 3, 2, "admin", UserRole.Administrator, default);
+        await Assert.ThrowsAsync<PdmConflictException>(() => workflow.SubmitReleasePackageAsync(draft.Id, "admin", UserRole.Administrator, default));
+        draft = await workflow.UpdateReleasePackageDraftAsync(draft.Id, "设计问题 / 设计变更", ids, null, "admin", UserRole.Administrator, default, wholeSetMultiplier: 3);
+        var published = await PublishThroughAllStepsAsync(workflow, draft);
+        Assert.Equal(9, published.StandardBomSnapshot.Sum(item => item.Quantity) * published.WholeSetMultiplier);
+        Assert.Equal(1, formal.WholeSetMultiplier);
+    }
+
+    [Fact]
+    public async Task BomMultiplierDefaultsToCurrentProjectQuantityAndManualOverrideSurvivesLaterSaves()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var parent = await repository.CreateNumberedProjectAsync(new(
+            Guid.Parse("70000000-0000-0000-0000-000000000001"), "P", 2,
+            Guid.Parse("c0046500-0000-0000-0000-000000000001"), "倍率主项目", null, null, 7, "engineer", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
+        var project = await repository.CreateSubprojectAsync(new(parent.Id, "倍率子项目", null, 3), default);
+        var projectId = project.Id;
+        UpdateProjectDetailsCommand Details(int quantity) => new(project.OrganizationId, project.ProjectTypeCode, project.EquipmentTypeCode,
+            null, project.Name, project.ProjectAlias, project.SignedDate, quantity);
+        var items = await repository.GetBomAsync(projectId, BomKind.Standard, default);
+        var draft = await repository.SaveBomDraftAsync(projectId, BomKind.Standard, items, "admin", default);
+        Assert.Equal(3, draft.WholeSetMultiplier);
+        Assert.False(draft.IsMultiplierOverridden);
+        await repository.SetBomVersionStateAsync([draft.Id], BomVersionState.Released, "admin", DateTimeOffset.UtcNow, default);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var manual = await workflow.UpdateBomMultiplierAsync(projectId, BomKind.Standard, 5, 3, "admin", UserRole.Administrator, default);
+        Assert.True(manual.IsMultiplierOverridden);
+        await repository.UpdateProjectDetailsAsync(projectId, Details(4), default);
+        var saved = await repository.SaveBomDraftAsync(projectId, BomKind.Standard, items, "admin", default);
+        Assert.Equal(5, saved.WholeSetMultiplier);
+        Assert.True(saved.IsMultiplierOverridden);
+        Assert.Equal(3, (await repository.FindBomVersionAsync(projectId, draft.Id, default))!.WholeSetMultiplier);
+    }
+
+    [Fact]
+    public async Task LongLeadUsesBomTotalCapacityAndFormalOnlyIssuesTheRemainingTotal()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var first = (await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).First() with { Quantity = 0.5m };
+        var secondId = Guid.NewGuid();
+        var second = first with { Id = secondId, ReleaseTrackingId = secondId, Quantity = 1.5m };
+        await repository.ReplaceBomAsync(ProjectId, BomKind.Standard, [first, second], default);
+        await workflow.UpdateBomMultiplierAsync(ProjectId, BomKind.Standard, 3, 1, "admin", UserRole.Administrator, default);
+        var early = await PublishThroughAllStepsAsync(workflow, await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, "", "", "", "未指定", null, ReleaseScope.StandardLongLead, [first.Id, second.Id], "admin", UserRole.Administrator, default,
+            new Dictionary<Guid,decimal>{{first.Id,1.5m},{second.Id,3.5m}}));
+        Assert.Equal(1, early.WholeSetMultiplier);
+        Assert.Equal(5, early.StandardBomSnapshot.Sum(item => item.Quantity));
+        var formal = await PublishThroughAllStepsAsync(workflow, await workflow.CreateScopedReleasePackageAsync(
+            ProjectId, null, "", "", "", "未指定", null, ReleaseScope.StandardFormal, [first.Id,second.Id], "admin", UserRole.Administrator, default, wholeSetMultiplier:3));
+        var quantities = BomReleaseAggregation.Build(formal, BomReleaseAggregation.PriorLongLeadItems(formal, [early]));
+        Assert.Equal(6, quantities.ProductionStructure.Sum(item => item.Quantity));
+        Assert.Equal(1, Assert.Single(quantities.PurchaseDemand).Quantity);
+        Assert.Equal(2, (await repository.GetBomAsync(ProjectId, BomKind.Standard, default)).Sum(item => item.Quantity));
     }
 
     [Fact]

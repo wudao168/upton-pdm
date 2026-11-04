@@ -21,7 +21,7 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = (await connection.QueryAsync<RelationRow>(new CommandDefinition("""
-            SELECT t.id TemplateId,t.main_material_id MainMaterialId,mm.material_code MainMaterialCode,mm.name MainMaterialName,
+            SELECT t.id TemplateId,t.main_material_id MainMaterialId,COALESCE(mm.material_code,mk.kit_code) MainMaterialCode,COALESCE(mm.name,mk.name) MainMaterialName,
                    t.name TemplateName,t.is_archived IsArchived,t.updated_by TemplateUpdatedBy,t.updated_at TemplateUpdatedAt,t.row_version TemplateRowVersion,
                    r.id RevisionId,r.version_no RevisionVersion,r.revision_state RevisionState,r.change_note ChangeNote,
                    r.created_by RevisionCreatedBy,r.created_at RevisionCreatedAt,r.published_by PublishedBy,r.published_at PublishedAt,r.row_version RevisionRowVersion,
@@ -32,22 +32,24 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
                    o.quantity_mode QuantityMode,o.quantity_per_set QuantityPerSet,
                    o.is_default IsDefault,o.sort_order OptionSortOrder,o.selection_advice SelectionAdvice
             FROM material_relation_template t
-            INNER JOIN material_master mm ON mm.id=t.main_material_id
+            LEFT JOIN material_master mm ON mm.id=t.main_material_id
+            LEFT JOIN engineering_kit mk ON mk.id=t.main_material_id
             LEFT JOIN material_relation_revision r ON r.template_id=t.id AND r.revision_state IN ('Published','Draft')
             LEFT JOIN material_relation_group g ON g.revision_id=r.id
             LEFT JOIN material_relation_option o ON o.group_id=g.id
             LEFT JOIN material_master om ON om.id=o.material_id
             WHERE (@IncludeDraft=1 OR r.revision_state='Published')
-            ORDER BY mm.material_code,r.version_no,g.sort_order,o.sort_order
+            ORDER BY MainMaterialCode,r.version_no,g.sort_order,o.sort_order
             """, new { IncludeDraft = includeDraft }, cancellationToken: cancellationToken))).ToArray();
         var mains = (await connection.QueryAsync<MainRow>(new CommandDefinition("""
-            SELECT rm.revision_id RevisionId,mm.id MaterialId,mm.material_code MaterialCode,mm.name MaterialName,
-                   mm.specification Specification,mm.brand Brand,mm.remark Remark
+            SELECT rm.revision_id RevisionId,rm.material_id MaterialId,COALESCE(mm.material_code,mk.kit_code) MaterialCode,COALESCE(mm.name,mk.name) MaterialName,
+                   COALESCE(mm.specification,mk.kit_model) Specification,COALESCE(mm.brand,mk.brand) Brand,COALESCE(mm.remark,mk.description) Remark
             FROM material_relation_revision_main rm
             JOIN material_relation_revision r ON r.id=rm.revision_id
-            JOIN material_master mm ON mm.id=rm.material_id
+            LEFT JOIN material_master mm ON mm.id=rm.material_id
+            LEFT JOIN engineering_kit mk ON mk.id=rm.material_id
             WHERE r.revision_state='Published' OR (@IncludeDraft=1 AND r.revision_state='Draft')
-            ORDER BY mm.material_code
+            ORDER BY MaterialCode
             """, new { IncludeDraft = includeDraft }, cancellationToken: cancellationToken))).ToArray();
         return MapTemplates(rows, includeDraft, mains);
     }
@@ -65,7 +67,13 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
         var mainIds = mainMaterials.Select(item => item.MaterialId).Distinct().ToArray();
         var locked = (await connection.QueryAsync<Guid>(new CommandDefinition(
             "SELECT id FROM material_master WHERE id IN @MainIds ORDER BY id FOR UPDATE", new { MainIds = mainIds }, transaction, cancellationToken: cancellationToken))).ToArray();
-        if (locked.Length != mainIds.Length) throw new PdmConflictException("主料信息已发生变化，请刷新后重试。");
+        var lockedKits = (await connection.QueryAsync<Guid>(new CommandDefinition(
+            "SELECT id FROM engineering_kit WHERE id IN @MainIds AND is_active=1 AND current_released_revision_id IS NOT NULL ORDER BY id FOR UPDATE", new { MainIds = mainIds }, transaction, cancellationToken: cancellationToken))).ToArray();
+        if (locked.Concat(lockedKits).Distinct().Count() != mainIds.Length) throw new PdmConflictException("主料信息已发生变化，请刷新后重试。");
+        foreach (var id in locked)
+            await connection.ExecuteAsync(new CommandDefinition("INSERT INTO material_relation_main_source(id,material_id) VALUES(@Id,@Id) ON DUPLICATE KEY UPDATE id=id", new { Id = id }, transaction, cancellationToken: cancellationToken));
+        foreach (var id in lockedKits)
+            await connection.ExecuteAsync(new CommandDefinition("INSERT INTO material_relation_main_source(id,kit_id) VALUES(@Id,@Id) ON DUPLICATE KEY UPDATE id=id", new { Id = id }, transaction, cancellationToken: cancellationToken));
         var conflicts = await connection.QueryAsync<MainConflictRow>(new CommandDefinition("""
             SELECT rm.material_id MaterialId,r.template_id TemplateId
             FROM material_relation_revision_main rm JOIN material_relation_revision r ON r.id=rm.revision_id
@@ -178,6 +186,12 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        const string retainSources = """
+            INSERT IGNORE INTO material_relation_item_source(project_id,accessory_bom_item_id,main_bom_item_id)
+            SELECT project_id,accessory_bom_item_id,main_bom_item_id FROM material_relation_selection
+            WHERE project_id=@ProjectId AND main_bom_item_id=@MainBomItemId
+            """;
+        await connection.ExecuteAsync(new CommandDefinition(retainSources, new { ProjectId = projectId, MainBomItemId = mainBomItemId }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition(
             "DELETE FROM material_relation_selection WHERE project_id=@ProjectId AND main_bom_item_id=@MainBomItemId",
             new { ProjectId = projectId, MainBomItemId = mainBomItemId }, transaction, cancellationToken: cancellationToken));
@@ -186,7 +200,18 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
                 INSERT INTO material_relation_selection(project_id,main_bom_item_id,accessory_bom_item_id,revision_id,group_id,option_id,expected_quantity,updated_by,updated_at)
                 VALUES(@ProjectId,@MainBomItemId,@AccessoryBomItemId,@RevisionId,@GroupId,@OptionId,@ExpectedQuantity,@UpdatedBy,@UpdatedAt)
                 """, new { item.ProjectId, item.MainBomItemId, item.AccessoryBomItemId, item.RevisionId, item.GroupId, item.OptionId, item.ExpectedQuantity, item.UpdatedBy, UpdatedAt = item.UpdatedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(retainSources, new { ProjectId = projectId, MainBomItemId = mainBomItemId }, transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<Guid>> ListRelatedMainBomItemIdsAsync(Guid projectId, IReadOnlyCollection<Guid> accessoryIds, CancellationToken ct)
+    {
+        if (accessoryIds.Count == 0) return [];
+        await using var connection = await OpenAsync(ct);
+        return (await connection.QueryAsync<Guid>(new CommandDefinition("""
+            SELECT main_bom_item_id FROM material_relation_item_source WHERE project_id=@ProjectId AND accessory_bom_item_id IN @Ids
+            UNION SELECT main_bom_item_id FROM material_relation_selection WHERE project_id=@ProjectId AND accessory_bom_item_id IN @Ids
+            """, new { ProjectId = projectId, Ids = accessoryIds }, cancellationToken: ct))).ToArray();
     }
 
     public async Task<IReadOnlyList<MaterialRelationReview>> ListReviewsAsync(Guid projectId, CancellationToken cancellationToken)

@@ -92,6 +92,8 @@ public sealed class ControlledDocumentRecycleService(IPdmRepository repository, 
         if (document.ProjectId != projectId || document.DeletedAt is null || document.PurgedAt is not null)
             throw new PdmRuleException("该图档不在可恢复的回收站中。");
         var now = timeProvider.GetUtcNow();
+        if (repository is IArchiveRecycleStore sets && await sets.IsDocumentInArchiveRecycleSetAsync(projectId, documentId, cancellationToken))
+            throw new PdmRuleException("该图档属于成套回收批次，请从“按存档批次回收 / 恢复”入口成套恢复。");
         var updated = await repository.SetDocumentDeletedAsync(documentId, false, expectedRowVersion, actor, null, now, cancellationToken);
         await repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), now, actor, "document.restore", nameof(PdmDocument), documentId.ToString(), $"{updated.DrawingNumber} · 从受控回收站恢复"), cancellationToken);
         return updated;

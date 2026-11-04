@@ -166,3 +166,20 @@ it('导航和内容行不添加刷新图标，控件移入导航后清除标记'
   await settle()
   expect(buttons[2]!.dataset.pdmButtonRefresh).toBeUndefined()
 })
+
+it('文字按钮和业务页签隐藏前置图标，保留导航、纯图标、尾部箭头及状态', async () => {
+  install('<aside class="pdm-sidebar"><button><svg id="nav-icon"></svg>项目中心</button></aside><button id="action"><svg id="prefix"></svg>导出<svg id="suffix"></svg></button><button aria-label="刷新"><svg id="icon-only"><title>刷新</title></svg></button><div role="tab"><span><svg id="tab-icon"></svg>料品主档</span></div><button aria-expanded="false"><svg id="fold"></svg>分组</button><button class="pdm-global-status"><svg id="status"></svg>成功</button><button><svg id="loading" class="is-loading"></svg>保存中</button>')
+  for(const id of ['prefix','tab-icon']) expect(document.getElementById(id)?.hasAttribute('data-pdm-leading-icon')).toBe(true)
+  for(const id of ['nav-icon','suffix','icon-only','fold','status','loading']) expect(document.getElementById(id)?.hasAttribute('data-pdm-leading-icon')).toBe(false)
+  const action=document.getElementById('action')!
+  document.getElementById('prefix')!.classList.add('is-loading')
+  await settle()
+  expect(document.getElementById('prefix')?.hasAttribute('data-pdm-leading-icon')).toBe(false)
+  document.getElementById('prefix')!.classList.remove('is-loading')
+  await settle()
+  expect(document.getElementById('prefix')?.hasAttribute('data-pdm-leading-icon')).toBe(true)
+  action.childNodes[1]!.textContent=''
+  await settle()
+  expect(action.hasAttribute('data-pdm-text-only')).toBe(false)
+  expect(document.getElementById('prefix')?.hasAttribute('data-pdm-leading-icon')).toBe(false)
+})

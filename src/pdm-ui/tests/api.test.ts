@@ -3,6 +3,36 @@ import { downloadProductionDrawingArchive, downloadReleasePreviewArchive, listPr
 import type { BomItem } from '../src/types'
 
 describe('API JSON response handling', () => {
+  it('同一父节点的工程图及辅助清单重复投影只显示一次，普通零件实例保留', async () => {
+    const documents = [
+      { id: 'root', projectId: 'project', kind: 0, fileName: 'ROOT.SLDASM', revision: { display: 'W1' } },
+      { id: 'part', projectId: 'project', kind: 1, fileName: 'PART.SLDPRT', revision: { display: 'W1' } },
+      { id: 'drawing', projectId: 'project', kind: 2, fileName: 'PART.SLDDRW', revision: { display: 'W1' } },
+      { id: 'step', projectId: 'project', kind: 5, fileName: 'SOURCE.STEP', revision: { display: 'W1' } },
+    ]
+    const node = (id: string, path: string, kind: number, children: unknown[] = [], role = 0) => ({ nodeId: path, documentId: id, instancePath: path, fileName: documents.find(doc => doc.id === id)!.fileName, kind, role, status: 0, quantity: 1, children })
+    const root = node('root', 'root', 0, [node('part', 'root/part-1', 1, [node('drawing', 'root/part-1/old', 2), node('drawing', 'root/part-1/new', 2)]), node('part', 'root/part-2', 1), node('step', 'root/source', 5, [], 1), node('step', 'root/native-file', 5, [], 1)])
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ currentDocuments: documents, libraryDocuments: documents, documentRelations: [{ modelDocumentId: 'part', drawingDocumentId: 'drawing' }], referenceRoot: root }), { status: 200 })))
+    const result = await loadProjectDocumentWorkspace('project', 'token')
+    expect(result.root.children.filter(child => child.documentId === 'part')).toHaveLength(2)
+    expect(result.root.children.filter(child => child.documentId === 'step')).toHaveLength(1)
+    expect(result.root.children[0]!.children.filter(child => child.documentId === 'drawing')).toHaveLength(1)
+  })
+  it('一次读取精简工作区并保留嵌入层级和历史版本，不额外读取整套目录', async () => {
+    const documents = [{ id: 'model', projectId: 'project', kind: 0, fileName: 'A.SLDASM', storedVersionCount: 3, revision: { display: 'W3' } }]
+    const root = { documentId: 'model', nodeId: 'root', instancePath: 'root', fileName: 'A.SLDASM', kind: 0, status: 0, revision: { display: 'W2' }, children: [
+      { nodeId: 'embedded', instancePath: 'root/embedded', fileName: 'PART^A.SLDPRT', kind: 1, status: 4, children: [] },
+    ] }
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) => new Response(JSON.stringify({ currentDocuments: documents, libraryDocuments: documents, documentRelations: [], referenceRoot: root }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await loadProjectDocumentWorkspace('project', 'token')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('X-PDM-Document-View')).toBe('workspace')
+    expect(result.root.children[0]).toMatchObject({ status: 'Virtual', documentId: undefined })
+    expect(result.documents).toHaveLength(1)
+    expect(result.documents[0]?.storedVersionCount).toBe(3)
+  })
+
   it('合并同时读取且每个页面得到独立数据，完成后重新读取', async () => {
     let resolve!: (response: Response) => void
     const fetchMock = vi.fn().mockImplementationOnce(() => new Promise<Response>(done => { resolve = done }))

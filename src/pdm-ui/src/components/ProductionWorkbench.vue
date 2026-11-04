@@ -1,11 +1,13 @@
 <script setup lang="ts">
+import { u9UnitName } from '../u9Units'
 import { isInactiveDom } from '../activeDom'
 import SearchField from './SearchField.vue'
 import { canViewProductionTab } from '../navigationAccess'
 import { vQuantity } from '../quantityInput'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ElDatePicker } from 'element-plus'
-import { ChevronRight, Folder, FolderOpen } from '@lucide/vue'
+import { Package, Tag } from '../solidMenuIcons'
+import { matchesProductionStatus, productionStatusFilters } from '../productionStatusFilter'
 import ProductionDrawingCenter from './ProductionDrawingCenter.vue'
 import ReleaseAttentionBorder from './ReleaseAttentionBorder.vue'
 import ProductionDrawingQr from './ProductionDrawingQr.vue'
@@ -25,7 +27,7 @@ import { assignProductionLot, listProductionTrackingProjects, readProductionCapa
 import { productionReleaseAttention, lineState, lineTotal, movementTotal, productionPriority, productionRequestId, allocationChangeBlockReason, unassignedQuantity, isProductionLineOpen, isProductionLotOpen, selfProductionState, externalProductionState, lotStage, productionMovementLabels,
   type ProductionCapacityView, type ProductionLine, type ProductionLot,
   type ProductionProject, type ProductionReleaseRecord, type ProductionReleaseState,
-  type ProductionReleaseSummary, type ProductionRoute,
+  type ProductionRoute,
   type ProductionScheduleSlot } from '../productionTracking'
 import { userErrorMessage } from '../userErrorMessage'
 import { ElMessage } from '../statusMessage'
@@ -86,16 +88,16 @@ const checkedLineIds = ref<string[]>([])
 const checkedScheduleIds = ref<string[]>([]), showScheduleBatch = ref(false)
 const drawingContext = ref<{ state: NonNullable<ProductionReleaseRecord['state']>; line: ProductionLine; action: 'preview' | 'download' }>()
 const detailColumnWeights = [1, 1, 3, 1, 2, 2, 2, 2, 1, 2, 2, 2, 2]
-function detailFixedColumnWidth(index: number, fixedDrawing = true) {
+function detailFixedColumnWidth(index: number) {
   if ([0, 1, 3, 8].includes(index)) return 50
-  return fixedDrawing && index === detailColumnWeights.length - 1 ? 90 : undefined
+  return index === detailColumnWeights.length - 1 ? 90 : undefined
 }
 const detailFlexibleWeight = detailColumnWeights.reduce((total, weight, index) => total + (detailFixedColumnWidth(index) ? 0 : weight), 0)
-function detailColumnWidth(index: number, weight: number, fixedDrawing = true) {
-  const fixed = detailFixedColumnWidth(index, fixedDrawing)
+function detailColumnWidth(index: number, weight: number) {
+  const fixed = detailFixedColumnWidth(index)
   if (fixed) return `${fixed}px`
-  const ratio = weight / (detailFlexibleWeight + (fixedDrawing ? 0 : detailColumnWeights.at(-1)!))
-  return `calc(${ratio * 100}% - ${ratio * (fixedDrawing ? 290 : 200)}px)`
+  const ratio = weight / detailFlexibleWeight
+  return `calc(${ratio * 100}% - ${ratio * 290}px)`
 }
 const batchMode = ref<'delivery' | 'assign' | null>(null)
 const includeComplete = ref(false), statusFilter = ref('')
@@ -229,8 +231,7 @@ const canSchedule = computed(() => can('production.schedule'))
 const canManageCapacity = computed(() => can('production.capacity.manage'))
 const movementLabels = productionMovementLabels
 const visibleProjects = computed(() => projects.value.map(project => ({ ...project, packages: project.packages.filter(item => {
-  if (!includeComplete.value && ['已完结', '变更已结案', '领料完成', '已领用', '已领用／含报废', '已取消', '已取消／转版', '已取消剩余流程', '已报废', '已转版'].includes(item.status)) return false
-  if (statusFilter.value && item.status !== statusFilter.value) return false
+  if (!matchesProductionStatus(item.status, statusFilter.value, includeComplete.value)) return false
   const query = projectSearch.value.trim().toLowerCase()
   return !query || `${project.code} ${project.name} ${item.packageNumber}`.toLowerCase().includes(query)
 }) })).filter(project => project.packages.length > 0))
@@ -556,7 +557,14 @@ watch(() => [selectedLot.value?.id, selectedLot.value?.promisedOn], () => { prom
 function expandProject(id: string) {
   if (!expandedProjectIds.value.includes(id)) expandedProjectIds.value.push(id)
 }
-function toggleProject(id: string) {
+function animateMenuClick(event?: MouseEvent) {
+  const button = event?.currentTarget as HTMLElement | undefined
+  if (!button?.animate || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  button.animate([{ transform: 'scale(.98)' }, { transform: 'scale(1.015)', offset: .65 }, { transform: 'scale(1)' }],
+    { duration: 360, easing: 'cubic-bezier(.22,1,.36,1)' })
+}
+function toggleProject(id: string, event?: MouseEvent) {
+  animateMenuClick(event)
   expandedProjectIds.value = expandedProjectIds.value.includes(id)
     ? expandedProjectIds.value.filter(value => value !== id) : [...expandedProjectIds.value, id]
 }
@@ -565,7 +573,8 @@ function toggleAllProjects() {
   expandedProjectIds.value = hasExpandedProjects.value ? [] : visibleProjects.value.map(project => project.id)
 }
 const progress = (value: number, total: number) => total > 0 ? Math.round(value * 100 / total) : 0
-async function chooseRelease(projectId: string, id: string) {
+async function chooseRelease(projectId: string, id: string, event?: MouseEvent) {
+  animateMenuClick(event)
   if (allCategories.value) { allCategories.value = false; allRecords.value = []; refreshGeneration++; pending.value = false }
   selectedProjectId.value = projectId
   expandProject(projectId)
@@ -727,7 +736,7 @@ function printLotCard() {
       <div class="production-workbench__grid" :class="{ 'production-workbench__grid--schedule': tab === 'schedule' }">
         <aside class="production-workbench__tree pdm-panel" aria-label="项目与发布包">
           <div class="production-workbench__toolbar">
-            <select v-model="statusFilter" aria-label="筛选生产状态"><option value="">全部状态</option><option v-for="name in ['待接收','待分配','部分分配','待生产经理接图','排产','机加','包装','质检','质检完成','领料完成','已暂停','已取消','已取消剩余流程','分批流转','待生产签收','待排产','外协待交货','待质检收料','质检中','质检完成／合格待领','已领用','已领用／含报废','已排产待执行','执行中','已齐套待领用','变更待处理','无新增生产需求']" :key="name" :value="name">{{ name }}</option></select>
+            <select v-model="statusFilter" aria-label="筛选生产状态"><option value="">全部状态</option><option v-for="name in productionStatusFilters" :key="name" :value="name">{{ name }}</option></select>
             <label><input v-model="includeComplete" type="checkbox">已完结</label>
             <button type="button" class="pdm-secondary-action" :disabled="pending" @click="refresh">刷新</button>
           </div>
@@ -739,24 +748,23 @@ function printLotCard() {
             <button type="button" class="production-workbench__toggle-projects" :aria-label="hasExpandedProjects ? '折叠全部项目发布包' : '展开全部项目发布包'" :aria-expanded="hasExpandedProjects" :disabled="!visibleProjects.length" @click="toggleAllProjects">{{ hasExpandedProjects ? '折叠' : '展开' }}</button>
           </div>
           <div v-for="project in visibleProjects" :key="project.id" class="production-workbench__tree-project">
-            <button type="button" class="production-workbench__project" :class="{ selected: selectedProjectId === project.id, 'is-release-attention': Boolean(projectAttention(project)) }" :data-release-attention="projectAttention(project) || undefined" :title="attentionTitle(projectAttention(project))" :aria-expanded="expandedProjectIds.includes(project.id)" :aria-controls="`production-project-packages-${project.id}`" :aria-label="`${expandedProjectIds.includes(project.id) ? '折叠' : '展开'}项目 ${project.code} 的发布包`" @click="toggleProject(project.id)">
+            <button type="button" class="production-workbench__project" :class="{ selected: selectedProjectId === project.id, 'is-release-attention': Boolean(projectAttention(project)) }" :data-release-attention="projectAttention(project) || undefined" :title="attentionTitle(projectAttention(project))" :aria-expanded="expandedProjectIds.includes(project.id)" :aria-controls="`production-project-packages-${project.id}`" :aria-label="`${expandedProjectIds.includes(project.id) ? '折叠' : '展开'}项目 ${project.code} 的发布包`" @click="toggleProject(project.id, $event)">
               <ReleaseAttentionBorder v-if="projectAttention(project)" :tone="projectAttention(project) as 'error' | 'new'" />
-              <ChevronRight class="production-workbench__project-chevron" :size="14" aria-hidden="true" />
-              <component :is="expandedProjectIds.includes(project.id) ? FolderOpen : Folder" class="production-workbench__folder" :size="14" aria-hidden="true" />
+              <Tag :filled="selectedProjectId === project.id" class="production-workbench__category-icon" :size="14" aria-hidden="true" />
               <span class="production-workbench__project-identity" :title="`${project.code} · ${project.name}`"><strong>{{ project.code }}</strong><span>{{ project.name }}</span></span>
               <small>{{ project.packages.length }} 包</small>
             </button>
-            <div v-show="expandedProjectIds.includes(project.id)" :id="`production-project-packages-${project.id}`" class="production-workbench__project-packages" role="group" :aria-label="`${project.code}的发布包`">
-            <button v-for="item in project.packages" :key="item.releasePackageId" type="button" class="production-workbench__package" :class="{ selected: selectedReleaseId === item.releasePackageId, 'is-release-attention': Boolean(productionReleaseAttention(item)) }" :data-release-attention="productionReleaseAttention(item) || undefined" :title="attentionTitle(productionReleaseAttention(item))" @click="chooseRelease(project.id, item.releasePackageId)">
+            <Transition name="production-packages"><div v-show="expandedProjectIds.includes(project.id)" :id="`production-project-packages-${project.id}`" class="production-workbench__project-packages" role="group" :aria-label="`${project.code}的发布包`">
+            <button v-for="item in project.packages" :key="item.releasePackageId" type="button" class="production-workbench__package" :class="{ selected: selectedReleaseId === item.releasePackageId, 'is-release-attention': Boolean(productionReleaseAttention(item)) }" :data-release-attention="productionReleaseAttention(item) || undefined" :title="attentionTitle(productionReleaseAttention(item))" @click="chooseRelease(project.id, item.releasePackageId, $event)">
               <ReleaseAttentionBorder v-if="productionReleaseAttention(item)" :tone="productionReleaseAttention(item) as 'error' | 'new'" />
-              <span class="production-workbench__package-header"><strong :title="item.packageNumber">{{ item.packageNumber.replace(/^RP-.+-(\d{8}-[^-]+)$/, '$1') }}</strong><em>{{ item.status }}</em></span>
-              <span class="production-workbench__package-meta">
-                <small class="production-workbench__package-counts"><span>质检 {{ item.qualifiedLines }}/{{ item.totalLines }}</span><span>领用 {{ item.issuedLines }}/{{ item.totalLines }}</span></small>
-                <small class="production-workbench__package-required">需 {{ dateLabel(item.firstRequiredOn) }}</small>
+              <Package :filled="selectedReleaseId === item.releasePackageId" class="production-workbench__package-icon" :size="16" aria-hidden="true" />
+              <span class="production-workbench__package-content">
+                <strong class="production-workbench__package-number" :title="item.packageNumber">{{ item.packageNumber.replace(/^RP-.+-(\d{8}-[^-]+)$/, '$1') }}</strong>
+                <span class="production-workbench__package-status"><em :title="item.status">{{ item.status }}</em><small v-if="item.urgentLines || item.atRiskLines" class="production-workbench__package-alerts"><b v-if="item.urgentLines">紧急 {{ item.urgentLines }} 项</b><b v-if="item.atRiskLines">交期风险 {{ item.atRiskLines }} 项</b></small></span>
+                <span class="production-workbench__package-meta"><small class="production-workbench__package-counts"><span>质检 {{ item.qualifiedLines }}/{{ item.totalLines }}</span><span>领用 {{ item.issuedLines }}/{{ item.totalLines }}</span></small><small class="production-workbench__package-required">需 {{ dateLabel(item.firstRequiredOn) }}</small></span>
               </span>
-              <small v-if="item.urgentLines || item.atRiskLines" class="production-workbench__package-alerts"><b v-if="item.urgentLines">紧急 {{ item.urgentLines }} 项</b><b v-if="item.atRiskLines">交期风险 {{ item.atRiskLines }} 项</b></small>
             </button>
-            </div>
+            </div></Transition>
           </div>
           <p v-if="!visibleProjects.length" class="production-workbench__empty">{{ pending ? '正在读取生产发布包…' : tab === 'schedule' ? '暂无已分配自制批次的发布包' : tab === 'external' ? '暂无已分配外协批次的发布包' : '暂无符合条件的生产发布包' }}</p>
         </aside>
@@ -820,9 +828,9 @@ function printLotCard() {
         </main>
         <aside class="production-workbench__right" aria-label="生产详细状态与发布包汇总">
           <section class="pdm-panel production-workbench__detail">
-            <template v-if="selectedLine && state"><div class="production-workbench__detail-heading"><div><header><h2>{{ tab === 'external' ? '外协物料 · 详细状态' : '选中物料 · 详细状态' }}</h2><span class="production-workbench__priority" :class="priorityClass(selectedLine.priority)">{{ productionPriority(selectedLine.priority) }}</span></header><h3 v-stocked-material="selectedLine.materialCode">{{ selectedLine.name }}</h3><p>{{ selectedLine.drawingNumber }} · {{ selectedLine.displayRevision || selectedLine.revision || '无版次' }} · {{ lineState(state, selectedLine) }}</p></div><ProductionDrawingQr v-if="canReadDrawings" :token="token" :state="state" :line="selectedLine" /></div><dl><dt>需求数量</dt><dd>{{ selectedLine.requiredQuantity }} {{ selectedLine.unit }}</dd><dt>质检合格</dt><dd>{{ lineMetric(selectedLine, 'Pass') }} {{ selectedLine.unit }}</dd><dt>已领用</dt><dd>{{ lineMetric(selectedLine, 'Issue') }} {{ selectedLine.unit }}</dd><dt>需求日期</dt><dd>{{ dateLabel(selectedLine.requiredOn) }}</dd><dt>材质</dt><dd>{{ selectedLine.material || '—' }}</dd><dt>表面处理</dt><dd>{{ selectedLine.surfaceTreatment || '—' }}</dd><dt>热处理</dt><dd>{{ selectedLine.heatTreatment || '—' }}</dd></dl>
+            <template v-if="selectedLine && state"><div class="production-workbench__detail-heading"><div><header><h2>{{ tab === 'external' ? '外协物料 · 详细状态' : '选中物料 · 详细状态' }}</h2><span class="production-workbench__priority" :class="priorityClass(selectedLine.priority)">{{ productionPriority(selectedLine.priority) }}</span></header><h3 v-stocked-material="selectedLine.materialCode">{{ selectedLine.name }}</h3><p>{{ selectedLine.drawingNumber }} · {{ selectedLine.displayRevision || selectedLine.revision || '无版次' }} · {{ lineState(state, selectedLine) }}</p></div><ProductionDrawingQr v-if="canReadDrawings" :token="token" :state="state" :line="selectedLine" /></div><dl><dt>需求数量</dt><dd>{{ selectedLine.requiredQuantity }} {{ u9UnitName(selectedLine.unit) }}</dd><dt>质检合格</dt><dd>{{ lineMetric(selectedLine, 'Pass') }} {{ u9UnitName(selectedLine.unit) }}</dd><dt>已领用</dt><dd>{{ lineMetric(selectedLine, 'Issue') }} {{ u9UnitName(selectedLine.unit) }}</dd><dt>需求日期</dt><dd>{{ dateLabel(selectedLine.requiredOn) }}</dd><dt>材质</dt><dd>{{ selectedLine.material || '—' }}</dd><dt>表面处理</dt><dd>{{ selectedLine.surfaceTreatment || '—' }}</dd><dt>热处理</dt><dd>{{ selectedLine.heatTreatment || '—' }}</dd></dl>
               <details v-if="tab === 'tracking' && canAdjustDelivery" class="production-workbench__operation"><summary>调整紧急程度／需求日期</summary><label>紧急程度<select v-model="deliveryPriority"><option value="Normal">普通</option><option value="Priority">加急</option><option value="Urgent">紧急</option></select></label><label>需求日期<input v-model="deliveryRequiredOn" type="date"></label><label>调整原因<input v-model="deliveryReason" placeholder="填写协调原因"></label><button type="button" class="pdm-secondary-action" :disabled="pending" @click="saveDelivery">保存调整</button></details>
-              <h4>生产批次</h4><div class="production-workbench__lots"><button v-for="lot in lineLots" :key="lot.id" type="button" :class="{ selected: selectedLotId === lot.id }" @click="selectedLotId = lot.id"><strong>{{ routeLabel(lot.route) }} · {{ lot.quantity }} {{ selectedLine.unit }}</strong><small>{{ lot.route === 'External' ? lot.supplier : lot.assignee || '待排产' }} · 预计 {{ dateLabel(lot.promisedOn) }}</small></button><p v-if="!lineLots.length">供应链尚未分配生产批次</p></div>
+              <h4>生产批次</h4><div class="production-workbench__lots"><button v-for="lot in lineLots" :key="lot.id" type="button" :class="{ selected: selectedLotId === lot.id }" @click="selectedLotId = lot.id"><strong>{{ routeLabel(lot.route) }} · {{ lot.quantity }} {{ u9UnitName(selectedLine.unit) }}</strong><small>{{ lot.route === 'External' ? lot.supplier : lot.assignee || '待排产' }} · 预计 {{ dateLabel(lot.promisedOn) }}</small></button><p v-if="!lineLots.length">供应链尚未分配生产批次</p></div>
               <dl v-if="tab === 'external' && selectedLot?.route === 'External'" aria-label="外协批次信息"><dt>供应商</dt><dd>{{ selectedLot.supplier || '—' }}</dd><dt>外协批次数量</dt><dd>{{ selectedLot.quantity }}</dd><dt>负责人</dt><dd>{{ selectedLot.assignee || '—' }}</dd><dt>承诺交期</dt><dd :class="{ 'production-workbench__late-date': isLateDate(selectedLot.promisedOn, selectedLine.requiredOn) }">{{ dateLabel(selectedLot.promisedOn) }}</dd><dt>外协已交货</dt><dd>{{ movementTotal(state, selectedLot.id, 'ExternalDelivered') }}</dd></dl>
               <template v-if="tab === 'tracking' && canAssign && state.receivedAt && (selectedLot || checkedLines.length)"><button type="button" class="pdm-secondary-action production-workbench__allocation-edit" :disabled="pending || !checkedLines.length && Boolean(allocationBlocked)" :title="!checkedLines.length && allocationBlocked || undefined" @click="checkedLines.length ? batchMode = 'assign' : showAllocationEdit = true">{{ checkedLines.length ? '批量修改所选分配' : '修改选中批次分配' }}</button><small v-if="!checkedLines.length && allocationBlocked" class="production-workbench__allocation-blocked">{{ allocationBlocked }}</small></template>
               <template v-if="tab === 'tracking' && canAssign && state.receivedAt"><details class="production-workbench__operation"><summary>新增分配自制／外协</summary><p>未分配数量 {{ unassigned }}；已有批次请使用“修改选中批次分配”。</p><label>方式<select v-model="assignRoute"><option value="Self">自制</option><option value="External">外协</option></select></label><label>本次数量<input v-quantity v-model.number="assignQuantity" type="number" min="0.001" step="any"></label><ProductionSupplierPicker v-if="assignRoute === 'External'" v-model="assignSupplierId" :token="token" :disabled="pending" @selected="assignSupplier = $event?.name ?? ''" /><label>负责人<input v-model="assignAssignee" placeholder="填写负责人"></label><label>承诺日期<input v-model="assignPromisedOn" type="date"></label><button type="button" class="pdm-primary-action" :disabled="pending || unassigned <= 0" @click="assign">确认新增分配</button></details></template>
@@ -858,7 +866,7 @@ function printLotCard() {
               </div>
               <p v-if="downloadStatus" class="production-workbench__download-status" role="status">{{ downloadStatus }}</p>
               <div class="production-workbench__table-wrap"><table class="pdm-fit-columns">
-                <colgroup><col v-for="(weight, index) in detailColumnWeights" :key="index" :data-pdm-fixed-width="detailFixedColumnWidth(index, false)" :style="{ width: detailColumnWidth(index, weight, false) }"></colgroup>
+                <colgroup><col v-for="(weight, index) in detailColumnWeights" :key="index" :data-pdm-fixed-width="detailFixedColumnWidth(index)" :style="{ width: detailColumnWidth(index, weight) }"></colgroup>
                 <thead><tr><th><template v-if="allCategories">查看</template><input v-else type="checkbox" aria-label="全选当前筛选自制批次（跨页）" :checked="allScheduleChecked" :indeterminate="someScheduleChecked" :disabled="!selectableScheduleLots.length || pending" @change="toggleScheduleLots"></th><th>等级</th><th>图号／名称</th><th>版次</th><th>材质</th><th>表面处理</th><th>热处理</th><th>合格／需求</th><th>已领</th><th>当前环节</th><th>需求日期</th><th>预计完成</th><th>生产资料</th></tr></thead>
                 <tbody><tr v-for="lot in pagedScheduleLots" :key="lot.key" :class="{ selected: !allCategories && selectedLotId === lot.id }" @click="allCategories ? openOverviewLot(lot.source, lot) : chooseScheduleLot(lot)">
                   <td><button v-if="allCategories" type="button" class="production-workbench__open-package" :aria-label="`打开发布包 ${lot.source.packageNumber} 的自制批次 ${lot.line?.drawingNumber} ${lot.id}`" @click.stop="openOverviewLot(lot.source, lot)">查看</button><input v-else v-model="checkedScheduleIds" type="checkbox" :value="lot.id" :aria-label="`勾选排程批次 ${lot.line?.drawingNumber} ${lot.id}`" :disabled="pending || !canReadDrawings && (!canSchedule || !mayScheduleLot(lot))" :title="canReadDrawings ? '勾选后可批量下载本包正式图纸' : lot.frozen ? '图纸变更冻结的批次不能排程' : !mayScheduleLot(lot) ? '请先由生产岗位扫码签收' : undefined" @click.stop></td>
@@ -892,7 +900,7 @@ function printLotCard() {
                 </fieldset></form><p>{{ canSchedule ? '确认后占用计划工时，并核对该资源组全部项目的已排工时。' : '当前账号没有排程权限，仅可查看安排。' }}</p>
                 <details :key="selectedLot.id" class="production-workbench__operation production-workbench__history" aria-label="完整操作记录"><summary>完整操作记录（{{ selectedLotMovements.length }}）</summary>
                   <ol class="production-workbench__events"><li v-for="item in selectedLotMovements" :key="item.id">
-                    <strong>{{ item.operationName || movementLabels[item.kind] || '流程办理' }} · {{ item.quantity }} {{ selectedLine.unit }}</strong>
+                    <strong>{{ item.operationName || movementLabels[item.kind] || '流程办理' }} · {{ item.quantity }} {{ u9UnitName(selectedLine.unit) }}</strong>
                     <time>{{ new Date(item.occurredAt).toLocaleString('zh-CN', { hour12: false }) }}</time>
                     <span>{{ item.actorName || item.actor }}（{{ item.actor }}）</span><small v-if="item.actorRoles">操作角色：{{ item.actorRoles }}</small>
                     <span v-if="item.workstationName">{{ item.workstationName }}{{ item.resourceGroup ? ` · ${item.resourceGroup}` : '' }}</span>
@@ -909,7 +917,6 @@ function printLotCard() {
     </template>
     <section v-else-if="tab === 'capacity'" class="production-workbench__secondary pdm-panel"><header><h2>内部资源组产能</h2><span>计划负荷由每日可用工时及已确认排程计算。</span><button type="button" class="pdm-secondary-action production-workbench__refresh" :disabled="pending" @click="refresh">刷新</button></header><form v-if="canManageCapacity && capacity" class="production-workbench__capacity-form" @submit.prevent="saveCapacity"><label>资源组<input v-model="resourceGroup" list="production-resource-groups"><datalist id="production-resource-groups"><option v-for="name in resourceNames" :key="name" :value="name" /></datalist></label><label>日期<input v-model="availableDate" type="date" required></label><label>当天可用工时<input v-model.number="availableHours" type="number" min="0" max="1000" step="0.5"></label><button type="submit" class="pdm-primary-action" :disabled="pending">保存可用工时</button></form><div class="production-workbench__table-wrap"><table><thead><tr><th>资源组</th><th>日期</th><th>可用工时</th><th>已排工时</th><th>计划负荷</th></tr></thead><tbody><tr v-for="item in capacity?.usage ?? []" :key="`${item.resourceGroupId}-${item.date}`"><td>{{ item.resourceGroupId }}</td><td>{{ item.date }}</td><td>{{ item.availableHours }} 小时</td><td>{{ item.committedHours }} 小时</td><td :class="{ 'production-workbench__danger': item.committedHours > item.availableHours }">{{ item.availableHours > 0 ? `${progress(item.committedHours, item.availableHours)}%` : '未开放产能' }}</td></tr></tbody></table><p v-if="!capacity?.usage.length" class="production-workbench__empty">尚未维护资源组可用工时；请先由生产负责人设置。</p></div></section>
     <section v-else-if="tab === 'execution'" class="production-workbench__secondary production-workbench__pda pdm-panel">
-      <header><h2>生产现场扫码执行</h2><span>扫描图纸或批次流转卡后，确认本次操作与数量。</span><div class="production-workbench__execution-actions"><a :href="scanPageHref" target="_blank" rel="noopener" class="pdm-secondary-action">移动扫码页</a><button type="button" class="pdm-secondary-action" aria-label="刷新PDA页面" @click="scanPreviewKey++">刷新</button></div></header>
       <div class="production-pda__stage">
         <div class="production-pda__body" role="group" aria-label="PDA移动扫码终端">
           <div class="production-pda__scanner" aria-hidden="true"></div>
@@ -1031,13 +1038,14 @@ function printLotCard() {
 .production-workbench__tree-project{min-width:0;margin-bottom:var(--pdm-control-gap)}
 .production-workbench__project{min-height:40px;padding:7px 5px;border:0;background:transparent;color:var(--pdm-text)}
 .production-workbench__project>svg{flex:none;color:var(--pdm-muted)}
-.production-workbench__project>.production-workbench__folder{color:#b07c2c;fill:#f7e9ca}
-.production-workbench__project.selected>.production-workbench__folder{color:#2563eb;fill:#dbeafe}
+.production-workbench__project>.production-workbench__category-icon{color:var(--pdm-muted);fill:none}
+.production-workbench__project.selected>.production-workbench__category-icon{color:var(--pdm-theme-accent)}
 .production-workbench__project-identity{display:flex;min-width:0;flex:1;align-items:center;gap:var(--pdm-control-gap)}
 .production-workbench__project-identity strong{flex:none}
 .production-workbench__project-identity>span{min-width:0;color:var(--pdm-muted)}
 .production-workbench__project small{padding:1px 6px;border-radius:10px;background:var(--pdm-theme-accent-soft);color:var(--pdm-muted)}
-.production-workbench__project:hover,.production-workbench__project.selected{background:var(--pdm-theme-accent-soft);box-shadow:none}
+.production-workbench__project:hover{background:var(--pdm-theme-accent-soft);box-shadow:none}
+.production-workbench__project.selected{background:var(--pdm-selection-bg);box-shadow:inset 3px 0 var(--pdm-theme-accent)}
 .production-workbench__project.selected strong{color:var(--pdm-theme-accent)}
 .production-workbench__project-chevron{transition:transform 160ms ease}
 .production-workbench__project[aria-expanded="true"] .production-workbench__project-chevron{transform:rotate(90deg)}
@@ -1056,7 +1064,6 @@ function printLotCard() {
 }
 .production-workbench__tree-actions{display:grid;grid-column:1/-1;grid-template-columns:minmax(0,1fr) 80px;gap:5px;min-width:0;margin-bottom:5px}.production-workbench__tree-actions>.production-workbench__all-categories{grid-column:auto;height:30px;min-height:30px;padding:0 6px}
 .production-workbench__pda { display: flex; flex-direction: column; min-height: 0; }
-.production-workbench__pda .production-workbench__execution-actions { flex: 0 0 auto; margin: 0 0 0 auto; gap: var(--pdm-control-gap); }
 .production-pda__stage { display: flex; flex: 1 1 auto; min-height: 0; padding: 18px 8px; overflow: auto; }
 .production-pda__body { position: relative; flex: 0 0 400px; width: 400px; margin: auto; padding: 38px 16px 46px; border: 4px solid #303944; border-radius: 30px; background: linear-gradient(115deg, #20272f, #11171e); box-shadow: 0 12px 28px rgb(15 23 42 / 18%); }
 .production-pda__body::before, .production-pda__body::after { content: ''; position: absolute; top: 122px; width: 5px; height: 60px; border-radius: 3px; background: #465260; }

@@ -628,10 +628,18 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
 
     public async Task<PdmMaterial> UpsertU9MaterialAsync(PdmMaterial material, CancellationToken cancellationToken)
     {
-        if (material.SourceSystem != MaterialDataSource.U9C || material.MasterOwner != MaterialMasterOwner.U9C)
-            throw new PdmRuleException("U9C导入料品必须标记为U9C来源和U9C主控。");
+        if (material.SourceSystem != MaterialDataSource.U9C)
+            throw new PdmRuleException("U9C对账资料必须标记原始来源。");
 
         await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var previous = await connection.QuerySingleOrDefaultAsync<MaterialRow>(new CommandDefinition(
+            MaterialSelect + " WHERE material_code=@MaterialCode FOR UPDATE", new { material.MaterialCode }, transaction, cancellationToken: cancellationToken));
+        var merged = MaterialMasterReconciliation.Merge(previous is null ? null : MapMaterial(previous), material);
+        var parameters = new DynamicParameters(MaterialParameters(merged));
+        parameters.Add("U9ReconciliationMessage", merged.U9ReconciliationMessage);
+        parameters.Add("U9ReconciledAt", merged.U9ReconciledAt?.UtcDateTime);
+        parameters.Add("U9IsEffective", merged.U9IsEffective);
         await connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT INTO material_master(
@@ -643,38 +651,18 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
                 @Weight,@WeightUnit,@SourceBomItemId,@ApprovalStatus,@ApprovedBy,@ApprovedAt,@U9CategoryCode,@U9ItemId,@U9ItemCode,@U9SyncConfirmed,
                 @SourceSystem,@MasterOwner,@LastU9SyncedAt,@SyncStatus,@CreatedBy,@CreatedAt,@UpdatedBy,@UpdatedAt,@RowVersion,@CategoryCode,@IsArchived,@ArchivedBy,@ArchivedAt)
             ON DUPLICATE KEY UPDATE
-                name=IF(master_owner='U9C',VALUES(name),name),
-                material_kind=IF(master_owner='U9C',VALUES(material_kind),material_kind),
-                supply_mode=IF(master_owner='U9C',VALUES(supply_mode),supply_mode),
-                unit_code=IF(master_owner='U9C',VALUES(unit_code),unit_code),
-                specification=IF(master_owner='U9C',VALUES(specification),specification),
-                material=IF(master_owner='U9C',VALUES(material),material),
-                remark=IF(master_owner='U9C',VALUES(remark),remark),
-                brand=IF(master_owner='U9C',VALUES(brand),brand),
-                surface_treatment=IF(master_owner='U9C',VALUES(surface_treatment),surface_treatment),
-                purchase_link=IF(master_owner='U9C',VALUES(purchase_link),purchase_link),
-                weight=IF(master_owner='U9C',VALUES(weight),weight),
-                weight_unit=IF(master_owner='U9C',VALUES(weight_unit),weight_unit),
-                u9_category_code=IF(master_owner='U9C',VALUES(u9_category_code),u9_category_code),
-                u9_item_id=IF(master_owner='U9C',VALUES(u9_item_id),u9_item_id),
-                u9_item_code=IF(master_owner='U9C',VALUES(u9_item_code),u9_item_code),
-                u9_sync_confirmed=IF(master_owner='U9C',1,u9_sync_confirmed),
-                source_system=IF(master_owner='U9C','U9C',source_system),
-                last_u9_synced_at=IF(master_owner='U9C',VALUES(last_u9_synced_at),last_u9_synced_at),
-                sync_status=IF(master_owner='U9C','Succeeded',sync_status),
-                updated_by=IF(master_owner='U9C',VALUES(updated_by),updated_by),
-                updated_at=IF(master_owner='U9C',VALUES(updated_at),updated_at),
-                row_version=IF(master_owner='U9C',row_version+1,row_version),
-                category_code=IF(master_owner='U9C',VALUES(category_code),category_code),
-                is_archived=IF(master_owner='U9C',0,is_archived),
-                archived_by=IF(master_owner='U9C',NULL,archived_by),
-                archived_at=IF(master_owner='U9C',NULL,archived_at)
-            """, MaterialParameters(material), cancellationToken: cancellationToken));
+                u9_item_id=VALUES(u9_item_id),u9_item_code=VALUES(u9_item_code),u9_sync_confirmed=VALUES(u9_sync_confirmed),
+                row_version=VALUES(row_version),master_owner='Pdm',last_u9_synced_at=VALUES(last_u9_synced_at)
+            """, parameters, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE material_master SET u9_reconciliation_message=@U9ReconciliationMessage,u9_reconciled_at=@U9ReconciledAt,u9_is_effective=@U9IsEffective WHERE material_code=@MaterialCode",
+            parameters, transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
         return await FindMaterialByCodeAsync(material.MaterialCode, cancellationToken)
             ?? throw new PdmRuleException("U9C料品导入后未能回读PLM主档。");
     }
 
-    public async Task<int> ArchiveMissingU9MaterialsAsync(
+    public async Task<int> RecordMissingU9MaterialsAsync(
         string categoryCode,
         DateTimeOffset synchronizedSince,
         string actor,
@@ -685,9 +673,9 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
         return await connection.ExecuteAsync(new CommandDefinition(
             """
             UPDATE material_master
-            SET is_archived=1,archived_by=@Actor,archived_at=@ArchivedAt,
-                updated_by=@Actor,updated_at=@ArchivedAt,row_version=row_version+1
-            WHERE master_owner='U9C' AND category_code=@CategoryCode AND is_archived=0
+            SET u9_reconciliation_message='U9C对账未找到同号料品；PLM资料及启停状态已保留。',
+                u9_reconciled_at=@ArchivedAt,u9_is_effective=NULL
+            WHERE (u9_sync_confirmed=1 OR source_system='U9C') AND category_code=@CategoryCode
               AND (last_u9_synced_at IS NULL OR last_u9_synced_at<@SynchronizedSince)
             """,
             new
@@ -719,8 +707,8 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
             await connection.ExecuteAsync(new CommandDefinition(
                 """
                 UPDATE material_master
-                SET last_u9_synced_at=@ObservedAt
-                WHERE master_owner='U9C' AND category_code=@CategoryCode AND material_code IN @MaterialCodes
+                SET last_u9_synced_at=GREATEST(COALESCE(last_u9_synced_at,@ObservedAt),@ObservedAt)
+                WHERE (u9_sync_confirmed=1 OR source_system='U9C') AND category_code=@CategoryCode AND material_code IN @MaterialCodes
                 """,
                 new
                 {
@@ -843,9 +831,11 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
                     specification=@Specification,material=@Material,remark=@Remark,brand=@Brand,surface_treatment=@SurfaceTreatment,purchase_link=@PurchaseLink,
                     selection_advice=@SelectionAdvice,reference_price=@ReferencePrice,model_3d_link=@Model3DLink,document_link=@DocumentLink,is_recommended=@IsRecommended,
                     weight=@Weight,weight_unit=@WeightUnit,category_code=@CategoryCode,u9_category_code=@CategoryCode,
-                    sync_status=@SyncStatus,updated_by=@UpdatedBy,updated_at=@UpdatedAt,row_version=row_version+1
-                WHERE id=@Id AND row_version=@ExpectedRowVersion AND approval_status='Approved'
-                  AND sync_status<>'Pending' AND is_archived=0
+                    sync_status=@SyncStatus,updated_by=@UpdatedBy,updated_at=@UpdatedAt,row_version=row_version+1,
+                    master_owner='Pdm',is_archived=@IsArchived,archived_by=@ArchivedBy,archived_at=@ArchivedAt,
+                    u9_reconciliation_message=@U9ReconciliationMessage,u9_reconciled_at=@U9ReconciledAt,u9_is_effective=@U9IsEffective
+                WHERE id=@Id AND row_version=@ExpectedRowVersion AND (approval_status='Approved' OR @AvailabilityChange=1)
+                  AND sync_status<>'Pending' AND (is_archived=0 OR @AvailabilityChange=1 OR @ArchivedReconciliation=1)
                   AND NOT EXISTS(
                       SELECT 1 FROM u9_material_sync_task AS active_task
                       WHERE active_task.material_id=current_material.id AND active_task.status='Pending'
@@ -854,6 +844,14 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
                 {
                     material.Id,
                     SyncStatus = task.Status.ToString(),
+                    AvailabilityChange = task.Operation == MaterialSyncOperation.SetAvailability,
+                    ArchivedReconciliation = task.Operation == MaterialSyncOperation.Update && material.U9ReconciledAt.HasValue,
+                    material.IsArchived,
+                    material.ArchivedBy,
+                    ArchivedAt = material.ArchivedAt?.UtcDateTime,
+                    material.U9ReconciliationMessage,
+                    U9ReconciledAt = material.U9ReconciledAt?.UtcDateTime,
+                    material.U9IsEffective,
                     material.Name,
                     MaterialKind = material.Kind.ToString(),
                     SupplyMode = material.SupplyMode.ToString(),
@@ -921,17 +919,27 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
         return (await FindMaterialAsync(materialId, cancellationToken))!;
     }
 
-    public async Task<PdmMaterial> ReactivateMaterialAsync(Guid materialId, long expectedRowVersion, string actor, DateTimeOffset reactivatedAt, CancellationToken cancellationToken)
+    public async Task<PdmMaterial> ReactivateMaterialAsync(Guid materialId, long expectedRowVersion, string actor, DateTimeOffset reactivatedAt, CancellationToken cancellationToken, bool u9StateConfirmed = false)
     {
         await using var connection = await OpenAsync(cancellationToken);
         var affected = await connection.ExecuteAsync(new CommandDefinition(
             """
             UPDATE material_master
-            SET is_archived=0,archived_by=NULL,archived_at=NULL,updated_by=@Actor,updated_at=@ReactivatedAt,row_version=row_version+1
+            SET is_archived=0,archived_by=NULL,archived_at=NULL,updated_by=@Actor,updated_at=@ReactivatedAt,
+                last_u9_synced_at=IF(@U9StateConfirmed=1,@ReactivatedAt,last_u9_synced_at),row_version=row_version+1
             WHERE id=@MaterialId AND row_version=@ExpectedRowVersion AND is_archived=1
-            """, new { MaterialId = materialId, ExpectedRowVersion = expectedRowVersion, Actor = actor, ReactivatedAt = reactivatedAt.UtcDateTime }, cancellationToken: cancellationToken));
+            """, new { MaterialId = materialId, ExpectedRowVersion = expectedRowVersion, Actor = actor, ReactivatedAt = reactivatedAt.UtcDateTime, U9StateConfirmed = u9StateConfirmed }, cancellationToken: cancellationToken));
         if (affected != 1) throw new PdmConflictException("料品已启用或已被其他用户修改，请刷新后重试。");
         return (await FindMaterialAsync(materialId, cancellationToken))!;
+    }
+
+    public async Task<IReadOnlyList<PdmMaterial>> ListUnobservedU9MaterialsAsync(string categoryCode, DateTimeOffset synchronizedSince, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var rows = await connection.QueryAsync<MaterialRow>(new CommandDefinition(MaterialSelect +
+            " WHERE (u9_sync_confirmed=1 OR source_system='U9C') AND category_code=@CategoryCode AND (last_u9_synced_at IS NULL OR last_u9_synced_at<@SynchronizedSince)",
+            new { CategoryCode = categoryCode, SynchronizedSince = synchronizedSince.UtcDateTime }, cancellationToken: cancellationToken));
+        return rows.Select(MapMaterial).ToArray();
     }
 
     public async Task<PdmMaterial> DeleteLocalMaterialAsync(Guid materialId, long expectedRowVersion, bool u9AbsenceConfirmed, CancellationToken cancellationToken)
@@ -1575,8 +1583,10 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
                 """
                 UPDATE material_master
                 SET sync_status='Pending'
-                WHERE id=@MaterialId AND approval_status='Approved' AND sync_status<>'Pending' AND is_archived=0
-                """, new { MaterialId = materialId.Value }, transaction, cancellationToken: cancellationToken));
+                WHERE id=@MaterialId AND sync_status<>'Pending'
+                  AND ((approval_status='Approved' AND (is_archived=0 OR EXISTS(SELECT 1 FROM u9_material_sync_task WHERE id=@TaskId AND operation='Update' AND material_id=@MaterialId))) OR EXISTS(
+                      SELECT 1 FROM u9_material_sync_task WHERE id=@TaskId AND operation='SetAvailability' AND material_id=@MaterialId))
+                """, new { MaterialId = materialId.Value, TaskId = taskId }, transaction, cancellationToken: cancellationToken));
             var taskAffected = materialAffected == 1
                 ? await connection.ExecuteAsync(new CommandDefinition(
                     """
@@ -1638,17 +1648,23 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
                     OccurredAt = audit.OccurredAt.UtcDateTime
                 }, transaction, cancellationToken: cancellationToken));
             if (affected != 1) throw new PdmConflictException("U9C同步任务状态已变化，请刷新后重试。");
+            var availabilityTask = await connection.QuerySingleAsync<SyncTaskRow>(new CommandDefinition(
+                SyncTaskSelect + " WHERE id=@TaskId", new { TaskId = taskId }, transaction, cancellationToken: cancellationToken));
+            var availability = availabilityTask.Operation == nameof(MaterialSyncOperation.SetAvailability);
             await connection.ExecuteAsync(new CommandDefinition(
                 """
                 UPDATE material_master
                 SET u9_item_id=@U9ItemId,u9_item_code=@U9ItemCode,u9_sync_confirmed=1,sync_status='Succeeded',updated_by=@Actor,
-                    updated_at=@OccurredAt,row_version=row_version+1
+                    updated_at=@OccurredAt,row_version=row_version+1,last_u9_synced_at=@OccurredAt,
+                    u9_is_effective=IF(@Availability=1,@Enabled,u9_is_effective)
                 WHERE id=@MaterialId
                 """, new
                 {
                     MaterialId = materialId.Value,
                     U9ItemId = u9ItemId,
                     U9ItemCode = u9ItemCode,
+                    Availability = availability,
+                    Enabled = availability ? U9MaterialIntegrationService.AvailabilityState(MapTask(availabilityTask)) : (bool?)null,
                     audit.Actor,
                     OccurredAt = audit.OccurredAt.UtcDateTime
                 }, transaction, cancellationToken: cancellationToken));
@@ -1995,7 +2011,10 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
             DocumentAttachmentCount = row.DocumentAttachmentCount,
             Drawing2DAttachmentCount = row.Drawing2DAttachmentCount,
             EnabledDrawing2DVersion = row.EnabledDrawing2DVersion,
-            EnabledModel3DVersion = row.EnabledModel3DVersion
+            EnabledModel3DVersion = row.EnabledModel3DVersion,
+            U9ReconciliationMessage = row.U9ReconciliationMessage,
+            U9ReconciledAt = Utc(row.U9ReconciledAt),
+            U9IsEffective = row.U9IsEffective
         };
 
     private static MaterialAttachment MapMaterialAttachment(MaterialAttachmentRow row) => new(
@@ -2200,6 +2219,7 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
         SELECT id,material_code,name,material_kind,supply_mode,unit_code,specification,material,remark,brand,surface_treatment,purchase_link,selection_advice,reference_price,model_3d_link,document_link,is_recommended,cover_image_attachment_id,
                weight,weight_unit,source_bom_item_id,approval_status,approved_by,approved_at,u9_category_code,u9_item_id,u9_item_code,u9_sync_confirmed,
                source_system,master_owner,last_u9_synced_at,sync_status,created_by,created_at,updated_by,updated_at,row_version,category_code,is_archived,archived_by,archived_at,
+               u9_reconciliation_message,u9_reconciled_at,u9_is_effective,
                 (SELECT COUNT(*) FROM bom_material_link AS material_link WHERE material_link.material_id=material_master.id)
                     + CASE WHEN source_bom_item_id IS NULL THEN 0 ELSE 1 END AS reference_count,
                 (SELECT COUNT(*) FROM material_attachment AS attachment WHERE attachment.material_id=material_master.id AND attachment.attachment_kind='Model3D') AS model3d_attachment_count,
@@ -2303,6 +2323,9 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
         public string SourceSystem { get; init; } = nameof(MaterialDataSource.Pdm);
         public string MasterOwner { get; init; } = nameof(MaterialMasterOwner.Pdm);
         public DateTime? LastU9SyncedAt { get; init; }
+        public string? U9ReconciliationMessage { get; init; }
+        public DateTime? U9ReconciledAt { get; init; }
+        public bool? U9IsEffective { get; init; }
         public string SyncStatus { get; init; } = string.Empty;
         public string CreatedBy { get; init; } = string.Empty;
         public DateTime CreatedAt { get; init; }

@@ -7,6 +7,122 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed class BomFileVersionTests
 {
+    [Fact]
+    public async Task InitialEmptyLibrarySelectionFillsWhenDrawingsBecomeAvailableWithoutChangingSnapshots()
+    {
+        var f = await Fixture();
+        var store = new InMemoryBomFileStore();
+        var service = new BomFileService(f.Repository, f.Materials,
+            new LocalMaterialAttachmentStorage(Options.Create(new PdmStorageOptions()), TimeProvider.System), store,
+            TimeProvider.System, new InMemoryStandardLibraryRepository());
+        var row = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, f.Material.MaterialCode, f.Material.Name, 1, "001", null, "规格", "W1", true)
+            { Source = "MaterialRelation" };
+        await f.Repository.ReplaceBomAsync(ProjectId, BomKind.Standard, [row], default);
+        var frozen = Assert.Single(await service.CaptureAsync([row], default, refreshCurrent: true));
+        Assert.Empty(frozen.Files!);
+        Assert.Equal(1, (await store.ReadAsync(BomFileService.Scope(ProjectId, row.DrawingNumber), default)).RowVersion);
+        var drawing = await f.Materials.CreateMaterialAttachmentAsync(File(f.Material, MaterialAttachmentKind.Drawing2D), default);
+        var model = await f.Materials.CreateMaterialAttachmentAsync(File(f.Material, MaterialAttachmentKind.Model3D), default);
+        foreach (var file in new[] { drawing, model })
+            await f.Materials.EnableMaterialAttachmentAsync(f.Material.Id, file.Id, null, "admin", DateTimeOffset.UtcNow, default);
+
+        var current = Assert.Single(await service.CaptureAsync([frozen], default, refreshCurrent: true));
+        Assert.Equal(2, current.Files!.Count);
+        Assert.Contains(current.Files, file => file.Id == drawing.Id);
+        Assert.Contains(current.Files, file => file.Id == model.Id);
+        Assert.Equal(2, (await service.ReadAsync(ProjectId, row.Id, "admin", UserRole.Administrator, default)).Files.Count);
+        Assert.Empty(frozen.Files!);
+        Assert.Empty(Assert.Single(await service.CaptureAsync([frozen], default)).Files!);
+    }
+
+    [Fact]
+    public async Task ExplicitlyAdoptedEmptySelectionIsNotAutomaticallyReplaced()
+    {
+        var f = await Fixture();
+        var store = new InMemoryBomFileStore();
+        var service = new BomFileService(f.Repository, f.Materials,
+            new LocalMaterialAttachmentStorage(Options.Create(new PdmStorageOptions()), TimeProvider.System), store,
+            TimeProvider.System, new InMemoryStandardLibraryRepository());
+        var row = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, f.Material.MaterialCode, f.Material.Name, 1, "001", null, "规格", "W1", true);
+        await f.Repository.ReplaceBomAsync(ProjectId, BomKind.Standard, [row], default);
+        var initial = await service.ReadAsync(ProjectId, row.Id, "admin", UserRole.Administrator, default);
+        await service.AdoptLibraryAsync(ProjectId, row.Id, initial.RowVersion, "admin", UserRole.Administrator, default);
+        var drawing = await f.Materials.CreateMaterialAttachmentAsync(File(f.Material, MaterialAttachmentKind.Drawing2D), default);
+        await f.Materials.EnableMaterialAttachmentAsync(f.Material.Id, drawing.Id, null, "admin", DateTimeOffset.UtcNow, default);
+        var current = await service.ReadAsync(ProjectId, row.Id, "admin", UserRole.Administrator, default);
+        Assert.Empty(current.Files);
+        Assert.True(current.LibraryUpdateAvailable);
+    }
+
+    [Fact]
+    public async Task LibraryMembershipRequiresMaintenancePermissionAtEveryUploadStageAndRemoval()
+    {
+        var f=await Fixture();
+        var root=Path.Combine(Path.GetTempPath(),"pdm-bom-file-permission",Guid.NewGuid().ToString("N"));
+        try
+        {
+            await f.Repository.SetChildProjectDesignersAsync(ProjectId,["engineer"],"admin",default);
+            var settings=await f.Repository.GetSystemSettingsAsync(default);
+            await f.Repository.UpdateSystemSettingsAsync(settings with{MaterialAttachmentRoot=Path.Combine(root,"files")},default);
+            var row=new BomItem(Guid.NewGuid(),ProjectId,BomKind.Standard,1,f.Material.MaterialCode,f.Material.Name,1,"001",null,"规格","W1",true);
+            await f.Repository.ReplaceBomAsync(ProjectId,BomKind.Standard,[row],default);
+            var library=new InMemoryStandardLibraryRepository();
+            var storage=new LocalMaterialAttachmentStorage(Options.Create(new PdmStorageOptions{UploadTempRoot=Path.Combine(root,"uploads"),ChunkSizeBytes=1024}),TimeProvider.System);
+            var service=new BomFileService(f.Repository,f.Materials,storage,new InMemoryBomFileStore(),TimeProvider.System,library);
+            Assert.True((await service.ReadAsync(ProjectId,row.Id,"engineer",UserRole.Engineer,default)).CanEditFiles);
+            var data="project attachment"u8.ToArray();var hash=Convert.ToHexString(SHA256.HashData(data));
+            var session=await service.StartAsync(ProjectId,row.Id,"项目配图.jpg",data.Length,hash,"engineer",UserRole.Engineer,default);
+            await service.ChunkAsync(ProjectId,row.Id,session.Id,0,new MemoryStream(data),"engineer",UserRole.Engineer,default);
+            await library.AddMembershipsAsync([new(StandardLibraryDefaults.UncategorizedId,f.Material.Id,"admin",DateTimeOffset.UtcNow)],default);
+            var read=await service.ReadAsync(ProjectId,row.Id,"engineer",UserRole.Engineer,default);
+            Assert.True(read.IsStandardLibraryMaterial);Assert.False(read.CanEditFiles);
+            Assert.True((await service.ReadAsync(ProjectId,row.Id,"admin",UserRole.Administrator,default)).CanEditFiles);
+            var denied=await Assert.ThrowsAsync<UnauthorizedAccessException>(()=>service.StartAsync(ProjectId,row.Id,"新图纸.pdf",data.Length,hash,"engineer",UserRole.Engineer,default));
+            Assert.Contains("标准库",denied.Message);
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(()=>service.ChunkAsync(ProjectId,row.Id,session.Id,0,new MemoryStream(data),"engineer",UserRole.Engineer,default));
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(()=>service.CompleteAsync(ProjectId,row.Id,session.Id,"配图","engineer",UserRole.Engineer,default));
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(()=>service.AdoptLibraryAsync(ProjectId,row.Id,read.RowVersion,"engineer",UserRole.Engineer,default));
+            var original=await f.Repository.GetRolePermissionsAsync(UserRole.Engineer,default);
+            await f.Repository.SetRolePermissionsAsync("Engineer",original.Append(PermissionCodes.StandardLibraryManage).ToArray(),default);
+            var completed=await service.CompleteAsync(ProjectId,row.Id,session.Id,"配图","engineer",UserRole.Engineer,default);
+            Assert.True(completed.CanEditFiles);var uploaded=Assert.Single(completed.Files);
+            await f.Repository.SetRolePermissionsAsync("Engineer",original.ToArray(),default);
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(()=>service.RemoveAsync(ProjectId,row.Id,uploaded.Id,completed.RowVersion,"engineer",UserRole.Engineer,default));
+            Assert.Equal(uploaded.Id,Assert.Single((await service.ReadAsync(ProjectId,row.Id,"engineer",UserRole.Engineer,default)).Files).Id);
+            var download=await service.DownloadAsync(ProjectId,row.Id,uploaded.Id,"engineer",UserRole.Engineer,default);
+            await using(var content=download.Content){using var copied=new MemoryStream();await content.CopyToAsync(copied);Assert.Equal(data,copied.ToArray());}
+            await library.RemoveMembershipAsync(StandardLibraryDefaults.UncategorizedId,f.Material.Id,default);
+            Assert.True((await service.ReadAsync(ProjectId,row.Id,"engineer",UserRole.Engineer,default)).CanEditFiles);
+        }
+        finally
+        {
+            if(Directory.Exists(root))
+            {
+                foreach(var file in Directory.EnumerateFiles(root,"*",SearchOption.AllDirectories))System.IO.File.SetAttributes(file,FileAttributes.Normal);
+                Directory.Delete(root,true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task CurrentBomRefreshesStaleEmptyFilesWhileFrozenSnapshotsStayUnchanged()
+    {
+        var f = await Fixture();
+        var file = await f.Materials.CreateMaterialAttachmentAsync(File(f.Material, MaterialAttachmentKind.Drawing2D), default);
+        await f.Materials.EnableMaterialAttachmentAsync(f.Material.Id, file.Id, null, "admin", DateTimeOffset.UtcNow, default);
+        var row = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, f.Material.MaterialCode, f.Material.Name, 1, "001", null, null, "W1", true) { Files = [] };
+        var storage = new LocalMaterialAttachmentStorage(Options.Create(new PdmStorageOptions { UploadTempRoot = Path.GetTempPath() }), TimeProvider.System);
+        var service = new BomFileService(f.Repository, f.Materials, storage, new InMemoryBomFileStore(), TimeProvider.System, new InMemoryStandardLibraryRepository());
+        Assert.Empty(Assert.Single(await service.CaptureAsync([row], default)).Files!);
+        var current = Assert.Single(await service.CaptureAsync([row], default, refreshCurrent: true));
+        Assert.Equal(file.Id, Assert.Single(current.Files!).Id);
+        var blank = Assert.Single(await service.CaptureAsync([current with { DrawingNumber = " " }], default, refreshCurrent: true));
+        Assert.Empty(blank.Files!);
+        Assert.Throws<PdmRuleException>(() => BomFileService.Scope(ProjectId, " "));
+        Assert.Empty(row.Files);
+        Assert.Equal(file.Id, Assert.Single(Assert.Single(await service.CaptureAsync([current], default)).Files!).Id);
+    }
+
     private static readonly Guid ProjectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static async Task<(InMemoryPdmRepository Repository, InMemoryMaterialRepository Materials, PdmMaterial Material)> Fixture()
     {
@@ -64,7 +180,7 @@ public sealed class BomFileVersionTests
             await attachments.EnableAsync(f.Material.Id, first.Id, null, "admin", UserRole.Administrator, default);
             var row = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, f.Material.MaterialCode, f.Material.Name, 1, "001", null, "规格", "W1", true);
             await f.Repository.ReplaceBomAsync(ProjectId, BomKind.Standard, [row], default);
-            var service = new BomFileService(f.Repository, f.Materials, storage, new InMemoryBomFileStore(), TimeProvider.System);
+            var service = new BomFileService(f.Repository, f.Materials, storage, new InMemoryBomFileStore(), TimeProvider.System, new InMemoryStandardLibraryRepository());
             var initial = await service.ReadAsync(ProjectId, row.Id, "admin", UserRole.Administrator, default);
             Assert.Equal(first.Id, Assert.Single(initial.Files).Id);
             var data = "project agreement"u8.ToArray();
@@ -116,7 +232,7 @@ public sealed class BomFileVersionTests
         var oldVersion = await f.Repository.SaveBomDraftAsync(ProjectId, BomKind.Standard, [row], "admin", default);
         await f.Repository.SetBomVersionStateAsync([oldVersion.Id], BomVersionState.Released, "admin", DateTimeOffset.UtcNow, default);
         var storage = new LocalMaterialAttachmentStorage(Options.Create(new PdmStorageOptions()), TimeProvider.System);
-        var service = new BomFileService(f.Repository, f.Materials, storage, new InMemoryBomFileStore(), TimeProvider.System);
+        var service = new BomFileService(f.Repository, f.Materials, storage, new InMemoryBomFileStore(), TimeProvider.System, new InMemoryStandardLibraryRepository());
         Assert.Empty((await service.ReadAsync(ProjectId, row.Id, "admin", UserRole.Administrator, default, oldVersion.Id)).Files);
         Assert.Equal(file.Id, Assert.Single((await service.ReadAsync(ProjectId, row.Id, "admin", UserRole.Administrator, default)).Files).Id);
     }

@@ -52,7 +52,10 @@ public sealed partial class MySqlPdmRepository
         role == UserRole.Administrator || FunctionPermissionCatalog.Contains(await GetRolePermissionsAsync(role, cancellationToken), permissionCode);
 
     public async Task<bool> HasUserPermissionAsync(string username, UserRole fallbackRole, string permissionCode, CancellationToken cancellationToken) =>
-        fallbackRole == UserRole.Administrator || FunctionPermissionCatalog.Contains(await GetUserPermissionsAsync(username, fallbackRole, cancellationToken), permissionCode);
+        fallbackRole == UserRole.Administrator || FunctionPermissionCatalog.Contains(
+            string.Equals(TenantContext.Current?.Username, username, StringComparison.OrdinalIgnoreCase)
+                ? TenantContext.Current!.Permissions
+                : await GetUserPermissionsAsync(username, fallbackRole, cancellationToken), permissionCode);
 
     public async Task<RolePermissionDirectory> SetRolePermissionsAsync(string roleCode, IReadOnlyList<string> permissionCodes, CancellationToken cancellationToken)
     {

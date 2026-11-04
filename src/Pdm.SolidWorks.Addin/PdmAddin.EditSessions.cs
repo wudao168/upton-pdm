@@ -380,7 +380,7 @@ public sealed partial class PdmAddin
     {
         if (plmAuthoritativeCheckouts.Contains(documentId)) return;
         if (!EnsureEditJournal()) return;
-        if (editJournal.ReadAll().Any(item => item.DocumentId == documentId && item.DiscardPending))
+        if (editJournal.ReadDocument(documentId).Any(item => item.DiscardPending))
             throw new InvalidOperationException("该图档已放弃编辑但工作文件尚未恢复，请从PLM重新打开后再获取权限；已放弃的修改不会重新提交。");
         if (!localEdits.TryGetValue(documentId, out var entry) || !entry.PendingClose) return;
         await ClosePreservedEditAsync(entry, token);

@@ -19,9 +19,12 @@ public sealed class BrowserCadArchiveQueue(IOptions<PdmStorageOptions> options)
 {
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true, WriteIndented = true };
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> gates = new();
-    public string Root { get; } = Path.GetFullPath(Path.Combine(options.Value.UploadTempRoot, "..", "browser-cad-archives"));
+    public string Root => string.IsNullOrWhiteSpace(options.Value.BrowserCadArchiveRoot)
+        ? Path.GetFullPath(Path.Combine(options.Value.UploadTempRoot, "..", "browser-cad-archives")) : options.Value.BrowserCadArchiveRoot;
+    private IEnumerable<string> Roots => options.Value.Roots("browserCad", Root);
     public SemaphoreSlim Gate(Guid id) => gates.GetOrAdd(id, _ => new(1, 1));
-    public string DirectoryFor(Guid id) => Path.Combine(Root, id.ToString("N"));
+    public string DirectoryFor(Guid id) => Roots.Select(root => Path.Combine(root, id.ToString("N"))).FirstOrDefault(Directory.Exists)
+        ?? Path.Combine(Root, id.ToString("N"));
     public string Under(Guid id, string relative)
     {
         var directory = DirectoryFor(id);
@@ -44,8 +47,7 @@ public sealed class BrowserCadArchiveQueue(IOptions<PdmStorageOptions> options)
     }
     public IEnumerable<BrowserCadJob> Pending()
     {
-        if (!Directory.Exists(Root)) yield break;
-        foreach (var directory in Directory.GetDirectories(Root))
+        foreach (var directory in Roots.Where(Directory.Exists).SelectMany(Directory.GetDirectories).Distinct(StringComparer.OrdinalIgnoreCase))
             if (Guid.TryParseExact(Path.GetFileName(directory), "N", out var id))
             {
                 BrowserCadJob? job = null;

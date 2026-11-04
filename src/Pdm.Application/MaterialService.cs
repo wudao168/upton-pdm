@@ -12,7 +12,7 @@ public sealed class MaterialService(
     IU9SecretProtector secretProtector,
     IU9OpenApiClient u9Client,
     TimeProvider timeProvider,
-    WorkflowNotificationService? workflowNotifications = null)
+    WorkflowNotificationService? workflowNotifications = null, MaterialBrandService? brandCatalog = null)
 {
     private const string PendingApplicationCodePrefix = "PDM-PENDING-";
     private const long DefaultMaterialCodeStartSequence = 1_000_000;
@@ -411,6 +411,7 @@ public sealed class MaterialService(
     internal static IReadOnlyList<string> StandardBomMaterialMasterIssues(BomItem item, PdmMaterial? material)
     {
         if (material is null) return ["料号不存在于料品主档"];
+        item = WithCurrentMaterialMaster(item, material);
         var issues = new List<string>();
         if (material.IsArchived) issues.Add("料品主档已归档");
         if (material.ApprovalStatus != MaterialApprovalStatus.Approved) issues.Add("料品主档尚未批准");
@@ -425,6 +426,25 @@ public sealed class MaterialService(
             else if (!string.Equals(drawingValue.Trim(), masterValue.Trim(), StringComparison.OrdinalIgnoreCase))
                 issues.Add($"{label}与料品主档不一致");
         }
+    }
+
+    internal static bool UsesCurrentMaterialMaster(BomItem item) =>
+        !item.SourceDocumentId.HasValue && !item.IsManualUnmatched
+        && item.Kind is BomKind.Standard or BomKind.Electrical
+        && (item.Source is "EngineeringKit" or "MaterialRelation" || item.EngineeringKitReferenceId.HasValue);
+
+    internal static BomItem WithCurrentMaterialMaster(BomItem item, PdmMaterial? material)
+    {
+        if (!UsesCurrentMaterialMaster(item) || material is null || material.IsArchived
+            || material.ApprovalStatus != MaterialApprovalStatus.Approved
+            || material.Kind != (item.Kind == BomKind.Standard ? MaterialKind.Standard : MaterialKind.Electrical)
+            || !string.Equals(item.DrawingNumber.Trim(), material.MaterialCode, StringComparison.OrdinalIgnoreCase)) return item;
+        return item with
+        {
+            Name = material.Name, Specification = material.Specification, Brand = material.Brand,
+            Material = material.Material, SurfaceTreatment = material.SurfaceTreatment,
+            Weight = material.Weight?.ToString(CultureInfo.InvariantCulture)
+        };
     }
 
     internal static IReadOnlyList<string> StandardBomMaterialMasterBlockingIssues(BomItem item, PdmMaterial? material) =>
@@ -802,6 +822,7 @@ public sealed class MaterialService(
         CancellationToken cancellationToken)
     {
         await RequireAnyPermissionAsync(actor, role, [PermissionCodes.MaterialApply, PermissionCodes.MaterialManage], cancellationToken);
+        if (brandCatalog is not null) command = command with { Brand = await brandCatalog.NormalizeAsync(command.Brand, null, cancellationToken) };
         var category = await RequireCreatableCategoryAsync(command.CategoryCode, command.Kind, cancellationToken);
         var now = timeProvider.GetUtcNow();
         var normalized = Normalize(Guid.NewGuid(), command, null, actor, now, category.Code);
@@ -833,6 +854,7 @@ public sealed class MaterialService(
     public async Task<PdmMaterial> CreateApplicationDraftAsync(SaveMaterialCommand command, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.BomEdit, cancellationToken);
+        if (brandCatalog is not null) command = command with { Brand = await brandCatalog.NormalizeAsync(command.Brand, null, cancellationToken) };
         return await CreateApplicationDraftCoreAsync(command, actor, cancellationToken);
     }
 
@@ -869,6 +891,7 @@ public sealed class MaterialService(
         if (existing.IsArchived) throw new PdmRuleException("已归档料品不能修改。");
         if (existing.ApprovalStatus != MaterialApprovalStatus.Draft) throw new PdmRuleException("已批准物料不可直接修改，请通过后续变更流程处理。");
         if (command.ExpectedRowVersion is null) throw new PdmRuleException("更新物料必须提供数据版本。");
+        if (brandCatalog is not null) command = command with { Brand = await brandCatalog.NormalizeAsync(command.Brand, existing.Brand, cancellationToken) };
         var category = await RequireCreatableCategoryAsync(command.CategoryCode ?? existing.CategoryCode, command.Kind, cancellationToken);
         var updated = Normalize(materialId, command, existing, actor, timeProvider.GetUtcNow(), category.Code);
         var duplicateRule = await GetEffectiveDuplicateRuleAsync(category, cancellationToken);
@@ -1029,6 +1052,7 @@ public sealed class MaterialService(
                     command.Weight, command.WeightUnit, CategoryCode: category.Code, PurchaseLink: command.PurchaseLink,
                     SelectionAdvice: command.SelectionAdvice, ReferencePrice: command.ReferencePrice, Model3DLink: command.Model3DLink,
                     DocumentLink: command.DocumentLink, IsRecommended: command.IsRecommended);
+                if (brandCatalog is not null) save = save with { Brand = await brandCatalog.NormalizeAsync(save.Brand, null, cancellationToken) };
                 material = Normalize(Guid.NewGuid(), save, null, actor, now, category.Code);
                 requiresApproval = savedApprovalRules.TryGetValue(category.Code, out var approvalRule)
                     ? approvalRule.RequiresApproval
@@ -1329,7 +1353,7 @@ public sealed class MaterialService(
         if (string.IsNullOrWhiteSpace(categoryCode)) categoryCode = (await RequireEnabledCategoryRuleAsync(command.Kind, cancellationToken)).U9CategoryCode;
         var currentCategory = await materials.FindCategoryAsync(categoryCode, cancellationToken)
             ?? throw new PdmRuleException("料品分类不存在或尚未从U9C同步。");
-        var updated = Normalize(materialId, command, existing, actor, timeProvider.GetUtcNow(), currentCategory.Code);
+        var updated = Normalize(materialId, command, existing, actor, timeProvider.GetUtcNow(), currentCategory.Code) with { MasterOwner = MaterialMasterOwner.Pdm };
         var duplicateRule = await GetEffectiveDuplicateRuleAsync(currentCategory, cancellationToken);
         ValidateDuplicateRuleValues(duplicateRule, updated.Name, updated.Specification, updated.Brand);
         var duplicates = await FindDuplicateMaterialsAsync(updated.Name, updated.Specification, updated.Brand, duplicateRule, materialId, cancellationToken);
@@ -1347,7 +1371,7 @@ public sealed class MaterialService(
             throw new PdmRuleException("U9C同步请求正在执行，结果确认前不能再次修改U9字段。");
 
         var category = await RequireCreatableCategoryAsync(currentCategory.Code, command.Kind, cancellationToken);
-        updated = Normalize(materialId, command, existing, actor, timeProvider.GetUtcNow(), category.Code);
+        updated = Normalize(materialId, command, existing, actor, timeProvider.GetUtcNow(), category.Code) with { MasterOwner = MaterialMasterOwner.Pdm };
         ValidateForApproval(updated);
         var rule = new MaterialCategoryRule(updated.Kind, category.Code, category.Name, category.DefaultSupplyMode, category.AllowCreate, category.UpdatedBy, category.UpdatedAt);
         ValidateSupplyMode(updated, rule);
@@ -1404,7 +1428,7 @@ public sealed class MaterialService(
         if (existing.RowVersion != expectedRowVersion)
             throw new PdmConflictException("物料主档已被其他用户修改，请刷新后重试。");
         if (existing.SourceSystem != MaterialDataSource.Pdm || existing.MasterOwner != MaterialMasterOwner.Pdm)
-            throw new PdmRuleException("只有PLM来源且PLM主控的料品可以删除；U9C主控料品只能停用或由U9C维护。");
+            throw new PdmRuleException("仅PLM建档来源的料品可申请物理删除；U9C历史来源料品请使用停用，以保留原系统关联。");
         if (await materials.HasMaterialReferencesAsync(materialId, cancellationToken))
             throw new PdmRuleException("料品已被BOM引用或来源于BOM，不能删除；可改为停用。");
         if ((await materials.ListSyncTasksAsync(cancellationToken)).Any(task =>
@@ -1439,7 +1463,7 @@ public sealed class MaterialService(
             && string.Equals(configuration.ItemQueryPath, U9MaterialContract.QueryPath, StringComparison.OrdinalIgnoreCase)
             && string.Equals(configuration.ItemDeletePath, U9MaterialContract.DeletePath, StringComparison.OrdinalIgnoreCase);
         var decision = !isPdmMaster
-            ? "U9C主控料品不允许从PLM发起物理删除。"
+            ? "U9C历史来源或尚未接管的料品保留原系统关联，不从PLM发起物理删除，请使用停用。"
             : referenceCount > 0
                 ? $"PLM中已有{referenceCount}处BOM引用，不能删除。"
                 : synchronizedDeleteAvailable
@@ -1456,62 +1480,78 @@ public sealed class MaterialService(
             decision);
     }
 
-    public async Task<PdmMaterial> ArchiveAsync(Guid materialId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<PdmMaterial> ArchiveAsync(Guid materialId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken) =>
+        (await SetAvailabilityAsync(materialId, expectedRowVersion, false, actor, role, cancellationToken)).Material;
+
+    public async Task<PdmMaterial> ReactivateAsync(Guid materialId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken) =>
+        (await SetAvailabilityAsync(materialId, expectedRowVersion, true, actor, role, cancellationToken)).Material;
+
+    public async Task<(PdmMaterial Material, MaterialSyncTask? Task)> SetAvailabilityAsync(
+        Guid materialId, long expectedRowVersion, bool enabled, string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
         var existing = await materials.FindMaterialAsync(materialId, cancellationToken)
             ?? throw new PdmNotFoundException("物料主档不存在。");
-        if (existing.IsArchived) throw new PdmRuleException("料品已经归档。");
-        var archived = await materials.ArchiveMaterialAsync(materialId, expectedRowVersion, actor, timeProvider.GetUtcNow(), cancellationToken);
-        await AuditAsync(actor, "material.archive", archived.Id, $"归档料品主档：{archived.MaterialCode}；未调用U9C物理删除。", cancellationToken);
-        return archived;
+        if (existing.RowVersion != expectedRowVersion) throw new PdmConflictException("料品已被其他用户修改，请刷新后重试。");
+        if (existing.IsArchived == !enabled) throw new PdmRuleException(enabled ? "料品当前已启用。" : "料品当前已停用。");
+        if (existing.SyncStatus == MaterialSyncStatus.Pending) throw new PdmRuleException("料品正在同步U9C，请等待结果后再修改启停状态。");
+        var at = timeProvider.GetUtcNow();
+        var linked = existing.U9SyncConfirmed || existing.SourceSystem == MaterialDataSource.U9C || existing.MasterOwner == MaterialMasterOwner.U9C;
+        if (!linked)
+        {
+            var local = enabled
+                ? await materials.ReactivateMaterialAsync(materialId, expectedRowVersion, actor, at, cancellationToken)
+                : await materials.ArchiveMaterialAsync(materialId, expectedRowVersion, actor, at, cancellationToken);
+            await AuditAsync(actor, enabled ? "material.reactivate" : "material.archive", materialId,
+                $"PLM料品{(enabled ? "启用" : "停用")}：{existing.MaterialCode}；尚未对接U9C，保留原料号及历史。", cancellationToken);
+            return (local, null);
+        }
+        var updated = existing with
+        {
+            IsArchived = !enabled, ArchivedBy = enabled ? null : actor, ArchivedAt = enabled ? null : at,
+            MasterOwner = MaterialMasterOwner.Pdm, UpdatedBy = actor, UpdatedAt = at
+        };
+        var correlation = $"pdm-availability-{materialId:N}-v{expectedRowVersion}";
+        var payload = U9MaterialPayloadFactory.AvailabilityPayload(existing.MaterialCode, enabled, correlation);
+        var task = new MaterialSyncTask(Guid.NewGuid(), materialId, MaterialSyncOperation.SetAvailability, MaterialSyncStatus.PreviewReady,
+            correlation, payload, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))), 0, at, null, null,
+            existing.U9ItemId, existing.U9ItemCode, at, at);
+        var audit = new AuditEntry(Guid.NewGuid(), at, actor, enabled ? "material.reactivate" : "material.archive",
+            nameof(PdmMaterial), materialId.ToString(), $"PLM料品{(enabled ? "启用" : "停用")}并自动同步U9C：{existing.MaterialCode}；仅同步启停，回查确认后标记成功，失败保留PLM决定并允许重试。");
+        return await materials.UpdateAndEnqueueAsync(updated, expectedRowVersion, task, audit, cancellationToken);
     }
 
-    public async Task<PdmMaterial> ReactivateAsync(Guid materialId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<(PdmMaterial Material, MaterialSyncTask? Task)> ReconcileMasterAsync(
+        Guid materialId, long expectedRowVersion, U9ItemReference actual, bool synchronize,
+        string actor, UserRole role, CancellationToken cancellationToken)
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken);
-        var existing = await materials.FindMaterialAsync(materialId, cancellationToken)
-            ?? throw new PdmNotFoundException("物料主档不存在。");
-        if (!existing.IsArchived) throw new PdmRuleException("料品当前已启用。");
-
-        var u9ExistenceVerified = existing.SourceSystem == MaterialDataSource.U9C
-            || existing.MasterOwner == MaterialMasterOwner.U9C;
-        if (u9ExistenceVerified)
-            await EnsureU9ControlledMaterialExistsAsync(existing, cancellationToken);
-
-        var reactivated = await materials.ReactivateMaterialAsync(
-            materialId, expectedRowVersion, actor, timeProvider.GetUtcNow(), cancellationToken);
-        var verification = u9ExistenceVerified ? "已只读确认U9C同号料品存在；" : string.Empty;
-        await AuditAsync(actor, "material.reactivate", reactivated.Id,
-            $"启用料品主档：{reactivated.MaterialCode}；{verification}保留原料号和审批记录，未创建新料号、未写入U9C。", cancellationToken);
-        return reactivated;
-    }
-
-    private async Task EnsureU9ControlledMaterialExistsAsync(PdmMaterial material, CancellationToken cancellationToken)
-    {
-        var configuration = await materials.GetIntegrationConfigurationAsync(cancellationToken);
-        if (!string.Equals(configuration.ItemQueryPath, U9MaterialContract.QueryPath, StringComparison.OrdinalIgnoreCase))
-            throw new PdmRuleException("U9C料品Query路径与已冻结的官方合同不一致，无法确认料品状态。");
-        if (string.IsNullOrWhiteSpace(configuration.ClientSecretCiphertext))
-            throw new PdmRuleException("U9C应用密钥尚未配置，无法确认料品仍然存在，已阻止启用。");
-
-        var authentication = await u9Client.AuthenticateAsync(new(
-            configuration.BaseUrl,
-            configuration.EnterpriseCode,
-            configuration.OrganizationCode,
-            configuration.UserCode,
-            configuration.ClientId,
-            secretProtector.Unprotect(configuration.ClientSecretCiphertext)), cancellationToken);
-        var result = await u9Client.QueryItemsAsync(
-            configuration.BaseUrl,
-            configuration.ItemQueryPath,
-            authentication.Token,
-            U9MaterialPayloadFactory.QueryPayload(material.MaterialCode, $"pdm-reactivate-check-{Guid.NewGuid():N}"),
-            cancellationToken);
-        if (result.ResponseCode != 0)
-            throw new PdmRuleException($"U9C料品查询失败（ResCode={result.ResponseCode}）：{result.ResponseMessage ?? "未返回错误说明"}；已阻止启用。");
-        if (!result.Items.Any(item => string.Equals(item.U9ItemCode?.Trim(), material.MaterialCode, StringComparison.OrdinalIgnoreCase)))
-            throw new PdmRuleException($"U9C未找到料品 {material.MaterialCode}，不能在PLM启用；请先恢复U9C料品或等待全量同步。");
+        var existing = await materials.FindMaterialAsync(materialId, cancellationToken) ?? throw new PdmNotFoundException("料品主档不存在。");
+        if (existing.RowVersion != expectedRowVersion) throw new PdmConflictException("料品已被修改，请刷新后重新对账。");
+        if (!SameCode(actual.U9ItemCode, existing.MaterialCode)) throw new PdmRuleException("U9C返回料号与当前料品不一致，未改动PLM。");
+        if (!string.IsNullOrWhiteSpace(existing.U9ItemId) && !string.IsNullOrWhiteSpace(actual.U9ItemId) && existing.U9ItemId != actual.U9ItemId)
+            throw new PdmRuleException("U9C内部标识与原映射不一致，已保留PLM原料号和关联，请先核对。");
+        var at = timeProvider.GetUtcNow();
+        var incoming = MaterialMasterReconciliation.Snapshot(existing, actual, at);
+        var reconciled = MaterialMasterReconciliation.Merge(existing, incoming);
+        if (!synchronize || reconciled.U9ReconciliationMessage is null)
+            return (await materials.UpsertU9MaterialAsync(incoming, cancellationToken), null);
+        if (existing.ApprovalStatus != MaterialApprovalStatus.Approved)
+            throw new PdmRuleException("草稿不能同步覆盖U9C，请先完成料品审批。");
+        if (!existing.U9SyncConfirmed && existing.SourceSystem != MaterialDataSource.U9C)
+            throw new PdmRuleException("同号料品尚未确认U9C映射，请先核对建档任务，不能直接覆盖。");
+        if (U9MaterialContract.EffectiveState(actual) is null)
+            throw new PdmRuleException("U9C未返回启停状态，已保留PLM资料，请核对接口后重试。");
+        var correlation = $"pdm-reconcile-{materialId:N}-v{expectedRowVersion}";
+        var payload = U9MaterialPayloadFactory.ModifyPayload(existing, correlation, U9MaterialPayloadFactory.ResolveUnitCode(existing.UnitCode),
+            incoming, synchronizeAvailability: true);
+        var task = new MaterialSyncTask(Guid.NewGuid(), materialId, MaterialSyncOperation.Update, MaterialSyncStatus.PreviewReady,
+            correlation, payload, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))), 0, at, null, null,
+            existing.U9ItemId, existing.U9ItemCode, at, at);
+        var updated = reconciled with { UpdatedBy = actor, UpdatedAt = at };
+        return await materials.UpdateAndEnqueueAsync(updated, expectedRowVersion, task,
+            new AuditEntry(Guid.NewGuid(), at, actor, "material.reconcile.sync", nameof(PdmMaterial), materialId.ToString(),
+                $"按PLM已批准基线同步U9C：{existing.MaterialCode}；差异：{reconciled.U9ReconciliationMessage}"), cancellationToken);
     }
 
     private async Task<bool> EnsureMaterialAbsentFromU9Async(
@@ -1711,7 +1751,7 @@ public sealed class MaterialService(
                 existingTask.CorrelationId,
                 u9UnitCode, cancellationToken);
         }
-        else if (existingTask.Operation == MaterialSyncOperation.Update)
+        else if (existingTask.Operation is MaterialSyncOperation.Update or MaterialSyncOperation.SetAvailability)
         {
             // 重试保留人工确认的属性范围，不能扩展为整个料品覆盖。
             payloadJson = existingTask.PayloadJson;
@@ -2079,7 +2119,15 @@ public sealed class MaterialService(
             Model3DLink: NormalizeHttpLink(command.Model3DLink, "3D链接"),
             DocumentLink: NormalizeHttpLink(command.DocumentLink, "资料链接"),
             IsRecommended: command.IsRecommended,
-            CoverImageAttachmentId: existing?.CoverImageAttachmentId);
+            CoverImageAttachmentId: existing?.CoverImageAttachmentId,
+            SourceSystem: existing?.SourceSystem ?? MaterialDataSource.Pdm,
+            MasterOwner: existing?.MasterOwner ?? MaterialMasterOwner.Pdm,
+            LastU9SyncedAt: existing?.LastU9SyncedAt)
+        {
+            U9ReconciliationMessage = existing?.U9ReconciliationMessage,
+            U9ReconciledAt = existing?.U9ReconciledAt,
+            U9IsEffective = existing?.U9IsEffective
+        };
     }
 
     private static void ValidateForApproval(PdmMaterial material)

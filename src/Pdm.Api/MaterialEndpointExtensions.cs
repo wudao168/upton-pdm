@@ -153,11 +153,28 @@ public static class MaterialEndpointExtensions
             return Results.Ok(MapMaterial(await service.UpdateAsync(materialId, ToCommand(request), actor, role, cancellationToken)));
         });
 
-        api.MapPost("/materials/{materialId:guid}/change", async (Guid materialId, SaveMaterialRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        api.MapPost("/materials/{materialId:guid}/change", async (Guid materialId, SaveMaterialRequest request, HttpContext context, MaterialService service, MaterialSyncBatchService syncBatches, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
             var changed = await service.ChangeApprovedAsync(materialId, ToCommand(request), actor, role, cancellationToken);
+            if (changed.Task is not null) await syncBatches.CreateAutomaticAsync([changed.Task.Id], actor, cancellationToken);
             return Results.Ok(new { Material = MapMaterial(changed.Material), Task = changed.Task is null ? null : MapTask(changed.Task) });
+        });
+
+        api.MapPost("/materials/{materialId:guid}/reconcile-u9", async (Guid materialId, long expectedRowVersion, bool? synchronize,
+            HttpContext context, MaterialService service, IMaterialRepository materials, IPdmRepository repository, U9MaterialIntegrationService integration,
+            MaterialSyncBatchService syncBatches, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.MaterialManage, cancellationToken))
+                throw new UnauthorizedAccessException("当前角色无权接管或同步料品主数据。");
+            var material = await materials.FindMaterialAsync(materialId, cancellationToken) ?? throw new PdmNotFoundException("料品主档不存在。");
+            var query = await integration.QueryByCodeAsync(material.MaterialCode, actor, role, cancellationToken);
+            var matches = query.Items.Where(item => string.Equals(item.U9ItemCode?.Trim(), material.MaterialCode, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (query.ResponseCode != 0 || matches.Length != 1) throw new PdmRuleException("U9C未返回唯一同号料品，PLM资料已保留，请核对后重试对账。");
+            var result = await service.ReconcileMasterAsync(materialId, expectedRowVersion, matches[0], synchronize ?? false, actor, role, cancellationToken);
+            if (result.Task is not null) await syncBatches.CreateAutomaticAsync([result.Task.Id], actor, cancellationToken);
+            return Results.Ok(new { Material = MapMaterial(result.Material), Task = result.Task is null ? null : MapTask(result.Task) });
         });
 
         api.MapDelete("/materials/{materialId:guid}", async (Guid materialId, long expectedRowVersion, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
@@ -173,16 +190,20 @@ public static class MaterialEndpointExtensions
             return Results.Ok(await service.InspectRemovalAsync(materialId, actor, role, cancellationToken));
         });
 
-        api.MapPost("/materials/{materialId:guid}/archive", async (Guid materialId, long expectedRowVersion, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        api.MapPost("/materials/{materialId:guid}/archive", async (Guid materialId, long expectedRowVersion, HttpContext context, MaterialService service, MaterialSyncBatchService syncBatches, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(MapMaterial(await service.ArchiveAsync(materialId, expectedRowVersion, actor, role, cancellationToken)));
+            var changed = await service.SetAvailabilityAsync(materialId, expectedRowVersion, false, actor, role, cancellationToken);
+            if (changed.Task is not null) await syncBatches.CreateAutomaticAsync([changed.Task.Id], actor, cancellationToken);
+            return Results.Ok(MapMaterial(changed.Material));
         });
 
-        api.MapPost("/materials/{materialId:guid}/reactivate", async (Guid materialId, long expectedRowVersion, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
+        api.MapPost("/materials/{materialId:guid}/reactivate", async (Guid materialId, long expectedRowVersion, HttpContext context, MaterialService service, MaterialSyncBatchService syncBatches, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(MapMaterial(await service.ReactivateAsync(materialId, expectedRowVersion, actor, role, cancellationToken)));
+            var changed = await service.SetAvailabilityAsync(materialId, expectedRowVersion, true, actor, role, cancellationToken);
+            if (changed.Task is not null) await syncBatches.CreateAutomaticAsync([changed.Task.Id], actor, cancellationToken);
+            return Results.Ok(MapMaterial(changed.Material));
         });
 
         api.MapPost("/materials/link-bom-batch", async (LinkBomMaterialsRequest request, HttpContext context, MaterialService service, CancellationToken cancellationToken) =>
@@ -444,21 +465,10 @@ public static class MaterialEndpointExtensions
             return Results.Ok(MapTask(await service.RetrySyncTaskAsync(taskId, actor, role, cancellationToken)));
         });
 
-        api.MapPost("/material-sync-tasks/{taskId:guid}/execute", async (Guid taskId, HttpContext context, MaterialCodeSynchronizationService service, IMaterialRepository materials, U9MaterialIntegrationService integration, CancellationToken cancellationToken) =>
+        api.MapPost("/material-sync-tasks/{taskId:guid}/execute", async (Guid taskId, HttpContext context, MaterialCodeSynchronizationService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var task = await materials.FindSyncTaskAsync(taskId, cancellationToken)
-                ?? throw new PdmNotFoundException("U9C同步任务不存在。");
-            MaterialCodeSynchronizationResult result;
-            if (task.Operation == MaterialSyncOperation.Update)
-            {
-                var selection = context.Request.ContentLength is > 0
-                    ? await context.Request.ReadFromJsonAsync<ConfirmU9MaterialAttributesRequest>(cancellationToken) : null;
-                if (selection?.Attributes is not { Count: > 0 }) throw new PdmRuleException("请在料品管理中选择属性并确认更新U9C。");
-                var updated = await integration.ExecuteTaskAsync(taskId, actor, role, cancellationToken, selection.Attributes);
-                result = new(updated.Material, updated.Task, updated, null, [], true, "已按人工确认的属性更新U9C。");
-            }
-            else result = await service.SynchronizeTaskAsync(taskId, actor, role, cancellationToken);
+            var result = await service.SynchronizeTaskAsync(taskId, actor, role, cancellationToken);
             return Results.Ok(new
             {
                 Material = MapMaterial(result.Material),
@@ -723,6 +733,9 @@ public static class MaterialEndpointExtensions
         SourceSystem = material.SourceSystem.ToString(),
         MasterOwner = material.MasterOwner.ToString(),
         material.LastU9SyncedAt,
+        material.U9ReconciliationMessage,
+        material.U9ReconciledAt,
+        material.U9IsEffective,
         material.ReferenceCount,
         material.Model3DAttachmentCount,
         material.DocumentAttachmentCount,

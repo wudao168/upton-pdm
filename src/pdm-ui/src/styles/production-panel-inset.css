@@ -1,0 +1,8 @@
+/* 发布跟踪、外协追溯、自制追溯共用的三栏内容内边距。 */
+@layer pdm-business {
+  :root body .production-workbench__grid > :is(.production-workbench__tree.pdm-panel, .production-workbench__lines.pdm-panel),
+  :root body .production-workbench__grid > .production-workbench__right > .production-workbench__detail.pdm-panel {
+    box-sizing:border-box;
+    padding:5px !important;
+  }
+}

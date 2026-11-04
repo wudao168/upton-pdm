@@ -1,3 +1,10 @@
+@import './production-panel-inset.css';
+@import './business-content-inset.css';
+@import './borderless-business-panels.css';
+@import './action-edges.css';
+@import './production-menu.css';
+@import './solid-menu-icons.css';
+@import './capsule-controls.css';
 /* DESIGN.md 的业务界面公共规则。布局使用显式类，不再新增 DOM 扫描器。 */
   :root body .pdm-toolbar {
     display: flex;

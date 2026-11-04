@@ -4,7 +4,7 @@ import { ElInputNumber } from 'element-plus'
 import { parseQuantityInput, quantityInputText } from '../quantityInput'
 
 defineOptions({ inheritAttrs: false })
-const props = withDefaults(defineProps<{ isQuantity?: boolean }>(), { isQuantity: true })
+const props = withDefaults(defineProps<{ isQuantity?: boolean; step?: number; stepStrictly?: boolean }>(), { isQuantity: true, step: 1, stepStrictly: false })
 const model = defineModel<number | null>()
 const control = ref<InstanceType<typeof ElInputNumber>>()
 const typing = ref(false)
@@ -26,6 +26,6 @@ function mousedown(event: MouseEvent) {
 </script>
 
 <template>
-  <ElInputNumber ref="control" v-bind="$attrs" v-model="model" :step="1" :formatter="props.isQuantity ? format : undefined" :parser="props.isQuantity ? parseQuantityInput : undefined" :inputmode="props.isQuantity ? 'decimal' : undefined"
+  <ElInputNumber ref="control" v-bind="$attrs" v-model="model" :step="props.isQuantity ? 1 : props.step" :step-strictly="props.isQuantity ? false : props.stepStrictly" :data-pdm-quantity-step="props.isQuantity ? '1' : undefined" :formatter="props.isQuantity ? format : undefined" :parser="props.isQuantity ? parseQuantityInput : undefined" :inputmode="props.isQuantity ? 'decimal' : undefined"
     @input.capture="typing = true" @keydown.capture="keydown" @mousedown.capture="mousedown" @blur="finishTyping" />
 </template>

@@ -1036,7 +1036,7 @@ internal sealed class SolidWorksReferenceTreeScanner
         return Resolve;
     }
 
-    private string[] ReadDrawingReferences(string path, out Exception readError)
+    internal string[] ReadDrawingReferences(string path, out Exception readError, bool requireComplete = false)
     {
         readError = null;
         var references = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1051,13 +1051,14 @@ internal sealed class SolidWorksReferenceTreeScanner
                 try
                 {
                     UpdateDrawingReferences(loaded, drawing);
-                    if (drawing.DrawingViewsRead)
+                    if (drawing.DrawingViewsRead && (!requireComplete || !drawing.StructureIndexPending))
                         return drawing.ReferencedModels.Select(model => model.FullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                    if (requireComplete) readError = new InvalidOperationException("工程图当前视图尚未完整读取，不能据此排除关联更新。");
                 }
                 catch (Exception error) { readError = error; Log("Drawing views pending: " + error.Message); }
             }
             var info = new FileInfo(path);
-            if (drawingReferences.TryGetValue(path, out var cached)
+            if (!requireComplete && drawingReferences.TryGetValue(path, out var cached)
                 && cached.Item1 == info.Length && cached.Item2 == info.LastWriteTimeUtc) return cached.Item3;
             var previousDirectory = application.GetCurrentWorkingDirectory();
             try
@@ -1078,6 +1079,7 @@ internal sealed class SolidWorksReferenceTreeScanner
                             }
                             catch (ArchiveReferencePathException error)
                             {
+                                if (requireComplete) readError = error;
                                 // A malformed outside reference is not a missing tree model.
                                 // Confirmed drawing views are validated against the tree before upload.
                                 PluginDiagnosticLog.Record("树外引用", "工程图候选引用无法解析，未扩大存档范围：" + path + "；" + error.Message);

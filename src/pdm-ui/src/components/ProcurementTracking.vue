@@ -216,6 +216,7 @@ function resetFilters() {
   Object.assign(filters, { keyword: '', brand: '', bomKind: '', purchaseRequisitionStatus: [], purchaseOrderStatus: [], buyerName: [], delayedOnly: false, unreceivedOnly: false, unissuedOnly: false })
 }
 function filterValues(row: ProjectProcurementTrackingItem, key: FilterKey) {
+  if (key === 'purchaseRequisitionStatus' && row.isDemandCanceled) return ['已取消']
   if (['purchaseRequisitionStatus', 'purchaseOrderStatus'].includes(key) && materialStockPlan(row.materialCode)) return ['常备件']
   const value = String(manufacturingValue(row, key) ?? '').trim()
   return key === 'buyerName' ? value.split('；').map(name => name.trim()).filter(Boolean) : value ? [value] : []
@@ -421,6 +422,7 @@ function statusType(status: string) {
 }
 
 function rowClassName({ row }: { row: ProjectProcurementTrackingItem }) {
+  if (row.isDemandCanceled) return ''
   if (isManufacturing(row)) return isFullyReceived(row) ? '' : !row.manufacturing?.receivedAt ? 'is-procurement-missing'
     : !row.manufacturing.assignedQuantity ? 'is-procurement-warning' : deliveryDay(row.manufacturing.forecastOn) < deliveryDay(new Date().toISOString()) ? 'is-procurement-late' : ''
   if (row.isWarehouseMovementRow || isFullyReceived(row)) return ''
@@ -556,6 +558,7 @@ const statsCards = computed(() => {
 })
 
 function cellText(row: ProjectProcurementTrackingItem, key: ColumnKey) {
+  if (key === 'purchaseRequisitionStatus' && row.isDemandCanceled) return '已取消'
   if (key === 'files') return row.files?.map(file => file.fileName).join('、') || '—'
   if (['purchaseRequisitionStatus', 'purchaseOrderStatus'].includes(key) && materialStockPlan(row.materialCode)) return '常备件'
   if (isMovementColumn(key)) return movementText(row, key)
@@ -703,13 +706,13 @@ onBeforeUnmount(() => {
       <label class="procurement-tracking__delay-filter"><input v-model="filters.delayedOnly" type="checkbox" aria-label="延期">延期</label>
       <el-button @click="resetFilters">重置筛选</el-button>
       </div>
+      <span class="procurement-tracking__updated" :title="hasManufacturing ? `制造数据读取：${formatDate(result?.manufacturingReadAt,true)}` : ''">{{ manufacturingOnly ? '制造读取' : '刷新' }}：{{ formatDate(manufacturingOnly ? result?.manufacturingReadAt : result?.lastSuccessfulRefreshAt, true) }}</span>
       <div class="procurement-tracking__actions">
         <el-button @click="settingsVisible = true">列设置</el-button>
         <el-button type="primary" :loading="refreshStarting" :disabled="refreshCoolingDown" @click="refreshFromU9">立即刷新</el-button>
         <el-button v-if="projectWritable && !manufacturingOnly" @click="openInventorySettings">库存设置</el-button>
         <el-button v-if="projectExport" :loading="exporting" :disabled="loading || !filteredItems.length || !columns.length" @click="exportExcel">导出 Excel</el-button>
       </div>
-      <span class="procurement-tracking__updated" :title="hasManufacturing ? `制造数据读取：${formatDate(result?.manufacturingReadAt,true)}` : ''">{{ manufacturingOnly ? '制造读取' : '刷新' }}：{{ formatDate(manufacturingOnly ? result?.manufacturingReadAt : result?.lastSuccessfulRefreshAt, true) }}</span>
     </header>
 
     <el-alert v-if="result?.lastRefreshError && !manufacturingOnly" :title="`U9C最近一次刷新失败，采购数据继续显示上次完整快照：${result.lastRefreshError}`" type="warning" :closable="false" show-icon />
@@ -756,6 +759,7 @@ onBeforeUnmount(() => {
         <template #default="{ row }">
           <template v-if="column.key === 'files'"><button v-if="row.files?.length" type="button" class="pdm-bom-files-link procurement-tracking__files-link" :aria-label="`${row.materialCode} · 图纸附件`" @click="selectedFiles = row">查看（{{ row.files.length }}）</button><span v-else>—</span></template>
           <span v-else-if="isMovementColumn(column.key)" class="procurement-tracking__movement" :class="movementTone(row, column.key)" :title="movementHint(row, column.key)">{{ movementText(row, column.key) }}</span>
+          <el-tag v-else-if="column.key === 'purchaseRequisitionStatus' && row.isDemandCanceled" type="danger" size="small" title="该物料需求已在BOM正式发布中取消，历史请购、采购单据的实际状态保留在明细中。">已取消</el-tag>
           <span v-else-if="(column.key === 'purchaseRequisitionStatus' || column.key === 'purchaseOrderStatus') && materialStockPlan(row.materialCode)" v-stocked-material="row.materialCode">常备件</span>
           <el-tag v-else-if="(column.key === 'purchaseRequisitionStatus' || column.key === 'purchaseOrderStatus') && !row.isWarehouseMovementRow" :type="statusType(String(manufacturingValue(row,column.key)))" size="small">{{ cellText(row,column.key) }}</el-tag>
           <el-button v-else-if="isManufacturing(row) && column.key === 'purchaseOrderNumbers'" link :aria-label="`查看${row.materialName}制造明细`" @click="showManufacturing(row)">{{ row.manufacturing?.batches.length ? cellText(row,column.key) : '查看制造明细' }}</el-button>
@@ -789,7 +793,7 @@ onBeforeUnmount(() => {
       </template>
     </el-dialog>
 
-    <BomFilesDialog v-if="selectedFiles" :project-id="projectId" :row="{ drawingNumber: selectedFiles.materialCode, files: selectedFiles.files }" :token="token" :can-edit="false" procurement @close="selectedFiles = null" />
+    <BomFilesDialog v-if="selectedFiles" :project-id="projectId" :row="{ drawingNumber: selectedFiles.materialCode, files: selectedFiles.files }" :token="token" :can-edit="false" procurement :procurement-supplement="selectedFiles.filesFromCurrentBom" @close="selectedFiles = null" />
     <el-dialog class="procurement-tracking-dialog" v-model="settingsVisible" title="采购跟踪列设置" width="520px" append-to-body>
       <div class="procurement-tracking__settings-body">
       <p class="procurement-tracking__settings-note">可按当前账号选择显示列，保存后在不同客户端自动恢复；价格、税额、币种及其他财务信息不提供。</p>

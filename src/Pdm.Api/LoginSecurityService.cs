@@ -186,7 +186,13 @@ public sealed class LoginSecurityService(LoginSecurityStore store, TimeProvider 
             catch (PdmRuleException error) { return error.Message; }
         }
         var now = clock.GetUtcNow();
-        return await store.UpdateAsync<LoginUserState, string?>(Key(username), state =>
+        var current = await store.ReadAsync<LoginUserState>(Key(username), ct);
+        var validationError = Validate(current, false);
+        if (validationError is not null || current.Sessions.Find(s => s.Id == sessionId)!.LastSeenAt >= now.AddSeconds(-30)) return validationError;
+        // 只有心跳到期才进入写事务；事务内再次验证，避免管理员下线被心跳覆盖。
+        return await store.UpdateAsync<LoginUserState, string?>(Key(username), state => Validate(state, true), ct);
+
+        string? Validate(LoginUserState state, bool heartbeat)
         {
             var session = state.Sessions.Find(s => s.Id == sessionId);
             if (session is null || session.Revoked) return "该登录已退出或被管理员下线，请重新登录。";
@@ -200,14 +206,14 @@ public sealed class LoginSecurityService(LoginSecurityStore store, TimeProvider 
                     && s.Version == policy.Version && s.LastSeenAt > now - Lease))
                 return "该账号已在其他位置登录，请重新登录。";
             // 合并高频业务请求的心跳写入；独立心跳每分钟调用一次。
-            if (session.LastSeenAt < now.AddSeconds(-30))
+            if (heartbeat && session.LastSeenAt < now.AddSeconds(-30))
             {
                 session.LastSeenAt = now;
                 var device = state.Devices.Find(d => d.Id == session.DeviceId);
                 if (device is not null) device.LastSeenAt = now;
             }
             return null;
-        }, ct);
+        }
     }
 
     public Task<bool> RevokeAsync(string username, string id, CancellationToken ct) =>

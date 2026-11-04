@@ -245,7 +245,7 @@ describe('工时填报与汇总', () => {
   it('默认月历，项目名称自动带出，保存半小时工时并重新读取', async () => {
     const wrapper = mountManager(); await flushPromises()
     expect(wrapper.find('.wh-calendar').exists()).toBe(true)
-    expect(wrapper.text()).toContain('员工甲')
+    expect(wrapper.find('.wh-toolbar').exists()).toBe(false)
     wrapper.findComponent(ElSelect).vm.$emit('update:modelValue','child'); await flushPromises()
     expect((wrapper.get('input[aria-label="自动带出项目名称"]').element as HTMLInputElement).value).toBe('上料单元')
     await wrapper.get('input[aria-label="工时数"]').setValue('4.5')

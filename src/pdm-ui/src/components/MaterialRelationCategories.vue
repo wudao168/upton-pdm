@@ -29,7 +29,7 @@ watch(() => [props.materialId, props.token, props.catalog], load, { immediate: t
 </script>
 
 <template>
-  <section class="material-relation-categories" aria-label="关联配置继承分类" v-loading="loading">
+  <section class="material-relation-categories" :class="{ 'is-compact': compact }" aria-label="关联配置继承分类" v-loading="loading">
     <strong v-if="!compact">标准物料分类</strong>
     <template v-if="assigned.length"><el-tag v-for="category in assigned" :key="category.id">{{ category.name }}</el-tag><span v-if="!compact">继承主料归属；分类调整请在标准物料中维护。</span></template>
     <template v-else><span>{{ compact ? '未分类（待补选）' : '未分类，请由标准化人员补选。' }}</span><template v-if="canManage"><el-tree-select v-model="selected" :data="tree" node-key="id" check-strictly filterable :props="{ label: 'label', children: 'children' }" placeholder="选择标准物料分类" aria-label="补选标准物料分类" /><el-button :disabled="!selected" :loading="saving" @click="save">保存分类</el-button></template></template>
@@ -39,4 +39,5 @@ watch(() => [props.materialId, props.token, props.catalog], load, { immediate: t
 
 <style scoped>
 .material-relation-categories{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:10px 0;font-size:12px}.material-relation-categories>span{color:var(--pdm-muted)}.material-relation-categories :deep(.el-tree-select){width:230px}.material-relation-categories p{width:100%;margin:0;color:var(--pdm-danger)}
+.material-relation-categories.is-compact{flex-wrap:nowrap;white-space:nowrap;min-width:350px}.material-relation-categories.is-compact :deep(.el-select){width:180px;flex:0 0 180px}.material-relation-categories.is-compact p{width:auto;white-space:normal}
 </style>

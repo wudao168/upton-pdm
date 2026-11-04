@@ -55,6 +55,7 @@ public sealed record MaterialRelationMainMaterial(Guid MaterialId, string Materi
     string? Specification = null, string? Brand = null, string? Remark = null)
 {
     public IReadOnlyList<StandardLibraryCategory> StandardLibraryCategories { get; init; } = [];
+    public bool IsEngineeringKit { get; init; }
 }
 
 public sealed record MaterialRelationRevision(
@@ -102,6 +103,19 @@ public sealed record MaterialRelationSelection(
     decimal ExpectedQuantity,
     string UpdatedBy,
     DateTimeOffset UpdatedAt);
+
+public sealed record MaterialRelationAllocationGroup(Guid GroupId, string GroupName, IReadOnlyList<Guid> OptionIds,
+    bool ConfirmNoAccessory = false, string? NoAccessoryReason = null)
+{
+    public IReadOnlyList<MaterialRelationAllocatedOption> Options { get; init; } = [];
+}
+
+public sealed record MaterialRelationAllocatedOption(Guid OptionId, string MaterialCode, string MaterialName,
+    string? Specification, string? Brand, string UnitCode, MaterialRelationQuantityMode QuantityMode,
+    decimal QuantityPerSet, decimal Quantity);
+
+public sealed record MaterialRelationAllocation(Guid Id, string Name, decimal Quantity, Guid RevisionId, int RevisionVersion,
+    IReadOnlyList<MaterialRelationAllocationGroup> Groups);
 
 public sealed record MaterialRelationReview(
     Guid ProjectId,

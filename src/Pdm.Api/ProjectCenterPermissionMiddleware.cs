@@ -20,7 +20,9 @@ public sealed class ProjectCenterPermissionMiddleware(RequestDelegate next)
         var actor = context.User.Identity.Name ?? "";
         if (!Enum.TryParse<UserRole>(context.User.FindFirstValue(ClaimTypes.Role), out var role))
             throw new UnauthorizedAccessException("登录信息无效，请重新登录。");
-        var permissions = await repository.GetUserPermissionsAsync(actor, role, context.RequestAborted);
+        var permissions = string.Equals(TenantContext.Current?.Username, actor, StringComparison.OrdinalIgnoreCase)
+            ? TenantContext.Current!.Permissions
+            : await repository.GetUserPermissionsAsync(actor, role, context.RequestAborted);
         bool Allows(string code) => role == UserRole.Administrator || permissions.Contains(code);
         void Require(string code, string message) { if (!Allows(code)) throw new UnauthorizedAccessException(message); }
         if (tab is not null) Require(ProjectCenterPermissions.Tab(tab), "当前角色无权查看此项目页签，请联系管理员核对角色权限。");

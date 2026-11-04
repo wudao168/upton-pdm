@@ -39,9 +39,12 @@ public sealed partial class PdmAddin
             EnsureDrawingOpenHasNoConflictingWindows(requested);
             return false;
         }
-        if (requested.Warnings?.Count > 0)
-            throw new InvalidOperationException("工程图引用尚不完整，已保留原窗口，未开始打开：" + string.Join("；", requested.Warnings.Take(3)));
+        var unresolvedWarnings = (requested.Warnings ?? new List<string>())
+            .Where(warning => !IsConfirmedReferenceVersionNotice(requested, warning)).ToArray();
+        if (unresolvedWarnings.Length > 0)
+            throw new InvalidOperationException("工程图引用尚不完整，已保留原窗口，未开始打开：" + string.Join("；", unresolvedWarnings.Take(3)));
 
+        var contextIds = await VerifiedOpenContextIdsAsync(requested);
         var files = new List<ControlledOpenFileDto>();
         var retainedHashes = new Dictionary<Guid, string>();
         ControlledOpenFileDto missingDrawing = null;
@@ -49,15 +52,20 @@ public sealed partial class PdmAddin
         foreach (var file in requested.Files)
         {
             var existing = context.Value.Files.FirstOrDefault(candidate => candidate.DocumentId == file.DocumentId);
+            var isContext = existing != null && contextIds.Contains(file.DocumentId);
             var source = existing ?? file;
             var path = Path.GetFullPath(Path.Combine(context.Key, source.RelativePath ?? source.FileName));
             if (!IsPathWithinDirectory(path, context.Key)
                 || context.Value.Files.Any(candidate => candidate.DocumentId != file.DocumentId
                     && PathsEqual(path, Path.Combine(context.Key, candidate.RelativePath ?? candidate.FileName)))
-                || existing != null && (existing.VersionId != file.VersionId
-                    || !string.Equals(existing.FileName, file.FileName, StringComparison.OrdinalIgnoreCase)
-                    || !WorkingConfigurationMatches(existing, file)))
+                || existing != null && (!string.Equals(existing.FileName, file.FileName, StringComparison.OrdinalIgnoreCase)
+                    || !isContext && (existing.VersionId != file.VersionId || !WorkingConfigurationMatches(existing, file))))
+            {
+                LogOperation("工程图复用一致性未通过 file=" + file.FileName + " requestedVersion=" + file.VersionId
+                    + " localVersion=" + source.VersionId + " requestedConfiguration=" + file.Configuration
+                    + " localConfiguration=" + source.Configuration + " verifiedContext=" + isContext);
                 throw DrawingContextMismatch(file.FileName);
+            }
             if (!File.Exists(path))
             {
                 if (file.DocumentId != requested.RootDocumentId || existing != null) throw DrawingContextMismatch(file.FileName);
@@ -66,7 +74,7 @@ public sealed partial class PdmAddin
             else
             {
                 if (!WorkingReuseBindingMatches(path, requested.ProjectId, source)) throw DrawingContextMismatch(file.FileName);
-                if (!WorkingReuseFileBytesMatch(source, file))
+                if (!isContext && !WorkingReuseFileBytesMatch(source, file))
                 {
                     var exact = (await apiClient.GetVersionsAsync(file.DocumentId, lifetime.Token)).FirstOrDefault(version => version.Id == file.VersionId);
                     if (!WorkingReuseStoredSourceVersionMatches(source, file, exact)) throw DrawingContextMismatch(file.FileName);
@@ -83,9 +91,10 @@ public sealed partial class PdmAddin
                     if (!verified && workingHash != null) retainedHashes[file.DocumentId] = workingHash;
                 }
             }
-            files.Add(new ControlledOpenFileDto { DocumentId = file.DocumentId, VersionId = file.VersionId,
-                FileName = file.FileName, RelativePath = source.RelativePath ?? source.FileName, Configuration = file.Configuration,
-                Revision = file.Revision, Sha256 = source.Sha256, FileLength = source.FileLength,
+            if (isContext) LogOperation("工程图打开复用已核对的装配环境，未切换父装配版本或配置：" + source.FileName);
+            files.Add(new ControlledOpenFileDto { DocumentId = file.DocumentId, VersionId = isContext ? source.VersionId : file.VersionId,
+                FileName = file.FileName, RelativePath = source.RelativePath ?? source.FileName, Configuration = isContext ? source.Configuration : file.Configuration,
+                Revision = isContext ? source.Revision : file.Revision, Sha256 = source.Sha256, FileLength = source.FileLength,
                 NativeIsolation = source.NativeIsolation, IsNativeIsolated = source.IsNativeIsolated, IsRoot = file.DocumentId == requested.RootDocumentId });
         }
         var root = files.Single(file => file.IsRoot);
@@ -125,7 +134,23 @@ public sealed partial class PdmAddin
         ScheduleTreeRefresh();
         LogOperation("工程图复用当前模型打开 path=" + rootPath + " context=" + context.Key
             + " files=" + files.Count + " closed=0 modelReplaced=0 acquire=" + acquirePermission);
+        if (requested.Warnings?.Count > 0)
+        {
+            LogOperation("工程图引用版本已按本次确认核对：" + string.Join("；", requested.Warnings));
+            taskPaneControl?.SetCheckoutReminder("已按本次确认采用最新受控引用；原存档版本保留，详情见日志。", true);
+        }
         return true;
+    }
+
+    private static bool IsConfirmedReferenceVersionNotice(ControlledOpenManifestDto manifest, string warning)
+    {
+        // Only the server's completed version-resolution notice is informational.
+        // Confirmation is local to this request; missing/unknown warnings still block.
+        return manifest.LatestReferenceVersionsConfirmed && warning != null
+            && manifest.Files.Any(file => file.DocumentId != Guid.Empty && file.VersionId != Guid.Empty
+                && !string.IsNullOrWhiteSpace(file.FileName) && !string.IsNullOrWhiteSpace(file.Revision)
+                && warning.StartsWith("引用文件" + file.FileName + "在当前快照中记录了多个版本（", StringComparison.Ordinal)
+                && warning.EndsWith("），已统一使用最新受控版本" + file.Revision + "。", StringComparison.Ordinal));
     }
 
     private static InvalidOperationException DrawingContextMismatch(string fileName) => new InvalidOperationException(

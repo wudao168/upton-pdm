@@ -718,14 +718,29 @@ export interface EditLockSummary {
   canEmergencyRelease?: boolean
 }
 
+export interface BomConfigurationQuantityChange {
+  members: Array<{ mainBomItemId: string; allocationId?: string }>
+  quantity: number
+  expectedQuantity: number
+  confirmed: boolean
+  confirmationToken?: string
+}
+export interface BomQuantityDifference { bomItemId?: string; materialCode: string; materialName: string; before: number; after: number; isAccessory: boolean; unit?: string }
 export interface BomItem {
+  configurationQuantities?: BomConfigurationQuantityChange[]
+  isSummaryQuantity?: boolean
+  consolidatedSourceIds?: string[]
   files?: import('./bomFiles').BomFileReference[] | null
   nameplateContent?: import('./projectNameplate').NameplateContent | null
   displayRevision?: string
+  isPublishedInBom?: boolean
+  bomPublishedVersion?: string
+  relationOptionId?: string
   maintainedItem?: BomItem
   summaryItemIds?: string[]
   summaryFingerprint?: string
   editedFields?: string[]
+  quantityAllocations?: Record<string, number>
   id?: string
   releaseTrackingId?: string
   kind?: BomClassification
@@ -750,7 +765,10 @@ export interface BomItem {
   sourceConfiguration?: string
   sourceInstancePath?: string
   parentDrawingNumber?: string
-  source?: 'Auto' | 'Manual' | 'MaterialRelation' | 'EngineeringKit'
+  source?: 'Auto' | 'Manual' | 'MaterialRelation' | 'EngineeringKit' | 'Summary'
+  relationMainBomItemId?: string
+  relationAllocations?: MaterialRelationAllocation[]
+  engineeringKitRelationAllocations?: MaterialRelationAllocation[]
   engineeringKitReferenceId?: string
   engineeringKitId?: string
   engineeringKitRevisionId?: string
@@ -949,6 +967,8 @@ export interface BomVersion {
   projectId: string
   kind: Exclude<BomKind, 'Unclassified'>
   versionNumber: number
+  wholeSetMultiplier?: number
+  isMultiplierOverridden?: boolean
   label: string
   state: BomVersionState
   baseVersionId?: string
@@ -1433,6 +1453,9 @@ export interface PdmMaterial {
   sourceSystem: MaterialDataSource
   masterOwner: MaterialMasterOwner
   lastU9SyncedAt?: string | null
+  u9ReconciliationMessage?: string | null
+  u9ReconciledAt?: string | null
+  u9IsEffective?: boolean | null
   referenceCount: number
   model3DAttachmentCount: number
   documentAttachmentCount: number
@@ -1539,6 +1562,7 @@ export interface MaterialRelationGroup {
 }
 
 export interface MaterialRelationMainMaterial {
+  isEngineeringKit?: boolean
   materialId: string
   materialCode: string
   materialName: string
@@ -1615,6 +1639,7 @@ export interface MaterialRelationGroupCheck {
   expectedQuantity: number
   actualQuantity: number
   selectedOptionIds: string[]
+  accessoryBomItemIds?: Record<string,string>
   reviewDecision?: MaterialRelationReviewDecision | null
   reviewReason?: string | null
   reviewedBy?: string | null
@@ -1624,6 +1649,7 @@ export interface MaterialRelationGroupCheck {
 
 export interface MaterialRelationMainCheck {
   mainBomItemId: string
+  bomSequence?: number
   mainMaterialCode: string
   mainMaterialName: string
   mainQuantity: number
@@ -1632,6 +1658,17 @@ export interface MaterialRelationMainCheck {
   revisionVersion: number
   isComplete: boolean
   groups: MaterialRelationGroupCheck[]
+  allocations?: MaterialRelationAllocation[]
+}
+
+export interface MaterialRelationAllocation {
+  id: string
+  name: string
+  quantity: number
+  revisionId: string
+  revisionVersion: number
+  groups: Array<{ groupId: string; groupName: string; optionIds: string[]; confirmNoAccessory: boolean; noAccessoryReason?: string | null;
+    options?: Array<{optionId:string;materialCode:string;materialName:string;unitCode:string;quantityMode:'PerMainQuantity'|'Fixed'|number;quantityPerSet:number;quantity:number}> }>
 }
 
 export interface MaterialRelationCompleteness {
@@ -1831,7 +1868,7 @@ export interface MaterialCategoryRule {
 export interface MaterialSyncTask {
   id: string
   materialId: string
-  operation: 'Create' | 'Update'
+  operation: 'Create' | 'Update' | 'SetAvailability'
   status: MaterialSyncStatus
   correlationId: string
   payloadJson: string
@@ -2289,7 +2326,9 @@ export interface WarehouseMovementDetail {
 }
 
 export interface ProjectProcurementTrackingItem {
+  isDemandCanceled?: boolean
   files?: import('./bomFiles').BomFileReference[]
+  filesFromCurrentBom?: boolean
   sequence: number
   projectCode: string
   subprojectCode?: string | null

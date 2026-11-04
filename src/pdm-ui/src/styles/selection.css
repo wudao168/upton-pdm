@@ -1,3 +1,4 @@
+@import './release-attention.css';
 /* 仅统一已有选择背景；不按通用状态属性给原本无背景的控件新增填充。
    审批进度、库存预警、推荐项等业务状态色保留。主导航使用相反的白色选中底色。 */
 :root body :is(
@@ -74,4 +75,29 @@
 :root body .pc-toolbar > .pc-controls > button[aria-pressed="true"],
 :root body .work-hours .wh-modes button.active {
   color: var(--pdm-text) !important;
+}
+
+/* Selected business classifications share the theme color for label and tag. */
+:root body :is(.pdm-category-sidebar, .stocked-tree, .standard-structure__categories) .el-tree-node.is-current > .el-tree-node__content :is(.standard-library__category-label, .category-label, .standard-structure__category-label),
+:root body .standard-library__category-label.is-selected,
+:root body .production-suppliers__category-filter.is-active,
+:root body .production-workbench__project.selected .production-workbench__project-identity {
+  color: var(--pdm-theme-accent) !important;
+  font-weight: 600;
+}
+:root body :is(.pdm-category-sidebar, .stocked-tree, .standard-structure__categories) .el-tree-node.is-current > .el-tree-node__content svg.lucide-tag,
+:root body .standard-library__category-label.is-selected > svg.lucide-tag,
+:root body .production-suppliers__category-filter.is-active > svg.lucide-tag,
+:root body .production-workbench__project.selected > svg.lucide-tag {
+  color: var(--pdm-theme-accent) !important;
+  fill: var(--pdm-theme-accent-soft-strong) !important;
+}
+:root body .standard-library__category-label.is-selected > span,
+:root body .production-workbench__project.selected .production-workbench__project-identity > :is(strong, span) {
+  color: inherit !important;
+}
+
+/* Stronger project-family selection; release indicators remain independent. */
+:root body .pdm-project-sidebar .pdm-project-family__list > button.is-active[aria-current="page"] {
+  background: #e5e7eb !important;
 }

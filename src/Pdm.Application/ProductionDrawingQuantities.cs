@@ -26,26 +26,12 @@ public static class ProductionDrawingQuantities
     public static IReadOnlyList<ProductionDrawingBomQuantity> Build(ReleasePackage package, IEnumerable<ReleasePackage> history)
     {
         var items = FrozenItems(package);
-        var multiplier = Math.Max(1, package.WholeSetMultiplier);
-        var historyItems = history.ToArray();
-        var previous = package.Scope == ReleaseScope.NonStandardSupplement
-            ? historyItems.Where(previous => previous.ProjectId == package.ProjectId && previous.Id != package.Id
-                    && previous.State == ReleasePackageState.Published && previous.PublishedAt.HasValue
-                    && (!package.PublishedAt.HasValue || previous.PublishedAt < package.PublishedAt)
-                    && previous.Scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement)
-                .OrderByDescending(previous => previous.PublishedAt).FirstOrDefault()
-            : null;
-        var priorItems = previous is null ? BomReleaseAggregation.PriorLongLeadItems(package, historyItems)
-            : FrozenItems(previous).Select(item => item with { Quantity = item.Quantity * Math.Max(1, previous.WholeSetMultiplier) });
-        var prior = BomReleaseAggregation.PriorQuantities(priorItems, items);
-        return items.GroupBy(BomReleaseAggregation.MaterialKey)
-            .Select(group =>
-            {
-                var singleSet = group.Sum(item => item.Quantity);
-                var total = singleSet * multiplier;
-                var alreadyReleased = prior.GetValueOrDefault(group.Key);
-                return new ProductionDrawingBomQuantity(group.Key, group.Select(item => item.Id).ToArray(),
-                    singleSet, multiplier, total, alreadyReleased, Math.Max(0, total - alreadyReleased));
-            }).ToArray();
+        var quantities=ReleaseQuantityComparison.Build(package,BomKind.NonStandard,history).ToDictionary(item=>item.MaterialKey);
+        return items.GroupBy(BomReleaseAggregation.MaterialKey).Select(group=>
+        {
+            var quantity=quantities[group.Key];
+            return new ProductionDrawingBomQuantity(group.Key,group.Select(item=>item.Id).ToArray(),group.Sum(item=>item.Quantity),
+                quantity.Multiplier,quantity.TargetQuantity,quantity.PreviousBaselineQuantity+quantity.EarlyReleasedCredit,quantity.NewDemand);
+        }).ToArray();
     }
 }
