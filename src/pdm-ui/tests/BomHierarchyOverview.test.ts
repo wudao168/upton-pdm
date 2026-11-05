@@ -399,7 +399,7 @@ describe('BomHierarchyOverview', () => {
     const button = wrapper.get('button[aria-label="刷新多级BOM"]')
     await button.trigger('click')
     expect(button.attributes('disabled')).toBeDefined()
-    expect(button.text()).toBe('刷新中…')
+    expect(button.text()).toBe('刷新')
     await button.trigger('click')
     expect(api.listBom).toHaveBeenCalledTimes(6)
     finish([item('NEW', '新物料')])

@@ -64,7 +64,7 @@ onBeforeUnmount(closePreview)
     <h2>{{ task.projectCode }} · {{ task.projectName }}</h2>
     <p>{{ task.releasePackageNumber || `${task.qualityAcceptance ? '验收' : '验证'}计划 第${task.validationPlanRevision}版` }} · {{ task.stepName || task.stage }}</p>
     <p v-if="loading" role="status">正在读取审批资料…</p>
-    <p v-if="error" role="alert" class="mobile-error">{{ error }} <button :disabled="pending" @click="load">刷新资料</button></p>
+    <p v-if="error" role="alert" class="mobile-error">{{ error }} <button :disabled="pending" @click="load">刷新</button></p>
     <template v-if="release">
       <h3>审批流程</h3><ol><li v-for="step in release.steps" :key="step.id">{{ step.stage }} · {{ step.assignee }} · {{ step.detail }}<p v-if="step.comment">处理意见：{{ step.comment }}</p></li></ol>
       <p v-if="release.changeReason">变更原因：{{ release.changeReason }}</p>

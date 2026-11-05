@@ -151,7 +151,7 @@ describe('U9IntegrationManagement', () => {
     expect(inventoryPanel.text()).toContain('每 60 分钟')
     expect(inventoryPanel.text()).toContain('库存快照明细120')
     expect(inventoryPanel.text()).toContain('覆盖料号45')
-    expect(inventoryPanel.text()).toContain('立即全量刷新')
+    expect(inventoryPanel.text()).toContain('刷新')
     expect(inventoryPanel.text()).not.toContain('库存查询接口路径')
     expect(inventoryPanel.find('input[name="u9InventoryQueryPath"]').exists()).toBe(false)
     expect(api.getU9InventorySyncStatus).toHaveBeenCalledWith('token')

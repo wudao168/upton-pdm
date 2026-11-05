@@ -146,7 +146,7 @@ async function printLabel() {
 </script>
 <template>
   <section class="production-operation" aria-label="当前可办理步骤">
-    <header><strong>本岗扫码办理</strong><button type="button" :disabled="loading || pending" @click="refresh">刷新步骤</button></header>
+    <header><strong>本岗扫码办理</strong><button type="button" :disabled="loading || pending" @click="refresh">刷新</button></header>
     <details v-if="line?.nameplateContent"><summary>查看铭牌内容</summary><NameplateContentPanel :content="line.nameplateContent" /></details>
     <p v-if="error" role="alert" class="production-operation__error">{{ error }}</p><p v-if="notice" role="status">{{ notice }}</p>
     <p v-if="loading" role="status">正在核对岗位、工位和当前可办理数量…</p>

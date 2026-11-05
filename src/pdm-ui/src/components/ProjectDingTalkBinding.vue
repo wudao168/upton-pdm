@@ -73,7 +73,7 @@ onBeforeUnmount(() => window.removeEventListener('focus', refreshOnFocus))
     </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" /><el-alert v-if="notice" :title="notice" type="info" :closable="false" />
     <template v-if="view">
-      <PanelActions><el-button :disabled="pending" @click="load">刷新群绑定</el-button><el-button v-if="view.canManage" :disabled="pending || !view.groupId" @click="resend">重发提交入口</el-button><el-button v-if="view.canManage" :disabled="pending || !view.groupId" type="danger" plain @click="unbind">解除群绑定</el-button></PanelActions>
+      <PanelActions><el-button :disabled="pending" @click="load">刷新</el-button><el-button v-if="view.canManage" :disabled="pending || !view.groupId" @click="resend">重发提交入口</el-button><el-button v-if="view.canManage" :disabled="pending || !view.groupId" type="danger" plain @click="unbind">解除群绑定</el-button></PanelActions>
       <section class="ding-binding-descriptions" aria-label="绑定使用说明">
         <h3>使用说明</h3>
         <p>绑定关系属于当前主项目，子项目共用；同一群只能关联一个主项目。本页只显示当前项目的绑定，不再列出全部群。</p>

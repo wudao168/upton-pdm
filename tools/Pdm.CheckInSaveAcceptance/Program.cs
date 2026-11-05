@@ -28,6 +28,8 @@ internal static partial class Program
   if(args.Length>0&&args[0]=="--archive-status-proxy-host") { RunArchiveStatusProxyHost(args); return; }
   AppDomain.CurrentDomain.AssemblyResolve+=(_,e)=>{var path=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0])),new AssemblyName(e.Name).Name+".dll");return File.Exists(path)?Assembly.LoadFrom(path):null;};
   assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));
+  if(args.Length>1&&args[1]=="--required-property-index-regression")
+  {try{RequiredPropertyIndexScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--committed-child-checkout-regression")
   {try{CommittedChildCheckoutScenario(args[2]).GetAwaiter().GetResult();}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--open-context-metadata-replay")

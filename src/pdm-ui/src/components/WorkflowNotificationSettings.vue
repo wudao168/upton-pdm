@@ -56,7 +56,7 @@ const recordState = (state: string) => ({ Waiting: '等待业务完成', Ready: 
   <section class="workflow-notifications" aria-label="通知接收设置">
     <header><h3>通知接收设置</h3><label class="notification-check"><input v-model="enabled" type="checkbox" :disabled="pending || !catalog">启用通知</label></header>
     <p class="notification-hint">通知时机：{{ trigger }}</p>
-    <p v-if="error" role="alert" class="pdm-inline-error">{{ error }} <button type="button" @click="load">刷新通知设置</button></p>
+    <p v-if="error" role="alert" class="pdm-inline-error">{{ error }} <button type="button" @click="load">刷新</button></p>
     <p v-if="notice" role="status" class="notification-success">{{ notice }}</p>
     <p v-if="pending && !catalog" class="notification-hint">正在加载通知设置…</p>
     <fieldset v-if="catalog" :disabled="pending || !enabled">

@@ -628,6 +628,26 @@ const currentRelationChecks = computed(() => relationMainRows.value
   .filter((item): item is MaterialRelationCompleteness['mainMaterials'][number] => !!item))
 const selectedRelationMainRow = computed(() => relationMainRows.value.find(item => item.id === selectedRelationMainId.value))
 const selectedRelationMainCheck = computed(() => relationCheckByMainId.value.get(selectedRelationMainId.value))
+function relationBatchSignature(main: MaterialRelationCompleteness['mainMaterials'][number]) {
+  return JSON.stringify([main.templateId, main.revisionId, main.revisionVersion, main.groups.map(group => [group.groupId, group.groupName, group.isRequired,
+    group.selectionMode, group.maxSelection, group.options.map(option => [option.id, option.materialId, option.materialCode,
+      option.materialName, option.specification, option.brand, option.materialKind, option.unitCode, option.quantityMode, option.quantityPerSet, option.isDefault]).sort()]).sort()])
+}
+function canBatchSelectRelationMain(mainId: string) {
+  if (!selectedRelationBatchIds.value.length || selectedRelationBatchIds.value.includes(mainId)) return true
+  const first = relationCheckByMainId.value.get(selectedRelationBatchIds.value[0]!)
+  const target = relationCheckByMainId.value.get(mainId)
+  return !!first && !!target && relationBatchSignature(first) === relationBatchSignature(target)
+}
+const compatibleRelationMainIds = computed(() => selectedRelationMainCheck.value ? currentRelationChecks.value
+  .filter(main => relationBatchSignature(main) === relationBatchSignature(selectedRelationMainCheck.value!)).map(main => main.mainBomItemId) : [])
+const allCompatibleRelationMainsSelected = computed(() => compatibleRelationMainIds.value.length > 0
+  && compatibleRelationMainIds.value.every(id => selectedRelationBatchIds.value.includes(id)))
+function toggleRelationBatchMain(mainId: string, checked: boolean) {
+  if (!checked) { selectedRelationBatchIds.value = selectedRelationBatchIds.value.filter(id => id !== mainId); return }
+  if (!canBatchSelectRelationMain(mainId)) { ElMessage.warning('只能同时勾选关联配置、候选物料及数量规则完全一致的主料。'); return }
+  selectedRelationBatchIds.value = [...new Set([...selectedRelationBatchIds.value, mainId])]
+}
 const rawSourceRows = computed(() => kind.value === 'Source'
   ? sourceDataRows.value.filter(item => !assemblyScope.value
     || item.sourceInstancePath?.startsWith(`roots/${assemblyScope.value.replaceAll('-', '').toLowerCase()}/`))
@@ -3067,12 +3087,14 @@ function isPerMainRelationQuantity(value: unknown) {
 }
 
 function updateRelationChoice(mainBomItemId: string, groupId: string, value: string | string[]) {
+  if (relationApplying.value) return
   const key = relationChoiceKey(mainBomItemId, groupId)
   relationChoices.value = { ...relationChoices.value, [key]: Array.isArray(value) ? value : value ? [value] : [] }
   relationNoAccessoryConfirmed.value = { ...relationNoAccessoryConfirmed.value, [key]: false }
 }
 
 async function confirmRelationNoAccessory(mainBomItemId: string, groupId: string) {
+  if (relationApplying.value) return
   try {
     await ElMessageBox.confirm('确认本次该主物料无需配套吗？确认后会清空当前组已选的关联物料。', '二次确认', {
       type: 'warning', confirmButtonText: '确认无需配套', cancelButtonText: '取消', confirmButtonClass: 'pdm-danger-confirm',
@@ -3086,6 +3108,7 @@ async function confirmRelationNoAccessory(mainBomItemId: string, groupId: string
 }
 
 function reopenRelationGroup(mainBomItemId: string, groupId: string) {
+  if (relationApplying.value) return
   relationNoAccessoryConfirmed.value = { ...relationNoAccessoryConfirmed.value, [relationChoiceKey(mainBomItemId, groupId)]: false }
 }
 
@@ -3124,7 +3147,7 @@ function initializeRelationChoices(result: MaterialRelationCompleteness) {
 }
 
 async function loadRelationCompleteness(showError = true) {
-  if (!projectWritable.value) return null
+  if (!projectWritable.value || relationApplying.value) return null
   if (!props.projectId || !props.token) return
   const sequence = ++relationLoadSequence
   relationLoading.value = true
@@ -3220,6 +3243,7 @@ function copyAllocationChoices(mainId: string, fromId: string, targetMain: strin
 }
 
 function addRelationAllocation(copy = false) {
+  if (relationApplying.value) return
   clearGlobalStatus()
   const mainId = selectedRelationMainId.value, current = selectedRelationAllocation.value
   if (relationRequiresWhole(mainId) && (!current || !Number.isInteger(current.quantity) || current.quantity < 2)) {
@@ -3236,6 +3260,7 @@ function addRelationAllocation(copy = false) {
 }
 
 async function unifyRelationAllocations() {
+  if (relationApplying.value) return
   const mainId = selectedRelationMainId.value, main = selectedRelationMainCheck.value, current = selectedRelationAllocation.value
   if (!main || !current || allocationsFor(mainId).length <= 1) return
   try { await ElMessageBox.confirm('将当前组合应用于该主料的全部数量，其他组合将被合并。是否继续？', '统一选配', { confirmButtonText: '统一选配', cancelButtonText: '取消' }) }
@@ -3245,6 +3270,7 @@ async function unifyRelationAllocations() {
 }
 
 function removeRelationAllocation() {
+  if (relationApplying.value) return
   clearGlobalStatus()
   const mainId = selectedRelationMainId.value, current = selectedRelationAllocation.value
   const remaining = allocationsFor(mainId).filter(item => item.id !== current?.id)
@@ -3256,9 +3282,12 @@ function removeRelationAllocation() {
 
 function applyRelationBatch() {
   const mainId = selectedRelationMainId.value, source = selectedRelationMainCheck.value
-  if (!source || !allocationTotalValid(mainId)) { ElMessage.warning('请先完成当前主料的数量分配。'); return }
+  if (!source || !allocationTotalValid(mainId)) { ElMessage.warning('请先完成当前主料的数量分配。'); return false }
   const targets = selectedRelationBatchIds.value.map(id => relationCheckByMainId.value.get(id)).filter(item => !!item)
-  if (!targets.length || targets.some(item => item.revisionId !== source.revisionId)) { ElMessage.warning('请勾选使用同一关联配置版本的主料。'); return }
+  if (!targets.length || targets.length !== selectedRelationBatchIds.value.length
+    || targets.some(item => relationBatchSignature(item) !== relationBatchSignature(source))) {
+    ElMessage.warning('勾选主料须与右侧当前主料的关联配置、候选物料及数量规则完全一致，请重新选择。'); return false
+  }
   const sourceAllocations = allocationsFor(mainId)
   const plans: Array<{ targetId: string; allocations: RelationAllocationDraft[] }> = []
   for (const target of targets) {
@@ -3270,9 +3299,9 @@ function applyRelationBatch() {
       assigned += quantity
       return { id: createClientUuid(), name: item.name, quantity }
     })
-    if (allocations.some(item => item.quantity <= 0)) { ElMessage.warning('目标主料数量过小，无法按当前组合比例分配。'); return }
+    if (allocations.some(item => item.quantity <= 0)) { ElMessage.warning('目标主料数量过小，无法按当前组合比例分配。'); return false }
     if (relationRequiresWhole(target.mainBomItemId) && allocations.some(item => !Number.isInteger(item.quantity))) {
-      ElMessage.warning('批量应用会产生计件小数，请为该主料单独分配整数数量。'); return
+      ElMessage.warning('批量应用会产生计件小数，请为该主料单独分配整数数量。'); return false
     }
     plans.push({ targetId: target.mainBomItemId, allocations })
   }
@@ -3281,7 +3310,7 @@ function applyRelationBatch() {
     plan.allocations.forEach((item, index) => copyAllocationChoices(mainId, sourceAllocations[index]!.id, plan.targetId, item.id))
     selectedRelationAllocations.value[plan.targetId] = plan.allocations[0]!.id
   }
-  ElMessage.success('已应用至勾选主料，请保存核对结果。')
+  return true
 }
 
 function relationMainStatus(mainBomItemId: string) {
@@ -3292,6 +3321,7 @@ function relationMainStatus(mainBomItemId: string) {
 }
 
 function toggleRelationOption(mainBomItemId: string, group: MaterialRelationGroupCheck, optionId: string) {
+  if (relationApplying.value) return
   if (isSingleRelationGroup(group)) {
     updateRelationSingle(mainBomItemId, group.groupId, optionId)
     return
@@ -3303,13 +3333,20 @@ function toggleRelationOption(mainBomItemId: string, group: MaterialRelationGrou
 }
 
 async function applySelectedRelations() {
-  if (!props.projectId || !props.token || !currentRelationChecks.value.length) return
-  if (currentRelationChecks.value.some(main => !allocationTotalValid(main.mainBomItemId))) {
+  if (!props.projectId || !props.token || relationApplying.value || !currentRelationChecks.value.length) return
+  const projectId = props.projectId, token = props.token, savedKind = kind.value
+  const batch = selectedRelationBatchIds.value.length > 0
+  if (batch && !applyRelationBatch()) return
+  const scope = currentRelationChecks.value.filter(main => batch ? selectedRelationBatchIds.value.includes(main.mainBomItemId)
+    : relationDraftChanged(main.mainBomItemId) || main.mainBomItemId === selectedRelationMainId.value)
+  if (!scope.length) { ElMessage.warning('请先选择需要保存核对结果的主料。'); return }
+  if (scope.some(main => !allocationTotalValid(main.mainBomItemId))) {
     ElMessage.warning('每个组合数量须大于0，计件数量须为整数，分配合计必须等于对应主料数量。'); return
   }
-  const changedMains = currentRelationChecks.value.filter(main => !main.isComplete || relationDraftChanged(main.mainBomItemId))
-  if (!changedMains.length) { ElMessage.success('当前主料均已核对，无需重复保存。'); return }
+  const changedMains = scope.filter(main => !main.isComplete || relationDraftChanged(main.mainBomItemId))
+  if (!changedMains.length) { ElMessage.success('当前保存范围内的主料已核对，无需重复保存。'); return }
   relationApplying.value = true
+  ++relationLoadSequence
   try {
     const payload = changedMains.map(main => {
       const allocations = allocationsFor(main.mainBomItemId)
@@ -3318,14 +3355,19 @@ async function applySelectedRelations() {
         : { mainBomItemId: main.mainBomItemId, choices: [], allocations: allocations.map(allocation => ({ ...allocation,
           choices: allocationChoices(main.mainBomItemId, allocation.id) })) }
     })
-    relationCompleteness.value = await applyMaterialRelations(props.projectId, payload, props.token)
+    const result = await applyMaterialRelations(projectId, payload, token)
+    if (props.projectId !== projectId || props.token !== token || kind.value !== savedKind) return
+    relationCompleteness.value = result
     initializeRelationChoices(relationCompleteness.value)
     if (!relationCheckByMainId.value.has(selectedRelationMainId.value))
       selectedRelationMainId.value = currentRelationChecks.value[0]?.mainBomItemId ?? relationMainRows.value[0]?.id ?? ''
     emit('materialRelationsApplied')
     emit('materialCodeChanged')
     ElMessage.success(relationCompleteness.value.isComplete ? '关联物料核对结果已保存' : '核对结果已保存，仍有待核对项；完成选配或确认无需配套后才能发布')
-  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '配套物料应用失败') }
+  } catch (error) {
+    if (props.projectId !== projectId || props.token !== token || kind.value !== savedKind) return
+    ElMessage.error(userErrorMessage(error instanceof Error ? error.message : '关联物料核对保存失败，请稍后重试。'))
+  }
   finally { relationApplying.value = false }
 }
 
@@ -3430,16 +3472,18 @@ const bomColumnTotalWeight = computed(() => 26 + 44 + 32 + bomColumnDefinitions
   .filter(column => isBomColumnVisible(column.key))
   .reduce((sum, column) => sum + (bomColumnWeights[column.key] ?? 60), 0))
 function bomColumnWidth(key: BomColumnKey | 'select' | 'actions' | 'sequence') {
-  if (key === 'actions') return 'width: 88px !important'
+  if (key === 'select') return 'width: 28px !important'
+  if (key === 'actions') return 'width: 80px !important'
+  if (key === 'sequence') return 'width: 36px !important'
   if (key === 'drawingNumber' && hasGroupedBomRows.value) return 'width: 160px !important'
   if (key === 'drawing') return 'width: 60px !important'
   if (key === 'revision' && (kind.value === 'Standard' || kind.value === 'Electrical')) return 'width: 145px !important'
   const fixedDrawing = isBomColumnVisible('drawing')
   const fixedRevision = isBomColumnVisible('revision') && (kind.value === 'Standard' || kind.value === 'Electrical')
   const fixedCode = hasGroupedBomRows.value && isBomColumnVisible('drawingNumber')
-  const fixedWeight = (fixedCode ? bomColumnWeights.drawingNumber ?? 100 : 0) + 44 + (fixedDrawing ? bomColumnWeights.drawing ?? 60 : 0) + (fixedRevision ? bomColumnWeights.revision ?? 60 : 0)
-  const fixedWidth = (fixedCode ? 160 : 0) + 88 + (fixedDrawing ? 60 : 0) + (fixedRevision ? 145 : 0)
-  const weight = key === 'select' ? 26 : key === 'sequence' ? 32 : bomColumnWeights[key] ?? 60
+  const fixedWeight = (fixedCode ? bomColumnWeights.drawingNumber ?? 100 : 0) + 26 + 44 + 32 + (fixedDrawing ? bomColumnWeights.drawing ?? 60 : 0) + (fixedRevision ? bomColumnWeights.revision ?? 60 : 0)
+  const fixedWidth = (fixedCode ? 160 : 0) + 28 + 80 + 36 + (fixedDrawing ? 60 : 0) + (fixedRevision ? 145 : 0)
+  const weight = bomColumnWeights[key] ?? 60
   const ratio = weight / (bomColumnTotalWeight.value - fixedWeight)
   return `width: calc(${ratio * 100}% - ${ratio * fixedWidth}px) !important`
 }
@@ -4850,9 +4894,9 @@ async function submitBatchUpdate() {
           <tr v-if="!pagedRows.length"><td colspan="8" class="pdm-empty-info">{{ comparison.removed.length ? '没有符合当前筛选条件的已移除物料。' : `与${comparisonBaseline?.label ?? '发布基线'}相比，当前没有本轮已移除物料；历史删除记录请到回收站查看。` }}</td></tr>
         </tbody>
       </table>
-      <table v-else ref="bomTable" class="pdm-edit-table pdm-bom-table pdm-fit-columns">
+      <table v-else ref="bomTable" class="pdm-edit-table pdm-bom-table pdm-fit-columns" data-pdm-compact-columns="28,80,36">
         <colgroup>
-          <col class="is-select" :style="bomColumnWidth('select')"><col class="is-row-actions" data-pdm-fixed-width="88" :style="bomColumnWidth('actions')"><col class="is-sequence" :style="bomColumnWidth('sequence')"><col v-if="isBomColumnVisible('kind')" class="is-kind" :style="bomColumnWidth('kind')"><col v-if="isBomColumnVisible('wearPart')" class="is-wear-part" :style="bomColumnWidth('wearPart')"><col v-if="isBomColumnVisible('impact') && !isSourceView && !isWearPartView" class="is-impact" :style="bomColumnWidth('impact')"><col v-if="isBomColumnVisible('unit')" class="is-unit" :style="bomColumnWidth('unit')"><col v-if="isBomColumnVisible('drawingNumber')" class="is-code" :style="bomColumnWidth('drawingNumber')">
+          <col class="is-select" :style="bomColumnWidth('select')"><col class="is-row-actions" data-pdm-fixed-width="80" :style="bomColumnWidth('actions')"><col class="is-sequence" :style="bomColumnWidth('sequence')"><col v-if="isBomColumnVisible('kind')" class="is-kind" :style="bomColumnWidth('kind')"><col v-if="isBomColumnVisible('wearPart')" class="is-wear-part" :style="bomColumnWidth('wearPart')"><col v-if="isBomColumnVisible('impact') && !isSourceView && !isWearPartView" class="is-impact" :style="bomColumnWidth('impact')"><col v-if="isBomColumnVisible('unit')" class="is-unit" :style="bomColumnWidth('unit')"><col v-if="isBomColumnVisible('drawingNumber')" class="is-code" :style="bomColumnWidth('drawingNumber')">
           <col v-if="isBomColumnVisible('name')" class="is-name" :style="bomColumnWidth('name')"><col v-if="isBomColumnVisible('parentDrawingNumber')" class="is-parent-code" :style="bomColumnWidth('parentDrawingNumber')"><col v-if="isBomColumnVisible('specification')" class="is-model" :style="bomColumnWidth('specification')"><col v-if="isBomColumnVisible('revision')" class="is-revision" :style="bomColumnWidth('revision')"><col v-if="isBomColumnVisible('remark')" class="is-remark" :style="bomColumnWidth('remark')"><col v-if="isBomColumnVisible('brand')" class="is-brand" :style="bomColumnWidth('brand')">
           <col v-if="isBomColumnVisible('material')" class="is-material" :style="bomColumnWidth('material')"><col v-if="isBomColumnVisible('surfaceTreatment')" class="is-surface" :style="bomColumnWidth('surfaceTreatment')"><col v-if="isBomColumnVisible('heatTreatment')" class="is-heat" :style="bomColumnWidth('heatTreatment')"><col v-if="isBomColumnVisible('weight')" class="is-weight" :style="bomColumnWidth('weight')"><col v-if="isBomColumnVisible('quantity')" class="is-quantity" :style="bomColumnWidth('quantity')"><col v-if="isBomColumnVisible('quantityReference')" class="is-quantity-reference" :style="bomColumnWidth('quantityReference')"><col v-if="isBomColumnVisible('attachments')" :style="bomColumnWidth('attachments')"><col v-if="isBomColumnVisible('drawing')" class="is-drawing-audit" :style="bomColumnWidth('drawing')">
           <col v-if="isBomColumnVisible('issue')" class="is-source" :style="bomColumnWidth('issue')"><col v-if="isBomColumnVisible('dataStatus')" class="is-data-status" :style="bomColumnWidth('dataStatus')">
@@ -5086,13 +5130,14 @@ async function submitBatchUpdate() {
       <div v-if="relationLoading" class="pdm-empty-info pdm-material-relation-loading">正在核对关联配置与 BOM…</div>
       <div v-else class="pdm-material-relation-workspace">
         <section class="pdm-material-relation-pane" aria-label="主物料明细">
-          <header><strong>主物料明细</strong><span>共 {{ relationMainRows.length }} 条来源行</span></header><button type="button" class="pdm-secondary-action" :disabled="!selectedRelationBatchIds.length" @click="applyRelationBatch">应用当前选配到勾选主料</button>
+          <header><strong>主物料明细</strong><span>共 {{ relationMainRows.length }} 条来源行</span></header>
+          <p class="pdm-material-relation-help">{{ selectedRelationBatchIds.length ? `已勾选 ${selectedRelationBatchIds.length} 条，保存时自动应用右侧当前选配，各自主料数量独立计算；未勾选主料保持不变。` : '可勾选关联配置、候选物料及数量规则完全一致的主料，一次保存自动应用当前选配；不勾选时保存当前及已编辑主料。' }}</p>
           <div class="pdm-material-relation-table-wrap">
             <table class="pdm-edit-table pdm-material-relation-main-table">
-              <thead><tr><th><input type="checkbox" aria-label="全选关联主料" :checked="relationMainRows.length > 0 && selectedRelationBatchIds.length === relationMainRows.length" @change="selectedRelationBatchIds = ($event.target as HTMLInputElement).checked ? relationMainRows.map(item => item.id!) : []"></th><th>物料编码</th><th>物料名称</th><th>型号</th><th>数量</th><th>状态</th></tr></thead>
+              <thead><tr><th><input type="checkbox" aria-label="全选关联主料" title="仅勾选与右侧当前主料关联配置和候选物料完全一致的主料" :checked="allCompatibleRelationMainsSelected" :disabled="relationApplying || !compatibleRelationMainIds.length" @change="selectedRelationBatchIds = ($event.target as HTMLInputElement).checked ? [...compatibleRelationMainIds] : []"></th><th>物料编码</th><th>物料名称</th><th>型号</th><th>数量</th><th>状态</th></tr></thead>
               <tbody>
-                <tr v-for="main in relationMainRows" :key="main.id" :class="{ 'is-selected': main.id === selectedRelationMainId }" tabindex="0" @click="selectedRelationMainId = main.id ?? ''" @keydown.enter="selectedRelationMainId = main.id ?? ''">
-                  <td><input v-model="selectedRelationBatchIds" type="checkbox" :value="main.id" :aria-label="`勾选主料 ${main.drawingNumber} 第${main.sequence}行`" @click.stop></td><td :title="main.drawingNumber" v-stocked-material="main.drawingNumber">{{ main.drawingNumber || '—' }}</td><td :title="main.name" v-stocked-material="main.drawingNumber">{{ main.name || '—' }}</td><td :title="main.specification">{{ main.specification || '—' }}</td><td>{{ main.quantity }} {{ u9UnitName(main.unit) }}</td><td><span class="pdm-material-relation-status" :class="`is-${relationMainStatus(main.id ?? '')}`">{{ relationMainStatus(main.id ?? '') }}</span></td>
+                <tr v-for="main in relationMainRows" :key="main.id" :class="{ 'is-selected': main.id === selectedRelationMainId }" tabindex="0" @click="!relationApplying && (selectedRelationMainId = main.id ?? '')" @keydown.enter="!relationApplying && (selectedRelationMainId = main.id ?? '')">
+                  <td><input type="checkbox" :value="main.id" :checked="selectedRelationBatchIds.includes(main.id!)" :disabled="relationApplying || !canBatchSelectRelationMain(main.id!)" :title="canBatchSelectRelationMain(main.id!) ? '保存时自动应用当前选配' : '关联配置或候选物料不同，不能同时勾选'" :aria-label="`勾选主料 ${main.drawingNumber} 第${main.sequence}行`" @click.stop @change="toggleRelationBatchMain(main.id!, ($event.target as HTMLInputElement).checked)"></td><td :title="main.drawingNumber" v-stocked-material="main.drawingNumber">{{ main.drawingNumber || '—' }}</td><td :title="main.name" v-stocked-material="main.drawingNumber">{{ main.name || '—' }}</td><td :title="main.specification">{{ main.specification || '—' }}</td><td>{{ main.quantity }} {{ u9UnitName(main.unit) }}</td><td><span class="pdm-material-relation-status" :class="`is-${relationMainStatus(main.id ?? '')}`">{{ relationMainStatus(main.id ?? '') }}</span></td>
                 </tr>
                 <tr v-if="!relationMainRows.length"><td colspan="5" class="pdm-empty-info">当前 BOM 没有已发布关联配置的主物料。</td></tr>
               </tbody>
@@ -5103,20 +5148,20 @@ async function submitBatchUpdate() {
           <header><strong>关联物料明细</strong><span v-if="selectedRelationMainCheck">配置 V{{ selectedRelationMainCheck.revisionVersion }}</span></header>
           <div v-if="!selectedRelationMainRow" class="pdm-material-relation-empty"><strong>请选择主物料</strong><span>选中左侧主物料后，这里显示对应的关联物料。</span></div>
           <div v-else-if="!selectedRelationMainCheck" class="pdm-material-relation-empty"><strong>暂无关联物料配置</strong><span>该主物料尚未发布关联配置。</span></div>
-          <div v-else class="pdm-material-relation-groups">
+          <div v-else :key="selectedRelationMainCheck.mainBomItemId" class="pdm-material-relation-groups">
             <div class="pdm-relation-allocation-editor" v-if="selectedRelationAllocation && selectedRelationMainCheck">
               <div class="pdm-toolbar"><button type="button" class="pdm-secondary-action" @click="unifyRelationAllocations" :disabled="allocationsFor(selectedRelationMainId).length === 1">统一选配</button><button type="button" class="pdm-secondary-action" @click="addRelationAllocation()">拆分组合</button><button type="button" class="pdm-secondary-action" @click="addRelationAllocation(true)">复制组合</button><button type="button" class="pdm-secondary-action" :disabled="allocationsFor(selectedRelationMainId).length === 1" @click="removeRelationAllocation">删除组合</button></div>
-              <nav class="pdm-tabs" aria-label="主料配置组合"><button v-for="allocation in allocationsFor(selectedRelationMainId)" :key="allocation.id" type="button" class="pdm-secondary-action" :class="{ 'is-active': allocation.id === selectedRelationAllocation.id }" @click="selectedRelationAllocations[selectedRelationMainId] = allocation.id">{{ allocation.name }} · {{ allocation.quantity }}</button></nav>
-              <div class="pdm-toolbar"><label>组合名称<input v-model.trim="selectedRelationAllocation.name" maxlength="80" aria-label="组合名称"></label><label>分配数量<input v-quantity="relationRequiresWhole(selectedRelationMainId)" v-model.number="selectedRelationAllocation.quantity" type="number" min="0.0001" step="any" aria-label="组合分配数量"></label><span :class="{ 'pdm-relation-allocation-warning': !allocationTotalValid(selectedRelationMainId) }">已分配 {{ formatQuantity(allocationsFor(selectedRelationMainId).reduce((sum, item) => sum + item.quantity, 0)) }} / 主料 {{ selectedRelationMainCheck.mainQuantity }}；配件按当前组合数量计算</span></div>
+              <nav class="pdm-tabs" aria-label="主料配置组合"><button v-for="allocation in allocationsFor(selectedRelationMainId)" :key="allocation.id" type="button" class="pdm-secondary-action" :class="{ 'is-active': allocation.id === selectedRelationAllocation.id }" @click="selectedRelationAllocations[selectedRelationMainId] = allocation.id" :disabled="relationApplying">{{ allocation.name }} · {{ allocation.quantity }}</button></nav>
+              <div class="pdm-toolbar"><label>组合名称<input v-model.trim="selectedRelationAllocation.name" maxlength="80" aria-label="组合名称" :disabled="relationApplying"></label><label>分配数量<input v-quantity="relationRequiresWhole(selectedRelationMainId)" v-model.number="selectedRelationAllocation.quantity" type="number" min="0.0001" step="any" aria-label="组合分配数量" :disabled="relationApplying"></label><span :class="{ 'pdm-relation-allocation-warning': !allocationTotalValid(selectedRelationMainId) }">已分配 {{ formatQuantity(allocationsFor(selectedRelationMainId).reduce((sum, item) => sum + item.quantity, 0)) }} / 主料 {{ selectedRelationMainCheck.mainQuantity }}；配件按当前组合数量计算</span></div>
             </div>
             <section v-for="group in selectedRelationMainCheck.groups" :key="group.groupId" class="pdm-material-relation-group" :class="{ 'is-incomplete': !relationGroupReviewed(selectedRelationMainCheck.mainBomItemId, group) }">
-              <div class="pdm-material-relation-group-title"><div><strong>{{ group.groupName }}</strong></div><div class="pdm-material-relation-group-actions"><div class="pdm-material-relation-no-accessory"><button type="button" class="pdm-secondary-action pdm-material-relation-group-button pdm-material-relation-review-button" :disabled="!relationNoAccessory(selectedRelationMainCheck.mainBomItemId, group.groupId)" @click="reopenRelationGroup(selectedRelationMainCheck.mainBomItemId, group.groupId)">重新核对</button></div><button type="button" class="pdm-material-relation-none-button pdm-material-relation-group-button" :disabled="relationNoAccessory(selectedRelationMainCheck.mainBomItemId, group.groupId)" @click="confirmRelationNoAccessory(selectedRelationMainCheck.mainBomItemId, group.groupId)">无需配套</button><button type="button" class="pdm-secondary-action pdm-material-relation-clear-button pdm-material-relation-group-button" :disabled="!relationChoice(selectedRelationMainCheck.mainBomItemId, group.groupId).length" @click="updateRelationChoice(selectedRelationMainCheck.mainBomItemId, group.groupId, [])">清除选择</button></div></div>
+              <div class="pdm-material-relation-group-title"><div><strong>{{ group.groupName }}</strong></div><div class="pdm-material-relation-group-actions"><div class="pdm-material-relation-no-accessory"><button type="button" class="pdm-secondary-action pdm-material-relation-group-button pdm-material-relation-review-button" :disabled="relationApplying || !relationNoAccessory(selectedRelationMainCheck.mainBomItemId, group.groupId)" @click="reopenRelationGroup(selectedRelationMainCheck.mainBomItemId, group.groupId)">重新核对</button></div><button type="button" class="pdm-material-relation-none-button pdm-material-relation-group-button" :disabled="relationApplying || relationNoAccessory(selectedRelationMainCheck.mainBomItemId, group.groupId)" @click="confirmRelationNoAccessory(selectedRelationMainCheck.mainBomItemId, group.groupId)">无需配套</button><button type="button" class="pdm-secondary-action pdm-material-relation-clear-button pdm-material-relation-group-button" :disabled="relationApplying || !relationChoice(selectedRelationMainCheck.mainBomItemId, group.groupId).length" @click="updateRelationChoice(selectedRelationMainCheck.mainBomItemId, group.groupId, [])">清除选择</button></div></div>
               <div class="pdm-material-relation-option-list">
                 <table class="pdm-edit-table" aria-label="关联物料候选列表">
                   <thead><tr><th>选择</th><th>名称</th><th>型号</th><th>品牌</th><th>选型建议</th><th>数量</th></tr></thead>
                   <tbody>
                     <tr v-for="option in group.options" :key="option.id" :class="{ 'is-selected': relationChoice(selectedRelationMainCheck.mainBomItemId, group.groupId).includes(option.id), 'is-preferred': option.isDefault }" @click="toggleRelationOption(selectedRelationMainCheck.mainBomItemId, group, option.id)">
-                      <td><input :type="isSingleRelationGroup(group) ? 'radio' : 'checkbox'" :name="`relation-${selectedRelationMainCheck.mainBomItemId}-${group.groupId}`" :checked="relationChoice(selectedRelationMainCheck.mainBomItemId, group.groupId).includes(option.id)" :aria-label="`选择关联物料 ${option.materialCode}`" @click.stop @change="toggleRelationOption(selectedRelationMainCheck.mainBomItemId, group, option.id)"></td>
+                      <td><input :type="isSingleRelationGroup(group) ? 'radio' : 'checkbox'" :name="`relation-${selectedRelationMainCheck.mainBomItemId}-${group.groupId}`" :disabled="relationApplying" :checked="relationChoice(selectedRelationMainCheck.mainBomItemId, group.groupId).includes(option.id)" :aria-label="`选择关联物料 ${option.materialCode}`" @click.stop @change="toggleRelationOption(selectedRelationMainCheck.mainBomItemId, group, option.id)"></td>
                       <td v-stocked-material="option.materialCode" :title="option.materialName"><span v-if="option.isDefault" class="pdm-material-relation-preferred">优先</span>{{ option.materialName || '—' }}</td><td :title="option.specification || ''">{{ option.specification || '—' }}</td><td :title="option.brand || ''">{{ option.brand || '—' }}</td><td :title="option.selectionAdvice || ''">{{ option.selectionAdvice || '—' }}</td><td :title="relationQuantityText(group, option.id, selectedRelationAllocation?.quantity ?? selectedRelationMainCheck.mainQuantity)">{{ relationQuantityText(group, option.id, selectedRelationAllocation?.quantity ?? selectedRelationMainCheck.mainQuantity) }}</td>
                     </tr>
                   </tbody>
@@ -5455,6 +5500,7 @@ async function submitBatchUpdate() {
 .pdm-bom-manager-panel :deep(.pdm-bom-table th),
 .pdm-bom-manager-panel :deep(.pdm-bom-table td) { min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-left: 2px; padding-right: 2px; }
 .pdm-bom-manager-panel :deep(.pdm-bom-table th) { white-space: normal; overflow-wrap: anywhere; }
+:deep(.pdm-bom-sequence-value) { width:auto!important; min-width:0!important; padding-inline:0!important; }
 .pdm-bom-manager-panel :deep(.pdm-bom-row-actions) { flex-wrap: nowrap; gap: 2px; }
 .pdm-bom-manager-panel :deep(.pdm-bom-table tbody td input:not([type="checkbox"])),
 .pdm-bom-manager-panel :deep(.pdm-bom-table tbody td select) { box-sizing:border-box; height:24px; min-height:0; max-height:24px; padding-top:0; padding-bottom:0; vertical-align:middle; }

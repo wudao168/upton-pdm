@@ -298,10 +298,137 @@ it('同料号汇总包含两个来源时逐行显示真实数量，并支持勾�
   expect(wrapper.findAll('.pdm-material-relation-main-table tbody tr').map(row=>row.findAll('td')[4]!.text())).toEqual(['1 个','1 个'])
   await wrapper.get('input[aria-label="选择关联物料 ACC"]').setValue(true)
   await wrapper.get('input[aria-label="全选关联主料"]').setValue(true)
-  await wrapper.findAll('button').find(button=>button.text()==='应用当前选配到勾选主料')!.trigger('click')
+  expect(wrapper.findAll('button').some(button=>button.text()==='应用当前选配到勾选主料')).toBe(false)
   await wrapper.findAll('button').find(button=>button.text()==='保存核对结果')!.trigger('click');await flushPromises()
   expect(materialApi.applyMaterialRelations.mock.calls[0]![1].map((item:{choices:Array<{optionIds:string[]}>})=>item.choices[0]!.optionIds)).toEqual([['shared-option'],['shared-option']])
   wrapper.unmount()
+})
+
+function relationIsolationChecks() {
+  return ['main-a', 'main-b', 'main-c'].map((id, index) => ({ mainBomItemId: id, bomSequence: index + 1,
+    mainMaterialCode: index === 2 ? 'OTHER' : 'SAME', mainMaterialName: '独立主料', mainQuantity: index + 2,
+    templateId: 'template', revisionId: index === 2 ? 'different-revision' : 'revision', revisionVersion: 1, isComplete: false,
+    groups: [{ groupId: 'panel', groupName: '面板', isRequired: true, selectionMode: 'Single' as const, maxSelection: 1,
+      isComplete: false, status: '待核对', expectedQuantity: 0, actualQuantity: 0, selectedOptionIds: [index === 1 ? 'B' : 'A'],
+      options: ['A', 'B'].map(option => ({ id: option, materialId: option, materialCode: option, materialName: `面板${option}`,
+        materialKind: 'Standard' as const, unitCode: '001', quantityMode: 'PerMainQuantity' as const, quantityPerSet: 1, isDefault: false, sortOrder: 1 })) }] }))
+}
+
+async function openRelationIsolationFixture(checks = relationIsolationChecks()) {
+  materialApi.applyMaterialRelations.mockClear()
+  const result: MaterialRelationCompleteness = { projectId: 'project', isComplete: false, mainMaterialCount: checks.length,
+    incompleteGroupCount: checks.length, mainMaterials: checks }
+  materialApi.getMaterialRelationCompleteness.mockResolvedValue(result)
+  materialApi.applyMaterialRelations.mockResolvedValue(result)
+  const wrapper = mount(BomManager, { props: { standard: checks.map(check => ({ id: check.mainBomItemId, sequence: check.bomSequence,
+    drawingNumber: check.mainMaterialCode, name: check.mainMaterialName, quantity: check.mainQuantity, unit: '001', revision: 'W1', complete: true })),
+    nonStandard: [], electrical: [], declarations: [], pending: false, editable: true, token: 'token', projectId: 'project', requestedBomKind: 'Standard' } })
+  await flushPromises(); await wrapper.get('.pdm-bom-relation-action').trigger('click'); await flushPromises()
+  return wrapper
+}
+
+it('保存核对时自动应用到勾选主料，数量各自计算且不提交未勾选主料', async () => {
+  const wrapper = await openRelationIsolationFixture()
+  try {
+    await wrapper.get('input[aria-label="选择关联物料 B"]').setValue(true)
+    await wrapper.get('input[aria-label="全选关联主料"]').setValue(true)
+    expect(wrapper.get('input[aria-label="勾选主料 OTHER 第3行"]').attributes('disabled')).toBeDefined()
+    await wrapper.findAll('button').find(button => button.text() === '保存核对结果')!.trigger('click'); await flushPromises()
+    const payload = materialApi.applyMaterialRelations.mock.calls[0]![1]
+    expect(payload.map((item: { mainBomItemId: string }) => item.mainBomItemId)).toEqual(['main-a', 'main-b'])
+    expect(payload.map((item: { choices: Array<{ optionIds: string[] }> }) => item.choices[0]!.optionIds)).toEqual([['B'], ['B']])
+  } finally { wrapper.unmount() }
+})
+
+it('未勾选时只保存当前编辑行，不重写另一个同料号未核对实例', async () => {
+  const checks = relationIsolationChecks(), original = JSON.stringify(checks[1])
+  const wrapper = await openRelationIsolationFixture(checks)
+  try {
+    await wrapper.get('input[aria-label="选择关联物料 B"]').setValue(true)
+    await wrapper.findAll('button').find(button => button.text() === '保存核对结果')!.trigger('click'); await flushPromises()
+    const payload = materialApi.applyMaterialRelations.mock.calls[0]![1]
+    expect(payload).toHaveLength(1)
+    expect(payload[0].mainBomItemId).toBe('main-a')
+    expect(JSON.stringify(checks[1])).toBe(original)
+  } finally { wrapper.unmount() }
+})
+
+it('当前选配可只应用到另一个勾选实例，未勾选的来源主料不保存', async () => {
+  const wrapper = await openRelationIsolationFixture()
+  try {
+    await wrapper.get('input[aria-label="选择关联物料 A"]').setValue(true)
+    await wrapper.get('input[aria-label="勾选主料 SAME 第2行"]').setValue(true)
+    expect(wrapper.get('.pdm-material-relation-groups').text()).toContain('1 × 2 = 2')
+    await wrapper.findAll('button').find(button => button.text() === '保存核对结果')!.trigger('click'); await flushPromises()
+    const payload = materialApi.applyMaterialRelations.mock.calls[0]![1]
+    expect(payload).toHaveLength(1)
+    expect(payload[0].mainBomItemId).toBe('main-b')
+    expect(payload[0].choices[0].optionIds).toEqual(['A'])
+  } finally { wrapper.unmount() }
+})
+
+it.each(['revision', 'material', 'quantity'] as const)('关联%s不一致时禁止同时勾选', async difference => {
+  const checks = relationIsolationChecks()
+  if (difference === 'revision') checks[1]!.revisionId = 'other-revision'
+  if (difference === 'material') checks[1]!.groups[0]!.options[0]!.materialCode = 'OTHER-ACCESSORY'
+  if (difference === 'quantity') checks[1]!.groups[0]!.options[0]!.quantityPerSet = 2
+  const wrapper = await openRelationIsolationFixture(checks)
+  try {
+    await wrapper.get('input[aria-label="勾选主料 SAME 第1行"]').setValue(true)
+    expect(wrapper.get('input[aria-label="勾选主料 SAME 第2行"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('input[aria-label="全选关联主料"]').setValue(true)
+    expect((wrapper.get('input[aria-label="勾选主料 SAME 第2行"]').element as HTMLInputElement).checked).toBe(false)
+  } finally { wrapper.unmount() }
+})
+
+it('同配置两条实例选配不同时反复切换仍显示各自的真实单选值', async () => {
+  const wrapper = await openRelationIsolationFixture()
+  try {
+    for (let round = 0; round < 3; round++) {
+      await wrapper.findAll('.pdm-material-relation-main-table tbody tr')[1]!.trigger('click')
+      expect((wrapper.get('input[aria-label="选择关联物料 B"]').element as HTMLInputElement).checked).toBe(true)
+      expect((wrapper.get('input[aria-label="选择关联物料 A"]').element as HTMLInputElement).checked).toBe(false)
+      expect((wrapper.get('input[aria-label="组合分配数量"]').element as HTMLInputElement).value).toBe('3')
+      await wrapper.findAll('.pdm-material-relation-main-table tbody tr')[0]!.trigger('click')
+      expect((wrapper.get('input[aria-label="选择关联物料 A"]').element as HTMLInputElement).checked).toBe(true)
+      expect((wrapper.get('input[aria-label="选择关联物料 B"]').element as HTMLInputElement).checked).toBe(false)
+      expect((wrapper.get('input[aria-label="组合分配数量"]').element as HTMLInputElement).value).toBe('2')
+    }
+  } finally { wrapper.unmount() }
+})
+
+it('批量组合会产生计件小数时阻止保存，目标实例原配置和数量不变', async () => {
+  const warning = vi.spyOn(ElMessage, 'warning')
+  const wrapper = await openRelationIsolationFixture()
+  try {
+    await wrapper.findAll('button').find(button => button.text() === '拆分组合')!.trigger('click')
+    await wrapper.get('input[aria-label="选择关联物料 B"]').setValue(true)
+    await wrapper.get('input[aria-label="全选关联主料"]').setValue(true)
+    await wrapper.findAll('button').find(button => button.text() === '保存核对结果')!.trigger('click'); await flushPromises()
+    expect(materialApi.applyMaterialRelations).not.toHaveBeenCalled()
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('计件小数'))
+    await wrapper.findAll('.pdm-material-relation-main-table tbody tr')[1]!.trigger('click')
+    expect((wrapper.get('input[aria-label="组合分配数量"]').element as HTMLInputElement).value).toBe('3')
+    expect(wrapper.get('[aria-label="主料配置组合"]').text()).toContain('统一配置 · 3')
+  } finally { wrapper.unmount(); warning.mockRestore() }
+})
+
+it('保存关联核对期间锁定选项、数量和主料切换，避免新编辑被返回结果覆盖', async () => {
+  const wrapper = await openRelationIsolationFixture()
+  let complete!: (result: MaterialRelationCompleteness) => void
+  const pending = new Promise<MaterialRelationCompleteness>(resolve => { complete = resolve })
+  materialApi.applyMaterialRelations.mockImplementationOnce(() => pending)
+  try {
+    await wrapper.get('input[aria-label="选择关联物料 B"]').setValue(true)
+    await wrapper.findAll('button').find(button => button.text() === '保存核对结果')!.trigger('click'); await flushPromises()
+    expect(wrapper.get('input[aria-label="选择关联物料 A"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('input[aria-label="组合分配数量"]').attributes('disabled')).toBeDefined()
+    await wrapper.findAll('.pdm-material-relation-main-table tbody tr')[1]!.trigger('click')
+    expect(wrapper.findAll('.pdm-material-relation-main-table tbody tr')[0]!.classes()).toContain('is-selected')
+    complete(await materialApi.getMaterialRelationCompleteness('project', 'token'))
+    await flushPromises()
+    expect(materialApi.applyMaterialRelations).toHaveBeenCalledTimes(1)
+  } finally { wrapper.unmount() }
 })
 
 it('BOM倍率默认使用当前项目数量，允许手动保存，并显示手动值及精简分类页签', async () => {

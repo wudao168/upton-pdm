@@ -396,7 +396,7 @@ const overviewAlerts = computed(() => [
   <section class="pdm-workbench" aria-label="工作台主页面">
     <div class="pdm-overview-layout">
       <section class="pdm-panel pdm-overview-status" aria-label="项目状态与下一步">
-        <header><span><CheckCircle2 :size="18" /></span><h2>项目状态与下一步</h2><p>{{ projectStageLabel }}阶段 · {{ projectHealth.label }} · 项目进度 {{ projectProgress === null ? '—' : `${projectProgress}%` }} · 计划完成 {{ projectFinish }}</p><button class="pdm-overview-refresh pdm-text-action" type="button" :disabled="refreshingOverview" aria-label="刷新项目概览" title="自动每5分钟更新，也可手动刷新" @click="loadOperationalSummary"><RefreshCw :size="13" />{{ refreshingOverview ? '刷新中' : '刷新' }}</button></header>
+        <header><span><CheckCircle2 :size="18" /></span><h2>项目状态与下一步</h2><p>{{ projectStageLabel }}阶段 · {{ projectHealth.label }} · 项目进度 {{ projectProgress === null ? '—' : `${projectProgress}%` }} · 计划完成 {{ projectFinish }}</p><button class="pdm-overview-refresh pdm-text-action" type="button" :disabled="refreshingOverview" aria-label="刷新项目概览" title="自动每5分钟更新，也可手动刷新" @click="loadOperationalSummary"><RefreshCw :size="13" />刷新</button></header>
         <div class="pdm-overview-status__body">
           <OverviewTimeline :plan="activePlan" :baseline="initialBaseline" :baseline-unavailable="baselineUnavailable" :progress-tone="projectHealth.tone" @open-task="taskId => emit('projectPlan', taskId)" />
         </div>

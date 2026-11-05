@@ -95,7 +95,9 @@ export function installColumnResize(app: App, owner: Document = document) {
     return table.store.states.columns.value.map(column => JSON.stringify([column.property, column.type, label(column.label ?? '')]))
   }
   function htmlSchema(structure: ReturnType<typeof htmlHeaders>) {
-    return [...structure.positions].map(([cell, position]) => JSON.stringify([label(cell.textContent ?? ''), position.start, position.span, cell.rowSpan]))
+    const columns = [...structure.positions].map(([cell, position]) => JSON.stringify([label(cell.textContent ?? ''), position.start, position.span, cell.rowSpan]))
+    const compact = structure.positions.keys().next().value?.closest('table')?.dataset.pdmCompactColumns
+    return compact ? [...columns, `compact:${compact}`] : columns
   }
   function applyGrid(root: HTMLElement, widths: number[], gantt: boolean) {
     const property = gantt ? '--pdm-resized-gantt-columns' : '--pdm-resized-list-columns'
@@ -104,13 +106,18 @@ export function installColumnResize(app: App, owner: Document = document) {
     if (gantt) root.style.setProperty('--pdm-resized-gantt-width', `${widths.reduce((sum, width) => sum + width, 0)}px`)
     root.classList.add(gantt ? 'pdm-columns-resized' : 'pdm-resized-grid-list')
   }
-  function applyHtml(table: HTMLTableElement, structure: ReturnType<typeof htmlHeaders>, values: number[]) {
+  function applyHtml(table: HTMLTableElement, structure: ReturnType<typeof htmlHeaders>, values: number[], compact: number[] = []) {
     let group = table.querySelector(':scope > colgroup')
     if (!group) { group = owner.createElement('colgroup'); table.prepend(group) }
     if (group.children.length !== structure.count) group.replaceChildren(...values.map(() => owner.createElement('col')))
-    const total = values.reduce((sum, value) => sum + value, 0)
-    const width = (start: number, span: number) => `${values.slice(start, start + span).reduce((sum, value) => sum + value, 0) / total * 100}%`
-    Array.from(group.children).forEach((column, index) => { (column as HTMLElement).style.width = width(index, 1) })
+    const total = values.slice(compact.length).reduce((sum, value) => sum + value, 0)
+    const fixed = compact.reduce((sum, value) => sum + value, 0)
+    const width = (start: number, span: number) => {
+      const pixels = compact.slice(start, start + span).reduce((sum, value) => sum + value, 0)
+      const ratio = values.slice(start, start + span).reduce((sum, value, offset) => sum + (start + offset < compact.length ? 0 : value), 0) / total
+      return compact.length ? ratio ? `calc(${ratio * 100}% + ${pixels - ratio * fixed}px)` : `${pixels}px` : `${ratio * 100}%`
+    }
+    Array.from(group.children).forEach((column, index) => { (column as HTMLElement).style.setProperty('width', width(index, 1), 'important') })
     for (const [cell, position] of structure.positions) cell.style.width = width(position.start, position.span)
     table.style.setProperty('width', '100%', 'important')
     table.style.setProperty('min-width', '0', 'important')
@@ -124,8 +131,13 @@ export function installColumnResize(app: App, owner: Document = document) {
       if (drag?.root === root || root.closest('.el-table')) continue
       if (root instanceof HTMLTableElement) {
         const structure = htmlHeaders(root)
-        const values = savedWidths(preferenceKey(root, htmlSchema(structure)), structure.count)
+        const schema = htmlSchema(structure)
+        const values = savedWidths(preferenceKey(root, schema), structure.count)
         if (values) applyHtml(root, structure, values)
+        else if (root.dataset.pdmCompactColumns) {
+          const previous = savedWidths(preferenceKey(root, schema.slice(0, -1)), structure.count)
+          if (previous) applyHtml(root, structure, previous, root.dataset.pdmCompactColumns.split(',').map(Number))
+        }
       } else {
         const gantt = root.classList.contains('pdm-gantt-table')
         const head = root.querySelector(gantt ? '.pdm-gantt-info-head' : '.pdm-project-browser-table-head')

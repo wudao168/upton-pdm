@@ -536,7 +536,7 @@ watch(() => props.active, (active, previous) => {
     <div v-if="Object.keys(detailErrors).length" class="bom-overview__error" role="alert">部分项目BOM读取失败：{{ hierarchyProjects.filter(project => detailErrors[project.id]).map(project => project.code).join('、') }}。其他项目仍可查看，请刷新重试。</div>
     <div class="bom-overview__generation">
       <span v-if="editable">{{ Object.keys(detailErrors).length && !eligibleHeaderRows.length ? '项目BOM读取失败，暂无法统计自动流程' : missingHeaderCount ? `待BOM发布后自动生成并同步 ${missingHeaderCount} 个BOM料号` : pendingHeaderCount ? `${pendingHeaderCount} 个BOM料号尚未完成自动处理，请查看各行状态` : '全部BOM料号已由U9C回写' }}</span>
-      <button type="button" class="pdm-secondary-action" aria-label="刷新多级BOM" :disabled="loading || !!syncingRowKey || !token" @click="refreshOverview">{{ loading ? '刷新中…' : '刷新' }}</button>
+      <button type="button" class="pdm-secondary-action" aria-label="刷新多级BOM" :disabled="loading || !!syncingRowKey || !token" @click="refreshOverview">刷新</button>
     </div>
 
     <div class="bom-overview__table-wrap" @scroll.passive="scheduleVisibleU9Check">

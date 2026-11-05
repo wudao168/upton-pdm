@@ -52,7 +52,7 @@ watch(() => props.token, () => void load(), { immediate: true })
 
 <template>
   <section v-loading="loading" class="stocked-settings pdm-panel" aria-label="常备件设置">
-    <header><strong>常备件同步与提醒</strong><div class="stocked-settings__actions"><el-button :loading="loading" :disabled="saving || synchronizing" @click="load">刷新设置</el-button><el-button type="primary" :loading="synchronizing" :disabled="loading || saving || !value" @click="synchronize">{{ synchronizing ? '同步中…' : '立即同步' }}</el-button></div></header>
+    <header><strong>常备件同步与提醒</strong><div class="stocked-settings__actions"><el-button :loading="loading" :disabled="saving || synchronizing" @click="load">刷新</el-button><el-button type="primary" :loading="synchronizing" :disabled="loading || saving || !value" @click="synchronize">{{ synchronizing ? '同步中…' : '立即同步' }}</el-button></div></header>
     <p v-if="error" class="stocked-settings__error" role="alert">{{ error }}</p>
     <p v-if="synchronizing" class="field-help" role="status">正在从U9C回读库存规划、现存量及近3个月请购采购信息，请稍候…</p>
     <el-form v-if="value" label-position="top" :disabled="synchronizing" @submit.prevent="save">

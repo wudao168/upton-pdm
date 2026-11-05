@@ -184,7 +184,7 @@ onBeforeUnmount(() => { disposed = true; generation++; projectGeneration++; docu
 </script>
 <template>
   <div class="mobile-office">
-    <header class="mobile-office-header"><div><strong>UPLM</strong><span>移动办公</span></div><small v-if="session">{{ session.activeCompanyName }} · {{ session.displayName }}</small><button v-if="session" :disabled="refreshing" @click="refresh">{{ refreshing ? '刷新中…' : '刷新' }}</button></header>
+    <header class="mobile-office-header"><div><strong>UPLM</strong><span>移动办公</span></div><small v-if="session">{{ session.activeCompanyName }} · {{ session.displayName }}</small><button v-if="session" :disabled="refreshing" @click="refresh">刷新</button></header>
     <main class="mobile-office-main">
       <p v-if="error" class="mobile-error" role="alert">{{ error }}</p><p v-if="notice" class="mobile-notice" role="status">{{ notice }}</p>
       <section v-if="!session" class="mobile-signin"><h1>UPLM 员工移动办公</h1><p>待办 · 审批 · 项目 · OPL · 工时</p><p v-if="pending" role="status">正在识别钉钉员工身份…</p><button v-else class="pdm-primary-action" @click="signIn">重新进入</button><p>请从钉钉工作台打开，首次使用需由管理员绑定现有UPLM账号。</p></section>

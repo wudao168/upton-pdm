@@ -39,6 +39,29 @@ function pointer(element: Element | Document, type: string, x: number) {
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; window.localStorage.clear(); vi.restoreAllMocks() })
 
 describe('global column resizing', () => {
+  it('BOM紧凑列兼容旧列宽，其余列保留分配；再次拖动后记忆新宽度', () => {
+    const html = '<div data-pdm-preference-scope=\'["alice","company"]\'><table class="pdm-bom-table"><thead><tr><th>选择</th><th>操作</th><th>序号</th><th>名称</th><th>型号</th></tr></thead></table></div>'
+    setup(html, 1000)
+    let headers = document.querySelectorAll('th')
+    ;[[0,100],[100,150],[250,100],[350,300],[650,350]].forEach(([left,width],index) => rect(headers[index]!,left!,width!))
+    pointer(headers[0]!, 'pointerdown', 98); pointer(document, 'pointermove', 98); pointer(document, 'pointerup', 98)
+    const compact = html.replace('class="pdm-bom-table"', 'class="pdm-bom-table" data-pdm-compact-columns="28,80,36"')
+    dispose(); setup(compact, 1000)
+    let columns = document.querySelectorAll('col')
+    expect([...columns].slice(0,3).map(col=>col.style.width)).toEqual(['28px','80px','36px'])
+    expect(Number(columns[3]!.style.width.match(/calc\(([\d.]+)%/)?.[1])).toBeCloseTo(300 / 650 * 100, 3)
+    expect(Number(columns[4]!.style.width.match(/calc\(([\d.]+)%/)?.[1])).toBeCloseTo(350 / 650 * 100, 3)
+    expect(columns[0]!.style.getPropertyPriority('width')).toBe('important')
+    headers = document.querySelectorAll('th')
+    ;[[0,28],[28,80],[108,36],[144,856*300/650],[144+856*300/650,856*350/650]].forEach(([left,width],index)=>rect(headers[index]!,left!,width!))
+    pointer(headers[0]!, 'pointerdown', 26); pointer(document, 'pointermove', 38); pointer(document, 'pointerup', 38)
+    expect(window.localStorage.length).toBe(2)
+    dispose(); setup(compact, 1000)
+    columns = document.querySelectorAll('col')
+    expect(parseFloat(columns[0]!.style.width)).toBeCloseTo(4)
+    expect(parseFloat(columns[1]!.style.width)).toBeCloseTo(6.8)
+    expect(parseFloat(columns[2]!.style.width)).toBeCloseTo(3.6)
+  })
   it('自由调整原固定列并保持表格百分比总宽', () => {
     const html = '<div data-pdm-preference-scope=\'["alice","company"]\'><table><colgroup><col data-pdm-fixed-width="50" style="width:50px"><col><col data-pdm-fixed-width="50" style="width:50px"><col></colgroup><thead><tr><th>选择</th><th>图号</th><th>等级</th><th>材质</th></tr></thead></table></div>'
     setup(html, 400)

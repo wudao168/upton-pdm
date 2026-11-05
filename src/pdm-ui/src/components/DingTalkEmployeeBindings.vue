@@ -37,7 +37,7 @@ onMounted(load)
       <el-button :disabled="pending || !view.corpId" @click="view.bindings.push({ corpId: view.corpId, userId: '', username: '' })">添加员工绑定</el-button>
       <el-button type="primary" :loading="pending" @click="save">保存员工绑定</el-button>
     </template>
-    <el-button :disabled="pending" @click="load">刷新员工绑定</el-button>
+    <el-button :disabled="pending" @click="load">刷新</el-button>
   </section>
 </template>
 <style scoped>

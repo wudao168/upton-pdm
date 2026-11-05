@@ -709,7 +709,7 @@ onBeforeUnmount(() => {
       <span class="procurement-tracking__updated" :title="hasManufacturing ? `制造数据读取：${formatDate(result?.manufacturingReadAt,true)}` : ''">{{ manufacturingOnly ? '制造读取' : '刷新' }}：{{ formatDate(manufacturingOnly ? result?.manufacturingReadAt : result?.lastSuccessfulRefreshAt, true) }}</span>
       <div class="procurement-tracking__actions">
         <el-button @click="settingsVisible = true">列设置</el-button>
-        <el-button type="primary" :loading="refreshStarting" :disabled="refreshCoolingDown" @click="refreshFromU9">立即刷新</el-button>
+        <el-button type="primary" :loading="refreshStarting" :disabled="refreshCoolingDown" @click="refreshFromU9">刷新</el-button>
         <el-button v-if="projectWritable && !manufacturingOnly" @click="openInventorySettings">库存设置</el-button>
         <el-button v-if="projectExport" :loading="exporting" :disabled="loading || !filteredItems.length || !columns.length" @click="exportExcel">导出 Excel</el-button>
       </div>

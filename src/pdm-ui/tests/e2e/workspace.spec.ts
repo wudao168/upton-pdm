@@ -4619,6 +4619,91 @@ test('released BOM rows expose linked 2D and 3D preview downloads', async ({ pag
   expect(errors).toEqual([])
 })
 
+for (const useKit of [false, true]) {
+  test(`relation review saves checked ${useKit ? 'kit' : 'material'} instances automatically and independently`, async ({ page }, testInfo) => {
+    await mockPlanCompanionPanels(page)
+    await mockBomHierarchySummary(page)
+    const errors: string[] = [], submissions: string[][] = []
+    page.on('pageerror', error => errors.push(error.message))
+    page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+    const ids = ['relation-main-a', 'relation-main-b', 'relation-main-c']
+    const choices: Record<string, string> = { [ids[0]!]: 'PANEL-A', [ids[1]!]: 'PANEL-B', [ids[2]!]: 'PANEL-A' }
+    const reviewed = new Set<string>()
+    const base = ids.map((id, index) => ({ id: useKit && index < 2 ? `child-${id}` : id, kind: 'Standard', sequence: index + 1,
+      drawingNumber: index === 2 ? 'OTHER-MAIN' : useKit ? 'KIT-BASE' : 'SAME-MAIN', name: index === 2 ? '不同关联配置主料' : '独立实例',
+      quantity: index + 2, unit: '001', specification: 'MODEL', revision: 'W1', isComplete: true,
+      ...(useKit && index < 2 ? { source: 'EngineeringKit', engineeringKitReferenceId: id, engineeringKitId: 'kit-identity',
+        engineeringKitRevisionId: 'kit-revision', engineeringKitComponentId: 'kit-component', engineeringKitCode: 'UKIT-000004', engineeringKitVersionNumber: 1 } : {}) }))
+    const kit = { id: 'kit-identity', code: 'UKIT-000004', model: 'UTJ-12-00001', name: 'HMI安装套件', brand: 'UPTON', isActive: true,
+      currentReleasedRevisionId: 'kit-revision', revisions: [{ id: 'kit-revision', versionNumber: 1, state: 'Released',
+        components: [{ id: 'kit-component', materialId: 'base-master', materialCode: 'KIT-BASE', materialName: '套件子料', materialKind: 'Standard', quantity: 1, unitCode: '001', isOptional: false, sortOrder: 1 }] }] }
+    const completeness = () => ({ projectId, isComplete: ids.every(id => reviewed.has(id)), mainMaterialCount: 3,
+      incompleteGroupCount: ids.filter(id => !reviewed.has(id)).length, mainMaterials: ids.map((id, index) => ({ mainBomItemId: id,
+        bomSequence: index + 1, mainMaterialCode: index === 2 ? 'OTHER-MAIN' : useKit ? 'UKIT-000004' : 'SAME-MAIN', mainMaterialName: '独立实例',
+        mainQuantity: index + 2, templateId: index === 2 ? 'other-template' : 'shared-template', revisionId: index === 2 ? 'other-revision' : 'shared-revision',
+        revisionVersion: 1, isComplete: reviewed.has(id), groups: [{ groupId: index === 2 ? 'other-panel' : 'panel', groupName: '面板', isRequired: true,
+          selectionMode: 'Single', maxSelection: 1, isComplete: reviewed.has(id), status: reviewed.has(id) ? '已选配' : '待核对',
+          expectedQuantity: index + 2, actualQuantity: reviewed.has(id) ? index + 2 : 0, selectedOptionIds: [choices[id]],
+          reviewDecision: reviewed.has(id) ? 'Selected' : null, accessoryBomItemIds: { [choices[id]!]: `accessory-${id}` },
+          options: ['PANEL-A', 'PANEL-B'].map(code => ({ id: code, materialId: `master-${code}`, materialCode: code, materialName: code === 'PANEL-A' ? '面板甲' : '面板乙',
+            materialKind: 'Standard', unitCode: '001', quantityMode: 'PerMainQuantity', quantityPerSet: 1, isDefault: false, sortOrder: 1 })) }] })) })
+    const bom = () => [...base, ...ids.filter(id => reviewed.has(id)).map(id => ({ id: `accessory-${id}`, kind: 'Standard', sequence: 10 + ids.indexOf(id),
+      drawingNumber: choices[id], name: choices[id] === 'PANEL-A' ? '面板甲' : '面板乙', quantity: ids.indexOf(id) + 2, unit: '001',
+      revision: 'W1', isComplete: true, source: 'MaterialRelation', relationMainBomItemId: id }))]
+    await page.route('**/api/engineering-kits**', route => route.fulfill({ json: useKit ? [kit] : [] }))
+    await page.route('**/api/material-code/resolve', route => route.fulfill({ json: [] }))
+    await page.route('**/api/projects/*/boms/Standard**', route => route.fulfill({ json: bom() }))
+    await page.route('**/api/material-relations/projects/*/completeness**', route => route.fulfill({ json: completeness() }))
+    await page.route('**/api/material-relations/projects/*/apply', async route => {
+      const body = route.request().postDataJSON() as { mainMaterials: Array<{ mainBomItemId: string; choices: Array<{ optionIds: string[] }>; allocations?: Array<{ choices: Array<{ optionIds: string[] }> }> }> }
+      submissions.push(body.mainMaterials.map(main => main.mainBomItemId))
+      for (const main of body.mainMaterials) { choices[main.mainBomItemId] = (main.choices[0] ?? main.allocations?.[0]?.choices[0])!.optionIds[0]!; reviewed.add(main.mainBomItemId) }
+      await route.fulfill({ json: completeness() })
+    })
+    await page.route('**/*jelly*.html*', route => new URL(route.request().url()).searchParams.has('import') ? route.fallback() : route.fulfill({ contentType: 'text/html', body: '<html></html>' }))
+    await page.setViewportSize({ width: 1959, height: 1080 })
+    await page.goto('/')
+    await expect(page).toHaveTitle(/PLM/)
+    const login = page.getByLabel('登录PLM')
+    await login.getByRole('textbox', { name: '账号' }).fill('admin')
+    await login.getByRole('textbox', { name: '密码' }).fill('correct-password')
+    await login.getByRole('button', { name: '登录', exact: true }).click()
+    await enterProject(page)
+    await page.getByRole('button', { name: 'BOM', exact: true }).click()
+    await page.getByRole('tab', { name: /^标准件（/ }).click()
+    await page.getByRole('button', { name: '关联物料', exact: true }).click()
+    const drawer = page.getByRole('dialog', { name: 'BOM 关联物料核对', exact: true })
+    await expect(drawer.locator('.pdm-material-relation-main-table tbody tr')).toHaveCount(3)
+    await expect(drawer.getByRole('button', { name: '应用当前选配到勾选主料', exact: true })).toHaveCount(0)
+    const mainRows = drawer.locator('.pdm-material-relation-main-table tbody tr')
+    await drawer.getByLabel('选择关联物料 PANEL-B', { exact: true }).check()
+    await drawer.getByRole('button', { name: '保存核对结果', exact: true }).click()
+    await expect.poll(() => submissions.length).toBe(1)
+    expect(submissions[0]).toEqual([ids[0]])
+    await expect(mainRows.nth(1)).toContainText('待核对')
+    await drawer.getByLabel('选择关联物料 PANEL-A', { exact: true }).check()
+    await mainRows.nth(0).getByRole('checkbox').check()
+    await mainRows.nth(1).getByRole('checkbox').check()
+    await expect(mainRows.nth(2).getByRole('checkbox')).toBeDisabled()
+    await drawer.getByRole('button', { name: '保存核对结果', exact: true }).click()
+    await expect.poll(() => submissions.length).toBe(2)
+    expect(submissions[1]).toEqual(ids.slice(0, 2))
+    await drawer.getByLabel('选择关联物料 PANEL-B', { exact: true }).check()
+    await drawer.getByRole('button', { name: '保存核对结果', exact: true }).click()
+    await expect.poll(() => submissions.length).toBe(3)
+    expect(submissions[2]).toEqual([ids[0]])
+    expect(choices[ids[1]!]).toBe('PANEL-A')
+    await mainRows.nth(1).click()
+    await expect(drawer.getByLabel('选择关联物料 PANEL-A', { exact: true })).toBeChecked()
+    await expect(drawer.getByLabel('组合分配数量')).toHaveValue('3')
+    await expect(drawer.getByLabel('关联物料明细')).toContainText('1 × 3 = 3')
+    await expect(drawer.locator('.pdm-material-relation-main-table tbody tr').nth(0)).toContainText('2')
+    expect(errors).toEqual([])
+    await expect(page.locator('vite-error-overlay')).toHaveCount(0)
+    await page.screenshot({ path: testInfo.outputPath(`relation-${useKit ? 'kit' : 'material'}-isolated.png`), fullPage: false })
+  })
+}
+
 test('related materials use a scoped right drawer for electrical BOM', async ({ page }, testInfo) => {
   await page.route(`**/api/projects/${projectId}/boms/Electrical`, route => route.fulfill({ json: [
     { id: 'bom-electrical-1', kind: 'Electrical', sequence: 1, drawingNumber: 'REAL-EL-001', name: '真实传感器', quantity: 1, unit: '件', material: null, specification: 'PNP', revision: 'A', isComplete: false },

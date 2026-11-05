@@ -134,7 +134,7 @@ describe('常备件', () => {
     await interval.setValue('6'); await interval.trigger('change')
     await wrapper.findAll('button').find(button => button.text() === '立即同步')!.trigger('click')
     expect(wrapper.find('[role="status"]').text()).toContain('正在从U9C回读')
-    expect(wrapper.findAll('button').find(button => button.text() === '刷新设置')!.attributes('disabled')).toBeDefined()
+    expect(wrapper.findAll('button').find(button => button.text() === '刷新')!.attributes('disabled')).toBeDefined()
     expect(api.refreshStockedMaterials).toHaveBeenCalledTimes(1)
     expect(api.saveStockedMaterialSettings).not.toHaveBeenCalled()
     complete(); await flushPromises()

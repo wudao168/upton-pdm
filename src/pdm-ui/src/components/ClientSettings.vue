@@ -140,7 +140,7 @@ onBeforeUnmount(() => {
         <article :class="{ 'has-recovery': (usage.recoveryFiles ?? 0) > 0 }"><small>异常恢复副本</small><strong>{{ usage.recoveryFiles ?? 0 }} 个 · {{ formatBytes(usage.recoveryBytes) }}</strong><span>{{ (usage.recoveryFiles ?? 0) > 0 ? '需管理员核对' : '无待处理' }}</span></article>
       </div>
       <div class="pdm-settings-actions pdm-client-settings-actions">
-        <button type="button" class="pdm-secondary-action" :disabled="maintenancePending || !available" @click="refreshWorkspaceUsage">刷新用量</button>
+        <button type="button" class="pdm-secondary-action" :disabled="maintenancePending || !available" @click="refreshWorkspaceUsage">刷新</button>
         <button type="button" class="pdm-secondary-action" :disabled="maintenancePending || !available || (usage.snapshotFiles ?? 0) === 0" @click="clearReusableCache">清理只读缓存</button>
       </div>
     </section>

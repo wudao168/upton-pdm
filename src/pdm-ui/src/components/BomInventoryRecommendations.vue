@@ -315,7 +315,7 @@ onBeforeUnmount(() => { ++generation; ++selectionGeneration; controller?.abort()
                   </tr></tbody>
                 </table></div>
                 <section v-if="candidate" class="bom-inventory__comparison" aria-label="替换物料对比">
-                  <header><strong>库存明细与确认</strong><button type="button" class="pdm-secondary-action" :disabled="refreshing || candidateLoading" @click="refreshCandidate">{{ refreshing ? '刷新中…' : '刷新库存' }}</button></header>
+                  <header><strong>库存明细与确认</strong><button type="button" class="pdm-secondary-action" :disabled="refreshing || candidateLoading" @click="refreshCandidate">刷新</button></header>
                   <p v-if="candidateLoading" role="status">正在核对已批准料品…</p>
                   <p v-if="candidateError" class="bom-inventory__error" role="alert">{{ candidateError }}</p>
                   <p v-if="material" class="bom-inventory__material">已批准料品：{{ material.materialCode }} · {{ material.name }}<br>型号 {{ material.specification || '—' }} · 品牌 {{ material.brand || '—' }} · 单位 {{ u9UnitName(material.unitCode) }}</p>

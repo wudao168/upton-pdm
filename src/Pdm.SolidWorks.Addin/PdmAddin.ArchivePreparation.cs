@@ -37,24 +37,13 @@ public sealed partial class PdmAddin
         try
         {
             return MergeReferencedConfigurationProperties(document, node,
-                ReadCheckInProperties(document, node, useCached: true, nativePropertyCards: cards, requireComplete: false), configurations);
+                ReadCheckInProperties(document, node, useCached: true, nativePropertyCards: cards, requireComplete: true), configurations);
         }
         catch (Exception error)
         {
-            LogDiagnostic("存档属性索引暂未完整读取，原生文件仍完整保存：" + node.FullPath, error);
-            archiveWarnings.Add(node.FileName + "：图档内容已保存，部分属性索引待补齐，可稍后刷新或维护BOM，无需重复存档。");
-            var fallback = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            lock (metadataCacheSync)
-                if (documentVersionsCache.TryGetValue(node.DocumentId ?? Guid.Empty, out var cached)
-                    && cached.Versions.FirstOrDefault()?.PropertySnapshot != null)
-                    foreach (var pair in cached.Versions.First().PropertySnapshot) fallback[pair.Key] = pair.Value;
-            try
-            {
-                foreach (var pair in ReadCheckInProperties(document, node, useCached: true, nativePropertyCards: cards))
-                    fallback[pair.Key] = pair.Value;
-            }
-            catch (Exception partialError) { LogDiagnostic("存档属性索引保留已有值：" + node.FullPath, partialError); }
-            return fallback;
+            LogDiagnostic("自定义属性读取失败，未继续存档：" + node.FullPath, error);
+            throw new InvalidOperationException("未能完整读取图档自定义属性：" + node.FileName
+                + "。本批尚未上传，原文件和修改已保留；请核对该图档的自定义属性及读取权限，技术原因已记入诊断日志。", error);
         }
     }
 

@@ -162,7 +162,7 @@ async function runInventorySyncNow() {
     await ElMessageBox.confirm(
       '立即从U9C只读获取当前组织的完整库存，并在全部成功后切换PLM库存快照？该操作不会修改U9C。',
       '确认库存全量刷新',
-      { confirmButtonText: '开始刷新', cancelButtonText: '取消' },
+      { confirmButtonText: '刷新', cancelButtonText: '取消' },
     )
   } catch { return }
   inventorySyncStarting.value = true
@@ -211,7 +211,7 @@ async function runProcurementSyncNow() {
     await ElMessageBox.confirm(
       '立即从U9C只读获取PLM有效项目范围内的请购、标准采购状态，并在全部成功后切换快照？不会查询价格、税额或财务信息，也不会修改U9C。',
       '确认采购跟踪全量刷新',
-      { confirmButtonText: '开始刷新', cancelButtonText: '取消' },
+      { confirmButtonText: '刷新', cancelButtonText: '取消' },
     )
   } catch { return }
   procurementSyncStarting.value = true
@@ -489,7 +489,7 @@ onMounted(() => {
           <SquareLoader v-if="fullSyncLoading" overlay label="正在加载自动同步状态" />
           <header class="u9-card-heading">
             <div><h2>U9C料品自动全量对账</h2><p>PLM主控研发资料及启停；每天按原料号核对U9C，保留PLM当前值并记录差异。PLM已生效的变更自动同步到U9C。</p></div>
-            <div class="u9-actions"><el-tag :type="fullSyncTagType">{{ fullSyncStatusText }}</el-tag><el-button type="primary" :loading="fullSyncStarting" @click="runFullSyncNow">立即全量同步</el-button><el-button :loading="fullSyncLoading" @click="loadFullSyncStatus">刷新状态</el-button></div>
+            <div class="u9-actions"><el-tag :type="fullSyncTagType">{{ fullSyncStatusText }}</el-tag><el-button type="primary" :loading="fullSyncStarting" @click="runFullSyncNow">立即全量同步</el-button><el-button :loading="fullSyncLoading" @click="loadFullSyncStatus">刷新</el-button></div>
           </header>
           <el-alert title="范围取自允许创建、启用且可见的分类。U9C未返回、停用或字段不一致时只记录对账差异，不覆盖PLM、不自动改变启停。库存、采购和财务数据继续由U9C主控。历史U9C来源物料经同号核对后由PLM接管。" type="info" :closable="false" show-icon />
           <dl class="full-sync-summary">
@@ -524,7 +524,7 @@ onMounted(() => {
           <SquareLoader v-if="inventorySyncLoading" overlay label="正在加载库存同步状态" />
           <header class="u9-card-heading">
             <div><h2>U9C库存自动全量刷新</h2><p>按设置周期只读刷新“料品库存”快照；只有整批成功才切换新快照，失败时继续使用上一次完整数据。</p></div>
-            <div class="u9-actions"><el-tag :type="inventorySyncTagType">{{ inventorySyncStatusText }}</el-tag><el-button type="primary" :loading="inventorySyncStarting" @click="runInventorySyncNow">立即全量刷新</el-button><el-button :loading="inventorySyncLoading" @click="loadInventorySyncStatus">刷新状态</el-button></div>
+            <div class="u9-actions"><el-tag :type="inventorySyncTagType">{{ inventorySyncStatusText }}</el-tag><el-button type="primary" :loading="inventorySyncStarting" @click="runInventorySyncNow">刷新</el-button><el-button :loading="inventorySyncLoading" @click="loadInventorySyncStatus">刷新</el-button></div>
           </header>
           <el-form label-position="top" class="u9-settings-form">
             <div class="u9-form-grid">
@@ -547,7 +547,7 @@ onMounted(() => {
           <SquareLoader v-if="procurementSyncLoading" overlay label="正在加载采购跟踪同步状态" />
           <header class="u9-card-heading">
             <div><h2>U9C采购跟踪自动全量刷新</h2><p>每15分钟只读同步PLM有效项目范围内的请购与标准采购行状态；不读取价格、税额、币种及财务信息，失败时继续使用上一次完整快照。</p></div>
-            <div class="u9-actions"><el-tag :type="procurementSyncTagType">{{ procurementSyncStatusText }}</el-tag><el-button type="primary" :loading="procurementSyncStarting" @click="runProcurementSyncNow">立即全量刷新</el-button><el-button :loading="procurementSyncLoading" @click="loadProcurementSyncStatus">刷新状态</el-button></div>
+            <div class="u9-actions"><el-tag :type="procurementSyncTagType">{{ procurementSyncStatusText }}</el-tag><el-button type="primary" :loading="procurementSyncStarting" @click="runProcurementSyncNow">刷新</el-button><el-button :loading="procurementSyncLoading" @click="loadProcurementSyncStatus">刷新</el-button></div>
           </header>
           <el-form label-position="top" class="u9-settings-form">
             <div class="u9-form-grid">
