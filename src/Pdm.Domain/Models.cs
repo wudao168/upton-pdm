@@ -950,7 +950,7 @@ public sealed record ReleasePackage(
 public sealed record DrawingDeliveryOverride(string Priority, DateOnly RequiredOn);
 
 public sealed record ReleaseVersionBinding(Guid DocumentId, Guid VersionId, string Revision, string Sha256, bool Publish,
-    string FileName = "", bool RequiresPromotion = true, string PreviousReleasedRevision = "", string TargetRevision = "");
+    string FileName = "", bool RequiresPromotion = true, string PreviousReleasedRevision = "", string TargetRevision = "", Guid? DrawingModelDocumentId = null);
 
 public sealed record AuditEntry(
     Guid Id,

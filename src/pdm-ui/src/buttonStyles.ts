@@ -22,9 +22,11 @@ export const buttonContentSelector = [
   '.pdm-global-status', '.pdm-company-switcher', '.pdm-project-code-link', '.pdm-project-switcher__display', '.pdm-project-switcher__search-icon',
   '.pdm-release-package-row', '.pdm-titlebar__sidebar-toggle',
   '.wr-next', '.pdm-plan-summary-action', '.bom-overview__link',
+  '.drawing-review-candidate',
   '[aria-label^="选择项目号"]', '.pdm-project-switcher__option',
   '.pdm-tree-row', '.pdm-tree-toggle', '.pdm-bom-cell-edit', '.pdm-gantt-cell-edit', '.pdm-gantt-resize-handle',
   '.pdm-bom-issue-button', '.pdm-bom-files-link',
+  '.pdm-bom-table tbody > tr > td:nth-child(3) > .pdm-inspect-link',
   '.el-table .caret-wrapper',
   '.bom-tree-node__select', '.bom-tree-node__toggle', '.bom-tree-node__category',
   '.pdm-project-classification__division', '.pdm-project-classification__unassigned',
@@ -55,6 +57,7 @@ const compactLabels: Record<string, string> = {
 const generatedTitles = new WeakMap<HTMLButtonElement, string>()
 
 function updateLeadingIcons(control: HTMLElement) {
+  if (control.closest('.layout-phone')) return
   const preserved = !!control.closest('.pdm-sidebar, .pdm-tree, .el-tree, [role="tree"], .el-picker-panel, .el-time-panel, .el-select, .el-cascader')
     || control.matches('.pdm-global-status') || (control instanceof HTMLButtonElement && isFoldButton(control))
   const texts = document.createTreeWalker(control, NodeFilter.SHOW_TEXT, { acceptNode: node =>
@@ -72,6 +75,7 @@ function updateLeadingIcons(control: HTMLElement) {
 }
 
 function updateButton(button: HTMLButtonElement) {
+  if (button.closest('.layout-phone')) return
   updateLeadingIcons(button)
   const fold = isFoldButton(button)
   if (fold) button.dataset.pdmFoldControl = 'true'
@@ -89,7 +93,7 @@ function updateButton(button: HTMLButtonElement) {
   if (/^(?:(?:立即|全量|正在|手动))*刷新/.test(action)) button.dataset.pdmButtonRefresh = 'true'
   else delete button.dataset.pdmButtonRefresh
   let kind = 'outline'
-  if (/^(?:确认|永久|彻底)?(?:删除|移除|清空)/.test(action)) kind = 'delete'
+  if (button.matches('.pdm-danger-action') || /^(?:确认|永久|彻底)?(?:删除|移除|清空)/.test(action)) kind = 'delete'
   else if (/^(?:新增|新建|添加|增加|创建|加入)/.test(action)) kind = 'add'
   else if (/^(?:确认|确定|保存|提交|同意|通过|批准)/.test(action)) kind = 'confirm'
   else if (button.disabled && /^(?:正在|处理中|请稍候)|中[.…]*$/.test(label)) kind = button.dataset.pdmButtonKind ?? kind

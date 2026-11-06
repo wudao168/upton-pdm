@@ -112,10 +112,11 @@ export function installColumnResize(app: App, owner: Document = document) {
     if (group.children.length !== structure.count) group.replaceChildren(...values.map(() => owner.createElement('col')))
     const total = values.slice(compact.length).reduce((sum, value) => sum + value, 0)
     const fixed = compact.reduce((sum, value) => sum + value, 0)
+    const flexibleSpace = Math.max(0, availableWidth(table.parentElement!) - fixed)
     const width = (start: number, span: number) => {
       const pixels = compact.slice(start, start + span).reduce((sum, value) => sum + value, 0)
       const ratio = values.slice(start, start + span).reduce((sum, value, offset) => sum + (start + offset < compact.length ? 0 : value), 0) / total
-      return compact.length ? ratio ? `calc(${ratio * 100}% + ${pixels - ratio * fixed}px)` : `${pixels}px` : `${ratio * 100}%`
+      return compact.length ? `${pixels + ratio * flexibleSpace}px` : `${ratio * 100}%`
     }
     Array.from(group.children).forEach((column, index) => { (column as HTMLElement).style.setProperty('width', width(index, 1), 'important') })
     for (const [cell, position] of structure.positions) cell.style.width = width(position.start, position.span)
@@ -325,6 +326,7 @@ export function installColumnResize(app: App, owner: Document = document) {
   owner.addEventListener('pointercancel', end, true)
   owner.addEventListener('click', click, true)
   owner.defaultView?.addEventListener('blur', end)
+  owner.defaultView?.addEventListener('resize', scheduleRestore)
   const stopPreferences = watch(tablePreferenceVersion, () => {
     scheduleRestore()
     for (const root of owner.querySelectorAll<HTMLElement>('.el-table')) {
@@ -343,5 +345,6 @@ export function installColumnResize(app: App, owner: Document = document) {
     owner.removeEventListener('pointercancel', end, true)
     owner.removeEventListener('click', click, true)
     owner.defaultView?.removeEventListener('blur', end)
+    owner.defaultView?.removeEventListener('resize', scheduleRestore)
   })
 }

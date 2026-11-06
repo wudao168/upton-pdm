@@ -165,7 +165,8 @@ public sealed partial class InMemoryPdmRepository
             var supervisorNode = package.State == DrawingReviewPackageState.PendingSupervisorApproval;
             if (!supervisorNode && package.State != DrawingReviewPackageState.InReview)
                 throw new PdmConflictException("当前图纸审核单不允许继续审核。");
-            var items = package.Items.Select(item => item.Id != itemId ? item : target == DrawingReviewTarget.Model3D
+            var currentItem = package.Items.Single(item => item.Id == itemId);
+            var items = package.Items.Select(item => !(target == DrawingReviewTarget.Drawing2D ? item.ReviewsSameDrawing(currentItem) : item.Id == itemId) ? item : target == DrawingReviewTarget.Model3D
                 ? item with { ModelState = state, ModelReviewer = reviewer, ModelReviewerName = reviewerName, ModelReviewedAt = reviewedAt, ModelComment = comment }
                 : item with { DrawingState = state, DrawingReviewer = reviewer, DrawingReviewerName = reviewerName, DrawingReviewedAt = reviewedAt, DrawingComment = comment }).ToArray();
             package = package with
@@ -196,7 +197,7 @@ public sealed partial class InMemoryPdmRepository
             var current = target == DrawingReviewTarget.Model3D ? currentItem.ModelState : currentItem.DrawingState;
             if (current is not (DrawingReviewTargetState.Approved or DrawingReviewTargetState.Marked or DrawingReviewTargetState.ChangesRequested))
                 throw new PdmConflictException("该图档没有可撤销的审核结论。");
-            var items = package.Items.Select(item => item.Id != itemId ? item : target == DrawingReviewTarget.Model3D
+            var items = package.Items.Select(item => !(target == DrawingReviewTarget.Drawing2D ? item.ReviewsSameDrawing(currentItem) : item.Id == itemId) ? item : target == DrawingReviewTarget.Model3D
                 ? item with { ModelState = DrawingReviewTargetState.Pending, ModelReviewer = null, ModelReviewerName = null, ModelReviewedAt = null, ModelComment = null }
                 : item with { DrawingState = DrawingReviewTargetState.Pending, DrawingReviewer = null, DrawingReviewerName = null, DrawingReviewedAt = null, DrawingComment = null }).ToArray();
             package = package with
@@ -229,7 +230,8 @@ public sealed partial class InMemoryPdmRepository
                 throw new PdmConflictException("当前图纸审核单不允许重新提交审核。");
             if (package.Items.Single(item => item.Id == itemId).DrawingState != DrawingReviewTargetState.ChangesRequested)
                 throw new PdmConflictException("只有已退回（待修改）的图档可以重新提交审核。");
-            var items = package.Items.Select(item => item.Id != itemId ? item : item with
+            var currentItem = package.Items.Single(item => item.Id == itemId);
+            var items = package.Items.Select(item => !item.ReviewsSameDrawing(currentItem) ? item : item with
             {
                 DrawingState = DrawingReviewTargetState.Pending,
                 DrawingVersionId = drawingVersionId,

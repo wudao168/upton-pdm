@@ -19,7 +19,7 @@ it('recognizes operation types without styling navigation, content rows or unrel
 })
 
 it('信息展示与BOM内容链接不套用操作按钮外框', () => {
-  install('<button class="wr-next"><span>下一节点</span></button><button class="pdm-plan-summary-action"><strong>阶段进度</strong></button><button class="bom-overview__link">标准件BOM</button><button class="pdm-bom-issue-button">未填写料号</button><button class="pdm-bom-files-link">查看（3）</button>')
+  install('<button class="wr-next"><span>下一节点</span></button><button class="pdm-plan-summary-action"><strong>阶段进度</strong></button><button class="bom-overview__link">标准件BOM</button><button class="pdm-bom-issue-button">未填写料号</button><button class="pdm-bom-files-link">查看（3）</button><table class="pdm-bom-table"><tbody><tr><td></td><td></td><td><button class="pdm-inspect-link pdm-text-action">1</button></td></tr></tbody></table><button class="drawing-review-candidate"><span>✓</span><strong>A01-100</strong><em>待发起审核</em></button>')
   for (const button of document.querySelectorAll('button')) expect(button.dataset.pdmButtonKind).toBeUndefined()
   expect(document.querySelector('.wr-next span')!.textContent).toBe('下一节点')
 })
@@ -165,6 +165,12 @@ it('导航和内容行不添加刷新图标，控件移入导航后清除标记'
   buttons[2]!.parentElement!.className = 'pdm-tabs'
   await settle()
   expect(buttons[2]!.dataset.pdmButtonRefresh).toBeUndefined()
+})
+
+it('手机预览保留实际移动端的图标和按钮样式', () => {
+  install('<div class="layout-phone"><nav><button><svg id="preview-nav-icon"></svg>首页</button></nav><button>处理审批</button></div>')
+  expect(document.getElementById('preview-nav-icon')?.hasAttribute('data-pdm-leading-icon')).toBe(false)
+  expect(document.querySelector('.layout-phone > button')?.hasAttribute('data-pdm-button-kind')).toBe(false)
 })
 
 it('文字按钮和业务页签隐藏前置图标，保留导航、纯图标、尾部箭头及状态', async () => {

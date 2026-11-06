@@ -134,9 +134,9 @@ public sealed partial class MySqlPdmRepository
         await connection.ExecuteAsync(new CommandDefinition(
             """
             INSERT IGNORE INTO user_notification(
-                id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date,is_sender_receipt)
+                id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date,is_sender_receipt,resolved_at)
             VALUES(
-                @Id,@Recipient,@Category,@Title,@Content,@ProjectId,@ReleasePackageId,@SourceKey,@CreatedAt,@ReadAt,@DueDate,@IsSenderReceipt)
+                @Id,@Recipient,@Category,@Title,@Content,@ProjectId,@ReleasePackageId,@SourceKey,@CreatedAt,@ReadAt,@DueDate,@IsSenderReceipt,@ResolvedAt)
             """,
             notifications.Select(item => new
             {
@@ -150,6 +150,7 @@ public sealed partial class MySqlPdmRepository
                 item.SourceKey,
                 CreatedAt = item.CreatedAt.UtcDateTime,
                 ReadAt = item.ReadAt?.UtcDateTime,
+                ResolvedAt = item.ResolvedAt?.UtcDateTime,
                 item.IsSenderReceipt,
                 DueDate = item.DueDate?.ToDateTime(TimeOnly.MinValue)
             }),

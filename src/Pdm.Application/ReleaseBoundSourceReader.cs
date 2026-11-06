@@ -4,6 +4,12 @@ namespace Upton.Pdm.Application;
 
 public static class ReleaseBoundSourceReader
 {
+    public static IEnumerable<Guid> ModelDocumentIds(ReleasePackage package, Guid drawingId, DocumentReferenceNode node)
+    {
+        var model = package.VersionBindings?.SingleOrDefault(binding => binding.DocumentId == drawingId)?.DrawingModelDocumentId;
+        return model.HasValue ? [model.Value] : ModelDocumentIds(node);
+    }
+
     public static string DrawingModel(ReleasePackage package, DocumentVersion version, IEnumerable<Guid> modelIds, string fallback)
     {
         var models = modelIds.ToHashSet();

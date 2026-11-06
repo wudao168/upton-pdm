@@ -26,7 +26,6 @@ const mode = props.mobile ? ref('calendar') : rememberedTab('work-hours.mode', '
 const own = ref<WorkHoursView>(), report = ref<WorkHoursView>()
 const selected = ref(chinaToday()), month = ref(selected.value.slice(0, 7) + '-01')
 const loading = ref(false), reporting = ref(false), saving = ref(false), error = ref('')
-const mobileCalendarOpen = ref(false)
 const holidays = ref<HolidayMap>(new Map()), calendarReady = ref(false), calendarError = ref('')
 const today = computed(() => own.value?.today ?? chinaToday())
 const entries = computed(() => own.value?.sheets.flatMap(x => x.entries) ?? [])
@@ -53,7 +52,15 @@ const allProjects = computed(() => {
   return [...result.values()]
 })
 const recent = computed(() => [...new Set([...entries.value].sort((a, b) => b.date.localeCompare(a.date)).map(x => x.projectId))].slice(0, 5).map(id => allProjects.value.find(x => x.id === id)!).filter(Boolean))
-const projectName = computed(() => allProjects.value.find(x => x.id === form.projectId)?.name ?? '选择项目后自动带出')
+const projectName = computed(() => allProjects.value.find(x => x.id === form.projectId)?.name ?? (props.mobile ? '' : '选择项目后自动带出'))
+const mobileProjectSearch = ref('')
+const mobileProjects = computed(() => allProjects.value.filter(project => `${project.code} ${project.name}`.toLowerCase().includes(mobileProjectSearch.value.trim().toLowerCase())))
+function syncMobileEntry() {
+  if (!props.mobile || saving.value) return
+  const entry = daily.value.find(item => item.projectId === form.projectId && item.location === form.location)
+  if (entry) form.hours = entry.hours
+}
+watch(() => [form.projectId, form.location], syncMobileEntry)
 let prefilledProjectId = ''
 function prefillProject() {
   const id = props.initialProjectId
@@ -62,7 +69,7 @@ function prefillProject() {
 }
 watch(() => props.initialProjectId, prefillProject)
 defineExpose({
-  canLeave: () => !dirty.value && !saving.value,
+  canLeave: () => props.mobile || (!dirty.value && !saving.value),
   prefill: (projectId: string) => { if (!dirty.value && allProjects.value.some(project => project.id === projectId)) form.projectId = projectId },
 })
 const number = (value: number) => value.toLocaleString('zh-CN', { maximumFractionDigits: 1 })
@@ -91,6 +98,7 @@ function resetWeek() {
   weekBaseline.value = JSON.stringify(rows.value)
 }
 function mayLeave() {
+  if (props.mobile) return !saving.value
   if (dirty.value) { ElMessage.warning(settingsDirty.value ? '有未保存的工时设置，请先保存或取消更改。' : '有未保存的工时，请先保存或取消修改。'); return false }
   return !saving.value
 }
@@ -100,7 +108,11 @@ async function loadOwn() {
   try {
     const result = await readWorkHours(days.value[0]!, days.value.at(-1)!, false, props.token)
     if (generation !== ownGeneration) return
-    own.value = result; resetForm(); resetWeek(); prefillProject(); emit('changed')
+    const preserveMobileForm = props.mobile && !!own.value
+    own.value = result
+    if (!preserveMobileForm) resetForm()
+    if (!props.mobile) resetWeek()
+    prefillProject(); syncMobileEntry(); emit('changed')
     if (tab.value === 'settings' && !(result.canManageSettings ?? result.canManage)) tab.value = 'entry'
     if (tab.value === 'report' && !report.value) await loadReport()
   } catch (cause) { if (generation === ownGeneration) error.value = failure(cause, '工时读取失败，请检查网络后刷新重试。') }
@@ -110,7 +122,12 @@ async function selectDay(day: string) {
   if (!mayLeave()) return
   selected.value = day
   if (month.value.slice(0, 7) !== day.slice(0, 7)) { month.value = day.slice(0, 7) + '-01'; await loadOwn() }
-  else { resetForm(); resetWeek() }
+  else { if (!props.mobile) { resetForm(); resetWeek() }; syncMobileEntry() }
+}
+function selectMobileDay(event: Event) {
+  const input = event.target as HTMLInputElement
+  if (!input.value || input.value > today.value) { input.value = selected.value; ElMessage.warning('请选择今天或之前的日期。'); return }
+  void selectDay(input.value)
 }
 async function move(offset: number) {
   if (!mayLeave()) return
@@ -126,15 +143,17 @@ async function persist(from: string, to: string, values: WorkHourInput[]) {
   saving.value = true
   try {
     await saveWorkHours({ from, to, entries: values, versions: own.value.sheets.filter(x => x.month >= from.slice(0, 7) && x.month <= to.slice(0, 7)).map(x => ({ month: x.month, rowVersion: x.rowVersion })) }, props.token)
-    resetForm(); weekBaseline.value = JSON.stringify(rows.value)
+    if (!props.mobile) resetForm()
+    weekBaseline.value = JSON.stringify(rows.value)
     await loadOwn()
-    ElMessage.success('工时已保存并计入汇总。')
+    if (props.mobile) formBaseline.value = JSON.stringify(form)
+    ElMessage.success(props.mobile ? '工时已保存。' : '工时已保存并计入汇总。')
     return true
   } catch (cause) { ElMessage.error(failure(cause, '工时保存失败，填写内容已保留，请稍后重试。')); return false }
   finally { saving.value = false }
 }
 async function saveDay() {
-  const values: WorkHourInput[] = daily.value.filter(x => x.id !== editing.value).map(x => ({ date: x.date, projectId: x.projectId, location: x.location, hours: x.hours }))
+  const values: WorkHourInput[] = daily.value.filter(x => props.mobile ? x.projectId !== form.projectId || x.location !== form.location : x.id !== editing.value).map(x => ({ date: x.date, projectId: x.projectId, location: x.location, hours: x.hours }))
   values.push({ date: selected.value, ...form, hours: Number(form.hours) })
   await persist(selected.value, selected.value, values)
 }
@@ -379,19 +398,35 @@ function exportReport() {
     notes: '子项目上卷不重复累计；整日未填按全部项目工时核对，不随项目或所在地筛选变化。', fields: [] }) }
   catch { ElMessage.error('报表导出失败，请检查浏览器下载权限后重试。') }
 }
-function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value) { event.preventDefault(); event.returnValue = '' } }
+function beforeUnload(event: BeforeUnloadEvent) { if (!props.mobile && dirty.value) { event.preventDefault(); event.returnValue = '' } }
 window.addEventListener('beforeunload', beforeUnload)
 onBeforeUnmount(() => { ownGeneration++; reportGeneration++; window.removeEventListener('beforeunload', beforeUnload) })
 onMounted(() => { document.addEventListener('pointerdown', dismissCalendarMenu); window.addEventListener('scroll', dismissCalendarMenu, true); window.addEventListener('resize', dismissCalendarMenu) })
 onBeforeUnmount(() => { document.removeEventListener('pointerdown', dismissCalendarMenu); window.removeEventListener('scroll', dismissCalendarMenu, true); window.removeEventListener('resize', dismissCalendarMenu) })
 watch(() => [props.token, props.companyId], () => { ownGeneration++; reportGeneration++; copyOpen.value = false; dayClipboard.value = undefined; transferSource.value = undefined; calendarMenu.value = undefined; clearDrag(); detailOpen.value = false; historyOpen.value = false; history.value = []; detailRows.value = []; copyEntries.value = []; own.value = undefined; report.value = undefined; reportInitialized = false; rows.value = []; weekBaseline.value = '[]'; resetForm(); selected.value = chinaToday(); month.value = selected.value.slice(0, 7) + '-01'; Object.assign(filter, { from: month.value, to: selected.value === month.value ? selected.value : addDays(selected.value,-1), username: '', department: '', projectId: '', location: '' }); if (props.active) void loadOwn() }, { immediate: true })
 watch(() => props.active, active => { if (!active) { calendarMenu.value = undefined; clearDrag(); copyOpen.value = false }; if (active && !own.value && !loading.value) void loadOwn() })
-void loadGlobalStatusContent().then(data => { holidays.value = new Map(data.holidayCalendars.flatMap(c => c.days.map(day => [day.date, day] as const))); calendarReady.value = true })
+if (!props.mobile) void loadGlobalStatusContent().then(data => { holidays.value = new Map(data.holidayCalendars.flatMap(c => c.days.map(day => [day.date, day] as const))); calendarReady.value = true })
   .catch(() => { calendarError.value = '节假日标记暂时读取失败，仍可填写工时及查看服务端完整性检查，请刷新后重试。' })
 </script>
 
 <template>
   <section ref="workHoursRoot" class="work-hours" aria-label="工时管理" :aria-busy="loading || reporting || saving">
+    <section v-if="mobile" class="wh-mobile-entry" aria-label="填报工时">
+      <h1>填报工时</h1>
+      <p v-if="error" class="wh-error" role="alert">{{ error }} <button :disabled="loading || saving" @click="loadOwn">重试</button></p>
+      <p v-if="loading" role="status">正在读取工时…</p>
+      <form novalidate @submit.prevent="saveDay">
+        <fieldset class="wh-mobile-fields" :disabled="saving || loading || !own">
+          <label>日期<input type="date" :value="selected" :max="today" required aria-label="填报日期" @change="selectMobileDay"></label>
+          <label>所在地<select v-model="form.location" aria-label="所在地"><option>厂内</option><option>厂外</option></select></label>
+          <label class="wh-mobile-wide">项目号<el-select v-model="form.projectId" filterable :filter-method="(query: string) => mobileProjectSearch = query" placeholder="选择项目号" aria-label="填报项目" :disabled="saving || loading || !own || selected > today" @visible-change="(open: boolean) => { if (!open) mobileProjectSearch = '' }"><el-option v-for="project in mobileProjects" :key="project.id" :value="project.id" :label="project.code"><span>{{ project.code }} · {{ project.name }}</span></el-option></el-select></label>
+          <label class="wh-mobile-wide">项目名称<input :value="projectName" readonly aria-label="自动带出项目名称"></label>
+          <label class="wh-mobile-wide">工时数<input v-model.number="form.hours" type="number" min="0.5" max="24" step="0.5" required aria-label="工时数"></label>
+          <button type="submit" class="pdm-primary-action wh-mobile-wide" :disabled="!form.projectId || selected > today">{{ saving ? '正在保存…' : '保存' }}</button>
+        </fieldset>
+      </form>
+    </section>
+    <template v-else>
     <div class="wh-tabs pdm-tabs" role="group" aria-label="工时页签"><button :aria-pressed="tab === 'entry'" :class="{ active: tab === 'entry' }" @click="changeTab('entry')">填报工时</button><button :aria-pressed="tab === 'report'" :class="{ active: tab === 'report' }" @click="changeTab('report')">汇总工时</button><button v-if="own?.canManageSettings ?? own?.canManage" :aria-pressed="tab === 'settings'" :class="{ active: tab === 'settings' }" @click="changeTab('settings')">工时设置</button></div>
     <p v-if="error" class="wh-error" role="alert">{{ error }} <button @click="tab === 'entry' ? loadOwn() : loadReport()">重试</button></p>
     <p v-if="calendarError" class="wh-warning" role="status">{{ calendarError }}</p>
@@ -403,8 +438,7 @@ void loadGlobalStatusContent().then(data => { holidays.value = new Map(data.holi
         </div>
       </div>
       <div v-if="mode === 'calendar'" class="wh-calendar-layout">
-        <button v-if="mobile" type="button" @click="mobileCalendarOpen = !mobileCalendarOpen">{{ mobileCalendarOpen ? '收起月历' : '展开月历补填' }}</button>
-        <div v-show="!mobile || mobileCalendarOpen" class="pdm-panel wh-calendar">
+        <div class="pdm-panel wh-calendar">
           <div class="wh-weekdays"><span v-for="(day,index) in ['周一','周二','周三','周四','周五','周六','周日']" :key="day" :class="{ 'wh-rest': index === 6 }">{{ day }}</span></div>
           <div class="wh-day-grid"><button v-for="day in days" :key="day" class="wh-day" :class="{ outside: day.slice(0,7) !== month.slice(0,7), selected: day === selected, today: day === today, missed: visibleDayStatus(day) === '未填', rest: !workingDay(day, holidays), 'is-drag-source': dragSource?.date === day, 'is-drop-target': dropTarget === day, 'is-cut': dayClipboard?.mode === 'cut' && dayClipboard.date === day }" :aria-label="`${day} ${number(hoursOn(entries,day))}小时`" :aria-pressed="day === selected" @click="selectDay(day)" :data-work-hours-date="day" :draggable="canCopyDate(day) && !copyOpen" @dragstart="startDayDrag($event, day)" @dragover="overDay($event, day)" @dragleave="leaveDay($event, day)" @drop="dropDay($event, day)" @dragend="clearDrag" @contextmenu="showCalendarMenu($event, day)"><span class="wh-date">{{ Number(day.slice(8)) }} <small v-if="day === today">今天</small><small v-else-if="holidays.get(day)">{{ holidays.get(day)?.isOffDay ? holidays.get(day)?.name : '补班' }}</small></span><b v-if="hoursOn(entries,day)">{{ number(hoursOn(entries,day)) }} 小时</b><span v-if="hoursOn(entries,day)" class="wh-day-records"><span v-for="entry in entries.filter(x => x.date === day)" :key="entry.id" class="wh-day-record" :title="`${entry.projectCode} · ${entry.projectName} · ${entry.location} · ${number(entry.hours)}小时`"><span class="wh-day-project"><span class="wh-day-project-code">{{ entry.projectCode }}</span><span class="wh-day-project-name">{{ entry.projectName }}</span></span><span class="wh-day-record-hours">{{ number(entry.hours) }}小时</span></span></span><span v-if="visibleDayStatus(day)" class="wh-day-status" :class="{ warning: visibleDayStatus(day) === '待核对' }">{{ visibleDayStatus(day) }}</span></button></div>
           <p class="wh-note">仅已生效名单参与完整性检查，默认周日休息，节假日按日历安排。未填不代表缺勤。</p>
@@ -457,11 +491,23 @@ void loadGlobalStatusContent().then(data => { holidays.value = new Map(data.holi
     </el-dialog>
     <el-drawer v-model="detailOpen" :title="detailTitle" size="min(900px, 95vw)" append-to-body><div class="wh-table-wrap"><table><thead><tr><th>日期</th><th>人员</th><th>项目号</th><th>项目名称</th><th>所在地</th><th>工时</th></tr></thead><tbody><tr v-for="row in detailRows" :key="row.entry.id"><td>{{ row.entry.date }}</td><td>{{ row.person.displayName }}</td><td>{{ row.entry.projectCode }}</td><td>{{ row.entry.projectName }}</td><td>{{ row.entry.location }}</td><td>{{ number(row.entry.hours) }}</td></tr></tbody></table><p v-if="!detailRows.length" class="wh-empty">暂无明细</p></div></el-drawer>
     <el-drawer v-model="historyOpen" :title="`${month.slice(0,7)} · 本人工时修改记录`" size="min(760px,95vw)" append-to-body><p v-if="historyLoading">正在读取…</p><p v-else-if="!history.length">本月暂无修改记录。</p><details v-for="item in history" :key="item.id" class="wh-history"><summary>{{ new Date(item.at).toLocaleString('zh-CN',{hour12:false}) }} · {{ item.actor }} · {{ item.dates.join('、') }}</summary><p v-if="item.reason">原因：{{ item.reason }}</p><div v-for="(list,index) in [item.before,item.after]" :key="index"><b>{{ index === 0 ? '修改前' : '修改后' }}</b><p v-if="!list.length">无记录</p><p v-for="entry in list" :key="entry.id">{{ entry.date }} · {{ entry.projectCode }} · {{ entry.projectName }} · {{ entry.location }} · {{ number(entry.hours) }}小时</p></div></details></el-drawer>
+    </template>
   </section>
 </template>
 
 <style scoped>
-.work-hours{height:100%;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:5px;padding:0 2px 8px;color:var(--pdm-text);font-size:12px}.work-hours button,.work-hours input,.work-hours select{font:inherit}.work-hours button:not(.wh-day),.work-hours input,.work-hours select{border:1px solid var(--pdm-border);border-radius:var(--pdm-radius-control);background:var(--pdm-surface);color:var(--pdm-text);padding:5px 8px;min-height:28px}.work-hours button{display:inline-flex;align-items:center;justify-content:center;gap:4px}.work-hours button:disabled{opacity:.55;cursor:default}.work-hours .pdm-primary-action,.work-hours button.active{background:var(--pdm-theme-accent);border-color:var(--pdm-theme-accent);color:var(--pdm-theme-on-accent,#fff)}.work-hours>.wh-tabs.pdm-tabs{align-self:stretch;flex-shrink:0;width:100%;margin-block:0!important}.wh-toolbar,.wh-title,.wh-controls,.wh-summary{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.wh-toolbar{justify-content:space-between;flex-shrink:0}.wh-title>span,.wh-note,.wh-muted{color:var(--pdm-muted)}.wh-title strong{font-size:15px}.wh-summary{background:var(--pdm-surface);padding:8px 12px;gap:20px;flex-shrink:0;border-bottom:1px solid var(--pdm-border)}.wh-summary b{color:var(--pdm-theme-accent);font-size:17px;margin:0 3px}.wh-summary>span:last-of-type{margin-left:auto;font-size:11px;color:var(--pdm-muted)}.wh-calendar-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,34%);gap:8px;flex:1;min-height:520px}.wh-calendar{display:flex;flex-direction:column;overflow:hidden;min-width:0}.wh-weekdays,.wh-day-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr))}.wh-weekdays span{text-align:center;padding:9px;background:var(--pdm-table-header)}.wh-day-grid{flex:1;grid-template-rows:repeat(6,minmax(65px,1fr))}.work-hours .wh-day{border:0;border-top:1px solid var(--pdm-border);border-right:1px solid var(--pdm-border);background:var(--pdm-surface);color:var(--pdm-text);padding:6px;display:flex;align-items:flex-start;justify-content:flex-start;flex-direction:column;gap:5px;min-width:0;text-align:left}.wh-day.rest,.wh-weekdays .wh-rest{background:color-mix(in srgb,var(--pdm-text) 9%,var(--pdm-surface))}.wh-day.outside{opacity:.45}.wh-day.selected{box-shadow:inset 0 0 0 2px var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft)}.wh-day.missed{background:var(--pdm-danger-soft)}.wh-date{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.wh-date small{font-size:10px;color:var(--pdm-theme-accent);overflow:hidden;max-width:70px;text-overflow:ellipsis;white-space:nowrap}.wh-day.today .wh-date{color:var(--pdm-theme-accent);font-weight:600}.wh-day>b{color:var(--pdm-theme-accent)}.wh-day-status{font-size:11px}.wh-day.missed .wh-day-status,.wh-danger{color:var(--pdm-danger)}.wh-day-status.warning{color:var(--pdm-orange)}.wh-note{font-size:11px;line-height:1.7;padding:4px 8px;margin:0}.wh-day-editor{overflow:auto;min-width:0;padding:0 10px 10px}.wh-day-editor>header,.wh-charts header{display:flex;justify-content:space-between;align-items:center;padding:10px 2px;border-bottom:1px solid var(--pdm-border);gap:8px}.wh-day-editor>header span{color:var(--pdm-theme-accent)}.wh-day-editor form,.wh-day-editor fieldset{display:flex;flex-direction:column;gap:10px}.wh-day-editor form{padding:12px 0}.wh-day-editor label{display:grid;grid-template-columns:65px minmax(0,1fr);align-items:center;gap:7px}.wh-day-editor fieldset{border:0;padding:0;margin:0;min-width:0}.wh-day-editor input,.wh-day-editor select{width:100%;min-width:0}.wh-day-editor input[readonly]{background:var(--pdm-table-header);color:var(--pdm-muted)}.wh-day-editor h3{font-size:12px;border-top:1px solid var(--pdm-border);padding-top:10px}.wh-entry{display:flex;gap:5px;align-items:center;padding:8px 0;border-bottom:1px solid var(--pdm-border)}.wh-entry>div{flex:1;min-width:0;overflow-wrap:anywhere}.wh-entry small{display:block;color:var(--pdm-muted);margin-top:4px}.wh-entry button{flex-shrink:0}.wh-recent{display:flex;flex-wrap:wrap;gap:4px}.wh-recent>span{flex-basis:100%;color:var(--pdm-muted)}.wh-recent button{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px!important}.wh-empty{text-align:center;color:var(--pdm-muted);padding:20px 6px}.wh-error,.wh-warning{margin:0;padding:8px;background:var(--pdm-danger-soft);color:var(--pdm-danger)}.wh-warning{background:var(--pdm-surface-muted,var(--pdm-table-header));color:var(--pdm-orange)}.wh-week-panel{padding:10px}.wh-week-actions{margin-bottom:10px}.wh-week-actions>span{flex:1;color:var(--pdm-muted)}.wh-table-wrap{overflow:auto;min-width:0}.wh-table-wrap table{width:100%;border-collapse:collapse;font-size:12px;text-align:center}.wh-table-wrap th,.wh-table-wrap td{padding:8px;border-bottom:1px solid var(--pdm-border);white-space:nowrap}.wh-table-wrap th{background:var(--pdm-table-header);position:sticky;top:0}.wh-week-table{min-width:1000px;table-layout:fixed}.wh-week-table th:first-child{width:290px}.wh-week-table th:nth-child(2){width:85px}.wh-week-table th small{display:block;font-weight:400;margin-top:5px}.wh-week-table input{width:100%;min-width:60px;text-align:center}.wh-week-table .wh-rest{background:color-mix(in srgb,var(--pdm-text) 9%,var(--pdm-surface))}.wh-week-table tfoot{font-weight:600}.wh-report-filters{display:flex;gap:7px;flex-wrap:wrap;align-items:flex-end}.wh-report-filters label{display:flex;flex:0 0 120px;flex-direction:column;gap:4px;width:120px;min-width:0}.wh-report-filters .el-select,.wh-report-filters select{width:100%;box-sizing:border-box}.wh-report-filters .wh-date-range{flex-basis:280px;width:280px;max-width:100%}.wh-date-range :deep(.el-date-editor){width:100%;min-width:0;box-sizing:border-box}.wh-date-range :deep(.el-range-input){min-width:0}.wh-report-summary{justify-content:space-around;gap:12px}.wh-report-summary>span:last-of-type{margin:0;color:var(--pdm-text);font-size:12px}.wh-charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;flex-shrink:0}.wh-charts section{min-width:0;padding:0 12px 10px}.wh-legend{font-size:11px;color:var(--pdm-muted);display:flex;align-items:center;gap:5px}.wh-legend i{width:9px;height:9px;background:var(--pdm-theme-accent)}.wh-legend i.outside{background:var(--pdm-orange)}.wh-bars{display:flex;gap:8px;height:190px;align-items:flex-end;overflow:auto;padding:8px 2px 0}.wh-bar-column{flex:1;min-width:35px;text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:4px;font-variant-numeric:tabular-nums}.wh-stack{width:75%;max-width:45px;display:flex;flex-direction:column;justify-content:flex-end;min-height:2px}.wh-bar-inside{background:var(--pdm-theme-accent)}.wh-bar-outside{background:var(--pdm-orange)}.wh-bar-column>small{font-size:10px;white-space:nowrap}.wh-report-table{flex:1;min-height:120px}.wh-report-table button{border:0!important;color:var(--pdm-theme-accent)!important;background:transparent!important}.wh-copy-row{display:flex;align-items:center;gap:6px;padding:8px;border-bottom:1px solid var(--pdm-border)}.wh-copy-row>span{flex:1}.wh-copy-row input{width:80px}.wh-history{padding:10px 0;border-bottom:1px solid var(--pdm-border)}.wh-history summary{cursor:pointer}.wh-history p{font-size:12px;overflow-wrap:anywhere}
+.wh-mobile-entry{display:grid;gap:16px;width:100%;max-width:480px;margin:0 auto}
+.wh-mobile-entry h1{margin:0;font-size:20px;line-height:28px;font-weight:600}
+.wh-mobile-entry form{margin:0}
+.wh-mobile-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;border:0;padding:0;margin:0;min-width:0}
+.wh-mobile-fields>label{display:grid;gap:4px;min-width:0;font-size:14px;line-height:20px}
+.work-hours .wh-mobile-fields>label>input,.work-hours .wh-mobile-fields select{box-sizing:border-box;width:100%;min-width:0;min-height:42px;padding:8px 12px}
+.wh-mobile-fields :deep(.el-select){width:100%;min-width:0}
+.wh-mobile-fields :deep(.el-select__wrapper){min-height:42px}
+.wh-mobile-fields :deep(input.el-select__input){min-height:0;height:24px;border:0;border-radius:0;padding:0;background:transparent;outline:0;box-shadow:none}
+.wh-mobile-fields .wh-mobile-wide{grid-column:1/-1}
+.work-hours .wh-mobile-fields>button{width:100%;min-height:42px;padding:8px 12px}
+.work-hours{height:100%;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:5px;padding:0 2px 8px;color:var(--pdm-text);font-size:12px}.work-hours button,.work-hours input,.work-hours select{font:inherit}.work-hours button:not(.wh-day),.work-hours input,.work-hours select{border:1px solid var(--pdm-border);border-radius:var(--pdm-radius-control);background:var(--pdm-surface);color:var(--pdm-text);padding:5px 8px;min-height:28px}.work-hours button{display:inline-flex;align-items:center;justify-content:center;gap:4px}.work-hours button:disabled{opacity:.55;cursor:default}.work-hours .pdm-primary-action,.work-hours button.active{background:var(--pdm-theme-accent);border-color:var(--pdm-theme-accent);color:var(--pdm-theme-on-accent,#fff)}.work-hours>.wh-tabs.pdm-tabs{align-self:stretch;flex-shrink:0;width:100%;margin-block:0!important}.wh-toolbar,.wh-title,.wh-controls,.wh-summary{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.wh-toolbar{justify-content:space-between;flex-shrink:0}.wh-title>span,.wh-note,.wh-muted{color:var(--pdm-muted)}.wh-title strong{font-size:15px}.wh-summary{background:var(--pdm-surface);padding:8px 12px;gap:20px;flex-shrink:0;border-bottom:1px solid var(--pdm-border)}.wh-summary b{color:var(--pdm-theme-accent);font-size:17px;margin:0 3px}.wh-summary>span:last-of-type{margin-left:auto;font-size:11px;color:var(--pdm-muted)}.wh-calendar-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,34%);gap:8px;flex:1;min-height:520px}.wh-calendar{display:flex;flex-direction:column;overflow:hidden;min-width:0}.wh-weekdays,.wh-day-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr))}.wh-weekdays span{text-align:center;padding:9px;background:var(--pdm-table-header)}.wh-day-grid{flex:1;grid-template-rows:repeat(6,minmax(65px,1fr))}.work-hours .wh-day{border:0;border-top:1px solid var(--pdm-border);border-right:1px solid var(--pdm-border);background:var(--pdm-surface);color:var(--pdm-text);padding:6px;display:flex;align-items:flex-start;justify-content:flex-start;flex-direction:column;gap:5px;min-width:0;text-align:left}.wh-day.rest,.wh-weekdays .wh-rest{background:color-mix(in srgb,var(--pdm-text) 9%,var(--pdm-surface))}.wh-day.outside{opacity:.45}.wh-day.selected{box-shadow:inset 0 0 0 2px var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft)}.wh-day.missed{background:var(--pdm-danger-soft)}.wh-date{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.wh-date small{font-size:10px;color:var(--pdm-theme-accent);overflow:hidden;max-width:70px;text-overflow:ellipsis;white-space:nowrap}.wh-day.today .wh-date{color:var(--pdm-theme-accent);font-weight:600}.wh-day>b{color:var(--pdm-theme-accent)}.wh-day-status{font-size:11px}.wh-day.missed .wh-day-status,.wh-danger{color:var(--pdm-danger)}.wh-day-status.warning{color:var(--pdm-orange)}.wh-note{font-size:11px;line-height:1.7;padding:4px 8px;margin:0}.wh-day-editor{overflow:auto;min-width:0;padding:0 10px 10px}.wh-day-editor>header,.wh-charts header{display:flex;justify-content:space-between;align-items:center;padding:10px 2px;border-bottom:1px solid var(--pdm-border);gap:8px}.wh-day-editor>header span{color:var(--pdm-theme-accent)}.wh-day-editor form,.wh-day-editor fieldset{display:flex;flex-direction:column;gap:10px}.wh-day-editor form{padding:12px 0}.wh-day-editor label{display:grid;grid-template-columns:65px minmax(0,1fr);align-items:center;gap:7px}.wh-day-editor fieldset{border:0;padding:0;margin:0;min-width:0}.wh-day-editor input,.wh-day-editor select{width:100%;min-width:0}.wh-day-editor input[readonly]{background:var(--pdm-table-header);color:var(--pdm-muted)}.wh-day-editor h3{font-size:12px;border-top:1px solid var(--pdm-border);padding-top:10px}.wh-entry{display:flex;gap:5px;align-items:center;padding:8px 0;border-bottom:1px solid var(--pdm-border)}.wh-entry>div{flex:1;min-width:0;overflow-wrap:anywhere}.wh-entry small{display:block;color:var(--pdm-muted);margin-top:4px}.wh-entry button{flex-shrink:0}.wh-recent{display:flex;flex-wrap:wrap;gap:4px}.wh-recent>span{flex-basis:100%;color:var(--pdm-muted)}.wh-recent button{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px!important}.wh-empty{text-align:center;color:var(--pdm-muted);padding:20px 6px}.wh-error,.wh-warning{margin:0;padding:8px;background:var(--pdm-danger-soft);color:var(--pdm-danger)}.wh-warning{background:var(--pdm-surface-muted,var(--pdm-table-header));color:var(--pdm-orange)}.wh-week-panel{padding:10px}.wh-week-actions{margin-bottom:10px}.wh-week-actions>span{flex:1;color:var(--pdm-muted)}.wh-table-wrap{overflow:auto;min-width:0}.wh-table-wrap table{width:100%;border-collapse:collapse;font-size:12px;text-align:center}.wh-table-wrap th,.wh-table-wrap td{padding:8px;border-bottom:1px solid var(--pdm-border);white-space:nowrap}.wh-table-wrap th{background:var(--pdm-table-header);position:sticky;top:0}.wh-week-table{min-width:1000px;table-layout:fixed}.wh-week-table th:first-child{width:290px}.wh-week-table th:nth-child(2){width:85px}.wh-week-table th small{display:block;font-weight:400;margin-top:5px}.wh-week-table input{width:100%;min-width:60px;text-align:center}.wh-week-table .wh-rest{background:color-mix(in srgb,var(--pdm-text) 9%,var(--pdm-surface))}.wh-week-table tfoot{font-weight:600}.wh-report-filters{display:flex;gap:7px;flex-wrap:wrap;align-items:flex-end}.wh-report-filters label{display:flex;flex:0 0 120px;flex-direction:column;gap:4px;width:120px;min-width:0}.wh-report-filters .el-select,.wh-report-filters select{width:100%;box-sizing:border-box}.wh-report-filters .wh-date-range{flex-basis:280px;width:280px;max-width:100%}.wh-date-range :deep(.el-date-editor){width:100%;min-width:0;box-sizing:border-box}.wh-date-range :deep(.el-range-input){min-width:0}.wh-report-summary{justify-content:space-around;gap:12px}.wh-report-summary>span:last-of-type{margin:0;color:var(--pdm-text);font-size:12px}.wh-charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;flex-shrink:0}.wh-charts section{min-width:0;padding:0 12px 10px}.wh-legend{font-size:11px;color:var(--pdm-muted);display:flex;align-items:center;gap:5px}.wh-legend i{width:9px;height:9px;background:var(--pdm-theme-accent)}.wh-legend i.outside{background:#f97316}.wh-bars{display:flex;gap:8px;height:190px;align-items:flex-end;overflow:auto;padding:8px 2px 0}.wh-bar-column{flex:1;min-width:35px;text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:4px;font-variant-numeric:tabular-nums}.wh-stack{width:75%;max-width:45px;display:flex;flex-direction:column;justify-content:flex-end;min-height:2px}.wh-bar-inside{background:var(--pdm-theme-accent)}.wh-bar-outside{background:#f97316}.wh-bar-column>small{font-size:10px;white-space:nowrap}.wh-report-table{flex:1;min-height:120px}.wh-report-table button{border:0!important;color:var(--pdm-theme-accent)!important;background:transparent!important}.wh-copy-row{display:flex;align-items:center;gap:6px;padding:8px;border-bottom:1px solid var(--pdm-border)}.wh-copy-row>span{flex:1}.wh-copy-row input{width:80px}.wh-history{padding:10px 0;border-bottom:1px solid var(--pdm-border)}.wh-history summary{cursor:pointer}.wh-history p{font-size:12px;overflow-wrap:anywhere}
 .wh-report-overview{flex-shrink:0;min-width:0;padding:10px;display:flex;flex-direction:column;gap:8px}.wh-report-overview .wh-report-summary{margin:0;padding:8px 4px}.wh-project-empty{height:190px;box-sizing:border-box;margin:0;display:grid;place-items:center}.work-hours .wh-project-bars>.wh-bar-column{display:flex;justify-content:flex-end;min-width:90px;min-height:0;border:0;border-radius:0;background:transparent;padding:0}.wh-project-bars>.wh-bar-column:focus-visible{outline:2px solid var(--pdm-theme-accent);outline-offset:-2px}
 .wh-report-bottom{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;flex:1;min-height:320px;align-items:stretch}.wh-report-list{min-width:0;min-height:0;display:flex;flex-direction:column;padding:8px 12px;overflow:hidden}.wh-report-list>header{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;min-height:56px;margin-bottom:10px;flex-shrink:0;box-sizing:border-box}.wh-report-list .wh-report-table{min-height:0}.wh-report-list table{min-width:650px}.wh-report-list>.wh-note{flex-shrink:0}
 @media(max-width:1100px){.wh-report-bottom{flex:none;grid-template-columns:minmax(0,1fr);grid-auto-rows:360px}}

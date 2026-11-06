@@ -62,7 +62,8 @@ public sealed partial class PdmWorkflowService
         IReadOnlyList<BomItem> selected, IReadOnlyList<Guid>? confirmedRemovedIds, Guid? explicitRootId,
         Guid projectId, CancellationToken ct, Guid? boundBomVersionId = null)
     {
-        if (IsLongLeadScope(scope) || ReleaseScopeBomKind(scope) == BomKind.Electrical) return;
+        // 标准件按已保存BOM独立审批；仅非标图纸发布依赖CAD结构完整性。
+        if (IsLongLeadScope(scope) || ReleaseScopeBomKind(scope) != BomKind.NonStandard) return;
         if (snapshot?.Root.HasPendingStructureIndex != true) return;
         BomItem[] removed = [];
         if (confirmedRemovedIds is { Count: > 0 })
@@ -89,7 +90,7 @@ public sealed partial class PdmWorkflowService
     private async Task RequireCompletePackageReleaseIndexAsync(ReleasePackage package, CadReferenceSnapshot? snapshot, CancellationToken ct)
     {
         if (package.Scope == ReleaseScope.LegacyCombined) { RequireCompleteReleaseIndex(snapshot); return; }
-        if (IsLongLeadScope(package.Scope) || ReleaseScopeBomKind(package.Scope) == BomKind.Electrical) return;
+        if (IsLongLeadScope(package.Scope) || ReleaseScopeBomKind(package.Scope) != BomKind.NonStandard) return;
         if (snapshot?.Root.HasPendingStructureIndex != true) return;
         var kind = ReleaseScopeBomKind(package.Scope);
         var ids = package.SelectedBomItemIds.ToHashSet();

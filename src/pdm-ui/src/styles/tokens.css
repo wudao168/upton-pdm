@@ -14,9 +14,9 @@
   --pdm-search-width: 150px;
   --pdm-filter-width: 120px;
   --pdm-control-height: 28px;
-  --pdm-action-confirm: #0f766e;
-  --pdm-action-confirm-hover: #115e59;
-  --pdm-action-confirm-pressed: #134e4a;
+  --pdm-action-confirm: var(--pdm-theme-accent);
+  --pdm-action-confirm-hover: var(--pdm-theme-accent-hover);
+  --pdm-action-confirm-pressed: var(--pdm-theme-accent-hover);
   --pdm-action-delete: #e62222;
   --pdm-action-delete-hover: #c41b1b;
   --pdm-action-refresh: #3b82f6;

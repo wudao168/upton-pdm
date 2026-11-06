@@ -39,7 +39,7 @@ function pointer(element: Element | Document, type: string, x: number) {
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; window.localStorage.clear(); vi.restoreAllMocks() })
 
 describe('global column resizing', () => {
-  it('BOM紧凑列兼容旧列宽，其余列保留分配；再次拖动后记忆新宽度', () => {
+  it('BOM紧凑列兼容旧列宽及窗口缩放，其余列保留分配；再次拖动后记忆新宽度', async () => {
     const html = '<div data-pdm-preference-scope=\'["alice","company"]\'><table class="pdm-bom-table"><thead><tr><th>选择</th><th>操作</th><th>序号</th><th>名称</th><th>型号</th></tr></thead></table></div>'
     setup(html, 1000)
     let headers = document.querySelectorAll('th')
@@ -49,9 +49,15 @@ describe('global column resizing', () => {
     dispose(); setup(compact, 1000)
     let columns = document.querySelectorAll('col')
     expect([...columns].slice(0,3).map(col=>col.style.width)).toEqual(['28px','80px','36px'])
-    expect(Number(columns[3]!.style.width.match(/calc\(([\d.]+)%/)?.[1])).toBeCloseTo(300 / 650 * 100, 3)
-    expect(Number(columns[4]!.style.width.match(/calc\(([\d.]+)%/)?.[1])).toBeCloseTo(350 / 650 * 100, 3)
+    expect(parseFloat(columns[3]!.style.width)).toBeCloseTo(856 * 300 / 650)
+    expect(parseFloat(columns[4]!.style.width)).toBeCloseTo(856 * 350 / 650)
     expect(columns[0]!.style.getPropertyPriority('width')).toBe('important')
+    Object.defineProperty(document.body.firstElementChild!, 'clientWidth', { value: 2000 })
+    window.dispatchEvent(new Event('resize')); await new Promise(resolve=>setTimeout(resolve,0))
+    expect(columns[0]!.style.width).toBe('28px')
+    expect(parseFloat(columns[3]!.style.width)).toBeCloseTo(1856 * 300 / 650)
+    Object.defineProperty(document.body.firstElementChild!, 'clientWidth', { value: 1000 })
+    window.dispatchEvent(new Event('resize')); await new Promise(resolve=>setTimeout(resolve,0))
     headers = document.querySelectorAll('th')
     ;[[0,28],[28,80],[108,36],[144,856*300/650],[144+856*300/650,856*350/650]].forEach(([left,width],index)=>rect(headers[index]!,left!,width!))
     pointer(headers[0]!, 'pointerdown', 26); pointer(document, 'pointermove', 38); pointer(document, 'pointerup', 38)

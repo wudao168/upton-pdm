@@ -32,12 +32,13 @@ public sealed partial class PdmWorkflowService
         var models = IsNonStandardScope(package.Scope)
             ? package.NonStandardBomSnapshot.Where(item => selected.Contains(item.Id) && item.SourceDocumentId.HasValue)
                 .Select(item => item.SourceDocumentId!.Value).Distinct().ToArray() : [];
-        var relations = await repository.ListDocumentRelationsAsync(package.ProjectId, ct);
+        var drawingPairs = await DrawingModelPairing.ReadAsync(repository, package.ProjectId, ct);
+        var uncertain = drawingPairs.FirstOrDefault(pair => pair.Issue is not null && pair.ReferencedModelIds.Any(models.Contains));
+        if (!IsLongLeadScope(package.Scope) && uncertain is not null) throw new PdmRuleException(uncertain.Issue!);
+        var relations = drawingPairs.Where(pair => pair.ModelDocumentId.HasValue)
+            .Select(pair => new DocumentModelDrawingRelation(pair.ModelDocumentId!.Value, pair.DrawingDocumentId)).ToArray();
         var publishIds = models.Concat(relations.Where(item => models.Contains(item.ModelDocumentId))
             .Select(item => item.DrawingDocumentId)).ToHashSet();
-        var nonStandardIds = (await repository.GetBomAsync(package.ProjectId, BomKind.NonStandard, ct))
-            .Where(item => item.SourceDocumentId.HasValue && !item.IsManuallyExcluded && !item.IsPendingRemoval)
-            .Select(item => item.SourceDocumentId!.Value).ToHashSet();
         var bindings = new Dictionary<Guid, ReleaseVersionBinding>();
         var drawingIds = new HashSet<Guid>();
         var reference = package.ReferenceSnapshotId.HasValue ? await repository.FindReferenceSnapshotAsync(package.ReferenceSnapshotId.Value, ct) : null;
@@ -61,8 +62,7 @@ public sealed partial class PdmWorkflowService
             // A formal promotion preserves this source design; reuse it instead of promoting the same work file again.
             if (version.Status == DocumentVersionStatus.Work)
                 version = history.FirstOrDefault(value => value.Status == DocumentVersionStatus.Released && value.SourceVersionId == version.Id) ?? version;
-            if (!publishIds.Contains(id) && nonStandardIds.Contains(id) && version.Status == DocumentVersionStatus.Work)
-                throw new PdmConflictException($"本次图纸引用了未纳入发布的非标子件{document.FileName}工作版本。请明确纳入该项变更或使用既有正式版；系统不会自动扩大发布范围。");
+            // 引用模型冻结到当前使用版本，只有工程图对应的选中模型才升正式版。
             if (bindings.TryGetValue(id, out var bound))
             {
                 if (bound.VersionId != version.Id && !MatchesReviewedVersion(history.First(value => value.Id == bound.VersionId), version.Id, history))
@@ -80,7 +80,8 @@ public sealed partial class PdmWorkflowService
             bindings[id] = new(id, version.Id, version.Revision.Display, version.Sha256, selectedForPublication, storedName,
                 selectedForPublication && version.Status == DocumentVersionStatus.Work,
                 history.FirstOrDefault(value => value.Status == DocumentVersionStatus.Released)?.Revision.Display ?? "",
-                selectedForPublication ? version.Status == DocumentVersionStatus.Work ? version.Revision.Release().Display : version.Revision.Display : "");
+                selectedForPublication ? version.Status == DocumentVersionStatus.Work ? version.Revision.Release().Display : version.Revision.Display : "",
+                document.Kind == DocumentKind.Drawing ? drawingPairs.SingleOrDefault(pair => pair.DrawingDocumentId == id)?.ModelDocumentId : null);
             async Task VisitAsync(DocumentReferenceNode node)
             {
                 if (node.DocumentId is Guid childId && childId != id) await AddAsync(childId, node.Revision);

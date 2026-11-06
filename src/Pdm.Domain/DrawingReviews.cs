@@ -135,6 +135,8 @@ public sealed record DrawingReviewCandidate
 
     public string? Reason { get; init; }
 
+    public bool IsReferenceOnly { get; init; }
+
     public bool Selectable => State is DrawingReviewCandidateState.Ready or DrawingReviewCandidateState.ApprovedCurrent;
 }
 
@@ -205,6 +207,11 @@ public sealed record DrawingReviewItem
     public Guid? EffectiveDrawingVersionId => DrawingResultVersionId ?? DrawingVersionId;
 
     public bool RequiresDrawingReview => DrawingDocumentId.HasValue;
+
+    // 一张工程图可以关联多个模型；审核结论和回写按冻结的工程图版本共享。
+    public bool ReviewsSameDrawing(DrawingReviewItem other) => PackageId == other.PackageId
+        && DrawingDocumentId.HasValue && DrawingDocumentId == other.DrawingDocumentId
+        && DrawingVersionId.HasValue && DrawingVersionId == other.DrawingVersionId;
 }
 
 public sealed record DrawingReviewMarkup

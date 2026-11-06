@@ -53,6 +53,11 @@ function mountCard(packageValue: DrawingReviewPackage | undefined, currentUserna
 }
 
 describe('DrawingReviewAnnotationCard', () => {
+  it('本图审核通过但整单未完成时明确等待其他图纸审核', () => {
+    const wrapper = mountCard({ ...review, items: [{ ...review.items[0]!, drawingState: 'Approved' }] })
+    expect(wrapper.text()).toContain('等待本单其余图纸完成审核后转批准')
+    wrapper.unmount()
+  })
   it('审核单已完成或正在写标记时不再显示等待批准', () => {
     const approvedItem = { ...review.items[0]!, drawingState: 'Approved' as const }
     const writing = mountCard({ ...review, state: 'WritingProperties', items: [approvedItem] })
@@ -107,7 +112,7 @@ describe('DrawingReviewAnnotationCard', () => {
     const approved: DrawingReviewPackage = { ...review, items: [{ ...review.items[0]!, drawingState: 'Approved' }] }
     const wrapper = mountCard(approved)
 
-    expect(wrapper.text()).toContain('该2D工程图已通过审核，等待批准')
+    expect(wrapper.text()).toContain('该2D工程图已审核，等待本单其余图纸完成审核后转批准')
     expect(wrapper.find('.is-approve').exists()).toBe(false)
     const revokeButton = wrapper.get('.drawing-review-decision-buttons .is-revoke')
     expect(revokeButton.text()).toBe('撤销')

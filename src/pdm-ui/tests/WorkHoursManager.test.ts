@@ -7,6 +7,7 @@ import * as api from '../src/api'
 import * as calendar from '../src/projectCalendar'
 import * as workbook from '../src/procurementWorkbook'
 import type { WorkHoursView } from '../src/workHours'
+import { ElMessage } from '../src/statusMessage'
 
 vi.mock('../src/statusMessage', () => ({ ElMessage: { success: vi.fn(), warning: vi.fn(), error: vi.fn() } }))
 vi.mock('../src/globalStatusContent', () => ({ loadGlobalStatusContent: async () => ({ holidayCalendars: [] }) }))
@@ -18,11 +19,78 @@ const view = (): WorkHoursView => ({ today: '2026-10-20', startDate: '2026-10-12
 const selectStub = defineComponent({ name: 'ElSelect', props: ['modelValue', 'disabled'], emits: ['update:modelValue'], template: '<select :value="modelValue" :disabled="disabled" @change="$emit(\'update:modelValue\',$event.target.value)"><slot /></select>' })
 const optionStub = defineComponent({ name: 'ElOption', props: ['value','label'], template: '<option :value="value">{{ label }}</option>' })
 const treeSelectStub = defineComponent({name:'ElTreeSelect',props:['modelValue','data'],emits:['update:modelValue'],template:'<div data-testid="department-tree" />'})
-const mountManager = () => mount(WorkHoursManager, { props: { token: 'token', companyId: 'c', active: true }, global: { plugins: [ElementPlus], stubs: { teleport: true, ElSelect: selectStub, ElOption: optionStub, ElTreeSelect: treeSelectStub } } })
+const mountManager = (props: { mobile?: boolean; initialProjectId?: string } = {}) => mount(WorkHoursManager, { props: { token: 'token', companyId: 'c', active: true, ...props }, global: { plugins: [ElementPlus], stubs: { teleport: true, ElSelect: selectStub, ElOption: optionStub, ElTreeSelect: treeSelectStub } } })
 type Wrapper = ReturnType<typeof mountManager>
 const button = (wrapper: Wrapper, text: string) => wrapper.findAll('button').find(x => x.text() === text)!
 beforeEach(() => { vi.spyOn(calendar,'chinaToday').mockReturnValue('2026-10-20'); vi.spyOn(api,'readWorkHours').mockImplementation(async () => view()); vi.spyOn(api,'saveWorkHours').mockImplementation(async () => view()) })
 afterEach(() => vi.restoreAllMocks())
+
+describe('移动端精简工时填报', () => {
+  it('仅显示五个字段和保存，管理员也不显示汇总、设置、日历及辅助操作', async () => {
+    vi.mocked(api.readWorkHours).mockResolvedValue({ ...view(), canManage: true, canManageSettings: true })
+    const wrapper = mountManager({ mobile: true }); await flushPromises()
+    expect(wrapper.findAll('.wh-mobile-fields > label').map(label => label.element.firstChild?.textContent)).toEqual(['日期', '所在地', '项目号', '项目名称', '工时数'])
+    expect(wrapper.findAll('button').map(item => item.text())).toEqual(['保存'])
+    expect(wrapper.find('.wh-tabs, .wh-summary, .wh-calendar, .wh-recent, .wh-entry, .wh-charts').exists()).toBe(false)
+    expect(wrapper.text()).not.toMatch(/本月累计|未填工作日|复制|最近项目|修改记录|汇总工时|工时设置|当日记录/)
+    expect((wrapper.get('[aria-label="自动带出项目名称"]').element as HTMLInputElement).value).toBe('')
+    wrapper.unmount()
+  })
+  it('未保存及保存失败时可离开，切换模块不会清空输入，刷新也不弹出保存拦截', async () => {
+    vi.mocked(api.saveWorkHours).mockRejectedValue(new Error('服务器暂时不可用，请重试。'))
+    const wrapper = mountManager({ mobile: true }); await flushPromises()
+    await wrapper.get('[aria-label="填报项目"]').setValue('child')
+    await wrapper.get('[aria-label="工时数"]').setValue('6.5')
+    await wrapper.get('form').trigger('submit'); await flushPromises()
+    expect((wrapper.vm as unknown as { canLeave: () => boolean }).canLeave()).toBe(true)
+    const unload = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(unload)
+    expect(unload.defaultPrevented).toBe(false)
+    await wrapper.setProps({ active: false }); await wrapper.setProps({ active: true }); await flushPromises()
+    expect((wrapper.get('[aria-label="工时数"]').element as HTMLInputElement).value).toBe('6.5')
+    expect((wrapper.get('[aria-label="填报项目"]').element as HTMLSelectElement).value).toBe('child')
+    wrapper.unmount()
+  })
+  it('未保存时直接切换日期，项目名称自动带出，并读取对应已有工时', async () => {
+    const wrapper = mountManager({ mobile: true }); await flushPromises()
+    await wrapper.get('[aria-label="填报项目"]').setValue('child')
+    await wrapper.get('[aria-label="工时数"]').setValue('6.5')
+    await wrapper.get('[aria-label="填报日期"]').setValue('2026-10-19'); await flushPromises()
+    expect((wrapper.get('[aria-label="填报日期"]').element as HTMLInputElement).value).toBe('2026-10-19')
+    expect((wrapper.get('[aria-label="自动带出项目名称"]').element as HTMLInputElement).value).toBe('上料单元')
+    expect((wrapper.get('[aria-label="工时数"]').element as HTMLInputElement).value).toBe('8')
+    expect(api.saveWorkHours).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+  it('再次保存同日同项目同所在地时更新对应记录，保留其他项目和所在地', async () => {
+    const data = view()
+    data.sheets[1]!.entries.push({ ...data.sheets[1]!.entries[0]!, id: 'other', projectId: 'root', projectCode: 'P700012', projectName: '设备', location: '厂外', hours: 3.5 })
+    vi.mocked(api.readWorkHours).mockResolvedValue(data)
+    const wrapper = mountManager({ mobile: true, initialProjectId: 'child' }); await flushPromises()
+    await wrapper.get('[aria-label="填报日期"]').setValue('2026-10-19'); await flushPromises()
+    await wrapper.get('[aria-label="所在地"]').setValue('厂内')
+    await wrapper.get('[aria-label="工时数"]').setValue('6.5')
+    await wrapper.get('form').trigger('submit'); await flushPromises()
+    expect(api.saveWorkHours).toHaveBeenLastCalledWith({ from: '2026-10-19', to: '2026-10-19', versions: [{ month: '2026-10', rowVersion: 2 }], entries: [
+      { date: '2026-10-19', projectId: 'root', location: '厂外', hours: 3.5 },
+      { date: '2026-10-19', projectId: 'child', location: '厂内', hours: 6.5 },
+    ] }, 'token')
+    wrapper.unmount()
+  })
+  it('保留半小时及每日上限校验，并以中文拒绝未来日期', async () => {
+    vi.mocked(ElMessage.warning).mockClear()
+    const wrapper = mountManager({ mobile: true, initialProjectId: 'child' }); await flushPromises()
+    for (const hours of ['0.25', '24.5']) {
+      await wrapper.get('[aria-label="工时数"]').setValue(hours)
+      await wrapper.get('form').trigger('submit'); await flushPromises()
+    }
+    expect(api.saveWorkHours).not.toHaveBeenCalled()
+    expect(ElMessage.warning).toHaveBeenCalledWith('请选择项目和所在地，工时须大于0并按0.5小时填写。')
+    await wrapper.get('[aria-label="填报日期"]').setValue('2026-10-21'); await flushPromises()
+    expect((wrapper.get('[aria-label="填报日期"]').element as HTMLInputElement).value).toBe('2026-10-20')
+    expect(ElMessage.warning).toHaveBeenCalledWith('请选择今天或之前的日期。')
+    wrapper.unmount()
+  })
+})
 
 describe('工时填报与汇总', () => {
   async function calendarMenu(w: Wrapper, date: string, action: string) {

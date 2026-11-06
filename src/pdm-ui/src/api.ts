@@ -1632,6 +1632,11 @@ export function login(username: string, password: string): Promise<AuthSession> 
 }
 
 export const readDingTalkOfficeBootstrap = (companyId?: string) => requestJson<{ enabled: boolean; companyId: string; corpId: string; appKey: string }>(`/api/integrations/dingtalk/office/bootstrap${companyId ? `?companyId=${encodeURIComponent(companyId)}` : ''}`)
+export const readMobileOfficeLayout = (token: string) => requestJson<import('./mobileOfficeLayout').MobileOfficeLayoutView>('/api/settings/dingtalk/office-layout', { cache: 'no-store' }, token)
+export const saveMobileOfficeLayoutDraft = (layout: import('./mobileOfficeLayout').MobileOfficeLayout, expectedRowVersion: number, token: string) => requestJson<import('./mobileOfficeLayout').MobileOfficeLayoutView>('/api/settings/dingtalk/office-layout/draft', { method: 'PUT', body: JSON.stringify({ layout, expectedRowVersion }) }, token)
+export const publishMobileOfficeLayout = (expectedRowVersion: number, token: string) => requestJson<import('./mobileOfficeLayout').MobileOfficeLayoutView>('/api/settings/dingtalk/office-layout/publish', { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token)
+export const rollbackMobileOfficeLayout = (version: number, expectedRowVersion: number, token: string) => requestJson<import('./mobileOfficeLayout').MobileOfficeLayoutView>('/api/settings/dingtalk/office-layout/rollback', { method: 'POST', body: JSON.stringify({ version, expectedRowVersion }) }, token)
+export const readPublishedMobileOfficeLayout = (token: string) => requestJson<import('./mobileOfficeLayout').PublishedMobileOfficeLayout>('/api/integrations/dingtalk/office/layout', { cache: 'no-store' }, token, 10000, '移动端布局读取超时，请检查网络后重试。')
 export const loginDingTalkOffice = (companyId: string, code: string) => requestJson<AuthSession>('/api/integrations/dingtalk/office/login', {
   method: 'POST', body: JSON.stringify({ companyId, code, clientInstanceId: browserLoginInstance() }),
 })

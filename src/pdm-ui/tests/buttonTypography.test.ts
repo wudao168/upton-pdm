@@ -16,6 +16,12 @@ function install() {
   installButtonTypography(app)
 }
 const settle = () => new Promise(resolve => setTimeout(resolve, 0))
+it('手机预览按钮不应用桌面尺寸装饰', () => {
+  const target = button(80, 30)
+  const preview = document.createElement('div'); preview.className = 'layout-phone'; document.body.append(preview); preview.append(target)
+  install()
+  expect(target.dataset.pdmButtonSize).toBeUndefined()
+})
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; vi.restoreAllMocks() })
 it('按用途标记普通按钮，旧宽高不再决定字体', () => {
   const target = button(80, 30)
@@ -60,7 +66,7 @@ it('导航、进度条、分类、空白日期和单元格保持内容布局', a
 it('流程节点和标签关闭按钮保留原生尺寸，延迟挂载也不套用操作按钮尺寸', async () => {
   install()
   const host = document.createElement('div')
-  host.innerHTML = '<button class="production-scan-settings__node"><strong>包装接收</strong><span>机加主管、机加人员</span></button><button class="el-tag__close" aria-label="关闭此标签">×</button>'
+  host.innerHTML = '<button class="production-scan-settings__node"><strong>包装接收</strong><span>机加主管、机加人员</span></button><button class="el-tag__close" aria-label="关闭此标签">×</button><button class="drawing-review-candidate"><span>✓</span><strong>A01-100</strong><em>待发起审核</em></button>'
   document.body.append(host); await settle()
   for (const button of host.querySelectorAll('button')) expect(button.dataset.pdmButtonSize).toBeUndefined()
 })

@@ -70,6 +70,8 @@ public sealed class NotificationInboxService(IPdmRepository repository, IProject
                 {
                     if (drawing.State != DrawingReviewPackageState.PendingSupervisorApproval) decisions[notice.Id] = new(notice, true, "本轮主管批准已结束");
                     else if (!string.Equals(drawing.Supervisor, notice.Recipient, StringComparison.OrdinalIgnoreCase)) decisions[notice.Id] = new(notice, false, "不是当前指定主管");
+                    else if (drawing.Items.Max(item => item.DrawingReviewedAt) is { } reviewedAt && notice.CreatedAt < reviewedAt)
+                        decisions[notice.Id] = new(notice, true, "上一轮批准提醒已由本轮提醒替代");
                 }
                 else if (notice.Category == "DrawingReviewChangesRequested")
                 {

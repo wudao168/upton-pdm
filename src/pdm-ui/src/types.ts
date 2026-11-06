@@ -1288,6 +1288,7 @@ export interface DrawingReviewCandidate {
   state: DrawingReviewCandidateState
   reason?: string | null
   selectable: boolean
+  isReferenceOnly?: boolean
 }
 
 export interface AddDrawingReviewMarkupInput {

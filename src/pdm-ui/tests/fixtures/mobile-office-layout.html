@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>UPLM移动端页面维护测试</title>
+    <style>html,body,#app{height:auto!important;overflow:visible!important}</style>
+  </head>
+  <body style="margin:0;padding:24px">
+    <div id="app"></div>
+    <script type="module">
+      import { createApp } from 'vue'
+      import ElementPlus from 'element-plus'
+      import zhCn from 'element-plus/es/locale/lang/zh-cn'
+      import 'element-plus/dist/index.css'
+      import '../../src/styles/tokens.css'
+      import '../../src/styles/themes.css'
+      import '../../src/styles/app.css'
+      import '../../src/styles/ui-consistency.css'
+      import '../../src/styles/stat-cards.css'
+      import { installButtonStyles } from '../../src/buttonStyles'
+      import { installButtonTypography } from '../../src/buttonTypography'
+      import Editor from '../../src/components/MobileOfficeLayoutEditor.vue'
+      const app = createApp(Editor, { token: 'admin-token' }).use(ElementPlus, { locale: zhCn })
+      installButtonStyles(app)
+      installButtonTypography(app)
+      app.mount('#app')
+    </script>
+  </body>
+</html>

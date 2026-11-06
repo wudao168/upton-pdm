@@ -1,18 +1,21 @@
 import type { DrawingReviewBadge, DrawingReviewCandidate, DrawingReviewPackage } from './types'
 
 export function drawingReviewCandidateBadge(candidate: DrawingReviewCandidate, packages: DrawingReviewPackage[]): DrawingReviewBadge {
+  if (candidate.isReferenceOnly) return { label: '装配引用', tone: 'neutral' }
   const review = packages.find(value => ['InReview', 'PendingSupervisorApproval', 'ChangesRequested', 'WritingProperties', 'Approved'].includes(value.state)
     && value.items.some(item => candidate.drawingDocumentId ? item.drawingDocumentId === candidate.drawingDocumentId : item.modelDocumentId === candidate.modelDocumentId))
   const item = review?.items.find(value => candidate.drawingDocumentId ? value.drawingDocumentId === candidate.drawingDocumentId : value.modelDocumentId === candidate.modelDocumentId)
   const state = review?.state === 'WritingProperties' || review?.state === 'Approved' ? 'Marked' : item?.drawingState
   if (state === 'ChangesRequested') return { label: '已退回（待修改）', tone: 'danger' }
+  if (candidate.state === 'InReview' && state === 'Approved' && review?.state === 'InReview')
+    return { label: '已审核', tone: 'neutral' }
   if (candidate.state === 'InReview' && state) return { label: drawingReviewTargetStateLabel(state), tone: drawingReviewTargetStateTone(state) }
   return { label: ({ Ready: '待发起审核', InReview: '待审核', ApprovedCurrent: '已批准', Unavailable: '不可发起' } as const)[candidate.state], tone: drawingReviewCandidateStateTone(candidate.state) }
 }
 
 export function drawingReviewTreeBadges(candidates: DrawingReviewCandidate[], packages: DrawingReviewPackage[]): Record<string, DrawingReviewBadge> {
   const badges: Record<string, DrawingReviewBadge> = {}
-  const priority: Record<string, number> = { '已批准': 0, '不可发起': 1, '待发起审核': 2, '待批准': 3, '待审核': 4, '已退回（待修改）': 5 }
+  const priority: Record<string, number> = { '装配引用': 0, '已批准': 0, '不可发起': 1, '待发起审核': 2, '已审核': 3, '待批准': 3, '待审核': 4, '已退回（待修改）': 5 }
   for (const candidate of candidates) {
     const badge = drawingReviewCandidateBadge(candidate, packages)
     for (const id of [candidate.drawingDocumentId, candidate.modelDocumentId]) {
@@ -20,6 +23,17 @@ export function drawingReviewTreeBadges(candidates: DrawingReviewCandidate[], pa
     }
   }
   return badges
+}
+
+export function uniqueDrawingReviewCandidates(candidates: DrawingReviewCandidate[]) {
+  return candidates.filter((candidate, index) => !candidate.isReferenceOnly && candidates.findIndex(other =>
+    candidate.drawingDocumentId ? other.drawingDocumentId === candidate.drawingDocumentId : other.candidateId === candidate.candidateId) === index)
+}
+
+export function uniqueDrawingReviewItems(items: DrawingReviewPackage['items']) {
+  return items.filter((item, index) => items.findIndex(other => item.drawingDocumentId
+    ? other.drawingDocumentId === item.drawingDocumentId && other.drawingVersionId === item.drawingVersionId
+    : other.id === item.id) === index)
 }
 
 const packageStateLabels: Record<DrawingReviewPackage['state'], string> = {

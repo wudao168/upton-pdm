@@ -3270,7 +3270,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     [InlineData(BomKind.Standard, ReleaseScope.StandardLongLead, ReleaseScope.StandardFormal)]
     [InlineData(BomKind.NonStandard, ReleaseScope.NonStandardLongLead, ReleaseScope.NonStandardWithDrawing)]
     [InlineData(BomKind.Electrical, ReleaseScope.ElectricalLongLead, ReleaseScope.ElectricalFormal)]
-    public async Task EarlyBomRelease_AllowsProjectWithoutReferenceTreeWhileFormalReleaseStillRequiresIt(
+    public async Task EarlyBomRelease_AllowsProjectWithoutReferenceTreeAndStandardFormalIsIndependent(
         BomKind kind,
         ReleaseScope earlyScope,
         ReleaseScope formalScope)
@@ -3303,6 +3303,14 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
             _ => throw new InvalidOperationException()
         });
 
+        if (kind == BomKind.Standard)
+        {
+            var formal = await workflow.CreateScopedReleasePackageAsync(project.Id, null, "", "", "正式发布", "未指定", null,
+                formalScope, [item.Id], "admin", UserRole.Administrator, default);
+            Assert.Null(formal.ReferenceSnapshotId);
+            Assert.Equal(2, Assert.Single(formal.StandardBomSnapshot).Quantity);
+            return;
+        }
         var formalError = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
             project.Id, null, string.Empty, string.Empty, "正式发布", "未指定", null,
             formalScope, [], "admin", UserRole.Administrator, default));

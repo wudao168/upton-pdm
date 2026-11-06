@@ -2,9 +2,53 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import ReleaseCenter from '../src/components/ReleaseCenter.vue'
 import * as api from '../src/api'
-import type { BomItem, CreateReleasePackageInput, ReleasePackageSummary } from '../src/types'
+import type { BomItem, CreateReleasePackageInput, DrawingReviewCandidate, ReleasePackageSummary } from '../src/types'
 
 describe('ReleaseCenter', () => {
+  it.each(['NonStandardLongLead', 'NonStandardWithDrawing'] as const)('新建%s按模型配置汇总空料号结构实例', async scope => {
+    const base: BomItem = { id:'same-0',kind:'NonStandard',sequence:1,drawingNumber:'',name:'70006186.01.05-01',specification:'70006186.01.05-01',quantity:1,unit:'个',revision:'W1',complete:true,sourceDocumentId:'same-model',sourceConfiguration:'默认' }
+    const repeated = Array.from({length:4},(_,index)=>({...base,id:`same-${index}`,sequence:index+1,sourceInstancePath:`root/instance-${index}`}))
+    const items = [...repeated,{...base,id:'other-model',sourceDocumentId:'other-model'}, {...base,id:'other-config',sourceConfiguration:'备用'}, {...base,id:'manual-a',sourceDocumentId:undefined}, {...base,id:'manual-b',sourceDocumentId:undefined}]
+    const wrapper=mount(ReleaseCenter,{props:{releasePackage:null,releaseItems:items,allowedScopes:[scope],preferredScope:scope,username:'engineer',pending:false,progress:0,error:'',canManage:true,canDecide:false,
+      drawingReviewCandidates:items.map<DrawingReviewCandidate>(item=>({candidateId:item.id!,bomItemId:item.id,modelDocumentId:item.sourceDocumentId,drawingDocumentId:`drawing-${item.sourceDocumentId??item.id}`,drawingNumber:item.name,name:item.name,bomKinds:['NonStandard'],modelRevision:'W1',state:'ApprovedCurrent',selectable:false}))}})
+    const rows=wrapper.findAll('.release-detail-picker tbody tr')
+    expect(rows).toHaveLength(5)
+    expect(rows[0]!.findAll('td')[6]!.text()).toBe('4')
+    if(scope==='NonStandardLongLead'){
+      await rows[0]!.get('input[type="checkbox"]').setValue(true)
+      await rows[0]!.get('input[type="number"]').setValue(3)
+      await wrapper.get('form').trigger('submit')
+      const input=wrapper.emitted<CreateReleasePackageInput[]>('create')![0]![0]!
+      expect(input.selectedBomItemQuantities).toEqual({'same-0':1,'same-1':1,'same-2':1})
+      expect(input.selectedBomItemIds).toEqual(['same-0','same-1','same-2'])
+    }
+    wrapper.unmount()
+  })
+
+  it('空料号长交期汇总扣除此前发布量，保留实际结构位置和剩余上限', async () => {
+    const base: BomItem={id:'row-1',kind:'NonStandard',sequence:1,drawingNumber:'',name:'空料号零件',specification:'MODEL',quantity:1,unit:'个',revision:'W1',complete:true,sourceDocumentId:'model',sourceConfiguration:'默认'}
+    const items=[base,{...base,id:'row-2',sequence:2},{...base,id:'row-3',sequence:3}]
+    const wrapper=mount(ReleaseCenter,{props:{releasePackage:null,releaseItems:items,longLeadPublishedItems:[{...base,id:'old-row',quantity:1}],allowedScopes:['NonStandardLongLead'],preferredScope:'NonStandardLongLead',username:'engineer',pending:false,progress:0,error:'',canManage:true,canDecide:false,
+      drawingReviewCandidates:[{candidateId:'candidate',modelDocumentId:'model',drawingDocumentId:'drawing',drawingNumber:'MODEL',name:'空料号零件',bomKinds:['NonStandard'],modelRevision:'W1',state:'ApprovedCurrent',selectable:false}]}})
+    const rows=wrapper.findAll('.release-detail-picker tbody tr')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.findAll('td')[6]!.text()).toBe('2')
+    await rows[0]!.get('input[type="checkbox"]').setValue(true)
+    const quantity=rows[0]!.get('input[type="number"]')
+    expect(quantity.attributes('max')).toBe('2')
+    expect((quantity.element as HTMLInputElement).value).toBe('2')
+    wrapper.unmount()
+  })
+  it('装配图的引用零件不进入正式发布选择，有独立工程图的零件仍可发布', () => {
+    const models=['assembly','reference','part'];
+    const rows: BomItem[]=models.map((model,index)=>({id:model,kind:'NonStandard',sequence:index+1,drawingNumber:model,name:model,quantity:1,unit:'件',revision:'W1',complete:true,sourceDocumentId:model}));
+    const wrapper=mount(ReleaseCenter,{props:{releasePackage:null,releaseItems:rows,allowedScopes:['NonStandardWithDrawing'],preferredScope:'NonStandardWithDrawing',username:'engineer',pending:false,progress:0,error:'',canManage:true,canDecide:false,
+      drawingReviewCandidates:models.map<DrawingReviewCandidate>(model=>({candidateId:model,bomItemId:model,modelDocumentId:model,drawingDocumentId:model==='reference'?null:`drawing-${model}`,drawingNumber:model,name:model,bomKinds:['NonStandard'],modelRevision:'W1',state:model==='reference'?'Unavailable':'ApprovedCurrent',selectable:false,isReferenceOnly:model==='reference'}))}});
+    const choices=wrapper.findAll('input[aria-label^="本次发布物料"]');
+    expect(choices).toHaveLength(2);
+    expect(choices.map(item=>item.attributes('aria-label')).join(' ')).not.toContain('reference');
+    wrapper.unmount();
+  })
   it('发布明细仍按料号汇总，不按配套主料或套件层级拆行', () => {
     const item: BomItem={id:'owner-a',kind:'Standard',sequence:1,drawingNumber:'SHARED',name:'共用配件',quantity:2,unit:'001',revision:'W1',complete:true,relationMainBomItemId:'main-a'}
     const items=[item,{...item,id:'owner-b',sequence:2,quantity:3,relationMainBomItemId:'main-b'},

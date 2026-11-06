@@ -52,6 +52,20 @@ const candidate: DrawingReviewCandidate = {
 }
 
 describe('DrawingReviewPanel', () => {
+  it('同一图纸关联多个模型时只显示一行、一次决定和一张进度', async () => {
+    const current = { ...review, assignedReviewers: ['REVIEWER'], items: [review.items[0]!,
+      { ...review.items[0]!, id: 'item-2', modelDocumentId: 'model-2' },
+      { ...review.items[0]!, id: 'item-3', modelDocumentId: 'model-3' }] }
+    const wrapper = mount(DrawingReviewPanel, { global: { plugins: [ElementPlus] }, props: {
+      ...permissions, packageId: current.id, packages: [current], currentUsername: 'reviewer',
+      candidates: current.items.map((item, index) => ({ ...candidate, candidateId: `candidate-${index}`, modelDocumentId: item.modelDocumentId, state: 'InReview' as const, selectable: false })),
+    } })
+    expect(wrapper.findAll('.drawing-review-overview__row')).toHaveLength(1)
+    expect(wrapper.text()).toContain('1张2D图纸 · 0/1项完成')
+    await wrapper.get('.drawing-review-overview__batch .is-approve').trigger('click')
+    expect(wrapper.emitted('decideBatch')?.[0]?.[0]).toHaveLength(1)
+    wrapper.unmount()
+  })
   it('自动勾选待本人审核的图纸，排除已批准项，刷新保留人工取消', async () => {
     const current: DrawingReviewPackage = { ...review, assignedReviewers: ['reviewer'], items: [
       review.items[0]!,
@@ -311,8 +325,8 @@ describe('DrawingReviewPanel', () => {
     // 待批准和已退回在同一列表，按实际状态筛选。
     const todoRows = wrapper.findAll('.drawing-review-overview__row')
     expect(todoRows).toHaveLength(2)
-    expect(todoRows[0]!.find('em').text()).toContain('待批准')
-    expect(todoRows[0]!.classes()).toContain('is-pending')
+    expect(todoRows[0]!.find('em').text()).toContain('已审核')
+    expect(todoRows[0]!.classes()).toContain('is-neutral')
     await wrapper.get('select[aria-label="筛选图纸审核状态"]').setValue('已退回（待修改）')
     const doneRows = wrapper.findAll('.drawing-review-overview__row')
     expect(doneRows).toHaveLength(1)

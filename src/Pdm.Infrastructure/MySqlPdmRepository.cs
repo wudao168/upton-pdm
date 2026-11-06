@@ -578,20 +578,27 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """,
             new { ProjectId = projectId, AllDocuments = documentIds is null, DocumentIds = documentIds?.Count > 0 ? documentIds : new[] { Guid.Empty } },
             cancellationToken: cancellationToken));
-        var pendingRows = await connection.QueryAsync<PendingDrawingRelationRow>(new CommandDefinition(
+        // Choose current versions using small metadata before reading large reference payloads.
+        var versions = await connection.QueryAsync<PendingDrawingRelationVersionRow>(new CommandDefinition(
             """
-            SELECT d.id DocumentId,d.project_id ProjectId,d.file_name FileName,v.reference_snapshot_json ReferenceSnapshotJson
+            SELECT v.id Id,d.id DocumentId,(v.revision_label=d.revision_label) MatchesRevision,v.created_at CreatedAt
             FROM document d
             INNER JOIN project requested ON requested.id=@ProjectId
             INNER JOIN project owner_project ON owner_project.id=d.project_id
-            INNER JOIN document_version v ON v.id=(SELECT current_version.id FROM document_version current_version
-                WHERE current_version.document_id=d.id
-                ORDER BY (current_version.revision_label=d.revision_label) DESC,current_version.created_at DESC LIMIT 1)
+            INNER JOIN document_version v ON v.document_id=d.id
             WHERE (owner_project.id=COALESCE(requested.parent_project_id,requested.id)
                OR owner_project.parent_project_id=COALESCE(requested.parent_project_id,requested.id))
               AND d.kind='Drawing' AND d.deleted_at IS NULL AND d.purged_at IS NULL
-              AND JSON_EXTRACT(v.reference_snapshot_json,'$.structureIndexPending')=TRUE
             """, new { ProjectId = projectId }, cancellationToken: cancellationToken));
+        var versionIds = versions.GroupBy(version => version.DocumentId)
+            .Select(group => group.OrderByDescending(version => version.MatchesRevision).ThenByDescending(version => version.CreatedAt).First().Id).ToArray();
+        if (versionIds.Length == 0) return rows.ToArray();
+        var pendingRows = await connection.QueryAsync<PendingDrawingRelationRow>(new CommandDefinition(
+            """
+            SELECT d.id DocumentId,d.project_id ProjectId,d.file_name FileName,v.reference_snapshot_json ReferenceSnapshotJson
+            FROM document_version v INNER JOIN document d ON d.id=v.document_id
+            WHERE v.id IN @VersionIds AND JSON_EXTRACT(v.reference_snapshot_json,'$.structureIndexPending')=TRUE
+            """, new { VersionIds = versionIds }, cancellationToken: cancellationToken));
         var scope = documentIds?.ToHashSet();
         var sources = pendingRows.Select(row => new PendingDrawingRelationSource(row.DocumentId, row.ProjectId, row.FileName,
             JsonSerializer.Deserialize<DocumentReferenceNode>(row.ReferenceSnapshotJson, jsonOptions)!))
@@ -608,6 +615,14 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             """, new { ModelIds = modelIds }, cancellationToken: cancellationToken));
         return rows.Concat(PendingDrawingRelations.Recover(sources, modelVersions)).Distinct()
             .OrderBy(relation => relation.ModelDocumentId).ThenBy(relation => relation.DrawingDocumentId).ToArray();
+    }
+
+    private sealed class PendingDrawingRelationVersionRow
+    {
+        public Guid Id { get; init; }
+        public Guid DocumentId { get; init; }
+        public bool MatchesRevision { get; init; }
+        public DateTime CreatedAt { get; init; }
     }
 
     private sealed class PendingDrawingRelationRow
@@ -632,7 +647,6 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             FROM project_reference_root current_root
             INNER JOIN reference_snapshot snapshot ON snapshot.id=current_root.reference_snapshot_id
             INNER JOIN project ON project.id=current_root.project_id
-            ORDER BY project.code
             """,
             cancellationToken: cancellationToken));
         var documentRows = await connection.QueryAsync<DocumentRow>(new CommandDefinition(

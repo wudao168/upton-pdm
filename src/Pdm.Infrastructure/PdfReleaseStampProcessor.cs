@@ -77,7 +77,7 @@ public sealed class PdfReleaseStampProcessor(IPdmRepository repository, ILogger<
                 throw new PdmConflictException("PDF发布标识与本次冻结版本不一致，已保留原PDF。");
             var revision = source.ExpectedFormalRevision;
             if (string.IsNullOrWhiteSpace(revision)) revision = version.Status == DocumentVersionStatus.Released ? version.Revision.Display : version.Revision.Release().Display;
-            var models = ReleaseBoundSourceReader.ModelDocumentIds(version.ReferenceSnapshot).ToHashSet();
+            var models = ReleaseBoundSourceReader.ModelDocumentIds(package, source.DocumentId, version.ReferenceSnapshot).ToHashSet();
             if (models.Count == 0) models.UnionWith((await repository.ListDocumentRelationsAsync(project.Id, cancellationToken))
                 .Where(item => item.DrawingDocumentId == source.DocumentId).Select(item => item.ModelDocumentId));
             var model = ReleaseBoundSourceReader.DrawingModel(package, version, models, source.DrawingNumber);

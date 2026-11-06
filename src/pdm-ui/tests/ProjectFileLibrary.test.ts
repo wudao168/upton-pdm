@@ -25,6 +25,33 @@ function mountLibrary(folders: ProjectFolder[] = [businessFolder], documents: an
 }
 
 describe('ProjectFileLibrary', () => {
+  it('切换目录和刷新目录数据不重开已折叠分支，子级展开状态互不影响', async () => {
+    const root = { ...businessFolder, id: 'root', name: '根目录', purpose: 'Root' as const }
+    const mechanical = { ...businessFolder, id: 'mechanical', name: '机械图纸', purpose: 'MechanicalRoot' as const, parentFolderId: root.id }
+    const branch = { ...controlledFolder, id: 'branch', name: '机械子目录', parentFolderId: mechanical.id }
+    const electrical = { ...businessFolder, id: 'electrical', name: '电气图纸', purpose: 'ElectricalRoot' as const, parentFolderId: root.id }
+    const folders = [root, mechanical, branch, { ...controlledFolder, id: 'part', name: '零件目录', parentFolderId: branch.id }, electrical,
+      { ...controlledFolder, id: 'electric-part', name: '电气子目录', parentFolderId: electrical.id }, { ...businessFolder, parentFolderId: root.id }]
+    const wrapper = mountLibrary(folders); await flushPromises()
+    const tree = wrapper.findComponent({ name: 'ElTree' }).vm as unknown as { getNode(id: string): { expanded: boolean } }
+    const toggle = async (name: string) => {
+      const label = wrapper.findAll('.pdm-folder-node').find(node => node.text().startsWith(name))!
+      ;(label.element.closest('.el-tree-node__content')!.querySelector('.el-tree-node__expand-icon') as HTMLElement).click()
+      await flushPromises()
+    }
+    expect(tree.getNode(mechanical.id).expanded).toBe(true)
+    await toggle(branch.name); await toggle(mechanical.name)
+    expect(tree.getNode(mechanical.id).expanded).toBe(false)
+    expect(tree.getNode(branch.id).expanded).toBe(true)
+    await wrapper.findAll('.pdm-folder-node').find(node => node.text().startsWith(businessFolder.name))!.trigger('click'); await flushPromises()
+    await wrapper.findAll('.pdm-folder-node').find(node => node.text().startsWith('电气子目录'))!.trigger('click'); await flushPromises()
+    expect(tree.getNode(mechanical.id).expanded).toBe(false)
+    expect(tree.getNode(electrical.id).expanded).toBe(true)
+    await wrapper.setProps({ folders: folders.map(folder => ({ ...folder })) }); await flushPromises()
+    expect(tree.getNode(mechanical.id).expanded).toBe(false)
+    expect(tree.getNode(branch.id).expanded).toBe(true)
+    wrapper.unmount()
+  })
   it('有回收权限时可从受控目录打开批次回收入口', async () => {
     api.listRecycleArchiveBatches.mockResolvedValue([]); api.listArchiveRecycleSets.mockResolvedValue([])
     const wrapper = mountLibrary([controlledFolder], [], true); await flushPromises()
@@ -119,6 +146,28 @@ describe('ProjectFileLibrary', () => {
 
     expect(api.readProjectFileContent).toHaveBeenCalledWith('project-1', 'file-video', 'token')
     expect(wrapper.find('video').exists()).toBe(true)
+  })
+
+  it('取消文件说明编辑后失焦不保存，也不清空原说明', async () => {
+    api.listProjectFiles.mockResolvedValue([{ ...file, description: '保留说明' }])
+    const wrapper = mountLibrary(); await flushPromises()
+    await wrapper.get('button.pdm-file-description').trigger('click')
+    const input = wrapper.get('input.pdm-file-description-input')
+    await input.setValue('临时输入')
+    await input.trigger('keydown', { key: 'Escape' }); await input.trigger('blur'); await flushPromises()
+    expect(api.updateProjectFileDescription).not.toHaveBeenCalled()
+    expect(wrapper.get('button.pdm-file-description').text()).toBe('保留说明')
+    wrapper.unmount()
+  })
+
+  it('未修改文件说明时失焦不提交更新', async () => {
+    api.listProjectFiles.mockResolvedValue([{ ...file, description: '保留说明' }])
+    const wrapper = mountLibrary(); await flushPromises()
+    await wrapper.get('button.pdm-file-description').trigger('click')
+    await wrapper.get('input.pdm-file-description-input').trigger('blur'); await flushPromises()
+    expect(api.updateProjectFileDescription).not.toHaveBeenCalled()
+    expect(wrapper.find('input.pdm-file-description-input').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('文件说明在单元格内编辑并保存，不打开弹窗', async () => {

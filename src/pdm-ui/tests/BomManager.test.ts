@@ -1340,7 +1340,7 @@ describe('BomManager', () => {
     await wrapper.get('button[aria-label="编辑品牌"]').trigger('click')
     await wrapper.get('input[aria-label="内联编辑品牌"]').setValue('保留修改')
     await wrapper.get('input[aria-label="内联编辑品牌"]').trigger('keydown.enter')
-    const unsaved = wrapper.text().match(/未保存 \d+ 项/)?.[0]
+    const unsaved = wrapper.text().match(/未保存 \d+ 条物料/)?.[0]
     expect(unsaved).toBeTruthy()
     await wrapper.get('.pdm-bom-save-action').trigger('click')
     await wrapper.setProps({ pending: true })
@@ -2303,7 +2303,7 @@ describe('BomManager', () => {
     await heatTreatmentEditor.setValue('渗碳')
     await heatTreatmentEditor.trigger('keydown', { key: 'Enter' })
     expect(wrapper.get('button[aria-label="编辑热处理"]').text()).toBe('渗碳')
-    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 项')
+    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 条物料')
   })
 
   it('keeps the three-category BOM toolbar labels compact', async () => {
@@ -3130,11 +3130,11 @@ describe('BomManager', () => {
 
     await wrapper.get('button[aria-label="对比源数据"]').trigger('click')
     expect(wrapper.emitted('generate')).toEqual([[false]])
-    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 项')
+    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 条物料')
 
     await wrapper.setProps({ standard: [{ ...original, name: '重新对账名称' }] })
     await flushPromises()
-    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 项')
+    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 条物料')
     expect(wrapper.get('button[aria-label="编辑物料名称"]').text()).toBe('未保存名称')
   })
 
@@ -3159,7 +3159,7 @@ describe('BomManager', () => {
     await tabs[2].trigger('click')
     await flushPromises()
     expect(tabs[1].attributes('aria-selected')).toBe('true')
-    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 项')
+    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 条物料')
 
     await tabs[2].trigger('click')
     await flushPromises()
@@ -3351,7 +3351,7 @@ describe('BomManager', () => {
     const editor = wrapper.get('input[aria-label="内联编辑物料名称"]')
     await editor.setValue('待恢复名称')
     await editor.trigger('keydown', { key: 'Enter' })
-    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 项')
+    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 条物料')
     await wrapper.findAll('input[aria-label="选择物料"]')[0].setValue(true)
     const restore = wrapper.findAll('.pdm-bom-selection-toolbar button').find(button => button.text() === '源数据')!
     expect(restore.attributes('disabled')).toBeUndefined()
@@ -3774,7 +3774,7 @@ describe('BomManager', () => {
     await nameField.setValue('新轴承')
     await nameField.trigger('keydown', { key: 'Enter' })
     expect(wrapper.emitted('batchUpdate')).toBeUndefined()
-    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 项')
+    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 条物料')
     expect(wrapper.get('button[aria-label="编辑物料名称"]').text()).toBe('新轴承')
 
     await wrapper.get('button[aria-label="编辑物料分类"]').trigger('click')
@@ -4507,11 +4507,109 @@ describe('BomManager', () => {
 
   const matchedMaterial = (specification: string) => ({ id: specification, materialCode: `CODE-${specification}`, name: '主档名称', specification, brand: '主档品牌', unitCode: '个', approvalStatus: 'Approved', isArchived: false } as PdmMaterial)
 
-  it('shows edits immediately during slow matching and protects subsequent manual fields', async () => {
+  async function previewInlineRows(wrapper: ReturnType<typeof mountInlineMatchRows>) {
+    const instance = wrapper.vm.$ as unknown as { setupState: { configurationQuantityPreview: BomItem[] } }
+    instance.setupState.configurationQuantityPreview = wrapper.props('standard').map(row => ({ ...row, kind: 'Standard' }))
+    await flushPromises()
+  }
+
+  it.each(['pending', 'failed', 'duplicate'] as const)('clears a removed row %s match and saves the remaining edits', async status => {
+    let finish!: (materials: PdmMaterial[]) => void
+    if (status === 'pending') materialApi.matchApprovedMaterials.mockReturnValue(new Promise(resolve => { finish = resolve }))
+    else if (status === 'failed') materialApi.matchApprovedMaterials.mockRejectedValue(new Error('timeout'))
+    else materialApi.matchApprovedMaterials.mockResolvedValue([matchedMaterial('REMOVED'), { ...matchedMaterial('REMOVED'), id: 'second', materialCode: 'SECOND' }])
+    const wrapper = mountInlineMatchRows()
+    await flushPromises()
+    await editInline(wrapper, '型号', 'REMOVED')
+    await editInline(wrapper, '物料名称', '保留行的修改', 1)
+    await flushPromises()
+    expect(wrapper.find('.pdm-bom-inline-match').exists()).toBe(true)
+    await wrapper.get('.pdm-bom-save-action').trigger('click')
+    expect(wrapper.emitted('save')).toBeUndefined()
+    await wrapper.setProps({ standard: wrapper.props('standard').slice(1) })
+    if (status === 'pending') finish([matchedMaterial('REMOVED')])
+    await flushPromises()
+    expect(wrapper.find('.pdm-bom-inline-match').exists()).toBe(false)
+    await wrapper.get('.pdm-bom-save-action').trigger('click')
+    expect(wrapper.emitted('save')).toHaveLength(1)
+    expect(wrapper.emitted('save')![0]![1]).toEqual([expect.objectContaining({ id: 'slow-1', name: '保留行的修改', drawingNumber: 'OLD-1' })])
+    wrapper.unmount()
+  })
+
+  it('matches and saves an edited material from quantity preview instead of reusing its own display copy', async () => {
+    materialApi.matchApprovedMaterials.mockResolvedValue([matchedMaterial('PREVIEW')])
+    const wrapper = mountInlineMatchRows()
+    await flushPromises()
+    await previewInlineRows(wrapper)
+    await editInline(wrapper, '型号', 'PREVIEW')
+    await flushPromises()
+    expect(materialApi.matchApprovedMaterials).toHaveBeenCalledWith('token', 'specification', 'PREVIEW')
+    expect(wrapper.findAll('[aria-label="编辑物料编码"]')[0]!.text()).toBe('CODE-PREVIEW')
+    expect(wrapper.find('.pdm-bom-inline-match').exists()).toBe(false)
+    await wrapper.get('.pdm-bom-save-action').trigger('click')
+    expect((wrapper.emitted('save')![0]![1] as BomItem[])[0]).toMatchObject({ drawingNumber: 'CODE-PREVIEW', specification: 'PREVIEW', name: '主档名称' })
+    wrapper.unmount()
+  })
+
+  it('keeps duplicate matching visible in quantity preview until an explicit material choice', async () => {
+    materialApi.matchApprovedMaterials.mockResolvedValue([matchedMaterial('DUPLICATE'), { ...matchedMaterial('DUPLICATE'), id: 'second', materialCode: 'SECOND' }])
+    const wrapper = mountInlineMatchRows()
+    await flushPromises()
+    await previewInlineRows(wrapper)
+    await editInline(wrapper, '型号', 'DUPLICATE')
+    await flushPromises()
+    await wrapper.get('.pdm-bom-save-action').trigger('click')
+    expect(wrapper.emitted('save')).toBeUndefined()
+    const confirm = wrapper.findAll('.pdm-bom-inline-match button').find(button => button.text() === '确认料品')!
+    await confirm.trigger('click')
+    await flushPromises()
+    await wrapper.get('.pdm-duplicate-material-dialog').findAll('button').filter(button => button.text() === '确认选择')[1]!.trigger('click')
+    await flushPromises()
+    await wrapper.get('.pdm-bom-save-action').trigger('click')
+    expect((wrapper.emitted('save')![0]![1] as BomItem[])[0]).toMatchObject({ drawingNumber: 'SECOND', specification: 'DUPLICATE' })
+    wrapper.unmount()
+  })
+
+  it('counts unsaved material rows once across multiple field edits and material autofill', async () => {
+    materialApi.matchApprovedMaterials.mockResolvedValue([matchedMaterial('COUNT')])
+    const wrapper = mountInlineMatchRows()
+    await flushPromises()
+    await editInline(wrapper, '型号', 'COUNT')
+    await flushPromises()
+    await editInline(wrapper, '物料名称', '手工名称')
+    await editInline(wrapper, '备注信息', '手工备注')
+    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 条物料')
+    expect(wrapper.get('.pdm-bom-save-action').text()).toBe('保存BOM')
+    await editInline(wrapper, '物料名称', '第二条修改', 1)
+    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 2 条物料')
+    await wrapper.get('.pdm-bom-save-action').trigger('click')
+    const saved = wrapper.emitted('save')![0]![1] as BomItem[]
+    expect(saved[0]).toMatchObject({ drawingNumber: 'CODE-COUNT', name: '手工名称', remark: '手工备注' })
+    expect(saved[1]).toMatchObject({ name: '第二条修改' })
+    await wrapper.setProps({ standard: saved })
+    expect(wrapper.find('.pdm-bom-unsaved-count').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('counts a summary material once when multiple source instances and fields change', async () => {
+    const wrapper = mount(BomManager, { props: {
+      standard: [{ id: 'summary-1', summaryItemIds: ['summary-1', 'summary-2'], kind: 'Standard', sequence: 1,
+        drawingNumber: 'SUMMARY', name: '汇总物料', quantity: 2, unit: '个', revision: 'W1', complete: true }],
+      nonStandard: [], electrical: [], declarations: [], pending: false, editable: true, requestedBomKind: 'Standard',
+    } })
+    await flushPromises()
+    await editInline(wrapper, '物料名称', '汇总名称')
+    await editInline(wrapper, '备注信息', '汇总备注')
+    expect(wrapper.get('.pdm-bom-unsaved-count').text()).toBe('未保存 1 条物料')
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('shows edits immediately during slow matching and protects subsequent manual fields (quantity preview: %s)', async preview => {
     let resolve!: (materials: PdmMaterial[]) => void
     materialApi.matchApprovedMaterials.mockReturnValue(new Promise<PdmMaterial[]>(done => { resolve = done }))
     const wrapper = mountInlineMatchRows()
     await flushPromises()
+    if (preview) await previewInlineRows(wrapper)
     await editInline(wrapper, '型号', 'NEW')
     expect(wrapper.findAll('[aria-label="编辑型号"]')[0]!.text()).toBe('NEW')
     expect(wrapper.text()).toContain('匹配中')
@@ -4548,10 +4646,11 @@ describe('BomManager', () => {
     wrapper.unmount()
   })
 
-  it('keeps failed matches editable and requires retry or explicit manual retention before saving', async () => {
+  it.each([false, true])('keeps failed matches editable and requires retry or explicit manual retention before saving (quantity preview: %s)', async preview => {
     materialApi.matchApprovedMaterials.mockRejectedValue(new Error('timeout'))
     const wrapper = mountInlineMatchRows()
     await flushPromises()
+    if (preview) await previewInlineRows(wrapper)
     await editInline(wrapper, '型号', 'TIMEOUT')
     await flushPromises()
     expect(wrapper.findAll('[aria-label="编辑型号"]')[0]!.text()).toBe('TIMEOUT')
@@ -4735,7 +4834,7 @@ describe('BomManager', () => {
     expect(wrapper.get('button[aria-label="编辑物料编码"]').text()).toBe('01020000089')
     expect(wrapper.get('tr:not(.is-quick-entry) .pdm-bom-data-status').text()).toContain('待人工维护：图档品牌缺失')
     expect(wrapper.get('tr:not(.is-quick-entry) .pdm-bom-data-status').attributes('title')).toContain('图档品牌缺失')
-    expect(wrapper.text()).toMatch(/未保存 \d+ 项/)
+    expect(wrapper.text()).toMatch(/未保存 \d+ 条物料/)
   })
 
   it('hides material-code application when any summarized instance is already pending approval', async () => {

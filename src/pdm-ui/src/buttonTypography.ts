@@ -8,6 +8,7 @@ const blockButton = '.pdm-login-submit, .production-scan-page__login button, .pr
 const iconButton = '.el-dialog__headerbtn, .el-drawer__close-btn, .el-message-box__headerbtn, .pdm-icon-button, .pdm-icon-action, .pdm-tree-toggle, .material-category-nav__toggle'
 
 function updateButton(button: HTMLButtonElement) {
+  if (button.closest('.layout-phone')) return
   if (button.classList.contains('pdm-button-font-80x30')) button.classList.remove('pdm-button-font-80x30')
   const text = button.textContent?.replace(/\s+/g, ' ').trim() ?? ''
   const icon = button.matches(iconButton) || !text || /^[+＋×✕✓✔‹›←→↑↓▴▾▸▹◂◃−－]$/.test(text)

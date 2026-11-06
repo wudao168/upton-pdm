@@ -3,6 +3,17 @@ import { installControlSpacing } from '../src/controlSpacing'
 
 let dispose: (() => void) | undefined
 const settle = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+it('手机预览保持移动端原有模块间距', async () => {
+  document.body.innerHTML = '<div class="layout-phone"><div class="mobile-layout-grid" style="display:grid"><button>待办</button><button>工时</button></div></div>'
+  dispose = installControlSpacing(); await settle()
+  expect(document.querySelector('.mobile-layout-grid')!.hasAttribute('data-pdm-control-layout')).toBe(false)
+})
+it('钉钉设置纵向面板及页面编辑器不被全局规则改为多列换行', async () => {
+  document.body.innerHTML = '<section class="ding-settings" style="display:flex;flex-direction:column;height:400px"><button>页面维护</button><section class="office-layout-editor"><label>标题<input></label><button>保存</button></section><button>员工绑定</button></section>'
+  dispose = installControlSpacing(); await settle()
+  expect(document.querySelector('.ding-settings')!.hasAttribute('data-pdm-control-layout')).toBe(false)
+  expect(document.querySelector('.office-layout-editor')!.hasAttribute('data-pdm-control-layout')).toBe(false)
+})
 afterEach(() => { dispose?.(); document.body.innerHTML = '' })
 
 it('按钮、输入框和搜索组件共用间距，组件内部保持原结构', async () => {

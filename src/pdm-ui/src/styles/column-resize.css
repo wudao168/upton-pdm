@@ -15,3 +15,12 @@ table:has(> thead):not(.el-table__header) > :is(thead, tbody) > tr > :is(th, td)
 table:has(> thead):not(.el-table__header) :is(input, select, textarea) { box-sizing: border-box; min-width: 0; max-width: 100%; }
 .pdm-project-browser-list:not(.pdm-resized-grid-list) > :is(.pdm-project-browser-table-head, [role=option]) { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .pdm-column-scroll { min-width: 0; max-width: 100%; overflow-x: auto; }
+@layer pdm-button-sizing {
+  :root body .pdm-bom-table :is(th, td):nth-child(3) { text-align:center!important; }
+  :root body .pdm-bom-table :is(th, td):nth-child(3) > button.pdm-inspect-link {
+    display:inline-block!important; width:auto!important; min-width:0!important; max-width:100%!important;
+    margin:0!important; padding:0!important; border:0!important; border-radius:0!important;
+    outline:0!important; background:transparent!important; box-shadow:none!important;
+    text-align:center!important; vertical-align:middle;
+  }
+}

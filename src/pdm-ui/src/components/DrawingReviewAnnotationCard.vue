@@ -46,11 +46,11 @@ const selfReviewBlocked = computed(() => selfReview.value && !props.allowSelfRev
 const canActOnTarget = computed(() => props.canDecide
   && activePackage.value?.state === 'InReview'
   && activeItem.value?.drawingState === 'Pending'
-  && (assignedReviewerPool.value.length === 0 || assignedReviewerPool.value.includes(props.currentUsername) || props.allowSelfReview)
+  && (assignedReviewerPool.value.length === 0 || assignedReviewerPool.value.some(username => username.toLowerCase() === props.currentUsername.toLowerCase()) || props.allowSelfReview)
   && !selfReviewBlocked.value)
 const canActAsSupervisor = computed(() => props.canDecide
   && activePackage.value?.state === 'PendingSupervisorApproval'
-  && (activePackage.value.supervisor === props.currentUsername || props.allowSelfReview))
+  && (activePackage.value.supervisor?.toLowerCase() === props.currentUsername.toLowerCase() || props.allowSelfReview))
 const supervisorApproval = computed(() => activePackage.value?.state === 'PendingSupervisorApproval')
 const canAct = computed(() => supervisorApproval.value ? canActAsSupervisor.value : canActOnTarget.value)
 const itemApproved = computed(() => activeItem.value?.drawingState === 'Approved' || activeItem.value?.drawingState === 'Marked')
@@ -65,8 +65,8 @@ const canRevoke = computed(() => props.canDecide
   && (itemApproved.value || itemChangesRequested.value)
   && (activePackage.value?.state === 'InReview' || supervisorApproval.value)
   && (assignedReviewerPool.value.length === 0
-    || assignedReviewerPool.value.includes(props.currentUsername)
-    || activePackage.value?.supervisor === props.currentUsername
+    || assignedReviewerPool.value.some(username => username.toLowerCase() === props.currentUsername.toLowerCase())
+    || activePackage.value?.supervisor?.toLowerCase() === props.currentUsername.toLowerCase()
     || props.allowSelfReview)
 )
 const routeLabel = computed(() => supervisorApproval.value
@@ -88,7 +88,7 @@ const decisionRouteLabel = computed(() => {
     return '本审核单已整单退回（待修改）：各图纸已解锁，可重新发起审核；或由发起人/项目经理撤销本单'
   if (itemApproved.value) {
     if (supervisorApproval.value) return '该2D工程图已通过审核，等待批准；批准为整单操作，退回只作用于当前选中的图纸'
-    if (reviewActive.value) return '该2D工程图已通过审核，等待批准'
+    if (reviewActive.value) return '该2D工程图已审核，等待本单其余图纸完成审核后转批准'
     return `该2D工程图已通过审核，${finishedPackageLabels[activePackage.value.state] ?? drawingReviewPackageStateLabel(activePackage.value.state)}`
   }
   if (itemChangesRequested.value) return canResubmit.value

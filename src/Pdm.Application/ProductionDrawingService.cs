@@ -118,8 +118,10 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                     // Direct conversion keeps the approved source path; provenance is
                     // established by the source-version link, not by rewriting CAD files.
                     var legacy = source is null;
+                    var pairedModelId = package.VersionBindings?.SingleOrDefault(binding => binding.DocumentId == document.Id)?.DrawingModelDocumentId;
                     var bomItems = relatedModels.TryGetValue(document.Id, out var modelIds)
-                        ? modelIds.SelectMany(modelId => packageBomItems[package.Id].GetValueOrDefault(modelId, [])).ToArray()
+                        ? modelIds.Where(modelId => !pairedModelId.HasValue || modelId == pairedModelId.Value)
+                            .SelectMany(modelId => packageBomItems[package.Id].GetValueOrDefault(modelId, [])).ToArray()
                         : [];
                     if (bomItems.Length == 0)
                         bomItems = frozenBomItems[package.Id]
@@ -128,6 +130,7 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                     var modelFiles = relatedModels.TryGetValue(document.Id, out modelIds)
                         ? modelIds
                             .Where(modelId => packageBomItems[package.Id].ContainsKey(modelId)
+                                && (!pairedModelId.HasValue || modelId == pairedModelId.Value)
                                 && allDocuments.TryGetValue(modelId, out var modelDocument)
                                 && modelDocument.Kind is DocumentKind.Assembly or DocumentKind.Part)
                             .OrderBy(modelId => allDocuments[modelId].DrawingNumber, StringComparer.OrdinalIgnoreCase)
@@ -143,7 +146,7 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                             }).ToArray()
                         : [];
                     var qrSource = source ?? version;
-                    var qrModels = ReleaseBoundSourceReader.ModelDocumentIds(qrSource.ReferenceSnapshot).ToHashSet();
+                    var qrModels = ReleaseBoundSourceReader.ModelDocumentIds(package, document.Id, qrSource.ReferenceSnapshot).ToHashSet();
                     if (qrModels.Count == 0 && relatedModels.TryGetValue(document.Id, out var qrRelatedModels)) qrModels.UnionWith(qrRelatedModels);
                     results.Add(new ProductionDrawingItem(
                         project.Id, project.Code, project.Name, document.Id, version.Id, package.Id, package.Number,

@@ -2665,13 +2665,14 @@ public sealed partial class PdmWorkflowService(
         effectiveSerialFrom = project.SerialNumbers.FirstOrDefault() ?? "未指定";
         effectiveSerialTo = null;
 
+        var targetKind = ReleaseScopeBomKind(scope);
         var snapshot = rootDocumentId.HasValue
             ? await repository.GetProjectReferenceRootAsync(projectId, rootDocumentId.Value, cancellationToken)
                 ?? throw new PdmRuleException("所选装配体尚未完整存档，不能创建其发布包。")
             : await repository.GetLatestReferenceSnapshotAsync(projectId, cancellationToken);
-        if (snapshot is null && !IsLongLeadScope(scope))
+        if (snapshot is null && !IsLongLeadScope(scope) && targetKind != BomKind.Standard)
             throw new PdmRuleException("项目尚无已存档的引用树快照，不能创建正式发布包；可先使用长交期BOM发布。");
-        if (referenceSnapshotId.HasValue && referenceSnapshotId.Value != Guid.Empty
+        if (targetKind != BomKind.Standard && referenceSnapshotId.HasValue && referenceSnapshotId.Value != Guid.Empty
             && (snapshot is null || referenceSnapshotId.Value != snapshot.SnapshotId))
             throw new PdmConflictException("指定的引用树快照不是项目当前最新快照，请刷新后重试。");
 
@@ -2687,7 +2688,6 @@ public sealed partial class PdmWorkflowService(
         var standard = (await ReadCurrentBomAsync(projectId, BomKind.Standard, cancellationToken)).Where(IsPublishableBomItem).ToArray();
         var nonStandard = (await repository.GetBomAsync(projectId, BomKind.NonStandard, cancellationToken)).Where(IsPublishableBomItem).ToArray();
         var electrical = (await ReadCurrentBomAsync(projectId, BomKind.Electrical, cancellationToken)).Where(IsPublishableBomItem).ToArray();
-        var targetKind = ReleaseScopeBomKind(scope);
         var targetItems = targetKind == BomKind.Standard ? standard : targetKind == BomKind.NonStandard ? nonStandard : electrical;
         if (!IsLongLeadScope(scope)) await RequireCurrentBomMultiplierAsync(projectId, targetKind, wholeSetMultiplier, cancellationToken);
         bool InRoot(BomItem item) => !rootDocumentId.HasValue
@@ -2711,7 +2711,7 @@ public sealed partial class PdmWorkflowService(
             cancellationToken, rootDocumentId: rootDocumentId, hasConfirmedRemovals: confirmedRemovedBomItemIds?.Count > 0);
         if (!BomReady(targetKind, targetItems, settings.ValidationRules))
             throw new PdmRuleException($"{BomName(targetKind)}仍有资料不完整的物料，不能创建发布包。{MissingBomSummary(targetKind, targetItems, settings.ValidationRules)}");
-        if (targetKind != BomKind.Electrical)
+        if (targetKind == BomKind.NonStandard)
         {
             var unresolved = await repository.GetBomAsync(projectId, BomKind.Unclassified, cancellationToken);
             if (unresolved.Any(item => !item.IsManuallyExcluded && InRoot(item)))
@@ -2906,9 +2906,10 @@ public sealed partial class PdmWorkflowService(
         }
         else
         {
-            var snapshot = await CurrentReleaseReferenceSnapshotAsync(package, cancellationToken)
-                ?? throw new PdmRuleException("项目尚无已存档的引用树快照，不能编辑发布包。");
             var targetKind = ReleaseScopeBomKind(package.Scope);
+            var snapshot = await CurrentReleaseReferenceSnapshotAsync(package, cancellationToken);
+            if (snapshot is null && targetKind != BomKind.Standard)
+                throw new PdmRuleException("项目尚无已存档的引用树快照，不能编辑发布包。");
             var currentItems = (await ReadCurrentBomAsync(package.ProjectId, targetKind, cancellationToken))
                 .Where(IsPublishableBomItem).ToArray();
             await RequireCurrentBomMultiplierAsync(package.ProjectId, targetKind, updated.WholeSetMultiplier, cancellationToken);
@@ -2928,7 +2929,7 @@ public sealed partial class PdmWorkflowService(
                 package.EffectiveSerialTo, settings.ValidationRules, cancellationToken);
             var scoped = updated with
             {
-                ReferenceSnapshotId = snapshot.SnapshotId,
+                ReferenceSnapshotId = snapshot?.SnapshotId,
                 ChangeReason = normalizedReason,
                 SelectedBomItemIds = selectedItems.Select(item => item.Id).ToArray(),
                 StandardBomVersionId = targetKind == BomKind.Standard ? targetVersion.Id : package.StandardBomVersionId,
@@ -4447,13 +4448,14 @@ public sealed partial class PdmWorkflowService(
             Items = items
         };
         package = await repository.CreateDrawingReviewPackageAsync(package, cancellationToken);
+        var drawingCount = package.Items.Select(item => item.DrawingDocumentId).Distinct().Count();
         await AuditAsync(actor, "drawing-review.create", nameof(DrawingReviewPackage), package.Id.ToString(),
-            $"{package.Number}；选择2D工程图 {package.Items.Count}张；{(reviewers.Count == 0 ? "未指定审核人，由具备审图权限的人员并行处理" : $"指定审核人 {string.Join("、", reviewers.Select(reviewer => reviewer.DisplayName))}")}；机械主管 {supervisor.DisplayName}", cancellationToken);
+            $"{package.Number}；选择2D工程图 {drawingCount}张；{(reviewers.Count == 0 ? "未指定审核人，由具备审图权限的人员并行处理" : $"指定审核人 {string.Join("、", reviewers.Select(reviewer => reviewer.DisplayName))}")}；机械主管 {supervisor.DisplayName}", cancellationToken);
         var reviewerRecipients = reviewers.Count > 0
             ? reviewers.Select(reviewer => reviewer.Username)
             : await ListDrawingReviewPoolNotificationRecipientsAsync(projectId, actor, cancellationToken);
         await CreateDrawingReviewNotificationsAsync(projectId, $"drawing-review:{package.Id:N}:reviewer", "DrawingReviewAssigned", "待审图纸",
-            project => $"{project.Code} · {package.Number} 有 {package.Items.Count} 张2D工程图待审核，发起人 {actor}",
+            project => $"{project.Code} · {package.Number} 有 {drawingCount} 张2D工程图待审核，发起人 {actor}",
             reviewerRecipients, cancellationToken);
         return package;
     }
@@ -4603,7 +4605,10 @@ public sealed partial class PdmWorkflowService(
 
         var documents = await repository.ListDocumentsAsync(projectId, cancellationToken);
         var documentById = documents.ToDictionary(document => document.Id);
-        var relations = await repository.ListDocumentRelationsAsync(projectId, cancellationToken);
+        var drawingPairs = await DrawingModelPairing.ReadAsync(repository, projectId, cancellationToken);
+        var referenceOnlyModels = DrawingModelPairing.ReferenceOnlyModelIds(drawingPairs);
+        var relations = drawingPairs.Where(pair => pair.ModelDocumentId.HasValue)
+            .Select(pair => new DocumentModelDrawingRelation(pair.ModelDocumentId!.Value, pair.DrawingDocumentId)).ToArray();
         foreach (var source in sources.OrderBy(source => source.DrawingNumber, StringComparer.OrdinalIgnoreCase))
         {
             if (!documentById.TryGetValue(source.ModelDocumentId, out var model)
@@ -4644,9 +4649,10 @@ public sealed partial class PdmWorkflowService(
             if (relatedDrawings.Length != 1)
             {
                 state = DrawingReviewCandidateState.Unavailable;
-                reason = relatedDrawings.Length == 0
+                reason = drawingPairs.FirstOrDefault(pair => pair.Issue is not null && pair.ReferencedModelIds.Contains(model.Id))?.Issue
+                    ?? (referenceOnlyModels.Contains(model.Id) ? "仅为装配图引用模型，不独立审核或发布；独立发布需有对应工程图。" : relatedDrawings.Length == 0
                     ? "非标BOM缺少关联2D工程图"
-                    : $"非标BOM关联了{relatedDrawings.Length}张2D工程图，必须保持唯一";
+                    : $"非标BOM关联了{relatedDrawings.Length}张2D工程图，必须保持唯一");
             }
             else if (drawing is not null && activeDocumentIds.Contains(drawing.Id))
             {
@@ -4679,6 +4685,7 @@ public sealed partial class PdmWorkflowService(
                 BomItemId = source.BomKinds.Count > 0 ? source.ReviewSourceId : null,
                 ModelDocumentId = model.Id,
                 DrawingDocumentId = drawing?.Id,
+                IsReferenceOnly = referenceOnlyModels.Contains(model.Id),
                 DrawingNumber = drawing?.DrawingNumber ?? model.DrawingNumber,
                 Name = source.Name,
                 Configuration = source.Configuration,
@@ -4810,7 +4817,8 @@ public sealed partial class PdmWorkflowService(
         var comment = string.IsNullOrWhiteSpace(command.Comment) ? null : command.Comment.Trim();
         if (command.Decision == DrawingReviewDecision.RequestChanges)
             comment = RequiredComment(comment ?? string.Empty, "退回说明");
-        if (command.Decision == DrawingReviewDecision.Approve && package.Markups.Any(markup => markup.ItemId == itemId
+        var drawingItemIds = package.Items.Where(candidate => candidate.ReviewsSameDrawing(item)).Select(candidate => candidate.Id).ToHashSet();
+        if (command.Decision == DrawingReviewDecision.Approve && package.Markups.Any(markup => drawingItemIds.Contains(markup.ItemId)
                 && markup.Target == command.Target
                 && markup.Severity == DrawingReviewMarkupSeverity.Blocking
                 && markup.State == DrawingReviewMarkupState.Open))
@@ -4822,7 +4830,7 @@ public sealed partial class PdmWorkflowService(
         await AuditAsync(actor, "drawing-review.decide", nameof(DrawingReviewItem), itemId.ToString(), $"{command.Target}；{command.Decision}；{comment}", cancellationToken);
         if (command.Decision == DrawingReviewDecision.RequestChanges)
         {
-            await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:changes:reviewer", "DrawingReviewChangesRequested", "图纸审核被退回",
+            await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:changes:reviewer:{itemId:N}:{now.UtcDateTime:yyyyMMddHHmmssffffff}", "DrawingReviewChangesRequested", "图纸审核被退回",
                 project => $"{project.Code} · {package.Number} 的 {item.DrawingNumber} 被 {reviewerName} 退回：{comment}",
                 [package.CreatedBy], cancellationToken);
             return package;
@@ -4843,7 +4851,8 @@ public sealed partial class PdmWorkflowService(
         package = await repository.AdvanceDrawingReviewToSupervisorAsync(package.Id, cancellationToken);
         await AuditAsync(actor, "drawing-review.supervisor.submit", nameof(DrawingReviewPackage), package.Id.ToString(),
             $"审图节点完成；转机械主管 {package.SupervisorName ?? package.Supervisor}", cancellationToken);
-        await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:supervisor", "DrawingReviewSupervisorApproval", "待机械主管批准",
+        var reviewCompletedAt = package.Items.Max(item => item.DrawingReviewedAt) ?? package.CreatedAt;
+        await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:supervisor:{reviewCompletedAt.UtcDateTime:yyyyMMddHHmmssffffff}", "DrawingReviewSupervisorApproval", "待机械主管批准",
             project => $"{project.Code} · {package.Number} 已完成审图，等待机械主管批准",
             [package.Supervisor], cancellationToken);
         return package;
@@ -4900,7 +4909,7 @@ public sealed partial class PdmWorkflowService(
         var reviewers = updated.AssignedReviewers.Count > 0
             ? updated.AssignedReviewers
             : (await ListDrawingReviewPoolNotificationRecipientsAsync(package.ProjectId, actor, cancellationToken)).ToArray();
-        await CreateDrawingReviewNotificationsAsync(updated.ProjectId, $"drawing-review:{updated.Id:N}:resubmit:{itemId:N}:{latest.Id:N}", "DrawingReviewResubmitted", "图纸已修改重新提交审核",
+        await CreateDrawingReviewNotificationsAsync(updated.ProjectId, $"drawing-review:{updated.Id:N}:resubmit:{itemId:N}:{latest.Id:N}:{timeProvider.GetUtcNow().UtcDateTime:yyyyMMddHHmmssffffff}", "DrawingReviewResubmitted", "图纸已修改重新提交审核",
             project => $"{project.Code} · {item.DrawingNumber} 已按修改后的版本 {latest.Revision.Display} 重新提交审核，请重新审图。",
             reviewers, cancellationToken);
         return updated;
@@ -4927,7 +4936,7 @@ public sealed partial class PdmWorkflowService(
         await AuditAsync(actor, "drawing-review.supervisor.decide", nameof(DrawingReviewPackage), package.Id.ToString(), $"{command.Decision}；{comment}", cancellationToken);
         if (command.Decision == DrawingReviewDecision.RequestChanges)
         {
-            await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:changes:supervisor", "DrawingReviewChangesRequested", "图纸审核被退回",
+            await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:changes:supervisor:{now.UtcDateTime:yyyyMMddHHmmssffffff}", "DrawingReviewChangesRequested", "图纸审核被退回",
                 project => $"{project.Code} · {package.Number} 被机械主管 {reviewerName} 退回：{comment}",
                 [package.CreatedBy], cancellationToken);
             return package;
@@ -4935,18 +4944,22 @@ public sealed partial class PdmWorkflowService(
         var writebacks = BuildDrawingReviewWritebacks(package, actor, reviewerName, now);
         package = await repository.QueueDrawingReviewWritebacksAsync(package.Id, writebacks, cancellationToken);
         await AuditAsync(actor, "drawing-review.writeback.queue", nameof(DrawingReviewPackage), package.Id.ToString(), $"机械主管批准；2D图纸审核属性写回{writebacks.Length}项", cancellationToken);
+        await CreateDrawingReviewNotificationsAsync(package.ProjectId, $"drawing-review:{package.Id:N}:approved", "DrawingReviewApproved", "2D图纸已批准",
+            project => $"{project.Code} · {package.Number} 已由 {reviewerName} 批准，审核标记按属性回写任务处理。",
+            [package.CreatedBy], cancellationToken);
         return package;
     }
 
     private static DrawingReviewWritebackRequest[] BuildDrawingReviewWritebacks(DrawingReviewPackage package, string actor, string reviewerName, DateTimeOffset now) =>
-        package.Items.Select(candidate =>
+        package.Items.GroupBy(candidate => (candidate.DrawingDocumentId, candidate.DrawingVersionId)).SelectMany(group =>
         {
+            var candidate = group.First();
             var drawingId = Guid.NewGuid();
             var drawingProperties = DrawingReviewProperties(package, DrawingReviewTarget.Drawing2D,
                 candidate.DrawingReviewer ?? actor, candidate.DrawingReviewerName ?? reviewerName,
                 candidate.DrawingReviewedAt ?? now, candidate.DrawingRevision!);
             var drawingWriteback = new CadPropertyWriteback(drawingId, package.ProjectId, drawingId, candidate.DrawingDocumentId!.Value, null, candidate.DrawingVersionId!.Value, candidate.DrawingRevision!, drawingProperties, CadPropertyWritebackStatus.Pending, actor, now);
-            return new DrawingReviewWritebackRequest(candidate.Id, drawingWriteback);
+            return group.Select(item => new DrawingReviewWritebackRequest(item.Id, drawingWriteback));
         }).ToArray();
 
     public async Task<CadPropertyWriteback> StartCadPropertyWritebackAsync(Guid id, string actor, UserRole role, CancellationToken cancellationToken)
@@ -5108,7 +5121,7 @@ public sealed partial class PdmWorkflowService(
             if (targetKind == BomKind.Standard) await EnsureStandardMaterialMasterReadyAsync(targetItems, cancellationToken);
             if (!BomReady(targetKind, targetItems, validationRules))
                 throw new PdmRuleException($"{BomName(targetKind)}仍有资料不完整的物料，不能提交审批。");
-            if (targetKind != BomKind.Electrical && (await repository.GetBomAsync(package.ProjectId, BomKind.Unclassified, cancellationToken)).Any(item => !item.IsManuallyExcluded))
+            if (targetKind == BomKind.NonStandard && (await repository.GetBomAsync(package.ProjectId, BomKind.Unclassified, cancellationToken)).Any(item => !item.IsManuallyExcluded))
                 throw new PdmRuleException("源数据中仍有待分类或待确认物料，请处理完成后再提交机械发布包。");
             var targetVersionId = targetKind == BomKind.Standard ? package.StandardBomVersionId
                 : targetKind == BomKind.NonStandard ? package.NonStandardBomVersionId
@@ -6491,7 +6504,7 @@ public sealed partial class PdmWorkflowService(
             null,
             sourceKey,
             createdAt,
-            null)).ToArray(), cancellationToken);
+            null) { ResolvedAt = category == "DrawingReviewApproved" ? createdAt : null }).ToArray(), cancellationToken);
     }
 
     /// <summary>手动重试转图：把发布包的转图事项重新排队（不影响已完成的发布）。</summary>
@@ -6889,7 +6902,9 @@ public sealed partial class PdmWorkflowService(
             .ToArray();
         if (approvedPackages.Length == 0)
             throw new PdmRuleException("非标件BOM尚无已完成的2D图纸审核，不能进入非标件BOM审核发布。");
-        var relations = await repository.ListDocumentRelationsAsync(projectId, cancellationToken);
+        var drawingPairs = await DrawingModelPairing.ReadAsync(repository, projectId, cancellationToken);
+        var relations = drawingPairs.Where(pair => pair.ModelDocumentId.HasValue)
+            .Select(pair => new DocumentModelDrawingRelation(pair.ModelDocumentId!.Value, pair.DrawingDocumentId)).ToArray();
         var missing = new List<string>();
         foreach (var sourceItem in sourceItems)
         {
@@ -7433,6 +7448,20 @@ public sealed partial class PdmWorkflowService(
     private async Task<BomItem[]> SelectScopedReleaseItemsAsync(Guid projectId, ReleaseScope scope, BomKind kind,
         IReadOnlyList<BomItem> items, IReadOnlyList<Guid>? selectedIds, IReadOnlyList<Guid>? removedIds, int multiplier, CancellationToken cancellationToken)
     {
+        if (scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardSupplement)
+        {
+            var pairs = await DrawingModelPairing.ReadAsync(repository, projectId, cancellationToken);
+            var references = DrawingModelPairing.ReferenceOnlyModelIds(pairs);
+            var selectedModels = items.Where(item => selectedIds is null || selectedIds.Contains(item.Id))
+                .Where(item => item.SourceDocumentId.HasValue).Select(item => item.SourceDocumentId!.Value).ToHashSet();
+            var uncertain = pairs.FirstOrDefault(pair => pair.Issue is not null && pair.ReferencedModelIds.Overlaps(selectedModels));
+            if (uncertain is not null) throw new PdmRuleException(uncertain.Issue!);
+            var orphan = selectedModels.FirstOrDefault(id => references.Contains(id)
+                && !pairs.Any(pair => pair.ReferencedModelIds.Contains(id) && pair.ModelDocumentId is Guid model && selectedModels.Contains(model)));
+            if (orphan != Guid.Empty) throw new PdmRuleException("所选零件仅为装配图的引用模型，不能凭装配图独立发布。请选择对应装配体，或为零件关联独立工程图后再发布。");
+            items = items.Where(item => !item.SourceDocumentId.HasValue || !references.Contains(item.SourceDocumentId.Value)).ToArray();
+            if (selectedIds is not null) selectedIds = selectedIds.Where(id => items.Any(item => item.Id == id)).ToArray();
+        }
         if (!IsSupplementScope(scope)) return SelectScopedReleaseItems(kind, items, selectedIds, removedIds?.Count > 0);
         var previous = await ReleasedBomBaselineAsync(projectId, kind, cancellationToken);
         var selected = SelectScopedReleaseItems(kind, items, selectedIds, removedIds?.Count > 0, previous.Items, multiplier, previous.Multiplier);

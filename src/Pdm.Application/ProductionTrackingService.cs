@@ -1267,7 +1267,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
             if (binding is null) continue;
             var source = await repository.FindDocumentVersionAsync(binding.DocumentId, binding.VersionId, ct);
             if (source is null) continue;
-            var models = ReleaseBoundSourceReader.ModelDocumentIds(source.ReferenceSnapshot).ToHashSet();
+            var models = ReleaseBoundSourceReader.ModelDocumentIds(package, binding.DocumentId, source.ReferenceSnapshot).ToHashSet();
             if (models.Count == 0) models.UnionWith((await repository.ListDocumentRelationsAsync(package.ProjectId, ct))
                 .Where(item => item.DrawingDocumentId == drawing.DocumentId).Select(item => item.ModelDocumentId));
             if (!string.Equals(ReleaseBoundSourceReader.DrawingModel(package, source, models, drawing.DrawingNumber), model,
@@ -1294,7 +1294,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
         var source = await repository.FindDocumentVersionAsync(binding.DocumentId, sourceId, ct);
         if (source is null || !string.Equals(source.Sha256, binding.Sha256, StringComparison.OrdinalIgnoreCase))
             throw new PdmConflictException("二维码对应的冻结来源校验失败，请联系项目负责人核对。");
-        var models = ReleaseBoundSourceReader.ModelDocumentIds(source.ReferenceSnapshot).ToHashSet();
+        var models = ReleaseBoundSourceReader.ModelDocumentIds(package, binding.DocumentId, source.ReferenceSnapshot).ToHashSet();
         if (models.Count == 0) models.UnionWith((await repository.ListDocumentRelationsAsync(package.ProjectId, ct))
             .Where(relation => relation.DrawingDocumentId == drawing.Id).Select(relation => relation.ModelDocumentId));
         var bom = ProductionDrawingQuantities.FrozenItems(package)

@@ -26,7 +26,7 @@ public static class PdfTitleBlockSnapshotBuilder
         {
             var version = await repository.FindDocumentVersionAsync(source.DocumentId, source.SourceVersionId, ct)
                 ?? throw new PdmConflictException($"图纸{source.FileName}的冻结版本不存在。");
-            var modelIds = ReleaseBoundSourceReader.ModelDocumentIds(version.ReferenceSnapshot).ToHashSet();
+            var modelIds = ReleaseBoundSourceReader.ModelDocumentIds(package, source.DocumentId, version.ReferenceSnapshot).ToHashSet();
             var bom = items.Where(item => item.SourceDocumentId.HasValue && modelIds.Contains(item.SourceDocumentId.Value)).ToArray();
             var matches = reviews.Where(review => review.State == DrawingReviewPackageState.Approved)
                 .SelectMany(review => review.Items.Where(item => item.DrawingDocumentId == source.DocumentId

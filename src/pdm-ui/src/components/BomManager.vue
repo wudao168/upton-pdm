@@ -306,7 +306,7 @@ type InlineMaterialMatch = {
   snapshot: BomItem
   candidates: PdmMaterial[]
 }
-const inlineMaterialMatches = shallowReactive(new Map<BomItem, InlineMaterialMatch>())
+const inlineMaterialMatches = shallowReactive(new Map<string, InlineMaterialMatch>())
 const matchedDraftSignatures = shallowReactive(new WeakMap<BomItem, string>())
 const materialMatchRequests = new Map<string, Promise<MaterialMatchResult>>()
 const draftKitRequests = new Map<BomItem, { field: 'drawingNumber' | 'specification'; value: string; quantity: number }>()
@@ -469,14 +469,13 @@ let acknowledgedPublishedRows = new Set<string>()
 let duplicateMaterialChoiceResolver: ((material: PdmMaterial | null) => void) | null = null
 
 const stagedEditCount = computed(() => {
-  const configurationCount = Object.keys(configurationQuantityChanges.value).length
-  if (!rows.value.some(row => row.summaryItemIds)) return stagedEditKeys.value.size + configurationCount
-  const representativeById = new Map(rows.value.flatMap(row => (row.summaryItemIds ?? (row.id ? [row.id] : []))
-    .map(id => [id, row.id ?? id] as const)))
-  return new Set([...stagedEditKeys.value].map(key => {
-    const separator = key.lastIndexOf(':')
-    return `${representativeById.get(key.slice(0, separator)) ?? key.slice(0, separator)}:${key.slice(separator + 1)}`
-  })).size + configurationCount
+  const representativeById = new Map(rows.value.flatMap(row => {
+    const key = rowSelectionKey(row) ?? `row:${row.sequence}`
+    return [key, ...(row.summaryItemIds ?? row._sourceItemIds ?? [])].map(id => [id, key] as const)
+  }))
+  const itemIds = [...stagedEditKeys.value].map(key => key.slice(0, key.lastIndexOf(':')))
+  itemIds.push(...Object.values(configurationQuantityChanges.value).flatMap(change => change.members.map(member => member.mainBomItemId)))
+  return new Set(itemIds.map(id => representativeById.get(id) ?? id)).size
 })
 const hasStagedEdits = computed(() => stagedEditCount.value > 0)
 const relationReviewComplete = computed(() => !hasStagedEdits.value && !relationLoading.value && relationCompleteness.value !== null
@@ -2576,6 +2575,7 @@ function saveCurrentBom() {
     ElMessage.warning('套件型号尚未展开，请完成套件选择或重新识别后再保存BOM。')
     return
   }
+  pruneInlineMaterialMatches()
   if (inlineMaterialMatches.size) {
     ElMessage.warning('请先完成行内料品匹配；匹配失败可重试或确认保留手工输入，重复候选须确认选择。')
     return
@@ -2667,7 +2667,7 @@ async function requestKind(nextKind: BomView) {
   if (hasStagedEdits.value) {
     try {
       await ElMessageBox.confirm(
-        `当前BOM有 ${stagedEditCount.value} 项未保存修改，切换分类将放弃这些修改。是否继续？`,
+        `当前BOM有 ${stagedEditCount.value} 条物料未保存，切换分类将放弃这些修改。是否继续？`,
         '放弃未保存修改？',
         { confirmButtonText: '放弃修改并切换', cancelButtonText: '取消', type: 'warning', closeOnClickModal: false },
       )
@@ -4421,7 +4421,7 @@ function reusableBomRow(row: BomItem, field: MaterialLookupField, value: string)
   if (!specification) return undefined
   const brand = materialLookupValue(field === 'brand' ? value : row.brand)
   let matches = rows.value.filter(candidate => candidate !== row
-    && !inlineMaterialMatches.has(candidate)
+    && !inlineMaterialMatches.has(candidate.id ?? '')
     && !candidate.manuallyExcluded
     && materialLookupValue(candidate.specification) === specification)
   if (brand) matches = matches.filter(candidate => materialLookupValue(candidate.brand) === brand)
@@ -4553,8 +4553,19 @@ async function autofillDraftFromMaterialMaster(row: BomItem, field: MaterialLook
   }
 }
 
-function applyInlineMaterialMatch(row: BomItem, match: InlineMaterialMatch, material: PdmMaterial | BomItem) {
-  if (inlineMaterialMatches.get(row) !== match || !rows.value.includes(row)) return
+function currentInlineMaterialRow(row: BomItem) {
+  return row.id ? rows.value.find(current => current.id === row.id) : undefined
+}
+
+function pruneInlineMaterialMatches() {
+  const currentIds = new Set(rows.value.map(row => row.id))
+  for (const id of inlineMaterialMatches.keys()) if (!currentIds.has(id)) inlineMaterialMatches.delete(id)
+}
+watch(() => rows.value.map(row => row.id), pruneInlineMaterialMatches)
+
+function applyInlineMaterialMatch(displayRow: BomItem, match: InlineMaterialMatch, material: PdmMaterial | BomItem) {
+  const row = currentInlineMaterialRow(displayRow)
+  if (!row?.id || inlineMaterialMatches.get(row.id) !== match) return
   const input: BatchUpdateBomItemsInput = { itemIds: operationItemIds(row), fields: [] }
   if ('materialCode' in material) applyMaterialAutofill(input, material, match.field, match.value)
   else applyBomRowAutofill(input, material, match.field, match.value)
@@ -4563,13 +4574,16 @@ function applyInlineMaterialMatch(row: BomItem, match: InlineMaterialMatch, mate
     && row[field as keyof BomItem] === match.snapshot[field as keyof BomItem]
     && !(editingCell.value?.itemId === row.id && editingCell.value?.field === field))
   applyBatchInputToRows(input)
-  inlineMaterialMatches.delete(row)
+  inlineMaterialMatches.delete(row.id)
 }
 
-async function startInlineMaterialMatch(row: BomItem, field: MaterialLookupField, value: string) {
+async function startInlineMaterialMatch(displayRow: BomItem, field: MaterialLookupField, value: string) {
+  const row = currentInlineMaterialRow(displayRow)
+  if (!row?.id) return
+  const itemId = row.id
   const match: InlineMaterialMatch = { status: 'pending', field, value, snapshot: { ...row }, candidates: [] }
-  inlineMaterialMatches.set(row, match)
-  const isCurrent = () => inlineMaterialMatches.get(row) === match && rows.value.includes(row)
+  inlineMaterialMatches.set(itemId, match)
+  const isCurrent = () => inlineMaterialMatches.get(itemId) === match && !!currentInlineMaterialRow(row)
   const reusable = reusableBomRow(row, field, value)
   if (reusable) {
     applyInlineMaterialMatch(row, match, reusable)
@@ -4579,20 +4593,22 @@ async function startInlineMaterialMatch(row: BomItem, field: MaterialLookupField
     const result = await findApprovedMaterialMatches(row, field, value)
     if (!isCurrent()) return
     if (result.duplicateDetected) {
-      inlineMaterialMatches.set(row, { ...match, status: 'duplicate', candidates: result.candidates })
+      inlineMaterialMatches.set(itemId, { ...match, status: 'duplicate', candidates: result.candidates })
     } else if (result.candidates.length === 1) {
       applyInlineMaterialMatch(row, match, result.candidates[0])
     } else {
-      inlineMaterialMatches.delete(row)
+      inlineMaterialMatches.delete(itemId)
       if (props.token) ElMessage.warning(`料品主档中未找到${field === 'drawingNumber' ? '物料编码' : '型号'}“${field === 'brand' ? row.specification : value}”，已保留手工输入`)
     }
   } catch {
-    if (isCurrent()) inlineMaterialMatches.set(row, { ...match, status: 'failed' })
+    if (isCurrent()) inlineMaterialMatches.set(itemId, { ...match, status: 'failed' })
   }
 }
 
-async function confirmInlineMaterialMatch(row: BomItem) {
-  const match = inlineMaterialMatches.get(row)
+async function confirmInlineMaterialMatch(displayRow: BomItem) {
+  const row = currentInlineMaterialRow(displayRow)
+  if (!row?.id) return
+  const match = inlineMaterialMatches.get(row.id)
   if (!match) return
   if (match.status === 'failed') {
     void startInlineMaterialMatch(row, match.field, String(row[match.field] ?? ''))
@@ -4603,9 +4619,10 @@ async function confirmInlineMaterialMatch(row: BomItem) {
   if (selected) applyInlineMaterialMatch(row, match, selected)
 }
 
-async function commitInlineEdit(row: BomItem) {
+async function commitInlineEdit(displayRow: BomItem) {
+  const row = currentInlineMaterialRow(displayRow)
   const edit = editingCell.value
-  if (!edit || !row.id || edit.itemId !== row.id) return
+  if (!edit || !row?.id || edit.itemId !== row.id) return
   const value = inlineValue
   editingCell.value = null
   const unchanged = edit.field === 'quantity'
@@ -4652,7 +4669,7 @@ async function commitInlineEdit(row: BomItem) {
   else {
     applyBatchInputToRows(input)
     if (edit.field === 'drawingNumber' || edit.field === 'specification' || edit.field === 'brand') {
-      inlineMaterialMatches.delete(row)
+      inlineMaterialMatches.delete(row.id)
       if (String(value).trim() || (edit.field === 'brand' && row.specification?.trim())) void startInlineMaterialMatch(row, edit.field, String(value).trim())
     }
   }
@@ -4712,11 +4729,11 @@ async function submitBatchUpdate() {
     <div class="pdm-bom-detail-toolbar">
       <div class="pdm-segmented" role="tablist">
         <button v-if="project && projects.length" type="button" role="tab" class="pdm-bom-overview-tab" :aria-selected="kind === 'Overview'" @click="requestKind('Overview')">多级总览</button>
-        <button type="button" role="tab" class="pdm-source-data-tab" :aria-selected="kind === 'Source'" @click="requestKind('Source')">源数据<span v-if="sourceDataLoaded">（{{ sourceDataTotalCount }}）</span></button>
-        <button type="button" role="tab" :aria-selected="kind === 'Standard'" @click="requestKind('Standard')">标准件（{{ standardSummaryRows.length }}）</button>
-        <button type="button" role="tab" :aria-selected="kind === 'NonStandard'" @click="requestKind('NonStandard')">非标件（{{ nonStandardSummaryRows.length }}）</button>
-        <button type="button" role="tab" :aria-selected="kind === 'Electrical'" @click="requestKind('Electrical')">电气件（{{ electricalSummaryRows.length }}）</button>
-        <button type="button" role="tab" class="pdm-wear-part-tab" :aria-selected="kind === 'WearPart'" @click="requestKind('WearPart')">易损件（{{ wearPartSummaryRows.length }}）</button>
+        <button type="button" role="tab" class="pdm-source-data-tab" :aria-selected="kind === 'Source'" @click="requestKind('Source')">源数据<span v-if="sourceDataLoaded"> {{ sourceDataTotalCount }}</span></button>
+        <button type="button" role="tab" :aria-selected="kind === 'Standard'" @click="requestKind('Standard')">标准件 {{ standardSummaryRows.length }}</button>
+        <button type="button" role="tab" :aria-selected="kind === 'NonStandard'" @click="requestKind('NonStandard')">非标件 {{ nonStandardSummaryRows.length }}</button>
+        <button type="button" role="tab" :aria-selected="kind === 'Electrical'" @click="requestKind('Electrical')">电气件 {{ electricalSummaryRows.length }}</button>
+        <button type="button" role="tab" class="pdm-wear-part-tab" :aria-selected="kind === 'WearPart'" @click="requestKind('WearPart')">易损件 {{ wearPartSummaryRows.length }}</button>
         <span v-if="unresolvedCount" class="pdm-bom-unresolved-count">待处理 {{ unresolvedCount }}</span>
       </div>
       <div v-if="!isOverviewView && !isReleaseView" class="pdm-bom-display-control pdm-tabs" role="group" aria-label="BOM显示方式">
@@ -4812,9 +4829,9 @@ async function submitBatchUpdate() {
         <MoreActions><button type="button" class="pdm-secondary-action" v-if="projectExport" @click="openExportDialog(kind as BomKind)" title="导出XLSX">导出</button>
 <button v-if="canEditCurrentView && supportsMaterialCodes" type="button" class="pdm-secondary-action pdm-bom-inventory-action" :disabled="pending || !token || !projectId || !rows.length" title="扫描当前子项目完整BOM的库存相似型号，不受筛选和分页影响" @click="openInventoryRecommendations()">库存推荐</button>
 <button v-if="canEditCurrentView" type="button" class="pdm-secondary-action" :disabled="pending || u9BomReading || !selectedRows.length" @click="previewU9BomDifferences">{{ u9BomReading ? '读取U9…' : '按U9校正' }}</button></MoreActions>
-        <span v-if="hasStagedEdits" class="pdm-bom-unsaved-count" role="status" aria-live="polite">未保存 {{ stagedEditCount }} 项</span>
+        <span v-if="hasStagedEdits" class="pdm-bom-unsaved-count" role="status" aria-live="polite">未保存 {{ stagedEditCount }} 条物料</span>
         <button v-if="canEditCurrentView && hasStagedEdits" type="button" class="pdm-secondary-action pdm-bom-discard-action" :disabled="pending" @click="discardStagedEdits">撤销修改</button>
-        <button v-if="canEditCurrentView" type="button" class="pdm-primary-action pdm-bom-save-action" :disabled="pending" @click="saveCurrentBom">{{ pending ? '保存中…' : hasStagedEdits ? `保存BOM（${stagedEditCount}）` : '保存BOM' }}</button>
+        <button v-if="canEditCurrentView" type="button" class="pdm-primary-action pdm-bom-save-action" :disabled="pending" @click="saveCurrentBom">{{ pending ? '保存中…' : '保存BOM' }}</button>
         <button v-if="canManageCurrentRelease && !releaseComparisonActive" type="button" class="pdm-primary-action" @click="openReleaseDrawer()">发起发布</button>
       </div>
     </div>
@@ -4974,11 +4991,11 @@ async function submitBatchUpdate() {
               <span v-else class="pdm-bom-cell-value" :title="parentDrawingNumberDisplay(row)">{{ parentDrawingNumberDisplay(row) }}</span>
             </td>
             <td v-if="isBomColumnVisible('specification')" class="pdm-bom-model-cell">
-              <div v-if="inlineMaterialMatches.has(row)" class="pdm-bom-inline-match" role="status">
-                <span v-if="inlineMaterialMatches.get(row)?.status === 'pending'">匹配中…</span>
+              <div v-if="inlineMaterialMatches.has(row.id ?? '')" class="pdm-bom-inline-match" role="status">
+                <span v-if="inlineMaterialMatches.get(row.id ?? '')?.status === 'pending'">匹配中…</span>
                 <template v-else>
-                  <button type="button" @click="confirmInlineMaterialMatch(row)">{{ inlineMaterialMatches.get(row)?.status === 'duplicate' ? '确认料品' : '匹配失败，重试' }}</button>
-                  <button v-if="inlineMaterialMatches.get(row)?.status === 'failed'" type="button" @click="inlineMaterialMatches.delete(row)">保留手工输入</button>
+                  <button type="button" @click="confirmInlineMaterialMatch(row)">{{ inlineMaterialMatches.get(row.id ?? '')?.status === 'duplicate' ? '确认料品' : '匹配失败，重试' }}</button>
+                  <button v-if="inlineMaterialMatches.get(row.id ?? '')?.status === 'failed'" type="button" @click="inlineMaterialMatches.delete(row.id ?? '')">保留手工输入</button>
                 </template>
               </div>
               <div class="pdm-bom-model-value">
@@ -5500,7 +5517,6 @@ async function submitBatchUpdate() {
 .pdm-bom-manager-panel :deep(.pdm-bom-table th),
 .pdm-bom-manager-panel :deep(.pdm-bom-table td) { min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-left: 2px; padding-right: 2px; }
 .pdm-bom-manager-panel :deep(.pdm-bom-table th) { white-space: normal; overflow-wrap: anywhere; }
-:deep(.pdm-bom-sequence-value) { width:auto!important; min-width:0!important; padding-inline:0!important; }
 .pdm-bom-manager-panel :deep(.pdm-bom-row-actions) { flex-wrap: nowrap; gap: 2px; }
 .pdm-bom-manager-panel :deep(.pdm-bom-table tbody td input:not([type="checkbox"])),
 .pdm-bom-manager-panel :deep(.pdm-bom-table tbody td select) { box-sizing:border-box; height:24px; min-height:0; max-height:24px; padding-top:0; padding-bottom:0; vertical-align:middle; }

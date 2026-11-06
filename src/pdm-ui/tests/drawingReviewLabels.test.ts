@@ -7,6 +7,11 @@ function candidate(index: number, state: DrawingReviewCandidate['state']): Drawi
 }
 
 describe('drawingReviewTreeBadges', () => {
+  it('逐图通过后先显示已审核，整单进入批准节点才显示待批准', () => {
+    const review = { state: 'InReview', items: [{ drawingDocumentId: 'drawing-1', modelDocumentId: 'model-1', drawingState: 'Approved' }] } as DrawingReviewPackage
+    expect(drawingReviewCandidateBadge(candidate(1, 'InReview'), [review]).label).toBe('已审核')
+    expect(drawingReviewCandidateBadge(candidate(1, 'InReview'), [{ ...review, state: 'PendingSupervisorApproval' }]).label).toBe('待批准')
+  })
   it('只改动04时，01至03的模型与工程图均沿用已批准，04才待发起审核', () => {
     const candidates = [candidate(1, 'ApprovedCurrent'), candidate(2, 'ApprovedCurrent'), candidate(3, 'ApprovedCurrent'), candidate(4, 'Ready')]
     const badges = drawingReviewTreeBadges(candidates, [])

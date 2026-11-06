@@ -267,15 +267,16 @@ public sealed partial class MySqlPdmRepository
         var supervisorNode = link.PackageState == DrawingReviewPackageState.PendingSupervisorApproval.ToString();
         if (!supervisorNode && link.PackageState != DrawingReviewPackageState.InReview.ToString())
             throw new PdmConflictException("当前图纸审核单不允许继续审核。");
+        var itemIds = await DrawingReviewTargetItemIdsAsync(connection, transaction, itemId, target, cancellationToken);
         var sql = target == DrawingReviewTarget.Model3D
             ? "UPDATE drawing_review_item SET model_state=@State,model_reviewer=@Reviewer,model_reviewer_name=@ReviewerName,model_reviewed_at=@ReviewedAt,model_comment=@Comment WHERE id=@ItemId AND model_state='Pending'"
             : supervisorNode
-                ? "UPDATE drawing_review_item SET drawing_state=@State,drawing_reviewer=@Reviewer,drawing_reviewer_name=@ReviewerName,drawing_reviewed_at=@ReviewedAt,drawing_comment=@Comment WHERE id=@ItemId AND drawing_state IN ('Approved','Marked','Pending')"
-                : "UPDATE drawing_review_item SET drawing_state=@State,drawing_reviewer=@Reviewer,drawing_reviewer_name=@ReviewerName,drawing_reviewed_at=@ReviewedAt,drawing_comment=@Comment WHERE id=@ItemId AND drawing_state='Pending'";
+                ? "UPDATE drawing_review_item SET drawing_state=@State,drawing_reviewer=@Reviewer,drawing_reviewer_name=@ReviewerName,drawing_reviewed_at=@ReviewedAt,drawing_comment=@Comment WHERE id IN @ItemIds AND drawing_state IN ('Approved','Marked','Pending')"
+                : "UPDATE drawing_review_item SET drawing_state=@State,drawing_reviewer=@Reviewer,drawing_reviewer_name=@ReviewerName,drawing_reviewed_at=@ReviewedAt,drawing_comment=@Comment WHERE id IN @ItemIds AND drawing_state='Pending'";
         var affected = await connection.ExecuteAsync(new CommandDefinition(sql,
-            new { ItemId = itemId, State = state.ToString(), Reviewer = reviewer, ReviewerName = reviewerName, ReviewedAt = reviewedAt.UtcDateTime, Comment = comment },
+            new { ItemId = itemId, ItemIds = itemIds, State = state.ToString(), Reviewer = reviewer, ReviewerName = reviewerName, ReviewedAt = reviewedAt.UtcDateTime, Comment = comment },
             transaction, cancellationToken: cancellationToken));
-        if (affected != 1) throw new PdmConflictException("该3D或2D图档已经完成审核，请刷新后重试。");
+        if (affected != itemIds.Length) throw new PdmConflictException("该3D或2D图档已经完成审核，请刷新后重试。");
         // 机械主管退回单张图纸后，审核单回到审图节点重新审核（其余已通过的图纸保持通过）。
         if (supervisorNode)
             await connection.ExecuteAsync(new CommandDefinition(
@@ -298,11 +299,12 @@ public sealed partial class MySqlPdmRepository
         if (link.PackageState != DrawingReviewPackageState.InReview.ToString()
             && link.PackageState != DrawingReviewPackageState.PendingSupervisorApproval.ToString())
             throw new PdmConflictException("当前图纸审核单不允许撤销审核通过。");
+        var itemIds = await DrawingReviewTargetItemIdsAsync(connection, transaction, itemId, target, cancellationToken);
         var sql = target == DrawingReviewTarget.Model3D
             ? "UPDATE drawing_review_item SET model_state='Pending',model_reviewer=NULL,model_reviewer_name=NULL,model_reviewed_at=NULL,model_comment=NULL WHERE id=@ItemId AND model_state IN ('Approved','Marked','ChangesRequested')"
-            : "UPDATE drawing_review_item SET drawing_state='Pending',drawing_reviewer=NULL,drawing_reviewer_name=NULL,drawing_reviewed_at=NULL,drawing_comment=NULL WHERE id=@ItemId AND drawing_state IN ('Approved','Marked','ChangesRequested')";
-        var affected = await connection.ExecuteAsync(new CommandDefinition(sql, new { ItemId = itemId }, transaction, cancellationToken: cancellationToken));
-        if (affected != 1) throw new PdmConflictException("该图档没有可撤销的审核结论。");
+            : "UPDATE drawing_review_item SET drawing_state='Pending',drawing_reviewer=NULL,drawing_reviewer_name=NULL,drawing_reviewed_at=NULL,drawing_comment=NULL WHERE id IN @ItemIds AND drawing_state IN ('Approved','Marked','ChangesRequested')";
+        var affected = await connection.ExecuteAsync(new CommandDefinition(sql, new { ItemId = itemId, ItemIds = itemIds }, transaction, cancellationToken: cancellationToken));
+        if (affected != itemIds.Length) throw new PdmConflictException("该图档没有可撤销的审核结论。");
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE drawing_review_package SET state='InReview',supervisor_reviewed_by=NULL,supervisor_reviewed_by_name=NULL,supervisor_reviewed_at=NULL,supervisor_comment=NULL WHERE id=@PackageId AND state='PendingSupervisorApproval'",
             new { link.PackageId }, transaction, cancellationToken: cancellationToken));
@@ -329,6 +331,7 @@ public sealed partial class MySqlPdmRepository
             throw new PdmConflictException("当前图纸审核单不允许重新提交审核。");
         if (link.DrawingState != DrawingReviewTargetState.ChangesRequested.ToString())
             throw new PdmConflictException("只有已退回（待修改）的图档可以重新提交审核。");
+        var itemIds = await DrawingReviewTargetItemIdsAsync(connection, transaction, itemId, DrawingReviewTarget.Drawing2D, cancellationToken);
         var affected = await connection.ExecuteAsync(new CommandDefinition(
             """
             UPDATE drawing_review_item
@@ -336,17 +339,17 @@ public sealed partial class MySqlPdmRepository
                 drawing_sha256=@DrawingSha256,drawing_created_by=@DrawingCreatedBy,
                 drawing_reviewer=NULL,drawing_reviewer_name=NULL,drawing_reviewed_at=NULL,drawing_comment=NULL,
                 drawing_result_version_id=NULL,drawing_writeback_id=NULL
-            WHERE id=@ItemId AND drawing_state='ChangesRequested'
+            WHERE id IN @ItemIds AND drawing_state='ChangesRequested'
             """,
             new
             {
-                ItemId = itemId,
+                ItemIds = itemIds,
                 DrawingVersionId = drawingVersionId,
                 DrawingRevision = drawingRevision,
                 DrawingSha256 = drawingSha256,
                 DrawingCreatedBy = drawingCreatedBy
             }, transaction, cancellationToken: cancellationToken));
-        if (affected != 1) throw new PdmConflictException("该图档已经重新提交或审核结论已变化，请刷新后重试。");
+        if (affected != itemIds.Length) throw new PdmConflictException("该图档已经重新提交或审核结论已变化，请刷新后重试。");
         // 已提交机械主管的审核单：单张退回图修改后重新提交，审核单退回审图节点重新审核。
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE drawing_review_package SET state='InReview',supervisor_reviewed_by=NULL,supervisor_reviewed_by_name=NULL,supervisor_reviewed_at=NULL,supervisor_comment=NULL WHERE id=@PackageId AND state IN ('PendingSupervisorApproval','ChangesRequested')",
@@ -416,9 +419,10 @@ public sealed partial class MySqlPdmRepository
             "SELECT COUNT(*) FROM drawing_review_item WHERE package_id=@PackageId",
             new { PackageId = packageId }, transaction, cancellationToken: cancellationToken));
         if (itemCount != requests.Count) throw new PdmRuleException("图纸审核属性写回必须覆盖审核单中的全部图档。");
+        foreach (var request in requests.DistinctBy(request => request.Drawing.Id))
+            await InsertDrawingReviewWritebackAsync(connection, transaction, request.Drawing, cancellationToken);
         foreach (var request in requests)
         {
-            await InsertDrawingReviewWritebackAsync(connection, transaction, request.Drawing, cancellationToken);
             var affected = await connection.ExecuteAsync(new CommandDefinition(
                 """
                 UPDATE drawing_review_item
@@ -461,9 +465,9 @@ public sealed partial class MySqlPdmRepository
             if (!resultVersionId.HasValue) throw new PdmRuleException("图纸审核属性写回缺少结果版本。");
             var sql = link.Target == DrawingReviewTarget.Model3D.ToString()
                 ? "UPDATE drawing_review_item item JOIN drawing_review_package package ON package.id=item.package_id SET item.model_state='Marked',item.model_result_version_id=@ResultVersionId WHERE item.id=@ItemId AND package.state='WritingProperties'"
-                : "UPDATE drawing_review_item item JOIN drawing_review_package package ON package.id=item.package_id SET item.drawing_state='Marked',item.drawing_result_version_id=@ResultVersionId WHERE item.id=@ItemId AND package.state='WritingProperties'";
+                : "UPDATE drawing_review_item item JOIN drawing_review_package package ON package.id=item.package_id SET item.drawing_state='Marked',item.drawing_result_version_id=@ResultVersionId WHERE item.drawing_writeback_id=@WritebackId AND package.state='WritingProperties'";
             await connection.ExecuteAsync(new CommandDefinition(sql,
-                new { link.ItemId, ResultVersionId = resultVersionId.Value }, transaction, cancellationToken: cancellationToken));
+                new { link.ItemId, WritebackId = writebackId, ResultVersionId = resultVersionId.Value }, transaction, cancellationToken: cancellationToken));
             var remaining = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
                 "SELECT COUNT(*) FROM drawing_review_item WHERE package_id=@PackageId AND drawing_state NOT IN ('Marked','NotRequired')",
                 new { link.PackageId }, transaction, cancellationToken: cancellationToken));
@@ -734,6 +738,21 @@ public sealed partial class MySqlPdmRepository
     private sealed class DrawingReviewMarkupLinkRow
     {
         public Guid PackageId { get; init; }
+    }
+
+    private static async Task<Guid[]> DrawingReviewTargetItemIdsAsync(DbConnection connection, DbTransaction transaction,
+        Guid itemId, DrawingReviewTarget target, CancellationToken cancellationToken)
+    {
+        if (target == DrawingReviewTarget.Model3D) return [itemId];
+        return (await connection.QueryAsync<Guid>(new CommandDefinition(
+            """
+            SELECT item.id FROM drawing_review_item item
+            JOIN drawing_review_item selected ON selected.id=@ItemId
+                AND item.package_id=selected.package_id
+                AND item.drawing_document_id=selected.drawing_document_id
+                AND item.drawing_version_id=selected.drawing_version_id
+            FOR UPDATE
+            """, new { ItemId = itemId }, transaction, cancellationToken: cancellationToken))).ToArray();
     }
 
     private sealed class DrawingReviewItemLinkRow

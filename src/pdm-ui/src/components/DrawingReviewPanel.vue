@@ -5,7 +5,7 @@ import { ArrowLeft, ChevronLeft, ChevronRight, History, MessageSquareText, Rotat
 import { ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, ref, watch } from 'vue'
-import { drawingReviewAssignedReviewerLabel, drawingReviewAssignedReviewerPool, drawingReviewCandidateBadge, drawingReviewCandidateStateTone, drawingReviewPackageStateLabel, drawingReviewPackageStateTone } from '../drawingReviewLabels'
+import { drawingReviewAssignedReviewerLabel, drawingReviewAssignedReviewerPool, drawingReviewCandidateBadge, drawingReviewCandidateStateTone, drawingReviewPackageStateLabel, drawingReviewPackageStateTone, uniqueDrawingReviewCandidates, uniqueDrawingReviewItems } from '../drawingReviewLabels'
 import type { AddDrawingReviewMarkupInput, DrawingReviewBatchEntry, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 
@@ -74,31 +74,33 @@ const selectedPackageId = computed({
 })
 const activePackage = computed(() => props.packages.find(item => item.id === selectedPackageId.value) ?? props.packages[0])
 const activeItem = computed(() => activePackage.value?.items.find(item => item.drawingDocumentId === props.selectedDocumentId))
-const markedTargetCount = computed(() => activePackage.value?.items.reduce((count, item) => count + Number(item.drawingState === 'Approved' || item.drawingState === 'Marked'), 0) ?? 0)
-const totalTargetCount = computed(() => activePackage.value?.items.length ?? 0)
+const activeDrawingItems = computed(() => uniqueDrawingReviewItems(activePackage.value?.items ?? []))
+const markedTargetCount = computed(() => activeDrawingItems.value.reduce((count, item) => count + Number(item.drawingState === 'Approved' || item.drawingState === 'Marked'), 0))
+const totalTargetCount = computed(() => activeDrawingItems.value.length)
 const canWithdrawActive = computed(() => Boolean(activePackage.value
   && (activePackage.value.state === 'InReview' || activePackage.value.state === 'PendingSupervisorApproval' || activePackage.value.state === 'ChangesRequested')
   && props.canSubmit
   && (props.canManageWithdraw || activePackage.value.createdBy.localeCompare(props.currentUsername, undefined, { sensitivity: 'accent' }) === 0)))
 // 审核标记属性回写由客户端逐张完成；长期未完成时允许发起人/项目经理/管理员放弃写入并直接完成审核，避免图档被无限期锁住。
-const pendingWritebackCount = computed(() => activePackage.value?.items.filter(item => item.drawingWritebackId && !item.drawingResultVersionId).length ?? 0)
+const pendingWritebackCount = computed(() => activeDrawingItems.value.filter(item => item.drawingWritebackId && !item.drawingResultVersionId).length)
 const canAbandonWritebacks = computed(() => Boolean(activePackage.value
   && activePackage.value.state === 'WritingProperties'
   && props.canSubmit
   && (props.canManageWithdraw || activePackage.value.createdBy.localeCompare(props.currentUsername, undefined, { sensitivity: 'accent' }) === 0)))
+const reviewCandidates = computed(() => uniqueDrawingReviewCandidates(props.candidates))
 const filteredCandidates = computed(() => {
   const keyword = scopeSearch.value.trim().toLocaleLowerCase()
-  return props.candidates.filter((candidate) => {
+  return reviewCandidates.value.filter((candidate) => {
     return !keyword || `${candidate.drawingNumber} ${candidate.name}`.toLocaleLowerCase().includes(keyword)
   })
 })
 const overviewStateOptions = computed(() => [
-  { value: 'All', label: '全部', count: props.candidates.length },
-  ...['待发起审核', '待审核', '待批准', '已批准', '已退回（待修改）', '不可发起'].map(label => ({
-    value: label, label, count: props.candidates.filter(candidate => overviewStateLabel(candidate) === label).length,
+  { value: 'All', label: '全部', count: reviewCandidates.value.length },
+  ...['待发起审核', '待审核', '已审核', '待批准', '已批准', '已退回（待修改）', '不可发起'].map(label => ({
+    value: label, label, count: reviewCandidates.value.filter(candidate => overviewStateLabel(candidate) === label).length,
   })),
 ])
-const overviewCandidates = computed(() => props.candidates.filter(candidate => overviewState.value === 'All' || overviewStateLabel(candidate) === overviewState.value))
+const overviewCandidates = computed(() => reviewCandidates.value.filter(candidate => overviewState.value === 'All' || overviewStateLabel(candidate) === overviewState.value))
 const overviewEmptyMessage = '没有符合筛选条件的图纸。'
 
 // 仅允许勾选当前用户能够发起、重新提交或审批的图纸。
@@ -127,11 +129,11 @@ const selectedResubmitEntries = computed(() => selectedOverviewCandidates.value.
 const selectedOverviewEntries = computed(() => overviewTargets.value.filter(entry => entry.action && selectedOverviewIds.value.includes(entry.candidate.candidateId)))
 watch(overviewSelectableIds, ids => { selectedOverviewIds.value = selectedOverviewIds.value.filter(id => ids.includes(id)) })
 // 审核任务变化时默认选中待当前人员处理的图纸；普通刷新不覆盖人工取消勾选。
-watch(() => `${selectedPackageId.value}:${props.currentUsername}:` + props.candidates.flatMap(candidate => {
+watch(() => `${selectedPackageId.value}:${props.currentUsername}:` + reviewCandidates.value.flatMap(candidate => {
   const action = overviewRowAction(candidate)
   return action ? [`${candidate.candidateId}:${action.packageId}:${action.itemId}:${action.kind}`] : []
 }).join('|'), () => {
-  selectedOverviewIds.value = props.candidates.filter(candidate => overviewRowAction(candidate)).map(candidate => candidate.candidateId)
+  selectedOverviewIds.value = reviewCandidates.value.filter(candidate => overviewRowAction(candidate)).map(candidate => candidate.candidateId)
 }, { immediate: true })
 const selectedSubmittableIds = computed(() => selectedOverviewCandidates.value
   .filter(canInitiate)
@@ -169,13 +171,13 @@ function overviewRowAction(candidate: DrawingReviewCandidate) {
   if (!packageValue || !item || !props.canDecide) return null
   if (packageValue.state === 'PendingSupervisorApproval') {
     if (item.drawingState !== 'Approved' && item.drawingState !== 'Marked') return null
-    return packageValue.supervisor === props.currentUsername || props.allowSelfReview
+    return packageValue.supervisor?.toLowerCase() === props.currentUsername.toLowerCase() || props.allowSelfReview
       ? { kind: 'supervisor' as const, packageId: packageValue.id, itemId: item.id }
       : null
   }
   if (packageValue.state !== 'InReview' || item.drawingState !== 'Pending') return null
   const pool = drawingReviewAssignedReviewerPool(packageValue)
-  const assigned = pool.length === 0 || pool.includes(props.currentUsername) || props.allowSelfReview
+  const assigned = pool.length === 0 || pool.some(username => username.toLowerCase() === props.currentUsername.toLowerCase()) || props.allowSelfReview
   const selfReview = Boolean(item.drawingCreatedBy)
     && item.drawingCreatedBy!.localeCompare(props.currentUsername, undefined, { sensitivity: 'accent' }) === 0
     && !props.allowSelfReview
@@ -219,13 +221,13 @@ async function batchDecide(decision: DrawingReviewDecision) {
   selectedOverviewIds.value = []
 }
 const selectedCandidateCount = computed(() => selectedCandidateIds.value.length)
-const candidateEmptyMessage = computed(() => props.candidates.length === 0
+const candidateEmptyMessage = computed(() => reviewCandidates.value.length === 0
   ? '当前没有有效非标件BOM候选；请先将3D模型归入非标件BOM，并保持唯一关联的2D工程图。'
   : '没有符合搜索条件的图档。')
 
-watch(() => props.candidates, () => {
+watch(() => reviewCandidates.value, () => {
   if (scopeOpen.value) {
-    const available = new Set(props.candidates.filter(canInitiate).map(candidate => candidate.modelDocumentId))
+    const available = new Set(reviewCandidates.value.filter(canInitiate).map(candidate => candidate.modelDocumentId))
     selectedCandidateIds.value = selectedCandidateIds.value.filter(id => available.has(id))
   }
 }, { deep: true })
@@ -240,7 +242,7 @@ function canInitiate(candidate: DrawingReviewCandidate) {
 }
 
 function selectAllReadyCandidates() {
-  selectedCandidateIds.value = props.candidates
+  selectedCandidateIds.value = reviewCandidates.value
     .filter(canInitiate)
     .map(candidate => candidate.modelDocumentId!)
 }
@@ -305,18 +307,18 @@ function overviewStateTone(candidate: DrawingReviewCandidate) {
 
 function reviewItemFor(candidate: DrawingReviewCandidate) {
   const packageValue = activeReviewPackageFor(candidate)
-  return packageValue?.items.find(value =>
-    Boolean(candidate.drawingDocumentId) && value.drawingDocumentId === candidate.drawingDocumentId
-    || Boolean(candidate.modelDocumentId) && value.modelDocumentId === candidate.modelDocumentId)
+  return packageValue?.items.find(value => candidate.drawingDocumentId
+    ? value.drawingDocumentId === candidate.drawingDocumentId
+    : Boolean(candidate.modelDocumentId) && value.modelDocumentId === candidate.modelDocumentId)
 }
 
 function activeReviewPackageFor(candidate: DrawingReviewCandidate) {
   return props.packages.find(packageValue =>
     (packageValue.state === 'InReview' || packageValue.state === 'PendingSupervisorApproval' || packageValue.state === 'ChangesRequested'
       || packageValue.state === 'WritingProperties' || packageValue.state === 'Approved')
-    && packageValue.items.some(item =>
-      Boolean(candidate.drawingDocumentId) && item.drawingDocumentId === candidate.drawingDocumentId
-      || Boolean(candidate.modelDocumentId) && item.modelDocumentId === candidate.modelDocumentId))
+    && packageValue.items.some(item => candidate.drawingDocumentId
+      ? item.drawingDocumentId === candidate.drawingDocumentId
+      : Boolean(candidate.modelDocumentId) && item.modelDocumentId === candidate.modelDocumentId))
 }
 
 function candidateReviewerLabel(candidate: DrawingReviewCandidate) {
@@ -500,7 +502,7 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
     <template v-else>
       <section class="drawing-review-package-summary">
         <div><strong>{{ activePackage.number }}</strong><span :class="`is-${packageStateTone}`">{{ packageStateLabel(activePackage.state) }}</span></div>
-        <p>{{ activePackage.items.length }}张2D图纸 · {{ markedTargetCount }}/{{ totalTargetCount }}项完成 · 发起人 {{ displayUserName(activePackage.createdBy) }}</p>
+        <p>{{ totalTargetCount }}张2D图纸 · {{ markedTargetCount }}/{{ totalTargetCount }}项完成 · 发起人 {{ displayUserName(activePackage.createdBy) }}</p>
         <p class="drawing-review-route">审核：{{ assignedReviewerLabel(activePackage) }} → 批准：{{ activePackage.supervisorName || displayUserName(activePackage.supervisor) }}</p>
         <p v-if="currentHandlerLabel(activePackage)" class="drawing-review-current-handler">{{ currentHandlerLabel(activePackage) }}</p>
         <p v-if="activePackage.state === 'Withdrawn'" class="drawing-review-withdrawn">{{ activePackage.withdrawnBy }} 撤销：{{ activePackage.withdrawalReason }}</p>
@@ -555,4 +557,6 @@ const packageStateTone = computed(() => activePackage.value ? drawingReviewPacka
 .drawing-review-package-summary>div>span.is-success{background:var(--pdm-green-soft);color:var(--pdm-green)}
 .drawing-review-package-summary>div>span.is-danger{background:var(--pdm-danger-soft);color:var(--pdm-danger)}
 .drawing-review-package-summary>div>span.is-neutral{background:var(--pdm-surface-muted);color:var(--pdm-muted)}
+.drawing-review-panel button.drawing-review-candidate{border:0;border-radius:0;box-shadow:none;font-weight:400}
+.drawing-review-candidate__number{font-weight:400}
 </style>

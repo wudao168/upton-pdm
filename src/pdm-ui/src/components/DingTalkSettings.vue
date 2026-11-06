@@ -5,6 +5,9 @@ import type { DingTalkSettings } from '../dingtalk'
 const props = defineProps<{ token: string }>()
 const settings = ref<DingTalkSettings | null>(null), secret = ref(''), pending = ref(false), error = ref(''), notice = ref('')
 const DingTalkEmployeeBindings = defineAsyncComponent(() => import('./DingTalkEmployeeBindings.vue'))
+const MobileOfficeLayoutEditor = defineAsyncComponent(() => import('./MobileOfficeLayoutEditor.vue'))
+const layoutsOpen = ref(false), layoutEditor = ref<{ canLeave: () => boolean }>()
+function toggleLayouts() { if (!layoutsOpen.value || layoutEditor.value?.canLeave()) layoutsOpen.value = !layoutsOpen.value }
 const employeesOpen = ref(false)
 const previewValues: Record<string, string> = { 所属项目: 'P700014 · TEST 5', 子项目: '项目整体', 问题编号: '5', 问题描述: '测试', 优先级: '普通', 实施状态: '待处理', 负责人: '白红梅', 提交人: '王勇煌', 要求完成日期: '2026-10-17', 解决措施: '处理结果示例', 提交日期: '2026-10-16 14:25', 完成日期: '', 更新人: '王勇煌', 变更内容: '', 附件: '现场.png' }
 const preview = computed(() => (settings.value?.notificationTemplate || settings.value?.defaultNotificationTemplate || '').split('\n')
@@ -37,6 +40,8 @@ onMounted(load)
         <label class="pdm-dialog-field">员工移动办公首页地址<el-input :model-value="settings.officeEntryUrl" aria-label="员工移动办公首页地址" readonly placeholder="保存访问地址后生成" /></label>
       </div>
       <p class="pdm-counter-note">启用员工移动办公时，将“员工移动办公首页地址”填写到钉钉应用首页及PC端首页；包含待办、审批、项目、OPL和工时。原有群内访客提交卡片继续有效。</p>
+      <el-button :disabled="pending" @click="toggleLayouts">{{ layoutsOpen ? '收起移动端页面维护' : '移动端页面维护' }}</el-button>
+      <MobileOfficeLayoutEditor v-if="layoutsOpen" ref="layoutEditor" :token="token" />
       <el-button :disabled="pending" @click="employeesOpen = !employeesOpen">{{ employeesOpen ? '收起员工绑定设置' : '员工账号绑定' }}</el-button>
       <DingTalkEmployeeBindings v-if="employeesOpen" :token="token" @saved="version => { if (settings) settings.rowVersion = version }" />
       <p class="pdm-counter-note">将生成的统一首页地址填写到钉钉应用首页及PC端首页。访客仅提交问题，自动记录钉钉姓名，无需PLM账号或账号绑定，也不校验群成员名单。</p>

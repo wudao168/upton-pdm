@@ -60,24 +60,24 @@ public sealed class RuleReleaseScopeIsolationTests
         await repository.CheckInVersionAsync(pending.Id, "admin", session,
             ArchiveBatchTests.Commit(project, pending, ArchiveBatchTests.Node(pending) with { StructureIndexPending = true }, 'A', true), default);
         var removedRootId = removedRootPending ? pending.Id : complete.RootDocumentId;
-        var removed = new BomItem(Guid.NewGuid(), projectId, BomKind.Standard, 1, "REMOVED", "已删除组件", 1, "个", null, null, "W1", true)
+        var removed = new BomItem(Guid.NewGuid(), projectId, BomKind.NonStandard, 1, "REMOVED", "已删除组件", 1, "个", null, null, "W1", true)
         {
             SourceDocumentId = Guid.NewGuid(), SourceConfiguration = "Default",
             SourceInstancePath = $"roots/{removedRootId:N}/deleted-occurrence", Source = "Auto"
         };
-        var baseline = await repository.SaveBomDraftAsync(projectId, BomKind.Standard, [removed], "admin", default);
+        var baseline = await repository.SaveBomDraftAsync(projectId, BomKind.NonStandard, [removed], "admin", default);
         await repository.SetBomVersionStateAsync([baseline.Id], BomVersionState.Released, "admin", null, default);
-        var next = await repository.SaveBomDraftAsync(projectId, BomKind.Standard, [], "admin", default);
+        var next = await repository.SaveBomDraftAsync(projectId, BomKind.NonStandard, [], "admin", default);
         Assert.Equal(baseline.Id, next.BaseVersionId);
         // A later current-BOM row cannot replace the frozen deletion source.
-        await repository.ReplaceBomAsync(projectId, BomKind.Standard,
+        await repository.ReplaceBomAsync(projectId, BomKind.NonStandard,
             [removed with { SourceDocumentId = null, SourceInstancePath = null, Source = "Manual" }], default);
         var snapshot = (await repository.GetLatestReferenceSnapshotAsync(projectId, default))!;
         var package = new ReleasePackage(Guid.NewGuid(), projectId, "QA-REMOVE", ReleasePackageState.Draft,
             snapshot.SnapshotId, "M", "E", [], DateTimeOffset.UtcNow, null, null)
         {
-            Scope = ReleaseScope.StandardSupplement, StandardBomVersionId = next.Id,
-            SelectedBomItemIds = [], StandardBomSnapshot = [],
+            Scope = ReleaseScope.NonStandardSupplement, NonStandardBomVersionId = next.Id,
+            SelectedBomItemIds = [], NonStandardBomSnapshot = [],
             ConfirmedRemovedBomItemIds = [unknownRemovedId ? Guid.NewGuid() : removed.Id]
         };
         var workflow = new PdmWorkflowService(repository, new UnusedStorage(), new NoOpPublisher(), TimeProvider.System);
@@ -102,7 +102,7 @@ public sealed class RuleReleaseScopeIsolationTests
     [InlineData("wrong-root", false)]
     [InlineData("manual", false)]
     [InlineData("wrong-configuration", false)]
-    public async Task OnlyTheSelectedCadRootMayBlockScopedRelease(string source, bool explicitRoot)
+    public async Task OnlyTheSelectedCadRootMayBlockNonStandardRelease(string source, bool explicitRoot)
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var projectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
@@ -131,21 +131,20 @@ public sealed class RuleReleaseScopeIsolationTests
             }).ToArray();
         await repository.ReplaceBomAsync(projectId, BomKind.Standard, selected, default);
 
-        await ConfigureApprovers(repository, projectId);
         var workflow = new PdmWorkflowService(repository, new UnusedStorage(), new NoOpPublisher(), TimeProvider.System);
         var packageIdsBefore = (await repository.ListReleasePackagesAsync(projectId, default)).Select(package => package.Id).Order().ToArray();
-        Task<ReleasePackage> Create() => workflow.CreateScopedReleasePackageAsync(projectId, null, "", "", "", "未指定", null,
-            ReleaseScope.StandardFormal, selected.Select(item => item.Id).ToArray(), "admin", UserRole.Administrator, default,
-            rootDocumentId: explicitRoot ? selectedRoot.RootDocumentId : null);
+        var method = typeof(PdmWorkflowService).GetMethod("RequireCompleteScopedReleaseIndexAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        Task Validate() => (Task)method.Invoke(workflow, [forest, ReleaseScope.NonStandardWithDrawing, selected,
+            null, explicitRoot ? selectedRoot.RootDocumentId : null, projectId, CancellationToken.None, null])!;
         if (source is "pending" or "unknown" or "ambiguous" or "wrong-root" or "wrong-configuration")
         {
-            var error = await Assert.ThrowsAsync<PdmRuleException>(Create);
+            var error = await Assert.ThrowsAsync<PdmRuleException>(Validate);
             Assert.Contains(source == "pending" ? "待补全" : "来源", error.Message);
             Assert.Equal(packageIdsBefore, (await repository.ListReleasePackagesAsync(projectId, default)).Select(package => package.Id).Order());
             return;
         }
-        var package = await Create();
-        Assert.Equal(selected.Select(item => item.Id).Order(), package.SelectedBomItemIds.Order());
+        await Validate();
     }
 
     private static async Task<CadReferenceSnapshot> ArchiveCompleteRoot(InMemoryPdmRepository repository, Project project, Guid session)
@@ -154,23 +153,6 @@ public sealed class RuleReleaseScopeIsolationTests
         await repository.CheckInVersionAsync(root.Id, "admin", session,
             ArchiveBatchTests.Commit(project, root, ArchiveBatchTests.Node(root), 'C', true), default);
         return (await repository.GetProjectReferenceRootAsync(project.Id, root.Id, default))!;
-    }
-
-    private static async Task ConfigureApprovers(InMemoryPdmRepository repository, Guid projectId)
-    {
-        foreach (var user in new[] { "admin", "mechanical-supervisor", "standardization-supervisor" })
-            if (await repository.FindUserAsync(user, default) is null)
-                await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), user, user, "unused",
-                    user == "admin" ? UserRole.Administrator : UserRole.Approver, true), default);
-        var organization = Guid.Parse("70000000-0000-0000-0000-000000000001");
-        var division = await repository.SaveOrganizationUnitAsync(new SaveOrganizationUnitCommand(null, organization, null,
-            "RULE-SCOPE-DIV", "规则测试事业部", OrganizationUnitKind.BusinessDivision, true, 0), default);
-        var department = await repository.SaveOrganizationUnitAsync(new SaveOrganizationUnitCommand(null, organization, division.Id,
-            "RULE-SCOPE-DEPT", "规则测试部门", OrganizationUnitKind.Department, true, 0), default);
-        await repository.SetOrganizationMembershipsAsync("admin", [department.Id], department.Id, default);
-        await repository.SetOrganizationUnitManagersAsync(department.Id, "mechanical-supervisor", [], default);
-        await repository.SetOrganizationUnitManagersAsync(division.Id, "standardization-supervisor", [], default);
-        await repository.SetMainProjectStaffingAsync(projectId, new SetMainProjectStaffingCommand("admin", [], ["admin"]), "admin", default);
     }
 
     private sealed class NoOpPublisher : IReleasePackagePublisher

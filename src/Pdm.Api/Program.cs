@@ -128,6 +128,7 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IProjectContactInformationRepository, MySqlProjectContactInformationRepository>();
     builder.Services.AddScoped<IProjectOplRepository, MySqlProjectOplRepository>();
     builder.Services.AddScoped<IDingTalkConfigurationRepository, MySqlDingTalkConfigurationRepository>();
+    builder.Services.AddScoped<IMobileOfficeLayoutRepository, MySqlMobileOfficeLayoutRepository>();
     builder.Services.AddScoped<IReleaseDeliveryStore, MySqlReleaseDeliveryStore>();
     builder.Services.AddScoped<IProductionTrackingStore, MySqlProductionTrackingStore>();
     builder.Services.AddScoped<IProductionSupplierStore, MySqlProductionSupplierStore>();
@@ -160,6 +161,7 @@ else
     builder.Services.AddSingleton<IProjectContactInformationRepository, InMemoryProjectContactInformationRepository>();
     builder.Services.AddSingleton<IProjectOplRepository, InMemoryProjectOplRepository>();
     builder.Services.AddSingleton<IDingTalkConfigurationRepository, InMemoryDingTalkConfigurationRepository>();
+    builder.Services.AddSingleton<IMobileOfficeLayoutRepository, InMemoryMobileOfficeLayoutRepository>();
     builder.Services.AddSingleton<IReleaseDeliveryStore, InMemoryReleaseDeliveryStore>();
     builder.Services.AddSingleton<IProductionTrackingStore, InMemoryProductionTrackingStore>();
     builder.Services.AddSingleton<IProductionSupplierStore, InMemoryProductionSupplierStore>();
@@ -256,6 +258,7 @@ builder.Services.AddScoped<ProjectOplService>();
 builder.Services.AddSingleton<ProjectOplViewState>();
 builder.Services.Configure<DingTalkOplOptions>(builder.Configuration.GetSection("DingTalkOpl"));
 builder.Services.AddScoped<DingTalkConfigurationService>();
+builder.Services.AddScoped<MobileOfficeLayoutService>();
 builder.Services.AddSingleton<DingTalkProjectBindingCodes>();
 builder.Services.AddSingleton<DingTalkStreamStatusCache>();
 builder.Services.AddHttpClient("dingtalk-stream", client => client.Timeout = TimeSpan.FromSeconds(20)).RemoveAllLoggers();
@@ -506,6 +509,7 @@ app.MapWorkHoursEndpoints();
 app.MapProjectOplEndpoints();
 app.MapDingTalkOplEndpoints();
 app.MapDingTalkOfficeEndpoints();
+app.MapMobileOfficeLayoutEndpoints();
 if (Directory.Exists(deployedWebRoot))
 {
     app.MapGet("/{**path}", async context =>

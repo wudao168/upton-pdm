@@ -261,6 +261,8 @@ const changeReasonSummary = computed(() => selectedChangeReasons.value.map(reaso
 const availableReleaseItems = computed(() => (props.releaseItems.length ? props.releaseItems
   : scope.value.startsWith('Standard') ? props.standardItems : [])
   .filter(row => !row.manuallyExcluded && !row.releaseExcluded && !row.pendingRemoval && !row.releaseConfirmation
+    && (isLongLeadScope(scope.value) || !isNonStandardScope(scope.value)
+      || !props.drawingReviewCandidates.some(candidate => candidate.isReferenceOnly && candidate.modelDocumentId === row.sourceDocumentId))
     && (!effectiveRootDocumentId.value || row.sourceInstancePath?.startsWith(`roots/${effectiveRootDocumentId.value.replaceAll('-', '').toLowerCase()}/`))
     && (!row.kind || row.kind === (scope.value.startsWith('Electrical') ? 'Electrical' : isNonStandardScope(scope.value) ? 'NonStandard' : 'Standard'))))
 const releasePageSize = 50
@@ -302,7 +304,7 @@ const releaseItemGroupKey = (item: BomItem, index: number) => {
     : [
         'item', item.sourceDocumentId, item.sourceConfiguration, item.kind, item.unit, item.name,
         item.specification, item.brand, item.material, item.surfaceTreatment, item.heatTreatment,
-        item.weight, item.remark, item.revision, item.id || index,
+        item.weight, item.remark, item.revision, item.sourceDocumentId ? '' : item.id || index,
       ].map(value => String(value ?? '').trim().toLocaleLowerCase()).join('|')
 }
 const drawingReviewCandidateFor = (item: BomItem) => props.drawingReviewCandidates.find(candidate => Boolean(candidate.bomItemId) && releaseInstanceIds(item).includes(candidate.bomItemId!))
