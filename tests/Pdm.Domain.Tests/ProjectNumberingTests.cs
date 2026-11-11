@@ -215,6 +215,22 @@ public sealed class ProjectNumberingTests
         Assert.All(savedChild!.SerialNumbers, serial => Assert.StartsWith("3", serial));
     }
 
+    [Fact]
+    public async Task TypesHaveIndependentSequencesAndReleasedNumbers()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var standard = await repository.CreateNumberedProjectAsync(Command("标准", 1), default);
+        var research = await repository.CreateNumberedProjectAsync(Command("研发", 1) with { ProjectTypeCode = "R" }, default);
+        Assert.Equal(standard.Code[1..], research.Code[1..]);
+        var nextStandard = await repository.CreateNumberedProjectAsync(Command("标准二", 1), default);
+        Assert.Equal("P700002", nextStandard.Code);
+        await repository.DeleteProjectAsync(standard.Id, default);
+        var nextResearch = await repository.CreateNumberedProjectAsync(Command("研发二", 1) with { ProjectTypeCode = "R" }, default);
+        Assert.Equal("R700002", nextResearch.Code);
+        var reused = await repository.CreateNumberedProjectAsync(Command("标准回收", 1), default);
+        Assert.Equal(standard.Code, reused.Code);
+    }
+
     private static CreateNumberedProjectCommand Command(string name, int quantity) => new(
         KunshanId,
         "P",

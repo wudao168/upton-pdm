@@ -6,15 +6,25 @@ using Upton.Pdm.Application;
 
 namespace Upton.Pdm.Infrastructure;
 
-public sealed class InMemoryQualityInspectionRepository : IQualityInspectionRepository
+public sealed class InMemoryQualityInspectionRepository(InMemoryProjectFileRepository? files = null) : IQualityInspectionRepository
 {
     private readonly ConcurrentDictionary<Guid, QualityInspectionRecord> records = new();
     public Task<IReadOnlyList<QualityInspectionRecord>> ListAsync(Guid projectId, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<QualityInspectionRecord>>(records.Values.Where(x => x.ProjectId == projectId).OrderByDescending(x => x.UploadedAt).ToArray());
     public Task<QualityInspectionRecord?> FindAsync(Guid id, CancellationToken cancellationToken) => Task.FromResult(records.GetValueOrDefault(id));
-    public Task AddAsync(QualityInspectionRecord record, CancellationToken cancellationToken) { records[record.Id] = record; return Task.CompletedTask; }
+    public Task<bool> TryAddAsync(QualityInspectionRecord record, StoredProjectFileUpload? archive, CancellationToken cancellationToken)
+    {
+        lock (records)
+        {
+            if (records.ContainsKey(record.Id)) return Task.FromResult(false);
+            if (archive is not null)
+                (files ?? throw new InvalidOperationException("未配置项目文件仓储。"))
+                    .AddVersion(archive, record.UploadedBy, record.Title);
+            return Task.FromResult(records.TryAdd(record.Id, record));
+        }
+    }
 }
 
-public sealed class MySqlQualityInspectionRepository(IOptions<PdmDatabaseOptions> options) : IQualityInspectionRepository
+public sealed class MySqlQualityInspectionRepository(IOptions<PdmDatabaseOptions> options, MySqlProjectFileRepository files) : IQualityInspectionRepository
 {
     private const string Select = "SELECT id,project_id ProjectId,kind,station,title,remark,file_name FileName,storage_relative_path StorageRelativePath,file_length FileLength,sha256,uploaded_by UploadedBy,uploaded_at UploadedAt FROM quality_inspection_record";
     public async Task<IReadOnlyList<QualityInspectionRecord>> ListAsync(Guid projectId, CancellationToken cancellationToken)
@@ -34,10 +44,20 @@ public sealed class MySqlQualityInspectionRepository(IOptions<PdmDatabaseOptions
         public string? Remark { get; set; } public string FileName { get; set; } = ""; public string StorageRelativePath { get; set; } = "";
         public long FileLength { get; set; } public string Sha256 { get; set; } = ""; public string UploadedBy { get; set; } = ""; public DateTime UploadedAt { get; set; }
     }
-    public async Task AddAsync(QualityInspectionRecord record, CancellationToken cancellationToken)
+    public async Task<bool> TryAddAsync(QualityInspectionRecord record, StoredProjectFileUpload? archive, CancellationToken cancellationToken)
     {
         await using var connection = new MySqlConnection(options.Value.ConnectionString);
-        await connection.ExecuteAsync(new CommandDefinition("INSERT INTO quality_inspection_record(id,project_id,kind,station,title,remark,file_name,storage_relative_path,file_length,sha256,uploaded_by,uploaded_at) VALUES(@Id,@ProjectId,@Kind,@Station,@Title,@Remark,@FileName,@StorageRelativePath,@FileLength,@Sha256,@UploadedBy,@UploadedAt)",
-            new { record.Id, record.ProjectId, record.Kind, record.Station, record.Title, record.Remark, record.FileName, record.StorageRelativePath, record.FileLength, record.Sha256, record.UploadedBy, UploadedAt = record.UploadedAt.UtcDateTime }, cancellationToken: cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            await connection.ExecuteAsync(new CommandDefinition("INSERT INTO quality_inspection_record(id,project_id,kind,station,title,remark,file_name,storage_relative_path,file_length,sha256,uploaded_by,uploaded_at) VALUES(@Id,@ProjectId,@Kind,@Station,@Title,@Remark,@FileName,@StorageRelativePath,@FileLength,@Sha256,@UploadedBy,@UploadedAt)",
+                new { record.Id, record.ProjectId, record.Kind, record.Station, record.Title, record.Remark, record.FileName, record.StorageRelativePath, record.FileLength, record.Sha256, record.UploadedBy, UploadedAt = record.UploadedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+        }
+        catch (MySqlException error) when (error.Number == 1062) { return false; }
+        if (archive is not null)
+            await files.AddVersionInTransactionAsync(connection, transaction, archive, record.UploadedBy, record.Title, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return true;
     }
 }

@@ -32,15 +32,29 @@ public sealed partial class InMemoryPdmRepository
     public async Task UpsertUserNotificationsAsync(IReadOnlyList<UserNotification> notifications, CancellationToken cancellationToken)
     {
         notifications = await NotificationRecipientPolicy.FilterAsync(this, notifications, cancellationToken);
-        lock (gate) foreach (var notification in notifications)
+        lock (gate) foreach (var notification in notifications) UpsertNotification(notification);
+    }
+
+    internal void SyncOplAssignment(OplIssue issue, UserNotification? assignment)
+    {
+        lock (gate)
         {
-            var prior = userNotifications.Values.FirstOrDefault(item => item.Recipient.Equals(notification.Recipient, StringComparison.OrdinalIgnoreCase) && item.SourceKey == notification.SourceKey);
-            userNotifications[prior?.Id ?? notification.Id] = prior is null ? notification : notification with
-            {
-                Id = prior.Id, CreatedAt = prior.ResolvedAt is not null && notification.ResolvedAt is null ? notification.CreatedAt : prior.CreatedAt,
-                ReadAt = prior.ResolvedAt is not null && notification.ResolvedAt is null ? null : prior.ReadAt,
-            };
+            var key = ProjectOplService.AssignmentKey(issue.Id);
+            foreach (var item in userNotifications.Values.Where(item => item.SourceKey == key && item.ResolvedAt is null
+                && !item.Recipient.Equals(assignment?.Recipient, StringComparison.OrdinalIgnoreCase)).ToArray())
+                userNotifications[item.Id] = item with { ResolvedAt = issue.UpdatedAt, ReadAt = item.ReadAt ?? issue.UpdatedAt };
+            if (assignment is not null) UpsertNotification(assignment with { Title = $"OPL #{issue.Number} 待回填" });
         }
+    }
+
+    private void UpsertNotification(UserNotification notification)
+    {
+        var prior = userNotifications.Values.FirstOrDefault(item => item.Recipient.Equals(notification.Recipient, StringComparison.OrdinalIgnoreCase) && item.SourceKey == notification.SourceKey);
+        userNotifications[prior?.Id ?? notification.Id] = prior is null ? notification : notification with
+        {
+            Id = prior.Id, CreatedAt = prior.ResolvedAt is not null && notification.ResolvedAt is null ? notification.CreatedAt : prior.CreatedAt,
+            ReadAt = prior.ResolvedAt is not null && notification.ResolvedAt is null ? null : prior.ReadAt,
+        };
     }
 
     public Task ResolveUserNotificationsAsync(IReadOnlyList<string> sourceKeys, DateTimeOffset resolvedAt, CancellationToken cancellationToken)
@@ -65,18 +79,26 @@ public sealed partial class InMemoryPdmRepository
 
     public Task<IReadOnlyList<UserNotification>> ListDatedUserTodosAsync(string recipient, Guid companyId, DateOnly from, DateOnly to, CancellationToken ct)
     {
-        var systemOnly = NotificationRecipientPolicy.SystemOnly(users.Values.FirstOrDefault(user => user.Username.Equals(recipient, StringComparison.OrdinalIgnoreCase)));
+        var systemOnly = !HasUserPermission(recipient, UserRole.ProductionViewer, AuthorizationActions.BusinessNotifications);
         lock (gate) return Task.FromResult<IReadOnlyList<UserNotification>>(userNotifications.Values.Where(item =>
             item.Recipient.Equals(recipient, StringComparison.OrdinalIgnoreCase) && (!systemOnly || item.IsSenderReceipt) && item.Category == "ProjectTodo" && item.DueDate >= from && item.DueDate <= to
             && (item.SourceKey.StartsWith($"calendar-todo:{companyId:N}:", StringComparison.Ordinal)
                 || item.ProjectId is Guid id && projects.TryGetValue(id, out var project) && project.OrganizationId == companyId)).OrderBy(item => item.DueDate).ThenBy(item => item.CreatedAt).ToArray());
     }
 
+    public Task<IReadOnlyList<UserNotification>> ListProjectActivityNotificationsAsync(string recipient, DateTimeOffset since, CancellationToken ct)
+    {
+        lock (gate) return Task.FromResult<IReadOnlyList<UserNotification>>(userNotifications.Values
+            .Where(item => item.Recipient.Equals(recipient, StringComparison.OrdinalIgnoreCase) && item.CreatedAt >= since && ProjectActivityFeed.IsCandidate(item)
+                && item.ProjectId is Guid id && projects.TryGetValue(id, out var project) && project.OrganizationId == TenantContext.CompanyId)
+            .OrderByDescending(item => item.CreatedAt).ToArray());
+    }
+
     public Task<IReadOnlyList<UserNotification>> ListUserNotificationsAsync(string recipient, int take, CancellationToken cancellationToken)
     {
         lock (gate)
         {
-            var systemOnly = NotificationRecipientPolicy.SystemOnly(users.Values.FirstOrDefault(user => user.Username.Equals(recipient, StringComparison.OrdinalIgnoreCase)));
+            var systemOnly = !HasUserPermission(recipient, UserRole.ProductionViewer, AuthorizationActions.BusinessNotifications);
             return Task.FromResult<IReadOnlyList<UserNotification>>(userNotifications.Values
                 .Where(item => string.Equals(item.Recipient, recipient, StringComparison.OrdinalIgnoreCase))
                 .Where(item => !systemOnly || NotificationRecipientPolicy.IsSystemMessage(item) || item.IsSenderReceipt && item.ReadAt is not null)
@@ -85,7 +107,7 @@ public sealed partial class InMemoryPdmRepository
                 .Where(item => !item.SourceKey.StartsWith("calendar-todo:", StringComparison.Ordinal) || TenantContext.CompanyId is Guid company && item.SourceKey.StartsWith($"calendar-todo:{company:N}:", StringComparison.Ordinal))
                 .Where(item => item.Category is not ("work-hours" or "work-hours-correction") || TenantContext.CompanyId is not Guid hoursCompany || item.SourceKey.StartsWith($"{item.Category}:{hoursCompany:N}:", StringComparison.Ordinal))
                 .Where(item => item.Category != "stocked-material" || TenantContext.CompanyId is not Guid stockedCompany || item.SourceKey.StartsWith($"stocked-low:{stockedCompany:N}:", StringComparison.Ordinal))
-                .Where(item => !item.IsPlanOverdueReminder)
+                .Where(item => !item.IsPlanOverdueReminder && !item.Category.StartsWith(ProjectActivityFeed.Prefix, StringComparison.Ordinal))
                 .OrderByDescending(item => item.CreatedAt)
                 .ThenByDescending(item => item.Id)
                 .GroupBy(item => item.Category == "project-plan" && item.SourceKey.StartsWith("project-plan:", StringComparison.Ordinal) ? $"project-plan:{item.SourceKey.Split(':').ElementAtOrDefault(1)}" : item.Id.ToString())
@@ -118,7 +140,8 @@ public sealed partial class InMemoryPdmRepository
         lock (gate)
         {
             if (userNotifications.TryGetValue(notificationId, out var notification)
-                && string.Equals(notification.Recipient, recipient, StringComparison.OrdinalIgnoreCase))
+                && string.Equals(notification.Recipient, recipient, StringComparison.OrdinalIgnoreCase)
+                && (notification.Category != "ProjectStaffingPending" || notification.ResolvedAt is not null))
                 userNotifications[notificationId] = notification with { ReadAt = readAt };
         }
         return Task.CompletedTask;
@@ -128,9 +151,9 @@ public sealed partial class InMemoryPdmRepository
     {
         lock (gate)
         {
-            var systemOnly = NotificationRecipientPolicy.SystemOnly(users.Values.FirstOrDefault(user => user.Username.Equals(recipient, StringComparison.OrdinalIgnoreCase)));
+            var systemOnly = !HasUserPermission(recipient, UserRole.ProductionViewer, AuthorizationActions.BusinessNotifications);
             foreach (var notification in userNotifications.Values
-                .Where(item => item.ReadAt is null && string.Equals(item.Recipient, recipient, StringComparison.OrdinalIgnoreCase))
+                .Where(item => item.ReadAt is null && (item.Category != "ProjectStaffingPending" || item.ResolvedAt is not null) && string.Equals(item.Recipient, recipient, StringComparison.OrdinalIgnoreCase))
                 .Where(item => !systemOnly || NotificationRecipientPolicy.IsSystemMessage(item))
                 .ToArray())
                 userNotifications[notification.Id] = notification with { ReadAt = readAt };

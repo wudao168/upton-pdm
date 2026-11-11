@@ -19,8 +19,9 @@ public static class ReleaseManagementNotifications
         var names = root.CollaborativeProjectManagers.Concat(project.CollaborativeProjectManagers)
             .Append(root.PrimaryProjectManager).Append(project.PrimaryProjectManager)
             .Where(name => !string.IsNullOrWhiteSpace(name)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var notificationAuthorization = await repository.GetAuthorizationSettingsAsync(ct);
         return directory.Users.Where(user => names.Contains(user.Username) && user.IsActive
-            && !NotificationRecipientPolicy.SystemOnly(user.EffectiveRoleCodes)
+            && NotificationRecipientPolicy.CanReceive(notificationAuthorization, user)
             && (project.OrganizationId is null || user.CompanyId == project.OrganizationId || user.CompanyId is null
                 && directory.Memberships.Any(member => member.Username.Equals(user.Username, StringComparison.OrdinalIgnoreCase)
                     && directory.Units.Any(unit => unit.Id == member.UnitId && unit.OrganizationId == project.OrganizationId && unit.IsActive))))
@@ -45,6 +46,8 @@ public static class ReleaseManagementNotifications
         var directory = await repository.GetOrganizationDirectoryAsync(ct);
         var recipients = await ReadersAsync(repository, project, directory, await ManagersAsync(repository, project, directory, ct), ct);
         var changed = package.Scope is ReleaseScope.StandardSupplement or ReleaseScope.NonStandardSupplement or ReleaseScope.ElectricalSupplement;
+        await ProjectActivityFeed.EmitAsync(repository, project, "Release", changed ? "BOM增补/减少已发布" : "BOM已发布",
+            $"{package.Number} · 请查看本次发布明细", package.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault()?.Assignee ?? "", package.Id.ToString("N"), now, ct, package.Id);
         var early = package.Scope is ReleaseScope.StandardLongLead or ReleaseScope.NonStandardLongLead or ReleaseScope.ElectricalLongLead;
         await repository.CreateUserNotificationsAsync(recipients.Select(name => new UserNotification(Guid.NewGuid(), name, "ReleaseDepartment",
             changed ? "BOM增补/变更已发布" : early ? "BOM已先行发布" : "BOM已正式发布",

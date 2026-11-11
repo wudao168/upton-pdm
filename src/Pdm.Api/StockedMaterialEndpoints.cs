@@ -19,7 +19,7 @@ public static class StockedMaterialEndpoints
                 item.Categories, item.Snapshot, item.ManagementOnly, coverImage = item.CoverImage is null ? null : MaterialEndpointExtensions.MapAttachment(item.CoverImage) }),
                 result.Total, result.LowStockCount, result.FormalCount, result.DraftCount, result.ManagementOnlyCount,
                 result.Page, result.PageSize, result.Scope, result.LastSuccessAt, result.LastError,
-                canSynchronize = TenantContext.Current?.HasRole("StandardizationAssistant") == true,
+                canSynchronize = TenantContext.Current?.HasPermission(AuthorizationActions.StockSynchronize) == true,
                 canManageSettings = TenantContext.Current?.HasPermission(PermissionCodes.StorageSettingsManage) == true });
         });
         api.MapPost("/memberships", async (AddStandardLibraryMaterialsRequest request, HttpContext context, StockedMaterialService service, CancellationToken ct) =>
@@ -56,9 +56,8 @@ public static class StockedMaterialEndpoints
         api.MapPost("/refresh", async (HttpContext context, StockedMaterialService service, IPdmRepository repository, ILogger<StockedMaterialService> logger, CancellationToken ct) =>
         {
             var (actor, role) = User(context);
-            if (TenantContext.Current?.HasRole("StandardizationAssistant") != true
-                && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.StorageSettingsManage, ct))
-                throw new UnauthorizedAccessException("请由标准化助理执行立即同步，或由系统设置管理员在设置页操作。");
+            if (!await repository.HasUserPermissionAsync(actor, role, AuthorizationActions.StockSynchronize, ct))
+                throw new UnauthorizedAccessException("当前账号没有立即同步常备物料的权限，或由系统设置管理员在设置页操作。");
             var scope = await service.RequireScopeAsync(actor, role, false, ct);
             try { await service.SynchronizeAsync(scope, actor, ct); return Results.Ok(await service.ListAsync(scope, null, null, null, 1, 50, ct)); }
             catch (Exception error) when (error is not (PdmRuleException or PdmConflictException or UnauthorizedAccessException or OperationCanceledException))

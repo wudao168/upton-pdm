@@ -50,6 +50,7 @@ public sealed class ReleasePreviewService(
             }
             return archived.Count;
         }
+        if (package.PreviewState == ReleasePreviewState.Failed && package.PreviewError?.StartsWith(ItemErrorPrefix, StringComparison.Ordinal) == true) return archived.Count;
         // 巡检不能把已耗尽次数的任务改回 Pending，造成“自动重试”假象。
         if (package.PreviewAttempts >= MaxAttempts)
         {
@@ -142,9 +143,26 @@ public sealed class ReleasePreviewService(
                 .Where(source => !completed.Contains(source.DocumentId)).ToArray();
             var stagingDirectory = StorageLocationPolicy.ResolveUnder(vaultRoot, Path.Combine(".release-staging", package.Number));
             Directory.CreateDirectory(stagingDirectory);
-            var (previews, failures) = sources.Length == 0
+            // A mixed response can contain both permanent drawing errors and unconfirmed host work.
+            // Resume only the latter after a standby host becomes free.
+            var held = new Dictionary<Guid,string>();
+            if (package.PreviewState == ReleasePreviewState.WaitingForServer && package.PreviewError?.StartsWith(ItemErrorPrefix, StringComparison.Ordinal) == true)
+                foreach (var source in sources)
+                {
+                    var reason = ItemError(package.PreviewError, source.FileName);
+                    if (package.PreviewError.Contains("\n" + source.FileName + "：", StringComparison.Ordinal)
+                        && !reason.StartsWith(PartialPreviewConversionException.WaitingForHost, StringComparison.Ordinal))
+                        held[source.DocumentId] = reason;
+                }
+            var ready = sources.Where(s => !held.ContainsKey(s.DocumentId)).ToArray();
+            var (previews, failures) = ready.Length == 0
                 ? (new Dictionary<Guid, DocumentPreviewArtifact>(), (PartialPreviewConversionException?)null)
-                : await ConvertPreviewsAsync(package, project, sources, stagingDirectory, cancellationToken);
+                : await ConvertPreviewsAsync(package, project, ready, stagingDirectory, cancellationToken);
+            if (held.Count > 0)
+            {
+                foreach (var pair in failures?.Errors ?? new Dictionary<Guid,string>()) held[pair.Key] = pair.Value;
+                failures = new PartialPreviewConversionException(previews, held, string.Join("\n", sources.Where(s => held.ContainsKey(s.DocumentId)).Select(s => $"{s.FileName}：{held[s.DocumentId]}")));
+            }
             if (previews.Count > 0) await repository.AttachReleasePreviewArtifactsAsync(package.Id, previews, cancellationToken);
             package = await repository.FindReleasePackageAsync(package.Id, cancellationToken) ?? package;
             await CopyPreviewsIntoPublishedPathAsync(package, vaultRoot, await ReleasedVersionsAsync(package.Id, cancellationToken), cancellationToken);
@@ -172,19 +190,27 @@ public sealed class ReleasePreviewService(
             if (package.PreviewState != ReleasePreviewState.WaitingForServer || package.PreviewError != exception.Message)
                 await RecordFailureAsync(package.Id, exception, "release-package.preview-waiting");
             await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.WaitingForServer,
-                exception.Message, package.PreviewAttempts, timeProvider.GetUtcNow(), CancellationToken.None);
+                package.PreviewError?.Contains(PartialPreviewConversionException.WaitingForHost, StringComparison.Ordinal) == true ? package.PreviewError : exception.Message,
+                package.PreviewAttempts, timeProvider.GetUtcNow(), CancellationToken.None);
             await NotifyIncompleteAsync(package.Id, cancellationToken);
             return false;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            var exhausted = attempts >= MaxAttempts;
+            if (exception is PartialPreviewConversionException mixed && mixed.Errors.Values.Any(reason => reason.StartsWith(PartialPreviewConversionException.WaitingForHost, StringComparison.Ordinal)))
+            {
+                await repository.MarkReleasePreviewStateAsync(package.Id, ReleasePreviewState.WaitingForServer, mixed.Message, package.PreviewAttempts, timeProvider.GetUtcNow(), CancellationToken.None);
+                return false;
+            }
+            var needsRepair = exception is PartialPreviewConversionException perFile && perFile.Errors.Values.All(reason =>
+                !reason.Contains("转图服务器") && !reason.Contains("启动") && !reason.Contains("心跳中断"));
+            var exhausted = needsRepair || attempts >= MaxAttempts;
             var error = await RecordFailureAsync(package.Id, exception);
             await repository.MarkReleasePreviewStateAsync(package.Id,
                 exhausted ? ReleasePreviewState.Failed : ReleasePreviewState.Pending, error, attempts, timeProvider.GetUtcNow(), CancellationToken.None);
             if (!exhausted) await NotifyIncompleteAsync(package.Id, cancellationToken);
             if (exhausted)
-                await NotifyAsync(package, project, "图纸转换多次失败",
+                await NotifyAsync(package, project, needsRepair ? "图纸转换需要处理" : "图纸转换多次失败",
                     $"已重试{attempts}次，生产资料仍未全部投放：{error}；可在发布面板手动重试转图", "failed", cancellationToken);
             return false;
         }
@@ -241,6 +267,13 @@ public sealed class ReleasePreviewService(
             var version = (await repository.ListDocumentVersionsAsync(source.DocumentId, cancellationToken))
                 .Where(item => item.ReleasePackageId == packageId || source.AlreadyReleased && item.Id == source.SourceVersionId)
                 .OrderByDescending(item => item.ReleasePackageId == packageId).ThenByDescending(item => item.CreatedAt).FirstOrDefault();
+            var binding = package.VersionBindings?.FirstOrDefault(item => item.DocumentId == source.DocumentId);
+            if (binding is { Publish: false } && source.Kind is DocumentKind.Part or DocumentKind.Assembly)
+            {
+                var frozen = await repository.FindDocumentVersionAsync(binding.DocumentId, binding.VersionId, cancellationToken);
+                if (frozen?.Sha256 == binding.Sha256)
+                    version = frozen with { Preview = package.ModelDeliveryArtifacts.GetValueOrDefault(source.DocumentId) };
+            }
             if (version is not null) result.Add(PdfTitleBlockSnapshotBuilder.DeliveryVersion(package, version));
         }
         return result;
@@ -248,7 +281,7 @@ public sealed class ReleasePreviewService(
 
     private async Task<bool> PreviewReadableAsync(string vaultRoot, DocumentVersion? version, CancellationToken cancellationToken)
     {
-        if (version?.Preview is not { } preview || version.Status != DocumentVersionStatus.Released) return false;
+        if (version?.Preview is not { } preview) return false;
         var document = await repository.FindDocumentAsync(version.DocumentId, cancellationToken);
         if (document is null || preview.Format != ExpectedFormat(document.Kind)) return false;
         var legacy = false;
@@ -289,11 +322,11 @@ public sealed class ReleasePreviewService(
     /// 批量重试：多个图档在同一个转换请求里一次性转出（引用树只下发、只解析一次），
     /// 比逐条重试快一个数量级；同样保留同包其它已转好的预览。
     /// </summary>
-    public async Task<IReadOnlyList<ReleasePreviewItem>> RetryItemsAsync(Guid releasePackageId, IReadOnlyList<Guid> documentIds, string actor, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ReleasePreviewItem>> RetryItemsAsync(Guid releasePackageId, IReadOnlyList<Guid> documentIds, string actor, CancellationToken cancellationToken, bool stampOnly = false)
     {
         var gate = PackageLocks.GetOrAdd(releasePackageId, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken);
-        try { return await RetryItemsCoreAsync(releasePackageId, documentIds, actor, cancellationToken); }
+        try { return await RetryItemsCoreAsync(releasePackageId, documentIds, actor, cancellationToken, stampOnly); }
         catch (OperationCanceledException)
         {
             var package = await repository.FindReleasePackageAsync(releasePackageId, CancellationToken.None);
@@ -305,7 +338,7 @@ public sealed class ReleasePreviewService(
         finally { gate.Release(); }
     }
 
-    private async Task<IReadOnlyList<ReleasePreviewItem>> RetryItemsCoreAsync(Guid releasePackageId, IReadOnlyList<Guid> documentIds, string actor, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<ReleasePreviewItem>> RetryItemsCoreAsync(Guid releasePackageId, IReadOnlyList<Guid> documentIds, string actor, CancellationToken cancellationToken, bool stampOnly)
     {
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
@@ -331,11 +364,11 @@ public sealed class ReleasePreviewService(
             foreach (var target in targets)
                 if (!versions.TryGetValue(target.DocumentId, out var version) || !await PreviewReadableAsync(vaultRoot, version, cancellationToken)
                     || version.Preview?.Format == DocumentPreviewFormat.Pdf && pdfReleaseStamp is not null
-                        && !pdfReleaseStamp.IsCurrent(StorageLocationPolicy.ResolveUnder(vaultRoot, version.Preview.StorageRelativePath), package, target.SourceVersionId))
+                        && !pdfReleaseStamp.IsCurrent(StorageLocationPolicy.ResolveUnder(vaultRoot, version.Preview.StorageRelativePath), package, package.VersionBindings?.FirstOrDefault(binding => binding.DocumentId == target.DocumentId)?.VersionId ?? version.SourceVersionId ?? target.SourceVersionId))
                     missingTargets.Add(target);
             (previews, failures) = missingTargets.Count == 0
                 ? (new Dictionary<Guid, DocumentPreviewArtifact>(), (PartialPreviewConversionException?)null)
-                : await ConvertPreviewsAsync(package, project, missingTargets, stagingDirectory, cancellationToken);
+                : await ConvertPreviewsAsync(package, project, missingTargets, stagingDirectory, cancellationToken, stampOnly);
             var releasedVersions = await repository.AttachReleasePreviewArtifactsAsync(package.Id, previews, cancellationToken);
             if (missingTargets.Count > 0 && releasedVersions.Count == 0 && failures is null)
                 throw new PdmRuleException("该图档还没有正式版本，无法挂接预览；请重新发布后再转图。");
@@ -347,7 +380,8 @@ public sealed class ReleasePreviewService(
                 ?? previousItems.FirstOrDefault(previous => previous.DocumentId == item.DocumentId)?.Error
                 ?? "尚未生成预览，请单独重试。").ReplaceLineEndings(" ")}");
             await repository.MarkReleasePreviewStateAsync(package.Id,
-                pending.Length == 0 ? ReleasePreviewState.Succeeded : ReleasePreviewState.Failed,
+                pending.Length == 0 ? ReleasePreviewState.Succeeded : failures?.Errors.Values.Any(reason => reason.StartsWith(PartialPreviewConversionException.WaitingForHost, StringComparison.Ordinal)) == true
+                    ? ReleasePreviewState.WaitingForServer : ReleasePreviewState.Failed,
                 pending.Length == 0 ? null : ItemErrorPrefix + string.Join("\n", errors),
                 pending.Length == 0 ? 0 : package.PreviewAttempts,
                 timeProvider.GetUtcNow(), cancellationToken);
@@ -406,7 +440,7 @@ public sealed class ReleasePreviewService(
     }
 
     private async Task<(IReadOnlyDictionary<Guid, DocumentPreviewArtifact> Artifacts, PartialPreviewConversionException? Failure)> ConvertPreviewsAsync(
-        ReleasePackage package, Project project, IReadOnlyList<ReleasePreviewSource> sources, string stagingDirectory, CancellationToken cancellationToken)
+        ReleasePackage package, Project project, IReadOnlyList<ReleasePreviewSource> sources, string stagingDirectory, CancellationToken cancellationToken, bool stampOnly = false)
     {
         var artifacts = new Dictionary<Guid, DocumentPreviewArtifact>();
         var errors = new Dictionary<Guid, string>();
@@ -422,12 +456,21 @@ public sealed class ReleasePreviewService(
         try
         {
             if (pending.Length > 0)
-                foreach (var pair in await previewConverter.GenerateAsync(package, project, pending, stagingDirectory, cancellationToken, keepExistingPreviews: true)) artifacts[pair.Key] = pair.Value;
+            {
+                var generated = stampOnly
+                    ? await previewConverter.StampCachedAsync(package, project, pending, stagingDirectory, cancellationToken)
+                    : await previewConverter.GenerateAsync(package, project, pending, stagingDirectory, cancellationToken, keepExistingPreviews: true);
+                foreach (var pair in generated) artifacts[pair.Key] = pair.Value;
+            }
         }
         catch (PartialPreviewConversionException exception)
         {
             foreach (var pair in exception.Artifacts) artifacts[pair.Key] = pair.Value;
             foreach (var pair in exception.Errors) errors[pair.Key] = pair.Value;
+        }
+        catch (PdmRuleException exception) when (stampOnly)
+        {
+            foreach (var source in pending) errors[source.DocumentId] = "PDF发布标识待处理：" + exception.Message;
         }
         return (artifacts, errors.Count == 0 ? null : new PartialPreviewConversionException(artifacts, errors,
             string.Join("\n", sources.Where(source => errors.ContainsKey(source.DocumentId)).Select(source => $"{source.FileName}：{errors[source.DocumentId]}"))));

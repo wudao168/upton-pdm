@@ -65,7 +65,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .u9-sync-preview__change.is-add { color: var(--el-color-success); }
 .u9-sync-preview__change.is-delete { color: var(--el-color-danger); }
 .u9-sync-preview__reconciliation { margin-top: 16px; }
-summary { cursor: pointer; padding: 8px 0; color: var(--el-color-primary); }
+summary { cursor: pointer; padding: 8px 0; color:var(--pdm-text); }
 .u9-sync-preview__notes { margin: 16px 0 0; padding-left: 20px; font-size: 12px; line-height: 1.4; }
 </style>
 

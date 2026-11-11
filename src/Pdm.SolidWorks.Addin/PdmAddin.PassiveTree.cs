@@ -33,7 +33,7 @@ public sealed partial class PdmAddin
         catch (Exception error)
         {
             LogDiagnostic("展开PLM结构索引", error);
-            taskPaneControl.SetTreeLoadingStatus("该结构暂未读取完整，请重新展开或刷新；本地修改已保留。");
+            taskPaneControl.SetTreeNotice("该结构暂未读取完整，请重新展开或刷新；本地修改已保留。");
         }
         finally { ReleasePassiveMetadataOwner(token); }
     }
@@ -76,7 +76,7 @@ public sealed partial class PdmAddin
         taskPaneControl.SetActiveDrawingSource(currentTree.Kind == CadDocumentKind.Drawing
             ? currentTree.ReferencedModels.Concat(currentTree.Children).FirstOrDefault(node => node.Kind == CadDocumentKind.Part || node.Kind == CadDocumentKind.Assembly) : null);
         CacheActiveTree(currentTreeCacheKey, currentTree, currentProjectId);
-        taskPaneControl.SetTreeLoadingStatus(currentTree.LocalStructureDeferred
+        taskPaneControl.SetTreeNotice(currentTree.LocalStructureDeferred
             ? "结构按需读取；执行PLM操作时核对实际图档。" : string.Empty);
         if (currentProjectId.HasValue && apiClient?.IsAuthenticated == true)
             _ = RefreshPassiveMetadataAsync(currentTree, currentProjectId.Value, BeginMetadataRefresh());
@@ -109,7 +109,7 @@ public sealed partial class PdmAddin
         catch (Exception error)
         {
             LogDiagnostic("读取设计树轻量状态", error);
-            if (ReferenceEquals(tree, currentTree)) taskPaneControl.SetTreeLoadingStatus("图档状态暂未更新，请刷新重试；本地修改已保留。");
+            if (ReferenceEquals(tree, currentTree)) taskPaneControl.SetTreeNotice("图档状态暂未更新，请刷新重试；本地修改已保留。");
         }
         finally { ReleasePassiveMetadataOwner(token); }
     }
@@ -181,7 +181,7 @@ public sealed partial class PdmAddin
             tree.DisplayStructurePending = false;
             ReconcilePassiveDrawings(tree, documents, relations);
             taskPaneControl.SetTree(currentTree);
-            taskPaneControl.SetTreeLoadingStatus("已显示PLM结构索引；存档时核对本地实际结构。");
+            taskPaneControl.SetTreeNotice("已显示PLM结构索引；存档时核对本地实际结构。");
         }
         finally { passiveIndexLoads.Remove(tree); }
     }
@@ -236,6 +236,8 @@ public sealed partial class PdmAddin
 
     private CadTreeNodeEventArgs EnsureNativeTreeForOperation(CadTreeNodeEventArgs selection)
     {
+        if (nativeFileOpenInProgress != 0 && !TryCompleteReturnedFileOpen())
+            throw new InvalidOperationException("SolidWorks 仍在打开图档或执行命令，请完成或取消当前操作后重试。");
         if (currentTree != null && !currentTree.LocalStructureDeferred) return selection;
         Interlocked.Increment(ref nativeTreeForOperation);
         try { RefreshTree(true); }

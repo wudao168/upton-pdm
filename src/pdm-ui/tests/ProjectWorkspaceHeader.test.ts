@@ -1,7 +1,7 @@
 import { computed } from 'vue'
 import { projectCenterAccessKey, projectCenterSchema } from '../src/projectCenterAccess'
 import { flushPromises, mount } from '@vue/test-utils'
-import { ElMessageBox, ElSelect } from 'element-plus'
+import { ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ProjectWorkspaceHeader from '../src/components/ProjectWorkspaceHeader.vue'
 import type { ProjectSummary, ReleasePackageSummary } from '../src/types'
@@ -82,8 +82,35 @@ const otherRootProject: ProjectSummary = {
   designLead: 'lead-two',
 }
 
+const browseCustomers = [
+  { id: 'customer-2', code: 'C002', name: otherRootProject.customerName!, isActive: true },
+  { id: 'customer-3', code: 'C003', name: '暂无项目的客户', isActive: true },
+]
+const browseDivision = { id: 'division-2', organizationId: 'company', code: 'D002', name: otherRootProject.executionUnitName!, kind: 'BusinessDivision' as const, canManufacture: true, isActive: true, sortOrder: 0 }
+const browseUnits = [
+  browseDivision,
+  { ...browseDivision, id: 'division-3', code: 'D003', name: '暂无项目的事业部', canManufacture: false },
+  { ...browseDivision, id: 'other-company-division', organizationId: 'other-company', name: '其他公司的事业部' },
+  { ...browseDivision, id: 'team', name: '项目组', kind: 'Team' as const },
+]
+
 describe('ProjectWorkspaceHeader', () => {
   beforeEach(() => vi.restoreAllMocks())
+
+  it('转图排队不显示异常点，失败持续显示橙色标识且恢复后移除', async () => {
+    const release = { scope:'NonStandardSupplement', locksDocuments:true, state:'已发布', previewState:'Pending' } as ReleasePackageSummary
+    const wrapper = mount(ProjectWorkspaceHeader, { props:{ project:rootProject, projects:[rootProject], activeTab:'overview', releasePackages:[release] } })
+    try {
+      const tab = wrapper.findAll('.pdm-project-tabs button').find(button => button.text() === '发布')!
+      expect(tab.attributes('data-release-attention')).toBeUndefined()
+      await wrapper.setProps({ releasePackages:[{ ...release, previewState:'Failed' }] })
+      expect(tab.attributes('data-release-attention')).toBe('error')
+      expect(tab.findAll('.pdm-release-attention-border')).toHaveLength(1)
+      expect(tab.find('.pdm-tab-update-dot').exists()).toBe(false)
+      await wrapper.setProps({ releasePackages:[{ ...release, previewState:'Succeeded' }] })
+      expect(tab.attributes('data-release-attention')).toBeUndefined()
+    } finally { wrapper.unmount() }
+  })
 
   it('项目号和发布页签持续提示待供应链接收的非标包，接收完成后同时停止', async () => {
     vi.useFakeTimers()
@@ -110,7 +137,7 @@ describe('ProjectWorkspaceHeader', () => {
     const wrapper = mount(ProjectWorkspaceHeader, { props: { project: rootProject, projects: [rootProject], activeTab: 'overview', releasePackages: [release] } })
     const tab = wrapper.findAll('.pdm-project-tabs button').find(button => button.text() === '发布')!
     expect(tab.attributes('data-release-attention')).toBe('error')
-    expect(tab.attributes('title')).toContain('未完成事项')
+    expect(tab.attributes('title')).toContain('发布／转图失败 1 项')
     await tab.trigger('click')
     await wrapper.setProps({ activeTab: 'release' })
     expect(tab.attributes('data-release-attention')).toBe('error')
@@ -122,7 +149,7 @@ describe('ProjectWorkspaceHeader', () => {
     wrapper.unmount()
   })
 
-  it('未选中的异常项目仍有红色边框，新发布绿色提示24小时且异常优先', async () => {
+  it('仅汇总的转图未完成标识不算失败，确认失败后列表显示异常，新发布提示保留24小时', async () => {
     const now = Date.now()
     vi.useFakeTimers(); vi.setSystemTime(now)
     const child = { ...childProject, hasReleaseAttention: true, latestPurchasedBomPublishedAt: new Date(now - 1000).toISOString() }
@@ -130,13 +157,13 @@ describe('ProjectWorkspaceHeader', () => {
     const wrapper = mount(ProjectWorkspaceHeader, { props: { project: root, projects: [root, child], activeTab: 'overview' } })
     try {
       const childButton = wrapper.get('[aria-label="选择项目号 P700002-1"]')
-      expect(childButton.attributes('data-release-attention')).toBe('error')
+      expect(childButton.attributes('data-release-attention')).toBe('new')
       const tab = wrapper.findAll('.pdm-project-tabs button').find(button => button.text() === '发布')!
       expect(tab.attributes('data-release-attention')).toBe('new')
       expect(tab.find('.pdm-release-attention-border.is-new').exists()).toBe(true)
       await vi.advanceTimersByTimeAsync(60000)
       expect(tab.attributes('data-release-attention')).toBeUndefined()
-      expect(childButton.attributes('data-release-attention')).toBe('error')
+      expect(childButton.attributes('data-release-attention')).toBe('new')
       await wrapper.setProps({ project: child, releasePreviewIssues: { [child.id]: true } })
       expect(tab.attributes('data-release-attention')).toBe('error')
       await wrapper.setProps({ project: root })
@@ -161,7 +188,7 @@ describe('ProjectWorkspaceHeader', () => {
     expect(wrapper.find('.pdm-project-context').exists()).toBe(false)
     expect(sidebar.text()).not.toContain('项目基本信息')
     expect(sidebar.get('.pdm-project-sidebar__summary').find('small').text()).toBe('子项目')
-    expect(sidebar.get('.pdm-project-sidebar__summary').findAll('dt').map(item => item.text())).toEqual(['状态', '型号', '序列号', '事业部', '项目经理', '主设', '工程师'])
+    expect(sidebar.get('.pdm-project-sidebar__summary').findAll('dt').map(item => item.text())).toEqual(['状态', '型号', '序列号', '事业部', '项目经理', '主设计', '设计人员'])
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('P700002-1 · 机架')
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('AK-1-C00003-001-01')
     expect(sidebar.get('.pdm-project-sidebar__summary').text()).toContain('70000002')
@@ -177,7 +204,7 @@ describe('ProjectWorkspaceHeader', () => {
     expect(wrapper.find('.pdm-project-selected-summary').exists()).toBe(false)
     const projectTabs = wrapper.findAll('.pdm-project-tabs button')
     expect(projectTabs).toHaveLength(13)
-    expect(projectTabs.map(button => button.text())).toEqual(['概览', '信息', '文件', '计划', 'OPL', '预算', '质量', '图档', 'BOM', '发布', '备料', '记录', '设置'])
+    expect(projectTabs.map(button => button.text())).toEqual(['概览', '信息', '文件', '计划', '预算', '质量', 'OPL', '图档', 'BOM', '发布', '备料', '记录', '设置'])
     expect(projectTabs.at(-1)?.attributes('aria-label')).toBe('项目设置')
     expect(wrapper.text()).not.toContain('图纸审核')
     expect(sidebar.get('[aria-label="选择项目号 P700002"] .pdm-project-family__state').text()).toBe('可编辑')
@@ -215,7 +242,7 @@ describe('ProjectWorkspaceHeader', () => {
     const summary = wrapper.get('.pdm-project-sidebar__summary')
     expect(summary.find('small').text()).toBe('主项目')
     expect(summary.text()).toContain('P700002 · XXX设备')
-    expect(summary.findAll('dt').map(item => item.text())).toEqual(['状态', '型号', '序列号', '事业部', '项目经理', '主设', '工程师'])
+    expect(summary.findAll('dt').map(item => item.text())).toEqual(['状态', '型号', '序列号', '事业部', '项目经理', '主设计', '设计人员'])
     expect(summary.text()).toContain('AK-1-C00003-001-00')
     expect(summary.text()).toContain('70000001')
     expect(summary.text()).toContain('自动化事业部')
@@ -342,21 +369,100 @@ describe('ProjectWorkspaceHeader', () => {
   })
 
   it.each([
-    ['客户', '客户筛选', '深圳测试客户有限公司'],
-    ['事业部', '事业部筛选', '检测事业部'],
+    ['客户', '客户筛选', 'C002'],
+    ['事业部', '事业部筛选', 'division-2'],
     ['项目经理', '人员筛选', 'manager-two'],
-    ['主设', '人员筛选', 'lead-two'],
+    ['主设计', '人员筛选', 'lead-two'],
   ])('浏览项目可按%s下拉筛选', async (_, filterLabel, filterValue) => {
     const wrapper = mount(ProjectWorkspaceHeader, {
-      props: { project: childProject, projects: [rootProject, childProject, drawingChild, otherRootProject], activeTab: 'overview' },
+      props: { project: childProject, projects: [rootProject, childProject, drawingChild, otherRootProject], activeTab: 'overview', customers: browseCustomers, organizationUnits: browseUnits, companyId: 'company' },
     })
 
     await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
-    if (filterLabel === '人员筛选') { wrapper.findComponent(ElSelect).vm.$emit('update:modelValue', filterValue); await flushPromises() }
+    if (filterLabel === '人员筛选') { wrapper.findAllComponents(ElSelect).find(item => item.props('ariaLabel') === filterLabel)!.vm.$emit('update:modelValue', filterValue); await flushPromises() }
     else await wrapper.get(`select[aria-label="${filterLabel}"]`).setValue(filterValue)
 
     expect(wrapper.findAll('[role="option"]')).toHaveLength(1)
     expect(wrapper.get('button[aria-label="选择浏览项目 P700003"]').text()).toContain('检测设备')
+    if (filterLabel === '客户筛选' || filterLabel === '事业部筛选') {
+      const select = wrapper.get(`select[aria-label="${filterLabel}"]`)
+      const [option, label] = filterLabel === '客户筛选' ? ['C003', '暂无项目的客户'] : ['division-3', '暂无项目的事业部']
+      expect(select.get(`option[value="${option}"]`).text()).toBe(label)
+      expect(select.text()).not.toContain('其他公司的事业部')
+      await select.setValue(option)
+      expect(wrapper.get('.pdm-empty-info').text()).toBe('没有符合搜索条件的项目。')
+    }
+  })
+
+  it('默认只推荐及浏览 P 项目，多选前缀与客户组合筛选，清空显示全部且再次打开恢复 P', async () => {
+    const repair = { ...otherRootProject, id: 'repair', code: 'R700028', projectTypeCode: 'R', customerCode: 'C002' }
+    const qa = { ...rootProject, id: 'qa', code: 'QA-001' }
+    const lowercase = { ...otherRootProject, id: 'lowercase', code: 'p700030' }
+    const projectTypes = [{ code: 'P', name: '标准项目' }, { code: 'R', name: '研发项目' }, { code: 'S', name: '售后项目' }, { code: 'W', name: '外发项目' }]
+    const wrapper = mount(ProjectWorkspaceHeader, { props: { project: rootProject, projects: [rootProject, otherRootProject, repair, qa, lowercase, childProject], activeTab: 'overview', projectTypes, customers: browseCustomers } })
+    try {
+      const suggest = wrapper.getComponent({ name: 'ElAutocomplete' }).props('fetchSuggestions') as (query: string, callback: (items: Array<{ id: string }>) => void) => void
+      const candidates = vi.fn()
+      suggest('', candidates)
+      expect(candidates.mock.calls[0]?.[0].map((item: { id: string }) => item.id)).toEqual(['lowercase', otherRootProject.id, rootProject.id])
+      suggest('R700028', candidates)
+      expect(candidates.mock.calls[1]?.[0]).toEqual([])
+      await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+      const prefix = wrapper.findAllComponents(ElSelect).find(item => item.props('multiple'))!
+      expect(prefix.props('modelValue')).toEqual(['P'])
+      expect(prefix.findAllComponents(ElOption).map(option => option.props('label'))).toEqual(['标准项目 P', '研发项目 R', '售后项目 S', '外发项目 W'])
+      const codes = () => wrapper.findAll('.pdm-project-browser-list > button').map(item => item.attributes('aria-label'))
+      expect(codes()).toEqual(['选择浏览项目 p700030', '选择浏览项目 P700003', '选择浏览项目 P700002'])
+      prefix.vm.$emit('update:modelValue', ['P', 'R'])
+      await flushPromises()
+      expect(codes()).toContain('选择浏览项目 R700028')
+      expect(codes()).not.toContain('选择浏览项目 QA-001')
+      await wrapper.get('select[aria-label="客户筛选"]').setValue('C002')
+      expect(codes()).not.toContain('选择浏览项目 P700002')
+      await wrapper.get('select[aria-label="客户筛选"]').setValue('')
+      prefix.vm.$emit('update:modelValue', [])
+      await flushPromises()
+      expect(codes()).toHaveLength(5)
+      await wrapper.get('button[aria-label="关闭项目浏览"]').trigger('click')
+      await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+      expect(wrapper.findAllComponents(ElSelect).find(item => item.props('multiple'))!.props('modelValue')).toEqual(['P'])
+    } finally { wrapper.unmount() }
+  })
+
+  it('点击快捷搜索保留失焦前的关键词，跨前缀查找并切换非 P 项目', async () => {
+    const repair = { ...otherRootProject, id: 'repair', code: 'R700028' }
+    const wrapper = mount(ProjectWorkspaceHeader, { props: { project: rootProject, projects: [rootProject, repair], activeTab: 'overview' } })
+    try {
+      const input = wrapper.get('input[aria-label="快速搜索项目"]')
+      await input.setValue(' r700028 ')
+      await input.trigger('blur')
+      await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+      expect(wrapper.get('input[aria-label="搜索项目"]').element).toHaveProperty('value', 'r700028')
+      expect(wrapper.findAllComponents(ElSelect).find(item => item.props('multiple'))!.props('modelValue')).toEqual([])
+      expect(wrapper.findAll('.pdm-project-browser-list > button')).toHaveLength(1)
+      await wrapper.get('button[aria-label="选择浏览项目 R700028"]').trigger('click')
+      expect(wrapper.emitted('switch')).toEqual([['repair']])
+      await wrapper.setProps({ project: repair })
+      expect(wrapper.get('input[aria-label="快速搜索项目"]').attributes('placeholder')).toBe('R700028 · 检测设备')
+      expect(wrapper.get('.pdm-project-family__list').text()).toContain('R700028')
+    } finally { wrapper.unmount() }
+  })
+
+  it('改变前缀后返回第一页，无匹配时显示空状态', async () => {
+    const projects = Array.from({ length: 25 }, (_, index) => ({ ...otherRootProject, id: `paged-${index}`, code: `P${700100 + index}` }))
+    const repair = { ...otherRootProject, id: 'repair', code: 'R700028' }
+    const wrapper = mount(ProjectWorkspaceHeader, { props: { project: rootProject, projects: [rootProject, repair, ...projects], activeTab: 'overview' } })
+    try {
+      await wrapper.get('button[aria-label="浏览项目"]').trigger('click')
+      await wrapper.get('button[aria-label="下一页"]').trigger('click')
+      wrapper.findAllComponents(ElSelect).find(item => item.props('multiple'))!.vm.$emit('update:modelValue', ['R'])
+      await flushPromises()
+      expect(wrapper.get('[aria-label="项目列表分页"]').text()).toContain('第 1 / 1 页')
+      expect(wrapper.find('button[aria-label="选择浏览项目 R700028"]').exists()).toBe(true)
+      await wrapper.get('input[aria-label="搜索项目"]').setValue('不存在的项目')
+      expect(wrapper.findAll('.pdm-project-browser-list > button')).toHaveLength(0)
+      expect(wrapper.get('.pdm-empty-info').text()).toBe('没有符合搜索条件的项目。')
+    } finally { wrapper.unmount() }
   })
 
   it('取消项目浏览时保持当前项目，选取后直接切换', async () => {
@@ -436,7 +542,7 @@ describe('项目中心逐页授权', () => {
       props: { project: rootProject, projects: [rootProject], activeTab: 'overview' },
       global: { provide: { [projectCenterAccessKey as symbol]: permissions } },
     })
-    expect(wrapper.findAll('.pdm-project-tabs button').map(button => button.text())).toEqual(['概览', '计划', 'OPL', '质量', '图档', 'BOM', '发布', '备料'])
+    expect(wrapper.findAll('.pdm-project-tabs button').map(button => button.text())).toEqual(['概览', '计划', '质量', 'OPL', '图档', 'BOM', '发布', '备料'])
     wrapper.unmount()
   })
 })

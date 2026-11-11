@@ -15,6 +15,7 @@ internal sealed class AgentBatchContext
     public string Source { get; set; }
     public string RootFileName { get; set; }
     public string RequestId { get; set; }
+    public string DispatchId { get; set; }
 }
 
 internal sealed class AgentLog
@@ -145,7 +146,9 @@ internal sealed class AgentJournal
             }
             batch.Completed = batch.Files.Count;
             batch.Status = error != null || batch.SuccessCount == 0 ? "失败" : batch.FailedCount == 0 ? "成功" : "部分成功";
-            batch.Stage = error ?? (batch.Status == "成功" ? "处理完成，结果已返回服务器" : "处理结束，部分图档需要重试");
+            if (batch.Status != "成功" && string.IsNullOrWhiteSpace(batch.Error))
+                batch.Error = batch.Files.FirstOrDefault(file => file.Status == "失败")?.Message;
+            batch.Stage = batch.Error ?? "处理完成，结果已返回服务器";
             Log(batch.Status == "成功" ? "成功" : "提醒", batch.Stage, id);
         }
     }

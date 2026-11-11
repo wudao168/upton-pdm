@@ -69,7 +69,12 @@ public static class ProcurementTrackingAggregation
                     && linked.Where(po => !po.IsCanceled).Sum(po => po.PurchaseQuantity) < pr.RequestedQuantity))
                     pairs.Add((pr, null));
             }
-            if (pairs.Count == 0) pairs.Add((null, null));
+            var demand = material.Sum(row => row.Quantity) ?? 0;
+            var remainingPrDemand = Math.Min(demand, prs.Where(pr => !pr.IsCanceled).Sum(pr => Math.Max(0, pr.RequestedQuantity)));
+            var remainingOrderOnlyDemand = Math.Min(demand - remainingPrDemand, pairs.Where(pair => pair.Pr is null && pair.Po is { IsCanceled: false })
+                .Sum(pair => Math.Max(0, pair.Po!.PurchaseQuantity)));
+            var unrequested = demand - remainingPrDemand - remainingOrderOnlyDemand;
+            if (pairs.Count == 0 || unrequested > 0) pairs.Add((null, null));
             var countedPr = new HashSet<(string, string)>();
             var firstBatch = true;
             foreach (var batch in pairs.GroupBy(pair => new
@@ -81,17 +86,29 @@ public static class ProcurementTrackingAggregation
                 Arrival = Arrival(pair.Po),
                 Delivery = pair.Po?.DeliveryDate?.Date,
                 Organization = Code(pair.Pr?.OrganizationCode ?? pair.Po?.OrganizationCode)
-            }).OrderBy(batch => batch.Key.PrNumber).ThenBy(batch => batch.Key.PoNumber).ThenBy(batch => batch.Key.Delivery))
+            }).OrderBy(batch => batch.All(pair => pair.Pr is null && pair.Po is null)).ThenBy(batch => batch.Key.PrNumber).ThenBy(batch => batch.Key.PoNumber).ThenBy(batch => batch.Key.Delivery))
             {
                 var batchPr = batch.Where(pair => pair.Pr is not null).Select(pair => pair.Pr!).Distinct().ToArray();
                 var batchPo = batch.Where(pair => pair.Po is not null).Select(pair => pair.Po!).Distinct().ToArray();
                 var newPr = batchPr.Where(pr => countedPr.Add((Code(pr.OrganizationCode), Code(pr.LineId)))).ToArray();
                 var activePr = newPr.Where(pr => !pr.IsCanceled).ToArray();
                 var activePo = batchPo.Where(po => !po.IsCanceled).ToArray();
+                decimal allocated;
+                if (batchPr.Length > 0)
+                {
+                    allocated = Math.Min(remainingPrDemand, activePr.Sum(pr => Math.Max(0, pr.RequestedQuantity)));
+                    remainingPrDemand -= allocated;
+                }
+                else if (batchPo.Length > 0)
+                {
+                    allocated = Math.Min(remainingOrderOnlyDemand, activePo.Sum(po => Math.Max(0, po.PurchaseQuantity)));
+                    remainingOrderOnlyDemand -= allocated;
+                }
+                else allocated = unrequested;
                 var batchRow = first with
                 {
                     Sequence = result.Count + 1,
-                    Quantity = firstBatch ? material.Sum(row => row.Quantity) : null,
+                    Quantity = allocated > 0 || firstBatch && demand == 0 ? allocated : null,
                     Remark = Join(material.Select(row => row.Remark)),
                     BomKind = Join(material.Select(row => row.BomKind)) ?? first.BomKind,
                     ImpactStage = material.Any(row => row.ImpactStage == "Assembly") ? "Assembly"

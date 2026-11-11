@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { releaseFailureMessage } from '../src/releaseFailureMessage'
 
 describe('转图启动错误提示', () => {
+  it('合并同一批的重复错误并保留首次失败原因', () => {
+    const message = releaseFailureMessage('逐项转图结果：\nA.SLDDRW：专用进程启动超时\nB.SLDDRW：随批停止\nC.SLDDRW：随批停止')
+    expect(message).toContain('1 项：专用进程启动超时')
+    expect(message).toContain('2 项：随批停止')
+  })
   it('发布排序内存不足时说明中文原因并给出退回草稿的处理方式', () => {
     const message = releaseFailureMessage('Out of sort memory, consider increasing server sort buffer size')
     expect(message).toContain('排序内存不足')

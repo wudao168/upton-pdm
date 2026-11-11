@@ -131,6 +131,14 @@ public sealed partial class MySqlPdmRepository
         var byId = rows.ToDictionary(item => item.Id);
         // Permission checks below open their own connections; release this read connection first.
         await connection.CloseAsync();
+        var authorization = await GetAuthorizationSettingsAsync(cancellationToken);
+        var authorizationContexts = new Dictionary<Guid, AuthorizationPolicy.Context?>();
+        async Task<FolderAccess> DefaultAccess(ProjectFolderRow row)
+        {
+            var target = row.TargetProjectId ?? projectId;
+            if (!authorizationContexts.TryGetValue(target, out var context)) authorizationContexts[target] = context = await AuthorizationPolicy.CreateContextAsync(this, target, actor, cancellationToken);
+            return context is null ? FolderAccess.None : AuthorizationPolicy.FolderDefaults(authorization, context with { FolderTemplate = row.TemplateKey });
+        }
         var result = new List<ProjectFolder>(rows.Length);
         var targetAccess = new Dictionary<Guid, bool>();
         foreach (var row in rows.Where(row => documentFolderId.HasValue ? row.Id == documentFolderId.Value
@@ -139,7 +147,7 @@ public sealed partial class MySqlPdmRepository
             var explicitRules = permissionRows.Where(item => item.FolderId == row.Id).Select(MapRule).ToArray();
             var canSeeTarget = row.TargetProjectId is null || await CanReadTargetAsync(row.TargetProjectId.Value);
             var access = canSeeTarget
-                ? ResolveAccess(row, byId, permissionRows, templatePermissionRows, actor, roleCodes, role)
+                ? ResolveAccess(row, byId, permissionRows, templatePermissionRows, actor, roleCodes, await DefaultAccess(row))
                 : FolderAccess.None;
             result.Add(MapFolder(row) with { EffectiveAccess = access, Permissions = explicitRules });
         }
@@ -264,10 +272,20 @@ public sealed partial class MySqlPdmRepository
     public async Task DeleteProjectFolderAsync(Guid projectId, Guid folderId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
-        var affected = await connection.ExecuteAsync(new CommandDefinition(
-            "DELETE f FROM project_folder f INNER JOIN project p ON p.id=@ProjectId WHERE f.id=@FolderId AND f.root_project_id=COALESCE(p.root_project_id,p.id) AND f.is_system=0 AND f.purpose='Standard' AND NOT EXISTS(SELECT 1 FROM project_folder child WHERE child.parent_folder_id=f.id)",
-            new { ProjectId = projectId, FolderId = folderId }, cancellationToken: cancellationToken));
-        if (affected == 0) throw new PdmConflictException("只能删除空的自定义文件夹。");
+        try
+        {
+            var affected = await connection.ExecuteAsync(new CommandDefinition("""
+                DELETE f FROM project_folder f
+                INNER JOIN project p ON p.id=@ProjectId AND f.root_project_id=COALESCE(p.root_project_id,p.id)
+                LEFT JOIN project_folder child ON child.parent_folder_id=f.id
+                WHERE f.id=@FolderId AND f.is_system=0 AND f.purpose='Standard' AND child.id IS NULL
+                """, new { ProjectId = projectId, FolderId = folderId }, cancellationToken: cancellationToken));
+            if (affected == 0) throw new PdmConflictException("只能删除空的自定义文件夹。");
+        }
+        catch (MySqlConnector.MySqlException exception) when (exception.Number == 1451)
+        {
+            throw new PdmConflictException("文件夹仍有文件或回收站记录，请先核对目录内容后再删除。");
+        }
     }
 
     private static async Task<ProjectFolder> FindProjectFolderAsync(DbConnection connection, Guid folderId, CancellationToken cancellationToken)
@@ -318,9 +336,9 @@ public sealed partial class MySqlPdmRepository
 
     private static FolderAccess ResolveAccess(ProjectFolderRow row, IReadOnlyDictionary<Guid, ProjectFolderRow> byId,
         IReadOnlyList<FolderPermissionRow> explicitRules, IReadOnlyList<TemplatePermissionRow> templateRules,
-        string actor, IReadOnlyList<string> roleCodes, UserRole role)
+        string actor, IReadOnlyList<string> roleCodes, FolderAccess defaultAccess)
     {
-        if (role is UserRole.Administrator or UserRole.PlatformAdministrator) return FolderAccess.All;
+        if (defaultAccess == FolderAccess.All) return defaultAccess;
         ProjectFolderRow? current = row;
         while (current is not null)
         {
@@ -329,15 +347,11 @@ public sealed partial class MySqlPdmRepository
                 matches = templateRules.Where(item => item.FolderKey == current.TemplateKey && Matches(item.PrincipalType, item.PrincipalKey, actor, roleCodes))
                     .Select(item => new FolderPermissionRow { Id = item.Id, FolderId = current.Id, PrincipalType = item.PrincipalType, PrincipalKey = item.PrincipalKey, AccessMask = item.AccessMask }).ToArray();
             if (matches.Length > 0) return matches.Aggregate(FolderAccess.None, (value, item) => value | (FolderAccess)item.AccessMask);
-            if (current.TemplateKey is "presales" or "customer-files" && roleCodes.Any(CommercialProjectAccess.IsCommercialRole))
-                return FolderAccess.View | FolderAccess.Download | FolderAccess.Upload | (role == UserRole.Engineer ? FolderAccess.Edit : FolderAccess.None);
+
             if (!current.InheritPermissions || current.ParentFolderId is null) break;
             current = byId.GetValueOrDefault(current.ParentFolderId.Value);
         }
-        if (row.Purpose == ProjectFolderPurpose.Release) return FolderAccess.View | FolderAccess.Download;
-        return role == UserRole.Engineer
-            ? FolderAccess.View | FolderAccess.Download | FolderAccess.Upload | FolderAccess.Edit
-            : FolderAccess.View | FolderAccess.Download;
+        return defaultAccess;
     }
 
     private static bool Matches(string type, string key, string actor, IReadOnlyList<string> roleCodes) =>

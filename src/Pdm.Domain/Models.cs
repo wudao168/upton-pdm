@@ -150,11 +150,16 @@ public sealed record PreviewConversionSettings
     public int TimeoutMinutes { get; init; } = 30;
 
     public IReadOnlyList<PreviewAgentServer> Servers { get; init; } = [];
+    public bool AwaitingRegistration { get; init; }
+    public bool? LocalExecutionAllowed { get; init; }
 
     public string NormalizedAgentUrl => AgentUrl.Trim().TrimEnd('/');
 }
 
-public sealed record PreviewAgentServer(string Name, string AgentUrl, string AgentToken, int TimeoutMinutes = 30, Guid? CompanyId = null);
+public sealed record PreviewAgentServer(string Name, string AgentUrl, string AgentToken, int TimeoutMinutes = 30, Guid? CompanyId = null)
+{
+    public bool Disabled { get; init; }
+}
 
 public sealed record PdmSystemSettings(string VaultRoot, string ReleaseRoot)
 {
@@ -271,7 +276,25 @@ public sealed record ApprovalWorkflowStepTemplate(
     [property: JsonConverter(typeof(JsonStringEnumConverter))] ApprovalAssigneeSource AssigneeSource,
     string? FixedAssignee = null,
     Guid? FixedUnitId = null,
-    IReadOnlyList<string>? RoleCodes = null);
+    IReadOnlyList<string>? RoleCodes = null)
+{
+    public bool RequireAllApprovers { get; init; }
+    public IReadOnlyList<ApprovalDepartmentTemplate>? ParallelDepartments { get; init; }
+    public string? ConditionRole { get; init; }
+    public string? EmptyFallbackUser { get; init; }
+    public bool UnlessRole { get; init; }
+    public decimal? AmountGreaterThan { get; init; }
+    public ApprovalConditionSet? Conditions { get; init; }
+    public ApprovalNodePolicy? Policy { get; init; }
+    public ApprovalCopyRule? CopyOnApproval { get; init; }
+}
+
+public sealed record ApprovalFieldCondition(string Field, string Operator, string? Value);
+public sealed record ApprovalConditionSet(string Match, IReadOnlyList<ApprovalFieldCondition> Rules);
+public sealed record ApprovalFlowBranch(string Id, string Name, ApprovalConditionSet? Conditions, IReadOnlyList<ApprovalFlowNode> Nodes);
+public sealed record ApprovalFlowNode(string Id, string Kind, string Name,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] ApprovalStage? Stage = null,
+    IReadOnlyList<ApprovalFlowBranch>? Branches = null);
 
 public sealed record ApprovalWorkflowTemplate(
     string Code,
@@ -280,6 +303,9 @@ public sealed record ApprovalWorkflowTemplate(
     IReadOnlyList<ApprovalWorkflowStepTemplate> Steps)
 {
     public IReadOnlyList<string>? EmergencyRoleCodes { get; init; }
+    public Guid? ExpenseDepartmentId { get; init; }
+    public IReadOnlyDictionary<string, Guid>? ExpenseDepartmentIds { get; init; }
+    public IReadOnlyList<ApprovalFlowNode>? Layout { get; init; }
 }
 
 public sealed record ReleaseApprovalSettings(
@@ -291,6 +317,9 @@ public sealed record ReleaseApprovalSettings(
     ApprovalWorkflowTemplate? NonStandard = null,
     ApprovalWorkflowTemplate? MaterialCodeApplication = null)
 {
+    public ApprovalWorkflowTemplate? ExpenseProcurement { get; init; }
+    public ApprovalWorkflowTemplate? ExpenseSupplyChain { get; init; }
+    public ApprovalWorkflowTemplate? Expense { get; init; }
     public static ReleaseApprovalSettings Default { get; } = new(
         new ApprovalWorkflowTemplate(
             "mechanical-release",
@@ -298,7 +327,7 @@ public sealed record ReleaseApprovalSettings(
             1,
             [
                 new(ApprovalStage.MechanicalEngineer, "机械工程师自检", ApprovalAssigneeSource.Submitter),
-                new(ApprovalStage.MainDesigner, "主设审核", ApprovalAssigneeSource.ProjectDesignLead),
+                new(ApprovalStage.MainDesigner, "主设计审核", ApprovalAssigneeSource.ProjectDesignLead),
                 new(ApprovalStage.MechanicalSupervisor, "机械主管批准", ApprovalAssigneeSource.PrimaryUnitManager)
             ]),
         new ApprovalWorkflowTemplate(
@@ -317,7 +346,7 @@ public sealed record ReleaseApprovalSettings(
             1,
             [
                 new(ApprovalStage.MechanicalEngineer, "编制人自检", ApprovalAssigneeSource.Submitter),
-                new(ApprovalStage.MainDesigner, "主设审核", ApprovalAssigneeSource.ProjectDesignLead),
+                new(ApprovalStage.MainDesigner, "主设计审核", ApprovalAssigneeSource.ProjectDesignLead),
                 new(ApprovalStage.MechanicalSupervisor, "机械主管批准", ApprovalAssigneeSource.PrimaryUnitManager)
             ]));
 
@@ -817,6 +846,7 @@ public sealed record ApprovalTask(
     DateTimeOffset? DecidedAt)
 {
     public int StepOrder { get; init; }
+    public ApprovalGroup? Participants { get; init; }
 
     public string? StepName { get; init; }
 
@@ -832,7 +862,10 @@ public sealed record PendingApprovalTask(
     ApprovalStage Stage,
     ReleasePackageState PackageState,
     string Assignee,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt)
+{
+    public ApprovalGroup? Participants { get; init; }
+}
 
 /// <summary>发布预览（转图）状态：转图是发布之后的独立事项，失败不影响发布结果。</summary>
 public static class ReleasePreviewState
@@ -861,6 +894,9 @@ public sealed record ReleasePackage(
     public PdfTitleBlockSnapshot? PdfTitleBlockSnapshot { get; init; }
 
     public IReadOnlyDictionary<Guid, DocumentPreviewArtifact> PdfDeliveryArtifacts { get; init; } = new Dictionary<Guid, DocumentPreviewArtifact>();
+
+    /// <summary>按本包冻结模型源版本生成的STEP，独立于模型工作版和其他发布包。</summary>
+    public IReadOnlyDictionary<Guid, DocumentPreviewArtifact> ModelDeliveryArtifacts { get; init; } = new Dictionary<Guid, DocumentPreviewArtifact>();
 
     public Guid? RootDocumentId { get; init; }
     public Guid? StandardBomVersionId { get; init; }

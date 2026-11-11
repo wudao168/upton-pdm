@@ -19,7 +19,7 @@ public sealed partial class MySqlPdmRepository
     public async Task ResolveUserNotificationAsync(Guid notificationId, string recipient, DateTimeOffset resolvedAt, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
-        await connection.ExecuteAsync(new CommandDefinition("UPDATE user_notification SET resolved_at=COALESCE(resolved_at,@ResolvedAt),read_at=COALESCE(read_at,@ResolvedAt) WHERE id=@Id AND recipient_username=@Recipient",
+        await connection.ExecuteAsync(new CommandDefinition("UPDATE user_notification SET resolved_at=COALESCE(resolved_at,@ResolvedAt),read_at=COALESCE(read_at,@ResolvedAt) WHERE id=@Id AND recipient_username=@Recipient AND (category<>'ProjectStaffingPending' OR resolved_at IS NOT NULL)",
             new { Id = notificationId, Recipient = recipient, ResolvedAt = resolvedAt.UtcDateTime }, cancellationToken: cancellationToken));
     }
     public async Task<IReadOnlyList<UserNotification>> ListUnreadReleaseNotificationsAsync(string? recipient, CancellationToken cancellationToken)
@@ -39,18 +39,23 @@ public sealed partial class MySqlPdmRepository
         notifications = await NotificationRecipientPolicy.FilterAsync(this, notifications, cancellationToken);
         if (notifications.Count == 0) return;
         await using var connection = await OpenAsync(cancellationToken);
-        await connection.ExecuteAsync(new CommandDefinition("""
+        await UpsertNotificationsAsync(connection, notifications, null, cancellationToken);
+    }
+
+    internal static Task UpsertNotificationsAsync(System.Data.IDbConnection connection,
+        IReadOnlyList<UserNotification> notifications, System.Data.IDbTransaction? transaction, CancellationToken cancellationToken) =>
+        connection.ExecuteAsync(new CommandDefinition("""
             INSERT INTO user_notification(id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date,resolved_at,is_sender_receipt)
             VALUES(@Id,@Recipient,@Category,@Title,@Content,@ProjectId,@ReleasePackageId,@SourceKey,@CreatedAt,@ReadAt,@DueDate,@ResolvedAt,@IsSenderReceipt)
             ON DUPLICATE KEY UPDATE read_at=IF(resolved_at IS NOT NULL AND VALUES(resolved_at) IS NULL,NULL,read_at),
               created_at=IF(resolved_at IS NOT NULL AND VALUES(resolved_at) IS NULL,VALUES(created_at),created_at),
-              category=VALUES(category),title=VALUES(title),content=VALUES(content),resolved_at=VALUES(resolved_at),is_sender_receipt=VALUES(is_sender_receipt)
+              category=VALUES(category),title=VALUES(title),content=VALUES(content),resolved_at=VALUES(resolved_at),is_sender_receipt=VALUES(is_sender_receipt),
+              project_id=VALUES(project_id),due_date=VALUES(due_date)
             """, notifications.Select(item => new
         {
             item.Id, item.Recipient, item.Category, item.Title, item.Content, item.ProjectId, item.ReleasePackageId, item.SourceKey,
             CreatedAt = item.CreatedAt.UtcDateTime, ReadAt = item.ReadAt?.UtcDateTime, DueDate = item.DueDate?.ToDateTime(TimeOnly.MinValue), ResolvedAt = item.ResolvedAt?.UtcDateTime, item.IsSenderReceipt,
-        }), cancellationToken: cancellationToken));
-    }
+        }), transaction, cancellationToken: cancellationToken));
 
     public async Task ResolveUserNotificationsAsync(IReadOnlyList<string> sourceKeys, DateTimeOffset resolvedAt, CancellationToken cancellationToken)
     {
@@ -75,7 +80,7 @@ public sealed partial class MySqlPdmRepository
 
     public async Task<IReadOnlyList<UserNotification>> ListDatedUserTodosAsync(string recipient, Guid companyId, DateOnly from, DateOnly to, CancellationToken ct)
     {
-        var systemOnly = NotificationRecipientPolicy.SystemOnly(await FindUserAsync(recipient, ct));
+        var systemOnly = !await NotificationRecipientPolicy.CanReceiveAsync(this, recipient, ct);
         await using var connection = await OpenAsync(ct);
         var rows = await connection.QueryAsync<UserNotificationRow>(new CommandDefinition(
             """
@@ -89,15 +94,28 @@ public sealed partial class MySqlPdmRepository
         return rows.Select(MapUserNotification).ToArray();
     }
 
+    public async Task<IReadOnlyList<UserNotification>> ListProjectActivityNotificationsAsync(string recipient, DateTimeOffset since, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(ct);
+        var rows = await connection.QueryAsync<UserNotificationRow>(new CommandDefinition("""
+            SELECT n.id,n.recipient_username,n.category,n.title,n.content,n.project_id,n.release_package_id,n.source_key,n.created_at,n.read_at,n.due_date,n.resolved_at,n.is_sender_receipt
+            FROM user_notification n JOIN project p ON p.id=n.project_id
+            WHERE n.recipient_username=@Recipient AND p.organization_id=@CompanyId AND n.created_at>=@Since
+                AND (n.category LIKE 'ProjectActivity.%' OR n.category='ReleaseDepartment')
+            ORDER BY n.created_at DESC,n.id DESC
+            """, new { Recipient = recipient, CompanyId = TenantContext.CompanyId, Since = since.UtcDateTime }, cancellationToken: ct));
+        return rows.Select(MapUserNotification).ToArray();
+    }
+
     public async Task<IReadOnlyList<UserNotification>> ListUserNotificationsAsync(string recipient, int take, CancellationToken cancellationToken)
     {
-        var systemOnly = NotificationRecipientPolicy.SystemOnly(await FindUserAsync(recipient, cancellationToken));
+        var systemOnly = !await NotificationRecipientPolicy.CanReceiveAsync(this, recipient, cancellationToken);
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<UserNotificationRow>(new CommandDefinition(
             """
             SELECT id,recipient_username,category,title,content,project_id,release_package_id,source_key,created_at,read_at,due_date,resolved_at,is_sender_receipt
             FROM user_notification n
-            WHERE recipient_username=@Recipient
+            WHERE recipient_username=@Recipient AND n.category NOT LIKE 'ProjectActivity.%'
               AND (@SystemOnly=0 OR (n.category='System' AND n.project_id IS NULL AND n.release_package_id IS NULL) OR (n.is_sender_receipt=1 AND n.read_at IS NOT NULL))
               AND (n.category NOT IN ('ReleasePreviewPending','ReleasePreviewResult') OR EXISTS (
                   SELECT 1 FROM release_package conversion_package WHERE conversion_package.id=n.release_package_id
@@ -168,10 +186,10 @@ public sealed partial class MySqlPdmRepository
 
     public async Task MarkAllUserNotificationsReadAsync(string recipient, DateTimeOffset readAt, CancellationToken cancellationToken)
     {
-        var systemOnly = NotificationRecipientPolicy.SystemOnly(await FindUserAsync(recipient, cancellationToken));
+        var systemOnly = !await NotificationRecipientPolicy.CanReceiveAsync(this, recipient, cancellationToken);
         await using var connection = await OpenAsync(cancellationToken);
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE user_notification SET read_at=@ReadAt WHERE recipient_username=@Recipient AND read_at IS NULL AND (@SystemOnly=0 OR (category='System' AND project_id IS NULL AND release_package_id IS NULL))",
+            "UPDATE user_notification SET read_at=@ReadAt WHERE recipient_username=@Recipient AND read_at IS NULL AND (category<>'ProjectStaffingPending' OR resolved_at IS NOT NULL) AND (@SystemOnly=0 OR (category='System' AND project_id IS NULL AND release_package_id IS NULL))",
             new { Recipient = recipient, SystemOnly = systemOnly, ReadAt = readAt.UtcDateTime },
             cancellationToken: cancellationToken));
     }

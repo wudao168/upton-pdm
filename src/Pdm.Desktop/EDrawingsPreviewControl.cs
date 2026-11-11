@@ -49,6 +49,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
     internal event Action<string>? UserMessageRequested;
     internal event Action<bool>? MarkupModifiedChanged;
+    internal event Action<string, string, string>? ComponentSelectionChanged;
 
     internal void ApplyTheme(string theme)
     {
@@ -83,6 +84,11 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
         viewer.EndInit();
         viewer.DocumentLoaded += OnDocumentLoaded;
         viewer.DocumentFailed += OnDocumentFailed;
+        viewer.ComponentSelected += (name, configuration) =>
+        {
+            if (documentReady && !documentTransitioning)
+                ComponentSelectionChanged?.Invoke(currentDocumentPath, name, configuration);
+        };
         documentLoadTimer.Interval = 30000;
         documentLoadTimer.Tick += (_, _) => OnDocumentFailed(currentDocumentPath, -1, "加载超时");
 
@@ -1255,9 +1261,11 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
     private sealed class EDrawingsAxHost : Forms.AxHost
     {
         private static readonly Guid ModelViewEventsId = new("2EA4AE0F-494C-4554-97AE-F02F3076A90D");
+        private const int ComponentSelectionEventId = 10; // OnComponentSelectionNotify2
         private object? eventSource;
         private Action<string>? documentLoadedHandler;
         private Action<string, int, string>? documentFailedHandler;
+        private Action<string, string, int, int>? componentSelectedHandler;
         private bool interfacePrepared;
 
         internal EDrawingsAxHost() : base("{C59EEF21-0223-4C39-A708-A3BE9008C67E}")
@@ -1266,6 +1274,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
 
         internal event Action<string>? DocumentLoaded;
         internal event Action<string, int, string>? DocumentFailed;
+        internal event Action<string, string>? ComponentSelected;
 
         internal dynamic ActiveControl
         {
@@ -1341,6 +1350,17 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
                 eventSource = null;
                 documentLoadedHandler = null;
                 documentFailedHandler = null;
+                return;
+            }
+            try
+            {
+                componentSelectedHandler = (name, configuration, _, _) => ComponentSelected?.Invoke(name, configuration);
+                ComEventsHelper.Combine(eventSource, ModelViewEventsId, ComponentSelectionEventId, componentSelectedHandler);
+            }
+            catch (COMException error)
+            {
+                componentSelectedHandler = null;
+                WriteDiagnostic("组件选择事件订阅失败", error.ToString());
             }
         }
 
@@ -1353,6 +1373,8 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
                     ComEventsHelper.Remove(eventSource, ModelViewEventsId, 3, documentLoadedHandler);
                     if (documentFailedHandler != null)
                         ComEventsHelper.Remove(eventSource, ModelViewEventsId, 5, documentFailedHandler);
+                    if (componentSelectedHandler != null)
+                        ComEventsHelper.Remove(eventSource, ModelViewEventsId, ComponentSelectionEventId, componentSelectedHandler);
                 }
                 catch
                 {
@@ -1362,6 +1384,7 @@ internal sealed class EDrawingsPreviewControl : Forms.UserControl
             eventSource = null;
             documentLoadedHandler = null;
             documentFailedHandler = null;
+            componentSelectedHandler = null;
             base.DetachSink();
         }
 

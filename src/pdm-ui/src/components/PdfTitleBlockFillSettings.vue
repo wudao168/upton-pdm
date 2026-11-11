@@ -54,7 +54,9 @@ async function save() {
 .pdf-field-groups { flex: 0 0 auto; min-width: 0; }
 fieldset { flex: 0 0 auto; border: 1px solid var(--pdm-border-color, #dce3ec); border-radius: 8px; margin: 16px 0; padding: 14px 16px; }
 legend { padding: 0 6px; font-weight: 600; }
-.pdf-field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px 20px; }
+.pdf-field-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 14px 20px; }
 .pdf-field-grid .pdm-checkbox-field { grid-column: auto; min-height: 28px; }
 .pdf-title-block-settings p { line-height: 1.7; }
+@media (max-width:1280px) { .pdf-field-grid { grid-template-columns:repeat(4,minmax(0,1fr)); } }
+@media (max-width:640px) { .pdf-field-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 </style>

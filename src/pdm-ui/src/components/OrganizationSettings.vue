@@ -1,5 +1,9 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
 import UserSelect from './UserSelect'
+import CompanyBusinessDetailsDialog from './CompanyBusinessDetailsDialog.vue'
+import { listCompanyBusinessDetails } from '../api'
+import type { CompanyBusinessDetailsKind, CompanyBusinessDetailsStatus } from '../companyBusinessDetails'
 import { ElMessage } from '../statusMessage'
 import { computed, reactive, ref, watch } from 'vue'
 import type { OrganizationDirectory, OrganizationUnit, PdmUser, ProjectOrganization, SaveOrganizationUnitInput, SaveProjectOrganizationInput } from '../types'
@@ -14,6 +18,7 @@ const props = defineProps<{
   embedded?: boolean
   mode?: 'organization' | 'companies'
   activeCompanyId?: string
+  token?: string
   pending: boolean
   onSaveOrganization: (input: SaveProjectOrganizationInput) => Promise<ProjectOrganization>
   onSaveUnit: (input: SaveOrganizationUnitInput) => Promise<OrganizationUnit>
@@ -24,6 +29,27 @@ const emit = defineEmits<{ 'update:activeCompanyId': [companyId: string] }>()
 
 const activeView = ref<'organization' | 'companies'>(props.mode ?? 'organization')
 const companyDialog = ref(false)
+const businessDialog = ref<{ company: ProjectOrganization; kind: CompanyBusinessDetailsKind; id: number }>()
+const businessStatuses = ref<CompanyBusinessDetailsStatus[]>([])
+const businessByCompany = computed(() => new Map(businessStatuses.value.map(item => [item.organizationId, item])))
+let statusRequest = 0
+let dialogSequence = 0
+function openBusinessDialog(company: ProjectOrganization, kind: CompanyBusinessDetailsKind) {
+  businessDialog.value = { company, kind, id: ++dialogSequence }
+}
+function closeBusinessDialog(id: number) {
+  if (businessDialog.value?.id === id) businessDialog.value = undefined
+}
+async function loadBusinessStatuses() {
+  const request = ++statusRequest
+  if (!props.token || activeView.value !== 'companies') return
+  try {
+    const items = await listCompanyBusinessDetails(props.token)
+    if (request === statusRequest) businessStatuses.value = items
+  } catch {
+    if (request === statusRequest) ElMessage.error('公司资料状态读取失败，请刷新后重试。')
+  }
+}
 const unitDialog = ref(false)
 const membershipDialog = ref(false)
 const managerDialog = ref(false)
@@ -93,6 +119,12 @@ watch(sortedCompanies, companies => {
 }, { immediate: true })
 
 watch(() => props.mode, mode => { if (mode) activeView.value = mode }, { immediate: true })
+watch([activeView, () => Boolean(props.token), () => props.activeCompanyId], () => {
+  businessStatuses.value = []
+  businessDialog.value = undefined
+  void loadBusinessStatuses()
+}, { immediate: true })
+watch(() => props.directory.organizations.map(company => company.id).join(','), () => void loadBusinessStatuses())
 watch(() => props.activeCompanyId, companyId => { if (companyId && companyId !== currentCompanyId.value) currentCompanyId.value = companyId }, { immediate: true })
 
 watch(currentCompanyId, companyId => {
@@ -113,7 +145,7 @@ function effectiveCompanyId(user: PdmUser) {
   const primary = props.directory.memberships.find(item => item.username === user.username && item.isPrimary)
   return props.directory.units.find(item => item.id === primary?.unitId)?.organizationId
 }
-function userName(username?: string) { const user = props.directory.users.find(item => item.username === username); return user?.displayName || username || '未设置' }
+function userName(username?: string) { const user = props.directory.users.find(item => item.username === username); return user?.displayName || (username ? '姓名待补充' : '未设置') }
 function kindName(kind: OrganizationUnit['kind']) { return ({ BusinessDivision: '部门', Department: '下级部门', Team: '团队' })[kind] }
 function unitPath(unitId: string) {
   const names: string[] = []
@@ -283,7 +315,7 @@ async function addMember() {
         <section class="pdm-panel org-detail-panel" aria-label="组织详情">
           <template v-if="showingUnassigned">
             <header class="org-detail-heading"><div><div class="org-detail-eyebrow">人员归属</div><h2>未分配人员</h2><p>仅显示主公司为当前公司、但尚未加入当前公司部门的账号。</p></div></header>
-            <div class="org-table-scroll"><table class="pdm-project-table"><thead><tr><th>账号</th><th>姓名</th><th>系统角色</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="user in unassignedUsers" :key="user.username"><td>{{ user.username }}</td><td>{{ user.displayName }}</td><td>{{ user.role }}</td><td><span class="pdm-status" :class="user.isActive ? 'is-ok' : 'is-warn'">{{ user.isActive ? '启用' : '停用' }}</span></td><td><button class="pdm-text-action" type="button" :disabled="!user.isActive || !companyUnits.length" @click="openMembership(user)">设置归属</button></td></tr></tbody></table></div>
+            <div class="org-table-scroll"><table class="pdm-project-table"><thead><tr><th>姓名</th><th>系统角色</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="user in unassignedUsers" :key="user.username"><td><PersonName :name="user.displayName" /></td><td>{{ user.role }}</td><td><span class="pdm-status" :class="user.isActive ? 'is-ok' : 'is-warn'">{{ user.isActive ? '启用' : '停用' }}</span></td><td><button class="pdm-text-action" type="button" :disabled="!user.isActive || !companyUnits.length" @click="openMembership(user)">设置归属</button></td></tr></tbody></table></div>
             <p v-if="!unassignedUsers.length" class="pdm-empty-info">所有账号均已分配组织。</p>
           </template>
 
@@ -292,7 +324,7 @@ async function addMember() {
             <dl class="org-unit-summary"><div><dt>所属公司</dt><dd>{{ companyName(currentUnit.organizationId) }}</dd></div><div><dt>组织类型</dt><dd>{{ kindName(currentUnit.kind) }}</dd></div><div><dt>上级组织</dt><dd>{{ currentUnit.parentUnitId ? unitName(currentUnit.parentUnitId) : '公司直属' }}</dd></div><div><dt>状态</dt><dd><span class="pdm-status" :class="currentUnit.isActive ? 'is-ok' : 'is-warn'">{{ currentUnit.isActive ? '启用' : '停用' }}</span></dd></div></dl>
             <section class="org-manager-summary"><div><small>主负责人</small><strong>{{ userName(currentManagers?.primaryManager) }}</strong></div><div><small>协同负责人</small><strong>{{ currentManagers?.collaborativeManagers.map(userName).join('、') || '未设置' }}</strong></div></section>
             <header class="org-members-heading"><div><h3>本组织及下级人员</h3><small>{{ selectedMembers.length }} 人；一个账号可有多个归属，但仅有一个主组织</small></div><button type="button" class="pdm-primary-action" :disabled="currentUnit.isActive === false || !addableUsers.length" @click="openAddMember">添加人员</button></header>
-            <div class="org-table-scroll"><table class="pdm-project-table"><thead><tr><th>账号</th><th>姓名</th><th>系统角色</th><th>主组织</th><th>其他组织</th><th>操作</th></tr></thead><tbody><tr v-for="user in selectedMembers" :key="user.username"><td>{{ user.username }}</td><td>{{ user.displayName }}</td><td>{{ user.role }}</td><td>{{ primaryUnitName(user.username) }}</td><td>{{ otherUnitNames(user.username) }}</td><td><button class="pdm-text-action" type="button" :disabled="!user.isActive" @click="openMembership(user)">设置归属</button></td></tr></tbody></table></div>
+            <div class="org-table-scroll"><table class="pdm-project-table"><thead><tr><th>姓名</th><th>系统角色</th><th>主组织</th><th>其他组织</th><th>操作</th></tr></thead><tbody><tr v-for="user in selectedMembers" :key="user.username"><td><PersonName :name="user.displayName" /></td><td>{{ user.role }}</td><td>{{ primaryUnitName(user.username) }}</td><td>{{ otherUnitNames(user.username) }}</td><td><button class="pdm-text-action" type="button" :disabled="!user.isActive" @click="openMembership(user)">设置归属</button></td></tr></tbody></table></div>
             <p v-if="!selectedMembers.length" class="pdm-empty-info">该组织及下级尚未分配人员。可从“未分配人员”开始设置。</p>
           </template>
 
@@ -303,14 +335,28 @@ async function addMember() {
 
     <section v-else class="pdm-panel org-section" aria-label="公司管理">
       <header class="pdm-panel-heading"><div><h2>公司管理</h2><small>公司代码参与项目号和设备型号生成；已有业务数据的公司仅允许停用。</small></div></header>
-      <div class="org-table-scroll"><table class="pdm-project-table"><thead><tr><th>公司</th><th>项目号代码</th><th>设备型号代码</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="company in sortedCompanies" :key="company.id"><td>{{ company.name }}</td><td>{{ company.projectCompanyCode }}</td><td>{{ company.modelCompanyCode }}</td><td><span class="pdm-status" :class="company.isActive === false ? 'is-warn' : 'is-ok'">{{ company.isActive === false ? '停用' : '启用' }}</span></td><td><button v-if="!embedded" class="pdm-text-action" type="button" @click="selectCompany(company.id)">组织架构</button><button class="pdm-text-action" type="button" @click="openCompany(company)">编辑</button></td></tr></tbody></table></div>
+      <div class="org-table-scroll">
+        <table class="pdm-project-table">
+          <thead><tr><th>公司</th><th>项目号代码</th><th>设备型号代码</th><th>开票资料</th><th>收货信息</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr v-for="company in sortedCompanies" :key="company.id">
+              <td>{{ company.name }}</td><td>{{ company.projectCompanyCode }}</td><td>{{ company.modelCompanyCode }}</td>
+              <td><button v-if="businessByCompany.has(company.id)" class="pdm-text-action" type="button" :aria-label="`维护${company.name}的开票资料`" @click="openBusinessDialog(company, 'invoice')">{{ businessByCompany.get(company.id)?.invoiceConfigured ? '已维护' : '待维护' }}</button><span v-else>—</span></td>
+              <td><button v-if="businessByCompany.has(company.id)" class="pdm-text-action" type="button" :aria-label="`维护${company.name}的收货信息`" @click="openBusinessDialog(company, 'receiving')">{{ businessByCompany.get(company.id)?.receivingConfigured ? '已维护' : '待维护' }}</button><span v-else>—</span></td>
+              <td><span class="pdm-status" :class="company.isActive === false ? 'is-warn' : 'is-ok'">{{ company.isActive === false ? '停用' : '启用' }}</span></td>
+              <td><button v-if="!embedded" class="pdm-text-action" type="button" @click="selectCompany(company.id)">组织架构</button><button class="pdm-text-action" type="button" @click="openCompany(company)">编辑</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <CompanyBusinessDetailsDialog v-if="businessDialog && token" :key="businessDialog.id" :dialog-id="businessDialog.id" :company="businessDialog.company" :kind="businessDialog.kind" :token="token" @saved="loadBusinessStatuses" @close="closeBusinessDialog" />
     </section>
 
     <el-dialog v-model="companyDialog" :title="companyForm.id ? '编辑公司' : '新增公司'" width="520px"><div class="org-form"><label>公司名称<input v-model="companyForm.name" maxlength="200"></label><label>项目号公司代码<input v-model="companyForm.projectCompanyCode" maxlength="1" placeholder="如 7"></label><label>设备型号公司代码<input v-model="companyForm.modelCompanyCode" maxlength="8" placeholder="如 AK"></label><label class="org-form-check"><input v-model="companyForm.isActive" type="checkbox"><span>启用</span></label></div><template #footer><button class="pdm-secondary-action" type="button" @click="companyDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending" @click="saveCompany">保存</button></template></el-dialog>
-    <el-dialog v-model="unitDialog" :title="unitForm.id ? '编辑组织' : unitForm.parentUnitId ? '新增下级组织' : '新建部门'" width="560px" :close-on-click-modal="false"><div class="org-form"><label>所属公司<input :value="companyName(unitForm.organizationId)" disabled></label><label>类型<select v-model="unitForm.kind" :disabled="!unitForm.parentUnitId"><option v-if="!unitForm.parentUnitId" value="BusinessDivision">部门（公司直属）</option><option value="Department">下级部门</option><option value="Team">团队</option></select></label><label v-if="unitForm.kind !== 'BusinessDivision'">上级组织<select v-model="unitForm.parentUnitId"><option value="" disabled>请选择</option><option v-for="unit in unitOptions" :key="unit.id" :value="unit.id">{{ unitPath(unit.id) }}</option></select></label><label>{{ unitForm.kind === 'BusinessDivision' ? '组织编码' : '本级编码' }}<span class="org-code-input" :class="{ 'has-prefix': unitCodePrefix }"><span v-if="unitCodePrefix">{{ unitCodePrefix }}</span><input v-model="unitForm.code" :maxlength="unitCodeMaxLength" aria-label="本级组织编码"></span><small v-if="unitCodePrefix" class="org-code-preview">完整编码：{{ completeUnitCode || '—' }}</small></label><label>组织名称<input v-model="unitForm.name" maxlength="160"></label><label v-if="unitForm.kind === 'BusinessDivision'" class="org-form-check"><input v-model="unitForm.canManufacture" type="checkbox"><span>制造部门（可承接项目）</span></label><label class="org-form-check"><input v-model="unitForm.canArchiveStandardLibrary" type="checkbox"><span>标准库存档授权（本部门及下级成员）</span></label><label class="org-form-check"><input v-model="unitForm.isActive" type="checkbox"><span>启用</span></label><small class="org-form-note">组织编码按上级完整编码逐级拼接，仅最终完整编码不能重复；下级部门和团队最多10级。</small></div><template #footer><button class="pdm-secondary-action" type="button" @click="unitDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending" @click="saveUnit">{{ pending ? '保存中…' : '保存组织' }}</button></template></el-dialog>
+    <el-dialog v-model="unitDialog" :title="unitForm.id ? '编辑组织' : unitForm.parentUnitId ? '新增下级组织' : '新建部门'" width="560px" :close-on-click-modal="!pending"><div class="org-form"><label>所属公司<input :value="companyName(unitForm.organizationId)" disabled></label><label>类型<select v-model="unitForm.kind" :disabled="!unitForm.parentUnitId"><option v-if="!unitForm.parentUnitId" value="BusinessDivision">部门（公司直属）</option><option value="Department">下级部门</option><option value="Team">团队</option></select></label><label v-if="unitForm.kind !== 'BusinessDivision'">上级组织<select v-model="unitForm.parentUnitId"><option value="" disabled>请选择</option><option v-for="unit in unitOptions" :key="unit.id" :value="unit.id">{{ unitPath(unit.id) }}</option></select></label><label>{{ unitForm.kind === 'BusinessDivision' ? '组织编码' : '本级编码' }}<span class="org-code-input" :class="{ 'has-prefix': unitCodePrefix }"><span v-if="unitCodePrefix">{{ unitCodePrefix }}</span><input v-model="unitForm.code" :maxlength="unitCodeMaxLength" aria-label="本级组织编码"></span><small v-if="unitCodePrefix" class="org-code-preview">完整编码：{{ completeUnitCode || '—' }}</small></label><label>组织名称<input v-model="unitForm.name" maxlength="160"></label><label v-if="unitForm.kind === 'BusinessDivision'" class="org-form-check"><input v-model="unitForm.canManufacture" type="checkbox"><span>制造部门（可承接项目）</span></label><label class="org-form-check"><input v-model="unitForm.canArchiveStandardLibrary" type="checkbox"><span>标准库存档授权（本部门及下级成员）</span></label><label class="org-form-check"><input v-model="unitForm.isActive" type="checkbox"><span>启用</span></label><small class="org-form-note">组织编码按上级完整编码逐级拼接，仅最终完整编码不能重复；下级部门和团队最多10级。</small></div><template #footer><button class="pdm-secondary-action" type="button" @click="unitDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending" @click="saveUnit">{{ pending ? '保存中…' : '保存组织' }}</button></template></el-dialog>
     <el-dialog v-model="membershipDialog" :title="`人员归属 · ${selectedUser?.displayName ?? ''}`" width="600px"><div class="org-form"><label>主公司<input :value="currentCompany?.name || ''" disabled></label><label>所属组织<el-select v-model="membershipUnits" multiple filterable style="width:100%"><el-option v-for="unit in companyUnits.filter(item => item.isActive)" :key="unit.id" :label="unitPath(unit.id)" :value="unit.id" /></el-select></label><label>主组织<el-select v-model="primaryUnit" style="width:100%"><el-option v-for="unitId in membershipUnits" :key="unitId" :label="unitPath(unitId)" :value="unitId" /></el-select></label><small class="org-form-note">组织关系仅在用户主公司内维护；可加入多个组织，但必须指定一个主组织。</small></div><template #footer><button class="pdm-secondary-action" type="button" @click="membershipDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending" @click="saveMemberships">保存</button></template></el-dialog>
-    <el-dialog v-model="addMemberDialog" :title="`添加人员 · ${currentUnit?.name ?? ''}`" width="520px" :close-on-click-modal="false"><div class="org-form"><label>选择人员<UserSelect v-model="membersToAdd" multiple collapse-tags filterable clearable placeholder="请选择" aria-label="选择要添加的人员" style="width:100%"><el-option v-for="user in addableUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label><small class="org-form-note">可多选并按姓名筛选；将人员添加到当前组织时，已有的其他组织归属和主组织保持不变。</small></div><template #footer><button class="pdm-secondary-action" type="button" @click="addMemberDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending || !membersToAdd.length" @click="addMember">添加到本组织</button></template></el-dialog>
-    <el-dialog v-model="managerDialog" :title="`部门负责人 · ${selectedUnit?.name ?? ''}`" width="600px" :close-on-click-modal="false"><div class="org-form"><label>主负责人<UserSelect v-model="primaryManager" clearable filterable style="width:100%" @clear="collaborativeManagers=[]"><el-option v-for="user in managerCandidates()" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label><label>协同负责人<UserSelect v-model="collaborativeManagers" multiple filterable style="width:100%"><el-option v-for="user in managerCandidates().filter(item => item.username !== primaryManager)" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label><small class="org-form-note">每级部门都可设置负责人；清空主负责人并保存，即删除该组织的全部负责人。</small></div><template #footer><button v-if="primaryManager || collaborativeManagers.length" class="org-clear-manager" type="button" @click="primaryManager=''; collaborativeManagers=[]">清空负责人</button><button class="pdm-secondary-action" type="button" @click="managerDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending" @click="saveManagers">{{ pending ? '保存中…' : '保存负责人' }}</button></template></el-dialog>
+    <el-dialog v-model="addMemberDialog" :title="`添加人员 · ${currentUnit?.name ?? ''}`" width="520px" :close-on-click-modal="!pending"><div class="org-form"><label>选择人员<UserSelect v-model="membersToAdd" multiple collapse-tags filterable clearable placeholder="请选择" aria-label="选择要添加的人员" style="width:100%"><el-option v-for="user in addableUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label><small class="org-form-note">可多选并按姓名筛选；将人员添加到当前组织时，已有的其他组织归属和主组织保持不变。</small></div><template #footer><button class="pdm-secondary-action" type="button" @click="addMemberDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending || !membersToAdd.length" @click="addMember">添加到本组织</button></template></el-dialog>
+    <el-dialog v-model="managerDialog" :title="`部门负责人 · ${selectedUnit?.name ?? ''}`" width="600px" :close-on-click-modal="!pending"><div class="org-form"><label>主负责人<UserSelect v-model="primaryManager" clearable filterable style="width:100%" @clear="collaborativeManagers=[]"><el-option v-for="user in managerCandidates()" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label><label>协同负责人<UserSelect v-model="collaborativeManagers" multiple filterable style="width:100%"><el-option v-for="user in managerCandidates().filter(item => item.username !== primaryManager)" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label><small class="org-form-note">每级部门都可设置负责人；清空主负责人并保存，即删除该组织的全部负责人。</small></div><template #footer><button v-if="primaryManager || collaborativeManagers.length" class="org-clear-manager" type="button" @click="primaryManager=''; collaborativeManagers=[]">清空负责人</button><button class="pdm-secondary-action" type="button" @click="managerDialog=false">取消</button><button class="pdm-primary-action" type="button" :disabled="pending" @click="saveManagers">{{ pending ? '保存中…' : '保存负责人' }}</button></template></el-dialog>
   </section>
 </template>
 
@@ -319,7 +365,7 @@ async function addMember() {
 .org-embedded-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }.org-embedded-heading > div:first-child { display: grid; gap: 3px; }.org-embedded-heading strong { font-size: 14px; }.org-embedded-heading small { color: var(--pdm-muted); }
 .org-view-tabs { display: inline-flex; gap: 3px; margin-bottom: 12px; padding: 3px; border: 1px solid var(--pdm-border); border-radius: 7px; background: var(--pdm-surface-muted); }
 .org-view-tabs button { min-width: 88px; min-height: var(--pdm-tab-secondary); border: 0; border-radius: 5px; background: transparent; color: var(--pdm-muted); cursor: pointer; }
-.org-view-tabs button.is-active { background: var(--pdm-surface); color: var(--pdm-blue); box-shadow: 0 1px 4px var(--pdm-shadow); }
+.org-view-tabs button.is-active { background: var(--pdm-surface); color:var(--pdm-text); box-shadow: 0 1px 4px var(--pdm-shadow); }
 .org-company-switcher { display: grid; grid-template-columns: minmax(190px, auto) minmax(260px, 390px) minmax(260px, 1fr); align-items: center; gap: 18px; margin-bottom: 12px; padding: 13px 16px; }
 .org-company-switcher > div:first-child { display: grid; gap: 3px; }.org-company-switcher small { color: var(--pdm-muted); }
 .org-company-switcher select { min-height: 36px; border: 1px solid var(--pdm-border); border-radius: 6px; padding: 0 10px; background: var(--pdm-surface); color: var(--pdm-text); }
@@ -330,9 +376,9 @@ async function addMember() {
 .org-company-root { display: flex; align-items: center; gap: 8px; padding: 10px; border: 1px solid var(--pdm-border); border-radius: 6px; background: var(--pdm-surface-muted); font-size: 12px; }
 .org-tree { flex: 1 1 auto; min-height: 180px; margin: 7px 0; overflow: auto; background: transparent; --el-tree-node-hover-bg-color: var(--pdm-blue-soft); }
 .org-tree-node { min-width: 0; display: inline-flex; align-items: center; gap: 7px; }.org-tree-node > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.org-tree-node em { color: var(--pdm-danger); font-size: 11px; font-style: normal; }.org-tree-node em.is-manufacturing { color: var(--pdm-green); }
-.org-node-kind { flex: 0 0 auto; min-width: 35px; padding: 2px 5px; border-radius: 4px; background: var(--pdm-surface-muted); color: var(--pdm-text-soft); font-size: 11px; text-align: center; }.org-node-kind.is-company { background: var(--pdm-theme-accent-soft); color: var(--pdm-blue); }.org-node-kind.is-BusinessDivision { background: var(--pdm-green-soft); color: var(--pdm-green); }.org-node-kind.is-Team { background: var(--pdm-orange-soft); color: var(--pdm-orange); }
-.org-unassigned-button { min-height: 38px; display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--pdm-border); border-radius: 6px; padding: 0 11px; background: var(--pdm-surface); color: var(--pdm-text); cursor: pointer; }.org-unassigned-button:hover, .org-unassigned-button.is-active { border-color: var(--pdm-blue); background: var(--pdm-blue-soft); color: var(--pdm-blue); }.org-unassigned-button b { min-width: 22px; padding: 2px 6px; border-radius: 10px; background: var(--pdm-surface-muted); }
-.org-detail-panel { display: flex; flex-direction: column; overflow: hidden; }.org-detail-heading { flex: 0 0 auto; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 14px; border-bottom: 1px solid var(--pdm-border); }.org-detail-heading h2 { margin: 3px 0; font-size: var(--pdm-font-size-heading); }.org-detail-heading p { margin: 0; color: var(--pdm-muted); font-size: 11px; }.org-detail-eyebrow { max-width: 620px; overflow: hidden; color: var(--pdm-blue); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.org-node-kind { flex: 0 0 auto; min-width: 35px; padding: 2px 5px; border-radius: 4px; background: var(--pdm-surface-muted); color: var(--pdm-text-soft); font-size: 11px; text-align: center; }.org-node-kind.is-company { background: var(--pdm-theme-accent-soft); color:var(--pdm-text); }.org-node-kind.is-BusinessDivision { background: var(--pdm-green-soft); color: var(--pdm-green); }.org-node-kind.is-Team { background: var(--pdm-orange-soft); color: var(--pdm-orange); }
+.org-unassigned-button { min-height: 38px; display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--pdm-border); border-radius: 6px; padding: 0 11px; background: var(--pdm-surface); color: var(--pdm-text); cursor: pointer; }.org-unassigned-button:hover, .org-unassigned-button.is-active { border-color: var(--pdm-blue); background: var(--pdm-blue-soft); color:var(--pdm-text); }.org-unassigned-button b { min-width: 22px; padding: 2px 6px; border-radius: 10px; background: var(--pdm-surface-muted); }
+.org-detail-panel { display: flex; flex-direction: column; overflow: hidden; }.org-detail-heading { flex: 0 0 auto; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 14px; border-bottom: 1px solid var(--pdm-border); }.org-detail-heading h2 { margin: 3px 0; font-size: var(--pdm-font-size-heading); }.org-detail-heading p { margin: 0; color: var(--pdm-muted); font-size: 11px; }.org-detail-eyebrow { max-width: 620px; overflow: hidden; color:var(--pdm-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .org-unit-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }.org-unit-summary div, .org-manager-summary div { min-width: 0; padding: 10px; border-radius: 6px; background: var(--pdm-surface-muted); }.org-unit-summary dt, .org-manager-summary small { display: block; margin-bottom: 4px; color: var(--pdm-muted); font-size: 11px; }.org-unit-summary dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .org-manager-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }.org-manager-summary strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
 .org-members-heading { display: flex; justify-content: space-between; margin: 4px 0 8px; }.org-members-heading h3 { margin: 0 0 3px; font-size: 12px; }.org-members-heading small { color: var(--pdm-muted); }

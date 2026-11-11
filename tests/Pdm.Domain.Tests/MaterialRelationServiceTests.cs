@@ -11,6 +11,7 @@ public sealed partial class MaterialRelationServiceTests
     {
         var clock = TimeProvider.System;
         var pdm = new InMemoryPdmRepository(clock);
+        await PermissionTestUsers.Ensure(pdm, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer));
         var materials = new InMemoryMaterialRepository(clock);
         var relations = new InMemoryMaterialRelationRepository();
         var service = new MaterialRelationService(relations, materials, pdm, clock);

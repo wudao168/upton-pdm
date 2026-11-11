@@ -10,7 +10,7 @@ public sealed class DrawingModelPairingTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task AssemblyDrawingPublishesOnlyItsAssemblyWhileAnIndependentPartDrawingPublishesItsPart(bool independentPartDrawing)
+    public async Task SelectedBomPublishesOnlyPairedDrawingsAndFreezesModelsAsReferences(bool independentPartDrawing)
     {
         var (repo, project, assembly, part, otherPart, drawing, partDrawing, rows) = await Prepare(independentPartDrawing);
         var pairs = await DrawingModelPairing.ReadAsync(repo, project.Id, default);
@@ -35,8 +35,10 @@ public sealed class DrawingModelPairingTests
         var capture = typeof(PdmWorkflowService).GetMethod("CaptureReleaseVersionsAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
         package = await (Task<ReleasePackage>)capture.Invoke(workflow, [package,CancellationToken.None])!;
         Assert.NotNull(package.VersionBindings);
-        Assert.True(package.VersionBindings.Single(item => item.DocumentId == assembly.Id).Publish);
-        Assert.Equal(independentPartDrawing, package.VersionBindings.Single(item => item.DocumentId == part.Id).Publish);
+        Assert.False(package.VersionBindings.Single(item => item.DocumentId == assembly.Id).Publish);
+        Assert.False(package.VersionBindings.Single(item => item.DocumentId == part.Id).Publish);
+        Assert.Equal(independentPartDrawing ? 2 : 1, package.VersionBindings.Count(item => item.Publish));
+        Assert.True(package.VersionBindings.Single(item => item.DocumentId == drawing.Id).Publish);
         var reference = package.VersionBindings.Single(item => item.DocumentId == otherPart.Id);
         Assert.False(reference.Publish);
         Assert.False(reference.RequiresPromotion);
@@ -45,9 +47,10 @@ public sealed class DrawingModelPairingTests
         Assert.Equal([assembly.Id], ReleaseBoundSourceReader.ModelDocumentIds(package,drawing.Id,source.ReferenceSnapshot));
         package = await repo.CreateReleasePackageAsync(package with {State=ReleasePackageState.Publishing},default);
         var previews = await repo.ListReleasePreviewSourcesAsync(package.Id,default);
-        Assert.Equal(independentPartDrawing ? 3 : 1,previews.Count);
+        Assert.Equal(independentPartDrawing ? 4 : 2,previews.Count);
         Assert.DoesNotContain(previews,item=>item.DocumentId==otherPart.Id);
-        Assert.DoesNotContain(previews,item=>item.DocumentId==assembly.Id);
+        Assert.Contains(previews,item=>item.DocumentId==assembly.Id);
+        Assert.Equal(independentPartDrawing, previews.Any(item => item.DocumentId == part.Id));
         Assert.Contains(await repo.ListReleaseReferenceSourcesAsync(package.Id,default),item=>item.DocumentId==otherPart.Id);
         Assert.Single(await repo.ListDocumentVersionsAsync(otherPart.Id,default));
     }

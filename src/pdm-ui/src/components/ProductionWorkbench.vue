@@ -1,7 +1,13 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
+import { useUserDisplayName as usePersonDisplayName } from '../userDisplay'
+const displayUserName = usePersonDisplayName()
 import { u9UnitName } from '../u9Units'
 import { isInactiveDom } from '../activeDom'
 import SearchField from './SearchField.vue'
+import { invalidateProjectAttention, useProjectAttention } from '../composables/useProjectAttention'
+import { projectAttentionReasons, releaseFailureReasons } from '../projectAttention'
+import type { ProductionReleaseSummary } from '../productionTracking'
 import { canViewProductionTab } from '../navigationAccess'
 import { vQuantity } from '../quantityInput'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
@@ -24,7 +30,7 @@ import { assignProductionLot, listProductionTrackingProjects, readProductionCapa
   saveProductionCapacity, scheduleProductionLot,
   updateProductionLineDelivery, updateProductionLotPromise, resolveProductionRevision,
   readProductionLotQr, listProductionDrawings, downloadProductionDrawingArchive, downloadGeneratedFile } from '../api'
-import { productionReleaseAttention, lineState, lineTotal, movementTotal, productionPriority, productionRequestId, allocationChangeBlockReason, unassignedQuantity, isProductionLineOpen, isProductionLotOpen, selfProductionState, externalProductionState, lotStage, productionMovementLabels,
+import { lineState, lineTotal, movementTotal, productionPriority, productionRequestId, allocationChangeBlockReason, unassignedQuantity, isProductionLineOpen, isProductionLotOpen, selfProductionState, externalProductionState, lotStage, productionMovementLabels,
   type ProductionCapacityView, type ProductionLine, type ProductionLot,
   type ProductionProject, type ProductionReleaseRecord, type ProductionReleaseState,
   type ProductionRoute,
@@ -38,15 +44,11 @@ import { createProductionDrawingBomDownload } from '../productionDrawingBomDownl
 
 const props = defineProps<{ token: string; username: string; permissions: string[] }>()
 const workbenchRoot = ref<HTMLElement | null>(null)
-const scanPageUrl = new URL(window.location.pathname, window.location.origin)
-scanPageUrl.searchParams.set('productionScan', '1')
-const configuration = new URLSearchParams(window.location.search).get('configuration')
-if (configuration) scanPageUrl.searchParams.set('configuration', configuration)
-const scanPageHref = scanPageUrl.pathname + scanPageUrl.search
 const scanPreviewKey = ref(0)
 const showAllocationEdit = ref(false)
 const tab = rememberedTab<string>('production.tab', 'tracking', ['tracking','external','schedule','capacity','execution','drawings','suppliers'])
 const projects = ref<ProductionProject[]>([])
+const listAttention = useProjectAttention(() => props.token, () => projects.value.map(item => item.id))
 const record = ref<ProductionReleaseRecord | null>(null)
 const allCategories = ref(false), allRecords = ref<ProductionReleaseRecord[]>([])
 const trackingOnlyUnassigned = ref(false), trackingOnlyOpen = ref(true)
@@ -87,17 +89,15 @@ const scheduleFilter = ref<'all' | 'unplanned' | 'planned'>('all'), schedulePage
 const checkedLineIds = ref<string[]>([])
 const checkedScheduleIds = ref<string[]>([]), showScheduleBatch = ref(false)
 const drawingContext = ref<{ state: NonNullable<ProductionReleaseRecord['state']>; line: ProductionLine; action: 'preview' | 'download' }>()
-const detailColumnWeights = [1, 1, 3, 1, 2, 2, 2, 2, 1, 2, 2, 2, 2]
-function detailFixedColumnWidth(index: number) {
-  if ([0, 1, 3, 8].includes(index)) return 50
-  return index === detailColumnWeights.length - 1 ? 90 : undefined
-}
-const detailFlexibleWeight = detailColumnWeights.reduce((total, weight, index) => total + (detailFixedColumnWidth(index) ? 0 : weight), 0)
+const detailColumnWeights = [0, 0, 3.4, 0, 1.4, 1.8, 1.5, 1.6, 0, 1.9, 2, 2, 0]
+const detailFixedWidths = [36, 44, 0, 52, 0, 0, 0, 0, 38, 0, 0, 0, 90]
+const detailFixedWidth = detailFixedWidths.reduce((total, width) => total + width, 0)
+const detailFlexibleWeight = detailColumnWeights.reduce((total, weight) => total + weight, 0)
 function detailColumnWidth(index: number, weight: number) {
-  const fixed = detailFixedColumnWidth(index)
+  const fixed = detailFixedWidths[index]
   if (fixed) return `${fixed}px`
   const ratio = weight / detailFlexibleWeight
-  return `calc(${ratio * 100}% - ${ratio * 290}px)`
+  return `calc((max(680px, 100cqw) - ${detailFixedWidth}px) * ${ratio})`
 }
 const batchMode = ref<'delivery' | 'assign' | null>(null)
 const includeComplete = ref(false), statusFilter = ref('')
@@ -236,11 +236,20 @@ const visibleProjects = computed(() => projects.value.map(project => ({ ...proje
   return !query || `${project.code} ${project.name} ${item.packageNumber}`.toLowerCase().includes(query)
 }) })).filter(project => project.packages.length > 0))
 function projectAttention(project: ProductionProject): 'error' | 'new' | '' {
-  const tones = (projects.value.find(item => item.id === project.id)?.packages ?? project.packages).map(productionReleaseAttention)
+  if (listAttention.reasons(project.id, undefined, true).length) return 'error'
+  const tones = (projects.value.find(item => item.id === project.id)?.packages ?? project.packages).map(packageAttention)
   return tones.includes('error') ? 'error' : tones.includes('new') ? 'new' : ''
 }
+function packageWarnings(item: ProductionReleaseSummary) {
+  const entry = listAttention.entries.value[item.projectId]
+  const packages = listAttention.releases.value[item.projectId]?.filter(release => release.id === item.releasePackageId)
+  return entry ? projectAttentionReasons(entry, listAttention.today.value, packages) : releaseFailureReasons(packages)
+}
+function packageAttention(item: ProductionReleaseSummary): 'error' | 'new' | '' {
+  return item.hasReleaseAttention || packageWarnings(item).length ? 'error' : !item.receivedAt ? 'new' : ''
+}
 function attentionTitle(tone: string) {
-  return tone === 'error' ? '存在图纸转出未完成事项，请处理或重试' : tone === 'new' ? '有发布包待供应链接收，接收后停止绿色提示' : undefined
+  return tone === 'error' ? '项目计划、交期、采购交付或发布／转图存在异常，请查看详情' : tone === 'new' ? '有发布包待供应链接收，接收后停止绿色提示' : listAttention.error.value || undefined
 }
 watch(visibleProjects, values => {
   if (projectSearch.value.trim() || statusFilter.value) {
@@ -442,6 +451,7 @@ async function loadRelease(id: string) {
 }
 async function refresh() {
   if (!props.token || !availableTabs.value.includes(tab.value)) return
+  invalidateProjectAttention(props.token)
   const current = ++refreshGeneration, activeTab = tab.value
   pending.value = true
   error.value = ''
@@ -451,6 +461,7 @@ async function refresh() {
     const values = activeTab === 'external' ? await listProductionTrackingProjects(props.token, false, true) : await listProductionTrackingProjects(props.token, activeTab === 'schedule')
     if (current !== refreshGeneration || tab.value !== activeTab) return
     projects.value = values
+    void listAttention.refresh()
     if (allCategories.value) {
       const records: ProductionReleaseRecord[] = [], choices: ProductionSupplierChoices[] = []
       const ids = [...new Set(values.flatMap(project => project.packages.map(item => item.releasePackageId)))]
@@ -579,13 +590,6 @@ async function chooseRelease(projectId: string, id: string, event?: MouseEvent) 
   selectedProjectId.value = projectId
   expandProject(projectId)
   await loadRelease(id)
-}
-function openAllCategories() {
-  allCategories.value = true; allRecords.value = []
-  generation++; selectedProjectId.value = ''; selectedReleaseId.value = ''; record.value = null
-  selectedLineId.value = ''; selectedLotId.value = ''; checkedLineIds.value = []
-  projectSearch.value = ''; statusFilter.value = ''; includeComplete.value = true
-  void refresh()
 }
 async function openOverviewLine(source: ProductionReleaseState, line: ProductionLine) {
   await chooseRelease(source.projectId, source.releasePackageId)
@@ -744,19 +748,18 @@ function printLotCard() {
             <SearchField><input v-model="projectSearch" type="search" placeholder="项目号、名称或发布包" aria-label="搜索生产发布包"></SearchField>
           </div>
           <div class="production-workbench__tree-actions">
-            <button type="button" class="production-workbench__all-categories" :class="{ selected: allCategories }" :aria-pressed="allCategories" @click="openAllCategories">全部发布包</button>
             <button type="button" class="production-workbench__toggle-projects" :aria-label="hasExpandedProjects ? '折叠全部项目发布包' : '展开全部项目发布包'" :aria-expanded="hasExpandedProjects" :disabled="!visibleProjects.length" @click="toggleAllProjects">{{ hasExpandedProjects ? '折叠' : '展开' }}</button>
           </div>
           <div v-for="project in visibleProjects" :key="project.id" class="production-workbench__tree-project">
-            <button type="button" class="production-workbench__project" :class="{ selected: selectedProjectId === project.id, 'is-release-attention': Boolean(projectAttention(project)) }" :data-release-attention="projectAttention(project) || undefined" :title="attentionTitle(projectAttention(project))" :aria-expanded="expandedProjectIds.includes(project.id)" :aria-controls="`production-project-packages-${project.id}`" :aria-label="`${expandedProjectIds.includes(project.id) ? '折叠' : '展开'}项目 ${project.code} 的发布包`" @click="toggleProject(project.id, $event)">
+            <button type="button" class="production-workbench__project" :class="{ selected: selectedProjectId === project.id, 'is-release-attention': Boolean(projectAttention(project)) }" :data-release-attention="projectAttention(project) || undefined" :title="listAttention.reasons(project.id, undefined, true).join('；') || attentionTitle(projectAttention(project))" :aria-expanded="expandedProjectIds.includes(project.id)" :aria-controls="`production-project-packages-${project.id}`" :aria-label="`${expandedProjectIds.includes(project.id) ? '折叠' : '展开'}项目 ${project.code} 的发布包`" @click="toggleProject(project.id, $event)">
               <ReleaseAttentionBorder v-if="projectAttention(project)" :tone="projectAttention(project) as 'error' | 'new'" />
               <Tag :filled="selectedProjectId === project.id" class="production-workbench__category-icon" :size="14" aria-hidden="true" />
               <span class="production-workbench__project-identity" :title="`${project.code} · ${project.name}`"><strong>{{ project.code }}</strong><span>{{ project.name }}</span></span>
               <small>{{ project.packages.length }} 包</small>
             </button>
             <Transition name="production-packages"><div v-show="expandedProjectIds.includes(project.id)" :id="`production-project-packages-${project.id}`" class="production-workbench__project-packages" role="group" :aria-label="`${project.code}的发布包`">
-            <button v-for="item in project.packages" :key="item.releasePackageId" type="button" class="production-workbench__package" :class="{ selected: selectedReleaseId === item.releasePackageId, 'is-release-attention': Boolean(productionReleaseAttention(item)) }" :data-release-attention="productionReleaseAttention(item) || undefined" :title="attentionTitle(productionReleaseAttention(item))" @click="chooseRelease(project.id, item.releasePackageId, $event)">
-              <ReleaseAttentionBorder v-if="productionReleaseAttention(item)" :tone="productionReleaseAttention(item) as 'error' | 'new'" />
+            <button v-for="item in project.packages" :key="item.releasePackageId" type="button" class="production-workbench__package" :class="{ selected: selectedReleaseId === item.releasePackageId, 'is-release-attention': Boolean(packageAttention(item)) }" :data-release-attention="packageAttention(item) || undefined" :title="packageWarnings(item).join('；') || attentionTitle(packageAttention(item))" @click="chooseRelease(project.id, item.releasePackageId, $event)">
+              <ReleaseAttentionBorder v-if="packageAttention(item)" :tone="packageAttention(item) as 'error' | 'new'" />
               <Package :filled="selectedReleaseId === item.releasePackageId" class="production-workbench__package-icon" :size="16" aria-hidden="true" />
               <span class="production-workbench__package-content">
                 <strong class="production-workbench__package-number" :title="item.packageNumber">{{ item.packageNumber.replace(/^RP-.+-(\d{8}-[^-]+)$/, '$1') }}</strong>
@@ -810,8 +813,8 @@ function printLotCard() {
               </template>
             </div>
             <p v-if="downloadStatus" class="production-workbench__download-status" role="status">{{ downloadStatus }}</p>
-            <div class="production-workbench__table-wrap"><table class="pdm-fit-columns">
-              <colgroup><col v-for="(weight, index) in detailColumnWeights" :key="index" :data-pdm-fixed-width="detailFixedColumnWidth(index)" :style="{ width: detailColumnWidth(index, weight) }"></colgroup>
+            <div class="production-workbench__table-wrap production-workbench__trace-table"><table class="pdm-fit-columns" data-pdm-min-width="680">
+              <colgroup><col v-for="(weight, index) in detailColumnWeights" :key="index" :data-pdm-fixed-width="detailFixedWidths[index] || undefined" :style="{ width: detailColumnWidth(index, weight) }"></colgroup>
               <thead><tr><th><template v-if="allCategories">查看</template><input v-else type="checkbox" aria-label="全选当前筛选物料（跨页）" :checked="allVisibleChecked" :indeterminate="someVisibleChecked" :disabled="!visibleLines.length || pending || tab === 'external' && !canReadDrawings" @change="toggleVisibleLines"></th><th>等级</th><th>图号／名称</th><th>版次</th><th>材质</th><th>表面处理</th><th>热处理</th><th>合格／需求</th><th>已领</th><th>当前环节</th><th>需求日期</th><th>预计完成</th><th>生产资料</th></tr></thead>
               <tbody><tr v-for="{ source, line, key } in pagedLineRows" :key="key" :class="{ selected: !allCategories && selectedLineId === line.id }" @click="allCategories ? openOverviewLine(source, line) : selectedLineId = line.id">
                 <td><button v-if="allCategories" type="button" class="production-workbench__open-package" :aria-label="`打开发布包 ${source.packageNumber} 的物料 ${line.drawingNumber}`" @click.stop="openOverviewLine(source, line)">查看</button><input v-else v-model="checkedLineIds" type="checkbox" :value="line.id" :aria-label="`选择物料 ${line.drawingNumber} ${line.revision}`" :disabled="pending || tab === 'external' && !canReadDrawings" @click.stop></td>
@@ -830,13 +833,13 @@ function printLotCard() {
           <section class="pdm-panel production-workbench__detail">
             <template v-if="selectedLine && state"><div class="production-workbench__detail-heading"><div><header><h2>{{ tab === 'external' ? '外协物料 · 详细状态' : '选中物料 · 详细状态' }}</h2><span class="production-workbench__priority" :class="priorityClass(selectedLine.priority)">{{ productionPriority(selectedLine.priority) }}</span></header><h3 v-stocked-material="selectedLine.materialCode">{{ selectedLine.name }}</h3><p>{{ selectedLine.drawingNumber }} · {{ selectedLine.displayRevision || selectedLine.revision || '无版次' }} · {{ lineState(state, selectedLine) }}</p></div><ProductionDrawingQr v-if="canReadDrawings" :token="token" :state="state" :line="selectedLine" /></div><dl><dt>需求数量</dt><dd>{{ selectedLine.requiredQuantity }} {{ u9UnitName(selectedLine.unit) }}</dd><dt>质检合格</dt><dd>{{ lineMetric(selectedLine, 'Pass') }} {{ u9UnitName(selectedLine.unit) }}</dd><dt>已领用</dt><dd>{{ lineMetric(selectedLine, 'Issue') }} {{ u9UnitName(selectedLine.unit) }}</dd><dt>需求日期</dt><dd>{{ dateLabel(selectedLine.requiredOn) }}</dd><dt>材质</dt><dd>{{ selectedLine.material || '—' }}</dd><dt>表面处理</dt><dd>{{ selectedLine.surfaceTreatment || '—' }}</dd><dt>热处理</dt><dd>{{ selectedLine.heatTreatment || '—' }}</dd></dl>
               <details v-if="tab === 'tracking' && canAdjustDelivery" class="production-workbench__operation"><summary>调整紧急程度／需求日期</summary><label>紧急程度<select v-model="deliveryPriority"><option value="Normal">普通</option><option value="Priority">加急</option><option value="Urgent">紧急</option></select></label><label>需求日期<input v-model="deliveryRequiredOn" type="date"></label><label>调整原因<input v-model="deliveryReason" placeholder="填写协调原因"></label><button type="button" class="pdm-secondary-action" :disabled="pending" @click="saveDelivery">保存调整</button></details>
-              <h4>生产批次</h4><div class="production-workbench__lots"><button v-for="lot in lineLots" :key="lot.id" type="button" :class="{ selected: selectedLotId === lot.id }" @click="selectedLotId = lot.id"><strong>{{ routeLabel(lot.route) }} · {{ lot.quantity }} {{ u9UnitName(selectedLine.unit) }}</strong><small>{{ lot.route === 'External' ? lot.supplier : lot.assignee || '待排产' }} · 预计 {{ dateLabel(lot.promisedOn) }}</small></button><p v-if="!lineLots.length">供应链尚未分配生产批次</p></div>
-              <dl v-if="tab === 'external' && selectedLot?.route === 'External'" aria-label="外协批次信息"><dt>供应商</dt><dd>{{ selectedLot.supplier || '—' }}</dd><dt>外协批次数量</dt><dd>{{ selectedLot.quantity }}</dd><dt>负责人</dt><dd>{{ selectedLot.assignee || '—' }}</dd><dt>承诺交期</dt><dd :class="{ 'production-workbench__late-date': isLateDate(selectedLot.promisedOn, selectedLine.requiredOn) }">{{ dateLabel(selectedLot.promisedOn) }}</dd><dt>外协已交货</dt><dd>{{ movementTotal(state, selectedLot.id, 'ExternalDelivered') }}</dd></dl>
+              <h4>生产批次</h4><div class="production-workbench__lots"><button v-for="lot in lineLots" :key="lot.id" type="button" :class="{ selected: selectedLotId === lot.id }" @click="selectedLotId = lot.id"><strong>{{ routeLabel(lot.route) }} · {{ lot.quantity }} {{ u9UnitName(selectedLine.unit) }}</strong><small>{{ lot.route === 'External' ? lot.supplier : displayUserName(lot.assignee, '待排产') }} · 预计 {{ dateLabel(lot.promisedOn) }}</small></button><p v-if="!lineLots.length">供应链尚未分配生产批次</p></div>
+              <dl v-if="tab === 'external' && selectedLot?.route === 'External'" aria-label="外协批次信息"><dt>供应商</dt><dd>{{ selectedLot.supplier || '—' }}</dd><dt>外协批次数量</dt><dd>{{ selectedLot.quantity }}</dd><dt>负责人</dt><dd><PersonName :name="displayUserName(selectedLot.assignee)" /></dd><dt>承诺交期</dt><dd :class="{ 'production-workbench__late-date': isLateDate(selectedLot.promisedOn, selectedLine.requiredOn) }">{{ dateLabel(selectedLot.promisedOn) }}</dd><dt>外协已交货</dt><dd>{{ movementTotal(state, selectedLot.id, 'ExternalDelivered') }}</dd></dl>
               <template v-if="tab === 'tracking' && canAssign && state.receivedAt && (selectedLot || checkedLines.length)"><button type="button" class="pdm-secondary-action production-workbench__allocation-edit" :disabled="pending || !checkedLines.length && Boolean(allocationBlocked)" :title="!checkedLines.length && allocationBlocked || undefined" @click="checkedLines.length ? batchMode = 'assign' : showAllocationEdit = true">{{ checkedLines.length ? '批量修改所选分配' : '修改选中批次分配' }}</button><small v-if="!checkedLines.length && allocationBlocked" class="production-workbench__allocation-blocked">{{ allocationBlocked }}</small></template>
               <template v-if="tab === 'tracking' && canAssign && state.receivedAt"><details class="production-workbench__operation"><summary>新增分配自制／外协</summary><p>未分配数量 {{ unassigned }}；已有批次请使用“修改选中批次分配”。</p><label>方式<select v-model="assignRoute"><option value="Self">自制</option><option value="External">外协</option></select></label><label>本次数量<input v-quantity v-model.number="assignQuantity" type="number" min="0.001" step="any"></label><ProductionSupplierPicker v-if="assignRoute === 'External'" v-model="assignSupplierId" :token="token" :disabled="pending" @selected="assignSupplier = $event?.name ?? ''" /><label>负责人<input v-model="assignAssignee" placeholder="填写负责人"></label><label>承诺日期<input v-model="assignPromisedOn" type="date"></label><button type="button" class="pdm-primary-action" :disabled="pending || unassigned <= 0" @click="assign">确认新增分配</button></details></template>
-              <template v-if="selectedLot"><ProductionRevisionDisposition v-if="selectedLot.frozen" ref="revisionPanel" :key="selectedLot.id" :state="state" :lot="selectedLot" :unit="selectedLine.unit" :can-resolve="canAssign || canSchedule && selectedLot.route === 'Self'" :pending="pending" @resolve="resolveRevision" /><details v-if="canAssign && selectedLot.route === 'External'" class="production-workbench__operation"><summary>更新外协承诺交期</summary><label>承诺日期<input v-model="promiseOn" type="date"></label><label>调整原因<input v-model="promiseReason" placeholder="填写供应商反馈或调整原因"></label><button type="button" class="pdm-secondary-action" :disabled="pending" @click="savePromise">保存承诺日期</button></details><details v-if="tab === 'tracking'" class="production-workbench__operation"><summary>登记本次流转／操作记录</summary><ProductionOperationPanel v-if="record" :token="token" :username="username" :record="record" :line-id="selectedLine.id" @updated="record = $event" /></details><details v-else class="production-workbench__operation"><summary>完整外协流转记录</summary><ol class="production-workbench__events"><li v-for="item in state.movements.filter(item => item.lotId === selectedLot?.id).slice().reverse()" :key="item.id"><time>{{ new Date(item.occurredAt).toLocaleString('zh-CN', { hour12: false }) }}</time><span>{{ item.operationName || movementLabels[item.kind] || '流程办理' }} {{ item.quantity }} · {{ item.actorName || item.actor }}</span><small v-if="item.workstationName">{{ item.workstationName }}</small><small v-if="item.fromStage || item.toStage">{{ item.fromStage }} → {{ item.toStage }}</small><small v-if="item.note">{{ item.note }}</small></li></ol><p v-if="!state.movements.some(item => item.lotId === selectedLot?.id)">暂无流转记录</p></details><button v-if="canSchedule && selectedLot.route === 'Self' && !selectedLot.frozen" type="button" class="pdm-secondary-action" @click="chooseScheduleLot(selectedLot)">安排自制生产</button></template>
+              <template v-if="selectedLot"><ProductionRevisionDisposition v-if="selectedLot.frozen" ref="revisionPanel" :key="selectedLot.id" :state="state" :lot="selectedLot" :unit="selectedLine.unit" :can-resolve="canAssign || canSchedule && selectedLot.route === 'Self'" :pending="pending" @resolve="resolveRevision" /><details v-if="canAssign && selectedLot.route === 'External'" class="production-workbench__operation"><summary>更新外协承诺交期</summary><label>承诺日期<input v-model="promiseOn" type="date"></label><label>调整原因<input v-model="promiseReason" placeholder="填写供应商反馈或调整原因"></label><button type="button" class="pdm-secondary-action" :disabled="pending" @click="savePromise">保存承诺日期</button></details><details v-if="tab === 'tracking'" class="production-workbench__operation"><summary>登记本次流转／操作记录</summary><ProductionOperationPanel v-if="record" :token="token" :username="username" :record="record" :line-id="selectedLine.id" @updated="record = $event" /></details><details v-else class="production-workbench__operation"><summary>完整外协流转记录</summary><ol class="production-workbench__events"><li v-for="item in state.movements.filter(item => item.lotId === selectedLot?.id).slice().reverse()" :key="item.id"><time>{{ new Date(item.occurredAt).toLocaleString('zh-CN', { hour12: false }) }}</time><span>{{ item.operationName || movementLabels[item.kind] || '流程办理' }} {{ item.quantity }} · <PersonName :name="item.actorName || displayUserName(item.actor)" /></span><small v-if="item.workstationName">{{ item.workstationName }}</small><small v-if="item.fromStage || item.toStage">{{ item.fromStage }} → {{ item.toStage }}</small><small v-if="item.note">{{ item.note }}</small></li></ol><p v-if="!state.movements.some(item => item.lotId === selectedLot?.id)">暂无流转记录</p></details><button v-if="canSchedule && selectedLot.route === 'Self' && !selectedLot.frozen" type="button" class="pdm-secondary-action" @click="chooseScheduleLot(selectedLot)">安排自制生产</button></template>
               <button v-if="selectedLot" type="button" class="pdm-secondary-action" @click="openLotCard(selectedLot)">查看／打印批次流转卡</button>
-              <h4>最近记录</h4><ol class="production-workbench__events"><li v-for="item in recentMovements" :key="item.id"><time>{{ item.occurredAt.slice(5, 16).replace('T', ' ') }}</time><span>{{ item.operationName || movementLabels[item.kind] || '流程办理' }} {{ item.quantity }} · {{ item.actor }}</span><small v-if="item.kind === 'AllocationChanged'">{{ item.note }}</small></li><li v-if="!recentMovements.length">暂无流转记录</li></ol>
+              <h4>最近记录</h4><ol class="production-workbench__events"><li v-for="item in recentMovements" :key="item.id"><time>{{ item.occurredAt.slice(5, 16).replace('T', ' ') }}</time><span>{{ item.operationName || movementLabels[item.kind] || '流程办理' }} {{ item.quantity }} · <PersonName :name="displayUserName(item.actor)" /></span><small v-if="item.kind === 'AllocationChanged'">{{ item.note }}</small></li><li v-if="!recentMovements.length">暂无流转记录</li></ol>
             </template><p v-else class="production-workbench__empty">点击物料查看详细状态</p>
           </section>
 
@@ -865,8 +868,8 @@ function printLotCard() {
                 <template v-if="!allCategories"><button type="button" class="pdm-secondary-action" :disabled="!checkedSelfLots.length" @click="checkedScheduleIds = []">清空选择</button><template v-if="canReadDrawings && state.scope !== 'Nameplate'"><button type="button" class="pdm-secondary-action" :disabled="!checkedDrawingLines.length || pending || downloading" :aria-busy="downloading" @click="downloadCheckedDrawings('Pdf')">批量下载 PDF</button><button type="button" class="pdm-secondary-action" :disabled="!checkedDrawingLines.length || pending || downloading" :aria-busy="downloading" @click="downloadCheckedDrawings('Step')">批量下载 STEP</button></template><button v-if="canSchedule" type="button" class="pdm-secondary-action" :disabled="!checkedScheduleLots.length || checkedScheduleLots.length !== checkedSelfLots.length || pending" :title="checkedScheduleLots.length !== checkedSelfLots.length ? '所选批次包含尚未签收或已冻结的批次，请调整勾选后排程' : undefined" @click="showScheduleBatch = true">批量排程</button></template>
               </div>
               <p v-if="downloadStatus" class="production-workbench__download-status" role="status">{{ downloadStatus }}</p>
-              <div class="production-workbench__table-wrap"><table class="pdm-fit-columns">
-                <colgroup><col v-for="(weight, index) in detailColumnWeights" :key="index" :data-pdm-fixed-width="detailFixedColumnWidth(index)" :style="{ width: detailColumnWidth(index, weight) }"></colgroup>
+              <div class="production-workbench__table-wrap production-workbench__trace-table"><table class="pdm-fit-columns" data-pdm-min-width="680">
+                <colgroup><col v-for="(weight, index) in detailColumnWeights" :key="index" :data-pdm-fixed-width="detailFixedWidths[index] || undefined" :style="{ width: detailColumnWidth(index, weight) }"></colgroup>
                 <thead><tr><th><template v-if="allCategories">查看</template><input v-else type="checkbox" aria-label="全选当前筛选自制批次（跨页）" :checked="allScheduleChecked" :indeterminate="someScheduleChecked" :disabled="!selectableScheduleLots.length || pending" @change="toggleScheduleLots"></th><th>等级</th><th>图号／名称</th><th>版次</th><th>材质</th><th>表面处理</th><th>热处理</th><th>合格／需求</th><th>已领</th><th>当前环节</th><th>需求日期</th><th>预计完成</th><th>生产资料</th></tr></thead>
                 <tbody><tr v-for="lot in pagedScheduleLots" :key="lot.key" :class="{ selected: !allCategories && selectedLotId === lot.id }" @click="allCategories ? openOverviewLot(lot.source, lot) : chooseScheduleLot(lot)">
                   <td><button v-if="allCategories" type="button" class="production-workbench__open-package" :aria-label="`打开发布包 ${lot.source.packageNumber} 的自制批次 ${lot.line?.drawingNumber} ${lot.id}`" @click.stop="openOverviewLot(lot.source, lot)">查看</button><input v-else v-model="checkedScheduleIds" type="checkbox" :value="lot.id" :aria-label="`勾选排程批次 ${lot.line?.drawingNumber} ${lot.id}`" :disabled="pending || !canReadDrawings && (!canSchedule || !mayScheduleLot(lot))" :title="canReadDrawings ? '勾选后可批量下载本包正式图纸' : lot.frozen ? '图纸变更冻结的批次不能排程' : !mayScheduleLot(lot) ? '请先由生产岗位扫码签收' : undefined" @click.stop></td>
@@ -886,7 +889,7 @@ function printLotCard() {
                 <ProductionDrawingQr v-if="canReadDrawings && state && selectedLot?.route === 'Self' && selectedLine" :token="token" :state="state" :line="selectedLine" />
               </div>
               <template v-if="selectedLot?.route === 'Self' && selectedLine">
-                <dl><dt>批次数量</dt><dd>{{ selectedLot.quantity }}</dd><dt>排程状态</dt><dd>{{ selectedLot.frozen ? '变更待处理' : selectedLot.schedule.length ? '已排产' : '待排产' }}</dd><dt>已排工时</dt><dd>{{ Number(selectedLot.schedule.reduce((total, slot) => total + slot.hours, 0).toFixed(2)) }} 小时</dd><dt>需求日期</dt><dd>{{ dateLabel(selectedLine.requiredOn) }}</dd><dt>负责人</dt><dd>{{ selectedLot.assignee || '—' }}</dd><dt>材质</dt><dd>{{ selectedLine.material || '—' }}</dd><dt>表面处理</dt><dd>{{ selectedLine.surfaceTreatment || '—' }}</dd><dt>热处理</dt><dd>{{ selectedLine.heatTreatment || '—' }}</dd></dl>
+                <dl><dt>批次数量</dt><dd>{{ selectedLot.quantity }}</dd><dt>排程状态</dt><dd>{{ selectedLot.frozen ? '变更待处理' : selectedLot.schedule.length ? '已排产' : '待排产' }}</dd><dt>已排工时</dt><dd>{{ Number(selectedLot.schedule.reduce((total, slot) => total + slot.hours, 0).toFixed(2)) }} 小时</dd><dt>需求日期</dt><dd>{{ dateLabel(selectedLine.requiredOn) }}</dd><dt>负责人</dt><dd><PersonName :name="displayUserName(selectedLot.assignee)" /></dd><dt>材质</dt><dd>{{ selectedLine.material || '—' }}</dd><dt>表面处理</dt><dd>{{ selectedLine.surfaceTreatment || '—' }}</dd><dt>热处理</dt><dd>{{ selectedLine.heatTreatment || '—' }}</dd></dl>
                 <ProductionRevisionDisposition v-if="selectedLot.frozen && state" ref="revisionPanel" :key="selectedLot.id" :state="state" :lot="selectedLot" :unit="selectedLine.unit" :can-resolve="canAssign || canSchedule" :pending="pending" @resolve="resolveRevision" />
                 <p v-if="!mayScheduleLot(selectedLot) && !selectedLot.frozen">请先由生产岗位扫码签收，再安排排程。</p><form class="production-workbench__schedule-form" @submit.prevent="saveSchedule"><fieldset :disabled="pending || !canSchedule || !mayScheduleLot(selectedLot)">
                   <div v-for="(slot, index) in scheduleSlots" :key="index" class="production-workbench__slot">
@@ -902,7 +905,7 @@ function printLotCard() {
                   <ol class="production-workbench__events"><li v-for="item in selectedLotMovements" :key="item.id">
                     <strong>{{ item.operationName || movementLabels[item.kind] || '流程办理' }} · {{ item.quantity }} {{ u9UnitName(selectedLine.unit) }}</strong>
                     <time>{{ new Date(item.occurredAt).toLocaleString('zh-CN', { hour12: false }) }}</time>
-                    <span>{{ item.actorName || item.actor }}（{{ item.actor }}）</span><small v-if="item.actorRoles">操作角色：{{ item.actorRoles }}</small>
+                    <span><PersonName :name="item.actorName || displayUserName(item.actor)" />（<PersonName :name="displayUserName(item.actor)" />）</span><small v-if="item.actorRoles">操作角色：{{ item.actorRoles }}</small>
                     <span v-if="item.workstationName">{{ item.workstationName }}{{ item.resourceGroup ? ` · ${item.resourceGroup}` : '' }}</span>
                     <span v-if="item.fromStage || item.toStage">{{ item.fromStage }} → {{ item.toStage }}</span><span v-if="item.recipient">实际领用人：{{ item.recipient }}</span>
                     <small v-if="item.note">{{ item.note }}</small><small>记录编号：{{ item.id }}</small>
@@ -920,9 +923,17 @@ function printLotCard() {
       <div class="production-pda__stage">
         <div class="production-pda__body" role="group" aria-label="PDA移动扫码终端">
           <div class="production-pda__scanner" aria-hidden="true"></div>
-          <iframe :key="scanPreviewKey" :src="scanPageHref" class="production-pda__screen" title="PDA移动扫码页面" allow="camera"></iframe>
+          <div class="production-pda__bezel">
+            <iframe :key="scanPreviewKey" src="./production-app/index.html" class="production-pda__screen" title="PDA移动扫码页面" allow="camera"></iframe>
+          </div>
+          <div class="production-pda__keys" aria-hidden="true">
+            <span>↶</span><span>⌃</span><span class="production-pda__scan-key">•••</span><span>⌄</span><span>ENT</span>
+            <span>⌂</span><span>‹</span><span>›</span><span>⌫</span>
+            <span class="production-pda__function-key">—</span><span class="production-pda__number">1</span><span class="production-pda__number">2</span><span class="production-pda__number">3</span><span>P1</span>
+            <span class="production-pda__function-key">—</span><span class="production-pda__number">4</span><span class="production-pda__number">5</span><span class="production-pda__number">6</span><span class="production-pda__number">0</span>
+            <span>✱</span><span class="production-pda__number">7</span><span class="production-pda__number">8</span><span class="production-pda__number">9</span><span>↵</span>
+          </div>
           <span class="production-pda__brand" aria-hidden="true">UPLM PDA</span>
-          <div class="production-pda__keys" aria-hidden="true"><span></span><span></span><span></span></div>
         </div>
       </div>
     </section>
@@ -943,12 +954,17 @@ function printLotCard() {
 .production-workbench input,.production-workbench select{height:30px;min-width:0;border:1px solid var(--pdm-border);border-radius:var(--pdm-radius-control);padding:0 8px;background:var(--pdm-surface);font:inherit;color:inherit;box-sizing:border-box}
 .production-workbench button{font:inherit;cursor:pointer}.production-workbench button:disabled{cursor:not-allowed;opacity:.55}
 .production-workbench__execution-actions,.production-workbench__tabs,.production-workbench__toolbar,.production-workbench__line-tools,.production-workbench__lines header{display:flex;align-items:center;justify-content:space-between;gap:10px}
-.production-workbench__tabs{justify-content:flex-start;border-bottom:1px solid var(--pdm-border);gap:18px}.production-workbench__tabs button{border:0;background:none;min-height:36px;padding:6px 9px;color:var(--pdm-text-soft)}.production-workbench__tabs button[aria-current=page]{color:var(--pdm-blue);font-weight:700;border-bottom:2px solid var(--pdm-blue)}
+.production-workbench__tabs{justify-content:flex-start;border-bottom:1px solid var(--pdm-border);gap:18px}.production-workbench__tabs button{border:0;background:none;min-height:36px;padding:6px 9px;color:var(--pdm-text-soft)}.production-workbench__tabs button[aria-current=page]{ color:var(--pdm-text);font-weight:700;border-bottom:2px solid var(--pdm-blue)}
 .production-workbench__toolbar{flex-wrap:wrap;justify-content:flex-start;font-size:12px}.production-workbench__toolbar label{display:flex;align-items:center;gap:7px}.production-workbench__toolbar label input{height:auto}
-.production-workbench__grid{flex:1;min-height:0;display:grid;grid-template-columns:250px minmax(0,1fr) 320px;gap:var(--pdm-container-gap)}.production-workbench__tree,.production-workbench__lines,.production-workbench__detail,.production-workbench__summary{padding:10px;min-width:0;box-sizing:border-box}.production-workbench__tree{overflow:auto}.production-workbench__tree-search{display:flex;align-items:center;gap:8px;margin:8px 0}.production-workbench__tree-search>input{flex:1;min-width:0;width:0}.production-workbench__project,.production-workbench__package{display:block;width:100%;border:0;text-align:left;background:transparent;padding:8px;border-radius:5px}.production-workbench__project{display:flex;align-items:center;gap:5px;border-top:1px solid var(--pdm-border);white-space:nowrap}.production-workbench__project span{overflow:hidden;text-overflow:ellipsis}.production-workbench__project small{margin-left:auto;flex:none}.production-workbench__package{margin:2px 0 2px 8px;width:calc(100% - 8px);border-left:2px solid transparent}.production-workbench__package.selected{background:var(--pdm-blue-soft);border-color:var(--pdm-blue)}.production-workbench__package span{display:flex;align-items:center;justify-content:space-between;gap:4px}.production-workbench__package em{font-style:normal;color:var(--pdm-blue);white-space:nowrap}.production-workbench__package small{display:block;color:var(--pdm-text-soft);margin-top:3px}.production-workbench__package b{color:var(--pdm-danger)}
-.production-workbench__lines{display:flex;flex-direction:column;overflow:hidden}.production-workbench__lines header{flex:0 0 auto;min-height:56px}.production-workbench__lines header p{font-size:11px}.production-workbench__state{font-size:12px;color:var(--pdm-blue);margin-left:7px}.production-workbench__line-tools{flex:0 0 auto;padding:8px 0;border-top:1px solid var(--pdm-border)}.production-workbench__line-tools nav{display:flex;gap:3px}.production-workbench__line-tools button{border:0;background:none;padding:5px 7px}.production-workbench__line-tools button[aria-pressed=true]{color:var(--pdm-blue);font-weight:700;border-bottom:2px solid var(--pdm-blue)}.production-workbench__line-tools input{width:190px}
+.production-workbench__grid{flex:1;min-height:0;display:grid;grid-template-columns:clamp(180px,12vw,250px) minmax(0,1fr) clamp(228px,16vw,320px);gap:var(--pdm-container-gap)}.production-workbench__tree,.production-workbench__lines,.production-workbench__detail,.production-workbench__summary{padding:10px;min-width:0;box-sizing:border-box}.production-workbench__tree{overflow:auto}.production-workbench__tree-search{display:flex;align-items:center;gap:8px;margin:8px 0}.production-workbench__tree-search>input{flex:1;min-width:0;width:0}.production-workbench__project,.production-workbench__package{display:block;width:100%;border:0;text-align:left;background:transparent;padding:8px;border-radius:5px}.production-workbench__project{display:flex;align-items:center;gap:5px;border-top:1px solid var(--pdm-border);white-space:nowrap}.production-workbench__project span{overflow:hidden;text-overflow:ellipsis}.production-workbench__project small{margin-left:auto;flex:none}.production-workbench__package{margin:2px 0 2px 8px;width:calc(100% - 8px);border-left:2px solid transparent}.production-workbench__package.selected{background:var(--pdm-blue-soft);border-color:var(--pdm-blue)}.production-workbench__package span{display:flex;align-items:center;justify-content:space-between;gap:4px}.production-workbench__package em{font-style:normal; color:var(--pdm-text);white-space:nowrap}.production-workbench__package small{display:block;color:var(--pdm-text-soft);margin-top:3px}.production-workbench__package b{color:var(--pdm-danger)}
+.production-workbench__lines{display:flex;flex-direction:column;overflow:hidden}.production-workbench__lines header{flex:0 0 auto;min-height:56px}.production-workbench__lines header p{font-size:11px}.production-workbench__state{font-size:12px; color:var(--pdm-text);margin-left:7px}.production-workbench__line-tools{flex:0 0 auto;padding:8px 0;border-top:1px solid var(--pdm-border)}.production-workbench__line-tools nav{display:flex;gap:3px}.production-workbench__line-tools button{border:0;background:none;padding:5px 7px}.production-workbench__line-tools button[aria-pressed=true]{ color:var(--pdm-text);font-weight:700;border-bottom:2px solid var(--pdm-blue)}.production-workbench__line-tools input{width:190px}
 .production-workbench__bulk-tools{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:0 0 8px;font-size:12px}.production-workbench__bulk-tools>span{margin-right:auto;color:var(--pdm-muted)}.production-workbench__lines input[type=checkbox]{width:16px;height:16px;margin:0;padding:0;vertical-align:middle}
-.production-workbench__table-wrap{flex:1;min-height:0;overflow:auto}.production-workbench__lines table th,.production-workbench__lines table td{text-align:center;vertical-align:middle}.production-workbench__lines td small{overflow:hidden;text-overflow:ellipsis}.production-workbench table{border-collapse:collapse;width:100%;font-size:12px}.production-workbench th{position:sticky;top:0;background:var(--pdm-table-header);text-align:left;z-index:1;white-space:nowrap}.production-workbench td,.production-workbench th{border-bottom:1px solid var(--pdm-border);padding:7px 6px}.production-workbench td{white-space:nowrap}.production-workbench td small{display:block;color:var(--pdm-muted)}.production-workbench tbody tr{cursor:pointer}.production-workbench tbody tr:hover,.production-workbench tbody tr.selected{background:var(--pdm-blue-soft)}.production-workbench__lines footer{padding-top:8px;color:var(--pdm-muted);font-size:11px}
+.production-workbench__table-wrap{flex:1;min-height:0;overflow:auto}
+.production-workbench__trace-table { container-type: inline-size; min-width: 0; }
+.production-workbench__trace-table > table { width: 100%; min-width: 680px !important; table-layout: fixed; }
+.production-workbench__trace-table > table :is(th, td) { padding-inline: 3px; }
+.production-workbench__trace-table > table th { white-space: normal; overflow-wrap: anywhere; }
+.production-workbench__lines table th,.production-workbench__lines table td{text-align:center;vertical-align:middle}.production-workbench__lines td small{overflow:hidden;text-overflow:ellipsis}.production-workbench table{border-collapse:collapse;width:100%;font-size:12px}.production-workbench th{position:sticky;top:0;background:var(--pdm-table-header);text-align:left;z-index:1;white-space:nowrap}.production-workbench td,.production-workbench th{border-bottom:1px solid var(--pdm-border);padding:7px 6px}.production-workbench td{white-space:nowrap}.production-workbench td small{display:block;color:var(--pdm-muted)}.production-workbench tbody tr{cursor:pointer}.production-workbench tbody tr:hover,.production-workbench tbody tr.selected{background:var(--pdm-blue-soft)}.production-workbench__lines footer{padding-top:8px;color:var(--pdm-muted);font-size:11px}
 .production-workbench__priority{display:inline-block;font-size:11px;padding:2px 5px;border-radius:4px;background:var(--pdm-surface-muted)}.production-workbench__priority.urgent{background:var(--pdm-danger-soft);color:var(--pdm-danger)}.production-workbench__priority.priority{background:var(--pdm-orange-soft);color:var(--pdm-orange)}
 .production-workbench__right{display:flex;flex-direction:column;gap:var(--pdm-container-gap);min-height:0}.production-workbench__detail{flex:1;min-height:0;overflow:auto}.production-workbench__detail header{display:flex;justify-content:space-between}.production-workbench__detail dl{display:grid;grid-template-columns:auto 1fr;gap:5px 10px;font-size:12px}.production-workbench__detail dt{color:var(--pdm-muted)}.production-workbench__detail dd{margin:0;text-align:right}.production-workbench__lots{display:grid;gap:4px}.production-workbench__lots button{border:1px solid var(--pdm-border);background:var(--pdm-surface);text-align:left;padding:7px;border-radius:5px}.production-workbench__lots button.selected{border-color:var(--pdm-blue);background:var(--pdm-blue-soft)}.production-workbench__lots small{display:block}.production-workbench__operation{margin:9px 0;border-top:1px solid var(--pdm-border);padding-top:7px}.production-workbench__operation summary{cursor:pointer;font-weight:700}.production-workbench__operation label,.production-workbench__field{display:grid;gap:4px;margin:7px 0;font-size:12px}.production-workbench__operation button{margin-top:4px}.production-workbench__events{padding-left:15px;font-size:11px}.production-workbench__events li{margin:4px 0}.production-workbench__events time{margin-right:6px;color:var(--pdm-muted)}
 .production-workbench__summary{flex:0 0 auto;max-height:180px}.production-workbench__summary p{font-size:12px;display:flex;justify-content:space-between}.production-workbench__bar{height:8px;background:var(--pdm-surface-muted);border-radius:8px;overflow:hidden}.production-workbench__bar span{display:block;height:100%;background:var(--pdm-blue)}.production-workbench__empty{padding:24px;text-align:center;color:var(--pdm-muted)}
@@ -959,7 +975,7 @@ function printLotCard() {
 .production-workbench__card-backdrop{position:fixed;inset:0;z-index:2500;display:grid;place-items:center;background:var(--pdm-overlay);padding:15px}.production-workbench__card{width:min(430px,100%);padding:18px;text-align:center}.production-workbench__card header{display:flex;justify-content:space-between;align-items:center}.production-workbench__card header button{border:0;background:none;font-size:24px}.production-workbench__card>strong,.production-workbench__card>small{display:block;margin:12px}.production-workbench__card img{display:block;width:260px;height:260px;margin:12px auto}.production-workbench__card>div:last-child{display:flex;justify-content:center;gap:9px}
 .production-workbench{font-size:13px}.production-workbench h2,.production-workbench h3{font-size:15px}.production-workbench table{font-size:13px}.production-workbench td,.production-workbench th{padding:9px 7px}.production-workbench__package small,.production-workbench__lines header p,.production-workbench__detail dl,.production-workbench__summary p{font-size:12px}.production-workbench__tabs button{font-size:13px}
 @media(max-width:1100px){.production-workbench__grid{grid-template-columns:250px minmax(0,1fr)}.production-workbench__right{grid-column:1/-1;display:flex}.production-workbench__detail{max-height:360px}.production-workbench__summary{max-height:none}}@media(max-width:700px){.production-workbench__tabs{overflow:auto;flex:0 0 auto}.production-workbench__tabs button{white-space:nowrap}.production-workbench__grid{grid-template-columns:1fr;overflow:auto}.production-workbench__tree{max-height:185px}.production-workbench__lines{min-height:420px}.production-workbench__right{display:flex}.production-workbench__secondary{overflow:auto}.production-workbench__capacity-form{flex-wrap:wrap}}
-.production-workbench__allocation-edit{margin-top:8px}.production-workbench__allocation-edit:disabled{cursor:not-allowed}.production-workbench__allocation-blocked{display:block;margin:5px 0;color:var(--pdm-muted)}.production-workbench__events li>small{display:block;overflow-wrap:anywhere;color:var(--pdm-muted)}.production-workbench__drawing-links button:disabled{cursor:not-allowed}.production-workbench__drawing-links button{border:0;padding:2px 4px;background:none;color:var(--pdm-blue);font-size:12px}.production-workbench__lines footer{display:flex;align-items:center;justify-content:space-between;gap:12px}.production-workbench__lines footer nav{display:flex;align-items:center;gap:5px;flex:none}.production-workbench__lines footer button{border:1px solid var(--pdm-border);background:var(--pdm-surface);border-radius:4px;padding:3px 6px}
+.production-workbench__allocation-edit{margin-top:8px}.production-workbench__allocation-edit:disabled{cursor:not-allowed}.production-workbench__allocation-blocked{display:block;margin:5px 0;color:var(--pdm-muted)}.production-workbench__events li>small{display:block;overflow-wrap:anywhere;color:var(--pdm-muted)}.production-workbench__drawing-links button:disabled{cursor:not-allowed}.production-workbench__drawing-links button{border:0;padding:2px 4px;background:none; color:var(--pdm-text);font-size:12px}.production-workbench__lines footer{display:flex;align-items:center;justify-content:space-between;gap:12px}.production-workbench__lines footer nav{display:flex;align-items:center;gap:5px;flex:none}.production-workbench__lines footer button{border:1px solid var(--pdm-border);background:var(--pdm-surface);border-radius:4px;padding:3px 6px}
 @media(max-width:1100px){.production-workbench__schedule-right{display:flex}.production-workbench__schedule-right .production-workbench__detail{max-height:none}}@media(max-width:700px){.production-workbench__schedule-right{min-height:420px}.production-workbench__grid--schedule .production-workbench__line-tools{flex-wrap:wrap}.production-workbench__grid--schedule .production-workbench__lines footer{flex-wrap:wrap}}
 @media(max-width:1600px){.production-workbench__drawing-links button{display:block;max-width:100%;margin:0 auto;padding:2px 0}}
 /* 发布包卡片：编号单行省略，需求日期与领用行、上方状态共用右边缘。 */
@@ -1025,16 +1041,14 @@ function printLotCard() {
 .production-workbench__tree-search>input{grid-column:1;width:100%}
 
 .production-workbench__tree>.production-workbench__tree-project,.production-workbench__tree>.production-workbench__empty{grid-column:1/-1}
-.production-workbench__project{background:rgb(232,238,247);color:rgb(30,41,59)}
+.production-workbench__project{background:rgb(232,238,247); color:var(--pdm-text)}
 .production-workbench__project.selected{box-shadow:inset 3px 0 0 var(--pdm-theme-accent)}
 .production-workbench__package.selected{border-left:0;padding-left:10px;border-radius:0;background:var(--pdm-surface-muted);box-shadow:inset 5px 0 0 var(--shell-brand)}
-.production-workbench__package.selected strong{color:var(--pdm-blue)}
+.production-workbench__package.selected strong{ color:var(--pdm-text)}
 .production-workbench__bulk-tools{flex:0 0 auto;flex-wrap:nowrap;overflow-x:auto;min-width:0;white-space:nowrap}
 .production-workbench__bulk-tools>nav.pdm-tabs{flex:0 0 auto;max-width:none;margin:0!important;align-self:center}
 .production-workbench__bulk-tools>button{flex:0 0 auto}
 .production-workbench__quick-filter{display:inline-flex;align-items:center;gap:4px;flex:0 0 auto;white-space:nowrap}
-.production-workbench__all-categories{grid-column:1/-1;width:100%;padding:8px 10px;border:1px solid var(--pdm-blue);border-radius:5px;background:var(--pdm-blue);color:var(--pdm-on-primary,#fff);font:inherit;text-align:center;cursor:pointer}
-.production-workbench__all-categories.selected{font-weight:700}
 .production-workbench__tree-project{min-width:0;margin-bottom:var(--pdm-control-gap)}
 .production-workbench__project{min-height:40px;padding:7px 5px;border:0;background:transparent;color:var(--pdm-text)}
 .production-workbench__project>svg{flex:none;color:var(--pdm-muted)}
@@ -1046,7 +1060,7 @@ function printLotCard() {
 .production-workbench__project small{padding:1px 6px;border-radius:10px;background:var(--pdm-theme-accent-soft);color:var(--pdm-muted)}
 .production-workbench__project:hover{background:var(--pdm-theme-accent-soft);box-shadow:none}
 .production-workbench__project.selected{background:var(--pdm-selection-bg);box-shadow:inset 3px 0 var(--pdm-theme-accent)}
-.production-workbench__project.selected strong{color:var(--pdm-theme-accent)}
+.production-workbench__project.selected strong{ color:var(--pdm-text)}
 .production-workbench__project-chevron{transition:transform 160ms ease}
 .production-workbench__project[aria-expanded="true"] .production-workbench__project-chevron{transform:rotate(90deg)}
 .production-workbench__project-packages{display:grid;grid-template-columns:minmax(0,1fr);min-width:0;gap:var(--pdm-control-gap);margin:0 0 5px 11px;padding-left:10px;border-left:1px solid var(--pdm-border)}
@@ -1055,25 +1069,112 @@ function printLotCard() {
 .production-workbench__project-packages>.production-workbench__package.selected{padding:8px;border-color:var(--pdm-theme-accent);background:var(--pdm-theme-accent-soft);box-shadow:none}
 @media(prefers-reduced-motion:reduce){.production-workbench__project-chevron{transition:none}}
 @media(min-width:701px) and (max-width:1100px){.production-workbench__project-packages .production-workbench__package-header{flex-wrap:wrap}.production-workbench__project-packages .production-workbench__package-header strong{flex-basis:100%}}
-.production-workbench__open-package{padding:0;border:0;background:none;color:var(--pdm-blue);font:inherit;cursor:pointer}
+.production-workbench__open-package{padding:0;border:0;background:none; color:var(--pdm-text);font:inherit;cursor:pointer}
 @media(min-width:701px) and (max-width:1100px){
 .production-workbench__tree>.production-workbench__toolbar>select,.production-workbench__tree-search>input{grid-column:1/-1}
 .production-workbench__tree>.production-workbench__toolbar>label{grid-column:1/3}
 .production-workbench__tree>.production-workbench__toolbar>button{grid-column:3}
 
 }
-.production-workbench__tree-actions{display:grid;grid-column:1/-1;grid-template-columns:minmax(0,1fr) 80px;gap:5px;min-width:0;margin-bottom:5px}.production-workbench__tree-actions>.production-workbench__all-categories{grid-column:auto;height:30px;min-height:30px;padding:0 6px}
+.production-workbench__tree-actions{display:grid;grid-column:1/-1;grid-template-columns:80px;justify-content:end;gap:5px;min-width:0;margin-bottom:5px}
 .production-workbench__pda { display: flex; flex-direction: column; min-height: 0; }
 .production-pda__stage { display: flex; flex: 1 1 auto; min-height: 0; padding: 18px 8px; overflow: auto; }
-.production-pda__body { position: relative; flex: 0 0 400px; width: 400px; margin: auto; padding: 38px 16px 46px; border: 4px solid #303944; border-radius: 30px; background: linear-gradient(115deg, #20272f, #11171e); box-shadow: 0 12px 28px rgb(15 23 42 / 18%); }
-.production-pda__body::before, .production-pda__body::after { content: ''; position: absolute; top: 122px; width: 5px; height: 60px; border-radius: 3px; background: #465260; }
-.production-pda__body::before { left: -8px; }
-.production-pda__body::after { right: -8px; }
-.production-pda__scanner { position: absolute; top: 11px; left: 50%; width: 104px; height: 12px; transform: translateX(-50%); border: 2px solid #3d4855; border-radius: 5px; background: linear-gradient(90deg, #0b1016, #5a2428, #0b1016); }
-.production-pda__screen { display: block; width: 360px; height: 640px; border: 0; border-radius: 10px; outline: 2px solid #080c11; background: #fff; }
-.production-pda__brand { position: absolute; bottom: 27px; left: 0; right: 0; color: #a8b2bd; font-size: 10px; letter-spacing: 2px; text-align: center; }
-.production-pda__keys { position: absolute; bottom: 12px; left: 0; right: 0; display: flex; justify-content: center; gap: 28px; }
-.production-pda__keys span { width: 19px; height: 5px; border-radius: 3px; background: #586674; }
+.production-pda__body {
+  position: relative;
+  flex: none;
+  width: min(100%, clamp(290px, calc((100dvh - 145px) * .44), 400px));
+  aspect-ratio: 196 / 446;
+  box-sizing: border-box;
+  margin: auto;
+  border: 4px solid #222321;
+  border-radius: 24% 24% 32% 32% / 6% 6% 8% 8%;
+  background: linear-gradient(145deg, #3b3c39 3%, #242522 57%, #333431 97%);
+  box-shadow: inset 0 0 0 2px #555651, inset 0 0 0 6px #20211f, 0 12px 28px rgb(0 0 0 / 20%);
+}
+.production-pda__body::before, .production-pda__body::after {
+  content: '';
+  position: absolute;
+  top: 31%;
+  width: 5px;
+  height: 16%;
+  border: 1px solid #35352f;
+  border-radius: 3px;
+  background: linear-gradient(#333431 25%, #b19a41 25% 75%, #333431 75%);
+}
+.production-pda__body::before { left: -7px; }
+.production-pda__body::after { right: -7px; }
+.production-pda__scanner {
+  position: absolute;
+  z-index: 1;
+  inset: 1.7% 34% auto;
+  height: 1.2%;
+  border-radius: 5px;
+  background: linear-gradient(#9a9c96, #5b5d58);
+  box-shadow: 0 1px 2px #10110f;
+}
+.production-pda__bezel {
+  position: absolute;
+  inset: 3% 5.3% 33%;
+  border: 2px solid #191a18;
+  border-radius: 14px 14px 24px 24px;
+  background: linear-gradient(160deg, #31322e, #262724 60%, #33342f);
+  box-shadow: inset 0 1px 2px #64665e, 0 1px #54554f;
+}
+.production-pda__screen {
+  position: absolute;
+  top: 5%;
+  left: 7%;
+  width: 86%;
+  height: 87%;
+  display: block;
+  box-sizing: border-box;
+  border: 1px solid #151613;
+  border-radius: 2px;
+  background: var(--pdm-surface);
+}
+.production-pda__keys {
+  position: absolute;
+  inset: 69% 10% 7%;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-rows: repeat(5, minmax(0, 1fr));
+  gap: 4%;
+  padding: 3%;
+  border-radius: 5% 5% 23% 23% / 7% 7% 14% 14%;
+  background: #30312f;
+  box-shadow: inset 0 1px 3px #181917;
+  user-select: none;
+}
+.production-pda__keys > span {
+  display: grid;
+  place-items: center;
+  border: 1px solid #242523;
+  border-radius: 4px;
+  background: linear-gradient(#8a8c86, #676963);
+  color: #fff;
+  box-shadow: inset 0 1px rgb(255 255 255 / 24%), 0 1px 1px #181917;
+  font-size: clamp(8px, 1.3vh, 13px);
+  font-weight: 700;
+  line-height: 1;
+}
+.production-pda__keys > .production-pda__scan-key {
+  grid-row: span 2;
+  border-radius: 22%;
+  background: linear-gradient(#f7de63, #d9a929);
+  color: #705818;
+  letter-spacing: 1px;
+}
+.production-pda__keys > .production-pda__number { background: linear-gradient(#fff, #dfdfda); color: #30312e; }
+.production-pda__keys > .production-pda__function-key { color: #f1d459; }
+.production-pda__keys > .production-pda__function-key:nth-child(15) { color: #73d2d0; }
+.production-pda__brand {
+  position: absolute;
+  inset: auto 0 3%;
+  color: #bebfb8;
+  font-size: 9px;
+  letter-spacing: 2px;
+  text-align: center;
+}
 @layer pdm-button-sizing {
   .production-workbench__table-wrap .production-workbench__open-package { width: 100% !important; min-width: 0 !important; max-width: 100% !important; padding-inline: 0 !important; }
 }

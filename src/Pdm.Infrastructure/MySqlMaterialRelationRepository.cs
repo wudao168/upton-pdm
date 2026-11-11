@@ -17,9 +17,16 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
         DefaultTypeMap.MatchNamesWithUnderscores = true;
     }
 
-    public async Task<IReadOnlyList<MaterialRelationTemplate>> ListTemplatesAsync(bool includeDraft, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<MaterialRelationTemplate>> ListTemplatesAsync(bool includeDraft, CancellationToken cancellationToken) =>
+        LoadTemplatesAsync(includeDraft, null, cancellationToken);
+
+    public Task<IReadOnlyList<MaterialRelationTemplate>> ListRetiredRevisionsAsync(IReadOnlyCollection<Guid> revisionIds, CancellationToken cancellationToken) =>
+        revisionIds.Count == 0 ? Task.FromResult<IReadOnlyList<MaterialRelationTemplate>>([]) : LoadTemplatesAsync(false, revisionIds, cancellationToken);
+
+    private async Task<IReadOnlyList<MaterialRelationTemplate>> LoadTemplatesAsync(bool includeDraft, IReadOnlyCollection<Guid>? retiredRevisionIds, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
+        var query = new { IncludeDraft = includeDraft, Retired = retiredRevisionIds is not null, RevisionIds = retiredRevisionIds ?? [] };
         var rows = (await connection.QueryAsync<RelationRow>(new CommandDefinition("""
             SELECT t.id TemplateId,t.main_material_id MainMaterialId,COALESCE(mm.material_code,mk.kit_code) MainMaterialCode,COALESCE(mm.name,mk.name) MainMaterialName,
                    t.name TemplateName,t.is_archived IsArchived,t.updated_by TemplateUpdatedBy,t.updated_at TemplateUpdatedAt,t.row_version TemplateRowVersion,
@@ -34,13 +41,15 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
             FROM material_relation_template t
             LEFT JOIN material_master mm ON mm.id=t.main_material_id
             LEFT JOIN engineering_kit mk ON mk.id=t.main_material_id
-            LEFT JOIN material_relation_revision r ON r.template_id=t.id AND r.revision_state IN ('Published','Draft')
+            LEFT JOIN material_relation_revision r ON r.template_id=t.id
+                AND (r.revision_state IN ('Published','Draft') OR (@Retired=1 AND r.revision_state='Superseded'))
             LEFT JOIN material_relation_group g ON g.revision_id=r.id
             LEFT JOIN material_relation_option o ON o.group_id=g.id
             LEFT JOIN material_master om ON om.id=o.material_id
-            WHERE (@IncludeDraft=1 OR r.revision_state='Published')
+            WHERE (@Retired=0 AND (@IncludeDraft=1 OR r.revision_state='Published'))
+                OR (@Retired=1 AND t.is_archived=1 AND r.revision_state<>'Draft' AND r.id IN @RevisionIds)
             ORDER BY MainMaterialCode,r.version_no,g.sort_order,o.sort_order
-            """, new { IncludeDraft = includeDraft }, cancellationToken: cancellationToken))).ToArray();
+            """, query, cancellationToken: cancellationToken))).ToArray();
         var mains = (await connection.QueryAsync<MainRow>(new CommandDefinition("""
             SELECT rm.revision_id RevisionId,rm.material_id MaterialId,COALESCE(mm.material_code,mk.kit_code) MaterialCode,COALESCE(mm.name,mk.name) MaterialName,
                    COALESCE(mm.specification,mk.kit_model) Specification,COALESCE(mm.brand,mk.brand) Brand,COALESCE(mm.remark,mk.description) Remark
@@ -48,11 +57,79 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
             JOIN material_relation_revision r ON r.id=rm.revision_id
             LEFT JOIN material_master mm ON mm.id=rm.material_id
             LEFT JOIN engineering_kit mk ON mk.id=rm.material_id
-            WHERE r.revision_state='Published' OR (@IncludeDraft=1 AND r.revision_state='Draft')
+            WHERE (@Retired=0 AND (r.revision_state='Published' OR (@IncludeDraft=1 AND r.revision_state='Draft')))
+                OR (@Retired=1 AND r.id IN @RevisionIds)
             ORDER BY MaterialCode
-            """, new { IncludeDraft = includeDraft }, cancellationToken: cancellationToken))).ToArray();
-        return MapTemplates(rows, includeDraft, mains);
+            """, query, cancellationToken: cancellationToken))).ToArray();
+        return MapTemplates(rows, includeDraft, mains, retiredRevisionIds is not null);
     }
+
+    public async Task<MaterialRelationTemplate> SetActiveAsync(Guid templateId, bool isActive, long expectedRowVersion, string actor, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken);
+        var key = new { Id = templateId };
+        var header = await LockTemplateAsync(connection, transaction, templateId, cancellationToken);
+        if (header.RowVersion != expectedRowVersion) throw new PdmConflictException("关联配置已被修改，请刷新后重试。");
+        if (!await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
+            "SELECT EXISTS(SELECT 1 FROM material_relation_revision WHERE template_id=@Id AND revision_state='Published')", key, transaction, cancellationToken: cancellationToken)))
+            throw new PdmRuleException("关联配置发布后才可停用或恢复启用。");
+        if (isActive && header.IsArchived)
+        {
+            var mainIds = (await connection.QueryAsync<Guid>(new CommandDefinition("""
+                SELECT DISTINCT m.material_id FROM material_relation_revision_main m
+                JOIN material_relation_revision r ON r.id=m.revision_id
+                WHERE r.template_id=@Id AND r.revision_state IN ('Draft','Published')
+                """, key, transaction, cancellationToken: cancellationToken))).ToArray();
+            if (mainIds.Length == 0) mainIds = [header.MainMaterialId];
+            await connection.QueryAsync<Guid>(new CommandDefinition("SELECT id FROM material_master WHERE id IN @MainIds ORDER BY id FOR UPDATE",
+                new { MainIds = mainIds }, transaction, cancellationToken: cancellationToken));
+            await connection.QueryAsync<Guid>(new CommandDefinition("SELECT id FROM engineering_kit WHERE id IN @MainIds ORDER BY id FOR UPDATE",
+                new { MainIds = mainIds }, transaction, cancellationToken: cancellationToken));
+            var conflict = await connection.QueryFirstOrDefaultAsync<string>(new CommandDefinition("""
+                SELECT t.name FROM material_relation_revision_main m
+                JOIN material_relation_revision r ON r.id=m.revision_id
+                JOIN material_relation_template t ON t.id=r.template_id
+                WHERE m.material_id IN @MainIds AND r.revision_state IN ('Draft','Published') AND t.id<>@Id AND t.is_archived=0
+                LIMIT 1
+                """, new { Id = templateId, MainIds = mainIds }, transaction, cancellationToken: cancellationToken));
+            if (conflict is not null) throw new PdmConflictException($"主料已归属配置“{conflict}”，请调整该配置后再恢复启用。");
+        }
+        if (header.IsArchived == isActive)
+            await connection.ExecuteAsync(new CommandDefinition("""
+                UPDATE material_relation_template SET is_archived=@Archived,updated_by=@Actor,updated_at=@Now,row_version=row_version+1 WHERE id=@Id
+                """, new { Id = templateId, Archived = !isActive, Actor = actor, Now = now.UtcDateTime }, transaction, cancellationToken: cancellationToken));
+        await transaction.CommitAsync(cancellationToken);
+        return (await ListTemplatesAsync(true, cancellationToken)).Single(item => item.Id == templateId);
+    }
+
+    public async Task DeleteDraftAsync(Guid templateId, long expectedRowVersion, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var header = await LockTemplateAsync(connection, transaction, templateId, cancellationToken);
+        if (header.RowVersion != expectedRowVersion) throw new PdmConflictException("关联配置已被修改，请刷新后重试。");
+        var key = new { Id = templateId };
+        if (await connection.ExecuteScalarAsync<bool>(new CommandDefinition("""
+            SELECT EXISTS(SELECT 1 FROM material_relation_revision WHERE template_id=@Id AND (revision_state<>'Draft' OR published_at IS NOT NULL))
+            """, key, transaction, cancellationToken: cancellationToken)))
+            throw new PdmRuleException("已发布过的关联配置请使用停用操作。");
+        try
+        {
+            await connection.ExecuteAsync(new CommandDefinition("DELETE FROM material_relation_template WHERE id=@Id", key, transaction, cancellationToken: cancellationToken));
+        }
+        catch (MySqlException exception) when (exception.Number == 1451)
+        {
+            throw new PdmConflictException("此关联配置已有引用，请解除引用后再删除。");
+        }
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    private static async Task<TemplateLockRow> LockTemplateAsync(MySqlConnection connection, MySqlTransaction transaction, Guid templateId, CancellationToken cancellationToken) =>
+        await connection.QuerySingleOrDefaultAsync<TemplateLockRow>(new CommandDefinition(
+            "SELECT id Id,main_material_id MainMaterialId,row_version RowVersion,is_archived IsArchived FROM material_relation_template WHERE id=@Id FOR UPDATE",
+            new { Id = templateId }, transaction, cancellationToken: cancellationToken))
+            ?? throw new PdmNotFoundException("关联配置不存在。");
 
     public async Task<MaterialRelationTemplate> SaveDraftAsync(Guid? templateId, SaveMaterialRelationTemplateCommand command, string mainMaterialCode, string mainMaterialName, IReadOnlyList<MaterialRelationGroup> groups, string actor, DateTimeOffset now, CancellationToken cancellationToken, IReadOnlyList<MaterialRelationMainMaterial>? mainMaterials = null)
     {
@@ -60,9 +137,10 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var effectiveTemplateId = templateId ?? Guid.NewGuid();
         var header = templateId.HasValue ? await connection.QuerySingleOrDefaultAsync<TemplateLockRow>(new CommandDefinition(
-            "SELECT id Id,main_material_id MainMaterialId,row_version RowVersion FROM material_relation_template WHERE id=@Id FOR UPDATE",
+            "SELECT id Id,main_material_id MainMaterialId,row_version RowVersion,is_archived IsArchived FROM material_relation_template WHERE id=@Id FOR UPDATE",
             new { Id = effectiveTemplateId }, transaction, cancellationToken: cancellationToken)) : null;
         if (templateId.HasValue && header is null) throw new PdmNotFoundException("配套模板不存在。");
+        if (header?.IsArchived == true) throw new PdmRuleException("请先恢复启用该关联配置，再维护草稿。");
         mainMaterials ??= [new(command.MainMaterialId, mainMaterialCode, mainMaterialName)];
         var mainIds = mainMaterials.Select(item => item.MaterialId).Distinct().ToArray();
         var locked = (await connection.QueryAsync<Guid>(new CommandDefinition(
@@ -148,9 +226,8 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        var locked = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
-            "SELECT id FROM material_relation_template WHERE id=@Id FOR UPDATE", new { Id = templateId }, transaction, cancellationToken: cancellationToken));
-        if (!locked.HasValue) throw new PdmNotFoundException("关联配置不存在。");
+        var header = await LockTemplateAsync(connection, transaction, templateId, cancellationToken);
+        if (header.IsArchived) throw new PdmRuleException("请先恢复启用该关联配置，再发布草稿。");
         var affected = await connection.ExecuteAsync(new CommandDefinition("""
             UPDATE material_relation_revision SET revision_state='Superseded',row_version=row_version+1
             WHERE template_id=@TemplateId AND revision_state='Published'
@@ -249,9 +326,9 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
         return connection;
     }
 
-    private static IReadOnlyList<MaterialRelationTemplate> MapTemplates(IReadOnlyList<RelationRow> rows, bool includeDraft, IReadOnlyList<MainRow> mains)
+    private static IReadOnlyList<MaterialRelationTemplate> MapTemplates(IReadOnlyList<RelationRow> rows, bool includeDraft, IReadOnlyList<MainRow> mains, bool retired)
     {
-        return rows.GroupBy(row => row.TemplateId).Select(templateRows =>
+        return rows.GroupBy(row => (row.TemplateId, RevisionId: retired ? row.RevisionId : null)).Select(templateRows =>
         {
             var header = templateRows.First();
             MaterialRelationRevision? Revision(string state)
@@ -276,12 +353,12 @@ public sealed class MySqlMaterialRelationRepository : IMaterialRelationRepositor
                 { MainMaterials = mains.Where(item => item.RevisionId == first.RevisionId).Select(item => new MaterialRelationMainMaterial(item.MaterialId, item.MaterialCode, item.MaterialName, item.Specification, item.Brand, item.Remark)).ToArray() };
             }
             return new MaterialRelationTemplate(header.TemplateId, header.MainMaterialId, header.MainMaterialCode, header.MainMaterialName, header.TemplateName,
-                header.IsArchived, Revision("Published"), includeDraft ? Revision("Draft") : null, header.TemplateUpdatedBy,
+                header.IsArchived, Revision(retired ? header.RevisionState! : "Published"), includeDraft ? Revision("Draft") : null, header.TemplateUpdatedBy,
                 new DateTimeOffset(header.TemplateUpdatedAt, TimeSpan.Zero), header.TemplateRowVersion);
         }).ToArray();
     }
 
-    private sealed record TemplateLockRow(Guid Id, Guid MainMaterialId, long RowVersion);
+    private sealed record TemplateLockRow(Guid Id, Guid MainMaterialId, long RowVersion, bool IsArchived);
     private sealed record MainRow(Guid RevisionId, Guid MaterialId, string MaterialCode, string MaterialName, string? Specification, string? Brand, string? Remark);
     private sealed record MainConflictRow(Guid MaterialId, Guid TemplateId);
     private sealed record MainOwnerRow(string Name, bool IsArchived);

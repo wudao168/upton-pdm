@@ -17,7 +17,9 @@ public sealed class EditCollaborationTests
 
     private async Task<(Project Project, PdmDocument Document)> Editing(string name = "协作零件")
     {
-        var project = Assert.Single(await repository.ListProjectsAsync(default));
+        var company = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.First().Id;
+        var customer = (await repository.ListCustomersAsync(true, default)).First().Id;
+        var project = await repository.CreateNumberedProjectAsync(new(company, "P", 2, customer, name, null, null, 1, "admin", @"C:\test-vault", @"C:\test-release"), default);
         var document = await repository.RegisterDocumentAsync(new(project.Id, name, name, name + ".SLDPRT", DocumentKind.Part), "admin", default);
         document = await repository.CheckoutAsync(document.Id, "admin", session, "设计电脑A", clock.GetUtcNow().AddMinutes(5), default);
         return (project, document);
@@ -107,8 +109,8 @@ public sealed class EditCollaborationTests
     public async Task HandoffUsesRecipientsPermissionsAndRestoresInitiatorsContext()
     {
         var item = await Editing();
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "viewer", "只读协助人", "unused", UserRole.ProductionViewer, true), default);
-        await repository.CreateUserAsync(new(Guid.NewGuid(), "helper-admin", "有权限协助人", "unused", UserRole.Administrator, true), default);
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "viewer", "只读协助人", "unused", UserRole.ProductionViewer, true, CompanyId: item.Project.OrganizationId), default);
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "helper-admin", "有权限协助人", "unused", UserRole.Administrator, true, CompanyId: item.Project.OrganizationId), default);
         var company = item.Project.OrganizationId ?? Guid.Empty;
         var initiator = new CurrentTenant(Guid.NewGuid(), company, company, "admin", "developer", true, new HashSet<string>(), ["developer"]);
         TenantContext.Set(initiator);

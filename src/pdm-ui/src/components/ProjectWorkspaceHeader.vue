@@ -1,15 +1,18 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
 import SearchField from './SearchField.vue'
 import UserSelect from './UserSelect'
 import RawDrawerPanel from './RawDrawerPanel.vue'
 import PanelActions from './PanelActions.vue'
-import { ElAutocomplete } from 'element-plus'
+import { ElAutocomplete, ElOption, ElSelect } from 'element-plus'
 
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import type { ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectSummary, ReleasePackageSummary } from '../types'
+import type { OrganizationUnit, PdmCustomer, ProjectCopyOptionsInput, ProjectCopyPreview, ProjectCopyResult, ProjectSummary, ProjectTypeDefinition, ReleasePackageSummary } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 import { useProjectTabUpdates } from '../projectTabUpdates'
 import { projectReleaseAttention } from '../releasePreviewState'
+import { useProjectAttention } from '../composables/useProjectAttention'
+import { releaseFailureReasons } from '../projectAttention'
 import ReleaseAttentionBorder from './ReleaseAttentionBorder.vue'
 import ProjectSettingsDrawer from './ProjectSettingsDrawer.vue'
 import { useProjectCenterAccess } from '../projectCenterAccess'
@@ -21,6 +24,10 @@ const props = withDefaults(defineProps<{
   active?: boolean
   project: ProjectSummary
   projects: ProjectSummary[]
+  projectTypes?: ProjectTypeDefinition[]
+  customers?: PdmCustomer[]
+  organizationUnits?: OrganizationUnit[]
+  companyId?: string
   activeTab: ProjectTab
   releasePackages?: ReleasePackageSummary[]
   releasePreviewIssues?: Record<string, boolean>
@@ -51,6 +58,8 @@ function releaseAttentionTitle(item: ProjectSummary) {
   return tone === 'error' ? '发布或图纸转出存在未完成事项，请到发布页查看处理' : tone === 'new' ? item.hasUnreceivedNonStandardRelease ? '有非标件发布包待供应链接收，接收后停止绿色提示' : '有新的标准件或电气件发布，绿色呼吸边框自发布时间起提示24小时' : undefined
 }
 function updateTitle(key: ProjectTab, label: string) {
+  const warnings = tabWarnings.value.filter(detail => detail.tab === key)
+  if (warnings.length) return `${label}异常：${[...new Set(warnings.map(detail => detail.reason))].join('；')}`
   if (key === 'release' && activeReleaseAttention.value) return releaseAttentionTitle(props.project)
   const update = tabUpdates.value[key]
   if (!update) return undefined
@@ -66,9 +75,9 @@ const tabs = [
   { key: 'information', label: '信息' },
   { key: 'files', label: '文件' },
   { key: 'project-plan', label: '计划' },
-  { key: 'opl', label: 'OPL' },
   { key: 'budget', label: '预算' },
   { key: 'validation-plan', label: '质量' },
+  { key: 'opl', label: 'OPL' },
   { key: 'documents', label: '图档' },
   { key: 'bom', label: 'BOM' },
   { key: 'release', label: '发布' },
@@ -81,6 +90,24 @@ const rootProject = computed(() => {
   return props.projects.find(item => item.id === props.project.parentProjectId) ?? props.project
 })
 const rootProjects = computed(() => props.projects.filter(item => !item.parentProjectId))
+const listAttention = useProjectAttention(() => props.token, () => [rootProject.value.id], () => props.active)
+const tabWarnings = computed(() => [
+  ...listAttention.details(props.project.id, undefined, props.project.id === rootProject.value.id),
+  ...releaseFailureReasons(props.releasePackages).map(reason => ({ tab: 'release', reason })),
+  ...(props.releasePreviewIssues?.[props.project.id] ? [{ tab: 'release', reason: '图纸转出失败' }] : []),
+])
+function tabAttentionTone(key: ProjectTab) {
+  return tabWarnings.value.some(detail => detail.tab === key) ? 'error' : key === 'release' && activeReleaseAttention.value === 'new' ? 'new' : undefined
+}
+function projectWarnings(item: ProjectSummary) {
+  return [...new Set([...listAttention.reasons(item.id, undefined, item.id === rootProject.value.id), ...releaseFailureReasons(item.id === props.project.id ? props.releasePackages : []), ...(props.releasePreviewIssues?.[item.id] ? ['图纸转出失败'] : [])])]
+}
+function listAttentionTone(item: ProjectSummary) {
+  return projectWarnings(item).length ? 'error' : projectReleaseAttention({ ...item, hasReleaseAttention: false }, undefined, false, attentionNow.value)
+}
+function listAttentionTitle(item: ProjectSummary) {
+  return projectWarnings(item).length ? `橙色异常：${projectWarnings(item).join('；')}` : listAttentionTone(item) === 'new' ? '绿色提示：有新发布或待供应链接收的发布包' : listAttention.error.value || undefined
+}
 const familyProjects = computed(() => {
   const root = props.projects.find(item => item.id === rootProject.value.id) ?? rootProject.value
   const children = props.projects
@@ -107,28 +134,41 @@ const executionEngineers = computed(() => {
     return true
   })
 })
-const executionEngineerNames = computed(() => executionEngineers.value.map(item => displayUserName(item)).join('、') || '待分配')
+const executionEngineerNames = computed(() => executionEngineers.value.map(item => displayUserName(item)).join('、') || '—')
 const visibleTabs = computed(() => tabs.filter(tab => projectAccess.canViewTab(tab.key) && (props.project.canReadContent || tab.key === 'overview' || tab.key === 'records')))
 const switchConfirmationPending = ref(false)
 const projectSettingsOpen = ref(false)
 const projectBrowserOpen = ref(false)
 const quickProjectQuery = ref('')
 const projectSearchQuery = ref('')
+const projectTypeFilter = ref<string[]>([])
 const projectCustomerFilter = ref('')
 const projectExecutionUnitFilter = ref('')
 const projectPersonFilter = ref('')
 const projectPage = ref(1)
 const projectPageSize = ref(20)
 const normalizedProjectSearchQuery = computed(() => projectSearchQuery.value.trim().toLocaleLowerCase())
-const projectCustomerOptions = computed(() => [...new Set(rootProjects.value.map(item => item.customerName).filter((item): item is string => Boolean(item)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
-const projectExecutionUnitOptions = computed(() => [...new Set(rootProjects.value.map(item => item.executionUnitName).filter((item): item is string => Boolean(item)))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
+function projectCodePrefix(code: string) {
+  return code.trim().toUpperCase().match(/^[A-Z]/)?.[0] ?? '#'
+}
+const projectTypeOptions = computed(() => (props.projectTypes ?? [])
+  .filter(type => type.isActive !== false)
+  .map(type => ({ code: type.code.trim().toUpperCase(), name: type.name }))
+  .sort((left, right) => left.code.localeCompare(right.code)))
+const defaultProjectTypes = computed(() => projectTypeOptions.value.some(type => type.code === 'P') ? ['P'] : [])
+const projectCustomerOptions = computed(() => [...(props.customers ?? [])].sort((left, right) => left.name.localeCompare(right.name, 'zh-CN')))
+const projectExecutionUnitOptions = computed(() => (props.organizationUnits ?? [])
+  .filter(unit => unit.kind === 'BusinessDivision' && unit.organizationId === (props.companyId || props.project.organizationId))
+  .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN', { numeric: true })))
+const selectedCustomer = computed(() => projectCustomerOptions.value.find(customer => customer.code === projectCustomerFilter.value))
+const selectedExecutionUnit = computed(() => projectExecutionUnitOptions.value.find(unit => unit.id === projectExecutionUnitFilter.value))
 const projectPersonOptions = computed(() => [...new Set(rootProjects.value.flatMap(item => [item.primaryProjectManager, ...item.collaborativeProjectManagers, ...projectDesignLeads(item), ...item.designers]).filter((item): item is string => Boolean(item)))].sort((left, right) => displayUserName(left).localeCompare(displayUserName(right), 'zh-CN')))
 function matchesProjectSearch(item: ProjectSummary, query: string) {
   return !query || [item.code, item.name, item.projectAlias, item.customerName, item.deviceModel, ...item.serialNumbers].some(value => value?.toLocaleLowerCase().includes(query))
 }
 function quickProjectSuggestions(query: string, callback: (items: Array<{ id: string; code: string; name: string; value: string }>) => void) {
   const normalized = query.trim().toLocaleLowerCase()
-  callback(rootProjects.value.filter(item => matchesProjectSearch(item, normalized))
+  callback(rootProjects.value.filter(item => projectCodePrefix(item.code) === 'P' && matchesProjectSearch(item, normalized))
     .sort((left, right) => right.code.localeCompare(left.code, 'zh-CN', { numeric: true, sensitivity: 'base' }))
     .slice(0, 20).map(item => ({ id: item.id, code: item.code, name: item.name, value: `${item.code} · ${item.name}` })))
 }
@@ -138,10 +178,14 @@ function selectQuickProject(projectId: string) {
 }
 const filteredRootProjects = computed(() => {
   const query = normalizedProjectSearchQuery.value
+  const customer = selectedCustomer.value
+  const executionUnit = selectedExecutionUnit.value
   return rootProjects.value.filter(item => {
+    const projectType = item.projectTypeCode?.trim().toUpperCase() || projectCodePrefix(item.code)
+    if (projectTypeFilter.value.length && !projectTypeFilter.value.includes(projectType)) return false
     if (!matchesProjectSearch(item, query)) return false
-    if (projectCustomerFilter.value && item.customerName !== projectCustomerFilter.value) return false
-    if (projectExecutionUnitFilter.value && item.executionUnitName !== projectExecutionUnitFilter.value) return false
+    if (customer && (item.customerCode ? item.customerCode !== customer.code : item.customerName !== customer.name)) return false
+    if (executionUnit && (item.executionUnitId ? item.executionUnitId !== executionUnit.id : item.executionUnitName !== executionUnit.name)) return false
     if (projectPersonFilter.value && ![item.primaryProjectManager, ...item.collaborativeProjectManagers, ...projectDesignLeads(item), ...item.designers].includes(projectPersonFilter.value)) return false
     return true
   }).sort((left, right) => right.code.localeCompare(left.code, 'zh-CN', { numeric: true, sensitivity: 'base' }))
@@ -152,7 +196,7 @@ const pagedRootProjects = computed(() => {
   return filteredRootProjects.value.slice(start, start + projectPageSize.value)
 })
 
-watch([projectSearchQuery, projectCustomerFilter, projectExecutionUnitFilter, projectPersonFilter, projectPageSize], () => { projectPage.value = 1 })
+watch([projectSearchQuery, projectTypeFilter, projectCustomerFilter, projectExecutionUnitFilter, projectPersonFilter, projectPageSize], () => { projectPage.value = 1 })
 watch(projectPageCount, pageCount => { if (projectPage.value > pageCount) projectPage.value = pageCount })
 watch(() => props.project.id, () => { projectSettingsOpen.value = false })
 watch(() => rootProject.value.id, () => { quickProjectQuery.value = '' })
@@ -171,10 +215,18 @@ function confirmProjectSwitch(projectId: string) {
   }
 }
 
+function openProjectBrowser() {
+  projectSearchQuery.value = quickProjectQuery.value.trim()
+  projectTypeFilter.value = projectSearchQuery.value ? [] : [...defaultProjectTypes.value]
+  quickProjectQuery.value = ''
+  projectBrowserOpen.value = true
+}
+
 function closeProjectBrowser() {
   if (switchConfirmationPending.value) return
   projectBrowserOpen.value = false
   projectSearchQuery.value = ''
+  projectTypeFilter.value = []
   projectCustomerFilter.value = ''
   projectExecutionUnitFilter.value = ''
   projectPersonFilter.value = ''
@@ -218,13 +270,13 @@ function drawingDocumentCount(project: ProjectSummary) {
     <aside class="pdm-project-sidebar-stack" aria-label="项目基本信息与全部项目号">
       <section class="pdm-project-sidebar__context" aria-label="当前项目">
         <div class="pdm-project-switcher">
-          <SearchField class="pdm-project-switcher__display" :class="{ 'is-disabled': switchConfirmationPending || Boolean(switchingProjectId) }" @keydown.esc.capture="quickProjectQuery = ''">
+          <SearchField :compact-placeholder="false" class="pdm-project-switcher__display" :class="{ 'is-disabled': switchConfirmationPending || Boolean(switchingProjectId) }" @keydown.esc.capture="quickProjectQuery = ''">
             <ElAutocomplete v-model="quickProjectQuery" class="pdm-project-switcher__input" aria-label="快速搜索项目" :placeholder="`${rootProject.code} · ${rootProject.name}`" :title="`${rootProject.code} · ${rootProject.name}`"
               :fetch-suggestions="quickProjectSuggestions" :debounce="100" :highlight-first-item="true" popper-class="pdm-project-quick-search" :disabled="switchConfirmationPending || Boolean(switchingProjectId)"
-              @select="item => selectQuickProject(item.id)" @blur="quickProjectQuery = ''">
+              @select="item => selectQuickProject(item.id)">
               <template #default="{ item }"><strong :title="item.code">{{ item.code }}</strong><small :title="item.name">{{ item.name }}</small></template>
             </ElAutocomplete>
-            <template #action><button type="button" class="pdm-project-switcher__search-icon" aria-label="浏览项目" aria-haspopup="dialog" :aria-expanded="projectBrowserOpen" :disabled="switchConfirmationPending || Boolean(switchingProjectId)" title="浏览项目" @click="projectBrowserOpen = true">搜索</button></template>
+            <template #action><button type="button" class="pdm-project-switcher__search-icon" aria-label="浏览项目" aria-haspopup="dialog" :aria-expanded="projectBrowserOpen" :disabled="switchConfirmationPending || Boolean(switchingProjectId)" title="浏览项目" @click="openProjectBrowser">搜索</button></template>
           </SearchField>
         </div>
       </section>
@@ -239,9 +291,9 @@ function drawingDocumentCount(project: ProjectSummary) {
           <div><dt>型号</dt><dd :title="sidebarProject.deviceModel">{{ sidebarProject.deviceModel || '—' }}</dd></div>
           <div><dt>序列号</dt><dd :title="sidebarProject.serialNumbers.join('、')">{{ sidebarProject.serialNumbers.join('、') || '—' }}</dd></div>
           <div><dt>事业部</dt><dd :title="rootProject.executionUnitName">{{ rootProject.executionUnitName || '待分配' }}</dd></div>
-          <div><dt>项目经理</dt><dd :title="displayUserName(rootProject.primaryProjectManager, '待分配')">{{ displayUserName(rootProject.primaryProjectManager, '待分配') }}</dd></div>
-          <div><dt>主设</dt><dd :title="projectDesignLeads(rootProject).map(item => displayUserName(item)).join('、') || '待分配'">{{ projectDesignLeads(rootProject).map(item => displayUserName(item)).join('、') || '待分配' }}</dd></div>
-          <div><dt>工程师</dt><dd :title="executionEngineerNames">{{ executionEngineerNames }}</dd></div>
+          <div><dt>项目经理</dt><dd :title="displayUserName(rootProject.primaryProjectManager, '—')"><PersonName :name="displayUserName(rootProject.primaryProjectManager, '—')" /></dd></div>
+          <div><dt>主设计</dt><dd :title="projectDesignLeads(rootProject).map(item => displayUserName(item)).join('、') || '—'"><PersonName :name="projectDesignLeads(rootProject).map(item => displayUserName(item)).join('、') || '—'" /></dd></div>
+          <div><dt>设计人员</dt><dd :title="executionEngineerNames"><PersonName :name="executionEngineerNames" /></dd></div>
         </dl>
       </section>
 
@@ -257,16 +309,16 @@ function drawingDocumentCount(project: ProjectSummary) {
             v-for="item in familyProjects"
             :key="item.id"
             type="button"
-            :class="{ 'is-active': item.id === project.id, 'is-release-attention': Boolean(releaseAttention(item)) }"
-            :data-release-attention="releaseAttention(item) || undefined"
-            :title="releaseAttentionTitle(item)"
+            :class="{ 'is-active': item.id === project.id, 'is-release-attention': Boolean(listAttentionTone(item)) }"
+            :data-release-attention="listAttentionTone(item) || undefined"
+            :title="listAttentionTitle(item)"
             :aria-current="item.id === project.id ? 'page' : undefined"
             :aria-label="`选择项目号 ${item.code}`"
             :aria-busy="item.id === switchingProjectId"
             :disabled="switchConfirmationPending || Boolean(switchingProjectId)"
             @click="item.id !== project.id && emit('switch', item.id)"
           >
-            <ReleaseAttentionBorder v-if="releaseAttention(item)" :tone="releaseAttention(item) as 'error' | 'new'" />
+            <ReleaseAttentionBorder v-if="listAttentionTone(item)" :tone="listAttentionTone(item) as 'error' | 'new'" />
             <span class="pdm-project-family__identity"><strong>{{ item.code }}</strong><small :title="item.name">{{ item.name }}</small></span>
             <span class="pdm-project-family__meta">
               <span class="pdm-project-family__state">{{ item.id === switchingProjectId ? '切换中…' : documentStatus(item, item.id === project.id) }}</span>
@@ -284,17 +336,17 @@ function drawingDocumentCount(project: ProjectSummary) {
     <section class="pdm-project-detail">
       <header class="pdm-project-detail__header">
         <nav class="pdm-project-tabs pdm-tabs" aria-label="项目功能">
-          <button v-for="tab in visibleTabs" :key="tab.key" type="button" :class="{ 'is-active': activeTab === tab.key, 'is-release-attention': tab.key === 'release' && Boolean(activeReleaseAttention) }" :data-release-attention="tab.key === 'release' ? activeReleaseAttention || undefined : undefined" :title="updateTitle(tab.key, tab.label)" @click="emit('tab', tab.key, Boolean(tabUpdates[tab.key]))"><ReleaseAttentionBorder v-if="tab.key === 'release' && activeReleaseAttention" :tone="activeReleaseAttention as 'error' | 'new'" /><span>{{ tab.label }}</span><i v-if="tabUpdates[tab.key]" class="pdm-tab-update-dot" aria-hidden="true" /></button>
+          <button v-for="tab in visibleTabs" :key="tab.key" type="button" :class="{ 'is-active': activeTab === tab.key, 'is-release-attention': Boolean(tabAttentionTone(tab.key)) }" :data-release-attention="tabAttentionTone(tab.key) || undefined" :title="updateTitle(tab.key, tab.label)" @click="emit('tab', tab.key, Boolean(tabUpdates[tab.key]))"><ReleaseAttentionBorder v-if="tabAttentionTone(tab.key)" :tone="tabAttentionTone(tab.key) as 'error' | 'new'" /><span>{{ tab.label }}</span><i v-if="tabUpdates[tab.key] && !tabAttentionTone(tab.key)" class="pdm-tab-update-dot" aria-hidden="true" /></button>
           <button type="button" v-if="projectAccess.write.value && projectAccess.canViewTab('information')" class="pdm-project-tabs__settings" aria-label="项目设置" @click="projectSettingsOpen = true"><span>设置</span></button>
         </nav>
       </header>
       <slot />
     </section>
 
-    <div v-if="projectBrowserOpen" class="pdm-dialog-backdrop" @click.self="closeProjectBrowser" @keydown.esc="closeProjectBrowser">
+    <Transition name="pdm-drawer" appear><div v-if="projectBrowserOpen" class="pdm-dialog-backdrop" @click.self="closeProjectBrowser" @keydown.esc="closeProjectBrowser">
       <RawDrawerPanel class="pdm-project-browser-dialog" role="dialog" aria-modal="true" aria-labelledby="pdm-project-browser-title">
         <template #header="{ setActionTarget }"><header><div class="pdm-panel-topbar"><div class="pdm-panel-topbar-title">
-          <div><h3 id="pdm-project-browser-title">浏览项目</h3><p>搜索并选择需要切换的主项目。</p></div>
+          <div><h3 id="pdm-project-browser-title">浏览项目</h3><p>{{ defaultProjectTypes.length ? '默认显示标准项目 P，' : '' }}可多选项目分类，清空分类则显示全部。</p></div>
 
         </div><div class="pdm-panel-header-actions" :ref="setActionTarget"></div></div><button type="button" class="pdm-icon-button" aria-label="关闭项目浏览" :disabled="switchConfirmationPending" @click="closeProjectBrowser">×</button></header></template>
         <div class="pdm-project-browser-search">
@@ -302,8 +354,11 @@ function drawingDocumentCount(project: ProjectSummary) {
           <span>找到 {{ filteredRootProjects.length }} 个项目</span>
         </div>
         <div class="pdm-project-browser-filters" aria-label="项目筛选">
-          <select v-model="projectCustomerFilter" aria-label="客户筛选"><option value="">全部客户</option><option v-for="customer in projectCustomerOptions" :key="customer" :value="customer">{{ customer }}</option></select>
-          <select v-model="projectExecutionUnitFilter" aria-label="事业部筛选"><option value="">全部事业部</option><option v-for="unit in projectExecutionUnitOptions" :key="unit" :value="unit">{{ unit }}</option></select>
+          <ElSelect v-model="projectTypeFilter" class="pdm-project-prefix-filter" aria-label="项目分类筛选" multiple clearable collapse-tags collapse-tags-tooltip placeholder="全部项目分类">
+            <ElOption v-for="type in projectTypeOptions" :key="type.code" :value="type.code" :label="`${type.name} ${type.code}`" />
+          </ElSelect>
+          <select v-model="projectCustomerFilter" aria-label="客户筛选"><option value="">全部客户</option><option v-for="customer in projectCustomerOptions" :key="customer.id" :value="customer.code">{{ customer.name }}</option></select>
+          <select v-model="projectExecutionUnitFilter" aria-label="事业部筛选"><option value="">全部事业部</option><option v-for="unit in projectExecutionUnitOptions" :key="unit.id" :value="unit.id">{{ unit.name }}</option></select>
           <UserSelect v-model="projectPersonFilter" aria-label="人员筛选"><option value="">全部人员</option><option v-for="person in projectPersonOptions" :key="person" :value="person">{{ displayUserName(person) }}</option></UserSelect>
         </div>
         <div class="pdm-project-browser-list" role="listbox" aria-label="项目搜索结果">
@@ -336,7 +391,7 @@ function drawingDocumentCount(project: ProjectSummary) {
         </div>
         <PanelActions><footer><button type="button" class="pdm-secondary-action" :disabled="switchConfirmationPending" @click="closeProjectBrowser">取消</button></footer></PanelActions>
       </RawDrawerPanel>
-    </div>
+    </div></Transition>
 
     <ProjectSettingsDrawer
       v-if="projectSettingsOpen"
@@ -355,6 +410,15 @@ function drawingDocumentCount(project: ProjectSummary) {
 </template>
 
 <style scoped>
+.pdm-project-browser-filters { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.pdm-project-prefix-filter { min-width: 0; width: 100%; }
+.pdm-project-browser-list > button, .pdm-project-browser-table-head { text-align: center; align-items: center; }
+.pdm-project-browser-list .pdm-empty-info { text-align: center; }
+@media (max-width: 600px) {
+  .pdm-project-browser-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pdm-project-browser-pagination { flex-wrap: wrap; }
+  .pdm-project-browser-pagination > span, .pdm-project-browser-pagination label, .pdm-project-browser-pagination button { white-space: nowrap; }
+}
 .pdm-project-tabs button.is-release-attention, .pdm-project-family__list button.is-release-attention { position: relative; }
 /* From Uiverse.io by vinodjangid07，输入框宽度随项目侧栏收缩。 */
 .pdm-project-sidebar__context { height: calc(var(--pdm-tab-primary) + 2 * var(--pdm-tabs-padding)); flex-basis: calc(var(--pdm-tab-primary) + 2 * var(--pdm-tabs-padding)); padding: var(--pdm-tabs-padding) var(--pdm-content-inset); border-color: transparent; }
@@ -362,7 +426,7 @@ function drawingDocumentCount(project: ProjectSummary) {
 .pdm-project-switcher__display:not(.is-disabled):hover,
 .pdm-project-switcher__display:not(.is-disabled):focus-within { transform: none; border-color: transparent; box-shadow: none; }
 .pdm-project-switcher__display > :deep(.pdm-project-switcher__input) { width: 170px; flex: 1 1 170px; }
-.pdm-project-switcher__display :deep(.pdm-project-switcher__input .el-input__wrapper) { height: var(--pdm-tab-primary); min-height: var(--pdm-tab-primary); padding: 0 0 0 15px; border: 1px solid #d0d7e1; border-radius: 6px; background: #fff; box-shadow: none !important; }
+.pdm-project-switcher__display :deep(.pdm-project-switcher__input .el-input__wrapper) { height: var(--pdm-tab-primary); min-height: var(--pdm-tab-primary); padding: 0 0 0 15px; border: 1px solid #d0d7e1; border-radius: 6px; background: var(--pdm-surface); box-shadow: none !important; }
 .pdm-project-switcher__display :deep(.pdm-project-switcher__input .el-input__wrapper.is-focus) { border-color: #292524; }
 .pdm-project-switcher__display :deep(.pdm-project-switcher__input .el-input__inner) { height: calc(var(--pdm-tab-primary) - 2px); line-height: calc(var(--pdm-tab-primary) - 2px); font-size: .7em; color: #292524; }
 .pdm-project-switcher__search-icon { width: var(--pdm-tab-primary); min-width: var(--pdm-tab-primary); height: var(--pdm-tab-primary); flex: 0 0 var(--pdm-tab-primary); padding: 0; border: none; border-radius: 6px; color: #fff; background: #292524; box-shadow: none; transition: all .3s; font-size: .7em; gap: 4px; }

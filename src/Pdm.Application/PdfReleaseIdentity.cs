@@ -8,6 +8,22 @@ public static class PdfReleaseIdentity
 
     public static string Display(string model, string revision) => $"{model}\n{revision}";
 
+    // A release is the production batch. Reprinting a release must retain this identity.
+    public static string Display(string model, string revision, Guid packageId) =>
+        $"UPLM-BATCH|{Uri.EscapeDataString(model.Trim())}|{Uri.EscapeDataString(revision.Trim())}|{packageId:N}";
+
+    public static bool TryDecodeBatch(string code, out string model, out string revision, out Guid packageId)
+    {
+        model = revision = string.Empty;
+        packageId = Guid.Empty;
+        var parts = code.Trim().Split('|');
+        if (parts.Length != 4 || parts[0] != "UPLM-BATCH" || !Guid.TryParseExact(parts[3], "N", out packageId)
+            || packageId == Guid.Empty) return false;
+        model = Uri.UnescapeDataString(parts[1]);
+        revision = Uri.UnescapeDataString(parts[2]);
+        return model.Length is > 0 and <= 300 && revision.Length is > 0 and <= 40;
+    }
+
     public static bool TryDecodeDisplay(string code, out string model, out string revision)
     {
         model = revision = string.Empty;

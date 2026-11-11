@@ -45,15 +45,25 @@ public sealed class ReleaseDeliveryArchiveService(
         }
         if (missing.Count == 0) return 0;
 
-        return await files.ArchiveReleaseAsync(
+        var purchase = missing.Where(item => item.FileName.EndsWith("-采购清单.pdf", StringComparison.Ordinal)).ToArray();
+        var regular = missing.Except(purchase).ToArray();
+        var count = await files.ArchiveReleaseAsync(
             folder.RootProjectId,
             folder.Id,
             packageDirectory,
             package.Number,
-            missing,
+            regular,
             actor,
             package.PublishedAt ?? timeProvider.GetUtcNow(),
             cancellationToken);
+        if (purchase.Length > 0)
+        {
+            var purchaseFolder = await repository.FindProjectFolderByKeyAsync(project.Id, "purchase", cancellationToken)
+                ?? throw new PdmRuleException("项目采购清单文件夹不存在，请刷新项目目录后重试发布归档。");
+            count += await files.ArchiveReleaseAsync(purchaseFolder.RootProjectId, purchaseFolder.Id, packageDirectory,
+                package.Number, purchase, actor, package.PublishedAt ?? timeProvider.GetUtcNow(), cancellationToken);
+        }
+        return count;
     }
 
     /// <summary>机械发布（标准件/非标件/历史组合）汇总到"机械发布"，电气发布汇总到"电气发布"。</summary>

@@ -1,4 +1,4 @@
-﻿using Upton.Pdm.Domain;
+using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
 
@@ -9,20 +9,23 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
     {
         var project = await RequireReadAsync(projectId, actor, role, ct);
         var budget = await budgets.FindAsync(projectId, ct) ?? new(projectId, ProjectBudgetCategories.All.Select(category => new ProjectBudgetLine(category)).ToArray());
-        var reserve = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetReserve, ct);
-        var canEditActual = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetActualEdit, ct);
-        var canEdit = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetEdit, ct);
+        var reserve = await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetReserve, ct);
+        var canEditActual = await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetActualEdit, ct);
+        var canEdit = await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetEdit, ct);
         var root = project.ParentProjectId is null ? project : await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, ct)
             ?? throw new PdmNotFoundException("主项目不存在。");
-        var sources = await procurement.ListForProjectAsync(root.Code, project.ParentProjectId is null ? null : project.Code, ct);
-        var nonstandard = await repository.GetBomAsync(projectId, BomKind.NonStandard, ct);
+        var access = await ProjectFinancialAccessPolicy.ReadAsync(repository, project, actor, role, ct);
+        var sources = access.Actual || access.Departments.Count > 0
+            ? await procurement.ListForProjectAsync(root.Code, project.ParentProjectId is null ? null : project.Code, ct) : [];
+        var purchaseOrders = sources.Where(row => row.RecordKind == U9ProcurementRecordKinds.PurchaseOrder && !row.IsCanceled).ToArray();
+        var nonstandard = purchaseOrders.Length > 0 ? await repository.GetBomAsync(projectId, BomKind.NonStandard, ct) : [];
+        var materialCodes = await materials.FindMaterialCodesBySourceBomItemsAsync(nonstandard.Select(item => item.Id).ToArray(), ct);
         var nonstandardCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var item in nonstandard)
         {
-            var material = await materials.FindMaterialBySourceBomItemAsync(item.Id, ct);
-            nonstandardCodes.Add(material?.U9ItemCode ?? material?.MaterialCode ?? item.DrawingNumber);
+            nonstandardCodes.Add(materialCodes.GetValueOrDefault(item.Id) ?? item.DrawingNumber);
         }
-        var orders = sources.Where(row => row.RecordKind == U9ProcurementRecordKinds.PurchaseOrder && !row.IsCanceled)
+        var orders = purchaseOrders
             .DistinctBy(row => (row.OrganizationCode, row.LineId)).Select(row =>
             {
                 var key = $"{row.OrganizationCode}:{row.LineId}";
@@ -37,26 +40,54 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
             return Calculate(line, orderAmount, matching.Any(order => order.Amount is null));
         }).ToArray();
         var settlementAmount = SettlementTotal(budget.SettlementLines ?? []);
-        var canViewSettlement = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetSettlementView, ct);
-        var canEditSettlement = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetSettlementEdit, ct);
-        var canEditBonusRate = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetBonusRateEdit, ct);
-        return new(projectId, rows, Total(rows.Select(row => row.BudgetAmount)), Total(rows.Select(row => row.ActualAmount)),
+        var canViewSettlement = await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetSettlementView, ct);
+        var canEditSettlement = await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetSettlementEdit, ct);
+        var canEditBonusRate = await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetBonusRateEdit, ct);
+        var result = new ProjectBudgetView(projectId, rows, Total(rows.Select(row => row.BudgetAmount)), Total(rows.Select(row => row.ActualAmount)),
             Total(rows.Select(row => row.EstimatedAmount)), Overrun(rows), canEdit || canEditActual, reserve,
             budget.RowVersion, budget.UpdatedBy, budget.UpdatedAt, orders, canEdit, canEditActual, ReadNotes(budget).Where(note => reserve || note.Category != ProjectBudgetCategories.Reserve).ToArray(), canViewSettlement ? budget.SettlementLines ?? [] : [], canViewSettlement ? settlementAmount : null, canEditBonusRate ? budget.BonusRate : null, canViewSettlement && settlementAmount.HasValue ? settlementAmount.Value < 200000m ? 0m : decimal.Round(settlementAmount.Value * budget.BonusRate, 2, MidpointRounding.AwayFromZero) : null, canEditSettlement, canEditBonusRate, canViewSettlement);
+        if (access.CanMaintainBudget && canEdit)
+            result = result with { Departments = (await repository.GetOrganizationDirectoryAsync(ct)).Units
+                .Where(unit => unit.IsActive && unit.OrganizationId == project.OrganizationId && unit.Kind == OrganizationUnitKind.Department)
+                .OrderBy(unit => unit.SortOrder).Select(unit => new ProjectBudgetDepartment(unit.Id, unit.Name)).ToArray() };
+        return access.Filter(result);
     }
 
     public async Task<ProjectBudgetView> SaveAsync(Guid projectId, SaveProjectBudgetCommand command, string actor, UserRole role, CancellationToken ct)
     {
-        await RequireReadAsync(projectId, actor, role, ct);
-        var canEdit = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetEdit, ct);
-        var canEditActual = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetActualEdit, ct);
+        var project = await RequireReadAsync(projectId, actor, role, ct);
+        var access = await ProjectFinancialAccessPolicy.ReadAsync(repository, project, actor, role, ct);
+        var canEdit = access.CanMaintainBudget && await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetEdit, ct);
+        var canEditActual = access.CanMaintainActual && await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetActualEdit, ct);
         if (!canEdit && !canEditActual)
             throw new UnauthorizedAccessException("当前账号没有预算维护权限。");
         if (command.Lines is null || command.Lines.Select(line => line.Category).Distinct().Count() != command.Lines.Count
             || command.Lines.Any(line => !ProjectBudgetCategories.All.Contains(line.Category)))
             throw new PdmRuleException("预算分类无效或重复。");
         var current = await budgets.FindAsync(projectId, ct);
-        var reserve = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetReserve, ct);
+        // Hidden fields are omitted by the client. Preserve their stored values; never clear them on save.
+        command = command with { Lines = command.Lines.Select(line => {
+            var stored = NormalizeLegacyActual(NormalizeLegacyBudget(current?.Lines.FirstOrDefault(item => item.Category == line.Category)
+                ?? new ProjectBudgetLine(line.Category)), current?.ManualActualAmounts ?? true);
+            if (!access.Actual && (line.ActualAmount.HasValue || line.ActualHours.HasValue || line.ActualHourlyRate.HasValue
+                || line.RemainingAmount.HasValue || line.RemainingHours.HasValue))
+                throw new UnauthorizedAccessException("当前账号不能提交实际成本及预计成本数据。");
+            if (!access.Budget && (line.BudgetAmount.HasValue || line.PlannedHours.HasValue || line.HourlyRate.HasValue))
+                throw new UnauthorizedAccessException("当前账号不能提交预算金额数据。");
+            if (!access.Actual) line = line with { ActualAmount = stored.ActualAmount, ActualHours = stored.ActualHours,
+                ActualHourlyRate = stored.ActualHourlyRate, RemainingAmount = stored.RemainingAmount, RemainingHours = stored.RemainingHours };
+            if (!access.Budget) line = line with { BudgetAmount = stored.BudgetAmount, PlannedHours = stored.PlannedHours, HourlyRate = stored.HourlyRate };
+            return line;
+        }).ToArray() };
+        if (command.Lines.Any(line => line.DepartmentId != current?.Lines.FirstOrDefault(item => item.Category == line.Category)?.DepartmentId))
+        {
+            if (!canEdit) throw new UnauthorizedAccessException("仅有预算维护权限的负责人可调整费用归属部门。");
+            var directory = await repository.GetOrganizationDirectoryAsync(ct);
+            if (command.Lines.Any(line => line.DepartmentId.HasValue && !directory.Units.Any(unit => unit.Id == line.DepartmentId
+                && unit.OrganizationId == project.OrganizationId && unit.Kind == OrganizationUnitKind.Department && unit.IsActive)))
+                throw new PdmRuleException("费用归属部门必须是当前公司内的启用部门。");
+        }
+        var reserve = await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetReserve, ct);
         if (!reserve && command.Lines.Any(line => line.Category == ProjectBudgetCategories.Reserve))
             throw new UnauthorizedAccessException("风险预留仅计划管理可维护。");
         var required = ProjectBudgetCategories.All.Where(category => reserve || category != ProjectBudgetCategories.Reserve).ToArray();
@@ -93,9 +124,12 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
 
     public async Task<ProjectBudgetView> AddNoteAsync(Guid projectId, AddProjectBudgetNoteCommand command, string actor, UserRole role, CancellationToken ct)
     {
-        await RequireReadAsync(projectId, actor, role, ct);
+        var project = await RequireReadAsync(projectId, actor, role, ct);
+        var access = await ProjectFinancialAccessPolicy.ReadAsync(repository, project, actor, role, ct);
+        if (!access.Budget && !access.Actual)
+            throw new UnauthorizedAccessException("当前账号没有项目财务备注维护权限。");
         if (command.Category != "Assessment" && !ProjectBudgetCategories.All.Contains(command.Category)) throw new PdmRuleException("预算分类无效。");
-        if (command.Category == ProjectBudgetCategories.Reserve && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetReserve, ct))
+        if (command.Category == ProjectBudgetCategories.Reserve && !await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetReserve, ct))
             throw new UnauthorizedAccessException("风险预留仅计划管理可查看。");
         var content = command.Content?.Trim();
         if (string.IsNullOrEmpty(content) || content.Length > 500) throw new PdmRuleException("备注内容应为1至500字。");
@@ -113,7 +147,7 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
     public async Task<ProjectBudgetView> SaveSettlementAsync(Guid projectId, SaveProjectSettlementCommand command, string actor, UserRole role, CancellationToken ct)
     {
         await RequireReadAsync(projectId, actor, role, ct);
-        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetSettlementEdit, ct)) throw new UnauthorizedAccessException("当前账号没有结算金额维护权限。");
+        if (!await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetSettlementEdit, ct)) throw new UnauthorizedAccessException("当前账号没有结算金额维护权限。");
         if (command.Lines is null || command.Lines.Count > 100) throw new PdmRuleException("结算明细最多100条。");
         var lines = command.Lines.Where(line => !string.IsNullOrWhiteSpace(line.Content) || !string.IsNullOrWhiteSpace(line.Unit) || !string.IsNullOrWhiteSpace(line.Note) || line.Quantity.HasValue || line.UnitPrice.HasValue)
             .Select(line => line with { Content = line.Content?.Trim() ?? "", Unit = line.Unit?.Trim(), Note = line.Note?.Trim() }).ToArray();
@@ -129,7 +163,7 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
     public async Task<ProjectBudgetView> SaveBonusRateAsync(Guid projectId, SaveProjectBonusRateCommand command, string actor, UserRole role, CancellationToken ct)
     {
         await RequireReadAsync(projectId, actor, role, ct);
-        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetBonusRateEdit, ct)) throw new UnauthorizedAccessException("当前账号没有项目奖金比例维护权限。");
+        if (!await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetBonusRateEdit, ct)) throw new UnauthorizedAccessException("当前账号没有项目奖金比例维护权限。");
         if (command.Rate is < 0 or > .01m) throw new PdmRuleException("奖金比例应在0%至1%之间。");
         var current = await budgets.FindAsync(projectId, ct) ?? new(projectId, ProjectBudgetCategories.All.Select(category => new ProjectBudgetLine(category)).ToArray(), ManualActualAmounts: true);
         await budgets.SaveAsync(current with { BonusRate = command.Rate, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() }, command.ExpectedRowVersion, ct);
@@ -143,10 +177,7 @@ public sealed class ProjectBudgetService(IPdmRepository repository, IProjectBudg
     {
         var project = await repository.FindProjectAsync(projectId, ct) ?? throw new PdmNotFoundException("项目不存在。");
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, ct)) throw new UnauthorizedAccessException("当前账号没有项目内容查看权限。");
-        var root = project.ParentProjectId is null ? project : await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, ct);
-        var settings = await repository.GetProjectPermissionSettingsAsync(ct);
-        var lead = root is not null && ProjectPermissionPolicy.Allows(project, root, actor, settings, PermissionCodes.ProjectBudgetView);
-        if (!lead && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectBudgetView, ct))
+        if (!await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectBudgetView, ct))
             throw new UnauthorizedAccessException("当前账号没有预算查看权限。");
         return project;
     }

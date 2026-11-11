@@ -66,7 +66,7 @@ async function setDateRange(wrapper: VueWrapper, value: [string, string] | null)
   await flushPromises()
 }
 
-describe('发布跟踪快捷筛选与全部分类', () => {
+describe('发布跟踪快捷筛选与发布包切换', () => {
   it('三个追溯列表使用相同列宽与表头，生产资料列固定90px', async () => {
     const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['production.schedule'] } })
     await flushPromises()
@@ -108,7 +108,7 @@ describe('发布跟踪快捷筛选与全部分类', () => {
   it('展开折叠总控只调整项目列表，保留当前发布包', async () => {
     const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } })
     await flushPromises()
-    expect(wrapper.get('.production-workbench__all-categories').text()).toBe('全部发布包')
+    expect(wrapper.find('.production-workbench__all-categories').exists()).toBe(false)
     const selected = wrapper.get('.production-workbench__package.selected').text()
     const button = wrapper.get('.production-workbench__toggle-projects')
     expect(button.text()).toBe('折叠')
@@ -259,7 +259,7 @@ describe('发布跟踪快捷筛选与全部分类', () => {
     expect(open.element.checked).toBe(true); expect((unassigned.element as HTMLInputElement).checked).toBe(false)
     wrapper.unmount()
   })
-  it('汇总不同项目和发布包，重复物料ID不混淆，图纸与办理入口使用各自原发布包', async () => {
+  it('切换不同项目和发布包，重复物料ID不混淆，图纸与办理入口使用各自原发布包', async () => {
     records.two.state.projectId = 'other-project'; records.two.state.projectCode = 'P002'; records.two.state.projectName = '第二项目'
     records.two.state.movements.push({ id: 'issue-two', requestId: 'issue-two', lotId: 'external', kind: 'Issue', quantity: 4, actor: 'admin', occurredAt: '' })
     const projects = await api.listProductionTrackingProjects('token')
@@ -269,33 +269,32 @@ describe('发布跟踪快捷筛选与全部分类', () => {
     ])
     const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view', 'production.assign'] } })
     await flushPromises()
-    await wrapper.get('[aria-label="搜索生产发布包"]').setValue('P001')
-    await wrapper.get('.production-workbench__all-categories').trigger('click'); await flushPromises()
     const middle = wrapper.get('[aria-label="发布包物料明细"]')
-    expect(wrapper.get<HTMLInputElement>('[aria-label="搜索生产发布包"]').element.value).toBe('')
-    expect(wrapper.get('.production-workbench__all-categories').attributes('aria-pressed')).toBe('true')
-    expect(middle.findAll('tbody tr')).toHaveLength(6)
-    const second = middle.findAll('tbody tr').find(row => row.text().includes('RP-two') && row.text().includes('D-001'))!
-    expect(second.text()).toContain('P002'); expect(second.findAll('td')[8].text()).toBe('4')
+    expect(middle.get('header').text()).toContain('RP-one')
+    expect(middle.findAll('tbody tr').find(row => row.text().includes('D-001'))!.findAll('td')[8].text()).toBe('0')
+    await wrapper.findAll('.production-workbench__package').find(button => button.text().includes('RP-two'))!.trigger('click'); await flushPromises()
+    expect(middle.get('header').text()).toContain('P002')
+    expect(middle.findAll('tbody tr')).toHaveLength(3)
+    const second = middle.findAll('tbody tr').find(row => row.text().includes('D-001'))!
+    expect(second.findAll('td')[8].text()).toBe('4')
     await second.get('[aria-label="预览图纸 D-001"]').trigger('click'); await flushPromises()
     expect(wrapper.findComponent(ProductionLineDrawingDialog).props('state').releasePackageId).toBe('two')
     wrapper.findComponent(ProductionLineDrawingDialog).vm.$emit('close'); await flushPromises()
-    await wrapper.get('[aria-label="打开发布包 RP-two 的物料 D-001"]').trigger('click'); await flushPromises()
-    expect(wrapper.get('.production-workbench__all-categories').attributes('aria-pressed')).toBe('false')
+    await second.trigger('click'); await flushPromises()
     expect(middle.get('header').text()).toContain('RP-two'); expect(middle.get('header').text()).toContain('第二项目')
     expect(wrapper.get('.production-workbench__detail').text()).toContain('外协板')
     wrapper.unmount()
   })
-  it('读取汇总期间切换回发布包，迟到的汇总结果不能覆盖当前选择', async () => {
+  it('读取发布包期间切换回原包，迟到的结果不能覆盖当前选择', async () => {
     let complete!: (record: ProductionReleaseRecord) => void
     vi.mocked(api.readProductionTrackingRelease).mockImplementation(async id => id === 'two'
       ? new Promise(resolve => { complete = resolve }) : records[id])
     const wrapper = mount(ProductionWorkbench, { props: { token: 'token', username: 'admin', permissions: ['project.content.view'] } })
     await flushPromises()
-    await wrapper.get('.production-workbench__all-categories').trigger('click'); await flushPromises()
+    await wrapper.findAll('.production-workbench__package').find(button => button.text().includes('RP-two'))!.trigger('click'); await flushPromises()
     await wrapper.findAll('.production-workbench__package').find(button => button.text().includes('RP-one'))!.trigger('click'); await flushPromises()
     complete(records.two); await flushPromises()
-    expect(wrapper.get('.production-workbench__all-categories').attributes('aria-pressed')).toBe('false')
+    expect(wrapper.get('.production-workbench__package.selected').text()).toContain('RP-one')
     expect(wrapper.get('[aria-label="发布包物料明细"] header').text()).toContain('RP-one')
     expect(wrapper.findAll('.production-workbench__toolbar button')[0].attributes('disabled')).toBeUndefined()
     wrapper.unmount()
@@ -331,7 +330,7 @@ describe('三栏自制排程', () => {
     await history.get('summary').trigger('click')
     expect(history.findAll('li')).toHaveLength(13)
     expect(history.text()).toContain('received-self-a'); expect(history.text()).toContain('trace-11')
-    expect(history.text()).toContain('车床操作员（operator）'); expect(history.text()).toContain('车床工位 · 车床组')
+    expect(history.text()).toContain('车床操作员'); expect(history.text()).not.toContain('operator'); expect(history.text()).toContain('车床工位 · 车床组')
     expect(history.text()).toContain('追溯说明11'); expect(history.text()).not.toContain('received-self-b')
     await wrapper.get('[aria-label="选择排程批次 D-003 self-b"]').trigger('click'); await flushPromises()
     expect(wrapper.get('[aria-label="排程安排"] [aria-label="完整操作记录"]').text()).toContain('received-self-b')
@@ -648,13 +647,18 @@ describe('三栏自制排程', () => {
     expect(wrapper.get('[aria-label="排程安排"] h3').text()).toBe('第二包自制件')
     wrapper.unmount()
   })
-  it('生产执行仅显示真实PDA扫码页并随账号切换重置', async () => {
+  it('生产执行嵌入生产执行 App 并随账号切换重置', async () => {
     const wrapper = await openSchedule()
     await wrapper.findAll('.production-workbench__tabs button').find(button => button.text() === '生产执行')!.trigger('click')
     await flushPromises()
     const frame = wrapper.get('iframe[title="PDA移动扫码页面"]')
-    expect(frame.attributes('src')).toContain('?productionScan=1')
+    expect(frame.attributes('src')).toBe('./production-app/index.html')
     expect(frame.attributes('allow')).toBe('camera')
+    expect(wrapper.get('.production-pda__bezel iframe').element).toBe(frame.element)
+    const keys = wrapper.get('.production-pda__keys')
+    expect(keys.attributes('aria-hidden')).toBe('true')
+    expect(keys.findAll('.production-pda__number')).toHaveLength(10)
+    expect(keys.find('.production-pda__scan-key').exists()).toBe(true)
     expect(wrapper.find('.production-workbench__pda > header').exists()).toBe(false)
     await wrapper.setProps({ token: 'different-account-token' })
     expect(wrapper.get('iframe').element).not.toBe(frame.element)
@@ -948,8 +952,8 @@ describe('三栏自制排程', () => {
   })
 })
 
-describe('外协与自制的未完工筛选及全部分类', () => {
-  it.each(['外协追溯', '自制追溯'])('%s默认只显示未交付批次，可查看完工数据并跨项目汇总', async tabName => {
+describe('外协与自制的未完工筛选及项目切换', () => {
+  it.each(['外协追溯', '自制追溯'])('%s默认只显示未交付批次，可查看完工数据并切换项目发布包', async tabName => {
     const first = records.one.state
     first.lines[0].requiredQuantity = 12
     first.lots[0].supplier = '甲'
@@ -985,21 +989,21 @@ describe('外协与自制的未完工筛选及全部分类', () => {
     else expect(middle.findAll('tbody tr')).toHaveLength(3)
     await middle.findAll('button').find(button => button.text() === '重置筛选')!.trigger('click'); await flushPromises()
     expect(open.element.checked).toBe(true)
-    await wrapper.get('.production-workbench__all-categories').trigger('click'); await flushPromises()
-    expect(wrapper.get('.production-workbench__all-categories').attributes('aria-pressed')).toBe('true')
-    expect(middle.get('header').text()).toContain('2 个发布包')
-    expect(middle.findAll('tbody tr')).toHaveLength(2)
-    expect(middle.text()).toContain('P002')
+    await wrapper.findAll('.production-workbench__package').find(button => button.text().includes('RP-two'))!.trigger('click'); await flushPromises()
+    expect(middle.get('header').text()).toContain('RP-two')
+    expect(middle.get('header').text()).toContain('P002')
+    expect(middle.findAll('tbody tr')).toHaveLength(1)
     const label = tabName === '外协追溯' ? '筛选供应商' : '筛选资源组'
     await middle.get(`[aria-label="${label}"]`).setValue(tabName === '外协追溯' ? '乙' : '异地资源组'); await flushPromises()
-    expect(middle.findAll('tbody tr')).toHaveLength(1); expect(middle.findAll('tbody tr')[0].text()).toContain('P002')
+    expect(middle.findAll('tbody tr')).toHaveLength(1)
     await middle.findAll('button').find(button => button.text() === '重置筛选')!.trigger('click'); await flushPromises()
-    const target = middle.findAll('tbody tr').find(row => row.text().includes('RP-two'))!
+    const target = middle.findAll('tbody tr')[0]!
     await target.findAll('button').find(button => button.attributes('aria-label')?.startsWith('预览图纸'))!.trigger('click'); await flushPromises()
     expect(wrapper.findComponent(ProductionLineDrawingDialog).props('state').releasePackageId).toBe('two')
     wrapper.findComponent(ProductionLineDrawingDialog).vm.$emit('close'); await flushPromises()
-    await target.get('.production-workbench__open-package').trigger('click'); await flushPromises()
-    expect(wrapper.get('.production-workbench__all-categories').attributes('aria-pressed')).toBe('false')
+    if (tabName === '自制追溯') await target.get('.production-workbench__schedule-select').trigger('click')
+    else await target.trigger('click')
+    await flushPromises()
     expect(middle.get('header').text()).toContain('RP-two')
     if (tabName === '自制追溯') expect(wrapper.get('[aria-label="选择排程批次 D-003 self-c"]').attributes('aria-pressed')).toBe('true')
     wrapper.unmount()

@@ -66,7 +66,7 @@ test('LAN HTTP mobile home, projects, OPL save and work-hours conflict preserve 
   await page.getByRole('button', { name: '新增问题', exact: true }).click()
   await page.getByRole('textbox', { name: '问题描述', exact: true }).fill('手机新增问题')
   await page.getByRole('button', { name: '保存问题', exact: true }).click()
-  await expect(page.locator('.mobile-opl-card')).toContainText('手机新增问题')
+  await expect(page.getByRole('button', { name: '查看问题 #1 手机新增问题', exact: true })).toBeVisible()
   await expect(page.getByRole('dialog', { name: '新增开口问题' })).not.toBeVisible()
   await page.screenshot({ path: join(process.env.TEMP!, 'uplm-mobile-opl-390.png'), fullPage: true })
   await page.getByRole('navigation').getByRole('button', { name: '工时', exact: true }).click()

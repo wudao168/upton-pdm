@@ -442,7 +442,21 @@ public sealed record U9MaterialIntegrationSettings(
 
 public sealed record MaterialCodeApprovalNode(Guid Id, int Order, ApprovalStage Stage, string Name,
     IReadOnlyList<string> Assignees, ApprovalDecision? Decision = null, string? DecisionBy = null,
-    string? Comment = null, DateTimeOffset? DecidedAt = null, bool IsEmergencySubstitute = false);
+    string? Comment = null, DateTimeOffset? DecidedAt = null, bool IsEmergencySubstitute = false)
+{
+    public IReadOnlyList<ApprovalDepartmentBranch> Departments { get; init; } = [];
+    public bool RequireAllApprovers { get; init; }
+    public ApprovalNodePolicy? Policy { get; init; }
+    public ApprovalCopyDelivery? CopyOnApproval { get; init; }
+    public IReadOnlyList<ApprovalNoteRevision> NoteHistory { get; init; } = [];
+    public IReadOnlyList<ApprovalSignature> Signatures { get; init; } = [];
+
+    public bool CanSign(string actor) =>
+        Decision is null && (Departments.Count > 0 ? Departments.Any(d => d.CanSign(actor)) : Assignees.Contains(actor, StringComparer.OrdinalIgnoreCase)
+        && !Signatures.Any(signature => string.Equals(signature.Actor, actor, StringComparison.OrdinalIgnoreCase)));
+}
+
+public sealed record ApprovalSignature(string Actor, string? Comment, DateTimeOffset SignedAt);
 
 public sealed record MaterialCodeApprovalSnapshot(string Code, int Version,
     IReadOnlyList<MaterialCodeApprovalNode> Nodes, IReadOnlyList<string> EmergencyRoleCodes);

@@ -1,38 +1,29 @@
-/* The selected navigation surface joins the main white workspace. */
-:root body .pdm-sidebar { background:rgb(229,231,235) !important; }
+/* 导航选中态保持独立胶囊，与主内容区留出相同的左右间距。 */
+:root body .pdm-sidebar { background:var(--pdm-nav-bg) !important; }
 :root body .pdm-sidebar .pdm-sidebar__nav .pdm-nav-item.is-active {
-  width:calc(100% - 8px) !important;
-  margin-inline-end:0 !important;
+  width:calc(100% - 16px) !important;
+  margin-inline-end:8px !important;
   border:0 !important;
-  border-radius:999px 0 0 999px !important;
-  background:#fff !important;
+  border-radius:999px !important;
+  background:var(--shell-content-bg, var(--pdm-bg, #fff)) !important;
   box-shadow:none !important;
 }
 :root body .pdm-sidebar.has-moving-highlight .pdm-sidebar__highlight {
   border:0 !important;
-  border-radius:999px 0 0 999px !important;
-  background:#fff !important;
+  border-radius:999px !important;
+  background:var(--shell-content-bg, var(--pdm-bg, #fff)) !important;
   box-shadow:none !important;
-  overflow:visible;
+  overflow:hidden;
 }
 :root body .pdm-sidebar.has-moving-highlight .pdm-sidebar__highlight::before,
 :root body .pdm-sidebar.has-moving-highlight .pdm-sidebar__highlight::after,
 :root body .pdm-sidebar:not(.has-moving-highlight) .pdm-nav-item.is-active::before,
 :root body .pdm-sidebar:not(.has-moving-highlight) .pdm-nav-item.is-active::after {
-  content:'';position:absolute;right:0;width:24px;height:24px;pointer-events:none;
-}
-:root body .pdm-sidebar.has-moving-highlight .pdm-sidebar__highlight::before,
-:root body .pdm-sidebar:not(.has-moving-highlight) .pdm-nav-item.is-active::before {
-  top:-24px;background:radial-gradient(circle at top left,transparent 24px,#fff 24px);
-}
-:root body .pdm-sidebar.has-moving-highlight .pdm-sidebar__highlight::after,
-:root body .pdm-sidebar:not(.has-moving-highlight) .pdm-nav-item.is-active::after {
-  bottom:-24px;background:radial-gradient(circle at bottom left,transparent 24px,#fff 24px);
+  content:none;display:none;
 }
 :root body .production-workbench .production-workbench__tree-actions > button.production-workbench__toggle-projects {
   border:1px solid var(--pdm-border) !important;
-  background:var(--pdm-surface) !important;
-  color:var(--pdm-theme-accent);
+  background:var(--pdm-surface) !important; color:var(--pdm-text);
 }
 :root body .production-workbench .production-workbench__tree-actions > button.production-workbench__toggle-projects:hover:not(:disabled) {
   border-color:var(--pdm-theme-accent) !important;

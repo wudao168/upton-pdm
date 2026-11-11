@@ -50,6 +50,10 @@ function installApiMock(projectsBeforeDefault: Array<Record<string, unknown>> = 
     if (url.endsWith('/client-bootstrap.json')) return json({ ConfigurationVersion: '2026.09.12.1234-version-display' })
     if (url.endsWith('/health')) return json({ status: 'ok' })
     if (url.endsWith('/api/approval-tasks/mine')) return json([])
+    if (url.endsWith('/api/project-activities/mine')) return json([])
+    if (url.endsWith('/api/workbench')) return json({ projects: [], summary: {}, upcoming: [], overdue: [] })
+    if (url.endsWith('/bom-headers')) return json([])
+    if (url.endsWith('/bom-headers/overview')) return json([])
     if (url.endsWith('/api/standard-structures')) return json({ catalog: { companyId: 'company', categories: [], structures: [], storageRoot: '', rowVersion: 0 }, canManage: false, canArchive: false, canConfigureStorage: false })
     if (url.endsWith('/api/edit-locks')) return json(editLocks)
     if (url.endsWith('/api/audit?take=200')) return json([])
@@ -265,14 +269,14 @@ function buttonByText(wrapper: ReturnType<typeof mount>, label: string) {
 }
 
 async function navigateTo(wrapper: ReturnType<typeof mount>, label: string) {
-  const projectPages = ['项目总览', '项目日历', '项目列表']
+  const projectPages = ['项目总览', '项目明细', '项目日历', '项目列表']
   const standardPages = ['标准物料', '标准结构', '常备件']
   const group = projectPages.includes(label) ? '项目总览' : standardPages.includes(label) ? '标准物料' : label
   const button = wrapper.get('.pdm-sidebar').findAll('button').find(button => button.text().trim() === group)!
   await button.trigger('click')
   await flushPromises()
   if (projectPages.includes(label) || standardPages.includes(label)) {
-    const tab = wrapper.get('.pdm-navigation-tabs').findAll('[role="tab"]').find(tab => tab.text() === label)!
+    const tab = wrapper.get('.pdm-navigation-tabs').findAll('[role="tab"]').find(tab => tab.text() === (label === '项目总览' ? '项目明细' : label === '项目列表' ? '立项信息' : label))!
     await tab.trigger('click')
     await flushPromises()
   }
@@ -560,7 +564,7 @@ describe('PLM client workspace', () => {
     await verify('developer', 'true', ['developer'])
   })
 
-  it.each(['a', 'c', 'p', 'o', 'g'])('applies saved theme %s and synchronizes it to the Windows client', async savedTheme => {
+  it.each(['a', 'c', 'g'])('applies saved theme %s and synchronizes it to the Windows client', async savedTheme => {
     const postMessage = vi.fn()
     window.localStorage.setItem('pdm_theme', savedTheme)
     Object.defineProperty(window, 'chrome', {
@@ -1267,7 +1271,7 @@ describe('PLM client workspace', () => {
     expect(postMessage).toHaveBeenCalledWith({ type: 'desktop-settings-save', payload: { workspaceRoot: 'D:\\PDM-Cache' } })
   })
 
-  it.each([['琥珀橙', 'o'], ['鸢尾紫', 'p'], ['石墨灰', 'g']])('个人设置切换%s会写入账号并立即应用', async (label, value) => {
+  it.each([['系统', 'a'], ['深色', 'c'], ['浅色', 'g']])('个人设置切换%s会写入账号并立即应用', async (label, value) => {
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     await login(wrapper, false)
 
@@ -1320,14 +1324,14 @@ describe('PLM client workspace', () => {
     const postMessage = vi.fn()
     let receive: (event: MessageEvent) => void = () => {}
     Object.defineProperty(window, 'chrome', { configurable: true, value: { webview: { postMessage, addEventListener: vi.fn((_event, handler) => { receive = handler }), removeEventListener: vi.fn() } } })
-    window.localStorage.setItem('pdm_theme', 'o')
+    window.localStorage.setItem('pdm_theme', 'c')
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [ElementPlus] } })
     try {
       await flushPromises()
       postMessage.mockClear()
       receive(new MessageEvent('message', { data: { type: 'review-overlay-action', payload: { action: 'state-ready' } } }))
       await flushPromises()
-      expect(postMessage).toHaveBeenCalledWith({ type: 'review-overlay-state', payload: expect.objectContaining({ theme: 'o' }) })
+      expect(postMessage).toHaveBeenCalledWith({ type: 'review-overlay-state', payload: expect.objectContaining({ theme: 'c' }) })
     } finally { wrapper.unmount(); delete window.chrome }
   })
 
@@ -1336,7 +1340,7 @@ describe('PLM client workspace', () => {
     await flushPromises()
     expect(wrapper.find('[aria-label="未登录主页"]').exists()).toBe(true)
     expect(wrapper.find('form[aria-label="登录PLM"]').exists()).toBe(true)
-    expect(wrapper.find('.el-overlay-dialog').exists()).toBe(false)
+    expect(wrapper.findAll('.el-overlay-dialog').every(dialog => !dialog.isVisible())).toBe(true)
 
     await login(wrapper, false)
 
@@ -1367,7 +1371,7 @@ describe('PLM client workspace', () => {
     await flushPromises()
     expect(wrapper.find('[aria-label="BOM维护"]').exists()).toBe(true)
     expect(wrapper.find('[aria-label="BOM维护"] h2').exists()).toBe(false)
-    expect(wrapper.text()).toContain('标准件BOM（1）')
+    expect(wrapper.findAll('[role="tab"]').map(tab => tab.text())).toContain('标准件 1')
 
     // 发布已从BOM面板的子页签改为工作区顶部页签（BOM与备料之间）。
     const releaseViewTab = projectTabByText(wrapper, '发布')
@@ -1762,7 +1766,7 @@ describe('PLM client workspace', () => {
     await login(wrapper)
     await navigateTo(wrapper, '项目日历')
     const tabs = () => wrapper.get('.pdm-navigation-tabs').findAll('[role="tab"]').map(tab => tab.text())
-    expect(tabs()).toEqual(['项目总览', '项目日历', '项目列表'])
+    expect(tabs()).toEqual(['项目报表', '项目明细', '项目日历', '立项信息'])
     const calendar = wrapper.get('[data-navigation-page="project-calendar"]')
     await calendar.findAll('button').find(button => button.text() === '周')!.trigger('click')
     await navigateTo(wrapper, '标准程序')
@@ -1808,7 +1812,7 @@ describe('PLM client workspace', () => {
     await login(wrapper, true, 'admin')
     const navigate = (label: string) => navigateTo(wrapper, label)
     const pages = [
-      ['项目日历', 'project-calendar'], ['项目总览', 'project-workbench'], ['项目列表', 'projects'],
+      ['项目日历', 'project-calendar'], ['项目明细', 'project-workbench'], ['项目列表', 'projects'],
       ['标准物料', 'standard-library'], ['标准结构', 'standard-structure'], ['料品管理', 'materials'],
       ['标准程序', 'program-templates'], ['我的待办', 'tasks'], ['制造中心', 'production-drawings'], ['系统设置', 'admin'],
     ] as const
@@ -1890,7 +1894,7 @@ describe('PLM client workspace', () => {
     await login(wrapper)
 
     await projectTabByText(wrapper, '概览').trigger('click')
-    expect(wrapper.get('[aria-label="工作台主页面"]').text()).toContain('项目团队')
+    expect(wrapper.get('[aria-label="工作台主页面"]').text()).toContain('项目风险')
 
     await projectTabByText(wrapper, '图档').trigger('click')
     expect(wrapper.find('[aria-label="项目设计树"]').exists()).toBe(true)
@@ -2019,7 +2023,7 @@ describe('PLM client workspace', () => {
     expect(markupToolbar.findAll('button').map(button => button.attributes('aria-label'))).toEqual([
       '引线批注', '云线批注', '框选批注', '手绘批注',
     ])
-    expect(previewToolbar.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual(['打开最新'])
+    expect(previewToolbar.findAll('.pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual(['全屏预览', '打开最新'])
     expect(wrapper.findAll('.pdm-preview-markup-row .pdm-preview-command').map(button => button.attributes('aria-label'))).toEqual([
       '保存批注',
     ])

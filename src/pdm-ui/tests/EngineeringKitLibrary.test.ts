@@ -157,7 +157,7 @@ describe('EngineeringKitLibrary', () => {
     await flushPromises()
 
     expect(api.listEngineeringKits).toHaveBeenCalledWith('token', false)
-    expect(wrapper.text()).toContain('套件料号')
+    expect(wrapper.text()).toContain('物料编码')
     expect(wrapper.text()).toContain('套件内物料数量')
     expect(wrapper.text()).toContain('UKIT-000001')
     expect(wrapper.text()).toContain('UPTON')

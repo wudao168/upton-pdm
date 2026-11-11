@@ -52,4 +52,4 @@
 :root body .el-table .sort-caret.ascending::before { top: 2px; border-bottom-color: currentColor; transform-origin: center bottom; }
 :root body .el-table .sort-caret.descending::before { top: -1px; border-top-color: currentColor; transform-origin: center top; }
 :root body .el-table .ascending .sort-caret.ascending,
-:root body .el-table .descending .sort-caret.descending { color: var(--pdm-theme-accent); }
+:root body .el-table .descending .sort-caret.descending { color:var(--pdm-text); }

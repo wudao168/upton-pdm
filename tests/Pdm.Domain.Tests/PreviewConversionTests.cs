@@ -14,6 +14,36 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class PreviewConversionTests
 {
     [Fact]
+    public async Task ReadOnlyTemporaryCopiesAreCleanedWithoutChangingArchivedSources()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-preview-readonly", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var (repository, project, sources, package, staging) = await PrepareAsync(root,
+                new PreviewConversionSettings { Mode = PreviewConversionMode.Remote, AgentUrl = "http://agent:5199" });
+            var work = Path.Combine(root, "conversion");
+            var original = Path.Combine(project.VaultLocation, sources[0].StorageRelativePath);
+            File.SetAttributes(original, File.GetAttributes(original) | FileAttributes.ReadOnly);
+            var originalHash = await File.ReadAllBytesAsync(original);
+            var agent = new StubAgentHandler { DuringRequest = () =>
+            {
+                var directory = Directory.GetDirectories(Path.Combine(work, "release-preview", package.Id.ToString("N"))).Single();
+                var copy = Path.Combine(directory, "sources", "只读引用.SLDPRT");
+                File.Copy(original, copy);
+                File.SetAttributes(copy, File.GetAttributes(copy) | FileAttributes.ReadOnly);
+            } };
+            var converter = new SolidWorksServerPreviewConverter(Options.Create(new PdmPreviewWorkerOptions()), repository,
+                new HttpClient(agent), storageOptions: Options.Create(new PdmStorageOptions { ConversionWorkRoot = work }));
+            Assert.Equal(sources.Length, (await converter.GenerateAsync(package, project, sources, staging, default)).Count);
+            Assert.Empty(Directory.GetDirectories(Path.Combine(work, "release-preview", package.Id.ToString("N"))));
+            Assert.Equal(originalHash, await File.ReadAllBytesAsync(original));
+            Assert.True(File.GetAttributes(original).HasFlag(FileAttributes.ReadOnly));
+            File.SetAttributes(original, File.GetAttributes(original) & ~FileAttributes.ReadOnly);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public async Task EnabledTitleBlockFailureNeverDeliversRawPdfAndRetryReusesRawConversion()
     {
         var root = Path.Combine(Path.GetTempPath(), "pdm-pdf-title-block-failure", Guid.NewGuid().ToString("N"));
@@ -30,7 +60,7 @@ public sealed class PreviewConversionTests
             Assert.False(failure.Artifacts.ContainsKey(drawing.DocumentId));
             Assert.Single(failure.Artifacts);
             stamp.Fail = false;
-            var completed = await converter.GenerateAsync(package, project, sources, staging, default);
+            var completed = await converter.StampCachedAsync(package, project, sources, staging, default);
             Assert.True(completed.ContainsKey(drawing.DocumentId));
             Assert.Equal(1, agent.RequestCount);
         }
@@ -245,8 +275,28 @@ public sealed class PreviewConversionTests
         }
     }
 
+    [Theory]
+    [InlineData(PreviewConversionMode.Remote, "没有已勾选")]
+    [InlineData(PreviewConversionMode.Local, "本机禁止转图")]
+    public async Task DisabledConversionHostsNeverStartAWorker(PreviewConversionMode mode, string reason)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-disabled-host-test", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var host = new PreviewAgentServer("禁用主机", "http://disabled:5199", "") { Disabled = true };
+            var (repository, project, sources, package, staging) = await PrepareAsync(root,
+                new PreviewConversionSettings { Mode = mode, AgentUrl = host.AgentUrl, Servers = [host] });
+            using var client = new HttpClient(new UnreachableAgentHandler());
+            var converter = new SolidWorksServerPreviewConverter(Options.Create(new PdmPreviewWorkerOptions
+                { AllowLocalExecution = false, WorkerPath = Path.Combine(root, "absent.exe") }), repository, client);
+            var error = await Assert.ThrowsAsync<PreviewServerUnavailableException>(() => converter.GenerateAsync(package, project, sources, staging, default));
+            Assert.Contains(reason, error.Message);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
     [Fact]
-    public async Task PreviewAgentRegistration_SwitchesToRemoteAndBackToLocal()
+    public async Task PreviewAgentRegistration_WaitsForRemoteHostAfterUnregister()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
@@ -259,8 +309,10 @@ public sealed class PreviewConversionTests
         Assert.Equal(PreviewConversionMode.Remote, (await repository.GetSystemSettingsAsync(default)).PreviewConversion.Mode);
 
         var cleared = await workflow.ClearPreviewAgentAsync("admin", UserRole.Administrator, default);
-        Assert.Equal(PreviewConversionMode.Local, cleared.PreviewConversion.Mode);
-        Assert.Equal(PreviewConversionMode.Local, (await repository.GetSystemSettingsAsync(default)).PreviewConversion.Mode);
+        Assert.Equal(PreviewConversionMode.Remote, cleared.PreviewConversion.Mode);
+        Assert.Empty(cleared.PreviewConversion.AgentUrl);
+        Assert.Empty(cleared.PreviewConversion.AgentToken);
+        Assert.Equal(PreviewConversionMode.Remote, (await repository.GetSystemSettingsAsync(default)).PreviewConversion.Mode);
 
         var invalid = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.RegisterPreviewAgentAsync("不是地址", "token", 30, "admin", UserRole.Administrator, default));
         Assert.Contains("转图服务器地址", invalid.Message);
@@ -390,6 +442,7 @@ public sealed class PreviewConversionTests
 
     private sealed class StubAgentHandler : HttpMessageHandler
     {
+        public Action? DuringRequest { get; init; }
         public int RequestCount { get; private set; }
         public Uri? RequestUri { get; private set; }
         public string? Token { get; private set; }
@@ -406,6 +459,7 @@ public sealed class PreviewConversionTests
             if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath == "/health")
                 return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"workerExists\":true,\"busy\":false}", Encoding.UTF8, "application/json") };
             RequestCount++;
+            DuringRequest?.Invoke();
             RequestUri = request.RequestUri;
             UploadedSources.Clear();
             UploadedKinds.Clear();
@@ -464,6 +518,73 @@ public sealed class PreviewConversionTests
             {
                 Content = new ByteArrayContent(responseStream.ToArray())
             };
+        }
+    }
+
+    [Theory]
+    [InlineData("断线", 2)]
+    [InlineData("启动失败", 2)]
+    [InlineData("图纸错误", 1)]
+    [InlineData("旧派单", 1)]
+    public async Task MultiHostRetryUsesOnlyUnconfirmedFiles(string fault, int postCount)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "dispatch-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var first = "http://a-" + Guid.NewGuid().ToString("N");
+            var second = "http://b-" + Guid.NewGuid().ToString("N");
+            var (repository, project, sources, package, stage) = await PrepareAsync(root, new PreviewConversionSettings {
+                Mode = PreviewConversionMode.Remote, AgentUrl = first, Servers = [new("A",first,""),new("B",second,"")] });
+            var agent = new FailoverHandler(fault);
+            var converter = new SolidWorksServerPreviewConverter(Options.Create(new PdmPreviewWorkerOptions()), repository,
+                new HttpClient(agent), storageOptions: Options.Create(new PdmStorageOptions { ConversionWorkRoot = root }));
+            if (fault == "旧派单")
+            {
+                var error = await Assert.ThrowsAsync<PdmConflictException>(() => converter.GenerateAsync(package,project,sources,stage,default));
+                Assert.Contains("不属于当前派单", error.Message);
+            }
+            else if (fault == "图纸错误")
+            {
+                var error = await Assert.ThrowsAsync<PartialPreviewConversionException>(() => converter.GenerateAsync(package,project,sources,stage,default));
+                Assert.Single(error.Artifacts); Assert.Single(error.Errors);
+            }
+            else Assert.Equal(2,(await converter.GenerateAsync(package,project,sources,stage,default)).Count);
+            Assert.Equal(postCount, agent.Targets.Count);
+            if (postCount == 2)
+            {
+                Assert.Equal(fault == "断线" ? 2 : 1, agent.Targets[1].Length);
+                Assert.NotEqual(agent.Hosts[0],agent.Hosts[1]);
+            }
+            Assert.Equal(postCount, PreviewDispatchHistory.Read(root,package.Id).Select(a=>a.Id).Distinct().Count());
+            Assert.All(PreviewDispatchHistory.Read(root,package.Id), record => Assert.NotNull(record.Finished));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root,true); }
+    }
+
+    private sealed class FailoverHandler(string fault) : HttpMessageHandler
+    {
+        public List<Guid[]> Targets { get; } = [];
+        public List<string> Hosts { get; } = [];
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.Method == HttpMethod.Get)
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"workerExists\":true,\"busy\":false}") };
+            using var input = new ZipArchive(await request.Content!.ReadAsStreamAsync(ct));
+            using var manifest = await JsonDocument.ParseAsync(input.GetEntry("manifest.json")!.Open(), cancellationToken:ct);
+            var jobs = manifest.RootElement.GetProperty("jobs").EnumerateArray().Where(j=>j.GetProperty("convert").GetBoolean()).ToArray();
+            Targets.Add(jobs.Select(j=>j.GetProperty("documentId").GetGuid()).ToArray()); Hosts.Add(request.RequestUri!.Host);
+            if (Targets.Count == 1 && fault == "断线") throw new HttpRequestException("test connection lost");
+            using var data = new MemoryStream();
+            using (var zip = new ZipArchive(data,ZipArchiveMode.Create,true))
+            {
+                var results = jobs.Select((job,i)=>new {documentId=job.GetProperty("documentId").GetGuid(),
+                    success=Targets.Count!=1||i==0,error= fault=="启动失败"?"本批次SolidWorks启动失败":"图档损坏，请检查图纸。"}).ToArray();
+                using (var writer=new StreamWriter(zip.CreateEntry("result.json").Open()))
+                    writer.Write(JsonSerializer.Serialize(new {success=results.All(r=>r.success),items=results,dispatchId=fault=="旧派单" ? Guid.NewGuid().ToString("N") : manifest.RootElement.GetProperty("context").GetProperty("dispatchId").GetString()}));
+                for(var i=0;i<jobs.Length;i++) if(results[i].success)
+                { using var writer = new StreamWriter(zip.CreateEntry("outputs/"+jobs[i].GetProperty("outputName").GetString()).Open());writer.Write("converted-data"); }
+            }
+            return new HttpResponseMessage(HttpStatusCode.OK) {Content=new ByteArrayContent(data.ToArray())};
         }
     }
 

@@ -14,6 +14,7 @@ public sealed record ProductionFlowNode(Guid Id, string Name, string Stage, stri
 public sealed record ProductionScanCatalog(Guid CompanyId, IReadOnlyList<ProductionWorkstation> Workstations,
     IReadOnlyList<ProductionPostBinding> Bindings, long RowVersion = 0)
 {
+    public IReadOnlyList<ProductionPrinter> Printers { get; init; } = [];
     public string FlowMode { get; init; } = "ResourceOperations";
     public IReadOnlyList<string> ControlRoleCodes { get; init; } = [];
     public int LabelWidthMm { get; init; } = 60;
@@ -32,6 +33,7 @@ public sealed record SaveProductionScanCatalog(IReadOnlyList<ProductionWorkstati
 public sealed record ProductionScanAction(Guid LotId, string Kind, string Label, decimal RemainingQuantity,
     Guid BindingId, string Post, Guid WorkstationId, string WorkstationName, string ResourceGroup)
 {
+    public bool CreatesPackageLabel { get; init; }
     public string? SourceKind { get; init; }
     public string? SourceName { get; init; }
 }
@@ -197,7 +199,7 @@ public sealed class ProductionScanService(IPdmRepository repository, IProduction
                 throw new PdmRuleException("机加工位必须填写对应排程资源组。");
         }
         var updated = new ProductionScanCatalog(current.CompanyId, stations, bindings, current.RowVersion + 1)
-        { FlowMode = input.FlowMode, ControlRoleCodes = controls, LabelWidthMm = input.LabelWidthMm, LabelHeightMm = input.LabelHeightMm, FlowNodes = nodes };
+        { FlowMode = input.FlowMode, ControlRoleCodes = controls, LabelWidthMm = input.LabelWidthMm, LabelHeightMm = input.LabelHeightMm, FlowNodes = nodes, Printers = current.Printers };
         if (!await store.SaveScanCatalogAsync(updated, current.RowVersion, ct)) throw new PdmConflictException("扫码岗位配置已被其他人修改，请刷新后重试。");
         await repository.AppendAuditAsync(new(Guid.NewGuid(), clock.GetUtcNow(), actor, "production.scan-settings.save", "ProductionScanCatalog",
             current.CompanyId.ToString(), JsonSerializer.Serialize(new { Before = current, After = updated })), ct);

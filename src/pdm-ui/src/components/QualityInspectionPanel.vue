@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
+import { useUserDisplayName as usePersonDisplayName } from '../userDisplay'
+const displayUserName = usePersonDisplayName()
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, download: projectDownload } = useProjectCenterAccess()
 import PanelActions from './PanelActions.vue'
@@ -109,11 +112,11 @@ watch(() => [props.projects.map(x => x.id).join(','), props.token, props.refresh
   <section class="pdm-panel quality-inspection" :aria-label="title">
     <header class="quality-section__toolbar"><div class="quality-section__heading"><h2><ListChecks :size="18" />{{ title }}</h2>
       <p v-if="kind === 'incoming'" class="quality-inspection__hint">独立检验记录 · 三坐标等数据文件；非标BOM质检列表将在接口对接后展示。</p>
-      <p v-else class="quality-inspection__hint">按项目、子项目归档，可保存多份{{ title }}记录。</p></div><div class="quality-section__actions"><select v-if="kind === 'assembly' && stations.length" v-model="stationFilter" aria-label="筛选工站"><option value="">全部工站</option><option v-for="item in stations" :key="item">{{ item }}</option></select><button v-if="writableProjects.length" class="pdm-secondary-action" @click="openUpload">上传记录</button></div></header>
+      <p v-else class="quality-inspection__hint">按项目、子项目归档，可保存多份{{ title }}记录。</p></div><div class="quality-section__actions"><slot name="actions" /><select v-if="kind === 'assembly' && stations.length" v-model="stationFilter" aria-label="筛选工站"><option value="">全部工站</option><option v-for="item in stations" :key="item">{{ item }}</option></select><button v-if="writableProjects.length" class="pdm-secondary-action" @click="openUpload">上传记录</button></div></header>
     <p v-if="error" role="alert">{{ error }} <button @click="load">重试</button></p>
     <div class="quality-inspection__scroll">
       <p v-if="loading">正在加载…</p>
-      <table v-else><thead><tr><th>项目</th><th v-if="kind === 'assembly' && stations.length">工站</th><th>检验内容</th><th>文件</th><th>备注</th><th>上传人</th><th>上传时间</th></tr></thead><tbody><tr v-for="record in visibleRecords" :key="record.id"><td>{{ projectLabel(record.projectId) }}</td><td v-if="kind === 'assembly' && stations.length">{{ record.station }}</td><td>{{ record.title }}</td><td><button class="pdm-text-action"  :disabled="previewLoading" @click="preview(record)">{{ record.fileName }}</button></td><td>{{ record.remark || '—' }}</td><td>{{ record.uploadedBy }}</td><td>{{ new Date(record.uploadedAt).toLocaleString() }}</td></tr><tr v-if="!visibleRecords.length"><td :colspan="kind === 'assembly' && stations.length ? 7 : 6" class="quality-inspection__empty">暂无{{ title }}记录</td></tr></tbody></table>
+      <table v-else><thead><tr><th>项目</th><th v-if="kind === 'assembly' && stations.length">工站</th><th>检验内容</th><th>文件</th><th>备注</th><th>上传人</th><th>上传时间</th></tr></thead><tbody><tr v-for="record in visibleRecords" :key="record.id"><td>{{ projectLabel(record.projectId) }}</td><td v-if="kind === 'assembly' && stations.length">{{ record.station }}</td><td>{{ record.title }}</td><td><button class="pdm-text-action"  :disabled="previewLoading" @click="preview(record)">{{ record.fileName }}</button></td><td>{{ record.remark || '—' }}</td><td><PersonName :name="displayUserName(record.uploadedBy)" /></td><td>{{ new Date(record.uploadedAt).toLocaleString() }}</td></tr><tr v-if="!visibleRecords.length"><td :colspan="kind === 'assembly' && stations.length ? 7 : 6" class="quality-inspection__empty">暂无{{ title }}记录</td></tr></tbody></table>
     </div>
     <footer class="quality-inspection__footer"><span>共 {{ visibleRecords.length }} 条记录</span><span>范围：主项目及子项目</span></footer>
     <el-dialog v-model="previewOpen" :title="`检验文件预览 · ${previewRecord?.fileName ?? ''}`" width="90vw" top="5vh" append-to-body destroy-on-close @closed="clearPreview">
@@ -129,6 +132,7 @@ watch(() => [props.projects.map(x => x.id).join(','), props.token, props.refresh
         <label v-else>检验内容<input v-model="recordTitle" :disabled="saving" maxlength="200" required :placeholder="kind === 'incoming' ? '如：三坐标测量报告' : kind === 'assembly' ? '如：导轨平行度、转台跳动' : '如：客户验收报告、问题确认记录'"></label>
         <label>备注<textarea v-model="remark" :disabled="saving" maxlength="2000" rows="3" /></label>
         <label>记录文件<input type="file" multiple :disabled="saving" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls,.csv,.zip,.txt,.docx" @change="selectFile"></label>
+        <p v-if="customerAcceptance" class="quality-inspection__hint">上传后，原文件将自动归入文件页签的「验收资料」。</p>
         <p v-if="files.length || uploadedCount" class="quality-inspection__upload-progress">已保存 {{ uploadedCount }} 个文件，待上传 {{ files.length }} 个</p>
         <ul v-if="files.length || uploadedFiles.length" class="quality-inspection__upload-list" aria-label="记录文件列表">
           <li v-for="(file, index) in uploadedFiles" :key="`saved-${index}`"><span>{{ file.name }}</span><small>已保存</small></li>

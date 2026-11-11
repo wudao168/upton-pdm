@@ -2,6 +2,7 @@
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, download: projectDownload, print: projectPrint } = useProjectCenterAccess()
 import { documentVersionSummary, documentDrawingVersion, documentPublishedVersion } from '../drawingRevision'
+import { findPreviewComponent } from '../previewComponent'
 import { Cloud, FileSearch, Maximize2, Minimize2, PencilLine, Rotate3D, RotateCcw, Square } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -17,6 +18,8 @@ const props = withDefaults(defineProps<{
   emptyProject?: boolean
   related: DocumentNode[]
   bomItem?: BomItem
+  readableDocumentIds?: ReadonlySet<string>
+  bomItemForNode?: (node: DocumentNode) => BomItem | undefined
   currentUsername?: string
   canManageLifecycle?: boolean
   canEditDocuments?: boolean
@@ -90,7 +93,18 @@ const markupSaving = ref(false)
 const markupDirty = ref(false)
 const lastArchivedAt = ref('')
 const versionMetadata = ref<DocumentVersionSummary[]>([])
-const activeVersionMetadata = computed(() => props.reviewVersionId
+const componentSelection = ref<{ name: string; configuration: string }>()
+const componentNode = computed(() => {
+  const selection = componentSelection.value
+  if (!selection) return undefined
+  const node = findPreviewComponent(props.selected, selection.name, selection.configuration)
+  return node?.documentId && props.readableDocumentIds?.has(node.documentId) ? node : undefined
+})
+const propertyNode = computed(() => componentSelection.value ? componentNode.value : props.selected)
+const propertyBomItem = computed(() => componentSelection.value
+  ? componentNode.value && props.bomItemForNode?.(componentNode.value)
+  : props.bomItem)
+const activeVersionMetadata = computed(() => componentSelection.value ? componentNode.value ?? {} : props.reviewVersionId
   ? versionMetadata.value.find(version => version.id === props.reviewVersionId) ?? {}
   : props.selected)
 let resizeObserver: ResizeObserver | undefined
@@ -104,8 +118,8 @@ const mode = computed<PreviewMode>(() => props.selected.kind === 'Drawing' ? 'dr
 const displayedRevision = computed(() => props.reviewVersionId && props.reviewRevision ? props.reviewRevision : props.selected.version)
 const meaningfulSelectedName = computed(() => {
   if (props.emptyProject) return ''
-  const name = props.selected.name?.trim()
-  return name && name !== props.selected.drawingNumber?.trim() ? name : ''
+  const name = propertyNode.value?.name?.trim()
+  return name && name !== propertyNode.value?.drawingNumber?.trim() ? name : ''
 })
 const previewPropertyValue = (value?: string | null) => value?.trim() || '—'
 const formatArchiveDate = (value?: string | null) => {
@@ -113,17 +127,17 @@ const formatArchiveDate = (value?: string | null) => {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false })
 }
-const propertiesExpanded = ref(false)
-watch(() => props.selected.documentId, () => { propertiesExpanded.value = false })
+const propertiesExpanded = ref(true)
+watch(() => props.selected.documentId, () => { propertiesExpanded.value = true })
 const corePropertyLabels = new Set(['物料编码', '名称', '图纸版本', '发布版本'])
 const previewProperties = computed(() => [
-  { label: '物料编码', value: previewPropertyValue(props.bomItem?.drawingNumber || props.selected.drawingNumber) },
-  { label: '名称', value: previewPropertyValue(props.bomItem?.name || meaningfulSelectedName.value) },
-  { label: '型号', value: previewPropertyValue(props.bomItem?.specification) },
-  { label: '品牌', value: previewPropertyValue(props.bomItem?.brand) },
-  { label: '材质', value: previewPropertyValue(props.bomItem?.material) },
-  { label: '表面处理', value: previewPropertyValue(props.bomItem?.surfaceTreatment) },
-  { label: '热处理', value: previewPropertyValue(props.bomItem?.heatTreatment) },
+  { label: '物料编码', value: previewPropertyValue(propertyBomItem.value?.drawingNumber || propertyNode.value?.drawingNumber) },
+  { label: '名称', value: previewPropertyValue(propertyBomItem.value?.name || meaningfulSelectedName.value) },
+  { label: '型号', value: previewPropertyValue(propertyBomItem.value?.specification) },
+  { label: '品牌', value: previewPropertyValue(propertyBomItem.value?.brand) },
+  { label: '材质', value: previewPropertyValue(propertyBomItem.value?.material) },
+  { label: '表面处理', value: previewPropertyValue(propertyBomItem.value?.surfaceTreatment) },
+  { label: '热处理', value: previewPropertyValue(propertyBomItem.value?.heatTreatment) },
   { label: '图纸版本', value: documentDrawingVersion(activeVersionMetadata.value) },
   { label: '发布版本', value: documentPublishedVersion(activeVersionMetadata.value) },
   { label: '最近存档', value: formatArchiveDate(lastArchivedAt.value) },
@@ -132,9 +146,10 @@ const previewProperties = computed(() => [
 async function loadLastArchivedAt() {
   const request = ++archiveDateRequest
   lastArchivedAt.value = ''
-  if (!props.selected.documentId || !props.accessToken) return
+  const documentId = propertyNode.value?.documentId
+  if (!documentId || !props.accessToken) return
   try {
-    const versions = await listDocumentVersions(props.selected.documentId, props.accessToken)
+    const versions = await listDocumentVersions(documentId, props.accessToken)
     if (request !== archiveDateRequest) return
     lastArchivedAt.value = versions.reduce((latest, version) => {
       if (!version.createdAt) return latest
@@ -276,6 +291,7 @@ function normalizedPreviewFormat(value: string | number): 'Step' | 'Pdf' {
 
 async function startPreview() {
   if (!props.active || !props.selected.documentId) return
+  componentSelection.value = undefined
   previewSessionActivated.value = true
   if (!props.desktopAvailable) {
     clearWebPreview()
@@ -355,8 +371,18 @@ function onPreviewStatus(event: Event) {
   if (detail.state === 'loading' || detail.state === 'ready' || detail.state === 'error') {
     previewState.value = detail.state
     previewError.value = detail.message ?? ''
+    if (detail.state !== 'ready') componentSelection.value = undefined
     if (detail.state === 'ready') void nextTick(schedulePreviewBounds)
   }
+}
+
+function onPreviewComponent(event: Event) {
+  const detail = (event as CustomEvent<{ documentId?: string; versionId?: string; name?: string; configuration?: string }>).detail
+  if (!props.active || !props.desktopAvailable || previewState.value !== 'ready' || props.selected.kind !== 'Assembly'
+    || !detail?.documentId || detail.documentId !== props.selected.documentId
+    || (props.reviewVersionId && detail.versionId !== props.reviewVersionId)) return
+  const name = detail.name?.trim()
+  componentSelection.value = name ? { name, configuration: detail.configuration ?? '' } : undefined
 }
 
 function onLightweightPreviewStatus(event: Event) {
@@ -414,11 +440,12 @@ watch(() => props.reviewPanelCollapsed, () => {
   void nextTick(schedulePreviewBounds)
 }, { flush: 'post' })
 
-watch([() => props.selected.documentId, () => props.selected.version, () => props.accessToken], () => {
+watch([() => propertyNode.value?.documentId, () => propertyNode.value?.version, () => props.accessToken], () => {
   void loadLastArchivedAt()
 }, { immediate: true })
 
 watch([() => props.selected.id, () => props.reviewVersionId], ([selectedId, reviewVersionId], [previousSelectedId, previousReviewVersionId]) => {
+  componentSelection.value = undefined
   // 审批只更新审核版本；只有用户主动加载后才打开该版本，不能续用旧预览会话自动打开。
   if (selectedId === previousSelectedId && reviewVersionId !== previousReviewVersionId) previewSessionActivated.value = false
   markupSaving.value = false
@@ -473,6 +500,7 @@ watch(() => props.active, active => {
 watch(() => props.projectId, (projectId, previousProjectId) => {
   if (!previousProjectId || projectId === previousProjectId) return
   previewMaximized.value = false
+  componentSelection.value = undefined
   previewSessionActivated.value = false
   hidePreview()
   clearWebPreview()
@@ -486,6 +514,7 @@ onMounted(() => {
   window.addEventListener('scroll', schedulePreviewBounds, true)
   document.addEventListener('visibilitychange', schedulePreviewBounds)
   window.addEventListener('pdm-preview-status', onPreviewStatus)
+  window.addEventListener('pdm-preview-component', onPreviewComponent)
   window.addEventListener('pdm-lightweight-preview-status', onLightweightPreviewStatus)
   window.addEventListener('pdm-preview-markup-status', onMarkupStatus)
   window.addEventListener('pdm-solidworks-capability', onSolidWorksCapability)
@@ -513,6 +542,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('scroll', schedulePreviewBounds, true)
   document.removeEventListener('visibilitychange', schedulePreviewBounds)
   window.removeEventListener('pdm-preview-status', onPreviewStatus)
+  window.removeEventListener('pdm-preview-component', onPreviewComponent)
   window.removeEventListener('pdm-lightweight-preview-status', onLightweightPreviewStatus)
   window.removeEventListener('pdm-preview-markup-status', onMarkupStatus)
   window.removeEventListener('pdm-solidworks-capability', onSolidWorksCapability)
@@ -525,15 +555,16 @@ onBeforeUnmount(() => {
     <section class="pdm-panel pdm-preview-control-panel" aria-label="图档查看与操作">
       <header class="pdm-preview-toolbar">
         <section class="pdm-preview-properties-bar" aria-label="图档信息">
-          <span class="pdm-preview-properties-bar__title">图档属性</span>
+          <span class="pdm-preview-properties-bar__title">{{ componentSelection ? '选中零件属性' : '图档属性' }}</span>
           <span v-if="selected.kind === 'Drawing' && /(?:^|-)W\d+$/i.test(displayedRevision)" class="pdm-preview-work-badge">设计工作版 · 不供生产</span>
-          <dl class="pdm-preview-properties" aria-label="图档属性">
+          <span v-if="componentSelection && !componentNode" class="pdm-preview-component-unavailable">所选零件暂无可查看的关联图档</span>
+          <dl v-else class="pdm-preview-properties" aria-label="图档属性">
             <div v-for="property in previewProperties.filter(item => propertiesExpanded || corePropertyLabels.has(item.label))" :key="property.label">
               <dt>{{ property.label }}</dt>
               <dd :title="property.value">{{ property.value }}</dd>
             </div>
           </dl>
-          <button type="button" class="pdm-inspect-link pdm-text-action" :aria-expanded="propertiesExpanded" @click="propertiesExpanded = !propertiesExpanded">{{ propertiesExpanded ? '收起属性' : '更多属性' }}</button>
+          <button v-if="!componentSelection || componentNode" type="button" class="pdm-inspect-link pdm-text-action" :aria-expanded="propertiesExpanded" @click="propertiesExpanded = !propertiesExpanded">{{ propertiesExpanded ? '收起属性' : '更多属性' }}</button>
         </section>
         <div class="pdm-solidworks-actions">
           <button type="button" class="pdm-preview-command pdm-preview-maximize" :aria-label="previewMaximized ? '还原预览' : '全屏预览'" :aria-pressed="previewMaximized" :title="previewMaximized ? '还原预览（Esc）' : '全屏显示预览区'" @click="togglePreviewMaximized"><Minimize2 v-if="previewMaximized" :size="15" /><Maximize2 v-else :size="15" />{{ previewMaximized ? '还原' : '全屏' }}</button>
@@ -658,7 +689,13 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-:global(:root body .pdm-preview-panel.is-maximized){position:fixed;inset:0;z-index:1500;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);width:100%;height:100%;min-width:0;min-height:0;margin:0;padding:0;background:var(--pdm-surface);overflow:hidden}
+:global(.pdm-document-workspace > .pdm-workspace:has(.pdm-preview-panel.is-maximized)){
+  position:fixed;inset:0;z-index:1500;grid-template-columns:min(250px,33vw) minmax(0,1fr);
+  grid-template-rows:minmax(0,1fr);background:var(--pdm-surface);
+}
+:global(.pdm-document-workspace > .pdm-workspace:has(.pdm-preview-panel.is-maximized) > .pdm-tree-panel){grid-area:1 / 1}
+:global(.pdm-document-workspace > .pdm-workspace:has(.pdm-preview-panel.is-maximized) > .pdm-stage){grid-area:1 / 2}
+.pdm-preview-component-unavailable{color:var(--pdm-muted)}
 .pdm-preview-maximize{white-space:nowrap}
 .pdm-preview-work-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:4px;background:var(--pdm-orange-soft);color:var(--pdm-orange);font-size:12px;font-weight:600;white-space:nowrap}
 </style>

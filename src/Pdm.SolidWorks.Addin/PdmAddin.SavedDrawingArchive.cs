@@ -115,8 +115,12 @@ public sealed partial class PdmAddin
                 }
                 finally { application.DocumentVisible(visible, type); }
             }
+            // OpenDoc6 can set the save flag while loading a saved assembly. Only
+            // this hidden, newly opened, exact-path read-only window is ours.
+            var dirtyOnOpen = opened && document.GetSaveFlag();
+            var openStamp = dirtyOnOpen ? document.GetUpdateStamp() : 0;
             if (memory == null && !opened && document.GetSaveFlag())
-                throw new InvalidOperationException("当前内存内容与已保存文件尚未核对，未用内存属性代替提交文件属性。");
+                throw new ArchiveUnsavedPropertySourceException();
             var configurations = SavedPropertyConfigurations(node);
             if (node.Kind != CadDocumentKind.Drawing)
             {
@@ -136,9 +140,12 @@ public sealed partial class PdmAddin
                 ReadPropertyManager(document.Extension.CustomPropertyManager[configuration], scope, values, useCached: true, requireComplete: true);
             }
             if (memory != null) ValidateCurrentMemoryCopy(node);
-            else if (!opened && document.GetSaveFlag()) throw new InvalidOperationException("读取自定义属性期间图档出现了未提交修改。");
+            else if (opened && (dirtyOnOpen != document.GetSaveFlag()
+                || dirtyOnOpen && (document.GetUpdateStamp() != openStamp || !document.IsOpenedReadOnly())))
+                throw new InvalidOperationException("临时只读图档在读取属性期间发生变化，请重新检查。");
+            else if (!opened && document.GetSaveFlag()) throw new ArchiveUnsavedPropertySourceException();
             source.Refresh();
-            if (!source.Exists || source.Length != length || source.LastWriteTimeUtc != lastWrite)
+            if (dirtyOnOpen || !source.Exists || source.Length != length || source.LastWriteTimeUtc != lastWrite)
             {
                 // Metadata may change as a network/encryption filter opens a native
                 // document. Verify the submitted content, not just that metadata.
@@ -164,6 +171,10 @@ public sealed partial class PdmAddin
         catch (Exception error)
         {
             LogDiagnostic("自定义属性读取失败，未提交原生文件：" + node.FullPath, error);
+            if (error is ArchiveUnsavedPropertySourceException)
+                throw new InvalidOperationException("图档存在尚未固定到提交副本的内存修改：" + node.FileName
+                    + "。本批尚未上传，当前窗口和修改已保留。请结束当前编辑后重新检查；只读文件无需强行保存回原目录，"
+                    + "存档须先生成包含当前修改的提交副本。", error);
             var contentChanged = error is InvalidOperationException && error.Message == "读取自定义属性期间源文件内容发生变化。";
             throw new InvalidOperationException((contentChanged ? "读取属性期间源文件内容发生变化，请等待文件稳定后重试：" : "未能完整读取图档自定义属性：") + node.FileName
                 + "。本批尚未上传，原文件、窗口及修改已保留。请检查该文件能否在当前SolidWorks中正常读取属性；"
@@ -174,6 +185,12 @@ public sealed partial class PdmAddin
             if (opened && document != null && !CloseArchiveReadDocument(document))
                 throw new InvalidOperationException("自定义属性的临时读取窗口未能关闭，已停止存档并保留原文件：" + node.FileName);
         }
+    }
+
+    private sealed class ArchiveUnsavedPropertySourceException : InvalidOperationException
+    {
+        internal ArchiveUnsavedPropertySourceException()
+            : base("当前内存内容与提交文件尚未核对，未用内存属性代替已保存文件属性。") { }
     }
 
     private bool CanArchiveSavedDrawingBytes(CadTreeNode node, bool hasUnsavedChanges) =>

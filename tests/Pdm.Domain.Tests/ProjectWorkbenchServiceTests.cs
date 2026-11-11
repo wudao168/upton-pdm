@@ -13,7 +13,7 @@ public sealed class ProjectWorkbenchServiceTests
         public Task<IReadOnlyDictionary<Guid, int>> CountOpenAsync(IReadOnlyCollection<Guid> ids, CancellationToken ct)
         { Batches++; Requested = ids; return Task.FromResult<IReadOnlyDictionary<Guid, int>>(ids.ToDictionary(id => id, _ => 2)); }
         public Task<IReadOnlyList<OplIssue>> ListAsync(Guid id, CancellationToken ct) => throw new InvalidOperationException("Overview must not load full OPL lists");
-        public Task<OplIssue> SaveAsync(OplIssue issue, long version, CancellationToken ct) => throw new NotSupportedException();
+        public Task<OplIssue> SaveAsync(OplIssue issue, long version, CancellationToken ct, UserNotification? assignment = null) => throw new NotSupportedException();
     }
     [Fact]
     public async Task FirstScreenUsesOneOplCountBatchAndSkipsBusinessDetails()

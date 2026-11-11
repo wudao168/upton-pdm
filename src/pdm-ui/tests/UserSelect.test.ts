@@ -23,6 +23,19 @@ function mountSelect(native = false, multiple = false) {
 const options = () => [...document.querySelectorAll('[role="option"]')].filter(node => (node as HTMLElement).style.display !== 'none')
 
 describe('共用人员选择', () => {
+  it('多选后清空搜索并关闭候选，保留姓名标签和账号值', async () => {
+    const input = mountSelect(false, true)
+    await wrapper.get('.el-select__wrapper').trigger('click')
+    await input.setValue('zm')
+    await flushPromises()
+    ;(options()[0] as HTMLElement).click()
+    await flushPromises()
+    expect((input.element as HTMLInputElement).value).toBe('')
+    expect(input.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.findAll('.el-tag').map(tag => tag.text())).toEqual(['王一', '张明'])
+    expect((wrapper.vm as unknown as { chosen: string[] }).chosen).toEqual(['engineer.02', 'engineer.01'])
+  })
+
   it.each([false, true])('filters Chinese names by initials and returns the original account (native options: %s)', async native => {
     const input = mountSelect(native)
     if (native) expect(wrapper.get('.el-select__placeholder').text()).toBe('全部人员')
@@ -30,6 +43,7 @@ describe('共用人员选择', () => {
     await input.setValue('ZM')
     await flushPromises()
     expect(options().map(node => node.textContent?.trim())).toEqual(['张明'])
+    expect(options()[0]?.querySelector('.pdm-person-initial')?.getAttribute('data-initial')).toBe('张')
     ;(options()[0] as HTMLElement).click()
     await flushPromises()
     expect((wrapper.vm as unknown as { chosen: string }).chosen).toBe('engineer.01')

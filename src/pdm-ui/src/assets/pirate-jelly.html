@@ -915,7 +915,7 @@ class JellyRenderer {
  constructor(canvas,sim,island){this.canvas=canvas;this.sim=sim;this.island=island;this.yaw=-.47;this.pitch=.49;this.distance=12.6;this.flavour=0;this.day=.17;this.reduced=false;this.errors=[];this.camera=[0,5,10];this.vp=M.identity();this.invVP=M.identity();}
  async init(){
   if(!navigator.gpu)throw new Error('WebGPU is not available in this browser.');
-  this.adapter=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});
+  this.adapter=await navigator.gpu.requestAdapter();
   if(!this.adapter)throw new Error('No WebGPU adapter is available.');
   const d=this.device=await this.adapter.requestDevice();
   d.addEventListener('uncapturederror',e=>{this.errors.push(e.error.message);console.error('WebGPU:',e.error.message)});

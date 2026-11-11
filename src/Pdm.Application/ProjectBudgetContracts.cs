@@ -6,7 +6,7 @@ public sealed record ProjectBudgetLine(string Category, decimal? BudgetAmount = 
     decimal? ActualAmount = null, decimal? RemainingAmount = null,
     decimal? PlannedHours = null, decimal? HourlyRate = null,
     decimal? ActualHours = null, decimal? ActualHourlyRate = null, decimal? RemainingHours = null,
-    string? Note = null);
+    string? Note = null, Guid? DepartmentId = null);
 
 public sealed record ProjectBudget(Guid ProjectId, IReadOnlyList<ProjectBudgetLine> Lines,
     long RowVersion = 0, string? UpdatedBy = null, DateTimeOffset? UpdatedAt = null,
@@ -20,12 +20,14 @@ public sealed record SaveProjectBudgetCommand(IReadOnlyList<ProjectBudgetLine> L
     IReadOnlyDictionary<string, string>? OrderCategories = null);
 public sealed record ProjectBudgetOrder(string Key, string DocumentNumber, int LineNumber, string MaterialCode,
     string ItemName, decimal? Amount, string Category);
+public sealed record ProjectBudgetDepartment(Guid Id, string Name);
 public sealed record ProjectBudgetRow(ProjectBudgetLine Input, decimal? BudgetAmount, decimal? ActualAmount,
     decimal? OrderAmount, decimal? EstimatedAmount, decimal? Variance, string Alert);
 public sealed record ProjectBudgetView(Guid ProjectId, IReadOnlyList<ProjectBudgetRow> Rows,
     decimal? BudgetAmount, decimal? ActualAmount, decimal? EstimatedAmount, decimal? OverrunAmount,
     bool CanEdit, bool CanViewReserve, long RowVersion, string? UpdatedBy, DateTimeOffset? UpdatedAt,
-    IReadOnlyList<ProjectBudgetOrder> Orders, bool CanEditBudget = false, bool CanEditActual = false, IReadOnlyList<ProjectBudgetNote>? Notes = null, IReadOnlyList<ProjectSettlementLine>? SettlementLines = null, decimal? SettlementAmount = null, decimal? BonusRate = null, decimal? BonusAmount = null, bool CanEditSettlement = false, bool CanEditBonus = false, bool CanViewSettlement = false);
+    IReadOnlyList<ProjectBudgetOrder> Orders, bool CanEditBudget = false, bool CanEditActual = false, IReadOnlyList<ProjectBudgetNote>? Notes = null, IReadOnlyList<ProjectSettlementLine>? SettlementLines = null, decimal? SettlementAmount = null, decimal? BonusRate = null, decimal? BonusAmount = null, bool CanEditSettlement = false, bool CanEditBonus = false, bool CanViewSettlement = false,
+    bool CanViewBudget = false, bool CanViewActual = false, bool IsDepartmentScoped = false, IReadOnlyList<ProjectBudgetDepartment>? Departments = null);
 
 public sealed record AssessmentLaborRateSettings(IReadOnlyDictionary<string, decimal?> Rates, long RowVersion = 0, string? UpdatedBy = null, DateTimeOffset? UpdatedAt = null);
 

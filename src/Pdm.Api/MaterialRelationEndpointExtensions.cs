@@ -60,6 +60,19 @@ public static class MaterialRelationEndpointExtensions
             return Results.Ok(await service.PublishAsync(templateId, request.RevisionId, request.ExpectedRowVersion, actor, role, cancellationToken));
         });
 
+        api.MapPut("/templates/{templateId:guid}/active", async (Guid templateId, SetMaterialRelationActiveRequest request, HttpContext context, MaterialRelationService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.SetActiveAsync(templateId, request.IsActive, request.ExpectedRowVersion, actor, role, cancellationToken));
+        });
+
+        api.MapDelete("/templates/{templateId:guid}", async (Guid templateId, long expectedRowVersion, HttpContext context, MaterialRelationService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            await service.DeleteDraftAsync(templateId, expectedRowVersion, actor, role, cancellationToken);
+            return Results.NoContent();
+        });
+
         api.MapGet("/projects/{projectId:guid}/completeness", async (Guid projectId, Guid? releasePackageId, HttpContext context, MaterialRelationService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -119,6 +132,7 @@ public sealed record SaveMaterialRelationTemplateRequest(
 }
 
 public sealed record PublishMaterialRelationTemplateRequest(Guid RevisionId, long ExpectedRowVersion);
+public sealed record SetMaterialRelationActiveRequest(bool IsActive, long ExpectedRowVersion);
 public sealed record MaterialRelationChoiceRequest(
     Guid GroupId,
     IReadOnlyList<Guid> OptionIds,

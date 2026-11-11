@@ -25,6 +25,7 @@ public sealed class ProductionScanTests : IDisposable
         new(Guid.NewGuid(), "User", user, post, stations.Select(station => station.Id).ToArray(), true);
     private async Task<ProductionTrackingRecord> CreateAsync()
     {
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "管理员", "unused", UserRole.Administrator, true, CompanyId: company), default);
         foreach (var name in new[] { "receive", "machine", "packing", "quality", "issue" })
             await repository.CreateUserAsync(new(Guid.NewGuid(), name, "人员-" + name, "unused", UserRole.Administrator, true, CompanyId: company), default);
         var project = await repository.CreateProjectAsync(new("SCAN-" + Guid.NewGuid().ToString("N"), "扫码回归", "admin", "vault", "release"), "admin", default);
@@ -53,6 +54,8 @@ public sealed class ProductionScanTests : IDisposable
 
     private async Task ConfigureDepartmentAsync()
     {
+        var managerPermissions = (await repository.GetRolePermissionDirectoryAsync(default)).Roles.Single(item => item.Role == "ProductionManager").Permissions;
+        await repository.SetRolePermissionsAsync("ProductionManager", managerPermissions.Append(PermissionCodes.ProductionAssign).ToArray(), default);
         await repository.CreateUserAsync(new(Guid.NewGuid(), "control-manager", "流程经理", "unused", UserRole.Administrator, true,
             CompanyId: company, RoleCode: "ProductionManager"), default);
         await Scan.SaveAsync(new(Stations, [Bind("receive", "Reception", reception), Bind("machine", "MachiningReception", cnc),

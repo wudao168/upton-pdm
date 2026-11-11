@@ -59,7 +59,7 @@ onMounted(load)
     <template v-else-if="draft && view">
       <p>图档原件、版本PDF与STEP、审核批注及验收资料随上方项目图档库保存；正式交付文件随生产发包库保存；料品、套件和BOM上传附件随料品资料库保存。标准结构使用下方独立存档目录。</p>
       <p>以上为服务器物理位置，不改变项目里的机械图纸、电气图纸、客户资料等业务目录、文件归属或权限。各客户端的本地工作区和下载目录仍在对应电脑设置。</p>
-      <div class="pdm-settings-form">
+      <div class="pdm-settings-form pdm-settings-grid--four">
         <label v-for="field in fields" :key="field.key">{{ field.label }}<input v-model="draft[field.key]" :aria-label="field.label" :disabled="busy"><small>{{ field.note }}</small></label>
         <label>备份目标根目录<input v-model="draft.backupRoot" aria-label="备份目标根目录" :disabled="busy" placeholder="待确认，可填写独立备份盘目录或UNC共享目录"><small>留空表示备份目标待确认，不执行备份。数据库、文件和恢复配置按同一备份批次保存；不能与源目录相同或互相包含。</small></label>
       </div>
@@ -70,7 +70,7 @@ onMounted(load)
         <p v-for="(roots, kind) in draft.historicalRoots" :key="kind">历史目录：{{ roots.join('；') }}</p>
         <p>数据库当前目录：{{ view.databaseDataRoot || '当前使用内存数据库' }}；配置与密钥当前目录：{{ view.secretsRoot }}。</p>
         <p>下列地址仅登记迁移目标，保存后仍使用当前目录。正式迁移时间另行确认，不能直接移动正在使用的数据库、加密密钥或远程转图任务。</p>
-        <div class="pdm-settings-form">
+        <div class="pdm-settings-form pdm-settings-grid--four">
           <label>数据库数据迁移目标<input v-model="draft.databaseDataTarget" aria-label="数据库数据迁移目标" :disabled="busy" placeholder="待正式迁移时确认"></label>
           <label>配置与密钥迁移目标<input v-model="draft.secretsTarget" aria-label="配置与密钥迁移目标" :disabled="busy" placeholder="待正式迁移时确认"><small>Windows本机加密密钥需验证跨服务器恢复能力。</small></label>
           <label>远程转图工作目录目标<input v-model="draft.previewAgentWorkTarget" aria-label="远程转图工作目录目标" :disabled="busy" placeholder="待转图电脑迁移时确认"><small>转图服务器：{{ view.previewAgentUrl || '未配置远程转图' }}；需在转图代理实际修改后核对。</small></label>

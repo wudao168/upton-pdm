@@ -108,6 +108,7 @@ internal static class Program
             foreach (var task in new[] { first, second }) { using (var response = await task) Check(response.IsSuccessStatusCode, "accepted request returns its conversion response"); }
             await WaitUntil(() => !AgentProgram.Busy);
             await AgentProgram.ApplyPendingSettingsAsync();
+            await WaitUntil(() => AgentProgram.Options.Name == next.Name);
             Check(AgentProgram.Options.Name == next.Name && File.Exists(Path.Combine(options.DataDirectory, "settings.json")), "pending settings become effective and persist after work completes");
             var prefs = File.ReadAllText(Path.Combine(options.DataDirectory, "settings.json"));
             Check(!prefs.Contains(options.Token), "saved preferences protect the token");
@@ -124,13 +125,18 @@ internal static class Program
             Check(!window.Visible && !window.ShowInTaskbar, "tray action hides the window without stopping the agent");
             Check((await client.GetAsync("/health")).IsSuccessStatusCode, "health remains available while the window is in the tray");
             window.RestoreWindow(); Check(window.Visible && window.ShowInTaskbar, "restore brings back the foreground window");
-            for (var page = 0; page < 3; page++)
-            {
-                window.SelectPage(page); await Task.Delay(350);
-                if (page == 1) typeof(AgentMainForm).GetMethod("SelectBatch", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(window, new object[] { records.Single(item => item.Files.Count == 2).Id });
-                Capture(window, "page-" + page);
-            }
+            typeof(AgentMainForm).GetMethod("SelectBatch", PrivateStatic | BindingFlags.Instance).Invoke(window,
+                new object[] { records.Single(item => item.Files.Count == 2).Id });
+            await Task.Delay(350);
+            var files = (DataGridView)typeof(AgentMainForm).GetField("documentsGrid", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(window);
+            Check(files.Rows.Count == 2, "selected request shows both files in the same workbench");
+            var packages = (DataGridView)typeof(AgentMainForm).GetField("packagesGrid", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(window);
+            CheckGridAlignment(packages, files);
+            Capture(window, "workbench");
+            window.SelectPage(2); await Task.Delay(350);
+            Capture(window, "workbench-settings");
             window.Size = window.MinimumSize; await Task.Delay(300); Capture(window, "page-settings-minimum");
+            CheckGridAlignment(packages, files);
             Check(records.All(item => item.Returned), "finished records distinguish returned results from failed delivery");
             AgentProgram.TogglePause();
             using (var invalid = await client.PostAsync("/convert", new StringContent("not a ZIP file")))
@@ -138,6 +144,15 @@ internal static class Program
             await WaitUntil(() => !AgentProgram.Busy);
             Check(AgentProgram.Journal.Snapshot().First().Status == "失败" && AgentProgram.Journal.TotalRequests == 3, "invalid input is counted once and retained as a failed batch");
         }
+    }
+
+    private static void CheckGridAlignment(DataGridView packages, DataGridView files)
+    {
+        var left = packages.PointToScreen(System.Drawing.Point.Empty);
+        var right = files.PointToScreen(System.Drawing.Point.Empty);
+        Check(left.Y == right.Y && packages.ColumnHeadersHeight == files.ColumnHeadersHeight
+            && packages.Rows[0].Height == files.Rows[0].Height && packages.Height == files.Height,
+            "package and drawing tables share header, row height and bottom edge");
     }
 
     private static ByteArrayContent Request(params string[] names)

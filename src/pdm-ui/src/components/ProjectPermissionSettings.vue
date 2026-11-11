@@ -146,8 +146,8 @@ watch(() => props.token, token => { void load(token) }, { immediate: true })
         </div>
       </section>
       <aside class="pdm-project-permission-notes" aria-label="特殊授权规则">
-        <p><strong>预算查看：</strong>预算查看可由角色独立授权，也可由项目岗位授权；岗位未勾选不表示该人员一定无权查看。仍需具备项目内容访问权，预算范围保持现有规则。</p>
-        <p><strong>人员分配：</strong>分配执行工程师还按事业部负责人、机械主管等组织职责授权，本表未勾选不代表所有管理人员都无权分配。</p>
+        <p><strong>财务查看：</strong>角色或项目岗位授权只开放入口。项目经理（含协同）、事业部负责人、主设计可查看所负责项目的预算、评估、实际金额及剩余预算，主项目经理可查看所属子项目。所属公司高管可查看实际成本；采购、供应链仅可查看明确归属本部门的预算和实际金额。金额维护仍按原维护权限控制，管理员身份不自动获得财务金额权限。</p>
+        <p><strong>人员分配：</strong>分配设计人员还按事业部负责人、机械主管等组织职责授权，本表未勾选不代表所有管理人员都无权分配。</p>
         <p><strong>其他限制：</strong>项目访问仍受公司及内容权限控制；图档存档、目录权限、审批任务和业务状态还需满足各自规则，本表不是全部项目操作的总开关。系统管理员等特权账号沿用现有规则。</p>
       </aside>
     </div>
@@ -163,7 +163,7 @@ watch(() => props.token, token => { void load(token) }, { immediate: true })
 .pdm-project-permission-intro { margin: 0 0 12px; color: var(--pdm-text-soft); font-size: 12px; line-height: 1.8; }
 .pdm-project-permission-intro strong { color: var(--pdm-text); }
 .pdm-project-permission-scopes { margin-bottom: 12px; border: 1px solid var(--pdm-border); border-radius: 6px; padding: 10px 12px; background: var(--pdm-surface); font-size: 12px; }
-.pdm-project-permission-scopes summary { color: var(--pdm-blue); cursor: pointer; }
+.pdm-project-permission-scopes summary { color:var(--pdm-text); cursor: pointer; }
 .pdm-project-permission-scopes dl { display: grid; grid-template-columns: 210px minmax(0, 1fr); margin: 10px 0; }
 .pdm-project-permission-scopes dt,.pdm-project-permission-scopes dd { margin: 0; padding: 7px 8px; border-top: 1px solid var(--pdm-border); line-height: 1.6; }
 .pdm-project-permission-scopes dt { font-weight: 600; }.pdm-project-permission-scopes p { margin: 8px 0 0; color: var(--pdm-muted); line-height: 1.6; }
@@ -181,7 +181,7 @@ watch(() => props.token, token => { void load(token) }, { immediate: true })
 .pdm-project-permission-matrix small { display: block; margin-top: 4px; color: var(--pdm-muted); font-size: 11px; font-weight: 400; }
 .pdm-project-permission-group th { background: var(--pdm-table-header); color: var(--pdm-muted); text-align: left; }
 .pdm-project-permission-matrix td label { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 26px; color: var(--pdm-muted); cursor: pointer; }
-.pdm-project-permission-matrix td label.is-checked { color: var(--pdm-theme-accent); }.pdm-project-permission-matrix input { accent-color: var(--pdm-theme-accent); }
+.pdm-project-permission-matrix td label.is-checked { color:var(--pdm-text); }.pdm-project-permission-matrix input { accent-color: var(--pdm-theme-accent); }
 .pdm-project-permission-notes { margin-top: 12px; padding: 4px 12px; border-left: 3px solid var(--pdm-border); color: var(--pdm-muted); font-size: 12px; line-height: 1.7; }
 .pdm-project-permission-notes p { margin: 6px 0; }
 .pdm-project-permission-actions { display: flex; flex-wrap: wrap; flex: 0 0 auto; align-items: center; gap: 8px; padding: 12px 0 0; border-top: 1px solid var(--pdm-border); }

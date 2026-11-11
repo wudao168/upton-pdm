@@ -130,6 +130,7 @@ public sealed class StandardLibraryServiceTests
         public Fixture()
         {
             Repository = new(TimeProvider);
+            PermissionTestUsers.Ensure(Repository, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer)).GetAwaiter().GetResult();
             Materials = new(TimeProvider);
             Service = new(new InMemoryStandardLibraryRepository(), Materials, Repository, TimeProvider);
         }

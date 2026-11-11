@@ -238,6 +238,7 @@ public sealed class StandardStructureTests
     public async Task StorageAndMovePermissionsAreEnforced()
     {
         using var f = new Fixture(); var item = await f.Archive(); var c = await f.Catalog();
+        await PermissionTestUsers.Ensure(f.Repository, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer));
         await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.ConfigureStorageAsync(f.Root + "-new", c.RowVersion, "admin", UserRole.Administrator, default));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => f.Service.MoveStructuresAsync(new([item.Id], StandardStructureRules.UnclassifiedId, c.RowVersion), "engineer", UserRole.Engineer, default));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => f.Service.ArchiveAsync(new(Guid.NewGuid(), 1, "非法存档", Fixture.Node(), [], Guid.NewGuid()), [], "admin", UserRole.Administrator, default));

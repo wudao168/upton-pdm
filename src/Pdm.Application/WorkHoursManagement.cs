@@ -51,17 +51,17 @@ public sealed partial class WorkHoursService
 {
     private sealed record ManagementAccess(bool Admin, HashSet<Guid> Units, HashSet<string> Names);
     private static bool InCompany(OrganizationDirectoryUser user, Guid company) => user.CompanyId == company || user.CompanyId is null || user.AccessibleCompanyIds?.Contains(company) == true;
-    private static bool Assistant(OrganizationDirectoryUser user) => user.EffectiveRoleCodes.Any(x => Same(x, "TechnicalAssistant"));
-    private static bool RosterAssistant(OrganizationDirectoryUser user) => user.EffectiveRoleCodes.Any(x => Same(x, "TechnicalAssistant") || Same(x, "ProductionAssistant") || Same(x, "SalesAssistant"));
+    private bool Assistant(OrganizationDirectoryUser user) => repository.HasUserPermissionAsync(user.Username, user.Role, "work-hours.manage.department", default).GetAwaiter().GetResult();
+    private bool RosterAssistant(OrganizationDirectoryUser user) => repository.HasUserPermissionAsync(user.Username, user.Role, "work-hours.roster.manage", default).GetAwaiter().GetResult();
     private static WorkHoursPerson Person(OrganizationDirectoryUser user, OrganizationDirectory directory, Guid company)
     {
         var unit = PrimaryUnit(user.Username, directory, company);
         return new(user.Username, user.DisplayName, unit?.Name ?? "未分配", user.IsActive) { DepartmentId = unit?.Id };
     }
-    private static ManagementAccess ManagementScope(Guid company, OrganizationDirectory directory, OrganizationDirectoryUser user, WorkHoursCatalog catalog, bool personnelOnly = false)
+    private ManagementAccess ManagementScope(Guid company, OrganizationDirectory directory, OrganizationDirectoryUser user, WorkHoursCatalog catalog, bool personnelOnly = false)
     {
-        var admin = !personnelOnly && (user.Role is UserRole.Administrator or UserRole.PlatformAdministrator || user.EffectiveRoleCodes.Any(x => x is "platform_admin" or "developer"));
-        var eligible = personnelOnly ? RosterAssistant(user) : Assistant(user) || user.Role == UserRole.BusinessUnitManager || user.EffectiveRoleCodes.Contains("BusinessUnitManager", StringComparer.OrdinalIgnoreCase);
+        var admin = !personnelOnly && repository.HasUserPermissionAsync(user.Username, user.Role, "work-hours.manage.company", default).GetAwaiter().GetResult();
+        var eligible = personnelOnly ? RosterAssistant(user) : Assistant(user);
         var units = directory.Units.Where(x => x.OrganizationId == company && x.IsActive).ToArray();
         var selected = admin ? units.Select(x => x.Id).ToHashSet() : eligible
             ? directory.Managers.Where(x => Same(x.PrimaryManager, user.Username) || x.CollaborativeManagers.Any(n => Same(n, user.Username))).Select(x => x.UnitId)
@@ -105,7 +105,7 @@ public sealed partial class WorkHoursService
         // 修订按人员裁剪，部门管理者不能通过设置历史读到其他部门的信息。
         return new(Today, catalog.RowVersion, access.Admin, access.Admin ? "当前公司" : "授权部门及下级部门", people,
             directory.Units.Where(x => access.Units.Contains(x.Id)).ToArray(),
-            access.Admin ? directory.Users.Where(x => InCompany(x, catalog.CompanyId) && x.IsActive && (Assistant(x) || x.Role == UserRole.BusinessUnitManager)).Select(x => Person(x, directory, catalog.CompanyId)).ToArray() : [],
+            access.Admin ? directory.Users.Where(x => InCompany(x, catalog.CompanyId) && x.IsActive && (Assistant(x))).Select(x => Person(x, directory, catalog.CompanyId)).ToArray() : [],
             catalog.Requirements.Where(x => access.Names.Contains(x.Username)).ToArray(), catalog.Exceptions.Where(x => access.Names.Contains(x.Username)).ToArray(),
             access.Admin ? catalog.Grants : [], catalog.History.Select(x => x with
             {
@@ -185,7 +185,7 @@ public sealed partial class WorkHoursService
     {
         var (company, directory, catalog, access) = await Management(actor, ct);
         if (!access.Admin) throw new UnauthorizedAccessException("只有系统管理员可以设置工时管理的授权部门。");
-        var target = directory.Users.FirstOrDefault(x => InCompany(x, company) && Same(x.Username, input.Username) && x.IsActive && (Assistant(x) || x.Role == UserRole.BusinessUnitManager));
+        var target = directory.Users.FirstOrDefault(x => InCompany(x, company) && Same(x.Username, input.Username) && x.IsActive && (Assistant(x)));
         if (target is null || input.UnitIds is null || input.UnitIds.Any(id => !directory.Units.Any(x => x.Id == id && x.OrganizationId == company && x.IsActive)))
             throw new PdmRuleException("请选择当前公司的事业部负责人、技术助理及有效部门。");
         var grants = catalog.Grants.Where(x => !Same(x.Username, target.Username)).ToList();

@@ -11,14 +11,19 @@ public sealed record ProjectWorkbookMetadata(string Title, string Company, strin
 {
     public static ProjectWorkbookMetadata ForProject(Project project, Project main, OrganizationDirectory? directory, string title, string versionLabel, string version, DateTimeOffset at, string actor, string scope = "当前项目")
     {
-        string Names(IEnumerable<string?> people) => string.Join("、", people.Where(x=>!string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).Select(x=>directory?.Users.FirstOrDefault(u=>u.Username.Equals(x,StringComparison.OrdinalIgnoreCase))?.DisplayName ?? x));
+        string Names(IEnumerable<string?> people) => string.Join("、", people.Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase).Select(username =>
+            {
+                var name = directory?.Users.FirstOrDefault(user => user.Username.Equals(username, StringComparison.OrdinalIgnoreCase))?.DisplayName;
+                return string.IsNullOrWhiteSpace(name) ? "姓名待补充" : name;
+            }));
         var child = project.Id != main.Id;
         KeyValuePair<string,string> Field(string label, string? value) => new(label,string.IsNullOrWhiteSpace(value)?"—":value);
         return new(title,project.OrganizationName ?? main.OrganizationName ?? "UPTON 阿普顿",scope,versionLabel,version,at.ToOffset(TimeSpan.FromHours(8)),
         [Field("主项目号",main.Code),Field("主项目名称",main.Name),Field("型号",main.DeviceModel),Field("客户",project.CustomerName ?? main.CustomerName),
          Field("子项目号",child?project.Code:null),Field("子项目名称",child?project.Name:null),Field("子项目型号",child?project.DeviceModel:null),Field("整套数量",project.Quantity.ToString(CultureInfo.InvariantCulture)+"套"),
          Field("事业部",project.ExecutionUnitName ?? main.ExecutionUnitName),Field("项目经理",Names(new[]{project.PrimaryProjectManager ?? main.PrimaryProjectManager}.Concat(project.CollaborativeProjectManagers))),
-         Field("主设",Names(project.DesignLeads.Count>0?project.DesignLeads.Select(x=>(string?)x):new[]{project.DesignLead ?? main.DesignLead})),Field("工程师",Names(project.Designers))],Names([actor]));
+         Field("主设计",Names(project.DesignLeads.Count>0?project.DesignLeads.Select(x=>(string?)x):new[]{project.DesignLead ?? main.DesignLead})),Field("设计人员",Names(project.Designers))],Names([actor]));
     }
 }
 
@@ -79,7 +84,25 @@ public static partial class ProjectWorkbookHeader
                 root.Add(new XElement(Ns+"pageMargins",new XAttribute("left",.3),new XAttribute("right",.3),new XAttribute("top",.3),new XAttribute("bottom",.3),new XAttribute("header",.1),new XAttribute("footer",.1)),new XElement(Ns+"pageSetup",new XAttribute("orientation","landscape"),new XAttribute("paperSize",9),new XAttribute("fitToWidth",1),new XAttribute("fitToHeight",0)),new XElement(Ns+"headerFooter",new XElement(Ns+"oddFooter",$"&L导出人：{metadata.ExportedBy}　来源：UPLM&R第&P页 / 共&N页")));
                 var drawing=$"uplm-header{index+1}.xml";root.Add(new XElement(Ns+"drawing",new XAttribute(DocRel+"id","uplmHeader")));
                 var relPath="xl/worksheets/_rels/"+Path.GetFileName(path)+".rels";var rels=Load(relPath,$"<Relationships xmlns='{Rel}'/>");rels.Root!.Add(new XElement(Rel+"Relationship",new XAttribute("Id","uplmHeader"),new XAttribute("Type",DocRel.NamespaceName+"/drawing"),new XAttribute("Target","../drawings/"+drawing)));Save(relPath,rels);
-                var drawingPath="xl/drawings/"+drawing;Save(drawingPath,XDocument.Parse($"<xdr:wsDr xmlns:xdr='http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing' xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main' xmlns:r='{DocRel}'><xdr:oneCellAnchor><xdr:from><xdr:col>{columns-3}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>80000</xdr:rowOff></xdr:from><xdr:ext cx='1400000' cy='180000'/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id='1' name='公司LOGO'/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed='image'/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:prstGeom prst='rect'><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>"));Override(drawingPath,"application/vnd.openxmlformats-officedocument.drawing+xml");Save("xl/drawings/_rels/"+drawing+".rels",XDocument.Parse($"<Relationships xmlns='{Rel}'><Relationship Id='image' Type='{DocRel}/image' Target='../media/uplm-company-logo.png'/></Relationships>"));
+                var drawingPath = $"xl/drawings/{drawing}";
+                Save(drawingPath, XDocument.Parse($"""
+                    <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+                        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="{DocRel}">
+                      <xdr:oneCellAnchor>
+                        <xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>80000</xdr:rowOff></xdr:from>
+                        <xdr:ext cx="1400000" cy="180000"/>
+                        <xdr:pic>
+                          <xdr:nvPicPr><xdr:cNvPr id="1" name="公司LOGO"/><xdr:cNvPicPr/></xdr:nvPicPr>
+                          <xdr:blipFill><a:blip r:embed="image"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+                          <xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+                        </xdr:pic>
+                        <xdr:clientData/>
+                      </xdr:oneCellAnchor>
+                    </xdr:wsDr>
+                    """));
+                Override(drawingPath, "application/vnd.openxmlformats-officedocument.drawing+xml");
+                Save($"xl/drawings/_rels/{drawing}.rels", XDocument.Parse(
+                    $"<Relationships xmlns='{Rel}'><Relationship Id='image' Type='{DocRel}/image' Target='../media/uplm-company-logo.png'/></Relationships>"));
                 var sheetId=index.ToString(CultureInfo.InvariantCulture);names.Elements().Where(e=>(string?)e.Attribute("name")=="_xlnm.Print_Titles" && (string?)e.Attribute("localSheetId")==sheetId).Remove();var sheetName=(string?)book.Root.Element(Ns+"sheets")!.Elements().ElementAt(index).Attribute("name")??"Sheet";names.Add(new XElement(Ns+"definedName",new XAttribute("name","_xlnm.Print_Titles"),new XAttribute("localSheetId",sheetId),$"'{sheetName.Replace("'","''")}'!$1:${originalHeaderRow+delta}"));
                 var order="sheetPr dimension sheetViews sheetFormatPr cols sheetData sheetProtection protectedRanges scenarios autoFilter sortState dataConsolidate customSheetViews mergeCells phoneticPr conditionalFormatting dataValidations hyperlinks printOptions pageMargins pageSetup headerFooter rowBreaks colBreaks drawing legacyDrawing legacyDrawingHF picture tableParts extLst".Split(' ');var elements=root.Elements().OrderBy(e=>Array.IndexOf(order,e.Name.LocalName) is var o && o>=0?o:99).ToArray();root.ReplaceNodes(elements);Save(path,sheet);
             }

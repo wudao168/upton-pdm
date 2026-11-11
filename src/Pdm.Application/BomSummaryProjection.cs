@@ -53,6 +53,35 @@ public static class BomSummaryProjection
         }).ToArray();
     }
 
+    // A maintained total replaces the old occurrences in its summary group. Reconcile the
+    // baseline only for selected owners; deferred groups retain their original frozen rows.
+    internal static IReadOnlyList<BomItem> BaselineForSelectedTotals(IReadOnlyList<BomItem> previous,
+        IReadOnlyList<BomItem> current, IReadOnlyList<BomItem> selected, IReadOnlyList<Guid>? confirmedRemoved = null)
+    {
+        var owners = selected.Where(item => item.IsSummaryQuantity && !item.EngineeringKitReferenceId.HasValue
+            && !item.RelationMainBomItemId.HasValue && item.RelationAllocations.Count == 0).Select(item => item.Id).ToHashSet();
+        if (owners.Count == 0) return previous;
+        var retained = current.Select(item => item.Id).Concat(confirmedRemoved ?? []).ToHashSet();
+        var absorbed = new HashSet<Guid>();
+        var totals = new Dictionary<Guid, decimal>();
+        var old = previous.ToDictionary(item => item.Id);
+        foreach (var group in Group(previous, includeFingerprint: false))
+        {
+            var members = group.SummaryItemIds!;
+            if (members.Count < 2) continue;
+            var selectedOwners = members.Where(owners.Contains).ToArray();
+            if (selectedOwners.Length != 1) continue;
+            var owner = selectedOwners[0];
+            var missing = members.Where(id => !retained.Contains(id)).ToArray();
+            if (missing.Length == 0) continue;
+            absorbed.UnionWith(missing);
+            totals[owner] = old[owner].Quantity + missing.Sum(id => old[id].Quantity);
+        }
+        if (absorbed.Count == 0) return previous;
+        return previous.Where(item => !absorbed.Contains(item.Id)).Select(item =>
+            totals.TryGetValue(item.Id, out var quantity) ? item with { Quantity = quantity } : item).ToArray();
+    }
+
     private static string Fingerprint(IEnumerable<BomItem> items) => Convert.ToHexString(SHA256.HashData(
         Encoding.UTF8.GetBytes(JsonSerializer.Serialize(items.OrderBy(item => item.Id).Select(item => new {
             Values = Input(item), item.RelationAllocations, item.Source, item.IsManuallyOverridden, item.IsPendingRemoval,

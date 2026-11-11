@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import { readProjectNameplate, saveProjectNameplate, confirmProjectNameplate, PdmApiError } from '../api'
 import { ElMessage } from '../statusMessage'
@@ -91,15 +92,15 @@ async function confirm() {
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="`铭牌 · ${project.code}`" width="620px" append-to-body :close-on-click-modal="false" :close-on-press-escape="!saving" :show-close="!saving">
+  <el-dialog v-model="visible" :title="`铭牌 · ${project.code}`" width="620px" append-to-body :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving">
     <p v-if="loading" role="status">正在读取铭牌…</p>
     <div v-else-if="error" role="alert">{{ error }} <el-button @click="load">重新读取</el-button></div>
     <template v-else-if="view">
       <div class="nameplate-toolbar"><el-checkbox v-if="editing" v-model="view.nameplate.enabled" :disabled="!view.canEdit || saving" aria-label="启用铭牌">启用铭牌</el-checkbox><span v-else role="status" aria-label="铭牌状态" :class="{ 'is-published': status?.published }">{{ status?.published ? '铭牌已发布' : view.nameplate.enabled ? `${status?.label} · ${view.canEdit ? '可编辑' : '仅查看'}` : '铭牌未启用' }}</span></div>
       <div class="nameplate-assignments" aria-label="铭牌填写分工">
-        <p><strong>执行工程师：</strong>设备尺寸、重量、气源压力、出厂月份。<span>{{ executionComplete ? '已填写' : '待填写完整' }}</span><span v-if="view.nameplate.executionSavedBy"> · {{ displayName(view.nameplate.executionSavedBy) }}</span></p>
+        <p><strong>设计人员：</strong>设备尺寸、重量、气源压力、出厂月份。<span>{{ executionComplete ? '已填写' : '待填写完整' }}</span><span v-if="view.nameplate.executionSavedBy"> · <PersonName :name="displayName(view.nameplate.executionSavedBy)" /></span></p>
         <p><strong>硬件工程师：</strong>电压、频率、电流，完成后确认发布。<span>{{ status?.published ? '已填写，已确认发布' : status?.hardwareComplete ? '已填写，待确认发布' : '待填写完整' }}</span></p>
-        <p v-if="view.nameplate.releasePackageId">发布包：{{ view.nameplate.releasePackageNumber }} · 硬件确认：{{ displayName(view.nameplate.confirmedBy || '') }}</p>
+        <p v-if="view.nameplate.releasePackageId">发布包：{{ view.nameplate.releasePackageNumber }} · 硬件确认：<PersonName :name="displayName(view.nameplate.confirmedBy || '')" /></p>
       </div>
       <NameplatePreview :name="view.name" :model="view.model" :serial-numbers="view.serialNumbers" :power-supply="view.nameplate.powerSupply" :rated-power="ratedPower" :dimensions="view.nameplate.dimensions" :air-pressure="view.nameplate.airPressure" :weight="view.nameplate.weight" :factory-date="view.nameplate.factoryDate">
         <template v-if="editing" #powerSupply><div class="nameplate-numbers nameplate-power-inputs"><label><input :value="draft.voltage" @input="draft.voltage = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="电压" :disabled="hardwareDisabled"><span>V</span></label><label><input :value="draft.frequency" @input="draft.frequency = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="频率" :disabled="hardwareDisabled"><span>Hz</span></label><b>/</b><label><input :value="draft.current" @input="draft.current = ($event.target as HTMLInputElement).value" type="number" min="0" step="any" aria-label="电流" :disabled="hardwareDisabled"><span>A</span></label></div></template>

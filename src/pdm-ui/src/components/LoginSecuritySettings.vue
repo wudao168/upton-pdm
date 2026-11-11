@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
+import { useUserDisplayName as usePersonDisplayName } from '../userDisplay'
+const displayUserName = usePersonDisplayName()
 import SearchField from './SearchField.vue'
 import { matchesUserSearch } from '../userSearch'
 import { computed, onMounted, ref } from 'vue'
@@ -63,13 +66,13 @@ onMounted(() => void run(load))
     <div class="actions search"><label>搜索账号或电脑 <SearchField @search="run(load)"><input v-model="query" type="search" aria-label="搜索账号或电脑" /></SearchField></label><button type="button" :disabled="pending" @click="run(load)">刷新</button></div>
     <h3>电脑绑定与待确认申请</h3>
     <p class="hint">目标电脑登录一次后会出现在此处。更换电脑需先解绑；重装系统或更换Windows用户后可能需要重新确认电脑凭证。</p>
-    <div class="table-wrap"><table><thead><tr><th>账号</th><th>电脑名称 / MAC</th><th>状态</th><th>登记 / 批准时间</th><th>最近使用</th><th>操作</th></tr></thead><tbody>
-      <tr v-for="device in devices" :key="device.username + device.id"><td>{{ device.username }}</td><td>{{ device.machine }}<small>{{ device.mac || '未读取到物理网卡地址' }}</small></td><td>{{ device.approved ? '已绑定' : '待确认' }}</td><td>{{ time(device.requestedAt) }}<small>{{ time(device.approvedAt) }}</small></td><td>{{ time(device.lastSeenAt) }}</td><td><button :disabled="pending" @click="deviceAction(device.username, device.id, !device.approved)">{{ device.approved ? '解除绑定' : '确认绑定' }}</button></td></tr>
+    <div class="table-wrap"><table><thead><tr><th>姓名</th><th>电脑名称 / MAC</th><th>状态</th><th>登记 / 批准时间</th><th>最近使用</th><th>操作</th></tr></thead><tbody>
+      <tr v-for="device in devices" :key="device.username + device.id"><td><PersonName :name="displayUserName(device.username)" /></td><td>{{ device.machine }}<small>{{ device.mac || '未读取到物理网卡地址' }}</small></td><td>{{ device.approved ? '已绑定' : '待确认' }}</td><td>{{ time(device.requestedAt) }}<small>{{ time(device.approvedAt) }}</small></td><td>{{ time(device.lastSeenAt) }}</td><td><button :disabled="pending" @click="deviceAction(device.username, device.id, !device.approved)">{{ device.approved ? '解除绑定' : '确认绑定' }}</button></td></tr>
       <tr v-if="!devices.length"><td colspan="6">暂无电脑记录；请先在目标电脑使用新版客户端或插件登录。</td></tr>
     </tbody></table></div>
     <h3>登录会话</h3>
-    <div class="table-wrap"><table><thead><tr><th>账号</th><th>终端</th><th>电脑</th><th>状态</th><th>登录时间</th><th>最近活动</th><th>操作</th></tr></thead><tbody>
-      <tr v-for="session in sessions" :key="session.id"><td>{{ session.username }}</td><td>{{ typeName(session.type) }}</td><td>{{ session.machine }}</td><td>{{ status(session) }}</td><td>{{ time(session.createdAt) }}</td><td>{{ time(session.lastSeenAt) }}</td><td><button :disabled="pending || session.revoked" @click="revoke(session.username, session.id)">强制下线</button></td></tr>
+    <div class="table-wrap"><table><thead><tr><th>姓名</th><th>终端</th><th>电脑</th><th>状态</th><th>登录时间</th><th>最近活动</th><th>操作</th></tr></thead><tbody>
+      <tr v-for="session in sessions" :key="session.id"><td><PersonName :name="displayUserName(session.username)" /></td><td>{{ typeName(session.type) }}</td><td>{{ session.machine }}</td><td>{{ status(session) }}</td><td>{{ time(session.createdAt) }}</td><td>{{ time(session.lastSeenAt) }}</td><td><button :disabled="pending || session.revoked" @click="revoke(session.username, session.id)">强制下线</button></td></tr>
       <tr v-if="!sessions.length"><td colspan="7">暂无登录会话。</td></tr>
     </tbody></table></div>
     <p class="hint">开关、绑定、解绑和强制下线操作保存在全局审计中。</p>

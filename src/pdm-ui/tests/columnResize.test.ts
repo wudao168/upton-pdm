@@ -39,6 +39,15 @@ function pointer(element: Element | Document, type: string, x: number) {
 afterEach(() => { dispose?.(); document.body.innerHTML = ''; window.localStorage.clear(); vi.restoreAllMocks() })
 
 describe('global column resizing', () => {
+  it('窄屏恢复项目列表列宽时保留可读总宽并允许横向滚动', () => {
+    vi.spyOn(tablePreferences, 'readTablePreference').mockReturnValue('[180,320]')
+    setup('<div data-pdm-preference-scope=\'["qa","company"]\'><table data-pdm-min-width="1500"><thead><tr><th>项目号</th><th>名称</th></tr></thead></table></div>', 500)
+    const table=document.querySelector('table')!
+    expect(table.style.minWidth).toBe('1500px')
+    expect(table.style.maxWidth).toBe('none')
+    expect(table.parentElement!.classList.contains('pdm-column-scroll')).toBe(true)
+    expect([...document.querySelectorAll('col')].map(col=>col.style.width)).toEqual(['36%','64%'])
+  })
   it('BOM紧凑列兼容旧列宽及窗口缩放，其余列保留分配；再次拖动后记忆新宽度', async () => {
     const html = '<div data-pdm-preference-scope=\'["alice","company"]\'><table class="pdm-bom-table"><thead><tr><th>选择</th><th>操作</th><th>序号</th><th>名称</th><th>型号</th></tr></thead></table></div>'
     setup(html, 1000)
@@ -203,6 +212,30 @@ describe('global column resizing', () => {
       }
       expect(table.store.states.columns.value.map((column: { resizable: boolean }) => column.resizable)).toEqual([true, true, true])
     } finally { wrapper.unmount(); globalThis.ResizeObserver = Original }
+  })
+  it('窄屏恢复滚动目录时选择框和内容列保持可读宽度', async () => {
+    const Original = globalThis.ResizeObserver
+    const observers: Array<{ callback: ResizeObserverCallback; root?: Element }> = []
+    globalThis.ResizeObserver = class {
+      entry: { callback: ResizeObserverCallback; root?: Element }
+      constructor(callback: ResizeObserverCallback) { this.entry = { callback }; observers.push(this.entry) }
+      observe(root: Element) { this.entry.root = root }
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver
+    vi.spyOn(tablePreferences, 'readTablePreference').mockReturnValue('[8,40,60]')
+    const host = document.createElement('div');host.dataset.pdmPreferenceScope='["qa","company"]';document.body.append(host)
+    const wrapper=mount(defineComponent({components:{ElTable,ElTableColumn},template:'<el-table data-pdm-column-layout="scroll" :data="[]"><el-table-column type="selection" width="38"/><el-table-column label="名称" min-width="140"/><el-table-column label="型号" min-width="180"/></el-table>'}),{attachTo:host,global:{plugins:[{install:installColumnResize}]}})
+    try {
+      await nextTick()
+      const root=wrapper.element,table=wrapper.findComponent({name:'ElTable'}).vm.$.exposed!
+      const observer=observers.find(item=>item.root===root&&item.callback.toString().includes('const space'))!
+      Object.defineProperty(root,'clientWidth',{configurable:true,value:240})
+      observer.callback([],{} as ResizeObserver);await nextTick()
+      expect(table.store.states.columns.value.map((column:{realWidth:number})=>column.realWidth)).toEqual([38,140,180])
+      observer.callback([],{} as ResizeObserver);await nextTick()
+      expect(table.store.states.columns.value.map((column:{realWidth:number})=>column.realWidth)).toEqual([38,140,180])
+    } finally {wrapper.unmount();globalThis.ResizeObserver=Original}
   })
   it('enables real Element Plus selection and index columns after mount', async () => {
     const wrapper = mount(defineComponent({

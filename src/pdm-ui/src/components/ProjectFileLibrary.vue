@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
+import PdfDrawingViewer from './PdfDrawingViewer.vue'
 import SearchField from './SearchField.vue'
 import UserSelect from './UserSelect'
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
@@ -8,22 +10,26 @@ import { Download, Eye, File, Folder, FolderCog, FolderPlus, History, Pencil, Ro
 import type { ControlledDocumentRecycleReadiness, FolderPermissionRule, ManagedDocument, PdmUser, ProjectFile, ProjectFileVersion, ProjectFolder, RolePermissionSettings } from '../types'
 import { createProjectFolder, deleteProjectFile, deleteProjectFolder, downloadProjectFile, getControlledDocumentRecycleReadiness, listControlledDocumentRecycleBin, listProjectFiles, listProjectFileVersions, moveProjectFile, moveProjectFolder, readProjectFileContent, recycleControlledDocument, recycleControlledDocumentsBatch, renameProjectFile, renameProjectFolder, restoreControlledDocument, restoreProjectFile, updateProjectFileDescription, uploadProjectFile } from '../api'
 import ArchiveRecycleDialog from './ArchiveRecycleDialog.vue'
+import ProjectFileForms from './ProjectFileForms.vue'
 import { resolveUserDisplayName } from '../userDisplay'
 import { readFolderDocumentIndex, readFolderDocuments } from '../api'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 
 const props = defineProps<{
   projectId: string; token: string; folders: ProjectFolder[]; documents: ManagedDocument[]; users: PdmUser[]; roles: RolePermissionSettings[]
-  administrator: boolean; canRecycleDocuments?: boolean; pending: boolean
+  administrator: boolean; canRecycleDocuments?: boolean; pending: boolean; formPermissions?: readonly string[]
+  requestedArchive?: { projectId: string; folderId: string; fileId: string }
   onUpdatePermissions: (folderId: string, permissions: FolderPermissionRule[]) => Promise<ProjectFolder[]>
   onReload: () => Promise<unknown>
 }>()
+const emit = defineEmits<{ archiveLocated: [] }>()
 const displayUserName = (username?: string | null, emptyText = '—') => resolveUserDisplayName(props.users, username, emptyText)
 const projectAccess = useProjectCenterAccess()
 interface FolderTreeNode extends ProjectFolder { children: FolderTreeNode[] }
 interface MoveFolderTreeNode extends FolderTreeNode { disabled: boolean; children: MoveFolderTreeNode[] }
 
 const selectedFolderId = ref('')
+const archivedFormFileId = ref('')
 const expandedFolderKeys = ref<string[]>([])
 const kindFilter = ref<'all' | 'model' | 'drawing'>('all')
 const query = ref('')
@@ -47,6 +53,8 @@ const mediaPreviewOpen = ref(false)
 const mediaPreviewFile = ref<ProjectFile | null>(null)
 const mediaPreviewUrl = ref('')
 const mediaPreviewLoading = ref(false)
+const previewText = ref('')
+let previewGeneration = 0
 let uploadController: AbortController | null = null
 const permissionOpen = ref(false)
 const permissionRows = ref<FolderPermissionRule[]>([])
@@ -156,9 +164,27 @@ watch(() => [props.projectId, props.token, props.documents], () => {
   countsRequest++; documentCounts.value = null; legacyCatalog = undefined; countsRead = undefined; void loadFiles()
 })
 onBeforeUnmount(() => { filesRequest++; countsRequest++; uploadController?.abort(); rejectMoveTarget?.('cancel'); clearMediaPreview() })
+watch([() => props.requestedArchive, visibleFolders], ([archive, folders]) => {
+  if (!archive || archive.projectId !== props.projectId || !folders.some(folder => folder.id === archive.folderId)) return
+  emit('archiveLocated')
+  void locateArchivedForm(archive.folderId, archive.fileId)
+}, { immediate: true, flush: 'post' })
 
 function hasAccess(folder: ProjectFolder | undefined, mask: number) { return Boolean(folder && (folder.effectiveAccess & mask) === mask) }
-function selectFolder(folder: ProjectFolder) { selectedFolderId.value = folder.id; query.value = '' }
+function selectFolder(folder: ProjectFolder) { selectedFolderId.value = folder.id; query.value = ''; archivedFormFileId.value = '' }
+
+async function locateArchivedForm(folderId: string, fileId: string) {
+  const projectId = props.projectId
+  selectedFolderId.value = folderId
+  query.value = ''
+  includeDeleted.value = false
+  await nextTick()
+  await loadFiles()
+  if (props.projectId !== projectId || selectedFolderId.value !== folderId) return
+  archivedFormFileId.value = fileId
+  await nextTick()
+  document.querySelector('[data-project-file-id="' + fileId + '"]')?.scrollIntoView({ block: 'nearest' })
+}
 const fileCounts = computed(() => {
   const result: Record<string, number> = {}
   projectFiles.value.forEach(file => { if (!file.deletedAt) result[file.folderId] = (result[file.folderId] ?? 0) + 1 })
@@ -171,20 +197,27 @@ function formatSize(bytes = 0) { if (bytes < 1024) return `${bytes} B`; if (byte
 function mediaKind(file: ProjectFile) { return /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.fileName) ? 'image' : /\.(mp4|webm|ogv|mov)$/i.test(file.fileName) ? 'video' : null }
 function canPreview(file: ProjectFile) { return Boolean(mediaKind(file)) || /\.(pdf|txt|csv|md)$/i.test(file.fileName) }
 function clearMediaPreview() {
+  previewGeneration++
+  previewText.value = ''
   if (mediaPreviewUrl.value) URL.revokeObjectURL(mediaPreviewUrl.value)
   mediaPreviewUrl.value = ''
   mediaPreviewFile.value = null
   mediaPreviewLoading.value = false
 }
 async function openMediaPreview(file: ProjectFile) {
-  if (!mediaKind(file)) return
+  if (!canPreview(file)) return
   clearMediaPreview()
+  const current = previewGeneration
   mediaPreviewFile.value = file
   mediaPreviewOpen.value = true
   mediaPreviewLoading.value = true
-  try { mediaPreviewUrl.value = URL.createObjectURL(await readProjectFileContent(props.projectId, file.id, props.token)) }
-  catch (error) { ElMessage.error(error instanceof Error ? error.message : '媒体预览加载失败'); mediaPreviewOpen.value = false }
-  finally { mediaPreviewLoading.value = false }
+  try {
+    const blob = await readProjectFileContent(props.projectId, file.id, props.token)
+    if (current !== previewGeneration) return
+    if (/\.(txt|csv|md)$/i.test(file.fileName)) { const text = await blob.text(); if (current === previewGeneration) previewText.value = text }
+    else mediaPreviewUrl.value = URL.createObjectURL(blob)
+  } catch { if (current === previewGeneration) { ElMessage.error('文件预览加载失败，请稍后重试。'); mediaPreviewOpen.value = false } }
+  finally { if (current === previewGeneration) mediaPreviewLoading.value = false }
 }
 
 async function loadFiles() {
@@ -477,9 +510,9 @@ async function savePermissions() { if (!selectedFolder.value) return; try { awai
 </script>
 
 <template>
-  <section class="pdm-file-library">
+  <section class="pdm-file-library" aria-label="项目文件夹">
     <aside class="pdm-panel pdm-folder-pane">
-      <el-tree :data="treeData" node-key="id" :default-expanded-keys="expandedFolderKeys" :auto-expand-parent="false" highlight-current @node-click="selectFolder" @node-expand="expandFolder" @node-collapse="collapseFolder">
+      <el-tree :data="treeData" node-key="id" :current-node-key="selectedFolderId" :default-expanded-keys="expandedFolderKeys" :auto-expand-parent="false" highlight-current @node-click="selectFolder" @node-expand="expandFolder" @node-collapse="collapseFolder">
         <template #default="{ data }"><span class="pdm-folder-node"><span class="pdm-folder-node__icon" :class="{ 'is-populated': folderCount(data.id) > 0 }"><Folder :size="15" /></span><span>{{ data.name }}</span><small v-if="folderCount(data.id)">{{ folderCount(data.id) }}</small></span></template>
       </el-tree>
     </aside>
@@ -487,6 +520,7 @@ async function savePermissions() { if (!selectedFolder.value) return; try { awai
       <header class="pdm-folder-toolbar">
         <div><div class="pdm-breadcrumb">项目文件 <span>/</span> {{ selectedFolder?.name || '请选择目录' }}</div><h2>{{ selectedFolder?.name || '项目文件库' }}</h2><p v-if="releaseFolder">按发布范围自动汇总的发布成品（受控BOM、STEP/PDF等），网页只读。</p><p v-else-if="!businessFolder && selectedFolder">该目录由图档或发布流程受控，网页不维护普通文件。</p></div>
         <div class="pdm-file-actions" v-if="selectedFolder">
+          <ProjectFileForms v-if="formPermissions?.length" :project-id="projectId" :token="token" :permissions="formPermissions" @archived="locateArchivedForm" />
           <button v-if="documentFolder && canRecycleDocuments" type="button" class="pdm-secondary-action" :disabled="pending || recycleLoading" @click="archiveRecycleOpen = true">按存档批次回收 / 恢复</button>
           <button v-if="documentFolder && canRecycleDocuments" type="button" class="pdm-danger-action" :disabled="recycleLoading || selectedDocumentIds.length === 0" @click="openBatchRecycle"><Trash2 :size="15" />批量移入回收站（{{ selectedDocumentIds.length }}）</button>
           <button v-if="businessFolder && hasAccess(selectedFolder, 4)" type="button" class="pdm-primary-action" :disabled="Boolean(uploadingName)" @click="chooseFiles"><Upload :size="15" />上传文件</button>
@@ -508,17 +542,22 @@ async function savePermissions() { if (!selectedFolder.value) return; try { awai
         <button v-for="folder in displayedChildFolders" :key="folder.id" type="button" class="pdm-folder-child" :aria-label="`进入文件夹 ${folder.name}`" @click="selectFolder(folder)"><span><Folder :size="17" />{{ folder.name }}</span><small>文件夹</small><small>{{ folderCount(folder.id) ? `${folderCount(folder.id)} 个项目` : '空文件夹' }}</small></button>
       </section>
       <div v-if="fileFolder && displayedFiles.length" v-loading="loadingFiles" class="pdm-file-table-wrap">
-        <table class="pdm-file-detail-table pdm-folder-file-list" aria-label="项目资料文件"><colgroup><col class="pdm-file-column-select"><col class="pdm-project-file-column-name"><col class="pdm-project-file-column-description"><col class="pdm-project-file-column-version"><col class="pdm-project-file-column-size"><col class="pdm-project-file-column-uploader"><col class="pdm-project-file-column-updated"><col class="pdm-project-file-column-actions"></colgroup><thead><tr><th><input type="checkbox" aria-label="选择当前列表全部项目文件" :checked="allDisplayedFilesSelected" :disabled="selectableFiles.length === 0" @change="toggleDisplayedFiles(($event.target as HTMLInputElement).checked)"></th><th>文件名</th><th>说明</th><th>版本</th><th>大小</th><th>上传人</th><th>更新时间</th><th>操作</th></tr></thead><tbody><tr v-for="item in displayedFiles" :key="item.id" :class="{ 'is-deleted': item.deletedAt }">
-          <td><input v-if="!item.deletedAt" type="checkbox" :aria-label="`选择 ${item.fileName}`" :checked="selectedFileIds.includes(item.id)" @change="toggleFile(item.id, ($event.target as HTMLInputElement).checked)"></td><td><button v-if="!item.deletedAt && canPreview(item) && hasAccess(selectedFolder, 2)" type="button" class="pdm-file-name pdm-file-name--preview" :title="`${mediaKind(item) ? '预览播放' : '预览'} ${item.fileName}`" @click="mediaKind(item) ? openMediaPreview(item) : download(item, undefined, true)"><File :size="15" />{{ item.fileName }}</button><span v-else class="pdm-file-name" :title="item.fileName"><File :size="15" />{{ item.fileName }}</span><small v-if="item.deletedAt" class="pdm-deleted-badge">回收站</small></td><td><input v-if="editingFileDescriptionId === item.id" v-model="fileDescriptionDraft" class="pdm-file-description-input" :aria-label="`编辑 ${item.fileName} 的说明`" maxlength="500" placeholder="请输入说明" :disabled="savingFileDescriptionId === item.id" @keydown.enter.prevent="saveFileDescription(item)" @keydown.esc.prevent="cancelFileDescriptionEdit" @blur="saveFileDescription(item)"><button v-else-if="businessFolder && !item.deletedAt && hasAccess(selectedFolder, 8)" type="button" class="pdm-file-description" :aria-label="`编辑 ${item.fileName} 的说明`" :title="item.description || '点击填写说明'" @click="editFileDescription(item)">{{ item.description || '点击填写说明' }}</button><span v-else class="pdm-file-description" :title="item.description || ''">{{ item.description || '—' }}</span></td><td>V{{ item.currentVersion?.versionNumber ?? 0 }}</td><td>{{ formatSize(item.currentVersion?.fileLength) }}</td><td>{{ displayUserName(item.currentVersion?.uploadedBy) }}</td><td>{{ new Date(item.updatedAt).toLocaleString() }}</td>
-          <td><div class="pdm-row-actions"><button v-if="!item.deletedAt && canPreview(item) && hasAccess(selectedFolder, 2)" type="button" :title="mediaKind(item) ? '预览播放' : '预览'" @click="mediaKind(item) ? openMediaPreview(item) : download(item, undefined, true)"><Eye :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 2)" type="button" title="下载" @click="download(item)"><Download :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 1)" type="button" title="版本历史" @click="openVersions(item)"><History :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 8)" type="button" title="重命名" @click="renameFileEntry(item)"><Pencil :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 8)" type="button" title="移动" @click="moveFileEntry(item)"><Folder :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 16)" type="button" title="删除" @click="removeFile(item)"><Trash2 :size="14" /></button><button v-if="item.deletedAt && hasAccess(selectedFolder, 16)" type="button" title="恢复" @click="restoreFile(item)"><RotateCcw :size="14" /></button></div></td>
+        <table class="pdm-file-detail-table pdm-folder-file-list" aria-label="项目资料文件"><colgroup><col class="pdm-file-column-select"><col class="pdm-project-file-column-name"><col class="pdm-project-file-column-description"><col class="pdm-project-file-column-version"><col class="pdm-project-file-column-size"><col class="pdm-project-file-column-uploader"><col class="pdm-project-file-column-updated"><col class="pdm-project-file-column-actions"></colgroup><thead><tr><th><input type="checkbox" aria-label="选择当前列表全部项目文件" :checked="allDisplayedFilesSelected" :disabled="selectableFiles.length === 0" @change="toggleDisplayedFiles(($event.target as HTMLInputElement).checked)"></th><th>文件名</th><th>说明</th><th>版本</th><th>大小</th><th>上传人</th><th>更新时间</th><th>操作</th></tr></thead><tbody><tr v-for="item in displayedFiles" :key="item.id" :data-project-file-id="item.id" :class="{ 'is-deleted': item.deletedAt, 'is-form-archived': item.id === archivedFormFileId }">
+          <td><input v-if="!item.deletedAt" type="checkbox" :aria-label="`选择 ${item.fileName}`" :checked="selectedFileIds.includes(item.id)" @change="toggleFile(item.id, ($event.target as HTMLInputElement).checked)"></td><td><button v-if="!item.deletedAt && canPreview(item) && hasAccess(selectedFolder, 2)" type="button" class="pdm-file-name pdm-file-name--preview" :title="`${mediaKind(item) ? '预览播放' : '预览'} ${item.fileName}`" @click="openMediaPreview(item)"><File :size="15" />{{ item.fileName }}</button><span v-else class="pdm-file-name" :title="item.fileName"><File :size="15" />{{ item.fileName }}</span><small v-if="item.deletedAt" class="pdm-deleted-badge">回收站</small></td><td><input v-if="editingFileDescriptionId === item.id" v-model="fileDescriptionDraft" class="pdm-file-description-input" :aria-label="`编辑 ${item.fileName} 的说明`" maxlength="500" placeholder="请输入说明" :disabled="savingFileDescriptionId === item.id" @keydown.enter.prevent="saveFileDescription(item)" @keydown.esc.prevent="cancelFileDescriptionEdit" @blur="saveFileDescription(item)"><button v-else-if="businessFolder && !item.deletedAt && hasAccess(selectedFolder, 8)" type="button" class="pdm-file-description" :aria-label="`编辑 ${item.fileName} 的说明`" :title="item.description || '点击填写说明'" @click="editFileDescription(item)">{{ item.description || '点击填写说明' }}</button><span v-else class="pdm-file-description" :title="item.description || ''">{{ item.description || '—' }}</span></td><td>V{{ item.currentVersion?.versionNumber ?? 0 }}</td><td>{{ formatSize(item.currentVersion?.fileLength) }}</td><td><PersonName :name="displayUserName(item.currentVersion?.uploadedBy)" /></td><td>{{ new Date(item.updatedAt).toLocaleString() }}</td>
+          <td><div class="pdm-row-actions"><button v-if="!item.deletedAt && canPreview(item) && hasAccess(selectedFolder, 2)" type="button" :title="mediaKind(item) ? '预览播放' : '预览'" @click="openMediaPreview(item)"><Eye :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 2)" type="button" title="下载" @click="download(item)"><Download :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 1)" type="button" title="版本历史" @click="openVersions(item)"><History :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 8)" type="button" title="重命名" @click="renameFileEntry(item)"><Pencil :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 8)" type="button" title="移动" @click="moveFileEntry(item)"><Folder :size="14" /></button><button v-if="!item.deletedAt && hasAccess(selectedFolder, 16)" type="button" title="删除" @click="removeFile(item)"><Trash2 :size="14" /></button><button v-if="item.deletedAt && hasAccess(selectedFolder, 16)" type="button" title="恢复" @click="restoreFile(item)"><RotateCcw :size="14" /></button></div></td>
         </tr></tbody></table>
       </div>
       <div v-else-if="documentFolder && displayedDocuments.length" class="pdm-file-table-wrap"><table class="pdm-file-detail-table pdm-folder-file-list" aria-label="受控图档"><colgroup><col class="pdm-file-column-select"><col class="pdm-file-column-number"><col class="pdm-file-column-name"><col class="pdm-file-column-kind"><col class="pdm-file-column-revision"><col class="pdm-file-column-state"><col class="pdm-file-column-editor"><col class="pdm-file-column-updated"><col v-if="canRecycleDocuments" class="pdm-file-column-actions"></colgroup><thead><tr><th><input type="checkbox" aria-label="选择当前列表全部受控图档" :checked="allDisplayedDocumentsSelected" :disabled="selectableDocuments.length === 0" @change="toggleDisplayedDocuments(($event.target as HTMLInputElement).checked)"></th><th>图号</th><th>名称</th><th>类型</th><th>版本</th><th>状态</th><th>编辑人</th><th>更新时间</th><th v-if="canRecycleDocuments">操作</th></tr></thead><tbody><tr v-for="document in displayedDocuments" :key="document.id" :class="{ 'is-deleted': document.deletedAt }"><td><input v-if="!document.deletedAt" type="checkbox" :aria-label="`选择 ${document.drawingNumber}`" :checked="selectedDocumentIds.includes(document.id)" @change="toggleDocument(document.id, ($event.target as HTMLInputElement).checked)"></td><td><span class="pdm-file-name"><File :size="15" />{{ document.drawingNumber }}</span><small v-if="document.deletedAt" class="pdm-deleted-badge">回收站</small></td><td>{{ document.name }}</td><td>{{ kindLabel(document.kind) }}</td><td>{{ document.revision }}</td><td>{{ document.deletedAt ? '待清理' : stateLabel(document.state) }}</td><td>{{ document.deletedAt ? displayUserName(document.deletedBy) : displayUserName(document.checkedOutBy) }}</td><td>{{ document.updatedAt ? new Date(document.updatedAt).toLocaleString() : '—' }}</td><td v-if="canRecycleDocuments"><div class="pdm-row-actions"><button v-if="!document.deletedAt" type="button" :title="stateLabel(document.state) === '已发布' ? '已发布图档仅允许作废' : '删除前检查'" :disabled="recycleLoading" @click="prepareDocumentRecycle(document)"><Trash2 :size="14" /></button><button v-else type="button" title="恢复" :disabled="recycleLoading" @click="restoreDocument(document)"><RotateCcw :size="14" /></button></div></td></tr></tbody></table></div>
       <div v-else-if="!displayedChildFolders.length" class="pdm-folder-empty" v-loading="loadingFiles"><FolderCog :size="34" /><strong>{{ query ? '没有匹配的文件或文件夹' : includeDeleted ? '此目录及回收站暂无文件' : '此目录暂无文件' }}</strong><span v-if="businessFolder && hasAccess(selectedFolder, 4)">可上传项目资料，或在此目录下新建子文件夹。</span><span v-else-if="businessFolder">当前账号可查看该目录，但没有上传权限。</span><span v-else-if="releaseFolder">本发布范围还没有发布成品，发布流程完成后会自动汇总到这里。</span><span v-else>受控图档由SolidWorks存档，发布文件由审批发布流程生成。</span></div>
     </section>
   </section>
-  <el-dialog v-model="mediaPreviewOpen" :title="mediaPreviewFile?.fileName || '媒体预览'" width="min(960px, calc(100vw - 48px))" class="pdm-media-preview-dialog" destroy-on-close @closed="clearMediaPreview">
-    <div v-loading="mediaPreviewLoading" class="pdm-media-preview-stage"><img v-if="mediaPreviewUrl && mediaPreviewFile && mediaKind(mediaPreviewFile) === 'image'" :src="mediaPreviewUrl" :alt="mediaPreviewFile.fileName"><video v-else-if="mediaPreviewUrl && mediaPreviewFile" :src="mediaPreviewUrl" controls autoplay preload="metadata">当前浏览器不支持此视频格式。</video></div>
+  <el-dialog v-model="mediaPreviewOpen" :title="mediaPreviewFile?.fileName || '文件预览'" width="min(1440px, calc(100vw - 24px))" class="pdm-media-preview-dialog" append-to-body destroy-on-close @close="clearMediaPreview">
+    <section class="pdm-project-file-preview" aria-label="项目文件预览">
+      <p v-if="mediaPreviewLoading" role="status">正在读取文件…</p>
+      <PdfDrawingViewer v-else-if="mediaPreviewFile && /\.pdf$/i.test(mediaPreviewFile.fileName)" :url="mediaPreviewUrl" fill-height />
+      <div v-else-if="mediaPreviewFile && mediaKind(mediaPreviewFile)" class="pdm-media-preview-stage"><img v-if="mediaKind(mediaPreviewFile) === 'image'" :src="mediaPreviewUrl" :alt="mediaPreviewFile.fileName"><video v-else :src="mediaPreviewUrl" controls preload="metadata">当前浏览器不支持此视频格式。</video></div>
+      <pre v-else class="pdm-project-file-text">{{ previewText }}</pre>
+    </section>
   </el-dialog>
   <el-dialog v-model="moveTargetOpen" :title="moveTargetTitle" width="520px" class="pdm-move-folder-dialog" modal-class="pdm-move-folder-overlay" @closed="cancelMoveTarget">
     <p class="pdm-dialog-help">请选择目标文件夹。灰色目录不可作为移动目标。</p>
@@ -527,7 +566,7 @@ async function savePermissions() { if (!selectedFolder.value) return; try { awai
     </el-tree>
     <template #footer><button type="button" class="pdm-secondary-action" @click="moveTargetOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="!moveTargetId" @click="confirmMoveTarget">确定</button></template>
   </el-dialog>
-  <el-dialog v-model="versionOpen" :title="`版本历史 · ${versionFile?.fileName ?? ''}`" width="720px"><el-table :data="versions"><el-table-column prop="versionNumber" label="版本" width="80"><template #default="scope">V{{ scope.row.versionNumber }}</template></el-table-column><el-table-column prop="fileName" label="原始文件名" /><el-table-column label="大小" width="100"><template #default="scope">{{ formatSize(scope.row.fileLength) }}</template></el-table-column><el-table-column label="上传人" width="100"><template #default="scope">{{ displayUserName(scope.row.uploadedBy) }}</template></el-table-column><el-table-column label="上传时间" width="170"><template #default="scope">{{ new Date(scope.row.uploadedAt).toLocaleString() }}</template></el-table-column><el-table-column label="操作" width="70"><template #default="scope"><button class="pdm-icon-action" type="button" title="下载该版本" @click="versionFile && download(versionFile, scope.row.id)"><Download :size="14" /></button></template></el-table-column></el-table></el-dialog>
+  <el-dialog v-model="versionOpen" :title="`版本历史 · ${versionFile?.fileName ?? ''}`" width="720px"><el-table :data="versions"><el-table-column prop="versionNumber" label="版本" width="80"><template #default="scope">V{{ scope.row.versionNumber }}</template></el-table-column><el-table-column prop="fileName" label="原始文件名" /><el-table-column label="大小" width="100"><template #default="scope">{{ formatSize(scope.row.fileLength) }}</template></el-table-column><el-table-column label="上传人" width="100"><template #default="scope"><PersonName :name="displayUserName(scope.row.uploadedBy)" /></template></el-table-column><el-table-column label="上传时间" width="170"><template #default="scope">{{ new Date(scope.row.uploadedAt).toLocaleString() }}</template></el-table-column><el-table-column label="操作" width="70"><template #default="scope"><button class="pdm-icon-action" type="button" title="下载该版本" @click="versionFile && download(versionFile, scope.row.id)"><Download :size="14" /></button></template></el-table-column></el-table></el-dialog>
   <ArchiveRecycleDialog v-if="canRecycleDocuments" v-model:open="archiveRecycleOpen" :project-id="projectId" :token="token" :on-reload="async () => { await onReload(); await loadFiles() }" />
   <el-dialog v-model="recycleOpen" title="删除受控图档" width="620px" class="pdm-document-recycle-dialog">
     <template v-if="recycleReadiness">
@@ -551,11 +590,22 @@ async function savePermissions() { if (!selectedFolder.value) return; try { awai
 </template>
 
 <style scoped>
+.pdm-file-detail-table .is-form-archived td{background:var(--pdm-theme-accent-soft)}
+.pdm-folder-toolbar{flex-wrap:wrap}
+.pdm-folder-toolbar .pdm-file-actions{margin-inline-start:auto}
 .pdm-folder-toolbar .pdm-file-actions button{font-size:12px}
 .pdm-folder-node__icon{display:inline-flex;flex:0 0 auto}.pdm-folder-node__icon.is-populated{color:var(--pdm-theme-accent)}.pdm-folder-node__icon.is-populated svg{fill:currentColor}
 .pdm-file-column-select{width:42px}.pdm-file-column-actions{width:76px}.pdm-recycle-summary{display:flex;flex-direction:column;gap:5px;margin:14px 0;padding:12px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface-muted)}.pdm-recycle-summary span{font-size:12px;color:var(--pdm-muted)}.pdm-recycle-field{display:flex;flex-direction:column;gap:6px;margin-top:14px}.pdm-recycle-field>span{font-size:12px;color:var(--pdm-text-soft)}.pdm-recycle-field b{color:var(--pdm-danger)}.pdm-document-recycle-dialog ul{margin:8px 0 0;padding-left:20px}.pdm-danger-action{display:inline-flex;min-height:var(--pdm-button-default);align-items:center;gap:5px;border:1px solid var(--pdm-danger-border);border-radius:5px;padding:0 11px;background:var(--pdm-danger-soft);color:var(--pdm-danger);cursor:pointer}.pdm-danger-action:disabled{cursor:not-allowed;opacity:.45}
 .pdm-file-actions,.pdm-row-actions,.pdm-upload-strip,.pdm-file-batch-actions{display:flex;align-items:center;gap:8px}.pdm-file-actions{flex-wrap:wrap;justify-content:flex-end}.pdm-file-batch-actions{min-height:34px}.pdm-file-batch-actions>span{color:var(--pdm-text-soft);font-size:12px;white-space:nowrap}.pdm-upload-strip{padding:8px 14px;background:var(--pdm-theme-accent-soft);border-bottom:1px solid var(--pdm-theme-accent-soft-strong)}.pdm-upload-strip>span{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-upload-strip :deep(.el-progress){flex:1}.pdm-row-actions button,.pdm-icon-action{display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;color:var(--pdm-blue);cursor:pointer;padding:4px;border-radius:4px}.pdm-row-actions button:hover,.pdm-icon-action:hover{background:var(--pdm-blue-soft)}.is-deleted{opacity:.65}.pdm-deleted-badge{margin-left:8px;color:var(--pdm-orange)}.pdm-file-detail-table th:last-child{width:180px}
-.pdm-folder-children{margin:10px 12px 0;border:1px solid var(--pdm-border);border-radius:7px;overflow:hidden;background:var(--pdm-surface);font-size:12px}.pdm-folder-children header,.pdm-folder-child{display:grid;grid-template-columns:minmax(0,1fr) 120px 120px;align-items:center;gap:12px;padding:0 14px}.pdm-folder-children header{height:36px;background:var(--pdm-table-header);color:var(--pdm-muted);font-weight:500}.pdm-folder-child{width:100%;min-height:42px;border:0;border-top:1px solid var(--pdm-border-soft);background:var(--pdm-surface);color:var(--pdm-text);text-align:left;cursor:pointer}.pdm-folder-child:hover{background:var(--pdm-blue-soft)}.pdm-folder-child>span{display:inline-flex;min-width:0;align-items:center;gap:7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pdm-blue)}.pdm-folder-child>span svg{flex:0 0 auto;color:var(--pdm-theme-accent);fill:currentColor}.pdm-folder-child small{color:var(--pdm-muted)}
+.pdm-folder-children{margin:10px 12px 0;border:1px solid var(--pdm-border);border-radius:7px;overflow:hidden;background:var(--pdm-surface);font-size:12px}.pdm-folder-children header,.pdm-folder-child{display:grid;grid-template-columns:minmax(0,1fr) 120px 120px;align-items:center;gap:12px;padding:0 14px}.pdm-folder-children header{height:36px;background:var(--pdm-table-header);color:var(--pdm-muted);font-weight:500}.pdm-folder-child{width:100%;min-height:42px;border:0;border-top:1px solid var(--pdm-border-soft);background:var(--pdm-surface);color:var(--pdm-text);text-align:left;cursor:pointer}.pdm-folder-child:hover{background:var(--pdm-blue-soft)}.pdm-folder-child>span{display:inline-flex;min-width:0;align-items:center;gap:7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; color:var(--pdm-text)}.pdm-folder-child>span svg{flex:0 0 auto;color:var(--pdm-theme-accent);fill:currentColor}.pdm-folder-child small{color:var(--pdm-muted)}
 .pdm-media-preview-stage{display:grid;place-items:center;min-height:280px;max-height:70vh;background:var(--pdm-text)}.pdm-media-preview-stage img,.pdm-media-preview-stage video{display:block;max-width:100%;max-height:70vh;object-fit:contain}.pdm-media-preview-stage video{width:min(100%,900px)}
 :global(.pdm-move-folder-overlay .el-overlay-dialog){align-items:center;justify-content:center;padding:12px}:global(.pdm-move-folder-overlay .el-overlay-dialog>.pdm-move-folder-dialog){width:min(520px,calc(100vw - 24px))!important;height:min(720px,calc(100dvh - 24px));max-height:calc(100dvh - 24px);margin:auto;border-radius:8px;box-shadow:0 16px 42px var(--pdm-shadow-strong)}:global(.pdm-move-folder-overlay .el-overlay-dialog>.pdm-move-folder-dialog .el-dialog__body){display:flex;min-height:0;flex-direction:column;overflow:hidden}.pdm-move-folder-tree{box-sizing:border-box;min-height:0;flex:1 1 auto;padding:8px;border:1px solid var(--pdm-border);border-radius:6px;overflow:auto}.pdm-move-folder-tree :deep(.el-tree-node__content){height:28px}.pdm-folder-node.is-move-disabled{color:var(--pdm-muted)}
+</style>
+
+<style scoped>
+.pdm-file-detail-table .is-form-archived td{background:var(--pdm-theme-accent-soft)}
+:root body .pdm-file-library button.pdm-file-name--preview, :root body .pdm-file-library button.pdm-file-description { border:0 !important; box-shadow:none !important; background:transparent !important; min-width:0 !important; padding:0 !important; }
+:global(.pdm-media-preview-dialog .el-dialog__body) { display:flex; min-height:0; overflow:hidden; }
+.pdm-project-file-preview { display:flex; flex:1; flex-direction:column; min-height:0; min-width:0; }
+.pdm-project-file-text { overflow:auto; white-space:pre-wrap; color:var(--pdm-text); font:inherit; }
 </style>

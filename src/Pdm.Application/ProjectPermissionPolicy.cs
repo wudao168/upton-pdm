@@ -6,29 +6,7 @@ public static class ProjectPermissionPolicy
 {
     public static async Task<bool> CanAsync(IPdmRepository repository, Guid projectId, string actor, UserRole role, string operation, CancellationToken cancellationToken)
     {
-        var definition = RolePermissionCatalog.Permissions.FirstOrDefault(item => item.Code == operation);
-        if (string.IsNullOrWhiteSpace(actor) || definition?.Scope != "project")
-            return false;
-        var roleAllows = await repository.HasUserPermissionAsync(actor, role, operation, cancellationToken);
-        if ((!roleAllows && operation != PermissionCodes.ProjectBudgetView)
-            || !await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
-            return false;
-
-        var project = await repository.FindProjectAsync(projectId, cancellationToken);
-        if (project is null) return false;
-        var root = project.ParentProjectId is null ? project
-            : await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, cancellationToken);
-        if (root is null || !IsValidProjectScope(project, root, actor)) return false;
-        if (role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true) return true;
-        if (operation == PermissionCodes.ProjectBudgetView && roleAllows) return true;
-        if (definition.ProjectAuthorization == "role") return roleAllows;
-
-        if (operation == PermissionCodes.ProjectDesignerAssign
-            && (await repository.FindProjectForUserAsync(projectId, actor, role, cancellationToken))?.CanAssignDesigners == true)
-            return true;
-
-        var settings = await repository.GetProjectPermissionSettingsAsync(cancellationToken);
-        return Allows(project, root, actor, settings, operation);
+        return await AuthorizationPolicy.CanAsync(repository, projectId, actor, operation, cancellationToken);
     }
 
     public static IReadOnlyList<string> AllowedOperations(Project project, Project root, string actor,

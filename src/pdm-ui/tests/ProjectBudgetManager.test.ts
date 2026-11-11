@@ -5,7 +5,7 @@ import ProjectBudgetManager from '../src/components/ProjectBudgetManager.vue'
 import { calculateBudgetRow, budgetCategories, uppercaseMoney } from '../src/projectBudget'
 import type { BudgetLine } from '../src/projectBudget'
 
-const api = vi.hoisted(() => ({ getBudgetAssessments: vi.fn(), getProjectBudget: vi.fn(), saveProjectBudget: vi.fn(), addProjectBudgetNote: vi.fn() }))
+const api = vi.hoisted(() => ({ getBudgetAssessments: vi.fn(), getProjectBudget: vi.fn(), saveProjectBudget: vi.fn(), saveBudgetAssessment: vi.fn(), saveAssessmentLaborRates: vi.fn(), addProjectBudgetNote: vi.fn() }))
 vi.mock('../src/api', () => api)
 const line = (category: string): BudgetLine => ({ category, budgetAmount: 1000, actualAmount: 100, remainingAmount: 0,
   plannedHours: 10, hourlyRate: 100, actualHours: 1, actualHourlyRate: 100, remainingHours: 0, note: null })
@@ -14,6 +14,37 @@ const response = (editable = true) => ({ projectId: 'p1', rows: budgetCategories
 beforeEach(() => { vi.clearAllMocks(); api.getBudgetAssessments.mockResolvedValue({ sheets: [], amounts: { Standard: 250, MechanicalDesign: 800 } }); api.getProjectBudget.mockResolvedValue(response()); api.saveProjectBudget.mockResolvedValue(response()) })
 
 describe('project budget', () => {
+  it('保存评估保留当前编辑页，更新版本号且继续编辑不会丢失其他项目评估', async () => {
+    const group = { id: 'g1', name: '控制部分', category: 'Standard', laborCategory: null, departmentId: 'old-department', items: [{ id: 'i1', name: '模块', model: null, brand: null, note: null, quantity: 1, unitPrice: 100 }] }
+    const root = { projectId: 'p1', projectCode: 'P1', projectName: '主项目', designLead: 'engineer', canEdit: true, rowVersion: 1, total: 100, updatedBy: null, updatedAt: null, groups: [group] }
+    const child = { ...root, projectId: 'p2', projectCode: 'P1-1', projectName: '子项目', groups: [{ ...group, id: 'g2' }] }
+    api.getBudgetAssessments.mockResolvedValue({ sheets: [root, child], amounts: { Standard: 200 }, departments: [{ id: 'old-department', name: '原部门' }] })
+    api.saveBudgetAssessment.mockImplementation(async (id, input) => ({ sheets: [{ ...root, projectId: id, groups: JSON.parse(JSON.stringify(input.groups)), rowVersion: input.expectedRowVersion + 1 }], amounts: { Standard: 100 } }))
+    const wrapper = mount(ProjectBudgetManager, { props: { project: { id: 'p1' }, token: 'token' }, global: { plugins: [ElementPlus] } })
+    try {
+      await flushPromises()
+      await wrapper.findAll('[role="tab"]').find(tab => tab.text() === '预算评估')!.trigger('click')
+      await wrapper.findAll('button').find(button => button.text() === '编辑评估')!.trigger('click')
+      expect(wrapper.find('[aria-label="评估归属部门"]').exists()).toBe(false)
+      await wrapper.get('input[aria-label="分组名称"]').setValue('已修改的控制部分')
+      await wrapper.findAll('button').find(button => button.text() === '保存评估')!.trigger('click'); await flushPromises()
+      expect((wrapper.get('input[aria-label="分组名称"]').element as HTMLInputElement).value).toBe('已修改的控制部分')
+      expect(wrapper.findAll('button').find(button => button.text() === '保存评估')!.attributes('disabled')).toBeDefined()
+      expect(api.saveBudgetAssessment).toHaveBeenLastCalledWith('p1', expect.objectContaining({ expectedRowVersion: 1, groups: [expect.objectContaining({ departmentId: 'old-department' })] }), 'token')
+      await wrapper.get('input[aria-label="分组名称"]').setValue('继续修改')
+      await wrapper.findAll('button').find(button => button.text() === '保存评估')!.trigger('click'); await flushPromises()
+      expect(api.saveBudgetAssessment).toHaveBeenLastCalledWith('p1', expect.objectContaining({ expectedRowVersion: 2 }), 'token')
+      expect(wrapper.find('input[aria-label="分组名称"]').exists()).toBe(true)
+      expect(api.getBudgetAssessments).toHaveBeenCalledTimes(1)
+      await wrapper.findAll('button').find(button => button.text() === '返回列表')!.trigger('click'); await flushPromises()
+      expect(wrapper.text()).toContain('子项目')
+      await wrapper.findAll('[role="tab"]').find(tab => tab.text() === '预算汇总')!.trigger('click')
+      await wrapper.get('input[aria-label="预算金额"]').setValue('1500')
+      await wrapper.findAll('button').find(button => button.text() === '保存预算')!.trigger('click'); await flushPromises()
+      expect(api.saveProjectBudget).toHaveBeenLastCalledWith('p1', expect.objectContaining({ expectedRowVersion: 3 }), 'token')
+    } finally { wrapper.unmount() }
+  })
+
   it('keeps summary edits when the same project refreshes and the login token renews', async () => {
     const wrapper = mount(ProjectBudgetManager, { props: { project: { id: 'p1' }, token: 'token' }, global: { plugins: [ElementPlus] } })
     try {
@@ -77,7 +108,8 @@ describe('project budget', () => {
     add.click(); await flushPromises()
     expect(api.addProjectBudgetNote).toHaveBeenCalledWith('p1', { category: 'Standard', content: '新备注', expectedRowVersion: 1 }, 'token')
     expect(wrapper.find('button[aria-label="标准件备注"]').text()).toBe('新备注')
-    expect(dialog.textContent).toContain('viewer')
+    expect(dialog.textContent).toContain('姓名待补充')
+    expect(dialog.textContent).not.toContain('viewer')
     expect(dialog.textContent).toContain('原备注')
     expect(dialog.querySelector('article')?.textContent).toContain('新备注')
     expect(wrapper.text()).not.toContain('保存预算')
@@ -90,6 +122,11 @@ describe('project budget', () => {
     expect(uppercaseMoney(100000001.10)).toBe('人民币壹亿零壹元壹角')
     expect(uppercaseMoney(0)).toBe('人民币零元整')
     expect(uppercaseMoney(null)).toBe('—')
+    expect(uppercaseMoney(0.01)).toBe('人民币零元零壹分')
+    expect(uppercaseMoney(200.80)).toBe('人民币贰佰元捌角')
+    expect(uppercaseMoney(720.75)).toBe('人民币柒佰贰拾元柒角伍分')
+    expect(uppercaseMoney(1_000_000_000)).toBe('人民币壹拾亿元整')
+    for (const invalid of [Number.NaN, Number.POSITIVE_INFINITY, -1]) expect(uppercaseMoney(invalid)).toBe('—')
   })
   it('compares cost sources without duplicating orders and retains unknown values', () => {
     expect(calculateBudgetRow(line('Standard'), 600).estimatedAmount).toBe(600)
@@ -112,7 +149,7 @@ describe('project budget', () => {
     expect(wrapper.findAll('.pdm-budget__costs')).toHaveLength(1)
     expect(wrapper.findAll('.pdm-budget__costs .pdm-budget__group')).toHaveLength(2)
     expect(wrapper.find('.pdm-budget__costs .pdm-primary-action').exists()).toBe(true)
-    expect(wrapper.findAll('thead th')).toHaveLength(14)
+    expect(wrapper.findAll('thead th')).toHaveLength(16)
     expect(wrapper.findAll('tfoot tr')).toHaveLength(2)
     expect(wrapper.findAll('tfoot')[0]!.text()).toContain('¥ 5,000.00')
     expect(wrapper.findAll('tfoot')[0]!.text()).toContain('¥ 4,500.00')
@@ -144,7 +181,7 @@ describe('project budget', () => {
     expect(wrapper.findAll('tfoot')[0]!.text()).toContain('¥ 900.00')
     expect(wrapper.findAll('tfoot')[0]!.text()).toContain('¥ 100.00')
     expect(wrapper.findAll('.pdm-budget__cards article')[3]!.text()).toContain('90.0%')
-    expect(wrapper.findAll('tfoot')[1]!.text()).toContain('未录入')
+    expect(wrapper.findAll('tfoot')[1]!.text()).toContain('—')
     wrapper.unmount()
   })
   it('lets finance enter actual hours and amounts without editing budgets', async () => {

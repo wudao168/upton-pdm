@@ -32,6 +32,9 @@ public static class BomDrawingRevision
                      !property.Key.StartsWith(CadPropertyCardSnapshot.ScopePrefix, StringComparison.Ordinal)
                      && property.Key.Split('/').Last() is "版次" or "版本"))
             if (!string.IsNullOrWhiteSpace(property.Value)
+                // 历史图框的Rev01等数字标记属于图框版本，不参与UPLM的A/B发布版次校验。
+                && !System.Text.RegularExpressions.Regex.IsMatch(property.Value.Trim(), @"^REV[0-9]+$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant)
                 && !string.Equals(property.Value.Trim(), targetRevision, StringComparison.OrdinalIgnoreCase))
                 throw new PdmConflictException($"工程图{fileName}的标题栏版次属性为{property.Value}，与本次发布版本{targetRevision}不一致。请核对历史发布记录，在SolidWorks中修正后重新存档并审核，再创建发布包。");
     }
@@ -85,17 +88,13 @@ public static class BomDrawingRevision
             versions[projectId] = (await repository.ListBomVersionsAsync(projectId, null, ct))
                     .Where(version => version.State == BomVersionState.Released).OrderByDescending(version => version.VersionNumber).ToArray();
         }
-        var histories = new Dictionary<Guid, IReadOnlyList<DocumentVersion>>();
-        foreach (var id in items.Where(item => item.SourceDocumentId.HasValue)
-                     .Select(item => item.SourceDocumentId!.Value).Distinct())
-            histories[id] = (await repository.ListDocumentVersionsAsync(id, ct))
-                .Where(version => version.Status == DocumentVersionStatus.Work
-                    || version.ReleasePackageId.HasValue && publishedIds.Contains(version.ReleasePackageId.Value)).ToArray();
+        var documentIds = items.Where(item => item.SourceDocumentId.HasValue).Select(item => item.SourceDocumentId!.Value).Distinct().ToArray();
+        var revisions = await repository.PublishedDocumentRevisionsAsync(documentIds, publishedIds, ct);
         return items.Select(item =>
         {
             var publication=PublishedBomVersion(item,packages[item.ProjectId],versions[item.ProjectId]);
             item = item with { IsPublishedInBom = publication is not null, BomPublishedVersion=publication };
-            var label = ForHistory(item, item.SourceDocumentId is Guid id && histories.TryGetValue(id, out var history) ? history : []);
+            var label = item.SourceDocumentId is Guid id ? revisions.GetValueOrDefault(id) ?? "未发布" : ForHistory(item, []);
             if (item.Kind is not (BomKind.Standard or BomKind.Electrical) || !string.IsNullOrWhiteSpace(label) && label is not ("未发布" or "—"))
                 return item with { DisplayRevision = label };
             bool Matches(BomItem frozen) => SamePublishedSource(item, frozen);

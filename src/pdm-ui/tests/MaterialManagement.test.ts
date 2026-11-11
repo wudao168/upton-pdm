@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   listMaterials: vi.fn(),
   listMaterialPage: vi.fn(),
   listMaterialBrands: vi.fn(),
+  listMaterialBrandCatalog: vi.fn().mockResolvedValue([{ id: 'brand-omron', name: '欧姆龙', isActive: true }, { id: 'brand-unified', name: '统一品牌', isActive: true }]),
   listPendingMasterMaterials: vi.fn(),
   listMaterialRelationTemplates: vi.fn(),
   listMaterialRelationCategories: vi.fn(),
@@ -602,14 +603,14 @@ describe('MaterialManagement', () => {
     confirm.mockRestore()
   })
 
-  it('新增料品的品牌提供可筛选下拉选项并允许录入新品牌', async () => {
+  it('新增料品的品牌从品牌库筛选选择，不允许绕过品牌库创建', async () => {
     const wrapper = mount(MaterialManagement, { props: { token: 'token', canEdit: true, canApprove: true, canManageIntegration: false }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     await wrapper.findAll('button').find(button => button.text() === '新增料品')!.trigger('click')
     const editor = wrapper.findComponent({ name: 'MaterialEditorDialog' })
-    const brand = editor.findAllComponents({ name: 'ElSelect' }).find(select => select.props('placeholder') === '可输入或选择品牌')!
+    const brand = editor.findAllComponents({ name: 'ElSelect' }).find(select => select.props('placeholder') === '从品牌库选择品牌')!
     expect(brand.props('filterable')).toBe(true)
-    expect(brand.props('allowCreate')).toBe(true)
+    expect(brand.props('allowCreate')).toBe(false)
     expect(brand.props('modelValue')).toBe('')
     expect(editor.props('brands')).toContain('欧姆龙')
     wrapper.unmount()
@@ -1572,7 +1573,7 @@ describe('MaterialManagement', () => {
     expect(categoryItem.text()).not.toContain('新增时必须主动选择')
     expect(codeItem.text()).not.toContain('从PLM分类当前基线向后预留编号')
     expect(codeItem.text()).not.toContain('U9C在后台同步')
-    expect(wrapper.text()).toContain('001 个')
+    expect(wrapper.get('.material-editor-dialog').text()).toContain('计量单位个')
     expect(wrapper.text()).not.toContain('PLM直接保存并使用U9C计量单位编码')
     expect(wrapper.get('.material-editor-dialog').text()).not.toContain('供给方式')
     expect(wrapper.getComponent({ name: 'ElDialog' }).props('width')).toBe('688px')
@@ -2161,7 +2162,8 @@ describe('MaterialManagement', () => {
     await wrapper.findAll('.batch-editor-form .el-checkbox').find(checkbox => checkbox.text() === '品牌')!.get('input').setValue(true)
     await flushPromises()
     const brandItem = wrapper.findAll('.batch-editor-form .el-form-item').find(item => item.text().includes('品牌'))!
-    await brandItem.get('input.el-input__inner').setValue('统一品牌')
+    brandItem.getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', '统一品牌')
+    await flushPromises()
     await wrapper.findAll('button').find(button => button.text() === '保存批量修改')!.trigger('click')
     await flushPromises()
 

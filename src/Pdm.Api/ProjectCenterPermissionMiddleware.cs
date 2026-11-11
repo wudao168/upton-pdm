@@ -23,9 +23,15 @@ public sealed class ProjectCenterPermissionMiddleware(RequestDelegate next)
         var permissions = string.Equals(TenantContext.Current?.Username, actor, StringComparison.OrdinalIgnoreCase)
             ? TenantContext.Current!.Permissions
             : await repository.GetUserPermissionsAsync(actor, role, context.RequestAborted);
-        bool Allows(string code) => role == UserRole.Administrator || permissions.Contains(code);
+        var projectId = await AuthorizationResource.ProjectAsync(context, repository);
+        if (projectId is Guid target)
+        {
+            var resourceContext = await AuthorizationPolicy.CreateContextAsync(repository, target, actor, context.RequestAborted);
+            permissions = resourceContext is null ? new HashSet<string>() : AuthorizationPolicy.Decisions(await repository.GetAuthorizationSettingsAsync(context.RequestAborted), resourceContext).Where(d => d.Allowed).Select(d => d.Permission).ToHashSet();
+        }
+        bool Allows(string code) => permissions.Contains(code);
         void Require(string code, string message) { if (!Allows(code)) throw new UnauthorizedAccessException(message); }
-        if (tab is not null) Require(ProjectCenterPermissions.Tab(tab), "当前角色无权查看此项目页签，请联系管理员核对角色权限。");
+        if (tab is not null) Require(ProjectCenterPermissions.Tab(tab), "当前账号无权查看此项目页签，请联系管理员核对权限中心配置。");
 
         var read = HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method);
         // 查看标记与版本校验仅记录查阅状态，不修改业务内容。
@@ -38,11 +44,11 @@ public sealed class ProjectCenterPermissionMiddleware(RequestDelegate next)
             || !inlinePreview && (path.EndsWith("/download") || path.EndsWith("/content")
                 || path.EndsWith("/file") && !resource.StartsWith("release-preview-items/")
                 || Regex.IsMatch(resource, @"^opl/[^/]+/attachments/[^/]+$"));
-        if (download) Require(ProjectCenterPermissions.Download, "当前角色仅允许在线查看，未开放文件下载。");
+        if (download) Require(ProjectCenterPermissions.Download, "当前账号仅允许在线查看，未开放文件下载。");
         if (path.EndsWith("/export") || resource == "export-metadata")
-            Require(ProjectCenterPermissions.Export, "当前角色未开放数据导出。");
+            Require(ProjectCenterPermissions.Export, "当前账号未开放数据导出。");
         if (!read && !readPost && !archive)
-            Require(ProjectCenterPermissions.Write, "当前角色仅允许查看项目资料，不能执行编辑或业务处理操作。");
+            Require(ProjectCenterPermissions.Write, "当前账号仅允许查看项目资料，不能执行编辑或业务处理操作。");
         await next(context);
     }
 
@@ -51,6 +57,7 @@ public sealed class ProjectCenterPermissionMiddleware(RequestDelegate next)
         var first = resource.Split('/')[0];
         return first switch
         {
+            "risk-overview" => "overview",
             "contact-information" or "nameplate" or "position-members" or "dingtalk" => "information",
             "files" => "files",
             "plan" => "project-plan", "opl" => "opl", "budget" => "budget",
@@ -78,6 +85,6 @@ public sealed class ProjectCenterPermissionMiddleware(RequestDelegate next)
     public static string PreviewContentType(string fileName) => Path.GetExtension(fileName).ToLowerInvariant() switch
     {
         ".pdf" => "application/pdf", ".png" => "image/png", ".jpg" or ".jpeg" => "image/jpeg", ".webp" => "image/webp", ".gif" => "image/gif",
-        _ => throw new UnauthorizedAccessException("此文件暂不支持在线预览，当前角色未开放下载，请联系资料负责人提供PDF或图片。")
+        _ => throw new UnauthorizedAccessException("此文件暂不支持在线预览，当前账号未开放下载，请联系资料负责人提供PDF或图片。")
     };
 }

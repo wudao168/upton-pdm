@@ -1,15 +1,18 @@
 <script setup lang="ts">
+import { projectPersonnelRoles } from '../projectPersonnelRoles'
 import PanelActions from './PanelActions.vue'
 import { createClientUuid } from '../clientId'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Plus, RotateCw as RefreshCw } from '@lucide/vue'
 import { computed, nextTick, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { ElMessage } from '../statusMessage'
-import { listProjectPlanTemplates, replaceSystemDefaultProjectPlanTemplate, saveProjectPlanTemplate } from '../api'
+import { getProjectPermissionSettings, getProjectPositionMembers, listProjectPlanTemplates, replaceSystemDefaultProjectPlanTemplate, saveProjectPlanTemplate } from '../api'
 import type { ProjectPlanStageDefinition, ProjectPlanTemplate } from '../types'
 import { percent } from '../projectPlanAllocation'
 
 const props = defineProps<{ token: string; currentUsername: string; projectId: string; canManageSystem: boolean }>()
+const positionRoles = ref<{ key: string; label: string }[]>([])
+const responsibilityRoles = computed(() => [...projectPersonnelRoles, ...positionRoles.value])
 const templates = ref<ProjectPlanTemplate[]>([])
 const templateDraft = ref<ProjectPlanTemplate | null>(null)
 const selectedTemplateId = ref('')
@@ -66,12 +69,15 @@ const defaultStages = [
   { code: 'FinalAcceptance', name: '终验收' },
 ]
 async function load() {
+  positionRoles.value = []
   templates.value = []
   templateDraft.value = null
   error.value = ''
   loading.value = true
   try {
     templates.value = await listProjectPlanTemplates(props.token, true, props.projectId)
+    const positionCatalog = props.projectId ? (await getProjectPositionMembers(props.projectId, props.token)).positions : (await getProjectPermissionSettings(props.token)).customPositions ?? []
+    positionRoles.value = positionCatalog.filter(item => item.isActive && !item.isSystem).map(item => ({ key: 'Custom:' + item.key, label: item.name }))
     if (templates.value[0]) selectTemplate(templates.value[0].id)
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : '计划模板加载失败'
@@ -274,7 +280,7 @@ function removeTemplateTask(id: string) {
           <section v-if="selectedGroup" class="pdm-template-detail" aria-label="阶段子任务明细">
             <header class="pdm-plan-stage-editor">
               <label>阶段名称<el-input v-model="selectedGroup.stage.name" :maxlength="60" aria-label="模板阶段名称" /></label>
-              <span>{{ selectedGroup.tasks.length }} 项子任务</span>
+
               <button class="pdm-secondary-action" @click="removeStage(templateDraft.stages!, templateDraft.stages!.findIndex(stage => stage.code === selectedGroup!.stage.code), templateDraft.tasks)">删除阶段</button>
               <button class="pdm-primary-action" @click="addTemplateTask"><Plus :size="14" />增加子任务</button>
             </header>
@@ -296,7 +302,7 @@ function removeTemplateTask(id: string) {
                 <span v-if="task.isMilestone">0 天</span><el-input-number v-else-if="task.fixedDurationDays != null" :model-value="task.fixedDurationDays" :min="1" :max="3650" :precision="0" :controls="false" aria-label="固定工期天数" @update:model-value="task.fixedDurationDays = $event ?? 1" /><el-input-number v-else :model-value="Number((task.durationRatio * 100).toFixed(2))" :min="0" :max="100" :precision="2" :controls="false" aria-label="阶段内工期比例" @update:model-value="task.durationRatio = Math.round(($event ?? 0) * 100) / 10000" /><el-input-number :model-value="task.weight" :min="0" :controls="false" aria-label="权重" @update:model-value="task.weight = $event ?? 0" />
                 <span class="pdm-task-contribution">{{ percent(weightTotal > 0 ? task.weight / weightTotal : 0) }}</span>
                 <el-select :model-value="task.predecessorSortOrders[0] ?? null" clearable filterable aria-label="前置任务" @update:model-value="task.predecessorSortOrders = $event == null ? [] : [Number($event)]"><el-option v-for="other in templateDraft.tasks.filter(item => item.id !== task.id)" :key="other.id" :value="other.sortOrder" :label="`${other.sortOrder} · ${other.name}`" /></el-select>
-                <el-select v-model="task.defaultAssigneeRole" aria-label="默认责任角色"><el-option label="项目经理" value="ProjectManager" /><el-option label="主设" value="DesignLead" /><el-option label="设计人员" value="Designer" /></el-select>
+                <el-select v-model="task.defaultAssigneeRole" aria-label="默认责任角色"><el-option v-for="role in responsibilityRoles" :key="role.key" :label="role.label" :value="role.key" /></el-select>
                 <el-select v-model="task.workflowKey" clearable placeholder="非流程任务" aria-label="流程节点" :disabled="templateDraft.scope === 'Personal'"><el-option v-for="option in workflowOptions" :key="option.value" :label="option.label" :value="option.value" /></el-select>
                 <el-checkbox v-model="task.isMilestone" aria-label="里程碑" /><el-checkbox v-model="task.isRequired" aria-label="必需任务" :disabled="Boolean(task.workflowKey)" />
                 <div class="pdm-template-row-actions"><button class="pdm-template-icon" :disabled="index === 0" :aria-label="`上移任务：${task.name}`" title="上移任务" @click="moveTask(task.id, -1)"><ArrowUp :size="14" /></button><button class="pdm-template-icon" :disabled="index === selectedGroup.tasks.length - 1" :aria-label="`下移任务：${task.name}`" title="下移任务" @click="moveTask(task.id, 1)"><ArrowDown :size="14" /></button><button class="pdm-template-delete" :disabled="Boolean(task.workflowKey)" :title="task.workflowKey ? `${workflowLabel(task.workflowKey)}为流程必需任务，不允许删除` : '删除任务'" @click="removeTemplateTask(task.id)">删除</button></div>
@@ -325,8 +331,8 @@ function removeTemplateTask(id: string) {
 .pdm-template-tree__body{min-height:0;overflow:auto;padding:6px;flex:1}.pdm-template-stage-parent{display:flex;align-items:center;gap:2px;padding:4px 0;border-radius:5px}.pdm-template-stage-parent.is-active{background:var(--plan-accent-soft)}
 .pdm-template-stage-select{display:flex;align-items:center;gap:6px;flex:1;min-width:0;border:0;background:transparent;color:var(--pdm-text);text-align:left;padding:5px 0}.pdm-template-stage-select strong{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}.pdm-template-stage-select small{color:var(--pdm-muted)}
 .pdm-template-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:var(--pdm-symbol-compact);height:var(--pdm-symbol-compact);border:1px solid transparent;border-radius:4px;background:transparent;color:var(--pdm-muted)}.pdm-template-icon:hover:not(:disabled){color:var(--plan-accent);border-color:var(--plan-accent-border);background:var(--plan-accent-soft)}.pdm-template-icon:disabled{opacity:.3;cursor:not-allowed}
-.pdm-template-children{display:flex;flex-direction:column;margin-left:13px;border-left:1px solid var(--pdm-border);padding:2px 0 6px 12px}.pdm-template-children>button{display:flex;gap:8px;align-items:center;min-width:0;min-height:30px;padding:4px 7px;border:0;border-radius:4px;background:transparent;color:var(--pdm-text);text-align:left;font-size:11px}.pdm-template-children>button>span:first-child{width:24px;flex-shrink:0;color:var(--pdm-muted)}.pdm-template-children>button>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-template-children>button:hover,.pdm-template-children>button.is-active{background:var(--plan-accent-soft);color:var(--plan-accent)}.pdm-template-children>small{padding:5px 8px;font-size:11px;color:var(--pdm-muted)}
-.pdm-plan-stage-editor{display:flex;align-items:end;gap:10px;padding:12px;flex-shrink:0}.pdm-plan-stage-editor>label{display:flex;flex-direction:column;gap:6px;flex:1;min-width:100px;font-size:11px}.pdm-plan-stage-editor>span{align-self:center;color:var(--pdm-muted);font-size:11px;white-space:nowrap}.pdm-plan-stage-editor>button{padding-inline:8px;font-size:11px;white-space:nowrap}.pdm-template-detail>p{padding:0 12px;margin:0 0 10px}
+.pdm-template-children{display:flex;flex-direction:column;margin-left:13px;border-left:1px solid var(--pdm-border);padding:2px 0 6px 12px}.pdm-template-children>button{display:flex;gap:8px;align-items:center;min-width:0;min-height:30px;padding:4px 7px;border:0;border-radius:4px;background:transparent;color:var(--pdm-text);text-align:left;font-size:11px}.pdm-template-children>button>span:first-child{width:24px;flex-shrink:0;color:var(--pdm-muted)}.pdm-template-children>button>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-template-children>button:hover,.pdm-template-children>button.is-active{background:var(--plan-accent-soft); color:var(--pdm-text)}.pdm-template-children>small{padding:5px 8px;font-size:11px;color:var(--pdm-muted)}
+.pdm-plan-stage-editor{display:flex;align-items:end;gap:10px;padding:12px;flex-shrink:0}.pdm-plan-stage-editor>label{display:flex;flex-direction:column;gap:6px;flex:0 1 500px;width:500px;max-width:100%;min-width:100px;font-size:11px}.pdm-plan-stage-editor>span{align-self:center;color:var(--pdm-muted);font-size:11px;white-space:nowrap}.pdm-plan-stage-editor>button{padding-inline:8px;font-size:11px;white-space:nowrap}.pdm-template-detail>p{padding:0 12px;margin:0 0 10px}
 .pdm-template-table{min-height:0;overflow-y:auto;overflow-x:hidden;flex:1;border-top:1px solid var(--pdm-border)}.pdm-template-head,.pdm-template-row{display:grid;grid-template-columns:42px 120px minmax(76px,.85fr) minmax(68px,.75fr) minmax(58px,.6fr) minmax(64px,.7fr) minmax(94px,1.15fr) minmax(84px,1fr) minmax(92px,1.05fr) 42px 38px minmax(88px,.95fr);width:100%;min-width:0;box-sizing:border-box;gap:7px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--pdm-border);text-align:center}.pdm-template-head>*,.pdm-template-row>*{min-width:0;text-align:center}.pdm-template-head{position:sticky;top:0;z-index:1;background:var(--pdm-surface-muted);color:var(--pdm-muted);font-size:11px}.pdm-template-row{font-size:11px}.pdm-template-row.is-selected{background:var(--plan-accent-soft)}.pdm-template-row :deep(.el-input),.pdm-template-row :deep(.el-select),.pdm-template-row :deep(.el-input-number){width:100%;min-width:0}.pdm-template-row :deep(.el-input__inner),.pdm-template-row :deep(.el-select__selected-item),.pdm-template-row :deep(.el-select__placeholder){text-align:center}.pdm-template-row :deep(.el-checkbox){justify-self:center}.pdm-template-order{color:var(--pdm-muted);font-variant-numeric:tabular-nums}.pdm-template-row-actions{display:flex;align-items:center;justify-content:center;gap:2px;overflow:hidden}.pdm-template-delete{border:0;background:transparent;color:var(--pdm-muted);padding:5px;font-size:11px;white-space:nowrap}.pdm-template-delete:hover{color:var(--pdm-danger)}.pdm-template-empty{padding:24px;text-align:center}
 .pdm-allocation-summary{display:flex;flex-wrap:wrap;gap:6px 20px;padding:10px 12px;border:1px solid var(--pdm-border);border-radius:5px;font-size:11px;flex-shrink:0;background:var(--pdm-surface-muted)}.pdm-allocation-summary>small,.pdm-allocation-summary>p{width:100%;color:var(--pdm-muted)}.pdm-template-stage-allocation{display:block;margin:0 0 5px 27px;color:var(--pdm-muted);font-size:11px}.pdm-stage-allocation-controls{display:flex;flex-wrap:wrap;gap:12px;padding:0 12px 10px;flex-shrink:0}.pdm-stage-allocation-controls>label{display:flex;flex-direction:column;gap:5px;width:150px;font-size:11px}.pdm-stage-allocation-controls .el-input-number{width:100%}.pdm-task-allocation-summary{margin:0 12px 10px;font-size:11px}.pdm-task-contribution{font-variant-numeric:tabular-nums}
 .pdm-plan-template-settings>footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-shrink:0;padding-top:12px;border-top:1px solid var(--pdm-border);background:var(--pdm-surface)}.pdm-plan-template-settings>footer>span{flex:1;color:var(--pdm-muted);font-size:11px}

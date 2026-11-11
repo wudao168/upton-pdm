@@ -6,8 +6,7 @@
   box-shadow: none !important;
   background: transparent !important;
 }
-:root body button[data-pdm-fold-control]:focus-visible {
-  color: var(--pdm-theme-accent-hover) !important;
+:root body button[data-pdm-fold-control]:focus-visible { color:var(--pdm-text) !important;
 }
 :root body .pdm-titlebar__sidebar-toggle[data-pdm-fold-control]::before,
 :root body .pdm-titlebar__sidebar-toggle[data-pdm-fold-control]::after {

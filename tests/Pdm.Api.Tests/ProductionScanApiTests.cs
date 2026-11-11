@@ -38,12 +38,20 @@ public sealed class ProductionScanApiTests(PdmApiFactory factory) : IClassFixtur
         {
             var directory = await repository.CreateRoleAsync("扫码测试-" + username, "接口回归", "ProductionViewer", default);
             var definition = directory.Roles.Single(item => item.Name == "扫码测试-" + username);
-            await repository.SetRolePermissionsAsync(definition.Role, [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, permission], default);
+            var settings = await repository.GetAuthorizationSettingsAsync(default);
+            if (settings.Templates.All(item => item.RoleCode != definition.Role))
+                await repository.SaveAuthorizationSettingsAsync(settings with { Templates = settings.Templates.Append(
+                    new AuthorizationTemplate(definition.Role, definition.Name, "接口回归", []) { RoleCode = definition.Role }).ToArray() }, settings.Revision, default);
+            await repository.SetRolePermissionsAsync(definition.Role, [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView,
+                ProjectCenterPermissions.Tab("procurement"), ProjectCenterPermissions.Write, permission], default);
             roleCodes[username] = definition.Role;
             await repository.CreateUserAsync(new(Guid.NewGuid(), username, "人员-" + username, "unused", UserRole.ProductionViewer, true, RoleCode: definition.Role), default);
             await repository.SetUserCompanyScopeAsync(username, company, false, [], "admin", default);
         }
-        var project = await repository.CreateProjectAsync(new("SCAN-API-" + Guid.NewGuid().ToString("N"), "扫码接口回归", "admin", "vault", "release"), "admin", default);
+        Project project;
+        TenantContext.Set(new(Guid.NewGuid(), company, company, "admin", "Administrator", false, new HashSet<string>()));
+        try { project = await repository.CreateProjectAsync(new("SCAN-API-" + Guid.NewGuid().ToString("N"), "扫码接口回归", "admin", "vault", "release"), "admin", default); }
+        finally { TenantContext.Clear(); }
         var item = new BomItem(Guid.NewGuid(), project.Id, BomKind.NonStandard, 1, "02041000013", "垫片", 2, "件", "钢", "7002541.00-02", "W1", true);
         var release = new ReleasePackage(Guid.NewGuid(), project.Id, "RP-SCAN-API", ReleasePackageState.Published, null, "W1", "W1", [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, "release")
         { Scope = ReleaseScope.NonStandardWithDrawing, NonStandardBomSnapshot = [item], SelectedBomItemIds = [item.Id] };
@@ -70,7 +78,12 @@ public sealed class ProductionScanApiTests(PdmApiFactory factory) : IClassFixtur
         using var receive = Client("scan-receive"); using var machine = Client("scan-machine"); using var pack = Client("scan-pack"); using var quality = Client("scan-quality"); using var issue = Client("scan-issue");
         Assert.Equal(HttpStatusCode.Forbidden, (await machine.GetAsync("/api/production-tracking/scan-settings")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await machine.GetAsync("/api/production-tracking/scan-settings/options")).StatusCode);
-        async Task<ProductionScanContext> Actions(HttpClient client) => (await client.GetFromJsonAsync<ProductionScanContext>($"/api/production-tracking/releases/{release.Id}/actions"))!;
+        async Task<ProductionScanContext> Actions(HttpClient client)
+        {
+            var response = await client.GetAsync($"/api/production-tracking/releases/{release.Id}/actions");
+            Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+            return (await response.Content.ReadFromJsonAsync<ProductionScanContext>())!;
+        }
         Assert.Equal("ProductionReceived", Assert.Single((await Actions(receive)).Actions).Kind);
         Assert.Empty((await Actions(machine)).Actions);
         var qr = Uri.EscapeDataString($"UPLM-PRODUCTION|{release.Id}|{lot.Id}");
@@ -150,7 +163,8 @@ public sealed class ProductionScanApiTests(PdmApiFactory factory) : IClassFixtur
             new { lotId = nextLot, kind = "Cancelled", quantity = 1, requestId = Guid.NewGuid(), note = "未授权减少需求" });
         Assert.Equal(HttpStatusCode.Forbidden, unauthorizedCancellation.StatusCode);
         await repository.SetRolePermissionsAsync(roleCodes["scan-receive"],
-            [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProductionExecute, PermissionCodes.ProductionAssign], default);
+            [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProductionExecute, PermissionCodes.ProductionAssign,
+                ProjectCenterPermissions.Tab("procurement"), ProjectCenterPermissions.Write], default);
         next = await DepartmentMove(receive, "Cancelled", quantity: 1);
         Assert.Equal("已取消剩余流程", ProductionFlowRules.Stage(next.State, next.State.Lots[0]));
         Assert.Equal("scan-receive", next.State.Movements.Last().Actor);

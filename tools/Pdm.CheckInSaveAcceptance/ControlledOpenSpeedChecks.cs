@@ -24,18 +24,28 @@ internal static partial class Program
   Set(manifest,"Files",files);return manifest;
  }
 
- static void ControlledNativeFirstScenario()
+ static void ControlledNativeFirstScenario(bool missingOnly=false)
  {
   var directory=Path.Combine(Path.GetTempPath(),"pdm-native-first-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(directory);
   var identity=Type("PdmDocumentIdentityStore");var binding=identity.GetField("bindingDirectory",Flags);var resolver=identity.GetField("workspaceRootResolver",Flags);var previousBinding=binding.GetValue(null);var previousRoot=resolver.GetValue(null);
   binding.SetValue(null,Path.Combine(directory,"bindings"));resolver.SetValue(null,new Func<string>(()=>directory));
   try
   {
-   foreach(var mode in new[]{"verified","fallback","fallback-fails","preloaded-mismatch","same-title","historical","disabled-rule","legacy-warning"})
+   var modes=missingOnly?new[]{"missing-suppressed","missing-nested","missing-actually-loaded","missing-edit",
+     "missing-toolbox","missing-toolbox-language-dir","missing-toolbox-edit","missing-toolbox-known","missing-toolbox-and-outside"}
+     :new[]{"verified","fallback","fallback-fails","preloaded-mismatch","same-title","historical","disabled-rule","legacy-warning"};
+   foreach(var mode in modes)
    {
     Type("DocumentRuleGate").GetMethod("Configure",Flags).Invoke(null,new object[]{mode=="disabled-rule"||mode=="legacy-warning"?new[]{"F20"}:new string[0]});
     var folder=mode=="historical"?Path.Combine(directory,".uplm","Snapshots",mode,"ReadOnly"):Path.Combine(directory,"View",mode);Directory.CreateDirectory(folder);
     var bytes=Encoding.UTF8.GetBytes("canonical native content");var manifest=SpeedManifest("ROOT.SLDASM",bytes);var files=((IList)Get(manifest,"Files")).Cast<object>().ToArray();
+    var missing=mode.StartsWith("missing-",StringComparison.Ordinal);
+    var toolbox=mode.StartsWith("missing-toolbox",StringComparison.Ordinal);
+    var toolboxRoot=Path.Combine(directory,"toolbox-data");
+    var missingPath=toolbox?Path.Combine(toolboxRoot,"browser","GB",mode=="missing-toolbox-known"?"PART-1.SLDPRT":"MISSING.SLDPRT")
+      :Path.Combine(directory,"original","MISSING.SLDPRT");
+    if(mode=="missing-edit"||mode=="missing-toolbox-edit")Set(manifest,"ForEdit",true);
+    if(mode=="missing-nested"){Set(files[2],"FileName","DEFERRED.SLDASM");Set(files[2],"RelativePath","DEFERRED.SLDASM");}
     foreach(var file in files)
     {
      var p=Path.Combine(folder,(string)Get(file,"FileName"));File.WriteAllBytes(p,bytes);File.SetAttributes(p,FileAttributes.ReadOnly);
@@ -55,9 +65,15 @@ internal static partial class Program
      var path=Path.Combine(folder,(string)Get(file,"FileName"));var first=path==partPath;
      switch(call.MethodName){case "GetPathName":return path;case "get_Name2":return Path.GetFileNameWithoutExtension(path);case "get_IsVirtual":return false;case "GetModelDoc2":return first?Part(wrong?externalPath:partPath):null;default:throw new Exception("Unexpected component operation "+call.MethodName);}
     }).GetTransparentProxy();
-    var components=files.Skip(1).Select(Component).ToArray();
+    var components=files.Skip(1).Select(Component).ToList();
+    if(missing&&mode!="missing-nested"&&!toolbox)
+      components.Add(new Proxy(interop.GetType("SolidWorks.Interop.sldworks.Component2",true),call=>{
+       switch(call.MethodName){case "GetPathName":return missingPath;case "get_Name2":return "MISSING-1";case "get_IsVirtual":return false;
+        case "GetModelDoc2":return mode=="missing-actually-loaded"?Part(missingPath):null;case "IsSuppressed":return true;
+        default:throw new Exception("Unexpected missing component operation "+call.MethodName);}
+      }).GetTransparentProxy());
     var root=new DiscardAssemblyProxy(modelType,call=>{
-     switch(call.MethodName){case "GetPathName":return rootPath;case "GetTitle":return "ROOT.SLDASM";case "GetType":return 2;case "GetSaveFlag":return false;case "IsOpenedReadOnly":return true;case "GetComponents":return components;case "get_Extension":return extension;case "GetEquationMgr":case "GetDesignTable":return null;default:throw new Exception("Unexpected root operation "+call.MethodName);}
+     switch(call.MethodName){case "GetPathName":return rootPath;case "GetTitle":return "ROOT.SLDASM";case "GetType":return 2;case "GetSaveFlag":return false;case "IsOpenedReadOnly":return true;case "GetComponents":return components.ToArray();case "get_Extension":return extension;case "GetEquationMgr":case "GetDesignTable":return null;default:throw new Exception("Unexpected root operation "+call.MethodName);}
     }).GetTransparentProxy();
     var conflicting=new Proxy(modelType,call=>call.MethodName=="GetPathName"?otherPath:call.MethodName=="GetTitle"?"ROOT.SLDASM":throw new Exception("Conflicting document touched")).GetTransparentProxy();
     object active=loaded?root:other;
@@ -65,22 +81,34 @@ internal static partial class Program
      switch(call.MethodName){
       case "GetDocuments":return new[]{mode=="same-title"?conflicting:other}.Concat(loaded?new[]{root}:new object[0]).ToArray();
       case "get_ActiveDoc":return active;
-      case "OpenDoc6":if((string)call.Args[0]!=rootPath)throw new Exception("Unexpected document open");opens++;loaded=true;active=root;return root;
+      case "OpenDoc6":if((string)call.Args[0]!=rootPath)throw new Exception("Unexpected document open");
+       if((mode=="missing-suppressed"||toolbox)&&!(bool)TreeCallStatic("ControlledOpenBoundary","Reject",missingPath))throw new Exception("Uncontrolled component was allowed to load");
+       if(mode=="missing-toolbox-and-outside"&&!(bool)TreeCallStatic("ControlledOpenBoundary","Reject",Path.Combine(toolboxRoot,"browser-backup","MISSING.SLDPRT")))
+        throw new Exception("A same-name part outside the configured Toolbox browser was allowed to load");
+       opens++;loaded=true;active=root;return root;
       case "CloseDoc":if((string)call.Args[0]!="ROOT.SLDASM")throw new Exception("Closed unselected draft");closes++;loaded=false;active=other;return null;
-      case "GetDocumentDependencies2":scans++;return (string)call.Args[0]==rootPath&&wrong?new[]{"PART-1.SLDPRT",externalPath}:new string[0];
+      case "GetDocumentDependencies2":scans++;
+       if(mode=="missing-nested"&&(string)call.Args[0]==Path.Combine(folder,"DEFERRED.SLDASM"))return new[]{"MISSING.SLDPRT",missingPath};
+       return (string)call.Args[0]==rootPath&&wrong?new[]{"PART-1.SLDPRT",externalPath}:new string[0];
       case "ReplaceReferencedDocument":if((string)call.Args[0]!=rootPath||(string)call.Args[1]!=externalPath||(string)call.Args[2]!=partPath)throw new Exception("Reference rewrite escaped root");replacements++;File.AppendAllText(rootPath,"|rebased");if(mode!="fallback-fails"&&mode!="legacy-warning")wrong=false;return true;
       case "GetCurrentWorkingDirectory":return "";
       case "GetSearchFolders":return search;
       case "SetCurrentWorkingDirectory":return true;
       case "SetSearchFolders":search=(string)call.Args[1];return true;
       case "GetUserPreferenceToggle":return rules;
+      case "GetUserPreferenceStringValue":return mode=="missing-toolbox-language-dir"?Path.Combine(toolboxRoot,"lang","english"):toolboxRoot;
       case "SetUserPreferenceToggle":rules=(bool)call.Args[1];return true;
       default:throw new Exception("Unexpected native operation "+call.MethodName);
      }
     }).GetTransparentProxy());
+    using var pane=missing?(System.Windows.Forms.Control)New("PdmTaskPaneControl","缺件打开验收"):null;
+    if(pane!=null)SetField(plugin,"taskPaneControl",pane);
     var failed=false;try{var opened=DiscardCall(plugin,"OpenControlledReadOnlyDocument",rootPath,2,"Default",manifest);if(opened!=root)throw new Exception("Wrong returned document");}catch(InvalidOperationException){failed=true;}catch(IOException){failed=true;}
-    var shouldFail=preloaded||mode=="same-title"||mode=="fallback-fails";
+    var shouldFail=preloaded||mode=="same-title"||mode=="fallback-fails"||mode=="missing-actually-loaded"||mode=="missing-edit"
+      ||toolbox&&mode!="missing-toolbox"&&mode!="missing-toolbox-language-dir";
     if(failed!=shouldFail||search!=""||rules||File.ReadAllText(otherPath)!="unselected dirty user draft")throw new Exception("Native-first validation/scope failure "+mode);
+    if(missing&&!shouldFail&&(opens!=1||closes!=0||!((System.Windows.Forms.Control)Field(pane,"checkoutReminder")).Text.Contains("MISSING.SLDPRT")))
+      throw new Exception("Missing component open did not keep the window and report the missing file: "+mode);
     if(mode=="verified"&&(scans!=0||opens!=1||closes!=0||replacements!=0))throw new Exception("Verified native open performed an unnecessary 214-file prepass");
     if(mode=="fallback"&&(scans!=214||opens!=2||closes!=1||replacements!=1))throw new Exception("Reference mismatch did not run one bounded materialization retry");
     if(mode=="fallback-fails"&&(scans!=214||opens!=2||closes!=2))throw new Exception("Invalid fallback was accepted or retried indefinitely");

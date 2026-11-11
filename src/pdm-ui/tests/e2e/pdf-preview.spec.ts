@@ -16,16 +16,9 @@ test('PDF drawing renders pixels without native PDF plugin', async ({ page }) =>
   const xref = pdf.length
   pdf += `xref\n0 5\n0000000000 65535 f \n${offsets.slice(1).map(offset => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`
   await page.route('**/sample.pdf', route => route.fulfill({ contentType: 'application/pdf', body: pdf }))
-  await page.route('**/pdf-viewer-test', route => route.fulfill({ contentType: 'text/html', body: `
-    <html><head><title>PDF preview test</title></head><body><div id="app"></div>
-    <script type="module">
-      import { createApp } from '/node_modules/.vite/deps/vue.js';
-      import Viewer from '/src/components/PdfDrawingViewer.vue';
-      createApp(Viewer, { url: '/sample.pdf' }).mount('#app');
-    </script></body></html>` }))
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
-  await page.goto('/pdf-viewer-test')
+  await page.goto('/tests/e2e/fixtures/pdf-preview.html')
   await expect(page.getByText('1 / 1 页')).toBeVisible()
   await expect(page.getByRole('status')).toHaveCount(0)
   await expect(page.getByRole('alert')).toHaveCount(0)

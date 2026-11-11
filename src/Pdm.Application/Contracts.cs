@@ -62,7 +62,7 @@ public sealed record UserProfile(
     string? Landline,
     string? MobilePhone,
     string? Email,
-    string Theme = "a");
+    string Theme = "g");
 
 public sealed record PasswordResetTask(
     Guid Id,
@@ -144,6 +144,8 @@ public sealed record ReleasePublication(
 {
     public DateTimeOffset? PublishedAt { get; init; }
 }
+
+public sealed record PreviewPackageHeader(Guid Id, Guid ProjectId, string Number, string State, string PreviewState, int DrawingCount, DateTimeOffset CreatedAt);
 
 public sealed record FormalDrawingSource(Guid SourceVersionId, string StorageRelativePath, long FileLength, string Sha256, string Revision, string QrContent);
 
@@ -487,6 +489,7 @@ public interface IPdmRepository
     async Task<Project?> FindProjectForUserAsync(Guid projectId, string actor, UserRole role, CancellationToken ct) =>
         (await ListProjectsForUserAsync(actor, role, ct)).FirstOrDefault(project => project.Id == projectId);
     Task<Project?> FindProjectAsync(Guid projectId, CancellationToken cancellationToken);
+    Task<ProjectContactInformation?> FindProjectContactInformationAsync(Guid projectId, CancellationToken cancellationToken) => Task.FromResult<ProjectContactInformation?>(null);
     Task<bool> HasProjectReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken);
     Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken);
     Task<bool> HasChildProjectsAsync(Guid projectId, CancellationToken cancellationToken);
@@ -514,6 +517,8 @@ public interface IPdmRepository
     async Task SetBrowserCadArchiveEnabledAsync(bool enabled, CancellationToken ct) =>
         await UpdateSystemSettingsAsync((await GetSystemSettingsAsync(ct)) with { BrowserCadArchiveEnabled = enabled }, ct);
     Task<ProjectPermissionSettings> GetProjectPermissionSettingsAsync(CancellationToken cancellationToken);
+    Task<AuthorizationSettings> GetAuthorizationSettingsAsync(CancellationToken cancellationToken);
+    Task<AuthorizationSettings> SaveAuthorizationSettingsAsync(AuthorizationSettings settings, long expectedRevision, CancellationToken cancellationToken, bool updateRoles = false);
     Task<ProjectPermissionSettings> UpdateProjectPermissionSettingsAsync(ProjectPermissionSettings settings, CancellationToken cancellationToken);
     Task<IReadOnlyDictionary<string, int>> GetProjectPositionUsageAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
     Task<Project> SetCustomProjectPositionsAsync(Guid projectId, IReadOnlyDictionary<string, IReadOnlyList<string>> members, string actor, CancellationToken cancellationToken) => throw new NotSupportedException();
@@ -529,6 +534,9 @@ public interface IPdmRepository
     Task<RolePermissionDirectory> CreateRoleAsync(string name, string description, string sourceRoleCode, CancellationToken cancellationToken);
     Task<RolePermissionDirectory> DeleteRoleAsync(string roleCode, CancellationToken cancellationToken);
     Task<OrganizationDirectory> GetOrganizationDirectoryAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<CompanyBusinessDetailsStatus>> ListCompanyBusinessDetailsAsync(Guid? companyId, CancellationToken ct);
+    Task<CompanyBusinessDetails> ReadCompanyBusinessDetailsAsync(Guid companyId, string kind, CancellationToken ct);
+    Task<CompanyBusinessDetails> SaveCompanyBusinessDetailsAsync(Guid companyId, string kind, CompanyBusinessDetails input, CancellationToken ct);
     Task<ProjectOrganization> SaveProjectOrganizationAsync(SaveProjectOrganizationCommand command, CancellationToken cancellationToken);
     Task<OrganizationUnit> SaveOrganizationUnitAsync(SaveOrganizationUnitCommand command, CancellationToken cancellationToken);
     Task<OrganizationDirectory> SetOrganizationMembershipsAsync(string username, IReadOnlyList<Guid> unitIds, Guid primaryUnitId, CancellationToken cancellationToken);
@@ -597,9 +605,37 @@ public interface IPdmRepository
         }
         return result;
     }
+    async Task<IReadOnlyDictionary<Guid, string>> PublishedDocumentRevisionsAsync(IReadOnlyCollection<Guid> documentIds, IReadOnlyCollection<Guid> packageIds, CancellationToken ct)
+    {
+        var result = new Dictionary<Guid, string>();
+        if (packageIds.Count == 0) return result;
+        foreach (var id in documentIds)
+        {
+            var history = await ListDocumentVersionsAsync(id, ct);
+            var latest = history.Where(v => v.Status == DocumentVersionStatus.Released && v.ReleasePackageId is Guid packageId && packageIds.Contains(packageId))
+                .MaxBy(v => v.Revision.BaseRevision);
+            if (latest is not null) result[id] = latest.Revision.Display;
+        }
+        return result;
+    }
     Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken, int? limit = null);
     Task<IReadOnlyList<DocumentVersionVerificationResult>> ListDocumentVersionVerificationsAsync(IReadOnlyList<DocumentVersionVerificationRequest> requests, CancellationToken cancellationToken);
     Task<IReadOnlyList<DocumentVersion>> ListProjectDocumentVersionsAsync(Guid projectId, CancellationToken cancellationToken);
+    // 报表只读取正式图纸版本元数据；生产仓储使用批量轻量查询，不加载CAD引用和BOM快照。
+    async Task<IReadOnlyList<ReportDrawingVersion>> ListReportDrawingVersionsAsync(IReadOnlyCollection<Guid> projectIds, CancellationToken ct)
+    {
+        var result = new List<ReportDrawingVersion>();
+        foreach (var id in projectIds)
+        {
+            var documents = (await ListDocumentsAsync(id, ct)).Concat(await ListDeletedDocumentsAsync(id, ct)).Where(d => d.Kind == DocumentKind.Drawing).DistinctBy(d => d.Id).ToDictionary(d => d.Id);
+            var packages = (await ListReleasePackagesAsync(id, ct)).Where(p => p.PublishedAt.HasValue).ToDictionary(p => p.Id);
+            foreach (var v in await ListProjectDocumentVersionsAsync(id, ct))
+                if (documents.TryGetValue(v.DocumentId, out var doc) && v.Status == DocumentVersionStatus.Released && v.ReleasePackageId is Guid packageId && packages.TryGetValue(packageId, out var package))
+                    result.Add(new(id, doc.Id, doc.DrawingNumber, v.Revision.Display, package.PublishedAt!.Value, package.ChangeReasonSelections));
+        }
+        return result;
+    }
+
     Task<IReadOnlyList<DocumentVersion>> ListProductionDrawingVersionsAsync(Guid projectId, CancellationToken cancellationToken) =>
         ListProjectDocumentVersionsAsync(projectId, cancellationToken);
     async Task<IReadOnlyDictionary<Guid, Guid>> LatestDocumentVersionIdsAsync(Guid projectId, CancellationToken cancellationToken) =>
@@ -682,6 +718,9 @@ public interface IPdmRepository
     Task<IReadOnlyList<ProjectBomHeaderBinding>> ListProjectBomHeaderBindingsAsync(Guid projectId, CancellationToken cancellationToken);
     Task<ProjectBomHeaderBinding> SaveProjectBomHeaderBindingAsync(Guid projectId, ProjectBomHeaderKind kind, Guid materialId, long expectedRowVersion, string actor, CancellationToken cancellationToken);
     Task<IReadOnlyList<BomVersion>> ListBomVersionsAsync(Guid projectId, BomKind? kind, CancellationToken cancellationToken);
+    async Task<BomVersion?> FindLatestBomVersionAsync(Guid projectId, BomKind kind, BomVersionState? state, CancellationToken cancellationToken) =>
+        (await ListBomVersionsAsync(projectId, kind, cancellationToken))
+            .Where(version => state is null || version.State == state).MaxBy(version => version.VersionNumber);
     Task<BomVersion?> FindBomVersionAsync(Guid projectId, Guid versionId, CancellationToken cancellationToken);
     Task<BomVersion> SaveBomDraftAsync(Guid projectId, BomKind kind, IReadOnlyList<BomItem> items, string actor, CancellationToken cancellationToken);
     Task<BomVersion> UpdateBomVersionMultiplierAsync(Guid versionId, int multiplier, int expectedMultiplier, string actor, CancellationToken cancellationToken);
@@ -690,6 +729,15 @@ public interface IPdmRepository
     Task<IReadOnlyList<ManufacturingBomBaseline>> ListManufacturingBomBaselinesAsync(Guid projectId, CancellationToken cancellationToken);
     Task<ManufacturingBomBaseline> CreateManufacturingBomBaselineAsync(ManufacturingBomBaseline baseline, CancellationToken cancellationToken);
     Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAsync(Guid projectId, CancellationToken cancellationToken);
+    async Task<IReadOnlyList<PreviewPackageHeader>> ListPreviewPackageHeadersAsync(Guid[] projectIds, CancellationToken ct)
+    {
+        var result = new List<PreviewPackageHeader>();
+        foreach (var id in projectIds)
+            result.AddRange((await ListReleasePackagesAsync(id, ct)).Where(p => ReleasePreviewPolicy.RequiresConversion(p)
+                && p.State is ReleasePackageState.Published or ReleasePackageState.Publishing)
+                .Select(p => new PreviewPackageHeader(p.Id, id, p.Number, p.State.ToString(), p.PreviewState.ToString(), p.DrawingDocumentCount, p.CreatedAt)));
+        return result.OrderByDescending(p => p.CreatedAt).ToArray();
+    }
     Task<IReadOnlyList<PendingApprovalTask>> ListPendingApprovalTasksAsync(Guid projectId, CancellationToken cancellationToken);
     Task<ReleasePackage?> FindReleasePackageAsync(Guid releasePackageId, CancellationToken cancellationToken);
     Task<ReleasePackage?> FindReleasePackageByApprovalTaskAsync(Guid taskId, CancellationToken cancellationToken);
@@ -766,9 +814,10 @@ public interface IPdmRepository
     Task<ReleasePackage> ApplyReleasePackageMaterialCodesAsync(Guid releasePackageId, IReadOnlyDictionary<Guid, string> materialCodes, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> SubmitReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken);
     Task<ReleasePackage> WithdrawReleasePackageAsync(Guid releasePackageId, string actor, CancellationToken cancellationToken);
-    Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, bool emergencySubstitute, string? emergencyReason, CancellationToken cancellationToken);
+    Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, bool emergencySubstitute, string? emergencyReason, CancellationToken cancellationToken, string? businessNote = null);
     Task<ReleasePackage> TransferApprovalAsync(Guid taskId, string expectedAssignee, string targetUsername, CancellationToken cancellationToken);
     Task<IReadOnlyList<UserNotification>> ListDatedUserTodosAsync(string recipient, Guid companyId, DateOnly from, DateOnly to, CancellationToken ct);
+    Task<IReadOnlyList<UserNotification>> ListProjectActivityNotificationsAsync(string recipient, DateTimeOffset since, CancellationToken cancellationToken);
     Task<IReadOnlyList<UserNotification>> ListUserNotificationsAsync(string recipient, int take, CancellationToken cancellationToken);
     Task CreateUserNotificationsAsync(IReadOnlyList<UserNotification> notifications, CancellationToken cancellationToken);
     Task UpsertUserNotificationsAsync(IReadOnlyList<UserNotification> notifications, CancellationToken cancellationToken);
@@ -847,6 +896,9 @@ public interface IReleasePackagePublisher
 
 public interface IServerPreviewConverter
 {
+    Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> StampCachedAsync(ReleasePackage package, Project project,
+        IReadOnlyList<ReleasePreviewSource> sources, string directory, CancellationToken ct) =>
+        throw new PdmRuleException("此转换程序不支持单独重试标识。");
     Task<IReadOnlyDictionary<Guid, FormalDrawingSource>> FinalizeDrawingsAsync(
         ReleasePackage package, Project project, IReadOnlyList<ReleasePreviewSource> sources,
         string stagingDirectory, CancellationToken cancellationToken) =>

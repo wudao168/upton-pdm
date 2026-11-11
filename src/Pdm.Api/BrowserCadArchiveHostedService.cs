@@ -11,6 +11,8 @@ public sealed class BrowserCadArchiveHostedService(IServiceScopeFactory scopes, 
     {
         while (!stoppingToken.IsCancellationRequested)
         {
+            try
+            {
             foreach (var job in queue.Pending())
             {
                 if (!await queue.Gate(job.Id).WaitAsync(0, stoppingToken)) continue;
@@ -29,10 +31,24 @@ public sealed class BrowserCadArchiveHostedService(IServiceScopeFactory scopes, 
                 catch (Exception error)
                 {
                     logger.LogError(error, "网页存档任务 {JobId} 未完成，已保留上传文件", job.Id);
-                    using var scope = scopes.CreateScope();
-                    await scope.ServiceProvider.GetRequiredService<BrowserCadArchiveService>().RecordFailureAsync(job, error, CancellationToken.None);
+                    try
+                    {
+                        using var scope = scopes.CreateScope();
+                        await scope.ServiceProvider.GetRequiredService<BrowserCadArchiveService>().RecordFailureAsync(job, error, stoppingToken);
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+                    catch (Exception persistenceError)
+                    {
+                        logger.LogError(persistenceError, "网页存档任务 {JobId} 的失败状态暂时无法保存，将在下次轮询重试；API 服务继续运行", job.Id);
+                    }
                 }
                 finally { TenantContext.Clear(); queue.Gate(job.Id).Release(); }
+            }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+            catch (Exception pollingError)
+            {
+                logger.LogError(pollingError, "网页存档队列暂时无法读取，将在下次轮询重试；API 服务继续运行");
             }
             await Task.Delay(1500, stoppingToken);
         }

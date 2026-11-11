@@ -177,6 +177,8 @@ public sealed class BomWorkbookTests
         Assert.Contains("<b", styles);
         Assert.Contains("horizontal=\"center\"", styles);
         var drawing = ReadEntryXml(archive, "xl/drawings/drawing1.xml").ToString();
+        Assert.Contains("<xdr:col>0</xdr:col>", drawing);
+        Assert.Contains("<xdr:colOff>0</xdr:colOff>", drawing);
         Assert.Contains("cx=\"1466667\"", drawing);
         Assert.Contains("cy=\"188000\"", drawing);
         Assert.Equal(4, archive.GetEntry("xl/media/image1.png")!.Length);

@@ -46,6 +46,14 @@ public sealed class WorkflowNotificationApiTests
         Assert.Empty((await client.GetFromJsonAsync<WorkflowNoticeJob[]>("/api/workflow-notifications/flows/standard-release/records"))!);
         var reread = (await client.GetFromJsonAsync<WorkflowNotificationCatalog>("/api/workflow-notifications"))!;
         Assert.Equal(saved.RowVersion, reread.RowVersion); Assert.Equal("CompanyRole", reread.Flows.Single().Recipients.Last().DepartmentSource);
+        await repository.CreateUserAsync(new(Guid.NewGuid(),"copy-person","指定抄送人","unused",UserRole.Engineer,true,CompanyId:company),default);
+        var extended=new SaveWorkflowNotification(true,[new("User",null,Target:"copy-person"),new("ProjectRole",null,Target:"StandardProcurement"),
+            new("Fixed",unit.Id,RoleCode:"SupplyChain",IncludeSubdepartments:true)],reread.RowVersion,company);
+        var copied=await client.PutAsJsonAsync("/api/workflow-notifications/flows/expense-approval",extended);
+        Assert.True(copied.IsSuccessStatusCode,await copied.Content.ReadAsStringAsync());
+        var copyRead=(await client.GetFromJsonAsync<WorkflowNotificationCatalog>("/api/workflow-notifications"))!.Flows.Single(flow=>flow.FlowCode=="expense-approval");
+        Assert.Equal("copy-person",copyRead.Recipients[0].Target);Assert.True(copyRead.Recipients[2].IncludeSubdepartments);
+        Assert.Equal(before,JsonSerializer.Serialize((await repository.GetSystemSettingsAsync(default)).ApprovalWorkflows));
         await repository.CreateUserAsync(new(Guid.NewGuid(), "workflow-notice-viewer", "普通工程师", "unused", UserRole.Engineer, true, CompanyId: company), default);
         client.DefaultRequestHeaders.Authorization = new("Bearer", Token("workflow-notice-viewer", UserRole.Engineer));
         Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/workflow-notifications")).StatusCode);

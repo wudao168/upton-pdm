@@ -7,8 +7,7 @@
   --pdm-button-icon-size: 15px;
   border-radius: 5px !important;
   border-color: transparent !important;
-  background: var(--pdm-surface) !important;
-  color: var(--pdm-theme-accent) !important;
+  background: var(--pdm-surface) !important; color:var(--pdm-text) !important;
   box-shadow: 1px 1px 3px rgba(0, 0, 0, .15) !important;
   transition: background-color var(--pdm-transition-fast), color var(--pdm-transition-fast), border-color var(--pdm-transition-fast), box-shadow var(--pdm-transition-fast);
 }

@@ -1,0 +1,39 @@
+/* 抽屉及抽屉化弹窗中的文件选择按钮；保留原生文件名、键盘和选择行为。 */
+@layer pdm-button-sizing {
+  :root body :is(.el-drawer, .el-dialog, .pdm-custom-drawer) input[type="file"]::file-selector-button {
+    box-sizing:border-box;
+    width:80px; min-width:80px; max-width:80px;
+    height:28px; min-height:28px; max-height:28px;
+    padding:0 8px; margin:0 8px 0 0;
+    border:1px solid var(--pdm-action-confirm); border-radius:999px;
+    background:var(--pdm-action-confirm); color:#fff;
+    font-family:var(--pdm-font-ui); font-size:12px; line-height:26px;
+    text-align:center; vertical-align:middle; cursor:pointer;
+  }
+  :root body :is(.el-drawer, .el-dialog, .pdm-custom-drawer) input[type="file"]:not(:disabled)::file-selector-button:hover {
+    border-color:var(--pdm-action-confirm-hover); background:var(--pdm-action-confirm-hover);
+  }
+  :root body :is(.el-drawer, .el-dialog, .pdm-custom-drawer) input[type="file"]:focus-visible::file-selector-button {
+    outline:2px solid var(--pdm-theme-accent); outline-offset:2px;
+  }
+  :root body :is(.el-drawer, .el-dialog, .pdm-custom-drawer) input[type="file"]:disabled::file-selector-button {
+    opacity:.5; cursor:not-allowed;
+  }
+  :root body :is(.el-drawer, .el-dialog, .pdm-custom-drawer) button.pdm-file-picker-button.pdm-file-picker-button {
+    background:var(--pdm-action-confirm) !important; color:#fff !important;
+    border-color:var(--pdm-action-confirm) !important; outline-color:var(--pdm-action-confirm) !important;
+    box-sizing:border-box !important;
+    width:80px !important; min-width:80px !important; max-width:80px !important; flex:0 0 80px !important;
+    height:28px !important; min-height:28px !important; max-height:28px !important;
+    padding:0 4px !important; border-radius:999px !important;
+    font-size:12px !important; line-height:26px !important;
+    justify-content:center !important; text-align:center !important;
+  }
+}
+
+@layer pdm-button-sizing {
+  :root body :is(.el-drawer, .el-dialog, .pdm-custom-drawer) button.pdm-file-picker-button.pdm-file-picker-button:hover:not(:disabled):not(.is-disabled) {
+    background:var(--pdm-action-confirm-hover) !important;
+    border-color:var(--pdm-action-confirm-hover) !important;
+  }
+}

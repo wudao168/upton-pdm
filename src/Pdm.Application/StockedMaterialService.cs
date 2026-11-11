@@ -470,7 +470,8 @@ public sealed class StockedMaterialService(IStockedMaterialStore store, StockedM
     {
         var directory = await repository.GetOrganizationDirectoryAsync(ct);
         var roles = (await repository.GetRolePermissionDirectoryAsync(ct)).Roles.Where(role => role.Role == "StandardizationAssistant" || role.Name == "标准化助理").Select(role => role.Role).ToArray();
-        return directory.Users.Where(user => user.IsActive && !NotificationRecipientPolicy.SystemOnly(user.EffectiveRoleCodes)
+        var notificationAuthorization = await repository.GetAuthorizationSettingsAsync(ct);
+        return directory.Users.Where(user => user.IsActive && NotificationRecipientPolicy.CanReceive(notificationAuthorization, user)
             && (user.CompanyId == company || user.CompanyId is null && directory.Memberships.Any(member => member.Username.Equals(user.Username, StringComparison.OrdinalIgnoreCase)
                 && directory.Units.Any(unit => unit.Id == member.UnitId && unit.OrganizationId == company && unit.IsActive))))
             .Select(user => new StockedMaterialRecipient(user.Username, user.DisplayName, roles.Any(role => user.EffectiveRoleCodes.Contains(role, StringComparer.OrdinalIgnoreCase))))

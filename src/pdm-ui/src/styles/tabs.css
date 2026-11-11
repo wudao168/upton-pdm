@@ -30,6 +30,15 @@
   flex: 0 0 120px !important;
 }
 
+/* 项目中心的第二级分类页签固定100px，一级功能导航保留原尺寸。 */
+:root body .pdm-project-tab-content :is(.pdm-budget > .pdm-project-subtabs, .quality-manager > .pdm-project-subtabs, .pdm-bom-detail-toolbar > .pdm-segmented) > button {
+  box-sizing: border-box;
+  width: 100px !important;
+  min-width: 100px !important;
+  max-width: 100px !important;
+  flex: 0 0 100px !important;
+}
+
 :root body .el-tabs > .el-tabs__header {
   flex-shrink: 0;
   width: 100%;
@@ -138,8 +147,7 @@
   border: 0 !important;
   border-radius: var(--pdm-tabs-radius) !important;
   background: transparent !important;
-  box-shadow: none !important;
-  color: rgb(30, 41, 59) !important;
+  box-shadow: none !important; color:var(--pdm-text) !important;
   font-family: var(--pdm-font-ui) !important;
   font-size: var(--pdm-font-size-navigation) !important;
   font-weight: 400 !important;
@@ -150,8 +158,7 @@
 }
 
 :root body [role="tab"],
-:root body :is(.production-scan-settings__tabs, .wh-report-modes) > button {
-  color: rgb(30, 41, 59) !important;
+:root body :is(.production-scan-settings__tabs, .wh-report-modes) > button { color:var(--pdm-text) !important;
   font-family: var(--pdm-font-ui) !important;
   font-size: var(--pdm-font-size-navigation) !important;
 }
@@ -166,8 +173,7 @@
 
 :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):hover:not(:disabled):not(.is-disabled):not(:is(.is-active, [aria-selected="true"], [aria-pressed="true"], [aria-current="page"])),
 :root body .pdm-tabs .el-radio-button:not(.is-disabled):not(.is-active):hover .el-radio-button__inner {
-  background: rgba(255, 255, 255, .5) !important;
-  color: rgb(30, 41, 59) !important;
+  background: rgba(255, 255, 255, .5) !important; color:var(--pdm-text) !important;
 }
 
 :root body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):is(.is-active, [aria-selected="true"], [aria-pressed="true"], [aria-current="page"]),
@@ -175,8 +181,7 @@
   position: relative;
   z-index: 1;
   background: var(--pdm-tabs-selected) !important;
-  box-shadow: var(--pdm-tabs-shadow) !important;
-  color: var(--pdm-theme-accent) !important;
+  box-shadow: var(--pdm-tabs-shadow) !important; color:var(--pdm-text) !important;
   font-weight: 600 !important;
 }
 

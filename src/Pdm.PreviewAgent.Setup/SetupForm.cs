@@ -28,7 +28,7 @@ internal sealed class SetupForm : Form
     public SetupForm(SetupOptions options)
     {
         this.options = options;
-        Text = "UPLM 转图代理 1.2.3 · 安装与升级";
+        Text = "UPLM 转图代理 1.3.0 · 安装与升级";
         Width = 820;
         Height = 760;
         StartPosition = FormStartPosition.CenterScreen;

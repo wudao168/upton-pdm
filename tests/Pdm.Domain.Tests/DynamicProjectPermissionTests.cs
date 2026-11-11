@@ -12,6 +12,7 @@ public sealed class DynamicProjectPermissionTests
     public async Task SavedGranularRoleDoesNotRegainRevokedActionsThroughReadOrLegacyCapability()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("engineer", UserRole.Engineer));
         await repository.SetRolePermissionsAsync("Engineer", [FunctionPermissionCatalog.SchemaMarker, PermissionCodes.ProjectContentView, "bom.mechanical.row.create"], default);
         Assert.True(await repository.HasUserPermissionAsync("engineer", UserRole.Engineer, "bom.mechanical.row.create", default));
         Assert.True(await repository.HasUserPermissionAsync("engineer", UserRole.Engineer, PermissionCodes.BomMechanicalEdit, default));
@@ -59,9 +60,10 @@ public sealed class DynamicProjectPermissionTests
     }
 
     [Fact]
-    public async Task ReferencedPositionCannotBeDeletedAndAssignmentsKeepHistory()
+    public async Task RetiredPositionSettingsCannotChangeAssignmentsAndHistoryIsPreserved()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator));
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         var rules = ProjectPermissionSettings.Default.Normalize().Rules.ToDictionary(item => item.Key, item => item.Value);
         rules[Position] = [];
@@ -69,8 +71,8 @@ public sealed class DynamicProjectPermissionTests
         await repository.UpdateProjectPermissionSettingsAsync(settings, default);
         await repository.SetCustomProjectPositionsAsync(project.Id, new Dictionary<string, IReadOnlyList<string>> { [Position] = ["engineer"] }, "admin", default);
         var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
-        await Assert.ThrowsAsync<PdmRuleException>(() => workflow.UpdateProjectPermissionSettingsAsync(ProjectPermissionSettings.Default.Normalize(), "admin", UserRole.Administrator, default));
-        await workflow.UpdateProjectPermissionSettingsAsync(settings with { CustomPositions = [settings.CustomPositions![0] with { IsActive = false }] }, "admin", UserRole.Administrator, default);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.UpdateProjectPermissionSettingsAsync(ProjectPermissionSettings.Default.Normalize(), "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.UpdateProjectPermissionSettingsAsync(settings with { CustomPositions = [settings.CustomPositions![0] with { IsActive = false }] }, "admin", UserRole.Administrator, default));
         Assert.Equal("engineer", Assert.Single((await repository.FindProjectAsync(project.Id, default))!.CustomPositionMembers[Position]));
     }
 

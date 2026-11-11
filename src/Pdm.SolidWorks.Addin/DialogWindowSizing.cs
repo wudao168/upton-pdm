@@ -9,6 +9,32 @@ internal static class DialogWindowSizing
 {
     private const uint GetAncestorRoot = 2;
 
+    internal static IDisposable BlockOwnerInput(IntPtr ownerHandle) => new OwnerInputBlock(ownerHandle);
+
+    private sealed class OwnerInputBlock : IDisposable
+    {
+        private readonly IntPtr window;
+        private readonly bool restore;
+
+        public OwnerInputBlock(IntPtr ownerHandle)
+        {
+            window = GetAncestor(ownerHandle, GetAncestorRoot);
+            restore = window != IntPtr.Zero && IsWindowEnabled(window);
+            if (restore) EnableWindow(window, false);
+        }
+
+        public void Dispose()
+        {
+            if (restore) EnableWindow(window, true);
+        }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowEnabled(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnableWindow(IntPtr window, bool enable);
+
     public static void CenterOnOwnerScreen(Form dialog)
     {
         dialog.StartPosition = FormStartPosition.Manual;

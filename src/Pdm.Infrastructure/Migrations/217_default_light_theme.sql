@@ -1,0 +1,1 @@
+ALTER TABLE pdm_user ALTER COLUMN theme SET DEFAULT 'g';

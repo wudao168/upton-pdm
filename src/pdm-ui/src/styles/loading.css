@@ -1,4 +1,12 @@
-:root { --pdm-loading-icon-size: 144px; }
+:root {
+  --pdm-loading-icon-size: 144px;
+  --pdm-loading-bg: color-mix(in srgb, var(--pdm-surface, #fff) 82%, transparent);
+}
+
+/* 自定义刷新遮罩和 Element Plus 加载层共用当前主题底色。 */
+:root body :is(.pdm-square-loader.is-overlay, .el-loading-mask) {
+  background: var(--pdm-loading-bg);
+}
 
 @keyframes pdm-loading-breath {
   0%, 100% { transform: scale(.97); opacity: .78; }
@@ -18,8 +26,7 @@
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: #fff;
-  color: #536781;
+  background: var(--pdm-surface, #fff); color:var(--pdm-text-soft);
   font: 14px/1.5 "Microsoft YaHei UI", "Microsoft YaHei", Arial, sans-serif;
 }
 

@@ -12,8 +12,8 @@ public static class ProjectPermissionPositions
     [
         new(MainManager, "主项目经理／协同项目经理", "负责的主项目及全部子项目", "subtree", true),
         new(ChildManager, "子项目负责人", "仅负责的子项目", "self", true),
-        new(MainDesigner, "主设", "负责的主项目及全部子项目", "subtree", true),
-        new(Engineer, "执行工程师／电气硬件", "执行工程师明确分配的项目；主项目电气硬件负责人覆盖主／子项目，子项目负责人仅限本项目", "self", true),
+        new(MainDesigner, "主设计", "负责的主项目及全部子项目", "subtree", true),
+        new(Engineer, "设计人员／电气硬件", "设计人员明确分配的项目；主项目电气硬件负责人覆盖主／子项目，子项目负责人仅限本项目", "self", true),
         new(Other, "其他人员", "同公司内未担任项目岗位、且有内容查看权限的人员（兜底规则）", "self", true)
     ];
 }

@@ -197,11 +197,11 @@ async function revoke() {
 
 <style scoped>
 .drawing-review-decision-bar{display:flex;flex:1 1 auto;min-width:0;align-items:center;gap:8px;color:var(--pdm-text);font-size:12px}
-.drawing-review-decision-bar__node{flex:0 0 auto;padding:4px 7px;border-radius:5px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:12px;font-weight:500;white-space:nowrap}
+.drawing-review-decision-bar__node{flex:0 0 auto;padding:4px 7px;border-radius:5px;background:var(--pdm-blue-soft); color:var(--pdm-text);font-size:12px;font-weight:500;white-space:nowrap}
 .drawing-review-decision-bar__node.is-warning{background:var(--pdm-orange-soft);color:var(--pdm-orange)}
-.drawing-review-decision-bar__node.is-pending{background:var(--pdm-theme-accent-soft);color:var(--pdm-theme-accent)}
+.drawing-review-decision-bar__node.is-pending{background:var(--pdm-theme-accent-soft); color:var(--pdm-text)}
 .drawing-review-decision-bar textarea{flex:1 1 160px;min-width:110px;height:28px;box-sizing:border-box;padding:5px 7px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:12px;resize:vertical}
-.drawing-review-decision-bar__route{flex:0 1 auto;min-width:0;overflow:hidden;color:var(--pdm-blue);font-size:12px;text-overflow:ellipsis;white-space:nowrap}
+.drawing-review-decision-bar__route{flex:0 1 auto;min-width:0;overflow:hidden; color:var(--pdm-text);font-size:12px;text-overflow:ellipsis;white-space:nowrap}
 .drawing-review-decision-bar__hint{flex:0 0 auto;color:var(--pdm-muted);font-size:12px;white-space:nowrap}
 .drawing-review-decision-bar .drawing-review-decision-buttons{flex:0 0 auto;display:flex;gap:5px;margin-left:auto}
 .drawing-review-decision-bar .drawing-review-decision-buttons button{display:inline-flex;align-items:center;justify-content:center;gap:5px;width:auto;min-width:100px;height:var(--pdm-button-default);min-height:var(--pdm-button-default);padding:0 6px;border:1px solid var(--pdm-border);border-radius:5px;background:var(--pdm-surface);color:var(--pdm-text);font:inherit;font-size:12px;cursor:pointer}

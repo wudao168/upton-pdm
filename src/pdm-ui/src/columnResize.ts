@@ -5,7 +5,7 @@ import { ElMessage } from './statusMessage'
 import { isInactiveDom } from './activeDom'
 
 const minimumWidth = 32
-const hasFixedWidth = (column: { className?: string }) => column.className?.split(/\s+/).includes('pdm-column-fixed-width') === true
+const hasFixedWidth = (column: { className?: string; type?: string }) => column.type === 'selection' || column.type === 'expand' || column.className?.split(/\s+/).includes('pdm-column-fixed-width') === true
 
 type HeaderPosition = { start: number; span: number }
 function htmlHeaders(table: HTMLTableElement) {
@@ -112,7 +112,8 @@ export function installColumnResize(app: App, owner: Document = document) {
     if (group.children.length !== structure.count) group.replaceChildren(...values.map(() => owner.createElement('col')))
     const total = values.slice(compact.length).reduce((sum, value) => sum + value, 0)
     const fixed = compact.reduce((sum, value) => sum + value, 0)
-    const flexibleSpace = Math.max(0, availableWidth(table.parentElement!) - fixed)
+    const readableWidth = Math.max(0, Number(table.dataset.pdmMinWidth) || 0)
+    const flexibleSpace = Math.max(0, Math.max(availableWidth(table.parentElement!), readableWidth) - fixed)
     const width = (start: number, span: number) => {
       const pixels = compact.slice(start, start + span).reduce((sum, value) => sum + value, 0)
       const ratio = values.slice(start, start + span).reduce((sum, value, offset) => sum + (start + offset < compact.length ? 0 : value), 0) / total
@@ -121,8 +122,8 @@ export function installColumnResize(app: App, owner: Document = document) {
     Array.from(group.children).forEach((column, index) => { (column as HTMLElement).style.setProperty('width', width(index, 1), 'important') })
     for (const [cell, position] of structure.positions) cell.style.width = width(position.start, position.span)
     table.style.setProperty('width', '100%', 'important')
-    table.style.setProperty('min-width', '0', 'important')
-    table.style.setProperty('max-width', '100%', 'important')
+    table.style.setProperty('min-width', `${readableWidth}px`, 'important')
+    table.style.setProperty('max-width', readableWidth ? 'none' : '100%', 'important')
     table.classList.add('pdm-fit-columns', 'pdm-columns-resized'); table.style.tableLayout = 'fixed'
     table.parentElement?.classList.add('pdm-column-scroll')
   }
@@ -178,19 +179,19 @@ export function installColumnResize(app: App, owner: Document = document) {
       const manual = manualWidths.get(root)
       const saved = savedWidths(key, columns.length)
         ?? (manual?.schema === schema && manual.key === key ? manual.widths : null)
-      if (saved) {
-        root.classList.add('pdm-fit-columns')
-        const fitted = fitColumnWidths(saved, space)
-        if (fitted.some((width, index) => Math.abs(width - current[index]!) > 0.1)) fitElement(table, fitted)
-        return
-      }
       if (root.dataset.pdmColumnLayout === 'scroll') {
         const minimums = columns.map(column => {
           if (!readableMinimums.has(column)) readableMinimums.set(column, Number(column.width ?? column.minWidth ?? 80))
           return readableMinimums.get(column)!
         })
-        const fitted = fitColumnWidths(readableColumnWidths(minimums, minimums, space, columns.map(hasFixedWidth)), space)
+        const fitted = readableColumnWidths(saved ?? minimums, minimums, space, columns.map(hasFixedWidth))
         if (fitted.some((width, index) => Math.abs(width - current[index]!) > 1)) fitElement(table, fitted)
+        return
+      }
+      if (saved) {
+        root.classList.add('pdm-fit-columns')
+        const fitted = fitColumnWidths(saved, space)
+        if (fitted.some((width, index) => Math.abs(width - current[index]!) > 0.1)) fitElement(table, fitted)
         return
       }
       const widths = current

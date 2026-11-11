@@ -22,7 +22,9 @@ public static class ClientLogEndpoints
             options.OnRejected = async (context, ct) =>
             {
                 context.HttpContext.Response.StatusCode = 429;
-                await context.HttpContext.Response.WriteAsJsonAsync(new { message = "日志请求过于频繁，请稍后重试。" }, ct);
+                var message = context.HttpContext.Request.Path.StartsWithSegments("/api/client-logs")
+                    ? "日志请求过于频繁，请稍后重试。" : "请求过于频繁，请稍后重试。";
+                await context.HttpContext.Response.WriteAsJsonAsync(new { message }, ct);
             };
             options.AddPolicy("client-logs", context => RateLimitPartition.GetFixedWindowLimiter(context.User.Identity?.Name ?? "anonymous", _ =>
                 new FixedWindowRateLimiterOptions { PermitLimit = 60, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
@@ -102,7 +104,7 @@ public static class ClientLogEndpoints
         });
     }
 
-    private static bool CanRead() => TenantContext.Current is { } t && (t.IsPlatformAdministrator || t.HasRole("Administrator"));
+    private static bool CanRead() => TenantContext.Current is { } t && t.HasPermission(AuthorizationActions.ClientLogs);
     private static ClientLogQuery Query(HttpRequest request)
     {
         string? Value(string key) => request.Query.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value.ToString() : null;

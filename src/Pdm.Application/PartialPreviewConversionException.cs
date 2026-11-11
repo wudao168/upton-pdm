@@ -8,6 +8,7 @@ public sealed class PartialPreviewConversionException(
     IReadOnlyDictionary<Guid, string> errors,
     string message) : Exception(ItemErrorPrefix + message)
 {
+    public const string WaitingForHost = "等待空闲转图服务器：";
     public const string ItemErrorPrefix = "逐项转图结果：\n";
     public IReadOnlyDictionary<Guid, DocumentPreviewArtifact> Artifacts { get; } = artifacts;
     public IReadOnlyDictionary<Guid, string> Errors { get; } = errors;

@@ -8,7 +8,7 @@ public sealed partial class PdmWorkflowService
     {
         var project = (await repository.ListProjectsForUserAsync(actor, role, cancellationToken)).FirstOrDefault(item => item.Id == projectId)
             ?? throw new UnauthorizedAccessException("无权配置该项目的岗位人员。");
-        if (role != UserRole.Administrator && !(project.CanManageMainStaffing || project.CanAssignDesigners)) throw new UnauthorizedAccessException("仅有项目分工管理权限的人员可以分配自定义岗位。");
+        if (!(project.CanManageMainStaffing || project.CanAssignDesigners)) throw new UnauthorizedAccessException("仅有项目分工管理权限的人员可以分配自定义岗位。");
         var settings = await repository.GetProjectPermissionSettingsAsync(cancellationToken);
         var definitions = (settings.CustomPositions ?? []).ToDictionary(item => item.Key);
         if (input is null || input.Keys.Any(key => !definitions.ContainsKey(key))) throw new PdmRuleException("项目岗位已调整，请刷新后重新分配。");
@@ -30,6 +30,7 @@ public sealed partial class PdmWorkflowService
         }
         var saved = await repository.SetCustomProjectPositionsAsync(projectId, members, actor, cancellationToken);
         await AuditAsync(actor, "project.positions.assign", nameof(Project), projectId.ToString(), "更新自定义岗位人员分配", cancellationToken);
+        await ProjectActivityFeed.StaffingAsync(repository, project, saved, actor, timeProvider.GetUtcNow(), cancellationToken);
         return (await repository.ListProjectsForUserAsync(actor, role, cancellationToken)).First(item => item.Id == saved.Id);
     }
 }

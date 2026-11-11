@@ -334,7 +334,7 @@ public sealed class ProcurementTrackingAggregationTests
         Assert.Equal(2, rows.Count);
         Assert.Equal(5, rows[0].RequestedQuantity);
         Assert.Equal(5, rows[1].RequestedQuantity);
-        Assert.Null(rows[1].Quantity);
+        Assert.All(rows, row => Assert.Equal(5, row.Quantity));
         Assert.Equal(10, rows.Sum(row => row.Quantity));
     }
 
@@ -408,6 +408,21 @@ public sealed class ProcurementTrackingAggregationTests
         ], []);
 
         Assert.Equal(ProjectPlanStage.Assembly, Assert.Single(rows).ImpactStage);
+    }
+
+    [Fact]
+    public void AddedDemandKeepsOnlyPreviouslyRequisitionedQuantityApproved()
+    {
+        var pr = Pr("1", "PR1", 1);
+        var rows = ProcurementTrackingAggregation.Group([Item(4)], [pr, pr]);
+        var approved = Assert.Single(rows, row => row.PurchaseRequisitionStatus == "已核准");
+        Assert.Equal(1, approved.Quantity);
+        var pending = Assert.Single(rows, row => row.PurchaseRequisitionStatus == "未请购");
+        Assert.Equal(3, pending.Quantity);
+        Assert.Empty(pending.PurchaseRequisitionNumbers);
+        Assert.Null(pending.PurchaseRequisitionCreatedAt);
+        Assert.Equal(0, pending.RequestedQuantity);
+        Assert.Equal(4, rows.Sum(row => row.Quantity));
     }
 
     private static ProjectProcurementTrackingItem Item(decimal quantity) => new(1, "P1", "P1-1", "A", "平垫", "M4", null, "国优",

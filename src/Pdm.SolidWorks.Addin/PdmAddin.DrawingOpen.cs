@@ -117,7 +117,8 @@ public sealed partial class PdmAddin
             manifest.RetainedWorkingHashes.Add(pair.Key, pair.Value);
             manifest.ResumedDocumentIds.Add(pair.Key);
         }
-        var opened = OpenControlledReadOnlyDocumentCore(rootPath, (int)swDocumentTypes_e.swDocDRAWING, string.Empty, manifest, true);
+        var opened = OpenControlledReadOnlyDocumentCore(rootPath, (int)swDocumentTypes_e.swDocDRAWING, string.Empty, manifest, true,
+            allowMissingComponents: !acquirePermission);
         if (opened == null) throw new IOException("工程图尚未打开，已保留原零件、总装窗口及修改，请查看本次操作日志。");
         foreach (var file in files.Where(file => context.Value.Files.All(existing => existing.DocumentId != file.DocumentId)))
         {

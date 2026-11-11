@@ -1,4 +1,4 @@
-import { vi } from 'vitest'
+import { beforeEach, vi } from 'vitest'
 import { config } from '@vue/test-utils'
 import { stockedMaterial } from '../src/materialStockPlans'
 
@@ -22,6 +22,11 @@ class IntersectionObserverMock {
 
 vi.stubGlobal('ResizeObserver', ResizeObserverMock)
 vi.stubGlobal('IntersectionObserver', IntersectionObserverMock)
+// Some suites restore global stubs after each test; browser observers are still needed by shared controls.
+beforeEach(() => {
+  vi.stubGlobal('ResizeObserver', ResizeObserverMock)
+  vi.stubGlobal('IntersectionObserver', IntersectionObserverMock)
+})
 vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('API offline in unit tests')))
 Object.defineProperty(window, 'matchMedia', {
   writable: true,

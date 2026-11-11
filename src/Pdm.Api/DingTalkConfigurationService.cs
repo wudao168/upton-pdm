@@ -105,8 +105,7 @@ public sealed partial class DingTalkConfigurationService(IDingTalkConfigurationR
         if (!await projects.HasProjectContentReadAccessAsync(projectId, actor, role, ct)) throw new UnauthorizedAccessException("无权查看该项目的钉钉绑定。");
         var root = project.ParentProjectId is null ? project : await projects.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, ct) ?? throw new PdmNotFoundException("主项目不存在。");
         if (!await projects.HasProjectContentReadAccessAsync(root.Id, actor, role, ct)) throw new UnauthorizedAccessException("无权查看该主项目。");
-        var manage = role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true ||
-            string.Equals(root.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase) || root.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase);
+        var manage = await AuthorizationPolicy.CanAsync(projects, root.Id, actor, "project.opl.manage", ct);
         if (TenantContext.CompanyId is null) throw new PdmRuleException("请先选择所属公司。");
         return (root.Id, manage);
     }

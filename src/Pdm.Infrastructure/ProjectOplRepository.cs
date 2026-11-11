@@ -3,10 +3,11 @@ using Dapper;
 using Microsoft.Extensions.Options;
 using MySqlConnector;
 using Upton.Pdm.Application;
+using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Infrastructure;
 
-public sealed class InMemoryProjectOplRepository : IProjectOplRepository
+public sealed class InMemoryProjectOplRepository(IPdmRepository? projects = null) : IProjectOplRepository
 {
     private readonly Dictionary<Guid, OplIssue> records = [];
     private readonly object gate = new();
@@ -18,7 +19,7 @@ public sealed class InMemoryProjectOplRepository : IProjectOplRepository
             .Where(issue => projectIds.Contains(issue.ProjectId) && issue.Status is not ("已完成" or "已作废"))
             .GroupBy(issue => issue.ProjectId).ToDictionary(group => group.Key, group => group.Count()));
     }
-    public Task<OplIssue> SaveAsync(OplIssue issue, long expectedVersion, CancellationToken ct)
+    public Task<OplIssue> SaveAsync(OplIssue issue, long expectedVersion, CancellationToken ct, UserNotification? assignment = null)
     {
         lock (gate)
         {
@@ -26,6 +27,7 @@ public sealed class InMemoryProjectOplRepository : IProjectOplRepository
             if ((current?.RowVersion ?? 0) != expectedVersion) throw new PdmConflictException("问题已被其他人修改，请关闭抽屉并刷新后重试。");
             var saved = issue with { Number = current?.Number ?? records.Values.Where(x => x.ProjectId == issue.ProjectId).Select(x => x.Number).DefaultIfEmpty().Max() + 1, RowVersion = expectedVersion + 1 };
             records[saved.Id] = saved;
+            if (projects is InMemoryPdmRepository memory) memory.SyncOplAssignment(saved, assignment);
             return Task.FromResult(saved);
         }
     }
@@ -49,7 +51,7 @@ public sealed class MySqlProjectOplRepository(IOptions<PdmDatabaseOptions> optio
             new { ProjectIds = projectIds.ToArray() }, cancellationToken: ct));
         return rows.ToDictionary(row => row.ProjectId, row => row.OpenCount);
     }
-    public async Task<OplIssue> SaveAsync(OplIssue issue, long expectedVersion, CancellationToken ct)
+    public async Task<OplIssue> SaveAsync(OplIssue issue, long expectedVersion, CancellationToken ct, UserNotification? assignment = null)
     {
         await using var connection = new MySqlConnection(options.Value.ConnectionString);
         await connection.OpenAsync(ct);
@@ -60,6 +62,12 @@ public sealed class MySqlProjectOplRepository(IOptions<PdmDatabaseOptions> optio
         var number = version is null ? await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT COALESCE(MAX(issue_number),0)+1 FROM project_opl_issue WHERE project_id=@ProjectId", new { issue.ProjectId }, transaction, cancellationToken: ct)) : issue.Number;
         var saved = issue with { Number = number, RowVersion = expectedVersion + 1 };
         await connection.ExecuteAsync(new CommandDefinition("INSERT INTO project_opl_issue(id,project_id,issue_number,row_version,payload_json) VALUES(@Id,@ProjectId,@Number,@RowVersion,@Payload) ON DUPLICATE KEY UPDATE row_version=@RowVersion,payload_json=@Payload", new { saved.Id, saved.ProjectId, saved.Number, saved.RowVersion, Payload = JsonSerializer.Serialize(saved, JsonOptions) }, transaction, cancellationToken: ct));
+        await connection.ExecuteAsync(new CommandDefinition("""
+            UPDATE user_notification SET resolved_at=@Now,read_at=COALESCE(read_at,@Now)
+            WHERE source_key=@SourceKey AND resolved_at IS NULL AND (@Recipient IS NULL OR recipient_username<>@Recipient)
+            """, new { SourceKey = ProjectOplService.AssignmentKey(saved.Id), Recipient = assignment?.Recipient, Now = saved.UpdatedAt.UtcDateTime }, transaction, cancellationToken: ct));
+        if (assignment is not null)
+            await MySqlPdmRepository.UpsertNotificationsAsync(connection, [assignment with { Title = $"OPL #{saved.Number} 待回填" }], transaction, ct);
         await transaction.CommitAsync(ct);
         return saved;
     }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using SolidWorks.Interop.sldworks;
+using SolidWorks.Interop.swconst;
 
 namespace Upton.Pdm.SolidWorks;
 
@@ -76,11 +77,41 @@ internal sealed class ControlledOpenBoundary : IDisposable
         return true;
     }
 
-    internal void Verify()
+    internal void Verify(ISet<string> missingComponents = null, ISldWorks application = null)
     {
-        if (blocked.Count > 0)
+        var unexpected = blocked.Where(path => missingComponents?.Contains(Path.GetFileName(path)) != true).ToList();
+        bool IsUnlistedPart(string path) => string.Equals(Path.GetExtension(path), ".SLDPRT", StringComparison.OrdinalIgnoreCase)
+            && !paths.ContainsKey(Path.GetFileName(path));
+        // SolidWorks can omit a Toolbox occurrence from the returned tree when its
+        // open callback rejects the file. In a read-only open, the rejected request
+        // itself identifies the missing part. Loaded sources are checked separately.
+        if (missingComponents != null && application != null && unexpected.Any(IsUnlistedPart))
+        {
+            try
+            {
+                var toolbox = application.GetUserPreferenceStringValue((int)swUserPreferenceStringValue_e.swHoleWizardToolBoxFolder);
+                if (!string.IsNullOrWhiteSpace(toolbox) && Path.IsPathRooted(toolbox))
+                {
+                    var root = Path.GetFullPath(toolbox);
+                    var parent = Path.GetDirectoryName(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                    // SOLIDWORKS 2022 can return the language directory of the
+                    // Hole Wizard database instead of the configured Toolbox root.
+                    if (string.Equals(Path.GetFileName(parent), "lang", StringComparison.OrdinalIgnoreCase))
+                        root = Path.GetDirectoryName(parent);
+                    var browser = Path.Combine(root, "browser") + Path.DirectorySeparatorChar;
+                    unexpected.RemoveAll(path =>
+                    {
+                        if (!IsUnlistedPart(path) || !path.StartsWith(browser, StringComparison.OrdinalIgnoreCase)) return false;
+                        missingComponents.Add(Path.GetFileName(path));
+                        return true;
+                    });
+                }
+            }
+            catch (Exception error) { PluginDiagnosticLog.Record("受控打开核对", "未能识别Toolbox目录，保留引用拦截：" + error); }
+        }
+        if (unexpected.Count > 0)
             throw new InvalidOperationException("已阻止图档加载原目录或其他非受控文件，尚未完成打开；请核对PLM引用定位。原文件和已有窗口均保留：\r\n"
-                + string.Join("\r\n", blocked.OrderBy(path => path, StringComparer.OrdinalIgnoreCase)));
+                + string.Join("\r\n", unexpected.OrderBy(path => path, StringComparer.OrdinalIgnoreCase)));
     }
 
     public void Dispose() { current = previous; }

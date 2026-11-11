@@ -73,7 +73,7 @@ public sealed partial class MySqlPdmRepository : IProjectApplicationRepository
         if (command.ApplicationApproval is not { } approval) return null;
         var value = await ReadApplication(connection, transaction, approval.ApplicationId, command.OrganizationId, true, ct)
             ?? throw new PdmNotFoundException("立项申请不存在或不属于当前公司。");
-        if (value.Status == ProjectApplicationService.Approved) return value;
+        if (value.HasApprovedProject()) return value;
         if (value.Status != ProjectApplicationService.Pending || value.RowVersion != approval.ExpectedRowVersion)
             throw new PdmConflictException("申请已变化，请刷新后重新审批。");
         return value;
@@ -81,10 +81,17 @@ public sealed partial class MySqlPdmRepository : IProjectApplicationRepository
     private async Task CompleteApplicationApproval(MySqlConnection connection, DbTransaction transaction, ProjectApplication application,
         ProjectApplicationApproval approval, Project project, CancellationToken ct)
     {
-        var value = application with { Status = ProjectApplicationService.Approved, ProjectId = project.Id, ProjectCode = project.Code,
-            RowVersion = application.RowVersion + 1, UpdatedAt = approval.Event.At };
-        await WriteApplication(connection, transaction, value, approval.Event with { ProjectId = project.Id, ProjectCode = project.Code }, false, ct);
         var input = approval.Event.ApprovedData?.Input ?? application.Data.Input;
+        var value = application.WithApprovedProject(project, input, approval.Event.At);
+        await WriteApplication(connection, transaction, value, approval.Event with { ProjectId = project.Id, ProjectCode = project.Code }, false, ct);
+        if (ProjectApplicationBudgets.Create(project.Id, input, approval.Event.Actor, approval.Event.At) is { } budget)
+        {
+            var parameters = new { budget.ProjectId, budget.RowVersion, Payload = JsonSerializer.Serialize(budget, jsonOptions), budget.UpdatedBy, UpdatedAt = budget.UpdatedAt!.Value.UtcDateTime };
+            await connection.ExecuteAsync(new CommandDefinition(
+                "INSERT INTO project_budget(project_id,row_version,payload_json,updated_by,updated_at) VALUES(@ProjectId,@RowVersion,@Payload,@UpdatedBy,@UpdatedAt)", parameters, transaction, cancellationToken: ct));
+            await connection.ExecuteAsync(new CommandDefinition(
+                "INSERT INTO project_budget_version(project_id,row_version,payload_json,updated_by,updated_at) VALUES(@ProjectId,@RowVersion,@Payload,@UpdatedBy,@UpdatedAt)", parameters, transaction, cancellationToken: ct));
+        }
         var contacts = new ProjectContactInformation(project.Id, RowVersion: 1, UpdatedBy: approval.Event.Actor, UpdatedAt: approval.Event.At,
             SalesPeople: input.SalesUsername, PresalesPeople: string.Join('、', input.PresalesUsernames));
         await connection.ExecuteAsync(new CommandDefinition(

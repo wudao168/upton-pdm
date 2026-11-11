@@ -334,12 +334,7 @@ internal sealed class ProjectDocumentsControl : UserControl
     }
 
     private string DisplayUserName(string username)
-    {
-        var value = username?.Trim() ?? string.Empty;
-        return userDisplayNames.TryGetValue(value, out var displayName) && !string.IsNullOrWhiteSpace(displayName)
-            ? displayName.Trim()
-            : value;
-    }
+        => PersonDisplayName.Resolve(userDisplayNames, username);
 
     public event EventHandler<ControlledOpenEventArgs> OpenRequested;
     public event EventHandler<ProjectBrowseEventArgs> ProjectSelected;

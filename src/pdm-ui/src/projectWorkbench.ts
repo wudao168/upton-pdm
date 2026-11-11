@@ -41,7 +41,13 @@ export function progress(item: WorkbenchProject): number | null {
   return isEffective(item) ? item.completionPercent : null
 }
 export const nextTask = (item: WorkbenchProject) => effectiveTasks(item).filter(task => unfinished(task) && validDate(task.plannedFinish)).sort((a, b) => a.plannedFinish.localeCompare(b.plannedFinish))[0]
-export function deliveryDate(item: WorkbenchProject) {
+export type ProjectDeliveryPlan = {
+  plannedFinish: string
+  tasks: readonly Pick<ProjectPlanTask, 'stage' | 'plannedFinish'>[]
+  stages?: readonly { code: string; participatesInDelivery?: boolean | null }[]
+}
+
+export function deliveryDate(item: { plan: ProjectDeliveryPlan | null }) {
   const stages = item.plan?.stages?.filter(stage => stage.participatesInDelivery === true).map(stage => stage.code) ?? []
   const dates = item.plan?.tasks.filter(task => !stages.length || stages.includes(task.stage)).map(task => task.plannedFinish).filter(validDate).sort() ?? []
   return dates.at(-1) || (validDate(item.plan?.plannedFinish) ? item.plan?.plannedFinish : undefined)

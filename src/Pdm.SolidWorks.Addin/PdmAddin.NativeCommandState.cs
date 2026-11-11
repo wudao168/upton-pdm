@@ -15,6 +15,11 @@ public sealed partial class PdmAddin
     private bool unknownRemovalObserved;
     private IModelDoc2 unknownLoadOwner;
     private string unknownLoadOwnerPath;
+    private string pendingOpenPath;
+    private IModelDoc2 pendingOpenHost;
+    private string pendingOpenHostPath;
+    private long pendingOpenStarted;
+    private int pendingOpenIdleEpoch = -1;
 
     private bool NativeInsertionEvidenceAllowed() => !disconnecting && !ControlledOpenBoundary.IsActive
         && Volatile.Read(ref ownedReferenceResolutionDepth) == 0
@@ -27,6 +32,11 @@ public sealed partial class PdmAddin
     private void ObserveNativeFileOpening(string fileName)
     {
         nativeLoadEpoch++;
+        pendingOpenPath = fileName;
+        pendingOpenHost = nativeFileOpenCommandId == 2 ? assemblyEventDocument : null;
+        pendingOpenHostPath = assemblyEventDocumentPath;
+        pendingOpenStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        pendingOpenIdleEpoch = -1;
         unknownAddedEpoch = unknownSavedEpoch = 0; unknownRemovalObserved = false;
         unknownLoadOwner = null; unknownLoadOwnerPath = null;
         if (nativeFileOpenCommandId != 0 || !NativeInsertionEvidenceAllowed()
@@ -137,6 +147,7 @@ public sealed partial class PdmAddin
 
     private bool CanStartArchiveRequest()
     {
+        TryCompleteReturnedFileOpen();
         TryCompleteSavedInsertionForArchive();
         var reason = ArchiveRequestBusyReason();
         if (reason == null) return true;
@@ -145,5 +156,48 @@ public sealed partial class PdmAddin
             + Volatile.Read(ref nativeFileOpenInProgress) + " sourceCommand=" + nativeFileOpenCommandId);
         TopMostMessageBox.Show(taskPaneControl, reason, "存档准备提醒", MessageBoxButtons.OK, MessageBoxIcon.Information);
         return false;
+    }
+
+    // File > Open on a STEP-derived child can return to the original assembly
+    // without a post-open notification or an open document for the child.
+    // Only reconcile on a foreground operation. Idle during a native load is
+    // not sufficient evidence to start an assembly scan.
+    private bool TryCompleteReturnedFileOpen()
+    {
+        var epoch = nativeLoadEpoch;
+        var host = pendingOpenHost;
+        var path = pendingOpenPath;
+        bool SameRequest() => nativeFileOpenInProgress != 0 && nativeFileOpenCommandId == 2
+            && (nativeUiCommandId == 0 || nativeUiCommandId == 2) && epoch == nativeLoadEpoch
+            && pendingOpenIdleEpoch == epoch && host != null && ReferenceEquals(host, assemblyEventDocument)
+            && NativeInsertionEvidenceAllowed();
+        if (!SameRequest() || string.IsNullOrWhiteSpace(path)
+            || !(path.EndsWith(".stp.SLDASM", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".step.SLDASM", StringComparison.OrdinalIgnoreCase))
+            || System.Diagnostics.Stopwatch.GetTimestamp() - pendingOpenStarted < 5L * System.Diagnostics.Stopwatch.Frequency)
+            return false;
+        try
+        {
+            if (!application.StartupProcessCompleted || application.CommandInProgress) return false;
+            application.GetRunningCommandInfo(out _, out _, out var active);
+            if (active || !ReferenceEquals(application.ActiveDoc, host) || host.GetBlockingState() != 0
+                || !PathsEqual(host.GetPathName(), pendingOpenHostPath) || PathsEqual(path, assemblyEventDocumentPath))
+                return false;
+            var count = application.GetDocumentCount();
+            var stamp = host.GetUpdateStamp();
+            if (application.GetOpenDocumentByName(path) != null || application.GetDocumentCount() != count
+                || host.GetUpdateStamp() != stamp || !ReferenceEquals(application.ActiveDoc, host)
+                || host.GetBlockingState() != 0 || application.CommandInProgress) return false;
+            application.GetRunningCommandInfo(out _, out _, out active);
+            if (active || !SameRequest()) return false;
+            Interlocked.Exchange(ref nativeFileOpenInProgress, 0);
+            nativeFileOpenCommandId = nativeUiCommandId = 0;
+            pendingOpenHost = null;
+            nativeLoadEpoch++;
+            ScheduleTreeRefresh(forceScan: false);
+            LogOperation("显式操作已核对打开命令返回原装配，恢复结构读取：图档=" + path + "；宿主=" + assemblyEventDocumentPath);
+            return true;
+        }
+        catch (Exception error) { LogDiagnostic("核对原生打开状态", error); return false; }
     }
 }

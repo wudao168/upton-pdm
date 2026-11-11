@@ -1,3 +1,5 @@
+@import './project-release-attention.css';
+@import './production-release-attention.css';
 /* Project-center new releases: right strip in the project list, dot on the release tab. */
 :root body .pdm-project-family__list > button[data-release-attention="new"] {
   position: relative;

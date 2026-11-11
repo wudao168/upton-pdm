@@ -1,4 +1,19 @@
 import { canViewProjectTab } from './projectCenterAccess'
+import type { BonusView, BonusSettings, BonusSettingsView, BonusPerson, BonusEvidence, BonusScore, BonusBook } from './projectBonus'
+export const getProjectBonus = (id: string, token: string) => requestJson<BonusView>(`/api/projects/${id}/bonus`, {}, token)
+export const getProjectBonusHistory = (id: string, token: string) => requestJson<BonusBook[]>(`/api/projects/${id}/bonus/history`, {}, token)
+export const getProjectBonusSettings = (token: string) => requestJson<BonusSettingsView>('/api/settings/project-bonus', {}, token)
+export const saveProjectBonusSettings = (input: BonusSettings, token: string) => requestJson<BonusSettingsView>('/api/settings/project-bonus', { method: 'PUT', body: JSON.stringify(input) }, token)
+export const saveProjectBonus = (id: string, phase: string, input: { expectedRowVersion: number; people: BonusPerson[]; evidence: BonusEvidence[]; milestoneEvidence: string; startScoring: boolean }, token: string) => requestJson<BonusView>(`/api/projects/${id}/bonus/${phase}`, { method: 'PUT', body: JSON.stringify(input) }, token)
+export const scoreProjectBonus = (id: string, phase: string, expectedRowVersion: number, scores: BonusScore[], token: string) => requestJson<BonusView>(`/api/projects/${id}/bonus/${phase}/scores`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, scores }) }, token)
+export const actProjectBonus = (id: string, phase: string, action: string, expectedRowVersion: number, comment: string, token: string) => requestJson<BonusView>(`/api/projects/${id}/bonus/${phase}/${action}`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, comment }) }, token)
+export const payProjectBonus = (id: string, phase: string, input: { expectedRowVersion: number; amount: number; date: string; voucher: string }, token: string) => requestJson<BonusView>(`/api/projects/${id}/bonus/${phase}/payment`, { method: 'POST', body: JSON.stringify(input) }, token)
+import type { ExpenseDirectory, ExpenseView, SaveExpense } from './expenseRequests'
+export const getExpenseRequests = (projectId: string, token: string) => requestJson<ExpenseDirectory>(`/api/projects/${projectId}/expense-requests`, {}, token)
+export const previewExpenseRequest = (projectId: string, input: SaveExpense, token: string) => requestJson<{ steps: string[]; totalAmount: number }>(`/api/projects/${projectId}/expense-requests/preview`, { method: 'POST', body: JSON.stringify(input) }, token)
+export const saveExpenseRequest = (projectId: string, id: string, input: SaveExpense, token: string) => requestJson<ExpenseView>(`/api/projects/${projectId}/expense-requests/${id}`, { method: 'PUT', body: JSON.stringify(input) }, token)
+export const decideExpenseRequest = (projectId: string, id: string, input: { expectedRowVersion: number; approve: boolean; comment: string; businessNote?: string }, token: string) => requestJson<ExpenseView>(`/api/projects/${projectId}/expense-requests/${id}/decision`, { method: 'POST', body: JSON.stringify(input) }, token)
+export const withdrawExpenseRequest = (projectId: string, id: string, expectedRowVersion: number, token: string) => requestJson<ExpenseView>(`/api/projects/${projectId}/expense-requests/${id}/withdraw`, { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token)
 import type { ProductionSupplierCatalog, ProductionSupplierChoices, SaveProductionSupplier } from './productionSuppliers'
 import type { WorkHoursView, SaveWorkHours, MoveWorkHoursDay, WorkHourRevision, WorkHoursManagement, WorkHoursSheet, WorkHoursProject, SaveWorkHoursGroupSettings } from './workHours'
 import type { BrowserCadCapability, BrowserCadTarget, BrowserCadTicket } from './browserCadArchive'
@@ -126,6 +141,13 @@ export function saveProjectOpl(projectId: string, id: string | null, input: OplI
   files.forEach(file => body.append('files', file))
   return requestJson<OplIssue>(`/api/projects/${projectId}/opl${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body }, token)
 }
+export async function transcribeProjectOpl(projectId: string, id: string | null, relatedProjectId: string | null, wave: Blob, token: string, signal: AbortSignal) {
+  const scope = relatedProjectId ? `?relatedProjectId=${encodeURIComponent(relatedProjectId)}` : ''
+  const result = await requestJson<{ text: string }>(`/api/projects/${projectId}/opl${id ? `/${id}` : ''}/speech/transcribe${scope}`, {
+    method: 'POST', body: wave, headers: { 'Content-Type': 'audio/wav' }, signal,
+  }, token, 110000, '录音识别等待超时，录音已保留，可重试。')
+  return result.text
+}
 export async function readOplAttachment(projectId: string, issueId: string, attachmentId: string, token: string, preview = false) {
   let response: Response
   try { response = await fetch(`${apiBase}/api/projects/${projectId}/opl/${issueId}/attachments/${attachmentId}${preview ? '?preview=true' : ''}`, { headers: authenticatedHeaders(token) }) }
@@ -151,12 +173,13 @@ import type { AppendProjectValidationPlanItemsInput, ConfirmValidationPlanExecut
 import { sha256Hex } from './fileHash'
 import type { NameplateTemplate, ProjectNameplate, ProjectNameplateView } from './projectNameplate'
 import type { ProjectContactInformation, ProjectContactInformationView } from './projectContactInformation'
-import type { ProjectApplication, ProjectApplicationInput, ProjectApplicationDetail, ProjectApplicationView, ProjectApplicationApprovalInput } from './projectApplications'
+import type { ProjectApplication, ProjectApplicationInput, ProjectApplicationDetail, ProjectApplicationView, ProjectApplicationApprovalInput, ProjectApplicationContract } from './projectApplications'
 
 export const readProjectApplications = (token: string) => requestJson<ProjectApplicationView>('/api/project-applications', {}, token)
 export const saveApplicationProjectOrderDate = (id: string, input: { orderDate: string | null; expectedOrderDate: string | null }, token: string) => requestJson<{ id: string; signedDate: string | null }>(`/api/project-applications/projects/${id}/order-date`, { method: 'PUT', body: JSON.stringify(input) }, token)
 export const readProjectApplication = (id: string, token: string) => requestJson<ProjectApplicationDetail>(`/api/project-applications/${id}`, {}, token)
 export const saveProjectApplication = (id: string | undefined, input: { data: ProjectApplicationInput; expectedRowVersion: number; submit: boolean }, token: string) => requestJson<ProjectApplication>(`/api/project-applications${id ? `/${id}` : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(input) }, token)
+export const supplementProjectApplicationContract = (id: string, input: { expectedRowVersion: number; contract: ProjectApplicationContract }, token: string) => requestJson<ProjectApplication>(`/api/project-applications/${id}/contract`, { method: 'PUT', body: JSON.stringify(input) }, token)
 export const actProjectApplication = (id: string, action: 'withdraw' | 'return', input: { expectedRowVersion: number; comment?: string }, token: string) => requestJson<ProjectApplication>(`/api/project-applications/${id}/${action}`, { method: 'POST', body: JSON.stringify(input) }, token)
 export const approveProjectApplication = (id: string, input: ProjectApplicationApprovalInput, token: string) => requestJson<ProjectApplication>(`/api/project-applications/${id}/approve`, { method: 'POST', body: JSON.stringify(input) }, token)
 
@@ -555,6 +578,7 @@ interface ApiBomItem {
 }
 
 interface ApiApprovalTask {
+  participants?: ApprovalStep['participants']
   id: string
   stage: number | string
   assignee: string
@@ -644,7 +668,7 @@ export function saveUserTablePreference(key: string, value: string, token: strin
 
 export const listMaterialStockPlans = (token: string) => requestJson<import('./materialStockPlans').MaterialStockPlanSnapshot>('/api/material-stock-plans', {}, token)
 
-async function requestJson<T>(path: string, init: RequestInit = {}, token?: string, timeoutMs = 0, timeoutMessage = 'BOM保存等待超时，服务端保存结果尚未确认。当前修改已保留在页面中，请勿刷新或关闭页面，请核对保存结果后再操作。'): Promise<T> {
+export async function requestJson<T>(path: string, init: RequestInit = {}, token?: string, timeoutMs = 0, timeoutMessage = 'BOM保存等待超时，服务端保存结果尚未确认。当前修改已保留在页面中，请勿刷新或关闭页面，请核对保存结果后再操作。'): Promise<T> {
   if (timeoutMs > 0) {
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -678,7 +702,7 @@ async function performJsonRequest<T>(path: string, init: RequestInit, token?: st
   headers.set('X-PDM-Request-ID', diagnosticId)
   const requestStarted = performance.now()
   headers.set('Accept', 'application/json')
-  if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json')
+  if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   if (token) headers.set('Authorization', `Bearer ${token}`)
   const activeCompanyId = window.localStorage.getItem('pdm_active_organization')
   if (activeCompanyId && (token || path === '/api/auth/resume') && !headers.has('X-Company-Id')) headers.set('X-Company-Id', activeCompanyId)
@@ -720,6 +744,12 @@ function authenticatedHeaders(token: string): Headers {
   const activeCompanyId = window.localStorage.getItem('pdm_active_organization')
   if (activeCompanyId) headers.set('X-Company-Id', activeCompanyId)
   return headers
+}
+
+export async function readSparePartFile(path: string, token: string): Promise<Blob> {
+  const response = await fetch(`${apiBase}/api/spare-parts/${path}`, { headers: authenticatedHeaders(token), cache: 'no-store' })
+  if (!response.ok) throw new PdmApiError(response.status === 403 ? '当前账号没有此项权限。' : '读取文件失败，请刷新后重试。', response.status)
+  return response.blob()
 }
 
 export function readValidationCheckCatalog(token: string, includeInactive = false, scope = ''): Promise<ValidationCheckCatalog> {
@@ -780,8 +810,8 @@ export function transferValidationPlanApproval(taskId: string, newAssignee: stri
   return requestJson<ProjectValidationPlan>(`/api${scope}/validation-plan-approval-tasks/${taskId}/transfer`, { method: 'POST', body: JSON.stringify({ newAssignee }) }, token)
 }
 
-export function decideValidationPlanApproval(taskId: string, decision: 'Approved' | 'Rejected', comment: string, token: string, scope = ''): Promise<ProjectValidationPlan> {
-  return requestJson<ProjectValidationPlan>(`/api${scope}/validation-plan-approval-tasks/${taskId}/decision`, { method: 'POST', body: JSON.stringify({ decision: decision === 'Approved' ? 0 : 1, comment }) }, token)
+export function decideValidationPlanApproval(taskId: string, decision: 'Approved' | 'Rejected', comment: string, token: string, scope = '', businessNote?: string): Promise<ProjectValidationPlan> {
+  return requestJson<ProjectValidationPlan>(`/api${scope}/validation-plan-approval-tasks/${taskId}/decision`, { method: 'POST', body: JSON.stringify({ decision: decision === 'Approved' ? 0 : 1, comment, businessNote }) }, token)
 }
 
 export function listMyValidationPlanApprovalTasks(token: string, scope = ''): Promise<ValidationPlanApprovalTaskSummary[]> {
@@ -1207,6 +1237,20 @@ export function expandEngineeringKit(kitId: string, input: { revisionId?: string
 export function listMaterialRelationTemplates(token: string, includeDraft = false): Promise<MaterialRelationTemplate[]> {
   return requestJson<MaterialRelationTemplate[]>(`/api/material-relations/templates${includeDraft ? '?includeDraft=true' : ''}`, {}, token)
 }
+
+export function setMaterialRelationActive(templateId: string, isActive: boolean, expectedRowVersion: number, token: string) {
+  return requestJson<MaterialRelationTemplate>(`/api/material-relations/templates/${templateId}/active`, {
+    method: 'PUT', body: JSON.stringify({ isActive, expectedRowVersion }),
+  }, token)
+}
+
+export function deleteMaterialRelationDraft(templateId: string, expectedRowVersion: number, token: string) {
+  return requestJson<void>(`/api/material-relations/templates/${templateId}?expectedRowVersion=${expectedRowVersion}`, { method: 'DELETE' }, token)
+}
+
+export function deleteEngineeringKitDraft(kitId: string, expectedRowVersion: number, token: string) {
+  return requestJson<void>(`/api/engineering-kits/${kitId}?expectedRowVersion=${expectedRowVersion}`, { method: 'DELETE' }, token)
+}
 export const listMaterialRelationMainOptions = (token: string, query = '') => requestJson<import('./types').MaterialRelationMainMaterial[]>(`/api/material-relations/main-options?${new URLSearchParams({ query })}`, {}, token)
 export const listMaterialRelationCategories = (token: string) => requestJson<StandardLibraryCategory[]>('/api/material-relations/categories', {}, token)
 export const getMaterialRelationCategories = (materialId: string, token: string) => requestJson<StandardLibraryCategory[]>(`/api/material-relations/materials/${materialId}/categories`, {}, token)
@@ -1282,8 +1326,8 @@ export async function listMaterialCodeApplications(token: string, projectId?: st
   })
 }
 
-export function decideMaterialCodeApplication(applicationId: string, expectedRowVersion: number, approved: boolean, comment: string, token: string, categoryCode?: string, emergencySubstitute = false, emergencyReason?: string): Promise<MaterialCodeDecisionResult> {
-  return requestJson(`/api/material-code/applications/${applicationId}/decision`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, approved, comment, categoryCode, emergencySubstitute, emergencyReason }) }, token)
+export function decideMaterialCodeApplication(applicationId: string, expectedRowVersion: number, approved: boolean, comment: string, token: string, categoryCode?: string, emergencySubstitute = false, emergencyReason?: string, businessNote?: string): Promise<MaterialCodeDecisionResult> {
+  return requestJson(`/api/material-code/applications/${applicationId}/decision`, { method: 'POST', body: JSON.stringify({ expectedRowVersion, approved, comment, categoryCode, emergencySubstitute, emergencyReason, businessNote }) }, token)
 }
 
 export function withdrawMaterialCodeApplication(applicationId: string, expectedRowVersion: number, token: string): Promise<MaterialCodeApplication> {
@@ -1833,6 +1877,18 @@ function mapOrganizationUnit(unit: Omit<OrganizationUnit, 'kind'> & { kind: stri
   return { ...unit, kind: typeof unit.kind === 'string' ? unit.kind as OrganizationUnit['kind'] : ['BusinessDivision', 'Department', 'Team'][unit.kind] as OrganizationUnit['kind'] }
 }
 
+export function listCompanyBusinessDetails(token: string) {
+  return requestJson<import('./companyBusinessDetails').CompanyBusinessDetailsStatus[]>('/api/organizations/business-details', {}, token)
+}
+
+export function readCompanyBusinessDetails(companyId: string, kind: import('./companyBusinessDetails').CompanyBusinessDetailsKind, token: string) {
+  return requestJson<import('./companyBusinessDetails').CompanyBusinessDetails>(`/api/organizations/${companyId}/business-details/${kind}`, {}, token)
+}
+
+export function saveCompanyBusinessDetails(companyId: string, kind: import('./companyBusinessDetails').CompanyBusinessDetailsKind, input: import('./companyBusinessDetails').CompanyBusinessDetails, token: string) {
+  return requestJson<import('./companyBusinessDetails').CompanyBusinessDetails>(`/api/organizations/${companyId}/business-details/${kind}`, { method: 'PUT', body: JSON.stringify(input) }, token)
+}
+
 export function updateOrganizationMemberships(username: string, unitIds: string[], primaryUnitId: string, token: string): Promise<OrganizationDirectory> {
   return requestJson(`/api/organization-users/${encodeURIComponent(username)}/memberships`, {
     method: 'PUT', body: JSON.stringify({ unitIds, primaryUnitId }),
@@ -2261,8 +2317,8 @@ export async function listCadPropertyWritebackVersions(projectId: string, token:
   })
 }
 
-export function submitReleasePackage(releasePackageId: string, token: string): Promise<ApiReleasePackage> {
-  return requestJson(`/api/release-packages/${releasePackageId}/submit`, { method: 'POST' }, token)
+export async function submitReleasePackage(releasePackageId: string, token: string): Promise<ReleasePackageSummary> {
+  return mapReleasePackage(await requestJson<ApiReleasePackage>(`/api/release-packages/${releasePackageId}/submit`, { method: 'POST' }, token))
 }
 
 export function withdrawReleasePackage(releasePackageId: string, comment: string, token: string): Promise<ApiReleasePackage> {
@@ -2348,8 +2404,8 @@ export function obsoleteDocument(documentId: string, comment: string, token: str
   return requestJson(`/api/documents/${documentId}/obsolete`, { method: 'POST', body: JSON.stringify({ comment }) }, token)
 }
 
-export function decideApproval(taskId: string, decision: 'Approved' | 'Rejected', comment: string, token: string): Promise<ApiReleasePackage> {
-  return requestJson(`/api/approval-tasks/${taskId}/decision`, { method: 'POST', body: JSON.stringify({ decision: decision === 'Approved' ? 0 : 1, comment }) }, token)
+export function decideApproval(taskId: string, decision: 'Approved' | 'Rejected', comment: string, token: string, businessNote?: string): Promise<ApiReleasePackage> {
+  return requestJson(`/api/approval-tasks/${taskId}/decision`, { method: 'POST', body: JSON.stringify({ decision: decision === 'Approved' ? 0 : 1, comment, businessNote }) }, token)
 }
 
 export function listApprovalTransferCandidates(taskId: string, token: string): Promise<ApprovalTransferCandidate[]> {
@@ -2453,6 +2509,10 @@ export async function readProjectWorkbench(view: string, token: string, scope = 
   return { ...data, projects: data.projects.map(item => ({ ...item, project: mapProject(item.project) })) }
 }
 
+export function readProjectRiskOverview(projectId: string, token: string, signal?: AbortSignal): Promise<import('./projectAttention').ProjectRiskOverviewProject[]> {
+  return requestJson(`/api/projects/${projectId}/risk-overview`, { signal }, token)
+}
+
 export async function readProjectCalendar(token: string, signal?: AbortSignal): Promise<import('./projectWorkbench').WorkbenchData> {
   type Data = import('./projectWorkbench').WorkbenchData
   const data = await requestJson<Omit<Data, 'projects'> & { projects: Array<Omit<Data['projects'][number], 'project'> & { project: ApiProject }> }>('/api/project-calendar', { signal }, token)
@@ -2477,6 +2537,10 @@ export function generateProjectPlan(projectId: string, input: { templateId: stri
 
 export function saveProjectPlan(projectId: string, input: { tasks: import('./types').ProjectPlanTask[]; changeReason: string; expectedRowVersion: number; stages?: import('./types').ProjectPlanStageDefinition[]; createMissingFollowers?: boolean }, token: string): Promise<import('./types').ProjectPlan> {
   return requestJson(`/api/projects/${projectId}/plan`, { method: 'PUT', body: JSON.stringify(input) }, token)
+}
+
+export function saveProjectPlanHolidays(projectId: string, holidays: import('./types').ProjectPlanHoliday[], expectedRowVersion: number, token: string): Promise<import('./types').ProjectPlan> {
+  return requestJson(`/api/projects/${projectId}/plan/holidays`, { method: 'PUT', body: JSON.stringify({ holidays, expectedRowVersion }) }, token)
 }
 
 export function deleteProjectPlan(projectId: string, expectedRowVersion: number, includeIndependentChildren: boolean, token: string): Promise<void> {
@@ -3244,6 +3308,7 @@ function mapReleasePackage(releasePackage: ApiReleasePackage): ReleasePackageSum
       id: task.id,
       stage,
       assignee: task.assignee,
+      participants: task.participants,
       status,
       detail: decision === 'Approved' ? `已同意${decisionTime ? ` · ${decisionTime}` : ''}`
         : decision === 'Rejected' ? `已退回${decisionTime ? ` · ${decisionTime}` : ''}`
@@ -3372,7 +3437,7 @@ function mapReferenceStatus(value: number | string): ReferenceStatus {
 
 function approvalStage(value: number | string): string {
   const key = typeof value === 'number' ? ({ 1: 'ProcessReview', 2: 'Approval', 10: 'MechanicalEngineer', 20: 'MainDesigner', 30: 'MechanicalSupervisor', 40: 'HardwareEngineer', 50: 'HardwareSupervisor', 60: 'StandardizationSupervisor' } as Record<number, string>)[value] : value
-  return ({ ProcessReview: '工艺审核', Approval: '批准', MechanicalEngineer: '机械工程师自检', MainDesigner: '主设审核', MechanicalSupervisor: '机械主管批准', HardwareEngineer: '硬件工程师自检', HardwareSupervisor: '硬件主管审核', StandardizationSupervisor: '标准化主管批准' } as Record<string, string>)[key] ?? String(value)
+  return ({ ProcessReview: '工艺审核', Approval: '批准', MechanicalEngineer: '机械工程师自检', MainDesigner: '主设计审核', MechanicalSupervisor: '机械主管批准', HardwareEngineer: '硬件工程师自检', HardwareSupervisor: '硬件主管审核', StandardizationSupervisor: '标准化主管批准' } as Record<string, string>)[key] ?? String(value)
 }
 
 function releaseState(value: number | string): string {
@@ -3485,3 +3550,40 @@ export const saveArchiveWarningPolicy = (policy: ArchiveWarningPolicy, token: st
 export interface MaterialBrand { id: string; name: string; isActive: boolean; rowVersion: number; previousNames: string[] }
 export const listMaterialBrandCatalog = (token: string) => requestJson<MaterialBrand[]>('/api/material-brands', {}, token)
 export const saveMaterialBrand = (id: string | undefined, input: { name: string; isActive: boolean; rowVersion?: number }, token: string) => requestJson<MaterialBrand>(id ? '/api/material-brands/' + id : '/api/material-brands', { method: id ? 'PUT' : 'POST', body: JSON.stringify(input) }, token)
+
+export const listProjectActivities = (token: string, signal?: AbortSignal) => requestJson<import("./projectActivity").ProjectActivity[]>("/api/project-activities/mine", { signal }, token, 15000, "项目动态暂未更新，请稍后重试。")
+
+export const readProjectReporting = (token: string, signal?: AbortSignal) => requestJson<import('./projectReporting').ReportingData>('/api/project-report', { signal }, token, 120000, '项目报表读取失败，请稍后刷新重试。')
+
+const projectFileFormPath = (projectId: string, kind: import('./projectFileForms').ProjectFileFormKind, id?: string) =>
+  '/api/projects/' + projectId + '/files/' + kind + (id ? '/' + id : '')
+
+export async function downloadProjectAcceptanceExcel(projectId: string, kind: import('./projectFileForms').ProjectFileFormKind, id: string, fileName: string, token: string) {
+  const response = await fetch(`${apiBase}/api/projects/${projectId}/files/${kind}/${id}/excel`, { headers: authenticatedHeaders(token) })
+  if (!response.ok) {
+    const problem = await response.json().catch(() => null)
+    throw new PdmApiError(problem?.detail || '验收单下载失败，请核对填写内容和项目导出权限。', response.status)
+  }
+  const url = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}
+
+export const listProjectFileForms = (projectId: string, kind: import('./projectFileForms').ProjectFileFormKind, token: string, signal?: AbortSignal) =>
+  requestJson<import('./projectFileForms').ProjectFileFormIndex>(projectFileFormPath(projectId, kind), { signal }, token)
+
+export const readProjectFileForm = (projectId: string, kind: import('./projectFileForms').ProjectFileFormKind, id: string, token: string) =>
+  requestJson<import('./projectFileForms').ProjectFileForm>(projectFileFormPath(projectId, kind, id), {}, token)
+
+export const saveProjectFileForm = (projectId: string, kind: import('./projectFileForms').ProjectFileFormKind, id: string,
+  input: { expectedRowVersion: number; data: import('./projectFileForms').ProjectFileFormData }, token: string) =>
+  requestJson<import('./projectFileForms').ProjectFileForm>(projectFileFormPath(projectId, kind, id),
+    { method: 'PUT', body: JSON.stringify(input) }, token, 60000, '草稿保存失败，请保留当前内容并重试。')
+
+export const archiveProjectFileForm = (projectId: string, kind: import('./projectFileForms').ProjectFileFormKind, id: string,
+  expectedRowVersion: number, token: string) =>
+  requestJson<import('./projectFileForms').ProjectFileFormSummary>(projectFileFormPath(projectId, kind, id) + '/archive',
+    { method: 'POST', body: JSON.stringify({ expectedRowVersion }) }, token, 120000, '生成存档失败，请检查项目文件目录后重试。')

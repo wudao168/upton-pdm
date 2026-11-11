@@ -1,0 +1,27 @@
+/* 制造项目/发布包：右侧提示条与左侧选中条对称，不使用环形闪烁。 */
+@layer pdm-button-sizing {
+  :root body .production-workbench .production-workbench__tree button:is(
+    .production-workbench__project,
+    .production-workbench__package
+  ).is-release-attention {
+    padding-right: 15px !important;
+  }
+}
+
+:root body .production-workbench .production-workbench__tree button:is(
+  .production-workbench__project,
+  .production-workbench__package
+) > .pdm-release-attention-border {
+  position: absolute;
+  inset: 8px 0 8px auto;
+  width: 4px;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  mask: none;
+  background: var(--release-border-color);
+  pointer-events: none;
+  animation: none;
+  opacity: 1;
+}

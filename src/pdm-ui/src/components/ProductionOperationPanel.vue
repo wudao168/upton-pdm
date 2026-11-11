@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
+import { useUserDisplayName as usePersonDisplayName } from '../userDisplay'
+const displayUserName = usePersonDisplayName()
 import { vQuantity } from '../quantityInput'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { PdmApiError, cancelUnassignedProductionDemand, readProductionActions, readProductionTrackingRelease, recordProductionMovement } from '../api'
@@ -190,8 +193,8 @@ async function printLabel() {
       <p v-if="demandAttempt">待核实上次需求取消：{{ demandAttempt.quantity }}。重试沿用同一操作编号，不重复扣减。</p>
       <button type="button" :disabled="pending || Boolean(attempt)" @click="cancelDemand">{{ demandAttempt ? '重试取消未分配需求' : '确认取消未分配需求' }}</button>
     </details>
-    <details v-if="demandHistory.length"><summary>未分配需求取消记录（{{ demandHistory.length }}）</summary><p v-for="item in demandHistory" :key="item.requestId">取消 {{ item.quantity }} · {{ item.actor }} · {{ item.reason }} · {{ new Date(item.occurredAt).toLocaleString('zh-CN', { hour12: false }) }}</p></details>
-    <details v-if="lot" class="production-operation__history"><summary>完整操作记录（{{ history.length }}）</summary><ol><li v-for="item in history" :key="item.id"><strong>{{ item.operationName || productionMovementLabels[item.kind] || '流程办理' }} · {{ item.quantity }}</strong><p>{{ item.actorName || item.actor }}（{{ item.actor }}） · {{ new Date(item.occurredAt).toLocaleString('zh-CN', { hour12: false }) }}</p><p v-if="item.workstationName">{{ productionPosts[item.post || ''] }} · {{ item.workstationName }}{{ item.resourceGroup ? ` · ${item.resourceGroup}` : '' }}</p><p v-if="item.fromStage || item.toStage">{{ item.fromStage }} → {{ item.toStage }}</p><p v-if="item.recipient">实际领用人：{{ item.recipient }}</p><p v-if="item.note">{{ item.note }}</p><small>记录编号：{{ item.id }}</small></li></ol><p v-if="!history.length">暂无操作记录</p></details>
+    <details v-if="demandHistory.length"><summary>未分配需求取消记录（{{ demandHistory.length }}）</summary><p v-for="item in demandHistory" :key="item.requestId">取消 {{ item.quantity }} · <PersonName :name="displayUserName(item.actor)" /> · {{ item.reason }} · {{ new Date(item.occurredAt).toLocaleString('zh-CN', { hour12: false }) }}</p></details>
+    <details v-if="lot" class="production-operation__history"><summary>完整操作记录（{{ history.length }}）</summary><ol><li v-for="item in history" :key="item.id"><strong>{{ item.operationName || productionMovementLabels[item.kind] || '流程办理' }} · {{ item.quantity }}</strong><p><PersonName :name="item.actorName || displayUserName(item.actor)" />（<PersonName :name="displayUserName(item.actor)" />） · {{ new Date(item.occurredAt).toLocaleString('zh-CN', { hour12: false }) }}</p><p v-if="item.workstationName">{{ productionPosts[item.post || ''] }} · {{ item.workstationName }}{{ item.resourceGroup ? ` · ${item.resourceGroup}` : '' }}</p><p v-if="item.fromStage || item.toStage">{{ item.fromStage }} → {{ item.toStage }}</p><p v-if="item.recipient">实际领用人：{{ item.recipient }}</p><p v-if="item.note">{{ item.note }}</p><small>记录编号：{{ item.id }}</small></li></ol><p v-if="!history.length">暂无操作记录</p></details>
   </section>
 </template>
 <style scoped>

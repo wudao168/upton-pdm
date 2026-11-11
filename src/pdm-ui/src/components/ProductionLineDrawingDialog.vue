@@ -3,7 +3,7 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 import PdfDrawingViewer from './PdfDrawingViewer.vue'
 import NameplateContentPanel from './NameplateContentPanel.vue'
 import { downloadProductionDrawingFile, listProductionDrawings, readProductionDrawingPreview } from '../api'
-import type { ProductionDrawingItem } from '../types'
+import type { ProductionDrawingItem, ProductionDrawingModelFile } from '../types'
 import type { ProductionLine, ProductionReleaseState } from '../productionTracking'
 import { ElMessage } from '../statusMessage'
 import { userErrorMessage } from '../userErrorMessage'
@@ -26,11 +26,12 @@ async function preview(item: ProductionDrawingItem) {
   } catch (cause) { if (!disposed && current === generation) failure(cause) }
   finally { if (!disposed && current === generation) pending.value = false }
 }
-async function download(item: ProductionDrawingItem, closeAfter = false) {
+async function download(item: ProductionDrawingItem, model?: ProductionDrawingModelFile) {
   pending.value = true; error.value = ''
   try {
-    await downloadProductionDrawingFile(item, 'Pdf', props.token)
-    if (!disposed) { ElMessage.success('正式图纸已交给浏览器保存'); if (closeAfter) emit('close') }
+    if (model) await downloadProductionDrawingFile(item, 'Step', props.token, undefined, model)
+    else await downloadProductionDrawingFile(item, 'Pdf', props.token)
+    if (!disposed) ElMessage.success(`正式 ${model ? 'STEP' : 'PDF'} 已交给浏览器保存`)
   } catch (cause) { if (!disposed && !(cause instanceof DOMException && cause.name === 'AbortError')) failure(cause) }
   finally { if (!disposed) pending.value = false }
 }
@@ -41,10 +42,8 @@ onMounted(async () => {
     if (disposed) return
     drawings.value = drawingsForProductionLine(items, props.state, props.line)
     if (!drawings.value.length) error.value = '该物料在此发布包中没有可用的正式图纸，请到图纸资料核对。'
-    else if (drawings.value.length === 1 && drawings.value[0].pdfReady) {
-      if (props.action === 'download') await download(drawings.value[0], true)
-      else await preview(drawings.value[0])
-    }
+    else if (props.action === 'preview' && drawings.value.length === 1 && drawings.value[0].pdfReady)
+      await preview(drawings.value[0])
   } catch (cause) { if (!disposed) failure(cause) }
   finally { if (!disposed) loading.value = false }
 })
@@ -57,7 +56,7 @@ onMounted(async () => {
       <p class="production-line-drawings__context" :title="`${state.packageNumber} · ${line.drawingNumber} · ${line.name}`">{{ state.packageNumber }} · {{ line.drawingNumber }} · {{ line.name }}</p>
       <p v-if="loading" role="status">正在读取发布包图纸…</p><p v-if="error" role="alert">{{ error }}</p>
       <p v-if="pending" role="status">正在读取正式图纸，请稍候…</p>
-      <PdfDrawingViewer :url="url" fill-height><template #toolbar><div class="production-line-drawings__files"><div v-for="item in drawings" :key="`${item.releasePackageId}-${item.versionId}`"><strong>{{ item.drawingNumber }} · {{ item.revision }}</strong><span v-if="!item.isCurrent">历史正式版</span><span v-if="!item.pdfReady">PDF 待转换</span><template v-else><el-button :disabled="pending" @click="preview(item)">预览</el-button><el-button :disabled="pending" @click="download(item)">下载 PDF</el-button></template></div></div></template></PdfDrawingViewer>
+      <PdfDrawingViewer :url="url" fill-height><template #toolbar><div class="production-line-drawings__files"><div v-for="item in drawings" :key="`${item.releasePackageId}-${item.versionId}`"><strong>{{ item.drawingNumber }} · {{ item.revision }}</strong><span v-if="!item.isCurrent">历史正式版</span><span v-if="!item.pdfReady">PDF 待转换</span><template v-else><el-button :disabled="pending" @click="preview(item)">预览</el-button><el-button :disabled="pending" @click="download(item)">下载 PDF</el-button></template><span v-if="!item.modelFiles?.length">未关联发布包冻结模型，请联系项目负责人核对</span><template v-for="model in item.modelFiles" :key="model.documentId"><el-button v-if="model.stepReady && model.versionId" :disabled="pending" :title="model.drawingNumber" @click="download(item, model)">下载 STEP{{ item.modelFiles!.length > 1 ? ` · ${model.drawingNumber}` : '' }}</el-button><span v-else>{{ model.drawingNumber }} · STEP 待转换</span></template></div></div></template></PdfDrawingViewer>
       <small v-if="selected?.legacyUnverified">历史图面未校验，图面标记可能与系统记录不同。</small>
     </section>
     <template #footer><el-button @click="emit('close')">关闭</el-button></template>

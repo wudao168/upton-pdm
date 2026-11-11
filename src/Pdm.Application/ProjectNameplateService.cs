@@ -56,13 +56,13 @@ public sealed class ProjectNameplateService(IPdmRepository repository, IProjectN
         var family = projects.Where(item => item.CanReadContent && (item.RootProjectId ?? item.ParentProjectId ?? item.Id) == rootId).ToArray();
         var values = (await nameplates.ListAsync(family.Select(item => item.Id).ToArray(), ct)).ToDictionary(item => item.ProjectId);
         var permission = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectNameplateEdit, ct);
-        return family.Select(project =>
+        return (await Task.WhenAll(family.Select(async project =>
         {
             var plate = values.GetValueOrDefault(project.Id) ?? new(project.Id);
-            var assigned = role == UserRole.Administrator || project.Designers.Contains(actor, StringComparer.OrdinalIgnoreCase)
-                || project.PhaseOwners.GetValueOrDefault("ElectricalHardware", "").Split('、', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Contains(actor, StringComparer.OrdinalIgnoreCase);
+            var assigned = await AuthorizationPolicy.CanAsync(repository, project.Id, actor, "project.nameplate.execution.edit", ct)
+                || await AuthorizationPolicy.CanAsync(repository, project.Id, actor, "project.nameplate.hardware.edit", ct);
             return new ProjectNameplateAccessSummary(project.Id, plate, permission && assigned && plate.ReleasePackageId is null);
-        }).ToArray();
+        }))).ToArray();
     }
 
     public async Task<ProjectNameplateView> GetAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
@@ -73,17 +73,16 @@ public sealed class ProjectNameplateService(IPdmRepository repository, IProjectN
         var released = plate.ReleasePackageId.HasValue ? await repository.FindReleasePackageAsync(plate.ReleasePackageId.Value, ct) : null;
         var content = released?.NonStandardBomSnapshot.FirstOrDefault()?.NameplateContent;
         var permission = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectNameplateEdit, ct);
-        var execution = permission && (role == UserRole.Administrator || project.Designers.Contains(actor, StringComparer.OrdinalIgnoreCase));
-        var hardware = permission && project.PhaseOwners.GetValueOrDefault("ElectricalHardware", "")
-            .Split('、', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Contains(actor, StringComparer.OrdinalIgnoreCase);
+        var execution = permission && await AuthorizationPolicy.CanAsync(repository, projectId, actor, "project.nameplate.execution.edit", ct);
+        var hardware = permission && await AuthorizationPolicy.CanAsync(repository, projectId, actor, "project.nameplate.hardware.edit", ct);
         return new(plate, content?.Name ?? project.Name, content?.Model ?? project.DeviceModel ?? "",
             released is null ? project.SerialNumbers : released.NonStandardBomSnapshot.Select(item => item.NameplateContent!.SerialNumber).ToArray(),
             await nameplates.ReadTemplateAsync(ct) ?? NameplateTemplate.Default,
-            (execution || hardware || permission && role == UserRole.Administrator) && plate.ReleasePackageId is null,
+            (execution || hardware) && plate.ReleasePackageId is null,
             await repository.HasUserPermissionAsync(actor, role, PermissionCodes.NameplateTemplateManage, ct))
         {
             CanEditExecution = execution,
-            CanEditHardware = hardware || permission && role == UserRole.Administrator,
+            CanEditHardware = hardware,
             CanConfirm = hardware && plate.ReleasePackageId is null
         };
     }

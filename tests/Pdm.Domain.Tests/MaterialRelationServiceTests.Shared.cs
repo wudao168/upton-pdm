@@ -11,6 +11,44 @@ public sealed partial class MaterialRelationServiceTests
             [new("垫圈", true, MaterialRelationSelectionMode.Single, 1, 1, false, 1, [new(accessory.Id, MaterialRelationQuantityMode.PerMainQuantity, 2, false, 1)])], mains.Select(item => item.Id).ToArray());
 
     [Fact]
+    public async Task RetiredRulesKeepExistingBomBoundToItsRevisionAndSkipNewRows()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        var company = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First().Id;
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "admin", "关联配置测试员", "unused", UserRole.Administrator, true, CompanyId: company), default);
+        var materials = new InMemoryMaterialRepository(TimeProvider.System);
+        var store = new InMemoryMaterialRelationRepository();
+        var service = new MaterialRelationService(store, materials, repository, TimeProvider.System);
+        var material = await AddApprovedMaterialAsync(materials, MaterialKind.Standard, "0102", "MAIN-STOP", "主料");
+        var part = await AddApprovedMaterialAsync(materials, MaterialKind.Standard, "0102", "PART-STOP", "垫圈");
+        var draft = await service.SaveDraftAsync(null, SharedCommand(part, material), "admin", UserRole.Administrator, default);
+        var original = await service.PublishAsync(draft.Id, draft.DraftRevision!.Id, draft.DraftRevision.RowVersion, "admin", UserRole.Administrator, default);
+        var group = original.PublishedRevision!.Groups.Single();
+        var project = await repository.CreateProjectAsync(new("RETIRED-BOM", "停用关联配置", "admin", "vault", "release"), "admin", default);
+        var main = new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, 1, material.MaterialCode, material.Name, 2, "001", null, null, "W1", true);
+        await repository.ReplaceBomAsync(project.Id, BomKind.Standard, [main], default);
+        ApplyMaterialRelationsCommand selection = new(main.Id, [new(group.Id, [group.Options.Single().Id])]);
+        Assert.True((await service.ApplyAsync(project.Id, [selection], "admin", UserRole.Administrator, default)).IsComplete);
+
+        var second = await service.SaveDraftAsync(draft.Id, SharedCommand(part, material), "admin", UserRole.Administrator, default);
+        var latest = await service.PublishAsync(draft.Id, second.DraftRevision!.Id, second.DraftRevision.RowVersion, "admin", UserRole.Administrator, default);
+        var retired = await store.SetActiveAsync(draft.Id, false, latest.RowVersion, "admin", DateTimeOffset.UtcNow, default);
+        var existing = await repository.GetBomAsync(project.Id, BomKind.Standard, default);
+        var fresh = main with { Id = Guid.NewGuid(), Sequence = 3 };
+        await repository.ReplaceBomAsync(project.Id, BomKind.Standard, existing.Append(fresh).ToArray(), default);
+        var check = Assert.Single((await service.GetCompletenessAsync(project.Id, "admin", UserRole.Administrator, default)).MainMaterials);
+        Assert.Equal(main.Id, check.MainBomItemId);
+        Assert.Equal(original.PublishedRevision.Id, check.RevisionId);
+        Assert.True(check.IsArchived);
+        Assert.True(check.IsComplete);
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.ApplyAsync(project.Id, [selection], "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.ApplyAsync(project.Id, [selection with { MainBomItemId = fresh.Id }], "admin", UserRole.Administrator, default));
+        var replacement = await service.SaveDraftAsync(null, SharedCommand(part, material), "admin", UserRole.Administrator, default);
+        Assert.NotEqual(draft.Id, replacement.Id);
+        await Assert.ThrowsAsync<PdmConflictException>(() => store.SetActiveAsync(draft.Id, true, retired.RowVersion, "admin", DateTimeOffset.UtcNow, default));
+    }
+
+    [Fact]
     public async Task SharedRangeIsDraftedThenPublishedAndRemovedAnchorCanJoinAnotherGroup()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);

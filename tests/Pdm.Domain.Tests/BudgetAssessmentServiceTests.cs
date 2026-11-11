@@ -18,7 +18,7 @@ public sealed class BudgetAssessmentServiceTests
         Assert.Equal(300, main.Amounts["Standard"]);
         Assert.Equal(300, main.Amounts["MechanicalDesign"]);
         Assert.Equal(800, main.Amounts["Equipment"]);
-        Assert.False(main.Sheets[0].CanEdit);
+        Assert.True(main.Sheets[0].CanEdit);
         var sub = await service.GetAsync(child.Id, "engineer", UserRole.Engineer, default);
         Assert.Single(sub.Sheets);
         Assert.Equal(50, sub.Amounts["Standard"]);
@@ -43,6 +43,7 @@ public sealed class BudgetAssessmentServiceTests
         Assert.Equal("子项目评估备注", Assert.Single(view.Sheets.Single(sheet => sheet.ProjectId == child.Id).Notes!).Content);
         var saved = await service.SaveAsync(root.Id, new([Group("Standard", null, 2, 100)], 2), "engineer", UserRole.Engineer, default);
         Assert.Equal("主项目评估备注", Assert.Single(saved.Sheets.Single(sheet => sheet.ProjectId == root.Id).Notes!).Content);
+        Assert.Contains((await store.FindAsync(root.Id, default))!.Notes!, note => note.Content == "主项目评估备注");
         Assert.Equal(200, saved.Amounts["Standard"]);
     }
 
@@ -51,7 +52,7 @@ public sealed class BudgetAssessmentServiceTests
     {
         var (service, _, _, root) = await Setup();
         var groups = new[] { Group("Standard", null, 1, 100) };
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(root.Id, new(groups, 0), "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(root.Id, new(groups, 0), "unassigned", UserRole.Administrator, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, new([groups[0] with { Category = "RiskReserve" }], 0), "engineer", UserRole.Engineer, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, new([groups[0] with { Category = "Labor", LaborCategory = null }], 0), "engineer", UserRole.Engineer, default));
         await Assert.ThrowsAsync<PdmRuleException>(() => service.SaveAsync(root.Id, new([groups[0] with { Items = [new(Guid.NewGuid(), "错误", Quantity: -1, UnitPrice: 1)] }], 0), "engineer", UserRole.Engineer, default));
@@ -61,7 +62,7 @@ public sealed class BudgetAssessmentServiceTests
     [InlineData("manager")]
     [InlineData("MANAGER")]
     [InlineData("collaborator")]
-    public async Task MainProjectManagersCanEditAndSaveTheirProjectAndChildAssessments(string actor)
+    public async Task MainProjectManagersWithoutDesignAppointmentCannotReadOrEditBudgetAssessments(string actor)
     {
         var (service, repository, store, root) = await Setup();
         var child = await repository.CreateSubprojectAsync(new(root.Id, "子项目", null, 1), default);
@@ -69,22 +70,19 @@ public sealed class BudgetAssessmentServiceTests
 
         var directory = await service.GetAsync(root.Id, actor, UserRole.Engineer, default);
         Assert.Equal(2, directory.Sheets.Count);
-        Assert.All(directory.Sheets, sheet => Assert.True(sheet.CanEdit));
+        Assert.All(directory.Sheets, sheet => { Assert.False(sheet.CanEdit); Assert.Empty(sheet.Groups); Assert.Null(sheet.Total); });
         Assert.False(directory.CanEditLaborRates);
         foreach (var project in new[] { root, child })
         {
-            var saved = await service.SaveAsync(project.Id, new([Group("Standard", null, 2, 125)], 0), actor, UserRole.Engineer, default);
-            var sheet = saved.Sheets.Single(item => item.ProjectId == project.Id);
-            Assert.True(sheet.CanEdit);
-            Assert.Equal(250, sheet.Total);
-            Assert.Equal(actor, (await store.FindAsync(project.Id, default))!.AssessmentUpdatedBy);
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(project.Id, new([Group("Standard", null, 2, 125)], 0), actor, UserRole.Engineer, default));
+            Assert.Null(await store.FindAsync(project.Id, default));
         }
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveLaborRatesAsync(root.Id,
             new(new Dictionary<string, decimal?> { ["MechanicalDesign"] = 100 }, 0), actor, UserRole.Engineer, default));
     }
 
     [Fact]
-    public async Task ChildProjectManagerCanOnlyEditTheirAssignedChild()
+    public async Task ChildProjectManagerCannotUseAssignmentToGainBudgetAssessmentAccess()
     {
         var (service, repository, store, root) = await Setup();
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView], default);
@@ -93,11 +91,10 @@ public sealed class BudgetAssessmentServiceTests
         await repository.SetChildProjectManagerAsync(child.Id, "child-manager", "admin", default);
 
         var directory = await service.GetAsync(root.Id, "child-manager", UserRole.Engineer, default);
-        Assert.True(directory.Sheets.Single(sheet => sheet.ProjectId == child.Id).CanEdit);
+        Assert.False(directory.Sheets.Single(sheet => sheet.ProjectId == child.Id).CanEdit);
         Assert.False(directory.Sheets.Single(sheet => sheet.ProjectId == root.Id).CanEdit);
         Assert.False(directory.Sheets.Single(sheet => sheet.ProjectId == sibling.Id).CanEdit);
-        var saved = await service.SaveAsync(child.Id, new([Group("Equipment", null, 3, 100)], 0), "child-manager", UserRole.Engineer, default);
-        Assert.Equal(300, Assert.Single(saved.Sheets).Total);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(child.Id, new([Group("Equipment", null, 3, 100)], 0), "child-manager", UserRole.Engineer, default));
         foreach (var project in new[] { root, sibling })
         {
             await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(project.Id,
@@ -138,7 +135,7 @@ public sealed class BudgetAssessmentServiceTests
         await Assert.ThrowsAsync<PdmConflictException>(() => service.SaveLaborRatesAsync(root.Id, new(rates, 1), "admin", UserRole.Administrator, default));
         Assert.NotNull(await store.FindLaborRatesAsync(default));
         var other = await repository.CreateProjectAsync(new("OTHER-RATES", "另一主项目", "admin", @"D:\Vault", @"D:\Release"), "admin", default);
-        Assert.Equal(150, (await service.GetAsync(other.Id, "admin", UserRole.Administrator, default)).LaborRates["MechanicalDesign"]);
+        Assert.Empty((await service.GetAsync(other.Id, "admin", UserRole.Administrator, default)).LaborRates);
     }
     [Fact]
     public async Task LegacyGroupTypeAndAmountArePreservedUntilRatesAreConfigured()
@@ -183,9 +180,12 @@ public sealed class BudgetAssessmentServiceTests
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var organization = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First();
+        foreach (var (name, role) in new[] { ("engineer", UserRole.Engineer), ("planner", UserRole.PlanningManager), ("admin", UserRole.Administrator),
+            ("manager", UserRole.Engineer), ("collaborator", UserRole.Engineer), ("child-manager", UserRole.Engineer), ("unassigned", UserRole.Administrator) })
+            await repository.CreateUserAsync(new(Guid.NewGuid(), name, name, "unused", role, true, CompanyId: organization.Id), default);
         var customer = (await repository.ListCustomersAsync(false, default)).First();
         var root = await repository.CreateNumberedProjectAsync(new(organization.Id, "P", 1, customer.Id, "评估", null, new DateOnly(2026, 10, 1), 1, "engineer", @"D:\Vault", @"D:\Release"), default);
-        root = await repository.SetMainProjectStaffingAsync(root.Id, new("manager", ["collaborator"], ["engineer"]), "admin", default);
+        root = await repository.SetMainProjectStaffingAsync(root.Id, new("manager", ["collaborator", "planner"], ["engineer", "planner", "admin"]), "admin", default);
         var store = new InMemoryProjectBudgetRepository();
         var budget = new ProjectBudgetService(repository, store, new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
         return (new(repository, store, budget, TimeProvider.System), repository, store, root);

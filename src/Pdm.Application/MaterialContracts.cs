@@ -283,6 +283,9 @@ public sealed record U9ConnectionTestResult(
 
 public interface IU9OpenApiClient
 {
+    Task<IReadOnlyList<SparePurchasePrice>> QuerySparePurchasePricesAsync(string baseUrl, string token,
+        string organizationCode, IReadOnlyList<string> materialCodes, DateTimeOffset synchronizedAt, CancellationToken ct) =>
+        throw new NotSupportedException();
     Task<IReadOnlyList<StockedPurchaseLine>?> QueryStockedPurchasesAsync(string baseUrl, string token, string organizationCode,
         IReadOnlyList<string> materialCodes, DateOnly from, DateOnly through, CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<StockedPurchaseLine>?>(null);
@@ -331,6 +334,14 @@ public interface IMaterialRepository
     Task<IReadOnlyList<PdmMaterial>> FindMaterialsByCodesAsync(IReadOnlyList<string> materialCodes, CancellationToken cancellationToken);
     Task<IReadOnlyList<PdmMaterial>> FindMaterialsByDuplicateFieldsAsync(string? name, string? specification, string? brand, IReadOnlyList<string> fields, CancellationToken cancellationToken);
     Task<PdmMaterial?> FindMaterialBySourceBomItemAsync(Guid bomItemId, CancellationToken cancellationToken);
+    async Task<IReadOnlyDictionary<Guid, string>> FindMaterialCodesBySourceBomItemsAsync(IReadOnlyList<Guid> bomItemIds, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<Guid, string>();
+        foreach (var id in bomItemIds.Distinct())
+            if (await FindMaterialBySourceBomItemAsync(id, cancellationToken) is { } material)
+                result[id] = material.U9ItemCode ?? material.MaterialCode;
+        return result;
+    }
     Task<IReadOnlyList<MaterialAttachment>> ListMaterialAttachmentsAsync(Guid materialId, MaterialAttachmentKind? kind, CancellationToken cancellationToken);
     Task<MaterialAttachment?> FindMaterialAttachmentAsync(Guid attachmentId, CancellationToken cancellationToken);
     Task<MaterialAttachment> CreateMaterialAttachmentAsync(MaterialAttachment attachment, CancellationToken cancellationToken);

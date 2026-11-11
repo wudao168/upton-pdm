@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProjectPlanTemplateSettings from '../src/components/ProjectPlanTemplateSettings.vue'
 import type { ProjectPlanTemplate } from '../src/types'
 
-const api = vi.hoisted(() => ({ listProjectPlanTemplates: vi.fn(), saveProjectPlanTemplate: vi.fn(), replaceSystemDefaultProjectPlanTemplate: vi.fn() }))
+const api = vi.hoisted(() => ({ listProjectPlanTemplates: vi.fn(), getProjectPositionMembers: vi.fn(), saveProjectPlanTemplate: vi.fn(), replaceSystemDefaultProjectPlanTemplate: vi.fn() }))
 vi.mock('../src/api', () => api)
 const template: ProjectPlanTemplate = {
   id: 'template', name: '设备模板', isActive: true, rowVersion: 1,
@@ -21,11 +21,43 @@ function render(canManage = true, currentUsername = 'admin') {
 beforeEach(() => {
   vi.restoreAllMocks()
   vi.clearAllMocks()
+  api.getProjectPositionMembers.mockResolvedValue({ positions: [{ key: "test-owner", name: "测试负责人", isActive: true, isSystem: false }], members: {} })
   api.listProjectPlanTemplates.mockResolvedValue([structuredClone(template)])
   api.saveProjectPlanTemplate.mockImplementation(async (id, input) => ({ ...structuredClone(template), ...JSON.parse(JSON.stringify(input)), id: id || 'copy', rowVersion: 2 }))
 })
 afterEach(() => wrappers.splice(0).forEach(wrapper => wrapper.unmount()))
 describe('设置页项目计划模板', () => {
+  it('默认责任角色包括项目信息岗位和自定义岗位', async () => {
+    const wrapper = render(); await flushPromises()
+    const labels = wrapper.findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))
+    for (const role of ['项目经理','协同项目经理','主设计','设计人员','销售','售前','电气工程师','硬件工程师','标准件采购','非标件采购','非标件生产','机械装配','电气装配','调试工程师','验收','测试负责人']) expect(labels).toContain(role)
+    expect(labels).not.toContain('电气调试')
+  })
+
+  it('调试工程师按既有岗位键保存，生成计划可关联该岗位人员', async () => {
+    const wrapper = render(); await flushPromises()
+    const roleSelect = wrapper.findAllComponents({ name: 'ElSelect' }).find(select => select.findAllComponents({ name: 'ElOption' }).some(option => option.props('value') === 'ElectricalCommissioning'))!
+    roleSelect.vm.$emit('update:modelValue', 'ElectricalCommissioning')
+    await flushPromises()
+    await wrapper.find('footer .pdm-primary-action').trigger('click')
+    await flushPromises()
+    expect(api.saveProjectPlanTemplate.mock.calls[0]![1].tasks[0].defaultAssigneeRole).toBe('ElectricalCommissioning')
+  })
+
+  it('切换项目时重新加载可用自定义岗位，移除旧项目和停用岗位', async () => {
+    const wrapper = render(); await flushPromises()
+    api.getProjectPositionMembers.mockResolvedValue({ positions: [
+      { key: 'new-owner', name: '新增负责人', isActive: true, isSystem: false },
+      { key: 'inactive-owner', name: '停用负责人', isActive: false, isSystem: false },
+    ], members: {} })
+    await wrapper.setProps({ projectId: 'another-project' }); await flushPromises()
+    expect(api.getProjectPositionMembers).toHaveBeenLastCalledWith('another-project', 'test')
+    const labels = wrapper.findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))
+    expect(labels).toContain('新增负责人')
+    expect(labels).toContain('调试工程师')
+    expect(labels).not.toContain('测试负责人')
+    expect(labels).not.toContain('停用负责人')
+  })
   function groupedTemplate() {
     return { ...structuredClone(template), stages: [
       { code: 'design', name: '设计', participatesInDelivery: true, durationRatio: .5, progressRatio: .5 },

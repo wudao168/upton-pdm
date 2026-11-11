@@ -40,9 +40,16 @@ internal static partial class Program
             var path = request.Path.TrimEnd('/');
             if (string.Equals(path, "/health", StringComparison.OrdinalIgnoreCase))
             {
+                // Only the configured PLM server may request per-file progress.
+                var includeProgress = !string.IsNullOrWhiteSpace(options.Token)
+                    && string.Equals(request.Header("X-Pdm-Agent-Token"), options.Token, StringComparison.Ordinal)
+                    && request.Header("X-UPLM-Workbench") == "1";
+                var running = includeProgress && CurrentBatchId is Guid activeId ? Journal.ReadBatch(activeId) : null;
                 await WriteJsonAsync(stream, 200, new
                 {
                     status = "ok",
+                    dispatchId = running?.Context?.DispatchId,
+                    progressFiles = running?.Files.Select(f => new { f.DocumentId, f.Status }).ToArray(),
                     machine = Environment.MachineName,
                     name = options.Name,
                     busy = Paused || ConversionGate.CurrentCount == 0,
@@ -159,7 +166,7 @@ internal static partial class Program
                     var resultEntry = archive.CreateEntry("result.json", CompressionLevel.Fastest);
                     using (var resultStream = resultEntry.Open())
                     {
-                        var payload = Encoding.UTF8.GetBytes(Serializer.Serialize(new { result.Success, result.Error, result.Items, result.AssemblyPreviewVersion }));
+                        var payload = Encoding.UTF8.GetBytes(Serializer.Serialize(new { result.Success, result.Error, result.Items, result.AssemblyPreviewVersion, DispatchId = manifest.Context?.DispatchId }));
                         resultStream.Write(payload, 0, payload.Length);
                     }
                     // 只回传需要转出的结果；引用文件的结果服务端不会使用，回传只是浪费带宽和时间。
@@ -534,6 +541,7 @@ internal static partial class Program
 
     private sealed class WorkerItem
     {
+        public string FailureKind { get; set; }
         public Guid DocumentId { get; set; }
         public bool Success { get; set; }
         public string Error { get; set; }

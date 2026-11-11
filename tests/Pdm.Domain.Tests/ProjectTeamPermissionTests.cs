@@ -10,6 +10,7 @@ public sealed class ProjectTeamPermissionTests
     public async Task MissingOrganizationMembershipsReturnsValidationError()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator));
         var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
         var error = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.SetOrganizationMembershipsAsync(
             "admin", null!, Guid.Empty, "admin", UserRole.Administrator, default));
@@ -20,6 +21,7 @@ public sealed class ProjectTeamPermissionTests
     public async Task AdministratorsAndProjectOrExecutionDivisionManagersCanMaintainTeamOwners()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator));
         var root = await repository.CreateNumberedProjectAsync(new(Guid.Parse("70000000-0000-0000-0000-000000000001"), "C", 2, Guid.Parse("c0046500-0000-0000-0000-000000000001"), "团队权限验证", null, new(2026, 10, 3), 1, "admin", "D:/test", "D:/release"), default);
         var division = await repository.SaveOrganizationUnitAsync(new(null, root.OrganizationId!.Value, null, "TEAM-TEST", "团队测试事业部", OrganizationUnitKind.BusinessDivision, true, 1, true), default);
         foreach (var actor in new[] { "pm", "division-manager", "lead", "supervisor", "collaborator" })
@@ -30,7 +32,8 @@ public sealed class ProjectTeamPermissionTests
         await repository.SetProjectExecutionUnitAsync(root.Id, division.Id, "admin", default);
         await repository.SetMainProjectStaffingAsync(root.Id, new("pm", ["collaborator"], ["lead"]), "admin", default);
         await repository.SetOrganizationUnitManagersAsync(division.Id, "division-manager", [], default);
-        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectStaffingManage], default);
+        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectDesignerAssign, PermissionCodes.ProjectStaffingManage, "project.phase-owners.manage", AuthorizationActions.TechnicalCandidate], default);
+        await PermissionTestUsers.Scope(repository, "Engineer", PermissionCodes.ProjectStaffingManage, "primary-project-manager", "division-manager");
         var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
         Assert.True((await repository.ListProjectsForUserAsync("pm", UserRole.Engineer, default)).Single(project => project.Id == root.Id).CanManageMainStaffing);
         var multipleOwners = await workflow.SetProjectPhaseOwnersAsync(root.Id, new(new Dictionary<string, string> { ["Acceptance"] = "lead、collaborator、lead" }), "pm", UserRole.Engineer, default);

@@ -97,6 +97,16 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
             }
             var modelVersionsByPackage = uses.Where(entry => allDocuments.TryGetValue(entry.Value.DocumentId, out var model)
                 && model.Kind is DocumentKind.Assembly or DocumentKind.Part).ToDictionary(entry => entry.Key, entry => entry.Value);
+            foreach (var package in packages.Values)
+            foreach (var binding in package.VersionBindings?.Where(binding => !binding.Publish) ?? [])
+            {
+                if (!allDocuments.TryGetValue(binding.DocumentId, out var model)
+                    || model.Kind is not (DocumentKind.Part or DocumentKind.Assembly)) continue;
+                var frozen = await repository.FindDocumentVersionAsync(binding.DocumentId, binding.VersionId, cancellationToken);
+                if (frozen?.Sha256 == binding.Sha256)
+                    modelVersionsByPackage[(package.Id, model.Id)] = frozen with
+                    { Preview = package.ModelDeliveryArtifacts.GetValueOrDefault(model.Id) };
+            }
             var versions = uses.Where(entry => documents.ContainsKey(entry.Value.DocumentId))
                 .Select(entry => (Package: packages[entry.Key.PackageId], Version: entry.Value)).GroupBy(entry => entry.Version.DocumentId);
             foreach (var group in versions)
@@ -160,7 +170,7 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
                         legacy,
                         version.Id == current.Version.Id && package.Id == current.Package.Id ? null : current.Package.PublishedAt ?? current.Version.CreatedAt)
                     {
-                        QrContent = PdfReleaseIdentity.Display(ReleaseBoundSourceReader.DrawingModel(package, qrSource, qrModels, document.DrawingNumber), version.Revision.Display),
+                        QrContent = PdfReleaseIdentity.Display(ReleaseBoundSourceReader.DrawingModel(package, qrSource, qrModels, document.DrawingNumber), version.Revision.Display, package.Id),
                         BomItems = bomItems,
                         BomQuantities = packageQuantities[package.Id].Where(quantity =>
                             bomItems.Any(item => quantity.SourceBomItemIds.Contains(item.Id))).ToArray(),
@@ -180,6 +190,28 @@ public sealed class ProductionDrawingService(IPdmRepository repository)
     }
 
     /// <summary>生产取用时重新检查当前作废状态，不影响工程历史版本的查阅。</summary>
+    public async Task<DocumentVersion> EnsureProductionModelAllowedAsync(Guid packageId, Guid documentId, Guid versionId, CancellationToken ct)
+    {
+        var package = await repository.FindReleasePackageAsync(packageId, ct)
+            ?? throw new PdmNotFoundException("发布包不存在。");
+        var binding = package.VersionBindings?.FirstOrDefault(item => item.DocumentId == documentId);
+        if (binding is not { Publish: false }) return await EnsureProductionUseAllowedAsync(documentId, versionId, ct);
+        var document = await repository.FindDocumentAsync(documentId, ct)
+            ?? throw new PdmNotFoundException("冻结模型不存在，请刷新图纸列表。");
+        if (document.State == DocumentLifecycleState.Obsolete)
+            throw new PdmConflictException($"图档 {document.DrawingNumber} 已作废，不能用于生产。");
+        var source = await repository.FindDocumentVersionAsync(documentId, versionId, ct);
+        var artifact = package.ModelDeliveryArtifacts.GetValueOrDefault(documentId);
+        if (package.State != ReleasePackageState.Published || package.ProjectId != document.ProjectId
+            || !ReleasePreviewPolicy.RequiresConversion(package)
+            || document.Kind is not (DocumentKind.Part or DocumentKind.Assembly)
+            || binding.VersionId != versionId || source?.Sha256 != binding.Sha256
+            || artifact?.Format != DocumentPreviewFormat.Step
+            || !string.Equals(artifact.SourceSha256, binding.Sha256, StringComparison.OrdinalIgnoreCase))
+            throw new PdmConflictException("STEP交付产物与发布包冻结模型版本不一致或尚未就绪，请刷新后重试。");
+        return source with { Preview = artifact };
+    }
+
     public async Task<DocumentVersion> EnsureProductionUseAllowedAsync(
         Guid documentId, Guid versionId, CancellationToken cancellationToken)
     {

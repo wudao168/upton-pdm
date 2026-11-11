@@ -2,7 +2,7 @@
 import { onBeforeUnmount, onMounted, reactive, watch } from 'vue'
 import type { AddDrawingReviewMarkupInput, DrawingReviewCandidate, DrawingReviewDecision, DrawingReviewPackage, DrawingReviewTarget } from '../types'
 import DrawingReviewPanel from './DrawingReviewPanel.vue'
-import { isPdmTheme, type PdmTheme } from '../themes'
+import { applyPdmTheme, isPdmTheme, watchPdmSystemTheme, type PdmTheme } from '../themes'
 
 
 interface ReviewOverlayState {
@@ -56,7 +56,9 @@ function updateState(event: MessageEvent) {
   if (!isPdmTheme(state.theme)) state.theme = 'a'
 }
 
-watch(() => state.theme, theme => { document.documentElement.dataset.pdmTheme = theme }, { immediate: true })
+watch(() => state.theme, applyPdmTheme, { immediate: true })
+const stopSystemThemeWatch = watchPdmSystemTheme(() => state.theme)
+onBeforeUnmount(stopSystemThemeWatch)
 
 function addMarkup(packageId: string, input: AddDrawingReviewMarkupInput) {
   send('add-markup', { packageId, input })

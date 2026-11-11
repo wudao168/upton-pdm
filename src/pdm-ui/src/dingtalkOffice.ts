@@ -6,7 +6,7 @@ type DingTalkSdk = {
   runtime?: { permission?: { requestAuthCode: (input: { corpId: string; onSuccess: (result: { code: string }) => void; onFail: () => void }) => void } }
 }
 
-export async function dingTalkOfficeAuthCode(corpId: string, appKey: string): Promise<string> {
+export async function dingTalkOfficeAuthCode(corpId: string, appKey: string, bindingScan = false): Promise<string> {
   const target = window as Window & { dd?: DingTalkSdk }
   if (!target.dd) {
     await new Promise<void>((resolve, reject) => {
@@ -19,10 +19,13 @@ export async function dingTalkOfficeAuthCode(corpId: string, appKey: string): Pr
     })
   }
   const sdk = target.dd
-  if (!sdk?.env?.platform || sdk.env.platform === 'notInDingTalk') throw new Error('请在钉钉工作台中打开UPLM移动办公。')
+  if (!sdk?.env?.platform || sdk.env.platform === 'notInDingTalk') throw new Error(bindingScan
+    ? '请使用本人钉钉的「扫一扫」打开绑定页面。' : '请在钉钉工作台中打开UPLM移动办公。')
   return new Promise<string>((resolve, reject) => {
     const timer = window.setTimeout(() => reject(new Error('钉钉身份识别超时，请重新进入应用。')), 15_000)
-    const fail = () => { clearTimeout(timer); reject(new Error('钉钉身份识别失败，请从已发布的企业应用重新进入。')) }
+    const fail = () => { clearTimeout(timer); reject(new Error(bindingScan
+      ? '钉钉身份识别失败，请重新扫码。若仍失败，请联系管理员核对应用的免登地址和可见范围。'
+      : '钉钉身份识别失败，请从已发布的企业应用重新进入。')) }
     const success = (result: { code: string }) => { clearTimeout(timer); result.code ? resolve(result.code) : fail() }
     sdk.error?.(fail)
     sdk.ready(() => {

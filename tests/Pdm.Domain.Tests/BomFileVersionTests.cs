@@ -127,6 +127,7 @@ public sealed class BomFileVersionTests
     private static async Task<(InMemoryPdmRepository Repository, InMemoryMaterialRepository Materials, PdmMaterial Material)> Fixture()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer));
         var materials = new InMemoryMaterialRepository(TimeProvider.System);
         var now = DateTimeOffset.UtcNow;
         var material = new PdmMaterial(Guid.NewGuid(), "STD-001", "内部标准件", MaterialKind.Standard, MaterialSupplyMode.Manufacture,

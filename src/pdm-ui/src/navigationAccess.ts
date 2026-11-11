@@ -1,4 +1,4 @@
-export type NavigationKey = 'work-hours' | 'project-applications' | 'project-calendar' | 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'stocked-materials' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
+export type NavigationKey = 'work-hours' | 'project-applications' | 'project-calendar' | 'project-center' | 'project-workbench' | 'project-reports' | 'projects' | 'production-drawings' | 'spare-parts' | 'materials' | 'standard-library' | 'stocked-materials' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
 type PermissionCheck = (permission: string) => boolean
 
 const productionOperations = ['production.assign', 'production.schedule', 'production.execute', 'production.inspect', 'production.issue', 'production.capacity.manage', 'production.drawing.manage', 'production.scan.manage']
@@ -20,7 +20,7 @@ export function canViewProductionTab(tab: string, can: PermissionCheck) {
 
 export function canViewNavigation(key: NavigationKey | 'workspace', can: PermissionCheck, canManageSystem: boolean) {
   switch (key) {
-    case 'project-workbench': case 'project-calendar': case 'projects':
+    case 'project-workbench': case 'project-reports': case 'project-calendar': case 'projects':
       return can('project.view')
     case 'project-center': case 'workspace':
       return can('project.view') && (!can('system.project-center-permissions.v1') ||
@@ -33,6 +33,7 @@ export function canViewNavigation(key: NavigationKey | 'workspace', can: Permiss
     case 'materials': return can('material.view')
     case 'production-drawings':
       return ['tracking', 'capacity', 'drawings', 'execution', 'suppliers'].some(tab => canViewProductionTab(tab, can))
+    case 'spare-parts': return can('spare-parts.view')
     case 'admin': return canManageSystem
     // Personal work-hour records and personal tasks are available to authenticated users.
     case 'work-hours': case 'tasks': return true

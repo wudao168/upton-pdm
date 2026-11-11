@@ -4,6 +4,15 @@ import MyTasks from '../src/components/MyTasks.vue'
 import type { MyApprovalTask, UserNotification } from '../src/types'
 
 describe('MyTasks', () => {
+  it('刷新位于工具栏最左侧并保留刷新事件与禁用状态', async () => {
+    const wrapper=mount(MyTasks,{props:{tasks:[],notifications:[],locks:[],materialCodeTasks:[],passwordResetTasks:[],pending:false,onRequestRelease:vi.fn(),onForceRelease:vi.fn(),onResetPassword:vi.fn()}})
+    expect(wrapper.get('.pdm-task-toolbar').element.firstElementChild?.textContent?.trim()).toBe('刷新')
+    await wrapper.get('.pdm-task-toolbar > button').trigger('click')
+    expect(wrapper.emitted('refresh')).toHaveLength(1)
+    await wrapper.setProps({pending:true})
+    expect(wrapper.get('.pdm-task-toolbar > button').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
   it('同一发布审批通知与待办合为一条，已读及全部已读后仍保留待审批，完成后可查看历史', async () => {
     const task: MyApprovalTask = { id: 'approval-1', projectId: 'project-1', projectCode: 'P700016-4', projectName: '1111',
       releasePackageId: 'release-1', releasePackageNumber: 'RP-P700016-4-001', stage: 'MainDesigner', packageState: 'Approval', createdAt: '2026-11-04T08:06:09Z' }

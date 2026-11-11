@@ -145,14 +145,15 @@ internal sealed partial class PdmApiClient : IDisposable
         bool releasedOnly,
         bool forEdit,
         CancellationToken cancellationToken,
-        bool resolveLegacyReferences = false)
+        bool resolveLegacyReferences = false,
+        bool allowMissingComponents = false)
     {
         try
         {
             return await PostJsonAsync<ControlledOpenManifestDto>(
                 controlledOpenHttpClient,
                 string.Concat("api/documents/", documentId, "/open-manifest"),
-                new { versionId, releasedOnly, forEdit, resolveLegacyReferences, treeScopeOnly = true },
+                new { versionId, releasedOnly, forEdit, resolveLegacyReferences, treeScopeOnly = true, allowMissingComponents },
                 cancellationToken).ConfigureAwait(false);
         }
         catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)

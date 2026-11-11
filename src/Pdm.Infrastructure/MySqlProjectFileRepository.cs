@@ -50,6 +50,15 @@ public sealed class MySqlProjectFileRepository : IProjectFileRepository
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var added = await AddVersionInTransactionAsync(connection, transaction, upload, actor, comment, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return await FindAsync(added.Id, cancellationToken) ?? throw new PdmNotFoundException("项目文件保存失败。");
+    }
+
+    internal async Task<(Guid Id, int Version)> AddVersionInTransactionAsync(MySqlConnection connection, MySqlTransaction transaction,
+        StoredProjectFileUpload upload, string actor, string? comment, CancellationToken cancellationToken,
+        bool generated = false, Guid? expectedFileId = null, int? expectedVersion = null)
+    {
         var rootId = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
             "SELECT root_project_id FROM project_folder WHERE id=@FolderId AND root_project_id=COALESCE((SELECT root_project_id FROM project WHERE id=@ProjectId),(SELECT id FROM project WHERE id=@ProjectId))",
             new { upload.FolderId, upload.ProjectId }, transaction, cancellationToken: cancellationToken))
@@ -57,6 +66,8 @@ public sealed class MySqlProjectFileRepository : IProjectFileRepository
         var fileId = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
             "SELECT id FROM project_file WHERE folder_id=@FolderId AND deleted_at IS NULL AND LOWER(file_name)=LOWER(@FileName) FOR UPDATE",
             new { upload.FolderId, upload.FileName }, transaction, cancellationToken: cancellationToken));
+        if (generated && fileId != expectedFileId)
+            throw new PdmConflictException("存档目标已有同名文件或原文件已变动，请刷新项目文件后重试。");
         var now = timeProvider.GetUtcNow().UtcDateTime;
         if (fileId is null)
         {
@@ -68,14 +79,15 @@ public sealed class MySqlProjectFileRepository : IProjectFileRepository
         var versionNumber = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
             "SELECT COALESCE(MAX(version_number),0)+1 FROM project_file_version WHERE project_file_id=@FileId",
             new { FileId = fileId }, transaction, cancellationToken: cancellationToken));
+        if (expectedVersion is int version && versionNumber != version)
+            throw new PdmConflictException("项目文件版本已更新，请重新生成存档。");
         await connection.ExecuteAsync(new CommandDefinition(
             "INSERT INTO project_file_version(id,project_file_id,version_number,file_name,storage_root,storage_relative_path,file_length,sha256,uploaded_by,uploaded_at,comment) VALUES(@Id,@FileId,@VersionNumber,@FileName,@StorageRoot,@RelativePath,@Length,@Sha256,@Actor,@StoredAt,@Comment)",
             new { Id = upload.VersionId, FileId = fileId, VersionNumber = versionNumber, upload.FileName, upload.StorageRoot, upload.RelativePath, upload.Length, upload.Sha256, Actor = actor, StoredAt = upload.StoredAt.UtcDateTime, Comment = comment }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE project_file SET updated_by=@Actor,updated_at=@Now WHERE id=@FileId",
             new { Actor = actor, Now = now, FileId = fileId }, transaction, cancellationToken: cancellationToken));
-        await transaction.CommitAsync(cancellationToken);
-        return await FindAsync(fileId.Value, cancellationToken) ?? throw new PdmNotFoundException("项目文件保存失败。");
+        return (fileId.Value, versionNumber);
     }
 
     public Task<ProjectFile> RenameAsync(Guid fileId, string fileName, string actor, CancellationToken cancellationToken) => UpdateAsync(fileId,

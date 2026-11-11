@@ -23,7 +23,7 @@ public sealed class PdfReleaseStampTests : IDisposable
     {
         var (service, source, project, package, path) = Fixture(legacy, pages);
         await service.ApplyAsync(package, project, source, path, default);
-        const string code = "NEW-MODEL-123\nB";
+        var code = PdfReleaseIdentity.Display("NEW-MODEL-123", "B", package.Id);
         Assert.True(service.IsStamped(path, package.Id, source.SourceVersionId));
         lock (PdfReleasePageEditor.Gate)
         {
@@ -56,7 +56,7 @@ public sealed class PdfReleaseStampTests : IDisposable
         var (service, source, project, package, path) = Fixture(true, 1, cadOnly: true);
         await service.ApplyAsync(package, project, source, path, default);
         lock (PdfReleasePageEditor.Gate)
-            Assert.Equal("NEW-MODEL-123\nB", PdfReleasePageEditor.DecodePage(path, 0));
+            Assert.Equal(PdfReleaseIdentity.Display("NEW-MODEL-123", "B", package.Id), PdfReleasePageEditor.DecodePage(path, 0));
     }
 
     [Theory]
@@ -97,7 +97,7 @@ public sealed class PdfReleaseStampTests : IDisposable
         Assert.True(service.IsStamped(path, package.Id, source.SourceVersionId));
         lock (PdfReleasePageEditor.Gate)
         {
-            for (var i = 0; i < 2; i++) Assert.Equal("NEW-MODEL-123\nB", PdfReleasePageEditor.DecodePage(path, i));
+            for (var i = 0; i < 2; i++) Assert.Equal(PdfReleaseIdentity.Display("NEW-MODEL-123", "B", package.Id), PdfReleasePageEditor.DecodePage(path, i));
             Assert.DoesNotContain(PdfReleasePageEditor.Texts(File.ReadAllBytes(path)), t => t.Value.Contains("OLD-MODEL"));
         }
     }
@@ -143,7 +143,7 @@ public sealed class PdfReleaseStampTests : IDisposable
                 Assert.Equal(text.Bounds.Left, moved.Bounds.Left, .01);
                 Assert.Equal(text.Bounds.Bottom + 68, moved.Bounds.Bottom, .01);
             }
-            Assert.Equal("NEW-MODEL-123\nB", PdfReleasePageEditor.DecodePage(path, 0));
+            Assert.Equal(PdfReleaseIdentity.Display("NEW-MODEL-123", "B", package.Id), PdfReleasePageEditor.DecodePage(path, 0));
         }
     }
 
@@ -177,7 +177,7 @@ public sealed class PdfReleaseStampTests : IDisposable
             var texts = PdfReleasePageEditor.Texts(File.ReadAllBytes(path));
             Assert.Contains(texts, t => t.Value == "保留的尺寸与图纸正文" && Math.Abs(t.Bounds.Left - 100) < 1);
             Assert.Contains(texts, t => t.Value.Contains("UPTON Automation Systems"));
-            Assert.Equal("NEW-MODEL-123\nB", PdfReleasePageEditor.DecodePage(path, 0));
+            Assert.Equal(PdfReleaseIdentity.Display("NEW-MODEL-123", "B", package.Id), PdfReleasePageEditor.DecodePage(path, 0));
         }
     }
 
@@ -292,7 +292,7 @@ public sealed class PdfReleaseStampTests : IDisposable
                 var after = PdfReleasePageEditor.Texts(File.ReadAllBytes(secondPath), page);
                 Assert.Contains(after, text => text.Value.Trim() == "2");
                 foreach (var note in before) Assert.Contains(after, text => text.Value == note.Value && Math.Abs(text.Bounds.Bottom - note.Bounds.Bottom) < .1);
-                Assert.Equal("NEW-MODEL-123\nB", PdfReleasePageEditor.DecodePage(secondPath, page));
+                Assert.Equal(PdfReleaseIdentity.Display("NEW-MODEL-123", "B", second.Id), PdfReleasePageEditor.DecodePage(secondPath, page));
             }
         var bytes = await File.ReadAllBytesAsync(secondPath);
         await service.ReissueAsync(second, project, source, secondPath, default);

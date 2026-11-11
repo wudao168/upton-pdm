@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using MySqlConnector;
 using Upton.Pdm.Domain;
 using Upton.Pdm.Infrastructure;
+using Upton.Pdm.Application;
 
 var baseConnection = Environment.GetEnvironmentVariable("PDM_ACCEPTANCE_CONNECTION")
     ?? throw new InvalidOperationException("PDM_ACCEPTANCE_CONNECTION未设置。");
@@ -22,9 +23,11 @@ await runner.RunAsync(CancellationToken.None);
 
 await using var connection = new MySqlConnection(builder.ConnectionString);
 await connection.OpenAsync();
+long? financialBatchMilliseconds = null;
 if (string.Equals(Environment.GetEnvironmentVariable("PDM_ACCEPTANCE_SEED"), "1", StringComparison.Ordinal))
 {
     await SeedAsync(connection);
+    financialBatchMilliseconds = await VerifyFinancialStorageAsync(connection, options);
 }
 var migrations = (await connection.QueryAsync<string>("SELECT version FROM pdm_schema_migration ORDER BY version")).ToArray();
 var releaseColumns = await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='release_package' AND column_name IN ('mechanical_bom_snapshot_json','electrical_bom_snapshot_json','publish_error')");
@@ -64,6 +67,7 @@ var qaPasswordHash = await connection.QuerySingleOrDefaultAsync<string>("SELECT 
 Console.WriteLine(JsonSerializer.Serialize(new
 {
     database = builder.Database,
+    financialBatchMilliseconds,
     migrations,
     expectedMigrationApplied = migrations.Contains("004_phase1_bom_release_workflow", StringComparer.Ordinal),
     projectFileMigrationApplied = migrations.Contains("075_project_files", StringComparer.Ordinal),
@@ -78,6 +82,71 @@ Console.WriteLine(JsonSerializer.Serialize(new
     qaAdminExists = qaPasswordHash is not null,
     qaPasswordVerified = qaPasswordHash is not null && new Pbkdf2PasswordService().Verify(Environment.GetEnvironmentVariable("PDM_ACCEPTANCE_ADMIN_PASSWORD") ?? string.Empty, qaPasswordHash)
 }, new JsonSerializerOptions { WriteIndented = true }));
+
+static async Task<long> VerifyFinancialStorageAsync(MySqlConnection connection, IOptions<PdmDatabaseOptions> options)
+{
+    // Only isolated QA databases may receive this financial fixture.
+    if (!connection.Database.StartsWith("pdm_qa_full_", StringComparison.Ordinal))
+        throw new InvalidOperationException("财务集成验收只能在独立QA数据库运行。");
+    var first = Guid.Parse("11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    var second = Guid.Parse("22222222-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    var overrideId = Guid.NewGuid();
+    var now = DateTime.UtcNow;
+    await connection.ExecuteAsync("""
+        INSERT INTO material_master(id,material_code,name,material_kind,supply_mode,unit_code,source_bom_item_id,
+          approval_status,u9_item_code,sync_status,created_by,created_at,updated_by,updated_at,row_version)
+        VALUES(@Id,@Code,'财务映射验收','Standard','Purchase','001',@Source,'Approved',@U9,'NotQueued','qa_admin',@Now,'qa_admin',@Now,1)
+        """, new[] {
+            new { Id = Guid.NewGuid(), Code = "QA-LEGACY-FIRST", Source = (Guid?)first, U9 = (string?)null, Now = now },
+            new { Id = overrideId, Code = "QA-LINKED", Source = (Guid?)null, U9 = (string?)"QA-U9-OVERRIDE", Now = now },
+            new { Id = Guid.NewGuid(), Code = "QA-LEGACY-SECOND", Source = (Guid?)second, U9 = (string?)null, Now = now }
+        });
+    await connection.ExecuteAsync("INSERT INTO bom_material_link(bom_item_id,material_id,linked_by,linked_at) VALUES(@First,@Id,'qa_admin',@Now)", new { First = first, Id = overrideId, Now = now });
+    var materials = new MySqlMaterialRepository(options);
+    var requested = Enumerable.Range(0, 2000).Select(_ => Guid.NewGuid()).Prepend(first).Append(second).Append(first).ToArray();
+    var timer = System.Diagnostics.Stopwatch.StartNew();
+    var codes = await materials.FindMaterialCodesBySourceBomItemsAsync(requested, default);
+    timer.Stop();
+    if (codes.Count != 2 || codes[first] != "QA-U9-OVERRIDE" || codes[second] != "QA-LEGACY-SECOND")
+        throw new InvalidOperationException("批量物料编码读取未保持显式关联优先及历史来源回退规则。");
+    foreach (var id in new[] { first, second })
+    {
+        var single = (await materials.FindMaterialBySourceBomItemAsync(id, default))!;
+        if (codes[id] != (single.U9ItemCode ?? single.MaterialCode)) throw new InvalidOperationException("批量与单条物料编码读取不一致。");
+    }
+    var store = new MySqlProjectBudgetRepository(options);
+    var projectId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    var departmentId = Guid.NewGuid();
+    var original = new ProjectBudget(projectId, [new("Standard", 125.25m, 42.50m, DepartmentId: departmentId)], UpdatedBy: "qa_admin", UpdatedAt: DateTimeOffset.UtcNow,
+        AssessmentGroups: [new(Guid.NewGuid(), "部门评估", "Standard", null, [new(Guid.NewGuid(), "验收物料", Quantity: 2, UnitPrice: 5.25m)], departmentId)]);
+    await store.SaveAsync(original, 0, default);
+    var restored = (await store.FindAsync(projectId, default))!;
+    if (restored.Lines.Single() != original.Lines.Single() || restored.AssessmentGroups!.Single().DepartmentId != departmentId)
+        throw new InvalidOperationException("费用归属部门或财务金额保存后不一致。");
+    try { await store.SaveAsync(original, 0, default); throw new InvalidOperationException("预算过期版本覆盖未被拒绝。"); }
+    catch (PdmConflictException) { }
+    var expenseStore = new MySqlExpenseRequestRepository(options);
+    var expenseId = Guid.NewGuid();
+    var pending = new ExpenseRequest(expenseId, projectId, "QA-PHASE1", "费用事务验收", "qa_admin", "SitePurchase", "Procurement",
+        new DateOnly(2026, 12, 1), "验收", [new("Material", "QA", "配件", "", "", "个", 2m, 12.35m, "")], "Pending", null,
+        [new(Guid.NewGuid(), "部门审批", new ApprovalGroup(["qa_engineer"], false, []))], 0, DateTimeOffset.UtcNow, departmentId);
+    var notice = new UserNotification(Guid.NewGuid(), "qa_engineer", "ExpenseApprovalPending", "费用待审批", "请进入费用申请处理。", projectId, null,
+        $"expense-request:{expenseId:N}:1", DateTimeOffset.UtcNow, null);
+    var pendingSaved = await expenseStore.SaveAsync(pending, 0, [notice], default);
+    var restoredExpense = (await expenseStore.FindAsync(expenseId, default))!;
+    if (restoredExpense.DepartmentId != departmentId || restoredExpense.TotalAmount != 24.70m)
+        throw new InvalidOperationException("费用部门或数量金额持久化不一致。");
+    await expenseStore.SaveAsync(pendingSaved with { Status = "Withdrawn" }, pendingSaved.RowVersion, [], default);
+    if ((await expenseStore.FindAsync(expenseId, default))!.CurrentStep is not null)
+        throw new InvalidOperationException("撤回后仍存在待审批节点。");
+    if (await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM user_notification WHERE id=@Id AND resolved_at IS NULL", new { notice.Id }) != 0)
+        throw new InvalidOperationException("费用撤回没有在同一事务关闭待办。");
+    try { await expenseStore.SaveAsync(pendingSaved with { Status = "Approved" }, pendingSaved.RowVersion, [notice], default); throw new InvalidOperationException("费用过期审批覆盖未被拒绝。"); }
+    catch (PdmConflictException) { }
+    if (await connection.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM project_expense_request_version WHERE request_id=@Id", new { Id = expenseId }) != 2)
+        throw new InvalidOperationException("费用撤回历史或并发事务回滚不一致。");
+    return timer.ElapsedMilliseconds;
+}
 
 static async Task SeedAsync(MySqlConnection connection)
 {

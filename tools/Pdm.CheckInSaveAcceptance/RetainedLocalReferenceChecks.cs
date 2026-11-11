@@ -88,7 +88,7 @@ internal static partial class Program
       Check(blocked!=permitted,mode+"：受控边界仅放行精确核对的本地新增文件");
       if(permitted)
       {
-       TreeCall(plugin,"ValidateControlledLoadedSources",model,rootPath,manifest,app);Check(true,mode+"：未加载的新增零件或子装配按本地待存档引用核对，不误报服务器缺件");
+       TreeCall(plugin,"ValidateControlledLoadedSources",model,rootPath,manifest,app,null);Check(true,mode+"：未加载的新增零件或子装配按本地待存档引用核对，不误报服务器缺件");
        if(managed)
        {
         includeExistingPart=true;loadedDirty=true;var blockedUnsaved=false;
@@ -110,7 +110,7 @@ internal static partial class Program
        File.Delete(unknown);
        if(mode=="tamper")
        {
-        File.AppendAllText(source,"changed after proof");var caught=false;try{TreeCall(plugin,"ValidateControlledLoadedSources",model,rootPath,manifest,app);}catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){caught=true;}
+        File.AppendAllText(source,"changed after proof");var caught=false;try{TreeCall(plugin,"ValidateControlledLoadedSources",model,rootPath,manifest,app,null);}catch(TargetInvocationException error)when(error.InnerException is InvalidOperationException){caught=true;}
         Check(caught,"新增文件在原生打开期间变化时不能认定打开完成");
        }
       }

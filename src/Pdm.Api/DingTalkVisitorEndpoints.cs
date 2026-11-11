@@ -20,13 +20,17 @@ public static class DingTalkVisitorEndpoints
         api.MapPost("/projects/{projectId:guid}/submit", (Guid projectId, HttpContext context, DingTalkVisitorSession sessions, DingTalkOplIntegration integration,
             IPdmRepository repository, ProjectOplService opl, CancellationToken ct) =>
             InSession(context, sessions, integration, async (ticket, actor) => {
-                var root = await repository.FindProjectAsync(projectId, ct);
-                if (root is null || root.OrganizationId != ticket.CompanyId || root.ParentProjectId is not null || !root.IsActive || !IsBound(projectId, ticket, integration))
-                    throw new PdmRuleException("请选择当前入口对应的项目，或重新打开群入口。");
+                var root = await RequireBoundProjectAsync(projectId, ticket, integration, repository, ct);
                 var (input, uploads) = await ProjectOplEndpointExtensions.ReadFormAsync<OplVisitorInput>(context, ct);
                 var issue = await opl.SubmitVisitorAsync(root, input, uploads, actor, ticket.Name, ct);
                 var notification = await integration.NotifyAsync(issue, false, ct);
                 return Results.Ok(new { issue.Number, submittedBy = ticket.Name, notificationSent = notification.Sent, notificationMessage = notification.Message });
+            }, ct));
+        api.MapPost("/projects/{projectId:guid}/speech/transcribe", (Guid projectId, HttpContext context, DingTalkVisitorSession sessions,
+            DingTalkOplIntegration integration, IPdmRepository repository, IOplSpeechRecognizer speech, CancellationToken ct) =>
+            InSession(context, sessions, integration, async (ticket, _) => {
+                await RequireBoundProjectAsync(projectId, ticket, integration, repository, ct);
+                return await OplSpeechTranscription.ReadAndRecognizeAsync(context, speech, ct);
             }, ct));
         api.MapGet("/projects/{projectId:guid}/people", (Guid projectId, HttpContext context, DingTalkVisitorSession sessions, DingTalkOplIntegration integration, IPdmRepository repository, CancellationToken ct) =>
             InSession(context, sessions, integration, async (ticket, _) => {
@@ -37,6 +41,13 @@ public static class DingTalkVisitorEndpoints
                     if (user.IsActive && await repository.HasProjectContentReadAccessAsync(root.Id, user.Username, user.Role, ct)) people.Add(new(user.Username, user.DisplayName));
                 return Results.Ok(people);
             }, ct));
+    }
+    private static async Task<Project> RequireBoundProjectAsync(Guid projectId, DingTalkVisitorTicket ticket, DingTalkOplIntegration integration, IPdmRepository repository, CancellationToken ct)
+    {
+        var root = await repository.FindProjectAsync(projectId, ct);
+        if (root is null || root.OrganizationId != ticket.CompanyId || root.ParentProjectId is not null || !root.IsActive || !IsBound(projectId, ticket, integration))
+            throw new PdmRuleException("请选择当前入口对应的项目，或重新打开群入口。");
+        return root;
     }
     private static bool IsBound(Guid projectId, DingTalkVisitorTicket ticket, DingTalkOplIntegration integration) => integration.SubmissionEnabled(projectId)
         && (ticket.GroupId is null || integration.IsBoundToGroup(projectId, ticket.GroupId.Value));

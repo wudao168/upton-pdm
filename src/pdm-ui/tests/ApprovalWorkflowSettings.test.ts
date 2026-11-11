@@ -4,12 +4,34 @@ import ApprovalWorkflowSettings from '../src/components/ApprovalWorkflowSettings
 import type { OrganizationDirectory, PdmSystemSettings } from '../src/types'
 
 describe('ApprovalWorkflowSettings', () => {
+  it('edits the active canvas node and round-trips routing, signature, note and copy settings', async () => {
+    const onSave = vi.fn().mockImplementation(async settings => settings)
+    const wrapper = mount(ApprovalWorkflowSettings, { props: { settings: {} as PdmSystemSettings, pending: false, onSave } })
+    const flow = wrapper.get('[aria-label="标准件BOM审批"]')
+    const select = flow.get('select[aria-label="审批人来源"]')
+    await select.setValue('Role')
+    await flow.find('details.workflow-role-choices input[value="Engineer"]').setValue(true)
+    await flow.get('select[aria-label="多人审批方式"]').setValue('all')
+    await flow.find('.policy-settings label:last-child input').setValue(true)
+    const actions = flow.findAll('button').filter(button => button.text() === '添加抄送')
+    await actions[0]!.trigger('click')
+    await flow.get('.copy-options textarea').setValue('技术审核已完成')
+    expect(flow.get('.flow-canvas').text()).toContain('技术审核已完成')
+    await flow.get('.workflow-card-title button').trigger('click')
+    const saved = onSave.mock.calls[0]![0] as PdmSystemSettings
+    expect(saved.approvalWorkflows!.standard!.steps[1]).toMatchObject({
+      requireAllApprovers: true, roleCodes: ['Engineer'], conditionRole: null,
+      policy: { editBusinessNote: true }, copyOnApproval: { source: 'Submitter', message: '技术审核已完成' },
+    })
+    expect(saved.approvalWorkflows!.nonStandard).toBeUndefined()
+    wrapper.unmount()
+  })
   it('shows fixed specific reasons and saves formal supplement limits by BOM type', async () => {
     const settings = {
       approvalWorkflows: {
         mechanical: { code: 'mechanical-release', name: '机械发布审批', version: 2, steps: [
           { stage: 'MechanicalEngineer', name: '机械工程师自检', assigneeSource: 'Submitter' },
-          { stage: 'MainDesigner', name: '主设审核', assigneeSource: 'ProjectDesignLead' },
+          { stage: 'MainDesigner', name: '主设计审核', assigneeSource: 'ProjectDesignLead' },
           { stage: 'MechanicalSupervisor', name: '机械主管批准', assigneeSource: 'PrimaryUnitManager' },
         ] },
         electrical: { code: 'electrical-release', name: '电气发布审批', version: 2, steps: [
@@ -36,9 +58,9 @@ describe('ApprovalWorkflowSettings', () => {
     expect(wrapper.find('.workflow-heading h1').exists()).toBe(false)
     expect(wrapper.find('.workflow-heading p').exists()).toBe(false)
     expect(wrapper.find('.workflow-heading').exists()).toBe(false)
-    expect(wrapper.findAll('.workflow-card')).toHaveLength(5)
+    expect(wrapper.findAll('.workflow-card')).toHaveLength(6)
     expect(wrapper.findAll('.workflow-card').map(card => card.attributes('aria-label'))).toEqual([
-      '标准件BOM审批', '非标件BOM与图纸审批', '电气发布审批', '验证计划审批', '料号申请审批',
+      '标准件BOM审批', '非标件BOM与图纸审批', '电气发布审批', '验证计划审批', '料号申请审批', '费用审批',
     ])
     expect(wrapper.find('select').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('指定账号')
@@ -60,7 +82,7 @@ describe('ApprovalWorkflowSettings', () => {
     const settings = { approvalWorkflows: {
       mechanical: { code: 'mechanical-release', name: '机械发布审批', version: 4, steps: [
         { stage: 'MechanicalEngineer', name: '机械自检', assigneeSource: 'Submitter' },
-        { stage: 'MainDesigner', name: '主设审核', assigneeSource: 'ProjectDesignLead' },
+        { stage: 'MainDesigner', name: '主设计审核', assigneeSource: 'ProjectDesignLead' },
         { stage: 'MechanicalSupervisor', name: '主管批准', assigneeSource: 'PrimaryUnitManager' },
       ] },
       electrical: { code: 'electrical-release', name: '电气发布审批', version: 2, steps: [

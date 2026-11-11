@@ -16,6 +16,7 @@ const emit = defineEmits<{
   scanned: [counts: Array<{ key: string; signature: string; count: number }>]
 }>()
 type ScanResult = { candidates: InventoryCandidate[]; error?: string }
+const panelVisible = ref(true)
 const results = ref<Record<string, ScanResult>>({})
 const warehouseNames = ref<string[]>([])
 const selectedWarehouses = ref<string[] | null>(null)
@@ -267,12 +268,12 @@ onBeforeUnmount(() => { ++generation; ++selectionGeneration; controller?.abort()
 
 <template>
   <Teleport to="body">
-    <div class="pdm-dialog-backdrop" @click.self="emit('close')" @keydown.esc="emit('close')">
+    <Transition name="pdm-drawer" appear @after-leave="emit('close')"><div v-if="panelVisible" class="pdm-dialog-backdrop" @click.self="panelVisible = false" @keydown.esc="panelVisible = false">
       <RawDrawerPanel class="pdm-bom-batch-dialog bom-inventory" role="dialog" aria-modal="true" aria-labelledby="bom-inventory-title">
         <template #header>
           <header><div><h3 id="bom-inventory-title">库存相似型号推荐 · {{ kind === 'Standard' ? '标准件BOM' : '电气件BOM' }}</h3>
             <p>当前项目完整BOM，共 {{ items.length }} 行；型号匹配度≥80%，同品牌优先。型号相似，待工程师核对。</p></div>
-            <button type="button" class="pdm-icon-button" aria-label="关闭库存推荐" @click="emit('close')">×</button>
+            <button type="button" class="pdm-icon-button" aria-label="关闭库存推荐" @click="panelVisible = false">×</button>
           </header>
         </template>
         <div class="bom-inventory__toolbar"><span role="status">{{ scanning ? `扫描中 ${completed} / ${items.length}` : `扫描完成 ${completed} / ${items.length}，${matchCount} 行有库存候选` }}</span>
@@ -332,9 +333,9 @@ onBeforeUnmount(() => { ++generation; ++selectionGeneration; controller?.abort()
             </main>
           </section>
         </div>
-        <footer><span>确认替换后为未保存修改，请关闭此窗口后点击“保存BOM”；已发布历史版本保留。</span><button type="button" class="pdm-secondary-action" @click="emit('close')">关闭</button></footer>
+        <footer><span>确认替换后为未保存修改，请关闭此窗口后点击“保存BOM”；已发布历史版本保留。</span><button type="button" class="pdm-secondary-action" @click="panelVisible = false">关闭</button></footer>
       </RawDrawerPanel>
-    </div>
+    </div></Transition>
   </Teleport>
 </template>
 
@@ -355,7 +356,7 @@ onBeforeUnmount(() => { ++generation; ++selectionGeneration; controller?.abort()
 .bom-inventory__existing-table th:nth-child(5) { width: 18%; }
 .bom-inventory__existing-table thead { position: sticky; top: 0; z-index: 1; }
 .bom-inventory__existing-table tbody tr { cursor: pointer; }
-.bom-inventory__existing-table tbody tr.is-selected td { background: var(--pdm-theme-accent-soft); color: var(--pdm-primary); }
+.bom-inventory__existing-table tbody tr.is-selected td { background: var(--pdm-theme-accent-soft); color:var(--pdm-text); }
 .bom-inventory__existing-table tbody tr:focus-visible { outline: 2px solid var(--pdm-primary); outline-offset: -2px; }
 .bom-inventory small { color: var(--pdm-muted); font-size: 11px; }
 .bom-inventory__detail { min-width: 0; min-height: 0; flex: 1; overflow: auto; padding: 10px; }
@@ -376,7 +377,7 @@ onBeforeUnmount(() => { ++generation; ++selectionGeneration; controller?.abort()
 .bom-inventory__decision { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 0; font-size: 12px; }
 .bom-inventory__decision label { display: flex; gap: 6px; align-items: center; }
 .bom-inventory__decision > div { display: flex; gap: 5px; }
-.bom-inventory__decision-status { color: var(--pdm-primary); font-size: 12px; }
+.bom-inventory__decision-status { color:var(--pdm-text); font-size: 12px; }
 .bom-inventory__empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 160px; padding: 20px; color: var(--pdm-muted); font-size: 12px; text-align: center; }
 /* Keep all three material lists at a fixed row height; titles retain the full text. */
 .bom-inventory .bom-inventory__existing-table tr, .bom-inventory .bom-inventory__candidates tr, .bom-inventory .bom-inventory__locations tr { height: 40px; }

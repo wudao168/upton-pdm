@@ -162,6 +162,7 @@ public sealed class ProjectFolderTreeTests
     public async Task ProjectFolderPermissionsGateDocumentReadAndEditAccess()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer));
         var main = await repository.CreateNumberedProjectAsync(Command("目录权限项目"), CancellationToken.None);
         await repository.SetMainProjectStaffingAsync(main.Id, new("project-manager", [], ["engineer"]), "admin", CancellationToken.None);
         var folders = await repository.ListProjectFoldersAsync(main.Id, "admin", UserRole.Administrator, CancellationToken.None);

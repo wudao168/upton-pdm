@@ -1,3 +1,4 @@
+@import './business-tables.css';
 /* 与概览页共用的视觉规范；业务布局和专用预览画布保留各自尺寸。 */
 .pdm-app-shell .el-table,
 .el-dialog .el-table,
@@ -52,8 +53,7 @@
     .production-scan-settings__station-columns, .notification-columns),
 :root body :is(th, thead td, [role="columnheader"], .pdm-tree-columns, .pdm-project-browser-table-head,
     .drawing-review-overview > header, .pdm-gantt-head, .pdm-template-head, .material-relation-option-head,
-    .production-scan-settings__station-columns, .notification-columns) :is(div, span, small, strong, em, a, button, input, select, label, p, .cell) {
-  color: rgb(30, 41, 59) !important;
+    .production-scan-settings__station-columns, .notification-columns) :is(div, span, small, strong, em, a, button, input, select, label, p, .cell) { color:var(--pdm-text) !important;
   font-family: var(--pdm-font-ui) !important;
 }
 
@@ -87,16 +87,12 @@
 :is(.el-drawer, .el-dialog, .pdm-custom-drawer) .pdm-panel-header-actions > :is(div, footer) { display: flex; min-width: 0; max-width: 100%; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; border: 0; }
 .pdm-panel-header-actions:empty { display: none; }
 .pdm-panel-header-actions .el-button + .el-button { margin-left: 0; }
-.el-dialog__header:has(.pdm-panel-topbar) .pdm-panel-topbar { padding-right: 32px; }
-.el-drawer__header:has(.pdm-panel-topbar) { align-items: center; gap: 8px; }
-.el-drawer__header:has(.pdm-panel-topbar) .el-drawer__close-btn { align-self: flex-start; margin-left: 0; }
-.pdm-custom-drawer > header:has(.pdm-panel-topbar) { align-items: center; gap: 8px; }
 :is(.el-drawer, .el-dialog, .pdm-custom-drawer) .pdm-panel-topbar-title :is(.el-dialog__title, .el-drawer__title, [role="heading"], h1, h2, h3),
 :is(.el-drawer, .el-dialog, .pdm-custom-drawer) .pdm-panel-topbar-title > strong { font-size: 16px !important; }
 
 :is(.el-dialog__title, .el-drawer__title, .el-message-box__title) {
   color: var(--pdm-text);
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
 }
 
@@ -126,7 +122,7 @@ button[role="tab"] {
   min-height: var(--pdm-tab-primary);
 }
 
-:is(.pdm-admin-tabs, .pdm-segmented, .pdm-plan-view-tabs, .pdm-plan-zoom,
+:is(.pdm-admin-tabs, .pdm-segmented, .pdm-plan-zoom,
     .pdm-project-settings__tabs, .org-view-tabs, .wb-tabs, .pdm-view-switch,
     .pdm-bom-display-control, .pdm-bom-comparison-filters) button,
 .material-code-approval-subtabs .el-tabs__item {
@@ -242,7 +238,7 @@ button[role="tab"] {
 :root body [data-pdm-shared-border][data-pdm-shared-border~="bottom"] { border-bottom-color: transparent !important; }
 
 .pdm-plan-page :is(.pdm-gantt-shell, .pdm-gantt-table, .pdm-gantt-info-head, .pdm-gantt-timeline-head, .pdm-gantt-info-row, .pdm-gantt-timeline-row) {
-  background-color: #fff !important;
+  background-color: var(--pdm-surface);
 }
 
 .el-table .el-table__cell,

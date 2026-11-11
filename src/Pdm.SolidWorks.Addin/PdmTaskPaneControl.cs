@@ -315,6 +315,15 @@ internal sealed class PdmTaskPaneControl : UserControl
         using (token.Register(() => { if (Volatile.Read(ref started) == 0) result.TrySetCanceled(); })) return await result.Task;
     }
 
+    public void SetTreeNotice(string message) => RunOnUiThread(() =>
+    {
+        if (workspaceOperationActive) return;
+        SetWorkspaceStage(null);
+        if (!string.IsNullOrWhiteSpace(message)) workspaceOperationStatus.Text = "设计树：" + message;
+        workspaceOperationProgress.Visible = false;
+        actionToolTip.SetToolTip(workspaceOperationStatus, workspaceOperationStatus.Text);
+    });
+
     public void SetTreeLoadingStatus(string message) => RunOnUiThread(() =>
     {
         if (workspaceOperationActive) return;
@@ -499,7 +508,7 @@ internal sealed class PdmTaskPaneControl : UserControl
 
         RunOnUiThread(() =>
         {
-            loginButton.Text = string.IsNullOrWhiteSpace(displayName) ? "登录" : displayName;
+            loginButton.Text = string.IsNullOrWhiteSpace(authenticatedUsername) ? "登录" : PersonDisplayName.Format(authenticatedUsername, displayName);
             workHoursButton.Enabled = !string.IsNullOrWhiteSpace(authenticatedUsername);
             plannedTaskTimer.Stop();
             plannedTaskRefreshTimer.Stop();
@@ -508,9 +517,7 @@ internal sealed class PdmTaskPaneControl : UserControl
                 ? "登录后显示本人负责的计划任务" : "暂无本人负责的计划任务";
             if (!string.IsNullOrWhiteSpace(authenticatedUsername)) plannedTaskTimer.Start();
             if (!string.IsNullOrWhiteSpace(authenticatedUsername)) plannedTaskRefreshTimer.Start();
-            loginButton.AccessibleDescription = string.IsNullOrWhiteSpace(username)
-                ? loginButton.Text
-                : string.Concat(loginButton.Text, "（", username, "）");
+            loginButton.AccessibleDescription = loginButton.Text;
             actionToolTip.SetToolTip(loginButton, loginButton.AccessibleDescription);
             projectDocuments.SetAuthenticatedUser(authenticatedUsername);
             RefreshSelectionIndependentStructureActions();
@@ -543,12 +550,7 @@ internal sealed class PdmTaskPaneControl : UserControl
     }
 
     private string DisplayUserName(string username)
-    {
-        var value = username?.Trim() ?? string.Empty;
-        return userDisplayNames.TryGetValue(value, out var displayName) && !string.IsNullOrWhiteSpace(displayName)
-            ? displayName.Trim()
-            : value;
-    }
+        => PersonDisplayName.Resolve(userDisplayNames, username);
 
     public void SetProjects(IReadOnlyList<ProjectDto> projects)
     {
@@ -2284,7 +2286,7 @@ internal sealed class PdmTaskPaneControl : UserControl
             CancelActiveTreeBuild();
             treeBuildPending = false;
             renderedTreeStamp = null;
-            SetTreeLoadingStatus("设计树暂未显示完整，请右键刷新重试。");
+            SetTreeNotice("设计树暂未显示完整，请右键刷新重试。");
             Upton.Pdm.ClientShared.ClientDiagnostics.Record("error", "设计树显示失败", error.ToString());
         }
         // A native document switch can immediately occupy the CAD message loop.

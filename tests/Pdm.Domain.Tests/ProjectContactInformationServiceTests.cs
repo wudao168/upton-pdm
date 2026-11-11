@@ -75,6 +75,7 @@ public sealed class ProjectContactInformationServiceTests
     public async Task ContactInformationEditingUsesIndependentRolePermission()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("pm", UserRole.Engineer), ("co-pm", UserRole.Engineer), ("designer", UserRole.Engineer));
         var root = Assert.Single(await repository.ListProjectsAsync(default));
         await repository.SetMainProjectStaffingAsync(root.Id, new("pm", ["co-pm"], ["designer"]), "admin", default);
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectContactEdit], default);

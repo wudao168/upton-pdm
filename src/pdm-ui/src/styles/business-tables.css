@@ -1,0 +1,12 @@
+/* 业务列表统一居中；只约束单元格，不改变树层级、编辑框和预览画布的布局。 */
+@layer pdm-business {
+  :root body :is(.pdm-app-shell, .el-dialog, .el-drawer, .pdm-custom-drawer) table :is(th, td) {
+    text-align: center !important;
+    vertical-align: middle !important;
+  }
+
+  :root body :is(.pdm-app-shell, .el-dialog, .el-drawer, .pdm-custom-drawer) .el-table .cell,
+  :root body :is(.pdm-app-shell, .el-dialog, .el-drawer, .pdm-custom-drawer) .el-table__empty-text {
+    text-align: center !important;
+  }
+}

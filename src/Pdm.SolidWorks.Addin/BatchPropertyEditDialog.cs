@@ -644,6 +644,7 @@ internal sealed class BatchPropertyEditDialog : Form
     private RowStyle executionRowStyle;
     private bool propertyCardsConfirmed;
     private bool operationRunning;
+    private bool synchronizingProperties;
     private bool operationPaused;
     private bool operationStopRequested;
     private bool thumbnailLoadingStarted;
@@ -696,7 +697,13 @@ internal sealed class BatchPropertyEditDialog : Form
         DialogWindowSizing.CenterOnOwnerScreen(this);
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
-        MinimizeBox = false;
+        MinimizeBox = initialOperation != PropertyOperationMode.PropertyWriteback;
+        close.Click += (_, _) => { if (!Modal) Close(); };
+        FormClosing += (_, args) =>
+        {
+            if (args.CloseReason == CloseReason.UserClosing && (operationRunning || synchronizingProperties))
+                args.Cancel = true;
+        };
 
         BuildGrid();
         BuildPropertyCardGrid();
@@ -941,6 +948,9 @@ internal sealed class BatchPropertyEditDialog : Form
         }
 
         syncButton.Enabled = false;
+        synchronizingProperties = true;
+        propertyWorkspaceHost.Enabled = false;
+        close.Enabled = false;
         execute.Enabled = false;
         UseWaitCursor = true;
         plmSyncStatus.Text = "正在从PLM同步…";
@@ -954,6 +964,7 @@ internal sealed class BatchPropertyEditDialog : Form
                 throw new InvalidOperationException("请先勾选需要从PLM同步属性的图档。");
             }
             var synchronizedCount = await synchronizePlmProperties(selectedItems);
+            if (IsDisposed) return;
             SynchronizeRelatedDrawingsForChangedModels(selectedItems);
             RefreshGridComboBoxValues();
             grid.Refresh();
@@ -964,6 +975,7 @@ internal sealed class BatchPropertyEditDialog : Form
         }
         catch (Exception exception)
         {
+            if (IsDisposed) return;
             plmSyncStatus.Text = "PLM同步失败";
             plmSyncStatus.ForeColor = Color.FromArgb(190, 55, 55);
             PluginDiagnosticLog.Record("异常", exception.ToString());
@@ -971,9 +983,15 @@ internal sealed class BatchPropertyEditDialog : Form
         }
         finally
         {
-            UseWaitCursor = false;
-            syncButton.Enabled = true;
-            UpdateOperationState();
+            synchronizingProperties = false;
+            if (!IsDisposed)
+            {
+                UseWaitCursor = false;
+                propertyWorkspaceHost.Enabled = true;
+                close.Enabled = true;
+                syncButton.Enabled = true;
+                UpdateOperationState();
+            }
         }
     }
 
@@ -2149,7 +2167,7 @@ internal sealed class BatchPropertyEditDialog : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing)
+        if (disposing && !IsDisposed)
         {
             fillResultToolTip.Dispose();
             thumbnailCancellation.Cancel();

@@ -8,9 +8,10 @@ export const userDisplayNameKey: InjectionKey<UserDisplayNameResolver> = Symbol(
 export function resolveUserDisplayName(users: readonly PdmUser[], username?: string | null, emptyText = '—') {
   const normalized = username?.trim()
   if (!normalized) return emptyText
-  return users.find(user => user.username.localeCompare(normalized, undefined, { sensitivity: 'accent' }) === 0)?.displayName || normalized
+  const name = users.find(user => user.username.localeCompare(normalized, undefined, { sensitivity: 'accent' }) === 0)?.displayName?.trim()
+  return name && name.toLowerCase() !== normalized.toLowerCase() ? name : '姓名待补充'
 }
 
 export function useUserDisplayName() {
-  return inject(userDisplayNameKey, (username, emptyText = '—') => username?.trim() || emptyText)
+  return inject(userDisplayNameKey, (username, emptyText = '—') => resolveUserDisplayName([], username, emptyText))
 }

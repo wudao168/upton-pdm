@@ -20,7 +20,7 @@ function clearDialogStatus() {
 }
 
 function dialogIsOpen(dialog: HTMLElement) {
-  if (!dialog.isConnected) return false
+  if (!dialog.isConnected || dialog.closest('[data-pdm-genie-snapshot], [data-pdm-genie-layer]')) return false
   for (let node: HTMLElement | null = dialog; node; node = node.parentElement) {
     if (node.hidden || node.style.display === 'none' || node.getAttribute('aria-hidden') === 'true'
       || node.classList.contains('dialog-fade-leave-active')
@@ -55,7 +55,12 @@ function showInDialog(dialog: HTMLElement, type: StatusType, message: string) {
 
   const body = [...dialog.children].find(child => child.classList.contains('el-dialog__body') || child.classList.contains('el-drawer__body'))
   const header = [...dialog.children].find(child => child.matches('header, .el-dialog__header, .el-drawer__header'))
-  dialog.insertBefore(status, body ?? header?.nextSibling ?? dialog.firstChild)
+  const inlineHost = dialog.matches('.pdm-message-drawer')
+    ? dialog.querySelector<HTMLElement>('[data-pdm-dialog-status-host]') : null
+  if (inlineHost) {
+    status.classList.add('is-inline')
+    inlineHost.append(status)
+  } else dialog.insertBefore(status, body ?? header?.nextSibling ?? dialog.firstChild)
   dialogStatus = status
   dialogObserver = new MutationObserver(() => {
     if (!dialogIsOpen(dialog)) clearDialogStatus()
@@ -80,13 +85,13 @@ export function registerStatusHost() {
   }
 }
 
-function show(type: StatusType, message: string) {
+function show(type: StatusType, message: string, pageScope = false) {
   if (type === 'error' || type === 'warning') {
     const translated = userErrorMessage(message)
     if (translated !== message) console.error('操作异常原文：', message)
     message = translated
   }
-  const dialog = activeDialog()
+  const dialog = pageScope ? undefined : activeDialog()
   if (dialog) {
     currentStatus.value = undefined
     return showInDialog(dialog, type, message)
@@ -100,7 +105,7 @@ function show(type: StatusType, message: string) {
 }
 
 export const ElMessage = {
-  success: (message: string) => show('success', message),
+  success: (message: string, options?: { scope: 'page' }) => show('success', message, options?.scope === 'page'),
   warning: (message: string) => show('warning', message),
   error: (message: string) => show('error', message),
   info: (message: string) => show('info', message),

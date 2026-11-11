@@ -1,4 +1,4 @@
-﻿using Upton.Pdm.Application;
+using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
 using Upton.Pdm.Infrastructure;
 
@@ -11,6 +11,7 @@ public sealed class ProjectBudgetServiceTests
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
+        await FinancialTestActors.ConfigureAsync(repository, project.Id, ("planner", UserRole.PlanningManager), ("manager", UserRole.BusinessUnitManager), ("admin", UserRole.Administrator), ("viewer", UserRole.Engineer), ("unknown-engineer", UserRole.Engineer));
         await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "sales", "销售助理", "unused", UserRole.ProductionViewer, true, RoleCode: "SalesAssistant"), default);
         var store = new InMemoryProjectBudgetRepository();
         var service = new ProjectBudgetService(repository, store, new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
@@ -95,6 +96,7 @@ public sealed class ProjectBudgetServiceTests
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var projectId = Assert.Single(await repository.ListProjectsAsync(default)).Id;
+        await FinancialTestActors.ConfigureAsync(repository, projectId, ("engineer", UserRole.Engineer));
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectBudgetView, PermissionCodes.ProjectBudgetEdit], default);
         var store = new InMemoryProjectBudgetRepository();
         var service = new ProjectBudgetService(repository, store, new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
@@ -113,6 +115,7 @@ public sealed class ProjectBudgetServiceTests
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
+        await FinancialTestActors.ConfigureAsync(repository, project.Id, ("planner", UserRole.PlanningManager), ("manager", UserRole.BusinessUnitManager), ("admin", UserRole.Administrator), ("viewer", UserRole.Engineer), ("unknown-engineer", UserRole.Engineer));
         var store = new InMemoryProjectBudgetRepository();
         var procurement = new InMemoryU9ProcurementRepository();
         var order = new U9ProcurementSourceRow("ORG", "PO", "line1", null, "PO001", 1, 2, false, null,
@@ -134,6 +137,7 @@ public sealed class ProjectBudgetServiceTests
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
+        await FinancialTestActors.ConfigureAsync(repository, project.Id, ("planner", UserRole.PlanningManager), ("manager", UserRole.BusinessUnitManager), ("admin", UserRole.Administrator), ("viewer", UserRole.Engineer), ("unknown-engineer", UserRole.Engineer));
         var service = new ProjectBudgetService(repository, new InMemoryProjectBudgetRepository(), new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.GetAsync(project.Id, "engineer", UserRole.Engineer, default));
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectBudgetView], default);
@@ -152,9 +156,10 @@ public sealed class ProjectBudgetServiceTests
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
+        await FinancialTestActors.ConfigureAsync(repository, project.Id, ("planner", UserRole.PlanningManager), ("manager", UserRole.BusinessUnitManager), ("admin", UserRole.Administrator), ("viewer", UserRole.Engineer), ("unknown-engineer", UserRole.Engineer));
         var store = new InMemoryProjectBudgetRepository();
         var service = new ProjectBudgetService(repository, store, new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
-        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView, PermissionCodes.ProjectBudgetActualEdit], default);
+        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView, PermissionCodes.ProjectBudgetActualEdit, AuthorizationActions.FinancialActualRead, AuthorizationActions.FinancialActualMaintain], default);
         var view = await service.GetAsync(project.Id, "unknown-engineer", UserRole.Engineer, default);
         Assert.True(view.CanEditActual);
         Assert.False(view.CanEditBudget);
@@ -173,6 +178,7 @@ public sealed class ProjectBudgetServiceTests
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
+        await FinancialTestActors.ConfigureAsync(repository, project.Id, ("planner", UserRole.PlanningManager), ("manager", UserRole.BusinessUnitManager), ("admin", UserRole.Administrator), ("viewer", UserRole.Engineer), ("unknown-engineer", UserRole.Engineer));
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView], default);
         var store = new InMemoryProjectBudgetRepository();
         var service = new ProjectBudgetService(repository, store, new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
@@ -289,6 +295,7 @@ public sealed class ProjectBudgetServiceTests
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var projectId = Assert.Single(await repository.ListProjectsAsync(default)).Id;
+        await FinancialTestActors.ConfigureAsync(repository, projectId, ("engineer", UserRole.Engineer));
         await repository.CreateUserAsync(new(Guid.NewGuid(), "sales", "销售助理", "unused", UserRole.ProductionViewer, true, RoleCode: "SalesAssistant"), default);
         var service = new ProjectBudgetService(repository, new InMemoryProjectBudgetRepository(), new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
         var saved = await service.SaveSettlementAsync(projectId, new([new("销售结算", "套", 2, 1000)], 0), "sales", UserRole.ProductionViewer, default);
@@ -296,6 +303,7 @@ public sealed class ProjectBudgetServiceTests
         Assert.False(saved.CanEditBonus);
         Assert.Equal(2000, saved.SettlementAmount);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveBonusRateAsync(projectId, new(.01m, 1), "sales", UserRole.ProductionViewer, default));
+        await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator));
         var admin = await service.SaveBonusRateAsync(projectId, new(.01m, 1), "admin", UserRole.Administrator, default);
         Assert.True(admin.CanEditBonus);
     }
@@ -304,6 +312,7 @@ public sealed class ProjectBudgetServiceTests
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
+        await FinancialTestActors.ConfigureAsync(repository, project.Id, ("planner", UserRole.PlanningManager), ("manager", UserRole.BusinessUnitManager), ("admin", UserRole.Administrator), ("viewer", UserRole.Engineer), ("unknown-engineer", UserRole.Engineer));
         var store = new InMemoryProjectBudgetRepository();
         return (new(repository, store, new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System)), store, project.Id);
     }

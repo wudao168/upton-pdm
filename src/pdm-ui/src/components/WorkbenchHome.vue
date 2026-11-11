@@ -1,13 +1,17 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, canViewTab } = useProjectCenterAccess()
 import ProjectTodoFields from './ProjectTodoFields.vue'
-import { CheckCircle2, ChevronRight, FolderTree, ListTodo, RotateCw as RefreshCw, UsersRound } from '@lucide/vue'
-import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, readProjectOverviewRecords, listProjectPlanVersions, readProjectPlanPortfolio, readProjectValidationPlan } from '../api'
+import { CheckCircle2, ChevronRight, FolderTree, ListTodo, RotateCw as RefreshCw, TriangleAlert } from '@lucide/vue'
+import { addProjectManagerNote, createProjectTodo, getMaterialRelationCompleteness, readProjectOverviewRecords, listProjectPlanVersions, readProjectPlanPortfolio, readProjectRiskOverview, readProjectValidationPlan } from '../api'
 import OverviewTimeline from './OverviewTimeline.vue'
+import { chinaToday } from '../projectCalendar'
+import { projectRiskRows, type ProjectAttentionDetail, type ProjectRiskOverviewProject } from '../projectAttention'
 import { ElMessage } from '../statusMessage'
+import { resolveUserDisplayName } from '../userDisplay'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { AuditEntry, DocumentNode, DrawingReviewPackage, MaterialCodeApplication, MaterialRelationCompleteness, PdmUser, ProjectPhaseOwnerKey, ProjectPlan, ProjectPlanPortfolio, ProjectSummary, ProjectValidationPlan, ReleasePackageSummary } from '../types'
+import type { AuditEntry, DocumentNode, DrawingReviewPackage, MaterialCodeApplication, MaterialRelationCompleteness, PdmUser, ProjectPlan, ProjectPlanPortfolio, ProjectSummary, ProjectValidationPlan, ReleasePackageSummary } from '../types'
 
 const props = withDefaults(defineProps<{
   active?: boolean
@@ -35,7 +39,8 @@ const props = withDefaults(defineProps<{
   canAddManagerNote: boolean
 }>(), { active: true })
 
-const emit = defineEmits<{ documents: []; information: []; bom: []; projectPlan: [taskId?: string]; validationPlan: []; procurement: []; release: [] }>()
+const emit = defineEmits<{ documents: []; bom: []; projectPlan: [taskId?: string]; openPortfolioPlan: [projectId: string]; validationPlan: []; release: [];
+  openRisk: [projectId: string, tab: ProjectAttentionDetail['tab']] }>()
 
 const activeProject = computed(() => props.projects.find(item => item.id === props.project.id) ?? props.project)
 const rootProject = computed(() => {
@@ -62,15 +67,64 @@ const todoDueDate = ref<string>()
 const todoRecipients = ref<string[]>([])
 let overviewRequestId = 0
 
-const phaseOwnerDefinitions: Array<{ key: ProjectPhaseOwnerKey; label: string; detail: string; preferredRoles: string[] }> = [
-  { key: 'StandardProcurement', label: '标准件采购', detail: '标准件询价、下单与到货协调', preferredRoles: ['ProcurementSpecialist', 'ProcurementManager', 'SupplyChain'] },
-  { key: 'NonStandardProcurement', label: '非标件采购', detail: '非标件外协采购与交付跟进', preferredRoles: ['ProcurementSpecialist', 'ProcurementManager', 'SupplyChain'] },
-  { key: 'NonStandardProduction', label: '非标件生产', detail: '机加、自制与外协生产协调', preferredRoles: ['ProductionManager', 'ProductionAssistant', 'MachiningSupervisor'] },
-  { key: 'MechanicalAssembly', label: '机械装配', detail: '机械装配排程与现场协调', preferredRoles: ['AssemblySupervisor', 'AssemblyFitter', 'MechanicalManager'] },
-  { key: 'ElectricalAssembly', label: '电气装配', detail: '电气接线与装配协调', preferredRoles: ['ElectricalSupervisor', 'AssemblyElectrician', 'ElectricalEngineer'] },
-  { key: 'ElectricalCommissioning', label: '电气调试', detail: '电气调试与问题闭环', preferredRoles: ['CommissioningEngineer', 'ElectricalEngineer'] },
-  { key: 'Acceptance', label: '验收', detail: '客户验收、整改与交付协调', preferredRoles: ['ProjectManager', 'ProductionManager', 'BusinessUnitManager'] },
-]
+const riskProjects = ref<ProjectRiskOverviewProject[]>([])
+const riskToday = ref(chinaToday())
+const risksPending = ref(false)
+const risksFailed = ref(false)
+const canReadRisks = computed(() => activeProject.value.canReadContent && canViewTab('overview'))
+const riskRows = computed(() => projectRiskRows(riskProjects.value, riskToday.value).filter(row => canViewTab(row.tab)))
+const activeRisk = ref<{ projectId: string; key: string }>()
+const selectedRisk = computed(() => riskRows.value.find(row => row.projectId === activeRisk.value?.projectId && row.key === activeRisk.value?.key))
+const riskDetailOpen = computed({
+  get: () => Boolean(selectedRisk.value),
+  set: (open: boolean) => { if (!open) activeRisk.value = undefined },
+})
+const riskTabLabels = { 'project-plan': '计划', procurement: '备料', release: '发布' } as const
+
+function openRiskPage() {
+  const risk = selectedRisk.value
+  if (!risk) return
+  activeRisk.value = undefined
+  emit('openRisk', risk.projectId, risk.tab)
+}
+const risksIncomplete = computed(() => risksFailed.value || riskProjects.value.some(item => item.incomplete))
+let riskRequest: AbortController | undefined
+
+async function loadProjectRisks() {
+  riskRequest?.abort()
+  if (!props.token || !canReadRisks.value || !props.active) {
+    risksPending.value = false
+    return
+  }
+  const request = new AbortController()
+  riskRequest = request
+  risksPending.value = true
+  risksFailed.value = false
+  try {
+    const data = await readProjectRiskOverview(activeProject.value.id, props.token, request.signal)
+    if (!request.signal.aborted) {
+      riskProjects.value = data
+      riskToday.value = chinaToday()
+    }
+  } catch {
+    if (!request.signal.aborted) {
+      riskProjects.value = []
+      risksFailed.value = true
+    }
+  } finally {
+    if (!request.signal.aborted) {
+      risksPending.value = false
+      if (!selectedRisk.value) activeRisk.value = undefined
+    }
+  }
+}
+
+watch([() => activeProject.value.id, () => props.token, () => props.active, canReadRisks], () => {
+  activeRisk.value = undefined
+  riskProjects.value = []
+  risksFailed.value = false
+  void loadProjectRisks()
+}, { immediate: true })
 
 function projectDesignLeads(project: ProjectSummary) {
   return project.designLeads?.length ? project.designLeads : project.designLead ? [project.designLead] : []
@@ -140,24 +194,24 @@ watch([() => props.project.id, () => props.token, () => recordProjects.value.map
   baselineUnavailable.value = false
   return loadOperationalSummary()
 }, { immediate: true })
-onMounted(() => { overviewTimer = window.setInterval(() => { if (props.active !== false && !document.hidden && !refreshingOverview.value) void loadOperationalSummary() }, 300_000) })
-onBeforeUnmount(() => { window.clearInterval(overviewTimer); ++overviewRequestId })
+function refreshOverview() {
+  void loadOperationalSummary()
+  if (!risksPending.value) void loadProjectRisks()
+}
+onMounted(() => {
+  overviewTimer = window.setInterval(() => {
+    if (props.active && !document.hidden && !refreshingOverview.value) refreshOverview()
+  }, 300_000)
+})
+onBeforeUnmount(() => { window.clearInterval(overviewTimer); ++overviewRequestId; riskRequest?.abort() })
 
 function assignedPeople(usernames: Array<string | undefined>) {
   const uniqueUsernames = [...new Set(usernames.flatMap(item => item?.split('、') ?? []).map(item => item.trim()).filter((item): item is string => Boolean(item)))]
   return uniqueUsernames.map(username => ({
     username,
-    name: props.users.find(user => user.username.localeCompare(username, undefined, { sensitivity: 'accent' }) === 0)?.displayName || username,
+    name: personName(username),
   }))
 }
-
-const staffingRows = computed(() => [
-  { key: 'manager', stage: '项目管理', role: activeProject.value.parentProjectId ? '子项目负责人' : '项目经理', people: assignedPeople([activeProject.value.primaryProjectManager ?? rootProject.value.primaryProjectManager]) },
-  { key: 'collaborative-managers', stage: '项目管理', role: '协同项目经理', people: assignedPeople(rootProject.value.collaborativeProjectManagers) },
-  { key: 'design-lead', stage: '设计阶段', role: '主设', people: assignedPeople(projectDesignLeads(rootProject.value)) },
-  { key: 'engineers', stage: '设计执行', role: '执行工程师', people: assignedPeople(activeProject.value.designers) },
-  { key: 'downstream', stage: '后续阶段', role: '各部门负责人', people: [] },
-])
 
 const stageNames: Record<string, string> = {
   Design: '设计', MaterialPreparation: '备料', Assembly: '装配', Commissioning: '调试',
@@ -168,9 +222,20 @@ const activePlanItem = computed(() => planPortfolio.value?.projects?.find(item =
   ?? planPortfolio.value?.projects?.find(item => item.isRoot)
   ?? null)
 const activePlan = computed(() => activePlanItem.value?.plan ?? null)
-const projectStage = computed(() => activePlanItem.value?.currentStage ?? activePlan.value?.currentStage ?? activeProject.value.stage)
-const projectStageLabel = computed(() => activePlan.value?.stages?.find(item => item.code === projectStage.value)?.name
-  ?? stageNames[projectStage.value ?? ''] ?? projectStage.value ?? '未排程')
+function plannedStage(item?: ProjectPlanPortfolio['projects'][number] | null) {
+  if (!item?.hasPlan) return undefined
+  const isPlanStage = (code?: string) => Boolean(code && (Object.hasOwn(stageNames, code)
+    || item.plan?.stages?.some(stage => stage.code === code)))
+  return isPlanStage(item.currentStage) ? item.currentStage
+    : isPlanStage(item.plan?.currentStage) ? item.plan?.currentStage : undefined
+}
+
+function plannedStageLabel(item?: ProjectPlanPortfolio['projects'][number] | null, stage = plannedStage(item)) {
+  if (!stage) return '未排程'
+  return item?.plan?.stages?.find(definition => definition.code === stage)?.name ?? stageNames[stage] ?? '未排程'
+}
+
+const projectStageLabel = computed(() => plannedStageLabel(activePlanItem.value))
 const projectProgress = computed(() => activePlanItem.value?.hasPlan
   ? activePlanItem.value.completionPercent
   : activeProject.value.id === rootProject.value.id && planPortfolio.value?.projects?.some(item => item.hasPlan)
@@ -225,8 +290,7 @@ const shippingCountdownState = computed(() => {
 })
 
 function personName(username?: string | null) {
-  if (!username) return '待分配'
-  return props.users.find(user => user.username.localeCompare(username, undefined, { sensitivity: 'accent' }) === 0)?.displayName ?? username
+  return resolveUserDisplayName(props.users, username)
 }
 
 function phaseOwnerText(project: ProjectSummary, stage?: string) {
@@ -239,11 +303,11 @@ function phaseOwnerText(project: ProjectSummary, stage?: string) {
           : stage === 'AcceptanceProgress' || stage === 'FinalAcceptance' ? [owners.Acceptance]
             : [project.primaryProjectManager ?? rootProject.value.primaryProjectManager]
   const names = assignedPeople(usernames).map(person => person.name)
-  return names.length ? names.join('、') : '待分配'
+  return names.length ? names.join('、') : '—'
 }
 
 function currentStageFinish(item: NonNullable<ProjectPlanPortfolio['projects'][number]>) {
-  const stage = item.currentStage ?? item.plan?.currentStage
+  const stage = plannedStage(item)
   if (!stage) return ''
   const stageSchedule = item.plan?.stageSchedules?.find(schedule => schedule.stage === stage)
   if (stageSchedule) return addPlanDays(stageSchedule.startDate, Math.max(1, stageSchedule.durationDays) - 1)
@@ -283,7 +347,7 @@ function overdueTaskSummary(item: NonNullable<ProjectPlanPortfolio['projects'][n
 
 const portfolioRows = computed(() => (planPortfolio.value?.projects ?? []).map(item => {
   const project = props.projects.find(candidate => candidate.id === item.projectId)
-  const stage = item.currentStage ?? project?.stage
+  const stage = plannedStage(item)
   const currentTask = [...(item.plan?.tasks ?? [])]
     .filter(task => task.status !== 'Completed')
     .sort((left, right) => Number(right.status === 'InProgress') - Number(left.status === 'InProgress')
@@ -292,11 +356,12 @@ const portfolioRows = computed(() => (planPortfolio.value?.projects ?? []).map(i
   const engineers = project ? assignedPeople(project.designers).map(person => person.name) : []
   return {
     ...item,
+    planProjectId: item.isRoot || item.hasPlan ? item.projectId : planPortfolio.value?.rootProjectId ?? item.projectId,
     project,
     stage,
-    stageLabel: stageNames[stage ?? ''] ?? stage ?? '未排程',
-    engineers: engineers.length ? engineers.join('、') : '待分配',
-    owner: project ? phaseOwnerText(project, stage) : '待分配',
+    stageLabel: plannedStageLabel(item, stage),
+    engineers: engineers.length ? engineers.join('、') : '—',
+    owner: project ? phaseOwnerText(project, stage) : '—',
     remainingWorkPeriod: remainingWorkPeriod(item),
     overdueTaskSummary: overdueTaskSummary(item),
     currentTask,
@@ -371,11 +436,6 @@ const todoRecipientCandidates = computed(() => props.users
   .filter(user => user.isActive)
   .sort((left, right) => left.displayName.localeCompare(right.displayName, 'zh-CN')))
 
-const teamRows = computed(() => [
-  ...staffingRows.value.filter(row => ['manager', 'design-lead'].includes(row.key)),
-  ...phaseOwnerDefinitions.map(phase => ({ key: phase.key, role: phase.label, people: assignedPeople([activeProject.value.phaseOwners?.[phase.key]]) })),
-])
-const teamRowPairs = computed(() => Array.from({ length: Math.ceil(teamRows.value.length / 2) }, (_, index) => teamRows.value.slice(index * 2, index * 2 + 2)))
 const latestReleasePackage = computed(() => props.releasePackage ?? [...props.releasePackages]
   .sort((left, right) => (right.createdAt ?? '').localeCompare(left.createdAt ?? ''))[0] ?? null)
 const approvalCount = computed(() => {
@@ -396,7 +456,7 @@ const overviewAlerts = computed(() => [
   <section class="pdm-workbench" aria-label="工作台主页面">
     <div class="pdm-overview-layout">
       <section class="pdm-panel pdm-overview-status" aria-label="项目状态与下一步">
-        <header><span><CheckCircle2 :size="18" /></span><h2>项目状态与下一步</h2><p>{{ projectStageLabel }}阶段 · {{ projectHealth.label }} · 项目进度 {{ projectProgress === null ? '—' : `${projectProgress}%` }} · 计划完成 {{ projectFinish }}</p><button class="pdm-overview-refresh pdm-text-action" type="button" :disabled="refreshingOverview" aria-label="刷新项目概览" title="自动每5分钟更新，也可手动刷新" @click="loadOperationalSummary"><RefreshCw :size="13" />刷新</button></header>
+        <header><span><CheckCircle2 :size="18" /></span><h2>项目状态与下一步</h2><p>{{ projectStageLabel }}阶段 · {{ projectHealth.label }} · 项目进度 {{ projectProgress === null ? '—' : `${projectProgress}%` }} · 计划完成 {{ projectFinish }}</p><button class="pdm-overview-refresh pdm-text-action" type="button" :disabled="refreshingOverview" aria-label="刷新项目概览" title="自动每5分钟更新，也可手动刷新" @click="refreshOverview"><RefreshCw :size="13" />刷新</button></header>
         <div class="pdm-overview-status__body">
           <OverviewTimeline :plan="activePlan" :baseline="initialBaseline" :baseline-unavailable="baselineUnavailable" :progress-tone="projectHealth.tone" @open-task="taskId => emit('projectPlan', taskId)" />
         </div>
@@ -412,11 +472,28 @@ const overviewAlerts = computed(() => [
       </section>
 
       <div class="pdm-overview-summary" aria-label="项目核心业务概览">
-        <article class="pdm-panel pdm-overview-team" aria-label="项目团队">
-          <header><span><UsersRound :size="18" /></span><h2>项目团队</h2><span class="pdm-overview-team__actions"><button v-if="projectWritable && canViewTab('information') && (rootProject.canManageMainStaffing || activeProject.canAssignDesigners)" type="button" class="pdm-text-action" title="前往信息页分配项目人员" @click="emit('information')">分配人员</button></span></header>
-          <div class="pdm-overview-team__table-wrap"><table class="pdm-overview-team__table"><thead><tr><th>职责</th><th>负责人</th><th>职责</th><th>负责人</th></tr></thead><tbody><tr v-for="pair in teamRowPairs" :key="pair[0]?.key"><template v-for="row in pair" :key="row.key"><td class="is-role">{{ row.role }}</td><td :class="{ 'is-pending': !row.people.length }">{{ row.people.map(person => person.name).join('、') || '待分配' }}</td></template></tr></tbody></table></div>
+        <article v-if="canReadRisks" class="pdm-panel pdm-overview-project-risks" aria-label="项目风险" :aria-busy="risksPending">
+          <header><span><TriangleAlert :size="18" /></span><h2>项目风险</h2></header>
+          <div class="pdm-overview-project-risks__table-wrap">
+            <table class="pdm-fit-columns">
+              <colgroup><col class="risk-project"><col class="risk-type"><col><col class="risk-action"></colgroup>
+              <thead><tr><th scope="col">项目号</th><th scope="col">风险类型</th><th scope="col">明细</th><th scope="col">操作</th></tr></thead>
+              <tbody>
+                <tr v-for="risk in riskRows" :key="`${risk.projectId}:${risk.key}`">
+                  <td :title="risk.projectCode">{{ risk.projectCode }}</td>
+                  <td class="risk-description" :title="risk.reason">{{ risk.reason }}</td>
+                  <td :title="risk.subject">{{ risk.subject }}</td>
+                  <td><button type="button" class="pdm-text-action" :aria-label="`查看 ${risk.projectCode} ${risk.reason} ${risk.subject}`" @click="activeRisk = { projectId: risk.projectId, key: risk.key }">查看</button></td>
+                </tr>
+                <tr v-if="!riskRows.length && !risksIncomplete"><td colspan="4" role="status">{{ risksPending ? '正在读取项目风险…' : '当前暂无风险' }}</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-if="risksIncomplete" class="pdm-overview-project-risks__notice" role="status">
+            <span>{{ risksFailed ? '项目风险读取失败' : '部分项目风险暂未更新' }}</span>
+            <button type="button" class="pdm-text-action" :disabled="risksPending" @click="loadProjectRisks">刷新</button>
+          </div>
         </article>
-        <article class="pdm-panel pdm-overview-reserved" aria-label="预留区域" />
       </div>
 
       <div class="pdm-overview-bottom">
@@ -424,8 +501,8 @@ const overviewAlerts = computed(() => [
           <header><span><FolderTree :size="18" /></span><h2>项目总览</h2><p>当前主项目及全部子项目的阶段、负责人和计划风险</p><button v-if="!portfolioRows.length && token" type="button" class="pdm-text-action" @click="openManagerNote(activeProject.id, activeProject.code, activeProject.name)">查看记录</button><button type="button" class="pdm-overview-link" @click="emit('projectPlan')">进入项目计划 <ChevronRight :size="13" /></button></header>
           <div class="pdm-project-portfolio__table-wrap">
             <table><thead><tr><th>项目</th><th>执行</th><th>阶段</th><th>计划完成</th><th>剩余工期</th><th>进度</th><th>负责人</th><th>当前</th><th>状态</th><th>备注</th></tr></thead><tbody>
-              <tr v-for="row in portfolioRows" :key="row.projectId" :class="{ 'is-root': row.isRoot }" tabindex="0" @click="emit('projectPlan')" @keydown.enter="emit('projectPlan')">
-                <td><strong>{{ row.projectCode }}</strong><small>{{ row.projectName }}</small></td><td :class="{ 'is-pending': row.engineers === '待分配' }">{{ row.engineers }}</td><td>{{ row.stageLabel }}</td><td :title="row.currentStageFinish ? `当前主任务“${row.stageLabel}”计划完成 ${displayDate(row.currentStageFinish)}` : '当前主任务未排期'">{{ displayDate(row.currentStageFinish) }}</td><td><span :class="`is-${row.remainingWorkPeriod.tone}`" :title="row.remainingWorkPeriod.basis">{{ row.remainingWorkPeriod.label }}</span></td><td><span class="pdm-project-portfolio__progress"><em>{{ row.hasPlan ? `${row.completionPercent}%` : '—' }}</em><i><em :style="{ width: `${row.completionPercent}%` }" /></i></span></td><td :class="{ 'is-pending': row.owner === '待分配' }">{{ row.owner }}</td><td class="pdm-project-portfolio__task" :title="row.currentTask?.name"><strong v-if="row.currentTask">{{ row.currentTask.name }}</strong><small v-if="row.currentTask">{{ personName(row.currentTask.assignee) }} · {{ displayDate(row.currentTask.plannedFinish) }}</small><span v-else>暂无待办</span></td><td><span class="pdm-project-portfolio__overdue" :class="`is-${row.overdueTaskSummary.tone}`" :title="row.overdueTaskSummary.basis"><i v-for="line in row.overdueTaskSummary.lines" :key="line">{{ line }}</i></span></td><td class="pdm-project-portfolio__notes" @click.stop><ol><li v-for="note in notesForProject(row.projectId)" :key="note.id"><span :title="note.detail">{{ note.detail }}</span></li><li v-if="!notesForProject(row.projectId).length" class="is-empty">暂无备注</li></ol><button type="button" class="pdm-text-action" :aria-label="`${canAddManagerNote ? '维护' : '查看'} ${row.projectCode} 的记录`" v-if="canViewTab('records')" @click="openManagerNote(row.projectId, row.projectCode, row.projectName)">记录</button></td>
+              <tr v-for="row in portfolioRows" :key="row.projectId" :class="{ 'is-root': row.isRoot }" tabindex="0" @click="emit('openPortfolioPlan', row.planProjectId)" @keydown.enter.self.prevent="emit('openPortfolioPlan', row.planProjectId)" @keydown.space.self.prevent="emit('openPortfolioPlan', row.planProjectId)">
+                <td><strong>{{ row.projectCode }}</strong><small>{{ row.projectName }}</small></td><td :class="{ 'is-pending': row.engineers === '—' }"><PersonName :name="row.engineers" /></td><td>{{ row.stageLabel }}</td><td :title="row.currentStageFinish ? `当前主任务“${row.stageLabel}”计划完成 ${displayDate(row.currentStageFinish)}` : '当前主任务未排期'">{{ displayDate(row.currentStageFinish) }}</td><td><span :class="`is-${row.remainingWorkPeriod.tone}`" :title="row.remainingWorkPeriod.basis">{{ row.remainingWorkPeriod.label }}</span></td><td><span class="pdm-project-portfolio__progress"><em>{{ row.hasPlan ? `${row.completionPercent}%` : '—' }}</em><i><em :style="{ width: `${row.completionPercent}%` }" /></i></span></td><td :class="{ 'is-pending': row.owner === '—' }"><PersonName :name="row.owner" /></td><td class="pdm-project-portfolio__task" :title="row.currentTask?.name"><strong v-if="row.currentTask">{{ row.currentTask.name }}</strong><small v-if="row.currentTask"><PersonName :name="personName(row.currentTask.assignee)" /> · {{ displayDate(row.currentTask.plannedFinish) }}</small><span v-else>暂无待办</span></td><td><span class="pdm-project-portfolio__overdue" :class="`is-${row.overdueTaskSummary.tone}`" :title="row.overdueTaskSummary.basis"><i v-for="line in row.overdueTaskSummary.lines" :key="line">{{ line }}</i></span></td><td class="pdm-project-portfolio__notes"><ol><li v-for="note in notesForProject(row.projectId)" :key="note.id"><span :title="note.detail">{{ note.detail }}</span></li><li v-if="!notesForProject(row.projectId).length" class="is-empty">暂无备注</li></ol><button type="button" class="pdm-text-action" :aria-label="`${canAddManagerNote ? '维护' : '查看'} ${row.projectCode} 的记录`" v-if="canViewTab('records')" @click.stop="openManagerNote(row.projectId, row.projectCode, row.projectName)">记录</button></td>
               </tr>
               <tr v-if="!portfolioRows.length" class="is-empty"><td colspan="10">尚未加载项目计划总览</td></tr>
             </tbody></table>
@@ -434,6 +511,25 @@ const overviewAlerts = computed(() => [
 
       </div>
     </div>
+
+    <el-drawer v-model="riskDetailOpen" title="项目风险详情" size="min(480px, calc(100vw - 24px))" append-to-body>
+      <template v-if="selectedRisk">
+        <section class="risk-detail" aria-label="风险明细">
+          <span class="risk-description">{{ selectedRisk.reason }}</span>
+          <h3>{{ selectedRisk.subject }}</h3>
+          <dl>
+            <dt>项目号</dt><dd>{{ selectedRisk.projectCode }}</dd>
+            <template v-for="field in selectedRisk.fields" :key="field.label">
+              <dt>{{ field.label }}</dt><dd>{{ field.value === '' ? '—' : field.value ?? '—' }}</dd>
+            </template>
+          </dl>
+        </section>
+      </template>
+      <template #footer>
+        <button type="button" class="pdm-secondary-action" @click="riskDetailOpen = false">关闭</button>
+        <button v-if="selectedRisk" type="button" class="pdm-primary-action" data-pdm-primary @click="openRiskPage">前往{{ riskTabLabels[selectedRisk.tab] }}</button>
+      </template>
+    </el-drawer>
 
     <el-dialog v-model="managerNoteDialogOpen" class="pdm-manager-note-dialog" :title="managerNoteTarget ? `${canAddManagerNote ? '维护' : '查看'}项目记录 · ${managerNoteTarget.code}` : '项目记录'" width="520px" append-to-body>
       <template v-if="canAddManagerNote"><label class="pdm-dialog-field">备注内容<textarea v-model="managerNoteContent" class="pdm-manager-note-dialog__input" maxlength="1000" rows="5" placeholder="记录进度、风险或需要跟进的事项" aria-label="项目备注内容" /></label>
@@ -444,7 +540,7 @@ const overviewAlerts = computed(() => [
         <div v-if="projectRecordHistory.length" class="pdm-project-record-history__list">
           <article v-for="entry in projectRecordHistory" :key="entry.id">
             <header><strong>{{ projectRecordHistoryLabel(entry) }}</strong><span>{{ projectRecordHistoryType(entry) }}</span></header>
-            <p><span>{{ personName(entry.actor) }}</span><time>{{ projectRecordHistoryTime(entry) }}</time></p>
+            <p><span><PersonName :name="personName(entry.actor)" /></span><time>{{ projectRecordHistoryTime(entry) }}</time></p>
             <small>{{ entry.detail }}</small>
           </article>
         </div>
@@ -456,3 +552,103 @@ const overviewAlerts = computed(() => [
 
   </section>
 </template>
+
+<style scoped>
+.pdm-overview-project-risks {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.pdm-overview-project-risks > header {
+  min-height: 42px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 13px;
+  border-bottom: 1px solid var(--pdm-border-soft);
+}
+.pdm-overview-project-risks > header > span {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  color: var(--pdm-orange);
+  background: var(--pdm-orange-soft);
+}
+.pdm-overview-project-risks h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+.pdm-overview-project-risks__table-wrap {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+.pdm-overview-project-risks table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.pdm-overview-project-risks th {
+  height: var(--pdm-overview-table-header-height);
+  position: sticky;
+  top: 0;
+  background: var(--pdm-bg);
+  color: var(--pdm-muted);
+  font-weight: 500;
+}
+.pdm-overview-project-risks td {
+  height: var(--pdm-detail-row-height);
+  border-top: 1px solid var(--pdm-border-soft);
+}
+.pdm-overview-project-risks :is(th, td) {
+  padding: 0 5px;
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.risk-project { width: 88px; }
+.risk-type { width: 118px; }
+.risk-action { width: 48px; }
+.risk-description { color: var(--pdm-orange); }
+.risk-detail h3 {
+  margin: 6px 0 16px;
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+.risk-detail dl {
+  display: grid;
+  grid-template-columns: minmax(88px, max-content) minmax(0, 1fr);
+  gap: 12px;
+}
+.risk-detail dt { color: var(--pdm-muted); }
+.risk-detail dd {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.pdm-overview-project-risks__notice {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 4px;
+  color: var(--pdm-muted);
+  font-size: 12px;
+}
+@media (max-width: 1000px) {
+  .pdm-overview-project-risks__table-wrap { max-height: 250px; }
+}
+@media (max-width: 480px) {
+  .risk-project { width: 72px; }
+  .risk-type { width: 96px; }
+  .risk-action { width: 40px; }
+}
+</style>

@@ -34,6 +34,7 @@ public interface IEngineeringKitRepository
     Task<IReadOnlyList<EngineeringKit>> ListAsync(bool releasedOnly, CancellationToken cancellationToken);
     Task<EngineeringKit?> FindAsync(Guid kitId, CancellationToken cancellationToken);
     Task<EngineeringKit> SetActiveAsync(Guid kitId, bool isActive, long expectedRowVersion, string actor, DateTimeOffset updatedAt, CancellationToken cancellationToken);
+    Task DeleteDraftAsync(Guid kitId, long expectedRowVersion, CancellationToken cancellationToken);
     // 套件附件沿用通用附件结构，其中 MaterialId 表示所属套件 ID，不写入料品主档。
     Task<IReadOnlyList<MaterialAttachment>> ListLibraryAttachmentsAsync(Guid kitId, MaterialAttachmentKind? kind, CancellationToken cancellationToken);
     Task<MaterialAttachment?> FindLibraryAttachmentAsync(Guid attachmentId, CancellationToken cancellationToken);

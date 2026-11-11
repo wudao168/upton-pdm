@@ -13,14 +13,19 @@ import 'element-plus/dist/index.css'
 import './styles/tokens.css'
 import './styles/themes.css'
 import './styles/app.css'
+import './styles/drawer-motion.css'
+import './styles/capsule-fields.css'
+import './styles/twenty-appearance.css'
+import './styles/global-accent.css'
 import './styles/ui-consistency.css'
 import ServerConnectionSettings from './components/ServerConnectionSettings.vue'
-import { isPdmTheme } from './themes'
+import { applyPdmTheme, isPdmTheme, watchPdmSystemTheme } from './themes'
 
 const savedTheme = window.localStorage.getItem('pdm_theme')
-document.documentElement.dataset.pdmTheme = isPdmTheme(savedTheme) ? savedTheme : 'a'
+applyPdmTheme(isPdmTheme(savedTheme) ? savedTheme : 'a')
 
 const app = createApp(ServerConnectionSettings).use(ElementPlus, { locale: zhCn })
+app.onUnmount(watchPdmSystemTheme(() => { const theme = document.documentElement.dataset.pdmTheme; return isPdmTheme(theme) ? theme : 'a' }))
 installPanelHeaderActions(app)
 installColumnResize(app)
 installDatePickers(app)

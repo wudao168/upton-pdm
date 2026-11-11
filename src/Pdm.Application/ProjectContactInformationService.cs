@@ -37,7 +37,7 @@ public sealed class ProjectContactInformationService(IPdmRepository repository, 
         var shortFields = new[] { command.CustomerContact, command.CustomerPhone, command.ShippingContact, command.ShippingPhone };
         if (shortFields.Any(value => value is null || value.Length > 100) || command.ShippingAddress is null || command.ShippingAddress.Length > 500)
             throw new PdmRuleException("联系人、联系方式和职位最多100个字符，收货地址和备注最多500个字符。");
-        if (command.SalesPeople is null || command.PresalesPeople is null || command.SalesPeople.Length > 500 || command.PresalesPeople.Length > 500) throw new PdmRuleException("销售、售前人员最多500个字符。");
+        if (command.SalesPeople is null || command.PresalesPeople is null || command.SalesPeople.Length > 500 || command.PresalesPeople.Length > 500) throw new PdmRuleException("销售经理、售前工程师最多500个字符。");
         var entries = (command.Entries ?? LegacyEntries(command.CustomerContact, command.CustomerPhone, command.ShippingAddress, command.ShippingContact, command.ShippingPhone)).ToArray();
         if (entries.Any(entry => entry is null || entry.Contact is null || entry.Phone is null || entry.Address is null
             || entry.Contact.Length > 100 || entry.Phone.Length > 100 || entry.Address.Length > 500

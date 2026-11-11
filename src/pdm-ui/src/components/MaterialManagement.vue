@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
+import ApprovalNoteEditor from './ApprovalNoteEditor.vue'
 import { userErrorMessage } from '../userErrorMessage'
 import MaterialBrandSelect from './MaterialBrandSelect.vue'
 import MaterialBrandLibrary from './MaterialBrandLibrary.vue'
@@ -11,8 +13,6 @@ import { projectHeaderHtml, projectHeaderCss } from '../exportFormat'
 import { clearGlobalStatus, ElMessage } from '../statusMessage'
 import { ElMessageBox } from 'element-plus'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Boxes, Warehouse, Link2, Package, ListTree, ClipboardCheck, Hash, Tag } from '../solidMenuIcons'
-import SquareLoader from './SquareLoader.vue'
 import MaterialEditorDialog from './MaterialEditorDialog.vue'
 import { materialImageLimit } from '../materialImages'
 import MaterialInventory from './MaterialInventory.vue'
@@ -98,6 +98,9 @@ const props = withDefaults(defineProps<{
   canViewRelations?: boolean
   canManageRelations?: boolean
   canPublishRelations?: boolean
+  canChangeRelationActivity?: boolean
+  canDeleteRelationDrafts?: boolean
+  canDeleteKitDrafts?: boolean
   canManageKits?: boolean
   canViewKits?: boolean
   canViewBomHeaders?: boolean
@@ -514,6 +517,16 @@ function workflowRowStatusLabel(row: MaterialCodeWorkflowRow) {
 function applicationApprovalHistory(application?: MaterialCodeApprovalRow) {
   return application?.approvalWorkflow?.nodes.map(node => `${node.order}. ${node.name}：${node.decision == null ? '待审批' : node.decision === 'Approved' || node.decision === 0 ? '已通过' : '已退回'}${node.decisionBy ? `（${displayUserName(node.decisionBy)}）` : ''}`).join('\n') || ''
 }
+const approvalNotes = ref<Record<string, string | undefined>>({})
+const pendingNode = (application: MaterialCodeApprovalRow) => application.approvalWorkflow?.nodes.find(node => node.decision == null)
+async function requiredApprovalOpinion(targets: MaterialCodeApprovalRow[]) {
+  if (!targets.some(target => pendingNode(target)?.policy?.requireOpinion)) return ''
+  const result = await ElMessageBox.prompt('当前节点要求填写同意意见。', '审批意见', {
+    inputType: 'textarea', confirmButtonText: '确认', cancelButtonText: '取消',
+    inputValidator: value => !!value?.trim() && value.trim().length <= 1000 || '请填写1至1000个字符的审批意见',
+  })
+  return result.value.trim()
+}
 async function emergencyCodeApplication(application: MaterialCodeApprovalRow, approved: boolean) {
   if (!application.canEmergencyDecide || decidingApplicationId.value) return
   try {
@@ -580,7 +593,8 @@ const materialCodePlaceholder = computed(() => {
 })
 const selectedMaterial = computed(() => selectedMaterials.value.length === 1 ? selectedMaterials.value[0] : null)
 const editingMaterial = computed(() => materials.value.find(item => item.id === editingId.value) ?? null)
-const relationByMaterialId = computed(() => new Map(materialRelations.value.flatMap(item => [...relationMains(item), ...relationMains(item, false)].map(main => [main.materialId, item] as const))))
+const relationByMaterialId = computed(() => new Map(materialRelations.value.filter(item => !item.isArchived)
+  .flatMap(item => [...relationMains(item), ...relationMains(item, false)].map(main => [main.materialId, item] as const))))
 const canEditSelected = computed(() => Boolean(selectedMaterial.value
   && !selectedMaterial.value.isArchived))
 const canBatchEditSelected = computed(() => selectedMaterials.value.length > 1
@@ -1116,6 +1130,7 @@ async function decideCodeApplication(application: MaterialCodeApprovalRow, appro
       comment = result.value.trim()
     } catch { return }
   }
+  if (approved) { try { comment = await requiredApprovalOpinion(targets) } catch { return } }
   decidingApplicationId.value = application.id
   let succeeded = 0
   const failures: string[] = []
@@ -1153,7 +1168,15 @@ function canRejectCodeApplication(application: MaterialCodeApprovalRow) {
 }
 
 async function processApprovalRow(application: MaterialCodeApprovalRow, approved: boolean, comment: string) {
-  if (!application.masterMaterial) return decideMaterialCodeApplication(application.id, application.rowVersion, approved, comment, props.token, approved ? approvalCategoryCode(application) : undefined)
+  if (!application.masterMaterial) {
+    const note = approvalNotes.value[application.id]
+    const category = approved ? approvalCategoryCode(application) : undefined
+    if (note === undefined || !pendingNode(application)?.policy?.editBusinessNote)
+      return decideMaterialCodeApplication(application.id, application.rowVersion, approved, comment, props.token, category)
+    const result = await decideMaterialCodeApplication(application.id, application.rowVersion, approved, comment, props.token, category, false, undefined, note)
+    delete approvalNotes.value[application.id]
+    return result
+  }
   if (!props.canApprove) throw new Error('当前账号没有普通料品审批权限。')
   if (!approved) {
     const rejected = await rejectMaterial(application.masterMaterial.id, application.rowVersion, comment, props.token)
@@ -1198,6 +1221,7 @@ async function decideSelectedCodeApplications(approved: boolean) {
     }
   } catch { return }
 
+  if (approved) { try { comment = await requiredApprovalOpinion(targets) } catch { return } }
   batchDecidingApplications.value = true
   let succeeded = 0
   const failures: string[] = []
@@ -1773,47 +1797,45 @@ watch(() => props.token, () => { inspectionOpen.value = false; inspection.value 
 <template>
   <MaterialBrandLibrary v-if="brandLibraryOpen" :token="token" :can-manage="canEdit" @close="brandLibraryOpen = false" />
   <ObjectInspector v-model="inspectionOpen" :title="inspection?.name || '料品详情'" :fields="inspectionFields" />
-  <section class="material-page pdm-panel pdm-loading-host">
-    <SquareLoader v-if="loading" overlay label="正在加载料品数据" />
+  <section class="material-page pdm-panel" :aria-busy="loading || materialPageLoading">
     <el-tabs v-model="activeTab" class="material-tabs">
       <el-tab-pane label="料品主档" name="materials">
-        <template #label><span class="material-tab-label"><Boxes :filled="activeTab === 'materials'" :size="16" />料品主档</span></template>
+        <template #label><span class="material-tab-label">料品主档</span></template>
         <div class="material-master-layout" :class="{ 'is-category-collapsed': categoryNavCollapsed }">
           <CategoryNavigation class="material-category-nav" :nodes="materialCategoryNodes" :model-value="selectedMaterialCategoryCode" aria-label="料品分类" all-label="全部料品" :collapsed="categoryNavCollapsed" collapsible default-expand-all @toggle="categoryNavCollapsed = !categoryNavCollapsed" @update:model-value="selectMaterialCategory" />
           <section class="material-master-content" aria-label="料品列表">
             <div class="material-toolbar pdm-toolbar">
-              <div class="material-toolbar__actions pdm-toolbar__group"><el-button @click="load">刷新</el-button><el-button class="material-select-drafts" aria-label="勾选本页草稿" :disabled="!pageDrafts.length || loading || materialPageLoading || queryingInventory" @click="selectPageDrafts">勾选本页草稿</el-button><el-button v-if="canCreateMaterial" type="primary" @click="openCreate">新增料品</el-button><el-button v-if="canEdit" :disabled="selectedMaterials.length > 1 ? !canBatchEditSelected : !canEditSelected" @click="selectedMaterials.length > 1 ? openBatchEdit() : openSelectedEdit()">{{ selectedMaterials.length > 1 ? '批量编辑' : '编辑' }}</el-button><el-button v-if="canApprove" :disabled="!canApproveSelected" @click="approveSelected">批准</el-button><el-button @click="brandLibraryOpen = true">品牌库</el-button><MoreActions><el-button v-if="canCreateMaterial" @click="openMaterialImport">批量导入</el-button><el-button :disabled="selectedMaterials.length === 0" :loading="queryingU9" @click="querySelected">查询U9C</el-button><el-button :loading="queryingInventory" :disabled="Object.values(rowInventoryLoading).some(Boolean)" @click="querySelectedInventory">库存查询</el-button><el-button v-if="canEdit" :disabled="!canArchiveSelected" @click="archiveSelected">停用</el-button><el-button v-if="canEdit" :loading="reactivatingMaterial" :disabled="!canReactivateSelected" @click="reactivateSelected">启用</el-button><el-button v-if="canEdit" type="danger" :disabled="!canDeleteSelected" @click="deleteSelected">删除</el-button></MoreActions></div>
+              <div class="material-toolbar__actions pdm-toolbar__group"><el-button :loading="loading" :disabled="loading || materialPageLoading" @click="load">刷新</el-button><el-button class="material-select-drafts" aria-label="勾选本页草稿" :disabled="!pageDrafts.length || loading || materialPageLoading || queryingInventory" @click="selectPageDrafts">勾选本页草稿</el-button><el-button v-if="canCreateMaterial" type="primary" @click="openCreate">新增料品</el-button><el-button v-if="canEdit" :disabled="selectedMaterials.length > 1 ? !canBatchEditSelected : !canEditSelected" @click="selectedMaterials.length > 1 ? openBatchEdit() : openSelectedEdit()">{{ selectedMaterials.length > 1 ? '批量编辑' : '编辑' }}</el-button><el-button v-if="canApprove" :disabled="!canApproveSelected" @click="approveSelected">批准</el-button><el-button @click="brandLibraryOpen = true">品牌库</el-button><MoreActions><el-button v-if="canCreateMaterial" @click="openMaterialImport">批量导入</el-button><el-button :disabled="selectedMaterials.length === 0" :loading="queryingU9" @click="querySelected">查询U9C</el-button><el-button :loading="queryingInventory" :disabled="Object.values(rowInventoryLoading).some(Boolean)" @click="querySelectedInventory">库存查询</el-button><el-button v-if="canEdit" :disabled="!canArchiveSelected" @click="archiveSelected">停用</el-button><el-button v-if="canEdit" :loading="reactivatingMaterial" :disabled="!canReactivateSelected" @click="reactivateSelected">启用</el-button><el-button v-if="canEdit" type="danger" :disabled="!canDeleteSelected" @click="deleteSelected">删除</el-button></MoreActions></div>
               <div class="material-toolbar__filters pdm-toolbar__group"><el-checkbox v-model="showArchived" @change="searchMaterials">显示已停用</el-checkbox><el-select v-model="brandFilter" class="material-brand-filter" clearable filterable remote remote-show-suffix aria-label="筛选品牌" placeholder="筛选品牌" :remote-method="loadBrandFilterOptions" :loading="brandFilterLoading" @visible-change="openBrandFilter"><el-option v-for="brand in brandFilterOptions" :key="brand" :label="brand" :value="brand" /></el-select>
-              <SearchField><el-input v-model="query" class="material-toolbar__search" clearable placeholder="搜索编码、名称、规格或分类" @keyup.enter="searchMaterials" /><template #action><el-button type="primary" class="material-toolbar__search-button" @click="searchMaterials">搜索</el-button></template></SearchField>
+              <SearchField><el-input v-model="query" class="material-toolbar__search" clearable placeholder="搜索编码、名称、规格或分类" @keyup.enter="searchMaterials" /><template #action><el-button type="primary" class="material-toolbar__search-button" :loading="materialPageLoading && !loading && query.trim() === appliedQuery" @click="searchMaterials">搜索</el-button></template></SearchField>
 
               </div>
             </div>
-            <div class="material-table-shell pdm-loading-host">
-              <SquareLoader v-if="materialPageLoading" overlay label="正在查询料品主档" />
-              <el-table ref="materialTable" class="material-table" data-pdm-column-layout="scroll" :data="pagedMaterials" :row-class-name="materialRowClass" height="100%" stripe row-key="id" table-layout="fixed" :fit="true" :empty-text="query.trim() || brandFilter || selectedMaterialCategoryCode ? '没有符合筛选条件的料品' : '尚未创建PLM料品'" :default-sort="{ prop: 'createdAt', order: 'descending' }" @sort-change="sortMaterials" @selection-change="selectedMaterials = $event">
-          <el-table-column type="selection" width="38" fixed="left" class-name="pdm-column-fixed-width" />
-          <el-table-column prop="materialCode" label="物料编码" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="140" fixed="left" show-overflow-tooltip ><template #default="{ row }"><button type="button" class="pdm-inspect-link pdm-text-action" v-stocked-material="row.materialCode" :aria-label="`查看料品 ${row.materialCode} 详情`" @click.stop="inspectMaterial(row)">{{ row.materialCode }}</button></template></el-table-column>
-          <el-table-column prop="name" label="名称" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="180" fixed="left" show-overflow-tooltip><template #default="{ row }"><el-tag v-if="row.isRecommended" size="small" type="warning">推荐</el-tag> <span v-stocked-material="row.materialCode">{{ row.name }}</span></template></el-table-column>
-          <el-table-column v-if="canViewRelations" label="关联配置" min-width="88"><template #default="{ row }"><el-button link :type="relationStatus(row).type" :aria-label="`查看 ${row.materialCode} 的关联物料`" @click.stop="openRelationDetail(row)">{{ relationStatus(row).label }}</el-button></template></el-table-column>
-          <el-table-column label="引用" align="right" min-width="48"><template #default="{ row }">{{ row.referenceCount ?? 0 }}</template></el-table-column>
-          <el-table-column label="库存" min-width="72"><template #default="{ row }"><el-tooltip :content="rowInventoryTooltip(row)" placement="top"><el-button link :type="rowInventoryErrors[row.id] ? 'danger' : 'primary'" :disabled="!row.materialCode || queryingInventory" :loading="rowInventoryLoading[row.id]" :aria-label="`查询 ${row.materialCode} 的库存`" @click.stop="queryRowInventory(row)">{{ rowInventoryErrors[row.id] ? '查询失败' : rowInventoryResults[row.id] ? formatInventoryQuantity(rowInventoryResults[row.id].quantity) : '查询' }}</el-button></el-tooltip></template></el-table-column>
-          <el-table-column prop="specification" label="规格" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
-          <el-table-column prop="brand" label="品牌" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="56" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
-          <el-table-column label="材质" min-width="52" show-overflow-tooltip><template #default="{ row }">{{ row.material || '—' }}</template></el-table-column>
-          <el-table-column label="表面处理" min-width="64" show-overflow-tooltip><template #default="{ row }">{{ row.surfaceTreatment || '—' }}</template></el-table-column>
-          <el-table-column label="重量" min-width="54" show-overflow-tooltip><template #default="{ row }">{{ weightLabel(row) }}</template></el-table-column>
-          <el-table-column label="备注" min-width="180" show-overflow-tooltip><template #default="{ row }">{{ row.remark || '—' }}</template></el-table-column>
-          <el-table-column label="选型建议" min-width="100" show-overflow-tooltip><template #default="{ row }">{{ row.selectionAdvice || '—' }}</template></el-table-column>
-          <el-table-column label="参考价格" align="right" min-width="72" show-overflow-tooltip><template #default="{ row }">{{ referencePriceLabel(row) }}</template></el-table-column>
-          <el-table-column label="3D" min-width="48"><template #default="{ row }"><el-button link type="primary" :disabled="attachmentCount(row, 'Model3D') === 0" @click.stop="openAttachmentViewer(row, 'Model3D')">{{ attachmentCount(row, 'Model3D') || '—' }}</el-button></template></el-table-column>
-          <el-table-column label="资料" min-width="48"><template #default="{ row }"><el-button link type="primary" :disabled="attachmentCount(row, 'Document') === 0" @click.stop="openAttachmentViewer(row, 'Document')">{{ attachmentCount(row, 'Document') || '—' }}</el-button></template></el-table-column>
-          <el-table-column prop="createdBy" label="创建人" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="70" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.createdBy) }}</template></el-table-column>
-          <el-table-column prop="createdAt" label="创建时间" sortable="custom" :sort-orders="['descending', 'ascending', null]" min-width="130" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.createdAt) }}</template></el-table-column>
-          <el-table-column label="计量单位" min-width="76"><template #default="{ row }">{{ u9UnitLabel(row.unitCode) }}</template></el-table-column>
-          <el-table-column label="来源/主控" min-width="90"><template #default="{ row }">{{ row.sourceSystem === 'U9C' ? 'U9C' : 'PLM' }}/{{ row.masterOwner === 'U9C' ? '待对账接管' : 'PLM' }}</template></el-table-column>
-          <el-table-column label="状态" min-width="56"><template #default="{ row }"><el-tag :type="row.isArchived ? 'info' : row.approvalStatus === 'Approved' ? 'success' : 'info'">{{ row.isArchived ? '已停用' : row.approvalStatus === 'Approved' ? '已批准' : '草稿' }}</el-tag></template></el-table-column>
-          <el-table-column label="U9C同步/对账" min-width="110"><template #default="{ row }"><el-button v-if="canEdit && ['Failed', 'NeedsReview'].includes(row.syncStatus)" link type="primary" @click.stop="retryMaterialSynchronization(row)">重试同步</el-button><span>{{ row.syncStatus === 'Succeeded' && !row.u9SyncConfirmed ? '待校正' : syncLabels[row.syncStatus] }}</span><el-tooltip v-if="row.u9ReconciliationMessage" :content="row.u9ReconciliationMessage" placement="top"><span> · 对账差异</span></el-tooltip><span v-else-if="row.u9ReconciledAt"> · 已对账</span><el-button v-if="canEdit && row.approvalStatus === 'Approved' && (row.u9ReconciliationMessage || row.masterOwner === 'U9C')" link type="primary" :disabled="reactivatingMaterial || row.syncStatus === 'Pending'" @click.stop="reconcileSelectedMaster(row)">核对并同步</el-button></template></el-table-column>
-          <el-table-column label="U9/删除校验" min-width="112"><template #default="{ row }"><el-tooltip v-if="u9ValidationResults[row.id]" :content="u9ValidationResults[row.id].message" placement="top"><div class="u9-validation" :aria-label="u9ValidationResults[row.id].message"><el-tag :type="u9ValidationResults[row.id].status === 'Matched' ? 'success' : u9ValidationResults[row.id].status === 'SpecificationMismatch' ? 'danger' : 'warning'">{{ validationLabel(u9ValidationResults[row.id]) }}</el-tag></div></el-tooltip><span v-else class="u9-unchecked">未校验</span></template></el-table-column>
+            <div class="material-table-shell">
+              <el-table ref="materialTable" class="material-table" data-pdm-column-layout="scroll" :data="pagedMaterials" :row-class-name="materialRowClass" height="100%" stripe row-key="id" table-layout="fixed" :fit="true" :empty-text="loading || materialPageLoading ? '正在加载料品…' : query.trim() || brandFilter || selectedMaterialCategoryCode ? '没有符合筛选条件的料品' : '尚未创建PLM料品'" :default-sort="{ prop: 'createdAt', order: 'descending' }" @sort-change="sortMaterials" @selection-change="selectedMaterials = $event">
+          <el-table-column align="center" header-align="center" type="selection" width="38" fixed="left" class-name="pdm-column-fixed-width" />
+          <el-table-column align="center" header-align="center" prop="materialCode" label="物料编码" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="140" fixed="left" show-overflow-tooltip ><template #default="{ row }"><button type="button" class="pdm-inspect-link pdm-text-action" v-stocked-material="row.materialCode" :aria-label="`查看料品 ${row.materialCode} 详情`" @click.stop="inspectMaterial(row)">{{ row.materialCode }}</button></template></el-table-column>
+          <el-table-column align="center" header-align="center" prop="name" label="名称" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="180" fixed="left" show-overflow-tooltip><template #default="{ row }"><el-tag v-if="row.isRecommended" size="small" type="warning">推荐</el-tag> <span v-stocked-material="row.materialCode">{{ row.name }}</span></template></el-table-column>
+          <el-table-column align="center" header-align="center" v-if="canViewRelations" label="关联配置" min-width="88"><template #default="{ row }"><el-button link :type="relationStatus(row).type" :aria-label="`查看 ${row.materialCode} 的关联物料`" @click.stop="openRelationDetail(row)">{{ relationStatus(row).label }}</el-button></template></el-table-column>
+          <el-table-column align="center" header-align="center" label="引用" min-width="48"><template #default="{ row }">{{ row.referenceCount ?? 0 }}</template></el-table-column>
+          <el-table-column align="center" header-align="center" label="库存" min-width="72"><template #default="{ row }"><el-tooltip :content="rowInventoryTooltip(row)" placement="top"><el-button link :type="rowInventoryErrors[row.id] ? 'danger' : 'primary'" :disabled="!row.materialCode || queryingInventory" :loading="rowInventoryLoading[row.id]" :aria-label="`查询 ${row.materialCode} 的库存`" @click.stop="queryRowInventory(row)">{{ rowInventoryErrors[row.id] ? '查询失败' : rowInventoryResults[row.id] ? formatInventoryQuantity(rowInventoryResults[row.id].quantity) : '查询' }}</el-button></el-tooltip></template></el-table-column>
+          <el-table-column align="center" header-align="center" prop="specification" label="规格" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ row.specification || '—' }}</template></el-table-column>
+          <el-table-column align="center" header-align="center" prop="brand" label="品牌" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="56" show-overflow-tooltip><template #default="{ row }">{{ row.brand || '—' }}</template></el-table-column>
+          <el-table-column align="center" header-align="center" label="材质" min-width="52" show-overflow-tooltip><template #default="{ row }">{{ row.material || '—' }}</template></el-table-column>
+          <el-table-column align="center" header-align="center" label="表面处理" min-width="64" show-overflow-tooltip><template #default="{ row }">{{ row.surfaceTreatment || '—' }}</template></el-table-column>
+          <el-table-column align="center" header-align="center" label="重量" min-width="54" show-overflow-tooltip><template #default="{ row }">{{ weightLabel(row) }}</template></el-table-column>
+          <el-table-column align="center" header-align="center" label="备注" min-width="180" show-overflow-tooltip><template #default="{ row }">{{ row.remark || '—' }}</template></el-table-column>
+          <el-table-column align="center" header-align="center" label="选型建议" min-width="100" show-overflow-tooltip><template #default="{ row }">{{ row.selectionAdvice || '—' }}</template></el-table-column>
+          <el-table-column align="center" header-align="center" label="参考价格" min-width="72" show-overflow-tooltip><template #default="{ row }">{{ referencePriceLabel(row) }}</template></el-table-column>
+          <el-table-column align="center" header-align="center" label="3D" min-width="48"><template #default="{ row }"><el-button link type="primary" :disabled="attachmentCount(row, 'Model3D') === 0" @click.stop="openAttachmentViewer(row, 'Model3D')">{{ attachmentCount(row, 'Model3D') || '—' }}</el-button></template></el-table-column>
+          <el-table-column align="center" header-align="center" label="资料" min-width="48"><template #default="{ row }"><el-button link type="primary" :disabled="attachmentCount(row, 'Document') === 0" @click.stop="openAttachmentViewer(row, 'Document')">{{ attachmentCount(row, 'Document') || '—' }}</el-button></template></el-table-column>
+          <el-table-column align="center" header-align="center" prop="createdBy" label="创建人" sortable="custom" :sort-orders="['ascending', 'descending', null]" min-width="70" show-overflow-tooltip><template #default="{ row }"><PersonName :name="displayUserName(row.createdBy)" /></template></el-table-column>
+          <el-table-column align="center" header-align="center" prop="createdAt" label="创建时间" sortable="custom" :sort-orders="['descending', 'ascending', null]" min-width="130" show-overflow-tooltip><template #default="{ row }">{{ dateTimeLabel(row.createdAt) }}</template></el-table-column>
+          <el-table-column align="center" header-align="center" label="计量单位" min-width="76"><template #default="{ row }">{{ u9UnitLabel(row.unitCode) }}</template></el-table-column>
+          <el-table-column align="center" header-align="center" label="来源/主控" min-width="90"><template #default="{ row }">{{ row.sourceSystem === 'U9C' ? 'U9C' : 'PLM' }}/{{ row.masterOwner === 'U9C' ? '待对账接管' : 'PLM' }}</template></el-table-column>
+          <el-table-column align="center" header-align="center" label="状态" min-width="56"><template #default="{ row }"><el-tag :type="row.isArchived ? 'info' : row.approvalStatus === 'Approved' ? 'success' : 'info'">{{ row.isArchived ? '已停用' : row.approvalStatus === 'Approved' ? '已批准' : '草稿' }}</el-tag></template></el-table-column>
+          <el-table-column align="center" header-align="center" label="U9C同步/对账" min-width="110"><template #default="{ row }"><el-button v-if="canEdit && ['Failed', 'NeedsReview'].includes(row.syncStatus)" link type="primary" @click.stop="retryMaterialSynchronization(row)">重试同步</el-button><span>{{ row.syncStatus === 'Succeeded' && !row.u9SyncConfirmed ? '待校正' : syncLabels[row.syncStatus] }}</span><el-tooltip v-if="row.u9ReconciliationMessage" :content="row.u9ReconciliationMessage" placement="top"><span> · 对账差异</span></el-tooltip><span v-else-if="row.u9ReconciledAt"> · 已对账</span><el-button v-if="canEdit && row.approvalStatus === 'Approved' && (row.u9ReconciliationMessage || row.masterOwner === 'U9C')" link type="primary" :disabled="reactivatingMaterial || row.syncStatus === 'Pending'" @click.stop="reconcileSelectedMaster(row)">核对并同步</el-button></template></el-table-column>
+          <el-table-column align="center" header-align="center" label="U9/删除校验" min-width="112"><template #default="{ row }"><el-tooltip v-if="u9ValidationResults[row.id]" :content="u9ValidationResults[row.id].message" placement="top"><div class="u9-validation" :aria-label="u9ValidationResults[row.id].message"><el-tag :type="u9ValidationResults[row.id].status === 'Matched' ? 'success' : u9ValidationResults[row.id].status === 'SpecificationMismatch' ? 'danger' : 'warning'">{{ validationLabel(u9ValidationResults[row.id]) }}</el-tag></div></el-tooltip><span v-else class="u9-unchecked">未校验</span></template></el-table-column>
               </el-table>
             </div>
             <el-pagination v-model:current-page="currentPage" v-model:page-size="pageSize" class="material-pagination" :page-sizes="[50, 100, 200]" :total="materialTotal" layout="total, sizes, prev, pager, next" />
@@ -1822,34 +1844,36 @@ watch(() => props.token, () => { inspectionOpen.value = false; inspection.value 
       </el-tab-pane>
 
       <el-tab-pane label="料品库存" name="inventory" lazy>
-        <template #label><span class="material-tab-label"><Warehouse :filled="activeTab === 'inventory'" :size="16" />料品库存</span></template>
+        <template #label><span class="material-tab-label">料品库存</span></template>
         <MaterialInventory :token="token" :requested-material-code="inventoryRequestedMaterialCode" :request-key="inventoryRequestKey" />
       </el-tab-pane>
 
       <el-tab-pane v-if="canViewRelations" label="关联配置" name="relations">
-        <template #label><span class="material-tab-label"><Link2 :filled="activeTab === 'relations'" :size="16" />关联配置</span></template>
+        <template #label><span class="material-tab-label">关联配置</span></template>
         <MaterialRelationDirectory
           v-if="activeTab === 'relations'"
           :token="token"
           :relations="materialRelations"
           :can-manage="canManageRelations"
           :can-publish="canPublishRelations"
+          :can-change-activity="canPublishRelations && canChangeRelationActivity"
+          :can-delete-drafts="canManageRelations && canDeleteRelationDrafts"
           @refresh="loadMaterialRelations"
         />
       </el-tab-pane>
 
       <el-tab-pane v-if="canViewKits || canManageKits" label="料品套件" name="kits">
-        <template #label><span class="material-tab-label"><Package :filled="activeTab === 'kits'" :size="16" />料品套件</span></template>
-        <EngineeringKitLibrary v-if="activeTab === 'kits'" :token="token" :can-manage="canManageKits" :active="active !== false" />
+        <template #label><span class="material-tab-label">料品套件</span></template>
+        <EngineeringKitLibrary v-if="activeTab === 'kits'" :token="token" :can-manage="canManageKits" :can-delete-drafts="canManageKits && canDeleteKitDrafts" :active="active !== false" />
       </el-tab-pane>
 
       <el-tab-pane v-if="canViewBomHeaders" label="BOM料号" name="bom-headers">
-        <template #label><span class="material-tab-label"><ListTree :filled="activeTab === 'bom-headers'" :size="16" />BOM料号</span></template>
+        <template #label><span class="material-tab-label">BOM料号</span></template>
         <BomHeaderMaterialDirectory v-if="activeTab === 'bom-headers'" :token="token" />
       </el-tab-pane>
 
       <el-tab-pane name="code-approvals" lazy>
-        <template #label><span class="material-tab-label"><ClipboardCheck :filled="activeTab === 'code-approvals'" :size="16" />料号审批<em v-if="canReceiveNotices && currentWorkCount">{{ currentWorkCount }}</em></span></template>
+        <template #label><span class="material-tab-label">料号审批<em v-if="canReceiveNotices && currentWorkCount">{{ currentWorkCount }}</em></span></template>
         <div class="material-code-approval-workflow">
           <el-tabs v-model="codeApprovalView" class="material-code-approval-subtabs">
           <el-tab-pane name="pending">
@@ -1877,10 +1901,14 @@ watch(() => props.token, () => { inspectionOpen.value = false; inspection.value 
                   <el-table-column label="名称" width="110" show-overflow-tooltip><template #default="{ row }"><span v-stocked-material="workflowRowMaterialCode(row)">{{ row.approval?.applicationName || row.approval?.bomItemName || row.syncTask?.materialName || '—' }}</span></template></el-table-column>
                   <el-table-column label="型号" width="90" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.specification || row.syncTask?.specification || '—' }}</template></el-table-column>
                   <el-table-column label="品牌" width="72" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.brand || row.syncTask?.brand || '—' }}</template></el-table-column>
-                  <el-table-column label="申请人" width="82" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.approval?.requestedBy || row.syncTask?.requestedBy || '') }}</template></el-table-column>
+                  <el-table-column label="申请人" width="82" show-overflow-tooltip><template #default="{ row }"><PersonName :name="displayUserName(row.approval?.requestedBy || row.syncTask?.requestedBy || '')" /></template></el-table-column>
                   <el-table-column label="申请时间" width="124" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.requestedAt ? dateTimeLabel(row.approval.requestedAt) : row.syncTask?.requestedAt ? dateTimeLabel(row.syncTask.requestedAt) : '—' }}</template></el-table-column>
                   <el-table-column label="当前节点／状态" min-width="160"><template #default="{ row }"><el-tag :title="applicationApprovalHistory(row.approval)" :type="workflowRowStatusType(row)">{{ workflowRowStatusLabel(row) }}</el-tag></template></el-table-column>
-                  <el-table-column label="说明" min-width="180" show-overflow-tooltip><template #default="{ row }">{{ workflowRowDescription(row) }}</template></el-table-column>
+                  <el-table-column label="说明" min-width="180"><template #default="{ row }">{{ workflowRowDescription(row) }}
+                    <ApprovalNoteEditor v-if="row.approval?.approvalWorkflow" v-model="approvalNotes[row.approval.id]" label="料号申请说明"
+                      :identity="row.approval.id + ':' + row.approval.rowVersion" :nodes="row.approval.approvalWorkflow.nodes"
+                      :editable="!!(row.approval.canDecide && pendingNode(row.approval)?.policy?.editBusinessNote)" />
+                  </template></el-table-column>
                   <el-table-column label="操作" width="150"><template #default="{ row }"><template v-if="row.approval?.status === 'Pending'"><el-button v-if="row.approval.masterMaterial ? canApprove : (row.approval.canDecide ?? canDecideMaterialCode)" link type="primary" :loading="decidingApplicationId === row.approval.id" :disabled="batchDecidingApplications" @click="decideCodeApplication(row.approval, true)">批准</el-button><el-button v-if="canRejectCodeApplication(row.approval)" link type="danger" :disabled="decidingApplicationId === row.approval.id || batchDecidingApplications" @click="decideCodeApplication(row.approval, false)">退回</el-button><el-button v-if="row.approval.canEmergencyDecide && !row.approval.canDecide" link type="warning" :disabled="!!decidingApplicationId || batchDecidingApplications" @click="emergencyCodeApplication(row.approval, true)">紧急代批</el-button><el-button v-if="row.approval.canEmergencyDecide && !row.approval.canDecide" link type="danger" :disabled="!!decidingApplicationId || batchDecidingApplications" @click="emergencyCodeApplication(row.approval, false)">紧急代退回</el-button></template><template v-else-if="row.syncTask"><el-button link type="primary" @click="showPreview(row.syncTask)">查看请求</el-button><el-button v-if="canExecuteSyncTask(row.syncTask)" link type="primary" :disabled="batchSyncingTasks" :loading="syncingTaskId === row.syncTask.id" @click="executeTask(row.syncTask)">{{ syncTaskActionLabel(row.syncTask) }}</el-button></template><span v-else>—</span></template></el-table-column>
                 </el-table>
               </div>
@@ -1902,10 +1930,14 @@ watch(() => props.token, () => { inspectionOpen.value = false; inspection.value 
                   <el-table-column label="名称" width="110" show-overflow-tooltip><template #default="{ row }"><span v-stocked-material="workflowRowMaterialCode(row)">{{ row.approval?.applicationName || row.approval?.bomItemName || row.syncTask?.materialName || '—' }}</span></template></el-table-column>
                   <el-table-column label="型号" width="90" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.specification || row.syncTask?.specification || '—' }}</template></el-table-column>
                   <el-table-column label="品牌" width="72" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.brand || row.syncTask?.brand || '—' }}</template></el-table-column>
-                  <el-table-column label="申请人" width="82" show-overflow-tooltip><template #default="{ row }">{{ displayUserName(row.approval?.requestedBy || row.syncTask?.requestedBy || '') }}</template></el-table-column>
+                  <el-table-column label="申请人" width="82" show-overflow-tooltip><template #default="{ row }"><PersonName :name="displayUserName(row.approval?.requestedBy || row.syncTask?.requestedBy || '')" /></template></el-table-column>
                   <el-table-column label="申请时间" width="124" show-overflow-tooltip><template #default="{ row }">{{ row.approval?.requestedAt ? dateTimeLabel(row.approval.requestedAt) : row.syncTask?.requestedAt ? dateTimeLabel(row.syncTask.requestedAt) : '—' }}</template></el-table-column>
                   <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="workflowRowStatusType(row)">{{ workflowRowStatusLabel(row) }}</el-tag></template></el-table-column>
-                  <el-table-column label="说明" min-width="180" show-overflow-tooltip><template #default="{ row }">{{ workflowRowDescription(row) }}</template></el-table-column>
+                  <el-table-column label="说明" min-width="180"><template #default="{ row }">{{ workflowRowDescription(row) }}
+                    <ApprovalNoteEditor v-if="row.approval?.approvalWorkflow" v-model="approvalNotes[row.approval.id]" label="料号申请说明"
+                      :identity="row.approval.id + ':' + row.approval.rowVersion" :nodes="row.approval.approvalWorkflow.nodes"
+                      :editable="!!(row.approval.canDecide && pendingNode(row.approval)?.policy?.editBusinessNote)" />
+                  </template></el-table-column>
                   <el-table-column label="操作" width="150"><template #default>—</template></el-table-column>
                 </el-table>
               </div>
@@ -1917,7 +1949,7 @@ watch(() => props.token, () => { inspectionOpen.value = false; inspection.value 
       </el-tab-pane>
 
       <el-tab-pane v-if="canManageIntegration" label="取号设置" name="numbering-settings">
-        <template #label><span class="material-tab-label"><Hash :filled="activeTab === 'numbering-settings'" :size="16" />取号设置</span></template>
+        <template #label><span class="material-tab-label">取号设置</span></template>
         <div class="material-numbering-settings-scroll">
           <section class="material-duplicate-settings" aria-label="料品查重与审核规则设置">
             <header><div><strong>全局查重规则（按分类配置字段）</strong><p>全局查询PLM料品主档，分类不参与查重；按待保存料品所属分类取规则。所选字段必填，忽略首尾空格和大小写，全部相同即判重；右侧设置该分类新增料品是否需要审核。</p></div><div class="material-rules-header-actions"><el-input-number class="material-numbering-settings__input" v-model="numberingStartSequence" aria-label="PLM料号起始流水" :min="1000000" :max="9999999" :step="1" :precision="0" /><el-button type="primary" :loading="savingNumberingSettings" @click="saveNumberingSettings">保存基线设置</el-button><el-button type="primary" :loading="savingMaterialRules" @click="saveMaterialRules">保存规则</el-button></div></header>
@@ -1939,7 +1971,7 @@ watch(() => props.token, () => { inspectionOpen.value = false; inspection.value 
       </el-tab-pane>
 
       <el-tab-pane label="分类维护" name="rules">
-        <template #label><span class="material-tab-label"><Tag :filled="activeTab === 'rules'" :size="16" />分类维护</span></template>
+        <template #label><span class="material-tab-label">分类维护</span></template>
         <div class="category-layout">
           <aside class="category-tree-panel">
             <div class="category-actions"><el-button v-if="canManageIntegration" size="small" @click="startCategory(null)">新增根分类</el-button><el-button v-if="canManageIntegration" size="small" :disabled="!selectedCategoryCode" @click="startCategory(selectedCategoryCode)">新增下级</el-button></div>
@@ -2064,6 +2096,8 @@ watch(() => props.token, () => { inspectionOpen.value = false; inspection.value 
 </template>
 
 <style scoped>
+.material-toolbar__actions :deep(.pdm-more-actions > summary){width:80px;min-width:80px;max-width:80px}
+
 .material-toolbar__actions :deep(.el-button.material-select-drafts){min-width:88px!important;flex:0 0 88px}
 .material-toolbar__search{width:clamp(220px,20vw,340px)!important;min-width:160px!important;flex:0 1 340px!important}
 .material-import-actions{display:flex;align-items:center;gap:8px;margin-bottom:12px}.material-import-actions>span{min-width:0;overflow:hidden;color:var(--pdm-muted);text-overflow:ellipsis;white-space:nowrap}.material-import-summary{display:flex;align-items:center;gap:18px;margin:12px 0 8px;padding:9px 12px;border:1px solid var(--pdm-green-border);border-radius:6px;background:var(--pdm-green-soft);color:var(--pdm-green)}.material-import-summary.has-errors{border-color:var(--pdm-danger-border);background:var(--pdm-danger-soft);color:var(--pdm-danger)}.material-import-errors{color:var(--pdm-danger);line-height:1.4}.material-import-dialog :deep(.el-alert){margin-bottom:10px}
@@ -2076,8 +2110,8 @@ watch(() => props.token, () => { inspectionOpen.value = false; inspection.value 
 .material-page{height:100%;min-height:0;display:flex;flex-direction:column}.material-tabs{min-height:0;flex:1 1 auto;display:flex;flex-direction:column}.material-tabs :deep(.el-tabs__header .el-tabs__item){font-size:12px;font-weight:600}.material-tabs :deep(.el-tabs__content){min-height:0;flex:1 1 auto}.material-tabs :deep(.el-tab-pane){height:100%;min-height:0}.material-master-layout{height:100%;min-height:0}.material-master-content{display:flex;flex-direction:column}.material-toolbar{flex:0 0 auto;margin-bottom:5px}.material-table-shell{min-height:0;flex:1 1 auto}.material-table{height:100%}.material-pagination{flex:0 0 auto;justify-content:flex-end;margin-top:5px}.material-pagination :deep(.el-pagination__total),.material-pagination :deep(.el-select__selected-item),.material-pagination :deep(button),.material-pagination :deep(.number){font-size:11px}
 .material-tab-label{display:inline-flex;align-items:center;gap:5px}.material-tab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--pdm-blue);color:var(--pdm-surface);font-size:11px;font-style:normal;font-weight:600;line-height:18px;text-align:center}
 .material-table :deep(.el-table__body tr.el-table__row){height:30px}.material-table :deep(.el-table__body td.el-table__cell){height:30px;padding:0}.material-table :deep(.el-table__body .el-tag){height:20px;padding-top:0;padding-bottom:0;line-height:18px}
-.material-code-approval-workflow{height:100%;min-height:0;overflow:auto;padding-right:2px}.material-code-approval-subtabs{min-height:0}.material-code-approval-subtabs :deep(.el-tabs__content),.material-code-approval-subtabs :deep(.el-tab-pane){height:auto;min-height:0;overflow:visible}.material-code-approval-subtabs :deep(.el-tabs__header){margin:0 0 8px}.material-code-approval-subtabs :deep(.el-tabs__item){height:var(--pdm-tab-secondary);font-size:11px;font-weight:600}.material-code-approval-subtab-label{display:inline-flex;align-items:center;gap:5px}.material-code-approval-subtab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--pdm-theme-accent-soft-strong);color:var(--pdm-blue);font-size:11px;font-style:normal;line-height:18px;text-align:center}
-.material-step-feedback{position:sticky;top:0;z-index:4;min-height:82px;max-height:132px;margin-bottom:8px;overflow:auto;padding:7px 9px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-table-header);color:var(--pdm-text-soft);font-size:11px}.material-step-feedback__status,.material-step-feedback__result header{display:flex;align-items:flex-start;gap:8px}.material-step-feedback__status{padding-bottom:5px;border-bottom:1px solid var(--pdm-border-soft)}.material-step-feedback__status>strong,.material-step-feedback__result header>strong{flex:0 0 auto;color:var(--pdm-text);font-size:11px}.material-step-feedback__status>span,.material-step-feedback__result header>span{min-width:0;font-weight:600;line-height:1.4}.material-step-feedback__status>span.is-running{color:var(--pdm-blue)}.material-step-feedback__result{padding-top:5px}.material-step-feedback__result p{margin:3px 0 0;line-height:1.4}.material-step-feedback__result ul{margin:4px 0 0;padding-left:18px;line-height:1.4}.material-step-feedback.is-success{border-color:var(--pdm-green-border);background:var(--pdm-green-soft)}.material-step-feedback.is-success .material-step-feedback__result header>span{color:var(--pdm-green)}.material-step-feedback.is-warning{border-color:var(--pdm-orange-border);background:var(--pdm-orange-soft)}.material-step-feedback.is-warning .material-step-feedback__result header>span{color:var(--pdm-orange)}.material-step-feedback.is-error{border-color:var(--pdm-danger-border);background:var(--pdm-danger-soft)}.material-step-feedback.is-error .material-step-feedback__result header>span{color:var(--pdm-danger)}.material-step-feedback.is-empty .material-step-feedback__result header>span,.material-step-feedback.is-empty .material-step-feedback__result p{color:var(--pdm-muted)}
+.material-code-approval-workflow{height:100%;min-height:0;overflow:auto;padding-right:2px}.material-code-approval-subtabs{min-height:0}.material-code-approval-subtabs :deep(.el-tabs__content),.material-code-approval-subtabs :deep(.el-tab-pane){height:auto;min-height:0;overflow:visible}.material-code-approval-subtabs :deep(.el-tabs__header){margin:0 0 8px}.material-code-approval-subtabs :deep(.el-tabs__item){height:var(--pdm-tab-secondary);font-size:11px;font-weight:600}.material-code-approval-subtab-label{display:inline-flex;align-items:center;gap:5px}.material-code-approval-subtab-label em{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--pdm-theme-accent-soft-strong); color:var(--pdm-text);font-size:11px;font-style:normal;line-height:18px;text-align:center}
+.material-step-feedback{position:sticky;top:0;z-index:4;min-height:82px;max-height:132px;margin-bottom:8px;overflow:auto;padding:7px 9px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-table-header);color:var(--pdm-text-soft);font-size:11px}.material-step-feedback__status,.material-step-feedback__result header{display:flex;align-items:flex-start;gap:8px}.material-step-feedback__status{padding-bottom:5px;border-bottom:1px solid var(--pdm-border-soft)}.material-step-feedback__status>strong,.material-step-feedback__result header>strong{flex:0 0 auto;color:var(--pdm-text);font-size:11px}.material-step-feedback__status>span,.material-step-feedback__result header>span{min-width:0;font-weight:600;line-height:1.4}.material-step-feedback__status>span.is-running{ color:var(--pdm-text)}.material-step-feedback__result{padding-top:5px}.material-step-feedback__result p{margin:3px 0 0;line-height:1.4}.material-step-feedback__result ul{margin:4px 0 0;padding-left:18px;line-height:1.4}.material-step-feedback.is-success{border-color:var(--pdm-green-border);background:var(--pdm-green-soft)}.material-step-feedback.is-success .material-step-feedback__result header>span{color:var(--pdm-green)}.material-step-feedback.is-warning{border-color:var(--pdm-orange-border);background:var(--pdm-orange-soft)}.material-step-feedback.is-warning .material-step-feedback__result header>span{color:var(--pdm-orange)}.material-step-feedback.is-error{border-color:var(--pdm-danger-border);background:var(--pdm-danger-soft)}.material-step-feedback.is-error .material-step-feedback__result header>span{color:var(--pdm-danger)}.material-step-feedback.is-empty .material-step-feedback__result header>span,.material-step-feedback.is-empty .material-step-feedback__result p{color:var(--pdm-muted)}
 .material-code-workflow-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start;gap:10px;min-width:0}.material-code-workflow-stage{min-width:0;overflow:hidden;padding:10px;border:1px solid var(--pdm-border);border-radius:8px;background:var(--pdm-surface)}.material-code-workflow-stage__title{display:flex;align-items:center;gap:8px;margin-bottom:8px;color:var(--pdm-text-soft)}.material-code-workflow-stage__title strong{color:var(--pdm-green);font-size:12px;white-space:nowrap}.material-code-workflow-stage__title span{overflow:hidden;color:var(--pdm-muted);text-overflow:ellipsis;white-space:nowrap}
 .material-sync-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px}.material-sync-toolbar :deep(.el-button){min-width:100px;height:var(--pdm-button-default);margin-left:0;font-size:11px}.material-sync-toolbar>span{color:var(--pdm-muted);font-size:11px}
 .material-code-workflow-stage--unified{width:100%}.material-code-workflow-feedback{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:14px}.material-code-workflow-feedback .material-step-feedback__status{grid-column:1 / -1}.material-code-workflow-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.material-code-workflow-toolbar>span{color:var(--pdm-muted);font-size:11px}.material-code-workflow-toolbar :deep(.el-button){min-width:80px;height:var(--pdm-button-default);margin-left:0;font-size:11px}
@@ -2095,12 +2129,14 @@ watch(() => props.token, () => { inspectionOpen.value = false; inspection.value 
 .material-toolbar__filters{flex:0 1 auto}.material-toolbar__search{width:200px!important;min-width:0!important;flex:0 1 200px!important}.material-toolbar__search-button{width:clamp(60px,5vw,80px);height:var(--pdm-button-default);flex:0 0 auto;margin-left:0;padding:0}
 </style>
 <style scoped>
+.material-toolbar__actions :deep(.pdm-more-actions > summary){width:80px;min-width:80px;max-width:80px}
+
 .material-tabs > :deep(.el-tabs__header) { margin: 0 0 12px; border: 1px solid var(--pdm-border); border-radius: var(--pdm-radius-panel); background: var(--pdm-surface); padding: 0 12px; }
 .material-tabs > :deep(.el-tabs__header .el-tabs__nav-wrap::after) { display: none; }
 .material-tabs > :deep(.el-tabs__header .el-tabs__nav) { display: flex; gap: 4px; }
 .material-tabs > :deep(.el-tabs__header .el-tabs__item) { padding: 8px 10px; color: var(--pdm-muted); font-size: 12px; font-weight: 600; }
 .material-tabs > :deep(.el-tabs__header .el-tabs__item:hover) { color: var(--pdm-text); }
-.material-tabs > :deep(.el-tabs__header .el-tabs__item.is-active) { color: var(--pdm-blue); }
+.material-tabs > :deep(.el-tabs__header .el-tabs__item.is-active) { color:var(--pdm-text); }
 .material-tabs > :deep(.el-tabs__header .el-tabs__active-bar) { height: 3px; background: var(--pdm-blue); }
 .material-tab-label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 </style>

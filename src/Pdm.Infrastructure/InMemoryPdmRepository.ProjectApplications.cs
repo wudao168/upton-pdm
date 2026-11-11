@@ -48,17 +48,18 @@ public sealed partial class InMemoryPdmRepository : IProjectApplicationRepositor
         if (command.ApplicationApproval is not { } approval) return null;
         var value = projectApplications.GetValueOrDefault(approval.ApplicationId);
         if (value is null || value.CompanyId != command.OrganizationId) throw new PdmNotFoundException("立项申请不存在或不属于当前公司。");
-        if (value.Status == ProjectApplicationService.Approved) return value;
+        if (value.HasApprovedProject()) return value;
         if (value.Status != ProjectApplicationService.Pending || value.RowVersion != approval.ExpectedRowVersion)
             throw new PdmConflictException("申请已变化，请刷新后重新审批。");
         return value;
     }
     private void CompleteApplicationApproval(ProjectApplication application, ProjectApplicationApproval approval, Project project)
     {
-        projectApplications[application.Id] = application with { Status = ProjectApplicationService.Approved, ProjectId = project.Id,
-            ProjectCode = project.Code, RowVersion = application.RowVersion + 1, UpdatedAt = approval.Event.At };
-        applicationHistory[application.Id].Add(approval.Event with { ProjectId = project.Id, ProjectCode = project.Code });
         var input = approval.Event.ApprovedData?.Input ?? application.Data.Input;
+        if (projectBudgets is not null && ProjectApplicationBudgets.Create(project.Id, input, approval.Event.Actor, approval.Event.At) is { } budget)
+            projectBudgets.SaveAsync(budget, 0, default).GetAwaiter().GetResult();
+        projectApplications[application.Id] = application.WithApprovedProject(project, input, approval.Event.At);
+        applicationHistory[application.Id].Add(approval.Event with { ProjectId = project.Id, ProjectCode = project.Code });
         if (projectContacts is not null)
             projectContacts.SaveAsync(new(project.Id, UpdatedBy: approval.Event.Actor, UpdatedAt: approval.Event.At,
                 SalesPeople: input.SalesUsername, PresalesPeople: string.Join('、', input.PresalesUsernames)), 0, default).GetAwaiter().GetResult();

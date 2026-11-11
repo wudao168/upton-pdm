@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import SearchField from './SearchField.vue'
+import PersonName from './PersonName.vue'
 import UserSelect from './UserSelect'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, export: projectExport } = useProjectCenterAccess()
@@ -8,7 +8,7 @@ import { getProjectExportMetadata } from '../api'
 import { createClientUuid } from '../clientId'
 import { Calendar, ChevronDown, ChevronRight, Download, History, ListCollapse, ListTree, PanelLeftClose, PanelLeftOpen, Plus, RotateCw as RefreshCw, Settings, Trash2 } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import {
   generateProjectPlan,
@@ -23,11 +23,12 @@ import {
   readProjectPlan,
   readProjectPlanPortfolio,
   reuseProjectPlan,
-  saveProjectPlan,
+  saveProjectPlan as requestPlanSave,
+  saveProjectPlanHolidays,
   setProjectPlanStage,
-  updateProjectPlanTaskProgress,
+  updateProjectPlanTaskProgress as requestTaskProgress,
 } from '../api'
-import type { ProjectPlan, ProjectPlanPortfolio, ProjectPlanPortfolioItem, ProjectPlanStage, ProjectPlanStageDefinition, ProjectPlanTask, ProjectPlanTemplate, ProjectPlanVersion, ProjectSummary } from '../types'
+import type { ProjectPlan, ProjectPlanHoliday, ProjectPlanPortfolio, ProjectPlanPortfolioItem, ProjectPlanStage, ProjectPlanStageDefinition, ProjectPlanTask, ProjectPlanTemplate, ProjectPlanVersion, ProjectSummary } from '../types'
 import { useUserDisplayName } from '../userDisplay'
 import { hasStageAllocation, planProgress, stageProgress } from '../projectPlanAllocation'
 import { loadGlobalStatusContent } from '../globalStatusContent'
@@ -39,6 +40,7 @@ const props = defineProps<{
   project: ProjectSummary
   projects: ProjectSummary[]
   requestedTaskId?: string
+  singlePlan?: boolean
   companyName?: string
   token: string
   currentUsername: string
@@ -77,6 +79,9 @@ type TimelineRow = {
 
 const loading = ref(false)
 const error = ref('')
+let planLoadRevision = 0
+let portfolioRevision = 0
+onBeforeUnmount(() => { planLoadRevision++; portfolioRevision++ })
 const plan = ref<ProjectPlan | null>(null)
 const inheritedParentPlan = ref(false)
 const portfolio = ref<ProjectPlanPortfolio | null>(null)
@@ -106,10 +111,16 @@ watch(infoColumnsCollapsed, updateTimelineWidth, { flush: 'post' })
 onBeforeUnmount(() => resizeObserver.disconnect())
 const showBaseline = ref(true)
 const showNonWorkingDays = ref(false)
+const holidayDialogOpen = ref(false)
+type HolidayRange = Omit<ProjectPlanHoliday, 'date'> & { dates: [string, string] | null }
+const holidayDraft = ref<HolidayRange[]>([])
+const maxHolidayDays = 366
+const holidayVersion = ref(0)
+const holidayError = ref('')
+const savingHolidays = ref(false)
 const expanded = ref(new Set<string>())
 const collapsedStages = ref(new Set<string>())
 const timelineStageFilter = ref<string[]>([])
-const timelineTaskFilter = ref('')
 const timelineAssigneeFilter = ref<string[]>([])
 const unassignedFilter = '__unassigned__'
 const holidayCalendarDays = ref(new Map<string, { name: string; isOffDay: boolean }>())
@@ -122,8 +133,13 @@ const stageProgressDialogOpen = ref(false)
 const resourceConflictsDialogOpen = ref(false)
 const generateDialogOpen = ref(false)
 const taskDialogOpen = ref(false)
-const draggedTaskRow = ref<TimelineRow | null>(null)
-const taskDropTarget = ref<{ key: string; position: 'before' | 'after' } | null>(null)
+type TaskDropPosition = 'before' | 'after'
+let draggedTask: { id: string; planId: string; rowVersion: number; stage: ProjectPlanStage } | null = null
+let taskDropMarker: { info: Element; timeline: Element; position: TaskDropPosition } | null = null
+let taskDragFrame = 0
+let pendingTaskTarget: { element: HTMLElement; clientY: number } | null = null
+const taskSortPreview = shallowRef<{ planId: string; rowVersion: number; stage: ProjectPlanStage; order: Map<string, number> } | null>(null)
+onBeforeUnmount(clearTaskSortDrag)
 const reuseDialogOpen = ref(false)
 const manageDialogOpen = ref(false)
 const deleteDialogOpen = ref(false)
@@ -171,6 +187,58 @@ const sourceProjectOptions = computed(() => (portfolio.value?.projects ?? []).fi
 const targetProjectOptions = computed(() => (portfolio.value?.projects ?? []).filter(item => !item.isRoot && item.projectId !== reuseForm.sourceProjectId))
 const managedChildPlans = computed(() => (portfolio.value?.projects ?? []).filter(item => !item.isRoot))
 const ownsDisplayedPlan = computed(() => Boolean(plan.value && !inheritedParentPlan.value && plan.value.projectId === props.project.id))
+const canEditHolidays = computed(() => ownsDisplayedPlan.value && projectWritable.value && canManageProject(props.project.id, 'update'))
+function openHolidays() {
+  const ranges: HolidayRange[] = []
+  for (const { date, name, isOffDay } of [...(plan.value?.holidayOverrides ?? [])].sort((left, right) => left.date.localeCompare(right.date))) {
+    const previous = ranges.at(-1)
+    if (previous?.dates && previous.name === name && previous.isOffDay === isOffDay && addDays(previous.dates[1], 1) === date)
+      previous.dates[1] = date
+    else ranges.push({ dates: [date, date], name, isOffDay })
+  }
+  holidayDraft.value = ranges
+  holidayVersion.value = plan.value?.rowVersion ?? 0
+  holidayError.value = ''
+  holidayDialogOpen.value = true
+}
+async function saveHolidays() {
+  if (!canEditHolidays.value || savingHolidays.value) return
+  const projectId = props.project.id
+  const days = new Map<string, ProjectPlanHoliday>()
+  for (const { dates, name, isOffDay } of holidayDraft.value) {
+    const [start, end] = dates ?? []
+    if (!start || !end || start > end || start < '2000-01-01' || end > '2199-12-31' || !name.trim()) {
+      holidayError.value = '请填写有效的日期区间和说明，日期须在2000至2199年内。'
+      return
+    }
+    const count = dayDiff(start, end) + 1
+    if (days.size + count > maxHolidayDays) {
+      holidayError.value = `全部日期区间合计最多可设置${maxHolidayDays}天。`
+      return
+    }
+    for (let offset = 0; offset < count; offset++) {
+      const date = addDays(start, offset)
+      if (days.has(date)) {
+        holidayError.value = `日期区间在 ${date} 重叠，同一天只能设置一次。`
+        return
+      }
+      days.set(date, { date, name: name.trim(), isOffDay })
+    }
+  }
+  savingHolidays.value = true
+  holidayError.value = ''
+  try {
+    await commitPlanUpdate(saveProjectPlanHolidays(projectId, [...days.values()], holidayVersion.value, props.token))
+    if (props.project.id !== projectId) return
+    showNonWorkingDays.value = true
+    holidayDialogOpen.value = false
+    ElMessage.success('项目假期已保存。')
+  } catch (cause) {
+    if (props.project.id === projectId) holidayError.value = cause instanceof Error ? cause.message : '保存假期失败，请重试。'
+  } finally {
+    savingHolidays.value = false
+  }
+}
 const generateTargetProject = computed(() => props.projects.find(item => item.id === generateTargetProjectId.value))
 function canManageProject(projectId: string, action?: string) {
   const project = projectId === props.project.id ? props.project : props.projects.find(item => item.id === projectId)
@@ -387,7 +455,6 @@ async function completeTaskToday(row: TimelineRow) {
       completionPercent: 100, actualStart: task.actualStart || today, actualFinish: today, expectedRowVersion: owner.rowVersion,
     }, props.token)
     inlineEdit.value = null
-    await load()
     ElMessage.success(`已完成：完成日期记录为 ${today}，任务标记为100%完成`)
   } catch (reason) {
     ElMessage.error(reason instanceof Error ? reason.message : '完成日期保存失败')
@@ -410,7 +477,6 @@ async function saveInlineEdit() {
         actualFinish: edit.actualFinish, expectedRowVersion: owner.rowVersion,
       }, props.token)
       inlineEdit.value = null
-      await load()
       ElMessage.success('完成日期已保存，任务已标记为100%完成')
     } catch (reason) {
       ElMessage.error(reason instanceof Error ? reason.message : '完成日期保存失败')
@@ -431,7 +497,6 @@ async function saveInlineEdit() {
     const tasks = owner.tasks.map(item => item.id !== task.id ? item : { ...item, ...(edit.field === 'assignee' ? { assignee: edit.assignee || undefined } : { plannedStart: edit.dates[0], plannedFinish: edit.dates[1] }) })
     await saveProjectPlan(owner.projectId, { tasks, changeReason: reason.value, expectedRowVersion: owner.rowVersion }, props.token)
     inlineEdit.value = null
-    await load()
     ElMessage.success('计划已保存')
   } catch (reason) {
     if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '计划保存失败')
@@ -599,7 +664,13 @@ function stageRows(owner: ProjectPlan, level: number): TimelineRow[] {
       baselineStart: stage.tasks.flatMap(task => task.baselineStart ? [task.baselineStart] : []).sort()[0],
       baselineFinish: stage.tasks.flatMap(task => task.baselineFinish ? [task.baselineFinish] : []).sort().slice(-1)[0],
     }]
-    if (!collapsedStages.value.has(key)) rows.push(...stage.tasks.map(task => taskRow(task, owner, owner.projectId, level + 1)))
+    if (!collapsedStages.value.has(key)) {
+      const preview = taskSortPreview.value
+      const tasks = preview?.planId === owner.id && preview.rowVersion === owner.rowVersion && preview.stage === stage.code
+        ? [...stage.tasks].sort((left, right) => (preview.order.get(left.id) ?? 0) - (preview.order.get(right.id) ?? 0))
+        : stage.tasks
+      rows.push(...tasks.map(task => taskRow(task, owner, owner.projectId, level + 1)))
+    }
     return rows
   })
 }
@@ -652,10 +723,9 @@ const timelineStageOptions = computed(() => [...new Set(displayedPlans.value.fla
 const timelineAssigneeOptions = computed(() => [...new Set(planTaskEntries.value.map(({ task }) => task.assignee?.trim() || ''))]
   .map(username => ({ value: username || unassignedFilter, label: displayUserName(username, '待分配') }))
   .sort((left, right) => left.label.localeCompare(right.label, 'zh-CN')))
-const hasTimelineFilters = computed(() => Boolean(timelineStageFilter.value.length || timelineTaskFilter.value.trim() || timelineAssigneeFilter.value.length))
+const hasTimelineFilters = computed(() => timelineStageFilter.value.length > 0 || timelineAssigneeFilter.value.length > 0)
 const matchingPlanTasks = computed(() => planTaskEntries.value.filter(({ owner, task }) =>
   (!timelineStageFilter.value.length || timelineStageFilter.value.includes(stageLabel(task.stage, owner)))
-  && (!timelineTaskFilter.value.trim() || task.name.toLowerCase().includes(timelineTaskFilter.value.trim().toLowerCase()))
   && (!timelineAssigneeFilter.value.length || timelineAssigneeFilter.value.some(username =>
     username.toLowerCase() === (task.assignee?.trim().toLowerCase() || unassignedFilter)))))
 const visibleTimelineRows = computed(() => {
@@ -668,10 +738,9 @@ const visibleTimelineRows = computed(() => {
 })
 function clearTimelineFilters() {
   timelineStageFilter.value = []
-  timelineTaskFilter.value = ''
   timelineAssigneeFilter.value = []
 }
-watch([timelineStageFilter, timelineTaskFilter, timelineAssigneeFilter], () => {
+watch([timelineStageFilter, timelineAssigneeFilter], () => {
   if (!hasTimelineFilters.value) return
   expanded.value = new Set(displayedPlans.value.map(owner => owner.projectId))
   collapsedStages.value = new Set()
@@ -722,14 +791,16 @@ const yearBands = computed(() => buildTimelineBands('year'))
 const monthBands = computed(() => buildTimelineBands('month'))
 const calendarMarkers = computed(() => {
   const markers: Array<{ date: string; left: number; width: number; tone: 'sunday' | 'holiday' | 'workday'; title: string }> = []
+  const custom = new Map((plan.value?.holidayOverrides ?? []).map(day => [day.date, day]))
   for (let index = 0; index < timelineBounds.value.days; index += 1) {
     const date = addDays(timelineBounds.value.start, index)
-    const override = holidayCalendarDays.value.get(date)
+    const manual = custom.get(date)
+    const override = manual ?? holidayCalendarDays.value.get(date)
     const isSunday = dateValue(date).getDay() === 0
     if (!override && !isSunday) continue
     const tone = override ? override.isOffDay ? 'holiday' : 'workday' : 'sunday'
     const title = override
-      ? `${date} · ${override.name}${override.isOffDay ? '（法定节假日）' : '调休上班'}`
+      ? `${date} · ${override.name}${manual ? override.isOffDay ? '（项目假期）' : '（项目工作日）' : override.isOffDay ? '（法定节假日）' : '调休上班'}`
       : `${date} · 周日`
     markers.push({ date, left: index * dayWidth.value, width: dayWidth.value, tone, title })
   }
@@ -915,7 +986,6 @@ async function finishBarDrag(event: PointerEvent) {
       const description = `拖动“${drag.row.name}”阶段${action}至 ${boundary}，仅重排本阶段任务；显式前置关系按依赖联动，其他阶段不再保持首尾连续`
       await saveProjectPlan(owner.projectId, { tasks, changeReason: description, expectedRowVersion: owner.rowVersion }, props.token)
       ElMessage.success(isEffective(owner) ? '变更草稿已保存，原计划继续生效' : '本阶段及依赖任务排期已保存')
-      await load()
     } catch (reason) {
       if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '阶段排期保存失败')
     } finally { saving.value = false }
@@ -930,7 +1000,6 @@ async function finishBarDrag(event: PointerEvent) {
     const description = `${task.name}：${task.plannedStart} ～ ${task.plannedFinish} → ${start} ～ ${finish}。${resizing ? `工期由 ${dayDiff(task.plannedStart, task.plannedFinish) + 1} 天调整为 ${dayDiff(start, finish) + 1} 天` : '工期不变'}，其他任务不自动移动。`
     const reason = `${resizing ? '拖动调整工期' : '拖动排期'}：${description}`
     await saveProjectPlan(owner.projectId, { tasks: owner.tasks.map(item => item.id === task.id ? { ...item, plannedStart: start, plannedFinish: finish } : item), changeReason: reason, expectedRowVersion: owner.rowVersion }, props.token)
-    await load()
     ElMessage.success(resizing ? '任务工期已保存' : '任务排期已保存')
   } catch (reason) {
     if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '拖动排期保存失败')
@@ -949,13 +1018,20 @@ function rowBarStyle(row: TimelineRow) {
   const widthDays = dayDiff(start, finish) + 1 + (drag?.mode === 'resize-start' ? -drag.days : drag?.mode === 'resize-finish' ? drag.days : 0)
   const left = leftDays * dayWidth.value
   const width = row.isMilestone ? 12 : Math.max(8, widthDays * dayWidth.value)
-  return { left: `${left}px`, width: `${width}px`, '--progress': `${row.completion}%` }
+  const shortBar = !row.isMilestone && (row.isStage || Boolean(row.task)) && width < 28
+  return {
+    left: `${left}px`,
+    width: `${width}px`,
+    '--progress': `${row.completion}%`,
+    '--gantt-inline-progress': shortBar ? 'none' : 'grid',
+    '--gantt-adjacent-progress': shortBar ? `"${row.completion}%"` : 'none',
+  }
 }
 
 function rowBarLabelStyle(row: TimelineRow) {
   const style = rowBarStyle(row)
   if (style.display === 'none') return style
-  return { left: `calc(${style.left} + ${style.width} + 6px)` }
+  return { left: `calc(${style.left} + ${style.width} + 6px)`, '--gantt-adjacent-progress': style['--gantt-adjacent-progress'] }
 }
 
 function baselineStyle(row: TimelineRow) {
@@ -972,20 +1048,88 @@ function toggleExpanded(projectId: string) {
   expanded.value = next
 }
 
+function applySavedPlans(savedPlans: ProjectPlan[]) {
+  const byProject = new Map(savedPlans.map(saved => [saved.projectId, saved]))
+  const ownPlan = byProject.get(props.project.id)
+  if (ownPlan) {
+    plan.value = visibleSavedPlan(ownPlan)
+    inheritedParentPlan.value = false
+  }
+  if (portfolio.value) {
+    portfolio.value = { ...portfolio.value, projects: portfolio.value.projects.map(item => {
+      const saved = byProject.get(item.projectId)
+      if (!saved) return item
+      const effective = saved.changeDraftSource ?? saved
+      return {
+        ...item, hasPlan: true, plan: visibleSavedPlan(saved),
+        currentStage: isEffective(saved) ? effective.currentStage : undefined,
+        completionPercent: isEffective(saved) ? planProgress(effective.tasks, effective.stages) : 0,
+        plannedStart: effective.plannedStart, plannedFinish: effective.plannedFinish, forecastFinish: effective.forecastFinish,
+      }
+    }) }
+  }
+  if (childProjects.value.length) void refreshPlanPortfolio()
+}
+
+function visibleSavedPlan(saved: ProjectPlan): ProjectPlan {
+  const source = saved.changeDraftSource
+  if (!source || saved.changeRequest?.submittedBy.toLowerCase() === props.currentUsername.toLowerCase()) return saved
+  return {
+    ...source, rowVersion: saved.rowVersion, changeRequest: saved.changeRequest, changeDraftSource: null,
+    holidayOverrides: saved.holidayOverrides, updatedBy: saved.updatedBy, updatedAt: saved.updatedAt,
+  }
+}
+
+async function refreshPlanPortfolio() {
+  const revision = ++portfolioRevision
+  const { id } = props.project
+  const token = props.token
+  try {
+    const updated = await readProjectPlanPortfolio(id, token)
+    if (revision === portfolioRevision && id === props.project.id && token === props.token) portfolio.value = updated
+  } catch {
+    if (revision === portfolioRevision && id === props.project.id && token === props.token)
+      ElMessage.warning('计划已保存，项目汇总暂未刷新，可点击刷新重试。')
+  }
+}
+
+async function commitPlanUpdate<T extends ProjectPlan | ProjectPlan[]>(request: Promise<T>) {
+  const selectedProjectId = props.project.id
+  const token = props.token
+  const revision = planLoadRevision
+  const saved = await request
+  if (props.project.id === selectedProjectId && props.token === token && revision === planLoadRevision)
+    applySavedPlans(Array.isArray(saved) ? saved : [saved])
+  return saved
+}
+
+function saveProjectPlan(projectId: string, input: Parameters<typeof requestPlanSave>[1], token: string) {
+  return commitPlanUpdate(requestPlanSave(projectId, input, token))
+}
+
+function updateProjectPlanTaskProgress(projectId: string, taskId: string, input: Parameters<typeof requestTaskProgress>[2], token: string) {
+  return commitPlanUpdate(requestTaskProgress(projectId, taskId, input, token))
+}
+
 async function load() {
+  const revision = ++planLoadRevision
+  const groupRevision = ++portfolioRevision
+  const { id, parentProjectId } = props.project
+  const token = props.token
   loading.value = true
   error.value = ''
   try {
     const [loadedTemplates, loadedPlan, loadedPortfolio, loadedParentPlan] = await Promise.all([
-      listProjectPlanTemplates(props.token, false, props.project.id),
-      readProjectPlan(props.project.id, props.token),
-      readProjectPlanPortfolio(props.project.id, props.token),
-      props.project.parentProjectId ? readProjectPlan(rootProject.value.id, props.token) : Promise.resolve(null),
+      listProjectPlanTemplates(token, false, id),
+      readProjectPlan(id, token),
+      readProjectPlanPortfolio(id, token),
+      parentProjectId ? readProjectPlan(rootProject.value.id, token) : Promise.resolve(null),
     ])
+    if (revision !== planLoadRevision || id !== props.project.id || token !== props.token) return
     templates.value = loadedTemplates
     inheritedParentPlan.value = Boolean(!loadedPlan && loadedParentPlan)
     plan.value = loadedPlan ?? loadedParentPlan
-    portfolio.value = loadedPortfolio
+    if (groupRevision === portfolioRevision) portfolio.value = loadedPortfolio
     if (props.requestedTaskId) {
       masterPlanMode.value = true
       const row = timelineRows.value.find(item => item.task?.id === props.requestedTaskId)
@@ -994,9 +1138,9 @@ async function load() {
     }
     if (!generateForm.templateId) generateForm.templateId = loadedTemplates.find(item => item.isActive && (!item.projectTypeCode || item.projectTypeCode === props.project.projectTypeCode))?.id ?? loadedTemplates[0]?.id ?? ''
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : '项目计划加载失败'
+    if (revision === planLoadRevision) error.value = reason instanceof Error ? reason.message : '项目计划加载失败'
   } finally {
-    loading.value = false
+    if (revision === planLoadRevision) loading.value = false
   }
 }
 
@@ -1019,18 +1163,13 @@ async function generate() {
   saving.value = true
   try {
     const targetProjectId = generateTargetProjectId.value || props.project.id
-    const generated = await generateProjectPlan(targetProjectId, {
+    await commitPlanUpdate(generateProjectPlan(targetProjectId, {
       ...generateForm,
       independentStages: scheduledPostDeliveryStages.value.filter(stage => !stage.deferred).map(({ stage, startDate, durationDays }) => ({ stage, startDate, durationDays })),
       deferredStages: independentSchedules.value.filter(stage => stage.deferred).map(stage => stage.stage),
-    }, props.token)
-    if (targetProjectId === props.project.id) {
-      plan.value = generated
-      inheritedParentPlan.value = false
-    }
+    }, props.token))
     generateDialogOpen.value = false
     ElMessage.success(targetProjectId === props.project.id ? '计划草稿已生成，调整确认后请提交事业部总经理审批' : '子项目独立计划草稿已生成')
-    await load()
   } catch (reason) {
     ElMessage.error(reason instanceof Error ? reason.message : '计划生成失败')
   } finally {
@@ -1068,25 +1207,22 @@ async function saveTask() {
   if (scheduleChanged && !canEditSelectedPlan.value) return ElMessage.error('仅该项目的主项目经理或开发者可以修改计划安排')
   saving.value = true
   try {
-    let saved: ProjectPlan
     if (scheduleChanged || !isEffective(ownerPlan)) {
       const tasks = ownerPlan.tasks.map(item => item.id === task.id ? {
         ...item, name: item.isCustom ? taskName : item.name, assignee: taskForm.assignee.trim() || undefined,
         plannedStart: taskForm.plannedStart, plannedFinish: taskForm.plannedFinish, isRequired: taskForm.isRequired,
       } : item)
-      saved = await saveProjectPlan(ownerPlan.projectId, { tasks, changeReason: isEffective(ownerPlan) ? '保存计划安排' : '', expectedRowVersion: ownerPlan.rowVersion }, props.token)
+      await saveProjectPlan(ownerPlan.projectId, { tasks, changeReason: isEffective(ownerPlan) ? '保存计划安排' : '', expectedRowVersion: ownerPlan.rowVersion }, props.token)
     } else {
-      saved = await updateProjectPlanTaskProgress(ownerPlan.projectId, task.id, {
+      await updateProjectPlanTaskProgress(ownerPlan.projectId, task.id, {
         completionPercent: taskForm.completionPercent,
         actualStart: taskForm.actualStart || undefined,
         actualFinish: taskForm.actualFinish || undefined,
         expectedRowVersion: ownerPlan.rowVersion,
       }, props.token)
     }
-    if (saved.projectId === props.project.id) plan.value = saved
     taskDialogOpen.value = false
     ElMessage.success(!isEffective(ownerPlan) ? '草稿已保存；需重新提交并批准后生效' : scheduleChanged ? '变更草稿已保存，原计划继续生效' : '实际进度已更新，项目阶段已重新判断')
-    await load()
   } catch (reason) {
     if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '任务保存失败')
   } finally {
@@ -1112,7 +1248,6 @@ async function deleteSelectedTask() {
     }, props.token)
     taskDialogOpen.value = false
     selectedTask.value = null
-    await load()
     ElMessage.success(isEffective(ownerPlan) ? '任务删减已保存到变更草稿' : '任务已删除，排期已重新计算')
   } catch (reason) {
     if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '任务删除失败')
@@ -1143,7 +1278,6 @@ async function addCustomTask(row: TimelineRow) {
     await saveProjectPlan(owner.projectId, {
       tasks: [...owner.tasks, customTask], changeReason: `新增自定义任务：${customTask.name}`, expectedRowVersion: owner.rowVersion,
     }, props.token)
-    await load()
     ElMessage.success(isEffective(owner) ? '自定义任务已保存到变更草稿' : '自定义任务已新增')
   } catch (reason) {
     if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '新增自定义任务失败')
@@ -1161,83 +1295,129 @@ function canDragTaskRow(row: TimelineRow) {
 }
 
 function canDropTaskRow(row: TimelineRow) {
-  const source = draggedTaskRow.value
-  return Boolean(source?.task && source.plan && row.task && row.plan
-    && source.task.id !== row.task.id && source.plan.id === row.plan.id && source.task.stage === row.task.stage)
+  const source = draggedTask
+  return Boolean(source && row.task && row.plan && canDragTaskRow(row)
+    && source.id !== row.task.id && source.planId === row.plan.id
+    && source.rowVersion === row.plan.rowVersion && source.stage === row.task.stage)
 }
 
 function startTaskSortDrag(event: DragEvent, row: TimelineRow) {
-  if (!canDragTaskRow(row)) return event.preventDefault()
-  draggedTaskRow.value = row
-  taskDropTarget.value = null
-  event.dataTransfer?.setData('text/plain', row.task!.id)
+  if (!row.task || !row.plan || !canDragTaskRow(row)) return event.preventDefault()
+  clearTaskSortDrag()
+  draggedTask = { id: row.task.id, planId: row.plan.id, rowVersion: row.plan.rowVersion, stage: row.task.stage }
+  event.dataTransfer?.setData('text/plain', row.task.id)
   if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
 }
 
+function taskDropPosition(element: HTMLElement, clientY: number): TaskDropPosition {
+  const bounds = element.getBoundingClientRect()
+  return clientY > bounds.top + bounds.height / 2 ? 'after' : 'before'
+}
+
+function paintTaskDropMarker() {
+  taskDragFrame = 0
+  const target = pendingTaskTarget
+  pendingTaskTarget = null
+  if (!target || !target.element.isConnected) return
+  const info = target.element.classList.contains('pdm-gantt-info-row') ? target.element : target.element.previousElementSibling
+  const timeline = info?.nextElementSibling
+  if (!info?.classList.contains('pdm-gantt-info-row') || !timeline?.classList.contains('pdm-gantt-timeline-row')) return
+  const position = taskDropPosition(target.element, target.clientY)
+  if (taskDropMarker?.info === info && taskDropMarker.position === position) return
+  clearTaskDropMarker()
+  info.setAttribute('data-task-drop', position)
+  timeline.setAttribute('data-task-drop', position)
+  taskDropMarker = { info, timeline, position }
+}
+
 function dragOverTaskRow(event: DragEvent, row: TimelineRow) {
+  if (!draggedTask) return
   if (!canDropTaskRow(row)) {
-    taskDropTarget.value = null
+    clearTaskDropMarker()
     return
   }
   event.preventDefault()
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
-  const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
-  taskDropTarget.value = { key: row.key, position: event.clientY > bounds.top + bounds.height / 2 ? 'after' : 'before' }
+  pendingTaskTarget = { element: event.currentTarget as HTMLElement, clientY: event.clientY }
+  if (!taskDragFrame) taskDragFrame = requestAnimationFrame(paintTaskDropMarker)
+}
+
+function clearTaskDropMarker() {
+  if (taskDragFrame) cancelAnimationFrame(taskDragFrame)
+  taskDragFrame = 0
+  pendingTaskTarget = null
+  taskDropMarker?.info.removeAttribute('data-task-drop')
+  taskDropMarker?.timeline.removeAttribute('data-task-drop')
+  taskDropMarker = null
+}
+
+function leaveTaskSortArea(event: DragEvent) {
+  if (draggedTask && !(event.relatedTarget instanceof Node && (event.currentTarget as HTMLElement).contains(event.relatedTarget)))
+    clearTaskDropMarker()
 }
 
 function clearTaskSortDrag() {
-  draggedTaskRow.value = null
-  taskDropTarget.value = null
+  draggedTask = null
+  clearTaskDropMarker()
 }
 
 async function dropTaskRow(event: DragEvent, row: TimelineRow) {
-  const source = draggedTaskRow.value
-  if (!source?.task || !source.plan || !row.task || !canDropTaskRow(row)) {
+  const source = draggedTask
+  const owner = row.plan
+  if (!source || !owner || !row.task || !canDropTaskRow(row)) {
     clearTaskSortDrag()
     return
   }
   event.preventDefault()
-  const siblings = source.plan.tasks.filter(task => task.stage === source.task!.stage)
-    .sort((left, right) => left.sortOrder - right.sortOrder)
-  const remaining = siblings.filter(task => task.id !== source.task!.id)
-  const targetIndex = remaining.findIndex(task => task.id === row.task!.id)
-  const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect()
-  const insertAfter = taskDropTarget.value?.key === row.key ? taskDropTarget.value.position === 'after' : event.clientY > bounds.top + bounds.height / 2
-  remaining.splice(targetIndex + (insertAfter ? 1 : 0), 0, source.task)
-  const originalSortOrders = siblings.map(task => task.sortOrder)
-  const reorderedSortOrders = new Map(remaining.map((task, index) => [task.id, originalSortOrders[index]!]))
+  const position = taskDropPosition(event.currentTarget as HTMLElement, event.clientY)
   clearTaskSortDrag()
+  const siblings = owner.tasks.filter(task => task.stage === source.stage)
+    .sort((left, right) => left.sortOrder - right.sortOrder)
+  const sourceIndex = siblings.findIndex(task => task.id === source.id)
+  const movingTask = siblings[sourceIndex]
+  if (!movingTask) return
+  const reordered = siblings.filter(task => task.id !== source.id)
+  const targetIndex = reordered.findIndex(task => task.id === row.task!.id)
+  if (targetIndex < 0) return
+  const insertIndex = targetIndex + (position === 'after' ? 1 : 0)
+  if (insertIndex === sourceIndex) return
+  reordered.splice(insertIndex, 0, movingTask)
+  const sortOrders = new Map(reordered.map((task, index) => [task.id, siblings[index]!.sortOrder]))
+  taskSortPreview.value = { planId: owner.id, rowVersion: owner.rowVersion, stage: source.stage,
+    order: new Map(reordered.map((task, index) => [task.id, index])) }
   saving.value = true
   try {
-    await saveProjectPlan(source.plan.projectId, {
-      tasks: source.plan.tasks.map(task => reorderedSortOrders.has(task.id)
-        ? { ...task, sortOrder: reorderedSortOrders.get(task.id)! } : task),
-      changeReason: `拖动调整任务排序：${source.task.name}`,
-      expectedRowVersion: source.plan.rowVersion,
+    await saveProjectPlan(owner.projectId, {
+      tasks: owner.tasks.map(task => sortOrders.has(task.id)
+        ? { ...task, sortOrder: sortOrders.get(task.id)! } : task),
+      changeReason: `拖动调整任务排序：${movingTask.name}`,
+      expectedRowVersion: owner.rowVersion,
     }, props.token)
-    await load()
-    ElMessage.success(`已调整“${source.task.name}”的排序`)
+    ElMessage.success(`已调整“${movingTask.name}”的排序`)
   } catch (reason) {
     ElMessage.error(reason instanceof Error ? reason.message : '调整任务排序失败')
-  } finally { saving.value = false }
+  } finally {
+    taskSortPreview.value = null
+    saving.value = false
+  }
 }
 
 async function shiftPlan() {
-  if (!plan.value) return
+  if (!plan.value || saving.value) return
   try {
     const daysInput = await ElMessageBox.prompt('输入正数向后顺延，输入负数向前调整。基线不会移动。', '批量调整计划（自然日）', { confirmButtonText: '下一步', cancelButtonText: '取消', inputPattern: /^-?\d+$/, inputErrorMessage: '请输入整数天数' })
     const days = Number(daysInput.value)
     if (!days) return
-    plan.value = await saveProjectPlan(props.project.id, {
+    saving.value = true
+    await saveProjectPlan(props.project.id, {
       tasks: plan.value.tasks.map(task => ({ ...task, plannedStart: addDays(task.plannedStart, days), plannedFinish: addDays(task.plannedFinish, days) })),
       changeReason: '批量调整计划',
       expectedRowVersion: plan.value.rowVersion,
     }, props.token)
     ElMessage.success(`计划已整体${days > 0 ? '顺延' : '提前'}${Math.abs(days)}天`)
-    await load()
   } catch (reason) {
     if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '批量调整失败')
-  }
+  } finally { saving.value = false }
 }
 
 async function openVersions() {
@@ -1284,10 +1464,9 @@ async function saveStage() {
   if (!plan.value || !stageForm.reason.trim()) return ElMessage.warning('请填写阶段调整原因')
   saving.value = true
   try {
-    plan.value = await setProjectPlanStage(props.project.id, { stage: stageForm.stage || undefined, reason: stageForm.reason, expectedRowVersion: plan.value.rowVersion }, props.token)
+    await commitPlanUpdate(setProjectPlanStage(props.project.id, { stage: stageForm.stage || undefined, reason: stageForm.reason, expectedRowVersion: plan.value.rowVersion }, props.token))
     stageDialogOpen.value = false
-    ElMessage.success(stageForm.stage ? '例外阶段已更新' : '已恢复按任务条件自动判断阶段')
-    await load()
+    ElMessage.success(stageForm.stage ? '项目阶段状态已更新' : '已恢复按任务条件自动判断阶段')
   } catch (reason) {
     ElMessage.error(reason instanceof Error ? reason.message : '阶段调整失败')
   } finally {
@@ -1322,9 +1501,8 @@ async function submitApproval() {
   saving.value = true
   try {
     await ElMessageBox.confirm('提交给项目执行事业部总经理审批。审批人处理前仍可修改；修改会自动撤回本次审批并回到草稿。', '提交首版计划审批', { confirmButtonText: '提交审批', cancelButtonText: '取消' })
-    plan.value = await submitProjectPlan(props.project.id, plan.value.rowVersion, props.token)
+    await commitPlanUpdate(submitProjectPlan(props.project.id, plan.value.rowVersion, props.token))
     ElMessage.success('已提交事业部总经理审批')
-    await load()
   } catch (reason) { if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '提交失败') }
   finally { saving.value = false }
 }
@@ -1353,9 +1531,8 @@ async function submitChangeRequest() {
   }
   saving.value = true
   try {
-    await submitProjectPlanChange(props.project.id, { tasks: [], reason: changeReason.value.trim(), expectedRowVersion: changeVersion.value }, props.token)
+    await commitPlanUpdate(submitProjectPlanChange(props.project.id, { tasks: [], reason: changeReason.value.trim(), expectedRowVersion: changeVersion.value }, props.token))
     changeDialogOpen.value = false
-    await load()
     ElMessage.success('已取得变更权限：可直接编辑变更草稿，完成并生效后会通知各阶段负责人')
   } catch (reason) {
     changeSubmitError.value = { type: '变更申请提交失败', message: reason instanceof Error ? reason.message : '请稍后重试' }
@@ -1367,9 +1544,8 @@ async function decideChange(approve: boolean) {
   saving.value = true
   try {
     const result = await ElMessageBox.prompt(approve ? '批准后申请人获得一次变更权限并从现行计划创建草稿；草稿完成前原计划继续生效。' : '请填写退回原因；原计划不受影响。', approve ? '批准变更权限' : '退回变更权限', { confirmButtonText: approve ? '批准权限' : '退回', cancelButtonText: '取消', ...(approve ? {} : { inputPattern: /\S+/, inputErrorMessage: '请输入退回原因' }) })
-    await decideProjectPlan(props.project.id, { expectedRowVersion: plan.value.rowVersion, approve, comment: result.value }, props.token)
+    await commitPlanUpdate(decideProjectPlan(props.project.id, { expectedRowVersion: plan.value.rowVersion, approve, comment: result.value }, props.token))
     changeReviewOpen.value = false
-    await load()
     ElMessage.success(approve ? '变更权限已批准，已创建可编辑草稿' : '变更权限已退回，原计划不变')
   } catch (reason) { if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '审批失败') }
   finally { saving.value = false }
@@ -1380,9 +1556,7 @@ async function completeChangeDraft() {
   try {
     await ElMessageBox.confirm('完成后，本草稿将替换当前生效计划；跟随主计划的未审批子项目同步更新，独立或已生效子项目保留并列出差异。', '完成变更并生效', { confirmButtonText: '完成并生效', cancelButtonText: '取消' })
     saving.value = true
-    const activated = await completeProjectPlanChange(props.project.id, plan.value.rowVersion, props.token)
-    plan.value = activated
-    await load()
+    const activated = await commitPlanUpdate(completeProjectPlanChange(props.project.id, plan.value.rowVersion, props.token))
     ElMessage.success(`变更已完成并生效，已自动形成基线V${activated.baselineVersion}，并已通知各阶段负责人`)
   } catch (reason) { if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '完成变更失败') }
   finally { saving.value = false }
@@ -1393,8 +1567,7 @@ async function abandonChangeDraft() {
   try {
     await ElMessageBox.confirm('放弃后删除本次变更草稿并恢复现行计划；已发生的实际进度不会丢失。', '放弃本次变更', { confirmButtonText: '确认放弃', cancelButtonText: '继续编辑', type: 'warning' })
     saving.value = true
-    plan.value = await abandonProjectPlanChange(props.project.id, plan.value.rowVersion, props.token)
-    await load()
+    await commitPlanUpdate(abandonProjectPlanChange(props.project.id, plan.value.rowVersion, props.token))
     ElMessage.success('变更草稿已放弃，原计划继续生效')
   } catch (reason) { if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '放弃变更失败') }
   finally { saving.value = false }
@@ -1405,9 +1578,8 @@ async function decideApproval(approve: boolean) {
   saving.value = true
   try {
     const result = await ElMessageBox.prompt(approve ? '批准后首版计划正式生效，并自动冻结基线V1。' : '请填写退回原因，项目经理可修改后重新提交。', approve ? '批准首版计划' : '退回首版计划', { confirmButtonText: approve ? '批准生效' : '退回', cancelButtonText: '取消', ...(approve ? {} : { inputPattern: /\S+/, inputErrorMessage: '请输入退回原因' }) })
-    plan.value = await decideProjectPlan(props.project.id, { expectedRowVersion: plan.value.rowVersion, approve, comment: result.value }, props.token)
+    await commitPlanUpdate(decideProjectPlan(props.project.id, { expectedRowVersion: plan.value.rowVersion, approve, comment: result.value }, props.token))
     ElMessage.success(approve ? '首版计划已批准生效，基线V1已冻结' : '计划已退回')
-    await load()
   } catch (reason) { if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '审批失败') }
   finally { saving.value = false }
 }
@@ -1440,7 +1612,6 @@ async function saveStageConfiguration() {
     const reason = isEffective(owner) ? '保存变更草稿阶段配置' : ''
     await saveProjectPlan(owner.projectId, { tasks: owner.tasks, stages: stagesDraft.value, changeReason: reason, expectedRowVersion: owner.rowVersion }, props.token)
     stagesDialogOpen.value = false
-    await load()
     ElMessage.success('项目阶段配置已保存')
   } catch (reason) { if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '阶段配置保存失败') }
   finally { saving.value = false }
@@ -1452,10 +1623,9 @@ async function reusePlan() {
   if (!reuseForm.changeReason.trim()) return ElMessage.warning('请填写复制原因')
   saving.value = true
   try {
-    const saved = await reuseProjectPlan(rootProject.value.id, { ...reuseForm }, props.token)
+    const saved = await commitPlanUpdate(reuseProjectPlan(rootProject.value.id, { ...reuseForm }, props.token))
     reuseDialogOpen.value = false
     ElMessage.success(`已将计划复制到${saved.length}个子项目；后续计划互相独立`)
-    await load()
   } catch (reason) {
     ElMessage.error(reason instanceof Error ? reason.message : '批量复制计划失败')
   } finally {
@@ -1468,7 +1638,6 @@ async function syncChildren() {
   saving.value = true
   try {
     await saveProjectPlan(plan.value.projectId, { tasks: plan.value.tasks, changeReason: '同步主项目计划到跟随子项目', expectedRowVersion: plan.value.rowVersion, createMissingFollowers: true }, props.token)
-    await load()
     manageDialogOpen.value = false
     syncResultsDialogOpen.value = true
   } catch (reason) {
@@ -1521,7 +1690,8 @@ function formatIsoWeek(value: string) {
   return `W${String(week).padStart(2, '0')}`
 }
 
-watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.value = false; return load() }, { immediate: true })
+watch(() => props.singlePlan, singlePlan => { masterPlanMode.value = singlePlan === true })
+watch(() => props.project.id, () => { clearTaskSortDrag(); taskSortPreview.value = null; holidayDialogOpen.value = false; clearTimelineFilters(); masterPlanMode.value = props.singlePlan === true; return load() }, { immediate: true })
 </script>
 
 <template>
@@ -1531,40 +1701,50 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
     <template v-else>
       <section class="pdm-plan-summary">
         <article class="pdm-plan-shipping-card">
-          <div class="pdm-plan-shipping-card__date">
-            <span>项目发货日期</span>
+          <span>项目发货日期</span>
+          <div class="pdm-plan-summary__value">
             <strong>{{ shippingDate || '未排程' }}</strong>
-            <small>{{ shippingDate ? (portfolioMode ? '按各项目交付阶段最晚完成日' : '按交付阶段计划完成日') : '尚未建立计划' }}</small>
-          </div>
-          <div v-if="shippingCountdown" class="pdm-plan-shipping-countdown" :class="{ 'is-today': shippingCountdownDays === 0, 'is-overdue': (shippingCountdownDays ?? 0) < 0 }" :aria-label="shippingCountdown">
-            <strong><b>{{ Math.abs(shippingCountdownDays ?? 0) }}</b><em v-if="shippingCountdownDays !== 0">天</em></strong>
-            <span>{{ (shippingCountdownDays ?? 0) > 0 ? '距发货' : shippingCountdownDays === 0 ? '今日发货' : '已超期' }}</span>
+            <div v-if="shippingCountdown" class="pdm-plan-shipping-countdown" :class="{ 'is-today': shippingCountdownDays === 0, 'is-overdue': (shippingCountdownDays ?? 0) < 0 }" :aria-label="shippingCountdown">
+              <strong><b>{{ Math.abs(shippingCountdownDays ?? 0) }}</b><em v-if="shippingCountdownDays !== 0">天</em></strong>
+              <span>{{ (shippingCountdownDays ?? 0) > 0 ? '距发货' : shippingCountdownDays === 0 ? '今日发货' : '已超期' }}</span>
+            </div>
           </div>
         </article>
         <article class="pdm-plan-active-stage-card">
-          <div class="pdm-plan-active-stage-card__detail">
-            <span>{{ portfolioMode ? '当前阶段' : '当前活动阶段' }}</span>
-            <strong><i class="pdm-plan-stage-dot" :class="hasEffectivePlans ? stageTone(activeStage) : 'is-neutral'" />{{ activeStageSummary }}</strong>
-            <small>{{ plan?.manualStage ? '人工例外状态' : portfolioMode ? '按配置的阶段顺序及必需任务判断' : '依据实际排期，允许多阶段并行' }}</small>
-          </div>
-          <div v-if="activeStageCountdown" class="pdm-plan-shipping-countdown" :class="{ 'is-today': activeStageCountdownDays === 0, 'is-overdue': (activeStageCountdownDays ?? 0) < 0 }" :aria-label="activeStageCountdown">
-            <strong><b>{{ Math.abs(activeStageCountdownDays ?? 0) }}</b><em v-if="activeStageCountdownDays !== 0">天</em></strong>
-            <span>{{ (activeStageCountdownDays ?? 0) > 0 ? '距当前节点' : activeStageCountdownDays === 0 ? '当前节点到期' : '当前节点已超期' }}</span>
+          <span>{{ portfolioMode ? '当前阶段' : '当前活动阶段' }}</span>
+          <div class="pdm-plan-summary__value">
+            <strong class="pdm-plan-active-stage-card__value"><i class="pdm-plan-stage-dot" :class="hasEffectivePlans ? stageTone(activeStage) : 'is-neutral'" /><span>{{ activeStageSummary }}</span></strong>
+            <div v-if="activeStageCountdown" class="pdm-plan-shipping-countdown" :class="{ 'is-today': activeStageCountdownDays === 0, 'is-overdue': (activeStageCountdownDays ?? 0) < 0 }" :aria-label="activeStageCountdown">
+              <strong><b>{{ Math.abs(activeStageCountdownDays ?? 0) }}</b><em v-if="activeStageCountdownDays !== 0">天</em></strong>
+              <span>{{ (activeStageCountdownDays ?? 0) > 0 ? '距当前节点' : activeStageCountdownDays === 0 ? '当前节点到期' : '当前节点已超期' }}</span>
+            </div>
           </div>
         </article>
-        <article><span>{{ progressLabel }}</span><strong>{{ overallProgress }}%</strong><div class="pdm-plan-progress"><i :style="{ width: `${overallProgress}%` }" /></div></article>
-        <article><span>计划风险</span><strong>{{ portfolioMode ? `${portfolio?.laggingProjectCount ?? 0} 滞后 / ${portfolio?.riskProjectCount ?? 0} 风险` : !isEffective(plan) ? '待审批生效' : `${plan?.tasks.filter(item => item.status !== 'Completed' && item.plannedFinish < isoDate(new Date())).length ?? 0} 项逾期` }}</strong><small>生效后提醒：7天、3天、到期日、逾期每日</small></article>
-        <article><span>计划基线</span><strong>{{ plan?.baselineVersion ? `V${plan.baselineVersion}` : '未设置' }}</strong><small>{{ plan?.baselineVersion ? '灰色细条为冻结基线' : '设置后可比较计划与实际' }}</small></article>
-        <article><button type="button" class="pdm-plan-summary-action" aria-label="查看阶段进度详情" @click="stageProgressDialogOpen = true"><span>阶段进度</span><strong>{{ stageCount ? `${completedStageCount} / ${stageCount}` : '暂无计划' }}</strong><small>已完成阶段 · 点击查看详情</small></button></article>
+        <article>
+          <span>{{ progressLabel }}</span>
+          <div class="pdm-plan-summary__value">
+            <strong>{{ overallProgress }}%</strong>
+            <div class="pdm-plan-progress"><i :style="{ width: `${overallProgress}%` }" /></div>
+          </div>
+        </article>
+        <article><span>计划风险</span><strong>{{ portfolioMode ? `${portfolio?.laggingProjectCount ?? 0} 滞后 / ${portfolio?.riskProjectCount ?? 0} 风险` : !isEffective(plan) ? '待审批生效' : `${plan?.tasks.filter(item => item.status !== 'Completed' && item.plannedFinish < isoDate(new Date())).length ?? 0} 项逾期` }}</strong></article>
+        <article><span>计划基线</span><strong>{{ plan?.baselineVersion ? `V${plan.baselineVersion}` : '未设置' }}</strong></article>
+        <article><button type="button" class="pdm-plan-summary-action" aria-label="查看阶段进度详情" @click="stageProgressDialogOpen = true"><span>阶段进度</span><strong>{{ stageCount ? `${completedStageCount} / ${stageCount}` : '暂无计划' }}</strong></button></article>
       </section>
 
       <section class="pdm-plan-panel">
         <header class="pdm-plan-toolbar">
-          <div class="pdm-plan-view-tabs"><strong class="pdm-plan-view-label">{{ portfolioMode ? `全部子项目（${visibleTimelineRows.length}）` : '任务甘特图' }}</strong><span v-if="!portfolioMode">{{ visibleTimelineRows.length }} 行</span></div>
+          <div v-if="portfolioMode" class="pdm-plan-view-tabs"><strong>全部子项目（{{ visibleTimelineRows.length }}）</strong></div>
+          <div v-if="displayedPlans.length" class="pdm-plan-filters" role="group" aria-label="甘特图任务筛选">
+            <label>阶段<el-select v-model="timelineStageFilter" aria-label="筛选阶段" placeholder="全部阶段" multiple filterable clearable collapse-tags collapse-tags-tooltip><el-option v-for="name in timelineStageOptions" :key="name" :label="name" :value="name" /></el-select></label>
+            <label>责任人<UserSelect v-model="timelineAssigneeFilter" aria-label="筛选责任人" placeholder="全部责任人" multiple filterable clearable collapse-tags collapse-tags-tooltip><el-option v-for="person in timelineAssigneeOptions" :key="person.value" :label="person.label" :value="person.value" /></UserSelect></label>
+            <button type="button" class="pdm-secondary-action" :disabled="!hasTimelineFilters" @click="clearTimelineFilters">清空筛选</button>
+            <small role="status"><template v-if="taskSortPreview">正在保存任务顺序…</template><template v-else>匹配 {{ matchingPlanTasks.length }} / {{ planTaskEntries.length }} 项任务</template></small>
+          </div>
           <div class="pdm-plan-toolbar__actions">
             <button type="button" class="pdm-plan-delete-action" :disabled="saving || !canDeleteDisplayedPlan || !canManageProject(project.id, 'delete')" :title="deleteDisabledReason || (isEffective(plan) ? '删除现行计划和变更草稿' : '删除未审批计划')" @click="openToolbarDelete">删除计划</button>
             <template v-if="canApprove"><button type="button" class="pdm-primary-action" :disabled="saving" @click="decideApproval(true)">批准生效</button><button type="button" class="pdm-secondary-action" :disabled="saving" @click="decideApproval(false)">退回</button></template>
-            <button v-if="!portfolioMode && ownsDisplayedPlan && isEffective(plan) && canEdit && !pendingChange && !editingChangeDraft" type="button" class="pdm-secondary-action" :disabled="saving" @click="openChangeRequest">申请变更权限</button>
+            <button v-if="!portfolioMode && ownsDisplayedPlan && isEffective(plan) && canEdit && !pendingChange && !editingChangeDraft" type="button" class="pdm-secondary-action pdm-danger-action" :disabled="saving" @click="openChangeRequest">变更计划</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && plan?.changeRequest" type="button" class="pdm-secondary-action" @click="changeReviewOpen = true">{{ pendingChange ? '权限待审批' : '变更申请记录' }}</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && editingChangeDraft && canEditSchedule(plan)" type="button" class="pdm-primary-action" :disabled="saving" @click="completeChangeDraft">完成变更并生效</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan && editingChangeDraft && canEditSchedule(plan)" type="button" class="pdm-secondary-action" :disabled="saving" @click="abandonChangeDraft">放弃变更</button>
@@ -1573,17 +1753,20 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
             <button v-if="portfolioMode && isMasterWithChildren" type="button" class="pdm-primary-action" @click="masterPlanMode = true">编辑主计划</button>
             <button v-if="portfolioMode && (managedChildPlans.length || plan?.childSyncResults?.length || canEditSchedule(plan))" type="button" class="pdm-secondary-action" @click="manageDialogOpen = true">编辑子计划</button>
             <button v-if="canEdit || canManageSystemTemplates" type="button" class="pdm-secondary-action" @click="templatesDrawerOpen = true"><Settings :size="14" />计划模板</button>
-            <button type="button" class="pdm-secondary-action" :disabled="loading" @click="load"><RefreshCw :size="14" />刷新</button>
+            <button type="button" class="pdm-secondary-action" :disabled="loading || saving || savingHolidays" @click="load"><RefreshCw :size="14" />刷新</button>
             <button type="button" class="pdm-secondary-action" :disabled="!rootExportPlan && !childExportOptions.length" v-if="projectExport" @click="openExportDialog"><Download :size="14" />导出计划</button>
             <button v-if="!portfolioMode && isMasterWithChildren" type="button" class="pdm-secondary-action" @click="masterPlanMode = false">查看子项目汇总</button>
             <button v-if="!portfolioMode && canEdit && ((!plan && !project.parentProjectId) || (ownsDisplayedPlan && canEditSchedule(plan)))" type="button" class="pdm-primary-action" @click="openGenerate()"><Calendar :size="14" />{{ plan ? '重新生成' : '生成初始计划' }}</button>
             <label v-if="hasVisibleBaseline" class="pdm-plan-switch"><input v-model="showBaseline" type="checkbox">显示基线</label>
-            <label class="pdm-plan-switch"><input v-model="showNonWorkingDays" aria-label="显示节假日和周日背景色" type="checkbox">休息日</label>
+            <div class="pdm-plan-switch">
+              <input v-model="showNonWorkingDays" aria-label="显示假期" type="checkbox">
+              <button type="button" class="pdm-secondary-action" @click="openHolidays">假期</button>
+            </div>
             <div class="pdm-plan-zoom pdm-tabs" aria-label="甘特图缩放"><button v-for="item in ([['month','月'],['week','周'],['day','日']] as const)" :key="item[0]" :class="{ 'is-active': zoom === item[0] }" @click="zoom = item[0]">{{ item[1] }}</button></div>
             <button v-if="!portfolioMode && canEditSchedule(plan)" type="button" class="pdm-secondary-action" @click="shiftPlan">批量调整</button>
             <button v-if="!portfolioMode && plan && canEditSchedule(plan) && !hasStageAllocation(plan.stages)" type="button" class="pdm-secondary-action" @click="openStageConfiguration">阶段配置</button>
             <button v-if="!portfolioMode && ownsDisplayedPlan" type="button" class="pdm-secondary-action" @click="openVersions"><History :size="14" />版本对比</button>
-            <button v-if="!portfolioMode && ownsDisplayedPlan && isEffective(plan) && canEdit" type="button" class="pdm-secondary-action" @click="openStage">{{ hasStageException ? '恢复正常阶段' : '阶段例外' }}</button>
+            <button v-if="!portfolioMode && ownsDisplayedPlan && isEffective(plan) && canEdit" type="button" class="pdm-secondary-action" @click="openStage">{{ hasStageException ? '恢复正常阶段' : '暂停/取消/终止' }}</button>
           </div>
         </header>
 
@@ -1591,14 +1774,7 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
         <div v-if="!portfolioMode && editingChangeDraft" class="pdm-plan-edit-hint is-change-draft"><strong>正在编辑变更草稿</strong>：原计划继续用于生产、提醒和进度统计；可多次保存，完成变更并生效后才会替换。已完成任务不可改排期。</div>
         <div v-if="project.parentProjectId && plan && !inheritedParentPlan" class="pdm-plan-edit-hint">{{ plan.followsParentPlan ? '跟随主项目计划：单独修改计划日期后转为独立计划；修改责任人不解除跟随。' : '独立计划：主项目调整不会覆盖此计划。' }}</div>
 
-        <div v-if="displayedPlans.length" class="pdm-plan-filters" aria-label="甘特图任务筛选">
-          <label>阶段<el-select v-model="timelineStageFilter" aria-label="筛选阶段" placeholder="全部阶段" multiple filterable clearable collapse-tags collapse-tags-tooltip><el-option v-for="name in timelineStageOptions" :key="name" :label="name" :value="name" /></el-select></label>
-          <label>任务<SearchField><el-input v-model="timelineTaskFilter" aria-label="筛选任务" placeholder="搜索任务名称" clearable /></SearchField></label>
-          <label>责任人<UserSelect v-model="timelineAssigneeFilter" aria-label="筛选责任人" placeholder="全部责任人" multiple filterable clearable collapse-tags collapse-tags-tooltip><el-option v-for="person in timelineAssigneeOptions" :key="person.value" :label="person.label" :value="person.value" /></UserSelect></label>
-          <button type="button" class="pdm-secondary-action" :disabled="!hasTimelineFilters" @click="clearTimelineFilters">清空筛选</button>
-          <small role="status">匹配 {{ matchingPlanTasks.length }} / {{ planTaskEntries.length }} 项任务</small>
-        </div>
-        <div v-if="visibleTimelineRows.length" ref="ganttShell" class="pdm-gantt-shell">
+        <div v-if="visibleTimelineRows.length" ref="ganttShell" class="pdm-gantt-shell" @dragleave="leaveTaskSortArea">
           <div class="pdm-gantt-table" :class="{ 'is-info-collapsed': infoColumnsCollapsed, 'has-task-actions': showGanttTaskActions }">
             <div class="pdm-gantt-head pdm-gantt-info-head">
               <span v-if="showGanttTaskActions" class="pdm-gantt-action-head" aria-label="任务操作"><Settings :size="14" /></span>
@@ -1618,7 +1794,7 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
               <span v-if="shippingDateLeft >= 0 && shippingDateLeft <= timelineWidth" class="pdm-gantt-shipping is-header" :title="`项目发货日期：${shippingDate}`" :style="{ left: `${shippingDateLeft}px` }"><b class="pdm-gantt-shipping__label">发货</b></span>
             </div>
             <template v-for="row in visibleTimelineRows" :key="row.key">
-              <div role="button" tabindex="0" class="pdm-gantt-info-row" :class="{ 'is-project': !row.task && !row.isStage, 'is-stage': row.isStage, 'is-task': Boolean(row.task), 'is-sortable': canDragTaskRow(row), 'is-drop-before': taskDropTarget?.key === row.key && taskDropTarget.position === 'before', 'is-drop-after': taskDropTarget?.key === row.key && taskDropTarget.position === 'after', 'is-child': row.level > 0, 'is-inherited-plan': row.isInherited }" :style="{ '--gantt-indent': `${10 + row.level * 16}px` }" :title="row.isInherited ? '默认跟随主计划' : undefined" :aria-expanded="row.isStage ? !collapsedStages.has(row.key) : !row.task && row.plan ? expanded.has(row.projectId) : undefined" :draggable="canDragTaskRow(row)" @dragstart="startTaskSortDrag($event, row)" @dragend="clearTaskSortDrag" @dragover="dragOverTaskRow($event, row)" @drop="dropTaskRow($event, row)" @keydown.enter.self.prevent="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)" @keydown.space.self.prevent="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)" @click="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)">
+              <div role="button" tabindex="0" class="pdm-gantt-info-row" :class="{ 'is-project': !row.task && !row.isStage, 'is-stage': row.isStage, 'is-task': Boolean(row.task), 'is-sortable': canDragTaskRow(row), 'is-child': row.level > 0, 'is-inherited-plan': row.isInherited }" :style="{ '--gantt-indent': `${10 + row.level * 16}px` }" :title="row.isInherited ? '默认跟随主计划' : undefined" :aria-expanded="row.isStage ? !collapsedStages.has(row.key) : !row.task && row.plan ? expanded.has(row.projectId) : undefined" :draggable="canDragTaskRow(row)" @dragstart="startTaskSortDrag($event, row)" @dragend="clearTaskSortDrag" @dragover="dragOverTaskRow($event, row)" @drop="dropTaskRow($event, row)" @keydown.enter.self.prevent="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)" @keydown.space.self.prevent="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)" @click="row.isStage ? toggleStage(row.key) : row.task ? openTask(row) : toggleExpanded(row.projectId)">
                 <span v-if="showGanttTaskActions" class="pdm-gantt-action-cell">
                   <button v-if="row.isStage && canEditSchedule(row.plan)" type="button" :aria-label="`在${row.name}新增自定义任务`" :title="`在${row.name}新增自定义任务`" @click.stop="addCustomTask(row)"><Plus :size="14" /></button>
                   <button v-else-if="row.task && canEditSchedule(row.plan)" type="button" class="pdm-gantt-delete-task" :aria-label="`删除任务${row.name}`" title="删除任务" :disabled="saving || !canDeleteTimelineTask(row)" @click.stop="deleteTimelineTask(row)"><Trash2 :size="12" /></button>
@@ -1631,8 +1807,8 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
                 </span>
                 <span v-if="!infoColumnsCollapsed"><span class="pdm-gantt-stage-cell" :class="{ 'is-current': rowStageIsCurrent(row) }" :title="rowStageLabel(row)">{{ rowStageLabel(row) }}</span></span>
                 <span v-if="!infoColumnsCollapsed" @click.stop>
-                  <button v-if="row.task && canEditSchedule(row.plan)" type="button" class="pdm-gantt-cell-edit" :aria-label="`编辑${row.name}责任人`" :disabled="saving" @click="beginInlineEdit(row, 'assignee')">{{ displayUserName(row.task.assignee, '待分配') }}</button>
-                  <span v-else>{{ row.task ? displayUserName(row.task.assignee, '待分配') : '—' }}</span>
+                  <button v-if="row.task && canEditSchedule(row.plan)" type="button" class="pdm-gantt-cell-edit" :aria-label="`编辑${row.name}责任人`" :disabled="saving" @click="beginInlineEdit(row, 'assignee')"><PersonName :name="displayUserName(row.task.assignee, '待分配')" /></button>
+                  <span v-else><PersonName :name="row.task ? displayUserName(row.task.assignee, '待分配') : '—'" /></span>
                   <div v-if="inlineEdit?.row.key === row.key && inlineEdit.field === 'assignee'" class="pdm-gantt-inline-editor" @keydown.stop>
                     <UserSelect v-model="inlineEdit.assignee" aria-label="行内责任人" filterable clearable><el-option v-for="username in assigneeOptions" :key="username" :label="displayUserName(username)" :value="username" /></UserSelect>
                     <div><button type="button" :disabled="saving" @click="inlineEdit = null">取消</button><button type="button" :disabled="saving" @click="saveInlineEdit">保存责任人</button></div>
@@ -1669,7 +1845,7 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
                 </span>
                 <span class="pdm-gantt-row-control" aria-hidden="true" />
               </div>
-              <div class="pdm-gantt-timeline-row" :class="{ 'is-project': !row.task && !row.isStage, 'is-stage': row.isStage, 'is-drop-before': taskDropTarget?.key === row.key && taskDropTarget.position === 'before', 'is-drop-after': taskDropTarget?.key === row.key && taskDropTarget.position === 'after', 'is-inherited-plan': row.isInherited }" :title="row.isInherited ? '默认跟随主计划' : undefined" :style="{ width: `${timelineWidth}px` }" @dragover="dragOverTaskRow($event, row)" @drop="dropTaskRow($event, row)" @dblclick="row.isStage ? toggleStage(row.key) : openTask(row)">
+              <div class="pdm-gantt-timeline-row" :class="{ 'is-project': !row.task && !row.isStage, 'is-stage': row.isStage, 'is-inherited-plan': row.isInherited }" :title="row.isInherited ? '默认跟随主计划' : undefined" :style="{ width: `${timelineWidth}px` }" @dragover="dragOverTaskRow($event, row)" @drop="dropTaskRow($event, row)" @dblclick="row.isStage ? toggleStage(row.key) : openTask(row)">
                 <span v-for="marker in showNonWorkingDays ? calendarMarkers : []" :key="`${row.key}-calendar-${marker.date}`" aria-hidden="true" class="pdm-gantt-calendar-shade" :class="`is-${marker.tone}`" :style="{ left: `${marker.left}px`, width: `${Math.max(marker.width, 1)}px` }" />
                 <span v-for="tick in ticks" :key="`${row.key}-${tick.date}`" class="pdm-gantt-gridline" :style="{ left: `${tick.left}px` }" />
                 <span v-if="todayLeft >= 0 && todayLeft <= timelineWidth" class="pdm-gantt-today" :style="{ left: `${todayLeft}px` }" />
@@ -1677,7 +1853,10 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
                 <span v-if="showBaseline" class="pdm-gantt-baseline" :style="baselineStyle(row)" />
                 <span class="pdm-gantt-bar" :class="{ 'is-draggable': row.task && canEditSchedule(row.plan) && !saving, 'is-stage-adjustable': row.isStage && canResizeStage(row.plan) && !saving, 'is-dragging': barDrag?.row.key === row.key, 'is-project': !row.task && !row.isStage, 'is-milestone': row.isMilestone, 'is-lagging': row.isLagging, 'is-neutral': !isEffective(row.plan) }" :style="rowBarStyle(row)" @pointerdown.stop="startBarDrag($event, row)" @pointermove="moveBarDrag" @pointerup="finishBarDrag" @pointercancel="cancelBarDrag" @lostpointercapture="cancelBarDrag">
                   <button v-if="row.isStage ? canResizeStageEdge(row, 'resize-start') && !saving : row.task && !row.isMilestone && canEditSchedule(row.plan) && !saving" type="button" class="pdm-gantt-resize-handle is-start" :class="{ 'is-stage-handle': row.isStage }" :aria-label="row.isStage ? `拖动调整${row.name}阶段开始边界` : `拖动调整${row.name}开始日期`" @pointerdown.stop="startBarDrag($event, row, 'resize-start')" @dblclick.stop />
-                  <i /><b v-if="!row.isMilestone">{{ row.completion }}%</b>
+                  <template v-if="!row.isMilestone">
+                    <i class="pdm-gantt-bar__fill" aria-hidden="true" />
+                    <b>{{ row.completion }}%</b>
+                  </template>
                   <button v-if="row.isStage ? canResizeStageEdge(row, 'resize-finish') && !saving : row.task && !row.isMilestone && canEditSchedule(row.plan) && !saving" type="button" class="pdm-gantt-resize-handle is-finish" :class="{ 'is-stage-handle': row.isStage }" :aria-label="row.isStage ? `拖动调整${row.name}阶段结束边界` : `拖动调整${row.name}结束日期`" @pointerdown.stop="startBarDrag($event, row, 'resize-finish')" @dblclick.stop />
                 </span>
                 <span v-if="row.isStage || row.task" aria-hidden="true" class="pdm-gantt-bar-label" :class="{ 'is-stage': row.isStage }" :style="rowBarLabelStyle(row)">{{ row.name }}</span>
@@ -1685,7 +1864,7 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
             </template>
           </div>
         </div>
-        <div v-else-if="hasTimelineFilters" class="pdm-plan-empty" role="status"><h2>暂无符合筛选条件的任务</h2><p>请调整阶段、任务名称或责任人，或清空筛选后查看全部任务。</p><button type="button" class="pdm-secondary-action" @click="clearTimelineFilters">清空筛选</button></div>
+        <div v-else-if="hasTimelineFilters" class="pdm-plan-empty" role="status"><h2>暂无符合筛选条件的任务</h2><p>请调整阶段或责任人，或清空筛选后查看全部任务。</p><button type="button" class="pdm-secondary-action" @click="clearTimelineFilters">清空筛选</button></div>
         <div v-else class="pdm-plan-empty">
           <Calendar :size="42" />
           <h2>{{ project.parentProjectId ? '主项目尚未建立计划' : portfolioMode ? '各子项目尚未建立计划' : '尚未建立项目计划' }}</h2>
@@ -1695,6 +1874,34 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
         <footer class="pdm-plan-legend"><span><i class="is-plan" />当前计划</span><span><i class="is-baseline" />冻结基线</span><span><i class="is-progress" />实际完成</span><span><i class="is-today" />今天</span><span><i class="is-shipping" />发货日</span><small>工期按自然日计算；初始阶段连续，后续调整允许阶段交叉，仅显式前置关系联动。</small></footer>
       </section>
     </template>
+
+    <el-dialog v-model="holidayDialogOpen" title="项目假期" width="min(720px, 96vw)" destroy-on-close :close-on-click-modal="!savingHolidays" :close-on-press-escape="!savingHolidays" :show-close="!savingHolidays">
+      <div class="pdm-plan-form">
+        <p>共享日历继续标记法定节假日、调休和周日。手动调整只用于当前计划的甘特图标记，工期仍按自然日计算。</p>
+        <el-table :data="holidayDraft" max-height="380" empty-text="暂无手动设置的假期">
+          <el-table-column label="日期区间" width="265" align="center">
+            <template #default="{ row }">
+              <el-date-picker v-model="row.dates" style="width: 100%; max-width: 100%" aria-label="假期日期区间" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" unlink-panels :clearable="false" :disabled="!canEditHolidays || savingHolidays" />
+            </template>
+          </el-table-column>
+          <el-table-column label="说明" min-width="150" align="center">
+            <template #default="{ row }"><el-input v-model="row.name" aria-label="假期说明" maxlength="60" :disabled="!canEditHolidays || savingHolidays" /></template>
+          </el-table-column>
+          <el-table-column label="类型" width="105" align="center">
+            <template #default="{ row }"><select v-model="row.isOffDay" aria-label="假期类型" :disabled="!canEditHolidays || savingHolidays"><option :value="true">假期</option><option :value="false">工作日</option></select></template>
+          </el-table-column>
+          <el-table-column v-if="canEditHolidays" label="操作" width="90" align="center">
+            <template #default="{ $index }"><button type="button" class="pdm-text-action" :disabled="savingHolidays" @click="holidayDraft.splice($index, 1)">移除</button></template>
+          </el-table-column>
+        </el-table>
+        <el-alert v-if="holidayError" type="error" :closable="false" :title="holidayError" />
+      </div>
+      <template #footer>
+        <button v-if="canEditHolidays" type="button" class="pdm-primary-action" :disabled="savingHolidays || holidayDraft.length >= maxHolidayDays" @click="holidayDraft.push({ dates: null, name: '', isOffDay: true })">新增</button>
+        <button type="button" class="pdm-secondary-action" :disabled="savingHolidays" @click="holidayDialogOpen = false">{{ canEditHolidays ? '取消' : '关闭' }}</button>
+        <button v-if="canEditHolidays" type="button" class="pdm-primary-action" :disabled="savingHolidays" @click="saveHolidays">保存</button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="generateDialogOpen" :title="generateTargetProjectId !== project.id ? '单独设置子项目计划' : '按规则生成初始计划'" width="560px" destroy-on-close>
       <div class="pdm-plan-form">
@@ -1748,13 +1955,13 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
 
     <el-dialog v-model="changeReviewOpen" title="计划变更申请与差异" width="760px" destroy-on-close>
       <div v-if="plan?.changeRequest" class="pdm-plan-form">
-        <p>{{ plan.changeRequest.status === 'Pending' ? '变更权限待审批（历史申请），原计划继续生效' : plan.changeDraftSource ? '已取得变更权限，草稿编辑中，原计划继续生效' : plan.changeRequest.status === 'Approved' ? '本次变更已结束' : '变更权限已退回，原计划不变' }}<template v-if="plan.changeRequest.status === 'Pending'">；审批人：{{ displayUserName(plan.changeRequest.approvalAssignee) }}</template></p>
-        <p>申请人：{{ displayUserName(plan.changeRequest.submittedBy) }}；原因：{{ plan.changeRequest.reason }}<br v-if="plan.changeRequest.comment" />{{ plan.changeRequest.comment ? `说明：${plan.changeRequest.comment}` : '' }}</p>
+        <p>{{ plan.changeRequest.status === 'Pending' ? '变更权限待审批（历史申请），原计划继续生效' : plan.changeDraftSource ? '已取得变更权限，草稿编辑中，原计划继续生效' : plan.changeRequest.status === 'Approved' ? '本次变更已结束' : '变更权限已退回，原计划不变' }}<template v-if="plan.changeRequest.status === 'Pending'">；审批人：<PersonName :name="displayUserName(plan.changeRequest.approvalAssignee)" /></template></p>
+        <p>申请人：<PersonName :name="displayUserName(plan.changeRequest.submittedBy)" />；原因：{{ plan.changeRequest.reason }}<br v-if="plan.changeRequest.comment" />{{ plan.changeRequest.comment ? `说明：${plan.changeRequest.comment}` : '' }}</p>
         <div v-if="plan.changeRequest.tasks.length" class="pdm-plan-change-review">
           <article v-for="change in plan.changeRequest.tasks" :key="change.taskId">
             <strong>{{ plan.tasks.find(task => task.id === change.taskId)?.name }}</strong>
-            <span>当前：{{ plan.tasks.find(task => task.id === change.taskId)?.plannedStart }} ～ {{ plan.tasks.find(task => task.id === change.taskId)?.plannedFinish }} · {{ displayUserName(plan.tasks.find(task => task.id === change.taskId)?.assignee, '待分配') }}</span>
-            <span>申请：{{ change.plannedStart }} ～ {{ change.plannedFinish }} · {{ displayUserName(change.assignee, '待分配') }}</span>
+            <span>当前：{{ plan.tasks.find(task => task.id === change.taskId)?.plannedStart }} ～ {{ plan.tasks.find(task => task.id === change.taskId)?.plannedFinish }} · <PersonName :name="displayUserName(plan.tasks.find(task => task.id === change.taskId)?.assignee, '待分配')" /></span>
+            <span>申请：{{ change.plannedStart }} ～ {{ change.plannedFinish }} · <PersonName :name="displayUserName(change.assignee, '待分配')" /></span>
           </article>
         </div>
         <p v-else>此申请仅申请变更权限，未预先提交任务排期修改。</p>
@@ -1793,10 +2000,10 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
       <template #footer><button type="button" class="pdm-secondary-action" @click="exportDialogOpen = false">取消</button><button type="button" class="pdm-secondary-action" :disabled="!selectedExportItems.length" @click="exportPlans('pdf')">导出 PDF</button><button type="button" class="pdm-primary-action" :disabled="!selectedExportItems.length" @click="exportPlans('excel')">导出 Excel</button></template>
     </el-dialog>
 
-    <el-dialog v-model="stageDialogOpen" :title="hasStageException ? '恢复正常阶段' : '设置阶段例外'" width="520px" destroy-on-close>
+    <el-dialog v-model="stageDialogOpen" :title="hasStageException ? '恢复正常阶段' : '设置暂停、取消或终止'" width="520px" destroy-on-close>
       <div class="pdm-plan-form">
         <template v-if="hasStageException"><p>当前处于“{{ stageLabel(plan?.manualStage, plan) }}”状态。恢复后，系统将按第一个未完成的必需任务自动判断正常阶段。</p><label>恢复原因<el-input v-model="stageForm.reason" aria-label="恢复正常阶段原因" type="textarea" :rows="3" /></label></template>
-        <template v-else><label>例外状态<el-select v-model="stageForm.stage" placeholder="请选择例外状态"><el-option label="暂停" value="Paused" /><el-option label="取消" value="Cancelled" /><el-option label="终止" value="Terminated" /></el-select></label><label>原因<el-input v-model="stageForm.reason" aria-label="阶段例外原因" type="textarea" :rows="3" /></label><p>设计、备料、装配、调试等正常阶段由必需任务的完成条件自动判断，不能人工跳过。</p></template>
+        <template v-else><p>将当前项目阶段标记为暂停、取消或终止，并记录调整原因。</p><label>阶段状态<el-select v-model="stageForm.stage" placeholder="请选择阶段状态"><el-option label="暂停" value="Paused" /><el-option label="取消" value="Cancelled" /><el-option label="终止" value="Terminated" /></el-select></label><label>原因<el-input v-model="stageForm.reason" aria-label="阶段状态调整原因" type="textarea" :rows="3" /></label><p>设计、备料、装配、调试等正常阶段由必需任务的完成条件自动判断，不能人工跳过。</p></template>
       </div>
       <template #footer><button type="button" class="pdm-secondary-action" @click="stageDialogOpen = false">取消</button><button type="button" class="pdm-primary-action" :disabled="saving" @click="saveStage">{{ hasStageException ? '确认恢复' : '保存' }}</button></template>
     </el-dialog>
@@ -1899,7 +2106,7 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
         </article>
       </div>
       <p v-else class="pdm-empty-info">所选两个版本没有差异。</p>
-      <div v-if="versions.length" class="pdm-plan-version-list"><article v-for="item in versions" :key="item.id"><strong>V{{ item.versionNumber }} · {{ item.changeReason }}</strong><span>{{ displayUserName(item.createdBy) }} · {{ new Date(item.createdAt).toLocaleString() }}</span><small>{{ item.snapshot.plannedStart }} — {{ item.snapshot.forecastFinish }} · {{ item.snapshot.tasks.length }}项任务</small></article></div>
+      <div v-if="versions.length" class="pdm-plan-version-list"><article v-for="item in versions" :key="item.id"><strong>V{{ item.versionNumber }} · {{ item.changeReason }}</strong><span><PersonName :name="displayUserName(item.createdBy)" /> · {{ new Date(item.createdAt).toLocaleString() }}</span><small>{{ item.snapshot.plannedStart }} — {{ item.snapshot.forecastFinish }} · {{ item.snapshot.tasks.length }}项任务</small></article></div>
     </el-dialog>
 
   </section>
@@ -1914,38 +2121,123 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
 .pdm-post-delivery-stage>header>.el-checkbox,.pdm-offsite-plan>header>.el-checkbox{flex-direction:row;gap:6px;height:24px;margin:0}
 .pdm-offsite-plan{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--pdm-border);border-radius:6px}.pdm-offsite-plan>header,.pdm-post-delivery-stage>header{display:flex;align-items:center;justify-content:space-between;gap:8px}.pdm-offsite-plan>header>strong{font-size:12px}.pdm-post-delivery-stage{display:flex;flex-direction:column;gap:8px;padding:10px 0 0;border-top:1px solid var(--pdm-border)}.pdm-post-delivery-stage strong{font-size:12px}.pdm-offsite-plan small{font-size:11px;color:var(--pdm-muted)}
 .pdm-plan-edit-hint{padding:6px 12px;color:var(--pdm-muted);font-size:11px;border-bottom:1px solid var(--pdm-border)}
-.pdm-plan-edit-hint.is-change-draft{color:var(--pdm-text);background:color-mix(in srgb,var(--pdm-orange) 10%,var(--pdm-surface));border-color:color-mix(in srgb,var(--pdm-orange) 30%,var(--pdm-border))}.pdm-plan-compare-selectors{display:grid;grid-template-columns:1fr auto 1fr;align-items:end;gap:12px}.pdm-plan-compare-selectors label{display:flex;flex-direction:column;gap:6px;font-size:12px}.pdm-plan-compare-summary{font-size:11px;color:var(--pdm-muted)}.pdm-plan-compare-table{max-height:42vh;overflow:auto;border:1px solid var(--pdm-border);border-radius:6px}.pdm-plan-compare-table article{display:grid;grid-template-columns:170px 1fr 24px 1fr;gap:10px;align-items:center;padding:9px 10px;border-bottom:1px solid var(--pdm-border);font-size:11px}.pdm-plan-compare-table article:last-child{border-bottom:0}.pdm-plan-compare-table strong small{margin-left:6px;color:var(--plan-accent)}.pdm-plan-compare-table span{line-height:1.4}.pdm-plan-compare-table b{text-align:center;color:var(--pdm-muted)}
+.pdm-plan-edit-hint.is-change-draft{color:var(--pdm-text);background:color-mix(in srgb,var(--pdm-orange) 10%,var(--pdm-surface));border-color:color-mix(in srgb,var(--pdm-orange) 30%,var(--pdm-border))}.pdm-plan-compare-selectors{display:grid;grid-template-columns:1fr auto 1fr;align-items:end;gap:12px}.pdm-plan-compare-selectors label{display:flex;flex-direction:column;gap:6px;font-size:12px}.pdm-plan-compare-summary{font-size:11px;color:var(--pdm-muted)}.pdm-plan-compare-table{max-height:42vh;overflow:auto;border:1px solid var(--pdm-border);border-radius:6px}.pdm-plan-compare-table article{display:grid;grid-template-columns:170px 1fr 24px 1fr;gap:10px;align-items:center;padding:9px 10px;border-bottom:1px solid var(--pdm-border);font-size:11px}.pdm-plan-compare-table article:last-child{border-bottom:0}.pdm-plan-compare-table strong small{margin-left:6px; color:var(--pdm-text)}.pdm-plan-compare-table span{line-height:1.4}.pdm-plan-compare-table b{text-align:center;color:var(--pdm-muted)}
 .pdm-plan-management-list{display:flex;flex-direction:column;gap:8px;max-height:52vh;overflow:auto}.pdm-plan-management-list article{display:flex;align-items:center;gap:8px;padding:10px;border:1px solid var(--pdm-border);border-radius:6px}.pdm-plan-management-list article>div{display:flex;flex:1;min-width:0;flex-direction:column;gap:4px}.pdm-plan-management-list strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.pdm-plan-management-list small{color:var(--pdm-muted);font-size:11px}.pdm-plan-management-list button{flex-shrink:0}
 .pdm-plan-export{display:grid;gap:9px}.pdm-plan-export>p{margin:0 0 3px;color:var(--pdm-muted);line-height:1.4}.pdm-plan-export__scope,.pdm-plan-export__children>label{display:flex;align-items:center;gap:9px;padding:10px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface);cursor:pointer}.pdm-plan-export__scope:has(input:checked),.pdm-plan-export__children>label:has(input:checked){border-color:var(--plan-accent);background:var(--plan-accent-soft)}.pdm-plan-export__scope.is-disabled{cursor:not-allowed;opacity:.55}.pdm-plan-export__scope>span,.pdm-plan-export__children span{display:grid;min-width:0;gap:3px}.pdm-plan-export__scope small,.pdm-plan-export__children small{color:var(--pdm-muted)}.pdm-plan-export__children{display:grid;max-height:280px;gap:6px;overflow:auto;padding:8px 0 0 26px}.pdm-plan-export__scope input,.pdm-plan-export__children input{accent-color:var(--plan-accent)}
 .pdm-plan-sync-management{display:flex;align-items:center;gap:8px;padding-top:10px;border-top:1px solid var(--pdm-border)}.pdm-plan-sync-management>div{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px}.pdm-plan-sync-management strong{font-size:12px}.pdm-plan-sync-management small{color:var(--pdm-muted);font-size:11px}.pdm-plan-sync-management button{flex-shrink:0}
-.pdm-plan-approval-strip{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--plan-accent-border);border-radius:6px;background:var(--plan-accent-soft);font-size:12px}.pdm-plan-approval-strip span{flex:1}.pdm-plan-targets{border:1px solid var(--pdm-border);border-radius:6px;overflow:hidden}.pdm-plan-targets__header{display:flex;align-items:center;gap:12px;padding:8px 10px;background:var(--pdm-surface-muted);font-size:12px}.pdm-plan-targets__header>span{flex:1;color:var(--pdm-muted)}.pdm-plan-targets__list{display:flex;flex-direction:column;max-height:340px;overflow:auto;padding:4px 10px}.pdm-plan-targets__list :deep(.el-checkbox){margin:0;min-height:38px;flex-shrink:0;display:flex;flex-direction:row;align-items:center;border-bottom:1px solid var(--pdm-border)}.pdm-plan-targets__list :deep(.el-checkbox__label){display:flex;flex:1;justify-content:space-between;gap:12px;white-space:normal}.pdm-plan-targets__list small{color:var(--pdm-muted);white-space:nowrap}.pdm-plan-stage-list{max-height:280px;overflow:auto;margin:8px 0}.pdm-plan-stage-editor{display:flex;gap:6px;align-items:center;margin:6px 0}.pdm-plan-stage-editor>.el-input{flex:1}.pdm-plan-stage-editor>span{width:22px}.pdm-plan-stage-editor>button{white-space:nowrap;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface);color:var(--plan-accent);padding:6px}.pdm-plan-stage-editor>button:disabled{opacity:.4}
+.pdm-plan-approval-strip{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--plan-accent-border);border-radius:6px;background:var(--plan-accent-soft);font-size:12px}.pdm-plan-approval-strip span{flex:1}.pdm-plan-targets{border:1px solid var(--pdm-border);border-radius:6px;overflow:hidden}.pdm-plan-targets__header{display:flex;align-items:center;gap:12px;padding:8px 10px;background:var(--pdm-surface-muted);font-size:12px}.pdm-plan-targets__header>span{flex:1;color:var(--pdm-muted)}.pdm-plan-targets__list{display:flex;flex-direction:column;max-height:340px;overflow:auto;padding:4px 10px}.pdm-plan-targets__list :deep(.el-checkbox){margin:0;min-height:38px;flex-shrink:0;display:flex;flex-direction:row;align-items:center;border-bottom:1px solid var(--pdm-border)}.pdm-plan-targets__list :deep(.el-checkbox__label){display:flex;flex:1;justify-content:space-between;gap:12px;white-space:normal}.pdm-plan-targets__list small{color:var(--pdm-muted);white-space:nowrap}.pdm-plan-stage-list{max-height:280px;overflow:auto;margin:8px 0}.pdm-plan-stage-editor{display:flex;gap:6px;align-items:center;margin:6px 0}.pdm-plan-stage-editor>.el-input{flex:1}.pdm-plan-stage-editor>span{width:22px}.pdm-plan-stage-editor>button{white-space:nowrap;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface); color:var(--pdm-text);padding:6px}.pdm-plan-stage-editor>button:disabled{opacity:.4}
 .pdm-plan-page { --plan-accent: var(--shell-accent, var(--pdm-blue)); --plan-accent-hover: var(--shell-accent-hover, var(--pdm-blue)); --plan-accent-soft: var(--shell-accent-soft, var(--pdm-blue-soft)); --plan-accent-border: var(--shell-accent-border, var(--pdm-border)); min-width: 0; height: 100%; display: flex; flex-direction: column; gap: var(--pdm-container-gap); padding: 0; overflow: auto; color: var(--pdm-text); background: var(--pdm-bg); }
-.pdm-plan-toolbar__actions { min-width: max-content; display: flex; flex: 0 0 auto; flex-wrap: nowrap; align-items: center; gap: 4px; white-space: nowrap; }.pdm-plan-toolbar__actions > .pdm-primary-action,.pdm-plan-toolbar__actions > .pdm-secondary-action,.pdm-plan-toolbar__actions > .pdm-plan-delete-action{box-sizing:border-box;width:auto;min-width:80px;height:var(--pdm-button-large);min-height:var(--pdm-button-large);padding:0 4px;font-size:11px}.pdm-plan-delete-action{border:1px solid var(--pdm-danger);border-radius:5px;background:var(--pdm-danger);color:#fff;cursor:pointer}.pdm-plan-delete-action:not(:disabled):hover,.pdm-plan-delete-action:not(:disabled):focus-visible{filter:brightness(.92);outline:2px solid color-mix(in srgb,var(--pdm-danger) 25%,transparent);outline-offset:1px}.pdm-plan-delete-action:disabled{border-color:var(--pdm-border);background:var(--pdm-surface-muted);color:var(--pdm-muted);cursor:not-allowed;opacity:1}
-.pdm-plan-delete-task{border:1px solid var(--pdm-danger);border-radius:5px;background:transparent;color:var(--pdm-danger);padding:7px 12px}.pdm-plan-delete-task:disabled{border-color:var(--pdm-border);color:var(--pdm-muted);cursor:not-allowed}.pdm-plan-dialog-spacer{flex:1}.pdm-plan-workflow-lock{padding:8px 10px;border:1px solid var(--plan-accent-border);border-radius:5px;background:var(--plan-accent-soft);color:var(--plan-accent)!important}
-.pdm-plan-summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--pdm-container-gap); }
-.pdm-plan-summary-action{width:100%;min-width:0;display:flex;flex:1;flex-direction:column;justify-content:center;align-items:flex-start;padding:0;border:0;background:transparent;color:var(--pdm-text);text-align:left;cursor:pointer}.pdm-plan-summary-action>span{color:var(--pdm-muted);font-size:11px}.pdm-plan-summary-action:hover>span{color:var(--plan-accent)}.pdm-plan-summary-action:focus-visible{outline:2px solid var(--plan-accent);outline-offset:5px}.pdm-plan-summary-action .is-risk{color:var(--pdm-orange)}
-.pdm-plan-summary article { min-height: 86px; display: flex; flex-direction: column; justify-content: center; padding: 12px 15px; border: 1px solid var(--pdm-border); border-radius: 8px; background: var(--pdm-surface); box-shadow: var(--pdm-shadow-sm); }
-.pdm-plan-summary article>span { color: var(--pdm-muted); font-size: 11px; }.pdm-plan-summary strong { display: flex; align-items: center; gap: 7px; margin-top: 5px; font-size: 16px; }.pdm-plan-summary small { margin-top: 4px; color: var(--pdm-muted); font-size: 11px; }
-.pdm-plan-summary article.pdm-plan-shipping-card,.pdm-plan-summary article.pdm-plan-active-stage-card{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px}.pdm-plan-shipping-card__date,.pdm-plan-active-stage-card__detail{min-width:0;display:flex;flex-direction:column;justify-content:center}.pdm-plan-shipping-card__date>span,.pdm-plan-active-stage-card__detail>span{color:var(--pdm-muted);font-size:11px}.pdm-plan-shipping-card__date>strong,.pdm-plan-active-stage-card__detail>strong,.pdm-plan-shipping-card__date>small,.pdm-plan-active-stage-card__detail>small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-plan-summary .pdm-plan-shipping-countdown{min-width:58px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding-left:11px;border-left:1px solid var(--pdm-border);color:var(--pdm-green);font-weight:600}.pdm-plan-summary .pdm-plan-shipping-countdown>strong{margin:0;font-size:28px;line-height:1;font-variant-numeric:tabular-nums}.pdm-plan-summary .pdm-plan-shipping-countdown>strong>b{font:inherit}.pdm-plan-summary .pdm-plan-shipping-countdown>strong>em{margin-left:2px;font-size:11px;font-style:normal}.pdm-plan-summary .pdm-plan-shipping-countdown>span{margin-top:4px;font-size:11px;line-height:1;white-space:nowrap}.pdm-plan-summary .pdm-plan-shipping-countdown.is-today{color:var(--plan-accent)}.pdm-plan-summary .pdm-plan-shipping-countdown.is-overdue{color:var(--pdm-danger)}
-.pdm-plan-stage-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--plan-accent); box-shadow: 0 0 0 4px var(--plan-accent-soft); }.pdm-plan-stage-dot.is-warning{background:var(--pdm-orange)}.pdm-plan-stage-dot.is-danger{background:var(--pdm-danger)}.pdm-plan-stage-dot.is-complete{background:var(--pdm-green)}
+.pdm-plan-toolbar__actions { min-width:0; display:flex; flex-wrap:wrap; align-items:center; gap:var(--pdm-control-gap); white-space:nowrap; }.pdm-plan-toolbar__actions > .pdm-primary-action,.pdm-plan-toolbar__actions > .pdm-secondary-action,.pdm-plan-toolbar__actions > .pdm-plan-delete-action{box-sizing:border-box;width:auto;min-width:80px;height:var(--pdm-button-large);min-height:var(--pdm-button-large);padding:0 4px;font-size:11px}.pdm-plan-delete-action{border:1px solid var(--pdm-danger);border-radius:5px;background:var(--pdm-danger);color:#fff;cursor:pointer}.pdm-plan-delete-action:not(:disabled):hover,.pdm-plan-delete-action:not(:disabled):focus-visible{filter:brightness(.92);outline:2px solid color-mix(in srgb,var(--pdm-danger) 25%,transparent);outline-offset:1px}.pdm-plan-delete-action:disabled{border-color:var(--pdm-border);background:var(--pdm-surface-muted);color:var(--pdm-muted);cursor:not-allowed;opacity:1}
+.pdm-plan-delete-task{border:1px solid var(--pdm-danger);border-radius:5px;background:transparent;color:var(--pdm-danger);padding:7px 12px}.pdm-plan-delete-task:disabled{border-color:var(--pdm-border);color:var(--pdm-muted);cursor:not-allowed}.pdm-plan-dialog-spacer{flex:1}.pdm-plan-workflow-lock{padding:8px 10px;border:1px solid var(--plan-accent-border);border-radius:5px;background:var(--plan-accent-soft); color:var(--pdm-text) !important}
+.pdm-plan-summary-action {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--pdm-text);
+  text-align: left;
+  cursor: pointer;
+}
+.pdm-plan-active-stage-card__value { display: flex; align-items: baseline; gap: 7px; }
+.pdm-plan-active-stage-card__value > span { min-width: 0; }
+.pdm-plan-summary .pdm-plan-shipping-countdown {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 100%;
+  margin-inline-start: auto;
+  color: var(--pdm-green);
+  font-weight: 600;
+}
+.pdm-plan-shipping-countdown strong { display: flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+.pdm-plan-shipping-countdown em { font-size: 12px; font-style: normal; }
+.pdm-plan-shipping-countdown span { font-size: 12px; line-height: 16px; text-align: right; }
+.pdm-plan-shipping-countdown.is-today { color: var(--pdm-text); }
+.pdm-plan-shipping-countdown.is-overdue { color: var(--pdm-danger); }
+.pdm-plan-stage-dot { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--plan-accent); box-shadow: 0 0 0 4px var(--plan-accent-soft); }.pdm-plan-stage-dot.is-warning{background:var(--pdm-orange)}.pdm-plan-stage-dot.is-danger{background:var(--pdm-danger)}.pdm-plan-stage-dot.is-complete{background:var(--pdm-green)}
 .pdm-plan-progress { height: 10px; margin-top: 8px; overflow: hidden; border-radius: 5px; background: var(--pdm-surface-muted); }.pdm-plan-progress i { display: block; height: 100%; border-radius: inherit; background: var(--plan-accent); }
 .pdm-plan-panel { min-height: 420px; display: flex; flex: 1; flex-direction: column; overflow: hidden; border: 1px solid var(--pdm-border); border-radius: 8px; background: var(--pdm-surface); box-shadow: var(--pdm-shadow-sm); }
-.pdm-plan-toolbar { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 8px; overflow-x: auto; padding: 9px 12px; border-bottom: 1px solid var(--pdm-border); }.pdm-plan-view-tabs { min-width:max-content;display:flex;flex:0 0 auto;align-items:center;gap:8px}.pdm-plan-view-tabs>button{box-sizing:border-box;width:80px;min-width:80px;height:var(--pdm-tab-secondary);min-height:var(--pdm-tab-secondary);padding:0 6px;border:0;border-radius:5px;color:var(--plan-accent);background:var(--plan-accent-soft);font-weight:600;white-space:nowrap}.pdm-plan-view-label{color:var(--plan-accent);font-size:12px;font-weight:600;white-space:nowrap}.pdm-plan-view-tabs span{color:var(--pdm-muted);font-size:11px}
+.pdm-plan-toolbar { min-height:44px; display:flex; flex-wrap:wrap; align-items:center; gap:var(--pdm-control-gap); padding:5px 12px; border-bottom:1px solid var(--pdm-border); }
+.pdm-plan-view-tabs { font-size:12px; white-space:nowrap; }
 .pdm-plan-switch { display: flex; align-items: center; gap: 5px; color: var(--pdm-muted); font-size: 11px; }.pdm-plan-switch input{accent-color:var(--plan-accent)}
-.pdm-plan-zoom { display: inline-flex; padding: 2px; border: 1px solid var(--pdm-border); border-radius: 6px; background: var(--pdm-surface-muted); }.pdm-plan-zoom button { min-height: var(--pdm-tab-secondary); padding: 3px 9px; border: 0; border-radius: 4px; color: var(--pdm-muted); background: transparent; }.pdm-plan-zoom button.is-active { color: var(--plan-accent); background: var(--pdm-surface); box-shadow: var(--pdm-shadow-sm); }
+.pdm-plan-zoom { display: inline-flex; padding: 2px; border: 1px solid var(--pdm-border); border-radius: 6px; background: var(--pdm-surface-muted); }.pdm-plan-zoom button { min-height: var(--pdm-tab-secondary); padding: 3px 9px; border: 0; border-radius: 4px; color: var(--pdm-muted); background: transparent; }.pdm-plan-zoom button.is-active { color:var(--pdm-text); background: var(--pdm-surface); box-shadow: var(--pdm-shadow-sm); }
 .pdm-gantt-shell { min-height: 0; flex: 1; overflow: auto; }.pdm-gantt-table { min-width: 0; width: 100%; display: grid; grid-template-columns: 708px minmax(0,1fr); align-content: start; }.pdm-gantt-table.is-info-collapsed{grid-template-columns:382px minmax(0,1fr)}
 .pdm-gantt-head { position: sticky; top: 0; z-index: 6; height: 60px; border-bottom: 1px solid var(--pdm-border); background: var(--pdm-surface-muted); }.pdm-gantt-info-head { left: 0; z-index: 8; display: grid; grid-template-columns: 150px 86px 80px 80px 120px 60px 100px 32px; align-items:center;padding:0;color:var(--pdm-muted);font-size:11px;font-weight:600}.pdm-gantt-timeline-head { position: sticky; overflow:hidden; }.pdm-gantt-tick { position:absolute;top:40px;height:20px;display:flex;align-items:center;color:var(--pdm-muted);font-size:11px; }
-.pdm-gantt-info-row { position: sticky; left: 0; z-index: 3; height: 40px; display:grid;grid-template-columns:150px 86px 80px 80px 120px 60px 100px 32px;align-items:center;padding:0;border:0;border-bottom:1px solid var(--pdm-border);color:var(--pdm-text);background:var(--pdm-surface);text-align:left;font-size:11px}.pdm-gantt-info-row:hover{background:var(--plan-accent-soft)}.pdm-gantt-info-row.is-project{height:40px;background:var(--pdm-surface-muted)}.pdm-gantt-info-row.is-child .pdm-gantt-name{padding-left:26px}.pdm-gantt-name{min-width:0;padding:0 10px;display:flex;align-items:center;gap:5px}.pdm-gantt-name>span{min-width:0;display:flex;flex-direction:column}.pdm-gantt-name strong,.pdm-gantt-name small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-gantt-name strong{font-size:11px}.pdm-gantt-name small{margin-top:2px;color:var(--pdm-muted);font-size:11px}.pdm-gantt-indent{width:13px}.pdm-gantt-info-row span.is-lagging{color:var(--pdm-danger);font-weight:600}.pdm-gantt-info-row span.is-risk{color:var(--pdm-orange);font-weight:600}.pdm-gantt-stage-cell{display:inline-flex;max-width:78px;overflow:hidden;padding:2px 7px;border-radius:9px;color:var(--pdm-muted);background:var(--pdm-surface-muted);font-size:11px;line-height:16px;text-overflow:ellipsis;white-space:nowrap}.pdm-gantt-stage-cell.is-current{color:var(--plan-accent);background:var(--plan-accent-soft);font-weight:600}.pdm-gantt-row-control{height:100%}
+.pdm-gantt-info-row { position: sticky; left: 0; z-index: 3; height: 40px; display:grid;grid-template-columns:150px 86px 80px 80px 120px 60px 100px 32px;align-items:center;padding:0;border:0;border-bottom:1px solid var(--pdm-border);color:var(--pdm-text);background:var(--pdm-surface);text-align:left;font-size:11px}.pdm-gantt-info-row:hover{background:var(--plan-accent-soft)}.pdm-gantt-info-row.is-project{height:40px;background:var(--pdm-surface-muted)}.pdm-gantt-info-row.is-child .pdm-gantt-name{padding-left:26px}.pdm-gantt-name{min-width:0;padding:0 10px;display:flex;align-items:center;gap:5px}.pdm-gantt-name>span{min-width:0;display:flex;flex-direction:column}.pdm-gantt-name strong,.pdm-gantt-name small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pdm-gantt-name strong{font-size:11px}.pdm-gantt-name small{margin-top:2px;color:var(--pdm-muted);font-size:11px}.pdm-gantt-indent{width:13px}.pdm-gantt-info-row span.is-lagging{color:var(--pdm-danger);font-weight:600}.pdm-gantt-info-row span.is-risk{color:var(--pdm-orange);font-weight:600}.pdm-gantt-stage-cell{display:inline-flex;max-width:78px;overflow:hidden;padding:2px 7px;border-radius:9px;color:var(--pdm-muted);background:var(--pdm-surface-muted);font-size:11px;line-height:16px;text-overflow:ellipsis;white-space:nowrap}.pdm-gantt-stage-cell.is-current{ color:var(--pdm-text);background:var(--plan-accent-soft);font-weight:600}.pdm-gantt-row-control{height:100%}
 .pdm-gantt-timeline-row{position:relative;height:40px;overflow:hidden;border-bottom:1px solid var(--pdm-border);background:var(--pdm-surface)}.pdm-gantt-timeline-row.is-project{height:40px;background:color-mix(in srgb,var(--pdm-surface-muted) 65%,var(--pdm-surface))}.pdm-gantt-gridline{position:absolute;z-index:1;top:0;bottom:0;border-left:1px solid color-mix(in srgb,var(--pdm-border) 70%,transparent)}.pdm-gantt-calendar-shade{position:absolute;z-index:0;top:0;bottom:0;pointer-events:none}.pdm-gantt-calendar-shade.is-sunday{background:color-mix(in srgb,#9db7d5 18%,transparent)}.pdm-gantt-calendar-shade.is-holiday{background:color-mix(in srgb,#f2a65a 22%,transparent)}.pdm-gantt-calendar-shade.is-workday{background:transparent}.pdm-gantt-calendar-shade.is-header{z-index:1;top:40px;pointer-events:auto}.pdm-gantt-calendar-band{position:absolute;z-index:2;height:20px;display:flex;align-items:center;justify-content:center;overflow:hidden;border-right:1px solid var(--pdm-border);border-bottom:1px solid var(--pdm-border);color:var(--pdm-text);font-size:11px;font-weight:600;white-space:nowrap}.pdm-gantt-calendar-band.is-year{top:0}.pdm-gantt-calendar-band.is-month{top:20px;color:var(--pdm-muted);font-weight:600}.pdm-gantt-today,.pdm-gantt-shipping{position:absolute;z-index:2;top:0;bottom:0;border-left:1px solid var(--pdm-danger)}.pdm-gantt-shipping{border-left:2px solid var(--pdm-green)}.pdm-gantt-today.is-header,.pdm-gantt-shipping.is-header{z-index:9;top:40px}.pdm-gantt-today.is-header::before,.pdm-gantt-shipping.is-header::before{content:'';position:absolute;top:0;left:-3px;border:3px solid transparent;border-top-color:var(--pdm-danger)}.pdm-gantt-shipping.is-header::before{left:-4px;border-width:4px;border-top-color:var(--pdm-green)}.pdm-gantt-today__label,.pdm-gantt-shipping__label{position:absolute;left:0;bottom:2px;transform:translateX(-50%);padding:0 4px;border:1px solid color-mix(in srgb,var(--pdm-danger) 40%,var(--pdm-border));border-radius:4px;background:var(--pdm-surface);color:var(--pdm-danger);font-size:11px;font-weight:600;line-height:14px;white-space:nowrap}.pdm-gantt-shipping__label{border-color:color-mix(in srgb,var(--pdm-green) 45%,var(--pdm-border));color:var(--pdm-green)}
-.pdm-gantt-baseline{position:absolute;z-index:1;bottom:5px;height:4px;border-radius:3px;background:var(--pdm-muted);opacity:.58}.pdm-gantt-bar{--progress:0%;position:absolute;z-index:3;top:9px;height:20px;overflow:hidden;border:1px solid var(--plan-accent);border-radius:4px;background:color-mix(in srgb,var(--plan-accent) 17%,var(--pdm-surface));box-shadow:0 1px 3px color-mix(in srgb,var(--plan-accent) 15%,transparent)}.pdm-gantt-bar i{position:absolute;inset:0 auto 0 0;width:var(--progress);background:var(--plan-accent)}.pdm-gantt-bar b{position:absolute;z-index:2;inset:0;display:grid;place-items:center;color:#fff;font-size:11px;font-weight:400;mix-blend-mode:difference}.pdm-gantt-bar.is-project{top:9px;height:22px;border-radius:11px}.pdm-gantt-bar.is-project i{opacity:.86}.pdm-gantt-bar.is-lagging{border-color:var(--pdm-danger)}.pdm-gantt-bar.is-milestone{width:12px!important;height:12px;top:14px;border-radius:2px;background:var(--plan-accent);transform:rotate(45deg)}
+.pdm-gantt-baseline{position:absolute;z-index:1;bottom:5px;height:4px;border-radius:3px;background:var(--pdm-muted);opacity:.58}
+.pdm-gantt-bar {
+  --progress:0%;
+  --gantt-progress-tone:var(--plan-accent);
+  --gantt-progress-ink:light-dark(var(--gantt-progress-tone), color-mix(in srgb,var(--gantt-progress-tone) 54%,var(--pdm-surface)));
+  position:absolute;
+  z-index:3;
+  top:9px;
+  height:20px;
+  overflow:hidden;
+  border-radius:999px;
+  background:color-mix(in srgb,var(--pdm-text) 9%,var(--pdm-surface));
+}
+.pdm-gantt-bar__fill {
+  position:absolute;
+  inset:0 auto 0 0;
+  width:var(--progress);
+  border-radius:inherit;
+  background:var(--gantt-progress-ink);
+  pointer-events:none;
+}
+.pdm-gantt-bar b {
+  position:absolute;
+  z-index:2;
+  inset:0;
+  display:var(--gantt-inline-progress,grid);
+  place-items:center;
+  color:var(--pdm-text);
+  font-size:11px;
+  font-weight:600;
+  font-variant-numeric:tabular-nums;
+  pointer-events:none;
+}
+.pdm-gantt-bar.is-project{height:22px}
+.pdm-gantt-bar.is-lagging {
+  --gantt-progress-tone:light-dark(color-mix(in srgb,var(--pdm-danger) 46%,var(--pdm-surface)),var(--pdm-danger));
+  background:color-mix(in srgb,var(--pdm-danger) 13%,var(--pdm-surface));
+}
+.pdm-gantt-bar.is-milestone{width:12px!important;height:12px;top:14px;border-radius:2px;background:var(--plan-accent);transform:rotate(45deg)}
+@media (prefers-reduced-motion:no-preference) {
+  .pdm-gantt-bar__fill {
+    animation:pdm-gantt-progress-enter 680ms cubic-bezier(.22,1,.36,1) backwards;
+    transition:opacity 180ms ease-out,filter 180ms ease-out;
+  }
+}
+@keyframes pdm-gantt-progress-enter {
+  from { width:0; }
+  to { width:var(--progress); }
+}
+@media (hover:hover) {
+  .pdm-gantt-bar:hover > .pdm-gantt-bar__fill { filter:brightness(.95); }
+  .pdm-gantt-table:has(.pdm-gantt-bar:not(.is-milestone):hover) .pdm-gantt-bar:not(:hover) > .pdm-gantt-bar__fill { opacity:.55; }
+}
 .pdm-gantt-bar-label{position:absolute;z-index:4;top:10px;max-width:150px;overflow:hidden;color:var(--pdm-text);font-size:11px;line-height:18px;text-overflow:ellipsis;white-space:nowrap;pointer-events:none}.pdm-gantt-bar-label.is-stage{font-weight:600}
+.pdm-gantt-bar-label::before {
+  content:var(--gantt-adjacent-progress,none);
+  margin-inline-end:4px;
+  font-weight:600;
+  font-variant-numeric:tabular-nums;
+}
 .pdm-plan-legend{min-height:38px;display:flex;align-items:center;gap:16px;padding:7px 12px;border-top:1px solid var(--pdm-border);color:var(--pdm-muted);font-size:11px}.pdm-plan-legend span{display:flex;align-items:center;gap:5px}.pdm-plan-legend i{width:18px;height:5px;border-radius:3px;background:var(--plan-accent)}.pdm-plan-legend i.is-baseline{height:3px;background:var(--pdm-muted)}.pdm-plan-legend i.is-progress{background:linear-gradient(90deg,var(--plan-accent) 55%,var(--plan-accent-soft) 55%)}.pdm-plan-legend i.is-today{width:1px;height:12px;background:var(--pdm-danger)}.pdm-plan-legend i.is-shipping{width:2px;height:12px;background:var(--pdm-green)}.pdm-plan-legend small{margin-left:auto;font-size:11px}
 .pdm-plan-empty,.pdm-plan-state{min-height:310px;display:flex;flex:1;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--pdm-muted);text-align:center}.pdm-plan-empty svg{color:var(--plan-accent)}.pdm-plan-empty h2{margin:0;color:var(--pdm-text);font-size:16px}.pdm-plan-empty p{max-width:540px;margin:0;font-size:12px;line-height:1.4}.pdm-plan-state.is-error{color:var(--pdm-danger)}
-.pdm-plan-form{display:flex;flex-direction:column;gap:14px}.pdm-plan-form label{display:flex;flex-direction:column;gap:6px;color:var(--pdm-text);font-size:12px}.pdm-plan-form__grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.pdm-plan-form p{margin:0;padding:9px;border-radius:6px;color:var(--pdm-muted);background:var(--pdm-surface-muted);font-size:11px;line-height:1.4}.pdm-plan-stage-duration-preview{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface-muted);font-size:11px}.pdm-plan-stage-duration-preview>header{display:flex;align-items:center;justify-content:space-between;gap:12px}.pdm-plan-stage-duration-preview>header small{color:var(--pdm-muted)}.pdm-plan-stage-duration-preview>div{display:flex;flex-wrap:wrap;gap:6px}.pdm-plan-stage-duration-preview>div>span{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface)}.pdm-plan-stage-duration-preview b{color:var(--plan-accent);font-weight:600}.pdm-plan-progress-input{padding:0 8px}.pdm-plan-checkbox{justify-content:flex-end}.pdm-plan-version-list{display:flex;flex-direction:column;gap:8px}.pdm-plan-version-list article{display:grid;grid-template-columns:1fr auto;gap:4px 14px;padding:11px;border:1px solid var(--pdm-border);border-radius:6px}.pdm-plan-version-list span,.pdm-plan-version-list small{color:var(--pdm-muted);font-size:11px}.pdm-plan-version-list small{grid-column:1/-1}
-@media (max-width:1400px){.pdm-plan-summary{grid-template-columns:repeat(3,minmax(0,1fr))}}@media (max-width:760px){.pdm-plan-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.pdm-plan-form{display:flex;flex-direction:column;gap:14px}.pdm-plan-form label{display:flex;flex-direction:column;gap:6px;color:var(--pdm-text);font-size:12px}.pdm-plan-form__grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.pdm-plan-form p{margin:0;padding:9px;border-radius:6px;color:var(--pdm-muted);background:var(--pdm-surface-muted);font-size:11px;line-height:1.4}.pdm-plan-stage-duration-preview{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--pdm-border);border-radius:6px;background:var(--pdm-surface-muted);font-size:11px}.pdm-plan-stage-duration-preview>header{display:flex;align-items:center;justify-content:space-between;gap:12px}.pdm-plan-stage-duration-preview>header small{color:var(--pdm-muted)}.pdm-plan-stage-duration-preview>div{display:flex;flex-wrap:wrap;gap:6px}.pdm-plan-stage-duration-preview>div>span{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface)}.pdm-plan-stage-duration-preview b{ color:var(--pdm-text);font-weight:600}.pdm-plan-progress-input{padding:0 8px}.pdm-plan-checkbox{justify-content:flex-end}.pdm-plan-version-list{display:flex;flex-direction:column;gap:8px}.pdm-plan-version-list article{display:grid;grid-template-columns:1fr auto;gap:4px 14px;padding:11px;border:1px solid var(--pdm-border);border-radius:6px}.pdm-plan-version-list span,.pdm-plan-version-list small{color:var(--pdm-muted);font-size:11px}.pdm-plan-version-list small{grid-column:1/-1}
+
 .pdm-gantt-info-row.is-project,.pdm-gantt-timeline-row.is-project{background:color-mix(in srgb,var(--pdm-border) 32%,var(--pdm-surface))}.pdm-gantt-info-row.is-stage,.pdm-gantt-timeline-row.is-stage{background:color-mix(in srgb,var(--plan-accent-soft) 82%,var(--pdm-surface))}.pdm-gantt-info-row.is-inherited-plan,.pdm-gantt-timeline-row.is-inherited-plan{background:color-mix(in srgb,var(--pdm-surface-muted) 72%,var(--pdm-surface))}.pdm-gantt-info-row .pdm-gantt-name{padding-left:var(--gantt-indent,10px)}
 .pdm-gantt-info-head,.pdm-gantt-info-row{grid-template-columns:150px 86px 80px 80px 120px 60px 100px 32px}.pdm-gantt-table.is-info-collapsed .pdm-gantt-info-head,.pdm-gantt-table.is-info-collapsed .pdm-gantt-info-row{grid-template-columns:170px 120px 60px 32px}
-.pdm-gantt-table.has-task-actions .pdm-gantt-info-head,.pdm-gantt-table.has-task-actions .pdm-gantt-info-row{grid-template-columns:36px 150px 86px 80px 80px 120px 60px 100px 32px}.pdm-gantt-table.has-task-actions.is-info-collapsed .pdm-gantt-info-head,.pdm-gantt-table.has-task-actions.is-info-collapsed .pdm-gantt-info-row{grid-template-columns:36px 170px 120px 60px 32px}.pdm-gantt-action-head,.pdm-gantt-action-cell{display:grid;place-items:center;height:100%}.pdm-gantt-action-head{color:var(--pdm-muted)}.pdm-gantt-action-cell>button{display:inline-grid;place-items:center;padding:0;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface);color:var(--plan-accent);cursor:pointer}.pdm-gantt-action-cell>button{width:var(--pdm-symbol-compact);height:var(--pdm-symbol-compact)}.pdm-gantt-action-cell>.pdm-gantt-delete-task{width:var(--pdm-symbol-small);height:var(--pdm-symbol-small)}.pdm-gantt-action-cell>button:hover:not(:disabled),.pdm-gantt-action-cell>button:focus-visible{border-color:var(--plan-accent);background:var(--plan-accent-soft);outline:0}.pdm-gantt-action-cell>button:disabled{cursor:not-allowed;color:var(--pdm-muted);opacity:.55}.pdm-gantt-info-row.is-sortable,.pdm-gantt-timeline-row.is-sortable{cursor:grab}.pdm-gantt-info-row.is-sortable:active,.pdm-gantt-timeline-row.is-sortable:active{cursor:grabbing}.pdm-gantt-info-row.is-drop-before::after,.pdm-gantt-info-row.is-drop-after::after,.pdm-gantt-timeline-row.is-drop-before::after,.pdm-gantt-timeline-row.is-drop-after::after{content:'';position:absolute;z-index:10;left:0;right:0;height:3px;background:var(--plan-accent);box-shadow:0 0 0 1px color-mix(in srgb,var(--plan-accent) 28%,transparent);pointer-events:none;animation:pdm-gantt-insert-pulse .55s ease-in-out infinite alternate}.pdm-gantt-info-row.is-drop-before::after,.pdm-gantt-timeline-row.is-drop-before::after{top:0}.pdm-gantt-info-row.is-drop-after::after,.pdm-gantt-timeline-row.is-drop-after::after{bottom:-1px}@keyframes pdm-gantt-insert-pulse{from{opacity:.42}to{opacity:1}}
+.pdm-gantt-table.has-task-actions .pdm-gantt-info-head,.pdm-gantt-table.has-task-actions .pdm-gantt-info-row{grid-template-columns:36px 150px 86px 80px 80px 120px 60px 100px 32px}.pdm-gantt-table.has-task-actions.is-info-collapsed .pdm-gantt-info-head,.pdm-gantt-table.has-task-actions.is-info-collapsed .pdm-gantt-info-row{grid-template-columns:36px 170px 120px 60px 32px}.pdm-gantt-action-head,.pdm-gantt-action-cell{display:grid;place-items:center;height:100%}.pdm-gantt-action-head{color:var(--pdm-muted)}.pdm-gantt-action-cell>button{display:inline-grid;place-items:center;padding:0;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface); color:var(--pdm-text);cursor:pointer}.pdm-gantt-action-cell>button{width:var(--pdm-symbol-compact);height:var(--pdm-symbol-compact)}.pdm-gantt-action-cell>.pdm-gantt-delete-task{width:var(--pdm-symbol-small);height:var(--pdm-symbol-small)}.pdm-gantt-action-cell>button:hover:not(:disabled),.pdm-gantt-action-cell>button:focus-visible{border-color:var(--plan-accent);background:var(--plan-accent-soft);outline:0}.pdm-gantt-action-cell>button:disabled{cursor:not-allowed;color:var(--pdm-muted);opacity:.55}.pdm-gantt-info-row.is-sortable,.pdm-gantt-timeline-row.is-sortable{cursor:grab}.pdm-gantt-info-row.is-sortable:active,.pdm-gantt-timeline-row.is-sortable:active{cursor:grabbing}.pdm-gantt-info-row[data-task-drop="before"]::after,.pdm-gantt-info-row[data-task-drop="after"]::after,.pdm-gantt-timeline-row[data-task-drop="before"]::after,.pdm-gantt-timeline-row[data-task-drop="after"]::after{content:'';position:absolute;z-index:10;left:0;right:0;height:3px;background:var(--plan-accent);pointer-events:none}.pdm-gantt-info-row[data-task-drop="before"]::after,.pdm-gantt-timeline-row[data-task-drop="before"]::after{top:0}.pdm-gantt-info-row[data-task-drop="after"]::after,.pdm-gantt-timeline-row[data-task-drop="after"]::after{bottom:-1px}
 .pdm-gantt-date-lines{display:block;font-size:0!important;line-height:0}.pdm-gantt-date-lines time{display:block;font-size:11px;line-height:16px}.pdm-gantt-inline-editor.is-duration{left:396px;width:250px}
 .pdm-gantt-info-row>span{text-align:center}.pdm-gantt-info-row>span:not(.pdm-gantt-name){padding-left:0!important}.pdm-gantt-info-row .pdm-gantt-name{position:relative;justify-content:center;padding:0 18px}.pdm-gantt-name>svg{position:absolute;left:6px}.pdm-gantt-name>.pdm-gantt-indent{display:none}
 .pdm-gantt-cell-edit{text-align:center!important}.pdm-gantt-inline-editor{text-align:left;white-space:normal}.pdm-gantt-inline-editor.is-actual-finish{left:376px;width:290px}.pdm-gantt-inline-editor label{display:block;margin-bottom:8px}.pdm-gantt-inline-editor small{display:block;line-height:1.4}
@@ -1954,10 +2246,14 @@ watch(() => props.project.id, () => { clearTimelineFilters(); masterPlanMode.val
 .pdm-gantt-tick.is-week{justify-content:center}.pdm-gantt-tick__week{color:var(--pdm-text);font-size:11px;font-weight:600;white-space:nowrap}.pdm-gantt-tick__week-start{position:absolute;left:0;top:50%;z-index:4;transform:translate(-50%,-50%);padding:0 2px;background:var(--pdm-surface-muted);color:var(--pdm-muted);font-size:11px;line-height:16px;white-space:nowrap}.pdm-gantt-tick.is-first .pdm-gantt-tick__week-start{transform:translateY(-50%)}
 .pdm-gantt-info-row{cursor:pointer}.pdm-gantt-info-row:has(.pdm-gantt-inline-editor){z-index:9}
 .pdm-gantt-cell-edit{display:block;width:100%;padding:4px 0;overflow:hidden;text-overflow:ellipsis;border:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}.pdm-gantt-cell-edit:hover{text-decoration:underline}
-.pdm-gantt-cell-edit.is-complete{margin:0 auto;width:auto;padding:2px 10px;border:1px solid var(--pdm-blue);border-radius:10px;background:var(--pdm-blue-soft);color:var(--pdm-blue);font-size:11px;font-weight:600;text-align:center}.pdm-gantt-cell-edit.is-complete:hover{background:var(--pdm-blue);color:#fff;text-decoration:none}
+.pdm-gantt-cell-edit.is-complete{margin:0 auto;width:auto;padding:2px 10px;border:1px solid var(--pdm-blue);border-radius:10px;background:var(--pdm-blue-soft); color:var(--pdm-text);font-size:11px;font-weight:600;text-align:center}.pdm-gantt-cell-edit.is-complete:hover{background:var(--pdm-blue);color:#fff;text-decoration:none}
 .pdm-gantt-inline-editor{position:absolute;top:100%;left:236px;width:260px;padding:10px;background:var(--pdm-surface);border:1px solid var(--pdm-border);border-radius:6px;box-shadow:0 4px 14px var(--pdm-shadow);cursor:default}.pdm-gantt-inline-editor.is-dates{left:216px;width:350px}.pdm-gantt-inline-editor>div:last-child{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}.pdm-gantt-inline-editor button{border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-surface);color:var(--pdm-text);padding:5px 9px;cursor:pointer}
 .pdm-plan-date-range.el-date-editor,.pdm-gantt-inline-editor .el-date-editor{width:100%;min-width:0;box-sizing:border-box}
-.pdm-plan-stage-dot.is-neutral{background:var(--pdm-muted);box-shadow:none}.pdm-gantt-bar.is-neutral{border-color:var(--pdm-muted);background:color-mix(in srgb,var(--pdm-muted) 24%,var(--pdm-surface));box-shadow:none}.pdm-gantt-bar.is-neutral i{background:var(--pdm-muted)}.pdm-gantt-bar.is-neutral.is-milestone{background:var(--pdm-muted)}
-.pdm-plan-filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:0 10px;box-sizing:border-box;margin-bottom:8px;flex:none}.pdm-plan-filters>label{display:flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap}.pdm-plan-filters .el-select{width:180px}.pdm-plan-filters .el-input{width:220px}.pdm-plan-filters>small{color:var(--pdm-muted);font-size:12px}.pdm-plan-filters>button{height:30px;padding:0 10px}
-@media(max-width:700px){.pdm-plan-filters>label{flex:1 1 220px;min-width:0}.pdm-plan-filters .el-select,.pdm-plan-filters .el-input{flex:1;width:auto;min-width:0}}
+.pdm-plan-stage-dot.is-neutral{background:var(--pdm-muted);box-shadow:none}
+.pdm-gantt-bar.is-neutral{--gantt-progress-tone:light-dark(color-mix(in srgb,var(--pdm-muted) 55%,var(--pdm-surface)),var(--pdm-muted))}
+.pdm-gantt-bar.is-neutral.is-milestone{background:var(--pdm-muted)}
+.pdm-plan-filters { display:flex; flex:0 1 auto; min-width:0; max-width:100%; flex-wrap:wrap; align-items:center; gap:var(--pdm-control-gap); }
+.pdm-plan-filters > label { display:flex; align-items:center; gap:var(--pdm-control-gap); font-size:12px; white-space:nowrap; }
+.pdm-plan-filters .el-select { width:140px; } .pdm-plan-filters > small { color:var(--pdm-muted); font-size:12px; white-space:nowrap; }
+@media(max-width:700px){.pdm-plan-filters>label{flex:1 1 220px;min-width:0}.pdm-plan-filters .el-select{flex:1;width:auto;min-width:0}}
 </style>

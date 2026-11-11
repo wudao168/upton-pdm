@@ -17,7 +17,7 @@ public sealed partial class PdmWorkflowService
         var scope = await repository.GetUserCompanyScopeAsync(recipient.Username, ct) ?? throw new PdmRuleException("接手人尚未配置公司范围。");
         if (scope.PrimaryCompanyId is null) throw new PdmRuleException("接手人尚未配置所属公司。");
         var companyId = project.OrganizationId ?? scope.PrimaryCompanyId ?? Guid.Empty;
-        var platform = recipient.HasRole("platform_admin") || recipient.HasRole("developer") || recipient.Username.Equals("admin", StringComparison.OrdinalIgnoreCase);
+        var platform = AuthorizationPolicy.GlobalAllows(await repository.GetAuthorizationSettingsAsync(ct), recipient, scope.PrimaryCompanyId, AuthorizationActions.PlatformManage);
         if (companyId != scope.PrimaryCompanyId && !platform && (!scope.CrossCompanyView || !scope.AccessibleCompanyIds.Contains(companyId)))
             throw new PdmRuleException("接手人无权访问该图档所属公司。");
         var originalTenant = TenantContext.Current;
@@ -40,7 +40,7 @@ public sealed partial class PdmWorkflowService
         await RequirePermissionAsync(actor, role, PermissionCodes.DocumentLockEmergencyRelease, ct);
         var current = await RequireDocumentAsync(documentId, ct);
         var project = await repository.FindProjectAsync(current.ProjectId, ct) ?? throw new PdmNotFoundException("项目不存在。");
-        if (!IsProjectLockManager(project, actor, role)) throw new UnauthorizedAccessException("仅授权项目负责人或系统管理员可以紧急接管。");
+        if (!await AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockEmergencyRelease, ct)) throw new UnauthorizedAccessException("当前账号没有此项目的紧急接管权限。");
         reason = RequiredReason(reason);
         var updated = await repository.ReclaimCheckoutAsync(documentId, sessionId, checkedOutAt, null, timeProvider.GetUtcNow(), ct);
         await AuditAsync(actor, "document.checkout.emergency-release", nameof(PdmDocument), documentId.ToString(),

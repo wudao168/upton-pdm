@@ -10,6 +10,7 @@ public sealed class ArchiveWarningPolicyTests
     public async Task BatchSizeSettingUsesExistingAdministratorPermission()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("engineer", UserRole.Engineer), ("admin", UserRole.Administrator));
         var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => workflow.SaveArchiveWarningPolicyAsync(
             new() { MaxBatchRequestMiB = 128 }, "engineer", UserRole.Engineer, default));

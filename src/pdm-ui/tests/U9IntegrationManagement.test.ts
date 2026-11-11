@@ -99,7 +99,7 @@ describe('U9IntegrationManagement', () => {
 
     expect(wrapper.find('.u9-integration-page > .pdm-pagebar').exists()).toBe(false)
     const tabs = wrapper.findAll('[role="tab"]')
-    expect(tabs.map(tab => tab.text())).toEqual(['基础设置', '接口设置', '客户查询', '料品同步', 'BOM维护'])
+    expect(tabs.map(tab => tab.text())).toEqual(['基础设置', '接口设置', '客户查询', '料品同步'])
     expect(tabs.find(tab => tab.text().includes('基础设置'))?.attributes('aria-selected')).toBe('true')
     expect(wrapper.get('input[name="u9BaseUrl"]').element).toHaveProperty('value', settings.baseUrl)
 
@@ -203,10 +203,10 @@ describe('U9IntegrationManagement', () => {
     }, 'token')
   })
 
-  it('BOM维护可查询U9C并展示请求预览和子项', async () => {
+  it('料品同步内的BOM维护可查询U9C并展示请求预览和子项', async () => {
     const wrapper = mountPage()
     await flushPromises()
-    await wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('BOM维护'))!.trigger('click')
+    await wrapper.findAll('[role="tab"]').find(tab => tab.text() === '料品同步')!.trigger('click')
     await flushPromises()
 
     const panel = wrapper.get('[aria-label="U9C BOM查询与维护"]')
@@ -227,7 +227,7 @@ describe('U9IntegrationManagement', () => {
     api.getU9MaterialIntegration.mockResolvedValueOnce({ ...settings, writeEnabled: true })
     const wrapper = mountPage()
     await flushPromises()
-    await wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('BOM维护'))!.trigger('click')
+    await wrapper.findAll('[role="tab"]').find(tab => tab.text() === '料品同步')!.trigger('click')
     await flushPromises()
 
     const panel = wrapper.get('[aria-label="U9C BOM查询与维护"]')

@@ -11,7 +11,7 @@ export function projectReleaseAttention(project: Pick<ProjectSummary, 'hasReleas
   return now >= latest && now - latest < 24 * 60 * 60 * 1000 ? 'new' : ''
 }
 
-export function requiresReleasePreview(release: ReleasePackageSummary) {
+export function requiresReleasePreview(release: Pick<ReleasePackageSummary, 'locksDocuments' | 'scope'>) {
   return release.locksDocuments !== false && ['NonStandardWithDrawing', 'NonStandardSupplement', 'LegacyCombined'].includes(release.scope)
 }
 

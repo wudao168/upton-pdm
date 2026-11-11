@@ -1,5 +1,6 @@
 import { defineComponent, h, provide, ref, type App, type Component, type InjectionKey, type Ref } from 'vue'
 import { ElDialog, ElDrawer } from 'element-plus'
+import { installDrawerGenie } from './drawerGenie'
 
 // 系统弹窗按侧面抽屉展示，统一把主操作放到标题与关闭按钮之间。
 export const panelHeaderActionsKey: InjectionKey<Ref<HTMLElement | undefined>> = Symbol('panel-header-actions')
@@ -34,6 +35,7 @@ function withHeaderActions(panel: Component, name: string) {
 }
 
 export function installPanelHeaderActions(app: App) {
+  app.onUnmount(installDrawerGenie())
   app.component('ElDrawer', withHeaderActions(ElDrawer, 'PdmHeaderDrawer'))
   app.component('ElDialog', withHeaderActions(ElDialog, 'PdmHeaderDialog'))
 }

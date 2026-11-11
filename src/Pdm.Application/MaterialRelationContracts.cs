@@ -71,6 +71,7 @@ public sealed record MaterialRelationMainCheck(
     IReadOnlyList<MaterialRelationGroupCheck> Groups)
 {
     public int BomSequence { get; init; }
+    public bool IsArchived { get; init; }
     public IReadOnlyList<MaterialRelationAllocation> Allocations { get; init; } = [];
 }
 
@@ -84,6 +85,9 @@ public sealed record MaterialRelationCompleteness(
 public interface IMaterialRelationRepository
 {
     Task<IReadOnlyList<MaterialRelationTemplate>> ListTemplatesAsync(bool includeDraft, CancellationToken cancellationToken);
+    Task<IReadOnlyList<MaterialRelationTemplate>> ListRetiredRevisionsAsync(IReadOnlyCollection<Guid> revisionIds, CancellationToken cancellationToken);
+    Task<MaterialRelationTemplate> SetActiveAsync(Guid templateId, bool isActive, long expectedRowVersion, string actor, DateTimeOffset now, CancellationToken cancellationToken);
+    Task DeleteDraftAsync(Guid templateId, long expectedRowVersion, CancellationToken cancellationToken);
     Task<MaterialRelationTemplate> SaveDraftAsync(Guid? templateId, SaveMaterialRelationTemplateCommand command, string mainMaterialCode, string mainMaterialName, IReadOnlyList<MaterialRelationGroup> groups, string actor, DateTimeOffset now, CancellationToken cancellationToken, IReadOnlyList<MaterialRelationMainMaterial>? mainMaterials = null);
     Task<MaterialRelationTemplate> PublishAsync(Guid templateId, Guid revisionId, long expectedRowVersion, string actor, DateTimeOffset now, CancellationToken cancellationToken);
     Task<IReadOnlyList<MaterialRelationSelection>> ListSelectionsAsync(Guid projectId, CancellationToken cancellationToken);

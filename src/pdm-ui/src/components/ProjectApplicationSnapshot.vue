@@ -1,5 +1,9 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
 import type { ProjectApplicationData } from '../projectApplications'
+import ProjectApplicationBudget from './ProjectApplicationBudget.vue'
+import ProjectApplicationSettlement from './ProjectApplicationSettlement.vue'
+import ProjectApplicationContractFields from './ProjectApplicationContractFields.vue'
 defineProps<{ data: ProjectApplicationData }>()
 </script>
 
@@ -10,10 +14,13 @@ defineProps<{ data: ProjectApplicationData }>()
     <dt>立项方式</dt><dd>{{ data.input.isSpecial ? '特殊立项' : '正常立项' }}</dd>
     <dt>订单日期</dt><dd>{{ data.input.orderDate || '未填写' }}</dd>
     <dt>交货日期</dt><dd>{{ data.input.deliveryDate || '—' }}</dd>
-    <dt>销售人员</dt><dd>{{ data.salesName || '—' }}</dd>
-    <dt>售前工程师</dt><dd>{{ data.presalesPeople.map(x => x.displayName).join('、') || '—' }}</dd>
+    <dt>销售经理</dt><dd>{{ data.salesName || '—' }}</dd>
+    <dt>售前工程师</dt><dd><PersonName :name="data.presalesPeople.map(x => x.displayName).join('、') || '—'" /></dd>
     <dt>备注</dt><dd>{{ data.input.remarks || '—' }}</dd>
   </dl>
+  <ProjectApplicationContractFields :model-value="data.input.contract" readonly />
+  <ProjectApplicationSettlement :model-value="data.input.settlementLines" readonly />
+  <ProjectApplicationBudget v-if="data.canViewBudget === true" :model-value="data.input.budgetAmounts" readonly />
 </template>
 
 <style scoped>

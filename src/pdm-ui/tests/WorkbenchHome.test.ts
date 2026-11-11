@@ -7,6 +7,7 @@ import type { DocumentNode, ProjectSummary } from '../src/types'
 const apiMocks = vi.hoisted(() => ({
   listProjectPlanVersions: vi.fn().mockResolvedValue([]),
   readProjectPlanPortfolio: vi.fn(),
+  readProjectRiskOverview: vi.fn(),
   readProjectValidationPlan: vi.fn(),
   getMaterialRelationCompleteness: vi.fn(),
   getProjectProcurementTracking: vi.fn(),
@@ -75,6 +76,7 @@ describe('WorkbenchHome', () => {
     vi.useFakeTimers()
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
     vi.setSystemTime(new Date('2026-09-25T08:00:00+08:00'))
+    apiMocks.readProjectRiskOverview.mockResolvedValue([])
     apiMocks.readProjectPlanPortfolio.mockResolvedValue({
       rootProjectId: 'project-root', currentStage: 'Design', completionPercent: 62, laggingProjectCount: 0, riskProjectCount: 0, plannedFinish: '2026-10-18',
       projects: [{ projectId: 'project-root', projectCode: 'P700001', projectName: '气密设备', isRoot: true, hasPlan: true, currentStage: 'Design', completionPercent: 62, plannedFinish: '2026-10-18', isLagging: false, isAtRisk: false,
@@ -151,7 +153,7 @@ describe('WorkbenchHome', () => {
         users: [
           { username: 'manager', displayName: '项目经理甲', role: 'ProjectManager', isActive: true },
           { username: 'coordinator', displayName: '协同经理乙', role: 'ProjectManager', isActive: true },
-          { username: 'lead', displayName: '主设丙', role: 'Engineer', isActive: true },
+          { username: 'lead', displayName: '主设计丙', role: 'Engineer', isActive: true },
           { username: 'engineer', displayName: '工程师丁', role: 'Engineer', isActive: true },
         ],
         selected,
@@ -182,11 +184,11 @@ describe('WorkbenchHome', () => {
         ] as never,
         releasePackages: [{
           state: '审批中', scope: 'StandardFormal', createdAt: '2026-08-21T10:00:00Z',
-          steps: [{ id: 'step-1', stage: '主设审核', assignee: 'lead', status: 'current', detail: '待处理' }],
+          steps: [{ id: 'step-1', stage: '主设计审核', assignee: 'lead', status: 'current', detail: '待处理' }],
         }] as never,
         releasePackage: {
           state: '审批中',
-          steps: [{ id: 'step-1', stage: '主设审核', assignee: 'lead', status: 'current', detail: '待处理' }],
+          steps: [{ id: 'step-1', stage: '主设计审核', assignee: 'lead', status: 'current', detail: '待处理' }],
         } as never,
         organizationDirectory: {
           organizations: [],
@@ -240,8 +242,8 @@ describe('WorkbenchHome', () => {
     expect(wrapper.get('button[aria-label="查看待处理"]').text()).toContain('5')
     expect(wrapper.find('button[aria-label="查看关键物料"]').exists()).toBe(false)
     expect(wrapper.get('[aria-label="项目待办与风险"]').find('.pdm-overview-alerts').element.children).toHaveLength(3)
-    expect(wrapper.get('[aria-label="项目核心业务概览"]').find('[aria-label="项目团队"]').exists()).toBe(true)
-    expect(wrapper.get('[aria-label="项目核心业务概览"]').find('[aria-label="预留区域"]').exists()).toBe(true)
+    expect(wrapper.get('[aria-label="项目核心业务概览"]').find('[aria-label="项目风险"]').exists()).toBe(true)
+    expect(wrapper.get('[aria-label="项目核心业务概览"]').findAll('article')).toHaveLength(1)
     expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('P700001')
     expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('设计')
     expect(wrapper.get('[aria-label="项目总览"]').text()).toContain('工程师丁')
@@ -296,40 +298,46 @@ describe('WorkbenchHome', () => {
     ;[...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === '取消')!.click()
     await flushPromises()
     expect(wrapper.emitted('records')).toBeUndefined()
-    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('项目经理甲')
-    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('主设丙')
-    expect(wrapper.get('[aria-label="项目团队"]').text()).not.toContain('工程师丁')
-    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('分配人员')
-    expect(wrapper.get('[aria-label="项目团队"]').findAll('button')).toHaveLength(1)
-    const configureOwners = wrapper.get('[aria-label="项目团队"]').findAll('button').find(button => button.text() === '分配人员')!
-    await configureOwners.trigger('click')
-    await flushPromises()
-    expect(wrapper.emitted('information')).toHaveLength(1)
-    expect(document.body.querySelector('[aria-label="主项目分工"]')).toBeNull()
-    for (const phase of ['标准件采购', '非标件采购', '非标件生产', '机械装配', '电气装配', '电气调试', '验收']) {
-      expect(wrapper.get('[aria-label="项目团队"]').text()).toContain(phase)
+    const riskPanel = wrapper.get('[aria-label="项目风险"]')
+    expect(riskPanel.text()).toContain('当前暂无风险')
+    expect(wrapper.find('[aria-label="项目团队"]').exists()).toBe(false)
+    const rootRisk = { project: { id: project.id, code: project.code, deliveryDate: '2026-09-22' }, plan: null, procurement: null, releases: [], incomplete: false }
+    const childRisk = {
+      project: { id: childProject.id, code: childProject.code }, plan: null, releases: [], incomplete: false,
+      procurement: { delayed: 2, items: [
+        { sequence: 1, materialCode: 'M001', materialName: '导轨', requiredOn: '2026-09-22', expectedOn: '2026-09-28', purchaseOrders: ['PO001'] },
+        { sequence: 2, materialCode: 'M002', materialName: '丝杆', requiredOn: '2026-09-23', expectedOn: '2026-09-30', purchaseOrders: ['PO002'] },
+      ] },
     }
-    expect(wrapper.findAll('.pdm-overview-team__table thead th').map(cell => cell.text())).toEqual(['职责', '负责人', '职责', '负责人'])
-    expect(wrapper.findAll('.pdm-overview-team__table tbody tr')).toHaveLength(5)
-    const assignedProject = { ...project, phaseOwners: { StandardProcurement: 'manager', Acceptance: 'coordinator' } }
-    await wrapper.setProps({ projects: [assignedProject, childProject] })
-    const standardOwnerRow = wrapper.findAll('.pdm-overview-team__table tbody tr').find(row => row.text().includes('标准件采购'))!
-    expect(standardOwnerRow.text()).toContain('项目经理甲')
-    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('验收协同经理乙')
-    await wrapper.setProps({ projects: [{ ...assignedProject, phaseOwners: { ...assignedProject.phaseOwners, StandardProcurement: 'engineer' } }, childProject] })
-    expect(standardOwnerRow.text()).toContain('工程师丁')
-    expect(standardOwnerRow.text()).not.toContain('项目经理甲')
-    expect(wrapper.find('[aria-label="当前阶段任务"]').exists()).toBe(false)
-    expect(wrapper.find('[aria-label="项目位置"]').exists()).toBe(false)
-
-    await wrapper.findAll('button').find(button => button.text().includes('分配人员'))!.trigger('click')
+    apiMocks.readProjectRiskOverview.mockResolvedValueOnce([rootRisk, childRisk])
+    await wrapper.get('[aria-label="刷新项目概览"]').trigger('click')
     await flushPromises()
-    expect(wrapper.emitted('information')).toHaveLength(2)
+    expect(riskPanel.text()).toContain('项目交期已逾期 3 天')
+    expect(riskPanel.findAll('tbody tr')).toHaveLength(3)
+    await riskPanel.get('[aria-label="查看 P700001-1 采购交付延期 M001 · 导轨"]').trigger('click')
+    await flushPromises()
+    const riskDetail = document.body.querySelector('[aria-label="风险明细"]')!
+    expect(riskDetail.textContent).toContain('PO001')
+    expect(riskDetail.textContent).not.toContain('PO002')
+    expect(wrapper.emitted('openRisk')).toBeUndefined()
+    ;[...document.body.querySelectorAll('button')].find(button => button.textContent === '前往备料')!.click()
+    await flushPromises()
+    expect(wrapper.emitted('openRisk')).toEqual([[childProject.id, 'procurement']])
 
-    await wrapper.setProps({ projects: [{ ...project, collaborativeProjectManagers: [] }, childProject] })
-    await wrapper.setProps({ project: { ...childProject, canAssignDesigners: false }, projects: [project, { ...childProject, canAssignDesigners: false }] })
-    expect(wrapper.get('[aria-label="项目团队"]').text()).not.toContain('执行工程师')
-    expect(wrapper.get('[aria-label="项目团队"]').text()).toContain('分配人员')
+    apiMocks.readProjectRiskOverview.mockResolvedValueOnce([childRisk])
+    await wrapper.setProps({ project: childProject })
+    await flushPromises()
+    expect(riskPanel.text()).not.toContain('项目交期')
+    expect(riskPanel.findAll('tbody tr')).toHaveLength(2)
+
+    apiMocks.readProjectRiskOverview.mockRejectedValueOnce(new Error('读取失败'))
+    await wrapper.get('[aria-label="刷新项目概览"]').trigger('click')
+    await flushPromises()
+    expect(riskPanel.text()).toContain('项目风险读取失败')
+    expect(riskPanel.text()).not.toContain('当前暂无风险')
+    await riskPanel.get('button').trigger('click')
+    await flushPromises()
+    expect(riskPanel.text()).toContain('当前暂无风险')
 
     await wrapper.findAll('button').find(button => button.text().includes('进入项目计划'))!.trigger('click')
 

@@ -304,7 +304,8 @@ public sealed class ValidationPlanService(
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
         var workflow = settings.ApprovalWorkflows.ValidationPlan ?? ReleaseApprovalSettings.Default.ValidationPlan!;
         var now = timeProvider.GetUtcNow();
-        var tasks = await BuildApprovalTasksAsync(current.Id, workflow, project, actor, now, cancellationToken);
+        var tasks = await BuildApprovalTasksAsync(current.Id, workflow, project, actor, now, cancellationToken,
+            new Dictionary<string, object?> { ["PreparedBy"] = current.PreparedBy, ["ValidationDate"] = current.ValidationDate, ["ItemCount"] = current.Items.Count, ["RevisionNumber"] = current.RevisionNumber });
         var saved = await validationPlans.SubmitAsync(current.Id, expectedRowVersion, workflow.Code, workflow.Version, tasks, actor, now, cancellationToken);
         if (!qualityAcceptance && workflowNotifications is not null) await workflowNotifications.CaptureValidationAsync(saved, cancellationToken);
         await AuditAsync(actor, "project.validation-plan.submit", nameof(ProjectValidationPlan), saved.Id, $"提交验证计划R{saved.RevisionNumber}审批；模板v{workflow.Version}", cancellationToken);
@@ -324,7 +325,8 @@ public sealed class ValidationPlanService(
     {
         if (string.IsNullOrWhiteSpace(reason) || reason.Trim().Length > 500) throw new PdmRuleException("请填写紧急代批原因，最多500个字符。");
         if (!await CanEmergencyDecideAsync(taskId, actor, role, cancellationToken)) throw new UnauthorizedAccessException("当前用户不属于该审批流的紧急代批角色，或无项目访问权限。");
-        var saved = await validationPlans.DecideAsync(taskId, actor, decision, $"紧急代批：{reason.Trim()}", timeProvider.GetUtcNow(), cancellationToken);
+        var saved = await validationPlans.DecideAsync(taskId, actor, decision, $"紧急代批：{reason.Trim()}", timeProvider.GetUtcNow(), cancellationToken, emergencySubstitute: true);
+        await NotifyDecisionAsync(saved, taskId, cancellationToken);
         if (saved.State == ProjectValidationPlanState.Effective)
         {
             var project = await repository.FindProjectAsync(saved.ProjectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
@@ -334,21 +336,34 @@ public sealed class ValidationPlanService(
         return saved;
     }
 
-    public async Task<ProjectValidationPlan> DecideAsync(Guid taskId, ApprovalDecision decision, string? comment, string actor, UserRole role, CancellationToken cancellationToken)
+    public async Task<ProjectValidationPlan> DecideAsync(Guid taskId, ApprovalDecision decision, string? comment, string actor, UserRole role, CancellationToken cancellationToken, string? businessNote = null)
     {
         if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ApprovalDecide, cancellationToken)
             && !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ValidationPlanEdit, cancellationToken))
             throw new UnauthorizedAccessException("当前角色无权处理验证计划审批。");
         var task = (await validationPlans.ListPendingApprovalTasksAsync(actor, false, cancellationToken)).FirstOrDefault(item => item.Id == taskId)
             ?? throw new PdmRuleException("只能处理当前分配给自己的验证计划审批任务。");
-        var saved = await validationPlans.DecideAsync(taskId, actor, decision, Optional(comment, 500, "审批意见"), timeProvider.GetUtcNow(), cancellationToken);
+        if (decision == ApprovalDecision.Rejected && string.IsNullOrWhiteSpace(comment)) throw new PdmRuleException("退回验证计划时请填写原因。");
+        var saved = await validationPlans.DecideAsync(taskId, actor, decision, Optional(comment, 500, "审批意见"), timeProvider.GetUtcNow(), cancellationToken, businessNote: businessNote);
+        await NotifyDecisionAsync(saved, taskId, cancellationToken);
         if (saved.State == ProjectValidationPlanState.Effective)
         {
             var project = await repository.FindProjectAsync(saved.ProjectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
             await EnsureArchivedAsync(project, saved, cancellationToken);
         }
-        await AuditAsync(actor, "project.validation-plan.approval.decide", nameof(ValidationPlanApprovalTask), taskId, $"R{saved.RevisionNumber}；{decision}", cancellationToken);
+        await AuditAsync(actor, "project.validation-plan.approval.decide", nameof(ValidationPlanApprovalTask), taskId, $"R{saved.RevisionNumber}；{decision}" + (businessNote is null ? "" : $"；计划备注改为：{businessNote.Trim()}"), cancellationToken);
         return saved;
+    }
+
+    private async Task NotifyDecisionAsync(ProjectValidationPlan plan, Guid taskId, CancellationToken ct)
+    {
+        var node = plan.ApprovalTasks.Single(task => task.Id == taskId);
+        if (node.Decision == ApprovalDecision.Approved)
+            await ApprovalNodeCopies.NotifyAsync(repository, node.Participants?.CopyOnApproval, plan.ProjectId, null, taskId, node.StepName, node.DecidedAt, ct);
+        if (node.Decision == ApprovalDecision.Rejected && !string.IsNullOrWhiteSpace(plan.SubmittedBy))
+            await repository.CreateUserNotificationsAsync([new UserNotification(Guid.NewGuid(), plan.SubmittedBy, "ValidationPlanRejected",
+                "验证计划已退回", $"R{plan.RevisionNumber} · {node.StepName}：{node.DecisionComment}。请修改后重新提交审批。",
+                plan.ProjectId, null, $"validation-plan:{taskId:N}:rejected", node.DecidedAt ?? timeProvider.GetUtcNow(), null)], ct);
     }
 
     public async Task<ProjectValidationPlan> WithdrawAsync(Guid projectId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
@@ -368,6 +383,7 @@ public sealed class ValidationPlanService(
     {
         var task = (await ListMyApprovalTasksAsync(actor, role, cancellationToken)).FirstOrDefault(item => item.Id == taskId)
             ?? throw new UnauthorizedAccessException("只能转交当前分配给自己的验证计划审批任务。");
+        if (task.Participants is { } participants && (participants.Members.Count > 1 || participants.Policy?.DisableTransfer == true)) throw new PdmRuleException("该节点不允许转交。");
         if (!string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("只能转交当前分配给自己的验证计划审批任务。");
         if (string.Equals(actor, newAssignee, StringComparison.OrdinalIgnoreCase)) throw new PdmRuleException("不能转交给自己。");
@@ -387,7 +403,7 @@ public sealed class ValidationPlanService(
     {
         var result = new List<PendingValidationPlanApprovalTask>();
         foreach (var task in await validationPlans.ListPendingApprovalTasksAsync(actor, true, cancellationToken))
-            if (string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase) || await CanEmergencyDecideAsync(task.Id, actor, role, cancellationToken, businessInbox)) result.Add(task);
+            if (task.CanSign(actor) || await CanEmergencyDecideAsync(task.Id, actor, role, cancellationToken, businessInbox)) result.Add(task);
         return result;
     }
 
@@ -645,10 +661,12 @@ public sealed class ValidationPlanService(
         return DateOnly.TryParse($"{match.Groups[1].Value}-{match.Groups[2].Value}-{match.Groups[3].Value}", out var date) ? date : null;
     }
 
-    private async Task<IReadOnlyList<ValidationPlanApprovalTask>> BuildApprovalTasksAsync(Guid planId, ApprovalWorkflowTemplate workflow, Project project, string actor, DateTimeOffset createdAt, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<ValidationPlanApprovalTask>> BuildApprovalTasksAsync(Guid planId, ApprovalWorkflowTemplate workflow, Project project, string actor, DateTimeOffset createdAt, CancellationToken cancellationToken, IReadOnlyDictionary<string, object?>? fields = null)
     {
         var users = await repository.ListUsersAsync(cancellationToken);
         var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
+        workflow = ApprovalNodeRules.ResolveRoute(workflow, users.FirstOrDefault(user => user.Username.Equals(actor, StringComparison.OrdinalIgnoreCase)),
+            fields: ApprovalConditionRules.Context(project, actor, directory, fields));
         var primaryMembership = directory.Memberships.FirstOrDefault(item => item.IsPrimary && string.Equals(item.Username, actor, StringComparison.OrdinalIgnoreCase));
         var primaryUnit = primaryMembership is null ? null : directory.Units.FirstOrDefault(item => item.Id == primaryMembership.UnitId && item.IsActive);
         string? UnitManager(ApprovalAssigneeSource source)
@@ -666,8 +684,11 @@ public sealed class ValidationPlanService(
         for (var index = 0; index < workflow.Steps.Count; index++)
         {
             var step = workflow.Steps[index];
+            var group = await ApprovalNodeRules.ResolveGroupAsync(repository, step, project, users, cancellationToken, workflow.Code);
+            var copy = await ApprovalNodeCopies.ResolveAsync(repository, step, project, actor, users, cancellationToken);
             var assignee = step.AssigneeSource switch
             {
+                ApprovalAssigneeSource.Role or ApprovalAssigneeSource.DepartmentMembers or ApprovalAssigneeSource.ParallelDepartments => group!.Members[0],
                 ApprovalAssigneeSource.Submitter => actor,
                 ApprovalAssigneeSource.ProjectDesignLead => project.DesignLead,
                 ApprovalAssigneeSource.FixedUser => step.FixedAssignee,
@@ -679,13 +700,13 @@ public sealed class ValidationPlanService(
             if (string.IsNullOrWhiteSpace(assignee)) throw new PdmRuleException($"审批模板“{workflow.Name}”的“{step.Name}”尚未配置审批人。");
             if (!users.Any(user => user.IsActive && string.Equals(user.Username, assignee, StringComparison.OrdinalIgnoreCase))) throw new PdmRuleException($"审批节点“{step.Name}”的账号{assignee}不存在或已停用。");
             var autoApproved = step.AssigneeSource == ApprovalAssigneeSource.Submitter
-                || step.AssigneeSource == ApprovalAssigneeSource.ProjectDesignLead
+                || step.Policy is null && step.CopyOnApproval is null && step.AssigneeSource == ApprovalAssigneeSource.ProjectDesignLead
                     && string.Equals(assignee, actor, StringComparison.OrdinalIgnoreCase);
             var autoComment = step.AssigneeSource == ApprovalAssigneeSource.Submitter
                 ? "提交验证计划即完成编制人自检"
-                : autoApproved ? "提交人为当前主设，系统自动通过" : null;
+                : autoApproved ? "提交人为当前主设计，系统自动通过" : null;
             result.Add(new ValidationPlanApprovalTask(Guid.NewGuid(), planId, index + 1, step.Stage, step.Name, assignee,
-                autoApproved ? ApprovalDecision.Approved : null, autoApproved ? actor : null, autoComment, createdAt, autoApproved ? createdAt : null) { EmergencyRoleCodes = workflow.EmergencyRoleCodes });
+                autoApproved ? ApprovalDecision.Approved : null, autoApproved ? actor : null, autoComment, createdAt, autoApproved ? createdAt : null) { EmergencyRoleCodes = workflow.EmergencyRoleCodes, Participants = ApprovalNodeRules.Freeze(group, assignee, step.Policy, copy) });
         }
         return result;
     }

@@ -48,7 +48,7 @@ internal static partial class Program
    using(var boundary=(IDisposable)New("ControlledOpenBoundary",directory,manifest))
    {
     Check((int)TreeCall(plugin,"OnFileOpening",path)==1,"受控加载不使用原图或未登记的包外图档："+Path.GetFileName(path));
-    var rejected=false;try{TreeCall(boundary,"Verify");}catch(System.Reflection.TargetInvocationException error)when(error.InnerException is InvalidOperationException){rejected=true;}Check(rejected,"取消外部加载后不能误报打开成功");
+    var rejected=false;try{TreeCall(boundary,"Verify",null,null);}catch(System.Reflection.TargetInvocationException error)when(error.InnerException is InvalidOperationException){rejected=true;}Check(rejected,"取消外部加载后不能误报打开成功");
    }
    foreach(var mode in new[]{"linked-parameter","linked-import","read-deps-failed","replacement-failed","replacement-not-persisted","resource-link-lost","untracked-present","untracked-missing"})
    {

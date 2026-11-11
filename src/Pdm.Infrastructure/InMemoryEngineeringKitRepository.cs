@@ -110,6 +110,21 @@ public sealed class InMemoryEngineeringKitRepository(IPdmRepository? repository 
         }
     }
 
+    public async Task DeleteDraftAsync(Guid kitId, long expectedRowVersion, CancellationToken cancellationToken)
+    {
+        var kit = await FindAsync(kitId, cancellationToken) ?? throw new PdmNotFoundException("套件不存在。");
+        lock (gate)
+        {
+            if (!values.TryGetValue(kitId, out var current) || current.RowVersion != expectedRowVersion)
+                throw new PdmConflictException("套件已被修改，请刷新后重试。");
+            if (current.CurrentReleasedRevisionId.HasValue || current.Revisions.Any(revision => revision.State != EngineeringKitRevisionState.Draft || revision.PublishedAt.HasValue))
+                throw new PdmRuleException("已发布过的料品套件请使用停用操作。");
+            if (kit.ReferenceCount > 0 || attachments.Values.Any(attachment => attachment.MaterialId == kitId))
+                throw new PdmConflictException("此套件已有引用或附件，请解除引用后再删除。");
+            values.TryRemove(kitId, out _);
+        }
+    }
+
     public Task<EngineeringKit> PublishAsync(Guid kitId, long expectedRowVersion, string actor, DateTimeOffset publishedAt, string? modelCategoryCode, CancellationToken cancellationToken)
     {
         lock (gate)

@@ -4,9 +4,7 @@ namespace Upton.Pdm.Application;
 
 public static class BrowserCadArchivePolicy
 {
-    public static bool CanConfigure(UserRole role) => TenantContext.Current is { } tenant
-        ? tenant.IsPlatformAdministrator || tenant.HasRole(nameof(UserRole.Administrator)) || tenant.HasRole(nameof(UserRole.PlatformAdministrator))
-        : role is UserRole.Administrator or UserRole.PlatformAdministrator;
+    public static bool CanConfigure(UserRole role) => TenantContext.Current?.HasPermission(PermissionCodes.StorageSettingsManage) == true;
 }
 
 public sealed record BrowserCadArchiveTarget(Guid? ProjectId = null, Guid? StructureId = null,

@@ -29,7 +29,9 @@ public sealed partial class MaterialRelationService(
         await RequireAsync(actor, role, PermissionCodes.MaterialRelationView, cancellationToken);
         var manage = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.MaterialRelationManage, cancellationToken)
             || await repository.HasUserPermissionAsync(actor, role, PermissionCodes.MaterialRelationPublish, cancellationToken);
-        return await WithCategoriesAsync(await relations.ListTemplatesAsync(includeDraft && manage, cancellationToken), cancellationToken);
+        var maintenance = includeDraft && manage;
+        var templates = await relations.ListTemplatesAsync(maintenance, cancellationToken);
+        return await WithCategoriesAsync(maintenance ? templates : templates.Where(template => !template.IsArchived).ToArray(), cancellationToken);
     }
 
     public async Task<IReadOnlyList<StandardLibraryCategory>> ListCategoryCatalogAsync(string actor, UserRole role, CancellationToken ct)
@@ -105,7 +107,8 @@ public sealed partial class MaterialRelationService(
         await RequireAsync(actor, role, PermissionCodes.MaterialRelationManage, cancellationToken);
         var templates = await relations.ListTemplatesAsync(true, cancellationToken);
         var existing = templateId.HasValue ? templates.FirstOrDefault(item => item.Id == templateId) : command.MainMaterialIds is null
-            ? templates.FirstOrDefault(item => item.MainMaterials.Concat(item.PublishedMainMaterials).Any(main => main.MaterialId == command.MainMaterialId)) : null;
+            ? templates.FirstOrDefault(item => !item.IsArchived && item.MainMaterials.Concat(item.PublishedMainMaterials).Any(main => main.MaterialId == command.MainMaterialId)) : null;
+        if (existing?.IsArchived == true) throw new PdmRuleException("请先恢复启用该关联配置，再维护草稿。");
         if (existing is not null) templateId = existing.Id;
         var mainIds = (command.MainMaterialIds ?? existing?.MainMaterials.Select(item => item.MaterialId).ToArray() ?? [command.MainMaterialId]).Distinct().ToArray();
         if (mainIds.Length == 0 || mainIds.Contains(Guid.Empty)) throw new PdmRuleException("请至少选择一个已批准的主物料。");
@@ -162,6 +165,7 @@ public sealed partial class MaterialRelationService(
         await RequireAsync(actor, role, PermissionCodes.MaterialRelationPublish, cancellationToken);
         var template = (await relations.ListTemplatesAsync(true, cancellationToken)).FirstOrDefault(item => item.Id == templateId)
             ?? throw new PdmNotFoundException("关联配置不存在。");
+        if (template.IsArchived) throw new PdmRuleException("请先恢复启用该关联配置，再发布草稿。");
         var draft = template.DraftRevision is { } current && current.Id == revisionId ? current : throw new PdmConflictException("待发布草稿不存在或已变化，请刷新后重试。");
         foreach (var option in draft.Groups.SelectMany(group => group.Options))
             _ = await RequireApprovedMaterialAsync(option.MaterialId, $"配件“{option.MaterialCode}”", cancellationToken);
@@ -176,6 +180,25 @@ public sealed partial class MaterialRelationService(
         var published = await relations.PublishAsync(templateId, revisionId, expectedRowVersion, actor, timeProvider.GetUtcNow(), cancellationToken);
         await AuditAsync(actor, "material-relation.publish", templateId, $"{template.MainMaterialCode} · V{published.PublishedRevision?.Version}", cancellationToken);
         return (await WithCategoriesAsync([published], cancellationToken)).Single();
+    }
+
+    public async Task<MaterialRelationTemplate> SetActiveAsync(Guid templateId, bool isActive, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireAsync(actor, role, PermissionCodes.MaterialRelationView, cancellationToken);
+        await RequireAsync(actor, role, PermissionCodes.MaterialRelationPublish, cancellationToken);
+        await RequireAsync(actor, role, PermissionCodes.MaterialRelationActivity, cancellationToken);
+        var saved = await relations.SetActiveAsync(templateId, isActive, expectedRowVersion, actor, timeProvider.GetUtcNow(), cancellationToken);
+        await AuditAsync(actor, isActive ? "material-relation.activate" : "material-relation.deactivate", templateId, saved.Name, cancellationToken);
+        return (await WithCategoriesAsync([saved], cancellationToken)).Single();
+    }
+
+    public async Task DeleteDraftAsync(Guid templateId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireAsync(actor, role, PermissionCodes.MaterialRelationView, cancellationToken);
+        await RequireAsync(actor, role, PermissionCodes.MaterialRelationManage, cancellationToken);
+        await RequireAsync(actor, role, PermissionCodes.MaterialRelationDelete, cancellationToken);
+        await relations.DeleteDraftAsync(templateId, expectedRowVersion, cancellationToken);
+        await AuditAsync(actor, "material-relation.draft.delete", templateId, "删除从未发布的关联配置草稿", cancellationToken);
     }
 
     public async Task<MaterialRelationCompleteness> GetCompletenessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken, Guid? releasePackageId = null)
@@ -209,11 +232,10 @@ public sealed partial class MaterialRelationService(
 
         var byKind = await LoadBomByKindAsync(projectId, cancellationToken);
         var activeItems = byKind.Values.SelectMany(item => item).Where(IsActive).ToArray();
-        var templates = (await relations.ListTemplatesAsync(false, cancellationToken))
-            .Where(item => item.PublishedRevision is not null && !item.IsArchived)
-            .SelectMany(item => item.PublishedMainMaterials.Select(main => (main.MaterialCode, Template: item))).ToDictionary(item => item.MaterialCode, item => item.Template, StringComparer.OrdinalIgnoreCase);
         var existingSelections = (await relations.ListSelectionsAsync(projectId, cancellationToken)).ToArray();
-        var allItems = (await RelationMainsAsync(activeItems, templates.Keys, cancellationToken)).ToDictionary(item => item.Id);
+        var existingReviews = await relations.ListReviewsAsync(projectId, cancellationToken);
+        var rules = await LoadProjectRelationRulesAsync(activeItems, existingSelections, existingReviews, cancellationToken);
+        var allItems = (await RelationMainsAsync(activeItems, rules.MainCodes, cancellationToken)).ToDictionary(item => item.Id);
         var selectionsToSave = new Dictionary<Guid, IReadOnlyList<MaterialRelationSelection>>();
         var reviewsToSave = new Dictionary<Guid, IReadOnlyList<MaterialRelationReview>>();
         var affectedKinds = new HashSet<BomKind>();
@@ -222,7 +244,9 @@ public sealed partial class MaterialRelationService(
         {
             if (!allItems.TryGetValue(command.MainBomItemId, out var main)) throw new PdmNotFoundException("主物料BOM行不存在或已被排除。");
             affectedKinds.Add(main.Kind);
-            if (!templates.TryGetValue(main.DrawingNumber.Trim(), out var template) || template.PublishedRevision is not { } revision)
+            var template = rules.For(main);
+            if (template?.IsArchived == true) throw new PdmRuleException($"主物料“{main.DrawingNumber}”的关联配置已停用，保留已有选配。");
+            if (template?.PublishedRevision is not { } revision)
                 throw new PdmRuleException($"主物料“{main.DrawingNumber}”尚未发布生效的关联配置。");
             var allocations = BuildAllocations(main, revision, command);
             main = main with { RelationAllocations = allocations };
@@ -358,16 +382,14 @@ public sealed partial class MaterialRelationService(
         }
         var candidates = scope is null ? all : all.Where(item => scope.Contains(item.Id)
             || item.EngineeringKitReferenceId is Guid reference && scope.Contains(reference)).ToArray();
-        var templates = (await relations.ListTemplatesAsync(false, cancellationToken))
-            .Where(item => item.PublishedRevision is not null && !item.IsArchived)
-            .SelectMany(item => item.PublishedMainMaterials.Select(main => (main.MaterialCode, Template: item))).ToDictionary(item => item.MaterialCode, item => item.Template, StringComparer.OrdinalIgnoreCase);
         var reviews = (await relations.ListReviewsAsync(projectId, cancellationToken)).ToArray();
+        var rules = await LoadProjectRelationRulesAsync(candidates, selections, reviews, cancellationToken);
         var checks = new List<MaterialRelationMainCheck>();
-        foreach (var main in (await RelationMainsAsync(candidates, templates.Keys, cancellationToken))
-            .Where(item => templates.ContainsKey(item.DrawingNumber.Trim()) && (scope is null || scope.Contains(item.Id))))
+        foreach (var main in (await RelationMainsAsync(candidates, rules.MainCodes, cancellationToken))
+            .Where(item => scope is null || scope.Contains(item.Id)))
         {
-            var template = templates[main.DrawingNumber.Trim()];
-            var revision = template.PublishedRevision!;
+            var template = rules.For(main);
+            if (template?.PublishedRevision is not { } revision) continue;
             var allocations = main.RelationAllocations.Where(allocation => allocation.RevisionId == revision.Id).ToArray();
             var linkedSelections = selections.Where(item => item.MainBomItemId == main.Id && item.RevisionId == revision.Id).ToArray();
             var relationFingerprint = CalculateRelationFingerprint(main,
@@ -429,10 +451,44 @@ public sealed partial class MaterialRelationService(
                     group.Options) {AccessoryBomItemIds=linked.GroupBy(selection=>selection.OptionId).ToDictionary(group=>group.Key,group=>group.First().AccessoryBomItemId)});
             }
             checks.Add(new MaterialRelationMainCheck(main.Id, main.DrawingNumber, main.Name, main.Quantity, template.Id, revision.Id, revision.Version,
-                groupChecks.All(group => group.IsComplete), groupChecks) { BomSequence = main.Sequence, Allocations = allocations });
+                groupChecks.All(group => group.IsComplete), groupChecks) { BomSequence = main.Sequence, Allocations = allocations, IsArchived = template.IsArchived });
         }
         return new MaterialRelationCompleteness(projectId, checks.All(item => item.IsComplete), checks.Count,
             checks.Sum(item => item.Groups.Count(group => !group.IsComplete)), checks);
+    }
+
+    private async Task<ProjectRelationRules> LoadProjectRelationRulesAsync(IReadOnlyList<BomItem> items,
+        IReadOnlyList<MaterialRelationSelection> selections, IReadOnlyList<MaterialRelationReview> reviews, CancellationToken ct)
+    {
+        var active = (await relations.ListTemplatesAsync(false, ct)).Where(template => !template.IsArchived && template.PublishedRevision is not null)
+            .SelectMany(template => template.PublishedMainMaterials.Select(main => (main.MaterialCode, Template: template)))
+            .ToDictionary(item => item.MaterialCode, item => item.Template, StringComparer.OrdinalIgnoreCase);
+        var boundRevisions = selections.Select(item => (item.MainBomItemId, item.RevisionId))
+            .Concat(reviews.Select(item => (item.MainBomItemId, item.RevisionId)))
+            .Distinct().ToLookup(item => item.MainBomItemId, item => item.RevisionId);
+        var revisionIds = boundRevisions.SelectMany(group => group)
+            .Concat(items.SelectMany(item => item.RelationAllocations.Concat(item.EngineeringKitRelationAllocations)).Select(allocation => allocation.RevisionId))
+            .Distinct().ToArray();
+        var retired = (await relations.ListRetiredRevisionsAsync(revisionIds, ct)).ToDictionary(template => template.PublishedRevision!.Id);
+        return new(active, retired, boundRevisions);
+    }
+
+    private sealed record ProjectRelationRules(
+        IReadOnlyDictionary<string, MaterialRelationTemplate> Active,
+        IReadOnlyDictionary<Guid, MaterialRelationTemplate> Retired,
+        ILookup<Guid, Guid> BoundRevisions)
+    {
+        public IEnumerable<string> MainCodes => Active.Keys.Concat(Retired.Values.SelectMany(template => template.PublishedMainMaterials.Select(main => main.MaterialCode)));
+
+        public MaterialRelationTemplate? For(BomItem main)
+        {
+            var code = main.DrawingNumber.Trim();
+            foreach (var revisionId in main.RelationAllocations.Select(allocation => allocation.RevisionId).Concat(BoundRevisions[main.Id]))
+                if (Retired.TryGetValue(revisionId, out var template)
+                    && template.PublishedMainMaterials.Any(material => string.Equals(material.MaterialCode, code, StringComparison.OrdinalIgnoreCase)))
+                    return template;
+            return Active.GetValueOrDefault(code);
+        }
     }
 
     /// <summary>

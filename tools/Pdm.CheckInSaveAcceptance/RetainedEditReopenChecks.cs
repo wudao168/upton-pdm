@@ -135,7 +135,7 @@ internal static partial class Program
          case "GetUserPreferenceToggle":return search;case "SetUserPreferenceToggle":search=(bool)call.Args[1];return true;default:throw new Exception("不得关闭旧窗口或改写原文件："+call.MethodName);}
        }).GetTransparentProxy();SetField(plugin,"application",app);
        TreeCall(plugin,"RememberControlledOpenManifest",manifest,canonical);
-       var opened=TreeCall(plugin,"OpenControlledReadOnlyDocumentCore",rootPath,2,"",manifest,false,false);
+       var opened=TreeCall(plugin,"OpenControlledReadOnlyDocumentCore",rootPath,2,"",manifest,false,false,false);
        Check(ReferenceEquals(opened,total)&&nativeOpens==1&&loaded.Count==2,mode+"：原生打开阶段复用原目录并正常载入总装与零件");
        Check(nativeReadonly[partPath]==(mode=="closed-drawing-only")&&nativeReadonly[rootPath],mode+"：只恢复必要图档权限，总装继续只读");
        Check(WorkingReuseHash(edited)==changedHash,mode+"：原生加载及权限恢复后修改内容不变");

@@ -4,7 +4,8 @@ namespace Upton.Pdm.Application;
 
 public sealed record DepartmentPosition(Guid Id, string Name, bool IsActive = true);
 public sealed record DepartmentPositionAssignment(Guid DepartmentId, Guid PositionId, IReadOnlyList<string> Usernames);
-public sealed record WorkflowNotificationRecipient(string DepartmentSource, Guid? DepartmentId, Guid PositionId = default, string? RoleCode = null);
+public sealed record WorkflowNotificationRecipient(string DepartmentSource, Guid? DepartmentId, Guid PositionId = default, string? RoleCode = null,
+    string? Target = null, bool IncludeSubdepartments = false);
 public sealed record WorkflowNotificationRule(string FlowCode, bool Enabled, IReadOnlyList<WorkflowNotificationRecipient> Recipients);
 public sealed record WorkflowNotificationCatalog(Guid CompanyId, long RowVersion,
     IReadOnlyList<DepartmentPosition> Positions, IReadOnlyList<DepartmentPositionAssignment> Assignments,
@@ -53,7 +54,7 @@ public static class WorkflowNotificationFlows
     {
         ["standard-release"] = "标准件BOM", ["nonstandard-release"] = "非标件BOM",
         ["electrical-release"] = "电气件BOM", ["validation-plan"] = "验证计划",
-        ["material-code-application"] = "料号申请"
+        ["material-code-application"] = "料号申请", ["expense-approval"] = "费用申请"
     };
     public static string ReleaseSourceKey(Guid id, string eventName) => $"release-notice:{id:N}:{eventName}";
 }

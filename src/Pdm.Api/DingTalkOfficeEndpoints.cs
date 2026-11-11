@@ -12,6 +12,38 @@ public static class DingTalkOfficeEndpoints
 {
     public static void MapDingTalkOfficeEndpoints(this WebApplication app)
     {
+        var self = app.MapGroup("/api/me/dingtalk-binding").RequireAuthorization();
+        self.MapGet("", async (bool? qr, DingTalkConfigurationService service, DingTalkEmployeePairing pairing, CancellationToken ct) =>
+            Results.Ok(await service.SelfBindingAsync(pairing, false, qr == true, ct)));
+        self.MapPost("", async (bool? qr, DingTalkConfigurationService service, DingTalkEmployeePairing pairing, CancellationToken ct) =>
+            Results.Ok(await service.SelfBindingAsync(pairing, true, qr == true, ct)));
+        self.MapPost("/confirm", async (DingTalkPairingCode input, DingTalkConfigurationService service, DingTalkEmployeePairing pairing, CancellationToken ct) =>
+        {
+            await service.ConfirmSelfBindingAsync(pairing, input.Code, ct);
+            return Results.NoContent();
+        });
+        app.MapPost("/api/integrations/dingtalk/office/binding-scan", async (DingTalkPairingScan input,
+            DingTalkEmployeePairing pairing, DingTalkOplIntegration integration, HttpContext context, CancellationToken ct) =>
+        {
+            var ticket = pairing.FindPending(input.CompanyId, input.Code, qr: true);
+            await integration.LoadAsync(ticket.CompanyId, ct);
+            if (!DingTalkEmployeePairing.Matches(ticket, integration.Settings))
+                throw new PdmConflictException("钉钉应用配置已更新，请在客户端重新生成二维码。");
+            context.Response.Headers.CacheControl = "no-store";
+            return Results.Ok(new { ticket.EmployeeName, ticket.CorpId, ticket.AppKey });
+        }).AllowAnonymous().RequireRateLimiting("dingtalk-pairing");
+        app.MapPost("/api/integrations/dingtalk/office/binding-proof", async (DingTalkPairingProof input,
+            DingTalkEmployeePairing pairing, DingTalkOplIntegration integration, CancellationToken ct) =>
+        {
+            var ticket = pairing.FindPending(input.CompanyId, input.Code, input.Qr);
+            await integration.LoadAsync(ticket.CompanyId, ct);
+            if (!DingTalkEmployeePairing.Matches(ticket, integration.Settings))
+                throw new PdmConflictException("钉钉应用配置已更新，请在客户端重新生成绑定请求。");
+            var identity = await integration.ResolveVisitorAsync(null, input.AuthCode, ct);
+            pairing.Verify(ticket, identity);
+            return Results.NoContent();
+        }).AllowAnonymous().RequireRateLimiting("dingtalk-pairing");
+
         app.MapGet("/api/integrations/dingtalk/office/bootstrap", async (Guid? companyId, DingTalkOplIntegration integration, CancellationToken ct) =>
         {
             await integration.LoadAsync(companyId, ct);
@@ -31,7 +63,7 @@ public static class DingTalkOfficeEndpoints
                 throw new PdmRuleException("钉钉移动办公尚未启用，请联系管理员配置当前企业应用。");
             var identity = await integration.ResolveVisitorAsync(null, input.Code, ct);
             var binding = integration.Settings.EmployeeBindings.SingleOrDefault(item => item.CorpId == integration.Settings.CorpId && item.UserId == identity.UserId);
-            if (binding is null) throw new UnauthorizedAccessException($"当前钉钉账号尚未绑定UPLM账号，请联系管理员。钉钉用户ID：{identity.UserId}");
+            if (binding is null) throw new UnauthorizedAccessException("当前钉钉账号尚未绑定 UPLM。请在客户端打开「个人设置 → 绑定钉钉」扫码，或联系管理员协助绑定。");
             var account = await repository.FindUserAsync(binding.Username, ct);
             if (account is null || !account.IsActive) throw new UnauthorizedAccessException("绑定的UPLM账号不存在或已停用，请联系管理员。");
             var company = await companies.ResolveAsync(account, input.CompanyId.ToString(), ct);

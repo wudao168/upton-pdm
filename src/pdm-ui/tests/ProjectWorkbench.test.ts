@@ -69,7 +69,7 @@ describe('逐项目跟进工作台', () => {
     vi.mocked(api.readProjectWorkbench).mockResolvedValue(data([design,assembly,draft,missing]))
     const wrapper=mountWorkbench();await flushPromises()
     expect(wrapper.findAll('.wr-project-second').map(row=>row.text())).toEqual(expect.arrayContaining([expect.stringContaining('设计'),expect.stringContaining('装配'),expect.stringContaining('计划未生效'),expect.stringContaining('未排程')]))
-    expect(wrapper.find('.wr-project-second').text()).not.toContain('主设')
+    expect(wrapper.find('.wr-project-second').text()).not.toContain('主设计')
     await wrapper.get('[aria-label="筛选事业部"]').setValue('T2事业部')
     await wrapper.get('[aria-label="筛选阶段"]').setValue('设计')
     wrapper.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'pm');await flushPromises()
@@ -103,8 +103,9 @@ describe('逐项目跟进工作台', () => {
 
   it('首屏不等待业务详情，不为46个项目读取完整OPL', async () => {
     const projects=Array.from({length:46},(_,i)=>({...item(String(i)),oplOpenCount:i}))
-    let finish!: (value: WorkbenchData) => void
-    vi.mocked(api.readProjectWorkbench).mockImplementation((_view,_token,_scope,options)=>options?.projectId?new Promise(resolve=>{finish=resolve}):Promise.resolve(data(projects)))
+    const finishes = new Map<string, (value: WorkbenchData) => void>()
+    let completed = false
+    vi.mocked(api.readProjectWorkbench).mockImplementation((_view,_token,_scope,options)=>options?.projectId ? completed ? Promise.resolve(data(projects)) : new Promise(resolve=>{finishes.set(options.projectId!,resolve)}) : Promise.resolve(data(projects)))
     const wrapper=mountWorkbench();await flushPromises()
     expect(wrapper.findAll('.wr-project')).toHaveLength(46)
     expect(wrapper.findAll('.wr-project')[1]!.text()).not.toContain('OPL')
@@ -113,7 +114,9 @@ describe('逐项目跟进工作台', () => {
     expect(api.readProjectOpl).toHaveBeenCalledTimes(1)
     expect(api.readProjectOpl).toHaveBeenCalledWith('0','token',false)
     expect(wrapper.text()).toContain('详情加载中')
-    finish(data(projects));await flushPromises()
+    expect(finishes.size).toBeLessThanOrEqual(2)
+    completed = true
+    for (const finish of finishes.values()) finish(data(projects));await flushPromises()
     expect(wrapper.text()).not.toContain('详情加载中')
     wrapper.unmount()
   })
@@ -146,7 +149,7 @@ describe('逐项目跟进工作台', () => {
     vi.mocked(api.readProjectWorkbench).mockResolvedValue({...data([root,other,child]),scopes:['personal','company']})
     const wrapper=mountWorkbench(); await flushPromises()
     expect(wrapper.findAll('.wr-project')).toHaveLength(2)
-    expect(wrapper.get('.wr-project-second').text()).toContain('pm')
+    expect(wrapper.get('.wr-project-second').text()).toContain('姓名待补充')
     await wrapper.get('[aria-label="下一项目"]').trigger('click'); await flushPromises()
     expect(wrapper.get('.wr-identity').text()).toContain('P-second')
     await wrapper.findAll('button').find(button=>button.text()==='公司')!.trigger('click'); await flushPromises()

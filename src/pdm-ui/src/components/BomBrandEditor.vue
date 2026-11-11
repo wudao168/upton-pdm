@@ -65,5 +65,13 @@ onBeforeUnmount(() => { disposed = true; request++ })
 .pdm-bom-brand-editor { width: 100%; }
 .pdm-bom-brand-editor :deep(.el-autocomplete) { width: 100%; }
 .pdm-bom-brand-editor :deep(.el-input__wrapper) { padding: 0 4px; }
-.pdm-bom-brand-editor :deep(.el-input__inner) { height: 22px; font: inherit; }
+.pdm-bom-brand-editor :deep(.el-autocomplete input.el-input__inner) {
+  min-width: 0;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font: inherit;
+}
 </style>

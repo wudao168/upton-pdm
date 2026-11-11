@@ -1,8 +1,8 @@
 .mobile-office[data-layout-theme=green]{--mobile-accent:#15803d;--mobile-tint:#f0fdf4}
 .mobile-office[data-layout-theme=blue]{--mobile-accent:#1d4ed8;--mobile-tint:#eff6ff}
 .mobile-office[data-layout-theme=purple]{--mobile-accent:#7e22ce;--mobile-tint:#faf5ff}
-.mobile-office[data-layout-theme] .mobile-office-header strong,.mobile-office[data-layout-theme] .mobile-layout-metrics strong{color:var(--mobile-accent)}
-.mobile-office[data-layout-theme] .mobile-bottom-nav button[aria-current=page]{color:var(--mobile-accent);background:var(--mobile-tint)}
+.mobile-office[data-layout-theme] .mobile-office-header strong,.mobile-office[data-layout-theme] .mobile-layout-metrics strong{ color:var(--pdm-text)}
+.mobile-office[data-layout-theme] .mobile-bottom-nav button[aria-current=page]{ color:var(--pdm-text);background:var(--mobile-tint)}
 .mobile-office[data-layout-theme] button.pdm-primary-action{background:var(--mobile-accent);border-color:var(--mobile-accent)}
 .mobile-office[data-layout-theme] :focus-visible{outline-color:var(--mobile-accent)}
 .mobile-home-layout{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
@@ -14,5 +14,5 @@
 .mobile-home-layout .mobile-record{margin:0}
 .mobile-layout-metrics button{display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:16px}
 .mobile-layout-metrics strong{font-size:30px;line-height:36px}
-.mobile-layout-metrics span{font-size:14px;line-height:20px;color:#64748b;text-align:left}
+.mobile-layout-metrics span{font-size:14px;line-height:20px; color:var(--pdm-text-soft);text-align:left}
 .mobile-home-block[data-selected]{outline:2px solid var(--mobile-accent);outline-offset:4px;border-radius:4px}

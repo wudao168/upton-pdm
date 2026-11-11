@@ -131,6 +131,8 @@ public sealed record ProjectPlanChangeRequest(Guid Id, IReadOnlyList<ProjectPlan
     string SubmittedBy, DateTimeOffset SubmittedAt, string ApprovalAssignee, ProjectPlanApprovalStatus Status,
     string? DecidedBy = null, DateTimeOffset? DecidedAt = null, string? Comment = null);
 
+public sealed record ProjectPlanHoliday(DateOnly Date, string Name, bool IsOffDay);
+
 public sealed record ProjectPlan(
     Guid Id,
     Guid ProjectId,
@@ -150,6 +152,7 @@ public sealed record ProjectPlan(
     DateTimeOffset UpdatedAt,
     long RowVersion)
 {
+    public IReadOnlyList<ProjectPlanHoliday> HolidayOverrides { get; init; } = [];
     public bool FollowsParentPlan { get; init; }
     public ProjectPlanChangeRequest? ChangeRequest { get; init; }
     // Present only while an approved change permission is being used. The nested

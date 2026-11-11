@@ -26,7 +26,7 @@ const roles: RolePermissionDirectory = {
 describe('UserSettings', () => {
   afterEach(() => { document.body.innerHTML = '' })
 
-  it('在一个页面提供用户、角色权限和组织关系，并可创建用户', async () => {
+  it('在一个页面提供用户、权限中心和组织关系，并可创建用户', async () => {
     const saveUser = vi.fn().mockResolvedValue({ username: 'new-user', displayName: '新用户', role: 'Engineer', isActive: true })
     const wrapper = mount(UserSettings, {
       attachTo: document.body,
@@ -39,28 +39,36 @@ describe('UserSettings', () => {
         pending: false,
         onSaveUser: saveUser,
         onResetPassword: vi.fn(),
-        onSaveRolePermissions: vi.fn(),
-        onCreateRole: vi.fn(),
-        onDeleteRole: vi.fn(),
         onSaveOrganization: vi.fn(),
         onSaveUnit: vi.fn(),
         onUpdateMemberships: vi.fn(),
         onUpdateManagers: vi.fn(),
+        onSaveRolePermissions: vi.fn(),
+        onCreateRole: vi.fn(),
+        onDeleteRole: vi.fn(),
       },
+      slots: { permissions: '<section aria-label="权限中心">角色管理</section>' },
       global: { plugins: [ElementPlus] },
     })
     await flushPromises()
 
     expect(wrapper.find('.pdm-pagebar').exists()).toBe(false)
     expect(wrapper.get('[aria-label="当前公司主体"]').text()).toContain('昆山阿普顿自动化系统有限公司')
-    expect(wrapper.get('[aria-label="用户设置功能"]').text()).toContain('用户角色权限组织关系公司管理')
+    expect(wrapper.get('[aria-label="用户设置功能"]').text()).toContain('用户权限中心组织关系公司管理')
     expect(wrapper.get('[aria-label="用户列表"]').text()).toContain('工程师')
     expect(wrapper.get('[aria-label="用户列表"]').text()).toContain('设计部')
+    const userHeaders = () => wrapper.findAll('.user-directory th').map(cell => cell.text())
+    expect(userHeaders().slice(0, 2)).toEqual(['账号', '姓名'])
+    expect(wrapper.findAll('.user-directory tbody td').slice(0, 2).map(cell => cell.text())).toEqual(['engineer', '设计工程师'])
+    await wrapper.setProps({ permissions: ['system.role.view'] })
+    expect(userHeaders()).not.toContain('账号')
+    expect(wrapper.get('.user-directory tbody td').text()).toBe('设计工程师')
+    await wrapper.setProps({ permissions: ['settings.organization.manage', 'system.role.view', 'system.role.edit'] })
 
-    await wrapper.findAll('button').find(button => button.text() === '角色权限')!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text() === '权限中心')!.trigger('click')
     await flushPromises()
     expect(wrapper.find('[aria-label="当前公司主体"]').exists()).toBe(false)
-    expect(wrapper.get('[aria-label="角色列表"]').text()).toContain('角色编码说明用户数类型操作')
+    expect(wrapper.get('[aria-label="权限中心"]').text()).toBe('角色管理')
     await wrapper.findAll('button').find(button => button.text() === '用户')!.trigger('click')
 
     await wrapper.findAll('button').find(button => button.text() === '新建用户')!.trigger('click')

@@ -32,6 +32,6 @@ onMounted(load)
   <section class="pdm-panel pdm-manager-panel" aria-label="标准化存档目录设置">
     <header class="pdm-manager-heading"><div><h2>标准化存档目录</h2><p>独立保存标准结构图档、预览及历史版本，不能与项目图档和生产发包目录相同或互相包含。</p></div></header>
     <div v-if="error" role="alert">{{ error }}<el-button @click="load">重新加载</el-button></div>
-    <template v-else><div class="pdm-settings-form"><label>标准化存档根目录<input v-model="storageRoot" :disabled="busy" placeholder="例如 D:\PLM\StandardStructures" aria-label="标准化存档根目录"><small>已有存档时切换目录需先完成文件迁移和核对，系统会阻止直接改到新位置。</small></label></div><div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="busy || !storageRoot.trim()" @click="save">保存标准化存档目录</button></div></template>
+    <template v-else><div class="pdm-settings-form pdm-settings-grid--four"><label>标准化存档根目录<input v-model="storageRoot" :disabled="busy" placeholder="例如 D:\PLM\StandardStructures" aria-label="标准化存档根目录"><small>已有存档时切换目录需先完成文件迁移和核对，系统会阻止直接改到新位置。</small></label></div><div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="busy || !storageRoot.trim()" @click="save">保存标准化存档目录</button></div></template>
   </section>
 </template>

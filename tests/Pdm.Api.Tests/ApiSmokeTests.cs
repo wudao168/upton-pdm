@@ -45,6 +45,79 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task ReadOnlyOpenManifestCanOmitMissingComponentWithoutGrantingAccess()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var directory = Path.Combine(Path.GetTempPath(), "uplm-missing-open-" + Guid.NewGuid().ToString("N"));
+        var versionPath = Path.Combine(directory, ".versions", "ROOT.SLDASM");
+        Directory.CreateDirectory(Path.GetDirectoryName(versionPath)!);
+        var bytes = Encoding.UTF8.GetBytes("archived assembly fixture");
+        await File.WriteAllBytesAsync(versionPath, bytes);
+        File.SetAttributes(versionPath, FileAttributes.ReadOnly);
+        try
+        {
+            var companyId = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.First(item => item.IsActive).Id;
+            var passwords = factory.Services.GetRequiredService<IPasswordService>();
+            const string password = "MissingFixture1";
+            async Task<UserAccount> CreateUserAsync(UserRole role, string? roleCode = null)
+            {
+                var account = new UserAccount(Guid.NewGuid(), "qa-open-" + Guid.NewGuid().ToString("N"), "缺件查看验收",
+                    passwords.Hash(password), role, true, RoleCode: roleCode, CompanyId: companyId);
+                await repository.CreateUserAsync(account, default);
+                return account;
+            }
+            var admin = await CreateUserAsync(UserRole.Administrator);
+            Project project;
+            TenantContext.Set(new CurrentTenant(admin.Id, companyId, companyId, admin.Username, admin.EffectiveRoleCode, false, new HashSet<string>()));
+            try { project = await repository.CreateProjectAsync(new("QA-MISSING-OPEN", "缺件只读打开", "admin", directory, directory), "admin", default); }
+            finally { TenantContext.Clear(); }
+            var session = Guid.NewGuid();
+            var root = await repository.RegisterDocumentAsync(new(project.Id, "ROOT", "总装", "ROOT.SLDASM", DocumentKind.Assembly), "admin", default);
+            root = await repository.CheckoutAsync(root.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
+            var missing = new DocumentReferenceNode(Guid.NewGuid(), null, "ROOT/MISSING-1", "MISSING.SLDPRT", "缺件",
+                DocumentKind.Part, "Default", 1, ReferenceNodeStatus.Missing, null, null, []);
+            var node = new DocumentReferenceNode(Guid.NewGuid(), root.Id, "ROOT", root.FileName, root.Name,
+                DocumentKind.Assembly, "Default", 1, ReferenceNodeStatus.Normal, root.Revision, null, [missing]);
+            var now = DateTimeOffset.UtcNow;
+            await repository.CheckInVersionAsync(root.Id, "admin", session,
+                new(new StoredFile(Path.Combine(".versions", "ROOT.SLDASM"), bytes.Length, Convert.ToHexString(SHA256.HashData(bytes)), now),
+                    "缺件回归", new Dictionary<string, string?>(), new CadReferenceSnapshot(Guid.NewGuid(), project.Id, root.Id, now, "admin", node, new string('F', 64)), [], [], IsProjectRoot: true), default);
+            var version = Assert.Single(await repository.ListDocumentVersionsAsync(root.Id, default));
+            var url = $"/api/documents/{root.Id}/open-manifest";
+            var readOnly = new { versionId = version.Id, allowMissingComponents = true };
+            Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsJsonAsync(url, readOnly)).StatusCode);
+            async Task SignInAsync(UserAccount user)
+            {
+                client.DefaultRequestHeaders.Authorization = null;
+                var response = await client.PostAsJsonAsync("/api/auth/login", new { username = user.Username, password });
+                response.EnsureSuccessStatusCode();
+                var sessionToken = (await response.Content.ReadFromJsonAsync<LoginSessionResponse>())!.AccessToken;
+                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", sessionToken);
+            }
+            await SignInAsync(await CreateUserAsync(UserRole.ProductionViewer, "QA-No-Document-Access"));
+            Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync(url, readOnly)).StatusCode);
+            await SignInAsync(admin);
+            foreach (var versionId in new Guid?[] { null, version.Id })
+            {
+                var response = await client.PostAsJsonAsync(url, new { versionId, allowMissingComponents = true });
+                Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+                var manifest = (await response.Content.ReadFromJsonAsync<ControlledOpenManifest>())!;
+                Assert.Equal(root.Id, Assert.Single(manifest.Files).DocumentId);
+                Assert.Contains(manifest.Warnings, warning => warning.Contains("MISSING.SLDPRT"));
+            }
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync(url, new { versionId = version.Id })).StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync(url, new { forEdit = true, allowMissingComponents = true })).StatusCode);
+        }
+        finally
+        {
+            File.SetAttributes(versionPath, FileAttributes.Normal);
+            File.Delete(versionPath);
+            Directory.Delete(Path.GetDirectoryName(versionPath)!);
+            Directory.Delete(directory);
+        }
+    }
+
+    [Fact]
     public async Task Health_ReportsIsolatedPdmPorts()
     {
         var health = await client.GetFromJsonAsync<HealthResponse>("/health");
@@ -470,9 +543,13 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
             new { items = new[] { input with { Id = original.Id, Name = "新名称", IsWearPart = true } } });
         response.EnsureSuccessStatusCode();
         result = await response.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Empty(result.GetProperty("draftItemOverrides").EnumerateArray());
         var draft = Assert.Single(await repository.ListBomVersionsAsync(project.Id, BomKind.Standard, default));
         Assert.Equal("新名称", Assert.Single(draft.Items).Name);
+        // Compact responses must reconstruct the exact frozen draft, including reconciliation metadata.
+        var reconstructed = result.GetProperty("items").Deserialize<BomItem[]>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!.ToDictionary(item => item.Id);
+        foreach (var item in result.GetProperty("draftItemOverrides").Deserialize<BomItem[]>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!) reconstructed[item.Id] = item;
+        var restored = result.GetProperty("draftItemIds").EnumerateArray().Select(id => reconstructed[id.GetGuid()]).ToArray();
+        Assert.Equal(JsonSerializer.Serialize(draft.Items), JsonSerializer.Serialize(restored));
     }
 
     [Fact]
@@ -560,6 +637,65 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         var storedPath = Path.Combine(project.VaultLocation, record.StorageRelativePath);
         Assert.Equal("abc", await File.ReadAllTextAsync(storedPath));
         File.Delete(storedPath);
+    }
+
+    [Theory]
+    [InlineData("preAcceptance", "预验收")]
+    [InlineData("finalAcceptance", "终验收")]
+    public async Task CustomerAcceptanceUpload_ArchivesOriginalAndRetriesWithoutNewVersions(string kind, string label)
+    {
+        await using var factory = new PdmApiFactory();
+        using var client = factory.CreateClient();
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        var company = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First().Id;
+        var customer = (await repository.ListCustomersAsync(true, default)).First().Id;
+        var key = Guid.NewGuid().ToString("N");
+        var vault = Path.Combine(AppContext.BaseDirectory, ".data", "quality-archive-tests", key);
+        const string uploader = "acceptance-uploader";
+        await repository.CreateUserAsync(new(Guid.NewGuid(), uploader, "验收上传测试", "unused", UserRole.Engineer, true,
+            RoleCode: "acceptance-test", CompanyId: company), default);
+        var project = await repository.CreateNumberedProjectAsync(new(company, "P", 2, customer, "验收资料归档测试", null, null, 1,
+            uploader, vault, Path.Combine(vault, "release")), default);
+        await repository.SetMainProjectStaffingAsync(project.Id, new(uploader, [], []), uploader, default);
+        var uploadPermission = kind == "preAcceptance" ? PermissionCodes.QualityPreAcceptanceUpload : PermissionCodes.QualityFinalAcceptanceUpload;
+        var codes = new[] { PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, ProjectCenterPermissions.Tab("files"),
+            ProjectCenterPermissions.Tab("validation-plan"), ProjectCenterPermissions.Write, ProjectCenterPermissions.Download,
+            "project.file.view", "project.file.download", AuthorizationActions.FolderView, AuthorizationActions.FolderDownload };
+        var template = new AuthorizationTemplate("acceptance-test", "验收测试", "", codes.Select(code => new AuthorizationGrant(code, ["MainManager"]))
+            .Append(new AuthorizationGrant(uploadPermission, ["company"])).ToArray()) with { RoleCode = "acceptance-test" };
+        var settings = await repository.GetAuthorizationSettingsAsync(default);
+        await repository.SaveAuthorizationSettingsAsync(settings with { Templates = [template] }, settings.Revision, default);
+        var contents = Encoding.UTF8.GetBytes("%PDF-1.4\n原始验收记录");
+        var sha256 = Convert.ToHexString(SHA256.HashData(contents));
+        const string fileName = "客户验收记录.pdf";
+        var uploadPath = $"/api/projects/{project.Id}/quality-inspection-uploads";
+        var input = new { fileName, totalLength = contents.Length, sha256, kind };
+        client.DefaultRequestHeaders.Authorization = new("Bearer", CreateToken(uploader, "Engineer"));
+        var otherKind = kind == "preAcceptance" ? "finalAcceptance" : "preAcceptance";
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync(uploadPath, new { fileName, totalLength = contents.Length, sha256, kind = otherKind })).StatusCode);
+        var started = await client.PostAsJsonAsync(uploadPath, input);
+        Assert.Equal(HttpStatusCode.OK, started.StatusCode);
+        var session = (await started.Content.ReadFromJsonAsync<UploadSession>())!;
+        Assert.Equal(HttpStatusCode.OK, (await client.PutAsync($"/api/uploads/sessions/{session.Id}/chunks/0", new ByteArrayContent(contents))).StatusCode);
+        var completion = $"{uploadPath}/{session.Id}/complete";
+        var completionInput = new { kind, title = label, remark = "已确认" };
+        var completed = await client.PostAsJsonAsync(completion, completionInput);
+        Assert.Equal(HttpStatusCode.OK, completed.StatusCode);
+        var record = (await completed.Content.ReadFromJsonAsync<QualityInspectionRecord>())!;
+        Assert.Equal(kind, record.Kind);
+        Assert.Equal("已确认", record.Remark);
+        Assert.Contains(label, record.StorageRelativePath);
+        var repeat = await client.PostAsJsonAsync(completion, completionInput);
+        Assert.Equal(HttpStatusCode.OK, repeat.StatusCode);
+        Assert.Equal(record.Id, (await repeat.Content.ReadFromJsonAsync<QualityInspectionRecord>())!.Id);
+        Assert.Equal(contents, await client.GetByteArrayAsync($"/api/quality-inspections/{record.Id}/download"));
+
+        var folder = (await repository.FindProjectFolderByKeyAsync(project.Id, "acceptance", default))!;
+        var file = Assert.Single((await client.GetFromJsonAsync<ProjectFile[]>($"/api/projects/{project.Id}/files?folderId={folder.Id}"))!);
+        Assert.Equal(fileName, file.FileName);
+        Assert.Equal(1, file.CurrentVersion!.VersionNumber);
+        Assert.Equal(sha256, file.CurrentVersion.Sha256);
+        Assert.Equal(contents, await client.GetByteArrayAsync($"/api/projects/{project.Id}/files/{file.Id}/content"));
     }
 
     [Fact]
@@ -1485,6 +1621,34 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
     }
 
     [Fact]
+    public async Task StaffingApi_RequiresMainProjectStaffingPermissionForCollaborativeManagers()
+    {
+        var repository = factory.Services.GetRequiredService<IPdmRepository>();
+        if (await repository.FindUserAsync("admin", default) is null)
+            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), "admin", "系统管理员", "unused", UserRole.Administrator, true), default);
+        var project = await repository.CreateNumberedProjectAsync(new(Guid.Parse("70000000-0000-0000-0000-000000000001"), "P", 2,
+            Guid.Parse("c0046500-0000-0000-0000-000000000001"), "协同项目经理授权验收", null, new(2026, 10, 3), 1, "admin", "D:/test", "D:/release"), default);
+        var division = await repository.SaveOrganizationUnitAsync(new(null, project.OrganizationId!.Value, null,
+            "STAFFING-QA", "人员分配测试事业部", OrganizationUnitKind.BusinessDivision, true, 1, true), default);
+        await repository.SetProjectExecutionUnitAsync(project.Id, division.Id, "admin", default);
+        foreach (var user in new[] { "staffing-manager", "staffing-collaborator" })
+        {
+            await repository.CreateUserAsync(new(Guid.NewGuid(), user, user, "unused", UserRole.ProductionViewer, true), default);
+            await repository.SetOrganizationMembershipsAsync(user, [division.Id], division.Id, default);
+        }
+
+        var url = $"/api/projects/{project.Id}/staffing";
+        var staffing = new { primaryProjectManager = "staffing-manager", collaborativeProjectManagers = new[] { "staffing-collaborator" }, designLeads = Array.Empty<string>() };
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("staffing-collaborator", "ProductionViewer"));
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync(url, staffing)).StatusCode);
+
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("admin", "Administrator"));
+        var response = await client.PutAsJsonAsync(url, staffing);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(staffing.collaborativeProjectManagers, (await response.Content.ReadFromJsonAsync<Project>())!.CollaborativeProjectManagers);
+    }
+
+    [Fact]
     public async Task OrganizationAndStaffing_EnforcesDivisionAssignmentAndCrossDivisionChildScope()
     {
         var repository = factory.Services.GetRequiredService<IPdmRepository>();
@@ -1550,14 +1714,14 @@ public sealed class ApiSmokeTests : IClassFixture<PdmApiFactory>
         Assert.Equal(HttpStatusCode.OK, administratorExecutionResponse.StatusCode);
         administratorProjects = await client.GetFromJsonAsync<List<ProjectResponse>>("/api/projects");
         administratorMain = Assert.Single(administratorProjects!, item => item.Id == project.Id);
-        Assert.False(administratorMain.CanManageMainStaffing);
-        Assert.False(administratorMain.CanAssignDesigners);
+        Assert.True(administratorMain.CanManageMainStaffing);
+        Assert.True(administratorMain.CanAssignDesigners);
 
         var administratorStaffingResponse = await client.PutAsJsonAsync($"/api/projects/{project.Id}/staffing", new
         {
             primaryProjectManager = "project-manager", collaborativeProjectManagers = Array.Empty<string>(), designLead = "design-lead"
         });
-        Assert.Equal(HttpStatusCode.Forbidden, administratorStaffingResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, administratorStaffingResponse.StatusCode);
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken("plan-user", "PlanningManager"));
         var planningProjects = await client.GetFromJsonAsync<List<ProjectResponse>>("/api/projects");
@@ -2019,6 +2183,7 @@ public sealed class PdmApiFactory : WebApplicationFactory<Program>
             foreach (var registration in services.Where(service =>
                 service.ImplementationType == typeof(Upton.Pdm.Api.MaterialU9SyncBatchHostedService) || service.ImplementationType == typeof(Upton.Pdm.Api.DingTalkStreamService)
                 || service.ImplementationType == typeof(Upton.Pdm.Api.EditCollaborationHostedService)
+                || service.ImplementationType == typeof(Upton.Pdm.Api.BrowserCadArchiveHostedService)
                 || service.ImplementationType == typeof(Upton.Pdm.Api.ReleaseDeliveryHostedService)).ToArray())
                 services.Remove(registration);
             services.AddDataProtection().UseEphemeralDataProtectionProvider();

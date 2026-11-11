@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
 import SearchField from './SearchField.vue'
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import { heartbeatSession, listMyApprovalTasks, listProjects, listUserNotifications, loginDingTalkOffice, logoutSession, markUserNotificationRead, readDingTalkOfficeBootstrap, readProjectPlan, readWorkHours, readPublishedMobileOfficeLayout } from '../api'
@@ -8,8 +9,11 @@ import { dingTalkOfficeAuthCode } from '../dingtalkOffice'
 import { useWorkHoursReminder } from '../composables/useWorkHoursReminder'
 import { canViewProjectTab, projectCenterAccessKey } from '../projectCenterAccess'
 import { userDisplayNameKey } from '../userDisplay'
+import { getOrganizationDirectory, requestJson } from '../api'
+import { resolveUserDisplayName } from '../userDisplay'
+import type { OrganizationDirectory } from '../types'
 import { userErrorMessage } from '../userErrorMessage'
-import { isTaskCenterNotification } from '../taskNotifications'
+import { isTaskCenterNotification, oplResponseCategory, oplResponseIssueId } from '../taskNotifications'
 import { chinaToday } from '../projectCalendar'
 import { defaultMobileOfficeLayout, mobileOfficeInitialPage, mobileOfficeNavigation, type MobileOfficePage } from '../mobileOfficeLayout'
 import MobileOfficeHome from './MobileOfficeHome.vue'
@@ -24,8 +28,11 @@ type Page = MobileOfficePage
 type Guard = { canLeave: () => boolean; prefill?: (projectId: string) => void }
 const query = new URLSearchParams(window.location.search)
 const session = ref<AuthSession>(), pending = ref(false), refreshing = ref(false), error = ref(''), notice = ref('')
+const bindingCode = ref('')
+const people = ref<OrganizationDirectory['users']>([])
 const page = ref<Page>('home'), projects = ref<ProjectSummary[]>([]), tasks = ref<MyApprovalTask[]>([]), notifications = ref<UserNotification[]>([])
 const projectId = ref(''), projectSection = ref<'overview' | 'opl'>('overview'), plan = ref<ProjectPlan | null>(null), projectLoading = ref(false), projectError = ref('')
+const requestedOplIssueId = ref<string>()
 const search = ref(''), taskFilter = ref<'pending' | 'read'>('pending'), selectedTask = ref<MyApprovalTask>()
 const workHours = ref<Guard>(), opl = ref<Guard>(), approval = ref<Guard>(), workHoursVisited = ref(false), workHoursProject = ref('')
 const todayHours = ref<number | null>(null), version = ref(''), todayHoursError = ref('')
@@ -34,11 +41,19 @@ const token = computed(() => session.value?.accessToken ?? '')
 const permissions = computed(() => session.value?.permissions ?? [])
 const selectedProject = computed(() => projects.value.find(project => project.id === projectId.value))
 const visibleProjects = computed(() => projects.value.filter(project => `${project.code} ${project.name} ${project.customerName || ''}`.toLowerCase().includes(search.value.trim().toLowerCase())))
-const visibleNotifications = computed(() => notifications.value.filter(isTaskCenterNotification).filter(item => taskFilter.value === 'read' ? !!item.readAt : !item.readAt))
+const visibleNotifications = computed(() => notifications.value.filter(isTaskCenterNotification).filter(item => {
+  const handled = item.category === oplResponseCategory ? !!item.resolvedAt : !!item.readAt
+  return taskFilter.value === 'read' ? handled : !handled
+}))
 const unread = computed(() => notifications.value.filter(item => isTaskCenterNotification(item) && !item.readAt).length)
 const reminder = useWorkHoursReminder(() => ({ token: token.value, companyId: session.value?.activeCompanyId ?? '', username: session.value?.username ?? '' }))
 provide(projectCenterAccessKey, permissions)
-provide(userDisplayNameKey, (username?: string | null, fallback = '—') => session.value && username === session.value.username ? session.value.displayName : username || fallback)
+const displayUserName = (username?: string | null, fallback = '—') => {
+  if (!username) return fallback
+  const name = session.value && username.toLowerCase() === session.value.username.toLowerCase() ? session.value.displayName : ''
+  return name && name.toLowerCase() !== username.toLowerCase() ? name : resolveUserDisplayName(people.value, username, fallback)
+}
+provide(userDisplayNameKey, displayUserName)
 const canView = (tab: string) => canViewProjectTab(permissions.value, tab)
 const canViewProjects = computed(() => permissions.value.includes('project.view') && (canView('overview') || canView('opl')))
 const visibleNavigation = computed(() => mobileOfficeNavigation(layout.value, canViewProjects.value))
@@ -104,6 +119,23 @@ async function refreshPage() {
     await refresh()
   } finally { layoutRefreshing.value = false }
 }
+async function verifyBinding() {
+  if (pending.value || !/^[0-9a-f]{8}$/i.test(bindingCode.value)) return
+  pending.value = true
+  error.value = ''; notice.value = ''
+  try {
+    const bootstrap = await readDingTalkOfficeBootstrap(query.get('companyId') || undefined)
+    if (!bootstrap.enabled) throw new Error('当前公司尚未启用钉钉移动办公，请联系管理员。')
+    const authCode = await dingTalkOfficeAuthCode(bootstrap.corpId, bootstrap.appKey)
+    await requestJson<void>('/api/integrations/dingtalk/office/binding-proof', {
+      method: 'POST', body: JSON.stringify({ companyId: bootstrap.companyId, code: bindingCode.value, authCode }),
+    })
+    bindingCode.value = ''
+    notice.value = '钉钉身份已验证。请回到客户端核对姓名并确认绑定，再点此处「重新进入」。'
+  } catch (cause) { error.value = failure(cause, '绑定验证失败，请重新生成绑定码后重试。') }
+  finally { pending.value = false }
+}
+
 async function signIn() {
   if (pending.value) return
   pending.value = true; error.value = ''; notice.value = ''
@@ -117,6 +149,10 @@ async function signIn() {
     generation++; projectGeneration++; refreshing.value = false
     projects.value = []; tasks.value = []; notifications.value = []; selectedTask.value = undefined; projectId.value = ''; plan.value = null; workHoursVisited.value = false; todayHours.value = null
     session.value = result
+    people.value = []
+    void getOrganizationDirectory(result.accessToken).then(directory => {
+      if (!disposed && token.value === result.accessToken) people.value = directory.users
+    }).catch(() => { /* 历史人员仍由姓名占位展示。 */ })
     layout.value = defaultMobileOfficeLayout(); layoutVersion.value = 0; layoutNotice.value = ''
     await loadLayout()
     await refresh()
@@ -153,6 +189,13 @@ async function approvalDone() { selectedTask.value = undefined; notice.value = '
 async function openNotification(notification: UserNotification) {
   if (!canLeave()) return
   try {
+    const oplIssueId = oplResponseIssueId(notification)
+    if (oplIssueId && notification.projectId) {
+      await openProject(notification.projectId, 'opl')
+      if (page.value === 'projects' && projectId.value === notification.projectId && projectSection.value === 'opl')
+        requestedOplIssueId.value = oplIssueId
+      return
+    }
     await markUserNotificationRead(notification.id, token.value)
     notification.readAt = new Date().toISOString()
     if (notification.category === 'work-hours-correction') navigate('work-hours')
@@ -214,7 +257,18 @@ onBeforeUnmount(() => { disposed = true; generation++; projectGeneration++; docu
     <main class="mobile-office-main">
       <p v-if="error" class="mobile-error" role="alert">{{ error }}</p><p v-if="notice" class="mobile-notice" role="status">{{ notice }}</p>
       <p v-if="session && layoutNotice" class="mobile-notice" role="status">{{ layoutNotice }}</p>
-      <section v-if="!session" class="mobile-signin"><h1>UPLM 员工移动办公</h1><p>待办 · 审批 · 项目 · OPL · 工时</p><p v-if="pending" role="status">正在识别钉钉员工身份…</p><button v-else class="pdm-primary-action" @click="signIn">重新进入</button><p>请从钉钉工作台打开，首次使用需由管理员绑定现有UPLM账号。</p></section>
+      <section v-if="!session" class="mobile-signin">
+        <h1>UPLM 员工移动办公</h1><p>待办 · 审批 · 项目 · OPL · 工时</p>
+        <p v-if="pending" role="status">正在验证钉钉员工身份…</p>
+        <button v-else class="pdm-primary-action" @click="signIn">重新进入</button>
+        <details><summary>使用旧版客户端绑定码</summary>
+          <p>请输入客户端「个人设置 → 绑定钉钉」生成的绑定码。</p>
+          <form class="pdm-toolbar__group" @submit.prevent="verifyBinding">
+            <input v-model.trim="bindingCode" aria-label="钉钉绑定码" placeholder="八位绑定码" maxlength="8" autocomplete="off" :disabled="pending">
+            <button type="submit" class="pdm-primary-action" :disabled="pending || !/^[0-9a-f]{8}$/i.test(bindingCode)">验证身份</button>
+          </form>
+        </details>
+      </section>
       <template v-else>
         <MobileOfficeHome v-if="page === 'home'" :layout="layout" :display-name="session.displayName" :today="chinaToday()" :tasks="tasks" :projects="projects" :unread="unread" :today-hours="todayHours" :today-hours-error="todayHoursError" :refreshing="refreshing" :can-view-projects="canViewProjects" :reminder-count="reminder.count.value" @navigate="navigate" @open-task="id => { const task = tasks.find(item => item.id === id); if (task) openTask(task) }" @open-project="openProject" />
         <section v-if="page === 'tasks'" aria-label="我的待办">
@@ -229,14 +283,14 @@ onBeforeUnmount(() => { disposed = true; generation++; projectGeneration++; docu
         <section v-if="page === 'projects' && canViewProjects" aria-label="移动项目">
           <template v-if="!selectedProject"><h1>我的项目</h1><label class="mobile-field">搜索项目<SearchField><input v-model="search" aria-label="搜索项目" placeholder="项目号、名称或客户" /></SearchField></label><button v-for="project in visibleProjects" :key="project.id" class="mobile-record mobile-record-button" @click="openProject(project.id)"><strong>{{ project.code }} · {{ project.name }}</strong><span>{{ project.stage }} · {{ project.parentProjectId ? '子项目' : '主项目' }}</span><small>{{ project.customerName }}{{ project.deliveryDate ? ` · 交期 ${project.deliveryDate}` : '' }}</small></button><p v-if="!visibleProjects.length">暂无符合条件的项目。</p></template>
           <template v-else><button @click="() => { if (canLeave()) { projectGeneration++; projectId = ''; projectSection = 'overview' } }">返回项目列表</button><h1>{{ selectedProject.code }} · {{ selectedProject.name }}</h1><div class="mobile-tabs"><button v-if="canView('overview')" :aria-pressed="projectSection === 'overview'" @click="openProject(selectedProject.id)">项目概况</button><button v-if="canView('opl')" :aria-pressed="projectSection === 'opl'" @click="openProject(selectedProject.id, 'opl')">OPL开口问题</button><button @click="projectHours">填写项目工时</button></div>
-            <ProjectOplManager v-if="projectSection === 'opl'" ref="opl" :key="selectedProject.id" :project="selectedProject" :token="token" :mobile="true" @open-release="notice = '请在待办中打开对应审批；历史发布资料可在电脑端查看。'" />
-            <template v-else><dl class="mobile-project-facts"><dt>项目状态</dt><dd>{{ selectedProject.stage }}</dd><dt>客户</dt><dd>{{ selectedProject.customerName || '—' }}</dd><dt>项目经理</dt><dd>{{ selectedProject.primaryProjectManager || selectedProject.owner || '—' }}</dd><dt>协同经理</dt><dd>{{ selectedProject.collaborativeProjectManagers?.join('、') || '—' }}</dd><dt>设计人员</dt><dd>{{ selectedProject.designers?.join('、') || '—' }}</dd><dt>交付日期</dt><dd>{{ selectedProject.deliveryDate || '—' }}</dd></dl>
-              <h2 v-if="canView('project-plan')">项目计划</h2><p v-if="projectLoading" role="status">正在读取项目计划…</p><p v-if="projectError" class="mobile-error" role="alert">{{ projectError }} <button @click="openProject(selectedProject.id)">重试</button></p><p v-if="canView('project-plan') && !projectLoading && !projectError && !plan">项目尚未建立计划。</p><template v-if="plan"><p>{{ plan.templateName }} · 计划完成 {{ plan.plannedFinish }}</p><article v-for="item in plan.tasks" :key="item.id" class="mobile-record"><strong>{{ item.name }}</strong><p>{{ item.assignee || '未分派' }} · {{ item.plannedStart }} 至 {{ item.plannedFinish }}</p><progress :value="item.completionPercent" max="100" :aria-label="`${item.name}完成比例`" /><span>{{ item.completionPercent }}%</span></article></template>
+            <ProjectOplManager v-if="projectSection === 'opl'" ref="opl" :key="selectedProject.id" :project="selectedProject" :token="token" :mobile="true" :requested-issue-id="requestedOplIssueId" @issue-request-handled="requestedOplIssueId = undefined" @saved="refresh" @open-release="notice = '请在待办中打开对应审批；历史发布资料可在电脑端查看。'" />
+            <template v-else><dl class="mobile-project-facts"><dt>项目状态</dt><dd>{{ selectedProject.stage }}</dd><dt>客户</dt><dd>{{ selectedProject.customerName || '—' }}</dd><dt>项目经理</dt><dd><PersonName :name="displayUserName(selectedProject.primaryProjectManager || selectedProject.owner)" /></dd><dt>协同经理</dt><dd>{{ selectedProject.collaborativeProjectManagers?.join('、') || '—' }}</dd><dt>设计人员</dt><dd>{{ selectedProject.designers?.join('、') || '—' }}</dd><dt>交付日期</dt><dd>{{ selectedProject.deliveryDate || '—' }}</dd></dl>
+              <h2 v-if="canView('project-plan')">项目计划</h2><p v-if="projectLoading" role="status">正在读取项目计划…</p><p v-if="projectError" class="mobile-error" role="alert">{{ projectError }} <button @click="openProject(selectedProject.id)">重试</button></p><p v-if="canView('project-plan') && !projectLoading && !projectError && !plan">项目尚未建立计划。</p><template v-if="plan"><p>{{ plan.templateName }} · 计划完成 {{ plan.plannedFinish }}</p><article v-for="item in plan.tasks" :key="item.id" class="mobile-record"><strong>{{ item.name }}</strong><p><PersonName :name="displayUserName(item.assignee, '未分派')" /> · {{ item.plannedStart }} 至 {{ item.plannedFinish }}</p><progress :value="item.completionPercent" max="100" :aria-label="`${item.name}完成比例`" /><span>{{ item.completionPercent }}%</span></article></template>
             </template>
           </template>
         </section>
         <WorkHoursManager v-if="workHoursVisited" v-show="page === 'work-hours'" ref="workHours" :token="token" :company-id="session.activeCompanyId" :active="page === 'work-hours'" :mobile="true" :initial-project-id="workHoursProject" @changed="workHoursChanged" />
-        <section v-if="page === 'mine'" aria-label="我的账号"><h1>我的账号</h1><dl class="mobile-project-facts"><dt>姓名</dt><dd>{{ session.displayName }}</dd><dt>UPLM账号</dt><dd>{{ session.username }}</dd><dt>公司</dt><dd>{{ session.activeCompanyName }}</dd><dt>界面版本</dt><dd>{{ version || '开发预览' }}</dd><dt>页面布局版本</dt><dd>{{ layoutVersion ? `V${layoutVersion}` : '系统默认 V0' }}</dd></dl><p>权限和审批规则沿用UPLM设置。工时保存后立即计入汇总；工时缺填在独立入口提醒。</p><button :disabled="pending" @click="reenter">重新验证钉钉身份</button><button :disabled="pending" @click="signOut">退出当前登录</button></section>
+        <section v-if="page === 'mine'" aria-label="我的账号"><h1>我的账号</h1><dl class="mobile-project-facts"><dt>姓名</dt><dd>{{ session.displayName }}</dd><dt>公司</dt><dd>{{ session.activeCompanyName }}</dd><dt>界面版本</dt><dd>{{ version || '开发预览' }}</dd><dt>页面布局版本</dt><dd>{{ layoutVersion ? `V${layoutVersion}` : '系统默认 V0' }}</dd></dl><p>权限和审批规则沿用UPLM设置。工时保存后立即计入汇总；工时缺填在独立入口提醒。</p><button :disabled="pending" @click="reenter">重新验证钉钉身份</button><button :disabled="pending" @click="signOut">退出当前登录</button></section>
       </template>
     </main>
     <MobileOfficeNavigation v-if="session" :layout="layout" :page="page" :can-view-projects="canViewProjects" :task-count="tasks.length + unread" :reminder-count="reminder.count.value" @navigate="navigate" />

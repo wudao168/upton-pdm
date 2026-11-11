@@ -30,7 +30,7 @@ public sealed partial class PdmAddin
         finally { application.SetCurrentWorkingDirectory(previous ?? string.Empty); }
     }
 
-    private void RenameRootDocumentAndReferences(CadTreeNode node, IModelDoc2 document, string newPath)
+    private void RenameRootDocumentAndReferences(CadTreeNode node, IModelDoc2 document, string newPath, Func<string, bool> includeDrawing = null)
     {
         var oldPath = Path.GetFullPath(node.FullPath);
         var hasEmbeddedComponents = EnumerateCadNodes(currentTree).Any(candidate => candidate.Status == CadReferenceStatus.Virtual);
@@ -66,6 +66,7 @@ public sealed partial class PdmAddin
         {
             var readablePath = File.Exists(candidate.FullPath) ? candidate.FullPath : candidate.SourceReferencePath;
             if (string.IsNullOrWhiteSpace(readablePath) || !File.Exists(readablePath)) continue;
+            if (candidate.Kind == CadDocumentKind.Drawing && includeDrawing != null && !includeDrawing(readablePath)) continue;
             if (!ReadRenameReferences(readablePath, true).Any(path => PathsEqual(path, oldPath))) continue;
             if (candidate.IsExternalProvenance || candidate.IsReadOnlyPreview)
                 throw new InvalidOperationException("引用当前总装的图档不是可编辑工作副本，请先从所属项目获取：" + candidate.FileName);

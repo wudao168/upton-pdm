@@ -21,6 +21,7 @@ public sealed class PdmPreviewWorkerOptions
         "Upton.Pdm.SolidWorks.PreviewWorker.exe");
 
     public int TimeoutMinutes { get; set; } = 30;
+    public bool AllowLocalExecution { get; set; } = true;
 }
 
 public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewConverter, IAssemblyPreviewConverter
@@ -89,13 +90,28 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         IReadOnlyList<ReleasePreviewSource> sources,
         string stagingDirectory,
         CancellationToken cancellationToken,
-        bool keepExistingPreviews)
+        bool keepExistingPreviews) => await GenerateCoreAsync(package, project, sources, stagingDirectory, cancellationToken, false);
+
+    public Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> StampCachedAsync(ReleasePackage package, Project project,
+        IReadOnlyList<ReleasePreviewSource> sources, string directory, CancellationToken ct) =>
+        GenerateCoreAsync(package, project, sources, directory, ct, true);
+
+    private async Task<IReadOnlyDictionary<Guid, DocumentPreviewArtifact>> GenerateCoreAsync(ReleasePackage package, Project project,
+        IReadOnlyList<ReleasePreviewSource> sources, string stagingDirectory, CancellationToken cancellationToken, bool stampOnly)
     {
         var conversionSettings = repository is null
             ? PreviewConversionSettings.Default
             : (await repository.GetSystemSettingsAsync(cancellationToken)).PreviewConversion ?? PreviewConversionSettings.Default;
         if (conversionSettings.TimeoutMinutes is < 1 or > 120) throw new PdmRuleException("图纸转换超时必须设置为1到120分钟。");
         var remote = conversionSettings.Mode == PreviewConversionMode.Remote;
+        if (remote && conversionSettings.Servers.Count > 0)
+        {
+            var allowed = conversionSettings.Servers.Where(host => !host.Disabled && (!host.CompanyId.HasValue || host.CompanyId == project.OrganizationId)).ToArray();
+            if (allowed.Length == 0) throw new PreviewServerUnavailableException("当前项目所属公司没有已勾选的转图服务器，等待管理员选择后重试。");
+            conversionSettings = conversionSettings with { Servers = allowed, AgentUrl = allowed[0].AgentUrl, AgentToken = allowed[0].AgentToken };
+        }
+        if (remote && string.IsNullOrWhiteSpace(conversionSettings.AgentUrl))
+            throw new PreviewServerUnavailableException("暂时没有已登记的远程转图服务器，等待登记后重试。");
         if (remote && !Uri.TryCreate(conversionSettings.NormalizedAgentUrl, UriKind.Absolute, out _))
             throw new PdmRuleException("远程转图服务器地址未配置，请在系统设置中填写转图电脑地址（例如 http://192.168.2.50:5199）。");
         if (!remote && !OperatingSystem.IsWindows())
@@ -156,12 +172,14 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
             }
 
             IReadOnlyDictionary<Guid, string> errors = new Dictionary<Guid, string>();
+            if (stampOnly && pendingJobs.Count > 0)
+                throw new PdmRuleException("缺少与冻结图纸及引用版本一致的原始PDF缓存，请使用重新转图。");
             if (pendingJobs.Count > 0)
             {
                 var runJobs = pendingJobs.Concat(referenceJobs).ToArray();
                 errors = remote
                     ? await RunRemoteAgentAsync(conversionSettings, runJobs, workRoot, outputRoot, cancellationToken, package.State == ReleasePackageState.Publishing ? package.Id : null,
-                        new PreviewAgentContext(null, project.Code, "PLM发布转图", runJobs.FirstOrDefault(job => job.DocumentId == package.RootDocumentId)?.FileName, package.Number), waitForServer: false)
+                        new PreviewAgentContext(null, project.Code, "PLM发布转图", runJobs.FirstOrDefault(job => job.DocumentId == package.RootDocumentId)?.FileName, package.Number, package.Id), waitForServer: false)
                     : await RunLocalWorkerAsync(conversionSettings, runJobs, sourceRoot, workRoot, outputRoot, cancellationToken);
                 foreach (var job in pendingJobs.Where(job => !errors.ContainsKey(job.DocumentId))) await StoreToCacheAsync(cacheRoot, cacheFingerprint, job, cancellationToken);
                 PrunePreviewCache(cacheRoot);
@@ -238,6 +256,8 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         string outputRoot,
         CancellationToken cancellationToken)
     {
+        if (!settings.AllowLocalExecution)
+            throw new PreviewServerUnavailableException("本机禁止转图，请登记远程转图服务器并选择远程转换，任务等待远程服务器接单。");
         _ = outputRoot;
         var workerPath = Path.GetFullPath(settings.WorkerPath);
         if (!File.Exists(workerPath)) throw new PdmRuleException($"服务器SolidWorks转换程序不存在：{workerPath}");
@@ -267,12 +287,118 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         string outputRoot,
         CancellationToken cancellationToken, Guid? publishingPackageId = null, PreviewAgentContext? context = null, bool waitForServer = true)
     {
-        if (publishingPackageId is Guid waitingId) ReleasePublishingProgress.Set(waitingId, "等待空闲转图服务器");
-        using var lease = conversion.Servers.Count == 0 && waitForServer ? null : await PreviewAgentPool.AcquireAsync(conversion,
-            $"{jobs.Count(job => job.Convert)} 项：{string.Join("、", jobs.Where(job => job.Convert).Take(3).Select(job => job.FileName))}",
-            httpClient, cancellationToken, waitForServer);
-        conversion = lease?.Settings ?? conversion;
-        var serverName = conversion.Servers.FirstOrDefault(server => string.Equals(server.AgentUrl.TrimEnd('/'), conversion.NormalizedAgentUrl, StringComparison.OrdinalIgnoreCase))?.Name ?? conversion.NormalizedAgentUrl;
+        var tried = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var remaining = jobs.Where(job => job.Convert).Select(job => job.DocumentId).ToHashSet();
+        var failures = new Dictionary<Guid, string>();
+        var multi = conversion.Servers.Select(server => server.AgentUrl.TrimEnd('/')).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1;
+        IReadOnlyDictionary<Guid, string> AwaitStandby()
+        {
+            if (remaining.Count == jobs.Count(job => job.Convert))
+                throw new PreviewServerUnavailableException("本批任务等待可用转图服务器，已保留队列。");
+            foreach (var id in remaining)
+                failures[id] = PartialPreviewConversionException.WaitingForHost + failures[id];
+            return failures;
+        }
+        while (true)
+        {
+            if (publishingPackageId is Guid waitingId) ReleasePublishingProgress.Set(waitingId, "等待空闲转图服务器");
+            PreviewAgentPool.Lease? lease;
+            try
+            {
+                lease = conversion.Servers.Count == 0 && waitForServer ? null : await PreviewAgentPool.AcquireAsync(conversion,
+                    $"{context?.RequestId} · {remaining.Count} 个图档", httpClient, cancellationToken, waitForServer && tried.Count == 0, tried);
+            }
+            catch (PreviewServerUnavailableException) when (remaining.Count < jobs.Count(job => job.Convert))
+            {
+                return AwaitStandby();
+            }
+            using (lease)
+            {
+                var settings = lease?.Settings ?? conversion;
+                var url = settings.NormalizedAgentUrl;
+                var serverName = settings.Servers.FirstOrDefault(server => string.Equals(server.AgentUrl.TrimEnd('/'), url, StringComparison.OrdinalIgnoreCase))?.Name ?? url;
+                var attempt = Guid.NewGuid();
+                var attemptRoot = Directory.CreateDirectory(Path.Combine(workRoot, attempt.ToString("N"))).FullName;
+                var attemptJobs = jobs.Select(job => job with { Convert = remaining.Contains(job.DocumentId) }).ToArray();
+                var attemptContext = context is null ? null : context with { DispatchId = attempt.ToString("N") };
+                tried.Add(url);
+                using var completed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                using var lost = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var monitor = multi ? MonitorHostAsync(url, lost, completed.Token) : Task.CompletedTask;
+                var trace = context?.PackageId is Guid packageId ? PreviewDispatchHistory.Start(storage.ConversionWorkRoot, packageId,
+                    attempt, serverName, remaining.ToArray()) : null;
+                try
+                {
+                    var result = await SendAttemptAsync(settings, attemptJobs, attemptRoot, serverName, publishingPackageId, attemptContext, waitForServer, lost.Token);
+                    lost.Token.ThrowIfCancellationRequested();
+                    trace?.Finish(result);
+                    foreach (var id in remaining.ToArray())
+                    {
+                        if (!result.TryGetValue(id, out var reason)) { failures.Remove(id); remaining.Remove(id); }
+                        else { failures[id] = reason; if (!HostStartupFailure(reason)) remaining.Remove(id); }
+                    }
+                    if (remaining.Count == 0) return failures;
+                    if (!multi) return failures;
+                    PreviewAgentPool.ReportFault(url);
+                    if (tried.Count >= conversion.Servers.Count) return AwaitStandby();
+                }
+                catch (Exception error) when (!cancellationToken.IsCancellationRequested &&
+                    (error is AgentTransportException or PreviewServerUnavailableException or HttpRequestException or HttpIOException || lost.IsCancellationRequested))
+                {
+                    var reason = lost.IsCancellationRequested ? "转图服务器心跳中断" : error is HttpRequestException or HttpIOException ? "读取代理结果时连接中断" : error.Message;
+                    trace?.End(reason);
+                    if (!multi)
+                    {
+                        if (error is AgentTransportException) throw new PdmRuleException(error.Message);
+                        throw;
+                    }
+                    PreviewAgentPool.ReportFault(url);
+                    foreach (var id in remaining) failures[id] = reason;
+                    if (tried.Count >= conversion.Servers.Count)
+                    {
+                        if (remaining.Count < jobs.Count(job => job.Convert)) return AwaitStandby();
+                        throw new PreviewServerUnavailableException("本次可用转图服务器均未完成任务，等待空闲服务器后重试。", error);
+                    }
+                }
+                catch (Exception) { trace?.End("任务中断或转换结果未通过校验"); throw; }
+                finally { completed.Cancel(); await monitor; }
+            }
+        }
+    }
+
+    private static bool HostStartupFailure(string reason) =>
+        reason.StartsWith("转图主机启动失败：", StringComparison.Ordinal) || reason.Contains("专用SolidWorks", StringComparison.OrdinalIgnoreCase) && (reason.Contains("启动") || reason.Contains("未就绪"))
+        || reason.Contains("本批次SolidWorks启动失败", StringComparison.OrdinalIgnoreCase)
+        || reason.Contains("未找到已安装的SolidWorks程序", StringComparison.OrdinalIgnoreCase);
+
+    private async Task MonitorHostAsync(string url, CancellationTokenSource lost, CancellationToken ct)
+    {
+        var misses = 0;
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                using var probe = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                probe.CancelAfter(TimeSpan.FromSeconds(4));
+                try
+                {
+                    using var response = await httpClient.GetAsync(url + "/health", probe.Token);
+                    misses = response.IsSuccessStatusCode ? 0 : misses + 1;
+                }
+                catch (Exception error) when (error is HttpRequestException or OperationCanceledException) { misses++; }
+                if (misses >= 3 && !ct.IsCancellationRequested) { lost.Cancel(); return; }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+    }
+
+    private sealed class AgentTransportException(string message) : PdmRuleException(message);
+
+    private async Task<IReadOnlyDictionary<Guid, string>> SendAttemptAsync(PreviewConversionSettings conversion,
+        IReadOnlyList<PreviewJob> jobs, string workRoot, string serverName, Guid? publishingPackageId,
+        PreviewAgentContext? context, bool waitForServer, CancellationToken cancellationToken)
+    {
         if (publishingPackageId is Guid assignedId) ReleasePublishingProgress.Set(assignedId, $"已分配 {serverName}，准备发送转图文件");
         var requestPath = Path.Combine(workRoot, "request.zip");
         var manifest = new PreviewAgentManifest(jobs
@@ -320,11 +446,11 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         }
         catch (OperationCanceledException exception)
         {
-            throw new PdmRuleException($"调用转图服务器在{DescribeElapsed(stopwatch.Elapsed)}后被中断（等不到转图电脑响应）：{DescribeReason(exception)}");
+            throw new AgentTransportException($"调用转图服务器在{DescribeElapsed(stopwatch.Elapsed)}后被中断（等不到转图电脑响应）：{DescribeReason(exception)}");
         }
         catch (HttpRequestException exception)
         {
-            if (waitForServer) throw new PdmRuleException($"无法连接转图服务器{conversion.NormalizedAgentUrl}（等待{DescribeElapsed(stopwatch.Elapsed)}）：{DescribeReason(exception)}");
+            if (waitForServer) throw new AgentTransportException($"无法连接转图服务器{conversion.NormalizedAgentUrl}（等待{DescribeElapsed(stopwatch.Elapsed)}）：{DescribeReason(exception)}");
             throw new PreviewServerUnavailableException($"无法连接转图服务器{conversion.NormalizedAgentUrl}，等待恢复后自动重试。", exception);
         }
 
@@ -337,13 +463,15 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
                     var detail = await response.Content.ReadAsStringAsync(timeout.Token);
                     if (!waitForServer && response.StatusCode is System.Net.HttpStatusCode.ServiceUnavailable or System.Net.HttpStatusCode.TooManyRequests)
                         throw new PreviewServerUnavailableException("转图服务器暂时无法接收任务，等待恢复后自动重试。");
+                    if ((int)response.StatusCode is 502 or 503 or 504 || HostStartupFailure(PreviewAgentProtocol.DescribeError(detail)))
+                        throw new AgentTransportException($"转图主机无法执行本次任务：{PreviewAgentProtocol.DescribeError(detail)}");
                     throw new PdmRuleException($"转图服务器返回错误({(int)response.StatusCode})：{PreviewAgentProtocol.DescribeError(detail)}");
                 }
                 var responsePath = Path.Combine(workRoot, "response.zip");
                 await using (var content = await response.Content.ReadAsStreamAsync(timeout.Token))
                 await using (var file = File.Create(responsePath))
                     await content.CopyToAsync(file, timeout.Token);
-                return await MaterializeAgentResponseAsync(responsePath, jobs);
+                return await MaterializeAgentResponseAsync(responsePath, jobs, context?.DispatchId);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -355,7 +483,7 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
             }
             catch (OperationCanceledException exception)
             {
-                throw new PdmRuleException($"读取转图服务器结果在{DescribeElapsed(stopwatch.Elapsed)}后被中断：{DescribeReason(exception)}");
+                throw new AgentTransportException($"读取转图服务器结果在{DescribeElapsed(stopwatch.Elapsed)}后被中断：{DescribeReason(exception)}");
             }
         }
     }
@@ -395,7 +523,7 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
     }
 
     /// <summary>解析转图代理返回的压缩包：校验 result.json 并把每个图档的 STEP/PDF 落到输出路径。</summary>
-    private static async Task<IReadOnlyDictionary<Guid, string>> MaterializeAgentResponseAsync(string responsePath, IReadOnlyList<PreviewJob> jobs)
+    private static async Task<IReadOnlyDictionary<Guid, string>> MaterializeAgentResponseAsync(string responsePath, IReadOnlyList<PreviewJob> jobs, string? dispatchId)
     {
         using (var archive = ZipFile.OpenRead(responsePath))
         {
@@ -406,6 +534,8 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
                 result = await JsonSerializer.DeserializeAsync<PreviewWorkerResult>(stream, JsonOptions)
                     ?? throw new PdmRuleException("转图服务器结果文件无效。");
             }
+            if (result.DispatchId is not null && result.DispatchId != dispatchId)
+                throw new PdmConflictException("返回结果不属于当前派单，已拒绝写入。");
             var errors = ValidateWorkerResult(result, jobs);
             foreach (var job in jobs)
             {
@@ -434,7 +564,8 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         if (result.Success != result.Items.All(item => item.Success))
             throw new PdmRuleException("转图服务器返回的汇总状态与逐项结果不一致，请检查转图代理日志。");
         return result.Items.Where(item => !item.Success).ToDictionary(item => item.DocumentId,
-            item => string.IsNullOrWhiteSpace(item.Error) ? "该图档转换失败，请在转图电脑打开检查后单独重试。" : item.Error);
+            item => item.FailureKind == "HostStartup" ? "转图主机启动失败：" + item.Error
+                : string.IsNullOrWhiteSpace(item.Error) ? "该图档转换失败，请在转图电脑打开检查后单独重试。" : item.Error);
     }
 
     /// <summary>转图结果缓存目录（与发布包预览目录同级）。</summary>
@@ -506,7 +637,7 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         }
     }
 
-    private static PdmRuleException RemoteTimeout(PreviewConversionSettings conversion) =>
+    private static AgentTransportException RemoteTimeout(PreviewConversionSettings conversion) =>
         new($"调用转图服务器超过{conversion.TimeoutMinutes}分钟，已终止本次发布转换。");
 
     private static string DescribeElapsed(TimeSpan elapsed) =>
@@ -567,18 +698,39 @@ public sealed partial class SolidWorksServerPreviewConverter : IServerPreviewCon
         return Convert.ToHexString(await SHA256.HashDataAsync(input, cancellationToken));
     }
 
-    private static void DeleteDirectory(string path)
+    private void DeleteDirectory(string path)
     {
-        if (Directory.Exists(path)) Directory.Delete(path, true);
+        var target = Path.GetFullPath(path);
+        var parent = Path.GetDirectoryName(target);
+        var assemblyRoot = Path.GetFullPath(Path.Combine(storage.ConversionWorkRoot, "assembly-preview"));
+        var releaseRoot = Path.GetFullPath(Path.Combine(storage.ConversionWorkRoot, "release-preview"));
+        var allowedParent = string.Equals(parent, assemblyRoot, StringComparison.OrdinalIgnoreCase)
+            || parent is not null && Guid.TryParseExact(Path.GetFileName(parent), "N", out _)
+                && string.Equals(Path.GetDirectoryName(parent), releaseRoot, StringComparison.OrdinalIgnoreCase);
+        if (!allowedParent || !Guid.TryParseExact(Path.GetFileName(target), "N", out _))
+            throw new InvalidOperationException("转图临时目录越界，已停止清理。");
+        try
+        {
+            if (!Directory.Exists(target)) return;
+            foreach (var file in Directory.EnumerateFiles(target, "*", new EnumerationOptions
+                { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
+                File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
+            Directory.Delete(target, true);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            // 临时副本清理失败留在诊断中，不能覆盖已完成的转换结果或真正的转图错误。
+            Trace.TraceError("转图临时目录清理失败：{0}；{1}", target, error);
+        }
     }
 
     private sealed record PreviewWorkerManifest(IReadOnlyList<PreviewWorkerJob> Jobs);
     private sealed record PreviewWorkerJob(Guid DocumentId, string SourcePath, string OutputPath, string Kind, bool Convert = true, string? ReleaseRevision = null, string? QrContent = null, bool AssemblyPreview = false, string? Configuration = null);
-    private sealed record PreviewWorkerResult(bool Success, string? Error, IReadOnlyList<PreviewWorkerItem>? Items = null, int AssemblyPreviewVersion = 0);
-    private sealed record PreviewWorkerItem(Guid DocumentId, bool Success, string? Error);
+    private sealed record PreviewWorkerResult(bool Success, string? Error, IReadOnlyList<PreviewWorkerItem>? Items = null, int AssemblyPreviewVersion = 0, string? DispatchId = null);
+    private sealed record PreviewWorkerItem(Guid DocumentId, bool Success, string? Error, string? FailureKind = null);
 
     private sealed record PreviewJob(Guid DocumentId, DocumentKind Kind, string FileName, string SourcePath, string OutputPath, string SourceSha256, bool Convert = true, string? ReleaseRevision = null, string? QrContent = null, bool AssemblyPreview = false, string? Configuration = null);
-    private sealed record PreviewAgentContext(string? Initiator, string ProjectCode, string Source, string? RootFileName, string RequestId);
+    private sealed record PreviewAgentContext(string? Initiator, string ProjectCode, string Source, string? RootFileName, string RequestId, Guid? PackageId = null, string? DispatchId = null);
     private sealed record PreviewAgentManifest(IReadOnlyList<PreviewAgentJob> Jobs, PreviewAgentContext? Context = null);
     private sealed record PreviewAgentJob(Guid DocumentId, string Kind, string FileName, string OutputName, bool Convert = true, string? ReleaseRevision = null, string? QrContent = null, bool AssemblyPreview = false, string? Configuration = null);
 }

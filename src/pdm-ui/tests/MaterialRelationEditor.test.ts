@@ -51,6 +51,18 @@ async function selectAccessory(wrapper: ReturnType<typeof mount>, id: string) {
 }
 
 describe('MaterialRelationEditor', () => {
+  it('只读旧版配置保留主物料型号品牌备注，不依赖维护人员专用搜索接口', async () => {
+    const wrapper=mount(MaterialRelationEditor,{props:{token:'token',mainMaterial,canManage:false,canPublish:false},global:{plugins:[ElementPlus]}})
+    try {
+      await flushPromises()
+      const table=wrapper.get('.material-relation-main-table')
+      expect(table.text()).toContain('750W')
+      expect(table.text()).toContain('MITSUBISHI')
+      expect(table.text()).toContain('带抱闸')
+      expect(api.listMaterialRelationMainOptions).not.toHaveBeenCalled()
+      expect(api.saveMaterialRelationTemplate).not.toHaveBeenCalled()
+    } finally {wrapper.unmount()}
+  })
   beforeEach(() => {
     vi.clearAllMocks()
     api.listMaterialRelationMainOptions.mockImplementation(async (token, query) => (await api.listMaterials(token, query ?? '', false, 100)).filter((item: any) => item.approvalStatus === 'Approved' && !item.isArchived).map((item: any) => ({ materialId: item.id, materialCode: item.materialCode, materialName: item.name, specification: item.specification, brand: item.brand })))

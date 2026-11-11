@@ -77,6 +77,7 @@ public sealed class ProjectOplTests
     public async Task CompleteUsesServerClockPreservesFieldsAndChecksPermissionsAndVersions()
     {
         var projects = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(projects, ("admin", UserRole.Administrator), ("other", UserRole.Engineer));
         var issues = new InMemoryProjectOplRepository();
         var store = new Storage();
         var now = new DateTimeOffset(2026, 10, 13, 0, 1, 0, TimeSpan.Zero);

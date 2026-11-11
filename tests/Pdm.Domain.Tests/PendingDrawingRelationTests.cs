@@ -30,7 +30,7 @@ public sealed class PendingDrawingRelationTests
         Assert.Equal(saved, Assert.Single(await repository.ListDocumentVersionsAsync(drawing.Id, default)));
         Assert.True(saved.ReferenceSnapshot.StructureIndexPending);
 
-        // Discovering a drawing must not bypass its pending state when formal versions are captured.
+        // BOM发布只冻结对应2D图纸，源结构待补全状态保持原值；完整审批仍由提交入口检查。
         model = await repository.CheckoutAsync(model.Id, "admin", session, "QA", DateTimeOffset.UtcNow.AddMinutes(15), null, default);
         var modelVersion = Assert.Single(await repository.ListDocumentVersionsAsync(model.Id, default));
         await repository.CheckInVersionAsync(model.Id, "admin", session,
@@ -43,9 +43,12 @@ public sealed class PendingDrawingRelationTests
         { Scope = ReleaseScope.NonStandardWithDrawing, RootDocumentId = model.Id, SelectedBomItemIds = [item.Id], NonStandardBomSnapshot = [item] };
         var capture = typeof(PdmWorkflowService).GetMethod("CaptureReleaseVersionsAsync",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-        var error = await Assert.ThrowsAsync<PdmRuleException>(() => (Task<ReleasePackage>)capture.Invoke(workflow, [package, CancellationToken.None])!);
-        Assert.Contains("待补全", error.Message);
-        Assert.Contains(drawing.FileName, error.Message);
+        var captured = await (Task<ReleasePackage>)capture.Invoke(workflow, [package, CancellationToken.None])!;
+        var binding = Assert.Single(captured.VersionBindings!, item => item.Publish);
+        Assert.Equal(drawing.Id, binding.DocumentId);
+        Assert.Equal(saved.Id, binding.VersionId);
+        Assert.DoesNotContain(captured.VersionBindings!, item => item.DocumentId == model.Id && item.Publish);
+        Assert.True((await repository.ListDocumentVersionsAsync(drawing.Id, default)).Single().ReferenceSnapshot.StructureIndexPending);
     }
 
     [Fact]

@@ -18,17 +18,13 @@ public sealed partial class MaterialServiceTests
     public async Task BomMaterialWritesRequireBothRoleAndProjectKindPermissions(BomKind kind, bool revokeProjectGrant)
     {
         var service = CreateService(out var materials, out var repository, out _);
+        await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer));
         await repository.SetMainProjectStaffingAsync(ProjectId, new("admin", [], ["engineer"]), "admin", default);
         var permission = kind == BomKind.Electrical ? PermissionCodes.BomElectricalEdit : PermissionCodes.BomMechanicalEdit;
         var otherPermission = kind == BomKind.Electrical ? PermissionCodes.BomMechanicalEdit : PermissionCodes.BomElectricalEdit;
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.BomEdit,
             revokeProjectGrant ? permission : otherPermission], default);
-        if (revokeProjectGrant)
-        {
-            var settings = await repository.GetProjectPermissionSettingsAsync(default);
-            await repository.UpdateProjectPermissionSettingsAsync(new(settings.Rules.ToDictionary(pair => pair.Key,
-                pair => (IReadOnlyList<string>)pair.Value.Where(code => code != permission && !RolePermissionCatalog.Permissions.Any(item => item.Code == code && item.LegacyPermission == permission)).ToArray())), default);
-        }
+        if (revokeProjectGrant) await PermissionTestUsers.Revoke(repository, "Engineer", permission);
         var item = new BomItem(Guid.NewGuid(), ProjectId, kind, 1, "", "权限测试物料", 1, "001", null, "PERMISSION-MODEL", "W1", true) { Brand = "TEST" };
         await repository.ReplaceBomAsync(ProjectId, kind, [item], default);
         var material = await service.CreateAsync(new(null, item.Name, MaterialKind.Standard, MaterialSupplyMode.Purchase, "001",
@@ -1975,6 +1971,39 @@ public sealed partial class MaterialServiceTests
     }
 
     [Fact]
+    public async Task Countersignature_RequiresBothUsersAndRecordsAuthorizedNoteBeforeIssuingCode()
+    {
+        var service = CreateService(out var materials, out var repository, out _);
+        foreach (var name in new[] { "admin", "reviewer" })
+            await repository.CreateUserAsync(new UserAccount(Guid.NewGuid(), name, name, "unused", UserRole.Administrator, true), default);
+        var settings = await repository.GetSystemSettingsAsync(default);
+        var flow = MaterialCodeWorkflowDefaults.Template() with { Steps = [
+            new(ApprovalStage.MechanicalEngineer, "自检", ApprovalAssigneeSource.Submitter),
+            new ApprovalWorkflowStepTemplate(ApprovalStage.MainDesigner, "双人会签", ApprovalAssigneeSource.Role, RoleCodes: ["Administrator"])
+                { RequireAllApprovers = true, Policy = new ApprovalNodePolicy(RequireOpinion: true, EditBusinessNote: true),
+                  CopyOnApproval = new ApprovalCopyRule("Submitter", "", "料号会签完成") }] };
+        await repository.UpdateSystemSettingsAsync(settings with { ApprovalWorkflows = settings.ApprovalWorkflows with { MaterialCodeApplication = flow } }, default);
+        var workflow = new PdmWorkflowService(repository, null!, null!, TimeProvider.System);
+        var item = Assert.Single(await workflow.ReplaceBomAsync(ProjectId, BomKind.Standard,
+            [new BomItemInput(1, "", "会签测试件", 1, "001", null, "SIGN-001", "W1", true, Brand: "TEST")], "admin", UserRole.Administrator, default));
+        var pending = Assert.Single(await service.ApplyForMaterialCodesAsync(new(ProjectId, [item.Id]), "admin", UserRole.Administrator, default)).Application!;
+        await Assert.ThrowsAsync<PdmRuleException>(() => service.DecideMaterialCodeApplicationAsync(pending.Id, pending.RowVersion, true, "", "admin", UserRole.Administrator, default));
+        var first = await service.DecideMaterialCodeApplicationAsync(pending.Id, pending.RowVersion, true, "已复核", "admin", UserRole.Administrator, default, businessNote: "按确认规格采购");
+        Assert.Null(first.Material);
+        Assert.Empty(await materials.ListSyncTasksAsync(default));
+        Assert.False(first.Application.CanDecide);
+        var firstNode = first.Application.ApprovalWorkflow!.Nodes.Last();
+        Assert.Null(firstNode.Decision);
+        Assert.Equal("admin", Assert.Single(firstNode.Signatures).Actor);
+        Assert.Equal("按确认规格采购", Assert.Single(firstNode.NoteHistory).Text);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.DecideMaterialCodeApplicationAsync(pending.Id, first.Application.RowVersion, true, "重复", "admin", UserRole.Administrator, default));
+        var final = await service.DecideMaterialCodeApplicationAsync(pending.Id, first.Application.RowVersion, true, "同意", "reviewer", UserRole.Administrator, default);
+        Assert.Equal(MaterialCodeApplicationStatus.Approved, final.Application.Status);
+        Assert.Equal(2, final.Application.ApprovalWorkflow!.Nodes.Last().Signatures.Count);
+        Assert.NotNull(final.Material);
+    }
+
+    [Fact]
     public async Task ConfiguredMaterialWorkflow_AdvancesOneNodeAndFreezesAssignmentsUntilFinalApproval()
     {
         var service = CreateService(out var materials, out var repository, out _);
@@ -2203,6 +2232,7 @@ public sealed partial class MaterialServiceTests
     {
         var timeProvider = TimeProvider.System;
         repository = new InMemoryPdmRepository(timeProvider);
+        PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer), ("viewer", UserRole.ProductionViewer)).GetAwaiter().GetResult();
         materials = new InMemoryMaterialRepository(timeProvider);
         materials.SaveIntegrationConfigurationAsync(new(
             "http://u9.example.test/U9", "01", "7", "pdm", "PDM", "protected:test-secret",

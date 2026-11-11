@@ -1,0 +1,37 @@
+/* 左侧主题色表示选中；右侧由业务状态独立显示，不随选中重复上色。 */
+:root body .wr-project-list { padding-inline: 0; }
+:root body .wr-project-list > .wr-project { position:relative; padding-inline:17px; }
+:root body .pdm-project-family__list { padding-inline:0; }
+:root body .pdm-project-family__list > button { padding-inline:17px; }
+@layer pdm-button-sizing {
+  :root body .pdm-project-family__list > button { padding-inline:17px !important; }
+  :root body :is(.wr-project-list > .wr-project, .pdm-project-family__list > button) { border-radius:0 !important; }
+  :root body .wr-project-list > .wr-project.selected,
+  :root body .pdm-project-family__list > button.is-active { box-shadow:inset 5px 0 0 var(--pdm-theme-accent) !important; background:var(--pdm-selection-bg) !important; }
+  :root body .production-workbench__project-packages { margin-inline:0 !important; padding-inline:0 !important; border-left:0 !important; }
+  :root body .production-workbench .production-workbench__tree button:is(.production-workbench__project,.production-workbench__package),
+  :root body .production-workbench .production-workbench__tree button:is(.production-workbench__project,.production-workbench__package).is-release-attention {
+    box-sizing:border-box; width:100% !important; max-width:100% !important; margin-inline:0 !important; padding-inline:17px !important;
+    border:0 !important; border-radius:0 !important; box-shadow:none !important;
+  }
+  :root body .production-workbench .production-workbench__tree button:is(.production-workbench__project,.production-workbench__package).selected {
+    box-shadow:inset 5px 0 0 var(--pdm-theme-accent) !important; background:var(--pdm-selection-bg) !important;
+  }
+  :root body .production-workbench__tree-actions > .production-workbench__all-categories {
+    background:transparent !important; color:var(--pdm-text) !important; border-color:transparent !important;
+  }
+  :root body .production-workbench__tree-actions > .production-workbench__all-categories.selected { box-shadow:inset 0 -3px 0 var(--pdm-theme-accent) !important; }
+}
+/* 异常橙条与绿色新发布提示共用全高5px位置，保持常亮。 */
+:root body :is(.wr-project-list > .wr-project, .pdm-project-family__list > button, .production-workbench__project, .production-workbench__package) > .pdm-release-attention-border {
+  position:absolute; inset:0 0 0 auto; width:5px; height:auto; padding:0; border:0; border-radius:0; mask:none; pointer-events:none; animation:none; opacity:1;
+}
+:root body :is(.wr-project-list > .wr-project, .pdm-project-family__list > button, .production-workbench__project, .production-workbench__package) > .pdm-release-attention-border.is-error { background:#f5a524; }
+:root body :is(.wr-project-list > .wr-project, .pdm-project-family__list > button, .production-workbench__project, .production-workbench__package) > .pdm-release-attention-border.is-new { background:#16a34a; animation:none; }
+@layer pdm-button-sizing {
+  :root body :is(.wr-project-list > .wr-project, .pdm-project-family__list > button, .production-workbench__project, .production-workbench__package) > .pdm-release-attention-border {
+    inset:0 0 0 auto !important; width:5px !important; height:auto !important;
+    padding:0 !important; border-radius:0 !important; mask:none !important; animation:none !important; opacity:1 !important;
+  }
+  :root body :is(.wr-project-list > .wr-project, .pdm-project-family__list > button, .production-workbench__project, .production-workbench__package) > .pdm-release-attention-border.is-error { background:#f5a524 !important; }
+}

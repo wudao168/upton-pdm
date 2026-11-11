@@ -31,6 +31,43 @@ internal static partial class Program
     internal static bool WindowCreated { get; set; }
     internal static bool WindowVisible { get; set; }
 
+    internal static async Task<string> ProbeSolidWorksAsync()
+    {
+        if (!await ConversionGate.WaitAsync(0)) return "转换程序正在处理任务，请在空闲时自检。";
+        try
+        {
+            var timer = Stopwatch.StartNew();
+            var message = await Task.Run(() =>
+            {
+                using var probe = new Process { StartInfo = new ProcessStartInfo(Options.WorkerPath, "--probe-startup")
+                {
+                    UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, StandardErrorEncoding = Encoding.UTF8
+                }};
+                probe.Start();
+                var diagnostic = probe.StandardError.ReadToEndAsync();
+                if (!probe.WaitForExit(180000))
+                {
+                    probe.Kill();
+                    return "启动自检超过三分钟，请检查SolidWorks许可及启动弹窗。";
+                }
+                var output = diagnostic.GetAwaiter().GetResult();
+                if (probe.ExitCode == 0) return "启动自检成功，专用SolidWorks会话已就绪并正常关闭。";
+                Journal.Diagnostic(output);
+                var last = output.Trim().Split('\n');
+                return AgentText.Safe(last[last.Length - 1], "启动自检失败，请查看启动日志并检查许可。");
+            });
+            var result = message + "（用时 " + (int)timer.Elapsed.TotalSeconds + " 秒）";
+            Journal.Log(message.StartsWith("启动自检成功") ? "成功" : "失败", result);
+            return result;
+        }
+        catch (Exception error)
+        {
+            Journal.Diagnostic(error.ToString());
+            return "无法完成启动自检，请核对本机转换程序路径及权限。";
+        }
+        finally { ConversionGate.Release(); }
+    }
+
     private static int RunApplication(string[] args)
     {
         Application.EnableVisualStyles();

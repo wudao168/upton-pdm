@@ -147,7 +147,7 @@ public sealed record PreviewAgentRegisterResult(bool Ok, string AgentUrl, int Ti
 /// <summary>图纸转出打包下载：可按发布包筛选，并只下载选中的图档（都不传表示全部已转出文件）。</summary>
 public sealed record ReleasePreviewArchiveRequest(Guid? ReleasePackageId = null, IReadOnlyList<Guid>? DocumentIds = null);
 
-public sealed record ReleasePreviewRetryRequest(IReadOnlyList<Guid>? DocumentIds = null);
+public sealed record ReleasePreviewRetryRequest(IReadOnlyList<Guid>? DocumentIds = null, bool StampOnly = false);
 
 /// <summary>图纸转出明细：单个图档的目标格式、成功/失败与失败原因。</summary>
 public sealed record ReleasePreviewItemResult(
@@ -328,7 +328,7 @@ public sealed record RestoreVersionRequest(string ChangeNote, Guid? OperationId 
 
 public sealed record PublishDocumentVersionRequest(Guid SourceVersionId, Guid ReleasePackageId, Guid ApprovalTaskId);
 
-public sealed record CreateControlledOpenManifestRequest(Guid? VersionId, bool ReleasedOnly, bool ForEdit, bool ResolveLegacyReferences = false, bool TreeScopeOnly = false);
+public sealed record CreateControlledOpenManifestRequest(Guid? VersionId, bool ReleasedOnly, bool ForEdit, bool ResolveLegacyReferences = false, bool TreeScopeOnly = false, bool AllowMissingComponents = false);
 
 public sealed record CreateReleasePackageRequest(
     Guid ProjectId,
@@ -425,7 +425,7 @@ public sealed record CompleteCadPropertyWritebackRequest(Guid ResultVersionId);
 
 public sealed record FailCadPropertyWritebackRequest(string Error, bool Conflict = false);
 
-public sealed record ApprovalRequest(ApprovalDecision Decision, string? Comment);
+public sealed record ApprovalRequest(ApprovalDecision Decision, string? Comment, string? BusinessNote = null);
 
 public sealed record ApprovalTransferRequest(string TargetUsername, string? Comment);
 

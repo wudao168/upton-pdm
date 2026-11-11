@@ -9,6 +9,39 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class ProductionDrawingValidityTests
 {
     [Theory]
+    [InlineData(DocumentKind.Part)]
+    [InlineData(DocumentKind.Assembly)]
+    public async Task FrozenReferenceModelDeliversPackageStepWithoutPromotingOrChangingTheSource(DocumentKind kind)
+    {
+        var f = await CreateFixtureAsync();
+        Store<PdmDocument>(f.Repository, "documents")[f.Model.Id] = f.Model with { Kind = kind };
+        var source = f.ModelVersion with { Status = DocumentVersionStatus.Work, Revision = RevisionLabel.InitialWork(), ReleasePackageId = null, Preview = null };
+        Store<DocumentVersion>(f.Repository, "versions")[source.Id] = source;
+        var package = f.Package with { VersionBindings = [
+            new(f.Drawing.Id, f.DrawingVersion.Id, "B", f.DrawingVersion.Sha256, true, f.Drawing.FileName, false),
+            new(f.Model.Id, source.Id, "W1", source.Sha256, false, f.Model.FileName, false)] };
+        Store<ReleasePackage>(f.Repository, "packages")[package.Id] = package;
+        var sources = await f.Repository.ListReleasePreviewSourcesAsync(package.Id, default);
+        Assert.Contains(sources, s => s.DocumentId == f.Model.Id && s.SourceVersionId == source.Id);
+        var pending = Assert.Single(await f.Service.ListAsync("admin", UserRole.Administrator, false, f.Model.ProjectId, default));
+        Assert.False(Assert.Single(pending.ModelFiles).StepReady);
+        var step = f.ModelVersion.Preview!;
+        await f.Repository.AttachReleasePreviewArtifactsAsync(package.Id, new Dictionary<Guid, DocumentPreviewArtifact> { [f.Model.Id] = step }, default);
+        var ready = Assert.Single(await f.Service.ListAsync("admin", UserRole.Administrator, false, f.Model.ProjectId, default));
+        var model = Assert.Single(ready.ModelFiles);
+        Assert.True(model.StepReady);
+        Assert.Equal(source.Id, model.VersionId);
+        var delivered = await f.Service.EnsureProductionModelAllowedAsync(package.Id, model.DocumentId, model.VersionId!.Value, default);
+        Assert.Equal(step, delivered.Preview);
+        Assert.Equal(source, await f.Repository.FindDocumentVersionAsync(f.Model.Id, source.Id, default));
+        await Assert.ThrowsAsync<PdmConflictException>(() => f.Service.EnsureProductionUseAllowedAsync(f.Model.Id, source.Id, default));
+        await Assert.ThrowsAsync<PdmConflictException>(() => f.Repository.AttachReleasePreviewArtifactsAsync(package.Id,
+            new Dictionary<Guid, DocumentPreviewArtifact> { [f.Model.Id] = step with { SourceSha256 = new string('F', 64) } }, default));
+        await f.Repository.ObsoleteDocumentAsync(f.Model.Id, "admin", default);
+        await Assert.ThrowsAsync<PdmConflictException>(() => f.Service.EnsureProductionModelAllowedAsync(package.Id, f.Model.Id, source.Id, default));
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task DrawingQrUsesPdfRuleAndFrozenModelWithoutRequiringPdf(bool pdfReady)
@@ -21,7 +54,7 @@ public sealed class ProductionDrawingValidityTests
 
         var drawing = Assert.Single(await fixture.Service.ListAsync("admin", UserRole.Administrator, true, fixture.Drawing.ProjectId, default));
 
-        Assert.Equal(PdfReleaseIdentity.Display("PLM-FROZEN-MODEL", "B"), drawing.QrContent);
+        Assert.Equal(PdfReleaseIdentity.Display("PLM-FROZEN-MODEL", "B", fixture.Package.Id), drawing.QrContent);
         Assert.Equal(pdfReady, drawing.PdfReady);
     }
 
@@ -141,6 +174,7 @@ public sealed class ProductionDrawingValidityTests
     private static async Task<Fixture> CreateFixtureAsync()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ProductionTestAuthorization.EnableAsync(repository);
         var project = await repository.CreateProjectAsync(new("VALIDITY-" + Guid.NewGuid().ToString("N"),
             "生产图纸有效性", "admin", "vault", "release"), "admin", default);
         var model = await repository.RegisterDocumentAsync(new(project.Id, "PART", "模型", "PART.SLDPRT", DocumentKind.Part), "admin", default);

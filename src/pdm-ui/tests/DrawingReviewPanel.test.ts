@@ -465,14 +465,14 @@ describe('DrawingReviewPanel', () => {
     expect(wrapper.emitted('create')).toEqual([[['model-1'], ['reviewer-b']]])
   })
 
-  it('发起审核默认选择有审图权限的项目主设，批量发起也沿用该默认值', async () => {
+  it('发起审核默认选择有审图权限的项目主设计，批量发起也沿用该默认值', async () => {
     const wrapper = mount(DrawingReviewPanel, {
       global: { plugins: [ElementPlus] },
       props: {
         packageId: '', packages: [], candidates: [candidate], currentUsername: 'designer',
         ...permissions,
         reviewerOptions: [
-          { username: 'lead', label: '项目主设' },
+          { username: 'lead', label: '项目主设计' },
           { username: 'reviewer', label: '审图员' },
         ],
         defaultReviewers: ['lead', 'unqualified-lead'],

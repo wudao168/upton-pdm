@@ -57,7 +57,7 @@ function bomPropertyMappingsFromLegacy(settings: PdmSystemSettings) {
     solidWorksProperty: mapping.mappingEditable ? values[mapping.pdmPropertyKey] ?? mapping.solidWorksProperty : mapping.solidWorksProperty,
   }))
 }
-const defaultSystemSettings: PdmSystemSettings = { vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 60, checkoutLeaseMinutes: 5, checkoutOfflineGraceMinutes: 30, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, checkoutAutoReleaseEnabled: true, checkoutIdleReleaseMinutes: 30, checkoutReleaseCountdownSeconds: 60, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: fallbackBomPropertyMappings.map(mapping => ({ ...mapping })), validationRules: { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], }, approvalWorkflows: { mechanical: { code: 'mechanical-release', name: '机械发布审批', version: 1, steps: [{ stage: 'MechanicalEngineer', name: '机械工程师自检', assigneeSource: 'Submitter' }, { stage: 'MainDesigner', name: '主设审核', assigneeSource: 'ProjectDesignLead' }, { stage: 'MechanicalSupervisor', name: '机械主管批准', assigneeSource: 'PrimaryUnitManager' }] }, electrical: { code: 'electrical-release', name: '电气发布审批', version: 1, steps: [{ stage: 'HardwareEngineer', name: '硬件工程师自检', assigneeSource: 'Submitter' }, { stage: 'HardwareSupervisor', name: '硬件主管审核', assigneeSource: 'PrimaryUnitManager' }, { stage: 'StandardizationSupervisor', name: '标准化主管批准', assigneeSource: 'ParentUnitManager' }] }, emergencySubstituteRoleCode: 'BusinessUnitManager' }, releaseChangeReasonTypes: ['正式补充', '物料问题 / 交期不满足', '物料问题 / 物料下单晚', '物料问题 / 买错物料', '物料问题 / 物料漏买', '图纸问题 / 图纸漏下', '图纸问题 / 图纸错误', '设计问题 / 设计变更', '设计问题 / 设计错误', '客户原因 / 客户需求变更', '客户原因 / 客户信息输入错误', '客户原因 / 客户未及时确认', '客户原因 / 客户未及时提供产品', '其他'], formalSupplementPolicies: { standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } } }
+const defaultSystemSettings: PdmSystemSettings = { vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 60, checkoutLeaseMinutes: 5, checkoutOfflineGraceMinutes: 30, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, checkoutAutoReleaseEnabled: true, checkoutIdleReleaseMinutes: 30, checkoutReleaseCountdownSeconds: 60, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: fallbackBomPropertyMappings.map(mapping => ({ ...mapping })), validationRules: { standard: ['drawingNumber', 'name', 'unit', 'specification', 'quantity', 'revision'], nonStandard: ['drawingNumber', 'name', 'unit', 'material', 'quantity', 'revision'], electrical: ['drawingNumber', 'name', 'unit', 'quantity', 'revision'], }, approvalWorkflows: { mechanical: { code: 'mechanical-release', name: '机械发布审批', version: 1, steps: [{ stage: 'MechanicalEngineer', name: '机械工程师自检', assigneeSource: 'Submitter' }, { stage: 'MainDesigner', name: '主设计审核', assigneeSource: 'ProjectDesignLead' }, { stage: 'MechanicalSupervisor', name: '机械主管批准', assigneeSource: 'PrimaryUnitManager' }] }, electrical: { code: 'electrical-release', name: '电气发布审批', version: 1, steps: [{ stage: 'HardwareEngineer', name: '硬件工程师自检', assigneeSource: 'Submitter' }, { stage: 'HardwareSupervisor', name: '硬件主管审核', assigneeSource: 'PrimaryUnitManager' }, { stage: 'StandardizationSupervisor', name: '标准化主管批准', assigneeSource: 'ParentUnitManager' }] }, emergencySubstituteRoleCode: 'BusinessUnitManager' }, releaseChangeReasonTypes: ['正式补充', '物料问题 / 交期不满足', '物料问题 / 物料下单晚', '物料问题 / 买错物料', '物料问题 / 物料漏买', '图纸问题 / 图纸漏下', '图纸问题 / 图纸错误', '设计问题 / 设计变更', '设计问题 / 设计错误', '客户原因 / 客户需求变更', '客户原因 / 客户信息输入错误', '客户原因 / 客户未及时确认', '客户原因 / 客户未及时提供产品', '其他'], formalSupplementPolicies: { standard: { maximumCount: 2, validDays: null }, electrical: { maximumCount: 2, validDays: null } } }
 const defaultCrmIntegrationSettings: CrmIntegrationSettings = { baseUrl: '', username: '', passwordConfigured: false, autoSyncEnabled: false, autoSyncIntervalMinutes: 60, lastSyncAt: null, lastSyncCount: 0, lastAutoSyncAttemptAt: null, lastAutoSyncError: null }
 
 const emptyProject: ProjectSummary = {
@@ -362,6 +362,7 @@ export function usePdmWorkspace() {
       ?? items.find(item => item.drawingNumber.localeCompare(node.drawingNumber, undefined, { sensitivity: 'accent' }) === 0)
   }
   const selectedBomItem = computed(() => bomItemForNode(selectedNode.value))
+  const readableDocumentIds = computed(() => new Set(managedDocuments.value.map(document => document.id)))
   const selectedDocumentId = computed(() => selectedNode.value.documentId)
   const filteredTree = computed<DocumentNode | undefined>(() => documentFilter.value === 'drawing'
     ? undefined
@@ -388,7 +389,7 @@ export function usePdmWorkspace() {
     ? Math.max(0, documentFilterCounts.value.all - warningCount.value)
     : 0)
   const hasRole = (role: string) => currentRoles.value.includes(role)
-  const hasPermission = (code: string) => hasRole('Administrator') || currentPermissions.value.includes(code)
+  const hasPermission = (code: string) => currentPermissions.value.includes(code)
 
   function selectNode(node: DocumentNode) {
     selectedId.value = node.id
@@ -1002,8 +1003,21 @@ export function usePdmWorkspace() {
     operationPending.value = true
     operationError.value = ''
     try {
-      await submitReleasePackage(releasePackageId, accessToken)
-      await reload()
+      const id = project.value.id
+      const token = accessToken
+      const submitted = await submitReleasePackage(releasePackageId, token)
+      if (project.value.id !== id || token !== accessToken) return
+      releasePackages.value = releasePackages.value.map(item => item.id === submitted.id ? submitted : item)
+      void refreshApprovalInbox()
+      try {
+        const versions = await listBomVersions(id, token)
+        if (project.value.id === id && token === accessToken) bomVersions.value = versions
+      } catch {
+        if (project.value.id === id && token === accessToken) {
+          loadedProjectTabs.delete('bom')
+          operationError.value = '发布包已提交审批，BOM版本状态刷新失败，请刷新页面查看。'
+        }
+      }
     } catch (error) {
       operationError.value = messageFrom(error)
       throw error
@@ -1057,8 +1071,9 @@ export function usePdmWorkspace() {
     releaseStatusLoading = true
     releaseStatusLastCheckAt = Date.now()
     try {
+      const previous = releasePackages.value
       const packages = await listReleasePackages(projectId, accessToken)
-      if (project.value?.id === projectId && JSON.stringify(releasePackages.value) !== JSON.stringify(packages)) releasePackages.value = packages
+      if (releasePackages.value === previous && project.value?.id === projectId && JSON.stringify(releasePackages.value) !== JSON.stringify(packages)) releasePackages.value = packages
     } catch {
       // 保留已有状态，下轮继续读取，避免临时网络失败挡住项目页面。
     } finally { releaseStatusLoading = false }
@@ -1106,11 +1121,11 @@ export function usePdmWorkspace() {
     }
   }
 
-  async function decideApprovalTask(taskId: string, decision: 'Approved' | 'Rejected', comment: string) {
+  async function decideApprovalTask(taskId: string, decision: 'Approved' | 'Rejected', comment: string, businessNote?: string) {
     operationPending.value = true
     operationError.value = ''
     try {
-      await decideApproval(taskId, decision, comment, accessToken)
+      await decideApproval(taskId, decision, comment, accessToken, businessNote)
       await reload()
     } catch (error) {
       operationError.value = messageFrom(error)
@@ -1314,7 +1329,7 @@ export function usePdmWorkspace() {
     persistentSession = session
     accessToken = session.accessToken
     postDesktopMessage('session-ready', { accessToken: session.accessToken, activeCompanyId: session.activeCompanyId })
-    currentUser.value = session.displayName || session.username
+    currentUser.value = (session.displayName?.trim() && session.displayName.trim().toLowerCase() !== session.username.toLowerCase() ? session.displayName.trim() : '姓名待补充')
     currentUsername.value = session.username
     currentRole.value = session.role
     currentRoles.value = session.roles?.length ? [...new Set(session.roles)] : [session.role]
@@ -1326,7 +1341,7 @@ export function usePdmWorkspace() {
     accessibleCompanies.value = session.accessibleCompanies ?? []
     if (activeCompanyId.value) window.localStorage.setItem('pdm_active_organization', activeCompanyId.value)
     if (currentProfile.value?.username !== session.username) {
-      currentProfile.value = { username: session.username, displayName: session.displayName || session.username, gender: 'unspecified' }
+      currentProfile.value = { username: session.username, displayName: (session.displayName?.trim() && session.displayName.trim().toLowerCase() !== session.username.toLowerCase() ? session.displayName.trim() : '姓名待补充'), gender: 'unspecified' }
     }
     window.localStorage.setItem(sessionKey, JSON.stringify(session))
     window.sessionStorage.removeItem(sessionKey)
@@ -1806,6 +1821,7 @@ export function usePdmWorkspace() {
     try {
       const saved = await updateMainProjectStaffingRequest(projectId, input, accessToken)
       await reload(project.value.id)
+      await loadMyApprovalTasks()
       return saved
     } finally { operationPending.value = false }
   }
@@ -2057,7 +2073,9 @@ export function usePdmWorkspace() {
     if (session && session.accessToken !== accessToken) await applySession(session)
   }
 
+  const refreshAuthorization = () => { void renewPersistentSession().then(() => reload()) }
   onMounted(async () => {
+    window.addEventListener('pdm-authorization-changed', refreshAuthorization)
     window.addEventListener('storage', syncBrowserSession)
     sessionHeartbeatTimer = window.setInterval(() => { if (authenticated.value && accessToken) void heartbeatSession(accessToken).catch(() => {}) }, 60_000)
     window.addEventListener('pdm-session-expired', handleSessionExpired)
@@ -2108,6 +2126,7 @@ export function usePdmWorkspace() {
   })
 
   onBeforeUnmount(() => {
+    window.removeEventListener('pdm-authorization-changed', refreshAuthorization)
     window.removeEventListener('storage', syncBrowserSession)
     if (sessionHeartbeatTimer !== undefined) window.clearInterval(sessionHeartbeatTimer)
     window.removeEventListener('pdm-session-expired', handleSessionExpired)
@@ -2157,6 +2176,8 @@ export function usePdmWorkspace() {
     materialCodeApplications,
     selectedNode,
     selectedBomItem,
+    readableDocumentIds,
+    bomItemForNode,
     filteredTree,
     filteredDrawings,
     documentFilter,
@@ -2301,6 +2322,7 @@ export function usePdmWorkspace() {
     emergencyDecideApprovalTask,
     loadAuditEntries,
     loadMyApprovalTasks,
+    refreshApprovalInbox,
     markNotificationRead,
     markAllNotificationsRead,
     requestEditLockRelease,

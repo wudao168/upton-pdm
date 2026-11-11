@@ -13,20 +13,43 @@ public sealed class InMemoryProjectFileRepository(TimeProvider timeProvider) : I
     public Task<ProjectFile?> FindAsync(Guid fileId, CancellationToken cancellationToken) => Task.FromResult(files.GetValueOrDefault(fileId));
     public Task<IReadOnlyList<ProjectFileVersion>> ListVersionsAsync(Guid fileId, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<ProjectFileVersion>>(versions.Values.Where(item => item.ProjectFileId == fileId).OrderByDescending(item => item.VersionNumber).ToArray());
     public Task<ProjectFileVersion?> FindVersionAsync(Guid fileId, Guid versionId, CancellationToken cancellationToken) => Task.FromResult(versions.TryGetValue(versionId, out var version) && version.ProjectFileId == fileId ? version : null);
-    public Task<ProjectFile> AddVersionAsync(StoredProjectFileUpload upload, string actor, string? comment, CancellationToken cancellationToken)
+    public Task<ProjectFile> AddVersionAsync(StoredProjectFileUpload upload, string actor, string? comment, CancellationToken cancellationToken) =>
+        Task.FromResult(AddVersion(upload, actor, comment));
+
+    internal ProjectFile AddVersion(StoredProjectFileUpload upload, string actor, string? comment)
+    {
+        lock (files) return AddVersion(upload, upload.ProjectId, FindActive(upload), actor, comment);
+    }
+
+    internal (ProjectFile Workbook, ProjectFile? Evidence) AddFormVersions(Guid rootId, StoredProjectFileUpload workbook,
+        StoredProjectFileUpload? evidence, ProjectFileFormSummary form, int expectedVersion, string actor)
     {
         lock (files)
         {
-            var file = files.Values.FirstOrDefault(item => item.FolderId == upload.FolderId && item.DeletedAt is null && item.FileName.Equals(upload.FileName, StringComparison.OrdinalIgnoreCase));
-            var now = timeProvider.GetUtcNow();
-            file ??= new ProjectFile(Guid.NewGuid(), upload.ProjectId, upload.FolderId, upload.FileName, actor, now, actor, now, null, null);
-            var number = versions.Values.Where(item => item.ProjectFileId == file.Id).Select(item => item.VersionNumber).DefaultIfEmpty().Max() + 1;
-            var version = new ProjectFileVersion(upload.VersionId, file.Id, number, upload.FileName, upload.StorageRoot, upload.RelativePath, upload.Length, upload.Sha256, actor, upload.StoredAt, comment);
-            versions[version.Id] = version;
-            file = file with { UpdatedBy = actor, UpdatedAt = now, CurrentVersion = version };
-            files[file.Id] = file;
-            return Task.FromResult(file);
+            var target = FindActive(workbook);
+            var evidenceTarget = evidence is null ? null : FindActive(evidence);
+            if (target?.Id != form.FileId || evidenceTarget?.Id != form.EvidenceFileId || NextVersion(target) != expectedVersion)
+                throw new PdmConflictException("存档文件已变动或存在同名文件，请刷新后重试。");
+            return (AddVersion(workbook, rootId, target, actor, form.Number),
+                evidence is null ? null : AddVersion(evidence, rootId, evidenceTarget, actor, $"{form.Number} · 对应 Excel V{expectedVersion}"));
         }
+    }
+
+    private ProjectFile? FindActive(StoredProjectFileUpload upload) => files.Values.FirstOrDefault(item =>
+        item.FolderId == upload.FolderId && item.DeletedAt is null && item.FileName.Equals(upload.FileName, StringComparison.OrdinalIgnoreCase));
+
+    private int NextVersion(ProjectFile? file) => file is null ? 1 : versions.Values.Where(item => item.ProjectFileId == file.Id)
+        .Select(item => item.VersionNumber).DefaultIfEmpty().Max() + 1;
+
+    private ProjectFile AddVersion(StoredProjectFileUpload upload, Guid rootId, ProjectFile? file, string actor, string? comment)
+    {
+        var now = timeProvider.GetUtcNow();
+        file ??= new ProjectFile(Guid.NewGuid(), rootId, upload.FolderId, upload.FileName, actor, now, actor, now, null, null);
+        var version = new ProjectFileVersion(upload.VersionId, file.Id, NextVersion(file), upload.FileName, upload.StorageRoot, upload.RelativePath, upload.Length, upload.Sha256, actor, upload.StoredAt, comment);
+        versions[version.Id] = version;
+        file = file with { UpdatedBy = actor, UpdatedAt = now, CurrentVersion = version };
+        files[file.Id] = file;
+        return file;
     }
     public Task<ProjectFile> RenameAsync(Guid fileId, string fileName, string actor, CancellationToken cancellationToken) => Update(fileId, item => item with { FileName = fileName, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() });
     public Task<ProjectFile> UpdateDescriptionAsync(Guid fileId, string? description, string actor, CancellationToken cancellationToken) => Update(fileId, item => item with { Description = description, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow() });

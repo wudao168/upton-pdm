@@ -38,9 +38,9 @@ public sealed class MaterialNotificationPolicyTests
     }
 
     [Theory]
-    [InlineData("Engineer", false)]
+    [InlineData("Engineer", true)]
     [InlineData("Approver", true)]
-    public async Task MixedAdministratorUsesTheBusinessRolesNotificationPermission(string businessRole, bool expected)
+    public async Task MixedTemplatesCombineTheirConfiguredNotificationGrants(string businessRole, bool expected)
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         await repository.CreateUserAsync(new(Guid.NewGuid(), "mixed-notice", "兼任岗位", "unused", UserRole.Administrator, true, RoleCodes: ["Administrator", businessRole]), default);

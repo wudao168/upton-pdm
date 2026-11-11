@@ -120,7 +120,8 @@ describe('ProjectFileLibrary', () => {
 
     await wrapper.find('button[title="预览 会议纪要.pdf"]').trigger('click')
 
-    expect(api.downloadProjectFile).toHaveBeenCalledWith('project-1', file, 'token', undefined, true)
+    expect(api.readProjectFileContent).toHaveBeenCalledWith('project-1', file.id, 'token')
+    expect(api.downloadProjectFile).not.toHaveBeenCalled()
   })
 
   it('项目文件列表支持选择全部并按目录权限显示批量操作', async () => {

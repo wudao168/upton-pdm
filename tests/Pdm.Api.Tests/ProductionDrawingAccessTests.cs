@@ -20,6 +20,33 @@ namespace Upton.Pdm.Api.Tests;
 public sealed class ProductionDrawingAccessTests(PdmApiFactory factory) : IClassFixture<PdmApiFactory>
 {
     [Fact]
+    public async Task FrozenWorkingModelStepIsDeliveredOnlyThroughItsPublishedPackage()
+    {
+        using var fixture = await CreateFixtureAsync();
+        var source = fixture.ModelVersion with { Status = DocumentVersionStatus.Work,
+            Revision = RevisionLabel.InitialWork(), ReleasePackageId = null, Preview = null };
+        Store<DocumentVersion>(fixture.Repository, "versions")[source.Id] = source;
+        var package = fixture.Package with { VersionBindings = [
+            new(fixture.Drawing.Id, fixture.DrawingVersion.Id, "B", fixture.DrawingVersion.Sha256, true, fixture.Drawing.FileName, false),
+            new(fixture.Model.Id, source.Id, "W1", source.Sha256, false, fixture.Model.FileName, false)] };
+        Store<ReleasePackage>(fixture.Repository, "packages")[package.Id] = package;
+        await fixture.Repository.AttachReleasePreviewArtifactsAsync(package.Id,
+            new Dictionary<Guid, DocumentPreviewArtifact> { [fixture.Model.Id] = fixture.ModelVersion.Preview! }, default);
+        using var response = await fixture.Client.GetAsync(fixture.PreviewUrl(true));
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        Assert.Equal("model/step", response.Content.Headers.ContentType!.MediaType);
+        Assert.Equal("正式STEP", await response.Content.ReadAsStringAsync());
+        using var archiveResponse = await fixture.DownloadArchiveAsync(true);
+        Assert.True(archiveResponse.IsSuccessStatusCode, await archiveResponse.Content.ReadAsStringAsync());
+        using var archive = new ZipArchive(await archiveResponse.Content.ReadAsStreamAsync());
+        Assert.Single(archive.Entries, entry => entry.FullName.EndsWith(".step", StringComparison.Ordinal));
+        Assert.Equal(source, await fixture.Repository.FindDocumentVersionAsync(fixture.Model.Id, source.Id, default));
+        Store<ReleasePackage>(fixture.Repository, "packages")[package.Id] = package;
+        using var missing = await fixture.Client.GetAsync(fixture.PreviewUrl(true));
+        Assert.Equal(HttpStatusCode.Conflict, missing.StatusCode);
+    }
+
+    [Fact]
     public async Task ReusedDrawingVersionKeepsBothPublicationPdfsAndArchiveSelectionsSeparate()
     {
         using var fixture = await CreateFixtureAsync();
@@ -84,7 +111,7 @@ public sealed class ProductionDrawingAccessTests(PdmApiFactory factory) : IClass
         var rows = sheet.Descendants(ns + "row").ToArray();
         var header = rows.Single(row => row.Elements(ns + "c").Any(cell => cell.Value == "BOM总量"));
         var data = rows.SkipWhile(row => row != header).Skip(1).First();
-        foreach (var expected in new[] { ("BOM总量", "6"), ("已提前发布", "0"), ("本次新增下发", "6"), ("单套数量", "2"), ("整套数量", "3") })
+        foreach (var expected in new[] { ("BOM总量", "6"), ("前期已发布", "0"), ("本次新增下发", "6"), ("单套数量", "2"), ("整套数量", "3") })
         {
             var column = new string(header.Elements(ns + "c").Single(cell => cell.Value == expected.Item1).Attribute("r")!.Value.TakeWhile(char.IsLetter).ToArray());
             Assert.Equal(expected.Item2, data.Elements(ns + "c").Single(cell => new string(cell.Attribute("r")!.Value.TakeWhile(char.IsLetter).ToArray()) == column).Value);
@@ -240,10 +267,17 @@ public sealed class ProductionDrawingAccessTests(PdmApiFactory factory) : IClass
         var client = factory.CreateClient();
         Authorize(client, "admin", "Administrator");
         var repository = (InMemoryPdmRepository)factory.Services.GetRequiredService<IPdmRepository>();
+        var company = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations.First(item => item.IsActive).Id;
+        foreach (var (username, role) in new[] { ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer) })
+            if (await repository.FindUserAsync(username, default) is null)
+                await repository.CreateUserAsync(new(Guid.NewGuid(), username, username == "admin" ? "测试管理员" : "测试工程师", "unused", role, true, CompanyId: company), default);
         var root = Path.Combine(Path.GetTempPath(), "pdm-production-access-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
-        var project = await repository.CreateProjectAsync(new("PROD-ACCESS-" + Guid.NewGuid().ToString("N"),
-            "生产取用验收", "admin", root, root), "admin", default);
+        Project project;
+        TenantContext.Set(new(Guid.NewGuid(), company, company, "admin", "Administrator", false, new HashSet<string>()));
+        try { project = await repository.CreateProjectAsync(new("PROD-ACCESS-" + Guid.NewGuid().ToString("N"),
+            "生产取用验收", "admin", root, root), "admin", default); }
+        finally { TenantContext.Clear(); }
         var model = await repository.RegisterDocumentAsync(new(project.Id, "PART", "模型", "PART.SLDPRT", DocumentKind.Part), "admin", default);
         var drawing = await repository.RegisterDocumentAsync(new(project.Id, "DRAWING", "图纸", "DRAWING.SLDDRW",
             DocumentKind.Drawing, RelatedModelDocumentId: model.Id), "admin", default);

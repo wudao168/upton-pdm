@@ -234,13 +234,13 @@ public sealed partial class MySqlPdmRepository
             var oldProjectSequence = 0;
             if (codeChanged && !TryParseProjectSequence(project.Code, project.ProjectTypeCode, oldOrganization.ProjectCompanyCode, out oldProjectSequence))
                 throw new PdmRuleException("项目号不是系统自动编号，不能变更所属公司或项目类型。");
-            var projectSequence = organizationChanged
-                ? await ReserveProjectNumberAsync(connection, transaction, organization.Id, cancellationToken)
+            var projectSequence = codeChanged
+                ? await ReserveProjectNumberAsync(connection, transaction, organization.Id, projectTypeCode, cancellationToken)
                 : oldProjectSequence;
-            if (organizationChanged)
+            if (codeChanged)
                 await connection.ExecuteAsync(new CommandDefinition(
-                    "INSERT IGNORE INTO released_project_number(organization_id,sequence_value,released_at) VALUES(@OrganizationId,@Sequence,@Now)",
-                    new { OrganizationId = oldOrganization.Id, Sequence = oldProjectSequence, Now = now }, transaction, cancellationToken: cancellationToken));
+                    "INSERT IGNORE INTO released_project_type_number(organization_id,project_type_code,sequence_value,released_at) VALUES(@OrganizationId,@ProjectTypeCode,@Sequence,@Now)",
+                    new { OrganizationId = oldOrganization.Id, project.ProjectTypeCode, Sequence = oldProjectSequence, Now = now }, transaction, cancellationToken: cancellationToken));
 
             var existingCustomerSequence = project.CustomerProjectSequence
                 ?? TryRecoverCustomerProjectSequence(project.DeviceModel, project.CustomerCode);
@@ -372,6 +372,15 @@ public sealed partial class MySqlPdmRepository
         var now = timeProvider.GetUtcNow().UtcDateTime;
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var current = await connection.QuerySingleOrDefaultAsync<dynamic>(new CommandDefinition(
+            "SELECT execution_unit_id ExecutionUnitId FROM project WHERE id=@ProjectId AND parent_project_id IS NULL FOR UPDATE",
+            new { ProjectId = projectId }, transaction, cancellationToken: cancellationToken));
+        if (current is null) throw new PdmNotFoundException("主项目不存在。");
+        if ((Guid?)current.ExecutionUnitId == executionUnitId)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return await FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("主项目不存在。");
+        }
         var affected = await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE project SET execution_unit_id=@ExecutionUnitId,row_version=row_version+1,updated_at=@Now WHERE id=@ProjectId AND parent_project_id IS NULL",
             new { ProjectId = projectId, ExecutionUnitId = executionUnitId, Now = now }, transaction, cancellationToken: cancellationToken));

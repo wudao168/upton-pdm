@@ -7,9 +7,10 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class IndependentBusinessPermissionTests
 {
     [Fact]
-    public async Task PlanEditingRequiresBothRoleGrantAndConfiguredProjectScope()
+    public async Task PlanEditingUsesUnifiedTemplateAndLegacySettingsCannotOverrideIt()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("engineer", UserRole.Engineer), ("other", UserRole.Engineer));
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         await repository.SetMainProjectStaffingAsync(project.Id, new("engineer", [], []), "admin", default);
         Assert.True(await ProjectPermissionPolicy.CanAsync(repository, project.Id, "engineer", UserRole.Engineer, PermissionCodes.ProjectPlanEdit, default));
@@ -18,6 +19,8 @@ public sealed class IndependentBusinessPermissionTests
         await repository.UpdateProjectPermissionSettingsAsync(new(settings.Rules.ToDictionary(pair => pair.Key,
             pair => (IReadOnlyList<string>)(pair.Key == ProjectPermissionPositions.MainManager
                 ? pair.Value.Where(code => code != PermissionCodes.ProjectPlanEdit && !RolePermissionCatalog.Permissions.Any(item => item.Code == code && item.LegacyPermission == PermissionCodes.ProjectPlanEdit)).ToArray() : pair.Value))), default);
+        Assert.True(await ProjectPermissionPolicy.CanAsync(repository, project.Id, "engineer", UserRole.Engineer, PermissionCodes.ProjectPlanEdit, default));
+        await PermissionTestUsers.Revoke(repository, "Engineer", PermissionCodes.ProjectPlanEdit);
         Assert.False(await ProjectPermissionPolicy.CanAsync(repository, project.Id, "engineer", UserRole.Engineer, PermissionCodes.ProjectPlanEdit, default));
     }
 
@@ -25,6 +28,7 @@ public sealed class IndependentBusinessPermissionTests
     public async Task QualityUploadKindsCanBeGrantedSeparately()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("engineer", UserRole.Engineer));
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.QualityIncomingUpload], default);
         Assert.True(await QualityUploadPolicy.CanAsync(repository, project.Id, "incoming", "engineer", UserRole.Engineer, default));
@@ -38,6 +42,7 @@ public sealed class IndependentBusinessPermissionTests
     public async Task ContactAndNameplateEditingCanBeGrantedSeparately()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("engineer", UserRole.Engineer));
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         var contacts = new ProjectContactInformationService(repository, new InMemoryProjectContactInformationRepository(), TimeProvider.System);
         var nameplates = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(repository), TimeProvider.System);
@@ -45,7 +50,7 @@ public sealed class IndependentBusinessPermissionTests
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectContactEdit], default);
         Assert.True((await contacts.GetAsync(project.Id, "engineer", UserRole.Engineer, default)).CanEdit);
         Assert.False((await nameplates.GetAsync(project.Id, "engineer", UserRole.Engineer, default)).CanEdit);
-        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit], default);
+        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit, "project.nameplate.execution.edit"], default);
         Assert.False((await contacts.GetAsync(project.Id, "engineer", UserRole.Engineer, default)).CanEdit);
         Assert.True((await nameplates.GetAsync(project.Id, "engineer", UserRole.Engineer, default)).CanEdit);
     }
@@ -54,13 +59,16 @@ public sealed class IndependentBusinessPermissionTests
     public async Task BudgetReserveAndSettlementCanBeGrantedSeparately()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("engineer", UserRole.Engineer));
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         var service = new ProjectBudgetService(repository, new InMemoryProjectBudgetRepository(), new InMemoryU9ProcurementRepository(), TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectBudgetView, PermissionCodes.ProjectBudgetReserve], default);
+        await PermissionTestUsers.Scope(repository, "Engineer", PermissionCodes.ProjectBudgetView, "company");
         var reserve = await service.GetAsync(project.Id, "engineer", UserRole.Engineer, default);
         Assert.True(reserve.CanViewReserve);
         Assert.False(reserve.CanViewSettlement);
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectBudgetView, PermissionCodes.ProjectBudgetSettlementView], default);
+        await PermissionTestUsers.Scope(repository, "Engineer", PermissionCodes.ProjectBudgetView, "company");
         var settlement = await service.GetAsync(project.Id, "engineer", UserRole.Engineer, default);
         Assert.False(settlement.CanViewReserve);
         Assert.True(settlement.CanViewSettlement);

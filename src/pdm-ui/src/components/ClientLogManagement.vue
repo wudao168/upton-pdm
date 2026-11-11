@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
+import { useUserDisplayName as usePersonDisplayName } from '../userDisplay'
+const displayUserName = usePersonDisplayName()
 import { onMounted, ref, watch } from 'vue'
 import { ElDatePicker } from 'element-plus'
 import { readClientLogs, downloadClientLogs, type ClientLogPage } from '../api'
@@ -68,7 +71,7 @@ watch(() => props.token, () => load(true))
       <thead><tr><th>计算机 / 用户</th><th>组件 / 版本</th><th>日志类型</th><th>记录数</th><th>覆盖时间</th><th>上传时间</th></tr></thead>
       <tbody>
         <tr v-for="row in data.items" :key="row.id">
-          <td><strong>{{ row.machine }}</strong><br />{{ row.username }}<small>设备：{{ row.deviceId }}</small></td>
+          <td><strong>{{ row.machine }}</strong><br /><PersonName :name="displayUserName(row.username)" /><small>设备：{{ row.deviceId }}</small></td>
           <td>{{ row.component === 'desktop' ? '桌面客户端' : row.component === 'preview-agent' ? '转图代理' : 'SolidWorks 插件' }}<br />{{ row.version || '版本未记录' }}<small>界面：{{ row.component === 'preview-agent' ? '代理前台界面' : row.uiVersion || '尚未加载网页界面' }}</small></td>
           <td :class="{ 'log-error': row.kind === 'error' }">{{ row.kind === 'error' ? '错误日志' : '运行日志' }}</td><td>{{ row.entryCount }}</td>
           <td>{{ time(row.startedAt) }}<br />至 {{ time(row.endedAt) }}</td><td>{{ time(row.receivedAt) }}</td>
@@ -86,7 +89,7 @@ header h2 { margin: 0 0 8px; } header p, .log-hint { color: var(--pdm-text-soft)
 .log-filters { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; margin: 18px 0; }
 .log-filters label { display: grid; gap: 6px; font-size: 13px; }
 input, select { min-height: 34px; border: 1px solid var(--pdm-border); border-radius: 4px; padding: 5px 8px; max-width: 230px; }
-button { border: 1px solid var(--pdm-border); border-radius: 4px; background: white; padding: 8px 12px; cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
+button { border: 1px solid var(--pdm-border); border-radius: 4px; background: var(--pdm-surface); padding: 8px 12px; cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
 .log-actions, footer { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; } footer { justify-content: flex-end; margin-top: 16px; }
 .log-table-wrap { overflow: auto; } table { width: 100%; border-collapse: collapse; font-size: 13px; } th { text-align: left; background: var(--pdm-surface-muted); } td, th { padding: 12px; border-bottom: 1px solid var(--pdm-surface-muted); vertical-align: top; } small { display: block; max-width: 240px; overflow-wrap: anywhere; color: var(--pdm-text-soft); margin-top: 5px; }
 .log-date-range { min-width: 0; max-width: 100%; }

@@ -9,6 +9,17 @@ namespace Upton.Pdm.Infrastructure;
 
 public sealed partial class MySqlPdmRepository
 {
+    public async Task<IReadOnlyDictionary<Guid, string>> PublishedDocumentRevisionsAsync(IReadOnlyCollection<Guid> documentIds, IReadOnlyCollection<Guid> packageIds, CancellationToken ct)
+    {
+        if (documentIds.Count == 0 || packageIds.Count == 0) return new Dictionary<Guid, string>();
+        await using var connection = await OpenAsync(ct);
+        var rows = await connection.QueryAsync<(Guid DocumentId, string Label)>(new CommandDefinition(
+            "SELECT document_id,revision_label FROM document_version WHERE document_id IN @DocumentIds AND version_status='Released' AND release_package_id IN @PackageIds",
+            new { DocumentIds = documentIds, PackageIds = packageIds }, cancellationToken: ct));
+        return rows.GroupBy(row => row.DocumentId).ToDictionary(group => group.Key,
+            group => group.Select(row => RevisionLabel.Parse(row.Label)).MaxBy(revision => revision.BaseRevision).Display);
+    }
+
     public async Task<IReadOnlyList<DocumentVersion>> ListDocumentVersionsAsync(Guid documentId, CancellationToken cancellationToken, int? limit = null)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -681,6 +692,7 @@ public sealed partial class MySqlPdmRepository
               AND locks_documents=1
               AND release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')
               AND preview_state IN ('Pending','WaitingForServer','Failed')
+              AND NOT (preview_state='Failed' AND COALESCE(preview_error,'') LIKE '逐项转图结果：%')
               AND preview_attempts < @MaxAttempts
             ORDER BY preview_updated_at IS NULL DESC, preview_updated_at, created_at
             LIMIT @Limit
@@ -753,6 +765,23 @@ public sealed partial class MySqlPdmRepository
             VersionSelect + " WHERE version_status='Released' AND " + versionScope,
             new { PackageId = releasePackageId, ReusedIds = reusedIds }, cancellationToken: cancellationToken));
         var updated = new List<DocumentVersion>();
+        var modelArtifacts = new Dictionary<Guid, DocumentPreviewArtifact>(package.ModelDeliveryArtifacts);
+        foreach (var binding in package.VersionBindings?.Where(item => !item.Publish) ?? [])
+        {
+            if (!previews.TryGetValue(binding.DocumentId, out var artifact)) continue;
+            var document = await FindDocumentAsync(binding.DocumentId, cancellationToken);
+            var source = await FindDocumentVersionAsync(binding.DocumentId, binding.VersionId, cancellationToken);
+            if (document?.Kind is not (DocumentKind.Part or DocumentKind.Assembly)
+                || source is null || source.Sha256 != binding.Sha256 || artifact.Format != DocumentPreviewFormat.Step
+                || !string.Equals(artifact.SourceSha256, binding.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new PdmConflictException("STEP交付产物与发布包冻结模型版本不一致，未挂接。");
+            modelArtifacts[binding.DocumentId] = artifact;
+            updated.Add(source with { Preview = artifact });
+        }
+        if (modelArtifacts.Count != package.ModelDeliveryArtifacts.Count || updated.Count > 0)
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE release_package SET model_delivery_artifacts_json=@Artifacts WHERE id=@Id",
+                new { Id = package.Id, Artifacts = JsonSerializer.Serialize(modelArtifacts, jsonOptions) }, cancellationToken: cancellationToken));
         foreach (var row in rows)
         {
             var version = MapDocumentVersion(row);

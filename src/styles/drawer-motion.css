@@ -1,0 +1,55 @@
+/* BoardUI project-board：560ms 展开、480ms 向右下收拢。仅作用于右侧面板。 */
+@layer pdm-button-sizing {
+  :root body .el-overlay-dialog:has(> .el-dialog:not(.is-fullscreen)) { padding: 12px !important; box-sizing: border-box !important; }
+  :root body .el-overlay-dialog > .el-dialog:not(.is-fullscreen),
+  :root body .el-drawer.rtl,
+  :root body .pdm-dialog-backdrop > .pdm-custom-drawer {
+    border-radius: 24px !important; overflow: hidden !important;
+    max-width: calc(100vw - 24px) !important; max-height: calc(100dvh - 24px) !important;
+    transform-origin: 100% 100% !important;
+    box-shadow: -12px 12px 48px var(--pdm-shadow-strong) !important;
+    animation: none !important;
+  }
+  :root body .el-overlay-dialog > .el-dialog:not(.is-fullscreen) { height: 100% !important; margin: 0 !important; }
+  :root body .el-drawer.rtl { top: 12px !important; right: 12px !important; bottom: 12px !important; height: auto !important; transition: none !important; }
+  :root body .pdm-dialog-backdrop:has(> .pdm-custom-drawer) { padding: 12px !important; box-sizing: border-box !important; }
+  :root body .pdm-dialog-backdrop > .pdm-custom-drawer { height: 100% !important; }
+
+  :root body .dialog-fade-enter-active:has(.el-dialog:not(.is-fullscreen)),
+  :root body .el-drawer-fade-enter-active:has(.el-drawer.rtl),
+  :root body .pdm-drawer-enter-active { animation: pdm-panel-backdrop-in 560ms linear both !important; transition: none !important; }
+  :root body .dialog-fade-leave-active:has(.el-dialog:not(.is-fullscreen)),
+  :root body .el-drawer-fade-leave-active:has(.el-drawer.rtl),
+  :root body .pdm-drawer-leave-active { animation: pdm-panel-backdrop-out 480ms linear both !important; transition: none !important; pointer-events: none !important; }
+  :root body .dialog-fade-enter-active .el-dialog:not(.is-fullscreen),
+  :root body .el-drawer-fade-enter-active .el-drawer.rtl,
+  :root body .pdm-drawer-enter-active > .pdm-custom-drawer { animation: pdm-panel-unfold 560ms cubic-bezier(.16,1,.3,1) both !important; will-change: transform, clip-path, opacity; }
+  :root body .dialog-fade-leave-active .el-dialog:not(.is-fullscreen),
+  :root body .el-drawer-fade-leave-active .el-drawer.rtl,
+  :root body .pdm-drawer-leave-active > .pdm-custom-drawer { animation: pdm-panel-fold 480ms cubic-bezier(.55,0,.85,.4) both !important; will-change: transform, clip-path, opacity; }
+  @media (max-width: 600px) {
+    :root body .el-overlay-dialog > .el-dialog:not(.is-fullscreen), :root body .el-drawer.rtl, :root body .pdm-dialog-backdrop > .pdm-custom-drawer { border-radius: 16px !important; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :root body :is(.dialog-fade-enter-active,.dialog-fade-leave-active):has(.el-dialog:not(.is-fullscreen)),
+    :root body :is(.el-drawer-fade-enter-active,.el-drawer-fade-leave-active):has(.el-drawer.rtl),
+    :root body :is(.pdm-drawer-enter-active,.pdm-drawer-leave-active) { animation-duration: 1ms !important; }
+    :root body :is(.dialog-fade-enter-active,.dialog-fade-leave-active) .el-dialog:not(.is-fullscreen),
+    :root body :is(.el-drawer-fade-enter-active,.el-drawer-fade-leave-active) .el-drawer.rtl,
+    :root body :is(.pdm-drawer-enter-active,.pdm-drawer-leave-active) > .pdm-custom-drawer { animation: none !important; transform: none !important; clip-path: none !important; }
+  }
+}
+@keyframes pdm-panel-backdrop-in { from { opacity: 0; } 35%, to { opacity: 1; } }
+@keyframes pdm-panel-backdrop-out { from, 50% { opacity: 1; } to { opacity: 0; } }
+@keyframes pdm-panel-unfold {
+  0% { opacity: 0; transform: translate(36px,36px) scale(.12,.02); clip-path: polygon(55% 0,100% 0,100% 100%,95% 100%,90% 75%,75% 50%,60% 25%); }
+  38% { opacity: 1; transform: translate(12px,18px) scale(.65,.55); clip-path: polygon(8% 0,100% 0,100% 100%,40% 100%,25% 75%,12% 50%,8% 25%); }
+  76% { opacity: 1; transform: translate(0,0) scale(.98,.99); clip-path: polygon(0 0,100% 0,100% 100%,0 100%,0 75%,0 50%,0 25%); }
+  100% { opacity: 1; transform: none; clip-path: polygon(0 0,100% 0,100% 100%,0 100%,0 75%,0 50%,0 25%); }
+}
+@keyframes pdm-panel-fold {
+  0% { opacity: 1; transform: none; clip-path: polygon(0 0,100% 0,100% 100%,0 100%,0 75%,0 50%,0 25%); }
+  45% { opacity: 1; transform: translate(8px,14px) scale(.92,.86); clip-path: polygon(0 0,100% 0,100% 100%,35% 100%,18% 75%,6% 50%,0 25%); }
+  78% { opacity: .85; transform: translate(26px,30px) scale(.42,.24); clip-path: polygon(20% 0,100% 0,100% 100%,85% 100%,65% 75%,35% 50%,22% 25%); }
+  100% { opacity: 0; transform: translate(36px,36px) scale(.12,.02); clip-path: polygon(55% 0,100% 0,100% 100%,95% 100%,90% 75%,75% 50%,60% 25%); }
+}

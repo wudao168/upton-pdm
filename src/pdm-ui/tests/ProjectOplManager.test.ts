@@ -12,14 +12,30 @@ const exporter = vi.hoisted(() => ({ downloadOplWorkbook: vi.fn() }))
 vi.mock('../src/oplWorkbook', () => exporter)
 let wrapper: ReturnType<typeof mount>
 const issue = { id: 'i1', projectId: 'p1', number: 1, description: '相机支架松动', priority: '高', status: '待处理', owner: '', dueDate: '2020-01-01', solution: '', createdBy: 'admin', createdAt: '2026-10-12T00:00:00Z', updatedBy: 'admin', rowVersion: 3, attachments: [] }
-async function setup(project = { id: 'p1', code: 'P700012', name: 'TEST 4' } as ProjectSummary) {
+async function setup(project = { id: 'p1', code: 'P700012', name: 'TEST 4' } as ProjectSummary, mode: 'list' | 'board' = 'list') {
   wrapper = mount(ProjectOplManager, { attachTo: document.body, props: { project, token: 'token' }, global: { plugins: [ElementPlus], stubs: { PdfDrawingViewer: { props: ['url'], template: '<div class="pdf-preview-stub" :data-url="url" />' } } } })
   await flushPromises()
+  if (mode === 'list') await click('列表', wrapper.element)
 }
 const click = async (label: string, root: ParentNode = document.body) => { (Array.from(root.querySelectorAll('button')).find(b => b.textContent?.trim() === label) as HTMLButtonElement).click(); await flushPromises() }
-beforeEach(() => { vi.clearAllMocks(); api.markProjectOplViewed.mockResolvedValue(undefined); api.readProjectOpl.mockResolvedValue({ rows: [{ issue, canEdit: true, canComplete: true }], people: [] }); api.saveProjectOpl.mockResolvedValue(issue); api.getProjectExportMetadata.mockResolvedValue({title:'项目资料',company:'公司',scope:'当前项目',versionLabel:'版本',version:'—',exportedAt:'2026-10-14T12:00:00+08:00',exportedBy:'管理员',fields:[]}) })
+const ResizeObserverMock = globalThis.ResizeObserver
+beforeEach(() => { vi.stubGlobal('ResizeObserver', ResizeObserverMock); vi.clearAllMocks(); api.markProjectOplViewed.mockResolvedValue(undefined); api.readProjectOpl.mockResolvedValue({ rows: [{ issue, canEdit: true, canComplete: true }], people: [] }); api.saveProjectOpl.mockResolvedValue(issue); api.getProjectExportMetadata.mockResolvedValue({title:'项目资料',company:'公司',scope:'当前项目',versionLabel:'版本',version:'—',exportedAt:'2026-10-14T12:00:00+08:00',exportedBy:'管理员',fields:[]}) })
 afterEach(() => { wrapper?.unmount(); document.body.innerHTML = ''; vi.unstubAllGlobals() })
 describe('OPL drawer', () => {
+  it.each(['board', 'row', 'view'] as const)('opens %s directly in edit mode with the same saved values and version', async entry => {
+    await setup(undefined, entry === 'board' ? 'board' : 'list')
+    if (entry === 'board') await wrapper.get('[data-issue-id="i1"] .opl-board-card__open').trigger('click')
+    else if (entry === 'row') await wrapper.get('tbody tr').trigger('click')
+    else await click('查看', wrapper.element)
+    await flushPromises()
+    const description = document.body.querySelector('textarea[aria-label="问题描述"]') as HTMLTextAreaElement
+    expect(description.value).toBe(issue.description)
+    expect(description.disabled).toBe(false)
+    expect(document.body.textContent).not.toContain('编辑问题')
+    description.value = '已直接修改'; description.dispatchEvent(new Event('input', { bubbles: true })); await flushPromises()
+    await click('保存问题')
+    expect(api.saveProjectOpl).toHaveBeenCalledWith('p1', 'i1', expect.objectContaining({ description: '已直接修改', expectedRowVersion: 3 }), [], 'token')
+  })
   it('keeps NEW until the individual detail is viewed, then clears only that marker and retains overdue', async () => {
     api.readProjectOpl.mockResolvedValue({ rows: [{ issue, canEdit: false, canComplete: false, isNew: true }, { issue: { ...issue, id: 'i2', number: 2 }, canEdit: true, canComplete: true, isNew: true }], people: [] })
     await setup()
@@ -194,7 +210,8 @@ describe('OPL drawer', () => {
     await setup()
     await wrapper.get('tbody tr').trigger('click')
     expect(document.body.textContent).toContain('查看开口问题')
-    expect(document.body.querySelector('textarea')?.disabled).toBe(true)
+    expect(document.body.querySelector('textarea')).toBeNull()
+    expect(document.body.textContent).not.toContain('保存问题')
   })
   it('previews PDF attachments without opening the row editor and releases the URL', async () => {
     const NativeURL = URL
@@ -216,7 +233,7 @@ describe('OPL drawer', () => {
       { issue: { ...issue, id: 'whole', description: '项目整体问题' }, canEdit: true, canComplete: true },
       { issue: { ...issue, id: 'child', description: '当前子项目问题', relatedProjectId: 'child-1' }, canEdit: true, canComplete: true },
       { issue: { ...issue, id: 'other', description: '其他子项目问题', relatedProjectId: 'child-2' }, canEdit: true, canComplete: true },
-    ], people: [], rootProject: { id: 'root', code: 'P700012', name: '主设备' }, subprojects: [{ id: 'child-1', code: 'P700012-1', name: '子设备' }] })
+    ], people: [], rootProject: { id: 'root', code: 'P700012', name: '主设计备' }, subprojects: [{ id: 'child-1', code: 'P700012-1', name: '子设备' }] })
     await setup({ id: 'child-1', parentProjectId: 'root', code: 'P700012-1', name: '子设备' } as ProjectSummary)
     expect(wrapper.text()).toContain('当前子项目问题')
     expect(wrapper.text()).not.toContain('项目整体问题')
@@ -233,10 +250,10 @@ describe('OPL drawer', () => {
     expect(wrapper.text()).toContain('其他子项目问题')
   })
   it('shows the main project and offers optional children when opened from a child', async () => {
-    api.readProjectOpl.mockResolvedValue({ rows: [{ issue: { ...issue, relatedProjectId: 'child-1' }, canEdit: true, canComplete: true }], people: [], rootProject: { id: 'root-1', code: 'P700012', name: '主设备' }, subprojects: [{ id: 'child-1', code: 'P700012-1', name: '子设备' }] })
+    api.readProjectOpl.mockResolvedValue({ rows: [{ issue: { ...issue, relatedProjectId: 'child-1' }, canEdit: true, canComplete: true }], people: [], rootProject: { id: 'root-1', code: 'P700012', name: '主设计备' }, subprojects: [{ id: 'child-1', code: 'P700012-1', name: '子设备' }] })
     await setup(); await click('编辑')
     const projectInput = document.body.querySelector('input[disabled]') as HTMLInputElement
-    expect(projectInput.value).toBe('P700012 · 主设备')
+    expect(projectInput.value).toBe('P700012 · 主设计备')
     expect(document.body.textContent).toContain('子项目')
     await click('保存问题')
     expect(api.saveProjectOpl).toHaveBeenCalledWith('p1', 'i1', expect.objectContaining({ relatedProjectId: 'child-1' }), [], 'token')
@@ -271,6 +288,7 @@ it('装配只读账号即使是问题负责人也不能新增、完成、编辑�
   const permissions = computed(() => [projectCenterSchema, 'project.tab.opl.view'])
   wrapper = mount(ProjectOplManager, { attachTo: document.body, props: { project: { id: 'p1', code: 'P1', name: '装配指导' } as ProjectSummary, token: 'token' }, global: { plugins: [ElementPlus], provide: { [projectCenterAccessKey as symbol]: permissions } } })
   await flushPromises()
+  await click('列表', wrapper.element)
   const buttons = wrapper.findAll('button').map(button => button.text().trim())
   expect(buttons).not.toContain('新增问题')
   expect(buttons).not.toContain('编辑')
@@ -280,4 +298,75 @@ it('装配只读账号即使是问题负责人也不能新增、完成、编辑�
   expect(document.body.textContent).toContain('查看开口问题')
   expect(Array.from(document.body.querySelectorAll('.opl-form input, .opl-form textarea')).every(control => (control as HTMLInputElement).disabled)).toBe(true)
   expect(api.saveProjectOpl).not.toHaveBeenCalled()
+})
+
+describe('OPL 状态看板', () => {
+  async function drag(id: string, target: string) {
+    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: vi.fn() }
+    await wrapper.get(`[data-issue-id="${id}"]`).trigger('dragstart', { dataTransfer })
+    await wrapper.get(`[data-status="${target}"]`).trigger('dragover', { dataTransfer })
+    await wrapper.get(`[data-status="${target}"]`).trigger('drop', { dataTransfer })
+    await flushPromises()
+  }
+  it('展示五列和完整筛选结果，切回列表保留分页', async () => {
+    api.readProjectOpl.mockResolvedValue({ rows: Array.from({ length: 25 }, (_, i) => ({ issue: { ...issue, id: `b${i}`, number: i + 1, status: i === 24 ? '已完成' : '待处理' }, canEdit: true, canComplete: true })), people: [] })
+    await setup(); await click('看板', wrapper.element)
+    expect(wrapper.findAll('.opl-board-column')).toHaveLength(5)
+    expect(wrapper.findAll('.opl-board-card')).toHaveLength(25)
+    expect(wrapper.get('[data-status="已完成"]').findAll('.opl-board-card')).toHaveLength(1)
+    await click('列表', wrapper.element)
+    expect(wrapper.findAll('tbody tr')).toHaveLength(20)
+  })
+  it('拖入目标列自动保存状态并保留版本与其他字段', async () => {
+    api.saveProjectOpl.mockResolvedValue({ ...issue, status: '处理中', rowVersion: 4 })
+    await setup(); await click('看板', wrapper.element); await drag('i1', '处理中')
+    expect(api.saveProjectOpl).toHaveBeenCalledWith('p1', 'i1', expect.objectContaining({ description: issue.description, status: '处理中', expectedRowVersion: 3, attachmentIds: [], relatedProjectId: null }), [], 'token')
+    expect(wrapper.get('[data-status="处理中"]').text()).toContain(issue.description)
+    expect(wrapper.get('[data-status="待处理"]').findAll('.opl-board-card')).toHaveLength(0)
+    await click('列表', wrapper.element)
+    expect(wrapper.find('tbody').text()).toContain('处理中')
+  })
+  it('拖入完成走确认接口', async () => {
+    api.completeProjectOpl.mockResolvedValue({ ...issue, status: '已完成', completedAt: '2026-11-07T02:00:00Z', rowVersion: 4 })
+    await setup(); await click('看板', wrapper.element); await drag('i1', '已完成')
+    expect(api.completeProjectOpl).toHaveBeenCalledWith('p1', 'i1', 3, 'token', false)
+    expect(api.saveProjectOpl).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-status="已完成"]').text()).toContain(issue.description)
+  })
+  it('失败及重复拖放保留原状态，不重复请求', async () => {
+    let reject!: (reason: Error) => void
+    api.saveProjectOpl.mockImplementation(() => new Promise((_, fail) => { reject = fail }))
+    await setup(); await click('看板', wrapper.element); await drag('i1', '处理中'); await drag('i1', '已作废')
+    expect(api.saveProjectOpl).toHaveBeenCalledTimes(1)
+    reject(new Error('network failure')); await flushPromises()
+    expect(wrapper.get('[data-status="待处理"]').text()).toContain(issue.description)
+    expect(wrapper.get('[data-status="处理中"]').findAll('.opl-board-card')).toHaveLength(0)
+    expect(document.body.textContent).toContain('卡片已保留在原状态')
+    expect(document.body.textContent).not.toContain('network failure')
+  })
+  it('待确认缺少措施时先补充，保存前不改动状态', async () => {
+    await setup(); await click('看板', wrapper.element); await drag('i1', '待确认')
+    expect(api.saveProjectOpl).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain('请填写解决措施并保存')
+    expect(wrapper.get('[data-status="待处理"]').text()).toContain(issue.description)
+    expect(wrapper.findComponent({ name: 'ElDrawer' }).props('modelValue')).toBe(true)
+  })
+  it('只读可展开详情但不能拖动；可编辑者没有确认权限时不能拖入完成', async () => {
+    api.readProjectOpl.mockResolvedValue({ rows: [{ issue, canEdit: false, canComplete: false }, { issue: { ...issue, id: 'edit', number: 2 }, canEdit: true, canComplete: false }], people: [] })
+    await setup(); await click('看板', wrapper.element)
+    expect(wrapper.get('[data-issue-id="i1"]').attributes('draggable')).toBe('false')
+    await drag('i1', '处理中'); await drag('edit', '已完成')
+    expect(api.saveProjectOpl).not.toHaveBeenCalled(); expect(api.completeProjectOpl).not.toHaveBeenCalled()
+    await wrapper.get('[data-issue-id="i1"] .opl-board-card__open').trigger('click'); await flushPromises()
+    expect(document.body.querySelector('[aria-label="开口问题详情"]')?.textContent).toContain(issue.description)
+    expect(document.body.textContent).not.toContain('编辑问题')
+  })
+})
+
+it('OPL 默认显示看板，并可切换现有列表', async () => {
+  await setup(undefined, 'board')
+  expect(wrapper.find('.opl-board').exists()).toBe(true)
+  expect(wrapper.find('.opl-table').exists()).toBe(false)
+  await click('列表', wrapper.element)
+  expect(wrapper.find('.opl-table').exists()).toBe(true)
 })

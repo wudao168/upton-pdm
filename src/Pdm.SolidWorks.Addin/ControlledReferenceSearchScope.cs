@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using SolidWorks.Interop.sldworks;
@@ -41,7 +42,7 @@ internal sealed class ControlledReferenceSearchScope : IDisposable
         }
     }
 
-    internal void VerifyLoadedSources() => boundary.Verify();
+    internal void VerifyLoadedSources(ISet<string> missingComponents = null) => boundary.Verify(missingComponents, application);
 
     public void Dispose()
     {

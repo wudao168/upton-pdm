@@ -1,0 +1,16 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'com.upton.pdm.production'
+    compileSdk 35
+    defaultConfig { applicationId 'com.upton.pdm.production'; minSdk 28; targetSdk 35; versionCode 2; versionName '1.0.1' }
+    buildFeatures { buildConfig true }
+    sourceSets { main { assets.srcDirs = [layout.buildDirectory.dir('generated/production-assets')]; res.srcDirs = ['src/main/res'] } }
+    buildTypes { release { minifyEnabled false } }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+}
+dependencies { implementation 'com.google.zxing:core:3.5.3' }
+tasks.register('copyProductionAssets', Copy) {
+    from('../../pdm-ui/public/production-app') { into 'production-app' }
+    into layout.buildDirectory.dir('generated/production-assets')
+}
+tasks.named('preBuild').configure { dependsOn 'copyProductionAssets' }

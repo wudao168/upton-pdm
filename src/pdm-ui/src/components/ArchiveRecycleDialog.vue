@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useUserDisplayName as usePersonDisplayName } from '../userDisplay'
+const displayUserName = usePersonDisplayName()
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { listRecycleArchiveBatches, previewRecycleArchive, recycleArchiveSet, listArchiveRecycleSets, restoreArchiveSet } from '../api'
@@ -57,14 +59,14 @@ watch([open, () => props.projectId], () => { if (open.value) void load(); else s
 </script>
 
 <template>
-  <el-dialog v-model="open" title="按存档批次回收 / 恢复图档" width="min(900px, 94vw)" :close-on-click-modal="false" :close-on-press-escape="!busy" :show-close="!busy">
+  <el-dialog v-model="open" title="按存档批次回收 / 恢复图档" width="min(900px, 94vw)" :close-on-click-modal="!busy" :close-on-press-escape="!busy" :show-close="!busy">
     <p>当前项目：<strong>{{ batches[0]?.projectCode || projectId }}</strong></p>
     <p>仅处理本批首次存档、尚未发布且未被范围外图档引用的文件。项目原有图档、其他版本和电脑原图保留。</p>
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
     <label>选择存档批次（最近100批）</label>
     <select v-model="batchId" aria-label="选择存档批次" :disabled="busy" @change="inspect" style="width: 100%; min-height: 36px; font: inherit">
       <option value="" disabled>请选择需核对的存档批次</option>
-      <option v-for="batch in batches" :key="batch.batchId" :value="batch.batchId">{{ date(batch.committedAt) }} · {{ batch.actor }} · {{ batch.fileCount }}份图档</option>
+      <option v-for="batch in batches" :key="batch.batchId" :value="batch.batchId">{{ date(batch.committedAt) }} · {{ displayUserName(batch.actor) }} · {{ batch.fileCount }}份图档</option>
     </select>
     <button type="button" class="pdm-secondary-action" :disabled="busy || !batchId" @click="inspect">重新核对回收范围</button>
     <p v-if="!busy && !batches.length">当前项目没有可核对的已成功提交批次。</p>

@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Security.Cryptography;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.DependencyInjection;
 using Upton.Pdm.Api;
@@ -75,5 +76,52 @@ public sealed class DingTalkOplIntegrationTests
         Assert.False(bootstrap.TryGetProperty("appSecret", out _));
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync($"/api/projects/{ProjectId}/opl/integrations/dingtalk/submit", new StringContent("{}"))).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/integrations/dingtalk/opl/login", new { projectId = ProjectId, code = "code" })).StatusCode);
+    }
+
+    [Fact]
+    public async Task SpeechRequiresTheCurrentGroupAndBoundProject()
+    {
+        var settings = Settings();
+        using var host = new PdmApiFactory();
+        using var factory = host.WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+        {
+            services.AddSingleton(new DingTalkOplIntegration(new HttpClient(new Handler()), Options.Create(settings), TimeProvider.System));
+            services.AddSingleton<IOplSpeechRecognizer, GuestSpeech>();
+        }));
+        using var client = factory.CreateClient();
+        var repo = factory.Services.GetRequiredService<IPdmRepository>();
+        settings.CompanyId = (await repo.GetOrganizationDirectoryAsync(default)).Organizations.First().Id;
+        var customer = Guid.Parse("c0046500-0000-0000-0000-000000000001");
+        var bound = await repo.CreateNumberedProjectAsync(new(settings.CompanyId, "P", 2, customer, "群绑定项目",
+            null, null, 1, "admin", @"C:\PDM\Vault", @"C:\PDM\Release"), default);
+        var other = await repo.CreateNumberedProjectAsync(new(settings.CompanyId, "P", 2, customer, "其他群项目",
+            null, null, 1, "admin", @"C:\PDM\Vault", @"C:\PDM\Release"), default);
+        var group = Guid.NewGuid();
+        var otherGroup = Guid.NewGuid();
+        settings.Groups[group] = new() { OpenConversationId = "bound-group" };
+        settings.Groups[otherGroup] = new() { OpenConversationId = "another-group" };
+        settings.Bindings[bound.Id] = group;
+        settings.Bindings[other.Id] = otherGroup;
+        async Task<HttpResponseMessage> Send(Guid projectId)
+        {
+            using var audio = new ByteArrayContent(ProjectOplApiTests.TestWave());
+            audio.Headers.ContentType = new("audio/wav");
+            return await client.PostAsync($"/api/integrations/dingtalk/opl/guest/projects/{projectId}/speech/transcribe", audio);
+        }
+        Assert.Equal(HttpStatusCode.Forbidden, (await Send(bound.Id)).StatusCode);
+        using var scope = factory.Services.CreateScope();
+        var session = scope.ServiceProvider.GetRequiredService<DingTalkVisitorSession>().Issue(settings, group, new("ding-user", "现场人员"));
+        client.DefaultRequestHeaders.Add("X-DingTalk-Session", session);
+        using var accepted = await Send(bound.Id);
+        Assert.True(accepted.IsSuccessStatusCode, await accepted.Content.ReadAsStringAsync());
+        Assert.Equal("安装支架松动。", (await accepted.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("text").GetString());
+        Assert.Equal(HttpStatusCode.BadRequest, (await Send(other.Id)).StatusCode);
+        settings.Bindings.Remove(bound.Id);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Send(bound.Id)).StatusCode);
+    }
+
+    private sealed class GuestSpeech : IOplSpeechRecognizer
+    {
+        public Task<string?> RecognizeAsync(byte[] wave, CancellationToken ct) => Task.FromResult<string?>("安装支架松动。");
     }
 }

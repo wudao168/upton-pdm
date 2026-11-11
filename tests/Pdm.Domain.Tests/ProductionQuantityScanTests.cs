@@ -15,6 +15,7 @@ public sealed class ProductionQuantityScanTests
     private static async Task<Fixture> Create(string route)
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ProductionTestAuthorization.EnableAsync(repository);
         var project = await repository.CreateProjectAsync(new("SCAN-QTY-" + Guid.NewGuid().ToString("N"), "同版本增量扫码", "admin", "vault", "release"), "admin", default);
         var model = await repository.RegisterDocumentAsync(new(project.Id, "MODEL-QTY", "模型", "MODEL.SLDPRT", DocumentKind.Part), "admin", default);
         var drawing = await repository.RegisterDocumentAsync(new(project.Id, "DRAWING-QTY", "图纸", "DRAWING.SLDDRW", DocumentKind.Drawing, RelatedModelDocumentId: model.Id), "admin", default);
@@ -76,6 +77,62 @@ public sealed class ProductionQuantityScanTests
         var original = await f.Service.FindAsync(f.Original.Id, "admin", UserRole.Administrator, default);
         Assert.Equal(10, original.State.Lots[0].Quantity);
         Assert.False(original.State.Lots[0].Frozen);
+    }
+
+    [Fact]
+    public async Task BatchQrPinsTheEncodedReleaseWhileLegacyQrKeepsExistingMatching()
+    {
+        var f = await Create("Self");
+        var first = PdfReleaseIdentity.Display("MODEL-QTY", "B", f.Original.Id);
+        var second = PdfReleaseIdentity.Display("MODEL-QTY", "B", f.Supplement.Id);
+        Assert.NotEqual(first, second);
+        Assert.Equal(f.Original.Id, Assert.Single(await f.Service.ResolveScanAsync(first, "admin", UserRole.Administrator, default)).ReleasePackageId);
+        Assert.Equal(f.Supplement.Id, Assert.Single(await f.Service.ResolveScanAsync(second, "admin", UserRole.Administrator, default)).ReleasePackageId);
+        Assert.Equal(2, (await f.Service.ResolveScanAsync(PdfReleaseIdentity.Display("MODEL-QTY", "B"), "admin", UserRole.Administrator, default)).Count);
+        Assert.Empty(await f.Service.ResolveScanAsync(PdfReleaseIdentity.Display("WRONG-MODEL", "B", f.Original.Id), "admin", UserRole.Administrator, default));
+    }
+
+    [Fact]
+    public async Task PartialPackagingRetryAndReprintKeepQuantityAndObsoleteDrawingBlocksCachedOperations()
+    {
+        var company = Guid.NewGuid();
+        TenantContext.Set(new(Guid.NewGuid(), company, company, "admin", "Administrator", false, new HashSet<string>()));
+        try
+        {
+        var f = await Create("Self");
+        var station = new ProductionWorkstation(Guid.NewGuid(), "包装测试工位", "CNC", true);
+        var printer = new ProductionPrinter(Guid.NewGuid(), "包装打印机", "测试打印队列", "admin", true);
+        Assert.True(await f.Store.SaveScanCatalogAsync(new(f.Project.OrganizationId!.Value, [station],
+            ProductionFlowRules.Posts.Keys.Select(post => new ProductionPostBinding(Guid.NewGuid(), "User", "admin", post, [station.Id], true)).ToArray())
+            { FlowMode = "DepartmentHandover", Printers = [printer] }, 0, default));
+        foreach (var kind in new[] { "ProductionReceived", "MachiningReceived" })
+            await f.Service.RecordAsync(f.Original.Id, new(f.LotId, kind, 10, Guid.NewGuid(), WorkstationId: station.Id), "admin", UserRole.Administrator, default);
+        var input = new RecordProductionMovement(f.LotId, "PackingStarted", 5, Guid.NewGuid(), WorkstationId: station.Id, LabelPrinterId: printer.Id);
+        var packed = await f.Service.RecordAsync(f.Original.Id, input, "admin", UserRole.Administrator, default);
+        var label = Assert.Single(packed.State.Movements, item => item.Label is not null).Label!;
+        Assert.Equal(5, label.Quantity); Assert.Single(packed.State.PrintJobs);
+        var retry = await f.Service.RecordAsync(f.Original.Id, input, "admin", UserRole.Administrator, default);
+        Assert.Equal(packed.RowVersion, retry.RowVersion);
+        Assert.Equal(5, (await f.Service.ActionsAsync(f.Original.Id, "admin", UserRole.Administrator, default)).Actions.Single(item => item.Kind == "PackingStarted").RemainingQuantity);
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.RecordAsync(f.Original.Id, input with { RequestId = Guid.NewGuid(), Quantity = 6 }, "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmRuleException>(() => f.Service.RecordAsync(f.Original.Id, input with { RequestId = Guid.NewGuid(), Quantity = 1.5m }, "admin", UserRole.Administrator, default));
+        var labels = new ProductionLabelService(f.Repository, f.Store, f.Service, TimeProvider.System);
+        var claimed = await labels.ClaimAsync(printer.Id, "admin", UserRole.Administrator, default);
+        Assert.NotNull(claimed); Assert.Equal(5, claimed.Label.Quantity);
+        Assert.Null(await labels.ClaimAsync(printer.Id, "admin", UserRole.Administrator, default));
+        await labels.CompleteAsync(f.Original.Id, claimed.Job.Id, new(claimed.Job.ClaimToken!.Value, "Submitted", null), "admin", UserRole.Administrator, default);
+        var reprintInput = new ReprintProductionLabel(printer.Id, Guid.NewGuid(), "标签破损");
+        var reprinted = await labels.ReprintAsync(f.Original.Id, label.Id, reprintInput, "admin", UserRole.Administrator, default);
+        Assert.Equal(2, reprinted.State.PrintJobs.Count);
+        Assert.Equal(5, ProductionTrackingRules.Total(reprinted.State, f.LotId, "PackingStarted"));
+        Assert.Equal(reprinted.RowVersion, (await labels.ReprintAsync(f.Original.Id, label.Id, reprintInput, "admin", UserRole.Administrator, default)).RowVersion);
+        await f.Repository.ObsoleteDocumentAsync(f.Drawing.Id, "admin", default);
+        await Assert.ThrowsAsync<PdmConflictException>(() => f.Service.RecordAsync(f.Original.Id, input with { RequestId = Guid.NewGuid() }, "admin", UserRole.Administrator, default));
+        await Assert.ThrowsAsync<PdmConflictException>(() => labels.ReprintAsync(f.Original.Id, label.Id, reprintInput with { RequestId = Guid.NewGuid() }, "admin", UserRole.Administrator, default));
+        Assert.Null(await labels.ClaimAsync(printer.Id, "admin", UserRole.Administrator, default));
+        Assert.Equal("Blocked", (await f.Store.FindAsync(f.Original.Id, default))!.State.PrintJobs.Last().Status);
+        }
+        finally { TenantContext.Clear(); }
     }
 
     [Fact]

@@ -15,13 +15,13 @@ namespace Upton.Pdm.Infrastructure;
 
 public sealed class PdfReleaseStampProcessor(IPdmRepository repository, ILogger<PdfReleaseStampProcessor> logger) : IPdfReleaseStampProcessor
 {
-    private const string Schema = "3";
+    private const string Schema = "4";
     private const double FontSize = 7.8;
     private sealed record Stamp(Guid PackageId, Guid SourceId, string SourceSha, string Model, string Project,
         string Revision, DateTimeOffset PublishedAt)
     {
         public string Identity => PdfReleaseIdentity.Encode(PackageId, SourceId);
-        public string Code => PdfReleaseIdentity.Display(Model, Revision);
+        public string Code => PdfReleaseIdentity.Display(Model, Revision, PackageId);
         public string Time => PublishedAt.ToOffset(TimeSpan.FromHours(8)).ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
     }
 

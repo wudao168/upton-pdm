@@ -1,17 +1,19 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
 import SearchField from './SearchField.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage } from '../statusMessage'
 import { matchesUserSearch } from '../userSearch'
 import { ElMessageBox } from 'element-plus'
 import OrganizationSettings from './OrganizationSettings.vue'
-import RolePermissionSettings from './RolePermissionSettings.vue'
+
 import type { CreateRoleInput, OrganizationDirectory, OrganizationUnit, PdmUser, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, ProjectOrganization } from '../types'
 
 const props = defineProps<{
   directory: OrganizationDirectory
   roleDirectory: RolePermissionDirectory
   activeOrganizationId: string
+  token?: string
   permissions: string[]
   currentUsername: string
   platformAdministrator?: boolean
@@ -144,7 +146,7 @@ async function resetPassword(user: PdmUser) {
   <section class="pdm-project-manager pdm-user-settings" aria-label="用户设置">
     <nav class="user-settings-tabs pdm-tabs" aria-label="用户设置功能">
       <button type="button" :class="{ 'is-active': activeSection === 'users' }" @click="activeSection='users'">用户</button>
-      <button v-if="availableSections.includes('roles')" type="button" :class="{ 'is-active': activeSection === 'roles' }" @click="activeSection='roles'">角色权限</button>
+      <button v-if="availableSections.includes('roles')" type="button" :class="{ 'is-active': activeSection === 'roles' }" @click="activeSection='roles'">权限中心</button>
       <button v-if="availableSections.includes('organization')" type="button" :class="{ 'is-active': activeSection === 'organization' }" @click="activeSection='organization'">组织关系</button>
       <button v-if="availableSections.includes('companies')" type="button" :class="{ 'is-active': activeSection === 'companies' }" @click="activeSection='companies'">公司管理</button>
     </nav>
@@ -163,18 +165,20 @@ async function resetPassword(user: PdmUser) {
         <div class="user-directory-actions"><SearchField><input v-model="query" type="search" placeholder="搜索账号、姓名、角色或部门" aria-label="搜索用户"></SearchField><button v-if="canManageUsers" type="button" class="pdm-primary-action" @click="openUser()">新建用户</button></div>
       </header>
       <div class="user-table-scroll">
-        <table class="pdm-project-table">
-          <thead><tr><th>账号</th><th>姓名</th><th>角色</th><th>公司</th><th>主部门</th><th>兼任部门</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody><tr v-for="user in filteredUsers" :key="user.username"><td><strong>{{ user.username }}</strong></td><td>{{ user.displayName }}</td><td :title="roleNames(user)">{{ roleNames(user) }}</td><td :title="companyName(user.companyId ?? undefined)">{{ companyName(user.companyId ?? undefined) }}</td><td :title="primaryUnitName(user.username)">{{ primaryUnitName(user.username) }}</td><td :title="otherUnitNames(user.username)">{{ otherUnitNames(user.username) }}</td><td><span class="pdm-status" :class="user.isActive ? 'is-ok' : 'is-warn'">{{ user.isActive ? '启用' : '停用' }}</span></td><td><div class="user-row-actions"><button v-if="canManageUsers" type="button" class="pdm-text-action" @click="openUser(user)">编辑</button><button v-if="canManageOrganization" type="button" class="pdm-text-action" :disabled="!user.isActive || !activeUnits.length" @click="openMembership(user)">组织关系</button><button v-if="canManageUsers && user.username.toLocaleLowerCase('zh-CN') !== currentUsername.toLocaleLowerCase('zh-CN')" type="button" class="pdm-text-action" @click="resetPassword(user)">重置密码</button></div></td></tr></tbody>
+        <table class="pdm-project-table" data-pdm-min-width="820">
+          <colgroup><col v-for="column in (canManageUsers ? 7 : 6)" :key="column"><col class="user-actions-column"></colgroup>
+          <thead><tr><th v-if="canManageUsers">账号</th><th>姓名</th><th>角色</th><th>公司</th><th>主部门</th><th>兼任部门</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody><tr v-for="user in filteredUsers" :key="user.username"><td v-if="canManageUsers" :title="user.username">{{ user.username }}</td><td><PersonName :name="user.displayName || '姓名待补充'" /></td><td :title="roleNames(user)">{{ roleNames(user) }}</td><td :title="companyName(user.companyId ?? undefined)">{{ companyName(user.companyId ?? undefined) }}</td><td :title="primaryUnitName(user.username)">{{ primaryUnitName(user.username) }}</td><td :title="otherUnitNames(user.username)">{{ otherUnitNames(user.username) }}</td><td><span class="pdm-status" :class="user.isActive ? 'is-ok' : 'is-warn'">{{ user.isActive ? '启用' : '停用' }}</span></td><td><div class="user-row-actions"><button v-if="canManageUsers" type="button" class="pdm-text-action" @click="openUser(user)">编辑</button><button v-if="canManageOrganization" type="button" class="pdm-text-action" :disabled="!user.isActive || !activeUnits.length" @click="openMembership(user)">组织关系</button><button v-if="canManageUsers && user.username.toLocaleLowerCase('zh-CN') !== currentUsername.toLocaleLowerCase('zh-CN')" type="button" class="pdm-text-action" @click="resetPassword(user)">重置密码</button></div></td></tr></tbody>
         </table>
       </div>
       <p v-if="!filteredUsers.length" class="pdm-empty-info">没有符合条件的用户。</p>
       <p v-if="!canManageUsers" class="user-permission-note">当前账号可查看用户；新建、编辑及角色分配需要同时拥有组织维护和角色修改权限。</p>
     </section>
 
-    <RolePermissionSettings v-else-if="activeSection === 'roles'" embedded :directory="roleDirectory" :can-edit="canEditRoles" :pending="pending" :on-save="onSaveRolePermissions" :on-create="onCreateRole" :on-delete="onDeleteRole" />
+    <slot v-else-if="activeSection === 'roles'" name="permissions" />
+
     <OrganizationSettings v-else-if="activeSection === 'organization'" embedded mode="organization" :active-company-id="activeOrganizationId" :directory="directory" :pending="pending" :on-save-organization="onSaveOrganization" :on-save-unit="onSaveUnit" :on-update-memberships="onUpdateMemberships" :on-update-managers="onUpdateManagers" @update:active-company-id="emit('updateActiveOrganizationId', $event)" />
-    <OrganizationSettings v-else embedded mode="companies" :active-company-id="activeOrganizationId" :directory="directory" :pending="pending" :on-save-organization="onSaveOrganization" :on-save-unit="onSaveUnit" :on-update-memberships="onUpdateMemberships" :on-update-managers="onUpdateManagers" @update:active-company-id="emit('updateActiveOrganizationId', $event)" />
+    <OrganizationSettings v-else embedded mode="companies" :active-company-id="activeOrganizationId" :directory="directory" :token="token" :pending="pending" :on-save-organization="onSaveOrganization" :on-save-unit="onSaveUnit" :on-update-memberships="onUpdateMemberships" :on-update-managers="onUpdateManagers" @update:active-company-id="emit('updateActiveOrganizationId', $event)" />
 
     <el-dialog v-model="userDialog" :title="editingUsername ? '编辑用户' : '新建用户'" width="560px">
       <div class="user-form">
@@ -205,14 +209,14 @@ async function resetPassword(user: PdmUser) {
 .pdm-user-settings { min-height: 0; }
 .user-settings-tabs { display: flex; gap: 28px; margin-bottom: 12px; padding: 0 16px; border: 1px solid var(--pdm-border); border-radius: 7px; background: var(--pdm-surface); }
 .user-settings-tabs button { min-width: 74px; min-height: var(--pdm-tab-primary); border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--pdm-text); cursor: pointer; }
-.user-settings-tabs button:hover { color: var(--pdm-blue); }.user-settings-tabs button:focus-visible { outline: 2px solid var(--pdm-theme-accent-focus); outline-offset: -3px; }
-.user-settings-tabs button.is-active { border-bottom-color: var(--pdm-blue); background: transparent; color: var(--pdm-blue); font-weight: 500; }
+.user-settings-tabs button:hover { color:var(--pdm-text); }.user-settings-tabs button:focus-visible { outline: 2px solid var(--pdm-theme-accent-focus); outline-offset: -3px; }
+.user-settings-tabs button.is-active { border-bottom-color: var(--pdm-blue); background: transparent; color:var(--pdm-text); font-weight: 500; }
 .user-company-context { display: grid; grid-template-columns: minmax(210px, auto) minmax(260px, 390px) minmax(180px, 1fr); align-items: center; gap: 18px; margin-bottom: 12px; padding: 12px 16px; }.user-company-context > div { display: grid; gap: 3px; }.user-company-context small { color: var(--pdm-muted); }.user-company-context select { min-height: 36px; border: 1px solid var(--pdm-border); border-radius: 6px; padding: 0 10px; background: var(--pdm-surface); color: var(--pdm-text); }.user-company-context > span { overflow: hidden; color: var(--pdm-muted); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .user-directory { min-height: 0; display: flex; flex: 1 1 auto; flex-direction: column; padding: 16px; overflow: hidden; }
 .user-directory-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }.user-directory-heading h2 { margin: 0 0 4px; font-size: var(--pdm-font-size-heading); }.user-directory-heading p { margin: 0; color: var(--pdm-muted); font-size: 11px; }
 .user-directory-actions { display: flex; align-items: center; gap: 8px; }.user-directory-actions input { width: 280px; min-height: 36px; border: 1px solid var(--pdm-border); border-radius: 6px; padding: 0 11px; background: var(--pdm-surface); color: var(--pdm-text); }
-.user-table-scroll { width: 100%; min-height: 0; flex: 1 1 auto; overflow: auto; }.user-table-scroll table { width: 100%; min-width: 1020px; table-layout: fixed; }.user-table-scroll th:nth-child(1) { width: 120px; }.user-table-scroll th:nth-child(2) { width: 110px; }.user-table-scroll th:nth-child(3) { width: 110px; }.user-table-scroll th:nth-child(4) { width: 170px; }.user-table-scroll th:nth-child(5), .user-table-scroll th:nth-child(6) { width: 160px; }.user-table-scroll th:nth-child(7) { width: 75px; }.user-table-scroll th:nth-child(8) { width: 205px; }.user-table-scroll td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.user-row-actions { display: flex; align-items: center; gap: 8px; white-space: nowrap; }.user-permission-note { margin: 12px 0 0; color: var(--pdm-muted); font-size: 11px; }
+.user-table-scroll { width: 100%; min-height: 0; flex: 1 1 auto; overflow: auto; }.user-table-scroll table { width: 100%; min-width: 820px; table-layout: fixed; }.user-table-scroll table:not(.pdm-columns-resized) > colgroup > col.user-actions-column { width: 200px !important; }.user-table-scroll td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.user-row-actions { display: flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; }.user-row-actions > button { flex: none; }.user-permission-note { margin: 12px 0 0; color: var(--pdm-muted); font-size: 11px; }
 .user-form { display: grid; gap: 14px; }.user-form label { display: grid; gap: 7px; color: var(--pdm-text-soft); font-size: 12px; }.user-form input:not([type='checkbox']), .user-form select { min-height: 38px; border: 1px solid var(--pdm-border); border-radius: 6px; padding: 0 10px; background: var(--pdm-surface); }.user-form input:disabled { background: var(--pdm-surface-muted); color: var(--pdm-muted); }.user-form small { color: var(--pdm-muted); line-height: 1.4; }.user-form .user-checkbox { display: flex; align-items: center; gap: 8px; }
 @media (max-width: 900px) { .user-company-context { grid-template-columns: 1fr; }.user-company-context > span { text-align: left; }.user-directory-heading { align-items: stretch; flex-direction: column; }.user-directory-actions input { width: 100%; }.user-directory-actions { align-items: stretch; }.user-settings-tabs button { min-width: 0; flex: 1; } }
 </style>

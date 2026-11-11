@@ -269,7 +269,7 @@ describe('StandardLibrary', () => {
     await flushPromises()
 
     const toolbar = wrapper.find('.standard-library__toolbar')
-    expect(toolbar.findAll('button').map(button => button.text().trim())).toEqual(['新增物料', '导入', '维护', '移除', '刷新', '搜索'])
+    expect(toolbar.findAll('button').map(button => button.text().trim())).toEqual(['刷新', '新增物料', '导入', '维护', '移除', '搜索'])
     expect(wrapper.find('.standard-library__tree').findAll('button').map(button => button.text().trim())).not.toContain('配套物料模板')
     expect(wrapper.find('.standard-library__header').exists()).toBe(false)
     expect(wrapper.find('.scope-label').exists()).toBe(false)

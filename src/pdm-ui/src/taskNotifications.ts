@@ -1,5 +1,14 @@
 import type { MyApprovalTask, UserNotification } from './types'
 
+export const oplResponseCategory = 'OplResponsePending'
+export function oplResponseIssueId(notification: UserNotification) {
+  return notification.category === oplResponseCategory ? notification.sourceKey.split(':')[1] : undefined
+}
+
+export function isProjectTodo(notification: UserNotification) {
+  return notification.category === 'ProjectTodo' || notification.category === oplResponseCategory
+}
+
 /** 工时催填由工时管理入口提醒；更正通知等普通业务消息仍保留。 */
 export function isTaskCenterNotification(notification: Pick<UserNotification, 'category'>) {
   return notification.category !== 'work-hours'

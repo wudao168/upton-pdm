@@ -1,10 +1,13 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
+import ApprovalNoteEditor from './ApprovalNoteEditor.vue'
+import { canSignNode } from '../approvalParticipants'
 import SearchField from './SearchField.vue'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { write: projectWritable, download: projectDownload, export: projectExport } = useProjectCenterAccess()
 import SquareLoader from './SquareLoader.vue'
 import { getValidationEmergencyCapability, emergencyDecideValidationPlan } from '../api'
-import { ArrowLeft, CalendarDays, CheckCircle2, Download, FileUp, LibraryBig, ListChecks, Paperclip, Plus, RotateCcw, Save, Send, Trash2, XCircle } from '@lucide/vue'
+import { ArrowLeft, CalendarDays, CheckCircle2, Download, FileUp, GripVertical, LibraryBig, ListChecks, Paperclip, Plus, RotateCcw, Save, Send, Trash2, XCircle } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { appendProjectValidationPlanItems, confirmValidationPlanExecution, createProjectValidationPlanRevision, decideValidationPlanApproval, deleteValidationCheckCategory, deleteValidationCheckItem, downloadValidationPlanAttachment, exportProjectValidationPlan, readProjectValidationPlan, readValidationCheckCatalog, readValidationPlanExecutionRecords, recognizeValidationPlanAttachment, saveProjectValidationPlan, saveValidationCheckCategory, saveValidationCheckItem, submitProjectValidationPlan, transferValidationPlanApproval, updateProjectValidationPlanStandards, uploadValidationPlanAttachment, withdrawProjectValidationPlan } from '../api'
@@ -12,6 +15,8 @@ import { createClientId } from '../clientId'
 import { ElMessage } from '../statusMessage'
 import type { ProjectSummary, ProjectValidationPlan, ProjectValidationPlanItem, ValidationCheckCatalog, ValidationCheckCategory, ValidationCheckItem, ValidationPlanAttachment, ValidationPlanExecutionRecord, ValidationPlanRecognitionCandidate, ValidationPlanRecognitionDraft } from '../types'
 import { useUserDisplayName } from '../userDisplay'
+import { userErrorMessage } from '../userErrorMessage'
+import { recordClientDiagnostic } from '../clientDiagnostics'
 
 const props = defineProps<{
   qualityAcceptance?: boolean
@@ -42,6 +47,9 @@ watch(view, value => emit('viewChanged', value))
 const detailProject = ref<ProjectSummary | null>(null)
 const summaryPlans = ref<Record<string, ProjectValidationPlan | null>>({})
 const summaryErrors = ref<Record<string, boolean>>({})
+const summaryActingId = ref('')
+let summaryContext = 0
+onBeforeUnmount(() => { summaryContext++ })
 const saving = ref(false)
 const exporting = ref(false)
 const uploading = ref(false)
@@ -92,10 +100,21 @@ const familyProjects = computed(() => {
 })
 const rootProject = computed(() => familyProjects.value.find(item => !item.parentProjectId) ?? familyProjects.value[0])
 const activeDetailProject = computed(() => detailProject.value ?? familyProjects.value.find(item => item.id === props.projectId) ?? null)
-const normalizedState = computed(() => {
-  const value = plan.value?.state
+function normalizedPlanState(valuePlan: ProjectValidationPlan | null | undefined) {
+  const value = valuePlan?.state
   return typeof value === 'number' ? ['Draft', 'PendingApproval', 'Effective', 'Rejected', 'Superseded'][value] : value
-})
+}
+const normalizedState = computed(() => normalizedPlanState(plan.value))
+function approvalTaskFor(value: ProjectValidationPlan | null | undefined) {
+  return normalizedPlanState(value) === 'PendingApproval' ? value?.approvalTasks?.slice().sort((a, b) => a.stepOrder - b.stepOrder).find(item => item.decision == null) ?? null : null
+}
+function canSubmitSummary(value: ProjectValidationPlan | null | undefined) {
+  return Boolean(projectWritable.value && props.canEdit && value && ['Draft', 'Rejected'].includes(normalizedPlanState(value) ?? ''))
+}
+function canDecideSummary(value: ProjectValidationPlan | null | undefined) {
+  const task = approvalTaskFor(value)
+  return Boolean(projectWritable.value && props.canDecideApproval && task && canSignNode(task, props.currentUsername))
+}
 const editable = computed(() => projectWritable.value && props.canEdit && (!plan.value || normalizedState.value === 'Draft' || normalizedState.value === 'Rejected'))
 const canAppend = computed(() => projectWritable.value && props.canEdit && normalizedState.value === 'Effective')
 const canMaintainStandards = computed(() => projectWritable.value && props.canEdit && normalizedState.value === 'Effective')
@@ -104,12 +123,11 @@ const appendedRows = computed(() => rows.value.filter(item => !persistedItemIds.
 const standardChanges = computed(() => canMaintainStandards.value
   ? rows.value.filter(item => persistedItemIds.value.has(item.id) && (item.validationStandard || null) !== (persistedStandards.value[item.id] || null))
   : [])
-const currentApprovalTask = computed(() => normalizedState.value === 'PendingApproval'
-  ? plan.value?.approvalTasks?.slice().sort((a, b) => a.stepOrder - b.stepOrder).find(item => item.decision == null) ?? null
-  : null)
+const currentApprovalTask = computed(() => approvalTaskFor(plan.value))
 const canDecideCurrent = computed(() => Boolean(projectWritable.value && props.canDecideApproval && currentApprovalTask.value
-  && currentApprovalTask.value.assignee.toLocaleLowerCase() === props.currentUsername.toLocaleLowerCase()))
+  && canSignNode(currentApprovalTask.value, props.currentUsername)))
 const canEmergencyCurrent = ref(false)
+const approvalNote = ref<string>()
 let emergencyCheck = 0
 watch(() => currentApprovalTask.value?.id, async taskId => {
   const check = ++emergencyCheck
@@ -136,6 +154,7 @@ async function emergencyDecideCurrent(decision: 'Approved' | 'Rejected') {
   } finally { submitting.value = false }
 }
 const canTransferCurrent = computed(() => Boolean(projectWritable.value && props.canDecideApproval && currentApprovalTask.value
+  && !currentApprovalTask.value.participants?.policy?.disableTransfer && (currentApprovalTask.value.participants?.members.length ?? 1) === 1
   && currentApprovalTask.value.assignee.toLowerCase() === props.currentUsername.toLowerCase()))
 const canWithdraw = computed(() => projectWritable.value && normalizedState.value === 'PendingApproval'
   && plan.value?.submittedBy?.toLowerCase() === props.currentUsername.toLowerCase())
@@ -191,6 +210,7 @@ watch([preparedBy, planDate, rows], () => {
 }, { deep: true, flush: 'sync' })
 
 watch([() => props.projectId, () => props.projects.map(item => `${item.id}:${item.parentProjectId ?? ''}`).join('|')], () => {
+  summaryContext++
   view.value = 'summary'
   detailProject.value = null
   void loadSummary()
@@ -547,6 +567,44 @@ async function submitForApproval() {
   }
 }
 
+async function actFromSummary(project: ProjectSummary, action: 'submit' | 'Approved' | 'Rejected') {
+  if (summaryActingId.value || !project.canReadContent || !projectWritable.value) return
+  const context = summaryContext
+  summaryActingId.value = project.id
+  try {
+    const latest = await readProjectValidationPlan(project.id, props.token, ...planScope())
+    if (context !== summaryContext) return
+    summaryPlans.value[project.id] = latest
+    summaryErrors.value[project.id] = false
+    if (!latest || !(action === 'submit' ? canSubmitSummary(latest) : canDecideSummary(latest))) {
+      ElMessage.warning('计划状态或审批权限已变化，列表已更新，请重新查看。')
+      return
+    }
+    let result: ProjectValidationPlan
+    if (action === 'submit') {
+      await ElMessageBox.confirm(`提交${project.code}的计划R${latest.revisionNumber}后，本版本在审批完成前不可修改。`, '提交计划审批', { type:'warning', confirmButtonText:'提交审批', cancelButtonText:'取消' })
+      if (context !== summaryContext) return
+      result = await submitProjectValidationPlan(project.id, latest.rowVersion, props.token, ...planScope())
+    } else {
+      const task = approvalTaskFor(latest)!
+      const { value } = await ElMessageBox.prompt(action === 'Approved' ? '可填写审批意见。' : '请填写退回原因。', `${action === 'Approved' ? '批准' : '退回'} ${project.code} 的计划`, {
+        inputValidator: value => action === 'Approved' || value.trim().length > 0 || '请填写退回原因',
+        confirmButtonText: action === 'Approved' ? '批准' : '退回', cancelButtonText:'取消', type: action === 'Approved' ? 'success' : 'warning',
+      })
+      if (context !== summaryContext) return
+      result = await decideValidationPlanApproval(task.id, action, value, props.token, ...planScope())
+    }
+    if (context !== summaryContext) return
+    summaryPlans.value[project.id] = result
+    ElMessage.success(action === 'submit' ? '计划已提交审批' : action === 'Approved' ? '审批已流转' : '计划已退回')
+  } catch (error) {
+    if (context === summaryContext && error !== 'cancel' && error !== 'close') {
+      recordClientDiagnostic('error', '列表计划审批', error)
+      ElMessage.error(userErrorMessage(errorMessage(error)))
+    }
+  } finally { summaryActingId.value = '' }
+}
+
 async function decideCurrent(decision: 'Approved' | 'Rejected') {
   const task = currentApprovalTask.value
   if (!task) return
@@ -556,7 +614,7 @@ async function decideCurrent(decision: 'Approved' | 'Rejected') {
       confirmButtonText: decision === 'Approved' ? '批准' : '退回', cancelButtonText: '取消', type: decision === 'Approved' ? 'success' : 'warning',
     })
     submitting.value = true
-    hydratePlan(await decideValidationPlanApproval(task.id, decision, value, props.token, ...planScope()))
+    hydratePlan(await (approvalNote.value !== undefined && task.participants?.policy?.editBusinessNote ? decideValidationPlanApproval(task.id, decision, value, props.token, planScope()[0] ?? '', approvalNote.value) : decideValidationPlanApproval(task.id, decision, value, props.token, ...planScope())))
     dirty.value = false
     ElMessage.success(decision === 'Approved' ? '审批已流转' : '验证计划已退回')
   } catch (error) {
@@ -855,8 +913,8 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
     <template v-if="view === 'summary'">
       <div v-if="loading" class="validation-plan__empty pdm-loading-page"><SquareLoader label="正在加载项目验证计划列表…" /><span class="pdm-loading-copy">正在加载项目验证计划列表…</span></div>
       <div v-else class="validation-plan__table-scroll">
-        <table class="validation-plan-summary__table">
-          <thead><tr><th>项目代号</th><th>项目名称</th><th>项目类型</th><th>{{ qualityAcceptance ? '验收项数' : '验证项数' }}</th><th>编制人</th><th>编制日期</th><th>最近保存</th><th>状态</th><th>{{ qualityAcceptance ? '质量验收' : '验证计划' }}</th><th>附件</th></tr></thead>
+        <table class="validation-plan-summary__table" data-pdm-min-width="1240">
+          <thead><tr><th>项目代号</th><th>项目名称</th><th>项目类型</th><th>{{ qualityAcceptance ? '验收项数' : '验证项数' }}</th><th>编制人</th><th>编制日期</th><th>最近保存</th><th>状态</th><th>{{ qualityAcceptance ? '质量验收' : '验证计划' }}</th><th>附件</th><th>操作</th></tr></thead>
           <tbody>
             <tr v-for="project in familyProjects" :key="project.id" :class="{ 'is-disabled': !project.canReadContent }" :tabindex="project.canReadContent ? 0 : -1" @click="openProjectPlan(project)" @keydown.enter.self.prevent="openProjectPlan(project)" @keydown.space.self.prevent="openProjectPlan(project)">
               <td><strong>{{ project.code }}</strong></td>
@@ -869,6 +927,16 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
               <td><span class="validation-plan-summary__status" :class="`is-${summaryStatus(project)}`">{{ summaryStatus(project) }}</span></td>
               <td><button type="button" class="validation-plan-summary__file-link" :aria-label="`查看 ${project.code} 的验证计划文件`" @click.stop="openSummaryAttachments(project, 'PlanDocument')">{{ summaryAttachmentCount(project.id, 'PlanDocument') }}</button></td>
               <td><button type="button" class="validation-plan-summary__file-link" :aria-label="`查看 ${project.code} 的附件`" @click.stop="openSummaryAttachments(project, 'Evidence')">{{ summaryAttachmentCount(project.id, 'Evidence') }}</button></td>
+              <td class="validation-plan-summary__actions" @click.stop @keydown.stop>
+                <div class="validation-plan-summary__action-buttons">
+                <button type="button" class="pdm-text-action" :aria-label="`查看计划 ${project.code}`" :disabled="!project.canReadContent || Boolean(summaryActingId)" @click="openProjectPlan(project)">查看</button>
+                <button v-if="project.canReadContent && canSubmitSummary(summaryPlans[project.id])" type="button" class="pdm-primary-action" :aria-label="`提交计划审批 ${project.code}`" :disabled="Boolean(summaryActingId) || loading" @click="actFromSummary(project, 'submit')">提交审批</button>
+                <template v-if="project.canReadContent && canDecideSummary(summaryPlans[project.id])">
+                  <button type="button" class="pdm-primary-action" :aria-label="`批准计划 ${project.code}`" :disabled="Boolean(summaryActingId) || loading" @click="actFromSummary(project, 'Approved')">批准</button>
+                  <button type="button" class="pdm-secondary-action" :aria-label="`退回计划 ${project.code}`" :disabled="Boolean(summaryActingId) || loading" @click="actFromSummary(project, 'Rejected')">退回</button>
+                </template>
+                </div>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -880,7 +948,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
       <div class="validation-plan-attachment-list">
         <table v-if="attachmentDialogFiles.length">
           <thead><tr><th>原文件名</th><th>版本</th><th>上传人</th><th>上传时间</th><th>大小</th><th>SHA-256</th><th>操作</th></tr></thead>
-          <tbody><tr v-for="file in attachmentDialogFiles" :key="file.id"><td :title="file.originalFileName">{{ file.originalFileName }}</td><td>V{{ file.fileVersion }}</td><td>{{ displayUserName(file.uploadedBy, file.uploadedBy) }}</td><td>{{ formatDateTime(file.uploadedAt) }}</td><td>{{ fileSize(file.fileLength) }}</td><td class="is-sha" :title="file.sha256">{{ file.sha256 }}</td><td><button type="button" class="pdm-text-action" v-if="projectDownload" @click="downloadAttachment(file.id, file.originalFileName)">下载</button></td></tr></tbody>
+          <tbody><tr v-for="file in attachmentDialogFiles" :key="file.id"><td :title="file.originalFileName">{{ file.originalFileName }}</td><td>V{{ file.fileVersion }}</td><td><PersonName :name="displayUserName(file.uploadedBy, file.uploadedBy)" /></td><td>{{ formatDateTime(file.uploadedAt) }}</td><td>{{ fileSize(file.fileLength) }}</td><td class="is-sha" :title="file.sha256">{{ file.sha256 }}</td><td><button type="button" class="pdm-text-action" v-if="projectDownload" @click="downloadAttachment(file.id, file.originalFileName)">下载</button></td></tr></tbody>
         </table>
         <div v-else class="validation-plan-attachment-list__empty">暂无{{ attachmentDialogKind === 'PlanDocument' ? '验证计划文件' : '附件' }}</div>
       </div>
@@ -897,8 +965,8 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
         <button v-if="canManageCatalog" type="button" class="pdm-secondary-action" @click="openCatalogManager"><LibraryBig :size="14" />模板管理</button>
         <input ref="planFileInput" class="validation-plan__file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls" @change="uploadFile('PlanDocument', $event)">
         <input ref="evidenceFileInput" class="validation-plan__file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls,.csv,.zip" @change="uploadFile('Evidence', $event)">
-        <button type="button" class="pdm-secondary-action validation-plan__upload-action" :disabled="!plan || normalizedState !== 'Effective' || uploading" title="验证计划审批完成并生效后可上传" @click="planFileInput?.click()"><FileUp :size="14" />上传计划</button>
-        <button type="button" class="pdm-secondary-action validation-plan__upload-action" :disabled="!plan || normalizedState !== 'Effective' || uploading" title="验证计划审批完成并生效后可上传" @click="evidenceFileInput?.click()"><Paperclip :size="14" />上传附件</button>
+        <button type="button" class="pdm-file-picker-button pdm-secondary-action validation-plan__upload-action" :disabled="!plan || normalizedState !== 'Effective' || uploading" title="验证计划审批完成并生效后可上传" @click="planFileInput?.click()"><FileUp :size="14" />上传计划</button>
+        <button type="button" class="pdm-file-picker-button pdm-secondary-action validation-plan__upload-action" :disabled="!plan || normalizedState !== 'Effective' || uploading" title="验证计划审批完成并生效后可上传" @click="evidenceFileInput?.click()"><Paperclip :size="14" />上传附件</button>
         <button type="button" class="pdm-secondary-action" :disabled="!canAdd" @click="openSelection"><Plus :size="14" />选取内容</button>
         <button type="button" class="pdm-secondary-action" :disabled="!canAdd" aria-label="添加自定义项" @click="addCustomRow"><Plus :size="14" />添加自定义</button>
         <button type="button" class="pdm-secondary-action" :disabled="!plan || dirty || exporting" v-if="projectExport" @click="exportPlan"><Download :size="14" />{{ exporting ? '导出中…' : '导出Excel' }}</button>
@@ -908,6 +976,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
         <button v-if="plan && editable" type="button" class="pdm-primary-action" :disabled="dirty || submitting" @click="submitForApproval"><Send :size="14" />提交审批</button>
         <button v-if="canWithdraw" type="button" class="pdm-secondary-action" :disabled="submitting" @click="withdrawCurrent">撤回申请</button>
         <button v-if="canTransferCurrent" type="button" class="pdm-secondary-action" :disabled="submitting" @click="transferCurrent">转交</button>
+        <ApprovalNoteEditor v-if="plan" v-model="approvalNote" label="计划备注" :identity="plan.id + (currentApprovalTask?.id ?? '')" :nodes="plan.approvalTasks.map(step => step.participants)" :editable="!!(canDecideCurrent && currentApprovalTask?.participants?.policy?.editBusinessNote)" />
         <button v-if="canEmergencyCurrent && !canDecideCurrent" type="button" class="pdm-secondary-action" :disabled="submitting" @click="emergencyDecideCurrent('Rejected')">紧急代退回</button>
         <button v-if="canEmergencyCurrent && !canDecideCurrent" type="button" class="pdm-primary-action" :disabled="submitting" @click="emergencyDecideCurrent('Approved')">紧急代批</button>
         <button v-if="canDecideCurrent" type="button" class="pdm-secondary-action" :disabled="submitting" @click="decideCurrent('Rejected')"><XCircle :size="14" />退回</button>
@@ -917,17 +986,17 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 
     <div class="validation-plan__meta">
       <label>项目代号<input :value="activeDetailProject?.code" readonly></label>
-      <label>项目名称<input :value="activeDetailProject?.name" readonly></label>
+      <label>项目名称<input class="validation-plan__project-name" :value="activeDetailProject?.name" readonly></label>
       <label>编制人<input :value="preparedBy" readonly></label>
       <label>编制日期<input :value="planDate" readonly type="date"></label>
       <span v-if="plan" class="validation-plan__state">R{{ plan.revisionNumber }} · {{ stateLabel() }}</span>
-      <span v-if="currentApprovalTask" class="validation-plan__current-approval">当前等待：{{ currentApprovalTask.stepName }} · {{ displayUserName(currentApprovalTask.assignee, currentApprovalTask.assignee) }}</span>
+      <span v-if="currentApprovalTask" class="validation-plan__current-approval">当前等待：{{ currentApprovalTask.stepName }} · <PersonName :name="displayUserName(currentApprovalTask.assignee, currentApprovalTask.assignee)" /></span>
       <span v-if="dirty" class="validation-plan__dirty">有未保存修改</span>
     </div>
 
     <div v-if="loading" class="validation-plan__empty pdm-loading-page"><SquareLoader label="正在加载验证计划…" /><span class="pdm-loading-copy">正在加载验证计划…</span></div>
     <div v-else-if="rows.length" class="validation-plan__table-scroll">
-      <table class="validation-plan__table">
+      <table class="validation-plan__table pdm-fit-columns" data-pdm-min-width="1440">
         <thead><tr><th>序号</th><th>分类</th><th>{{ qualityAcceptance ? '验收内容' : '验证内容' }}</th><th>{{ qualityAcceptance ? '验收标准' : '验证标准' }}</th><th>信息来源</th><th>{{ qualityAcceptance ? '验收日期' : '验证日期' }}</th><th>责任人</th><th>结果</th><th>审核人</th><th>备注</th><th>操作</th></tr></thead>
         <tbody>
           <tr v-for="(row, index) in rows" :key="row.id" :data-row-index="index" :class="{ 'is-row-dragging': draggedRowIndex === index, 'is-drag-over-before': dragOverRowIndex === index && dragOverPosition === 'before', 'is-drag-over-after': dragOverRowIndex === index && dragOverPosition === 'after' }">
@@ -941,18 +1010,18 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
             <td><input v-model="row.result" :disabled="!isRowEditable(row)" maxlength="1500" placeholder="填写结果"></td>
             <td><input v-model="row.reviewer" :disabled="!isRowEditable(row)" maxlength="100" placeholder="审核人"></td>
             <td><input v-model="row.remark" :disabled="!isRowEditable(row)" maxlength="1000" placeholder="备注"></td>
-            <td><div class="validation-plan__row-actions"><span v-if="editable" class="validation-plan__drag-handle" role="button" tabindex="0" :aria-label="`拖动第 ${index + 1} 行排序`" :title="`按住拖动第 ${index + 1} 行排序`" @pointerdown="startRowPointerDrag(index, $event)">⠿</span><button type="button" :disabled="!canAdd" title="添加自定义项" aria-label="添加自定义项" @click="addCustomRow"><Plus :size="14" /></button><button type="button" :disabled="!canRemoveRow(row)" title="移除" @click="removeRow(index)"><Trash2 :size="14" /></button></div></td>
+            <td><div class="validation-plan__row-actions"><button v-if="editable" type="button" class="validation-plan__drag-handle" :aria-label="`拖动第 ${index + 1} 行排序`" :title="`按住拖动第 ${index + 1} 行排序`" @pointerdown="startRowPointerDrag(index, $event)"><GripVertical :size="14" /></button><button type="button" :disabled="!canAdd" title="添加自定义项" aria-label="添加自定义项" @click="addCustomRow"><Plus :size="14" /></button><button type="button" :disabled="!canRemoveRow(row)" title="移除" @click="removeRow(index)"><Trash2 :size="14" /></button></div></td>
           </tr>
         </tbody>
       </table>
     </div>
     <div v-else class="validation-plan__empty"><ListChecks :size="42" /><h3>当前项目还没有{{ qualityAcceptance ? '质量验收' : '验证' }}检查项</h3><p>按分类从全局检查项库选取，或直接添加自定义项。</p><div v-if="canAdd" class="validation-plan__actions"><button type="button" class="pdm-primary-action" @click="openSelection">选取内容</button><button type="button" class="pdm-secondary-action" aria-label="添加自定义项" @click="addCustomRow"><Plus :size="14" />添加自定义</button></div></div>
     <section v-if="plan?.approvalTasks?.length || plan?.attachments?.length || executionRecords.length" class="validation-plan__records">
-      <div v-if="plan?.approvalTasks?.length"><strong>审批记录</strong><span v-for="task in plan.approvalTasks" :key="task.id">{{ task.stepOrder }}. {{ task.stepName }} · {{ displayUserName(task.assignee, task.assignee) }} · {{ approvalTaskStatus(task) }}</span></div>
-      <div v-if="plan?.attachments?.length"><strong>归档文件（验收资料 / 验证计划）</strong><div v-for="file in plan.attachments" :key="file.id" class="validation-plan__attachment-row"><button type="button" class="validation-plan__attachment" :title="`SHA-256 ${file.sha256}`" v-if="projectDownload" @click="downloadAttachment(file.id, file.originalFileName)">{{ file.kind === 'PlanDocument' || file.kind === 0 ? '验证计划' : '佐证附件' }} · {{ file.originalFileName }} · V{{ file.fileVersion }} · {{ fileSize(file.fileLength) }} · {{ displayUserName(file.uploadedBy, file.uploadedBy) }}</button><button v-if="normalizedState === 'Effective' && isRecognizableAttachment(file)" type="button" class="pdm-text-action" :disabled="recognizing" @click="recognizeAttachment(file)">{{ recognizing ? '识别中…' : '识别结果' }}</button></div></div>
-      <div v-if="executionRecords.length"><strong>验证执行记录</strong><article v-for="record in executionRecords" :key="record.id" class="validation-plan__execution-record"><span>{{ record.sourceFileName }} · {{ displayUserName(record.confirmedBy, record.confirmedBy) }} · {{ formatDateTime(record.confirmedAt) }}</span><small v-for="item in record.items" :key="item.id" :title="item.sourceText">{{ planItemLabel(item.planItemId) }}：{{ item.result || '未填写结果' }}<template v-if="item.responsiblePerson"> · {{ item.responsiblePerson }}</template><template v-if="item.validationDate"> · {{ item.validationDate }}</template></small></article></div>
+      <div v-if="plan?.approvalTasks?.length"><strong>审批记录</strong><span v-for="task in plan.approvalTasks" :key="task.id">{{ task.stepOrder }}. {{ task.stepName }} · <PersonName :name="displayUserName(task.assignee, task.assignee)" /> · {{ approvalTaskStatus(task) }}</span></div>
+      <div v-if="plan?.attachments?.length"><strong>归档文件（验收资料 / 验证计划）</strong><div v-for="file in plan.attachments" :key="file.id" class="validation-plan__attachment-row"><button type="button" class="validation-plan__attachment" :title="`SHA-256 ${file.sha256}`" v-if="projectDownload" @click="downloadAttachment(file.id, file.originalFileName)">{{ file.kind === 'PlanDocument' || file.kind === 0 ? '验证计划' : '佐证附件' }} · {{ file.originalFileName }} · V{{ file.fileVersion }} · {{ fileSize(file.fileLength) }} · <PersonName :name="displayUserName(file.uploadedBy, file.uploadedBy)" /></button><button v-if="normalizedState === 'Effective' && isRecognizableAttachment(file)" type="button" class="pdm-text-action" :disabled="recognizing" @click="recognizeAttachment(file)">{{ recognizing ? '识别中…' : '识别结果' }}</button></div></div>
+      <div v-if="executionRecords.length"><strong>验证执行记录</strong><article v-for="record in executionRecords" :key="record.id" class="validation-plan__execution-record"><span>{{ record.sourceFileName }} · <PersonName :name="displayUserName(record.confirmedBy, record.confirmedBy)" /> · {{ formatDateTime(record.confirmedAt) }}</span><small v-for="item in record.items" :key="item.id" :title="item.sourceText">{{ planItemLabel(item.planItemId) }}：{{ item.result || '未填写结果' }}<template v-if="item.responsiblePerson"> · <PersonName :name="item.responsiblePerson" /></template><template v-if="item.validationDate"> · {{ item.validationDate }}</template></small></article></div>
     </section>
-    <footer class="validation-plan__footer"><span>共 {{ rows.length }} 项</span><span v-if="plan">最近保存：{{ displayUserName(plan.updatedBy) }} · {{ new Date(plan.updatedAt).toLocaleString() }}</span><span v-else>尚未保存</span></footer>
+    <footer class="validation-plan__footer"><span>共 {{ rows.length }} 项</span><span v-if="plan">最近保存：<PersonName :name="displayUserName(plan.updatedBy)" /> · {{ new Date(plan.updatedAt).toLocaleString() }}</span><span v-else>尚未保存</span></footer>
     </template>
 
     <el-dialog v-model="recognitionOpen" class="validation-plan-recognition-dialog" :title="`识别并确认 · ${recognitionDraft?.originalFileName || ''}`" width="min(1220px, 96vw)" append-to-body destroy-on-close>
@@ -1007,12 +1076,13 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-plan__actions button,.validation-plan__toolbar button { display:inline-flex; align-items:center; gap:5px; }.validation-plan__toolbar .validation-plan__actions>button { box-sizing:border-box; justify-content:center; width:80px; min-width:80px; max-width:80px; height:30px; min-height:30px; flex:0 0 80px; padding:0; margin:0; gap:4px; font-size:12px; white-space:nowrap; }
 .validation-plan__upload-action:disabled { border-color:var(--pdm-border); background:var(--pdm-surface-muted); color:var(--pdm-muted); cursor:not-allowed; opacity:1; }
 .validation-plan__back { display:grid!important; place-items:center; width:var(--pdm-symbol-compact); height:var(--pdm-symbol-compact); padding:0; border:1px solid var(--pdm-border); border-radius:5px; background:var(--pdm-surface); color:var(--pdm-text); }
-.validation-plan__meta { justify-content:flex-start; padding:10px 12px; border:1px solid var(--pdm-border); border-radius:8px; background:var(--pdm-soft); }
-.validation-plan__meta label { display:grid; gap:4px; color:var(--pdm-muted); font-size:11px; }
-.validation-plan__meta input { width:190px; height:30px; padding:0 9px; border:1px solid var(--pdm-border); border-radius:5px; background:var(--pdm-surface); color:var(--pdm-text); }
+.validation-plan__meta { --pdm-control-gap:20px; justify-content:flex-start; gap:20px; flex-wrap:wrap; padding:10px 12px; border:1px solid var(--pdm-border); border-radius:8px; background:var(--pdm-soft); }
+.validation-plan__meta label { --pdm-control-gap:8px; flex:none; display:flex; align-items:center; gap:8px; white-space:nowrap; color:var(--pdm-muted); font-size:11px; }
+.validation-plan__meta input { text-align:center; box-sizing:border-box; flex:0 0 120px; min-width:120px; width:120px; max-width:120px; height:30px; padding:0 9px; border:1px solid var(--pdm-border); border-radius:5px; background:var(--pdm-surface); color:var(--pdm-text); }
+.validation-plan__meta .validation-plan__project-name { flex-basis:300px; min-width:300px; width:300px; max-width:300px; }
 .validation-plan__dirty { margin-left:auto; color:var(--pdm-orange); font-size:12px; }
 .validation-plan__table-scroll { min-height:0; flex:1 1 auto; overflow:auto; border:1px solid var(--pdm-border); border-radius:7px; }
-.validation-plan__table { width:100%; min-width:0; border-collapse:collapse; table-layout:fixed; font-size:12px; }
+.validation-plan__table { width:100%; min-width:1440px; border-collapse:collapse; table-layout:fixed; font-size:12px; }
 .validation-plan-summary__table { width:100%; min-width:1240px; border-collapse:collapse; table-layout:fixed; font-size:12px; }
 .validation-plan-summary__table th { position:sticky; top:0; z-index:1; padding:9px 6px; border:0; background:var(--pdm-table-header); color:var(--pdm-muted); font-weight:500; text-align:center; vertical-align:middle; }
 .validation-plan-summary__table th:nth-child(7), .validation-plan-summary__table td:nth-child(7) { width:180px; white-space:nowrap; }
@@ -1020,7 +1090,9 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-plan-summary__table tbody tr:hover,.validation-plan-summary__table tbody tr:focus { background:var(--pdm-theme-accent-soft); outline:none; }
 .validation-plan-summary__table tbody tr.is-disabled { cursor:not-allowed; opacity:.55; }
 .validation-plan-summary__table td { height:38px; padding:0 6px; border:0; border-top:1px solid var(--pdm-border-soft); color:var(--pdm-text); text-align:center; vertical-align:middle; }
-.validation-plan-summary__file-link { min-width:34px; padding:3px 8px; border:1px solid var(--pdm-theme-accent-border); border-radius:999px; background:var(--pdm-theme-accent-soft); color:var(--pdm-primary); font:inherit; cursor:pointer; }
+.validation-plan-summary__table .validation-plan-summary__actions { padding-block:5px; }
+.validation-plan-summary__action-buttons { display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:5px; }
+.validation-plan-summary__file-link { min-width:34px; padding:3px 8px; border:1px solid var(--pdm-theme-accent-border); border-radius:999px; background:var(--pdm-theme-accent-soft); color:var(--pdm-text); font:inherit; cursor:pointer; }
 .validation-plan-summary__file-link:hover,.validation-plan-summary__file-link:focus-visible { border-color:var(--pdm-primary); outline:2px solid var(--pdm-theme-accent-focus); }
 .validation-plan-summary__status { display:inline-block; min-width:54px; padding:3px 7px; border-radius:999px; background:var(--pdm-soft); color:var(--pdm-muted); }
 .validation-plan-summary__status.is-已生效 { background:var(--pdm-green-soft); color:var(--pdm-green); }
@@ -1030,23 +1102,23 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-plan__table th { position:sticky; top:0; z-index:1; padding:9px 3px; border:0; background:var(--pdm-table-header); color:var(--pdm-muted); font-weight:500; text-align:center; vertical-align:middle; }
 .validation-plan__table tbody tr { background:var(--pdm-surface); }
 .validation-plan__table td { overflow-wrap:anywhere; padding:0 3px; border:0; border-top:1px solid var(--pdm-border-soft); color:var(--pdm-text); text-align:center; vertical-align:middle; }
-.validation-plan__table th:nth-child(1){width:3%}.validation-plan__table th:nth-child(2){width:8%}.validation-plan__table th:nth-child(3){width:25%}.validation-plan__table th:nth-child(4){width:13%}.validation-plan__table th:nth-child(5){width:8%}.validation-plan__table th:nth-child(6){width:6%}.validation-plan__table th:nth-child(7){width:8%}.validation-plan__table th:nth-child(8){width:7%}.validation-plan__table th:nth-child(9){width:7%}.validation-plan__table th:nth-child(10){width:10%}.validation-plan__table th:nth-child(11){width:5%}
+.validation-plan__table th:nth-child(1){width:3%}.validation-plan__table th:nth-child(2){width:7%}.validation-plan__table th:nth-child(3){width:25%}.validation-plan__table th:nth-child(4){width:13%}.validation-plan__table th:nth-child(5){width:8%}.validation-plan__table th:nth-child(6){width:6%}.validation-plan__table th:nth-child(7){width:7%}.validation-plan__table th:nth-child(8){width:8%}.validation-plan__table th:nth-child(9){width:7%}.validation-plan__table th:nth-child(10){width:9%}.validation-plan__table th:nth-child(11){width:7%}
 .validation-plan__table input,.validation-plan__table select { box-sizing:border-box; width:100%; min-width:0; height:24px; padding:3px 2px; border:1px solid transparent; border-radius:4px; background:transparent; color:var(--pdm-text); font:inherit; text-align:center; }
 .validation-plan__table input:focus,.validation-plan__table select:focus { border-color:var(--pdm-blue); background:var(--pdm-surface); outline:2px solid var(--pdm-theme-accent-focus); }
 .validation-plan__table .is-standard,.validation-plan__table th:nth-child(4),.validation-plan__table .is-standard input { text-align:center; }
 .validation-plan__table input:disabled,.validation-plan__table select:disabled { border-color:transparent; background:transparent; color:inherit; opacity:1; }
-.validation-plan__date-cell { position:relative; }.validation-plan__date-cell input[type="date"] { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }.validation-plan__date-cell button { display:inline-grid; place-items:center; width:24px; height:24px; padding:0; border:1px solid var(--pdm-theme-accent-border); border-radius:4px; background:var(--pdm-theme-accent-soft); color:var(--pdm-primary); }.validation-plan__date-cell button:disabled { opacity:.55; }.validation-plan__table .is-sequence { color:var(--pdm-muted); white-space:nowrap; }.validation-plan__drag-handle { display:inline-block; margin-right:4px; color:var(--pdm-primary); cursor:grab; touch-action:none; user-select:none; }.validation-plan__drag-handle:focus-visible { outline:2px solid var(--pdm-theme-accent-focus); outline-offset:2px; border-radius:2px; }.validation-plan__table tbody tr.is-row-dragging { opacity:.5; }.validation-plan__table tbody tr.is-drag-over-before { box-shadow:inset 0 2px 0 var(--pdm-primary); }.validation-plan__table tbody tr.is-drag-over-after { box-shadow:inset 0 -2px 0 var(--pdm-primary); }.validation-plan__table th:nth-child(3),.validation-plan__table .is-content { text-align:left; }.validation-plan__table .is-content { line-height:1.4; white-space:normal; }.validation-plan__table .is-content input { text-align:left; }
+.validation-plan__date-cell { position:relative; }.validation-plan__date-cell input[type="date"] { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }.validation-plan__date-cell button { display:inline-grid; place-items:center; width:24px; height:24px; padding:0; border:1px solid var(--pdm-theme-accent-border); border-radius:4px; background:var(--pdm-theme-accent-soft); color:var(--pdm-text); }.validation-plan__date-cell button:disabled { opacity:.55; }.validation-plan__table .is-sequence { color:var(--pdm-muted); white-space:nowrap; }.validation-plan__row-actions .validation-plan__drag-handle { cursor:grab; touch-action:none; user-select:none; }.validation-plan__drag-handle:active { cursor:grabbing; }.validation-plan__drag-handle:focus-visible { outline:2px solid var(--pdm-theme-accent-focus); outline-offset:2px; }.validation-plan__table tbody tr.is-row-dragging { opacity:.5; }.validation-plan__table tbody tr.is-drag-over-before { box-shadow:inset 0 2px 0 var(--pdm-primary); }.validation-plan__table tbody tr.is-drag-over-after { box-shadow:inset 0 -2px 0 var(--pdm-primary); }.validation-plan__table .is-content { line-height:1.4; white-space:normal; }.validation-plan__table .is-content input { text-align:left; }
 .validation-plan__category { display:inline-block; padding:3px 7px; border-radius:999px; background:var(--pdm-green-soft); color:var(--pdm-green); }
-.validation-plan__row-actions { display:flex; flex-wrap:wrap; justify-content:center; gap:5px; }.validation-plan__row-actions button { display:grid; place-items:center; width:var(--pdm-symbol-small); height:var(--pdm-symbol-small); padding:0; border:1px solid var(--pdm-theme-accent-border); border-radius:3px; background:var(--pdm-theme-accent-soft); color:var(--pdm-primary); }.validation-plan__row-actions button:last-child { border-color:var(--pdm-danger-border); background:var(--pdm-danger-soft); color:var(--pdm-danger); }
+.validation-plan__row-actions { display:flex; flex-wrap:wrap; justify-content:center; gap:5px; }.validation-plan__row-actions button { display:grid; place-items:center; width:var(--pdm-symbol-small); height:var(--pdm-symbol-small); padding:0; border:1px solid var(--pdm-theme-accent-border); border-radius:3px; background:var(--pdm-theme-accent-soft); color:var(--pdm-text); }.validation-plan__row-actions button:last-child { border-color:var(--pdm-danger-border); background:var(--pdm-danger-soft); color:var(--pdm-danger); }
 .validation-plan__empty { min-height:0; flex:1 1 auto; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; color:var(--pdm-muted); }.validation-plan__empty h3,.validation-plan__empty p { margin:0; }
 .validation-plan__footer { color:var(--pdm-muted); font-size:11px; }
 .validation-plan__file-input { display:none; }
-.validation-plan__state { align-self:flex-end; padding:4px 9px; border-radius:999px; background:var(--pdm-theme-accent-soft); color:var(--pdm-primary); font-size:12px; white-space:nowrap; }
+.validation-plan__state { align-self:flex-end; padding:4px 9px; border-radius:999px; background:var(--pdm-theme-accent-soft); color:var(--pdm-text); font-size:12px; white-space:nowrap; }
 .validation-plan__current-approval { color:var(--pdm-text); font-size:12px; white-space:nowrap; }
 .validation-plan__records { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
 .validation-plan__records>div { display:flex; flex-direction:column; gap:6px; min-width:0; padding:9px 11px; border:1px solid var(--pdm-border-soft); border-radius:7px; background:var(--pdm-soft); font-size:11px; }
 .validation-plan__records>div>strong { color:var(--pdm-text); }
-.validation-plan__attachment { overflow:hidden; padding:0; border:0; background:transparent; color:var(--pdm-primary); text-align:left; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; }
+.validation-plan__attachment { overflow:hidden; padding:0; border:0; background:transparent; color:var(--pdm-text); text-align:left; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; }
 .validation-plan__attachment-row { display:flex; align-items:center; gap:8px; min-width:0; }.validation-plan__attachment-row .validation-plan__attachment { min-width:0; flex:1 1 auto; }.validation-plan__attachment-row .pdm-text-action { flex:0 0 auto; }
 .validation-plan__execution-record { display:grid; gap:4px; padding:7px 0; border-top:1px solid var(--pdm-border-soft); }.validation-plan__execution-record:first-of-type { border-top:0; }.validation-plan__execution-record small { overflow:hidden; color:var(--pdm-muted); text-overflow:ellipsis; white-space:nowrap; }
 .validation-recognition__notice { margin-bottom:10px; padding:9px 11px; border:1px solid var(--pdm-orange-border); border-radius:6px; background:var(--pdm-orange-soft); color:var(--pdm-orange); font-size:12px; }
@@ -1062,7 +1134,7 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-plan-attachment-list__empty { display:grid; place-items:center; min-height:180px; color:var(--pdm-muted); }
 .validation-selector { display:grid; grid-template-columns:220px 1fr; height:100%; min-height:0; border:1px solid var(--pdm-border); border-radius:7px; overflow:hidden; }
 .validation-selector aside,.validation-catalog aside { display:flex; flex-direction:column; min-height:0; overflow:auto; padding:10px; background:var(--pdm-soft); border-right:1px solid var(--pdm-border); }
-.validation-selector aside>strong { padding:5px 7px 10px; }.validation-selector aside>button,.validation-catalog aside>button { display:flex; justify-content:space-between; gap:8px; width:100%; padding:8px; border:0; border-radius:5px; background:transparent; color:var(--pdm-text); text-align:left; }.validation-selector aside>button.is-active,.validation-catalog aside>button.is-active { background:var(--pdm-theme-accent-soft); color:var(--pdm-theme-accent); }
+.validation-selector aside>strong { padding:5px 7px 10px; }.validation-selector aside>button,.validation-catalog aside>button { display:flex; justify-content:space-between; gap:8px; width:100%; padding:8px; border:0; border-radius:5px; background:transparent; color:var(--pdm-text); text-align:left; }.validation-selector aside>button.is-active,.validation-catalog aside>button.is-active { background:var(--pdm-theme-accent-soft); color:var(--pdm-text); }
 .validation-selector aside>button.is-complete:not(.is-active) { color:var(--pdm-muted); opacity:.68; }
 .validation-selector section { display:flex; flex-direction:column; min-height:0; padding:12px; }.validation-selector__filter { display:flex; flex:0 0 auto; align-items:center; gap:12px; }.validation-selector__filter>input,.validation-catalog section>input { height:34px; padding:0 10px; border:1px solid var(--pdm-border); border-radius:5px; }.validation-selector__filter>input { min-width:0; flex:1 1 auto; }
 .validation-selector__select-all { display:flex; flex:0 0 auto; align-items:center; gap:6px; color:var(--pdm-text); font-size:12px; white-space:nowrap; }.validation-selector__items { min-height:0; flex:1 1 auto; margin-top:10px; overflow:auto; }.validation-selector__items label { display:grid; grid-template-columns:22px 1fr 90px; align-items:start; gap:6px; padding:9px 6px; border-bottom:1px solid var(--pdm-border); }.validation-selector__items small { color:var(--pdm-muted); text-align:right; }
@@ -1070,5 +1142,5 @@ function approvalTaskStatus(task: ProjectValidationPlan['approvalTasks'][number]
 .validation-catalog section { display:flex; flex-direction:column; min-width:0; min-height:0; padding:12px; }.validation-catalog section>header>div { display:flex; align-items:center; gap:8px; }.validation-catalog section>header small { color:var(--pdm-muted); }.validation-catalog__items { min-height:0; margin-top:10px; overflow:auto; }.validation-catalog__items article { display:grid; grid-template-columns:1fr auto auto; align-items:center; gap:10px; padding:9px 6px; border-bottom:1px solid var(--pdm-border); }.validation-catalog__items article>div { display:grid; gap:4px; }.validation-catalog__items article small { color:var(--pdm-muted); }
 .validation-editor { display:grid; gap:13px; }.validation-editor label { display:grid; gap:5px; color:var(--pdm-muted); font-size:12px; }.validation-editor input,.validation-editor select,.validation-editor textarea { width:100%; padding:8px 9px; border:1px solid var(--pdm-border); border-radius:5px; background:var(--pdm-surface); color:var(--pdm-text); box-sizing:border-box; }.validation-editor label.is-check { display:flex; flex-direction:row; align-items:center; color:var(--pdm-text); }.validation-editor label.is-check input { width:auto; }
 .pdm-text-action.is-danger { color:var(--pdm-danger); }
-@media (max-width: 1100px) { .validation-plan__toolbar { align-items:flex-start; }.validation-plan__meta { flex-wrap:wrap; }.validation-plan__meta input { width:150px; } }
+@media (max-width: 1100px) { .validation-plan__toolbar { align-items:flex-start; }.validation-plan__meta { flex-wrap:wrap; } }
 </style>

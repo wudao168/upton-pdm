@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
 import { computed, ref, watch } from 'vue'
 import { addProjectBudgetNote } from '../api'
 import type { BudgetNote, ProjectBudget } from '../projectBudget'
@@ -23,9 +24,9 @@ async function add() {
 }
 </script>
 <template>
-  <el-dialog :model-value="modelValue" :title="title" width="600px" :close-on-click-modal="false" :close-on-press-escape="!saving" :show-close="!saving" @update:model-value="(value: boolean) => emit('update:modelValue', value)">
+  <el-dialog :model-value="modelValue" :title="title" width="600px" :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving" @update:model-value="(value: boolean) => emit('update:modelValue', value)">
     <div class="pdm-budget__note-history">
-      <article v-for="note in history" :key="note.id"><header><span>{{ displayUserName(note.createdBy, '历史备注') }}</span><time>{{ note.createdAt ? new Date(note.createdAt).toLocaleString('zh-CN') : '时间未记录' }}</time></header><p>{{ note.content }}</p></article>
+      <article v-for="note in history" :key="note.id"><header><span><PersonName :name="displayUserName(note.createdBy, '历史备注')" /></span><time>{{ note.createdAt ? new Date(note.createdAt).toLocaleString('zh-CN') : '时间未记录' }}</time></header><p>{{ note.content }}</p></article>
       <p v-if="!history.length" class="pdm-budget__note-empty">暂无备注</p>
     </div>
     <el-input v-model="content" type="textarea" :rows="3" maxlength="500" show-word-limit :disabled="saving" placeholder="输入新备注" aria-label="新备注" />

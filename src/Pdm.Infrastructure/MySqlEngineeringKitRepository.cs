@@ -53,6 +53,35 @@ public sealed class MySqlEngineeringKitRepository : IEngineeringKitRepository
         return (await FindAsync(kit.Id, cancellationToken))!;
     }
 
+    public async Task DeleteDraftAsync(Guid kitId, long expectedRowVersion, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var key = new { Id = kitId };
+        var version = await connection.QuerySingleOrDefaultAsync<long?>(new CommandDefinition(
+            "SELECT row_version FROM engineering_kit WHERE id=@Id FOR UPDATE", key, transaction, cancellationToken: cancellationToken))
+            ?? throw new PdmNotFoundException("套件不存在。");
+        if (version != expectedRowVersion) throw new PdmConflictException("套件已被修改，请刷新后重试。");
+        if (await connection.ExecuteScalarAsync<bool>(new CommandDefinition("""
+            SELECT EXISTS(SELECT 1 FROM engineering_kit WHERE id=@Id AND current_released_revision_id IS NOT NULL)
+                OR EXISTS(SELECT 1 FROM engineering_kit_revision WHERE kit_id=@Id AND (revision_state<>'Draft' OR published_at IS NOT NULL))
+            """, key, transaction, cancellationToken: cancellationToken)))
+            throw new PdmRuleException("已发布过的料品套件请使用停用操作。");
+        if (await connection.ExecuteScalarAsync<bool>(new CommandDefinition("""
+            SELECT EXISTS(SELECT 1 FROM bom_item WHERE engineering_kit_id=@Id)
+            """, key, transaction, cancellationToken: cancellationToken)))
+            throw new PdmConflictException("此套件已有BOM引用，请解除引用后再删除。");
+        try
+        {
+            await connection.ExecuteAsync(new CommandDefinition("DELETE FROM engineering_kit WHERE id=@Id", key, transaction, cancellationToken: cancellationToken));
+        }
+        catch (MySqlException exception) when (exception.Number == 1451)
+        {
+            throw new PdmConflictException("此套件已有引用或附件，请解除引用后再删除。");
+        }
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     public async Task<EngineeringKit> SaveDraftAsync(EngineeringKit kit, EngineeringKitRevision revision, long? expectedRowVersion, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

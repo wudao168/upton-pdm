@@ -736,7 +736,7 @@ internal static partial class Program
                         .Any(path => string.Equals(path, oldPath, StringComparison.OrdinalIgnoreCase)));
                 var beforePath = (string)Get(candidate, "FullPath");
                 type.GetMethod("ApplyDocumentRenameWithLinkedDrawing", Members).Invoke(addin,
-                    new object[] { candidate, "QA-待落盘子件", model, false });
+                    new object[] { candidate, "QA-待落盘子件", model, false, null });
                 var pendingPath = (string)Get(candidate, "FullPath");
                 Report["pendingChildBeforeRootRename"] = new { beforePath, pendingPath,
                     pending = Get(candidate, "IsRenamePendingSave"), targetExists = File.Exists(pendingPath) };
@@ -745,7 +745,7 @@ internal static partial class Program
                 Console.WriteLine("RENAME: child renamed in memory; target absent on disk; now renaming root");
             }
             Console.WriteLine("RENAME: applying production rename");
-            type.GetMethod("ApplyDocumentRenameWithLinkedDrawing", Members).Invoke(addin, new object[] { root, "QA-改名后总装", model, true });
+            type.GetMethod("ApplyDocumentRenameWithLinkedDrawing", Members).Invoke(addin, new object[] { root, "QA-改名后总装", model, true, null });
             model = (IModelDoc2)app.GetOpenDocumentByName((string)Get(root, "FullPath"));
             Report["renamedRoot"] = model.GetPathName();
             Report["oldRootRemains"] = File.Exists(oldPath);

@@ -54,7 +54,7 @@ public sealed class NotificationInboxTests
     }
 
     [Fact]
-    public async Task LegacyPublicReviewPoolUsesBusinessReviewRolesInsteadOfAdministrativePermission()
+    public async Task LegacyPublicReviewPoolUsesConfiguredGrantsFromAllTemplates()
     {
         using var f = await Fixture.Create();
         var package = new DrawingReviewPackage { Id = Guid.NewGuid(), ProjectId = f.Project.Id, Number = "DR-POOL", State = DrawingReviewPackageState.InReview,
@@ -65,7 +65,7 @@ public sealed class NotificationInboxTests
         await f.Repository.CreateUserNotificationsAsync([assigned, copied], default);
         await f.Inbox.ReconcileAsync(null, default);
         Assert.Null(Assert.Single(await f.Repository.ListUserNotificationsAsync("review-a", 200, default)).ReadAt);
-        Assert.NotNull(Assert.Single(await f.Repository.ListUserNotificationsAsync("mixed-admin", 200, default)).ReadAt);
+        Assert.Null(Assert.Single(await f.Repository.ListUserNotificationsAsync("mixed-admin", 200, default)).ReadAt);
     }
 
     [Fact]

@@ -63,7 +63,9 @@ internal static partial class Program
             }
             Console.Error.WriteLine("专用SolidWorks启动失败；进程=" + ownedProcess.Id + "；已退出=" + ownedProcess.HasExited
                 + (ownedProcess.HasExited ? "；退出码=" + ownedProcess.ExitCode : "；连接等待超时"));
-            throw new InvalidOperationException("专用SolidWorks启动未完成，请检查转图电脑的许可或启动弹窗后重试；现有工作会话已保留。");
+            throw new InvalidOperationException(ownedProcess.HasExited
+                ? $"专用SolidWorks在启动期间退出（退出码 {ownedProcess.ExitCode}），请在转图电脑检查启动日志及许可。"
+                : "专用SolidWorks已启动，但两分钟内未就绪，请在转图电脑检查许可及启动弹窗，完成启动自检后重试。");
         }
     }
 

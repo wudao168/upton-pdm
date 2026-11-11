@@ -7,6 +7,38 @@ namespace Upton.Pdm.Domain.Tests;
 
 public sealed partial class Phase1ReleaseWorkflowTests
 {
+    [Fact]
+    public async Task SelectedSummaryReplacesBothOldOccurrencesInDraftResubmissionAndApproval()
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var first = new BomItem(Guid.NewGuid(), ProjectId, BomKind.Standard, 1, "01020003769", "带导杆气缸", 1, "001", null, "MGPM12-20Z", "W1", true);
+        var second = first with { Id = Guid.NewGuid(), Sequence = 2 };
+        var deferred = first with { Id = Guid.NewGuid(), Sequence = 3, DrawingNumber = "DEFER" };
+        await repository.ReplaceBomAsync(ProjectId, BomKind.Standard, [first, second, deferred], default);
+        var formal = await workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", "", "未指定", null,
+            ReleaseScope.StandardFormal, [first.Id, second.Id, deferred.Id], "admin", UserRole.Administrator, default);
+        formal = await PublishThroughAllStepsAsync(workflow, formal);
+        var total = second with { Quantity = 5, IsSummaryQuantity = true, IsManuallyRetained = true };
+        await repository.ReplaceBomAsync(ProjectId, BomKind.Standard, [total], default);
+        var draft = await workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", "设计问题 / 设计变更", "未指定", null,
+            ReleaseScope.StandardSupplement, [total.Id], "admin", UserRole.Administrator, default);
+        void Check(ReleasePackage package)
+        {
+            Assert.Equal(5, Assert.Single(package.StandardBomSnapshot, item => item.DrawingNumber == first.DrawingNumber).Quantity);
+            Assert.Contains(package.StandardBomSnapshot, item => item.Id == deferred.Id);
+        }
+        Check(draft);
+        var submitted = await workflow.SubmitReleasePackageAsync(draft.Id, "admin", UserRole.Administrator, default);
+        Check(submitted);
+        await workflow.WithdrawReleasePackageAsync(draft.Id, "admin", UserRole.Administrator, "重核数量", default);
+        Check(await workflow.UpdateReleasePackageDraftAsync(draft.Id, draft.ChangeReason, [total.Id], null, "admin", UserRole.Administrator, default));
+        Check(await PublishThroughAllStepsAsync(workflow, draft));
+        var history = await repository.FindReleasePackageAsync(formal.Id, default);
+        Assert.Equal(2, history!.StandardBomSnapshot.Where(item => item.DrawingNumber == first.DrawingNumber).Sum(item => item.Quantity));
+    }
+
     [Theory]
     [InlineData(BomKind.Standard,ReleaseScope.StandardFormal,ReleaseScope.StandardSupplement)]
     [InlineData(BomKind.Electrical,ReleaseScope.ElectricalFormal,ReleaseScope.ElectricalSupplement)]

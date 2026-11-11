@@ -30,20 +30,7 @@ public sealed class FunctionPermissionMiddleware(RequestDelegate next)
                 if (string.IsNullOrWhiteSpace(actor) || !Enum.TryParse<UserRole>(context.User.FindFirstValue(ClaimTypes.Role), out var role))
                     throw new UnauthorizedAccessException("当前登录身份不能执行此功能，请使用有效的业务账号登录。");
                 if (!await repository.HasUserPermissionAsync(actor, role, permission.Code, context.RequestAborted)) throw new UnauthorizedAccessException("当前角色未授权此功能操作，请联系管理员核对功能权限。");
-                Guid? projectId = Guid.TryParse(context.Request.RouteValues.GetValueOrDefault("projectId")?.ToString(), out var project) ? project : null;
-                if (projectId is null && Guid.TryParse(context.Request.RouteValues.GetValueOrDefault("documentId")?.ToString(), out var document)) projectId = (await repository.FindDocumentAsync(document, context.RequestAborted))?.ProjectId;
-                if (projectId is null && Guid.TryParse(context.Request.RouteValues.GetValueOrDefault("releasePackageId")?.ToString(), out var package)) projectId = (await repository.FindReleasePackageAsync(package, context.RequestAborted))?.ProjectId;
-                if (projectId is null && context.Request.ContentType?.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) == true)
-                {
-                    context.Request.EnableBuffering();
-                    try
-                    {
-                        using var body = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
-                        if (body.RootElement.ValueKind == JsonValueKind.Object && body.RootElement.TryGetProperty("projectId", out var id) && id.ValueKind == JsonValueKind.String && Guid.TryParse(id.GetString(), out var value)) projectId = value;
-                    }
-                    catch (JsonException) { throw new PdmRuleException("请求内容格式无效，请刷新页面后重试。"); }
-                    finally { context.Request.Body.Position = 0; }
-                }
+                var projectId = permission.Scope == "project" ? await AuthorizationResource.ProjectAsync(context, repository) : null;
                 if (projectId is Guid target) await ProjectPermissionPolicy.RequireAsync(repository, target, actor, role, permission.Code, context.RequestAborted);
             }
         }

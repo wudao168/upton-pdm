@@ -40,8 +40,8 @@ public sealed class NotificationInboxService(IPdmRepository repository, IProject
             if (decisions.ContainsKey(notice.Id)) continue;
             if (notice.IsSenderReceipt) { decisions[notice.Id] = new(notice, false, "发送回执属于发起记录"); continue; }
             if (!userCache.TryGetValue(notice.Recipient, out var user)) userCache[notice.Recipient] = user = await repository.FindUserAsync(notice.Recipient, ct);
-            if (user?.IsActive == false || NotificationRecipientPolicy.SystemOnly(user) && !NotificationRecipientPolicy.IsSystemMessage(notice))
-            { decisions[notice.Id] = new(notice, false, "账号已停用或仅承担系统管理职责"); continue; }
+            if (user is null || !user.IsActive || !await NotificationRecipientPolicy.CanReceiveAsync(repository, user.Username, ct) && !NotificationRecipientPolicy.IsSystemMessage(notice))
+            { decisions[notice.Id] = new(notice, false, "账号已停用或未获准接收业务消息"); continue; }
 
             var key = notice.SourceKey.Split(':');
             if (notice.Category.StartsWith("DrawingReview", StringComparison.Ordinal) && TryId(key, 1, out var drawingId))
@@ -62,7 +62,7 @@ public sealed class NotificationInboxService(IPdmRepository repository, IProject
                         var project = await repository.FindProjectAsync(drawing.ProjectId, ct);
                         var isLead = project is not null && (string.Equals(project.DesignLead, user.Username, StringComparison.OrdinalIgnoreCase) || project.DesignLeads.Contains(user.Username, StringComparer.OrdinalIgnoreCase));
                         if (!await NotificationRecipientPolicy.InBusinessCompanyAsync(repository, user, project?.OrganizationId, ct)
-                            || !isLead && !await NotificationRecipientPolicy.HasBusinessPermissionAsync(repository, user.EffectiveRoleCodes, PermissionCodes.DrawingReviewDecide, ct))
+                            || !isLead && !await NotificationRecipientPolicy.HasBusinessPermissionAsync(repository, user, PermissionCodes.DrawingReviewDecide, ct))
                             decisions[notice.Id] = new(notice, false, "不属于当前公共审图受理岗位");
                     }
                 }
@@ -140,7 +140,7 @@ public sealed class NotificationInboxService(IPdmRepository repository, IProject
                     decisions[notice.Id] = new(notice, true, "本轮立项事项已被处理或被新一轮替代");
                 else if (application.Status == ProjectApplicationService.Pending)
                 {
-                    if (user is not null && !await NotificationRecipientPolicy.HasBusinessPermissionAsync(repository, user.EffectiveRoleCodes, PermissionCodes.ProjectApplicationApprove, ct))
+                    if (user is not null && !await NotificationRecipientPolicy.HasBusinessPermissionAsync(repository, user, PermissionCodes.ProjectApplicationApprove, ct))
                         decisions[notice.Id] = new(notice, false, "不属于立项审批业务受理岗位");
                 }
                 else if (!application.Applicant.Equals(notice.Recipient, StringComparison.OrdinalIgnoreCase)) decisions[notice.Id] = new(notice, false, "申请结果仅反馈本人");

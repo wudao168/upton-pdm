@@ -181,18 +181,18 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
         if (affected == 0) throw new PdmConflictException("验证计划状态已变化，请刷新后重试。");
         await connection.ExecuteAsync(new CommandDefinition($"DELETE FROM {tablePrefix}validation_plan_approval_task WHERE plan_id=@PlanId", new { PlanId = planId }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition(
-            $"INSERT INTO {tablePrefix}validation_plan_approval_task(id,plan_id,step_order,stage,step_name,assignee,decision,decision_by,decision_comment,created_at,decided_at,emergency_roles_json) VALUES(@Id,@PlanId,@StepOrder,@Stage,@StepName,@Assignee,@Decision,@DecisionBy,@DecisionComment,@CreatedAt,@DecidedAt,@EmergencyRolesJson)",
-            tasks.Select(task => new { task.Id, task.PlanId, task.StepOrder, Stage = task.Stage.ToString(), task.StepName, task.Assignee, EmergencyRolesJson = task.EmergencyRoleCodes is null ? null : JsonSerializer.Serialize(task.EmergencyRoleCodes), Decision = task.Decision?.ToString(), task.DecisionBy, task.DecisionComment, CreatedAt = task.CreatedAt.UtcDateTime, DecidedAt = task.DecidedAt?.UtcDateTime }), transaction, cancellationToken: cancellationToken));
+            $"INSERT INTO {tablePrefix}validation_plan_approval_task(id,plan_id,step_order,stage,step_name,assignee,decision,decision_by,decision_comment,created_at,decided_at,emergency_roles_json,participants_json) VALUES(@Id,@PlanId,@StepOrder,@Stage,@StepName,@Assignee,@Decision,@DecisionBy,@DecisionComment,@CreatedAt,@DecidedAt,@EmergencyRolesJson,@ParticipantsJson)",
+            tasks.Select(task => new { task.Id, task.PlanId, task.StepOrder, Stage = task.Stage.ToString(), task.StepName, task.Assignee, ParticipantsJson = ApprovalGroupJson.Write(task.Participants), EmergencyRolesJson = task.EmergencyRoleCodes is null ? null : JsonSerializer.Serialize(task.EmergencyRoleCodes), Decision = task.Decision?.ToString(), task.DecisionBy, task.DecisionComment, CreatedAt = task.CreatedAt.UtcDateTime, DecidedAt = task.DecidedAt?.UtcDateTime }), transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
         return await FindPlanByIdAsync(connection, null, planId, cancellationToken) ?? throw new PdmNotFoundException("验证计划不存在。");
     }
 
-    public async Task<ProjectValidationPlan> DecideAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, DateTimeOffset decidedAt, CancellationToken cancellationToken)
+    public async Task<ProjectValidationPlan> DecideAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, DateTimeOffset decidedAt, CancellationToken cancellationToken, bool emergencySubstitute = false, string? businessNote = null)
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var task = await connection.QuerySingleOrDefaultAsync<ApprovalTaskRow>(new CommandDefinition(
-            $"SELECT id,plan_id,step_order,stage,step_name,assignee,decision,decision_by,decision_comment,created_at,decided_at,emergency_roles_json FROM {tablePrefix}validation_plan_approval_task WHERE id=@TaskId FOR UPDATE",
+            $"SELECT id,plan_id,step_order,stage,step_name,assignee,decision,decision_by,decision_comment,created_at,decided_at,emergency_roles_json,participants_json FROM {tablePrefix}validation_plan_approval_task WHERE id=@TaskId FOR UPDATE",
             new { TaskId = taskId }, transaction, cancellationToken: cancellationToken)) ?? throw new PdmNotFoundException("验证计划审批任务不存在。");
         var plan = await connection.QuerySingleAsync<PlanRow>(new CommandDefinition(PlanSelect + " WHERE id=@PlanId FOR UPDATE", new { PlanId = task.PlanId }, transaction, cancellationToken: cancellationToken));
         if (plan.State != ProjectValidationPlanState.PendingApproval.ToString() || task.Decision is not null) throw new PdmConflictException("验证计划审批状态已变化。");
@@ -200,6 +200,16 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
             $"SELECT COUNT(*) FROM {tablePrefix}validation_plan_approval_task WHERE plan_id=@PlanId AND step_order<@StepOrder AND decision IS NULL",
             new { task.PlanId, task.StepOrder }, transaction, cancellationToken: cancellationToken));
         if (earlierPending > 0) throw new PdmConflictException("当前尚未到达该审批节点。");
+        var signed = ApprovalNodeRules.Sign(ApprovalGroupJson.Read(task.ParticipantsJson), actor, decision, comment, decidedAt, emergencySubstitute, out var waiting, businessNote);
+        if (signed is not null)
+            await connection.ExecuteAsync(new CommandDefinition($"UPDATE {tablePrefix}validation_plan_approval_task SET participants_json=@Json WHERE id=@TaskId",
+                new { Json = ApprovalGroupJson.Write(signed), TaskId = taskId }, transaction, cancellationToken: cancellationToken));
+        if (waiting)
+        {
+            var pending = await FindPlanByIdAsync(connection, transaction, task.PlanId, cancellationToken) ?? throw new PdmNotFoundException("验证计划不存在。");
+            await transaction.CommitAsync(cancellationToken);
+            return pending;
+        }
         await connection.ExecuteAsync(new CommandDefinition(
             $"UPDATE {tablePrefix}validation_plan_approval_task SET decision=@Decision,decision_by=@Actor,decision_comment=@Comment,decided_at=@DecidedAt WHERE id=@TaskId AND decision IS NULL",
             new { TaskId = taskId, Decision = decision.ToString(), Actor = actor, Comment = comment, DecidedAt = decidedAt.UtcDateTime }, transaction, cancellationToken: cancellationToken));
@@ -222,15 +232,15 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<PendingTaskRow>(new CommandDefinition(
             $"""
-            SELECT task.id,task.plan_id,plan.project_id,plan.revision_number,task.stage,task.step_name,task.assignee,task.created_at
+            SELECT task.id,task.plan_id,plan.project_id,plan.revision_number,task.stage,task.step_name,task.assignee,task.participants_json,task.created_at
             FROM {tablePrefix}validation_plan_approval_task task
             JOIN {tablePrefix}project_validation_plan plan ON plan.id=task.plan_id
             WHERE plan.state='PendingApproval' AND task.decision IS NULL
-              AND (@IncludeAll OR task.assignee=@Actor)
+              AND (@IncludeAll OR task.assignee=@Actor OR task.participants_json IS NOT NULL)
               AND NOT EXISTS (SELECT 1 FROM {tablePrefix}validation_plan_approval_task earlier WHERE earlier.plan_id=task.plan_id AND earlier.step_order<task.step_order AND earlier.decision IS NULL)
             ORDER BY task.created_at
             """, new { Actor = actor, IncludeAll = includeAll }, cancellationToken: cancellationToken));
-        return rows.Select(row => new PendingValidationPlanApprovalTask(row.Id, row.PlanId, row.ProjectId, row.RevisionNumber, Enum.Parse<ApprovalStage>(row.Stage), row.StepName, row.Assignee, Utc(row.CreatedAt))).ToArray();
+        return rows.Select(row => new PendingValidationPlanApprovalTask(row.Id, row.PlanId, row.ProjectId, row.RevisionNumber, Enum.Parse<ApprovalStage>(row.Stage), row.StepName, row.Assignee, Utc(row.CreatedAt)) { Participants = ApprovalGroupJson.Read(row.ParticipantsJson) }).Where(task => includeAll || task.CanSign(actor)).ToArray();
     }
 
     public async Task<ProjectValidationPlan> WithdrawAsync(Guid planId, long expectedRowVersion, string actor, DateTimeOffset at, CancellationToken cancellationToken)
@@ -248,7 +258,7 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var task = await connection.QuerySingleOrDefaultAsync<ApprovalTaskRow>(new CommandDefinition(
-            $"SELECT id,plan_id,step_order,stage,step_name,assignee,decision,decision_by,decision_comment,created_at,decided_at,emergency_roles_json FROM {tablePrefix}validation_plan_approval_task WHERE id=@TaskId FOR UPDATE",
+            $"SELECT id,plan_id,step_order,stage,step_name,assignee,decision,decision_by,decision_comment,created_at,decided_at,emergency_roles_json,participants_json FROM {tablePrefix}validation_plan_approval_task WHERE id=@TaskId FOR UPDATE",
             new { TaskId = taskId }, transaction, cancellationToken: cancellationToken)) ?? throw new PdmNotFoundException("验证计划审批任务不存在。");
         var plan = await connection.QuerySingleAsync<PlanRow>(new CommandDefinition(PlanSelect + " WHERE id=@PlanId FOR UPDATE", new { PlanId = task.PlanId }, transaction, cancellationToken: cancellationToken));
         var earlierPending = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
@@ -257,7 +267,7 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
         if (plan.State != "PendingApproval" || task.Decision is not null || earlierPending > 0 || !string.Equals(task.Assignee, currentAssignee, StringComparison.OrdinalIgnoreCase))
             throw new PdmConflictException("验证计划审批任务已变化。");
         await connection.ExecuteAsync(new CommandDefinition(
-            $"UPDATE {tablePrefix}validation_plan_approval_task SET assignee=@NewAssignee WHERE id=@TaskId",
+            $"UPDATE {tablePrefix}validation_plan_approval_task SET assignee=@NewAssignee,participants_json=JSON_SET(participants_json,'$.Members',JSON_ARRAY(@NewAssignee)) WHERE id=@TaskId",
             new { TaskId = taskId, NewAssignee = newAssignee }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition(
             $"UPDATE {tablePrefix}project_validation_plan SET updated_by=@Actor,updated_at=@At,row_version=row_version+1 WHERE id=@PlanId",
@@ -335,7 +345,7 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
             $"SELECT id,catalog_category_id,catalog_item_id,category_name,validation_content,validation_standard,information_source,validation_date,result,reviewer,responsible_person,remark,sort_order FROM {tablePrefix}project_validation_plan_item WHERE plan_id=@PlanId ORDER BY sort_order,id",
             new { PlanId = row.Id }, transaction, cancellationToken: cancellationToken));
         var taskRows = await connection.QueryAsync<ApprovalTaskRow>(new CommandDefinition(
-            $"SELECT id,plan_id,step_order,stage,step_name,assignee,decision,decision_by,decision_comment,created_at,decided_at,emergency_roles_json FROM {tablePrefix}validation_plan_approval_task WHERE plan_id=@PlanId ORDER BY step_order",
+            $"SELECT id,plan_id,step_order,stage,step_name,assignee,decision,decision_by,decision_comment,created_at,decided_at,emergency_roles_json,participants_json FROM {tablePrefix}validation_plan_approval_task WHERE plan_id=@PlanId ORDER BY step_order",
             new { PlanId = row.Id }, transaction, cancellationToken: cancellationToken));
         var attachmentRows = await connection.QueryAsync<AttachmentRow>(new CommandDefinition(
             $"SELECT id,plan_id,attachment_kind,original_file_name,file_version,storage_relative_path,file_length,sha256,uploaded_by,uploaded_at FROM {tablePrefix}validation_plan_attachment WHERE plan_id=@PlanId ORDER BY uploaded_at DESC",
@@ -369,7 +379,7 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
     private static ValidationCheckItem? MapItem(ItemRow? row) => row is null ? null : new(row.Id, row.CategoryId, row.Content, row.DefaultInformationSource, row.SortOrder, row.IsActive, row.Note, row.ReferenceCount, row.CreatedBy, Utc(row.CreatedAt), row.UpdatedBy, Utc(row.UpdatedAt), row.RowVersion);
     private static ProjectValidationPlanItem MapPlanItem(PlanItemRow row) => new(row.Id, row.CatalogCategoryId, row.CatalogItemId, row.CategoryName, row.ValidationContent, row.InformationSource, ToDateOnly(row.ValidationDate), row.Result, row.Reviewer, row.ResponsiblePerson, row.Remark, row.SortOrder, row.ValidationStandard);
     private static ValidationPlanApprovalTask MapApprovalTask(ApprovalTaskRow row) => new(row.Id, row.PlanId, row.StepOrder, Enum.Parse<ApprovalStage>(row.Stage), row.StepName, row.Assignee,
-        row.Decision is null ? null : Enum.Parse<ApprovalDecision>(row.Decision), row.DecisionBy, row.DecisionComment, Utc(row.CreatedAt), row.DecidedAt is null ? null : Utc(row.DecidedAt.Value)) { EmergencyRoleCodes = row.EmergencyRolesJson is null ? null : JsonSerializer.Deserialize<string[]>(row.EmergencyRolesJson) };
+        row.Decision is null ? null : Enum.Parse<ApprovalDecision>(row.Decision), row.DecisionBy, row.DecisionComment, Utc(row.CreatedAt), row.DecidedAt is null ? null : Utc(row.DecidedAt.Value)) { Participants = ApprovalGroupJson.Read(row.ParticipantsJson), EmergencyRoleCodes = row.EmergencyRolesJson is null ? null : JsonSerializer.Deserialize<string[]>(row.EmergencyRolesJson) };
     private static ValidationPlanAttachment MapAttachment(AttachmentRow row) => new(row.Id, row.PlanId, Enum.Parse<ValidationPlanAttachmentKind>(row.AttachmentKind), row.OriginalFileName, row.FileVersion, row.StorageRelativePath, row.FileLength, row.Sha256, row.UploadedBy, Utc(row.UploadedAt));
     private static ValidationPlanExecutionRecord MapExecutionRecord(ExecutionRecordRow row, IEnumerable<ExecutionItemRow> items) =>
         new(row.Id, row.PlanId, row.SourceAttachmentId, row.SourceFileName, row.OcrText, items.Select(MapExecutionItem).ToArray(), row.ConfirmedBy, Utc(row.ConfirmedAt));
@@ -459,6 +469,7 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
 
     private sealed class ApprovalTaskRow
     {
+        public string? ParticipantsJson { get; init; }
         public string? EmergencyRolesJson { get; init; }
         public Guid Id { get; init; }
         public Guid PlanId { get; init; }
@@ -489,6 +500,7 @@ public sealed class MySqlValidationPlanRepository : IValidationPlanRepository
 
     private sealed class PendingTaskRow
     {
+        public string? ParticipantsJson { get; init; }
         public Guid Id { get; init; }
         public Guid PlanId { get; init; }
         public Guid ProjectId { get; init; }

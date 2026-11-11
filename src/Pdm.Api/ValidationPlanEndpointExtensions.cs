@@ -143,7 +143,7 @@ public static class ValidationPlanEndpointExtensions
         {
             var service = qualityAcceptance ? services.GetRequiredKeyedService<ValidationPlanService>("quality") : services.GetRequiredService<ValidationPlanService>();
             var (actor, role) = CurrentUser(context.User);
-            return Results.Ok(await service.DecideAsync(taskId, request.Decision, request.Comment, actor, role, cancellationToken));
+            return Results.Ok(await service.DecideAsync(taskId, request.Decision, request.Comment, actor, role, cancellationToken, request.BusinessNote));
         });
 
         api.MapGet("/validation-plan-approval-tasks/{taskId:guid}/emergency-capability", async (Guid taskId, HttpContext context, IServiceProvider services, CancellationToken cancellationToken) =>
@@ -163,7 +163,7 @@ public static class ValidationPlanEndpointExtensions
         {
             var service = qualityAcceptance ? services.GetRequiredKeyedService<ValidationPlanService>("quality") : services.GetRequiredService<ValidationPlanService>();
             var (actor, role) = CurrentUser(context.User);
-            if (NotificationRecipientPolicy.SystemOnly(TenantContext.Current?.EffectiveRoleCodes ?? [role.ToString()])) return Results.Ok(Array.Empty<ValidationPlanApprovalTaskResponse>());
+            if (TenantContext.Current?.HasPermission(AuthorizationActions.BusinessNotifications) != true) return Results.Ok(Array.Empty<ValidationPlanApprovalTaskResponse>());
             var projects = (await repository.ListProjectsForUserAsync(actor, role, cancellationToken)).ToDictionary(item => item.Id);
             var tasks = await service.ListMyApprovalTasksAsync(actor, role, cancellationToken, businessInbox: true);
             return Results.Ok(tasks.Where(item => projects.ContainsKey(item.ProjectId)).Select(item => new ValidationPlanApprovalTaskResponse(

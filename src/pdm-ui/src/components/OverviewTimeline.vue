@@ -5,11 +5,11 @@ import type { ProjectPlan } from '../types'
 const props = defineProps<{ plan: ProjectPlan | null; baseline: ProjectPlan | null; baselineUnavailable: boolean; progressTone?: 'success' | 'warning' | 'danger' }>()
 const emit = defineEmits<{ openTask: [taskId?: string] }>()
 const phases = [
-  { name: '设计', codes: ['Design'], color: '#3b82f6' },
-  { name: '备料', codes: ['MaterialPreparation'], color: '#8b5cf6' },
-  { name: '装配', codes: ['Assembly'], color: '#14b8a6' },
-  { name: '调试', codes: ['Commissioning', 'ClientCommissioning'], color: '#f59e0b' },
-  { name: '验收', codes: ['AcceptanceProgress', 'FinalAcceptance'], color: '#22a35a' },
+  { name: '设计', codes: ['Design'], color: '#9ae600' },
+  { name: '备料', codes: ['MaterialPreparation'], color: '#3392ff' },
+  { name: '装配', codes: ['Assembly'], color: '#c27aff' },
+  { name: '调试', codes: ['Commissioning', 'ClientCommissioning'], color: '#fb64b6' },
+  { name: '验收', codes: ['AcceptanceProgress', 'FinalAcceptance'], color: '#fdc700' },
 ]
 const today = new Date().toLocaleDateString('sv-SE')
 const progressLabel = computed(() => props.progressTone === 'danger' ? '已滞后' : props.progressTone === 'warning' ? '有风险' : props.progressTone === 'success' ? '正常' : '进度状态未知')
@@ -88,7 +88,19 @@ function segmentBackground(segment: { left: number; width: number; color: string
         <strong>{{ row.label }}</strong>
         <div class="pdm-overview-timeline__track">
           <span v-if="!row.segments.length" class="pdm-overview-timeline__empty" :class="{ 'has-truck': row.kind === 'actual' }">{{ row.empty }}</span>
-          <button v-for="segment in row.segments" :key="segment.name" class="pdm-overview-timeline__segment" :class="{ 'is-baseline': row.kind === 'baseline' }" :style="{ left: `${segment.left}%`, width: `${Math.min(segment.width, 100 - segment.left)}%`, background: segmentBackground(segment, row.segments) }" :title="`${segment.name}主任务 · ${segment.start} — ${segment.finish}${row.kind === 'actual' ? ` · 完成 ${segment.completion}%` : ''}`" @click="emit('openTask', segment.taskId)"><span>● {{ segment.name }}{{ row.kind === 'actual' ? ` ${segment.completion}%` : '' }}</span></button>
+          <button
+            v-for="segment in row.segments"
+            :key="segment.name"
+            type="button"
+            class="pdm-overview-timeline__segment"
+            :class="{ 'is-baseline': row.kind === 'baseline' }"
+            :style="{ left: `${segment.left}%`, width: `${Math.min(segment.width, 100 - segment.left)}%`, '--overview-stage-fill': segmentBackground(segment, row.segments) }"
+            :title="`${segment.name}主任务 · ${segment.start} — ${segment.finish}${row.kind === 'actual' ? ` · 完成 ${segment.completion}%` : ''}`"
+            @click="emit('openTask', segment.taskId)"
+          >
+            <i class="pdm-overview-timeline__fill" aria-hidden="true" />
+            <span>{{ segment.name }}{{ row.kind === 'actual' ? ` ${segment.completion}%` : '' }}</span>
+          </button>
           <i v-if="(row.kind === 'planned' || row.kind === 'actual' && row.segments.length) && bounds && day(today) >= bounds.start && day(today) < bounds.finish" class="pdm-overview-timeline__today-arrow" :class="props.progressTone && `is-${props.progressTone}`" :style="{ left: `${position(today)}%` }" aria-label="当前日期位置" :title="`${today} · ${progressLabel}`" />
           <div v-if="row.kind === 'actual'" class="pdm-overview-timeline__truck" :style="{ left: `min(calc(${Math.min(100, Math.max(0, ...row.segments.map(segment => segment.left + segment.width)))}% + 4px), calc(100% - 34px))` }" role="img" :aria-label="`${progressLabel}，货车行驶中`" :title="progressLabel">
             <div class="pdm-overview-truck__wrapper" aria-hidden="true">

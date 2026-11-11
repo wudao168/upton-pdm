@@ -26,7 +26,7 @@ describe('SideNav', () => {
     expect(wrapper.findAll('.pdm-nav-group')).toHaveLength(1)
     expect(wrapper.find('.pdm-sidebar__settings').exists()).toBe(false)
     await wrapper.setProps({ visibleKeys: ['tasks', 'production-drawings'] })
-    expect(wrapper.findAll('.pdm-nav-group').map(item => item.attributes('aria-label'))).toEqual(['常用功能', '生产'])
+    expect(wrapper.findAll('.pdm-nav-group').map(item => item.attributes('aria-label'))).toEqual(['项目', '生产'])
     wrapper.unmount()
   })
   afterEach(() => {
@@ -60,10 +60,10 @@ describe('SideNav', () => {
       frame?.(16)
       expect(wrapper.findAll('.pdm-sidebar__highlight')).toHaveLength(1)
       expect(animate.mock.calls[0]?.[0]).toEqual([
-        { transform: `translate(8px, 100px) scale(${124 / 132}, ${44 / 50})` },
+        { transform: `translate(8px, 100px) scale(${124 / 110}, ${44 / 50})` },
         { transform: 'translate(8px, 250px)' },
       ])
-      expect((wrapper.get('.pdm-sidebar__highlight').element as HTMLElement).style.width).toBe('132px')
+      expect((wrapper.get('.pdm-sidebar__highlight').element as HTMLElement).style.width).toBe('110px')
       preference.matches = true
       await wrapper.setProps({ active: 'project-center' })
       frame?.(32)
@@ -119,7 +119,7 @@ describe('SideNav', () => {
       label: group.attributes('aria-label'),
       entries: group.findAll('.pdm-nav-item').map(item => item.text().trim()),
     }))).toEqual([
-      { label: '常用功能', entries: ['项目总览', '项目中心', '工时管理', '我的待办'] },
+      { label: '项目', entries: ['项目总览', '项目中心', '工时管理', '我的待办'] },
       { label: '生产', entries: ['制造中心'] },
       { label: '标准化', entries: ['标准物料', '标准程序', '料品管理'] },
     ])

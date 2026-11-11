@@ -68,6 +68,6 @@ function value(row: DetailRow, key: string) { return row[key] ?? '—' }
 <style scoped>
 .pdm-aligned-details{min-width:0;max-width:100%;overflow:auto}.pdm-aligned-details.is-embedded{max-width:none;overflow:visible}
 .pdm-aligned-detail-table{table-layout:fixed;border-collapse:collapse;font-size:var(--pdm-font-size-body);background:var(--pdm-surface)}
-.pdm-aligned-detail-table th,.pdm-aligned-detail-table td{box-sizing:border-box;height:30px;padding:0 8px;border:0;border-bottom:1px solid var(--pdm-container-border);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pdm-aligned-detail-table th,.pdm-aligned-detail-table td{box-sizing:border-box;height:30px;padding:0 8px;border:0;border-bottom:1px solid var(--pdm-container-border);text-align:center;vertical-align:middle;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pdm-aligned-detail-table th{font-weight:500;background:var(--pdm-table-header)}.pdm-aligned-detail-table button{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style>

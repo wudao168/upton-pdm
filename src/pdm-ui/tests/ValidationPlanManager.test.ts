@@ -1,4 +1,4 @@
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessageBox } from 'element-plus'
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ValidationPlanManager from '../src/components/ValidationPlanManager.vue'
@@ -43,6 +43,63 @@ const childPlan = {
 }
 
 describe('ValidationPlanManager', () => {
+  const mountSummary = (extra: Record<string, unknown> = {}) => mount(ValidationPlanManager, {
+    props: { projectId:childProject.id, projectCode:childProject.code, projectName:childProject.name, projects:[rootProject, childProject], token:'token', currentUsername:'engineer', currentDisplayName:'工程师', canEdit:true, canManageCatalog:false, ...extra },
+    global: { plugins:[ElementPlus] },
+  })
+  it.each([false, true])('列表提交审批保持列表视图，并使用最新版本与正确接口范围（质量验收=%s）', async qualityAcceptance => {
+    api.readProjectValidationPlan.mockResolvedValue(childPlan)
+    api.submitProjectValidationPlan.mockResolvedValue({ ...childPlan, state:'PendingApproval' })
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockImplementation(async () => 'confirm' as never)
+    const wrapper = mountSummary({ qualityAcceptance })
+    try {
+      await flushPromises()
+      api.readProjectValidationPlan.mockResolvedValue({ ...childPlan, rowVersion:99 })
+      await wrapper.get(`[aria-label="提交计划审批 ${childProject.code}"]`).trigger('click'); await flushPromises()
+      expect(api.submitProjectValidationPlan).toHaveBeenCalledWith(childProject.id, 99, 'token', ...(qualityAcceptance ? ['/quality'] : []))
+      expect(wrapper.find('.validation-plan__meta').exists()).toBe(false)
+      expect(wrapper.find('.validation-plan-summary__table').exists()).toBe(true)
+      expect(wrapper.get(`[aria-label="查看计划 ${childProject.code}"]`).element.closest('tr')?.textContent).toContain('审批中')
+    } finally { wrapper.unmount(); confirm.mockRestore() }
+  })
+  it.each(['Approved', 'Rejected'] as const)('列表可以处理当前审批节点：%s', async decision => {
+    const pending = { ...childPlan, state:'PendingApproval', approvalTasks:[{ id:'task-1', assignee:'engineer', stepOrder:1, decision:null }] }
+    api.readProjectValidationPlan.mockResolvedValue(pending)
+    api.decideValidationPlanApproval.mockResolvedValue({ ...childPlan, state:decision === 'Approved' ? 'Effective' : 'Rejected' })
+    const prompt = vi.spyOn(ElMessageBox, 'prompt').mockImplementation(async () => ({ value:'核对意见', action:'confirm' }) as never)
+    const wrapper = mountSummary({ canDecideApproval:true })
+    try {
+      await flushPromises()
+      await wrapper.get(`[aria-label="${decision === 'Approved' ? '批准' : '退回'}计划 ${childProject.code}"]`).trigger('click'); await flushPromises()
+      expect(api.decideValidationPlanApproval).toHaveBeenCalledWith('task-1', decision, '核对意见', 'token')
+      expect(wrapper.find('.validation-plan__meta').exists()).toBe(false)
+    } finally { wrapper.unmount(); prompt.mockRestore() }
+  })
+  it('列表不向只读人员或非当前审批人显示操作，过期状态更新后禁止继续提交', async () => {
+    api.readProjectValidationPlan.mockResolvedValue(childPlan)
+    const wrapper = mountSummary({ canEdit:false, canDecideApproval:true })
+    try {
+      await flushPromises()
+      expect(wrapper.find('[aria-label^="提交计划审批"]').exists()).toBe(false)
+      await wrapper.setProps({ canEdit:true }); await flushPromises()
+      api.readProjectValidationPlan.mockResolvedValue({ ...childPlan, state:'PendingApproval', approvalTasks:[{ id:'task-1', assignee:'other', stepOrder:1, decision:null }] })
+      await wrapper.get(`[aria-label="提交计划审批 ${childProject.code}"]`).trigger('click'); await flushPromises()
+      expect(api.submitProjectValidationPlan).not.toHaveBeenCalled()
+      expect(wrapper.find('[aria-label^="批准计划"]').exists()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
+  it('提交失败后保留原状态并解除操作锁', async () => {
+    api.readProjectValidationPlan.mockResolvedValue(childPlan)
+    api.submitProjectValidationPlan.mockRejectedValueOnce(new Error('当前计划缺少必填内容，请补充后重试。'))
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockImplementation(async () => 'confirm' as never)
+    const wrapper = mountSummary()
+    try {
+      await flushPromises()
+      await wrapper.get(`[aria-label="提交计划审批 ${childProject.code}"]`).trigger('click'); await flushPromises()
+      expect(wrapper.get(`[aria-label="提交计划审批 ${childProject.code}"]`).attributes('disabled')).toBeUndefined()
+      expect(wrapper.get(`[aria-label="查看计划 ${childProject.code}"]`).element.closest('tr')?.textContent).toContain('草稿')
+    } finally { wrapper.unmount(); confirm.mockRestore() }
+  })
   it('质量验收使用独立接口并显示独立标题', async () => {
     const wrapper = mount(ValidationPlanManager, {
       props: { qualityAcceptance: true, projectId: childProject.id, projectCode: childProject.code, projectName: childProject.name, projects: [rootProject, childProject], token: 'token', currentUsername: 'engineer', currentDisplayName: '工程师', canEdit: true, canManageCatalog: true },
@@ -182,27 +239,30 @@ describe('ValidationPlanManager', () => {
     wrapper.unmount()
   })
 
-  it('显示当前审批人、自动通过记录和分配给主设的审批按钮', async () => {
+  it('显示当前审批人、自动通过记录和分配给主设计的审批按钮', async () => {
     const pendingPlan = {
       ...childPlan,
       state: 'PendingApproval' as const,
       approvalTasks: [
         { id: 'task-1', planId: childPlan.id, stepOrder: 1, stage: 'MechanicalEngineer', stepName: '编制人自检', assignee: 'engineer', decision: 'Approved' as const, decisionBy: 'engineer', decisionComment: '提交验证计划即完成编制人自检', createdAt: '2026-09-14T00:00:00Z', decidedAt: '2026-09-14T00:00:00Z' },
-        { id: 'task-2', planId: childPlan.id, stepOrder: 2, stage: 'MainDesigner', stepName: '主设审核', assignee: 'designer', decision: null, decisionBy: null, decisionComment: null, createdAt: '2026-09-14T00:00:00Z', decidedAt: null },
+        { id: 'task-2', planId: childPlan.id, stepOrder: 2, stage: 'MainDesigner', stepName: '主设计审核', assignee: 'designer', decision: null, decisionBy: null, decisionComment: null, createdAt: '2026-09-14T00:00:00Z', decidedAt: null },
       ],
     }
     api.readProjectValidationPlan.mockImplementation(async (projectId: string) => projectId === childProject.id ? pendingPlan : null)
     const wrapper = mount(ValidationPlanManager, {
       attachTo: document.body,
-      props: { projectId: childProject.id, projectCode: childProject.code, projectName: childProject.name, projects: [rootProject, childProject], token: 'token', currentUsername: 'designer', currentDisplayName: '主设', canEdit: true, canManageCatalog: false, canDecideApproval: true },
-      global: { plugins: [ElementPlus] },
+      props: { projectId: childProject.id, projectCode: childProject.code, projectName: childProject.name, projects: [rootProject, childProject], token: 'token', currentUsername: 'designer', currentDisplayName: '钟先睿', canEdit: true, canManageCatalog: false, canDecideApproval: true },
+      global: {
+        plugins: [ElementPlus],
+        provide: { [userDisplayNameKey]: (username?: string) => username === 'designer' ? '钟先睿' : username === 'engineer' ? '王勇煌' : '姓名待补充' },
+      },
     })
     await flushPromises()
     await wrapper.findAll('tbody tr').find(row => row.text().includes('P700005-3'))!.trigger('click')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('当前等待：主设审核 · designer')
-    expect(wrapper.text()).toContain('编制人自检 · engineer · 系统自动通过')
+    expect(wrapper.text()).toContain('当前等待：主设计审核 · 钟先睿')
+    expect(wrapper.text()).toContain('编制人自检 · 王勇煌 · 系统自动通过')
     expect(wrapper.findAll('button').some(button => button.text().includes('批准'))).toBe(true)
     expect(wrapper.findAll('button').some(button => button.text().includes('退回'))).toBe(true)
     wrapper.unmount()

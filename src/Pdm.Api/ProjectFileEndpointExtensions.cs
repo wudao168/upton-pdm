@@ -9,6 +9,39 @@ public static class ProjectFileEndpointExtensions
     public static void MapProjectFileEndpoints(this WebApplication app)
     {
         var api = app.MapGroup("/api").RequireAuthorization();
+        foreach (var kind in ProjectFileFormPermissions.Kinds)
+        {
+            var path = "/projects/{projectId:guid}/files/" + kind;
+            api.MapGet(path, async (Guid projectId, HttpContext context, ProjectFileFormService service, CancellationToken ct) =>
+            {
+                var (actor, role) = CurrentUser(context.User);
+                return Results.Ok(await service.ListAsync(projectId, kind, actor, role, ct));
+            });
+            api.MapGet(path + "/{formId:guid}", async (Guid projectId, Guid formId, HttpContext context, ProjectFileFormService service, CancellationToken ct) =>
+            {
+                var (actor, role) = CurrentUser(context.User);
+                return Results.Ok(await service.ReadAsync(projectId, kind, formId, actor, role, ct));
+            });
+            api.MapPut(path + "/{formId:guid}", async (Guid projectId, Guid formId, SaveProjectFileForm input, HttpContext context, ProjectFileFormService service, CancellationToken ct) =>
+            {
+                var (actor, role) = CurrentUser(context.User);
+                return Results.Ok(await service.SaveAsync(projectId, kind, formId, input, actor, role, ct));
+            });
+            if (ProjectFileFormPermissions.IsAcceptance(kind))
+            {
+                api.MapGet(path + "/{formId:guid}/excel", async (Guid projectId, Guid formId, HttpContext context, ProjectFileFormService service, CancellationToken ct) =>
+                {
+                    var (actor, role) = CurrentUser(context.User);
+                    var result = await service.ExportAcceptanceAsync(projectId, kind, formId, actor, role, ct);
+                    return Results.File(result.Content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", result.FileName);
+                });
+            }
+            api.MapPost(path + "/{formId:guid}/archive", async (Guid projectId, Guid formId, ArchiveProjectFileFormRequest input, HttpContext context, ProjectFileFormService service, CancellationToken ct) =>
+            {
+                var (actor, role) = CurrentUser(context.User);
+                return Results.Ok(await service.ArchiveAsync(projectId, kind, formId, input.ExpectedRowVersion, actor, role, ct));
+            });
+        }
         api.MapGet("/projects/{projectId:guid}/files", async (Guid projectId, Guid? folderId, bool? includeDeleted, HttpContext context, ProjectFileService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
@@ -105,3 +138,5 @@ public static class ProjectFileEndpointExtensions
         return (actor, Enum.Parse<UserRole>(role));
     }
 }
+
+public sealed record ArchiveProjectFileFormRequest(long ExpectedRowVersion);

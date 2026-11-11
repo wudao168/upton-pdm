@@ -2,30 +2,31 @@
 :root body .eligible-material-filters > .pdm-search-field { width:100%; }
 :root body .eligible-material-filters > .el-select { display:inline-block; width:100%; min-width:0; }
 
-/* Search shells wrap the tier-sized action with 2px vertical and right insets. */
+/* 外框与搜索按钮等高，右侧按钮覆盖边框内缩，外沿贴合。 */
 @layer pdm-button-sizing {
   :root body .pdm-search-field.pdm-search-field {
     border:1px solid var(--pdm-border) !important;
-    padding-left:3px !important; padding-right:1px !important;
+    padding-left:3px !important; padding-right:0 !important;
+    grid-template-rows:minmax(0, 1fr);
     background:#fff !important;
   }
   :root body .pdm-search-field.pdm-search-field > .pdm-search-field__action {
     position:static !important; align-self:center !important; justify-self:end !important;
-    height:auto !important; margin:0 !important; padding:0 !important; transform:none !important;
+    height:auto !important; margin:0 -1px 0 0 !important; padding:0 !important; transform:none !important;
   }
   :root body .pdm-search-field.pdm-search-field:hover:not(.is-disabled) { border-color:var(--pdm-theme-accent-border) !important; }
   :root body .pdm-search-field.pdm-search-field:focus-within { border-color:var(--pdm-theme-accent) !important; }
-  :root body .pdm-search-field.pdm-search-field:not(:where(.mobile-office .pdm-search-field)) {
+  :root body .pdm-search-field.pdm-search-field {
     box-sizing:border-box !important;
-    height:32px !important; min-height:32px !important; max-height:32px !important;
-    padding-block:1px !important;
+    height:28px !important; min-height:28px !important; max-height:28px !important;
+    padding-block:0 !important;
     border-radius:999px !important;
   }
   :root body .pdm-project-sidebar__context .pdm-project-switcher > .pdm-search-field.pdm-search-field {
-    height:36px !important; min-height:36px !important; max-height:36px !important;
+    height:32px !important; min-height:32px !important; max-height:32px !important;
   }
   :root body :is(table, .el-table) .pdm-search-field.pdm-search-field {
-    height:28px !important; min-height:28px !important; max-height:28px !important;
+    height:24px !important; min-height:24px !important; max-height:24px !important;
   }
   :root body .pdm-project-sidebar-stack > .pdm-project-sidebar__context { padding-block:4px !important; }
 }

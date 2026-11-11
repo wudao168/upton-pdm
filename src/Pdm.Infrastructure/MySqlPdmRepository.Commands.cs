@@ -410,12 +410,12 @@ public sealed partial class MySqlPdmRepository
         {
             await connection.ExecuteAsync(new CommandDefinition(
                 """
-                INSERT INTO approval_task(id, release_package_id, stage, step_order, step_name, assignee, decision_by, decision_value, decision_comment, decided_at, is_emergency_substitute, emergency_reason)
-                VALUES (@Id, @ReleasePackageId, @Stage, @StepOrder, @StepName, @Assignee, @DecisionBy, @DecisionValue, @DecisionComment, @DecidedAt, @IsEmergencySubstitute, @EmergencyReason)
+                INSERT INTO approval_task(id, release_package_id, stage, step_order, step_name, assignee, decision_by, decision_value, decision_comment, decided_at, is_emergency_substitute, emergency_reason, participants_json)
+                VALUES (@Id, @ReleasePackageId, @Stage, @StepOrder, @StepName, @Assignee, @DecisionBy, @DecisionValue, @DecisionComment, @DecidedAt, @IsEmergencySubstitute, @EmergencyReason, @ParticipantsJson)
                 """,
                 new { task.Id, task.ReleasePackageId, Stage = task.Stage.ToString(), task.StepOrder, task.StepName, task.Assignee,
                     task.DecisionBy, DecisionValue = task.Decision?.ToString(), DecisionComment = task.Comment, DecidedAt = task.DecidedAt?.UtcDateTime,
-                    task.IsEmergencySubstitute, task.EmergencyReason },
+                    task.IsEmergencySubstitute, task.EmergencyReason, ParticipantsJson = ApprovalGroupJson.Write(task.Participants) },
                 transaction,
                 cancellationToken: cancellationToken));
         }
@@ -530,7 +530,7 @@ public sealed partial class MySqlPdmRepository
         var documentIds = string.IsNullOrWhiteSpace(packageState.RootJson) ? [] : DeserializeDocumentIds(packageState.RootJson);
         var bindings = packageState.VersionBindingsJson is null ? null : JsonSerializer.Deserialize<ReleaseVersionBinding[]>(packageState.VersionBindingsJson, jsonOptions);
         if (bindings is not null) documentIds = bindings.Where(item => item.Publish && item.RequiresPromotion).Select(item => item.DocumentId).ToArray();
-        if (packageState.LocksDocuments && string.IsNullOrWhiteSpace(packageState.RootJson))
+        if (packageState.LocksDocuments && bindings is null && string.IsNullOrWhiteSpace(packageState.RootJson))
             throw new PdmConflictException("正式发布包缺少引用树快照，不能提交审批。");
         if (packageState.LocksDocuments && documentIds.Length == 0 && bindings is null) throw new PdmConflictException("发布包引用快照中没有可审批图档。");
         var blocked = packageState.LocksDocuments ? await connection.QuerySingleOrDefaultAsync<DocumentApprovalBlockRow>(new CommandDefinition(
@@ -556,7 +556,7 @@ public sealed partial class MySqlPdmRepository
         }
 
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL,is_emergency_substitute=0,emergency_reason=NULL WHERE release_package_id=@PackageId",
+            "UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL,is_emergency_substitute=0,emergency_reason=NULL,participants_json=JSON_SET(participants_json,'$.Signatures',JSON_ARRAY()) WHERE release_package_id=@PackageId",
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
         if (!string.Equals(packageState.ReleaseScope, ReleaseScope.LegacyCombined.ToString(), StringComparison.Ordinal))
         {
@@ -607,7 +607,7 @@ public sealed partial class MySqlPdmRepository
         var documentIds = string.IsNullOrWhiteSpace(packageState.RootJson) ? [] : DeserializeDocumentIds(packageState.RootJson);
         if (packageState.VersionBindingsJson is not null) documentIds = (JsonSerializer.Deserialize<ReleaseVersionBinding[]>(packageState.VersionBindingsJson, jsonOptions) ?? []).Where(item => item.Publish && item.RequiresPromotion).Select(item => item.DocumentId).ToArray();
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL,is_emergency_substitute=0,emergency_reason=NULL WHERE release_package_id=@PackageId",
+            "UPDATE approval_task SET decision_by=NULL,decision_value=NULL,decision_comment=NULL,decided_at=NULL,is_emergency_substitute=0,emergency_reason=NULL,participants_json=JSON_SET(participants_json,'$.Signatures',JSON_ARRAY()) WHERE release_package_id=@PackageId",
             new { PackageId = releasePackageId }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE release_package SET state='Draft',published_at=NULL,published_path=NULL,publish_error=NULL,preview_state='None',preview_error=NULL,preview_attempts=0,preview_updated_at=NULL,row_version=row_version+1 WHERE id=@PackageId",
@@ -624,13 +624,13 @@ public sealed partial class MySqlPdmRepository
         return package;
     }
 
-    public async Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, bool emergencySubstitute, string? emergencyReason, CancellationToken cancellationToken)
+    public async Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, bool emergencySubstitute, string? emergencyReason, CancellationToken cancellationToken, string? businessNote = null)
     {
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<ApprovalDecisionRow>(new CommandDefinition(
             """
-            SELECT t.id, t.release_package_id, t.stage, t.step_order, t.assignee, t.decision_value, p.state AS package_state, p.locks_documents
+            SELECT t.id, t.release_package_id, t.stage, t.step_order, t.assignee, t.participants_json, t.decision_value, p.state AS package_state, p.locks_documents
             FROM approval_task t
             INNER JOIN release_package p ON p.id = t.release_package_id
             WHERE t.id = @TaskId
@@ -646,7 +646,8 @@ public sealed partial class MySqlPdmRepository
             throw new PdmConflictException("审批任务已经处理。 ");
         }
 
-        if (!emergencySubstitute && !string.Equals(row.Assignee, actor, StringComparison.OrdinalIgnoreCase) && !string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))
+        var participants = ApprovalGroupJson.Read(row.ParticipantsJson);
+        if (participants is null && !emergencySubstitute && !string.Equals(row.Assignee, actor, StringComparison.OrdinalIgnoreCase) && !string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))
         {
             throw new PdmRuleException("只能处理分配给自己的审批任务。 ");
         }
@@ -659,7 +660,19 @@ public sealed partial class MySqlPdmRepository
             throw new PdmConflictException("当前发布包尚未到达该审批节点。 ");
         }
 
-        var now = timeProvider.GetUtcNow().UtcDateTime;
+        var signedAt = timeProvider.GetUtcNow();
+        var now = signedAt.UtcDateTime;
+        var signed = ApprovalNodeRules.Sign(participants, actor, decision, comment, signedAt, emergencySubstitute, out var waiting, businessNote);
+        if (signed is not null)
+            await connection.ExecuteAsync(new CommandDefinition("UPDATE approval_task SET participants_json=@Json WHERE id=@TaskId",
+                new { Json = ApprovalGroupJson.Write(signed), TaskId = taskId }, transaction, cancellationToken: cancellationToken));
+        if (waiting)
+        {
+            var pending = await FindReleasePackageAsync(connection, transaction, row.ReleasePackageId, cancellationToken)
+                ?? throw new PdmNotFoundException("发布包不存在。");
+            await transaction.CommitAsync(cancellationToken);
+            return pending;
+        }
         await connection.ExecuteAsync(new CommandDefinition(
             """
             UPDATE approval_task
@@ -733,7 +746,7 @@ public sealed partial class MySqlPdmRepository
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var row = await connection.QuerySingleOrDefaultAsync<ApprovalDecisionRow>(new CommandDefinition(
             """
-            SELECT t.id, t.release_package_id, t.stage, t.step_order, t.assignee, t.decision_value, p.state AS package_state, p.locks_documents
+            SELECT t.id, t.release_package_id, t.stage, t.step_order, t.assignee, t.participants_json, t.decision_value, p.state AS package_state, p.locks_documents
             FROM approval_task t
             INNER JOIN release_package p ON p.id = t.release_package_id
             WHERE t.id = @TaskId
@@ -751,7 +764,7 @@ public sealed partial class MySqlPdmRepository
             throw new PdmConflictException("审批任务已转交给其他用户，请刷新后重试。 ");
 
         await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE approval_task SET assignee=@TargetUsername WHERE id=@TaskId",
+            "UPDATE approval_task SET assignee=@TargetUsername,participants_json=JSON_SET(participants_json,'$.Members',JSON_ARRAY(@TargetUsername)) WHERE id=@TaskId",
             new { TaskId = taskId, TargetUsername = targetUsername }, transaction, cancellationToken: cancellationToken));
         var package = await FindReleasePackageAsync(connection, transaction, row.ReleasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。 ");
@@ -963,6 +976,7 @@ public sealed partial class MySqlPdmRepository
 
     private sealed class ApprovalDecisionRow
     {
+        public string? ParticipantsJson { get; init; }
         public Guid Id { get; init; }
         public Guid ReleasePackageId { get; init; }
         public string Stage { get; init; } = string.Empty;

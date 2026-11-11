@@ -1,0 +1,76 @@
+/* 顶部双容器与主导航共用 Twenty 参考图中的中性浅灰色。 */
+.pdm-app-shell {
+  --pdm-shell-frame-bg: #f9f9f9;
+  --pdm-shell-frame-border: #ebebeb;
+}
+
+:root body .pdm-app-shell .pdm-sidebar {
+  background: var(--pdm-shell-frame-bg) !important;
+  border: 0 !important;
+}
+
+:root body .pdm-app-shell .pdm-titlebar,
+:root body .pdm-app-shell .pdm-sidebar .pdm-sidebar__brand {
+  box-sizing: border-box;
+  background: var(--pdm-shell-frame-bg) !important;
+  border: 1px solid var(--pdm-shell-frame-border) !important;
+  border-radius: 0 !important;
+}
+
+/* 两个容器相接处由右侧页头画线，避免出现双倍宽的边框。 */
+:root body .pdm-app-shell .pdm-sidebar .pdm-sidebar__brand {
+  height: var(--pdm-titlebar-measured-height, 50px);
+  flex-basis: var(--pdm-titlebar-measured-height, 50px);
+  border-right-width: 0 !important;
+}
+
+:root body .pdm-app-shell .pdm-titlebar :is(
+  .pdm-global-status.is-idle,
+  .pdm-header-clock,
+  .pdm-header-control,
+  .pdm-user-profile-trigger,
+  .pdm-logout-button,
+  .pdm-command-trigger
+) {
+  background: var(--pdm-shell-frame-bg) !important;
+  border-color: var(--pdm-shell-frame-border) !important;
+}
+
+:root body .pdm-app-shell .pdm-titlebar :is(
+  .pdm-header-control,
+  .pdm-user-profile-trigger,
+  .pdm-logout-button,
+  .pdm-command-trigger
+):is(:hover, :focus-visible) {
+  background: var(--pdm-theme-accent-soft) !important;
+  border-color: var(--pdm-shell-frame-border) !important;
+}
+
+/* 页头信息和时间不显示外框；状态反馈仍保留各自的语义样式。 */
+@layer pdm-button-sizing {
+  :root body .pdm-app-shell .pdm-titlebar .pdm-global-status.is-idle,
+  :root body .pdm-app-shell .pdm-titlebar .pdm-header-clock {
+    border: 0 !important;
+    box-shadow: none !important;
+  }
+
+  :root body .pdm-app-shell .pdm-titlebar :is(
+    .pdm-header-control,
+    .pdm-user-profile-trigger,
+    .pdm-logout-button,
+    .pdm-command-trigger
+  ) {
+    border: 1px solid var(--pdm-shell-frame-border) !important;
+    box-shadow: none !important;
+    outline: 0 !important;
+  }
+  :root body .pdm-app-shell .pdm-titlebar :is(
+    .pdm-header-control,
+    .pdm-user-profile-trigger,
+    .pdm-logout-button,
+    .pdm-command-trigger
+  ):focus-visible {
+    outline: 2px solid var(--pdm-theme-accent-focus) !important;
+    outline-offset: 2px;
+  }
+}

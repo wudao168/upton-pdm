@@ -11,6 +11,9 @@ public static class ProjectApplicationEndpoints
         var api = app.MapGroup("/api/project-applications").RequireAuthorization();
         api.MapPut("/projects/{projectId:guid}/order-date", async (Guid projectId, ProjectOrderDateInput input, HttpContext context, ProjectApplicationService service, CancellationToken ct) =>
             Results.Ok(await service.UpdateOrderDateAsync(projectId, input, Actor(context), Role(context), ct)));
+        // The main project locates the source application. The application still defines the authorization scope.
+        api.MapGet("/projects/{mainProjectId:guid}/contract", async (Guid mainProjectId, HttpContext context, ProjectApplicationService service, CancellationToken ct) =>
+            Results.Ok(await service.ReadContractByProjectAsync(mainProjectId, Actor(context), Role(context), ct)));
         api.MapGet("", async (HttpContext context, ProjectApplicationService service, CancellationToken ct) =>
             Results.Ok(await service.GetAsync(Actor(context), Role(context), ct)));
         api.MapGet("/{id:guid}", async (Guid id, HttpContext context, ProjectApplicationService service, CancellationToken ct) =>
@@ -19,6 +22,8 @@ public static class ProjectApplicationEndpoints
             Results.Ok(await service.SaveAsync(null, input, Actor(context), Role(context), ct)));
         api.MapPut("/{id:guid}", async (Guid id, SaveProjectApplicationInput input, HttpContext context, ProjectApplicationService service, CancellationToken ct) =>
             Results.Ok(await service.SaveAsync(id, input, Actor(context), Role(context), ct)));
+        api.MapPut("/{id:guid}/contract", async (Guid id, SupplementProjectApplicationContractInput input, HttpContext context, ProjectApplicationService service, CancellationToken ct) =>
+            Results.Ok(await service.SupplementContractAsync(id, input, Actor(context), Role(context), ct)));
         api.MapPost("/{id:guid}/withdraw", async (Guid id, ProjectApplicationActionInput input, HttpContext context, ProjectApplicationService service, CancellationToken ct) =>
             Results.Ok(await service.WithdrawAsync(id, input, Actor(context), Role(context), ct)));
         api.MapPost("/{id:guid}/return", async (Guid id, ProjectApplicationActionInput input, HttpContext context, ProjectApplicationService service, CancellationToken ct) =>

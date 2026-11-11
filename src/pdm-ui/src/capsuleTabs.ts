@@ -20,7 +20,21 @@ export function installCapsuleTabs() {
       }
       const target = selected.querySelector<HTMLElement>('.el-radio-button__inner') ?? selected
       const bounds = track.getBoundingClientRect(), rect = target.getBoundingClientRect()
-      const values = { x: rect.left - bounds.left + track.scrollLeft - track.clientLeft, y: rect.top - bounds.top + track.scrollTop - track.clientTop, w: rect.width, h: rect.height }
+      // 只测可见文字，排除图标、状态点和按钮左右留白；保留多段文字之间的间距。
+      const textRects: DOMRect[] = []
+      const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT)
+      const range = document.createRange()
+      while (walker.nextNode()) {
+        const node = walker.currentNode, value = node.textContent ?? '', parent = node.parentElement
+        if (!value.trim() || !parent || parent.closest('svg, [aria-hidden="true"], [hidden]')) continue
+        if (getComputedStyle(parent).visibility === 'hidden') continue
+        range.setStart(node, value.length - value.trimStart().length)
+        range.setEnd(node, value.trimEnd().length)
+        textRects.push(...Array.from(range.getClientRects()).filter(box => box.width > 0 && box.height > 0))
+      }
+      const left = textRects.length ? Math.max(rect.left, Math.min(...textRects.map(box => box.left))) : rect.left
+      const right = textRects.length ? Math.min(rect.right, Math.max(...textRects.map(box => box.right))) : rect.right
+      const values = { x: left - bounds.left + track.scrollLeft - track.clientLeft, y: rect.top - bounds.top + track.scrollTop - track.clientTop, w: Math.max(0, right - left), h: rect.height }
       for (const [key, value] of Object.entries(values)) track.style.setProperty(`--pdm-thumb-${key}`, `${value}px`)
       if (!track.classList.contains('pdm-capsule-ready')) track.classList.add('pdm-capsule-ready')
       const observer = tracks.get(track)!

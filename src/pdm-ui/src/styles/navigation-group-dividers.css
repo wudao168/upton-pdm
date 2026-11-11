@@ -1,0 +1,17 @@
+/* 分组分隔线与LOGO容器共用1px浅灰线，位于上下文字的视觉中点。 */
+:root body .pdm-sidebar .pdm-nav-group + .pdm-nav-group { position: relative; }
+:root body .pdm-sidebar .pdm-nav-group + .pdm-nav-group::before {
+  content: '';
+  position: absolute;
+  top: -17px;
+  left: 17px;
+  right: 17px;
+  height: 1px;
+  background: var(--pdm-shell-frame-border, #ebebeb);
+  pointer-events: none;
+}
+:root body .pdm-sidebar.is-collapsed .pdm-nav-group + .pdm-nav-group::before {
+  top: -10px;
+  left: 12px;
+  right: 12px;
+}

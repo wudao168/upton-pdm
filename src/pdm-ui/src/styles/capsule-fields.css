@@ -1,0 +1,37 @@
+/* 单行输入和筛选统一胶囊；搜索框及多行输入保留其专用规则。 */
+:root { --pdm-field-height: 28px; }
+.mobile-office, .production-scan-page { --pdm-field-height: 32px; }
+@layer pdm-button-sizing {
+  :root body :is(select:not([multiple]), input:not([type="checkbox"], [type="radio"], [type="hidden"], [type="range"], [type="file"], [type="color"], .el-input__inner, .el-select__input, .el-range-input, .el-cascader__search-input), .el-input, .el-input__wrapper, .el-select, .el-select__wrapper, .el-date-editor, .el-cascader, .el-input-number, .el-autocomplete):not(:where(.pdm-search-field, .pdm-search-field *)) {
+    box-sizing: border-box !important;
+    height: var(--pdm-field-height, 28px) !important;
+    min-height: var(--pdm-field-height, 28px) !important;
+    max-height: var(--pdm-field-height, 28px) !important;
+    border-radius: 999px !important;
+    --el-component-size: var(--pdm-field-height, 28px);
+  }
+
+  /* 固定高度的单行控件要为文字保留整行空间，横向内边距沿用原布局。 */
+  :root body :is(
+    select:not([multiple], [size]:not([size="1"])),
+    input:not([type="checkbox"], [type="radio"], [type="hidden"], [type="range"], [type="file"], [type="color"], [type="button"], [type="submit"], [type="reset"], [type="image"]),
+    .el-input__wrapper, .el-select__wrapper, .el-date-editor
+  ):not(:where(.pdm-search-field, .pdm-search-field *)) {
+    padding-block: 0 !important;
+  }
+
+  :root body select:not([multiple], [size]:not([size="1"])) {
+    text-overflow: ellipsis;
+  }
+
+  :root body :is(.el-input--large, .el-select--large, .el-date-editor--large, .el-cascader--large, .el-input-number--large) { --pdm-field-height: 32px; }
+  :root body :is(.el-input--small, .el-select--small, .el-date-editor--small, .el-cascader--small, .el-input-number--small) { --pdm-field-height: 24px; }
+  :root body :is(table, .el-table) :is(select:not([multiple]), input:not([type="checkbox"], [type="radio"], [type="hidden"], [type="range"], [type="file"], [type="color"], .el-input__inner, .el-select__input, .el-range-input, .el-cascader__search-input), .el-input, .el-input__wrapper, .el-select, .el-select__wrapper, .el-date-editor, .el-cascader, .el-input-number, .el-autocomplete):not(:where(.pdm-search-field, .pdm-search-field *)) { --pdm-field-height: 24px !important; }
+  :root body :is(.el-input__inner, .el-range-input):not(:where(.pdm-search-field, .pdm-search-field *)) { height:100% !important; min-height:0 !important; max-height:none !important; }
+  :root body .el-input-number:not(:where(.pdm-search-field, .pdm-search-field *)) { overflow:hidden; }
+  :root body .el-input-number:focus-within:not(:where(.pdm-search-field, .pdm-search-field *)) { box-shadow:0 0 0 2px var(--pdm-theme-accent-focus); }
+  :root body .el-input-number:not(.is-controls-right) .el-input-number__decrease { border-radius:999px 0 0 999px; }
+  :root body .el-input-number:not(.is-controls-right) .el-input-number__increase { border-radius:0 999px 999px 0; }
+  :root body :is(.pdm-login-input-frame, textarea[rows="1"], .el-textarea:has(> textarea[rows="1"])) { border-radius:999px !important; }
+  :root body :is(textarea, .el-textarea__inner):not(:where(.pdm-search-field, .pdm-search-field *)) { border-radius:16px !important; }
+}

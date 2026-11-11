@@ -48,11 +48,11 @@
 :root body .pdm-bom-multiplier-control { padding-inline:0; gap:0; }
 :root body .pdm-bom-multiplier-control > input.pdm-bom-multiplier { width:32px !important; max-width:32px !important; }
 
-/* Main and expanded directories share centered cells and the navigation's light-gray header. */
+/* 主表与展开明细共用居中单元格，表头底色随当前主题。 */
 @layer pdm-business {
   :root body :is(.material-relation-directory__main, .engineering-kit-library__main) > .el-table :is(th, td) .cell,
   :root body :is(.material-relation-directory__main, .engineering-kit-library__main) .pdm-aligned-detail-table :is(th, td) { text-align:center !important; }
   :root body :is(.material-relation-directory__main, .engineering-kit-library__main) > .el-table th,
-  :root body :is(.material-relation-directory__main, .engineering-kit-library__main) .pdm-aligned-detail-table th { background:#f5f5f7 !important; font-weight:400 !important; }
+  :root body :is(.material-relation-directory__main, .engineering-kit-library__main) .pdm-aligned-detail-table th { background:var(--pdm-table-header) !important; font-weight:400 !important; }
   :root body :is(.material-relation-directory__main, .engineering-kit-library__main) > .el-table th .cell { font-weight:400 !important; }
 }

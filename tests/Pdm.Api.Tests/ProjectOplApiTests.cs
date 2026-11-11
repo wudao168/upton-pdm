@@ -1,4 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Http.Json;
 using System.Security.Claims;
@@ -6,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.AspNetCore.TestHost;
 using Upton.Pdm.Api;
 using Upton.Pdm.Application;
 using Upton.Pdm.Domain;
@@ -14,6 +16,134 @@ namespace Upton.Pdm.Api.Tests;
 
 public sealed class ProjectOplApiTests
 {
+    [Fact]
+    public async Task AssignmentTodoFollowsTheIssueAndAuthorizedUsersCanFillTheResponse()
+    {
+        await using var host = new PdmApiFactory();
+        await using var factory = host.WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+            services.AddSingleton<IOplSpeechRecognizer, TestSpeechRecognizer>()));
+        using var client = factory.CreateClient();
+        var repo = factory.Services.GetRequiredService<IPdmRepository>();
+        var company = (await repo.GetOrganizationDirectoryAsync(default)).Organizations.First().Id;
+        var customer = Guid.Parse("c0046500-0000-0000-0000-000000000001");
+        var project = await repo.CreateNumberedProjectAsync(new(company, "P", 2, customer, "待办测试项目", null, null, 1, "opl-manager", @"C:\PDM\Vault", @"C:\PDM\Release"), default);
+        var child = await repo.CreateSubprojectAsync(new(project.Id, "待办测试子项目", null, 1), default);
+        var otherProject = await repo.CreateNumberedProjectAsync(new(company, "P", 2, customer, "未授权测试项目", null, null, 1, "opl-manager", @"C:\PDM\Vault", @"C:\PDM\Release"), default);
+        var settings = await repo.GetAuthorizationSettingsAsync(default);
+        string[] names = ["opl-manager", "opl-owner", "opl-replacement", "opl-colleague"];
+        foreach (var name in names)
+            await repo.CreateUserAsync(new(Guid.NewGuid(), name, "OPL测试人员", "unused", UserRole.Engineer, true, RoleCode: name, CompanyId: company), default);
+        string[] projectGrants = [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, ProjectCenterPermissions.Tab("opl"),
+            ProjectCenterPermissions.Write, "project.opl.view", "project.opl.edit"];
+        var roles = names.Select(name => new AuthorizationTemplate(name, name, "",
+            new[] { new AuthorizationGrant(AuthorizationActions.BusinessNotifications, ["company"]) }) { RoleCode = name }).ToArray();
+        var worker = new AuthorizationTemplate("opl-worker", "OPL项目人员", "", projectGrants.Select(code => new AuthorizationGrant(code, ["company"])).ToArray()) { ProjectAssignable = true };
+        var manager = worker with { Key = "opl-management", Name = "OPL项目经理",
+            Grants = worker.Grants.Concat([new("project.opl.manage", ["company"]), new("project.opl.create", ["company"])]).ToArray() };
+        settings = await repo.SaveAuthorizationSettingsAsync(settings with
+        {
+            Templates = settings.Templates.Concat(roles).Concat([worker, manager]).ToArray(),
+            Assignments = names.Select(name => new AuthorizationAssignment(Guid.NewGuid(), name, name == "opl-manager" ? manager.Key : worker.Key, company, "project", project.Id)).ToArray()
+        }, settings.Revision, default);
+        void Login(string name)
+        {
+            var jwt = new JwtSecurityToken("upton-pdm", "upton-pdm-clients", [new(ClaimTypes.Name, name), new(ClaimTypes.Role, "Engineer")],
+                expires: DateTime.UtcNow.AddMinutes(10), signingCredentials: new(new SymmetricSecurityKey(Encoding.UTF8.GetBytes("development-only-pdm-signing-key-2026")), SecurityAlgorithms.HmacSha256));
+            client.DefaultRequestHeaders.Authorization = new("Bearer", new JwtSecurityTokenHandler().WriteToken(jwt));
+        }
+        static MultipartFormDataContent Body(object data)
+        {
+            var form = new MultipartFormDataContent();
+            form.Add(JsonContent.Create(data), "data");
+            return form;
+        }
+        async Task<UserNotification[]> Todos() => (await client.GetFromJsonAsync<UserNotification[]>("/api/notifications/mine"))!
+            .Where(item => item.Category == ProjectOplService.AssignmentCategory).ToArray();
+        async Task<HttpResponseMessage> Transcribe(string path, byte[]? wave = null)
+        {
+            using var content = new ByteArrayContent(wave ?? TestWave());
+            content.Headers.ContentType = new("audio/wav");
+            return await client.PostAsync(path + "/speech/transcribe", content);
+        }
+
+        Login("opl-manager");
+        var path = $"/api/projects/{project.Id}/opl";
+        using var speech = await Transcribe(path);
+        Assert.True(speech.IsSuccessStatusCode, await speech.Content.ReadAsStringAsync());
+        Assert.Equal("现场支架松动。", (await speech.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("text").GetString());
+        Assert.Equal(HttpStatusCode.BadRequest, (await Transcribe(path, [0, 1])).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await Transcribe($"/api/projects/{otherProject.Id}/opl")).StatusCode);
+        var input = new OplInput("设备问题", "普通", "待处理", "opl-owner", new(2026, 11, 30), "", 0, []);
+        using var createForm = Body(input);
+        createForm.Add(new ByteArrayContent(TestWave()), "files", "OPL录音-测试.wav");
+        using var created = await client.PostAsync(path, createForm);
+        Assert.True(created.IsSuccessStatusCode, await created.Content.ReadAsStringAsync());
+        var issue = (await created.Content.ReadFromJsonAsync<OplIssue>())!;
+        input = input with { AttachmentIds = [Assert.Single(issue.Attachments).Id] };
+        path += $"/{issue.Id}";
+        Login("opl-owner");
+        Assert.Equal(HttpStatusCode.OK, (await Transcribe(path)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await Transcribe($"/api/projects/{project.Id}/opl")).StatusCode);
+        using var playback = await client.GetAsync($"{path}/attachments/{issue.Attachments[0].Id}?preview=true");
+        Assert.Equal(HttpStatusCode.OK, playback.StatusCode);
+        Assert.Equal("audio/wav", playback.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(TestWave(), await playback.Content.ReadAsByteArrayAsync());
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync($"/api/projects/{child.Id}/opl/{issue.Id}/attachments/{issue.Attachments[0].Id}?preview=true")).StatusCode);
+        var todo = Assert.Single(await Todos());
+        Assert.Equal(ProjectOplService.AssignmentKey(issue.Id), todo.SourceKey);
+        Assert.Null(todo.ResolvedAt);
+        Assert.True((await client.GetFromJsonAsync<OplView>($"/api/projects/{project.Id}/opl"))!.Rows.Single().CanEdit);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsync($"/api/projects/{otherProject.Id}/opl/{issue.Id}", Body(input with { ExpectedRowVersion = 1 }))).StatusCode);
+
+        Login("opl-colleague");
+        Assert.Empty(await Todos());
+        Assert.Equal(HttpStatusCode.Forbidden, (await Transcribe(path)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsync(path, Body(input with { ExpectedRowVersion = 1 }))).StatusCode);
+        Login("opl-manager");
+        var reassigned = input with { Owner = "opl-replacement", ExpectedRowVersion = 1 };
+        Assert.Equal(HttpStatusCode.OK, (await client.PutAsync(path, Body(reassigned))).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsync(path, Body(reassigned))).StatusCode);
+        Login("opl-owner");
+        Assert.NotNull(Assert.Single(await Todos()).ResolvedAt);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsync(path, Body(reassigned with { ExpectedRowVersion = 2 }))).StatusCode);
+
+        Login("opl-replacement");
+        Assert.Null(Assert.Single(await Todos()).ResolvedAt);
+        var response = reassigned with { ExpectedRowVersion = 2, Solution = "更换支架", ExpectedCompletionDate = new(2026, 11, 20) };
+        using var filled = await client.PutAsync(path, Body(response));
+        Assert.True(filled.IsSuccessStatusCode, await filled.Content.ReadAsStringAsync());
+        var saved = (await filled.Content.ReadFromJsonAsync<OplIssue>())!;
+        Assert.Equal(input.DueDate, saved.DueDate);
+        Assert.Equal(response.ExpectedCompletionDate, saved.ExpectedCompletionDate);
+        Assert.NotNull(Assert.Single(await Todos()).ResolvedAt);
+
+        Login("opl-manager");
+        var adjustment = response with { ExpectedRowVersion = 3, ExpectedCompletionDate = new(2026, 11, 21) };
+        using var adjusted = await client.PutAsync(path, Body(adjustment));
+        Assert.Equal(adjustment.ExpectedCompletionDate, (await adjusted.Content.ReadFromJsonAsync<OplIssue>())!.ExpectedCompletionDate);
+        settings = await repo.SaveAuthorizationSettingsAsync(settings with { Assignments = settings.Assignments.Where(item => item.Username != "opl-replacement").ToArray() }, settings.Revision, default);
+        Login("opl-replacement");
+        Assert.Empty(await Todos());
+        Assert.Equal(HttpStatusCode.Forbidden, (await Transcribe(path)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsync(path, Body(adjustment with { ExpectedRowVersion = 4 }))).StatusCode);
+    }
+
+    internal static byte[] TestWave()
+    {
+        var wave = new byte[46];
+        "RIFF"u8.CopyTo(wave);
+        "WAVEfmt "u8.CopyTo(wave.AsSpan(8));
+        "data"u8.CopyTo(wave.AsSpan(36));
+        foreach (var (offset, value) in new[] { (4, 38), (16, 16), (20, 0x00010001), (24, 16000), (28, 32000), (32, 0x00100002), (40, 2) })
+            BinaryPrimitives.WriteInt32LittleEndian(wave.AsSpan(offset, 4), value);
+        return wave;
+    }
+
+    private sealed class TestSpeechRecognizer : IOplSpeechRecognizer
+    {
+        public Task<string?> RecognizeAsync(byte[] wave, CancellationToken ct) => Task.FromResult<string?>("现场支架松动。");
+    }
+
     [Fact]
     public async Task HttpOplHistoryUsesPublishedPackagesAndNewReleaseContractValidatesAssociations()
     {

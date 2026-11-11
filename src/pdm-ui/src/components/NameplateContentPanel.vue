@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
 import type { NameplateContent } from '../projectNameplate'
 import { useUserDisplayName } from '../userDisplay'
 import NameplatePreview from './NameplatePreview.vue'
@@ -21,7 +22,7 @@ const displayName = useUserDisplayName()
       <dt>设备外形尺寸</dt><dd>{{ content.dimensions }}</dd>
       <dt>设备重量</dt><dd>{{ content.weight }}</dd>
       <dt>出厂月份</dt><dd>{{ content.factoryDate.slice(0, 7) }}</dd>
-      <dt>硬件确认人</dt><dd>{{ displayName(content.confirmedBy) }}</dd>
+      <dt>硬件确认人</dt><dd><PersonName :name="displayName(content.confirmedBy)" /></dd>
       <dt>确认时间</dt><dd>{{ new Date(content.confirmedAt).toLocaleString('zh-CN', { hour12: false }) }}</dd>
     </dl>
   </section>

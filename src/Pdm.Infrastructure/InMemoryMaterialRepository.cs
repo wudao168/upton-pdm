@@ -194,6 +194,21 @@ public sealed partial class InMemoryMaterialRepository : IMaterialRepository
             && string.Equals(left.Trim(), right.Trim(), StringComparison.OrdinalIgnoreCase);
     }
 
+    public Task<IReadOnlyDictionary<Guid, string>> FindMaterialCodesBySourceBomItemsAsync(IReadOnlyList<Guid> bomItemIds, CancellationToken cancellationToken)
+    {
+        lock (gate)
+        {
+            var result = new Dictionary<Guid, string>();
+            foreach (var id in bomItemIds.Distinct())
+            {
+                var material = bomLinks.TryGetValue(id, out var materialId) ? materials.GetValueOrDefault(materialId)
+                    : materials.Values.FirstOrDefault(item => item.SourceBomItemId == id);
+                if (material is not null) result[id] = material.U9ItemCode ?? material.MaterialCode;
+            }
+            return Task.FromResult<IReadOnlyDictionary<Guid, string>>(result);
+        }
+    }
+
     public Task<PdmMaterial?> FindMaterialBySourceBomItemAsync(Guid bomItemId, CancellationToken cancellationToken) =>
         Task.FromResult(bomLinks.TryGetValue(bomItemId, out var materialId) ? materials.GetValueOrDefault(materialId)
             : materials.Values.FirstOrDefault(item => item.SourceBomItemId == bomItemId));

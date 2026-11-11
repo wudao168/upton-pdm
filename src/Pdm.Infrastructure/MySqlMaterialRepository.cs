@@ -222,6 +222,31 @@ public sealed partial class MySqlMaterialRepository : IMaterialRepository
         return rows.Select(MapMaterial).ToArray();
     }
 
+    public async Task<IReadOnlyDictionary<Guid, string>> FindMaterialCodesBySourceBomItemsAsync(IReadOnlyList<Guid> bomItemIds, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<Guid, string>();
+        if (bomItemIds.Count == 0) return result;
+        await using var connection = await OpenAsync(cancellationToken);
+        foreach (var ids in bomItemIds.Distinct().Chunk(1000))
+        {
+            var linked = await connection.QueryAsync<BomMaterialCodeRow>(new CommandDefinition("""
+                SELECT link.bom_item_id AS BomItemId, COALESCE(material.u9_item_code, material.material_code) AS Code
+                FROM bom_material_link link JOIN material_master material ON material.id=link.material_id
+                WHERE link.bom_item_id IN @Ids
+                """, new { Ids = ids }, cancellationToken: cancellationToken));
+            foreach (var row in linked) result[row.BomItemId] = row.Code;
+            var missing = ids.Where(id => !result.ContainsKey(id)).ToArray();
+            if (missing.Length == 0) continue;
+            var legacy = await connection.QueryAsync<BomMaterialCodeRow>(new CommandDefinition("""
+                SELECT source_bom_item_id AS BomItemId, COALESCE(u9_item_code, material_code) AS Code
+                FROM material_master WHERE source_bom_item_id IN @Ids ORDER BY created_at,id
+                """, new { Ids = missing }, cancellationToken: cancellationToken));
+            foreach (var row in legacy) result.TryAdd(row.BomItemId, row.Code);
+        }
+        return result;
+    }
+    private sealed record BomMaterialCodeRow(Guid BomItemId, string Code);
+
     public async Task<PdmMaterial?> FindMaterialBySourceBomItemAsync(Guid bomItemId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);

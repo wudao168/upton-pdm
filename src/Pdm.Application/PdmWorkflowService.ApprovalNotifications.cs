@@ -13,10 +13,11 @@ public sealed partial class PdmWorkflowService
             ?? throw new PdmNotFoundException("发布包对应的项目不存在。");
         var title = resubmitted ? "BOM发布已重新提交审批" : "BOM发布待审批";
         // 退回重提会复用任务ID；成功流转使用独立事件键，保留旧消息并生成新一轮未读提醒。
-        await repository.CreateUserNotificationsAsync([new UserNotification(
-            Guid.NewGuid(), task.Assignee, "ReleaseApprovalPending", title,
+        var recipients = task.Participants?.Remaining() ?? [task.Assignee];
+        await repository.CreateUserNotificationsAsync(recipients.Select(recipient => new UserNotification(
+            Guid.NewGuid(), recipient, "ReleaseApprovalPending", title,
             $"{project.Code} · {package.Number} 待您审批，请查看发布包并处理。",
             project.Id, package.Id, $"release-package:{package.Id:N}:approval:{task.Id:N}:{Guid.NewGuid():N}",
-            timeProvider.GetUtcNow(), null)], ct);
+            timeProvider.GetUtcNow(), null)).ToArray(), ct);
     }
 }

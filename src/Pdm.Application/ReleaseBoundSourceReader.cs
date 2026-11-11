@@ -42,17 +42,20 @@ public static class ReleaseBoundSourceReader
     {
         var result = new List<ReleasePreviewSource>();
         var nativeIndexes = await repository.ListNativeReferenceIndexesAsync(package.ProjectId, ct);
+        var bomModels = ProductionDrawingQuantities.FrozenItems(package).Where(item => item.SourceDocumentId.HasValue)
+            .Select(item => item.SourceDocumentId!.Value).ToHashSet();
         foreach (var binding in package.VersionBindings ?? [])
         {
-            if (previewsOnly && !binding.Publish) continue;
+            if (previewsOnly && !binding.Publish && !bomModels.Contains(binding.DocumentId)) continue;
             var document = await repository.FindDocumentAsync(binding.DocumentId, ct)
                 ?? throw new PdmRuleException("发布绑定的图档不存在。");
-            if (previewsOnly && document.Kind is not (DocumentKind.Part or DocumentKind.Drawing)) continue;
+            if (previewsOnly && document.Kind is not (DocumentKind.Part or DocumentKind.Drawing)
+                && !(document.Kind == DocumentKind.Assembly && bomModels.Contains(document.Id))) continue;
             var history = await repository.ListDocumentVersionsAsync(binding.DocumentId, ct);
             var original = history.FirstOrDefault(version => version.Id == binding.VersionId);
             if (original is null || original.Sha256 != binding.Sha256)
                 throw new PdmConflictException("发布绑定的源版本内容不一致，已停止转图。");
-            var source = package.State == ReleasePackageState.Published
+            var source = package.State == ReleasePackageState.Published && binding.Publish
                 ? history.FirstOrDefault(version => version.ReleasePackageId == package.Id && version.SourceVersionId == binding.VersionId) ?? original
                 : original;
             if (package.State == ReleasePackageState.Published && binding.Publish && source.Status != DocumentVersionStatus.Released)
@@ -63,7 +66,8 @@ public static class ReleaseBoundSourceReader
                 document.Kind, independent?.RelativePath ?? source.StorageRelativePath, independent?.Length ?? source.FileLength, independent?.Sha256 ?? source.Sha256,
                 source.Status == DocumentVersionStatus.Released || string.IsNullOrWhiteSpace(originalHash) ? source.Sha256 : originalHash,
                 source.Status == DocumentVersionStatus.Released ? source.Revision.Display : source.Revision.Release().Display,
-                source.Status == DocumentVersionStatus.Released));
+                source.Status == DocumentVersionStatus.Released && source.ReleasePackageId != package.Id
+                    && (binding.Publish || source.Preview?.Format == DocumentPreviewFormat.Step)));
         }
         return result;
     }

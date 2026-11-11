@@ -141,9 +141,8 @@ public sealed class ControlledDocumentRecycleService(IPdmRepository repository, 
 
     private async Task RequireAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        if (role != UserRole.Administrator
-            || !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DocumentRecycle, cancellationToken))
-            throw new UnauthorizedAccessException("仅管理员可管理受控图档回收站。");
+        if (!await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.DocumentRecycle, cancellationToken))
+            throw new UnauthorizedAccessException("当前账号没有此项目的受控图档回收权限。");
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目内容的访问权限。");
     }

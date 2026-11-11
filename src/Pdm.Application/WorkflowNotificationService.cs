@@ -3,7 +3,7 @@
 namespace Upton.Pdm.Application;
 
 public sealed class WorkflowNotificationService(IPdmRepository repository, IWorkflowNotificationStore store,
-    IMaterialRepository materials, IValidationPlanRepository validationPlans, TimeProvider clock)
+    IMaterialRepository materials, IValidationPlanRepository validationPlans, TimeProvider clock, IExpenseRequestRepository? expenses = null)
 {
     private async Task<Guid> RequireAdminAsync(string actor, UserRole role, CancellationToken ct)
     {
@@ -28,13 +28,25 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
         if (!WorkflowNotificationFlows.Names.ContainsKey(flowCode)) throw new PdmRuleException("通知流程不存在，请刷新页面。");
         var catalog = await store.ReadAsync(company, ct);
         if (input.Recipients is null || input.Recipients.Count > 100 || input.Enabled && input.Recipients.Count == 0)
-            throw new PdmRuleException("启用通知时，请至少选择一个接收角色，最多100组；部门可以不选。");
+            throw new PdmRuleException("启用完成抄送时，请选择1至100组接收对象。");
         var directory = await repository.GetOrganizationDirectoryAsync(ct);
         var units = ActiveUnits(directory, company);
         var roles = (await repository.GetRolePermissionDirectoryAsync(ct)).Roles;
         var recipients = new List<WorkflowNotificationRecipient>();
         foreach (var recipient in input.Recipients)
         {
+            if (recipient is null) throw new PdmRuleException("抄送对象不能为空，请重新选择。");
+            if (Extended(recipient)) {
+                var copy = ToCopy(recipient);
+                await ApprovalCopyRecipients.ValidateAsync(repository,[copy],company,ct);
+                if (copy.Source == "User" && !await NotificationRecipientPolicy.CanReceiveAsync(repository, copy.Target, ct))
+                    throw new PdmRuleException("所选人员未获准接收业务消息，请在权限中心核对。");
+                if ((copy.Source == "Role" || !string.IsNullOrWhiteSpace(copy.RoleCode)) && !await NotificationRecipientPolicy.RoleCanReceiveAsync(repository, copy.Source == "Role" ? copy.Target : copy.RoleCode!, ct))
+                    throw new PdmRuleException("所选岗位未获准接收业务消息，请在权限中心核对。");
+                recipients.Add(recipient with { Target = copy.Source is "User" or "ProjectRole" ? copy.Target : null,
+                    RoleCode = copy.Source == "Role" ? copy.Target : copy.RoleCode, IncludeSubdepartments = copy.IncludeSubdepartments });
+                continue;
+            }
             if (recipient.DepartmentSource is not ("Fixed" or "SubmitterDepartment" or "CompanyRole")
                 || recipient.DepartmentSource == "Fixed" && (!recipient.DepartmentId.HasValue || !units.Contains(recipient.DepartmentId.Value))
                 || recipient.DepartmentSource != "Fixed" && recipient.DepartmentId.HasValue)
@@ -42,8 +54,8 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
             var selectedRole = roles.FirstOrDefault(item => item.Role.Equals(recipient.RoleCode?.Trim(), StringComparison.OrdinalIgnoreCase));
             if (selectedRole is null || recipient.PositionId != Guid.Empty)
                 throw new PdmRuleException("请选择有效的接收角色；原接收配置请重新选择角色后保存。");
-            if (NotificationRecipientPolicy.SystemOnly([selectedRole.Role]))
-                throw new PdmRuleException("系统管理员角色不用于业务通知，请选择业务接收角色。");
+            if (!await NotificationRecipientPolicy.RoleCanReceiveAsync(repository, selectedRole.Role, ct))
+                throw new PdmRuleException("所选岗位未获准接收业务消息，请在权限中心核对。");
             recipients.Add(recipient with { RoleCode = selectedRole.Role });
         }
         var rule = new WorkflowNotificationRule(flowCode, input.Enabled, recipients.Distinct().ToArray());
@@ -95,6 +107,9 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
     public Task CaptureMaterialAsync(MaterialCodeApplication application, CancellationToken ct) =>
         CaptureAsync("MaterialCode", application.Id, application.ProjectId, application.RequestedBy,
             application.RequestedAt.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture), "material-code-application", ct);
+
+    public Task CaptureExpenseAsync(ExpenseRequest request,CancellationToken ct) => CaptureAsync("Expense",request.Id,request.ProjectId,request.Applicant,
+        request.Steps.First().Id.ToString("N"),"expense-approval",ct);
 
     private async Task CaptureAsync(string kind, Guid id, Guid projectId, string submitter, string token, string flow, CancellationToken ct, bool restart = false)
     {
@@ -148,11 +163,11 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
             foreach (var message in job.Messages)
             {
                 var user = await repository.FindUserAsync(message.Username, ct);
-                if (NotificationRecipientPolicy.SystemOnly(user)) continue;
+                if (user is not null && !await NotificationRecipientPolicy.CanReceiveAsync(repository, user.Username, ct)) continue;
                 if (user is null || !CompanyUser(directory, user.Username, job.CompanyId)) { skipped = true; continue; }
                 var canRead = await repository.HasProjectContentReadAccessAsync(job.ProjectId, user.Username, user.Role, ct);
                 if (!canRead && !message.RoleRecipient) { skipped = true; continue; }
-                messages.Add(new(Guid.NewGuid(), user.Username, job.BusinessKind == "Release" ? "ReleaseDepartment" : job.BusinessKind == "ValidationPlan" ? "WorkflowValidationPlan" : "WorkflowMaterialCode",
+                messages.Add(new(Guid.NewGuid(), user.Username, job.BusinessKind == "Release" ? "ReleaseDepartment" : job.BusinessKind == "ValidationPlan" ? "WorkflowValidationPlan" : job.BusinessKind == "Expense" ? "WorkflowExpenseCopy" : "WorkflowMaterialCode",
                     message.Title, canRead ? message.Content : RoleSummary, job.ProjectId, job.BusinessKind == "Release" ? job.BusinessId : null,
                     job.NotificationSourceKey!, clock.GetUtcNow(), null));
             }
@@ -192,6 +207,15 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
             title = "验证计划审批已通过";
             content = $"{project.Code} · 验证计划R{plan.RevisionNumber}已生效，请查看负责的验证事项。";
         }
+        else if (job.BusinessKind == "Expense")
+        {
+            var request = expenses is null ? null : await expenses.FindAsync(job.BusinessId,ct);
+            if (request is null || request.Steps.FirstOrDefault()?.Id.ToString("N") != job.BusinessToken || request.Status is "Rejected" or "Withdrawn")
+                return next with { State = "Cancelled", Message = "费用申请已撤回、退回或被新一轮审批替代" };
+            if (request.Status != "Approved") return next;
+            title = "费用申请审批完成抄送";
+            content = $"{project.Code} · {(request.Purpose == "SitePurchase" ? "现场采购" : "维修补订")}申请已通过审批，请进入项目费用申请查看。";
+        }
         else
         {
             var application = await materials.FindMaterialCodeApplicationAsync(job.BusinessId, ct);
@@ -212,6 +236,15 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
         var managers = (await ReleaseManagementNotifications.ManagersAsync(repository, project, directory, ct)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (job.Rule.Enabled) foreach (var recipient in job.Rule.Recipients)
         {
+            if (Extended(recipient)) {
+                IReadOnlyList<string> matched;
+                try { matched = await ApprovalCopyRecipients.ResolveAsync(repository,ToCopy(recipient),project,job.Submitter,directory,job.SubmitterDepartmentId,ct); }
+                catch (PdmRuleException) { warnings.Add("抄送接收配置失效，请检查部门、角色或人员设置"); continue; }
+                if (matched.Count == 0) warnings.Add("一组抄送对象未匹配到有效人员，请检查部门、角色或项目分工");
+                recipients.UnionWith(matched);
+                if (recipient.RoleCode is not null) roleRecipients.UnionWith(matched);
+                continue;
+            }
             var unitId = recipient.DepartmentSource == "SubmitterDepartment" ? job.SubmitterDepartmentId : recipient.DepartmentId;
             if (recipient.RoleCode is not null)
             {
@@ -274,7 +307,7 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
         foreach (var recipient in recipients)
         {
             var user = directory.Users.FirstOrDefault(user => user.Username.Equals(recipient, StringComparison.OrdinalIgnoreCase));
-            if (user is not null && NotificationRecipientPolicy.SystemOnly(user.EffectiveRoleCodes)) continue;
+            if (user is not null && !await NotificationRecipientPolicy.CanReceiveAsync(repository, user.Username, ct)) continue;
             if (user is null || !CompanyUser(directory, recipient, job.CompanyId))
             { warnings.Add($"接收人{recipient}已停用或不属于当前公司"); continue; }
             var canRead = await repository.HasProjectContentReadAccessAsync(job.ProjectId, user.Username, user.Role, ct);
@@ -297,6 +330,17 @@ public sealed class WorkflowNotificationService(IPdmRepository repository, IWork
     }
 
     private const string RoleSummary = "您所属角色有一条业务完成通知，请联系业务负责人处理后续工作；详情按项目权限开放。";
+
+    private static bool Extended(WorkflowNotificationRecipient recipient) => recipient.DepartmentSource is not ("Fixed" or "SubmitterDepartment" or "CompanyRole")
+        || recipient.IncludeSubdepartments || recipient.RoleCode is null && recipient.PositionId == Guid.Empty;
+    private static ApprovalCopyRecipient ToCopy(WorkflowNotificationRecipient recipient)
+    {
+        var source = recipient.DepartmentSource switch { "Fixed" => "Department", "CompanyRole" => "Role", _ => recipient.DepartmentSource };
+        if (recipient.PositionId != Guid.Empty || source is not ("Department" or "FixedManager") && recipient.DepartmentId.HasValue)
+            throw new PdmRuleException("抄送接收配置无效，请重新选择对象。");
+        return ApprovalCopyRecipients.Normalize(new(source,source is "Department" or "FixedManager" ? recipient.DepartmentId?.ToString() ?? "" : source == "Role" ? recipient.RoleCode ?? "" : recipient.Target ?? "",
+            recipient.RoleCode,recipient.IncludeSubdepartments));
+    }
 
     private static HashSet<Guid> ActiveUnits(OrganizationDirectory directory, Guid company)
     {

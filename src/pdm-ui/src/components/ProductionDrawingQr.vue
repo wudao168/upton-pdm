@@ -54,5 +54,5 @@ watch(() => [props.state.releasePackageId, props.state.formalReleasePackageId, p
 </template>
 
 <style scoped>
-.production-drawing-qr{display:grid;width:96px;justify-items:center;gap:4px;font-size:11px;line-height:1.4}.production-drawing-qr img{display:block;max-width:100%;background:#fff}.production-drawing-qr select{width:100%;min-width:0;height:28px;border:1px solid var(--pdm-border);background:var(--pdm-surface);color:var(--pdm-text)}.production-drawing-qr p{margin:0;overflow-wrap:anywhere}.production-drawing-qr [role=alert]{color:var(--pdm-danger)}.production-drawing-qr button{border:0;background:transparent;color:var(--pdm-theme-accent);font:inherit;cursor:pointer}
+.production-drawing-qr{display:grid;width:96px;justify-items:center;gap:4px;font-size:11px;line-height:1.4}.production-drawing-qr img{display:block;max-width:100%;background:#fff}.production-drawing-qr select{width:100%;min-width:0;height:28px;border:1px solid var(--pdm-border);background:var(--pdm-surface);color:var(--pdm-text)}.production-drawing-qr p{margin:0;overflow-wrap:anywhere}.production-drawing-qr [role=alert]{color:var(--pdm-danger)}.production-drawing-qr button{border:0;background:transparent; color:var(--pdm-text);font:inherit;cursor:pointer}
 </style>

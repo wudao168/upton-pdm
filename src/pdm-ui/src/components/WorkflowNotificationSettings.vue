@@ -2,17 +2,17 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { readWorkflowNotifications, saveWorkflowNotification, readWorkflowNotificationRecords } from '../api'
 import { userErrorMessage } from '../userErrorMessage'
-import type { OrganizationDirectory, RolePermissionSettings } from '../types'
-import { notificationDepartments, notificationDepartmentPath, submitterDepartmentOption, type WorkflowNotificationCatalog, type WorkflowNoticeRecord, type WorkflowNotificationRecipient } from '../workflowNotifications'
+import type { ApprovalCopyRecipient, OrganizationDirectory, RolePermissionSettings } from '../types'
+import ApprovalCopyRecipientsEditor from './ApprovalCopyRecipientsEditor.vue'
+import { noticeToCopy, copyToNotice, incompleteCopy, type WorkflowNotificationCatalog, type WorkflowNoticeRecord, type WorkflowNotificationRecipient } from '../workflowNotifications'
 
 const props = defineProps<{ token: string; companyId: string; flowCode: string; directory?: OrganizationDirectory; roles?: RolePermissionSettings[]; active: boolean }>()
 const catalog = ref<WorkflowNotificationCatalog | null>(null), enabled = ref(false)
-const rows = ref<Array<{ department: string; roleCode: string }>>([])
+const rows = ref<ApprovalCopyRecipient[]>([])
 const pending = ref(false), error = ref(''), notice = ref(''), records = ref<WorkflowNoticeRecord[]>([]), showRecords = ref(false)
 let generation = 0
-const departments = computed(() => notificationDepartments(props.directory, props.companyId))
 const roles = computed(() => props.roles ?? [])
-const trigger = computed(() => props.flowCode === 'validation-plan' ? '审批通过后通知；计划责任工程师仍按计划项自动匹配。' : props.flowCode === 'material-code-application' ? '正式料号生成后通知，结果同时返回原申请人。' : '正式发布成功后通知；增补、变更发布使用同一份接收配置。')
+const trigger = computed(() => props.flowCode === 'expense-approval' ? '费用申请全部审批通过后抄送。' : props.flowCode === 'validation-plan' ? '审批通过后通知；计划责任工程师仍按计划项自动匹配。' : props.flowCode === 'material-code-application' ? '正式料号生成后通知，结果同时返回原申请人。' : '正式发布成功后通知；增补、变更发布使用同一份接收配置。')
 async function load() {
   if (!props.token || !props.companyId || !props.active) return
   const version = ++generation, company = props.companyId
@@ -23,8 +23,8 @@ async function load() {
     catalog.value = value
     const flow = value.flows.find(flow => flow.flowCode === props.flowCode)
     enabled.value = flow?.enabled ?? false
-    rows.value = (flow?.recipients ?? []).map(row => ({ department: row.departmentSource === 'SubmitterDepartment' ? submitterDepartmentOption : row.departmentId ?? '', roleCode: row.roleCode ?? '' }))
-    if (flow?.recipients.some(row => !row.roleCode)) error.value = '原通知使用旧接收配置，请为各行重新选择角色后保存。'
+    rows.value = (flow?.recipients ?? []).map(noticeToCopy)
+    if (rows.value.some(row => row.roleCode === '__legacy__')) error.value = '原通知使用旧接收配置，请为各行重新选择角色后保存。'
   } catch (cause) { if (version === generation) error.value = userErrorMessage(cause instanceof Error ? cause.message : '通知设置加载失败') }
   finally { if (version === generation) pending.value = false }
 }
@@ -32,13 +32,13 @@ watch(() => [props.token, props.companyId, props.flowCode, props.active], load, 
 onBeforeUnmount(() => generation++)
 async function save() {
   if (!catalog.value || pending.value) return
-  if (rows.value.some(row => !roles.value.some(role => role.role === row.roleCode)) || enabled.value && !rows.value.length) { error.value = '请为每行选择角色；部门可以不选，启用通知时至少保留一组接收对象。'; return }
-  const recipients: WorkflowNotificationRecipient[] = rows.value.map(row => ({ departmentSource: row.department === submitterDepartmentOption ? 'SubmitterDepartment' : row.department ? 'Fixed' : 'CompanyRole', departmentId: row.department === submitterDepartmentOption || !row.department ? null : row.department, roleCode: row.roleCode }))
+  if (rows.value.some(row => incompleteCopy(row) || row.roleCode && !roles.value.some(role => role.role === row.roleCode) || row.source === 'Role' && !roles.value.some(role => role.role === row.target)) || enabled.value && !rows.value.length) { error.value = '请完整选择抄送对象及有效角色；启用时至少保留一组抄送对象。'; return }
+  const recipients: WorkflowNotificationRecipient[] = rows.value.map(copyToNotice)
   const company = props.companyId, version = generation
   pending.value = true; error.value = ''; notice.value = ''
   try {
     const value = await saveWorkflowNotification(props.flowCode, { enabled: enabled.value, recipients, expectedRowVersion: catalog.value.rowVersion, companyId: company }, props.token)
-    if (version === generation && company === props.companyId) { catalog.value = value; notice.value = '通知设置已保存；审批流程保持不变，新发起的审批使用此配置。' }
+    if (version === generation && company === props.companyId) { catalog.value = value; notice.value = '完成抄送已保存；审批流程保持不变，新发起的审批使用此配置。' }
   } catch (cause) { if (version === generation) error.value = userErrorMessage(cause instanceof Error ? cause.message : '通知设置保存失败') }
   finally { if (version === generation) pending.value = false }
 }
@@ -53,26 +53,15 @@ const recordState = (state: string) => ({ Waiting: '等待业务完成', Ready: 
 </script>
 
 <template>
-  <section class="workflow-notifications" aria-label="通知接收设置">
-    <header><h3>通知接收设置</h3><label class="notification-check"><input v-model="enabled" type="checkbox" :disabled="pending || !catalog">启用通知</label></header>
-    <p class="notification-hint">通知时机：{{ trigger }}</p>
+  <section class="workflow-notifications" aria-label="完成时抄送">
+    <header><h3>完成时抄送</h3><label class="notification-check"><input v-model="enabled" type="checkbox" :disabled="pending || !catalog">启用完成抄送</label></header>
+    <p class="notification-hint">抄送时机：{{ trigger }}</p>
     <p v-if="error" role="alert" class="pdm-inline-error">{{ error }} <button type="button" @click="load">刷新</button></p>
     <p v-if="notice" role="status" class="notification-success">{{ notice }}</p>
     <p v-if="pending && !catalog" class="notification-hint">正在加载通知设置…</p>
-    <fieldset v-if="catalog" :disabled="pending || !enabled">
-      <legend class="notification-sr">接收部门与角色</legend>
-      <div class="notification-row notification-columns" aria-hidden="true"><span>部门（可不选）</span><span>角色</span><span></span></div>
-      <div v-for="(row, index) in rows" :key="index" class="notification-row">
-        <label><span class="notification-mobile-label">部门（可不选）</span><select v-model="row.department" :aria-label="`接收对象${index + 1}部门`"><option value="">不限部门（当前公司）</option><option :value="submitterDepartmentOption">提交人部门（跟随审批流）</option><option v-for="department in departments" :key="department.id" :value="department.id">{{ notificationDepartmentPath(directory, department.id) }}</option><option v-if="row.department && row.department !== submitterDepartmentOption && !departments.some(department => department.id === row.department)" :value="row.department" disabled>原部门已失效，请重新选择</option></select></label>
-        <label><span class="notification-mobile-label">角色</span><select v-model="row.roleCode" :aria-label="`接收对象${index + 1}角色`"><option value="" disabled>{{ roles.length ? '请选择角色' : '暂无角色，请先维护用户角色' }}</option><option v-for="role in roles" :key="role.role" :value="role.role">{{ role.name }}</option><option v-if="row.roleCode && !roles.some(role => role.role === row.roleCode)" :value="row.roleCode" disabled>原角色已失效，请重新选择</option></select></label>
-        <button type="button" class="pdm-secondary-action" :aria-label="`删除接收对象${index + 1}`" @click="rows.splice(index, 1)">删除</button>
-      </div>
-      <button type="button" class="pdm-secondary-action" @click="rows.push({ department: '', roleCode: '' })">＋ 添加接收对象</button>
-    </fieldset>
-    <p class="notification-hint">选择部门：通知该部门内拥有所选角色的人员；不选部门：通知当前公司内拥有该角色的全部有效人员。多组匹配同一人员只通知一次。</p>
-    <p class="notification-hint">角色及人员在“用户设置”中维护；收到通知不改变业务详情的查看权限。</p>
-    <p class="notification-hint">“提交人部门”沿用审批发起时的主部门关系；新配置不补发历史通知。</p>
-    <footer><button type="button" class="pdm-text-action" @click="loadRecords">{{ showRecords ? '收起通知记录' : '查看通知记录' }}</button><button type="button" class="pdm-primary-action" :disabled="pending || !catalog" @click="save">{{ pending ? '正在处理…' : '保存通知设置' }}</button></footer>
+    <ApprovalCopyRecipientsEditor v-if="catalog" v-model="rows" :directory="directory" :roles="roles" :company-id="companyId" :disabled="pending || !enabled" />
+    <p class="notification-hint">在所选分支完成业务后抄送，不参与审批判断；新配置不补发历史抄送。原有接收配置继续保留。</p>
+    <p class="notification-hint">“发起人部门”使用发起时的主部门；技术助理沿用既有事业部范围。角色及人员在用户设置中维护，收到抄送不增加业务查看权限。</p>    <footer><button type="button" class="pdm-text-action" @click="loadRecords">{{ showRecords ? '收起通知记录' : '查看通知记录' }}</button><button type="button" class="pdm-primary-action" :disabled="pending || !catalog" @click="save">{{ pending ? '正在处理…' : '保存完成抄送' }}</button></footer>
     <div v-if="showRecords" class="notification-records"><p v-if="!records.length" class="notification-hint">暂无新流程的通知记录。</p><div v-for="record in records" :key="record.id"><strong>{{ recordState(record.state) }}</strong><span>{{ record.message }}</span><small>{{ new Date(record.createdAt).toLocaleString() }}</small></div></div>
   </section>
 </template>

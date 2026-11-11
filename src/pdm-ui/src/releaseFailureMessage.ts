@@ -4,6 +4,19 @@ import { requiresReleasePreview } from './releasePreviewState'
 
 export function releaseFailureMessage(error?: string | null): string {
   const message = error?.trim() ?? ''
+  if (message.startsWith('逐项转图结果：')) {
+    const reasons = new Map<string, number>()
+    for (const line of message.split(/\r?\n/).slice(1)) {
+      if (!line.trim()) continue
+      const separator = line.indexOf('：')
+      const reason = userErrorMessage(line.slice(separator < 0 ? 0 : separator + 1).trim())
+      reasons.set(reason, (reasons.get(reason) ?? 0) + 1)
+    }
+    if (reasons.size) {
+      const summary = [...reasons].slice(0, 2).map(([reason, count]) => `${count} 项：${reason}`).join('；')
+      return summary + (reasons.size > 2 ? '；另有其他原因。' : '。') + '逐张结果见图纸转出列表。'
+    }
+  }
   if (/80080005|CO_E_SERVER_EXEC_FAILURE/i.test(message)) {
     return '转图服务器无法启动 SolidWorks（错误码 80080005）。请管理员检查转图服务器上的 SolidWorks 启动状态，恢复后重试。'
   }

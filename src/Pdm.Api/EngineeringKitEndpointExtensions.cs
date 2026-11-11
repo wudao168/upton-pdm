@@ -34,6 +34,13 @@ public static class EngineeringKitEndpointExtensions
             return Results.Ok(await service.SetActiveAsync(kitId, request.IsActive, request.ExpectedRowVersion, actor, role, cancellationToken));
         });
 
+        api.MapDelete("/{kitId:guid}", async (Guid kitId, long expectedRowVersion, HttpContext context, EngineeringKitService service, CancellationToken cancellationToken) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            await service.DeleteDraftAsync(kitId, expectedRowVersion, actor, role, cancellationToken);
+            return Results.NoContent();
+        });
+
         api.MapPut("/{kitId:guid}/library-metadata", async (Guid kitId, SaveEngineeringKitLibraryMetadataCommand request, HttpContext context, EngineeringKitService service, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);

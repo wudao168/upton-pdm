@@ -14,6 +14,7 @@ import 'element-plus/dist/index.css'
 import './styles/tokens.css'
 import './styles/themes.css'
 import './styles/app.css'
+import './styles/drawer-motion.css'
 import './styles/ui-consistency.css'
 import './styles/tabs.css'
 import './styles/business.css'
@@ -21,15 +22,29 @@ import './styles/interaction.css'
 import './styles/stat-cards.css'
 import './styles/material-stock-plans.css'
 import './styles/capsule-tabs.css'
+import './styles/capsule-fields.css'
+import './styles/twenty-appearance.css'
+import './styles/global-accent.css'
+import './styles/project-list-alignment.css'
+import './styles/shell-frame.css'
+import './styles/navigation-group-dividers.css'
+import './styles/primary-tabs-inset.css'
+import './styles/table-action-frames.css'
 import { stockedMaterial } from './materialStockPlans'
-import App from './App.vue'
 import { installClientDiagnostics } from './clientDiagnostics'
-import { isPdmTheme } from './themes'
+import { applyPdmTheme, isPdmTheme, watchPdmSystemTheme } from './themes'
 
+const App = defineAsyncComponent(() => import('./App.vue'))
 const query = new URLSearchParams(window.location.search)
 const savedTheme = window.localStorage.getItem('pdm_theme')
-document.documentElement.dataset.pdmTheme = isPdmTheme(savedTheme) ? savedTheme : 'a'
-const root = query.has('dingtalkOffice')
+applyPdmTheme(isPdmTheme(savedTheme) ? savedTheme : 'g')
+const reportPreview = query.get('projectReportPreview') === '1'
+const bindingScan = query.get('dingtalkBinding') === '1'
+const root = reportPreview
+  ? defineAsyncComponent(() => import('./components/ProjectReportPreview.vue'))
+  : bindingScan
+  ? defineAsyncComponent(() => import('./components/DingTalkBindingScan.vue'))
+  : query.has('dingtalkOffice')
   ? defineAsyncComponent(() => import('./components/MobileOfficeApp.vue'))
   : query.has('dingtalkOpl')
   ? defineAsyncComponent(() => import('./components/DingTalkOplPage.vue'))
@@ -37,8 +52,9 @@ const root = query.has('dingtalkOffice')
     ? defineAsyncComponent(() => import('./components/ProductionScanPage.vue')) : App
 const app = createApp(root).use(ElementPlus, { locale: zhCn })
 app.directive('stocked-material', stockedMaterial)
-installClientDiagnostics(app)
-if (!query.has('dingtalkOffice')) {
+app.onUnmount(watchPdmSystemTheme(() => { const theme = document.documentElement.dataset.pdmTheme; return isPdmTheme(theme) ? theme : 'g' }))
+if (!reportPreview && !bindingScan) installClientDiagnostics(app)
+if (!query.has('dingtalkOffice') && !bindingScan) {
   installPanelHeaderActions(app)
   installColumnResize(app)
   installDatePickers(app)

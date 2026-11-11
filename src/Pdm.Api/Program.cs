@@ -107,7 +107,9 @@ if (!builder.Environment.IsDevelopment())
 if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgnoreCase))
 {
     builder.Services.AddScoped<IPdmRepository, MySqlPdmRepository>();
-    builder.Services.AddScoped<IProjectFileRepository, MySqlProjectFileRepository>();
+    builder.Services.AddScoped<MySqlProjectFileRepository>();
+    builder.Services.AddScoped<IProjectFileRepository>(provider => provider.GetRequiredService<MySqlProjectFileRepository>());
+    builder.Services.AddScoped<IProjectFileFormRepository, MySqlProjectFileFormRepository>();
     builder.Services.AddScoped<IMaterialRepository, MySqlMaterialRepository>();
     builder.Services.AddScoped<IU9InventoryRepository, MySqlU9InventoryRepository>();
     builder.Services.AddScoped<IU9ProcurementRepository, MySqlU9ProcurementRepository>();
@@ -124,6 +126,8 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
     builder.Services.AddScoped<IValidationPlanRepository, MySqlValidationPlanRepository>();
     builder.Services.AddKeyedScoped<IValidationPlanRepository>("quality", (provider, _) => new MySqlValidationPlanRepository(provider.GetRequiredService<IOptions<PdmDatabaseOptions>>(), true));
     builder.Services.AddScoped<IProjectBudgetRepository, MySqlProjectBudgetRepository>();
+    builder.Services.AddScoped<IExpenseRequestRepository, MySqlExpenseRequestRepository>();
+    builder.Services.AddScoped<IProjectBonusRepository, MySqlProjectBonusRepository>();
     builder.Services.AddScoped<IProjectNameplateRepository, MySqlProjectNameplateRepository>();
     builder.Services.AddScoped<IProjectContactInformationRepository, MySqlProjectContactInformationRepository>();
     builder.Services.AddScoped<IProjectOplRepository, MySqlProjectOplRepository>();
@@ -140,7 +144,9 @@ if (string.Equals(databaseOptions.Provider, "MySql", StringComparison.OrdinalIgn
 else
 {
     builder.Services.AddSingleton<IPdmRepository, InMemoryPdmRepository>();
-    builder.Services.AddSingleton<IProjectFileRepository, InMemoryProjectFileRepository>();
+    builder.Services.AddSingleton<InMemoryProjectFileRepository>();
+    builder.Services.AddSingleton<IProjectFileRepository>(provider => provider.GetRequiredService<InMemoryProjectFileRepository>());
+    builder.Services.AddSingleton<IProjectFileFormRepository, InMemoryProjectFileFormRepository>();
     builder.Services.AddSingleton<IMaterialRepository, InMemoryMaterialRepository>();
     builder.Services.AddSingleton<IU9InventoryRepository, InMemoryU9InventoryRepository>();
     builder.Services.AddSingleton<IU9ProcurementRepository, InMemoryU9ProcurementRepository>();
@@ -157,6 +163,8 @@ else
     builder.Services.AddSingleton<IValidationPlanRepository, InMemoryValidationPlanRepository>();
     builder.Services.AddKeyedSingleton<IValidationPlanRepository>("quality", new InMemoryValidationPlanRepository());
     builder.Services.AddSingleton<IProjectBudgetRepository, InMemoryProjectBudgetRepository>();
+    builder.Services.AddSingleton<IExpenseRequestRepository, InMemoryExpenseRequestRepository>();
+    builder.Services.AddSingleton<IProjectBonusRepository, InMemoryProjectBonusRepository>();
     builder.Services.AddSingleton<IProjectNameplateRepository, InMemoryProjectNameplateRepository>();
     builder.Services.AddSingleton<IProjectContactInformationRepository, InMemoryProjectContactInformationRepository>();
     builder.Services.AddSingleton<IProjectOplRepository, InMemoryProjectOplRepository>();
@@ -204,6 +212,8 @@ builder.Services.AddHttpClient<IU9ProcurementClient, U9OpenApiClient>(client => 
 builder.Services.AddHttpClient<IU9BomQueryClient, U9OpenApiClient>(client => client.Timeout = TimeSpan.FromSeconds(20))
     .RemoveAllLoggers();
 builder.Services.AddScoped<PdmWorkflowService>();
+builder.Services.AddScoped<ISparePartStore>(provider => (ISparePartStore)provider.GetRequiredService<IPdmRepository>());
+builder.Services.AddScoped<SparePartService>();
 builder.Services.AddScoped<ProjectCopyService>();
 builder.Services.AddScoped<ReleaseItemCommentService>();
 builder.Services.AddScoped<CrmCustomerIntegrationService>();
@@ -228,6 +238,8 @@ builder.Services.AddScoped<MaterialRelationService>();
 builder.Services.AddScoped<IMaterialRelationReleaseGuard>(provider => provider.GetRequiredService<MaterialRelationService>());
 builder.Services.AddScoped<ProgramTemplateService>();
 builder.Services.AddScoped<ProjectFileService>();
+builder.Services.AddScoped<ProjectFileFormService>();
+builder.Services.AddSingleton<IProjectFileFormWorkbook, ProjectFileFormWorkbook>();
 builder.Services.AddScoped<IValidationPlanFileArchive, ValidationPlanFileArchive>();
 builder.Services.AddScoped<ControlledDocumentRecycleService>();
 builder.Services.AddScoped<IArchiveRecycleStore>(provider => (IArchiveRecycleStore)provider.GetRequiredService<IPdmRepository>());
@@ -247,6 +259,8 @@ builder.Services.AddScoped<ProjectWorkbenchService>(provider => new ProjectWorkb
     provider.GetRequiredService<U9ProcurementService>(), provider.GetRequiredKeyedService<IValidationPlanRepository>("quality"),
     provider.GetRequiredService<IQualityInspectionRepository>(), provider.GetRequiredService<IProjectWorkbenchRiskRepository>(), provider.GetRequiredService<TimeProvider>(), provider.GetRequiredService<IProjectOplRepository>()));
 builder.Services.AddScoped<ProjectBudgetService>();
+builder.Services.AddScoped<ExpenseRequestService>();
+builder.Services.AddScoped<ProjectBonusService>();
 builder.Services.AddScoped<ProjectNameplateService>();
 builder.Services.AddScoped<ProjectContactInformationService>();
 builder.Services.AddScoped<IProjectApplicationRepository>(provider => (IProjectApplicationRepository)provider.GetRequiredService<IPdmRepository>());
@@ -257,9 +271,18 @@ builder.Services.AddHostedService<WorkHoursReminderHostedService>();
 builder.Services.AddScoped<ProjectOplService>();
 builder.Services.AddSingleton<ProjectOplViewState>();
 builder.Services.Configure<DingTalkOplOptions>(builder.Configuration.GetSection("DingTalkOpl"));
+builder.Services.Configure<OplSpeechOptions>(builder.Configuration.GetSection("Pdm:OplSpeech"));
+builder.Services.AddSingleton<IOplSpeechRecognizer, LocalOplSpeechRecognizer>();
 builder.Services.AddScoped<DingTalkConfigurationService>();
 builder.Services.AddScoped<MobileOfficeLayoutService>();
 builder.Services.AddSingleton<DingTalkProjectBindingCodes>();
+builder.Services.AddSingleton<DingTalkEmployeePairing>();
+builder.Services.AddRateLimiter(options => options.AddPolicy("dingtalk-pairing", context =>
+    System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new()
+        {
+            PermitLimit = 20, Window = TimeSpan.FromMinutes(1), QueueLimit = 0
+        })));
 builder.Services.AddSingleton<DingTalkStreamStatusCache>();
 builder.Services.AddHttpClient("dingtalk-stream", client => client.Timeout = TimeSpan.FromSeconds(20)).RemoveAllLoggers();
 builder.Services.AddHostedService<DingTalkStreamService>();
@@ -280,6 +303,7 @@ builder.Services.AddScoped<ReleasePreviewService>();
 builder.Services.AddScoped<ProductionDrawingService>();
 builder.Services.AddScoped<ProductionTrackingService>();
 builder.Services.AddScoped<ProductionScanService>();
+builder.Services.AddScoped<ProductionLabelService>();
 builder.Services.AddScoped<ProductionSupplierService>();
 builder.Services.AddScoped<IProductionTrackingObserver>(provider => provider.GetRequiredService<ProductionTrackingService>());
 builder.Services.AddScoped<ReleaseDeliveryArchiveService>();
@@ -385,6 +409,7 @@ builder.Services.AddResponseCompression(options =>
     options.MimeTypes = Microsoft.AspNetCore.ResponseCompression.ResponseCompressionDefaults.MimeTypes.Concat(["application/wasm"]);
 });
 
+builder.Services.AddHttpClient("preview-workbench").ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 var app = builder.Build();
 if (args.Contains("--storage-backup-plan", StringComparer.OrdinalIgnoreCase))
 {
@@ -475,8 +500,11 @@ app.MapLoginSecurity();
 app.MapDocumentOperationRules();
 app.MapArchiveWarningPolicy();
 app.MapPdmEndpoints();
+app.MapAuthorizationCenter();
+app.MapPreviewWorkbench();
 app.MapPdmMaterialEndpoints();
 app.MapBomFileEndpoints();
+app.MapSparePartEndpoints();
 app.MapPdmInventoryEndpoints();
 app.MapPdmProcurementEndpoints();
 app.MapStandardLibraryEndpoints();
@@ -494,6 +522,7 @@ app.MapProjectContentResetEndpoints();
 app.MapU9BomEndpoints();
 app.MapReleaseDeliveryEndpoints();
 app.MapProductionTrackingEndpoints();
+app.MapProductionMobileEndpoints();
 app.MapProductionSupplierEndpoints();
 app.MapValidationPlanEndpoints();
 app.MapWorkflowNotificationEndpoints();
@@ -502,6 +531,8 @@ app.MapProjectPlanningEndpoints();
 app.MapProjectWorkbenchEndpoints();
 app.MapCalendarTodos();
 app.MapProjectBudgetEndpoints();
+app.MapExpenseRequestEndpoints();
+app.MapProjectBonusEndpoints();
 app.MapProjectNameplateEndpoints();
 app.MapProjectContactInformationEndpoints();
 app.MapProjectApplicationEndpoints();
@@ -517,6 +548,13 @@ if (Directory.Exists(deployedWebRoot))
         if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path.StartsWithSegments("/health"))
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        // The catch-all endpoint is selected before DefaultFiles runs; keep the mobile entry out of the desktop SPA fallback.
+        if (string.Equals(context.Request.Path.Value?.TrimEnd('/'), "/production-app", StringComparison.OrdinalIgnoreCase))
+        {
+            context.Response.Redirect("/production-app/index.html");
             return;
         }
 

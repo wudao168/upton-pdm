@@ -173,9 +173,11 @@ public sealed class ProjectPermissionPolicyTests
     public async Task BudgetView_UsesExistingRoleOrProjectPositionGrant_ConsistentlyWithBudgetService()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("engineer", UserRole.Engineer), ("outsider", UserRole.Engineer));
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         await repository.SetMainProjectStaffingAsync(project.Id, new("manager", [], ["engineer"]), "admin", default);
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView], default);
+        await PermissionTestUsers.Scope(repository, "Engineer", PermissionCodes.ProjectBudgetView, "MainDesigner");
         var budgets = new ProjectBudgetService(repository, new InMemoryProjectBudgetRepository(), new InMemoryU9ProcurementRepository(),
             TimeProvider.System, new InMemoryMaterialRepository(TimeProvider.System));
 
@@ -186,24 +188,21 @@ public sealed class ProjectPermissionPolicyTests
         Assert.False(await ProjectPermissionPolicy.CanAsync(repository, project.Id, "outsider", UserRole.Engineer, PermissionCodes.ProjectBudgetView, default));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => budgets.GetAsync(project.Id, "outsider", UserRole.Engineer, default));
 
-        var settings = await repository.GetProjectPermissionSettingsAsync(default);
-        await repository.UpdateProjectPermissionSettingsAsync(new(settings.Rules.ToDictionary(pair => pair.Key,
-            pair => pair.Key == ProjectPermissionPositions.MainDesigner
-                ? (IReadOnlyList<string>)pair.Value.Where(code => code != PermissionCodes.ProjectBudgetView).ToArray() : pair.Value)), default);
+        await PermissionTestUsers.Revoke(repository, "Engineer", PermissionCodes.ProjectBudgetView);
         Assert.False(await ProjectPermissionPolicy.CanAsync(repository, project.Id, "engineer", UserRole.Engineer, PermissionCodes.ProjectBudgetView, default));
         Assert.DoesNotContain(PermissionCodes.ProjectBudgetView, (await repository.ListProjectsForUserAsync("engineer", UserRole.Engineer, default))
             .Single(item => item.Id == project.Id).EffectiveProjectPermissions);
 
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectBudgetView], default);
+        await PermissionTestUsers.Scope(repository, "Engineer", PermissionCodes.ProjectBudgetView, "company");
         Assert.True(await ProjectPermissionPolicy.CanAsync(repository, project.Id, "outsider", UserRole.Engineer, PermissionCodes.ProjectBudgetView, default));
         Assert.Contains(PermissionCodes.ProjectBudgetView, (await repository.ListProjectsForUserAsync("outsider", UserRole.Engineer, default))
             .Single(item => item.Id == project.Id).EffectiveProjectPermissions);
         Assert.NotNull(await budgets.GetAsync(project.Id, "outsider", UserRole.Engineer, default));
 
         await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectView], default);
-        await repository.UpdateProjectPermissionSettingsAsync(settings, default);
         Assert.False(await ProjectPermissionPolicy.CanAsync(repository, project.Id, "engineer", UserRole.Engineer, PermissionCodes.ProjectBudgetView, default));
-        Assert.Empty((await repository.ListProjectsForUserAsync("engineer", UserRole.Engineer, default))
+        Assert.DoesNotContain(PermissionCodes.ProjectBudgetView, (await repository.ListProjectsForUserAsync("engineer", UserRole.Engineer, default))
             .Single(item => item.Id == project.Id).EffectiveProjectPermissions);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => budgets.GetAsync(project.Id, "engineer", UserRole.Engineer, default));
     }

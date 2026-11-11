@@ -26,18 +26,18 @@ onMounted(load)
 </script>
 <template>
   <section class="ding-employees" aria-label="钉钉员工账号绑定">
-    <p>将当前企业的钉钉用户ID与在职UPLM账号一一绑定。用户ID可从钉钉后台取得，也会显示在员工首次打开应用的未绑定提示中。姓名不用于匹配账号。</p>
+    <p>将当前企业的钉钉用户ID与在职UPLM账号一一绑定。可在角色管理授权「自助绑定本人钉钉」，员工从个人设置发起绑定。管理员手动绑定时，用户 ID 可从钉钉后台取得。</p>
     <p v-if="error" role="alert">{{ error }}</p><p v-if="notice" role="status">{{ notice }}</p>
     <template v-if="view">
       <div v-for="(binding, index) in view.bindings" :key="index" class="ding-employee-row">
         <el-input v-model="binding.userId" aria-label="钉钉用户ID" placeholder="钉钉用户ID" :disabled="pending" />
-        <UserSelect v-model="binding.username" aria-label="绑定UPLM账号" placeholder="选择UPLM账号" filterable :disabled="pending"><el-option v-for="account in view.accounts" :key="account.username" :value="account.username" :label="`${account.displayName}（${account.username}）`" /></UserSelect>
-        <el-button :disabled="pending" @click="view.bindings.splice(index, 1)">移除绑定</el-button>
+        <UserSelect v-model="binding.username" aria-label="绑定UPLM账号" placeholder="选择员工" filterable :disabled="pending"><el-option v-for="account in view.accounts" :key="account.username" :value="account.username" :label="account.displayName" /></UserSelect>
+        <el-button class="ding-action" :disabled="pending" @click="view.bindings.splice(index, 1)">移除绑定</el-button>
       </div>
-      <el-button :disabled="pending || !view.corpId" @click="view.bindings.push({ corpId: view.corpId, userId: '', username: '' })">添加员工绑定</el-button>
-      <el-button type="primary" :loading="pending" @click="save">保存员工绑定</el-button>
+      <el-button class="ding-action" :disabled="pending || !view.corpId" @click="view.bindings.push({ corpId: view.corpId, userId: '', username: '' })">添加员工绑定</el-button>
+      <el-button class="ding-action" type="primary" :loading="pending" @click="save">保存员工绑定</el-button>
     </template>
-    <el-button :disabled="pending" @click="load">刷新</el-button>
+    <el-button class="ding-action" :disabled="pending" @click="load">刷新</el-button>
   </section>
 </template>
 <style scoped>

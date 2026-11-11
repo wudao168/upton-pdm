@@ -48,8 +48,8 @@ public static class LoginSecurityEndpoints
 
     public sealed record DeviceApproval(bool Approved);
     // 与 CompanySessionService 的内置 admin 全局管理规则保持一致。
-    private static bool CanEditPolicy() => TenantContext.Current is { } tenant && (tenant.IsPlatformAdministrator || tenant.Username.Equals("admin", StringComparison.OrdinalIgnoreCase));
-    private static bool CanManage() => CanEditPolicy() || TenantContext.Current?.HasRole("Administrator") == true;
+    private static bool CanEditPolicy() => TenantContext.Current is { } tenant && tenant.HasPermission("system.login-policy.manage");
+    private static bool CanManage() => CanEditPolicy() || TenantContext.Current?.HasPermission(AuthorizationActions.ClientLogs) == true;
     private static async Task<bool> CanManageUserAsync(string username, IPdmRepository repository, CancellationToken ct)
     {
         if (!CanManage()) return false;

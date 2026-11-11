@@ -89,8 +89,8 @@ public sealed class ArchiveRecycleService(IPdmRepository repository, IArchiveRec
 {
     private async Task Access(Guid projectId, string actor, UserRole role, CancellationToken ct)
     {
-        if (role != UserRole.Administrator || !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DocumentRecycle, ct))
-            throw new UnauthorizedAccessException("仅具有图档回收权限的管理员可执行此操作。");
+        if (!await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.DocumentRecycle, ct))
+            throw new UnauthorizedAccessException("当前账号没有此项目的图档回收权限。");
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, ct)) throw new UnauthorizedAccessException("没有该项目的访问权限。");
     }
     public async Task<IReadOnlyList<ArchiveRecycleBatch>> ListBatchesAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)

@@ -123,6 +123,38 @@ public sealed class ReleaseDeliveryArchiveTests
         Assert.Equal(0, await service.ArchiveAsync(Guid.NewGuid(), "admin", default));
     }
 
+    [Fact]
+    public async Task PurchasePdfPreservesEveryReleaseAndIsIdempotent()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pdm-purchase-pdf", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var repository = new InMemoryPdmRepository(TimeProvider.System);
+            var files = new InMemoryProjectFileRepository(TimeProvider.System);
+            var service = new ReleaseDeliveryArchiveService(repository, files, TimeProvider.System);
+            var project = (await repository.FindProjectAsync(ProjectId, default))!;
+            for (var release = 1; release <= 2; release++)
+            {
+                var number = $"RP-PURCHASE-{release}";
+                var path = Path.Combine(root, number); Directory.CreateDirectory(path);
+                var package = await CreatePublishedPackageAsync(repository, project.Id, path, number, ReleaseScope.StandardFormal);
+                var items = Enumerable.Range(1,120).Select(i => new BomItem(Guid.NewGuid(), project.Id, BomKind.Standard, i, $"M-{i:D4}", "采购清单中文物料名称", i, "个", "Q235B", "规格及备注分页验证", "W1", true)).ToArray();
+                var bytes = BomPurchaseListPdf.Write(BomWorkbook.WriteStandardRelease(items, new Dictionary<string,decimal>()), project, package, "标准件BOM");
+                using var pdf = PdfSharp.Pdf.IO.PdfReader.Open(new MemoryStream(bytes), PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import);
+                Assert.True(pdf.PageCount >= 3); Assert.Equal(number, pdf.Info.Subject);
+                await File.WriteAllBytesAsync(Path.Combine(path, number + BomPurchaseListPdf.Suffix), bytes);
+                Assert.Equal(1, await service.ArchiveAsync(package.Id, "admin", default));
+                Assert.Equal(0, await service.ArchiveAsync(package.Id, "admin", default));
+            }
+            var folder = (await repository.FindProjectFolderByKeyAsync(project.Id, "purchase", default))!;
+            var archived = await files.ListAsync(folder.RootProjectId, folder.Id, false, default);
+            Assert.Equal(2, archived.Count);
+            foreach (var file in archived) Assert.Single(await files.ListVersionsAsync(file.Id, default));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
     private static async Task<ReleasePackage> CreatePublishedPackageAsync(
         InMemoryPdmRepository repository,
         Guid projectId,

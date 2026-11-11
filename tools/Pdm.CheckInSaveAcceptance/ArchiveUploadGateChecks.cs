@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -16,9 +16,9 @@ internal static partial class Program
  static async Task ArchiveUploadGateScenario(Form host,string output,bool memoryOnly=false)
  {
   output=Path.Combine(Path.GetFullPath(output),Guid.NewGuid().ToString("N"));
-  foreach(var mode in new[]{"early-other-editor","early-missing-file","early-review-locked","confirm","cancel","recheck","changed-during-preflight","server-denied-late","missing-references","missing-references-cache","strict-missing-references","payload-too-large","background-upload","cancel-upload","upload-failure","cycle-after-initial-check","changed-after-commit","cancel-after-commit","chunked-final-sync","memory-snapshot"})
+  foreach(var mode in new[]{"early-other-editor","early-missing-file","early-review-locked","confirm","cancel","recheck","changed-during-preflight","server-denied-late","missing-references","missing-references-cache","strict-missing-references","payload-too-large","background-upload","cancel-upload","upload-failure","cycle-after-initial-check","changed-after-commit","cancel-after-commit","chunked-final-sync","memory-snapshot","memory-late-properties","memory-during-index","memory-copy-recheck"})
   {
-   if(memoryOnly&&mode!="memory-snapshot")continue;
+   if(memoryOnly&&!mode.StartsWith("memory-"))continue;
    var folder=Path.Combine(Path.GetFullPath(output),mode,"View");Directory.CreateDirectory(folder);
    var identity=Type("PdmDocumentIdentityStore");var bindings=identity.GetField("bindingDirectory",Flags);var resolver=identity.GetField("workspaceRootResolver",Flags);var oldBindings=bindings.GetValue(null);var oldRoot=resolver.GetValue(null);
    var batchFolder=Type("ArchiveBatchJournal").GetField("directory",Flags);var oldBatch=batchFolder.GetValue(null);
@@ -29,7 +29,7 @@ internal static partial class Program
    try
    {
     plugin=New("PdmAddin");var project=Guid.NewGuid();var checkout=(Guid)Field(plugin,"checkoutSessionId");
-    var warningMode=mode.Contains("missing-references");var memoryMode=mode=="memory-snapshot";
+    var warningMode=mode.Contains("missing-references");var memoryMode=mode.StartsWith("memory-");
     var nodes=new[]{LinkedNode(folder,warningMode||memoryMode?"SOURCE-A.SLDASM":"SOURCE-A.SLDPRT",warningMode||memoryMode?"Assembly":"Part"),LinkedNode(folder,"SOURCE-B.SLDPRT","Part")};
     if(mode=="chunked-final-sync")nodes=nodes.Concat(Enumerable.Range(2,15).Select(i=>LinkedNode(folder,"SOURCE-"+i+".SLDPRT","Part"))).ToArray();
     var absentPaths=Enumerable.Range(0,3).Select(i=>Path.Combine(folder,"old-user","MISSING-"+i+".SLDPRT")).ToArray();
@@ -50,6 +50,8 @@ internal static partial class Program
     var appType=Type("PdmAddin").GetField("application",Flags).FieldType;var nativeWrites=0;
     var memoryEvents=new List<string>();
     var memoryModels=memoryMode?nodes.Select(n=>new Model(appType.Assembly.GetType("SolidWorks.Interop.sldworks.IModelDoc2",true),(string)Get(n,"FullPath"),true,memoryEvents,true){MemoryPayload="native current state "+Get(n,"FileName")}).ToArray():new Model[0];
+    if(mode=="memory-late-properties")foreach(var model in memoryModels){model.Dirty=false;model.OnConfigurationNames=()=>model.Modify(false);}
+    if(mode=="memory-during-index")foreach(var model in memoryModels){model.Dirty=false;model.OnPropertyRead=()=>model.Modify(false);}
     var diskBefore=nodes.ToDictionary(n=>(string)Get(n,"FullPath"),n=>File.ReadAllBytes((string)Get(n,"FullPath")));
     if(memoryMode)foreach(var node in nodes)File.SetAttributes((string)Get(node,"FullPath"),FileAttributes.ReadOnly);
     SetField(plugin,"application",ArchiveNativeMock(appType,call=>{
@@ -144,6 +146,7 @@ internal static partial class Program
       Task task;
       SynchronizationContext.SetSynchronizationContext(uploadContext);
       Action<int,int,string,string> syncProgress=mode=="cancel-after-commit" ? (Action<int,int,string,string>)((done,total,name,status)=>{if(Convert.ToInt32(Get(session,"DisplayStep"))==10)TreeCall(session,"RequestCancellation");}) : null;
+      if(mode=="memory-copy-recheck") { var injected=false; syncProgress=(done,total,name,status)=>{if(!injected && status.Contains("正在核对副本准备方式")){injected=true;foreach(var model in memoryModels)model.Modify();}}; }
       try{task=(Task)Type("PdmAddin").GetMethod("CheckInBatchAsync",Flags).Invoke(plugin,new object[]{LinkedItems(nodes),project,"isolated automatic archive test",syncProgress,(CancellationToken)Get(session,"Token"),null,null,null,null,false,null});}
       finally{SynchronizationContext.SetSynchronizationContext(priorContext);}
       if(await Task.WhenAny(task,Task.Delay(15000))!=task){uploadContext.Release();TreeCall(session,"RequestCancellation");throw new Exception("上传依赖了主线程逐文件回调，或出现额外人工等待");}
@@ -167,7 +170,7 @@ internal static partial class Program
          throw new Exception("服务器提交后的新增修改未保留为待提交状态");
      if(memoryMode)
      {
-      if(memoryEvents.Count!=2||memoryEvents.Any(e=>!e.StartsWith("copy:"))||memoryModels.Any(m=>!m.Dirty)
+      if(memoryEvents.Count!=(mode=="memory-copy-recheck"?4:2)||memoryEvents.Any(e=>!e.StartsWith("copy:"))||memoryModels.Any(m=>!m.Dirty)
         ||nodes.Any(n=>!diskBefore[(string)Get(n,"FullPath")].SequenceEqual(File.ReadAllBytes((string)Get(n,"FullPath")))||(File.GetAttributes((string)Get(n,"FullPath"))&FileAttributes.ReadOnly)==0))
          throw new Exception("整批内存副本提交改变了源文件、权限或原待保存标记");
       if(((IEnumerable)Get(result,"BomWarnings")).Cast<string>().Any(w=>w.Contains("本机状态同步失败")||w.Contains("之后的本地修改")))throw new Exception("已提交内存副本被误判为未提交修改");
@@ -242,7 +245,7 @@ internal static partial class Program
    {
     if(!Confirmed)throw new Exception("未确认即提交");Commits++;var body=await request.Content.ReadAsStringAsync();var missingExtension=mode=="missing-references-cache"?".stp.SLDASM":".SLDPRT";WarningSnapshotCommitted=Enumerable.Range(0,3).All(i=>body.Contains("MISSING-"+i+missingExtension));var payload=json.Deserialize<Dictionary<string,object>>(body);
     var submitted=((IEnumerable)payload["files"]).Cast<Dictionary<string,object>>().ToDictionary(row=>Guid.Parse((string)row["documentId"]),row=>(Dictionary<string,object>)row["request"]);
-    if(mode=="memory-snapshot")foreach(var row in submitted.Values){var props=(Dictionary<string,object>)row["properties"];if((string)props["SourceFileSha256"]!=(string)row["sha256"])throw new Exception("旧源文件被误标为已提交的当前内容");}
+    if(mode.StartsWith("memory-"))foreach(var row in submitted.Values){var props=(Dictionary<string,object>)row["properties"];if((string)props["SourceFileSha256"]!=(string)row["sha256"])throw new Exception("旧源文件被误标为已提交的当前内容");if((string)props["全局/物料名称"]!="当前内存属性"||(string)props["UPLM.CustomPropertiesRead"]!="1")throw new Exception("未保存的内存属性未随当前副本完整提交");}
     value=new{batchId=payload["batchId"],results=nodes.Select(n=>{var requestData=submitted[(Guid)Get(n,"DocumentId")];return new{document=Document(n,true),version=new{id=Guid.NewGuid(),drawingVersion="V2",revision=new{display="W2"},sha256=requestData["sha256"],fileLength=requestData["fileLength"],storageRelativePath=requestData["storageRelativePath"],propertySnapshot=requestData["properties"]},versionCreated=true};}).ToArray()};
     if(mode=="changed-after-commit")File.AppendAllText((string)Get(nodes[0],"FullPath")," later-after-commit");
     if(mode=="chunked-final-sync")File.AppendAllText((string)Get(nodes.Last(),"FullPath")," later-after-commit");

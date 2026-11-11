@@ -15,6 +15,7 @@ const username = ref('')
 const password = ref('')
 const rememberCredentials = ref(desktopCredentialStorageAvailable)
 const scene = ref<'melon' | 'pirate'>('melon')
+const interactiveSceneAvailable = window.isSecureContext && 'gpu' in navigator
 const sceneUrl = computed(() => scene.value === 'melon' ? melonJellyUrl : pirateJellyUrl)
 const sceneTitle = computed(() => scene.value === 'melon' ? '西瓜软糖：拖动拉伸，松手回弹' : '海盗果冻：拖动海水造浪，点击船只开炮')
 const showPassword = ref(false)
@@ -67,17 +68,29 @@ async function submitPasswordReset() {
   <main class="pdm-login-shell has-melon" :class="{ 'is-compact': props.compact }">
     <section class="pdm-login-layout">
       <aside class="pdm-login-melon" :aria-label="scene === 'melon' ? '西瓜软糖交互区' : '海盗果冻交互区'">
-        <div class="pdm-login-scene-picker" role="group" aria-label="切换互动场景">
+        <div v-if="interactiveSceneAvailable" class="pdm-login-scene-picker" role="group" aria-label="切换互动场景">
           <button type="button" :aria-pressed="scene === 'melon'" @click="scene = 'melon'">西瓜软糖</button>
           <button type="button" :aria-pressed="scene === 'pirate'" @click="scene = 'pirate'">海盗果冻</button>
         </div>
         <iframe
+          v-if="interactiveSceneAvailable"
           :key="scene"
           class="pdm-login-melon-frame"
           :src="`${sceneUrl}?embed=login`"
           sandbox="allow-scripts"
           :title="sceneTitle"
         />
+        <svg v-else class="pdm-login-melon-frame" viewBox="0 0 600 600" role="img" aria-label="西瓜软糖展示">
+          <defs><radialGradient id="melon-backdrop"><stop stop-color="#fffaf1" /><stop offset="1" stop-color="#e8eee4" /></radialGradient></defs>
+          <rect width="600" height="600" fill="url(#melon-backdrop)" />
+          <ellipse cx="300" cy="445" rx="185" ry="25" fill="#364c3b" opacity=".12" />
+          <g transform="rotate(-15 300 300)">
+            <path d="M110 260 A190 190 0 0 0 490 260 Z" fill="#538756" />
+            <path d="M124 260 A176 176 0 0 0 476 260 Z" fill="#d8e7b2" />
+            <path d="M139 260 A161 161 0 0 0 461 260 Z" fill="#e57b79" />
+            <g fill="#574042"><ellipse cx="220" cy="300" rx="5" ry="10" transform="rotate(-30 220 300)" /><ellipse cx="300" cy="310" rx="5" ry="10" /><ellipse cx="380" cy="300" rx="5" ry="10" transform="rotate(30 380 300)" /><ellipse cx="260" cy="365" rx="5" ry="10" /><ellipse cx="340" cy="365" rx="5" ry="10" /></g>
+          </g>
+        </svg>
       </aside>
 
       <section class="pdm-login-content">
@@ -153,7 +166,7 @@ async function submitPasswordReset() {
       </section>
     </section>
 
-    <el-dialog v-model="passwordHelpVisible" title="申请重置密码" width="420px" :close-on-click-modal="false" append-to-body>
+    <el-dialog v-model="passwordHelpVisible" title="申请重置密码" width="420px" :close-on-click-modal="!passwordResetPending" append-to-body>
       <el-form :model="passwordResetForm" label-position="top" @submit.prevent="submitPasswordReset">
         <el-form-item label="账号" required>
           <el-input v-model="passwordResetForm.username" autocomplete="username" placeholder="请输入账号" maxlength="80" />

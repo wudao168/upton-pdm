@@ -1,4 +1,9 @@
-/* 业务内容外侧留白，不在日历日期格之间增加间隔。 */
+/* 主页面统一提供外侧留白，子页面保留各自的面板内边距。 */
+:root body main.pdm-main {
+  padding-inline: var(--pdm-content-inset);
+  --pdm-primary-tabs-inline-inset: 0px;
+}
+
 @layer pdm-business {
   :root body .program-template-library > .program-template-panel,
   :root body #pane-bom-headers > .bom-header-directory,
@@ -6,9 +11,8 @@
   :root body #pane-numbering-settings > .material-numbering-settings-scroll,
   :root body .production-workbench > .production-workbench__secondary.pdm-panel,
   :root body .work-hours > .wh-summary,
-  :root body .work-hours > .wh-calendar-layout,
-  :root body main.pdm-main .project-calendar {
+  :root body .work-hours > .wh-calendar-layout {
     box-sizing:border-box;
-    padding-inline:5px !important;
+    padding-inline:var(--pdm-content-inset) !important;
   }
 }

@@ -11,7 +11,7 @@ import StockedMaterialSettings from './StockedMaterialSettings.vue'
 import ApprovalWorkflowSettings from './ApprovalWorkflowSettings.vue'
 import FolderTemplateSettings from './FolderTemplateSettings.vue'
 import UserSettings from './UserSettings.vue'
-import ProjectPermissionSettings from './ProjectPermissionSettings.vue'
+import PermissionCenter from './PermissionCenter.vue'
 import ProductionScanSettings from './ProductionScanSettings.vue'
 import ArchiveWarningSettings from './ArchiveWarningSettings.vue'
 import type { AuditEntry, CreateRoleInput, CrmConnectionTestResult, CrmCustomerSyncResult, CrmIntegrationSettings, EquipmentTypeDefinition, OrganizationDirectory, OrganizationUnit, PdmCustomer, PdmSystemSettings, PdmUser, ProjectFolderTemplateNode, ProjectNumberingOptions, ProjectOrganization, RolePermissionDirectory, SaveOrganizationUnitInput, SavePdmUserInput, SaveProjectOrganizationInput, UpdateCrmIntegrationInput } from '../types'
@@ -54,17 +54,14 @@ const props = defineProps<{
 }>()
 defineEmits<{ refreshAudit: []; updateActiveOrganizationId: [organizationId: string] }>()
 
-type AdminTab = 'u9' | 'users' | 'project-permissions' | 'folders' | 'settings' | 'dingtalk' | 'stocked-materials' | 'approval' | 'audit' | 'client-logs' | 'production-scan' | 'archive-warnings' | 'login-security'
-const activeTab = rememberedTab<AdminTab>('system.tab', 'u9', ['u9','users','project-permissions','folders','settings','dingtalk','stocked-materials','approval','audit','client-logs','production-scan','archive-warnings','login-security'])
+type AdminTab = 'u9' | 'users' | 'settings' | 'stocked-materials' | 'approval' | 'audit' | 'client-logs' | 'production-scan' | 'archive-warnings' | 'login-security'
+const activeTab = rememberedTab<AdminTab>('system.tab', 'u9', ['u9','users','settings','stocked-materials','approval','audit','client-logs','production-scan','archive-warnings','login-security'])
 const hasPermission = (code: string) => props.permissions.includes(code)
 const availableTabs = computed<AdminTab[]>(() => [
   (hasPermission('settings.customer.manage') || hasPermission('settings.storage.manage')) && 'u9',
   (hasPermission('settings.organization.manage') || hasPermission('system.role.view')) && 'users',
-  hasPermission('system.project-permission.view') && 'project-permissions',
-  hasPermission('settings.folder.manage') && 'folders',
-  hasPermission('settings.storage.manage') && 'settings',
+  (hasPermission('settings.storage.manage') || hasPermission('settings.folder.manage')) && 'settings',
   'archive-warnings',
-  hasPermission('settings.storage.manage') && 'dingtalk',
   hasPermission('settings.storage.manage') && 'stocked-materials',
   hasPermission('settings.storage.manage') && 'approval',
   hasPermission('production.scan.manage') && 'production-scan',
@@ -78,13 +75,10 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
 <template>
   <section class="pdm-admin-workspace" aria-label="系统管理">
     <nav class="pdm-admin-tabs pdm-tabs" aria-label="系统管理功能">
-      <button v-if="availableTabs.includes('u9')" type="button" :class="{ 'is-active': activeTab === 'u9' }" @click="activeTab='u9'">U9C接口</button>
+      <button v-if="availableTabs.includes('u9')" type="button" :class="{ 'is-active': activeTab === 'u9' }" @click="activeTab='u9'">系统接口</button>
       <button v-if="availableTabs.includes('users')" type="button" :class="{ 'is-active': activeTab === 'users' }" @click="activeTab='users'">用户设置</button>
-      <button v-if="availableTabs.includes('project-permissions')" type="button" :class="{ 'is-active': activeTab === 'project-permissions' }" @click="activeTab='project-permissions'">项目权限</button>
-      <button v-if="availableTabs.includes('folders')" type="button" :class="{ 'is-active': activeTab === 'folders' }" @click="activeTab='folders'">文件夹模板</button>
       <button v-if="availableTabs.includes('settings')" type="button" :class="{ 'is-active': activeTab === 'settings' }" @click="activeTab='settings'">编号与存储</button>
       <button v-if="availableTabs.includes('archive-warnings')" type="button" :class="{ 'is-active': activeTab === 'archive-warnings' }" @click="activeTab='archive-warnings'">存档警告策略</button>
-      <button v-if="availableTabs.includes('dingtalk')" type="button" :class="{ 'is-active': activeTab === 'dingtalk' }" @click="activeTab='dingtalk'">钉钉应用</button>
       <button v-if="availableTabs.includes('stocked-materials')" type="button" :class="{ 'is-active': activeTab === 'stocked-materials' }" @click="activeTab='stocked-materials'">常备件设置</button>
       <button v-if="availableTabs.includes('approval')" type="button" :class="{ 'is-active': activeTab === 'approval' }" @click="activeTab='approval'">审批流程</button>
       <button v-if="availableTabs.includes('production-scan')" type="button" :class="{ 'is-active': activeTab === 'production-scan' }" @click="activeTab='production-scan'">生产扫码设置</button>
@@ -103,14 +97,23 @@ watch(availableTabs, tabs => { if (!tabs.includes(activeTab.value)) activeTab.va
       :on-save-customer-settings="onSaveCrmIntegrationSettings"
       :on-test-customer-connection="onTestCrmIntegration"
       :on-sync-customers="onSyncCrmCustomers"
-    />
-    <UserSettings v-else-if="activeTab === 'users'" :directory="organizationDirectory" :role-directory="rolePermissionDirectory" :active-organization-id="activeOrganizationId" :permissions="permissions" :current-username="currentUsername" :platform-administrator="platformAdministrator" :pending="pending" :on-save-user="onSaveUser" :on-reset-password="onResetUserPassword" :on-save-role-permissions="onUpdateRolePermissions" :on-create-role="onCreateRole" :on-delete-role="onDeleteRole" :on-save-organization="onSaveOrganization" :on-save-unit="onSaveUnit" :on-update-memberships="onUpdateMemberships" :on-update-managers="onUpdateManagers" @update-active-organization-id="$emit('updateActiveOrganizationId', $event)" />
-    <ProjectPermissionSettings v-else-if="activeTab === 'project-permissions'" :token="token" :can-edit="hasPermission('system.project-permission.edit')" />
+    >
+      <template #dingtalk>
+        <DingTalkSettings :key="activeOrganizationId" :token="token" />
+      </template>
+    </U9IntegrationManagement>
+    <UserSettings v-else-if="activeTab === 'users'" :directory="organizationDirectory" :role-directory="rolePermissionDirectory" :active-organization-id="activeOrganizationId" :token="token" :permissions="permissions" :current-username="currentUsername" :platform-administrator="platformAdministrator" :pending="pending" :on-save-user="onSaveUser" :on-reset-password="onResetUserPassword" :on-save-role-permissions="onUpdateRolePermissions" :on-create-role="onCreateRole" :on-delete-role="onDeleteRole" :on-save-organization="onSaveOrganization" :on-save-unit="onSaveUnit" :on-update-memberships="onUpdateMemberships" :on-update-managers="onUpdateManagers" @update-active-organization-id="$emit('updateActiveOrganizationId', $event)">
+      <template #permissions>
+        <PermissionCenter :token="token" :company-id="activeOrganizationId" :roles="rolePermissionDirectory.roles" />
+      </template>
+    </UserSettings>
     <ProductionScanSettings v-else-if="activeTab === 'production-scan'" :key="activeOrganizationId" :token="token" />
-    <FolderTemplateSettings v-else-if="activeTab === 'folders'" :nodes="folderTemplate" :users="organizationDirectory.users" :roles="rolePermissionDirectory.roles" :pending="pending" :on-save="onSaveFolderTemplate" />
-    <StorageSettings :administrator="administrator || platformAdministrator" v-else-if="activeTab === 'settings'" :settings="settings" :token="token" :equipment-types="equipmentTypes" :numbering-options="numberingOptions" :pending="pending" :on-save-settings="onSaveSettings" :on-save-equipment-type="onSaveEquipmentType" :on-update-counters="onUpdateCounters" />
+    <StorageSettings :administrator="administrator || platformAdministrator" v-else-if="activeTab === 'settings'" :settings="settings" :token="token" :equipment-types="equipmentTypes" :numbering-options="numberingOptions" :pending="pending" :on-save-settings="onSaveSettings" :on-save-equipment-type="onSaveEquipmentType" :on-update-counters="onUpdateCounters" :can-manage-storage="hasPermission('settings.storage.manage')" :can-manage-folders="hasPermission('settings.folder.manage')">
+      <template #folders>
+        <FolderTemplateSettings :nodes="folderTemplate" :users="organizationDirectory.users" :roles="rolePermissionDirectory.roles" :pending="pending" :on-save="onSaveFolderTemplate" />
+      </template>
+    </StorageSettings>
     <ArchiveWarningSettings v-else-if="activeTab === 'archive-warnings'" :key="activeOrganizationId" :token="token" :can-edit="hasPermission('settings.storage.manage')" />
-    <DingTalkSettings v-else-if="activeTab === 'dingtalk'" :key="activeOrganizationId" :token="token" />
     <StockedMaterialSettings v-else-if="activeTab === 'stocked-materials'" :key="activeOrganizationId" :token="token" />
     <ClientLogManagement v-else-if="activeTab === 'client-logs'" :key="activeOrganizationId" :token="token" />
     <LoginSecuritySettings v-else-if="activeTab === 'login-security'" :key="activeOrganizationId" :token="token" />

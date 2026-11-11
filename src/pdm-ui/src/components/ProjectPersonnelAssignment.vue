@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { projectPhasePersonnelRoles } from '../projectPersonnelRoles'
 import UserSelect from './UserSelect'
 import { computed, nextTick, reactive, ref } from 'vue'
 import { clearGlobalStatus, ElMessage } from '../statusMessage'
@@ -35,8 +36,9 @@ const staffing = reactive<MainProjectStaffingInput>({ primaryProjectManager: '',
 const commercial = reactive({ salesPeople: [] as string[], presalesPeople: [] as string[] })
 function commercialUsers(value: string) { return value.split('、').filter(Boolean).map(name => props.directory.users.find(user => user.username === name || user.displayName === name)?.username ?? name) }
 const engineers = ref<string[]>([])
+const originalEngineers = ref('[]')
 const phases = reactive<Partial<Record<keyof ProjectPhaseOwners, string[]>>>({})
-const definitions = [{ key: 'ElectricalEngineer', label: '电气工程师' }, { key: 'ElectricalHardware', label: '硬件工程师' }, { key: 'StandardProcurement', label: '标准件采购' }, { key: 'NonStandardProcurement', label: '非标件采购' }, { key: 'NonStandardProduction', label: '非标件生产' }, { key: 'MechanicalAssembly', label: '机械装配' }, { key: 'ElectricalAssembly', label: '电气装配' }, { key: 'ElectricalCommissioning', label: '电气调试' }, { key: 'Acceptance', label: '验收' }] as const
+const definitions = projectPhasePersonnelRoles
 function inDivision(unitId: string): boolean {
   const unit = props.directory.units.find(item => item.id === unitId)
   return unitId === props.root.executionUnitId || Boolean(unit?.parentUnitId && inDivision(unit.parentUnitId))
@@ -50,9 +52,9 @@ const companyUsers = computed(() => {
   const members = new Set(props.directory.memberships.filter(item => units.has(item.unitId)).map(item => item.username))
   return props.directory.users.filter(user => user.isActive && members.has(user.username))
 })
-const hardwareUsers = computed(() => companyUsers.value.filter(user => [user.role, ...(user.roles ?? [])].includes('HardwareEngineer')))
-const engineerUsers = computed(() => companyUsers.value.filter(user => [user.role, ...(user.roles ?? [])].some(role => ['Engineer', 'ElectricalEngineer', 'CommissioningEngineer', 'HardwareEngineer', 'MechanicalManager', 'TechnicalAssistant', 'ProcessReviewer', 'Approver'].includes(role))))
-const electricalUsers = computed(() => companyUsers.value.filter(user => [user.role, ...(user.roles ?? [])].includes('ElectricalEngineer')))
+const hardwareUsers = computed(() => companyUsers.value)
+const engineerUsers = computed(() => companyUsers.value.filter(user => user.canBeDesigner))
+const electricalUsers = computed(() => companyUsers.value)
 const positionCandidates = computed(() => {
   const candidates = position.value === 'ElectricalEngineer' ? electricalUsers.value : position.value === 'ElectricalHardware' ? hardwareUsers.value : companyUsers.value
   const selected = position.value ? phases[position.value] ?? [] : []
@@ -71,9 +73,15 @@ async function configure(project?: ProjectSummary, phase?: keyof ProjectPhaseOwn
   staffing.collaborativeProjectManagers = [...props.root.collaborativeProjectManagers]
   staffing.designLeads = [...(props.root.designLeads?.length ? props.root.designLeads : props.root.designLead ? [props.root.designLead] : [])]
   for (const phase of definitions) phases[phase.key] = (props.root.phaseOwners?.[phase.key] ?? '').split('、').filter(Boolean)
+  if (!phases.Acceptance?.length) {
+    const qualityUnits = new Set(props.directory.units.filter(unit => unit.isActive && unit.organizationId === props.root.organizationId && /质量部|品质部|质检部/.test(unit.name)).map(unit => unit.id))
+    const activeUsers = new Set(companyUsers.value.map(user => user.username))
+    phases.Acceptance = [...new Set(props.directory.managers.filter(item => qualityUnits.has(item.unitId)).flatMap(item => [item.primaryManager, ...item.collaborativeManagers]).filter(user => activeUsers.has(user)))]
+  }
   commercial.salesPeople = commercialUsers(props.commercialStaff.salesPeople)
   commercial.presalesPeople = commercialUsers(props.commercialStaff.presalesPeople)
-  engineers.value = [...(project?.designers ?? [])]
+  engineers.value = [...(project?.designers ?? props.root.designers)]
+  originalEngineers.value = JSON.stringify(engineers.value)
   open.value = true
   const generation = ++positionGeneration
   positionsLoading.value = false
@@ -114,7 +122,7 @@ function configureMany(projects: ProjectSummary[], allowsOwners: boolean) {
 async function save() {
   if (saving.value || positionsLoading.value || (!target.value && !props.canMaintainTeam)) return
   if (batch.value && !(position.value ? phases[position.value]?.length : engineers.value.length)) { error.value = '请选择至少一名人员。'; return }
-  if (!target.value && props.root.canManageMainStaffing && (!staffing.primaryProjectManager || !staffing.designLeads.length)) { error.value = '请选择项目经理和至少一名主设。'; return }
+  if (!target.value && props.root.canManageMainStaffing && !staffing.primaryProjectManager) { error.value = '请选择项目经理，主设计可稍后分配。'; return }
   saving.value = true
   error.value = ''
   try {
@@ -136,10 +144,15 @@ async function save() {
     else {
       const value = { salesPeople: commercial.salesPeople.join('、'), presalesPeople: commercial.presalesPeople.join('、') }
       if (props.canEditCommercial && (value.salesPeople !== props.commercialStaff.salesPeople || value.presalesPeople !== props.commercialStaff.presalesPeople)) {
-        if (!await props.onSaveCommercial(value)) { error.value = '销售、售前人员保存失败，请检查客户信息提示。'; return }
+        if (!await props.onSaveCommercial(value)) { error.value = '销售经理、售前工程师保存失败，请检查客户信息提示。'; return }
       }
       if (props.root.canManageMainStaffing) await props.onUpdateMainStaffing(props.root.id, { ...staffing, collaborativeProjectManagers: [...staffing.collaborativeProjectManagers], designLeads: [...staffing.designLeads] })
-      if (props.root.canAssignDesigners) await props.onUpdatePhaseOwners(props.root.id, Object.fromEntries(definitions.map(phase => [phase.key, (phases[phase.key] ?? []).join('、')])))
+      if (props.root.canAssignDesigners && JSON.stringify(engineers.value) !== originalEngineers.value) {
+        const saved = await props.onUpdateDesigners(props.root.id, [...engineers.value])
+        originalEngineers.value = JSON.stringify(engineers.value)
+        emit('positionsUpdated', saved)
+      }
+      if (props.root.canAssignDesigners) await props.onUpdatePhaseOwners(props.root.id, { ...props.root.phaseOwners, ...Object.fromEntries(definitions.map(phase => [phase.key, (phases[phase.key] ?? []).join('、')])) })
     }
     if (!position.value && props.token && originalMembers.value && JSON.stringify(customMembers.value) !== originalMembers.value)
       emit('positionsUpdated', await updateProjectPositionMembers(target.value?.id ?? props.root.id, customMembers.value, props.token))
@@ -156,25 +169,26 @@ defineExpose({ configure, configureMany })
 </script>
 
 <template>
-  <el-dialog v-model="open" :title="batch ? `批量分配人员 · ${batchTotal} 个项目` : target ? `分配${position ? definitions.find(item => item.key === position)?.label : '执行工程师'} · ${target.code}` : '分配项目团队'" width="560px" append-to-body :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving">
+  <el-dialog v-model="open" :title="batch ? `批量分配人员 · ${batchTotal} 个项目` : target ? `分配${position ? definitions.find(item => item.key === position)?.label : '设计人员'} · ${target.code}` : '分配项目团队'" width="560px" append-to-body :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving">
     <div class="personnel-assignment">
       <template v-if="batch">
         <div class="personnel-assignment__batch-summary"><p>将统一设置所选项目的该岗位人员，其他岗位保持不变。</p><p>待分配项目：{{ batchProjects.map(item => item.code).join('、') || '全部已完成' }}</p><p v-if="saving || batchCompleted" role="status">已保存 {{ batchCompleted }} / {{ batchTotal }} 个项目</p></div>
-        <label>分配岗位<el-select :model-value="position || 'designers'" aria-label="批量分配岗位" :disabled="saving || batchCompleted > 0" @update:model-value="position = $event === 'designers' ? null : $event; error = ''"><el-option label="执行工程师" value="designers" /><template v-if="batchAllowsOwners"><el-option v-for="phase in definitions.filter(item => ['ElectricalEngineer', 'ElectricalHardware', 'MechanicalAssembly', 'ElectricalAssembly'].includes(item.key))" :key="phase.key" :label="phase.label" :value="phase.key" /></template></el-select></label>
+        <label>分配岗位<el-select :model-value="position || 'designers'" aria-label="批量分配岗位" :disabled="saving || batchCompleted > 0" @update:model-value="position = $event === 'designers' ? null : $event; error = ''"><el-option label="设计人员" value="designers" /><template v-if="batchAllowsOwners"><el-option v-for="phase in definitions.filter(item => ['ElectricalEngineer', 'ElectricalHardware', 'MechanicalAssembly', 'ElectricalAssembly'].includes(item.key))" :key="phase.key" :label="phase.label" :value="phase.key" /></template></el-select></label>
       </template>
       <label v-if="position">{{ definitions.find(item => item.key === position)?.label }}<UserSelect v-model="phases[position]" :aria-label="definitions.find(item => item.key === position)?.label" multiple filterable clearable :disabled="saving || (batch && batchCompleted > 0)"><el-option v-for="user in positionCandidates" :key="user.username" :label="user.displayName" :value="user.username" :disabled="!user.isActive" /></UserSelect></label>
       <template v-else-if="!target">
 
-          <label>项目经理<UserSelect v-model="staffing.primaryProjectManager" aria-label="项目经理" filterable :disabled="saving || !root.canManageMainStaffing || (!administrator && currentUsername === root.primaryProjectManager)"><el-option v-for="user in divisionUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
+          <label>项目经理<UserSelect v-model="staffing.primaryProjectManager" aria-label="项目经理" filterable :disabled="saving || !root.canManageMainStaffing || (!root.effectiveProjectPermissions?.includes('project.staffing.replace-self') && currentUsername === root.primaryProjectManager)"><el-option v-for="user in divisionUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
           <label>协同项目经理<UserSelect v-model="staffing.collaborativeProjectManagers" aria-label="协同项目经理" multiple filterable :disabled="saving || !root.canManageMainStaffing"><el-option v-for="user in divisionUsers.filter(item => item.username !== staffing.primaryProjectManager)" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
-          <label>主设<UserSelect v-model="staffing.designLeads" aria-label="主设" multiple filterable :disabled="saving || !root.canManageMainStaffing"><el-option v-for="user in divisionUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
+          <label>主设计<UserSelect v-model="staffing.designLeads" aria-label="主设计" multiple filterable :disabled="saving || !root.canManageMainStaffing"><el-option v-for="user in divisionUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
 
         <label>硬件工程师<UserSelect v-model="phases.ElectricalHardware" aria-label="硬件工程师" multiple filterable clearable :disabled="saving || !root.canAssignDesigners"><el-option v-for="user in hardwareUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
-        <label>销售<UserSelect v-model="commercial.salesPeople" aria-label="团队销售人员" multiple filterable :disabled="saving || !canEditCommercial"><el-option v-for="user in companyUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
-        <label>售前<UserSelect v-model="commercial.presalesPeople" aria-label="团队售前人员" multiple filterable :disabled="saving || !canEditCommercial"><el-option v-for="user in companyUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
+        <label>设计人员<UserSelect v-model="engineers" aria-label="设计人员" multiple filterable clearable :disabled="saving || !root.canAssignDesigners"><el-option v-for="user in engineerUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
+        <label>销售经理<UserSelect v-model="commercial.salesPeople" aria-label="团队销售经理" multiple filterable :disabled="saving || !canEditCommercial"><el-option v-for="user in companyUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
+        <label>售前工程师<UserSelect v-model="commercial.presalesPeople" aria-label="团队售前工程师" multiple filterable :disabled="saving || !canEditCommercial"><el-option v-for="user in companyUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
         <label v-for="phase in definitions.filter(item => item.key !== 'ElectricalHardware')" :key="phase.key">{{ phase.label }}<UserSelect v-model="phases[phase.key]" :aria-label="phase.label" multiple filterable clearable :disabled="saving || !root.canAssignDesigners"><el-option v-for="user in phase.key === 'ElectricalEngineer' ? electricalUsers : companyUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
       </template>
-      <label v-else>执行工程师<UserSelect v-model="engineers" aria-label="执行工程师" multiple filterable :disabled="saving || (batch && batchCompleted > 0)"><el-option v-for="user in engineerUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
+      <label v-else>设计人员<UserSelect v-model="engineers" aria-label="设计人员" multiple filterable :disabled="saving || (batch && batchCompleted > 0)"><el-option v-for="user in engineerUsers" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>
       <p v-if="positionsLoading" role="status">正在读取自定义岗位…</p>
       <template v-for="customPosition in position ? [] : customPositions" :key="customPosition.key">
         <label>{{ customPosition.name }}{{ customPosition.isActive ? '' : '（已停用）' }}<UserSelect v-model="customMembers[customPosition.key]" :aria-label="`自定义岗位${customPosition.name}`" multiple filterable clearable :disabled="saving"><el-option v-for="user in companyUsers" :disabled="!customPosition.isActive && !customMembers[customPosition.key]?.includes(user.username)" :key="user.username" :label="user.displayName" :value="user.username" /></UserSelect></label>

@@ -49,6 +49,41 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         Assert.Equal(2, (await repository.ListUserNotificationsAsync(task.Assignee, 200, default)).Count(item => item.Category == "ReleaseApprovalPending"));
     }
 
+    [Theory]
+    [InlineData(ReleaseScope.StandardFormal)]
+    [InlineData(ReleaseScope.NonStandardWithDrawing)]
+    [InlineData(ReleaseScope.ElectricalFormal)]
+    public async Task GroupApproval_CopiesOnlyAfterAllRequiredSignatures(ReleaseScope scope)
+    {
+        var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await ConfigureApprovalWorkflowsAsync(repository);
+        var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
+        var id = Guid.NewGuid();
+        var group = new ApprovalGroup(["mechanical-supervisor", "standardization-supervisor"], true, [])
+        {
+            CopyOnApproval = new ApprovalCopyDelivery(["mechanical-supervisor"], "复核完成"),
+            Policy = new ApprovalNodePolicy(EditBusinessNote: true),
+        };
+        var first = new ApprovalTask(Guid.NewGuid(), id, ApprovalStage.MainDesigner, group.Members[0], null, null, null, null)
+            { StepOrder = 1, Participants = group };
+        var last = first with { Id = Guid.NewGuid(), StepOrder = 2, Stage = ApprovalStage.Approval, Participants = null };
+        if (scope == ReleaseScope.NonStandardWithDrawing)
+            await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
+        var kind = scope == ReleaseScope.NonStandardWithDrawing ? BomKind.NonStandard : scope == ReleaseScope.ElectricalFormal ? BomKind.Electrical : BomKind.Standard;
+        var draft = await workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", "", "未指定", null,
+            scope, CurrentIds(repository, kind), "admin", UserRole.Administrator, default);
+        first = first with { ReleasePackageId = draft.Id, StepOrder = 2 };
+        last = last with { ReleasePackageId = draft.Id, StepOrder = 3 };
+        await repository.UpdateDraftReleasePackageAsync(draft with { ApprovalTasks = [draft.ApprovalTasks[0], first, last] }, default);
+        await workflow.SubmitReleasePackageAsync(draft.Id, "admin", UserRole.Administrator, default);
+        var partial = await workflow.DecideAsync(first.Id, group.Members[1], UserRole.Approver, ApprovalDecision.Approved, "同意", default, false, "已核对");
+        Assert.Null(partial.ApprovalTasks.Single(task => task.Id == first.Id).Decision);
+        Assert.DoesNotContain(await repository.ListUserNotificationsAsync(group.Members[0], 200, default), notice => notice.Category == "ApprovalNodeCopy");
+        await workflow.DecideAsync(first.Id, group.Members[0], UserRole.Approver, ApprovalDecision.Approved, "同意", default, false);
+        var messages = await repository.ListUserNotificationsAsync(group.Members[0], 200, default);
+        Assert.Equal("复核完成", Assert.Single(messages, notice => notice.Category == "ApprovalNodeCopy").Content);
+    }
+
     [Fact]
     public async Task ApprovalReminderGoesOnlyToCurrentNodeAndStopsWhenAllNodesAreApproved()
     {
@@ -193,13 +228,13 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         await PrepareApprovedNonStandardDrawingReviewAsync(repository, workflow);
         var package = await workflow.CreateScopedReleasePackageAsync(ProjectId, null, "", "", "", "未指定", null,
             ReleaseScope.NonStandardWithDrawing, CurrentIds(repository, BomKind.NonStandard), "admin", UserRole.Administrator, default);
-        var modelId = package.NonStandardBomSnapshot.Single().SourceDocumentId!.Value;
-        var pinned = package.VersionBindings!.Single(item => item.DocumentId == modelId);
+        var pinned = Assert.Single(package.VersionBindings!, binding => binding.Publish);
+        var drawingId = pinned.DocumentId;
         Assert.Equal(1, package.DrawingDocumentCount);
-        await CheckInAsync(repository, modelId, "designer", new Dictionary<string, string?>(), 'E');
+        await CheckInAsync(repository, drawingId, "designer", new Dictionary<string, string?>(), 'E');
         var error = await Assert.ThrowsAsync<PdmConflictException>(() => workflow.SubmitReleasePackageAsync(package.Id, "admin", UserRole.Administrator, default));
         Assert.Contains("绑定的图纸版本已变化", error.Message);
-        Assert.Equal(pinned.VersionId, (await repository.FindReleasePackageAsync(package.Id, default))!.VersionBindings!.Single(item => item.DocumentId == modelId).VersionId);
+        Assert.Equal(pinned.VersionId, (await repository.FindReleasePackageAsync(package.Id, default))!.VersionBindings!.Single(item => item.DocumentId == drawingId).VersionId);
     }
 
     [Fact]
@@ -217,6 +252,13 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
             ReleaseScope.NonStandardWithDrawing, CurrentIds(repository, BomKind.NonStandard), "admin", UserRole.Administrator, default);
         var binding = package.VersionBindings!.Single(item => item.DocumentId == dependency.Id);
         Assert.False(binding.Publish); Assert.False(binding.RequiresPromotion);
+        Assert.Equal(1, package.DrawingDocumentCount);
+        var drawing = Assert.Single(package.VersionBindings!, binding => binding.Publish);
+        var modelId = package.NonStandardBomSnapshot.Single().SourceDocumentId!.Value;
+        await CheckInAsync(repository, modelId, "designer", new Dictionary<string, string?>(), 'F');
+        var candidate = Assert.Single(await workflow.ListDrawingReviewCandidatesAsync(ProjectId, "admin", UserRole.Administrator, default),
+            item => item.DrawingDocumentId == drawing.DocumentId);
+        Assert.True(candidate.CurrentDrawingApproved);
         var dependencyVersions = (await repository.ListDocumentVersionsAsync(dependency.Id, default)).Count;
         var editSession = Guid.NewGuid();
         await repository.CheckoutAsync(dependency.Id, "other-designer", editSession, "QA", DateTimeOffset.UtcNow.AddMinutes(10), null, default);
@@ -227,6 +269,10 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         Assert.NotEqual(DocumentLifecycleState.InReview, untouched.State);
         Assert.Equal(dependencyVersions, (await repository.ListDocumentVersionsAsync(dependency.Id, default)).Count);
         Assert.Contains(await repository.ListReleaseReferenceSourcesAsync(package.Id, default), source => source.SourceVersionId == binding.VersionId);
+        foreach (var task in submitted.ApprovalTasks.Where(task => task.Decision is null).OrderBy(task => task.StepOrder))
+            submitted = await workflow.DecideAsync(task.Id, "admin", UserRole.Administrator, ApprovalDecision.Approved, "测试图纸发布", default);
+        Assert.Equal(ReleasePackageState.Published, submitted.State);
+        Assert.DoesNotContain(await repository.ListDocumentVersionsAsync(modelId, default), version => version.ReleasePackageId == submitted.Id);
     }
 
     private static Guid[] CurrentIds(InMemoryPdmRepository repository, BomKind kind) =>
@@ -715,6 +761,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
     public async Task CurrentApprovalAssignee_CanRejectWithoutApprovalRolePermission()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("designer", UserRole.Engineer));
         var workflow = new PdmWorkflowService(repository, new UnusedFileStorage(), new RecordingPublisher(), TimeProvider.System);
         var packageId = Guid.NewGuid();
         var task = new ApprovalTask(Guid.NewGuid(), packageId, ApprovalStage.MainDesigner, "designer", null, null, null, null)
@@ -3314,7 +3361,7 @@ public sealed partial class Phase1ReleaseWorkflowTests : IDisposable
         var formalError = await Assert.ThrowsAsync<PdmRuleException>(() => workflow.CreateScopedReleasePackageAsync(
             project.Id, null, string.Empty, string.Empty, "正式发布", "未指定", null,
             formalScope, [], "admin", UserRole.Administrator, default));
-        Assert.Contains("引用树快照", formalError.Message);
+        Assert.Contains(kind == BomKind.NonStandard ? "请选择本次发布的物料" : "引用树快照", formalError.Message);
     }
 
     [Fact]

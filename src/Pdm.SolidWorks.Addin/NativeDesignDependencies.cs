@@ -134,6 +134,29 @@ internal static class NativeDesignDependencies
                 possible.ExceptWith(importedSources);
                 foreach (var path in possible) { ordinary?.Remove(path); unverified.Add(path); }
             }
+            if (unverified != null && references != null && model.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY)
+            {
+                // The assembly API aggregates child-part references, including
+                // MirrorStock plane rows with an empty FeatCom. An aggregate row
+                // whose feature is absent from this file does not prove that the
+                // assembly itself depends on that document. Retain the path as
+                // unverified; do not invent a context or remove a physical link.
+                var ownFeatures = new HashSet<string>(featureInventory.Select(feature => feature.Name), StringComparer.Ordinal);
+                var possible = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var explicitOrdinary = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (var i = 0; i < references.Length; i++)
+                {
+                    var path = Convert.ToString(references.GetValue(i));
+                    var status = states != null && i < states.Length ? Convert.ToInt32(states.GetValue(i)) : -1;
+                    if (string.IsNullOrWhiteSpace(path) || status == (int)swExternalReferenceStatus_e.swExternalReferenceBroken
+                        || IsAssemblyContext(path, ExternalValue(owners, i), ExternalValue(features, i), status)) continue;
+                    if (string.IsNullOrWhiteSpace(ExternalValue(owners, i)) && !ownFeatures.Contains(ExternalValue(features, i))) possible.Add(path);
+                    else explicitOrdinary.Add(path);
+                }
+                possible.ExceptWith(explicitOrdinary);
+                possible.ExceptWith(importedSources);
+                foreach (var path in possible) { ordinary?.Remove(path); unverified.Add(path); }
+            }
             foreach (var block in (model.SketchManager.GetSketchBlockDefinitions() as Array)?.OfType<ISketchBlockDefinition>()
                 ?? Enumerable.Empty<ISketchBlockDefinition>())
                 if (block.LinkToFile && !string.IsNullOrWhiteSpace(block.FileName)) paths.Add(block.FileName);

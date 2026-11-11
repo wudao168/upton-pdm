@@ -9,6 +9,7 @@ internal static partial class Program
 {
     static void NativeFileOpenSafetyScenario(string output)
     {
+        ReturnedFileOpenScenario(output);
         Directory.CreateDirectory(output);
         var calls = new List<string>();
         var uiActive = false;
@@ -31,6 +32,15 @@ internal static partial class Program
         }).GetTransparentProxy();
         SetField(addin, "application", app);
         void Check(bool value, string message) { TreeCheck(value, message); Console.WriteLine("PASS: " + message); }
+        var visualCalls = 0;
+        var leaf = new Proxy(appType.Assembly.GetType("SolidWorks.Interop.sldworks.Component2", true), call =>
+            call.MethodName == "GetChildren" ? (object)Array.Empty<object>()
+                : call.MethodName == "GetPathName" ? Path.Combine(output, "leaf.SLDPRT") : throw new Exception(call.MethodName)).GetTransparentProxy();
+        var visual = new Proxy(appType.Assembly.GetType("SolidWorks.Interop.sldworks.TreeControlItem", true), call =>
+        { visualCalls++; return null; }).GetTransparentProxy();
+        var scanner = Type("SolidWorksReferenceTreeScanner").GetConstructors(Flags).Single(c => c.GetParameters().Length == 1).Invoke(new[]{app});
+        var ordered = (System.Collections.IList)TreeCall(scanner,"GetOrderedChildren",leaf,visual,false,"root/leaf");
+        Check(ordered.Count == 0 && visualCalls == 0, "无原生子件的零件直接结束，不枚举建模特征寻找组件");
         TreeCall(addin, "WireSolidWorksEvents");
         Check(calls.Contains("add_FileOpenPreNotify") && calls.Contains("add_FileOpenPostNotify"), "同时监听文件开始打开与打开完成事件");
         var commandCloseSubscribed = calls.Contains("add_CommandCloseNotify");
@@ -124,5 +134,50 @@ internal static partial class Program
         TreeCall(addin, "UnwireSolidWorksEvents");
         Check(calls.Contains("remove_FileOpenPreNotify") && calls.Contains("remove_FileOpenPostNotify"), "插件退出时完整解绑新增事件");
         Check(calls.Contains("remove_CommandCloseNotify"), "插件退出时解绑命令结束通知");
+    }
+
+    static void ReturnedFileOpenScenario(string directory)
+    {
+        var interop = Type("PdmAddin").GetField("application", Flags).FieldType.Assembly;
+        foreach (var mode in new[] {"returned","no-idle","just-started","command","blocked","loaded","api","new-epoch","other-host","ordinary","internal"})
+        {
+            var addin = New("PdmAddin");
+            var path = Path.Combine(directory, "总装.SLDASM");
+            var target = Path.Combine(directory, mode == "ordinary" ? "子装.SLDASM" : "HLQ20X50SA(0)+().stp.SLDASM");
+            var host = new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true), call =>
+            {
+                switch (call.MethodName) {
+                    case "GetPathName": return path;
+                    case "GetBlockingState": return mode == "blocked" ? 6 : 0;
+                    case "GetUpdateStamp": return 27;
+                    default: throw new Exception(call.MethodName);
+                }
+            }).GetTransparentProxy();
+            var app = new Proxy(interop.GetType("SolidWorks.Interop.sldworks.SldWorks",true),call =>
+            {
+                switch (call.MethodName) {
+                    case "get_StartupProcessCompleted": return true;
+                    case "get_CommandInProgress": return mode == "api";
+                    case "GetRunningCommandInfo": return new ReturnMessage(null,new object[]{-3,"",mode=="command"},3,call.LogicalCallContext,call);
+                    case "get_ActiveDoc": return mode == "other-host" ? null : host;
+                    case "GetDocumentCount": return 264;
+                    case "GetOpenDocumentByName":
+                        if (mode == "new-epoch") TreeCall(addin,"OnFileOpening",target);
+                        return mode == "loaded" ? host : null;
+                    default: throw new Exception(call.MethodName);
+                }
+            }).GetTransparentProxy();
+            SetField(addin,"application",app);
+            SetField(addin,"assemblyEventDocument",host);
+            SetField(addin,"assemblyEventDocumentPath",path);
+            TreeCall(addin,"OnAssemblyCommandOpening",2,0);
+            TreeCall(addin,"OnFileOpening",target);
+            if (mode != "no-idle") TreeCall(addin,"OnSolidWorksIdle");
+            if (mode != "just-started") SetField(addin,"pendingOpenStarted",System.Diagnostics.Stopwatch.GetTimestamp()-60L*System.Diagnostics.Stopwatch.Frequency);
+            if (mode == "internal") SetField(addin,"controlledOpenInProgress",1);
+            var recovered=(bool)TreeCall(addin,"TryCompleteReturnedFileOpen");
+            if (recovered != (mode=="returned") || recovered != ((int)Field(addin,"nativeFileOpenInProgress")==0)) throw new Exception(mode);
+            Console.WriteLine("PASS: 显式操作核对导入装配的打开状态 " + mode);
+        }
     }
 }

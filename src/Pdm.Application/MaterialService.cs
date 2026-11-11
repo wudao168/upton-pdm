@@ -398,7 +398,8 @@ public sealed class MaterialService(
             };
             var approvalTemplate = (await repository.GetSystemSettingsAsync(cancellationToken)).ApprovalWorkflows.MaterialCodeApplication;
             if (approvalTemplate is not null)
-                application = application with { ApprovalWorkflow = await new MaterialCodeApprovalWorkflow(repository, timeProvider).CreateAsync(command.ProjectId, actor, approvalTemplate, cancellationToken) };
+                application = application with { ApprovalWorkflow = await new MaterialCodeApprovalWorkflow(repository, timeProvider).CreateAsync(command.ProjectId, actor, approvalTemplate, cancellationToken,
+                    new Dictionary<string, object?> { ["MaterialName"] = item.Name, ["Specification"] = item.Specification, ["Brand"] = item.Brand, ["Remark"] = item.Remark }) };
             application = await materials.CreateMaterialCodeApplicationAsync(application, cancellationToken);
             if (workflowNotifications is not null) await workflowNotifications.CaptureMaterialAsync(application, cancellationToken);
             if (signature is not null) createdBySignature[signature] = application;
@@ -596,19 +597,17 @@ public sealed class MaterialService(
         legacyRoles ??= application.ApprovalWorkflow is null ? (await repository.GetSystemSettingsAsync(ct)).MaterialCodeApproval.ApproverRoleCodes : [];
         var inboxRoles = businessInbox ? TenantContext.Current?.EffectiveRoleCodes
             ?? (await repository.FindUserAsync(actor, ct))?.EffectiveRoleCodes ?? [role.ToString()] : [];
-        var legacyCanDecide = businessInbox && NotificationRecipientPolicy.HasSystemAdministrator(inboxRoles)
-            ? legacyRoles.Intersect(NotificationRecipientPolicy.BusinessRoles(inboxRoles), StringComparer.OrdinalIgnoreCase).Any()
-            : role == UserRole.Administrator || legacyRoles.Contains(role.ToString(), StringComparer.OrdinalIgnoreCase);
+        var legacyCanDecide = await repository.HasUserPermissionAsync(actor, role, PermissionCodes.MaterialManage, ct) && legacyRoles.Intersect((await repository.FindUserAsync(actor, ct))?.EffectiveRoleCodes ?? [], StringComparer.OrdinalIgnoreCase).Any();
         return application with {
             CanDecide = requiresManualApproval && application.Status == MaterialCodeApplicationStatus.Pending && (application.ApprovalWorkflow is null
                 ? legacyCanDecide
-                : node?.Assignees.Contains(actor, StringComparer.OrdinalIgnoreCase) == true),
+                : node?.CanSign(actor) == true),
             CanEmergencyDecide = requiresManualApproval && application.Status == MaterialCodeApplicationStatus.Pending && node is not null
                 && await ApprovalEmergencyPolicy.CanAsync(repository, application.ProjectId, application.ApprovalWorkflow!.EmergencyRoleCodes, actor, role, ct, businessInbox)
         };
     }
 
-    public async Task<(MaterialCodeApplication Application, PdmMaterial? Material, MaterialSyncTask? Task)> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, bool approved, string? comment, string actor, UserRole role, CancellationToken cancellationToken, string? categoryCode = null, bool emergencySubstitute = false, string? emergencyReason = null)
+    public async Task<(MaterialCodeApplication Application, PdmMaterial? Material, MaterialSyncTask? Task)> DecideMaterialCodeApplicationAsync(Guid applicationId, long expectedRowVersion, bool approved, string? comment, string actor, UserRole role, CancellationToken cancellationToken, string? categoryCode = null, bool emergencySubstitute = false, string? emergencyReason = null, string? businessNote = null)
     {
         var application = await materials.FindMaterialCodeApplicationAsync(applicationId, cancellationToken) ?? throw new PdmNotFoundException("料号申请不存在。");
         if (!await repository.HasProjectContentReadAccessAsync(application.ProjectId, actor, role, cancellationToken)) throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
@@ -616,6 +615,7 @@ public sealed class MaterialService(
         if (application.Status != MaterialCodeApplicationStatus.Pending || application.RowVersion != expectedRowVersion) throw new PdmConflictException("料号申请或审批节点已变化，请刷新后重试。");
         var capability = await WithApprovalCapabilitiesAsync(application, actor, role, cancellationToken);
         MaterialCodeApprovalSnapshot? next = null;
+        MaterialCodeApprovalNode? completed = null;
         if (application.ApprovalWorkflow is not null)
         {
             var node = application.ApprovalWorkflow.Nodes.OrderBy(item => item.Order).FirstOrDefault(item => item.Decision is null)
@@ -629,18 +629,41 @@ public sealed class MaterialService(
             else if (capability.CanDecide != true) throw new UnauthorizedAccessException("只能处理当前节点分配给自己的料号审批任务。");
             if (!approved && string.IsNullOrWhiteSpace(comment)) throw new PdmRuleException("退回料号申请时必须填写原因。");
             if (comment?.Trim().Length > 1000) throw new PdmRuleException("审批备注不能超过1000个字符。");
-            next = application.ApprovalWorkflow with { Nodes = application.ApprovalWorkflow.Nodes.Select(item => item.Id == node.Id
-                ? item with { Decision = approved ? ApprovalDecision.Approved : ApprovalDecision.Rejected, DecisionBy = actor,
-                    Comment = comment?.Trim(), DecidedAt = timeProvider.GetUtcNow(), IsEmergencySubstitute = emergencySubstitute } : item).ToArray() };
+            var now = timeProvider.GetUtcNow();
+            var notes = ApprovalNodeRules.CheckInput(node.Policy, node.NoteHistory, actor, approved ? ApprovalDecision.Approved : ApprovalDecision.Rejected, comment, businessNote, now);
+            var signatures = node.Signatures;
+            var departments = node.Departments;
+            bool parallelWaiting = false;
+            if (departments.Count > 0)
+            {
+                var parallel = ApprovalNodeRules.Sign(new ApprovalGroup(node.Assignees, true, signatures) { Departments = departments, Policy = node.Policy },
+                    actor, approved ? ApprovalDecision.Approved : ApprovalDecision.Rejected, comment, now, emergencySubstitute, out parallelWaiting)!;
+                departments = parallel.Departments; signatures = parallel.Signatures;
+            }
+            else if (approved && node.RequireAllApprovers)
+            {
+                if (!node.CanSign(actor)) throw new PdmRuleException("会签节点只能由尚未签署的处理人本人同意。");
+                signatures = [.. signatures, new ApprovalSignature(actor, comment?.Trim(), now)];
+            }
+            var waitingForOthers = departments.Count > 0 ? parallelWaiting : approved && node.RequireAllApprovers && signatures.Count < node.Assignees.Count;
+            var updatedNode = waitingForOthers ? node with { Departments = departments, NoteHistory = notes, Signatures = signatures }
+                : node with { Departments = departments, NoteHistory = notes, Signatures = signatures, Decision = approved ? ApprovalDecision.Approved : ApprovalDecision.Rejected,
+                    DecisionBy = actor, Comment = comment?.Trim(), DecidedAt = now, IsEmergencySubstitute = emergencySubstitute };
+            if (updatedNode.Decision == ApprovalDecision.Approved) completed = updatedNode;
+            next = application.ApprovalWorkflow with { Nodes = application.ApprovalWorkflow.Nodes.Select(item => item.Id == node.Id ? updatedNode : item).ToArray() };
             if (approved && next.Nodes.Any(item => item.Decision is null))
             {
                 var advanced = await materials.AdvanceMaterialCodeApprovalAsync(applicationId, expectedRowVersion, next, cancellationToken);
-                await AuditAsync(actor, emergencySubstitute ? "material-code.application.emergency" : "material-code.application.node.approve", applicationId, $"当前节点“{node.Name}”已通过，等待后续审批。{comment}", cancellationToken);
+                if (completed is not null) await ApprovalNodeCopies.NotifyAsync(repository, completed.CopyOnApproval, application.ProjectId, null, completed.Id, completed.Name, completed.DecidedAt, cancellationToken);
+                var progress = waitingForOthers ? $"已签署（{signatures.Count}/{node.Assignees.Count}），等待其他处理人。" : "已通过，等待后续审批。";
+                await AuditAsync(actor, emergencySubstitute ? "material-code.application.emergency" : "material-code.application.node.approve", applicationId, $"当前节点“{node.Name}”{progress}{comment}", cancellationToken);
                 return (await WithApprovalCapabilitiesAsync(advanced, actor, role, cancellationToken), null, null);
             }
         }
+        else if (businessNote is not null) throw new PdmRuleException("该审批节点未授权修改业务说明。");
         else if (emergencySubstitute || capability.CanDecide != true) throw new UnauthorizedAccessException("当前用户无权处理该料号申请。");
         var result = await DecideMaterialCodeApplicationCoreAsync(application, expectedRowVersion, approved, comment, actor, false, cancellationToken, categoryCode, next);
+        if (completed is not null) await ApprovalNodeCopies.NotifyAsync(repository, completed.CopyOnApproval, application.ProjectId, null, completed.Id, completed.Name, completed.DecidedAt, cancellationToken);
         return (await WithApprovalCapabilitiesAsync(result.Application, actor, role, cancellationToken), result.Material, result.Task);
     }
 
@@ -651,8 +674,8 @@ public sealed class MaterialService(
             ?? throw new PdmNotFoundException("料号申请不存在。");
         if (application.BomHeaderKind is not null || application.BomItemId is null)
             throw new PdmRuleException("只有BOM物料料号申请可以撤回。");
-        if (!string.Equals(application.RequestedBy, actor, StringComparison.OrdinalIgnoreCase) && role != UserRole.Administrator)
-            throw new UnauthorizedAccessException("只有申请人或系统管理员可以撤回料号申请。");
+        if (!string.Equals(application.RequestedBy, actor, StringComparison.OrdinalIgnoreCase) && !await repository.HasUserPermissionAsync(actor, role, "material.application.manage-others", cancellationToken))
+            throw new UnauthorizedAccessException("当前账号没有撤回他人料号申请的权限。");
         if (!await repository.HasProjectContentReadAccessAsync(application.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的读取权限。");
         await ProjectPermissionPolicy.RequireAsync(repository, application.ProjectId, actor, role, PermissionCodes.BomEdit, cancellationToken);

@@ -110,9 +110,8 @@ public sealed class ProjectContentResetService(IPdmRepository repository, IProje
 
     private async Task RequireAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        if (role != UserRole.Administrator
-            || !await repository.HasUserPermissionAsync(actor, role, PermissionCodes.ProjectContentReset, cancellationToken))
-            throw new UnauthorizedAccessException("仅系统管理员可重置项目内容。");
+        if (!await AuthorizationPolicy.CanAsync(repository, projectId, actor, PermissionCodes.ProjectContentReset, cancellationToken))
+            throw new UnauthorizedAccessException("当前账号没有此项目的内容重置权限。");
         if (!await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目内容的访问权限。");
     }

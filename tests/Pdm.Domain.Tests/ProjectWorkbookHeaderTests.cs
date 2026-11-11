@@ -15,6 +15,14 @@ public class ProjectWorkbookHeaderTests
         using var stream=new MemoryStream(bytes);var parsed=Assert.Single(BomWorkbook.Read(stream));Assert.Equal(item.Quantity,parsed.Quantity);Assert.Equal(item.DrawingNumber,parsed.DrawingNumber);Assert.Equal(item.Revision,parsed.Revision);
         using var zip=new ZipArchive(new MemoryStream(bytes));Assert.NotNull(zip.GetEntry("xl/media/uplm-company-logo.png"));
         XDocument Read(string path){using var source=zip.GetEntry(path)!.Open();return XDocument.Load(source);}
+        var drawing=Read("xl/drawings/uplm-header1.xml");
+        var draw=drawing.Root!.Name.Namespace;
+        var anchor=drawing.Root.Element(draw+"oneCellAnchor")!;
+        var from=anchor.Element(draw+"from")!;
+        Assert.Equal("0",from.Element(draw+"col")!.Value);
+        Assert.Equal("0",from.Element(draw+"colOff")!.Value);
+        Assert.Equal("0",from.Element(draw+"row")!.Value);
+        Assert.Equal("1400000",anchor.Element(draw+"ext")!.Attribute("cx")!.Value);
         XNamespace ns="http://schemas.openxmlformats.org/spreadsheetml/2006/main";
         var sheet=Read("xl/worksheets/sheet1.xml");Assert.Contains(sheet.Descendants(ns+"t"),e=>e.Value=="P700014-1");Assert.Equal("7",sheet.Descendants(ns+"pane").Single().Attribute("ySplit")!.Value);
         Assert.Contains(Read("xl/workbook.xml").Descendants(ns+"definedName"),e=>e.Attribute("name")?.Value=="_xlnm.Print_Titles");

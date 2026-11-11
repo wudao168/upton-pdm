@@ -21,9 +21,7 @@ public sealed class CompanySessionService(IPdmRepository repository)
             .ToArray();
         var primary = organizations.SingleOrDefault(item => item.Id == primaryCompanyId)
             ?? throw new UnauthorizedAccessException("所属公司已停用。");
-        var globalAdministrator = string.Equals(account.Username, "admin", StringComparison.OrdinalIgnoreCase)
-            || account.HasRole("platform_admin")
-            || account.HasRole("developer");
+        var globalAdministrator = AuthorizationPolicy.GlobalAllows(await repository.GetAuthorizationSettingsAsync(cancellationToken), account, primaryCompanyId, Upton.Pdm.Domain.AuthorizationActions.PlatformManage);
         var accessibleIds = new HashSet<Guid> { primaryCompanyId };
         if (globalAdministrator)
         {

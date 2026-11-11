@@ -4,7 +4,7 @@ import { createProcurementWorkbook } from '../src/procurementWorkbook'
 import { createProjectPlansWorkbook, projectPlanPdfHtml } from '../src/projectPlanExport'
 import type { ProjectExportMetadata } from '../src/exportFormat'
 import type { ProjectPlan } from '../src/types'
-const meta: ProjectExportMetadata={title:'采购跟踪',company:'测试公司',scope:'当前子项目',versionLabel:'数据版本',version:'V1',exportedAt:'2026-10-14T09:00:00+08:00',exportedBy:'工程师',fields:['主项目号','主项目名称','型号','客户','子项目号','子项目名称','子项目型号','整套数量','事业部','项目经理','主设','工程师'].map((key,i)=>({key,value:i===4?'P700014-1':'实际资料'}))}
+const meta: ProjectExportMetadata={title:'采购跟踪',company:'测试公司',scope:'当前子项目',versionLabel:'数据版本',version:'V1',exportedAt:'2026-10-14T09:00:00+08:00',exportedBy:'工程师',fields:['主项目号','主项目名称','型号','客户','子项目号','子项目名称','子项目型号','整套数量','事业部','项目经理','主设计','工程师'].map((key,i)=>({key,value:i===4?'P700014-1':'实际资料'}))}
 it('adds the approved header while preserving literal codes, numbers and filter ranges',()=>{
  const files=unzipSync(createProcurementWorkbook(['物料编码','数量'],[['001234',12.5]],'采购跟踪',meta))
  const sheet=new DOMParser().parseFromString(strFromU8(files['xl/worksheets/sheet1.xml']!),'application/xml')
@@ -18,10 +18,25 @@ it('adds the approved header while preserving literal codes, numbers and filter 
 })
 it('gives every selected child independent sheets and PDF sections with its own header',()=>{
  const plan={tasks:[],stages:[],plannedStart:'2026-10-14',plannedFinish:'2026-10-15',baselineVersion:2,templateName:'计划',approvalStatus:'Approved'} as unknown as ProjectPlan
- const items=[1,2].map(i=>({projectCode:`P700014-${i}`,projectName:`子项目${i}`,plan,metadata:{exportHeader:{...meta,fields:meta.fields.map(f=>f.key==='子项目号'?{...f,value:`P700014-${i}`}:f)}}}))
+ const items=[1,2].map(i=>({projectCode:`P700014-${i}`,projectName:`子项目${i}`,plan:{...plan,plannedFinish:i===1?'2026-10-15':'2026-12-20'},metadata:{exportHeader:{...meta,fields:meta.fields.map(f=>f.key==='子项目号'?{...f,value:`P700014-${i}`}:f)}}}))
  const files=unzipSync(createProjectPlansWorkbook(items))
  expect(Object.keys(files).filter(p=>/^xl\/worksheets\/sheet\d+\.xml$/.test(p))).toHaveLength(4)
  expect(strFromU8(files['xl/worksheets/sheet1.xml']!)).toContain('P700014-1')
  expect(strFromU8(files['xl/worksheets/sheet3.xml']!)).toContain('P700014-2')
- expect(projectPlanPdfHtml('P700014',items).match(/class="uplm-export-section"/g)).toHaveLength(2)
+ for (const index of [1,2,3,4]) {
+  const drawing=new DOMParser().parseFromString(strFromU8(files[`xl/drawings/uplm-header${index}.xml`]!),'application/xml')
+  const anchor=drawing.documentElement.firstElementChild!
+  expect(anchor.localName).toBe('oneCellAnchor')
+  expect([...anchor.firstElementChild!.children].slice(0,3).map(cell=>cell.textContent)).toEqual(['0','0','0'])
+  expect(anchor.children[1]?.getAttribute('cx')).toBe('1400000')
+ }
+ const styles=strFromU8(files['xl/styles.xml']!)
+ expect(styles).toContain('rgb="FF6287B7"')
+ expect(styles).toContain('rgb="FF153565"')
+ const pdf=new DOMParser().parseFromString(projectPlanPdfHtml('P700014',items),'text/html')
+ const headers=[...pdf.querySelectorAll('.uplm-export-section .uplm-export-brand')]
+ expect(headers).toHaveLength(2)
+ expect(headers.map(header=>header.firstElementChild?.getAttribute('alt'))).toEqual(['公司LOGO','公司LOGO'])
+ expect(pdf.querySelector('style')?.textContent).toContain('.legend i{width:18px;height:6px;background:#dbeafe;border:1px solid #2563eb}')
+ expect(pdf.querySelector('style')?.textContent).toContain('@page{margin:0 8mm 8mm;padding-top:8mm;@bottom-right{content:"第" counter(page) "页 / 共" counter(pages) "页"')
 })

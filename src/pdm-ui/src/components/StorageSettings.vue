@@ -8,8 +8,10 @@ import PdfTitleBlockFillSettings from './PdfTitleBlockFillSettings.vue'
 import BrowserCadArchiveSettings from './BrowserCadArchiveSettings.vue'
 import type { BomPropertyMapping, BomValidationField, EquipmentTypeDefinition, PdmSystemSettings, ProjectNumberingOptions } from '../types'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   administrator?: boolean
+  canManageStorage?: boolean
+  canManageFolders?: boolean
   settings: PdmSystemSettings
   token?: string
   equipmentTypes: EquipmentTypeDefinition[]
@@ -18,11 +20,16 @@ const props = defineProps<{
   onSaveSettings: (settings: PdmSystemSettings) => Promise<PdmSystemSettings>
   onSaveEquipmentType: (input: EquipmentTypeDefinition) => Promise<EquipmentTypeDefinition>
   onUpdateCounters: (organizationId: string, currentProjectSequence: number, currentSerialSequence: number) => Promise<ProjectNumberingOptions>
-}>()
+}>(), { canManageStorage: true })
 
 const activeTab = ref('storage')
-const storageDraft = reactive<PdmSystemSettings>({ vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 60, checkoutLeaseMinutes: 5, checkoutOfflineGraceMinutes: 30, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, checkoutAutoReleaseEnabled: true, checkoutIdleReleaseMinutes: 30, checkoutReleaseCountdownSeconds: 60, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: [], validationRules: { standard: [], nonStandard: [], electrical: [] }, drawingQrPolicy: { enabled: true, sourceProperty: '型号', ruleVersion: '1', sizeMillimeters: 20, marginMillimeters: 5, everySheet: true } })
+watch(() => [props.canManageStorage, props.canManageFolders], ([storage, folders]) => {
+  if (storage === false) activeTab.value = 'folder-templates'
+  else if (!folders && activeTab.value === 'folder-templates') activeTab.value = 'storage'
+}, { immediate: true })
+const storageDraft = reactive<PdmSystemSettings>({ vaultRoot: '', releaseRoot: '', materialAttachmentRoot: '', checkoutHeartbeatSeconds: 60, checkoutLeaseMinutes: 5, checkoutOfflineGraceMinutes: 30, checkoutReminderHours: 4, checkoutStrongReminderHours: 8, checkoutOverdueHours: 24, checkoutForceReleaseHours: 48, checkoutAutoReleaseEnabled: true, checkoutIdleReleaseMinutes: 30, checkoutReleaseCountdownSeconds: 60, bomDrawingNumberProperty: '物料编码', bomNameProperty: '物料名称', bomDescriptionProperty: '备注信息', bomMaterialProperty: '材质', bomSpecificationProperty: '型号', bomUnitProperty: '单位', bomBrandProperty: '品牌', bomSurfaceTreatmentProperty: '表面处理', bomWeightProperty: '重量', bomPropertyMappings: [], validationRules: { standard: [], nonStandard: [], electrical: [] } })
 const previewConversionDraft = reactive({ mode: 'Local' as 'Local' | 'Remote', agentUrl: '', agentToken: '', timeoutMinutes: 30 })
+const selectedAgentUrls = ref<string[]>([])
 const previewAgentProbe = ref('')
 const previewAgentTesting = ref(false)
 const equipmentDialogOpen = ref(false)
@@ -63,19 +70,22 @@ watch(() => props.settings, settings => Object.assign(storageDraft, {
     nonStandard: [...settings.validationRules.nonStandard],
     electrical: [...settings.validationRules.electrical],
   },
-  drawingQrPolicy: { enabled: true, sourceProperty: '型号', ruleVersion: '1', sizeMillimeters: 20, marginMillimeters: 5, everySheet: true, ...settings.drawingQrPolicy },
 }), { immediate: true, deep: true })
 watch(() => props.settings.previewConversion, conversion => {
-  previewConversionDraft.mode = conversion?.mode === 'Remote' ? 'Remote' : 'Local'
+  selectedAgentUrls.value = (conversion?.servers ?? []).filter(server => !server.disabled).map(server => server.agentUrl)
+  previewConversionDraft.mode = conversion?.localExecutionAllowed === false || conversion?.mode === 'Remote' ? 'Remote' : 'Local'
   previewConversionDraft.agentUrl = conversion?.agentUrl ?? ''
   previewConversionDraft.agentToken = conversion?.agentToken ?? ''
   previewConversionDraft.timeoutMinutes = conversion?.timeoutMinutes ?? 30
 }, { immediate: true, deep: true })
 
 const previewConversionPayload = () => ({
-  servers: (props.settings.previewConversion?.servers ?? []).map(server => server.agentUrl.replace(/\/+$/, '') === props.settings.previewConversion?.agentUrl.replace(/\/+$/, '')
+  servers: (props.settings.previewConversion?.servers ?? []).map(server => {
+    const updated = server.agentUrl.replace(/\/+$/, '') === props.settings.previewConversion?.agentUrl.replace(/\/+$/, '')
     ? { ...server, agentUrl: previewConversionDraft.agentUrl.trim().replace(/\/+$/, ''), agentToken: previewConversionDraft.agentToken.trim(), timeoutMinutes: Number(previewConversionDraft.timeoutMinutes) || 30 }
-    : server),
+    : server
+    return selectedAgentUrls.value.includes(server.agentUrl) ? { ...updated, disabled: false } : { ...updated, disabled: true }
+  }),
   mode: previewConversionDraft.mode,
   agentUrl: previewConversionDraft.agentUrl.trim().replace(/\/+$/, ''),
   agentToken: previewConversionDraft.agentToken.trim(),
@@ -87,10 +97,16 @@ async function testPreviewAgentConnection() {
   previewAgentTesting.value = true
   previewAgentProbe.value = ''
   try {
-    const result = await testPreviewAgent(previewConversionPayload(), props.token)
-    previewAgentProbe.value = result.message
-    if (result.ok) ElMessage.success(result.message)
-    else ElMessage.warning(result.message)
+    const config = previewConversionPayload()
+    const targets = config.mode === 'Remote' && config.servers.length ? config.servers.filter(server => !server.disabled) : [config]
+    if (!targets.length) { previewAgentProbe.value = '请先勾选要测试的转图服务器。'; return }
+    const results = await Promise.all(targets.map(async target => {
+      const result = await testPreviewAgent({ ...config, agentUrl: target.agentUrl, agentToken: target.agentToken, timeoutMinutes: target.timeoutMinutes }, props.token!)
+      return { ...result, message: ('name' in target ? target.name + ' · ' : '') + result.message }
+    }))
+    previewAgentProbe.value = results.map(result => result.message).join('；')
+    if (results.every(result => result.ok)) ElMessage.success('所选转图服务器连接正常')
+    else ElMessage.warning('部分转图服务器连接失败，请查看测试结果')
   } catch (error) {
     const message = error instanceof Error ? error.message : '转图服务器测试失败'
     previewAgentProbe.value = message
@@ -195,23 +211,6 @@ async function saveValidationRules() {
   }
 }
 
-async function saveDrawingQrPolicy() {
-  const policy = storageDraft.drawingQrPolicy!
-  if (!policy.sourceProperty.trim() || !policy.ruleVersion.trim()) {
-    ElMessage.warning('二维码来源属性和规则版本不能为空')
-    return
-  }
-  try {
-    await props.onSaveSettings({
-      ...storageDraft,
-      drawingQrPolicy: { ...policy, sourceProperty: policy.sourceProperty.trim(), ruleVersion: policy.ruleVersion.trim() },
-    })
-    ElMessage.success('工程图二维码规则已保存')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '工程图二维码规则保存失败')
-  }
-}
-
 function editEquipmentType(item: EquipmentTypeDefinition) {
   Object.assign(equipmentDraft, item)
   equipmentDraft.isActive = item.isActive !== false
@@ -246,29 +245,32 @@ async function saveCounters(row: { id: string; project: number; serial: number }
 <template>
   <section class="pdm-project-manager" aria-label="系统设置">
     <el-tabs v-model="activeTab" class="pdm-settings-tabs">
-      <el-tab-pane label="项目编号" name="numbering">
+      <el-tab-pane v-if="canManageStorage !== false" label="项目编号" name="numbering">
         <section class="pdm-panel pdm-manager-panel">
           <header class="pdm-manager-heading"><div><h2>组织编号流水</h2><p>设置下一次项目编号和设备序列号使用的流水基线。</p></div></header>
           <div class="pdm-table-scroll"><table class="pdm-project-table"><thead><tr><th>组织</th><th>当前项目流水</th><th>当前序列流水</th><th>操作</th></tr></thead><tbody><tr v-for="row in counterDrafts" :key="row.id"><td><strong>{{ row.name }}</strong></td><td><input v-model.number="row.project" class="pdm-table-input" type="number" min="0" max="99999"></td><td><input v-model.number="row.serial" class="pdm-table-input" type="number" min="0" max="9999999"></td><td><button type="button" class="pdm-text-action" :disabled="pending" @click="saveCounters(row)">保存</button></td></tr></tbody></table></div>
         </section>
       </el-tab-pane>
-      <el-tab-pane label="存档位置" name="storage" class="pdm-storage-location-pane">
+      <el-tab-pane v-if="canManageStorage !== false" label="存档位置" name="storage" class="pdm-storage-location-pane">
         <section class="pdm-panel pdm-manager-panel">
           <header class="pdm-manager-heading"><div><h2>项目文件夹规则</h2><p>主项目号作为容器；主项目和各子项目均存放在对应主项目号目录下。</p></div></header>
-          <div class="pdm-settings-form"><label>图档存档根目录<input v-model="storageDraft.vaultRoot" placeholder="例如 D:\PLM\Vault"><small>示例：{{ storageDraft.vaultRoot || '未设置' }}\P700001\P700001-0、{{ storageDraft.vaultRoot || '未设置' }}\P700001\P700001-1</small></label><label>生产发包根目录<input v-model="storageDraft.releaseRoot" placeholder="例如 D:\PLM\Release"><small>示例：{{ storageDraft.releaseRoot || '未设置' }}\P700001\P700001-0、{{ storageDraft.releaseRoot || '未设置' }}\P700001\P700001-1</small></label><label>料品资料存档根目录<input v-model="storageDraft.materialAttachmentRoot" placeholder="例如 D:\PLM\MaterialAttachments"><small>目录变更只影响新上传附件，历史附件仍从原位置下载。</small></label></div>
+          <div class="pdm-settings-form pdm-settings-grid--four"><label>图档存档根目录<input v-model="storageDraft.vaultRoot" placeholder="例如 D:\PLM\Vault"><small>示例：{{ storageDraft.vaultRoot || '未设置' }}\P700001\P700001-0、{{ storageDraft.vaultRoot || '未设置' }}\P700001\P700001-1</small></label><label>生产发包根目录<input v-model="storageDraft.releaseRoot" placeholder="例如 D:\PLM\Release"><small>示例：{{ storageDraft.releaseRoot || '未设置' }}\P700001\P700001-0、{{ storageDraft.releaseRoot || '未设置' }}\P700001\P700001-1</small></label><label>料品资料存档根目录<input v-model="storageDraft.materialAttachmentRoot" placeholder="例如 D:\PLM\MaterialAttachments"><small>目录变更只影响新上传附件，历史附件仍从原位置下载。</small></label></div>
           <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveStorage">保存存储设置</button></div>
         </section>
         <ServerStorageSettings v-if="token" :token="token" />
         <StandardStructureStorageSettings v-if="token" :token="token" />
         <BrowserCadArchiveSettings v-if="token" :token="token" />
       </el-tab-pane>
-      <el-tab-pane label="图纸转换" name="preview-conversion">
+      <el-tab-pane v-if="canManageFolders && $slots.folders" label="文件夹模板" name="folder-templates" lazy>
+        <slot name="folders" />
+      </el-tab-pane>
+      <el-tab-pane v-if="canManageStorage !== false" label="图纸转换" name="preview-conversion">
         <section class="pdm-panel pdm-manager-panel">
-          <header class="pdm-manager-heading"><div><h2>PDF / STEP 转图位置</h2><p>正式发布（非标件BOM+图纸、增补/变更）审批通过后，系统自动把2D工程图转PDF、零件与装配转STEP。可选用API服务器本机转换，或交给独立的转图电脑。</p></div></header>
-          <div class="pdm-settings-form">
+          <header class="pdm-manager-heading"><div><h2>PDF / STEP 转图位置</h2><p>正式发布（非标件BOM+图纸、增补/变更）审批通过后，系统自动把2D工程图转PDF、零件与装配转STEP。远程任务由所选服务器中空闲的一台执行。</p></div></header>
+          <div class="pdm-settings-form pdm-settings-grid--four">
             <label>转换方式
               <select v-model="previewConversionDraft.mode">
-                <option value="Local">本机（API服务器上的SolidWorks）</option>
+                <option v-if="settings.previewConversion?.localExecutionAllowed !== false" value="Local">本机（API服务器上的SolidWorks）</option>
                 <option value="Remote">远程转图服务器（推荐）</option>
               </select>
               <small>远程方式需在转图电脑上运行转图代理 Upton.Pdm.PreviewAgent.exe，并安装SolidWorks。</small>
@@ -278,7 +280,7 @@ async function saveCounters(row: { id: string; project: number; serial: number }
               <small>填写转图电脑的IP与代理端口；地址不要带结尾的斜杠。</small>
             </label>
             <label>访问令牌
-              <input v-model="previewConversionDraft.agentToken" :disabled="previewConversionDraft.mode !== 'Remote'" placeholder="与转图代理配置一致（可留空）" aria-label="转图服务器访问令牌">
+              <input type="password" v-model="previewConversionDraft.agentToken" :disabled="previewConversionDraft.mode !== 'Remote'" placeholder="与转图代理配置一致（可留空）" aria-label="转图服务器访问令牌">
               <small>用于限制只有本PLM服务器可以调用转图代理。</small>
             </label>
             <label>转换超时（分钟）
@@ -287,20 +289,27 @@ async function saveCounters(row: { id: string; project: number; serial: number }
             </label>
           </div>
           <p v-if="previewAgentProbe" class="pdm-inline-info" role="status">{{ previewAgentProbe }}</p>
-          <p v-for="server in settings.previewConversion?.servers ?? []" :key="server.agentUrl">转图服务器：{{ server.name }} · {{ server.agentUrl }}</p>
+          <fieldset v-if="previewConversionDraft.mode === 'Remote' && settings.previewConversion?.servers?.length" class="preview-hosts">
+            <legend>参与转图的服务器（可多选）</legend>
+            <label v-for="server in settings.previewConversion.servers" :key="server.agentUrl">
+              <input v-model="selectedAgentUrls" type="checkbox" :value="server.agentUrl">
+              {{ server.name }} · {{ server.agentUrl }}
+            </label>
+            <small v-if="!selectedAgentUrls.length">当前未选择服务器，转图任务将等待。</small>
+          </fieldset>
           <div class="pdm-settings-actions">
             <button type="button" class="pdm-secondary-action" :disabled="pending || previewAgentTesting" @click="testPreviewAgentConnection">{{ previewAgentTesting ? '正在测试…' : '测试连接' }}</button>
             <button type="button" class="pdm-primary-action" :disabled="pending" @click="savePreviewConversion">保存图纸转换设置</button>
           </div>
         </section>
       </el-tab-pane>
-      <el-tab-pane label="PDF属性填写" name="pdf-title-block">
+      <el-tab-pane v-if="canManageStorage !== false" label="PDF属性填写" name="pdf-title-block">
         <PdfTitleBlockFillSettings :settings="settings" :administrator="administrator ?? false" :pending="pending" :on-save-settings="onSaveSettings" />
       </el-tab-pane>
-      <el-tab-pane label="编辑权限" name="checkout-policy">
+      <el-tab-pane v-if="canManageStorage !== false" label="编辑权限" name="checkout-policy">
         <section class="pdm-panel pdm-manager-panel">
           <header class="pdm-manager-heading"><div><h2>自动结束编辑与离线保护</h2><p>关闭图档后先保留必要草稿。闲置且确认无修改时，由插件倒计时释放；持续离线达到回收时限后，服务器撤销旧会话。在线有未提交修改时由负责人处理，接手人使用服务器最后存档版本。</p></div></header>
-          <div class="pdm-settings-form pdm-lock-policy-grid">
+          <div class="pdm-settings-form pdm-lock-policy-grid pdm-settings-grid--four">
             <label>插件心跳（秒）<input v-model.number="storageDraft.checkoutHeartbeatSeconds" type="number" min="30" max="600"><small>建议60秒</small></label>
             <label>编辑租约（分钟）<input v-model.number="storageDraft.checkoutLeaseMinutes" type="number" min="2" max="60"><small>建议5分钟，至少为心跳的两倍</small></label>
             <label>离线宽限（分钟）<input v-model.number="storageDraft.checkoutOfflineGraceMinutes" type="number" min="5" max="1440"><small>建议30分钟，之后可人工接管</small></label>
@@ -315,13 +324,13 @@ async function saveCounters(row: { id: string; project: number; serial: number }
           <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveCheckoutPolicy">保存编辑权限策略</button></div>
         </section>
       </el-tab-pane>
-      <el-tab-pane label="设备类型" name="equipment">
+      <el-tab-pane v-if="canManageStorage !== false" label="设备类型" name="equipment">
         <section class="pdm-panel pdm-project-list">
           <header class="pdm-panel-heading"><div><h2>设备类型设置</h2><small>编码固定为00–99；创建项目时只显示启用项。</small></div></header>
           <div class="pdm-table-scroll pdm-equipment-table"><table class="pdm-project-table"><thead><tr><th>编码</th><th>设备类型名称</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in equipmentTypes" :key="item.code"><td><strong>{{ String(item.code).padStart(2, '0') }}</strong></td><td>{{ item.name }}</td><td>{{ item.isActive === false ? '停用' : '启用' }}</td><td><button type="button" class="pdm-text-action" @click="editEquipmentType(item)">编辑</button></td></tr></tbody></table></div>
         </section>
       </el-tab-pane>
-      <el-tab-pane label="BOM属性映射" name="bom-properties">
+      <el-tab-pane v-if="canManageStorage !== false" label="BOM属性映射" name="bom-properties">
         <section class="pdm-panel pdm-manager-panel">
           <header class="pdm-manager-heading"><div><h2>SolidWorks属性对应关系</h2><p>列表由服务端的PLM属性目录自动生成；新增PLM属性后会自动出现新行，再由管理员选择对应的SolidWorks属性。配置属性优先于全局属性。</p></div></header>
           <div class="pdm-table-scroll pdm-property-mapping-table">
@@ -349,7 +358,7 @@ async function saveCounters(row: { id: string; project: number; serial: number }
           <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveBomMappings">保存属性映射</button></div>
         </section>
       </el-tab-pane>
-      <el-tab-pane label="BOM资料校验" name="bom-validation">
+      <el-tab-pane v-if="canManageStorage !== false" label="BOM资料校验" name="bom-validation">
         <section class="pdm-panel pdm-manager-panel">
           <header class="pdm-manager-heading"><div><h2>分类必填规则</h2><p>资料状态、设变提交和正式发布均由服务端按此规则校验；正式BOM版本会保留当时的规则快照。</p></div></header>
           <div class="pdm-bom-validation-grid">
@@ -371,22 +380,8 @@ async function saveCounters(row: { id: string; project: number; serial: number }
           <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveValidationRules">保存校验规则</button></div>
         </section>
       </el-tab-pane>
-      <el-tab-pane label="工程图二维码" name="drawing-qr">
-        <section class="pdm-panel pdm-manager-panel">
-          <header class="pdm-manager-heading"><div><h2>工程图二维码规则</h2><p>插件按此规则把型号二维码嵌入工程图；二维码为独立附加功能，生成或更新异常不会影响存档。</p></div></header>
-          <div class="pdm-settings-form">
-            <label class="pdm-checkbox-field"><input v-model="storageDraft.drawingQrPolicy!.enabled" type="checkbox">启用工程图二维码</label>
-            <label>来源属性<input v-model="storageDraft.drawingQrPolicy!.sourceProperty" maxlength="100"><small>工程图为空时读取唯一关联模型；当前使用“型号”。</small></label>
-            <label>规则版本<input v-model="storageDraft.drawingQrPolicy!.ruleVersion" maxlength="50"><small>调整二维码规则后递增，插件会自动刷新旧二维码。</small></label>
-            <label>二维码尺寸（毫米）<input v-model.number="storageDraft.drawingQrPolicy!.sizeMillimeters" type="number" min="8" max="100"></label>
-            <label>右下边距（毫米）<input v-model.number="storageDraft.drawingQrPolicy!.marginMillimeters" type="number" min="0" max="100"></label>
-            <label class="pdm-checkbox-field"><input v-model="storageDraft.drawingQrPolicy!.everySheet" type="checkbox">每张图纸页均写入</label>
-          </div>
-          <div class="pdm-settings-actions"><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveDrawingQrPolicy">保存二维码规则</button></div>
-        </section>
-      </el-tab-pane>
     </el-tabs>
-    <el-dialog v-model="equipmentDialogOpen" :title="`编辑设备类型 ${String(equipmentDraft.code).padStart(2, '0')}`" width="500px" :close-on-click-modal="false">
+    <el-dialog v-model="equipmentDialogOpen" :title="`编辑设备类型 ${String(equipmentDraft.code).padStart(2, '0')}`" width="500px" :close-on-click-modal="!pending">
       <form class="pdm-project-form" @submit.prevent="saveEquipment"><label>设备类型名称<input v-model="equipmentDraft.name" maxlength="100"></label><label class="pdm-checkbox-field"><input v-model="equipmentDraft.isActive" type="checkbox">启用设备类型</label></form>
       <template #footer><button type="button" class="pdm-secondary-action" :disabled="pending" @click="equipmentDialogOpen=false">取消</button><button type="button" class="pdm-primary-action" :disabled="pending" @click="saveEquipment">保存</button></template>
     </el-dialog>
@@ -400,4 +395,9 @@ async function saveCounters(row: { id: string; project: number; serial: number }
 @media (max-width: 640px) {
   .pdm-storage-location-pane :deep(.pdm-settings-form) { grid-template-columns: minmax(0, 1fr); }
 }
+</style>
+
+<style scoped>
+.preview-hosts { display: flex; flex-wrap: wrap; gap: 10px 24px; margin: 12px 0; padding: 10px 12px; border: 1px solid var(--el-border-color); }
+.preview-hosts label { display: inline-flex; align-items: center; gap: 6px; }
 </style>

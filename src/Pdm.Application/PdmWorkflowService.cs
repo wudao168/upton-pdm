@@ -186,7 +186,7 @@ public sealed partial class PdmWorkflowService(
             ReleaseChangeReasonLabels = NormalizeReleaseChangeReasonLabels(input.ReleaseChangeReasonLabels, NormalizeReleaseChangeReasonTypes(input.ReleaseChangeReasonTypes)),
             FormalSupplementPolicies = NormalizeFormalSupplementPolicies(input.FormalSupplementPolicies),
             PdfTitleBlockFill = new() { EnabledFields = pdfFields },
-            DrawingQrPolicy = NormalizeDrawingQrPolicy(input.DrawingQrPolicy),
+            DrawingQrPolicy = DrawingQrPolicy.Default,
             PreviewConversion = NormalizePreviewConversion(input.PreviewConversion)
         });
         await ValidateApprovalWorkflowTargetsAsync(settingsInput.ApprovalWorkflows, cancellationToken);
@@ -201,28 +201,11 @@ public sealed partial class PdmWorkflowService(
         await AuditAsync(actor, "system.material-code-approval.update", nameof(PdmSystemSettings), "material-code-approval", string.Join('、', settings.MaterialCodeApproval.ApproverRoleCodes), cancellationToken);
         await AuditAsync(actor, "system.release-change-reasons.update", nameof(PdmSystemSettings), "release-change-reasons", string.Join('、', settings.ReleaseChangeReasonTypes), cancellationToken);
         await AuditAsync(actor, "system.formal-supplement-policies.update", nameof(PdmSystemSettings), "formal-supplement-policies", $"标准件：{FormalSupplementPolicySummary(settings.FormalSupplementPolicies.Standard)}；电气：{FormalSupplementPolicySummary(settings.FormalSupplementPolicies.Electrical)}", cancellationToken);
-        await AuditAsync(actor, "system.drawing-qr-policy.update", nameof(PdmSystemSettings), "drawing-qr-policy", $"{(settings.DrawingQrPolicy.Enabled ? "启用" : "停用")}；来源属性{settings.DrawingQrPolicy.SourceProperty}；规则v{settings.DrawingQrPolicy.RuleVersion}；{settings.DrawingQrPolicy.SizeMillimeters}mm", cancellationToken);
         if (!pdfFields.SequenceEqual(PdfTitleBlockSnapshotBuilder.Normalize(current.PdfTitleBlockFill.EnabledFields)))
             await AuditAsync(actor, "system.pdf-title-block.update", nameof(PdmSystemSettings), "pdf-title-block",
                 "PDF自动填写：" + string.Join("、", pdfFields.Select(key => PdfTitleBlockFields.Get(key).Name)), cancellationToken);
         await AuditAsync(actor, "system.preview-conversion.update", nameof(PdmSystemSettings), "preview-conversion", $"{PreviewConversionSummary(settings.PreviewConversion)}", cancellationToken);
         return settings;
-    }
-
-    private static DrawingQrPolicy NormalizeDrawingQrPolicy(DrawingQrPolicy? input)
-    {
-        input ??= DrawingQrPolicy.Default;
-        var sourceProperty = input.SourceProperty?.Trim() ?? string.Empty;
-        var ruleVersion = input.RuleVersion?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(sourceProperty) || sourceProperty.Length > 100)
-            throw new PdmRuleException("工程图二维码来源属性不能为空且不能超过100个字符。");
-        if (string.IsNullOrWhiteSpace(ruleVersion) || ruleVersion.Length > 50)
-            throw new PdmRuleException("工程图二维码规则版本不能为空且不能超过50个字符。");
-        if (input.SizeMillimeters is < 8 or > 100)
-            throw new PdmRuleException("工程图二维码尺寸必须为8到100毫米。");
-        if (input.MarginMillimeters is < 0 or > 100)
-            throw new PdmRuleException("工程图二维码边距必须为0到100毫米。");
-        return input with { Enabled = false, SourceProperty = sourceProperty, RuleVersion = ruleVersion };
     }
 
     /// <summary>
@@ -237,7 +220,8 @@ public sealed partial class PdmWorkflowService(
         var agentToken = (input.AgentToken ?? string.Empty).Trim();
         if (input.Mode == PreviewConversionMode.Remote)
         {
-            if (!Uri.TryCreate(agentUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+            if ((!input.AwaitingRegistration || agentUrl.Length != 0 || input.Servers.Count != 0 || agentToken.Length != 0)
+                && (!Uri.TryCreate(agentUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")))
                 throw new PdmRuleException("远程转图服务器地址必须是 http:// 或 https:// 开头的完整地址，例如 http://192.168.2.50:5199。");
             if (agentToken.Length > 200)
                 throw new PdmRuleException("转图服务器访问令牌不能超过200个字符。");
@@ -250,7 +234,7 @@ public sealed partial class PdmWorkflowService(
                 || server.TimeoutMinutes is < 1 or > 120 || server.AgentToken.Length > 200 || server.Name.Length > 100)
                 throw new PdmRuleException("转图服务器名称、地址、令牌或超时设置不正确。");
         }
-        return input with { AgentUrl = agentUrl, AgentToken = agentToken };
+        return input with { AgentUrl = agentUrl, AgentToken = agentToken, LocalExecutionAllowed = null };
     }
 
     private static string PreviewConversionSummary(PreviewConversionSettings settings) =>
@@ -272,8 +256,9 @@ public sealed partial class PdmWorkflowService(
             && !string.IsNullOrWhiteSpace(current.PreviewConversion.AgentUrl))
             servers.Add(new(current.PreviewConversion.AgentUrl, current.PreviewConversion.AgentUrl, current.PreviewConversion.AgentToken, current.PreviewConversion.TimeoutMinutes));
         var normalizedUrl = agentUrl.Trim().TrimEnd('/');
-        servers.RemoveAll(server => string.Equals(server.AgentUrl.Trim().TrimEnd('/'), normalizedUrl, StringComparison.OrdinalIgnoreCase));
-        servers.Add(new(string.IsNullOrWhiteSpace(name) ? normalizedUrl : name.Trim(), normalizedUrl, agentToken, timeoutMinutes, TenantContext.CompanyId));
+        var previous = servers.FirstOrDefault(server => string.Equals(server.AgentUrl.Trim().TrimEnd('/'), normalizedUrl, StringComparison.OrdinalIgnoreCase));
+        if (previous is not null) servers.Remove(previous);
+        servers.Add(new(string.IsNullOrWhiteSpace(name) ? normalizedUrl : name.Trim(), normalizedUrl, agentToken, timeoutMinutes, TenantContext.CompanyId) { Disabled = previous?.Disabled ?? false });
         var saved = await UpdateSystemSettingsAsync(current with
         {
             PreviewConversion = new PreviewConversionSettings
@@ -292,7 +277,7 @@ public sealed partial class PdmWorkflowService(
         finally { PreviewAgentRegistrationGate.Release(); }
     }
 
-    /// <summary>转图代理卸载时调用：转换位置恢复为API服务器本机。</summary>
+    /// <summary>移除指定代理，最后一台移除后等待新的远程代理登记。</summary>
     public async Task<PdmSystemSettings> ClearPreviewAgentAsync(string actor, UserRole role, CancellationToken cancellationToken, string? agentUrl = null)
     {
         await PreviewAgentRegistrationGate.WaitAsync(cancellationToken);
@@ -300,14 +285,16 @@ public sealed partial class PdmWorkflowService(
         {
         var current = await repository.GetSystemSettingsAsync(cancellationToken);
         if (current.PreviewConversion.Mode == PreviewConversionMode.Local) return current;
+        if (!string.IsNullOrWhiteSpace(agentUrl) && current.PreviewConversion.Servers.Count == 0
+            && !string.Equals(current.PreviewConversion.NormalizedAgentUrl, agentUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)) return current;
         var remaining = current.PreviewConversion.Servers.Where(server => !string.Equals(server.AgentUrl.TrimEnd('/'), agentUrl?.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)).ToArray();
         if (string.IsNullOrWhiteSpace(agentUrl)) remaining = [];
         var replacement = remaining.FirstOrDefault();
         var saved = await UpdateSystemSettingsAsync(current with
         {
-            PreviewConversion = current.PreviewConversion with { Mode = replacement is null ? PreviewConversionMode.Local : PreviewConversionMode.Remote,
-                Servers = remaining, AgentUrl = replacement?.AgentUrl ?? current.PreviewConversion.AgentUrl,
-                AgentToken = replacement?.AgentToken ?? current.PreviewConversion.AgentToken }
+            PreviewConversion = current.PreviewConversion with { Mode = PreviewConversionMode.Remote,
+                AwaitingRegistration = replacement is null, Servers = remaining, AgentUrl = replacement?.AgentUrl ?? string.Empty,
+                AgentToken = replacement?.AgentToken ?? string.Empty }
         }, actor, role, cancellationToken);
         await AuditAsync(actor, "system.preview-agent.unregister", nameof(PdmSystemSettings), "preview-conversion",
             $"转图代理已移除；剩余转图服务器 {remaining.Length} 台", cancellationToken);
@@ -460,10 +447,11 @@ public sealed partial class PdmWorkflowService(
             string name,
             ApprovalStage[] stages,
             ApprovalAssigneeSource[] sources,
-            bool configurable = false, bool allowRole = false)
+            bool configurable = false)
         {
-            if (configurable && (template.Steps.Count is < 2 or > 6))
-                throw new PdmRuleException($"{name}必须包含提交人自检和至少1个审批节点，最多6个节点。");
+            var maximumSteps = code == ExpenseWorkflowDefaults.UnifiedCode ? ExpenseWorkflowDefaults.MaximumSteps : 6;
+            if (configurable && (template.Steps.Count < 2 || template.Steps.Count > maximumSteps))
+                throw new PdmRuleException($"{name}必须包含提交人自检和至少1个审批节点，最多{maximumSteps}个节点。");
             if (!configurable && template.Steps.Count != stages.Length)
                 throw new PdmRuleException($"{name}必须包含{stages.Length}个审批节点。");
             if (configurable && (template.Steps[0].Stage != stages[0] || template.Steps[0].AssigneeSource != ApprovalAssigneeSource.Submitter))
@@ -475,33 +463,46 @@ public sealed partial class PdmWorkflowService(
                 if (configurable)
                 {
                     if (step.Stage is not (ApprovalStage.MechanicalEngineer or ApprovalStage.MainDesigner or ApprovalStage.MechanicalSupervisor
-                        or ApprovalStage.HardwareEngineer or ApprovalStage.HardwareSupervisor or ApprovalStage.StandardizationSupervisor))
+                        or ApprovalStage.HardwareEngineer or ApprovalStage.HardwareSupervisor or ApprovalStage.StandardizationSupervisor)
+                        && !(code == ExpenseWorkflowDefaults.UnifiedCode && step.Stage is >= ApprovalStage.ExpenseReview1 and <= ApprovalStage.ExpenseReview20))
                         throw new PdmRuleException($"{name}第{index + 1}个节点的审批岗位无效。");
-                    if (index > 0 && !(allowRole && step.AssigneeSource == ApprovalAssigneeSource.Role) && step.AssigneeSource is not (ApprovalAssigneeSource.ProjectDesignLead
+                    if (index > 0 && step.AssigneeSource is not (ApprovalAssigneeSource.Role or ApprovalAssigneeSource.DepartmentMembers or ApprovalAssigneeSource.ParallelDepartments or ApprovalAssigneeSource.ProjectDesignLead
                         or ApprovalAssigneeSource.PrimaryUnitManager or ApprovalAssigneeSource.ParentUnitManager
                         or ApprovalAssigneeSource.FixedUser or ApprovalAssigneeSource.FixedUnitManager))
                         throw new PdmRuleException($"{name}第{index + 1}个节点的审批人来源无效。");
                     if (step.AssigneeSource == ApprovalAssigneeSource.Role && !(step.RoleCodes?.Any(code => !string.IsNullOrWhiteSpace(code)) ?? false))
                         throw new PdmRuleException($"{name}第{index + 1}个节点请至少选择一个审批角色。");
+                    if (step.AssigneeSource == ApprovalAssigneeSource.ParallelDepartments) ApprovalNodeRules.ValidateParallel(step.ParallelDepartments);
                     if (step.AssigneeSource == ApprovalAssigneeSource.FixedUser && string.IsNullOrWhiteSpace(step.FixedAssignee))
                         throw new PdmRuleException($"{name}第{index + 1}个节点请选择指定人员。");
-                    if (step.AssigneeSource == ApprovalAssigneeSource.FixedUnitManager && (!step.FixedUnitId.HasValue || step.FixedUnitId == Guid.Empty))
+                    if (step.AssigneeSource is (ApprovalAssigneeSource.FixedUnitManager or ApprovalAssigneeSource.DepartmentMembers) && (!step.FixedUnitId.HasValue || step.FixedUnitId == Guid.Empty))
                         throw new PdmRuleException($"{name}第{index + 1}个节点请选择指定部门。");
                 }
                 else if (step.Stage != stages[index] || step.AssigneeSource != sources[index])
                     throw new PdmRuleException($"{name}第{index + 1}个节点的岗位来源不允许修改。");
                 return step with {
                     Name = RequiredComment(step.Name, "节点名称"),
+                    ParallelDepartments = configurable && index > 0 && step.AssigneeSource == ApprovalAssigneeSource.ParallelDepartments ? step.ParallelDepartments : null,
                     FixedAssignee = configurable && step.AssigneeSource == ApprovalAssigneeSource.FixedUser ? step.FixedAssignee!.Trim() : null,
-                    FixedUnitId = configurable && step.AssigneeSource == ApprovalAssigneeSource.FixedUnitManager ? step.FixedUnitId : null,
-                    RoleCodes = allowRole && step.AssigneeSource == ApprovalAssigneeSource.Role
+                    Policy = configurable && index > 0 ? step.AssigneeSource == ApprovalAssigneeSource.ParallelDepartments ? (step.Policy ?? new()) with { DisableTransfer = true } : step.Policy : null,
+                    CopyOnApproval = configurable && index > 0 ? ApprovalNodeCopies.Normalize(step.CopyOnApproval) : null,
+                    EmptyFallbackUser = configurable && step.AssigneeSource is (ApprovalAssigneeSource.Role or ApprovalAssigneeSource.DepartmentMembers) ? NullIfWhiteSpace(step.EmptyFallbackUser) : null,
+                    ConditionRole = configurable && index > 0 ? NullIfWhiteSpace(step.ConditionRole) : null,
+                    UnlessRole = configurable && index > 0 && !string.IsNullOrWhiteSpace(step.ConditionRole) && step.UnlessRole,
+                    AmountGreaterThan = configurable && index > 0 && code.StartsWith("expense-") && step.Conditions is null ? step.AmountGreaterThan : null,
+                    Conditions = configurable && index > 0 ? ApprovalConditionRules.Normalize(step.Conditions, code) : null,
+                    FixedUnitId = configurable && step.AssigneeSource is (ApprovalAssigneeSource.FixedUnitManager or ApprovalAssigneeSource.DepartmentMembers) ? step.FixedUnitId : null,
+                    RequireAllApprovers = configurable && step.AssigneeSource is (ApprovalAssigneeSource.Role or ApprovalAssigneeSource.DepartmentMembers) && step.RequireAllApprovers,
+                    RoleCodes = configurable && step.AssigneeSource == ApprovalAssigneeSource.Role
                         ? step.RoleCodes!.Where(code => !string.IsNullOrWhiteSpace(code)).Select(code => code.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() : null
                 };
             }).ToArray();
             var emergencyRoles = (template.EmergencyRoleCodes ?? currentTemplate.EmergencyRoleCodes)?.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var layout = configurable ? ApprovalFlowGraph.Normalize(template with { Steps = steps, Code = code }) : null;
             var changed = JsonSerializer.Serialize(steps) != JsonSerializer.Serialize(currentTemplate.Steps)
+                || JsonSerializer.Serialize(layout) != JsonSerializer.Serialize(currentTemplate.Layout)
                 || JsonSerializer.Serialize(emergencyRoles) != JsonSerializer.Serialize(currentTemplate.EmergencyRoleCodes);
-            return new ApprovalWorkflowTemplate(code, name, changed ? currentTemplate.Version + 1 : currentTemplate.Version, steps) { EmergencyRoleCodes = emergencyRoles };
+            return new ApprovalWorkflowTemplate(code, name, changed ? currentTemplate.Version + 1 : currentTemplate.Version, steps) { EmergencyRoleCodes = emergencyRoles, Layout = layout };
         }
 
         return new ReleaseApprovalSettings(
@@ -520,18 +521,56 @@ public sealed partial class PdmWorkflowService(
                 [ApprovalStage.MechanicalEngineer], [], configurable: true),
             input.MaterialCodeApplication is null && current.MaterialCodeApplication is null ? null
                 : Normalize(input.MaterialCodeApplication ?? current.MaterialCodeApplication!, current.MaterialCodeApplication ?? MaterialCodeWorkflowDefaults.Template(),
-                    "material-code-application", "料号申请审批", [ApprovalStage.MechanicalEngineer], [], configurable: true, allowRole: true));
+                    "material-code-application", "料号申请审批", [ApprovalStage.MechanicalEngineer], [], configurable: true))
+        {
+            Expense = NormalizeUnifiedExpense(input.Expense ?? current.Expense),
+            ExpenseProcurement = input.Expense is not null || current.Expense is not null ? current.ExpenseProcurement : NormalizeExpense(input.ExpenseProcurement ?? current.ExpenseProcurement, current.ExpenseProcurement, false),
+            ExpenseSupplyChain = input.Expense is not null || current.Expense is not null ? current.ExpenseSupplyChain : NormalizeExpense(input.ExpenseSupplyChain ?? current.ExpenseSupplyChain, current.ExpenseSupplyChain, true)
+        };
+
+        ApprovalWorkflowTemplate? NormalizeUnifiedExpense(ApprovalWorkflowTemplate? template)
+        {
+            if (template is null) return null;
+            var previous = ExpenseWorkflowDefaults.Unified(current, true)!;
+            if (template.Layout is null) throw new PdmRuleException("费用审批请使用流程图配置审核节点和条件分支。");
+            var normalized = Normalize(template, previous, ExpenseWorkflowDefaults.UnifiedCode, "费用审批", [ApprovalStage.MechanicalEngineer], [], configurable: true);
+            return normalized with { EmergencyRoleCodes = [], ExpenseDepartmentIds = previous.ExpenseDepartmentIds };
+        }
+
+        ApprovalWorkflowTemplate? NormalizeExpense(ApprovalWorkflowTemplate? template, ApprovalWorkflowTemplate? previous, bool supplyChain)
+        {
+            if (template is null) return null;
+            var defaults = ExpenseWorkflowDefaults.Create(supplyChain);
+            if (template.Steps.Any(step => step.AmountGreaterThan < 0)) throw new PdmRuleException("费用审批的金额条件不能小于0。");
+            var normalized = Normalize(template, previous ?? defaults, defaults.Code, defaults.Name,
+                [ApprovalStage.MechanicalEngineer], [], configurable: true);
+            return normalized with { EmergencyRoleCodes = [], ExpenseDepartmentId = previous?.ExpenseDepartmentId
+                ?? (previous ?? template).Steps.Skip(1).Select(step => step.FixedUnitId).FirstOrDefault(id => id.HasValue) };
+        }
     }
 
     private async Task ValidateApprovalWorkflowTargetsAsync(ReleaseApprovalSettings settings, CancellationToken cancellationToken)
     {
-        var flows = new[] { settings.Standard!, settings.NonStandard!, settings.Electrical, settings.ValidationPlan!, settings.MaterialCodeApplication }.Where(flow => flow is not null).Select(flow => flow!).ToArray();
+        var flows = new[] { settings.Standard!, settings.NonStandard!, settings.Electrical, settings.ValidationPlan!, settings.MaterialCodeApplication,
+            settings.Expense, settings.Expense is null ? settings.ExpenseProcurement : null, settings.Expense is null ? settings.ExpenseSupplyChain : null }.Where(flow => flow is not null).Select(flow => flow!).ToArray();
         var allowedRoles = (await repository.GetRolePermissionDirectoryAsync(cancellationToken)).Roles.Select(item => item.Role).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (flows.SelectMany(flow => (flow.EmergencyRoleCodes ?? []).Concat(flow.Steps.SelectMany(step => step.RoleCodes ?? []))).Any(code => !allowedRoles.Contains(code)))
+        var parallelDepartments = flows.SelectMany(f => f.Steps).SelectMany(s => s.ParallelDepartments ?? []).ToArray();
+        if (parallelDepartments.Length > 0)
+        {
+            var units = (await repository.GetOrganizationDirectoryAsync(cancellationToken)).Units;
+            if (parallelDepartments.Any(d => !units.Any(u => u.Id == d.UnitId && u.IsActive && (TenantContext.CompanyId is null || u.OrganizationId == TenantContext.CompanyId))))
+                throw new PdmRuleException("并行审批部门不存在、已停用或不属于当前公司。");
+        }
+        foreach (var copy in flows.SelectMany(flow => flow.Steps).Select(step => step.CopyOnApproval).Where(copy => copy?.Recipients is not null))
+            await ApprovalCopyRecipients.ValidateAsync(repository, copy!.Recipients!, TenantContext.CompanyId, cancellationToken);
+        if (flows.Any(flow => ApprovalFlowGraph.Rules(flow.Layout).Any(rule => rule.Field == "SubmitterRole" && rule.Value is not null && !allowedRoles.Contains(rule.Value)))
+            || flows.Any(flow => flow.Steps.Any(step => step.ConditionRole is not null && !allowedRoles.Contains(step.ConditionRole)
+                || step.Conditions?.Rules.Any(rule => rule.Field == "SubmitterRole" && rule.Value is not null && !allowedRoles.Contains(rule.Value)) == true)) ||
+            flows.SelectMany(flow => (flow.EmergencyRoleCodes ?? []).Concat(flow.Steps.SelectMany(step => step.RoleCodes ?? []))).Any(code => !allowedRoles.Contains(code)))
             throw new PdmRuleException("审批配置包含不存在的角色，请刷新角色列表后重新选择。");
         var targets = flows
             .SelectMany(flow => flow.Steps.Select(step => (Flow: flow.Name, Step: step)))
-            .Where(item => item.Step.AssigneeSource is ApprovalAssigneeSource.FixedUser or ApprovalAssigneeSource.FixedUnitManager).ToArray();
+            .Where(item => item.Step.AssigneeSource is ApprovalAssigneeSource.FixedUser or ApprovalAssigneeSource.FixedUnitManager or ApprovalAssigneeSource.DepartmentMembers).ToArray();
         if (targets.Length == 0) return;
         var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
         foreach (var (flow, step) in targets)
@@ -545,6 +584,7 @@ public sealed partial class PdmWorkflowService(
             var unit = directory.Units.FirstOrDefault(item => item.Id == step.FixedUnitId && item.IsActive)
                 ?? throw new PdmRuleException($"{flow}的“{step.Name}”指定部门不存在或已停用，请重新选择。");
             var manager = directory.Managers.FirstOrDefault(item => item.UnitId == unit.Id)?.PrimaryManager;
+            if (step.AssigneeSource == ApprovalAssigneeSource.DepartmentMembers) continue;
             if (string.IsNullOrWhiteSpace(manager) || !IsActiveMemberOfOrganization(directory, manager, unit.OrganizationId))
                 throw new PdmRuleException($"部门“{unit.Name}”尚未配置有效的主负责人，请先在组织架构中设置负责人。");
         }
@@ -647,8 +687,6 @@ public sealed partial class PdmWorkflowService(
         if (await repository.FindUserAsync(username, cancellationToken) is not null) throw new PdmConflictException("用户名已经存在。");
         var targetRoles = await FindRolesAsync(command.RoleCodes ?? [command.RoleCode], cancellationToken);
         var targetRole = targetRoles[0];
-        if (targetRoles.Any(role => IsPlatformManagedRole(role.Role)) && TenantContext.Current?.IsPlatformAdministrator != true)
-            throw new UnauthorizedAccessException("只有平台级账号可以创建平台管理员或开发者。");
         var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
         var companyId = ResolveManagedCompany(command.CompanyId, directory);
         var accessibleCompanyIds = NormalizeAccessibleCompanies(command.AccessibleCompanyIds, companyId, directory);
@@ -673,15 +711,12 @@ public sealed partial class PdmWorkflowService(
         var targetRoles = await FindRolesAsync(command.RoleCodes ?? [command.RoleCode], cancellationToken);
         var targetRole = targetRoles[0];
         var roleCodes = targetRoles.Select(role => role.Role).ToArray();
-        if (targetRoles.Any(role => IsPlatformManagedRole(role.Role)) && TenantContext.Current?.IsPlatformAdministrator != true)
-            throw new UnauthorizedAccessException("只有平台级账号可以分配平台管理员或开发者角色。");
         if (string.Equals(actor, username, StringComparison.OrdinalIgnoreCase) && (!command.IsActive || !RoleSetsEqual(roleCodes, current.EffectiveRoleCodes)))
             throw new PdmRuleException("不能停用当前登录账号或修改其系统角色。");
-        if (current.Role == UserRole.Administrator && current.IsActive && (targetRole.BaseRole != UserRole.Administrator || !command.IsActive))
-        {
-            var activeAdministrators = (await repository.ListUsersAsync(cancellationToken)).Count(user => user.Role == UserRole.Administrator && user.IsActive);
-            if (activeAdministrators <= 1) throw new PdmRuleException("系统至少需要保留一个启用的管理员账号。");
-        }
+        var authorization = await repository.GetAuthorizationSettingsAsync(cancellationToken);
+        var candidate = current with { Role = targetRole.BaseRole, RoleCode = targetRole.Role, RoleCodes = roleCodes, IsActive = command.IsActive };
+        if (!(await repository.ListUsersAsync(cancellationToken)).Select(u => u.Id == current.Id ? candidate : u).Any(u => AuthorizationPolicy.GlobalAllows(authorization, u, u.CompanyId, PermissionCodes.RoleSettingsEdit) && AuthorizationPolicy.GlobalAllows(authorization, u, u.CompanyId, PermissionCodes.RoleSettingsView)))
+            throw new PdmRuleException("至少保留一位启用且能管理权限的人员。");
         var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
         var companyId = ResolveManagedCompany(command.CompanyId == Guid.Empty ? current.CompanyId ?? Guid.Empty : command.CompanyId, directory);
         var accessibleCompanyIds = NormalizeAccessibleCompanies(command.AccessibleCompanyIds, companyId, directory);
@@ -826,13 +861,10 @@ public sealed partial class PdmWorkflowService(
             && item.Kind == OrganizationUnitKind.BusinessDivision && item.CanManufacture)
             ?? throw new PdmRuleException("承接部门不存在、未启用或未设为制造部门。");
         if (project.OrganizationId != unit.OrganizationId) throw new PdmRuleException("执行事业部必须属于项目公司。");
-        if (role != UserRole.Administrator)
-        {
-            if (!directory.Users.Any(user => string.Equals(user.Username, actor, StringComparison.OrdinalIgnoreCase)
-                    && user.CompanyId == unit.OrganizationId))
-                throw new UnauthorizedAccessException("计划管理只能分配本人所属公司的项目。");
-        }
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.ProjectExecutionAssign, cancellationToken);
+        if (project.ExecutionUnitId == executionUnitId) return project;
         var saved = await repository.SetProjectExecutionUnitAsync(projectId, executionUnitId, actor, cancellationToken);
+        await ProjectAssignmentNotifications.AssignedAsync(repository, project, saved, directory, timeProvider.GetUtcNow(), cancellationToken);
         await AuditAsync(actor, "project.execution-unit.update", nameof(Project), project.Id.ToString(), $"{project.Code} · {unit.Name}；原项目分工已清空", cancellationToken);
         return saved;
     }
@@ -915,21 +947,21 @@ public sealed partial class PdmWorkflowService(
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         if (project.ParentProjectId is not null || project.ExecutionUnitId is null) throw new PdmRuleException("请先为主项目分配执行事业部。");
         var directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
-        if (role != UserRole.Administrator && !string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase) && !directory.Managers.Any(item => item.UnitId == project.ExecutionUnitId
-                && (string.Equals(item.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || item.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase))))
-            throw new UnauthorizedAccessException("只有项目经理和执行事业部经理可以配置项目经理和设计负责人。");
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.ProjectStaffingManage, cancellationToken);
         var primary = command.PrimaryProjectManager?.Trim() ?? string.Empty;
-        if (role != UserRole.Administrator && string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(primary, project.PrimaryProjectManager, StringComparison.OrdinalIgnoreCase))
-            throw new UnauthorizedAccessException("项目经理不能修改自己的项目经理分配。");
+        if (string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase) && !string.Equals(primary, project.PrimaryProjectManager, StringComparison.OrdinalIgnoreCase)
+            && !await AuthorizationPolicy.CanAsync(repository, projectId, actor, "project.staffing.replace-self", cancellationToken))
+            throw new UnauthorizedAccessException("当前账号没有变更本人项目经理分配的权限。");
         var designLeads = NormalizeUsers(command.DesignLeads);
         var collaborators = NormalizeUsers(command.CollaborativeProjectManagers).Where(username => !string.Equals(username, primary, StringComparison.OrdinalIgnoreCase)).ToArray();
         var candidates = new[] { primary }.Concat(designLeads).Concat(collaborators).ToArray();
-        if (string.IsNullOrWhiteSpace(primary) || designLeads.Length == 0
+        if (string.IsNullOrWhiteSpace(primary)
             || candidates.Any(username => !IsActiveMemberOfDivision(directory, username, project.ExecutionUnitId.Value)))
-            throw new PdmRuleException("项目经理、协同项目经理和主设必须是执行事业部内的启用账号。");
+            throw new PdmRuleException("项目经理、协同项目经理和主设计必须是执行事业部内的启用账号。");
         var saved = await repository.SetMainProjectStaffingAsync(projectId, new(primary, collaborators, designLeads), actor, cancellationToken);
-        await AuditAsync(actor, "project.staffing.update", nameof(Project), project.Id.ToString(), $"项目经理：{primary}；主设：{string.Join('、', designLeads)}；协同：{string.Join('、', collaborators)}", cancellationToken);
+        await AuditAsync(actor, "project.staffing.update", nameof(Project), project.Id.ToString(), $"项目经理：{primary}；主设计：{string.Join('、', designLeads)}；协同：{string.Join('、', collaborators)}", cancellationToken);
+        await ProjectActivityFeed.StaffingAsync(repository, project, saved, actor, timeProvider.GetUtcNow(), cancellationToken);
+        await ProjectAssignmentNotifications.StaffedAsync(repository, saved, timeProvider.GetUtcNow(), cancellationToken);
         return saved;
     }
 
@@ -952,13 +984,13 @@ public sealed partial class PdmWorkflowService(
         var isCurrentProjectManager = string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase);
         var isMainDesigner = project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
             || string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
-        if (role != UserRole.Administrator && !managesExecutionUnit && !isMechanicalSupervisor && !isCurrentProjectManager && !isMainDesigner)
-            throw new UnauthorizedAccessException("只有执行事业部负责人、机械主管、当前项目经理或主设可以分配执行工程师。");
+
         var normalized = NormalizeUsers(designers);
         if (root.OrganizationId is null || normalized.Any(username => !IsActiveTechnicalMemberOfOrganization(directory, username, root.OrganizationId.Value)))
             throw new PdmRuleException("工程师必须是项目公司内启用的机械、电气、硬件、标准化等技术岗位人员。");
         var saved = await repository.SetChildProjectDesignersAsync(projectId, normalized, actor, cancellationToken);
         await AuditAsync(actor, "project.designers.update", nameof(Project), project.Id.ToString(), $"{project.Code} · {(normalized.Length == 0 ? "清空" : string.Join('、', normalized))}", cancellationToken);
+        await ProjectActivityFeed.StaffingAsync(repository, project, saved, actor, timeProvider.GetUtcNow(), cancellationToken);
         return saved;
     }
 
@@ -975,8 +1007,7 @@ public sealed partial class PdmWorkflowService(
         var managesExecutionUnit = directory.Managers.Any(item => item.UnitId == root.ExecutionUnitId
             && (string.Equals(item.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || item.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)));
         var isProjectManager = string.Equals(root.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase);
-        if (role != UserRole.Administrator && !managesExecutionUnit && !isProjectManager)
-            throw new UnauthorizedAccessException("只有项目经理和执行事业部经理可以配置团队负责人。");
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, "project.phase-owners.manage", cancellationToken);
 
         var allowedKeys = new HashSet<string>(["ElectricalEngineer", "ElectricalHardware", "StandardProcurement", "NonStandardProcurement", "NonStandardProduction", "MechanicalAssembly", "ElectricalAssembly", "ElectricalCommissioning", "Acceptance"], StringComparer.OrdinalIgnoreCase);
         var normalized = command.PhaseOwners
@@ -987,6 +1018,7 @@ public sealed partial class PdmWorkflowService(
             throw new PdmRuleException("阶段负责人必须是项目公司内的启用账号。");
         var saved = await repository.SetProjectPhaseOwnersAsync(projectId, normalized, actor, cancellationToken);
         await AuditAsync(actor, "project.phase-owners.update", nameof(Project), project.Id.ToString(), $"{project.Code} · {string.Join('；', normalized.Select(item => $"{item.Key}:{item.Value}"))}", cancellationToken);
+        await ProjectActivityFeed.StaffingAsync(repository, project, saved, actor, timeProvider.GetUtcNow(), cancellationToken);
         return saved;
     }
 
@@ -1004,14 +1036,14 @@ public sealed partial class PdmWorkflowService(
             || root.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)
             || root.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
             || string.Equals(root.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
-        if (role != UserRole.Administrator && !managesExecutionUnit && !belongsToProjectStaffing)
-            throw new UnauthorizedAccessException("只有执行事业部负责人、项目经理或主设可以配置子项目负责人。");
+
         var normalized = projectManager?.Trim() ?? string.Empty;
         var candidates = new[] { root.PrimaryProjectManager }.Concat(root.CollaborativeProjectManagers).Where(item => !string.IsNullOrWhiteSpace(item));
         if (string.IsNullOrWhiteSpace(normalized) || !candidates.Contains(normalized, StringComparer.OrdinalIgnoreCase))
             throw new PdmRuleException("子项目负责人只能选择主项目经理或协同项目经理。");
         var saved = await repository.SetChildProjectManagerAsync(projectId, normalized, actor, cancellationToken);
         await AuditAsync(actor, "project.manager.update", nameof(Project), child.Id.ToString(), $"{child.Code} · {normalized}", cancellationToken);
+        await ProjectActivityFeed.StaffingAsync(repository, child, saved, actor, timeProvider.GetUtcNow(), cancellationToken);
         return saved;
     }
 
@@ -1846,8 +1878,8 @@ public sealed partial class PdmWorkflowService(
             var owned = string.Equals(document.CheckedOutBy, actor, StringComparison.OrdinalIgnoreCase);
             var canEditDocument = !owned && canRequestPermission
                 && await repository.HasDocumentAccessAsync(document.Id, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
-            var lockManager = canForcePermission && IsProjectLockManager(project, actor, role);
-            var emergencyManager = canEmergencyPermission && IsProjectLockManager(project, actor, role);
+            var lockManager = canForcePermission && await AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockForceRelease, cancellationToken);
+            var emergencyManager = canEmergencyPermission && await AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockEmergencyRelease, cancellationToken);
             var canReleaseOwn = owned && await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken)
                 && await repository.HasDocumentAccessAsync(document.Id, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
             if (!owned && !canEditDocument && !lockManager && !emergencyManager) continue;
@@ -1867,7 +1899,7 @@ public sealed partial class PdmWorkflowService(
                 document.CheckedOutBy, checkedOutAt, document.CheckoutMachine, heartbeatAt, leaseExpiresAt, connectionState, attention,
                 document.CheckoutReleaseRequestedBy, document.CheckoutReleaseRequestedAt, document.CheckoutReleaseRequestReason,
                 owned, canEditDocument, (lockManager || canReleaseOwn) && connectionState == EditLockConnectionState.Offline)
-            { SessionId = document.CheckoutSessionId, CanEmergencyRelease = canEmergencyPermission && IsProjectLockManager(project, actor, role)
+            { SessionId = document.CheckoutSessionId, CanEmergencyRelease = canEmergencyPermission && await AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockEmergencyRelease, cancellationToken)
                 && document.State is not (DocumentLifecycleState.InReview or DocumentLifecycleState.Obsolete) && !document.DrawingReviewLocked });
         }
         return result.OrderByDescending(item => item.AttentionLevel).ThenBy(item => item.CheckedOutAt).ToArray();
@@ -1901,7 +1933,7 @@ public sealed partial class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, owned ? PermissionCodes.DocumentEdit : PermissionCodes.DocumentLockForceRelease, cancellationToken);
         if (owned) await RequireDocumentAccessAsync(documentId, actor, role, FolderAccess.View | FolderAccess.Edit, cancellationToken);
         var project = await repository.FindProjectAsync(current.ProjectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
-        if (!owned && !IsProjectLockManager(project, actor, role)) throw new UnauthorizedAccessException("只有项目经理、设计负责人或系统管理员可以结束其他人员的异常占用。");
+        if (!owned && !await AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockForceRelease, cancellationToken)) throw new UnauthorizedAccessException("当前账号没有结束其他人员异常占用的权限。");
         var settings = await repository.GetSystemSettingsAsync(cancellationToken);
         var now = timeProvider.GetUtcNow();
         var heartbeatBefore = now.AddMinutes(-Math.Max(settings.CheckoutOfflineGraceMinutes, settings.CheckoutLeaseMinutes));
@@ -2042,7 +2074,8 @@ public sealed partial class PdmWorkflowService(
         UserRole role,
         CancellationToken cancellationToken,
         bool resolveLegacyReferences = false,
-        bool treeScopeOnly = false)
+        bool treeScopeOnly = false,
+        bool allowMissingComponents = false)
     {
         var rootDocument = await repository.FindDocumentAsync(documentId, cancellationToken)
             ?? throw new PdmNotFoundException("图档不存在。");
@@ -2155,11 +2188,13 @@ public sealed partial class PdmWorkflowService(
             var optionalCurrentDrawing = allowCurrentVersionFallback
                 && !isRoot
                 && node.Kind == DocumentKind.Drawing;
+            var optionalMissingComponent = allowMissingComponents && !forEdit && !isRoot
+                && node.Kind is DocumentKind.Part or DocumentKind.Assembly;
             try
             {
             if (node.Status == ReferenceNodeStatus.Missing)
             {
-                if (optionalCurrentDrawing)
+                if (optionalCurrentDrawing || optionalMissingComponent)
                 {
                     warnings.Add($"引用文件{node.FileName}缺失，本次按缺失引用打开。");
                     continue;
@@ -2179,6 +2214,11 @@ public sealed partial class PdmWorkflowService(
             {
                 if (!allowCurrentVersionFallback)
                 {
+                    if (optionalMissingComponent)
+                    {
+                        warnings.Add($"引用文件{node.FileName}尚未登记，本次按缺失引用打开。");
+                        continue;
+                    }
                     throw new PdmRuleException($"引用文件{node.FileName}尚未登记，不能生成完整打开清单。");
                 }
 
@@ -2188,7 +2228,7 @@ public sealed partial class PdmWorkflowService(
                     .ToArray();
                 if (matches.Length == 0)
                 {
-                    if (optionalCurrentDrawing)
+                    if (optionalCurrentDrawing || optionalMissingComponent)
                     {
                         warnings.Add($"引用文件{node.FileName}尚未登记，本次按缺失引用打开。");
                         continue;
@@ -2239,6 +2279,11 @@ public sealed partial class PdmWorkflowService(
                 {
                     if (versionId.HasValue || releasedOnly)
                     {
+                        if (optionalMissingComponent)
+                        {
+                            warnings.Add($"引用文件{node.FileName}未记录引用版本，本次按缺失引用打开。");
+                            continue;
+                        }
                         throw new PdmRuleException($"引用文件{node.FileName}的快照未记录版本，不能用当前最新版本替代。");
                     }
 
@@ -2269,6 +2314,11 @@ public sealed partial class PdmWorkflowService(
                     }
                     if (version is null)
                     {
+                        if (optionalMissingComponent)
+                        {
+                            warnings.Add($"引用文件{node.FileName}的受控版本{referencedRevision}不存在，本次按缺失引用打开。");
+                            continue;
+                        }
                         throw new PdmNotFoundException($"引用文件{node.FileName}的受控版本{referencedRevision}不存在。");
                     }
                 }
@@ -2343,10 +2393,24 @@ public sealed partial class PdmWorkflowService(
                 throw new PdmRuleException($"项目中存在同名文件{fileName}，不能放入同一受控工作区。");
             }
 
-            await fileStorage.ValidateStoredFileMetadataAsync(
-                project,
-                new StoredFile(version.StorageRelativePath, version.FileLength, version.Sha256, version.CreatedAt),
-                cancellationToken);
+            var isolated = ArchiveSafety.NativeCopy(nativeIndexes, referencedDocumentId, version);
+            try
+            {
+                await fileStorage.ValidateStoredFileMetadataAsync(
+                    project,
+                    new StoredFile(version.StorageRelativePath, version.FileLength, version.Sha256, version.CreatedAt),
+                    cancellationToken);
+                if (isolated != null)
+                {
+                    await fileStorage.ValidateStoredFileMetadataAsync(project,
+                        new StoredFile(isolated.RelativePath, isolated.Length, isolated.Sha256, version.CreatedAt), cancellationToken);
+                }
+            }
+            catch (PdmNotFoundException) when (optionalMissingComponent)
+            {
+                warnings.Add($"引用文件{fileName}的存档副本缺失，本次按缺失引用打开。");
+                continue;
+            }
             var item = new ControlledOpenFile(
                 referencedDocumentId,
                 version.Id,
@@ -2357,11 +2421,8 @@ public sealed partial class PdmWorkflowService(
                 version.Sha256,
                 node.Configuration,
                 isRoot);
-            var isolated = ArchiveSafety.NativeCopy(nativeIndexes, referencedDocumentId, version);
             if (isolated != null)
             {
-                await fileStorage.ValidateStoredFileMetadataAsync(project,
-                    new StoredFile(isolated.RelativePath, isolated.Length, isolated.Sha256, version.CreatedAt), cancellationToken);
                 item = item with { NativeIsolation = isolated };
             }
             item = item with { IsNativeIsolated = isolated != null || version.ReferenceSnapshot.NativeIsolationVerified
@@ -2520,7 +2581,7 @@ public sealed partial class PdmWorkflowService(
     {
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
-        RequireMechanicalReleaseRole(ReleaseScope.LegacyCombined, role);
+        await RequireMechanicalReleaseAsync(projectId, ReleaseScope.LegacyCombined, actor, cancellationToken);
         var project = await repository.FindProjectAsync(projectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。 ");
 
@@ -2650,7 +2711,7 @@ public sealed partial class PdmWorkflowService(
             throw new PdmRuleException("铭牌发布包由项目硬件工程师在铭牌中确认后自动生成。");
         if (confirmedRemovedBomItemIds?.Count > 0 && !IsSupplementScope(scope))
             throw new PdmRuleException("只有增补/变更发布可以确认删除正式物料。");
-        RequireMechanicalReleaseRole(scope, role);
+        await RequireMechanicalReleaseAsync(projectId, scope, actor, cancellationToken);
         wholeSetMultiplier = NormalizeWholeSetMultiplier(scope, wholeSetMultiplier);
         var project = await repository.FindProjectAsync(projectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。");
@@ -2670,9 +2731,9 @@ public sealed partial class PdmWorkflowService(
             ? await repository.GetProjectReferenceRootAsync(projectId, rootDocumentId.Value, cancellationToken)
                 ?? throw new PdmRuleException("所选装配体尚未完整存档，不能创建其发布包。")
             : await repository.GetLatestReferenceSnapshotAsync(projectId, cancellationToken);
-        if (snapshot is null && !IsLongLeadScope(scope) && targetKind != BomKind.Standard)
+        if (snapshot is null && !IsDrawingBomRelease(scope) && !IsLongLeadScope(scope) && targetKind != BomKind.Standard)
             throw new PdmRuleException("项目尚无已存档的引用树快照，不能创建正式发布包；可先使用长交期BOM发布。");
-        if (targetKind != BomKind.Standard && referenceSnapshotId.HasValue && referenceSnapshotId.Value != Guid.Empty
+        if (!IsDrawingBomRelease(scope) && targetKind != BomKind.Standard && referenceSnapshotId.HasValue && referenceSnapshotId.Value != Guid.Empty
             && (snapshot is null || referenceSnapshotId.Value != snapshot.SnapshotId))
             throw new PdmConflictException("指定的引用树快照不是项目当前最新快照，请刷新后重试。");
 
@@ -2711,7 +2772,7 @@ public sealed partial class PdmWorkflowService(
             cancellationToken, rootDocumentId: rootDocumentId, hasConfirmedRemovals: confirmedRemovedBomItemIds?.Count > 0);
         if (!BomReady(targetKind, targetItems, settings.ValidationRules))
             throw new PdmRuleException($"{BomName(targetKind)}仍有资料不完整的物料，不能创建发布包。{MissingBomSummary(targetKind, targetItems, settings.ValidationRules)}");
-        if (targetKind == BomKind.NonStandard)
+        if (targetKind == BomKind.NonStandard && !IsDrawingBomRelease(scope))
         {
             var unresolved = await repository.GetBomAsync(projectId, BomKind.Unclassified, cancellationToken);
             if (unresolved.Any(item => !item.IsManuallyExcluded && InRoot(item)))
@@ -2722,8 +2783,7 @@ public sealed partial class PdmWorkflowService(
         BomVersion? nonStandardVersion = null;
         BomVersion? electricalVersion = null;
         var snapshotItems = await SupplementSnapshotItemsAsync(projectId, scope, targetKind, targetItems, cancellationToken, confirmedRemovedBomItemIds);
-        await RequireCompleteScopedReleaseIndexAsync(snapshot, scope, targetItems, confirmedRemovedBomItemIds,
-            rootDocumentId, projectId, cancellationToken);
+        await ValidateRemovedBomBaselineAsync(scope, confirmedRemovedBomItemIds, projectId, cancellationToken);
         number = await repository.ReserveBusinessNumberAsync(numberPrefix, cancellationToken);
         if (!IsSupplementScope(scope)) changeNumber = number;
         if (!IsLongLeadScope(scope))
@@ -2743,7 +2803,8 @@ public sealed partial class PdmWorkflowService(
 
         var workflow = settings.ApprovalWorkflows.ForBomKind(targetKind);
         var packageId = Guid.NewGuid();
-        var tasks = await BuildApprovalTasksAsync(packageId, workflow, project, actor, cancellationToken);
+        var tasks = await BuildApprovalTasksAsync(packageId, workflow, project, actor, cancellationToken,
+            new Dictionary<string, object?> { ["ReleaseScope"] = scope.ToString(), ["ChangeReason"] = changeReason, ["ItemCount"] = targetItems.Count() });
         var selectedStandardSnapshot = scope == ReleaseScope.StandardLongLead ? targetItems : standardVersion?.Items ?? [];
         var selectedNonStandardSnapshot = scope == ReleaseScope.NonStandardLongLead ? targetItems : nonStandardVersion?.Items ?? [];
         var selectedElectricalSnapshot = scope == ReleaseScope.ElectricalLongLead ? targetItems : electricalVersion?.Items ?? [];
@@ -2829,7 +2890,7 @@ public sealed partial class PdmWorkflowService(
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
         await ProjectPermissionPolicy.RequireAsync(repository, package.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
-        RequireMechanicalReleaseRole(package.Scope, role);
+        await RequireMechanicalReleaseAsync(package.ProjectId, package.Scope, actor, cancellationToken);
         if (package.State != ReleasePackageState.Draft)
             throw new PdmConflictException("只有草稿发布包可以编辑，请刷新后重试。");
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
@@ -2908,7 +2969,7 @@ public sealed partial class PdmWorkflowService(
         {
             var targetKind = ReleaseScopeBomKind(package.Scope);
             var snapshot = await CurrentReleaseReferenceSnapshotAsync(package, cancellationToken);
-            if (snapshot is null && targetKind != BomKind.Standard)
+            if (snapshot is null && !IsDrawingBomRelease(package.Scope) && targetKind != BomKind.Standard)
                 throw new PdmRuleException("项目尚无已存档的引用树快照，不能编辑发布包。");
             var currentItems = (await ReadCurrentBomAsync(package.ProjectId, targetKind, cancellationToken))
                 .Where(IsPublishableBomItem).ToArray();
@@ -2919,8 +2980,7 @@ public sealed partial class PdmWorkflowService(
             if (!BomReady(targetKind, selectedItems, settings.ValidationRules))
                 throw new PdmRuleException($"{BomName(targetKind)}仍有资料不完整的物料，不能保存发布草稿。{MissingBomSummary(targetKind, selectedItems, settings.ValidationRules)}");
             var snapshotItems = await SupplementSnapshotItemsAsync(package.ProjectId, package.Scope, targetKind, selectedItems, cancellationToken, updated.ConfirmedRemovedBomItemIds);
-            await RequireCompleteScopedReleaseIndexAsync(snapshot, package.Scope, selectedItems, updated.ConfirmedRemovedBomItemIds,
-                package.RootDocumentId, package.ProjectId, cancellationToken,
+            await ValidateRemovedBomBaselineAsync(package.Scope, updated.ConfirmedRemovedBomItemIds, package.ProjectId, cancellationToken,
                 targetKind == BomKind.Standard ? package.StandardBomVersionId : package.NonStandardBomVersionId);
             var targetVersion = await ResolveBomVersionForReleaseAsync(
                 package.ProjectId, targetKind, snapshotItems, actor,
@@ -2967,7 +3027,7 @@ public sealed partial class PdmWorkflowService(
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
         await ProjectPermissionPolicy.RequireAsync(repository, package.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
-        RequireMechanicalReleaseRole(package.Scope, role);
+        await RequireMechanicalReleaseAsync(package.ProjectId, package.Scope, actor, cancellationToken);
         if (package.State != ReleasePackageState.Draft)
             throw new PdmConflictException("只有草稿发布包可以删除，请刷新后重试。");
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
@@ -2995,7 +3055,7 @@ public sealed partial class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
-        RequireMechanicalReleaseRole(package.Scope, role);
+        await RequireMechanicalReleaseAsync(package.ProjectId, package.Scope, actor, cancellationToken);
         if (!await repository.HasProjectContentReadAccessAsync(package.ProjectId, actor, role, cancellationToken))
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         await ProjectPermissionPolicy.RequireAsync(repository, package.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
@@ -3352,7 +3412,8 @@ public sealed partial class PdmWorkflowService(
         }
 
         if (items.Any(item => !existingById.ContainsKey(item.Id))) await RequireBomEditPermissionAsync(projectId, actor, role, kind, cancellationToken, "create");
-        if (existing.Any(item => !item.IsManuallyExcluded && !consolidatedSourceIds.Contains(item.Id) && (!items.Any(current => current.Id == item.Id) || items.Any(current => current.Id == item.Id && current.IsManuallyExcluded)))) await RequireBomEditPermissionAsync(projectId, actor, role, kind, cancellationToken, "delete");
+        var activeItemIds = items.Where(item => !item.IsManuallyExcluded).Select(item => item.Id).ToHashSet();
+        if (existing.Any(item => !item.IsManuallyExcluded && !consolidatedSourceIds.Contains(item.Id) && !activeItemIds.Contains(item.Id))) await RequireBomEditPermissionAsync(projectId, actor, role, kind, cancellationToken, "delete");
         if (items.Any(item => existingById.TryGetValue(item.Id, out var before) && (CadWritableValuesChanged(before, item) || before.Quantity != item.Quantity || before.Sequence != item.Sequence))) await RequireBomEditPermissionAsync(projectId, actor, role, kind, cancellationToken, "update");
         var writebackIds = kind == BomKind.Electrical
             ? new HashSet<Guid>()
@@ -4329,7 +4390,7 @@ public sealed partial class PdmWorkflowService(
         var project = await repository.FindProjectAsync(projectId, ct) ?? throw new PdmNotFoundException("项目不存在。");
         var result = new List<string>();
         foreach (var user in await ListDrawingReviewCandidateUsersAsync(projectId, actor, ct))
-            if ((IsProjectDesignLead(project, user.Username) || await NotificationRecipientPolicy.HasBusinessPermissionAsync(repository, user.EffectiveRoleCodes, PermissionCodes.DrawingReviewDecide, ct))
+            if ((IsProjectDesignLead(project, user.Username) || await NotificationRecipientPolicy.HasBusinessPermissionAsync(repository, user, PermissionCodes.DrawingReviewDecide, ct))
                 && await NotificationRecipientPolicy.InBusinessCompanyAsync(repository, user, project.OrganizationId, ct)) result.Add(user.Username);
         return result;
     }
@@ -4469,11 +4530,9 @@ public sealed partial class PdmWorkflowService(
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。");
-        var canWithdraw = role == UserRole.Administrator
-            || string.Equals(package.CreatedBy, actor, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
-            || project.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase);
-        if (!canWithdraw) throw new UnauthorizedAccessException("只有审核发起人、项目经理或系统管理员可以撤销图纸审核。");
+        var canWithdraw = await AuthorizationPolicy.CanAsync(repository, package.ProjectId, actor, AuthorizationActions.ReviewManage, cancellationToken)
+            || string.Equals(package.CreatedBy, actor, StringComparison.OrdinalIgnoreCase);
+        if (!canWithdraw) throw new UnauthorizedAccessException("只有审核发起人或获准管理审核任务的人员可以撤销图纸审核。");
         reason = RequiredComment(reason, "撤销原因");
         var withdrawn = await repository.WithdrawDrawingReviewPackageAsync(packageId, actor, timeProvider.GetUtcNow(), reason, cancellationToken);
         await AuditAsync(actor, "drawing-review.withdraw", nameof(DrawingReviewPackage), packageId.ToString(), $"{withdrawn.Number}；{reason}", cancellationToken);
@@ -4490,11 +4549,9 @@ public sealed partial class PdmWorkflowService(
             throw new UnauthorizedAccessException("当前用户没有该项目的操作权限。");
         var project = await repository.FindProjectAsync(package.ProjectId, cancellationToken)
             ?? throw new PdmNotFoundException("项目不存在。");
-        var canManage = role == UserRole.Administrator
-            || string.Equals(package.CreatedBy, actor, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
-            || project.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase);
-        if (!canManage) throw new UnauthorizedAccessException("只有审核发起人、项目经理或系统管理员可以放弃写入审核标记。");
+        var canManage = await AuthorizationPolicy.CanAsync(repository, package.ProjectId, actor, AuthorizationActions.ReviewManage, cancellationToken)
+            || string.Equals(package.CreatedBy, actor, StringComparison.OrdinalIgnoreCase);
+        if (!canManage) throw new UnauthorizedAccessException("只有审核发起人或获准管理审核任务的人员可以放弃写入审核标记。");
         reason = RequiredComment(reason, "放弃写入原因");
         var completed = await repository.AbandonDrawingReviewWritebacksAsync(packageId, actor, reason, timeProvider.GetUtcNow(), cancellationToken);
         await AuditAsync(actor, "drawing-review.writeback.abandon", nameof(DrawingReviewPackage), packageId.ToString(), $"{completed.Number}；{reason}", cancellationToken);
@@ -4692,6 +4749,12 @@ public sealed partial class PdmWorkflowService(
                 BomKinds = source.BomKinds,
                 ModelRevision = modelVersion?.Revision.Display ?? "—",
                 DrawingRevision = drawingVersion?.Revision.Display,
+                CurrentDrawingApproved = state == DrawingReviewCandidateState.ApprovedCurrent
+                    || state == DrawingReviewCandidateState.Ready && drawingVersion is not null && approvedPackages.Any(review => review.Items.Any(item =>
+                        item.ModelDocumentId == model.Id && item.DrawingDocumentId == drawing!.Id && IsDrawingReviewed(item.DrawingState)
+                        && item.EffectiveDrawingVersionId is Guid reviewed && MatchesReviewedVersion(drawingVersion, reviewed, drawingVersions)
+                        && !review.Markups.Any(mark => mark.ItemId == item.Id && mark.Target == DrawingReviewTarget.Drawing2D
+                            && mark.Severity == DrawingReviewMarkupSeverity.Blocking && mark.State == DrawingReviewMarkupState.Open))),
                 HasUnreleasedDrawingChanges = drawingVersion is { Status: DocumentVersionStatus.Work }
                     && drawingVersions.Any(version => version.Status == DocumentVersionStatus.Released),
                 State = state,
@@ -4798,13 +4861,13 @@ public sealed partial class PdmWorkflowService(
         }
         else if (targetState != DrawingReviewTargetState.Pending)
             throw new PdmConflictException("该2D工程图已经完成审核，请刷新后重试。");
-        var developerSelfReviewAllowed = TenantContext.Current?.HasRole("developer") == true;
+        var developerSelfReviewAllowed = await AuthorizationPolicy.CanAsync(repository, package.ProjectId, actor, AuthorizationActions.SelfReview, cancellationToken);
         if (supervisorNode)
         {
-            if (!string.Equals(package.Supervisor, actor, StringComparison.OrdinalIgnoreCase) && !developerSelfReviewAllowed)
+            if (!string.Equals(package.Supervisor, actor, StringComparison.OrdinalIgnoreCase) && !await AuthorizationPolicy.CanAsync(repository, package.ProjectId, actor, "drawing-review.task.override", cancellationToken))
                 throw new UnauthorizedAccessException($"当前节点由机械主管{package.SupervisorName ?? package.Supervisor}处理。");
         }
-        else if (!package.AllowsReviewer(actor) && !developerSelfReviewAllowed)
+        else if (!package.AllowsReviewer(actor) && !await AuthorizationPolicy.CanAsync(repository, package.ProjectId, actor, "drawing-review.task.override", cancellationToken))
         {
             var assigned = package.AssignedReviewerNames.Count > 0
                 ? string.Join("、", package.AssignedReviewerNames)
@@ -4869,11 +4932,11 @@ public sealed partial class PdmWorkflowService(
             throw new PdmConflictException("当前图纸审核单不允许撤销审核结论。");
         if (item.DrawingState is not (DrawingReviewTargetState.Approved or DrawingReviewTargetState.Marked or DrawingReviewTargetState.ChangesRequested))
             throw new PdmRuleException("该2D工程图尚未给出审核结论，无需撤销。");
-        var developerSelfReviewAllowed = TenantContext.Current?.HasRole("developer") == true;
+        var developerSelfReviewAllowed = await AuthorizationPolicy.CanAsync(repository, package.ProjectId, actor, AuthorizationActions.SelfReview, cancellationToken);
         if (!package.AllowsReviewer(actor)
             && !string.Equals(package.Supervisor, actor, StringComparison.OrdinalIgnoreCase)
-            && !developerSelfReviewAllowed)
-            throw new UnauthorizedAccessException("只有本审核单的审图人或机械主管可以撤销审核结论。");
+            && !await AuthorizationPolicy.CanAsync(repository, package.ProjectId, actor, "drawing-review.task.override", cancellationToken))
+            throw new UnauthorizedAccessException("当前账号未被分配此审核任务，也未获准接管任务。");
         var comment = string.IsNullOrWhiteSpace(command.Comment) ? null : command.Comment.Trim();
         var updated = await repository.RevokeDrawingReviewTargetAsync(item.Id, command.Target, cancellationToken);
         await AuditAsync(actor, "drawing-review.revoke", nameof(DrawingReviewItem), item.Id.ToString(),
@@ -4925,7 +4988,7 @@ public sealed partial class PdmWorkflowService(
         if (package.State != DrawingReviewPackageState.PendingSupervisorApproval)
             throw new PdmConflictException("当前图纸审核单尚未进入机械主管批准节点。");
         if (!string.Equals(package.Supervisor, actor, StringComparison.OrdinalIgnoreCase)
-            && TenantContext.Current?.HasRole("developer") != true)
+            && !await AuthorizationPolicy.CanAsync(repository, package.ProjectId, actor, AuthorizationActions.SelfReview, cancellationToken))
             throw new UnauthorizedAccessException($"当前节点由机械主管{package.SupervisorName ?? package.Supervisor}处理。");
         var comment = string.IsNullOrWhiteSpace(command.Comment) ? null : command.Comment.Trim();
         if (command.Decision == DrawingReviewDecision.RequestChanges)
@@ -5030,7 +5093,7 @@ public sealed partial class PdmWorkflowService(
         var package = await repository.FindReleasePackageAsync(releasePackageId, cancellationToken)
             ?? throw new PdmNotFoundException("发布包不存在。");
         await ProjectPermissionPolicy.RequireAsync(repository, package.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
-        RequireMechanicalReleaseRole(package.Scope, role);
+        await RequireMechanicalReleaseAsync(package.ProjectId, package.Scope, actor, cancellationToken);
         if (IsLongLeadScope(package.Scope))
         {
             var formalScope = FormalScopeForKind(ReleaseScopeBomKind(package.Scope));
@@ -5121,8 +5184,6 @@ public sealed partial class PdmWorkflowService(
             if (targetKind == BomKind.Standard) await EnsureStandardMaterialMasterReadyAsync(targetItems, cancellationToken);
             if (!BomReady(targetKind, targetItems, validationRules))
                 throw new PdmRuleException($"{BomName(targetKind)}仍有资料不完整的物料，不能提交审批。");
-            if (targetKind == BomKind.NonStandard && (await repository.GetBomAsync(package.ProjectId, BomKind.Unclassified, cancellationToken)).Any(item => !item.IsManuallyExcluded))
-                throw new PdmRuleException("源数据中仍有待分类或待确认物料，请处理完成后再提交机械发布包。");
             var targetVersionId = targetKind == BomKind.Standard ? package.StandardBomVersionId
                 : targetKind == BomKind.NonStandard ? package.NonStandardBomVersionId
                 : package.ElectricalBomVersionId;
@@ -5142,7 +5203,7 @@ public sealed partial class PdmWorkflowService(
                 cancellationToken,
                 await CurrentNonStandardReleaseItemsAsync(package, cancellationToken),
                 package.Scope == ReleaseScope.NonStandardSupplement ? package.SelectedBomItemIds : null,
-                package.VersionBindings);
+                package.VersionBindings, IsDrawingBomRelease(package.Scope));
         await ValidateReleaseVersionsAsync(package, cancellationToken);
         var pdfSnapshot = await PdfTitleBlockSnapshotBuilder.BuildAsync(repository, package, project, settings, cancellationToken);
         package = await repository.SaveReleasePdfTitleBlockAsync(package.Id, pdfSnapshot, cancellationToken);
@@ -5186,6 +5247,7 @@ public sealed partial class PdmWorkflowService(
         await RequirePermissionAsync(actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         await RequireDocumentAccessAsync(documentId, actor, role, FolderAccess.View | FolderAccess.Edit | FolderAccess.Publish, cancellationToken);
         var document = await RequireDocumentAsync(documentId, cancellationToken);
+        await ProjectPermissionPolicy.RequireAsync(repository, document.ProjectId, actor, role, ProductionMobilePermissions.Obsolete, cancellationToken);
         await ProjectPermissionPolicy.RequireAsync(repository, document.ProjectId, actor, role, PermissionCodes.ReleaseManage, cancellationToken);
         comment = RequiredComment(comment, "作废原因");
         var obsolete = await repository.ObsoleteDocumentAsync(documentId, actor, cancellationToken);
@@ -5205,10 +5267,10 @@ public sealed partial class PdmWorkflowService(
         return visible;
     }
 
-    public async Task<ReleasePackage> DecideAsync(Guid taskId, string actor, UserRole role, ApprovalDecision decision, string? comment, CancellationToken cancellationToken, bool publishImmediately = true)
+    public async Task<ReleasePackage> DecideAsync(Guid taskId, string actor, UserRole role, ApprovalDecision decision, string? comment, CancellationToken cancellationToken, bool publishImmediately = true, string? businessNote = null)
     {
         await EnsureApprovalTaskActorAsync(taskId, actor, cancellationToken);
-        return await CompleteApprovalDecisionAsync(taskId, actor, decision, comment, false, null, publishImmediately, cancellationToken);
+        return await CompleteApprovalDecisionAsync(taskId, actor, decision, comment, false, null, publishImmediately, cancellationToken, businessNote);
     }
 
     public async Task EnsureApprovalTaskActorAsync(Guid taskId, string actor, CancellationToken cancellationToken)
@@ -5220,8 +5282,8 @@ public sealed partial class PdmWorkflowService(
         var currentTask = package.ApprovalTasks.OrderBy(item => item.StepOrder).FirstOrDefault(item => item.Decision is null);
         if (task.Decision is not null || currentTask?.Id != taskId || package.State is not (ReleasePackageState.ProcessReview or ReleasePackageState.Approval))
             throw new PdmConflictException("当前发布包尚未到达该审批节点。 ");
-        if (!string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))
+        if (!(task.Participants?.CanSign(actor) ?? (string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))))
             throw new PdmRuleException("只能处理分配给自己的审批任务。 ");
     }
 
@@ -5250,6 +5312,8 @@ public sealed partial class PdmWorkflowService(
         if (string.IsNullOrWhiteSpace(targetUsername)) throw new PdmRuleException("请选择转交人员。");
         var package = await repository.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken)
             ?? throw new PdmNotFoundException("审批任务不存在。");
+        var group = package.ApprovalTasks.Single(task => task.Id == taskId).Participants;
+        if (group is not null && (group.Members.Count > 1 || group.Policy?.DisableTransfer == true)) throw new PdmRuleException("该节点不允许转交。");
         var target = await repository.FindUserAsync(targetUsername, cancellationToken)
             ?? throw new PdmNotFoundException("转交目标用户不存在。");
         if (!target.IsActive) throw new PdmRuleException("转交目标用户已停用。");
@@ -5289,15 +5353,36 @@ public sealed partial class PdmWorkflowService(
         bool emergencySubstitute,
         string? emergencyReason,
         bool publishImmediately,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string? businessNote = null)
     {
+        var originalComment = comment;
         comment = decision == ApprovalDecision.Rejected
             ? RequiredComment(comment, "退回原因")
             : string.IsNullOrWhiteSpace(comment) ? "同意" : comment.Trim();
         var pendingPackage = await repository.FindReleasePackageByApprovalTaskAsync(taskId, cancellationToken)
             ?? throw new PdmNotFoundException("审批任务不存在。");
+        var activeNode = pendingPackage.ApprovalTasks.First(task => task.Id == taskId);
+        if (decision == ApprovalDecision.Approved && activeNode.Participants?.Policy?.RequireOpinion == true && string.IsNullOrWhiteSpace(originalComment))
+            throw new PdmRuleException("该审批节点要求填写同意意见。");
         if (decision == ApprovalDecision.Approved)
         {
+            if (IsSupplementScope(pendingPackage.Scope) && pendingPackage.SelectedBomItemIds.Count > 0)
+            {
+                var kind = ReleaseScopeBomKind(pendingPackage.Scope);
+                var frozen = kind == BomKind.Standard ? pendingPackage.StandardBomSnapshot
+                    : kind == BomKind.Electrical ? pendingPackage.ElectricalBomSnapshot : pendingPackage.NonStandardBomSnapshot;
+                var selectedIds = pendingPackage.SelectedBomItemIds.ToHashSet();
+                var owners = frozen.Where(row => row.IsSummaryQuantity && selectedIds.Contains(row.Id)).ToArray();
+                if (owners.Length > 0)
+                {
+                    var prior = await ReleasedBomBaselineAsync(pendingPackage.ProjectId, kind, cancellationToken);
+                    var current = await ReadCurrentBomAsync(pendingPackage.ProjectId, kind, cancellationToken);
+                    var baseline = BomSummaryProjection.BaselineForSelectedTotals(prior.Items, current, owners, pendingPackage.ConfirmedRemovedBomItemIds);
+                    var obsolete = prior.Items.Select(row => row.Id).Except(baseline.Select(row => row.Id)).ToHashSet();
+                    if (frozen.Any(row => obsolete.Contains(row.Id)))
+                        throw new PdmConflictException("审批快照重复计入了已合并的BOM数量。请撤回审批，重新保存草稿，核对变更数量后再送审。");
+                }
+            }
             await EnsureReleaseMaterialRelationsAsync(pendingPackage, cancellationToken);
             await ValidateReleaseVersionsAsync(pendingPackage, cancellationToken);
         }
@@ -5310,13 +5395,18 @@ public sealed partial class PdmWorkflowService(
                 cancellationToken,
                 await CurrentNonStandardReleaseItemsAsync(pendingPackage, cancellationToken),
                 pendingPackage.Scope == ReleaseScope.NonStandardSupplement ? pendingPackage.SelectedBomItemIds : null,
-                pendingPackage.VersionBindings);
-        var package = await repository.DecideApprovalAsync(taskId, actor, decision, comment, emergencySubstitute, emergencyReason, cancellationToken);
+                pendingPackage.VersionBindings, IsDrawingBomRelease(pendingPackage.Scope));
+        var package = await repository.DecideApprovalAsync(taskId, actor, decision, comment, emergencySubstitute, emergencyReason, cancellationToken, businessNote);
         await AuditAsync(actor, emergencySubstitute ? "approval.emergency-substitute" : "approval.decide", nameof(ApprovalTask), taskId.ToString(), emergencySubstitute ? $"{decision}；原因：{emergencyReason}" : decision.ToString(), cancellationToken);
 
+        var completed = package.ApprovalTasks.First(task => task.Id == taskId);
+        if (completed.Decision == ApprovalDecision.Approved)
+            await ApprovalNodeCopies.NotifyAsync(repository, completed.Participants?.CopyOnApproval, package.ProjectId, package.Id, taskId,
+                completed.StepName ?? "发布审批", completed.DecidedAt, cancellationToken);
         if (package.State != ReleasePackageState.Publishing)
         {
-            await NotifyPendingReleaseApprovalAsync(package, false, cancellationToken);
+            if (!package.ApprovalTasks.Any(task => task.Id == taskId && task.Decision is null))
+                await NotifyPendingReleaseApprovalAsync(package, false, cancellationToken);
             if (package.State == ReleasePackageState.Rejected)
             {
                 await repository.SetBomVersionStateAsync(await PackageBomVersionIdsInStateAsync(package, BomVersionState.InReview, cancellationToken), BomVersionState.Draft, actor, null, cancellationToken);
@@ -6618,12 +6708,9 @@ public sealed partial class PdmWorkflowService(
         return missing.Length == 0 ? null : $"{BomName(kind)}缺少{string.Join('、', missing)}";
     }
 
-    private static bool IsProjectLockManager(Project project, string actor, UserRole role) =>
-        role is UserRole.Administrator or UserRole.PlatformAdministrator
-        || string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
-        || project.CollaborativeProjectManagers.Contains(actor, StringComparer.OrdinalIgnoreCase)
-        || project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
-        || string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
+    private bool IsProjectLockManager(Project project, string actor, UserRole role) =>
+        AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockForceRelease, default).GetAwaiter().GetResult()
+        || AuthorizationPolicy.CanAsync(repository, project.Id, actor, PermissionCodes.DocumentLockEmergencyRelease, default).GetAwaiter().GetResult();
 
     private static bool IsProjectDesignLead(Project project, string actor) =>
         project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
@@ -6773,18 +6860,9 @@ public sealed partial class PdmWorkflowService(
             throw new UnauthorizedAccessException("当前用户没有该项目目录下图档的对应操作权限。");
     }
 
-    public async Task<bool> CanSubmitArchiveAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
-    {
-        if (!await repository.HasUserPermissionAsync(actor, role, PermissionCodes.DocumentEdit, cancellationToken)
-            || !await repository.HasProjectContentReadAccessAsync(projectId, actor, role, cancellationToken))
-            return false;
-
-        var project = await repository.FindProjectAsync(projectId, cancellationToken);
-        if (project is null) return false;
-        if (ProjectSubmissionPolicy.CanSubmitArchive(project, actor, IsSubmissionAdministrator(role))) return true;
-        var root = project.ParentProjectId is null ? project : await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, cancellationToken);
-        return root is not null && ProjectPermissionPolicy.CustomAllows(project, root, actor, await repository.GetProjectPermissionSettingsAsync(cancellationToken), PermissionCodes.DocumentEdit);
-    }
+    public async Task<bool> CanSubmitArchiveAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
+        await AuthorizationPolicy.CanAsync(repository, projectId, actor, "document.archive", cancellationToken)
+        && await AuthorizationPolicy.CanAsync(repository, projectId, actor, AuthorizationActions.ArchiveSubmit, cancellationToken);
 
     public async Task<Project> RequireProjectSubmissionAccessAsync(
         Guid projectId,
@@ -6799,15 +6877,12 @@ public sealed partial class PdmWorkflowService(
         {
             var target = project.ParentProjectId is null ? "主项目图档" : string.Concat("子项目“", project.Code, "”");
             throw new UnauthorizedAccessException(string.Concat(
-                "当前账号未被分配为", target, "的项目经理、主设或工程师，不能", action, "。"));
+                "当前账号未被分配为", target, "的项目经理、主设计或工程师，不能", action, "。"));
         }
 
         return project;
     }
 
-    private static bool IsSubmissionAdministrator(UserRole role) =>
-        role is UserRole.Administrator or UserRole.PlatformAdministrator
-        || TenantContext.Current?.IsPlatformAdministrator == true;
 
     private Task AuditAsync(string actor, string action, string entityType, string entityId, string detail, CancellationToken cancellationToken) =>
         repository.AppendAuditAsync(new AuditEntry(Guid.NewGuid(), timeProvider.GetUtcNow(), actor, action, entityType, entityId, detail), cancellationToken);
@@ -6860,7 +6935,7 @@ public sealed partial class PdmWorkflowService(
         CancellationToken cancellationToken,
         IReadOnlyList<BomItem>? currentItems = null,
         IReadOnlyList<Guid>? selectedBomItemIds = null,
-        IReadOnlyList<ReleaseVersionBinding>? versionBindings = null)
+        IReadOnlyList<ReleaseVersionBinding>? versionBindings = null, bool drawingBomRelease = false)
     {
         // 发布数量以维护后的BOM为准；设计树只核对来源，草稿仍须与当前BOM一致。
         if (currentItems is not null && !BomSnapshotsEqual(snapshot, currentItems))
@@ -6872,26 +6947,29 @@ public sealed partial class PdmWorkflowService(
         var withoutDrawingSource = effectiveItems.Where(item => !item.SourceDocumentId.HasValue).Select(item => item.DrawingNumber).ToArray();
         if (withoutDrawingSource.Length > 0)
             throw new PdmRuleException($"以下非标件没有来源模型，无法定位2D工程图，不能进入非标件BOM审核发布：{string.Join("、", withoutDrawingSource.Take(12))}。");
-        var referenceSnapshot = await repository.GetLatestReferenceSnapshotAsync(projectId, cancellationToken)
-            ?? throw new PdmRuleException("项目尚无最新设计树，不能核对非标件BOM来源。");
-        var generated = await GenerateMechanicalBomFromSnapshotAsync(projectId, referenceSnapshot, "release-validation", cancellationToken, false, false);
-        var currentSources = generated.StandardItems
-            .Concat(generated.NonStandardItems)
-            .Concat(generated.UnclassifiedItems)
-            .Where(item => item.SourceDocumentId.HasValue && !item.IsPendingRemoval && !item.IsManualUnmatched && !item.IsManuallyExcluded)
-            .ToArray();
-        var missingSources = new List<string>();
-        foreach (var item in effectiveItems)
+        if (!drawingBomRelease)
         {
-            var source = currentSources.FirstOrDefault(candidate => SameBomSource(item, candidate));
-            if (source is null)
+            var referenceSnapshot = await repository.GetLatestReferenceSnapshotAsync(projectId, cancellationToken)
+                ?? throw new PdmRuleException("项目尚无最新设计树，不能核对非标件BOM来源。");
+            var generated = await GenerateMechanicalBomFromSnapshotAsync(projectId, referenceSnapshot, "release-validation", cancellationToken, false, false);
+            var currentSources = generated.StandardItems
+                .Concat(generated.NonStandardItems)
+                .Concat(generated.UnclassifiedItems)
+                .Where(item => item.SourceDocumentId.HasValue && !item.IsPendingRemoval && !item.IsManualUnmatched && !item.IsManuallyExcluded)
+                .ToArray();
+            var missingSources = new List<string>();
+            foreach (var item in effectiveItems)
             {
-                missingSources.Add(item.DrawingNumber);
-                continue;
+                var source = currentSources.FirstOrDefault(candidate => SameBomSource(item, candidate));
+                if (source is null)
+                {
+                    missingSources.Add(item.DrawingNumber);
+                    continue;
+                }
             }
+            if (missingSources.Count > 0)
+                throw new PdmRuleException($"以下非标件未在最新设计树中找到对应BOM来源，不能发布：{string.Join("、", missingSources.Take(12))}{(missingSources.Count > 12 ? $"等{missingSources.Count}项" : string.Empty)}。");
         }
-        if (missingSources.Count > 0)
-            throw new PdmRuleException($"以下非标件未在最新设计树中找到对应BOM来源，不能发布：{string.Join("、", missingSources.Take(12))}{(missingSources.Count > 12 ? $"等{missingSources.Count}项" : string.Empty)}。");
         var sourceItems = effectiveItems
             .GroupBy(item => item.SourceDocumentId!.Value)
             .Select(group => group.OrderBy(item => item.Sequence).First())
@@ -6909,7 +6987,7 @@ public sealed partial class PdmWorkflowService(
         foreach (var sourceItem in sourceItems)
         {
             var modelDocumentId = sourceItem.SourceDocumentId!.Value;
-            var modelVersions = await repository.ListDocumentVersionsAsync(modelDocumentId, cancellationToken);
+            var modelVersions = drawingBomRelease ? [] : await repository.ListDocumentVersionsAsync(modelDocumentId, cancellationToken);
             var boundModel = versionBindings?.FirstOrDefault(binding => binding.DocumentId == modelDocumentId && binding.Publish);
             var latestModel = boundModel is null ? modelVersions.OrderByDescending(version => version.CreatedAt).FirstOrDefault()
                 : modelVersions.FirstOrDefault(version => version.Id == boundModel.VersionId);
@@ -6931,7 +7009,7 @@ public sealed partial class PdmWorkflowService(
             var latestDrawing = boundDrawing is null ? drawingVersions.OrderByDescending(version => version.CreatedAt).FirstOrDefault()
                 : drawingVersions.FirstOrDefault(version => version.Id == boundDrawing.VersionId);
             var matched = false;
-            if (latestDrawing is not null)
+            if (latestDrawing is not null && (!drawingBomRelease || versionBindings is null || boundDrawing is not null))
             {
                 foreach (var package in approvedPackages)
                 {
@@ -6940,7 +7018,7 @@ public sealed partial class PdmWorkflowService(
                                  && IsDrawingReviewed(item.DrawingState)
                                  && item.EffectiveDrawingVersionId.HasValue
                                  && MatchesReviewedVersion(latestDrawing, item.EffectiveDrawingVersionId.Value, drawingVersions)
-                                 && latestModel is not null && MatchesReviewedVersion(latestModel, item.EffectiveModelVersionId, modelVersions)))
+                                 && (drawingBomRelease || latestModel is not null && MatchesReviewedVersion(latestModel, item.EffectiveModelVersionId, modelVersions))))
                     {
                         if (package.Markups.Any(markup => markup.ItemId == reviewItem.Id
                                 && markup.Target == DrawingReviewTarget.Drawing2D
@@ -6955,6 +7033,8 @@ public sealed partial class PdmWorkflowService(
             }
             if (!matched) missing.Add(sourceItem.DrawingNumber);
         }
+        if (drawingBomRelease && missing.Count > 0)
+            throw new PdmRuleException($"以下非标件未找到对应的已审核2D图纸版本：{string.Join("、", missing.Take(12))}。请核对图纸及其审核记录，刷新发布草稿后重试。");
         if (missing.Count > 0)
             throw new PdmRuleException($"以下非标件的2D图纸尚未审核通过或审核后模型/2D版本已变化：{string.Join("、", missing.Take(12))}{(missing.Count > 12 ? $"等{missing.Count}项" : string.Empty)}。请核对模型与工程图后重新发起图纸审核。");
     }
@@ -7012,17 +7092,11 @@ public sealed partial class PdmWorkflowService(
     private static bool IsNonStandardScope(ReleaseScope scope) =>
         scope is ReleaseScope.NonStandardWithDrawing or ReleaseScope.NonStandardLongLead or ReleaseScope.NonStandardSupplement;
 
-    private static void RequireMechanicalReleaseRole(ReleaseScope scope, UserRole role)
+    private async Task RequireMechanicalReleaseAsync(Guid projectId, ReleaseScope scope, string actor, CancellationToken cancellationToken)
     {
         if (scope != ReleaseScope.LegacyCombined && ReleaseScopeBomKind(scope) == BomKind.Electrical) return;
-        var tenant = TenantContext.Current;
-        var allowed = tenant is null
-            ? role is UserRole.Engineer or UserRole.Administrator
-            : tenant.HasRole(nameof(UserRole.Engineer))
-              || tenant.HasRole(nameof(UserRole.Administrator))
-              || tenant.HasRole("developer");
-        if (!allowed)
-            throw new UnauthorizedAccessException("标准件和非标件BOM仅允许机械工程师、系统管理员或开发者执行发布操作。");
+        if (!await AuthorizationPolicy.CanAsync(repository, projectId, actor, "release.mechanical", cancellationToken))
+            throw new UnauthorizedAccessException("当前账号没有标准件／非标件发布权限，请核对权限中心配置。");
     }
 
     private static bool IsPublishableBomItem(BomItem item) =>
@@ -7074,10 +7148,12 @@ public sealed partial class PdmWorkflowService(
         ApprovalWorkflowTemplate workflow,
         Project project,
         string actor,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, IReadOnlyDictionary<string, object?>? fields = null)
     {
         var users = await repository.ListUsersAsync(cancellationToken);
-        OrganizationDirectory? directory = null;
+        OrganizationDirectory? directory = await repository.GetOrganizationDirectoryAsync(cancellationToken);
+        workflow = ApprovalNodeRules.ResolveRoute(workflow, users.FirstOrDefault(user => user.Username.Equals(actor, StringComparison.OrdinalIgnoreCase)),
+            fields: ApprovalConditionRules.Context(project, actor, directory, fields));
         OrganizationUnit? primaryUnit = null;
         if (workflow.Steps.Any(step => step.AssigneeSource is ApprovalAssigneeSource.PrimaryUnitManager
             or ApprovalAssigneeSource.ParentUnitManager or ApprovalAssigneeSource.FixedUnitManager))
@@ -7124,8 +7200,11 @@ public sealed partial class PdmWorkflowService(
         for (var index = 0; index < workflow.Steps.Count; index++)
         {
             var step = workflow.Steps[index];
+            var group = await ApprovalNodeRules.ResolveGroupAsync(repository, step, project, users, cancellationToken);
+            var copy = await ApprovalNodeCopies.ResolveAsync(repository, step, project, actor, users, cancellationToken);
             var assignee = step.AssigneeSource switch
             {
+                ApprovalAssigneeSource.Role or ApprovalAssigneeSource.DepartmentMembers or ApprovalAssigneeSource.ParallelDepartments => group!.Members[0],
                 ApprovalAssigneeSource.Submitter => actor,
                 ApprovalAssigneeSource.ProjectDesignLead => project.DesignLead,
                 ApprovalAssigneeSource.FixedUser => step.FixedAssignee,
@@ -7143,6 +7222,7 @@ public sealed partial class PdmWorkflowService(
                 throw new PdmRuleException($"审批节点“{step.Name}”的指定人员不属于项目公司，请重新选择。");
             tasks.Add(new ApprovalTask(Guid.NewGuid(), packageId, step.Stage, assignee, null, null, null, null)
             {
+                Participants = ApprovalNodeRules.Freeze(group, assignee, step.Policy, copy),
                 StepOrder = index + 1,
                 StepName = step.Name
             });
@@ -7166,7 +7246,7 @@ public sealed partial class PdmWorkflowService(
             confirmedModels.UnionWith((await repository.GetBomAsync(projectId, kind, cancellationToken))
                 .Where(item => item.ReleaseConfirmation is not null && item.SourceDocumentId.HasValue)
                 .Select(item => item.SourceDocumentId!.Value));
-        if (confirmedModels.Count > 0)
+        if (!IsDrawingBomRelease(requestedScope) && confirmedModels.Count > 0)
         {
             var reference = rootDocumentId.HasValue
                 ? await repository.GetProjectReferenceRootAsync(projectId, rootDocumentId.Value, cancellationToken)
@@ -7342,7 +7422,8 @@ public sealed partial class PdmWorkflowService(
         }
         var current = await ReadCurrentBomAsync(projectId, kind, cancellationToken);
         var previous = await ReleasedBomBaselineAsync(projectId, kind, cancellationToken);
-        try { return BomSupplementSnapshot.Merge(current.Where(item => !item.IsManuallyExcluded && !item.IsPendingRemoval).ToArray(), selected, previous.Items, confirmedRemovedIds); }
+        var baseline = BomSummaryProjection.BaselineForSelectedTotals(previous.Items, current, selected, confirmedRemovedIds);
+        try { return BomSupplementSnapshot.Merge(current.Where(item => !item.IsManuallyExcluded && !item.IsPendingRemoval).ToArray(), selected, baseline, confirmedRemovedIds); }
         catch (InvalidOperationException error) { throw new PdmRuleException(error.Message); }
     }
 
@@ -7471,7 +7552,8 @@ public sealed partial class PdmWorkflowService(
             if (BomSupplementSnapshot.ChangedItems(items, previous.Items, multiplier, previous.Multiplier).Any(item => !ids.Contains(item.Id)))
                 throw new PdmRuleException("BOM整套倍率已变化，必须确认全部受影响的物料，不能将部分变更顺延。");
             var currentIds = items.Select(item => item.Id).ToHashSet();
-            if (BomSupplementSnapshot.Merge(items, selected, previous.Items, removedIds).Any(item => !currentIds.Contains(item.Id)))
+            var baseline = BomSummaryProjection.BaselineForSelectedTotals(previous.Items, await ReadCurrentBomAsync(projectId, kind, cancellationToken), selected, removedIds);
+            if (BomSupplementSnapshot.Merge(items, selected, baseline, removedIds).Any(item => !currentIds.Contains(item.Id)))
                 throw new PdmRuleException("BOM整套倍率已变化，存在尚未确认处理的历史物料；请恢复发布或撤销无需发布确认，并处理全部删除项后重试。");
         }
         return selected;
@@ -7485,7 +7567,7 @@ public sealed partial class PdmWorkflowService(
 
     private async Task<int> CurrentBomMultiplierAsync(Guid projectId, BomKind kind, CancellationToken cancellationToken)
     {
-        var current = (await repository.ListBomVersionsAsync(projectId, kind, cancellationToken)).FirstOrDefault();
+        var current = await repository.FindLatestBomVersionAsync(projectId, kind, null, cancellationToken);
         if (current is not null && (current.IsMultiplierOverridden || current.State == BomVersionState.InReview)) return current.WholeSetMultiplier;
         var project = await repository.FindProjectAsync(projectId, cancellationToken) ?? throw new PdmNotFoundException("项目不存在。");
         return project.Quantity;
@@ -7507,7 +7589,7 @@ public sealed partial class PdmWorkflowService(
                 snapshot = previous.MechanicalBomSnapshot.Where(item => kind == BomKind.Standard ? item.Kind == BomKind.Standard : item.Kind is BomKind.NonStandard or BomKind.Mechanical).ToArray();
             return (snapshot, Math.Max(1, previous.WholeSetMultiplier));
         }
-        var version = (await repository.ListBomVersionsAsync(projectId, kind, cancellationToken)).FirstOrDefault(version => version.State == BomVersionState.Released);
+        var version = await repository.FindLatestBomVersionAsync(projectId, kind, BomVersionState.Released, cancellationToken);
         return (version?.Items ?? [], version?.WholeSetMultiplier ?? 1);
     }
 
@@ -7571,16 +7653,11 @@ public sealed partial class PdmWorkflowService(
         && directory.Memberships.Any(membership => string.Equals(membership.Username, username, StringComparison.OrdinalIgnoreCase)
             && directory.Units.Any(unit => unit.Id == membership.UnitId && unit.IsActive && unit.OrganizationId == organizationId));
 
-    private static bool IsActiveTechnicalMemberOfOrganization(OrganizationDirectory directory, string username, Guid organizationId)
+    private bool IsActiveTechnicalMemberOfOrganization(OrganizationDirectory directory, string username, Guid organizationId)
     {
         if (!IsActiveMemberOfOrganization(directory, username, organizationId)) return false;
         var user = directory.Users.First(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase));
-        if (!user.EffectiveRoleCodes.Any(roleCode => roleCode is "Engineer" or "ElectricalEngineer" or "CommissioningEngineer" or "HardwareEngineer"
-                or "MechanicalManager" or "TechnicalAssistant" or "ProcessReviewer" or "Approver")) return false;
-        return directory.Memberships.Where(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase))
-            .Select(item => directory.Units.FirstOrDefault(unit => unit.Id == item.UnitId))
-            .Any(unit => unit is not null && (IsTechnicalUnitName(unit.Name)
-                || unit.Kind == OrganizationUnitKind.BusinessDivision && !IsNonTechnicalUnitName(unit.Name)));
+        return repository.HasUserPermissionAsync(username, user.Role, AuthorizationActions.TechnicalCandidate, default).GetAwaiter().GetResult();
     }
 
     private static bool IsTechnicalUnitName(string name) =>

@@ -7,6 +7,19 @@ public sealed record WorkbenchProcurement(bool Published, int PendingOrder, int 
 public sealed record WorkbenchQuality(string State, int Total, int Pending, int Failed, int Records, int Unconfirmed);
 public sealed record WorkbenchProject(Project Project, ProjectPlan? Plan, string PlanState, WorkbenchBudget? Budget,
     WorkbenchProcurement? Procurement, WorkbenchQuality? Quality, IReadOnlyList<string> Warnings, bool CanRegisterRisk, int? CompletionPercent, bool CanMaintainRecord = false, int? OplOpenCount = null);
+public sealed record ProjectRiskIdentity(Guid Id, string Code, string? BusinessStatus, DateOnly? DeliveryDate);
+public sealed record ProjectRiskProcurement(int Delayed, IReadOnlyList<ProjectRiskMaterial> Items);
+public sealed record ProjectRiskMaterial(int Sequence, string MaterialCode, string MaterialName, string? Specification,
+    decimal? Quantity, DateOnly? RequiredOn, DateOnly? ExpectedOn, IReadOnlyList<string> PurchaseOrders, string? ReleasePackageNumber);
+public sealed record ProjectRiskRelease(string State, string Scope, bool LocksDocuments, string PreviewState,
+    Guid Id, string Number, DateTimeOffset CreatedAt, string? Failure);
+public sealed record ProjectRiskTask(Guid Id, string Name, string Stage, DateOnly PlannedStart, DateOnly PlannedFinish, DateOnly? ActualFinish,
+    string Status, IReadOnlyList<Guid> PredecessorTaskIds);
+public sealed record ProjectRiskStage(string Code, bool? ParticipatesInDelivery);
+public sealed record ProjectRiskPlan(string ApprovalStatus, DateOnly PlannedFinish, IReadOnlyList<ProjectRiskTask> Tasks, IReadOnlyList<ProjectRiskStage> Stages);
+public sealed record ProjectRiskOverviewProject(ProjectRiskIdentity Project, ProjectRiskPlan? Plan, ProjectRiskProcurement? Procurement,
+    IReadOnlyList<ProjectRiskRelease> Releases, bool Incomplete);
+
 public sealed record WorkbenchView(string Key, string Label);
 public sealed record ProjectWorkbench(IReadOnlyList<WorkbenchView> Views, string View, DateTimeOffset UpdatedAt,
     IReadOnlyList<WorkbenchProject> Projects, IReadOnlyList<ProjectWorkbenchRisk> Risks, IReadOnlyList<string>? Scopes = null);
@@ -85,15 +98,15 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
         var directory = await repository.GetOrganizationDirectoryAsync(ct);
         var user = await repository.FindUserAsync(actor, ct);
         var roles = user?.EffectiveRoleCodes ?? TenantContext.Current?.EffectiveRoleCodes ?? [role.ToString()];
-        var administrator = role == UserRole.Administrator || roles.Contains("developer", StringComparer.OrdinalIgnoreCase);
+        var administrator = await repository.HasUserPermissionAsync(actor, role, "workbench.all", ct);
         var managedUnits = WorkbenchScope.ManagedUnits(directory, actor);
         var plans = (projects.Length == 0 ? [] : await planning.ListPlansAsync(projects.Select(project => project.Id).ToArray(), ct))
             .Where(plan => !plan.IsDeleted).ToDictionary(plan => plan.ProjectId);
         var propagatedTasks = calendarOnly ? plans.Values.Select(plan => plan.ChangeDraftSource ?? plan)
             .Where(plan => plan.ApprovalStatus == ProjectPlanApprovalStatus.Approved).SelectMany(plan => plan.Tasks)
             .Where(task => task.SourceTaskId.HasValue).Select(task => task.SourceTaskId!.Value).ToHashSet() : [];
-        var views = WorkbenchScope.Available(roles, administrator, managedUnits.Count > 0, projects.Any(project => WorkbenchScope.Manager(project, actor)),
-            projects.Any(project => WorkbenchScope.Engineer(project, actor)) || plans.Values.Any(plan => (plan.ChangeDraftSource ?? plan).Tasks.Any(task => WorkbenchScope.Contains(task.Assignee, actor))));
+        var viewPermissions = await repository.GetUserPermissionsAsync(actor, role, ct);
+        var views = WorkbenchScope.Views.Where(v => administrator || viewPermissions.Contains("workbench.view." + v.Key)).ToArray();
         var selected = string.IsNullOrWhiteSpace(requestedView) ? views.FirstOrDefault()?.Key ?? "" : requestedView;
         if (selected.Length > 0 && !views.Any(view => view.Key == selected)) throw new UnauthorizedAccessException("无权使用该岗位视角。");
         var scopes = new List<string> { "personal", "company" };
@@ -140,11 +153,7 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
                 {
                     try
                     {
-                        var value = await procurement.ListProjectAsync(project.Id, actor, role, ct);
-                        var items = value.Items.Where(item => !item.IsWarehouseMovementRow && (item.Manufacturing is null || item.Quantity > 0)).ToArray();
-                        purchasing = new(value.HasPublishedBom, items.Count(item => !item.IsFullyReceived && (item.Manufacturing is { } m
-                                ? m.AssignedQuantity < item.Quantity : item.PurchaseOrderNumbers.Count == 0)),
-                            items.Count(item => !item.IsFullyReceived), items.Count(item => item.HasDeliveryDelay && !item.IsFullyReceived), value.LastSuccessfulRefreshAt ?? value.ManufacturingReadAt, value.LastRefreshError);
+                        purchasing = await ReadProcurementSummaryAsync(project.Id, actor, role, ct);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add("采购跟踪暂时无法读取"); }
                 }
@@ -195,6 +204,99 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
         }).ToArray(), scopes);
     }
 
+    public async Task<IReadOnlyList<ProjectRiskOverviewProject>> GetRiskOverviewAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
+    {
+        var visible = (await repository.ListProjectsForUserAsync(actor, role, ct))
+            .Where(project => project.IsActive && project.CanReadContent && AllowsTab(project, "overview")).ToArray();
+        var selected = visible.FirstOrDefault(project => project.Id == projectId)
+            ?? throw new UnauthorizedAccessException("当前账号无权查看该项目风险。");
+        var candidates = selected.ParentProjectId is null
+            ? visible.Where(project => project.Id == projectId || project.RootProjectId == projectId || project.ParentProjectId == projectId)
+                .OrderBy(project => project.Id != projectId).ThenBy(project => project.Code, StringComparer.OrdinalIgnoreCase).ToArray()
+            : [selected];
+        var readable = new List<Project>();
+        foreach (var project in candidates)
+            if (await repository.HasProjectContentReadAccessAsync(project.Id, actor, role, ct)) readable.Add(project);
+        if (!readable.Any(project => project.Id == projectId))
+            throw new UnauthorizedAccessException("当前账号无权查看该项目风险。");
+
+        var planIds = readable.Where(project => AllowsTab(project, "project-plan")
+            && project.EffectiveProjectPermissions.Contains("project.plan.view")).Select(project => project.Id).ToHashSet();
+        var plans = (planIds.Count == 0 ? [] : await planning.ListPlansAsync(planIds.ToArray(), ct))
+            .Where(plan => !plan.IsDeleted).ToDictionary(plan => plan.ProjectId);
+        var result = new List<ProjectRiskOverviewProject>();
+        foreach (var project in readable)
+        {
+            plans.TryGetValue(project.Id, out var plan);
+            var incomplete = false;
+            ProjectRiskProcurement? purchasing = null;
+            IReadOnlyList<ProjectRiskRelease> releases = [];
+            if (AllowsTab(project, "procurement"))
+            {
+                try
+                {
+                    var value = await procurement.ListProjectAsync(project.Id, actor, role, ct);
+                    var delayed = ProcurementDemandRows(value).Where(IsDelayedProcurement)
+                        .Select(item => new ProjectRiskMaterial(item.Sequence, item.MaterialCode, item.MaterialName, item.Specification, item.Quantity,
+                            item.Manufacturing?.RequiredOn ?? ToDate(item.PurchaseRequisitionDeliveryDate),
+                            item.Manufacturing?.ForecastOn ?? ToDate(item.LatestDeliveryDate ?? item.PurchaseDeliveryDate),
+                            item.PurchaseOrderNumbers, item.ReleasePackageNumber)).ToArray();
+                    purchasing = new(delayed.Length, delayed);
+                    incomplete = !string.IsNullOrWhiteSpace(value.LastRefreshError);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    Console.Error.WriteLine($"项目采购风险读取失败：{ex}");
+                    incomplete = true;
+                }
+            }
+            if (AllowsTab(project, "release") && project.EffectiveProjectPermissions.Contains("release.view") && project.HasReleaseAttention)
+            {
+                try
+                {
+                    releases = (await repository.ListReleasePackagesAsync(project.Id, ct))
+                        .Where(item => item.State == ReleasePackageState.PublishFailed || item.PreviewState == ReleasePreviewState.Failed)
+                        .Select(item => new ProjectRiskRelease(item.State.ToString(), item.Scope.ToString(), item.LocksDocuments, item.PreviewState,
+                            item.Id, item.Number, item.CreatedAt, item.State == ReleasePackageState.PublishFailed ? item.PublishError : item.PreviewError)).ToArray();
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    Console.Error.WriteLine($"项目发布风险读取失败：{ex}");
+                    incomplete = true;
+                }
+            }
+            var effective = plan?.ChangeDraftSource ?? plan;
+            var schedule = effective?.ApprovalStatus == ProjectPlanApprovalStatus.Approved
+                ? new ProjectRiskPlan(effective.ApprovalStatus.ToString(), effective.PlannedFinish,
+                    effective.Tasks.Select(task => new ProjectRiskTask(task.Id, task.Name, task.Stage, task.PlannedStart, task.PlannedFinish,
+                        task.ActualFinish, task.Status.ToString(), task.PredecessorTaskIds)).ToArray(),
+                    effective.Stages.Select(stage => new ProjectRiskStage(stage.Code, stage.ParticipatesInDelivery)).ToArray())
+                : null;
+            result.Add(new(new(project.Id, project.Code, project.BusinessStatus, planIds.Contains(project.Id) ? project.DeliveryDate : null),
+                schedule, purchasing, releases, incomplete));
+        }
+        return result;
+
+        static bool AllowsTab(Project project, string tab) => project.EffectiveProjectPermissions.Contains(ProjectCenterPermissions.Tab(tab));
+    }
+
+    private async Task<WorkbenchProcurement> ReadProcurementSummaryAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
+    {
+        var value = await procurement.ListProjectAsync(projectId, actor, role, ct);
+        var items = ProcurementDemandRows(value).ToArray();
+        return new(value.HasPublishedBom, items.Count(item => !item.IsFullyReceived && (item.Manufacturing is { } m
+                ? m.AssignedQuantity < item.Quantity : item.PurchaseOrderNumbers.Count == 0)),
+            items.Count(item => !item.IsFullyReceived), items.Count(IsDelayedProcurement),
+            value.LastSuccessfulRefreshAt ?? value.ManufacturingReadAt, value.LastRefreshError);
+    }
+
+    private static IEnumerable<ProjectProcurementTrackingItem> ProcurementDemandRows(ProjectProcurementTrackingResult value) =>
+        value.Items.Where(item => !item.IsWarehouseMovementRow && (item.Manufacturing is null || item.Quantity > 0));
+
+    private static bool IsDelayedProcurement(ProjectProcurementTrackingItem item) => item.HasDeliveryDelay && !item.IsFullyReceived;
+
+    private static DateOnly? ToDate(DateTimeOffset? value) => value.HasValue ? DateOnly.FromDateTime(value.Value.Date) : null;
+
     private bool NeedsCalendarDeliveryDetails(ProjectPlan? plan, IReadOnlySet<Guid> propagatedTasks)
     {
         if (plan?.ApprovalStatus != ProjectPlanApprovalStatus.Approved) return false;
@@ -237,9 +339,8 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
         var project = await repository.FindProjectAsync(risk.ProjectId, ct) ?? throw new PdmNotFoundException("项目不存在。");
         var root = project.ParentProjectId is null ? project : await repository.FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, ct) ?? project;
         var units = WorkbenchScope.ManagedUnits(await repository.GetOrganizationDirectoryAsync(ct), actor);
-        if (role != UserRole.Administrator && TenantContext.Current?.HasRole("developer") != true && !WorkbenchScope.Same(risk.Owner, actor)
-            && !WorkbenchScope.Same(risk.CreatedBy, actor) && !WorkbenchScope.Manager(root, actor) && !(root.ExecutionUnitId is Guid unit && units.Contains(unit)))
-            throw new UnauthorizedAccessException("仅风险负责人、登记人或项目管理人员可关闭风险。");
+        if (!WorkbenchScope.Same(risk.Owner, actor) && !WorkbenchScope.Same(risk.CreatedBy, actor) && !await AuthorizationPolicy.CanAsync(repository, risk.ProjectId, actor, "project.risk.close-others", ct))
+            throw new UnauthorizedAccessException("当前账号没有关闭他人风险的权限。");
         if (risk.Closed) return;
         await risks.SaveAsync(risk with { Closed = true, ClosedBy = actor, ClosedAt = clock.GetUtcNow() }, ct);
         await repository.AppendAuditAsync(new(Guid.NewGuid(), clock.GetUtcNow(), actor, "project.risk.close", nameof(Project), risk.ProjectId.ToString(), risk.Title), ct);
@@ -253,9 +354,6 @@ public sealed class ProjectWorkbenchService(IPdmRepository repository, IProjectP
         var units = WorkbenchScope.ManagedUnits(await repository.GetOrganizationDirectoryAsync(ct), actor);
         var staff = await contacts.FindAsync(root.Id, ct);
         var plan = await planning.FindPlanAsync(projectId, ct);
-        if (role != UserRole.Administrator && TenantContext.Current?.HasRole("developer") != true && !WorkbenchScope.Manager(root, actor)
-            && !(root.ExecutionUnitId is Guid unit && units.Contains(unit)) && !WorkbenchScope.Engineer(root, actor) && !WorkbenchScope.Engineer(project, actor)
-            && !root.PhaseOwners.Values.Concat(project.PhaseOwners.Values).Any(value => WorkbenchScope.Contains(value, actor)) && !((plan?.ChangeDraftSource ?? plan)?.Tasks.Any(task => WorkbenchScope.Contains(task.Assignee, actor)) ?? false)
-            && !WorkbenchScope.Contains(staff?.SalesPeople, actor) && !WorkbenchScope.Contains(staff?.PresalesPeople, actor)) throw new UnauthorizedAccessException("仅项目参与人员可维护风险。");
+        if (!await AuthorizationPolicy.CanAsync(repository, projectId, actor, "project.risk.manage", ct)) throw new UnauthorizedAccessException("当前账号没有维护此项目风险的权限。");
     }
 }

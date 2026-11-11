@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import UserSelect from './UserSelect'
+import OplSpeechInput from './OplSpeechInput.vue'
+import { appendOplFiles } from '../oplSpeech'
 import { computed, nextTick, onMounted, ref } from 'vue'
 
 type DingSdk = { env?: { platform?: string }; ready: (callback: () => void) => void; runtime: { permission: { requestAuthCode: (input: { corpId: string; onSuccess: (result: { code: string }) => void; onFail: () => void }) => void } } }
@@ -10,6 +12,7 @@ const projectId = ref(''), previousProject = ref(''), projects = ref<ProjectOpti
 const selected = computed(() => projects.value.find(project => project.id === projectId.value))
 const token = ref(''), user = ref(''), error = ref(''), notice = ref(''), pending = ref(false)
 const description = ref(''), relatedProjectId = ref<string | null>(null), files = ref<File[]>([])
+const speechBusy = ref(false)
 const priority = ref('普通'), status = ref('待处理'), owner = ref(''), dueDate = ref(''), solution = ref('')
 const people = ref<Array<{ username: string; displayName: string }>>([])
 const message = (cause: unknown, fallback: string) => cause instanceof Error && /[\u3400-\u9fff]/.test(cause.message) ? cause.message : fallback
@@ -67,7 +70,7 @@ async function login() {
   finally { pending.value = false }
 }
 async function submit() {
-  if (pending.value || !selected.value) return
+  if (pending.value || speechBusy.value || !selected.value) return
   error.value = ''; notice.value = ''
   if (!description.value.trim()) { error.value = '请填写问题描述。'; return }
   if (files.value.length > 10 || files.value.some(file => !file.size || file.size > 10 * 1024 * 1024) || files.value.reduce((sum, file) => sum + file.size, 0) > 30 * 1024 * 1024) { error.value = '最多10个附件，单个不超过10MB，总大小不超过30MB。'; return }
@@ -81,7 +84,20 @@ async function submit() {
   } catch (cause) { error.value = message(cause, '问题提交失败，请检查网络后重试。') }
   finally { pending.value = false }
 }
-function selectFiles(event: Event) { files.value = Array.from((event.target as HTMLInputElement).files || []) }
+async function recognizeSpeech(wave: Blob, signal: AbortSignal) {
+  const result = await request(`/api/integrations/dingtalk/opl/guest/projects/${projectId.value}/speech/transcribe`, {
+    method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: wave, signal,
+  })
+  return result.text
+}
+function selectFiles(event: Event) {
+  const input = event.target as HTMLInputElement
+  const selectedFiles = appendOplFiles(files.value, Array.from(input.files || []))
+  input.value = ''
+  if (!selectedFiles) { error.value = '最多10个附件，单个不超过10MB，总大小不超过30MB。'; return }
+  error.value = ''
+  files.value = selectedFiles
+}
 onMounted(login)
 </script>
 
@@ -90,13 +106,14 @@ onMounted(login)
     <header><h1>OPL 开口问题反馈</h1><p v-if="user">提交人：{{ user }}</p><p>描述现场问题并上传附件，即可提交给项目人员处理。</p></header>
     <p v-if="error" role="alert" class="ding-error">{{ error }}</p><p v-if="notice" role="status" class="ding-success">{{ notice }}</p>
     <p v-if="pending && !token">正在识别钉钉姓名…</p>
-    <label v-if="token">所属项目<select v-model="projectId" :disabled="pending || projects.length === 1" @change="changeProject"><option v-if="projects.length !== 1" value="">请选择项目</option><option v-for="project in projects" :key="project.id" :value="project.id">{{ project.code }} · {{ project.name }}</option></select></label>
+    <label v-if="token">所属项目<select v-model="projectId" :disabled="pending || speechBusy || projects.length === 1" @change="changeProject"><option v-if="projects.length !== 1" value="">请选择项目</option><option v-for="project in projects" :key="project.id" :value="project.id">{{ project.code }} · {{ project.name }}</option></select></label>
     <p v-if="token && selected && query.get('groupId') && projects.length === 1">已自动关联当前群绑定的项目。</p>
     <p v-if="token && !pending && !projects.length">当前入口尚未关联项目，请联系项目人员设置群绑定。</p>
     <form v-if="token && selected" @submit.prevent="submit">
       <fieldset :disabled="pending">
         <label>子项目（非必填）<select v-model="relatedProjectId"><option :value="null">项目整体</option><option v-for="project in selected.subprojects" :key="project.id" :value="project.id">{{ project.code }} · {{ project.name }}</option></select></label>
         <label>问题描述<textarea v-model="description" required maxlength="2000" placeholder="请描述现场问题" /></label>
+        <OplSpeechInput :key="projectId" v-model:description="description" v-model:files="files" :disabled="pending" :transcribe="recognizeSpeech" @busy="speechBusy = $event" />
         <div class="ding-fields">
           <label>优先级<select v-model="priority"><option v-for="value in ['紧急','高','普通','低']" :key="value">{{ value }}</option></select></label>
           <label>实施状态<select v-model="status"><option v-for="value in ['待处理','处理中','待确认','已完成','已作废']" :key="value">{{ value }}</option></select></label>
@@ -106,13 +123,15 @@ onMounted(login)
         <label>解决措施<textarea v-model="solution" maxlength="4000" :required="status === '待确认'" placeholder="请填写处理过程和解决结果" /></label>
         <label>图片和附件<input id="dingtalk-opl-files" type="file" multiple @change="selectFiles"></label>
         <small>最多10个附件，单个不超过10MB，总大小不超过30MB。</small>
-        <button type="submit">{{ pending ? '正在提交…' : '提交问题' }}</button>
+        <ul v-if="files.length" class="ding-attachments"><li v-for="(file, index) in files" :key="index"><span>{{ file.name }}</span><button class="pdm-text-action" type="button" :disabled="speechBusy" @click="files.splice(index, 1)">移除</button></li></ul>
+        <button type="submit" :disabled="speechBusy">{{ pending ? '正在提交…' : '提交问题' }}</button>
       </fieldset>
     </form>
   </main>
 </template>
 <style scoped>
-.ding-opl { max-width:720px;margin:0 auto;padding:20px;color:var(--pdm-text,var(--pdm-text));overflow:auto;height:100vh;box-sizing:border-box;background:white; }
+.ding-opl { max-width:720px;margin:0 auto;padding:20px;color:var(--pdm-text,var(--pdm-text));overflow:auto;height:100vh;box-sizing:border-box;background:var(--pdm-surface); }
 .ding-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 12px}
+.ding-attachments{list-style:none;padding:0;margin:6px 0}.ding-attachments li{display:flex;gap:8px;align-items:center;overflow-wrap:anywhere}.ding-attachments button.pdm-text-action{margin:0;padding:0;background:none;color:var(--pdm-theme-accent);border:0}
 h1{font-size:20px}header p{color:var(--pdm-text-soft)}fieldset{border:0;margin:0;padding:0;min-width:0}label{display:flex;flex-direction:column;gap:6px;margin:14px 0}input,select,textarea{box-sizing:border-box;width:100%;padding:10px;border:1px solid var(--pdm-border);border-radius:5px;font:inherit}textarea{height:100px;resize:vertical}button{padding:10px 16px;margin-top:12px;background:var(--pdm-theme-accent);border:0;border-radius:5px;color:white;cursor:pointer}fieldset:disabled{opacity:.65}.ding-error{color:var(--pdm-danger)}.ding-success{background:var(--pdm-green-soft);padding:12px;border-radius:5px;line-height:1.7}small{display:block;color:var(--pdm-text-soft)}
 </style>

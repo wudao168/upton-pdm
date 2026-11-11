@@ -57,6 +57,7 @@ export const stockedMaterial: Directive<StockElement, unknown> = {
       const state = element.stockState!
       const plan = materialStockPlan(state.code)
       element.classList.toggle('pdm-stocked-material', !!plan)
+      if (binding.modifiers.highlight) element.classList.toggle('pdm-stocked-material-highlight', !!plan)
       if (plan) element.title = [state.title, materialStockTooltip(plan)].filter(Boolean).join('\n')
       else if (state.title) element.title = state.title
       else element.removeAttribute('title')

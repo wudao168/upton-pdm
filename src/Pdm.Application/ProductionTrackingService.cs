@@ -32,6 +32,7 @@ public sealed record ProductionMovement(
     Guid Id, Guid RequestId, Guid LotId, string Kind, decimal Quantity, string Actor,
     DateTimeOffset OccurredAt, string? Note = null, string? Recipient = null)
 {
+    public ProductionLabelSnapshot? Label { get; init; }
     public string? ActorName { get; init; }
     public string? ActorRoles { get; init; }
     public Guid? BindingId { get; init; }
@@ -54,6 +55,7 @@ public sealed record ProductionTrackingState(
     IReadOnlyList<ProductionMovement> Movements, string? ReceivedBy = null,
     DateTimeOffset? ReceivedAt = null)
 {
+    public IReadOnlyList<ProductionPrintJob> PrintJobs { get; init; } = [];
     public string FlowMode { get; init; } = "ResourceOperations";
     public IReadOnlyList<ProductionFlowNode>? FlowNodes { get; init; }
     public Guid? FormalReleasePackageId { get; init; }
@@ -152,7 +154,8 @@ public sealed record BatchProductionAllocation(IReadOnlyList<Guid> LineIds, stri
     Guid RequestId, long ExpectedRowVersion, Guid? SupplierId = null);
 
 public sealed record RecordProductionMovement(Guid LotId, string Kind, decimal Quantity,
-    Guid RequestId, string? Note = null, string? Recipient = null, Guid? WorkstationId = null, string? SourceKind = null);
+    Guid RequestId, string? Note = null, string? Recipient = null, Guid? WorkstationId = null, string? SourceKind = null,
+    Guid? LabelPrinterId = null);
 
 public static class ProductionTrackingRules
 {
@@ -955,12 +958,26 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
         var current = await FindAsync(id, actor, role, ct);
         var originalLot = current.State.Lots.FirstOrDefault(item => item.Id == input.LotId)
             ?? throw new PdmNotFoundException("生产批次不存在，请重新扫码或刷新页面。");
+        await ProductionDocumentGuard.RequireAsync(repository, current.State, originalLot.LineId, ct);
+        U9UnitCatalog.RequireWholeQuantity(input.Quantity, current.State.Lines.Single(item => item.Id == originalLot.LineId).Unit, "本次数量");
+        var labelCatalog = input.LabelPrinterId.HasValue ? await store.ScanCatalogAsync(current.State.CompanyId, ct) : null;
+        var labelCompany = input.LabelPrinterId.HasValue
+            ? (await repository.GetProjectNumberingOptionsAsync(ct)).Organizations.FirstOrDefault(item => item.Id == current.State.CompanyId)?.Name ?? "公司名称待补充"
+            : string.Empty;
+        if (input.LabelPrinterId.HasValue)
+        {
+            if (!await AuthorizationPolicy.CanAsync(repository, current.State.ProjectId, actor, ProductionMobilePermissions.Print, ct))
+                throw new UnauthorizedAccessException("没有打印该项目包装标签的权限。");
+            if (labelCatalog!.Printers.All(item => item.Id != input.LabelPrinterId || !item.IsActive))
+                throw new PdmRuleException("请选择已启用的包装打印机。");
+        }
         if (!ProductionFlowRules.Labels.ContainsKey(input.Kind) && ProductionDepartmentFlow.Node(current.State, originalLot, input.Kind) is null)
             throw new PdmRuleException("生产操作类型无效，请刷新可办理步骤。");
         await RequirePermissionAsync(actor, role, ProductionFlowRules.Permission(current.State, originalLot, input.Kind), ct);
         void CheckReplay(ProductionMovement movement)
         {
             if (movement.Actor != actor || movement.Kind != input.Kind || movement.LotId != input.LotId || movement.Quantity != input.Quantity
+                || movement.Label?.PrinterId != input.LabelPrinterId
                 || input.WorkstationId.HasValue && (movement.WorkstationId ?? Guid.Empty) != input.WorkstationId
                 || input.SourceKind is not null && movement.SourceKind != input.SourceKind
                 || (movement.Note ?? "") != (input.Note?.Trim() ?? "") || (movement.Recipient ?? "") != (input.Kind == "Issue" ? input.Recipient?.Trim() ?? "" : ""))
@@ -978,6 +995,8 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
         if (options.Length != 1) throw new PdmRuleException(options.Length == 0
             ? "当前账号、工位或前序环节不允许办理此步骤，请刷新可办理步骤后重新选择。" : "请选择本次办理的具体工位或异常发生环节。");
         var grant = options[0];
+        if (input.LabelPrinterId.HasValue && (grant.Post != "Packing" || !ProductionLabelRules.IsPackaging(current.State, originalLot, input.Kind)))
+            throw new PdmRuleException("只能随包装工序登记生成箱袋标签。");
         if (input.Quantity > grant.RemainingQuantity) throw new PdmRuleException("本次数量超过当前岗位和工位的可办理数量，请核对后重新确认。");
         if (input.Kind == "Resume" && grant.SourceKind is null && input.Quantity != grant.RemainingQuantity)
             throw new PdmRuleException("历史整批暂停请先全部恢复，再按环节和数量暂停。");
@@ -1004,13 +1023,25 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
             var movement = new ProductionMovement(Guid.NewGuid(), input.RequestId, lot.Id, input.Kind, input.Quantity,
                 actor, clock.GetUtcNow(), input.Note?.Trim(), input.Kind == "Issue" ? input.Recipient?.Trim() : null)
             {
-                ActorName = account?.DisplayName ?? actor, ActorRoles = string.Join(",", account?.EffectiveRoleCodes ?? [role.ToString()]),
+                ActorName = string.IsNullOrWhiteSpace(account?.DisplayName) ? "姓名待补充" : account.DisplayName, ActorRoles = string.Join(",", account?.EffectiveRoleCodes ?? [role.ToString()]),
                 BindingId = grant.BindingId == Guid.Empty ? null : grant.BindingId, Post = grant.Post, WorkstationId = grant.WorkstationId == Guid.Empty ? null : grant.WorkstationId,
                 WorkstationName = grant.WorkstationId == Guid.Empty ? null : grant.WorkstationName, ResourceGroup = grant.Post is "Machining" or "Trace" ? grant.ResourceGroup : null,
                 FromStage = grant.SourceName ?? ProductionFlowRules.Stage(state, lot), OperationName = grant.Label, SourceKind = source,
                 FlowCredits = ProductionQuantityFlow.IsRemoval(input.Kind) && source is not null
                     ? ProductionQuantityFlow.RemovalCredits(state, lot, source, input.Quantity) : []
             };
+            if (input.LabelPrinterId is Guid printerId)
+            {
+                var line = state.Lines.Single(item => item.Id == lot.LineId);
+                var label = new ProductionLabelSnapshot(movement.Id, lot.Id, line.Id, printerId,
+                    labelCompany, state.ProjectCode, line.Name, line.DrawingNumber,
+                    line.DisplayRevision ?? line.Revision, state.PackageNumber, input.Quantity, line.Unit,
+                    movement.OccurredAt, labelCatalog!.LabelWidthMm, labelCatalog.LabelHeightMm,
+                    $"UPLM-PACK|{id:N}|{movement.Id:N}");
+                movement = movement with { Label = label };
+                state = state with { PrintJobs = state.PrintJobs.Append(new(Guid.NewGuid(), label.Id, printerId,
+                    input.RequestId, actor, movement.OccurredAt)).ToArray() };
+            }
             var after = state with { Movements = state.Movements.Append(movement).ToArray() };
             var open = ProductionQuantityFlow.Outstanding(after, lot);
             var changedLot = lot with { Paused = open > 0 && ProductionQuantityFlow.Paused(after, lot) >= open };
@@ -1113,6 +1144,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
         string actor, UserRole role, CancellationToken ct)
     {
         var seeds = await ResolveScanCoreAsync(code, actor, role, ct);
+        var boundBatch = PdfReleaseIdentity.TryDecodeBatch(code, out _, out _, out _);
         var results = new List<ProductionScanResult>();
         var projects = new Dictionary<Guid, IReadOnlyList<ProductionTrackingState>>();
         foreach (var group in seeds.GroupBy(item => item.ReleasePackageId))
@@ -1128,6 +1160,8 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
                 var line = state.Lines.Single(item => item.Id == seed.LineId);
                 if (seed.LotId.HasValue)
                     results.Add(ScanResult(state, line, state.Lots.Single(item => item.Id == seed.LotId)));
+                else if (boundBatch)
+                    results.Add(ScanResult(state, line));
                 else
                     results.AddRange(records.SelectMany(record => record.Lines.Where(item => SameScanDemand(line, item))
                         .Select(item => ScanResult(record, item))));
@@ -1172,11 +1206,24 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
         string actor, UserRole role, CancellationToken ct)
     {
         code = code.Trim();
+        if (PdfReleaseIdentity.TryDecodeBatch(code, out var batchModel, out var batchRevision, out var batchId))
+            return (await ResolveDisplayScanAsync(batchModel, batchRevision, actor, role, ct, batchId))
+                .Where(item => item.ReleasePackageId == batchId).ToArray();
         if (PdfReleaseIdentity.TryDecodeDisplay(code, out var model, out var revision))
             return await ResolveDisplayScanAsync(model, revision, actor, role, ct);
         if (code.Trim().StartsWith("UPLM-PDF|", StringComparison.Ordinal))
             return await ResolvePdfScanAsync(code, actor, role, ct);
         var parts = code.Trim().Split('|');
+        if (parts.Length == 3 && parts[0] == "UPLM-PACK"
+            && Guid.TryParse(parts[1], out var labelReleaseId) && Guid.TryParse(parts[2], out var labelId))
+        {
+            var record = await FindAsync(labelReleaseId, actor, role, ct);
+            var label = record.State.Movements.Select(item => item.Label).FirstOrDefault(item => item?.Id == labelId)
+                ?? throw new PdmNotFoundException("包装标签不存在，请核对标签。");
+            await ProductionDocumentGuard.RequireAsync(repository, record.State, label.LineId, ct);
+            return [ScanResult(record.State, record.State.Lines.Single(item => item.Id == label.LineId),
+                record.State.Lots.Single(item => item.Id == label.LotId))];
+        }
         if (parts.Length == 3 && parts[0] == "UPLM-PRODUCTION"
             && Guid.TryParse(parts[1], out var packageId) && Guid.TryParse(parts[2], out var lotId))
         {
@@ -1184,6 +1231,7 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
             var lot = record.State.Lots.FirstOrDefault(item => item.Id == lotId)
                 ?? throw new PdmNotFoundException("批次二维码已失效，请刷新生产任务。");
             var line = record.State.Lines.Single(item => item.Id == lot.LineId);
+            await ProductionDocumentGuard.RequireAsync(repository, record.State, line.Id, ct);
             return [new(packageId, line.Id, lot.Id, record.State.PackageNumber,
                 line.DrawingNumber, line.Name, line.Revision, ProductionTrackingRules.Status(record.State))];
         }
@@ -1228,12 +1276,12 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
     }
 
     private async Task<IReadOnlyList<ProductionScanResult>> ResolveDisplayScanAsync(string model, string revision,
-        string actor, UserRole role, CancellationToken ct)
+        string actor, UserRole role, CancellationToken ct, Guid? exactPackageId = null)
     {
         var results = new List<ProductionScanResult>();
         var packages = new Dictionary<Guid, ReleasePackage>();
         foreach (var drawing in (await drawings.ListIndexAsync(actor, role, true, ct))
-            .Where(item => item.Revision == revision))
+            .Where(item => item.Revision == revision && (!exactPackageId.HasValue || item.ReleasePackageId == exactPackageId)))
         {
             var formal = await repository.FindDocumentVersionAsync(drawing.DocumentId, drawing.VersionId, ct);
             if (formal is null) continue;
@@ -1317,6 +1365,9 @@ public sealed class ProductionTrackingService(IPdmRepository repository, IProduc
         {
             var updated = change(current.State);
             if (ReferenceEquals(updated, current.State)) return current;
+            foreach (var lotId in updated.Movements.Where(item => current.State.Movements.All(old => old.Id != item.Id))
+                .Select(item => item.LotId).Distinct())
+                await ProductionDocumentGuard.RequireAsync(repository, updated, updated.Lots.Single(item => item.Id == lotId).LineId, ct);
             var candidate = current with { State = updated, RowVersion = current.RowVersion + 1 };
             if (await store.SaveAsync(candidate, current.RowVersion, ct)) return candidate;
             current = await store.FindAsync(id, ct) ?? throw new PdmNotFoundException("发布跟踪单不存在。");

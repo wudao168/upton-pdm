@@ -29,10 +29,13 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
     private readonly ConcurrentDictionary<Guid, DocumentVersion> versions = new();
     private readonly ConcurrentDictionary<Guid, string> documentSourceFingerprints = new();
     private readonly ConcurrentQueue<AuditEntry> audits = new();
-    private readonly Dictionary<Guid, int> projectCounters = new();
-    private readonly Dictionary<Guid, SortedSet<int>> releasedProjectNumbers = new();
+    private readonly Dictionary<(Guid OrganizationId, string ProjectTypeCode), int> projectCounters = new();
+    private readonly Dictionary<(Guid OrganizationId, string ProjectTypeCode), SortedSet<int>> releasedProjectNumbers = new();
     private readonly TimeProvider timeProvider;
     private readonly IProjectContactInformationRepository? projectContacts;
+    public Task<ProjectContactInformation?> FindProjectContactInformationAsync(Guid projectId, CancellationToken ct) =>
+        projectContacts?.FindAsync(projectId, ct) ?? Task.FromResult<ProjectContactInformation?>(null);
+    private readonly IProjectBudgetRepository? projectBudgets;
     private readonly IProductionTrackingStore? productionTracking;
     private readonly Dictionary<Guid, int> serialCounters = new();
     private readonly Dictionary<Guid, SortedSet<int>> releasedSerialNumbers = new();
@@ -56,10 +59,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     public int BomBatchApplyCount { get; private set; }
 
-    public InMemoryPdmRepository(TimeProvider timeProvider, IProjectContactInformationRepository? projectContacts = null, IProductionTrackingStore? productionTracking = null)
+    public InMemoryPdmRepository(TimeProvider timeProvider, IProjectContactInformationRepository? projectContacts = null, IProductionTrackingStore? productionTracking = null, IProjectBudgetRepository? projectBudgets = null)
     {
         this.timeProvider = timeProvider;
         this.projectContacts = projectContacts;
+        this.projectBudgets = projectBudgets;
         this.productionTracking = productionTracking;
         foreach (var definition in RolePermissionCatalog.Roles)
         {
@@ -117,7 +121,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         var result = new List<Project>();
         var activation = productionTracking is null ? DateTimeOffset.MaxValue : await productionTracking.ActivationAtAsync(cancellationToken);
         foreach (var project in projects.Values.Where(IsInActiveCompany).OrderBy(project => project.Code))
-            if (await HasCommercialProjectAccessAsync(project, actor, role, cancellationToken))
+            if (await AuthorizationPolicy.CanAsync(this, project.Id, actor, PermissionCodes.ProjectView, cancellationToken))
             {
                 var summary = ApplyCapabilities(project, actor, role);
                 if (productionTracking is not null)
@@ -141,14 +145,10 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         return Task.FromResult(project);
     }
 
-    public async Task<bool> HasProjectReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
-        HasUserPermission(actor, role, PermissionCodes.ProjectView) && projects.TryGetValue(projectId, out var project) && IsInActiveCompany(project)
-            && await HasCommercialProjectAccessAsync(project, actor, role, cancellationToken);
-
-    public async Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
-        projects.TryGetValue(projectId, out var project) && IsInActiveCompany(project)
-            && HasUserPermission(actor, role, PermissionCodes.ProjectContentView)
-            && await HasCommercialProjectAccessAsync(project, actor, role, cancellationToken);
+    public Task<bool> HasProjectReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
+        AuthorizationPolicy.CanAsync(this, projectId, actor, PermissionCodes.ProjectView, cancellationToken);
+    public Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken) =>
+        AuthorizationPolicy.CanAsync(this, projectId, actor, PermissionCodes.ProjectContentView, cancellationToken);
 
     private Task<bool> HasCommercialProjectAccessAsync(Project project, string actor, UserRole role, CancellationToken ct) =>
         CommercialProjectAccess.CanReadAsync(project, users.Values.FirstOrDefault(user => user.Username.Equals(actor, StringComparison.OrdinalIgnoreCase)),
@@ -233,7 +233,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 command.Owner,
                 command.VaultLocation,
                 command.ReleaseLocation,
-                true) { ResponsibleUsers = [actor], CreatedAt = timeProvider.GetUtcNow() };
+                true) { OrganizationId = TenantContext.CompanyId, ResponsibleUsers = [actor], CreatedAt = timeProvider.GetUtcNow() };
             projects[project.Id] = project;
             projectResponsibles[project.Id] = [actor];
             EnsureProjectFolderTree(project.Id);
@@ -249,9 +249,9 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         lock (gate)
         {
             if (!NumberingOptions().Organizations.Any(item => item.Id == organizationId)) throw new PdmNotFoundException("组织不存在。");
-            if (currentProjectSequence < projectCounters.GetValueOrDefault(organizationId) || currentSerialSequence < serialCounters.GetValueOrDefault(organizationId))
+            if (currentProjectSequence < CurrentProjectCounter(organizationId) || currentSerialSequence < serialCounters.GetValueOrDefault(organizationId))
                 throw new PdmRuleException("流水基线只能向前调整，不能小于系统当前值。");
-            projectCounters[organizationId] = currentProjectSequence;
+            foreach (var type in NumberingOptions().ProjectTypes) projectCounters[(organizationId, type.Code.ToUpperInvariant())] = currentProjectSequence;
             serialCounters[organizationId] = currentSerialSequence;
             return Task.FromResult(NumberingOptions());
         }
@@ -366,29 +366,37 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         Task.FromResult<IReadOnlyList<UserAccount>>(users.Values.OrderBy(user => user.Username).ToArray());
 
     public Task<RolePermissionDirectory> GetRolePermissionDirectoryAsync(CancellationToken cancellationToken) =>
-        Task.FromResult(BuildRolePermissionDirectory());
+        Task.FromResult(AuthorizationPolicy.ProjectDirectory(BuildRolePermissionDirectory(), authorizationSettings));
 
-    public Task<IReadOnlySet<string>> GetRolePermissionsAsync(UserRole role, CancellationToken cancellationToken) =>
-        Task.FromResult(FunctionPermissionCatalog.Effective(rolePermissions.GetValueOrDefault(role.ToString(), RolePermissionCatalog.Defaults[role])));
-
-    public Task<IReadOnlySet<string>> GetUserPermissionsAsync(string username, UserRole fallbackRole, CancellationToken cancellationToken)
+    public async Task<IReadOnlySet<string>> GetRolePermissionsAsync(UserRole role, CancellationToken cancellationToken)
     {
-        var user = users.Values.FirstOrDefault(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase));
-        return Task.FromResult(user is null ? PermissionsFor(fallbackRole.ToString(), fallbackRole) : PermissionsFor(user.EffectiveRoleCodes, fallbackRole));
+        var settings = await GetAuthorizationSettingsAsync(cancellationToken);
+        return (settings.Templates.FirstOrDefault(t => t.RoleCode == role.ToString() && t.IsActive)?.Grants ?? []).Where(g => g.Scopes.Count > 0).Select(g => g.Permission).ToHashSet();
     }
 
-    public Task<bool> HasRolePermissionAsync(UserRole role, string permissionCode, CancellationToken cancellationToken) =>
-        Task.FromResult(role == UserRole.Administrator || PermissionsFor(role.ToString(), role).Contains(permissionCode));
-
-    public async Task<bool> HasUserPermissionAsync(string username, UserRole fallbackRole, string permissionCode, CancellationToken cancellationToken) =>
-        fallbackRole == UserRole.Administrator || (await GetUserPermissionsAsync(username, fallbackRole, cancellationToken)).Contains(permissionCode);
-
-    public Task<RolePermissionDirectory> SetRolePermissionsAsync(string roleCode, IReadOnlyList<string> permissionCodes, CancellationToken cancellationToken)
+    public async Task<IReadOnlySet<string>> GetUserPermissionsAsync(string username, UserRole fallbackRole, CancellationToken cancellationToken)
     {
-        var definition = roleDefinitions.GetValueOrDefault(roleCode) ?? throw new PdmNotFoundException("角色不存在。");
-        if (definition.BaseRole == UserRole.PlatformAdministrator) throw new PdmRuleException("平台管理员权限由系统固定，不支持修改。");
-        if (!definition.IsSystemAdministrator) rolePermissions[roleCode] = RolePermissionCatalog.Normalize(definition.BaseRole, permissionCodes);
-        return Task.FromResult(BuildRolePermissionDirectory());
+        var user = await FindUserAsync(username, cancellationToken);
+        return user is null ? new HashSet<string>() : AuthorizationPolicy.PotentialPermissions(await GetAuthorizationSettingsAsync(cancellationToken), user, TenantContext.CompanyId ?? user.CompanyId);
+    }
+    public async Task<bool> HasRolePermissionAsync(UserRole role, string permissionCode, CancellationToken cancellationToken) =>
+        FunctionPermissionCatalog.Contains(await GetRolePermissionsAsync(role, cancellationToken), permissionCode);
+    public async Task<bool> HasUserPermissionAsync(string username, UserRole fallbackRole, string permissionCode, CancellationToken cancellationToken)
+    {
+        if (TenantContext.Current is { Authorization: not null } tenant && tenant.Username.Equals(username, StringComparison.OrdinalIgnoreCase)) return FunctionPermissionCatalog.Contains(tenant.Permissions, permissionCode);
+        var user = await FindUserAsync(username, cancellationToken);
+        if (user is null) return false;
+        var settings = await GetAuthorizationSettingsAsync(cancellationToken);
+        return RolePermissionCatalog.Permissions.FirstOrDefault(p => p.Code == permissionCode)?.Scope == "project"
+            ? FunctionPermissionCatalog.Contains(AuthorizationPolicy.PotentialPermissions(settings, user, TenantContext.CompanyId ?? user.CompanyId), permissionCode)
+            : AuthorizationPolicy.GlobalAllows(settings, user, TenantContext.CompanyId ?? user.CompanyId, permissionCode);
+    }
+
+    public async Task<RolePermissionDirectory> SetRolePermissionsAsync(string roleCode, IReadOnlyList<string> permissionCodes, CancellationToken cancellationToken)
+    {
+        var settings = await GetAuthorizationSettingsAsync(cancellationToken);
+        await SaveAuthorizationSettingsAsync(AuthorizationPolicy.UpdateRole(settings, roleCode, permissionCodes), settings.Revision, cancellationToken);
+        return await GetRolePermissionDirectoryAsync(cancellationToken);
     }
 
     public Task<RolePermissionDirectory> CreateRoleAsync(string name, string description, string sourceRoleCode, CancellationToken cancellationToken)
@@ -539,10 +547,10 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var codeChanged = organizationChanged || !string.Equals(project.ProjectTypeCode, projectTypeCode, StringComparison.OrdinalIgnoreCase);
             var customerChanged = organizationChanged || !string.Equals(project.CustomerCode, customer.Code, StringComparison.OrdinalIgnoreCase);
             var oldProjectSequence = codeChanged ? ParseProjectSequence(project, oldOrganization) : 0;
-            var projectSequence = organizationChanged
-                ? ReserveNumber(projectCounters, releasedProjectNumbers, organization.Id, 99999)
+            var projectSequence = codeChanged
+                ? ReserveProjectNumber(organization, projectTypeCode)
                 : oldProjectSequence;
-            if (organizationChanged) ReleaseNumber(releasedProjectNumbers, oldOrganization.Id, oldProjectSequence);
+            if (codeChanged) ReleaseNumber(releasedProjectNumbers, (oldOrganization.Id, project.ProjectTypeCode!.ToUpperInvariant()), oldProjectSequence);
 
             var existingCustomerSequence = project.CustomerProjectSequence
                 ?? TryRecoverCustomerProjectSequence(project.DeviceModel, project.CustomerCode);
@@ -602,6 +610,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         lock (gate)
         {
             if (!projects.TryGetValue(projectId, out var project) || project.ParentProjectId is not null) throw new PdmNotFoundException("主项目不存在。");
+            if (project.ExecutionUnitId == executionUnitId) return Task.FromResult(project);
             var unit = organizationUnits.GetValueOrDefault(executionUnitId) ?? throw new PdmNotFoundException("执行事业部不存在。");
             project = project with
             {
@@ -667,12 +676,12 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         lock (gate)
         {
             var application = LockApplicationApproval(command);
-            if (application?.Status == ProjectApplicationService.Approved)
+            if (application?.HasApprovedProject() == true)
                 return Task.FromResult(projects.GetValueOrDefault(application.ProjectId!.Value)
                     ?? throw new PdmConflictException("申请已批准，关联项目已不存在；不能重复建项，请联系管理员。"));
             var organization = NumberingOptions().Organizations.Single(item => item.Id == command.OrganizationId);
             if (!customers.TryGetValue(command.CustomerId, out var customer) || !customer.IsActive) throw new PdmRuleException("所选客户不存在或已停用。");
-            var projectSequence = ReserveNumber(projectCounters, releasedProjectNumbers, organization.Id, 99999);
+            var projectSequence = ReserveProjectNumber(organization, command.ProjectTypeCode);
             var customerKey = (organization.Id, customer.Code.ToUpperInvariant());
             var customerSequence = ReserveNumber(customerCounters, releasedCustomerNumbers, customerKey, 999);
             var serials = ReserveSerials(organization, command.Quantity);
@@ -876,10 +885,24 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         }
     }
 
+    private int CurrentProjectCounter(Guid organizationId) => projectCounters.Where(item => item.Key.OrganizationId == organizationId).Select(item => item.Value).DefaultIfEmpty().Max();
+
+    private int ReserveProjectNumber(ProjectOrganization organization, string type)
+    {
+        var key = (organization.Id, type.ToUpperInvariant());
+        var existing = projects.Values.Where(p => p.OrganizationId == organization.Id && p.ParentProjectId is null
+            && string.Equals(p.ProjectTypeCode, type, StringComparison.OrdinalIgnoreCase))
+            .Select(p => TryParseProjectSequence(p, organization, out var sequence) ? sequence : 0).DefaultIfEmpty().Max();
+        projectCounters[key] = Math.Max(projectCounters.GetValueOrDefault(key), existing);
+        if (releasedProjectNumbers.TryGetValue(key, out var released))
+            released.RemoveWhere(sequence => projects.Values.Any(p => string.Equals(p.Code, $"{type}{organization.ProjectCompanyCode}{sequence:D5}", StringComparison.OrdinalIgnoreCase)));
+        return ReserveNumber(projectCounters, releasedProjectNumbers, key, 99999);
+    }
+
     private ProjectNumberingOptions NumberingOptions() => new(
         organizations.Values.Where(item => item.IsActive).OrderBy(item => item.ProjectCompanyCode).Select(item => item with
         {
-            CurrentProjectSequence = projectCounters.GetValueOrDefault(item.Id),
+            CurrentProjectSequence = CurrentProjectCounter(item.Id),
             CurrentSerialSequence = serialCounters.GetValueOrDefault(item.Id)
         }).ToArray(),
         [new("P", "标准项目", true), new("W", "外发项目", true), new("R", "研发项目", true), new("S", "售后项目", true)],
@@ -993,7 +1016,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         if (project.ParentProjectId is null)
         {
             if (TryParseProjectSequence(project, organization, out var projectSequence))
-                ReleaseNumber(releasedProjectNumbers, organization.Id, projectSequence);
+                ReleaseNumber(releasedProjectNumbers, (organization.Id, project.ProjectTypeCode!.ToUpperInvariant()), projectSequence);
             if (!string.IsNullOrWhiteSpace(project.CustomerCode) && project.CustomerProjectSequence is not null)
                 ReleaseNumber(releasedCustomerNumbers, (organization.Id, project.CustomerCode.ToUpperInvariant()), project.CustomerProjectSequence.Value);
         }
@@ -1681,7 +1704,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             .Where(package => package.ProjectId == projectId && package.State is ReleasePackageState.ProcessReview or ReleasePackageState.Approval)
             .Select(package => (Package: package, Task: package.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault(task => task.Decision is null)))
             .Where(item => item.Task is not null)
-            .Select(item => new PendingApprovalTask(item.Task!.Id, item.Package.Id, item.Package.Number, item.Task.Stage, item.Package.State, item.Task.Assignee, item.Package.CreatedAt))
+            .Select(item => new PendingApprovalTask(item.Task!.Id, item.Package.Id, item.Package.Number, item.Task.Stage, item.Package.State, item.Task.Assignee, item.Package.CreatedAt) { Participants = item.Task.Participants })
             .OrderBy(item => item.CreatedAt)
             .ToArray());
 
@@ -2337,7 +2360,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var resetTasks = package.ApprovalTasks.OrderBy(task => task.StepOrder).Select(task => task with
             {
                 DecisionBy = null, Decision = null, Comment = null, DecidedAt = null,
-                IsEmergencySubstitute = false, EmergencyReason = null
+                IsEmergencySubstitute = false, EmergencyReason = null,
+                Participants = task.Participants is { } group ? group with { Signatures = [] } : null
             }).ToArray();
             if (package.Scope != ReleaseScope.LegacyCombined && resetTasks.Length > 0)
                 resetTasks[0] = resetTasks[0] with { DecisionBy = actor, Decision = ApprovalDecision.Approved, Comment = "提交人自检", DecidedAt = now };
@@ -2371,7 +2395,8 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var tasks = package.ApprovalTasks.Select(task => task with
             {
                 DecisionBy = null, Decision = null, Comment = null, DecidedAt = null,
-                IsEmergencySubstitute = false, EmergencyReason = null
+                IsEmergencySubstitute = false, EmergencyReason = null,
+                Participants = task.Participants is { } group ? group with { Signatures = [] } : null
             }).ToArray();
             var withdrawn = package with { State = ReleasePackageState.Draft, ApprovalTasks = tasks,
                 PublishedAt = null, PublishedPath = null, PublishError = null, PreviewState = ReleasePreviewState.None,
@@ -2381,7 +2406,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         }
     }
 
-    public Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, bool emergencySubstitute, string? emergencyReason, CancellationToken cancellationToken)
+    public Task<ReleasePackage> DecideApprovalAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, bool emergencySubstitute, string? emergencyReason, CancellationToken cancellationToken, string? businessNote = null)
     {
         lock (gate)
         {
@@ -2393,7 +2418,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 throw new PdmConflictException("审批任务已经处理。 ");
             }
 
-            if (!emergencySubstitute && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase) && !string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))
+            if (task.Participants is null && !emergencySubstitute && !string.Equals(task.Assignee, actor, StringComparison.OrdinalIgnoreCase) && !string.Equals(actor, "admin", StringComparison.OrdinalIgnoreCase))
             {
                 throw new PdmRuleException("只能处理分配给自己的审批任务。 ");
             }
@@ -2404,8 +2429,16 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                 throw new PdmConflictException("当前发布包尚未到达该审批节点。 ");
             }
 
+            var signed = ApprovalNodeRules.Sign(task.Participants, actor, decision, comment, timeProvider.GetUtcNow(), emergencySubstitute, out var waiting, businessNote);
+            if (waiting)
+            {
+                var pending = package with { ApprovalTasks = package.ApprovalTasks.Select(item => item.Id == taskId ? item with { Participants = signed } : item).ToArray() };
+                packages[package.Id] = pending;
+                return Task.FromResult(pending);
+            }
             var updatedTask = task with
             {
+                Participants = signed,
                 Decision = decision,
                 DecisionBy = actor,
                 Comment = comment,
@@ -2455,7 +2488,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             var updated = package with
             {
                 ApprovalTasks = package.ApprovalTasks.Select(item => item.Id == taskId
-                    ? item with { Assignee = targetUsername }
+                    ? item with { Assignee = targetUsername, Participants = item.Participants is { } group ? group with { Members = [targetUsername] } : null }
                     : item).ToArray()
             };
             packages[package.Id] = updated;
@@ -2539,6 +2572,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
             .Where(package => package.State == ReleasePackageState.Published
                 && ReleasePreviewPolicy.RequiresConversion(package)
                 && package.PreviewState is ReleasePreviewState.Pending or ReleasePreviewState.WaitingForServer or ReleasePreviewState.Failed
+                && !(package.PreviewState == ReleasePreviewState.Failed && package.PreviewError?.StartsWith(PartialPreviewConversionException.ItemErrorPrefix, StringComparison.Ordinal) == true)
                 && package.PreviewAttempts < maxAttempts)
             .OrderBy(package => package.PreviewUpdatedAt ?? DateTimeOffset.MinValue)
             .ThenBy(package => package.CreatedAt)
@@ -2563,6 +2597,22 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         lock (gate)
         {
             var updated = new List<DocumentVersion>();
+            var deliveryPackage = packages[releasePackageId];
+            var modelArtifacts = new Dictionary<Guid, DocumentPreviewArtifact>(deliveryPackage.ModelDeliveryArtifacts);
+            foreach (var binding in deliveryPackage.VersionBindings?.Where(item => !item.Publish) ?? [])
+            {
+                if (!previews.TryGetValue(binding.DocumentId, out var artifact)) continue;
+                var document = documents.GetValueOrDefault(binding.DocumentId);
+                var source = versions.GetValueOrDefault(binding.VersionId);
+                if (document?.Kind is not (DocumentKind.Part or DocumentKind.Assembly)
+                    || source is null || source.DocumentId != binding.DocumentId || source.Sha256 != binding.Sha256
+                    || artifact.Format != DocumentPreviewFormat.Step
+                    || !string.Equals(artifact.SourceSha256, binding.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new PdmConflictException("STEP交付产物与发布包冻结模型版本不一致，未挂接。");
+                modelArtifacts[binding.DocumentId] = artifact;
+                updated.Add(source with { Preview = artifact });
+            }
+            packages[releasePackageId] = deliveryPackage with { ModelDeliveryArtifacts = modelArtifacts };
             var reusedIds = packages.GetValueOrDefault(releasePackageId)?.VersionBindings?.Where(item => item.Publish && !item.RequiresPromotion).Select(item => item.VersionId).ToHashSet() ?? [];
             foreach (var version in versions.Values.Where(item => item.Status == DocumentVersionStatus.Released && (item.ReleasePackageId == releasePackageId || reusedIds.Contains(item.Id))).ToArray())
             {
@@ -2667,7 +2717,7 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         var user = users.Values.FirstOrDefault(item => string.Equals(item.Username, username, StringComparison.OrdinalIgnoreCase))
             ?? throw new PdmNotFoundException("用户不存在。");
         var existingTheme = userProfiles.TryGetValue(user.Username, out var previous) ? previous.Theme : null;
-        var profile = new UserProfile(user.Username, user.DisplayName, nickname, gender, landline, mobilePhone, email, theme ?? existingTheme ?? "a");
+        var profile = new UserProfile(user.Username, user.DisplayName, nickname, gender, landline, mobilePhone, email, theme ?? existingTheme ?? "g");
         userProfiles[user.Username] = profile;
         return Task.FromResult(profile);
     }
@@ -2836,7 +2886,10 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
 
     private FolderAccess ResolveFolderAccess(ProjectFolder folder, IReadOnlyList<ProjectFolder> folders, string actor, UserRole role)
     {
-        if (role is UserRole.Administrator or UserRole.PlatformAdministrator) return FolderAccess.All;
+        var settings = GetAuthorizationSettingsAsync(default).GetAwaiter().GetResult();
+        var context = AuthorizationPolicy.CreateContextAsync(this, folder.TargetProjectId ?? folder.RootProjectId, actor, default).GetAwaiter().GetResult();
+        var defaultAccess = context is null ? FolderAccess.None : AuthorizationPolicy.FolderDefaults(settings, context with { FolderTemplate = folder.TemplateKey });
+        if (defaultAccess == FolderAccess.All) return defaultAccess;
         var roleCodes = users.Values.FirstOrDefault(item => string.Equals(item.Username, actor, StringComparison.OrdinalIgnoreCase))?.EffectiveRoleCodes ?? [role.ToString()];
         ProjectFolder? current = folder;
         while (current is not null)
@@ -2849,15 +2902,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
                     item.PrincipalType == FolderPrincipalType.User && string.Equals(item.PrincipalKey, actor, StringComparison.OrdinalIgnoreCase)
                     || item.PrincipalType == FolderPrincipalType.Role && roleCodes.Contains(item.PrincipalKey, StringComparer.OrdinalIgnoreCase)).ToArray();
             if (rules.Length > 0) return rules.Aggregate(FolderAccess.None, (value, item) => value | item.Access);
-            if (current.TemplateKey is "presales" or "customer-files" && roleCodes.Any(CommercialProjectAccess.IsCommercialRole))
-                return FolderAccess.View | FolderAccess.Download | FolderAccess.Upload | (role == UserRole.Engineer ? FolderAccess.Edit : FolderAccess.None);
+
             if (!current.InheritPermissions || current.ParentFolderId is null) break;
             current = folders.FirstOrDefault(item => item.Id == current.ParentFolderId.Value);
         }
-        if (folder.Purpose == ProjectFolderPurpose.Release) return FolderAccess.View | FolderAccess.Download;
-        return role == UserRole.Engineer
-            ? FolderAccess.View | FolderAccess.Download | FolderAccess.Upload | FolderAccess.Edit
-            : FolderAccess.View | FolderAccess.Download;
+        return defaultAccess;
     }
 
     private static IReadOnlyList<FolderPermissionRule> NormalizeFolderPermissions(IEnumerable<SaveFolderPermissionCommand> permissions)
@@ -2915,45 +2964,12 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         };
         var businessStatus = BuildBusinessStatus(project.Id);
         var rootDocumentCheckedOutBy = RootDocumentCheckedOutBy(project.Id);
-        var managesExecutionUnit = project.ExecutionUnitId is Guid executionUnitId
-            && organizationManagers.TryGetValue(executionUnitId, out var managers)
-            && (string.Equals(managers.PrimaryManager, actor, StringComparison.OrdinalIgnoreCase) || managers.CollaborativeManagers.Contains(actor, StringComparer.OrdinalIgnoreCase));
-        var canManage = project.ParentProjectId is null && (managesExecutionUnit || string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase));
-        var belongsToProjectStaffing = string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
-            || project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
-            || string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
-        var actorAccount = users.Values.FirstOrDefault(item => string.Equals(item.Username, actor, StringComparison.OrdinalIgnoreCase));
-        var isMechanicalSupervisor = project.ExecutionUnitId is Guid supervisorUnitId
-            && actorAccount?.EffectiveRoleCodes.Contains("MechanicalManager", StringComparer.OrdinalIgnoreCase) == true
-            && organizationMemberships.TryGetValue(actor, out var supervisorMembership)
-            && supervisorMembership.UnitIds.Any(unitId => IsUnitWithin(unitId, supervisorUnitId));
-        var canReadContent = HasUserPermission(actor, role, PermissionCodes.ProjectContentView);
-        var canAssignDesigners = HasUserPermission(actor, role, PermissionCodes.ProjectDesignerAssign) && project.ExecutionUnitId is not null
-            && (managesExecutionUnit || isMechanicalSupervisor || belongsToProjectStaffing
-                || ProjectPermissionPolicy.CustomAllows(project, projects.GetValueOrDefault(project.RootProjectId ?? project.Id) ?? project, actor, projectPermissionSettings, PermissionCodes.ProjectDesignerAssign));
-        if (role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true)
-            return project with { CanAssignExecutionUnit = project.ParentProjectId is null, CanManageMainStaffing = project.ExecutionUnitId is not null && (role == UserRole.Administrator ? project.ParentProjectId is null : canManage), CanAssignDesigners = role == UserRole.Administrator ? project.ExecutionUnitId is not null : canAssignDesigners, CanReadContent = true, EffectiveProjectPermissions = ProjectPermissionSettings.Operations, CanSubmitArchive = true, DocumentCount = documentCount, ModelDocumentCount = modelDocumentCount, DrawingDocumentCount = drawingDocumentCount, BusinessStatus = businessStatus, RootDocumentCheckedOutBy = rootDocumentCheckedOutBy };
-        return project with
-        {
-            CanAssignExecutionUnit = HasUserPermission(actor, role, PermissionCodes.ProjectExecutionAssign) && project.ParentProjectId is null && project.OrganizationId == UserPrimaryCompanyId(actor),
-            CanManageMainStaffing = HasUserPermission(actor, role, PermissionCodes.ProjectStaffingManage) && canManage,
-            CanAssignDesigners = canAssignDesigners,
-            CanReadContent = canReadContent,
-            EffectiveProjectPermissions = canReadContent
-                ? ProjectPermissionPolicy.AllowedOperations(project, projects.GetValueOrDefault(project.RootProjectId ?? project.Id) ?? project, actor,
-                    PermissionsFor(actorAccount?.EffectiveRoleCodes ?? [role.ToString()], role), projectPermissionSettings)
-                    .Concat(canAssignDesigners ? [PermissionCodes.ProjectDesignerAssign] : [])
-                    .Distinct(StringComparer.Ordinal).ToArray()
-                : [],
-            CanSubmitArchive = canReadContent
-                && HasUserPermission(actor, role, PermissionCodes.DocumentEdit)
-                && (ProjectSubmissionPolicy.CanSubmitArchive(project, actor, false) || ProjectPermissionPolicy.CustomAllows(project, projects.GetValueOrDefault(project.RootProjectId ?? project.Id) ?? project, actor, projectPermissionSettings, PermissionCodes.DocumentEdit)),
-            DocumentCount = canReadContent ? documentCount : null,
-            ModelDocumentCount = canReadContent ? modelDocumentCount : null,
-            DrawingDocumentCount = canReadContent ? drawingDocumentCount : null,
-            BusinessStatus = canReadContent ? businessStatus : null,
-            RootDocumentCheckedOutBy = canReadContent ? rootDocumentCheckedOutBy : null
-        };
+        var user = users.Values.FirstOrDefault(u => u.Username.Equals(actor, StringComparison.OrdinalIgnoreCase));
+        if (user is null) return project with { CanReadContent = false, EffectiveProjectPermissions = [] };
+        var settings = GetAuthorizationSettingsAsync(default).GetAwaiter().GetResult();
+        var root = projects.GetValueOrDefault(project.RootProjectId ?? project.ParentProjectId ?? project.Id) ?? project;
+        project = project with { DocumentCount = documentCount, ModelDocumentCount = modelDocumentCount, DrawingDocumentCount = drawingDocumentCount, BusinessStatus = businessStatus, RootDocumentCheckedOutBy = rootDocumentCheckedOutBy };
+        return AuthorizationPolicy.ApplyCapabilities(settings, new(user, project, root, GetOrganizationDirectoryAsync(default).Result, FindProjectContactInformationAsync(root.Id, default).GetAwaiter().GetResult(), Ancestors: AuthorizationPolicy.ProjectAncestors(project, projects.Values)));
     }
 
     private string BuildBusinessStatus(Guid projectId)
@@ -3072,19 +3088,11 @@ public sealed partial class InMemoryPdmRepository : IPdmRepository
         UpdatedAt = now
     };
 
-    private bool HasUserPermission(string actor, UserRole role, string permissionCode) => role == UserRole.Administrator
-        || PermissionsFor(users.Values.FirstOrDefault(item => string.Equals(item.Username, actor, StringComparison.OrdinalIgnoreCase))?.EffectiveRoleCodes ?? [role.ToString()], role).Contains(permissionCode);
-
-    private bool HasRolePermission(UserRole role, string permissionCode) => role == UserRole.Administrator
-        || PermissionsFor(role.ToString(), role).Contains(permissionCode);
+    private bool HasUserPermission(string actor, UserRole role, string permissionCode) => HasUserPermissionAsync(actor, role, permissionCode, default).GetAwaiter().GetResult();
 
     private IReadOnlySet<string> PermissionsFor(string roleCode, UserRole fallbackRole) => fallbackRole == UserRole.Administrator
         ? RolePermissionCatalog.Defaults[UserRole.Administrator]
         : FunctionPermissionCatalog.Effective(rolePermissions.GetValueOrDefault(roleCode, RolePermissionCatalog.Defaults[fallbackRole]));
-
-    private IReadOnlySet<string> PermissionsFor(IEnumerable<string> roleCodes, UserRole fallbackRole) => fallbackRole == UserRole.Administrator
-        ? RolePermissionCatalog.Defaults[UserRole.Administrator]
-        : roleCodes.SelectMany(roleCode => FunctionPermissionCatalog.Effective(rolePermissions.GetValueOrDefault(roleCode, new HashSet<string>(StringComparer.Ordinal)))).ToHashSet(StringComparer.Ordinal);
 
     private HashSet<Guid> UserOrganizationIds(string username)
     {

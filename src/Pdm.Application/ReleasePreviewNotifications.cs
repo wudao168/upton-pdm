@@ -51,7 +51,6 @@ internal static class ReleasePreviewNotifications
                 && user.EffectiveRoleCodes.Contains("TechnicalAssistant", StringComparer.OrdinalIgnoreCase)).Select(user => user.Username));
         }
         return directory.Users.Where(user => recipients.Contains(user.Username) && user.IsActive
-            && !NotificationRecipientPolicy.SystemOnly(user.EffectiveRoleCodes)
             && (project.OrganizationId is null || user.CompanyId == project.OrganizationId || user.CompanyId is null
                 && directory.Memberships.Any(member => member.Username.Equals(user.Username, StringComparison.OrdinalIgnoreCase)
                     && units.Contains(member.UnitId))))
@@ -63,7 +62,7 @@ internal static class ReleasePreviewNotifications
     {
         if (!ReleasePreviewPolicy.RequiresConversion(package) || package.State != ReleasePackageState.Published
             || package.PreviewState is ReleasePreviewState.None or ReleasePreviewState.Succeeded) return;
-        var paused = package.PreviewAttempts >= ReleasePreviewService.MaxAttempts;
+        var paused = package.PreviewAttempts >= ReleasePreviewService.MaxAttempts || package.PreviewState == ReleasePreviewState.Failed;
         var status = paused ? "自动重试已暂停" : package.PreviewState == ReleasePreviewState.WaitingForServer
             ? "等待转图服务器恢复或空闲，不消耗失败次数" : "后台正在处理，失败后每3分钟自动重试，最多5次";
         var reason = string.IsNullOrWhiteSpace(package.PreviewError) ? "" : $"；原因：{package.PreviewError}";
@@ -80,9 +79,23 @@ internal static class ReleasePreviewNotifications
         var recipients = await RecipientsAsync(repository, package, project, ct);
         if (phase is "failed" or "completed")
             await repository.ResolveUserNotificationsAsync(phase == "completed" ? [Source(package.Id, "pending"), Source(package.Id, "failed")] : [Source(package.Id, "pending")], now, ct);
+        var content = $"{project.Code} · {package.Number} {detail}";
+        if (content.Length > 1000)
+        {
+            const string suffix = "… 请在项目发布页查看该发布包的逐项结果。";
+            var end = Math.Min(content.IndexOf('\n') is > 0 and var newline ? newline : content.Length, 1000 - suffix.Length);
+            // Keep the first file's explanation when the detail starts with a batch header.
+            if (end < 1000 - suffix.Length && content[..end].TrimEnd().EndsWith("逐项转图结果：", StringComparison.Ordinal))
+            {
+                var second = content.IndexOf('\n', end + 1);
+                end = Math.Min(second >= 0 ? second : content.Length, 1000 - suffix.Length);
+            }
+            if (end > 0 && char.IsHighSurrogate(content[end - 1])) end--;
+            content = content[..end].TrimEnd() + suffix;
+        }
         await repository.UpsertUserNotificationsAsync(recipients.Select(recipient => new UserNotification(Guid.NewGuid(), recipient,
             phase == "archive" ? "ReleaseDeliveryResult" : phase == "pending" ? "ReleasePreviewPending" : "ReleasePreviewResult",
-            title, $"{project.Code} · {package.Number} {detail}", project.Id, package.Id, Source(package.Id, phase), now, null)).ToArray(), ct);
+            title, content, project.Id, package.Id, Source(package.Id, phase), now, null)).ToArray(), ct);
         await ReleaseManagementNotifications.ReconcileRiskAsync(repository, package.Id, now, ct, phase == "archive", archiveVerified);
     }
 }

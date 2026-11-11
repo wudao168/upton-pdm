@@ -12,7 +12,7 @@ internal static partial class Program
  static async Task MemoryCopyLoadScenario(string output)
  {
   void Check(bool ok,string message){if(!ok)throw new Exception(message);Console.WriteLine("PASS: "+message);}
-  foreach(var mode in new[]{"orphan-import","multiple-imports","normal-post","no-load","preexisting-load","active-command","startup-loading","ui-command","new-load-in-query","new-load-in-cwd","query-error","copy-error","changed-path","disconnecting"})
+  foreach(var mode in new[]{"exact-lookup","orphan-import","multiple-imports","normal-post","no-load","preexisting-load","active-command","startup-loading","ui-command","new-load-in-query","new-load-in-cwd","query-error","copy-error","changed-path","disconnecting"})
   {
    var folder=Path.Combine(Path.GetFullPath(output),mode);Directory.CreateDirectory(folder);
    var node=LinkedNode(folder,"总装.SLDASM","Assembly");var path=(string)Get(node,"FullPath");
@@ -23,7 +23,8 @@ internal static partial class Program
    Action opening=()=>TreeCall(plugin,"OnFileOpening",Path.Combine(folder,"临时导入.stp.SLDASM"));
    SetField(plugin,"batchDialogInProgress",1);
    SetField(plugin,"application",new Proxy(appType,m=>{
-    if(m.MethodName=="GetDocuments")return new[]{model.GetTransparentProxy()};
+    if(m.MethodName=="GetDocuments")return mode=="exact-lookup"?new object[0]:new[]{model.GetTransparentProxy()};
+    if(m.MethodName=="GetOpenDocumentByName"&&mode=="exact-lookup"&&Equals(m.Args[0],path))return model.GetTransparentProxy();
     if(m.MethodName=="GetCurrentWorkingDirectory"){
      if(saved&&++cwdCalls==1&&mode=="new-load-in-cwd")opening();return folder;
     }
@@ -47,7 +48,7 @@ internal static partial class Program
     if(mode=="copy-error")throw new IOException("fixture native copy failure after load notification");
    };
    if(mode=="preexisting-load")opening();
-   var shouldPass=new[]{"orphan-import","multiple-imports","normal-post","no-load"}.Contains(mode);
+   var shouldPass=new[]{"exact-lookup","orphan-import","multiple-imports","normal-post","no-load"}.Contains(mode);
    Exception failure=null;
    try
    {

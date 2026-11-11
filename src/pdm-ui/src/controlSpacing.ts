@@ -3,7 +3,7 @@ import { isInactiveDom } from './activeDom'
 
 const control = 'button, input:not([type="hidden"]), select, textarea, [role="tab"], .el-input, .el-select, .el-date-editor, .el-cascader, .el-input-number, .el-dropdown, .el-checkbox, .el-radio-group, .el-switch'
 const wrapper = 'label, fieldset, .el-form-item, .pdm-inline-search, .pdm-titlebar__left, .pdm-titlebar__actions, .pdm-project-filters, .pdm-bom-selection-actions, .pdm-bom-filters, .pdm-bom-version-picker'
-const excluded = '.ding-settings, .office-layout-editor, .layout-phone, .pdm-bom-row-actions, .material-relation-categories.is-compact, .pdm-sidebar, .pdm-tree, .el-tree, [role="tree"], .wh-department-options, .pdm-project-family, .wr-project-list, .pdm-overview-timeline, .pdm-overview-alerts, .production-scan-settings__chain, .pc-grid, .wh-day-grid, .el-input, .el-select, .el-date-editor, .el-cascader, .el-input-number, .el-picker-panel, .el-time-panel, .el-dropdown-menu'
+const excluded = '.report-page, .ding-settings, .office-layout-editor, .layout-phone, .pdm-bom-row-actions, .material-relation-categories.is-compact, .pdm-sidebar, .pdm-tree, .el-tree, [role="tree"], .wh-department-options, .pdm-project-family, .wr-project-list, .pdm-overview-timeline, .pdm-overview-alerts, .production-scan-settings__chain, .pc-grid, .wh-day-grid, .el-input, .el-select, .el-date-editor, .el-cascader, .el-input-number, .el-picker-panel, .el-time-panel, .el-dropdown-menu'
 
 /** 只调整控件所在行的间距，不改变表格、树和内容卡片的排布。 */
 export function installControlSpacing() {

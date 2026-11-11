@@ -32,7 +32,10 @@ public sealed class ReleasePreviewCoordinator(
             await using var scope = scopeFactory.CreateAsyncScope();
             var service = scope.ServiceProvider.GetRequiredService<ReleasePreviewService>();
             var settings = await scope.ServiceProvider.GetRequiredService<IPdmRepository>().GetSystemSettingsAsync(CancellationToken.None);
-            var timeoutMinutes = settings.PreviewConversion?.TimeoutMinutes ?? DefaultTimeoutMinutes;
+            var conversion = settings.PreviewConversion;
+            var timeoutMinutes = conversion?.Servers.Count > 1
+                ? conversion.Servers.GroupBy(s => s.AgentUrl.TrimEnd('/'), StringComparer.OrdinalIgnoreCase).Sum(group => group.Max(s => s.TimeoutMinutes))
+                : conversion?.TimeoutMinutes ?? DefaultTimeoutMinutes;
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(applicationLifetime.ApplicationStopping);
             timeout.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes) + ExtraRunDuration);
             var processed = await service.ProcessPendingAsync(timeout.Token);

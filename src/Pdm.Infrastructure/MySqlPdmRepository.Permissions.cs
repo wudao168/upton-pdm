@@ -16,65 +16,39 @@ public sealed partial class MySqlPdmRepository
         var userCounts = (await connection.QueryAsync<RoleUserCountRow>(new CommandDefinition(
             "SELECT role_code RoleCode,COUNT(DISTINCT user_id) UserCount FROM pdm_user_role GROUP BY role_code", cancellationToken: cancellationToken)))
             .ToDictionary(item => item.RoleCode, item => checked((int)item.UserCount), StringComparer.OrdinalIgnoreCase);
-        return BuildRolePermissionDirectory(definitions, permissions, userCounts);
+        return AuthorizationPolicy.ProjectDirectory(BuildRolePermissionDirectory(definitions, permissions, userCounts), await ReadAuthorizationSettingsAsync(cancellationToken));
     }
 
     public async Task<IReadOnlySet<string>> GetRolePermissionsAsync(UserRole role, CancellationToken cancellationToken)
     {
-        if (role == UserRole.Administrator) return RolePermissionCatalog.Defaults[role];
-        await using var connection = await OpenAsync(cancellationToken);
-        return await ReadPermissionsAsync(connection, role.ToString(), cancellationToken);
+        var settings = await GetAuthorizationSettingsAsync(cancellationToken);
+        return (settings.Templates.FirstOrDefault(t => t.RoleCode == role.ToString() && t.IsActive)?.Grants ?? []).Where(g => g.Scopes.Count > 0).Select(g => g.Permission).ToHashSet();
     }
 
     public async Task<IReadOnlySet<string>> GetUserPermissionsAsync(string username, UserRole fallbackRole, CancellationToken cancellationToken)
     {
-        if (fallbackRole == UserRole.Administrator) return RolePermissionCatalog.Defaults[fallbackRole];
-        await using var connection = await OpenAsync(cancellationToken);
-        var assignmentCount = await connection.ExecuteScalarAsync<int>(new CommandDefinition(
-            "SELECT COUNT(*) FROM pdm_user_role assignment INNER JOIN pdm_user user_account ON user_account.id=assignment.user_id WHERE user_account.username=@Username",
-            new { Username = username }, cancellationToken: cancellationToken));
-        var permissions = (await connection.QueryAsync<string>(new CommandDefinition(
-            """
-            SELECT DISTINCT permission.permission_code
-            FROM pdm_user user_account
-            INNER JOIN pdm_user_role assignment ON assignment.user_id=user_account.id
-            INNER JOIN role_permission permission ON permission.role_code=assignment.role_code
-            WHERE user_account.username=@Username
-            """, new { Username = username }, cancellationToken: cancellationToken)))
-            .Where(RolePermissionCatalog.IsKnown).ToHashSet(StringComparer.Ordinal);
-        if (assignmentCount > 0) return FunctionPermissionCatalog.Effective(permissions);
-        var roleCode = await connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(
-            "SELECT COALESCE(NULLIF(assigned_role_code,''),role) FROM pdm_user WHERE username=@Username LIMIT 1", new { Username = username }, cancellationToken: cancellationToken));
-        return await ReadPermissionsAsync(connection, string.IsNullOrWhiteSpace(roleCode) ? fallbackRole.ToString() : roleCode, cancellationToken);
+        var user = await FindUserAsync(username, cancellationToken);
+        return user is null ? new HashSet<string>() : AuthorizationPolicy.PotentialPermissions(await GetAuthorizationSettingsAsync(cancellationToken), user, TenantContext.CompanyId ?? user.CompanyId);
     }
 
     public async Task<bool> HasRolePermissionAsync(UserRole role, string permissionCode, CancellationToken cancellationToken) =>
-        role == UserRole.Administrator || FunctionPermissionCatalog.Contains(await GetRolePermissionsAsync(role, cancellationToken), permissionCode);
+        FunctionPermissionCatalog.Contains(await GetRolePermissionsAsync(role, cancellationToken), permissionCode);
 
-    public async Task<bool> HasUserPermissionAsync(string username, UserRole fallbackRole, string permissionCode, CancellationToken cancellationToken) =>
-        fallbackRole == UserRole.Administrator || FunctionPermissionCatalog.Contains(
-            string.Equals(TenantContext.Current?.Username, username, StringComparison.OrdinalIgnoreCase)
-                ? TenantContext.Current!.Permissions
-                : await GetUserPermissionsAsync(username, fallbackRole, cancellationToken), permissionCode);
+    public async Task<bool> HasUserPermissionAsync(string username, UserRole fallbackRole, string permissionCode, CancellationToken cancellationToken)
+    {
+        if (TenantContext.Current is { Authorization: not null } tenant && string.Equals(tenant.Username, username, StringComparison.OrdinalIgnoreCase)) return FunctionPermissionCatalog.Contains(tenant.Permissions, permissionCode);
+        var user = await FindUserAsync(username, cancellationToken);
+        if (user is null) return false;
+        var settings = await GetAuthorizationSettingsAsync(cancellationToken);
+        return RolePermissionCatalog.Permissions.FirstOrDefault(p => p.Code == permissionCode)?.Scope == "project"
+            ? FunctionPermissionCatalog.Contains(AuthorizationPolicy.PotentialPermissions(settings, user, TenantContext.CompanyId ?? user.CompanyId), permissionCode)
+            : AuthorizationPolicy.GlobalAllows(settings, user, TenantContext.CompanyId ?? user.CompanyId, permissionCode);
+    }
 
     public async Task<RolePermissionDirectory> SetRolePermissionsAsync(string roleCode, IReadOnlyList<string> permissionCodes, CancellationToken cancellationToken)
     {
-        await using var connection = await OpenAsync(cancellationToken);
-        var definition = await FindRoleDefinitionAsync(connection, roleCode, cancellationToken) ?? throw new PdmNotFoundException("角色不存在。");
-        if (definition.BaseRole == UserRole.Administrator) return await GetRolePermissionDirectoryAsync(cancellationToken);
-        if (definition.BaseRole == UserRole.PlatformAdministrator) throw new PdmRuleException("平台管理员权限由系统固定，不支持修改。");
-        var normalized = RolePermissionCatalog.Normalize(definition.BaseRole, permissionCodes);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        try
-        {
-            await connection.ExecuteAsync(new CommandDefinition("DELETE FROM role_permission WHERE role_code=@RoleCode", new { definition.RoleCode }, transaction, cancellationToken: cancellationToken));
-            if (normalized.Count > 0)
-                await connection.ExecuteAsync(new CommandDefinition(
-                    "INSERT INTO role_permission(role_code,permission_code,updated_at) VALUES(@RoleCode,@PermissionCode,UTC_TIMESTAMP(6))",
-                    normalized.Select(code => new { definition.RoleCode, PermissionCode = code }), transaction, cancellationToken: cancellationToken));
-            await transaction.CommitAsync(cancellationToken);
-        }
-        catch { await transaction.RollbackAsync(cancellationToken); throw; }
+        var settings = await GetAuthorizationSettingsAsync(cancellationToken);
+        await SaveAuthorizationSettingsAsync(AuthorizationPolicy.UpdateRole(settings, roleCode, permissionCodes), settings.Revision, cancellationToken);
         return await GetRolePermissionDirectoryAsync(cancellationToken);
     }
 

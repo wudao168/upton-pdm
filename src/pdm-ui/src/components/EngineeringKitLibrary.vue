@@ -6,18 +6,20 @@ import AlignedDetailTable from './AlignedDetailTable.vue'
 import QuantityInputNumber from './QuantityInputNumber.vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { listStandardLibraryCategories, listEngineeringKits, listMaterials, publishEngineeringKit, saveEngineeringKit } from '../api'
+import { deleteEngineeringKitDraft, listStandardLibraryCategories, listEngineeringKits, listMaterials, publishEngineeringKit, saveEngineeringKit } from '../api'
 import EngineeringKitDetails from './EngineeringKitDetails.vue'
 import EngineeringKitActivityButton from './EngineeringKitActivityButton.vue'
 import { standardCategoryCode, matchesStandardCategory, isUncategorized } from '../standardLibraryCategories'
 import StandardCategoryFilter from './StandardCategoryFilter.vue'
 import { u9UnitName } from '../u9Units'
 import type { EngineeringKit, StandardLibraryCategory, PdmMaterial } from '../types'
+import { userErrorMessage } from '../userErrorMessage'
 
-const props = defineProps<{ token: string; canManage: boolean; active?: boolean }>()
+const props = defineProps<{ token: string; canManage: boolean; canDeleteDrafts?: boolean; active?: boolean }>()
 const loading = ref(false)
 const saving = ref(false)
 const publishing = ref(false)
+const deletingKitId = ref('')
 const query = ref('')
 const categoryFilter = ref('')
 const brandFilter = ref('')
@@ -246,6 +248,30 @@ function applyKitActivity(kit: EngineeringKit) {
   if (detailKit.value?.id === kit.id) detailKit.value = kit
 }
 
+function canDeleteDraft(kit: EngineeringKit) {
+  return props.canManage && props.canDeleteDrafts && !kit.currentReleasedRevisionId
+    && !kit.revisions.some(revision => revision.state === 'Released') && !kit.referenceCount
+}
+
+async function deleteDraft(kit: EngineeringKit) {
+  if (!canDeleteDraft(kit) || deletingKitId.value) return
+  deletingKitId.value = kit.id
+  try {
+    try {
+      await ElMessageBox.confirm('删除后，此草稿及其组成明细将移除。', `删除套件「${kit.name}」`, {
+        type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消',
+      })
+    } catch { return }
+    await deleteEngineeringKitDraft(kit.id, kit.rowVersion, props.token)
+    kits.value = kits.value.filter(item => item.id !== kit.id)
+    expandedKitIds.value = expandedKitIds.value.filter(id => id !== kit.id)
+    if (detailKit.value?.id === kit.id) detailKit.value = null
+    ElMessage.success('套件草稿已删除')
+  } catch (error) {
+    ElMessage.error(userErrorMessage(error instanceof Error ? error.message : '套件草稿删除失败，请刷新后重试'))
+  } finally { deletingKitId.value = '' }
+}
+
 watch(() => props.active, active => { if (active) void load() })
 onMounted(load)
 </script>
@@ -265,7 +291,7 @@ onMounted(load)
         </div>
         <span>共 {{ filteredKits.length }} 个套件</span>
       </div>
-      <el-table v-loading="loading" data-pdm-column-layout="scroll" :data="filteredKits" row-key="id" :expand-row-keys="expandedKitIds" @row-click="onRowClick" @expand-change="syncExpandedKits" height="100%" empty-text="暂无套件">
+      <el-table v-loading="loading" :data="filteredKits" row-key="id" :expand-row-keys="expandedKitIds" @row-click="onRowClick" @expand-change="syncExpandedKits" height="100%" empty-text="暂无套件">
         <el-table-column type="expand" width="32" class-name="pdm-column-fixed-width">
           <template #default="{ row }">
             <section :id="`kit-contents-${row.id}`" class="engineering-kit-library__contents" :aria-label="`套件 ${row.code || row.name} 的物料明细`">
@@ -281,7 +307,13 @@ onMounted(load)
         <el-table-column prop="description" label="备注" min-width="180" show-overflow-tooltip />
         <el-table-column label="套件内物料数量" width="150"><template #default="{ row }"><el-button link type="primary" @click="detailKit = row">{{ displayRevision(row)?.components.length ?? 0 }}</el-button></template></el-table-column>
         <el-table-column label="状态" width="145"><template #default="{ row }"><el-tag v-if="row.isActive === false" type="info" size="small">已停用</el-tag><el-tag v-else-if="canManage && draftRevision(row)" type="warning" size="small">V{{ String(draftRevision(row)?.versionNumber).padStart(2, '0') }} 草稿</el-tag><el-tag v-else-if="releasedRevision(row)" type="success" size="small">V{{ String(releasedRevision(row)?.versionNumber).padStart(2, '0') }} 已发布</el-tag></template></el-table-column>
-        <el-table-column v-if="canManage" label="操作" width="160" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="openEditor(row)">维护</el-button><EngineeringKitActivityButton :kit="row" :token="token" :can-manage="canManage" link @changed="applyKitActivity" /></template></el-table-column>
+        <el-table-column v-if="canManage" label="操作" :width="canDeleteDrafts ? 148 : 110" class-name="pdm-column-fixed-width">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openEditor(row)">维护</el-button>
+            <EngineeringKitActivityButton :kit="row" :token="token" :can-manage="canManage" :disabled="deletingKitId === row.id" link @changed="applyKitActivity" />
+            <el-button v-if="canDeleteDraft(row)" link type="danger" :disabled="!!deletingKitId" @click="deleteDraft(row)">删除</el-button>
+          </template>
+        </el-table-column>
       </el-table>
       </div>
       </div>
@@ -345,7 +377,7 @@ onMounted(load)
 
 <style scoped>
 .engineering-kit-library__layout{display:grid;flex:1;min-height:0}.engineering-kit-library__main{display:flex;min-height:0;min-width:0;flex-direction:column}.engineering-kit-library__main>:deep(.el-table){min-height:0;flex:1}
-.engineering-kit-library{display:flex;height:100%;min-height:0;flex-direction:column;overflow:hidden}.engineering-kit-editor__title{display:flex;padding:10px 16px;border-bottom:1px solid var(--pdm-border);align-items:center;justify-content:space-between}.engineering-kit-editor__title h1{margin:0;font-size:18px}.engineering-kit-editor__title>span{margin:4px 0 0;color:var(--pdm-muted);font-size:12px}.engineering-kit-library__toolbar{display:flex;flex:0 0 auto;align-items:center;gap:10px;margin-bottom:10px}.engineering-kit-library__toolbar>.el-select{width:150px}.engineering-kit-library__toolbar .el-input{width:min(430px,42vw)}.engineering-kit-library__toolbar span{color:var(--pdm-muted);font-size:12px}.engineering-kit-library>:deep(.el-table){min-height:0;flex:1}.kit-code{color:var(--pdm-theme-accent)}.engineering-kit-editor__title>div{display:flex;align-items:center;gap:12px}.engineering-kit-editor{padding:12px 16px;overflow:auto}.engineering-kit-summary{display:grid;overflow:hidden;border:1px solid var(--pdm-border);border-radius:8px;grid-template-columns:1.05fr 1.25fr 1.5fr 1.1fr 1.2fr .85fr .9fr}.engineering-kit-library__actions{display:flex;gap:8px}.engineering-kit-summary .is-model{gap:6px}.engineering-kit-model-head{display:flex;align-items:center;gap:8px}.engineering-kit-model-head label{white-space:nowrap}.engineering-kit-model-head :deep(.el-radio-group){flex:0 0 auto}.engineering-kit-summary>div{display:flex;min-height:68px;padding:9px 12px;border-right:1px solid var(--pdm-border);flex-direction:column;justify-content:center;gap:8px}.engineering-kit-summary>div:last-child{border-right:0}.engineering-kit-summary label,.engineering-kit-change-note>span,.engineering-kit-group__header label>span{color:var(--pdm-text-soft);font-size:12px;font-weight:600}.engineering-kit-summary strong{display:flex;min-height:32px;align-items:center}.engineering-kit-change-note{display:grid;margin:12px 0;align-items:center;grid-template-columns:82px 1fr}.engineering-kit-group{padding:12px;border:1px solid var(--pdm-border);border-radius:8px;background:var(--pdm-bg)}.engineering-kit-group :deep(.el-table__header .cell),.engineering-kit-group :deep(.el-table__body .cell){text-align:center;justify-content:center}.engineering-kit-group__header{display:flex;margin-bottom:10px;align-items:center;gap:12px}.engineering-kit-group__header label{display:flex;align-items:center;gap:10px}.engineering-kit-group-name{width:200px}.engineering-kit-group__count{color:var(--pdm-muted);font-size:12px}.engineering-kit-group__header>.el-button{margin-left:auto}.engineering-kit-editor__footer{display:flex;margin-top:14px;justify-content:flex-end;gap:8px}@media(max-width:1000px){.engineering-kit-library__toolbar{flex-wrap:wrap}.engineering-kit-summary{grid-template-columns:repeat(2,1fr)}.engineering-kit-summary>div{border-bottom:1px solid var(--pdm-border)}.engineering-kit-editor__title{align-items:flex-start;flex-direction:column;gap:6px}}
+.engineering-kit-library{display:flex;height:100%;min-height:0;flex-direction:column;overflow:hidden}.engineering-kit-editor__title{display:flex;padding:10px 16px;border-bottom:1px solid var(--pdm-border);align-items:center;justify-content:space-between}.engineering-kit-editor__title h1{margin:0;font-size:18px}.engineering-kit-editor__title>span{margin:4px 0 0;color:var(--pdm-muted);font-size:12px}.engineering-kit-library__toolbar{display:flex;flex:0 0 auto;align-items:center;gap:10px;margin-bottom:10px}.engineering-kit-library__toolbar>.el-select{width:150px}.engineering-kit-library__toolbar .el-input{width:min(430px,42vw)}.engineering-kit-library__toolbar span{color:var(--pdm-muted);font-size:12px}.engineering-kit-library>:deep(.el-table){min-height:0;flex:1}.kit-code{ color:var(--pdm-text)}.engineering-kit-editor__title>div{display:flex;align-items:center;gap:12px}.engineering-kit-editor{padding:12px 16px;overflow:auto}.engineering-kit-summary{display:grid;overflow:hidden;border:1px solid var(--pdm-border);border-radius:8px;grid-template-columns:1.05fr 1.25fr 1.5fr 1.1fr 1.2fr .85fr .9fr}.engineering-kit-library__actions{display:flex;gap:8px}.engineering-kit-summary .is-model{gap:6px}.engineering-kit-model-head{display:flex;align-items:center;gap:8px}.engineering-kit-model-head label{white-space:nowrap}.engineering-kit-model-head :deep(.el-radio-group){flex:0 0 auto}.engineering-kit-summary>div{display:flex;min-height:68px;padding:9px 12px;border-right:1px solid var(--pdm-border);flex-direction:column;justify-content:center;gap:8px}.engineering-kit-summary>div:last-child{border-right:0}.engineering-kit-summary label,.engineering-kit-change-note>span,.engineering-kit-group__header label>span{color:var(--pdm-text-soft);font-size:12px;font-weight:600}.engineering-kit-summary strong{display:flex;min-height:32px;align-items:center}.engineering-kit-change-note{display:grid;margin:12px 0;align-items:center;grid-template-columns:82px 1fr}.engineering-kit-group{padding:12px;border:1px solid var(--pdm-border);border-radius:8px;background:var(--pdm-bg)}.engineering-kit-group :deep(.el-table__header .cell),.engineering-kit-group :deep(.el-table__body .cell){text-align:center;justify-content:center}.engineering-kit-group__header{display:flex;margin-bottom:10px;align-items:center;gap:12px}.engineering-kit-group__header label{display:flex;align-items:center;gap:10px}.engineering-kit-group-name{width:200px}.engineering-kit-group__count{color:var(--pdm-muted);font-size:12px}.engineering-kit-group__header>.el-button{margin-left:auto}.engineering-kit-editor__footer{display:flex;margin-top:14px;justify-content:flex-end;gap:8px}@media(max-width:1000px){.engineering-kit-library__toolbar{flex-wrap:wrap}.engineering-kit-summary{grid-template-columns:repeat(2,1fr)}.engineering-kit-summary>div{border-bottom:1px solid var(--pdm-border)}.engineering-kit-editor__title{align-items:flex-start;flex-direction:column;gap:6px}}
 .engineering-kit-group{--pdm-detail-row-height:40px}
 .engineering-kit-group :deep(.el-table__header th.el-table__cell){height:40px;padding-block:0;box-sizing:border-box}
 .engineering-kit-group :deep(.el-table__body .cell){white-space:nowrap}

@@ -26,6 +26,7 @@ internal sealed class ThreadedEDrawingsPreview : IDisposable
     internal Forms.Panel HostControl { get; } = new() { Dock = Forms.DockStyle.Fill, BackColor = Color.FromArgb(151, 166, 184) };
     internal event Action<string>? UserMessageRequested;
     internal event Action<bool>? MarkupModifiedChanged;
+    internal event Action<string, string, string>? ComponentSelectionChanged;
     internal string CurrentDocumentPath => Volatile.Read(ref showingPath) ?? string.Empty;
 
     internal ThreadedEDrawingsPreview()
@@ -53,6 +54,7 @@ internal sealed class ThreadedEDrawingsPreview : IDisposable
                 window.Preview.ApplyTheme(initialTheme);
                 window.Preview.UserMessageRequested += message => UserMessageRequested?.Invoke(message);
                 window.Preview.MarkupModifiedChanged += modified => MarkupModifiedChanged?.Invoke(modified);
+                window.Preview.ComponentSelectionChanged += (path, name, configuration) => ComponentSelectionChanged?.Invoke(path, name, configuration);
                 window.Shown += (_, _) => {
                     SetParent(window.Handle, parent);
                     if (GetParent(window.Handle) != parent)

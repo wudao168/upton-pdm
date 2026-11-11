@@ -35,6 +35,39 @@ const bomItem: BomItem = {
 }
 
 describe('PreviewWorkspace', () => {
+  it('按原生组件事件显示已授权的零件属性，保持总装预览及操作对象', async () => {
+    const child = { ...selected, instancePath: 'ROOT/SHF20-20211227114217544-3', drawingVersion: 'V4' }
+    const branch = (id: string, part: DocumentNode): DocumentNode => ({
+      ...selected, id, instancePath: 'ROOT/' + id, kind: 'Assembly', children: [part],
+    })
+    const sameName = { ...child, documentId: 'other-doc', drawingVersion: 'V7' }
+    const assembly: DocumentNode = { ...selected, id: 'root', documentId: 'root-doc', kind: 'Assembly',
+      drawingNumber: 'ROOT', fileName: 'ROOT.SLDASM', children: [branch('left-1', child), branch('right-1', sameName)] }
+    const wrapper = mount(PreviewWorkspace, { props: { selected: assembly, related: [], desktopAvailable: true,
+      readableDocumentIds: new Set([child.documentId!]), bomItemForNode: () => bomItem } })
+    const properties = () => wrapper.get('[aria-label="图档属性"]').text()
+    const select = async (name: string, documentId = 'root-doc') => {
+      window.dispatchEvent(new CustomEvent('pdm-preview-component', { detail: { documentId, name, configuration: 'Default' } }))
+      await nextTick()
+    }
+    window.dispatchEvent(new CustomEvent('pdm-preview-status', { detail: { state: 'ready' } }))
+    await select('shf20-20211227114217544-3~Default', 'previous-doc')
+    expect(properties()).toContain('ROOT')
+    await select('shf20-20211227114217544-3~Default')
+    expect(wrapper.text()).toContain('所选零件暂无可查看的关联图档')
+    await select('ROOT/Default/left-1~Default/shf20-20211227114217544-3~Default')
+    expect(properties()).toContain('导向轴支座')
+    expect(properties()).toContain('V4')
+    expect(wrapper.emitted('preview')).toBeUndefined()
+    expect(wrapper.props('selected')).toEqual(assembly)
+    await wrapper.setProps({ readableDocumentIds: new Set<string>() })
+    expect(wrapper.text()).toContain('所选零件暂无可查看的关联图档')
+    expect(wrapper.text()).not.toContain('导向轴支座')
+    await select('')
+    expect(properties()).toContain('ROOT')
+    wrapper.unmount()
+  })
+
   it('全屏与还原保留同一个预览节点，Esc和离开页面可退出', async () => {
     const wrapper = mount(PreviewWorkspace, { props: { selected, related: [], desktopAvailable: true, active: true } })
     const slot = wrapper.get('.pdm-embedded-preview-slot').element
@@ -84,23 +117,23 @@ describe('PreviewWorkspace', () => {
     wrapper.unmount()
   })
 
-  it('图档核心属性常驻，展开其他属性并在换图时收起', async () => {
+  it('图档属性默认展开，可手动收起并在换图时重新展开', async () => {
     const wrapper = mount(PreviewWorkspace, {
       props: { selected, related: [], bomItem },
     })
 
     const bar = wrapper.get('.pdm-preview-properties-bar')
     expect(bar.find('.pdm-preview-properties').exists()).toBe(true)
-    expect(bar.findAll('.pdm-preview-properties > div')).toHaveLength(4)
-    await bar.get('button[aria-expanded]').trigger('click')
     expect(bar.findAll('.pdm-preview-properties > div')).toHaveLength(10)
+    await bar.get('button[aria-expanded]').trigger('click')
+    expect(bar.findAll('.pdm-preview-properties > div')).toHaveLength(4)
     expect(wrapper.find('.pdm-preview-properties-toggle').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="折叠图档属性"]').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="折叠图档信息卡"]').exists()).toBe(false)
     expect(wrapper.get('.pdm-preview-properties-bar__title').text()).toBe('图档属性')
     expect(wrapper.get('.pdm-preview-properties').attributes('style') ?? '').not.toContain('display: none')
     await wrapper.setProps({ selected: { ...selected, documentId: 'other' } })
-    expect(bar.findAll('.pdm-preview-properties > div')).toHaveLength(4)
+    expect(bar.findAll('.pdm-preview-properties > div')).toHaveLength(10)
     wrapper.unmount()
   })
 

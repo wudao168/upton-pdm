@@ -107,11 +107,11 @@ async function retryPreviews() {
 </script>
 <template>
   <button v-if="capability?.enabled" type="button" class="pdm-primary-action browser-cad-entry" :disabled="!capability.canArchive" :title="capability.reason || '选择已保存图档，由后台解析并存档'" @click="open">存档</button>
-  <el-dialog v-model="opened" title="存档" width="620px" append-to-body :close-on-click-modal="false">
+  <el-dialog v-model="opened" title="存档" width="620px" append-to-body :close-on-click-modal="!busy">
     <section class="browser-cad-dialog" aria-label="图档存档">
       <p>选择已保存的SolidWorks图档、完整文件夹或ZIP，可同时附带所需的STEP/STP、TXT、XLS/XLSX。根图档须为SLDASM、SLDPRT或SLDDRW；仅存档本套图档实际需要的文件，未变化文件沿用原版本。</p>
       <template v-if="!projectId"><label v-if="structure"><input v-model="updateSelected" type="checkbox" :disabled="busy || !!ticket">更新所选标准结构 {{ structure.code }}（不勾选则新增）</label><label>图纸类型<select v-model="drawingType" :disabled="busy || !!ticket || updateSelected" aria-label="存档图纸类型"><option :value="1">标准组件</option><option :value="2">标准零件</option><option :value="3">组件模板</option><option :value="4">零件模板</option><option :value="9">其他图档</option></select></label></template>
-      <div v-if="!running && ticket?.state !== 'Succeeded'" class="browser-cad-pickers"><button type="button" :disabled="busy" @click="reset(); filesInput?.click()">选择文件</button><button type="button" :disabled="busy" @click="reset(); folderInput?.click()">选择文件夹</button><input ref="filesInput" type="file" multiple :accept="browserCadUploadAccept" hidden aria-label="选择存档文件" @change="choose"><input ref="folderInput" type="file" webkitdirectory multiple hidden aria-label="选择存档文件夹" @change="choose"></div>
+      <div v-if="!running && ticket?.state !== 'Succeeded'" class="browser-cad-pickers"><button class="pdm-file-picker-button" type="button" :disabled="busy" @click="reset(); filesInput?.click()">选择文件</button><button class="pdm-file-picker-button" type="button" :disabled="busy" @click="reset(); folderInput?.click()">选择文件夹</button><input ref="filesInput" type="file" multiple :accept="browserCadUploadAccept" hidden aria-label="选择存档文件" @change="choose"><input ref="folderInput" type="file" webkitdirectory multiple hidden aria-label="选择存档文件夹" @change="choose"></div>
       <p v-if="selectionNotice" role="status">{{ selectionNotice }}</p>
       <p v-if="busy" role="status">正在接收文件，请保留此窗口…</p>
       <label v-if="ticket && !running && ticket.state !== 'Succeeded'">根图档<select v-model="rootPath" aria-label="存档根图档"><option v-for="file in rootFiles" :key="file.relativePath" :value="file.relativePath">{{ file.relativePath }}</option></select><small>请选择总装；单个零件或工程图可直接作为根图档。STEP、方程和设计表等伴随文件不作为根图档。</small></label>

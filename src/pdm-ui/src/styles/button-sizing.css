@@ -1,3 +1,4 @@
+@import './drawer-file-picker.css';
 @import './button-heights.css';
 @import './capsule-typography.css';
 @import './button-alignment.css';
@@ -30,14 +31,14 @@
   }
   :root body button[data-pdm-button-size="default"][data-pdm-button-fit="compact"] { width: 80px !important; }
   :root body button[data-pdm-button-size="inline"] {
-    min-width: 60px !important;
+    min-width: 0 !important;
     height: var(--pdm-button-compact) !important;
     min-height: var(--pdm-button-compact) !important;
     max-height: var(--pdm-button-compact) !important;
     padding-inline: 4px !important;
     --pdm-button-icon-size: 14px !important;
   }
-  :root body button[data-pdm-button-size="inline"][data-pdm-button-fit="compact"] { width: 60px !important; }
+  :root body button[data-pdm-button-size="inline"][data-pdm-button-fit="compact"] { width: max-content !important; }
   :root body .pdm-drawing-actions {
     display: flex;
     flex-wrap: nowrap !important;
@@ -144,4 +145,20 @@
   }
   .pdm-project-code-cell { grid-template-columns: 24px minmax(0, auto) 24px !important; }
   @media(max-width:1100px) { .pdm-project-code-cell { grid-template-columns: 24px minmax(0, auto) !important; } }
+}
+
+/* 项目页面已确认的固定操作宽度，覆盖自动紧凑按钮分类。 */
+@layer pdm-button-sizing {
+  :root body .pdm-overview-status > header > button.pdm-overview-refresh,
+  :root body .project-contacts__header-actions > button.el-button,
+  :root body .project-information__staff-actions > button.el-button {
+    box-sizing:border-box !important;
+    width:80px !important; min-width:80px !important; max-width:80px !important; flex:0 0 80px !important;
+    justify-content:center !important;
+  }
+  :root body .project-information__table button.pdm-text-action[aria-label^="创建铭牌 "] {
+    box-sizing:border-box !important;
+    width:60px !important; min-width:60px !important; max-width:60px !important; flex:0 0 60px !important;
+    justify-content:center !important;
+  }
 }

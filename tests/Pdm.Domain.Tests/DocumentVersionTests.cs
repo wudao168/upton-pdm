@@ -47,12 +47,14 @@ public sealed class DocumentVersionTests
     {
         Assert.False(DrawingQrPolicy.Default.Enabled);
         var repository = new Infrastructure.InMemoryPdmRepository(TimeProvider.System);
+        var company = (await repository.GetOrganizationDirectoryAsync(default)).Organizations.First().Id;
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "qr-settings-admin", "设置测试", "unused", UserRole.Administrator, true, CompanyId: company), default);
         var settings = await repository.GetSystemSettingsAsync(default);
         var workflow = new Application.PdmWorkflowService(repository, new RecordingFileStorage(), new NoOpPublisher(), TimeProvider.System);
         var saved = await workflow.UpdateSystemSettingsAsync(settings with
         {
             DrawingQrPolicy = DrawingQrPolicy.Default with { Enabled = true }
-        }, "admin", UserRole.Administrator, default);
+        }, "qr-settings-admin", UserRole.Administrator, default);
         Assert.False(saved.DrawingQrPolicy.Enabled);
         Assert.False((await repository.GetSystemSettingsAsync(default)).DrawingQrPolicy.Enabled);
     }

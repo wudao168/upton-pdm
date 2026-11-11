@@ -76,7 +76,7 @@ public sealed class StandardLibraryImportTests
         public StandardLibraryImportService Import => new(Store, Materials, Repository, new Protector(), Client, TimeProvider.System);
         public static async Task<Fixture> Create()
         {
-            var f = new Fixture(); var configuration = await f.Materials.GetIntegrationConfigurationAsync(default);
+            var f = new Fixture(); await PermissionTestUsers.Ensure(f.Repository, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer)); var configuration = await f.Materials.GetIntegrationConfigurationAsync(default);
             await f.Materials.SaveIntegrationConfigurationAsync(configuration with { ClientSecretCiphertext = "test", ItemQueryPath = U9MaterialContract.QueryPath, WriteEnabled = false }, default);
             return f;
         }

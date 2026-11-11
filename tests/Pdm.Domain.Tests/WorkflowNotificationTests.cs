@@ -8,6 +8,29 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class WorkflowNotificationTests
 {
     [Fact]
+    public async Task ExplicitSystemOnlyRecipientIsRejectedInsteadOfSilentlyDropped()
+    {
+        using var f=await Fixture.Create();f.SetCompany(f.Company);
+        await f.Repository.CreateUserAsync(new(Guid.NewGuid(),"copy-system-only","技术管理员","unused",UserRole.Administrator,true,CompanyId:f.Company),default);
+        var error=await Assert.ThrowsAsync<PdmRuleException>(()=>f.Rule("standard-release",true,[new("User",null,Target:"copy-system-only")]));
+        Assert.Contains("业务角色",error.Message);
+    }
+    [Fact]
+    public async Task CompletionCopiesCombineExplicitPeopleDepartmentRolesAndProjectRolesWithoutDuplicates()
+    {
+        using var f = await Fixture.Create(); f.SetCompany(f.Company);
+        f.Project = await f.Repository.SetMainProjectStaffingAsync(f.Project.Id,new("engineer-a",[],[]),"submitter",default);
+        await f.Rule("standard-release",true,[new("User",null,Target:"assistant-a"),new("SubmitterDepartment",null,RoleCode:"TechnicalAssistant",IncludeSubdepartments:true),
+            new("Fixed",f.Supply,RoleCode:"SupplyChain"),new("ProjectRole",null,Target:"ProjectManager"),new("Submitter",null)]);
+        var package=await f.Release(ReleaseScope.StandardFormal,"standard-release");await f.Service.CaptureReleaseAsync(package,default);
+        var job=await f.Job("standard-release");await f.Service.ProcessAsync(job.Id,default);
+        Assert.Equal(0,await f.Notices("assistant-a"));
+        await f.Repository.MarkPublishedAsync(package.Id,"unused",DateTimeOffset.UtcNow,default);
+        await f.Service.ProcessAsync(job.Id,default);await f.Service.ProcessAsync(job.Id,default);
+        foreach(var user in new[]{"assistant-a","supply","engineer-a","submitter"}) Assert.Equal(1,await f.Notices(user));
+        Assert.Equal(0,await f.Notices("assistant-b"));Assert.Equal("Sent",(await f.Store.FindJobAsync(job.Id,default))!.State);
+    }
+    [Fact]
     public async Task CompanyWideManagerRuleOnlyNotifiesAssignedManagersAndSharesThePublishedSummaryKey()
     {
         using var f = await Fixture.Create(); f.SetCompany(f.Company);
@@ -257,7 +280,7 @@ public sealed class WorkflowNotificationTests
         using var f = await Fixture.Create(); f.SetCompany(f.Company);
         foreach (var (name, company, active) in new[] { ("role-no-project", f.Company, true), ("role-foreign", Guid.NewGuid(), true), ("role-disabled", f.Company, false) })
             await f.Repository.CreateUserAsync(new(Guid.NewGuid(), name, name, "unused", UserRole.Engineer, active, RoleCode: "TechnicalAssistant", CompanyId: company), default);
-        await f.Repository.SetRolePermissionsAsync("TechnicalAssistant", [], default);
+        await f.Repository.SetRolePermissionsAsync("TechnicalAssistant", [AuthorizationActions.BusinessNotifications], default);
         Assert.False(await f.Repository.HasProjectContentReadAccessAsync(f.Project.Id, "role-no-project", UserRole.Engineer, default));
         await f.Rule("standard-release", true, [new("SubmitterDepartment", null, RoleCode: "TechnicalAssistant"), new("Fixed", f.First, RoleCode: "TechnicalAssistant"), new("CompanyRole", null, RoleCode: "TechnicalAssistant")]);
         var package = await f.Release(ReleaseScope.StandardFormal, "standard-release");
@@ -276,7 +299,7 @@ public sealed class WorkflowNotificationTests
     {
         using var f = await Fixture.Create(); f.SetCompany(f.Company);
         await f.Repository.CreateUserAsync(new(Guid.NewGuid(), "queued-role", "角色接收人", "unused", UserRole.Engineer, true, RoleCode: "TechnicalAssistant", CompanyId: f.Company), default);
-        await f.Repository.SetRolePermissionsAsync("TechnicalAssistant", [], default);
+        await f.Repository.SetRolePermissionsAsync("TechnicalAssistant", [AuthorizationActions.BusinessNotifications], default);
         var now = DateTimeOffset.UtcNow;
         var job = new WorkflowNoticeJob { Id = Guid.NewGuid(), CompanyId = f.Company, ProjectId = f.Project.Id, BusinessId = Guid.NewGuid(), BusinessKind = "Release",
             BusinessToken = "queued", Submitter = "submitter", SourceKey = "queued-role-notice", NotificationSourceKey = "queued-role-notice", Rule = new("standard-release", true, []),

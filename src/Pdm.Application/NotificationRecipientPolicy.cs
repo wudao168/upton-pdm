@@ -4,6 +4,20 @@ namespace Upton.Pdm.Application;
 
 public static class NotificationRecipientPolicy
 {
+    public static bool CanReceive(AuthorizationSettings settings, OrganizationDirectoryUser user) => AuthorizationPolicy.GlobalAllows(settings,
+        new UserAccount(Guid.Empty, user.Username, user.DisplayName, "", user.Role, user.IsActive, RoleCode: user.EffectiveRoleCode, CompanyId: user.CompanyId, RoleCodes: user.EffectiveRoleCodes), user.CompanyId, AuthorizationActions.BusinessNotifications);
+    public static async Task<bool> HasBusinessPermissionAsync(IPdmRepository repository, OrganizationDirectoryUser user, string permission, CancellationToken ct) =>
+        await repository.FindUserAsync(user.Username, ct) is { } account && await HasBusinessPermissionAsync(repository, account, permission, ct);
+    public static async Task<bool> CanReceiveAsync(IPdmRepository repository, string username, CancellationToken ct)
+    {
+        var user = await repository.FindUserAsync(username, ct);
+        return user is not null && AuthorizationPolicy.GlobalAllows(await repository.GetAuthorizationSettingsAsync(ct), user, user.CompanyId, AuthorizationActions.BusinessNotifications);
+    }
+    public static async Task<bool> RoleCanReceiveAsync(IPdmRepository repository, string role, CancellationToken ct) =>
+        (await repository.GetAuthorizationSettingsAsync(ct)).Templates.Any(t => t.IsActive && t.RoleCode == role && t.Grants.Any(g => g.Permission == AuthorizationActions.BusinessNotifications && g.Scopes.Contains("company")));
+    public static async Task<bool> HasBusinessPermissionAsync(IPdmRepository repository, UserAccount user, string permission, CancellationToken ct) =>
+        await CanReceiveAsync(repository, user.Username, ct) && await repository.HasUserPermissionAsync(user.Username, user.Role, permission, ct);
+
     public static IReadOnlyList<string> BusinessRoles(IEnumerable<string> roles) => roles
         .Where(role => !role.Equals(nameof(UserRole.Administrator), StringComparison.OrdinalIgnoreCase)
             && !role.Equals("platform_admin", StringComparison.OrdinalIgnoreCase)
@@ -45,7 +59,7 @@ public static class NotificationRecipientPolicy
         foreach (var recipient in notifications.Select(item => item.Recipient).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             var user = await repository.FindUserAsync(recipient, ct);
-            if (SystemOnly(user)) systemOnly.Add(recipient);
+            if (!await CanReceiveAsync(repository, recipient, ct)) systemOnly.Add(recipient);
             if (user?.IsActive == false) inactive.Add(recipient);
         }
         return notifications.Where(item => !inactive.Contains(item.Recipient) && (!systemOnly.Contains(item.Recipient) || IsSystemMessage(item) || item.IsSenderReceipt && item.ReadAt is not null)).ToArray();

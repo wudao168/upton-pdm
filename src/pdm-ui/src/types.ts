@@ -184,7 +184,10 @@ export interface ProjectPlanTask {
   isCustom?: boolean
 }
 
+export interface ProjectPlanHoliday { date: string; name: string; isOffDay: boolean }
+
 export interface ProjectPlan {
+  holidayOverrides?: ProjectPlanHoliday[]
   changeRequest?: {
     id: string; tasks: Array<{ taskId: string; plannedStart: string; plannedFinish: string; assignee?: string | null }>
     reason: string; submittedBy: string; submittedAt: string; approvalAssignee: string
@@ -342,6 +345,7 @@ export interface CrmCustomerSyncResult {
   customers: PdmCustomer[]
 }
 export interface PdmUser {
+  canBeDesigner?: boolean
   username: string
   displayName: string
   role: string
@@ -424,16 +428,20 @@ export interface PdmSystemSettings {
 }
 /** 图纸转换（2D转PDF、3D转STEP）的执行位置：Local=API服务器本机，Remote=独立转图电脑上的转图代理。 */
 export type PreviewConversionMode = 'Local' | 'Remote'
-export interface PreviewConversionSettings { mode: PreviewConversionMode; agentUrl: string; agentToken: string; timeoutMinutes: number; servers?: { name: string; agentUrl: string; agentToken: string; timeoutMinutes: number; companyId?: string | null }[] }
+export interface PreviewConversionSettings { localExecutionAllowed?: boolean | null; mode: PreviewConversionMode; agentUrl: string; agentToken: string; timeoutMinutes: number; servers?: { name: string; agentUrl: string; agentToken: string; timeoutMinutes: number; companyId?: string | null; disabled?: boolean }[] }
 export interface PreviewAgentProbeResult { ok: boolean; message: string; machine?: string | null; workerExists?: boolean | null; workerPath?: string | null }
 export interface MaterialCodeApprovalSettings { version: number; approverRoleCodes: string[] }
 export interface FormalSupplementPolicy { maximumCount?: number | null; validDays?: number | null }
 export interface FormalSupplementPolicies { standard: FormalSupplementPolicy; electrical: FormalSupplementPolicy }
-export type ApprovalStage = 'ProcessReview' | 'Approval' | 'MechanicalEngineer' | 'MainDesigner' | 'MechanicalSupervisor' | 'HardwareEngineer' | 'HardwareSupervisor' | 'StandardizationSupervisor'
-export type ApprovalAssigneeSource = 'Submitter' | 'ProjectDesignLead' | 'FixedUser' | 'PrimaryUnitManager' | 'ParentUnitManager' | 'FixedUnitManager' | 'Role'
-export interface ApprovalWorkflowStepTemplate { stage: ApprovalStage; name: string; assigneeSource: ApprovalAssigneeSource; fixedAssignee?: string | null; fixedUnitId?: string | null; roleCodes?: string[] | null }
-export interface ApprovalWorkflowTemplate { code: string; name: string; version: number; steps: ApprovalWorkflowStepTemplate[]; emergencyRoleCodes?: string[] | null }
-export interface ReleaseApprovalSettings { mechanical: ApprovalWorkflowTemplate; standard?: ApprovalWorkflowTemplate; nonStandard?: ApprovalWorkflowTemplate; electrical: ApprovalWorkflowTemplate; validationPlan?: ApprovalWorkflowTemplate; materialCodeApplication?: ApprovalWorkflowTemplate; emergencySubstituteRoleCode: string }
+export type ApprovalStage = 'ProcessReview' | 'Approval' | 'MechanicalEngineer' | 'MainDesigner' | 'MechanicalSupervisor' | 'HardwareEngineer' | 'HardwareSupervisor' | 'StandardizationSupervisor' | `ExpenseReview${1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19|20}` | `BonusReview:${string}`
+export type ApprovalAssigneeSource = 'Submitter' | 'ProjectDesignLead' | 'FixedUser' | 'PrimaryUnitManager' | 'ParentUnitManager' | 'FixedUnitManager' | 'Role' | 'DepartmentMembers' | 'ParallelDepartments'
+export interface ApprovalWorkflowStepTemplate { parallelDepartments?: { unitId: string; requireAll: boolean }[]; stage: ApprovalStage; name: string; assigneeSource: ApprovalAssigneeSource; fixedAssignee?: string | null; fixedUnitId?: string | null; roleCodes?: string[] | null; requireAllApprovers?: boolean; emptyFallbackUser?: string | null; conditionRole?: string | null; unlessRole?: boolean; amountGreaterThan?: number | null; conditions?: import('./approvalConditions').ConditionSet | null; copyOnApproval?: ApprovalCopyRule | null; policy?: import('./approvalParticipants').ApprovalNodePolicy | null }
+export interface ApprovalFlowBranch { id: string; name: string; conditions: import('./approvalConditions').ConditionSet | null; nodes: ApprovalFlowNode[] }
+export interface ApprovalFlowNode { id: string; kind: 'Approval' | 'Condition'; name: string; stage?: ApprovalStage | null; branches?: ApprovalFlowBranch[] | null }
+export interface ApprovalWorkflowTemplate { code: string; name: string; version: number; steps: ApprovalWorkflowStepTemplate[]; emergencyRoleCodes?: string[] | null; layout?: ApprovalFlowNode[] | null; expenseDepartmentId?: string | null; expenseDepartmentIds?: Record<string,string> | null }
+export interface ApprovalCopyRecipient { source: 'Role' | 'Department' | 'User' | 'Manager' | 'Submitter' | 'FixedManager' | 'SubmitterDepartment' | 'ParentDepartment' | 'SubmitterDivision' | 'ProjectRole' | 'ProjectMembers'; target: string; roleCode?: string | null; includeSubdepartments?: boolean }
+export interface ApprovalCopyRule { source: 'Role' | 'Department' | 'User' | 'Manager' | 'Submitter'; target: string; message: string; recipients?: ApprovalCopyRecipient[] | null }
+export interface ReleaseApprovalSettings { mechanical: ApprovalWorkflowTemplate; standard?: ApprovalWorkflowTemplate; nonStandard?: ApprovalWorkflowTemplate; electrical: ApprovalWorkflowTemplate; validationPlan?: ApprovalWorkflowTemplate; materialCodeApplication?: ApprovalWorkflowTemplate; expenseProcurement?: ApprovalWorkflowTemplate; expenseSupplyChain?: ApprovalWorkflowTemplate; expense?: ApprovalWorkflowTemplate; emergencySubstituteRoleCode: string }
 export type BomValidationField = 'drawingNumber' | 'name' | 'unit' | 'specification' | 'brand' | 'material' | 'surfaceTreatment' | 'weight' | 'quantity' | 'revision' | 'remark'
 export interface BomValidationRules {
   standard: BomValidationField[]
@@ -1017,6 +1025,7 @@ export interface ManufacturingBomBaseline {
 }
 
 export interface ApprovalStep {
+  participants?: import('./approvalParticipants').ApprovalParticipants | null
   id: string
   stage: string
   assignee: string
@@ -1284,6 +1293,7 @@ export interface DrawingReviewCandidate {
   bomKinds: BomKind[]
   modelRevision: string
   drawingRevision?: string | null
+  currentDrawingApproved?: boolean
   hasUnreleasedDrawingChanges?: boolean
   state: DrawingReviewCandidateState
   reason?: string | null
@@ -1649,6 +1659,7 @@ export interface MaterialRelationGroupCheck {
 }
 
 export interface MaterialRelationMainCheck {
+  isArchived?: boolean
   mainBomItemId: string
   bomSequence?: number
   mainMaterialCode: string
@@ -2637,6 +2648,7 @@ export interface ProjectValidationPlan {
 }
 
 export interface ValidationPlanApprovalTask {
+  participants?: import('./approvalParticipants').ApprovalParticipants | null
   id: string
   planId: string
   stepOrder: number
@@ -2793,6 +2805,6 @@ export interface MaterialCodeApprovalSnapshot {
   code: string
   version: number
   emergencyRoleCodes: string[]
-  nodes: Array<{ id: string; order: number; name: string; stage: string | number; assignees: string[];
+  nodes: Array<{ id: string; order: number; name: string; stage: string | number; assignees: string[]; policy?: import('./approvalParticipants').ApprovalNodePolicy | null; noteHistory?: import('./approvalParticipants').ApprovalNoteRevision[];
     decision?: 'Approved' | 'Rejected' | number | null; decisionBy?: string | null; comment?: string | null; decidedAt?: string | null; isEmergencySubstitute: boolean }>
 }

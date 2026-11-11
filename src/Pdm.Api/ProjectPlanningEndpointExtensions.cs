@@ -76,6 +76,11 @@ public static class ProjectPlanningEndpointExtensions
             var (actor, role) = CurrentUser(context.User);
             return Results.Ok(await service.SaveAsync(projectId, request.ToCommand(), actor, role, cancellationToken));
         });
+        api.MapPut("/projects/{projectId:guid}/plan/holidays", async (Guid projectId, SaveProjectPlanHolidaysRequest request, HttpContext context, ProjectPlanningService service, CancellationToken ct) =>
+        {
+            var (actor, role) = CurrentUser(context.User);
+            return Results.Ok(await service.SaveHolidaysAsync(projectId, request.Holidays, request.ExpectedRowVersion, actor, role, ct));
+        });
 
         api.MapPost("/projects/{projectId:guid}/plan/baseline", async (Guid projectId, SetProjectPlanBaselineRequest request, HttpContext context, ProjectPlanningService service, CancellationToken cancellationToken) =>
         {
@@ -156,6 +161,7 @@ public sealed record GenerateProjectPlanRequest(Guid TemplateId, DateOnly StartD
 }
 
 public sealed record SupplementStageScheduleRequest(DateOnly StartDate, int TotalDurationDays, long ExpectedRowVersion);
+public sealed record SaveProjectPlanHolidaysRequest(IReadOnlyList<ProjectPlanHoliday>? Holidays, long ExpectedRowVersion);
 
 public sealed record SaveProjectPlanRequest(IReadOnlyList<ProjectPlanTask> Tasks, string ChangeReason, long ExpectedRowVersion, IReadOnlyList<ProjectPlanStageDefinition>? Stages = null, bool CreateMissingFollowers = false)
 {

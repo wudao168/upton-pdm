@@ -26,6 +26,10 @@ public static class ProjectOplEndpointExtensions
             return await Save(projectId, null, context, service, ct, "DingTalk");
         });
         api.MapPut("/{id:guid}", (Guid projectId, Guid id, HttpContext context, ProjectOplService service, CancellationToken ct) => Save(projectId, id, context, service, ct));
+        api.MapPost("/speech/transcribe", (Guid projectId, Guid? relatedProjectId, HttpContext context, ProjectOplService service, IOplSpeechRecognizer speech, CancellationToken ct) =>
+            Transcribe(projectId, null, relatedProjectId, context, service, speech, ct));
+        api.MapPost("/{id:guid}/speech/transcribe", (Guid projectId, Guid id, Guid? relatedProjectId, HttpContext context, ProjectOplService service, IOplSpeechRecognizer speech, CancellationToken ct) =>
+            Transcribe(projectId, id, relatedProjectId, context, service, speech, ct));
         api.MapPost("/{id:guid}/view", async (Guid projectId, Guid id, HttpContext context, ProjectOplService service, ProjectOplViewState viewed, CancellationToken ct) =>
         {
             var view = await service.GetAsync(projectId, Actor(context), Role(context), ct, false);
@@ -45,7 +49,7 @@ public static class ProjectOplEndpointExtensions
         {
             var (file, content) = await service.OpenAsync(projectId, id, attachmentId, Actor(context), Role(context), ct);
             var preview = context.Request.Query["preview"] == "true";
-            return Results.File(content, preview ? ProjectCenterPermissionMiddleware.PreviewContentType(file.Name) : "application/octet-stream", preview ? null : file.Name, enableRangeProcessing: true);
+            return Results.File(content, preview ? OplAudioContentType(file.Name) ?? ProjectCenterPermissionMiddleware.PreviewContentType(file.Name) : "application/octet-stream", preview ? null : file.Name, enableRangeProcessing: true);
         });
         api.MapGet("/integrations/dingtalk", async (Guid projectId, HttpContext context, ProjectOplService service, DingTalkOplIntegration integration, CancellationToken ct) =>
         {
@@ -55,6 +59,19 @@ public static class ProjectOplEndpointExtensions
             return Results.Ok(new { enabled = integration.SubmissionEnabled(rootId), submissionEnabled = integration.SubmissionEnabled(rootId), notificationEnabled = integration.NotificationEnabled(rootId), message = "钉钉企业应用免登录提交与群机器人通知需由管理员配置。" });
         });
     }
+    private static async Task<IResult> Transcribe(Guid projectId, Guid? id, Guid? relatedProjectId, HttpContext context, ProjectOplService service, IOplSpeechRecognizer speech, CancellationToken ct)
+    {
+        await service.RequireSpeechAccessAsync(projectId, id, relatedProjectId, Actor(context), Role(context), ct);
+        return await OplSpeechTranscription.ReadAndRecognizeAsync(context, speech, ct);
+    }
+
+    private static string? OplAudioContentType(string name) => Path.GetExtension(name).ToLowerInvariant() switch
+    {
+        ".wav" => "audio/wav", ".mp3" => "audio/mpeg", ".m4a" => "audio/mp4", ".aac" => "audio/aac",
+        ".ogg" or ".opus" => "audio/ogg", ".flac" => "audio/flac",
+        ".webm" when name.StartsWith("OPL录音-", StringComparison.Ordinal) => "audio/webm",
+        _ => null,
+    };
     internal static async Task<(T Input, List<OplUpload> Uploads)> ReadFormAsync<T>(HttpContext context, CancellationToken ct) where T : class
     {
         const long max = 32 * 1024 * 1024;

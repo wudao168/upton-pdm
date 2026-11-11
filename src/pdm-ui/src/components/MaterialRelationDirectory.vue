@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import SearchField from './SearchField.vue'
+import { ElMessageBox } from 'element-plus'
 import { ElMessage } from '../statusMessage'
 import { computed, ref, watch } from 'vue'
-import { listMaterials, listMaterialRelationCategories } from '../api'
+import { deleteMaterialRelationDraft, listMaterials, listMaterialRelationCategories, setMaterialRelationActive } from '../api'
 import type { MaterialRelationTemplate, PdmMaterial, StandardLibraryCategory } from '../types'
 import MaterialRelationEditor from './MaterialRelationEditor.vue'
 import MaterialRelationDetails from './MaterialRelationDetails.vue'
@@ -10,12 +11,15 @@ import StandardCategoryFilter from './StandardCategoryFilter.vue'
 import { matchesStandardCategory, isUncategorized } from '../standardLibraryCategories'
 import { relationMains } from '../materialRelationMains'
 import { copyText } from '../copyText'
+import { userErrorMessage } from '../userErrorMessage'
 
 const props = defineProps<{
   token: string
   relations: MaterialRelationTemplate[]
   canManage: boolean
   canPublish: boolean
+  canChangeActivity?: boolean
+  canDeleteDrafts?: boolean
 }>()
 const emit = defineEmits<{ refresh: [] }>()
 
@@ -28,6 +32,7 @@ const editorOpen = ref(false)
 const selectedRelation = ref<MaterialRelationTemplate | null>(null)
 const directoryMaterials = ref<PdmMaterial[]>([])
 const directoryLoading = ref(false)
+const pendingRelationId = ref('')
 
 const materialById = computed(() => new Map(directoryMaterials.value.map(item => [item.id, item])))
 const brandOptions = computed(() => [...new Set(props.relations.flatMap(item => displayMains(item).map(main => main.brand?.trim())).filter((value): value is string => Boolean(value)))].sort((a, b) => a.localeCompare(b, 'zh-CN')))
@@ -83,6 +88,7 @@ function onRowClick(relation: MaterialRelationTemplate, _column: unknown, event:
 }
 
 function relationStatus(relation: MaterialRelationTemplate) {
+  if (relation.isArchived) return { label: '已停用', type: 'info' as const, version: relation.publishedRevision?.version }
   if (relation.draftRevision && relation.publishedRevision) return { label: '待生效修改', type: 'warning' as const, version: relation.draftRevision.version }
   if (relation.draftRevision) return { label: '待发布生效', type: 'warning' as const, version: relation.draftRevision.version }
   return { label: '已生效', type: 'success' as const, version: relation.publishedRevision?.version }
@@ -111,6 +117,35 @@ function handleChanged() {
 function refresh() {
   emit('refresh')
   void loadDirectoryMaterials()
+}
+
+async function changeRelation(relation: MaterialRelationTemplate, action: 'delete' | 'activity') {
+  if (pendingRelationId.value) return
+  const deleting = action === 'delete'
+  if (deleting ? !props.canDeleteDrafts || !!relation.publishedRevision : !props.canChangeActivity || !relation.publishedRevision) return
+  const activate = relation.isArchived
+  const label = deleting ? '删除' : activate ? '恢复启用' : '停用'
+  const message = deleting ? '删除后，此草稿及其配件组将移除。'
+    : activate ? '恢复启用后，可再次用于新增 BOM 选配。'
+    : '停用后，新增 BOM 选配不再使用此配置。已有选配及发布历史会保留。'
+  pendingRelationId.value = relation.id
+  try {
+    try {
+      await ElMessageBox.confirm(message, `${label}关联配置「${relation.name}」`, {
+        type: 'warning', confirmButtonText: `确认${label}`, cancelButtonText: '取消',
+      })
+    } catch { return }
+    if (deleting) {
+      await deleteMaterialRelationDraft(relation.id, relation.rowVersion, props.token)
+      expandedIds.value = expandedIds.value.filter(id => id !== relation.id)
+    } else {
+      await setMaterialRelationActive(relation.id, activate, relation.rowVersion, props.token)
+    }
+    emit('refresh')
+    ElMessage.success(`关联配置已${label}`)
+  } catch (error) {
+    ElMessage.error(userErrorMessage(error instanceof Error ? error.message : `关联配置${label}失败，请刷新后重试`))
+  } finally { pendingRelationId.value = '' }
 }
 </script>
 
@@ -143,7 +178,14 @@ function refresh() {
       <el-table-column label="配件组" width="80"><template #default="{ row }">{{ visibleRevision(row)?.groups.length ?? 0 }}</template></el-table-column>
       <el-table-column label="候选物料" width="90"><template #default="{ row }">{{ optionCount(row) }}</template></el-table-column>
       <el-table-column label="更新时间" width="170"><template #default="{ row }">{{ formatDate(row.updatedAt) }}</template></el-table-column>
-      <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button link type="primary" :aria-label="`维护 ${displayMains(row)[0]?.materialCode || row.mainMaterialCode} 的关联配置`" @click="openEditor(row)">维护</el-button></template></el-table-column>
+      <el-table-column label="操作" width="120" class-name="pdm-column-fixed-width">
+        <template #default="{ row }">
+          <el-button v-if="row.isArchived" link type="primary" @click="toggleExpansion(row)">查看</el-button>
+          <el-button v-else link type="primary" :aria-label="`维护 ${displayMains(row)[0]?.materialCode || row.mainMaterialCode} 的关联配置`" @click="openEditor(row)">维护</el-button>
+          <el-button v-if="canDeleteDrafts && !row.publishedRevision && row.draftRevision" link type="danger" :disabled="!!pendingRelationId" @click="changeRelation(row, 'delete')">删除</el-button>
+          <el-button v-if="canChangeActivity && row.publishedRevision" link :type="row.isArchived ? 'primary' : 'danger'" :disabled="!!pendingRelationId" @click="changeRelation(row, 'activity')">{{ row.isArchived ? '恢复启用' : '停用' }}</el-button>
+        </template>
+      </el-table-column>
     </el-table>
     </div>
 

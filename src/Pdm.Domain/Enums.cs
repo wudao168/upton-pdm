@@ -211,7 +211,13 @@ public enum ApprovalStage
     MechanicalSupervisor = 30,
     HardwareEngineer = 40,
     HardwareSupervisor = 50,
-    StandardizationSupervisor = 60
+    StandardizationSupervisor = 60,
+    // Separate identities allow both expense department branches to retain their reviewers.
+    ExpenseReview1 = 101, ExpenseReview2 = 102, ExpenseReview3 = 103, ExpenseReview4 = 104,
+    ExpenseReview5 = 105, ExpenseReview6 = 106, ExpenseReview7 = 107, ExpenseReview8 = 108,
+    ExpenseReview9 = 109, ExpenseReview10 = 110, ExpenseReview11 = 111, ExpenseReview12 = 112,
+    ExpenseReview13 = 113, ExpenseReview14 = 114, ExpenseReview15 = 115, ExpenseReview16 = 116,
+    ExpenseReview17 = 117, ExpenseReview18 = 118, ExpenseReview19 = 119, ExpenseReview20 = 120
 }
 
 public enum ApprovalAssigneeSource
@@ -222,7 +228,9 @@ public enum ApprovalAssigneeSource
     PrimaryUnitManager,
     ParentUnitManager,
     FixedUnitManager,
-    Role
+    Role,
+    DepartmentMembers,
+    ParallelDepartments
 }
 
 public enum ReleaseScope

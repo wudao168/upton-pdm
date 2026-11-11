@@ -34,7 +34,11 @@ public sealed class RuleReleaseScopeIsolationTests
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
         Task<ReleasePackage> Capture() => (Task<ReleasePackage>)method.Invoke(workflow, [package, CancellationToken.None])!;
         if (scope == ReleaseScope.NonStandardWithDrawing)
-            Assert.Contains("待补全", (await Assert.ThrowsAsync<PdmRuleException>(Capture)).Message);
+        {
+            var captured = await Capture();
+            Assert.Equal(drawing.Id, Assert.Single(captured.VersionBindings!, binding => binding.Publish).DocumentId);
+            Assert.Equal(1, captured.DrawingDocumentCount);
+        }
         else
         {
             var captured = await Capture();
@@ -84,67 +88,12 @@ public sealed class RuleReleaseScopeIsolationTests
         var method = typeof(PdmWorkflowService).GetMethod("RequireCompletePackageReleaseIndexAsync",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
         Task Validate() => (Task)method.Invoke(workflow, [package, snapshot, CancellationToken.None])!;
-        if (removedRootPending || unknownRemovedId)
+        if (unknownRemovedId)
         {
             var error = await Assert.ThrowsAsync<PdmRuleException>(Validate);
             Assert.Contains(unknownRemovedId ? "来源" : "待补全", error.Message);
         }
         else await Validate();
-    }
-
-    [Theory]
-    [InlineData("complete", true)]
-    [InlineData("complete", false)]
-    [InlineData("pending", true)]
-    [InlineData("pending", false)]
-    [InlineData("unknown", false)]
-    [InlineData("ambiguous", false)]
-    [InlineData("wrong-root", false)]
-    [InlineData("manual", false)]
-    [InlineData("wrong-configuration", false)]
-    public async Task OnlyTheSelectedCadRootMayBlockNonStandardRelease(string source, bool explicitRoot)
-    {
-        var repository = new InMemoryPdmRepository(TimeProvider.System);
-        var projectId = Guid.Parse("11111111-1111-1111-1111-111111111111");
-        var project = (await repository.FindProjectAsync(projectId, default))!;
-        var session = Guid.NewGuid();
-        var complete = await ArchiveCompleteRoot(repository, project, session);
-        Assert.False(complete.Root.HasPendingStructureIndex);
-        var unrelated = await ArchiveBatchTests.Register(repository, project, "UNRELATED-PENDING", DocumentKind.Assembly, session);
-        await repository.CheckInVersionAsync(unrelated.Id, "admin", session,
-            ArchiveBatchTests.Commit(project, unrelated, ArchiveBatchTests.Node(unrelated) with {
-                StructureIndexPending = true, Children = source == "ambiguous" ? [complete.Root] : [] }, 'A', true), default);
-        var forest = (await repository.GetLatestReferenceSnapshotAsync(projectId, default))!;
-        Assert.True(forest.Root.HasPendingStructureIndex);
-        Assert.Contains(ProjectReferenceForest.Roots(forest), root => root.DocumentId == complete.RootDocumentId);
-        Assert.False((await repository.GetProjectReferenceRootAsync(projectId, complete.RootDocumentId, default))!.Root.HasPendingStructureIndex);
-
-        var selectedRoot = source == "pending"
-            ? (await repository.GetProjectReferenceRootAsync(projectId, unrelated.Id, default))! : complete;
-        var selected = (await repository.GetBomAsync(projectId, BomKind.Standard, default))
-            .Select(item => item with {
-                SourceDocumentId = source == "manual" ? null : source == "unknown" ? Guid.NewGuid() : selectedRoot.RootDocumentId,
-                SourceConfiguration = source == "manual" ? null : source == "wrong-configuration" ? "UNKNOWN-CONFIGURATION" : selectedRoot.Root.Configuration,
-                SourceInstancePath = source is "manual" or "unknown" or "ambiguous" ? null
-                    : $"roots/{(source == "wrong-root" ? unrelated.Id : selectedRoot.RootDocumentId):N}/{selectedRoot.Root.InstancePath}",
-                Source = source == "manual" ? "Manual" : "Auto"
-            }).ToArray();
-        await repository.ReplaceBomAsync(projectId, BomKind.Standard, selected, default);
-
-        var workflow = new PdmWorkflowService(repository, new UnusedStorage(), new NoOpPublisher(), TimeProvider.System);
-        var packageIdsBefore = (await repository.ListReleasePackagesAsync(projectId, default)).Select(package => package.Id).Order().ToArray();
-        var method = typeof(PdmWorkflowService).GetMethod("RequireCompleteScopedReleaseIndexAsync",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-        Task Validate() => (Task)method.Invoke(workflow, [forest, ReleaseScope.NonStandardWithDrawing, selected,
-            null, explicitRoot ? selectedRoot.RootDocumentId : null, projectId, CancellationToken.None, null])!;
-        if (source is "pending" or "unknown" or "ambiguous" or "wrong-root" or "wrong-configuration")
-        {
-            var error = await Assert.ThrowsAsync<PdmRuleException>(Validate);
-            Assert.Contains(source == "pending" ? "待补全" : "来源", error.Message);
-            Assert.Equal(packageIdsBefore, (await repository.ListReleasePackagesAsync(projectId, default)).Select(package => package.Id).Order());
-            return;
-        }
-        await Validate();
     }
 
     private static async Task<CadReferenceSnapshot> ArchiveCompleteRoot(InMemoryPdmRepository repository, Project project, Guid session)

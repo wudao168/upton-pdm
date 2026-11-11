@@ -14,7 +14,7 @@ export async function createNameplateQr(serialNumber: string) {
   return createQr(content, '铭牌')
 }
 
-async function createQr(content: string, kind: string) {
+export async function createQr(content: string, kind: string) {
   const result = await writeBarcode(content, { format: 'QRCode', options: 'ecLevel=M', scale: 4, addQuietZones: true })
   if (result.error || !result.svg) throw new Error(`${kind}二维码生成失败，请重试。`)
   return { content, src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(result.svg)}` }

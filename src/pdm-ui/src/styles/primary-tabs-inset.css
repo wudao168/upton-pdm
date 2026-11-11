@@ -1,0 +1,14 @@
+/* 主页面已提供外侧留白，一级页签与内容区外框对齐。 */
+:root body :is(.pdm-navigation-tabs, .material-tabs, .pdm-project-tabs, .user-settings-tabs, .production-workbench__tabs, .wh-tabs, .pdm-task-filters, .pdm-admin-tabs):not(.el-tabs) {
+  box-sizing: border-box;
+  padding-inline: var(--pdm-primary-tabs-inline-inset, var(--pdm-content-inset)) !important;
+}
+
+/* Element Plus 由页眉统一留白，内层轨道清除原4px横向内边距，避免叠加。 */
+:root body :is(.pdm-navigation-tabs, .material-tabs, .pdm-project-tabs, .user-settings-tabs, .production-workbench__tabs, .wh-tabs, .pdm-task-filters, .pdm-admin-tabs) > .el-tabs__header {
+  box-sizing: border-box;
+  padding-inline: var(--pdm-primary-tabs-inline-inset, var(--pdm-content-inset)) !important;
+}
+:root body :is(.pdm-navigation-tabs, .material-tabs, .pdm-project-tabs, .user-settings-tabs, .production-workbench__tabs, .wh-tabs, .pdm-task-filters, .pdm-admin-tabs) > .el-tabs__header .el-tabs__nav {
+  padding-inline: 0 !important;
+}

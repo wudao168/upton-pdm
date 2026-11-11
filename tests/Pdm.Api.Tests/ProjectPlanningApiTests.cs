@@ -17,6 +17,50 @@ public sealed class ProjectPlanningApiTests : IClassFixture<PdmApiFactory>
     private readonly PdmApiFactory factory;
     public ProjectPlanningApiTests(PdmApiFactory factory) => this.factory = factory;
 
+    [Fact]
+    public async Task HolidayOverridesUseScopedPlanEditPermissionAndPreserveApprovedSchedule()
+    {
+        await using var isolated = new PdmApiFactory();
+        using var client = isolated.CreateClient();
+        var repository = isolated.Services.GetRequiredService<IPdmRepository>();
+        var planning = isolated.Services.GetRequiredService<IProjectPlanningRepository>();
+        var company = (await repository.GetProjectNumberingOptionsAsync(default)).Organizations[0].Id;
+        var customer = (await repository.ListCustomersAsync(true, default))[0];
+        var project = await repository.CreateNumberedProjectAsync(new(company, "P", 0, customer.Id, "项目假期", null, null, 1, "holiday-editor", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
+        var outside = await repository.CreateNumberedProjectAsync(new(company, "P", 0, customer.Id, "其他项目", null, null, 1, "holiday-editor", @"D:\PDM\Vault", @"D:\PDM\Release"), default);
+        await repository.CreateUserAsync(new(Guid.NewGuid(), "holiday-editor", "假期维护人", "unused", UserRole.Engineer, true, CompanyId: company), default);
+        string[] permissions = [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, ProjectCenterPermissions.Tab("project-plan"),
+            ProjectCenterPermissions.Write, PermissionCodes.ProjectPlanEdit, "project.plan.view", "project.plan.update"];
+        var template = new AuthorizationTemplate("holiday-editor", "假期维护", "", permissions.Select(code => new AuthorizationGrant(code, ["company"])).ToArray()) { ProjectAssignable = true };
+        var settings = await repository.GetAuthorizationSettingsAsync(default);
+        settings = await repository.SaveAuthorizationSettingsAsync(settings with
+        {
+            Templates = settings.Templates.Append(template).ToArray(),
+            Assignments = [new(Guid.NewGuid(), "holiday-editor", template.Key, company, "project", project.Id)]
+        }, settings.Revision, default);
+        var start = new DateOnly(2026, 11, 9);
+        var now = DateTimeOffset.UtcNow;
+        var plan = await planning.SavePlanAsync(new ProjectPlan(Guid.NewGuid(), project.Id, Guid.NewGuid(), "测试模板", "设计",
+            null, null, start, start.AddDays(10), start.AddDays(10), 1, [], "holiday-editor", now, "holiday-editor", now, 0)
+            { ApprovalStatus = ProjectPlanApprovalStatus.Approved }, null, null, default);
+        var url = $"/api/projects/{project.Id}/plan";
+        var holidays = new[] { new ProjectPlanHoliday(start.AddDays(2), "项目停工", true), new ProjectPlanHoliday(start.AddDays(6), "项目补班", false) };
+        var input = new { holidays, expectedRowVersion = plan.RowVersion };
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PutAsJsonAsync($"{url}/holidays", input)).StatusCode);
+        Authorize(client, "holiday-editor", "Engineer");
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync($"/api/projects/{outside.Id}/plan/holidays", input)).StatusCode);
+        using var response = await client.PutAsJsonAsync($"{url}/holidays", input);
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        var saved = (await client.GetFromJsonAsync<ProjectPlan>(url))!;
+        Assert.Equal(holidays, saved.HolidayOverrides);
+        Assert.Equal(plan.ApprovalStatus, saved.ApprovalStatus);
+        Assert.Equal(plan.BaselineVersion, saved.BaselineVersion);
+        Assert.Equal(plan.PlannedFinish, saved.PlannedFinish);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PutAsJsonAsync($"{url}/holidays", input)).StatusCode);
+        await repository.SaveAuthorizationSettingsAsync(settings with { Assignments = [] }, settings.Revision, default);
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsJsonAsync($"{url}/holidays", new { holidays, expectedRowVersion = saved.RowVersion })).StatusCode);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

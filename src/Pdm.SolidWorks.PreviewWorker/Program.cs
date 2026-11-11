@@ -28,6 +28,17 @@ internal static partial class Program
         var paths = args.Where(argument => !argument.StartsWith("--", StringComparison.Ordinal)).ToArray();
         var useLightweight = !flags.Contains("--no-lightweight");
         var dedicatedHost = flags.Contains("--dedicated-host");
+        if (flags.Contains("--probe-startup"))
+        {
+            try
+            {
+                using var probe = new ConversionSession(useLightweight, false);
+                probe.CheckStartup();
+                Console.Out.WriteLine("专用SolidWorks会话已就绪。");
+                return 0;
+            }
+            catch (Exception error) { Console.Error.WriteLine(error.Message); return 1; }
+        }
         if (flags.Contains("--serve")) return Serve(useLightweight, dedicatedHost);
         if (paths.Length != 2)
         {
@@ -158,7 +169,7 @@ internal static partial class Program
                     Console.Error.WriteLine($"转换文件 {job.SourcePath} 失败：{exception}");
                     if (!string.IsNullOrWhiteSpace(job.ReleaseRevision)) throw;
                     try { if (File.Exists(job.OutputPath)) File.Delete(job.OutputPath); } catch (Exception cleanupError) { Console.Error.WriteLine(cleanupError); }
-                    items.Add(new PreviewWorkerItem { DocumentId = job.DocumentId, Error = exception is InvalidOperationException
+                    items.Add(new PreviewWorkerItem { DocumentId = job.DocumentId, FailureKind = startupFailure == null ? "Document" : "HostStartup", Error = exception is InvalidOperationException
                         ? exception.Message : "SolidWorks转换异常，请在转图电脑打开该文件检查引用和弹窗后，单独重试；详细原因已记录到诊断日志。" });
                     Reset();
                     solidWorksPid = 0;
@@ -170,6 +181,8 @@ internal static partial class Program
             return new PreviewWorkerResult { Success = failed == 0, Items = items, AssemblyPreviewVersion = 1,
                 Error = failed == 0 ? null : $"{failed}项图档转换失败，其余{items.Count - failed}项已完成，可单独重试失败项。" };
         }
+
+        public void CheckStartup() => EnsureApplication();
 
         private ISldWorks EnsureApplication()
         {
@@ -411,6 +424,7 @@ internal static partial class Program
 
     private sealed class PreviewWorkerItem
     {
+        public string FailureKind { get; set; }
         public Guid DocumentId { get; set; }
         public bool Success { get; set; }
         public string Error { get; set; }

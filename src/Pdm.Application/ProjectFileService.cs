@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Upton.Pdm.Domain;
 
 namespace Upton.Pdm.Application;
@@ -92,6 +93,30 @@ public sealed class ProjectFileService(
     }
 
     public Task CancelUploadAsync(Guid sessionId, string actor, CancellationToken cancellationToken) => storage.CancelAsync(sessionId, actor, cancellationToken);
+
+    internal async Task<StoredProjectFileUpload> PrepareGeneratedFileAsync(Guid projectId, Guid folderId, string name,
+        byte[] content, string actor, UserRole role, CancellationToken ct)
+    {
+        var upload = await StartUploadAsync(projectId, folderId, name, content.LongLength,
+            Convert.ToHexString(SHA256.HashData(content)), actor, role, ct);
+        try
+        {
+            for (var offset = 0; offset < content.Length; offset += upload.ChunkSize)
+            {
+                using var chunk = new MemoryStream(content, offset, Math.Min(upload.ChunkSize, content.Length - offset), writable: false);
+                await storage.WriteChunkAsync(upload.Id, offset / upload.ChunkSize, chunk, actor, ct);
+            }
+            return await storage.CompleteAsync(upload.Id, actor, ct);
+        }
+        catch
+        {
+            try { await storage.CancelAsync(upload.Id, actor, CancellationToken.None); }
+            catch (PdmNotFoundException) { }
+            throw;
+        }
+    }
+
+    internal Task DiscardGeneratedFileAsync(StoredProjectFileUpload upload) => storage.DiscardAsync(upload, CancellationToken.None);
 
     public async Task<IReadOnlyList<ProjectFileVersion>> ListVersionsAsync(Guid projectId, Guid fileId, string actor, UserRole role, CancellationToken cancellationToken)
     {

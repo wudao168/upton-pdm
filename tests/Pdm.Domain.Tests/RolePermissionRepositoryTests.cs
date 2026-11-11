@@ -7,19 +7,14 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class RolePermissionRepositoryTests
 {
     [Fact]
-    public async Task PlatformAdministratorPermissionsCannotBeEditedOrCopied()
+    public async Task PlatformPermissionsCanBeEditedAndCopiedAsExplicitTemplates()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
-
-        var editError = await Assert.ThrowsAsync<PdmRuleException>(() => repository.SetRolePermissionsAsync("platform_admin", [], default));
-        Assert.Contains("平台管理员", editError.Message);
-        var copyError = await Assert.ThrowsAsync<PdmRuleException>(() => repository.CreateRoleAsync("平台副本", "", "platform_admin", default));
-        Assert.Contains("平台管理员", copyError.Message);
-
-        var directory = await repository.GetRolePermissionDirectoryAsync(default);
-        var platform = Assert.Single(directory.Roles, role => role.Role == "platform_admin");
-        Assert.True(RolePermissionCatalog.Defaults[UserRole.PlatformAdministrator].SetEquals(platform.Permissions));
-        Assert.DoesNotContain(directory.Roles, role => role.Name == "平台副本");
+        var current = await repository.GetAuthorizationSettingsAsync(default);
+        var platform = current.Templates.Single(t => t.RoleCode == "platform_admin");
+        var saved = await repository.SaveAuthorizationSettingsAsync(current with { Templates = current.Templates.Select(t => t.Key == platform.Key ? t with { Grants = [] } : t).Append(platform with { Key = "platform-copy", RoleCode = null }).ToArray() }, current.Revision, default);
+        Assert.Empty(saved.Templates.Single(t => t.Key == platform.Key).Grants);
+        Assert.Equal(platform.Grants, saved.Templates.Single(t => t.Key == "platform-copy").Grants);
     }
 
     [Fact]
@@ -41,7 +36,7 @@ public sealed class RolePermissionRepositoryTests
 
         await repository.SetRolePermissionsAsync(customRole.Role, [], default);
         var afterRevocation = await repository.GetUserPermissionsAsync("delivery-role-test", UserRole.ProductionViewer, default);
-        Assert.True(afterRevocation.SetEquals([PermissionCodes.MaterialView]));
+        Assert.True(afterRevocation.Where(p => p != ProjectCenterPermissions.SchemaMarker).ToHashSet().SetEquals([PermissionCodes.MaterialView]));
         Assert.False(await repository.HasUserPermissionAsync("delivery-role-test", UserRole.ProductionViewer, PermissionCodes.ProductionDrawingManage, default));
     }
 }

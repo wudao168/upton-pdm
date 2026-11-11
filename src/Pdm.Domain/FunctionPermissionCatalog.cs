@@ -8,9 +8,15 @@ public sealed record FunctionRoute(string Method, string Path);
 public static class FunctionPermissionCatalog
 {
     public const string SchemaMarker = "system.permission-profile.v2";
+    public static bool RequiresExplicitGrant(string code) => code is PermissionCodes.MaterialRelationActivity
+        or PermissionCodes.MaterialRelationDelete or PermissionCodes.EngineeringKitDelete
+        || ProjectFileFormPermissions.RequiresExplicitGrant(code)
+        || ProductionMobilePermissions.RequiresExplicitGrant(code)
+        || code.StartsWith("spare-parts.", StringComparison.Ordinal);
     public static IReadOnlyList<PermissionDefinition> Build(IReadOnlyList<PermissionDefinition> existing)
     {
         var result = existing.Select(Describe).ToList();
+        result.AddRange(AuthorizationActions.Definitions);
         foreach (var tab in ProjectCenterPermissions.Tabs)
             result.Add(new(ProjectCenterPermissions.Tab(tab.Key), $"查看{tab.Name}页签", "项目中心页签", "单独控制项目中心页签入口及对应内容的查看。")
             { Scope = "project", Action = "view", ProjectAuthorization = "role", Dependencies = tab.Key is "overview" or "records" ? [PermissionCodes.ProjectView] : [PermissionCodes.ProjectView, PermissionCodes.ProjectContentView] });
@@ -26,13 +32,37 @@ public static class FunctionPermissionCatalog
             Dependencies = [PermissionCodes.ProjectContentView], Routes = routes
         });
         FunctionRoute Route(string method, string path) => new(method, "/api" + path);
+        result.Add(new(PermissionCodes.MaterialRelationActivity, "停用及启用关联配置", "料品管理", "控制已发布关联配置是否用于新增选配。", Sensitive: true)
+        {
+            Action = "edit", Dependencies = [PermissionCodes.MaterialRelationView, PermissionCodes.MaterialRelationPublish],
+            Routes = [Route("PUT", "/material-relations/templates/{templateId}/active")]
+        });
+        result.Add(new(PermissionCodes.MaterialRelationDelete, "删除关联配置草稿", "料品管理", "删除从未发布且没有引用的关联配置。", Sensitive: true)
+        {
+            Action = "delete", Dependencies = [PermissionCodes.MaterialRelationView, PermissionCodes.MaterialRelationManage],
+            Routes = [Route("DELETE", "/material-relations/templates/{templateId}")]
+        });
+        result.Add(new(PermissionCodes.EngineeringKitDelete, "删除料品套件草稿", "标准库", "删除从未发布且没有引用的料品套件。", Sensitive: true)
+        {
+            Action = "delete", Dependencies = [PermissionCodes.StandardLibraryView, PermissionCodes.StandardLibraryManage],
+            Routes = [Route("DELETE", "/engineering-kits/{kitId}")]
+        });
         foreach (var item in new[] { ("create", "创建项目计划", "POST", "/generate"), ("update", "编辑项目计划", "PUT", ""), ("delete", "清空项目计划", "DELETE", ""), ("baseline", "建立计划基线", "POST", "/baseline"), ("submit", "提交计划审批", "POST", "/submit"), ("progress", "维护任务进度", "PUT", "/tasks/{taskId}/progress"), ("stage", "维护项目阶段", "PUT", "/stage"), ("reuse", "复用项目计划", "POST", "/reuse"), ("schedule", "补充阶段计划", "POST", "/stage-schedule"), ("change", "提交计划变更", "POST", "/change-request"), ("change-complete", "完成计划变更", "POST", "/change-complete"), ("change-abandon", "放弃计划变更", "POST", "/change-abandon") })
-            Add("project.plan." + item.Item1, item.Item2, "项目计划", PermissionCodes.ProjectPlanEdit, false, Route(item.Item3, "/projects/{projectId}/plan" + item.Item4));
+        {
+            var route = Route(item.Item3, "/projects/{projectId}/plan" + item.Item4);
+            Add("project.plan." + item.Item1, item.Item2, "项目计划", PermissionCodes.ProjectPlanEdit, false,
+                item.Item1 == "update" ? [route, Route("PUT", "/projects/{projectId}/plan/holidays")] : [route]);
+        }
         Add("project.plan.view", "查看项目计划", "项目计划", PermissionCodes.ProjectContentView, true, Route("GET", "/projects/{projectId}/plan"), Route("GET", "/projects/{projectId}/plan/portfolio"), Route("GET", "/projects/{projectId}/plan/versions"));
         foreach (var item in new[] { ("create", "新建项目文件夹", "POST", "/folders/{folderId}/children"), ("edit", "编辑项目文件夹", "PATCH", "/folders/{folderId}"), ("move", "移动项目文件夹", "POST", "/folders/{folderId}/move"), ("delete", "删除项目文件夹", "DELETE", "/folders/{folderId}"), ("view", "查看项目文件", "GET", "/files"), ("upload", "上传项目文件", "POST", "/folders/{folderId}/file-uploads"), ("download", "下载项目文件", "GET", "/files/{fileId}/content"), ("rename", "重命名项目文件", "PATCH", "/files/{fileId}"), ("description", "编辑项目文件说明", "PUT", "/files/{fileId}/description"), ("relocate", "移动项目文件", "POST", "/files/{fileId}/move"), ("recycle", "回收项目文件", "DELETE", "/files/{fileId}"), ("restore", "恢复项目文件", "POST", "/files/{fileId}/restore") })
             Add("project.file." + item.Item1, item.Item2, "项目文件", PermissionCodes.ProjectContentView, true, Route(item.Item3, "/projects/{projectId}" + item.Item4));
         foreach (var item in new[] { ("view", "查看OPL", "GET", ""), ("create", "创建OPL问题", "POST", ""), ("edit", "编辑OPL问题", "PUT", "/{issueId}"), ("complete", "完成OPL问题", "POST", "/{issueId}/complete"), ("download", "下载OPL附件", "GET", "/{issueId}/attachments/{attachmentId}") })
-            Add("project.opl." + item.Item1, item.Item2, "项目OPL", PermissionCodes.ProjectContentView, true, Route(item.Item3, "/projects/{projectId}/opl" + item.Item4));
+        {
+            var path = "/projects/{projectId}/opl" + item.Item4;
+            var route = Route(item.Item3, path);
+            Add("project.opl." + item.Item1, item.Item2, "项目OPL", PermissionCodes.ProjectContentView, true,
+                item.Item1 is "create" or "edit" ? [route, Route("POST", path + "/speech/transcribe")] : [route]);
+        }
         foreach (var item in new[] { ("register", "登记图档", "POST", "/projects/{projectId}/documents/register"), ("checkout", "签出图档", "POST", "/documents/{documentId}/checkout"), ("archive", "存档图档", "POST", "/documents/{documentId}/checkin"), ("restore", "恢复图档历史版本", "POST", "/documents/{documentId}/versions/{versionId}/restore") })
             Add("document." + item.Item1, item.Item2, "项目图档", PermissionCodes.DocumentEdit, true, Route(item.Item3, item.Item4));
         Add("document.view", "查看图档及版本", "项目图档", PermissionCodes.ProjectContentView, true, Route("GET", "/projects/{projectId}/documents"), Route("GET", "/documents/{documentId}/versions"), Route("POST", "/documents/version-verifications"));
@@ -54,6 +84,9 @@ public static class FunctionPermissionCatalog
             var view = result.FirstOrDefault(item => item.Module == operation.Module && item.Code.EndsWith(".view"));
             if (view is not null) result[result.IndexOf(operation)] = operation with { Dependencies = operation.Dependencies.Append(view.Code).Distinct().ToArray() };
         }
+        result.AddRange(ProjectFileFormPermissions.Definitions());
+        result.AddRange(SparePartPermissions.Definitions());
+        result.AddRange(ProductionMobilePermissions.Definitions());
         result.Add(new(SchemaMarker, "权限配置格式", "系统内部") { Hidden = true });
         var bundles = result.Where(item => item.LegacyPermission is not null && item.LegacyPermission != PermissionCodes.ProjectContentView).Select(item => item.LegacyPermission!).ToHashSet();
         var keys = result.Select(item => item.Code).ToHashSet(StringComparer.Ordinal);
@@ -79,7 +112,7 @@ public static class FunctionPermissionCatalog
         if (item.Code == PermissionCodes.RoleSettingsEdit) dependencies.Add(PermissionCodes.RoleSettingsView);
         if (item.Code == PermissionCodes.ProjectPermissionSettingsEdit) dependencies.Add(PermissionCodes.ProjectPermissionSettingsView);
         var position = item.Code is PermissionCodes.ProjectPlanEdit or PermissionCodes.ProjectEdit or PermissionCodes.ProjectDelete or PermissionCodes.ProjectChildCreate or PermissionCodes.ProjectDesignerAssign or PermissionCodes.BomEdit or PermissionCodes.BomMechanicalEdit or PermissionCodes.BomElectricalEdit or PermissionCodes.ValidationPlanEdit or PermissionCodes.ReleaseManage;
-        return item with { Scope = project ? "project" : "system", Action = Action(item.Code, item.Name), Dependencies = dependencies, ProjectAuthorization = item.Code == PermissionCodes.ProjectBudgetView ? "budget" : position ? "position" : "role" };
+        return item with { Scope = project ? "project" : item.Scope, Action = item.Action == "other" ? Action(item.Code, item.Name) : item.Action, Dependencies = dependencies, ProjectAuthorization = item.Code == PermissionCodes.ProjectBudgetView ? "budget" : position ? "position" : "role" };
     }
 
     public static string Action(string code, string name) => code.EndsWith(".notify", StringComparison.Ordinal) ? "notify"

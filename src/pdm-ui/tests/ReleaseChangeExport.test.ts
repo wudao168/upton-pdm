@@ -52,7 +52,7 @@ describe('发布BOM变更导出', () => {
     await button().trigger('click')
     await flushPromises()
     const rows = await exportedRows()
-    expect(rows.map(row => [row[1], row[10], row[11], row[12], row[14]])).toEqual([
+    expect(rows.map(row => [row[1], row[10], row[11], row[13], row[15]])).toEqual([
       ['add', 4, 0, 4, '新增'], ['up', 3, 2, 5, '修改'], ['down', -2, 5, 3, '修改'],
       ['attribute', 0, 3, 3, '修改'], ['delete', -5, 5, 0, '删除'],
     ])
@@ -67,7 +67,7 @@ describe('发布BOM变更导出', () => {
     wrapper = mount(ReleaseCenter, { props: { ...props, releasePackage: { ...release(current), wholeSetMultiplier: 3 }, previousVersionItems: previous, previousVersionMultiplier: 2 } })
     await button().trigger('click')
     await flushPromises()
-    expect((await exportedRows()).map(row => [row[1], row[10], row[11], row[12]])).toEqual([
+    expect((await exportedRows()).map(row => [row[1], row[10], row[11], row[13]])).toEqual([
       ['MAT', 0.9, 0.6, 1.5], ['fixed', 2, 4, 6],
     ])
   })

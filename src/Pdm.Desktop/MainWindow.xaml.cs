@@ -99,8 +99,8 @@ public partial class MainWindow : Window
         InitializeComponent();
         SourceInitialized += OnSourceInitialized;
         Loaded += OnLoaded;
-        SizeChanged += (_, _) => ApplyPreviewSurfaces();
-        LocationChanged += (_, _) => ApplyPreviewSurfaces();
+        SizeChanged += (_, _) => { UpdateMaximizedContentBounds(); ApplyPreviewSurfaces(); };
+        LocationChanged += (_, _) => { UpdateMaximizedContentBounds(); ApplyPreviewSurfaces(); };
         StateChanged += OnWindowStateChanged;
         Activated += OnWindowActivated;
         // eDrawings opens native markup editors that temporarily deactivate this WPF window.
@@ -1274,10 +1274,13 @@ public partial class MainWindow : Window
             startWithWindows = false;
         }
         InitializeTrayIcon();
+        Dispatcher.BeginInvoke(new Action(UpdateMaximizedContentBounds));
     }
 
     private IntPtr WindowMessageHook(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        if (message == 0x02E0) // WM_DPICHANGED: use the new monitor geometry after WPF applies it.
+            Dispatcher.BeginInvoke(new Action(UpdateMaximizedContentBounds));
         if (message != WindowMessageSystemCommand) return IntPtr.Zero;
         var command = wParam.ToInt32();
         if (command == MenuServerSettings)
@@ -1301,8 +1304,28 @@ public partial class MainWindow : Window
         HideToNotificationArea();
     }
 
+    private void UpdateMaximizedContentBounds()
+    {
+        var margin = new Thickness(0);
+        if (WindowState == WindowState.Maximized && PresentationSource.FromVisual(this) is HwndSource source
+            && source.CompositionTarget != null && ActualWidth > 0 && ActualHeight > 0)
+        {
+            // WindowChrome keeps the resize frame outside the monitor when maximized.
+            // Inset content by the actual clipped area, in DIPs, so the full caption remains visible.
+            var origin = PointToScreen(new System.Windows.Point(0, 0));
+            var scale = source.CompositionTarget.TransformToDevice;
+            var workArea = WinForms.Screen.FromHandle(source.Handle).WorkingArea;
+            margin = new Thickness(
+                Math.Max(0, (workArea.Left - origin.X) / scale.M11),
+                Math.Max(0, (workArea.Top - origin.Y) / scale.M22),
+                Math.Max(0, (origin.X + ActualWidth * scale.M11 - workArea.Right) / scale.M11),
+                Math.Max(0, (origin.Y + ActualHeight * scale.M22 - workArea.Bottom) / scale.M22));
+        }
+        if (RootGrid.Margin != margin) RootGrid.Margin = margin;
+    }
     private void OnWindowStateChanged(object? sender, EventArgs eventArgs)
     {
+        UpdateMaximizedContentBounds();
         MaximizeGlyph.Text = WindowState == WindowState.Maximized ? "\uE923" : "\uE922";
         if (WindowState == WindowState.Minimized && !allowClose && !hideAfterStartupNavigation)
         {
@@ -1899,6 +1922,12 @@ public partial class MainWindow : Window
             WpfMessageBox.Show(this, message, "UPLM", MessageBoxButton.OK, MessageBoxImage.Information)));
         embeddedPreview.MarkupModifiedChanged += modified => Dispatcher.BeginInvoke(new Action(() =>
             _ = PublishMarkupStatusAsync(modified ? "dirty" : "clean", modified ? "批注尚未保存。" : string.Empty)));
+        embeddedPreview.ComponentSelectionChanged += (path, name, configuration) =>
+        {
+            var generation = Volatile.Read(ref previewRequestGeneration);
+            Dispatcher.BeginInvoke(new Action(() =>
+                _ = PublishPreviewComponentAsync(generation, path, name, configuration)));
+        };
         EmbeddedPreviewHost.Child = embeddedPreview.HostControl;
         embeddedPreview.ApplyTheme(currentTheme);
     }
@@ -2125,6 +2154,24 @@ public partial class MainWindow : Window
         try
         {
             await WorkspaceView.CoreWebView2.ExecuteScriptAsync(script);
+        }
+        catch (InvalidOperationException)
+        {
+            // The WebView is closing with the client window.
+        }
+    }
+
+    private async Task PublishPreviewComponentAsync(int generation, string path, string name, string configuration)
+    {
+        if (generation != previewRequestGeneration || !previewDocumentReady || previewHostSuspended
+            || previewDocumentId is not Guid documentId || embeddedPreview?.IsShowingDocument(path) != true
+            || WorkspaceView.CoreWebView2 == null) return;
+
+        var detail = new { documentId, versionId = previewVersionId, name, configuration };
+        try
+        {
+            await WorkspaceView.CoreWebView2.ExecuteScriptAsync(
+                $"window.dispatchEvent(new CustomEvent('pdm-preview-component', {{ detail: {Serialize(detail)} }}));");
         }
         catch (InvalidOperationException)
         {

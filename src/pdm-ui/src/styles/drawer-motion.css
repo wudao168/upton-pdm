@@ -1,0 +1,42 @@
+/* BoardUI 项目看板：真实条带投影由 drawerGenie.ts 驱动，CSS 负责布局及过渡生命周期。 */
+@layer pdm-button-sizing {
+ :root body .el-overlay-dialog:has(> .el-dialog:not(.is-fullscreen)) { padding:12px !important; box-sizing:border-box !important; }
+ :root body .el-overlay-dialog > .el-dialog:not(.is-fullscreen), :root body .el-drawer.rtl, :root body .pdm-dialog-backdrop > .pdm-custom-drawer { border-radius:24px !important; overflow:hidden !important; max-width:calc(100vw - 24px) !important; max-height:calc(100dvh - 24px) !important; box-shadow:-12px 12px 60px var(--pdm-shadow-strong) !important; animation:none !important; transform:none !important; transition:none !important; }
+ :root body .el-overlay-dialog > .el-dialog:not(.is-fullscreen) { height:100% !important; margin:0 !important; }
+ :root body .el-drawer.rtl { top:12px !important; right:12px !important; bottom:12px !important; height:auto !important; }
+ :root body .pdm-dialog-backdrop:has(> .pdm-custom-drawer) { padding:12px !important; box-sizing:border-box !important; }
+ :root body .pdm-dialog-backdrop > .pdm-custom-drawer { height:100% !important; }
+ :root body .el-overlay:has(.el-overlay-dialog > .el-dialog:not(.is-fullscreen)), :root body .el-overlay:has(> .el-drawer.rtl), :root body .pdm-dialog-backdrop:has(> .pdm-custom-drawer) { background:var(--pdm-drawer-backdrop,rgba(0,0,0,.12)) !important; }
+ :root body .dialog-fade-enter-active:has(.el-dialog:not(.is-fullscreen)), :root body .el-drawer-fade-enter-active:has(.el-drawer.rtl), :root body .pdm-drawer-enter-active { animation:pdm-panel-backdrop-in 560ms linear both !important; transition:none !important; }
+ :root body .dialog-fade-leave-active:has(.el-dialog:not(.is-fullscreen)), :root body .el-drawer-fade-leave-active:has(.el-drawer.rtl), :root body .pdm-drawer-leave-active { animation:pdm-panel-backdrop-out 480ms linear both !important; transition:none !important; pointer-events:none !important; }
+ :root body [data-pdm-genie-source] { opacity:0 !important; }
+ :root body :is(.el-dialog:not(.is-fullscreen),.el-drawer.rtl,.pdm-custom-drawer) { font-size:14px !important; line-height:1.6 !important; }
+ :root body :is(.el-dialog:not(.is-fullscreen),.el-drawer.rtl) :is(.el-dialog__header,.el-drawer__header), :root body .pdm-custom-drawer > header { position:relative !important; padding:24px 24px 20px !important; margin:0 !important; border:0 !important; min-height:72px !important; box-sizing:border-box !important; align-items:center !important; gap:12px !important; }
+ :root body :is(.el-dialog:not(.is-fullscreen),.el-drawer.rtl,.pdm-custom-drawer) :is(.el-dialog__title,.el-drawer__title,.pdm-panel-topbar-title > strong,.pdm-panel-topbar-title h3) { color:var(--pdm-text) !important; font-size:16px !important; font-weight:600 !important; line-height:24px !important; }
+ :root body :is(.el-dialog:not(.is-fullscreen),.el-drawer.rtl,.pdm-custom-drawer) .pdm-panel-topbar { align-items:center !important; gap:12px !important; }
+ :root body :is(.el-dialog:not(.is-fullscreen),.el-drawer.rtl) :is(.el-dialog__body,.el-drawer__body) { padding:0 24px 24px !important; font-size:14px !important; line-height:1.6 !important; }
+ :root body :is(.el-dialog:not(.is-fullscreen),.el-drawer.rtl,.pdm-custom-drawer) :is(.el-form-item__label,form > label,form > div > label) { color:var(--pdm-muted) !important; font-size:13px !important; line-height:20px !important; }
+ :root body :is(.el-dialog:not(.is-fullscreen),.el-drawer.rtl,.pdm-custom-drawer) :is(.el-form-item,form > label) { margin-bottom:12px !important; }
+ :root body :is(.el-dialog:not(.is-fullscreen),.el-drawer.rtl,.pdm-custom-drawer) :is(form > section,.pdm-panel) { border-radius:20px !important; background:var(--pdm-drawer-section,#f7f7f7) !important; }
+ :root body :is(.el-dialog:not(.is-fullscreen),.el-drawer.rtl,.pdm-custom-drawer) form > section { padding:16px !important; border:0 !important; }
+ :root body :is(.el-dialog:not(.is-fullscreen),.el-drawer.rtl,.pdm-custom-drawer) :is(.el-dialog__headerbtn,.el-drawer__close-btn,header > button[aria-label^="关闭"],header > .pdm-icon-button) { width:30px !important; min-width:30px !important; max-width:30px !important; height:30px !important; min-height:30px !important; max-height:30px !important; padding:0 !important; border:0 !important; border-radius:50% !important; background:var(--pdm-nav-capsule-bg,#efefef) !important; color:var(--pdm-muted) !important; box-shadow:none !important; display:inline-flex !important; align-items:center !important; justify-content:center !important; flex-shrink:0 !important; font-size:22px !important; line-height:1 !important; }
+ :root body :is(.el-dialog > .el-dialog__header:has(> .el-dialog__headerbtn), .el-drawer > .el-drawer__header:has(> .el-drawer__close-btn)),
+ :root body .pdm-custom-drawer > header:has(> :is(button[aria-label^="关闭"], button.pdm-icon-button)) {
+   display:flex !important; column-gap:20px !important;
+ }
+ :root body :is(.el-dialog__header > .el-dialog__headerbtn, .el-drawer__header > .el-drawer__close-btn),
+ :root body .pdm-custom-drawer > header > :is(button[aria-label^="关闭"], button.pdm-icon-button) {
+   position:static !important; align-self:center !important; flex-shrink:0 !important; margin:0 !important; margin-inline-start:auto !important;
+ }
+ :root body :is(.el-dialog:not(.is-fullscreen),.el-drawer.rtl,.pdm-custom-drawer) :is(.el-dialog__headerbtn,.el-drawer__close-btn,header > button[aria-label^="关闭"],header > .pdm-icon-button):hover { background:var(--pdm-nav-selected-bg) !important; color:var(--pdm-text) !important; }
+ :root body :is(.el-dialog:not(.is-fullscreen),.el-drawer.rtl,.pdm-custom-drawer) :is(.el-dialog__headerbtn,.el-drawer__close-btn,header > button[aria-label^="关闭"],header > .pdm-icon-button)::before, :root body :is(.el-dialog:not(.is-fullscreen),.el-drawer.rtl,.pdm-custom-drawer) :is(.el-dialog__headerbtn,.el-drawer__close-btn,header > button[aria-label^="关闭"],header > .pdm-icon-button)::after { display:none !important; }
+ :root body :is(.el-dialog__headerbtn,.el-drawer__close-btn) .el-icon { font-size:18px !important; color:inherit !important; }
+ @media(max-width:600px) { :root body .el-overlay-dialog > .el-dialog:not(.is-fullscreen), :root body .el-drawer.rtl, :root body .pdm-dialog-backdrop > .pdm-custom-drawer { border-radius:16px !important; } }
+ @media(prefers-reduced-motion:reduce) { :root body :is(.dialog-fade-enter-active,.dialog-fade-leave-active):has(.el-dialog:not(.is-fullscreen)), :root body :is(.el-drawer-fade-enter-active,.el-drawer-fade-leave-active):has(.el-drawer.rtl), :root body :is(.pdm-drawer-enter-active,.pdm-drawer-leave-active) { animation-duration:1ms !important; } }
+}
+:root[data-pdm-color-scheme="dark"] { --pdm-drawer-backdrop:rgba(0,0,0,.36); --pdm-drawer-section:#242424; }
+.pdm-genie-layer { position:fixed !important; pointer-events:none !important; overflow:visible !important; margin:0 !important; padding:0 !important; border:0 !important; background:transparent !important; contain:layout style; }
+.pdm-genie-band { position:absolute !important; left:0 !important; top:0 !important; overflow:hidden !important; transform-origin:0 0 !important; pointer-events:none !important; margin:0 !important; padding:0 !important; will-change:transform; }
+[data-pdm-genie-shell] { position:absolute !important; left:0 !important; right:auto !important; bottom:auto !important; display:block !important; padding:0 !important; margin:0 !important; border:0 !important; border-radius:0 !important; overflow:visible !important; background:transparent !important; transform:none !important; animation:none !important; transition:none !important; opacity:1 !important; }
+@keyframes pdm-panel-backdrop-in { from { opacity:0; } 35%,to { opacity:1; } }
+@keyframes pdm-panel-backdrop-out { from,60% { opacity:1; } to { opacity:0; } }

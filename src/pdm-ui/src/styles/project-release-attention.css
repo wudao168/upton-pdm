@@ -1,0 +1,35 @@
+/* 项目中心异常提示：列表右侧常亮橙条，对应页签使用同色橙点。 */
+:root body .pdm-project-family__list > button[data-release-attention="error"] {
+  position: relative;
+  padding-right: 15px !important;
+}
+:root body .pdm-project-family__list > button[data-release-attention="error"] > .pdm-release-attention-border.is-error {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 5px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  mask: none;
+  background: #f5a524;
+  pointer-events: none;
+  animation: none;
+  opacity: 1;
+}
+:root body .pdm-project-tabs > button[data-release-attention="error"] > .pdm-release-attention-border.is-error {
+  position: absolute;
+  inset: 4px 4px auto auto;
+  width: 6px;
+  height: 6px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  mask: none;
+  background: #f5a524;
+  pointer-events: none;
+  animation: none;
+  opacity: 1;
+}
+:root body .pdm-project-tabs > button[data-release-attention="error"] > .pdm-tab-update-dot { display: none !important; }
+
+:root body .pdm-project-tabs > button > .pdm-tab-update-dot { background:#16a34a; }

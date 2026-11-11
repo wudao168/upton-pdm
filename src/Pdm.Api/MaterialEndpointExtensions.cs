@@ -270,11 +270,10 @@ public static class MaterialEndpointExtensions
             MaterialCodeApplicationStatus? parsedStatus = string.IsNullOrWhiteSpace(status) ? null : Parse<MaterialCodeApplicationStatus>(status, "申请状态");
             // 全局待审批查询用于消息中心；管理页和项目申请仍返回完整记录。
             if (projectId is null && parsedStatus == MaterialCodeApplicationStatus.Pending
-                && NotificationRecipientPolicy.SystemOnly(TenantContext.Current?.EffectiveRoleCodes ?? [role.ToString()])) return Results.Ok(Array.Empty<object>());
+                && TenantContext.Current?.HasPermission(AuthorizationActions.BusinessNotifications) != true) return Results.Ok(Array.Empty<object>());
             var inbox = projectId is null && parsedStatus == MaterialCodeApplicationStatus.Pending;
             var applications = await service.ListCodeApplicationsAsync(projectId, parsedStatus, actor, role, cancellationToken, businessInbox: inbox);
             return Results.Ok(applications.Where(application => !inbox
-                || !NotificationRecipientPolicy.HasSystemAdministrator(TenantContext.Current?.EffectiveRoleCodes ?? [role.ToString()])
                 || application.CanDecide == true || application.CanEmergencyDecide).Select(MapApplication));
         });
 
@@ -287,7 +286,7 @@ public static class MaterialEndpointExtensions
         api.MapPost("/material-code/applications/{applicationId:guid}/decision", async (Guid applicationId, DecideMaterialCodeApplicationRequest request, HttpContext context, MaterialService service, MaterialSyncBatchService syncBatches, ApprovalU9AutomationService automation, CancellationToken cancellationToken) =>
         {
             var (actor, role) = CurrentUser(context.User);
-            var result = await service.DecideMaterialCodeApplicationAsync(applicationId, request.ExpectedRowVersion, request.Approved, request.Comment, actor, role, cancellationToken, request.CategoryCode, request.EmergencySubstitute, request.EmergencyReason);
+            var result = await service.DecideMaterialCodeApplicationAsync(applicationId, request.ExpectedRowVersion, request.Approved, request.Comment, actor, role, cancellationToken, request.CategoryCode, request.EmergencySubstitute, request.EmergencyReason, request.BusinessNote);
             var finalApproved = request.Approved && result.Application.Status == MaterialCodeApplicationStatus.Approved;
             MaterialSyncBatch? automaticBatch = null;
             ApprovalU9AutomationResult? automationResult = null;

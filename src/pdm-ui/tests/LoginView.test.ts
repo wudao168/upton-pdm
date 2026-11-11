@@ -3,11 +3,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import LoginView from '../src/components/LoginView.vue'
 
 describe('LoginView', () => {
-  beforeEach(() => vi.useFakeTimers())
+  beforeEach(() => { vi.useFakeTimers(); vi.stubGlobal('isSecureContext', true); vi.stubGlobal('navigator', { ...navigator, gpu: {} }) })
 
   afterEach(() => {
     vi.clearAllTimers()
     vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  it('keeps login usable on intranet HTTP without starting unsupported WebGPU', async () => {
+    vi.stubGlobal('isSecureContext', false)
+    const wrapper = mount(LoginView, { props: { pending: false, error: '', online: true }, global: { stubs: { ElDialog: true } } })
+    expect(wrapper.find('iframe').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="西瓜软糖展示"]').exists()).toBe(true)
+    await wrapper.get('input[name="username"]').setValue('tester')
+    await wrapper.get('input[name="password"]').setValue('local-test')
+    await wrapper.get('form').trigger('submit')
+    expect(wrapper.emitted('submit')?.[0]).toEqual(['tester', 'local-test', false])
+    wrapper.unmount()
   })
 
   it('uses the same UPTON logo asset as CRM', () => {

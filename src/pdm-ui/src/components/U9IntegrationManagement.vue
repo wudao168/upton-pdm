@@ -30,7 +30,7 @@ const props = defineProps<{
   onSyncCustomers: () => Promise<CrmCustomerSyncResult>
 }>()
 
-type U9Tab = 'base' | 'interfaces' | 'customers' | 'material-sync' | 'bom-query'
+type U9Tab = 'base' | 'interfaces' | 'customers' | 'material-sync' | 'dingtalk'
 
 const activeTab = ref<U9Tab>('base')
 const loading = ref(false)
@@ -396,7 +396,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <section class="pdm-project-manager u9-integration-page pdm-loading-host" aria-label="U9C接口管理">
+  <section class="pdm-project-manager u9-integration-page pdm-loading-host" aria-label="系统接口">
     <SquareLoader v-if="loading" overlay label="正在加载U9C接口设置" />
     <el-tabs v-model="activeTab" class="u9-interface-tabs">
       <el-tab-pane label="基础设置" name="base">
@@ -566,10 +566,11 @@ onMounted(() => {
           </dl>
           <el-alert v-if="procurementSyncStatus?.latestRun?.lastError" :title="procurementSyncStatus.latestRun.lastError" type="error" :closable="false" show-icon />
         </section>
+        <U9BomQuery class="u9-inventory-sync-card" :token="token" :organization-code="integration.organizationCode" :write-enabled="integration.writeEnabled" />
       </el-tab-pane>
 
-      <el-tab-pane v-if="canManageBase" label="BOM维护" name="bom-query">
-        <U9BomQuery :token="token" :organization-code="integration.organizationCode" :write-enabled="integration.writeEnabled" />
+      <el-tab-pane v-if="canManageBase && $slots.dingtalk" label="钉钉应用" name="dingtalk" lazy>
+        <slot name="dingtalk" />
       </el-tab-pane>
     </el-tabs>
   </section>

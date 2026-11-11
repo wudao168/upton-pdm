@@ -32,6 +32,7 @@ public sealed class ProductionExceptionFlowTests : IDisposable
 
     private async Task<ProductionTrackingRecord> Create(string route, string mode, decimal assigned = 10)
     {
+        await ProductionTestAuthorization.EnableAsync(repository, company);
         var project = await repository.CreateProjectAsync(new("EX-" + Guid.NewGuid().ToString("N"), "制造异常全流程模拟", "admin", "vault", "release"), "admin", default);
         var item = new BomItem(Guid.NewGuid(), project.Id, BomKind.NonStandard, 1, "EX-001", "模拟件", 10, "件", "钢", "EX-MODEL", "B", true);
         var package = new ReleasePackage(Guid.NewGuid(), project.Id, "EX-RP", ReleasePackageState.Published, null, "B", "B", [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, "release")

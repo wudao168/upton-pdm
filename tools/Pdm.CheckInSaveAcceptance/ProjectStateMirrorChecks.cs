@@ -57,32 +57,33 @@ internal static partial class Program
         void Check(bool ok,string message){if(!ok)throw new Exception(message);Console.WriteLine("PASS: "+message);}
         var interop=Type("PdmAddin").GetField("application",Flags).FieldType.Assembly;
         const string parent=@"C:\fixture\PARENT.SLDASM",source=@"C:\fixture\SOURCE.SLDPRT";
-        foreach(var mode in new[]{"mirror-plane","ordinary-overlap","assembly-source","not-mirror","known-context"})
+        foreach(var mode in new[]{"mirror-plane","ordinary-overlap","assembly-source","not-mirror","known-context","assembly-aggregate","assembly-own","assembly-overlap"})
         {
             object ProxyFor(string name,Func<IMethodCallMessage,object> callback)=>new Proxy(interop.GetType("SolidWorks.Interop.sldworks."+name,true),callback).GetTransparentProxy();
             var mirror=ProxyFor("MirrorPartFeatureData",call=>call.MethodName=="get_PathName"?(mode=="assembly-source"?parent:source):throw new Exception("Unexpected mirror write/read: "+call.MethodName));
-            var feature=ProxyFor("Feature",call=>call.MethodName=="get_Name"?"MirrorA":call.MethodName=="GetTypeName2"?(mode=="not-mirror"?"Stock":"MirrorStock"):call.MethodName=="get_Is3DInterconnectFeature"?(object)false:call.MethodName=="GetDefinition"?mirror:throw new Exception(call.MethodName));
-            var manager=ProxyFor("FeatureManager",call=>call.MethodName=="GetFeatures"?new[]{feature}:call.MethodName=="GetFeatureCount"?(object)1:throw new Exception(call.MethodName));
+            var feature=ProxyFor("Feature",call=>call.MethodName=="get_Name"?(mode=="assembly-overlap"?"DerivedB":"MirrorA"):call.MethodName=="GetTypeName2"?(mode=="not-mirror"||mode.StartsWith("assembly-")&&mode!="assembly-source"?"Stock":"MirrorStock"):call.MethodName=="get_Is3DInterconnectFeature"?(object)false:call.MethodName=="GetDefinition"?mirror:throw new Exception(call.MethodName));
+            var manager=ProxyFor("FeatureManager",call=>call.MethodName=="GetFeatures"?(mode=="assembly-aggregate"?new object[0]:new[]{feature}):call.MethodName=="GetFeatureCount"?(object)(mode=="assembly-aggregate"?0:1):throw new Exception(call.MethodName));
             var sketches=ProxyFor("SketchManager",call=>call.MethodName=="GetSketchBlockDefinitions"?new object[0]:throw new Exception(call.MethodName));
             var extension=ProxyFor("ModelDocExtension",call=>{
                 if(call.MethodName!="ListExternalFileReferences2")throw new Exception("Unexpected model mutation");
-                var overlap=mode=="ordinary-overlap";
+                var overlap=mode=="ordinary-overlap"||mode=="assembly-overlap";
                 return new ReturnMessage(null,new object[]{overlap?new[]{source,parent,parent}:new[]{source,parent},new string[overlap?3:2],overlap?new[]{"MirrorA","MirrorA","DerivedB"}:new[]{"MirrorA","MirrorA"},new string[overlap?3:2],overlap?new[]{3,3,3}:new[]{3,3},new string[overlap?3:2],overlap?new[]{"","",""}:new[]{"",mode=="known-context"?"PART<1>":""},new int[overlap?3:2],new string[overlap?3:2]},9,call.LogicalCallContext,call);
             });
-            var model=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetType"?(object)1:call.MethodName=="get_Extension"?extension:call.MethodName=="get_FeatureManager"?manager:call.MethodName=="get_SketchManager"?sketches:call.MethodName=="GetEquationMgr"||call.MethodName=="GetDesignTable"?null:throw new Exception("Unexpected model write: "+call.MethodName)).GetTransparentProxy();
+            var model=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetType"?(object)(mode.StartsWith("assembly-")&&mode!="assembly-source"?2:1):call.MethodName=="get_Extension"?extension:call.MethodName=="get_FeatureManager"?manager:call.MethodName=="get_SketchManager"?sketches:call.MethodName=="GetEquationMgr"||call.MethodName=="GetDesignTable"?null:throw new Exception("Unexpected model write: "+call.MethodName)).GetTransparentProxy();
             var evidence=Type("NativeDesignDependencies").GetMethod("ReadCheckIn",Flags).Invoke(null,new[]{model});
             var unknown=((IEnumerable)Get(evidence,"UnverifiedSources")).Cast<string>().ToArray();
-            Check(unknown.Contains(parent)==(mode=="mirror-plane"),mode+"：辅助引用与明确文件来源分别处理");
+            var unverified=mode=="mirror-plane"||mode=="assembly-aggregate";
+            Check(unknown.Contains(parent)==unverified,mode+"：辅助引用与明确文件来源分别处理");
             Check(((IEnumerable)Get(evidence,"Sources")).Cast<string>().Contains(parent)&&((IEnumerable)Get(evidence,"Sources")).Cast<string>().Contains(source),mode+"：保留全部原引用路径");
             var owner=New("CadTreeNode");var back=New("CadTreeNode");Set(owner,"FullPath",@"C:\fixture\MIRROR.SLDPRT");Set(back,"FullPath",parent);Set(back,"SourceReferencePath",parent);Set(back,"Kind",Enum.Parse(Type("CadDocumentKind"),"Assembly"));Set(back,"Role",Enum.Parse(Type("CadReferenceRole"),"ExternalFileDependency"));((IList)Get(owner,"Children")).Add(back);
             Type("PdmAddin").GetMethod("ClassifyReferenceLinks",Flags).Invoke(null,new[]{owner,evidence});
-            Check((bool)Get(back,"ReferenceTypeVerified")!=(mode=="mirror-plane")&&(bool)Get(back,"IsContextReference")==(mode=="known-context"),mode+"：不将缺少归属证据的镜向辅助引用误标为已确认循环");
+            Check((bool)Get(back,"ReferenceTypeVerified")!=unverified&&(bool)Get(back,"IsContextReference")==(mode=="known-context"),mode+"：不将缺少归属证据的镜向辅助引用误标为已确认循环");
             var root=New("CadTreeNode");Set(root,"FullPath",parent);Set(root,"FileName","PARENT.SLDASM");Set(root,"Kind",Enum.Parse(Type("CadDocumentKind"),"Assembly"));Set(owner,"FileName","MIRROR.SLDPRT");Set(owner,"Kind",Enum.Parse(Type("CadDocumentKind"),"Part"));Set(back,"FileName","PARENT.SLDASM");((IList)Get(root,"Children")).Add(owner);
             var items=(IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(Type("BatchOperationItem")));items.Add(New("BatchOperationItem",root,0));items.Add(New("BatchOperationItem",owner,1));
             var policy=Activator.CreateInstance(assembly.GetType("Upton.Pdm.Domain.ArchiveWarningPolicy",true));
             void Configure(bool strict){Set(policy,"BlockAll",strict);Type("ArchiveWarningGate").GetMethod("Configure",Flags).Invoke(null,new[]{policy});}
             var validate=Type("ArchiveReferenceCycles").GetMethod("Validate",Flags);Configure(false);
-            if(mode=="mirror-plane")
+            if(unverified)
             {
                 validate.Invoke(null,new object[]{items});Check((bool)Get(back,"ReferenceTypeUnverified")&&!(bool)Get(back,"IsContextReference"),"镜向辅助回边默认按待核对提示存档，不断链或冒充上下文");
                 Configure(true);try{validate.Invoke(null,new object[]{items});throw new Exception("严格策略未生效");}catch(TargetInvocationException error){Check(error.InnerException.Message.Contains("管理员存档警告策略"),"镜向辅助回边服从管理员严格策略");}finally{Configure(false);}

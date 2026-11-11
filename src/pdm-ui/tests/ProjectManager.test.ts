@@ -215,7 +215,7 @@ describe('ProjectManager', () => {
   it('列表仅允许分配事业部，管理员也不能从此修改其他项目字段或人员', async () => {
     const wrapper = mountProjectManager(emptyDirectory, [{ ...parent, executionUnitId: 'division-1', canAssignExecutionUnit: true, canManageMainStaffing: true }, { ...child, canAssignDesigners: true }], true, true)
     expect(wrapper.find('[aria-label="分配事业部 P700001"]').exists()).toBe(true)
-    for (const name of ['配置项目经理（含协同） P700001', '配置主设 P700001', '配置子项目负责人 P700001-1', '分配工程师 P700001-1']) expect(wrapper.find('[aria-label="' + name + '"]').exists()).toBe(false)
+    for (const name of ['配置项目经理（含协同） P700001', '配置主设计 P700001', '配置子项目负责人 P700001-1', '分配工程师 P700001-1']) expect(wrapper.find('[aria-label="' + name + '"]').exists()).toBe(false)
     const menuItems = wrapper.findAllComponents({ name: 'ElDropdownItem' }).map(item => item.props('command'))
     expect(menuItems).not.toContain('edit')
     expect(menuItems).not.toContain('configure-staffing')
@@ -255,7 +255,7 @@ describe('ProjectManager', () => {
     expect(wrapper.get('[aria-label="项目筛选"]').element.parentElement).toBe(wrapper.get('[aria-label="项目列表"]').element)
     expect(wrapper.find('.pdm-project-table-panel .pdm-panel-heading').exists()).toBe(false)
     expect(wrapper.findAllComponents({ name: 'ElDropdownItem' }).some(item => item.props('command') === 'copy-content')).toBe(false)
-    expect(headers).toEqual(['项目号', '项目名称', '别名', '型号', '序列号', '客户', '事业部', '项目经理', '主设', '状态', '订单日期', '铭牌', '操作'])
+    expect(headers).toEqual(['项目号', '项目名称', '别名', '型号', '序列号', '客户', '事业部', '项目经理', '主设计', '状态', '订单日期', '铭牌', '操作'])
     expect(cells[1].text()).toBe('气密设备')
     expect(cells[2].text()).toBe('—')
     expect(cells[3].text()).toBe('AK-2-C001-001-00')
@@ -267,27 +267,27 @@ describe('ProjectManager', () => {
     expect(cells[10].text()).toBe('2026-08-13')
   })
 
-  it('项目人员全局显示姓名且未分配子项目工程师保持空白', async () => {
+  it('项目人员全局显示姓名且未分配子项目设计人员保持空白', async () => {
     const directory: OrganizationDirectory = {
       ...emptyDirectory,
       users: [
         { username: 'project-manager', displayName: '项目经理甲', role: 'ProjectManager', isActive: true },
         { username: 'project-manager-2', displayName: '项目经理乙', role: 'ProjectManager', isActive: true },
-        { username: 'design-lead', displayName: '主设甲', role: 'Engineer', isActive: true },
+        { username: 'design-lead', displayName: '主设计甲', role: 'Engineer', isActive: true },
       ],
     }
     const wrapper = mountProjectManager(directory)
 
     const parentCells = wrapper.get('tbody tr').findAll('td')
     expect(parentCells[7].text()).toBe('项目经理甲、项目经理乙')
-    expect(parentCells[8].text()).toBe('主设甲')
+    expect(parentCells[8].text()).toBe('主设计甲')
     expect(userFilter(wrapper, '项目经理筛选').findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))).toContain('项目经理甲')
-    expect(userFilter(wrapper, '主设工程师筛选').findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))).toContain('主设甲')
+    expect(userFilter(wrapper, '主设计或设计人员筛选').findAllComponents({ name: 'ElOption' }).map(option => option.props('label'))).toContain('主设计甲')
     expect(wrapper.text()).not.toContain('project-manager')
     expect(wrapper.text()).not.toContain('design-lead')
 
     await wrapper.get('[aria-label="展开P700001的子项目"]').trigger('click')
-    expect(wrapper.get('tr.is-child').findAll('td')[8].text()).toBe('待分配')
+    expect(wrapper.get('tr.is-child').findAll('td')[8].text()).toBe('—')
   })
 
   it('默认按项目号自然倒序排列主项目并保持子项目正序', async () => {
@@ -507,7 +507,7 @@ describe('ProjectManager', () => {
     expect(wrapper.findAll('tr.is-child')).toHaveLength(0)
     wrapper.unmount()
   })
-  it('可分别按事业部、项目经理和主设工程师筛选，且筛选后默认折叠，可手动展开匹配子项目', async () => {
+  it('可分别按事业部、项目经理和主设计或设计人员筛选，且筛选后默认折叠，可手动展开匹配子项目', async () => {
     const otherParent: ProjectSummary = {
       ...parent,
       id: 'parent-2',
@@ -532,7 +532,7 @@ describe('ProjectManager', () => {
     expect(wrapper.text()).not.toContain('P700002')
 
     userFilter(wrapper, '项目经理筛选').vm.$emit('update:modelValue', '')
-    userFilter(wrapper, '主设工程师筛选').vm.$emit('update:modelValue', 'child-designer')
+    userFilter(wrapper, '主设计或设计人员筛选').vm.$emit('update:modelValue', 'child-designer')
     await flushPromises()
     expect(wrapper.findAll('tr.is-child')).toHaveLength(0)
     expect(wrapper.get('[aria-label="展开全部项目明细"]').attributes('disabled')).toBeUndefined()

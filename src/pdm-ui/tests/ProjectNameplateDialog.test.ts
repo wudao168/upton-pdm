@@ -13,7 +13,7 @@ const create = () => wrapper = mount(ProjectNameplateDialog, { props: { project:
 beforeEach(() => { vi.spyOn(api, 'readProjectNameplate').mockResolvedValue(base()); vi.spyOn(api, 'saveProjectNameplate'); vi.spyOn(api, 'confirmProjectNameplate') })
 afterEach(() => { wrapper?.unmount(); vi.restoreAllMocks() })
 
-it('执行工程师只能填写设备信息，不能修改电源或确认发布', async () => {
+it('设计人员只能填写设备信息，不能修改电源或确认发布', async () => {
   create(); await flushPromises()
   await wrapper.get('button.el-button--primary').trigger('click')
   expect(wrapper.get('input[aria-label="长度"]').attributes('disabled')).toBeUndefined()

@@ -12,7 +12,7 @@ internal static partial class Program
  {
   void Check(bool ok,string description){if(!ok)throw new Exception(description);Console.WriteLine("PASS: "+description);}
   foreach(var kind in new[]{"Part","Assembly","Drawing"})
-  foreach(var mode in new[]{"metadata-touch","unloaded","loaded","readonly","partial","missing-value","cached-value","name-count","empty","dirty","wrong-path","open-dirty","changed","missing-config","multi-config"})
+  foreach(var mode in new[]{"metadata-touch","unloaded","loaded","readonly","partial","missing-value","cached-value","name-count","empty","dirty","wrong-path","open-dirty","open-stamp-changes","open-source-changes","changed","missing-config","multi-config"})
   {
    var folder=Path.Combine(Path.GetFullPath(output),kind,mode);Directory.CreateDirectory(folder);
    var node=LinkedNode(folder,"图档"+(kind=="Part"?".SLDPRT":kind=="Assembly"?".SLDASM":".SLDDRW"),kind);
@@ -20,7 +20,7 @@ internal static partial class Program
    var original=File.ReadAllBytes(path);var hash=WorkingReuseHash(path);
    if(mode=="readonly")File.SetAttributes(path,FileAttributes.ReadOnly);
    var attributes=File.GetAttributes(path);var calls=new List<string>();var reads=0;var opened=false;var closed=0;var nativeOptions=0;
-   var isLoaded=mode!="unloaded"&&mode!="readonly"&&mode!="open-dirty";
+   var isLoaded=mode!="unloaded"&&mode!="readonly"&&!mode.StartsWith("open-");
    var all=new Dictionary<string,Dictionary<string,string>>{
     [""]=new Dictionary<string,string>{{"物料分类","非标件"},{"物料名称","70006186.00-10"},{"型号","70006186.00-10"},{"表面处理","烤漆RAL7035 橙纹(灰白色)"},{"备注",""}},
     ["A"]=new Dictionary<string,string>{{"物料名称","配置A名称"}},["B"]=new Dictionary<string,string>{{"物料名称","配置B名称"}}};
@@ -31,7 +31,7 @@ internal static partial class Program
     if(call.MethodName=="Get6"){
      if(!(bool)call.Args[1])throw new Exception("禁止激活配置求值");reads++;var name=(string)call.Args[0];
      if(mode=="partial"&&name=="物料分类")throw new IOException("模拟读取失败");
-     if(mode=="changed"&&reads==1)File.AppendAllText(path,"模拟其他进程修改");
+     if((mode=="changed"||mode=="open-source-changes")&&reads==1)File.AppendAllText(path,"模拟其他进程修改");
      if(mode=="metadata-touch"&&reads==1)File.SetLastWriteTimeUtc(path,File.GetLastWriteTimeUtc(path).AddSeconds(2));
      return new ReturnMessage(mode=="missing-value"?1:mode=="cached-value"?0:2,new object[]{name,true,values[name],values[name],false,false},6,call.LogicalCallContext,call);
     }
@@ -41,7 +41,8 @@ internal static partial class Program
     call.MethodName=="get_CustomPropertyManager"?Manager((string)call.Args[0]):throw new Exception("禁止改写图档："+call.MethodName)).GetTransparentProxy();
    var model=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>{
     if(call.MethodName=="GetPathName")return mode=="wrong-path"?Path.Combine(folder,"其他图档.SLDPRT"):path;
-    if(call.MethodName=="GetSaveFlag")return mode=="dirty"||mode=="open-dirty";
+    if(call.MethodName=="GetSaveFlag")return mode=="dirty"||mode.StartsWith("open-");
+    if(call.MethodName=="GetUpdateStamp")return mode=="open-stamp-changes"?reads:13;
     if(call.MethodName=="GetConfigurationNames")return mode=="missing-config"?new[]{"B"}:new[]{"A","B"};
     if(call.MethodName=="IsOpenedReadOnly")return opened;
     if(call.MethodName=="get_Extension")return extension;
@@ -67,8 +68,8 @@ internal static partial class Program
    }
    IDictionary properties=null;Exception failure=null;
    try{properties=(IDictionary)TreeCall(plugin,"ReadSavedNativeProperties",node,hash,null);}catch(Exception error){failure=error;}
-   var shouldFail=mode=="partial"||mode=="missing-value"||mode=="name-count"||mode=="dirty"||mode=="wrong-path"||mode=="changed";
-   if(shouldFail)Check(failure!=null&&failure.ToString().Contains("自定义属性"),kind+"/"+mode+"：读取失败在上传前明确失败，不生成残缺属性索引");
+   var shouldFail=mode=="partial"||mode=="missing-value"||mode=="name-count"||mode=="dirty"||mode=="open-stamp-changes"||mode=="open-source-changes"||mode=="wrong-path"||mode=="changed";
+   if(shouldFail)Check(failure!=null&&(failure.ToString().Contains("源文件内容发生变化")||failure.ToString().Contains("自定义属性")||failure.ToString().Contains("尚未固定到提交副本的内存修改")),kind+"/"+mode+"：读取失败在上传前明确失败，不生成残缺属性索引");
    else{
     if(failure!=null)throw failure;
     Check((string)properties["UPLM.CustomPropertiesRead"]=="1",kind+"/"+mode+"：完成读取与空属性有明确证据");
@@ -99,7 +100,7 @@ internal static partial class Program
     if(kind=="Drawing")Check((nativeOptions&1024)==1024,"工程图属性读取使用出详图模式，不要求加载视图模型");
     Check(closed==1,kind+"/"+mode+"：仅关闭本次新增的临时属性窗口");
    }else Check(closed==0,kind+"/"+mode+"：已有用户窗口和同名冲突窗口均不关闭");
-   if(mode!="changed")Check(File.ReadAllBytes(path).SequenceEqual(original)&&File.GetAttributes(path)==attributes,kind+"/"+mode+"：源文件内容及只读状态不变");
+   if(mode!="changed"&&mode!="open-source-changes")Check(File.ReadAllBytes(path).SequenceEqual(original)&&File.GetAttributes(path)==attributes,kind+"/"+mode+"：源文件内容及只读状态不变");
    File.SetAttributes(path,FileAttributes.Normal);
   }
  }

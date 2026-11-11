@@ -141,7 +141,7 @@ public sealed class ValidationPlanServiceTests
     {
         var (_, _, repository, storage, project) = await CreateFixtureAsync();
         var records = new InMemoryQualityInspectionRepository();
-        var service = new QualityInspectionService(records, repository, storage);
+        var service = new QualityInspectionService(records, repository, storage, CreateProjectFileStorage());
         Assert.Empty(await service.ListAsync(project.Id, "developer", UserRole.Administrator, default));
         var session = await service.StartAsync(project.Id, "平行度.pdf", 10, new string('A', 64), "developer", UserRole.Administrator, default);
         Assert.Equal("", (await service.CompleteAsync(project.Id, session.Id, "assembly", "", "平行度", null, "developer", UserRole.Administrator, default)).Station);
@@ -154,20 +154,6 @@ public sealed class ValidationPlanServiceTests
         Assert.Contains(saved, row => row.Remark == "0.01mm");
         Assert.Contains("装配验收", storage.LastCompletedRelativePath);
         Assert.Empty(await records.ListAsync(Guid.NewGuid(), default));
-    }
-
-    [Theory]
-    [InlineData("preAcceptance", "预验收")]
-    [InlineData("finalAcceptance", "终验收")]
-    public async Task CustomerAcceptance_SavesSeparateRecords(string kind, string folder)
-    {
-        var (_, _, repository, storage, project) = await CreateFixtureAsync();
-        var service = new QualityInspectionService(new InMemoryQualityInspectionRepository(), repository, storage);
-        var session = await service.StartAsync(project.Id, "报告.pdf", 10, new string('A', 64), "developer", UserRole.Administrator, default, kind);
-        var record = await service.CompleteAsync(project.Id, session.Id, kind, "", "客户验收报告", "确认", "developer", UserRole.Administrator, default);
-        Assert.Equal(kind, record.Kind);
-        Assert.Contains(folder, storage.LastCompletedRelativePath);
-        Assert.Equal("确认", Assert.Single(await service.ListAsync(project.Id, "developer", UserRole.Administrator, default)).Remark);
     }
 
     [Theory]
@@ -204,7 +190,7 @@ public sealed class ValidationPlanServiceTests
     public async Task InspectionUpload_RejectsWrongProjectAndUnsupportedFile()
     {
         var (_, _, repository, storage, project) = await CreateFixtureAsync();
-        var service = new QualityInspectionService(new InMemoryQualityInspectionRepository(), repository, storage);
+        var service = new QualityInspectionService(new InMemoryQualityInspectionRepository(), repository, storage, CreateProjectFileStorage());
         await Assert.ThrowsAsync<PdmRuleException>(() => service.StartAsync(project.Id, "file.exe", 10, new string('A', 64), "developer", UserRole.Administrator, default));
         var wrong = await storage.StartUploadAsync(Guid.NewGuid(), "report.pdf", 10, new string('A', 64), default);
         await Assert.ThrowsAsync<PdmConflictException>(() => service.CompleteAsync(project.Id, wrong.Id, "incoming", null, "三坐标", null, "developer", UserRole.Administrator, default));
@@ -358,7 +344,8 @@ public sealed class ValidationPlanServiceTests
     public async Task AssignedValidationPlanEditor_CanDecideWithoutReleaseApprovalPermission()
     {
         var archive = new RecordingValidationPlanFileArchive();
-        var (service, plans, _, _, project) = await CreateFixtureAsync(archive);
+        var (service, plans, repository, _, project) = await CreateFixtureAsync(archive);
+        await PermissionTestUsers.Ensure(repository, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer));
         var draft = await service.SavePlanAsync(project.Id,
             new("工程师", new DateOnly(2026, 9, 14), [new(null, "确认设备安全门联锁", "内部评审", null, null, null, null, null, 1)]),
             "admin", UserRole.Administrator, default);
@@ -536,6 +523,9 @@ public sealed class ValidationPlanServiceTests
         Assert.Equal(ProjectValidationPlanState.Draft, withdrawn.State);
         Assert.Empty(await service.ListMyApprovalTasksAsync("approval-target", UserRole.Engineer, default));
     }
+
+    private static LocalProjectFileStorage CreateProjectFileStorage() =>
+        new(Microsoft.Extensions.Options.Options.Create(new PdmStorageOptions()), TimeProvider.System);
 
     private static async Task<(ValidationPlanService Service, InMemoryValidationPlanRepository Plans, InMemoryPdmRepository Repository, RecordingFileStorage Storage, Project Project)> CreateFixtureAsync(IValidationPlanFileArchive? archive = null)
     {

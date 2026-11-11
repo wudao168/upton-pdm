@@ -22,12 +22,14 @@
 @container(max-width:900px){.wr-content{grid-template-rows:auto 68px minmax(130px,var(--pdm-opl-height,240px)) minmax(160px,1fr) minmax(140px,1fr)!important}}
 :root body :is(.wr-panel h2,.production-workbench__detail h3){font-size:14px;font-weight:600}
 :root body :is(.pdm-bom-table,.material-table,.production-workbench table,.wr-scroll table){font-variant-numeric:tabular-nums}
-:root body .pdm-bom-table td:has(.pdm-bom-name-value),:root body .material-table .cell{text-align:left}
-:root body .material-table .is-right .cell{text-align:right}
+:root body .pdm-bom-table td:has(.pdm-bom-name-value){text-align:left}
+:root body .material-table .cell{min-width:0;text-align:center}
+:root body .material-table .el-table__body .el-button.is-link{border:0!important;box-shadow:none!important;background:transparent!important}
+:root body .material-table .el-table__body .el-button.is-link:not(:focus-visible){outline:none!important}
 :root body .material-table .el-table-column--selection .cell{text-align:center}
 :root body .production-workbench table{font-size:var(--pdm-font-size-body)}
 .production-workbench__detail ol{list-style:none;padding-left:8px}.production-workbench__detail li{position:relative;padding:5px 5px 8px 12px;border-left:1px solid var(--pdm-container-border)}.production-workbench__detail li::before{content:'';position:absolute;left:-3px;top:9px;width:5px;height:5px;border-radius:50%;background:var(--pdm-theme-accent)}
-.pdm-inspect-link{border:0;background:transparent;color:var(--pdm-theme-accent);padding:0;cursor:pointer;font:inherit}
+.pdm-inspect-link{border:0;background:transparent; color:var(--pdm-text);padding:0;cursor:pointer;font:inherit}
 .pdm-inspect-link:hover{text-decoration:underline}.pdm-history-toggle{margin-left:0;display:flex;align-items:center;gap:5px}
 .pdm-command-results button:focus-visible,.pdm-more-actions>summary:focus-visible{outline:2px solid var(--pdm-theme-accent);outline-offset:1px}
 .dialog-fade-enter-active .el-dialog,.dialog-fade-leave-active .el-dialog,.pdm-bom-batch-dialog{animation-duration:.5s}

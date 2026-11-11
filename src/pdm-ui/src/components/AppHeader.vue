@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { Bell, ChevronDown, ChevronLeft, ChevronRight, LogIn, LogOut } from '@lucide/vue'
+import { Bell, Check, ChevronDown, ChevronLeft, ChevronRight, LogIn, LogOut, Monitor, Moon, Sun } from '@lucide/vue'
 import { ElMessage } from '../statusMessage'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import ClientSettings from './ClientSettings.vue'
+import DingTalkSelfBinding from './DingTalkSelfBinding.vue'
 import type { PdmUserProfile } from '../types'
 import GlobalStatusBar from './GlobalStatusBar.vue'
+import type { ProjectActivity } from '../projectActivity'
 import { isPdmTheme, pdmThemes, type PdmTheme } from '../themes'
 
 
 const props = withDefaults(defineProps<{
+  activityToken?: string
   online: boolean
   userName?: string
   username?: string
@@ -24,6 +27,7 @@ const props = withDefaults(defineProps<{
   onSaveProfile?: (profile: Pick<PdmUserProfile, 'landline' | 'mobilePhone' | 'email' | 'gender' | 'nickname'>) => Promise<PdmUserProfile>
   onChangePassword?: (currentPassword: string, password: string) => Promise<void>
   desktopAvailable?: boolean
+  canBindDingTalk?: boolean
 }>(), {
   userName: '',
   username: '',
@@ -38,7 +42,7 @@ const props = withDefaults(defineProps<{
   desktopAvailable: false,
 })
 
-const emit = defineEmits<{ login: []; logout: []; notifications: []; theme: [theme: PdmTheme]; company: [companyId: string]; toggleSidebar: [] }>()
+const emit = defineEmits<{ openActivity: [item: ProjectActivity]; login: []; logout: []; notifications: []; theme: [theme: PdmTheme]; company: [companyId: string]; toggleSidebar: [] }>()
 const headerNow = ref(new Date())
 const personalInfoVisible = ref(false)
 const personalSettingsTab = ref('profile')
@@ -199,7 +203,7 @@ onUnmounted(() => {
     </div>
     <div class="pdm-titlebar__actions">
       <template v-if="props.userName">
-        <GlobalStatusBar :key="props.username || props.userName" />
+        <GlobalStatusBar :key="(props.username || props.userName) + props.activeCompanyId" :token="props.activityToken" :scope="JSON.stringify([props.username, props.activeCompanyId])" @open-activity="emit('openActivity', $event)" />
         <time class="pdm-header-clock" :datetime="headerNow.toISOString()">{{ headerDateTime }}</time>
         <slot name="quick-actions" />
         <button type="button" class="pdm-header-control pdm-message-button" @click="emit('notifications')">
@@ -220,7 +224,7 @@ onUnmounted(() => {
           </button>
           <template #dropdown>
             <el-dropdown-menu class="pdm-theme-menu">
-              <el-dropdown-item v-for="item in pdmThemes" :key="item.value" :command="item.value"><i class="pdm-theme-swatch" :style="{ backgroundColor: item.color }" /><span>{{ item.label }}</span><small v-if="props.theme === item.value">当前</small></el-dropdown-item>
+              <el-dropdown-item v-for="item in pdmThemes" :key="item.value" :command="item.value"><component :is="item.value === 'a' ? Monitor : item.value === 'c' ? Moon : Sun" :size="16" aria-hidden="true" /><span>{{ item.label }}</span><Check v-if="props.theme === item.value" :size="14" aria-label="当前主题" /></el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -237,7 +241,7 @@ onUnmounted(() => {
       <el-tabs v-model="personalSettingsTab">
         <el-tab-pane label="个人资料" name="profile">
           <el-form label-width="82px" class="personal-settings-form">
-            <el-form-item label="姓名"><el-input :model-value="props.profile?.displayName || props.userName || props.username" disabled /></el-form-item>
+            <el-form-item label="姓名"><el-input :model-value="props.profile?.displayName || props.userName || '姓名待补充'" disabled /></el-form-item>
             <el-form-item label="角色"><el-input :model-value="roleName" disabled /></el-form-item>
             <el-form-item label="昵称"><el-input v-model="profileForm.nickname" maxlength="80" show-word-limit /></el-form-item>
             <el-form-item label="性别">
@@ -252,6 +256,9 @@ onUnmounted(() => {
             <el-form-item label="邮箱"><el-input v-model="profileForm.email" maxlength="120" /></el-form-item>
           </el-form>
           <div class="personal-settings-actions"><el-button type="primary" :loading="personalSettingsPending" @click="submitProfile">保存资料</el-button></div>
+        </el-tab-pane>
+        <el-tab-pane v-if="props.canBindDingTalk && props.activityToken" label="绑定钉钉" name="dingtalk">
+          <DingTalkSelfBinding v-if="personalInfoVisible && personalSettingsTab === 'dingtalk'" :key="props.activeCompanyId" :token="props.activityToken" />
         </el-tab-pane>
         <el-tab-pane label="修改密码" name="password">
           <el-form label-width="100px" class="personal-settings-form password-settings-form">

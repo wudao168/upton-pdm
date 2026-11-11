@@ -1,0 +1,26 @@
+/* 全局交互强调色：页签、选中色带、焦点与主操作共用；业务状态色独立。 */
+:root,
+:root[data-pdm-theme],
+:root[data-pdm-color-scheme] {
+  --pdm-theme-accent: #10b981;
+  --pdm-theme-accent-hover: #059669;
+  --pdm-theme-accent-soft: #ecfdf5;
+  --pdm-theme-accent-soft-strong: #d1fae5;
+  --pdm-theme-accent-border: #6ee7b7;
+  --pdm-theme-accent-focus: rgb(16 185 129 / 25%);
+  --pdm-link: var(--pdm-text);
+  --pdm-blue: var(--pdm-theme-accent);
+  --pdm-purple: var(--pdm-theme-accent);
+  --pdm-button-accent: var(--pdm-theme-accent);
+}
+
+:root[data-pdm-color-scheme="dark"] {
+  --pdm-theme-accent-soft: #11261e;
+  --pdm-theme-accent-soft-strong: #173e2e;
+  --pdm-theme-accent-border: #236447;
+}
+
+:root[data-pdm-color-scheme] .mobile-office[data-layout-theme] {
+  --mobile-accent: var(--pdm-theme-accent);
+  --mobile-tint: var(--pdm-theme-accent-soft);
+}

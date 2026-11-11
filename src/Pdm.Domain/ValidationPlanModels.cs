@@ -101,6 +101,7 @@ public sealed record ValidationPlanApprovalTask(
     DateTimeOffset? DecidedAt)
 {
     public IReadOnlyList<string>? EmergencyRoleCodes { get; init; }
+    public ApprovalGroup? Participants { get; init; }
 }
 
 
@@ -169,4 +170,8 @@ public sealed record PendingValidationPlanApprovalTask(
     ApprovalStage Stage,
     string StepName,
     string Assignee,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt)
+{
+    public ApprovalGroup? Participants { get; init; }
+    public bool CanSign(string actor) => Participants?.CanSign(actor) ?? Assignee.Equals(actor, StringComparison.OrdinalIgnoreCase);
+}

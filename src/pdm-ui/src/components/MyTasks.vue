@@ -6,7 +6,7 @@ import { ElMessageBox } from 'element-plus'
 import { ClipboardCheck, KeyRound, RotateCw as RefreshCw } from '@lucide/vue'
 import type { EditLockSummary, MaterialCodeApplication, MyApprovalTask, PasswordResetTask, ProgramTemplateTask, UserNotification } from '../types'
 import { useUserDisplayName } from '../userDisplay'
-import { isTaskCenterNotification, releaseApprovalTaskForNotification } from '../taskNotifications'
+import { isProjectTodo, isTaskCenterNotification, oplResponseCategory, releaseApprovalTaskForNotification } from '../taskNotifications'
 
 const displayUserName = useUserDisplayName()
 
@@ -141,12 +141,17 @@ function stageLabel(stage: string | number) {
     ? ({ 1: 'ProcessReview', 2: 'Approval', 10: 'MechanicalEngineer', 20: 'MainDesigner', 30: 'MechanicalSupervisor', 40: 'HardwareEngineer', 50: 'HardwareSupervisor', 60: 'StandardizationSupervisor' } as Record<number, string>)[stage]
     : stage
   return ({
-    ProcessReview: '工艺审核', Approval: '批准', MechanicalEngineer: '机械工程师自检', MainDesigner: '主设审核',
+    ProcessReview: '工艺审核', Approval: '批准', MechanicalEngineer: '机械工程师自检', MainDesigner: '主设计审核',
     MechanicalSupervisor: '机械主管批准', HardwareEngineer: '硬件工程师自检', HardwareSupervisor: '硬件主管审核', StandardizationSupervisor: '标准化主管批准',
   } as Record<string, string>)[key] ?? String(stage)
 }
 
 function notificationActionLabel(notification: UserNotification) {
+  if (notification.category === oplResponseCategory) return notification.resolvedAt ? '查看问题' : '回填问题'
+  if (notification.category.startsWith('ProjectBonus')) return '查看项目奖金'
+  if (notification.category === 'ProjectStaffingPending') return notification.resolvedAt ? '查看项目' : '指定项目经理'
+  if (notification.category === 'ProjectAssigned') return '查看项目'
+  if (notification.category.startsWith('ExpenseApproval')) return '查看费用申请'
   if (notification.category.startsWith('DrawingReview')) return '查看审核'
   if (notification.category === 'WorkflowValidationPlan') return '查看验证计划'
   if (notification.category === 'WorkflowMaterialCode') return '查看BOM'
@@ -162,7 +167,8 @@ function notificationActionLabel(notification: UserNotification) {
 }
 
 function isApprovalNotification(notification: UserNotification) {
-  return notification.category.startsWith('DrawingReview') || notification.category.startsWith('ReleaseApproval')
+  if (notification.category.startsWith('ProjectBonus')) return true
+  return notification.category.startsWith('ExpenseApproval') || notification.category.startsWith('DrawingReview') || notification.category.startsWith('ReleaseApproval')
     || ['WorkflowValidationPlan', 'WorkflowMaterialCode', 'MaterialMasterRejected', 'MaterialCodeApplicationRejected',
       'project-plan-approval', 'project-application'].includes(notification.category)
 }
@@ -195,17 +201,17 @@ function formatDateTime(value: string) {
 }
 
 const rows = computed<TaskCenterRow[]>(() => [
-  ...visibleNotifications.value.filter(notification => notification.category === 'ProjectTodo').map(notification => ({
+  ...visibleNotifications.value.filter(isProjectTodo).map(notification => ({
     key: `notification-${notification.id}`,
     kind: 'todo' as const,
-    status: notification.isSenderReceipt ? '已发送' : notification.resolvedAt ? '已结束' : notification.readAt ? '已读' : notification.dueDate && notification.dueDate < new Date().toISOString().slice(0, 10) ? '已逾期' : '待处理',
+    status: notification.isSenderReceipt ? '已发送' : notification.resolvedAt ? '已结束' : notification.category === oplResponseCategory ? '待回填' : notification.readAt ? '已读' : notification.dueDate && notification.dueDate < new Date().toISOString().slice(0, 10) ? '已逾期' : '待处理',
     statusClass: notification.readAt || notification.isSenderReceipt || notification.resolvedAt ? 'is-ok' : notification.dueDate && notification.dueDate < new Date().toISOString().slice(0, 10) ? 'is-alert' : 'is-remind',
     title: notification.title,
     content: `${notification.dueDate ? `截止 ${notification.dueDate} · ` : ''}${notification.content}`,
     createdAt: notification.createdAt,
     notification,
   })),
-  ...visibleNotifications.value.filter(notification => notification.category !== 'ProjectTodo' && !releaseApprovalTaskForNotification(notification, props.tasks)).map(notification => ({
+  ...visibleNotifications.value.filter(notification => !isProjectTodo(notification) && !releaseApprovalTaskForNotification(notification, props.tasks)).map(notification => ({
     key: `notification-${notification.id}`,
     kind: isApprovalNotification(notification) ? 'approval' as const : 'notification' as const,
     status: notification.isSenderReceipt ? '已发送' : notification.resolvedAt ? notification.category === 'ReleaseManagementRisk' ? '已解除' : '已结束' : notification.readAt ? '已读' : '未读',
@@ -267,7 +273,8 @@ const rows = computed<TaskCenterRow[]>(() => [
   })),
 ].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()))
 
-const pendingRows = computed(() => rows.value.filter(row => row.approval || !row.notification?.readAt))
+const pendingBusinessTask = (row: TaskCenterRow) => ['ExpenseApprovalPending', 'ProjectBonusPending', oplResponseCategory].includes(row.notification?.category ?? '') && !row.notification?.resolvedAt
+const pendingRows = computed(() => rows.value.filter(row => row.approval || pendingBusinessTask(row) || !row.notification?.readAt))
 const filterCounts = computed(() => ({
   all: pendingRows.value.length,
   todo: pendingRows.value.filter(item => item.kind === 'todo').length,
@@ -278,7 +285,7 @@ const filterCounts = computed(() => ({
   lock: lockGroups.value.length,
   password: props.passwordResetTasks.length,
 }))
-const filteredRows = computed(() => rows.value.filter(row => (showHistory.value || row.approval || !row.notification?.readAt) && (taskFilter.value === 'all' || row.kind === taskFilter.value)))
+const filteredRows = computed(() => rows.value.filter(row => (showHistory.value || row.approval || pendingBusinessTask(row) || !row.notification?.readAt) && (taskFilter.value === 'all' || row.kind === taskFilter.value)))
 const pagedRows = computed(() => filteredRows.value.slice((currentPage.value - 1) * pageSize.value, currentPage.value * pageSize.value))
 const totalPages = computed(() => Math.max(1, Math.ceil(filteredRows.value.length / pageSize.value)))
 
@@ -382,7 +389,7 @@ async function resetPassword(task: PasswordResetTask) {
   <section class="pdm-project-manager pdm-task-center" aria-label="我的待办">
     <nav class="pdm-task-filters pdm-tabs" role="tablist" aria-label="待办类型">
       <button type="button" role="tab" :aria-selected="taskFilter === 'all'" @click="setTaskFilter('all')">全部待办（{{ filterCounts.all }}）</button>
-      <button v-if="visibleNotifications.some(item => item.category === 'ProjectTodo')" type="button" role="tab" :aria-selected="taskFilter === 'todo'" @click="setTaskFilter('todo')">项目待办（{{ filterCounts.todo }}）</button>
+      <button v-if="visibleNotifications.some(isProjectTodo)" type="button" role="tab" :aria-selected="taskFilter === 'todo'" @click="setTaskFilter('todo')">项目待办（{{ filterCounts.todo }}）</button>
       <button type="button" role="tab" :aria-selected="taskFilter === 'approval'" @click="setTaskFilter('approval')">审批任务（{{ filterCounts.approval }}）</button>
       <button type="button" role="tab" :aria-selected="taskFilter === 'material'" @click="setTaskFilter('material')">料号审批（{{ filterCounts.material }}）</button>
       <button v-if="programTemplateTasks.length" type="button" role="tab" :aria-selected="taskFilter === 'program'" @click="setTaskFilter('program')">程序模板（{{ filterCounts.program }}）</button>
@@ -391,8 +398,10 @@ async function resetPassword(task: PasswordResetTask) {
       <button type="button" role="tab" :aria-selected="taskFilter === 'notification'" @click="setTaskFilter('notification')">系统消息（{{ filterCounts.notification }}）</button>
     </nav>
     <section class="pdm-panel pdm-task-message-panel" aria-label="消息中心">
-      <div class="pdm-task-toolbar"><label class="pdm-history-toggle"><input v-model="showHistory" type="checkbox">显示已读记录</label>
+      <div class="pdm-task-toolbar">
         <button type="button" class="pdm-secondary-action" :disabled="pending" @click="$emit('refresh')"><RefreshCw :size="14" />刷新</button>
+        <label class="pdm-history-toggle"><input v-model="showHistory" type="checkbox">显示已读记录</label>
+        <div class="pdm-task-status-host" data-pdm-dialog-status-host></div>
         <PanelActions><button v-if="visibleNotifications.some(item => !item.readAt)" type="button" class="pdm-secondary-action" :disabled="pending" @click="onMarkAllNotificationsRead">全部已读</button></PanelActions>
       </div>
 
@@ -434,7 +443,7 @@ async function resetPassword(task: PasswordResetTask) {
       </footer>
     </section>
 
-    <el-dialog v-if="forceReleaseDialogOpen" v-model="forceReleaseDialogOpen" class="pdm-force-release-dialog" modal-class="pdm-force-release-overlay" :title="emergencyRelease ? '紧急接管编辑权限' : '批量强制释放超时权限'" width="520px" :close-on-click-modal="false" append-to-body>
+    <el-dialog v-if="forceReleaseDialogOpen" v-model="forceReleaseDialogOpen" class="pdm-force-release-dialog" modal-class="pdm-force-release-overlay" :title="emergencyRelease ? '紧急接管编辑权限' : '批量强制释放超时权限'" width="520px" :close-on-click-modal="!pending && !forceReleaseSubmitting" append-to-body>
       <div class="pdm-force-release-form">
         <p>{{ forceReleaseDialogSummary }}</p>
         <fieldset>

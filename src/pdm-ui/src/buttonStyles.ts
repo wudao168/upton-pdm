@@ -16,13 +16,16 @@ export function isFoldButton(button: HTMLButtonElement) {
 // 导航、树节点、日历格和图片入口属于业务内容，不作为操作按钮装饰。
 export const buttonNavigationSelector = 'nav, .pdm-sidebar, .pdm-tabs, [role="tablist"], .el-tree, [role="tree"], .el-pagination, .el-picker-panel, .el-dropdown-menu, .pdm-tree-context-menu'
 export const buttonContentSelector = [
+  '.bonus-phase', '.bonus-role-option',
+  '.report-page .report-card', '.report-page .report-heat-cell', '.report-segment button',
   '.pdm-search-field__action > button', '.pdm-search-submit',
-  '.pdm-command-results button',
+  '.pdm-command-results button', '.opl-board-card__open', '.opl-view-switch button',
   '[role="tab"]', '[role="treeitem"]', '[role="option"]', '[role="menuitem"]', '[role="checkbox"]', '[role="switch"]',
-  '.pdm-global-status', '.pdm-company-switcher', '.pdm-project-code-link', '.pdm-project-switcher__display', '.pdm-project-switcher__search-icon',
+  '.pdm-project-activity button', '.pdm-global-status', '.pdm-company-switcher', '.pdm-project-code-link', '.pdm-project-switcher__display', '.pdm-project-switcher__search-icon',
   '.pdm-release-package-row', '.pdm-titlebar__sidebar-toggle',
   '.wr-next', '.pdm-plan-summary-action', '.bom-overview__link',
   '.drawing-review-candidate',
+  '.authorization-pick', '.authorization-result-options button',
   '[aria-label^="选择项目号"]', '.pdm-project-switcher__option',
   '.pdm-tree-row', '.pdm-tree-toggle', '.pdm-bom-cell-edit', '.pdm-gantt-cell-edit', '.pdm-gantt-resize-handle',
   '.pdm-bom-issue-button', '.pdm-bom-files-link',
@@ -58,7 +61,7 @@ const generatedTitles = new WeakMap<HTMLButtonElement, string>()
 
 function updateLeadingIcons(control: HTMLElement) {
   if (control.closest('.layout-phone')) return
-  const preserved = !!control.closest('.pdm-sidebar, .pdm-tree, .el-tree, [role="tree"], .el-picker-panel, .el-time-panel, .el-select, .el-cascader')
+  const preserved = !!control.closest('.report-page, .pdm-sidebar, .pdm-tree, .el-tree, [role="tree"], .el-picker-panel, .el-time-panel, .el-select, .el-cascader')
     || control.matches('.pdm-global-status') || (control instanceof HTMLButtonElement && isFoldButton(control))
   const texts = document.createTreeWalker(control, NodeFilter.SHOW_TEXT, { acceptNode: node =>
     /[\p{L}\p{N}]/u.test(node.textContent ?? '') && !node.parentElement?.closest('svg, .el-icon, [aria-hidden="true"], em')
@@ -95,7 +98,7 @@ function updateButton(button: HTMLButtonElement) {
   let kind = 'outline'
   if (button.matches('.pdm-danger-action') || /^(?:确认|永久|彻底)?(?:删除|移除|清空)/.test(action)) kind = 'delete'
   else if (/^(?:新增|新建|添加|增加|创建|加入)/.test(action)) kind = 'add'
-  else if (/^(?:确认|确定|保存|提交|同意|通过|批准)/.test(action)) kind = 'confirm'
+  else if (button.hasAttribute('data-pdm-primary') || /^(?:确认|确定|保存|提交|同意|通过|批准)/.test(action)) kind = 'confirm'
   else if (button.disabled && /^(?:正在|处理中|请稍候)|中[.…]*$/.test(label)) kind = button.dataset.pdmButtonKind ?? kind
   if (kind === 'outline' && button.matches('.pdm-text-action, .is-link, .el-button--text, .pdm-link-button, .pdm-project-assignment-button')) {
     delete button.dataset.pdmButtonKind

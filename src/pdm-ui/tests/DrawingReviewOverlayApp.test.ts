@@ -18,7 +18,7 @@ describe('审核浮层全局主题', () => {
     delete window.chrome
   })
 
-  it.each(['a', 'c', 'p', 'o', 'g'])('接收到%s主题时同步全局变量，覆盖浮层及传送弹窗', async theme => {
+  it.each(['a', 'c', 'g'])('接收到%s主题时同步全局变量，覆盖浮层及传送弹窗', async theme => {
     let receive: (event: MessageEvent) => void = () => {}
     Object.defineProperty(window, 'chrome', { configurable: true, value: { webview: {
       postMessage: vi.fn(),

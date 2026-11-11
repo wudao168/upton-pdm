@@ -93,7 +93,7 @@ internal static partial class Program
     var rootOnly=New("ControlledOpenManifestDto");var rootFiles=(IList)Activator.CreateInstance(Property(rootOnly,"Files").PropertyType);
     var rootFile=New("ControlledOpenFileDto");Set(rootFile,"FileName",Path.GetFileName(rootPath));Set(rootFile,"RelativePath",Path.GetFileName(rootPath));Set(rootFile,"IsRoot",true);rootFiles.Add(rootFile);Set(rootOnly,"Files",rootFiles);
     blocked=false;
-    try{Type("PdmAddin").GetMethod("ValidateHistoricalControlledOpenReferences",Flags).Invoke(null,new[]{parent,(object)rootPath,rootOnly,app});}
+    try{Type("PdmAddin").GetMethod("ValidateHistoricalControlledOpenReferences",Flags).Invoke(null,new[]{parent,(object)rootPath,rootOnly,app,null});}
     catch(TargetInvocationException e){blocked=e.InnerException is InvalidOperationException;}
     if(blocked==embedded)throw new Exception("Parent-only package must allow embedded content and reject actual outside ordinary components");
     Console.WriteLine("PASS: F20 parent-only package loaded-source validation embedded="+embedded);

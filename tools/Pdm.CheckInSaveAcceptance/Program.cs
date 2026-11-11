@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -28,6 +28,20 @@ internal static partial class Program
   if(args.Length>0&&args[0]=="--archive-status-proxy-host") { RunArchiveStatusProxyHost(args); return; }
   AppDomain.CurrentDomain.AssemblyResolve+=(_,e)=>{var path=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0])),new AssemblyName(e.Name).Name+".dll");return File.Exists(path)?Assembly.LoadFrom(path):null;};
   assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));
+  if (args.Length > 1 && args[1] == "--property-window-regression")
+  {
+   using (var host = new Form { Opacity = 0, ShowInTaskbar = false })
+   {
+    host.Shown += (_, __) =>
+    {
+     try { PropertyWindowScenario(host); }
+     catch (Exception error) { Console.WriteLine("FAIL: " + error); Environment.ExitCode = 1; }
+     finally { host.Close(); }
+    };
+    Application.Run(host);
+   }
+   return;
+  }
   if(args.Length>1&&args[1]=="--required-property-index-regression")
   {try{RequiredPropertyIndexScenario(args[2]);}catch(Exception error){Console.WriteLine("FAIL: "+error);Environment.ExitCode=1;}return;}
   if(args.Length>1&&args[1]=="--committed-child-checkout-regression")
@@ -768,6 +782,11 @@ internal static partial class Program
    }
    return;
   }
+  if(args.Length>1&&args[1]=="--missing-readonly-open-regression")
+  {
+   ControlledNativeFirstScenario(true);
+   return;
+  }
   if(args.Length>1&&args[1]=="--latest-readonly-working-regression")
   {
    using(var latestHost=new Form{Opacity=0,ShowInTaskbar=false})
@@ -1044,7 +1063,7 @@ internal static partial class Program
    if(pendingMode){var pending=((IList)Get(root,"Children"))[0];Set(pending,"SourceReferencePath",savedPart);Set(pending,"IsRenamePendingSave",true);}
    if(mode=="embedded-virtual"){var node=New("CadTreeNode");Set(node,"FullPath",virtualPath);Set(node,"Status",Enum.Parse(Type("CadReferenceStatus"),"Virtual"));((IList)Get(root,"Children")).Add(node);}
    SetField(plugin,"currentTree",root);var rejected=false;Exception renameError=null;
-   try{Type("PdmAddin").GetMethod("RenameRootDocumentAndReferences",Flags).Invoke(plugin,new object[]{root,model,newPath});}
+   try{Type("PdmAddin").GetMethod("RenameRootDocumentAndReferences",Flags).Invoke(plugin,new object[]{root,model,newPath,null});}
    catch(TargetInvocationException error)when(error.InnerException is IOException||error.InnerException is InvalidOperationException){rejected=true;renameError=error.InnerException;}
    var success=mode=="context-and-drawing"||mode=="read-only-local-dependent"||mode=="embedded-virtual"||mode=="pending-dependent";
    if(rejected==success||cwd!="original-working-directory"||(int)Field(plugin,"draftSnapshotInProgress")!=0)throw new Exception("Incorrect rename result "+mode+" "+renameError);
@@ -1279,7 +1298,7 @@ internal static partial class Program
    var root=new AssemblyProxy(interop.GetType("SolidWorks.Interop.sldworks.ModelDoc2",true),call=>call.MethodName=="GetType"?2:call.MethodName=="GetComponents"?new[]{component,component}:throw new Exception(call.MethodName)).GetTransparentProxy();
    if(mode=="corrupt")File.WriteAllText(path,"tampered");if(mode=="missing")File.Delete(path);
    var rejected=false;
-   try{Type("PdmAddin").GetMethod("ValidateHistoricalControlledOpenReferences",Flags).Invoke(null,new object[]{root,Path.Combine(folder,"ROOT.SLDASM"),manifest,null});}
+   try{Type("PdmAddin").GetMethod("ValidateHistoricalControlledOpenReferences",Flags).Invoke(null,new object[]{root,Path.Combine(folder,"ROOT.SLDASM"),manifest,null,null});}
    catch(TargetInvocationException e)when(e.InnerException is InvalidOperationException){rejected=true;}
    var expectedRejection=mode=="corrupt"||mode=="missing"||!pathsDisabled&&(mode=="loaded-wrong"||mode=="suppressed-loaded-wrong");
    if(rejected!=expectedRejection)throw new Exception("Wrong controlled reference outcome "+mode);
@@ -1309,7 +1328,7 @@ internal static partial class Program
    var manifest=New("ControlledOpenManifestDto");var files=(IList)Activator.CreateInstance(Property(manifest,"Files").PropertyType);var file=New("ControlledOpenFileDto");
    Set(file,"FileName","source.stp");Set(file,"RelativePath","source.stp");Set(file,"Sha256",hash);Set(file,"FileLength",length);files.Add(file);Set(manifest,"Files",files);
    if(mode=="corrupt")File.WriteAllText(source,"changed original");if(mode=="missing")File.Delete(source);
-   var rejected=false;try{Type("PdmAddin").GetMethod("ValidateHistoricalControlledOpenReferences",Flags).Invoke(null,new object[]{root,Path.Combine(folder,"ROOT.SLDASM"),manifest,null});}catch(TargetInvocationException e)when(e.InnerException is InvalidOperationException){rejected=true;}
+   var rejected=false;try{Type("PdmAddin").GetMethod("ValidateHistoricalControlledOpenReferences",Flags).Invoke(null,new object[]{root,Path.Combine(folder,"ROOT.SLDASM"),manifest,null,null});}catch(TargetInvocationException e)when(e.InnerException is InvalidOperationException){rejected=true;}
    if(rejected!=(mode!="correct"))throw new Exception("Imported STEP controlled-open mismatch "+mode);
    Console.WriteLine("PASS: imported STEP controlled-open "+mode);
   }
@@ -1339,7 +1358,7 @@ internal static partial class Program
    Set(file,"FileName","OWNER.SLDASM");Set(file,"RelativePath","OWNER.SLDASM");Set(file,"Sha256",hash);Set(file,"FileLength",length);files.Add(file);Set(manifest,"Files",files);
    var ownerApp=new Proxy(Type("PdmAddin").GetField("application",Flags).FieldType,call=>call.MethodName=="get_ActiveDoc"||call.MethodName=="ActivateDoc3"?root:throw new Exception("Unexpected native write "+call.MethodName)).GetTransparentProxy();
    if(mode=="corrupt-owner")File.WriteAllText(owner,"tampered native geometry");if(mode=="missing-owner")File.Delete(owner);
-   var rejected=false;try{Type("PdmAddin").GetMethod("ValidateHistoricalControlledOpenReferences",Flags).Invoke(null,new object[]{root,Path.Combine(folder,"ROOT.SLDASM"),manifest,ownerApp});}catch(TargetInvocationException e)when(e.InnerException is InvalidOperationException){rejected=true;}
+   var rejected=false;try{Type("PdmAddin").GetMethod("ValidateHistoricalControlledOpenReferences",Flags).Invoke(null,new object[]{root,Path.Combine(folder,"ROOT.SLDASM"),manifest,ownerApp,null});}catch(TargetInvocationException e)when(e.InnerException is InvalidOperationException){rejected=true;}
    if(rejected!=(mode!="native-container"&&mode!="outside-source-record"))throw new Exception("Native import owner validation mismatch "+mode);
    Console.WriteLine("PASS: persisted imported hierarchy validates native owner, not historical STEP path "+mode);
   }}finally{Directory.Delete(folder,true);Directory.Delete(cacheDirectory);Directory.Delete(Path.GetDirectoryName(cacheDirectory));}
@@ -2174,9 +2193,10 @@ internal static partial class Program
  }
  sealed class Model:RealProxy,IRemotingTypeInfo
  {
-  public string Path;public bool Dirty;public Action OnSave;bool readOnly=true;readonly List<string> events;
+  public string Path;public bool Dirty;public Action OnSave,OnConfigurationNames,OnPropertyRead;bool readOnly=true;readonly List<string> events;
   readonly System.Type nativeType;readonly List<Delegate> modifyHandlers=new List<Delegate>();readonly List<Delegate> destroyHandlers=new List<Delegate>();readonly List<Delegate> reloadHandlers=new List<Delegate>();
   public int UpdateStamp=1,CopyError,SelectionCount=2;int heldSelection;public string MemoryPayload="current memory";
+  public readonly Dictionary<string,string> MemoryProperties=new Dictionary<string,string>{{"物料名称","当前内存属性"}};
   public string TypeName{get=>nativeType.FullName;set{}}
   public bool CanCastTo(System.Type type,object obj)=>type.IsAssignableFrom(nativeType)||type.Name=="IModelDoc2"||type.Name=="ModelDoc2"
    ||type.Name==(Path.EndsWith(".SLDASM",StringComparison.OrdinalIgnoreCase)?"DAssemblyDocEvents_Event":Path.EndsWith(".SLDDRW",StringComparison.OrdinalIgnoreCase)?"DDrawingDocEvents_Event":"DPartDocEvents_Event");
@@ -2191,6 +2211,12 @@ internal static partial class Program
    throw new Exception(call.MethodName);
   }).GetTransparentProxy();
   object Extension()=>new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.ModelDocExtension",true),call=>{
+   if(call.MethodName=="get_CustomPropertyManager"){var read=OnPropertyRead;OnPropertyRead=null;read?.Invoke();var global=string.IsNullOrEmpty((string)call.Args[0]);return new Proxy(nativeType.Assembly.GetType("SolidWorks.Interop.sldworks.CustomPropertyManager",true),p=>{
+    if(p.MethodName=="GetNames")return global?MemoryProperties.Keys.ToArray():new string[0];
+    if(p.MethodName=="get_Count")return global?MemoryProperties.Count:0;
+    if(p.MethodName=="Get6"){var name=(string)p.Args[0];var v=MemoryProperties[name];return new ReturnMessage(2,new object[]{name,true,v,v,false,false},6,p.LogicalCallContext,p);}
+    throw new Exception("禁止写入内存属性："+p.MethodName);
+   }).GetTransparentProxy();}
    if(call.MethodName=="ListExternalFileReferences2"){for(var i=0;i<call.Args.Length;i++)call.Args[i]=Array.Empty<object>();return null;}
    if(call.MethodName=="GetOLEObjects"||call.MethodName=="GetRenderMaterials")return Array.Empty<object>();
    if(call.MethodName=="GetOLEObjectCount")return 0;
@@ -2212,7 +2238,7 @@ internal static partial class Program
     case "GetType":value=call.MethodBase is MethodInfo info&&info.ReturnType==typeof(System.Type)?(object)nativeType:Path.EndsWith(".SLDASM",StringComparison.OrdinalIgnoreCase)?2:Path.EndsWith(".SLDDRW",StringComparison.OrdinalIgnoreCase)?3:1;break;
     case "GetSaveFlag":value=Dirty;break;
     case "GetUpdateStamp":value=UpdateStamp;break;
-    case "GetConfigurationNames":value=new[]{"Default"};break;
+    case "GetConfigurationNames":var configRead=OnConfigurationNames;OnConfigurationNames=null;configRead?.Invoke();value=new[]{"Default"};break;
     case "GetEquationMgr":case "GetDesignTable":case "FirstFeature":value=null;break;
     case "SetSaveFlag":Dirty=true;value=null;break;
     case "get_Extension":value=Extension();break;

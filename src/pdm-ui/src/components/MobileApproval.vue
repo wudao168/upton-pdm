@@ -1,4 +1,9 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
+import { useUserDisplayName as usePersonDisplayName } from '../userDisplay'
+const displayUserName = usePersonDisplayName()
+import ApprovalNoteEditor from './ApprovalNoteEditor.vue'
+import { canSignNode } from '../approvalParticipants'
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
 import { decideApproval, decideValidationPlanApproval, listReleasePackages, readDocumentPreviewFile, readProjectValidationPlan, downloadValidationPlanAttachment } from '../api'
 import type { MyApprovalTask, ProjectValidationPlan, ReleasePackageSummary } from '../types'
@@ -12,8 +17,11 @@ const error = ref(''), comment = ref(''), preview = ref(''), previewName = ref('
 const scope = props.task.qualityAcceptance ? '/quality' : ''
 const { write: projectWritable } = useProjectCenterAccess()
 const active = computed(() => projectWritable.value && (props.permissions.includes('approval.decide') || props.task.kind === 'validationPlan' && props.permissions.includes('validation-plan.edit')) && (props.task.kind === 'validationPlan'
-  ? plan.value?.id === props.task.validationPlanId && plan.value?.approvalTasks.some(task => task.id === props.task.id && task.assignee.toLowerCase() === props.username.toLowerCase() && task.decision == null)
-  : release.value?.steps.some(step => step.id === props.task.id && step.status === 'current' && (step.assignee.toLowerCase() === props.username.toLowerCase() || props.username.toLowerCase() === 'admin'))))
+  ? plan.value?.id === props.task.validationPlanId && plan.value?.approvalTasks.some(task => task.id === props.task.id && canSignNode(task, props.username) && task.decision == null)
+  : release.value?.steps.some(step => step.id === props.task.id && step.status === 'current' && (canSignNode(step, props.username) || !step.participants && props.username.toLowerCase() === 'admin'))))
+const note = ref<string>()
+const nodes = computed(() => plan.value?.approvalTasks ?? release.value?.steps ?? [])
+const editNote = computed(() => nodes.value.find(node => node.id === props.task.id)?.participants?.policy?.editBusinessNote === true)
 const bindings = computed(() => release.value?.versionBindings ?? [])
 const items = computed(() => [...(release.value?.standardBomSnapshot ?? []), ...(release.value?.nonStandardBomSnapshot ?? []), ...(release.value?.electricalBomSnapshot ?? [])])
 function closePreview() { if (preview.value) URL.revokeObjectURL(preview.value); preview.value = '' }
@@ -31,8 +39,8 @@ async function decide(decision: 'Approved' | 'Rejected') {
   if (decision === 'Rejected' && !comment.value.trim()) { error.value = '退回时请填写处理意见。'; return }
   pending.value = true; error.value = ''
   try {
-    if (props.task.kind === 'validationPlan') await decideValidationPlanApproval(props.task.id, decision, comment.value.trim(), props.token, scope)
-    else await decideApproval(props.task.id, decision, comment.value.trim(), props.token)
+    if (props.task.kind === 'validationPlan') await decideValidationPlanApproval(props.task.id, decision, comment.value.trim(), props.token, scope, editNote.value ? note.value : undefined)
+    else await decideApproval(props.task.id, decision, comment.value.trim(), props.token, editNote.value ? note.value : undefined)
     comment.value = ''; emit('done')
   } catch (cause) { error.value = userErrorMessage(cause instanceof Error ? cause.message : '审批结果未确认，请刷新待办核对后重试。') }
   finally { pending.value = false }
@@ -66,7 +74,7 @@ onBeforeUnmount(closePreview)
     <p v-if="loading" role="status">正在读取审批资料…</p>
     <p v-if="error" role="alert" class="mobile-error">{{ error }} <button :disabled="pending" @click="load">刷新</button></p>
     <template v-if="release">
-      <h3>审批流程</h3><ol><li v-for="step in release.steps" :key="step.id">{{ step.stage }} · {{ step.assignee }} · {{ step.detail }}<p v-if="step.comment">处理意见：{{ step.comment }}</p></li></ol>
+      <h3>审批流程</h3><ol><li v-for="step in release.steps" :key="step.id">{{ step.stage }} · <PersonName :name="displayUserName(step.assignee)" /> · {{ step.detail }}<p v-if="step.comment">处理意见：{{ step.comment }}</p></li></ol>
       <p v-if="release.changeReason">变更原因：{{ release.changeReason }}</p>
       <h3>本次审批的图档版本</h3><p v-if="!bindings.length">本次审批未绑定图档。</p>
       <article v-for="binding in bindings" :key="binding.documentId" class="mobile-record"><strong>{{ binding.fileName || binding.documentId }}</strong><p>版本 {{ binding.revision }}</p><button v-if="/\.slddrw$|\.pdf$/i.test(binding.fileName || '')" :disabled="pending" @click="showDrawing(binding)">查看此版本图纸</button></article>
@@ -76,8 +84,9 @@ onBeforeUnmount(closePreview)
       <h3>计划内容 · 第{{ plan.revisionNumber }}版</h3>
       <article v-for="item in plan.items" :key="item.id" class="mobile-record"><strong>{{ item.categoryName }} · {{ item.validationContent }}</strong><p>{{ item.validationStandard }}</p><p v-if="item.result">结果：{{ item.result }}</p></article>
       <h3>审批附件</h3><button v-for="file in plan.attachments" :key="file.id" :disabled="pending" @click="attachment(file.id, file.originalFileName)">{{ file.originalFileName }} · 第{{ file.fileVersion }}版</button>
-      <ol><li v-for="step in plan.approvalTasks" :key="step.id">{{ step.stepName }} · {{ step.assignee }}<p v-if="step.decisionComment">{{ step.decisionComment }}</p></li></ol>
+      <ol><li v-for="step in plan.approvalTasks" :key="step.id">{{ step.stepName }} · <PersonName :name="displayUserName(step.assignee)" /><p v-if="step.decisionComment">{{ step.decisionComment }}</p></li></ol>
     </template>
+    <ApprovalNoteEditor v-model="note" :identity="task.id" :label="plan ? '计划备注' : '发布备注'" :nodes="nodes.map(node => node.participants)" :editable="!!active && editNote" />
     <form v-if="active" class="mobile-approval-actions" @submit.prevent="decide('Approved')">
       <label>处理意见<textarea v-model="comment" aria-label="审批处理意见" rows="3" maxlength="500" :disabled="pending" /></label>
       <button type="submit" class="pdm-primary-action" :disabled="pending">{{ pending ? '正在处理…' : '通过审批' }}</button>

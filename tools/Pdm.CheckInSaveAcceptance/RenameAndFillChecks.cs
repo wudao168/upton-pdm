@@ -103,7 +103,7 @@ internal static partial class Program
   using(var pane=(Control)New("PdmTaskPaneControl","改名回归"))
   {
    host.Controls.Add(pane);SetField(plugin,"taskPaneControl",pane);
-   var result=(IDictionary)Type("PdmAddin").GetMethod("ExecuteBatchDocumentRenames",Flags).Invoke(plugin,new object[]{requests});
+   var result=(IDictionary)Type("PdmAddin").GetMethod("ExecuteBatchDocumentRenames",Flags).Invoke(plugin,new object[]{requests,null});
    var shouldFail=mode=="suppressed"||mode=="not-attached"||mode=="wrong-path"||mode=="read-only"||mode=="embedded-unloaded";
    var successes=result.Values.Cast<string>().Count(status=>status=="已完成");
    if(shouldFail?(renames!=0||successes!=0):(renames!=requests.Length||successes!=requests.Length))throw new Exception("Rename outcome "+mode+": "+string.Join(";",result.Values.Cast<string>()));

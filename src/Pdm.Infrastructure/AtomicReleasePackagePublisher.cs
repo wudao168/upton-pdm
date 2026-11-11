@@ -119,7 +119,10 @@ public sealed class AtomicReleasePackagePublisher : IReleasePackagePublisher
                 ? new KeyValuePair<string, string>(field.Key, $"{Math.Max(1, package.WholeSetMultiplier)}套") : field).ToArray() };
             if(supplementKind.HasValue) metadata=metadata with{Notes="完整目标基线（含未变更项）；需求净变更＝目标总量－前次基线－首次提前抵扣。负数表示减少需求，不代表已退料。"};
             var content = await File.ReadAllBytesAsync(path, cancellationToken);
-            await File.WriteAllBytesAsync(path, ProjectWorkbookHeader.Apply(content, metadata), cancellationToken);
+            var frozenWorkbook = ProjectWorkbookHeader.Apply(content, metadata);
+            await File.WriteAllBytesAsync(path, frozenWorkbook, cancellationToken);
+            await File.WriteAllBytesAsync(Path.Combine(stagingDirectory, $"{package.Number}-{Path.GetFileNameWithoutExtension(path)}{BomPurchaseListPdf.Suffix}"),
+                BomPurchaseListPdf.Write(frozenWorkbook, project, package, title), cancellationToken);
         }
     }
 

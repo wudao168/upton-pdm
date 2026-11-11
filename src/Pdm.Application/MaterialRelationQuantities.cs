@@ -32,16 +32,15 @@ public sealed partial class MaterialRelationService
         var byKind = original.ToDictionary(pair => pair.Key, pair => pair.Value.ToList());
         var items = byKind.Values.SelectMany(rows => rows).Where(QuantityActive).ToArray();
         var releasedVersions = (await repository.ListBomVersionsAsync(projectId, null, ct)).Where(version=>version.State==BomVersionState.Released).ToArray();
-        var templates = (await relations.ListTemplatesAsync(false, ct)).Where(template => !template.IsArchived && template.PublishedRevision is not null)
-            .SelectMany(template => template.PublishedMainMaterials.Select(main => (main.MaterialCode, Template: template)))
-            .ToDictionary(value => value.MaterialCode, value => value.Template, StringComparer.OrdinalIgnoreCase);
-        var mains = (await RelationMainsAsync(items, templates.Keys.Concat(items.Select(item => item.EngineeringKitCode ?? "")), ct)).ToDictionary(item => item.Id);
         var selections = (await relations.ListSelectionsAsync(projectId, ct)).ToArray();
         var reviews = (await relations.ListReviewsAsync(projectId,ct)).ToArray();
+        var rules = await LoadProjectRelationRulesAsync(items, selections, reviews, ct);
+        var mains = (await RelationMainsAsync(items, rules.MainCodes.Concat(items.Select(item => item.EngineeringKitCode ?? "")), ct)).ToDictionary(item => item.Id);
         var validationRules=(await repository.GetSystemSettingsAsync(ct)).ValidationRules;
         MaterialRelationMainCheck? WorkCheck(BomItem main)
         {
-            if(!templates.TryGetValue(main.DrawingNumber.Trim(),out var template) || template.PublishedRevision is not {} revision)return null;
+            var template = rules.For(main);
+            if (template?.PublishedRevision is not { } revision) return null;
             return new(main.Id,main.DrawingNumber,main.Name,main.Quantity,template.Id,revision.Id,revision.Version,false,
                 revision.Groups.Select(group=>{
                     var linked=selections.Where(selection=>selection.MainBomItemId==main.Id && selection.RevisionId==revision.Id && selection.GroupId==group.Id).ToArray();
@@ -94,8 +93,8 @@ public sealed partial class MaterialRelationService
                 ? string.Join("|",items.Where(row=>row.EngineeringKitReferenceId==member.Main.Id).Select(row=>BomDrawingRevision.PublishedBomVersion(row,packages,releasedVersions)??"未发布").Distinct().Order())
                 : BomDrawingRevision.PublishedBomVersion(member.Main,packages,releasedVersions)??"未发布").Distinct().ToArray();
             if(publicationGroups.Length>1)throw new PdmRuleException("不同发布状态或发布版本的配置必须分开修改数量。");
-            if (members.Any(member => member.Allocation is { } allocation && templates.TryGetValue(member.Main.DrawingNumber, out var template)
-                    && allocation.RevisionId != template.PublishedRevision!.Id))
+            if (members.Any(member => member.Allocation is { } allocation && rules.For(member.Main)?.PublishedRevision is { } revision
+                    && allocation.RevisionId != revision.Id))
                 throw new PdmConflictException("配套版本已更新，请先核对该组合，再修改数量。");
             U9UnitCatalog.RequireWholeQuantity(command.Quantity, first.EngineeringKitReferenceId == first.Id ? "007" : first.Unit, "主料汇总数量");
             var total = members.Sum(member => member.Quantity);
@@ -188,7 +187,7 @@ public sealed partial class MaterialRelationService
                     queue.Enqueue(owner.Id);
                 }
             }
-            if (!templates.TryGetValue(main.DrawingNumber, out var template) || template.PublishedRevision is not { } revision || !checks.TryGetValue(id, out var check))
+            if (rules.For(main)?.PublishedRevision is not { } revision || !checks.TryGetValue(id, out var check))
             {
                 if(selections.Any(selection=>selection.MainBomItemId==id))throw new PdmConflictException("关联配置已停用或缺少有效规则，请先核对配置，再修改主料数量。");
                 continue;
@@ -284,7 +283,7 @@ public sealed partial class MaterialRelationService
             var newQuantity=after is not null && QuantityActive(after)?after.Quantity:0;
             return new BomQuantityDifference(id,item.DrawingNumber,item.Name,oldQuantity,newQuantity,item.RelationMainBomItemId.HasValue,item.Unit);
         }).Where(change=>change.Before!=change.After).ToArray();
-        var finalMains=(await RelationMainsAsync(afterById.Values.Where(QuantityActive).ToArray(),templates.Keys.Concat(afterById.Values.Select(item=>item.EngineeringKitCode??"")),ct)).ToDictionary(main=>main.Id);
+        var finalMains=(await RelationMainsAsync(afterById.Values.Where(QuantityActive).ToArray(),rules.MainCodes.Concat(afterById.Values.Select(item=>item.EngineeringKitCode??"")),ct)).ToDictionary(main=>main.Id);
         foreach(var owner in reviewPlans.Keys.ToArray())
         {
             if(!finalMains.TryGetValue(owner,out var main))continue;
@@ -323,8 +322,8 @@ public sealed partial class MaterialRelationService
                 }).ToArray(),
             Selections=selections.Where(selection=>confirmationScope.Contains(selection.MainBomItemId)).OrderBy(selection=>selection.AccessoryBomItemId)
                 .Select(selection=>new {selection.MainBomItemId,selection.AccessoryBomItemId,selection.RevisionId,selection.GroupId,selection.OptionId,selection.ExpectedQuantity}).ToArray(),
-            Rules=confirmationScope.Where(mains.ContainsKey).Select(id=>mains[id].DrawingNumber).Distinct().Order().Select(code=>new {
-                Code=code,Revision=templates.GetValueOrDefault(code)?.PublishedRevision
+            Rules=confirmationScope.Where(mains.ContainsKey).Order().Select(id=>new {
+                MainId=id, Template=rules.For(mains[id]) is { } rule ? new { rule.IsArchived, Revision=rule.PublishedRevision } : null
             }).ToArray(),
             Materials=accessoryMaterials.Values.OrderBy(material=>material.Id).Select(material=>new {material.Id,material.Kind,material.MaterialCode,material.UnitCode}).ToArray(),
             Kits=kitDefinitions.Values.OrderBy(kit=>kit.Id).Select(kit=>new {kit.Id,Revisions=kit.Revisions.Where(revision=>mains.Values.Any(main=>confirmationScope.Contains(main.Id)&&main.EngineeringKitRevisionId==revision.Id))

@@ -136,10 +136,11 @@ public sealed partial class PdmAddin
             ProjectCode = requested.ProjectCode, RootDocumentId = requested.RootDocumentId, RootVersionId = requested.RootVersionId,
             RootRelativePath = localRoot.RelativePath ?? localRoot.FileName, RootRevision = requested.RootRevision, Files = files };
         ControlledOpenBoundary.RequireLoadedSources(application, rootPath, manifest);
+        var missingComponents = acquirePermission ? null : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         using (var search = new ControlledReferenceSearchScope(application, rootPath, manifest))
         {
-            ValidateControlledLoadedSources(loaded.Single(), rootPath, manifest, application);
-            search.VerifyLoadedSources();
+            ValidateControlledLoadedSources(loaded.Single(), rootPath, manifest, application, missingComponents);
+            search.VerifyLoadedSources(missingComponents);
         }
         // A part file contains all its configurations. Its assembly occurrence can
         // use another one; never rewrite that owner's occurrence configuration.
@@ -164,11 +165,17 @@ public sealed partial class PdmAddin
         {
             if (OpenOrActivateDocumentOnSolidWorksThread(rootPath, ToSolidWorksDocumentType(kind), localRoot.Configuration) == null)
                 throw new IOException("尚未激活当前PLM工作副本，原窗口和文件已保留：" + localRoot.FileName);
-            search.VerifyLoadedSources();
+            if (missingComponents?.Count > 0)
+            {
+                missingComponents.Clear();
+                ValidateControlledLoadedSources(loaded.Single(), rootPath, manifest, application, missingComponents);
+            }
+            search.VerifyLoadedSources(missingComponents);
         }
         VerifyCommittedMemory();
         RememberExplicitProjectPath(rootPath, requested.ProjectId);
         ScheduleTreeRefresh();
+        ReportMissingComponentsOnOpen(missingComponents);
         LogOperation("模型复用当前受控工作区 path=" + rootPath + " context=" + context.Key + " files=" + files.Count
             + " committedMemory=" + committedMemoryFiles.Count + " closed=0 downloaded=0 acquire=" + acquirePermission);
         return true;

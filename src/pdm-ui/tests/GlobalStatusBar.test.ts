@@ -129,6 +129,15 @@ describe('global operation status', () => {
     expect(globalStatus.value).toBeUndefined()
   })
 
+  it('keeps completed dialog operations visible on the page while the closing dialog still exists', async () => {
+    const wrapper=header()
+    const overlay=document.createElement('div');overlay.className='el-overlay';overlay.innerHTML='<section class="el-dialog"><div class="el-dialog__body">正在关闭的套件窗口</div></section>';document.body.append(overlay)
+    ElMessage.success('已确认添加套件',{scope:'page'});await flushPromises()
+    expect(wrapper.get('.pdm-global-status').text()).toContain('已确认添加套件')
+    expect(overlay.querySelector('.pdm-dialog-status')).toBeNull()
+    overlay.remove();await flushPromises()
+    expect(wrapper.get('.pdm-global-status').text()).toContain('已确认添加套件')
+  })
   it('shows operation feedback inside the topmost open dialog instead of the page header', async () => {
     const wrapper = header()
     const dialog = document.createElement('section')
@@ -173,5 +182,33 @@ describe('global operation status', () => {
     expect(dialog.textContent).not.toContain('上一次人员分配已保存')
     ElMessage.warning('本次请选择人员')
     expect(dialog.querySelector('.pdm-dialog-status')?.textContent).toContain('本次请选择人员')
+  })
+})
+
+
+describe('消息抽屉内联反馈', () => {
+  it('在已读筛选右侧显示并替换消息，关闭抽屉时清除', async () => {
+    const overlay = document.createElement('div')
+    overlay.className = 'el-overlay'
+    overlay.innerHTML = '<section class="el-drawer pdm-message-drawer"><header>消息</header><div class="el-drawer__body"><div class="pdm-task-toolbar"><label>显示已读记录</label><div data-pdm-dialog-status-host></div></div></div></section>'
+    document.body.append(overlay)
+    const dialog = overlay.querySelector<HTMLElement>('.el-drawer')!
+    const host = dialog.querySelector('[data-pdm-dialog-status-host]')!
+    // 收放动效的视觉副本不能截获真实操作结果。
+    const ghost = document.createElement('div')
+    ghost.setAttribute('data-pdm-genie-layer', '')
+    ghost.innerHTML = '<div class="el-overlay"><section class="el-drawer pdm-message-drawer" data-pdm-genie-snapshot><div data-pdm-dialog-status-host></div></section></div>'
+    document.body.append(ghost)
+    const old = ElMessage.success('待办任务已刷新')
+    expect(ghost.querySelector('.pdm-dialog-status')).toBeNull()
+    expect(dialog.querySelector(':scope > .pdm-dialog-status')).toBeNull()
+    expect(host.querySelector('.is-inline')?.textContent).toContain('待办任务已刷新')
+    ElMessage.error('刷新失败，请稍后重试')
+    old.close()
+    expect(host.querySelectorAll('.pdm-dialog-status')).toHaveLength(1)
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('刷新失败')
+    overlay.style.display = 'none'
+    await flushPromises()
+    expect(host.children).toHaveLength(0)
   })
 })

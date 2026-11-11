@@ -15,7 +15,7 @@ public sealed class ProjectNameplateServiceTests
         var repository = new InMemoryPdmRepository(TimeProvider.System);
         var project = Assert.Single(await repository.ListProjectsAsync(default));
         await repository.CreateUserAsync(new(Guid.NewGuid(), "nameplate-editor", "铭牌维护", "unused", role, true, RoleCode: roleCode), default);
-        await repository.SetRolePermissionsAsync(roleCode, [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit], default);
+        await repository.SetRolePermissionsAsync(roleCode, [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit, "project.nameplate.execution.edit"], default);
         await repository.SetProjectPhaseOwnersAsync(project.Id, new Dictionary<string, string> { ["ElectricalHardware"] = "nameplate-editor" }, "admin", default);
         var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(repository), TimeProvider.System);
         Assert.True((await service.GetAsync(project.Id, "nameplate-editor", role, default)).CanEdit);
@@ -28,6 +28,7 @@ public sealed class ProjectNameplateServiceTests
     public async Task NameplatePermissionRequiresTheAssignedProjectPosition()
     {
         var repository = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(repository, ("engineer", UserRole.Engineer), ("lead", UserRole.Engineer));
         var root = await repository.CreateNumberedProjectAsync(new(Guid.Parse("70000000-0000-0000-0000-000000000001"), "C", 2,
             Guid.Parse("c0046500-0000-0000-0000-000000000001"), "铭牌权限", null, new(2026, 10, 2), 1, "admin", "D:/test", "D:/release"), default);
         var first = await repository.CreateSubprojectAsync(new(root.Id, "设备一", null, 1), default);
@@ -36,7 +37,8 @@ public sealed class ProjectNameplateServiceTests
         await repository.SetMainProjectStaffingAsync(root.Id, new("manager", [], ["lead"]), "admin", default);
         await repository.SetChildProjectDesignersAsync(first.Id, ["engineer", "electrical"], "admin", default);
         await repository.CreateUserAsync(new(Guid.NewGuid(), "electrical", "电气工程师", "unused", UserRole.Engineer, true, RoleCode: "ElectricalEngineer"), default);
-        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit], default);
+        await repository.SetRolePermissionsAsync("Engineer", [PermissionCodes.ProjectContentView, PermissionCodes.ProjectNameplateEdit, "project.nameplate.execution.edit"], default);
+        await PermissionTestUsers.Scope(repository, "Engineer", "project.nameplate.execution.edit", "current-designer");
         await repository.SetRolePermissionsAsync("ElectricalEngineer", [PermissionCodes.ProjectContentView], default);
         var service = new ProjectNameplateService(repository, new InMemoryProjectNameplateRepository(repository), TimeProvider.System);
         Assert.True((await service.GetAsync(first.Id, "engineer", UserRole.Engineer, default)).CanEdit);

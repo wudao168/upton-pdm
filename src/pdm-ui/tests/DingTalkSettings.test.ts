@@ -30,7 +30,7 @@ it('keeps saved application secrets blank and sends a versioned update', async (
   wrapper = mount(DingTalkSettings, { props: { token: 'token' }, global: { plugins: [ElementPlus] } }); await flushPromises()
   expect(wrapper.find<HTMLInputElement>('input[type="password"]').element.value).toBe('')
   expect(wrapper.text()).toContain('统一应用首页地址')
-  expect(wrapper.text()).toContain('通知中显示负责人名称')
+  expect(wrapper.find('.pdm-counter-note').exists()).toBe(false)
   expect(wrapper.text()).not.toContain('qyapi_addresslist_search')
   expect(wrapper.text()).not.toContain('qyapi_chat_read')
   expect(wrapper.text()).not.toContain('酷应用')

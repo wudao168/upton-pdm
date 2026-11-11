@@ -190,7 +190,7 @@ internal sealed class PluginSettingsDialog : Form
         updateLayout.Controls.Add(new Label { Text = "下载进度", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 4);
         updateLayout.Controls.Add(updateProgress, 1, 4);
         updateLayout.SetColumnSpan(updateProgress, 2);
-        automaticUpdates.Text = "自动检查并下载更新（安装需手动确认）";
+        automaticUpdates.Text = "自动下载更新，退出全部 SolidWorks 窗口后安装";
         automaticUpdates.Checked = initialSettings.AutomaticUpdatesEnabled;
         automaticUpdates.Dock = DockStyle.Fill;
         updateLayout.Controls.Add(automaticUpdates, 0, 5);

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
 import SearchField from './SearchField.vue'
 import { computed, ref, watch } from 'vue'
 import { readProjectOpl } from '../api'
@@ -29,7 +30,7 @@ const filtered = computed(() => candidates.value.filter(({ issue }) => {
     && (selected || !state.value || state.value === '未完成' && issue.status !== '已完成' || state.value === issue.status)
 }))
 const missing = computed(() => props.modelValue.filter(id => !candidates.value.some(row => row.issue.id === id)))
-const person = (username: string) => view.value.people.find(item => item.username === username)?.displayName || username || '待分派'
+const person = (username: string) => view.value.people.find(item => item.username === username)?.displayName || (username ? '姓名待补充' : '待分派')
 const project = (id?: string | null) => view.value.subprojects?.find(item => item.id === id)?.code || (id ? '关联子项目' : '项目整体')
 function toggle(id: string, checked: boolean) {
   emit('update:modelValue', checked ? [...new Set([...props.modelValue, id])] : props.modelValue.filter(item => item !== id))
@@ -49,7 +50,7 @@ function toggle(id: string, checked: boolean) {
     <div v-else class="release-opl-rows">
       <label v-for="{ issue } in filtered" :key="issue.id" :title="issue.description">
         <input v-if="!readonly" type="checkbox" :checked="modelValue.includes(issue.id)" :disabled="disabled" :aria-label="`关联OPL ${issue.number}`" @change="toggle(issue.id, ($event.target as HTMLInputElement).checked)">
-        <strong>#{{ issue.number }}</strong><span class="release-opl-description">{{ issue.description }}</span><small>{{ project(issue.relatedProjectId) }} · {{ person(issue.owner) }} · {{ issue.status }}</small>
+        <strong>#{{ issue.number }}</strong><span class="release-opl-description">{{ issue.description }}</span><small>{{ project(issue.relatedProjectId) }} · <PersonName :name="person(issue.owner)" /> · {{ issue.status }}</small>
       </label>
       <p v-if="!filtered.length && !missing.length">暂无符合条件的OPL问题。</p>
       <label v-for="id in missing" :key="id"><input v-if="!readonly" type="checkbox" checked :disabled="disabled" aria-label="移除不可用OPL关联" @change="toggle(id, false)"><span>已关联问题当前不可用，请刷新核对。</span></label>

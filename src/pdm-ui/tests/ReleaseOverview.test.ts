@@ -1,15 +1,13 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ref } from 'vue'
+import { projectCenterAccessKey, projectCenterSchema } from '../src/projectCenterAccess'
 import ReleaseOverview from '../src/components/ReleaseOverview.vue'
 import { releaseFailureMessage } from '../src/releaseFailureMessage'
 import type { BomVersion, ManufacturingBomBaseline, ReleasePackageSummary, ReleasePreviewItemResult } from '../src/types'
 
 const api = vi.hoisted(() => ({
   listReleasePreviewItems: vi.fn(),
-  retryReleasePreviewItem: vi.fn(),
-  retryReleasePreviewItems: vi.fn(),
-  downloadReleasePreviewArchive: vi.fn(),
-  readReleasePreviewFile: vi.fn(),
 }))
 vi.mock('../src/api', () => api)
 
@@ -21,42 +19,16 @@ function previewItem(overrides: Partial<ReleasePreviewItemResult> = {}): Release
   }
 }
 
+function publishedRelease(overrides: Partial<ReleasePackageSummary> = {}): ReleasePackageSummary {
+  return {
+    id: 'release-published', number: 'RP-N-002', state: '已发布', scope: 'NonStandardWithDrawing', workflowVersion: 1,
+    steps: [], selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: true,
+    standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], previewState: 'Succeeded', ...overrides,
+  }
+}
+
 describe('ReleaseOverview', () => {
   beforeEach(() => { vi.clearAllMocks() })
-
-  it.each(['Pdf', 'Step'] as const)('预览%s只读取当前发布包文件，并选择对应查看器', async format => {
-    const item = previewItem({ format })
-    api.listReleasePreviewItems.mockResolvedValue([item])
-    api.readReleasePreviewFile.mockResolvedValue({ arrayBuffer: async () => new ArrayBuffer(8) })
-    const create = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:release-preview')
-    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
-    const wrapper = mount(ReleaseOverview, { props: { releasePackages: [], versions: [], baselines: [], projectId: 'project-1', token: 'token' }, global: { stubs: { PdfDrawingViewer: true, StepPreviewViewer: true } } })
-    await flushPromises()
-    await wrapper.get('button[aria-label^="预览"]').trigger('click')
-    await flushPromises()
-    expect(api.readReleasePreviewFile).toHaveBeenCalledWith('project-1', item, 'token')
-    expect(wrapper.find('pdf-drawing-viewer-stub').exists()).toBe(format === 'Pdf')
-    expect(wrapper.find('step-preview-viewer-stub').exists()).toBe(format === 'Step')
-    wrapper.unmount()
-    if (format === 'Pdf') expect(revoke).toHaveBeenCalledWith('blob:release-preview')
-    create.mockRestore(); revoke.mockRestore()
-  })
-
-  it('关闭预览后忽略未完成请求，不再创建失效文件地址', async () => {
-    api.listReleasePreviewItems.mockResolvedValue([previewItem({ format: 'Pdf' })])
-    let finish!: (blob: Blob) => void
-    api.readReleasePreviewFile.mockReturnValue(new Promise(resolve => { finish = resolve }))
-    const create = vi.spyOn(URL, 'createObjectURL')
-    const wrapper = mount(ReleaseOverview, { props: { releasePackages: [], versions: [], baselines: [], projectId: 'project-1', token: 'token' }, global: { stubs: { PdfDrawingViewer: true, StepPreviewViewer: true } } })
-    await flushPromises()
-    await wrapper.get('button[aria-label^="预览"]').trigger('click')
-    await wrapper.setProps({ projectId: 'project-2' })
-    finish(new Blob())
-    await flushPromises()
-    expect(create).not.toHaveBeenCalled()
-    expect(wrapper.find('pdf-drawing-viewer-stub').exists()).toBe(false)
-    wrapper.unmount(); create.mockRestore()
-  })
 
   it('转图完成但实际投放失败时发出项目异常，明细恢复后清除', async () => {
     api.listReleasePreviewItems.mockResolvedValueOnce([previewItem({ succeeded: false, error: '生产目录尚未投放' })])
@@ -113,22 +85,20 @@ describe('ReleaseOverview', () => {
     wrapper.unmount()
   })
 
-  it('状态变化和手动刷新保留现有表格及勾选，不再切换为整块加载提示', async () => {
+  it('状态变化和手动刷新保留现有汇总表，不切换为整块加载提示', async () => {
     const release = { id: 'release-published', number: 'RP-N-002', state: '已发布', scope: 'NonStandardWithDrawing', previewState: 'Running', steps: [], standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [] } as unknown as ReleasePackageSummary
     api.listReleasePreviewItems.mockResolvedValue([previewItem()])
     const wrapper = mount(ReleaseOverview, { props: { releasePackages: [release], versions: [], baselines: [], projectId: 'project-1', token: 'token' } })
     await flushPromises()
     const table = wrapper.get('.pdm-release-preview-table').element
-    await wrapper.get('input[aria-label="选择 7080113.00-01"]').setValue(true)
     let complete!: (items: ReleasePreviewItemResult[]) => void
     api.listReleasePreviewItems.mockReturnValueOnce(new Promise(resolve => { complete = resolve }))
     await wrapper.setProps({ releasePackages: [{ ...release, previewState: 'Succeeded' }] })
     expect(api.listReleasePreviewItems).toHaveBeenCalledTimes(2)
     expect(wrapper.get('.pdm-release-preview-table').element).toBe(table)
-    expect(wrapper.text()).not.toContain('正在读取图纸转出明细…')
+    expect(wrapper.text()).not.toContain('正在读取图纸转出状态…')
     complete([previewItem()])
     await flushPromises()
-    expect(wrapper.get<HTMLInputElement>('input[aria-label="选择 7080113.00-01"]').element.checked).toBe(true)
     await wrapper.findAll('button').find(button => button.text() === '刷新')!.trigger('click')
     await flushPromises()
     expect(api.listReleasePreviewItems).toHaveBeenCalledTimes(3)
@@ -139,14 +109,13 @@ describe('ReleaseOverview', () => {
   it('切换项目后丢弃上一项目晚返回的明细', async () => {
     let completePrevious!: (items: ReleasePreviewItemResult[]) => void
     api.listReleasePreviewItems.mockReturnValueOnce(new Promise(resolve => { completePrevious = resolve }))
-    const wrapper = mount(ReleaseOverview, { props: { releasePackages: [], versions: [], baselines: [], projectId: 'previous', token: 'token' } })
-    api.listReleasePreviewItems.mockResolvedValueOnce([previewItem({ drawingNumber: '当前项目图纸' })])
+    const wrapper = mount(ReleaseOverview, { props: { releasePackages: [publishedRelease()], versions: [], baselines: [], projectId: 'previous', token: 'token' } })
+    api.listReleasePreviewItems.mockResolvedValueOnce([previewItem()])
     await wrapper.setProps({ projectId: 'current' })
     await flushPromises()
-    completePrevious([previewItem({ drawingNumber: '上一项目图纸' })])
+    completePrevious([previewItem({ succeeded: false }), previewItem({ documentId: 'doc-2' })])
     await flushPromises()
-    expect(wrapper.get('.pdm-release-preview-table').text()).toContain('当前项目图纸')
-    expect(wrapper.text()).not.toContain('上一项目图纸')
+    expect(wrapper.findAll('.pdm-release-preview-table tbody td').map(cell => cell.text())).toEqual(['RP-N-002', '1', '1 / 1（100%）', '已完成', '—', '—'])
     wrapper.unmount()
   })
 
@@ -155,22 +124,20 @@ describe('ReleaseOverview', () => {
     expect(releaseFailureMessage('发布失败：MySqlException: connection timed out')).toBe('操作未完成，请重试；如仍失败，请联系管理员。')
   })
 
-  it('does not count running or queued artifacts as failures and prevents duplicate retries', async () => {
-    const release: ReleasePackageSummary = { id: 'release-published', number: 'RP-N-002', state: '已发布', scope: 'NonStandardWithDrawing',
-      workflowVersion: 1, steps: [], selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: false,
-      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], previewState: 'Running' }
+  it('区分转换中、排队中和失败', async () => {
+    const release = publishedRelease({ previewState: 'Running' })
     api.listReleasePreviewItems.mockResolvedValue([previewItem({ succeeded: false, fileLength: 0, error: '正在转换…' })])
     const wrapper = mount(ReleaseOverview, { props: { releasePackages: [release], versions: [], baselines: [], projectId: 'p', token: 't', canManageRelease: true } })
     await flushPromises()
-    expect(wrapper.text()).toContain('转换中 1、排队中 0、失败 0')
     expect(wrapper.get('.pdm-release-preview-pending').text()).toBe('转换中')
-    expect(wrapper.findAll('button').find(button => button.text() === '重试')!.element.disabled).toBe(true)
+    expect(wrapper.get('progress').attributes('value')).toBe('0')
     await wrapper.setProps({ releasePackages: [{ ...release, previewState: 'Pending' }] })
     await flushPromises()
-    expect(wrapper.text()).toContain('转换中 0、排队中 1、失败 0')
+    expect(wrapper.get('.pdm-release-preview-pending').text()).toBe('排队中')
     await wrapper.setProps({ releasePackages: [{ ...release, previewState: 'Failed' }] })
     await flushPromises()
-    expect(wrapper.text()).toContain('转换中 0、排队中 0、失败 1')
+    expect(wrapper.get('.pdm-release-preview-failed').text()).toBe('有失败项')
+    expect(wrapper.get('.pdm-release-preview-list header small').text()).toContain('失败 1')
     wrapper.unmount()
   })
 
@@ -248,89 +215,47 @@ describe('ReleaseOverview', () => {
     expect(wrapper.emitted('open')).toEqual([['release-1']])
   })
 
-  it('lists conversion details with per-item retry and packaged download', async () => {
-    const published: ReleasePackageSummary = {
-      id: 'release-published', number: 'RP-N-002', state: '已发布', steps: [], scope: 'NonStandardWithDrawing', workflowVersion: 1,
-      selectedBomItemIds: [], createsManufacturingBaseline: true, locksDocuments: true,
-      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], createdAt: '2026-09-20T08:00:00Z',
-      previewState: 'Failed', previewError: '发布包尚未进入服务器转换状态。', previewAttempts: 5,
-    }
-    api.listReleasePreviewItems.mockResolvedValue([
-      previewItem(),
-      previewItem({ documentId: 'doc-2', drawingNumber: '7080113.00-02', fileName: '7080113.00-02 工程图.SLDDRW', kind: 'Drawing', format: 'Pdf', succeeded: false, fileLength: 0, error: '转图服务器返回错误(500)：SolidWorks转换进程失败。' }),
-    ])
-    api.retryReleasePreviewItem.mockResolvedValue({ ok: true, item: previewItem(), message: '已重新转出该图档。' })
-    api.downloadReleasePreviewArchive.mockResolvedValue(undefined)
+  it('为转出不全的发布包显示原因并调用已有的包级重试', async () => {
+    const release = publishedRelease()
+    api.listReleasePreviewItems.mockResolvedValue([previewItem(), previewItem({ documentId: 'doc-2', succeeded: false, error: '尚未生成预览。' })])
+    const permissions = ref([projectCenterSchema, 'project.content.write'])
     const wrapper = mount(ReleaseOverview, {
-      props: { releasePackages: [published], versions: [], baselines: [], pending: false, projectId: 'project-1', token: 'token', canManageRelease: true },
+      props: { releasePackages: [release], versions: [], baselines: [], projectId: 'p', token: 't', canManageRelease: true },
+      global: { provide: { [projectCenterAccessKey as symbol]: permissions } },
     })
     await flushPromises()
-
-    expect(api.listReleasePreviewItems).toHaveBeenCalledWith('project-1', undefined, 'token')
-    const table = wrapper.get('.pdm-release-preview-table')
-    expect(table.text()).toContain('7080113.00-01')
-    expect(table.text()).toContain('7080113.00-02')
-    expect(table.text()).toContain('STEP')
-    expect(table.text()).toContain('PDF')
-    expect(table.text()).toContain('成功')
-    expect(table.text()).toContain('失败')
-    expect(table.text()).toContain('转图服务器返回错误(500)')
-    expect(wrapper.get('.pdm-release-preview-pager').text()).toContain('单页最多 50 条')
-    expect(wrapper.get('.pdm-release-row-tail em').text()).toBe('转图失败')
-
-    // “选中失败”一键勾选当前筛选下的全部失败项
-    await wrapper.findAll('button').find(button => button.text().includes('选中失败'))!.trigger('click')
+    const panel = wrapper.get('.pdm-release-preview-list')
+    expect(panel.findAll('tbody td').map(cell => cell.text())).toEqual(['RP-N-002', '2', '1 / 2（50%）', '转出不全', '尚未生成预览。', '重试'])
+    expect(panel.get('progress').attributes()).toMatchObject({ value: '1', max: '2' })
+    expect(panel.findAll('button').map(button => button.text())).toEqual(['刷新', '重试'])
+    expect(panel.findAll('input, a')).toHaveLength(0)
+    await panel.get('button[aria-label="重试转图 RP-N-002"]').trigger('click')
+    expect(wrapper.emitted('retryPreview')).toEqual([[release.id]])
+    await wrapper.setProps({ pending: true })
+    expect(panel.get('button[aria-label="重试转图 RP-N-002"]').attributes('disabled')).toBeDefined()
+    await wrapper.setProps({ pending: false, canManageRelease: false })
+    expect(panel.find('button[aria-label="重试转图 RP-N-002"]').exists()).toBe(false)
+    await wrapper.setProps({ canManageRelease: true })
+    permissions.value = [projectCenterSchema]
     await flushPromises()
-    expect(wrapper.findAll('button').some(button => button.text().includes('重试选中（1）'))).toBe(true)
-
-    // 失败行可以单项重试（不影响同包其它文件）
-    await table.findAll('button').find(button => button.text() === '重试')!.trigger('click')
-    await flushPromises()
-    expect(api.retryReleasePreviewItem).toHaveBeenCalledWith('release-published', 'doc-2', 'token')
-
-    // 勾选失败项后批量重试：同一发布包的多个图档只发一次请求（引用树只下发一次）
-    api.retryReleasePreviewItems.mockResolvedValue({ ok: true, items: [previewItem({ documentId: 'doc-2', succeeded: true, error: null })], message: '已重新转出 1 项。' })
-    await table.find('input[aria-label="选择 7080113.00-02"]').setValue(true)
-    await flushPromises()
-    await wrapper.findAll('button').find(button => button.text().includes('重试选中'))!.trigger('click')
-    await flushPromises()
-    expect(api.retryReleasePreviewItems).toHaveBeenCalledTimes(1)
-    expect(api.retryReleasePreviewItems).toHaveBeenCalledWith('release-published', ['doc-2'], 'token')
-
-    // 多选后“下载选中”，或“全部下载”，都以压缩包形式下载
-    await table.find('input[aria-label="选择 7080113.00-01"]').setValue(true)
-    await wrapper.findAll('button').find(button => button.text().includes('下载选中'))!.trigger('click')
-    await flushPromises()
-    expect(api.downloadReleasePreviewArchive).toHaveBeenCalledWith('project-1', undefined, ['doc-1'], 'token')
-    await wrapper.findAll('button').find(button => button.text() === '全部下载')!.trigger('click')
-    await flushPromises()
-    expect(api.downloadReleasePreviewArchive).toHaveBeenCalledWith('project-1', undefined, ['doc-1'], 'token')
+    expect(panel.find('button[aria-label="重试转图 RP-N-002"]').exists()).toBe(false)
+    wrapper.unmount()
   })
 
-  it('disables conversion retry without release management permission', async () => {
-    const published: ReleasePackageSummary = {
-      id: 'release-published', number: 'RP-N-002', state: '已发布', steps: [], scope: 'NonStandardWithDrawing', workflowVersion: 1,
-      selectedBomItemIds: [], createsManufacturingBaseline: true, locksDocuments: true,
-      standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [], createdAt: '2026-09-20T08:00:00Z',
-      previewState: 'Failed',
-    }
-    api.listReleasePreviewItems.mockResolvedValue([
-      previewItem({ releasePackageId: 'release-published', documentId: 'doc-failed', drawingNumber: '7080113.00', succeeded: false, fileLength: 0, error: '转图服务器返回错误(500)。' }),
-    ])
-    const wrapper = mount(ReleaseOverview, {
-      props: { releasePackages: [published], versions: [], baselines: [], projectId: 'project-1', token: 'token', canManageRelease: false },
-    })
+  it('只显示运行中或需要重新发布的原因，不提供重复转图入口', async () => {
+    const release = publishedRelease({ previewState: 'Running' })
+    api.listReleasePreviewItems.mockResolvedValue([previewItem({ succeeded: false, error: '正在转换…' })])
+    const wrapper = mount(ReleaseOverview, { props: { releasePackages: [release], versions: [], baselines: [], projectId: 'p', token: 't', canManageRelease: true } })
     await flushPromises()
-
-    // 没有发布管理权限（如审图角色）时不能重试：按钮置灰并说明原因，避免直接报 403。
-    const retryButton = wrapper.get('.pdm-release-preview-table button')
-    expect(retryButton.text()).toBe('重试')
-    expect(retryButton.attributes('disabled')).toBeDefined()
-    expect(retryButton.attributes('title')).toContain('发布管理')
-    const bulkRetry = wrapper.findAll('button').find(button => button.text().includes('重试选中'))!
-    expect(bulkRetry.attributes('disabled')).toBeDefined()
-    // 下载仍然可用（只需要项目内容查看权限）
-    expect(wrapper.findAll('button').some(button => button.text() === '全部下载')).toBe(true)
+    const panel = wrapper.get('.pdm-release-preview-list')
+    expect(panel.get('.pdm-release-preview-problem').text()).toBe('—')
+    expect(panel.find('button[aria-label^="重试转图"]').exists()).toBe(false)
+    api.listReleasePreviewItems.mockResolvedValue([previewItem({ succeeded: false, error: '该图档没有随本次发布转为正式版本，需要重新发布后才能转出。' })])
+    await wrapper.setProps({ releasePackages: [{ ...release, previewState: 'Failed' }] })
+    await flushPromises()
+    expect(panel.get('.pdm-release-preview-problem').text()).toContain('需要重新发布')
+    expect(panel.find('button[aria-label^="重试转图"]').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('filters conversion details by release package', async () => {
@@ -349,21 +274,12 @@ describe('ReleaseOverview', () => {
       props: { releasePackages: [first, second], versions: [], baselines: [], projectId: 'project-1', token: 'token', canManageRelease: true },
     })
     await flushPromises()
-    expect(wrapper.get('.pdm-release-preview-table').text()).toContain('A-001')
-    expect(wrapper.get('.pdm-release-preview-table').text()).toContain('B-001')
-
-    // 所有按钮常驻显示：未选择发布包时“重试整包”置灰，选择后才可点击。
-    const retryPackage = wrapper.findAll('button').find(button => button.text() === '重试整包')!
-    expect(retryPackage.attributes('disabled')).toBeDefined()
-
+    expect(wrapper.findAll('.pdm-release-preview-table tbody td:first-child').map(cell => cell.text())).toEqual(['RP-A', 'RP-B'])
     await wrapper.get('select[aria-label="按发布包筛选"]').setValue('pkg-b')
-    await flushPromises()
-    expect(wrapper.get('.pdm-release-preview-table').text()).not.toContain('A-001')
-    expect(wrapper.get('.pdm-release-preview-table').text()).toContain('B-001')
-    expect(retryPackage.attributes('disabled')).toBeUndefined()
+    expect(wrapper.findAll('.pdm-release-preview-table tbody td:first-child').map(cell => cell.text())).toEqual(['RP-B'])
   })
 
-  it('filters drawing conversions to the latest released BOM package and downloads every package output', async () => {
+  it('filters drawing conversion status to the latest released BOM package', async () => {
     const olderPackage: ReleasePackageSummary = {
       id: 'pkg-old', number: 'RP-N-001', state: '已发布', steps: [], scope: 'NonStandardWithDrawing', workflowVersion: 1,
       selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: true,
@@ -391,7 +307,6 @@ describe('ReleaseOverview', () => {
       previewItem({ releasePackageId: 'pkg-current', releasePackageNumber: 'RP-N-002', documentId: 'doc-current', drawingNumber: '7080113.00-02', fileName: '7080113.00-02.SLDPRT' }),
       previewItem({ releasePackageId: 'pkg-current', releasePackageNumber: 'RP-N-002', documentId: 'doc-unrelated', drawingNumber: '7080113.00-99', fileName: '7080113.00-99.SLDPRT' }),
     ])
-    api.downloadReleasePreviewArchive.mockResolvedValue(undefined)
     const wrapper = mount(ReleaseOverview, {
       props: { releasePackages: [olderPackage, currentPackage], versions, baselines: [], projectId: 'project-1', token: 'token' },
     })
@@ -399,20 +314,14 @@ describe('ReleaseOverview', () => {
 
     const bomFilter = wrapper.get('select[aria-label="按最新BOM筛选"]')
     expect(bomFilter.findAll('option').map(option => option.text())).toEqual(['全部', '非标件BOM · N-B02'])
-    expect(wrapper.get('.pdm-release-preview-table').text()).toContain('7080113.00-01')
-    expect(wrapper.get('.pdm-release-preview-table').text()).toContain('7080113.00-99')
+    expect(wrapper.findAll('.pdm-release-preview-table tbody td:first-child').map(cell => cell.text())).toEqual(['RP-N-002', 'RP-N-001'])
 
     await bomFilter.setValue('ns-v2')
     await flushPromises()
     const filteredTable = wrapper.get('.pdm-release-preview-table')
-    expect(filteredTable.text()).toContain('7080113.00-02')
-    expect(filteredTable.text()).not.toContain('7080113.00-01')
-    expect(filteredTable.text()).toContain('7080113.00-99')
+    expect(filteredTable.findAll('tbody td').map(cell => cell.text())).toEqual(['RP-N-002', '2', '2 / 2（100%）', '已完成', '—', '—'])
     expect(wrapper.get('.pdm-release-preview-list header small').text()).toContain('成功 2')
 
-    await wrapper.findAll('button').find(button => button.text() === '全部下载')!.trigger('click')
-    await flushPromises()
-    expect(api.downloadReleasePreviewArchive).toHaveBeenCalledWith('project-1', 'pkg-current', ['doc-current', 'doc-unrelated'], 'token')
   })
 
   it('matches the latest compatible package when a legacy package has no BOM version link', async () => {
@@ -437,7 +346,7 @@ describe('ReleaseOverview', () => {
     await wrapper.get('select[aria-label="按最新BOM筛选"]').setValue('ns-v3')
     await flushPromises()
 
-    expect(wrapper.get('.pdm-release-preview-table').text()).toContain(drawing.drawingNumber)
+    expect(wrapper.get('.pdm-release-preview-table').text()).toContain('RP-N-003')
     expect(wrapper.get('.pdm-release-preview-list header small').text()).toContain('成功 1')
   })
 
@@ -454,4 +363,34 @@ describe('ReleaseOverview', () => {
     expect(wrapper.get('.pdm-release-package-description>small').text()).toBe('增补/变更 · ECN-N-005')
     expect(wrapper.get('.pdm-release-row-tail em').text()).toBe('转图完成')
   })
+  it('铭牌记录合并到非标卡片，保留全部铭牌历史、最近五项BOM及原详情入口', async () => {
+    const make = (id: string, scope: ReleasePackageSummary['scope'], state: string, createdAt: string) => ({
+      id, number: id, scope, state, createdAt, steps: [], standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [],
+    } as unknown as ReleasePackageSummary)
+    const packages = [
+      make('NP-OLD', 'Nameplate', '已发布', '2026-09-01'),
+      make('NP-ACTIVE', 'Nameplate', '待审核', '2026-11-06'),
+      ...Array.from({ length: 6 }, (_, index) => make('BOM-' + index, 'NonStandardWithDrawing', '已发布', '2026-11-0' + (6 - index))),
+    ]
+    const wrapper = mount(ReleaseOverview, { props: { releasePackages: packages, versions: [], baselines: [] } })
+    const cards = wrapper.findAll('.pdm-release-stream-card')
+    expect(cards).toHaveLength(3)
+    const nonStandard = cards[1]!
+    expect(nonStandard.text()).toContain('非标件BOM + 图纸')
+    expect(nonStandard.text()).toContain('铭牌机加件')
+    expect(nonStandard.text()).toContain('在途 1')
+    expect(nonStandard.text()).toContain('NP-ACTIVE')
+    expect(nonStandard.text()).toContain('NP-OLD')
+    for (let index = 0; index < 5; index++) expect(nonStandard.text()).toContain('BOM-' + index)
+    expect(nonStandard.text()).not.toContain('BOM-5')
+    expect(cards[0]!.text()).not.toContain('NP-OLD')
+    expect(cards[2]!.text()).not.toContain('NP-OLD')
+    await nonStandard.findAll('button').find(button => button.text().includes('NP-OLD'))!.trigger('click')
+    expect(wrapper.emitted('open')).toEqual([['NP-OLD']])
+    await nonStandard.findAll('button').find(button => button.text().includes('NP-ACTIVE'))!.trigger('click')
+    expect(wrapper.emitted('open')).toEqual([['NP-OLD'], ['NP-ACTIVE']])
+    expect(packages[0]!.scope).toBe('Nameplate')
+    wrapper.unmount()
+  })
+
 })

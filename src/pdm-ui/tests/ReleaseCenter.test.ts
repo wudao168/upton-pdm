@@ -448,7 +448,7 @@ describe('ReleaseCenter', () => {
       standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [],
       steps: [
         { id: 'task-1', stage: '机械工程师自检', assignee: 'engineer', decisionBy: 'engineer', status: 'approved', detail: '09/03 14:36', comment: '提交人自检' },
-        { id: 'task-2', stage: '主设审核', assignee: 'designer', decisionBy: 'designer', status: 'rejected', detail: '09/03 16:11', comment: '结构需修改' },
+        { id: 'task-2', stage: '主设计审核', assignee: 'designer', decisionBy: 'designer', status: 'rejected', detail: '09/03 16:11', comment: '结构需修改' },
         { id: 'task-3', stage: '机械主管批准', assignee: 'supervisor', status: 'skipped', detail: '本轮未到达' },
       ],
     }
@@ -499,7 +499,7 @@ describe('ReleaseCenter', () => {
       id: 'release-current', number: 'RP-CURRENT-001', state: '审批中', scope: 'StandardFormal',
       workflowVersion: 1, selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: false,
       standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [],
-      steps: [{ id: 'task-current', stage: '主设审核', assignee: 'designer', status: 'current', detail: '待处理' }],
+      steps: [{ id: 'task-current', stage: '主设计审核', assignee: 'designer', status: 'current', detail: '待处理' }],
     }
     const wrapper = mount(ReleaseCenter, {
       props: {
@@ -875,7 +875,7 @@ describe('ReleaseCenter', () => {
       id: 'release-main-designer', number: 'RP-M-001', state: '审批中', scope: 'StandardFormal',
       workflowVersion: 1, selectedBomItemIds: [], createsManufacturingBaseline: false, locksDocuments: false,
       standardBomSnapshot: [], nonStandardBomSnapshot: [], electricalBomSnapshot: [],
-      steps: [{ id: 'task-main-designer', stage: '主设审核', assignee: 'main-designer', status: 'current', detail: '待处理' }],
+      steps: [{ id: 'task-main-designer', stage: '主设计审核', assignee: 'main-designer', status: 'current', detail: '待处理' }],
     }
     const wrapper = mount(ReleaseCenter, {
       props: {

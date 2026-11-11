@@ -81,8 +81,7 @@
 :root body :is(.pdm-category-sidebar, .stocked-tree, .standard-structure__categories) .el-tree-node.is-current > .el-tree-node__content :is(.standard-library__category-label, .category-label, .standard-structure__category-label),
 :root body .standard-library__category-label.is-selected,
 :root body .production-suppliers__category-filter.is-active,
-:root body .production-workbench__project.selected .production-workbench__project-identity {
-  color: var(--pdm-theme-accent) !important;
+:root body .production-workbench__project.selected .production-workbench__project-identity { color:var(--pdm-text) !important;
   font-weight: 600;
 }
 :root body :is(.pdm-category-sidebar, .stocked-tree, .standard-structure__categories) .el-tree-node.is-current > .el-tree-node__content svg.lucide-tag,

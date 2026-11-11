@@ -7,6 +7,30 @@ namespace Upton.Pdm.Domain.Tests;
 public sealed class ProjectPlanningServiceTests
 {
     [Fact]
+    public async Task Template_roles_resolve_phase_custom_and_commercial_owners_without_manager_fallback()
+    {
+        var contacts = new InMemoryProjectContactInformationRepository();
+        var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
+        await pdm.SetProjectPhaseOwnersAsync(project.Id, new Dictionary<string,string> { ["ElectricalEngineer"] = "electric、backup", ["ElectricalCommissioning"] = "commissioning、backup", ["Acceptance"] = "quality" }, "admin", default);
+        await pdm.SetCustomProjectPositionsAsync(project.Id, new Dictionary<string,IReadOnlyList<string>> { ["service"] = new[] { "service-owner" } }, "admin", default);
+        await contacts.SaveAsync(new(project.Id, SalesPeople: "sales", PresalesPeople: "presales"), 0, default);
+        var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), pdm, TimeProvider.System, contacts);
+        string[] roles = ["ElectricalCommissioning", "ElectricalEngineer", "Acceptance", "Custom:service", "SalesPeople", "PresalesPeople", "MechanicalAssembly"];
+        var tasks = roles.Select((role,index) => new ProjectPlanTemplateTask(Guid.NewGuid(), role, "design", 1m, [], role, 1, false, true, (index+1)*10) { FixedDurationDays = 1 }).ToArray();
+        ProjectPlanStageDefinition[] stages = [new("design", "设计") { ParticipatesInDelivery = true, DurationRatio = 1, ProgressRatio = 1 }];
+        var template = await service.SaveTemplateAsync(null, new("角色验证", null, true, tasks, null, stages), "admin", UserRole.Administrator, default);
+        var plan = await service.GenerateAsync(project.Id, new(template.Id, new DateOnly(2026,11,7), 30, false, null), "admin", UserRole.Administrator, default);
+        Assert.Equal("electric", plan.Tasks.Single(t => t.Name == "ElectricalEngineer").Assignee);
+        Assert.Equal("commissioning", plan.Tasks.Single(t => t.Name == "ElectricalCommissioning").Assignee);
+        Assert.Equal("quality", plan.Tasks.Single(t => t.Name == "Acceptance").Assignee);
+        Assert.Equal("service-owner", plan.Tasks.Single(t => t.Name == "Custom:service").Assignee);
+        Assert.Equal("sales", plan.Tasks.Single(t => t.Name == "SalesPeople").Assignee);
+        Assert.Equal("presales", plan.Tasks.Single(t => t.Name == "PresalesPeople").Assignee);
+        Assert.Null(plan.Tasks.Single(t => t.Name == "MechanicalAssembly").Assignee);
+    }
+
+    [Fact]
     public async Task Project_manager_can_create_personal_template_but_cannot_modify_system_template()
     {
         var pdm = new InMemoryPdmRepository(TimeProvider.System);
@@ -221,6 +245,7 @@ public sealed class ProjectPlanningServiceTests
     {
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 9, 10, 1, 0, 0, TimeSpan.Zero));
         var pdm = new InMemoryPdmRepository(clock);
+        await PermissionTestUsers.Ensure(pdm, ("admin", UserRole.Administrator));
         var plans = new InMemoryProjectPlanningRepository();
         var service = new ProjectPlanningService(plans, pdm, clock);
         var project = await AssignProjectManager(pdm, Assert.Single(await pdm.ListProjectsAsync(default)));
@@ -241,6 +266,8 @@ public sealed class ProjectPlanningServiceTests
         var stageOwners = requested.Tasks.Where(task => !string.IsNullOrWhiteSpace(task.Assignee))
             .Select(task => task.Assignee!.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         Assert.NotEmpty(stageOwners);
+        await PermissionTestUsers.Ensure(pdm, stageOwners.Select(name => (name, UserRole.Engineer)).ToArray());
+        await PermissionTestUsers.Grant(pdm, "Administrator", AuthorizationActions.BusinessNotifications);
         var draftTasks = requested.Tasks.Select(task => task with
         {
             PlannedStart = task.PlannedStart.AddDays(1), PlannedFinish = task.PlannedFinish.AddDays(1)
@@ -1199,6 +1226,7 @@ public sealed class ProjectPlanningServiceTests
     public async Task SystemTemplateEditingUsesIndependentPermission()
     {
         var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(pdm, ("admin", UserRole.Administrator), ("actor", UserRole.Engineer));
         var service = new ProjectPlanningService(new InMemoryProjectPlanningRepository(), pdm, TimeProvider.System);
         var shared = Assert.Single(await service.ListTemplatesAsync(false, "admin", UserRole.Administrator, default));
         var command = new SaveProjectPlanTemplateCommand("设置页模板", null, true, shared.Tasks, null, shared.Stages);

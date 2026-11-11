@@ -29,9 +29,10 @@
   :root body :is(.pdm-toolbar, .standard-library__toolbar, .stocked-toolbar,
       .material-relation-directory__toolbar, .engineering-kit-library__toolbar,
       .production-suppliers__filters, .production-workbench__trace-filters,
-      .production-drawings__toolbar, .pc-toolbar, .wh-controls) {
+      .production-drawings__toolbar, .pc-toolbar, .wh-controls,
+      .material-code-workflow-toolbar, .pdm-template-toolbar) {
     --el-component-size: var(--pdm-control-height);
-    align-items: center;
+    align-items: center !important;
     gap: var(--pdm-control-gap) !important;
   }
   :root body :is(.pdm-toolbar, .standard-library__toolbar, .stocked-toolbar,
@@ -95,13 +96,13 @@
   }
   :root body .material-table .el-table__body .cell { line-height: 24px; }
   :root body .pdm-bom-table { min-width: 1200px !important; }
-  :root body .production-workbench__lines .production-workbench__table-wrap > table { min-width: 1000px !important; }
   :root body :is(.project-information, .pdm-plan-page, .production-workbench__secondary,
       .production-workbench__detail, .production-drawings__projects, .production-drawings__main,
       .production-suppliers__categories, .production-suppliers__main, .material-relation-directory,
       .production-workbench__tree, .engineering-kit-library, .bom-header-directory,
       .material-code-approval-workflow, .material-numbering-settings-scroll,
-      .material-master-content, .standard-library__main, .stocked-main,
+      .material-master-content, .standard-library__main, .standard-library__content, .stocked-main, .stocked-content,
+      .pdm-category-sidebar,
       .pdm-manager-panel, .wr-projects, .wr-identity, .wr-status,
       .pdm-project-context, .pdm-project-sidebar, .wh-day-editor) {
     padding-inline: var(--pdm-content-inset) !important;

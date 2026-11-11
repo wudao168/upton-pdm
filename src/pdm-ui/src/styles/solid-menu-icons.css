@@ -2,6 +2,6 @@
 :root body svg.pdm-solid-menu-icon { stroke:none !important; }
 :root body svg.pdm-menu-icon[data-pdm-leading-icon] { display:inline-block !important; }
 :root body svg.pdm-solid-menu-icon > path { fill:currentColor !important; stroke:none !important; }
-:root body .pdm-sidebar .pdm-nav-item.is-active > svg.pdm-solid-menu-icon { color:var(--pdm-theme-accent) !important; }
+:root body .pdm-sidebar .pdm-nav-item.is-active > svg.pdm-solid-menu-icon { color:var(--pdm-nav-icon-color, var(--pdm-theme-accent)) !important; }
 
 :root body svg.pdm-outline-menu-icon { fill:none !important; }

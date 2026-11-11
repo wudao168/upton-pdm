@@ -1,4 +1,5 @@
 export interface BudgetLine {
+  departmentId?: string | null
   category: string
   budgetAmount: number | null
   actualAmount: number | null
@@ -26,6 +27,8 @@ export interface BudgetOrder {
 export interface SettlementLine { content: string; unit: string | null; quantity: number | null; unitPrice: number | null; note: string | null }
 export interface BudgetNote { id: string; category: string; content: string; createdBy: string | null; createdAt: string | null }
 export interface ProjectBudget {
+  canViewBudget?: boolean; canViewActual?: boolean; isDepartmentScoped?: boolean
+  departments?: Array<{ id: string; name: string }>
   projectId: string; rows: BudgetRow[]; orders: BudgetOrder[]
   budgetAmount: number | null; actualAmount: number | null
   estimatedAmount: number | null; overrunAmount: number | null
@@ -63,13 +66,13 @@ export function calculateBudgetRow(input: BudgetLine, orderAmount: number | null
 }
 
 export interface AssessmentItem { id: string; name: string; model: string | null; brand: string | null; note: string | null; quantity: number | null; unitPrice: number | null; laborCategory?: string | null }
-export interface AssessmentGroup { id: string; name: string; category: string; laborCategory: string | null; items: AssessmentItem[] }
+export interface AssessmentGroup { id: string; name: string; category: string; laborCategory: string | null; items: AssessmentItem[]; departmentId?: string | null }
 export interface AssessmentSheet { projectId: string; projectCode: string; projectName: string; designLead: string | null; canEdit: boolean; rowVersion: number; groups: AssessmentGroup[]; total: number | null; updatedBy: string | null; updatedAt: string | null; notes?: BudgetNote[] }
-export interface AssessmentDirectory { sheets: AssessmentSheet[]; amounts: Record<string, number | null>; ratesProjectId?: string; ratesRowVersion?: number; canEditLaborRates?: boolean; laborRates?: Record<string, number | null> }
+export interface AssessmentDirectory { sheets: AssessmentSheet[]; amounts: Record<string, number | null>; ratesProjectId?: string; ratesRowVersion?: number; canEditLaborRates?: boolean; laborRates?: Record<string, number | null>; departments?: Array<{ id: string; name: string }> }
 export const assessmentItemTotal = (item: AssessmentItem) => item.quantity == null || item.unitPrice == null ? null : Math.round((item.quantity * item.unitPrice + Number.EPSILON) * 100) / 100
 export const assessmentSum = (values: Array<number | null>) => values.some(value => value != null) ? values.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null
 export function uppercaseMoney(amount: number | null): string {
-  if (amount == null) return '—'
+  if (amount == null || !Number.isFinite(amount) || amount < 0) return '—'
   const cents = Math.round(amount * 100)
   if (cents === 0) return '人民币零元整'
   const digits = '零壹贰叁肆伍陆柒捌玖'

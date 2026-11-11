@@ -137,7 +137,11 @@ public sealed partial class PdmAddin
             if (node.HistoricalRepair != null || node.Role == CadReferenceRole.ExternalFileDependency
                 || node.Status == CadReferenceStatus.Virtual || node.IsStoredImport
                 || node.Kind != CadDocumentKind.Part && node.Kind != CadDocumentKind.Assembly && node.Kind != CadDocumentKind.Drawing) continue;
-            var model = reads.FindLoaded(node.FullPath);
+            // Lightweight/context-loaded documents can be returned by the exact-path
+            // lookup before they appear in GetDocuments. They still own unsaved edits.
+            var model = reads.FindLoaded(node.FullPath) ?? application.GetOpenDocumentByName(node.FullPath) as IModelDoc2;
+            if (model != null && !PathsEqual(model.GetPathName(), node.FullPath))
+                throw new InvalidOperationException("当前状态副本的图档路径不匹配，原窗口和修改已保留：" + node.FileName);
             if (model == null) { ForgetArchiveMemoryCopy(node.FullPath); continue; }
             if (node.IsRenamePendingSave)
                 throw new InvalidOperationException("图档改名尚未保存，不能在存档时自动改写原文件，请先完成改名：" + node.FileName);
@@ -241,7 +245,13 @@ public sealed partial class PdmAddin
     {
         var copy = MemoryCopy(node);
         if (copy != null && !copy.MatchesMemory())
-            throw new InvalidOperationException("图档内存内容在生成副本后发生变化，已停止本次提交，请重新存档：" + node.FileName);
+            throw new ArchiveMemoryChangedException(node.FileName);
+    }
+
+    private sealed class ArchiveMemoryChangedException : InvalidOperationException
+    {
+        internal ArchiveMemoryChangedException(string fileName)
+            : base("图档内存内容在生成副本后发生变化，请结束当前编辑后重新存档：" + fileName) { }
     }
 
     private IReadOnlyDictionary<string, string> ApplyCommittedMemoryState(IEnumerable<CadTreeNode> nodes, IReadOnlyDictionary<string, string> localHashes)

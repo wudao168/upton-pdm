@@ -1,0 +1,96 @@
+/* Board UI 参考：柔和底板、独立日期卡片、底部事项色条。沿用业务状态与主题。 */
+@layer pdm-button-sizing {
+  :root body .project-calendar { display:flex !important; flex-direction:column !important; overflow:auto !important; gap:14px !important; padding:10px 10px 16px !important; }
+  :root body .project-calendar .pc-toolbar { order:0 !important; padding:0 !important; gap:var(--pdm-control-gap) !important; }
+  :root body .project-calendar .pc-months { order:1 !important; display:grid !important; grid-template-columns:repeat(2,minmax(0,1fr)) !important; gap:16px !important; overflow:visible !important; min-height:auto !important; }
+  :root body .project-calendar .pc-months.single { grid-template-columns:minmax(0,1fr) !important; }
+  :root body .project-calendar .pc-month { border:0 !important; border-radius:24px !important; background:var(--pc-board) !important; padding:16px !important; overflow:hidden !important; display:grid !important; grid-template-rows:44px 34px auto !important; }
+  :root body .project-calendar .pc-month h2 { padding:2px 4px 14px !important; border:0 !important; font-size:20px !important; font-weight:600 !important; }
+  :root body .project-calendar .pc-weekdays { gap:5px !important; }
+  :root body .project-calendar .pc-weekdays span { padding:6px 0 12px !important; border:0 !important; color:var(--pdm-muted) !important; font-size:13px !important; }
+  :root body .project-calendar .pc-grid { gap:5px !important; grid-template-rows:repeat(6,116px) !important; }
+  :root body .project-calendar .pc-grid .pc-day { min-height:116px !important; padding:6px !important; gap:3px !important; border:0 !important; border-radius:16px !important; background:var(--pc-day) !important; box-shadow:0 1px 1px var(--pdm-shadow) !important; color:var(--pdm-text) !important; }
+  :root body .project-calendar .pc-grid .pc-day.outside { background:var(--pc-outside) !important; color:var(--pdm-muted) !important; }
+  :root body .project-calendar .pc-grid .pc-day.selected { box-shadow:inset 0 0 0 2px var(--pdm-theme-accent) !important; }
+  :root body .project-calendar .pc-grid .pc-day:hover { box-shadow:inset 0 0 0 1px var(--pdm-border) !important; }
+  :root body .project-calendar .pc-grid .pc-day.selected:hover { box-shadow:inset 0 0 0 2px var(--pdm-theme-accent) !important; }
+  :root body .project-calendar .pc-day:focus-visible { outline:2px solid var(--pdm-theme-accent) !important; outline-offset:2px !important; }
+  :root body .project-calendar .pc-day-heading { margin-bottom:auto !important; }
+  :root body .project-calendar .pc-date { width:24px !important; height:24px !important; font-size:13px !important; }
+  :root body .project-calendar .pc-date.today { background:var(--pdm-theme-accent) !important; color:#fff !important; }
+  :root body .project-calendar .pc-event.pc-event { background:var(--pc-event) !important; border:0 !important; border-radius:7px !important; padding:0 5px !important; font-size:12px !important; line-height:16px !important; color:var(--pdm-text) !important; width:100% !important; box-sizing:border-box !important; }
+  :root body .project-calendar .pc-event b { font-size:inherit !important; }
+  :root body .project-calendar .pc-event.warning { background:var(--pc-warning) !important; }
+  :root body .project-calendar .pc-event.danger { background:var(--pc-danger) !important; }
+  :root body .project-calendar .pc-event.done { background:var(--pc-done) !important; }
+  :root body .project-calendar .pc-more { margin-top:0 !important; background:transparent !important; color:var(--pdm-muted) !important; font-size:11px !important; }
+  :root body .project-calendar .pc-bottom { order:3 !important; display:block !important; min-height:180px !important; }
+  :root body .project-calendar .pc-details { border-radius:16px !important; }
+  :root body .project-calendar .pc-legend { order:2 !important; flex-wrap:wrap !important; gap:16px !important; }
+  :root body .project-calendar :is(.pc-week-view,.pc-list) { order:1 !important; min-height:320px !important; }
+  :root body .project-calendar .pc-week-view { gap:10px !important; background:var(--pc-board) !important; padding:12px !important; border-radius:24px !important; }
+  :root body .project-calendar .pc-week-view article { border-radius:16px !important; padding:10px !important; background:var(--pc-day) !important; display:flex !important; flex-direction:column !important; gap:6px !important; }
+  @container (max-width:1100px) { :root body .project-calendar .pc-months { grid-template-columns:minmax(0,1fr) !important; } }
+  @container (max-width:600px) {
+    :root body .project-calendar .pc-month { padding:8px !important; border-radius:16px !important; }
+    :root body .project-calendar .pc-grid { gap:5px !important; grid-template-rows:repeat(6,116px) !important; }
+    :root body .project-calendar .pc-grid .pc-day { padding:4px !important; min-height:116px !important; border-radius:10px !important; }
+    :root body .project-calendar .pc-event.pc-event { padding:0 3px !important; font-size:12px !important; }
+  }
+}
+.project-calendar { --pc-board:#f7f7f7 !important; --pc-day:#fff !important; --pc-outside:#ebebeb !important; --pc-event:#eee5fa !important; --pc-warning:#fdf0cd !important; --pc-danger:#fce5ef !important; --pc-done:#d1fae5 !important; }
+:root[data-pdm-color-scheme="dark"] .project-calendar { --pc-board:#202020 !important; --pc-day:#292929 !important; --pc-outside:#242424 !important; --pc-event:#392d48 !important; --pc-warning:#44391e !important; --pc-danger:#472c38 !important; --pc-done:#213e33 !important; }
+@layer pdm-button-sizing {
+ :root body .project-calendar .pc-event.pc-event { min-width:0 !important; height:16px !important; min-height:16px !important; max-height:16px !important; display:block !important; text-align:left !important; box-shadow:none !important; outline:0 !important; }
+ :root body .project-calendar .pc-event::before,:root body .project-calendar .pc-event::after { display:none !important; }
+ :root body .project-calendar .pc-event > * { opacity:1 !important; }
+ :root body .project-calendar .pc-event:hover { filter:brightness(.96); }
+ :root body .pc-event-popover { border:1px solid var(--pdm-border-soft) !important; border-radius:22px !important; padding:12px !important; background:var(--pdm-surface) !important; box-shadow:0 8px 28px var(--pdm-shadow-strong) !important; max-width:calc(100vw - 24px) !important; color:var(--pdm-text) !important; }
+}
+.pc-event-card { display:grid; gap:10px; }
+.pc-event-card header,.pc-event-card dl>div { background:var(--pdm-nav-bg); border-radius:14px; padding:12px; }
+.pc-event-card header { display:grid; gap:6px; }
+.pc-event-card header strong { font-size:18px; line-height:1.5; }
+.pc-event-card header span,.pc-event-card dt { color:var(--pdm-muted); font-size:12px; }
+.pc-event-card dl { margin:0; display:grid; gap:8px; }
+.pc-event-card dl>div { display:grid; gap:6px; }
+.pc-event-card dd { margin:0; line-height:1.5; overflow-wrap:anywhere; }
+.pc-event-card > button { justify-self:end; }
+:root body .project-calendar .pc-day { transition:box-shadow .18s ease,background-color .18s ease; }
+:root body .pc-event-popover.pc-card-enter-active,:root body .pc-event-popover.pc-card-leave-active { transition:opacity .15s cubic-bezier(0,0,.2,1),transform .15s cubic-bezier(0,0,.2,1),filter .15s cubic-bezier(0,0,.2,1); }
+:root body .pc-event-popover.pc-card-enter-from,:root body .pc-event-popover.pc-card-leave-to { opacity:0; transform:scale(.9); filter:blur(4px); }
+@media(prefers-reduced-motion:reduce) { :root body .project-calendar .pc-day,:root body .pc-event-popover { transition:none !important; } }
+:root body .pc-event-card header { border-radius:14px !important; border:0 !important; } :root body .pc-event-popover { max-height:calc(100dvh - 24px); overflow:auto; }
+:root body .pc-event-popover { transition:opacity .15s cubic-bezier(0,0,.2,1),transform .15s cubic-bezier(0,0,.2,1),filter .15s cubic-bezier(0,0,.2,1); }
+@layer pdm-button-sizing {
+ :root body .project-calendar .pc-day-heading { flex-wrap:nowrap !important; gap:2px !important; align-items:center !important; }
+ :root body .project-calendar .pc-day-heading .pc-holiday { flex-basis:auto !important; flex:1 1 auto !important; }
+ :root body .project-calendar .pc-day-heading .pc-more { position:static !important; margin:0 0 0 auto !important; align-self:center !important; flex:0 0 auto !important; width:auto !important; min-width:0 !important; height:16px !important; min-height:16px !important; max-height:16px !important; padding:0 !important; border:0 !important; border-radius:0 !important; box-shadow:none !important; outline:0 !important; font-size:12px !important; line-height:16px !important; background:transparent !important; color:var(--pdm-muted) !important; }
+ :root body .project-calendar .pc-more::before,:root body .project-calendar .pc-more::after { display:none !important; }
+ :root body .project-calendar .pc-more:focus-visible { outline:2px solid var(--pdm-theme-accent) !important; }
+ :root body .project-calendar .pc-event b { line-height:16px !important; }
+ :root body .pc-day-agenda .pc-agenda-event.pc-agenda-event { width:100% !important; min-width:0 !important; height:auto !important; min-height:48px !important; max-height:none !important; display:grid !important; gap:4px !important; padding:10px !important; text-align:left !important; white-space:normal !important; background:var(--pdm-nav-bg) !important; border:0 !important; border-radius:12px !important; box-shadow:none !important; outline:0 !important; }
+ :root body .pc-day-agenda .pc-agenda-event.pc-agenda-event > * { opacity:1 !important; text-align:left !important; justify-content:start !important; }
+ :root body .pc-day-agenda .pc-agenda-event.pc-agenda-event::before,:root body .pc-day-agenda .pc-agenda-event.pc-agenda-event::after { display:none !important; }
+}
+.pc-agenda-list { display:grid; gap:6px; }
+.pc-agenda-event span { color:var(--pdm-muted); font-size:12px; }
+.pc-agenda-event strong { overflow-wrap:anywhere; font-size:13px; }
+
+@layer pdm-button-sizing { :root body .project-calendar .pc-grid .pc-day { box-sizing:border-box !important; height:116px !important; max-height:116px !important; } }
+
+/* 全屏看板按可用高度显示完整六周；普通视图保留可滚动的日期卡片。 */
+@layer pdm-button-sizing {
+  @media (min-width:1101px) and (min-height:700px) {
+    :root body .project-calendar.is-maximized { display:grid !important; grid-template-rows:auto minmax(0,1fr) auto minmax(120px,22%) !important; overflow:hidden !important; gap:8px !important; }
+    :root body .project-calendar.is-maximized .pc-months { min-height:0 !important; overflow:hidden !important; }
+    :root body .project-calendar.is-maximized .pc-month { min-height:0 !important; padding:10px !important; grid-template-rows:32px 24px minmax(0,1fr) !important; }
+    :root body .project-calendar.is-maximized .pc-month h2 { padding:0 4px !important; }
+    :root body .project-calendar.is-maximized .pc-weekdays span { padding:2px 0 !important; }
+    :root body .project-calendar.is-maximized .pc-grid { min-height:0 !important; grid-template-rows:repeat(6,minmax(0,1fr)) !important; }
+    :root body .project-calendar.is-maximized .pc-grid .pc-day { min-height:0 !important; height:auto !important; max-height:none !important; padding:3px !important; }
+    :root body .project-calendar.is-maximized .pc-bottom { min-height:0 !important; overflow:hidden !important; }
+    :root body .project-calendar.is-maximized .pc-details { height:100%; }
+    :root body .project-calendar.is-maximized :is(.pc-week-view,.pc-list) { min-height:0 !important; }
+  }
+}

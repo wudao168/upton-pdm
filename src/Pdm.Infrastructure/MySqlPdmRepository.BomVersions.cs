@@ -1,4 +1,4 @@
-﻿using System.Data.Common;
+using System.Data.Common;
 using System.Text.Json;
 using Dapper;
 using Upton.Pdm.Application;
@@ -19,6 +19,15 @@ public sealed partial class MySqlPdmRepository
             .ThenByDescending(row => row.VersionNumber).Select(MapBomVersion).ToArray();
     }
 
+    public async Task<BomVersion?> FindLatestBomVersionAsync(Guid projectId, BomKind kind, BomVersionState? state, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        var row = await connection.QuerySingleOrDefaultAsync<BomVersionRow>(new CommandDefinition(
+            $"{BomVersionSelect} WHERE project_id=@ProjectId AND bom_kind=@Kind AND (@State IS NULL OR state=@State) ORDER BY version_number DESC LIMIT 1",
+            new { ProjectId = projectId, Kind = kind.ToString(), State = state?.ToString() }, cancellationToken: cancellationToken));
+        return row is null ? null : MapBomVersion(row);
+    }
+
     public async Task<BomVersion?> FindBomVersionAsync(Guid projectId, Guid versionId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
@@ -36,8 +45,8 @@ public sealed partial class MySqlPdmRepository
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var now = timeProvider.GetUtcNow();
-        var existing = await connection.QuerySingleOrDefaultAsync<BomVersionRow>(new CommandDefinition(
-            $"{BomVersionSelect} WHERE project_id=@ProjectId AND bom_kind=@Kind AND state='Draft' ORDER BY version_number DESC LIMIT 1 FOR UPDATE",
+        var existing = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
+            "SELECT id FROM bom_version WHERE project_id=@ProjectId AND bom_kind=@Kind AND state='Draft' ORDER BY version_number DESC LIMIT 1 FOR UPDATE",
             new { ProjectId = projectId, Kind = kind.ToString() }, transaction, cancellationToken: cancellationToken));
         var motherMaterialId = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
             "SELECT material_id FROM project_bom_header WHERE project_id=@ProjectId AND bom_kind=@Kind",
@@ -46,7 +55,7 @@ public sealed partial class MySqlPdmRepository
         Guid versionId;
         if (existing is not null)
         {
-            versionId = existing.Id;
+            versionId = existing.Value;
             await connection.ExecuteAsync(new CommandDefinition(
                 "UPDATE bom_version SET mother_material_id=@MotherMaterialId,snapshot_json=@Snapshot,whole_set_multiplier=CASE WHEN is_multiplier_overridden=1 THEN whole_set_multiplier ELSE @ProjectQuantity END,updated_by=@Actor,updated_at=@Now,row_version=row_version+1 WHERE id=@Id",
                 new { Id = versionId, MotherMaterialId = motherMaterialId, Snapshot = snapshot, Actor = actor, Now = now.UtcDateTime, ProjectQuantity = project.Quantity }, transaction, cancellationToken: cancellationToken));

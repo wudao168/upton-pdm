@@ -326,8 +326,8 @@ public sealed class ProgramTemplateService(
     {
         var tasks = new Dictionary<Guid, ProgramTemplateApprovalTask>();
         var user = await pdmRepository.FindUserAsync(actor, cancellationToken);
-        var roles = NotificationRecipientPolicy.BusinessRoles(user?.EffectiveRoleCodes ?? CurrentRoleCodes(role));
-        var canApprove = await NotificationRecipientPolicy.HasBusinessPermissionAsync(pdmRepository, roles, PermissionCodes.ProgramTemplateApprove, cancellationToken);
+        var roles = user?.EffectiveRoleCodes ?? [];
+        var canApprove = user is not null && await NotificationRecipientPolicy.HasBusinessPermissionAsync(pdmRepository, user, PermissionCodes.ProgramTemplateApprove, cancellationToken);
         foreach (var roleCode in roles.DefaultIfEmpty(""))
             foreach (var task in await templates.ListTasksAsync(actor, roleCode, canApprove, cancellationToken)) tasks[task.Id] = task;
         // 管理权限不扩展为别人的受理职责；本人发起且有批准权限的事项仍可在管理流程中办理。

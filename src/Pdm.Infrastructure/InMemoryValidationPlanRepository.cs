@@ -164,7 +164,7 @@ public sealed class InMemoryValidationPlanRepository : IValidationPlanRepository
         }
     }
 
-    public Task<ProjectValidationPlan> DecideAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, DateTimeOffset decidedAt, CancellationToken cancellationToken)
+    public Task<ProjectValidationPlan> DecideAsync(Guid taskId, string actor, ApprovalDecision decision, string? comment, DateTimeOffset decidedAt, CancellationToken cancellationToken, bool emergencySubstitute = false, string? businessNote = null)
     {
         lock (gate)
         {
@@ -173,8 +173,9 @@ public sealed class InMemoryValidationPlanRepository : IValidationPlanRepository
             if (current.State != ProjectValidationPlanState.PendingApproval) throw new PdmConflictException("验证计划已不在审批中。");
             var activeTask = current.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault(task => task.Decision is null);
             if (activeTask?.Id != taskId) throw new PdmConflictException("当前尚未到达该审批节点。");
+            var group = ApprovalNodeRules.Sign(activeTask.Participants, actor, decision, comment, decidedAt, emergencySubstitute, out var waiting, businessNote);
             var tasks = current.ApprovalTasks.Select(task => task.Id == taskId
-                ? task with { Decision = decision, DecisionBy = actor, DecisionComment = comment, DecidedAt = decidedAt }
+                ? waiting ? task with { Participants = group } : task with { Participants = group, Decision = decision, DecisionBy = actor, DecisionComment = comment, DecidedAt = decidedAt }
                 : task).ToArray();
             var finalApproved = decision == ApprovalDecision.Approved && tasks.All(task => task.Decision == ApprovalDecision.Approved);
             if (finalApproved)
@@ -222,7 +223,7 @@ public sealed class InMemoryValidationPlanRepository : IValidationPlanRepository
                 throw new PdmConflictException("验证计划审批任务已变化。");
             var saved = current with
             {
-                ApprovalTasks = current.ApprovalTasks.Select(task => task.Id == taskId ? task with { Assignee = newAssignee } : task).ToArray(),
+                ApprovalTasks = current.ApprovalTasks.Select(task => task.Id == taskId ? task with { Assignee = newAssignee, Participants = task.Participants is { } group ? group with { Members = [newAssignee] } : null } : task).ToArray(),
                 UpdatedBy = currentAssignee, UpdatedAt = at, RowVersion = current.RowVersion + 1
             };
             plans[current.Id] = saved;
@@ -236,8 +237,8 @@ public sealed class InMemoryValidationPlanRepository : IValidationPlanRepository
         {
             var result = plans.Values.Where(plan => plan.State == ProjectValidationPlanState.PendingApproval)
                 .Select(plan => (Plan: plan, Task: plan.ApprovalTasks.OrderBy(task => task.StepOrder).FirstOrDefault(task => task.Decision is null)))
-                .Where(item => item.Task is not null && (includeAll || string.Equals(item.Task.Assignee, actor, StringComparison.OrdinalIgnoreCase)))
-                .Select(item => new PendingValidationPlanApprovalTask(item.Task!.Id, item.Plan.Id, item.Plan.ProjectId, item.Plan.RevisionNumber, item.Task.Stage, item.Task.StepName, item.Task.Assignee, item.Task.CreatedAt))
+                .Where(item => item.Task is not null && (includeAll || (item.Task.Participants?.CanSign(actor) ?? string.Equals(item.Task.Assignee, actor, StringComparison.OrdinalIgnoreCase))))
+                .Select(item => new PendingValidationPlanApprovalTask(item.Task!.Id, item.Plan.Id, item.Plan.ProjectId, item.Plan.RevisionNumber, item.Task.Stage, item.Task.StepName, item.Task.Assignee, item.Task.CreatedAt) { Participants = item.Task.Participants })
                 .OrderBy(item => item.CreatedAt).ToArray();
             return Task.FromResult<IReadOnlyList<PendingValidationPlanApprovalTask>>(result);
         }

@@ -167,6 +167,40 @@ public sealed class BomDrawingRevisionTests
     }
 
     [Theory]
+    [InlineData("版本", "Rev01", "A")]
+    [InlineData("全局/版本", "REV01", "B")]
+    [InlineData("配置:Default/版次", "Rev02", "C")]
+    [InlineData("版次", " rev01 ", "A")]
+    [InlineData("版本", "Rev001", "B")]
+    public void LegacyFrameRevisionDoesNotBlockPublicationOrRewriteTheApprovedSource(string property, string legacy, string target)
+    {
+        var version = Version(Guid.NewGuid(), "W1") with { PropertySnapshot = new Dictionary<string, string?> { [property] = legacy } };
+        BomDrawingRevision.ValidateDrawingProperties(version, target, "FF0002.02-05.SLDDRW");
+        Assert.Equal(legacy, version.PropertySnapshot[property]);
+        Assert.Equal(RevisionLabel.InitialWork(), version.Revision);
+    }
+
+    [Fact]
+    public void LegacyFramePropertyDoesNotHideAConflictingLetterRevision()
+    {
+        var version = Version(Guid.NewGuid(), "W1") with { PropertySnapshot = new Dictionary<string, string?> { ["版本"] = "Rev01", ["版次"] = "B" } };
+        Assert.Throws<PdmConflictException>(() => BomDrawingRevision.ValidateDrawingProperties(version, "A", "FF0002.02-05.SLDDRW"));
+        BomDrawingRevision.ValidateDrawingProperties(version, "B", "FF0002.02-05.SLDDRW");
+        Assert.Equal("Rev01", version.PropertySnapshot["版本"]);
+        Assert.Equal("B", version.PropertySnapshot["版次"]);
+    }
+
+    [Theory]
+    [InlineData("RevA")]
+    [InlineData("REV01A")]
+    [InlineData("01")]
+    public void NonLegacyMismatchesStillBlockPublication(string value)
+    {
+        var version = Version(Guid.NewGuid(), "W1") with { PropertySnapshot = new Dictionary<string, string?> { ["版本"] = value } };
+        Assert.Throws<PdmConflictException>(() => BomDrawingRevision.ValidateDrawingProperties(version, "A", "FF0002.02-05.SLDDRW"));
+    }
+
+    [Theory]
     [InlineData("版本", "Global")]
     [InlineData("版本", "Configuration")]
     [InlineData("版本", "Both")]

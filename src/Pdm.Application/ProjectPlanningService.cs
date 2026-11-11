@@ -5,7 +5,8 @@ namespace Upton.Pdm.Application;
 public sealed class ProjectPlanningService(
     IProjectPlanningRepository plans,
     IPdmRepository repository,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    IProjectContactInformationRepository? contacts = null)
 {
     public async Task<IReadOnlyList<ProjectPlanTemplate>> ListTemplatesAsync(bool includeInactive, string actor, UserRole role, CancellationToken cancellationToken, Guid? projectId = null)
     {
@@ -148,6 +149,11 @@ public sealed class ProjectPlanningService(
         var now = timeProvider.GetUtcNow();
         ValidateAllocation(template.Stages, template.Tasks);
         var activeTemplate = SelectStagesToGenerate(template, command.DeferredStages);
+        if (contacts is not null)
+        {
+            var contact = await contacts.FindAsync(project.RootProjectId ?? project.ParentProjectId ?? project.Id, cancellationToken);
+            if (contact is not null) project = project with { PhaseOwners = new Dictionary<string,string>(project.PhaseOwners) { ["SalesPeople"] = contact.SalesPeople, ["PresalesPeople"] = contact.PresalesPeople } };
+        }
         var generatedTasks = Schedule(activeTemplate, command.StartDate, command.TotalDurationDays, project, command.IndependentStages);
         var plan = new ProjectPlan(
             current?.Id ?? Guid.NewGuid(), projectId, template.Id, template.Name,
@@ -157,6 +163,7 @@ public sealed class ProjectPlanningService(
             current?.CreatedBy ?? actor, current?.CreatedAt ?? now, actor, now, current?.RowVersion ?? 0)
         {
             Stages = activeTemplate.Stages,
+            HolidayOverrides = current?.HolidayOverrides ?? [],
             StageSchedules = AllocateStageSchedules(activeTemplate.Stages, command.StartDate, command.TotalDurationDays, command.IndependentStages)
         };
         var saved = await SaveWithChildrenAsync(project, plan, current?.RowVersion, null, actor, role, cancellationToken);
@@ -215,6 +222,26 @@ public sealed class ProjectPlanningService(
         foreach (var item in deleted)
             await AuditAsync(actor, "project-plan.delete", nameof(ProjectPlan), item.Plan.Id,
                 $"{item.Project.Code}；{(item.Plan.ApprovalStatus == ProjectPlanApprovalStatus.Approved ? "经批准变更权限删除现行计划及变更草稿" : "未批准计划已永久删除")}", cancellationToken);
+    }
+
+    public async Task<ProjectPlan> SaveHolidaysAsync(Guid projectId, IReadOnlyList<ProjectPlanHoliday>? holidays, long expectedRowVersion,
+        string actor, UserRole role, CancellationToken ct)
+    {
+        var project = await RequireManageAsync(projectId, actor, role, ct);
+        await ProjectPermissionPolicy.RequireAsync(repository, projectId, actor, role, "project.plan.update", ct);
+        var current = await plans.FindPlanAsync(projectId, ct) ?? throw new PdmNotFoundException("请先建立当前项目的计划。");
+        if (current.RowVersion != expectedRowVersion) throw new PdmConflictException("计划已更新，请刷新后重新编辑假期。");
+        if (holidays is null || holidays.Count > 366 || holidays.Any(day => day is null || day.Date.Year is < 2000 or > 2199)
+            || holidays.Select(day => day.Date).Distinct().Count() != holidays.Count)
+            throw new PdmRuleException("请填写不重复的有效日期（2000至2199年），最多可设置366天。");
+        var normalized = holidays.OrderBy(day => day.Date).Select(day => day with { Name = Required(day.Name, 60, "假期说明") }).ToArray();
+        if (normalized.SequenceEqual(current.HolidayOverrides)) return VisiblePlan(current, actor);
+        var saved = await plans.SavePlanAsync(current with
+        {
+            HolidayOverrides = normalized, UpdatedBy = actor, UpdatedAt = timeProvider.GetUtcNow()
+        }, expectedRowVersion, null, ct);
+        await AuditAsync(actor, "project-plan.holidays.update", nameof(ProjectPlan), saved.Id, $"{project.Code}；假期调整 {normalized.Length} 天", ct);
+        return VisiblePlan(saved, actor);
     }
 
     public async Task<ProjectPlan> SaveAsync(Guid projectId, SaveProjectPlanCommand command, string actor, UserRole role, CancellationToken cancellationToken)
@@ -364,6 +391,7 @@ public sealed class ProjectPlanningService(
             var copied = source with
             {
                 Id = current?.Id ?? Guid.NewGuid(), ProjectId = child.Id, Tasks = tasks,
+                HolidayOverrides = current?.HolidayOverrides ?? [],
                 FollowsParentPlan = true, ParentPlanId = source.Id, ParentPlanRowVersion = (expectedRowVersion ?? 0) + 1,
                 ChildSyncResults = [], CurrentStage = EvaluateStage(tasks, current?.ManualStage, source.Stages),
                 ManualStage = current?.ManualStage, ManualStageReason = current?.ManualStageReason,
@@ -544,6 +572,12 @@ public sealed class ProjectPlanningService(
             UpdatedAt = now
         }, command.ExpectedRowVersion, NewVersion(EffectivePlan(current), reason, actor, now), cancellationToken);
         await AuditAsync(actor, "project-plan.stage", nameof(ProjectPlan), saved.Id, $"{project.Code}；{saved.CurrentStage}；{reason}", cancellationToken);
+        if (current.ManualStage != saved.ManualStage)
+            await ProjectActivityFeed.EmitAsync(repository, project, "Status",
+                saved.ManualStage == ProjectPlanStage.Paused ? "项目已暂停" : saved.ManualStage == ProjectPlanStage.Cancelled ? "项目已取消"
+                : saved.ManualStage == ProjectPlanStage.Terminated ? "项目已终止" : "项目已恢复",
+                reason, actor, $"stage:{saved.RowVersion}", now, cancellationToken,
+                extraRecipients: saved.Tasks.Select(task => task.Assignee ?? ""));
         return saved;
     }
 
@@ -590,7 +624,8 @@ public sealed class ProjectPlanningService(
                 current?.Id ?? Guid.NewGuid(), target.Id, source.TemplateId, $"{source.TemplateName}（套用自{sourceProject.Code}）",
                 EvaluateStage(tasks, null, source.Stages), null, null,
                 tasks.Min(item => item.PlannedStart), tasks.Max(item => item.PlannedFinish), ForecastFinish(tasks), 0, tasks,
-                current?.CreatedBy ?? actor, current?.CreatedAt ?? now, actor, now, current?.RowVersion ?? 0) { Stages = source.Stages, StageSchedules = source.StageSchedules };
+                current?.CreatedBy ?? actor, current?.CreatedAt ?? now, actor, now, current?.RowVersion ?? 0)
+                { Stages = source.Stages, StageSchedules = source.StageSchedules, HolidayOverrides = current?.HolidayOverrides ?? [] };
             var saved = await plans.SavePlanAsync(copied, current?.RowVersion, null, cancellationToken);
             savedPlans.Add(saved);
             await AuditAsync(actor, "project-plan.reuse", nameof(ProjectPlan), saved.Id, $"{target.Code}；来源{sourceProject.Code}；{reason}", cancellationToken);
@@ -769,6 +804,10 @@ public sealed class ProjectPlanningService(
         notifications.AddRange(BuildStageOwnerChangeNotifications(project, saved, request, nextBaseline, now));
         await repository.CreateUserNotificationsAsync(notifications, cancellationToken);
         await AuditAsync(actor, "project-plan.change.complete", nameof(ProjectPlan), saved.Id, $"基线V{nextBaseline}；{request.Reason}", cancellationToken);
+        await ProjectActivityFeed.EmitAsync(repository, project, "Plan", "项目计划变更已生效",
+            $"计划完成日期：{source.PlannedFinish:yyyy/MM/dd} → {saved.PlannedFinish:yyyy/MM/dd} · 基线V{nextBaseline} · {request.Reason}",
+            actor, request.Id.ToString("N"), now, cancellationToken,
+            extraRecipients: source.Tasks.Concat(saved.Tasks).Select(task => task.Assignee ?? ""));
         return saved;
     }
 
@@ -803,7 +842,7 @@ public sealed class ProjectPlanningService(
         if (!string.Equals(actor, request.SubmittedBy, StringComparison.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("仅变更申请人可以放弃本次变更。");
         var now = timeProvider.GetUtcNow();
-        var restored = source with { ChangeDraftSource = null,
+        var restored = source with { ChangeDraftSource = null, HolidayOverrides = current.HolidayOverrides,
             ChangeRequest = request with { Comment = "申请人已放弃本次变更" }, UpdatedBy = actor, UpdatedAt = now };
         var saved = await plans.SavePlanAsync(restored, expectedRowVersion, null, cancellationToken);
         await AuditAsync(actor, "project-plan.change.abandon", nameof(ProjectPlan), saved.Id, $"{project.Code}；{request.Reason}", cancellationToken);
@@ -1083,7 +1122,10 @@ public sealed class ProjectPlanningService(
     {
         "DesignLead" => project.DesignLead ?? project.DesignLeads.FirstOrDefault() ?? project.Designers.FirstOrDefault() ?? project.PrimaryProjectManager,
         "Designer" => project.Designers.FirstOrDefault() ?? project.DesignLead ?? project.PrimaryProjectManager,
-        _ => project.PrimaryProjectManager ?? project.CollaborativeProjectManagers.FirstOrDefault() ?? project.Owner
+        "ProjectManager" or null or "" => project.PrimaryProjectManager ?? project.CollaborativeProjectManagers.FirstOrDefault() ?? project.Owner,
+        "CollaborativeProjectManager" => project.CollaborativeProjectManagers.FirstOrDefault(),
+        _ when role.StartsWith("Custom:", StringComparison.Ordinal) => project.CustomPositionMembers.GetValueOrDefault(role[7..], []).FirstOrDefault(),
+        _ => project.PhaseOwners.GetValueOrDefault(role)?.Split('、', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()
     };
 
     private static string? ResolveAssigneeForStage(string stage, Project project) => stage == ProjectPlanStage.Design
@@ -1269,6 +1311,7 @@ public sealed class ProjectPlanningService(
         return plan.ChangeDraftSource with
         {
             RowVersion = plan.RowVersion, ChangeRequest = plan.ChangeRequest, ChangeDraftSource = null,
+            HolidayOverrides = plan.HolidayOverrides,
             UpdatedBy = plan.UpdatedBy, UpdatedAt = plan.UpdatedAt
         };
     }

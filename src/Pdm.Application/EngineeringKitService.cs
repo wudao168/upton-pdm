@@ -89,6 +89,15 @@ public sealed class EngineeringKitService(
         return saved;
     }
 
+    public async Task DeleteDraftAsync(Guid kitId, long expectedRowVersion, string actor, UserRole role, CancellationToken cancellationToken)
+    {
+        await RequireAsync(actor, role, PermissionCodes.StandardLibraryView, cancellationToken);
+        await RequireAsync(actor, role, PermissionCodes.StandardLibraryManage, cancellationToken);
+        await RequireAsync(actor, role, PermissionCodes.EngineeringKitDelete, cancellationToken);
+        await kits.DeleteDraftAsync(kitId, expectedRowVersion, cancellationToken);
+        await AuditAsync(actor, "engineering-kit.draft.delete", kitId, "删除从未发布的料品套件草稿", cancellationToken);
+    }
+
     private async Task<StandardLibraryCategory> RequireCategoryAsync(Guid? categoryId, CancellationToken cancellationToken)
     {
         if (categoryId is null) throw new PdmRuleException("请选择标准物料分类。");

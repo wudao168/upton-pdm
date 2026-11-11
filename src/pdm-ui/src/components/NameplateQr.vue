@@ -27,5 +27,5 @@ watch(() => props.serialNumber, refresh, { immediate: true })
 </template>
 
 <style scoped>
-.nameplate-qr{display:grid;flex:0 0 96px;width:96px;justify-items:center;gap:4px;font-size:11px;line-height:1.4;text-align:center;overflow-wrap:anywhere}.nameplate-qr img{display:block;background:#fff;max-width:100%}.nameplate-qr p{margin:0}.nameplate-qr [role=alert]{color:var(--pdm-danger)}.nameplate-qr button{border:0;background:transparent;color:var(--pdm-theme-accent);font:inherit;cursor:pointer}
+.nameplate-qr{display:grid;flex:0 0 96px;width:96px;justify-items:center;gap:4px;font-size:11px;line-height:1.4;text-align:center;overflow-wrap:anywhere}.nameplate-qr img{display:block;background:#fff;max-width:100%}.nameplate-qr p{margin:0}.nameplate-qr [role=alert]{color:var(--pdm-danger)}.nameplate-qr button{border:0;background:transparent; color:var(--pdm-text);font:inherit;cursor:pointer}
 </style>

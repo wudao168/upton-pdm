@@ -139,7 +139,11 @@ async function load() {
     relations.value = relationRows
     categoryCatalog.value = categories
     activeTemplateId.value = currentRelation?.id || ''
-    mainCache.value = currentRelation ? relationMains(currentRelation) : props.mainMaterial ? [asMain(props.mainMaterial)] : []
+    const selectedMains = currentRelation ? relationMains(currentRelation) : props.mainMaterial ? [asMain(props.mainMaterial)] : []
+    mainCache.value = selectedMains.map(main => {
+      const material = props.mainMaterial?.id === main.materialId ? props.mainMaterial : materialRows.find(item => item.id === main.materialId)
+      return material ? { ...main, specification: main.specification ?? material.specification, brand: main.brand ?? material.brand, remark: main.remark ?? material.remark } : main
+    })
     mainIds.value = mainCache.value.map(item => item.materialId)
     mainSelection.value = ''
     materials.value = materialRows

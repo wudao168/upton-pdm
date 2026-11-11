@@ -4,18 +4,20 @@ const { write: projectWritable } = useProjectCenterAccess()
 import { computed, ref, watch } from 'vue'
 import ValidationPlanManager from './ValidationPlanManager.vue'
 import QualityInspectionPanel from './QualityInspectionPanel.vue'
+import ProjectFileForms from './ProjectFileForms.vue'
 import { readQualityUploadAccess } from '../api'
 import { ElMessage } from '../statusMessage'
 import type { ProjectSummary } from '../types'
 
-const props = defineProps<{ projectId: string; projectCode: string; projectName: string; projects: ProjectSummary[]; token: string; currentUsername: string; currentDisplayName: string; canEdit: boolean; canManageCatalog: boolean; canDecideApproval?: boolean; requestedQualityAcceptance?: boolean; requestedProjectId?: string; requestedSection?: string }>()
-const emit = defineEmits<{ requestHandled: [] }>()
+const props = defineProps<{ projectId: string; projectCode: string; projectName: string; projects: ProjectSummary[]; token: string; currentUsername: string; currentDisplayName: string; canEdit: boolean; canManageCatalog: boolean; canDecideApproval?: boolean; requestedQualityAcceptance?: boolean; requestedProjectId?: string; requestedSection?: string; formPermissions?: readonly string[] }>()
+const emit = defineEmits<{ requestHandled: []; locateArchive: [folderId: string, fileId: string] }>()
 const inspectionRevision = ref(0)
 const activeDetail = ref('')
 const activeTab = ref('quality')
 const access = ref<Record<string, string[]>>({})
 let accessGeneration = 0
 function writableIds(kind: string) { if (!projectWritable.value) return []; return familyProjects.value.filter(x => access.value[x.id]?.includes(kind)).map(x => x.id) }
+const canEditValidation = computed(() => projectWritable.value && props.canEdit)
 const canEditQuality = computed(() => projectWritable.value && (access.value[props.projectId]?.includes('quality') ?? false))
 watch([() => props.requestedProjectId, () => props.requestedSection], ([id]) => { if (id) activeTab.value = props.requestedSection || 'quality' }, { immediate: true })
 function selectTab(tab: string) { activeTab.value = tab }
@@ -49,17 +51,22 @@ function changeView(section: string, view: string) { activeDetail.value = view =
 <template>
   <div class="quality-manager" :class="{ 'has-detail': activeTab === 'quality' && activeDetail }" aria-label="项目质量">
     <nav class="quality-manager__tabs pdm-project-subtabs pdm-segmented" aria-label="质量分类" role="tablist">
-      <button v-for="tab in [{ key: 'quality', label: '质量检验' }, { key: 'process', label: '过程检验' }, { key: 'customer', label: '客户验收' }]" :key="tab.key" type="button" :class="{ 'is-active': activeTab === tab.key }" :aria-pressed="activeTab === tab.key" role="tab" :aria-selected="activeTab === tab.key" @click="selectTab(tab.key)">{{ tab.label }}</button>
+      <button v-for="tab in [{ key: 'quality', label: '质量检验' }, { key: 'process', label: '过程检验' }, { key: 'customer', label: '预/终验收' }]" :key="tab.key" type="button" :class="{ 'is-active': activeTab === tab.key }" :aria-pressed="activeTab === tab.key" role="tab" :aria-selected="activeTab === tab.key" @click="selectTab(tab.key)">{{ tab.label }}</button>
     </nav>
     <div v-show="activeTab === 'quality'" class="quality-manager__sections">
-      <ValidationPlanManager v-show="!activeDetail || activeDetail === 'validation'" v-bind="props" :can-edit="canEditQuality" :requested-project-id="requestedQualityAcceptance ? undefined : requestedProjectId" class="quality-manager__plan" @view-changed="changeView('validation', $event)" @request-handled="emit('requestHandled')" />
+      <ValidationPlanManager v-show="!activeDetail || activeDetail === 'validation'" v-bind="props" :can-edit="canEditValidation" :requested-project-id="requestedQualityAcceptance ? undefined : requestedProjectId" class="quality-manager__plan" @view-changed="changeView('validation', $event)" @request-handled="emit('requestHandled')" />
       <ValidationPlanManager v-show="!activeDetail || activeDetail === 'acceptance'" v-bind="props" :can-edit="canEditQuality" :requested-project-id="requestedQualityAcceptance ? requestedProjectId : undefined" quality-acceptance class="quality-manager__plan" @view-changed="changeView('acceptance', $event)" @request-handled="emit('requestHandled')" />
     </div>
     <div v-show="activeTab === 'process'" class="quality-manager__sections">
       <QualityInspectionPanel v-for="kind in ['incoming', 'assembly'] as const" :key="kind" :kind="kind" :projects="familyProjects" :project-id="projectId" :token="token" :can-edit="canEdit" :writable-project-ids="writableIds(kind)" :refresh-version="inspectionRevision" @saved="inspectionRevision++" />
     </div>
     <div v-show="activeTab === 'customer'" class="quality-manager__sections">
-      <QualityInspectionPanel v-for="kind in ['preAcceptance', 'finalAcceptance'] as const" :key="kind" :kind="kind" :projects="familyProjects" :project-id="projectId" :token="token" :can-edit="canEdit" :writable-project-ids="writableIds(kind)" :refresh-version="inspectionRevision" @saved="inspectionRevision++" />
+      <QualityInspectionPanel v-for="kind in ['preAcceptance', 'finalAcceptance'] as const" :key="kind" :kind="kind" :projects="familyProjects" :project-id="projectId" :token="token" :can-edit="canEdit" :writable-project-ids="writableIds(kind)" :refresh-version="inspectionRevision" @saved="inspectionRevision++">
+        <template #actions>
+          <ProjectFileForms v-if="activeTab === 'customer' && formPermissions?.length" :project-id="projectId" :token="token" :permissions="formPermissions"
+            :only-kind="kind === 'preAcceptance' ? 'pre-acceptance' : 'final-acceptance'" show-archive-link @archived="(folderId, fileId) => emit('locateArchive', folderId, fileId)" />
+        </template>
+      </QualityInspectionPanel>
     </div>
   </div>
 </template>

@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import PersonName from './PersonName.vue'
+import { useUserDisplayName as usePersonDisplayName } from '../userDisplay'
+const displayUserName = usePersonDisplayName()
 import SearchField from './SearchField.vue'
 import { useProjectCenterAccess } from '../projectCenterAccess'
 const { export: projectExport, write: projectWritable } = useProjectCenterAccess()
@@ -32,8 +35,8 @@ interface ColumnDefinition { key: ColumnKey; label: string; width: number; fixed
 
 const columnDefinitions: ColumnDefinition[] = [
   { key: 'sequence', label: '序号', width: 64, fixedWidth: 40, defaultVisible: true, align: 'center' },
-  { key: 'projectCode', label: '项目号', width: 118, fixedWidth: 70, defaultVisible: true },
-  { key: 'subprojectCode', label: '子项目号', width: 126, fixedWidth: 70, defaultVisible: true },
+  { key: 'projectCode', label: '项目号', width: 118, fixedWidth: 70, defaultVisible: false },
+  { key: 'subprojectCode', label: '子项目号', width: 126, fixedWidth: 70, defaultVisible: false },
   { key: 'materialCode', label: '物料编码', width: 142, fixedWidth: 85, defaultVisible: true },
   { key: 'materialName', label: '物料名称', width: 240, fixedWidth: 120, defaultVisible: true },
   { key: 'impactStage', label: '关键', width: 90, fixedWidth: 60, defaultVisible: true, align: 'center' },
@@ -760,12 +763,14 @@ onBeforeUnmount(() => {
           <template v-if="column.key === 'files'"><button v-if="row.files?.length" type="button" class="pdm-bom-files-link procurement-tracking__files-link" :aria-label="`${row.materialCode} · 图纸附件`" @click="selectedFiles = row">查看（{{ row.files.length }}）</button><span v-else>—</span></template>
           <span v-else-if="isMovementColumn(column.key)" class="procurement-tracking__movement" :class="movementTone(row, column.key)" :title="movementHint(row, column.key)">{{ movementText(row, column.key) }}</span>
           <el-tag v-else-if="column.key === 'purchaseRequisitionStatus' && row.isDemandCanceled" type="danger" size="small" title="该物料需求已在BOM正式发布中取消，历史请购、采购单据的实际状态保留在明细中。">已取消</el-tag>
-          <span v-else-if="(column.key === 'purchaseRequisitionStatus' || column.key === 'purchaseOrderStatus') && materialStockPlan(row.materialCode)" v-stocked-material="row.materialCode">常备件</span>
+          <span v-else-if="(column.key === 'purchaseRequisitionStatus' || column.key === 'purchaseOrderStatus') && materialStockPlan(row.materialCode)" v-stocked-material.highlight="row.materialCode">常备件</span>
           <el-tag v-else-if="(column.key === 'purchaseRequisitionStatus' || column.key === 'purchaseOrderStatus') && !row.isWarehouseMovementRow" :type="statusType(String(manufacturingValue(row,column.key)))" size="small">{{ cellText(row,column.key) }}</el-tag>
           <el-button v-else-if="isManufacturing(row) && column.key === 'purchaseOrderNumbers'" link :aria-label="`查看${row.materialName}制造明细`" @click="showManufacturing(row)">{{ row.manufacturing?.batches.length ? cellText(row,column.key) : '查看制造明细' }}</el-button>
           <el-tag v-else-if="column.key === 'impactStage' && row.impactStage" :type="row.impactStage === 'Assembly' ? 'warning' : 'info'" size="small">{{ cellText(row, column.key) }}</el-tag>
+          <PersonName v-else-if="column.key === 'buyerName'" :name="cellText(row, column.key)" />
           <span v-else-if="column.key === 'inventoryQuantity'" :title="inventoryHint(row)">{{ cellText(row, column.key) }}</span>
-          <span v-else v-stocked-material="['materialCode', 'materialName'].includes(column.key) ? row.materialCode : undefined" :title="cellText(row, column.key)">{{ cellText(row, column.key) }}</span>
+          <span v-else-if="column.key === 'materialName' || column.key === 'specification'" v-stocked-material.highlight="row.materialCode" :title="cellText(row, column.key)">{{ cellText(row, column.key) }}</span>
+          <span v-else v-stocked-material="column.key === 'materialCode' ? row.materialCode : undefined" :title="cellText(row, column.key)">{{ cellText(row, column.key) }}</span>
         </template>
       </el-table-column>
     </el-table>
@@ -816,9 +821,9 @@ onBeforeUnmount(() => {
         <p v-if="!manufacturingDetail.manufacturing?.batches.length">尚未分配制造批次。</p>
         <section v-for="batch in manufacturingDetail.manufacturing?.batches" :key="batch.id" class="procurement-manufacturing-batch">
           <h3>{{ batch.route === 'Self' ? '自制' : '外协' }} · {{ batch.id.slice(0,8) }}　{{ batch.status }}</h3>
-          <p>负责人：{{ batch.assignee || '待分配' }}　供应商：{{ batch.supplier || '—' }}　承诺日期：{{ batch.promisedOn || '待确认' }}</p>
+          <p>负责人：<PersonName :name="displayUserName(batch.assignee, '待分配')" />　供应商：{{ batch.supplier || '—' }}　承诺日期：{{ batch.promisedOn || '待确认' }}</p>
           <p>有效批次数量：{{ formatNumber(batch.quantity) }}　外协交货：{{ formatNumber(batch.deliveredQuantity) }}　已交检：{{ formatNumber(batch.submittedQuantity) }}　合格：{{ formatNumber(batch.qualifiedQuantity) }}　已领用：{{ formatNumber(batch.issuedQuantity) }}</p>
-          <table class="procurement-manufacturing-history" aria-label="制造批次流转记录"><thead><tr><th>时间</th><th>操作</th><th>数量</th><th>操作人</th><th>备注</th></tr></thead><tbody><tr v-for="event in batch.history" :key="event.id"><td>{{ formatDate(event.occurredAt,true) }}</td><td>{{ event.operationName || productionMovementLabels[event.kind] || '流程记录' }}</td><td>{{ formatNumber(event.quantity) }}</td><td>{{ event.actorName || event.actor }}</td><td>{{ event.note || '—' }}</td></tr></tbody></table>
+          <table class="procurement-manufacturing-history" aria-label="制造批次流转记录"><thead><tr><th>时间</th><th>操作</th><th>数量</th><th>操作人</th><th>备注</th></tr></thead><tbody><tr v-for="event in batch.history" :key="event.id"><td>{{ formatDate(event.occurredAt,true) }}</td><td>{{ event.operationName || productionMovementLabels[event.kind] || '流程记录' }}</td><td>{{ formatNumber(event.quantity) }}</td><td><PersonName :name="event.actorName || displayUserName(event.actor)" /></td><td>{{ event.note || '—' }}</td></tr></tbody></table>
         </section>
       </template>
     </el-drawer>
@@ -831,17 +836,17 @@ onBeforeUnmount(() => {
 .procurement-tracking__heading :deep(.el-button){font-size:11px}
 .procurement-tracking__filters{display:flex;flex-wrap:nowrap;align-items:center;gap:4px;flex:0 0 auto;margin:0;white-space:nowrap}
 .procurement-tracking__brand-filter{width:80px;flex:0 0 80px}
-.procurement-tracking__brand-filter{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,var(--pdm-surface));color:var(--pdm-text);font:inherit;font-size:11px;padding:0 8px;min-width:0}
+.procurement-tracking__brand-filter{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:999px;background:var(--pdm-panel,var(--pdm-surface));color:var(--pdm-text);font:inherit;font-size:11px;padding:0 8px;min-width:0}
 .procurement-tracking__brand-filter::-webkit-calendar-picker-indicator{display:none}
 .procurement-tracking__kind-filter{display:flex;width:80px;max-width:100%;height:30px;box-sizing:border-box;flex:0 0 80px;align-items:center;color:var(--pdm-text);font:inherit;font-size:11px;min-width:0;cursor:pointer}
 .procurement-tracking__kind-filter select{box-sizing:border-box;min-width:0;width:100%;height:100%;padding:0 5px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,var(--pdm-surface));color:inherit;font:inherit;font-size:11px;appearance:none;-webkit-appearance:none;cursor:pointer}
 .procurement-tracking__kind-filter select:focus{outline:0}
 .procurement-tracking__movement{white-space:pre-line;line-height:18px;display:block}
 .procurement-tracking__movement.is-transfer{color:var(--pdm-orange)}
-.procurement-tracking__movement.is-stockin{color:var(--pdm-blue)}
+.procurement-tracking__movement.is-stockin{ color:var(--pdm-text)}
 .procurement-tracking__search{height:30px;box-sizing:border-box;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,var(--pdm-surface));color:var(--pdm-text);font:inherit;font-size:11px;padding:0 8px;min-width:0}
-.procurement-tracking__multi-filter{display:flex;width:80px;max-width:100%;height:30px;box-sizing:border-box;flex:0 0 80px;align-items:center;padding:0 5px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,var(--pdm-surface));color:var(--pdm-text);font:inherit;font-size:11px;cursor:pointer}.procurement-tracking__multi-filter>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.procurement-tracking__multi-filter.has-value{border-color:var(--pdm-blue);color:var(--pdm-blue)}.procurement-tracking__search{width:168px;max-width:100%;flex:0 0 168px}
-.procurement-tracking__multi-options{display:grid;gap:7px;max-height:260px;overflow:auto}.procurement-tracking__multi-options label{display:flex;align-items:center;gap:7px;color:var(--pdm-text);font-size:11px}.procurement-tracking__multi-options>span{color:var(--pdm-muted);font-size:11px}.procurement-tracking__multi-options>button{justify-self:end;border:0;background:transparent;color:var(--pdm-blue);font-size:11px;cursor:pointer}
+.procurement-tracking__multi-filter{display:flex;width:80px;max-width:100%;height:30px;box-sizing:border-box;flex:0 0 80px;align-items:center;padding:0 5px;border:1px solid var(--pdm-border);border-radius:4px;background:var(--pdm-panel,var(--pdm-surface));color:var(--pdm-text);font:inherit;font-size:11px;cursor:pointer}.procurement-tracking__multi-filter>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.procurement-tracking__multi-filter.has-value{border-color:var(--pdm-blue); color:var(--pdm-text)}.procurement-tracking__search{width:168px;max-width:100%;flex:0 0 168px}
+.procurement-tracking__multi-options{display:grid;gap:7px;max-height:260px;overflow:auto}.procurement-tracking__multi-options label{display:flex;align-items:center;gap:7px;color:var(--pdm-text);font-size:11px}.procurement-tracking__multi-options>span{color:var(--pdm-muted);font-size:11px}.procurement-tracking__multi-options>button{justify-self:end;border:0;background:transparent; color:var(--pdm-text);font-size:11px;cursor:pointer}
 .procurement-tracking__delay-filter{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--pdm-text);white-space:nowrap}
 .procurement-tracking__filters .el-button{height:30px;margin:0;white-space:nowrap}
 .procurement-tracking__warehouse-list{display:flex;flex-direction:column;max-height:60vh;overflow:auto}
@@ -852,7 +857,7 @@ onBeforeUnmount(() => {
 
 .procurement-tracking :deep(.el-button:not(.is-link):not(.is-circle):not(.el-button--text):not([aria-label])),:global(.procurement-tracking-dialog .el-button:not(.is-link):not(.is-circle):not(.el-button--text):not([aria-label])){box-sizing:border-box;width:60px;min-width:60px!important;flex:0 0 60px;padding-inline:3px!important;font-size:11px}
 .procurement-tracking__multi-options>button{width:60px;min-width:60px}
-.procurement-tracking__files-link { padding:0; border:0; background:transparent; box-shadow:none; color:var(--pdm-theme-accent); font:inherit; cursor:pointer; }
+.procurement-tracking__files-link { padding:0; border:0; background:transparent; box-shadow:none; color:var(--pdm-text); font:inherit; cursor:pointer; }
 .procurement-tracking__files-link:hover,.procurement-tracking__files-link:focus-visible { outline:none; text-decoration:underline; }
 </style>
 
@@ -886,4 +891,12 @@ onBeforeUnmount(() => {
 .procurement-stats-card.is-warning .procurement-stats-card__value { color: var(--pdm-orange); }
 .procurement-stats-card.is-danger { border-left-color: var(--pdm-danger); }
 .procurement-stats-card.is-danger .procurement-stats-card__value { color: var(--pdm-danger); }
+</style>
+
+<style scoped>
+@layer pdm-button-sizing {
+  :root body .procurement-tracking .procurement-tracking__heading,
+  :root body .procurement-tracking .procurement-tracking__heading :deep(:is(button,input,select,label,span,small)),
+  :root body .procurement-tracking .procurement-tracking__heading :deep(button::after) { font-size:13px !important; }
+}
 </style>

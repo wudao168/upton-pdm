@@ -3,8 +3,9 @@ import { computed, onBeforeUnmount, onMounted, onUpdated, ref } from 'vue'
 import { Boxes, ClipboardCheck, Clock, FileCode, FileText, FolderKanban, LayoutDashboard, Library, Settings } from '../solidMenuIcons'
 import { repairMojibake } from '../mojibake'
 import navBrandLogo from '../assets/upton-horizontal-brand-white.png'
+import type { NavigationKey } from '../navigationAccess'
 
-type NavKey = 'work-hours' | 'project-applications' | 'project-calendar' | 'project-center' | 'project-workbench' | 'projects' | 'production-drawings' | 'materials' | 'standard-library' | 'stocked-materials' | 'standard-structure' | 'program-templates' | 'tasks' | 'admin'
+type NavKey = NavigationKey
 
 type SystemReleaseHistoryEntry = {
   Version?: string
@@ -72,7 +73,7 @@ function updateHighlight() {
   }
   const rootBounds = root.getBoundingClientRect()
   const x = bounds.left - rootBounds.left, y = bounds.top - rootBounds.top
-  const width = Math.max(bounds.width, rootBounds.width - x)
+  const width = bounds.width
   const navBounds = target.closest('nav')?.getBoundingClientRect()
   const geometry = `${x},${y},${width},${bounds.height},${rootBounds.height},${navBounds?.top},${navBounds?.bottom}`
   if (geometry === lastHighlightGeometry && lastHighlightedKey === props.active && !motionPreference?.matches) return
@@ -198,19 +199,20 @@ async function openVersionInfo() {
 }
 
 const groups = [
-  { key: 'primary', label: '', items: [
-    { key: 'project-workbench', label: '项目总览', icon: LayoutDashboard, iconColor: '#5d8ce8' },
-    { key: 'project-center', label: '项目中心', icon: FolderKanban, iconColor: '#329f96' },
-    { key: 'work-hours', label: '工时管理', icon: Clock, iconColor: '#d6a03a' },
-    { key: 'tasks', label: '我的待办', icon: ClipboardCheck, iconColor: '#a37bd2' },
+  { key: 'primary', label: '项目', items: [
+    { key: 'project-workbench', label: '项目总览', icon: LayoutDashboard, iconColor: '#3e63dd' },
+    { key: 'project-center', label: '项目中心', icon: FolderKanban, iconColor: '#12a594' },
+    { key: 'work-hours', label: '工时管理', icon: Clock, iconColor: '#f5a524' },
+    { key: 'tasks', label: '我的待办', icon: ClipboardCheck, iconColor: '#8e4ec6' },
   ] },
   { key: 'production', label: '生产', items: [
-    { key: 'production-drawings', label: '制造中心', icon: FileText, iconColor: '#e88454' },
+    { key: 'production-drawings', label: '制造中心', icon: FileText, iconColor: '#f76b15' },
+    { key: 'spare-parts', label: '备品备件', icon: Boxes, iconColor: '#0d9469' },
   ] },
   { key: 'standardization', label: '标准化', items: [
-    { key: 'standard-library', label: '标准物料', icon: Library, iconColor: '#7aa94f' },
-    { key: 'program-templates', label: '标准程序', icon: FileCode, iconColor: '#45a4cc' },
-    { key: 'materials', label: '料品管理', icon: Boxes, iconColor: '#d77094' },
+    { key: 'standard-library', label: '标准物料', icon: Library, iconColor: '#30a46c' },
+    { key: 'program-templates', label: '标准程序', icon: FileCode, iconColor: '#0090ff' },
+    { key: 'materials', label: '料品管理', icon: Boxes, iconColor: '#d6409f' },
   ] },
 ] satisfies Array<{ key: string; label: string; items: Array<{ key: NavKey; label: string; icon: typeof FolderKanban; iconColor: string }> }>
 const visibleGroups = computed(() => groups.map(group => ({ ...group, items: group.items.filter(item =>
@@ -234,6 +236,7 @@ const visibleGroups = computed(() => groups.map(group => ({ ...group, items: gro
           type="button"
           class="pdm-nav-item"
           :class="{ 'is-active': props.active === item.key }"
+          :style="{ '--pdm-nav-icon-color': item.iconColor }"
           :aria-current="props.active === item.key ? 'page' : undefined"
           :aria-label="props.collapsed ? item.key === 'work-hours' ? workHoursHint : item.label : undefined"
           :title="item.key === 'work-hours' && props.workHoursCount > 0 ? workHoursHint : props.collapsed ? item.label : undefined"

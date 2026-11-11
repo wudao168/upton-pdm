@@ -8,8 +8,11 @@ $updaterType = $assembly.GetType('Upton.Pdm.ClientShared.ClientPackageUpdater', 
 $buildArguments = $updaterType.GetMethod('BuildUpdaterArguments', [Reflection.BindingFlags]'NonPublic,Static')
 if (-not $buildArguments) { throw 'Build the updated plugin before running this test.' }
 $root = Join-Path $projectRoot ('tmp\handoff-test-' + [Guid]::NewGuid().ToString('N'))
-foreach ($scenario in @('success', 'version', 'hash', 'rollback')) {
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+foreach ($scenario in @('success', 'version', 'hash', 'rollback', 'plugin-archive', 'plugin-bad-archive')) {
     $invalidVersion = $scenario -eq 'version'
+    $pluginArchive = $scenario -like 'plugin-*'
+    $expectSuccess = $scenario -in @('success', 'plugin-archive')
     $caseRoot = Join-Path $root ($scenario + "-quote'-unicode-" + [char]0x4E2D)
     $target = Join-Path $caseRoot 'target'
     $payload = Join-Path $caseRoot 'payload'
@@ -25,7 +28,16 @@ foreach ($scenario in @('success', 'version', 'hash', 'rollback')) {
     $hashes = @{}
     Get-ChildItem -LiteralPath $payload -File | ForEach-Object { $hashes[$_.Name] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
     if ($scenario -eq 'hash') { [IO.File]::WriteAllText((Join-Path $payload 'updated.txt'), 'corrupted download') }
-    $pending = @{Component='desktop'; Version='2026.09.30.1459'; PayloadDirectory=$payload; TargetDirectory=$target; FileHashes=$hashes} | ConvertTo-Json -Compress
+    $state = @{Component='desktop'; Version='2026.09.30.1459'; PayloadDirectory=$payload; TargetDirectory=$target; FileHashes=$hashes}
+    if ($pluginArchive) {
+        $zip = Join-Path $caseRoot 'package.zip'
+        [IO.Compression.ZipFile]::CreateFromDirectory($payload, $zip)
+        $state.Component = 'solidworks-addin'
+        $state.PackageSha256 = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+        [IO.File]::WriteAllText((Join-Path $payload '.uplm-version'), 'corrupted cache')
+        if ($scenario -eq 'plugin-bad-archive') { [IO.File]::WriteAllText($zip, 'corrupted download') }
+    }
+    $pending = $state | ConvertTo-Json -Compress
     $arguments = $buildArguments.Invoke($null, [object[]]@(0, $pendingPath.ToString(), ($pendingPath + '.launched'), '', $pending.ToString()))
     if ($scenario -eq 'rollback') {
         # Fault injection: candidate hashes pass, installed-file hashes fail after the directory swap.
@@ -41,7 +53,7 @@ foreach ($scenario in @('success', 'version', 'hash', 'rollback')) {
     if (-not $process.WaitForExit(30000)) { throw 'Installer timed out.' }
     if ($process.ExitCode -ne 0) { throw "Installer exited with $($process.ExitCode)" }
     $installed = (Get-Content -LiteralPath (Join-Path $target '.uplm-version') -Raw).Trim()
-    if ($scenario -ne 'success') {
+    if (!$expectSuccess) {
         if ($installed -ne '2026.09.30.1417' -or -not (Test-Path -LiteralPath ($pendingPath + '.error.txt'))) { throw 'Invalid package was not rejected with an error.' }
         if ($scenario -eq 'rollback' -and (Test-Path -LiteralPath (Join-Path $target 'updated.txt'))) { throw 'Failed new files remained after rollback.' }
         Write-Output "PASS: $scenario failure retains/restores the old installation and records an error."
@@ -49,7 +61,7 @@ foreach ($scenario in @('success', 'version', 'hash', 'rollback')) {
         if ($installed -ne '2026.09.30.1459' -or (Test-Path -LiteralPath $pendingPath)) { throw 'Update did not finish.' }
         if ((Get-Content -LiteralPath (Join-Path $target 'uplm-bootstrap.json') -Raw) -notmatch '192.168.2.8:5173') { throw 'Server address was lost.' }
         if (-not (Test-Path -LiteralPath (Join-Path $target 'updated.txt'))) { throw 'Payload was not installed.' }
-        Write-Output 'PASS: in-memory handoff updates despite unreadable pending JSON, without a disk script; quoted Unicode paths and empty restart path work.'
+        Write-Output "PASS: $scenario update verified and retained the server address."
     }
     $process.Dispose()
 }

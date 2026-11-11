@@ -71,11 +71,15 @@ public static class PermissionCodes
     public const string StandardLibraryManage = "standard-library.manage";
     public const string MaterialRelationView = "material-relation.view";
     public const string MaterialRelationManage = "material-relation.manage";
+    public const string MaterialRelationActivity = "material-relation.activity";
+    public const string MaterialRelationDelete = "material-relation.delete";
+    public const string EngineeringKitDelete = "engineering-kit.delete";
     public const string MaterialRelationPublish = "material-relation.publish";
     public const string CustomerSettingsManage = "settings.customer.manage";
     public const string OrganizationSettingsManage = "settings.organization.manage";
     public const string FolderSettingsManage = "settings.folder.manage";
     public const string StorageSettingsManage = "settings.storage.manage";
+    public const string DingTalkSelfBind = "account.dingtalk.bind";
     public const string RoleSettingsView = "system.role.view";
     public const string RoleSettingsEdit = "system.role.edit";
     public const string ProjectPermissionSettingsView = "system.project-permission.view";
@@ -107,14 +111,17 @@ public static class RolePermissionCatalog
         new(PermissionCodes.QualityFinalAcceptanceUpload, "上传终验收资料", "质量资料", Sensitive: true),
         new(PermissionCodes.ProjectView, "查看项目清单", "项目管理", "查看当前公司项目元数据；项目图档与业务内容仍按内容权限和项目分工控制。"),
         new(PermissionCodes.ProjectCreate, "创建主项目", "项目管理"),
-        new(PermissionCodes.ProjectApplicationSubmit, "发起立项申请", "立项申请", "填写、提交及撤回本人立项申请。"),
+        new(PermissionCodes.ProjectApplicationSubmit, "发起立项申请", "立项申请", "填写、提交及撤回本人立项申请，补齐本人特殊立项的合同资料。")
+        {
+            Routes = [new("PUT", "/api/project-applications/{id}/contract")]
+        },
         new(PermissionCodes.ProjectApplicationApprove, "审批立项申请", "立项申请", "查看本公司申请，批准建项或退回修改。", Sensitive: true),
         new(PermissionCodes.ProjectEdit, "编辑项目基本信息", "项目管理", "可修改创建项目时填写的业务信息；涉及编号字段时由系统校验并重新生成。"),
         new(PermissionCodes.ProjectChildCreate, "创建子项目", "项目管理"),
         new(PermissionCodes.ProjectDelete, "删除空项目", "项目管理", "仅可删除无子项目、图档、BOM、结构快照及审批发布包的项目；成功删除后释放系统编号。", Sensitive: true),
         new(PermissionCodes.ProjectExecutionAssign, "分配执行事业部", "项目分工", "仅可分配本人所属公司的项目。"),
-        new(PermissionCodes.ProjectStaffingManage, "配置项目经理与设计负责人", "项目分工", "仅项目经理或执行事业部负责人可维护，项目经理不能修改自己的分配。"),
-        new(PermissionCodes.ProjectDesignerAssign, "分配执行工程师", "项目分工", "事业部负责人、机械主管、当前项目经理或主设可在本人负责范围内配置。"),
+        new(PermissionCodes.ProjectStaffingManage, "配置项目经理与设计负责人", "项目分工", "管理员、所属公司计划管理、项目经理或执行事业部负责人可维护，普通项目经理不能修改自己的分配。"),
+        new(PermissionCodes.ProjectDesignerAssign, "分配设计人员", "项目分工", "事业部负责人、机械主管、当前项目经理或主设计可在本人负责范围内配置。"),
         new(PermissionCodes.ProjectContentView, "查看项目图档与业务内容", "项目内容", "拥有此权限的角色可查看所属公司内项目的图档、BOM、发布和版本内容。"),
         new(PermissionCodes.ProjectContentReset, "重置项目内容", "项目内容", "仅管理员可在项目从未发布且未同步外部系统时，将项目内容整体重置并保留30天恢复快照。", Sensitive: true),
         new(PermissionCodes.DocumentEdit, "登记、签出和存档图档", "项目内容", Sensitive: true),
@@ -161,10 +168,12 @@ public static class RolePermissionCatalog
         new(PermissionCodes.OrganizationSettingsManage, "维护公司与组织结构", "系统设置", Sensitive: true),
         new(PermissionCodes.FolderSettingsManage, "维护文件夹模板与目录权限", "系统设置", Sensitive: true),
         new(PermissionCodes.StorageSettingsManage, "维护编号、设备类型和存储位置", "系统设置", Sensitive: true),
-        new(PermissionCodes.RoleSettingsView, "查看角色权限", "角色权限"),
-        new(PermissionCodes.RoleSettingsEdit, "修改角色权限", "角色权限", Sensitive: true),
-        new(PermissionCodes.ProjectPermissionSettingsView, "查看项目权限设置", "项目权限"),
-        new(PermissionCodes.ProjectPermissionSettingsEdit, "修改项目权限设置", "项目权限", Sensitive: true),
+        new(PermissionCodes.DingTalkSelfBind, "自助绑定本人钉钉", "个人设置", "当前公司内已登录员工绑定本人的钉钉账号。须通过企业应用验证并由本人确认，不能替他人绑定或覆盖已有绑定。", Sensitive: true)
+        { Scope = "company", Action = "edit" },
+        new(PermissionCodes.RoleSettingsView, "查看权限中心", "权限中心"),
+        new(PermissionCodes.RoleSettingsEdit, "维护权限中心", "权限中心", Sensitive: true),
+        new(PermissionCodes.ProjectPermissionSettingsView, "查看历史项目岗位目录", "项目分工", "供计划模板引用已有自定义项目岗位，不包含权限配置。"),
+        new(PermissionCodes.ProjectPermissionSettingsEdit, "历史项目权限写入（已停用）", "系统内部", Sensitive: true) { Hidden = true },
         new(PermissionCodes.AuditView, "查看全局审计", "系统审计", Sensitive: true)
     ]);
 
@@ -194,12 +203,13 @@ public static class RolePermissionCatalog
                 PermissionCodes.ProgramTemplateView,
                 PermissionCodes.StandardLibraryView,
                 PermissionCodes.MaterialRelationView),
-            [UserRole.PlanningManager] = Set(PermissionCodes.ProjectBudgetView, PermissionCodes.ProjectBudgetEdit, PermissionCodes.ProjectView, PermissionCodes.ProjectExecutionAssign, PermissionCodes.ProjectContentView, PermissionCodes.ProgramTemplateView),
+            [UserRole.PlanningManager] = Set(PermissionCodes.ProjectStaffingManage, PermissionCodes.ProjectBudgetView, PermissionCodes.ProjectBudgetEdit, PermissionCodes.ProjectView, PermissionCodes.ProjectExecutionAssign, PermissionCodes.ProjectContentView, PermissionCodes.ProgramTemplateView),
             [UserRole.ProcessReviewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialView, PermissionCodes.MaterialManage, PermissionCodes.MaterialRelationView, PermissionCodes.MaterialRelationManage, PermissionCodes.ValidationCatalogManage),
             [UserRole.Approver] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateApprove, PermissionCodes.StandardLibraryView, PermissionCodes.MaterialView, PermissionCodes.MaterialManage, PermissionCodes.MaterialRelationView, PermissionCodes.MaterialRelationManage, PermissionCodes.MaterialRelationPublish, PermissionCodes.ValidationCatalogManage),
             [UserRole.ProductionViewer] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProgramTemplateView),
             [UserRole.BusinessUnitManager] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ValidationPlanEdit, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ApprovalEmergencySubstitute, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateReview),
-            [UserRole.Administrator] = Set(Permissions.Select(permission => permission.Code).ToArray()),
+            [UserRole.Administrator] = Set(Permissions.Select(permission => permission.Code)
+                .Where(code => !FunctionPermissionCatalog.RequiresExplicitGrant(code)).ToArray()),
             [UserRole.PlatformAdministrator] = Set(
                 PermissionCodes.ProjectPlanTemplateManage,
                 PermissionCodes.CustomerSettingsManage,
@@ -230,6 +240,7 @@ public static class RolePermissionCatalog
         new("PresalesEngineer", "售前工程师", "负责项目前期资料的提供，参与评审。", UserRole.ProductionViewer, true),
         new("SalesManager", "销售经理", "查看自己当前项目的状态。", UserRole.ProductionViewer, true),
         new("Finance", "财务", "登记项目实际成本及实际工时。", UserRole.ProductionViewer, true),
+        new("CompanyExecutive", "公司高管", "查看所属公司授权项目的实际成本；不自动获得预算金额权限。", UserRole.ProductionViewer, true),
         new("SupplyChain", "供应链", "查看负责范围内的项目、BOM和生产资料。", UserRole.ProductionViewer, true),
         new("ProcurementSpecialist", "采购专员", "查看负责范围内的项目、BOM和采购资料。", UserRole.ProductionViewer, true),
         new("ProcurementManager", "采购经理", "查看采购资料并处理分配的审批任务。", UserRole.Approver, true),
@@ -269,6 +280,7 @@ public static class RolePermissionCatalog
             ["PresalesEngineer"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView),
             ["SalesManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView),
             ["Finance"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView, PermissionCodes.ProjectBudgetActualEdit),
+            ["CompanyExecutive"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.ProjectBudgetView),
             ["SupplyChain"] = Defaults[UserRole.ProductionViewer],
             ["ProcurementSpecialist"] = Defaults[UserRole.ProductionViewer],
             ["ProcurementManager"] = Set(PermissionCodes.ProjectView, PermissionCodes.ProjectContentView, PermissionCodes.DrawingReviewAnnotate, PermissionCodes.DrawingReviewDecide, PermissionCodes.ApprovalDecide, PermissionCodes.ProgramTemplateView, PermissionCodes.ProgramTemplateApprove, PermissionCodes.StandardLibraryView),
@@ -312,7 +324,7 @@ public static class RolePermissionCatalog
         }
         if (roleCode is "PlanningManager") { permissions.Add(PermissionCodes.ProjectBudgetReserve); permissions.Add(PermissionCodes.ProjectBudgetSettlementEdit); permissions.Add(PermissionCodes.ProjectBudgetBonusRateEdit); }
         if (roleCode is "SalesAssistant") { permissions.Add(PermissionCodes.ProjectBudgetSettlementEdit); permissions.Add(PermissionCodes.ProjectApplicationSubmit); }
-        if (roleCode is "PlanningManager") permissions.Add(PermissionCodes.ProjectApplicationApprove);
+        if (roleCode is "PlanningManager") { permissions.Add(PermissionCodes.ProjectApplicationApprove); permissions.Add(PermissionCodes.ProjectStaffingManage); }
         if (roleCode is "SupplyChain" or "ProcurementManager") permissions.Add(PermissionCodes.ProductionAssign);
         if (roleCode is "ProductionManager" or "ProductionAssistant" or "MachiningSupervisor" or "MachiningOperator") permissions.Add(PermissionCodes.ProductionExecute);
         if (roleCode is "ProductionManager" or "ProductionAssistant" or "MachiningSupervisor") permissions.Add(PermissionCodes.ProductionSchedule);

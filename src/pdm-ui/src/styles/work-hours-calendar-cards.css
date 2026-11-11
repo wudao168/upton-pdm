@@ -1,0 +1,104 @@
+/* 与项目日历保持相同的卡片、间距和主题色；工时编辑及拖拽行为不变。 */
+.work-hours {
+  --wh-calendar-board: #f7f7f7;
+  --wh-calendar-day: #fff;
+  --wh-calendar-outside: #ebebeb;
+  --wh-calendar-inside: #d1fae5;
+  --wh-calendar-offsite: #fdf0cd;
+}
+:root[data-pdm-color-scheme="dark"] .work-hours {
+  --wh-calendar-board: #202020;
+  --wh-calendar-day: #292929;
+  --wh-calendar-outside: #242424;
+  --wh-calendar-inside: #213e33;
+  --wh-calendar-offsite: #44391e;
+}
+@layer pdm-button-sizing {
+  :root body .work-hours .wh-calendar-layout { flex: none !important; align-items: stretch !important; gap: 16px !important; }
+  :root body .work-hours .wh-calendar {
+    padding: 16px !important; border: 0 !important; border-radius: 24px !important;
+    background: var(--wh-calendar-board) !important; min-height: 0 !important;
+  }
+  :root body .work-hours .wh-weekdays { gap: 5px !important; }
+  :root body .work-hours .wh-weekdays span { background: transparent !important; color: var(--pdm-muted) !important; padding: 6px 0 12px !important; font-size: 13px !important; }
+  :root body .work-hours .wh-day-grid { gap: 5px !important; flex: none !important; grid-template-rows: repeat(6,116px) !important; }
+  :root body .work-hours .wh-day.wh-day {
+    box-sizing: border-box !important; width: 100% !important; min-width: 0 !important;
+    height: 116px !important; min-height: 116px !important; max-height: 116px !important;
+    padding: 6px !important; gap: 3px !important; border: 0 !important; border-radius: 16px !important;
+    display: flex !important; flex-direction: column !important; align-items: stretch !important;
+    justify-content: flex-start !important; text-align: left !important; white-space: normal !important;
+    background: var(--wh-calendar-day) !important; color: var(--pdm-text) !important;
+    box-shadow: 0 1px 1px var(--pdm-shadow) !important; overflow: hidden !important;
+    transition: box-shadow 150ms ease, background-color 150ms ease !important;
+  }
+  :root body .work-hours .wh-day.wh-day::before, :root body .work-hours .wh-day.wh-day::after { display: none !important; }
+  :root body .work-hours .wh-day.outside { background: var(--wh-calendar-outside) !important; color: var(--pdm-muted) !important; opacity: 1 !important; }
+  :root body .work-hours .wh-day:hover { box-shadow: inset 0 0 0 1px var(--pdm-border) !important; }
+  :root body .work-hours .wh-day.selected, :root body .work-hours .wh-day.is-drop-target { box-shadow: inset 0 0 0 2px var(--pdm-theme-accent) !important; }
+  :root body .work-hours .wh-day:focus-visible { outline: 2px solid var(--pdm-theme-accent) !important; outline-offset: -2px !important; }
+  :root body .work-hours .wh-day.is-drag-source, :root body .work-hours .wh-day.is-cut { opacity: .6 !important; }
+  :root body .work-hours .wh-day-heading { display: flex !important; align-items: center !important; justify-content: space-between !important; gap: 3px !important; flex: none !important; min-height: 24px !important; }
+  :root body .work-hours .wh-date { min-width: 0 !important; flex-wrap: nowrap !important; gap: 3px !important; font-size: 13px !important; font-weight: 400 !important; }
+  :root body .work-hours .wh-date-number { display: inline-flex !important; align-items: center !important; justify-content: center !important; width: 24px !important; height: 24px !important; flex-shrink: 0 !important; }
+  :root body .work-hours .wh-day.today .wh-date-number { border-radius: 50% !important; background: var(--pdm-theme-accent) !important; color: #fff !important; }
+  :root body .work-hours .wh-day-heading > b { font-size: 12px !important; font-weight: 500 !important; white-space: nowrap !important; color: var(--pdm-muted) !important; }
+  :root body .work-hours .wh-day-records { flex: 0 1 auto !important; margin-top: auto !important; gap: 3px !important; font-size: 12px !important; scrollbar-width: thin; }
+  :root body .work-hours .wh-day-record {
+    box-sizing: border-box !important; height: 16px !important; min-height: 16px !important;
+    line-height: 16px !important; padding: 0 5px !important; border-radius: 7px !important;
+    background: var(--wh-calendar-inside) !important; color: var(--pdm-text) !important;
+    font-size: 12px !important; align-items: center !important; flex-wrap: nowrap !important;
+  }
+  :root body .work-hours .wh-day-record.outside { background: var(--wh-calendar-offsite) !important; }
+  :root body .work-hours .wh-day-project { flex: 1 !important; display: block !important; overflow: hidden !important; text-overflow: ellipsis !important; white-space: nowrap !important; }
+  :root body .work-hours .wh-day-project-name { margin-left: 4px !important; }
+  :root body .work-hours .wh-day-record-hours { margin-left: 0 !important; font-size: 12px !important; }
+  :root body .work-hours .wh-day-status { margin-top: auto !important; font-size: 12px !important; line-height: 16px !important; text-align: left !important; }
+  :root body .work-hours .wh-day-records + .wh-day-status { margin-top: 0 !important; }
+  :root body .work-hours .wh-day-editor { border-radius: 16px !important; }
+  @media (min-width: 1101px) {
+    :root body .work-hours .wh-calendar-layout { grid-template-columns: 400px minmax(0, 1fr) !important; }
+    :root body .work-hours .wh-day-editor { min-height: 0 !important; align-self: stretch !important; contain: size; overflow: auto !important; }
+  }
+  @media (max-width: 760px) {
+    :root body .work-hours .wh-calendar { padding: 8px !important; border-radius: 16px !important; }
+    :root body .work-hours .wh-day.wh-day { padding: 4px !important; border-radius: 10px !important; }
+    :root body .work-hours .wh-day-heading { flex-wrap: wrap !important; gap: 0 !important; }
+  }
+  @media (prefers-reduced-motion: reduce) { :root body .work-hours .wh-day.wh-day { transition: none !important; } }
+}
+
+/* 参考 Uiverse.io / risabbir 的双面翻转圆形图标；状态来自已保存的工时。 */
+@layer pdm-button-sizing {
+  :root body .work-hours .wh-day.wh-day { position: relative !important; }
+  :root body .work-hours .wh-day-indicator {
+    position: absolute; inset: 50% auto auto 50%; width: 32px; height: 32px;
+    transform: translate(-50%, -50%); pointer-events: none;
+  }
+  :root body .work-hours .wh-day-indicator__flip {
+    position: relative; display: block; width: 100%; height: 100%; perspective: 1000px;
+    transition: transform 400ms ease;
+  }
+  :root body .work-hours .wh-day-indicator__front,
+  :root body .work-hours .wh-day-indicator__back {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    border-radius: 50%; backface-visibility: hidden; transition: transform 300ms ease;
+    box-shadow: 0 2px 4px #0000001a;
+  }
+  :root body .work-hours .wh-day-indicator__front { background: linear-gradient(135deg, #ff6347, #f76c6c); transform: rotateY(0deg); }
+  :root body .work-hours .wh-day-indicator__back { background: linear-gradient(135deg, #10b981, #34d399); transform: rotateY(180deg); }
+  :root body .work-hours .wh-day-indicator.is-filled .wh-day-indicator__front { transform: rotateY(180deg); }
+  :root body .work-hours .wh-day-indicator.is-filled .wh-day-indicator__back { transform: rotateY(0deg); }
+  :root body .work-hours .wh-day-indicator svg { width: 20px; height: 20px; fill: none; stroke: #fff; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  :root body .work-hours .wh-day:hover .wh-day-indicator__flip,
+  :root body .work-hours .wh-day:focus-visible .wh-day-indicator__flip { transform: scale(1.1); }
+  :root body .work-hours .wh-day.outside .wh-day-indicator { opacity: .45; }
+  :root body .work-hours .wh-day-records { max-height: 35px !important; }
+  :root body .work-hours .wh-day-records:has(+ .wh-day-status) { max-height: 16px !important; }
+  @media (prefers-reduced-motion: reduce) {
+    :root body .work-hours .wh-day-indicator__flip,
+    :root body .work-hours .wh-day-indicator__front,
+    :root body .work-hours .wh-day-indicator__back { transition: none !important; }
+  }
+}

@@ -9,6 +9,7 @@ public sealed class MaterialBrandServiceTests
     public async Task CatalogEnforcesPermissionUniquenessVersionsAndActiveSelections()
     {
         var pdm = new InMemoryPdmRepository(TimeProvider.System);
+        await PermissionTestUsers.Ensure(pdm, ("admin", UserRole.Administrator), ("engineer", UserRole.Engineer));
         var service = new MaterialBrandService(new InMemoryMaterialBrandRepository(), pdm, TimeProvider.System);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveAsync(null, "品牌", true, null, "engineer", UserRole.Engineer, default));
         var brand = await service.SaveAsync(null, " UPTON ", true, null, "admin", UserRole.Administrator, default);

@@ -13,6 +13,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     private readonly string connectionString;
     private readonly TimeProvider timeProvider;
     private readonly IProjectContactInformationRepository? projectContacts;
+    public Task<ProjectContactInformation?> FindProjectContactInformationAsync(Guid projectId, CancellationToken ct) =>
+        projectContacts?.FindAsync(projectId, ct) ?? Task.FromResult<ProjectContactInformation?>(null);
     private readonly JsonSerializerOptions jsonOptions = new(JsonSerializerDefaults.Web);
 
     public MySqlPdmRepository(IOptions<PdmDatabaseOptions> options, TimeProvider timeProvider, IProjectContactInformationRepository? projectContacts = null)
@@ -79,21 +81,12 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         var user = await FindUserAsync(actor, cancellationToken);
         var visibleProjects = new List<Project>();
         foreach (var project in projects)
-            if (await CommercialProjectAccess.CanReadAsync(project, user, actor, role, projectContacts, cancellationToken)) visibleProjects.Add(project);
+            visibleProjects.Add(project);
         projects = visibleProjects;
         var permissions = await GetUserPermissionsAsync(actor, role, cancellationToken);
         var projectPermissions = await GetProjectPermissionSettingsAsync(cancellationToken);
         await using var connection = await OpenAsync(cancellationToken);
         var capabilities = await ApplyCapabilitiesAsync(connection, projects, actor, permissions, projectPermissions, cancellationToken);
-        if (role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true)
-        {
-            return projects.Zip(capabilities, (project, capability) => ApplyAdministratorCapabilities(project) with
-            {
-                CanManageMainStaffing = role == UserRole.Administrator ? project.ParentProjectId is null && project.ExecutionUnitId is not null : capability.CanManageMainStaffing,
-                CanAssignDesigners = role == UserRole.Administrator ? project.ExecutionUnitId is not null : capability.CanAssignDesigners
-            }).ToArray();
-        }
-
         return capabilities;
     }
 
@@ -109,34 +102,28 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         if (!await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, ct)) return null;
         var project = (await ReadProjectsAsync(projectId, ct)).SingleOrDefault();
         var user = await FindUserAsync(actor, ct);
-        if (project is null || !await CommercialProjectAccess.CanReadAsync(project, user, actor, role, projectContacts, ct)) return null;
+        if (project is null) return null;
         var scope = new List<Project> { project };
         if ((project.RootProjectId ?? project.ParentProjectId) is Guid rootId && rootId != project.Id)
         {
             var root = (await ReadProjectsAsync(rootId, ct)).SingleOrDefault();
-            if (root is not null && await CommercialProjectAccess.CanReadAsync(root, user, actor, role, projectContacts, ct)) scope.Add(root);
+            if (root is not null) scope.Add(root);
         }
         var permissions = await GetUserPermissionsAsync(actor, role, ct);
         var settings = await GetProjectPermissionSettingsAsync(ct);
         await using var connection = await OpenAsync(ct);
-        var capability = (await ApplyCapabilitiesAsync(connection, scope, actor, permissions, settings, ct)).First(item => item.Id == projectId);
-        return role == UserRole.Administrator || TenantContext.Current?.HasRole("developer") == true
-            ? ApplyAdministratorCapabilities(project) with { CanManageMainStaffing = role == UserRole.Administrator ? project.ParentProjectId is null && project.ExecutionUnitId is not null : capability.CanManageMainStaffing, CanAssignDesigners = role == UserRole.Administrator ? project.ExecutionUnitId is not null : capability.CanAssignDesigners }
-            : capability;
+        var capability = (await ApplyCapabilitiesAsync(connection, scope, actor, permissions, settings, ct)).FirstOrDefault(item => item.Id == projectId);
+        return capability;
     }
 
     public async Task<bool> HasProjectReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        return await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectView, cancellationToken)
-            && await IsProjectInActiveCompanyAsync(projectId, cancellationToken)
-            && await HasCommercialProjectAccessAsync(projectId, actor, role, cancellationToken);
+        return await AuthorizationPolicy.CanAsync(this, projectId, actor, PermissionCodes.ProjectView, cancellationToken);
     }
 
     public async Task<bool> HasProjectContentReadAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken cancellationToken)
     {
-        return await HasUserPermissionAsync(actor, role, PermissionCodes.ProjectContentView, cancellationToken)
-            && await IsProjectInActiveCompanyAsync(projectId, cancellationToken)
-            && await HasCommercialProjectAccessAsync(projectId, actor, role, cancellationToken);
+        return await AuthorizationPolicy.CanAsync(this, projectId, actor, PermissionCodes.ProjectContentView, cancellationToken);
     }
 
     private async Task<bool> HasCommercialProjectAccessAsync(Guid projectId, string actor, UserRole role, CancellationToken ct)
@@ -204,8 +191,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
                     && TryParseProjectSequence(deletedProject.Code, deletedProject.ProjectTypeCode, deletedProject.ProjectCompanyCode, out var projectSequence))
                 {
                     await connection.ExecuteAsync(new CommandDefinition(
-                        "INSERT IGNORE INTO released_project_number(organization_id,sequence_value,released_at) VALUES(@OrganizationId,@Sequence,@Now)",
-                        new { OrganizationId = deletedProject.OrganizationId.Value, Sequence = projectSequence, Now = timeProvider.GetUtcNow().UtcDateTime }, transaction, cancellationToken: cancellationToken));
+                        "INSERT IGNORE INTO released_project_type_number(organization_id,project_type_code,sequence_value,released_at) VALUES(@OrganizationId,@ProjectTypeCode,@Sequence,@Now)",
+                        new { OrganizationId = deletedProject.OrganizationId.Value, deletedProject.ProjectTypeCode, Sequence = projectSequence, Now = timeProvider.GetUtcNow().UtcDateTime }, transaction, cancellationToken: cancellationToken));
                     if (!string.IsNullOrWhiteSpace(deletedProject.CustomerCode) && deletedProject.CustomerProjectSequence is not null)
                         await connection.ExecuteAsync(new CommandDefinition(
                             "INSERT IGNORE INTO released_customer_project_number(organization_id,customer_code,sequence_value,released_at) VALUES(@OrganizationId,@CustomerCode,@Sequence,@Now)",
@@ -256,7 +243,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             command.Owner,
             command.VaultLocation,
             command.ReleaseLocation,
-            true);
+            true) { OrganizationId = TenantContext.CompanyId };
         var now = timeProvider.GetUtcNow().UtcDateTime;
         await using var connection = await OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -264,10 +251,10 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         {
             await connection.ExecuteAsync(new CommandDefinition(
                 """
-                INSERT INTO project(id,code,name,owner,vault_location,release_location,is_active,row_version,created_at,updated_at)
-                VALUES(@Id,@Code,@Name,@Owner,@VaultLocation,@ReleaseLocation,1,1,@Now,@Now)
+                INSERT INTO project(id,code,name,owner,vault_location,release_location,organization_id,is_active,row_version,created_at,updated_at)
+                VALUES(@Id,@Code,@Name,@Owner,@VaultLocation,@ReleaseLocation,@OrganizationId,1,1,@Now,@Now)
                 """,
-                new { project.Id, project.Code, project.Name, project.Owner, project.VaultLocation, project.ReleaseLocation, Now = now },
+                new { project.Id, project.Code, project.Name, project.Owner, project.VaultLocation, project.ReleaseLocation, project.OrganizationId, Now = now },
                 transaction,
                 cancellationToken: cancellationToken));
             await connection.ExecuteAsync(new CommandDefinition(
@@ -333,6 +320,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         if (currentProjectSequence < currentProject || currentSerialSequence < currentSerial)
             throw new PdmRuleException("流水基线只能向前调整，不能小于系统当前值。");
         await connection.ExecuteAsync(new CommandDefinition("UPDATE project_number_counter SET current_value=@Value WHERE organization_id=@OrganizationId", new { OrganizationId = organizationId, Value = currentProjectSequence }, transaction, cancellationToken: cancellationToken));
+        // 旧版组织基线操作明确将所有现有类型统一向前推进，日常取号仍独立。
+        await connection.ExecuteAsync(new CommandDefinition("INSERT INTO project_type_number_counter(organization_id,project_type_code,current_value) SELECT @OrganizationId,code,@Value FROM project_type_definition ON DUPLICATE KEY UPDATE current_value=GREATEST(current_value,@Value)", new { OrganizationId = organizationId, Value = currentProjectSequence }, transaction, cancellationToken: cancellationToken));
         await connection.ExecuteAsync(new CommandDefinition("UPDATE serial_number_counter SET current_value=@Value WHERE organization_id=@OrganizationId", new { OrganizationId = organizationId, Value = currentSerialSequence }, transaction, cancellationToken: cancellationToken));
         await transaction.CommitAsync(cancellationToken);
         return await GetProjectNumberingOptionsAsync(cancellationToken);
@@ -346,7 +335,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         try
         {
             var application = await LockApplicationApproval(connection, transaction, command, cancellationToken);
-            if (application?.Status == ProjectApplicationService.Approved)
+            if (application?.HasApprovedProject() == true)
             {
                 var existing = await FindProjectAsync(connection, transaction, application.ProjectId!.Value, cancellationToken)
                     ?? throw new PdmConflictException("申请已批准，关联项目已不存在；不能重复建项，请联系管理员。");
@@ -366,7 +355,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             if (!string.Equals(customer.SourceSystem, "u9c", StringComparison.OrdinalIgnoreCase))
                 throw new PdmRuleException("所选客户不是从U9C同步的数据，请重新选择客户。");
 
-            var projectSequence = await ReserveProjectNumberAsync(connection, transaction, command.OrganizationId, cancellationToken);
+            var projectSequence = await ReserveProjectNumberAsync(connection, transaction, command.OrganizationId, command.ProjectTypeCode, cancellationToken);
             var customerSequence = await ReserveCustomerProjectNumberAsync(connection, transaction, command.OrganizationId, customer.Code, cancellationToken);
             var serialSequences = await ReserveSerialNumbersAsync(connection, transaction, command.OrganizationId, command.Quantity, cancellationToken);
             var code = $"{command.ProjectTypeCode}{organization.ProjectCompanyCode}{projectSequence:D5}";
@@ -1244,12 +1233,27 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return new BomEmptyDeclaration(kind, declaredEmpty, actor, now);
     }
 
+    public async Task<IReadOnlyList<PreviewPackageHeader>> ListPreviewPackageHeadersAsync(Guid[] projectIds, CancellationToken ct)
+    {
+        if (projectIds.Length == 0) return [];
+        await using var connection = await OpenAsync(ct);
+        var rows = await connection.QueryAsync<(Guid Id, Guid ProjectId, string Number, string State, string PreviewState, int Count, DateTime Created)>(
+            new CommandDefinition("""
+                SELECT id,project_id,package_number,state,COALESCE(preview_state,'None'),drawing_document_count,created_at
+                FROM release_package WHERE project_id IN @Ids AND locks_documents=1 AND state IN ('Published','Publishing')
+                  AND release_scope IN ('NonStandardWithDrawing','NonStandardSupplement','LegacyCombined')
+                ORDER BY created_at DESC
+                """, new { Ids = projectIds }, cancellationToken: ct));
+        return rows.Select(row => new PreviewPackageHeader(row.Id, row.ProjectId, row.Number, row.State, row.PreviewState, row.Count,
+            new DateTimeOffset(DateTime.SpecifyKind(row.Created, DateTimeKind.Utc)))).ToArray();
+    }
+
     public async Task<IReadOnlyList<ReleasePackage>> ListReleasePackagesAsync(Guid projectId, CancellationToken cancellationToken)
     {
         await using var connection = await OpenAsync(cancellationToken);
         var rows = await connection.QueryAsync<ReleasePackageRow>(new CommandDefinition(
             """
-            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json, selected_bom_item_ids_json, confirmed_removed_bom_item_ids_json, related_opl_issue_ids_json, drawing_document_count, version_bindings_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier, pdf_title_block_snapshot_json, pdf_delivery_artifacts_json,
+            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json, selected_bom_item_ids_json, confirmed_removed_bom_item_ids_json, related_opl_issue_ids_json, drawing_document_count, version_bindings_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier, pdf_title_block_snapshot_json, pdf_delivery_artifacts_json, model_delivery_artifacts_json,
                    reference_snapshot_id, (SELECT scope_snapshot.root_document_id FROM reference_snapshot scope_snapshot WHERE scope_snapshot.id=release_package.reference_snapshot_id AND JSON_TYPE(JSON_EXTRACT(scope_snapshot.root_json, '$.documentId'))='STRING') AS ScopeRootDocumentId, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
@@ -1276,7 +1280,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         var rows = await connection.QueryAsync<PendingApprovalTaskRow>(new CommandDefinition(
             """
             SELECT task.id, task.release_package_id, package.package_number, task.stage,
-                   package.state package_state, task.assignee, package.created_at
+                   package.state package_state, task.assignee, task.participants_json, package.created_at
             FROM release_package package
             INNER JOIN approval_task task ON task.release_package_id=package.id
             WHERE package.project_id=@ProjectId
@@ -1297,7 +1301,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             Enum.Parse<ApprovalStage>(row.Stage),
             Enum.Parse<ReleasePackageState>(row.PackageState),
             row.Assignee,
-            AsUtc(row.CreatedAt))).ToArray();
+            AsUtc(row.CreatedAt)) { Participants = ApprovalGroupJson.Read(row.ParticipantsJson) }).ToArray();
     }
 
     public async Task<ReleasePackage?> FindReleasePackageAsync(Guid releasePackageId, CancellationToken cancellationToken)
@@ -1393,7 +1397,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         return await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT COUNT(*) FROM pdm_user", cancellationToken: cancellationToken));
     }
 
-    private static UserProfile MapUserProfile(UserProfileRow row) => new(row.Username, row.DisplayName, row.Nickname, row.Gender, row.Landline, row.MobilePhone, row.Email, string.IsNullOrWhiteSpace(row.Theme) ? "a" : row.Theme);
+    private static UserProfile MapUserProfile(UserProfileRow row) => new(row.Username, row.DisplayName, row.Nickname, row.Gender, row.Landline, row.MobilePhone, row.Email, string.IsNullOrWhiteSpace(row.Theme) ? "g" : row.Theme);
 
     private sealed class UserProfileRow
     {
@@ -1567,7 +1571,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         var row = await connection.QuerySingleOrDefaultAsync<ReleasePackageRow>(new CommandDefinition(
             """
-            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json, selected_bom_item_ids_json, confirmed_removed_bom_item_ids_json, related_opl_issue_ids_json, drawing_document_count, version_bindings_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier, pdf_title_block_snapshot_json, pdf_delivery_artifacts_json,
+            SELECT id, project_id, package_number, state, release_scope, workflow_code, workflow_version, emergency_roles_json, selected_bom_item_ids_json, confirmed_removed_bom_item_ids_json, related_opl_issue_ids_json, drawing_document_count, version_bindings_json, creates_manufacturing_baseline, locks_documents, whole_set_multiplier, pdf_title_block_snapshot_json, pdf_delivery_artifacts_json, model_delivery_artifacts_json,
                    reference_snapshot_id, (SELECT scope_snapshot.root_document_id FROM reference_snapshot scope_snapshot WHERE scope_snapshot.id=release_package.reference_snapshot_id AND JSON_TYPE(JSON_EXTRACT(scope_snapshot.root_json, '$.documentId'))='STRING') AS ScopeRootDocumentId, mechanical_bom_revision, electrical_bom_revision, mechanical_bom_snapshot_json, electrical_bom_snapshot_json,
                    standard_bom_version_id, non_standard_bom_version_id, electrical_bom_version_id, standard_bom_revision, non_standard_bom_revision,
                    standard_bom_snapshot_json, non_standard_bom_snapshot_json, change_number, change_reason, change_reason_selections_json,
@@ -1723,65 +1727,23 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         CanSubmitArchive = true
     };
 
-    private static async Task<IReadOnlyList<Project>> ApplyCapabilitiesAsync(DbConnection connection, IReadOnlyList<Project> projects, string actor, IReadOnlySet<string> permissions, ProjectPermissionSettings projectPermissions, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<Project>> ApplyCapabilitiesAsync(DbConnection connection, IReadOnlyList<Project> projects, string actor, IReadOnlySet<string> permissions, ProjectPermissionSettings projectPermissions, CancellationToken cancellationToken)
     {
-        var managedUnitIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
-            "SELECT unit_id FROM organization_unit_manager WHERE username=@Actor", new { Actor = actor }, cancellationToken: cancellationToken))).ToHashSet();
-        var primaryCompanyId = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
-            "SELECT company_id FROM pdm_user WHERE username=@Actor LIMIT 1", new { Actor = actor }, cancellationToken: cancellationToken));
-        var actorRoleCodes = string.Equals(TenantContext.Current?.Username, actor, StringComparison.OrdinalIgnoreCase)
-            ? TenantContext.Current!.EffectiveRoleCodes
-            : (await connection.QueryAsync<string>(new CommandDefinition(
-                "SELECT assignment.role_code FROM pdm_user user_account INNER JOIN pdm_user_role assignment ON assignment.user_id=user_account.id WHERE user_account.username=@Actor ORDER BY assignment.is_primary DESC,assignment.created_at,assignment.role_code",
-                new { Actor = actor }, cancellationToken: cancellationToken))).ToArray();
-        var actorMembershipUnitIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
-            "SELECT unit_id FROM organization_membership WHERE username=@Actor", new { Actor = actor }, cancellationToken: cancellationToken))).ToArray();
-        var organizationUnits = (await connection.QueryAsync<OrganizationUnitRow>(new CommandDefinition(
-            "SELECT id,organization_id,parent_unit_id,code,name,kind,is_active,sort_order,can_manufacture CanManufacture FROM organization_unit WHERE is_active=1",
-            cancellationToken: cancellationToken))).Select(MapOrganizationUnit).ToArray();
-        bool IsActorWithin(Guid divisionId) => actorMembershipUnitIds.Any(unitId =>
+        var user = await FindUserAsync(actor, cancellationToken);
+        if (user is null || !user.IsActive) return [];
+        var settings = await GetAuthorizationSettingsAsync(cancellationToken);
+        var directory = await GetOrganizationDirectoryAsync(cancellationToken);
+        var result = new List<Project>();
+        foreach (var project in projects)
         {
-            var current = organizationUnits.FirstOrDefault(unit => unit.Id == unitId);
-            while (current is not null)
-            {
-                if (current.Id == divisionId) return true;
-                current = current.ParentUnitId is Guid parentId ? organizationUnits.FirstOrDefault(unit => unit.Id == parentId) : null;
-            }
-            return false;
-        });
-        return projects.Select(project =>
-        {
-            var canReadContent = permissions.Contains(PermissionCodes.ProjectContentView);
-            var belongsToProjectStaffing = string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)
-                || project.DesignLeads.Contains(actor, StringComparer.OrdinalIgnoreCase)
-                || string.Equals(project.DesignLead, actor, StringComparison.OrdinalIgnoreCase);
-            var managesExecutionUnit = project.ExecutionUnitId is Guid executionUnitId && managedUnitIds.Contains(executionUnitId);
-            var isMechanicalSupervisor = project.ExecutionUnitId is Guid supervisorUnitId
-                && actorRoleCodes.Contains("MechanicalManager", StringComparer.OrdinalIgnoreCase)
-                && IsActorWithin(supervisorUnitId);
-            var canAssignDesigners = permissions.Contains(PermissionCodes.ProjectDesignerAssign) && project.ExecutionUnitId is not null
-                && (managesExecutionUnit || isMechanicalSupervisor || belongsToProjectStaffing
-                    || ProjectPermissionPolicy.CustomAllows(project, projects.FirstOrDefault(item => item.Id == (project.RootProjectId ?? project.Id)) ?? project, actor, projectPermissions, PermissionCodes.ProjectDesignerAssign));
-            return project with
-            {
-                EffectiveProjectPermissions = canReadContent
-                    ? ProjectPermissionPolicy.AllowedOperations(project, projects.FirstOrDefault(item => item.Id == (project.RootProjectId ?? project.Id)) ?? project, actor, permissions, projectPermissions)
-                        .Concat(canAssignDesigners ? [PermissionCodes.ProjectDesignerAssign] : [])
-                        .Distinct(StringComparer.Ordinal).ToArray()
-                    : [],
-                CanAssignExecutionUnit = permissions.Contains(PermissionCodes.ProjectExecutionAssign) && project.ParentProjectId is null && project.OrganizationId == primaryCompanyId,
-                CanManageMainStaffing = permissions.Contains(PermissionCodes.ProjectStaffingManage) && project.ParentProjectId is null && project.ExecutionUnitId is not null && (managedUnitIds.Contains(project.ExecutionUnitId.Value) || string.Equals(project.PrimaryProjectManager, actor, StringComparison.OrdinalIgnoreCase)),
-                CanAssignDesigners = canAssignDesigners,
-                CanReadContent = canReadContent,
-                CanSubmitArchive = canReadContent
-                    && permissions.Contains(PermissionCodes.DocumentEdit)
-                    && (ProjectSubmissionPolicy.CanSubmitArchive(project, actor, false) || ProjectPermissionPolicy.CustomAllows(project, projects.FirstOrDefault(item => item.Id == (project.RootProjectId ?? project.Id)) ?? project, actor, projectPermissions, PermissionCodes.DocumentEdit)),
-                DocumentCount = canReadContent ? project.DocumentCount : null,
-                ModelDocumentCount = canReadContent ? project.ModelDocumentCount : null,
-                DrawingDocumentCount = canReadContent ? project.DrawingDocumentCount : null,
-                BusinessStatus = canReadContent ? project.BusinessStatus : null
-            };
-        }).ToArray();
+            var root = project.ParentProjectId is null ? project : projects.FirstOrDefault(p => p.Id == (project.RootProjectId ?? project.ParentProjectId))
+                ?? await FindProjectAsync(project.RootProjectId ?? project.ParentProjectId.Value, cancellationToken);
+            if (root is null) continue;
+            var context = project.ParentProjectId is not null && project.ParentProjectId != root.Id ? await AuthorizationPolicy.CreateContextAsync(this, project.Id, actor, cancellationToken) : new AuthorizationPolicy.Context(user, project, root, directory, await FindProjectContactInformationAsync(root.Id, cancellationToken));
+            if (context is null) continue;
+            if (AuthorizationPolicy.Decide(settings, context, PermissionCodes.ProjectView).Allowed) result.Add(AuthorizationPolicy.ApplyCapabilities(settings, context));
+        }
+        return result;
     }
 
     private static Project BuildNumberedProject(
@@ -1869,23 +1831,40 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             transaction, cancellationToken: cancellationToken));
     }
 
-    private static async Task<int> ReserveProjectNumberAsync(MySqlConnection connection, DbTransaction transaction, Guid organizationId, CancellationToken cancellationToken)
+    private static async Task<int> ReserveProjectNumberAsync(MySqlConnection connection, DbTransaction transaction, Guid organizationId, string projectTypeCode, CancellationToken cancellationToken)
     {
-        var released = await connection.ExecuteScalarAsync<int?>(new CommandDefinition(
-            "SELECT sequence_value FROM released_project_number WHERE organization_id=@OrganizationId ORDER BY sequence_value LIMIT 1 FOR UPDATE",
-            new { OrganizationId = organizationId }, transaction, cancellationToken: cancellationToken));
+        var parameters = new { OrganizationId = organizationId, ProjectTypeCode = projectTypeCode.ToUpperInvariant() };
+        // 调用方已锁定所属公司；各类型独立续号，并从完整历史项目号恢复下限。
+        await connection.ExecuteAsync(new CommandDefinition("""
+            INSERT INTO project_type_number_counter(organization_id,project_type_code,current_value)
+            SELECT @OrganizationId,@ProjectTypeCode,COALESCE(MAX(CAST(RIGHT(p.code,5) AS UNSIGNED)),0)
+            FROM project p JOIN project_organization o ON o.id=p.organization_id
+            WHERE p.organization_id=@OrganizationId AND p.parent_project_id IS NULL
+              AND LEFT(p.code,CHAR_LENGTH(CONCAT(@ProjectTypeCode,o.project_company_code)))=CONCAT(@ProjectTypeCode,o.project_company_code)
+              AND CHAR_LENGTH(p.code)=CHAR_LENGTH(CONCAT(@ProjectTypeCode,o.project_company_code))+5 AND RIGHT(p.code,5) REGEXP '^[0-9]{5}$'
+            ON DUPLICATE KEY UPDATE current_value=GREATEST(project_type_number_counter.current_value,VALUES(current_value))
+            """, parameters, transaction, cancellationToken: cancellationToken));
+        var last = await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT current_value FROM project_type_number_counter WHERE organization_id=@OrganizationId AND project_type_code=@ProjectTypeCode FOR UPDATE", parameters, transaction, cancellationToken: cancellationToken));
+        var released = await connection.ExecuteScalarAsync<int?>(new CommandDefinition("""
+            SELECT r.sequence_value FROM released_project_type_number r
+            JOIN project_organization o ON o.id=r.organization_id
+            WHERE r.organization_id=@OrganizationId AND r.project_type_code=@ProjectTypeCode
+              AND NOT EXISTS(SELECT 1 FROM project p WHERE p.code=CONCAT(@ProjectTypeCode,o.project_company_code,LPAD(r.sequence_value,5,'0')))
+            ORDER BY r.sequence_value LIMIT 1 FOR UPDATE
+            """, parameters, transaction, cancellationToken: cancellationToken));
         if (released is not null)
         {
-            await connection.ExecuteAsync(new CommandDefinition(
-                "DELETE FROM released_project_number WHERE organization_id=@OrganizationId AND sequence_value=@Sequence",
-                new { OrganizationId = organizationId, Sequence = released.Value }, transaction, cancellationToken: cancellationToken));
+            await connection.ExecuteAsync(new CommandDefinition("DELETE FROM released_project_type_number WHERE organization_id=@OrganizationId AND project_type_code=@ProjectTypeCode AND sequence_value=@Sequence",
+                new { parameters.OrganizationId, parameters.ProjectTypeCode, Sequence = released.Value }, transaction, cancellationToken: cancellationToken));
             return released.Value;
         }
-        await connection.ExecuteAsync(new CommandDefinition("INSERT IGNORE INTO project_number_counter(organization_id,current_value) VALUES(@OrganizationId,0)", new { OrganizationId = organizationId }, transaction, cancellationToken: cancellationToken));
-        var last = await connection.ExecuteScalarAsync<int>(new CommandDefinition("SELECT current_value FROM project_number_counter WHERE organization_id=@OrganizationId FOR UPDATE", new { OrganizationId = organizationId }, transaction, cancellationToken: cancellationToken));
-        if (last >= 99999) throw new PdmRuleException("该组织的5位项目流水号已用尽。");
+        if (last >= 99999) throw new PdmRuleException($"该组织的{projectTypeCode}类5位项目流水号已用尽。");
         var next = last + 1;
-        await connection.ExecuteAsync(new CommandDefinition("UPDATE project_number_counter SET current_value=@Next WHERE organization_id=@OrganizationId", new { OrganizationId = organizationId, Next = next }, transaction, cancellationToken: cancellationToken));
+        await connection.ExecuteAsync(new CommandDefinition("UPDATE project_type_number_counter SET current_value=@Next WHERE organization_id=@OrganizationId AND project_type_code=@ProjectTypeCode",
+            new { parameters.OrganizationId, parameters.ProjectTypeCode, Next = next }, transaction, cancellationToken: cancellationToken));
+        // 保留旧版管理接口的汇总最大值；该值不再参与任何类型的自动取号。
+        await connection.ExecuteAsync(new CommandDefinition("INSERT INTO project_number_counter(organization_id,current_value) VALUES(@OrganizationId,@Next) ON DUPLICATE KEY UPDATE current_value=GREATEST(current_value,@Next)",
+            new { parameters.OrganizationId, Next = next }, transaction, cancellationToken: cancellationToken));
         return next;
     }
 
@@ -2058,7 +2037,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
     {
         var taskRows = await connection.QueryAsync<ApprovalTaskRow>(new CommandDefinition(
             """
-            SELECT id, release_package_id, stage, step_order, step_name, assignee, decision_by, decision_value, decision_comment, decided_at, is_emergency_substitute, emergency_reason
+            SELECT id, release_package_id, stage, step_order, step_name, assignee, decision_by, decision_value, decision_comment, decided_at, is_emergency_substitute, emergency_reason, participants_json
             FROM approval_task WHERE release_package_id = @PackageId ORDER BY step_order
             """,
             new { PackageId = row.Id },
@@ -2077,7 +2056,8 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             StepOrder = task.StepOrder,
             StepName = task.StepName,
             IsEmergencySubstitute = task.IsEmergencySubstitute,
-            EmergencyReason = task.EmergencyReason
+            EmergencyReason = task.EmergencyReason,
+            Participants = ApprovalGroupJson.Read(task.ParticipantsJson)
         }).ToArray();
         return new ReleasePackage(
             row.Id,
@@ -2136,6 +2116,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
             LocksDocuments = row.LocksDocuments,
             PdfTitleBlockSnapshot = row.PdfTitleBlockSnapshotJson is null ? null : JsonSerializer.Deserialize<PdfTitleBlockSnapshot>(row.PdfTitleBlockSnapshotJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
             PdfDeliveryArtifacts = row.PdfDeliveryArtifactsJson is null ? new Dictionary<Guid, DocumentPreviewArtifact>() : JsonSerializer.Deserialize<Dictionary<Guid, DocumentPreviewArtifact>>(row.PdfDeliveryArtifactsJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? new(),
+            ModelDeliveryArtifacts = row.ModelDeliveryArtifactsJson is null ? new Dictionary<Guid, DocumentPreviewArtifact>() : JsonSerializer.Deserialize<Dictionary<Guid, DocumentPreviewArtifact>>(row.ModelDeliveryArtifactsJson, new JsonSerializerOptions(JsonSerializerDefaults.Web)) ?? new(),
             WholeSetMultiplier = row.WholeSetMultiplier
         };
     }
@@ -2396,6 +2377,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
         public string? ConfirmedRemovedBomItemIdsJson { get; init; }
         public string? PdfTitleBlockSnapshotJson { get; init; }
         public string? PdfDeliveryArtifactsJson { get; init; }
+        public string? ModelDeliveryArtifactsJson { get; init; }
         public string? VersionBindingsJson { get; init; }
         public string? RelatedOplIssueIdsJson { get; init; }
         public int DrawingDocumentCount { get; init; }
@@ -2459,6 +2441,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
 
     private sealed class ApprovalTaskRow
     {
+        public string? ParticipantsJson { get; init; }
         public Guid Id { get; init; }
         public Guid ReleasePackageId { get; init; }
         public string Stage { get; init; } = string.Empty;
@@ -2475,6 +2458,7 @@ public sealed partial class MySqlPdmRepository : IPdmRepository
 
     private sealed class PendingApprovalTaskRow
     {
+        public string? ParticipantsJson { get; init; }
         public Guid Id { get; init; }
         public Guid ReleasePackageId { get; init; }
         public string PackageNumber { get; init; } = string.Empty;

@@ -10,6 +10,8 @@ public sealed record CurrentTenant(
     IReadOnlySet<string> Permissions,
     IReadOnlyList<string>? RoleCodes = null)
 {
+    public Guid? ResourceProjectId { get; init; }
+    public Upton.Pdm.Domain.AuthorizationSettings? Authorization { get; init; }
     public IReadOnlyList<string> EffectiveRoleCodes => (RoleCodes ?? [])
         .Prepend(RoleCode)
         .Where(code => !string.IsNullOrWhiteSpace(code))
@@ -19,7 +21,7 @@ public sealed record CurrentTenant(
     public bool HasPermission(string permission) => Permissions.Contains(permission);
     public bool HasRole(string roleCode) => EffectiveRoleCodes.Contains(roleCode, StringComparer.OrdinalIgnoreCase);
     public bool IsPlatformAdministrator =>
-        HasRole("platform_admin") || HasRole("developer");
+        HasPermission(Upton.Pdm.Domain.AuthorizationActions.PlatformManage);
 }
 
 public static class TenantContext

@@ -2,15 +2,19 @@
 import { computed, ref, watch } from 'vue'
 import { RotateCw as RefreshCw, Save } from '@lucide/vue'
 import { getProjectBudget, saveProjectBudget, getBudgetAssessments } from '../api'
-import { budgetCategories, calculateBudgetRow, uppercaseMoney } from '../projectBudget'
+import { assessmentItemTotal, assessmentSum, budgetCategories, calculateBudgetRow, uppercaseMoney } from '../projectBudget'
 import type { BudgetLine, ProjectBudget, AssessmentDirectory } from '../projectBudget'
 import BudgetAssessmentManager from './BudgetAssessmentManager.vue'
 import BudgetNotesDialog from './BudgetNotesDialog.vue'
 import BudgetSettlementCards from './BudgetSettlementCards.vue'
+import ExpenseRequests from './ExpenseRequests.vue'
+import ProjectBonusManager from './ProjectBonusManager.vue'
 import { ElMessage } from '../statusMessage'
 
 const props = defineProps<{ project: { id: string }; token?: string }>()
-const subTab = ref<'summary' | 'assessment'>('summary')
+const subTab = ref<'summary' | 'assessment' | 'expenses' | 'bonus'>('summary')
+const bonusDirty = ref(false)
+const expenseDirty = ref(false)
 const assessmentDirty = ref(false)
 const assessments = ref<AssessmentDirectory>({ sheets: [], amounts: {} })
 const budget = ref<ProjectBudget | null>(null)
@@ -66,12 +70,29 @@ const editable = computed(() => !!budget.value?.canEdit && !loading.value && !sa
 const budgetEditable = computed(() => editable.value && (budget.value?.canEditBudget ?? budget.value?.canEdit))
 const actualEditable = computed(() => editable.value && (budget.value?.canEditActual ?? budget.value?.canEdit))
 const name = (category: string) => budgetCategories.find(item => item.key === category)?.name ?? category
-const money = (value: number | null) => value == null ? '未录入' : `¥ ${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+const money = (value: number | null) => value == null ? '—' : `¥ ${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 const alertName = (value: string) => ({ Overrun: '超预算', Warning: '接近预算', Incomplete: '待完善', Normal: '正常' }[value] ?? value)
 function accept(result: ProjectBudget) {
   budget.value = result
   draft.value = result.rows.map(row => ({ ...row.input }))
   orderCategories.value = Object.fromEntries(result.orders.map(order => [order.key, order.category]))
+}
+function assessmentsSaved(result: AssessmentDirectory) {
+  const updates = new Map(result.sheets.map(sheet => [sheet.projectId, sheet]))
+  const sheets = assessments.value.sheets.map(sheet => updates.get(sheet.projectId) ?? sheet)
+  for (const sheet of result.sheets) if (!sheets.some(existing => existing.projectId === sheet.projectId)) sheets.push(sheet)
+  const amounts: AssessmentDirectory['amounts'] = {}
+  const add = (category: string | null | undefined, amount: number | null) => {
+    if (category && amount != null) amounts[category] = (amounts[category] ?? 0) + amount
+  }
+  for (const sheet of sheets) for (const group of sheet.groups) {
+    if (group.category === 'Labor') for (const item of group.items) add(item.laborCategory ?? group.laborCategory, assessmentItemTotal(item))
+    else add(group.category, assessmentSum(group.items.map(assessmentItemTotal)))
+  }
+  assessments.value = { ...assessments.value, sheets, amounts, laborRates: result.laborRates ?? assessments.value.laborRates, ratesRowVersion: result.ratesRowVersion ?? assessments.value.ratesRowVersion }
+  const current = sheets.find(sheet => sheet.projectId === props.project.id)
+  if (budget.value && current) budget.value = { ...budget.value, rowVersion: current.rowVersion }
+  assessmentDirty.value = false
 }
 async function load() {
   const sequence = ++loadSequence
@@ -98,20 +119,24 @@ async function save() {
   finally { saving.value = false }
 }
 // 同一项目的后台更新和登录续期不能重置页签或未保存内容。
-watch([() => props.project.id, () => Boolean(props.token)], () => { subTab.value = 'summary'; assessmentDirty.value = false; noteCategory.value = null; load() }, { immediate: true })
+watch([() => props.project.id, () => Boolean(props.token)], () => { subTab.value = 'summary'; bonusDirty.value = false; assessmentDirty.value = false; expenseDirty.value = false; noteCategory.value = null; load() }, { immediate: true })
 </script>
 
 <template>
   <section class="pdm-budget" v-loading="loading">
-    <nav class="pdm-budget__tabs pdm-project-subtabs pdm-segmented" aria-label="预算页面" role="tablist"><button role="tab" :aria-selected="subTab === 'summary'" :class="{ 'is-active': subTab === 'summary' }" :disabled="assessmentDirty" @click="subTab = 'summary'">预算汇总</button><button role="tab" :aria-selected="subTab === 'assessment'" :class="{ 'is-active': subTab === 'assessment' }" :disabled="changed" @click="subTab = 'assessment'">预算评估</button></nav>
+    <nav class="pdm-budget__tabs pdm-project-subtabs pdm-segmented" aria-label="预算页面" role="tablist"><button role="tab" :aria-selected="subTab === 'summary'" :class="{ 'is-active': subTab === 'summary' }" :disabled="assessmentDirty || expenseDirty || bonusDirty" @click="subTab = 'summary'">预算汇总</button><button role="tab" :aria-selected="subTab === 'assessment'" :class="{ 'is-active': subTab === 'assessment' }" :disabled="changed || expenseDirty || bonusDirty" @click="subTab = 'assessment'">预算评估</button><button role="tab" :aria-selected="subTab === 'expenses'" :class="{ 'is-active': subTab === 'expenses' }" :disabled="changed || assessmentDirty || bonusDirty" @click="subTab = 'expenses'">费用申请</button><button role="tab" :aria-selected="subTab === 'bonus'" :class="{ 'is-active': subTab === 'bonus' }" :disabled="changed || assessmentDirty || expenseDirty" @click="subTab = 'bonus'">项目奖金</button></nav>
+    <ProjectBonusManager v-if="subTab === 'bonus'" :key="project.id" :project-id="project.id" :token="token" @dirty="bonusDirty = $event" />
+    <ExpenseRequests v-if="subTab === 'expenses'" :key="project.id" :project-id="project.id" :token="token" @dirty="expenseDirty = $event" />
     <BudgetNotesDialog v-if="budget" :model-value="noteCategory !== null" :project-id="project.id" :category="noteCategory ?? ''" :title="`${noteCategory ? name(noteCategory) : ''}备注`" :notes="budget.notes ?? []" :row-version="budget.rowVersion" :token="token" :busy="saving" @update:model-value="value => { if (!value) noteCategory = null }" @added="notesAdded" @saving="noteSaving = $event" />
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
     <template v-if="budget">
-      <BudgetAssessmentManager v-if="subTab === 'assessment'" :directory="assessments" :token="token" @saved="load" @note-added="notesAdded" @dirty="assessmentDirty = $event" />
+      <p v-if="budget.isDepartmentScoped" class="pdm-inline-info">仅显示明确归属本部门的预算和实际金额，合计仅包含本部门数据。</p>
+
+      <BudgetAssessmentManager v-if="subTab === 'assessment'" :directory="assessments" :token="token" @saved="assessmentsSaved" @note-added="notesAdded" @dirty="assessmentDirty = $event" />
       <div v-if="subTab === 'summary'" class="pdm-budget__summary">
       <div class="pdm-budget__cards" :class="{ 'is-settlement-hidden': !budget.canViewSettlement }">
         <BudgetSettlementCards :budget="budget" :token="token" :busy="saving || noteSaving" @updated="settlementUpdated" @saving="settlementSaving = $event" />
-        <article v-for="card in cards" :key="card.title" :class="{ 'is-overrun': card.warning }"><div class="pdm-budget__card-heading"><span :title="card.title">{{ card.title }}</span></div><div class="pdm-budget__card-value"><strong>{{ money(card.value) }}</strong><strong v-if="card.proportion !== null" class="pdm-budget__ratio" :data-status="card.status">{{ card.proportion }}</strong></div><span><template v-if="card.value != null"><span v-if="card.title !== '预算金额'" class="pdm-budget__currency">人民币</span>{{ uppercaseMoney(card.value).slice(3) }}</template><template v-else>—</template></span></article>
+        <article v-for="card in cards" :key="card.title" :class="{ 'is-overrun': card.warning }"><div class="pdm-budget__card-header"><div class="pdm-budget__card-heading"><span :title="card.title">{{ card.title }}</span></div><span class="pdm-budget__card-caption"><template v-if="card.value != null"><span v-if="card.title !== '预算金额'" class="pdm-budget__currency">人民币</span>{{ uppercaseMoney(card.value).slice(3) }}</template><template v-else>—</template></span></div><div class="pdm-budget__card-value"><strong>{{ money(card.value) }}</strong><strong v-if="card.proportion !== null" class="pdm-budget__ratio" :data-status="card.status">{{ card.proportion }}</strong></div></article>
       </div>
       <section class="pdm-panel pdm-budget__section pdm-budget__costs">
         <div v-for="(group, index) in groups" :key="group.title" class="pdm-budget__group">
@@ -121,22 +146,23 @@ watch([() => props.project.id, () => Boolean(props.token)], () => { subTab.value
         </div></header>
         <div class="pdm-budget__scroll">
           <table>
-            <colgroup><col style="width: 13%" /><col style="width: 15%" /><col style="width: 15%" /><col style="width: 15%" /><col style="width: 15%" /><col style="width: 9%" /><col style="width: 18%" /></colgroup>
+            <colgroup><col style="width: 13%" /><col v-if="budgetEditable" style="width: 140px" /><col style="width: 15%" /><col style="width: 15%" /><col style="width: 15%" /><col style="width: 15%" /><col style="width: 9%" /><col style="width: 18%" /></colgroup>
             <thead>
-              <tr><th>费用分类</th><th class="budget-plan">{{ group.labor ? '预算工时费用' : '预算金额' }}</th><th>评估金额</th><th class="budget-actual">{{ group.labor ? '实际工时费用' : '实际金额' }}</th><th>{{ group.labor ? '剩余工时费用' : '剩余预算' }}</th><th>预警</th><th>备注</th></tr>
+              <tr><th>费用分类</th><th v-if="budgetEditable">归属部门</th><th class="budget-plan">{{ group.labor ? '预算工时费用' : '预算金额' }}</th><th>评估金额</th><th class="budget-actual">{{ group.labor ? '实际工时费用' : '实际金额' }}</th><th>{{ group.labor ? '剩余工时费用' : '剩余预算' }}</th><th>预警</th><th>备注</th></tr>
             </thead>
             <tbody>
               <tr v-for="row in group.rows" :key="row.input.category">
                 <th>{{ name(row.input.category) }}</th>
-                <td class="budget-plan"><el-input-number v-model="row.input.budgetAmount" :controls="false" :min="0" :max="1000000000" :precision="2" :disabled="!budgetEditable" aria-label="预算金额" /></td>
+                <td v-if="budgetEditable"><el-select v-model="row.input.departmentId" clearable placeholder="未归属，不向部门开放" :aria-label="`${name(row.input.category)}归属部门`"><el-option v-for="department in budget.departments ?? []" :key="department.id" :value="department.id" :label="department.name" /></el-select></td>
+                <td class="budget-plan"><span v-if="budget.canViewBudget === false">无权查看</span><el-input-number v-else v-model="row.input.budgetAmount" :controls="false" :min="0" :max="1000000000" :precision="2" :disabled="!budgetEditable" aria-label="预算金额" /></td>
                 <td>{{ ['RiskReserve', 'Logistics', 'Other'].includes(row.input.category) ? '—' : money(assessments.amounts[row.input.category] ?? null) }}</td>
-                <td class="budget-actual"><el-input-number v-model="row.input.actualAmount" :controls="false" :min="0" :max="1000000000" :precision="2" :disabled="!(row.input.category === 'RiskReserve' ? budgetEditable : actualEditable)" aria-label="实际金额" /></td>
+                <td class="budget-actual"><span v-if="budget.canViewActual === false">无权查看</span><el-input-number v-else v-model="row.input.actualAmount" :controls="false" :min="0" :max="1000000000" :precision="2" :disabled="!actualEditable" aria-label="实际金额" /></td>
                 <td :class="{ 'is-overrun': (remaining(row) ?? 0) < 0 }">{{ money(remaining(row)) }}</td>
                 <td><span class="pdm-budget__alert" :data-status="usageAlert(row)">{{ alertName(usageAlert(row)) }}</span></td>
                 <td><button type="button" class="pdm-budget__note-preview" :title="latestNote(row.input.category) || '添加备注'" :disabled="saving || noteSaving" :aria-label="`${name(row.input.category)}备注`" @click="openNotes(row.input.category)">{{ latestNote(row.input.category) || '添加备注' }}</button></td>
               </tr>
             </tbody>
-            <tfoot><tr><th>合计</th><td>{{ money(groupTotals(group.rows).budgetAmount) }}</td><td>{{ money(groupTotals(group.rows).assessmentAmount) }}</td><td>{{ money(groupTotals(group.rows).actualAmount) }}</td><td :class="{ 'is-overrun': (groupTotals(group.rows).remaining ?? 0) < 0 }">{{ money(groupTotals(group.rows).remaining) }}</td><td><span class="pdm-budget__alert" :data-status="usageAlert(groupTotals(group.rows))">{{ alertName(usageAlert(groupTotals(group.rows))) }}</span></td><td>—</td></tr></tfoot>
+            <tfoot><tr><th>合计</th><td v-if="budgetEditable">—</td><td>{{ money(groupTotals(group.rows).budgetAmount) }}</td><td>{{ money(groupTotals(group.rows).assessmentAmount) }}</td><td>{{ money(groupTotals(group.rows).actualAmount) }}</td><td :class="{ 'is-overrun': (groupTotals(group.rows).remaining ?? 0) < 0 }">{{ money(groupTotals(group.rows).remaining) }}</td><td><span class="pdm-budget__alert" :data-status="usageAlert(groupTotals(group.rows))">{{ alertName(usageAlert(groupTotals(group.rows))) }}</span></td><td>—</td></tr></tfoot>
           </table>
         </div>
         </div>
@@ -153,5 +179,7 @@ watch([() => props.project.id, () => Boolean(props.token)], () => { subTab.value
 </template>
 
 <style scoped>
+.pdm-budget__costs .pdm-budget__group > header > h3 { font-size:13px; }
 .pdm-budget__costs .pdm-budget__note-preview { margin-inline: auto; }
+.pdm-budget :is(th,td) { text-align:center; vertical-align:middle; }
 </style>

@@ -51,8 +51,14 @@ public sealed partial class U9ProcurementServiceTests
         Assert.Equal(2,Assert.Single(original.StandardBomSnapshot.Concat(original.ElectricalBomSnapshot),row=>row.Id==removed.Id).Quantity);
         var restored=removed with {Id=Guid.NewGuid(),Quantity=3};
         await Release("RP-REBUY",[restored,..current],ReleasePackageState.Published,0);
-        var active=Assert.Single((await service.ListProjectAsync(project.Id,"admin",UserRole.Administrator,default)).Items,row=>row.MaterialCode=="REMOVED");
-        Assert.False(active.IsDemandCanceled);Assert.Equal(3,active.Quantity);Assert.Equal("已核准",active.PurchaseRequisitionStatus);
+        var active=(await service.ListProjectAsync(project.Id,"admin",UserRole.Administrator,default)).Items.Where(row=>row.MaterialCode=="REMOVED").ToArray();
+        Assert.All(active,row=>Assert.False(row.IsDemandCanceled));
+        Assert.Equal(3,active.Sum(row=>row.Quantity));
+        Assert.Equal(2,active.Sum(row=>row.RequestedQuantity));
+        Assert.Equal(2,active.Sum(row=>row.PurchaseQuantity));
+        Assert.Equal(1,active.Sum(row=>row.ArrivedQuantity));
+        Assert.Equal(2,Assert.Single(active,row=>row.PurchaseRequisitionStatus=="已核准").Quantity);
+        Assert.Equal(1,Assert.Single(active,row=>row.PurchaseRequisitionStatus=="未请购").Quantity);
     }
 
     [Fact]

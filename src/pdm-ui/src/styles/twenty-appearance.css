@@ -1,0 +1,202 @@
+/* 色值对照 Twenty 官方 ThemeLight.ts / ThemeDark.ts；不复制其布局。
+   https://github.com/twentyhq/twenty/tree/main/packages/twenty-ui/src/theme/constants */
+:root, :root[data-pdm-color-scheme="light"] {
+  color-scheme: light;
+  --pdm-bg: #fff;
+  --pdm-surface: #fff;
+  --pdm-surface-muted: #fcfcfc;
+  --pdm-nav-bg: #f9f9f9;
+  --pdm-nav-selected-bg: #f1f1f1;
+  --pdm-nav-capsule-bg: #efefef;
+  --pdm-border: #d6d6d6;
+  --pdm-border-soft: #ebebeb;
+  --pdm-container-border: #ebebeb;
+  --pdm-text: #333;
+  --pdm-text-soft: #666;
+  --pdm-text-disabled: #b3b3b3;
+  --pdm-theme-accent: #3e63dd;
+  --pdm-theme-accent: color(display-p3 0.276 0.384 0.837);
+  --pdm-theme-accent-hover: color(display-p3 0.234 0.343 0.801);
+  --pdm-theme-accent-soft: color(display-p3 0.971 0.977 0.998);
+  --pdm-theme-accent-soft-strong: color(display-p3 0.885 0.914 1);
+  --pdm-theme-accent-border: color(display-p3 0.685 0.74 0.957);
+  --pdm-link: color(display-p3 0.256 0.354 0.755);
+  --pdm-selection-bg: #f1f1f1;
+  --pdm-tabs-selected: var(--pdm-selection-bg);
+  --pdm-table-header: var(--pdm-surface-muted);
+  --pdm-field-bg: var(--pdm-surface);
+  --pdm-sidebar: var(--pdm-nav-bg);
+  --pdm-sidebar-active: var(--pdm-nav-selected-bg);
+  --pdm-tabs-track: transparent;
+  --pdm-on-accent: #fff;
+  --pdm-muted: var(--pdm-text-soft);
+  --pdm-text-muted: var(--pdm-text-soft);
+  --pdm-blue: var(--pdm-link);
+  --pdm-blue-soft: var(--pdm-theme-accent-soft);
+  --pdm-purple: var(--pdm-link);
+  --pdm-shadow: rgb(0 0 0 / 4%);
+  --pdm-shadow-strong: rgb(0 0 0 / 16%);
+  --pdm-overlay: rgb(0 0 0 / 36%);
+  --el-color-white: #fff;
+  --el-color-black: #000;
+  --el-disabled-bg-color: var(--pdm-surface-muted);
+  --el-disabled-text-color: var(--pdm-text-disabled);
+  --el-disabled-border-color: var(--pdm-border-soft);
+}
+:root[data-pdm-color-scheme="dark"] {
+  color-scheme: dark;
+  --pdm-bg: #171717;
+  --pdm-bg: color(display-p3 0.09 0.09 0.09);
+  --pdm-surface: var(--pdm-bg);
+  --pdm-surface-muted: color(display-p3 0.106 0.106 0.106);
+  --pdm-nav-bg: color(display-p3 0.106 0.106 0.106);
+  --pdm-nav-selected-bg: color(display-p3 0.133 0.133 0.133);
+  --pdm-nav-capsule-bg: #272727;
+  --pdm-border: color(display-p3 0.282 0.282 0.282);
+  --pdm-border-soft: color(display-p3 0.133 0.133 0.133);
+  --pdm-container-border: var(--pdm-border-soft);
+  --pdm-text: color(display-p3 0.922 0.922 0.922);
+  --pdm-text-soft: color(display-p3 0.702 0.702 0.702);
+  --pdm-text-disabled: color(display-p3 0.482 0.482 0.482);
+  --pdm-theme-accent: color(display-p3 0.276 0.384 0.837);
+  --pdm-theme-accent-hover: color(display-p3 0.354 0.445 0.866);
+  --pdm-theme-accent-soft: color(display-p3 0.081 0.089 0.144);
+  --pdm-theme-accent-soft-strong: color(display-p3 0.129 0.18 0.369);
+  --pdm-theme-accent-border: color(display-p3 0.245 0.309 0.575);
+  --pdm-link: color(display-p3 0.63 0.69 1);
+  --pdm-selection-bg: var(--pdm-nav-selected-bg);
+  --pdm-green: color(display-p3 0.434 0.828 0.573);
+  --pdm-green-soft: color(display-p3 0.1 0.173 0.133);
+  --pdm-green-border: color(display-p3 0.227 0.403 0.298);
+  --pdm-danger: color(display-p3 0.83 0.329 0.324);
+  --pdm-danger-soft: color(display-p3 0.211 0.081 0.099);
+  --pdm-danger-border: color(display-p3 0.348 0.11 0.142);
+  --pdm-orange: #f5a524;
+  --pdm-orange-soft: #2d2305;
+  --pdm-orange-border: #574107;
+  --pdm-change-highlight: #453b13;
+  --pdm-change-highlight-hover: #5c4e16;
+  --pdm-shadow: rgb(0 0 0 / 32%);
+  --pdm-shadow-strong: rgb(0 0 0 / 60%);
+  --pdm-overlay: rgb(0 0 0 / 72%);
+}
+:root[data-pdm-color-scheme] .pdm-app-shell {
+  --pdm-shell-frame-bg: var(--pdm-nav-bg);
+  --pdm-shell-frame-border: var(--pdm-border-soft);
+}
+:root[data-pdm-color-scheme] .pdm-sidebar {
+  --pdm-sidebar-text: var(--pdm-text);
+  --pdm-sidebar-text-soft: var(--pdm-text-soft);
+  --pdm-sidebar-hover: var(--pdm-nav-selected-bg);
+  --shell-nav-icon: var(--pdm-text-soft);
+}
+@layer pdm-button-sizing {
+  :root[data-pdm-color-scheme] body .pdm-sidebar { background:var(--pdm-nav-bg) !important; }
+  :root[data-pdm-color-scheme] body .pdm-titlebar :is(
+    .pdm-header-control,
+    .pdm-user-profile-trigger,
+    .pdm-logout-button,
+    .pdm-command-trigger,
+    .pdm-company-switcher,
+    .pdm-titlebar__sidebar-toggle
+  ):is(:hover, :focus-visible):not(:disabled):not([aria-disabled="true"]) {
+    background:var(--pdm-nav-selected-bg) !important;
+    color:var(--pdm-text) !important;
+  }
+  :root[data-pdm-color-scheme] body .pdm-sidebar :is(.pdm-nav-item.is-active, .pdm-sidebar__highlight) { background:var(--pdm-nav-capsule-bg) !important; }
+  :root[data-pdm-color-scheme] body .production-workbench .production-workbench__tree :is(.production-workbench__project,.production-workbench__package) { background:var(--pdm-surface) !important; }
+  :root[data-pdm-color-scheme] body .production-workbench .production-workbench__tree .production-workbench__project.selected { background:var(--pdm-selection-bg) !important; }
+  :root[data-pdm-color-scheme] body .production-workbench .production-workbench__tree .production-workbench__package.selected { background:var(--pdm-surface-muted) !important; }
+}
+/* 分类图标保持同一鲜明颜色，深色提高亮度；选中状态不再被统一主题色覆盖。 */
+:root body .pdm-sidebar .pdm-nav-item > svg.pdm-menu-icon { color:var(--pdm-nav-icon-color, var(--pdm-theme-accent)) !important; }
+:root[data-pdm-color-scheme="dark"] body .pdm-sidebar .pdm-nav-item > svg.pdm-menu-icon { filter:brightness(1.25) saturate(1.08); }
+:root[data-pdm-color-scheme="dark"] body .pdm-sidebar__brand-logo { filter:brightness(0) invert(1); }
+:root[data-pdm-color-scheme] body .pdm-theme-menu { min-width:160px; }
+:root[data-pdm-color-scheme] body .pdm-theme-menu .el-dropdown-menu__item { display:flex; gap:10px; }
+:root[data-pdm-color-scheme] body .pdm-theme-menu .el-dropdown-menu__item > svg:last-child:not(:first-child) { margin-inline-start:auto; }
+:root[data-pdm-color-scheme="dark"] body :is(.pdm-app-shell, .pdm-shell-content, .pdm-main, .pdm-navigation-page) { color:var(--pdm-text); }
+:root[data-pdm-color-scheme="dark"] body :is(.pdm-panel, .pdm-project-manager, .pdm-task-message-panel, .wr-panel, .pdm-overview-card, .pdm-overview-status, .pdm-overview-team, .pdm-overview-timeline, .pdm-overview-team__table-wrap, .pdm-project-context, .pdm-project-sidebar, .pdm-budget__section, .pdm-manager-panel, .pdm-preview-empty) { background:var(--pdm-surface) !important; color:var(--pdm-text); }
+:root[data-pdm-color-scheme="dark"] body :is(.pdm-project-sidebar__context, .pdm-project-detail__header) { background:var(--pdm-surface) !important; }
+:root[data-pdm-color-scheme="dark"] body :is(.pdm-project-family__list > button.is-active, .pdm-project-table tr.is-current) { background:var(--pdm-selection-bg) !important; }
+:root[data-pdm-color-scheme="dark"] body :is(.pdm-overview-card__value, .pdm-overview-card h2, .pdm-overview-status h2, .pdm-overview-team h2) { color:var(--pdm-text) !important; }
+:root[data-pdm-color-scheme="dark"] body table th { background:var(--pdm-table-header) !important; color:var(--pdm-text) !important; }
+:root[data-pdm-color-scheme="dark"] body .el-table__header .cell { color:var(--pdm-text-soft) !important; }
+:root[data-pdm-color-scheme="dark"] body .el-table .el-button.is-link:not(.el-button--danger,.el-button--success,.el-button--warning) { color:var(--pdm-text); }
+:root[data-pdm-color-scheme="dark"] body .pdm-sidebar .pdm-nav-group__label { color:var(--pdm-text-soft); }
+:root[data-pdm-color-scheme="dark"] body .pdm-search-field { background:var(--pdm-surface-muted) !important; }
+@layer pdm-business {
+  :root[data-pdm-color-scheme="dark"] body .pdm-search-field.pdm-search-field.pdm-search-field :is(input,.el-input,.el-autocomplete,.el-input__wrapper) { background:var(--pdm-surface-muted) !important; color:var(--pdm-text) !important; }
+}
+@layer pdm-button-sizing {
+  :root[data-pdm-color-scheme="dark"] body :is(input:not([type="checkbox"],[type="radio"],[type="hidden"],[type="range"],[type="file"],[type="color"],.el-input__inner,.el-select__input,.el-range-input), select, textarea):not(.pdm-search-field *) { background:var(--pdm-field-bg) !important; color:var(--pdm-stocked-material-color,var(--pdm-text)) !important; }
+  :root[data-pdm-color-scheme="dark"] body .pdm-search-field.pdm-search-field { background:var(--pdm-surface-muted) !important; }
+  :root[data-pdm-color-scheme="dark"] body :is(.el-select__wrapper, .el-input__wrapper) { background:var(--pdm-field-bg) !important; }
+  :root[data-pdm-color-scheme="dark"] body :is(.el-select__wrapper.is-disabled, .el-input.is-disabled .el-input__wrapper, input:disabled, select:disabled, textarea:disabled) { background:var(--pdm-surface-muted) !important; color:var(--pdm-text-disabled) !important; }
+  :root[data-pdm-color-scheme="dark"] body button[data-pdm-button-refresh][data-pdm-button-refresh][data-pdm-button-refresh]:not([data-pdm-button-size="icon"],[data-pdm-button-size="inline-icon"]) { background:linear-gradient(to right,var(--pdm-theme-accent) 0 var(--pdm-refresh-zone),var(--pdm-surface-muted) var(--pdm-refresh-zone) 100%) !important; }
+}
+:root[data-pdm-color-scheme="dark"] body .pdm-tenant-company { color:var(--pdm-text) !important; }
+:root[data-pdm-color-scheme="dark"] body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):not(.is-active,.active,.selected,[aria-selected="true"],[aria-pressed="true"],[aria-current="page"]),
+:root[data-pdm-color-scheme="dark"] body .pdm-tabs .el-radio-button:not(.is-active) .el-radio-button__inner { color:var(--pdm-text-soft) !important; }
+:root[data-pdm-color-scheme="dark"] body :is(.pdm-tabs, [role="tablist"]) > :is(button, .el-tabs__item):hover:not(.is-active,.active,.selected,[aria-selected="true"],[aria-pressed="true"],[aria-current="page"]) { background:var(--pdm-nav-selected-bg) !important; }
+:root[data-pdm-color-scheme="dark"] body :is(button[data-pdm-button-kind="outline"], .pdm-header-control, .pdm-user-profile-trigger, .pdm-logout-button, .pdm-command-trigger) { color:var(--pdm-text) !important; }
+:root[data-pdm-color-scheme="dark"] body .el-select__selected-item:not(.is-transparent),
+:root[data-pdm-color-scheme="dark"] body .el-input-number__decrease,
+:root[data-pdm-color-scheme="dark"] body .el-input-number__increase { color:var(--pdm-text-soft); }
+
+/* 文字使用中性灰阶；主操作绿色取自统计卡片图标，装饰线与分类图标独立。 */
+:root[data-pdm-color-scheme] {
+  --pdm-button-accent:#10b981;
+  --pdm-button-accent-hover:#059669;
+  --pdm-button-accent-pressed:#047857;
+  --pdm-button-accent-soft:#ecfdf5;
+  --pdm-button-accent-border:#6ee7b7;
+  --pdm-action-confirm:var(--pdm-button-accent);
+  --pdm-action-confirm-hover:var(--pdm-button-accent-hover);
+  --pdm-action-confirm-pressed:var(--pdm-button-accent-pressed);
+  --pdm-action-refresh:var(--pdm-button-accent);
+  --el-color-primary:var(--pdm-button-accent);
+  --el-color-primary-dark-2:var(--pdm-button-accent-pressed);
+  --el-color-primary-light-3:color-mix(in srgb,var(--pdm-button-accent) 70%,var(--pdm-surface));
+  --el-color-primary-light-5:var(--pdm-button-accent-border);
+  --el-color-primary-light-7:color-mix(in srgb,var(--pdm-button-accent) 20%,var(--pdm-surface));
+  --el-color-primary-light-8:color-mix(in srgb,var(--pdm-button-accent) 12%,var(--pdm-surface));
+  --el-color-primary-light-9:color-mix(in srgb,var(--pdm-button-accent) 8%,var(--pdm-surface));
+}
+:root[data-pdm-color-scheme="dark"] { --pdm-button-accent-soft:#11261e; --pdm-button-accent-border:#236447; }
+:root[data-pdm-color-scheme] body :is(button[data-pdm-button-kind],button[data-pdm-button-refresh],.pdm-primary-action,.el-button--primary,button.pdm-search-submit,.pdm-search-field__action > button) {
+  --pdm-theme-accent:var(--pdm-button-accent);
+  --pdm-theme-accent-hover:var(--pdm-button-accent-hover);
+  --pdm-theme-accent-soft:var(--pdm-button-accent-soft);
+  --pdm-theme-accent-soft-strong:color-mix(in srgb,var(--pdm-button-accent) 20%,var(--pdm-surface));
+  --pdm-theme-accent-border:var(--pdm-button-accent-border);
+  --pdm-theme-accent-focus:color-mix(in srgb,var(--pdm-button-accent) 25%,transparent);
+  --shell-accent:var(--pdm-button-accent);
+  --shell-accent-hover:var(--pdm-button-accent-hover);
+  --pdm-primary:var(--pdm-button-accent);
+  --pdm-blue:var(--pdm-button-accent);
+}
+:root[data-pdm-color-scheme] body a { color:var(--pdm-text); }
+:root[data-pdm-color-scheme] body :is(.el-link:not(.el-link--danger,.el-link--warning,.el-link--success), .el-select-dropdown__item.is-selected, .el-dropdown-menu__item:not(.is-disabled):hover, .el-tree-node__label, .el-checkbox.is-checked .el-checkbox__label, .el-radio.is-checked .el-radio__label) { color:var(--pdm-text) !important; }
+:root[data-pdm-color-scheme] body .el-button:not(.el-button--primary,.el-button--danger,.el-button--warning,.el-button--success) {
+  --el-button-text-color:var(--pdm-text);
+  --el-button-hover-text-color:var(--pdm-text);
+  --el-button-active-text-color:var(--pdm-text);
+}
+:root[data-pdm-color-scheme] body :is(.el-tag:not(.el-tag--danger,.el-tag--warning,.el-tag--success),.el-pagination) { --el-tag-text-color:var(--pdm-text-soft); }
+:root[data-pdm-color-scheme] body :is(.el-pager li.is-active,.el-pagination button,.el-date-table td.today:not(.current) .el-date-table-cell__text,.el-year-table td.today .cell,.el-month-table td.today .cell) { color:var(--pdm-text) !important; }
+:root[data-pdm-color-scheme] body .el-button--primary:not(.is-link,.is-text,.el-button--text) {
+  --el-button-text-color:#fff;
+  --el-button-bg-color:var(--pdm-button-accent);
+  --el-button-border-color:var(--pdm-button-accent);
+  --el-button-hover-text-color:#fff;
+  --el-button-hover-bg-color:var(--pdm-button-accent-hover);
+  --el-button-hover-border-color:var(--pdm-button-accent-hover);
+  --el-button-active-text-color:#fff;
+  --el-button-active-bg-color:var(--pdm-button-accent-pressed);
+  --el-button-active-border-color:var(--pdm-button-accent-pressed);
+}
+:root[data-pdm-color-scheme] body :is(.el-button.is-link,.el-button.is-text,.el-button--text):not(.el-button--danger,.el-button--warning,.el-button--success) { color:var(--pdm-text) !important; }
+@layer pdm-button-sizing {
+  :root[data-pdm-color-scheme] body :is(.pdm-search-field .pdm-search-field__action > button,button.pdm-search-submit):active:not(:disabled) { background:var(--pdm-button-accent-pressed) !important; }
+}

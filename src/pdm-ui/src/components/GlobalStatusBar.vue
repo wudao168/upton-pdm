@@ -9,6 +9,13 @@ import {
 } from '../globalStatusContent'
 import { globalStatus, registerStatusHost } from '../statusMessage'
 
+import ProjectActivityTicker from './ProjectActivityTicker.vue'
+import { useProjectActivityFeed } from '../composables/useProjectActivityFeed'
+import type { ProjectActivity } from '../projectActivity'
+const props = withDefaults(defineProps<{ token?: string; scope?: string }>(), { token: '', scope: '' })
+const emit = defineEmits<{ openActivity: [item: ProjectActivity] }>()
+const { items: activities } = useProjectActivityFeed(() => props.token, () => props.scope, item => emit('openActivity', item))
+
 let unregister: (() => void) | undefined
 let rotationTimer: ReturnType<typeof setInterval> | undefined
 let contentLibrary: GlobalStatusContentLibrary | undefined
@@ -17,7 +24,7 @@ const idleContent = ref<ResolvedGlobalStatusContent>(fallbackGlobalStatusContent
 const labels = { success: '成功', warning: '提醒', error: '失败', info: '提示' }
 const label = computed(() => globalStatus.value ? labels[globalStatus.value.type] : '')
 const message = computed(() => globalStatus.value?.message || '')
-const idleTitle = computed(() => `${idleContent.value.item.text} — ${idleContent.value.attribution}`)
+const idleTitle = computed(() => `${idleContent.value.item.text} - ${idleContent.value.attribution}`)
 
 function refreshIdleContent() {
   if (contentLibrary) idleContent.value = selectGlobalStatusContent(contentLibrary, new Date())
@@ -41,10 +48,12 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <el-popover v-if="!globalStatus" placement="bottom-start" trigger="click" :width="440" popper-class="pdm-global-status-detail">
+  <ProjectActivityTicker v-if="!globalStatus && activities.length" :items="activities" @open="emit('openActivity', $event)" />
+  <el-popover v-else-if="!globalStatus" placement="bottom-start" trigger="click" :width="440" popper-class="pdm-global-status-detail">
     <template #reference>
       <button type="button" class="pdm-global-status is-idle" :title="idleTitle" :aria-label="idleTitle">
         <span class="pdm-global-status__text">{{ idleContent.item.text }}</span>
+        <span class="pdm-global-status__separator" aria-hidden="true">-</span>
         <span class="pdm-global-status__source">{{ idleContent.attribution }}</span>
       </button>
     </template>
@@ -71,22 +80,22 @@ onUnmounted(() => {
 
 <style scoped>
 .pdm-global-status { line-height: 20px; }
-.pdm-global-status.is-idle { cursor: pointer; }
+.pdm-global-status.is-idle { cursor: pointer; justify-content: center; gap: 10px; }
+.pdm-global-status__separator { flex: 0 0 auto; }
 .pdm-global-status.is-idle .pdm-global-status__text {
   min-width: 0;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   line-height: 20px;
 }
 .pdm-global-status__source {
   max-width: 42%;
   flex: 0 1 auto;
-  overflow: hidden;
-  color: var(--pdm-theme-accent);
+  overflow: hidden; color:var(--pdm-text);
   font-size: 12px;
   font-weight: 400;
   line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.pdm-global-status-detail a { color: var(--pdm-theme-accent); }
+.pdm-global-status-detail a { color:var(--pdm-text); }
 </style>

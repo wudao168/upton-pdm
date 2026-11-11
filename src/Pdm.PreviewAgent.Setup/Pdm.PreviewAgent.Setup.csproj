@@ -5,7 +5,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>Upton.Pdm.PreviewAgent.Setup</RootNamespace>
     <AssemblyName>Upton.Pdm.PreviewAgent.Setup</AssemblyName>
-    <Version>1.2.3</Version>
+    <Version>1.3.0</Version>
     <ApplicationIcon>..\Pdm.Desktop\Assets\PdmClient.ico</ApplicationIcon>
     <PreviewAgentPayloadRoot Condition="'$(PreviewAgentPayloadRoot)' == ''">payload.generated</PreviewAgentPayloadRoot>
     <PlatformTarget>x64</PlatformTarget>

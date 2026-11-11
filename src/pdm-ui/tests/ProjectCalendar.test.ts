@@ -37,6 +37,23 @@ beforeEach(() => {
 })
 afterEach(() => vi.useRealTimers())
 describe('项目日历', () => {
+  it('全屏压缩日期格保留全部事项入口，退出后恢复四条摘要', async () => {
+    vi.mocked(api.readProjectCalendar).mockResolvedValue(data([item('a'), item('b'), item('c')]))
+    const wrapper = mount(ProjectCalendar, { props: { token: 't', companyId: 'c', currentUsername: 'pm', users: [] } })
+    await flushPromises()
+    const day = () => wrapper.findAll('.pc-day').find(node => node.attributes('aria-label')?.startsWith('2026-10-04'))!
+    expect(day().findAll('.pc-event')).toHaveLength(3)
+    await wrapper.findAll('button').find(button => button.text() === '最大化看板')!.trigger('click')
+    expect(day().findAll('.pc-event')).toHaveLength(1)
+    expect(day().get('.pc-more').attributes('aria-label')).toBe('2026-10-04，另有2项，查看全部事项')
+    await day().get('.pc-more').trigger('click')
+    expect(wrapper.get('.pc-details').text()).toContain('P-a')
+    expect(wrapper.get('.pc-details').text()).toContain('P-b')
+    expect(wrapper.get('.pc-details').text()).toContain('P-c')
+    await wrapper.findAll('button').find(button => button.text() === '退出看板')!.trigger('click')
+    expect(day().findAll('.pc-event')).toHaveLength(3)
+    wrapper.unmount()
+  })
   it('uses the shared todo fields, defaults the clicked date and creates a normal task-center todo', async () => {
     const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-15T04:00:00Z'))
     vi.mocked(api.readProjectCalendar).mockResolvedValue(data([]))

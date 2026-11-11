@@ -36,10 +36,13 @@ describe('StorageSettings BOM property mappings', () => {
     }, global: { plugins: [ElementPlus] } })
     expect(wrapper.text()).toContain('一号转图机')
     expect(wrapper.text()).toContain('二号转图机')
+    const hosts = wrapper.findAll('.preview-hosts input[type=checkbox]')
+    expect(hosts).toHaveLength(2)
+    await hosts[1]!.setValue(false)
     await wrapper.get('input[aria-label="转图服务器地址"]').setValue('http://changed:5199')
     await wrapper.findAll('button').find(button => button.text() === '保存图纸转换设置')!.trigger('click')
     await flushPromises()
-    expect(onSaveSettings.mock.calls[0]![0].previewConversion.servers).toEqual([{ ...servers[0], agentUrl: 'http://changed:5199' }, servers[1]])
+    expect(onSaveSettings.mock.calls[0]![0].previewConversion.servers).toEqual([{ ...servers[0], agentUrl: 'http://changed:5199', disabled: false }, { ...servers[1], disabled: true }])
     wrapper.unmount()
   })
   it('explains that project storage is grouped under the main project code', () => {
@@ -121,27 +124,21 @@ describe('StorageSettings BOM property mappings', () => {
     wrapper.unmount()
   })
 
-  it('saves the centralized drawing QR policy', async () => {
-    const onSaveSettings = vi.fn().mockImplementation(async input => input)
+  it('places folder templates after storage and hides the retired drawing QR settings', async () => {
     const wrapper = mount(StorageSettings, {
       props: {
         settings, equipmentTypes: [], numberingOptions: { organizations: [], projectTypes: [], equipmentTypes: [] }, pending: false,
-        onSaveSettings, onSaveEquipmentType: vi.fn(), onUpdateCounters: vi.fn(),
+        canManageFolders: true, onSaveSettings: vi.fn(), onSaveEquipmentType: vi.fn(), onUpdateCounters: vi.fn(),
       },
+      slots: { folders: '<div>文件夹模板配置</div>' },
       global: { plugins: [ElementPlus] },
     })
 
-    const tab = wrapper.findAll('.el-tabs__item').find(item => item.text() === '工程图二维码')!
-    await tab.trigger('click')
-    await flushPromises()
-    const versionLabel = wrapper.findAll('.pdm-settings-form label').find(label => label.text().includes('规则版本'))!
-    await versionLabel.get('input').setValue('2')
-    await wrapper.findAll('button').find(button => button.text() === '保存二维码规则')!.trigger('click')
-    await flushPromises()
-
-    expect(onSaveSettings).toHaveBeenCalledWith(expect.objectContaining({
-      drawingQrPolicy: expect.objectContaining({ sourceProperty: '型号', ruleVersion: '2', sizeMillimeters: 20, marginMillimeters: 5, everySheet: true }),
-    }))
+    const tabs = wrapper.findAll('.el-tabs__item')
+    expect(tabs.map(tab => tab.text()).slice(0, 4)).toEqual(['项目编号', '存档位置', '文件夹模板', '图纸转换'])
+    expect(tabs.map(tab => tab.text())).not.toContain('工程图二维码')
+    await tabs[2]!.trigger('click')
+    expect(wrapper.text()).toContain('文件夹模板配置')
     wrapper.unmount()
   })
 })

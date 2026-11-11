@@ -1,0 +1,10 @@
+:root body :is(table, [role="table"], [role="grid"], .el-table-v2) :is(td, th, [role="cell"], [role="gridcell"], [role="columnheader"], .el-table-v2__row-cell) button {
+  border: 0 !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+:root body :is(table, [role="table"], [role="grid"], .el-table-v2) :is(td, th, [role="cell"], [role="gridcell"], [role="columnheader"], .el-table-v2__row-cell) button:focus-visible {
+  outline: 2px solid var(--pdm-theme-accent) !important;
+  outline-offset: 1px;
+}

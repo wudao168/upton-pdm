@@ -441,6 +441,9 @@ internal sealed class SolidWorksReferenceTreeScanner
     {
         var componentChildren = GetComponentChildren(component, isRoot, currentPath);
         var ordered = new List<ComponentTreeEntry>();
+        // FeatureManager supplies display order only. At a native leaf its
+        // children are modeling features, not assembly occurrences to order.
+        if (componentChildren.Count == 0) return ordered;
         if (featureTreeItem != null)
         {
             try
